@@ -8,6 +8,7 @@ import { ChatStore } from '../../src/chatStore'
 import { isPathInside } from '../../src/devIsolation'
 import { assertSafeFilesystemSegment } from '../../src/pathSafety'
 import { type ChatAuthorityScope } from '../../src/types'
+import { SIDEBAR_SESSION_PREVIEW_LIMIT as SIDEBAR_PREVIEW } from '../../ui/src/constants/navigation'
 import {
   type HostSnapshot,
   readHostSnapshot,
@@ -31,7 +32,14 @@ import {
 // CHAT_OPEN_AB_OUTPUT_JSON. Run only with playwright.chat-open-ab.config.ts.
 type Build = 'before' | 'after'
 type Chat = { id: string; count: number; lastText: string }
-type Catalog = { host: string; size: number; eligible: number; K: number; chats: Chat[] }
+type Catalog = {
+  host: string
+  size: number
+  eligible: number
+  K: number
+  chats: Chat[]
+  latestActivity: string[]
+}
 type Sample = {
   round: number
   build: Build
@@ -468,6 +476,9 @@ if (
       await test.step('precondition: one isolated login and existing server chats with at least two turns', async () => {
         await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
         await assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
+        // Every run starts without a session or chat cache, so no step can pass on an earlier run's history.
+        if (fs.existsSync(runDir))
+          throw new Error(`precondition: ${runDir} must not exist before the first launch.`)
         await launch('before')
         await login(page!, desktopCredentials())
         await ready()
@@ -542,7 +553,14 @@ if (
                   )
                 chats.push({ id: session.chatId, count, lastText: last.response })
               }
-              catalogs.push({ host, size: items.length, eligible: eligible.length, K, chats })
+              catalogs.push({
+                host,
+                size: items.length,
+                eligible: eligible.length,
+                K,
+                chats,
+                latestActivity: items.map(item => item.lastActivityAt),
+              })
             }
             return catalogs
           },
@@ -554,6 +572,19 @@ if (
         )
         if (new Set(lastTexts).size !== lastTexts.length)
           throw new Error('precondition: every measured chat must end with a unique last text.')
+        // W empties the cache, so its sidebar preview is the server's latest sessions across Hosts.
+        const previewHosts = new Set(
+          report.catalogs
+            .flatMap(catalog => catalog.latestActivity.map(at => ({ at, host: catalog.host })))
+            .sort((a, b) => b.at.localeCompare(a.at))
+            .slice(0, SIDEBAR_PREVIEW)
+            .map(entry => entry.host)
+        )
+        for (const host of HOSTS)
+          if (!previewHosts.has(host))
+            throw new Error(
+              `precondition: W needs a ${host} session among the server's ${SIDEBAR_PREVIEW} latest sessions.`
+            )
         // The benchmark builder owns valid paged metadata; rebind its synthetic tombstones to the real session below.
         const fixtureDir = isolatedPath(runDir, path.join(runDir, 'fixture'))
         fs.mkdirSync(fixtureDir, { mode: 0o700 })
@@ -587,7 +618,8 @@ if (
             await launch(build)
             await authenticated()
             await page.getByTestId('nav-chat').click()
-            for (const catalog of report.catalogs) {
+            // Stateless first: the sidebar preview orders cached chats by their first load, and L needs stateful rows in it.
+            for (const catalog of [...report.catalogs].reverse()) {
               const checked = new Set<string>()
               for (let pass = 1; pass <= (id === 1 ? 3 : 2); pass++) {
                 const remote = id === 1 && pass === 1
@@ -654,21 +686,26 @@ if (
             }
           }))
       }
-      const selected = report.catalogs[0]!.chats[0]!
+      // A cached chat's updatedAt is set by its first remote load in round 1, so L times the
+      // most recently loaded stateful chat, which the reversed host order puts in the preview.
+      const statefulIndex = JSON.parse(
+        fs.readFileSync(isolatedPath(runDir, path.join(cacheDir!, HOSTS[0], 'index.json')), 'utf8')
+      ) as { chats: Array<{ id: string; updatedAt: string }> }
+      const updatedAt = new Map(statefulIndex.chats.map(chat => [chat.id, chat.updatedAt]))
+      const selected = report.catalogs[0]!.chats.reduce((latest, chat) => {
+        const at = updatedAt.get(chat.id)
+        if (!at) throw new Error(`precondition: ${HOSTS[0]}/${chat.id} is missing from the cache.`)
+        return at > updatedAt.get(latest.id)! ? chat : latest
+      })
       await openChat(page!, HOSTS[0], hostLabels[HOSTS[0]]!, selected)
       await expect
         .poll(() => page!.evaluate(host => window.clerum.chat.getLastActive(host), HOSTS[0]))
         .toBe(selected.id)
-      // L and W time sidebar rows, which exist only for sessions inside the sidebar preview.
+      // L times a sidebar row, which exists only for sessions inside the sidebar preview.
       await expect(
         page!.locator(row(HOSTS[0], selected.id)),
         `precondition: L needs ${HOSTS[0]}/${selected.id} inside the sidebar preview.`
       ).toBeVisible()
-      for (const host of HOSTS)
-        await expect(
-          page!.locator(rows(host)).first(),
-          `precondition: W needs a ${host} session inside the sidebar preview.`
-        ).toBeVisible()
       await close()
       const savedCache = isolatedPath(runDir, path.join(runDir, 'cache-snapshot'))
       fs.cpSync(isolatedPath(runDir, cacheDir!), savedCache, { recursive: true })
