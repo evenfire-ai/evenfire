@@ -381,8 +381,14 @@ jobs:
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: 84368da042476ebec41292e4cc551889207ba45c
+          ref: 9b8634f2f827ca5c35886869fada550da1ff02d5
           path: r61-b1-producers/historical-pr2
+          persist-credentials: false
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 84368da042476ebec41292e4cc551889207ba45c
+          path: r61-b1-producers/earlier-pr2
           persist-credentials: false
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -390,6 +396,11 @@ jobs:
           node-version: '24'
           cache: npm
           cache-dependency-path: control-api/package-lock.json
+
+      - name: Verify R61-B1 pinned producer checkout contract
+        env:
+          R61_B1_PRODUCER_WORKSPACE: ${{ github.workspace }}
+        run: node --test scripts/tests/task106-r61-b1-producer-checkout-contract.cjs
 
       - name: Install dependencies
         working-directory: control-api
@@ -438,19 +449,35 @@ jobs:
         working-directory: r61-b1-producers/observed-dev/control-api
         run: npm run build
 
-      - name: Install historical PR2 producer dependency
+      - name: Install earlier PR2 producer dependency
+        working-directory: r61-b1-producers/earlier-pr2/packages/workflow-runtime-core
+        run: npm ci
+
+      - name: Build earlier PR2 producer dependency
+        working-directory: r61-b1-producers/earlier-pr2/packages/workflow-runtime-core
+        run: npm run build
+
+      - name: Install earlier PR2 Control API dependencies
+        working-directory: r61-b1-producers/earlier-pr2/control-api
+        run: npm ci
+
+      - name: Build earlier PR2 migration runner
+        working-directory: r61-b1-producers/earlier-pr2/control-api
+        run: npm run build
+
+      - name: Install published PR2 producer dependencies
         working-directory: r61-b1-producers/historical-pr2/packages/workflow-runtime-core
         run: npm ci
 
-      - name: Build historical PR2 producer dependency
+      - name: Build published PR2 producer dependency
         working-directory: r61-b1-producers/historical-pr2/packages/workflow-runtime-core
         run: npm run build
 
-      - name: Install historical PR2 Control API dependencies
+      - name: Install published PR2 Control API dependencies
         working-directory: r61-b1-producers/historical-pr2/control-api
         run: npm ci
 
-      - name: Build historical PR2 migration runner
+      - name: Build published PR2 migration runner
         working-directory: r61-b1-producers/historical-pr2/control-api
         run: npm run build
 
@@ -499,6 +526,7 @@ jobs:
           TASK106_R61_B1_PUBLISHED_PR1_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/published-pr1
           TASK106_R61_B1_DEV_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/observed-dev
           TASK106_R61_B1_PR2_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/historical-pr2
+          TASK106_R61_B1_EARLIER_PR2_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/earlier-pr2
           TASK106_R61_B1_LATEST_DEV_SOURCE_DIR: ${{ github.workspace }}/r61-b1-producers/latest-dev
           FORCE_COLOR: '0'
           NO_COLOR: '1'
