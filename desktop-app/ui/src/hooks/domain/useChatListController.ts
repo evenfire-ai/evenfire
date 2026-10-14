@@ -1457,14 +1457,12 @@ export function useChatListController({
         deletion.hostAuthorityEpoch !== getHostAuthorityEpoch(agentRef) ||
         isHostAccessBlocked(agentRef)
       ) {
-        // A changed Host/epoch cancels the operation within its own scope. An
-        // old team's confirmation must not present into the new team's UI.
-        if (isAuthenticated && sameAuthorityScope(deletion.fence.authorityScope, authorityScope)) {
-          host.current?.pushToast(
-            'Delete cancelled because chat access changed. Please try again.',
-            'error'
-          )
-        }
+        // This is the current UI's synchronous confirmation click, not a late
+        // result from the old scope. Explain why no deletion was dispatched.
+        host.current?.pushToast(
+          'Delete cancelled because chat access changed. Please try again.',
+          'error'
+        )
         return
       }
       const requestGeneration = requestGenerationRef.current
@@ -1546,7 +1544,6 @@ export function useChatListController({
       removeLatestChatSession,
       handleCreateChat,
       host,
-      isAuthenticated,
     ]
   )
 

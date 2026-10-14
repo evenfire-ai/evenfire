@@ -241,9 +241,10 @@ it.each(['storage', 'confirmation'] as const)(
   }
 )
 
-it('does not report an old-scope confirmation cancellation into the new team', async () => {
+it('reports cancellation when the real Delete dialog is confirmed after a team change', async () => {
   const { app, clerum } = await mountStorageDelete()
-  const deletion = await app.getVm().captureChatDeleteFence('agent-x')
+  expect(screen.getByRole('dialog', { name: 'Delete session?' })).toBeTruthy()
+  clerum.chat.setLastActive.mockImplementation(clerum.persistLastActive)
   await act(async () => {
     await app.getVm().handleEnsureTeamContext({ teamId: 'team-2' })
   })
@@ -251,18 +252,33 @@ it('does not report an old-scope confirmation cancellation into the new team', a
   act(() => app.getVm().handleSelectChatAgent('agent-x', { chatId: 'chat-3', selectLatest: false }))
   await waitFor(() => expect(screen.getByText('chat-3 real history')).toBeTruthy())
   await waitFor(() => expect(app.getVm().sessionStateByChatId['chat-3']?.syncing).toBe(false))
-  await act(async () => {
-    await app.getVm().handleDeleteChatForAgent('agent-x', 'chat-2', deletion)
-  })
+  expect(screen.getByRole('dialog', { name: 'Delete session?' })).toBeTruthy()
+  const beforeDelete = await clerum.readIndex('agent-x')
+  expect(beforeDelete.chats.map(chat => chat.id).sort()).toEqual(['chat-1', 'chat-2', 'chat-3'])
+  expect(beforeDelete.lastActiveChatId).toBe('chat-3')
+  const status = { text: app.getVm().statusText, tone: app.getVm().statusTone }
+  confirmStorageDelete()
+  await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(1))
+  expect(
+    within(screen.getByRole('alert')).getByText(
+      'Delete cancelled because chat access changed. Please try again.'
+    )
+  ).toBeTruthy()
   expect(clerum.chat.delete).not.toHaveBeenCalled()
-  expect(app.getVm().toasts).toEqual([])
-  expect(screen.queryAllByRole('alert')).toEqual([])
+  expect(app.getVm().toasts).toHaveLength(1)
+  expect(screen.queryByRole('dialog', { name: 'Delete session?' })).toBeNull()
+  expect(app.getVm().currentTeamId).toBe('team-2')
+  expect(app.getVm().selectedAgent).toBe('agent-x')
   expect(app.getVm().activeChatId).toBe('chat-3')
   expect(app.getVm().activeMessages.map(message => message.content)).toEqual([
     'chat-3 real history',
   ])
   expect(app.getVm().chatMessagesLoading).toBe(false)
-  expect((await clerum.readIndex('agent-x')).chats).toHaveLength(3)
+  expect({ text: app.getVm().statusText, tone: app.getVm().statusTone }).toEqual(status)
+  expect(await clerum.readIndex('agent-x')).toEqual(beforeDelete)
+  expect(
+    (await clerum.persistedMessages('agent-x', 'chat-2')).map(message => message.content)
+  ).toEqual(['chat-2 real history'])
 })
 
 it('same-scope Host cancellation reports once while another agent stays visible', async () => {
