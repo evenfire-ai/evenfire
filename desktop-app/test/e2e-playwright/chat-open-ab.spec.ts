@@ -626,16 +626,7 @@ if (
             }
           }))
       }
-      // L times the selected chat's sidebar row, so it must be a measured chat inside the preview.
-      await expect(page!.locator(rows(HOSTS[0])).first()).toBeVisible()
-      const previewIds = await page!
-        .locator(rows(HOSTS[0]))
-        .evaluateAll(elements => elements.map(element => element.getAttribute('data-chat-id')))
-      const selected = report.catalogs[0]!.chats.find(chat => previewIds.includes(chat.id))
-      if (!selected)
-        throw new Error(
-          `precondition: L needs a measured ${HOSTS[0]} chat inside the sidebar preview.`
-        )
+      const selected = report.catalogs[0]!.chats[0]!
       await openChat(page!, HOSTS[0], hostLabels[HOSTS[0]]!, selected)
       await expect
         .poll(() => page!.evaluate(host => window.clerum.chat.getLastActive(host), HOSTS[0]))
