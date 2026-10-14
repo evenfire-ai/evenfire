@@ -32,6 +32,7 @@ Use this index for long-form docs.
 | [Architecture overview](architecture/overview.md)                  | Services, CRDs, message lifecycle, NetworkPolicy model               |
 | [Platform topology](architecture/platform-topology.md)             | Namespaces, controller split, deny-all baseline                      |
 | [Non-MCP services](architecture/non-mcp-services.md)               | Namespace splitting and L0–L3 policy layers                          |
+| [Host storage layout](architecture/host-storage-layout.md)         | Workspace PVC layout, merge init, database failures, rollback rule   |
 | [Diagrams](architecture/diagrams/)                                 | Excalidraw sources                                                   |
 
 ## Surfaces (the UIs)
