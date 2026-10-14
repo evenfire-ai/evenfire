@@ -8,7 +8,6 @@ import { initDb } from '../src/db.js'
 import { createExternalAuthRouter } from '../src/routes/external/auth.js'
 import { createExternalInvitationsRouter } from '../src/routes/external/invitations.js'
 import { passwordIdentifierKey } from '../src/services/auth/passwordAdmissionState.js'
-import { createInvitationForTeams } from '../src/services/directory/membership.js'
 import { createPasswordResetInvitation } from '../src/services/directory/passwordResetInvitations.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 

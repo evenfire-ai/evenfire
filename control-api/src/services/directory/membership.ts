@@ -4,7 +4,6 @@ import { appendControlApiPermissionEventsInTransaction } from '../tracing/contro
 import {
   type GenericInvitationForTeamsInput,
   type GenericInvitationPurpose,
-  INVITATION_TTL_HOURS,
   type InvitationPurpose,
   type InvitationRow,
   type InvitationTeamAssignment,

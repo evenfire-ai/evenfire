@@ -11,7 +11,6 @@ import { passwordIdentifierKey } from '../src/services/auth/passwordAdmissionSta
 import { acquirePasswordWork } from '../src/services/auth/passwordWorkOwnership.js'
 import { verifyUserPassword } from '../src/services/directory/login.js'
 import {
-  createInvitationForTeams,
   setInvitationPasswordForEmail,
   updateUserPassword,
 } from '../src/services/directory/membership.js'

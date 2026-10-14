@@ -12,7 +12,6 @@ import { initDb } from '../src/db.js'
 import { requireInternalToken } from '../src/middleware/internalServiceAuth.js'
 import { sendPasswordAdmissionError } from '../src/middleware/passwordLoginAdmission.js'
 import { createExternalInvitationsRouter } from '../src/routes/external/invitations.js'
-import { createSilentInvitationForTeams } from '../src/services/directory/membership.js'
 import { createSilentPasswordResetInvitation } from '../src/services/directory/passwordResetInvitations.js'
 import { registerAndSendInvitation } from '../src/services/invitationFlowRegistrationService.js'
 import {

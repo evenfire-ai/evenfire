@@ -7,10 +7,7 @@ import request from 'supertest'
 import { initDb } from '../src/db.js'
 import { sendPasswordAdmissionError } from '../src/middleware/passwordLoginAdmission.js'
 import { acquirePasswordWork } from '../src/services/auth/passwordWorkOwnership.js'
-import {
-  createSilentInvitationForTeams,
-  setInvitationPasswordForEmail,
-} from '../src/services/directory/membership.js'
+import { setInvitationPasswordForEmail } from '../src/services/directory/membership.js'
 import { createSilentPasswordResetInvitation } from '../src/services/directory/passwordResetInvitations.js'
 import { createPostgresFatalCommitReplyInjector } from './helpers/realPostgresFatalCommit.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
