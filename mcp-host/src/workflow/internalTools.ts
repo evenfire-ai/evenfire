@@ -32,15 +32,15 @@ import {
   MIN_CHART_DIMENSION,
 } from './chartThemes'
 import { CONTEXT_FILES_TOOLS, loadContextFilesMounts } from './contextFiles'
-import { DASHBOARD_CHART_TYPES } from './dashboardCharts'
+import { runGenerateDashboard } from './dashboardRender'
 import {
   BLOCK_TYPES,
   CALLOUT_TONES,
+  DASHBOARD_CHART_TYPES,
   DASHBOARD_TEMPLATE_NAMES,
   HERO_STATUSES,
   SECTION_TYPES,
-  runGenerateDashboard,
-} from './dashboardRender'
+} from './dashboardVocabulary'
 import {
   DOCX_IMAGE_FILE_DESCRIPTION,
   IMAGE_FILE_DESCRIPTION,
@@ -64,7 +64,7 @@ export { enforceQuota, getDirectorySize } from './artifactOutput'
 export { CHART_THEMES } from './chartThemes'
 export type { ChartTheme } from './chartThemes'
 export { escapeHtmlAttr, safeJsonForScript } from './dashboardHtml'
-export { loadChartJsBundle } from './dashboardRender'
+export { loadChartJsBundle } from './dashboardChartJs'
 
 // Accessor to the current Host CRD, injected by main (avoids a circular import).
 // Re-read on every getOutputDir() call because `currentHost` is hydrated async

@@ -7,26 +7,9 @@
 import { ChartDataError, coerceNumber, normalizeChartData } from './chartData'
 import type { NormalizedDataset, NormalizedPoint } from './chartData'
 import { escapeHtml } from './dashboardHtml'
+import { DASHBOARD_CHART_TYPES } from './dashboardVocabulary'
 
-/** Every chart type the dashboard draws, the same set clerum__generate_chart accepts. */
-export const DASHBOARD_CHART_TYPES = [
-  'line',
-  'bar',
-  'horizontalBar',
-  'pie',
-  'doughnut',
-  'area',
-  'radar',
-  'polarArea',
-  'scatter',
-  'bubble',
-  'stackedBar',
-  'stackedArea',
-  'mixedBarLine',
-  'gauge',
-  'waterfall',
-  'funnel',
-] as const
+export { DASHBOARD_CHART_TYPES } from './dashboardVocabulary'
 
 const KNOWN_TYPES = new Set<string>(DASHBOARD_CHART_TYPES)
 const SLICE_TYPES = new Set(['pie', 'doughnut', 'polarArea'])

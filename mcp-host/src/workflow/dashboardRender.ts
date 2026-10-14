@@ -10,6 +10,7 @@ import {
   replacedBytes,
 } from './artifactOutput'
 import { coerceNumber } from './chartData'
+import { loadChartJsBundle } from './dashboardChartJs'
 import { DashboardCharts } from './dashboardCharts'
 import { escapeHtml, escapeHtmlAttr, oneOf, safeJsonForScript } from './dashboardHtml'
 import { dashboardScript } from './dashboardScript'
@@ -19,10 +20,27 @@ import {
   type DashboardThemeColors,
   type ThemeName,
 } from './dashboardThemes'
+import {
+  BLOCK_TYPES,
+  CALLOUT_TONES,
+  DASHBOARD_TEMPLATE_NAMES,
+  type DashboardTemplateName,
+  HERO_STATUSES,
+  SECTION_TYPES,
+} from './dashboardVocabulary'
 import { inlineSpans } from './inlineMarkup'
 import { choose, own } from './ownEntry'
 import { headerText, normalizeTableRows } from './tableRows'
 import type { InternalToolResult } from './types'
+
+export {
+  BLOCK_TYPES,
+  CALLOUT_TONES,
+  DASHBOARD_TEMPLATE_NAMES,
+  HERO_STATUSES,
+  SECTION_TYPES,
+} from './dashboardVocabulary'
+export { loadChartJsBundle } from './dashboardChartJs'
 
 function dashboardColorVars(c: DashboardThemeColors): string {
   return `
@@ -904,8 +922,6 @@ function dashItems(
 const cardNotice = (message: string) =>
   `<div class="callout" data-tone="danger">${escapeHtml(message)}</div>`
 
-export const HERO_STATUSES = ['green', 'yellow', 'red', 'neutral'] as const
-
 function renderHero(o: Record<string, unknown>): string {
   const eyebrowText = dashText(o.eyebrow)
   const eyebrow = eyebrowText ? `<div class="hero__eyebrow">${escapeHtml(eyebrowText)}</div>` : ''
@@ -1172,9 +1188,6 @@ function fitRowsToHeaders(
   return fitted
 }
 
-export const SECTION_TYPES = ['narrative', 'bullets', 'callout', 'code'] as const
-export const CALLOUT_TONES = ['info', 'success', 'warning', 'danger'] as const
-
 function renderSectionHtml(s: unknown, where: string): string {
   const section = dashRecord(s, where, 'a section object {type, content}')
   if (section.type !== undefined && !SECTION_TYPES.includes(section.type as never)) {
@@ -1403,31 +1416,7 @@ ${scripts}
 </html>`
 }
 
-// ─── Chart.js bundle loader (cached) ────────────────────────────────
-
-let cachedChartJsBundle: string | undefined
-
-/**
- * The Chart.js UMD bundle. chart.js exports only ".", "./auto" and
- * "./helpers", so resolving "chart.js/dist/chart.umd.js" throws
- * ERR_PACKAGE_PATH_NOT_EXPORTED; the entry point resolves, and the bundle sits
- * beside it in dist/.
- */
-export function loadChartJsBundle(): string {
-  if (cachedChartJsBundle) return cachedChartJsBundle
-  const bundle = path.join(path.dirname(require.resolve('chart.js')), 'chart.umd.js')
-  cachedChartJsBundle = fs.readFileSync(bundle, 'utf-8')
-  return cachedChartJsBundle
-}
-
 // ─── Templates ──────────────────────────────────────────────────────
-
-type DashboardTemplateName =
-  | 'executive-brief'
-  | 'operations-pulse'
-  | 'financial-review'
-  | 'technical-report'
-  | 'custom'
 
 type DashData = Record<string, unknown>
 
@@ -1538,22 +1527,6 @@ const DASHBOARD_TEMPLATES: Record<
 }
 
 // ─── Custom template (composable blocks) ────────────────────────────
-
-export const BLOCK_TYPES = [
-  'hero',
-  'kpis',
-  'chart',
-  'charts-grid',
-  'table',
-  'narrative',
-  'bullets',
-  'code',
-  'callout',
-  'incidents',
-  'service-health',
-  'divider',
-  'spacer',
-] as const
 
 /** Blocks that are content of their own; charts and card groups count their entries. */
 const COUNTED_BLOCKS = new Set(['table', 'narrative', 'bullets', 'code', 'callout'])
@@ -1829,11 +1802,3 @@ export async function runGenerateDashboard(
     return { success: false, error: err instanceof Error ? err.message : String(err) }
   }
 }
-
-export const DASHBOARD_TEMPLATE_NAMES = [
-  'executive-brief',
-  'operations-pulse',
-  'financial-review',
-  'technical-report',
-  'custom',
-] as const
