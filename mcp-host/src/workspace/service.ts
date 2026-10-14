@@ -65,8 +65,8 @@ export function isLockedPath(relativePath: string): boolean {
 
 export {
   GfsDownloadPathError,
-  PROTECTED_STATE_DB_FILES,
   StateDbPathError,
+  isStateDbName,
   isStateDbPath,
   stateDbProtectedMessage,
 } from './protectedPaths'
