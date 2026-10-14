@@ -97,4 +97,171 @@ describe('PersistQueue', () => {
     worker.emit('exit', 137)
     await expect(promise).rejects.toThrow(/db worker exited/)
   })
+
+  it('rejects async writes admitted after the worker exited instead of dropping them', async () => {
+    const worker = new FakeWorker()
+    const q = new PersistQueue(worker, { syncTimeoutMs: 500, asyncTimeoutMs: 500 })
+    q.enqueueAsync('s1', { kind: 'ping' })
+    await Promise.resolve()
+    // Liveness witness: while the worker is alive the async write is posted.
+    expect(worker.sent).toHaveLength(1)
+
+    worker.emit('exit', 137)
+    expect(() => q.enqueueAsync('s1', { kind: 'ping' })).toThrow(/db worker exited \(code=137\)/)
+    expect(worker.sent).toHaveLength(1)
+  })
+
+  it('fails the next write on the same queue after an async write failed', async () => {
+    const worker = new FakeWorker()
+    const q = new PersistQueue(worker, { syncTimeoutMs: 500, asyncTimeoutMs: 500 })
+    // Witness: a sync write before any failure resolves.
+    const first = q.enqueueSync({ kind: 'ping' })
+    worker.emit('message', {
+      id: worker.sent[0].id,
+      ok: true,
+      result: 'pong',
+    } satisfies WorkerReply)
+    await expect(first).resolves.toBe('pong')
+
+    q.enqueueAsync('s1', { kind: 'ping' })
+    await Promise.resolve()
+    worker.emit('message', {
+      id: worker.sent[1].id,
+      ok: false,
+      error: { code: 'SQLITE_FULL', message: 'database or disk is full' },
+    } satisfies WorkerReply)
+    await new Promise(r => setImmediate(r))
+
+    await expect(q.enqueueSync({ kind: 'ping' })).rejects.toThrow(
+      /async write failed \(sessionKey=s1\): database or disk is full/
+    )
+    expect(() => q.enqueueAsync('s2', { kind: 'ping' })).toThrow(/database or disk is full/)
+  })
+
+  it('calls onFailure once when the worker exits unexpectedly', async () => {
+    const worker = new FakeWorker()
+    const failures: Error[] = []
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 500,
+      asyncTimeoutMs: 500,
+      onFailure: err => failures.push(err),
+    })
+    // Liveness witness: with the worker alive a write is acknowledged and
+    // onFailure has not fired.
+    const ok = q.enqueueSync({ kind: 'ping' })
+    worker.emit('message', {
+      id: worker.sent[0].id,
+      ok: true,
+      result: 'pong',
+    } satisfies WorkerReply)
+    await expect(ok).resolves.toBe('pong')
+    expect(failures).toHaveLength(0)
+
+    worker.emit('exit', 1)
+    expect(failures.map(e => e.message)).toEqual(['db worker exited (code=1)'])
+    // A later rejected write does not report a second failure.
+    expect(() => q.enqueueAsync('s1', { kind: 'ping' })).toThrow(/db worker exited/)
+    expect(failures).toHaveLength(1)
+  })
+
+  it('calls onFailure once when an async write fails', async () => {
+    const worker = new FakeWorker()
+    const failures: Error[] = []
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 500,
+      asyncTimeoutMs: 500,
+      onFailure: err => failures.push(err),
+    })
+    q.enqueueAsync('s1', { kind: 'ping' })
+    q.enqueueAsync('s2', { kind: 'ping' })
+    await Promise.resolve()
+    expect(worker.sent).toHaveLength(2)
+
+    // Liveness witness: an acknowledged async write does not fire onFailure.
+    worker.emit('message', {
+      id: worker.sent[0].id,
+      ok: true,
+      result: 'pong',
+    } satisfies WorkerReply)
+    await new Promise(r => setImmediate(r))
+    expect(failures).toHaveLength(0)
+
+    worker.emit('message', {
+      id: worker.sent[1].id,
+      ok: false,
+      error: { code: 'SQLITE_FULL', message: 'database or disk is full' },
+    } satisfies WorkerReply)
+    await new Promise(r => setImmediate(r))
+    expect(failures.map(e => e.message)).toEqual([
+      'async write failed (sessionKey=s2): database or disk is full',
+    ])
+
+    // A worker exit after the failure does not report a second one.
+    worker.emit('exit', 1)
+    expect(failures).toHaveLength(1)
+  })
+
+  it('does not call onFailure for the worker exit that follows a shutdown ACK', async () => {
+    const worker = new FakeWorker()
+    const failures: Error[] = []
+    const exits: number[] = []
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 500,
+      asyncTimeoutMs: 500,
+      onFailure: err => failures.push(err),
+      onExit: code => exits.push(code),
+    })
+    const closing = q.close()
+    await new Promise(r => setImmediate(r))
+    const shutdown = worker.sent.find(m => m.op.kind === 'shutdown')
+    expect(shutdown).toBeDefined()
+    worker.emit('message', { id: shutdown!.id, ok: true, result: null } satisfies WorkerReply)
+    // FakeWorker.terminate() emits the exit.
+    await closing
+    // Liveness witness: the exit was observed.
+    expect(exits).toEqual([0])
+    expect(failures).toHaveLength(0)
+  })
+
+  it('waits for the worker shutdown ACK before terminating it', async () => {
+    const worker = new FakeWorker()
+    let terminateCalls = 0
+    worker.terminate = () => {
+      terminateCalls += 1
+    }
+    const q = new PersistQueue(worker, { syncTimeoutMs: 500, asyncTimeoutMs: 500 })
+    const closing = q.close()
+    await new Promise(r => setImmediate(r))
+
+    const shutdown = worker.sent.find(m => m.op.kind === 'shutdown')
+    // Witness: the shutdown op was posted.
+    expect(shutdown).toBeDefined()
+    expect(terminateCalls).toBe(0)
+
+    worker.emit('message', { id: shutdown!.id, ok: true, result: null } satisfies WorkerReply)
+    await closing
+    expect(terminateCalls).toBe(1)
+  })
+
+  it('drains queued async writes before posting shutdown and rejects close on a failed one', async () => {
+    const worker = new FakeWorker()
+    const q = new PersistQueue(worker, { syncTimeoutMs: 500, asyncTimeoutMs: 500 })
+    q.enqueueAsync('s1', { kind: 'ping' })
+    await Promise.resolve()
+    const closing = q.close()
+    await new Promise(r => setImmediate(r))
+    // The queued write is still in flight, so shutdown is not posted yet.
+    expect(worker.sent.map(m => m.op.kind)).toEqual(['ping'])
+
+    worker.emit('message', {
+      id: worker.sent[0].id,
+      ok: false,
+      error: { code: 'SQLITE_IOERR', message: 'disk I/O error' },
+    } satisfies WorkerReply)
+    await new Promise(r => setImmediate(r))
+    const shutdown = worker.sent.find(m => m.op.kind === 'shutdown')
+    expect(shutdown).toBeDefined()
+    worker.emit('message', { id: shutdown!.id, ok: true, result: null } satisfies WorkerReply)
+    await expect(closing).rejects.toThrow(/disk I\/O error/)
+  })
 })

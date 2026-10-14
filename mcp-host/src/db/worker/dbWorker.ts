@@ -84,12 +84,15 @@ async function main(): Promise<void> {
           writesSinceCheckpoint = 0
         }
       }
-      const reply: WorkerReply = { id: msg.id, ok: true, result }
-      parentPort.postMessage(reply)
       if (msg.op.kind === 'shutdown') {
+        // Close (and checkpoint) before the ACK: the main thread terminates
+        // the worker as soon as it sees the reply.
         db.close()
+        parentPort.postMessage({ id: msg.id, ok: true, result } satisfies WorkerReply)
         process.exit(0)
       }
+      const reply: WorkerReply = { id: msg.id, ok: true, result }
+      parentPort.postMessage(reply)
     } catch (err) {
       const e = err as { code?: string; message?: string; stack?: string }
       const reply: WorkerReply = {

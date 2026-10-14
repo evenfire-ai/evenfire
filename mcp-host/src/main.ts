@@ -45,6 +45,7 @@ import {
   SqliteColdStartLoader,
   createConversationStore,
 } from './core/conversation/persistence'
+import { exitOnPersistFailure } from './core/conversation/persistence/persistFailureExit'
 import { validateApprovalConfig } from './core/extensions'
 import type { ApprovalDecision } from './core/extensions/approvalTypes'
 import { BasicSafety } from './core/safety/safety'
@@ -1628,6 +1629,7 @@ async function initializeConversationStore(): Promise<ConversationStoreHandle | 
     heartbeatMs: config.dbWorkerHeartbeatMs,
     pendingApprovalTtlMs: config.pendingApprovalTtlMs,
     barrierMode,
+    onPersistFailure: exitOnPersistFailure(() => isShuttingDown),
   })
 
   agent.setConversationStore(handle.store)

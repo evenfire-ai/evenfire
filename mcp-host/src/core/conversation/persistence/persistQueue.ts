@@ -4,9 +4,12 @@
  * - `enqueueSync(op)` resolves when the worker ACKs (or rejects on error /
  *   timeout). Used for IronClaw-critical writes: suspendForApproval, approve,
  *   deny, completeTurn with billed usage.
- * - `enqueueAsync(sessionKey, op)` is fire-and-forget but preserves the
+ * - `enqueueAsync(sessionKey, op)` does not wait for the ACK but preserves the
  *   `sessionKey`-scoped ordering chain (per `SessionProcessor`'s FIFO
- *   invariant). Errors are logged.
+ *   invariant). A failed async write marks the queue failed: every later
+ *   write rejects with that failure and `onFailure` fires once, so the Host
+ *   stops instead of accepting writes it can no longer persist. The same
+ *   holds after an unexpected worker exit.
  *
  * The implementation is transport-agnostic: callers inject a `WorkerLike`
  * (typically a `node:worker_threads.Worker`, but tests inject an in-process
@@ -21,6 +24,7 @@ import type {
   WorkerReply,
 } from '../../../db/worker/protocol'
 import { HEARTBEAT_ID } from '../../../db/worker/protocol'
+import { logger } from '../../../logger'
 
 export interface WorkerLike {
   postMessage(msg: WorkerMessage): void
@@ -39,6 +43,11 @@ export interface PersistQueueOptions {
   onTransportError?: (err: Error) => void
   /** Called when the worker exits. Drives reconnect/degraded handling in main. */
   onExit?: (code: number) => void
+  /**
+   * Called once, with the first failure that makes the queue unusable: an
+   * async write failed, or the worker exited before ACKing `shutdown`.
+   */
+  onFailure?: (err: Error) => void
 }
 
 interface PendingEntry {
@@ -51,7 +60,13 @@ interface PendingEntry {
 export class PersistQueue {
   private readonly pending = new Map<string, PendingEntry>()
   private readonly writeChain = new Map<string, Promise<void>>()
+  /** Set once admission closes (graceful `close()` or worker exit). */
   private closed = false
+  private exited = false
+  /** The worker ACKed `shutdown`; its exit that follows is expected. */
+  private shutdownAcked = false
+  /** First failure that makes further writes unsafe; never cleared. */
+  private failure: Error | null = null
 
   constructor(
     private readonly worker: WorkerLike,
@@ -63,6 +78,7 @@ export class PersistQueue {
     })
     this.worker.on('exit', code => {
       this.closed = true
+      this.exited = true
       // Flush pending with an explicit error so callers don't hang.
       for (const entry of this.pending.values()) {
         clearTimeout(entry.timeoutHandle)
@@ -72,24 +88,31 @@ export class PersistQueue {
       }
       this.pending.clear()
       if (this.opts.onExit) this.opts.onExit(code)
+      if (!this.shutdownAcked) this.recordFailure(new Error(`db worker exited (code=${code})`))
     })
   }
 
   /**
-   * Fire-and-forget write. Errors are logged. Ordering is preserved per
-   * `sessionKey` so a `startTurn` precedes its `completeTurn` on disk
-   * regardless of scheduling jitter. Returns immediately.
+   * Write without waiting for the ACK. Ordering is preserved per `sessionKey`
+   * so a `startTurn` precedes its `completeTurn` on disk regardless of
+   * scheduling jitter. Throws when the queue is closed or an earlier write
+   * failed; a failure of this write is recorded and surfaces on the next
+   * write, through `onFailure` and from `close()`.
    */
   enqueueAsync(sessionKey: string, op: WorkerOp): void {
-    if (this.closed) return
+    this.assertAdmissible()
     const prev = this.writeChain.get(sessionKey) ?? Promise.resolve()
     const next = prev
       .then(() => this.send(op, this.opts.asyncTimeoutMs))
       .then(() => {
         /* discard the result — async path */
       })
-      .catch(err => {
-        console.error(`[PersistQueue] async write failed (sessionKey=${sessionKey}):`, err)
+      .catch((err: Error) => {
+        const failure = new Error(
+          `async write failed (sessionKey=${sessionKey}): ${err.message ?? String(err)}`
+        )
+        logger.error({ sessionKey, err }, '[PersistQueue] async write failed')
+        this.recordFailure(failure)
       })
       .finally(() => {
         // Drop the chain reference once it settles so we don't keep arbitrarily
@@ -114,8 +137,10 @@ export class PersistQueue {
    * race the async one and the snapshot reads inconsistent state.
    */
   enqueueSync<T = unknown>(op: WorkerOp, sessionKey?: string): Promise<T> {
-    if (this.closed) {
-      return Promise.reject(new Error('PersistQueue is closed'))
+    try {
+      this.assertAdmissible()
+    } catch (err) {
+      return Promise.reject(err as Error)
     }
     if (sessionKey) {
       const prev = this.writeChain.get(sessionKey) ?? Promise.resolve()
@@ -183,28 +208,46 @@ export class PersistQueue {
     await Promise.allSettled(chains)
   }
 
+  /**
+   * Graceful shutdown: close admission, drain every queued write, wait for the
+   * worker to ACK `shutdown` (it closes the database before replying), then
+   * terminate it. Rejects with the first write failure, or with the shutdown
+   * failure, so the caller sees that the durable trail is incomplete.
+   */
   async close(): Promise<void> {
-    if (this.closed) return
+    if (this.closed && !this.exited) return
     this.closed = true
     await this.drain()
-    try {
-      this.worker.postMessage({ id: randomUUID(), op: { kind: 'shutdown' } })
-    } catch {
-      /* ignore — worker may already be gone */
-    }
-    try {
-      const terminated = this.worker.terminate()
-      if (terminated && typeof (terminated as Promise<number>).then === 'function') {
-        await terminated
+    let shutdownError: Error | null = null
+    if (!this.exited) {
+      try {
+        await this.send({ kind: 'shutdown' }, this.opts.syncTimeoutMs)
+      } catch (err) {
+        shutdownError = err as Error
       }
-    } catch (err) {
-      console.warn('[PersistQueue] terminate() raised:', err)
+    }
+    const terminated = this.worker.terminate()
+    if (terminated && typeof (terminated as Promise<number>).then === 'function') {
+      await terminated
     }
     for (const entry of this.pending.values()) {
       clearTimeout(entry.timeoutHandle)
       entry.reject(new Error('PersistQueue closed'))
     }
     this.pending.clear()
+    if (this.failure) throw this.failure
+    if (shutdownError) throw shutdownError
+  }
+
+  private recordFailure(err: Error): void {
+    if (this.failure) return
+    this.failure = err
+    if (this.opts.onFailure) this.opts.onFailure(err)
+  }
+
+  private assertAdmissible(): void {
+    if (this.failure) throw this.failure
+    if (this.closed) throw new Error('PersistQueue is closed')
   }
 
   private send<T>(op: WorkerOp, timeoutMs: number): Promise<T> {
@@ -244,6 +287,9 @@ export class PersistQueue {
     clearTimeout(entry.timeoutHandle)
     this.pending.delete(reply.id)
     if (reply.ok) {
+      // Set synchronously: the worker's exit can be delivered before the
+      // awaiting `close()` resumes.
+      if (entry.op.kind === 'shutdown') this.shutdownAcked = true
       entry.resolve(reply.result)
     } else {
       const err = new Error(reply.error?.message ?? 'unknown worker error')

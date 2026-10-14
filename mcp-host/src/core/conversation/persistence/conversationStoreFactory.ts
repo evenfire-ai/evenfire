@@ -10,6 +10,7 @@
  */
 import * as path from 'node:path'
 import { Worker } from 'node:worker_threads'
+import { logger } from '../../../logger'
 import { type ConversationStore, InMemoryConversationStore } from '../conversationStore'
 import { DualConversationStore } from './dualConversationStore'
 import { PersistQueue, type WorkerLike } from './persistQueue'
@@ -35,6 +36,11 @@ export interface ConversationStoreFactoryOptions {
   pendingApprovalTtlMs?: number
   /** Optional override for the compiled worker script path (used by tests). */
   workerScriptPath?: string
+  /**
+   * Called once when the persist queue becomes unusable (unexpected worker
+   * exit or a failed async write). `main.ts` ends the process here.
+   */
+  onPersistFailure?: (err: Error) => void
 }
 
 export interface ConversationStoreHandle {
@@ -90,11 +96,12 @@ export function createConversationStore(
     syncTimeoutMs: opts.syncTimeoutMs,
     asyncTimeoutMs: opts.asyncTimeoutMs,
     onTransportError: err => {
-      console.error('[ConversationStore] worker transport error:', err)
+      logger.error({ err }, '[ConversationStore] worker transport error')
     },
     onExit: code => {
-      console.warn(`[ConversationStore] worker exited (code=${code})`)
+      logger.error({ code }, '[ConversationStore] worker exited; writes are rejected')
     },
+    onFailure: opts.onPersistFailure,
   })
 
   const sqliteStore = new SqliteConversationStore(persistQueue, {
