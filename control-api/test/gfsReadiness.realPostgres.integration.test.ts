@@ -20,7 +20,7 @@ function quoteIdent(value: string): string {
 }
 
 describeRealPostgres('GFS Phase 0 real PostgreSQL readiness', () => {
-  const latestMigration = CONTROL_API_MIGRATIONS.at(-1)!.version
+  const latestMigration = CONTROL_API_MIGRATIONS.at(-1)!
   const database = `gfs_readiness_${randomBytes(6).toString('hex')}`
   const connectionString = databaseUrl(
     adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres',
@@ -74,12 +74,47 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL readiness', () => {
     }
   })
 
-  it('fails Control API readiness while the latest migration is absent', async () => {
+  it('keeps Control API readiness when the latest migration has an accepted historical receipt', async () => {
+    const acceptedAliases = latestMigration.legacyVersions ?? []
+    expect(acceptedAliases.length).toBeGreaterThan(0)
+
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
-      await client.query(`DELETE FROM schema_migrations WHERE version=$1`, [latestMigration])
-      await expect(assertDbReady(client)).rejects.toThrow(new RegExp(latestMigration))
+      await client.query('DELETE FROM schema_migrations WHERE version = $1', [
+        latestMigration.version,
+      ])
+      const aliasReceipts = await client.query<{ version: string }>(
+        `SELECT version FROM schema_migrations WHERE version = ANY($1::text[])`,
+        [acceptedAliases]
+      )
+      expect(aliasReceipts.rows.map(row => row.version)).not.toHaveLength(0)
+      await expect(assertDbReady(client)).resolves.toBeUndefined()
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined)
+      client.release()
+    }
+  })
+
+  it('fails Control API readiness only when the latest migration and every accepted alias are absent', async () => {
+    const acceptedLatestReceipts = [
+      latestMigration.version,
+      ...(latestMigration.legacyVersions ?? []),
+    ]
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query(`DELETE FROM schema_migrations WHERE version = ANY($1::text[])`, [
+        acceptedLatestReceipts,
+      ])
+      const remainingReceipts = await client.query<{ version: string }>(
+        `SELECT version FROM schema_migrations WHERE version = ANY($1::text[])`,
+        [acceptedLatestReceipts]
+      )
+      expect(remainingReceipts.rows).toHaveLength(0)
+      await expect(assertDbReady(client)).rejects.toMatchObject({
+        message: `Control API database is not ready: missing migrations ${latestMigration.version}`,
+      })
     } finally {
       await client.query('ROLLBACK').catch(() => undefined)
       client.release()
