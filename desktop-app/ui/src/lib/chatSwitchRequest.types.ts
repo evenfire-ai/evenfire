@@ -3,6 +3,6 @@ export interface PendingChatSwitchRequest {
   chatId: string
   revision: number
   scope: string
-  settled: boolean
+  state: 'pending' | 'fulfilled' | 'rejected'
   promise: Promise<void>
 }

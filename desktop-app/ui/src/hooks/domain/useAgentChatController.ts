@@ -450,8 +450,8 @@ export function useAgentChatController({
 
   const [activeChatId, setActiveChatId] = useState<string | null>(null)
   const selectionIntentRevisionRef = useRef(0)
-  // Admission closes at settlement. An effect that captured this execution
-  // while in flight may still await its result after its catalog read.
+  // Effects can share an in-flight execution or its successful same-intent
+  // result. A previously rejected execution instead permits an independent retry.
   const pendingChatSwitchRequestRef = useRef<PendingChatSwitchRequest | null>(null)
   const activeChatSwitchRequestRef = useRef<symbol | null>(null)
   const activeChatSwitchKeyRef = useRef<string | null>(null)
@@ -1222,15 +1222,17 @@ export function useAgentChatController({
         chatId,
         revision: selectionIntentRevision,
         scope: currentAuthScopeRef.current,
-        settled: false,
+        state: 'pending',
         promise,
       }
       pendingChatSwitchRequestRef.current = request
       try {
         await promise
-      } finally {
-        // Mark this execution, not whatever successor now occupies the ref.
-        request.settled = true
+        // Settle this execution, not whatever successor now occupies the ref.
+        request.state = 'fulfilled'
+      } catch (error) {
+        request.state = 'rejected'
+        throw error
       }
     },
     [
@@ -1467,7 +1469,7 @@ export function useAgentChatController({
     const pendingSwitch = pendingChatSwitchRequestRef.current
     const sharesPendingSwitch = Boolean(
       requestedSelection?.mode === 'specific' &&
-      !pendingSwitch?.settled &&
+      pendingSwitch?.state !== 'rejected' &&
       pendingSwitch?.revision === selectionIntentRevision &&
       pendingSwitch.scope === currentAuthScopeRef.current &&
       pendingSwitch.agentRef === selectedAgent &&
