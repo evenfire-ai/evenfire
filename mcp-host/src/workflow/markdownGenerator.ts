@@ -1,5 +1,4 @@
 /** clerum__generate_markdown: the text, written as given. */
-import * as fs from 'fs'
 import {
   artifactResult,
   claimOutputFile,
@@ -7,6 +6,7 @@ import {
   ensureDir,
   outputFilename,
   replacedBytes,
+  writeArtifact,
 } from './artifactOutput'
 import type { InternalToolResult } from './types'
 
@@ -41,7 +41,7 @@ export async function runGenerateMarkdown(
     ensureDir(outputDir)
     const target = claimOutputFile(outputDir, filename)
     enforceQuota(outputDir, Buffer.byteLength(content, 'utf-8'), replacedBytes(target))
-    fs.writeFileSync(target.filePath, content, 'utf-8')
+    writeArtifact(target, content)
 
     return artifactResult(target, 'md')
   } catch (err) {

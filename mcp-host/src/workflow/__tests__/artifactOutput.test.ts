@@ -2,7 +2,18 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { artifactResult, capNotes, claimOutputFile, outputFilename } from '../artifactOutput'
+import {
+  PARTIAL_PREFIX,
+  artifactResult,
+  capNotes,
+  claimOutputFile,
+  getDirectorySize,
+  outputFilename,
+  replacedBytes,
+  writeArtifact,
+} from '../artifactOutput'
+import { ArtifactPathError, openExistingArtifactFile } from '../artifactPaths'
+import { loadEmbeddableImage } from '../embeddedImages'
 import { INTERNAL_TOOLS, enforceQuota } from '../internalTools'
 
 let outputDir: string
@@ -90,6 +101,79 @@ describe('claimOutputFile', () => {
       const dangling = claimOutputFile(outputDir, 'dangling.pdf')
       fs.writeFileSync(dangling.filePath, 'new')
       expect(fs.existsSync(path.join(outside, 'missing.txt'))).toBe(false)
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('writeArtifact', () => {
+  const partials = () => fs.readdirSync(outputDir).filter(name => name.startsWith(PARTIAL_PREFIX))
+
+  it('writes the bytes, replaces an earlier file and leaves no partial file', () => {
+    writeArtifact(claimOutputFile(outputDir, 'r.md'), '# first\n')
+    writeArtifact(claimOutputFile(outputDir, 'r.md'), Buffer.from('# second\n'))
+    expect(fs.readFileSync(path.join(outputDir, 'r.md'), 'utf8')).toBe('# second\n')
+    expect(partials()).toEqual([])
+  })
+
+  it('replaces a link put in the name after the claim, never writing through it', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'clerum-outside-'))
+    try {
+      fs.writeFileSync(path.join(outside, 'victim.txt'), 'original')
+      const target = claimOutputFile(outputDir, 'r.pdf')
+      fs.symlinkSync(path.join(outside, 'victim.txt'), target.filePath)
+      writeArtifact(target, 'new')
+      expect(fs.lstatSync(target.filePath).isSymbolicLink()).toBe(false)
+      expect(fs.readFileSync(target.filePath, 'utf8')).toBe('new')
+      expect(fs.readFileSync(path.join(outside, 'victim.txt'), 'utf8')).toBe('original')
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps the earlier file and no partial file when the write fails', () => {
+    writeArtifact(claimOutputFile(outputDir, 'r.md'), 'kept')
+    expect(() => writeArtifact(claimOutputFile(outputDir, 'r.md'), 42 as never)).toThrow()
+    expect(fs.readFileSync(path.join(outputDir, 'r.md'), 'utf8')).toBe('kept')
+    expect(partials()).toEqual([])
+  })
+
+  it('treats a partial file as no artifact: not counted, not opened, not embedded', () => {
+    const name = `${PARTIAL_PREFIX}in-progress`
+    fs.writeFileSync(path.join(outputDir, name), Buffer.alloc(1024))
+    fs.writeFileSync(path.join(outputDir, 'done.md'), 'x')
+    // Witness: the counter does see regular files.
+    expect(getDirectorySize(outputDir)).toBe(1)
+    expect(() => openExistingArtifactFile(outputDir, name)).toThrow(ArtifactPathError)
+    const warnings: string[] = []
+    expect(loadEmbeddableImage(name, outputDir, warnings)).toBeUndefined()
+    expect(warnings.join(' ')).toContain('was not found')
+  })
+
+  it('removes a partial file left by a write that never finished', () => {
+    const stale = path.join(outputDir, `${PARTIAL_PREFIX}stale`)
+    const fresh = path.join(outputDir, `${PARTIAL_PREFIX}fresh`)
+    fs.writeFileSync(stale, 'x')
+    fs.writeFileSync(fresh, 'x')
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000)
+    fs.utimesSync(stale, twoHoursAgo, twoHoursAgo)
+    writeArtifact(claimOutputFile(outputDir, 'r.md'), 'x')
+    expect(fs.existsSync(stale)).toBe(false)
+    // A partial file this recent may belong to a write in progress.
+    expect(fs.existsSync(fresh)).toBe(true)
+  })
+
+  it('does not count the size behind a link planted in the name after the claim', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'clerum-outside-'))
+    try {
+      fs.writeFileSync(path.join(outputDir, 'r.pdf'), 'old')
+      const target = claimOutputFile(outputDir, 'r.pdf')
+      expect(replacedBytes(target)).toBe(3)
+      fs.writeFileSync(path.join(outside, 'big.bin'), Buffer.alloc(4096))
+      fs.rmSync(target.filePath)
+      fs.symlinkSync(path.join(outside, 'big.bin'), target.filePath)
+      expect(replacedBytes(target)).toBe(0)
     } finally {
       fs.rmSync(outside, { recursive: true, force: true })
     }

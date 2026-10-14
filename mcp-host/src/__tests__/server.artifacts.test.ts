@@ -88,6 +88,7 @@ describe('RPCServer runtime artifact routes', () => {
     outsideFile = path.join(os.tmpdir(), `clerum-outside-${process.pid}-${Date.now()}.txt`)
     fs.writeFileSync(path.join(outputDir, 'report.md'), '# ok\n')
     fs.writeFileSync(path.join(outputDir, '.clerum-state'), '{}')
+    fs.writeFileSync(path.join(outputDir, '.clerum-partial-in-progress'), 'half a file')
     fs.mkdirSync(path.join(outputDir, 'nested'))
     fs.writeFileSync(outsideFile, 'secret outside output')
     fs.symlinkSync(outsideFile, path.join(outputDir, 'leak.md'))
@@ -106,6 +107,11 @@ describe('RPCServer runtime artifact routes', () => {
         sizeBytes: 5,
       })
       expect(body.artifacts[0].createdAt).toMatch(/\d{4}-\d{2}-\d{2}T/)
+      const partial = await fetch(
+        `${baseUrl}/v1/runtime/artifacts/.clerum-partial-in-progress/download`,
+        { headers: rpcEdgeHeaders }
+      )
+      expect(partial.status).toBe(404)
     } finally {
       await server.stop()
     }

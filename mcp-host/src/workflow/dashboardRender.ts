@@ -3,7 +3,6 @@
  * the tool entry. The stylesheet, the page parts and the templates are in
  * dashboardCss, dashboardComponents and dashboardTemplates.
  */
-import * as fs from 'fs'
 import {
   artifactResult,
   claimOutputFile,
@@ -11,6 +10,7 @@ import {
   ensureDir,
   outputFilename,
   replacedBytes,
+  writeArtifact,
 } from './artifactOutput'
 import { loadChartJsBundle } from './dashboardChartJs'
 import { DashboardCharts } from './dashboardCharts'
@@ -194,7 +194,7 @@ export async function runGenerateDashboard(
     ensureDir(outputDir)
     const target = claimOutputFile(outputDir, filename)
     enforceQuota(outputDir, Buffer.byteLength(html, 'utf-8'), replacedBytes(target))
-    fs.writeFileSync(target.filePath, html, 'utf-8')
+    writeArtifact(target, html)
 
     return artifactResult(target, 'html', { warnings })
   } catch (err) {

@@ -1,5 +1,4 @@
 /** The PDF generator (clerum__generate_pdf): markdown body, tables and images typeset with pdfmake. */
-import * as fs from 'fs'
 import * as path from 'path'
 import { type Content, type ContentText, type TDocumentDefinitions } from 'pdfmake/interfaces'
 import {
@@ -9,6 +8,7 @@ import {
   ensureDir,
   outputFilename,
   replacedBytes,
+  writeArtifact,
 } from './artifactOutput'
 import {
   EMPTY_DOCUMENT_NOTE,
@@ -444,7 +444,7 @@ export async function runGeneratePdf(
     ensureDir(outputDir)
     const target = claimOutputFile(outputDir, filename)
     enforceQuota(outputDir, pdfBuffer.byteLength, replacedBytes(target))
-    fs.writeFileSync(target.filePath, pdfBuffer)
+    writeArtifact(target, pdfBuffer)
 
     return artifactResult(target, 'pdf', { warnings: [...warnings, ...typesetter.warnings()] })
   } catch (err) {

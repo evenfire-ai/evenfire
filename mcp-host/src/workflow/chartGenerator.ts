@@ -8,7 +8,6 @@ import {
   type Scale,
   registerables,
 } from 'chart.js'
-import * as fs from 'fs'
 import {
   artifactResult,
   claimOutputFile,
@@ -16,6 +15,7 @@ import {
   ensureDir,
   outputFilename,
   replacedBytes,
+  writeArtifact,
 } from './artifactOutput'
 import { ChartDataError, type NormalizedPoint, normalizeChartData } from './chartData'
 import {
@@ -954,7 +954,7 @@ export async function runGenerateChart(
     ensureDir(outputDir)
     const target = claimOutputFile(outputDir, filename)
     enforceQuota(outputDir, pngBuffer.byteLength, replacedBytes(target))
-    fs.writeFileSync(target.filePath, pngBuffer)
+    writeArtifact(target, pngBuffer)
 
     const summary =
       `Chart written: ${target.filename} (${canvas.width}x${canvas.height} px, ` +

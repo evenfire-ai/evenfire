@@ -1,5 +1,4 @@
 /** clerum__generate_xlsx: builds the workbook (xlsxWorkbook, loaded on first use) and writes it. */
-import * as fs from 'fs'
 import {
   artifactResult,
   claimOutputFile,
@@ -7,6 +6,7 @@ import {
   ensureDir,
   outputFilename,
   replacedBytes,
+  writeArtifact,
 } from './artifactOutput'
 import type { InternalToolResult } from './types'
 
@@ -33,7 +33,7 @@ export async function runGenerateXlsx(
     ensureDir(outputDir)
     const target = claimOutputFile(outputDir, filename)
     enforceQuota(outputDir, built.buffer.byteLength, replacedBytes(target))
-    fs.writeFileSync(target.filePath, built.buffer)
+    writeArtifact(target, built.buffer)
     return artifactResult(target, 'xlsx', {
       summary: `File generated: ${target.filename} (xlsx): ${built.summary}.`,
       warnings,

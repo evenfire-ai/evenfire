@@ -5,6 +5,7 @@ import { createCanvas, loadImage } from '@napi-rs/canvas'
 import { spawn } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
+import { isPartialArtifactName } from './artifactOutput'
 import { imageTarget } from './inlineMarkup'
 import { own } from './ownEntry'
 
@@ -237,7 +238,7 @@ function resolveImagePath(
     )
     file = sibling
   }
-  if (!fs.existsSync(file) || !fs.statSync(file).isFile()) {
+  if (isPartialArtifactName(file) || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
     warnings.push(`Image '${requested}' was not found in the output folder and was left out.`)
     return undefined
   }

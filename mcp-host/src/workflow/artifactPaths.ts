@@ -1,5 +1,6 @@
 import * as fs from 'fs'
 import * as path from 'path'
+import { isPartialArtifactName } from './artifactOutput'
 
 // Keep this aligned with control-api/src/k8s.ts until the artifact policy is
 // promoted to a shared runtime dependency consumed by both services.
@@ -48,6 +49,10 @@ function artifactFsError(err: unknown): ArtifactPathError {
 function resolveArtifactCandidate(outputDir: string, filename: string): ArtifactCandidate {
   if (!isSafeArtifactFilename(filename)) {
     throw new ArtifactPathError(400, 'Invalid filename')
+  }
+  // A file still being written is not an artifact yet.
+  if (isPartialArtifactName(filename)) {
+    throw new ArtifactPathError(404, 'Artifact not found')
   }
 
   const root = path.resolve(outputDir)

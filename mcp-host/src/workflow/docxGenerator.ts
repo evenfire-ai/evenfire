@@ -13,7 +13,6 @@ import {
   TabStopType,
   TextRun,
 } from 'docx'
-import * as fs from 'fs'
 import {
   artifactResult,
   claimOutputFile,
@@ -21,6 +20,7 @@ import {
   ensureDir,
   outputFilename,
   replacedBytes,
+  writeArtifact,
 } from './artifactOutput'
 import { EMPTY_DOCUMENT_NOTE, printedBranding } from './documentChrome'
 import { type DocxImagePlacement, docxImageParagraph } from './docxImages'
@@ -307,7 +307,7 @@ export async function runGenerateDocx(
     ensureDir(outputDir)
     const target = claimOutputFile(outputDir, filename)
     enforceQuota(outputDir, buffer.byteLength, replacedBytes(target))
-    fs.writeFileSync(target.filePath, buffer)
+    writeArtifact(target, buffer)
 
     return artifactResult(target, 'docx', { warnings: [...new Set(warnings)] })
   } catch (err) {

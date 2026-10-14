@@ -1,7 +1,7 @@
 /**
  * Naming, placing and reporting the files the document generators write.
  */
-import { createHash } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import * as fs from 'fs'
 import * as path from 'path'
 import type { ArtifactMetadata, InternalToolResult } from './types'
@@ -89,13 +89,92 @@ function lstat(file: string): fs.Stats | undefined {
   }
 }
 
-/** Size of the file a write is about to replace, so a quota check does not count it twice. */
+/**
+ * Size of the file a write is about to replace, so a quota check does not count
+ * it twice. Only a regular file counts: a link planted in its place since
+ * claimOutputFile must not lend the size of whatever it points to.
+ */
 export function replacedBytes(target: OutputTarget): number {
   if (!target.replacesExisting) return 0
+  const entry = lstat(target.filePath)
+  return entry?.isFile() ? entry.size : 0
+}
+
+/** Prefix of a file still being written: never listed, served, embedded or counted. */
+export const PARTIAL_PREFIX = '.clerum-partial-'
+
+export function isPartialArtifactName(name: string): boolean {
+  return path.basename(name).startsWith(PARTIAL_PREFIX)
+}
+
+/** A partial file this old was left by a write that never finished. */
+const ABANDONED_PARTIAL_MS = 60 * 60 * 1000
+
+function removeAbandonedPartials(dir: string): void {
+  let names: string[]
   try {
-    return fs.statSync(target.filePath).size
+    names = fs.readdirSync(dir)
   } catch {
-    return 0
+    return
+  }
+  const cutoff = Date.now() - ABANDONED_PARTIAL_MS
+  for (const name of names) {
+    if (!isPartialArtifactName(name)) continue
+    const file = path.join(dir, name)
+    const entry = lstat(file)
+    if (entry?.isFile() && entry.mtimeMs < cutoff) {
+      try {
+        fs.unlinkSync(file)
+      } catch {
+        // Another write removed it, or it cannot be removed; the next write retries.
+      }
+    }
+  }
+}
+
+/**
+ * Writes `data` under `target` whole: into a new file beside it, created
+ * without following links, flushed, then renamed over the name. A reader sees
+ * the previous file or this one, never part of it; a link in the name's place
+ * is replaced, not followed; a write that fails leaves the previous file and
+ * no partial one.
+ */
+export function writeArtifact(target: OutputTarget, data: string | Uint8Array): void {
+  const dir = path.dirname(target.filePath)
+  removeAbandonedPartials(dir)
+  const partial = path.join(dir, `${PARTIAL_PREFIX}${randomUUID()}`)
+  const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants
+  const fd = fs.openSync(partial, O_WRONLY | O_CREAT | O_EXCL | (O_NOFOLLOW ?? 0), 0o666)
+  let published = false
+  try {
+    try {
+      fs.writeFileSync(fd, data)
+      fs.fsyncSync(fd)
+    } finally {
+      fs.closeSync(fd)
+    }
+    fs.renameSync(partial, target.filePath)
+    published = true
+  } finally {
+    if (!published) {
+      try {
+        fs.unlinkSync(partial)
+      } catch {
+        // Already gone; the error being thrown is the one that matters.
+      }
+    }
+  }
+  // The file is published; flushing the folder only makes the new name
+  // survive a crash, so a folder that cannot be opened for it is not an error.
+  try {
+    const dirFd = fs.openSync(dir, fs.constants.O_RDONLY)
+    try {
+      fs.fsyncSync(dirFd)
+    } finally {
+      fs.closeSync(dirFd)
+    }
+  } catch {
+    // Some filesystems refuse to fsync a directory.
   }
 }
 
@@ -162,9 +241,7 @@ export function artifactResult(
 }
 
 export function ensureDir(dir: string): void {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true })
-  }
+  fs.mkdirSync(dir, { recursive: true })
 }
 
 // A dashboard with charts inlines the Chart.js UMD bundle (~210 KB) so the
@@ -183,7 +260,7 @@ export function getDirectorySize(dir: string): number {
     const full = path.join(dir, entry.name)
     if (entry.isDirectory()) {
       total += getDirectorySize(full)
-    } else if (entry.isFile()) {
+    } else if (entry.isFile() && !isPartialArtifactName(entry.name)) {
       try {
         total += fs.statSync(full).size
       } catch {
