@@ -55,13 +55,25 @@ type Sample = {
   chatId?: string
   observed_at_install?: boolean
   observer_installed_ms?: number
-  /** The transcript was missing or empty at some point between the click and the measurement. */
+  /** The "Loading conversation" skeleton was visible between the click and the measurement. */
   blank?: boolean
+  /** What the observer saw just before the click and on its first callbacks after it. */
+  trace?: OpenObservation[]
+}
+type OpenObservation = {
+  ms: number
+  lists: number
+  bubbles: number
+  skeleton: boolean
+  dedicated: boolean
 }
 const HOSTS = ['chatllm', 'chatllm-stateless'] as const
 // The Desktop remembers the last 8 transcripts it showed (`transcriptMemo`); reopens stay within it.
 const REMEMBERED_CHATS = 8
 const MESSAGES = '[data-testid="user-message"], [data-testid="agent-response"]'
+// Rendered by ChatThread while an active chat has no messages and is loading (both builds).
+const LOADING_SKELETON = '[aria-label="Loading conversation"]'
+const TRACE_LIMIT = 8
 const LIMIT_WINDOW_MS = 65_000
 const RATE_LIMITED = /\b429\b|Too Many Requests/g
 const rows = (host: string) =>
@@ -103,7 +115,7 @@ async function openChat(
   host: string,
   label: string,
   chat: Chat
-): Promise<{ ms: number; blank: boolean }> {
+): Promise<{ ms: number; blank: boolean; trace: OpenObservation[] }> {
   const pace = lastOpenAt + OPEN_PACE_MS - Date.now()
   if (pace > 0) await page.waitForTimeout(pace)
   lastOpenAt = Date.now()
@@ -140,14 +152,30 @@ async function openChat(
     )
     .toBe(true)
   return page.evaluate(
-    ({ selector, chat, messages }) =>
-      new Promise<{ ms: number; blank: boolean }>((resolve, reject) => {
+    ({ selector, chat, messages, skeleton, traceLimit }) =>
+      new Promise<{ ms: number; blank: boolean; trace: OpenObservation[] }>((resolve, reject) => {
         const button = document.querySelector<HTMLButtonElement>(`${selector} button`)
         if (!button || button.disabled)
           throw new Error(`Chat row has no enabled open button: ${selector}`)
-        let started: number
+        let started = performance.now()
         let clicked = false
         let blank = false
+        const trace: OpenObservation[] = []
+        // Before the click the Chat breadcrumb shows the Host's chat list with no active chat, which
+        // already has zero bubbles; only the loading skeleton marks a chat that was opened empty.
+        const observe = () => {
+          const transcripts = document.querySelectorAll('[data-testid="message-list"]')
+          const observation = {
+            ms: clicked ? performance.now() - started : -1,
+            lists: transcripts.length,
+            bubbles: transcripts[0]?.querySelectorAll(messages).length ?? 0,
+            skeleton: document.querySelector(skeleton) !== null,
+            dedicated: transcripts[0]?.classList.contains('chat-thread-dedicated') ?? false,
+          }
+          if (trace.length < traceLimit) trace.push(observation)
+          return observation
+        }
+        observe()
         // The sidebar previews only the latest sessions, so the active-row witness is checked outside the timing.
         const finish = () => {
           const transcripts = document.querySelectorAll('[data-testid="message-list"]')
@@ -159,8 +187,7 @@ async function openChat(
           }
           const transcript = transcripts[0]
           const bubbles = transcript?.querySelectorAll(messages)
-          // React commits a click's state synchronously, so every check after the click sees the new chat's frames.
-          if (clicked && !bubbles?.length) blank = true
+          if (observe().skeleton) blank = true
           if (
             bubbles?.length === chat.count &&
             bubbles[chat.count - 1]?.textContent?.includes(chat.lastText) &&
@@ -169,7 +196,7 @@ async function openChat(
           ) {
             observer.disconnect()
             clearTimeout(deadline)
-            resolve({ ms: performance.now() - started, blank })
+            resolve({ ms: performance.now() - started, blank, trace })
           }
         }
         const observer = new MutationObserver(finish)
@@ -192,6 +219,8 @@ async function openChat(
       selector: agentRow(host, chat.id),
       chat,
       messages: MESSAGES,
+      skeleton: LOADING_SKELETON,
+      traceLimit: TRACE_LIMIT,
     }
   )
 }
@@ -347,6 +376,8 @@ if (
       samples,
       cells: {} as Record<string, ReturnType<typeof quantiles>>,
       gates: [] as Array<Record<string, string | number | boolean>>,
+      // Reported, not gated: another branch profile shares the machine (plan addendum A9.2).
+      loadSpread: [] as Array<Record<string, string | number | boolean>>,
       complete: false,
     }
     let app: ElectronApplication | undefined
@@ -650,7 +681,7 @@ if (
                 // Round 1 is always BEFORE, so its first cached pass cannot be served from memory.
                 const firstCachedPass = id === 1 ? 2 : 1
                 // Reopens stay inside the remembered window: the last chats opened, newest first,
-                // skipping the active chat (a click on it changes nothing) until the end.
+                // with the last chat opened at the end.
                 const remembered = catalog.chats.slice(
                   -Math.min(catalog.chats.length, REMEMBERED_CHATS)
                 )
@@ -686,7 +717,7 @@ if (
                         .toBe(true)
                     })
                   for (const chat of reopen ? reopenOrder : catalog.chats) {
-                    const { ms, blank } = await openChat(
+                    const { ms, blank, trace } = await openChat(
                       page,
                       catalog.host,
                       hostLabels[catalog.host]!,
@@ -705,6 +736,7 @@ if (
                       chatId: chat.id,
                       ms,
                       blank,
+                      trace,
                     })
                     if (!checked.has(chat.id)) {
                       await expect
@@ -868,8 +900,8 @@ if (
             after: memoAfter,
             passed: memoAfter < memoBefore,
           })
-          // AFTER reopens never show an empty transcript. The witnesses prove the observer does see
-          // one where it happens: on AFTER first opens (disk path) and on every BEFORE reopen.
+          // AFTER reopens never show the loading skeleton. The witnesses prove the observer does see
+          // it where it happens: on AFTER first opens (disk path) and on BEFORE reopens.
           const blanks = (build: Build, metric: string) =>
             samples.filter(
               sample =>
@@ -891,7 +923,7 @@ if (
               values('after', host, 'open_memo_ms').length > 0 &&
               witness.after_reopen_blank === 0 &&
               witness.after_first_open_blank > 0 &&
-              witness.before_reopen_blank > 0,
+              witness.before_reopen_blank === values('before', host, 'open_memo_ms').length,
           })
         }
         const before = quantiles(values('before', HOSTS[0], 'relaunch_ms')).p50,
@@ -911,19 +943,14 @@ if (
         invalidated: rounds.filter(round => round.invalidated).length,
         passed: rounds.every(round => !round.invalidated),
       })
-      // Rounds compared within a scenario must run under comparable 1-minute load.
+      // 1-minute load spread across the rounds of each scenario.
       for (const scenario of phase === 'OL' ? ['O', 'L'] : ['W']) {
         const loads = rounds
           .filter(round => round.scenario === scenario)
           .map(round => round.loadavg[0]!)
+        if (loads.length === 0) throw new Error(`Scenario ${scenario} recorded no rounds.`)
         const spread = Math.max(...loads) - Math.min(...loads)
-        report.gates.push({
-          metric: 'loadavg_spread',
-          scenario,
-          spread,
-          budget: 1,
-          passed: loads.length > 0 && spread <= 1,
-        })
+        report.loadSpread.push({ scenario, spread, budget: 1, within_budget: spread <= 1 })
       }
       report.complete = true
     } finally {
