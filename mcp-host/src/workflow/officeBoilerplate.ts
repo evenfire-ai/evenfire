@@ -86,16 +86,22 @@ const SAMPLES: Record<
   },
 }
 
+/** How long a call waits for the reference before checking without it. */
+export const REFERENCE_WAIT_MS = 10_000
+
 const references = new Map<OfficeFormat, Promise<string[]>>()
 
 /**
  * The texts a package of `format` holds on its own. Empty when the sample
- * cannot be written, which leaves the scan as strict as before.
+ * cannot be written, or is not ready within REFERENCE_WAIT_MS, which leaves
+ * the scan as strict as before. A failed build is tried again on the next
+ * call.
  */
 export function boilerplateTexts(format: OfficeFormat): Promise<string[]> {
   let reference = references.get(format)
   if (!reference) {
     reference = writeSample(format).catch((err: unknown) => {
+      references.delete(format)
       logger.warn(
         {
           component: 'OfficeBoilerplate',
@@ -108,8 +114,25 @@ export function boilerplateTexts(format: OfficeFormat): Promise<string[]> {
     })
     references.set(format, reference)
   }
-  return reference
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const waited = new Promise<string[]>(resolve => {
+    timer = setTimeout(() => {
+      logger.warn(
+        { component: 'OfficeBoilerplate', format },
+        'The reference package is not ready; protected values are checked against all its text'
+      )
+      resolve([])
+    }, REFERENCE_WAIT_MS)
+    timer.unref?.()
+  })
+  return Promise.race([reference, waited]).finally(() => clearTimeout(timer))
 }
+
+/**
+ * When the sample was written (its document properties), which no other
+ * package shares, so it is no part of the reference.
+ */
+const TIMESTAMP = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g
 
 async function writeSample(format: OfficeFormat): Promise<string[]> {
   const sample = SAMPLES[format]
@@ -120,7 +143,7 @@ async function writeSample(format: OfficeFormat): Promise<string[]> {
     if (!result.success || !result.artifact) throw new Error(result.error ?? 'no artifact')
     const texts = officePackageTexts(fs.readFileSync(result.artifact.path))
     if (!texts) throw new Error('the reference package could not be read')
-    return texts
+    return texts.map(text => text.replace(TIMESTAMP, '\u0000'))
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

@@ -1,3 +1,4 @@
+import { createHash } from 'crypto'
 import * as fs from 'fs'
 import {
   isBinaryArtifactFormat,
@@ -13,6 +14,7 @@ import {
   isSafeArtifactFilename,
   openExistingArtifactFile,
 } from '../../workflow/artifactPaths'
+import { printedForms } from '../../workflow/toolText'
 import type { ArtifactMetadata } from '../../workflow/types'
 import type { Attachment } from '../types'
 
@@ -65,6 +67,16 @@ type BuildGeneratedArtifactAttachmentParams = {
    * package scan cannot tell it from the generator's own text.
    */
   packageBoilerplate?: readonly string[]
+  /**
+   * What the file shows that its arguments do not spell (a chart's drawn
+   * labels), each string as drawn; compared without separators.
+   */
+  shownText?: readonly string[]
+  /**
+   * The SHA-256 of the bytes the generator wrote. Other bytes found under the
+   * name (another call wrote it since) are not delivered.
+   */
+  writtenSha256?: string
 }
 
 function extension(filename: string | undefined): string {
@@ -123,6 +135,25 @@ function textContainsRedactableSecretEntry(
   return entries.some(entry => {
     if (!entry.value || entry.value.length < 4) return false
     return content.includes(entry.value)
+  })
+}
+
+/**
+ * Whether a string the file shows holds an entry, both without separators: a
+ * label drawn "3,141,592,653" shows "3141592653" and "3.141.592.653" alike.
+ */
+function shownTextHoldsSecretEntry(
+  shown: readonly string[] | undefined,
+  entries: ArtifactSecretEntry[]
+): boolean {
+  if (!shown?.length) return false
+  const values = entries
+    .map(entry => withoutSeparators(entry.value))
+    .filter(value => value.length >= 4)
+  if (values.length === 0) return false
+  return shown.some(text => {
+    const bare = withoutSeparators(text)
+    return values.some(value => bare.includes(value))
   })
 }
 
@@ -232,7 +263,18 @@ export function buildGeneratedArtifactAttachment(
   try {
     opened = openExistingArtifactFile(params.outputDir, params.artifact.name)
     const fileBuffer = readOpenedArtifactBuffer(opened, params.maxBytes)
+    if (
+      params.writtenSha256 !== undefined &&
+      createHash('sha256').update(fileBuffer).digest('hex') !== params.writtenSha256
+    ) {
+      warnSkip('artifact_replaced_before_delivery', params.sourceTool, params.artifact)
+      return null
+    }
     const secretEntries = params.secretEntriesProvider?.() ?? []
+    if (shownTextHoldsSecretEntry(params.shownText, secretEntries)) {
+      warnSkip('binary_redaction_unavailable', params.sourceTool, params.artifact)
+      return null
+    }
     if (isBinaryArtifactFormat(expectedFormat)) {
       // Binary artifacts are not redacted byte-by-byte here, so one that may
       // hold a secret is withheld: when the source payload that produced it
@@ -252,12 +294,17 @@ export function buildGeneratedArtifactAttachment(
       const packageEntries = secretEntries.filter(
         entry => !boilerplate.some(text => text.includes(entry.value))
       )
-      if (packageEntries.length > 0 && OFFICE_PACKAGE_FORMATS.has(expectedFormat)) {
-        // Numbers are compared as shown without separators, so any locale's
-        // grouping of a protected value matches.
-        const shownValues = packageEntries
-          .map(entry => withoutSeparators(entry.value))
-          .filter(value => value.length >= 4)
+      // Numbers are compared as shown without separators, so any locale's
+      // grouping of a protected value matches. Every entry counts here: a
+      // number a cell or a chart shows comes from the arguments, never from
+      // the generator's own text.
+      const shownValues = secretEntries
+        .map(entry => withoutSeparators(entry.value))
+        .filter(value => value.length >= 4)
+      if (
+        (packageEntries.length > 0 || shownValues.length > 0) &&
+        OFFICE_PACKAGE_FORMATS.has(expectedFormat)
+      ) {
         const found = officePackageHasText(
           fileBuffer,
           text => textContainsRedactableSecretEntry(text, packageEntries),
@@ -288,6 +335,18 @@ export function buildGeneratedArtifactAttachment(
       }
     }
     const redacted = redactArtifactForDelivery(expectedFormat, fileBuffer, secretEntries)
+    // A value printed whole once is redacted, but the same value split by
+    // markup elsewhere in the file is not: read the redacted text as printed.
+    if (
+      !isBinaryArtifactFormat(expectedFormat) &&
+      secretEntries.length > 0 &&
+      printedForms(redacted.buffer.toString('utf8')).some(text =>
+        textContainsRedactableSecretEntry(text, secretEntries)
+      )
+    ) {
+      warnSkip('text_redaction_unavailable', params.sourceTool, params.artifact)
+      return null
+    }
     if (redacted.buffer.byteLength > params.maxBytes) {
       warnSkip('redacted_artifact_too_large', params.sourceTool, params.artifact)
       return null

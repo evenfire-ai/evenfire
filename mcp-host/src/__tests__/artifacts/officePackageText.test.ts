@@ -202,6 +202,7 @@ describe('officePackageHasText, numbers as they are shown', () => {
     ],
     ['a built-in id it does not model', () => workbook('5', { id: 5 })],
     ['a system date format', () => workbook('46024', { id: 164, code: '[$-F800]dddd' })],
+    ['another calendar', () => workbook('46024', { id: 164, code: '[$-1070000]yyyy-mm-dd' })],
     [
       'an ISO date cell',
       () => pack({ 'xl/worksheets/sheet1.xml': '<c r="A1" t="d"><v>2026-01-02</v></c>' }),
@@ -228,6 +229,17 @@ describe('officePackageHasText, numbers as they are shown', () => {
     expect(
       officePackageHasText(plain, () => false, { ...OFFICE_PACKAGE_LIMITS, maxShownValues: 0 })
     ).toBe(false)
+  })
+
+  it('counts each rendering against the bound, not each number', async () => {
+    // One cell under the built-in short date and time is rendered in 84 patterns.
+    const dated = await workbook('46024.5', { id: 22 })
+    const bound = { ...OFFICE_PACKAGE_LIMITS, maxShownRenders: 83 }
+    expect(officePackageHasText(dated, () => false, bound)).toBeNull()
+    expect(officePackageHasText(dated, () => false, { ...bound, maxShownRenders: 84 })).toBe(false)
+    // A plain grouping format is one rendering.
+    const grouped = await workbook('3141592653', { id: 3 })
+    expect(officePackageHasText(grouped, () => false, { ...bound, maxShownRenders: 1 })).toBe(false)
   })
 
   it('reads no numbers when told not to', async () => {

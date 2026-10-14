@@ -178,6 +178,8 @@ class InternalToolAdapter implements Tool {
               sourcePayload: [params, printedForms(params), result.shownText ?? []],
               secretEntriesProvider: this.attachmentOptions.secretEntriesProvider,
               packageBoilerplate,
+              shownText: result.shownText,
+              writtenSha256: result.writtenSha256,
             })
           : null
       const images = result.success

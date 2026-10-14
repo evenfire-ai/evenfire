@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   builtinFormatCode,
   isModelledFormatCode,
+  renderCount,
   shownForms,
   withoutSeparators,
 } from '../../artifacts/shownNumbers'
@@ -33,6 +34,17 @@ describe('isModelledFormatCode', () => {
     expect(isModelledFormatCode(code)).toBe(true)
   })
 
+  it.each(['[$-409]yyyy-mm-dd', '[$€-407]#,##0', '[$-de-DE]dd.mm.yyyy', '[$USD-409]0', '[$€]0'])(
+    'reads %s, a currency or a plain locale',
+    code => {
+      expect(isModelledFormatCode(code)).toBe(true)
+    }
+  )
+
+  it('reads built-in 47 as Excel shows it', () => {
+    expect(builtinFormatCode(47)).toBe('mm:ss.0')
+  })
+
   it('reads every built-in format a package can name by id', () => {
     const ids = [
       0, 1, 2, 3, 4, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 37, 38, 39, 40, 45, 46,
@@ -47,6 +59,12 @@ describe('isModelledFormatCode', () => {
     ['an unterminated quote', '"x'],
     ['a system long date', '[$-F800]dddd, mmmm dd, yyyy'],
     ['a system date', '[$-x-sysdate]dddd'],
+    ['a system date by a padded id', '[$-0F800]dddd'],
+    ['the Thai Buddhist calendar by id', '[$-1070000]yyyy-mm-dd'],
+    ['the Thai Buddhist calendar by tag', '[$-th-TH,107]yyyy-mm-dd'],
+    ['native digits by id', '[$-D000409]0'],
+    ['Japanese era years', '[$-ja-JP-x-gannen]ggge'],
+    ['a numbering extension', '[$-th-TH-u-nu-thai]0'],
     ['native digits', '[DBNum1]0'],
     ['another calendar', '[B2]yyyy'],
     ['a code over 255 characters', `"${'x'.repeat(260)}"0`],
@@ -78,6 +96,17 @@ describe('shownForms', () => {
   it('shows month names in other languages', () => {
     const forms = shownForms(JAN_2_2026, 'mmm d, yyyy')
     expect(forms).toEqual(expect.arrayContaining(['Jan22026', 'janv22026', 'ene22026']))
+  })
+})
+
+describe('renderCount', () => {
+  it.each([
+    ['#,##0', false, 1],
+    ['mmm d, yyyy', false, 4],
+    ['mm-dd-yy', true, 14],
+    ['m/d/yy h:mm', true, 84],
+  ])('renders %s (short date %s) %i times', (code, shortDate, count) => {
+    expect(renderCount(code, shortDate)).toBe(count)
   })
 })
 

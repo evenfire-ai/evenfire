@@ -3,9 +3,9 @@
  * protected value it displays is found although the file only stores the
  * number: a date serial under a date format, digits under a grouping format or
  * beside quoted text. A spreadsheet renders in its viewer's locale, so a value
- * is compared without separators (any locale's grouping reads the same), in
- * each language's month and day names, and, for the built-in short date, in
- * the date patterns locales commonly use.
+ * is compared without separators (any locale's grouping reads the same), with
+ * month and day names in English, German, French and Spanish, and, for the
+ * built-in short date, in the date patterns locales commonly use.
  */
 import type * as Numfmt from 'numfmt'
 
@@ -15,7 +15,6 @@ export const MAX_FORMAT_CODE_LENGTH = 255
 let formatter: typeof Numfmt | undefined
 function numfmt(): typeof Numfmt {
   // Loaded on first use: only a scan with protected values configured needs it.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
   formatter ??= require('numfmt') as typeof Numfmt
   return formatter
 }
@@ -51,7 +50,8 @@ const BUILTIN_FORMATS: Readonly<Record<number, string>> = {
   40: '#,##0.00;[Red](#,##0.00)',
   45: 'mm:ss',
   46: '[h]:mm:ss',
-  47: 'mmss.0',
+  // As Excel shows it; ExcelJS's own table spells it 'mmss.0'.
+  47: 'mm:ss.0',
   48: '##0.0E+0',
   49: '@',
 }
@@ -85,8 +85,22 @@ export function isShortDateId(id: number): boolean {
   return SHORT_DATE_IDS.has(id)
 }
 
-/** A locale tag that makes a viewer use its system format: [$-F800], [$-x-sysdate]. */
-const SYSTEM_LOCALE = /^-(?:F[0-9A-F]{3}|x-sys)/i
+/**
+ * Whether a locale tag (the part of [$...] after '$') leaves numbers and dates
+ * as this module renders them: a currency with no locale, a plain locale id
+ * ([$-409], [$€-407]) or a plain language tag ([$-de-DE]). An id with
+ * calendar or digit bytes ([$-1070000], [$-D000409]), a system format
+ * ([$-F800], [$-x-sysdate]), a calendar suffix ([$-th-TH,107]) or a tag
+ * extension ([$-ja-JP-x-gannen], [$-th-TH-u-nu-thai]) is shown otherwise.
+ */
+function isModelledLocale(value: string): boolean {
+  const dash = value.indexOf('-')
+  if (dash < 0) return true
+  const tag = value.slice(dash + 1)
+  // Ids from 0xF000 are system formats; bytes above 0xFFFF pick a calendar or digits.
+  if (/^[0-9A-F]{1,8}$/i.test(tag)) return parseInt(tag, 16) < 0xf000
+  return /^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/i.test(tag) && !/-[a-z](?:-|$)/i.test(tag)
+}
 
 /**
  * Whether this module renders `code` the way a spreadsheet would: a code it
@@ -103,7 +117,7 @@ export function isModelledFormatCode(code: string): boolean {
       token =>
         token.type !== 'dbnum' &&
         token.type !== 'natnum' &&
-        !(token.type === 'locale' && SYSTEM_LOCALE.test(String(token.value)))
+        !(token.type === 'locale' && !isModelledLocale(String(token.value)))
     )
 }
 
@@ -133,7 +147,39 @@ export function withoutSeparators(text: string): string {
   return text.replace(SEPARATORS, '')
 }
 
+/** Month and day names, and AM/PM, are words a locale translates. */
+const NAMED = /m{3,}|d{3,}|AM\/PM|A\/P/i
+
+/** The codes shownForms renders a value under. */
+function renderedCodes(code: string, shortDate: boolean): readonly string[] {
+  if (!shortDate) return [code]
+  return code.includes('h')
+    ? SHORT_DATES.flatMap(date => SHORT_TIMES.map(time => `${date} ${time}`))
+    : SHORT_DATES
+}
+
 const MEMO_LIMIT = 20_000
+const renderCounts = new Map<string, number>()
+
+/**
+ * How many renderings shownForms makes for one value under `code`, which is
+ * what a scan's time budget counts: a built-in short date is rendered in
+ * every common pattern, a pattern with names in every name locale.
+ */
+export function renderCount(code: string, shortDate = false): number {
+  const key = `${shortDate ? 'S' : 'C'}\u0000${code}`
+  let count = renderCounts.get(key)
+  if (count === undefined) {
+    count = renderedCodes(code, shortDate).reduce(
+      (n, each) => n + (NAMED.test(each) ? 1 + NAME_LOCALES.length : 1),
+      0
+    )
+    if (renderCounts.size >= MEMO_LIMIT) renderCounts.clear()
+    renderCounts.set(key, count)
+  }
+  return count
+}
+
 const memo = new Map<string, string[]>()
 
 /**
@@ -147,15 +193,9 @@ export function shownForms(value: number, code: string, shortDate = false): stri
   if (known) return known
   const nf = numfmt()
   const forms = new Set<string>()
-  const codes = shortDate
-    ? code.includes('h')
-      ? SHORT_DATES.flatMap(date => SHORT_TIMES.map(time => `${date} ${time}`))
-      : SHORT_DATES
-    : [code]
-  for (const each of codes) {
+  for (const each of renderedCodes(code, shortDate)) {
     forms.add(withoutSeparators(nf.format(each, value, { locale: 'en', throws: false })))
-    // Month and day names, and AM/PM, are words a locale translates.
-    if (/m{3,}|d{3,}|AM\/PM|A\/P/i.test(each)) {
+    if (NAMED.test(each)) {
       for (const locale of NAME_LOCALES) {
         forms.add(withoutSeparators(nf.format(each, value, { locale, throws: false })))
       }

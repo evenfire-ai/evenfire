@@ -4,6 +4,7 @@ import JSZip from 'jszip'
 import * as os from 'os'
 import * as path from 'path'
 import { zipEntries } from '../../../workflow/__tests__/support/zipEntries'
+import { INTERNAL_TOOLS } from '../../../workflow/internalTools'
 import type { ArtifactMetadata } from '../../../workflow/types'
 import { CALLER_OUTPUTS_DIR } from '../../../workspace/callerOutputs'
 import type { NativeToolConfig } from '../../interfaces'
@@ -747,6 +748,88 @@ describe('generated internal artifact attachments', () => {
         chart('c.png')
       )
       expect(ordinary.attachments ?? []).toHaveLength(1)
+    })
+
+    it.each([
+      ['without grouping', '3141592653'],
+      ['grouped the German way', '3.141.592.653'],
+    ])(
+      'does not attach a chart image whose value label shows the protected value %s',
+      async (_label, secret) => {
+        const result = await toolWith('clerum__generate_chart', [secret]).execute({
+          filename: 'g.png',
+          type: 'bar',
+          showValues: true,
+          valueFormat: 'plain',
+          decimals: 0,
+          // Drawn "3,141,592,653", rounded: the arguments never spell it.
+          data: { labels: ['A'], datasets: [{ label: 'S', data: [3141592652.6] }] },
+        })
+        expect(result.is_error).toBe(false)
+        expect(result.attachments ?? []).toHaveLength(0)
+      }
+    )
+
+    it('attaches a chart image whose separate labels only spell a protected value run together', async () => {
+      const result = await toolWith('clerum__generate_chart', ['3405', '1203']).execute({
+        filename: 'line.png',
+        type: 'line',
+        showValues: true,
+        data: {
+          labels: ['a', 'b', 'c', 'd'],
+          datasets: [{ label: 'S', data: [120, 340, 560, 410] }],
+        },
+      })
+      expect(result.is_error).toBe(false)
+      expect(result.attachments ?? []).toHaveLength(1)
+    })
+
+    it('does not attach markdown that prints a protected value whole once and split once', async () => {
+      const markdown = toolWith('clerum__generate_markdown', ['probe-redaction-value'])
+      const leaked = await markdown.execute({
+        filename: 'twice.md',
+        content: 'a: probe-redaction-value\n\nb: probe-**redaction**-value',
+      })
+      expect(leaked.is_error).toBe(false)
+      expect(leaked.attachments ?? []).toHaveLength(0)
+      // Control: the whole occurrence alone is redacted and attached.
+      const whole = await markdown.execute({
+        filename: 'once.md',
+        content: 'a: probe-redaction-value',
+      })
+      expect(whole.attachments ?? []).toHaveLength(1)
+      expect(decoded(whole.attachments![0]!).toString('utf8')).toBe('a: [REDACTED:PROBE_0]')
+    })
+
+    it("does not attach a sheet that shows a protected value which is also the generator's own text", async () => {
+      // "1000" is in every workbook's styles; a cell of 999.6 shown as an integer reads "1,000".
+      const leaked = await toolWith('clerum__generate_xlsx', ['1000']).execute(
+        sheet(999.6, 'integer')
+      )
+      expect(leaked.is_error).toBe(false)
+      expect(leaked.attachments ?? []).toHaveLength(0)
+    })
+
+    it('delivers only the bytes the generator wrote', async () => {
+      const tool = INTERNAL_TOOLS.find(t => t.name === 'clerum__generate_markdown')!
+      const original = tool.execute.bind(tool)
+      // Another call writes the same name between this call's write and its delivery.
+      vi.spyOn(tool, 'execute').mockImplementationOnce(async (args, dir, options) => {
+        const result = await original(args, dir, options)
+        fs.writeFileSync(result.artifact!.path, '# someone else\n')
+        return result
+      })
+      const raced = await toolWith('clerum__generate_markdown', []).execute({
+        filename: 'race.md',
+        content: '# mine\n',
+      })
+      expect(raced.is_error).toBe(false)
+      expect(raced.attachments ?? []).toHaveLength(0)
+      const calm = await toolWith('clerum__generate_markdown', []).execute({
+        filename: 'race.md',
+        content: '# mine\n',
+      })
+      expect(calm.attachments ?? []).toHaveLength(1)
     })
 
     it("attaches ordinary documents when a protected value is also the generators' own text", async () => {

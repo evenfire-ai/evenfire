@@ -72,6 +72,8 @@ export interface OutputTarget {
   filePath: string
   /** A file already at `filePath` will be overwritten. */
   replacesExisting: boolean
+  /** The SHA-256 of the bytes writeArtifact published here. */
+  writtenSha256?: string
 }
 
 /** Where to write `filename`; a file already there is replaced. */
@@ -158,6 +160,7 @@ export function writeArtifact(target: OutputTarget, data: string | Uint8Array): 
     }
     fs.renameSync(partial, target.filePath)
     published = true
+    target.writtenSha256 = createHash('sha256').update(data).digest('hex')
   } finally {
     if (!published) {
       try {
@@ -240,6 +243,7 @@ export function artifactResult(
       createdAt: new Date().toISOString(),
     },
     content: parts.join('\n'),
+    ...(target.writtenSha256 ? { writtenSha256: target.writtenSha256 } : {}),
   }
 }
 

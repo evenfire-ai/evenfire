@@ -21,7 +21,11 @@ export function recordDrawnText(ctx: TextDrawing): string[] {
   return drawn
 }
 
-/** The drawn strings once each, and all of them joined, so a value drawn in pieces reads whole. */
+/**
+ * The drawn strings once each. Each is checked on its own: run together, the
+ * labels 340 and 560 would read "3405". A value that comes from the arguments
+ * is checked whole there, however it is drawn.
+ */
 export function drawnTexts(drawn: string[]): string[] {
-  return [...new Set(drawn), drawn.join('')]
+  return [...new Set(drawn)]
 }

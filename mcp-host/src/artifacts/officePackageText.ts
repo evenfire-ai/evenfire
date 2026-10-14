@@ -12,6 +12,7 @@ import {
   builtinFormatCode,
   isModelledFormatCode,
   isShortDateId,
+  renderCount,
   shownForms,
   showsIntegerAsStored,
 } from './shownNumbers'
@@ -26,10 +27,14 @@ export const OFFICE_PACKAGE_LIMITS = {
   maxDepth: 2,
   /**
    * Numbers rendered through their format across the package and every
-   * package inside it (about 0.6 s at this bound); a larger package is not
-   * attached.
+   * package inside it; a larger package is not attached.
    */
   maxShownValues: 250_000,
+  /**
+   * Renderings those numbers take (shownNumbers.renderCount): a built-in
+   * short date is rendered in dozens of patterns. About 0.6 s at this bound.
+   */
+  maxShownRenders: 500_000,
 }
 
 export type OfficePackageLimits = typeof OFFICE_PACKAGE_LIMITS
@@ -78,7 +83,7 @@ export function officePackageHasText(
     buffer,
     matches,
     limits,
-    { inflated: 0, shownValues: 0 },
+    { inflated: 0, shownValues: 0, shownRenders: 0 },
     0,
     matchesShown ?? undefined
   )
@@ -101,7 +106,7 @@ export function officePackageTexts(
       return false
     },
     { ...limits, maxShownValues: 0 },
-    { inflated: 0, shownValues: 0 },
+    { inflated: 0, shownValues: 0, shownRenders: 0 },
     0,
     undefined
   )
@@ -111,6 +116,7 @@ export function officePackageTexts(
 interface ScanBudget {
   inflated: number
   shownValues: number
+  shownRenders: number
 }
 
 function searchPackage(
@@ -275,6 +281,8 @@ function numbersShow(
   const render = (value: number, code: string, shortDate: boolean): boolean | null => {
     if (!shortDate && showsIntegerAsStored(code, value)) return false
     if (++budget.shownValues > limits.maxShownValues) return null
+    budget.shownRenders += renderCount(code, shortDate)
+    if (budget.shownRenders > limits.maxShownRenders) return null
     return shownForms(value, code, shortDate).some(matches)
   }
   const sheets = [...parts.keys()].filter(name => SHEET_PART.test(name))
