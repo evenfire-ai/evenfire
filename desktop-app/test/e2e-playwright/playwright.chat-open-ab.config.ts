@@ -12,6 +12,8 @@ const commonDir = execFileSync('git', ['rev-parse', '--git-common-dir'], {
   encoding: 'utf8',
 }).trim()
 const repositoryRoot = path.resolve(__dirname, '../../..', commonDir, '..')
+const phase = process.env.CHAT_OPEN_AB_PHASE
+if (phase !== 'OL' && phase !== 'W') throw new Error('CHAT_OPEN_AB_PHASE must be OL or W.')
 
 export default defineConfig({
   ...base,
@@ -23,6 +25,7 @@ export default defineConfig({
   retries: 0,
   workers: 1,
   reporter: [['list']],
-  outputDir: path.join(repositoryRoot, '.local-notes/issue1091-evidence/v2/C3/runs'),
+  // Playwright empties outputDir on every run; one directory per phase keeps the other's evidence.
+  outputDir: path.join(repositoryRoot, `.local-notes/issue1091-evidence/v2/C3/runs-${phase}`),
   preserveOutput: 'always',
 })
