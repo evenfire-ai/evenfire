@@ -1,4 +1,5 @@
 export const SIDEBAR_COLLAPSED_KEY = 'clerum.ui.sidebarCollapsed'
+export const SIDEBAR_WIDTH_KEY = 'clerum.ui.sidebarWidth'
 export const SIDEBAR_SESSION_PREVIEW_LIMIT = 5
 
 export const DESKTOP_ROUTES = {

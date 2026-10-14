@@ -1,9 +1,17 @@
+import type { SidebarResizeControls } from '@hooks/useSidebarResize'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import type { ActiveSandboxUiApp, NavItem, Tone } from '@/uiTypes'
+
+export type CompactMenuCloseFocus = 'preserve-destination-focus'
 
 export type SidebarNavProps = {
   navItem: NavItem
   collapsed: boolean
+  compactMode: boolean
+  compactMenuOpen: boolean
+  /** Preserve focus when this action's destination explicitly owns focus. */
+  onCompactMenuOpenChange: (open: boolean, closeFocus?: CompactMenuCloseFocus) => void
+  resize: SidebarResizeControls
   activeSandboxUiApp: ActiveSandboxUiApp | null
   availableSandboxUiApps: ActiveSandboxUiApp[]
   onCollapsedChange: (collapsed: boolean) => void

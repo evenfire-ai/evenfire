@@ -9,7 +9,15 @@ describe('GfsImagePreview layout', () => {
   let resizeObserverCallback: (() => void) | null = null
 
   beforeEach(() => {
+    sidebarRight = 74
+    resizeObserverCallback = null
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1280 })
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn((query: string) => ({
+        matches: window.innerWidth <= Number(query.match(/\d+/)?.[0] ?? 0),
+      })),
+    })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
@@ -97,6 +105,22 @@ describe('GfsImagePreview layout', () => {
       expect((modal as HTMLElement).style.left).toBe('328px')
       expect((modal as HTMLElement).style.right).toBe('0px')
     })
+  })
+
+  it('keeps the persistent sidebar offset at desktop widths above the compact breakpoint', () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 800 })
+    render(
+      <GfsImagePreview
+        byteLength={3}
+        fileName="diagram.png"
+        gfsUri="gfs://main/image-1"
+        mimeType="image/png"
+        onClose={vi.fn()}
+      />
+    )
+
+    expect((screen.getByRole('presentation') as HTMLElement).style.left).toBe('74px')
+    expect(window.matchMedia).toHaveBeenCalledWith('(max-width: 759px)')
   })
 
   it('keeps the unavailable image dialog named and closable', async () => {

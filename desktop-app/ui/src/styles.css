@@ -164,6 +164,20 @@ h3 {
   flex: 0 0 auto;
 }
 
+@media (max-width: 759px) {
+  .window-titlebar__actions {
+    left: calc(
+      (var(--window-titlebar-control-size) * 3) + (var(--space-1) * 2) + var(--space-4) + 74px
+    );
+  }
+
+  .window-titlebar--platform-mac .window-titlebar__actions {
+    left: calc(
+      (var(--window-titlebar-mac-control-size) * 3) + (var(--space-1) * 2) + var(--space-4) + 74px
+    );
+  }
+}
+
 .window-titlebar__actions .global-search {
   --global-search-expanded: clamp(160px, 20vw, 280px);
   --global-search-expanded-min: 0;
@@ -426,11 +440,9 @@ h3 {
   );
 }
 
-/* Narrow/mobile layout: the sidebar collapses into a full-width top bar, so
-   there is no left content column to track. Zero the tracked width so the
-   leading actions fall back to just clearing the window controls (the max()
-   clamp above), instead of anchoring to the now-irrelevant 328/74 px. */
-@media (max-width: 900px) {
+/* Compact navigation overlays the workspace, so there is no left content
+   column for title-bar actions to track. */
+@media (max-width: 759px) {
   .app-frame,
   .app-frame[data-sidebar-collapsed] {
     --sidebar-width: 0px;
@@ -463,6 +475,19 @@ h3 {
      no-drag and propagates, so this is idempotent — kept for clarity next to the
      interactive control, and harmless because it never widens a drag region. */
   -webkit-app-region: no-drag;
+}
+
+.window-titlebar__leading .compact-navigation-toggle.ui-icon-button {
+  display: none;
+}
+
+.compact-navigation-toggle svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
 }
 
 .window-titlebar__leading .titlebar-leading-action__btn.ui-icon-button svg {
@@ -1510,9 +1535,9 @@ h3 {
      and apps are also expanded on a short window; below this the panel would
      collapse to 0 and the nav-column scroll fallback could never reach it. */
   --sidebar-file-explorer-min-height: 160px;
-  width: 328px;
-  min-width: 328px;
-  max-width: 328px;
+  width: var(--sidebar-width);
+  min-width: var(--sidebar-width);
+  max-width: var(--sidebar-width);
   padding: 0 var(--space-2) var(--space-2);
   display: flex;
   flex-direction: column;
@@ -1601,6 +1626,56 @@ h3 {
 .sidebar-collapse-toggle.ui-icon-button:focus-visible .sidebar-collapse-icon {
   width: 16px;
   height: 16px;
+}
+
+.sidebar-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  bottom: 0;
+  z-index: 2;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.sidebar-resize-handle::after {
+  position: absolute;
+  top: 0;
+  right: 3px;
+  bottom: 0;
+  width: 2px;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  content: '';
+}
+
+.sidebar-resize-handle:hover::after,
+.sidebar-resize-handle:focus-visible::after {
+  background: rgba(var(--focus-rgb), 0.72);
+}
+
+.sidebar-resize-handle:focus-visible {
+  outline: none;
+}
+
+body.sidebar-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.sidebar-compact-close.ui-icon-button {
+  display: none;
+  margin-left: auto;
+}
+
+.sidebar-compact-close svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
 }
 
 .sidebar-logo {
@@ -11453,184 +11528,127 @@ pre {
   /* `.has-details` split-view was removed (unused in JSX). */
 }
 
-@media (max-width: 900px) {
-  body.mobile-sidebar-open::before {
+@media (max-width: 759px) {
+  body.compact-sidebar-open::before {
     content: '';
     position: fixed;
-    inset: 0;
+    inset: var(--window-titlebar-height) 0 0;
     background: rgba(var(--overlay-rgb), 0.72);
     pointer-events: none;
     z-index: calc(var(--layer-dropdown) + 20);
   }
 
   .app-shell {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr);
+    position: relative;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
   }
 
   .workspace-layout {
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
   }
 
-  /* Sidebar is gone and the aside spans the full top, so the extra top
-     breathing room (space-2 * 5) is no longer needed — drop it to space-2. */
   .content-panel.content-panel--agent-chat {
     padding-top: var(--space-2);
   }
 
   .left-nav {
-    position: sticky;
-    top: 0;
-    width: 100%;
+    position: fixed;
+    top: var(--window-titlebar-height);
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: calc(var(--layer-dropdown) + 1000);
+    width: auto;
     min-width: 0;
     max-width: none;
-    height: auto;
+    height: calc(100vh - var(--window-titlebar-height));
     min-height: 0;
     max-height: none;
-    padding-top: var(--space-2);
-    border-right: 0;
-    border-bottom: 1px solid rgba(var(--edge-rgb), 0.38);
-    overflow: visible;
+    padding: var(--space-2) var(--space-2) var(--space-3);
+    overflow: hidden;
+    visibility: hidden;
+    transform: translateY(-6px);
+    transition:
+      transform var(--motion-fast),
+      visibility var(--motion-fast);
+    border: 0;
+    background: var(--sidebar-gradient);
+    box-shadow: none;
   }
 
-  .left-nav.mobile-open {
-    z-index: calc(var(--layer-dropdown) + 30);
+  .left-nav.compact-open {
+    visibility: visible;
+    transform: translateY(0);
   }
 
-  .left-nav.collapsed {
-    width: 100%;
-    min-width: 0;
-    max-width: none;
-    padding-left: var(--space-2);
-    padding-right: var(--space-2);
+  .app-frame:has(.left-nav.compact-open) > .window-titlebar {
+    z-index: calc(var(--layer-dropdown) + 1010);
   }
 
-  .sidebar-logo {
-    position: relative;
-    z-index: 2;
-    margin-bottom: 0;
-    padding-left: var(--space-2);
-    padding-right: var(--space-2);
+  .window-titlebar__leading .compact-navigation-toggle.ui-icon-button {
+    display: inline-flex;
   }
 
   .sidebar-mobile-backdrop {
-    position: fixed;
+    position: absolute;
     inset: 0;
+    z-index: 1;
     display: none;
-    padding: 0;
     border: 0;
     border-radius: 0;
     background: rgba(var(--overlay-rgb), 0.72);
-    z-index: 1;
   }
 
-  /* Bare <button>: the global button:hover:enabled accent fill (--accent-strong)
-     outranks the overlay background above by specificity and would flash the whole
-     backdrop accent-blue on hover. It is a dismiss target, not an affordance; hold
-     the overlay tint. Same leak class already guarded on .nav-latest-session__main. */
   .sidebar-mobile-backdrop:hover:enabled {
     background: rgba(var(--overlay-rgb), 0.72);
   }
 
-  .left-nav.mobile-open .sidebar-mobile-backdrop {
+  .left-nav.compact-open .sidebar-mobile-backdrop {
     display: block;
   }
 
-  .sidebar-logo-link {
-    width: 100%;
+  .sidebar-logo,
+  .sidebar-menu-surface {
+    position: relative;
+    z-index: 2;
+    margin-right: 32px;
   }
 
-  .sidebar-mobile-menu-indicator {
+  .sidebar-logo {
+    padding-left: var(--space-2);
+    padding-right: var(--space-2);
+  }
+
+  .sidebar-logo-link {
+    width: auto;
+  }
+
+  .sidebar-compact-close.ui-icon-button {
     display: inline-flex;
   }
 
-  .left-nav.mobile-open .sidebar-mobile-menu-indicator svg {
-    transform: rotate(180deg);
-  }
-
-  /* Match the base rule's `.sidebar-collapse-toggle.ui-icon-button` specificity:
-     media queries don't add specificity, so a bare `.sidebar-collapse-toggle`
-     loses to it and the toggle would stay visible. In this viewport the sidebar
-     is an overlay menu with no persistent rail, so collapsing it is meaningless. */
-  .sidebar-collapse-toggle.ui-icon-button {
+  .sidebar-collapse-toggle.ui-icon-button,
+  .sidebar-resize-handle {
     display: none;
   }
 
   .sidebar-menu-surface {
-    display: none;
-    position: absolute;
-    top: calc(100% + var(--space-1));
-    left: var(--space-2);
-    right: var(--space-2);
-    max-height: calc(100vh - 88px);
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: none;
     overflow: auto;
-    border: 1px solid rgba(var(--edge-rgb), 0.4);
-    border-radius: var(--radius-lg);
-    background: var(--panel);
-    box-shadow: 0 16px 28px rgba(var(--overlay-rgb), 0.4);
-    padding: var(--space-1-5);
-    z-index: 3;
-  }
-
-  .left-nav.mobile-open .sidebar-menu-surface {
-    display: flex;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    padding: var(--space-1-5) var(--space-1-5) 0;
   }
 
   .nav-links {
     flex: 0 0 auto;
     overflow: visible;
-  }
-
-  .left-nav.collapsed .sidebar-logo {
-    justify-content: flex-start;
-    padding-left: var(--space-2);
-    padding-right: var(--space-2);
-  }
-
-  .left-nav.collapsed .sidebar-logo-mark {
-    width: 28px;
-    height: 28px;
-    display: none;
-  }
-
-  /* Reveal the wordmark in the collapsed mobile bar, but keep the light/dark
-     toggle. Targeting the shared `.sidebar-logo-lockup` (0,3,0) would outrank
-     `.sidebar-logo-lockup--dark { display: none }` (0,1,0) and paint both
-     variants at once (double logo), so drive the variants directly. */
-  .left-nav.collapsed .sidebar-logo-lockup--light {
-    display: block;
-  }
-
-  :root[data-theme='dark'] .left-nav.collapsed .sidebar-logo-lockup--light {
-    display: none;
-  }
-
-  :root[data-theme='dark'] .left-nav.collapsed .sidebar-logo-lockup--dark {
-    display: block;
-  }
-
-  .left-nav.collapsed .nav-link {
-    justify-content: flex-start;
-    padding: 0 var(--space-2) 0 var(--space-3);
-  }
-
-  .left-nav.collapsed .nav-link-label,
-  .left-nav.collapsed .nav-link .ui-nav-item__label {
-    display: inline;
-  }
-
-  .left-nav.collapsed .nav-link.active::before {
-    display: block;
-  }
-
-  .left-nav.collapsed .sidebar-settings-chevron {
-    display: inline-flex;
-  }
-
-  .sidebar-footer {
-    margin-top: var(--space-1-5);
-    padding-top: var(--space-1-5);
-    border-top: 1px solid rgba(var(--edge-rgb), 0.32);
   }
 
   .sidebar-settings-menu {
@@ -11641,18 +11659,12 @@ pre {
     box-shadow: none;
   }
 
-  .left-nav.collapsed .sidebar-settings-menu {
-    position: static;
-    width: auto;
-    min-width: 0;
-    margin-top: var(--space-1);
-    box-shadow: none;
-  }
-
   .nav-tooltip {
     display: none;
   }
+}
 
+@media (max-width: 900px) {
   .top-bar {
     position: static;
     top: auto;
