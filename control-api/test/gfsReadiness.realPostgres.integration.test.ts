@@ -20,7 +20,7 @@ function quoteIdent(value: string): string {
 }
 
 describeRealPostgres('GFS Phase 0 real PostgreSQL readiness', () => {
-  const latestMigration = CONTROL_API_MIGRATIONS.at(-1)!.version
+  const latestMigration = CONTROL_API_MIGRATIONS.at(-1)!
   const database = `gfs_readiness_${randomBytes(6).toString('hex')}`
   const connectionString = databaseUrl(
     adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres',
@@ -75,11 +75,17 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL readiness', () => {
   })
 
   it('fails Control API readiness while the latest migration is absent', async () => {
+    const acceptedLatestReceipts = [
+      latestMigration.version,
+      ...(latestMigration.legacyVersions ?? []),
+    ]
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
-      await client.query(`DELETE FROM schema_migrations WHERE version=$1`, [latestMigration])
-      await expect(assertDbReady(client)).rejects.toThrow(new RegExp(latestMigration))
+      await client.query(`DELETE FROM schema_migrations WHERE version = ANY($1::text[])`, [
+        acceptedLatestReceipts,
+      ])
+      await expect(assertDbReady(client)).rejects.toThrow(new RegExp(latestMigration.version))
     } finally {
       await client.query('ROLLBACK').catch(() => undefined)
       client.release()
