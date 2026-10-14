@@ -101,21 +101,28 @@ async function openChat(page: Page, host: string, label: string, chat: Chat): Pr
     )
     .toBe(true)
   return page.evaluate(
-    ({ selector, activeSelector, chat, messages }) =>
+    ({ selector, chat, messages }) =>
       new Promise<number>((resolve, reject) => {
         const button = document.querySelector<HTMLButtonElement>(`${selector} button`)
         if (!button || button.disabled)
           throw new Error(`Chat row has no enabled open button: ${selector}`)
         let started: number
+        // The sidebar previews only the latest sessions, so the active-row witness is checked outside the timing.
         const finish = () => {
-          const transcript = document.querySelector('[data-testid="message-list"]')
+          const transcripts = document.querySelectorAll('[data-testid="message-list"]')
+          if (transcripts.length > 1) {
+            observer.disconnect()
+            clearTimeout(deadline)
+            reject(new Error(`Expected one transcript, found ${transcripts.length}.`))
+            return
+          }
+          const transcript = transcripts[0]
           const bubbles = transcript?.querySelectorAll(messages)
           if (
             bubbles?.length === chat.count &&
             bubbles[chat.count - 1]?.textContent?.includes(chat.lastText) &&
             transcript &&
-            transcript.getBoundingClientRect().height > 0 &&
-            document.querySelector(activeSelector)?.getAttribute('aria-current') === 'true'
+            transcript.getBoundingClientRect().height > 0
           ) {
             observer.disconnect()
             clearTimeout(deadline)
@@ -139,7 +146,6 @@ async function openChat(page: Page, host: string, label: string, chat: Chat): Pr
       }),
     {
       selector: agentRow(host, chat.id),
-      activeSelector: row(host, chat.id),
       chat,
       messages: MESSAGES,
     }
@@ -171,8 +177,15 @@ async function relaunchPaint(
           element.getBoundingClientRect().height > 0 &&
           getComputedStyle(element).visibility !== 'hidden'
         const finish = () => {
+          const transcripts = document.querySelectorAll('[data-testid="message-list"]')
+          if (transcripts.length > 1) {
+            observer.disconnect()
+            clearTimeout(deadline)
+            reject(new Error(`Expected one transcript, found ${transcripts.length}.`))
+            return
+          }
+          const transcript = transcripts[0]
           for (const target of targets) {
-            const transcript = document.querySelector('[data-testid="message-list"]')
             const ready =
               Array.from(document.querySelectorAll(target.selector)).some(visible) &&
               (!target.chat ||
@@ -454,6 +467,12 @@ if (
           },
           [...HOSTS]
         )
+        // The transcript stop condition identifies a chat by its last text, so that text must be unique.
+        const lastTexts = report.catalogs.flatMap(catalog =>
+          catalog.chats.map(chat => chat.lastText)
+        )
+        if (new Set(lastTexts).size !== lastTexts.length)
+          throw new Error('precondition: every measured chat must end with a unique last text.')
         // The benchmark builder owns valid paged metadata; rebind its synthetic tombstones to the real session below.
         const fixtureDir = isolatedPath(runDir, path.join(runDir, 'fixture'))
         fs.mkdirSync(fixtureDir, { mode: 0o700 })
@@ -525,13 +544,24 @@ if (
                     ms,
                   })
                   if (!checked.has(chat.id)) {
-                    await expect(page.locator(row(catalog.host, chat.id))).toHaveAttribute(
-                      'aria-current',
-                      'true'
-                    )
+                    await expect
+                      .poll(() =>
+                        page.evaluate(host => window.clerum.chat.getLastActive(host), catalog.host)
+                      )
+                      .toBe(chat.id)
                     await expect(page.getByTestId('message-list').locator(MESSAGES)).toHaveCount(
                       chat.count
                     )
+                    // The sidebar previews only the latest sessions: when this chat has a row it is the active one, otherwise none is.
+                    const inSidebar = (await page.locator(row(catalog.host, chat.id)).count()) > 0
+                    await expect(
+                      page.locator('[data-testid="latest-session-row"][aria-current="true"]')
+                    ).toHaveCount(inSidebar ? 1 : 0)
+                    if (inSidebar)
+                      await expect(page.locator(row(catalog.host, chat.id))).toHaveAttribute(
+                        'aria-current',
+                        'true'
+                      )
                     checked.add(chat.id)
                   }
                 }
@@ -544,6 +574,16 @@ if (
       await expect
         .poll(() => page!.evaluate(host => window.clerum.chat.getLastActive(host), HOSTS[0]))
         .toBe(selected.id)
+      // L and W time sidebar rows, which exist only for sessions inside the sidebar preview.
+      await expect(
+        page!.locator(row(HOSTS[0], selected.id)),
+        `precondition: L needs ${HOSTS[0]}/${selected.id} inside the sidebar preview.`
+      ).toBeVisible()
+      for (const host of HOSTS)
+        await expect(
+          page!.locator(rows(host)).first(),
+          `precondition: W needs a ${host} session inside the sidebar preview.`
+        ).toBeVisible()
       await close()
       const savedCache = isolatedPath(runDir, path.join(runDir, 'cache-snapshot'))
       fs.cpSync(isolatedPath(runDir, cacheDir!), savedCache, { recursive: true })
