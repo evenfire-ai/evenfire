@@ -13,13 +13,12 @@ export interface ChatGetIndexDependencies {
  * chat:getIndex logic without Electron dependencies, so the chat-open benchmark
  * (scripts/bench-chat-open.mjs) measures the same code the IPC handler runs.
  *
- * The catalog read must never depend on the deleted-chat artifact cleanup:
- * a cleanup failure (scope changed mid-flight, no session, an unreadable
- * chats directory) would otherwise reject the read and leave the renderer
- * without the tombstones it filters deleted chats with. The failure is
- * reported and the cleanup stays queued for the next read. Only this agent's
- * queue is retried (the renderer reads every agent in a fan-out); the store
- * walks every agent once per bind on its own.
+ * Start deleted-chat artifact cleanup in the background and return the index
+ * without waiting for it. The index keeps the durable tombstones the renderer
+ * filters deleted chats with while their artifacts are still being removed.
+ * Attach the rejection handler immediately; an authority or cleanup failure
+ * is reported and the cleanup stays queued for a later read. Only this agent's
+ * queue is retried, except that the store walks every agent once per bind.
  */
 export async function runChatGetIndex(
   deps: ChatGetIndexDependencies,
@@ -27,7 +26,9 @@ export async function runChatGetIndex(
 ): Promise<ChatIndex> {
   try {
     const authority = deps.getChatDeletionFenceAuthority()
-    await deps.store.retryPendingDeleteCleanups(authority.authorityScope, agentRef)
+    void deps.store
+      .retryPendingDeleteCleanups(authority.authorityScope, agentRef)
+      .catch(deps.warnCleanupFailure)
   } catch (error) {
     deps.warnCleanupFailure(error)
   }
