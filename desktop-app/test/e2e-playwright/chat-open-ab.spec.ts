@@ -46,6 +46,7 @@ type Sample = {
 }
 const HOSTS = ['chatllm', 'chatllm-stateless'] as const
 const MESSAGES = '[data-testid="user-message"], [data-testid="agent-response"]'
+const LIMIT_WINDOW_MS = 65_000
 const rows = (host: string) =>
   `[data-testid="latest-session-row"][data-agent-ref=${JSON.stringify(host)}]`
 const row = (host: string, id: string) => `${rows(host)}[data-chat-id=${JSON.stringify(id)}]`
@@ -307,16 +308,23 @@ if (
     // The agent switcher shows display names; the app falls back to the ref when none is set.
     let hostLabels: Record<string, string> = {}
     const runDir = testInfo.outputPath('electron-isolation')
+    let closedAt = 0
     const close = async () => {
       if (app) {
         await app.close()
         app = undefined
+        closedAt = Date.now()
       }
     }
     let launches = 0
     let launchedBuild: Build | undefined
     const launch = async (build: Build) => {
       await close()
+      // A closed build's background requests can exhaust control-api's per-minute
+      // limits; the next build's session restore then fails. Start each launch in
+      // a fresh window, outside every timed section.
+      const quiet = closedAt + LIMIT_WINDOW_MS - Date.now()
+      if (quiet > 0) await new Promise(resolve => setTimeout(resolve, quiet))
       const launched = await launchDesktopApp(testInfo, 'issue-1091-ab', entries[build])
       app = launched.app
       page = launched.page
