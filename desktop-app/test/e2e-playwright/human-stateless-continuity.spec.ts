@@ -20,6 +20,11 @@ import { type ChildProcess, execFile } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
 import { promisify } from 'node:util'
 import {
+  readHostSnapshot,
+  waitForStatelessReady,
+  waitForStatelessSuspended,
+} from './helpers/hostSnapshot'
+import {
   EXTERNAL_REST_API_BASE_URL,
   RPC_PROXY_BASE_URL,
   assertAllowedTarget,
@@ -51,16 +56,6 @@ const SUSPEND_TIMEOUT_MS = 240_000
 // Renderer page.waitForResponse cannot observe those requests. The visible
 // assistant response, known conversation marker, and Host CRD/pod state are
 // the business signals for this recorded journey.
-
-type HostSnapshot = {
-  lifecycleState: string
-  lifecycleReason: string
-  replicas: number
-  readyReplicas: number
-  podNames: string[]
-  imageIds: string[]
-  pullPolicyRejection: string | null
-}
 
 type JourneyMetrics = {
   hcc_idle_minutes: number
@@ -118,84 +113,6 @@ async function kubectl(args: string[], timeoutMs = 20_000): Promise<string> {
 
 async function jsonKubectl(resource: string, namespace: string): Promise<any> {
   return JSON.parse(await kubectl(['-n', namespace, 'get', resource, '-o', 'json']))
-}
-
-async function readHostSnapshot(deployment: string, hostName: string): Promise<HostSnapshot> {
-  const [deploymentJson, hostJson, podsJson] = await Promise.all([
-    jsonKubectl(`deployment.apps/${deployment}`, STATELESS_NAMESPACE),
-    jsonKubectl(`host/${hostName}`, STATELESS_NAMESPACE),
-    kubectl(['-n', STATELESS_NAMESPACE, 'get', 'pods', '-l', `app=${hostName}`, '-o', 'json']),
-  ])
-  const pods = JSON.parse(podsJson).items ?? []
-  const spec = deploymentJson.spec ?? {}
-  const status = deploymentJson.status ?? {}
-  const lifecycle = hostJson.status?.lifecycle ?? {}
-  const pullPolicyRejection = (hostJson.status?.conditions ?? []).find(
-    (condition: { type?: string; status?: string }) =>
-      condition.type === 'StatelessPullPolicyRejected' && condition.status === 'True'
-  )
-  return {
-    lifecycleState: String(lifecycle.state ?? ''),
-    lifecycleReason: String(lifecycle.reason ?? ''),
-    replicas: Number(spec.replicas ?? -1),
-    readyReplicas: Number(status.readyReplicas ?? 0),
-    podNames: pods
-      .map((pod: { metadata?: { name?: string } }) => pod.metadata?.name)
-      .filter(Boolean)
-      .sort(),
-    imageIds: [
-      ...new Set<string>(
-        pods.flatMap((pod: { status?: { containerStatuses?: Array<{ imageID?: string }> } }) =>
-          (pod.status?.containerStatuses ?? [])
-            .map(container => container.imageID)
-            .filter((id): id is string => typeof id === 'string' && id.length > 0)
-        )
-      ),
-    ].sort(),
-    pullPolicyRejection: pullPolicyRejection?.reason ?? null,
-  }
-}
-
-async function waitForStatelessSuspended(timeoutMs: number): Promise<{
-  snapshot: HostSnapshot
-  elapsedMs: number
-}> {
-  const started = Date.now()
-  let last = await readHostSnapshot(STATELESS_DEPLOYMENT, STATELESS_HOST_RESOURCE)
-  while (Date.now() - started < timeoutMs) {
-    last = await readHostSnapshot(STATELESS_DEPLOYMENT, STATELESS_HOST_RESOURCE)
-    if (
-      last.lifecycleState === 'suspended' &&
-      last.replicas === 0 &&
-      last.readyReplicas === 0 &&
-      last.podNames.length === 0
-    ) {
-      expect(last.lifecycleReason, 'stateless suspension must be caused by idle timeout').toBe(
-        'idle'
-      )
-      return { snapshot: last, elapsedMs: Date.now() - started }
-    }
-    await new Promise(resolve => setTimeout(resolve, 5_000))
-  }
-  throw new Error(
-    `Stateless host did not reach verified replicas-0 suspension: ${JSON.stringify(last)}`
-  )
-}
-
-async function waitForStatelessReady(timeoutMs: number): Promise<{
-  snapshot: HostSnapshot
-  elapsedMs: number
-}> {
-  const started = Date.now()
-  let last = await readHostSnapshot(STATELESS_DEPLOYMENT, STATELESS_HOST_RESOURCE)
-  while (Date.now() - started < timeoutMs) {
-    last = await readHostSnapshot(STATELESS_DEPLOYMENT, STATELESS_HOST_RESOURCE)
-    if (last.replicas >= 1 && last.readyReplicas >= 1 && last.podNames.length > 0) {
-      return { snapshot: last, elapsedMs: Date.now() - started }
-    }
-    await new Promise(resolve => setTimeout(resolve, 2_000))
-  }
-  throw new Error(`Stateless host did not become Ready: ${JSON.stringify(last)}`)
 }
 
 async function readHccCadences(): Promise<{
@@ -340,7 +257,12 @@ async function resolveColdSend(
     wakingVisibleMs = Date.now() - started
     // The retry is a user action. Wait for the observed Host to become Ready
     // before taking it; a fast click can fail while the pod is still waking.
-    await waitForStatelessReady(270_000)
+    await waitForStatelessReady(
+      270_000,
+      KUBE_CONTEXT,
+      STATELESS_DEPLOYMENT,
+      STATELESS_HOST_RESOURCE
+    )
     const retry = waking.getByRole('button', { name: /retry last send/i })
     await expect(retry).toBeEnabled({ timeout: 150_000 })
     await retry.click()
@@ -484,8 +406,8 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
   try {
     await test.step('verify both Hosts and the branch-owned runtime baseline', async () => {
       const [statefulBefore, statelessBefore, cadences] = await Promise.all([
-        readHostSnapshot(STATEFUL_DEPLOYMENT, STATEFUL_HOST_RESOURCE),
-        readHostSnapshot(STATELESS_DEPLOYMENT, STATELESS_HOST_RESOURCE),
+        readHostSnapshot(STATEFUL_DEPLOYMENT, STATEFUL_HOST_RESOURCE, KUBE_CONTEXT),
+        readHostSnapshot(STATELESS_DEPLOYMENT, STATELESS_HOST_RESOURCE, KUBE_CONTEXT),
         readHccCadences(),
       ])
       expect(
@@ -553,7 +475,12 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
         timeout: 150_000,
       })
       await expect(statelessSend).toBeDisabled({ timeout: 150_000 })
-      const firstReady = await waitForStatelessReady(270_000)
+      const firstReady = await waitForStatelessReady(
+        270_000,
+        KUBE_CONTEXT,
+        STATELESS_DEPLOYMENT,
+        STATELESS_HOST_RESOURCE
+      )
       expect(
         firstReady.snapshot.imageIds,
         'record the actual stateless container imageID after the first UI response'
@@ -592,7 +519,12 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
       app = undefined
       page = undefined
 
-      const suspended = await waitForStatelessSuspended(SUSPEND_TIMEOUT_MS)
+      const suspended = await waitForStatelessSuspended(
+        SUSPEND_TIMEOUT_MS,
+        KUBE_CONTEXT,
+        STATELESS_DEPLOYMENT,
+        STATELESS_HOST_RESOURCE
+      )
       metrics.first_suspend_ms = suspended.elapsedMs
       expect(suspended.snapshot.lifecycleState).toBe('suspended')
       expect(suspended.snapshot.replicas).toBe(0)
@@ -612,7 +544,12 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
       // Observe the catalog-driven prewarm wake from authentication while the
       // retained conversation opens from local cache before Ready is observed.
       let readyObserved = false
-      const readyObservation = waitForStatelessReady(270_000).then(result => {
+      const readyObservation = waitForStatelessReady(
+        270_000,
+        KUBE_CONTEXT,
+        STATELESS_DEPLOYMENT,
+        STATELESS_HOST_RESOURCE
+      ).then(result => {
         readyObserved = true
         return { result, observedAt: Date.now() }
       })
@@ -649,7 +586,12 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
       await openExactSession(currentPage(), statelessTitle, STATELESS_HOST)
       const composer = currentPage().getByRole('textbox', { name: 'Agent message composer' })
       await composer.fill('')
-      const secondSuspended = await waitForStatelessSuspended(SUSPEND_TIMEOUT_MS)
+      const secondSuspended = await waitForStatelessSuspended(
+        SUSPEND_TIMEOUT_MS,
+        KUBE_CONTEXT,
+        STATELESS_DEPLOYMENT,
+        STATELESS_HOST_RESOURCE
+      )
       metrics.second_suspend_ms = secondSuspended.elapsedMs
       expect(secondSuspended.snapshot.lifecycleState).toBe('suspended')
       expect(secondSuspended.snapshot.replicas).toBe(0)
@@ -662,7 +604,11 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
       // second_launch_to_stateless_ready_ms. This fresh snapshot proves that
       // the second send is itself a cold wake intent, not a continuation of
       // that earlier prewarm window.
-      const preClick = await readHostSnapshot(STATELESS_DEPLOYMENT, STATELESS_HOST_RESOURCE)
+      const preClick = await readHostSnapshot(
+        STATELESS_DEPLOYMENT,
+        STATELESS_HOST_RESOURCE,
+        KUBE_CONTEXT
+      )
       metrics.cold_send_pre_click_ready_replicas = preClick.readyReplicas
       expect(preClick.lifecycleState).toBe('suspended')
       expect(preClick.replicas).toBe(0)
@@ -673,7 +619,12 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
       // the still-suspended Host, and the stepper count baseline excludes
       // completed steppers from earlier turns that keep the same test id.
       let readyObserved = false
-      const readyObservation = waitForStatelessReady(270_000).then(result => {
+      const readyObservation = waitForStatelessReady(
+        270_000,
+        KUBE_CONTEXT,
+        STATELESS_DEPLOYMENT,
+        STATELESS_HOST_RESOURCE
+      ).then(result => {
         readyObserved = true
         return { result, observedAt: Date.now() }
       })
@@ -767,7 +718,11 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
       await expect(
         currentPage().getByTestId('agent-response').filter({ hasText: statefulFollowMarker })
       ).toContainText(statefulMarker)
-      const statefulAfter = await readHostSnapshot(STATEFUL_DEPLOYMENT, STATEFUL_HOST_RESOURCE)
+      const statefulAfter = await readHostSnapshot(
+        STATEFUL_DEPLOYMENT,
+        STATEFUL_HOST_RESOURCE,
+        KUBE_CONTEXT
+      )
       metrics.stateful_pod_after = statefulAfter.podNames
       expect(statefulAfter.readyReplicas).toBeGreaterThan(0)
       expect(statefulAfter.podNames.join(',')).toBe(metrics.stateful_pod_before.join(','))
