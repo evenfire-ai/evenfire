@@ -76,12 +76,12 @@ function isolatedPath(runDir: string, target: string): string {
     throw new Error(`Cache target escapes isolation through a symlink: ${target}`)
   return target
 }
-async function openChat(page: Page, host: string, chat: Chat): Promise<number> {
+async function openChat(page: Page, host: string, label: string, chat: Chat): Promise<number> {
   await page
     .getByRole('navigation', { name: 'Chat breadcrumb', exact: true })
     .getByRole('button', { name: 'Chat', exact: true })
     .click()
-  await openExactAgentChat(page, host)
+  await openExactAgentChat(page, host, label)
   const more = page.getByRole('button', { name: 'Show more', exact: true })
   const loadMore = page.getByRole('button', { name: 'Load more', exact: true })
   const target = page.locator(agentRow(host, chat.id))
@@ -291,6 +291,8 @@ if (
     }
     let app: ElectronApplication | undefined
     let page: Page
+    // The agent switcher shows display names; the app falls back to the ref when none is set.
+    let hostLabels: Record<string, string> = {}
     const runDir = testInfo.outputPath('electron-isolation')
     const close = async () => {
       if (app) {
@@ -391,6 +393,15 @@ if (
         cacheDir = isolatedPath(
           runDir,
           path.join(runDir, 'chats', scope.environmentKey, scope.userId)
+        )
+        hostLabels = await page!.evaluate(
+          async hosts => {
+            const catalog = await window.clerum.access.refreshCatalog()
+            return Object.fromEntries(
+              hosts.map(host => [host, catalog.agentDisplayByName?.[host] ?? host])
+            )
+          },
+          [...HOSTS]
         )
         report.catalogs = await page!.evaluate(
           async hosts => {
@@ -503,7 +514,7 @@ if (
                       .toBe(true)
                   })
                 for (const chat of catalog.chats) {
-                  const ms = await openChat(page, catalog.host, chat)
+                  const ms = await openChat(page, catalog.host, hostLabels[catalog.host]!, chat)
                   samples.push({
                     round: id,
                     build,
@@ -529,7 +540,7 @@ if (
           }))
       }
       const selected = report.catalogs[0]!.chats[0]!
-      await openChat(page!, HOSTS[0], selected)
+      await openChat(page!, HOSTS[0], hostLabels[HOSTS[0]]!, selected)
       await expect
         .poll(() => page!.evaluate(host => window.clerum.chat.getLastActive(host), HOSTS[0]))
         .toBe(selected.id)
@@ -565,7 +576,7 @@ if (
                   await authenticated()
                   await expect(page.locator(row(HOSTS[0], selected.id))).toBeVisible()
                   await page.getByTestId('nav-chat').click()
-                  await openChat(page, HOSTS[0], selected)
+                  await openChat(page, HOSTS[0], hostLabels[HOSTS[0]]!, selected)
                 })(),
               ])
               for (const sample of paint) samples.push({ round: id, build, ...sample })

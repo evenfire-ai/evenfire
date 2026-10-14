@@ -281,8 +281,14 @@ export async function openAgentsPage(page: Page): Promise<void> {
 /**
  * Navigate to the exact agent named by hostRef and land on its chat composer.
  * Uses exact identity (no first-available fallback), per the recorder contract.
+ * The UI shows the agent's display name; pass it as `label` when it differs
+ * from hostRef.
  */
-export async function openExactAgentChat(page: Page, hostRef: string): Promise<void> {
+export async function openExactAgentChat(
+  page: Page,
+  hostRef: string,
+  label: string = hostRef
+): Promise<void> {
   const settingsMenu = page.getByTestId('nav-settings-menu')
   if ((await settingsMenu.getAttribute('aria-expanded')) !== 'true') {
     await settingsMenu.click()
@@ -293,7 +299,7 @@ export async function openExactAgentChat(page: Page, hostRef: string): Promise<v
   await expect(agentsItem).toBeVisible({ timeout: 15_000 })
   await agentsItem.click()
   const chatInput = page.getByRole('textbox', { name: 'Agent message composer' })
-  const exactAgent = page.locator('.agents-table-row-clickable', { hasText: hostRef }).first()
+  const exactAgent = page.locator('.agents-table-row-clickable', { hasText: label }).first()
   const emptyState = page.getByText('No agents available')
   await expect(chatInput.or(exactAgent).or(emptyState)).toBeVisible({ timeout: 20_000 })
 
@@ -311,16 +317,16 @@ export async function openExactAgentChat(page: Page, hostRef: string): Promise<v
   if (
     !(await chatInput.isVisible().catch(() => false)) ||
     !(await switchAgent
-      .getByText(hostRef, { exact: true })
+      .getByText(label, { exact: true })
       .isVisible()
       .catch(() => false))
   ) {
     await switchAgent.click()
-    await page.getByRole('menuitem', { name: hostRef, exact: true }).click()
+    await page.getByRole('menuitem', { name: label, exact: true }).click()
   }
 
   await expect(chatInput).toBeVisible({ timeout: 20_000 })
-  await expect(switchAgent).toContainText(hostRef)
+  await expect(switchAgent).toContainText(label)
 }
 
 /** Send a chat message and wait for a non-empty assistant response. */
