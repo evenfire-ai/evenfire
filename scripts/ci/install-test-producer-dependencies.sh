@@ -46,6 +46,7 @@ add_producer() {
 contains_executable_reference 'control-api/test/fixtures/' && add_producer control-api
 contains_executable_reference 'rpc-proxy/node_modules/.bin/tsx' && add_producer rpc-proxy
 contains_executable_reference 'workflow-recipes/src/' && add_producer workflow-recipes
+contains_executable_reference 'mcp-host/src/server' && add_producer mcp-host
 
 if [[ "${#producers[@]}" -eq 0 ]]; then
   exit 0
