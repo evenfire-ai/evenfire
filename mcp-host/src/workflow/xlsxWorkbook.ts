@@ -12,29 +12,20 @@ import {
 } from './embeddedImages'
 import { choose } from './ownEntry'
 import { headerText } from './tableRows'
+import { type SheetCell, cellProblem, readCell, startsLikeFormula, visualWidth } from './xlsxCells'
 import {
-  type SheetCell,
-  cellProblem,
-  isQuantityText,
-  looksLikeRefusedDate,
-  looksLikeUnreadNumber,
-  readCell,
-  startsLikeFormula,
-  visualWidth,
-} from './xlsxCells'
-import {
+  type ColumnPlan,
   capText,
   cellOutput,
   cellWidth,
-  codeColumn,
   count,
-  fits,
   isRecord,
-  plainIntegers,
   planColumn,
+  readColumns,
+  reportColumnReads,
   requestedFormats,
 } from './xlsxColumns'
-import { NUMBER_FORMATS, isIdentifierHeader } from './xlsxFormats'
+import { NUMBER_FORMATS } from './xlsxFormats'
 import { RegexBudget, prepareRules } from './xlsxRules'
 import { SheetNames, argumentColor, resolveColumn, sheetTable, tableWidth } from './xlsxSheet'
 import { keepZipTextWhole } from './zipText'
@@ -253,299 +244,249 @@ interface SheetContext {
   regexBudget: RegexBudget
 }
 
-/** Writes one sheet; returns what it holds, for the summary. */
-function writeSheet(
+/** The title row as written, for fitTitle once the columns are sized. */
+type SheetTitle = { row: ExcelJS.Row; text: string; span: number }
+
+/** The merged title row above the header, styled; the caller fits it once the columns are sized. */
+function writeTitleRow(
+  ws: ExcelJS.Worksheet,
+  titleRow: Record<string, unknown>,
+  label: string,
+  width: number,
+  ctx: SheetContext
+): SheetTitle {
+  const { warnings, palette } = ctx
+  const problem = cellProblem(titleRow.text)
+  if (problem) throw new Error(`${label}.titleRow.text ${problem}.`)
+  const titleCell = readCell(titleRow.text, false)
+  const titleText = capText(titleCell.value, 'A1', [])
+  if (titleText !== titleCell.value) {
+    warnings.push(`${label}.titleRow.text was cut to 32,767 characters, Excel's cell limit.`)
+  }
+  const row = ws.addRow([titleText])
+  const span = Math.max(width, 1)
+  if (span > 1) ws.mergeCells(1, 1, 1, span)
+  const font: Partial<ExcelJS.Font> = {
+    bold: true,
+    size: 14,
+    color: {
+      argb: argumentColor(titleRow.fontColor, `${label}.titleRow.fontColor`, warnings, WHITE),
+    },
+  }
+  const fill: ExcelJS.Fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: {
+      argb: argumentColor(
+        titleRow.fillColor,
+        `${label}.titleRow.fillColor`,
+        warnings,
+        palette.primary
+      ),
+    },
+  }
+  // Fill and font go on the merged cells only, not the row: a row style is
+  // written for all 16,384 columns and paints past the data area.
+  for (let c = 1; c <= span; c++) {
+    const cell = row.getCell(c)
+    cell.font = font
+    cell.fill = fill
+    cell.alignment = { vertical: 'middle', horizontal: 'center' }
+  }
+  if (startsLikeFormula(titleCell.text)) row.getCell(1).numFmt = NUMBER_FORMATS.text
+  row.height = TITLE_ROW_HEIGHT
+  return { row, text: typeof titleText === 'string' ? titleText : titleCell.text, span }
+}
+
+/** The header row, styled per cell; records each header's width and any cut header. */
+function writeHeaderRow(
+  ws: ExcelJS.Worksheet,
+  header: unknown[],
+  width: number,
+  headerRowNumber: number,
+  filterButtons: boolean,
+  palette: XlsxPalette,
+  cut: string[],
+  widths: number[]
+): void {
+  const headerRow = ws.addRow(
+    header.map((h, c) =>
+      h === undefined ? null : capText(h, `${columnLetter(c + 1)}${headerRowNumber}`, cut)
+    )
+  )
+  const headerFont: Partial<ExcelJS.Font> = { bold: true, color: { argb: WHITE }, size: 11 }
+  const headerFill: ExcelJS.Fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: palette.primary },
+  }
+  // Styles are set per cell for the same reason as the title row.
+  for (let c = 0; c < width; c++) {
+    const cell = headerRow.getCell(c + 1)
+    cell.font = headerFont
+    cell.fill = headerFill
+    cell.border = { bottom: { style: 'thin', color: { argb: palette.primaryDark } } }
+    cell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 }
+    if (typeof header[c] === 'string' && startsLikeFormula(header[c] as string)) {
+      cell.numFmt = NUMBER_FORMATS.text
+    }
+    // The filter button takes about two characters of the header cell.
+    widths[c] = cellWidth(header[c], undefined) + (filterButtons ? 2 : 0)
+  }
+  headerRow.height = 22
+}
+
+/** The data rows, with each column's format; zebra fill on every second row. */
+function writeDataRows(
+  ws: ExcelJS.Worksheet,
+  columns: SheetCell[][],
+  plans: ColumnPlan[],
+  width: number,
+  headerRowNumber: number,
+  dataRows: number,
+  palette: XlsxPalette,
+  cut: string[],
+  widths: number[]
+): void {
+  const dataFont: Partial<ExcelJS.Font> = { color: { argb: palette.text }, size: 10 }
+  const zebraFill: ExcelJS.Fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: palette.zebra },
+  }
+  for (let r = 0; r < dataRows; r++) {
+    const outputs = columns.map((cells, c) => {
+      const out = cellOutput(cells[r], plans[c])
+      const address = `${columnLetter(c + 1)}${headerRowNumber + 1 + r}`
+      return { ...out, value: capText(out.value, address, cut) }
+    })
+    const row = ws.addRow(outputs.map(o => o.value))
+    for (let c = 0; c < width; c++) {
+      const cell = row.getCell(c + 1)
+      cell.font = dataFont
+      if (r % 2 === 1) cell.fill = zebraFill
+      const { value, numFmt } = outputs[c]
+      if (numFmt) cell.numFmt = numFmt
+      if (typeof value === 'number' || value instanceof Date) {
+        cell.alignment = { horizontal: 'right' }
+      }
+      const w = cellWidth(value, numFmt)
+      if (w > widths[c]) widths[c] = w
+    }
+  }
+}
+
+function reportCutCells(cut: string[], label: string, warnings: string[]): void {
+  if (cut.length > 0) {
+    const shown = cut.slice(0, 5).join(', ')
+    const more = cut.length > 5 ? ` and ${cut.length - 5} more` : ''
+    warnings.push(
+      `${label}: ${cut.length === 1 ? `cell ${shown} was` : `cells ${shown}${more} were`} ` +
+        "cut to 32,767 characters, Excel's cell limit."
+    )
+  }
+}
+
+/** Fill, font color and weight from sheet.conditionalFormatting, on the cells each rule matches. */
+function applyConditionalFormatting(
   ws: ExcelJS.Worksheet,
   sheet: XlsxSheetSpec,
   label: string,
-  ctx: SheetContext,
-  logo?: EmbeddableImage
-): { rows: number; columns: number; images: number; title: boolean } {
-  const { warnings, palette } = ctx
-  const table = sheetTable(sheet, label, warnings)
-  const { header } = table
-  const width = Math.max(header.length, tableWidth(table.rows))
-
-  let rowNumber = 0
-  const titleRow = isRecord(sheet.titleRow) ? sheet.titleRow : undefined
-  let title: { row: ExcelJS.Row; text: string; span: number } | undefined
-  if (titleRow) {
-    const problem = cellProblem(titleRow.text)
-    if (problem) throw new Error(`${label}.titleRow.text ${problem}.`)
-    const titleCell = readCell(titleRow.text, false)
-    const titleText = capText(titleCell.value, 'A1', [])
-    if (titleText !== titleCell.value) {
-      warnings.push(`${label}.titleRow.text was cut to 32,767 characters, Excel's cell limit.`)
-    }
-    const row = ws.addRow([titleText])
-    rowNumber = 1
-    const span = Math.max(width, 1)
-    title = { row, text: typeof titleText === 'string' ? titleText : titleCell.text, span }
-    if (span > 1) ws.mergeCells(1, 1, 1, span)
-    const font: Partial<ExcelJS.Font> = {
-      bold: true,
-      size: 14,
-      color: {
-        argb: argumentColor(titleRow.fontColor, `${label}.titleRow.fontColor`, warnings, WHITE),
-      },
-    }
-    const fill: ExcelJS.Fill = {
-      type: 'pattern',
-      pattern: 'solid',
-      fgColor: {
-        argb: argumentColor(
-          titleRow.fillColor,
-          `${label}.titleRow.fillColor`,
-          warnings,
-          palette.primary
-        ),
-      },
-    }
-    // Fill and font go on the merged cells only, not the row: a row style is
-    // written for all 16,384 columns and paints past the data area.
-    for (let c = 1; c <= span; c++) {
-      const cell = row.getCell(c)
-      cell.font = font
-      cell.fill = fill
-      cell.alignment = { vertical: 'middle', horizontal: 'center' }
-    }
-    if (startsLikeFormula(titleCell.text)) row.getCell(1).numFmt = NUMBER_FORMATS.text
-    row.height = TITLE_ROW_HEIGHT
-  }
-
-  const autoFilter = sheet.autoFilter !== false
-  const widths = new Array<number>(width).fill(0)
-  const headerRowNumber = rowNumber + 1
-  const dataRows = table.rows.length
-
-  if (width > 0) {
-    const requested = requestedFormats(sheet.columnFormats, header, width, label, warnings)
-    const columns: SheetCell[][] = Array.from({ length: width }, () => [])
-    const columnName = (c: number) =>
-      `${label} column ${headerText(header[c]).trim() ? `'${headerText(header[c])}'` : columnLetter(c + 1)}`
-    for (let c = 0; c < width; c++) {
-      const format = requested.get(c)
-      const code = format ? undefined : codeColumn(table.rows, c)
-      if (code !== undefined) {
+  header: unknown[],
+  width: number,
+  columns: SheetCell[][],
+  headerRowNumber: number,
+  dataRows: number,
+  ctx: SheetContext
+): void {
+  const { warnings } = ctx
+  if (Array.isArray(sheet.conditionalFormatting)) {
+    sheet.conditionalFormatting.forEach((cf, j) => {
+      const cfLabel = `${label}.conditionalFormatting[${j}]`
+      if (!isRecord(cf)) {
+        warnings.push(`${cfLabel} must be an object with column and rules.`)
+        return
+      }
+      const col = resolveColumn(cf.column, header, width)
+      if (col === undefined) {
         warnings.push(
-          `${columnName(c)}: kept as text because '${code}' ` +
-            `${code.startsWith('0') ? 'has a leading zero' : 'has more than 15 digits'}, ` +
-            'which a number would lose.'
+          `${cfLabel}.column '${String(cf.column)}' matches no column; use a header text, ` +
+            "a column letter such as 'B', or a 0-based index."
         )
-        for (const row of table.rows) {
-          const v = row[c]
-          columns[c].push(readCell(typeof v === 'number' ? String(v) : v, false))
-        }
-        continue
+        return
       }
-      const convert = format
-        ? format.type !== 'text'
-        : !isIdentifierHeader(header[c]) || plainIntegers(table.rows, c)
-      // A percent or an amount of money is never an identifier.
-      for (const row of table.rows) {
-        columns[c].push(readCell(row[c], convert || (!format && isQuantityText(row[c]))))
-      }
-    }
-    const plans = columns.map((cells, c) =>
-      planColumn(cells, header[c], requested.get(c), columnName(c), warnings)
-    )
-    columns.forEach((cells, c) => {
-      const ambiguous = cells.find(cell => cell.ambiguous)
-      if (ambiguous) {
+      const texts = columns[col].map(cell => cell.text)
+      const rules = prepareRules(cf.rules, cfLabel, warnings, texts, ctx.regexBudget)
+      // A rule compares each cell as written: '50%' as 50 and 0.45 as 0.45.
+      const numeric =
+        Array.isArray(cf.rules) &&
+        cf.rules.some(
+          rule =>
+            isRecord(rule) &&
+            (rule.greaterThan !== undefined ||
+              rule.lessThan !== undefined ||
+              rule.between !== undefined)
+        )
+      const kinds = new Set(columns[col].map(cell => cell.kind))
+      if (numeric && kinds.has('percent') && kinds.has('number')) {
         warnings.push(
-          `${columnName(c)}: '${ambiguous.text}' was kept as text because it reads as two ` +
-            'different numbers depending on the locale; send numbers as JSON numbers.'
+          `${cfLabel}: the column holds percents written as text ('50%') and plain numbers ` +
+            '(0.45); numeric rules compare each as written, 50 and 0.45, so send the column ' +
+            'one way.'
         )
       }
-      const unread = requested.has(c)
-        ? []
-        : cells.filter(
-            cell => cell.kind === 'text' && !cell.ambiguous && looksLikeUnreadNumber(cell.text)
-          )
-      if (unread.length > 0) {
-        const sample = unread[0].text.trim()
-        warnings.push(
-          `${columnName(c)}: ` +
-            (unread.length === 1
-              ? `'${sample}' was kept as text`
-              : `${unread.length} values such as '${sample}' were kept as text`) +
-            '; send JSON numbers, or ISO 8601 dates such as 2026-09-22.'
-        )
-      }
-      const refused = requested.has(c)
-        ? []
-        : cells.filter(cell => cell.kind === 'text' && looksLikeRefusedDate(cell.text))
-      if (refused.length > 0) {
-        const sample = refused[0].text.trim()
-        warnings.push(
-          `${columnName(c)}: ` +
-            (refused.length === 1
-              ? `'${sample}' was kept as text: it is not a real date, or it is`
-              : `${refused.length} dates such as '${sample}' were kept as text: each is not a ` +
-                'real date, or is') +
-            ' before 1 March 1900, where Excel dates start.'
-        )
-      }
-      if (cells.some(cell => cell.shifted)) {
-        warnings.push(`${columnName(c)}: times with a UTC offset were converted to UTC.`)
-      }
-      const spec = requested.get(c)
-      if (spec && spec.type !== 'text') {
-        const misfits = cells.filter(
-          cell =>
-            cell.kind !== 'empty' && cell.kind !== 'boolean' && !cell.ambiguous && !fits(spec, cell)
-        )
-        if (misfits.length > 0) {
-          const hint =
-            spec.type === 'date'
-              ? "ISO 8601 dates such as '2026-09-22'"
-              : spec.type === 'custom'
-                ? "JSON numbers or ISO 8601 dates such as '2026-09-22'"
-                : 'JSON numbers such as 1234.5'
-          const chars = [...misfits[0].text]
-          const sample = chars.length > 40 ? `${chars.slice(0, 40).join('')}…` : misfits[0].text
-          const which =
-            misfits.length === 1
-              ? `'${sample}' does not fit the format columnFormats asked for, so it was`
-              : `${misfits.length} values such as '${sample}' do not fit the format ` +
-                'columnFormats asked for, so they were'
-          warnings.push(`${columnName(c)}: ${which} written as sent; send ${hint}.`)
-        }
-      }
-    })
-
-    const cut: string[] = []
-    const headerRow = ws.addRow(
-      header.map((h, c) =>
-        h === undefined ? null : capText(h, `${columnLetter(c + 1)}${headerRowNumber}`, cut)
-      )
-    )
-    rowNumber++
-    const headerFont: Partial<ExcelJS.Font> = { bold: true, color: { argb: WHITE }, size: 11 }
-    const headerFill: ExcelJS.Fill = {
-      type: 'pattern',
-      pattern: 'solid',
-      fgColor: { argb: palette.primary },
-    }
-    // Styles are set per cell for the same reason as the title row.
-    for (let c = 0; c < width; c++) {
-      const cell = headerRow.getCell(c + 1)
-      cell.font = headerFont
-      cell.fill = headerFill
-      cell.border = { bottom: { style: 'thin', color: { argb: palette.primaryDark } } }
-      cell.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 }
-      if (typeof header[c] === 'string' && startsLikeFormula(header[c] as string)) {
-        cell.numFmt = NUMBER_FORMATS.text
-      }
-      // The filter button takes about two characters of the header cell.
-      widths[c] = cellWidth(header[c], undefined) + (autoFilter && dataRows > 0 ? 2 : 0)
-    }
-    headerRow.height = 22
-
-    const dataFont: Partial<ExcelJS.Font> = { color: { argb: palette.text }, size: 10 }
-    const zebraFill: ExcelJS.Fill = {
-      type: 'pattern',
-      pattern: 'solid',
-      fgColor: { argb: palette.zebra },
-    }
-    for (let r = 0; r < dataRows; r++) {
-      const outputs = columns.map((cells, c) => {
-        const out = cellOutput(cells[r], plans[c])
-        const address = `${columnLetter(c + 1)}${headerRowNumber + 1 + r}`
-        return { ...out, value: capText(out.value, address, cut) }
-      })
-      const row = ws.addRow(outputs.map(o => o.value))
-      rowNumber++
-      for (let c = 0; c < width; c++) {
-        const cell = row.getCell(c + 1)
-        cell.font = dataFont
-        if (r % 2 === 1) cell.fill = zebraFill
-        const { value, numFmt } = outputs[c]
-        if (numFmt) cell.numFmt = numFmt
-        if (typeof value === 'number' || value instanceof Date) {
-          cell.alignment = { horizontal: 'right' }
-        }
-        const w = cellWidth(value, numFmt)
-        if (w > widths[c]) widths[c] = w
-      }
-    }
-
-    if (cut.length > 0) {
-      const shown = cut.slice(0, 5).join(', ')
-      const more = cut.length > 5 ? ` and ${cut.length - 5} more` : ''
-      warnings.push(
-        `${label}: ${cut.length === 1 ? `cell ${shown} was` : `cells ${shown}${more} were`} ` +
-          "cut to 32,767 characters, Excel's cell limit."
-      )
-    }
-
-    if (Array.isArray(sheet.conditionalFormatting)) {
-      sheet.conditionalFormatting.forEach((cf, j) => {
-        const cfLabel = `${label}.conditionalFormatting[${j}]`
-        if (!isRecord(cf)) {
-          warnings.push(`${cfLabel} must be an object with column and rules.`)
-          return
-        }
-        const col = resolveColumn(cf.column, header, width)
-        if (col === undefined) {
-          warnings.push(
-            `${cfLabel}.column '${String(cf.column)}' matches no column; use a header text, ` +
-              "a column letter such as 'B', or a 0-based index."
-          )
-          return
-        }
-        const texts = columns[col].map(cell => cell.text)
-        const rules = prepareRules(cf.rules, cfLabel, warnings, texts, ctx.regexBudget)
-        // A rule compares each cell as written: '50%' as 50 and 0.45 as 0.45.
-        const numeric =
-          Array.isArray(cf.rules) &&
-          cf.rules.some(
-            rule =>
-              isRecord(rule) &&
-              (rule.greaterThan !== undefined ||
-                rule.lessThan !== undefined ||
-                rule.between !== undefined)
-          )
-        const kinds = new Set(columns[col].map(cell => cell.kind))
-        if (numeric && kinds.has('percent') && kinds.has('number')) {
-          warnings.push(
-            `${cfLabel}: the column holds percents written as text ('50%') and plain numbers ` +
-              '(0.45); numeric rules compare each as written, 50 and 0.45, so send the column ' +
-              'one way.'
-          )
-        }
-        for (let r = 0; r < dataRows; r++) {
-          const rule = rules.find(candidate => candidate.matches(columns[col][r]))
-          if (!rule) continue
-          const cell = ws.getRow(headerRowNumber + 1 + r).getCell(col + 1)
-          if (rule.fill)
-            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: rule.fill } }
-          if (rule.font || rule.bold !== undefined) {
-            cell.font = {
-              ...(cell.font as object),
-              ...(rule.font ? { color: { argb: rule.font } } : {}),
-              ...(rule.bold !== undefined ? { bold: rule.bold } : {}),
-            }
+      for (let r = 0; r < dataRows; r++) {
+        const rule = rules.find(candidate => candidate.matches(columns[col][r]))
+        if (!rule) continue
+        const cell = ws.getRow(headerRowNumber + 1 + r).getCell(col + 1)
+        if (rule.fill)
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: rule.fill } }
+        if (rule.font || rule.bold !== undefined) {
+          cell.font = {
+            ...(cell.font as object),
+            ...(rule.font ? { color: { argb: rule.font } } : {}),
+            ...(rule.bold !== undefined ? { bold: rule.bold } : {}),
           }
         }
-      })
-    } else if (sheet.conditionalFormatting !== undefined) {
-      warnings.push(`${label}.conditionalFormatting must be an array of {column, rules}.`)
-    }
-
-    if (sheet.freezeHeader ?? dataRows > 0) {
-      ws.views = [{ state: 'frozen', xSplit: 0, ySplit: headerRowNumber }]
-    }
-    if (autoFilter && dataRows > 0) {
-      ws.autoFilter = `A${headerRowNumber}:${columnLetter(width)}${headerRowNumber}`
-    }
-    widths.forEach((w, c) => {
-      ws.getColumn(c + 1).width = Math.min(Math.max(w, MIN_TEXT_WIDTH), MAX_TEXT_WIDTH) + 2
+      }
     })
+  } else if (sheet.conditionalFormatting !== undefined) {
+    warnings.push(`${label}.conditionalFormatting must be an array of {column, rules}.`)
   }
+}
 
-  if (title) fitTitle(ws, title.row, title.text, title.span)
+/** Frozen header, filter buttons and column widths. */
+function applySheetView(
+  ws: ExcelJS.Worksheet,
+  sheet: XlsxSheetSpec,
+  width: number,
+  headerRowNumber: number,
+  dataRows: number,
+  autoFilter: boolean,
+  widths: number[]
+): void {
+  if (sheet.freezeHeader ?? dataRows > 0) {
+    ws.views = [{ state: 'frozen', xSplit: 0, ySplit: headerRowNumber }]
+  }
+  if (autoFilter && dataRows > 0) {
+    ws.autoFilter = `A${headerRowNumber}:${columnLetter(width)}${headerRowNumber}`
+  }
+  widths.forEach((w, c) => {
+    ws.getColumn(c + 1).width = Math.min(Math.max(w, MIN_TEXT_WIDTH), MAX_TEXT_WIDTH) + 2
+  })
+}
 
+/** The branding logo beside the data, then the sheet's images; returns how many were placed. */
+function placeSheetImages(
+  ws: ExcelJS.Worksheet,
+  sheet: XlsxSheetSpec,
+  label: string,
+  width: number,
+  rowNumber: number,
+  ctx: SheetContext,
+  logo?: EmbeddableImage
+): number {
+  const { warnings } = ctx
   let imageRow = rowNumber > 0 ? rowNumber + 1 : 0
   let images = 0
   if (logo) {
@@ -577,6 +518,73 @@ function writeSheet(
     ctx.imageBox,
     warnings
   )
+  return images
+}
+
+/** Writes one sheet; returns what it holds, for the summary. */
+function writeSheet(
+  ws: ExcelJS.Worksheet,
+  sheet: XlsxSheetSpec,
+  label: string,
+  ctx: SheetContext,
+  logo?: EmbeddableImage
+): { rows: number; columns: number; images: number; title: boolean } {
+  const { warnings, palette } = ctx
+  const table = sheetTable(sheet, label, warnings)
+  const { header } = table
+  const width = Math.max(header.length, tableWidth(table.rows))
+
+  const titleRow = isRecord(sheet.titleRow) ? sheet.titleRow : undefined
+  const title = titleRow ? writeTitleRow(ws, titleRow, label, width, ctx) : undefined
+  let rowNumber = title ? 1 : 0
+
+  const autoFilter = sheet.autoFilter !== false
+  const widths = new Array<number>(width).fill(0)
+  const headerRowNumber = rowNumber + 1
+  const dataRows = table.rows.length
+
+  if (width > 0) {
+    const requested = requestedFormats(sheet.columnFormats, header, width, label, warnings)
+    const columnName = (c: number) =>
+      `${label} column ${headerText(header[c]).trim() ? `'${headerText(header[c])}'` : columnLetter(c + 1)}`
+    const columns = readColumns(table.rows, header, width, requested, columnName, warnings)
+    const plans = columns.map((cells, c) =>
+      planColumn(cells, header[c], requested.get(c), columnName(c), warnings)
+    )
+    reportColumnReads(columns, requested, columnName, warnings)
+
+    const cut: string[] = []
+    writeHeaderRow(
+      ws,
+      header,
+      width,
+      headerRowNumber,
+      autoFilter && dataRows > 0,
+      palette,
+      cut,
+      widths
+    )
+    rowNumber++
+    writeDataRows(ws, columns, plans, width, headerRowNumber, dataRows, palette, cut, widths)
+    rowNumber += dataRows
+    reportCutCells(cut, label, warnings)
+    applyConditionalFormatting(
+      ws,
+      sheet,
+      label,
+      header,
+      width,
+      columns,
+      headerRowNumber,
+      dataRows,
+      ctx
+    )
+    applySheetView(ws, sheet, width, headerRowNumber, dataRows, autoFilter, widths)
+  }
+
+  if (title) fitTitle(ws, title.row, title.text, title.span)
+
+  const images = placeSheetImages(ws, sheet, label, width, rowNumber, ctx, logo)
   return { rows: dataRows, columns: width, images, title: titleRow !== undefined }
 }
 

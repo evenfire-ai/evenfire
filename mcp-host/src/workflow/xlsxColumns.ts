@@ -2,7 +2,16 @@
  * How a sheet column is read and formatted: requested formats, the plan per column, and the value and width each cell is written with.
  */
 import { headerText } from './tableRows'
-import { type SheetCell, codeDigits, startsLikeFormula, visualWidth } from './xlsxCells'
+import {
+  type SheetCell,
+  codeDigits,
+  isQuantityText,
+  looksLikeRefusedDate,
+  looksLikeUnreadNumber,
+  readCell,
+  startsLikeFormula,
+  visualWidth,
+} from './xlsxCells'
 import {
   type FormatSpec,
   NUMBER_FORMATS,
@@ -11,6 +20,7 @@ import {
   displayedWidth,
   formatSpec,
   headerCurrency,
+  isIdentifierHeader,
   percentFormat,
 } from './xlsxFormats'
 import { fitLength, resolveColumn } from './xlsxSheet'
@@ -68,7 +78,7 @@ export function requestedFormats(
   return formats
 }
 
-interface ColumnPlan {
+export interface ColumnPlan {
   spec?: FormatSpec
   explicit: boolean
   /** Format for the column's cells that fit its spec. */
@@ -285,4 +295,113 @@ export function cellWidth(value: unknown, numFmt: string | undefined): number {
   if (typeof value === 'number' || value instanceof Date) return displayedWidth(value, numFmt)
   if (typeof value === 'boolean') return 5
   return visualWidth(String(value))
+}
+
+/** Each column's cells as they will be written: codes stay text, other columns are converted. */
+export function readColumns(
+  rows: unknown[][],
+  header: unknown[],
+  width: number,
+  requested: Map<number, FormatSpec>,
+  columnName: (c: number) => string,
+  warnings: string[]
+): SheetCell[][] {
+  const columns: SheetCell[][] = Array.from({ length: width }, () => [])
+  for (let c = 0; c < width; c++) {
+    const format = requested.get(c)
+    const code = format ? undefined : codeColumn(rows, c)
+    if (code !== undefined) {
+      warnings.push(
+        `${columnName(c)}: kept as text because '${code}' ` +
+          `${code.startsWith('0') ? 'has a leading zero' : 'has more than 15 digits'}, ` +
+          'which a number would lose.'
+      )
+      for (const row of rows) {
+        const v = row[c]
+        columns[c].push(readCell(typeof v === 'number' ? String(v) : v, false))
+      }
+      continue
+    }
+    const convert = format
+      ? format.type !== 'text'
+      : !isIdentifierHeader(header[c]) || plainIntegers(rows, c)
+    // A percent or an amount of money is never an identifier.
+    for (const row of rows) {
+      columns[c].push(readCell(row[c], convert || (!format && isQuantityText(row[c]))))
+    }
+  }
+  return columns
+}
+
+/** Warnings about what a column holds: ambiguous, unread or refused values, UTC shifts and misfits. */
+export function reportColumnReads(
+  columns: SheetCell[][],
+  requested: Map<number, FormatSpec>,
+  columnName: (c: number) => string,
+  warnings: string[]
+): void {
+  columns.forEach((cells, c) => {
+    const ambiguous = cells.find(cell => cell.ambiguous)
+    if (ambiguous) {
+      warnings.push(
+        `${columnName(c)}: '${ambiguous.text}' was kept as text because it reads as two ` +
+          'different numbers depending on the locale; send numbers as JSON numbers.'
+      )
+    }
+    const unread = requested.has(c)
+      ? []
+      : cells.filter(
+          cell => cell.kind === 'text' && !cell.ambiguous && looksLikeUnreadNumber(cell.text)
+        )
+    if (unread.length > 0) {
+      const sample = unread[0].text.trim()
+      warnings.push(
+        `${columnName(c)}: ` +
+          (unread.length === 1
+            ? `'${sample}' was kept as text`
+            : `${unread.length} values such as '${sample}' were kept as text`) +
+          '; send JSON numbers, or ISO 8601 dates such as 2026-09-22.'
+      )
+    }
+    const refused = requested.has(c)
+      ? []
+      : cells.filter(cell => cell.kind === 'text' && looksLikeRefusedDate(cell.text))
+    if (refused.length > 0) {
+      const sample = refused[0].text.trim()
+      warnings.push(
+        `${columnName(c)}: ` +
+          (refused.length === 1
+            ? `'${sample}' was kept as text: it is not a real date, or it is`
+            : `${refused.length} dates such as '${sample}' were kept as text: each is not a ` +
+              'real date, or is') +
+          ' before 1 March 1900, where Excel dates start.'
+      )
+    }
+    if (cells.some(cell => cell.shifted)) {
+      warnings.push(`${columnName(c)}: times with a UTC offset were converted to UTC.`)
+    }
+    const spec = requested.get(c)
+    if (spec && spec.type !== 'text') {
+      const misfits = cells.filter(
+        cell =>
+          cell.kind !== 'empty' && cell.kind !== 'boolean' && !cell.ambiguous && !fits(spec, cell)
+      )
+      if (misfits.length > 0) {
+        const hint =
+          spec.type === 'date'
+            ? "ISO 8601 dates such as '2026-09-22'"
+            : spec.type === 'custom'
+              ? "JSON numbers or ISO 8601 dates such as '2026-09-22'"
+              : 'JSON numbers such as 1234.5'
+        const chars = [...misfits[0].text]
+        const sample = chars.length > 40 ? `${chars.slice(0, 40).join('')}…` : misfits[0].text
+        const which =
+          misfits.length === 1
+            ? `'${sample}' does not fit the format columnFormats asked for, so it was`
+            : `${misfits.length} values such as '${sample}' do not fit the format ` +
+              'columnFormats asked for, so they were'
+        warnings.push(`${columnName(c)}: ${which} written as sent; send ${hint}.`)
+      }
+    }
+  })
 }
