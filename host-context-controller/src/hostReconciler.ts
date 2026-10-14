@@ -3814,16 +3814,19 @@ export class HostReconciler {
             imagePullSecrets: config.hostImagePullSecretName
               ? [{ name: config.hostImagePullSecretName }]
               : undefined,
-            // Every Host merges a PVC split by the earlier stateless layout
-            // back to the root layout before mcp-host starts; on any other
-            // tree the init exits 0 without touching it.
-            initContainers: [
-              buildWorkspaceLayoutMergeContainer(
-                image,
-                imagePullPolicy,
-                hostContainerSecurityContext()
-              ),
-            ],
+            // While CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE is on, every Host
+            // merges a PVC split by the earlier stateless layout back to the
+            // root layout before mcp-host starts; on any other tree the init
+            // exits 0 without touching it.
+            initContainers: config.workspaceLayoutMerge
+              ? [
+                  buildWorkspaceLayoutMergeContainer(
+                    image,
+                    imagePullPolicy,
+                    hostContainerSecurityContext()
+                  ),
+                ]
+              : undefined,
             containers: [
               {
                 name: 'mcp-host',

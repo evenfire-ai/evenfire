@@ -58,6 +58,7 @@ vi.mock('../src/config', () => ({
     hostWorkspaceStorageClassName: 'do-block-storage-retain',
     hostWorkspaceStorageSize: '10Gi',
     hostWorkspacePath: '/workspace',
+    workspaceLayoutMerge: true,
     hostResources: {
       requests: { memory: '128Mi', cpu: '100m' },
       limits: { memory: '512Mi', cpu: '500m' },
@@ -5208,6 +5209,33 @@ describe('HostReconciler storage layout — one shape for every lifecycle', () =
     expect(dep.spec?.template?.spec?.initContainers?.map(init => init.name)).toEqual([
       'workspace-layout-merge',
     ])
+  })
+
+  describe('with CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE=false', () => {
+    afterEach(() => {
+      config.workspaceLayoutMerge = true
+    })
+
+    it.each(kinds)(
+      'renders no merge init and keeps the root layout for a $kind Host',
+      ({ host, workspacePath }) => {
+        const { reconciler } = createReconciler()
+        // Witness: with the flag on, the same Host renders the merge init.
+        expect(
+          reconciler.buildDeployment(host()).spec?.template?.spec?.initContainers?.map(i => i.name)
+        ).toEqual(['workspace-layout-merge'])
+
+        config.workspaceLayoutMerge = false
+        const dep = reconciler.buildDeployment(host())
+        expect(dep.spec?.template?.spec?.initContainers).toBeUndefined()
+        expect(dep.spec?.template?.spec?.containers?.[0]?.volumeMounts).toContainEqual({
+          name: 'workspace',
+          mountPath: workspacePath,
+        })
+        expect(envValue(dep, 'CLERUM_SESSION_DB_DIR')).toBe(workspacePath)
+        expect(JSON.stringify(dep)).not.toContain('subPath')
+      }
+    )
   })
 })
 
