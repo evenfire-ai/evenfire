@@ -478,16 +478,6 @@ function resolveChartType(
   }
 }
 
-// ─── Portable schema fragments ───────────────────────────────────────
-//
-// A tool schema does two jobs. The workflow path (stepRouter) compiles it with
-// AJV and REJECTS arguments that do not match before execute() runs, so it must
-// accept everything the runtime handles. And it reaches every provider
-// verbatim, so it must survive each SDK's translation. Unions are therefore
-// written as scalar type lists or `anyOf` branches — @google/genai turns both
-// into its own schema — and never as `oneOf`, which it passes through
-// untranslated for the Gemini API to reject. Every array declares `items`.
-
 /** Nominal pixels are multiplied by this to keep charts sharp when scaled down. */
 const CHART_PIXEL_RATIO = 2
 
