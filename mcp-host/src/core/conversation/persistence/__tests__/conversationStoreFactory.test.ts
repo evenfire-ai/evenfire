@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { logger } from '../../../../logger'
 import { createConversationStore } from '../conversationStoreFactory'
 
 const roots: string[] = []
@@ -63,5 +64,45 @@ describe('createConversationStore persist failure', () => {
     queue.enqueueAsync('s1', { kind: 'crash' } as never)
     await expect(failure).resolves.toMatchObject({ message: 'db worker exited (code=3)' })
     expect(() => queue.enqueueAsync('s1', { kind: 'ping' })).toThrow(/db worker exited/)
+  })
+
+  it('logs no error when the worker exits after a graceful shutdown', async () => {
+    const script = workerScript(`
+      const { parentPort } = require('node:worker_threads')
+      parentPort.on('message', msg => {
+        if (msg.op.kind === 'ping') parentPort.postMessage({ id: msg.id, ok: true, result: 'pong' })
+        if (msg.op.kind === 'shutdown') {
+          parentPort.postMessage({ id: msg.id, ok: true, result: { ok: true } })
+          process.exit(0)
+        }
+      })
+    `)
+    const errors = vi.spyOn(logger, 'error')
+    try {
+      const failures: Error[] = []
+      const handle = createConversationStore({
+        mode: 'sqlite',
+        dbPath: path.join(path.dirname(script), 'state.db'),
+        cacheSize: 10,
+        syncTimeoutMs: 2000,
+        asyncTimeoutMs: 2000,
+        checkpointEveryWrites: 100,
+        heartbeatMs: 60_000,
+        workerScriptPath: script,
+        onPersistFailure: err => failures.push(err),
+      })
+      const worker = handle.worker
+      if (!worker || !handle.persistQueue) throw new Error('sqlite mode returned no worker')
+      const exited = new Promise<number>(resolve => worker.once('exit', resolve))
+      await expect(handle.persistQueue.enqueueSync({ kind: 'ping' })).resolves.toBe('pong')
+
+      await handle.shutdown()
+      // Liveness witness: the worker really exited after the shutdown ACK.
+      await expect(exited).resolves.toBe(0)
+      expect(failures).toHaveLength(0)
+      expect(errors).not.toHaveBeenCalled()
+    } finally {
+      errors.mockRestore()
+    }
   })
 })

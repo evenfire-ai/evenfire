@@ -75,7 +75,7 @@ async function main(): Promise<void> {
           try {
             db.pragma('wal_checkpoint(PASSIVE)')
           } catch (err) {
-            logger.warn({ err: (err as Error).message }, '[dbWorker] PASSIVE checkpoint failed')
+            logger.warn({ err }, '[dbWorker] PASSIVE checkpoint failed')
           }
           writesSinceCheckpoint = 0
         }
@@ -126,7 +126,7 @@ async function main(): Promise<void> {
 main().catch(err => {
   // The main thread does not read `__fatal__`; this line is the only record
   // of why the worker stopped (for example an orphan-WAL refusal).
-  logger.error({ err: (err as Error).message }, '[dbWorker] fatal; exiting with code 1')
+  logger.error({ err }, '[dbWorker] fatal; exiting with code 1')
   if (parentPort) {
     parentPort.postMessage({
       id: '__fatal__',

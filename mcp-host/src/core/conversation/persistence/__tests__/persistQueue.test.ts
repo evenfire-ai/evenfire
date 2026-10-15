@@ -138,13 +138,15 @@ describe('PersistQueue', () => {
     expect(() => q.enqueueAsync('s2', { kind: 'ping' })).toThrow(/database or disk is full/)
   })
 
-  it('calls onFailure once when the worker exits unexpectedly', async () => {
+  it('calls onExit and onFailure once when the worker exits unexpectedly', async () => {
     const worker = new FakeWorker()
     const failures: Error[] = []
+    const exits: number[] = []
     const q = new PersistQueue(worker, {
       syncTimeoutMs: 500,
       asyncTimeoutMs: 500,
       onFailure: err => failures.push(err),
+      onExit: code => exits.push(code),
     })
     // Liveness witness: with the worker alive a write is acknowledged and
     // onFailure has not fired.
@@ -158,6 +160,7 @@ describe('PersistQueue', () => {
     expect(failures).toHaveLength(0)
 
     worker.emit('exit', 1)
+    expect(exits).toEqual([1])
     expect(failures.map(e => e.message)).toEqual(['db worker exited (code=1)'])
     // A later rejected write does not report a second failure.
     expect(() => q.enqueueAsync('s1', { kind: 'ping' })).toThrow(/db worker exited/)
@@ -201,15 +204,17 @@ describe('PersistQueue', () => {
     expect(failures).toHaveLength(1)
   })
 
-  it('does not call onFailure for the worker exit that follows a shutdown ACK', async () => {
+  it('reports neither onFailure nor onExit for the worker exit that follows a shutdown ACK', async () => {
     const worker = new FakeWorker()
     const failures: Error[] = []
-    const exits: number[] = []
+    const reportedExits: number[] = []
+    const observedExits: number[] = []
+    worker.on('exit', code => observedExits.push(code))
     const q = new PersistQueue(worker, {
       syncTimeoutMs: 500,
       asyncTimeoutMs: 500,
       onFailure: err => failures.push(err),
-      onExit: code => exits.push(code),
+      onExit: code => reportedExits.push(code),
     })
     const closing = q.close()
     await new Promise(r => setImmediate(r))
@@ -219,7 +224,8 @@ describe('PersistQueue', () => {
     // FakeWorker.terminate() emits the exit.
     await closing
     // Liveness witness: the exit was observed.
-    expect(exits).toEqual([0])
+    expect(observedExits).toEqual([0])
+    expect(reportedExits).toHaveLength(0)
     expect(failures).toHaveLength(0)
   })
 

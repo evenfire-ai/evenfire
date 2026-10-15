@@ -42,8 +42,9 @@ export interface PersistQueueOptions {
   /** Called on transport-level errors (worker crashed, message channel broke). */
   onTransportError?: (err: Error) => void
   /**
-   * Called when the worker exits, for logging. An exit before the `shutdown`
-   * ACK is also reported through `onFailure`, which ends the process.
+   * Called with the exit code when the worker exits before ACKing `shutdown`,
+   * for logging. The same exit is reported through `onFailure`, which ends
+   * the process. The exit that follows a `shutdown` ACK is not reported.
    */
   onExit?: (code: number) => void
   /**
@@ -91,8 +92,9 @@ export class PersistQueue {
         )
       }
       this.pending.clear()
+      if (this.shutdownAcked) return
       if (this.opts.onExit) this.opts.onExit(code)
-      if (!this.shutdownAcked) this.recordFailure(new Error(`db worker exited (code=${code})`))
+      this.recordFailure(new Error(`db worker exited (code=${code})`))
     })
   }
 
