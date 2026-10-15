@@ -1868,7 +1868,10 @@ export class TokenStore {
 
   async clearSessionToken(
     envKey: string,
-    options: { legacyEnvKeys?: readonly string[] } & SessionTokenMutationOptions = {}
+    options: {
+      legacyEnvKeys?: readonly string[]
+      clearLegacyGlobalSlot?: boolean
+    } & SessionTokenMutationOptions = {}
   ): Promise<void> {
     return this.trackOperation(async () => {
       await this.clearSessionTokenOnce(envKey, options)
@@ -1964,6 +1967,7 @@ export class TokenStore {
     envKey: string,
     options: {
       legacyEnvKeys?: readonly string[]
+      clearLegacyGlobalSlot?: boolean
       throwOnStorageError?: boolean
     } & SessionTokenMutationOptions
   ): Promise<StrictSessionTokenClearResult> {
@@ -2002,9 +2006,11 @@ export class TokenStore {
       for (const scopedEnvKey of scopedEnvKeys) {
         await deleteKeychainPassword(accountFor(scopedEnvKey))
       }
-      // Best-effort cleanup of the legacy global slot so it can't be migrated
-      // into another environment later.
-      await deleteKeychainPassword(LEGACY_ACCOUNT)
+      if (options.clearLegacyGlobalSlot !== false) {
+        // Best-effort cleanup of the legacy global slot so it can't be migrated
+        // into another environment later.
+        await deleteKeychainPassword(LEGACY_ACCOUNT)
+      }
     }
     // Always clean up file-based storage regardless of keychain result,
     // since prior versions may have written both stores.
@@ -2012,7 +2018,7 @@ export class TokenStore {
       this.encryptedFilePath(scopedEnvKey),
       this.plainFilePath(scopedEnvKey),
     ])
-    if (this.isolatedUserDataPath === undefined) {
+    if (this.isolatedUserDataPath === undefined && options.clearLegacyGlobalSlot !== false) {
       filePaths.push(legacyEncryptedFilePath(), legacyFilePath())
     }
     const fileSettlements = await Promise.allSettled(

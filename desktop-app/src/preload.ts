@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
 import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
+  DesktopRuntimeConfigHandoffSelection,
   EntityChangeStreamEvent,
   HostMessageRequest,
   ProfileSettingsOpenOptions,
@@ -69,16 +70,29 @@ const clerum = Object.freeze({
   },
   auth: {
     getSessionState: () => ipcRenderer.invoke('auth:getSessionState'),
+    getSessionGeneration: () => ipcRenderer.invoke('auth:getSessionGeneration'),
     getDependenciesHealth: () => ipcRenderer.invoke('auth:getDependenciesHealth'),
     getRuntimeConfigState: () => ipcRenderer.invoke('auth:getRuntimeConfigState'),
     selectRuntimeConfig: (optionId: string) =>
       ipcRenderer.invoke('auth:selectRuntimeConfig', { optionId }),
+    selectRuntimeConfigForHandoff: (optionId: string, expectedSessionGeneration: number) =>
+      ipcRenderer.invoke('auth:selectRuntimeConfigForHandoff', {
+        optionId,
+        expectedSessionGeneration,
+      }) as Promise<DesktopRuntimeConfigHandoffSelection>,
     clearRuntimeConfigSelection: () => ipcRenderer.invoke('auth:clearRuntimeConfigSelection'),
-    saveRuntimeConfig: (config: {
-      externalRestApiBaseUrl: string
-      rpcProxyBaseUrl?: string
-      appName?: string
-    }) => ipcRenderer.invoke('auth:saveRuntimeConfig', config),
+    saveRuntimeConfig: (
+      config: {
+        externalRestApiBaseUrl: string
+        rpcProxyBaseUrl?: string
+        appName?: string
+      },
+      expectedSessionGeneration?: number
+    ) =>
+      ipcRenderer.invoke(
+        'auth:saveRuntimeConfig',
+        expectedSessionGeneration === undefined ? config : { ...config, expectedSessionGeneration }
+      ),
     deleteRuntimeConfig: (optionId: string) =>
       ipcRenderer.invoke('auth:deleteRuntimeConfig', { optionId }),
     googleLogin: (idToken: string) => ipcRenderer.invoke('auth:googleLogin', { idToken }),
@@ -106,17 +120,12 @@ const clerum = Object.freeze({
       return () => ipcRenderer.off('auth:desktopSetupToken', listener)
     },
     onDesktopEnvironmentSetup: (
-      callback: (payload: {
-        externalRestApiBaseUrl: string
-        rpcProxyBaseUrl: string
-        appName?: string
-      }) => void
+      callback: (payload: { externalRestApiBaseUrl: string; appName?: string }) => void
     ) => {
       const listener = (
         _event: Electron.IpcRendererEvent,
         payload: {
           externalRestApiBaseUrl: string
-          rpcProxyBaseUrl: string
           appName?: string
         }
       ) => callback(payload)
