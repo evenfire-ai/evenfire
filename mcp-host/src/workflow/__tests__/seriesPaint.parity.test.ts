@@ -3,7 +3,7 @@
 // or its tint) in both outputs, although one writes hex and the other tokens.
 import { describe, expect, it } from 'vitest'
 import { normalizeChartData } from '../chartData'
-import { paintedDatasets } from '../chartGenerator'
+import { paintedDatasets } from '../chartDatasets'
 import { CHART_THEMES } from '../chartThemes'
 import { prepareDashboardChart } from '../dashboardCharts'
 import { tintOf } from '../seriesPaint'
