@@ -4,7 +4,9 @@
  * The data goes through the same normalizer as clerum__generate_chart, because
  * PowerPoint drops chart-cache values written as text such as "1,200".
  */
+import type PptxGenJS from 'pptxgenjs'
 import { ChartDataError, normalizeChartData } from './chartData'
+import type { PptxDeck } from './pptxDraw'
 import { PPTX_FONT_FACE } from './pptxText'
 import { NATIVE_CHART_TYPES } from './pptxVocabulary'
 
@@ -171,8 +173,8 @@ function valueFormats(values: number[]): { label: string; axis: string } {
 export function nativeChartArgs(
   chart: NativeChart,
   style: NativeChartStyle,
-  pptx: any
-): { type: string; data: unknown[]; options: Record<string, unknown> } {
+  pptx: Pick<PptxDeck, 'charts'>
+): { type: PptxGenJS.CHART_NAME; data: unknown[]; options: Record<string, unknown> } {
   const c = pptx.charts ?? {}
   const type =
     chart.type === 'line'

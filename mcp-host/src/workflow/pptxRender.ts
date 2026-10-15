@@ -329,8 +329,8 @@ function drawTable(slide: Slide, planned: PlannedSlide, ctx: DrawContext): void 
               color: hex(p.text),
               fill: r % 2 === 0 ? { color: hex(p.surface) } : undefined,
             }),
-        align: 'left',
-        valign: 'top',
+        align: 'left' as const,
+        valign: 'top' as const,
         ...runOptions(slide, text, 'left'),
       },
     }))

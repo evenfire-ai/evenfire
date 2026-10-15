@@ -8,7 +8,7 @@ import { ChartSpecError, type NativeChart, nativeChartArgs, readNativeChart } fr
 const style = { colors: ['#111111', '#222222'], textColor: '#000000', mutedColor: '#666666' }
 const pptx = {
   charts: { BAR: 'bar', LINE: 'line', PIE: 'pie', AREA: 'area', DOUGHNUT: 'doughnut' },
-}
+} as const
 
 describe('readNativeChart', () => {
   it('reads labels and datasets nested under data or at the top', () => {

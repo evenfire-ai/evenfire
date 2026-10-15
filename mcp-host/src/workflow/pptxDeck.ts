@@ -6,6 +6,7 @@
  * lists and tables that do not fit continue on further slides, titles and
  * values shrink to fit their boxes, and pictures keep their proportions.
  */
+import type PptxGenJSType from 'pptxgenjs'
 import { documentEastAsianScript } from './docxScript'
 import { choose } from './ownEntry'
 import { type DrawContext, hex } from './pptxDraw'
@@ -27,7 +28,8 @@ import { PPTX_FONT_FACE, TEXT_INSET_X, truncateToLines, wrapLines } from './pptx
 import { PPTX_ASPECT_RATIOS, PPTX_PALETTES, PPTX_TEMPLATES } from './pptxVocabulary'
 import { keepZipTextWhole } from './zipText'
 
-const PptxGenJS = require('pptxgenjs')
+// Loaded with require so the tests and the Host run the same CommonJS bundle.
+const PptxGenJS: typeof PptxGenJSType = require('pptxgenjs')
 
 /** The slides `args` describe, from a template's data or from slides[]. */
 function readDeck(args: Record<string, unknown>, ctx: ReadContext): PptxSlide[] {

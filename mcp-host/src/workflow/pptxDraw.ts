@@ -1,4 +1,5 @@
 /** What every slide renderer shares: the drawing context, colors and fitted text. */
+import type PptxGenJS from 'pptxgenjs'
 import { type PptxPicture } from './pptxInput'
 import { type Frame } from './pptxLayout'
 import { TEXT_INSET_X, TEXT_INSET_Y, fitText, lineHeightIn, truncateToLines } from './pptxText'
@@ -9,10 +10,21 @@ export function hex(c: string): string {
   return c.replace(/^#/, '').toUpperCase()
 }
 
+/**
+ * The deck pptxgenjs builds. Its `charts` and `shapes` name tables exist at
+ * run time (getters on the instance) but its types leave them out.
+ */
+export type PptxDeck = PptxGenJS & {
+  readonly charts?: Partial<
+    Record<'AREA' | 'BAR' | 'DOUGHNUT' | 'LINE' | 'PIE', PptxGenJS.CHART_NAME>
+  >
+  readonly shapes?: Partial<Record<'RECTANGLE' | 'ROUNDED_RECTANGLE', PptxGenJS.ShapeType>>
+}
+
 export interface DrawContext {
   frame: Frame
   palette: PptxPalette
-  pptx: any
+  pptx: PptxDeck
   warnings: string[]
   logo?: PptxPicture
 }
