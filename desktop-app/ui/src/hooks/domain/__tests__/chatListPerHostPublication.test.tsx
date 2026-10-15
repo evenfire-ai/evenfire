@@ -268,6 +268,55 @@ describe('per-Host Latest sessions publication', () => {
     expect(controller.result.current.latestChatSessions.map(chat => chat.id)).toEqual(['remote-a'])
   })
 
+  it('discards a page whose Host authority epoch advances after the publication check, inside its updater', async () => {
+    const pendingB = deferred<SessionsListResult>()
+    let bResolved = false
+    let armed = false
+    let bEpochReadsSinceArm = 0
+    // After B's response the loader reads B's epoch twice (post-read and
+    // pre-publication checks) before its `setLatestChatSessions` updater reads
+    // it a third time. From that third read on, B's authority has moved.
+    const getHostAuthorityEpoch = (agentRef: string) => {
+      if (!armed || agentRef !== HOST_B) return 0
+      bEpochReadsSinceArm += 1
+      return bEpochReadsSinceArm > 2 ? 1 : 0
+    }
+    clerum.chat.getIndex.mockResolvedValue(localIndex([]))
+    clerum.rpc.listSessions.mockImplementation((agentRef: string) =>
+      agentRef === HOST_B
+        ? pendingB.promise.then(page => {
+            bResolved = true
+            return page
+          })
+        : Promise.resolve(serverSessions([{ agent: HOST_A, chatId: 'remote-a' }]))
+    )
+    const controller = renderController({
+      selectedAgent: null,
+      agentNames: HOSTS,
+      getHostAuthorityEpoch,
+    })
+    await waitFor(() =>
+      expect(controller.result.current.latestChatSessions.map(chat => chat.id)).toEqual([
+        'remote-a',
+      ])
+    )
+    expect(clerum.rpc.listSessions).toHaveBeenCalledWith(HOST_B, undefined, {
+      agent: HOST_B,
+      limit: 50,
+    })
+
+    await act(async () => {
+      armed = true
+      pendingB.resolve(serverSessions([{ agent: HOST_B, chatId: 'moved-epoch-b' }]))
+      await pendingB.promise
+    })
+
+    // Liveness: B's catalog read resolved and the updater-time check ran.
+    expect(bResolved).toBe(true)
+    expect(bEpochReadsSinceArm).toBeGreaterThan(2)
+    expect(controller.result.current.latestChatSessions.map(chat => chat.id)).toEqual(['remote-a'])
+  })
+
   it('flushes only the arriving Host offline renames without spending another Host retry budget', async () => {
     const pendingA = deferred<SessionsListResult>()
     const pendingB = deferred<SessionsListResult>()

@@ -354,6 +354,7 @@ describe('switchToChat transcript memo (#1091 A9)', () => {
   const invalidations = [
     ['no invalidating event (control), reopening is served from memory', 'none', false],
     ['a team change, reopening opens blank', 'team', true],
+    ['a logout and login, reopening opens blank', 'logout', true],
     ['resetChat, reopening opens blank', 'reset', true],
     ['a confirmed revocation of the Host, reopening opens blank', 'revoked', true],
     ['an uncertain hold of the Host, reopening opens blank', 'uncertain', true],
@@ -378,6 +379,9 @@ describe('switchToChat transcript memo (#1091 A9)', () => {
       if (event === 'team') {
         act(() => controller.rerender({ currentTeamId: 'team-2', chatAuthorityTeamId: 'team-2' }))
         act(() => controller.rerender({ currentTeamId: 'team-1', chatAuthorityTeamId: 'team-1' }))
+      } else if (event === 'logout') {
+        act(() => controller.rerender({ isAuthenticated: false }))
+        act(() => controller.rerender({ isAuthenticated: true }))
       } else if (event === 'reset') {
         act(() => controller.result.current.resetChat())
       } else if (event === 'revoked' || event === 'uncertain') {
