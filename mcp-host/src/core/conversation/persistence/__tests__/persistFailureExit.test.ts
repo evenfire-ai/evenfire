@@ -54,7 +54,10 @@ const handle = createConversationStore({
   checkpointEveryWrites: 100,
   heartbeatMs: 60000,
   workerScriptPath: workerPath,
-  onPersistFailure: exitOnPersistFailure(() => false),
+  onPersistFailure: exitOnPersistFailure(() => false, {
+    beforeExit: async () => console.log('PRE_EXIT_FLUSH'),
+    beforeExitTimeoutMs: 1000,
+  }),
 })
 const queue = handle.persistQueue
 ;(async () => {
@@ -116,6 +119,7 @@ describe('exitOnPersistFailure in a Host process', () => {
     const run = runChild('async-write-failure')
     expect(run.out).toContain('FIRST_WRITE_ACKED')
     expect(run.out).toContain('Conversation store can no longer persist writes')
+    expect(run.out).toContain('PRE_EXIT_FLUSH')
     expect(run.out).not.toContain('STILL_RUNNING')
     expect(run.status).toBe(1)
   })
@@ -131,18 +135,95 @@ describe('exitOnPersistFailure in a Host process', () => {
 })
 
 describe('exitOnPersistFailure during shutdown', () => {
-  it('does not exit while the Host is shutting down', () => {
+  it('does not exit while the Host is shutting down', async () => {
     const exit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+    const beforeExit = vi.fn(async () => undefined)
     try {
       let shuttingDown = true
-      const handler = exitOnPersistFailure(() => shuttingDown)
+      const handler = exitOnPersistFailure(() => shuttingDown, {
+        beforeExit,
+        beforeExitTimeoutMs: 1000,
+      })
       handler(new Error('db worker exited (code=1)'))
+      expect(beforeExit).not.toHaveBeenCalled()
       expect(exit).not.toHaveBeenCalled()
 
       // Liveness witness: the same handler exits once shutdown is not running.
       shuttingDown = false
       handler(new Error('db worker exited (code=1)'))
-      expect(exit).toHaveBeenCalledExactlyOnceWith(1)
+      await vi.waitFor(() => expect(exit).toHaveBeenCalledExactlyOnceWith(1))
+      expect(beforeExit).toHaveBeenCalledOnce()
+    } finally {
+      exit.mockRestore()
+    }
+  })
+})
+
+describe('exitOnPersistFailure pre-exit flush', () => {
+  function spyExit(events: string[]) {
+    return vi.spyOn(process, 'exit').mockImplementation(code => {
+      events.push(`exit ${code}`)
+      return undefined as never
+    })
+  }
+
+  it('flushes before exiting 1', async () => {
+    const events: string[] = []
+    const exit = spyExit(events)
+    try {
+      const handler = exitOnPersistFailure(() => false, {
+        beforeExit: async () => {
+          events.push('flush start')
+          await new Promise(r => setTimeout(r, 20))
+          events.push('flushed')
+        },
+        beforeExitTimeoutMs: 1000,
+      })
+      handler(new Error('async write failed'))
+      // A second failure during the flush neither flushes nor exits again.
+      handler(new Error('db worker exited (code=1)'))
+      await vi.waitFor(() => expect(exit).toHaveBeenCalled())
+      expect(events).toEqual(['flush start', 'flushed', 'exit 1'])
+    } finally {
+      exit.mockRestore()
+    }
+  })
+
+  it('exits 1 when the flush hangs past the deadline', async () => {
+    const events: string[] = []
+    const exit = spyExit(events)
+    try {
+      const handler = exitOnPersistFailure(() => false, {
+        beforeExit: () => {
+          events.push('flush start')
+          return new Promise<void>(() => undefined)
+        },
+        beforeExitTimeoutMs: 30,
+      })
+      const started = Date.now()
+      handler(new Error('async write failed'))
+      await vi.waitFor(() => expect(exit).toHaveBeenCalled())
+      expect(Date.now() - started).toBeLessThan(500)
+      expect(events).toEqual(['flush start', 'exit 1'])
+    } finally {
+      exit.mockRestore()
+    }
+  })
+
+  it('exits 1 when the flush fails', async () => {
+    const events: string[] = []
+    const exit = spyExit(events)
+    try {
+      const handler = exitOnPersistFailure(() => false, {
+        beforeExit: async () => {
+          events.push('flush start')
+          throw new Error('usage endpoint unreachable')
+        },
+        beforeExitTimeoutMs: 1000,
+      })
+      handler(new Error('async write failed'))
+      await vi.waitFor(() => expect(exit).toHaveBeenCalled())
+      expect(events).toEqual(['flush start', 'exit 1'])
     } finally {
       exit.mockRestore()
     }

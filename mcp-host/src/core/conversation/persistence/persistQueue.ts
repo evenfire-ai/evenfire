@@ -6,10 +6,12 @@
  *   deny, completeTurn with billed usage.
  * - `enqueueAsync(sessionKey, op)` does not wait for the ACK but preserves the
  *   `sessionKey`-scoped ordering chain (per `SessionProcessor`'s FIFO
- *   invariant). A failed async write marks the queue failed: every later
- *   write rejects with that failure and `onFailure` fires once, so the Host
- *   stops instead of accepting writes it can no longer persist. The same
- *   holds after an unexpected worker exit.
+ *   invariant). An async write stays pending until the worker answers or
+ *   exits; a slow ACK is only logged, so its outcome is never guessed. A
+ *   failed async write marks the queue failed: every later write rejects
+ *   with that failure and `onFailure` fires once, so the Host stops instead
+ *   of accepting writes it can no longer persist. The same holds after an
+ *   unexpected worker exit.
  *
  * The implementation is transport-agnostic: callers inject a `WorkerLike`
  * (typically a `node:worker_threads.Worker`, but tests inject an in-process
@@ -36,6 +38,10 @@ export interface WorkerLike {
 
 export interface PersistQueueOptions {
   syncTimeoutMs: number
+  /**
+   * An async write not ACKed within this time is logged and kept pending.
+   * `close()` waits this long for the queued async writes to settle.
+   */
   asyncTimeoutMs: number
   /** Called whenever a heartbeat reply is observed (id === HEARTBEAT_ID). */
   onHeartbeat?: (payload: HeartbeatPayload) => void
@@ -110,7 +116,7 @@ export class PersistQueue {
     this.assertAdmissible()
     const prev = this.writeChain.get(sessionKey) ?? Promise.resolve()
     const next = prev
-      .then(() => this.sendUnlessFailed(op, this.opts.asyncTimeoutMs))
+      .then(() => this.sendUnlessFailed(op, this.opts.asyncTimeoutMs, 'warn'))
       .then(() => {
         /* discard the result — async path */
       })
@@ -235,7 +241,9 @@ export class PersistQueue {
 
   /**
    * Graceful shutdown: close admission, drain the keyed writes in
-   * `writeChain` (async writes and sync writes with a `sessionKey`), wait for
+   * `writeChain` (async writes and sync writes with a `sessionKey`) for at
+   * most `asyncTimeoutMs` (past it, a failure is recorded and the worker is
+   * terminated without `shutdown`), wait for
    * the worker to ACK `shutdown` (it closes the database before replying),
    * then terminate it. A sync write without a `sessionKey` is not in
    * `writeChain`; if the worker is still retrying it on a busy database,
@@ -251,8 +259,12 @@ export class PersistQueue {
 
   private async shutdown(): Promise<void> {
     this.closed = true
-    await this.drain()
-    if (!this.exited) {
+    if (!(await this.drainWithin(this.opts.asyncTimeoutMs))) {
+      // The worker is stuck on a write; terminate() below rejects it.
+      this.recordFailure(
+        new Error(`async writes not acknowledged within ${this.opts.asyncTimeoutMs}ms of close()`)
+      )
+    } else if (!this.exited) {
       try {
         await this.send({ kind: 'shutdown' }, this.opts.syncTimeoutMs)
       } catch (err) {
@@ -273,6 +285,18 @@ export class PersistQueue {
     if (this.failure) throw this.failure
   }
 
+  private async drainWithin(ms: number): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const expired = new Promise<boolean>(resolve => {
+      timer = setTimeout(() => resolve(false), ms)
+    })
+    try {
+      return await Promise.race([this.drain().then(() => true), expired])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
   private recordFailure(err: Error): void {
     if (this.failure) return
     this.failure = err
@@ -288,19 +312,38 @@ export class PersistQueue {
    * Post a write that waited on its `sessionKey` chain. The queue may have
    * failed while it waited, and admission was checked before that.
    */
-  private sendUnlessFailed<T>(op: WorkerOp, timeoutMs: number): Promise<T> {
+  private sendUnlessFailed<T>(
+    op: WorkerOp,
+    timeoutMs: number,
+    onTimeout: 'reject' | 'warn' = 'reject'
+  ): Promise<T> {
     if (this.failure) return Promise.reject(this.failure)
-    return this.send<T>(op, timeoutMs)
+    return this.send<T>(op, timeoutMs, onTimeout)
   }
 
-  private send<T>(op: WorkerOp, timeoutMs: number | null): Promise<T> {
+  /**
+   * `onTimeout: 'warn'` logs once when `timeoutMs` elapses and keeps waiting
+   * for the ACK or the worker exit.
+   */
+  private send<T>(
+    op: WorkerOp,
+    timeoutMs: number | null,
+    onTimeout: 'reject' | 'warn' = 'reject'
+  ): Promise<T> {
     const id = randomUUID()
     return new Promise<T>((resolve, reject) => {
       const timeoutHandle =
         timeoutMs === null
           ? undefined
           : setTimeout(() => {
-              if (this.pending.delete(id)) {
+              if (onTimeout === 'warn') {
+                if (this.pending.has(id)) {
+                  logger.warn(
+                    { op: op.kind, timeoutMs },
+                    '[PersistQueue] async write not acknowledged yet; still waiting'
+                  )
+                }
+              } else if (this.pending.delete(id)) {
                 reject(new Error(`db worker timeout (${timeoutMs}ms) for op=${op.kind}`))
               }
             }, timeoutMs)

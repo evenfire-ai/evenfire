@@ -99,6 +99,24 @@ describe('conversation-store files are not agent-accessible', () => {
     expect(hits).not.toContain('alias.md')
   })
 
+  it('list skips a link that cannot be resolved and keeps its siblings', async () => {
+    fs.symlinkSync('loop', path.join(root, 'loop'))
+    fs.symlinkSync('notes.md/child', path.join(root, 'through-file'))
+    fs.symlinkSync('missing', path.join(root, 'dangling'))
+    const workspace = new WorkspaceService(root)
+    const names = (await workspace.list()).map(e => e.name)
+    // Witness: the ordinary files and the dangling link stay listed.
+    expect(names).toEqual(expect.arrayContaining(['mystate.db.txt', 'notes.md', 'dangling']))
+    // ELOOP and ENOTDIR omit only their own entry.
+    expect(names).not.toContain('loop')
+    expect(names).not.toContain('through-file')
+    for (const p of PROTECTED) expect(names).not.toContain(p)
+
+    const all = await workspace.listAll()
+    expect(all).toEqual(expect.arrayContaining(['mystate.db.txt', 'notes.md']))
+    for (const p of PROTECTED) expect(all).not.toContain(p)
+  })
+
   it('file_read and file_write deny them, directly and through a symlink', async () => {
     const reader = new FileReadTool(root)
     const writer = new FileWriteTool(root)
@@ -126,17 +144,20 @@ describe('conversation-store files are not agent-accessible', () => {
       return new ShellTool(root, 5000, ['PATH'])
     }
 
-    it.each(['cat state.db.pre-1.bak', 'cat state.db-wal', 'echo y > state.db.pre-2.bak'])(
-      'rejects by name: %s',
-      async command => {
-        const out = await shell().execute({ command })
-        expect(out.is_error).toBe(true)
-        expect(out.content).toContain('Command rejected')
-        expect(out.content).not.toContain(STORE_BYTES)
-        storeFilesUntouched()
-        expect(fs.existsSync(path.join(root, 'state.db.pre-2.bak'))).toBe(false)
-      }
-    )
+    it.each([
+      'cat state.db.pre-1.bak',
+      'cat state.db-wal',
+      'echo y > state.db.pre-2.bak',
+      'cat state.db_old',
+      'cat state.db2',
+    ])('rejects by name: %s', async command => {
+      const out = await shell().execute({ command })
+      expect(out.is_error).toBe(true)
+      expect(out.content).toContain('Command rejected')
+      expect(out.content).not.toContain(STORE_BYTES)
+      storeFilesUntouched()
+      expect(fs.existsSync(path.join(root, 'state.db.pre-2.bak'))).toBe(false)
+    })
 
     it('runs commands on the lookalike and the ordinary file', async () => {
       const out = await shell().execute({

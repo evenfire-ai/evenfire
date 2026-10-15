@@ -232,6 +232,58 @@ describe('PersistQueue', () => {
     expect(failures).toHaveLength(1)
   })
 
+  it('keeps a slow async write pending past asyncTimeoutMs and its key ordered until the ACK', async () => {
+    const worker = new FakeWorker()
+    const failures: Error[] = []
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 500,
+      asyncTimeoutMs: 20,
+      onFailure: err => failures.push(err),
+    })
+    q.enqueueAsync('s1', { kind: 'ping' })
+    q.enqueueAsync('s1', { kind: 'ping' })
+    await Promise.resolve()
+    // Liveness witness: the first write was posted.
+    expect(worker.sent).toHaveLength(1)
+    await new Promise(r => setTimeout(r, 80))
+    // Past the threshold: still pending, the second write still queued behind it.
+    expect(failures).toHaveLength(0)
+    expect(worker.sent).toHaveLength(1)
+
+    worker.emit('message', { id: worker.sent[0].id, ok: true, result: null } satisfies WorkerReply)
+    await new Promise(r => setImmediate(r))
+    expect(worker.sent).toHaveLength(2)
+    worker.emit('message', { id: worker.sent[1].id, ok: true, result: null } satisfies WorkerReply)
+    await q.drainSessionKey('s1')
+    expect(failures).toHaveLength(0)
+    // A later write on the same key is still admitted.
+    q.enqueueAsync('s1', { kind: 'ping' })
+    await Promise.resolve()
+    expect(worker.sent).toHaveLength(3)
+  })
+
+  it('bounds the close() drain of an unacknowledged async write by asyncTimeoutMs', async () => {
+    const worker = new FakeWorker()
+    const failures: Error[] = []
+    const exits: number[] = []
+    worker.on('exit', code => exits.push(code))
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 500,
+      asyncTimeoutMs: 20,
+      onFailure: err => failures.push(err),
+    })
+    q.enqueueAsync('s1', { kind: 'ping' })
+    await Promise.resolve()
+    expect(worker.sent).toHaveLength(1)
+    const started = Date.now()
+    await expect(q.close()).rejects.toThrow(/not acknowledged within 20ms of close/)
+    expect(Date.now() - started).toBeLessThan(400)
+    // The worker was terminated and the failure reported once.
+    expect(exits).toEqual([0])
+    expect(failures).toHaveLength(1)
+    expect(worker.sent.map(m => m.op.kind)).toEqual(['ping'])
+  })
+
   it('reports neither onFailure nor onExit for the worker exit that follows a shutdown ACK', async () => {
     const worker = new FakeWorker()
     const failures: Error[] = []

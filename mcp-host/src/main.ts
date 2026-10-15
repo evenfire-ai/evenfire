@@ -251,6 +251,8 @@ let agent: AgentStateMachine | null = null
 let cronScheduler: CronScheduler | null = null
 let sessionProcessor: SessionProcessor | null = null
 let isShuttingDown = false
+/** Bound on the reporter flush that precedes a persist-failure exit 1. */
+const PERSIST_FAILURE_FLUSH_TIMEOUT_MS = 5_000
 let mcpInitializationGeneration = 0
 // Stage 3 (stateless-agents) — heartbeat emitter + DRAINING fence holder.
 let statelessHeartbeat: StatelessHeartbeat | null = null
@@ -1629,7 +1631,18 @@ async function initializeConversationStore(): Promise<ConversationStoreHandle | 
     heartbeatMs: config.dbWorkerHeartbeatMs,
     pendingApprovalTtlMs: config.pendingApprovalTtlMs,
     barrierMode,
-    onPersistFailure: exitOnPersistFailure(() => isShuttingDown),
+    onPersistFailure: exitOnPersistFailure(() => isShuttingDown, {
+      // Flush buffered usage and governed-run events before the exit 1.
+      // Marking the Host as shutting down keeps a SIGTERM during the flush
+      // from running the graceful path, which exits 0.
+      beforeExit: async () => {
+        isShuttingDown = true
+        usageReporter?.stop()
+        governedRunReporter?.stop()
+        await Promise.all([usageReporter?.drain(), governedRunReporter?.drain()])
+      },
+      beforeExitTimeoutMs: PERSIST_FAILURE_FLUSH_TIMEOUT_MS,
+    }),
   })
 
   agent.setConversationStore(handle.store)

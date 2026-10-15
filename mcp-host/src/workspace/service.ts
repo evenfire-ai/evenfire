@@ -316,8 +316,9 @@ export class WorkspaceService implements Workspace {
       const absPath = path.join(resolved, entry.name)
       // A symlink with a harmless name can resolve to store data; the listing
       // omits it as read and write already deny it. A dangling link reaches no
-      // file and stays listed.
-      if (await this.resolvesToProtectedPath(absPath, realWorkspaceRoot)) continue
+      // file and stays listed. A link that cannot be resolved (a loop, a path
+      // through a file) is omitted without hiding its siblings.
+      if (await this.omitFromListing(absPath, realWorkspaceRoot)) continue
       let size: number | undefined
       let modifiedAt: string | undefined
       try {
@@ -338,16 +339,12 @@ export class WorkspaceService implements Workspace {
     return results
   }
 
-  private async resolvesToProtectedPath(
-    absPath: string,
-    realWorkspaceRoot: string
-  ): Promise<boolean> {
+  private async omitFromListing(absPath: string, realWorkspaceRoot: string): Promise<boolean> {
     let realPath: string
     try {
       realPath = await fs.realpath(absPath)
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false
-      throw err
+      return (err as NodeJS.ErrnoException).code !== 'ENOENT'
     }
     return isProtectedRealPath(realPath, realWorkspaceRoot)
   }
