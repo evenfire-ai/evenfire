@@ -206,7 +206,7 @@ delete producer data.
 The final checked-in command and physical suite remain:
 
 ```sh
-bash scripts/ci/run-pr1056-private-recovery-postgres.sh configured
+bash scripts/ci/run-password-recovery-private-postgres.sh configured
 ```
 
 It selects exactly
@@ -228,7 +228,7 @@ producer revision, permitted data effects and cleanup result.
 
 `local` is a separate real-producer lane requiring the Member Registration source
 checkout, installed `tsx`, two disposable databases and the built HTTP child;
-see [private runner reference](pr1056-private-recovery-postgres.md). It is not
+see [private runner reference](password-recovery-private-postgres.md). It is not
 configured-producer or email-delivery evidence. Do not run `all` merely to obtain
 a green status without both lanes' explicit authorization.
 

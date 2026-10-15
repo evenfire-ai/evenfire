@@ -24,9 +24,9 @@ node scripts/ci/password-recovery-suite-contract.mjs verify
 Run the producer-backed lane from the Evenfire repository root:
 
 ```sh
-scripts/ci/run-pr1056-private-recovery-postgres.sh local
-scripts/ci/run-pr1056-private-recovery-postgres.sh configured
-scripts/ci/run-pr1056-private-recovery-postgres.sh all
+bash scripts/ci/run-password-recovery-private-postgres.sh local
+bash scripts/ci/run-password-recovery-private-postgres.sh configured
+bash scripts/ci/run-password-recovery-private-postgres.sh all
 ```
 
 `local` runs `control-api/test/r4l1.resetPasswordPayload.externalRest.realPostgres.integration.test.ts`.

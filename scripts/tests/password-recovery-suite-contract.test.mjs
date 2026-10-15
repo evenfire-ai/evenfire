@@ -195,7 +195,7 @@ for (const mode of ['local', 'configured']) {
         ])
           mkdirSync(join(fixture, directory), { recursive: true })
         copyFileSync(
-          join(root, 'scripts/ci/run-pr1056-private-recovery-postgres.sh'),
+          join(root, 'scripts/ci/run-password-recovery-private-postgres.sh'),
           join(fixture, 'scripts/ci/runner.sh')
         )
         writeFileSync(

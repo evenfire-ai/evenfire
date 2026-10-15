@@ -7,7 +7,7 @@ MODE="${1:-all}"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/ci/run-pr1056-private-recovery-postgres.sh [local|configured|all]
+Usage: scripts/ci/run-password-recovery-private-postgres.sh [local|configured|all]
 
 local      Run the R4-L1 test, which starts the local Member Registration producer.
 configured Run the BUG-192 test against an already running Member Registration producer.
