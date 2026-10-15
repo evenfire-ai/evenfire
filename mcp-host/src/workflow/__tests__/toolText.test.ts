@@ -138,6 +138,15 @@ describe('printedForms', () => {
     expect(asKey).toContain('probe-redaction-value')
   })
 
+  it('reads brackets and links that never close in linear time', () => {
+    // A quadratic pattern takes tens of seconds on these.
+    for (const text of ['['.repeat(200_000), '[a '.repeat(70_000), '](a "'.repeat(40_000)]) {
+      const started = Date.now()
+      printedForms({ text })
+      expect(Date.now() - started).toBeLessThan(2000)
+    }
+  })
+
   it('reads keys nested absurdly deep without overflowing the stack', () => {
     let deep: unknown = { 'k\u0007': 'v' }
     for (let i = 0; i < 10_000; i++) deep = { n: deep }

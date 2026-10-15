@@ -65,16 +65,32 @@ export function cleanToolArgs<T>(value: T, depth = 0): T {
   return out as T
 }
 
-/** Characters the document renderers draw as nothing, bidi controls among them. */
-const INVISIBLE = /[\u00AD\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g
+/**
+ * Characters a viewer draws as nothing (Unicode's default ignorables): bidi
+ * controls, joiners, variation selectors, tags and the like.
+ */
+const INVISIBLE = /\p{Default_Ignorable_Code_Point}/gu
 
 /**
  * Markdown link syntax a viewer does not print: a destination of any kind
- * ("](#notes)", "](notes.md)", "](<a b.md> \"title\")"), a reference ("][r]"),
- * a reference definition line and the brackets around a label.
+ * with its title ("](#notes)", "]( notes.md 'title')", "](<a b.md> (title))"),
+ * a reference ("][r]"), a reference definition and the brackets around a
+ * label. The text it runs on has its lines folded, so a definition is matched
+ * wherever it stands, up to its title. Whitespace sits where only one
+ * alternative can take it, and a label stops at the next bracket, so the
+ * pattern stays linear.
  */
-const LINK_SYNTAX =
-  /\]\((?:<[^>\n]*>|[^\s()]*(?:\([^\s()]*\))*)(?:\s+"[^"\n]*")?\)|\]\[[^\]\n]*\]|^[ \t]*\[[^\]\n]+\]:.*$|[[\]]/gm
+const LINK_TITLE = String.raw`(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\))`
+const LINK_DESTINATION = String.raw`(?:<[^>\n]*>|(?:[^\s()]|\([^\s()]*\))+)`
+const LINK_SYNTAX = new RegExp(
+  [
+    String.raw`\]\([ \t]*(?:${LINK_DESTINATION}(?:[ \t]+(?:${LINK_TITLE}[ \t]*)?)?)?\)`,
+    String.raw`\]\[[^\]\n]*\]`,
+    String.raw`\[[^[\]\n]+\]:[ \t]*(?:<[^>\n]*>|\S+)(?:[ \t]+${LINK_TITLE})?`,
+    String.raw`[[\]]`,
+  ].join('|'),
+  'g'
+)
 
 /** A backslash before ASCII punctuation, which markdown prints as that character. */
 const MARKDOWN_ESCAPE = /\\([!-/:-@[-`{-~])/g

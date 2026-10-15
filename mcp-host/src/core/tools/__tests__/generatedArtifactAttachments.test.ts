@@ -735,7 +735,15 @@ describe('generated internal artifact attachments', () => {
       ['a relative link', 'probe-[redaction](notes.md)-value'],
       ['an angle-bracket destination', 'probe-[redaction](<notes page.md>)-value'],
       ['a reference link', 'probe-[redaction][r]-value\n\n[r]: https://a.example'],
+      ['a link titled in single quotes', "probe-[redaction](#a 'x')-value"],
+      ['a link titled in parentheses', 'probe-[redaction](#a (x))-value'],
+      ['a destination after a space', 'probe-[redaction]( #a )-value'],
+      ['a destination holding parentheses', 'probe-[redaction](a(b)c)-value'],
+      ['a link after a reference definition', '[r]: #x\n\nprobe-[redaction](#a)-value'],
       ['a bidi control', 'probe-red\u202aaction-value'],
+      ['the Arabic letter mark', 'probe-red\u061caction-value'],
+      ['a combining grapheme joiner', 'probe-red\u034faction-value'],
+      ['a tag character', 'probe-red\u{e0041}action-value'],
     ])(
       'does not attach markdown that splits a protected value with %s',
       async (_label, content) => {
