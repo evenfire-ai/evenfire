@@ -1,7 +1,7 @@
 /** KPI and people cards. */
 import { type DrawContext, fitOrShorten, hex } from './pptxDraw'
 import { type PptxKpi } from './pptxInput'
-import { type Box, type PlannedSlide } from './pptxLayout'
+import { type Box, type PlanOf } from './pptxLayout'
 import { type Slide, addText } from './pptxRuns'
 import { TEXT_INSET_X, TEXT_INSET_Y, fitText, lineHeightIn, textWidth } from './pptxText'
 
@@ -189,8 +189,8 @@ function drawCard(
   }
 }
 
-export function drawKpis(slide: Slide, planned: PlannedSlide, ctx: DrawContext): void {
-  const cards = planned.kpis!
+export function drawKpis(slide: Slide, planned: PlanOf<'kpis'>, ctx: DrawContext): void {
+  const cards = planned.kpis
   const body = planned.body
   // One row up to four cards, then two rows with the longer one first:
   // five cards are three and two, not four and one.

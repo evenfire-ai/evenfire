@@ -1,5 +1,11 @@
 /** Slide planning: frames, title blocks and how lists and tables split across slides. */
-import { type PptxKpi, type PptxSlide, fieldPath } from './pptxInput'
+import {
+  type PptxKpi,
+  type PptxSlide,
+  type SlideLayout,
+  type SlideOf,
+  fieldPath,
+} from './pptxInput'
 import { type TableLayout, layoutTable } from './pptxTables'
 import {
   TEXT_INSET_X,
@@ -80,13 +86,37 @@ function bodyBox(frame: Frame, title: TitleBlock | undefined): Box {
 }
 
 /** One slide as it will be drawn, after lists and tables are split into pages. */
-export interface PlannedSlide {
-  spec: PptxSlide
+interface PlanCommon {
   title?: TitleBlock
   body: Box
-  bullets?: { items: string[]; size: number }
-  table?: { layout: TableLayout; page: number }
-  kpis?: PptxKpi[]
+}
+
+/** Layouts drawn on one slide whatever their content. */
+type SingleLayout = Exclude<SlideLayout, 'title-bullets' | 'title-table' | 'kpis'>
+
+/**
+ * One slide to draw: its spec, and for a layout that runs over several slides
+ * the part on this one, which it always has.
+ */
+export type PlannedSlide = PlanCommon &
+  (
+    | { spec: SlideOf<'title-bullets'>; bullets: { items: string[]; size: number } }
+    | { spec: SlideOf<'title-table'>; table: { layout: TableLayout; page: number } }
+    | { spec: SlideOf<'kpis'>; kpis: PptxKpi[] }
+    | { spec: SlideOf<SingleLayout> }
+  )
+
+/** The plan of a slide of `layout`. */
+export type PlanOf<L extends SlideLayout> = L extends SingleLayout
+  ? PlanCommon & { spec: SlideOf<L> }
+  : Extract<PlannedSlide, { spec: { layout: L } }>
+
+/** Whether `planned` is a slide of `layout`, as a type guard. */
+export function isPlanOf<L extends SlideLayout>(
+  planned: PlannedSlide,
+  layout: L
+): planned is PlanOf<L> {
+  return planned.spec.layout === layout
 }
 
 interface ListPlan {
@@ -173,7 +203,7 @@ export function planSlide(spec: PptxSlide, frame: Frame, warnings: string[]): Pl
   const titleFor = (text: string | undefined) =>
     titled && text ? layoutTitle(text, frame, fieldPath(spec, 'title'), warnings) : undefined
 
-  if (spec.layout === 'title-bullets' && spec.bullets) {
+  if (spec.layout === 'title-bullets') {
     let title = titleFor(spec.title)
     let body = bodyBox(frame, title)
     let list = planBullets(spec.bullets, body, frame, fieldPath(spec, 'bullets'), [])
@@ -198,7 +228,7 @@ export function planSlide(spec: PptxSlide, frame: Frame, warnings: string[]): Pl
     }))
   }
 
-  if (spec.layout === 'title-table' && spec.table) {
+  if (spec.layout === 'title-table') {
     let title = titleFor(spec.title)
     let body = bodyBox(frame, title)
     let layout = layoutTable(spec.table, body, frame.wide, fieldPath(spec, 'table'), [])
@@ -216,7 +246,7 @@ export function planSlide(spec: PptxSlide, frame: Frame, warnings: string[]): Pl
     }))
   }
 
-  if (spec.layout === 'kpis' && spec.kpis) {
+  if (spec.layout === 'kpis') {
     const n = Math.ceil(spec.kpis.length / KPIS_PER_SLIDE)
     if (n > 1) {
       warnings.push(
@@ -232,7 +262,7 @@ export function planSlide(spec: PptxSlide, frame: Frame, warnings: string[]): Pl
         spec,
         title,
         body: bodyBox(frame, title),
-        kpis: spec.kpis!.slice(i * perSlide, (i + 1) * perSlide),
+        kpis: spec.kpis.slice(i * perSlide, (i + 1) * perSlide),
       }
     })
   }

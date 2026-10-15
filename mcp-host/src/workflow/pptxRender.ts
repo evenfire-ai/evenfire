@@ -2,14 +2,16 @@
 import { hasRtlLetter } from './docxScript'
 import { nativeChartArgs } from './pptxCharts'
 import { type DrawContext, fitOrShorten, hex } from './pptxDraw'
-import { type PptxColumn, type PptxSlide, fieldPath } from './pptxInput'
+import { type PptxColumn, type PptxSlide, type SlideOf, fieldPath } from './pptxInput'
 import { drawKpis } from './pptxKpiCards'
 import {
   BULLET_INDENT,
   BULLET_SPACE_AFTER,
   type Box,
+  type PlanOf,
   type PlannedSlide,
   type TitleBlock,
+  isPlanOf,
 } from './pptxLayout'
 import { addPicture, placePicture } from './pptxPictures'
 import {
@@ -217,8 +219,8 @@ function drawSection(slide: Slide, spec: PptxSlide, ctx: DrawContext): void {
   }
 }
 
-function drawBullets(slide: Slide, planned: PlannedSlide, ctx: DrawContext): void {
-  const list = planned.bullets!
+function drawBullets(slide: Slide, planned: PlanOf<'title-bullets'>, ctx: DrawContext): void {
+  const list = planned.bullets
   slide.addText(bulletRuns(slide, list.items), {
     ...planned.body,
     fontSize: list.size,
@@ -275,9 +277,9 @@ function sameText(a: string | undefined, b: string | undefined): boolean {
   return (a ?? '').trim().toLowerCase() === (b ?? '').trim().toLowerCase()
 }
 
-function drawChart(slide: Slide, planned: PlannedSlide, ctx: DrawContext): void {
+function drawChart(slide: Slide, planned: PlanOf<'title-chart'>, ctx: DrawContext): void {
   const { spec, body } = planned
-  const chart = spec.chart!
+  const chart = spec.chart
   const caption = captionFor(chart.caption, body.w, `${fieldPath(spec, 'chart')}.caption`, ctx)
   const area = { ...body, h: body.h - (caption ? caption.h + 0.05 : 0) }
   let bottom = area.y + area.h
@@ -315,8 +317,8 @@ function drawChart(slide: Slide, planned: PlannedSlide, ctx: DrawContext): void 
   if (caption) drawCaption(slide, caption, body.x, bottom + 0.05, body.w, ctx)
 }
 
-function drawTable(slide: Slide, planned: PlannedSlide, ctx: DrawContext): void {
-  const { layout, page } = planned.table!
+function drawTable(slide: Slide, planned: PlanOf<'title-table'>, ctx: DrawContext): void {
+  const { layout, page } = planned.table
   const { rows, rowHeights } = layout.pages[page]
   const p = ctx.palette
   const data = rows.map((row, r) =>
@@ -424,21 +426,21 @@ function drawColumn(
   }
 }
 
-function drawTwoColumn(slide: Slide, planned: PlannedSlide, ctx: DrawContext): void {
+function drawTwoColumn(slide: Slide, planned: PlanOf<'two-column'>, ctx: DrawContext): void {
   const { body, spec } = planned
   const gap = 0.4
   const colW = (body.w - gap) / 2
-  drawColumn(slide, spec.columns!.left, { ...body, w: colW }, `${spec.where}.columns.left`, ctx)
+  drawColumn(slide, spec.columns.left, { ...body, w: colW }, `${spec.where}.columns.left`, ctx)
   drawColumn(
     slide,
-    spec.columns!.right,
+    spec.columns.right,
     { ...body, x: body.x + colW + gap, w: colW },
     `${spec.where}.columns.right`,
     ctx
   )
 }
 
-function drawImage(slide: Slide, planned: PlannedSlide, ctx: DrawContext): void {
+function drawImage(slide: Slide, planned: PlanOf<'image'>, ctx: DrawContext): void {
   const { body, spec } = planned
   const picture = spec.picture
   if (!picture) return
@@ -453,9 +455,9 @@ function drawImage(slide: Slide, planned: PlannedSlide, ctx: DrawContext): void 
   if (caption) drawCaption(slide, caption, body.x, box.y + box.h + 0.05, body.w, ctx)
 }
 
-function drawQuote(slide: Slide, spec: PptxSlide, ctx: DrawContext): void {
+function drawQuote(slide: Slide, spec: SlideOf<'quote'>, ctx: DrawContext): void {
   const { frame, palette } = ctx
-  const quote = spec.quote!
+  const quote = spec.quote
   addText(
     slide,
     '“',
@@ -528,26 +530,14 @@ export function drawFooter(
 }
 
 export function drawSlide(slide: Slide, planned: PlannedSlide, ctx: DrawContext): void {
-  const { spec } = planned
   if (planned.title) drawTitle(slide, planned.title, ctx)
-  switch (spec.layout) {
-    case 'cover':
-      return drawCover(slide, spec, ctx)
-    case 'section':
-      return drawSection(slide, spec, ctx)
-    case 'title-bullets':
-      return drawBullets(slide, planned, ctx)
-    case 'title-chart':
-      return drawChart(slide, planned, ctx)
-    case 'title-table':
-      return drawTable(slide, planned, ctx)
-    case 'kpis':
-      return drawKpis(slide, planned, ctx)
-    case 'two-column':
-      return drawTwoColumn(slide, planned, ctx)
-    case 'image':
-      return drawImage(slide, planned, ctx)
-    case 'quote':
-      return drawQuote(slide, spec, ctx)
-  }
+  if (isPlanOf(planned, 'cover')) return drawCover(slide, planned.spec, ctx)
+  if (isPlanOf(planned, 'section')) return drawSection(slide, planned.spec, ctx)
+  if (isPlanOf(planned, 'title-bullets')) return drawBullets(slide, planned, ctx)
+  if (isPlanOf(planned, 'title-chart')) return drawChart(slide, planned, ctx)
+  if (isPlanOf(planned, 'title-table')) return drawTable(slide, planned, ctx)
+  if (isPlanOf(planned, 'kpis')) return drawKpis(slide, planned, ctx)
+  if (isPlanOf(planned, 'two-column')) return drawTwoColumn(slide, planned, ctx)
+  if (isPlanOf(planned, 'image')) return drawImage(slide, planned, ctx)
+  if (isPlanOf(planned, 'quote')) return drawQuote(slide, planned.spec, ctx)
 }

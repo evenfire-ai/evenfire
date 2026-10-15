@@ -80,27 +80,44 @@ export interface PptxColumn {
   picture?: PptxPicture
 }
 
-export interface PptxSlide {
-  layout: SlideLayout
+/** What a slide of any layout may carry besides its content. */
+interface SlideCommon {
   /** Where the slide came from, as the model wrote it: "slides[2]", or "data" for a template. */
   where: string
   title?: string
   eyebrow?: string
   subtitle?: string
   status?: Status
-  bullets?: string[]
-  table?: PptxTable
-  kpis?: PptxKpi[]
-  /** People cards: the name large, the role under it. */
-  kpiStyle?: 'people'
-  chart?: PptxChart
-  picture?: PptxPicture
-  quote?: { text: string; attribution?: string }
-  columns?: { left: PptxColumn; right: PptxColumn }
   notes?: string
   /** Argument paths of fields that did not come from `${where}.<field>`, for messages. */
   paths?: Record<string, string>
 }
+
+/** A slide: its layout and the content that layout draws, which it always has. */
+export type PptxSlide = SlideCommon &
+  (
+    | { layout: 'cover' }
+    | { layout: 'section' }
+    | { layout: 'title-bullets'; bullets: string[] }
+    | { layout: 'title-chart'; chart: PptxChart }
+    | { layout: 'title-table'; table: PptxTable }
+    | {
+        layout: 'kpis'
+        kpis: PptxKpi[]
+        /** People cards: the name large, the role under it. */
+        kpiStyle?: 'people'
+      }
+    | { layout: 'two-column'; columns: { left: PptxColumn; right: PptxColumn } }
+    | {
+        layout: 'image'
+        /** Absent when the image could not be embedded: the slide shows its title, and a warning says why. */
+        picture?: PptxPicture
+      }
+    | { layout: 'quote'; quote: { text: string; attribution?: string } }
+  )
+
+/** The slide of `layout`. */
+export type SlideOf<L extends SlideLayout> = Extract<PptxSlide, { layout: L }>
 
 /** Argument path of one of a slide's fields, as messages name it. */
 export function fieldPath(slide: PptxSlide, field: string): string {
@@ -490,60 +507,68 @@ function readSlide(raw: unknown, index: number, ctx: ReadContext): PptxSlide {
     )
   }
   const layout = raw.layout as SlideLayout
-  const slide: PptxSlide = {
-    layout,
+  const common: SlideCommon = {
     where,
     title: readText(raw.title, `${where}.title`, TEXT_LIMITS.title, ctx),
     notes: readText(raw.notes, `${where}.notes`, TEXT_LIMITS.notes, ctx),
   }
   const used = LAYOUT_FIELDS[layout]
   if (used.includes('eyebrow')) {
-    slide.eyebrow = readText(raw.eyebrow, `${where}.eyebrow`, TEXT_LIMITS.eyebrow, ctx)
+    common.eyebrow = readText(raw.eyebrow, `${where}.eyebrow`, TEXT_LIMITS.eyebrow, ctx)
   }
   if (used.includes('subtitle')) {
-    slide.subtitle = readText(raw.subtitle, `${where}.subtitle`, TEXT_LIMITS.subtitle, ctx)
+    common.subtitle = readText(raw.subtitle, `${where}.subtitle`, TEXT_LIMITS.subtitle, ctx)
   }
-  if (used.includes('status')) slide.status = readEnum(raw.status, `${where}.status`, STATUSES)
+  if (used.includes('status')) common.status = readEnum(raw.status, `${where}.status`, STATUSES)
 
+  let slide: PptxSlide
   switch (layout) {
     case 'cover':
     case 'section':
-      if (!slide.title) missing(where, layout, 'title', '"..."')
+      if (!common.title) missing(where, layout, 'title', '"..."')
+      slide = { ...common, layout }
       break
-    case 'title-bullets':
-      slide.bullets = readStringList(raw.bullets, `${where}.bullets`, TEXT_LIMITS.bullet, ctx)
-      if (!slide.bullets?.length) missing(where, layout, 'bullets', '["...", "..."]')
+    case 'title-bullets': {
+      const bullets = readStringList(raw.bullets, `${where}.bullets`, TEXT_LIMITS.bullet, ctx)
+      if (!bullets?.length) missing(where, layout, 'bullets', '["...", "..."]')
+      slide = { ...common, layout, bullets }
       break
+    }
     case 'title-chart':
       if (raw.chart === undefined) missing(where, layout, 'chart', '{"path": "sales.png"}')
-      slide.chart = readChart(raw.chart, `${where}.chart`, ctx)
+      slide = { ...common, layout, chart: readChart(raw.chart, `${where}.chart`, ctx) }
       break
     case 'title-table':
       if (raw.table === undefined)
         missing(where, layout, 'table', '{"headers": [...], "rows": [[...]]}')
-      slide.table = readTable(raw.table, `${where}.table`, ctx)
+      slide = { ...common, layout, table: readTable(raw.table, `${where}.table`, ctx) }
       break
-    case 'kpis':
+    case 'kpis': {
       if (raw.kpis === undefined)
         missing(where, layout, 'kpis', '[{"label": "...", "value": "..."}]')
-      slide.kpis = readKpis(raw.kpis, `${where}.kpis`, ctx)
-      if (slide.kpis.length === 0)
-        missing(where, layout, 'kpis', '[{"label": "...", "value": "..."}]')
+      const kpis = readKpis(raw.kpis, `${where}.kpis`, ctx)
+      if (kpis.length === 0) missing(where, layout, 'kpis', '[{"label": "...", "value": "..."}]')
+      slide = { ...common, layout, kpis }
       break
+    }
     case 'two-column': {
       const cols = raw.columns
       if (!isRecord(cols) || cols.left === undefined || cols.right === undefined) {
         missing(where, layout, 'columns', '{"left": {...}, "right": {...}}')
       }
-      slide.columns = {
-        left: readColumn(cols.left, `${where}.columns.left`, ctx),
-        right: readColumn(cols.right, `${where}.columns.right`, ctx),
+      slide = {
+        ...common,
+        layout,
+        columns: {
+          left: readColumn(cols.left, `${where}.columns.left`, ctx),
+          right: readColumn(cols.right, `${where}.columns.right`, ctx),
+        },
       }
       break
     }
     case 'image':
       if (raw.image === undefined) missing(where, layout, 'image', '{"path": "photo.png"}')
-      slide.picture = readPicture(raw.image, `${where}.image`, ctx)
+      slide = { ...common, layout, picture: readPicture(raw.image, `${where}.image`, ctx) }
       break
     case 'quote': {
       const q = typeof raw.quote === 'string' ? { text: raw.quote } : raw.quote
@@ -551,14 +576,18 @@ function readSlide(raw: unknown, index: number, ctx: ReadContext): PptxSlide {
         ? readText(q.text, `${where}.quote.text`, TEXT_LIMITS.quote, ctx)
         : undefined
       if (!isRecord(q) || !text) missing(where, layout, 'quote', '{"text": "..."}')
-      slide.quote = {
-        text,
-        attribution: readText(
-          q.attribution,
-          `${where}.quote.attribution`,
-          TEXT_LIMITS.attribution,
-          ctx
-        ),
+      slide = {
+        ...common,
+        layout,
+        quote: {
+          text,
+          attribution: readText(
+            q.attribution,
+            `${where}.quote.attribution`,
+            TEXT_LIMITS.attribution,
+            ctx
+          ),
+        },
       }
       break
     }
