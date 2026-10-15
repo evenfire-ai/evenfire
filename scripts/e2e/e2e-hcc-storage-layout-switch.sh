@@ -20,7 +20,10 @@
 # their Deployments.
 #
 # Scenarios: S1-S7 (plan A7.10), RACE (A7.13), NEG_RV (stale resourceVersion),
-# NEG_CTRL (the history oracle rejects an empty catalog). The final line is
+# NEG_CTRL (the history and chatId-set oracles reject an empty catalog). After
+# every transition the Host must list the same non-empty chatId set as before
+# it and open the same database (its "[ConversationStore] opened" log line);
+# each check prints E2E_825_CONTINUITY. The final line is
 # E2E_825_RESULT=PASS only when every defined scenario ran and passed.
 set -euo pipefail
 umask 077
@@ -248,7 +251,7 @@ pod_storage() {
 # assert_pod NAME STATELESS WORKSPACE_PATH: lifecycle markers of the new Pod
 # match the requested lifecycle and its storage is the one root layout.
 assert_pod() {
-  local name=$1 stateless=$2 path=$3 env_flag priority merge_exit storage
+  local name=$1 stateless=$2 path=$3 env_flag priority merge_exit storage db
   env_flag="$(jq -r '[.spec.containers[] | select(.name == "mcp-host") | .env[]? | select(.name == "CLERUM_STATELESS_LIFECYCLE") | .value] | first // ""' <<<"$POD_JSON")"
   priority="$(jq -r '.spec.priorityClassName // ""' <<<"$POD_JSON")"
   if [ "$stateless" = true ]; then
@@ -270,7 +273,27 @@ assert_pod() {
     return 1
   fi
   printf '%s' "$storage" >"${SCRATCH}/${name}.storage"
-  ok "${name}: Pod ${POD_UID:0:8} stateless=${stateless}, root layout at ${path}, merge exit 0"
+  db="$(store_path "$name")" || return 1
+  [ "$db" = "${path}/state.db" ] || { fail "${name}: mcp-host opened ${db}, expected ${path}/state.db"; return 1; }
+  if [ -s "${SCRATCH}/${name}.dbpath" ] && [ "$(cat "${SCRATCH}/${name}.dbpath")" != "$db" ]; then
+    fail "${name}: store changed across the switch: $(cat "${SCRATCH}/${name}.dbpath") -> ${db}"
+    return 1
+  fi
+  printf '%s' "$db" >"${SCRATCH}/${name}.dbpath"
+  ok "${name}: Pod ${POD_UID:0:8} stateless=${stateless}, root layout at ${path}, merge exit 0, store ${db}"
+}
+
+# store_path NAME: the database the running mcp-host opened, read from its one
+# "[ConversationStore] opened" log line (kubectl logs, no exec).
+store_path() {
+  local pod lines
+  pod="$(jq -r '.metadata.name' <<<"$POD_JSON")"
+  lines="$(kctl logs "$pod" -n "$HOST_NS" -c mcp-host |
+    jq -Rr 'fromjson? | select(.msg == "[ConversationStore] opened") | .dbPath')" ||
+    { fail "${1}: could not read the mcp-host log of ${pod}"; return 1; }
+  [ -n "$lines" ] && [ "$(wc -l <<<"$lines" | tr -d ' ')" = 1 ] ||
+    { fail "${1}: expected one store-opened line in ${pod}, got: ${lines:-<none>}"; return 1; }
+  printf '%s' "$lines"
 }
 
 # switch_and_witness NAME STATELESS: request the switch, then require a new
@@ -299,6 +322,12 @@ history_matches() { # EXPECTED_DIGEST MESSAGES_JSON
 session_listed() { # SESSIONS_JSON HOST THREAD
   jq -e --arg t "$3" --arg a "$2" '[.items[]? | select(.chatId == $t and .agent == $a)] | length == 1' <<<"$1" >/dev/null
 }
+# chat_set SESSIONS_JSON HOST → "<n>:<sorted chatIds>" of the Host's sessions.
+chat_set() {
+  jq -r --arg a "$2" '[.items[]? | select(.agent == $a) | .chatId] | unique | "\(length):\(join(","))"' <<<"$1"
+}
+# chats_match BEFORE AFTER: the same set on both sides, and not an empty one.
+chats_match() { [ "${1%%:*}" -gt 0 ] && [ "$1" = "$2" ]; }
 
 # fetch_messages records nothing; read_messages counts a non-200 as a failure.
 fetch_messages() { # HOST THREAD → HTTP_CODE, HTTP_BODY
@@ -359,16 +388,25 @@ seed_history() {
     read_messages "$host" "$thread" || return 1
     printf '%s %s\n' "$thread" "$(history_digest "$HTTP_BODY")" >>"${SCRATCH}/${host}.threads"
   done
+  rpc GET "${RPC_BASE}/api/v1/rpc/hosts/${host}/sessions?agent=${host}&limit=100" || true
+  [ "$HTTP_CODE" = 200 ] || { fail "${host}: sessions returned ${HTTP_CODE}"; return 1; }
+  chat_set "$HTTP_BODY" "$host" >"${SCRATCH}/${host}.chats"
   ok "${host}: ${threads} conversation(s) x ${turns} turn(s) written"
 }
 
-# assert_history HOST: every recorded conversation is listed and unchanged;
-# then a resume turn is persisted with the next turn number.
+# assert_history HOST TRANSITION: the Host lists the same chatId set as before
+# the transition; every recorded conversation is unchanged; then a resume turn
+# is persisted with the next turn number.
 assert_history() {
-  local host=$1 thread digest sessions next=''
+  local host=$1 transition=$2 thread digest sessions before after next=''
   rpc GET "${RPC_BASE}/api/v1/rpc/hosts/${host}/sessions?agent=${host}&limit=100" || true
   [ "$HTTP_CODE" = 200 ] || { fail "${host}: sessions returned ${HTTP_CODE}"; return 1; }
   sessions="$HTTP_BODY"
+  before="$(cat "${SCRATCH}/${host}.chats")"
+  after="$(chat_set "$sessions" "$host")"
+  chats_match "$before" "$after" ||
+    { fail "${host} ${transition}: chatId set before=${before} after=${after}"; return 1; }
+  echo "E2E_825_CONTINUITY ${host} ${transition} before=${before} after=${after} dbPath=$(cat "${SCRATCH}/${host}.dbpath")"
   while read -r thread digest; do
     session_listed "$sessions" "$host" "$thread" || { fail "${host}/${thread}: not in the session list"; return 1; }
     read_messages "$host" "$thread" || return 1
@@ -552,7 +590,7 @@ suspended_host_with_history() { # NAME
 
 # ─── Scenarios ────────────────────────────────────────────────────────
 scenario_NEG_CTRL() {
-  local digest empty='{"agent":"x","chatId":"y","totalTurns":0,"turns":[]}'
+  local digest set_a empty='{"agent":"x","chatId":"y","totalTurns":0,"turns":[]}'
   local real='{"turns":[{"number":1,"user_input":"a","response":"b"}]}'
   digest="$(history_digest "$real")"
   history_matches "$digest" "$real" || { fail 'NEG_CTRL witness: the oracle rejects a matching history'; return 1; }
@@ -563,7 +601,18 @@ scenario_NEG_CTRL() {
   fi
   session_listed '{"items":[{"agent":"h","chatId":"t"}]}' h t || { fail 'NEG_CTRL witness: list oracle rejects a listed session'; return 1; }
   if session_listed '{"items":[]}' h t; then fail 'NEG_CTRL: the list oracle accepts an empty catalog'; return 1; fi
-  ok 'NEG_CTRL: oracles reject an empty catalog and accept a real one'
+  set_a="$(chat_set '{"items":[{"agent":"h","chatId":"b"},{"agent":"h","chatId":"a"},{"agent":"x","chatId":"c"}]}' h)"
+  [ "$set_a" = '2:a,b' ] || { fail "NEG_CTRL witness: chat_set returned '${set_a}', expected '2:a,b'"; return 1; }
+  chats_match "$set_a" "$set_a" || { fail 'NEG_CTRL witness: the set oracle rejects an equal set'; return 1; }
+  if chats_match "$set_a" "$(chat_set '{"items":[{"agent":"h","chatId":"a"}]}' h)"; then
+    fail 'NEG_CTRL: the set oracle accepts a lost chat'
+    return 1
+  fi
+  if chats_match "$(chat_set '{"items":[]}' h)" "$(chat_set '{"items":[]}' h)"; then
+    fail 'NEG_CTRL: the set oracle accepts an empty set on both sides'
+    return 1
+  fi
+  ok 'NEG_CTRL: oracles reject an empty catalog, a lost chat and empty-on-both-sides, and accept a real one'
 }
 
 scenario_NEG_RV() {
@@ -597,10 +646,10 @@ scenario_S1() {
   seed_history "$name" 3 2 || return 1
   pvc_fixture "$name" rw seed-file "$WRITE_FILE_SCRIPT" "s1 ${RUN}" seed.txt >/dev/null || return 1
   switch_and_witness "$name" true || return 1
-  assert_history "$name" || return 1
+  assert_history "$name" 'stateful->stateless' || return 1
   read_seed_file "$name" seed.txt "s1 ${RUN}" || return 1
   switch_and_witness "$name" false || return 1
-  assert_history "$name" || return 1
+  assert_history "$name" 'stateless->stateful' || return 1
   read_seed_file "$name" seed.txt "s1 ${RUN}"
 }
 
@@ -613,9 +662,9 @@ scenario_S2() {
   assert_pod "$name" true /workspace || return 1
   seed_history "$name" 2 2 || return 1
   switch_and_witness "$name" false || return 1
-  assert_history "$name" || return 1
+  assert_history "$name" 'stateless->stateful' || return 1
   switch_and_witness "$name" true || return 1
-  assert_history "$name"
+  assert_history "$name" 'stateful->stateless'
 }
 
 # S3: a CommunicationChannel makes HCC run the stateless Host as stateful;
@@ -639,13 +688,13 @@ scenario_S3() {
   assert_pod "$name" false /workspace || return 1
   reason="$(kctl get host "$name" -n "$HOST_NS" -o jsonpath='{.status.conditions[?(@.type=="StatelessEnableRejected")].status}')"
   [ "$reason" = True ] || { fail "S3: StatelessEnableRejected is '${reason}', expected True"; return 1; }
-  assert_history "$name" || return 1
+  assert_history "$name" 'stateless->stateful(channel)' || return 1
   kctl delete communicationchannel "$channel" -n "$CHANNEL_NS" --wait=true --timeout=60s >/dev/null ||
     { fail 'S3: CommunicationChannel delete failed'; return 1; }
   old=$POD_UID
   wait_new_ready_pod "$name" "$old" "$POD_READY_TIMEOUT" || return 1
   assert_pod "$name" true /workspace || return 1
-  assert_history "$name"
+  assert_history "$name" 'stateful->stateless(channel-deleted)'
 }
 
 # S4: switch to stateful while suspended, then back to stateless and wake.
@@ -654,14 +703,14 @@ scenario_S4() {
   name="$(truncate_rfc1123 "e2e-825-s4-${RUN}")"
   suspended_host_with_history "$name" || return 1
   switch_and_witness "$name" false || return 1
-  assert_history "$name" || return 1
+  assert_history "$name" 'suspended->stateful' || return 1
   read_seed_file "$name" seed.txt "seed ${RUN}" || return 1
   switch_and_witness "$name" true || return 1
   wait_suspended "$name" || return 1
   post_wake "$name" || return 1
   wait_new_ready_pod "$name" '' "$POD_READY_TIMEOUT" || return 1
   assert_pod "$name" true /workspace || return 1
-  assert_history "$name"
+  assert_history "$name" 'stateless-suspend->wake'
 }
 
 # S5: the inventoried split tree (state/ with a backup, workspace/ with a
@@ -688,7 +737,7 @@ scenario_S5() {
     return 1
   fi
   ok "S5: split tree merged to the root"
-  assert_history "$name" || return 1
+  assert_history "$name" 'suspend->wake(split-tree-merged)' || return 1
   read_seed_file "$name" seed.txt "seed ${RUN}"
 }
 
@@ -748,7 +797,7 @@ scenario_S7() {
   [ "$(grep -vxE 'f \./state\.db-(wal|shm)' <<<"$before")" = "$(grep -vxE 'f \./state\.db-(wal|shm)' <<<"$listing")" ] ||
     { fail 'S7: root entries differ from the tree before the re-split'; diff <(echo "$before") <(echo "$listing") >&2 || true; return 1; }
   ok 'S7: re-split tree merged back to the same root entries'
-  assert_history "$name" || return 1
+  assert_history "$name" 'suspend->wake(re-split-tree-merged)' || return 1
   read_seed_file "$name" seed.txt "seed ${RUN}"
 }
 
