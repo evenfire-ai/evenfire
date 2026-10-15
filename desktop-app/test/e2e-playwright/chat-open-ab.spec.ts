@@ -299,12 +299,17 @@ async function relaunchPaint(
                   transcript
                     .querySelectorAll(messages)
                     [target.chat.count - 1]?.textContent?.includes(target.chat.lastText)))
-            if (ready && !observed.has(target.metric))
+            if (ready && !observed.has(target.metric)) {
               observed.set(target.metric, {
                 at: performance.now(),
                 initial,
                 beforeClick: !clicked,
               })
+              // The test's clicks wait on this, so the witness is not decided by frame timing.
+              ;(window as { __abRelaunchObserved?: string[] }).__abRelaunchObserved = [
+                ...observed.keys(),
+              ]
+            }
           }
           if (observed.size === targets.length && navigation.loadEventEnd > 0) {
             observer.disconnect()
@@ -959,6 +964,13 @@ if (
                     (async () => {
                       await authenticated()
                       await expect(page.locator(row(HOSTS[0], selected.id))).toBeVisible()
+                      // Click only after the in-page observer has recorded the rows; otherwise a
+                      // late animation frame records them after this click.
+                      await page.waitForFunction(() =>
+                        (
+                          window as { __abRelaunchObserved?: string[] }
+                        ).__abRelaunchObserved?.includes('relaunch_rows_ms')
+                      )
                       await page.getByTestId('nav-chat').click()
                       await openChat(page, HOSTS[0], hostLabels[HOSTS[0]]!, selected, untimed)
                     })(),
