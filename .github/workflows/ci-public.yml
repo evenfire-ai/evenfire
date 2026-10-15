@@ -863,6 +863,20 @@ jobs:
       - name: Every image shipping a TLS tool installs ca-certificates
         run: bash scripts/check-dockerfile-ca-certificates.sh
 
+  # ─── Dockerfile font guard ────────────────────────────────────────────────
+  # The renderers find their faces by file name and the packages that ship
+  # them are listed in each Dockerfile; an image missing one builds and runs,
+  # and its Arabic, Hebrew or Han text silently loses its face.
+  dockerfile-font-guard:
+    name: Validate mcp-host font packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Every mcp-host image and CI job installs the renderers' fonts
+        run: bash scripts/check-dockerfile-fonts.sh
+      - name: The font check passes complete lists and names what one misses
+        run: bash scripts/tests/test-check-dockerfile-fonts.sh
+
   # ─── Deploy manifest check (public overlays) ──────────────────────────────
   # The public repo carries base + minikube overlays only; the gcp-dev/gcp-prod
   # overlays live in keyper-labs/evenfire-infra and are rendered by infra CI.

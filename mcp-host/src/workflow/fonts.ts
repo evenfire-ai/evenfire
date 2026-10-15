@@ -549,6 +549,26 @@ const MORE_SCRIPT_PREFIXES = [
   'NotoSansEthiopic',
 ]
 
+/** The scripts the fallback faces are there for, each with the faces that draw it. */
+const SCRIPT_FACES: ReadonlyArray<readonly [script: string, prefixes: readonly string[]]> = [
+  ['Arabic', SCRIPT_FALLBACK_PREFIXES.filter(prefix => prefix.includes('Arabic'))],
+  ['Hebrew', SCRIPT_FALLBACK_PREFIXES.filter(prefix => prefix.includes('Hebrew'))],
+  ...MORE_SCRIPT_PREFIXES.map(prefix => [prefix.slice('NotoSans'.length), [prefix]] as const),
+]
+
+/**
+ * The scripts no installed face draws, given which face prefixes resolve and
+ * whether a CJK collection is installed. A script with any face of its own is
+ * not missing, so an image without only the preferred one (Debian has no Noto
+ * Sans Arabic UI) is not reported.
+ */
+export function missingScripts(hasFace: (prefix: string) => boolean, hasCjk: boolean): string[] {
+  const missing = SCRIPT_FACES.filter(([, prefixes]) => !prefixes.some(hasFace)).map(
+    ([script]) => script
+  )
+  return hasCjk ? missing : ['CJK', ...missing]
+}
+
 interface FallbackFamily {
   family: string
   faces: PdfFaces
@@ -622,6 +642,14 @@ function discoverFallbacks(exclude: Set<string>): FallbackFamily[] {
   }
   FALLBACK_PREFIXES.forEach(add)
   MORE_SCRIPT_PREFIXES.forEach(add)
+  const missing = missingScripts(prefix => facesForPrefix(prefix) !== undefined, cjk !== undefined)
+  if (missing.length > 0) {
+    // Once per process: the faces are looked up once (glyphSource).
+    logger.warn(
+      { component: 'fonts', scripts: missing },
+      'No installed face draws these scripts, so PDFs leave their characters out'
+    )
+  }
   return out
 }
 

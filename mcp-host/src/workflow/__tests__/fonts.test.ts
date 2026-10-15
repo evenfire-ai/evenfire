@@ -15,6 +15,7 @@ import {
   asciiStandIn,
   canRender,
   ensureFontsReady,
+  missingScripts,
   pdfFontDescriptors,
   pdfGlyphSource,
   sanitizeForFont,
@@ -69,6 +70,28 @@ describe('font provisioning', () => {
         }
       }
     }
+  })
+})
+
+describe('missingScripts', () => {
+  const ALL = (_prefix: string) => true
+
+  it('reports no script whose preferred face alone is missing', () => {
+    // Debian ships Noto Sans Arabic but not its UI build.
+    expect(missingScripts(prefix => prefix !== 'NotoSansArabicUI', true)).toEqual([])
+    expect(missingScripts(ALL, true)).toEqual([])
+  })
+
+  it('reports a script none of whose faces is installed', () => {
+    expect(missingScripts(prefix => !prefix.includes('Arabic'), true)).toEqual(['Arabic'])
+    expect(missingScripts(ALL, false)).toEqual(['CJK'])
+  })
+
+  it('reports the sixteen further scripts on an image with only the Arabic and Hebrew faces', () => {
+    const alpine = (prefix: string) => /Arabic|Hebrew/.test(prefix)
+    const missing = missingScripts(alpine, true)
+    expect(missing).toHaveLength(16)
+    expect(missing).toEqual(expect.arrayContaining(['Devanagari', 'Thai', 'Ethiopic']))
   })
 })
 
