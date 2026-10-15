@@ -716,17 +716,6 @@ describe('App workspace chat tabs with held Host access', () => {
     )
   }
 
-  async function selectProductionChatTab(live: AppController, chatId: string) {
-    const tabIndex = live.workspaceTabs.tabs.findIndex(
-      tab => tab.kind === 'chat' && tab.chat?.chatId === chatId
-    )
-    expect(tabIndex).toBeGreaterThanOrEqual(0)
-    const buttons = document.querySelectorAll('.chat-view-tab__select')
-    fireEvent.click(buttons[tabIndex]!)
-    await waitFor(() => expect(live.activeChatId).toBe(chatId))
-    await waitFor(() => expect(live.chatMessagesLoading).toBe(false))
-  }
-
   it('keeps a failed selected tab focused when an unrelated tab closes', async () => {
     currentController.workspaceTabs = openChatTab(currentController.workspaceTabs, {
       id: 'chat-d',
