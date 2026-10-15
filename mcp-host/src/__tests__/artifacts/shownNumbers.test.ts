@@ -4,6 +4,7 @@ import {
   isModelledFormatCode,
   renderCount,
   shownForms,
+  showsNumber,
   withoutSeparators,
 } from '../../artifacts/shownNumbers'
 import { CURRENCY_SYMBOLS } from '../../workflow/xlsxCells'
@@ -34,12 +35,17 @@ describe('isModelledFormatCode', () => {
     expect(isModelledFormatCode(code)).toBe(true)
   })
 
-  it.each(['[$-409]yyyy-mm-dd', '[$€-407]#,##0', '[$-de-DE]dd.mm.yyyy', '[$USD-409]0', '[$€]0'])(
-    'reads %s, a currency or a plain locale',
-    code => {
-      expect(isModelledFormatCode(code)).toBe(true)
-    }
-  )
+  it.each([
+    '[$-409]yyyy-mm-dd',
+    '[$€-407]#,##0',
+    '[$-de-DE]dd.mm.yyyy',
+    '[$USD-409]0',
+    '[$€]0',
+    '[$€-x-euro2] #,##0.00',
+    '#,##0.00 [$€-x-euro1]',
+  ])('reads %s, a currency or a plain locale', code => {
+    expect(isModelledFormatCode(code)).toBe(true)
+  })
 
   it('reads built-in 47 as Excel shows it', () => {
     expect(builtinFormatCode(47)).toBe('mm:ss.0')
@@ -75,27 +81,53 @@ describe('isModelledFormatCode', () => {
 })
 
 describe('shownForms', () => {
-  it('shows a date serial as its date, in the code and without separators', () => {
-    expect(shownForms(JAN_2_2026, 'yyyy-mm-dd')).toContain('2026-01-02'.replace(/[.,]/g, ''))
+  it('shows a date serial as its date in the code', () => {
+    expect(shownForms(JAN_2_2026, 'yyyy-mm-dd')).toContain('2026-01-02')
     expect(shownForms(JAN_2_2026, 'dd/mm/yyyy')).toContain('02/01/2026')
-    expect(shownForms(46024.62783564815, 'yyyy-mm-dd hh:mm:ss')).toContain('2026-01-0215:04:05')
+    expect(shownForms(46024.62783564815, 'yyyy-mm-dd hh:mm:ss')).toContain('2026-01-02 15:04:05')
   })
 
   it('shows a built-in short date in the patterns locales use', () => {
     const forms = shownForms(JAN_2_2026, 'mm-dd-yy', true)
-    for (const shown of ['1/2/2026', '2/1/2026', '02012026', '2026-01-02']) {
-      expect(forms).toContain(withoutSeparators(shown))
+    for (const shown of ['1/2/2026', '2/1/2026', '02.01.2026', '2026-01-02']) {
+      expect(forms).toContain(shown)
     }
   })
 
   it('shows grouped digits, and quoted text beside them', () => {
-    expect(shownForms(3141592653, '#,##0')).toEqual(['3141592653'])
+    expect(shownForms(3141592653, '#,##0')).toEqual(['3,141,592,653'])
     expect(shownForms(123456, '"sk-"0')).toEqual(['sk-123456'])
   })
 
   it('shows month names in other languages', () => {
     const forms = shownForms(JAN_2_2026, 'mmm d, yyyy')
-    expect(forms).toEqual(expect.arrayContaining(['Jan22026', 'janv22026', 'ene22026']))
+    expect(forms).toEqual(expect.arrayContaining(['Jan 2, 2026', 'janv. 2, 2026', 'ene 2, 2026']))
+  })
+})
+
+describe('showsNumber', () => {
+  it.each([
+    ['grouped with commas', '3,141,592,653', '3141592653'],
+    ['grouped the German way', '3.141.592.653', '3141592653'],
+    ['grouped with apostrophes', "3'141'592'653", '3141592653'],
+    ['grouped with narrow spaces', '3\u202f141\u202f592\u202f653', '3141592653'],
+    ['grouped the Indian way', '3,14,15,92,653', '3141592653'],
+    ['before a decimal part', '3,141,592,653.00', '3141592653'],
+    ['written in blocks, as a card number is', 'Card 4111 1111 1111 1111', '4111111111111111'],
+    ['inside a longer grouped number', 'Q1 15,432 units', '5432'],
+    ['after a decimal point', '0.1234', '1234'],
+    ['as the secret writes it, separators and all', '1,234.50', '1.234,50'],
+  ])('finds a number shown %s', (_label, text, secret) => {
+    expect(showsNumber(text, secret)).toBe(true)
+  })
+
+  it.each([
+    ['across a decimal point', '54.32%', '5432'],
+    ['from a value that rounds elsewhere', '3,141,592,652.6', '3141592653'],
+    ['across two numbers in a list', '54, 32', '5432'],
+    ['in a secret that is not a number', 'sk-123456', 'sk-123456'],
+  ])('does not read a number %s', (_label, text, secret) => {
+    expect(showsNumber(text, secret)).toBe(false)
   })
 })
 

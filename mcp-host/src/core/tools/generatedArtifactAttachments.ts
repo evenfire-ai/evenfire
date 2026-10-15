@@ -7,13 +7,14 @@ import {
 } from '../../artifacts/artifactBytes'
 import type { ArtifactSecretEntry } from '../../artifacts/artifactRedaction'
 import { OFFICE_PACKAGE_LIMITS, officePackageHasText } from '../../artifacts/officePackageText'
-import { withoutSeparators } from '../../artifacts/shownNumbers'
+import { showsNumber } from '../../artifacts/shownNumbers'
 import { logger } from '../../logger'
 import {
   ArtifactPathError,
   isSafeArtifactFilename,
   openExistingArtifactFile,
 } from '../../workflow/artifactPaths'
+import { withoutWriteTimes } from '../../workflow/officeBoilerplate'
 import { printedForms } from '../../workflow/toolText'
 import type { ArtifactMetadata } from '../../workflow/types'
 import type { Attachment } from '../types'
@@ -69,7 +70,7 @@ type BuildGeneratedArtifactAttachmentParams = {
   packageBoilerplate?: readonly string[]
   /**
    * What the file shows that its arguments do not spell (a chart's drawn
-   * labels), each string as drawn; compared without separators.
+   * labels), each string as drawn; a number is read as any locale writes it.
    */
   shownText?: readonly string[]
   /**
@@ -133,6 +134,11 @@ function warnSkip(
   )
 }
 
+/**
+ * Whether `content` holds an entry: its exact text, or, for an entry that is a
+ * number, that number as any locale writes it ("4111 1111 1111 1111",
+ * "3.141.592.653").
+ */
 function textContainsRedactableSecretEntry(
   content: string,
   entries: ArtifactSecretEntry[]
@@ -140,27 +146,17 @@ function textContainsRedactableSecretEntry(
   if (entries.length === 0) return false
   return entries.some(entry => {
     if (!entry.value || entry.value.length < 4) return false
-    return content.includes(entry.value)
+    return content.includes(entry.value) || showsNumber(content, entry.value)
   })
 }
 
-/**
- * Whether a string the file shows holds an entry, both without separators: a
- * label drawn "3,141,592,653" shows "3141592653" and "3.141.592.653" alike.
- */
+/** Whether a string the file shows (a chart's drawn label) holds an entry. */
 function shownTextHoldsSecretEntry(
   shown: readonly string[] | undefined,
   entries: ArtifactSecretEntry[]
 ): boolean {
   if (!shown?.length) return false
-  const values = entries
-    .map(entry => withoutSeparators(entry.value))
-    .filter(value => value.length >= 4)
-  if (values.length === 0) return false
-  return shown.some(text => {
-    const bare = withoutSeparators(text)
-    return values.some(value => bare.includes(value))
-  })
+  return shown.some(text => textContainsRedactableSecretEntry(text, entries))
 }
 
 /**
@@ -302,24 +298,22 @@ export function buildGeneratedArtifactAttachment(
       // the package is read as delivered. One that cannot be read is withheld.
       const boilerplate = params.packageBoilerplate ?? []
       const packageEntries = secretEntries.filter(
-        entry => !boilerplate.some(text => text.includes(entry.value))
+        entry => !boilerplate.some(text => textContainsRedactableSecretEntry(text, [entry]))
       )
-      // Numbers are compared as shown without separators, so any locale's
-      // grouping of a protected value matches. Every entry counts here: a
-      // number a cell or a chart shows comes from the arguments, never from
-      // the generator's own text.
-      const shownValues = secretEntries
-        .map(entry => withoutSeparators(entry.value))
-        .filter(value => value.length >= 4)
+      // Every entry counts for the numbers a cell or a chart shows: they come
+      // from the arguments, never from the generator's own text.
+      const shownEntries = secretEntries.filter(entry => entry.value && entry.value.length >= 4)
       if (
-        (packageEntries.length > 0 || shownValues.length > 0) &&
+        (packageEntries.length > 0 || shownEntries.length > 0) &&
         OFFICE_PACKAGE_FORMATS.has(expectedFormat)
       ) {
         const found = officePackageHasText(
           fileBuffer,
-          text => textContainsRedactableSecretEntry(text, packageEntries),
+          text => textContainsRedactableSecretEntry(withoutWriteTimes(text), packageEntries),
           OFFICE_PACKAGE_LIMITS,
-          shownValues.length > 0 ? shown => shownValues.some(value => shown.includes(value)) : null
+          shownEntries.length > 0
+            ? shown => textContainsRedactableSecretEntry(shown, shownEntries)
+            : null
         )
         if (found !== false) {
           warnSkip(

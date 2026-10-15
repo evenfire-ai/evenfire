@@ -714,6 +714,44 @@ describe('generated internal artifact attachments', () => {
       expect(calm.attachments ?? []).toHaveLength(1)
     })
 
+    it.each([
+      [
+        'markdown',
+        'clerum__generate_markdown',
+        { filename: 'card.md', content: 'Card 4111 1111 1111 1111' },
+      ],
+      ['a PDF', 'clerum__generate_pdf', { filename: 'card.pdf', body: 'Card 4111 1111 1111 1111' }],
+    ])(
+      'does not attach %s that writes a protected number in groups',
+      async (_label, name, args) => {
+        const result = await toolWith(name, ['4111111111111111']).execute(args)
+        expect(result.is_error).toBe(false)
+        expect(result.attachments ?? []).toHaveLength(0)
+      }
+    )
+
+    it('attaches a chart whose decimal label only runs the digits of a protected number together', async () => {
+      const result = await toolWith('clerum__generate_chart', ['5432']).execute({
+        filename: 'pct.png',
+        type: 'bar',
+        data: { labels: ['54.32%', 'other'], datasets: [{ label: 'S', data: [1, 2] }] },
+      })
+      expect(result.is_error).toBe(false)
+      expect(result.attachments ?? []).toHaveLength(1)
+    })
+
+    it('attaches a document whose only match is the time the generator stamped on it', async () => {
+      // core.xml holds the moment of writing; a protected value of the year is not in the arguments.
+      const year = String(new Date().getUTCFullYear())
+      const result = await toolWith('clerum__generate_docx', [year]).execute({
+        filename: 'stamped.docx',
+        title: 'Report',
+        body: 'Hello',
+      })
+      expect(result.is_error).toBe(false)
+      expect(result.attachments ?? []).toHaveLength(1)
+    })
+
     it("attaches ordinary documents when a protected value is also the generators' own text", async () => {
       const common = ['Office', '1000', 'Calibri', 'General', 'main', 'false', 'solid']
       const calls: Array<[string, Record<string, unknown>]> = [

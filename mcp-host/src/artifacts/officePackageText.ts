@@ -66,7 +66,7 @@ interface ZipEntry {
  * nodes run together, so a value split across runs or cells reads whole, and
  * each attribute value on its own, with character references decoded; then
  * each number a sheet cell or a chart holds, in every form it may be shown,
- * passed to `matchesShown` without separators (shownNumbers.withoutSeparators);
+ * passed to `matchesShown` as shown (match numbers with shownNumbers.showsNumber);
  * null skips them.
  * Embedded packages are read too. Null when the bytes are not a package this
  * reader can read within `limits`, or show a number in a way it does not model

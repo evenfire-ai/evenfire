@@ -2,10 +2,10 @@
  * What a spreadsheet shows for a number under a number format code, so a
  * protected value it displays is found although the file only stores the
  * number: a date serial under a date format, digits under a grouping format or
- * beside quoted text. A spreadsheet renders in its viewer's locale, so a value
- * is compared without separators (any locale's grouping reads the same), with
- * month and day names in English, German, French and Spanish, and, for the
- * built-in short date, in the date patterns locales commonly use.
+ * beside quoted text. A spreadsheet renders in its viewer's locale, so a
+ * protected number is looked for as any locale may write it (showsNumber),
+ * with month and day names in English, German, French and Spanish, and, for
+ * the built-in short date, in the date patterns locales commonly use.
  */
 import type * as Numfmt from 'numfmt'
 
@@ -97,6 +97,8 @@ function isModelledLocale(value: string): boolean {
   const dash = value.indexOf('-')
   if (dash < 0) return true
   const tag = value.slice(dash + 1)
+  // Excel's euro placement tags, which move the symbol and nothing else.
+  if (/^x-euro[12]$/i.test(tag)) return true
   // Ids from 0xF000 are system formats; bytes above 0xFFFF pick a calendar or digits.
   if (/^[0-9A-F]{1,8}$/i.test(tag)) return parseInt(tag, 16) < 0xf000
   return /^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/i.test(tag) && !/-[a-z](?:-|$)/i.test(tag)
@@ -183,9 +185,10 @@ export function renderCount(code: string, shortDate = false): number {
 const memo = new Map<string, string[]>()
 
 /**
- * The ways a viewer may show `value` under `code` (`code` modelled), each
- * without separators. For a built-in short date id, pass `shortDate` to render
- * the common date patterns instead of `code`.
+ * The ways a viewer may show `value` under `code` (`code` modelled), as shown;
+ * compare a protected number with showsNumber, which reads any locale's
+ * grouping. For a built-in short date id, pass `shortDate` to render the
+ * common date patterns instead of `code`.
  */
 export function shownForms(value: number, code: string, shortDate = false): string[] {
   const key = `${shortDate ? 'S' : 'C'}\u0000${code}\u0000${value}`
@@ -194,10 +197,10 @@ export function shownForms(value: number, code: string, shortDate = false): stri
   const nf = numfmt()
   const forms = new Set<string>()
   for (const each of renderedCodes(code, shortDate)) {
-    forms.add(withoutSeparators(nf.format(each, value, { locale: 'en', throws: false })))
+    forms.add(nf.format(each, value, { locale: 'en', throws: false }))
     if (NAMED.test(each)) {
       for (const locale of NAME_LOCALES) {
-        forms.add(withoutSeparators(nf.format(each, value, { locale, throws: false })))
+        forms.add(nf.format(each, value, { locale, throws: false }))
       }
     }
   }
@@ -205,4 +208,98 @@ export function shownForms(value: number, code: string, shortDate = false): stri
   if (memo.size >= MEMO_LIMIT) memo.clear()
   memo.set(key, out)
   return out
+}
+
+/** A run of digits with single separators between them, as a number is shown. */
+const NUMBER_RUN = /\d+(?:[,.'\u2019\u00A0\u202F ]\d+)*/g
+const RUN_PART = /\d+|[,.'\u2019\u00A0\u202F ]/g
+/** Separators that only ever group digits: spaces and apostrophes, never a decimal mark. */
+const BLOCK_SEPARATOR = /^[ \u00A0\u202F'\u2019]$/
+
+/** Whether `groups` are the digit groups of one number as a locale groups thousands. */
+function groupedValidly(groups: string[]): boolean {
+  if (groups.length < 2) return true
+  const [first, ...rest] = groups
+  const last = rest[rest.length - 1]
+  const western = first.length <= 3 && rest.every(group => group.length === 3)
+  // Indian grouping: 3 digits last, 2 in each group before them.
+  const indian =
+    first.length <= 2 &&
+    rest.length >= 2 &&
+    last.length === 3 &&
+    rest.slice(0, -1).every(group => group.length === 2)
+  return western || indian
+}
+
+/** Whether every separator in `separators` is `separators[0]`. */
+function oneSeparator(separators: string[]): boolean {
+  return separators.every(sep => sep === separators[0])
+}
+
+/** The most groups one number is read across: 24 digits in groups of three. */
+const MAX_GROUPS = 8
+
+/**
+ * The digits a stretch of digit groups and the separators between them may
+ * stand for: all of them, where the separators group thousands as some locale
+ * does; those before the last separator, where that one is a decimal point
+ * and the rest group thousands; and, for groups set apart by spaces or
+ * apostrophes only (a card or phone number), all of them as a whole number.
+ * A decimal part is never joined to what comes before it: "54.32" shows 54
+ * and 32, not 5432.
+ */
+function readStretch(groups: string[], separators: string[], within: string[], whole: string[]) {
+  if (oneSeparator(separators) && groupedValidly(groups)) within.push(groups.join(''))
+  const decimal = separators[separators.length - 1]
+  const grouping = separators.slice(0, -1)
+  if (
+    (decimal === '.' || decimal === ',') &&
+    (grouping.length === 0 || (oneSeparator(grouping) && grouping[0] !== decimal)) &&
+    groupedValidly(groups.slice(0, -1))
+  ) {
+    within.push(groups.slice(0, -1).join(''))
+  }
+  if (separators.every(sep => BLOCK_SEPARATOR.test(sep))) whole.push(groups.join(''))
+}
+
+/**
+ * Every reading of a shown run of digits and separators: each group on its
+ * own, and each stretch of up to MAX_GROUPS groups read as one number (a space
+ * may group thousands or just stand between two numbers, as in "Q1 15,432").
+ */
+function readings(run: string): { within: string[]; whole: string[] } {
+  const groups: string[] = []
+  const separators: string[] = []
+  for (const part of run.match(RUN_PART) ?? []) {
+    if (/\d/.test(part)) groups.push(part)
+    else separators.push(part)
+  }
+  const within = [...groups]
+  const whole: string[] = []
+  for (let from = 0; from < groups.length; from++) {
+    for (let to = from + 1; to < Math.min(groups.length, from + MAX_GROUPS); to++) {
+      readStretch(groups.slice(from, to + 1), separators.slice(from, to), within, whole)
+    }
+  }
+  return { within, whole }
+}
+
+/**
+ * Whether `text` shows `secret` as a number, written as any locale writes it.
+ * Only a secret that is a number counts: digits, with separators or not, at
+ * least four of them; any other secret is found by its exact text instead.
+ */
+export function showsNumber(text: string, secret: string): boolean {
+  if (!/^[\d,.'\u2019\u00A0\u202F ]+$/.test(secret)) return false
+  const digits = withoutSeparators(secret)
+  if (digits.length < 4 || !/\d/.test(text)) return false
+  // A secret written with separators may use another locale's decimal mark.
+  const asWritten = digits !== secret
+  for (const run of text.match(NUMBER_RUN) ?? []) {
+    const { within, whole } = readings(run)
+    if (within.some(reading => reading.includes(digits))) return true
+    if (whole.includes(digits)) return true
+    if (asWritten && withoutSeparators(run).includes(digits)) return true
+  }
+  return false
 }

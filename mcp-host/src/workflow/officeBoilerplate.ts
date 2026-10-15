@@ -128,11 +128,18 @@ export function boilerplateTexts(format: OfficeFormat): Promise<string[]> {
   return Promise.race([reference, waited]).finally(() => clearTimeout(timer))
 }
 
+/** When a package was written, which its document properties hold. */
+const WRITE_TIME = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g
+
 /**
- * When the sample was written (its document properties), which no other
- * package shares, so it is no part of the reference.
+ * `text` without the times a generator stamps on the package it writes. They
+ * are no part of the reference, which no other package shares them with, and
+ * no part of what a delivered package is checked for: the generator wrote
+ * them, not the arguments.
  */
-const TIMESTAMP = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g
+export function withoutWriteTimes(text: string): string {
+  return text.replace(WRITE_TIME, '\u0000')
+}
 
 async function writeSample(format: OfficeFormat): Promise<string[]> {
   const sample = SAMPLES[format]
@@ -143,7 +150,7 @@ async function writeSample(format: OfficeFormat): Promise<string[]> {
     if (!result.success || !result.artifact) throw new Error(result.error ?? 'no artifact')
     const texts = officePackageTexts(fs.readFileSync(result.artifact.path))
     if (!texts) throw new Error('the reference package could not be read')
-    return texts.map(text => text.replace(TIMESTAMP, '\u0000'))
+    return texts.map(withoutWriteTimes)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

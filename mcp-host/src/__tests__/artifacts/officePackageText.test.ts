@@ -9,7 +9,7 @@ import {
   officePackageHasText,
   officePackageTexts,
 } from '../../artifacts/officePackageText'
-import { withoutSeparators } from '../../artifacts/shownNumbers'
+import { showsNumber } from '../../artifacts/shownNumbers'
 
 const needle = '3141592653'
 const holds = (text: string) => text.includes(needle)
@@ -143,12 +143,15 @@ function workbook(
   })
 }
 
-/** Matches nothing as stored, and `shown` (without separators) as shown. */
+/** Matches nothing as stored, and `shown` as shown: its text, or the number it writes. */
 function shownOnly(
   shown: string
 ): [(text: string) => boolean, typeof OFFICE_PACKAGE_LIMITS, (text: string) => boolean] {
-  const target = withoutSeparators(shown)
-  return [() => false, OFFICE_PACKAGE_LIMITS, text => text.includes(target)]
+  return [
+    () => false,
+    OFFICE_PACKAGE_LIMITS,
+    text => text.includes(shown) || showsNumber(text, shown),
+  ]
 }
 
 describe('officePackageHasText, numbers as they are shown', () => {
