@@ -1210,6 +1210,9 @@ export function useChatListController({
         // delete a newer rename's marker — that would drop its case-E protection).
         if (pendingRenamesRef.current.get(key) === entry) {
           pendingRenamesRef.current.delete(key)
+          // #1130: without the marker the server title wins the merge, so a
+          // catalog page cached before the rename must not be reused.
+          chatStore.invalidateSessionCatalog(entry.agentRef)
         }
       } catch (error) {
         if (

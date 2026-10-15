@@ -406,10 +406,13 @@ export function useAppController() {
       }
       if (authorityScopeRef.current !== scope || !hostAuthority.release(agentRef, heldAtEpoch))
         return false
+      // #1130: a catalog request made while the Host was held must not be
+      // shared with a reader that starts after the release.
+      invalidateSessionCatalog(agentRef)
       setHostAuthorityRevision(revision => revision + 1)
       return true
     },
-    [agentDisplayName, hostAuthority, pushToast]
+    [agentDisplayName, hostAuthority, invalidateSessionCatalog, pushToast]
   )
   const chat = useAgentChatController({
     selectedAgent: nav.selectedAgent,
