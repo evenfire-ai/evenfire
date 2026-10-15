@@ -1,5 +1,6 @@
 import {
   BrowserWindow,
+  IpcMainEvent,
   IpcMainInvokeEvent,
   Notification,
   app,
@@ -309,7 +310,7 @@ function parseHostMessageRequest(raw: unknown): HostMessageRequest {
   return parsed
 }
 
-export function assertTrustedSender(event: IpcMainInvokeEvent): void {
+export function assertTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): void {
   const senderUrl = String(event.senderFrame?.url || '')
   const devUrl = String(process.env.EVENFIRE_RENDERER_URL || '').trim()
   const isFileSender = senderUrl.startsWith('file://')

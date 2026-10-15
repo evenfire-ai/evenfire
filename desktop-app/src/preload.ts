@@ -143,6 +143,9 @@ const clerum = Object.freeze({
     switch: (teamId: string) => ipcRenderer.invoke('team:switch', { teamId }),
   },
   gfs: {
+    getUserNavigationGeneration: () => ipcRenderer.sendSync('gfs:getUserNavigationGeneration'),
+    advanceUserNavigationGeneration: () =>
+      ipcRenderer.sendSync('gfs:advanceUserNavigationGeneration'),
     listPendingDeepLinks: () => ipcRenderer.invoke('gfs:listPendingDeepLinks'),
     clearPendingDeepLinks: () => ipcRenderer.invoke('gfs:clearPendingDeepLinks'),
     acknowledgeDeepLink: (id: number) => ipcRenderer.invoke('gfs:acknowledgeDeepLink', { id }),

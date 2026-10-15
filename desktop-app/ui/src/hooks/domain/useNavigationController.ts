@@ -6,10 +6,12 @@ import {
   type GfsResourceNavigationRequest,
   assignGfsResourceNavigationOwner,
   canCompleteGfsResourceNavigation,
+  isGfsResourceNavigationActivationCurrent,
   isGfsResourceNavigationOwnerPresent,
 } from '../../lib/gfsResourceNavigationIntent'
 import {
   activeWorkspaceTab,
+  createFilesTab,
   createWorkspaceTabsState,
   newChatTab,
   openChatTab,
@@ -52,12 +54,50 @@ export function useNavigationController() {
   }, [])
   const [navigationIntentSequence, setNavigationIntentSequence] = useState(0)
   const navigationIntentSequenceRef = useRef(0)
-  const beginUserNavigationIntent = useCallback(() => {
+  const userNavigationGenerationRef = useRef<number | null>(null)
+  const currentUserNavigationGeneration = useCallback((): number | null => {
+    if (userNavigationGenerationRef.current !== null) return userNavigationGenerationRef.current
+    try {
+      const generation =
+        typeof window === 'undefined'
+          ? undefined
+          : window.clerum?.gfs?.getUserNavigationGeneration?.()
+      if (typeof generation === 'number' && Number.isSafeInteger(generation) && generation >= 0) {
+        userNavigationGenerationRef.current = generation
+      }
+    } catch {
+      return null
+    }
+    return userNavigationGenerationRef.current
+  }, [])
+  const beginNavigationIntent = useCallback(() => {
     const next = navigationIntentSequenceRef.current + 1
     navigationIntentSequenceRef.current = next
     setNavigationIntentSequence(next)
     return next
   }, [])
+  const beginUserNavigationIntent = useCallback(() => {
+    const advance =
+      typeof window === 'undefined'
+        ? undefined
+        : window.clerum?.gfs?.advanceUserNavigationGeneration
+    if (advance) {
+      const nextGeneration = advance()
+      if (
+        typeof nextGeneration !== 'number' ||
+        !Number.isSafeInteger(nextGeneration) ||
+        nextGeneration < 0
+      ) {
+        throw new Error('The main process returned an invalid GFS navigation generation')
+      }
+      userNavigationGenerationRef.current = nextGeneration
+    } else {
+      // User navigation still proceeds, but deep links fail closed until main
+      // can provide the authoritative cross-process ordering generation.
+      userNavigationGenerationRef.current = null
+    }
+    return beginNavigationIntent()
+  }, [beginNavigationIntent])
   const isNavigationIntentCurrent = useCallback(
     (sequence: number) => navigationIntentSequenceRef.current === sequence,
     []
@@ -220,10 +260,25 @@ export function useNavigationController() {
   )
 
   const beginGfsResourceNavigation = useCallback(
-    (id: number, uri: string, principalGeneration: number): GfsResourceNavigationRequest => {
-      const intentSequence = beginUserNavigationIntent()
+    (
+      id: number,
+      uri: string,
+      principalGeneration: number,
+      userNavigationGenerationAtActivation: number
+    ): GfsResourceNavigationRequest | null => {
+      const currentGeneration = currentUserNavigationGeneration()
+      if (
+        currentGeneration === null ||
+        !isGfsResourceNavigationActivationCurrent(
+          userNavigationGenerationAtActivation,
+          currentGeneration
+        )
+      ) {
+        return null
+      }
+      const intentSequence = beginNavigationIntent()
       const state = workspaceTabsRef.current
-      const owner = assignGfsResourceNavigationOwner(state)
+      const owner = assignGfsResourceNavigationOwner(state, uri)
       return {
         id,
         uri,
@@ -231,30 +286,35 @@ export function useNavigationController() {
         createDestination: owner.createDestination,
         intentSequence,
         principalGeneration,
+        userNavigationGenerationAtActivation,
       }
     },
-    [beginUserNavigationIntent, nextWorkspaceTabId]
+    [beginNavigationIntent, currentUserNavigationGeneration, nextWorkspaceTabId]
   )
 
   const isGfsResourceNavigationCurrent = useCallback(
     (request: GfsResourceNavigationRequest, principalGeneration: number): boolean => {
+      const userNavigationGeneration = currentUserNavigationGeneration()
+      if (userNavigationGeneration === null) return false
       const state = workspaceTabsRef.current
       const context: GfsResourceNavigationContext = {
         intentSequence: navigationIntentSequenceRef.current,
         principalGeneration,
+        userNavigationGeneration,
         activeTabId: state.activeTabId,
         tabs: state.tabs,
       }
       return canCompleteGfsResourceNavigation(request, context)
     },
-    []
+    [currentUserNavigationGeneration]
   )
 
   const activateGfsResourceNavigation = useCallback(
     (request: GfsResourceNavigationRequest, principalGeneration: number): boolean => {
       if (
         !isNavigationIntentCurrent(request.intentSequence) ||
-        request.principalGeneration !== principalGeneration
+        request.principalGeneration !== principalGeneration ||
+        currentUserNavigationGeneration() !== request.userNavigationGenerationAtActivation
       ) {
         return false
       }
@@ -262,7 +322,7 @@ export function useNavigationController() {
       let next: WorkspaceTabsState
       if (request.createDestination) {
         if (state.tabs.some(tab => tab.id === request.ownerTabId)) return false
-        next = openFilesTab(state, { id: request.ownerTabId, path: null })
+        next = createFilesTab(state, { id: request.ownerTabId, path: null })
       } else {
         if (!isGfsResourceNavigationOwnerPresent(request, state.tabs)) return false
         next = selectWorkspaceTab(state, request.ownerTabId)
@@ -272,7 +332,7 @@ export function useNavigationController() {
       setWorkspaceTabs(next)
       return true
     },
-    [isNavigationIntentCurrent, setWorkspaceTabs]
+    [currentUserNavigationGeneration, isNavigationIntentCurrent, setWorkspaceTabs]
   )
 
   const completeGfsResourceNavigationPreview = useCallback(

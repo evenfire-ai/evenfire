@@ -1711,7 +1711,16 @@ export function App() {
         void acknowledgeGfsDeepLink(value.id)
         return
       }
-      const request = vm.beginGfsResourceNavigation(value.id, uri, gfsDeepLinkGenerationRef.current)
+      const request = vm.beginGfsResourceNavigation(
+        value.id,
+        uri,
+        gfsDeepLinkGenerationRef.current,
+        value.userNavigationGenerationAtActivation
+      )
+      if (!request) {
+        void acknowledgeGfsDeepLink(value.id)
+        return
+      }
       setPendingGfsDeepLinkState([...pendingGfsDeepLinksRef.current, request])
     },
     [

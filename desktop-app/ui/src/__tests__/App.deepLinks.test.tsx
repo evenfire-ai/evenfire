@@ -15,6 +15,7 @@ import {
 } from '@lib/gfsResourceNavigationIntent'
 import {
   activeWorkspaceTab,
+  createFilesTab,
   createWorkspaceTabsState,
   newChatTab,
   openChatTab,
@@ -42,15 +43,17 @@ import { GfsResourceDeepLinkQueue } from '../../../src/gfsResourceDeepLinkQueue'
 // rationale.
 let forceControllerRender: () => void = () => {}
 let testNavigationIntentSequence = 0
+let testUserNavigationGeneration = 0
 type WorkspaceState = ReturnType<typeof useAppController>['workspaceTabs']
 
 function produceGfsResourceDeepLink(
   uri: string,
-  queue = new GfsResourceDeepLinkQueue()
+  queue = new GfsResourceDeepLinkQueue(),
+  userNavigationGenerationAtActivation = testUserNavigationGeneration
 ): GfsResourceDeepLinkEnvelope {
   const target = parseGfsResourceDeepLink(buildGfsResourceDeepLink(uri))
   if (!target) throw new Error('The shared producer rejected the GFS resource URI fixture')
-  return queue.enqueue(target)
+  return queue.enqueue(target, userNavigationGenerationAtActivation)
 }
 
 function useReactiveController(controller: AppController): AppController {
@@ -395,6 +398,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   })
   const beginUserNavigationIntent = vi.fn(() => {
     testNavigationIntentSequence += 1
+    testUserNavigationGeneration += 1
     forceControllerRender()
     return testNavigationIntentSequence
   })
@@ -414,10 +418,18 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     return true
   })
   const beginGfsResourceNavigation = vi.fn(
-    (id: number, uri: string, principalGeneration: number): GfsResourceNavigationRequest => {
-      const intentSequence = beginUserNavigationIntent()
+    (
+      id: number,
+      uri: string,
+      principalGeneration: number,
+      userNavigationGenerationAtActivation: number
+    ): GfsResourceNavigationRequest | null => {
+      if (userNavigationGenerationAtActivation !== testUserNavigationGeneration) return null
+      testNavigationIntentSequence += 1
+      forceControllerRender()
+      const intentSequence = testNavigationIntentSequence
       const state = controller.workspaceTabs
-      const owner = assignGfsResourceNavigationOwner(state)
+      const owner = assignGfsResourceNavigationOwner(state, uri)
       return {
         id,
         uri,
@@ -425,6 +437,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
         createDestination: owner.createDestination,
         intentSequence,
         principalGeneration,
+        userNavigationGenerationAtActivation,
       }
     }
   )
@@ -433,6 +446,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
       canCompleteGfsResourceNavigation(request, {
         intentSequence: testNavigationIntentSequence,
         principalGeneration,
+        userNavigationGeneration: testUserNavigationGeneration,
         activeTabId: controller.workspaceTabs.activeTabId,
         tabs: controller.workspaceTabs.tabs,
       })
@@ -441,14 +455,15 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     (request: GfsResourceNavigationRequest, principalGeneration: number) => {
       if (
         !isNavigationIntentCurrent(request.intentSequence) ||
-        request.principalGeneration !== principalGeneration
+        request.principalGeneration !== principalGeneration ||
+        request.userNavigationGenerationAtActivation !== testUserNavigationGeneration
       ) {
         return false
       }
       const state = controller.workspaceTabs
       if (request.createDestination) {
         if (state.tabs.some(tab => tab.id === request.ownerTabId)) return false
-        setWorkspaceTabs(openFilesTab(state, { id: request.ownerTabId, path: null }))
+        setWorkspaceTabs(createFilesTab(state, { id: request.ownerTabId, path: null }))
       } else {
         if (!isGfsResourceNavigationOwnerPresent(request, state.tabs)) return false
         setWorkspaceTabs(selectWorkspaceTab(state, request.ownerTabId))
@@ -696,6 +711,7 @@ describe('App deep-link orchestration', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     testNavigationIntentSequence = 0
+    testUserNavigationGeneration = 0
     resetComposerDraftStore()
     confirmDialogHarness.props = null
     confirmDialogHarness.mountedCount = 0
@@ -809,7 +825,7 @@ describe('App deep-link orchestration', () => {
     )
     await waitFor(() => expect(filesPageHarness.pendingGfsUri).toBeNull())
     expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
-    expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual({ id: link.id, uri })
+    expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual({ id: link.id, uri: link.uri })
     act(() => filesPageHarness.props?.onPendingGfsDeepLinkOutcome?.(link.id, 'opened'))
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
   })
@@ -834,9 +850,248 @@ describe('App deep-link orchestration', () => {
     )
     await waitFor(() => expect(filesPageHarness.pendingGfsUri).toBeNull())
     expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
-    expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual(link)
+    expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual({ id: link.id, uri: link.uri })
     act(() => filesPageHarness.props?.onPendingGfsDeepLinkOutcome?.(link.id, 'opened'))
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
+  })
+
+  it('does not let a link activated before a Chat selection take over an inactive Files root', async () => {
+    const uri = 'gfs://main/abababababababababababababababab'
+    const queue = new GfsResourceDeepLinkQueue()
+    const link = produceGfsResourceDeepLink(uri, queue)
+    acknowledgeGfsDeepLink.mockImplementation(async id => {
+      queue.acknowledge(id)
+    })
+    let workspaceTabs = openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+      id: 'files-root',
+      path: null,
+      title: 'Files root',
+    })
+    workspaceTabs = selectWorkspaceTab(workspaceTabs, 'chat-tab-1')
+    currentController = makeController({
+      initialExperienceLoading: false,
+      workspaceTabs,
+    })
+    render(<App />)
+    await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
+
+    const chatButton = screen.getByRole('button', { name: 'New chat' })
+    chatButton.focus()
+    expect(link.userNavigationGenerationAtActivation).toBe(0)
+    fireEvent.click(chatButton)
+    expect(chatButton.getAttribute('aria-pressed')).toBe('true')
+
+    // The queue captured generation 0 at activation. The explicit Chat click
+    // happens before the renderer receives this delayed event.
+    act(() => emitGfsDeepLink?.(link))
+
+    const activeTabButton = screen
+      .getByRole('toolbar', { name: 'Workspace tabs' })
+      .querySelector('button[aria-pressed="true"]')
+    expect(activeTabButton?.getAttribute('aria-label')).toBe('New chat')
+    expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1')
+    expect(
+      currentController.workspaceTabs.tabs.find(tab => tab.id === 'files-root')?.files?.path
+    ).toBeNull()
+    expect(screen.queryByTestId('files-page-surface')).toBeNull()
+    expect(filesPageHarness.resolveRequests).toEqual([])
+    expect(document.activeElement).toBe(chatButton)
+    await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
+    expect(acknowledgeGfsDeepLink).toHaveBeenCalledTimes(1)
+    expect(queue.list()).toEqual([])
+    expect(currentController.pushToast).not.toHaveBeenCalled()
+
+    act(() => emitGfsDeepLink?.(link))
+    expect(filesPageHarness.resolveRequests).toEqual([])
+    expect(acknowledgeGfsDeepLink).toHaveBeenCalledTimes(1)
+    expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1')
+  })
+
+  it('keeps newer explicit link navigation and reserves a separate Files destination', async () => {
+    const uri = 'gfs://main/acacacacacacacacacacacacacacacac'
+    let workspaceTabs = openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+      id: 'files-root',
+      path: null,
+      title: 'Files root',
+    })
+    workspaceTabs = selectWorkspaceTab(workspaceTabs, 'chat-tab-1')
+    currentController = makeController({
+      initialExperienceLoading: false,
+      workspaceTabs,
+    })
+    render(<App />)
+    await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
+
+    const chatButton = screen.getByRole('button', { name: 'New chat' })
+    chatButton.focus()
+    fireEvent.click(chatButton)
+    expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1')
+    expect(testUserNavigationGeneration).toBeGreaterThan(0)
+    const link = produceGfsResourceDeepLink(uri)
+    expect(link.userNavigationGenerationAtActivation).toBe(testUserNavigationGeneration)
+    act(() => emitGfsDeepLink?.(link))
+
+    await waitFor(() =>
+      expect(currentController.activateGfsResourceNavigation).toHaveBeenCalledOnce()
+    )
+    const destinationTab = currentController.workspaceTabs.tabs.find(
+      tab => tab.kind === 'files' && tab.id !== 'files-root'
+    )
+    expect(destinationTab?.id).toBeTruthy()
+    const activeTabButton = screen
+      .getByRole('toolbar', { name: 'Workspace tabs' })
+      .querySelector('button[aria-pressed="true"]')
+    expect(activeTabButton?.getAttribute('aria-label')).toBe('Files')
+    expect(currentController.workspaceTabs.tabs).toHaveLength(3)
+    expect(currentController.workspaceTabs.activeTabId).not.toBe('files-root')
+    expect(
+      currentController.workspaceTabs.tabs.find(tab => tab.id === 'files-root')?.files?.path
+    ).toBeNull()
+    expect(screen.getByTestId('files-page-surface').getAttribute('data-tab-id')).toBe(
+      currentController.workspaceTabs.activeTabId
+    )
+    expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual({ id: link.id, uri })
+    expect(filesPageHarness.resolveRequests).toEqual([])
+    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
+  })
+
+  it('creates a destination for an accepted link when no Files tab exists', async () => {
+    const uri = 'gfs://main/adadadadadadadadadadadadadadadad'
+    const queue = new GfsResourceDeepLinkQueue()
+    const link = produceGfsResourceDeepLink(uri, queue)
+    const producerResource = await resolveResource(
+      resolvedFile('adadadadadadadadadadadadadadadad', 'linked-note.md')
+    )
+    resolveGfsResource.mockResolvedValue(producerResource)
+    acknowledgeGfsDeepLink.mockImplementation(async id => {
+      queue.acknowledge(id)
+    })
+    filesPageHarness.resolveOnDeepLink = true
+    currentController = makeController({ initialExperienceLoading: false })
+    render(<App />)
+    await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
+
+    act(() => emitGfsDeepLink?.(link))
+    await waitFor(() =>
+      expect(currentController.activateGfsResourceNavigation).toHaveBeenCalledOnce()
+    )
+
+    const ownerId = currentController.workspaceTabs.activeTabId
+    expect(ownerId).toBeTruthy()
+    expect(currentController.workspaceTabs.tabs.filter(tab => tab.kind === 'files')).toHaveLength(1)
+    expect(currentController.workspaceTabs.activeTabId).toBe(ownerId)
+    expect(screen.getByTestId('files-page-surface').getAttribute('data-tab-id')).toBe(ownerId)
+    await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('files-page-surface').getAttribute('data-resolved-resource-uri')
+      ).toBe(uri)
+    )
+    expect(filesPageHarness.props?.pendingGfsDeepLink).toBeNull()
+    await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
+    expect(currentController.workspaceTabs.tabs.find(tab => tab.id === ownerId)?.files?.path).toBe(
+      uri
+    )
+    expect(queue.list()).toEqual([])
+    expect(acknowledgeGfsDeepLink).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not replay a canceled destination when the user selects its tab later', async () => {
+    const uri = 'gfs://main/aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae'
+    const link = produceGfsResourceDeepLink(uri)
+    const producerResource = await resolveResource(
+      resolvedFile('aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae', 'stale.md')
+    )
+    let resolveLink!: (resource: unknown) => void
+    resolveGfsResource.mockImplementation(
+      () =>
+        new Promise(resolve => {
+          resolveLink = resolve
+        })
+    )
+    filesPageHarness.resolveOnDeepLink = true
+    currentController = makeController({ initialExperienceLoading: false })
+    render(<App />)
+    await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
+
+    act(() => emitGfsDeepLink?.(link))
+    await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
+    const ownerId = currentController.workspaceTabs.activeTabId
+    expect(currentController.workspaceTabs.activeTabId).toBe(ownerId)
+
+    fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
+    await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
+    await act(async () => {
+      resolveLink(producerResource)
+      await Promise.resolve()
+    })
+    expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1')
+    expect(currentController.workspaceTabs.tabs.find(tab => tab.id === ownerId)?.files?.path).toBe(
+      null
+    )
+    expect(acknowledgeGfsDeepLink).toHaveBeenCalledTimes(1)
+    expect(currentController.pushToast).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Files' }))
+    expect(currentController.workspaceTabs.activeTabId).toBe(ownerId)
+    expect(filesPageHarness.props?.pendingGfsDeepLink).toBeNull()
+    expect(filesPageHarness.resolveRequests).toHaveLength(1)
+    expect(acknowledgeGfsDeepLink).toHaveBeenCalledTimes(1)
+  })
+
+  it('releases a retryable link when a newer valid link arrives', async () => {
+    const uriA = 'gfs://main/afafafafafafafafafafafafafafafaf'
+    const uriB = 'gfs://main/bfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbf'
+    const queue = new GfsResourceDeepLinkQueue()
+    const linkA = produceGfsResourceDeepLink(uriA, queue)
+    const producerResource = await resolveResource(
+      resolvedFile('bfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbf', 'newer.md')
+    )
+    const workspaceTabs = openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
+      id: 'files-owner',
+      path: uriA,
+      title: 'Files owner',
+    })
+    let resolveB!: (resource: unknown) => void
+    resolveGfsResource.mockImplementation(
+      () =>
+        new Promise(resolve => {
+          resolveB = resolve
+        })
+    )
+    filesPageHarness.resolveOnDeepLink = true
+    currentController = makeController({ initialExperienceLoading: false, workspaceTabs })
+    render(<App />)
+    await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
+
+    act(() => emitGfsDeepLink?.(linkA))
+    await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(1))
+    act(() => filesPageHarness.props?.onPendingGfsDeepLinkOutcome?.(linkA.id, 'retryable'))
+    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
+
+    const linkB = produceGfsResourceDeepLink(uriB, queue)
+    act(() => emitGfsDeepLink?.(linkB))
+    await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(2))
+    await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(linkA.id))
+    expect(filesPageHarness.resolveRequests[1]).toEqual({
+      id: linkB.id,
+      tabId: 'files-owner',
+      uri: uriB,
+    })
+    expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual({ id: linkB.id, uri: uriB })
+    expect(acknowledgeGfsDeepLink).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      resolveB(producerResource)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(linkB.id))
+    expect(acknowledgeGfsDeepLink).toHaveBeenCalledTimes(2)
+    expect(
+      currentController.workspaceTabs.tabs.find(tab => tab.id === 'files-owner')?.files?.path
+    ).toBe(uriB)
+    expect(currentController.pushToast).not.toHaveBeenCalled()
   })
 
   it('keeps Files B selected and unchanged when a link owned by Files A resolves late', async () => {
@@ -1233,7 +1488,7 @@ describe('App deep-link orchestration', () => {
     const uriC = 'gfs://main/cccccccccccccccccccccccccccccccc'
     const queue = new GfsResourceDeepLinkQueue()
     const linkA = produceGfsResourceDeepLink(uriA, queue)
-    const linkB = produceGfsResourceDeepLink(uriB, queue)
+    let linkB: GfsResourceDeepLinkEnvelope
     const resourceA = await resolveResource(
       resolvedFile('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'older-a.md')
     )
@@ -1263,6 +1518,7 @@ describe('App deep-link orchestration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Files B' }))
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(linkA.id))
 
+    linkB = produceGfsResourceDeepLink(uriB, queue)
     act(() => emitGfsDeepLink?.(linkB))
     await waitFor(() => expect(filesPageHarness.resolveRequests).toHaveLength(2))
     expect(filesPageHarness.resolveRequests[1]).toEqual({
@@ -1338,7 +1594,7 @@ describe('App deep-link orchestration', () => {
     await waitFor(() =>
       expect(currentController.activateGfsResourceNavigation).toHaveBeenCalledOnce()
     )
-    expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual(linkB)
+    expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual({ id: linkB.id, uri: linkB.uri })
   })
 
   it('clears pending resource links on a direct principal change', async () => {
@@ -1454,7 +1710,7 @@ describe('App deep-link orchestration', () => {
 
     act(() => staleOutcome?.(linkA.id, 'opened'))
     expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
-    expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual(linkB)
+    expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual({ id: linkB.id, uri: linkB.uri })
   })
 
   it('handles repeated Open route requests while FilesPage remains mounted', async () => {

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '../gfsDeepLinks.js'
 import {
   GfsResourceDeepLinkQueue,
+  GfsUserNavigationGeneration,
   createLogoutWithGfsResourceDeepLinkClear,
 } from '../gfsResourceDeepLinkQueue.js'
 
@@ -12,14 +13,43 @@ function parseProducedUri(uri: string) {
 }
 
 describe('GfsResourceDeepLinkQueue', () => {
-  it('canonicalizes identity, coalesces pending duplicates and acknowledges by id', () => {
+  it('captures the explicit-navigation generation at each activation boundary', () => {
+    const generation = new GfsUserNavigationGeneration()
     const queue = new GfsResourceDeepLinkQueue()
-    const first = queue.enqueue(parseProducedUri('gfs://main/0123456789abcdef0123456789ABCDEF'))
-    const duplicate = queue.enqueue(parseProducedUri('gfs://main/0123456789abcdef0123456789abcdef'))
+    const target = parseProducedUri('gfs://main/99999999999999999999999999999999')
 
-    expect(first).toEqual({ id: 1, uri: 'gfs://main/0123456789abcdef0123456789abcdef' })
-    expect(duplicate).toEqual(first)
+    const activatedBeforeSelection = queue.enqueue(target, generation.current())
+    expect(generation.advance()).toBe(1)
+    const activatedAfterSelection = queue.enqueue(target, generation.current())
+
+    expect(activatedBeforeSelection.userNavigationGenerationAtActivation).toBe(0)
+    expect(activatedAfterSelection.userNavigationGenerationAtActivation).toBe(1)
+    expect(activatedAfterSelection.id).toBeGreaterThan(activatedBeforeSelection.id)
+    expect(generation.current()).toBe(1)
+  })
+
+  it('keeps each activation distinct while canonicalizing identity and acknowledging by id', () => {
+    const queue = new GfsResourceDeepLinkQueue()
+    const first = queue.enqueue(parseProducedUri('gfs://main/0123456789abcdef0123456789ABCDEF'), 4)
+    const duplicate = queue.enqueue(
+      parseProducedUri('gfs://main/0123456789abcdef0123456789abcdef'),
+      5
+    )
+
+    expect(first).toEqual({
+      id: 1,
+      uri: 'gfs://main/0123456789abcdef0123456789abcdef',
+      userNavigationGenerationAtActivation: 4,
+    })
+    expect(duplicate).toEqual({
+      id: 2,
+      uri: 'gfs://main/0123456789abcdef0123456789abcdef',
+      userNavigationGenerationAtActivation: 5,
+    })
+    expect(queue.list()).toEqual([first, duplicate])
     queue.acknowledge(first.id)
+    expect(queue.list()).toEqual([duplicate])
+    queue.acknowledge(duplicate.id)
     expect(queue.list()).toEqual([])
   })
 
@@ -36,6 +66,9 @@ describe('GfsResourceDeepLinkQueue', () => {
     expect(() => queue.enqueue({ uri: 'gfs://main/../secret' })).toThrow(
       'Invalid GFS resource deep link'
     )
+    expect(() =>
+      queue.enqueue(parseProducedUri('gfs://main/00000000000000000000000000000004'), -1)
+    ).toThrow('Invalid GFS navigation generation')
   })
 
   it('keeps IDs monotonic across a clear and returns the next accepted ID', () => {
