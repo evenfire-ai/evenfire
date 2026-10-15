@@ -206,6 +206,55 @@ describe('createConversationStore store identity', () => {
     }
   })
 
+  // Opening can outlast a write budget (worker spawn, migrations, recovery of
+  // a large WAL), so the identity line must not depend on `syncTimeoutMs`.
+  it('logs the database path when opening takes longer than the sync write timeout', async () => {
+    const script = workerScript(`
+      const { parentPort } = require('node:worker_threads')
+      parentPort.on('message', msg => {
+        if (msg.op.kind === 'ping') {
+          setTimeout(() => parentPort.postMessage({ id: msg.id, ok: true, result: 'pong' }), 400)
+        }
+        if (msg.op.kind === 'shutdown') {
+          parentPort.postMessage({ id: msg.id, ok: true, result: { ok: true } })
+          process.exit(0)
+        }
+      })
+    `)
+    const dbPath = path.join(path.dirname(script), 'state.db')
+    const info = vi.spyOn(logger, 'info')
+    const errors = vi.spyOn(logger, 'error')
+    const opened = () => info.mock.calls.filter(([, msg]) => msg === '[ConversationStore] opened')
+    try {
+      const handle = createConversationStore({
+        mode: 'sqlite',
+        dbPath,
+        cacheSize: 10,
+        syncTimeoutMs: 100,
+        asyncTimeoutMs: 100,
+        checkpointEveryWrites: 100,
+        heartbeatMs: 60_000,
+        workerScriptPath: script,
+      })
+      await waitFor<void>(resolve => {
+        const poll = setInterval(() => {
+          if (opened().length > 0) {
+            clearInterval(poll)
+            resolve()
+          }
+        }, 5)
+      }, 3000)
+      expect(opened()).toEqual([[{ dbPath, mode: 'sqlite' }, '[ConversationStore] opened']])
+      expect(
+        errors.mock.calls.filter(([, msg]) => msg === '[ConversationStore] database did not open')
+      ).toEqual([])
+      await handle.shutdown()
+    } finally {
+      info.mockRestore()
+      errors.mockRestore()
+    }
+  })
+
   it('logs no database path when the worker exits before opening the database', async () => {
     const script = workerScript(`process.exit(1)`)
     const info = vi.spyOn(logger, 'info')

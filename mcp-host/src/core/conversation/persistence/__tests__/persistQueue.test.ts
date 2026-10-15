@@ -49,6 +49,34 @@ describe('PersistQueue', () => {
     await expect(q.enqueueSync({ kind: 'ping' })).rejects.toThrow(/timeout/)
   })
 
+  it('awaitOpen outlasts the sync timeout and resolves on the worker reply', async () => {
+    const worker = new FakeWorker()
+    const q = new PersistQueue(worker, { syncTimeoutMs: 30, asyncTimeoutMs: 30 })
+    let settled = false
+    const open = q.awaitOpen().finally(() => {
+      settled = true
+    })
+    // Liveness witness: the ping was posted to the worker.
+    expect(worker.sent.map(m => m.op.kind)).toEqual(['ping'])
+    await new Promise(r => setTimeout(r, 90))
+    expect(settled).toBe(false)
+    worker.emit('message', {
+      id: worker.sent[0].id,
+      ok: true,
+      result: 'pong',
+    } satisfies WorkerReply)
+    await expect(open).resolves.toBeUndefined()
+  })
+
+  it('awaitOpen rejects when the worker exits before answering', async () => {
+    const worker = new FakeWorker()
+    const q = new PersistQueue(worker, { syncTimeoutMs: 30, asyncTimeoutMs: 30 })
+    const open = q.awaitOpen()
+    expect(worker.sent.map(m => m.op.kind)).toEqual(['ping'])
+    worker.emit('exit', 1)
+    await expect(open).rejects.toThrow(/exited/)
+  })
+
   it('enqueueAsync preserves order per sessionKey', async () => {
     const worker = new FakeWorker()
     const q = new PersistQueue(worker, { syncTimeoutMs: 200, asyncTimeoutMs: 500 })

@@ -57,7 +57,8 @@ export interface PersistQueueOptions {
 interface PendingEntry {
   resolve: (v: unknown) => void
   reject: (e: Error) => void
-  timeoutHandle: ReturnType<typeof setTimeout>
+  /** Absent for `awaitOpen`, which has no timeout. */
+  timeoutHandle?: ReturnType<typeof setTimeout>
   op: WorkerOp
 }
 
@@ -176,6 +177,22 @@ export class PersistQueue {
   }
 
   /**
+   * Resolves when the worker answers a `ping`. The worker registers its
+   * message handler only after it has opened and migrated the database, so
+   * this resolves once the database is open. No timeout: opening (spawn,
+   * migrations, recovery of a large WAL) can outlast any write budget.
+   * Rejects on a worker error reply, a worker exit, or `close()`.
+   */
+  awaitOpen(): Promise<void> {
+    try {
+      this.assertAdmissible()
+    } catch (err) {
+      return Promise.reject(err as Error)
+    }
+    return this.send<unknown>({ kind: 'ping' }, null).then(() => undefined)
+  }
+
+  /**
    * Wait until every pending async write for `sessionKey` settles. Used by
    * `SqliteConversationStore` before sync write-through operations that
    * read other rows (e.g. load_active_session after persistTurnStart).
@@ -272,14 +289,17 @@ export class PersistQueue {
     return this.send<T>(op, timeoutMs)
   }
 
-  private send<T>(op: WorkerOp, timeoutMs: number): Promise<T> {
+  private send<T>(op: WorkerOp, timeoutMs: number | null): Promise<T> {
     const id = randomUUID()
     return new Promise<T>((resolve, reject) => {
-      const timeoutHandle = setTimeout(() => {
-        if (this.pending.delete(id)) {
-          reject(new Error(`db worker timeout (${timeoutMs}ms) for op=${op.kind}`))
-        }
-      }, timeoutMs)
+      const timeoutHandle =
+        timeoutMs === null
+          ? undefined
+          : setTimeout(() => {
+              if (this.pending.delete(id)) {
+                reject(new Error(`db worker timeout (${timeoutMs}ms) for op=${op.kind}`))
+              }
+            }, timeoutMs)
       const entry: PendingEntry = {
         resolve: resolve as PendingEntry['resolve'],
         reject,
