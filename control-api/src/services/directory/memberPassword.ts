@@ -11,8 +11,6 @@ import {
 } from './invitationStore.js'
 import { getMemberSessionContext } from './login.js'
 
-type PasswordWorkLease = MemberPasswordWorkLease
-
 async function revokeSiblingPasswordResets(
   db: Pick<DbClient, 'query'>,
   email: string,
@@ -36,7 +34,7 @@ export async function setInvitationPasswordForUser(
   email: string,
   invitationId: string,
   password: string,
-  passwordWorkLease?: PasswordWorkLease
+  passwordWorkLease?: MemberPasswordWorkLease
 ) {
   const trimmedUserId = userId.trim()
   const normalizedEmail = email.trim().toLowerCase()
@@ -127,7 +125,7 @@ export async function setInvitationPasswordForEmail(
   invitationId: string,
   password: string,
   expectedUserId?: string,
-  passwordWorkLease?: PasswordWorkLease
+  passwordWorkLease?: MemberPasswordWorkLease
 ) {
   const normalizedEmail = email.trim().toLowerCase()
   const trimmedInvitationId = invitationId.trim()
