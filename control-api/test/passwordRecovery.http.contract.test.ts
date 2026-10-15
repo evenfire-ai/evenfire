@@ -342,7 +342,7 @@ describe('response-drop proxy outbound boundary', () => {
 
       expect(result.response?.status).toBe(400)
       expect(result.response && JSON.parse(result.response.body)).toEqual({
-        error: 'invalid payload',
+        error: 'invalid_password',
       })
       expect(result.response?.headers['content-type']).toMatch(/^application\/json/)
       expect(result.response?.headers['retry-after']).toBeUndefined()
@@ -558,8 +558,20 @@ describe('invitation/password producer response mappings', () => {
       })
 
     expect(producerResponse.status).toBe(400)
-    expect(producerResponse.body).toEqual({ error: 'invalid payload' })
+    expect(producerResponse.body).toEqual({ error: 'invalid_password' })
     expect(directory.setInvitationPasswordForEmail).not.toHaveBeenCalled()
+
+    const missingInvitationId = await request(producerServer)
+      .post('/api/v1/external/invitations/password-token')
+      .set('authorization', `Bearer ${internalServiceToken}`)
+      .set('x-service-token', 'external-rest-api')
+      .send({
+        token: 'r6-synthetic-reset-proof',
+        email: preview.email,
+        password: 'R6-synthetic-valid-password',
+      })
+    expect(missingInvitationId.status).toBe(400)
+    expect(missingInvitationId.body).toEqual({ error: 'invalid payload' })
 
     const response = await request(await publicApp())
       .post('/api/v1/invitations/password')

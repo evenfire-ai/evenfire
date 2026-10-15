@@ -89,8 +89,11 @@ export function createExternalInvitationsRouter(): Router {
         const token = String(req.body?.token || '').trim()
         const invitationId = String(req.body?.invitationId || '').trim()
         const password = String(req.body?.password || '')
-        if (!email || !token || !invitationId || !password) {
+        if (!email || !token || !invitationId) {
           return res.status(400).json({ error: 'invalid payload' })
+        }
+        if (!password) {
+          return res.status(400).json({ error: 'invalid_password' })
         }
 
         let validation: { email: string; invitationUuid: string }

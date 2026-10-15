@@ -418,7 +418,7 @@ realProducer('R4-L1 reset password payload through the public route and real pro
     expect(empty.body).toEqual({ error: 'Password must be between 8 and 256 characters' })
     expect(JSON.stringify(empty.body)).not.toContain('invalid payload')
     expect(empty.headers['set-cookie']).toBeUndefined()
-    expect(producerResponses.at(-1)).toEqual({ status: 400, error: 'invalid payload' })
+    expect(producerResponses.at(-1)).toEqual({ status: 400, error: 'invalid_password' })
     const unchanged = await observer.query(
       `SELECT primary_invite.status AS reset_status,
               sibling.status AS sibling_status,
