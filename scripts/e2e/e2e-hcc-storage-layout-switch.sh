@@ -15,8 +15,7 @@
 #   - pvc-fixture: a short-lived Pod (the Host image, uid 1001, no token) that
 #     mounts a Host PVC to list it or, on a suspended Host, to seed a tree;
 #   - channel: a CommunicationChannel CR that makes HCC run a stateless Host
-#     as stateful;
-#   - pod-replace: deleting a Host Pod so its Deployment starts a new one.
+#     as stateful.
 # No kubectl exec into Host Pods, no SQLite writes, no apply/patch of Hosts or
 # their Deployments.
 #
@@ -94,13 +93,14 @@ HTTP_CODE='' HTTP_BODY='' HTTP_HEADERS=()
 
 # ─── HTTP ─────────────────────────────────────────────────────────────
 # http METHOD URL [BODY] [MAX_SECONDS] → HTTP_CODE, HTTP_BODY. A transport
-# failure is HTTP_CODE=000 and a non-zero return.
+# failure is HTTP_CODE=000 and a non-zero return. The body goes to curl on
+# stdin, never in argv, because login bodies carry passwords.
 http() {
   local method=$1 url=$2 body=${3:-} max=${4:-60} resp
   local args=(-sS -m "$max" -w '\n%{http_code}' -X "$method" "$url")
   [ ${#HTTP_HEADERS[@]} -eq 0 ] || args+=("${HTTP_HEADERS[@]}")
-  [ -z "$body" ] || args+=(-H 'Content-Type: application/json' -d "$body")
-  if ! resp="$(curl "${args[@]}")"; then
+  [ -z "$body" ] || args+=(-H 'Content-Type: application/json' --data-binary @-)
+  if ! resp="$(printf '%s' "$body" | curl "${args[@]}")"; then
     HTTP_CODE=000 HTTP_BODY=''
     return 1
   fi
