@@ -240,7 +240,7 @@ journey. Establish the intended Profile UI and External REST origins and backend
 revisions, and ensure no unrelated account uses the synthetic address.
 
 1. Request recovery through the intended Profile UI, which calls public
-   `POST /api/v1/auth/password-reset-request`. Check its non-enumerating success
+   `POST /api/v1/auth/password-reset/request`. Check its non-enumerating success
    without assuming that response proves delivery. Observe the actual message
    arriving in the permitted mailbox; record a redacted timestamp/message receipt.
 2. Inspect the destination origin/path privately before opening the link. The
