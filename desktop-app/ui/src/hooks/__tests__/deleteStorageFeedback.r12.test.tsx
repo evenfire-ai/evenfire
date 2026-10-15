@@ -299,9 +299,16 @@ it('same-scope Host cancellation reports once while another agent stays visible'
     await app.getVm().handleDeleteChatForAgent('agent-x', 'chat-2', deletion)
   })
   expect(clerum.chat.delete).not.toHaveBeenCalled()
-  expect(app.getVm().toasts).toHaveLength(1)
-  expect(screen.getAllByRole('alert')).toHaveLength(1)
-  expect(screen.getByRole('alert').textContent).toContain('Delete cancelled')
+  // Losing the selected Host announces itself when it happens; the cancelled
+  // delete is still reported exactly once.
+  expect(app.getVm().toasts.map(toast => toast.text)).toEqual([
+    'Access to agent-x was revoked.',
+    'Delete cancelled because chat access changed. Please try again.',
+  ])
+  expect(screen.getAllByRole('alert').map(alert => alert.textContent)).toEqual([
+    expect.stringContaining('Access to agent-x was revoked.'),
+    expect.stringContaining('Delete cancelled'),
+  ])
   expect(app.getVm().selectedAgent).toBe('agent-y')
   expect(app.getVm().activeChatId).toBe('other-chat')
   expect(app.getVm().activeMessages.map(message => message.content)).toEqual([

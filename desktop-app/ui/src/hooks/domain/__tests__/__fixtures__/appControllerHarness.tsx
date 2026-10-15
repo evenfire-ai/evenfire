@@ -60,7 +60,7 @@ function createSessionState(authenticated: boolean, me = HARNESS_ME) {
   return authenticated ? { authenticated: true, me } : { authenticated: false, me: null }
 }
 
-function createCatalog(agentNames: string[]) {
+function createCatalog(agentNames: string[], agentDisplayByName?: Record<string, string>) {
   return {
     userId: HARNESS_ME.id,
     teamId: HARNESS_ME.teamId,
@@ -70,6 +70,7 @@ function createCatalog(agentNames: string[]) {
     mcpServersByAgent: {},
     agentContextByName: {},
     agentProviderByName: {},
+    ...(agentDisplayByName ? { agentDisplayByName } : {}),
     contextIds: [],
     userContextIds: [],
     teamContextIds: [],
@@ -95,6 +96,8 @@ const DEFAULT_DESKTOP_RELEASE_STATUS = {
 export interface AppControllerClerumOptions {
   /** Access-catalog agents. Empty means "authenticated user with no agents". */
   agentNames?: string[]
+  /** Catalog `agentDisplayByName` (agent ref → visible name). Omitted by default. */
+  agentDisplayByName?: Record<string, string>
   /** Boot already signed in (default). `false` boots at the login screen. */
   startAuthenticated?: boolean
   /**
@@ -273,7 +276,7 @@ export function extendMockClerumForAppController(
     return createSessionState(true, sessionMe)
   })
   const refreshCatalog = vi.fn(async () =>
-    held() ? catalogDeferred.promise : createCatalog(agentNames)
+    held() ? catalogDeferred.promise : createCatalog(agentNames, options.agentDisplayByName)
   )
   const listPending = vi.fn(async () => (held() ? approvalsDeferred.promise : []))
 
@@ -424,7 +427,7 @@ export function extendMockClerumForAppController(
     },
     resolveAuthenticatedLoad() {
       teamDirectoryDeferred.resolve(teamDirectoryPayload)
-      catalogDeferred.resolve(createCatalog(agentNames))
+      catalogDeferred.resolve(createCatalog(agentNames, options.agentDisplayByName))
       approvalsDeferred.resolve([])
     },
     setSessionStateError(error) {

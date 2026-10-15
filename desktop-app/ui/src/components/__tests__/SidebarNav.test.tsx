@@ -15,11 +15,20 @@ vi.mock('@contexts/AuthContext', () => ({
     handleLogout: vi.fn(),
   }),
 }))
+// Mutable so the held-host tests can drive the "Latest sessions" block; every
+// other test reads the defaults restored in `beforeEach`.
+const sidebarContext = vi.hoisted(() => ({
+  latestChatSessions: [] as Array<{ id: string; agentRef: string; title: string }>,
+  latestChatSessionsLoading: false,
+  heldAgentRefs: [] as string[],
+  handleSelectChatAgent: (() => undefined) as (...args: unknown[]) => void,
+}))
 vi.mock('@contexts/ChatListContext', () => ({
   useChatListContext: () => ({
     activeChatId: null,
-    latestChatSessions: [],
-    latestChatSessionsLoading: false,
+    latestChatSessions: sidebarContext.latestChatSessions,
+    latestChatSessionsLoading: sidebarContext.latestChatSessionsLoading,
+    sessionStateByChatKey: {},
   }),
 }))
 vi.mock('@contexts/AgentChatActionsContext', () => ({
@@ -34,7 +43,8 @@ vi.mock('@contexts/AgentChatActionsContext', () => ({
 vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => ({
     selectedAgent: null,
-    handleSelectChatAgent: vi.fn(),
+    heldAgentRefs: sidebarContext.heldAgentRefs,
+    handleSelectChatAgent: sidebarContext.handleSelectChatAgent,
   }),
 }))
 // The real tree pulls TanStack Query and GFS contexts; the sidebar tests only
@@ -63,6 +73,10 @@ function baseProps(overrides: Partial<SidebarNavProps> = {}): SidebarNavProps {
 describe('SidebarNav logo', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    sidebarContext.latestChatSessions = []
+    sidebarContext.latestChatSessionsLoading = false
+    sidebarContext.heldAgentRefs = []
+    sidebarContext.handleSelectChatAgent = vi.fn()
     // jsdom does not implement matchMedia; SidebarNav reads it to detect the
     // mobile viewport. Stub it as a non-matching desktop viewport.
     if (!window.matchMedia) {
@@ -315,6 +329,10 @@ describe('SidebarNav flattened resources menu', () => {
 describe('SidebarNav Files label engages the file explorer', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    sidebarContext.latestChatSessions = []
+    sidebarContext.latestChatSessionsLoading = false
+    sidebarContext.heldAgentRefs = []
+    sidebarContext.handleSelectChatAgent = vi.fn()
     if (!window.matchMedia) {
       Object.defineProperty(window, 'matchMedia', {
         writable: true,
@@ -401,5 +419,38 @@ describe('SidebarNav Files label engages the file explorer', () => {
     fireEvent.click(toggle)
     expect(toggle.getAttribute('aria-expanded')).toBe('false')
     expect(screen.queryByTestId('file-explorer-tree')).toBeNull()
+  })
+
+  it.each([
+    {
+      state: 'with sessions of another host',
+      sessions: [{ id: 'chat-a1', agentRef: 'host-a', title: 'Session A1' }],
+      loading: false,
+    },
+    { state: 'with an empty session list', sessions: [], loading: false },
+    { state: 'while sessions load', sessions: [], loading: true },
+  ])('T-F1-1: shows a Retry row for a held host $state', ({ sessions, loading }) => {
+    sidebarContext.latestChatSessions = sessions
+    sidebarContext.latestChatSessionsLoading = loading
+    sidebarContext.heldAgentRefs = ['host-b']
+    const { container } = render(<SidebarNav {...baseProps()} />)
+
+    // Liveness witness: the "Latest sessions" block rendered in this state.
+    const block = container.querySelector('.nav-latest-sessions')
+    expect(block).not.toBeNull()
+    if (sessions.length) {
+      expect(
+        [...container.querySelectorAll('[data-testid="latest-session-row"]')].map(row =>
+          row.getAttribute('data-agent-ref')
+        )
+      ).toEqual(['host-a'])
+    }
+
+    expect(block?.textContent).toContain("Couldn't verify access to host-b")
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(sidebarContext.handleSelectChatAgent).toHaveBeenCalledTimes(1)
+    expect(sidebarContext.handleSelectChatAgent).toHaveBeenCalledWith('host-b', {
+      selectLatest: false,
+    })
   })
 })

@@ -2047,6 +2047,22 @@ h3 {
   background: var(--list-item-hover-bg);
 }
 
+/* A held Host: its sessions are hidden, so this row says why and offers Retry. */
+.nav-latest-session--held {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-1);
+  min-height: 28px;
+  padding-left: var(--sidebar-nav-label-indent);
+  color: var(--text-dim);
+  font-size: var(--font-size-2xs);
+  line-height: var(--line-height-tight);
+}
+
+/* Outranks `.left-nav .nav-latest-session:hover`: the row itself is not clickable. */
+.left-nav .nav-latest-session.nav-latest-session--held:hover {
+  background: transparent;
+}
+
 .nav-latest-session__main,
 .nav-latest-session__menu-button {
   min-height: 28px;

@@ -60,7 +60,11 @@ export function SidebarNav({
     handleRenameChatForAgent: onRenameChatForAgent,
     handleDeleteChatForAgent: onDeleteChatForAgent,
   } = useAgentChatActionsContext()
-  const { selectedAgent, handleSelectChatAgent: onSelectChatAgent } = useNavigationContext()
+  const {
+    selectedAgent,
+    heldAgentRefs,
+    handleSelectChatAgent: onSelectChatAgent,
+  } = useNavigationContext()
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [chatSessionsOpen, setChatSessionsOpen] = useState(true)
@@ -419,6 +423,19 @@ export function SidebarNav({
 
                 {item.id === DESKTOP_ROUTES.chat && chatSessionsOpen && (
                   <div className="nav-latest-sessions" ref={sessionsRef}>
+                    {heldAgentRefs.map(agentRef => (
+                      <div key={agentRef} className="nav-latest-session nav-latest-session--held">
+                        <span>Couldn't verify access to {agentRef}</span>
+                        <Button
+                          onClick={() => onSelectChatAgent(agentRef, { selectLatest: false })}
+                          color="neutral"
+                          size="xs"
+                          variant="text"
+                        >
+                          Retry
+                        </Button>
+                      </div>
+                    ))}
                     {latestChatSessionsLoading && !latestChatSessions.length ? (
                       <span className="nav-latest-sessions__empty">Loading sessions...</span>
                     ) : latestChatSessions.length ? (

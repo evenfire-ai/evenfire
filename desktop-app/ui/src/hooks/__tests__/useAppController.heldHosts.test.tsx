@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
 /**
- * Held Hosts in the coordinator: auto-selection skips them (H1), and they are
- * exposed as `heldAgentRefs`.
+ * Held Hosts in the coordinator: auto-selection skips them (H1), they are
+ * exposed as `heldAgentRefs` for the sidebar's Retry row (F1), a failed access
+ * verification is reported (F2), and losing access to the selected Host says
+ * why the selection was cleared (F3).
  *
  * Holds are produced the way production produces them: a catalog or
  * transcript read that the real RPC client rejects with a 403.
@@ -16,7 +18,10 @@ import {
   renderAppController,
 } from '../domain/__tests__/__fixtures__/appControllerHarness'
 import { deferred, serverSessions } from '../domain/__tests__/__fixtures__/catalogFixtures'
-import { ipcGenericForbidden } from '../domain/__tests__/__fixtures__/ipcErrors'
+import {
+  ipcGenericForbidden,
+  ipcHostAccessRevoked,
+} from '../domain/__tests__/__fixtures__/ipcErrors'
 import { type MockClerum, uninstallMockClerum } from '../domain/__tests__/__fixtures__/mockClerum'
 import { desktopQueryKeys } from '../domain/queryKeys'
 import type { useAppController } from '../useAppController'
@@ -28,6 +33,10 @@ type ListSessionsQuery = { agent?: string; limit?: number; cursor?: string }
 
 const HOST_A = 'agent-a'
 const HOST_B = 'agent-b'
+// Visible names distinct from the refs, so a toast that used the ref would fail.
+const DISPLAY_A = 'Research Host'
+const DISPLAY_B = 'Billing Host'
+const DISPLAY_BY_NAME = { [HOST_A]: DISPLAY_A, [HOST_B]: DISPLAY_B }
 
 /**
  * A `listSessions` double. Page reads (`limit: 50`) of a denied Host reject
@@ -63,6 +72,10 @@ function installCatalog(clerum: MockClerum) {
     pageReads: (agentRef: string) => pageReads.get(agentRef) ?? 0,
     verifyReads: (agentRef: string) => verifyReads.get(agentRef) ?? 0,
   }
+}
+
+function toastTexts(vm: Vm): string[] {
+  return vm.toasts.map(toast => toast.text)
 }
 
 describe('useAppController held Hosts', () => {
@@ -167,5 +180,144 @@ describe('useAppController held Hosts', () => {
     await waitFor(() => expect(app.result.current.selectedAgent).not.toBe(null))
     expect(app.result.current.selectedAgent).toBe(HOST_B)
     expect(catalog.verifyReads(HOST_A)).toBe(0)
+  })
+
+  it('T-F2-1: a failed access verification is reported and keeps the Host held', async () => {
+    const { clerum, handle } = installAppControllerClerum({
+      agentNames: [HOST_A, HOST_B],
+      agentDisplayByName: DISPLAY_BY_NAME,
+    })
+    const catalog = installCatalog(clerum)
+    catalog.deny(HOST_B, await ipcGenericForbidden('rpc:listSessions'))
+    const { app } = await mount(clerum, handle)
+    await holdThroughCatalog(app, catalog, HOST_B)
+    const verificationError = await ipcGenericForbidden('rpc:listSessions')
+    catalog.setVerify(async () => {
+      throw verificationError
+    })
+    const warn = vi.spyOn(console, 'warn')
+    const selectedBefore = app.result.current.selectedAgent
+
+    act(() => {
+      app.result.current.handleSelectChatAgent(HOST_B, { selectLatest: false })
+    })
+    await waitFor(() => expect(catalog.verifyReads(HOST_B)).toBe(1))
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 20))
+    })
+
+    expect(toastTexts(app.result.current)).toContain(`Could not verify access to ${DISPLAY_B}.`)
+    expect(warn).toHaveBeenCalledWith('[host-authority] access verification failed', {
+      agentRef: HOST_B,
+      status: 403,
+    })
+    expect(app.result.current.isHostAccessBlocked(HOST_B)).toBe(true)
+    expect(app.result.current.selectedAgent).toBe(selectedBefore)
+    expect(app.result.current.selectedAgent).not.toBe(HOST_B)
+  })
+
+  it('T-F2-2: a verification that fails after the scope changed warns without a toast', async () => {
+    const { clerum, handle } = installAppControllerClerum({
+      agentNames: [HOST_A, HOST_B],
+      agentDisplayByName: DISPLAY_BY_NAME,
+    })
+    const catalog = installCatalog(clerum)
+    catalog.deny(HOST_B, await ipcGenericForbidden('rpc:listSessions'))
+    const { app } = await mount(clerum, handle)
+    await holdThroughCatalog(app, catalog, HOST_B)
+    const pendingVerification = deferred<SessionsListResult>()
+    catalog.setVerify(() => pendingVerification.promise)
+    const warn = vi.spyOn(console, 'warn')
+
+    act(() => {
+      app.result.current.handleSelectChatAgent(HOST_B, { selectLatest: false })
+    })
+    await waitFor(() => expect(catalog.verifyReads(HOST_B)).toBe(1))
+
+    await act(async () => {
+      await app.result.current.handleEnsureTeamContext({ teamId: 'team-2' })
+    })
+    expect(handle.switchTeam).toHaveBeenCalledWith('team-2')
+    await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
+
+    await act(async () => {
+      pendingVerification.reject(await ipcGenericForbidden('rpc:listSessions'))
+      await pendingVerification.promise.catch(() => undefined)
+      await new Promise(resolve => setTimeout(resolve, 20))
+    })
+
+    // Liveness witness: the rejection reached the verification's catch.
+    expect(warn).toHaveBeenCalledWith('[host-authority] access verification failed', {
+      agentRef: HOST_B,
+      status: 403,
+    })
+    expect(toastTexts(app.result.current)).not.toContain(`Could not verify access to ${DISPLAY_B}.`)
+  })
+
+  it.each([
+    [
+      'a generic 403',
+      () => ipcGenericForbidden('rpc:loadSessionMessages'),
+      `Could not verify access to ${DISPLAY_A}. Use Retry in Latest sessions.`,
+    ],
+    [
+      'host_access_revoked',
+      () => ipcHostAccessRevoked('rpc:loadSessionMessages'),
+      `Access to ${DISPLAY_A} was revoked.`,
+    ],
+  ])(
+    'T-F3-1: losing the selected Host to %s clears the selection with a toast',
+    async (_label, rejection, expectedToast) => {
+      const { clerum, handle } = installAppControllerClerum({
+        agentNames: [HOST_A, HOST_B],
+        agentDisplayByName: DISPLAY_BY_NAME,
+      })
+      installCatalog(clerum)
+      const transcriptError = await rejection()
+      clerum.rpc.loadSessionMessages.mockImplementation(async (hostRef: string) => {
+        if (hostRef === HOST_A) throw transcriptError
+        return { agent: hostRef, chatId: '', turns: [] }
+      })
+      const { app } = await mount(clerum, handle)
+
+      act(() => {
+        app.result.current.handleSelectChatAgent(HOST_A, { chatId: 'chat-1', selectLatest: false })
+      })
+      await waitFor(() => expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true))
+      // Liveness witness: the hold cleared the selection.
+      await waitFor(() => expect(app.result.current.selectedAgent).toBe(null))
+      expect(
+        clerum.rpc.loadSessionMessages.mock.calls.some(
+          ([hostRef, , chatId]) => hostRef === HOST_A && chatId === 'chat-1'
+        )
+      ).toBe(true)
+
+      expect(toastTexts(app.result.current)).toContain(expectedToast)
+    }
+  )
+
+  it('T-F3-2: losing a Host that is not selected shows no toast', async () => {
+    const { clerum, handle } = installAppControllerClerum({ agentNames: [HOST_A, HOST_B] })
+    const catalog = installCatalog(clerum)
+    catalog.deny(HOST_B, await ipcGenericForbidden('rpc:listSessions'))
+    const { app } = await mount(clerum, handle)
+
+    act(() => {
+      app.result.current.handleSelectChatAgent(HOST_A, { selectLatest: false })
+    })
+    await waitFor(() => expect(app.result.current.selectedAgent).toBe(HOST_A))
+    await holdThroughCatalog(app, catalog, HOST_B)
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 20))
+    })
+
+    // Liveness witness: B is held and exposed; A is still selected.
+    expect(app.result.current.heldAgentRefs).toContain(HOST_B)
+    expect(app.result.current.selectedAgent).toBe(HOST_A)
+    expect(
+      toastTexts(app.result.current).filter(
+        text => text.includes(HOST_B) || text.includes('access')
+      )
+    ).toEqual([])
   })
 })

@@ -10,7 +10,7 @@ import type {
 } from '../../../src/types'
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '../constants/navigation'
 import { pickLatestAgent } from '../lib/agents'
-import { toPrettyJson } from '../lib/format'
+import { httpErrorStatus, toPrettyJson } from '../lib/format'
 import {
   type HostAuthorityHoldKind,
   type HostAuthorityStore,
@@ -358,10 +358,26 @@ export function useAppController() {
       invalidateSessionCatalog(agentRef)
       if (!hostAuthority.hold(agentRef, kind)) return
       setHostAuthorityRevision(revision => revision + 1)
-      if (selectedAgentRef.current === agentRef) nav.setSelectedAgent(null)
+      if (selectedAgentRef.current === agentRef) {
+        nav.setSelectedAgent(null)
+        const name = agentDisplayName(agentRef)
+        pushToast(
+          kind === 'revoked'
+            ? `Access to ${name} was revoked.`
+            : `Could not verify access to ${name}. Use Retry in Latest sessions.`,
+          'error'
+        )
+      }
       void agentsData.refresh()
     },
-    [agentsData.refresh, hostAuthority, invalidateSessionCatalog, nav.setSelectedAgent]
+    [
+      agentDisplayName,
+      agentsData.refresh,
+      hostAuthority,
+      invalidateSessionCatalog,
+      nav.setSelectedAgent,
+      pushToast,
+    ]
   )
   const onHostAccessRevoked = useCallback(
     (agentRef: string) => blockHostAccess(agentRef, 'revoked'),
@@ -378,7 +394,14 @@ export function useAppController() {
       const scope = authorityScopeRef.current
       try {
         await window.clerum.rpc.listSessions(agentRef, undefined, { agent: agentRef, limit: 1 })
-      } catch {
+      } catch (error) {
+        console.warn('[host-authority] access verification failed', {
+          agentRef,
+          status: httpErrorStatus(error) ?? null,
+        })
+        if (authorityScopeRef.current === scope) {
+          pushToast(`Could not verify access to ${agentDisplayName(agentRef)}.`, 'error')
+        }
         return false
       }
       if (authorityScopeRef.current !== scope || !hostAuthority.release(agentRef, heldAtEpoch))
@@ -386,7 +409,7 @@ export function useAppController() {
       setHostAuthorityRevision(revision => revision + 1)
       return true
     },
-    [hostAuthority]
+    [agentDisplayName, hostAuthority, pushToast]
   )
   const chat = useAgentChatController({
     selectedAgent: nav.selectedAgent,
