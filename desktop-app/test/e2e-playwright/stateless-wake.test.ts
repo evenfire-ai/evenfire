@@ -719,8 +719,9 @@ async function expectSessionVisible(
 }
 
 // Click a listed session and confirm it became the active chat: its row is the
-// active one, the composer targets HOST_REF, and its title still maps to the
-// same chat identity.
+// active one, the conversation breadcrumb names HOST_REF, and its title still
+// maps to the same chat identity. The "Switch chat agent" selector is not used:
+// the renderer shows it only on the new-chat landing (no active chat).
 async function openExistingSession(
   appPage: import('@playwright/test').Page,
   title: string,
@@ -735,7 +736,7 @@ async function openExistingSession(
       .locator('.nav-latest-session.active')
       .getByRole('button', { name: `Open ${title}`, exact: true })
   ).toBeVisible({ timeout: 30_000 })
-  await expect(appPage.getByRole('button', { name: /^Switch chat agent$/ })).toContainText(
+  await expect(appPage.getByRole('navigation', { name: 'Chat breadcrumb' })).toContainText(
     HOST_REF,
     { timeout: 30_000 }
   )
