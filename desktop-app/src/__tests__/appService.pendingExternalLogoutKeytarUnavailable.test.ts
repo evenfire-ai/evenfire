@@ -186,6 +186,12 @@ describe('AppService pending logout when Keytar is unavailable', () => {
   it.each(['password', 'oauth'] as const)(
     'admits a %s-authenticated temporary session without Keytar or safeStorage',
     async loginKind => {
+      const config = await import('../config.js')
+      await config.saveDesktopRuntimeConfig({
+        externalRestApiBaseUrl: 'https://auth.example.test/api',
+        rpcProxyBaseUrl: '',
+      })
+      activeEnvKey = config.getActiveEnvKey()
       const token = validSessionToken()
       const tokenStore = new TokenStoreClass()
       const service = new AppServiceClass({
@@ -202,8 +208,6 @@ describe('AppService pending logout when Keytar is unavailable', () => {
       ).authClient
       const result = { token, me: user }
       const state = service as unknown as {
-        completePasswordLogin: (email: string, password: string) => Promise<unknown>
-        googleLogin: (idToken: string) => Promise<unknown>
         sessionToken: string | null
         me: typeof user | null
       }
@@ -215,8 +219,8 @@ describe('AppService pending logout when Keytar is unavailable', () => {
 
       const sessionState =
         loginKind === 'password'
-          ? await state.completePasswordLogin('user@example.com', 'not-used-in-this-test')
-          : await state.googleLogin('oauth-id-token')
+          ? await service.passwordLogin('user@example.com', 'not-used-in-this-test')
+          : await service.googleLogin('oauth-id-token')
 
       expect(sessionState).toMatchObject({
         authenticated: true,
@@ -229,11 +233,13 @@ describe('AppService pending logout when Keytar is unavailable', () => {
       expect(markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)).toEqual(
         expect.objectContaining({ intent: 'memory-only-session' })
       )
-      const files = await readdir(userDataDirectory)
+      const entries = await readdir(userDataDirectory, { withFileTypes: true })
+      const files = entries.map(entry => entry.name)
       expect(files).not.toContain(`session-token-${activeEnvKey}.enc`)
       expect(files).not.toContain(`session-token-${activeEnvKey}.json`)
-      for (const file of files) {
-        const contents = await readFile(path.join(userDataDirectory, file))
+      for (const entry of entries) {
+        if (!entry.isFile()) continue
+        const contents = await readFile(path.join(userDataDirectory, entry.name))
         expect(contents.includes(Buffer.from(token))).toBe(false)
       }
     }
@@ -501,7 +507,7 @@ describe('AppService pending logout when Keytar is unavailable', () => {
     expect(service.checkTemporarySessionExpiry()).toBe(true)
     releaseDrain()
 
-    await expect(logout).resolves.toBeUndefined()
+    await expect(logout).resolves.toBeTypeOf('number')
     expect(suspension).toHaveBeenCalledOnce()
     expect(
       markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)
@@ -519,6 +525,7 @@ describe('AppService pending logout when Keytar is unavailable', () => {
       installAuthenticatedLogin: (result: { token: string; me: typeof user }) => Promise<unknown>
       sessionToken: string | null
       memoryOnlySession: { expiresAt: number } | undefined
+      memoryOnlySessionTermination: Promise<void> | null
     }
     const token = validSessionToken()
     await internals.installAuthenticatedLogin({ token, me: user })
@@ -537,6 +544,7 @@ describe('AppService pending logout when Keytar is unavailable', () => {
     expect(
       markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)
     ).toMatchObject({ intent: 'memory-only-session' })
+    await internals.memoryOnlySessionTermination
     vi.unstubAllGlobals()
   })
 

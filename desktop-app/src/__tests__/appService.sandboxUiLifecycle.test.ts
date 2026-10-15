@@ -3,6 +3,7 @@ import { app, shell } from 'electron'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { testSessionTokenWithExpiry } from '../../testSupport/authTestFixtures.js'
 import { AppService } from '../appService.js'
 import { __setChatStoreBaseDirForTests, unbindChatStore } from '../chatStoreBinding.js'
 import { wireMainWindowRendererReadiness } from '../mainWindowReadiness.js'
@@ -389,7 +390,7 @@ describe('AppService sandbox-ui effective RPC endpoint', () => {
         appName: 'Discovered environment',
       })
     authMocks.googleLogin.mockResolvedValue({
-      token: 'fake-session-token',
+      token: testSessionTokenWithExpiry(),
       me: {
         id: 'user-a',
         email: 'user-a@example.test',

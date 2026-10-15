@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { AppService } from '../../../../../src/appService'
 import type { DesktopRuntimeConfigState } from '../../../../../src/types'
+import { testSessionTokenWithExpiry } from '../../../../../testSupport/authTestFixtures'
 import { useAuthController } from '../useAuthController'
 import { wrapLikeElectronIpc } from './__fixtures__/ipcErrors'
 
@@ -151,6 +152,7 @@ beforeEach(async () => {
   runtimeConfigDirectory = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-desktop-env-test-'))
   vi.doUnmock('electron')
   vi.resetModules()
+  vi.doMock('keytar', () => ({}))
   vi.doMock('electron', () => ({
     safeStorage: { isEncryptionAvailable: () => false },
     app: {
@@ -327,7 +329,7 @@ describe('Desktop environment handoff', () => {
     await runtimeConfigModule!.selectDesktopRuntimeConfigOption(other.id)
     const { AuthClient } = await import('../../../../../src/authClient')
     vi.spyOn(AuthClient.prototype, 'googleLogin').mockResolvedValue({
-      token: 'synthetic-new-session',
+      token: testSessionTokenWithExpiry(),
       me: {
         id: 'new-user',
         email: 'new@example.test',
@@ -340,7 +342,7 @@ describe('Desktop environment handoff', () => {
     })
     const { TokenStore } = await import('../../../../../src/tokenStore')
     ;(nativeAppService as unknown as { tokenStore: InstanceType<typeof TokenStore> }).tokenStore =
-      new TokenStore({ isolatedUserDataPath: runtimeConfigDirectory })
+      new TokenStore()
     mocks.selectRuntimeConfigForHandoff.mockImplementationOnce(async (id, generation) => {
       const selection = await nativeAppService!.selectRuntimeConfigForHandoff(id, generation)
       await nativeAppService!.googleLogin('synthetic-google')
@@ -612,7 +614,7 @@ describe('Desktop environment handoff', () => {
     await act(async () => confirmation)
 
     finishLogin({
-      token: 'synthetic-session-during-refresh',
+      token: testSessionTokenWithExpiry(),
       me: {
         id: 'refresh-race-user',
         email: 'refresh-race@example.test',
@@ -1489,7 +1491,7 @@ describe('Desktop environment handoff', () => {
     }
     app.authClient = {
       googleLogin: vi.fn().mockResolvedValue({
-        token: 'synthetic-session-user-a',
+        token: testSessionTokenWithExpiry(),
         me: {
           id: 'user-a',
           email: 'user-a@example.test',

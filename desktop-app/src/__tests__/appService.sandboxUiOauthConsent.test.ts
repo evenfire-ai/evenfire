@@ -39,7 +39,9 @@ vi.mock('electron', () => ({
 }))
 
 vi.mock('../config.js', () => ({
+  getActiveEnvKey: () => 'test_env-000000000000',
   getActiveRuntimeConfigOptionId: () => null,
+  getActiveLegacyEnvKeys: () => [],
   config: {
     rpcProxyBaseUrl: 'http://proxy',
     externalRestApiBaseUrl: 'http://rest',

@@ -427,14 +427,16 @@ describe('AppService invitation configuration lookup', () => {
       sessionToken: string | null
       me: unknown
       suspendDesktopGfsUploadsForAuthBoundary: ReturnType<typeof vi.fn>
-      logout: () => Promise<void>
+      logout: () => Promise<number>
+      getSessionGeneration: () => number
     }
     service.tokenStore = tokenStore
     service.rpcTokenManager = { clear: vi.fn() } as never
     service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
     service.sessionToken = 'fixture-stale-session-token'
     service.me = { id: 'user-1' }
-    await expect(service.logout()).resolves.toBeUndefined()
+    const generationBeforeLogout = service.getSessionGeneration()
+    await expect(service.logout()).resolves.toBe(generationBeforeLogout + 1)
     expect(service.tokenStore.clearSessionTokenStrictly).toHaveBeenCalledWith(getActiveEnvKey(), {
       legacyEnvKeys: [getActiveLegacyRestOnlyEnvKey()],
       mayWrite: expect.any(Function),
@@ -537,27 +539,28 @@ describe('AppService invitation configuration lookup', () => {
       getSessionGeneration: () => number
       getSessionState: () => Promise<unknown>
       logout: () => Promise<number>
-      savedSessionRestoreAttemptedEnvKey: string
+      savedSessionRestoreAttemptedEnvKey: string | null
       savedSessionRestoreAttemptedAtMs: number
-      tokenStore: {
-        clearSessionToken: ReturnType<typeof vi.fn>
-        getSessionToken: ReturnType<typeof vi.fn>
-      }
+      tokenStore: TokenStore
     }
-    service.tokenStore = {
-      clearSessionToken: vi.fn().mockResolvedValue(undefined),
-      getSessionToken: vi.fn().mockResolvedValue(null),
-    } as never
+    const tokenStore = await createIsolatedTokenStore(configPath)
+    service.tokenStore = tokenStore
+    vi.spyOn(tokenStore, 'clearSessionTokenStrictly').mockResolvedValue({
+      keytarAvailable: true,
+      keytarDisabled: false,
+    })
+    const getSessionToken = vi.spyOn(tokenStore, 'getSessionToken')
 
     const logoutGeneration = await service.logout()
-    service.savedSessionRestoreAttemptedEnvKey = getActiveEnvKey()
+    service.savedSessionRestoreAttemptedEnvKey = null
     service.savedSessionRestoreAttemptedAtMs = 0
 
     await expect(service.getSessionState()).resolves.toEqual({ authenticated: false, me: null })
     expect(service.getSessionGeneration()).toBe(logoutGeneration)
-    expect(service.tokenStore.getSessionToken).toHaveBeenCalledWith(getActiveEnvKey(), {
-      legacyEnvKeys: expect.any(Array),
-    })
+    expect(getSessionToken).toHaveBeenCalledWith(
+      getActiveEnvKey(),
+      expect.objectContaining({ legacyEnvKeys: expect.any(Array) })
+    )
   })
 
   it('clears a saved token when startup session restore is rejected by the API', async () => {

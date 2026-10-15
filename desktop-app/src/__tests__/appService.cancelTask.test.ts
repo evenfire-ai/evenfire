@@ -6,7 +6,9 @@ import { AppService } from '../appService.js'
 // ── mock dependencies before AppService is imported ──────────────────────────
 
 vi.mock('../config.js', () => ({
+  getActiveEnvKey: () => 'test_env-000000000000',
   getActiveRuntimeConfigOptionId: () => null,
+  getActiveLegacyEnvKeys: () => [],
   config: {
     rpcProxyBaseUrl: 'http://proxy',
     externalRestApiBaseUrl: 'http://rest',

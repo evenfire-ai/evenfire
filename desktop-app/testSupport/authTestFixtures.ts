@@ -20,6 +20,14 @@ export function testLoginResult(
   return { token, me }
 }
 
+export function testSessionTokenWithExpiry(expiresAt = Date.now() + 60 * 60 * 1000): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'test', typ: 'JWT' })).toString('base64url')
+  const payload = Buffer.from(JSON.stringify({ exp: Math.floor(expiresAt / 1000) })).toString(
+    'base64url'
+  )
+  return `${header}.${payload}.test-signature`
+}
+
 export function testTeamSwitchResult(teamId: string, token = `session-${teamId}`) {
   return {
     token,
