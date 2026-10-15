@@ -1861,6 +1861,55 @@ export class AppService {
         encryptedCleanupUncertain = true
       }
     }
+    const repairAfterTransientObservation = async () => {
+      if (!previousToken || !runtimeOwned()) return
+      // The marker cannot grant or revoke authority while it is unreadable.
+      // Compare only this transaction's exact candidate inside each source lane.
+      // Both sources are repaired if a conversion may already have renamed CP-S.
+      if (source !== 'safe-storage') {
+        await this.tokenStore.repairKeytarSessionTokenIfMatches(token, previousToken, envKey, {
+          mayWrite: runtimeOwned,
+          onMutationDispatched: onPriorMutation,
+          onMutationSettled: onPriorMutationSettled,
+          candidateAuthority: publications.get('keytar')?.authority,
+        })
+      }
+      if (source === 'safe-storage' || encryptedWriteAttempted) {
+        await this.tokenStore.repairSafeStorageSessionTokenIfMatches(token, previousToken, envKey, {
+          mayWrite: runtimeOwned,
+          onMutationDispatched: onPriorMutation,
+          onMutationSettled: onPriorMutationSettled,
+          candidateAuthority:
+            publications.get('safe-storage')?.authority ?? publications.get('keytar')?.authority,
+        })
+      }
+      repairedPriorSource = await this.readVerifiedSessionTokenSource(
+        previousToken,
+        envKey,
+        source === 'safe-storage'
+          ? 'safe-storage'
+          : source === 'active-keytar'
+            ? 'keytar'
+            : 'default',
+        runtimeOwned,
+        this.priorSessionSource(
+          previousToken,
+          envKey,
+          source === 'safe-storage'
+            ? 'safe-storage'
+            : source === 'active-keytar'
+              ? 'keytar'
+              : 'default',
+          priorPublications,
+          publications,
+          previouslyAcceptedSource
+        )
+      )
+      await this.verifySessionTokenSource(repairedPriorSource, envKey, runtimeOwned)
+      this.requireSessionTokenSourceCurrent(repairedPriorSource, envKey, runtimeOwned)
+      if (this.me) this.recordAcceptedSessionSource(repairedPriorSource, envKey)
+      if (runtimeOwned()) await this.retireRepairedPersistenceProducer(producer)
+    }
     const repairPreviouslyAcceptedTeamAuthority = async (): Promise<
       'active-keytar' | 'safe-storage'
     > => {
@@ -2169,6 +2218,17 @@ export class AppService {
         if (runtimeOwned()) await this.failClosedForPendingLogout(error)
         throw error
       }
+      if (this.isTransientPersistenceAuthorityRead(error)) {
+        if (!candidateMutationDispatched) throw error
+        try {
+          await repairAfterTransientObservation()
+        } catch (repairError) {
+          // This is a real credential repair failure, not inferred corruption
+          // from the transient marker read. Keep every uninspected marker byte.
+          await rejectUnverifiedRepair(repairError)
+        }
+        throw error
+      }
       if (isPendingExternalLogoutReadFailure(error) && !isTransientPendingLogoutReadError(error)) {
         if (runtimeOwned()) await this.failClosedForPendingLogout(error)
         throw error
@@ -2371,6 +2431,14 @@ export class AppService {
         } catch (rollbackError) {
           this.reportDeferredLogoutFailureSafely(rollbackError)
           if (dispatchInspectionError !== undefined) rollbackError = dispatchInspectionError
+          if (this.isTransientPersistenceAuthorityRead(rollbackError)) {
+            try {
+              await repairAfterTransientObservation()
+            } catch (repairError) {
+              await rejectUnverifiedRepair(repairError)
+            }
+            throw error
+          }
           await rejectUnverifiedRepair(rollbackError)
         }
       }

@@ -6,18 +6,14 @@ import os from 'node:os'
 import path from 'node:path'
 
 const runtime = vi.hoisted(() => ({ directory: '', keychain: new Map<string, string>() }))
-
 const boundary = vi.hoisted(() => ({
   getPassword: vi.fn(),
   setPassword: vi.fn(),
   deletePassword: vi.fn(),
   notifySessionChanged: vi.fn(),
 }))
-
 const keyOf = (service: string, account: string) => `${service}::${account}`
-
 vi.mock('keytar', () => boundary)
-
 vi.mock('electron', () => ({
   app: { getPath: vi.fn(() => runtime.directory), isReady: vi.fn(() => true) },
   safeStorage: {
@@ -26,13 +22,11 @@ vi.mock('electron', () => ({
     decryptString: vi.fn((value: Buffer) => value.toString().replace(/^encrypted:/, '')),
   },
 }))
-
 vi.mock('../chatStoreBinding.js', () => ({
   bindChatStoreForUser: vi.fn(),
   unbindChatStore: vi.fn(),
   __setChatStoreBaseDirForTests: vi.fn(),
 }))
-
 vi.mock('../pluginSdkRuntime.js', () => ({
   tryGetPluginSdkRuntime: () => ({
     notifySessionChanged: boundary.notifySessionChanged,
@@ -41,9 +35,7 @@ vi.mock('../pluginSdkRuntime.js', () => ({
 }))
 
 const homeToken = 'fixture-r21-home-session'
-
 const teamToken = 'fixture-r21-team-session'
-
 const homeMe = {
   id: 'fixture-r21-user',
   email: 'fixture-r21@example.com',
@@ -158,6 +150,56 @@ async function enteredWithin(promise: Promise<void>, label: string) {
     clearTimeout(timer)
   }
 }
+
+describe('R21-M1 partial publication with unavailable repair', () => {
+  it('never restores a rejected native candidate while both repair and marker inspection are unavailable', async () => {
+    const h = await harness()
+    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+    h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'active-keytar')
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
+    let published = false
+    boundary.setPassword.mockImplementationOnce(async (service, account, token) => {
+      runtime.keychain.set(keyOf(service, account), token)
+      published = true
+      throw new Error('fixture-partial native publication rejected')
+    })
+    const get = boundary.getPassword.getMockImplementation()!
+    boundary.getPassword.mockImplementation(async (...args) => {
+      if (published) throw new Error('fixture-native repair locked')
+      return get(...args)
+    })
+    const open = fsSync.openSync.bind(fsSync)
+    let rejectedReads = 0
+    vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, mode) => {
+      if (published && String(file) === h.markerPath) {
+        rejectedReads += 1
+        throw Object.assign(new Error('fixture-transient owned marker read'), { code: 'EMFILE' })
+      }
+      return open(file, flags, mode)
+    })
+    const error = await h.service.switchTeam('fixture-other').then(
+      () => null,
+      error => error
+    )
+    expect(published).toBe(true)
+    // Keep uncertainty active across three actual restore attempts, rather than
+    // requiring the failed producer to manufacture three marker reads itself.
+    await h.service.initialize()
+    await h.service.initialize()
+    expect(rejectedReads).toBeGreaterThanOrEqual(3)
+    vi.restoreAllMocks()
+    boundary.getPassword.mockImplementation(
+      async (service, account) => runtime.keychain.get(keyOf(service, account)) ?? null
+    )
+    const restarted = await harness()
+    const result = await restarted.service.initialize()
+    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(teamToken)
+    expect(result.authenticated).toBe(false)
+    expect(h.state.sessionToken).toBeNull()
+    expect(error).toBeInstanceOf(Error)
+  })
+})
 
 describe('R21-M2 newer independent source authority during logout cleanup', () => {
   it('preserves journal entries appended after the verified logout cleanup snapshot', async () => {
@@ -308,6 +350,361 @@ describe('independent no-dispatch transient probe', () => {
       me: homeMe,
     })
     expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(teamToken)
+  })
+})
+
+describe('R21-M1 marker observation uncertainty', () => {
+  it('gives confirmed corruption precedence over a known-unpublished native outage', async () => {
+    const h = await harness()
+    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+    h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'active-keytar')
+    vi.doMock('keytar', () => ({}))
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
+    const paused = deferred()
+    const release = deferred()
+    const set = h.tokenStore.setSessionToken.bind(h.tokenStore)
+    vi.spyOn(h.tokenStore, 'setSessionToken').mockImplementationOnce(async (...args) => {
+      const outcome = await set(...args).then(
+        value => ({ value }),
+        error => ({ error })
+      )
+      paused.resolve()
+      await release.promise
+      if ('error' in outcome) throw outcome.error
+      return outcome.value
+    })
+    const switching = h.service.switchTeam('fixture-other').then(
+      () => null,
+      error => error
+    )
+    try {
+      await enteredWithin(paused.promise, 'known-unpublished native response')
+      await fs.writeFile(h.markerPath, '{fixture-confirmed-corruption')
+    } finally {
+      release.resolve()
+    }
+    const error = await switching
+    expect(h.service.getCachedUserId()).toBeNull()
+    expect(h.state.sessionToken).toBeNull()
+    expect(h.state.me).toBeNull()
+    expect(await fs.readFile(h.markerPath, 'utf8')).toBe('{fixture-confirmed-corruption')
+    const restarted = await harness()
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+    })
+    expect(restarted.state.authClient.getMe).not.toHaveBeenCalled()
+    expect(error).toBeInstanceOf(Error)
+  })
+
+  it('reactivates the unchanged live GFS scope when login marker inspection rejects before dispatch', async () => {
+    const h = await harness()
+    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+    boundary.setPassword.mockClear()
+    const set = h.tokenStore.setSessionToken.bind(h.tokenStore)
+    let armed = false
+    vi.spyOn(h.tokenStore, 'setSessionToken').mockImplementationOnce(async (...args) => {
+      armed = true
+      return set(...args)
+    })
+    const open = fsSync.openSync.bind(fsSync)
+    const spy = vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, mode) => {
+      if (String(file) === h.markerPath && armed) {
+        armed = false
+        throw Object.assign(new Error('fixture-login before-dispatch EMFILE'), { code: 'EMFILE' })
+      }
+      return open(file, flags, mode)
+    })
+    const error = await h.state.installAuthenticatedLogin({ token: teamToken, me: homeMe }).then(
+      () => null,
+      error => error
+    )
+    spy.mockRestore()
+    expect(boundary.setPassword).not.toHaveBeenCalled()
+    expect(h.state.sessionToken).toBe(homeToken)
+    expect(h.state.me).toEqual(homeMe)
+    expectHomeDispatchScope(h.service)
+    expect(h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)).toBeNull()
+    const restarted = await harness()
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: true,
+      me: homeMe,
+    })
+    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(teamToken)
+    expect(error).toBeInstanceOf(Error)
+  })
+
+  it('fails closed for confirmed marker corruption even when no login candidate was dispatched', async () => {
+    const h = await harness()
+    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+    boundary.setPassword.mockClear()
+    const set = h.tokenStore.setSessionToken.bind(h.tokenStore)
+    const corrupt = '{fixture-confirmed-marker-corruption'
+    vi.spyOn(h.tokenStore, 'setSessionToken').mockImplementationOnce(async (...args) => {
+      await fs.writeFile(h.markerPath, corrupt)
+      return set(...args)
+    })
+    const error = await h.state.installAuthenticatedLogin({ token: teamToken, me: homeMe }).then(
+      () => null,
+      error => error
+    )
+    expect(boundary.setPassword).not.toHaveBeenCalled()
+    expect(h.state.sessionToken).toBeNull()
+    expect(h.state.me).toBeNull()
+    expect(await fs.readFile(h.markerPath, 'utf8')).toBe(corrupt)
+    expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBe(homeToken)
+    const restarted = await harness()
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+    })
+    expect(restarted.state.authClient.getMe).not.toHaveBeenCalled()
+    expect(error).toBeInstanceOf(Error)
+  })
+
+  it.each(['active-keytar', 'safe-storage', 'absent'] as const)(
+    'repairs rejected login publication without changing %s marker bytes after transient inspection',
+    async source => {
+      const h = await harness()
+      if (source === 'safe-storage')
+        boundary.setPassword.mockRejectedValueOnce(new Error('fixture secure encrypted Home'))
+      await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+      if (source !== 'absent') {
+        h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, source)
+      }
+      const original = h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)
+      const fresh = 'fixture-rejected-login-after-transient-read'
+      let published = false
+      boundary.setPassword.mockImplementationOnce(async (service, account, token) => {
+        runtime.keychain.set(keyOf(service, account), token)
+        published = true
+      })
+      const open = fsSync.openSync.bind(fsSync)
+      let reads = 0
+      const spy = vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, mode) => {
+        if (String(file) === h.markerPath && published && ++reads <= 3)
+          throw Object.assign(new Error('fixture-login marker EMFILE'), { code: 'EMFILE' })
+        return open(file, flags, mode)
+      })
+      boundary.notifySessionChanged.mockClear()
+      const error = await h.state.installAuthenticatedLogin({ token: fresh, me: homeMe }).then(
+        () => null,
+        error => error
+      )
+      spy.mockRestore()
+      expect(h.state.sessionToken).toBe(homeToken)
+      expect(h.state.me).toEqual(homeMe)
+      expectHomeDispatchScope(h.service)
+      expect(h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)).toEqual(
+        original
+      )
+      expect(boundary.notifySessionChanged).not.toHaveBeenCalledWith(false)
+      const restarted = await harness()
+      await expect(restarted.service.initialize()).resolves.toEqual({
+        authenticated: true,
+        me: homeMe,
+      })
+      expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(fresh)
+      expect(error).toBeInstanceOf(Error)
+    }
+  )
+
+  it.each(['safe-storage', 'absent'] as const)(
+    'retains the previous source for post-write uncertainty with %s authority',
+    async source => {
+      const h = await harness()
+      await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+      if (source === 'safe-storage') {
+        await h.tokenStore.setSafeStorageSessionToken(homeToken, h.envKey)
+        h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, source)
+      } else {
+        const rename = fs.rename.bind(fs)
+        vi.spyOn(fs, 'rename').mockImplementationOnce(async (from, to) => {
+          if (String(to).endsWith('.enc')) throw new Error('fixture-encrypted write failed')
+          return rename(from, to)
+        })
+      }
+      const original = h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)
+      let candidateWritten = false
+      if (source === 'safe-storage') {
+        const rename = fs.rename.bind(fs)
+        vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+          const result = await rename(from, to)
+          if (String(to).endsWith('.enc')) candidateWritten = true
+          return result
+        })
+      } else {
+        boundary.setPassword.mockImplementationOnce(async (service, account, token) => {
+          runtime.keychain.set(keyOf(service, account), token)
+          candidateWritten = true
+          throw new Error('fixture-partial native write')
+        })
+      }
+      const open = fsSync.openSync.bind(fsSync)
+      let reads = 0
+      const spy = vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, mode) => {
+        if (String(file) === h.markerPath && candidateWritten && ++reads <= 3)
+          throw Object.assign(new Error('fixture-marker EMFILE'), { code: 'EMFILE' })
+        return open(file, flags, mode)
+      })
+      const error = await h.service.switchTeam('fixture-other').then(
+        () => null,
+        error => error
+      )
+      spy.mockRestore()
+      expect(h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)).toEqual(
+        original
+      )
+      expect(h.state.sessionToken).toBe(homeToken)
+      expect(h.state.me).toEqual(homeMe)
+      const restarted = await harness()
+      await expect(restarted.service.initialize()).resolves.toEqual({
+        authenticated: true,
+        me: homeMe,
+      })
+      expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(teamToken)
+      expect(error).toBeInstanceOf(Error)
+    }
+  )
+
+  it('fences a rejected candidate after transient inspection and genuine native repair failure', async () => {
+    const h = await harness()
+    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+    h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'active-keytar')
+    let candidateWritten = false
+    boundary.setPassword.mockImplementation(async (service, account, token) => {
+      if (token === homeToken) throw new Error('fixture-actual native repair failure')
+      runtime.keychain.set(keyOf(service, account), token)
+      if (token === teamToken) candidateWritten = true
+    })
+    const open = fsSync.openSync.bind(fsSync)
+    let reads = 0
+    const spy = vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, mode) => {
+      if (String(file) === h.markerPath && candidateWritten && ++reads <= 3)
+        throw Object.assign(new Error('fixture-marker EMFILE'), { code: 'EMFILE' })
+      return open(file, flags, mode)
+    })
+    const error = await h.service.switchTeam('fixture-other').then(
+      () => null,
+      error => error
+    )
+    spy.mockRestore()
+    expect(h.markers.readPendingExternalLogoutIntent(runtime.directory, h.envKey)).toEqual({
+      intent: 'keytar-cleanup-pending',
+      credentialSource: 'active-keytar',
+    })
+    const restarted = await harness()
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+    })
+    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(teamToken)
+    expect(h.state.sessionToken).toBeNull()
+    expect(error).toBeInstanceOf(Error)
+  })
+
+  it.each(['switch', 'hop'] as const)(
+    'preserves the verified source after third/fourth-read EMFILE during %s',
+    async operation => {
+      const h = await harness()
+      await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+      h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'active-keytar')
+      const original = await fs.readFile(h.markerPath, 'utf8')
+      let candidateWritten = false
+      boundary.setPassword.mockImplementation(async (service, account, token) => {
+        runtime.keychain.set(keyOf(service, account), token)
+        if (token === teamToken) candidateWritten = true
+      })
+      const open = fsSync.openSync.bind(fsSync)
+      let reads = 0
+      const spy = vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, mode) => {
+        if (String(file) === h.markerPath && candidateWritten && ++reads <= 2)
+          throw Object.assign(new Error('fixture-marker EMFILE'), { code: 'EMFILE' })
+        return open(file, flags, mode)
+      })
+      boundary.notifySessionChanged.mockClear()
+      const hopOperation = vi.fn(async () => 'must-not-run')
+      const result =
+        operation === 'switch'
+          ? h.service.switchTeam('fixture-other')
+          : h.state.runWithTeamContext('fixture-other', hopOperation)
+      const error = await result.then(
+        () => null,
+        error => error
+      )
+      spy.mockRestore()
+      expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBe(homeToken)
+      expect(h.state.sessionToken).toBe(homeToken)
+      expect(h.state.me).toEqual(homeMe)
+      expect(await fs.readFile(h.markerPath, 'utf8')).toBe(original)
+      expect(boundary.notifySessionChanged).not.toHaveBeenCalledWith(false)
+      const restarted = await harness()
+      await expect(restarted.service.initialize()).resolves.toEqual({
+        authenticated: true,
+        me: homeMe,
+      })
+      expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(teamToken)
+      expect(error).toBeInstanceOf(Error)
+      expect(hopOperation).not.toHaveBeenCalled()
+    }
+  )
+
+  it('repairs the exact native candidate after three consecutive transient ownership reads', async () => {
+    const h = await harness()
+    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+    h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'active-keytar')
+    const original = await fs.readFile(h.markerPath, 'utf8')
+    let candidateWritten = false
+    boundary.setPassword.mockImplementation(async (service, account, token) => {
+      runtime.keychain.set(keyOf(service, account), token)
+      if (token === teamToken) candidateWritten = true
+    })
+    const open = fsSync.openSync.bind(fsSync)
+    let reads = 0
+    const spy = vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, mode) => {
+      if (String(file) === h.markerPath && candidateWritten && ++reads <= 3)
+        throw Object.assign(new Error('fixture-marker EMFILE'), { code: 'EMFILE' })
+      return open(file, flags, mode)
+    })
+    const error = await h.service.switchTeam('fixture-other').then(
+      () => null,
+      error => error
+    )
+    spy.mockRestore()
+    expect(await fs.readFile(h.markerPath, 'utf8')).toBe(original)
+    const restarted = await harness()
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: true,
+      me: homeMe,
+    })
+    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(teamToken)
+    expect(h.state.sessionToken).toBe(homeToken)
+    expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBe(homeToken)
+    expect(error).toBeInstanceOf(Error)
+    // Startup may retire verified cleanup; before startup the exact witness was preserved.
+    expect(original).toContain('active-keytar')
+  })
+
+  it('does not report a false external logout for transient canceled-quit inspection', async () => {
+    const h = await harness()
+    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+    h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'active-keytar')
+    const observed = h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)
+    const open = fsSync.openSync.bind(fsSync)
+    const spy = vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, mode) => {
+      if (String(file) === h.markerPath)
+        throw Object.assign(new Error('fixture-marker EMFILE'), { code: 'EMFILE' })
+      return open(file, flags, mode)
+    })
+    boundary.notifySessionChanged.mockClear()
+    await expect(h.service.applyPendingExternalLogoutIntent()).resolves.toBe(false)
+    spy.mockRestore()
+    expect(h.state.sessionToken).toBe(homeToken)
+    expect(h.service.getCachedUserId()).toBe(homeMe.id)
+    expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBe(homeToken)
+    expect(h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)).toEqual(observed)
+    expect(boundary.notifySessionChanged).not.toHaveBeenCalledWith(false)
   })
 })
 
@@ -740,6 +1137,33 @@ describe('R18-H1 owner-approved absent-module outage policy', () => {
     await h.state.installAuthenticatedLogin({ token: 'fixture-isolated-fresh-session', me: homeMe })
     expect(h.service.getCachedUserId()).toBe(homeMe.id)
     expect(await h.tokenStore.getSessionToken(h.envKey)).toBe('fixture-isolated-fresh-session')
+  })
+})
+
+describe('R21-M1 confirmed-invalid asynchronous cleanup', () => {
+  it('denies existing authentication when a real native cleanup observes newly corrupt marker bytes', async () => {
+    const h = await harness()
+    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+    h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'active-keytar')
+    const remove = boundary.deletePassword.getMockImplementation()!
+    let corrupted = false
+    boundary.deletePassword.mockImplementationOnce(async (...args) => {
+      const deleted = await remove(...args)
+      await fs.writeFile(h.markerPath, '{fixture-new-marker-corruption')
+      corrupted = true
+      return deleted
+    })
+    await expect(h.service.applyPendingExternalLogoutIntent()).resolves.toBe(false)
+    expect(corrupted).toBe(true)
+    expect(h.state.sessionToken).toBeNull()
+    expect(h.state.me).toBeNull()
+    expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBe(homeToken)
+    const restarted = await harness()
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+    })
+    expect(restarted.state.authClient.getMe).not.toHaveBeenCalled()
   })
 })
 
