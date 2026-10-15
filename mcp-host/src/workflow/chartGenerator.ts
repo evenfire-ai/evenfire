@@ -1,12 +1,6 @@
 /** The PNG chart generator (clerum__generate_chart): Chart.js drawn on a Skia canvas. */
 import { type SKRSContext2D, createCanvas } from '@napi-rs/canvas'
-import {
-  Chart,
-  type ChartConfiguration,
-  type Plugin,
-  type Scale,
-  registerables,
-} from 'chart.js'
+import { Chart, type ChartConfiguration, type Plugin, type Scale, registerables } from 'chart.js'
 import {
   artifactResult,
   claimOutputFile,

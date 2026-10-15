@@ -52,7 +52,8 @@ describe('FONTKIT_RTL_SCRIPTS', () => {
 describe('the direction of a paragraph', () => {
   /** The direction the PDF lays a paragraph out in, which drops LRM and RLM as invisible. */
   const pdfReadsRtl = (text: string) =>
-    resolveParagraph([...text.replace(/[\u200e\u200f]/g, '')].map(ch => ch.codePointAt(0)!)).base === 1
+    resolveParagraph([...text.replace(/[\u200e\u200f]/g, '')].map(ch => ch.codePointAt(0)!))
+      .base === 1
 
   it.each([
     ['a roman numeral before Hebrew', 'Ⅻ שלום', false],
