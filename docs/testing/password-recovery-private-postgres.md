@@ -29,7 +29,7 @@ bash scripts/ci/run-password-recovery-private-postgres.sh configured
 bash scripts/ci/run-password-recovery-private-postgres.sh all
 ```
 
-`local` runs `control-api/test/r4l1.resetPasswordPayload.externalRest.realPostgres.integration.test.ts`.
+`local` runs `control-api/test/passwordResetPayload.externalRest.realPostgres.integration.test.ts`.
 It requires an isolated PostgreSQL 16 admin DSN in `CONTROL_API_REAL_PG_ADMIN_URL`,
 the Member Registration source checkout in `EVENFIRE_MEMBER_REGISTRATION_ROOT`,
 that checkout's installed `tsx` dependencies, and `external-rest-api/dist/app.js`.
@@ -37,7 +37,7 @@ The local public consumer runs as a bounded built HTTP child. The suite creates 
 control and producer databases and launches the real local Member Registration
 service. Use a disposable local PostgreSQL instance only.
 
-`configured` runs `control-api/test/bug192.passwordRecovery.memberRegistration.realPostgres.integration.test.ts`.
+`configured` runs `control-api/test/passwordRecovery.memberRegistration.realPostgres.integration.test.ts`.
 It requires `CONTROL_API_REAL_PG_ADMIN_URL`,
 `CONTROL_API_REAL_MEMBER_REGISTRATION_PG_URL`,
 `CONTROL_API_MEMBER_REGISTRATION_SERVICE_BASE_URL`, and

@@ -210,7 +210,7 @@ bash scripts/ci/run-password-recovery-private-postgres.sh configured
 ```
 
 It selects exactly
-`control-api/test/bug192.passwordRecovery.memberRegistration.realPostgres.integration.test.ts`
+`control-api/test/passwordRecovery.memberRegistration.realPostgres.integration.test.ts`
 through the strict suite manifest. Expect one physical suite and one passing
 scenario, containing admission-denial, real stored signed proof, preview/row
 binding, wrong-email/row negatives, reset session and later-login assertions.
