@@ -61,6 +61,24 @@ const CT = ['[Content_Types].xml', '<?xml version="1.0"?><Types/>']
 const DOCX = zip([CT, ['_rels/.rels', '<Relationships/>'], ['word/document.xml', '<w:document/>']])
 const XLSX = zip([CT, ['_rels/.rels', '<Relationships/>'], ['xl/workbook.xml', '<workbook/>']])
 const PLAIN_ZIP = zip([['a.txt', 'hello']])
+// An ordinary archive that happens to hold a folder named xl/, with no workbook.
+const ZIP_WITH_XL_FOLDER = zip([
+  ['readme.txt', 'backup'],
+  ['xl/notes.txt', 'not a workbook'],
+])
+// A spreadsheet whose workbook part is not the first entry.
+const XLSX_WORKBOOK_LAST = zip([
+  CT,
+  ['_rels/.rels', '<Relationships/>'],
+  ['xl/worksheets/sheet1.xml', '<worksheet/>'],
+  ['xl/workbook.xml', '<workbook/>'],
+])
+// A document that also carries an xl/ folder without a workbook part.
+const DOCX_WITH_XL_FOLDER = zip([
+  CT,
+  ['word/document.xml', '<w:document/>'],
+  ['xl/notes.txt', 'not a workbook'],
+])
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 const JPEG = b([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10], 'JFIF', [0x00, 0x01, 0x01, 0x00, 0xff, 0xd9])
@@ -70,6 +88,20 @@ const PNG = b(
   [0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89]
 )
 const PDF = b('%PDF-1.7\n1 0 obj << /Type /Catalog >> endobj\n%%EOF\n')
+
+const READER_BY_CLASS = Object.freeze({
+  text: 'text',
+  markdown: 'text',
+  html: 'text',
+  code: 'text',
+  svg: 'text',
+  jpeg: 'none',
+  png: 'none',
+  pdf: 'pdf',
+  docx: 'none',
+  xlsx: 'xlsx',
+  binary_unsupported: 'none',
+})
 
 const T = (cls, detection, mismatch, extra = {}) => {
   const text = ['text', 'markdown', 'html', 'code', 'svg'].includes(cls)
@@ -91,7 +123,7 @@ const T = (cls, detection, mismatch, extra = {}) => {
     detectedMediaType: extra.detectedMediaType ?? media,
     detection,
     textReadable: text,
-    reader: text ? 'text' : 'none',
+    reader: READER_BY_CLASS[cls],
     modelImageInput: cls === 'jpeg' || cls === 'png' ? 'candidate' : 'unsupported',
     mismatch,
   }
@@ -132,12 +164,49 @@ const classifier = [
   v('pdf bytes named .txt', PDF, 'notes.txt', 'text/plain', T('pdf', 'magic', true)),
   v('docx by zip entries', DOCX, 'letter.docx', DOCX_MIME, T('docx', 'magic', false)),
   v('xlsx by zip entries', XLSX, 'sheet.xlsx', XLSX_MIME, T('xlsx', 'magic', false)),
+  v('xlsx bytes named .txt', XLSX, 'q3.txt', 'text/plain', T('xlsx', 'magic', true)),
+  v(
+    'empty prefix falls back to the declared xlsx',
+    b(''),
+    'q3.xlsx',
+    XLSX_MIME,
+    T('xlsx', 'declared', false),
+    2048
+  ),
   v(
     'plain zip archive',
     PLAIN_ZIP,
     'archive.zip',
     'application/zip',
     T('binary_unsupported', 'magic', false, { detectedMediaType: 'application/zip' })
+  ),
+  v(
+    'zip with an xl folder but no workbook stays a plain zip',
+    ZIP_WITH_XL_FOLDER,
+    'backup.zip',
+    'application/zip',
+    T('binary_unsupported', 'magic', false, { detectedMediaType: 'application/zip' })
+  ),
+  v(
+    'zip with an xl folder but no workbook named .xlsx',
+    ZIP_WITH_XL_FOLDER,
+    'report.xlsx',
+    XLSX_MIME,
+    T('binary_unsupported', 'magic', true, { detectedMediaType: 'application/zip' })
+  ),
+  v(
+    'xlsx whose workbook is not the first entry',
+    XLSX_WORKBOOK_LAST,
+    'sheet.xlsx',
+    XLSX_MIME,
+    T('xlsx', 'magic', false)
+  ),
+  v(
+    'docx that also holds an xl folder',
+    DOCX_WITH_XL_FOLDER,
+    'letter.docx',
+    DOCX_MIME,
+    T('docx', 'magic', false)
   ),
   v(
     'zip named .docx without word entries',
@@ -507,6 +576,58 @@ const references = [
   r('name of 256 code points', { ...attachmentBase, name: `${'ñ'.repeat(253)}.md` }, invalid),
   r('empty name', { ...attachmentBase, name: '' }, invalid),
   r('reader text on a pdf', { ...gfsBase, reader: 'text' }, invalid),
+  r('reader pdf on a pdf', { ...gfsBase, reader: 'pdf' }, ok),
+  r('reader xlsx on a pdf', { ...gfsBase, reader: 'xlsx' }, invalid),
+  r(
+    'reader xlsx on an xlsx',
+    {
+      ...gfsBase,
+      name: 'q3.xlsx',
+      class: 'xlsx',
+      declaredMediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      detectedMediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      reader: 'xlsx',
+    },
+    ok
+  ),
+  r(
+    'reader none on an xlsx',
+    {
+      ...gfsBase,
+      name: 'q3.xlsx',
+      class: 'xlsx',
+      declaredMediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      detectedMediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      reader: 'none',
+    },
+    ok
+  ),
+  r(
+    'reader pdf on an xlsx',
+    {
+      ...gfsBase,
+      name: 'q3.xlsx',
+      class: 'xlsx',
+      declaredMediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      detectedMediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      reader: 'pdf',
+    },
+    invalid
+  ),
+  r(
+    'reader pdf on a docx',
+    {
+      ...gfsBase,
+      name: 'q3.docx',
+      class: 'docx',
+      declaredMediaType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      detectedMediaType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      reader: 'pdf',
+    },
+    invalid
+  ),
+  r('reader pdf on a text file', { ...attachmentBase, reader: 'pdf' }, invalid),
+  r('unknown reader', { ...gfsBase, reader: 'docx' }, invalid),
   r('textReadable on a pdf', { ...gfsBase, textReadable: true, reader: 'text' }, invalid),
   r('image candidate on a pdf', { ...gfsBase, modelImageInput: 'candidate' }, invalid),
   r('text detection on a pdf', { ...gfsBase, detection: 'text_utf8' }, invalid),

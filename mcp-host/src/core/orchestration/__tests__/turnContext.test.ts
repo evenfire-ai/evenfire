@@ -269,11 +269,11 @@ describe('attached_file lines (issue #666)', () => {
         'sender: jose\n' +
         'attached_file: id="file-1" name="notes.md" class=markdown bytes=42 reader=text\n' +
         'attached_file: id="file-2" name="report.pdf" class=pdf bytes=9000 reader=none\n' +
-        "If the user's request refers to an attached file, read it with clerum__attachment_read before answering. Files with reader=none cannot be read in this turn; say so instead of guessing.\n" +
+        "If the user's request refers to an attached file, read it before answering: reader=text with clerum__attachment_read, reader=pdf or reader=xlsx with clerum__document_read. Files with reader=none cannot be read in this turn; say so instead of guessing.\n" +
         '</turn-context>\n\n'
     )
     expect(ATTACHED_FILES_INSTRUCTION).toBe(
-      "If the user's request refers to an attached file, read it with clerum__attachment_read before answering. Files with reader=none cannot be read in this turn; say so instead of guessing."
+      "If the user's request refers to an attached file, read it before answering: reader=text with clerum__attachment_read, reader=pdf or reader=xlsx with clerum__document_read. Files with reader=none cannot be read in this turn; say so instead of guessing."
     )
   })
 

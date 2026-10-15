@@ -59,7 +59,7 @@ describe('buildComposerFileReferences (#666)', () => {
 
     expect(references.map(r => [r.class, r.reader, r.modelImageInput])).toEqual([
       ['png', 'none', 'candidate'],
-      ['pdf', 'none', 'unsupported'],
+      ['pdf', 'pdf', 'unsupported'],
       ['binary_unsupported', 'none', 'unsupported'],
     ])
   })

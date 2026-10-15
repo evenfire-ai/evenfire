@@ -183,8 +183,9 @@ describe('clerum__generate_pptx — all slide layouts', () => {
 
 // ─── Security: path traversal on logoPath / image / chart ──────────
 
+// A path escaping the output folder fails the call, as it does in the other generators.
 describe('clerum__generate_pptx — path traversal protection', () => {
-  it('silently skips logo when logoPath is traversal-unsafe', async () => {
+  it('fails when logoPath escapes the output folder', async () => {
     const tool = findTool('clerum__generate_pptx')
     const result = await tool.execute(
       {
@@ -194,12 +195,12 @@ describe('clerum__generate_pptx — path traversal protection', () => {
       },
       testOutputDir
     )
-    // Render still succeeds — bad logoPath is dropped, deck is produced.
-    expect(result.success).toBe(true)
-    expect(isPptxFile(path.join(testOutputDir, 'logo-trav.pptx'))).toBe(true)
+    expect(result.success).toBe(false)
+    expect(result.error).toMatch(/branding\.logoPath: path traversal blocked/)
+    expect(fs.existsSync(path.join(testOutputDir, 'logo-trav.pptx'))).toBe(false)
   })
 
-  it('silently skips slide image when image.path is traversal-unsafe', async () => {
+  it('fails when image.path escapes the output folder', async () => {
     const tool = findTool('clerum__generate_pptx')
     const result = await tool.execute(
       {
@@ -214,11 +215,11 @@ describe('clerum__generate_pptx — path traversal protection', () => {
       },
       testOutputDir
     )
-    expect(result.success).toBe(true)
-    expect(isPptxFile(path.join(testOutputDir, 'img-trav.pptx'))).toBe(true)
+    expect(result.success).toBe(false)
+    expect(result.error).toMatch(/slides\[0\]\.image\.path: path traversal blocked/)
   })
 
-  it('silently skips chart PNG when chart.path is traversal-unsafe', async () => {
+  it('fails when chart.path escapes the output folder', async () => {
     const tool = findTool('clerum__generate_pptx')
     const result = await tool.execute(
       {
@@ -233,8 +234,8 @@ describe('clerum__generate_pptx — path traversal protection', () => {
       },
       testOutputDir
     )
-    expect(result.success).toBe(true)
-    expect(isPptxFile(path.join(testOutputDir, 'chart-trav.pptx'))).toBe(true)
+    expect(result.success).toBe(false)
+    expect(result.error).toMatch(/slides\[0\]\.chart\.path: path traversal blocked/)
   })
 })
 
@@ -329,6 +330,38 @@ describe('clerum__generate_pptx — quota enforcement', () => {
 })
 
 // ─── Speaker notes ─────────────────────────────────────────────────
+
+describe('clerum__generate_pptx — plain text', () => {
+  it('says once that slides print markdown as written, and not for ordinary text', async () => {
+    const tool = findTool('clerum__generate_pptx')
+    const marked = await tool.execute(
+      {
+        filename: 'm.pptx',
+        slides: [
+          {
+            layout: 'title-bullets',
+            title: 'Results',
+            bullets: ['**Revenue** grew 12%', 'Use `npm ci` first'],
+          },
+        ],
+      },
+      testOutputDir
+    )
+    expect(marked.success, marked.error).toBe(true)
+    const notes = marked.content ?? ''
+    expect(notes).toContain('slides[0].bullets[0] holds markdown or HTML')
+    expect(notes.match(/holds markdown or HTML/g)).toHaveLength(1)
+
+    const plain = await tool.execute(
+      {
+        filename: 'p.pptx',
+        slides: [{ layout: 'title-bullets', title: 'Math', bullets: ['2*3*4 = 24', 'snake_case'] }],
+      },
+      testOutputDir
+    )
+    expect(plain.content ?? '').not.toContain('markdown')
+  })
+})
 
 describe('clerum__generate_pptx — speaker notes', () => {
   it('attaches notes without crashing the writer', async () => {

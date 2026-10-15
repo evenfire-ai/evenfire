@@ -28,6 +28,19 @@ const FILE_CLASSES = Object.freeze([
 const TEXT_CLASSES = new Set(['text', 'markdown', 'html', 'code', 'svg'])
 const IMAGE_CLASSES = new Set(['jpeg', 'png'])
 const DOCUMENT_BINARY_CLASSES = new Set(['pdf', 'docx', 'xlsx'])
+const READER_BY_CLASS = Object.freeze({
+  text: 'text',
+  markdown: 'text',
+  html: 'text',
+  code: 'text',
+  svg: 'text',
+  jpeg: 'none',
+  png: 'none',
+  pdf: 'pdf',
+  docx: 'none',
+  xlsx: 'xlsx',
+  binary_unsupported: 'none',
+})
 
 /** A prefix shorter than this carries too little evidence to override the declared type. */
 const DECLARED_EVIDENCE_PREFIX_BYTES = 65536
@@ -287,12 +300,17 @@ function zipLocalHeaderNames(bytes) {
   return names
 }
 
+/**
+ * A spreadsheet needs its workbook part, not just an `xl/` folder: an ordinary
+ * archive with a folder named `xl/` stays a plain zip, so it is never offered
+ * to the XLSX reader, which reads `xl/workbook.xml`.
+ */
 function officeClassFromZipNames(names) {
   if (!names) return null
   const hasWord = names.some(name => name.startsWith('word/'))
-  const hasSheet = names.some(name => name.startsWith('xl/'))
-  if (hasWord && !hasSheet) return 'docx'
-  if (hasSheet && !hasWord) return 'xlsx'
+  const hasWorkbook = names.includes('xl/workbook.xml')
+  if (hasWord && !hasWorkbook) return 'docx'
+  if (hasWorkbook && !hasWord) return 'xlsx'
   return null
 }
 
@@ -380,7 +398,7 @@ function result(fileClass, detection, mismatch, detectedMediaType) {
     detectedMediaType: detectedMediaType ?? MEDIA_TYPE_BY_CLASS[fileClass],
     detection,
     textReadable,
-    reader: textReadable ? 'text' : 'none',
+    reader: READER_BY_CLASS[fileClass],
     modelImageInput: IMAGE_CLASSES.has(fileClass) ? 'candidate' : 'unsupported',
     mismatch,
   }

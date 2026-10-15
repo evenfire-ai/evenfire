@@ -25,18 +25,18 @@
  * the six tile centers. A run that never delivered the image cannot pass by
  * guessing, and a request that carries no image never receives a color list.
  *
- * Documents (issue #678). The Host never puts an attached document's text in the
- * prompt: the first request lists the file by id and offers the
- * `clerum__attachment_read` tool. So the one tool call this fixture ever makes
- * is that read, answered with `finish_reason: 'tool_calls'`; the second request
- * carries the tool result, and the answer is `DOCUMENT_FIXTURE_SHA256:` plus the
- * first 16 hex characters of the SHA-256 of the delivered text. A run whose
- * document never reached the provider cannot produce that digest. Document rows
- * add `documentSha256` (the digest of the delivered text, never the text); the
- * answer row also records the page the Host delivered (`byteRange` and
- * `truncated`), so the oracle hashes that exact slice of the file. Rejected rows
- * add a `reason` drawn from `FIXTURE_REJECTION_REASONS`, a closed set of fixed
- * strings that never carries request content.
+ * Documents (issues #656/#678/#1093). The Host never puts an attached document's
+ * content in the prompt: it lists the file by id and announces the selected
+ * reader. If neither read tool is offered, the request is ordinary text-only.
+ * Otherwise the fixture calls the selected reader and the second request carries
+ * its tool result. The answer is `DOCUMENT_FIXTURE_SHA256:` plus the first 16
+ * hex characters of the SHA-256 of the delivered PDF page text joined by new
+ * lines, or the canonical JSON serialization of the received XLSX sheets. A run
+ * whose document never reached the provider cannot produce that digest. Every
+ * answer row carries `documentReader` and `documentSha256`, never the text or
+ * table; only a text answer also records `byteRange` and `truncated`. Rejected
+ * rows add a `reason` drawn from `FIXTURE_REJECTION_REASONS`, a closed set of
+ * fixed strings that never carries request content.
  *
  * Determinism and sanitation. Responses carry a synthetic completion id derived
  * from the run id, a fixed test usage block, and `finish_reason: 'stop'` (or
@@ -45,9 +45,9 @@
  * never turned into a false failure; only a delivered image can produce a color
  * list. Evidence is limited to the run id, counters, per-model counts, a per-call
  * ledger (model, nullable image digest, response kind, and for documents the
- * digest of the delivered text), and SHA-256 digests of the delivered image bytes
- * and document text. Headers, auth values, prompts, raw image bytes, and document
- * text are never recorded.
+ * document-derived digest), and SHA-256 digests of the delivered image bytes and
+ * document-derived content. Headers, auth values, prompts, raw image bytes, and
+ * document text/table values are never recorded.
  *
  * Authentication. This fixture never holds the runner's ZAI key. It holds only
  * the SHA-256 digest of that key, hashes the bearer token it receives, and
@@ -155,6 +155,8 @@ export const FIXTURE_REJECTION_REASONS = Object.freeze([
   'image-tile-grid-mismatch',
   'image-pixel-not-a-tile-color',
   'document-byte-length-malformed',
+  'document-reader-unavailable',
+  'document-reader-unsupported',
   'document-tool-result-count',
   'document-tool-output-malformed',
   'document-tool-output-unreadable',
@@ -373,8 +375,12 @@ function extractPngBytes(messages) {
 
 /** The Host tool that returns the text of an attached document (issue #678). */
 const ATTACHMENT_READ_TOOL = 'clerum__attachment_read'
+const DOCUMENT_READ_TOOL = 'clerum__document_read'
 
-/** Prefix of the document answer; the digest after it is computed from the delivered text. */
+/**
+ * Prefix of the document answer; the digest after it comes from the delivered
+ * PDF page text or the canonical JSON serialization of the received XLSX sheets.
+ */
 const DOCUMENT_ANSWER_PREFIX = 'DOCUMENT_FIXTURE_SHA256:'
 
 /** Length of the digest prefix echoed in the answer. */
@@ -388,18 +394,24 @@ const ATTACHED_FILE_LINE = /^attached_file: id="([^"\n]+)"[^\n]*$/m
  * verified, then the reader, then the optional media-type mismatch tail. The
  * declared type in that tail is written with `quotePromptValue`, a JSON string
  * literal that may contain spaces and escaped quotes. Anchored to the end of the
- * line, so a file name that contains the same text cannot supply the value.
+ * line, so a file name that contains the same text cannot supply either value.
+ * The reader is matched on its own, so a malformed byte length is still
+ * reported as one.
  */
-const ATTACHED_FILE_BYTES =
-  / bytes=(\S*) reader=\S+(?: mismatch=true(?: declared="(?:[^"\\]|\\.)*")? detected=\S+)?$/
+const MISMATCH_TAIL = '(?: mismatch=true(?: declared="(?:[^"\\\\]|\\\\.)*")? detected=\\S+)?$'
+const ATTACHED_FILE_BYTES = new RegExp(` bytes=(\\S*) reader=\\S+${MISMATCH_TAIL}`)
+const ATTACHED_FILE_READER = new RegExp(` reader=(\\S+)${MISMATCH_TAIL}`)
 
 /** A positive decimal integer without leading zeros. */
 const POSITIVE_DECIMAL = /^[1-9][0-9]*$/
 
 /** The wrapper the Host puts around a tool result (`BasicSafety.wrapForLlm`). */
-const ATTACHMENT_TOOL_OUTPUT = new RegExp(
-  `^<tool_output name="${ATTACHMENT_READ_TOOL}" sanitized="(?:true|false)">\\n([\\s\\S]*)\\n</tool_output>$`
-)
+const toolOutput = name =>
+  new RegExp(
+    `^<tool_output name="${name}" sanitized="(?:true|false)">\\n([\\s\\S]*)\\n</tool_output>$`
+  )
+const ATTACHMENT_TOOL_OUTPUT = toolOutput(ATTACHMENT_READ_TOOL)
+const DOCUMENT_TOOL_OUTPUT = toolOutput(DOCUMENT_READ_TOOL)
 
 /** A document turn the fixture cannot read pixel-exactly gets a stable reason code. */
 class FixtureDocumentError extends Error {
@@ -430,21 +442,23 @@ function attachedFileByteLength(line) {
 }
 
 /**
- * Classifies the request as one of the two turns of an attachment read.
+ * Classifies the request as one of the two turns of an attachment/document read.
  *
  * - `null`: not a document turn (no `attached_file` line, or the read tool is not offered).
- * - `{ stage: 'read', attachmentId, byteLength }`: the user message lists a readable file
- *   and no tool result follows it yet, so the model has to ask for the text. `byteLength`
- *   is the size the Host listed for the file.
- * - `{ stage: 'answer', text }`: a `role:'tool'` message after the last user message carries
- *   the wrapped tool result, so the model can answer from what was delivered.
+ * - `{ stage: 'read', reader, attachmentId, byteLength }`: the user message lists a
+ *   readable file and no tool result follows it yet, so the model has to call the
+ *   selected reader. `reader` is `text`, `pdf`, or `xlsx`; `byteLength` is the size
+ *   the Host listed for the file.
+ * - `{ stage: 'answer', reader, ... }`: a `role:'tool'` message after the last user message
+ *   carries the wrapped reader result, so the model can answer from what was delivered.
  *
  * The fixture is stateless: both turns are recognised from the message list alone.
  */
 function classifyDocumentTurn(body) {
   const tools = Array.isArray(body.tools) ? body.tools : []
-  const offered = tools.some(tool => tool?.function?.name === ATTACHMENT_READ_TOOL)
-  if (!offered) return null
+  const offeredAttachmentRead = tools.some(tool => tool?.function?.name === ATTACHMENT_READ_TOOL)
+  const offeredDocumentRead = tools.some(tool => tool?.function?.name === DOCUMENT_READ_TOOL)
+  if (!offeredAttachmentRead && !offeredDocumentRead) return null
 
   const userIndex = lastUserIndex(body.messages)
   if (userIndex < 0) return null
@@ -452,6 +466,24 @@ function classifyDocumentTurn(body) {
   if (typeof user.content !== 'string') return null
   const attached = ATTACHED_FILE_LINE.exec(user.content)
   if (!attached) return null
+  const reader = ATTACHED_FILE_READER.exec(attached[0])?.[1]
+  const documentReader =
+    reader === 'pdf' || reader === 'xlsx' ? reader : reader === 'text' ? 'text' : null
+  if (!documentReader)
+    throw new FixtureDocumentError(
+      'document-reader-unsupported',
+      'the attached_file reader is not text, pdf or xlsx'
+    )
+  if (documentReader !== 'text' && !offeredDocumentRead)
+    throw new FixtureDocumentError(
+      'document-reader-unavailable',
+      `reader=${documentReader} is offered without ${DOCUMENT_READ_TOOL}`
+    )
+  if (documentReader === 'text' && !offeredAttachmentRead)
+    throw new FixtureDocumentError(
+      'document-reader-unavailable',
+      'reader=text is offered without clerum__attachment_read'
+    )
 
   const toolMessages = body.messages
     .slice(userIndex + 1)
@@ -459,6 +491,7 @@ function classifyDocumentTurn(body) {
   if (toolMessages.length === 0)
     return {
       stage: 'read',
+      reader: documentReader,
       attachmentId: attached[1],
       byteLength: attachedFileByteLength(attached[0]),
     }
@@ -468,11 +501,13 @@ function classifyDocumentTurn(body) {
       `exactly one attachment read is supported, received ${toolMessages.length}`
     )
 
-  const wrapped = ATTACHMENT_TOOL_OUTPUT.exec(toolMessages[0].content)
+  const wrappedAttachment = ATTACHMENT_TOOL_OUTPUT.exec(toolMessages[0].content)
+  const wrappedDocument = DOCUMENT_TOOL_OUTPUT.exec(toolMessages[0].content)
+  const wrapped = wrappedDocument ?? wrappedAttachment
   if (!wrapped)
     throw new FixtureDocumentError(
       'document-tool-output-malformed',
-      'the tool result is not a clerum__attachment_read wrapper'
+      'the tool result is not a supported reader wrapper'
     )
   let result
   try {
@@ -480,15 +515,19 @@ function classifyDocumentTurn(body) {
   } catch {
     throw new FixtureDocumentError('document-tool-output-malformed', 'the tool result is not JSON')
   }
-  if (
-    !result ||
-    typeof result !== 'object' ||
-    result.kind !== 'text' ||
-    typeof result.text !== 'string'
-  )
+  if (!result || typeof result !== 'object')
     throw new FixtureDocumentError(
       'document-tool-output-unreadable',
-      'the tool result does not carry the document text'
+      'the tool result is not an object'
+    )
+  if (wrappedDocument) {
+    const document = documentReaderContent(result)
+    return { stage: 'answer', reader: document.reader, document }
+  }
+  if (result.kind !== 'text' || typeof result.text !== 'string')
+    throw new FixtureDocumentError(
+      'document-tool-output-unreadable',
+      'the attachment reader result does not carry text'
     )
   const range = result.byteRange
   if (
@@ -506,9 +545,81 @@ function classifyDocumentTurn(body) {
   // Only the two integers and the flag are copied: the ledger never holds text.
   return {
     stage: 'answer',
-    text: result.text,
-    byteRange: { offset: range.offset, length: range.length },
-    truncated: result.truncated,
+    reader: 'text',
+    document: {
+      text: result.text,
+      byteRange: { offset: range.offset, length: range.length },
+      truncated: result.truncated,
+    },
+  }
+}
+
+/**
+ * Parses the two successful document-reader shapes. The returned text/table is
+ * used only to derive a SHA-256 before the next model answer; it is never
+ * copied into evidence or an error.
+ */
+function documentReaderContent(result) {
+  if (!result || typeof result !== 'object' || result.status !== 'ok')
+    throw new FixtureDocumentError(
+      'document-tool-output-unreadable',
+      'the document reader did not return a successful result'
+    )
+  if (result.format === 'pdf') {
+    if (
+      result.mode !== 'text' ||
+      !Array.isArray(result.pages) ||
+      result.pages.length === 0 ||
+      result.pages.some(page => typeof page?.text !== 'string')
+    )
+      throw new FixtureDocumentError(
+        'document-tool-output-unreadable',
+        'the PDF reader result does not carry text pages'
+      )
+    return { reader: 'pdf', text: result.pages.map(page => page.text).join('\n') }
+  }
+  if (result.format !== 'xlsx')
+    throw new FixtureDocumentError(
+      'document-tool-output-unreadable',
+      'the reader result format is not pdf or xlsx'
+    )
+  if (!Array.isArray(result.sheets) || result.sheets.length === 0)
+    throw new FixtureDocumentError(
+      'document-tool-output-unreadable',
+      'the XLSX reader result does not carry sheets'
+    )
+  for (const sheet of result.sheets) {
+    if (
+      typeof sheet?.name !== 'string' ||
+      !isByteCount(sheet.startRow) ||
+      sheet.startRow < 1 ||
+      typeof sheet.truncated !== 'boolean' ||
+      !Array.isArray(sheet.rows) ||
+      sheet.rows.some(
+        row =>
+          !Array.isArray(row) ||
+          row.some(
+            value =>
+              ![null, undefined].includes(value) &&
+              !['string', 'number', 'boolean'].includes(typeof value)
+          )
+      )
+    )
+      throw new FixtureDocumentError(
+        'document-tool-output-unreadable',
+        'the XLSX reader result carries a malformed sheet or cell'
+      )
+  }
+  // The digest covers the sheet values in one fixed key order, so it does not
+  // depend on the order in which the Host serializes a sheet's fields.
+  return {
+    reader: 'xlsx',
+    table: result.sheets.map(sheet => ({
+      name: sheet.name,
+      startRow: sheet.startRow,
+      truncated: sheet.truncated,
+      rows: sheet.rows,
+    })),
   }
 }
 
@@ -877,36 +988,52 @@ export function createImageFixtureFetch(
           })
         }
         if (documentTurn.stage === 'read') {
-          // Ask for the text. The answer to this request carries no file content:
-          // the only way the text reaches the next request is the Host's own tool.
+          // Ask the Host's own reader for the attachment. The answer to this
+          // request carries no file content: the only way it reaches the next
+          // request is that tool result.
           state.counters.documentReadRequests += 1
           sequence += 1
           const completionId = `${COMPLETION_ID_PREFIX}${runId.slice(-12)}-${sequence}`
           recordCall(model, null, 'document-read-requested', {
+            documentReader: documentTurn.reader,
             documentSha256: null,
             documentByteLength: documentTurn.byteLength,
           })
           publish()
           return jsonResponse(
-            toolCallCompletionBody(completionId, model, ATTACHMENT_READ_TOOL, {
-              attachmentId: documentTurn.attachmentId,
-            })
+            toolCallCompletionBody(
+              completionId,
+              model,
+              documentTurn.reader === 'text' ? ATTACHMENT_READ_TOOL : DOCUMENT_READ_TOOL,
+              {
+                attachmentId: documentTurn.attachmentId,
+              }
+            )
           )
         }
-        // The digest in the answer is derived from the delivered text and from
-        // nothing else: the prompt and the file name never contribute to it.
-        const documentSha256 = createHash('sha256').update(documentTurn.text, 'utf8').digest('hex')
+        // The digest is derived from the delivered text or canonical table and
+        // from nothing else: the prompt and the file name never contribute to it.
+        const delivered =
+          documentTurn.document.table === undefined
+            ? documentTurn.document.text
+            : JSON.stringify(documentTurn.document.table)
+        const documentSha256 = createHash('sha256').update(delivered, 'utf8').digest('hex')
         state.counters.documentAnswers += 1
         return answer(
           model,
           `${DOCUMENT_ANSWER_PREFIX}${documentSha256.slice(0, DOCUMENT_ANSWER_DIGEST_CHARS)}`,
           'document-answer',
           {
-            // The page the Host delivered, so the oracle hashes that exact slice.
+            // Only reader/paging fields and the digest are copied to evidence.
             document: {
+              documentReader: documentTurn.reader,
               documentSha256,
-              byteRange: documentTurn.byteRange,
-              truncated: documentTurn.truncated,
+              ...(documentTurn.reader === 'text'
+                ? {
+                    byteRange: documentTurn.document.byteRange,
+                    truncated: documentTurn.document.truncated,
+                  }
+                : {}),
             },
           }
         )

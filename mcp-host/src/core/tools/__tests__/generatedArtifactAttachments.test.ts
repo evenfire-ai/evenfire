@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { zipEntries } from '../../../workflow/__tests__/support/zipEntries'
 import type { ArtifactMetadata } from '../../../workflow/types'
 import type { NativeToolConfig } from '../../interfaces'
 import type { Attachment } from '../../types'
@@ -247,6 +248,174 @@ describe('generated internal artifact attachments', () => {
     )
     expect(isInternalGeneratedArtifactAttachment({ ...base, mimeType: 'text/html' })).toBe(false)
     expect(isInternalGeneratedArtifactAttachment({ ...base, filename: 'report.html' })).toBe(false)
+  })
+
+  it.each([
+    ['an ANSI escape', 'probe-redaction\u001b[0m-value'],
+    ['an HTML tag', 'probe-redaction<b></b>-value'],
+    ['a character reference', 'probe&#45;redaction-value'],
+    ['a zero-width space', 'probe-redaction\u200B-value'],
+    ['markdown emphasis', 'probe-**redaction**-value'],
+    ['a markdown link', 'probe-[redaction](https://a.example)-value'],
+    ['a markdown link holding a reference', 'probe-[red&#97;ction](https://a.example)-value'],
+    ['an image', 'probe-![redaction](missing.png)-value'],
+  ])('does not attach a PDF that prints a secret split by %s', async (_label, body) => {
+    process.env.CLERUM_OUTPUT_DIR = outputDir
+    const registry = new NativeToolRegistry(
+      {
+        workspacePath: outputDir,
+        shellTimeout: 5000,
+        toolTimeout: 60000,
+        toolProgressInterval: 30000,
+        httpAllowlist: [],
+        envAllowlist: ['PATH'],
+        memoryMaxSize: 1048576,
+      },
+      'conv-1',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      null,
+      {
+        maxBytes: 52_428_800,
+        secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: 'probe-redaction-value' }],
+      }
+    )
+    const pdf = registry.get('clerum__generate_pdf')!
+    const leaked = await pdf.execute({ filename: 'split.pdf', body })
+    expect(leaked.is_error).toBe(false)
+    expect(leaked.attachments ?? []).toHaveLength(0)
+    const safe = await pdf.execute({ filename: 'safe.pdf', body: 'nothing secret here' })
+    expect(safe.attachments ?? []).toHaveLength(1)
+  })
+
+  it('does not attach a document whose arguments hold a secret with a quote or a backslash', async () => {
+    process.env.CLERUM_OUTPUT_DIR = outputDir
+    const secret = 'probe"redac\\tion-value'
+    const registry = new NativeToolRegistry(
+      {
+        workspacePath: outputDir,
+        shellTimeout: 5000,
+        toolTimeout: 60000,
+        toolProgressInterval: 30000,
+        httpAllowlist: [],
+        envAllowlist: ['PATH'],
+        memoryMaxSize: 1048576,
+      },
+      'conv-1',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      null,
+      {
+        maxBytes: 52_428_800,
+        secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: secret }],
+      }
+    )
+    const pdf = registry.get('clerum__generate_pdf')!
+    const leaked = await pdf.execute({ filename: 'quoted.pdf', body: `value: ${secret}` })
+    expect(leaked.is_error).toBe(false)
+    expect(leaked.attachments ?? []).toHaveLength(0)
+  })
+
+  it('does not attach a DOCX whose table cell prints a secret a link splits', async () => {
+    process.env.CLERUM_OUTPUT_DIR = outputDir
+    const registry = new NativeToolRegistry(
+      {
+        workspacePath: outputDir,
+        shellTimeout: 5000,
+        toolTimeout: 60000,
+        toolProgressInterval: 30000,
+        httpAllowlist: [],
+        envAllowlist: ['PATH'],
+        memoryMaxSize: 1048576,
+      },
+      'conv-1',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      null,
+      {
+        maxBytes: 52_428_800,
+        secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: 'probe-redaction-value' }],
+      }
+    )
+    const docx = registry.get('clerum__generate_docx')!
+    const cell = 'probe-[redaction](https://a.example)-value'
+    const leaked = await docx.execute({
+      filename: 'split.docx',
+      body: 'Table:',
+      tables: [{ headers: ['Value'], rows: [[cell]] }],
+    })
+    expect(leaked.is_error).toBe(false)
+    expect(leaked.attachments ?? []).toHaveLength(0)
+  })
+
+  describe('XLSX record keys, which the sheet prints as its header', () => {
+    const protectedValue = 'probe-redaction-value'
+
+    function xlsxTool() {
+      process.env.CLERUM_OUTPUT_DIR = outputDir
+      const registry = new NativeToolRegistry(
+        {
+          workspacePath: outputDir,
+          shellTimeout: 5000,
+          toolTimeout: 60000,
+          toolProgressInterval: 30000,
+          httpAllowlist: [],
+          envAllowlist: ['PATH'],
+          memoryMaxSize: 1048576,
+        },
+        'conv-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        null,
+        {
+          maxBytes: 52_428_800,
+          secretEntriesProvider: () => [{ name: 'PROBE_VALUE', value: protectedValue }],
+        }
+      )
+      return registry.get('clerum__generate_xlsx')!
+    }
+
+    function sheetXml(file: string): string {
+      return [...zipEntries(file)]
+        .filter(([name]) => name.startsWith('xl/') && name.endsWith('.xml'))
+        .map(([, data]) => data.toString('utf8'))
+        .join('\n')
+    }
+
+    it('attaches a sheet whose keys hold no secret', async () => {
+      const result = await xlsxTool().execute({
+        filename: 'ordinary.xlsx',
+        sheets: [{ name: 'S', rows: [{ Region: 'North', Total: 5 }] }],
+      })
+      expect(result.is_error).toBe(false)
+      expect(result.attachments ?? []).toHaveLength(1)
+      const attached = path.join(outputDir, 'attached.xlsx')
+      fs.writeFileSync(attached, decoded(result.attachments![0]!))
+      expect(sheetXml(attached)).toContain('Region')
+    })
+
+    it.each([
+      ['as sent', protectedValue],
+      ['split by a control character', 'probe-red\u0007action-value'],
+      ['split by an ANSI escape', 'probe-red\u001b[31maction-value'],
+      ['split by half a surrogate pair', 'probe-red\uD800action-value'],
+    ])('does not attach a sheet whose key prints a secret %s', async (_label, key) => {
+      const result = await xlsxTool().execute({
+        filename: 'keyed.xlsx',
+        sheets: [{ name: 'S', rows: [{ [key]: 'ordinary' }] }],
+      })
+      expect(result.is_error).toBe(false)
+      expect(sheetXml(path.join(outputDir, 'keyed.xlsx'))).toContain(protectedValue)
+      expect(result.attachments ?? []).toHaveLength(0)
+    })
   })
 
   it('native internal tools return generated artifact attachments through the adapter', async () => {

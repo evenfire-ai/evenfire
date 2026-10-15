@@ -301,7 +301,7 @@ describe('clerum__attachment_read through a complete task (#666)', () => {
     expect(deps.onComplete).toHaveBeenCalledTimes(1)
   })
 
-  it('returns a binary result for a PDF, and the model never sees its bytes', async () => {
+  it('points a PDF to clerum__document_read, and the model never sees its bytes', async () => {
     Object.assign(appConfig, {
       enableApproval: false,
       dynamicToolsEnabled: false,
@@ -317,14 +317,14 @@ describe('clerum__attachment_read through a complete task (#666)', () => {
     expect(executor.executorState).toBe('completed')
     expect(providerCalls).toHaveLength(2)
     expect(lastUserText(providerCalls[0]!.messages)).toContain(
-      `attached_file: id="file-1" name="report.pdf" class=${attachment.fileReference!.class} bytes=${attachment.fileReference!.byteLength} reader=none\n`
+      `attached_file: id="file-1" name="report.pdf" class=${attachment.fileReference!.class} bytes=${attachment.fileReference!.byteLength} reader=pdf\n`
     )
     const result = providerCalls[1]!.messages.find(
       message => message.role === 'tool' && message.tool_call_id === call.id
     )
     // Witness: the tool answered with the typed binary result.
     expect(result?.content).toContain('"kind":"binary"')
-    expect(result?.content).toContain('"reason":"no_reader_for_class"')
+    expect(result?.content).toContain('"reason":"read_with_document_read"')
     const everything = JSON.stringify(providerCalls.map(entry => entry.messages))
     expect(everything).not.toContain(SENTINEL)
   })

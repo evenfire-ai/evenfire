@@ -19,6 +19,7 @@ import type { McpManager } from '../../mcp/manager'
 import type { IncomingMessage } from '../../server'
 import type { McpTool } from '../../types'
 import { getOutputDir, resolveInternalTools } from '../../workflow/internalTools'
+import { printedForms } from '../../workflow/toolText'
 import type { InternalToolDefinition } from '../../workflow/types'
 import { ScopedWorkspace } from '../../workspace/scopedWorkspace'
 import type { Workspace } from '../../workspace/service'
@@ -30,6 +31,9 @@ import type { SpilloverStorage } from '../spillover'
 import { ToolDefinition, ToolOutput } from '../types'
 import { AttachmentReadTool } from './attachmentRead'
 import { CronManageTool } from './cronManage'
+import { DocumentReadTool } from './documentRead'
+import { DEFAULT_DOCUMENT_READ_LIMITS } from './documentRead/types'
+import { runDocumentJob } from './documentRead/workerRunner'
 import { FileReadTool } from './fileRead'
 import { FileWriteTool } from './fileWrite'
 import { buildGeneratedArtifactAttachment } from './generatedArtifactAttachments'
@@ -110,7 +114,9 @@ class InternalToolAdapter implements Tool {
               artifact: result.artifact,
               outputDir: this.outputDir,
               maxBytes: this.attachmentOptions.maxBytes,
-              sourcePayload: params,
+              // The file shows the arguments as the generator prints them, so a
+              // secret split by a tag or an escape is checked whole too.
+              sourcePayload: [params, printedForms(params)],
               secretEntriesProvider: this.attachmentOptions.secretEntriesProvider,
             })
           : null
@@ -332,6 +338,25 @@ export class NativeToolRegistry implements ToolRegistry {
       this.register(
         new AttachmentReadTool(sourceMessage, maxBytes, { contextWindowTokens, ledger, redactor })
       )
+      // #656 — PDF and XLSX attachments are read by `clerum__document_read`,
+      // which draws from the same turn ledger.
+      if (
+        sourceMessage.attachments.some(
+          a =>
+            a.kind === 'file' &&
+            (a.fileReference?.reader === 'pdf' || a.fileReference?.reader === 'xlsx')
+        )
+      ) {
+        this.register(
+          new DocumentReadTool(sourceMessage, {
+            contextWindowTokens,
+            ledger,
+            redactor,
+            runJob: runDocumentJob,
+            limits: DEFAULT_DOCUMENT_READ_LIMITS,
+          })
+        )
+      }
     }
 
     const envGetter = (key: string): string | undefined => {

@@ -705,12 +705,13 @@ test('getEvidence returns a private copy and onEvidence publishes snapshots', as
 })
 
 // ---------------------------------------------------------------------------
-// Documents (issue #678): the Host lists an attached file in the turn-context
-// block and offers `clerum__attachment_read`; the text reaches the provider only
-// in the tool result of the second request.
+// Documents (#656/#678/#1093): the Host lists an attached file in the
+// turn-context block and offers the reader selected by `reader=`; content
+// reaches the provider only in the tool result of the second request.
 // ---------------------------------------------------------------------------
 
 const READ_TOOL = 'clerum__attachment_read'
+const DOCUMENT_TOOL = 'clerum__document_read'
 const ATTACHMENT_ID = 'att-11111111-2222-4333-8444-555555555555'
 const DOCUMENT_TEXT = 'ledger token 7f3a9c1e\nsecond line\n'
 
@@ -723,16 +724,30 @@ const readToolDefinition = {
   },
 }
 
+const documentToolDefinition = {
+  type: 'function',
+  function: {
+    name: DOCUMENT_TOOL,
+    description: 'Read an attached PDF or XLSX document.',
+    parameters: { type: 'object' },
+  },
+}
+
 function documentUserMessage(
   text = 'Summarize the attached file.',
-  { bytesField = 'bytes=34' } = {}
+  {
+    bytesField = 'bytes=34',
+    reader = 'text',
+    className = reader === 'text' ? 'text' : reader,
+    fileName = reader === 'text' ? 'notes.txt' : `body-only.${reader}`,
+  } = {}
 ) {
   return {
     role: 'user',
     content:
       '<turn-context>\ndate: 2026-09-29\n' +
-      `attached_file: id="${ATTACHMENT_ID}" name="notes.txt" class=text ${bytesField} reader=text\n` +
-      "If the user's request refers to an attached file, read it with clerum__attachment_read before answering.\n" +
+      `attached_file: id="${ATTACHMENT_ID}" name="${fileName}" class=${className} ${bytesField} reader=${reader}\n` +
+      "If the user's request refers to an attached file, read it with the offered reader before answering.\n" +
       `</turn-context>\n\n${text}`,
   }
 }
@@ -752,9 +767,9 @@ function documentReadResult(text = DOCUMENT_TEXT) {
   }
 }
 
-function documentAnswerMessages(toolContent) {
+function documentAnswerMessages(toolContent, userOptions = {}) {
   return [
-    documentUserMessage(),
+    documentUserMessage(undefined, userOptions),
     {
       role: 'assistant',
       content: null,
@@ -765,6 +780,8 @@ function documentAnswerMessages(toolContent) {
     { role: 'tool', tool_call_id: 'call-1', content: toolContent },
   ]
 }
+
+const documentTools = [readToolDefinition, documentToolDefinition]
 
 const sha256 = text => createHash('sha256').update(text, 'utf8').digest('hex')
 
@@ -792,6 +809,7 @@ test('document turn 1: asks for the text with a tool call and carries no file co
       model: VISUAL_MODEL,
       imageSha256: null,
       responseKind: 'document-read-requested',
+      documentReader: 'text',
       documentSha256: null,
       documentByteLength: Buffer.byteLength(DOCUMENT_TEXT),
     },
@@ -814,6 +832,118 @@ test('document turn 1: the read row records the byte length the Host listed, not
     lengths.push(row.documentByteLength)
   }
   assert.deepEqual(lengths, [34, 6_291_456])
+})
+
+test('document turn 1: pdf chooses clerum__document_read and carries no file content', async () => {
+  const h = harness()
+  const response = await call(
+    h,
+    chatBody(VISUAL_MODEL, [documentUserMessage(undefined, { reader: 'pdf' })], {
+      tools: documentTools,
+    })
+  )
+  const body = await response.json()
+
+  assert.equal(response.status, 200)
+  assert.equal(body.choices[0].message.tool_calls[0].function.name, DOCUMENT_TOOL)
+  assert.deepEqual(JSON.parse(body.choices[0].message.tool_calls[0].function.arguments), {
+    attachmentId: ATTACHMENT_ID,
+  })
+  assert.deepEqual(h.getEvidence().attempts, [
+    {
+      model: VISUAL_MODEL,
+      imageSha256: null,
+      responseKind: 'document-read-requested',
+      documentReader: 'pdf',
+      documentSha256: null,
+      documentByteLength: 34,
+    },
+  ])
+})
+
+test('document turn 1: pdf without its reader is refused, with the same pdf read as liveness', async () => {
+  const unavailable = harness()
+  const unavailableResponse = await call(
+    unavailable,
+    chatBody(VISUAL_MODEL, [documentUserMessage(undefined, { reader: 'pdf' })], {
+      tools: [readToolDefinition],
+    })
+  )
+  assert.equal(unavailableResponse.status, 400)
+  assert.equal((await unavailableResponse.json()).error.code, 'document-reader-unavailable')
+  assert.deepEqual(unavailable.getEvidence().attempts, [
+    {
+      model: VISUAL_MODEL,
+      imageSha256: null,
+      responseKind: 'rejected',
+      reason: 'document-reader-unavailable',
+    },
+  ])
+  assert.equal(unavailable.getEvidence().counters.documentFailures, 1)
+  assert.equal(unavailable.getEvidence().counters.documentReadRequests, 0)
+
+  const available = harness()
+  const availableResponse = await call(
+    available,
+    chatBody(VISUAL_MODEL, [documentUserMessage(undefined, { reader: 'pdf' })], {
+      tools: documentTools,
+    })
+  )
+  assert.equal(availableResponse.status, 200)
+  assert.equal(available.getEvidence().attempts[0].documentReader, 'pdf')
+  assert.equal(available.getEvidence().counters.documentReadRequests, 1)
+})
+
+test('document turn 1: an unsupported reader is refused, with a supported reader as liveness', async () => {
+  const unsupported = harness()
+  const unsupportedResponse = await call(
+    unsupported,
+    chatBody(VISUAL_MODEL, [documentUserMessage(undefined, { reader: 'none' })], {
+      tools: documentTools,
+    })
+  )
+  assert.equal(unsupportedResponse.status, 400)
+  assert.equal((await unsupportedResponse.json()).error.code, 'document-reader-unsupported')
+  assert.deepEqual(unsupported.getEvidence().attempts, [
+    {
+      model: VISUAL_MODEL,
+      imageSha256: null,
+      responseKind: 'rejected',
+      reason: 'document-reader-unsupported',
+    },
+  ])
+  assert.equal(unsupported.getEvidence().counters.documentFailures, 1)
+  assert.equal(unsupported.getEvidence().counters.documentReadRequests, 0)
+
+  const supported = harness()
+  const supportedResponse = await call(
+    supported,
+    chatBody(VISUAL_MODEL, [documentUserMessage(undefined, { reader: 'xlsx' })], {
+      tools: documentTools,
+    })
+  )
+  assert.equal(supportedResponse.status, 200)
+  assert.equal(supported.getEvidence().attempts[0].documentReader, 'xlsx')
+  assert.equal(supported.getEvidence().counters.documentReadRequests, 1)
+})
+
+test('document turn 1: the reader comes from the line tail, never from the file name', async () => {
+  // The Host writes the file name verbatim, so it may contain ` reader=`.
+  const cases = [
+    { reader: 'xlsx', fileName: 'weird reader=pdf file.xlsx', tools: documentTools },
+    { reader: 'pdf', fileName: 'weird reader=text file.pdf', tools: [documentToolDefinition] },
+  ]
+  for (const { reader, fileName, tools } of cases) {
+    const h = harness()
+    const response = await call(
+      h,
+      chatBody(VISUAL_MODEL, [documentUserMessage(undefined, { reader, fileName })], { tools })
+    )
+    assert.equal(response.status, 200)
+    const [row] = h.getEvidence().attempts
+    assert.equal(row.responseKind, 'document-read-requested')
+    assert.equal(row.documentReader, reader)
+  }
 })
 
 test('document turn 1: an attached_file line without a usable bytes= is refused, not read', async () => {
@@ -872,6 +1002,7 @@ test('document turn 2: the answer is a digest of the delivered text and the ledg
       model: VISUAL_MODEL,
       imageSha256: null,
       responseKind: 'document-answer',
+      documentReader: 'text',
       documentSha256: digest,
       byteRange: { offset: 0, length: Buffer.byteLength(DOCUMENT_TEXT) },
       truncated: false,
@@ -909,6 +1040,186 @@ test('document turn 2: the answer row records the page the Host delivered, not a
     { byteRange: { offset: 0, length: 4_096 }, truncated: true },
     { byteRange: { offset: 65_536, length: 2_048 }, truncated: false },
   ])
+})
+
+test('document turn 2: the PDF answer is a digest of the delivered page text', async () => {
+  const h = harness()
+  const pages = [
+    { page: 1, text: 'first page' },
+    { page: 2, text: 'second page' },
+  ]
+  const result = {
+    status: 'ok',
+    attachmentId: ATTACHMENT_ID,
+    referenceId: 'ref-1',
+    format: 'pdf',
+    mode: 'text',
+    pageCount: 2,
+    pages,
+  }
+  const response = await call(
+    h,
+    chatBody(
+      VISUAL_MODEL,
+      documentAnswerMessages(wrappedToolOutput(result, { name: DOCUMENT_TOOL }), {
+        reader: 'pdf',
+      }),
+      { tools: documentTools }
+    )
+  )
+  const body = await response.json()
+
+  assert.equal(response.status, 200)
+  const digest = sha256(pages.map(page => page.text).join('\n'))
+  assert.equal(body.choices[0].message.content, `DOCUMENT_FIXTURE_SHA256:${digest.slice(0, 16)}`)
+  assert.deepEqual(h.getEvidence().attempts, [
+    {
+      model: VISUAL_MODEL,
+      imageSha256: null,
+      responseKind: 'document-answer',
+      documentReader: 'pdf',
+      documentSha256: digest,
+    },
+  ])
+})
+
+test('document turn 2: the XLSX answer is a digest of the canonical received table', async () => {
+  const h = harness()
+  const rows = [['lead'], [DOCUMENT_TEXT], [], ['after-the-gap']]
+  // The canonical order the Desktop spec hashes.
+  const sheets = [{ name: 'Report', startRow: 1, truncated: false, rows }]
+  const result = {
+    status: 'ok',
+    attachmentId: ATTACHMENT_ID,
+    referenceId: 'ref-1',
+    format: 'xlsx',
+    sheetNames: ['Report'],
+    // The order the Host serializes (documentRead/index.ts), which differs.
+    sheets: [{ name: 'Report', startRow: 1, rows, truncated: false }],
+  }
+  assert.notEqual(JSON.stringify(result.sheets), JSON.stringify(sheets))
+  const response = await call(
+    h,
+    chatBody(
+      VISUAL_MODEL,
+      documentAnswerMessages(wrappedToolOutput(result, { name: DOCUMENT_TOOL }), {
+        reader: 'xlsx',
+      }),
+      { tools: documentTools }
+    )
+  )
+  const body = await response.json()
+
+  assert.equal(response.status, 200)
+  const digest = sha256(JSON.stringify(sheets))
+  assert.equal(body.choices[0].message.content, `DOCUMENT_FIXTURE_SHA256:${digest.slice(0, 16)}`)
+  assert.deepEqual(h.getEvidence().attempts, [
+    {
+      model: VISUAL_MODEL,
+      imageSha256: null,
+      responseKind: 'document-answer',
+      documentReader: 'xlsx',
+      documentSha256: digest,
+    },
+  ])
+})
+
+test('document turn 2: every malformed document-reader result is refused, with valid PDF/XLSX twins', async () => {
+  async function callReader(result, reader) {
+    const h = harness()
+    const response = await call(
+      h,
+      chatBody(
+        VISUAL_MODEL,
+        documentAnswerMessages(wrappedToolOutput(result, { name: DOCUMENT_TOOL }), { reader }),
+        { tools: documentTools }
+      )
+    )
+    return { h, response }
+  }
+
+  const validPdf = {
+    status: 'ok',
+    attachmentId: ATTACHMENT_ID,
+    referenceId: 'ref-1',
+    format: 'pdf',
+    mode: 'text',
+    pageCount: 2,
+    pages: [
+      { page: 1, text: 'first page' },
+      { page: 2, text: 'second page' },
+    ],
+  }
+  const validSheet = { name: 'Report', startRow: 1, rows: [['value']], truncated: false }
+  const validXlsx = {
+    status: 'ok',
+    attachmentId: ATTACHMENT_ID,
+    referenceId: 'ref-1',
+    format: 'xlsx',
+    sheetNames: ['Report'],
+    sheets: [validSheet],
+  }
+
+  // Liveness witnesses: both accepted document-reader shapes produce answers.
+  for (const [reader, valid] of [
+    ['pdf', validPdf],
+    ['xlsx', validXlsx],
+  ]) {
+    const { h, response } = await callReader(valid, reader)
+    assert.equal(response.status, 200, reader)
+    assert.equal(h.getEvidence().counters.documentAnswers, 1, reader)
+    assert.equal(h.getEvidence().attempts[0].responseKind, 'document-answer', reader)
+  }
+
+  const { truncated: _sheetTruncated, ...sheetWithoutTruncated } = validSheet
+  const cases = [
+    ['null result', null],
+    ['array result', [validPdf]],
+    ['error status', { ...validPdf, status: 'error' }],
+    ['missing status', (({ status: _status, ...result }) => result)(validPdf)],
+    ['visual PDF', { ...validPdf, mode: 'visual' }],
+    ['missing pages', (({ pages: _pages, ...result }) => result)(validPdf)],
+    ['object pages', { ...validPdf, pages: { page: 1 } }],
+    ['empty pages', { ...validPdf, pages: [] }],
+    ['non-text page', { ...validPdf, pages: [validPdf.pages[0], { page: 2 }] }],
+    ['unsupported format', { ...validPdf, format: 'docx' }],
+    ['missing sheets', (({ sheets: _sheets, ...result }) => result)(validXlsx)],
+    ['object sheets', { ...validXlsx, sheets: validSheet }],
+    ['numeric sheet name', { ...validXlsx, sheets: [{ ...validSheet, name: 7 }] }],
+    ['zero start row', { ...validXlsx, sheets: [{ ...validSheet, startRow: 0 }] }],
+    ['fractional start row', { ...validXlsx, sheets: [{ ...validSheet, startRow: 1.5 }] }],
+    ['string start row', { ...validXlsx, sheets: [{ ...validSheet, startRow: '1' }] }],
+    ['missing sheet truncation', { ...validXlsx, sheets: [sheetWithoutTruncated] }],
+    ['object rows', { ...validXlsx, sheets: [{ ...validSheet, rows: { 0: [] } }] }],
+    ['object cell', { ...validXlsx, sheets: [{ ...validSheet, rows: [[{}]] }] }],
+  ]
+  for (const [label, result] of cases) {
+    const reader =
+      label.includes('sheet') ||
+      label.includes('start row') ||
+      label.includes('rows') ||
+      label.includes('cell')
+        ? 'xlsx'
+        : 'pdf'
+    const { h, response } = await callReader(result, reader)
+    assert.equal(response.status, 400, label)
+    assert.equal((await response.json()).error.code, 'document-tool-output-unreadable', label)
+    const evidence = h.getEvidence()
+    assert.equal(evidence.counters.documentFailures, 1, label)
+    assert.equal(evidence.counters.documentAnswers, 0, label)
+    assert.deepEqual(
+      evidence.attempts,
+      [
+        {
+          model: VISUAL_MODEL,
+          imageSha256: null,
+          responseKind: 'rejected',
+          reason: 'document-tool-output-unreadable',
+        },
+      ],
+      label
+    )
+  }
 })
 
 test('document turn 2: a page range or truncation flag the fixture cannot read is refused', async () => {
@@ -1080,6 +1391,8 @@ test('image rows keep their original shape (no documentSha256)', async () => {
  */
 const EXPECTED_REJECTION_REASONS = [
   'document-byte-length-malformed',
+  'document-reader-unavailable',
+  'document-reader-unsupported',
   'document-page-range-malformed',
   'document-stream-unsupported',
   'document-tool-output-malformed',
@@ -1104,7 +1417,7 @@ const EXPECTED_REJECTION_REASONS = [
 test('the fixture publishes exactly the closed set of rejection reasons, frozen', () => {
   const reasons = providerModule.FIXTURE_REJECTION_REASONS
   assert.ok(Array.isArray(reasons), 'FIXTURE_REJECTION_REASONS is exported as an array')
-  assert.deepEqual([...reasons].sort(), EXPECTED_REJECTION_REASONS)
+  assert.deepEqual([...reasons].sort(), [...EXPECTED_REJECTION_REASONS].sort())
   assert.equal(Object.isFrozen(reasons), true)
 })
 
