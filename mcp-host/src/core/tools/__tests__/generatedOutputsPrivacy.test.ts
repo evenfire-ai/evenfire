@@ -268,15 +268,34 @@ describe('generated documents are private to their caller', () => {
     expect(fs.readdirSync(outputsOf(a))).toEqual(['kept.md'])
   })
 
-  it('keeps only the minimum free space on a disk the Host shares with the root', async () => {
+  it('keeps only the minimum free space on the root disk in development', async () => {
     const a = rootOf('user-a')
-    volume.mode = 'busy-shared'
-    expect((await markdown(a, 'shared.md', '# fine\n')).is_error).toBe(false)
-    // The same reading on a volume of the Host's own keeps its 15%.
-    volume.mode = 'busy-own'
-    const refused = await markdown(a, 'own.md', '# refused\n')
-    expect(refused.is_error).toBe(true)
-    expect(refused.content).toMatch(/Not enough free space/)
+    vi.stubEnv('CLERUM_DEV_MODE', 'true')
+    try {
+      volume.mode = 'busy-shared'
+      expect((await markdown(a, 'shared.md', '# fine\n')).is_error).toBe(false)
+      // The same reading on a volume of the Host's own keeps its 15%.
+      volume.mode = 'busy-own'
+      const refused = await markdown(a, 'own.md', '# refused\n')
+      expect(refused.is_error).toBe(true)
+      expect(refused.content).toMatch(/Not enough free space/)
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it("keeps the volume's share on the node disk of a deployed Host", async () => {
+    // A local-path volume reports the node's root disk, as the root does.
+    const a = rootOf('user-a')
+    vi.stubEnv('CLERUM_DEV_MODE', '')
+    try {
+      volume.mode = 'busy-shared'
+      const refused = await markdown(a, 'node.md', '# refused\n')
+      expect(refused.is_error).toBe(true)
+      expect(refused.content).toMatch(/Not enough free space/)
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 
   it('writes when the volume cannot be measured, and says so once', async () => {

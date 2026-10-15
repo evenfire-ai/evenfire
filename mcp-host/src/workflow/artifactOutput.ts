@@ -393,14 +393,21 @@ function sharesRootVolume(space: fs.BigIntStatsFs): boolean {
 
 let unmeasurableVolumeReported = false
 
+/** CLERUM_DEV_MODE, read as config.ts reads it. */
+function devMode(): boolean {
+  const value = process.env.CLERUM_DEV_MODE
+  return !!value && (value.toLowerCase() === 'true' || value === '1')
+}
+
 /**
  * Every caller's folder shares the Host volume, so their quotas together do
  * not bound it: a write must leave the free space GFS keeps (freeSpaceFloor).
- * On a filesystem the Host does not have to itself, the root's, as in
- * development or on a hostPath volume, that share would be of the whole disk,
- * so only the minimum is kept there. Nothing is removed to make room. A
- * volume that cannot be measured does not refuse the write; that is logged
- * once.
+ * In development on the root's filesystem, the developer's own disk, that
+ * share would be of the whole disk, so only the minimum is kept there. A
+ * deployed Host keeps the share even on the node's disk (a local-path
+ * volume), where filling it would put the node under disk pressure. Nothing is
+ * removed to make room. A volume that cannot be measured does not refuse the
+ * write; that is logged once.
  */
 function enforceFreeSpaceFloor(outputDir: string, incomingBytes: number): void {
   let space: fs.BigIntStatsFs | undefined
@@ -420,7 +427,8 @@ function enforceFreeSpaceFloor(outputDir: string, incomingBytes: number): void {
     return
   }
   const blocks = (BigInt(incomingBytes) + space.bsize - 1n) / space.bsize
-  const floor = sharesRootVolume(space) ? FREE_SPACE_FLOOR_MIN_BYTES : freeSpaceFloor(space)
+  const floor =
+    devMode() && sharesRootVolume(space) ? FREE_SPACE_FLOOR_MIN_BYTES : freeSpaceFloor(space)
   if (blocks * space.bsize + floor > space.bavail * space.bsize) {
     const mb = (bytes: bigint) => (Number(bytes) / (1024 * 1024)).toFixed(1)
     throw new Error(
