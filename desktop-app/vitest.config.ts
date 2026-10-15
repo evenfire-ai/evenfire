@@ -12,6 +12,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      keytar: path.resolve(__dirname, 'test/fixtures/unavailableKeytar.ts'),
       '@': path.resolve(__dirname, 'ui/src'),
       '@components': path.resolve(__dirname, 'ui/src/components'),
       '@constants': path.resolve(__dirname, 'ui/src/constants'),
@@ -28,7 +29,10 @@ export default defineConfig({
     // Absolute, because the ui/** suites run through Vite's module server,
     // which serves an out-of-root setup file under `/@fs/` and cannot resolve
     // it from a path relative to this package.
-    setupFiles: [path.resolve(__dirname, '../scripts/testing/bind-loopback-in-tests.mjs')],
+    setupFiles: [
+      path.resolve(__dirname, 'test/setup/credentialStorageIsolation.ts'),
+      path.resolve(__dirname, '../scripts/testing/bind-loopback-in-tests.mjs'),
+    ],
     // Owns the temporary root of the renderer chat fixture's real ChatStore
     // directories and removes it once every test file has finished.
     globalSetup: ['ui/src/hooks/domain/__tests__/__fixtures__/mockClerumStoreRoot.ts'],
