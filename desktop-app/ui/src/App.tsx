@@ -831,9 +831,7 @@ export function App() {
         }
       }
       if (!tab) return
-      if (requireExactAccess) {
-        staleTeamContextChatIdentitiesRef.current.add(JSON.stringify([agentRef, chatId]))
-      }
+      staleTeamContextChatIdentitiesRef.current.add(JSON.stringify([agentRef, chatId]))
       requestWorkspaceTabSelection(tab.id, inDrawer, tab)
     },
     [nextChatTabId, requestWorkspaceTabSelection, setWorkspaceTabs, vm.handleSelectChatAgent]
