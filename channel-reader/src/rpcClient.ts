@@ -147,6 +147,7 @@ export interface ChannelReaderRuntimeSource {
 const RUNTIME_ADMISSION_RETRY_AFTER_SECONDS_DEFAULT = 1
 const RUNTIME_ADMISSION_RETRY_AFTER_SECONDS_MAX = 60
 const DIRECT_SERVICE_ADMISSION_ERROR = 'runtime_service_admission_limited'
+const TELEGRAM_RUNTIME_MESSAGE_POST_TIMEOUT_MS = 15_000
 
 export class RuntimeServiceAdmissionLimitedError extends Error {
   constructor(readonly retryAfterSeconds: number) {
@@ -254,6 +255,9 @@ export class RPCClient {
       const query = options?.async ? '?async=true' : ''
       const response = await fetch(`${this.baseUrl}/v1/runtime/messages${query}`, {
         method: 'POST',
+        ...(message.channelType === 'telegram'
+          ? { signal: AbortSignal.timeout(TELEGRAM_RUNTIME_MESSAGE_POST_TIMEOUT_MS) }
+          : {}),
         headers: this.runtimeHeaders(message),
         body: JSON.stringify(payload),
       })

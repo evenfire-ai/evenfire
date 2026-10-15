@@ -82,13 +82,11 @@ describe('ChannelReader provider event idempotency', () => {
     expect(rpc.sendMessage).not.toHaveBeenCalled()
   })
 
-  it('does not consume provider events when authorization admission is unavailable', async () => {
-    vi.useFakeTimers()
+  it('does not retry Telegram on an authorization error without canonical admission proof', async () => {
     const rpc = rpcClient()
     rpc.authorizeProviderMessage = vi
       .fn()
       .mockResolvedValueOnce({ authorized: false, reason: 'error', retryAfterSeconds: 2 })
-      .mockResolvedValueOnce({ authorized: true })
     const reader = new ChannelReader({
       rpcClient: rpc,
       notificationDeliveryClient: null,
@@ -98,12 +96,10 @@ describe('ChannelReader provider event idempotency', () => {
 
     await reader.handleMessages([message, message])
     expect(rpc.authorizeProviderMessage).toHaveBeenCalledOnce()
-
-    await vi.advanceTimersByTimeAsync(2_000)
     await reader.handleMessages([message])
 
-    expect(rpc.authorizeProviderMessage).toHaveBeenCalledTimes(2)
-    expect(rpc.sendMessage).toHaveBeenCalledOnce()
+    expect(rpc.authorizeProviderMessage).toHaveBeenCalledOnce()
+    expect(rpc.sendMessage).not.toHaveBeenCalled()
   })
 
   it('keeps non-Telegram provider events retryable after direct admission rejects them', async () => {
