@@ -41,6 +41,37 @@ describe('createHostAuthorityStore', () => {
     expect(store.getEpoch('host-y')).not.toBe(beforeRelease)
   })
 
+  it('T-H2-1: a repeated hold of the same kind is not a transition but still moves the epoch', () => {
+    const store = createHostAuthorityStore()
+    expect(store.hold('host-y', 'uncertain')).toBe(true)
+    const firstHeldAt = store.heldAtEpoch('host-y')
+    const firstEpoch = store.getEpoch('host-y')
+
+    expect(store.hold('host-y', 'uncertain')).toBe(false)
+    expect(store.getEpoch('host-y')).toBeGreaterThan(firstEpoch)
+    expect(store.heldAtEpoch('host-y')).not.toBe(firstHeldAt)
+
+    expect(store.hold('host-y', 'revoked')).toBe(true)
+    expect(store.hold('host-y', 'revoked')).toBe(false)
+    expect(store.isBlocked('host-y')).toBe(true)
+  })
+
+  it('T-H2-2: a release with the epoch read before a repeated hold is stale', () => {
+    const store = createHostAuthorityStore()
+    store.hold('host-y', 'uncertain')
+    const beforeRepeat = store.heldAtEpoch('host-y')
+    if (beforeRepeat === undefined) throw new Error('host-y must be held')
+    store.hold('host-y', 'uncertain')
+
+    expect(store.release('host-y', beforeRepeat)).toBe(false)
+    expect(store.isBlocked('host-y')).toBe(true)
+
+    const current = store.heldAtEpoch('host-y')
+    if (current === undefined) throw new Error('host-y must still be held')
+    expect(store.release('host-y', current)).toBe(true)
+    expect(store.isBlocked('host-y')).toBe(false)
+  })
+
   it('reset clears every hold and changes the epoch of a previously held Host', () => {
     const store = createHostAuthorityStore()
     store.hold('host-y', 'revoked')

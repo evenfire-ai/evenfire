@@ -22,8 +22,9 @@ export interface HostAuthorityStore {
   /** The epoch at which the Host was held, or undefined when it is not held. */
   heldAtEpoch: (agentRef: string) => number | undefined
   /**
-   * Hold the Host. Returns false when nothing changed: a confirmed revocation
-   * is never downgraded to an uncertain hold.
+   * Returns true only when the hold state changed (unheld→held or
+   * uncertain→revoked). A repeated hold of the same kind still advances the
+   * epoch so an in-flight verification is invalidated, but returns false.
    */
   hold: (agentRef: string, kind: HostAuthorityHoldKind) => boolean
   /**
@@ -45,11 +46,12 @@ export function createHostAuthorityStore(): HostAuthorityStore {
     getEpoch: agentRef => epochByAgent.get(agentRef) ?? 0,
     heldAtEpoch: agentRef => holds.get(agentRef)?.epoch,
     hold: (agentRef, kind) => {
-      if (holds.get(agentRef)?.kind === 'revoked' && kind === 'uncertain') return false
+      const current = holds.get(agentRef)
+      if (current?.kind === 'revoked' && kind === 'uncertain') return false
       epoch += 1
       holds.set(agentRef, { kind, epoch })
       epochByAgent.set(agentRef, epoch)
-      return true
+      return current?.kind !== kind
     },
     release: (agentRef, heldAtEpoch) => {
       if (holds.get(agentRef)?.epoch !== heldAtEpoch) return false
