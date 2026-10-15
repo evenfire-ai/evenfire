@@ -17,7 +17,9 @@ import { deriveUserKeyFromSource } from '../../../workspace/userKey'
 import { FileWriteTool } from '../fileWrite'
 import { NativeToolRegistry } from '../nativeToolRegistry'
 
-const volume = vi.hoisted(() => ({ mode: 'roomy' as 'roomy' | 'full' | 'unmeasurable' }))
+const volume = vi.hoisted(() => ({
+  mode: 'roomy' as 'roomy' | 'full' | 'unmeasurable' | 'busy-shared' | 'busy-own',
+}))
 
 // A roomy volume is sized to its free space, so the disk's occupancy never
 // meets the floor; a full one leaves less than the floor; an unmeasurable one
@@ -31,6 +33,18 @@ vi.mock('fs', async original => {
         throw Object.assign(new Error('statfs unavailable'), { code: 'ENOSYS' })
       }
       const reading = actual.statfsSync(target, options)
+      if (volume.mode === 'busy-shared' || volume.mode === 'busy-own') {
+        // 4 GB, 5% (200 MB) free: under the 15% share, over the minimum.
+        const busy = {
+          ...reading,
+          bsize: 4096n,
+          blocks: 1_000_000n,
+          bfree: 50_000n,
+          bavail: 50_000n,
+        }
+        const own = volume.mode === 'busy-own' && target !== '/'
+        return own ? { ...busy, blocks: 2_000_000n } : busy
+      }
       return volume.mode === 'full'
         ? { ...reading, bsize: 4096n, blocks: 1000n, bfree: 100n, bavail: 100n }
         : { ...reading, blocks: reading.bavail, bfree: reading.bavail }
@@ -252,6 +266,17 @@ describe('generated documents are private to their caller', () => {
     expect(result.is_error).toBe(true)
     expect(result.content).toMatch(/Not enough free space/)
     expect(fs.readdirSync(outputsOf(a))).toEqual(['kept.md'])
+  })
+
+  it('keeps only the minimum free space on a disk the Host shares with the root', async () => {
+    const a = rootOf('user-a')
+    volume.mode = 'busy-shared'
+    expect((await markdown(a, 'shared.md', '# fine\n')).is_error).toBe(false)
+    // The same reading on a volume of the Host's own keeps its 15%.
+    volume.mode = 'busy-own'
+    const refused = await markdown(a, 'own.md', '# refused\n')
+    expect(refused.is_error).toBe(true)
+    expect(refused.content).toMatch(/Not enough free space/)
   })
 
   it('writes when the volume cannot be measured, and says so once', async () => {

@@ -4,7 +4,7 @@
 import { createHash, randomUUID } from 'crypto'
 import * as fs from 'fs'
 import * as path from 'path'
-import { freeSpaceFloor } from '../internalTools/gfsDownloadStore'
+import { FREE_SPACE_FLOOR_MIN_BYTES, freeSpaceFloor } from '../internalTools/gfsDownloadStore'
 import { logger } from '../logger'
 import { CALLER_OUTPUTS_DIR } from '../workspace/callerOutputs'
 import type { ArtifactMetadata, InternalToolResult } from './types'
@@ -377,13 +377,30 @@ export function enforceQuota(outputDir: string, incomingBytes: number, replacing
     enforceFreeSpaceFloor(outputDir, incomingBytes)
 }
 
+/**
+ * Whether `space` is the filesystem the root is on, judged by its size, its
+ * block size and blocks: volumes of one APFS container, or an overlay root
+ * over the node's disk, report the same size but not the same type or inodes.
+ */
+function sharesRootVolume(space: fs.BigIntStatsFs): boolean {
+  try {
+    const root = fs.statfsSync('/', { bigint: true })
+    return root.bsize === space.bsize && root.blocks === space.blocks
+  } catch {
+    return false
+  }
+}
+
 let unmeasurableVolumeReported = false
 
 /**
  * Every caller's folder shares the Host volume, so their quotas together do
  * not bound it: a write must leave the free space GFS keeps (freeSpaceFloor).
- * Nothing is removed to make room. A volume that cannot be measured does not
- * refuse the write; that is logged once.
+ * On a filesystem the Host does not have to itself, the root's, as in
+ * development or on a hostPath volume, that share would be of the whole disk,
+ * so only the minimum is kept there. Nothing is removed to make room. A
+ * volume that cannot be measured does not refuse the write; that is logged
+ * once.
  */
 function enforceFreeSpaceFloor(outputDir: string, incomingBytes: number): void {
   let space: fs.BigIntStatsFs | undefined
@@ -403,7 +420,7 @@ function enforceFreeSpaceFloor(outputDir: string, incomingBytes: number): void {
     return
   }
   const blocks = (BigInt(incomingBytes) + space.bsize - 1n) / space.bsize
-  const floor = freeSpaceFloor(space)
+  const floor = sharesRootVolume(space) ? FREE_SPACE_FLOOR_MIN_BYTES : freeSpaceFloor(space)
   if (blocks * space.bsize + floor > space.bavail * space.bsize) {
     const mb = (bytes: bigint) => (Number(bytes) / (1024 * 1024)).toFixed(1)
     throw new Error(
