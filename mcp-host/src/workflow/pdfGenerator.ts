@@ -18,7 +18,6 @@ import {
   longestFitting,
   printedBranding,
 } from './documentChrome'
-import { documentEastAsianScript } from './docxScript'
 import {
   MAX_DECODE_PIXELS,
   fitImageSize,
@@ -40,6 +39,7 @@ import { PDF_PALETTES, statusColorFromPalette } from './pdfPalette'
 import { BODY_FONT_SIZE, MIN_BOTTOM_MARGIN, PORTRAIT, type UnitMeasure } from './pdfTables'
 import { LINE_FILL, PdfTypesetter } from './pdfText'
 import { headerText, normalizeTableRows } from './tableRows'
+import { documentEastAsianScript } from './textScript'
 import { type InternalToolResult } from './types'
 
 const PdfPrinter = require('pdfmake')

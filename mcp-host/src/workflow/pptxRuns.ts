@@ -1,9 +1,9 @@
 /** Text runs on a slide: language, direction and bullets. */
 import type PptxGenJS from 'pptxgenjs'
-import { bidiLanguage, hasRtlLetter, isRtlText, scriptSegments } from './docxScript'
 import { type PptxSlide, isRecord } from './pptxInput'
 import { type Box } from './pptxLayout'
 import { scriptOptions } from './pptxText'
+import { bidiLanguage, hasRtlLetter, isRtlText, scriptSegments } from './textDirection'
 
 // U+2022, not U+25CF: PowerPoint sets the ambiguous-width U+25CF in the East Asian face of
 // a CJK-tagged paragraph, where the dot is larger than on the Latin lines around it.

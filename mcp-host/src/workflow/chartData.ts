@@ -10,8 +10,8 @@
  * field and the fix. Warnings travel back in the tool result so the agent can
  * correct itself on the next call.
  */
+import { currencyPrefix, currencySuffix } from './numberText'
 import { own } from './ownEntry'
-import { currencyPrefix, currencySuffix } from './xlsxCells'
 
 /** Types whose points are {x,y} pairs rather than a value per label. */
 const XY_TYPES = new Set(['scatter', 'bubble'])

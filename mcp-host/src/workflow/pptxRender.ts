@@ -1,5 +1,4 @@
 /** The slide renderers, one per layout, and the footer. */
-import { hasRtlLetter } from './docxScript'
 import { nativeChartArgs } from './pptxCharts'
 import { type DrawContext, fitOrShorten, hex } from './pptxDraw'
 import { type PptxColumn, type PptxSlide, type SlideOf, fieldPath } from './pptxInput'
@@ -25,6 +24,7 @@ import {
 } from './pptxRuns'
 import { TEXT_INSET_X, TEXT_INSET_Y, fitText, lineHeightIn, truncateToLines } from './pptxText'
 import { type PptxPalette } from './pptxVocabulary'
+import { hasRtlLetter } from './textDirection'
 
 /** Series colors after the palette's own, so a chart of up to ten slices does not repeat one. */
 const EXTRA_SERIES_COLORS = ['#7c3aed', '#0d9488', '#ea580c', '#db2777']

@@ -7,7 +7,6 @@
  * values shrink to fit their boxes, and pictures keep their proportions.
  */
 import type PptxGenJSType from 'pptxgenjs'
-import { documentEastAsianScript } from './docxScript'
 import { choose } from './ownEntry'
 import { type DrawContext, hex } from './pptxDraw'
 import {
@@ -26,6 +25,7 @@ import { deckText, hanLanguage } from './pptxRuns'
 import { type PptxTemplate, buildTemplateSlides } from './pptxTemplates'
 import { PPTX_FONT_FACE, TEXT_INSET_X, truncateToLines, wrapLines } from './pptxText'
 import { PPTX_ASPECT_RATIOS, PPTX_PALETTES, PPTX_TEMPLATES } from './pptxVocabulary'
+import { documentEastAsianScript } from './textScript'
 import { keepZipTextWhole } from './zipText'
 
 // Loaded with require so the tests and the Host run the same CommonJS bundle.

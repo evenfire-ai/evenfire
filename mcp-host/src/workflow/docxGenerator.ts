@@ -26,13 +26,7 @@ import { EMPTY_DOCUMENT_NOTE, printedBranding } from './documentChrome'
 import { type DocxImagePlacement, docxImageParagraph } from './docxImages'
 import { textRuns } from './docxInline'
 import { bodyHasText, bodyToDocxChildren } from './docxMarkdown'
-import {
-  DOCX_COMPLEX_FONT,
-  DOCX_LATIN_FONT,
-  documentEastAsianScript,
-  docxDirection,
-  eastAsianScript,
-} from './docxScript'
+import { DOCX_COMPLEX_FONT, DOCX_LATIN_FONT, docxDirection } from './docxScript'
 import {
   DOCX_CONTENT_WIDTH_TWIPS,
   DOCX_LANDSCAPE_CONTENT_WIDTH_TWIPS,
@@ -44,6 +38,7 @@ import { buildDocxTable, docxSections } from './docxTable'
 import { htmlToPlainText } from './inlineMarkup'
 import { choose } from './ownEntry'
 import { normalizeTableRows } from './tableRows'
+import { documentEastAsianScript, eastAsianScript } from './textScript'
 import type { InternalToolResult } from './types'
 
 /**
