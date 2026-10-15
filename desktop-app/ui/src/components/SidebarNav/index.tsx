@@ -427,7 +427,11 @@ export function SidebarNav({
                       <div key={agentRef} className="nav-latest-session nav-latest-session--held">
                         <span>Couldn't verify access to {agentRef}</span>
                         <Button
-                          onClick={() => onSelectChatAgent(agentRef, { selectLatest: false })}
+                          aria-label={`Retry access to ${agentRef}`}
+                          onClick={() => {
+                            onSelectChatAgent(agentRef, { selectLatest: false })
+                            setMobileMenuOpen(false)
+                          }}
                           color="neutral"
                           size="xs"
                           variant="text"

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import React from 'react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { SidebarNav } from '../SidebarNav'
 import type { SidebarNavProps } from '../SidebarNav/types'
@@ -447,10 +447,59 @@ describe('SidebarNav Files label engages the file explorer', () => {
     }
 
     expect(block?.textContent).toContain("Couldn't verify access to host-b")
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Retry access to host-b' }))
     expect(sidebarContext.handleSelectChatAgent).toHaveBeenCalledTimes(1)
     expect(sidebarContext.handleSelectChatAgent).toHaveBeenCalledWith('host-b', {
       selectLatest: false,
     })
+  })
+
+  it('T-D13-1: names each held host Retry button after its host', () => {
+    sidebarContext.heldAgentRefs = ['host-b', 'host-c']
+    render(<SidebarNav {...baseProps()} />)
+
+    expect(screen.getAllByRole('button', { name: /^Retry access to / })).toHaveLength(2)
+    fireEvent.click(screen.getByRole('button', { name: 'Retry access to host-c' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Retry access to host-b' }))
+    expect(vi.mocked(sidebarContext.handleSelectChatAgent).mock.calls).toEqual([
+      ['host-c', { selectLatest: false }],
+      ['host-b', { selectLatest: false }],
+    ])
+  })
+
+  it('T-D13-2: closes the mobile menu when Retry is clicked', () => {
+    const matchMedia = vi.spyOn(window, 'matchMedia').mockImplementation(
+      query =>
+        ({
+          matches: true,
+          media: query,
+          onchange: null,
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(),
+        }) as MediaQueryList
+    )
+    onTestFinished(() => matchMedia.mockRestore())
+    sidebarContext.heldAgentRefs = ['host-b']
+    const { container, rerender } = render(<SidebarNav {...baseProps({ toggleRequestId: 0 })} />)
+    rerender(<SidebarNav {...baseProps({ toggleRequestId: 1 })} />)
+
+    // Liveness witness: the mobile menu is open before the click.
+    const nav = container.querySelector('.left-nav')
+    expect(nav?.classList.contains('mobile-open')).toBe(true)
+    expect(document.body.classList.contains('mobile-sidebar-open')).toBe(true)
+
+    const retry = container.querySelector<HTMLButtonElement>('.nav-latest-session--held button')
+    expect(retry).not.toBeNull()
+    fireEvent.click(retry!)
+
+    expect(sidebarContext.handleSelectChatAgent).toHaveBeenCalledTimes(1)
+    expect(sidebarContext.handleSelectChatAgent).toHaveBeenCalledWith('host-b', {
+      selectLatest: false,
+    })
+    expect(nav?.classList.contains('mobile-open')).toBe(false)
+    expect(document.body.classList.contains('mobile-sidebar-open')).toBe(false)
   })
 })
