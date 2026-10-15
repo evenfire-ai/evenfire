@@ -71,6 +71,10 @@ The app now auto-populates default RPC `hostRefs` from authorized agent names re
 - `MEMBER_REGISTRATION_SERVICE_BASE_URL` (no working default — falls back to the placeholder `https://example.com`, so set it explicitly; locally this is usually `http://127.0.0.1:8092`)
 - `REQUEST_TIMEOUT_MS` (default: `60000`)
 
+## Authentication Transition Ownership
+
+Same-team mutations keep the native auth/environment owner from their initial session check until the server request completes. This lets an already-dispatched mutation commit before a queued logout or environment switch, so those transitions may wait through the request deadline (`REQUEST_TIMEOUT_MS`, 60 seconds by default). Operations configured for one transient retry can hold the owner through a second bounded attempt. Same-team reads release the owner while waiting on the server and validate the captured session and environment before accepting the result.
+
 ## Architecture
 
 - `src/` (main/preload/services): privileged Electron process code and secure IPC handlers.
