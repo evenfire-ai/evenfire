@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, waitFor } from '@testing-library/react'
+import { readPendingExternalLogoutIntent } from '../../../../src/pendingExternalLogout'
 import {
   cleanupNativeCommitTestHarness,
   createNativeCommitTestHarness,
@@ -128,12 +129,10 @@ describe('useAppController desktop environment handoff', () => {
     )
   })
 
-  it('keeps the signed-in session and reports the native logout failure', async () => {
+  it('completes handoff after retrying a transient native clear failure', async () => {
     const { app, handle, handoff, native } = await openSwitchConfirmation()
-    const tokenStore = native.service as unknown as {
-      tokenStore: { clearSessionToken: ReturnType<typeof vi.fn> }
-    }
-    tokenStore.tokenStore.clearSessionToken.mockRejectedValueOnce(
+    const sourceEnvKey = native.runtimeConfig.getActiveEnvKey()
+    native.service.tokenStore.clearSessionTokenStrictly.mockRejectedValueOnce(
       new Error('secure storage unavailable')
     )
 
@@ -141,10 +140,16 @@ describe('useAppController desktop environment handoff', () => {
     await act(async () => handoff)
 
     expect(handle.logout).toHaveBeenCalledOnce()
-    expect(handle.selectRuntimeConfigForHandoff).not.toHaveBeenCalled()
-    expect(app.result.current.isAuthenticated).toBe(true)
-    expect(app.result.current.statusText).toContain(
-      "Logout failed: Error invoking remote method 'auth:logout': Error: secure storage unavailable"
-    )
+    expect(native.service.tokenStore.clearSessionTokenStrictly).toHaveBeenCalledTimes(2)
+    const logoutResult = await handle.logout.mock.results[0]?.value
+    expect(handle.selectRuntimeConfigForHandoff).toHaveBeenCalledOnce()
+    const [selectedOptionId, handoffGeneration] =
+      handle.selectRuntimeConfigForHandoff.mock.calls[0] ?? []
+    expect(selectedOptionId).toBe(native.optionB.id)
+    expect(handoffGeneration).toBeGreaterThan(logoutResult.sessionGeneration)
+    expect(native.service.getSessionGeneration()).toBeGreaterThan(handoffGeneration)
+    expect(app.result.current.isAuthenticated).toBe(false)
+    expect(app.result.current.runtimeConfigState?.activeOptionId).toBe(native.optionB.id)
+    expect(readPendingExternalLogoutIntent(native.userDataDir, sourceEnvKey)).toBeNull()
   })
 })

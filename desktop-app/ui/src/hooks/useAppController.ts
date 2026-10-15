@@ -937,6 +937,14 @@ export function useAppController() {
       fullSetStatus('Logged out.', 'success')
       try {
         await loadSession()
+        // getSessionState may finish a pending restore/denial pass after native
+        // logout committed. Runtime fencing can advance its generation during
+        // that pass, so handoff must carry the current generation of the
+        // confirmed signed-out state rather than the earlier logout receipt.
+        const sessionState = await window.clerum.auth.getSessionState()
+        if (!sessionState.authenticated) {
+          logoutGeneration = await window.clerum.auth.getSessionGeneration()
+        }
       } catch (error) {
         reflectSignedOutState()
         fullSetStatus(
