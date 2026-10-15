@@ -6,6 +6,7 @@ import type {
   HostMessageRequest,
   ProfileSettingsOpenOptions,
   SandboxUiDeepLinkEnvelope,
+  SandboxUiReleasedEvent,
 } from './types.js'
 
 // Sandboxed Electron preloads cannot load relative runtime modules. Keep this
@@ -671,7 +672,9 @@ const clerum = Object.freeze({
       bounds: { x: number; y: number; width: number; height: number; dpr?: number }
       launchId: string
     }) => ipcRenderer.invoke('sandboxUi:open', args),
-    close: () => ipcRenderer.invoke('sandboxUi:close'),
+    // Without args: legacy close of whatever is live. With a launch id: closes
+    // that launch's view only if it is still the live one.
+    close: (args?: { launchId: string }) => ipcRenderer.invoke('sandboxUi:close', args),
     reload: () => ipcRenderer.invoke('sandboxUi:reload'),
     getLocation: () => ipcRenderer.invoke('sandboxUi:getLocation'),
     copyDeepLink: (teamId?: string) => ipcRenderer.invoke('sandboxUi:copyDeepLink', { teamId }),
@@ -734,6 +737,11 @@ const clerum = Object.freeze({
         callback(args)
       ipcRenderer.on('sandboxUi:closed', listener)
       return () => ipcRenderer.off('sandboxUi:closed', listener)
+    },
+    onReleased: (callback: (args: SandboxUiReleasedEvent) => void) => {
+      const listener = (_event: unknown, args: SandboxUiReleasedEvent) => callback(args)
+      ipcRenderer.on('sandboxUi:released', listener)
+      return () => ipcRenderer.off('sandboxUi:released', listener)
     },
     onRefreshError: (
       callback: (args: { appRef: string; launchId: string; message: string }) => void

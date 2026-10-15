@@ -160,6 +160,7 @@ type MountSandboxUiViewOverrides = Omit<Partial<MountSandboxUiViewArgs>, 'parent
 
 function mountArgs(overrides: MountSandboxUiViewOverrides): MountSandboxUiViewArgs {
   return {
+    launchId: crypto.randomUUID(),
     recipeNs: 'sandbox-recipes',
     recipeName: 'task-board',
     setCookie:
@@ -395,6 +396,22 @@ describe('mountSandboxUiView lifecycle cleanup', () => {
     )
 
     expect(findInActiveSandboxUi('invoice', 'start', 2, onResult).status).toBe('started')
+  })
+
+  it('a mount over a live view releases that view as replaced', async () => {
+    const parentWindow = new FakeParentWindow()
+    const onReleased = vi.fn()
+    const first = mountArgs({ parentWindow, onReleased })
+    await mountSandboxUiView(first)
+
+    await mountSandboxUiView(mountArgs({ parentWindow, recipeName: 'second-app' }))
+
+    expect(onReleased).toHaveBeenCalledOnce()
+    expect(onReleased).toHaveBeenCalledWith({
+      launchId: first.launchId,
+      reason: 'replaced',
+      location: {},
+    })
   })
 
   it('keeps only the newest view when cookie writes complete out of order', async () => {

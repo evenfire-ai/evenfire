@@ -1403,7 +1403,7 @@ export class AppService {
     // The embed and its refresh loop run on the outgoing session. Queued rather
     // than awaited: callers must not wait on a pending open's mint; the serial
     // queue still tears down whatever that open mounts.
-    void this.closeSandboxUi().catch(error => {
+    void this.closeSandboxUi({ reason: 'session' }).catch(error => {
       console.error('[SandboxUI] Could not close the embed on session change:', error)
     })
   }
@@ -5283,6 +5283,8 @@ export class AppService {
    * mixups.
    */
   openSandboxUi(args: {
+    /** Names the view this open mounts in every event about it. */
+    launchId: string
     recipeNs: string
     recipeName: string
     title?: string
@@ -5291,12 +5293,15 @@ export class AppService {
     bounds: import('./sandboxUiDriver.js').SandboxUiBounds
     parentWindow: import('electron').BrowserWindow
     onClosed?: () => void
+    /** Exactly once per view this open mounts, even if the open then rejects. */
+    onReleased?: (event: import('./sandboxUiDriver.js').SandboxUiReleasedEvent) => void
     onRefreshError?: (message: string) => void
     onOauthError?: (message: string) => void
     onTitleChanged?: (title: string) => void
   }): Promise<void> {
     // Captured at request time, not when the queue reaches it: an open asked for
-    // under one session must not run under the next one.
+    // under one session must not run under the next one. Enqueued synchronously:
+    // a close for this launch sent right after it must find it ahead in the queue.
     const sessionEpoch = this.sandboxUiSessionEpoch
     return this.enqueueSandboxUiLifecycle(() => this.openSandboxUiNow(args, sessionEpoch))
   }
@@ -5316,11 +5321,14 @@ export class AppService {
     // drops its owner of the embed on `sandboxUi:closed`, which here would
     // orphan the view this open is about to mount. Failure is reported only by
     // the rejection.
-    await this.teardownSandboxUiView()
+    await this.teardownSandboxUiView('replaced')
     try {
       await this.mintAndMountSandboxUiView(args, recipeNs, recipeName, sessionEpoch)
     } catch (error) {
-      await this.teardownSandboxUiView()
+      // Only this open's own view, never one another launch owns; its release
+      // goes out before the rejection.
+      const reason = this.sandboxUiSessionEpoch === sessionEpoch ? 'closed' : 'session'
+      await this.teardownSandboxUiView(reason, args.launchId)
       throw error
     }
   }
@@ -5350,6 +5358,8 @@ export class AppService {
       routePath: args.routePath,
       parentWindow: args.parentWindow,
       bounds: args.bounds,
+      launchId: args.launchId,
+      onReleased: args.onReleased,
       onClosed: () => {
         // Cancel refresh first so the timer doesn't keep firing against a
         // partition we're about to evict on the next mount.
@@ -5386,11 +5396,11 @@ export class AppService {
     })
     this.assertSandboxUiSessionEpoch(sessionEpoch)
     const activeView = driver.getActiveSandboxUi()
-    if (!activeView || activeView.appRef !== `${recipeNs}/${recipeName}`) {
-      // A queued close or newer mount can invalidate this operation while an
-      // async cookie write is in flight. Do not cross-wire its refresh loop
-      // to whichever recipe is active now.
-      return
+    if (!activeView || activeView.launchId !== args.launchId) {
+      // The view died before the open finished (its renderer crashed, its
+      // window closed). An open resolves only when it leaves its view mounted,
+      // and its refresh loop must not attach to whatever is active now.
+      throw new Error('The app view closed before it finished opening')
     }
     // Pin the surface so the SDK broker can derive this plugin's identity from
     // `webContents.id` — the plugin never asserts who it is.
@@ -5431,25 +5441,55 @@ export class AppService {
     })
   }
 
-  closeSandboxUi(): Promise<void> {
-    return this.enqueueSandboxUiLifecycle(() => this.teardownSandboxUiView())
+  /**
+   * With a `launchId`, closes the view only if that launch still owns it: a
+   * close that arrives after its view was replaced must not take down the
+   * replacement. Without one, closes whatever is live. Enqueued synchronously,
+   * like `openSandboxUi`.
+   */
+  closeSandboxUi(
+    options: {
+      launchId?: string
+      reason?: import('./sandboxUiDriver.js').SandboxUiReleaseReason
+    } = {}
+  ): Promise<void> {
+    return this.enqueueSandboxUiLifecycle(() =>
+      this.teardownSandboxUiView(options.reason ?? 'closed', options.launchId)
+    )
   }
 
-  private async teardownSandboxUiView(): Promise<void> {
+  private async teardownSandboxUiView(
+    reason: import('./sandboxUiDriver.js').SandboxUiReleaseReason,
+    onlyLaunchId?: string
+  ): Promise<void> {
     const driver = await import('./sandboxUiDriver.js')
     const refreshModule = await import('./sandboxUiSessionRefresh.js')
-    refreshModule.cancelSandboxUiRefresh()
-    tryGetPluginSdkRuntime()?.unpinAllSandboxUiSurfaces()
-    await driver.unmountSandboxUiView()
+    if (onlyLaunchId !== undefined && driver.getActiveSandboxUi()?.launchId !== onlyLaunchId) {
+      return
+    }
+    // Neither must keep the view from being unmounted and released.
+    try {
+      refreshModule.cancelSandboxUiRefresh()
+    } catch (error) {
+      console.error('[SandboxUI] Could not cancel the session refresh of a closing view:', error)
+    }
+    try {
+      tryGetPluginSdkRuntime()?.unpinAllSandboxUiSurfaces()
+    } catch (error) {
+      console.error('[SandboxUI] Could not unpin the surfaces of a closing view:', error)
+    }
+    await driver.unmountSandboxUiView(reason)
   }
 
   // Read the active embed's current in-app route for the renderer's tab store
   // (mini-spec 05 §1). Mirrors `createSandboxUiDeepLink`'s read: it wraps
   // `driver.getActiveSandboxUiLocation()` and reshapes to the renderer contract.
   // Returns null when no embed is mounted or its webContents is destroyed.
-  // An out-of-prefix current URL makes `getActiveSandboxUiLocation` THROW
-  // ('Cannot read the current app route'); that propagates so the renderer can
-  // fall back to the default route instead of persisting a stale one.
+  // While the view has not yet applied the route its open asked for, that route
+  // is returned without reading the URL. Once applied, an out-of-prefix current
+  // URL makes `getActiveSandboxUiLocation` THROW ('Cannot read the current app
+  // route'); that propagates so the renderer can fall back to the default route
+  // instead of persisting a stale one.
   async getSandboxUiLocation(): Promise<{ appRef: string; routePath?: string } | null> {
     const driver = await import('./sandboxUiDriver.js')
     const location = driver.getActiveSandboxUiLocation()

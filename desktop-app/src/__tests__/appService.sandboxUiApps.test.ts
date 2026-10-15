@@ -178,6 +178,7 @@ describe('AppService.listSandboxUiApps', () => {
 
 describe('AppService sandbox UI lifecycle serialization', () => {
   const openArgs = (recipeName: string) => ({
+    launchId: crypto.randomUUID(),
     recipeNs: 'sandbox-recipes',
     recipeName,
     bounds: { x: 0, y: 0, width: 400, height: 300 },
@@ -187,8 +188,17 @@ describe('AppService sandbox UI lifecycle serialization', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockMountSandboxUiView.mockImplementation(
-      async ({ recipeNs, recipeName }: { recipeNs: string; recipeName: string }) => {
+      async ({
+        launchId,
+        recipeNs,
+        recipeName,
+      }: {
+        launchId: string
+        recipeNs: string
+        recipeName: string
+      }) => {
         mockGetActiveSandboxUi.mockReturnValue({
+          launchId,
           recipeNs,
           recipeName,
           appRef: `${recipeNs}/${recipeName}`,

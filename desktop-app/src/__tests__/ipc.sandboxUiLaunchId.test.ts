@@ -66,8 +66,10 @@ afterEach(() => {
 
 describe('sandboxUi:open launch id', () => {
   it("tags each view's events with the launch id of the open that mounted it", async () => {
-    await open({ launchId: 'launch-1' })
-    await open({ launchId: 'launch-2' })
+    const launch1 = crypto.randomUUID()
+    const launch2 = crypto.randomUUID()
+    await open({ launchId: launch1 })
+    await open({ launchId: launch2 })
     const [first, second] = opens
 
     // The replaced view reports after the relaunch of the same app.
@@ -77,29 +79,38 @@ describe('sandboxUi:open launch id', () => {
     second!.onTitleChanged?.('New title')
 
     expect(electron.send.mock.calls).toEqual([
-      ['sandboxUi:closed', { appRef: 'sandbox-recipes/alpha', launchId: 'launch-1' }],
+      ['sandboxUi:closed', { appRef: 'sandbox-recipes/alpha', launchId: launch1 }],
       [
         'sandboxUi:refreshError',
-        { appRef: 'sandbox-recipes/alpha', launchId: 'launch-1', message: 'refresh failed' },
+        { appRef: 'sandbox-recipes/alpha', launchId: launch1, message: 'refresh failed' },
       ],
       [
         'sandboxUi:titleChanged',
-        { appRef: 'sandbox-recipes/alpha', launchId: 'launch-1', title: 'Old title' },
+        { appRef: 'sandbox-recipes/alpha', launchId: launch1, title: 'Old title' },
       ],
       [
         'sandboxUi:titleChanged',
-        { appRef: 'sandbox-recipes/alpha', launchId: 'launch-2', title: 'New title' },
+        { appRef: 'sandbox-recipes/alpha', launchId: launch2, title: 'New title' },
       ],
     ])
   })
 
-  it.each([undefined, '', 42, 'a'.repeat(65), 'has space', '../x', { id: 'x' }])(
-    'rejects launch id %j before opening anything',
-    async launchId => {
-      await expect(open({ launchId })).rejects.toThrow(/launchId/)
-      expect(service.openSandboxUi).not.toHaveBeenCalled()
-    }
-  )
+  // A counter or any non-UUID id could repeat across renderer reloads, which
+  // main outlives.
+  it.each([
+    undefined,
+    '',
+    42,
+    'launch-1',
+    'a'.repeat(65),
+    'has space',
+    '../x',
+    { id: 'x' },
+    `${crypto.randomUUID()}-extra`,
+  ])('rejects launch id %j before opening anything', async launchId => {
+    await expect(open({ launchId })).rejects.toThrow(/launchId/)
+    expect(service.openSandboxUi).not.toHaveBeenCalled()
+  })
 
   it('accepts a renderer-minted UUID', async () => {
     const launchId = crypto.randomUUID()

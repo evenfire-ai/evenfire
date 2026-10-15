@@ -45,12 +45,15 @@ function sanitizeString(input: unknown): string {
 
 // The renderer names each sandbox-ui open so it can tell events of the view
 // that open mounted from those of a view it replaced (same appRef on a
-// relaunch). The id is echoed verbatim on IPC events, so bound it here.
-const SANDBOX_UI_LAUNCH_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/
+// relaunch). Main outlives renderer reloads and keeps reporting views opened by
+// an earlier renderer, so the id must be unique across renderer lifetimes: a
+// random UUID, never a counter. It is echoed verbatim on IPC events.
+const SANDBOX_UI_LAUNCH_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 function parseSandboxUiLaunchId(input: unknown): string {
   if (typeof input !== 'string' || !SANDBOX_UI_LAUNCH_ID_PATTERN.test(input)) {
-    throw new Error('launchId must be 1-64 characters of [A-Za-z0-9-]')
+    throw new Error('launchId must be a UUID')
   }
   return input
 }
@@ -2033,6 +2036,10 @@ export function registerIpcHandlers(service: AppService): void {
     return { x, y, width, height, dpr }
   }
 
+  // `sandboxUi:open` and `sandboxUi:close` must reach the AppService queue with
+  // no `await` before it, in both handlers: a close the renderer sends right
+  // after an open for the same launch would otherwise be enqueued first and
+  // miss the view the open then mounts.
   ipcMain.handle(
     'sandboxUi:open',
     async (
@@ -2060,6 +2067,7 @@ export function registerIpcHandlers(service: AppService): void {
       const bounds = parseBounds(payload?.bounds)
       const appRef = `${recipeNs}/${recipeName}`
       await service.openSandboxUi({
+        launchId,
         recipeNs,
         recipeName,
         // Human title from the installed recipe, used verbatim in consent
@@ -2074,6 +2082,15 @@ export function registerIpcHandlers(service: AppService): void {
           if (parentWindow.isDestroyed()) return
           parentWindow.webContents.send('sandboxUi:closed', { appRef, launchId })
         },
+        // Only the window the view was mounted in owns it.
+        onReleased: released => {
+          if (parentWindow.isDestroyed()) return
+          parentWindow.webContents.send('sandboxUi:released', {
+            launchId: released.launchId,
+            reason: released.reason,
+            location: released.location,
+          })
+        },
         onRefreshError: message => {
           if (parentWindow.isDestroyed()) return
           parentWindow.webContents.send('sandboxUi:refreshError', { appRef, launchId, message })
@@ -2086,9 +2103,17 @@ export function registerIpcHandlers(service: AppService): void {
     }
   )
 
-  ipcMain.handle('sandboxUi:close', async event => {
+  // Without a payload this is the legacy close of whatever is live. With one,
+  // the launch id is mandatory: a malformed id must not degrade into closing
+  // another launch's view.
+  ipcMain.handle('sandboxUi:close', async (event, payload?: { launchId?: unknown } | null) => {
     assertTrustedSender(event)
-    await service.closeSandboxUi()
+    if (payload === undefined || payload === null) {
+      await service.closeSandboxUi()
+      return
+    }
+    const launchId = parseSandboxUiLaunchId(payload.launchId)
+    await service.closeSandboxUi({ launchId })
   })
 
   ipcMain.handle('sandboxUi:reload', async event => {

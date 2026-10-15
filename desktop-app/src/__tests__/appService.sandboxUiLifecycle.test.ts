@@ -28,15 +28,76 @@ const electronMocks = vi.hoisted(() => {
 
   class FakeWebContents {
     id = nextWebContentsId++
+    // Chromium reports the last committed URL: '' until the first document
+    // commits, whatever `loadURL` was asked for.
     currentUrl = ''
+    pendingUrl = ''
     destroyed = false
+    // A page whose router has taken over the history API: `replaceState` does
+    // not move the URL.
+    historyLocked = false
     private readonly listeners = new Map<string, Set<(...args: unknown[]) => void>>()
-    executeJavaScript = vi.fn()
-    loadURL = vi.fn(async (url: string) => {
-      this.currentUrl = url
+    // Runs the script the driver sends against a minimal page, so whatever the
+    // embed would observe comes from the driver's real script, not a canned
+    // answer.
+    executeJavaScript = vi.fn(async (code: string): Promise<unknown> => {
+      const vm = await import('node:vm')
+      const webContents = this
+      const history = {
+        state: null as unknown,
+        replaceState(state: unknown, _title: string, url: string) {
+          history.state = state
+          if (webContents.historyLocked) return
+          webContents.currentUrl = new URL(url, webContents.currentUrl).href
+          webContents.emit('did-navigate-in-page', {}, webContents.currentUrl, true)
+        },
+      }
+      class PopStateEvent {
+        constructor(
+          readonly type: string,
+          readonly init?: unknown
+        ) {}
+      }
+      const window = {
+        location: {
+          get href() {
+            return webContents.currentUrl
+          },
+        },
+        history,
+        dispatchEvent: () => true,
+      }
+      return vm.runInNewContext(code, { window, URL, PopStateEvent })
     })
+    loadURL = vi.fn(async (url: string) => {
+      this.pendingUrl = url
+    })
+
+    /**
+     * The requested document commits with `status` and finishes loading;
+     * `redirectedTo` is where the server sent it instead.
+     */
+    commitLoad(status = 200, redirectedTo?: string): void {
+      this.currentUrl = redirectedTo ?? this.pendingUrl
+      this.emit('did-navigate', {}, this.currentUrl, status, '')
+      this.emit('did-finish-load')
+    }
+
+    /** The app navigates inside its document (history API / hash). */
+    navigateInPage(url: string): void {
+      this.currentUrl = url
+      this.emit('did-navigate-in-page', {}, url, true)
+    }
+    /** The user follows a link to another document of the app. */
+    navigateTo(url: string, status = 200): void {
+      this.pendingUrl = url
+      this.commitLoad(status)
+    }
     setWindowOpenHandler = vi.fn()
-    stopFindInPage = vi.fn()
+    // Native methods of a destroyed webContents throw, like Electron's.
+    stopFindInPage = vi.fn(() => {
+      this.assertAlive()
+    })
     findInPage = vi.fn(() => 41)
     focus = vi.fn()
     send = vi.fn()
@@ -58,6 +119,7 @@ const electronMocks = vi.hoisted(() => {
     }
 
     getURL(): string {
+      this.assertAlive()
       return this.currentUrl
     }
 
@@ -67,6 +129,10 @@ const electronMocks = vi.hoisted(() => {
 
     close(): void {
       this.destroyed = true
+    }
+
+    private assertAlive(): void {
+      if (this.destroyed) throw new Error('Object has been destroyed')
     }
   }
 
@@ -98,12 +164,26 @@ const electronMocks = vi.hoisted(() => {
     touchSandboxUiPartition: vi.fn(async () => undefined),
     sessionObject,
     views,
+    ipcHandlers: new Map<string, (event: unknown, payload?: unknown) => Promise<unknown>>(),
+    windowsBySender: new Map<unknown, unknown>(),
   }
 })
 
 vi.mock('electron', () => ({
   WebContentsView: electronMocks.FakeWebContentsView,
-  BrowserWindow: { getAllWindows: () => [] },
+  BrowserWindow: {
+    getAllWindows: () => [],
+    fromWebContents: (sender: unknown) => electronMocks.windowsBySender.get(sender) ?? null,
+  },
+  ipcMain: {
+    handle: (channel: string, handler: (event: unknown, payload?: unknown) => Promise<unknown>) => {
+      electronMocks.ipcHandlers.set(channel, handler)
+    },
+    on: vi.fn(),
+    removeHandler: vi.fn(),
+  },
+  clipboard: { writeText: vi.fn() },
+  dialog: { showSaveDialog: vi.fn(), showMessageBox: vi.fn() },
   Notification: class {
     static isSupported(): boolean {
       return false
@@ -166,13 +246,47 @@ vi.mock('../tokenStore.js', () => ({
 
 type Listener = (...args: unknown[]) => void
 
+// Electron throws from the native methods of a destroyed window instead of
+// ignoring the call; the contentView keeps its real child list.
 class FakeParentWindow {
   destroyed = false
-  contentView = {
-    addChildView: vi.fn(),
-    removeChildView: vi.fn(),
+  readonly children: unknown[] = []
+  readonly webContents = { send: vi.fn(), isDestroyed: () => this.destroyed }
+  readonly contentView: {
+    addChildView: ReturnType<typeof vi.fn>
+    removeChildView: ReturnType<typeof vi.fn>
+    readonly children: unknown[]
   }
   private readonly listeners = new Map<string, Set<Listener>>()
+
+  constructor() {
+    const win = this
+    this.contentView = {
+      addChildView: vi.fn((view: unknown) => {
+        win.assertAlive()
+        win.children.push(view)
+      }),
+      removeChildView: vi.fn((view: unknown) => {
+        win.assertAlive()
+        const index = win.children.indexOf(view)
+        if (index !== -1) win.children.splice(index, 1)
+      }),
+      get children(): unknown[] {
+        win.assertAlive()
+        return [...win.children]
+      },
+    }
+  }
+
+  /** The window closes: Electron destroys it and the views it held. */
+  destroy(): void {
+    this.destroyed = true
+    this.children.length = 0
+  }
+
+  private assertAlive(): void {
+    if (this.destroyed) throw new Error('Object has been destroyed')
+  }
 
   isDestroyed(): boolean {
     return this.destroyed
@@ -200,6 +314,7 @@ class FakeParentWindow {
     return this.on(event, handler)
   }
 
+  // EventEmitter, not native: works on a destroyed window too.
   removeListener(event: string, handler: Listener): this {
     this.listeners.get(event)?.delete(handler)
     return this
@@ -279,21 +394,24 @@ function makeService(): AppService {
   return svc
 }
 
+type OpenArgs = Parameters<AppService['openSandboxUi']>[0]
+
 function openArgs(
   recipeName: string,
   parentWindow: FakeParentWindow,
-  onClosed: () => void = vi.fn()
-): Parameters<AppService['openSandboxUi']>[0] {
+  onClosed: () => void = vi.fn(),
+  overrides: Partial<Omit<OpenArgs, 'parentWindow'>> = {}
+): OpenArgs {
   return {
     recipeNs: 'sandbox-recipes',
     recipeName,
     title: recipeName,
     defaultPath: '/',
     bounds: { x: 0, y: 0, width: 400, height: 300 },
-    parentWindow: parentWindow as unknown as Parameters<
-      AppService['openSandboxUi']
-    >[0]['parentWindow'],
+    parentWindow: parentWindow as unknown as OpenArgs['parentWindow'],
+    launchId: crypto.randomUUID(),
     onClosed,
+    ...overrides,
   }
 }
 
@@ -595,7 +713,7 @@ function wireMainWindow(service: AppService): FakeMainWebContents {
     webContents: mainWebContents as never,
     isCurrentWindow: () => true,
     markNotReady: vi.fn(),
-    closeSandboxUi: () => service.closeSandboxUi(),
+    sandboxUi: service,
   })
   return mainWebContents
 }
@@ -978,5 +1096,757 @@ describe('AppService sandbox-ui embed across a login that replaces a live sessio
     expect(getActiveSandboxUi()?.appRef).toBe('sandbox-recipes/second-app')
     expect(firstView?.webContents.isDestroyed()).toBe(true)
     expect(electronMocks.views).toHaveLength(2)
+  })
+})
+
+// ─── View release contract ───────────────────────────────────────────────
+// Every view main assigns ends with exactly one `released` that names the open
+// that mounted it, why it died and the route it was showing, and no view is
+// left attached without an owner.
+
+type ReleasedEvent = {
+  launchId: string
+  reason: string
+  location: { routePath?: string } | null
+}
+
+const APP_VIEW_URL = 'https://rpc.example/api/v1/sandbox-ui/sandbox-recipes/first-app/view'
+
+async function drainLifecycleQueue(service: AppService): Promise<void> {
+  await (
+    service as unknown as { enqueueSandboxUiLifecycle(op: () => Promise<void>): Promise<void> }
+  ).enqueueSandboxUiLifecycle(async () => undefined)
+}
+
+// I-orphan: without an active view, the window holds no sandbox-ui view; with
+// one, it holds exactly that one.
+function expectNoOrphanView(parentWindow: FakeParentWindow): void {
+  if (parentWindow.destroyed) return
+  const active = getActiveSandboxUi()
+  const attached = parentWindow.contentView.children
+  if (!active) {
+    expect(attached).toEqual([])
+    return
+  }
+  expect(attached).toHaveLength(1)
+  expect(
+    (attached[0] as InstanceType<typeof electronMocks.FakeWebContentsView>).webContents.id
+  ).toBe(active.webContentsId)
+}
+
+async function setupReleaseRecorder(routePath?: string) {
+  const service = makeService()
+  const runtime = initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
+  const parentWindow = new FakeParentWindow()
+  const released: ReleasedEvent[] = []
+  const onReleased = (event: ReleasedEvent) => {
+    released.push(event)
+  }
+  const launch = (
+    recipeName: string,
+    overrides: Partial<Omit<OpenArgs, 'parentWindow'>> = {}
+  ): OpenArgs =>
+    openArgs(recipeName, parentWindow, vi.fn(), {
+      onReleased,
+      ...(routePath ? { routePath } : {}),
+      ...overrides,
+    })
+  return { service, runtime, parentWindow, released, launch }
+}
+
+describe('AppService sandbox-ui teardown whose cleanup throws', () => {
+  it('still detaches the view, closes its webContents and releases it once', async () => {
+    const { service, parentWindow, released, launch } = await setupReleaseRecorder()
+    const args = launch('first-app')
+    await service.openSandboxUi(args)
+    const view = electronMocks.views[0]!
+    // A native call made while tearing down fails (the renderer went away
+    // between the liveness check and the call).
+    view.webContents.stopFindInPage.mockImplementationOnce(() => {
+      throw new Error('Object has been destroyed')
+    })
+
+    await service.closeSandboxUi({ launchId: args.launchId })
+
+    expect(parentWindow.contentView.children).toEqual([])
+    expect(view.webContents.isDestroyed()).toBe(true)
+    expect(getActiveSandboxUi()).toBeNull()
+    expect(released).toEqual([{ launchId: args.launchId, reason: 'closed', location: {} }])
+    expectNoOrphanView(parentWindow)
+  })
+
+  it('still releases the view when unhooking the session refresh from the parent throws', async () => {
+    // Electron's removeListener does not throw; the failure is injected to
+    // prove that nothing run ahead of the unmount (the refresh loop unhooks
+    // its own parent listeners first) can keep the view attached.
+    const { service, parentWindow, released, launch } = await setupReleaseRecorder()
+    const args = launch('first-app')
+    await service.openSandboxUi(args)
+    const view = electronMocks.views[0]!
+    vi.spyOn(parentWindow, 'removeListener').mockImplementation(() => {
+      throw new Error('Object has been destroyed')
+    })
+
+    await service.closeSandboxUi({ launchId: args.launchId })
+
+    expect(parentWindow.contentView.children).toEqual([])
+    expect(view.webContents.isDestroyed()).toBe(true)
+    expect(getActiveSandboxUi()).toBeNull()
+    expect(released).toEqual([{ launchId: args.launchId, reason: 'closed', location: {} }])
+    expect(resolvePluginSurface(view.webContents.id)).toBeNull()
+  })
+})
+
+describe('AppService sandbox-ui view release', () => {
+  it('releases each assigned view exactly once and never a launch that got no view', async () => {
+    const { service, parentWindow, released, launch } = await setupReleaseRecorder()
+    const first = launch('first-app')
+    await service.openSandboxUi(first)
+    expectNoOrphanView(parentWindow)
+
+    mintResponders.set('second-app', () => mintFails(409, 'app is starting'))
+    const failed = launch('second-app')
+    await expect(service.openSandboxUi(failed)).rejects.toThrow(/\(409\)/)
+    expectNoOrphanView(parentWindow)
+
+    const third = launch('first-app')
+    await service.openSandboxUi(third)
+    await service.closeSandboxUi({ launchId: third.launchId })
+    await service.logout()
+    await drainLifecycleQueue(service)
+
+    expect(released).toEqual([
+      { launchId: first.launchId, reason: 'replaced', location: {} },
+      { launchId: third.launchId, reason: 'closed', location: {} },
+    ])
+    expectNoOrphanView(parentWindow)
+  })
+
+  it('releases a view mounted under a session that ended before rejecting its open', async () => {
+    const { service, parentWindow, launch } = await setupReleaseRecorder()
+    const order: Array<[string, unknown]> = []
+    const args = launch('first-app', {
+      onReleased: event => {
+        order.push(['released', event])
+      },
+    })
+    // The session ends right as the view is attached: what logout does
+    // synchronously once its upload fence settles.
+    parentWindow.contentView.addChildView.mockImplementationOnce((view: unknown) => {
+      parentWindow.children.push(view)
+      ;(
+        service as unknown as { clearAuthenticatedSessionState(): void }
+      ).clearAuthenticatedSessionState()
+    })
+
+    await service.openSandboxUi(args).catch((error: Error) => {
+      order.push(['rejected', error.message])
+    })
+    await drainLifecycleQueue(service)
+
+    expect(order).toEqual([
+      ['released', { launchId: args.launchId, reason: 'session', location: {} }],
+      ['rejected', expect.stringMatching(/session changed/)],
+    ])
+    expect(getActiveSandboxUi()).toBeNull()
+    expectNoOrphanView(parentWindow)
+  })
+
+  it('a close naming another launch leaves the live view alone', async () => {
+    const { service, parentWindow, released, launch } = await setupReleaseRecorder()
+    const args = launch('first-app')
+    await service.openSandboxUi(args)
+    const live = getActiveSandboxUi()
+
+    await service.closeSandboxUi({ launchId: crypto.randomUUID() })
+
+    expect(getActiveSandboxUi()?.webContentsId).toBe(live!.webContentsId)
+    expect(released).toEqual([])
+    expectNoOrphanView(parentWindow)
+
+    // The legacy close names no launch and still closes whatever is live.
+    await service.closeSandboxUi()
+    expect(getActiveSandboxUi()).toBeNull()
+    expect(released).toEqual([{ launchId: args.launchId, reason: 'closed', location: {} }])
+    expectNoOrphanView(parentWindow)
+  })
+})
+
+describe('AppService sandbox-ui release reason per caller', () => {
+  it('crashed during the open: the release comes first, then the open rejects', async () => {
+    const { service, parentWindow, launch } = await setupReleaseRecorder()
+    const order: Array<[string, unknown]> = []
+    const args = launch('first-app', {
+      onReleased: event => {
+        order.push(['released', event])
+      },
+    })
+    // The embed renderer dies as soon as the view is attached.
+    parentWindow.contentView.addChildView.mockImplementationOnce((view: unknown) => {
+      parentWindow.children.push(view)
+      ;(view as InstanceType<typeof electronMocks.FakeWebContentsView>).webContents.emit(
+        'render-process-gone',
+        {},
+        { reason: 'crashed' }
+      )
+    })
+
+    await service.openSandboxUi(args).catch((error: Error) => {
+      order.push(['rejected', error.message])
+    })
+
+    expect(order).toEqual([
+      ['released', { launchId: args.launchId, reason: 'crashed', location: null }],
+      ['rejected', expect.stringMatching(/closed before it finished opening/)],
+    ])
+    expect(getActiveSandboxUi()).toBeNull()
+    expectNoOrphanView(parentWindow)
+  })
+
+  it('replaced: an open over a live view', async () => {
+    const { service, released, launch } = await setupReleaseRecorder()
+    const first = launch('first-app')
+    await service.openSandboxUi(first)
+    await service.openSandboxUi(launch('second-app'))
+    expect(released).toEqual([{ launchId: first.launchId, reason: 'replaced', location: {} }])
+  })
+
+  it('crashed: the embed renderer dies, and the route is not reported', async () => {
+    // The route the view was asked for would otherwise be reported: a crash
+    // must not hand it back for a relaunch that would crash again.
+    const { service, parentWindow, released, launch } = await setupReleaseRecorder('/r/crash')
+    const args = launch('first-app')
+    await service.openSandboxUi(args)
+
+    electronMocks.views[0]!.webContents.emit('render-process-gone', {}, { reason: 'crashed' })
+
+    expect(released).toEqual([{ launchId: args.launchId, reason: 'crashed', location: null }])
+    expectNoOrphanView(parentWindow)
+  })
+
+  it('parent_closed: the window holding the view closes', async () => {
+    const { service, parentWindow, released, launch } = await setupReleaseRecorder()
+    const args = launch('first-app')
+    await service.openSandboxUi(args)
+    const view = electronMocks.views[0]!
+
+    parentWindow.destroy()
+    parentWindow.emit('closed')
+
+    expect(view.webContents.isDestroyed()).toBe(true)
+    expect(getActiveSandboxUi()).toBeNull()
+    expect(released).toEqual([{ launchId: args.launchId, reason: 'parent_closed', location: {} }])
+  })
+
+  it('session: logout', async () => {
+    const { service, parentWindow, released, launch } = await setupReleaseRecorder()
+    const args = launch('first-app')
+    await service.openSandboxUi(args)
+
+    await service.logout()
+    await drainLifecycleQueue(service)
+
+    expect(released).toEqual([{ launchId: args.launchId, reason: 'session', location: {} }])
+    expectNoOrphanView(parentWindow)
+  })
+
+  it('renderer_replaced: the trusted renderer commits a new document', async () => {
+    const { service, parentWindow, released, launch } = await setupReleaseRecorder()
+    const args = launch('first-app')
+    await service.openSandboxUi(args)
+    const mainWebContents = wireMainWindow(service)
+
+    mainWebContents.emit('did-navigate', {}, 'file:///ui-dist/index.html', 200, 'OK')
+    await drainLifecycleQueue(service)
+
+    expect(released).toEqual([
+      { launchId: args.launchId, reason: 'renderer_replaced', location: {} },
+    ])
+    expectNoOrphanView(parentWindow)
+  })
+})
+
+describe('AppService sandbox-ui represented location', () => {
+  it('is the requested route until the view applies it, then the live route', async () => {
+    const { service, released, launch } = await setupReleaseRecorder('/r/first')
+    const first = launch('first-app')
+    await service.openSandboxUi(first)
+    const webContents = electronMocks.views[0]!.webContents
+
+    await expect(service.getSandboxUiLocation()).resolves.toEqual({
+      appRef: 'sandbox-recipes/first-app',
+      routePath: '/r/first',
+    })
+
+    // The document commits and the driver hands the route to the app.
+    webContents.commitLoad()
+    await vi.waitFor(() => expect(webContents.getURL()).toBe(`${APP_VIEW_URL}/r/first`), {
+      timeout: 1_000,
+    })
+    webContents.navigateInPage(`${APP_VIEW_URL}/inbox`)
+    await expect(service.getSandboxUiLocation()).resolves.toEqual({
+      appRef: 'sandbox-recipes/first-app',
+      routePath: '/inbox',
+    })
+
+    await service.closeSandboxUi({ launchId: first.launchId })
+    expect(released).toEqual([
+      { launchId: first.launchId, reason: 'closed', location: { routePath: '/inbox' } },
+    ])
+  })
+
+  it('a view replaced while still loading reports the route it was asked for', async () => {
+    const { service, released, launch } = await setupReleaseRecorder('/r/first')
+    const first = launch('first-app')
+    await service.openSandboxUi(first)
+
+    await service.openSandboxUi(launch('second-app', { routePath: '/r/second' }))
+
+    expect(released).toEqual([
+      { launchId: first.launchId, reason: 'replaced', location: { routePath: '/r/first' } },
+    ])
+  })
+
+  it('keeps the requested route while the app is not ready for it, until the user navigates', async () => {
+    const { service, released, launch } = await setupReleaseRecorder('/r/first')
+    const first = launch('first-app')
+    await service.openSandboxUi(first)
+    const webContents = electronMocks.views[0]!.webContents
+
+    // rpc-proxy answers with a "starting" interstitial: the handoff waits.
+    webContents.commitLoad(503)
+    await expect(service.getSandboxUiLocation()).resolves.toEqual({
+      appRef: 'sandbox-recipes/first-app',
+      routePath: '/r/first',
+    })
+
+    webContents.navigateInPage(`${APP_VIEW_URL}/elsewhere`)
+    await service.closeSandboxUi({ launchId: first.launchId })
+    expect(released).toEqual([
+      { launchId: first.launchId, reason: 'closed', location: { routePath: '/elsewhere' } },
+    ])
+  })
+
+  it('a view without a requested route reports the default route until it navigates', async () => {
+    const { service, released, launch } = await setupReleaseRecorder()
+    const first = launch('first-app')
+    await service.openSandboxUi(first)
+    const webContents = electronMocks.views[0]!.webContents
+
+    await expect(service.getSandboxUiLocation()).resolves.toEqual({
+      appRef: 'sandbox-recipes/first-app',
+    })
+    webContents.commitLoad()
+    webContents.navigateInPage(`${APP_VIEW_URL}/settings`)
+
+    await service.closeSandboxUi({ launchId: first.launchId })
+    expect(released).toEqual([
+      { launchId: first.launchId, reason: 'closed', location: { routePath: '/settings' } },
+    ])
+  })
+
+  it('a deep link copied while the view loads points at the requested route', async () => {
+    const { buildSandboxUiWebLink } = await import('../sandboxUiDeepLinks.js')
+    const { config } = await import('../config.js')
+    vi.spyOn(config, 'desktopProfileUiBaseUrlExplicit', 'get').mockReturnValue(true)
+    const { service, launch } = await setupReleaseRecorder('/r/first')
+    await service.openSandboxUi(launch('first-app'))
+
+    await expect(service.createSandboxUiDeepLink()).resolves.toEqual({
+      url: buildSandboxUiWebLink('https://profile.example.com', {
+        recipeNs: 'sandbox-recipes',
+        recipeName: 'first-app',
+        path: '/r/first',
+      }),
+    })
+  })
+})
+
+describe('sandbox-ui IPC lifecycle handlers over the real AppService', () => {
+  type Sender = { id: number }
+
+  function registerHandlers(service: AppService) {
+    electronMocks.ipcHandlers.clear()
+    electronMocks.windowsBySender.clear()
+    return import('../ipc.js').then(({ registerIpcHandlers }) => registerIpcHandlers(service))
+  }
+
+  function invoke(channel: string, sender: Sender, payload?: unknown): Promise<unknown> {
+    const handler = electronMocks.ipcHandlers.get(channel)
+    if (!handler) throw new Error(`no IPC handler registered for ${channel}`)
+    return handler({ sender, senderFrame: { url: 'file:///app/index.html' } }, payload)
+  }
+
+  function windowFor(sender: Sender): FakeParentWindow {
+    const parentWindow = new FakeParentWindow()
+    electronMocks.windowsBySender.set(sender, parentWindow)
+    return parentWindow
+  }
+
+  const openPayload = (launchId: string) => ({
+    recipeNs: 'sandbox-recipes',
+    recipeName: 'first-app',
+    defaultPath: '/',
+    bounds: { x: 0, y: 0, width: 400, height: 300 },
+    launchId,
+  })
+
+  it('a close sent right after its open never reaches the queue first', async () => {
+    const service = makeService()
+    initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
+    await registerHandlers(service)
+    const mainSender = { id: 1 }
+    const otherSender = { id: 2 }
+    const parentWindow = windowFor(mainSender)
+    const otherWindow = windowFor(otherSender)
+    const launchId = crypto.randomUUID()
+
+    // Both invokes are dispatched in the same tick, in send order.
+    const opened = invoke('sandboxUi:open', mainSender, openPayload(launchId))
+    const closed = invoke('sandboxUi:close', otherSender, { launchId })
+    await Promise.all([opened, closed])
+
+    expect(getActiveSandboxUi()).toBeNull()
+    expectNoOrphanView(parentWindow)
+    const releasedSends = parentWindow.webContents.send.mock.calls.filter(
+      ([channel]) => channel === 'sandboxUi:released'
+    )
+    expect(releasedSends).toEqual([
+      ['sandboxUi:released', { launchId, reason: 'closed', location: {} }],
+    ])
+    // Only the window that mounted the view hears about it.
+    expect(otherWindow.webContents.send).not.toHaveBeenCalled()
+  })
+
+  it('rejects a close with a malformed launch id without closing anything', async () => {
+    const service = makeService()
+    initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
+    await registerHandlers(service)
+    const sender = { id: 1 }
+    const parentWindow = windowFor(sender)
+    await invoke('sandboxUi:open', sender, openPayload(crypto.randomUUID()))
+
+    await expect(invoke('sandboxUi:close', sender, { launchId: '../x' })).rejects.toThrow(
+      /launchId/
+    )
+    await drainLifecycleQueue(service)
+
+    expect(getActiveSandboxUi()).not.toBeNull()
+    expectNoOrphanView(parentWindow)
+  })
+})
+
+describe('AppService sandbox-ui teardown isolates every step', () => {
+  async function openLive(routePath?: string) {
+    const recorder = await setupReleaseRecorder(routePath)
+    const args = recorder.launch('first-app')
+    await recorder.service.openSandboxUi(args)
+    const view = electronMocks.views[0]!
+    return { ...recorder, args, view }
+  }
+
+  function expectReleasedAndGone(
+    view: InstanceType<typeof electronMocks.FakeWebContentsView>,
+    released: ReleasedEvent[],
+    expected: ReleasedEvent
+  ): void {
+    expect(view.webContents.isDestroyed()).toBe(true)
+    expect(getActiveSandboxUi()).toBeNull()
+    expect(released).toEqual([expected])
+  }
+
+  it('a view whose listener unhooks and find stop all throw is still released and gone', async () => {
+    // Every per-view cleanup is live: a route handoff still waiting (the app
+    // answered 503), a find session, shortcut routing, document listeners.
+    const { service, parentWindow, released, args, view } = await openLive('/r/first')
+    view.webContents.commitLoad(503)
+    await expect(service.findInActiveSandboxUi('invoice', 'start', 1, vi.fn())).resolves.toEqual({
+      status: 'started',
+      requestId: 41,
+    })
+    // Injected failures, one per cleanup step.
+    vi.spyOn(view.webContents, 'removeListener').mockImplementation(() => {
+      throw new Error('injected unhook failure')
+    })
+    view.webContents.stopFindInPage.mockImplementation(() => {
+      throw new Error('injected stop failure')
+    })
+
+    await expect(service.closeSandboxUi({ launchId: args.launchId })).resolves.toBeUndefined()
+
+    expect(parentWindow.contentView.children).toEqual([])
+    expectReleasedAndGone(view, released, {
+      launchId: args.launchId,
+      reason: 'closed',
+      location: { routePath: '/r/first' },
+    })
+  })
+
+  it('a failing detach still closes and releases the view', async () => {
+    const { service, parentWindow, released, args, view } = await openLive()
+    parentWindow.contentView.removeChildView.mockImplementationOnce(() => {
+      throw new Error('detach failed')
+    })
+
+    await expect(service.closeSandboxUi({ launchId: args.launchId })).resolves.toBeUndefined()
+
+    expectReleasedAndGone(view, released, {
+      launchId: args.launchId,
+      reason: 'closed',
+      location: {},
+    })
+  })
+
+  it('a failing webContents close still detaches and releases the view', async () => {
+    const { service, parentWindow, released, args, view } = await openLive()
+    vi.spyOn(view.webContents, 'close').mockImplementationOnce(() => {
+      throw new Error('close failed')
+    })
+
+    await expect(service.closeSandboxUi({ launchId: args.launchId })).resolves.toBeUndefined()
+
+    expect(parentWindow.contentView.children).toEqual([])
+    expect(getActiveSandboxUi()).toBeNull()
+    expect(released).toEqual([{ launchId: args.launchId, reason: 'closed', location: {} }])
+  })
+
+  it('a release listener that throws does not fail the close', async () => {
+    const recorder = await setupReleaseRecorder()
+    const args = recorder.launch('first-app', {
+      onReleased: () => {
+        throw new Error('listener failed')
+      },
+    })
+    await recorder.service.openSandboxUi(args)
+
+    await expect(
+      recorder.service.closeSandboxUi({ launchId: args.launchId })
+    ).resolves.toBeUndefined()
+
+    expect(getActiveSandboxUi()).toBeNull()
+    expectNoOrphanView(recorder.parentWindow)
+  })
+
+  it('a failing surface unpin still unmounts and releases the view', async () => {
+    const { service, runtime, parentWindow, released, args, view } = await openLive()
+    vi.spyOn(runtime, 'unpinAllSandboxUiSurfaces').mockImplementation(() => {
+      throw new Error('unpin failed')
+    })
+
+    await expect(service.closeSandboxUi({ launchId: args.launchId })).resolves.toBeUndefined()
+
+    expect(parentWindow.contentView.children).toEqual([])
+    expectReleasedAndGone(view, released, {
+      launchId: args.launchId,
+      reason: 'closed',
+      location: {},
+    })
+  })
+
+  it('a view whose URL cannot be read is released with no location', async () => {
+    const { service, parentWindow, released, args, view } = await openLive()
+    view.webContents.commitLoad()
+    vi.spyOn(view.webContents, 'getURL').mockImplementation(() => {
+      throw new Error('Object has been destroyed')
+    })
+
+    await expect(service.closeSandboxUi({ launchId: args.launchId })).resolves.toBeUndefined()
+
+    expect(parentWindow.contentView.children).toEqual([])
+    expectReleasedAndGone(view, released, {
+      launchId: args.launchId,
+      reason: 'closed',
+      location: null,
+    })
+  })
+
+  it('a view showing a URL outside the app is released with no location', async () => {
+    const { service, parentWindow, released, args, view } = await openLive()
+    view.webContents.commitLoad()
+    view.webContents.navigateInPage('https://elsewhere.example/landing')
+    // The legacy reader keeps rejecting, so the renderer falls back.
+    await expect(service.getSandboxUiLocation()).rejects.toThrow(
+      'Cannot read the current app route'
+    )
+
+    await expect(service.closeSandboxUi({ launchId: args.launchId })).resolves.toBeUndefined()
+
+    expect(parentWindow.contentView.children).toEqual([])
+    expectReleasedAndGone(view, released, {
+      launchId: args.launchId,
+      reason: 'closed',
+      location: null,
+    })
+  })
+})
+
+describe('AppService sandbox-ui route settling', () => {
+  async function openLoading(routePath?: string) {
+    const recorder = await setupReleaseRecorder(routePath)
+    await recorder.service.openSandboxUi(recorder.launch('first-app'))
+    return { ...recorder, webContents: electronMocks.views[0]!.webContents }
+  }
+
+  const location = (routePath?: string) => ({
+    appRef: 'sandbox-recipes/first-app',
+    ...(routePath ? { routePath } : {}),
+  })
+
+  it('a view with no requested route reports where the server sent its first load', async () => {
+    const { service, webContents } = await openLoading()
+    webContents.commitLoad(200, `${APP_VIEW_URL}/welcome`)
+    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/welcome'))
+  })
+
+  it('an in-page navigation before the first load does not replace the requested route', async () => {
+    const { service, webContents } = await openLoading('/r/first')
+    webContents.navigateInPage(`${APP_VIEW_URL}/#boot`)
+    webContents.commitLoad(503)
+    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/r/first'))
+  })
+
+  it('an in-page navigation of a subframe does not replace the requested route', async () => {
+    const { service, webContents } = await openLoading('/r/first')
+    webContents.commitLoad(503)
+    webContents.emit('did-navigate-in-page', {}, `${APP_VIEW_URL}/frame`, false)
+    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/r/first'))
+  })
+
+  it('a handoff that finds the app already on the route settles it', async () => {
+    const { service, webContents } = await openLoading('/r/first')
+    webContents.commitLoad(200, `${APP_VIEW_URL}/r/first`)
+    await vi.waitFor(() => expect(webContents.executeJavaScript).toHaveBeenCalledOnce(), {
+      timeout: 1_000,
+    })
+    await expect(webContents.executeJavaScript.mock.results[0]!.value).resolves.toBe(true)
+    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/r/first'))
+  })
+
+  it('a handoff the app does not take keeps the requested route', async () => {
+    const { service, webContents } = await openLoading('/r/first')
+    webContents.historyLocked = true
+    webContents.commitLoad()
+    await vi.waitFor(() => expect(webContents.executeJavaScript).toHaveBeenCalledOnce(), {
+      timeout: 1_000,
+    })
+    await expect(webContents.executeJavaScript.mock.results[0]!.value).resolves.toBe(false)
+    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/r/first'))
+  })
+
+  it('a new document the user opens after the handoff gave up is the live route', async () => {
+    const { service, released, webContents } = await openLoading('/r/first')
+    webContents.commitLoad(503)
+    await vi.advanceTimersByTimeAsync(30_000)
+
+    // A reload commits the same document: still the requested route.
+    webContents.commitLoad()
+    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/r/first'))
+
+    webContents.navigateTo(`${APP_VIEW_URL}/reports`)
+    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/reports'))
+    await service.closeSandboxUi()
+    expect(released.map(event => event.location)).toEqual([{ routePath: '/reports' }])
+  })
+
+  it('a handoff that gives up before the first load does not settle on that first load', async () => {
+    // The app takes longer than the handoff waits to answer at all.
+    const { service, webContents } = await openLoading('/r/first')
+    await vi.advanceTimersByTimeAsync(30_000)
+    webContents.commitLoad()
+    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/r/first'))
+  })
+
+  it('a document committed outside the app does not replace the requested route', async () => {
+    const { service, webContents } = await openLoading('/r/first')
+    webContents.commitLoad(503)
+    await vi.advanceTimersByTimeAsync(30_000)
+    webContents.navigateTo('https://elsewhere.example/landing')
+    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/r/first'))
+  })
+
+  it('a reload after the router moved the URL during boot keeps the requested route', async () => {
+    const { service, webContents } = await openLoading('/r/first')
+    // The app's router rewrites the URL before the document finishes loading.
+    webContents.emit('did-navigate', {}, `${APP_VIEW_URL}/`, 200, '')
+    webContents.navigateInPage(`${APP_VIEW_URL}/home`)
+    await vi.advanceTimersByTimeAsync(30_000)
+    webContents.emit('did-finish-load')
+    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/r/first'))
+
+    // A reload commits the document the view is already showing.
+    webContents.emit('did-navigate', {}, `${APP_VIEW_URL}/home`, 200, '')
+    webContents.emit('did-finish-load')
+    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/r/first'))
+  })
+
+  it('a new document committed while the handoff still waits keeps the requested route', async () => {
+    const { service, webContents } = await openLoading('/r/first')
+    webContents.commitLoad(503)
+    webContents.navigateTo(`${APP_VIEW_URL}/starting`, 503)
+    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/r/first'))
+  })
+})
+
+describe('sandbox-ui IPC close ordering and legacy payloads', () => {
+  type Sender = { id: number }
+
+  async function setupIpc() {
+    const service = makeService()
+    initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
+    electronMocks.ipcHandlers.clear()
+    electronMocks.windowsBySender.clear()
+    const { registerIpcHandlers } = await import('../ipc.js')
+    registerIpcHandlers(service)
+    const sender: Sender = { id: 1 }
+    const parentWindow = new FakeParentWindow()
+    electronMocks.windowsBySender.set(sender, parentWindow)
+    const invoke = (channel: string, payload?: unknown): Promise<unknown> => {
+      const handler = electronMocks.ipcHandlers.get(channel)
+      if (!handler) throw new Error(`no IPC handler registered for ${channel}`)
+      return handler({ sender, senderFrame: { url: 'file:///app/index.html' } }, payload)
+    }
+    const open = (launchId: string) =>
+      invoke('sandboxUi:open', {
+        recipeNs: 'sandbox-recipes',
+        recipeName: 'first-app',
+        defaultPath: '/',
+        bounds: { x: 0, y: 0, width: 400, height: 300 },
+        launchId,
+      })
+    const releasedSends = () =>
+      parentWindow.webContents.send.mock.calls.filter(
+        ([channel]) => channel === 'sandboxUi:released'
+      )
+    return { service, parentWindow, invoke, open, releasedSends }
+  }
+
+  it('a null payload is the legacy close of whatever is live', async () => {
+    const { invoke, open, releasedSends, parentWindow } = await setupIpc()
+    const launchId = crypto.randomUUID()
+    await open(launchId)
+
+    await invoke('sandboxUi:close', null)
+
+    expect(getActiveSandboxUi()).toBeNull()
+    expectNoOrphanView(parentWindow)
+    expect(releasedSends()).toEqual([
+      ['sandboxUi:released', { launchId, reason: 'closed', location: {} }],
+    ])
+  })
+
+  it('a close sent right before the next open closes its own view first', async () => {
+    const { invoke, open, releasedSends } = await setupIpc()
+    const first = crypto.randomUUID()
+    const second = crypto.randomUUID()
+    await open(first)
+
+    const closed = invoke('sandboxUi:close', { launchId: first })
+    const opened = open(second)
+    await Promise.all([closed, opened])
+
+    expect(getActiveSandboxUi()?.launchId).toBe(second)
+    expect(releasedSends()).toEqual([
+      ['sandboxUi:released', { launchId: first, reason: 'closed', location: {} }],
+    ])
   })
 })

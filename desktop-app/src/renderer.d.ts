@@ -39,6 +39,7 @@ import {
   RpcConnectorsResult,
   SandboxUiApp,
   SandboxUiDeepLinkEnvelope,
+  SandboxUiReleasedEvent,
   SessionLifecycleState,
   SessionMessagesQuery,
   SessionMessagesResult,
@@ -766,7 +767,9 @@ declare global {
           // for the view this open mounts.
           launchId: string
         }) => Promise<void>
-        close: () => Promise<void>
+        // Without args: closes whatever is live (legacy). With a launch id:
+        // closes that launch's view only if it is still the live one.
+        close: (args?: { launchId: string }) => Promise<void>
         reload: () => Promise<void>
         getLocation: () => Promise<{ appRef: string; routePath?: string } | null>
         copyDeepLink: (teamId?: string) => Promise<{ url: string }>
@@ -808,6 +811,9 @@ declare global {
         ) => () => void
         onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => () => void
         onClosed: (callback: (args: { appRef: string; launchId: string }) => void) => () => void
+        // Once per view main tears down, whatever the reason, with the route it
+        // represented (`null`: unreadable, keep the last known one).
+        onReleased: (callback: (args: SandboxUiReleasedEvent) => void) => () => void
         onRefreshError: (
           callback: (args: { appRef: string; launchId: string; message: string }) => void
         ) => () => void
