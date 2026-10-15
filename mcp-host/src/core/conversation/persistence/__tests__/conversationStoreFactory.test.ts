@@ -141,6 +141,108 @@ describe('createConversationStore store identity', () => {
     }
   })
 
+  it('logs the database path only after the worker answers its first operation', async () => {
+    const script = workerScript(`
+      const fs = require('node:fs')
+      const path = require('node:path')
+      const { parentPort, workerData } = require('node:worker_threads')
+      const held = []
+      parentPort.on('message', msg => {
+        if (msg.op.kind === 'ping') {
+          fs.writeFileSync(path.join(path.dirname(workerData.dbPath), 'ping-received'), '')
+          held.push(msg.id)
+        }
+        if (msg.op.kind === 'release') {
+          for (const id of held.splice(0)) parentPort.postMessage({ id, ok: true, result: 'pong' })
+          parentPort.postMessage({ id: msg.id, ok: true, result: 'released' })
+        }
+        if (msg.op.kind === 'shutdown') {
+          parentPort.postMessage({ id: msg.id, ok: true, result: { ok: true } })
+          process.exit(0)
+        }
+      })
+    `)
+    const dbPath = path.join(path.dirname(script), 'state.db')
+    const marker = path.join(path.dirname(script), 'ping-received')
+    const info = vi.spyOn(logger, 'info')
+    const opened = () => info.mock.calls.filter(([, msg]) => msg === '[ConversationStore] opened')
+    try {
+      const handle = createConversationStore({
+        mode: 'sqlite',
+        dbPath,
+        cacheSize: 10,
+        syncTimeoutMs: 5000,
+        asyncTimeoutMs: 5000,
+        checkpointEveryWrites: 100,
+        heartbeatMs: 60_000,
+        workerScriptPath: script,
+      })
+      // Liveness witness: the factory's first operation reached the worker.
+      await waitFor<void>(resolve => {
+        const poll = setInterval(() => {
+          if (fs.existsSync(marker)) {
+            clearInterval(poll)
+            resolve()
+          }
+        }, 5)
+      }, 3000)
+      expect(opened()).toEqual([])
+
+      await expect(handle.persistQueue?.enqueueSync({ kind: 'release' } as never)).resolves.toBe(
+        'released'
+      )
+      await waitFor<void>(resolve => {
+        const poll = setInterval(() => {
+          if (opened().length > 0) {
+            clearInterval(poll)
+            resolve()
+          }
+        }, 5)
+      }, 3000)
+      expect(opened()).toEqual([[{ dbPath, mode: 'sqlite' }, '[ConversationStore] opened']])
+      await handle.shutdown()
+    } finally {
+      info.mockRestore()
+    }
+  })
+
+  it('logs no database path when the worker exits before opening the database', async () => {
+    const script = workerScript(`process.exit(1)`)
+    const info = vi.spyOn(logger, 'info')
+    const errors = vi.spyOn(logger, 'error')
+    try {
+      const failure = waitFor<Error>(resolve => {
+        createConversationStore({
+          mode: 'sqlite',
+          dbPath: path.join(path.dirname(script), 'state.db'),
+          cacheSize: 10,
+          syncTimeoutMs: 2000,
+          asyncTimeoutMs: 2000,
+          checkpointEveryWrites: 100,
+          heartbeatMs: 60_000,
+          workerScriptPath: script,
+          onPersistFailure: resolve,
+        })
+      }, 5000)
+      // Liveness witness: the factory saw the worker exit.
+      await expect(failure).resolves.toMatchObject({ message: 'db worker exited (code=1)' })
+      await waitFor<void>(resolve => {
+        const poll = setInterval(() => {
+          if (
+            errors.mock.calls.some(([, msg]) => msg === '[ConversationStore] database did not open')
+          ) {
+            clearInterval(poll)
+            resolve()
+          }
+        }, 5)
+      }, 3000)
+      expect(info.mock.calls.filter(([, msg]) => msg === '[ConversationStore] opened')).toEqual([])
+    } finally {
+      info.mockRestore()
+      errors.mockRestore()
+    }
+  })
+
   it('logs no database path for a memory store', () => {
     const info = vi.spyOn(logger, 'info')
     try {

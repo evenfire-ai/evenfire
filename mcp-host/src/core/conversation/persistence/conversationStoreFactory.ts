@@ -92,9 +92,6 @@ export function createConversationStore(
   }
 
   const worker = spawnWorker(opts) as unknown as WorkerLike & Worker
-  // One line per process names the database this Host reads and writes, so a
-  // Pod replacement that changes the store is visible in the Pod logs.
-  logger.info({ dbPath: opts.dbPath, mode: opts.mode }, '[ConversationStore] opened')
   const persistQueue = new PersistQueue(worker, {
     syncTimeoutMs: opts.syncTimeoutMs,
     asyncTimeoutMs: opts.asyncTimeoutMs,
@@ -106,6 +103,15 @@ export function createConversationStore(
     },
     onFailure: opts.onPersistFailure,
   })
+  // The worker answers only after it has opened and migrated the database, so
+  // the path is logged once that is true. One line per process names the
+  // database this Host reads and writes, so a Pod replacement that changes the
+  // store is visible in the Pod logs. A worker exit also ends the process
+  // through `onFailure`; this line only names the cause in the log.
+  persistQueue.enqueueSync({ kind: 'ping' }).then(
+    () => logger.info({ dbPath: opts.dbPath, mode: opts.mode }, '[ConversationStore] opened'),
+    (err: unknown) => logger.error({ err }, '[ConversationStore] database did not open')
+  )
 
   const sqliteStore = new SqliteConversationStore(persistQueue, {
     cacheSize: opts.cacheSize,
