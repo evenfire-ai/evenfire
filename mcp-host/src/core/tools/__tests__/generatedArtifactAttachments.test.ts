@@ -876,6 +876,37 @@ describe('generated internal artifact attachments', () => {
     })
   })
 
+  it.skipIf(process.getuid?.() === 0)(
+    'logs the stage, name and code of a read that fails, not only that it failed',
+    async () => {
+      const { logger } = await import('../../../logger')
+      const warn = vi.spyOn(logger, 'warn')
+      fs.writeFileSync(path.join(outputDir, 'locked.md'), '# locked\n')
+      fs.chmodSync(path.join(outputDir, 'locked.md'), 0o000)
+      try {
+        const attachment = buildGeneratedArtifactAttachment({
+          sourceTool: 'clerum__generate_markdown',
+          artifact: metadata(outputDir, 'locked.md', 'md'),
+          outputDir,
+          maxBytes: 1024,
+        })
+        expect(attachment).toBeNull()
+        expect(warn).toHaveBeenCalledWith(
+          expect.objectContaining({
+            reason: 'artifact_path_error_500',
+            stage: 'open',
+            errorName: 'ArtifactPathError',
+            errorCode: 'EACCES',
+          }),
+          'Skipping artifact attachment'
+        )
+      } finally {
+        fs.chmodSync(path.join(outputDir, 'locked.md'), 0o600)
+        warn.mockRestore()
+      }
+    }
+  )
+
   it('native internal tools return generated artifact attachments through the adapter', async () => {
     const config: NativeToolConfig = {
       workspacePath: outputDir,

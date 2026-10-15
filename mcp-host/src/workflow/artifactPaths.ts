@@ -9,7 +9,9 @@ export const MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
 export class ArtifactPathError extends Error {
   constructor(
     readonly status: 400 | 403 | 404 | 413 | 500,
-    message: string
+    message: string,
+    /** The filesystem error code behind it, for logs; never sent to a caller. */
+    readonly code?: string
   ) {
     super(message)
     this.name = 'ArtifactPathError'
@@ -43,7 +45,7 @@ function artifactFsError(err: unknown): ArtifactPathError {
   if (code === 'ELOOP') {
     return new ArtifactPathError(403, 'Symlink artifacts are not allowed')
   }
-  return new ArtifactPathError(500, 'Failed to read artifact')
+  return new ArtifactPathError(500, 'Failed to read artifact', code)
 }
 
 function resolveArtifactCandidate(outputDir: string, filename: string): ArtifactCandidate {

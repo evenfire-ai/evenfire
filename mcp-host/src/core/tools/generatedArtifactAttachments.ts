@@ -114,7 +114,12 @@ function closeFd(fd: number): void {
   }
 }
 
-function warnSkip(reason: string, sourceTool: string, artifact: ArtifactMetadata): void {
+function warnSkip(
+  reason: string,
+  sourceTool: string,
+  artifact: ArtifactMetadata,
+  failure?: { stage: string; errorName?: string; errorCode?: string }
+): void {
   logger.warn(
     {
       component: 'GeneratedArtifactAttachment',
@@ -122,6 +127,7 @@ function warnSkip(reason: string, sourceTool: string, artifact: ArtifactMetadata
       tool: sourceTool,
       format: artifact.format,
       filename: artifact.name,
+      ...failure,
     },
     'Skipping artifact attachment'
   )
@@ -260,9 +266,13 @@ export function buildGeneratedArtifactAttachment(
   }
 
   let opened
+  // Where an unexpected error stopped the delivery, for the log.
+  let stage: 'open' | 'read' | 'check' | 'redact' = 'open'
   try {
     opened = openExistingArtifactFile(params.outputDir, params.artifact.name)
+    stage = 'read'
     const fileBuffer = readOpenedArtifactBuffer(opened, params.maxBytes)
+    stage = 'check'
     if (
       params.writtenSha256 !== undefined &&
       createHash('sha256').update(fileBuffer).digest('hex') !== params.writtenSha256
@@ -334,7 +344,9 @@ export function buildGeneratedArtifactAttachment(
         return null
       }
     }
+    stage = 'redact'
     const redacted = redactArtifactForDelivery(expectedFormat, fileBuffer, secretEntries)
+    stage = 'check'
     // A value printed whole once is redacted, but the same value split by
     // markup elsewhere in the file is not: read the redacted text as printed.
     if (
@@ -370,7 +382,13 @@ export function buildGeneratedArtifactAttachment(
   } catch (err) {
     const reason =
       err instanceof ArtifactPathError ? `artifact_path_error_${err.status}` : 'artifact_read_error'
-    warnSkip(reason, params.sourceTool, params.artifact)
+    // The name and code say what failed; the message may hold a path, so it is left out.
+    const code = (err as NodeJS.ErrnoException | ArtifactPathError | undefined)?.code
+    warnSkip(reason, params.sourceTool, params.artifact, {
+      stage,
+      errorName: err instanceof Error ? err.name : typeof err,
+      ...(typeof code === 'string' ? { errorCode: code } : {}),
+    })
     return null
   } finally {
     if (opened) closeFd(opened.fd)
