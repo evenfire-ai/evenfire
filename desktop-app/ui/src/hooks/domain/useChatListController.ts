@@ -1739,8 +1739,8 @@ export function useChatListController({
             setLatestChatSessions(previous => {
               if (!requestStillCurrent()) return previous
               const deleted = deletedChatIdsByAgentRef.current.get(agentRef)
-              // Carried remote rows are rebuilt from this page or dropped, as
-              // before the carry existed.
+              // Remote rows are rebuilt from this page; carried rows missing
+              // from it are dropped.
               const cached = previous.filter(
                 item => item.agentRef === agentRef && !deleted?.has(item.id) && !item.remote
               )

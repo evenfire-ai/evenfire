@@ -7,6 +7,9 @@
  * answer re-hold a Host the user was just cleared for. Holding a Host therefore
  * invalidates its cached catalog requests.
  *
+ * #1130 (T-1130-1): releasing the hold invalidates again, so a request made
+ * while the Host was held is not shared with a reader after the release.
+ *
  * The held Host is deliberately not the selected one: a revoked hold of the
  * selected agent already clears the whole cache through the chat controller's
  * teardown, which would hide the defect.
