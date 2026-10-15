@@ -170,6 +170,15 @@ Before running, record owner approval for these concrete effects:
 - Producer `ensureApp`/`ensureLatestAppConfig` may create `apps`/`app_configs`
   rows. Existing teardown deletes flow rows by the generated test email but
   does **not** remove these possible app/config records.
+- Registration also inserts `invite_send_log` and `invite_redirect_tokens`
+  before sending email. Both records can persist when SMTP fails; configured
+  teardown does not delete them. For an external tenant binding, send-log
+  entries count toward the destination domain's daily quota. Confirm the
+  actual deployed revision, tenant binding and applicable quota before running.
+- A redirect record's `destination_url` contains signed invitation proof.
+  The inspected producer assigns a 30-day redirect expiry; expiry does not
+  physically delete the record. Confirm retention and narrowly scoped cleanup
+  with the owner. Never include the redirect token or destination URL in a receipt.
 - Registration calls the real invitation email path. Checked-in producer
   deployment configuration uses Postmark SMTP. A non-delivering configuration
   has not been established; outbound email may be attempted, and an invalid
@@ -181,11 +190,16 @@ and compatible with the development email service before execution. Use a
 separate permitted mailbox for the delivery/UI journey below. Do not silently
 change the runner to skip email, change recipients or omit cleanup.
 
-Clearly identifiable synthetic development app/config records may remain when
-accepted by the owner. Record them by sanitized identifier and agree on their
-later cleanup. This acceptance does not disable the runner's existing flow-row
-DELETE or temporary-database DROP. If teardown fails, confirm the exact generated
-resources before any manual deletion; never broadly delete producer data.
+Clearly identifiable synthetic development records may remain when explicitly
+accepted by the owner. Obtain separate approval for retained app/config records,
+send-log entries, proof-bearing redirect records and any applicable quota effects;
+willingness to retain app/config rows alone does not authorize the other effects.
+Record sanitized counts or non-secret identifiers and their retention or cleanup
+disposition. Do not assume that deleting a flow row cascades to redirect/send-log
+records, or that expiration proves deletion. This acceptance does not disable the
+runner's existing flow-row DELETE or temporary-database DROP. If teardown fails,
+confirm the exact generated resources before any manual deletion; never broadly
+delete producer data.
 
 ## E. Run the configured integration lane
 
@@ -283,6 +297,8 @@ New-password login under ordinary admission:
 Unrelated synthetic account/invitation state:
 Flow-row cleanup / temporary database drop:
 Remaining synthetic app/config records and owner disposition:
+Send-log records / applicable quota effects / owner disposition:
+Redirect records / expiry / retention or exact cleanup (no token or destination URL):
 Stopped task-owned processes / forwards / unset credentials:
 Unverified or failed paths:
 Reviewer / owner merge-sign-off decision:
