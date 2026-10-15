@@ -4,6 +4,7 @@
  * Routing and authz are split into dedicated modules under src/server/.
  */
 import express, { type NextFunction, type Request, type Response } from 'express'
+import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import * as fs from 'fs'
 import * as http from 'http'
 import * as path from 'path'
@@ -710,11 +711,27 @@ export class RPCServer {
       }
       next()
     }
+    // A listing reads and stats the caller's folder and a download reads and
+    // redacts a file, so each caller gets a bucket of their own: every call
+    // comes through the same rpc-proxy address, where one bucket would let a
+    // single caller hold the Host's disk and starve the rest.
+    const limitArtifactCalls = rateLimit({
+      windowMs: 60_000,
+      limit: 600,
+      standardHeaders: 'draft-8',
+      legacyHeaders: false,
+      keyGenerator: req => {
+        const userId = getRuntimeCallerContext(req)?.userId
+        return userId ? `caller:${userId}` : ipKeyGenerator(req.ip ?? '')
+      },
+      message: { error: 'Too Many Requests', retryable: true },
+    })
 
     this.app.get(
       '/v1/runtime/artifacts',
       rejectWorkflowRuntimeArtifacts,
       runtimeEdgeGuard(['rpc-proxy']),
+      limitArtifactCalls,
       (req, res) => {
         try {
           // Only the caller's own folder, re-verified per request; none yet
@@ -757,6 +774,7 @@ export class RPCServer {
       '/v1/runtime/artifacts/:filename/download',
       rejectWorkflowRuntimeArtifacts,
       runtimeEdgeGuard(['rpc-proxy']),
+      limitArtifactCalls,
       (req, res) => {
         const filename = req.params.filename as string
         if (isInternalWorkflowArtifactName(filename)) {

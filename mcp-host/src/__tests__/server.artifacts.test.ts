@@ -386,6 +386,34 @@ describe('RPCServer runtime artifact routes', () => {
     }
   })
 
+  it('limits each caller on their own, so one cannot starve the others', async () => {
+    outputDir = makeOutputDir('user-1')
+    fs.writeFileSync(path.join(outputDir, 'report.md'), '# ok\n')
+    const { server, baseUrl } = await startServer(outputDir)
+
+    try {
+      const list = (userId: string) =>
+        fetch(`${baseUrl}/v1/runtime/artifacts`, { headers: edgeHeaders(userId) })
+      for (let call = 0; call < 600; call++) {
+        const res = await list('user-1')
+        expect(res.status).toBe(200)
+        await res.arrayBuffer()
+      }
+      const limited = await list('user-1')
+      expect(limited.status).toBe(429)
+      expect(await limited.json()).toEqual({ error: 'Too Many Requests', retryable: true })
+      const download = await fetch(`${baseUrl}/v1/runtime/artifacts/report.md/download`, {
+        headers: rpcEdgeHeaders,
+      })
+      expect(download.status).toBe(429)
+      // Another caller, through the same rpc-proxy address, is still served.
+      const other = await list('user-2')
+      expect(other.status).toBe(200)
+    } finally {
+      await server.stop()
+    }
+  })
+
   it('does not serve CLERUM_OUTPUT_DIR in chat when a resolver is wired', async () => {
     outputDir = makeOutputDir('user-1')
     const shared = path.join(hostRoot, 'outputs')
