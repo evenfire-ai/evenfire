@@ -1069,7 +1069,16 @@ export function useAppController() {
       ) {
         // D.4: switchToChat is now a single unified path (no isRemote) — the
         // server is the source of truth and hydrates server-only chats itself.
-        void chat.switchToChat(agentName, targetChatId)
+        void chat
+          .switchToChat(agentName, targetChatId, {
+            onCurrentError: error => {
+              fullSetStatus(
+                `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
+                'error'
+              )
+            },
+          })
+          .catch(() => undefined)
         nav.setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
         // Activate the chat tab (dedupes/focuses by chatId). We are already on
         // the chat route, so `navItem` stays `chat` — same-commit derivation, no
@@ -1081,11 +1090,13 @@ export function useAppController() {
       const pendingSelectionOptions: {
         selectLatest: boolean
         suppressAutoSelect: boolean
+        deferSwitch: boolean
         title?: string
         isRemote?: boolean
       } = {
         selectLatest: shouldSelectLatest,
         suppressAutoSelect: !shouldSelectLatest && !targetChatId,
+        deferSwitch: options.keepNavItem === true,
       }
       if (options.title) pendingSelectionOptions.title = options.title
       if (options.isRemote !== undefined) pendingSelectionOptions.isRemote = options.isRemote
@@ -1110,13 +1121,23 @@ export function useAppController() {
       // effect replays into its `specific` branch instead of the reset branch;
       // both switches target the same chat and `switchToChat` coalesces them.
       if (options.keepNavItem && targetChatId && nav.selectedAgent === agentName) {
-        void chat.switchToChat(agentName, targetChatId)
+        void chat
+          .switchToChat(agentName, targetChatId, {
+            onCurrentError: error => {
+              fullSetStatus(
+                `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
+                'error'
+              )
+            },
+          })
+          .catch(() => undefined)
       }
     },
     [
       chat.clearActiveChat,
       chat.setPendingChatSelection,
       chat.switchToChat,
+      fullSetStatus,
       nav.activateChatTab,
       nav.navItem,
       nav.selectedAgent,
@@ -1231,12 +1252,21 @@ export function useAppController() {
           nav.navItem === DESKTOP_ROUTES.chat
         ) {
           try {
-            await chat.switchToChat(targetAgent, targetChatId)
-            nav.activateChatTab(targetAgent, targetChatId)
-            return
+            await chat.switchToChat(targetAgent, targetChatId, {
+              onCurrentError: error => {
+                fullSetStatus(
+                  `Could not open notification: ${error instanceof Error ? error.message : String(error)}`,
+                  'error'
+                )
+              },
+            })
           } catch {
-            // Fall through to pending selection so the normal agent load path can retry.
+            // The request owns current feedback and still rejects to awaiters.
+            // This UI event observes that rejection without reporting it again.
+            return
           }
+          nav.activateChatTab(targetAgent, targetChatId)
+          return
         }
 
         chat.setPendingChatSelection(targetAgent, targetChatId || null)
