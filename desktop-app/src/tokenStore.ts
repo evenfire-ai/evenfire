@@ -115,7 +115,19 @@ export class SessionTokenStorageUnavailableBeforeWriteError extends Error {
   }
 }
 
-async function loadKeytar(): Promise<KeytarModule | null> {
+let keytarImportInFlight: Promise<KeytarModule | null> | undefined
+
+function loadKeytar(): Promise<KeytarModule | null> {
+  if (keytarImportInFlight) return keytarImportInFlight
+  const pending = loadKeytarOnce()
+  keytarImportInFlight = pending
+  void pending.then(() => {
+    if (keytarImportInFlight === pending) keytarImportInFlight = undefined
+  })
+  return pending
+}
+
+async function loadKeytarOnce(): Promise<KeytarModule | null> {
   try {
     const mod = await import('keytar')
     if (isKeytarModule(mod)) {
@@ -183,6 +195,22 @@ async function syncDirectory(directoryPath: string): Promise<void> {
 }
 
 const tokenFileMutations = new Map<string, Promise<void>>()
+const keytarAccountOperations = new Map<string, Promise<void>>()
+
+/** Native access is ordered across stores by the exact OS-keychain account. */
+function accessKeytarAccount<T>(account: string, operation: () => Promise<T>): Promise<T> {
+  const key = `${SERVICE}\0${account}`
+  const pending = (keytarAccountOperations.get(key) ?? Promise.resolve()).then(operation)
+  const settled = pending.then(
+    () => undefined,
+    () => undefined
+  )
+  keytarAccountOperations.set(key, settled)
+  void settled.then(() => {
+    if (keytarAccountOperations.get(key) === settled) keytarAccountOperations.delete(key)
+  })
+  return pending
+}
 
 function mutateTokenFile<T>(filePath: string, operation: () => Promise<T>): Promise<T> {
   const pending = (tokenFileMutations.get(filePath) ?? Promise.resolve()).then(operation)
@@ -346,13 +374,15 @@ export class TokenStore {
         await this.verifiedStorageBase()
         return null
       }
-      const keytar = await loadKeytar()
-      if (!keytar) return null
-      try {
-        return await keytar.getPassword(SERVICE, accountFor(envKey))
-      } catch {
-        return null
-      }
+      return accessKeytarAccount(accountFor(envKey), async () => {
+        const keytar = await loadKeytar()
+        if (!keytar) return null
+        try {
+          return await keytar.getPassword(SERVICE, accountFor(envKey))
+        } catch {
+          return null
+        }
+      })
     })
   }
 
@@ -363,16 +393,19 @@ export class TokenStore {
     assertEnvKey(envKey)
     if (this.isolatedUserDataPath !== undefined) await this.verifiedStorageBase()
     const account = accountFor(envKey)
-    const keytar = this.isolatedUserDataPath === undefined ? await loadKeytar() : null
-    if (keytar) {
-      try {
-        const stored = await keytar.getPassword(SERVICE, account)
-        if (stored) return stored
-      } catch {
-        // Packaged builds can fail keychain access depending on host policies.
-        // Fall back to the local encrypted store so auth flow can continue.
-      }
-    }
+    const { keytar, stored } =
+      this.isolatedUserDataPath === undefined
+        ? await accessKeytarAccount(account, async () => {
+            const keytar = await loadKeytar()
+            try {
+              return { keytar, stored: keytar ? await keytar.getPassword(SERVICE, account) : null }
+            } catch (error) {
+              // Packaged builds can fail keychain access depending on host policies.
+              return { keytar, stored: null }
+            }
+          })
+        : { keytar: null, stored: null }
+    if (stored) return stored
 
     if (app?.isReady() && safeStorage.isEncryptionAvailable()) {
       try {
@@ -429,10 +462,14 @@ export class TokenStore {
       const legacyAccount = accountFor(legacyEnvKey)
       if (keytar) {
         try {
-          const token = await keytar.getPassword(SERVICE, legacyAccount)
+          const token = await accessKeytarAccount(legacyAccount, () =>
+            keytar.getPassword(SERVICE, legacyAccount)
+          )
           if (token) {
             await this.setSessionTokenOnce(token, envKey)
-            await keytar.deletePassword(SERVICE, legacyAccount).catch(() => {})
+            await accessKeytarAccount(legacyAccount, () =>
+              keytar.deletePassword(SERVICE, legacyAccount)
+            ).catch(() => {})
             return token
           }
         } catch {
@@ -485,10 +522,14 @@ export class TokenStore {
     // Legacy keytar global account.
     if (keytar) {
       try {
-        const legacy = await keytar.getPassword(SERVICE, LEGACY_ACCOUNT)
+        const legacy = await accessKeytarAccount(LEGACY_ACCOUNT, () =>
+          keytar.getPassword(SERVICE, LEGACY_ACCOUNT)
+        )
         if (legacy) {
           await this.setSessionTokenOnce(legacy, envKey)
-          await keytar.deletePassword(SERVICE, LEGACY_ACCOUNT).catch(() => {})
+          await accessKeytarAccount(LEGACY_ACCOUNT, () =>
+            keytar.deletePassword(SERVICE, LEGACY_ACCOUNT)
+          ).catch(() => {})
           return legacy
         }
       } catch {
@@ -597,20 +638,27 @@ export class TokenStore {
     assertEnvKey(envKey)
     if (this.isolatedUserDataPath !== undefined) await this.verifiedStorageBase()
     const account = accountFor(envKey)
-    const keytar = this.isolatedUserDataPath === undefined ? await loadKeytar() : null
-    if (options.requireKeytar && !keytar) {
-      throw new SessionTokenStorageUnavailableBeforeWriteError()
-    }
-    if (keytar) {
-      try {
-        await keytar.setPassword(SERVICE, account, token)
-        return
-      } catch (error) {
-        if (options.requireKeytar) {
-          throw new AggregateError([error], 'Failed to replace session token in Keytar')
+    if (this.isolatedUserDataPath === undefined) {
+      const savedInKeytar = await accessKeytarAccount(account, async () => {
+        const keytar = await loadKeytar()
+        if (!keytar) {
+          if (options.requireKeytar) throw new SessionTokenStorageUnavailableBeforeWriteError()
+          return false
         }
-        // Fall through to file storage when keychain writes fail.
-      }
+        try {
+          await keytar.setPassword(SERVICE, account, token)
+          return true
+        } catch (error) {
+          if (options.requireKeytar) {
+            throw new AggregateError([error], 'Failed to replace session token in Keytar')
+          }
+          // Fall through to file storage when keychain writes fail.
+          return false
+        }
+      })
+      if (savedInKeytar) return
+    } else if (options.requireKeytar) {
+      throw new SessionTokenStorageUnavailableBeforeWriteError()
     }
 
     if (app?.isReady() && safeStorage.isEncryptionAvailable()) {
@@ -660,8 +708,8 @@ export class TokenStore {
         )
       )
       for (const legacyEnvKey of legacyEnvKeys) assertEnvKey(legacyEnvKey)
-      const keytar = await loadKeytar()
-      if (!keytar) return { keytarAvailable: false, keytarDisabled: false }
+      const keytarPromise = loadKeytar()
+      let keytarAvailable = false
 
       const failedKeytarAccounts: string[] = []
       const errors: unknown[] = []
@@ -670,7 +718,12 @@ export class TokenStore {
         : [envKey, ...legacyEnvKeys]
       for (const account of [...scopedEnvKeys.map(accountFor), LEGACY_ACCOUNT]) {
         try {
-          await keytar.deletePassword(SERVICE, account)
+          await accessKeytarAccount(account, async () => {
+            const keytar = await keytarPromise
+            if (!keytar) return
+            keytarAvailable = true
+            await keytar.deletePassword(SERVICE, account)
+          })
         } catch (error) {
           failedKeytarAccounts.push(account)
           errors.push(error)
@@ -679,7 +732,7 @@ export class TokenStore {
       if (errors.length > 0) {
         throw new SessionTokenStorageClearError(errors, failedKeytarAccounts, 0)
       }
-      return { keytarAvailable: true, keytarDisabled: false }
+      return { keytarAvailable, keytarDisabled: false }
     })
   }
 
@@ -698,14 +751,20 @@ export class TokenStore {
     )
     for (const legacyEnvKey of legacyEnvKeys) assertEnvKey(legacyEnvKey)
     const scopedEnvKeys = [envKey, ...legacyEnvKeys]
-    const keytar = this.isolatedUserDataPath === undefined ? await loadKeytar() : null
+    const keytarPromise = this.isolatedUserDataPath === undefined ? loadKeytar() : null
+    let keytarAvailable = false
     const storageErrors: unknown[] = []
     const failedKeytarAccounts: string[] = []
     let failedFileCount = 0
-    if (keytar) {
+    if (keytarPromise) {
       const deleteKeychainPassword = async (account: string) => {
         try {
-          await keytar.deletePassword(SERVICE, account)
+          await accessKeytarAccount(account, async () => {
+            const keytar = await keytarPromise
+            if (!keytar) return
+            keytarAvailable = true
+            await keytar.deletePassword(SERVICE, account)
+          })
         } catch (error) {
           // Keychain cleanup is best-effort; continue through the scoped files.
           if (options.throwOnStorageError) {
@@ -748,7 +807,7 @@ export class TokenStore {
       throw new SessionTokenStorageClearError(storageErrors, failedKeytarAccounts, failedFileCount)
     }
     return {
-      keytarAvailable: keytar !== null,
+      keytarAvailable,
       keytarDisabled: this.isolatedUserDataPath !== undefined,
     }
   }
