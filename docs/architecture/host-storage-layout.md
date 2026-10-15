@@ -95,6 +95,37 @@ Two exceptions to F2/F3 cover the earlier init stopped half-way:
 inspect the PVC from a helper Pod, and rename or remove the conflicting entry.
 Keep every database file until the history is confirmed.
 
+### `CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE`
+
+HCC renders `workspace-layout-merge` only while this flag is enabled
+(`host-context-controller/src/config.ts`, `parseWorkspaceLayoutMerge`). On a
+stateful Host the PVC root is the agent workspace, so an agent can create a
+`state/state.db*` entry and trigger the merge; the merge is needed once per
+Host, and the flag closes that window once every Host is merged.
+
+- Unset or empty means `true`. Only the exact strings `true` and `false` are
+  accepted; any other value fails HCC config load with
+  `CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE must be 'true' or 'false', got '<value>'`.
+- The default is `true` because dev deploys automatically after a `dev` push
+  and prod promotes the dev image pins, so HCC can reach a cluster before any
+  overlay sets the flag. With the init missing, a split Host would start on an
+  empty database without an error.
+- Turn it off per cluster only when all four hold:
+  1. every Host Deployment renders `workspace-layout-merge`, with no `subPath`
+     and no `workspace-layout-init`;
+  2. every running Host Pod's `workspace-layout-merge` exited 0;
+  3. no Host is in `Init:Error` in `workspace-layout-merge`;
+  4. every Host that was suspended at deploy time has woken once with that
+     init exiting 0.
+- The turn-off is an overlay patch in `keyper-labs/evenfire-infra`
+  (`patches/hcc-workspace-layout-merge.yaml`, value `"false"`), never in
+  `dynamic-images.yaml`. Turning it off changes the pod template, so every
+  running Host restarts once.
+- Never turn it off in the deploy that first introduces this HCC.
+- Before any manual HCC undo to a revision older than #825's, set it back to
+  `true`. The older init re-splits stateless trees, and only a roll-forward
+  with the merge rendered brings them back to the root.
+
 ## Database failures in `mcp-host`
 
 - If the database worker exits, or an asynchronous write fails, the persist
