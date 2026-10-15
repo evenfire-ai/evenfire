@@ -71,6 +71,8 @@ interface ValueTable {
 interface Translated {
   chart: Omit<ClientChart, 'id'>
   warnings: string[]
+  /** What a composed chart draws, for the table shown in its place; others list their series. */
+  table?: ValueTable
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -286,7 +288,11 @@ function translate(
         borderColor: follow(first?.borderColor),
       }
       chart.datasets = [{ ...styled(stages, 0, 'bar'), label: '' }]
-      return { chart, warnings }
+      const table = {
+        labels: chart.labels,
+        series: [{ label: first?.label ?? '', values: stages.data.map(String) }],
+      }
+      return { chart, warnings, table }
     }
     case 'waterfall': {
       chart.type = 'bar'
@@ -303,6 +309,12 @@ function translate(
       floats.push([0, total])
       colors.push('$chart-0')
       chart.labels = [...labels, 'Total']
+      const table = {
+        labels: chart.labels,
+        series: [
+          { label: datasets[0]?.label ?? '', values: [...deltas.map(String), readout(total)] },
+        ],
+      }
       chart.datasets = [
         {
           label: datasets[0]?.label ?? '',
@@ -311,7 +323,7 @@ function translate(
           borderColor: colors,
         },
       ]
-      return { chart, warnings }
+      return { chart, warnings, table }
     }
     case 'gauge': {
       chart.type = 'doughnut'
@@ -348,7 +360,11 @@ function translate(
         },
       ]
       chart.gauge = { value: readout(raw), max: readout(max) }
-      return { chart, warnings }
+      const table = {
+        labels: [chart.labels[0], 'Max'],
+        series: [{ label: datasets[0]?.label ?? '', values: [chart.gauge.value, chart.gauge.max] }],
+      }
+      return { chart, warnings, table }
     }
     default:
       chart.datasets = datasets.map((ds, i) => styled(ds, i))
@@ -471,7 +487,7 @@ export function prepareDashboardChart(raw: unknown, where: string): PreparedChar
       caption:
         type === 'gauge' && Array.isArray(raw.labels) ? optionalText(raw.labels[0]) : undefined,
       chart: translated.chart,
-      table: valueTable(type, labels, datasets),
+      table: translated.table ?? valueTable(type, labels, datasets),
       warnings,
     }
   } catch (err) {
