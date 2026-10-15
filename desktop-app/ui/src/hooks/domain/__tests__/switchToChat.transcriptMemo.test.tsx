@@ -727,4 +727,58 @@ describe('switchToChat transcript memo (#1091 A9)', () => {
       expect(clerum.chat.loadMessages.mock.calls.length).toBe(readsBefore)
     }
   )
+
+  it.each(HOSTS)(
+    "m. %s: a superseded click's failed write leaves the newer click's transcript and memo entry",
+    async host => {
+      const disk = { 'chat-a': transcript('chat-a'), 'chat-b': transcript('chat-b') }
+      serveDisk(disk)
+      const controller = mount(host)
+      await settleMount()
+      await open(controller, host, 'chat-a')
+      await open(controller, host, 'chat-b')
+      const firstWrite = deferred<void>()
+      const secondWrite = deferred<void>()
+      clerum.chat.setLastActive
+        .mockImplementationOnce(() => firstWrite.promise)
+        .mockImplementationOnce(() => secondWrite.promise)
+      const reopenStart = frames.length
+      let firstClick!: Promise<void>
+      let secondClick!: Promise<void>
+      await act(async () => {
+        firstClick = controller.result.current.switchToChat(host, 'chat-a').catch(() => undefined)
+      })
+      await act(async () => {
+        secondClick = controller.result.current.switchToChat(host, 'chat-a')
+      })
+      // Liveness: both clicks issued their own last-active write.
+      expect(
+        clerum.chat.setLastActive.mock.calls.filter(call => call[1] === 'chat-a').length
+      ).toBeGreaterThanOrEqual(3)
+      await act(async () => {
+        firstWrite.reject(new Error('last-active write failed'))
+        await firstClick
+      })
+      // The newer click still owns the view: its transcript stays on screen.
+      expectOnlyTranscript(frames.slice(reopenStart), 'chat-a', disk['chat-a'])
+      await act(async () => {
+        secondWrite.resolve()
+        await secondClick
+      })
+      // The memo entry survived: a later return paints it before the write.
+      await open(controller, host, 'chat-b')
+      const persisted = deferred<void>()
+      clerum.chat.setLastActive.mockImplementationOnce(() => persisted.promise)
+      const returnStart = frames.length
+      let returning!: Promise<void>
+      await act(async () => {
+        returning = controller.result.current.switchToChat(host, 'chat-a')
+      })
+      expectOnlyTranscript(frames.slice(returnStart), 'chat-a', disk['chat-a'])
+      await act(async () => {
+        persisted.resolve()
+        await returning
+      })
+    }
+  )
 })

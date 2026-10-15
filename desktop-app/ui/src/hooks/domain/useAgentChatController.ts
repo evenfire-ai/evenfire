@@ -1122,11 +1122,18 @@ export function useAgentChatController({
       // when that write fails or the chat stops being viewable meanwhile.
       const remembered = canReuseActiveSwitch ? undefined : rememberedTranscript(agentRef, chatId)
       if (!canReuseActiveSwitch) presentSelectedTranscript(remembered)
-      // Clears the remembered transcript while this chat is still the visible
-      // one; the loading state stays with whichever selection intent owns it.
+      // Clears the remembered transcript while this selection intent still owns
+      // the visible chat; a newer click on the same row owns it from then on.
       const withdrawRemembered = () => {
         const view = activeChatVisibilityRef.current
-        if (!remembered || view.selectedAgent !== agentRef || view.activeChatId !== chatId) return
+        if (
+          !remembered ||
+          selectionIntentRevisionRef.current !== selectionIntentRevision ||
+          view.selectedAgent !== agentRef ||
+          view.activeChatId !== chatId
+        ) {
+          return
+        }
         cancelOlderMessagesLoad()
         chatMessagesRef.current = []
         setChatMessages([])
