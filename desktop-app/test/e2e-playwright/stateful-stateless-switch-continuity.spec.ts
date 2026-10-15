@@ -24,14 +24,7 @@
  *
  * Run: `make test-e2e-825-desktop-continuity`.
  */
-import {
-  type APIRequestContext,
-  type ElectronApplication,
-  type Page,
-  expect,
-  request,
-  test,
-} from '@playwright/test'
+import { type ElectronApplication, type Page, expect, test } from '@playwright/test'
 import { execFile } from 'node:child_process'
 import { realpathSync } from 'node:fs'
 import nodePath from 'node:path'
@@ -118,15 +111,19 @@ function requiredEnv(label: string, candidates: Array<string | undefined>): stri
   return value
 }
 
-/** Control API admin session. The cookie is issued Secure, so it is sent as an explicit header. */
+/**
+ * Control API admin session. It uses Node's fetch, never a Playwright request
+ * context, so the password and the session cookie stay out of the failure
+ * trace. The cookie is issued Secure, so it is sent as an explicit header.
+ */
 class AdminApi {
   private constructor(
-    private readonly api: APIRequestContext,
+    private readonly origin: string,
     private readonly cookie: string
   ) {}
 
   static async login(baseUrl: string): Promise<AdminApi> {
-    const api = await request.newContext({ baseURL: new URL(baseUrl).origin })
+    const origin = new URL(baseUrl).origin
     const username = process.env.TEST_ADMIN_USERNAME?.trim() || 'admin'
     const password = requiredEnv('The admin password', [
       process.env.E2E_ADMIN_PASSWORD,
@@ -134,19 +131,22 @@ class AdminApi {
       process.env.ADMIN_PASS,
       process.env.TEST_ADMIN_PASSWORD,
     ])
-    const response = await api.post('/api/v1/admin/auth/login', { data: { username, password } })
-    if (!response.ok()) {
-      throw new Error(`admin login returned HTTP ${response.status()}: ${await response.text()}`)
+    const response = await fetch(`${origin}/api/v1/admin/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    })
+    if (!response.ok) {
+      throw new Error(`admin login returned HTTP ${response.status}: ${await response.text()}`)
     }
-    const pair = response
-      .headersArray()
-      .filter(h => h.name.toLowerCase() === 'set-cookie')
-      .map(h => h.value.split(';')[0].trim())
+    const pair = response.headers
+      .getSetCookie()
+      .map(value => value.split(';')[0].trim())
       .find(p => p.startsWith(`${ADMIN_SESSION_COOKIE}=`))
     if (!pair || pair === `${ADMIN_SESSION_COOKIE}=`) {
       throw new Error(`admin login did not set ${ADMIN_SESSION_COOKIE}`)
     }
-    return new AdminApi(api, pair)
+    return new AdminApi(origin, pair)
   }
 
   private async call(
@@ -154,10 +154,13 @@ class AdminApi {
     path: string,
     data?: unknown
   ): Promise<{ status: number; body: any }> {
-    const response = await this.api.fetch(`/api/v1${path}`, {
+    const response = await fetch(`${this.origin}/api/v1${path}`, {
       method,
-      headers: { cookie: this.cookie },
-      ...(data === undefined ? {} : { data }),
+      headers: {
+        cookie: this.cookie,
+        ...(data === undefined ? {} : { 'content-type': 'application/json' }),
+      },
+      ...(data === undefined ? {} : { body: JSON.stringify(data) }),
     })
     const text = await response.text()
     let body: any = text
@@ -166,7 +169,7 @@ class AdminApi {
     } catch {
       // Non-JSON bodies are kept as text and reported in the failure message.
     }
-    return { status: response.status(), body }
+    return { status: response.status, body }
   }
 
   private async expectStatus(
@@ -246,10 +249,6 @@ class AdminApi {
       await new Promise(resolve => setTimeout(resolve, 3_000))
     }
     throw new Error(`${op} grant '${name}' on ${path} did not converge: ${last}`)
-  }
-
-  async dispose(): Promise<void> {
-    await this.api.dispose()
   }
 }
 
@@ -646,7 +645,6 @@ test('#825 — a conversation survives stateful -> stateless -> stateful switche
         }
       }
     }
-    await admin.dispose()
     // Cleanup failures leave cluster state behind. They fail the test; when the
     // journey already failed they are printed so its own error stays the cause.
     if (cleanupErrors.length > 0) {
