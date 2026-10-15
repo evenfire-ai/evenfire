@@ -4,10 +4,11 @@
  * Chart.js draws.
  */
 import type { ChartType } from 'chart.js'
+import { colorWarnings, withoutInvalidColors } from './chartColors'
 import type { NormalizedPoint } from './chartData'
 import { sliceColors } from './chartPlugins'
 import type { ChartTheme } from './chartThemes'
-import { datasetKind, seriesDefaults } from './seriesPaint'
+import { datasetKind, filled, seriesDefaults } from './seriesPaint'
 
 export interface ChartDataset {
   label?: string
@@ -107,15 +108,9 @@ function applyThemePalette(
         color,
         tint: `${color}33`,
       })
-      if (!out.borderColor) out.borderColor = paint.borderColor
-      if (!out.backgroundColor) out.backgroundColor = paint.backgroundColor
       // A value with no color of its own in a list takes the series default.
-      if (Array.isArray(out.borderColor)) {
-        out.borderColor = out.borderColor.map(c => c ?? paint.borderColor)
-      }
-      if (Array.isArray(out.backgroundColor)) {
-        out.backgroundColor = out.backgroundColor.map(c => c ?? paint.backgroundColor)
-      }
+      out.borderColor = filled(out.borderColor, paint.borderColor, color)
+      out.backgroundColor = filled(out.backgroundColor, paint.backgroundColor, color)
       if (chartType === 'area' && out.fill === undefined) {
         out.fill = true
       }
@@ -345,6 +340,11 @@ export function paintedDatasets(
   args: Record<string, unknown>,
   warnings: string[]
 ): { datasets: ChartDataset[]; resolved: ResolvedChartType } {
-  const themed = applyThemePalette(datasets, theme, chartTypeRaw, warnings)
+  // A color that is not a CSS color is left out for the palette's, as the
+  // dashboard leaves it, instead of drawn black.
+  const bad: Array<{ at: string; value: unknown }> = []
+  const checked = datasets.map((ds, i) => withoutInvalidColors(ds, i, 'data', bad))
+  warnings.push(...colorWarnings(bad, 'data'))
+  const themed = applyThemePalette(checked, theme, chartTypeRaw, warnings)
   return { datasets: themed, resolved: resolveChartType(chartTypeRaw, themed, labels, theme, args) }
 }

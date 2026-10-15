@@ -4,11 +4,12 @@
  * written, so an unusable chart becomes a note in its own card and a warning
  * for the agent instead of an error that stops the page script.
  */
+import { colorWarnings, withoutInvalidColors } from './chartColors'
 import { ChartDataError, coerceNumber, normalizeChartData } from './chartData'
 import type { NormalizedDataset, NormalizedPoint } from './chartData'
 import { escapeHtml } from './dashboardHtml'
 import { DASHBOARD_CHART_TYPES } from './dashboardVocabulary'
-import { TINT_ALPHA, seriesDefaults } from './seriesPaint'
+import { TINT_ALPHA, filled, seriesDefaults } from './seriesPaint'
 
 export { DASHBOARD_CHART_TYPES } from './dashboardVocabulary'
 
@@ -96,62 +97,17 @@ function seriesColors(ds: NormalizedDataset, index: number, type: string): Recor
   // Shared with the PNG renderer (seriesPaint.ts).
   const paint = seriesDefaults(type, ds, { color, tint: paletteColor(index, TINT_ALPHA).color })
   const dashed = dash && ds.borderColor === undefined ? { borderDash: dash } : {}
-  // A value with no color of its own in a list takes the series default.
-  const filled = (value: NormalizedDataset['borderColor'], fallback: string) =>
-    Array.isArray(value) ? value.map(c => c ?? fallback) : (value ?? fallback)
   return {
-    borderColor: filled(ds.borderColor, paint.borderColor),
-    backgroundColor: filled(ds.backgroundColor, paint.backgroundColor),
+    borderColor: filled(ds.borderColor, paint.borderColor, color),
+    backgroundColor: filled(ds.backgroundColor, paint.backgroundColor, color),
     ...(paint.pointBackgroundColor ? { pointBackgroundColor: paint.pointBackgroundColor } : {}),
     ...dashed,
   }
 }
 
-/** CSS color keywords, which canvas and Chart.js both read. */
-const NAMED_COLORS = new Set(
-  (
-    'aliceblue antiquewhite aqua aquamarine azure beige bisque black blanchedalmond blue ' +
-    'blueviolet brown burlywood cadetblue chartreuse chocolate coral cornflowerblue cornsilk ' +
-    'crimson cyan darkblue darkcyan darkgoldenrod darkgray darkgreen darkgrey darkkhaki ' +
-    'darkmagenta darkolivegreen darkorange darkorchid darkred darksalmon darkseagreen ' +
-    'darkslateblue darkslategray darkslategrey darkturquoise darkviolet deeppink deepskyblue ' +
-    'dimgray dimgrey dodgerblue firebrick floralwhite forestgreen fuchsia gainsboro ghostwhite ' +
-    'gold goldenrod gray green greenyellow grey honeydew hotpink indianred indigo ivory khaki ' +
-    'lavender lavenderblush lawngreen lemonchiffon lightblue lightcoral lightcyan ' +
-    'lightgoldenrodyellow lightgray lightgreen lightgrey lightpink lightsalmon lightseagreen ' +
-    'lightskyblue lightslategray lightslategrey lightsteelblue lightyellow lime limegreen linen ' +
-    'magenta maroon mediumaquamarine mediumblue mediumorchid mediumpurple mediumseagreen ' +
-    'mediumslateblue mediumspringgreen mediumturquoise mediumvioletred midnightblue mintcream ' +
-    'mistyrose moccasin navajowhite navy oldlace olive olivedrab orange orangered orchid ' +
-    'palegoldenrod palegreen paleturquoise palevioletred papayawhip peachpuff peru pink plum ' +
-    'powderblue purple rebeccapurple red rosybrown royalblue saddlebrown salmon sandybrown ' +
-    'seagreen seashell sienna silver skyblue slateblue slategray slategrey snow springgreen ' +
-    'steelblue tan teal thistle tomato turquoise violet wheat white whitesmoke yellow ' +
-    'yellowgreen transparent'
-  ).split(' ')
-)
-
-/** Longer than any CSS color a chart needs, e.g. "hsl(210deg 50% 40% / 0.8)". */
-const MAX_COLOR_LENGTH = 64
-
-function isCssColor(value: unknown): boolean {
-  if (typeof value !== 'string' || value.length > MAX_COLOR_LENGTH) return false
-  const v = value.trim().toLowerCase()
-  return (
-    /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/.test(v) ||
-    /^(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch)\((?:[\d\s.,%/+-]|deg|g?rad|turn|none)*\)$/.test(v) ||
-    NAMED_COLORS.has(v)
-  )
-}
-
-/** Color warnings written out per chart; the rest are counted in one line. */
-const COLOR_WARNINGS_SHOWN = 3
-
 /**
- * `ds` without the colors that are not CSS colors, which canvas would paint
- * black: a single color is dropped for the palette's, a per-point one gets the
- * palette color of its point (slices) or of its series. Each rejected value's
- * path and text go to `bad`.
+ * `ds` without the colors that are not CSS colors (chartColors.ts); a slice
+ * with no usable color, or none of its own, takes its palette color.
  */
 function checkColors(
   ds: NormalizedDataset,
@@ -160,44 +116,13 @@ function checkColors(
   where: string,
   bad: Array<{ at: string; value: unknown }>
 ): NormalizedDataset {
-  const out = { ...ds }
+  const out = withoutInvalidColors(ds, index, where, bad)
+  if (!SLICE_TYPES.has(type)) return out
   for (const key of ['backgroundColor', 'borderColor'] as const) {
-    const value = ds[key]
-    if (value === undefined) continue
-    const at = `${where}.datasets[${index}].${key}`
-    if (!Array.isArray(value)) {
-      if (!isCssColor(value)) {
-        bad.push({ at, value })
-        delete out[key]
-      }
-      continue
-    }
-    out[key] = value.map((v, j) => {
-      if (isCssColor(v)) return v
-      if (v !== undefined) bad.push({ at: `${at}[${j}]`, value: v })
-      // A slice with no usable color takes its palette color; a value of a
-      // series takes the series default (seriesColors).
-      return SLICE_TYPES.has(type) ? paletteColor(j).color : undefined
-    })
+    const value = out[key]
+    if (Array.isArray(value)) out[key] = value.map((v, j) => v ?? paletteColor(j).color)
   }
   return out
-}
-
-function colorWarnings(bad: Array<{ at: string; value: unknown }>, where: string): string[] {
-  const shown = bad.slice(0, COLOR_WARNINGS_SHOWN).map(({ at, value }) => {
-    const text = JSON.stringify(
-      typeof value === 'string' && value.length > 40 ? `${value.slice(0, 40)}…` : value
-    )
-    return (
-      `${at} ${text} is not a CSS color, so the palette color was used. ` +
-      'Pass hex such as "#2563eb", rgb(), hsl() or a color name.'
-    )
-  })
-  const more = bad.length - shown.length
-  if (more > 0) {
-    shown.push(`${where}: ${more} more colors are not CSS colors and were replaced the same way.`)
-  }
-  return shown
 }
 
 function readout(n: number): string {
