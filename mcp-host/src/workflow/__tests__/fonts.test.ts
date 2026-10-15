@@ -75,23 +75,47 @@ describe('font provisioning', () => {
 
 describe('missingScripts', () => {
   const ALL = (_prefix: string) => true
+  const NONE = (_cp: number) => false
 
   it('reports no script whose preferred face alone is missing', () => {
     // Debian ships Noto Sans Arabic but not its UI build.
-    expect(missingScripts(prefix => prefix !== 'NotoSansArabicUI', true)).toEqual([])
-    expect(missingScripts(ALL, true)).toEqual([])
+    expect(missingScripts(prefix => prefix !== 'NotoSansArabicUI', true, NONE)).toEqual([])
+    expect(missingScripts(ALL, true, NONE)).toEqual([])
   })
 
   it('reports a script none of whose faces is installed', () => {
-    expect(missingScripts(prefix => !prefix.includes('Arabic'), true)).toEqual(['Arabic'])
-    expect(missingScripts(ALL, false)).toEqual(['CJK'])
+    expect(missingScripts(prefix => !prefix.includes('Arabic'), true, NONE)).toEqual(['Arabic'])
+    expect(missingScripts(ALL, false, NONE)).toEqual(['CJK'])
   })
 
   it('reports the sixteen further scripts on an image with only the Arabic and Hebrew faces', () => {
-    const alpine = (prefix: string) => /Arabic|Hebrew/.test(prefix)
-    const missing = missingScripts(alpine, true)
+    const arabicAndHebrew = (prefix: string) => /Arabic|Hebrew/.test(prefix)
+    const missing = missingScripts(arabicAndHebrew, true, NONE)
     expect(missing).toHaveLength(16)
     expect(missing).toEqual(expect.arrayContaining(['Devanagari', 'Thai', 'Ethiopic']))
+  })
+
+  it('does not report a script another installed face draws', () => {
+    // DejaVu Sans draws Armenian and Georgian.
+    const dejaVu = (cp: number) => cp === 0x0531 || cp === 0x10d0
+    const missing = missingScripts(prefix => /Arabic|Hebrew/.test(prefix), true, dejaVu)
+    expect(missing).toHaveLength(14)
+    expect(missing).not.toContain('Armenian')
+    expect(missing).not.toContain('Georgian')
+    expect(missingScripts(ALL, false, cp => cp === 0x4e2d)).toEqual([])
+  })
+
+  it('asks which letters are drawn only for scripts with no face of their own', () => {
+    const asked: number[] = []
+    missingScripts(
+      prefix => prefix !== 'NotoSansThai',
+      true,
+      cp => {
+        asked.push(cp)
+        return true
+      }
+    )
+    expect(asked).toEqual([0x0e01])
   })
 })
 

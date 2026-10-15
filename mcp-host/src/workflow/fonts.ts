@@ -116,7 +116,7 @@ function registerSystemFonts(): void {
     }
     for (const file of files) {
       try {
-        GlobalFonts.registerFromPath(file)
+        if (!GlobalFonts.registerFromPath(file)) throw new Error('the renderer refused the face')
       } catch (err) {
         // A face the renderer cannot parse is not available; the image's package may be damaged.
         logger.warn({ file, err: errorText(err) }, 'Font face could not be registered')
@@ -135,11 +135,12 @@ export function ensureFontsReady(): void {
   try {
     const f = loadRobotoFaces()
     // register answers null, without throwing, for a face it cannot use.
-    if (!GlobalFonts.register(f.normal, CHART_FONT_FAMILY)) {
-      throw new Error('the renderer refused the regular face')
-    }
-    if (!GlobalFonts.register(f.bold, `${CHART_FONT_FAMILY} Bold`)) {
-      throw new Error('the renderer refused the bold face')
+    const refused = [
+      GlobalFonts.register(f.normal, CHART_FONT_FAMILY) ? undefined : 'regular',
+      GlobalFonts.register(f.bold, `${CHART_FONT_FAMILY} Bold`) ? undefined : 'bold',
+    ].filter(Boolean)
+    if (refused.length > 0) {
+      throw new Error(`the renderer refused the ${refused.join(' and ')} face`)
     }
   } catch (err) {
     // The system faces still register, so charts draw in them rather than in nothing.
@@ -284,7 +285,8 @@ const LATIN_PROBES = ['A', 'g', '0']
 function coverageScore(file: string): number {
   const alias = '__ClerumProbeFace'
   try {
-    GlobalFonts.registerFromPath(file, alias)
+    // A refused face would leave the alias on the face probed before it.
+    if (!GlobalFonts.registerFromPath(file, alias)) return -1
   } catch {
     return -1
   }
@@ -425,11 +427,13 @@ function resolvePdfFaces(): PdfFaces {
     // in the face the PDF will embed.
     const file = Array.isArray(chosen.normal) ? chosen.normal[0] : chosen.normal
     try {
-      if (typeof file === 'string') GlobalFonts.registerFromPath(file, PDF_FONT_FAMILY)
+      if (typeof file === 'string' && !GlobalFonts.registerFromPath(file, PDF_FONT_FAMILY)) {
+        throw new Error('the renderer refused the face')
+      }
       pdfFaces = chosen
       return pdfFaces
     } catch (err) {
-      // Unparseable face: fall through to the bundled one, which covers less.
+      // Unparseable or refused face: fall through to the bundled one, which covers less.
       logger.warn(
         { file, err: errorText(err) },
         'PDF body face could not be registered; the bundled Roboto face is used'
@@ -530,43 +534,55 @@ const FALLBACK_PREFIXES = [
  * are listed; fontkit loops forever on some Meetei Mayek, Kaithi and Nastaliq
  * sequences, so no installed face is used unlisted.
  */
-const MORE_SCRIPT_PREFIXES = [
-  'NotoSansDevanagari',
-  'NotoSansBengali',
-  'NotoSansGurmukhi',
-  'NotoSansGujarati',
-  'NotoSansOriya',
-  'NotoSansTamil',
-  'NotoSansTelugu',
-  'NotoSansKannada',
-  'NotoSansMalayalam',
-  'NotoSansThai',
-  'NotoSansLao',
-  'NotoSansKhmer',
-  'NotoSansMyanmar',
-  'NotoSansArmenian',
-  'NotoSansGeorgian',
-  'NotoSansEthiopic',
+const MORE_SCRIPTS: ReadonlyArray<readonly [prefix: string, letter: number]> = [
+  ['NotoSansDevanagari', 0x0915],
+  ['NotoSansBengali', 0x0995],
+  ['NotoSansGurmukhi', 0x0a15],
+  ['NotoSansGujarati', 0x0a95],
+  ['NotoSansOriya', 0x0b15],
+  ['NotoSansTamil', 0x0b95],
+  ['NotoSansTelugu', 0x0c15],
+  ['NotoSansKannada', 0x0c95],
+  ['NotoSansMalayalam', 0x0d15],
+  ['NotoSansThai', 0x0e01],
+  ['NotoSansLao', 0x0e81],
+  ['NotoSansKhmer', 0x1780],
+  ['NotoSansMyanmar', 0x1000],
+  ['NotoSansArmenian', 0x0531],
+  ['NotoSansGeorgian', 0x10d0],
+  ['NotoSansEthiopic', 0x1200],
+]
+const MORE_SCRIPT_PREFIXES = MORE_SCRIPTS.map(([prefix]) => prefix)
+
+/** The scripts the fallback faces are there for: a letter of each, and the faces named for it. */
+const SCRIPT_FACES: ReadonlyArray<
+  readonly [script: string, letter: number, prefixes: readonly string[]]
+> = [
+  ['Arabic', 0x0627, SCRIPT_FALLBACK_PREFIXES.filter(prefix => prefix.includes('Arabic'))],
+  ['Hebrew', 0x05d0, SCRIPT_FALLBACK_PREFIXES.filter(prefix => prefix.includes('Hebrew'))],
+  ...MORE_SCRIPTS.map(
+    ([prefix, letter]) => [prefix.slice('NotoSans'.length), letter, [prefix]] as const
+  ),
 ]
 
-/** The scripts the fallback faces are there for, each with the faces that draw it. */
-const SCRIPT_FACES: ReadonlyArray<readonly [script: string, prefixes: readonly string[]]> = [
-  ['Arabic', SCRIPT_FALLBACK_PREFIXES.filter(prefix => prefix.includes('Arabic'))],
-  ['Hebrew', SCRIPT_FALLBACK_PREFIXES.filter(prefix => prefix.includes('Hebrew'))],
-  ...MORE_SCRIPT_PREFIXES.map(prefix => [prefix.slice('NotoSans'.length), [prefix]] as const),
-]
+/** A Han character, drawn by the CJK collections. */
+const CJK_LETTER = 0x4e2d
 
 /**
- * The scripts no installed face draws, given which face prefixes resolve and
- * whether a CJK collection is installed. A script with any face of its own is
- * not missing, so an image without only the preferred one (Debian has no Noto
- * Sans Arabic UI) is not reported.
+ * The scripts no installed face draws. A script with a face named for it is
+ * not missing, even without the preferred one (Debian has no Noto Sans Arabic
+ * UI); one without is missing only when no other face draws its letter
+ * (DejaVu Sans draws Armenian and Georgian). `draws` is asked only for those.
  */
-export function missingScripts(hasFace: (prefix: string) => boolean, hasCjk: boolean): string[] {
-  const missing = SCRIPT_FACES.filter(([, prefixes]) => !prefixes.some(hasFace)).map(
-    ([script]) => script
-  )
-  return hasCjk ? missing : ['CJK', ...missing]
+export function missingScripts(
+  hasFace: (prefix: string) => boolean,
+  hasCjk: boolean,
+  draws: (cp: number) => boolean
+): string[] {
+  const missing = SCRIPT_FACES.filter(
+    ([, letter, prefixes]) => !prefixes.some(hasFace) && !draws(letter)
+  ).map(([script]) => script)
+  return hasCjk || draws(CJK_LETTER) ? missing : ['CJK', ...missing]
 }
 
 interface FallbackFamily {
@@ -623,6 +639,8 @@ function embeds(faces: PdfFaces, texts: string | string[]): boolean {
   }
 }
 
+const CJK_FALLBACK = 'Fallback-CJK'
+
 function discoverFallbacks(exclude: Set<string>): FallbackFamily[] {
   const out: FallbackFamily[] = []
   const seen = new Set<string>()
@@ -638,18 +656,10 @@ function discoverFallbacks(exclude: Set<string>): FallbackFamily[] {
   const cjkFile = cjk && faceFile(cjk.normal)
   if (cjk && cjkFile && !exclude.has(cjkFile)) {
     seen.add(cjkFile)
-    out.push({ family: 'Fallback-CJK', faces: cjk })
+    out.push({ family: CJK_FALLBACK, faces: cjk })
   }
   FALLBACK_PREFIXES.forEach(add)
   MORE_SCRIPT_PREFIXES.forEach(add)
-  const missing = missingScripts(prefix => facesForPrefix(prefix) !== undefined, cjk !== undefined)
-  if (missing.length > 0) {
-    // Once per process: the faces are looked up once (glyphSource).
-    logger.warn(
-      { component: 'fonts', scripts: missing },
-      'No installed face draws these scripts, so PDFs leave their characters out'
-    )
-  }
   return out
 }
 
@@ -686,8 +696,24 @@ class GlyphSource implements PdfGlyphSource {
         if (file) exclude.add(file)
       }
       this.fallbacks = discoverFallbacks(exclude)
+      this.reportMissingScripts(this.fallbacks)
     }
     return this.fallbacks
+  }
+
+  /** Logged once per process, since the faces are looked up once (glyphSource). */
+  private reportMissingScripts(fallbacks: FallbackFamily[]): void {
+    const missing = missingScripts(
+      prefix => facesForPrefix(prefix) !== undefined,
+      fallbacks.some(f => f.family === CJK_FALLBACK),
+      cp => this.familyFor(cp, PDF_FONT_FAMILY) !== undefined
+    )
+    if (missing.length > 0) {
+      logger.warn(
+        { component: 'fonts', scripts: missing },
+        'No installed face draws these scripts, so PDFs leave their characters out'
+      )
+    }
   }
 
   private infoOf(family: string): FaceInfo | undefined {
@@ -765,8 +791,10 @@ class GlyphSource implements PdfGlyphSource {
       this.registered.add(alias)
       ensureFontsReady()
       try {
-        if (Buffer.isBuffer(face)) GlobalFonts.register(face, alias)
-        else GlobalFonts.registerFromPath(faceFile(face)!, alias)
+        const key = Buffer.isBuffer(face)
+          ? GlobalFonts.register(face, alias)
+          : GlobalFonts.registerFromPath(faceFile(face)!, alias)
+        if (!key) throw new Error('the renderer refused the face')
       } catch (err) {
         // Measured with the canvas default instead; only line breaking is approximate.
         logger.warn(
