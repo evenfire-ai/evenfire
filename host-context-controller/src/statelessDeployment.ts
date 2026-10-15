@@ -8,9 +8,10 @@ import { config } from './config'
 import { HostCondition } from './types'
 
 /**
- * Condition surfacing a refused CONTEXT_MAPPER_STATELESS_IMAGE_PULL_POLICY
- * (Stage 6, W5). Mirrors the StatelessEnableRejected pattern: durable,
- * operator-visible, True only while the misconfiguration persists.
+ * Advisory condition for CONTEXT_MAPPER_STATELESS_IMAGE_PULL_POLICY (Stage 6,
+ * W5): True while IfNotPresent is applied to a mutable image reference. The
+ * policy is not overridden. Durable and operator-visible like
+ * StatelessEnableRejected, True only while the configuration persists.
  */
 export const STATELESS_PULL_POLICY_REJECTED_CONDITION_TYPE = 'StatelessPullPolicyRejected'
 /** Immutable CI image tag shape (sha-<gitsha>), as pushed by deploy-dev. */
@@ -247,8 +248,8 @@ export function resolveStatelessImagePullPolicy(image: string): StatelessPullPol
 }
 
 /**
- * Durable condition for the stateless pull-policy guard (Stage 6, W5): True
- * (MutableImageReference) while IfNotPresent is refused for a mutable image,
+ * Durable advisory condition for the stateless pull policy (Stage 6, W5): True
+ * (MutableImageReference) while IfNotPresent is applied to a mutable image,
  * False (StatelessPullPolicyAccepted) otherwise. The message states the
  * enforced outcome so the operator sees what the pod actually runs with.
  */

@@ -3571,8 +3571,8 @@ export class HostReconciler {
     const isStateless = effectiveLifecycle.stateless
     const image = isDesktop ? config.desktopImage : config.hostImage
     const resources = isDesktop ? config.desktopResources : config.hostResources
-    // Stage 6 (W5): stateless pods may override the pull policy (guarded —
-    // see resolveStatelessImagePullPolicy). Non-stateless pods keep the
+    // Stage 6 (W5): stateless pods may override the pull policy (a mutable
+    // image is reported, not refused — see resolveStatelessImagePullPolicy). Non-stateless pods keep the
     // global policy so their manifest stays byte-identical.
     const imagePullPolicy = isStateless
       ? this.statelessImagePullPolicyForHost(host, image)
