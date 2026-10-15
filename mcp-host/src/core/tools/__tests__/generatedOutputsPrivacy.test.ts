@@ -225,6 +225,24 @@ describe('generated documents are private to their caller', () => {
     }
   })
 
+  it.skipIf(process.getuid?.() === 0)(
+    'names no path when the folder cannot be written',
+    async () => {
+      const a = rootOf('user-a')
+      await markdown(a, 'first.md', '# first\n')
+      fs.chmodSync(outputsOf(a), 0o500)
+      try {
+        const result = await markdown(a, 'report.md', '# blocked\n')
+        expect(result.is_error).toBe(true)
+        expect(result.content).toContain('Could not save report.md (EACCES)')
+        expect(result.content).not.toContain(hostBase)
+        expect(result.content).not.toContain(path.basename(a))
+      } finally {
+        fs.chmodSync(outputsOf(a), 0o700)
+      }
+    }
+  )
+
   it('keeps the free space of the Host volume, and removes nothing to make room', async () => {
     const a = rootOf('user-a')
     await markdown(a, 'kept.md', '# kept\n')

@@ -12,6 +12,16 @@ import type { ArtifactMetadata, InternalToolResult } from './types'
 const MAX_STEM_LENGTH = 120
 
 /**
+ * A filesystem error as `what` and its code, without the path Node puts in
+ * the message: the error reaches the model, and in chat the path is the
+ * Host's layout and the caller's key. Other errors pass through.
+ */
+function storageError(err: unknown, what: string): unknown {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code
+  return err instanceof Error && typeof code === 'string' ? new Error(`${what} (${code}).`) : err
+}
+
+/**
  * Extensions a requested name may already carry. Anything else after a dot is
  * part of the name, so "report.v2" keeps its "v2".
  */
@@ -82,7 +92,13 @@ export function claimOutputFile(outputDir: string, filename: string): OutputTarg
   const entry = lstat(filePath)
   // A write follows a symbolic link, so a link in the name's place is removed
   // and a regular file is written there instead of wherever it points.
-  if (entry?.isSymbolicLink()) fs.unlinkSync(filePath)
+  if (entry?.isSymbolicLink()) {
+    try {
+      fs.unlinkSync(filePath)
+    } catch (err) {
+      throw storageError(err, `Could not replace ${filename}`)
+    }
+  }
   return { filename, filePath, replacesExisting: !!entry && !entry.isSymbolicLink() }
 }
 
@@ -145,6 +161,14 @@ function removeAbandonedPartials(dir: string): void {
  * no partial one.
  */
 export function writeArtifact(target: OutputTarget, data: string | Uint8Array): void {
+  try {
+    publish(target, data)
+  } catch (err) {
+    throw storageError(err, `Could not save ${target.filename}`)
+  }
+}
+
+function publish(target: OutputTarget, data: string | Uint8Array): void {
   const dir = path.dirname(target.filePath)
   removeAbandonedPartials(dir)
   const partial = path.join(dir, `${PARTIAL_PREFIX}${randomUUID()}`)
@@ -229,7 +253,12 @@ export function artifactResult(
   format: ArtifactMetadata['format'],
   opts: { summary?: string; warnings?: string[] } = {}
 ): InternalToolResult {
-  const stats = fs.statSync(target.filePath)
+  let stats: fs.Stats
+  try {
+    stats = fs.statSync(target.filePath)
+  } catch (err) {
+    throw storageError(err, `Could not read ${target.filename} back`)
+  }
   const parts = [opts.summary ?? `File generated: ${target.filename} (${format}).`]
   const warnings = capNotes(opts.warnings ?? [])
   if (warnings.length > 0) parts.push(`Notes: ${warnings.join(' ')}`)
@@ -248,7 +277,11 @@ export function artifactResult(
 }
 
 export function ensureDir(dir: string): void {
-  fs.mkdirSync(dir, { recursive: true })
+  try {
+    fs.mkdirSync(dir, { recursive: true })
+  } catch (err) {
+    throw storageError(err, 'Could not open the output folder')
+  }
 }
 
 // A dashboard with charts inlines the Chart.js UMD bundle (~210 KB) so the
@@ -323,15 +356,21 @@ export function enforceQuota(outputDir: string, incomingBytes: number, replacing
   const quotaMB = outputQuotaMB(process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB)
   const quotaBytes = quotaMB * 1024 * 1024
 
-  const current = getDirectorySize(outputDir) - replacingBytes
+  let size: number
+  try {
+    size = getDirectorySize(outputDir)
+  } catch (err) {
+    throw storageError(err, 'Could not measure the output folder')
+  }
+  const current = size - replacingBytes
   const projected = current + incomingBytes
   if (projected > quotaBytes) {
     const mb = (bytes: number) => (bytes / (1024 * 1024)).toFixed(1)
     throw new Error(
       `Output quota exceeded: the output folder holds ${mb(current)} MB and this file needs ` +
-        `${mb(incomingBytes)} MB, over the ${quotaMB} MB limit. Make the file smaller, or ask ` +
-        'the user to remove earlier generated files or an operator to raise ' +
-        'CLERUM_WORKFLOW_OUTPUT_QUOTA_MB.'
+        `${mb(incomingBytes)} MB, over the ${quotaMB} MB limit. Make the file smaller, give ` +
+        'it the name of an earlier generated file to replace that one, or ask an operator to ' +
+        'raise CLERUM_WORKFLOW_OUTPUT_QUOTA_MB.'
     )
   }
   if (path.basename(outputDir) === CALLER_OUTPUTS_DIR)
@@ -369,8 +408,8 @@ function enforceFreeSpaceFloor(outputDir: string, incomingBytes: number): void {
     const mb = (bytes: bigint) => (Number(bytes) / (1024 * 1024)).toFixed(1)
     throw new Error(
       `Not enough free space: the Host keeps ${mb(floor)} MB free and this file needs ` +
-        `${mb(BigInt(incomingBytes))} MB. Make the file smaller, or ask the user to remove ` +
-        'earlier generated files or an operator to free space on the Host.'
+        `${mb(BigInt(incomingBytes))} MB. Make the file smaller, or ask an operator to free ` +
+        'space on the Host.'
     )
   }
 }
