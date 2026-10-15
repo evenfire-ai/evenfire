@@ -730,6 +730,26 @@ describe('generated internal artifact attachments', () => {
       }
     )
 
+    it.each([
+      ['an anchor link', 'probe-[redaction](#notes)-value'],
+      ['a relative link', 'probe-[redaction](notes.md)-value'],
+      ['an angle-bracket destination', 'probe-[redaction](<notes page.md>)-value'],
+      ['a reference link', 'probe-[redaction][r]-value\n\n[r]: https://a.example'],
+      ['a bidi control', 'probe-red\u202aaction-value'],
+    ])(
+      'does not attach markdown that splits a protected value with %s',
+      async (_label, content) => {
+        const result = await toolWith('clerum__generate_markdown', [
+          'probe-redaction-value',
+        ]).execute({
+          filename: 'split.md',
+          content,
+        })
+        expect(result.is_error).toBe(false)
+        expect(result.attachments ?? []).toHaveLength(0)
+      }
+    )
+
     it('attaches a chart whose decimal label only runs the digits of a protected number together', async () => {
       const result = await toolWith('clerum__generate_chart', ['5432']).execute({
         filename: 'pct.png',

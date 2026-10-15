@@ -65,8 +65,16 @@ export function cleanToolArgs<T>(value: T, depth = 0): T {
   return out as T
 }
 
-/** Characters the document renderers draw as nothing. */
-const INVISIBLE = /[­​-‏⁠-⁤﻿]/g
+/** Characters the document renderers draw as nothing, bidi controls among them. */
+const INVISIBLE = /[\u00AD\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g
+
+/**
+ * Markdown link syntax a viewer does not print: a destination of any kind
+ * ("](#notes)", "](notes.md)", "](<a b.md> \"title\")"), a reference ("][r]"),
+ * a reference definition line and the brackets around a label.
+ */
+const LINK_SYNTAX =
+  /\]\((?:<[^>\n]*>|[^\s()]*(?:\([^\s()]*\))*)(?:\s+"[^"\n]*")?\)|\]\[[^\]\n]*\]|^\s*\[[^\]\n]+\]:.*$|[[\]]/gm
 
 /** A backslash before ASCII punctuation, which markdown prints as that character. */
 const MARKDOWN_ESCAPE = /\\([!-/:-@[-`{-~])/g
@@ -76,7 +84,8 @@ const MARKDOWN_ESCAPE = /\\([!-/:-@[-`{-~])/g
  * document generator may print it: as sent, cleaned as cleanToolArgs cleans
  * it, with HTML tags, character references, backslash escapes and invisible
  * characters taken out, with markdown markers taken out too, and read as
- * inline markdown, where a link prints its label. Text split by any of these
+ * inline markdown, where a link prints its label, and with the syntax of a
+ * link of any kind taken out. Text split by any of these
  * prints whole, so a check for leaked secrets that reads every form sees it
  * whole. Keys count because a generator can print one, as an XLSX sheet prints
  * the keys of record rows as its header. Like cleanToolArgs, it reads no
@@ -109,5 +118,7 @@ export function printedForms(args: unknown): string[] {
       .join('')
       .replace(INVISIBLE, '')
   )
-  return [...sent, ...cleaned, ...printed, ...bare, ...spoken]
+  // As a markdown viewer prints a link of any kind: its label only.
+  const unlinked = bare.map(text => text.replace(LINK_SYNTAX, ''))
+  return [...sent, ...cleaned, ...printed, ...bare, ...spoken, ...unlinked]
 }
