@@ -497,4 +497,28 @@ describe('workspace layout merge', () => {
     expect(snapshot(root)).toEqual(merged)
     expect(messageCount(join(root, 'state.db'))).toEqual({ rows: ROWS, check: 'ok' })
   }, 15_000)
+
+  it('a rollback init refuses a merged root holding a symlink and moves nothing', () => {
+    const root = splitRoot()
+    symlinkSync('/tmp/evenfire', join(root, 'workspace', 'evenfire'))
+    expect(merge(root).status).toBe(0)
+    const merged = snapshot(root)
+    expect(merged.evenfire).toBe('link:/tmp/evenfire')
+
+    const rolledBack = runScript(readFileSync(BASE_INIT, 'utf8'), [root])
+
+    expect(rolledBack.status).toBe(1)
+    expect(rolledBack.stderr).toContain(`legacy source is a symlink: ${root}/evenfire`)
+    // It creates its two empty directories before validating the sources.
+    const refusedTree = { ...merged, state: 'dir', workspace: 'dir' }
+    expect(snapshot(root)).toEqual(refusedTree)
+    // Rolling forward leaves those empty directories and the history intact.
+    expect(merge(root)).toEqual({ status: 0, stderr: '' })
+    expect(snapshot(root)).toEqual(refusedTree)
+    expect(messageCount(join(root, 'state.db'))).toEqual({ rows: ROWS, check: 'ok' })
+    // Witness: without the root symlink the same rollback init splits the tree.
+    rmSync(join(root, 'evenfire'))
+    baseInit(root)
+    expect(readdirSync(join(root, 'state'))).toContain('state.db')
+  }, 15_000)
 })

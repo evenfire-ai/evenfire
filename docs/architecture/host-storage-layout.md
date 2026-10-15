@@ -116,6 +116,13 @@ forced by a deploy.
 - Rolling HCC back is safe for stateful and stateless Hosts. The previous
   `workspace-layout-init` re-splits stateless trees, and `workspace-layout-merge`
   merges them again on roll-forward.
+- A merged root that holds a symlink (for example one an agent created under
+  `workspace/`, which the merge moved to the root) blocks the previous init:
+  it creates empty `state/` and `workspace/`, then exits 1 with
+  `legacy source is a symlink` and moves nothing, so the Host stays in
+  `Init:Error` with its history intact. Roll forward (the merge exits 0 and
+  keeps the two empty directories), or remove the root symlinks from a
+  helper Pod before the rollback.
 - The deploy workflows roll HCC back automatically when its rollout gate fails
   (`keyper-labs/evenfire-infra`, `deploy-clerum-dev.yml:715-742`,
   `deploy-clerum-prod.yml:643-670`). This is safe for a Host in `Init:Error`,
