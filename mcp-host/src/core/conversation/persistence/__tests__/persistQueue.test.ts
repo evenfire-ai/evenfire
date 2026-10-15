@@ -264,4 +264,68 @@ describe('PersistQueue', () => {
     worker.emit('message', { id: shutdown!.id, ok: true, result: null } satisfies WorkerReply)
     await expect(closing).rejects.toThrow(/disk I\/O error/)
   })
+
+  it('never posts a write chained behind a failed async write on the same key', async () => {
+    const worker = new FakeWorker()
+    const q = new PersistQueue(worker, { syncTimeoutMs: 500, asyncTimeoutMs: 500 })
+    q.enqueueAsync('s1', { kind: 'ping' })
+    q.enqueueAsync('s1', { kind: 'ping' })
+    const chainedSync = q.enqueueSync({ kind: 'ping' }, 's1')
+    await Promise.resolve()
+    // Liveness witness: the first write was posted; the others wait on it.
+    expect(worker.sent.map(m => m.op.kind)).toEqual(['ping'])
+
+    worker.emit('message', {
+      id: worker.sent[0].id,
+      ok: false,
+      error: { code: 'SQLITE_FULL', message: 'database or disk is full' },
+    } satisfies WorkerReply)
+    await expect(chainedSync).rejects.toThrow(
+      /async write failed \(sessionKey=s1\): database or disk is full/
+    )
+    await new Promise(r => setImmediate(r))
+    expect(worker.sent).toHaveLength(1)
+  })
+
+  it('resolves a concurrent second close only after the shutdown ACK', async () => {
+    const worker = new FakeWorker()
+    const q = new PersistQueue(worker, { syncTimeoutMs: 500, asyncTimeoutMs: 500 })
+    let secondSettled = false
+    const first = q.close()
+    const second = q.close().finally(() => {
+      secondSettled = true
+    })
+    await new Promise(r => setImmediate(r))
+    const shutdowns = worker.sent.filter(m => m.op.kind === 'shutdown')
+    // Witness: exactly one shutdown was posted, and it is not ACKed yet.
+    expect(shutdowns).toHaveLength(1)
+    expect(secondSettled).toBe(false)
+
+    worker.emit('message', { id: shutdowns[0].id, ok: true, result: null } satisfies WorkerReply)
+    await Promise.all([first, second])
+    expect(secondSettled).toBe(true)
+  })
+
+  it('rejects close when the worker reports a shutdown failure', async () => {
+    const worker = new FakeWorker()
+    const failures: Error[] = []
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 500,
+      asyncTimeoutMs: 500,
+      onFailure: err => failures.push(err),
+    })
+    const closing = q.close()
+    await new Promise(r => setImmediate(r))
+    const shutdown = worker.sent.find(m => m.op.kind === 'shutdown')
+    expect(shutdown).toBeDefined()
+    worker.emit('message', {
+      id: shutdown!.id,
+      ok: false,
+      error: { code: 'SQLITE_BUSY', message: 'database is locked' },
+    } satisfies WorkerReply)
+    await expect(closing).rejects.toThrow(/database is locked/)
+    // The shutdown failure is the queue's failure; the exit that terminate()
+    // causes afterwards is not reported as a second one.
+    expect(failures.map(e => e.message)).toEqual(['database is locked'])
+  })
 })

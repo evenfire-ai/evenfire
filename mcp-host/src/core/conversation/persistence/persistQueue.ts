@@ -70,6 +70,7 @@ export class PersistQueue {
   private shutdownAcked = false
   /** First failure that makes further writes unsafe; never cleared. */
   private failure: Error | null = null
+  private closePromise: Promise<void> | null = null
 
   constructor(
     private readonly worker: WorkerLike,
@@ -106,11 +107,13 @@ export class PersistQueue {
     this.assertAdmissible()
     const prev = this.writeChain.get(sessionKey) ?? Promise.resolve()
     const next = prev
-      .then(() => this.send(op, this.opts.asyncTimeoutMs))
+      .then(() => this.sendUnlessFailed(op, this.opts.asyncTimeoutMs))
       .then(() => {
         /* discard the result — async path */
       })
       .catch((err: Error) => {
+        // An earlier failure already recorded and logged.
+        if (err === this.failure) return
         const failure = new Error(
           `async write failed (sessionKey=${sessionKey}): ${err.message ?? String(err)}`
         )
@@ -148,7 +151,7 @@ export class PersistQueue {
     if (sessionKey) {
       const prev = this.writeChain.get(sessionKey) ?? Promise.resolve()
       const next = prev
-        .then(() => this.send<T>(op, this.opts.syncTimeoutMs))
+        .then(() => this.sendUnlessFailed<T>(op, this.opts.syncTimeoutMs))
         .finally(() => {
           if (this.writeChain.get(sessionKey) === (next as Promise<unknown>)) {
             this.writeChain.delete(sessionKey)
@@ -217,16 +220,22 @@ export class PersistQueue {
    * terminate it. Rejects with the first write failure, or with the shutdown
    * failure, so the caller sees that the durable trail is incomplete.
    */
-  async close(): Promise<void> {
-    if (this.closed && !this.exited) return
+  close(): Promise<void> {
+    // A second caller waits for the same shutdown instead of returning early.
+    this.closePromise ??= this.shutdown()
+    return this.closePromise
+  }
+
+  private async shutdown(): Promise<void> {
     this.closed = true
     await this.drain()
-    let shutdownError: Error | null = null
     if (!this.exited) {
       try {
         await this.send({ kind: 'shutdown' }, this.opts.syncTimeoutMs)
       } catch (err) {
-        shutdownError = err as Error
+        // Recorded before terminate(), so the exit it causes is not reported
+        // as a second failure.
+        this.recordFailure(err as Error)
       }
     }
     const terminated = this.worker.terminate()
@@ -239,7 +248,6 @@ export class PersistQueue {
     }
     this.pending.clear()
     if (this.failure) throw this.failure
-    if (shutdownError) throw shutdownError
   }
 
   private recordFailure(err: Error): void {
@@ -251,6 +259,15 @@ export class PersistQueue {
   private assertAdmissible(): void {
     if (this.failure) throw this.failure
     if (this.closed) throw new Error('PersistQueue is closed')
+  }
+
+  /**
+   * Post a write that waited on its `sessionKey` chain. The queue may have
+   * failed while it waited, and admission was checked before that.
+   */
+  private sendUnlessFailed<T>(op: WorkerOp, timeoutMs: number): Promise<T> {
+    if (this.failure) return Promise.reject(this.failure)
+    return this.send<T>(op, timeoutMs)
   }
 
   private send<T>(op: WorkerOp, timeoutMs: number): Promise<T> {
