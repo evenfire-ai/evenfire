@@ -2,17 +2,29 @@ import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
 import { pendingExternalLogoutOwnership } from '../pendingExternalLogout.js'
 
-const marker = fc.record({
-  revision: fc.option(fc.uuid(), { nil: null }),
-  intent: fc.oneof(
-    fc.constant({ intent: 'logout-pending' as const }),
-    fc.record({
+const priorMarker = fc.oneof(
+  fc.record({
+    revision: fc.option(fc.uuid(), { nil: null }),
+    intent: fc.constant({ intent: 'logout-pending' as const }),
+  }),
+  fc.record({
+    revision: fc.option(fc.uuid(), { nil: null }),
+    intent: fc.record({
       intent: fc.constant('keytar-cleanup-pending' as const),
       credentialSource: fc.constantFrom('active-keytar' as const, 'safe-storage' as const),
-    })
-  ),
+    }),
+  })
+)
+const memoryOnlyMarker = fc.record({
+  revision: fc.uuid(),
+  intent: fc.record({
+    intent: fc.constant('memory-only-session' as const),
+    volatileSessionId: fc.uuid(),
+  }),
 })
+const marker = fc.oneof(priorMarker, memoryOnlyMarker)
 const optionalMarker = fc.option(marker, { nil: null })
+const persistentMarker = fc.oneof(fc.constant(null), priorMarker)
 
 describe('marker ownership observation invariants', () => {
   it('never grants ownership after runtime supersession for any observation', () => {
@@ -62,7 +74,7 @@ describe('marker ownership observation invariants', () => {
     )
   })
 
-  it('never aliases LP, CP-K, CP-S or absence even when revisions are equal', () => {
+  it('never aliases LP, CP-K, CP-S, M or absence even when revisions are equal', () => {
     fc.assert(
       fc.property(fc.uuid(), revision => {
         const sources = [
@@ -82,6 +94,13 @@ describe('marker ownership observation invariants', () => {
               credentialSource: 'safe-storage' as const,
             },
           },
+          {
+            revision,
+            intent: {
+              intent: 'memory-only-session' as const,
+              volatileSessionId: '00000000-0000-4000-8000-000000000000',
+            },
+          },
         ]
         for (let current = 0; current < sources.length; current += 1)
           for (let expected = 0; expected < sources.length; expected += 1)
@@ -92,6 +111,45 @@ describe('marker ownership observation invariants', () => {
                 true
               ).status === 'owned'
             ).toBe(current === expected)
+      }),
+      { numRuns: 10000 }
+    )
+  })
+
+  it('denies every prior persistent source while the M restart fence owns the revision', () => {
+    fc.assert(
+      fc.property(
+        memoryOnlyMarker,
+        fc.array(persistentMarker, { maxLength: 8 }),
+        (current, prior) => {
+          expect(
+            pendingExternalLogoutOwnership({ status: 'observed', marker: current }, prior, true)
+          ).toEqual({ status: 'superseded' })
+          expect(
+            pendingExternalLogoutOwnership({ status: 'observed', marker: current }, [current], true)
+          ).toEqual({ status: 'owned', marker: current })
+        }
+      ),
+      { numRuns: 10000 }
+    )
+  })
+
+  it('prevents stale producers from owning a newer M marker revision', () => {
+    fc.assert(
+      fc.property(memoryOnlyMarker, stale => {
+        const nextRevision = stale.revision.endsWith('f')
+          ? `${stale.revision.slice(0, -1)}e`
+          : `${stale.revision.slice(0, -1)}f`
+        const newer = { ...stale, revision: nextRevision }
+        const observation = { status: 'observed' as const, marker: newer }
+
+        expect(pendingExternalLogoutOwnership(observation, [stale], true)).toEqual({
+          status: 'superseded',
+        })
+        expect(pendingExternalLogoutOwnership(observation, [newer], true)).toEqual({
+          status: 'owned',
+          marker: newer,
+        })
       }),
       { numRuns: 10000 }
     )
