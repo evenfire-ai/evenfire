@@ -2640,6 +2640,12 @@ function subscribeActivity(onEvent: (event: HostActivityEvent) => void): {
  * unserved and untouched; one line says how many there are.
  */
 function logSharedOutputs(): void {
+  if (process.env.CLERUM_OUTPUT_DIR) {
+    logger.warn(
+      { component: 'GeneratedOutputs' },
+      'CLERUM_OUTPUT_DIR is not used in chat; generated files go to each caller folder'
+    )
+  }
   countSharedOutputs(getOutputDir()).then(
     found => {
       if (found?.files) {

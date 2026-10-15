@@ -2,9 +2,11 @@
  * Where a chat caller's generated files live: a reserved directory inside the
  * caller's own verified root (`<host>/users/<key>/.clerum-outputs`), the root
  * file_read and file_write use, but out of reach of those tools. Generation,
- * attachment, listing and download all resolve it, so one user never reaches
- * another's files, not even by guessing a name. A directory that cannot be
- * verified is never replaced by a shared one.
+ * attachment, listing and download all resolve it, so through them one user
+ * never reaches another's files, not even by guessing a name. A directory that
+ * cannot be verified is never replaced by a shared one. shell_exec is not
+ * confined: an approved command runs as the Host and can read any caller's
+ * folder.
  */
 import * as fs from 'node:fs'
 import * as path from 'node:path'

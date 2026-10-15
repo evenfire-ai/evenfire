@@ -152,7 +152,7 @@ The schema is permissive (`additionalProperties: { type: boolean }`) so adding a
 
 ### Document and chart tools
 
-The `clerum__generate_*` tools write their files to the output folder: `/output` in a workflow run and `<workspace>/outputs` in chat, unless `CLERUM_OUTPUT_DIR` names another. Each generator loads its library on first use.
+The `clerum__generate_*` tools write their files to the output folder: `/output` in a workflow run, unless `CLERUM_OUTPUT_DIR` names another, and in chat each caller's own `<workspace>/users/<key>/.clerum-outputs`, which only that caller lists and downloads; `CLERUM_OUTPUT_DIR` is not used in chat. Files written to `<workspace>/outputs` before chat files became per caller stay there, are no longer listed or served, and are counted in a log line at startup. Each generator loads its library on first use.
 
 Charts, PDFs, and the measuring of DOCX tables and slide text read system fonts through `@napi-rs/canvas`, a native module. The images install them: `font-dejavu font-noto font-noto-cjk font-noto-arabic font-noto-hebrew` on Alpine (`Dockerfile`), and `fonts-dejavu-core fonts-noto-core fonts-noto-cjk` on Debian (`Dockerfile.slim`, `Dockerfile.full`, `Dockerfile.desktop`). Without them, the bundled Roboto still draws Latin, Greek and Cyrillic, but CJK, Arabic, Hebrew, arrows and check marks have no glyph to draw. A machine that runs the tests needs the same packages: CI installs the Debian ones for mcp-host, and the font tests fail in CI when they are missing.
 
