@@ -7,7 +7,7 @@
  * values shrink to fit their boxes, and pictures keep their proportions.
  */
 import { documentEastAsianScript } from './docxScript'
-import { own } from './ownEntry'
+import { choose } from './ownEntry'
 import { type DrawContext, hex } from './pptxDraw'
 import {
   PptxInputError,
@@ -28,23 +28,6 @@ import { PPTX_ASPECT_RATIOS, PPTX_PALETTES, PPTX_TEMPLATES } from './pptxVocabul
 import { keepZipTextWhole } from './zipText'
 
 const PptxGenJS = require('pptxgenjs')
-
-function pick<T>(
-  table: Record<string, T>,
-  value: unknown,
-  fallback: string,
-  field: string,
-  warnings: string[]
-): T {
-  if (value === undefined || value === null || value === '') return table[fallback]
-  const entry = typeof value === 'string' ? own(table, value) : undefined
-  if (entry) return entry
-  warnings.push(
-    `${field} ${JSON.stringify(value)} is not one of ${Object.keys(table).join(', ')}; ` +
-      `"${fallback}" was used.`
-  )
-  return table[fallback]
-}
 
 /** The slides `args` describe, from a template's data or from slides[]. */
 function readDeck(args: Record<string, unknown>, ctx: ReadContext): PptxSlide[] {
@@ -91,8 +74,12 @@ export async function buildPptxDeck(
 ): Promise<{ buffer: Buffer; slides: number }> {
   const ctx: ReadContext = { outputDir, warnings }
   const specs = readDeck(args, ctx)
-  const palette = pick(PPTX_PALETTES, args.palette, 'default', 'palette', warnings)
-  const aspect = pick(PPTX_ASPECT_RATIOS, args.aspectRatio, 'wide', 'aspectRatio', warnings)
+  const palette =
+    PPTX_PALETTES[choose(args.palette, Object.keys(PPTX_PALETTES), 'default', 'palette', warnings)]
+  const aspect =
+    PPTX_ASPECT_RATIOS[
+      choose(args.aspectRatio, Object.keys(PPTX_ASPECT_RATIOS), 'wide', 'aspectRatio', warnings)
+    ]
   if (args.branding !== undefined && args.branding !== null && !isRecord(args.branding)) {
     throw new PptxInputError(
       'branding must be an object with companyName, logoPath and footerText.'
