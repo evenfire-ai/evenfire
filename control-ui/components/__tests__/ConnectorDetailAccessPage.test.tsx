@@ -266,3 +266,34 @@ describe('connector detail access tabs', () => {
     ).not.toBeInTheDocument()
   })
 })
+
+describe('connector detail authentication field', () => {
+  it.each([
+    { name: 'absent', authType: undefined, expectedLabel: undefined },
+    { name: 'none', authType: 'none', expectedLabel: undefined },
+    { name: 'OAuth', authType: 'oauth', expectedLabel: 'OAuth' },
+    { name: 'bearer', authType: 'bearer', expectedLabel: 'Static credentials' },
+  ])(
+    'shows the field only when authentication is configured ($name)',
+    async ({ authType, expectedLabel }) => {
+      const auth = authType === undefined ? {} : { auth: { type: authType } }
+      vi.mocked(api.getMcpServer).mockResolvedValue({
+        metadata: { name: 'search', namespace: 'mcp-server' },
+        spec: { description: 'Search the public web', ...auth },
+        status: { conditions: [] },
+      })
+      navigation.params = { name: 'search', tab: 'configuration' }
+      navigation.segment = 'configuration'
+
+      renderDetail()
+
+      expect(await screen.findByText('Search the public web')).toBeVisible()
+      if (expectedLabel) {
+        expect(screen.getByText('Authentication')).toBeVisible()
+        expect(screen.getByText(expectedLabel)).toBeVisible()
+      } else {
+        expect(screen.queryByText('Authentication')).not.toBeInTheDocument()
+      }
+    }
+  )
+})
