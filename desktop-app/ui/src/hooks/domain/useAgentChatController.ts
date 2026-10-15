@@ -238,7 +238,15 @@ async function hasLocalMessagesBeyond(
   return chatStore
     .loadMessages(agentRef, chatId, 1, offset)
     .then(messages => messages.length > 0)
-    .catch(() => false)
+    .catch(error => {
+      console.warn('[chat-history] failed to probe older local messages', {
+        agentRef,
+        chatId,
+        offset,
+        error,
+      })
+      return true
+    })
 }
 
 function mergeUniqueMessages(
@@ -1493,14 +1501,12 @@ export function useAgentChatController({
     setOlderMessagesLoading(true)
     try {
       const visibleIds = new Set(chatMessages.map(message => message.id))
-      const localPage = (await chatStore
-        .loadMessages(
-          requestAgent,
-          requestChatId,
-          LOCAL_MESSAGE_PAGE_SIZE,
-          loadedLocalMessageCountRef.current
-        )
-        .catch(() => [])) as AgentChatMessage[]
+      const localPage = (await chatStore.loadMessages(
+        requestAgent,
+        requestChatId,
+        LOCAL_MESSAGE_PAGE_SIZE,
+        loadedLocalMessageCountRef.current
+      )) as AgentChatMessage[]
       if (!isStillRelevant()) return
       const unseenLocal = localPage.filter(message => !visibleIds.has(message.id))
       if (unseenLocal.length) {
@@ -1595,6 +1601,9 @@ export function useAgentChatController({
         chatId: requestChatId,
         error,
       })
+      if (isStillRelevant()) {
+        pushToast('Could not load older messages.', 'error')
+      }
     } finally {
       if (olderMessagesRequestRef.current === requestToken) {
         olderMessagesRequestRef.current = null
@@ -1612,6 +1621,7 @@ export function useAgentChatController({
     selectedAgent,
     isHostAccessBlocked,
     provisionalSelectionFor,
+    pushToast,
     tracker,
   ])
 

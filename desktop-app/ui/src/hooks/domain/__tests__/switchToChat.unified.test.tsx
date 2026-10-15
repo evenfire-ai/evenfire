@@ -983,6 +983,125 @@ describe('switchToChat (unified, D.4)', () => {
     expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledTimes(1)
   })
 
+  // H11 (#1110): a local chat longer than one window (80), with no server turn
+  // markers and no new history from the reconcile. The probe for older local
+  // messages reads one message past the window (`limit === 1`); the double
+  // rejects it and delegates every other read to the real ChatStore.
+  async function openLongLocalChatWithFailingProbe() {
+    const localMessages = Array.from({ length: 160 }, (_, index) => ({
+      id: `local-${index + 1}`,
+      role: index % 2 === 0 ? ('user' as const) : ('assistant' as const),
+      content: `local message ${index + 1}`,
+      timestamp: index + 1,
+    }))
+    await clerum.chat.appendMessages('agent-x', 'chat-a', localMessages)
+    clerum.rpc.loadSessionMessages.mockResolvedValue({
+      agent: 'agent-x',
+      chatId: 'chat-a',
+      state: 'idle',
+      turns: [],
+      hasMoreBefore: false,
+      hasMoreAfter: false,
+    })
+    const readStore = clerum.chat.loadMessages.getMockImplementation()
+    if (!readStore) throw new Error('Expected the real ChatStore loadMessages producer')
+    const failingReads: Array<{ limit?: number; offset?: number }> = [{ limit: 1 }]
+    clerum.chat.loadMessages.mockImplementation(
+      (agentRef: string, chatId: string, limit?: number, offset?: number) =>
+        failingReads.some(
+          read => read.limit === limit && (read.offset === undefined || read.offset === offset)
+        )
+          ? Promise.reject(new Error('Unable to read paged chat page'))
+          : readStore(agentRef, chatId, limit, offset)
+    )
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const controller = renderController()
+    await settleMount()
+    await act(async () => {
+      await controller.result.current.switchToChat('agent-x', 'chat-a')
+    })
+    return { controller, localMessages, failingReads, readStore, warn }
+  }
+
+  it('T-H11-1: a failed probe for older local messages keeps "Load older" visible and warns', async () => {
+    const { controller, localMessages, warn } = await openLongLocalChatWithFailingProbe()
+
+    // Liveness witness: the 80-message window is painted and the probe ran.
+    expect(controller.result.current.chatMessages.map(message => message.id)).toEqual(
+      localMessages.slice(80).map(message => message.id)
+    )
+    expect(clerum.chat.loadMessages).toHaveBeenCalledWith('agent-x', 'chat-a', 1, 80)
+    // "Load older" renders when both hold (`ChatThread.tsx`, `activeChatId && hasOlderMessages`).
+    expect(controller.result.current.activeChatId).toBe('chat-a')
+    expect(controller.result.current.hasOlderMessages).toBe(true)
+    expect(warn).toHaveBeenCalledWith(
+      '[chat-history] failed to probe older local messages',
+      expect.objectContaining({ agentRef: 'agent-x', chatId: 'chat-a', offset: 80 })
+    )
+  })
+
+  it('T-H11-2: a failed read of the older local page shows a toast and keeps the visible messages', async () => {
+    const { controller, failingReads, warn } = await openLongLocalChatWithFailingProbe()
+    failingReads.push({ limit: 80, offset: 80 })
+    const visibleBefore = controller.result.current.chatMessages
+
+    await act(async () => {
+      await controller.result.current.handleLoadOlderMessages()
+    })
+
+    // Liveness witness: the click issued its own local read, distinct from the probe.
+    expect(clerum.chat.loadMessages).toHaveBeenCalledWith('agent-x', 'chat-a', 80, 80)
+    expect(controller.spies.pushToast).toHaveBeenCalledWith(
+      'Could not load older messages.',
+      'error'
+    )
+    expect(warn).toHaveBeenCalledWith(
+      '[chat-history] failed to load older messages',
+      expect.objectContaining({ agentRef: 'agent-x', chatId: 'chat-a' })
+    )
+    expect(controller.result.current.chatMessages).toEqual(visibleBefore)
+  })
+
+  it('T-H11-3: an older page that fails after switching chats warns without a toast', async () => {
+    const { controller, readStore, warn } = await openLongLocalChatWithFailingProbe()
+    let rejectOlderPage!: (error: Error) => void
+    const olderPage = new Promise<never>((_resolve, reject) => {
+      rejectOlderPage = reject
+    })
+    clerum.chat.loadMessages.mockImplementation(
+      (agentRef: string, chatId: string, limit?: number, offset?: number) =>
+        chatId === 'chat-a' && limit === 80 && offset === 80
+          ? olderPage
+          : readStore(agentRef, chatId, limit, offset)
+    )
+
+    let pendingOlder!: Promise<void>
+    act(() => {
+      pendingOlder = controller.result.current.handleLoadOlderMessages()
+    })
+    await waitFor(() =>
+      expect(clerum.chat.loadMessages).toHaveBeenCalledWith('agent-x', 'chat-a', 80, 80)
+    )
+    await act(async () => {
+      await controller.result.current.switchToChat('agent-x', 'chat-b')
+    })
+    // Liveness witness: chat B is the confirmed view before A's read fails.
+    expect(controller.result.current.activeChatId).toBe('chat-b')
+
+    await act(async () => {
+      rejectOlderPage(new Error('Unable to read paged chat page'))
+      await pendingOlder
+    })
+    expect(warn).toHaveBeenCalledWith(
+      '[chat-history] failed to load older messages',
+      expect.objectContaining({ agentRef: 'agent-x', chatId: 'chat-a' })
+    )
+    expect(controller.spies.pushToast).not.toHaveBeenCalledWith(
+      'Could not load older messages.',
+      'error'
+    )
+  })
+
   it('cancels an in-flight older-page request when switching chats', async () => {
     let resolveOlder!: (messages: unknown[]) => void
     const olderPage = new Promise<unknown[]>(resolve => {
