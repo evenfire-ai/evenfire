@@ -19,7 +19,6 @@ import {
 import { acquirePasswordWork } from '../src/services/auth/passwordWorkOwnership.js'
 import {
   acceptInvitationForEmail,
-  createInvitationForTeams,
   createSilentInvitationForTeams,
   getInvitationByToken,
   setInvitationPasswordForEmail,
