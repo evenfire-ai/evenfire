@@ -138,12 +138,7 @@ async function invitationPasswordAuthFromRequest(req: Request): Promise<
 
 function isInvalidInvitationProof(error: unknown): boolean {
   return (
-    error instanceof ControlApiError &&
-    error.status === 400 &&
-    error.body !== null &&
-    typeof error.body === 'object' &&
-    'error' in error.body &&
-    error.body.error === 'invalid_invitation'
+    error instanceof ControlApiError && error.status === 400 && error.code === 'invalid_invitation'
   )
 }
 

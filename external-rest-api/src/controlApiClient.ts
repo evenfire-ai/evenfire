@@ -37,6 +37,19 @@ export class ControlApiError extends Error {
     this.body = body
     this.headers = headers
   }
+
+  get code(): string | null {
+    const body = this.body
+    if (
+      body !== null &&
+      typeof body === 'object' &&
+      'error' in body &&
+      typeof body.error === 'string'
+    ) {
+      return body.error
+    }
+    return null
+  }
 }
 
 function forwardableResponseHeaders(response: Response): Record<string, string> {

@@ -6,18 +6,6 @@ type AuthContext = {
   sessionToken: string
 }
 
-function controlApiErrorCode(error: ControlApiError): string | null {
-  if (
-    error.body !== null &&
-    typeof error.body === 'object' &&
-    'error' in error.body &&
-    typeof error.body.error === 'string'
-  ) {
-    return error.body.error
-  }
-  return null
-}
-
 function passwordAuthorityUnavailable(): ControlApiError {
   return new ControlApiError(
     'Password recovery authority unavailable',
@@ -123,10 +111,10 @@ export async function createDesktopAuthorization(
   } catch (error) {
     if (error instanceof ControlApiError && [429, 503].includes(error.status)) throw error
     if (error instanceof ControlApiError) {
-      if (error.status === 404 && controlApiErrorCode(error) === 'not_found') {
+      if (error.status === 404 && error.code === 'not_found') {
         return { error: 'not_found' }
       }
-      if (error.status === 401 && controlApiErrorCode(error) === 'invalid_password') {
+      if (error.status === 401 && error.code === 'invalid_password') {
         return { error: 'invalid_password' }
       }
     }

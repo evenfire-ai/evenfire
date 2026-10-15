@@ -151,13 +151,7 @@ export function createMeRouter(): Router {
         return
       }
       if (message.includes('(409)')) {
-        const upstreamError =
-          error instanceof ControlApiError &&
-          error.body &&
-          typeof error.body === 'object' &&
-          'error' in error.body
-            ? error.body.error
-            : undefined
+        const upstreamError = error instanceof ControlApiError ? error.code : null
         if (upstreamError === 'credential_changed') {
           res
             .status(PASSWORD_CREDENTIAL_CHANGED_PUBLIC_RESPONSE.status)

@@ -25,7 +25,7 @@ function invitationPasswordDomainError(
   | 'expired'
   | 'invalid_password'
   | null {
-  const code = controlApiErrorCode(error)
+  const code = error.code
   if (error.status === 400 && code === 'invalid_password') return 'invalid_password'
   if (error.status === 401 && code === 'user_retired') return 'not_found'
   if (error.status === 403 && code === 'forbidden') return 'forbidden'
@@ -36,20 +36,8 @@ function invitationPasswordDomainError(
   return null
 }
 
-function controlApiErrorCode(error: ControlApiError): string | null {
-  if (
-    error.body !== null &&
-    typeof error.body === 'object' &&
-    'error' in error.body &&
-    typeof error.body.error === 'string'
-  ) {
-    return error.body.error
-  }
-  return null
-}
-
 function resetPasswordDomainError(error: ControlApiError): ResetPasswordDomainError | null {
-  const code = controlApiErrorCode(error)
+  const code = error.code
   if (error.status === 400 && code === 'invalid_password') return 'invalid_password'
   if (error.status === 400 && code === 'invalid_invitation') return 'invalid_invitation'
   if (error.status === 401 && code === 'user_retired') return 'invalid_invitation'

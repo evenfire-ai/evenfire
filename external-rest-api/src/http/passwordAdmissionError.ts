@@ -34,11 +34,7 @@ export function sendPasswordAuthorityError(error: unknown, res: Response): boole
     return true
   }
   if (error.status === 503) {
-    const recoveryOutcomeUnknown =
-      error.body !== null &&
-      typeof error.body === 'object' &&
-      'error' in error.body &&
-      error.body.error === 'recovery_outcome_unknown'
+    const recoveryOutcomeUnknown = error.code === 'recovery_outcome_unknown'
     sendPublicPasswordAuthorityError(
       res,
       503,

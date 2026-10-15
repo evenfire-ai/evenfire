@@ -61,6 +61,19 @@ describe('controlApiClient error headers', () => {
   })
 })
 
+describe('ControlApiError.code', () => {
+  it.each([
+    [{ error: 'invalid_password' }, 'invalid_password'],
+    [null, null],
+    [undefined, null],
+    [{ error: 400 }, null],
+    [{ message: 'invalid_password' }, null],
+    [['invalid_password'], null],
+  ])('exposes only a string structured error code from %j', (body, code) => {
+    expect(new ControlApiError('private', 400, body).code).toBe(code)
+  })
+})
+
 describe('controlApiClient request identity', () => {
   afterEach(() => vi.unstubAllGlobals())
 
