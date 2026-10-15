@@ -17,9 +17,17 @@
  *   name.
  * - `CONTROL_API_BASE_URL` (or `E2E_CONTROL_API_URL`) and the admin password
  *   (`E2E_ADMIN_PASSWORD` / `ADMIN_PASSWORD` / `ADMIN_PASS` /
- *   `TEST_ADMIN_PASSWORD`) are required; loopback targets only.
- * - `E2E_DEV_LOGIN_EMAIL` is the Desktop user (admin@evenfire.local on a T2
- *   profile).
+ *   `TEST_ADMIN_PASSWORD`) are required; `TEST_ADMIN_USERNAME` defaults to
+ *   `admin`.
+ * - `EXTERNAL_REST_API_BASE_URL` and `RPC_PROXY_BASE_URL` (aliases and
+ *   defaults in `qa-recorder-helpers.ts`) are the Desktop targets. All three
+ *   URLs must be loopback and healthy; `assertAllowedTarget` waives both
+ *   checks only under `QA_RECORDER_ALLOW_REMOTE=1`, which this lane does not
+ *   set.
+ * - `E2E_DEV_LOGIN_EMAIL` is required and names the Desktop user
+ *   (admin@evenfire.local on a T2 profile). The Desktop password is read by
+ *   `desktopCredentials()`: `E2E_DESKTOP_PASSWORD` / `E2E_TEST_PASSWORD` /
+ *   `ADMIN_PASSWORD`.
  * - `E2E_825_SOURCE_HOST` (default `chatllm`) is the Host whose spec is copied.
  *
  * Run: `make test-e2e-825-desktop-continuity`.
@@ -70,7 +78,7 @@ const ADMIN_SESSION_COOKIE = 'control_ui_admin_session'
 
 // E2E_GUARDIAN_IPC_FLOW: Desktop sends RPC through Electron's main process,
 // which page.waitForResponse cannot observe. The business signals are the
-// Host's own session list and transcript, read through the app's
+// Host's own session list and per-turn replies, read through the app's
 // window.clerum.rpc bridge (rpc-proxy -> Host), plus the Pod witness.
 
 function kubeContext(): string {
@@ -205,15 +213,31 @@ class AdminApi {
     await this.expectStatus('POST', '/admin/hosts', 201, { metadata: { name }, spec })
   }
 
-  /** GET then PUT with the read's resourceVersion, echoing the full spec as Control UI does. */
+  /**
+   * GET then PUT with the read's resourceVersion, echoing the full spec as
+   * Control UI does. HCC writes the Host status between the two calls, so a
+   * `409 resource_changed` re-reads and retries (bounded); any other status,
+   * or a fifth conflict, fails.
+   */
   async setLifecycle(name: string, stateless: boolean): Promise<void> {
-    const host = await this.expectStatus('GET', `/admin/hosts/${name}`, 200)
-    const resourceVersion = host?.metadata?.resourceVersion
-    if (!resourceVersion) throw new Error(`Host ${name} read has no resourceVersion`)
-    await this.expectStatus('PUT', `/admin/hosts/${name}`, 200, {
-      metadata: { resourceVersion },
-      spec: { ...host.spec, lifecycle: { stateless } },
-    })
+    const attempts = 5
+    let last = ''
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      const host = await this.expectStatus('GET', `/admin/hosts/${name}`, 200)
+      const resourceVersion = host?.metadata?.resourceVersion
+      if (!resourceVersion) throw new Error(`Host ${name} read has no resourceVersion`)
+      const { status, body } = await this.call('PUT', `/admin/hosts/${name}`, {
+        metadata: { resourceVersion },
+        spec: { ...host.spec, lifecycle: { stateless } },
+      })
+      if (status === 200) return
+      last = `${status}: ${JSON.stringify(body)}`
+      if (status !== 409 || body?.reason !== 'resource_changed') {
+        throw new Error(`PUT /admin/hosts/${name} returned ${last}`)
+      }
+      console.info(`[825] ${name}: lifecycle PUT conflict on attempt ${attempt}, re-reading`)
+    }
+    throw new Error(`PUT /admin/hosts/${name} conflicted ${attempts} times; last ${last}`)
   }
 
   async deleteHost(name: string): Promise<void> {
@@ -422,7 +446,7 @@ async function hostConversation(
   page: Page,
   hostName: string,
   chatId: string
-): Promise<{ sessions: Array<{ chatId: string; turnCount: number }>; transcript: string }> {
+): Promise<{ sessions: Array<{ chatId: string; turnCount: number }>; responses: string[] }> {
   return page.evaluate(
     async ({ hostRef, chatId: id }) => {
       const list = await (window as any).clerum.rpc.listSessions(hostRef)
@@ -437,14 +461,16 @@ async function hostConversation(
         : null
       return {
         sessions: sessions.map(({ chatId: c, turnCount }: any) => ({ chatId: c, turnCount })),
-        transcript: messages ? JSON.stringify(messages.turns) : '',
+        // Assistant replies only: the prompt also carries the marker, so a
+        // match on user_input would pass for a turn the model never answered.
+        responses: messages ? messages.turns.map((t: any) => String(t.response ?? '')) : [],
       }
     },
     { hostRef: hostName, chatId }
   )
 }
 
-/** The Host lists exactly this one conversation with `turns` turns, and its transcript holds every marker. */
+/** The Host lists exactly this one conversation with `turns` turns, and turn i's reply holds marker i. */
 async function expectHostHistory(
   page: Page,
   hostName: string,
@@ -459,7 +485,9 @@ async function expectHostHistory(
         const view = await hostConversation(page, hostName, chatId)
         return {
           sessions: view.sessions,
-          missingMarkers: markers.filter(marker => !view.transcript.includes(marker)),
+          missingMarkers: markers.filter(
+            (marker, i) => !(view.responses[i] ?? '').includes(marker)
+          ),
         }
       },
       {
