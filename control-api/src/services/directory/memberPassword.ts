@@ -2,6 +2,7 @@ import bcrypt from 'bcryptjs'
 import { type DbClient, pool } from '../../db.js'
 import { type MemberPasswordWorkLease, runPasswordMutation } from '../auth/passwordWorkOwnership.js'
 import {
+  type InvitationUserRow,
   ensureInvitationUser,
   getInvitationRecordById,
   invitationResponse,
@@ -10,6 +11,36 @@ import {
   lockPasswordResetUser,
 } from './invitationStore.js'
 import { getMemberSessionContext } from './login.js'
+
+async function updateActivePasswordHash(
+  db: Pick<DbClient, 'query'>,
+  userId: string,
+  passwordHash: string
+): Promise<boolean> {
+  const update = await db.query(
+    `UPDATE users
+        SET password_hash = $2,
+            password_set_at = NOW(),
+            updated_at = NOW()
+      WHERE id = $1
+        AND lifecycle_state = 'active'
+      RETURNING id`,
+    [userId, passwordHash]
+  )
+  return update.rows.length === 1
+}
+
+async function loadInvitationPasswordResponse(
+  db: Pick<DbClient, 'query'>,
+  invitationId: string,
+  user: InvitationUserRow,
+  passwordHash: string
+) {
+  const invitation = await getInvitationRecordById(db, invitationId)
+  if (!invitation) return null
+  const teams = await loadInvitationTeams(db, invitation.id, invitation)
+  return invitationResponse(invitation, { ...user, password_hash: passwordHash }, teams)
+}
 
 async function revokeSiblingPasswordResets(
   db: Pick<DbClient, 'query'>,
@@ -87,17 +118,9 @@ export async function setInvitationPasswordForUser(
       if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
       if (user.id !== trimmedUserId) return { error: 'forbidden' as const }
       const passwordHash = await bcrypt.hash(trimmedPassword, 12)
-      const update = await db.query(
-        `UPDATE users
-            SET password_hash = $2,
-                password_set_at = NOW(),
-                updated_at = NOW()
-          WHERE id = $1
-            AND lifecycle_state = 'active'
-          RETURNING id`,
-        [user.id, passwordHash]
-      )
-      if (update.rows.length !== 1) return { error: 'user_retired' as const }
+      if (!(await updateActivePasswordHash(db, user.id, passwordHash))) {
+        return { error: 'user_retired' as const }
+      }
 
       if (!invitation.accepted_user_id) {
         await db.query(`UPDATE invitations SET accepted_user_id = $2 WHERE id = $1`, [
@@ -106,13 +129,12 @@ export async function setInvitationPasswordForUser(
         ])
       }
 
-      const refreshed = await getInvitationRecordById(db, invitation.id)
-      if (!refreshed) return { error: 'not_found' as const }
-      const teams = await loadInvitationTeams(db, refreshed.id, refreshed)
+      const response = await loadInvitationPasswordResponse(db, invitation.id, user, passwordHash)
+      if (!response) return { error: 'not_found' as const }
       return {
         data: {
           passwordUpdated: true,
-          ...invitationResponse(refreshed, { ...user, password_hash: passwordHash }, teams),
+          ...response,
         },
       }
     },
@@ -167,17 +189,9 @@ export async function setInvitationPasswordForEmail(
       }
 
       const passwordHash = await bcrypt.hash(trimmedPassword, 12)
-      const update = await db.query(
-        `UPDATE users
-            SET password_hash = $2,
-                password_set_at = NOW(),
-                updated_at = NOW()
-          WHERE id = $1
-            AND lifecycle_state = 'active'
-          RETURNING id`,
-        [user.id, passwordHash]
-      )
-      if (update.rows.length !== 1) return { error: 'user_retired' as const }
+      if (!(await updateActivePasswordHash(db, user.id, passwordHash))) {
+        return { error: 'user_retired' as const }
+      }
 
       const redeemed = await db.query(
         `UPDATE invitations
@@ -191,15 +205,14 @@ export async function setInvitationPasswordForEmail(
       if (redeemed.rows.length !== 1) return { error: 'not_pending' as const }
       await revokeSiblingPasswordResets(db, normalizedEmail, invitation.id, user.id)
 
-      const refreshed = await getInvitationRecordById(db, invitation.id)
-      if (!refreshed) return { error: 'not_found' as const }
-      const teams = await loadInvitationTeams(db, refreshed.id, refreshed)
+      const response = await loadInvitationPasswordResponse(db, invitation.id, user, passwordHash)
+      if (!response) return { error: 'not_found' as const }
       const sessionContext = await getMemberSessionContext(db, user)
       return {
         data: {
           passwordUpdated: true,
           sessionContext,
-          ...invitationResponse(refreshed, { ...user, password_hash: passwordHash }, teams),
+          ...response,
         },
       }
     },
