@@ -381,6 +381,65 @@ describe('per-Host Latest sessions publication', () => {
     ).toBe('Renamed B')
   })
 
+  it("does not spend another Host's rename budget when the selected Host's poll arrives", async () => {
+    // Every A read shares one deferred page; B's reads never resolve, so B's own
+    // arrival cannot retry B's rename.
+    const pendingA = deferred<SessionsListResult>()
+    clerum.chat.getIndex.mockImplementation(async (agentRef: string) =>
+      localIndex([{ id: `${agentRef}-chat`, title: `${agentRef} original` }])
+    )
+    clerum.rpc.listSessions.mockImplementation((agentRef: string) =>
+      agentRef === HOST_A ? pendingA.promise : new Promise<SessionsListResult>(() => undefined)
+    )
+    const failed = new Set<string>()
+    clerum.rpc.renameSession.mockImplementation(
+      async (agentRef: string, _agent: string, _chatId: string, title: string) => {
+        if (!failed.has(agentRef)) {
+          failed.add(agentRef)
+          throw new Error('fetch failed')
+        }
+        return { title }
+      }
+    )
+    const controller = renderController({ selectedAgent: HOST_A, agentNames: HOSTS })
+    await waitFor(() =>
+      expect(clerum.rpc.listSessions).toHaveBeenCalledWith(HOST_A, undefined, expect.anything())
+    )
+    const attemptsFor = (agentRef: string) =>
+      clerum.rpc.renameSession.mock.calls.filter(call => call[0] === agentRef).length
+
+    for (const agentRef of HOSTS) {
+      await act(async () => {
+        await controller.result.current.handleRenameChatForAgent(
+          agentRef,
+          `${agentRef}-chat`,
+          `Renamed ${agentRef}`
+        )
+      })
+    }
+    expect(attemptsFor(HOST_A)).toBe(1)
+    expect(attemptsFor(HOST_B)).toBe(1)
+
+    await act(async () => {
+      pendingA.resolve(serverSessions([{ agent: HOST_A, chatId: 'a-remote', title: 'Server A' }]))
+      await pendingA.promise
+    })
+    // Liveness: the selected Host's poll was applied and retried its own rename.
+    await waitFor(() =>
+      expect(controller.result.current.chatList.map(chat => chat.id)).toContain('a-remote')
+    )
+    await waitFor(() => expect(attemptsFor(HOST_A)).toBe(2))
+    // B's queued rename kept its budget: A's poll did not PATCH it.
+    expect(attemptsFor(HOST_B)).toBe(1)
+
+    // A reconnect retries every Host's offline rename.
+    await act(async () => {
+      window.dispatchEvent(new Event('online'))
+    })
+    await waitFor(() => expect(attemptsFor(HOST_B)).toBe(2))
+    expect(attemptsFor(HOST_A)).toBe(2)
+  })
+
   it('filters a confirmed tombstone created while that Host response is pending', async () => {
     const pendingB = deferred<SessionsListResult>()
     clerum.chat.getIndex.mockResolvedValue(localIndex([]))

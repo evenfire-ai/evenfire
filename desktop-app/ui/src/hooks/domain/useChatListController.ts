@@ -43,7 +43,8 @@ async function readSessionCatalog(
 }
 
 // R1-M1: an 'offline' pending rename (a genuine network / 5xx failure) retries on
-// every listSessions poll and every `window 'online'` event. A deterministic 5xx
+// its own Host's listSessions polls and on every `window 'online'` event; another
+// Host's poll does not spend its budget. A deterministic 5xx
 // / 501 would otherwise re-issue the PATCH forever, so cap the auto-retries per
 // entry: 5 rides out a transient blip and a few poll cycles before giving up,
 // while keeping the request volume bounded. Only 'offline' failures count toward
