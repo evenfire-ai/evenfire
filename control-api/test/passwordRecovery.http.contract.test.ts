@@ -781,7 +781,7 @@ describe('invitation/password producer response mappings', () => {
     })
 
     const response = await request(await publicApp())
-      .post('/api/v1/invitations/password')
+      .post('/api/v1/invitations/password-reset')
       .set('x-forwarded-for', '198.51.100.42')
       .send({
         token: 'r6-synthetic-reset-proof',
@@ -820,6 +820,9 @@ describe('invitation/password producer response mappings', () => {
       'R6-synthetic-valid-password'
     )
     expect(directory.setInvitationPasswordForEmail).toHaveBeenCalledOnce()
+    expect(directory.getInvitationByToken).toHaveBeenCalledWith('r6-producer-invitation-token')
+    expect(directory.getInvitationByToken).toHaveBeenCalledOnce()
+    expect(directory.acceptInvitationForEmail).not.toHaveBeenCalled()
   })
 
   it('keeps a dropped post-dispatch reset acknowledgement unknown and never retries it', async () => {
@@ -850,7 +853,7 @@ describe('invitation/password producer response mappings', () => {
     const response = await (async () => {
       try {
         return await request(await publicApp())
-          .post('/api/v1/invitations/password')
+          .post('/api/v1/invitations/password-reset')
           .set('x-forwarded-for', '198.51.100.43')
           .send({
             token: 'r6-synthetic-reset-proof',
@@ -869,6 +872,8 @@ describe('invitation/password producer response mappings', () => {
     expect(response.headers['set-cookie']).toBeUndefined()
     expect(JSON.stringify(response.body)).not.toMatch(/r6-|sql|stack|invalid_password/i)
     expect(directory.setInvitationPasswordForEmail).toHaveBeenCalledOnce()
+    expect(directory.getInvitationByToken).toHaveBeenCalledWith('r6-producer-invitation-token')
+    expect(directory.getInvitationByToken).toHaveBeenCalledOnce()
     expect(droppedResetResponsesForTest()).toBe(1)
   })
 

@@ -235,7 +235,7 @@ export async function setupInvitationPasswordWithToken(
   invitationId: string,
   password: string
 ): Promise<InvitationPreview & { passwordUpdated: boolean }> {
-  const response = (await apiSend('POST', '/api/v1/invitations/password', {
+  const response = (await apiSend('POST', '/api/v1/invitations/password-reset', {
     token: invitationUrlId,
     email,
     invitationId,

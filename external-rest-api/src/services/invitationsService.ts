@@ -6,35 +6,6 @@ type AuthContext = {
   sessionToken: string
 }
 
-type ResetPasswordDomainError =
-  | 'not_found'
-  | 'forbidden'
-  | 'not_pending'
-  | 'expired'
-  | 'invalid_invitation'
-  | 'invalid_password'
-
-function invitationPasswordDomainError(
-  error: ControlApiError
-):
-  | 'not_found'
-  | 'forbidden'
-  | 'not_accepted'
-  | 'not_pending'
-  | 'expired'
-  | 'invalid_password'
-  | null {
-  const code = controlApiErrorCode(error)
-  if (error.status === 400 && code === 'invalid_password') return 'invalid_password'
-  if (error.status === 401 && code === 'user_retired') return 'not_found'
-  if (error.status === 403 && code === 'forbidden') return 'forbidden'
-  if (error.status === 404 && code === 'not_found') return 'not_found'
-  if (error.status === 409 && code === 'invitation_not_accepted') return 'not_accepted'
-  if (error.status === 409 && code === 'invitation_not_pending') return 'not_pending'
-  if (error.status === 410 && code === 'expired') return 'expired'
-  return null
-}
-
 function controlApiErrorCode(error: ControlApiError): string | null {
   if (
     error.body !== null &&
@@ -45,40 +16,6 @@ function controlApiErrorCode(error: ControlApiError): string | null {
     return error.body.error
   }
   return null
-}
-
-function resetPasswordDomainError(
-  error: ControlApiError,
-  password: string
-): ResetPasswordDomainError | null {
-  const code = controlApiErrorCode(error)
-  if (error.status === 400 && code === 'invalid_password') return 'invalid_password'
-  // The public reset route has already required token, email, and invitation ID.
-  // The producer's exact payload error therefore identifies an empty password.
-  if (error.status === 400 && code === 'invalid payload' && password.length === 0) {
-    return 'invalid_password'
-  }
-  if (error.status === 400 && code === 'invalid_invitation') return 'invalid_invitation'
-  if (error.status === 401 && code === 'user_retired') return 'invalid_invitation'
-  if (error.status === 403 && code === 'forbidden') return 'forbidden'
-  if (error.status === 404 && code === 'not_found') return 'not_found'
-  if (
-    error.status === 409 &&
-    (code === 'invitation_not_pending' || code === 'invitation_not_ready')
-  ) {
-    return 'not_pending'
-  }
-  if (error.status === 410 && code === 'expired') return 'expired'
-  return null
-}
-
-function unknownRecoveryOutcome(): ControlApiError {
-  return new ControlApiError(
-    'Password recovery outcome is unknown',
-    503,
-    { error: 'recovery_outcome_unknown' },
-    { 'retry-after': '2' }
-  )
 }
 
 function passwordAuthorityUnavailable(): ControlApiError {
@@ -207,78 +144,5 @@ export async function getInvitationByToken(token: string): Promise<InvitationPre
     const message = error instanceof Error ? error.message : ''
     if (message.includes('(404)')) return null
     throw error
-  }
-}
-
-export async function setupInvitationPassword(
-  auth: AuthContext,
-  invitationId: string,
-  password: string
-): Promise<{
-  error?:
-    | 'not_found'
-    | 'forbidden'
-    | 'not_accepted'
-    | 'not_pending'
-    | 'expired'
-    | 'invalid_password'
-  data?: InvitationPreview & { passwordUpdated: boolean }
-}> {
-  try {
-    const data = await controlApiRequest<InvitationPreview & { passwordUpdated: boolean }>(
-      'POST',
-      '/external/invitations/password',
-      {
-        body: {
-          userId: auth.userId,
-          email: auth.email,
-          invitationId,
-          password,
-        },
-        userSessionToken: auth.sessionToken,
-      }
-    )
-    return { data }
-  } catch (error) {
-    if (error instanceof ControlApiError && [429, 503].includes(error.status)) throw error
-    if (error instanceof ControlApiError) {
-      const domainError = invitationPasswordDomainError(error)
-      if (domainError) return { error: domainError }
-    }
-    throw passwordAuthorityUnavailable()
-  }
-}
-
-export async function setupInvitationPasswordWithToken(
-  token: string,
-  email: string,
-  invitationId: string,
-  password: string
-): Promise<{
-  error?:
-    | 'not_found'
-    | 'forbidden'
-    | 'not_accepted'
-    | 'not_pending'
-    | 'expired'
-    | 'invalid_invitation'
-    | 'invalid_password'
-  data?: InvitationPreview & { passwordUpdated: boolean; token: string }
-}> {
-  try {
-    const data = await controlApiRequest<
-      InvitationPreview & { passwordUpdated: boolean; token: string }
-    >('POST', '/external/invitations/password-token', {
-      body: { email, token, invitationId, password },
-    })
-    return { data }
-  } catch (error) {
-    if (error instanceof ControlApiError && [429, 503].includes(error.status)) throw error
-    if (error instanceof ControlApiError) {
-      const domainError = resetPasswordDomainError(error, password)
-      if (domainError) return { error: domainError }
-      if (error.status < 500) throw passwordAuthorityUnavailable()
-    }
-    throw unknownRecoveryOutcome()
   }
 }

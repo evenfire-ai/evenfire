@@ -19,6 +19,10 @@ const invitationsServiceMock = vi.hoisted(() => ({
 
 vi.mock('../src/authToken.js', () => authTokenMock)
 vi.mock('../src/services/invitationsService.js', () => invitationsServiceMock)
+vi.mock('../src/services/invitationPasswordService.js', () => ({
+  setupInvitationPassword: invitationsServiceMock.setupInvitationPassword,
+  setupInvitationPasswordWithToken: invitationsServiceMock.setupInvitationPasswordWithToken,
+}))
 
 describe('routes/invitations', () => {
   beforeEach(() => {
@@ -139,6 +143,45 @@ describe('routes/invitations', () => {
       'Synthetic-verified-password-reset-link',
       'invitee@example.com',
       'inv-1',
+      'Synthetic-new-password-123'
+    )
+  })
+
+  it('uses the additive reset route without preview or invitation acceptance', async () => {
+    invitationsServiceMock.setupInvitationPasswordWithToken.mockResolvedValue({
+      data: {
+        id: 'reset-1',
+        email: 'invitee@example.com',
+        purpose: 'password_reset',
+        status: 'accepted',
+        passwordUpdated: true,
+        token: 'Synthetic-reset-session-token',
+      },
+    })
+
+    const res = await request(makeApp())
+      .post('/invitations/password-reset')
+      .set('x-forwarded-for', '198.51.100.12')
+      .send({
+        token: 'Synthetic-reset-proof',
+        email: 'Invitee@Example.com',
+        invitationId: 'reset-1',
+        password: 'Synthetic-new-password-123',
+      })
+      .expect(200)
+
+    expect(res.body).toMatchObject({ id: 'reset-1', passwordUpdated: true })
+    expect(JSON.stringify(res.body)).not.toContain('Synthetic-reset-session-token')
+    expect(String(res.headers['set-cookie'])).toContain(
+      'profile_session=Synthetic-reset-session-token'
+    )
+    expect(invitationsServiceMock.getInvitationByToken).not.toHaveBeenCalled()
+    expect(invitationsServiceMock.acceptInvitation).not.toHaveBeenCalled()
+    expect(invitationsServiceMock.setupInvitationPassword).not.toHaveBeenCalled()
+    expect(invitationsServiceMock.setupInvitationPasswordWithToken).toHaveBeenCalledWith(
+      'Synthetic-reset-proof',
+      'invitee@example.com',
+      'reset-1',
       'Synthetic-new-password-123'
     )
   })
@@ -398,7 +441,7 @@ describe('routes/invitations', () => {
     }
 
     const limited = await request(app)
-      .post('/invitations/password')
+      .post('/invitations/password-reset')
       .set('x-forwarded-for', '198.51.100.10')
       .send({})
       .expect(429)

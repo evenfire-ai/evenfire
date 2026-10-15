@@ -5,12 +5,14 @@ import { sendPasswordAuthorityError } from '../http/passwordAdmissionError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 import { createRateLimiter } from '../middleware/rateLimit.js'
 import {
+  setupInvitationPassword,
+  setupInvitationPasswordWithToken,
+} from '../services/invitationPasswordService.js'
+import {
   acceptInvitation,
   createDesktopAuthorization,
   getInvitationByToken,
   listPendingInvitations,
-  setupInvitationPassword,
-  setupInvitationPasswordWithToken,
 } from '../services/invitationsService.js'
 import { setProfileSessionCookie } from '../sessionCookie.js'
 
@@ -145,6 +147,29 @@ function isInvalidInvitationProof(error: unknown): boolean {
   )
 }
 
+async function completePasswordReset(
+  req: Request,
+  res: Response,
+  token: string,
+  email: string,
+  invitationId: string,
+  password: string
+): Promise<void> {
+  const result = await setupInvitationPasswordWithToken(token, email, invitationId, password)
+  if (result.error) {
+    sendInvitationPasswordError(res, result.error)
+    return
+  }
+  const sessionToken = result.data?.token
+  if (!result.data || !sessionToken) {
+    res.status(502).json({ error: 'Failed to restore account session' })
+    return
+  }
+  const { token: _sessionToken, ...body } = result.data
+  setProfileSessionCookie(req, res, sessionToken)
+  res.status(200).json(body)
+}
+
 export function createInvitationsRouter(): Router {
   const router = Router()
 
@@ -201,24 +226,7 @@ export function createInvitationsRouter(): Router {
           throw error
         }
         if (preview?.purpose === 'password_reset') {
-          const result = await setupInvitationPasswordWithToken(
-            token,
-            email,
-            invitationId,
-            password
-          )
-          if (result.error) {
-            sendInvitationPasswordError(res, result.error)
-            return
-          }
-          const sessionToken = result.data?.token
-          if (!result.data || !sessionToken) {
-            res.status(502).json({ error: 'Failed to restore account session' })
-            return
-          }
-          const { token: _sessionToken, ...body } = result.data
-          setProfileSessionCookie(req, res, sessionToken)
-          res.status(200).json(body)
+          await completePasswordReset(req, res, token, email, invitationId, password)
           return
         }
       }
@@ -236,6 +244,29 @@ export function createInvitationsRouter(): Router {
       }
       setProfileSessionCookie(req, res, authResult.auth.sessionToken)
       res.status(200).json(result.data)
+    } catch (error) {
+      if (sendPasswordAuthorityError(error, res)) return
+      next(error)
+    }
+  })
+
+  router.post('/invitations/password-reset', acceptRateLimit, async (req: Request, res, next) => {
+    try {
+      const invitationId = String(req.body?.invitationId || '').trim()
+      if (!invitationId) {
+        res.status(400).json({ error: 'invitationId is required' })
+        return
+      }
+      const token = String(req.body?.token || '').trim()
+      const email = String(req.body?.email || '')
+        .trim()
+        .toLowerCase()
+      if (!token || !email) {
+        res.status(401).json({ error: 'Unauthorized' })
+        return
+      }
+      const password = String(req.body?.password || '')
+      await completePasswordReset(req, res, token, email, invitationId, password)
     } catch (error) {
       if (sendPasswordAuthorityError(error, res)) return
       next(error)

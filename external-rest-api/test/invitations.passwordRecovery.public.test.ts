@@ -4,7 +4,7 @@ import { type AddressInfo } from 'node:net'
 import request from 'supertest'
 import { createApp } from '../src/app.js'
 import { config } from '../src/config.js'
-import { setupInvitationPasswordWithToken } from '../src/services/invitationsService.js'
+import { setupInvitationPasswordWithToken } from '../src/services/invitationPasswordService.js'
 
 const recoveryProof = 'synthetic-one-use-recovery-proof'
 
