@@ -92,6 +92,9 @@ export function createConversationStore(
   }
 
   const worker = spawnWorker(opts) as unknown as WorkerLike & Worker
+  // One line per process names the database this Host reads and writes, so a
+  // Pod replacement that changes the store is visible in the Pod logs.
+  logger.info({ dbPath: opts.dbPath, mode: opts.mode }, '[ConversationStore] opened')
   const persistQueue = new PersistQueue(worker, {
     syncTimeoutMs: opts.syncTimeoutMs,
     asyncTimeoutMs: opts.asyncTimeoutMs,

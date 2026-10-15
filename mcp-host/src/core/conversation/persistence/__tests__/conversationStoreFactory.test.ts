@@ -106,3 +106,57 @@ describe('createConversationStore persist failure', () => {
     }
   })
 })
+
+describe('createConversationStore store identity', () => {
+  it('logs the resolved database path once for a sqlite store', async () => {
+    const script = workerScript(`
+      const { parentPort } = require('node:worker_threads')
+      parentPort.on('message', msg => {
+        if (msg.op.kind === 'ping') parentPort.postMessage({ id: msg.id, ok: true, result: 'pong' })
+        if (msg.op.kind === 'shutdown') {
+          parentPort.postMessage({ id: msg.id, ok: true, result: { ok: true } })
+          process.exit(0)
+        }
+      })
+    `)
+    const dbPath = path.join(path.dirname(script), 'state.db')
+    const info = vi.spyOn(logger, 'info')
+    try {
+      const handle = createConversationStore({
+        mode: 'sqlite',
+        dbPath,
+        cacheSize: 10,
+        syncTimeoutMs: 2000,
+        asyncTimeoutMs: 2000,
+        checkpointEveryWrites: 100,
+        heartbeatMs: 60_000,
+        workerScriptPath: script,
+      })
+      await expect(handle.persistQueue?.enqueueSync({ kind: 'ping' })).resolves.toBe('pong')
+      const opened = info.mock.calls.filter(([, msg]) => msg === '[ConversationStore] opened')
+      expect(opened).toEqual([[{ dbPath, mode: 'sqlite' }, '[ConversationStore] opened']])
+      await handle.shutdown()
+    } finally {
+      info.mockRestore()
+    }
+  })
+
+  it('logs no database path for a memory store', () => {
+    const info = vi.spyOn(logger, 'info')
+    try {
+      const handle = createConversationStore({
+        mode: 'memory',
+        cacheSize: 10,
+        syncTimeoutMs: 2000,
+        asyncTimeoutMs: 2000,
+        checkpointEveryWrites: 100,
+        heartbeatMs: 60_000,
+      })
+      // Liveness witness: the factory built the memory store.
+      expect(handle.mode).toBe('memory')
+      expect(info.mock.calls.filter(([, msg]) => msg === '[ConversationStore] opened')).toEqual([])
+    } finally {
+      info.mockRestore()
+    }
+  })
+})
