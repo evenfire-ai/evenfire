@@ -352,7 +352,7 @@ function sanitizeDesktopNotificationActions(
 
 export function registerIpcHandlers(
   service: AppService,
-  logout: () => Promise<unknown> = () => service.logout()
+  logout: () => Promise<number> = () => service.logout()
 ): void {
   const streamOwnerCleanupRegistered = new Set<number>()
   const entityChangeOwnerCleanupRegistered = new Set<number>()

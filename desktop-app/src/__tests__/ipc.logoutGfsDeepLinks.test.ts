@@ -27,7 +27,7 @@ vi.mock('electron', () => ({
 vi.mock('../appService.js', () => ({ AppService: class {} }))
 
 const queue = new GfsResourceDeepLinkQueue()
-const service = { logout: vi.fn(async () => undefined) }
+const service = { logout: vi.fn(async () => 7) }
 const logoutWithQueueCleanup = createLogoutWithGfsResourceDeepLinkClear(queue, () =>
   service.logout()
 )
@@ -59,9 +59,10 @@ describe('auth:logout GFS deep-link queue cleanup', () => {
   it('clears user A before logout and accepts user B links afterward', async () => {
     const userALink = queue.enqueue(producedTarget('gfs://main/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'))
 
-    await handler('auth:logout')(trusted, undefined)
+    const result = await handler('auth:logout')(trusted, undefined)
 
     expect(service.logout).toHaveBeenCalledOnce()
+    expect(result).toEqual({ ok: true, sessionGeneration: 7 })
     expect(queue.list()).toEqual([])
     const userBLink = queue.enqueue(producedTarget('gfs://main/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'))
     expect(userBLink.id).toBeGreaterThan(userALink.id)
@@ -83,8 +84,8 @@ describe('auth:logout GFS deep-link queue cleanup', () => {
     let finishLogout!: () => void
     service.logout.mockImplementationOnce(
       () =>
-        new Promise<void>(resolve => {
-          finishLogout = resolve
+        new Promise<number>(resolve => {
+          finishLogout = () => resolve(8)
         })
     )
     queue.enqueue(producedTarget('gfs://main/dddddddddddddddddddddddddddddddd'))
@@ -96,7 +97,7 @@ describe('auth:logout GFS deep-link queue cleanup', () => {
     expect(queue.list()).toEqual([duringLogout])
 
     finishLogout()
-    await logoutOperation
+    await expect(logoutOperation).resolves.toEqual({ ok: true, sessionGeneration: 8 })
     expect(queue.list()).toEqual([])
     expect(service.logout).toHaveBeenCalledOnce()
 
