@@ -154,4 +154,27 @@ describe('marker ownership observation invariants', () => {
       { numRuns: 10000 }
     )
   })
+
+  it('keeps a same-revision M marker bound to its exact volatile session identity', () => {
+    fc.assert(
+      fc.property(memoryOnlyMarker, owner => {
+        const volatileSessionId = owner.intent.volatileSessionId.endsWith('f')
+          ? `${owner.intent.volatileSessionId.slice(0, -1)}e`
+          : `${owner.intent.volatileSessionId.slice(0, -1)}f`
+        const differentOwner = {
+          ...owner,
+          intent: { ...owner.intent, volatileSessionId },
+        }
+
+        expect(
+          pendingExternalLogoutOwnership(
+            { status: 'observed', marker: owner },
+            [differentOwner],
+            true
+          )
+        ).toEqual({ status: 'superseded' })
+      }),
+      { numRuns: 10000 }
+    )
+  })
 })
