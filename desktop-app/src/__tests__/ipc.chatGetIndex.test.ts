@@ -109,6 +109,33 @@ describe('chat:getIndex', () => {
     expect(warn).not.toHaveBeenCalled()
   })
 
+  it('returns the index while the cleanup retry is still pending', async () => {
+    const binding = await import('../chatStoreBinding.js')
+    const retry = vi.mocked(binding.requireChatStore().retryPendingDeleteCleanups)
+    let releaseCleanup!: () => void
+    let done = false
+    retry.mockImplementationOnce(
+      () =>
+        new Promise<void>(resolve => {
+          releaseCleanup = () => {
+            done = true
+            resolve()
+          }
+        })
+    )
+
+    const index = await call('chat:getIndex', { agentRef: 'agent-1' })
+
+    // Witness: the retry was started for this agent and is still pending.
+    expect(retry).toHaveBeenCalledWith(TEAM_A, 'agent-1')
+    expect(done).toBe(false)
+    expect(tombstones(index)).toEqual(['deleted-chat'])
+
+    releaseCleanup()
+    await settleCleanupRetries()
+    expect(done).toBe(true)
+  })
+
   it('still returns the tombstones when the session scope changed during the retry', async () => {
     // A transient identity change: the main service reports another user while
     // the store is still bound to user-a, so the retry rejects with a

@@ -20,6 +20,7 @@ const index: ChatIndex = {
     },
   ],
   lastActiveChatId: 'chat-1',
+  onboardingDismissed: false,
 }
 
 describe('runChatGetIndex', () => {
