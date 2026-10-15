@@ -1022,7 +1022,9 @@ export const config: Config = {
   // T2.1 — Conversation store backend selector.
   //
   //   - `memory`: legacy InMemoryConversationStore (no durability). Default
-  //     so the canary rollout can opt in per Host.
+  //     for a process started outside HCC (local dev, tests). HCC sets
+  //     `CLERUM_SESSION_STORE=sqlite` in every Host container's env, which
+  //     wins over the mcp-host ConfigMap (docs/architecture/host-storage-layout.md).
   //   - `sqlite`: SqliteConversationStore (RAM + worker thread + state.db).
   //   - `dual`: both stores live, reads from RAM, writes apply to both —
   //     for one-week parity validation (`clerum_conversation_store_parity_total`).

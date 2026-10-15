@@ -23,6 +23,17 @@ HCC renders the same storage for every Host Deployment
 | Init container        | `workspace-layout-merge`, while `CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE` is enabled (the default) |
 | Deployment strategy   | `Recreate`                                                                                       |
 
+HCC puts the store env in the container's `env`, which Kubernetes applies over
+the `mcp-host-config` ConfigMap loaded through `envFrom`, and mcp-host prefers
+`CLERUM_SESSION_DB_DIR` to `CLERUM_SESSION_DB_PATH` and to the memory
+workspace path (`resolveSessionDbPath`, `mcp-host/src/main.ts`), so a
+ConfigMap cannot move the database. The gcp-dev and gcp-prod overlays
+(`keyper-labs/evenfire-infra`, `mcp-host-config.yaml`) set
+`CLERUM_MEMORY_ENABLED` and `CLERUM_SESSION_STORE=sqlite`, and none of
+`CLERUM_SESSION_DB_DIR`, `CLERUM_SESSION_DB_PATH` or
+`CLERUM_MEMORY_WORKSPACE_PATH`. A stateful Host therefore already resolved its
+database to `/workspace/state.db`, the PVC root, before #825.
+
 `Recreate` stops the old Pod before the new one starts. A rolling update can
 run both Pods on the same node at once, and a `ReadWriteOnce` PVC does not
 prevent that, so two processes could write the same SQLite file.
@@ -32,6 +43,15 @@ Agent file tools cannot read or write any file whose basename starts with
 requested and on the resolved path
 (`mcp-host/src/workspace/protectedPaths.ts`). The shell gate applies the same
 prefix lexically and is not a security boundary.
+
+The database is part of the agent tree. The shell tool runs with the
+workspace root as its working directory (`mcp-host/src/core/tools/shell.ts`),
+so a command such as `rm -f *`, `find . -type f -delete` or `git clean -fdx`
+run there deletes `state.db` and its journals, and a hard link
+(`ln state.db notes`) exposes its contents under a name the prefix rule
+allows. Stateful Hosts had this exposure before #825; stateless Hosts gain it,
+because their database moves from the separate `state/` mount to the root.
+Isolating the database from the agent tree is a follow-up.
 
 ## The previous split layout
 
@@ -163,10 +183,11 @@ forced by a deploy.
 
 ## Rollback
 
-- Rolling HCC back is safe for stateful and stateless Hosts, with the one
-  exception below. The previous `workspace-layout-init` re-splits stateless
-  trees, and `workspace-layout-merge` merges them again on roll-forward.
-- The exception is a tree cut inside the previous init. That init moves the
+- Rolling HCC back is safe for stateful and stateless Hosts, with the two
+  exceptions below (risk R6 of #825). The previous `workspace-layout-init`
+  re-splits stateless trees, and `workspace-layout-merge` merges them again
+  on roll-forward.
+- The first exception is a tree cut inside the previous init. That init moves the
   root entries into `workspace/` in one loop and then `workspace/state.db*`
   into `state/` in a second loop. A crash between the loops leaves
   `workspace/state.db*` and a `state/` without a database. The previous init
@@ -178,6 +199,17 @@ forced by a deploy.
   a roll-forward before the Host starts again. To recover, scale the Host to
   zero, rename the new root `state.db*` files from a helper Pod (keep them),
   and move `workspace/state.db*` to the root.
+- The second exception is the same cut when `state/` already holds a
+  `state.db*.pre-<ts>.bak` from an earlier start. The tree then carries the
+  signature, and the merge moves `workspace/` entries in name order:
+  `state.db` before `state.db-shm` and `state.db-wal`. Resume covers only
+  journals at the root next to `state/state.db`, so a merge cut after
+  `workspace/state.db` moved leaves a root database next to journals in
+  `workspace/`, and every later start refuses with F2
+  (`more than one live SQLite database`). Nothing is lost: the Host stays in
+  `Init:Error` with the database and its journals on the PVC. To recover,
+  move the remaining `workspace/state.db-*` journals to the root from a
+  helper Pod.
 - A merged root that holds a symlink (for example one an agent created under
   `workspace/`, which the merge moved to the root) blocks the previous init:
   it creates empty `state/` and `workspace/`, then exits 1 with
@@ -192,8 +224,12 @@ forced by a deploy.
 - For an operator-initiated rollback: do not roll back while any Host is in
   `Init:Error` in `workspace-layout-merge`, and do not change a Host's
   lifecycle while rolled back.
-- Never roll back the Host image alone; HCC's Deployment carries both
-  (`CONTEXT_MAPPER_HOST_IMAGE`, `CONTEXT_MAPPER_DESKTOP_IMAGE`).
+- Never roll back the Host image alone; HCC's Deployment carries it. The
+  gcp-dev and gcp-prod overlays set both `CONTEXT_MAPPER_HOST_IMAGE` and
+  `CONTEXT_MAPPER_DESKTOP_IMAGE` (`patches/dynamic-images.yaml`);
+  `deploy/base` sets only the first, so without an overlay HCC renders desktop
+  Hosts with `clerum/mcp-host-desktop:latest`
+  (`host-context-controller/src/config.ts`).
 - A desktop Host's history from before #825 lived in the container, outside
   the PVC, and is lost at the first rollout unless it is copied out of the
   live Pod first (`kubectl --context <ctx> cp` of `/workspace/state.db*`).
