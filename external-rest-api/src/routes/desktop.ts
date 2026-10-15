@@ -25,7 +25,11 @@ export function createDesktopRouter(): Router {
       externalRestApiVersion: releaseManifest.externalRestApiVersion,
       rpcProxyVersion: releaseManifest.rpcProxyVersion,
       desktopVersion: releaseManifest.desktopVersion,
-      minimumDesktopVersion: releaseManifest.minimumDesktopVersion,
+      // Deprecated: kept only for desktop clients <= 0.11.0, which compare
+      // against this field and throw if it is missing. It equals
+      // desktopVersion, so those clients are forced to update (intended).
+      // Remove once no desktop <= 0.11.0 is in use.
+      minimumDesktopVersion: releaseManifest.desktopVersion,
       releaseTag: tag,
       releaseUrl: `${config.desktopReleaseBaseUrl}/tag/${encodeURIComponent(tag)}`,
     })

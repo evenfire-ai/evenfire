@@ -34,7 +34,6 @@ describe('AppService.getDesktopReleaseStatus', () => {
         checked: boolean
         currentVersion: string
         latestVersion: string
-        minimumVersion: string
         updateRequired: boolean
         releaseUrl: string
         releaseId?: string
@@ -55,7 +54,9 @@ describe('AppService.getDesktopReleaseStatus', () => {
         externalRestApiVersion: '0.1.50',
         rpcProxyVersion: '0.1.36',
         desktopVersion: '0.1.250',
-        minimumDesktopVersion: '0.1.250',
+        // Deprecated compat field: deliberately different from desktopVersion
+        // to prove the client ignores it.
+        minimumDesktopVersion: '0.0.1',
         releaseTag: 'desktop-app-0.1.250',
         releaseUrl: 'https://github.com/your-org/evenfire/releases/tag/desktop-app-0.1.250',
       }),
@@ -66,7 +67,6 @@ describe('AppService.getDesktopReleaseStatus', () => {
         checked: true,
         currentVersion: '0.1.249',
         latestVersion: '0.1.250',
-        minimumVersion: '0.1.250',
         updateRequired: true,
         releaseUrl: 'https://github.com/your-org/evenfire/releases/tag/desktop-app-0.1.250',
         releaseId: 'master-abc123',
@@ -88,5 +88,81 @@ describe('AppService.getDesktopReleaseStatus', () => {
         process.env.npm_package_version = previousPackageVersion
       }
     }
+  })
+
+  describe('updateRequired is driven by the release desktopVersion', () => {
+    const statusFor = async (currentVersion: string, policyOverrides: Record<string, unknown>) => {
+      const previousPackageVersion = process.env.npm_package_version
+      process.env.npm_package_version = currentVersion
+      const service = new AppService() as unknown as {
+        sessionToken: string
+        authClient: { getDesktopReleasePolicy: ReturnType<typeof vi.fn> }
+        getDesktopReleaseStatus: () => Promise<{ latestVersion: string; updateRequired: boolean }>
+      }
+      service.sessionToken = 'session-token'
+      service.authClient = {
+        getDesktopReleasePolicy: vi.fn().mockResolvedValue({
+          releaseId: 'release-0.11.0',
+          releaseTag: 'v0.11.0',
+          releaseUrl: 'https://github.com/your-org/evenfire/releases/tag/v0.11.0',
+          ...policyOverrides,
+        }),
+      }
+      try {
+        return await service.getDesktopReleaseStatus()
+      } finally {
+        if (previousPackageVersion === undefined) {
+          delete process.env.npm_package_version
+        } else {
+          process.env.npm_package_version = previousPackageVersion
+        }
+      }
+    }
+
+    it('requires an update when the installed version is older', async () => {
+      await expect(statusFor('0.10.9', { desktopVersion: '0.11.0' })).resolves.toMatchObject({
+        latestVersion: '0.11.0',
+        updateRequired: true,
+      })
+    })
+
+    it('does not require an update when the installed version is equal', async () => {
+      await expect(statusFor('0.11.0', { desktopVersion: '0.11.0' })).resolves.toMatchObject({
+        latestVersion: '0.11.0',
+        updateRequired: false,
+      })
+    })
+
+    it('does not require an update when the installed version is newer', async () => {
+      await expect(statusFor('0.12.0', { desktopVersion: '0.11.0' })).resolves.toMatchObject({
+        latestVersion: '0.11.0',
+        updateRequired: false,
+      })
+    })
+
+    it('ignores the deprecated minimumDesktopVersion field', async () => {
+      await expect(
+        statusFor('0.11.0', { desktopVersion: '0.11.0', minimumDesktopVersion: '0.12.0' })
+      ).resolves.toMatchObject({ updateRequired: false })
+      await expect(
+        statusFor('0.10.0', { desktopVersion: '0.11.0', minimumDesktopVersion: '0.1.0' })
+      ).resolves.toMatchObject({ updateRequired: true })
+    })
+
+    it('does not require an update or throw when desktopVersion is missing', async () => {
+      await expect(statusFor('0.10.0', {})).resolves.toMatchObject({
+        latestVersion: '',
+        updateRequired: false,
+      })
+    })
+
+    it('does not require an update or throw when desktopVersion is malformed', async () => {
+      for (const desktopVersion of ['', 'not-a-version', 42, null]) {
+        await expect(statusFor('0.10.0', { desktopVersion })).resolves.toMatchObject({
+          latestVersion: '',
+          updateRequired: false,
+        })
+      }
+    })
   })
 })

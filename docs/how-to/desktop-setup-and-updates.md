@@ -88,11 +88,15 @@ on first launch; running through local dev commands selects it by default.
 
 After you authenticate, the app checks the **currently selected tenant** for its
 update policy, so different tenants can be on different versions at the same
-time. It asks that tenant's External REST API for its release info, including a
-`minimumDesktopVersion`. If the installed version is **below** that minimum, the
-app shows an **update-required** screen and opens the release page for the new
-build (tag `desktop-app-<version>`) in your browser. (A packaged distribution is
-where this matters most — a source checkout can just pull the latest.)
+time. It asks that tenant's External REST API for its release info, including the
+release's `desktopVersion`. The desktop app is tightly coupled to the backend it
+talks to, so every release requires matching desktops: if the installed version
+is **below** the release's `desktopVersion`, the app shows an
+**update-required** screen and opens the release page for the new build (tag
+`v<version>`) in your browser. An installed version equal to or newer than
+`desktopVersion` is not asked to update. There is no separate minimum version.
+(A packaged distribution is where this matters most — a source checkout can
+just pull the latest.)
 
 This is update **detection**, not silent auto-install: the app tells the user an
 update is required and links the release. Code signing, notarization, and

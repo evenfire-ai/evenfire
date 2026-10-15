@@ -3,7 +3,7 @@ set -u
 FAIL=0
 
 # Tests for the release-cut scripts:
-#   scripts/release/update-desktop-release-manifest.mjs  (floor decoupling)
+#   scripts/release/update-desktop-release-manifest.mjs  (the manifest rewrite)
 #   scripts/release/prepare-release.mjs                  (the one writer)
 #   scripts/release/validate-release-tag.mjs             (the checker)
 #
@@ -15,7 +15,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
 
-# Write the ghcr pointer component the eighth coordinate reads.
+# Write the ghcr pointer component the pointer coordinate reads.
 # Usage: make_ghcr_component <dir> <tag> [secondRowTag]
 # Two rows, because the component in the real tree has one per published image
 # and the coordinate must handle ALL of them. The optional second tag builds a
@@ -51,9 +51,9 @@ component_tags() {
 
 # Build a scratch repo with the given desktop/ers/rpc versions and manifest.
 # Usage: make_fixture <dir> <desktopVersion> <ersVersion> <rpcVersion> \
-#                     <manifestDesktop> <manifestMinimum> <manifestErs> <manifestRpc>
+#                     <manifestDesktop> <manifestErs> <manifestRpc>
 make_fixture() {
-  local d=$1 dv=$2 ev=$3 rv=$4 mdv=$5 mmin=$6 mev=$7 mrv=$8
+  local d=$1 dv=$2 ev=$3 rv=$4 mdv=$5 mev=$6 mrv=$7
   mkdir -p "$d/desktop-app" "$d/external-rest-api/src" "$d/rpc-proxy"
   printf '{\n  "name": "desktop-app",\n  "version": "%s"\n}\n' "$dv" > "$d/desktop-app/package.json"
   printf '{\n  "name": "desktop-app",\n  "version": "%s",\n  "packages": {\n    "": {\n      "version": "%s"\n    }\n  }\n}\n' "$dv" "$dv" > "$d/desktop-app/package-lock.json"
@@ -65,7 +65,6 @@ export type ReleaseManifest = {
   externalRestApiVersion: string
   rpcProxyVersion: string
   desktopVersion: string
-  minimumDesktopVersion: string
 }
 
 export const releaseManifest: ReleaseManifest = {
@@ -73,7 +72,6 @@ export const releaseManifest: ReleaseManifest = {
   externalRestApiVersion: '$mev',
   rpcProxyVersion: '$mrv',
   desktopVersion: '$mdv',
-  minimumDesktopVersion: '$mmin',
 }
 EOF
   # The ghcr pin is a coordinate like any other, so every fixture carries one.
@@ -93,105 +91,33 @@ manifest_field() {
   grep -E "^  $2: '" "$1/external-rest-api/src/releaseManifest.ts" | sed "s/.*'\(.*\)'.*/\1/"
 }
 
-assert_floor_is_not_dragged_by_a_desktop_bump() {
+assert_desktop_bump_advances_desktop_version() {
   local d; d="$(mktemp -d)"
-  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.1.252 0.1.252 0.1.60 0.1.51
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.1.252 0.1.60 0.1.51
 
   if ( cd "$d" && node "$REPO_ROOT/scripts/release/update-desktop-release-manifest.mjs" \
         --release-id test-0000000 >/dev/null 2>&1 ); then
-    local dv min
-    dv="$(manifest_field "$d" desktopVersion)"
-    min="$(manifest_field "$d" minimumDesktopVersion)"
-    if [ "$dv" = "0.5.0" ] && [ "$min" = "0.1.252" ]; then
-      pass "desktop bump advances desktopVersion and leaves the floor alone"
+    local dv; dv="$(manifest_field "$d" desktopVersion)"
+    if [ "$dv" = "0.5.0" ]; then
+      pass "desktop bump advances desktopVersion"
     else
-      fail "expected desktopVersion=0.5.0 minimumDesktopVersion=0.1.252, got $dv / $min"
+      fail "expected desktopVersion=0.5.0, got $dv"
     fi
   else
-    fail "update-desktop-release-manifest.mjs rejected a floor below desktopVersion"
+    fail "update-desktop-release-manifest.mjs rejected a plain desktop bump"
   fi
   rm -rf "$d"
 }
 
-assert_floor_above_desktop_is_rejected() {
-  local d; d="$(mktemp -d)"
-  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.9.9 0.1.60 0.1.51
-
-  if ( cd "$d" && node "$REPO_ROOT/scripts/release/update-desktop-release-manifest.mjs" \
-        --validate-only >/dev/null 2>&1 ); then
-    fail "minimumDesktopVersion greater than desktopVersion was accepted"
-  else
-    pass "minimumDesktopVersion greater than desktopVersion is rejected"
-  fi
-  rm -rf "$d"
-}
-
-assert_explicit_minimum_flag_is_honoured() {
-  local d; d="$(mktemp -d)"
-  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
-
-  # 0.5.5 deliberately differs from BOTH the old floor (0.1.252) and the new
-  # desktop version (0.6.0). Asking for 0.6.0 here would pass against the
-  # unpatched script too, since its forced write lands on exactly that value.
-  if ( cd "$d" && node "$REPO_ROOT/scripts/release/update-desktop-release-manifest.mjs" \
-        --release-id test-0000000 --minimum-desktop-version 0.5.5 >/dev/null 2>&1 ); then
-    local min; min="$(manifest_field "$d" minimumDesktopVersion)"
-    if [ "$min" = "0.5.5" ]; then
-      pass "--minimum-desktop-version raises the floor when asked"
-    else
-      fail "expected floor 0.5.5 after explicit raise, got $min"
-    fi
-  else
-    fail "--minimum-desktop-version was not accepted"
-  fi
-  rm -rf "$d"
-}
-
-assert_unreadable_manifest_does_not_synthesize_a_floor() {
+# minimumDesktopVersion is retired: desktop clients must update whenever they
+# are below the release's desktopVersion. A manifest written before the
+# retirement (on HEAD or on a --previous ref) still carries the field; the
+# rewrite must drop it, or the rendered object would no longer match the
+# rendered ReleaseManifest type and external-rest-api would fail to compile.
+assert_legacy_minimum_field_is_dropped_on_rewrite() {
   local d; d="$(mktemp -d)"
   mkdir -p "$d/desktop-app" "$d/external-rest-api/src" "$d/rpc-proxy"
   printf '{\n  "name": "desktop-app",\n  "version": "0.5.0"\n}\n' > "$d/desktop-app/package.json"
-  printf '{\n  "name": "external-rest-api",\n  "version": "0.1.60"\n}\n' > "$d/external-rest-api/package.json"
-  printf '{\n  "name": "rpc-proxy",\n  "version": "0.1.51"\n}\n' > "$d/rpc-proxy/package.json"
-  # The export is renamed so parseManifest's regex cannot find `releaseManifest`
-  # and returns null -- simulates an unreadable/corrupted manifest with no
-  # --minimum-desktop-version flag to fall back on.
-  cat > "$d/external-rest-api/src/releaseManifest.ts" <<'EOF'
-export type ReleaseManifest = {
-  releaseId: string
-  externalRestApiVersion: string
-  rpcProxyVersion: string
-  desktopVersion: string
-  minimumDesktopVersion: string
-}
-
-export const releaseManifestRENAMED: ReleaseManifest = {
-  releaseId: 'fixture-0000000',
-  externalRestApiVersion: '0.1.60',
-  rpcProxyVersion: '0.1.51',
-  desktopVersion: '0.1.252',
-  minimumDesktopVersion: '0.1.252',
-}
-EOF
-  ( cd "$d" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm init )
-
-  if ( cd "$d" && node "$REPO_ROOT/scripts/release/update-desktop-release-manifest.mjs" \
-        --release-id t-3 >/dev/null 2>&1 ); then
-    fail "unreadable manifest with no explicit floor was silently accepted"
-  elif grep -q "minimumDesktopVersion: '0.5.0'" "$d/external-rest-api/src/releaseManifest.ts"; then
-    fail "unreadable manifest run was rejected but still wrote desktopVersion as the floor"
-  else
-    pass "unreadable manifest with no explicit floor is rejected, not silently defaulted to desktopVersion"
-  fi
-  rm -rf "$d"
-}
-
-assert_previous_ref_does_not_revert_a_raised_floor() {
-  local d; d="$(mktemp -d)"
-  mkdir -p "$d/desktop-app" "$d/external-rest-api/src" "$d/rpc-proxy"
-
-  # Earlier state, tagged v1: desktop 0.1.252, floor 0.1.252.
-  printf '{\n  "name": "desktop-app",\n  "version": "0.1.252"\n}\n' > "$d/desktop-app/package.json"
   printf '{\n  "name": "external-rest-api",\n  "version": "0.1.60"\n}\n' > "$d/external-rest-api/package.json"
   printf '{\n  "name": "rpc-proxy",\n  "version": "0.1.51"\n}\n' > "$d/rpc-proxy/package.json"
   cat > "$d/external-rest-api/src/releaseManifest.ts" <<'EOF'
@@ -207,95 +133,72 @@ export const releaseManifest: ReleaseManifest = {
   releaseId: 'v1-0000000',
   externalRestApiVersion: '0.1.60',
   rpcProxyVersion: '0.1.51',
-  desktopVersion: '0.1.252',
+  desktopVersion: '0.4.0',
   minimumDesktopVersion: '0.1.252',
 }
 EOF
   ( cd "$d" && git init -q . && git add -A && git -c user.email=t@t -c user.name=t commit -qm v1 && git tag v1 )
 
-  # HEAD: an operator already raised the floor to 0.4.0 and bumped desktop to 0.5.0.
-  printf '{\n  "name": "desktop-app",\n  "version": "0.5.0"\n}\n' > "$d/desktop-app/package.json"
-  cat > "$d/external-rest-api/src/releaseManifest.ts" <<'EOF'
-export type ReleaseManifest = {
-  releaseId: string
-  externalRestApiVersion: string
-  rpcProxyVersion: string
-  desktopVersion: string
-  minimumDesktopVersion: string
-}
-
-export const releaseManifest: ReleaseManifest = {
-  releaseId: 'head-0000000',
-  externalRestApiVersion: '0.1.60',
-  rpcProxyVersion: '0.1.51',
-  desktopVersion: '0.5.0',
-  minimumDesktopVersion: '0.4.0',
-}
-EOF
-  ( cd "$d" && git add -A && git -c user.email=t@t -c user.name=t commit -qm head )
-
-  if ( cd "$d" && node "$REPO_ROOT/scripts/release/update-desktop-release-manifest.mjs" \
-        --release-id t-2 --previous v1 >/dev/null 2>&1 ); then
-    local min; min="$(manifest_field "$d" minimumDesktopVersion)"
-    if [ "$min" = "0.4.0" ]; then
-      pass "--previous does not revert a floor already raised on HEAD"
-    else
-      fail "expected floor to stay at HEAD's 0.4.0, got $min (reverted to the --previous ref's floor)"
+  local manifest="$d/external-rest-api/src/releaseManifest.ts" problems="" previous_args
+  for previous_args in "" "--previous v1"; do
+    git -C "$d" checkout -q -- external-rest-api/src/releaseManifest.ts
+    # shellcheck disable=SC2086 # previous_args is deliberately word-split
+    if ! ( cd "$d" && node "$REPO_ROOT/scripts/release/update-desktop-release-manifest.mjs" \
+          --release-id t-2 $previous_args >/dev/null 2>&1 ); then
+      problems+="the rewrite failed (args='${previous_args}'); "
+      continue
     fi
+    if grep -q 'minimumDesktopVersion' "$manifest"; then
+      problems+="minimumDesktopVersion survived the rewrite (args='${previous_args}'); "
+    fi
+    if [ "$(manifest_field "$d" desktopVersion)" != "0.5.0" ]; then
+      problems+="desktopVersion not advanced to 0.5.0 (args='${previous_args}'); "
+    fi
+  done
+
+  if [ -z "$problems" ]; then
+    pass "a legacy manifest's minimumDesktopVersion is dropped on rewrite, with and without --previous"
   else
-    fail "--previous v1 with a floor already raised on HEAD was unexpectedly rejected"
+    fail "$problems"
   fi
   rm -rf "$d"
 }
 
-assert_ordering_check_fails_against_unpatched_script() {
-  local d; d="$(mktemp -d)"
-  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+# The --minimum-desktop-version flag is retired. Ignoring it silently would let
+# an operator following an old runbook believe they set a floor; refuse it
+# before anything is written instead.
+assert_retired_minimum_flag_is_refused_before_any_write() {
+  local d out rc; d="$(mktemp -d)"
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.60 0.1.51
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
 
-  # Case 2 above (floor > desktopVersion) also gets rejected by the unpatched
-  # `!==` check, so it does not prove ordering semantics. This case uses a
-  # floor STRICTLY BELOW desktopVersion, which the unpatched equality check
-  # rejects (0.1.252 !== 0.5.0) but the patched ordering check accepts
-  # (0.1.252 <= 0.5.0) -- the only kind of case that discriminates the two.
-  local unpatched="$d/unpatched-update-desktop-release-manifest.mjs"
-  if ! git -C "$REPO_ROOT" show 75e44f8e:scripts/release/update-desktop-release-manifest.mjs \
-        > "$unpatched" 2>/dev/null; then
-    fail "could not materialise the unpatched script from 75e44f8e"
-    rm -rf "$d"
-    return
-  fi
+  out="$( cd "$d" && node scripts/release/prepare-release.mjs \
+      --version 0.6.0 --release-id t --minimum-desktop-version 0.5.0 2>&1 )"; rc=$?
+  local pkg; pkg="$(node -e 'console.log(require(process.argv[1]).version)' "$d/desktop-app/package.json")"
 
-  local unpatched_exit patched_exit
-  ( cd "$d" && node "$unpatched" --validate-only >/dev/null 2>&1 )
-  unpatched_exit=$?
-  ( cd "$d" && node "$REPO_ROOT/scripts/release/update-desktop-release-manifest.mjs" \
-        --validate-only >/dev/null 2>&1 )
-  patched_exit=$?
-
-  if [ "$unpatched_exit" -ne 0 ] && [ "$patched_exit" -eq 0 ]; then
-    pass "ordering check (0.1.252 <= 0.5.0) is rejected by the unpatched equality check and accepted by the patched ordering check"
+  if [ "$rc" -ne 0 ] && [ "$pkg" = "0.5.0" ] && grep -q -- '--minimum-desktop-version' <<< "$out"; then
+    pass "the retired --minimum-desktop-version flag is refused, by name, before any coordinate is written"
   else
-    fail "expected unpatched exit!=0 and patched exit=0, got unpatched=$unpatched_exit patched=$patched_exit"
+    fail "expected a named refusal with package.json untouched; got rc=$rc pkg=$pkg out='$out'"
   fi
   rm -rf "$d"
 }
 
 assert_prepare_release_writes_every_coordinate() {
   local d; d="$(mktemp -d)"
-  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.60 0.1.51
   cp -R "$REPO_ROOT/scripts" "$d/scripts"
 
   if ( cd "$d" && node scripts/release/prepare-release.mjs \
         --version 0.6.0 --release-id test-1111111 >/dev/null 2>&1 ); then
-    local pv lv dv min
+    local pv lv dv
     pv="$(grep '"version"' "$d/desktop-app/package.json" | sed 's/.*: "\(.*\)".*/\1/')"
     lv="$(node -e 'const j=require(process.argv[1]);console.log(j.version,j.packages[""].version)' "$d/desktop-app/package-lock.json")"
     dv="$(manifest_field "$d" desktopVersion)"
-    min="$(manifest_field "$d" minimumDesktopVersion)"
-    if [ "$pv" = "0.6.0" ] && [ "$lv" = "0.6.0 0.6.0" ] && [ "$dv" = "0.6.0" ] && [ "$min" = "0.1.252" ]; then
+    if [ "$pv" = "0.6.0" ] && [ "$lv" = "0.6.0 0.6.0" ] && [ "$dv" = "0.6.0" ]; then
       pass "prepare-release writes package.json, both lockfile sites, and the manifest"
     else
-      fail "coordinates after prepare-release: pkg=$pv lock='$lv' manifest=$dv floor=$min"
+      fail "coordinates after prepare-release: pkg=$pv lock='$lv' manifest=$dv"
     fi
   else
     fail "prepare-release.mjs exited non-zero"
@@ -305,7 +208,7 @@ assert_prepare_release_writes_every_coordinate() {
 
 assert_prepare_release_leaves_a_same_string_dependency_alone() {
   local d; d="$(mktemp -d)"
-  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.60 0.1.51
   cp -R "$REPO_ROOT/scripts" "$d/scripts"
   node -e '
     const fs = require("fs"), p = process.argv[1]
@@ -326,7 +229,7 @@ assert_prepare_release_leaves_a_same_string_dependency_alone() {
 
 assert_prepare_release_rejects_a_non_greater_version() {
   local d; d="$(mktemp -d)"
-  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.60 0.1.51
   cp -R "$REPO_ROOT/scripts" "$d/scripts"
   if ( cd "$d" && node scripts/release/prepare-release.mjs --version 0.5.0 --release-id t >/dev/null 2>&1 ); then
     fail "prepare-release accepted a version not greater than current"
@@ -338,7 +241,7 @@ assert_prepare_release_rejects_a_non_greater_version() {
 
 assert_prepare_release_rejects_a_bad_version_shape() {
   local d; d="$(mktemp -d)"
-  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.60 0.1.51
   cp -R "$REPO_ROOT/scripts" "$d/scripts"
   if ( cd "$d" && node scripts/release/prepare-release.mjs --version 0.6 --release-id t >/dev/null 2>&1 ); then
     fail "prepare-release accepted a non MAJOR.MINOR.PATCH version"
@@ -350,7 +253,7 @@ assert_prepare_release_rejects_a_bad_version_shape() {
 
 assert_release_id_is_never_local() {
   local d; d="$(mktemp -d)"
-  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.60 0.1.51
   cp -R "$REPO_ROOT/scripts" "$d/scripts"
   if ( cd "$d" && node scripts/release/prepare-release.mjs --version 0.6.0 >/dev/null 2>&1 ); then
     fail "prepare-release ran without --release-id"
@@ -362,7 +265,7 @@ assert_release_id_is_never_local() {
 
 assert_validate_release_tag_catches_each_coordinate() {
   local d; d="$(mktemp -d)"
-  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.252 0.1.60 0.1.51
+  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.60 0.1.51
   cp -R "$REPO_ROOT/scripts" "$d/scripts"
 
   if ! ( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 >/dev/null 2>&1 ); then
@@ -371,11 +274,9 @@ assert_validate_release_tag_catches_each_coordinate() {
   fi
 
   # This breaks a single `equals` coordinate (desktop-app/package.json) and
-  # confirms the checker catches it. The other assertion kinds -- floor,
-  # explicit, counter -- get their own dedicated negative cases below
-  # (assert_floor_above_release_version_is_rejected_by_the_checker,
-  # assert_floor_non_semver_is_rejected_by_the_checker,
-  # assert_explicit_release_id_is_rejected_when_local_or_empty,
+  # confirms the checker catches it. The other assertion kinds -- explicit,
+  # counter, pointer -- get their own dedicated negative cases below
+  # (assert_explicit_release_id_is_rejected_when_local_or_empty,
   # assert_counter_mismatch_is_rejected_by_the_checker), not by looping here.
   local broke_all=1
   node -e '
@@ -411,7 +312,6 @@ export type ReleaseManifest = {
   externalRestApiVersion: string
   rpcProxyVersion: string
   desktopVersion: string
-  minimumDesktopVersion: string
 }
 
 export const releaseManifestRENAMED: ReleaseManifest = {
@@ -419,7 +319,6 @@ export const releaseManifestRENAMED: ReleaseManifest = {
   externalRestApiVersion: '0.1.60',
   rpcProxyVersion: '0.1.51',
   desktopVersion: '0.6.0',
-  minimumDesktopVersion: '0.1.252',
 }
 EOF
   # Coherent ghcr pin: the ONLY disagreement in this tree must be the manifest.
@@ -452,7 +351,6 @@ export type ReleaseManifest = {
   externalRestApiVersion: string
   rpcProxyVersion: string
   desktopVersion: string
-  minimumDesktopVersion: string
 }
 
 const decoy = {
@@ -460,7 +358,6 @@ const decoy = {
   externalRestApiVersion: '0.1.60',
   rpcProxyVersion: '0.1.51',
   desktopVersion: '0.6.0',
-  minimumDesktopVersion: '0.1.252',
 }
 
 export const releaseManifest: ReleaseManifest = {
@@ -468,7 +365,6 @@ export const releaseManifest: ReleaseManifest = {
   externalRestApiVersion: '9.9.9',
   rpcProxyVersion: '9.9.9',
   desktopVersion: '9.9.9',
-  minimumDesktopVersion: '9.9.9',
 }
 EOF
   # Coherent ghcr pin: the ONLY disagreement in this tree must be the manifest.
@@ -483,49 +379,9 @@ EOF
   rm -rf "$d"
 }
 
-assert_floor_is_checked_as_a_ceiling_not_an_equality() {
-  local d; d="$(mktemp -d)"
-  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.252 0.1.60 0.1.51
-  cp -R "$REPO_ROOT/scripts" "$d/scripts"
-  if ( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 >/dev/null 2>&1 ); then
-    pass "a floor below the release version is accepted, not required to equal it"
-  else
-    fail "validate-release-tag required minimumDesktopVersion to equal the version"
-  fi
-  rm -rf "$d"
-}
-
-assert_floor_above_release_version_is_rejected_by_the_checker() {
-  local d; d="$(mktemp -d)"
-  # Floor 0.9.9 is ABOVE the release version 0.6.0 -- the dangerous
-  # direction. This whole workstream exists because a wrong floor
-  # force-updates every existing desktop install; the checker must catch
-  # this before the tag, not just accept a floor that happens to be low.
-  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.9.9 0.1.60 0.1.51
-  cp -R "$REPO_ROOT/scripts" "$d/scripts"
-  if ( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 >/dev/null 2>&1 ); then
-    fail "validate-release-tag accepted a floor (0.9.9) above the release version (0.6.0)"
-  else
-    pass "validate-release-tag rejects a floor above the release version"
-  fi
-  rm -rf "$d"
-}
-
-assert_floor_non_semver_is_rejected_by_the_checker() {
-  local d; d="$(mktemp -d)"
-  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1 0.1.60 0.1.51
-  cp -R "$REPO_ROOT/scripts" "$d/scripts"
-  if ( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 >/dev/null 2>&1 ); then
-    fail "validate-release-tag accepted a non MAJOR.MINOR.PATCH floor (0.1)"
-  else
-    pass "validate-release-tag rejects a non MAJOR.MINOR.PATCH floor"
-  fi
-  rm -rf "$d"
-}
-
 assert_explicit_release_id_is_rejected_when_local_or_empty() {
   local d; d="$(mktemp -d)"
-  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.252 0.1.60 0.1.51
+  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.60 0.1.51
   cp -R "$REPO_ROOT/scripts" "$d/scripts"
   local manifest="$d/external-rest-api/src/releaseManifest.ts"
 
@@ -550,7 +406,7 @@ assert_counter_mismatch_is_rejected_by_the_checker() {
   # manifest externalRestApiVersion (0.1.61) disagrees with
   # external-rest-api/package.json (0.1.60) -- checked against the counter's
   # OWN package, not the release version.
-  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.252 0.1.61 0.1.51
+  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.61 0.1.51
   cp -R "$REPO_ROOT/scripts" "$d/scripts"
   if ( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 >/dev/null 2>&1 ); then
     fail "validate-release-tag accepted externalRestApiVersion disagreeing with external-rest-api/package.json"
@@ -562,7 +418,7 @@ assert_counter_mismatch_is_rejected_by_the_checker() {
 
 assert_unhandled_assert_kind_fails_closed() {
   local d; d="$(mktemp -d)"
-  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.252 0.1.60 0.1.51
+  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.60 0.1.51
   cp -R "$REPO_ROOT/scripts" "$d/scripts"
 
   # Append an extra coordinate whose assert kind the checker does not
@@ -608,7 +464,7 @@ assert_unhandled_assert_kind_fails_closed() {
 # exact skew the one-writer rule exists to prevent.
 assert_prepare_release_writes_the_ghcr_pin() {
   local d out rc; d="$(mktemp -d)"
-  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.60 0.1.51
   make_ghcr_component "$d" v0.5.0
   cp -R "$REPO_ROOT/scripts" "$d/scripts"
   out="$( cd "$d" && node scripts/release/prepare-release.mjs \
@@ -626,7 +482,7 @@ assert_prepare_release_writes_the_ghcr_pin() {
 # component would produce a tag that never exists.
 assert_the_pin_is_written_v_prefixed() {
   local d; d="$(mktemp -d)"
-  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.60 0.1.51
   make_ghcr_component "$d" v0.5.0
   cp -R "$REPO_ROOT/scripts" "$d/scripts"
   ( cd "$d" && node scripts/release/prepare-release.mjs \
@@ -644,7 +500,7 @@ assert_the_pin_is_written_v_prefixed() {
 # component with mixed tags, and the puller would fetch two different releases.
 assert_every_component_row_is_rewritten() {
   local d; d="$(mktemp -d)"
-  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.60 0.1.51
   make_ghcr_component "$d" v0.5.0
   cp -R "$REPO_ROOT/scripts" "$d/scripts"
   ( cd "$d" && node scripts/release/prepare-release.mjs \
@@ -661,7 +517,7 @@ assert_every_component_row_is_rewritten() {
 
 assert_validate_release_tag_catches_a_stale_pin() {
   local d out rc; d="$(mktemp -d)"
-  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.252 0.1.60 0.1.51
+  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.60 0.1.51
   make_ghcr_component "$d" v0.5.0
   cp -R "$REPO_ROOT/scripts" "$d/scripts"
   out="$( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 2>&1 )"; rc=$?
@@ -678,7 +534,7 @@ assert_validate_release_tag_catches_a_stale_pin() {
 # is checked. Asserting existence here would make every release-prep PR red.
 assert_the_pointer_check_does_not_require_the_artifact_to_exist() {
   local d out rc; d="$(mktemp -d)"
-  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.252 0.1.60 0.1.51
+  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.60 0.1.51
   make_ghcr_component "$d" v0.6.0
   cp -R "$REPO_ROOT/scripts" "$d/scripts"
   # No network, no registry, no tag: a pure tree read must still pass.
@@ -695,7 +551,7 @@ assert_the_pointer_check_does_not_require_the_artifact_to_exist() {
 # half-applied write, and reading only the first would hide it.
 assert_a_mixed_tag_component_is_rejected() {
   local d out rc; d="$(mktemp -d)"
-  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.252 0.1.60 0.1.51
+  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.60 0.1.51
   # First row already bumped, second row left behind: the first-row read that
   # this case exists to forbid would see v0.6.0 and pass.
   make_ghcr_component "$d" v0.6.0 v0.5.0
@@ -728,7 +584,7 @@ EOF
 # no pin in it at all.
 assert_prepare_release_fails_loudly_when_no_row_can_be_written() {
   local d out rc; d="$(mktemp -d)"
-  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.60 0.1.51
   gut_ghcr_component "$d"
   cp -R "$REPO_ROOT/scripts" "$d/scripts"
   out="$( cd "$d" && node scripts/release/prepare-release.mjs \
@@ -745,7 +601,7 @@ assert_prepare_release_fails_loudly_when_no_row_can_be_written() {
 # component whose images list was gutted must fail, not read as agreement.
 assert_a_component_with_no_rows_is_rejected() {
   local d out rc; d="$(mktemp -d)"
-  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.252 0.1.60 0.1.51
+  make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.6.0 0.1.60 0.1.51
   gut_ghcr_component "$d"
   cp -R "$REPO_ROOT/scripts" "$d/scripts"
   out="$( cd "$d" && node scripts/release/validate-release-tag.mjs --version 0.6.0 2>&1 )"; rc=$?
@@ -794,29 +650,9 @@ assert_every_defined_case_is_invoked() {
   fi
 }
 
-assert_floor_above_version_is_rejected_before_any_write() {
-  local d; d="$(mktemp -d)"
-  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
-  cp -R "$REPO_ROOT/scripts" "$d/scripts"
-
-  ( cd "$d" && node scripts/release/prepare-release.mjs \
-      --version 0.6.0 --release-id t --minimum-desktop-version 0.7.0 >/dev/null 2>&1 )
-  local pkg; pkg="$(node -e 'console.log(require(process.argv[1]).version)' "$d/desktop-app/package.json")"
-
-  # The delegated updater rejects floor > desktopVersion. Discovering that AFTER
-  # the coordinate loop has written package.json leaves the tree half-cut, so
-  # the range check has to happen up front.
-  if [ "$pkg" = "0.5.0" ]; then
-    pass "a floor above the release version is rejected before any coordinate is written"
-  else
-    fail "desktop-app/package.json was written to $pkg despite an impossible floor"
-  fi
-  rm -rf "$d"
-}
-
 assert_a_half_cut_release_can_be_completed_by_rerunning() {
   local d; d="$(mktemp -d)"
-  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.60 0.1.51
   cp -R "$REPO_ROOT/scripts" "$d/scripts"
 
   # Force the manifest write to fail AFTER package.json has been written.
@@ -829,11 +665,11 @@ assert_a_half_cut_release_can_be_completed_by_rerunning() {
   # otherwise the remediation both this script and validate-release-tag.mjs
   # print is a dead end ("not greater than the current desktop version").
   ( cd "$d" && node scripts/release/prepare-release.mjs --version 0.6.0 --release-id t >/dev/null 2>&1 )
-  local dv min; dv="$(manifest_field "$d" desktopVersion)"; min="$(manifest_field "$d" minimumDesktopVersion)"
-  if [ "$dv" = "0.6.0" ] && [ "$min" = "0.1.252" ]; then
-    pass "re-running a half-cut release completes it and leaves the floor alone"
+  local dv; dv="$(manifest_field "$d" desktopVersion)"
+  if [ "$dv" = "0.6.0" ]; then
+    pass "re-running a half-cut release completes it"
   else
-    fail "after re-run desktopVersion=$dv minimumDesktopVersion=$min; expected 0.6.0 / 0.1.252"
+    fail "after re-run desktopVersion=$dv; expected 0.6.0"
   fi
   rm -rf "$d"
 }
@@ -858,7 +694,7 @@ assert_a_half_cut_release_can_be_completed_by_rerunning() {
 assert_a_half_cut_release_names_every_file_the_writer_touched() {
   local d out checkout_cmd problems=""
   d="$(mktemp -d)"
-  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.60 0.1.51
   cp -R "$REPO_ROOT/scripts" "$d/scripts"
 
   # Force the manifest write to fail AFTER the coordinate loop has written
@@ -905,10 +741,10 @@ assert_a_half_cut_release_names_every_file_the_writer_touched() {
 assert_a_write_coordinate_without_a_path_stops_the_cut_before_any_write() {
   local d out rc pkg problems=""
   d="$(mktemp -d)"
-  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.60 0.1.51
   cp -R "$REPO_ROOT/scripts" "$d/scripts"
 
-  # A ninth coordinate that writes a file and never says which one.
+  # An extra coordinate that writes a file and never says which one.
   cat >> "$d/scripts/release/release-coordinates.mjs" <<'EOF'
 
 COORDINATES.push({
@@ -933,12 +769,9 @@ EOF
   rm -rf "$d"
 }
 
-assert_floor_is_not_dragged_by_a_desktop_bump
-assert_floor_above_desktop_is_rejected
-assert_explicit_minimum_flag_is_honoured
-assert_unreadable_manifest_does_not_synthesize_a_floor
-assert_previous_ref_does_not_revert_a_raised_floor
-assert_ordering_check_fails_against_unpatched_script
+assert_desktop_bump_advances_desktop_version
+assert_legacy_minimum_field_is_dropped_on_rewrite
+assert_retired_minimum_flag_is_refused_before_any_write
 assert_prepare_release_writes_every_coordinate
 assert_prepare_release_leaves_a_same_string_dependency_alone
 assert_prepare_release_rejects_a_non_greater_version
@@ -947,13 +780,9 @@ assert_release_id_is_never_local
 assert_validate_release_tag_catches_each_coordinate
 assert_validate_release_tag_rejects_a_renamed_manifest_export
 assert_validate_release_tag_ignores_a_decoy_object
-assert_floor_is_checked_as_a_ceiling_not_an_equality
-assert_floor_above_release_version_is_rejected_by_the_checker
-assert_floor_non_semver_is_rejected_by_the_checker
 assert_explicit_release_id_is_rejected_when_local_or_empty
 assert_counter_mismatch_is_rejected_by_the_checker
 assert_unhandled_assert_kind_fails_closed
-assert_floor_above_version_is_rejected_before_any_write
 assert_a_half_cut_release_can_be_completed_by_rerunning
 assert_prepare_release_writes_the_ghcr_pin
 assert_the_pin_is_written_v_prefixed

@@ -241,7 +241,7 @@ for (const packageRoot of affectedPackages) {
 // Re-sync the manifest whenever a counter it declares has drifted from the
 // package.json it tracks -- not only when this run performed the bump. A
 // bump that lands in one pre-commit invocation and a re-sync that then fails
-// (bad manifest, missing floor, ...) must still converge on a retry. Keying
+// (bad manifest, ...) must still converge on a retry. Keying
 // this off "does the manifest currently disagree with disk" rather than off
 // which packages this run happened to bump makes the retry path self-healing
 // instead of a bump that permanently disarms its own re-sync: on retry the
@@ -376,7 +376,7 @@ if (relevantCounterPackages.length > 0) {
           `re-sync ${MANIFEST_PATH} via scripts/release/update-desktop-release-manifest.mjs after ` +
           `${outOfSyncPackages.join(', ')} moved. Resolve the issue below, then either fix ` +
           `${MANIFEST_PATH} directly or run the updater manually with the flags it needs (e.g. ` +
-          `--minimum-desktop-version) and \`git add ${MANIFEST_PATH}\` before retrying the commit.` +
+          `--release-id) and \`git add ${MANIFEST_PATH}\` before retrying the commit.` +
           (detail ? `\n\nUnderlying error:\n${detail}` : ''),
         resync.status
       )

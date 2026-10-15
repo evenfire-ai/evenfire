@@ -3,8 +3,7 @@
 // delegates the manifest to update-desktop-release-manifest.mjs rather than
 // duplicating its renderer.
 //
-//   node scripts/release/prepare-release.mjs --version 0.6.0 --release-id <id> \
-//        [--minimum-desktop-version 0.6.0]
+//   node scripts/release/prepare-release.mjs --version 0.6.0 --release-id <id>
 import { execFileSync, execFileSync as run } from 'node:child_process'
 import process from 'node:process'
 import {
@@ -42,7 +41,16 @@ function die(message) {
 
 const version = argValue('--version')
 const releaseId = argValue('--release-id')
-const minimumDesktopVersion = argValue('--minimum-desktop-version')
+
+// minimumDesktopVersion is retired: every desktop below the release's
+// desktopVersion must update. Refuse the old flag instead of ignoring it, so an
+// operator following an outdated runbook does not believe a floor was set.
+if (process.argv.includes('--minimum-desktop-version')) {
+  die(
+    '--minimum-desktop-version is no longer supported: desktop apps below the ' +
+      "release's desktopVersion are always required to update"
+  )
+}
 
 if (!SEMVER_RE.test(version)) {
   die(`--version must be MAJOR.MINOR.PATCH, got: ${version || '(missing)'}`)
@@ -53,20 +61,6 @@ if (!SEMVER_RE.test(version)) {
 // manifest if this script stayed silent.
 if (!releaseId) {
   die('--release-id is required (it reaches a customer-facing manifest)')
-}
-
-if (minimumDesktopVersion && !SEMVER_RE.test(minimumDesktopVersion)) {
-  die(`--minimum-desktop-version must be MAJOR.MINOR.PATCH, got: ${minimumDesktopVersion}`)
-}
-
-// Range-check the floor BEFORE writing anything. The delegated updater rejects
-// a floor above desktopVersion, and discovering that after the coordinate loop
-// has already written package.json leaves the tree half-cut.
-if (minimumDesktopVersion && compareVersions(minimumDesktopVersion, version) > 0) {
-  die(
-    `--minimum-desktop-version ${minimumDesktopVersion} is greater than --version ${version}. ` +
-      `The floor is a compatibility minimum; it can never exceed the release itself.`
-  )
 }
 
 const onDisk = COORDINATES.find(c => c.name === 'desktop-app/package.json').read(ROOT)
@@ -95,9 +89,6 @@ const manifestArgs = [
   '--release-id',
   releaseId,
 ]
-if (minimumDesktopVersion) {
-  manifestArgs.push('--minimum-desktop-version', minimumDesktopVersion)
-}
 try {
   execFileSync('node', manifestArgs, { cwd: ROOT, stdio: 'inherit' })
 } catch (error) {

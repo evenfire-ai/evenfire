@@ -6,11 +6,10 @@
 // The coordinates are NOT all the same kind of thing, which is why each row
 // carries its own assertion:
 //   equals   - must equal the release version (build inputs, declarations)
-//   floor    - a compatibility floor; must be <= the version, moves only on request
 //   counter  - a per-service counter; must equal ITS OWN package.json, not the version
 //   pointer  - names an artifact; equality ONLY, never existence
 //
-// The ghcr component pointer row is the eighth coordinate, added by the image-
+// The ghcr component pointer row was added by the image-
 // consumption workstream once deploy/components/ghcr-images/kustomization.yaml
 // existed. Its assertion is deliberately NOT "and the artifact exists": the
 // v<version> images are created by release-images.yml ON THE TAG, so they
@@ -138,12 +137,6 @@ export const COORDINATES = [
     assert: 'equals',
     read: root => manifestField(root, 'desktopVersion'),
     writtenBy: 'update-desktop-release-manifest.mjs',
-  },
-  {
-    name: 'releaseManifest.minimumDesktopVersion',
-    assert: 'floor',
-    read: root => manifestField(root, 'minimumDesktopVersion'),
-    writtenBy: 'update-desktop-release-manifest.mjs --minimum-desktop-version',
   },
   {
     name: 'releaseManifest.releaseId',

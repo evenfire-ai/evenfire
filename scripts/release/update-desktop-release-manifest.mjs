@@ -2,7 +2,7 @@
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { SEMVER_RE, argValue, compareVersions, parseManifest } from './release-coordinates.mjs'
+import { argValue, parseManifest } from './release-coordinates.mjs'
 
 const ROOT = process.cwd()
 const MANIFEST_PATH = 'external-rest-api/src/releaseManifest.ts'
@@ -58,16 +58,29 @@ function previousManifest(ref) {
   return raw ? parseManifest(raw) : currentManifest()
 }
 
+// The only fields the manifest carries. Manifests read from older refs (or an
+// un-migrated HEAD) may still hold the retired minimumDesktopVersion floor;
+// picking these keys drops it so the rendered object always matches the
+// rendered ReleaseManifest type.
+const MANIFEST_FIELDS = ['releaseId', 'externalRestApiVersion', 'rpcProxyVersion', 'desktopVersion']
+
+function pickManifestFields(manifest) {
+  return Object.fromEntries(MANIFEST_FIELDS.map(field => [field, manifest[field]]))
+}
+
 function renderManifest(manifest) {
   return `export type ReleaseManifest = {
   releaseId: string
   externalRestApiVersion: string
   rpcProxyVersion: string
   desktopVersion: string
-  minimumDesktopVersion: string
 }
 
-export const releaseManifest: ReleaseManifest = ${JSON.stringify(manifest, null, 2)
+export const releaseManifest: ReleaseManifest = ${JSON.stringify(
+    pickManifestFields(manifest),
+    null,
+    2
+  )
     .replace(/"([^"]+)":/g, '$1:')
     .replace(/: "([^"]*)"/g, ": '$1'")
     .replace(/\n}$/, ',\n}')}
@@ -83,22 +96,11 @@ function validate(manifest, versions, options = {}) {
       throw new Error(`${field}=${manifest[field]} does not match package.json ${versions[field]}`)
     }
   }
-  if (!SEMVER_RE.test(manifest.minimumDesktopVersion)) {
-    throw new Error(
-      `minimumDesktopVersion=${manifest.minimumDesktopVersion} is not MAJOR.MINOR.PATCH`
-    )
-  }
-  if (compareVersions(manifest.minimumDesktopVersion, manifest.desktopVersion) > 0) {
-    throw new Error(
-      `minimumDesktopVersion=${manifest.minimumDesktopVersion} is greater than desktopVersion=${manifest.desktopVersion}`
-    )
-  }
 }
 
 function main() {
   const previousRef = argValue('--previous')
   const releaseId = argValue('--release-id') || 'local'
-  const minimumDesktopVersion = argValue('--minimum-desktop-version')
   const validateOnly = process.argv.includes('--validate-only')
   const deferDesktopRelease = process.argv.includes('--defer-desktop-release')
 
@@ -115,32 +117,17 @@ function main() {
 
   let previous = previousManifest(previousRef)
 
-  // HEAD's floor always outranks one read via --previous: HEAD reflects the
-  // most recent operator decision. Never synthesize a floor from
-  // desktopVersion -- if nothing readable carries a floor, the operator must
-  // say so explicitly.
-  const inherited = manifestAtHead?.minimumDesktopVersion || previous?.minimumDesktopVersion
-
-  if (!inherited && !minimumDesktopVersion) {
-    throw new Error(
-      'no minimumDesktopVersion could be read; pass ' +
-        '--minimum-desktop-version explicitly rather than ' +
-        'defaulting it to desktopVersion'
-    )
-  }
-
   if (!previous) {
     previous = {
       releaseId,
       externalRestApiVersion: versions.externalRestApiVersion,
       rpcProxyVersion: versions.rpcProxyVersion,
       desktopVersion: versions.desktopVersion,
-      minimumDesktopVersion: inherited || minimumDesktopVersion,
     }
   }
   const prevVersions = previousVersions(previousRef)
 
-  const next = { ...previous, releaseId }
+  const next = { ...pickManifestFields(previous), releaseId }
   let changed = false
 
   for (const field of ['externalRestApiVersion', 'rpcProxyVersion']) {
@@ -164,24 +151,8 @@ function main() {
     changed = true
   }
 
-  // The floor is a compatibility control, not a version. It moves ONLY when the
-  // operator asks. Advancing it with every release would show "update required"
-  // to every user of the previous release. See appService.ts:840.
-  //
-  // `previous` may carry a floor copied from an old --previous ref; always
-  // re-apply `inherited` (HEAD-first) before letting an explicit flag win, so
-  // a floor already raised on HEAD is never silently reverted.
-  if (inherited && next.minimumDesktopVersion !== inherited) {
-    next.minimumDesktopVersion = inherited
-    changed = true
-  }
-  if (minimumDesktopVersion) {
-    next.minimumDesktopVersion = minimumDesktopVersion
-    changed = true
-  }
-
   if (!changed && manifestAtHead) {
-    Object.assign(next, manifestAtHead)
+    Object.assign(next, pickManifestFields(manifestAtHead))
   }
 
   validate(next, versions, { deferDesktopRelease })
@@ -203,7 +174,7 @@ try {
   console.error(`::error::${error.message}`)
   console.error(
     `Fix ${MANIFEST_PATH} so it agrees with the current package.json versions (or pass the ` +
-      `correct --release-id / --minimum-desktop-version flags), then re-run ` +
+      `correct --release-id flag), then re-run ` +
       '`node scripts/release/update-desktop-release-manifest.mjs`.'
   )
   process.exit(1)

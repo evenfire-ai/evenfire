@@ -94,7 +94,9 @@ describe('routes/desktop', () => {
       externalRestApiVersion: releaseManifest.externalRestApiVersion,
       rpcProxyVersion: releaseManifest.rpcProxyVersion,
       desktopVersion: releaseManifest.desktopVersion,
-      minimumDesktopVersion: releaseManifest.minimumDesktopVersion,
+      // Compat field for desktop clients <= 0.11.0: must stay present and
+      // equal to desktopVersion.
+      minimumDesktopVersion: releaseManifest.desktopVersion,
       releaseTag: `v${releaseManifest.desktopVersion}`,
       releaseUrl: `https://github.com/example/evenfire/releases/tag/v${releaseManifest.desktopVersion}`,
     })
