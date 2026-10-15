@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from 'express'
 import { isIP } from 'node:net'
 import { z } from 'zod'
+import { passwordAdmissionDenialsTotal } from '../observability/metrics.js'
 import { PASSWORD_ADMISSION_POLICY } from '../services/auth/passwordAdmissionState.js'
 import { PasswordAdmissionError } from '../services/auth/passwordCredentialVerification.js'
 import { clearRateLimitHeaders, rateLimitMiddleware } from './rateLimitMiddleware.js'
@@ -19,6 +20,7 @@ export function sendPasswordAdmissionError(error: unknown, res: Response): boole
     error: error.publicError,
     retryAfterSeconds: error.retryAfterSeconds,
   })
+  passwordAdmissionDenialsTotal.inc({ reason: error.reason })
   return true
 }
 

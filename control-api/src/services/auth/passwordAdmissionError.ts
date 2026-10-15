@@ -1,7 +1,4 @@
-import {
-  type PasswordAdmissionDenialReason,
-  passwordAdmissionDenialsTotal,
-} from '../../observability/metrics.js'
+import type { PasswordAdmissionDenialReason } from '../../observability/metrics.js'
 
 export class PasswordAdmissionError extends Error {
   constructor(
@@ -14,6 +11,5 @@ export class PasswordAdmissionError extends Error {
       | 'recovery_outcome_unknown' = status === 429 ? 'rate_limited' : 'authority_unavailable'
   ) {
     super(status === 429 ? 'rate_limited' : 'authority_unavailable')
-    passwordAdmissionDenialsTotal.inc({ reason })
   }
 }
