@@ -134,8 +134,13 @@ export function ensureFontsReady(): void {
   ready = true
   try {
     const f = loadRobotoFaces()
-    GlobalFonts.register(f.normal, CHART_FONT_FAMILY)
-    GlobalFonts.register(f.bold, `${CHART_FONT_FAMILY} Bold`)
+    // register answers null, without throwing, for a face it cannot use.
+    if (!GlobalFonts.register(f.normal, CHART_FONT_FAMILY)) {
+      throw new Error('the renderer refused the regular face')
+    }
+    if (!GlobalFonts.register(f.bold, `${CHART_FONT_FAMILY} Bold`)) {
+      throw new Error('the renderer refused the bold face')
+    }
   } catch (err) {
     // The system faces still register, so charts draw in them rather than in nothing.
     logger.error({ err: errorText(err) }, 'Bundled Roboto faces could not be loaded')

@@ -32,4 +32,20 @@ describe('ensureFontsReady', () => {
     fonts.ensureFontsReady()
     expect(error).toHaveBeenCalledTimes(1)
   })
+
+  it('reports a bundled face the renderer refuses without throwing', async () => {
+    vi.resetModules()
+    const { logger } = await import('../../logger')
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined)
+    // register answers null, not an error, for a face it cannot use.
+    vi.spyOn(GlobalFonts, 'register').mockImplementationOnce(() => null)
+    const fonts = await import('../fonts')
+
+    fonts.ensureFontsReady()
+    expect(error).toHaveBeenCalledTimes(1)
+    expect(error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.stringContaining('regular') }),
+      'Bundled Roboto faces could not be loaded'
+    )
+  })
 })
