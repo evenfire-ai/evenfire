@@ -101,6 +101,7 @@ function seriesColors(ds: NormalizedDataset, index: number, type: string): Recor
     borderColor: filled(ds.borderColor, paint.borderColor, color),
     backgroundColor: filled(ds.backgroundColor, paint.backgroundColor, color),
     ...(paint.pointBackgroundColor ? { pointBackgroundColor: paint.pointBackgroundColor } : {}),
+    ...(paint.borderWidth ? { borderWidth: paint.borderWidth } : {}),
     ...dashed,
   }
 }
@@ -127,6 +128,11 @@ function checkColors(
 
 function readout(n: number): string {
   return Number.isInteger(n) ? String(n) : String(Number(n.toFixed(2)))
+}
+
+/** `n` at full precision, without the noise of adding binary fractions (0.1 + 0.2). */
+function plainNumber(n: number): string {
+  return String(Number(n.toPrecision(12)))
 }
 
 function firstSeriesValues(ds: NormalizedDataset | undefined): number[] {
@@ -237,7 +243,7 @@ function translate(
       const table = {
         labels: chart.labels,
         series: [
-          { label: datasets[0]?.label ?? '', values: [...deltas.map(String), readout(total)] },
+          { label: datasets[0]?.label ?? '', values: [...deltas.map(String), plainNumber(total)] },
         ],
       }
       chart.datasets = [
@@ -259,7 +265,10 @@ function translate(
       if (max !== requestedMax && spec.gaugeMax !== undefined && spec.gaugeMax !== null) {
         warnings.push(`gaugeMax ${String(spec.gaugeMax)} is not a positive number; used 100.`)
       }
-      const values = firstSeriesValues(datasets[0])
+      // The first number sent, as the PNG gauge reads it; a gap is no reading.
+      const values = ((datasets[0]?.data ?? []) as Array<number | null>).filter(
+        (v): v is number => typeof v === 'number'
+      )
       const raw = values[0] ?? 0
       if (values.length > 1) {
         warnings.push(
@@ -286,7 +295,8 @@ function translate(
       ]
       chart.gauge = { value: readout(raw), max: readout(max) }
       const table = {
-        labels: [chart.labels[0], 'Max'],
+        // A gauge sent with no labels has only a numbered position, which names nothing.
+        labels: [Array.isArray(spec.labels) ? chart.labels[0] : '', 'Max'],
         series: [{ label: datasets[0]?.label ?? '', values: [chart.gauge.value, chart.gauge.max] }],
       }
       return { chart, warnings, table }

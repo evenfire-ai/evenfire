@@ -50,8 +50,25 @@ describe('the table shown in place of a chart', () => {
     )
     expect(prepared.table).toEqual({
       labels: ['Start', 'Sales', 'Costs', 'Total'],
-      series: [{ label: 'Cash', values: ['0.1', '0.2', '-0.125', '0.18'] }],
+      series: [{ label: 'Cash', values: ['0.1', '0.2', '-0.125', '0.175'] }],
     })
+  })
+
+  it('reads the first number a gauge was sent, as the PNG gauge does', () => {
+    const prepared = prepareDashboardChart(
+      { type: 'gauge', labels: ['CPU'], datasets: [{ data: [null, 50] }] },
+      'charts[0]'
+    )
+    expect(prepared.table?.series[0].values).toEqual(['50', '100'])
+    expect(prepared.warnings.join(' ')).not.toContain('left out')
+  })
+
+  it('heads an unlabeled gauge with no made-up position', () => {
+    const prepared = prepareDashboardChart(
+      { type: 'gauge', datasets: [{ label: 'Load', data: [40] }] },
+      'charts[0]'
+    )
+    expect(prepared.table?.labels).toEqual(['', 'Max'])
   })
 
   it('keeps every series of an ordinary chart', () => {

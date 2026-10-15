@@ -87,7 +87,9 @@ function applyThemePalette(
           out.borderColor = out.borderColor.map(c => c ?? theme.backgroundColor)
         }
         const where = `data.datasets[${idx}]`
-        if (padded) {
+        // Only a list shorter than the slices is short; an entry left empty
+        // for not being a CSS color has a warning of its own.
+        if (padded && requested!.length < ds.data.length) {
           warnings.push(
             `${where}.backgroundColor had ${requested!.length} color(s) for ${ds.data.length} ` +
               'slices; the rest were taken from the theme. Send one color per slice.'
@@ -118,6 +120,8 @@ function applyThemePalette(
       if (paint.pointBackgroundColor && point.pointBackgroundColor === undefined) {
         point.pointBackgroundColor = paint.pointBackgroundColor
       }
+      if (paint.borderWidth && point.borderWidth === undefined)
+        point.borderWidth = paint.borderWidth
       const points = Array.isArray(ds.data) ? ds.data.length : 0
       if (chartType === 'scatter') {
         if (point.pointRadius === undefined) point.pointRadius = pointRadius(6, 100, points)

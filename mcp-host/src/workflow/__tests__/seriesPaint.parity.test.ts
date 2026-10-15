@@ -85,6 +85,25 @@ function pngRoles(kind: string, own: Own) {
   })
 }
 
+/** The first dataset each output draws. */
+function pngDataset(kind: string, own: Own): Record<string, unknown> {
+  const normalized = normalizeChartData(chartData(kind, own), { chartType: kind })
+  const { datasets } = paintedDatasets(
+    kind,
+    normalized.datasets as never,
+    normalized.labels,
+    theme,
+    {},
+    []
+  )
+  return datasets[0] as unknown as Record<string, unknown>
+}
+
+function dashboardDataset(kind: string, own: Own): Record<string, unknown> {
+  return prepareDashboardChart({ type: kind, ...chartData(kind, own) }, 'charts[0]').chart!
+    .datasets[0]
+}
+
 function dashboardRoles(kind: string, own: Own) {
   const prepared = prepareDashboardChart({ type: kind, ...chartData(kind, own) }, 'charts[0]')
   expect(prepared.error).toBeUndefined()
@@ -149,14 +168,36 @@ describe('how a series is painted', () => {
     }
   })
 
-  it("fills a bar with the caller's color, which an outline would not show", () => {
-    const own = { borderColor: '#f00' }
-    for (const each of [pngRoles('bar', own), dashboardRoles('bar', own)]) {
-      expect(each[0]).toEqual({
-        border: 'own borderColor',
-        fill: 'own borderColor',
-        points: 'none',
-      })
+  it("draws a caller's bar color as the outline it is, over the palette fill", () => {
+    // A white or transparent border must not hide the bar it outlines.
+    for (const borderColor of ['#f00', '#ffffff', 'transparent']) {
+      const own = { borderColor }
+      for (const each of [pngRoles('stackedBar', own), dashboardRoles('stackedBar', own)]) {
+        expect(each[0]).toEqual({ border: 'own borderColor', fill: 'palette', points: 'none' })
+      }
+      expect(pngDataset('stackedBar', own).borderWidth).toBe(2)
+      expect(dashboardDataset('stackedBar', own).borderWidth).toBe(2)
+    }
+    expect(pngDataset('bar', {}).borderWidth).toBeUndefined()
+    expect(dashboardDataset('bar', {}).borderWidth).toBeUndefined()
+  })
+
+  it('reads an empty borderColor list as no color', () => {
+    const own = { borderColor: [] as string[] }
+    for (const kind of ['bar', 'scatter', 'line'] as const) {
+      expect(pngRoles(kind, own)[0].fill).toBe(kind === 'line' ? 'palette tint' : 'palette')
+      expect(dashboardRoles(kind, own)[0].fill).toBe(kind === 'line' ? 'palette tint' : 'palette')
+    }
+  })
+
+  it('wraps a short color list over a fill list with gaps, as Chart.js wraps it', () => {
+    const own = {
+      borderColor: ['#ff0000', '#00ff00'],
+      backgroundColor: ['#0000ff', '#0000ff', 'brand'],
+    }
+    // A stacked area is filled in the series color, so its gap takes the wrapped border color.
+    for (const each of [pngDataset('stackedArea', own), dashboardDataset('stackedArea', own)]) {
+      expect(each.backgroundColor).toEqual(['#0000ff', '#0000ff', '#ff0000'])
     }
   })
 
@@ -192,6 +233,18 @@ describe('how a series is painted', () => {
       warnings
     )
     expect(warnings.join(' ')).toContain('"brand-blue" is not a CSS color')
+  })
+
+  it('does not call a full list of slice colors short when one is not a CSS color', () => {
+    const warnings: string[] = []
+    const data = {
+      labels: ['A', 'B', 'C'],
+      datasets: [{ data: [1, 2, 3], backgroundColor: ['#f00', 'brand', '#00f'] }],
+    }
+    const normalized = normalizeChartData(data, { chartType: 'pie' })
+    paintedDatasets('pie', normalized.datasets as never, normalized.labels, theme, {}, warnings)
+    expect(warnings.join(' ')).toContain('"brand" is not a CSS color')
+    expect(warnings.join(' ')).not.toContain('color(s) for 3 slices')
   })
 
   it('falls back to the palette tint for a color chart.js cannot read', () => {
