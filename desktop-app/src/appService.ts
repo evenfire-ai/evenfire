@@ -3385,8 +3385,12 @@ export class AppService {
     unbindChatStore()
     this.invalidateSandboxUiSession()
     if (options.notifySessionChanged === false) return
+    this.notifySessionChangedSafely(false)
+  }
+
+  private notifySessionChangedSafely(isAuthenticated: boolean): void {
     try {
-      tryGetPluginSdkRuntime()?.notifySessionChanged(false)
+      tryGetPluginSdkRuntime()?.notifySessionChanged(isAuthenticated)
     } catch (error) {
       this.reportDeferredLogoutFailureSafely(error)
     }
@@ -3671,8 +3675,10 @@ export class AppService {
         this.reportDeferredLogoutFailureSafely(suspendError)
       }
     }
-    if (this.sessionGeneration === generation && this.sessionToken === token)
-      this.clearAuthenticatedSessionState()
+    if (this.sessionGeneration === generation && this.sessionToken === token) {
+      if (this.sessionToken !== null || this.me !== null) this.clearAuthenticatedSessionState()
+      else this.notifySessionChangedSafely(false)
+    }
     this.reportDeferredLogoutFailureSafely(error)
   }
 
@@ -4000,11 +4006,15 @@ export class AppService {
           getActiveEnvKey() !== envKey
         )
           return
-        this.clearAuthenticatedSessionState(
-          options.notifySessionChanged === undefined
-            ? {}
-            : { notifySessionChanged: options.notifySessionChanged }
-        )
+        if (this.sessionToken || this.me) {
+          this.clearAuthenticatedSessionState(
+            options.notifySessionChanged === undefined
+              ? {}
+              : { notifySessionChanged: options.notifySessionChanged }
+          )
+        } else if (options.notifySessionChanged !== false) {
+          this.notifySessionChangedSafely(false)
+        }
         restoreGeneration = this.sessionGeneration
         restoreOwnedRuntimeToken = null
         const rejectedToken = options.rejectedToken
