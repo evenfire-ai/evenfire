@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { PROFILE_ROUTES } from '@constants/routes'
+import { ProfileApiError } from '@lib/api'
 import type { InvitationPreview } from '@/app/types/api'
 import { InvitationClient } from '../../invitations/[token]/InvitationClient'
 
@@ -19,11 +20,15 @@ vi.mock('@components/AuthContext', () => ({
   useAuth: () => ({ checkAuth: mocks.checkAuth }),
 }))
 
-vi.mock('@lib/api', () => ({
-  acceptInvitation: mocks.acceptInvitation,
-  getEvenfireDownloadUrl: () => 'https://downloads.example.invalid/evenfire',
-  setupInvitationPasswordWithToken: mocks.setupInvitationPasswordWithToken,
-}))
+vi.mock('@lib/api', async () => {
+  const actual = await vi.importActual<typeof import('@lib/api')>('@lib/api')
+  return {
+    ...actual,
+    acceptInvitation: mocks.acceptInvitation,
+    getEvenfireDownloadUrl: () => 'https://downloads.example.invalid/evenfire',
+    setupInvitationPasswordWithToken: mocks.setupInvitationPasswordWithToken,
+  }
+})
 
 const passwordReset: InvitationPreview = {
   id: 'reset-1',
@@ -180,7 +185,7 @@ describe('InvitationClient verified password recovery', () => {
 
   it('shows a retryable message when bounded recovery admission is busy', async () => {
     mocks.setupInvitationPasswordWithToken.mockRejectedValue(
-      new Error('429 Too Many Requests - rate_limited')
+      new ProfileApiError(429, 'rate_limited', '429 Too Many Requests - upstream wording changed')
     )
     render(
       <InvitationClient
@@ -204,7 +209,9 @@ describe('InvitationClient verified password recovery', () => {
   })
 
   it('shows a recovery-link error instead of blaming the new password', async () => {
-    mocks.setupInvitationPasswordWithToken.mockRejectedValue(new Error('invalid_invitation'))
+    mocks.setupInvitationPasswordWithToken.mockRejectedValue(
+      new ProfileApiError(400, 'invalid_invitation', '400 Bad Request - recovery link rejected')
+    )
     render(
       <InvitationClient
         invitationToken="invalid-reset-proof"
@@ -223,7 +230,11 @@ describe('InvitationClient verified password recovery', () => {
 
   it('does not resubmit a reset proof after an ambiguous recovery outcome', async () => {
     mocks.setupInvitationPasswordWithToken.mockRejectedValue(
-      new Error('503 Service Unavailable - recovery_outcome_unknown')
+      new ProfileApiError(
+        503,
+        'recovery_outcome_unknown',
+        '503 Service Unavailable - mutation result unavailable'
+      )
     )
     render(
       <InvitationClient

@@ -16,6 +16,7 @@ import { FormField } from '@components/FormField'
 import { TextInput } from '@components/TextInput'
 import { PROFILE_ROUTES } from '@constants/routes'
 import {
+  ProfileApiError,
   acceptInvitation,
   getEvenfireDownloadUrl,
   setupInvitationPasswordWithToken,
@@ -28,6 +29,15 @@ import {
 import { formatTeamRole } from '@lib/teamRoles'
 import type { InvitationPreview } from '@/app/types/api'
 import type { InvitationClientProps } from './types'
+
+type RecoveryPhase =
+  | { state: 'editing' }
+  | { state: 'submitting' }
+  | { state: 'checking_session' }
+  | { state: 'committed' }
+  | { state: 'session_unverified' }
+  | { state: 'outcome_unknown' }
+  | { state: 'authenticated' }
 
 function statusForInvitation(invitation: InvitationPreview): string {
   if (invitation.purpose === 'password_reset') {
@@ -72,16 +82,12 @@ function statusForInvitation(invitation: InvitationPreview): string {
 
 function isAmbiguousRecoveryOutcome(value: unknown): boolean {
   if (!(value instanceof Error)) return true
-  const message = value.message.replace(/^\d{3}\s+[A-Za-z ]+\s+-\s+/, '')
-  if (message === 'recovery_outcome_unknown') return true
   if (value instanceof TypeError || value.name === 'SyntaxError') return true
-  const status = value.message.match(/^\s*(\d{3})\b/)
-  return Boolean(
-    status &&
-    Number(status[1]) >= 500 &&
-    !message.includes('authority_unavailable') &&
-    !message.includes('rate_limited')
-  )
+  if (!(value instanceof ProfileApiError)) return false
+  if (value.code === 'recovery_outcome_unknown') return true
+  if (value.code === 'authority_unavailable' || value.code === 'rate_limited') return false
+  if (value.status === 429) return false
+  return value.status >= 500
 }
 
 export function InvitationClient({
@@ -100,9 +106,7 @@ export function InvitationClient({
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [submitting, setSubmitting] = useState<'accept' | 'password' | null>(null)
-  const [recoveryCommitted, setRecoveryCommitted] = useState(false)
-  const [recoveryOutcomeUnknown, setRecoveryOutcomeUnknown] = useState(false)
-  const [sessionCheckInFlight, setSessionCheckInFlight] = useState(false)
+  const [recoveryPhase, setRecoveryPhase] = useState<RecoveryPhase>({ state: 'editing' })
   const actionInFlightRef = useRef(false)
 
   useEffect(() => {
@@ -117,8 +121,7 @@ export function InvitationClient({
   }, [initialInvitation, initialError])
 
   useEffect(() => {
-    setRecoveryCommitted(false)
-    setRecoveryOutcomeUnknown(false)
+    setRecoveryPhase({ state: 'editing' })
   }, [invitationToken])
 
   const invitationExpired = useMemo(() => {
@@ -153,9 +156,43 @@ export function InvitationClient({
     email: invitation?.email.trim().toLowerCase(),
   })
   const busy = submitting !== null
+  const recoveryNeedsSessionCheck =
+    isPasswordReset &&
+    ['committed', 'checking_session', 'session_unverified', 'authenticated'].includes(
+      recoveryPhase.state
+    )
+  const recoveryOutcomeUnknown = isPasswordReset && recoveryPhase.state === 'outcome_unknown'
 
-  function friendlyInvitationError(value: unknown): string {
+  function friendlyInvitationError(value: unknown, isRecovery = false): string {
     if (!(value instanceof Error)) return 'Failed to update invitation.'
+    if (isRecovery) {
+      if (!(value instanceof ProfileApiError)) {
+        return 'We could not update your password. Please try again.'
+      }
+      if (value.code === 'invalid_password') return 'Password must be between 8 and 256 characters.'
+      if (value.code === 'invalid_invitation') return 'This recovery link is invalid or expired.'
+      if (value.code === 'invitation_not_accepted')
+        return 'Accept the invitation before setting a password.'
+      if (value.code === 'invitation_not_pending' || value.code === 'invitation_not_ready')
+        return 'This invitation has already been used.'
+      if (value.code === 'expired' || value.status === 410) return 'This invitation has expired.'
+      if (value.code === 'forbidden' || value.status === 403)
+        return 'Invitation email does not match.'
+      if (value.code === 'not_found' || value.status === 404) return 'Invitation not found.'
+      if (value.code === 'rate_limited' || value.status === 429) {
+        return 'Account recovery is temporarily busy. Please wait a moment and try again.'
+      }
+      if (value.code === 'authority_unavailable') {
+        return 'Account recovery is temporarily unavailable. Please try again shortly.'
+      }
+      if (value.code === 'recovery_outcome_unknown') {
+        return 'We could not confirm whether your password change completed. Try signing in with the new password. If that does not work, request a new reset link.'
+      }
+      if (value.status === 400 || value.status === 401) {
+        return 'This recovery link is invalid or expired.'
+      }
+      return 'We could not update your password. Please try again.'
+    }
     const message = value.message.replace(/^\d{3}\s+[A-Za-z ]+\s+-\s+/, '')
     if (message === 'invalid_password') return 'Password must be between 8 and 256 characters.'
     if (message === 'invalid_invitation') return 'This recovery link is invalid or expired.'
@@ -222,34 +259,44 @@ export function InvitationClient({
   }
 
   async function verifyRecoveredSession(expectedUserId: string) {
-    setSessionCheckInFlight(true)
+    setRecoveryPhase({ state: 'checking_session' })
     setError('')
     try {
       const result = await checkAuth()
       if (result.status === 'authenticated') {
         if (result.me.id === expectedUserId) {
+          setRecoveryPhase({ state: 'authenticated' })
           router.replace(PROFILE_ROUTES.home)
           return
         }
+        setRecoveryPhase({ state: 'session_unverified' })
         setError(
           'Your password was updated, but the signed-in account does not match this recovery link.'
         )
         return
       }
+      setRecoveryPhase({ state: 'session_unverified' })
       setError(
         'Your password was updated, but we could not verify your account session. Try again.'
       )
     } catch {
+      setRecoveryPhase({ state: 'session_unverified' })
       setError(
         'Your password was updated, but we could not verify your account session. Try again.'
       )
-    } finally {
-      setSessionCheckInFlight(false)
     }
   }
 
   async function retryRecoveredSession() {
-    if (!recoveryCommitted || !invitation?.userId || sessionCheckInFlight || busy) return
+    if (
+      (recoveryPhase.state !== 'committed' &&
+        recoveryPhase.state !== 'session_unverified' &&
+        recoveryPhase.state !== 'authenticated') ||
+      !invitation?.userId ||
+      busy
+    ) {
+      return
+    }
     await verifyRecoveredSession(invitation.userId)
   }
 
@@ -258,7 +305,7 @@ export function InvitationClient({
       !invitation ||
       busy ||
       actionInFlightRef.current ||
-      (isPasswordReset && (recoveryCommitted || recoveryOutcomeUnknown))
+      (isPasswordReset && recoveryPhase.state !== 'editing')
     ) {
       return
     }
@@ -273,6 +320,7 @@ export function InvitationClient({
     }
     actionInFlightRef.current = true
     setSubmitting('password')
+    if (isPasswordReset) setRecoveryPhase({ state: 'submitting' })
     try {
       const response = await setupInvitationPasswordWithToken(
         invitationToken,
@@ -281,11 +329,12 @@ export function InvitationClient({
         password
       )
       if (isPasswordReset) {
-        setRecoveryCommitted(true)
+        setRecoveryPhase({ state: 'committed' })
         setStatus('Your password has been updated.')
         setPassword('')
         setConfirmPassword('')
         if (!invitation.userId || response.userId !== invitation.userId) {
+          setRecoveryPhase({ state: 'session_unverified' })
           setError(
             'Your password was updated, but the signed-in account does not match this recovery link.'
           )
@@ -302,14 +351,15 @@ export function InvitationClient({
       })
     } catch (nextError) {
       if (isPasswordReset && isAmbiguousRecoveryOutcome(nextError)) {
-        setRecoveryOutcomeUnknown(true)
+        setRecoveryPhase({ state: 'outcome_unknown' })
         setPassword('')
         setConfirmPassword('')
         setError(
           'We could not confirm whether your password change completed. Try signing in with the new password. If that does not work, request a new reset link.'
         )
       } else {
-        setError(friendlyInvitationError(nextError))
+        if (isPasswordReset) setRecoveryPhase({ state: 'editing' })
+        setError(friendlyInvitationError(nextError, isPasswordReset))
       }
     } finally {
       actionInFlightRef.current = false
@@ -395,14 +445,16 @@ export function InvitationClient({
           </div>
         ) : null}
 
-        {!invitation ? null : isPasswordReset && recoveryCommitted ? (
+        {!invitation ? null : recoveryNeedsSessionCheck ? (
           <div className="stack">
             <Button
               type="button"
-              disabled={busy || sessionCheckInFlight || !invitation.userId}
+              disabled={busy || recoveryPhase.state === 'checking_session' || !invitation.userId}
               onClick={() => void retryRecoveredSession()}
             >
-              {sessionCheckInFlight ? 'Checking account session...' : 'Retry account session check'}
+              {recoveryPhase.state === 'checking_session'
+                ? 'Checking account session...'
+                : 'Retry account session check'}
             </Button>
             <a className="cu-btn" href={profileLoginHref}>
               Sign in instead

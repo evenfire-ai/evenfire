@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { PROFILE_ROUTES } from '@constants/routes'
+import { ProfileApiError } from '@lib/api'
 import type { InvitationPreview } from '@/app/types/api'
 import { InvitationClient } from '../../invitations/[token]/InvitationClient'
 
@@ -19,11 +20,15 @@ vi.mock('@components/AuthContext', () => ({
   useAuth: () => ({ checkAuth: mocks.checkAuth }),
 }))
 
-vi.mock('@lib/api', () => ({
-  acceptInvitation: mocks.acceptInvitation,
-  getEvenfireDownloadUrl: () => 'https://downloads.example.invalid/evenfire',
-  setupInvitationPasswordWithToken: mocks.setupInvitationPasswordWithToken,
-}))
+vi.mock('@lib/api', async () => {
+  const actual = await vi.importActual<typeof import('@lib/api')>('@lib/api')
+  return {
+    ...actual,
+    acceptInvitation: mocks.acceptInvitation,
+    getEvenfireDownloadUrl: () => 'https://downloads.example.invalid/evenfire',
+    setupInvitationPasswordWithToken: mocks.setupInvitationPasswordWithToken,
+  }
+})
 
 const passwordReset: InvitationPreview = {
   id: 'r6-reset-1',
@@ -76,7 +81,10 @@ describe('R6 recovery outcome and identity fences', () => {
   it.each([
     ['transport TypeError', new TypeError('socket closed after dispatch')],
     ['response SyntaxError', new SyntaxError('upstream response was not JSON')],
-    ['unknown post-dispatch outcome', new Error('503 unavailable - recovery_outcome_unknown')],
+    [
+      'unknown post-dispatch outcome',
+      new ProfileApiError(503, 'recovery_outcome_unknown', 'temporary service message'),
+    ],
   ])('does not replay a reset after %s', async (_label, error) => {
     mocks.setupInvitationPasswordWithToken.mockRejectedValueOnce(error)
     renderReset()
@@ -96,8 +104,11 @@ describe('R6 recovery outcome and identity fences', () => {
   })
 
   it.each([
-    ['rate limit', new Error('429 Too Many Requests - rate_limited')],
-    ['definite authority rejection', new Error('503 Service Unavailable - authority_unavailable')],
+    ['rate limit', new ProfileApiError(429, 'rate_limited', 'upstream wording changed')],
+    [
+      'definite authority rejection',
+      new ProfileApiError(503, 'authority_unavailable', 'temporary authority message'),
+    ],
   ])('keeps a definite %s retryable rather than ambiguous', async (_label, error) => {
     mocks.setupInvitationPasswordWithToken.mockRejectedValueOnce(error).mockResolvedValueOnce({
       ...passwordReset,

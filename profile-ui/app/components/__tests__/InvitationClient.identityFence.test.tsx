@@ -17,11 +17,15 @@ vi.mock('@components/AuthContext', () => ({
   useAuth: () => ({ checkAuth: mocks.checkAuth }),
 }))
 
-vi.mock('@lib/api', () => ({
-  acceptInvitation: vi.fn(),
-  getEvenfireDownloadUrl: () => 'https://downloads.example.invalid/evenfire',
-  setupInvitationPasswordWithToken: mocks.setupInvitationPasswordWithToken,
-}))
+vi.mock('@lib/api', async () => {
+  const actual = await vi.importActual<typeof import('@lib/api')>('@lib/api')
+  return {
+    ...actual,
+    acceptInvitation: vi.fn(),
+    getEvenfireDownloadUrl: () => 'https://downloads.example.invalid/evenfire',
+    setupInvitationPasswordWithToken: mocks.setupInvitationPasswordWithToken,
+  }
+})
 
 const invitation: InvitationPreview = {
   id: 'r6-identity-reset',
