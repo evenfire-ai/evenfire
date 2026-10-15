@@ -1122,6 +1122,7 @@ export function useAgentChatController({
         // PHASE 1 — render only the newest local page. The authoritative reconcile
         // below requests a delta after the newest cached server turn.
         let cached: Awaited<ReturnType<typeof chatStore.loadMessages>> = []
+        let localReadFailed = false
         try {
           cached = canReuseActiveSwitch
             ? ([...chatMessagesRef.current] as AgentChatMessage[])
@@ -1131,6 +1132,7 @@ export function useAgentChatController({
                 LOCAL_MESSAGE_PAGE_SIZE
               )) as AgentChatMessage[])
         } catch (error) {
+          localReadFailed = true
           console.warn('[chat-history] failed to load local messages', { agentRef, chatId, error })
         }
         // #1091 A9: the remembered transcript is already on screen. Keep it only
@@ -1138,15 +1140,17 @@ export function useAgentChatController({
         // e.g. a reply persisted while the chat was hidden. An empty page also
         // wins: `loadMessages` returns [] for a durably tombstoned chat, which
         // this session may not have loaded into `deletedChatIdsByAgentRef` yet,
-        // and recording [] drops the memo entry. The Host reconcile below runs
-        // in both cases.
+        // and recording [] drops the memo entry. A rejected read is not an empty
+        // page: it says nothing about the chat, so the remembered transcript
+        // stays. The Host reconcile below runs in every case.
         const keepRemembered =
           remembered !== undefined &&
-          cached.length > 0 &&
-          sameMessageSequence(
-            remembered.messages.slice(-cached.length),
-            cached as AgentChatMessage[]
-          )
+          (localReadFailed ||
+            (cached.length > 0 &&
+              sameMessageSequence(
+                remembered.messages.slice(-cached.length),
+                cached as AgentChatMessage[]
+              )))
         if (keepRemembered) {
           cached = remembered.messages as typeof cached
           if (!isStillActive()) return

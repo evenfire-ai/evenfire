@@ -276,6 +276,52 @@ describe('switchToChat transcript memo (#1091 A9)', () => {
   )
 
   it.each(HOSTS)(
+    'b4. %s: a failed disk read keeps the remembered transcript instead of treating it as a tombstone',
+    async host => {
+      const disk = { 'chat-a': transcript('chat-a'), 'chat-b': transcript('chat-b') }
+      serveDisk(disk)
+      const controller = mount(host)
+      await settleMount()
+      await open(controller, host, 'chat-a')
+      await open(controller, host, 'chat-b')
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      const newestPageReads = () =>
+        clerum.chat.loadMessages.mock.calls.filter(
+          ([, chatId, limit, offset]) => chatId === 'chat-a' && limit === 80 && offset === undefined
+        ).length
+      const readsBefore = newestPageReads()
+      clerum.chat.loadMessages.mockImplementationOnce(() =>
+        Promise.reject(new Error('EIO: newest chat page unreadable'))
+      )
+
+      const reopenStart = frames.length
+      await open(controller, host, 'chat-a')
+      // Witnesses: the reopen read the newest disk page and that read failed.
+      expect(newestPageReads()).toBeGreaterThan(readsBefore)
+      expect(warn).toHaveBeenCalledWith(
+        '[chat-history] failed to load local messages',
+        expect.objectContaining({ agentRef: host, chatId: 'chat-a' })
+      )
+      expectOnlyTranscript(frames.slice(reopenStart), 'chat-a', disk['chat-a'])
+
+      // The entry survived the failed read: the next reopen is still remembered.
+      await open(controller, host, 'chat-b')
+      const chatARead = deferred<AgentChatMessage[]>()
+      clerum.chat.loadMessages.mockImplementationOnce(() => chatARead.promise)
+      const againStart = frames.length
+      let again!: Promise<void>
+      await act(async () => {
+        again = controller.result.current.switchToChat(host, 'chat-a')
+      })
+      expectOnlyTranscript(frames.slice(againStart), 'chat-a', disk['chat-a'])
+      await act(async () => {
+        chatARead.resolve(disk['chat-a'])
+        await again
+      })
+    }
+  )
+
+  it.each(HOSTS)(
     'c. %s: when the disk page matches, the remembered list and paging offset are kept',
     async host => {
       const disk = { 'chat-a': transcript('chat-a', 81), 'chat-b': transcript('chat-b') }
