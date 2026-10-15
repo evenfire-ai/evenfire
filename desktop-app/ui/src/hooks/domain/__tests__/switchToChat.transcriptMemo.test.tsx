@@ -196,6 +196,40 @@ describe('switchToChat transcript memo (#1091 A9)', () => {
   )
 
   it.each(HOSTS)(
+    'b3. %s: a full disk page of the same length but shifted by a new reply replaces the remembered transcript',
+    async host => {
+      const disk = { 'chat-a': transcript('chat-a', 80), 'chat-b': transcript('chat-b') }
+      serveDisk(disk)
+      const controller = mount(host)
+      await settleMount()
+      await open(controller, host, 'chat-a')
+      await open(controller, host, 'chat-b')
+      const remembered = disk['chat-a']
+      // One reply persisted while A was hidden: the newest page keeps its
+      // length (80) but starts one message later.
+      disk['chat-a'] = transcript('chat-a', 81)
+      const shiftedPage = disk['chat-a'].slice(-80)
+      expect(shiftedPage).toHaveLength(remembered.length)
+
+      const diskRead = deferred<AgentChatMessage[]>()
+      clerum.chat.loadMessages.mockImplementationOnce(() => diskRead.promise)
+      const reopenStart = frames.length
+      let reopen!: Promise<void>
+      await act(async () => {
+        reopen = controller.result.current.switchToChat(host, 'chat-a')
+      })
+      // Witness: the reopen painted the remembered transcript first.
+      expectOnlyTranscript(frames.slice(reopenStart), 'chat-a', remembered)
+
+      await act(async () => {
+        diskRead.resolve(shiftedPage)
+        await reopen
+      })
+      expect(contentsOf(controller.result.current.chatMessages)).toEqual(contentsOf(shiftedPage))
+    }
+  )
+
+  it.each(HOSTS)(
     'b2. %s: an empty disk page (a tombstone this session has not loaded) drops the remembered transcript',
     async host => {
       const disk = { 'chat-a': transcript('chat-a'), 'chat-b': transcript('chat-b') }
@@ -450,65 +484,159 @@ describe('switchToChat transcript memo (#1091 A9)', () => {
     }
   )
 
-  it('stateless wake: a failed reconcile keeps the remembered transcript and holds nothing', async () => {
-    const host = 'chatllm-stateless'
-    const disk = { 'chat-a': transcript('chat-a'), 'chat-b': transcript('chat-b') }
-    serveDisk(disk)
-    const onHostAccessRevoked = vi.fn()
-    const onHostAuthorityUncertain = vi.fn()
-    const controller = mount(host, {
-      onHostAccessRevoked,
-      onHostAuthorityUncertain,
-      isHostAccessBlocked: () => false,
-    })
-    await settleMount()
-    await open(controller, host, 'chat-a')
+  it.each(HOSTS)(
+    "h. %s: a 'specific' selection whose tombstone arrives with the index withdraws the remembered chat",
+    async host => {
+      const otherHost = 'other-host'
+      const disk = { 'chat-a': transcript('chat-a') }
+      serveDisk(disk)
+      const controller = mount(host, { agentNames: [host, otherHost] })
+      await settleMount()
+      await open(controller, host, 'chat-a')
+      act(() => controller.rerender({ selectedAgent: otherHost, agentNames: [host, otherHost] }))
+      await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalledWith(otherHost))
 
-    const unavailable = await ipcHttpError('rpc:loadSessionMessages', 503, 'Service Unavailable', {
-      code: 'host_waking',
-    })
-    const notFound = await ipcHttpError('rpc:loadSessionMessages', 404, 'Not Found', {
-      error: 'not found',
-    })
-    const chatAReads = () =>
-      clerum.rpc.loadSessionMessages.mock.calls.filter(call => call[2] === 'chat-a').length
-    for (const failure of [unavailable, notFound]) {
+      const hostIndex = deferred<ReturnType<typeof localIndex>>()
+      const defaultIndex = clerum.chat.getIndex.getMockImplementation()
+      clerum.chat.getIndex.mockImplementation((agentRef: string) =>
+        agentRef === host ? hostIndex.promise : defaultIndex?.(agentRef)
+      )
+      const returnStart = frames.length
+      act(() => controller.result.current.setPendingChatSelection(host, 'chat-a'))
+      act(() => controller.rerender({ selectedAgent: host, agentNames: [host, otherHost] }))
+      await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenLastCalledWith(host))
+      // Witness: the seed painted the remembered transcript before the index arrived.
+      expectOnlyTranscript(frames.slice(returnStart), 'chat-a', disk['chat-a'])
+
+      const hostReadsBefore = clerum.rpc.loadSessionMessages.mock.calls.length
+      const tombstoneStart = frames.length
+      await act(async () => {
+        hostIndex.resolve(localIndex([], ['chat-a']))
+      })
+      await waitFor(() => expect(controller.result.current.chatMessages).toEqual([]))
+      const after = frames.slice(tombstoneStart)
+      expect(after.at(-1)).toEqual({ activeChatId: 'chat-a', contents: [], loading: false })
+      // The deleted chat is never read from the Host.
+      expect(clerum.rpc.loadSessionMessages.mock.calls.length).toBe(hostReadsBefore)
+    }
+  )
+
+  it.each(HOSTS)(
+    'i. %s: a transcript that changes during an uncertain hold is not remembered after release',
+    async host => {
+      const otherHost = 'other-host'
+      const disk = { 'chat-a': transcript('chat-a', 81), 'chat-b': transcript('chat-b') }
+      serveDisk(disk)
+      const controller = mount(host, { agentNames: [host, otherHost] })
+      await settleMount()
+      await open(controller, host, 'chat-a')
       await open(controller, host, 'chat-b')
-      const readsBefore = chatAReads()
-      // Every read of A fails while the Host wakes, including the reconcile's retries.
-      clerum.rpc.loadSessionMessages.mockImplementation(
-        async (_hostRef: string, _agent: string, chatId: string) => {
-          if (chatId === 'chat-a') throw failure
-          return { agent: host, chatId, state: 'idle', turns: [] }
+      const denial = await ipcGenericForbidden('rpc:loadSessionMessages')
+      clerum.rpc.loadSessionMessages.mockImplementationOnce(async () => {
+        throw denial
+      })
+      await open(controller, host, 'chat-a')
+      // Witness: the reconcile's denial put the Host on an uncertain hold with A visible.
+      expect(controller.hostAuthority.isBlocked(host)).toBe(true)
+      expect(controller.result.current.activeChatId).toBe('chat-a')
+      expect(controller.result.current.chatMessages).toHaveLength(80)
+
+      // The user pages older messages while the Host is held.
+      await act(async () => {
+        await controller.result.current.handleLoadOlderMessages()
+      })
+      expect(controller.result.current.chatMessages).toHaveLength(81)
+
+      act(() => controller.rerender({ selectedAgent: otherHost, agentNames: [host, otherHost] }))
+      await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalledWith(otherHost))
+      controller.hostAuthority.release(host)
+      expect(controller.hostAuthority.isBlocked(host)).toBe(false)
+      // The other Host opens a chat, as the chat route does on selection.
+      await open(controller, otherHost, 'chat-o')
+
+      const diskRead = deferred<AgentChatMessage[]>()
+      clerum.chat.loadMessages.mockImplementationOnce(() => diskRead.promise)
+      const returnStart = frames.length
+      act(() => controller.result.current.setPendingChatSelection(host, 'chat-a'))
+      act(() => controller.rerender({ selectedAgent: host, agentNames: [host, otherHost] }))
+      // Witness: the reopen after release reads the disk page.
+      await waitFor(() =>
+        expect(clerum.chat.loadMessages).toHaveBeenLastCalledWith(host, 'chat-a', 80, undefined)
+      )
+      expect(blankFrame(frames.slice(returnStart), 'chat-a')).toBe(true)
+      await act(async () => {
+        diskRead.resolve(disk['chat-a'].slice(-80))
+      })
+      await waitFor(() => expect(controller.result.current.chatMessages).toHaveLength(80))
+    }
+  )
+
+  it.each(HOSTS)(
+    '%s: a failed reconcile while the Host wakes keeps the remembered transcript and holds nothing',
+    async host => {
+      const disk = { 'chat-a': transcript('chat-a'), 'chat-b': transcript('chat-b') }
+      serveDisk(disk)
+      const onHostAccessRevoked = vi.fn()
+      const onHostAuthorityUncertain = vi.fn()
+      const controller = mount(host, {
+        onHostAccessRevoked,
+        onHostAuthorityUncertain,
+        isHostAccessBlocked: () => false,
+      })
+      await settleMount()
+      await open(controller, host, 'chat-a')
+
+      const unavailable = await ipcHttpError(
+        'rpc:loadSessionMessages',
+        503,
+        'Service Unavailable',
+        {
+          code: 'host_waking',
         }
       )
-      const reopenStart = frames.length
-      await open(controller, host, 'chat-a')
-      // Witness: the reconcile did reach the Host and fail.
-      expect(chatAReads()).toBeGreaterThan(readsBefore)
-      expectOnlyTranscript(frames.slice(reopenStart), 'chat-a', disk['chat-a'])
-    }
-    await waitFor(() =>
-      expect(
-        controller.result.current.sessionFsmStore.getState(makeTaskKey(host, 'chat-a'))?.phase
-      ).toBe('offline')
-    )
-    expect(onHostAccessRevoked).not.toHaveBeenCalled()
-    expect(onHostAuthorityUncertain).not.toHaveBeenCalled()
+      const notFound = await ipcHttpError('rpc:loadSessionMessages', 404, 'Not Found', {
+        error: 'not found',
+      })
+      const chatAReads = () =>
+        clerum.rpc.loadSessionMessages.mock.calls.filter(call => call[2] === 'chat-a').length
+      for (const failure of [unavailable, notFound]) {
+        await open(controller, host, 'chat-b')
+        const readsBefore = chatAReads()
+        // Every read of A fails while the Host wakes, including the reconcile's retries.
+        clerum.rpc.loadSessionMessages.mockImplementation(
+          async (_hostRef: string, _agent: string, chatId: string) => {
+            if (chatId === 'chat-a') throw failure
+            return { agent: host, chatId, state: 'idle', turns: [] }
+          }
+        )
+        const reopenStart = frames.length
+        await open(controller, host, 'chat-a')
+        // Witness: the reconcile did reach the Host and fail.
+        expect(chatAReads()).toBeGreaterThan(readsBefore)
+        expectOnlyTranscript(frames.slice(reopenStart), 'chat-a', disk['chat-a'])
+      }
+      await waitFor(() =>
+        expect(
+          controller.result.current.sessionFsmStore.getState(makeTaskKey(host, 'chat-a'))?.phase
+        ).toBe('offline')
+      )
+      expect(onHostAccessRevoked).not.toHaveBeenCalled()
+      expect(onHostAuthorityUncertain).not.toHaveBeenCalled()
 
-    // A third reopen is still served from memory.
-    await open(controller, host, 'chat-b')
-    const diskRead = deferred<AgentChatMessage[]>()
-    clerum.chat.loadMessages.mockImplementationOnce(() => diskRead.promise)
-    const reopenStart = frames.length
-    let reopen!: Promise<void>
-    await act(async () => {
-      reopen = controller.result.current.switchToChat(host, 'chat-a')
-    })
-    expectOnlyTranscript(frames.slice(reopenStart), 'chat-a', disk['chat-a'])
-    await act(async () => {
-      diskRead.resolve(disk['chat-a'])
-      await reopen
-    })
-  })
+      // A third reopen is still served from memory.
+      await open(controller, host, 'chat-b')
+      const diskRead = deferred<AgentChatMessage[]>()
+      clerum.chat.loadMessages.mockImplementationOnce(() => diskRead.promise)
+      const reopenStart = frames.length
+      let reopen!: Promise<void>
+      await act(async () => {
+        reopen = controller.result.current.switchToChat(host, 'chat-a')
+      })
+      expectOnlyTranscript(frames.slice(reopenStart), 'chat-a', disk['chat-a'])
+      await act(async () => {
+        diskRead.resolve(disk['chat-a'])
+        await reopen
+      })
+    }
+  )
 })

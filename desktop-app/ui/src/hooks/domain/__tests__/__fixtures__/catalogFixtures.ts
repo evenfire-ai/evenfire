@@ -8,7 +8,7 @@ export const CATALOG_NOW = '2026-09-12T00:00:00.000Z'
  * from the producer instead of hand-built parsed shapes.
  */
 export function serverSessions(
-  items: Array<{ agent: string; chatId: string; title?: string }>,
+  items: Array<{ agent: string; chatId: string; title?: string; lastActivityAt?: string }>,
   nextCursor?: string
 ): SessionsListResult {
   return parseSessionsListResult({
@@ -16,7 +16,7 @@ export function serverSessions(
       agent: i.agent,
       chatId: i.chatId,
       turnCount: 1,
-      lastActivityAt: CATALOG_NOW,
+      lastActivityAt: i.lastActivityAt ?? CATALOG_NOW,
       ...(i.title !== undefined ? { title: i.title } : {}),
     })),
     ...(nextCursor !== undefined ? { nextCursor } : {}),

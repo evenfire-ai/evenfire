@@ -89,6 +89,52 @@ describe('per-Host Latest sessions publication', () => {
     })
   })
 
+  it.each([
+    [HOST_A, HOST_B],
+    [HOST_B, HOST_A],
+  ])(
+    'interleaves %s and %s rows by last activity whichever Host arrives last',
+    async (first, last) => {
+      const at = (minute: number) => `2026-10-14T11:0${minute}:00.000Z`
+      const pages: Record<string, SessionsListResult> = {
+        [HOST_A]: serverSessions([
+          { agent: HOST_A, chatId: 'a-3', lastActivityAt: at(3) },
+          { agent: HOST_A, chatId: 'a-1', lastActivityAt: at(1) },
+        ]),
+        [HOST_B]: serverSessions([
+          { agent: HOST_B, chatId: 'b-4', lastActivityAt: at(4) },
+          { agent: HOST_B, chatId: 'b-2', lastActivityAt: at(2) },
+        ]),
+      }
+      const pendingLast = deferred<SessionsListResult>()
+      clerum.chat.getIndex.mockResolvedValue(localIndex([]))
+      clerum.rpc.listSessions.mockImplementation((agentRef: string) =>
+        agentRef === last ? pendingLast.promise : Promise.resolve(pages[agentRef]!)
+      )
+      const controller = renderController({ selectedAgent: null, agentNames: HOSTS })
+      await waitFor(() =>
+        expect(controller.result.current.latestChatSessions.map(chat => chat.agentRef)).toEqual([
+          first,
+          first,
+        ])
+      )
+
+      await act(async () => {
+        pendingLast.resolve(pages[last]!)
+        await pendingLast.promise
+      })
+
+      await waitFor(() =>
+        expect(controller.result.current.latestChatSessions.map(chat => chat.id)).toEqual([
+          'b-4',
+          'a-3',
+          'b-2',
+          'a-1',
+        ])
+      )
+    }
+  )
+
   it('discards a cancelled Host response while retaining the remaining Host rows', async () => {
     const pendingB = deferred<SessionsListResult>()
     let bResolved = false

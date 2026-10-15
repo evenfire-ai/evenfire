@@ -644,9 +644,11 @@ export function useAgentChatController({
   // Every change to the visible transcript (send, stream, hydrate, older page)
   // goes through `chatMessages`, so recording each settled commit keeps the memo
   // current. A commit whose state does not match the visible selection is a
-  // transition between chats and is skipped.
+  // transition between chats and is skipped. A held Host or a deleted chat is
+  // never recorded: its entry was withdrawn and must not come back on release.
   useEffect(() => {
     if (chatMessagesLoading || !activeChatId || !selectedAgent) return
+    if (isHostAccessBlocked(selectedAgent) || isChatDeleted(selectedAgent, activeChatId)) return
     const visible = activeChatVisibilityRef.current
     if (visible.activeChatId !== activeChatId || visible.selectedAgent !== selectedAgent) return
     transcriptMemo.set(chatTranscriptMemoKey(selectedAgent, activeChatId), {
@@ -660,6 +662,8 @@ export function useAgentChatController({
     chatMessagesLoading,
     chatTranscriptMemoKey,
     hasOlderMessages,
+    isChatDeleted,
+    isHostAccessBlocked,
     selectedAgent,
     transcriptMemo,
   ])
@@ -1043,7 +1047,22 @@ export function useAgentChatController({
   // chat, and a task in flight is rejoined via the tracker D.3 already mounts.
   const switchToChat = useCallback(
     async (agentRef: string, chatId: string) => {
-      if (isHostAccessBlocked(agentRef) || isChatDeleted(agentRef, chatId)) return
+      if (isHostAccessBlocked(agentRef)) return
+      if (isChatDeleted(agentRef, chatId)) {
+        // A selection seed may already have painted this chat from the memo
+        // before its tombstone arrived; withdraw both the entry and the view.
+        transcriptMemo.delete(chatTranscriptMemoKey(agentRef, chatId))
+        const visible = activeChatVisibilityRef.current
+        if (visible.selectedAgent === agentRef && visible.activeChatId === chatId) {
+          chatMessagesRef.current = []
+          setChatMessages([])
+          setChatMessagesLoading(false)
+          setHasOlderMessages(false)
+          cancelOlderMessagesLoad()
+          loadedLocalMessageCountRef.current = 0
+        }
+        return
+      }
       const key = makeTaskKey(agentRef, chatId)
       const visibleBeforeSwitch = activeChatVisibilityRef.current
       const reopeningActiveChat =
@@ -1213,6 +1232,9 @@ export function useAgentChatController({
       clearUnreadInList,
       rememberedTranscript,
       presentSelectedTranscript,
+      transcriptMemo,
+      chatTranscriptMemoKey,
+      cancelOlderMessagesLoad,
       chatStore.setLastActive,
       chatStore.loadMessages,
       chatStore.clearUnreadTerminal,

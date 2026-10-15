@@ -1,6 +1,6 @@
 import { type MutableRefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext'
-import { byUpdatedDesc, mergeCatalogPage } from '@lib/catalogMerge'
+import { byUpdatedDesc, mergeByUpdatedDesc, mergeCatalogPage } from '@lib/catalogMerge'
 import { agentChatPlaceholder, remotePlaceholder } from '@lib/chatTitle'
 import type { PendingRename } from '@lib/resolveSessionTitle'
 import type {
@@ -1456,8 +1456,9 @@ export function useChatListController({
 
   // A hold is enforced synchronously (the published list below filters held
   // Hosts, and every in-flight read compares its Host's epoch), so holding a
-  // Host needs no reload. Releasing one does: its sessions were dropped while
-  // it was held, so the cross-agent list reloads when a held Host comes back.
+  // Host needs no reload. The stored list may still hold that Host's rows, but
+  // its reads were discarded while it was held and those rows can be stale, so
+  // the cross-agent list reloads when a held Host comes back.
   const [latestReloadRevision, setLatestReloadRevision] = useState(0)
   const heldAgentsRef = useRef(new Set<string>())
   useEffect(() => {
@@ -1614,8 +1615,11 @@ export function useChatListController({
                   agentRef: session.agentRef,
                 }),
               })
-              return [...merged, ...previous.filter(item => item.agentRef !== agentRef)].sort(
-                byUpdatedDesc
+              // Every writer keeps `previous` sorted, so the other Hosts' rows
+              // stay sorted after the filter and one linear merge suffices.
+              return mergeByUpdatedDesc(
+                merged,
+                previous.filter(item => item.agentRef !== agentRef)
               )
             })
 

@@ -56,6 +56,25 @@ export function byUpdatedDesc(a: { updatedAt: string }, b: { updatedAt: string }
   return sortableTimestamp(b.updatedAt) - sortableTimestamp(a.updatedAt)
 }
 
+/**
+ * Merges two lists already sorted by `byUpdatedDesc` in linear time. Ties keep
+ * `first` ahead of `second`, the order a stable sort of `[...first, ...second]`
+ * gives.
+ */
+export function mergeByUpdatedDesc<T extends { updatedAt: string }>(first: T[], second: T[]): T[] {
+  const merged: T[] = []
+  let j = 0
+  for (const item of first) {
+    let next = second[j]
+    while (next !== undefined && byUpdatedDesc(item, next) > 0) {
+      merged.push(next)
+      next = second[++j]
+    }
+    merged.push(item)
+  }
+  return merged.concat(second.slice(j))
+}
+
 export function mergeCatalogPage<E extends CatalogMergeEntry, S extends CatalogMergeSession>(
   input: CatalogMergeInput<E, S>
 ): E[] {

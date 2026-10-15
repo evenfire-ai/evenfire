@@ -15,6 +15,7 @@ export interface TranscriptMemoEntry {
 export interface TranscriptMemo {
   get: (key: string) => TranscriptMemoEntry | undefined
   set: (key: string, entry: TranscriptMemoEntry) => void
+  delete: (key: string) => void
   deleteAgent: (agentRef: string) => void
   clear: () => void
 }
@@ -66,6 +67,9 @@ export function createTranscriptMemo(limits: TranscriptMemoLimits): TranscriptMe
       while (entries.size > limits.maxChats) {
         entries.delete(entries.keys().next().value!)
       }
+    },
+    delete(key) {
+      entries.delete(key)
     },
     deleteAgent(agentRef) {
       for (const key of entries.keys()) {

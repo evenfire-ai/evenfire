@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
-import { byUpdatedDesc, mergeCatalogPage } from '../catalogMerge'
+import { byUpdatedDesc, mergeByUpdatedDesc, mergeCatalogPage } from '../catalogMerge'
 import type { PendingRename } from '../resolveSessionTitle'
 
 /**
@@ -283,5 +283,26 @@ describe('mergeCatalogPage', () => {
     ]
     expect(merge(cached, sessions, { a: 'in-flight' })[0]?.title).toBe('Renamed')
     expect(merge(cached, sessions, {})[0]?.title).toBe('Server plan')
+  })
+})
+
+describe('mergeByUpdatedDesc', () => {
+  const rowsArb = (side: string) =>
+    fc
+      .array(timestampArb, { maxLength: 12 })
+      .map(stamps =>
+        stamps
+          .map((updatedAt, index) => ({ id: `${side}-${index}`, updatedAt }))
+          .sort(byUpdatedDesc)
+      )
+
+  it('equals a stable sort of both sorted lists, first list first on ties', () => {
+    fc.assert(
+      fc.property(rowsArb('first'), rowsArb('second'), (first, second) => {
+        const merged = mergeByUpdatedDesc(first, second)
+        expect(merged).toEqual([...first, ...second].sort(byUpdatedDesc))
+        expect(merged).toHaveLength(first.length + second.length)
+      })
+    )
   })
 })
