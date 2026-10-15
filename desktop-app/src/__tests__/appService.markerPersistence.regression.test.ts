@@ -192,10 +192,7 @@ describe('failed login follows an already-admitted logout transaction', () => {
       return persist(operation)
     })
     const login = own(h.state.installAuthenticatedLogin({ token: rejectedToken, me: homeMe }))
-    const loginOutcome = login.then(
-      () => null,
-      error => error
-    )
+    void login.catch(() => undefined)
     try {
       await awaitPhase(loginQueued.promise, login, 'queued explicit login')
       expect(runtime.keychain.size).toBe(0)
