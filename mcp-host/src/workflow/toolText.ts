@@ -74,7 +74,7 @@ const INVISIBLE = /[\u00AD\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\u
  * a reference definition line and the brackets around a label.
  */
 const LINK_SYNTAX =
-  /\]\((?:<[^>\n]*>|[^\s()]*(?:\([^\s()]*\))*)(?:\s+"[^"\n]*")?\)|\]\[[^\]\n]*\]|^\s*\[[^\]\n]+\]:.*$|[[\]]/gm
+  /\]\((?:<[^>\n]*>|[^\s()]*(?:\([^\s()]*\))*)(?:\s+"[^"\n]*")?\)|\]\[[^\]\n]*\]|^[ \t]*\[[^\]\n]+\]:.*$|[[\]]/gm
 
 /** A backslash before ASCII punctuation, which markdown prints as that character. */
 const MARKDOWN_ESCAPE = /\\([!-/:-@[-`{-~])/g
