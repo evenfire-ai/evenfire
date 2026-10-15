@@ -87,7 +87,7 @@ describe('pending logout without a Keytar module', () => {
     const { service, tokenStore, envKey, markers } = await createService()
     await tokenStore.setSafeStorageSessionToken('fixture-file-session', envKey)
 
-    await expect(service.logout()).resolves.toBeUndefined()
+    await expect(service.logout()).resolves.toBeTypeOf('number')
     await expect(tokenStore.getSafeStorageSessionToken(envKey)).resolves.toBeNull()
     expect(markers.readPendingExternalLogoutIntent(runtime.directory, envKey)).toEqual({
       intent: 'logout-pending',

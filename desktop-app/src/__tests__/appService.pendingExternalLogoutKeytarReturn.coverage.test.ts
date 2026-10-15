@@ -106,7 +106,7 @@ describe('pending logout when an unavailable Keytar module returns', () => {
       'fixture-fresh-safe-storage-session'
     )
 
-    await expect(recovery.service.logout()).resolves.toBeUndefined()
+    await expect(recovery.service.logout()).resolves.toBeTypeOf('number')
     await expect(
       recovery.tokenStore.getSafeStorageSessionToken(recovery.envKey)
     ).resolves.toBeNull()

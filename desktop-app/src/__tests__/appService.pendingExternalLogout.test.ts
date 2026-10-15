@@ -575,7 +575,7 @@ describe('AppService pending external logout', () => {
     })
 
     try {
-      await expect(service.logout()).resolves.toBeUndefined()
+      await expect(service.logout()).resolves.toBeTypeOf('number')
 
       expect(state.sessionToken).toBeNull()
       expect(state.me).toBeNull()
@@ -608,7 +608,7 @@ describe('AppService pending external logout', () => {
     })
 
     try {
-      await expect(service.logout()).resolves.toBeUndefined()
+      await expect(service.logout()).resolves.toBeTypeOf('number')
 
       expect(state.sessionToken).toBeNull()
       expect(state.me).toBeNull()
@@ -1220,7 +1220,7 @@ describe('AppService pending external logout', () => {
       new Error('Application is shutting down')
     )
 
-    await expect(service.logout()).resolves.toBeUndefined()
+    await expect(service.logout()).resolves.toBeTypeOf('number')
 
     expect(clearToken).not.toHaveBeenCalled()
     expect(state.sessionToken).toBeNull()

@@ -696,7 +696,7 @@ describe('durable logout failure policy', () => {
     keytarMock.setPassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
     keytarMock.deletePassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
 
-    await expect(harness.service.logout()).resolves.toBeUndefined()
+    await expect(harness.service.logout()).resolves.toBeTypeOf('number')
     const temporaryToken = sessionToken('temporary-after-logout')
     await expect(harness.login(temporaryToken)).resolves.toMatchObject({
       authenticated: true,

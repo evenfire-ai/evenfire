@@ -352,7 +352,7 @@ describe('pending logout accepted lifecycle coverage', () => {
       return open(...args)
     })
 
-    await expect(service.logout()).resolves.toBeUndefined()
+    await expect(service.logout()).resolves.toBeTypeOf('number')
     expect(state.sessionToken).toBeNull()
     expect(state.me).toBeNull()
     await expect(tokenStore.getSafeStorageSessionToken(activeEnvKey)).resolves.toBeNull()

@@ -716,12 +716,6 @@ describe('R20-M4 ordinary partial-write recovery', () => {
         error => error
       )
       await awaitPhase(entered.promise, switching, 'admitted native writer')
-      const logoutQueued = deferred()
-      const persist = h.state.runSessionPersistence.bind(h.state)
-      vi.spyOn(h.state, 'runSessionPersistence').mockImplementationOnce(operation => {
-        logoutQueued.resolve()
-        return persist(operation)
-      })
       const clear = vi.spyOn(h.tokenStore, 'clearSessionTokenStrictly')
       const logout = own(h.service.logout())
       let logoutSettled = false
@@ -734,7 +728,7 @@ describe('R20-M4 ordinary partial-write recovery', () => {
         }
       )
       try {
-        await awaitPhase(logoutQueued.promise, logout, 'queued logout storage transaction')
+        await new Promise<void>(resolve => setImmediate(resolve))
         expect(logoutSettled).toBe(false)
         expect(clear).not.toHaveBeenCalled()
       } finally {
@@ -742,6 +736,7 @@ describe('R20-M4 ordinary partial-write recovery', () => {
       }
       await rejection
       await logout
+      expect(clear).toHaveBeenCalledOnce()
       vi.mocked(h.state.authClient.getMe).mockClear()
       await expect(h.service.initialize()).resolves.toEqual({ authenticated: false, me: null })
       const restarted = await harness()

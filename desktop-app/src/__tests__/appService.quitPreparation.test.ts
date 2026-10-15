@@ -104,7 +104,7 @@ describe('AppService quit preparation', () => {
     await expect(service.logout()).rejects.toThrow('Application is shutting down')
 
     service.cancelQuitPreparation()
-    await expect(service.logout()).resolves.toBeUndefined()
+    await expect(service.logout()).resolves.toBeTypeOf('number')
     expect(clearSessionToken).not.toHaveBeenCalled()
     expect(clearSessionTokenStrictly).toHaveBeenCalledOnce()
     expect(reopenAdmission).toHaveBeenCalledOnce()
@@ -252,6 +252,7 @@ describe('AppService quit preparation', () => {
     const service = new AppServiceClass() as unknown as {
       pendingCredentialProducers: Set<Promise<unknown>>
       quitPreparationStarted: boolean
+      sessionToken: string | null
       requireSessionToken: () => string
       runWithTeamContext: <T>(
         teamId: string | null | undefined,
@@ -259,6 +260,7 @@ describe('AppService quit preparation', () => {
       ) => Promise<T>
     }
     service.quitPreparationStarted = true
+    service.sessionToken = 'session-token'
     service.requireSessionToken = vi.fn(() => 'session-token')
     const read = vi.fn(async (token: string) => token)
 

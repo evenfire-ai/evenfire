@@ -2,9 +2,9 @@ import { describe, expect, it, vi } from 'vitest'
 import { AppService } from '../appService.js'
 import { ApiError } from '../httpClient.js'
 
-// Enough microtask ticks to drain the team-context resolution chain
-// (issueRpcTokenForHostRefs -> runWithTeamContext) plus the stream open.
-async function flushAsyncWork(iterations = 16): Promise<void> {
+// Drain team-context resolution plus the serialized auth/environment commit
+// queue introduced by runtime-profile handoff. This does not advance timers.
+async function flushAsyncWork(iterations = 64): Promise<void> {
   for (let index = 0; index < iterations; index += 1) {
     await Promise.resolve()
   }
