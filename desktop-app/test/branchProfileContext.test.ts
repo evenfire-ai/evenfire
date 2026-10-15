@@ -14,7 +14,7 @@ describe('assertBranchProfileContext', () => {
     'clerum-test',
     'prod',
     'clerum',
-    'gke_eventfire-491421_us-central1-a_clerum-dev',
+    'gke_${GCP_PROJECT}_us-central1-a_example-dev',
     'clerum-fix-ABC-0123abcd',
     'clerum-fix-0123abc',
     'clerum-fix-0123abcd-extra',
