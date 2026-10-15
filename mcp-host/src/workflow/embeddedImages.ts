@@ -437,7 +437,8 @@ process.stdin.on('data', chunk => chunks.push(chunk))
 process.stdin.on('end', async () => {
   try {
     const image = await loadImage(Buffer.concat(chunks))
-    if (!image.width || !image.height || image.width * image.height > Number(process.argv[2])) process.exit(2)
+    if (!image.width || !image.height) process.exit(3)
+    if (image.width * image.height > Number(process.argv[2])) process.exit(2)
     const canvas = createCanvas(image.width, image.height)
     canvas.getContext('2d').drawImage(image, 0, 0)
     process.stdout.end(canvas.toBuffer('image/png'))
@@ -453,7 +454,7 @@ let svgQueue: Promise<unknown> = Promise.resolve()
 const STDERR_KEPT = 512
 
 /** Why the renderer gave no image. */
-type SvgFailure = 'spawn' | 'exit' | 'too-large' | 'timeout' | 'output'
+type SvgFailure = 'spawn' | 'exit' | 'empty' | 'too-large' | 'timeout' | 'output'
 
 type SvgRender = { png: Buffer } | { failure: SvgFailure }
 
@@ -464,6 +465,8 @@ function svgFailureNote(failure: SvgFailure): string {
       return `took longer than ${SVG_RENDER_MS / 1000} s to draw`
     case 'too-large':
       return 'draws more pixels than this tool converts'
+    case 'empty':
+      return 'has no width or height to draw'
     default:
       return 'could not be drawn'
   }
@@ -474,10 +477,14 @@ function renderSvg(svg: Buffer): Promise<SvgRender> {
   const run = svgQueue.then(
     () =>
       new Promise<SvgRender>(resolve => {
+        let done = false
+        let ended: SvgFailure | undefined
         const failed = (
           failure: SvgFailure,
           detail: { code?: number | null; signal?: string | null; stderr?: string } = {}
         ) => {
+          if (done) return
+          done = true
           logger.warn(
             { component: 'EmbeddedImages', reason: failure, ...detail },
             'An SVG image could not be drawn and was left out'
@@ -506,40 +513,53 @@ function renderSvg(svg: Buffer): Promise<SvgRender> {
           failed('spawn')
           return
         }
-        const chunks: Buffer[] = []
-        let size = 0
-        let stderr = ''
-        let ended: SvgFailure | undefined
+        // Listened for first: a child that could not start (no file
+        // descriptors left) has no pipes and emits 'error' on the next tick,
+        // and may emit nothing else.
+        child.on('error', () => {
+          if (child.pid === undefined) {
+            clearTimeout(timer)
+            failed('spawn')
+          }
+        })
         const timer = setTimeout(() => {
           ended = 'timeout'
           child.kill('SIGKILL')
         }, SVG_RENDER_MS)
-        child.stdout!.on('data', (chunk: Buffer) => {
+        if (!child.stdout || !child.stderr || !child.stdin) {
+          clearTimeout(timer)
+          failed('spawn')
+          return
+        }
+        const chunks: Buffer[] = []
+        let size = 0
+        let stderr = ''
+        child.stdout.on('data', (chunk: Buffer) => {
           size += chunk.length
           if (size > MAX_DECODE_PIXELS * 4) {
             ended = 'too-large'
             child.kill('SIGKILL')
           } else chunks.push(chunk)
         })
-        child.stderr!.on('data', (chunk: Buffer) => {
+        child.stderr.on('data', (chunk: Buffer) => {
           if (stderr.length < STDERR_KEPT) stderr += chunk.toString('utf8')
-        })
-        child.on('error', () => {
-          ended ??= 'spawn'
         })
         child.on('close', (code, signal) => {
           clearTimeout(timer)
           const png = Buffer.concat(chunks)
-          if (!ended && code === 0 && isPng(png)) {
+          if (!done && !ended && code === 0 && isPng(png)) {
+            done = true
             resolve({ png })
             return
           }
-          // Exit 2 is the renderer's own refusal of an image over the pixel limit.
-          const failure = ended ?? (code === 2 ? 'too-large' : code === 0 ? 'output' : 'exit')
+          // The renderer exits 2 for an image over the pixel limit, 3 for one with no size.
+          const failure =
+            ended ??
+            (code === 2 ? 'too-large' : code === 3 ? 'empty' : code === 0 ? 'output' : 'exit')
           failed(failure, { code, signal, stderr: stderr.slice(0, STDERR_KEPT) || undefined })
         })
-        child.stdin!.on('error', () => undefined)
-        child.stdin!.end(svg)
+        child.stdin.on('error', () => undefined)
+        child.stdin.end(svg)
       })
   )
   svgQueue = run.catch(() => undefined)
