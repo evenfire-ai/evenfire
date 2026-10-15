@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { exitOnPersistFailure } from '../persistFailureExit'
 
 // Runs the real factory, PersistQueue and exitOnPersistFailure in a child
 // Node process and reads that process's exit code. The worker thread is a
@@ -126,5 +127,24 @@ describe('exitOnPersistFailure in a Host process', () => {
     expect(run.out).toContain('Conversation store can no longer persist writes')
     expect(run.out).not.toContain('STILL_RUNNING')
     expect(run.status).toBe(1)
+  })
+})
+
+describe('exitOnPersistFailure during shutdown', () => {
+  it('does not exit while the Host is shutting down', () => {
+    const exit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+    try {
+      let shuttingDown = true
+      const handler = exitOnPersistFailure(() => shuttingDown)
+      handler(new Error('db worker exited (code=1)'))
+      expect(exit).not.toHaveBeenCalled()
+
+      // Liveness witness: the same handler exits once shutdown is not running.
+      shuttingDown = false
+      handler(new Error('db worker exited (code=1)'))
+      expect(exit).toHaveBeenCalledExactlyOnceWith(1)
+    } finally {
+      exit.mockRestore()
+    }
   })
 })
