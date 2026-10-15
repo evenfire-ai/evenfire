@@ -1,14 +1,15 @@
 import { type ElectronApplication, type Page, expect, test } from '@playwright/test'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { createFixture } from '../../scripts/bench-chat-open/fixtures.mjs'
 import { ChatStore } from '../../src/chatStore'
 import { isPathInside } from '../../src/devIsolation'
 import { assertSafeFilesystemSegment } from '../../src/pathSafety'
 import { type ChatAuthorityScope } from '../../src/types'
 import { SIDEBAR_SESSION_PREVIEW_LIMIT as SIDEBAR_PREVIEW } from '../../ui/src/constants/navigation'
+import { assertAllowedKubeContext } from './global-setup'
+import { createFixture } from './helpers/chatCacheFixture.mjs'
 import {
   type HostSnapshot,
   readHostSnapshot,
@@ -59,7 +60,12 @@ type Sample = {
   blank?: boolean
   /** What the observer saw just before the click and on its first callbacks after it. */
   trace?: OpenObservation[]
+  /** Relaunch metrics: observed before the test's first pointer event in the window. */
+  before_first_click?: boolean
 }
+/** Runs a measured window; the Host snapshot loop of the round is paused while it runs. */
+type Timed = <T>(work: () => Promise<T>) => Promise<T>
+const untimed: Timed = work => work()
 type OpenObservation = {
   ms: number
   lists: number
@@ -76,6 +82,10 @@ const LOADING_SKELETON = '[aria-label="Loading conversation"]'
 const TRACE_LIMIT = 8
 const LIMIT_WINDOW_MS = 65_000
 const RATE_LIMITED = /\b429\b|Too Many Requests/g
+// Relaunch rounds per build in L and W.
+const RELAUNCH_ROUNDS = 3
+// A live Desktop from an earlier A/B run would hold the Keychain item this run needs.
+const AB_PROCESS = /Evenfire Issue1091Ab/
 const rows = (host: string) =>
   `[data-testid="latest-session-row"][data-agent-ref=${JSON.stringify(host)}]`
 const row = (host: string, id: string) => `${rows(host)}[data-chat-id=${JSON.stringify(id)}]`
@@ -114,10 +124,12 @@ async function openChat(
   page: Page,
   host: string,
   label: string,
-  chat: Chat
+  chat: Chat,
+  timed: Timed
 ): Promise<{ ms: number; blank: boolean; trace: OpenObservation[] }> {
+  // A deadline, not a fixed sleep: wait only for what is left of the pace since the last open.
   const pace = lastOpenAt + OPEN_PACE_MS - Date.now()
-  if (pace > 0) await page.waitForTimeout(pace)
+  if (pace > 0) await new Promise(resolve => setTimeout(resolve, pace))
   lastOpenAt = Date.now()
   await page
     .getByRole('navigation', { name: 'Chat breadcrumb', exact: true })
@@ -151,77 +163,84 @@ async function openChat(
       }
     )
     .toBe(true)
-  return page.evaluate(
-    ({ selector, chat, messages, skeleton, traceLimit }) =>
-      new Promise<{ ms: number; blank: boolean; trace: OpenObservation[] }>((resolve, reject) => {
-        const button = document.querySelector<HTMLButtonElement>(`${selector} button`)
-        if (!button || button.disabled)
-          throw new Error(`Chat row has no enabled open button: ${selector}`)
-        let started = performance.now()
-        let clicked = false
-        let blank = false
-        const trace: OpenObservation[] = []
-        // Before the click the Chat breadcrumb shows the Host's chat list with no active chat, which
-        // already has zero bubbles; only the loading skeleton marks a chat that was opened empty.
-        const observe = () => {
-          const transcripts = document.querySelectorAll('[data-testid="message-list"]')
-          const observation = {
-            ms: clicked ? performance.now() - started : -1,
-            lists: transcripts.length,
-            bubbles: transcripts[0]?.querySelectorAll(messages).length ?? 0,
-            skeleton: document.querySelector(skeleton) !== null,
-            dedicated: transcripts[0]?.classList.contains('chat-thread-dedicated') ?? false,
+  return timed(() =>
+    page.evaluate(
+      ({ selector, chat, messages, skeleton, traceLimit }) =>
+        new Promise<{ ms: number; blank: boolean; trace: OpenObservation[] }>((resolve, reject) => {
+          const button = document.querySelector<HTMLButtonElement>(`${selector} button`)
+          if (!button || button.disabled)
+            throw new Error(`Chat row has no enabled open button: ${selector}`)
+          let blank = false
+          const trace: OpenObservation[] = []
+          // Before the click the Chat breadcrumb shows the Host's chat list with no active chat, which
+          // already has zero bubbles; only the loading skeleton marks a chat that was opened empty.
+          const observe = (ms: number) => {
+            const transcripts = document.querySelectorAll('[data-testid="message-list"]')
+            const observation = {
+              ms,
+              lists: transcripts.length,
+              bubbles: transcripts[0]?.querySelectorAll(messages).length ?? 0,
+              skeleton: document.querySelector(skeleton) !== null,
+              dedicated: transcripts[0]?.classList.contains('chat-thread-dedicated') ?? false,
+            }
+            if (trace.length < traceLimit) trace.push(observation)
+            return observation
           }
-          if (trace.length < traceLimit) trace.push(observation)
-          return observation
-        }
-        observe()
-        // The sidebar previews only the latest sessions, so the active-row witness is checked outside the timing.
-        const finish = () => {
-          const transcripts = document.querySelectorAll('[data-testid="message-list"]')
-          if (transcripts.length > 1) {
+          observe(-1)
+          // The sidebar previews only the latest sessions, so the active-row witness is checked outside the timing.
+          let scheduled = false
+          const finish = () => {
+            scheduled = false
+            const transcripts = document.querySelectorAll('[data-testid="message-list"]')
+            if (transcripts.length > 1) {
+              observer.disconnect()
+              clearTimeout(deadline)
+              reject(new Error(`Expected one transcript, found ${transcripts.length}.`))
+              return
+            }
+            const transcript = transcripts[0]
+            const bubbles = transcript?.querySelectorAll(messages)
+            if (observe(performance.now() - started).skeleton) blank = true
+            if (
+              bubbles?.length === chat.count &&
+              bubbles[chat.count - 1]?.textContent?.includes(chat.lastText) &&
+              transcript &&
+              transcript.getBoundingClientRect().height > 0
+            ) {
+              observer.disconnect()
+              clearTimeout(deadline)
+              resolve({ ms: performance.now() - started, blank, trace })
+            }
+          }
+          // One check per animation frame: a mutation only schedules it, so layout is read once
+          // per frame instead of once per mutation. Callbacks run after the click below sets `started`.
+          const observer = new MutationObserver(() => {
+            if (scheduled) return
+            scheduled = true
+            requestAnimationFrame(finish)
+          })
+          observer.observe(document.documentElement, {
+            childList: true,
+            subtree: true,
+            characterData: true,
+            attributes: true,
+          })
+          const deadline = setTimeout(() => {
             observer.disconnect()
-            clearTimeout(deadline)
-            reject(new Error(`Expected one transcript, found ${transcripts.length}.`))
-            return
-          }
-          const transcript = transcripts[0]
-          const bubbles = transcript?.querySelectorAll(messages)
-          if (observe().skeleton) blank = true
-          if (
-            bubbles?.length === chat.count &&
-            bubbles[chat.count - 1]?.textContent?.includes(chat.lastText) &&
-            transcript &&
-            transcript.getBoundingClientRect().height > 0
-          ) {
-            observer.disconnect()
-            clearTimeout(deadline)
-            resolve({ ms: performance.now() - started, blank, trace })
-          }
-        }
-        const observer = new MutationObserver(finish)
-        observer.observe(document.documentElement, {
-          childList: true,
-          subtree: true,
-          characterData: true,
-          attributes: true,
-        })
-        const deadline = setTimeout(() => {
-          observer.disconnect()
-          reject(new Error(`Transcript did not match server chat ${chat.id}`))
-        }, 120_000)
-        started = performance.now()
-        button.click()
-        clicked = true
-        finish()
-      }),
-    {
-      selector: agentRow(host, chat.id),
-      chat,
-      messages: MESSAGES,
-      skeleton: LOADING_SKELETON,
-      traceLimit: TRACE_LIMIT,
-    }
+            reject(new Error(`Transcript did not match server chat ${chat.id}`))
+          }, 120_000)
+          const started = performance.now()
+          button.click()
+          finish()
+        }),
+      {
+        selector: agentRow(host, chat.id),
+        chat,
+        messages: MESSAGES,
+        skeleton: LOADING_SKELETON,
+        traceLimit: TRACE_LIMIT,
+      }
+    )
   )
 }
 async function relaunchPaint(
@@ -237,6 +256,7 @@ async function relaunchPaint(
           ms: number
           observed_at_install: boolean
           observer_installed_ms: number
+          before_first_click: boolean
         }>
       >((resolve, reject) => {
         const navigation = performance.getEntriesByType('navigation')[0] as
@@ -244,12 +264,23 @@ async function relaunchPaint(
           | undefined
         if (!navigation) throw new Error('Window navigation timing is unavailable.')
         const installed = performance.now()
-        const observed = new Map<string, { at: number; initial: boolean }>()
+        const observed = new Map<string, { at: number; initial: boolean; beforeClick: boolean }>()
         let initial = true
+        // Witness for metrics that must be observed before the test clicks anything.
+        let clicked = false
+        document.addEventListener(
+          'pointerdown',
+          () => {
+            clicked = true
+          },
+          { capture: true, once: true }
+        )
+        let scheduled = false
         const visible = (element: Element) =>
           element.getBoundingClientRect().height > 0 &&
           getComputedStyle(element).visibility !== 'hidden'
         const finish = () => {
+          scheduled = false
           const transcripts = document.querySelectorAll('[data-testid="message-list"]')
           if (transcripts.length > 1) {
             observer.disconnect()
@@ -269,7 +300,11 @@ async function relaunchPaint(
                     .querySelectorAll(messages)
                     [target.chat.count - 1]?.textContent?.includes(target.chat.lastText)))
             if (ready && !observed.has(target.metric))
-              observed.set(target.metric, { at: performance.now(), initial })
+              observed.set(target.metric, {
+                at: performance.now(),
+                initial,
+                beforeClick: !clicked,
+              })
           }
           if (observed.size === targets.length && navigation.loadEventEnd > 0) {
             observer.disconnect()
@@ -283,13 +318,19 @@ async function relaunchPaint(
                   ms: Math.max(0, result.at - navigation.loadEventEnd),
                   observed_at_install: result.initial,
                   observer_installed_ms: installed - navigation.loadEventEnd,
+                  before_first_click: result.beforeClick,
                 }
               })
             )
           }
           initial = false
         }
-        const observer = new MutationObserver(finish)
+        // One check per animation frame, as in openChat.
+        const observer = new MutationObserver(() => {
+          if (scheduled) return
+          scheduled = true
+          requestAnimationFrame(finish)
+        })
         observer.observe(document.documentElement, {
           childList: true,
           subtree: true,
@@ -331,23 +372,28 @@ if (
     const context = required('CHAT_OPEN_AB_KUBE_CONTEXT')
     if (context !== context.trim() || context.startsWith('-'))
       throw new Error('CHAT_OPEN_AB_KUBE_CONTEXT must be the literal Kubernetes context.')
+    // The shared global setup is disabled for this config; apply its context guard before any kubectl call.
+    assertAllowedKubeContext(context, 'CHAT_OPEN_AB_KUBE_CONTEXT')
     const output = required('CHAT_OPEN_AB_OUTPUT_JSON')
     if (!path.isAbsolute(output) || path.extname(output) !== '.json')
       throw new Error('CHAT_OPEN_AB_OUTPUT_JSON must be an absolute JSON path.')
     const phase = required('CHAT_OPEN_AB_PHASE')
     if (phase !== 'OL' && phase !== 'W') throw new Error('CHAT_OPEN_AB_PHASE must be OL or W.')
     const builds = Object.fromEntries(
-      Object.entries(entries).map(([build, entry]) => [
-        build,
-        {
-          entry,
-          sha: execFileSync(
-            'git',
-            ['-C', path.resolve(path.dirname(entry), '../..'), 'rev-parse', 'HEAD'],
-            { encoding: 'utf8' }
-          ).trim(),
-        },
-      ])
+      Object.entries(entries).map(([build, entry]) => {
+        const git = (...args: string[]) =>
+          execFileSync('git', ['-C', path.resolve(path.dirname(entry), '../..'), ...args], {
+            encoding: 'utf8',
+          }).trim()
+        // A build must be exactly its commit: a clean tree, and dist/main.js built after the commit.
+        const dirty = git('status', '--porcelain')
+        if (dirty) throw new Error(`precondition: the ${build} worktree has uncommitted changes.`)
+        const committedAt = Number(git('log', '-1', '--format=%ct')) * 1000
+        const builtAt = fs.statSync(entry).mtimeMs
+        if (!(builtAt > committedAt))
+          throw new Error(`precondition: the ${build} build is older than its HEAD commit.`)
+        return [build, { entry, sha: git('rev-parse', 'HEAD'), committedAt, builtAt }]
+      })
     )
     const samples: Sample[] = []
     const rounds: Array<{
@@ -393,27 +439,84 @@ if (
         closedAt = Date.now()
       }
     }
+    // One app identity per run, so Electron creates its own `<appName> Safe Storage` Keychain item
+    // instead of reading one an earlier run left behind. BEFORE and AFTER share it and the user data.
+    const isolationTarget = `issue-1091-ab-${Date.now().toString(36)}`
+    const electronPath = fs.realpathSync(require('electron') as unknown as string)
     let launches = 0
     let mainLog = ''
+    // The current launch's main-process output, kept in memory so a round reads all of it.
+    let mainOutput: string[] = []
     let launchedBuild: Build | undefined
-    const launch = async (build: Build) => {
+    // A first window that never opens is usually a Keychain prompt nobody answers. Record what the
+    // process was doing and whether macOS shows a prompt; never answer or bypass it.
+    const diagnoseFirstWindow = (starting: ElectronApplication): string => {
+      const samplePath = testInfo.outputPath(`sample-${launches}.txt`)
+      execFileSync('sample', [String(starting.process().pid), '5', '-file', samplePath])
+      const agent = spawnSync('pgrep', ['-x', 'SecurityAgent'])
+      if (agent.status !== 0 && agent.status !== 1)
+        throw new Error(`pgrep SecurityAgent failed with status ${agent.status}.`)
+      return agent.status === 0
+        ? `KEYCHAIN_PROMPT_PENDING: SecurityAgent is running; sample in ${samplePath}`
+        : `FIRST_WINDOW_TIMEOUT: no SecurityAgent process; sample in ${samplePath}`
+    }
+    // A closed build's background requests can exhaust control-api's per-minute
+    // limits; the next build's session restore then fails. Start each launch in
+    // a fresh window, outside every timed section.
+    const awaitQuietWindow = async () => {
       await close()
-      // A closed build's background requests can exhaust control-api's per-minute
-      // limits; the next build's session restore then fails. Start each launch in
-      // a fresh window, outside every timed section.
       const quiet = closedAt + LIMIT_WINDOW_MS - Date.now()
       if (quiet > 0) await new Promise(resolve => setTimeout(resolve, quiet))
-      const launched = await launchDesktopApp(testInfo, 'issue-1091-ab', entries[build])
-      app = launched.app
-      page = launched.page
-      launchedBuild = build
+    }
+    const launch = async (build: Build) => {
+      await awaitQuietWindow()
+      const live = execFileSync('ps', ['-axo', 'pid=,args='], { encoding: 'utf8' })
+        .split('\n')
+        .filter(line => AB_PROCESS.test(line))
+        .map(line => line.trim().split(/\s+/)[0])
+      if (live.length)
+        throw new Error(`precondition: an A/B Desktop is still running (pids ${live.join(', ')}).`)
       // Keep each main process's output so a lost session can be explained after the run.
       mainLog = testInfo.outputPath(`main-${++launches}-${build}.log`)
-      const log = fs.createWriteStream(mainLog, {
-        mode: 0o600,
-      })
-      app.process().stdout?.pipe(log)
-      app.process().stderr?.pipe(log)
+      const log = fs.createWriteStream(mainLog, { mode: 0o600 })
+      const output: string[] = []
+      mainOutput = output
+      let starting: ElectronApplication | undefined
+      try {
+        const launched = await launchDesktopApp(testInfo, isolationTarget, entries[build], {
+          executablePath: electronPath,
+          beforeFirstWindow: started => {
+            starting = started
+            for (const stream of [started.process().stdout, started.process().stderr])
+              stream?.on('data', (chunk: Buffer) => {
+                output.push(chunk.toString('utf8'))
+                log.write(chunk)
+              })
+          },
+        })
+        app = launched.app
+        page = launched.page
+      } catch (error) {
+        const diagnosis =
+          starting && /firstWindow: Timeout/.test(String((error as Error)?.message))
+            ? diagnoseFirstWindow(starting)
+            : undefined
+        await starting?.close()
+        if (diagnosis) throw new Error(diagnosis, { cause: error })
+        throw error
+      }
+      launchedBuild = build
+      // Public process identities only: the pinned Electron, this build's code and the run's profile.
+      const runtime = await app.evaluate(({ app: electronApp }) => ({
+        executablePath: process.execPath,
+        appPath: electronApp.getAppPath(),
+        userData: electronApp.getPath('userData'),
+      }))
+      expect(fs.realpathSync(runtime.executablePath)).toBe(electronPath)
+      expect(fs.realpathSync(runtime.appPath)).toBe(fs.realpathSync(path.dirname(entries[build])))
+      expect(fs.realpathSync(runtime.userData)).toBe(
+        fs.realpathSync(path.join(runDir, 'user-data'))
+      )
     }
     const authenticated = async () => {
       try {
@@ -479,7 +582,13 @@ if (
         ),
       }
     }
-    const round = async (scenario: string, build: Build, action: (id: number) => Promise<void>) => {
+    // `timed` wraps every measured window; the Host snapshots (each a few kubectl processes)
+    // run only between those windows, so they never compete with a measurement.
+    const round = async (
+      scenario: string,
+      build: Build,
+      action: (id: number, timed: Timed) => Promise<void>
+    ) => {
       const record: (typeof rounds)[number] = {
         id: rounds.length + 1,
         scenario,
@@ -491,19 +600,36 @@ if (
       }
       rounds.push(record)
       let stopped = false
+      let paused = false
+      let sampling: Promise<void> = Promise.resolve()
       let observationFailure: { error: unknown } | undefined
       const observation = (async () => {
         while (!stopped) {
-          record.snapshots.push(await snapshot())
+          if (!paused) {
+            sampling = snapshot().then(state => {
+              record.snapshots.push(state)
+            })
+            await sampling
+          }
           if (!stopped) await new Promise(resolve => setTimeout(resolve, 250))
         }
       })().catch(error => {
         observationFailure = { error }
       })
+      const timed: Timed = async work => {
+        paused = true
+        try {
+          // A snapshot already running finishes before the measured window opens.
+          await sampling
+          return await work()
+        } finally {
+          paused = false
+        }
+      }
       try {
-        await action(record.id)
+        await action(record.id, timed)
         // A rate-limited round runs on stale or empty catalogs, so its timings are not valid samples.
-        const limited = fs.readFileSync(mainLog, 'utf8').match(RATE_LIMITED)?.length ?? 0
+        const limited = mainOutput.join('').match(RATE_LIMITED)?.length ?? 0
         if (limited)
           throw new Error(
             `Round ${record.id} (${scenario} ${build}) logged ${limited} rate-limited responses in ${path.basename(mainLog)}.`
@@ -671,7 +797,7 @@ if (
         for (const build of ['before', 'after', 'after', 'before'] as const) {
           await ready()
           await test.step(`O: ${build} cached chat opens`, () =>
-            round('O', build, async id => {
+            round('O', build, async (id, timed) => {
               await launch(build)
               await authenticated()
               await page.getByTestId('nav-chat').click()
@@ -721,7 +847,8 @@ if (
                       page,
                       catalog.host,
                       hostLabels[catalog.host]!,
-                      chat
+                      chat,
+                      timed
                     )
                     samples.push({
                       round: id,
@@ -753,8 +880,8 @@ if (
                       // The sidebar previews only the latest sessions: when this chat has a row it is the active one, otherwise none is.
                       // An empty preview would satisfy "none is active" without checking anything.
                       await expect(
-                        page.locator('[data-testid="latest-session-row"]').first()
-                      ).toBeVisible()
+                        page.locator('[data-testid="latest-session-row"]')
+                      ).not.toHaveCount(0)
                       const inSidebar = (await page.locator(row(catalog.host, chat.id)).count()) > 0
                       await expect(
                         page.locator('[data-testid="latest-session-row"][aria-current="true"]')
@@ -786,7 +913,7 @@ if (
             throw new Error(`precondition: ${HOSTS[0]}/${chat.id} is missing from the cache.`)
           return at > updatedAt.get(latest.id)! ? chat : latest
         })
-        await openChat(page!, HOSTS[0], hostLabels[HOSTS[0]]!, selected)
+        await openChat(page!, HOSTS[0], hostLabels[HOSTS[0]]!, selected, untimed)
         await expect
           .poll(() => page!.evaluate(host => window.clerum.chat.getLastActive(host), HOSTS[0]))
           .toBe(selected.id)
@@ -805,31 +932,39 @@ if (
             isolatedPath(runDir, path.join(savedCache, agent)),
             { recursive: true }
           )
+        // L: the large cache is in place and the app relaunches. Desktop does not reopen the last
+        // active chat on launch, so the user opens it: relaunch_rows_ms ends at the first stateful
+        // sidebar row (before any click), relaunch_ms at the transcript of the explicit open.
         for (const build of ['before', 'after'] as const)
-          for (let iteration = 0; iteration < 3; iteration++) {
+          for (let iteration = 0; iteration < RELAUNCH_ROUNDS; iteration++) {
             await ready()
             await close()
             fs.rmSync(isolatedPath(runDir, cacheDir!), { recursive: true })
             fs.cpSync(savedCache, isolatedPath(runDir, cacheDir!), { recursive: true })
             await test.step(`L: ${build} large-cache relaunch ${iteration + 1}`, () =>
-              round('L', build, async id => {
-                await launch(build)
-                const [paint] = await Promise.all([
-                  relaunchPaint(page, [
-                    {
-                      host: HOSTS[0],
-                      metric: 'relaunch_ms',
-                      selector: row(HOSTS[0], selected.id),
-                      chat: selected,
-                    },
-                  ]),
-                  (async () => {
-                    await authenticated()
-                    await expect(page.locator(row(HOSTS[0], selected.id))).toBeVisible()
-                    await page.getByTestId('nav-chat').click()
-                    await openChat(page, HOSTS[0], hostLabels[HOSTS[0]]!, selected)
-                  })(),
-                ])
+              round('L', build, async (id, timed) => {
+                await awaitQuietWindow()
+                const paint = await timed(async () => {
+                  await launch(build)
+                  const [observed] = await Promise.all([
+                    relaunchPaint(page, [
+                      { host: HOSTS[0], metric: 'relaunch_rows_ms', selector: rows(HOSTS[0]) },
+                      {
+                        host: HOSTS[0],
+                        metric: 'relaunch_ms',
+                        selector: row(HOSTS[0], selected.id),
+                        chat: selected,
+                      },
+                    ]),
+                    (async () => {
+                      await authenticated()
+                      await expect(page.locator(row(HOSTS[0], selected.id))).toBeVisible()
+                      await page.getByTestId('nav-chat').click()
+                      await openChat(page, HOSTS[0], hostLabels[HOSTS[0]]!, selected, untimed)
+                    })(),
+                  ])
+                  return observed
+                })
                 for (const sample of paint) samples.push({ round: id, build, ...sample })
                 await authenticated()
               }))
@@ -837,24 +972,27 @@ if (
       }
       if (phase === 'W')
         for (const build of ['before', 'after'] as const)
-          for (let iteration = 0; iteration < 3; iteration++) {
+          for (let iteration = 0; iteration < RELAUNCH_ROUNDS; iteration++) {
             await close()
             await waitForStatelessSuspended(240_000, context, HOSTS[1], HOSTS[1])
             // Empty only the isolated chat cache: both observed rows must come from the remote catalog.
             if (fs.existsSync(cacheDir!))
               fs.rmSync(isolatedPath(runDir, cacheDir!), { recursive: true })
             await test.step(`W: ${build} suspended-stateless relaunch ${iteration + 1}`, () =>
-              round('W', build, async id => {
-                await launch(build)
-                for (const sample of await relaunchPaint(
-                  page,
-                  HOSTS.map((host, index) => ({
-                    host,
-                    selector: rows(host),
-                    metric: index === 0 ? 'first_stateful_row_ms' : 'stateless_rows_ms',
-                  }))
-                ))
-                  samples.push({ round: id, build, ...sample })
+              round('W', build, async (id, timed) => {
+                await awaitQuietWindow()
+                const paint = await timed(async () => {
+                  await launch(build)
+                  return relaunchPaint(
+                    page,
+                    HOSTS.map((host, index) => ({
+                      host,
+                      selector: rows(host),
+                      metric: index === 0 ? 'first_stateful_row_ms' : 'stateless_rows_ms',
+                    }))
+                  )
+                })
+                for (const sample of paint) samples.push({ round: id, build, ...sample })
                 await authenticated()
                 await ready()
               }))
@@ -926,16 +1064,63 @@ if (
               witness.before_reopen_blank === values('before', host, 'open_memo_ms').length,
           })
         }
-        const before = quantiles(values('before', HOSTS[0], 'relaunch_ms')).p50,
-          after = quantiles(values('after', HOSTS[0], 'relaunch_ms')).p50
-        report.gates.push({ metric: 'relaunch_ms', before, after, passed: after < before })
+        // Every relaunch round of both builds contributes one sample per L metric.
+        const relaunchSamples = (build: Build, metric: string) => {
+          const found = values(build, HOSTS[0], metric)
+          if (found.length !== RELAUNCH_ROUNDS)
+            throw new Error(`L recorded ${found.length} ${build} ${metric} samples.`)
+          return found
+        }
+        // relaunch_rows_ms: window load to the first stateful sidebar row, observed before the
+        // test clicks anything; the non-blocking chat:getIndex is what shortens it.
+        const rowsUnclicked = samples
+          .filter(sample => sample.metric === 'relaunch_rows_ms')
+          .every(sample => sample.before_first_click === true)
+        const rowsBefore = quantiles(relaunchSamples('before', 'relaunch_rows_ms')).p50,
+          rowsAfter = quantiles(relaunchSamples('after', 'relaunch_rows_ms')).p50
+        report.gates.push({
+          metric: 'relaunch_rows_ms',
+          definition: 'window load -> first stateful sidebar row, before any click',
+          before: rowsBefore,
+          after: rowsAfter,
+          observed_before_click: rowsUnclicked,
+          passed: rowsUnclicked && rowsAfter < rowsBefore,
+        })
+        // relaunch_ms: window load to the transcript of the selected chat, including the explicit
+        // open. Desktop never restores the last active chat on launch.
+        const before = quantiles(relaunchSamples('before', 'relaunch_ms')).p50,
+          after = quantiles(relaunchSamples('after', 'relaunch_ms')).p50
+        report.gates.push({
+          metric: 'relaunch_ms',
+          definition: 'window load -> sidebar row -> explicit open -> transcript with all messages',
+          before,
+          after,
+          passed: after < before,
+        })
       } else {
-        const wakeAfter = Math.max(...values('after', HOSTS[0], 'first_stateful_row_ms'))
+        // W needs a control: BEFORE runs the same suspended-Host relaunches as AFTER.
+        const wake = (build: Build) => {
+          const found = values(build, HOSTS[0], 'first_stateful_row_ms')
+          if (found.length !== RELAUNCH_ROUNDS)
+            throw new Error(`W recorded ${found.length} ${build} first_stateful_row_ms samples.`)
+          return found
+        }
+        const wakeBefore = wake('before'),
+          wakeAfter = wake('after')
+        const afterMax = Math.max(...wakeAfter)
         report.gates.push({
           metric: 'first_stateful_row_ms',
-          after_max_ms: wakeAfter,
+          after_max_ms: afterMax,
           budget_ms: 2000,
-          passed: wakeAfter < 2000,
+          passed: afterMax < 2000,
+        })
+        const beforeP50 = quantiles(wakeBefore).p50,
+          afterP50 = quantiles(wakeAfter).p50
+        report.gates.push({
+          metric: 'first_stateful_row_ms_vs_before',
+          before: beforeP50,
+          after: afterP50,
+          passed: afterP50 < beforeP50,
         })
       }
       report.gates.push({
@@ -966,6 +1151,10 @@ if (
         fs.writeFileSync(output, JSON.stringify({ ...report, catalogs }, null, 2), { mode: 0o600 })
       }
     }
+    // O: three gates per Host; L: two; W: two; both phases: round validity.
+    expect(report.gates.length, 'Desktop A/B gate count').toBe(
+      phase === 'OL' ? HOSTS.length * 3 + 3 : 3
+    )
     expect(
       report.gates.every(gate => gate.passed),
       `Desktop A/B gates: ${JSON.stringify(report.gates)}; evidence: ${output}`

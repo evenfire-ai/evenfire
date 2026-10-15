@@ -16,10 +16,10 @@
  *   `HUMAN_E2E_STATEFUL_HOST_RESOURCE`, `HUMAN_E2E_STATELESS_HOST_RESOURCE`.
  */
 import { type ElectronApplication, type Locator, type Page, expect, test } from '@playwright/test'
-import { type ChildProcess, execFile } from 'node:child_process'
+import { type ChildProcess } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
-import { promisify } from 'node:util'
 import {
+  jsonKubectl,
   readHostSnapshot,
   waitForStatelessReady,
   waitForStatelessSuspended,
@@ -37,8 +37,6 @@ import {
   screenshotAndLog,
 } from './qa-recorder-helpers'
 
-const execFileAsync = promisify(execFile)
-
 const KUBE_CONTEXT = process.env.HUMAN_E2E_KUBE_CONTEXT?.trim() || ''
 const STATEFUL_HOST = process.env.HUMAN_E2E_STATEFUL_HOST?.trim() || 'chatLLM'
 const STATELESS_HOST = process.env.HUMAN_E2E_STATELESS_HOST?.trim() || 'chatllm-stateless'
@@ -47,7 +45,6 @@ const STATELESS_HOST_RESOURCE =
   process.env.HUMAN_E2E_STATELESS_HOST_RESOURCE?.trim() || 'chatllm-stateless'
 const HCC_DEPLOYMENT = 'host-context-controller'
 const HCC_NAMESPACE = 'control-plane'
-const STATELESS_NAMESPACE = 'mcp-host'
 const STATELESS_DEPLOYMENT = 'chatllm-stateless'
 const STATEFUL_DEPLOYMENT = 'chatllm'
 const SUSPEND_TIMEOUT_MS = 240_000
@@ -103,28 +100,22 @@ type JourneyMetrics = {
   }
 }
 
-async function kubectl(args: string[], timeoutMs = 20_000): Promise<string> {
-  const { stdout } = await execFileAsync('kubectl', ['--context', KUBE_CONTEXT, ...args], {
-    timeout: timeoutMs,
-    maxBuffer: 8 * 1024 * 1024,
-  })
-  return stdout.toString()
-}
-
-async function jsonKubectl(resource: string, namespace: string): Promise<any> {
-  return JSON.parse(await kubectl(['-n', namespace, 'get', resource, '-o', 'json']))
-}
-
 async function readHccCadences(): Promise<{
   idleMinutes: number
   idleFloorMinutes: number
   drainGraceMs: number
   heartbeatPollMs: number
 }> {
-  const deployment = await jsonKubectl(`deployment.apps/${HCC_DEPLOYMENT}`, HCC_NAMESPACE)
+  const deployment = await jsonKubectl<{
+    spec?: {
+      template?: {
+        spec?: { containers?: Array<{ env?: Array<{ name?: string; value?: string }> }> }
+      }
+    }
+  }>(KUBE_CONTEXT, HCC_NAMESPACE, `deployment.apps/${HCC_DEPLOYMENT}`)
   const env = deployment.spec?.template?.spec?.containers?.[0]?.env ?? []
   const value = (key: string, fallback: number): number => {
-    const found = env.find((item: { name?: string }) => item.name === key)
+    const found = env.find(item => item.name === key)
     return typeof found?.value === 'string' ? Number(found.value) : fallback
   }
   return {

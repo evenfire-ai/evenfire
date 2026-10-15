@@ -17,6 +17,10 @@ if (phase !== 'OL' && phase !== 'W') throw new Error('CHAT_OPEN_AB_PHASE must be
 
 export default defineConfig({
   ...base,
+  // The shared global setup stays off: its preflight login spends an attempt from the password
+  // budget, it reads E2E_K8S_CONTEXT instead of CHAT_OPEN_AB_KUBE_CONTEXT, and its seed marker
+  // ties the profile to this worktree's HEAD while BEFORE is another build. The spec runs the
+  // same context guard (assertAllowedKubeContext) before its first kubectl call.
   globalSetup: undefined,
   projects: [{ name: 'chat-open-ab', testMatch: /chat-open-ab\.spec\.ts/ }],
   // Paced opens, 65 s rate-limit windows between launches and stateless suspension waits.

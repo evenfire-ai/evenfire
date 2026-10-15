@@ -131,11 +131,17 @@ export function configuredHostRef(): string {
  * 1280x720 WebM. Returns the app handle and its first window page. Caller owns
  * closing the app (use finalizeRecording in a finally block) so the video file
  * is finalized on disk.
+ * `launch.executablePath` pins the Electron binary; `launch.beforeFirstWindow`
+ * receives the app before its first window opens (to attach output streams).
  */
 export async function launchDesktopApp(
   testInfo: TestInfo,
   isolationTarget?: string,
-  mainEntry: string = MAIN_ENTRY
+  mainEntry: string = MAIN_ENTRY,
+  launch: {
+    executablePath?: string
+    beforeFirstWindow?: (app: ElectronApplication) => void
+  } = {}
 ): Promise<{
   app: ElectronApplication
   page: Page
@@ -153,6 +159,7 @@ export async function launchDesktopApp(
   const slowMo = Number(process.env.QA_RECORDER_SLOW_MO_MS ?? 75)
 
   const app = await electron.launch({
+    executablePath: launch.executablePath,
     args: [`--user-data-dir=${userDataDir}`, mainEntry],
     env: {
       ...process.env,
@@ -188,6 +195,7 @@ export async function launchDesktopApp(
     slowMo: Number.isFinite(slowMo) ? slowMo : 75,
   })
 
+  launch.beforeFirstWindow?.(app)
   const actualUserDataDir = await app.evaluate(({ app: electronApp }) =>
     electronApp.getPath('userData')
   )
@@ -281,14 +289,8 @@ export async function openAgentsPage(page: Page): Promise<void> {
 /**
  * Navigate to the exact agent named by hostRef and land on its chat composer.
  * Uses exact identity (no first-available fallback), per the recorder contract.
- * The UI shows the agent's display name; pass it as `label` when it differs
- * from hostRef.
  */
-export async function openExactAgentChat(
-  page: Page,
-  hostRef: string,
-  label: string = hostRef
-): Promise<void> {
+export async function openExactAgentChat(page: Page, hostRef: string): Promise<void> {
   const settingsMenu = page.getByTestId('nav-settings-menu')
   if ((await settingsMenu.getAttribute('aria-expanded')) !== 'true') {
     await settingsMenu.click()
@@ -299,7 +301,7 @@ export async function openExactAgentChat(
   await expect(agentsItem).toBeVisible({ timeout: 15_000 })
   await agentsItem.click()
   const chatInput = page.getByRole('textbox', { name: 'Agent message composer' })
-  const exactAgent = page.locator('.agents-table-row-clickable', { hasText: label }).first()
+  const exactAgent = page.locator('.agents-table-row-clickable', { hasText: hostRef }).first()
   const emptyState = page.getByText('No agents available')
   await expect(chatInput.or(exactAgent).or(emptyState)).toBeVisible({ timeout: 20_000 })
 
@@ -317,16 +319,16 @@ export async function openExactAgentChat(
   if (
     !(await chatInput.isVisible().catch(() => false)) ||
     !(await switchAgent
-      .getByText(label, { exact: true })
+      .getByText(hostRef, { exact: true })
       .isVisible()
       .catch(() => false))
   ) {
     await switchAgent.click()
-    await page.getByRole('menuitem', { name: label, exact: true }).click()
+    await page.getByRole('menuitem', { name: hostRef, exact: true }).click()
   }
 
   await expect(chatInput).toBeVisible({ timeout: 20_000 })
-  await expect(switchAgent).toContainText(label)
+  await expect(switchAgent).toContainText(hostRef)
 }
 
 /** Send a chat message and wait for a non-empty assistant response. */
