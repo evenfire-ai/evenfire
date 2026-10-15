@@ -457,13 +457,25 @@ describe('workspace layout merge', () => {
         writeFileSync(join(root, 'elsewhere', 'state.db'), 'not ours')
         symlinkSync(join(root, 'elsewhere'), join(root, 'state'))
       },
+      'state is a regular file': root => {
+        writeFileSync(join(root, 'state'), 'user file')
+      },
+      'state is a dangling symlink': root => {
+        symlinkSync(join(root, 'missing'), join(root, 'state'))
+      },
+      'workspace is a symlink and there is no state/': root => {
+        mkdirSync(join(root, 'elsewhere'))
+        writeFileSync(join(root, 'elsewhere', 'SOUL.md'), 'user file')
+        symlinkSync(join(root, 'elsewhere'), join(root, 'workspace'))
+      },
     }
     for (const [name, prepare] of Object.entries(cases)) {
       const root = statefulRoot()
       prepare(root)
       const before = snapshot(root)
-      expect(merge(root), name).toEqual({ status: 0, stderr: '' })
-      expect(snapshot(root), name).toEqual(before)
+      // Soft, so one failing case does not hide the others.
+      expect.soft(merge(root), name).toEqual({ status: 0, stderr: '' })
+      expect.soft(snapshot(root), name).toEqual(before)
     }
     // Witness: the split tree is changed by the same script.
     const split = splitRoot()

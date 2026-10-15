@@ -30,12 +30,13 @@ function shellSingleQuote(value: string): string {
  *
  * The merge runs only when `state/` is a real directory holding a
  * `state.db*` entry, the signature the earlier init leaves. Any other tree
- * (stateful, desktop, empty, or a user folder named `state/` or
- * `workspace/`) exits 0 untouched.
+ * exits 0 untouched: stateful, desktop, empty, a user folder named `state/`
+ * or `workspace/`, and a `state` that is a symlink or not a directory (an
+ * agent can create those on a stateful Host, so they must not stop it).
  *
  * Every refusal prints one line and exits 1 before the first move:
- *   F1 `state` or `workspace` is a symlink or not a directory, a real
- *      `state/` cannot be listed and searched, a `state.db*` entry is a
+ *   F1 `workspace` is a symlink or not a directory, a real `state/`
+ *      cannot be listed and searched, a `state.db*` entry is a
  *      symlink or not a regular file, or a directory that decides a
  *      collision cannot be listed;
  *   F2 more than one live database (a `state.db` main file or its journals)

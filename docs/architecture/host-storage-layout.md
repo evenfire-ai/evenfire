@@ -49,9 +49,12 @@ SQLite.
 
 **Trigger.** It acts only on the split-layout signature: `state/` is a real
 directory (not a symlink) holding at least one `state.db*` entry. Every other
-tree, including an agent folder named `workspace/` or `state/` without a
-database, exits 0 unchanged. Stateful and desktop Hosts therefore never
-change.
+tree exits 0 unchanged, including an agent folder named `workspace/` or
+`state/` without a database, and a `state` that is a symlink or not a
+directory. An agent can create those on a stateful Host, so they must not
+stop it from starting. A stateful or desktop tree changes only if it carries
+the signature, which only the earlier init or an agent-created
+`state/state.db*` entry produces.
 
 **Moves**, in this order:
 
@@ -73,7 +76,7 @@ stays in `Init:Error`.
 
 | Case                                                                                                                          | Line contains                                                                                                |
 | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| F1: `state`, `workspace` or the PVC root is a symlink, not a directory, or escapes the root; a `state.db*` entry is a symlink | `directory is a symlink`, `is not a directory`, `escapes the workspace PVC root`, `SQLite file is a symlink` |
+| F1: `workspace` or the PVC root is a symlink, not a directory, or escapes the root; a real `state/` cannot be listed and searched; a `state.db*` entry is a symlink or not a regular file; a directory that decides a collision cannot be listed | `directory is a symlink`, `is not a directory`, `escapes the workspace PVC root`, `state directory is not readable and searchable`, `SQLite file is a symlink`, `SQLite file is not a regular file`, `cannot list directory` |
 | F2: more than one live database family across the root, `state/` and `workspace/`                                             | `more than one live SQLite database`                                                                         |
 | F3: a name to move already exists at the root, or under both `state/` and `workspace/`; `workspace/lost+found` exists         | `destination exists`, `exists under both state/ and workspace/`, `lost+found would remain`                   |
 | F4: the PVC root, `state/` or `workspace/` is not writable by the container uid                                               | `not writable by uid`                                                                                        |
