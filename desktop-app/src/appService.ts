@@ -5053,6 +5053,12 @@ export class AppService {
         this.workflowTeamByKey.clear()
         this.rpcTokenManager.clear()
         this.activateGfsAuthScope()
+        if (this.gfsScopeIdentity) {
+          await this.migrateLegacyDesktopGfsUploadScopes(
+            this.gfsScopeIdentity,
+            getActiveLegacyEnvKeys()
+          ).catch(() => undefined)
+        }
         producer.accept(result.token)
         if (!memoryOnlyAccepted) this.recordAcceptedSessionSource(selected!, envKey)
         return {
