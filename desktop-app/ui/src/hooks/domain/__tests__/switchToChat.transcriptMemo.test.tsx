@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 /**
- * #1091 A9 — reopening a chat renders its remembered transcript at once. The
- * disk check and the Host reconcile still run, but the list is never cleared
- * behind a spinner while they do. Every case runs for a stateful and a
- * stateless Host: the renderer has no branch by Host kind.
+ * #1091 A9 — reopening a chat renders its remembered transcript as soon as the
+ * selection is persisted (#976 orders the last-active write before any history
+ * is shown). The disk check and the Host reconcile still run, but the list is
+ * not cleared behind a spinner while they do. Every case runs for a stateful
+ * and a stateless Host: the renderer has no branch by Host kind.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
@@ -614,6 +615,81 @@ describe('switchToChat transcript memo (#1091 A9)', () => {
         diskRead.resolve(disk['chat-a'])
         await reopen
       })
+    }
+  )
+
+  it.each(HOSTS)(
+    'j. %s: the remembered transcript appears only after the selection is persisted',
+    async host => {
+      const disk = { 'chat-a': transcript('chat-a'), 'chat-b': transcript('chat-b') }
+      serveDisk(disk)
+      const controller = mount(host)
+      await settleMount()
+      await open(controller, host, 'chat-a')
+      await open(controller, host, 'chat-b')
+
+      const persisted = deferred<void>()
+      const diskRead = deferred<AgentChatMessage[]>()
+      clerum.chat.setLastActive.mockImplementationOnce(() => persisted.promise)
+      clerum.chat.loadMessages.mockImplementationOnce(() => diskRead.promise)
+      const readsBefore = clerum.chat.loadMessages.mock.calls.length
+      const reopenStart = frames.length
+      let reopen!: Promise<void>
+      await act(async () => {
+        reopen = controller.result.current.switchToChat(host, 'chat-a')
+      })
+      // While the last-active write is pending (#976): blank, spinner, no disk read.
+      expect(clerum.chat.setLastActive).toHaveBeenLastCalledWith(host, 'chat-a')
+      expect(clerum.chat.loadMessages.mock.calls.length).toBe(readsBefore)
+      expect(frames.at(-1)).toEqual({ activeChatId: 'chat-a', contents: [], loading: true })
+
+      const persistedAt = frames.length
+      await act(async () => {
+        persisted.resolve()
+      })
+      // Persisted: the remembered transcript replaces the spinner before the disk page.
+      expect(clerum.chat.loadMessages).toHaveBeenLastCalledWith(host, 'chat-a', 80, undefined)
+      expectOnlyTranscript(frames.slice(persistedAt), 'chat-a', disk['chat-a'])
+      expect(blankFrame(frames.slice(reopenStart), 'chat-a')).toBe(true)
+
+      await act(async () => {
+        diskRead.resolve(disk['chat-a'])
+        await reopen
+      })
+      expectOnlyTranscript(frames.slice(persistedAt), 'chat-a', disk['chat-a'])
+    }
+  )
+
+  it.each(HOSTS)(
+    'k. %s: a failed last-active write never shows the remembered transcript',
+    async host => {
+      const disk = { 'chat-a': transcript('chat-a'), 'chat-b': transcript('chat-b') }
+      serveDisk(disk)
+      const controller = mount(host)
+      await settleMount()
+      await open(controller, host, 'chat-a')
+      await open(controller, host, 'chat-b')
+
+      clerum.chat.setLastActive.mockImplementationOnce(async () => {
+        throw new Error('last-active write failed')
+      })
+      const onCurrentError = vi.fn()
+      const readsBefore = clerum.chat.loadMessages.mock.calls.length
+      const reopenStart = frames.length
+      await act(async () => {
+        await controller.result.current
+          .switchToChat(host, 'chat-a', { onCurrentError })
+          .catch(() => undefined)
+      })
+      // Witness: the selection reached the write and reported its failure.
+      expect(clerum.chat.setLastActive).toHaveBeenLastCalledWith(host, 'chat-a')
+      expect(onCurrentError).toHaveBeenCalledTimes(1)
+      expect(clerum.chat.loadMessages.mock.calls.length).toBe(readsBefore)
+      const shownA = frames.slice(reopenStart).filter(frame => frame.activeChatId === 'chat-a')
+      expect(shownA.length).toBeGreaterThan(0)
+      for (const frame of shownA) expect(frame.contents).toEqual([])
+      expect(controller.result.current.chatMessages).toEqual([])
+      expect(controller.result.current.chatMessagesLoading).toBe(false)
     }
   )
 })
