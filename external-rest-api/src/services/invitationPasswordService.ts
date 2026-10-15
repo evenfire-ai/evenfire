@@ -111,6 +111,7 @@ export async function setupInvitationPassword(
     if (error instanceof ControlApiError) {
       const domainError = invitationPasswordDomainError(error)
       if (domainError) return { error: domainError }
+      if (error.status === 401) throw passwordAuthorityUnavailable()
       if (error.status >= 500) throw passwordAuthorityUnavailable()
       throw new ControlApiUnexpectedResponseError()
     }
@@ -153,6 +154,7 @@ export async function setupInvitationPasswordWithToken(
       }
       const domainError = resetPasswordDomainError(error)
       if (domainError) return { error: domainError }
+      if (error.status === 401) throw passwordAuthorityUnavailable()
       if (error.status >= 500) throw unknownRecoveryOutcome()
       throw new ControlApiUnexpectedResponseError()
     }
