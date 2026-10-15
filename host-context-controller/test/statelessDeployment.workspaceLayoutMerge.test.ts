@@ -371,6 +371,63 @@ describe('workspace layout merge', () => {
     expect(merge(root).stderr).toContain(`destination exists: ${root}/cache`)
   }, 15_000)
 
+  it('refuses a journal present both at the root and under state/ in a resumed merge', () => {
+    const root = splitRoot()
+    // A merge stopped after the journals moved, with a second copy of one.
+    cpSync(join(root, 'state', 'state.db-wal'), join(root, 'state.db-wal'))
+    const before = snapshot(root)
+
+    const refused = merge(root)
+
+    expect(refused).toEqual({
+      status: 1,
+      stderr: `workspace layout merge refused: destination exists: ${root}/state.db-wal\n`,
+    })
+    expect(snapshot(root)).toEqual(before)
+    // Witness: with only the root copy left, the resumed merge completes.
+    rmSync(join(root, 'state', 'state.db-wal'))
+    expect(merge(root)).toEqual({ status: 0, stderr: '' })
+    expect(messageCount(join(root, 'state.db'))).toEqual({ rows: ROWS, check: 'ok' })
+  }, 15_000)
+
+  it.each([
+    {
+      name: 'a symlink',
+      prepare: () => {
+        const parent = tempDir('clerum-merge-link-')
+        const target = splitRoot()
+        const root = join(parent, 'root')
+        symlinkSync(target, root)
+        return { root, watched: target, line: `workspace PVC root is a symlink: ${root}` }
+      },
+    },
+    {
+      name: 'not a directory',
+      prepare: () => {
+        const parent = tempDir('clerum-merge-file-')
+        const root = join(parent, 'root')
+        writeFileSync(root, 'not a directory')
+        return { root, watched: parent, line: `workspace PVC root is not a directory: ${root}` }
+      },
+    },
+    {
+      name: '/',
+      prepare: () => ({ root: '/', watched: undefined, line: 'workspace PVC root resolves to /' }),
+    },
+  ])(
+    'refuses a PVC root that is $name before the signature check',
+    ({ prepare }) => {
+      const { root, watched, line } = prepare()
+      const before = watched ? snapshot(watched) : undefined
+
+      const refused = merge(root)
+
+      expect(refused).toEqual({ status: 1, stderr: `workspace layout merge refused: ${line}\n` })
+      if (watched) expect(snapshot(watched)).toEqual(before)
+    },
+    15_000
+  )
+
   it('moves symlinks under workspace/ as links without following them', () => {
     const root = splitRoot()
     symlinkSync('/tmp/evenfire', join(root, 'workspace', 'evenfire'))
