@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { TokenStore } from '../tokenStore.js'
+import { type SessionTokenFallbackSnapshot, TokenStore } from '../tokenStore.js'
 
 const fixture = vi.hoisted(() => ({
   directory: '',
@@ -34,6 +34,7 @@ const TOKEN = 'fixture-drain-token'
 const NEXT_TOKEN = 'fixture-next-token'
 const account = `session-token::${ENV}`
 const encryptedPath = () => path.join(fixture.directory, `session-token-${ENV}.enc`)
+let fallbackSnapshot: SessionTokenFallbackSnapshot
 
 function deferred() {
   let resolve!: () => void
@@ -43,16 +44,64 @@ function deferred() {
   return { promise, resolve }
 }
 
+async function awaitStorageBoundary(boundary: Promise<void>, operation: string): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const entered = await Promise.race([
+      boundary.then(() => true),
+      new Promise<boolean>(resolve => {
+        timer = setTimeout(() => resolve(false), 2000)
+      }),
+    ])
+    expect(entered, `${operation} must reach its real storage boundary`).toBe(true)
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 type Operation = {
   name: string
   run: (store: TokenStore) => Promise<unknown>
-  boundary: 'read-file' | 'rename-file' | 'get-keytar' | 'delete-keytar'
+  boundary:
+    | 'read-file'
+    | 'rename-file'
+    | 'get-keytar'
+    | 'delete-keytar'
+    | 'sync-directory'
+    | 'snapshot-file-lane'
   expected: unknown
   remainingKeytarToken: string | null
   remainingFileToken: string | null
 }
 
 const operations: Operation[] = [
+  {
+    name: 'snapshotSessionTokenFallbackFiles',
+    run: store => store.snapshotSessionTokenFallbackFiles(ENV),
+    boundary: 'snapshot-file-lane',
+    expected: expect.any(Object),
+    remainingKeytarToken: TOKEN,
+    remainingFileToken: TOKEN,
+  },
+  {
+    name: 'retireSessionTokenFallbackFilesIfUnchanged',
+    run: store => store.retireSessionTokenFallbackFilesIfUnchanged(fallbackSnapshot),
+    boundary: 'sync-directory',
+    expected: true,
+    remainingKeytarToken: TOKEN,
+    remainingFileToken: null,
+  },
+  {
+    name: 'retireSessionTokenFallbackFilesIfUnchanged with encrypted authority',
+    run: store =>
+      store.retireSessionTokenFallbackFilesIfUnchanged(fallbackSnapshot, {
+        preserveActiveEncryptedToken: TOKEN,
+      }),
+    boundary: 'sync-directory',
+    expected: true,
+    remainingKeytarToken: TOKEN,
+    remainingFileToken: TOKEN,
+  },
   {
     name: 'getSafeStorageSessionToken',
     run: store => store.getSafeStorageSessionToken(ENV),
@@ -76,6 +125,46 @@ const operations: Operation[] = [
     expected: undefined,
     remainingKeytarToken: TOKEN,
     remainingFileToken: NEXT_TOKEN,
+  },
+  {
+    name: 'discardSafeStorageSessionTokenIfMatches',
+    run: store => store.discardSafeStorageSessionTokenIfMatches(TOKEN, ENV),
+    boundary: 'sync-directory',
+    expected: true,
+    remainingKeytarToken: TOKEN,
+    remainingFileToken: null,
+  },
+  {
+    name: 'repairKeytarSessionTokenIfMatches',
+    run: store => store.repairKeytarSessionTokenIfMatches(TOKEN, NEXT_TOKEN, ENV),
+    boundary: 'get-keytar',
+    expected: true,
+    remainingKeytarToken: NEXT_TOKEN,
+    remainingFileToken: TOKEN,
+  },
+  {
+    name: 'repairSafeStorageSessionTokenIfMatches',
+    run: store => store.repairSafeStorageSessionTokenIfMatches(TOKEN, NEXT_TOKEN, ENV),
+    boundary: 'rename-file',
+    expected: true,
+    remainingKeytarToken: TOKEN,
+    remainingFileToken: NEXT_TOKEN,
+  },
+  {
+    name: 'repairKeytarSessionTokenIfMatches cleanup',
+    run: store => store.repairKeytarSessionTokenIfMatches(TOKEN, null, ENV),
+    boundary: 'get-keytar',
+    expected: true,
+    remainingKeytarToken: null,
+    remainingFileToken: TOKEN,
+  },
+  {
+    name: 'repairSafeStorageSessionTokenIfMatches cleanup',
+    run: store => store.repairSafeStorageSessionTokenIfMatches(TOKEN, null, ENV),
+    boundary: 'sync-directory',
+    expected: true,
+    remainingKeytarToken: TOKEN,
+    remainingFileToken: null,
   },
   {
     name: 'clearSessionTokenStrictly',
@@ -102,6 +191,7 @@ beforeEach(async () => {
   const producer = new TokenStore()
   await producer.setSessionToken(TOKEN, ENV)
   await producer.setSafeStorageSessionToken(TOKEN, ENV)
+  fallbackSnapshot = await producer.snapshotSessionTokenFallbackFiles(ENV)
 })
 
 afterEach(async () => {
@@ -109,18 +199,38 @@ afterEach(async () => {
   await fs.rm(fixture.directory, { recursive: true, force: true })
 })
 
-async function pauseBoundary(boundary: Operation['boundary']) {
+async function pauseBoundary(boundary: Operation['boundary'], store: TokenStore) {
   const started = deferred()
   const release = deferred()
   const keytar = await import('keytar')
-  if (boundary === 'read-file') {
-    const readFile = fs.readFile.bind(fs)
-    vi.spyOn(fs, 'readFile').mockImplementation(async (...args) => {
-      if (String(args[0]) === encryptedPath()) {
+  let predecessor: Promise<void> | undefined
+  if (boundary === 'snapshot-file-lane') {
+    const rename = fs.rename.bind(fs)
+    vi.spyOn(fs, 'rename').mockImplementationOnce(async (source, destination) => {
+      started.resolve()
+      await release.promise
+      return rename(source, destination)
+    })
+    predecessor = new TokenStore().setSafeStorageSessionToken(TOKEN, ENV)
+    try {
+      await awaitStorageBoundary(started.promise, 'earlier actual encrypted producer')
+    } catch (error) {
+      release.resolve()
+      await Promise.allSettled([predecessor])
+      throw error
+    }
+  } else if (boundary === 'read-file') {
+    const selectedReader = store as unknown as {
+      readFileSelection: (...args: unknown[]) => Promise<unknown>
+    }
+    const readSelection = selectedReader.readFileSelection.bind(selectedReader)
+    vi.spyOn(selectedReader, 'readFileSelection').mockImplementation(async (...args) => {
+      const selection = await readSelection(...args)
+      if (String(args[0]) === encryptedPath() && selection !== null) {
         started.resolve()
         await release.promise
       }
-      return readFile(...args)
+      return selection
     })
   } else if (boundary === 'rename-file') {
     const rename = fs.rename.bind(fs)
@@ -130,6 +240,15 @@ async function pauseBoundary(boundary: Operation['boundary']) {
         await release.promise
       }
       return rename(source, destination)
+    })
+  } else if (boundary === 'sync-directory') {
+    const open = fs.open.bind(fs)
+    vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      if (String(args[0]) === fixture.directory && args[1] === 'r') {
+        started.resolve()
+        await release.promise
+      }
+      return open(...args)
     })
   } else if (boundary === 'get-keytar') {
     vi.mocked(keytar.getPassword).mockImplementationOnce(async (_service, target) => {
@@ -144,20 +263,21 @@ async function pauseBoundary(boundary: Operation['boundary']) {
       return fixture.keychain.delete(target)
     })
   }
-  return { started, release }
+  return { started, release, predecessor }
 }
 
 describe('TokenStore marker operations participate in quit draining', () => {
   it.each(operations)('drains accepted $name through its storage boundary', async operation => {
     const store = new TokenStore()
-    const { started, release } = await pauseBoundary(operation.boundary)
+    const { started, release, predecessor } = await pauseBoundary(operation.boundary, store)
     const accepted = operation.run(store)
-    await started.promise
     let drained = false
-    const drain = store.prepareForQuit().then(() => {
-      drained = true
-    })
+    let drain: Promise<void> | undefined
     try {
+      await awaitStorageBoundary(started.promise, operation.name)
+      drain = store.prepareForQuit().then(() => {
+        drained = true
+      })
       await new Promise<void>(resolve => setImmediate(resolve))
       expect(drained, `${operation.name} must finish before quit`).toBe(false)
       release.resolve()
@@ -175,7 +295,11 @@ describe('TokenStore marker operations participate in quit draining', () => {
       )
     } finally {
       release.resolve()
-      await Promise.allSettled([accepted, drain])
+      await Promise.allSettled([
+        accepted,
+        ...(drain ? [drain] : []),
+        ...(predecessor ? [predecessor] : []),
+      ])
     }
   })
 
