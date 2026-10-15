@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { type ReactNode, useEffect, useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, render, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
@@ -142,7 +142,11 @@ vi.mock('@components/CommandPalette', () => ({
   },
 }))
 vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
-vi.mock('@components/Common', () => ({ Button: () => null, ToastStack: () => null }))
+vi.mock('@components/Common', () => ({
+  Button: () => null,
+  StatusBanner: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  ToastStack: () => null,
+}))
 vi.mock('@components/ConfirmDialog', () => ({
   ConfirmDialog: (props: {
     title: string
@@ -277,6 +281,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     statusText: '',
     statusTone: 'info',
     isAuthenticated: true,
+    temporarySessionExpiresAt: null,
     authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
     availableTeamIds: ['team-a', 'team-b'],
     teamDirectoryHydrated: true,
@@ -378,6 +383,19 @@ describe('App deep-link orchestration', () => {
   // (null) so unrelated launch/deactivation tests behave exactly as before;
   // the persistence tests override the resolved value per case.
   const getSandboxUiLocation = vi.fn().mockResolvedValue(null)
+
+  it('discloses when the authenticated session is temporary', () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      temporarySessionExpiresAt: Date.now() + 60_000,
+    })
+
+    render(<App />)
+
+    expect(screen.getByRole('status').textContent).toContain(
+      'This session is temporary. You’ll need to sign in again after quitting Evenfire.'
+    )
+  })
 
   it('prompts to add an environment when a Profile Portal handoff has no saved match', () => {
     currentController = makeController({

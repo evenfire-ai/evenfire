@@ -3,14 +3,23 @@ import { execFileSync } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { SessionTokenStorageUnavailableBeforeWriteError, TokenStore } from '../tokenStore.js'
+import {
+  SessionTokenStorageUnavailableBeforeWriteError,
+  TokenStore,
+  isQualifiedSafeStorageAvailable,
+} from '../tokenStore.js'
 
-const fixture = vi.hoisted(() => ({ directory: '', encryptionAvailable: true }))
+const fixture = vi.hoisted(() => ({
+  directory: '',
+  encryptionAvailable: true,
+  backend: 'gnome_libsecret',
+}))
 vi.mock('keytar', () => ({}))
 vi.mock('electron', () => ({
   app: { isReady: () => true, getPath: () => fixture.directory },
   safeStorage: {
     isEncryptionAvailable: () => fixture.encryptionAvailable,
+    getSelectedStorageBackend: () => fixture.backend,
     encryptString: (token: string) => Buffer.from(`encrypted:${token}`),
     decryptString: (value: Buffer) => value.toString().slice('encrypted:'.length),
   },
@@ -29,12 +38,25 @@ function conditionalOperation(
 beforeEach(async () => {
   fixture.directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-encrypted-guards-'))
   fixture.encryptionAvailable = true
+  fixture.backend = 'gnome_libsecret'
 })
 afterEach(async () => {
   vi.restoreAllMocks()
   await fs.rm(fixture.directory, { recursive: true, force: true })
 })
 describe('encrypted conditional operation guards', () => {
+  it('rejects Linux basic_text even when Electron encryption reports available', async () => {
+    fixture.backend = 'basic_text'
+    expect(isQualifiedSafeStorageAvailable('linux')).toBe(false)
+    fixture.backend = 'kwallet6'
+    expect(isQualifiedSafeStorageAvailable('linux')).toBe(true)
+  })
+
+  it('preserves the existing Electron secureStorage qualification on macOS and Windows', () => {
+    expect(isQualifiedSafeStorageAvailable('darwin')).toBe(true)
+    expect(isQualifiedSafeStorageAvailable('win32')).toBe(true)
+  })
+
   it('reports unavailable safeStorage as a typed before-write receipt without plaintext or encrypted output', async () => {
     fixture.encryptionAvailable = false
     const writing = new TokenStore({

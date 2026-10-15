@@ -20,6 +20,7 @@ vi.mock('electron', () => ({
   app: { getPath: vi.fn(() => runtime.directory), isReady: vi.fn(() => true) },
   safeStorage: {
     isEncryptionAvailable: vi.fn(() => true),
+    getSelectedStorageBackend: () => 'gnome_libsecret',
     encryptString: vi.fn((value: string) => Buffer.from(`encrypted:${value}`)),
     decryptString: vi.fn((value: Buffer) => value.toString().replace(/^encrypted:/, '')),
   },
@@ -42,6 +43,13 @@ const homeMe = {
   teamId: 'fixture-home',
   teamName: 'Fixture home',
   role: 'member',
+}
+
+function validSessionToken(): string {
+  const payload = Buffer.from(
+    JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url')
+  return `header.${payload}.signature`
 }
 
 beforeEach(async () => {
@@ -157,23 +165,15 @@ async function awaitPhase(phase: Promise<void>, producer: Promise<unknown>, labe
 }
 
 describe('failed login follows an already-admitted logout transaction', () => {
-  it('queues the rejected login behind logout and never restores its credential', async () => {
+  it('queues a fresh login behind logout and fences its temporary credential across restart', async () => {
+    vi.doMock('keytar', () => ({}))
     const h = await harness()
+    const rejectedToken = validSessionToken()
     h.markers.recordPendingExternalLogout(runtime.directory, h.envKey)
     const entered = deferred()
     const release = deferred()
-    const keytar = await import('keytar')
-    vi.mocked(keytar.deletePassword).mockImplementation(async (service, account) => {
-      if (runtime.keychain.get(keyOf(service, account)) === 'fixture-rejected-session') {
-        throw new Error('fixture-rollback deletion failed')
-      }
-      return runtime.keychain.delete(keyOf(service, account))
-    })
-    vi.mocked(keytar.getPassword).mockImplementation(async (service, account) => {
-      const token = runtime.keychain.get(keyOf(service, account)) ?? null
-      if (token === 'fixture-rejected-session') throw new Error('fixture-read-back failed')
-      return token
-    })
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
     // Pause the real clear's response after native effects have settled. The full
     // logout transaction must retain the persistence lane until that response.
     const clear = h.tokenStore.clearSessionTokenStrictly.bind(h.tokenStore)
@@ -191,33 +191,35 @@ describe('failed login follows an already-admitted logout transaction', () => {
       loginQueued.resolve()
       return persist(operation)
     })
-    const login = own(
-      h.state.installAuthenticatedLogin({ token: 'fixture-rejected-session', me: homeMe })
-    )
+    const login = own(h.state.installAuthenticatedLogin({ token: rejectedToken, me: homeMe }))
     const loginOutcome = login.then(
       () => null,
       error => error
     )
     try {
       await awaitPhase(loginQueued.promise, login, 'queued explicit login')
-      expect(keytar.setPassword).not.toHaveBeenCalled()
+      expect(runtime.keychain.size).toBe(0)
     } finally {
       release.resolve()
       await oldLogout
     }
-    const error = await loginOutcome
-    vi.mocked(keytar.getPassword).mockImplementation(
-      async (service, account) => runtime.keychain.get(keyOf(service, account)) ?? null
-    )
+    const loginResult = await login
+    expect(loginResult).toMatchObject({
+      authenticated: true,
+      me: homeMe,
+      sessionMode: 'temporary',
+    })
+    expect(h.service.getCachedUserId()).toBe(homeMe.id)
+    expect(h.markers.readPendingExternalLogoutIntent(runtime.directory, h.envKey)).toMatchObject({
+      intent: 'memory-only-session',
+    })
     const restarted = await harness()
     await expect(restarted.service.initialize()).resolves.toEqual({
       authenticated: false,
       me: null,
     })
-    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith('fixture-rejected-session')
+    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(rejectedToken)
     expect(restarted.service.getCachedUserId()).toBeNull()
-    expect(error).toBeInstanceOf(Error)
-    expect(error.message).toContain('Fresh session token could not be verified')
   })
 })
 
@@ -495,6 +497,70 @@ describe('team persistence preserves the existing secure session on transient fa
     expect(h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)).toBeNull()
     expect(notifySessionChanged).not.toHaveBeenCalledWith(false)
     expect(h.reportFailure).toHaveBeenCalledWith(expect.objectContaining({ code: 'EMFILE' }))
+  })
+
+  it('does not restore a prior temporary session when rollback cannot read a newer logout marker', async () => {
+    vi.doMock('keytar', () => ({}))
+    const h = await harness()
+    const makeToken = (jti: string) => {
+      const payload = Buffer.from(
+        JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600, jti })
+      ).toString('base64url')
+      return `header.${payload}.signature`
+    }
+    const priorToken = makeToken('prior-temporary-session')
+    const teamToken = makeToken('rejected-team-session')
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
+    await h.state.installAuthenticatedLogin({ token: priorToken, me: homeMe })
+    expect(h.service.getCachedUserId()).toBe(homeMe.id)
+    expect(h.markers.readPendingExternalLogoutIntent(runtime.directory, h.envKey)).toMatchObject({
+      intent: 'memory-only-session',
+    })
+
+    vi.spyOn(h.state.authClient, 'switchTeam').mockResolvedValue({ token: teamToken })
+    const refreshEntered = deferred()
+    const releaseRefresh = deferred()
+    vi.spyOn(h.state.authClient, 'getMe').mockImplementation(async token => {
+      if (token !== teamToken) return homeMe
+      h.markers.recordPendingExternalLogout(runtime.directory, h.envKey)
+      refreshEntered.resolve()
+      await releaseRefresh.promise
+      throw new Error('fixture team identity refresh failed')
+    })
+    const markerPath = path.join(
+      runtime.directory,
+      `pending-external-logout-${createHash('sha256').update(h.envKey).digest('hex')}`
+    )
+    const switching = own(h.service.switchTeam('fixture-other'))
+    await awaitPhase(refreshEntered.promise, switching, 'temporary team identity refresh')
+    const open = fsSync.openSync.bind(fsSync)
+    let failed = false
+    const spy = vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, mode) => {
+      if (!failed && String(file) === markerPath) {
+        failed = true
+        throw Object.assign(new Error('fixture rollback marker EMFILE'), { code: 'EMFILE' })
+      }
+      return open(file, flags, mode)
+    })
+    releaseRefresh.resolve()
+
+    await expect(switching).rejects.toThrow('fixture team identity refresh failed')
+    spy.mockRestore()
+
+    expect(failed).toBe(true)
+    expect(h.state.sessionToken).toBeNull()
+    expect(h.state.me).toBeNull()
+    expect(h.markers.readPendingExternalLogoutIntent(runtime.directory, h.envKey)).toEqual({
+      intent: 'logout-pending',
+    })
+    expect(h.reportFailure).toHaveBeenCalledWith(expect.objectContaining({ code: 'EMFILE' }))
+    const restarted = await harness()
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+    })
+    expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(priorToken)
   })
 })
 

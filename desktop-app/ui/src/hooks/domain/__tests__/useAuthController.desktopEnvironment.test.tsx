@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   onDesktopEnvironmentSetup: vi.fn(),
   onDesktopSetupToken: vi.fn(),
   onExternalLogout: vi.fn(),
+  onSessionExpired: vi.fn(),
   saveRuntimeConfig: vi.fn(),
   selectRuntimeConfig: vi.fn(),
   setStatus: vi.fn(),
@@ -40,9 +41,11 @@ type DesktopEnvironmentSetupPayload = typeof targetEnvironment
 let desktopEnvironmentSetupListener:
   | ((payload: DesktopEnvironmentSetupPayload) => void | Promise<void>)
   | null = null
+let sessionExpiredListener: (() => void) | null = null
 let confirmDesktopEnvironmentSetupForTest: (() => Promise<void>) | null = null
 let setBootingForTest: ((value: boolean) => void) | null = null
 let setAuthenticatedForTest: ((value: boolean) => void) | null = null
+let setTemporarySessionExpiryForTest: ((value: number | null) => void) | null = null
 let runtimeConfigModule: typeof import('../../../../../src/config') | null = null
 let runtimeConfigDirectory = ''
 const originalOnboardingPreview = process.env.EVENFIRE_ONBOARDING_PREVIEW
@@ -55,6 +58,7 @@ function Probe() {
   })
   setBootingForTest = auth.setBooting
   setAuthenticatedForTest = auth.setIsAuthenticated
+  setTemporarySessionExpiryForTest = auth.setTemporarySessionExpiresAt
   confirmDesktopEnvironmentSetupForTest = auth.handleConfirmDesktopEnvironmentSetup
 
   return (
@@ -67,6 +71,7 @@ function Probe() {
         {auth.pendingDesktopEnvironmentSetup?.rpcProxyBaseUrl || 'none'}
       </div>
       <div data-testid="setup-complete">{auth.desktopEnvironmentSetupComplete ? 'yes' : 'no'}</div>
+      <div data-testid="temporary-expiry">{auth.temporarySessionExpiresAt ?? 'none'}</div>
     </>
   )
 }
@@ -95,6 +100,7 @@ beforeEach(async () => {
   vi.clearAllMocks()
   vi.spyOn(Date, 'now').mockReturnValue(frozenProfileIdMilliseconds)
   desktopEnvironmentSetupListener = null
+  sessionExpiredListener = null
   confirmDesktopEnvironmentSetupForTest = null
   setBootingForTest = null
   setAuthenticatedForTest = null
@@ -129,6 +135,10 @@ beforeEach(async () => {
   mocks.loadSession.mockImplementation(async () => setBootingForTest?.(false))
   mocks.onDesktopSetupToken.mockReturnValue(() => undefined)
   mocks.onExternalLogout.mockReturnValue(() => undefined)
+  mocks.onSessionExpired.mockImplementation((listener: () => void) => {
+    sessionExpiredListener = listener
+    return () => undefined
+  })
   mocks.onDesktopEnvironmentSetup.mockImplementation(
     (listener: (payload: DesktopEnvironmentSetupPayload) => void | Promise<void>) => {
       desktopEnvironmentSetupListener = listener
@@ -145,6 +155,7 @@ beforeEach(async () => {
       onDesktopEnvironmentSetup: mocks.onDesktopEnvironmentSetup,
       onDesktopSetupToken: mocks.onDesktopSetupToken,
       onExternalLogout: mocks.onExternalLogout,
+      onSessionExpired: mocks.onSessionExpired,
     },
   }
 })
@@ -160,6 +171,28 @@ afterEach(async () => {
 })
 
 describe('Desktop environment handoff', () => {
+  it('clears the temporary-session disclosure and reloads auth on main-process expiry', async () => {
+    render(<Probe />)
+    await waitFor(() => expect(mocks.onSessionExpired).toHaveBeenCalledOnce())
+    const expiresAt = Date.now() + 60_000
+    act(() => setTemporarySessionExpiryForTest?.(expiresAt))
+    expect(screen.getByTestId('temporary-expiry')).toHaveTextContent(String(expiresAt))
+
+    await act(async () => {
+      sessionExpiredListener?.()
+      await Promise.resolve()
+    })
+
+    await waitFor(() =>
+      expect(mocks.setStatus).toHaveBeenCalledWith(
+        'Your temporary session ended. Please sign in again.',
+        'info'
+      )
+    )
+    expect(mocks.loadSession).toHaveBeenCalledWith({ preserveNav: true })
+    expect(screen.getByTestId('temporary-expiry')).toHaveTextContent('none')
+  })
+
   it('switches to a saved environment matching both service origins', async () => {
     render(<Probe />)
     await waitFor(() => expect(screen.getByTestId('configuration-loaded')).toHaveTextContent('yes'))

@@ -25,6 +25,7 @@ vi.mock('electron', () => ({
   app: { isReady: () => true, getPath: () => fixture.directory },
   safeStorage: {
     isEncryptionAvailable: () => true,
+    getSelectedStorageBackend: () => 'gnome_libsecret',
     encryptString: (token: string) => Buffer.from(`encrypted:${token}`),
     decryptString: (value: Buffer) => value.toString().slice('encrypted:'.length),
   },

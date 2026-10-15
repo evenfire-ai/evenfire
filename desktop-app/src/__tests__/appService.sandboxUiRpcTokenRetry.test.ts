@@ -17,6 +17,7 @@ vi.mock('electron', () => ({
   app: { getPath: vi.fn(() => '/tmp/clerum-desktop-test') },
   safeStorage: {
     isEncryptionAvailable: vi.fn(() => false),
+    getSelectedStorageBackend: () => 'gnome_libsecret',
     encryptString: vi.fn(),
     decryptString: vi.fn(),
   },

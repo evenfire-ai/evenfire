@@ -25,6 +25,7 @@ vi.mock('electron', () => ({
   app: { getPath: vi.fn(() => runtime.directory), isReady: vi.fn(() => true) },
   safeStorage: {
     isEncryptionAvailable: vi.fn(() => true),
+    getSelectedStorageBackend: () => 'gnome_libsecret',
     encryptString: vi.fn((value: string) => Buffer.from(`encrypted:${value}`)),
     decryptString: vi.fn((value: Buffer) => value.toString().replace(/^encrypted:/, '')),
   },
@@ -46,6 +47,15 @@ const me = {
   teamId: 'fixture-home-team',
   teamName: 'Fixture home team',
   role: 'member',
+}
+
+const expectedFreshToken = sessionToken('fixture-fresh-session')
+
+function sessionToken(label: string): string {
+  const payload = Buffer.from(
+    JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600, fixture: label })
+  ).toString('base64url')
+  return `header.${payload}.signature`
 }
 
 beforeEach(async () => {
@@ -106,7 +116,7 @@ async function createService(options: { isolated?: boolean } = {}) {
     }
   ).authClient
   vi.spyOn(authClient, 'getMe').mockResolvedValue(me)
-  const login = (token = 'fixture-fresh-session') =>
+  const login = (token = expectedFreshToken) =>
     (
       service as unknown as {
         installAuthenticatedLogin: (result: { token: string; me: typeof me }) => Promise<unknown>
@@ -134,7 +144,7 @@ describe('explicit login repair uses the pending-logout storage plan', () => {
     await expect(harness.login()).resolves.toEqual({ authenticated: true, me })
 
     expect(await harness.tokenStore.getSafeStorageSessionToken(harness.envKey)).toBe(
-      'fixture-fresh-session'
+      expectedFreshToken
     )
     expect(
       harness.markers.readPendingExternalLogoutIntent(runtime.directory, harness.envKey)
@@ -149,7 +159,7 @@ describe('explicit login repair uses the pending-logout storage plan', () => {
     )
     const restarted = await createService()
     await expect(restarted.service.initialize()).resolves.toEqual({ authenticated: true, me })
-    expect(restarted.authClient.getMe).toHaveBeenCalledWith('fixture-fresh-session')
+    expect(restarted.authClient.getMe).toHaveBeenCalledWith(expectedFreshToken)
   })
 
   it('recovers malformed regular bytes when the Keytar module is absent', async () => {
@@ -160,7 +170,7 @@ describe('explicit login repair uses the pending-logout storage plan', () => {
     await expect(harness.login()).resolves.toEqual({ authenticated: true, me })
 
     expect(await harness.tokenStore.getSafeStorageSessionToken(harness.envKey)).toBe(
-      'fixture-fresh-session'
+      expectedFreshToken
     )
     expect(
       harness.markers.readPendingExternalLogoutIntent(runtime.directory, harness.envKey)
@@ -186,7 +196,7 @@ describe('explicit login repair uses the pending-logout storage plan', () => {
     await expect(harness.login()).resolves.toEqual({ authenticated: true, me })
 
     expect(await harness.tokenStore.getSafeStorageSessionToken(harness.envKey)).toBe(
-      'fixture-fresh-session'
+      expectedFreshToken
     )
     expect(
       harness.markers.readPendingExternalLogoutIntent(runtime.directory, harness.envKey)
@@ -204,7 +214,7 @@ describe('explicit login repair uses the pending-logout storage plan', () => {
 
     await expect(harness.login()).resolves.toEqual({ authenticated: true, me })
 
-    expect(await harness.tokenStore.getSessionToken(harness.envKey)).toBe('fixture-fresh-session')
+    expect(await harness.tokenStore.getSessionToken(harness.envKey)).toBe(expectedFreshToken)
     expect(
       harness.markers.readPendingExternalLogoutMarker(runtime.directory, harness.envKey)
     ).toBeNull()
@@ -217,11 +227,14 @@ describe('explicit login repair uses the pending-logout storage plan', () => {
     await fs.writeFile(harness.markerPath, '{malformed')
     const entered = deferred()
     const release = deferred()
-    keytarMock.deletePassword.mockImplementationOnce(async () => {
-      entered.resolve()
-      await release.promise
-      return false
-    })
+    const snapshot = harness.tokenStore.snapshotSessionTokenFallbackFiles.bind(harness.tokenStore)
+    vi.spyOn(harness.tokenStore, 'snapshotSessionTokenFallbackFiles').mockImplementationOnce(
+      async (...args) => {
+        entered.resolve()
+        await release.promise
+        return snapshot(...args)
+      }
+    )
     const result = harness.login()
     await entered.promise
     let marker: ReturnType<typeof harness.markers.readPendingExternalLogoutMarker> | undefined
@@ -269,7 +282,7 @@ describe('explicit login repair uses the pending-logout storage plan', () => {
       authenticated: false,
       me: null,
     })
-    expect(restarted.authClient.getMe).not.toHaveBeenCalledWith('fixture-fresh-session')
+    expect(restarted.authClient.getMe).not.toHaveBeenCalledWith(expectedFreshToken)
     expect(error).toBeInstanceOf(Error)
     expect(error.message).toMatch(/Pending logout intent changed|mutation was superseded/)
   })
@@ -315,7 +328,7 @@ describe('team persistence respects pending-marker authority', () => {
         // working reader verifies the old slot. Neither case destroys the old session.
         if (keytarState === 'failed')
           expect(await harness.tokenStore.getKeytarSessionToken(harness.envKey)).toBe(
-            'fixture-fresh-session'
+            expectedFreshToken
           )
       }
       expect(harness.service.getCachedUserId()).toBe(me.id)
@@ -439,10 +452,21 @@ describe('durable logout failure policy', () => {
         return unlink(file)
       })
 
-      await expect(harness.login()).rejects.toThrow('fixture-owned cleanup')
-
+      if (failureStage === 'read-back') {
+        await expect(harness.login()).resolves.toMatchObject({
+          authenticated: true,
+          me,
+          sessionMode: 'temporary',
+        })
+        expect(
+          harness.markers.readPendingExternalLogoutIntent(runtime.directory, harness.envKey)
+        ).toMatchObject({ intent: 'memory-only-session' })
+        expect(harness.service.getCachedUserId()).toBe(me.id)
+      } else {
+        await expect(harness.login()).rejects.toThrow('fixture-owned cleanup')
+        expect(harness.service.getCachedUserId()).toBeNull()
+      }
       expect(failureInjected).toBe(true)
-      expect(harness.service.getCachedUserId()).toBeNull()
       const restarted = await createService()
       await expect(restarted.service.initialize()).resolves.toEqual({
         authenticated: false,
@@ -663,8 +687,7 @@ describe('durable logout failure policy', () => {
     expect(logoutError).toMatchObject({ code: 'EIO', message: 'fixture-marker reread failed' })
   })
 
-  // Characterization: the owner retained this policy for ordinary UI logout too.
-  it('blocks login after ordinary logout until secure storage recovers', async () => {
+  it('admits a temporary login after ordinary logout while secure storage is unavailable', async () => {
     const harness = await createService()
     await harness.login()
     const { safeStorage } = await import('electron')
@@ -674,14 +697,17 @@ describe('durable logout failure policy', () => {
     keytarMock.deletePassword.mockRejectedValue(new Error('fixture-Keytar unavailable'))
 
     await expect(harness.service.logout()).resolves.toBeUndefined()
-    await expect(harness.login()).rejects.toThrow('safeStorage is unavailable')
+    const temporaryToken = sessionToken('temporary-after-logout')
+    await expect(harness.login(temporaryToken)).resolves.toMatchObject({
+      authenticated: true,
+      me,
+      sessionMode: 'temporary',
+    })
 
-    expect(harness.service.getCachedUserId()).toBeNull()
+    expect(harness.service.getCachedUserId()).toBe(me.id)
     expect(
       harness.markers.readPendingExternalLogoutIntent(runtime.directory, harness.envKey)
-    ).toEqual({
-      intent: 'logout-pending',
-    })
+    ).toMatchObject({ intent: 'memory-only-session' })
     expect(await fs.readdir(runtime.directory)).not.toContain(
       `session-token-${harness.envKey}.json`
     )
@@ -697,11 +723,14 @@ describe('durable logout failure policy', () => {
 
     await expect(harness.login()).resolves.toEqual({ authenticated: true, me })
     expect(
-      harness.markers.readPendingExternalLogoutMarker(runtime.directory, harness.envKey)
-    ).toBeNull()
-    expect(await harness.tokenStore.getKeytarSessionToken(harness.envKey)).toBe(
-      'fixture-fresh-session'
-    )
+      harness.markers.readPendingExternalLogoutIntent(runtime.directory, harness.envKey)
+    ).toEqual({
+      intent: 'keytar-cleanup-pending',
+      credentialSource: 'active-keytar',
+    })
+    expect(await harness.tokenStore.getKeytarSessionToken(harness.envKey)).toBe(expectedFreshToken)
+    const recovered = await createService()
+    await expect(recovered.service.initialize()).resolves.toEqual({ authenticated: true, me })
   })
 
   it('rejects logout when durable intent cannot be reverified after cleanup fails', async () => {
@@ -779,7 +808,7 @@ describe('durable logout failure policy', () => {
       authenticated: false,
       me: null,
     })
-    expect(restarted.authClient.getMe).not.toHaveBeenCalledWith('fixture-fresh-session')
+    expect(restarted.authClient.getMe).not.toHaveBeenCalledWith(expectedFreshToken)
     expect(error).toMatchObject({ code: 'EIO', message: 'fixture-marker reread failed' })
   })
 })

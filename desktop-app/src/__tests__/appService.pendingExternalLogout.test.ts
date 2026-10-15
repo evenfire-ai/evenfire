@@ -48,6 +48,7 @@ vi.mock('electron', () => ({
   },
   safeStorage: {
     isEncryptionAvailable: vi.fn(() => false),
+    getSelectedStorageBackend: () => 'gnome_libsecret',
     encryptString: vi.fn((value: string) => Buffer.from(value, 'utf8')),
     decryptString: vi.fn((value: Buffer) => value.toString('utf8')),
   },
@@ -134,8 +135,15 @@ function markerPath(envKey = activeEnvKey): string {
   return path.join(userDataDirectory, `pending-external-logout-${environmentId}`)
 }
 
+function sessionToken(label: string): string {
+  const payload = Buffer.from(
+    JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600, fixture: label })
+  ).toString('base64url')
+  return `header.${payload}.signature`
+}
+
 const loginResult = {
-  token: 'fixture-session-token',
+  token: sessionToken('fixture-session-token'),
   me: {
     id: 'user-1',
     email: 'user@example.com',
@@ -504,13 +512,19 @@ describe('AppService pending external logout', () => {
   it('recovers an explicit login from a malformed marker after secure persistence', async () => {
     await fs.writeFile(markerPath(), '{not-json')
     const { service } = createService()
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
 
     await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).resolves.toEqual({
       authenticated: true,
       me: loginResult.me,
     })
 
-    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
+    expect(
+      markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)
+    ).toMatchObject({
+      intent: 'keytar-cleanup-pending',
+    })
     expect(internals(service).sessionToken).toBe(loginResult.token)
     expect(await fs.readdir(userDataDirectory)).not.toContain(`session-token-${activeEnvKey}.json`)
   })
@@ -532,12 +546,14 @@ describe('AppService pending external logout', () => {
     const isolatedStore = new TokenStoreClass({ isolatedUserDataPath: userDataDirectory })
     const { service } = createService(isolatedStore)
 
-    await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).resolves.toEqual({
+    await expect(
+      internals(service).installAuthenticatedLoginOnce(loginResult)
+    ).resolves.toMatchObject({
       authenticated: true,
       me: loginResult.me,
     })
 
-    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
+    expect(markerStore.readPendingExternalLogoutMarker(userDataDirectory, activeEnvKey)).toBeNull()
     expect(internals(service).sessionToken).toBe(loginResult.token)
   })
 
@@ -670,32 +686,23 @@ describe('AppService pending external logout', () => {
     })
   })
 
-  it('clears the prior logout intent before persisting an explicit login', async () => {
+  it('retains a source-cleanup revision after a fresh secure login replaces logout intent', async () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
     const { service, tokenStore } = createService()
     await tokenStore.setSessionToken('previous-session-token', activeEnvKey)
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
 
     await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).resolves.toEqual({
       authenticated: true,
       me: loginResult.me,
     })
 
-    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
+    expect(markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)).toEqual({
+      intent: 'keytar-cleanup-pending',
+      credentialSource: 'active-keytar',
+    })
     await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe(loginResult.token)
-    const keytar = await import('keytar')
-    const account = `session-token::${activeEnvKey}`
-    const oldCredentialDeleteIndex = keytar.deletePassword.mock.calls.findIndex(
-      ([service, deletedAccount]) => service === 'Evenfire' && deletedAccount === account
-    )
-    const freshCredentialWriteIndex = keytar.setPassword.mock.calls.findIndex(
-      ([service, writtenAccount, token]) =>
-        service === 'Evenfire' && writtenAccount === account && token === loginResult.token
-    )
-    expect(oldCredentialDeleteIndex).toBeGreaterThanOrEqual(0)
-    expect(freshCredentialWriteIndex).toBeGreaterThanOrEqual(0)
-    expect(keytar.deletePassword.mock.invocationCallOrder[oldCredentialDeleteIndex]).toBeLessThan(
-      keytar.setPassword.mock.invocationCallOrder[freshCredentialWriteIndex]
-    )
   })
 
   it('lets a fresh Keytar write replace a pending logout credential after delete fails', async () => {
@@ -713,7 +720,11 @@ describe('AppService pending external logout', () => {
     expect(keychain.get(keyOf('Evenfire', `session-token::${activeEnvKey}`))).toBe(
       loginResult.token
     )
-    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
+    expect(
+      markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)
+    ).toMatchObject({
+      intent: 'keytar-cleanup-pending',
+    })
     expect(internals(service).sessionToken).toBe(loginResult.token)
   })
 
@@ -756,7 +767,7 @@ describe('AppService pending external logout', () => {
     }
   })
 
-  it('fails closed when Keytar replacement and safeStorage are unavailable', async () => {
+  it('admits a temporary session when Keytar replacement and safeStorage are unavailable', async () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
     const { service, tokenStore } = createService()
     await tokenStore.setSessionToken('previous-session-token', activeEnvKey)
@@ -771,23 +782,36 @@ describe('AppService pending external logout', () => {
     vi.mocked(keytar.setPassword).mockRejectedValue(new Error('keychain temporarily locked'))
 
     try {
-      await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).rejects.toThrow(
-        'Electron safeStorage is unavailable for session-token fallback'
-      )
+      await expect(
+        internals(service).installAuthenticatedLoginOnce(loginResult)
+      ).resolves.toMatchObject({
+        authenticated: true,
+        me: loginResult.me,
+        sessionMode: 'temporary',
+      })
 
-      expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
-      expect(internals(service).sessionToken).toBeNull()
+      expect(
+        markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)
+      ).toMatchObject({ intent: 'memory-only-session' })
+      expect(internals(service).sessionToken).toBe(loginResult.token)
       await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe('previous-session-token')
       expect(await fs.readdir(userDataDirectory)).not.toContain(
         `session-token-${activeEnvKey}.json`
       )
+      const restarted = createService()
+      const getMe = vi.spyOn(internals(restarted.service).authClient, 'getMe')
+      await expect(restarted.service.initialize()).resolves.toEqual({
+        authenticated: false,
+        me: null,
+      })
+      expect(getMe).not.toHaveBeenCalled()
     } finally {
       vi.mocked(keytar.setPassword).mockReset().mockImplementation(originalSet)
       vi.mocked(keytar.deletePassword).mockReset().mockImplementation(originalDelete)
     }
   })
 
-  it('fails closed when Keytar and fallback-file cleanup both fail', async () => {
+  it('uses a durable temporary-session fence after a native write rejects post-publication', async () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
     const reportFailure = vi.fn()
     const { service, tokenStore } = createService(undefined, reportFailure)
@@ -795,38 +819,52 @@ describe('AppService pending external logout', () => {
     const keytar = await import('keytar')
     const account = `session-token::${activeEnvKey}`
     const originalDelete = vi.mocked(keytar.deletePassword).getMockImplementation()!
+    const originalSet = vi.mocked(keytar.setPassword).getMockImplementation()!
     vi.mocked(keytar.deletePassword).mockImplementation(async (_service, deletedAccount) => {
       if (deletedAccount === account) throw new Error('keychain temporarily locked')
       return false
     })
-    const fallbackPath = path.join(userDataDirectory, `session-token-${activeEnvKey}.json`)
-    const originalUnlink = fs.unlink.bind(fs)
-    const unlink = vi.spyOn(fs, 'unlink').mockImplementation(async filePath => {
-      if (String(filePath) === fallbackPath) {
-        throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
+    vi.mocked(keytar.setPassword).mockImplementation(async (service, writtenAccount, token) => {
+      if (writtenAccount === account) {
+        keychain.set(keyOf(service, writtenAccount), token)
+        throw new Error('keychain rejected after publishing candidate')
       }
-      return originalUnlink(filePath)
+      return originalSet(service, writtenAccount, token)
     })
-    const persistToken = vi.spyOn(tokenStore, 'setSessionToken')
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
+    const stalePlaintextPath = path.join(userDataDirectory, `session-token-${activeEnvKey}.json`)
+    await fs.writeFile(stalePlaintextPath, JSON.stringify({ token: 'stale-legacy-token' }))
 
     try {
       await expect(
         internals(service).installAuthenticatedLoginOnce(loginResult)
-      ).rejects.toMatchObject({
-        message: 'Failed to clear session token storage',
+      ).resolves.toMatchObject({
+        authenticated: true,
+        me: loginResult.me,
+        sessionMode: 'temporary',
       })
-
-      expect(persistToken).not.toHaveBeenCalled()
-      expect(reportFailure).toHaveBeenCalledOnce()
-      expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
-      await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBe('previous-session-token')
+      expect(
+        markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)
+      ).toMatchObject({
+        intent: 'memory-only-session',
+      })
+      expect(await fs.readFile(stalePlaintextPath, 'utf8')).toContain('stale-legacy-token')
+      expect(keychain.get(keyOf('Evenfire', account))).toBe(loginResult.token)
+      const restarted = createService()
+      const getMe = vi.spyOn(internals(restarted.service).authClient, 'getMe')
+      await expect(restarted.service.initialize()).resolves.toEqual({
+        authenticated: false,
+        me: null,
+      })
+      expect(getMe).not.toHaveBeenCalled()
     } finally {
-      unlink.mockRestore()
       vi.mocked(keytar.deletePassword).mockReset().mockImplementation(originalDelete)
+      vi.mocked(keytar.setPassword).mockReset().mockImplementation(originalSet)
     }
   })
 
-  it('reports the fallback write failure once when required Keytar replacement also fails', async () => {
+  it('reports failed secure writes once and admits the authenticated session in memory', async () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
     const reportFailure = vi.fn()
     const { service, tokenStore } = createService(undefined, reportFailure)
@@ -845,17 +883,23 @@ describe('AppService pending external logout', () => {
     )
 
     try {
-      await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).rejects.toThrow(
-        'file fallback failed'
-      )
+      await expect(
+        internals(service).installAuthenticatedLoginOnce(loginResult)
+      ).resolves.toMatchObject({
+        authenticated: true,
+        me: loginResult.me,
+        sessionMode: 'temporary',
+      })
 
       expect(
         reportFailure.mock.calls.map(([error]) =>
           error instanceof Error ? error.message : typeof error
         )
-      ).toEqual(['file fallback failed'])
-      expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
-      expect(internals(service).sessionToken).toBeNull()
+      ).toEqual(['Secure session persistence unavailable; admitted temporary session'])
+      expect(
+        markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)
+      ).toMatchObject({ intent: 'memory-only-session' })
+      expect(internals(service).sessionToken).toBe(loginResult.token)
     } finally {
       vi.mocked(keytar.deletePassword).mockReset().mockImplementation(originalDelete)
     }
@@ -950,7 +994,7 @@ describe('AppService pending external logout', () => {
     }
   })
 
-  it('fails closed without Keytar or safeStorage instead of writing a plaintext fallback', async () => {
+  it('uses a temporary session without Keytar or safeStorage and writes no plaintext fallback', async () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
     const { service } = createService()
     const { safeStorage } = await import('electron')
@@ -967,13 +1011,19 @@ describe('AppService pending external logout', () => {
     vi.mocked(keytar.deletePassword).mockImplementation(unavailable)
 
     try {
-      await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).rejects.toThrow(
-        'Electron safeStorage is unavailable for session-token fallback'
-      )
+      await expect(
+        internals(service).installAuthenticatedLoginOnce(loginResult)
+      ).resolves.toMatchObject({
+        authenticated: true,
+        me: loginResult.me,
+        sessionMode: 'temporary',
+      })
 
-      expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
-      expect(internals(service).sessionToken).toBeNull()
-      expect(internals(service).me).toBeNull()
+      expect(
+        markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)
+      ).toMatchObject({ intent: 'memory-only-session' })
+      expect(internals(service).sessionToken).toBe(loginResult.token)
+      expect(internals(service).me).toEqual(loginResult.me)
       expect(await fs.readdir(userDataDirectory)).not.toContain(
         `session-token-${activeEnvKey}.json`
       )
@@ -984,7 +1034,7 @@ describe('AppService pending external logout', () => {
     }
   })
 
-  it('keeps a pending logout marker and stays unauthenticated when fresh persistence fails', async () => {
+  it('keeps the pending logout fence and admits memory auth after secure write failures', async () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
     const reportFailure = vi.fn()
     const { service, tokenStore } = createService(undefined, reportFailure)
@@ -994,31 +1044,39 @@ describe('AppService pending external logout', () => {
       new Error('credential write failed')
     )
 
-    await expect(internals(service).installAuthenticatedLoginOnce(loginResult)).rejects.toThrow(
-      'credential write failed'
-    )
+    await expect(
+      internals(service).installAuthenticatedLoginOnce(loginResult)
+    ).resolves.toMatchObject({
+      authenticated: true,
+      me: loginResult.me,
+      sessionMode: 'temporary',
+    })
 
-    expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
-    expect(internals(service).sessionToken).toBeNull()
-    expect(internals(service).me).toBeNull()
+    expect(
+      markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)
+    ).toMatchObject({ intent: 'memory-only-session' })
+    expect(internals(service).sessionToken).toBe(loginResult.token)
+    expect(internals(service).me).toEqual(loginResult.me)
     expect(
       reportFailure.mock.calls.map(([error]) =>
         error instanceof Error ? error.message : typeof error
       )
-    ).toEqual(['credential write failed'])
+    ).toEqual(['Secure session persistence unavailable; admitted temporary session'])
   })
 
-  it('keeps login unauthenticated and the marker when marker retirement fails', async () => {
+  it('rejects temporary admission when the durable authority marker cannot be replaced', async () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
-    const reportFailure = vi.fn()
-    const { service, tokenStore } = createService(undefined, reportFailure)
+    const { service, tokenStore } = createService()
     await tokenStore.setSessionToken('previous-session-token', activeEnvKey)
-    const originalUnlink = fsSync.unlinkSync.bind(fsSync)
-    const unlink = vi.spyOn(fsSync, 'unlinkSync').mockImplementation(filePath => {
-      if (String(filePath) === markerPath()) {
+    const keytar = await import('keytar')
+    const originalSet = vi.mocked(keytar.setPassword).getMockImplementation()!
+    vi.mocked(keytar.setPassword).mockRejectedValue(new Error('keychain unavailable'))
+    const originalRename = fsSync.renameSync.bind(fsSync)
+    const rename = vi.spyOn(fsSync, 'renameSync').mockImplementation((source, destination) => {
+      if (String(destination) === markerPath()) {
         throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
       }
-      return originalUnlink(filePath)
+      return originalRename(source, destination)
     })
 
     try {
@@ -1026,34 +1084,45 @@ describe('AppService pending external logout', () => {
         'permission denied'
       )
 
-      expect(
-        reportFailure.mock.calls.map(([error]) =>
-          error instanceof Error ? error.message : typeof error
-        )
-      ).toEqual(['permission denied'])
       expect(internals(service).gfsDispatchBlocked).toBe(true)
       expect(internals(service).sessionToken).toBeNull()
       expect(internals(service).me).toBeNull()
-      expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
-      await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBeNull()
+      expect(markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)).toEqual({
+        intent: 'logout-pending',
+      })
+      expect(await fs.readdir(userDataDirectory)).not.toContain(
+        `session-token-${activeEnvKey}.json`
+      )
     } finally {
-      unlink.mockRestore()
+      rename.mockRestore()
+      vi.mocked(keytar.setPassword).mockReset().mockImplementation(originalSet)
     }
   })
 
-  it('rewrites logout intent when marker unlink succeeds but directory sync fails', async () => {
+  it('does not authenticate when the memory-only marker directory sync fails', async () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
     const { service, tokenStore } = createService()
+    await tokenStore.setSessionToken('previous-session-token', activeEnvKey)
+    const keytar = await import('keytar')
+    const originalSet = vi.mocked(keytar.setPassword).getMockImplementation()!
+    vi.mocked(keytar.setPassword).mockRejectedValue(new Error('keychain unavailable'))
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
     const originalFsync = fsSync.fsyncSync.bind(fsSync)
-    const originalUnlink = fsSync.unlinkSync.bind(fsSync)
-    let markerUnlinked = false
-    const unlink = vi.spyOn(fsSync, 'unlinkSync').mockImplementation(file => {
-      originalUnlink(file)
-      if (String(file) === markerPath()) markerUnlinked = true
-    })
     let failedDirectorySync = false
+    let memoryMarkerRenamed = false
+    const originalRename = fsSync.renameSync.bind(fsSync)
+    const rename = vi.spyOn(fsSync, 'renameSync').mockImplementation((source, destination) => {
+      const result = originalRename(source, destination)
+      if (String(destination) === markerPath()) memoryMarkerRenamed = true
+      return result
+    })
     const fsync = vi.spyOn(fsSync, 'fsyncSync').mockImplementation(descriptor => {
-      if (markerUnlinked && !failedDirectorySync && fsSync.fstatSync(descriptor).isDirectory()) {
+      if (
+        memoryMarkerRenamed &&
+        !failedDirectorySync &&
+        fsSync.fstatSync(descriptor).isDirectory()
+      ) {
         failedDirectorySync = true
         throw Object.assign(new Error('directory sync failed'), { code: 'EIO' })
       }
@@ -1066,15 +1135,15 @@ describe('AppService pending external logout', () => {
       )
 
       expect(failedDirectorySync).toBe(true)
-      expect(markerUnlinked).toBe(true)
-      expect(markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)).toEqual({
-        intent: 'logout-pending',
-      })
       expect(internals(service).sessionToken).toBeNull()
-      await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBeNull()
+      expect(internals(service).me).toBeNull()
+      expect(
+        markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)
+      ).not.toBeNull()
     } finally {
       fsync.mockRestore()
-      unlink.mockRestore()
+      rename.mockRestore()
+      vi.mocked(keytar.setPassword).mockReset().mockImplementation(originalSet)
     }
   })
 

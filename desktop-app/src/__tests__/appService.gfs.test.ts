@@ -17,6 +17,7 @@ vi.mock('electron', () => ({
   },
   safeStorage: {
     isEncryptionAvailable: vi.fn(() => true),
+    getSelectedStorageBackend: () => 'gnome_libsecret',
     encryptString: vi.fn((value: string) => Buffer.from(value)),
     decryptString: vi.fn((value: Buffer) => value.toString()),
   },

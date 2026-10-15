@@ -8,6 +8,9 @@ import {
   clearPendingExternalLogout,
   hasPendingExternalLogout,
   readPendingExternalLogoutIntent,
+  readPendingExternalLogoutMarker,
+  recordMemoryOnlySessionIfMissing,
+  recordMemoryOnlySessionIfUnchanged,
   recordPendingExternalLogout,
   recordPendingKeytarCleanup,
 } from '../pendingExternalLogout.js'
@@ -75,6 +78,45 @@ describe('pending external logout intent', () => {
     expect(readPendingExternalLogoutIntent(userDataDirectory, ENV_A)).toEqual({
       intent: 'logout-pending',
     })
+  })
+
+  it('records memory-only authority as a secret-free restart denial fence with revision CAS', async () => {
+    userDataDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-pending-logout-'))
+    const token = 'fixture-secret-session-token'
+
+    const first = recordMemoryOnlySessionIfMissing(
+      userDataDirectory,
+      ENV_A,
+      '11111111-1111-4111-8111-111111111111',
+      '22222222-2222-4222-8222-222222222222'
+    )
+
+    expect(first).toEqual({
+      intent: {
+        intent: 'memory-only-session',
+        volatileSessionId: '11111111-1111-4111-8111-111111111111',
+      },
+      revision: '22222222-2222-4222-8222-222222222222',
+    })
+    expect(recordMemoryOnlySessionIfMissing(userDataDirectory, ENV_A)).toBeNull()
+    const contents = await fs.readFile(markerPath(ENV_A), 'utf8')
+    expect(contents).not.toContain(token)
+    expect(readPendingExternalLogoutMarker(userDataDirectory, ENV_A)).toEqual(first)
+    expect((await fs.stat(markerPath(ENV_A))).mode & 0o777).toBe(0o600)
+
+    const next = recordMemoryOnlySessionIfUnchanged(
+      userDataDirectory,
+      ENV_A,
+      first!,
+      '33333333-3333-4333-8333-333333333333',
+      '44444444-4444-4444-8444-444444444444'
+    )
+    expect(next?.intent).toEqual({
+      intent: 'memory-only-session',
+      volatileSessionId: '33333333-3333-4333-8333-333333333333',
+    })
+    expect(recordMemoryOnlySessionIfUnchanged(userDataDirectory, ENV_A, first!)).toBeNull()
+    expect(readPendingExternalLogoutIntent(userDataDirectory, ENV_A)).toEqual(next?.intent)
   })
 
   it('ignores the unscoped marker and leaves it untouched by environment cleanup', async () => {

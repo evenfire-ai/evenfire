@@ -18,6 +18,7 @@ vi.mock('electron', () => ({
   app: { getPath: vi.fn(() => runtime.directory), isReady: vi.fn(() => true) },
   safeStorage: {
     isEncryptionAvailable: vi.fn(() => true),
+    getSelectedStorageBackend: () => 'gnome_libsecret',
     encryptString: vi.fn((value: string) => Buffer.from(`encrypted:${value}`)),
     decryptString: vi.fn((value: Buffer) => value.toString().replace(/^encrypted:/, '')),
   },
@@ -44,6 +45,13 @@ const homeMe = {
   teamId: 'fixture-home',
   teamName: 'Fixture home',
   role: 'member',
+}
+
+function validSessionToken(): string {
+  const payload = Buffer.from(
+    JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })
+  ).toString('base64url')
+  return `header.${payload}.signature`
 }
 
 beforeEach(async () => {
@@ -1093,8 +1101,8 @@ describe('R21-M2 stale native producer fencing', () => {
   })
 })
 
-describe('R18-H1 owner-approved absent-module outage policy', () => {
-  it('retains LP after ordinary logout without Keytar until verified secure recovery is available', async () => {
+describe('temporary session after an absent production Keytar module', () => {
+  it('admits memory auth after ordinary logout and requires fresh auth after restart', async () => {
     vi.doMock('keytar', () => ({}))
     const { safeStorage } = await import('electron')
     vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
@@ -1107,9 +1115,18 @@ describe('R18-H1 owner-approved absent-module outage policy', () => {
     expect(h.markers.readPendingExternalLogoutIntent(runtime.directory, h.envKey)).toEqual({
       intent: 'logout-pending',
     })
+    const temporaryToken = validSessionToken()
     await expect(
-      h.state.installAuthenticatedLogin({ token: 'fixture-denied-session', me: homeMe })
-    ).rejects.toThrow('safeStorage is unavailable')
+      h.state.installAuthenticatedLogin({ token: temporaryToken, me: homeMe })
+    ).resolves.toMatchObject({
+      authenticated: true,
+      me: homeMe,
+      sessionMode: 'temporary',
+    })
+    expect(h.state.sessionToken).toBe(temporaryToken)
+    expect(h.markers.readPendingExternalLogoutIntent(runtime.directory, h.envKey)).toMatchObject({
+      intent: 'memory-only-session',
+    })
     expect(await fs.readdir(runtime.directory)).not.toContain(`session-token-${h.envKey}.json`)
     const restarted = await harness()
     await expect(restarted.service.initialize()).resolves.toEqual({
