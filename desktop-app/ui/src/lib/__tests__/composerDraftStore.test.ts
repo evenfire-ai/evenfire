@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   claimPendingNewChatDraft,
   clearComposerDraft,
-  clearComposerDraftAfterSend,
   getComposerDraft,
   resetComposerDraftStore,
   setComposerDraft,
@@ -109,16 +108,6 @@ describe('composerDraftStore', () => {
     expect(getComposerDraft('chat-1')).toBe('')
   })
 
-  it('clearComposerDraftAfterSend clears both the no-chat bucket and the target chat', () => {
-    setComposerDraft(null, 'typed before a chat existed')
-    setComposerDraft('chat-1', 'leftover')
-
-    clearComposerDraftAfterSend('chat-1')
-
-    expect(getComposerDraft(null)).toBe('')
-    expect(getComposerDraft('chat-1')).toBe('')
-  })
-
   it('isolates no-chat drafts by agent while preserving the legacy unscoped bucket', () => {
     setComposerDraft(null, 'agent-a draft', 'agent-a')
     setComposerDraft(null, 'agent-b draft', 'agent-b')
@@ -128,7 +117,7 @@ describe('composerDraftStore', () => {
     expect(getComposerDraft(null, 'agent-b')).toBe('agent-b draft')
     expect(getComposerDraft(null)).toBe('legacy draft')
 
-    clearComposerDraftAfterSend(null, 'agent-a')
+    clearComposerDraft(null, 'agent-a')
     expect(getComposerDraft(null, 'agent-a')).toBe('')
     expect(getComposerDraft(null, 'agent-b')).toBe('agent-b draft')
     expect(getComposerDraft(null)).toBe('legacy draft')

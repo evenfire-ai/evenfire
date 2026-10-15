@@ -54,7 +54,6 @@ export function createEvenfireDeepLinkRouter<TWindow extends RendererTarget>(
 
   const sendDesktopEnvironmentSetup = (parsed: URL, rawUrl: string): void => {
     const externalRestApiBaseUrl = parsed.searchParams.get('externalRestApiBaseUrl') || ''
-    const rpcProxyBaseUrl = parsed.searchParams.get('rpcProxyBaseUrl') || ''
     const appName =
       parsed.searchParams.get('tenantName') || parsed.searchParams.get('appName') || ''
     if (!externalRestApiBaseUrl) return
@@ -64,7 +63,6 @@ export function createEvenfireDeepLinkRouter<TWindow extends RendererTarget>(
       options.focusMainWindow()
       window.webContents.send('auth:desktopEnvironmentSetup', {
         externalRestApiBaseUrl,
-        rpcProxyBaseUrl,
         appName,
       })
       return
