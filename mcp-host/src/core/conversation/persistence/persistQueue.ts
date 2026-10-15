@@ -234,10 +234,14 @@ export class PersistQueue {
   }
 
   /**
-   * Graceful shutdown: close admission, drain every queued write, wait for the
-   * worker to ACK `shutdown` (it closes the database before replying), then
-   * terminate it. Rejects with the first write failure, or with the shutdown
-   * failure, so the caller sees that the durable trail is incomplete.
+   * Graceful shutdown: close admission, drain the keyed writes in
+   * `writeChain` (async writes and sync writes with a `sessionKey`), wait for
+   * the worker to ACK `shutdown` (it closes the database before replying),
+   * then terminate it. A sync write without a `sessionKey` is not in
+   * `writeChain`; if the worker is still retrying it on a busy database,
+   * `shutdown` can close the database first and the write is rejected.
+   * Rejects with the first write failure, or with the shutdown failure, so
+   * the caller sees that the durable trail is incomplete.
    */
   close(): Promise<void> {
     // A second caller waits for the same shutdown instead of returning early.
