@@ -816,6 +816,11 @@ export function useAppController() {
         const authenticated = Boolean(sessionState.authenticated && sessionState.me)
         auth.setIsAuthenticated(authenticated)
         auth.setMe(sessionState.me)
+        auth.setTemporarySessionExpiresAt(
+          authenticated && sessionState.sessionMode === 'temporary'
+            ? (sessionState.expiresAt ?? null)
+            : null
+        )
 
         if (!authenticated || !sessionState.me) {
           setPostPaintDataReady(false)
@@ -1414,6 +1419,7 @@ export function useAppController() {
     statusTone,
     isAuthenticated: auth.isAuthenticated,
     me: auth.me,
+    temporarySessionExpiresAt: auth.temporarySessionExpiresAt,
     currentTeamId,
     availableTeamIds,
     teamDirectoryHydrated: teamsData.teamDirectoryHydrated,

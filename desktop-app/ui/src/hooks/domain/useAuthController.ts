@@ -63,6 +63,7 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
     setIsAuthenticatedState(next)
   }, [])
   const [me, setMe] = useState<SessionMe | null>(null)
+  const [temporarySessionExpiresAt, setTemporarySessionExpiresAt] = useState<number | null>(null)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [desktopSetupAuthorizationToken, setDesktopSetupAuthorizationToken] = useState('')
@@ -172,10 +173,20 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
     return window.clerum.auth.onExternalLogout(() => {
       setIsAuthenticated(false)
       setMe(null)
+      setTemporarySessionExpiresAt(null)
       setPassword('')
       setStatus('Signed out after password update.', 'info')
     })
   }, [setStatus])
+
+  useEffect(() => {
+    return window.clerum.auth.onSessionExpired(() => {
+      void onSessionNeedsLoad({ preserveNav: true }).finally(() => {
+        setTemporarySessionExpiresAt(null)
+        setStatus('Your temporary session ended. Please sign in again.', 'info')
+      })
+    })
+  }, [onSessionNeedsLoad, setStatus])
 
   const handlePasswordLogin = async () => {
     try {
@@ -514,6 +525,7 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
     statusTone,
     isAuthenticated,
     me,
+    temporarySessionExpiresAt,
     email,
     password,
     desktopSetupAuthorizationToken,
@@ -537,6 +549,7 @@ export function useAuthController({ setStatus, onSessionNeedsLoad }: UseAuthCont
     setStatusTone,
     setIsAuthenticated,
     setMe,
+    setTemporarySessionExpiresAt,
     setEmail,
     setPassword,
     setDesktopSetupAuthorizationToken,

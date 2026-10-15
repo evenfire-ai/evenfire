@@ -15,6 +15,27 @@ export class ApiError extends Error {
 }
 
 const TRANSIENT_RETRY_DELAY_MS = 250
+let sessionInvalidationHandler: ((token: string) => void) | undefined
+let sessionRequestGuard: ((token: string) => void) | undefined
+
+/** The main-process session coordinator owns invalidation for every authenticated client. */
+export function setSessionInvalidationHandler(
+  handler?: (token: string) => void,
+  requestGuard?: (token: string) => void
+): void {
+  sessionInvalidationHandler = handler
+  sessionRequestGuard = requestGuard
+}
+
+/** Keep token-bearing raw-fetch clients on the same 401 invalidation contract. */
+export function reportSessionUnauthorized(token: string, status: number): void {
+  if (status === 401) sessionInvalidationHandler?.(token)
+}
+
+/** Recheck volatile-session ownership at the final request-dispatch boundary. */
+export function assertSessionRequestAllowed(token: string): void {
+  sessionRequestGuard?.(token)
+}
 
 /**
  * Wrap an optional caller signal with the app-wide client timeout
@@ -133,6 +154,7 @@ export async function requestJson<T>(
   }
 
   const performRequest = async (): Promise<T> => {
+    if (options?.token) assertSessionRequestAllowed(options.token)
     const response = await fetch(url, {
       method,
       headers,
@@ -171,6 +193,9 @@ export async function requestJson<T>(
   try {
     return await performRequest()
   } catch (error) {
+    if (options?.token && error instanceof ApiError) {
+      reportSessionUnauthorized(options.token, error.status)
+    }
     if (!options?.retryTransientOnce || !isTransientNetworkError(error)) {
       throw error
     }

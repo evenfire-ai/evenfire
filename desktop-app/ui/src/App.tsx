@@ -16,7 +16,7 @@ import { ChatLocalSearch } from '@components/ChatLocalSearch'
 import { ChatSwitcher } from '@components/ChatSwitcher'
 import { ChatViewWorkspace } from '@components/ChatViewWorkspace'
 import { CommandPalette } from '@components/CommandPalette'
-import { Button, ToastStack } from '@components/Common'
+import { Button, StatusBanner, ToastStack } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { PluginConsentModal } from '@components/PluginConsentModal'
@@ -2404,6 +2404,7 @@ export function App() {
       statusTone: vm.statusTone,
       isAuthenticated: vm.isAuthenticated,
       me: vm.me,
+      temporarySessionExpiresAt: vm.temporarySessionExpiresAt,
       email: vm.email,
       password: vm.password,
       desktopSetupAuthorizationToken: vm.desktopSetupAuthorizationToken,
@@ -2848,6 +2849,14 @@ export function App() {
                                     : undefined
                                 }
                               >
+                                {vm.temporarySessionExpiresAt !== null && (
+                                  <div role="status" aria-live="polite">
+                                    <StatusBanner tone="info">
+                                      This session is temporary. You’ll need to sign in again after
+                                      quitting Evenfire.
+                                    </StatusBanner>
+                                  </div>
+                                )}
                                 {/* Every route mounts the command-center header in the
                                     window title bar via the same portal — the search
                                     pill and notification bell live in the title bar on

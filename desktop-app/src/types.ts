@@ -658,6 +658,10 @@ export type HostMessageResponse = {
 export type SessionState = {
   authenticated: boolean
   me: SessionMe | null
+  /** Present only for a current-process session that is never restored after restart. */
+  sessionMode?: 'temporary'
+  /** Absolute main-process deadline, in Unix milliseconds, for a temporary session. */
+  expiresAt?: number
 }
 
 export type PasswordLoginResult = SessionState

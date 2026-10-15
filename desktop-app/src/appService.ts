@@ -33,8 +33,16 @@ import {
   formatGfsUploadLimit,
 } from './gfs/upload.js'
 import { GfsClient, type GfsResourceView, parseSubjectKey } from './gfs/uriHandler.js'
-import { ApiError, requestJson, withTimeout } from './httpClient.js'
+import {
+  ApiError,
+  assertSessionRequestAllowed,
+  reportSessionUnauthorized,
+  requestJson,
+  setSessionInvalidationHandler,
+  withTimeout,
+} from './httpClient.js'
 import { MemberRegistrationServiceClient } from './memberRegistrationServiceClient.js'
+import { isMemoryOnlySessionExpired, memoryOnlySessionDeadline } from './memoryOnlySession.js'
 import {
   type PendingExternalLogoutIntent,
   type PendingExternalLogoutMarker,
@@ -45,6 +53,8 @@ import {
   pendingExternalLogoutMarkersMatch,
   pendingExternalLogoutOwnership,
   readPendingExternalLogoutContentsRevision,
+  recordMemoryOnlySessionIfMissing,
+  recordMemoryOnlySessionIfUnchanged,
   recordPendingExternalLogout,
   recordPendingExternalLogoutIfContentsUnchanged,
   recordPendingExternalLogoutIfUnchanged,
@@ -408,6 +418,7 @@ const SAVED_SESSION_RESTORE_RETRY_DELAY_MS = 5_000
 const gfsUploadTransport: DesktopUploadTransport = {
   requestJson,
   requestPart: async (url, token, headers, body, timeoutMs, signal) => {
+    assertSessionRequestAllowed(token)
     const response = await fetch(url, {
       method: 'PUT',
       headers: { authorization: `Bearer ${token}`, ...headers },
@@ -416,6 +427,7 @@ const gfsUploadTransport: DesktopUploadTransport = {
       duplex: 'half',
       signal: withTimeout(signal, timeoutMs),
     } as RequestInit & { duplex: 'half' })
+    reportSessionUnauthorized(token, response.status)
     const text = await response.text()
     return {
       status: response.status,
@@ -909,6 +921,7 @@ export interface AppServiceOptions {
   tokenStore?: TokenStore
   getUserDataDirectory?: () => string
   reportDeferredLogoutFailure?: (error: unknown) => void
+  notifySessionExpired?: () => void
 }
 
 type ActiveTeamContextHop = {
@@ -927,7 +940,7 @@ type PendingLogoutLoginPlan = {
   credentialSource: 'active-keytar' | 'safe-storage' | null
 }
 
-type SavedSessionRestorePolicy = 'normal' | 'safe-storage-only' | 'keytar-active-only'
+type SavedSessionRestorePolicy = 'normal' | 'safe-storage-only' | 'keytar-active-only' | 'deny-all'
 
 type SavedSessionRestorePlan = {
   policy: SavedSessionRestorePolicy
@@ -958,6 +971,23 @@ type AcceptedSessionTokenSource = {
   generation: number
 }
 
+type MemoryOnlySessionLease = {
+  envKey: string
+  volatileSessionId: string
+  marker: PendingExternalLogoutMarker
+  expiresAt: number
+}
+
+type MemoryOnlySessionMarker = Omit<PendingExternalLogoutMarker, 'intent'> & {
+  intent: Extract<PendingExternalLogoutIntent, { intent: 'memory-only-session' }>
+}
+
+function isMemoryOnlySessionMarker(
+  marker: PendingExternalLogoutMarker | null
+): marker is MemoryOnlySessionMarker {
+  return marker?.intent.intent === 'memory-only-session'
+}
+
 class SelectedSessionSourceSupersededError extends SessionTokenStorageSupersededBeforeWriteError {}
 
 function sessionTokenPublicationSource(
@@ -972,10 +1002,41 @@ function sessionTokenPublicationSource(
   }
 }
 
-type SessionPersistenceReceipt = SessionPersistenceSourceReceipt & {
+function canAdmitMemoryOnlyAfterStorageFailure(error: unknown): boolean {
+  const failures = error instanceof AggregateError ? error.errors : [error]
+  return !failures.some(
+    failure =>
+      failure instanceof SessionTokenStorageSupersededBeforeWriteError ||
+      failure instanceof SessionPersistenceJournalAdmissionError ||
+      failure instanceof SessionPersistenceCandidateDeniedError ||
+      isSessionTokenFallbackReadFailure(failure) ||
+      isSessionTokenMutationCallbackFailure(failure) ||
+      isPendingExternalLogoutReadFailure(failure) ||
+      isSessionPersistenceJournalReadFailure(failure) ||
+      isTransientPendingLogoutReadError(failure)
+  )
+}
+
+type PersistentSessionReceipt = SessionPersistenceSourceReceipt & {
+  mode: 'persistent'
   token: string
   generation: number
 }
+
+type TemporarySessionReceipt = {
+  mode: 'temporary'
+  envKey: string
+  volatileSessionId: string
+  marker: PendingExternalLogoutMarker
+  token: string
+  generation: number
+  expiresAt: number
+  previousToken: string
+  previousMe: SessionMe
+  previousLease: MemoryOnlySessionLease
+}
+
+type SessionPersistenceReceipt = PersistentSessionReceipt | TemporarySessionReceipt
 
 export class QuitAdmissionClosedError extends Error {
   readonly code = 'QUIT_ADMISSION_CLOSED'
@@ -1001,11 +1062,15 @@ export class AppService {
   private readonly tokenStore: TokenStore
   private readonly getUserDataDirectory: () => string
   private readonly reportDeferredLogoutFailure: (error: unknown) => void
+  private readonly notifySessionExpired: () => void
   private readonly pendingCredentialProducers = new Set<Promise<unknown>>()
   private quitPreparationStarted = false
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
   private sessionToken: string | null = null
   private acceptedSessionSource: AcceptedSessionTokenSource | undefined
+  private memoryOnlySession: MemoryOnlySessionLease | undefined
+  private memoryOnlySessionExpiryTimer: ReturnType<typeof setTimeout> | null = null
+  private memoryOnlySessionTermination: Promise<void> | null = null
   private me: SessionMe | null = null
   private profileUiBaseUrlCache: { key: string; value: string } | null = null
   private accessCatalog: AccessCatalog | null = null
@@ -1104,6 +1169,11 @@ export class AppService {
     this.tokenStore = options.tokenStore ?? new TokenStore()
     this.getUserDataDirectory = options.getUserDataDirectory ?? (() => app.getPath('userData'))
     this.reportDeferredLogoutFailure = options.reportDeferredLogoutFailure ?? (() => {})
+    this.notifySessionExpired = options.notifySessionExpired ?? (() => {})
+    setSessionInvalidationHandler(
+      token => this.endInvalidatedMemoryOnlySession(token),
+      token => this.assertTemporarySessionRequestAllowed(token)
+    )
   }
 
   private static dedupe(values: string[]): string[] {
@@ -1488,14 +1558,30 @@ export class AppService {
     return selected
   }
 
-  private requireSessionPersistenceReceipt(receipt: SessionPersistenceSourceReceipt): void {
-    this.requireSessionTokenSourceCurrent(receipt.selectedSource, receipt.envKey, () => {
+  private requireSessionPersistenceReceipt(
+    receipt: SessionPersistenceReceipt | SessionPersistenceSourceReceipt
+  ): void {
+    if ('mode' in receipt && receipt.mode === 'temporary') {
+      this.assertMemoryOnlySessionCurrent()
+      const lease = this.memoryOnlySession
+      if (
+        !lease ||
+        this.sessionGeneration !== receipt.generation ||
+        this.sessionToken !== receipt.token ||
+        lease.volatileSessionId !== receipt.volatileSessionId ||
+        !pendingExternalLogoutMarkersMatch(lease.marker, receipt.marker)
+      )
+        throw new SessionTokenStorageSupersededBeforeWriteError()
+      return
+    }
+    const persistent = 'mode' in receipt ? receipt : { ...receipt, mode: 'persistent' as const }
+    this.requireSessionTokenSourceCurrent(persistent.selectedSource, persistent.envKey, () => {
       const observation = pendingExternalLogoutOwnership(
-        observePendingExternalLogoutMarker(this.getUserDataDirectory(), receipt.envKey),
-        [receipt.marker],
-        getActiveEnvKey() === receipt.envKey &&
-          this.sessionToken === receipt.owner.token &&
-          this.sessionGeneration === receipt.owner.generation
+        observePendingExternalLogoutMarker(this.getUserDataDirectory(), persistent.envKey),
+        [persistent.marker],
+        getActiveEnvKey() === persistent.envKey &&
+          this.sessionToken === persistent.owner.token &&
+          this.sessionGeneration === persistent.owner.generation
       )
       if (observation.status === 'transient' || observation.status === 'invalid')
         throw observation.error
@@ -1503,8 +1589,15 @@ export class AppService {
     })
   }
 
-  private async verifySessionPersistenceReceipt(receipt: SessionPersistenceSourceReceipt) {
-    await this.verifySessionTokenSource(receipt.selectedSource, receipt.envKey, () => {
+  private async verifySessionPersistenceReceipt(
+    receipt: SessionPersistenceReceipt | SessionPersistenceSourceReceipt
+  ) {
+    if ('mode' in receipt && receipt.mode === 'temporary') {
+      this.requireSessionPersistenceReceipt(receipt)
+      return
+    }
+    const persistent = 'mode' in receipt ? receipt : { ...receipt, mode: 'persistent' as const }
+    await this.verifySessionTokenSource(persistent.selectedSource, persistent.envKey, () => {
       this.requireSessionPersistenceReceipt(receipt)
       return true
     })
@@ -1518,6 +1611,10 @@ export class AppService {
     } = {}
   ): Promise<void> {
     const tokenChanged = token !== this.sessionToken
+    if (tokenChanged && this.memoryOnlySession) {
+      await this.commitTemporarySessionToken(token, options)
+      return
+    }
     const previousToken = this.sessionToken
     const previousGeneration = this.sessionGeneration
     let installedGeneration = previousGeneration
@@ -1557,7 +1654,12 @@ export class AppService {
         sourceReceipt.owner.token = token
         installedProducer = sourceReceipt.producer
         installedSourceReceipt = sourceReceipt
-        options.onInstalled?.({ ...sourceReceipt, token, generation: installedGeneration })
+        options.onInstalled?.({
+          ...sourceReceipt,
+          mode: 'persistent',
+          token,
+          generation: installedGeneration,
+        })
         this.rpcTokenManager.clear()
         this.profileUiBaseUrlCache = null
         this.accessCatalog = null
@@ -1597,6 +1699,84 @@ export class AppService {
         throw new Error('stale_auth_epoch: authenticated team scope changed during binding')
       }
       this.updateCachedCurrentTeam(this.me.teamId)
+    }
+  }
+
+  private async commitTemporarySessionToken(
+    token: string,
+    options: {
+      refreshMe?: boolean
+      onInstalled?: (receipt: SessionPersistenceReceipt) => void
+    }
+  ): Promise<void> {
+    const previousLease = this.memoryOnlySession
+    const previousToken = this.sessionToken
+    const previousMe = this.me
+    const previousGeneration = this.sessionGeneration
+    const envKey = getActiveEnvKey()
+    if (!previousLease || !previousToken || !previousMe || previousLease.envKey !== envKey) {
+      throw new SessionTokenStorageSupersededBeforeWriteError()
+    }
+    const expiresAt = Math.min(previousLease.expiresAt, memoryOnlySessionDeadline(token))
+    if (isMemoryOnlySessionExpired(expiresAt)) {
+      throw new Error('Temporary session expired. Please sign in again.')
+    }
+    let receipt: TemporarySessionReceipt | undefined
+    await this.runSessionPersistence(async () => {
+      if (
+        this.sessionGeneration !== previousGeneration ||
+        this.sessionToken !== previousToken ||
+        this.memoryOnlySession !== previousLease
+      )
+        throw new SessionTokenStorageSupersededBeforeWriteError()
+      this.assertMemoryOnlySessionCurrent(previousLease)
+      this.sessionGeneration += 1
+      const generation = this.sessionGeneration
+      this.sessionToken = token
+      this.memoryOnlySession = { ...previousLease, expiresAt }
+      this.scheduleMemoryOnlySessionExpiry(this.memoryOnlySession)
+      receipt = {
+        mode: 'temporary',
+        envKey,
+        volatileSessionId: previousLease.volatileSessionId,
+        marker: previousLease.marker,
+        token,
+        generation,
+        expiresAt,
+        previousToken,
+        previousMe,
+        previousLease,
+      }
+      options.onInstalled?.(receipt)
+      this.rpcTokenManager.clear()
+      this.profileUiBaseUrlCache = null
+      this.accessCatalog = null
+      if (this.gfsTransientTeamHopDepth === 0) {
+        this.updateEntityChangeSessionToken(token)
+        this.restartEntityChangeStreamForSessionReplacement()
+      }
+    })
+
+    if (!options.refreshMe) return
+    const installedGeneration = this.sessionGeneration
+    try {
+      const switchedMe = await this.authClient.getMe(token)
+      if (receipt) this.requireSessionPersistenceReceipt(receipt)
+      if (this.sessionGeneration !== installedGeneration || this.sessionToken !== token) {
+        throw new SessionTokenStorageSupersededBeforeWriteError()
+      }
+      this.me = switchedMe
+      await this.bindCurrentChatStore(switchedMe.id)
+      if (receipt) this.requireSessionPersistenceReceipt(receipt)
+      if (this.sessionGeneration !== installedGeneration || this.sessionToken !== token) {
+        throw new SessionTokenStorageSupersededBeforeWriteError()
+      }
+      this.updateCachedCurrentTeam(switchedMe.teamId)
+    } catch (error) {
+      if (this.sessionGeneration === installedGeneration && this.sessionToken === token) {
+        unbindChatStore()
+      }
+      throw error
     }
   }
 
@@ -2458,6 +2638,53 @@ export class AppService {
     receipt: SessionPersistenceReceipt,
     previousToken: string
   ): Promise<void> {
+    if (receipt.mode === 'temporary') {
+      await this.runSessionPersistence(async () => {
+        const runtimeOwned = () =>
+          getActiveEnvKey() === receipt.envKey &&
+          this.sessionGeneration === receipt.generation &&
+          this.sessionToken === receipt.token &&
+          this.memoryOnlySession?.volatileSessionId === receipt.volatileSessionId
+        if (!runtimeOwned()) return
+        const observation = observePendingExternalLogoutMarker(
+          this.getUserDataDirectory(),
+          receipt.envKey
+        )
+        // An unreadable marker cannot prove that this rollback still owns the
+        // session. A concurrent logout or newer producer may have replaced it;
+        // in that case discard the volatile runtime instead of restoring an
+        // older credential under uncertain authority.
+        const mayRestore =
+          observation.status === 'observed' &&
+          pendingExternalLogoutMarkersMatch(observation.marker, receipt.marker)
+        if (observation.status === 'invalid' || observation.status === 'transient') {
+          this.reportDeferredLogoutFailureSafely(observation.error)
+        }
+        if (
+          mayRestore &&
+          receipt.previousToken === previousToken &&
+          !isMemoryOnlySessionExpired(receipt.previousLease.expiresAt)
+        ) {
+          this.clearAuthenticatedSessionState({ notifySessionChanged: false })
+          this.sessionToken = receipt.previousToken
+          this.me = receipt.previousMe
+          this.memoryOnlySession = receipt.previousLease
+          this.scheduleMemoryOnlySessionExpiry(receipt.previousLease)
+          this.updateEntityChangeSessionToken(receipt.previousToken)
+          this.restartEntityChangeStreamForSessionReplacement()
+          try {
+            await this.bindCurrentChatStore(receipt.previousMe.id)
+            this.activateGfsAuthScope()
+          } catch (error) {
+            if (this.sessionToken === receipt.previousToken) this.clearAuthenticatedSessionState()
+            this.reportDeferredLogoutFailureSafely(error)
+          }
+        } else {
+          this.clearAuthenticatedSessionState()
+        }
+      })
+      return
+    }
     const envKey = receipt.envKey
     const userDataDirectory = this.getUserDataDirectory()
     const runtimeOwned = () =>
@@ -2598,8 +2825,13 @@ export class AppService {
         if (completedReceipt) await this.verifySessionPersistenceReceipt(completedReceipt)
         if (!options.deferAcceptance && completedReceipt) {
           this.requireSessionPersistenceReceipt(completedReceipt)
-          completedReceipt.producer.accept(switched.token)
-          this.recordAcceptedSessionSource(completedReceipt.selectedSource, completedReceipt.envKey)
+          if (completedReceipt.mode === 'persistent') {
+            completedReceipt.producer.accept(switched.token)
+            this.recordAcceptedSessionSource(
+              completedReceipt.selectedSource,
+              completedReceipt.envKey
+            )
+          }
         }
         return switched.token
       } catch (error) {
@@ -2921,12 +3153,25 @@ export class AppService {
     const targetTeamId =
       String(options.teamId || '').trim() || (await this.resolveTeamForHostRefs(hostRefs))
     return this.runWithTeamContext(targetTeamId, token =>
-      this.rpcTokenManager.getOrIssue(token, scopes, hostRefs)
+      this.getRpcTokenForCurrentSession(token, scopes, hostRefs)
     )
+  }
+
+  private async getRpcTokenForCurrentSession(
+    sessionToken: string,
+    scopes: RpcScope[],
+    hostRefs: string[]
+  ) {
+    const rpcToken = await this.rpcTokenManager.getOrIssue(sessionToken, scopes, hostRefs)
+    if (this.memoryOnlySession) this.assertMemoryOnlySessionCurrent()
+    return rpcToken
   }
 
   private clearAuthenticatedSessionState(options: { notifySessionChanged?: boolean } = {}): void {
     this.acceptedSessionSource = undefined
+    this.memoryOnlySession = undefined
+    if (this.memoryOnlySessionExpiryTimer) clearTimeout(this.memoryOnlySessionExpiryTimer)
+    this.memoryOnlySessionExpiryTimer = null
     this.sessionGeneration += 1
     this.updateEntityChangeSessionToken(null)
     this.gfsAuthEpoch += 1
@@ -3074,6 +3319,11 @@ export class AppService {
     if (!restorePlan) {
       return { authenticated: Boolean(this.sessionToken && this.me), me: this.me }
     }
+    if (restorePlan.policy === 'deny-all') {
+      this.savedSessionRestoreAttemptedEnvKey = getActiveEnvKey()
+      this.savedSessionRestoreAttemptedAtMs = Date.now()
+      return { authenticated: false, me: null }
+    }
     if (this.restoreSavedSessionInFlight) {
       return await this.restoreSavedSessionInFlight
     }
@@ -3111,6 +3361,16 @@ export class AppService {
     }
 
     const intent = marker.intent
+
+    if (intent.intent === 'memory-only-session') {
+      // M is a restart fence, not a restore source. Do not clear or inspect any
+      // saved credential merely because a provider has become available again.
+      return {
+        policy: 'deny-all',
+        pendingCleanupMarker: marker,
+        retireMarkerAfterRestore: false,
+      }
+    }
 
     if (intent.intent === 'keytar-cleanup-pending') {
       return this.runCredentialProducer(() =>
@@ -3268,6 +3528,31 @@ export class AppService {
 
     const intent = marker.intent
 
+    if (intent.intent === 'memory-only-session') {
+      return {
+        intent,
+        marker,
+        writeKeytar: true,
+        requireSafeStorage: false,
+        retireMarker: false,
+        credentialSource: 'active-keytar',
+      }
+    }
+
+    if (intent.intent === 'logout-pending') {
+      // A fresh, server-authenticated login may replace LP only after a new
+      // source is accepted. Keep the denial record in place during admission;
+      // this avoids requiring a failing OS store merely to authenticate in M.
+      return {
+        intent,
+        marker,
+        writeKeytar: true,
+        requireSafeStorage: false,
+        retireMarker: false,
+        credentialSource: 'active-keytar',
+      }
+    }
+
     if (intent.intent === 'keytar-cleanup-pending') {
       const preserveActiveEnvKey = intent.credentialSource === 'active-keytar'
       try {
@@ -3396,6 +3681,9 @@ export class AppService {
     restoreGeneration = this.sessionGeneration
   ) {
     if (this.logoutInProgress) return { authenticated: false, me: null }
+    // A memory-only marker is durable denial state, never a restore source.
+    // Return before TokenStore can inspect an older Keytar/safeStorage value.
+    if (restorePlan.policy === 'deny-all') return { authenticated: false, me: null }
     const previousRuntimeToken = this.sessionToken
     const previousRuntimeMe = this.me
     hydrateDesktopRuntimeConfig()
@@ -4043,20 +4331,32 @@ export class AppService {
     token: string
     me: SessionMe
   }): Promise<SessionState> {
-    return this.runCredentialProducer(() => this.installAuthenticatedLoginOnce(result))
+    const authenticatedAt = Date.now()
+    return this.runCredentialProducer(() =>
+      this.installAuthenticatedLoginOnce(result, authenticatedAt)
+    )
   }
 
-  private async installAuthenticatedLoginOnce(result: {
-    token: string
-    me: SessionMe
-  }): Promise<SessionState> {
-    return this.runSessionPersistence(() => this.installAuthenticatedLoginWithinPersistence(result))
+  private async installAuthenticatedLoginOnce(
+    result: {
+      token: string
+      me: SessionMe
+    },
+    authenticatedAt = Date.now()
+  ): Promise<SessionState> {
+    return this.runSessionPersistence(() =>
+      this.installAuthenticatedLoginWithinPersistence(result, authenticatedAt)
+    )
   }
 
-  private async installAuthenticatedLoginWithinPersistence(result: {
-    token: string
-    me: SessionMe
-  }): Promise<SessionState> {
+  private async installAuthenticatedLoginWithinPersistence(
+    result: {
+      token: string
+      me: SessionMe
+    },
+    authenticatedAt = Date.now()
+  ): Promise<SessionState> {
+    if (this.memoryOnlySessionTermination) await this.memoryOnlySessionTermination
     const releasePrewarm = this.beginPrewarmAuthTransition()
     try {
       const envKey = getActiveEnvKey()
@@ -4070,6 +4370,9 @@ export class AppService {
       let requireSafeStorage = pendingLogout.requireSafeStorage
       let freshTokenUsesSafeStorageOnly = false
       let freshTokenUsesActiveKeytar = false
+      let memoryOnlyAccepted = false
+      let memoryOnlyMarker: PendingExternalLogoutMarker | null = null
+      let memoryOnlyExpiresAt: number | null = null
       let credentialSource = pendingLogout.credentialSource
       let attemptedCleanupMarker: PendingExternalLogoutMarker | null = null
       let completedMarker: PendingExternalLogoutMarker | null | undefined
@@ -4085,6 +4388,7 @@ export class AppService {
       const previousToken = this.sessionToken
       const previousMe = this.me
       const previousGeneration = this.sessionGeneration
+      const previousMemoryOnlySession = this.memoryOnlySession
       const previouslyAcceptedSource = this.captureAcceptedSessionSource(envKey)
       let installedGeneration: number | null = null
       let ownedRuntime = { generation: previousGeneration, token: previousToken }
@@ -4207,53 +4511,12 @@ export class AppService {
           )
           requireOwnedTransaction()
         }
-        if (pendingLogout.intent && pendingLogout.writeKeytar) {
-          const writtenSource = await this.persistRequiredKeytarOrSafeStorage(
-            result.token,
-            envKey,
-            transactionMayWrite,
-            () => {},
-            () => {},
-            {
-              keytarUnavailableBeforeWrite: false,
-              onMutationDispatched,
-              onSourceVerified,
-              onMutationSettled,
-              publications,
-            }
-          )
-          freshTokenUsesActiveKeytar = writtenSource === 'active-keytar'
-          freshTokenUsesSafeStorageOnly = writtenSource === 'safe-storage'
-          if (writtenSource === 'safe-storage') {
-            retirePendingLogoutMarker = false
-            credentialSource = 'safe-storage'
-          }
-        } else if (pendingLogout.intent) {
-          if (requireSafeStorage) {
-            await this.tokenStore.setSafeStorageSessionToken(result.token, envKey, {
-              mayWrite: transactionMayWrite,
-              onMutationDispatched,
-              onMutationSettled,
-            })
-            freshTokenUsesSafeStorageOnly = true
-            credentialSource = 'safe-storage'
-          } else {
-            // Isolated development storage has no Keytar by construction. Its
-            // strict clear completed before this fresh, ordinary test login.
-            await this.tokenStore.setSessionToken(result.token, envKey, {
-              mayWrite: transactionMayWrite,
-              onMutationDispatched,
-              onMutationSettled,
-            })
-          }
-        } else {
-          if (this.tokenStore.isIsolatedDevelopmentStorage()) {
-            await this.tokenStore.setSessionToken(result.token, envKey, {
-              mayWrite: transactionMayWrite,
-              onMutationDispatched,
-              onMutationSettled,
-            })
-          } else {
+        try {
+          if (
+            pendingLogout.intent &&
+            pendingLogout.writeKeytar &&
+            !this.tokenStore.isIsolatedDevelopmentStorage()
+          ) {
             const writtenSource = await this.persistRequiredKeytarOrSafeStorage(
               result.token,
               envKey,
@@ -4270,102 +4533,179 @@ export class AppService {
             )
             freshTokenUsesActiveKeytar = writtenSource === 'active-keytar'
             freshTokenUsesSafeStorageOnly = writtenSource === 'safe-storage'
-          }
-        }
-        requireOwnedTransaction()
-        {
-          selected ??= await this.readVerifiedSessionTokenSource(
-            result.token,
-            envKey,
-            freshTokenUsesSafeStorageOnly
-              ? 'safe-storage'
-              : freshTokenUsesActiveKeytar
-                ? 'keytar'
-                : 'default',
-            transactionMayWrite,
-            freshTokenUsesSafeStorageOnly
-              ? publications.get('safe-storage')
-              : freshTokenUsesActiveKeytar
-                ? publications.get('keytar')
-                : (publications.get('safe-storage') ?? publications.get('historical-plaintext'))
-          )
-          await this.verifySessionTokenSource(selected, envKey, transactionMayWrite)
-        }
-        requireOwnedTransaction()
-        requireOwnedSource()
-        if (
-          pendingLogout.intent &&
-          retirePendingLogoutMarker &&
-          (freshTokenUsesActiveKeytar || freshTokenUsesSafeStorageOnly) &&
-          (!fallbackBeforePersistence ||
-            !(await this.canRetireSourceCleanup(
-              envKey,
-              result.token,
-              freshTokenUsesActiveKeytar ? 'active-keytar' : 'safe-storage',
-              {
-                marker: pendingLogout.marker ?? undefined,
-                mayContinue: transactionOwned,
-                fallbackSnapshot: fallbackBeforePersistence,
-                selectedSource: selected,
+            if (writtenSource === 'safe-storage') {
+              retirePendingLogoutMarker = false
+              credentialSource = 'safe-storage'
+            }
+          } else if (pendingLogout.intent) {
+            if (requireSafeStorage) {
+              await this.tokenStore.setSafeStorageSessionToken(result.token, envKey, {
+                mayWrite: transactionMayWrite,
+                onMutationDispatched,
+                onMutationSettled,
+              })
+              freshTokenUsesSafeStorageOnly = true
+              credentialSource = 'safe-storage'
+            } else {
+              // Isolated development storage preserves its separately approved
+              // unpackaged plaintext exception; production uses the temporary mode.
+              await this.tokenStore.setSessionToken(result.token, envKey, {
+                mayWrite: transactionMayWrite,
+                onMutationDispatched,
+                onMutationSettled,
+              })
+              if (this.tokenStore.isIsolatedDevelopmentStorage()) {
+                retirePendingLogoutMarker = true
               }
-            )))
-        ) {
-          retirePendingLogoutMarker = false
-          credentialSource = freshTokenUsesActiveKeytar ? 'active-keytar' : 'safe-storage'
-        }
-        requireOwnedTransaction()
-        await this.verifySessionTokenSource(selected, envKey, transactionMayWrite)
-        if (pendingLogout.intent && retirePendingLogoutMarker) {
-          producer.declareMarker(null)
-          const markerRetired =
-            pendingLogout.marker &&
-            clearPendingExternalLogoutIfUnchanged(userDataDirectory, envKey, pendingLogout.marker)
-          if (!markerRetired) {
-            throw new Error('Pending logout intent changed while login was completing')
-          }
-          completedMarker = null
-        } else if (pendingLogout.intent) {
-          const cleanupCredentialSource = credentialSource ?? 'safe-storage'
-          const cleanupRevision = randomUUID()
-          attemptedCleanupMarker = {
-            intent: {
-              intent: 'keytar-cleanup-pending',
-              credentialSource: cleanupCredentialSource,
-            },
-            revision: cleanupRevision,
-          }
-          producer.declareMarker(attemptedCleanupMarker)
-          if (
-            !pendingLogout.marker ||
-            !recordPendingKeytarCleanupIfUnchanged(
-              userDataDirectory,
-              envKey,
-              pendingLogout.marker,
-              cleanupCredentialSource,
-              cleanupRevision
-            )
-          ) {
-            throw new Error('Pending logout intent changed while login was completing')
-          }
-          completedMarker = attemptedCleanupMarker
-        } else {
-          completedMarker = freshTokenUsesSafeStorageOnly
-            ? await this.bindVerifiedEncryptedCredentialIfMarkerMissing(
+            }
+          } else {
+            if (this.tokenStore.isIsolatedDevelopmentStorage()) {
+              await this.tokenStore.setSessionToken(result.token, envKey, {
+                mayWrite: transactionMayWrite,
+                onMutationDispatched,
+                onMutationSettled,
+              })
+            } else {
+              const writtenSource = await this.persistRequiredKeytarOrSafeStorage(
                 result.token,
                 envKey,
                 transactionMayWrite,
-                attempted => {
-                  producer.declareMarker(attempted)
-                  attemptedCleanupMarker = attempted
-                },
-                selected
+                () => {},
+                () => {},
+                {
+                  keytarUnavailableBeforeWrite: false,
+                  onMutationDispatched,
+                  onSourceVerified,
+                  onMutationSettled,
+                  publications,
+                }
               )
-            : freshTokenUsesActiveKeytar && fallbackBeforePersistence
-              ? await this.bindVerifiedNativeCredentialAfterFallbackCleanup(
+              freshTokenUsesActiveKeytar = writtenSource === 'active-keytar'
+              freshTokenUsesSafeStorageOnly = writtenSource === 'safe-storage'
+            }
+          }
+          requireOwnedTransaction()
+          {
+            selected ??= await this.readVerifiedSessionTokenSource(
+              result.token,
+              envKey,
+              freshTokenUsesSafeStorageOnly
+                ? 'safe-storage'
+                : freshTokenUsesActiveKeytar
+                  ? 'keytar'
+                  : 'default',
+              transactionMayWrite,
+              freshTokenUsesSafeStorageOnly
+                ? publications.get('safe-storage')
+                : freshTokenUsesActiveKeytar
+                  ? publications.get('keytar')
+                  : (publications.get('safe-storage') ?? publications.get('historical-plaintext'))
+            )
+            await this.verifySessionTokenSource(selected, envKey, transactionMayWrite)
+          }
+        } catch (storageError) {
+          if (!canAdmitMemoryOnlyAfterStorageFailure(storageError)) throw storageError
+          requireOwnedTransaction()
+          memoryOnlyExpiresAt = memoryOnlySessionDeadline(result.token, authenticatedAt)
+          const volatileSessionId = randomUUID()
+          const markerRevision = randomUUID()
+          const plannedMarker: PendingExternalLogoutMarker = {
+            intent: { intent: 'memory-only-session', volatileSessionId },
+            revision: markerRevision,
+          }
+          // The candidate denial is recorded before a possible partial provider
+          // write. M then durably denies all saved sources before runtime install.
+          producer.declareMarker(plannedMarker)
+          memoryOnlyMarker = pendingLogout.marker
+            ? recordMemoryOnlySessionIfUnchanged(
+                userDataDirectory,
+                envKey,
+                pendingLogout.marker,
+                volatileSessionId,
+                markerRevision
+              )
+            : recordMemoryOnlySessionIfMissing(
+                userDataDirectory,
+                envKey,
+                volatileSessionId,
+                markerRevision
+              )
+          if (!memoryOnlyMarker) {
+            throw new SessionTokenStorageSupersededBeforeWriteError()
+          }
+          this.reportDeferredLogoutFailureSafely(
+            new Error('Secure session persistence unavailable; admitted temporary session')
+          )
+          attemptedCleanupMarker = memoryOnlyMarker
+          completedMarker = memoryOnlyMarker
+          retirePendingLogoutMarker = false
+          credentialSource = null
+          memoryOnlyAccepted = true
+          selected = undefined
+        }
+        requireOwnedTransaction()
+        requireOwnedSource()
+        if (!memoryOnlyAccepted) {
+          if (
+            pendingLogout.intent &&
+            retirePendingLogoutMarker &&
+            (freshTokenUsesActiveKeytar || freshTokenUsesSafeStorageOnly) &&
+            (!fallbackBeforePersistence ||
+              !(await this.canRetireSourceCleanup(
+                envKey,
+                result.token,
+                freshTokenUsesActiveKeytar ? 'active-keytar' : 'safe-storage',
+                {
+                  marker: pendingLogout.marker ?? undefined,
+                  mayContinue: transactionOwned,
+                  fallbackSnapshot: fallbackBeforePersistence,
+                  selectedSource: selected,
+                }
+              )))
+          ) {
+            retirePendingLogoutMarker = false
+            credentialSource = freshTokenUsesActiveKeytar ? 'active-keytar' : 'safe-storage'
+          }
+          requireOwnedTransaction()
+          await this.verifySessionTokenSource(selected, envKey, transactionMayWrite)
+          if (pendingLogout.intent && retirePendingLogoutMarker) {
+            producer.declareMarker(null)
+            const markerRetired =
+              pendingLogout.marker &&
+              clearPendingExternalLogoutIfUnchanged(userDataDirectory, envKey, pendingLogout.marker)
+            if (!markerRetired) {
+              throw new Error('Pending logout intent changed while login was completing')
+            }
+            completedMarker = null
+          } else if (pendingLogout.intent) {
+            const cleanupCredentialSource = credentialSource ?? 'safe-storage'
+            const cleanupRevision = randomUUID()
+            attemptedCleanupMarker = {
+              intent: {
+                intent: 'keytar-cleanup-pending',
+                credentialSource: cleanupCredentialSource,
+              },
+              revision: cleanupRevision,
+            }
+            producer.declareMarker(attemptedCleanupMarker)
+            if (
+              !pendingLogout.marker ||
+              !recordPendingKeytarCleanupIfUnchanged(
+                userDataDirectory,
+                envKey,
+                pendingLogout.marker,
+                cleanupCredentialSource,
+                cleanupRevision
+              )
+            ) {
+              throw new Error('Pending logout intent changed while login was completing')
+            }
+            completedMarker = attemptedCleanupMarker
+          } else {
+            completedMarker = freshTokenUsesSafeStorageOnly
+              ? await this.bindVerifiedEncryptedCredentialIfMarkerMissing(
                   result.token,
                   envKey,
-                  null,
-                  fallbackBeforePersistence,
                   transactionMayWrite,
                   attempted => {
                     producer.declareMarker(attempted)
@@ -4373,15 +4713,51 @@ export class AppService {
                   },
                   selected
                 )
-              : null
+              : freshTokenUsesActiveKeytar && fallbackBeforePersistence
+                ? await this.bindVerifiedNativeCredentialAfterFallbackCleanup(
+                    result.token,
+                    envKey,
+                    null,
+                    fallbackBeforePersistence,
+                    transactionMayWrite,
+                    attempted => {
+                      producer.declareMarker(attempted)
+                      attemptedCleanupMarker = attempted
+                    },
+                    selected
+                  )
+                : null
+          }
+          requireOwnedTransaction()
+          await this.verifySessionTokenSource(selected, envKey, transactionMayWrite)
+          this.requireSessionTokenSourceCurrent(selected, envKey, transactionMayWrite)
         }
-        requireOwnedTransaction()
-        await this.verifySessionTokenSource(selected, envKey, transactionMayWrite)
-        this.requireSessionTokenSourceCurrent(selected, envKey, transactionMayWrite)
+        const acceptedMemoryOnlyMarker =
+          memoryOnlyAccepted && isMemoryOnlySessionMarker(memoryOnlyMarker)
+            ? memoryOnlyMarker
+            : null
+        if (memoryOnlyAccepted && (!acceptedMemoryOnlyMarker || memoryOnlyExpiresAt === null)) {
+          throw new Error('Temporary session authority was not durably established')
+        }
         producer.assertMayAuthenticate(result.token)
         // Persist, verify and complete source authority before replacing runtime.
         this.sessionGeneration += 1
         installedGeneration = this.sessionGeneration
+        this.memoryOnlySession =
+          acceptedMemoryOnlyMarker && memoryOnlyExpiresAt !== null
+            ? {
+                envKey,
+                volatileSessionId: acceptedMemoryOnlyMarker.intent.volatileSessionId,
+                marker: acceptedMemoryOnlyMarker,
+                expiresAt: memoryOnlyExpiresAt,
+              }
+            : undefined
+        if (memoryOnlyAccepted) this.acceptedSessionSource = undefined
+        if (this.memoryOnlySession) this.scheduleMemoryOnlySessionExpiry(this.memoryOnlySession)
+        else {
+          if (this.memoryOnlySessionExpiryTimer) clearTimeout(this.memoryOnlySessionExpiryTimer)
+          this.memoryOnlySessionExpiryTimer = null
+        }
         if (hadAuthenticatedScope) this.invalidateSandboxUiSession()
         this.sessionToken = result.token
         ownedRuntime = { generation: installedGeneration, token: result.token }
@@ -4391,8 +4767,12 @@ export class AppService {
         await this.bindCurrentChatStore(result.me.id)
         requireOwnedTransaction()
         requireOwnedSource()
-        await this.verifySessionTokenSource(selected, envKey, transactionMayWrite)
-        this.requireSessionTokenSourceCurrent(selected, envKey, transactionMayWrite)
+        if (!memoryOnlyAccepted) {
+          await this.verifySessionTokenSource(selected, envKey, transactionMayWrite)
+          this.requireSessionTokenSourceCurrent(selected, envKey, transactionMayWrite)
+        } else {
+          this.assertMemoryOnlySessionCurrent()
+        }
         this.accessCatalog = null
         this.teamDirectoryCache = null
         this.workflowApprovalTeamById.clear()
@@ -4400,11 +4780,57 @@ export class AppService {
         this.rpcTokenManager.clear()
         this.activateGfsAuthScope()
         producer.accept(result.token)
-        this.recordAcceptedSessionSource(selected, envKey)
-        return { authenticated: true, me: result.me }
+        if (!memoryOnlyAccepted) this.recordAcceptedSessionSource(selected!, envKey)
+        return {
+          authenticated: true,
+          me: result.me,
+          ...this.temporarySessionState(),
+        }
       } catch (error) {
         if (dispatchInspectionError !== undefined) error = dispatchInspectionError
         error = this.unwrapPersistenceAuthorityError(error)
+        if (memoryOnlyAccepted) {
+          if (
+            transactionOwned() &&
+            previousMemoryOnlySession &&
+            previousToken &&
+            previousMe &&
+            !isMemoryOnlySessionExpired(previousMemoryOnlySession.expiresAt) &&
+            memoryOnlyMarker
+          ) {
+            try {
+              const restoredMarker = recordMemoryOnlySessionIfUnchanged(
+                userDataDirectory,
+                envKey,
+                memoryOnlyMarker,
+                previousMemoryOnlySession.volatileSessionId,
+                randomUUID()
+              )
+              if (restoredMarker) {
+                this.clearAuthenticatedSessionState({ notifySessionChanged: false })
+                this.sessionToken = previousToken
+                this.me = previousMe
+                this.memoryOnlySession = { ...previousMemoryOnlySession, marker: restoredMarker }
+                this.scheduleMemoryOnlySessionExpiry(this.memoryOnlySession)
+                this.updateEntityChangeSessionToken(previousToken)
+                this.restartEntityChangeStreamForSessionReplacement()
+                await this.bindCurrentChatStore(previousMe.id)
+                this.activateGfsAuthScope()
+              } else if (transactionOwned()) {
+                // The failed replacement no longer owns the denial fence; do
+                // not leave its predecessor authenticated under a newer marker.
+                this.clearAuthenticatedSessionState()
+              }
+            } catch (restoreError) {
+              if (transactionOwned()) this.clearAuthenticatedSessionState()
+              this.reportDeferredLogoutFailureSafely(restoreError)
+            }
+          } else if (transactionOwned() && (previousToken || previousMe)) {
+            // The newly committed M fence denies the prior persisted source.
+            this.clearAuthenticatedSessionState()
+          }
+          throw error
+        }
         if (
           error instanceof SelectedSessionSourceSupersededError ||
           (selected &&
@@ -5136,6 +5562,32 @@ export class AppService {
           } catch (error) {
             markerInspectionFailed = true
             this.reportDeferredLogoutFailureSafely(error)
+          }
+
+          if (marker?.intent.intent === 'memory-only-session') {
+            const owner = { generation: this.sessionGeneration, token: this.sessionToken }
+            await this.suspendMemoryOnlySessionForAuthBoundary()
+            const current = observePendingExternalLogoutMarker(userDataDirectory, envKey)
+            if (current.status !== 'observed') throw current.error
+            if (!pendingExternalLogoutMarkersMatch(current.marker, marker)) {
+              throw new SessionTokenStorageSupersededBeforeWriteError()
+            }
+            if (
+              this.sessionGeneration !== owner.generation ||
+              this.sessionToken !== owner.token ||
+              getActiveEnvKey() !== envKey
+            ) {
+              // Expiry may have ended this exact M-owned session while the
+              // shared auth-boundary suspension was draining. Keep logout
+              // idempotent only if no newer runtime session took ownership.
+              if (!this.sessionToken && !this.me && !this.memoryOnlySession) return
+              throw new SessionTokenStorageSupersededBeforeWriteError()
+            }
+            // M already durably denies every persisted source. Keep that fence
+            // after logout; clearing it could revive a credential from an older
+            // Keytar/safeStorage session when a provider later recovers.
+            this.clearAuthenticatedSessionState()
+            return
           }
 
           if (marker?.intent.intent === 'keytar-cleanup-pending') {
@@ -6013,10 +6465,124 @@ export class AppService {
     if (!this.sessionToken) {
       throw new Error('Not authenticated')
     }
+    if (this.memoryOnlySession) this.assertMemoryOnlySessionCurrent()
     return this.sessionToken
   }
 
+  private scheduleMemoryOnlySessionExpiry(
+    lease: MemoryOnlySessionLease,
+    retryDelayMs?: number
+  ): void {
+    if (this.memoryOnlySessionExpiryTimer) clearTimeout(this.memoryOnlySessionExpiryTimer)
+    const timer = setTimeout(
+      () => {
+        const expired = this.checkTemporarySessionExpiry()
+        // A transient marker read must not permanently disable the lease
+        // deadline. Protected requests fail while ownership is uncertain, and
+        // this bounded retry rechecks the durable fence until it can be read.
+        if (!expired && this.memoryOnlySession === lease) {
+          this.scheduleMemoryOnlySessionExpiry(lease, 1_000)
+        }
+      },
+      Math.max(0, Math.min(lease.expiresAt - Date.now(), retryDelayMs ?? Number.POSITIVE_INFINITY))
+    )
+    timer.unref?.()
+    this.memoryOnlySessionExpiryTimer = timer
+  }
+
+  private notifyTemporarySessionEnded(): void {
+    try {
+      this.notifySessionExpired()
+    } catch (error) {
+      this.reportDeferredLogoutFailureSafely(error)
+    }
+  }
+
+  private suspendMemoryOnlySessionForAuthBoundary(): Promise<void> {
+    if (this.memoryOnlySessionTermination) return this.memoryOnlySessionTermination
+    const termination = this.suspendDesktopGfsUploadsForAuthBoundary().finally(() => {
+      if (this.memoryOnlySessionTermination === termination) {
+        this.memoryOnlySessionTermination = null
+      }
+    })
+    this.memoryOnlySessionTermination = termination
+    return termination
+  }
+
+  private endMemoryOnlySession(): void {
+    if (!this.memoryOnlySession) return
+    const termination = this.suspendMemoryOnlySessionForAuthBoundary()
+    this.clearAuthenticatedSessionState()
+    this.notifyTemporarySessionEnded()
+    void termination.catch(error => this.reportDeferredLogoutFailureSafely(error))
+  }
+
+  private endExpiredMemoryOnlySession(): void {
+    this.endMemoryOnlySession()
+  }
+
+  private endInvalidatedMemoryOnlySession(token: string): void {
+    if (!this.memoryOnlySession || token !== this.sessionToken) return
+    this.endMemoryOnlySession()
+  }
+
+  private assertTemporarySessionRequestAllowed(token: string): void {
+    const lease = this.memoryOnlySession
+    if (!lease) return
+    this.assertMemoryOnlySessionCurrent(lease)
+    if (token !== this.sessionToken) {
+      throw new Error('Temporary session was replaced before request dispatch')
+    }
+  }
+
+  private assertMemoryOnlySessionCurrent(expected = this.memoryOnlySession): void {
+    if (!expected || expected !== this.memoryOnlySession) throw new Error('Session has ended')
+    if (isMemoryOnlySessionExpired(expected.expiresAt)) {
+      this.endExpiredMemoryOnlySession()
+      throw new Error('Temporary session expired. Please sign in again.')
+    }
+    if (getActiveEnvKey() !== expected.envKey) {
+      this.clearAuthenticatedSessionState()
+      this.notifyTemporarySessionEnded()
+      throw new Error('Temporary session belongs to another environment')
+    }
+    const ownership = pendingExternalLogoutOwnership(
+      observePendingExternalLogoutMarker(this.getUserDataDirectory(), expected.envKey),
+      [expected.marker],
+      this.sessionToken !== null && Boolean(this.me)
+    )
+    if (ownership.status === 'transient') throw ownership.error
+    if (ownership.status !== 'owned') {
+      this.clearAuthenticatedSessionState()
+      this.notifyTemporarySessionEnded()
+      throw new Error('Temporary session authority is unavailable. Please sign in again.')
+    }
+  }
+
+  /** Called on OS resume as well as by a bounded timer; every protected request checks too. */
+  checkTemporarySessionExpiry(): boolean {
+    const lease = this.memoryOnlySession
+    if (!lease) return false
+    try {
+      this.assertMemoryOnlySessionCurrent(lease)
+      return false
+    } catch (error) {
+      if (isMemoryOnlySessionExpired(lease.expiresAt)) return true
+      if (error instanceof Error && error.message.includes('Temporary session authority'))
+        return true
+      if (getActiveEnvKey() !== lease.envKey) return true
+      this.reportDeferredLogoutFailureSafely(error)
+      return false
+    }
+  }
+
+  private temporarySessionState(): Pick<SessionState, 'sessionMode' | 'expiresAt'> {
+    const lease = this.memoryOnlySession
+    return lease ? { sessionMode: 'temporary', expiresAt: lease.expiresAt } : {}
+  }
+
   async getSessionState(): Promise<SessionState> {
+    if (this.memoryOnlySession) this.assertMemoryOnlySessionCurrent()
     if (!this.sessionToken || !this.me) {
       if (this.restoreSavedSessionInFlight) return this.restoreSavedSession()
       // createWindow() already performs the saved-token restore before showing
@@ -6031,7 +6597,7 @@ export class AppService {
       }
       return this.restoreSavedSession()
     }
-    return { authenticated: true, me: this.me }
+    return { authenticated: true, me: this.me, ...this.temporarySessionState() }
   }
 
   /**
@@ -6041,6 +6607,13 @@ export class AppService {
    * consent check. Returns null whenever there is no live session.
    */
   getCachedUserId(): string | null {
+    if (this.memoryOnlySession) {
+      try {
+        this.assertMemoryOnlySessionCurrent()
+      } catch {
+        return null
+      }
+    }
     if (!this.sessionToken || !this.me) return null
     return this.me.id
   }
@@ -6706,8 +7279,13 @@ export class AppService {
         if (completedReceipt) await this.verifySessionPersistenceReceipt(completedReceipt)
         if (completedReceipt) {
           this.requireSessionPersistenceReceipt(completedReceipt)
-          completedReceipt.producer.accept(installedToken!)
-          this.recordAcceptedSessionSource(completedReceipt.selectedSource, completedReceipt.envKey)
+          if (completedReceipt.mode === 'persistent') {
+            completedReceipt.producer.accept(installedToken!)
+            this.recordAcceptedSessionSource(
+              completedReceipt.selectedSource,
+              completedReceipt.envKey
+            )
+          }
         }
         return { authenticated: true, me: this.me }
       } catch (error) {
@@ -6716,7 +7294,10 @@ export class AppService {
         // with a blocked or stale GFS scope. Cleanup remains inside the outer
         // transient-hop gate, and the original persistence error is preserved.
         const rejectedReceipt = installedReceipt as SessionPersistenceReceipt | null
-        if (rejectedReceipt && !rejectedReceipt.producer.isAccepted)
+        if (
+          rejectedReceipt &&
+          (rejectedReceipt.mode === 'temporary' || !rejectedReceipt.producer.isAccepted)
+        )
           await this.clearOwnedPartialTeamSession(rejectedReceipt, previousToken)
         throw error
       }
@@ -8182,7 +8763,7 @@ export class AppService {
   /** Picker payload for the renderer's sandbox-ui app list. */
   async listSandboxUiApps(): Promise<{ apps: import('./rpcProxyClient.js').SandboxUiApp[] }> {
     const token = this.requireSessionToken()
-    const rpc = await this.rpcTokenManager.getOrIssue(token, SANDBOX_UI_VIEW_SCOPES, [
+    const rpc = await this.getRpcTokenForCurrentSession(token, SANDBOX_UI_VIEW_SCOPES, [
       SANDBOX_UI_HOST_REF_SENTINEL,
     ])
     try {
@@ -8190,7 +8771,7 @@ export class AppService {
     } catch (error) {
       if (AppService.shouldRefreshRpcToken(error)) {
         this.rpcTokenManager.clear()
-        const retried = await this.rpcTokenManager.getOrIssue(token, SANDBOX_UI_VIEW_SCOPES, [
+        const retried = await this.getRpcTokenForCurrentSession(token, SANDBOX_UI_VIEW_SCOPES, [
           SANDBOX_UI_HOST_REF_SENTINEL,
         ])
         return this.rpcClient.listSandboxUiApps(retried.token)
@@ -8209,7 +8790,7 @@ export class AppService {
     const name = String(recipeName || '').trim()
     if (!ns || !name) throw new Error('recipeNs and recipeName are required')
     const token = this.requireSessionToken()
-    const rpc = await this.rpcTokenManager.getOrIssue(token, SANDBOX_UI_VIEW_SCOPES, [
+    const rpc = await this.getRpcTokenForCurrentSession(token, SANDBOX_UI_VIEW_SCOPES, [
       SANDBOX_UI_HOST_REF_SENTINEL,
     ])
     try {
@@ -8251,7 +8832,9 @@ export class AppService {
     const sessionEpoch = this.sandboxUiSessionEpoch
     const token = this.requireSessionToken()
     const issueRpc = () =>
-      this.rpcTokenManager.getOrIssue(token, SANDBOX_UI_VIEW_SCOPES, [SANDBOX_UI_HOST_REF_SENTINEL])
+      this.getRpcTokenForCurrentSession(token, SANDBOX_UI_VIEW_SCOPES, [
+        SANDBOX_UI_HOST_REF_SENTINEL,
+      ])
     let rpc = await issueRpc()
     let result: { authorizeUrl: string }
     try {

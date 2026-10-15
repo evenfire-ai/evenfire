@@ -6,6 +6,24 @@ import os from 'node:os'
 import path from 'node:path'
 
 const SERVICE = 'Evenfire'
+const QUALIFIED_LINUX_SAFE_STORAGE_BACKENDS = new Set([
+  'gnome_libsecret',
+  'kwallet',
+  'kwallet5',
+  'kwallet6',
+])
+
+/** `isEncryptionAvailable()` alone accepts Electron's insecure Linux basic_text backend. */
+export function isQualifiedSafeStorageAvailable(
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  if (!app?.isReady() || !safeStorage.isEncryptionAvailable()) return false
+  if (platform !== 'linux') return platform === 'darwin' || platform === 'win32'
+  const backend = (
+    safeStorage as typeof safeStorage & { getSelectedStorageBackend?: () => string }
+  ).getSelectedStorageBackend?.()
+  return typeof backend === 'string' && QUALIFIED_LINUX_SAFE_STORAGE_BACKENDS.has(backend)
+}
 /**
  * Legacy single global slot (pre per-environment scoping). Read once for a
  * best-effort migration into the active environment's slot, then deleted.
@@ -922,7 +940,7 @@ export class TokenStore {
       if (bytes === null) return null
       let token: unknown
       if (source === 'safe-storage') {
-        if (!app?.isReady() || !safeStorage.isEncryptionAvailable())
+        if (!isQualifiedSafeStorageAvailable())
           throw new Error('Electron safeStorage is unavailable for session-token recovery')
         token = safeStorage.decryptString(bytes)
       } else {
@@ -1097,7 +1115,7 @@ export class TokenStore {
     if (stored && authority) return reportSelectedSessionToken(stored, 'keytar', options, authority)
 
     let encryptedSelection: { token: string; authority: SessionTokenReadAuthority } | null = null
-    if (app?.isReady() && safeStorage.isEncryptionAvailable()) {
+    if (isQualifiedSafeStorageAvailable()) {
       try {
         const file = await this.encryptedFilePath(envKey)
         encryptedSelection = await this.readFileSelection(file, 'safe-storage', await scopePromise)
@@ -1272,7 +1290,7 @@ export class TokenStore {
       if (selected)
         return this.reportCompletedMigration(selected.token, selected.source, envKey, options)
 
-      if (app?.isReady() && safeStorage.isEncryptionAvailable()) {
+      if (isQualifiedSafeStorageAvailable()) {
         try {
           const token = await this.readMigrationFileSource(
             candidate.encrypted,
@@ -1382,7 +1400,7 @@ export class TokenStore {
     return this.trackOperation(async () => {
       assertEnvKey(envKey)
       if (this.isolatedUserDataPath !== undefined) await this.verifiedStorageBase()
-      if (!app?.isReady() || !safeStorage.isEncryptionAvailable()) {
+      if (!isQualifiedSafeStorageAvailable()) {
         throw new SessionTokenStorageUnavailableBeforeWriteError('safe-storage')
       }
       options = await this.prepareMutationAuthority(envKey, options)
@@ -1480,7 +1498,7 @@ export class TokenStore {
             assertMutationOwnership(options)
             const encrypted = readRegularFallbackFile(observed.activeEncryptedFilePath)
             if (encrypted === null) return false
-            if (!app?.isReady() || !safeStorage.isEncryptionAvailable()) {
+            if (!isQualifiedSafeStorageAvailable()) {
               throw new Error(
                 'Electron safeStorage is unavailable for session-token fallback retirement'
               )
@@ -1492,7 +1510,7 @@ export class TokenStore {
             if (options.onlyIfMatches === undefined) return true
             let token: unknown
             if (filePath.endsWith('.enc')) {
-              if (!app?.isReady() || !safeStorage.isEncryptionAvailable())
+              if (!isQualifiedSafeStorageAvailable())
                 throw new Error(
                   'Electron safeStorage is unavailable for conditional fallback cleanup'
                 )
@@ -1708,7 +1726,7 @@ export class TokenStore {
           ) {
             throw new Error('Encrypted session token is not a regular file')
           }
-          if (!app?.isReady() || !safeStorage.isEncryptionAvailable()) {
+          if (!isQualifiedSafeStorageAvailable()) {
             throw new SessionTokenStorageUnavailableBeforeWriteError('safe-storage')
           }
           if (safeStorage.decryptString(fsSync.readFileSync(descriptor)) !== attemptedToken)
@@ -1733,7 +1751,7 @@ export class TokenStore {
           if (descriptor !== undefined) fsSync.closeSync(descriptor)
         }
         assertMutationOwnership(options)
-        if (createMissing && (!app?.isReady() || !safeStorage.isEncryptionAvailable()))
+        if (createMissing && !isQualifiedSafeStorageAvailable())
           throw new SessionTokenStorageUnavailableBeforeWriteError('safe-storage')
         if (previousToken === null) {
           await publishSourceMutation(
@@ -1815,7 +1833,7 @@ export class TokenStore {
     }
 
     options = await this.prepareMutationAuthority(envKey, options)
-    if (app?.isReady() && safeStorage.isEncryptionAvailable()) {
+    if (isQualifiedSafeStorageAvailable()) {
       const file = await this.encryptedFilePath(envKey)
       await writeTokenFileAtomic(
         file,

@@ -4,6 +4,7 @@ import path from 'node:path'
 
 const PENDING_EXTERNAL_LOGOUT_PREFIX = 'pending-external-logout-'
 const MARKER_VERSION = 1
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const markerReadFailures = new WeakSet<object>()
 
 /** CAS callers distinguish pre-mutation inspection from post-mutation sync failure. */
@@ -19,6 +20,7 @@ export function isTransientPendingLogoutReadError(error: unknown): boolean {
 
 export type PendingExternalLogoutIntent =
   | { intent: 'logout-pending' }
+  | { intent: 'memory-only-session'; volatileSessionId: string }
   | {
       intent: 'keytar-cleanup-pending'
       credentialSource: 'active-keytar' | 'safe-storage'
@@ -182,6 +184,7 @@ function readMarker(filePath: string): PendingExternalLogoutMarker | null {
     version?: unknown
     intent?: unknown
     credentialSource?: unknown
+    volatileSessionId?: unknown
     revision?: unknown
   }
   if (record.version !== MARKER_VERSION) {
@@ -196,6 +199,23 @@ function readMarker(filePath: string): PendingExternalLogoutMarker | null {
             throw new Error('Pending logout marker has an invalid revision')
           })()
   if (record.intent === 'logout-pending') return { intent: { intent: 'logout-pending' }, revision }
+  if (record.intent === 'memory-only-session') {
+    if (
+      typeof record.volatileSessionId !== 'string' ||
+      !UUID.test(record.volatileSessionId) ||
+      typeof revision !== 'string' ||
+      !UUID.test(revision) ||
+      Object.keys(record).some(
+        key => !['version', 'revision', 'intent', 'volatileSessionId'].includes(key)
+      )
+    ) {
+      throw new Error('Pending logout marker has an invalid memory-only session id')
+    }
+    return {
+      intent: { intent: 'memory-only-session', volatileSessionId: record.volatileSessionId },
+      revision,
+    }
+  }
   if (
     record.intent !== 'keytar-cleanup-pending' ||
     (record.credentialSource !== 'active-keytar' && record.credentialSource !== 'safe-storage')
@@ -338,10 +358,63 @@ export function pendingExternalLogoutMarkersMatch(
 ): boolean {
   if (!current || current.revision !== expected.revision) return false
   if (current.intent.intent !== expected.intent.intent) return false
-  if (current.intent.intent === 'logout-pending' || expected.intent.intent === 'logout-pending') {
+  if (current.intent.intent === 'logout-pending') {
     return current.intent.intent === expected.intent.intent
   }
+  if (current.intent.intent === 'memory-only-session') {
+    return (
+      expected.intent.intent === 'memory-only-session' &&
+      current.intent.volatileSessionId === expected.intent.volatileSessionId
+    )
+  }
+  if (expected.intent.intent !== 'keytar-cleanup-pending') return false
   return current.intent.credentialSource === expected.intent.credentialSource
+}
+
+/** Commit a new temporary-session denial fence only while the marker is absent. */
+export function recordMemoryOnlySessionIfMissing(
+  userDataDirectory: string,
+  envKey: string,
+  volatileSessionId: string = randomUUID(),
+  revision: string = randomUUID()
+): PendingExternalLogoutMarker | null {
+  if (!UUID.test(volatileSessionId) || !UUID.test(revision)) {
+    throw new Error('Memory-only session marker requires UUID ownership values')
+  }
+  if (readPendingExternalLogoutMarker(userDataDirectory, envKey) !== null) return null
+  const intent: PendingExternalLogoutIntent = {
+    intent: 'memory-only-session',
+    volatileSessionId,
+  }
+  writeMarkerIntent(userDataDirectory, envKey, intent, revision)
+  return { intent, revision }
+}
+
+/** Replace only the exact authority observed by a fresh authenticated producer. */
+export function recordMemoryOnlySessionIfUnchanged(
+  userDataDirectory: string,
+  envKey: string,
+  expected: PendingExternalLogoutMarker,
+  volatileSessionId: string = randomUUID(),
+  revision: string = randomUUID()
+): PendingExternalLogoutMarker | null {
+  if (!UUID.test(volatileSessionId) || !UUID.test(revision)) {
+    throw new Error('Memory-only session marker requires UUID ownership values')
+  }
+  if (
+    !pendingExternalLogoutMarkersMatch(
+      readPendingExternalLogoutMarker(userDataDirectory, envKey),
+      expected
+    )
+  ) {
+    return null
+  }
+  const intent: PendingExternalLogoutIntent = {
+    intent: 'memory-only-session',
+    volatileSessionId,
+  }
+  writeMarkerIntent(userDataDirectory, envKey, intent, revision)
+  return { intent, revision }
 }
 
 /** Restore logout intent only for the exact record owned by a failed conversion. */

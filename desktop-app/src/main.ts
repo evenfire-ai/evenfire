@@ -78,6 +78,11 @@ const appService = new AppService({
     const errorName = error instanceof Error && error.name ? error.name : typeof error
     console.error(`[Desktop] Could not apply deferred external logout (${errorName}).`)
   },
+  notifySessionExpired: () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('auth:sessionExpired')
+    }
+  },
 })
 registerQuitDrain(
   app,
@@ -185,6 +190,7 @@ function emitWindowControlsState(win: BrowserWindow): void {
  */
 function wirePowerMonitor(): void {
   const emit = () => {
+    appService.checkTemporarySessionExpiry()
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('system:resume')
     }
