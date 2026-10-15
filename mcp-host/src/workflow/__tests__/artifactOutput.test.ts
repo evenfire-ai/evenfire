@@ -1,7 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { logger } from '../../logger'
 import {
   PARTIAL_PREFIX,
   artifactResult,
@@ -225,6 +226,29 @@ describe('enforceQuota', () => {
       else process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = prev
     }
   })
+
+  it.each(['2GB', '1.5', '0', 'fifty'])(
+    'reads %j as no quota of its own: the default applies, and that is logged once',
+    value => {
+      const prev = process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB
+      process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = value
+      const warn = vi.spyOn(logger, 'warn')
+      try {
+        // Three megabytes: over the 2 or 1 a lenient read would take, under the 50 default.
+        fs.writeFileSync(path.join(outputDir, 'some.bin'), Buffer.alloc(3 * 1024 * 1024))
+        expect(() => enforceQuota(outputDir, 1024)).not.toThrow()
+        expect(() => enforceQuota(outputDir, 1024)).not.toThrow()
+        const reports = warn.mock.calls.filter(([, message]) =>
+          String(message).includes('CLERUM_WORKFLOW_OUTPUT_QUOTA_MB')
+        )
+        expect(reports).toHaveLength(1)
+      } finally {
+        warn.mockRestore()
+        if (prev === undefined) delete process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB
+        else process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB = prev
+      }
+    }
+  )
 })
 
 describe('generators through the shared output path', () => {

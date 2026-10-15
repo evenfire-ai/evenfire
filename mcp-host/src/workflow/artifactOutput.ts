@@ -278,6 +278,30 @@ export function getDirectorySize(dir: string): number {
   return total
 }
 
+/** The last invalid quota setting logged, so each is logged once. */
+let reportedQuotaSetting: string | undefined
+
+/**
+ * CLERUM_WORKFLOW_OUTPUT_QUOTA_MB as a whole number of megabytes. Anything
+ * else ("2GB", "1.5", "0") leaves the default, and is logged once: read
+ * leniently, "2GB" became a quota of 2 MB.
+ */
+function outputQuotaMB(raw: string | undefined): number {
+  const text = raw?.trim() ?? ''
+  if (text === '') return DEFAULT_QUOTA_MB
+  if (/^\d+$/.test(text) && Number(text) > 0 && Number.isSafeInteger(Number(text))) {
+    return Number(text)
+  }
+  if (reportedQuotaSetting !== raw) {
+    reportedQuotaSetting = raw
+    logger.warn(
+      { component: 'ArtifactOutput', value: text.slice(0, 32), defaultMB: DEFAULT_QUOTA_MB },
+      'CLERUM_WORKFLOW_OUTPUT_QUOTA_MB is not a whole number of megabytes; the default applies'
+    )
+  }
+  return DEFAULT_QUOTA_MB
+}
+
 /**
  * Enforce the output quota of one folder before a file is written: a workflow
  * run's output, or one chat caller's folder, so in chat each user has their
@@ -296,9 +320,7 @@ export function getDirectorySize(dir: string): number {
  * quota; the 1Gi PVC hard cap enforced by kubelet is the primary defense.
  */
 export function enforceQuota(outputDir: string, incomingBytes: number, replacingBytes = 0): void {
-  const raw = process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB
-  const parsed = raw ? parseInt(raw, 10) : NaN
-  const quotaMB = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_QUOTA_MB
+  const quotaMB = outputQuotaMB(process.env.CLERUM_WORKFLOW_OUTPUT_QUOTA_MB)
   const quotaBytes = quotaMB * 1024 * 1024
 
   const current = getDirectorySize(outputDir) - replacingBytes
