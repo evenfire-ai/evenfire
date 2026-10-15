@@ -68,12 +68,18 @@ export function readNativeChart(
       .replace(/\bdata\.labels\b/g, `${baseOf(labelsFrom)}.labels`)
       .replace(/\bdata\.datasets\b/g, `${base}.datasets`)
       .replace(/`data`/g, `\`${base}\``)
+  // Only what is drawn is read: a pie or doughnut draws its first series, and
+  // a native chart takes its colors from the palette. A series left out then
+  // neither sets the decimal convention, adds a category nor rejects the
+  // chart, and the colors sent stay in the "Ignored arguments" note.
+  const sent = datasetsFrom.datasets
+  const drawn = Array.isArray(sent) && SLICE_TYPES.has(type) ? sent.slice(0, 1) : sent
+  const datasets = Array.isArray(drawn)
+    ? drawn.map(d => (isRecord(d) ? { label: d.label, data: d.data } : d))
+    : drawn
   let normalized
   try {
-    normalized = normalizeChartData(
-      { labels: labelsFrom.labels, datasets: datasetsFrom.datasets },
-      { chartType: type }
-    )
+    normalized = normalizeChartData({ labels: labelsFrom.labels, datasets }, { chartType: type })
   } catch (err) {
     if (err instanceof ChartDataError) throw new ChartSpecError(rewrite(err.message))
     throw err
@@ -89,16 +95,15 @@ export function readNativeChart(
       `${base}.datasets: ${unnamed} series had no label, so the legend numbers them; give each a label.`
     )
   }
-  let series = normalized.datasets.map((d, i) => ({
+  const series = normalized.datasets.map((d, i) => ({
     name: boundLabel(d.label || `#${i + 1}`, MAX_SERIES_NAME),
     values: d.data as Array<number | null>,
   }))
-  if (SLICE_TYPES.has(type) && series.length > 1) {
+  if (Array.isArray(sent) && sent.length > series.length) {
     warnings.push(
       `${where}: a ${type} chart draws one series, so only "${series[0].name}" was drawn and ` +
-        `${series.length - 1} more were left out. Use a bar or line chart to compare series.`
+        `${sent.length - series.length} more were left out. Use a bar or line chart to compare series.`
     )
-    series = series.slice(0, 1)
   }
   const labels = (normalized.labels ?? []).map(l => boundLabel(l, MAX_CATEGORY_LABEL))
   return { type, labels, series }

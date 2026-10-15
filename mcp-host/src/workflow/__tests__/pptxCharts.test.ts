@@ -51,6 +51,51 @@ describe('readNativeChart', () => {
   })
 })
 
+describe('a pie or doughnut reads only the series it draws', () => {
+  it('is not rejected for a value in a series it leaves out', () => {
+    const warnings: string[] = []
+    const chart = readNativeChart(
+      {
+        type: 'pie',
+        labels: ['A', 'B'],
+        datasets: [{ data: [60, 40] }, { data: ['n/a'] }],
+      },
+      'c',
+      warnings
+    )
+    expect(chart?.series).toEqual([{ name: '#1', values: [60, 40] }])
+    expect(warnings.join(' ')).toContain('1 more were left out')
+  })
+
+  it('takes no decimal convention and no category from it', () => {
+    // Alone, '1.250' reads two ways and is refused; a dropped '1,100.5' must not settle it.
+    expect(() =>
+      readNativeChart(
+        { type: 'doughnut', labels: ['A'], datasets: [{ data: ['1.250'] }, { data: ['1,100.5'] }] },
+        'c',
+        []
+      )
+    ).toThrow(ChartSpecError)
+    const labelled = readNativeChart(
+      {
+        type: 'pie',
+        datasets: [
+          {
+            data: [
+              { label: 'A', value: 1 },
+              { label: 'B', value: 2 },
+            ],
+          },
+          { data: [{ label: 'C', value: 3 }] },
+        ],
+      },
+      'c',
+      []
+    )
+    expect(labelled?.labels).toEqual(['A', 'B'])
+  })
+})
+
 describe('nativeChartArgs', () => {
   const chart = (over: Partial<NativeChart>): NativeChart => ({
     type: 'bar',

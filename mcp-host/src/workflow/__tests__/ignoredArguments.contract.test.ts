@@ -173,6 +173,32 @@ describe('every argument a generator does not read is named', () => {
     expect(result.content).toContain(note(expected))
   })
 
+  it('names the colors of a native deck chart, which takes its colors from the palette', async () => {
+    const tool = INTERNAL_TOOLS.find(t => t.name === 'clerum__generate_pptx')!
+    const sent = {
+      filename: 'c.pptx',
+      slides: [
+        {
+          layout: 'title-chart',
+          title: 'C',
+          chart: {
+            type: 'bar',
+            labels: ['a'],
+            datasets: [{ label: 'S', data: [1], backgroundColor: '#ff0000', fill: true }],
+          },
+        },
+      ],
+    }
+    const expected = unknownArguments(tool.parameters, sent)
+    expect(expected).toEqual([
+      'slides[0].chart.datasets[0].backgroundColor',
+      'slides[0].chart.datasets[0].fill',
+    ])
+    const result = await tool.execute(sent, dir)
+    expect(result.success, result.error).toBe(true)
+    expect(result.content).toContain(note(expected))
+  })
+
   it('names the fields of the first sheet when top-level images are moved onto it', async () => {
     // A 1x1 PNG in the output folder, named as the generators take images.
     fs.writeFileSync(
