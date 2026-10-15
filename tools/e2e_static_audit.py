@@ -26,9 +26,114 @@ EMAIL_RESET_ENTRY_PATH = re.compile(r"/invitations/[A-Za-z0-9_-]+")
 SAFE_STATIC_APP_PATH = re.compile(r"/(?:[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*)?")
 NAVIGATION_ANNOTATION = re.compile(
     r"\s*//\s*E2E_GUARDIAN_NAVIGATION:\s*"
-    r"(negative-route-guard|root-entry|email-reset-entry)\s+—\s+(\S.*)"
+    r"(negative-route-guard|root-entry|email-reset-entry|fixture-agent-route-guard)\s+—\s+(\S.*)"
 )
 STATIC_GOTO_ARGUMENT = re.compile(r"\s*(['\"])([^'\"\\\r\n]*)\1\s*(?=[,)])")
+FIXTURE_AGENT_GOTO_ARGUMENT = re.compile(
+    r"\s*`/agents/\$\{scenario\.agentName\}/connectors`\s*(?=[,)])"
+)
+FIXTURE_AGENT_GUARD_SPEC = Path(
+    "tests/e2e/playwright/desktop/codex-subscription-approved-tools.spec.ts"
+)
+FIXTURE_AGENT_GUARD_TITLE = "unauthenticated agent route guard prevents connector use"
+
+
+def _fixture_agent_sources_are_safe() -> bool:
+    repository_root = Path(__file__).resolve().parents[1]
+    scenarios_path = repository_root / "tests/e2e/playwright/helpers/approved-tools-scenarios.ts"
+    preparer_path = repository_root / "scripts/e2e/prepare-codex-approved-tools.mjs"
+    if not scenarios_path.is_file() or not preparer_path.is_file():
+        return False
+    scenarios = scenarios_path.read_text(encoding="utf-8")
+    preparer = preparer_path.read_text(encoding="utf-8")
+    safe_name_validation = re.search(
+        r"for \(const key of \['runId', 'agentName', 'connectorName', 'contextName'\] as const\)"
+        r"\s*\{\s*if \(!/\^\[a-zA-Z0-9_-\]\{1,80\}\$/.test\(row\[key\]\)\)",
+        scenarios,
+    )
+    unique_agent_names = re.search(
+        r"for \(const key of \['runId', 'agentName', 'contextName', 'connectorName', 'fixtureUrl'\] as const\)"
+        r"\s*\{\s*if \(new Set\(rows\.map\(row => row\[key\]\)\)\.size !== 3\)",
+        scenarios,
+    )
+    return bool(
+        safe_name_validation
+        and unique_agent_names
+        and "agentName: `${run}-agent-${label}`" in preparer
+    )
+
+
+def _is_fixture_agent_guard(text: str, path: Path, match: re.Match[str]) -> bool:
+    repository_root = Path(__file__).resolve().parents[1]
+    try:
+        if path.resolve() != repository_root / FIXTURE_AGENT_GUARD_SPEC:
+            return False
+    except OSError:
+        return False
+
+    imports = re.search(
+        r"import\s*\{(?P<bindings>[^}]+)\}\s*from\s*['\"]\.\./helpers/approved-tools-scenarios['\"]",
+        text,
+        re.DOTALL,
+    )
+    if (
+        not imports
+        or not re.search(r"\breadEvidence\b", imports.group("bindings"))
+        or not re.search(r"\bscenarios\b", imports.group("bindings"))
+        or text.count("const cases = scenarios()") != 1
+        or not _fixture_agent_sources_are_safe()
+    ):
+        return False
+
+    test_pattern = re.compile(
+        r"test\(\s*(['\"])" + re.escape(FIXTURE_AGENT_GUARD_TITLE) + r"\1\s*,"
+        r"\s*async\s*\(\s*\{\s*page\s*\}\s*\)\s*=>\s*\{"
+        r"(?P<body>[\s\S]*?)\n\}\s*\)",
+    )
+    test_match = test_pattern.search(text)
+    if not test_match:
+        return False
+    body = test_match.group("body")
+    body_navigation = list(re.finditer(r"\bpage\.goto\s*\(", body))
+    if len(body_navigation) != 1:
+        return False
+    body_goto = body_navigation[0]
+    if not FIXTURE_AGENT_GOTO_ARGUMENT.match(body[body_goto.end() :]):
+        return False
+    if not re.search(r"const scenario = cases\[0\]!", body):
+        return False
+    if not re.search(r"const before = await readEvidence\(scenario\)", body):
+        return False
+    if not re.search(
+        r"expect\(\(await readEvidence\(scenario\)\)\.calls\)\.toEqual\(before\.calls\)",
+        body,
+    ):
+        return False
+    if not re.search(
+        r"expect\(page\.getByLabel\(['\"]Username or email['\"]\)\)\.toBeVisible\(\)",
+        body,
+    ):
+        return False
+    if not re.search(
+        r"expect\(page\.getByRole\(['\"]button['\"],\s*\{\s*name:\s*['\"]Sign in['\"],"
+        r"\s*exact:\s*true\s*\}\)\)\.toBeVisible\(\)",
+        body,
+    ):
+        return False
+    if not re.search(
+        r"expect\(page\.getByRole\(['\"]button['\"],\s*\{\s*name:\s*['\"]Add connector"
+        r"[^}]*\}\)\)\.toHaveCount\(0\)",
+        body,
+    ):
+        return False
+    if not re.search(
+        r"expect\(page\.getByLabel\(['\"]Main navigation['\"]\)\)\.toHaveCount\(0\)",
+        body,
+    ):
+        return False
+
+    absolute_goto_start = test_match.start("body") + body_goto.start()
+    return match.start() == absolute_goto_start
 
 
 def audit_file(path: Path) -> list[str]:
@@ -81,6 +186,13 @@ def audit_text(text: str, path: Path = Path("<source>")) -> list[str]:
 
         annotation = NAVIGATION_ANNOTATION.fullmatch(adjacent)
         destination = root_argument.group(2) if root_argument else None
+        if (
+            annotation
+            and annotation.group(1) == "fixture-agent-route-guard"
+            and FIXTURE_AGENT_GOTO_ARGUMENT.match(after)
+            and _is_fixture_agent_guard(text, path, match)
+        ):
+            continue
         if destination in {"", "/"}:
             if annotation is None or annotation.group(1) == "root-entry":
                 continue

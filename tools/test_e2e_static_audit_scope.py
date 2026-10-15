@@ -198,7 +198,7 @@ class E2EStaticAuditMarkerScopeTests(unittest.TestCase):
             "tests/e2e/playwright/profile-ui-recovery/reset-session-hydration.spec.ts"
         ).read_text(encoding="utf-8")
         without_marker = spec.replace(
-            "// E2E_GUARDIAN_NAVIGATION: email-reset-entry — the emailed password-reset URL\n", ""
+            "// E2E_GUARDIAN_NAVIGATION: email-reset-entry — the synthetic emailed reset URL\n", ""
         )
         self.assertTrue(
             any(
@@ -230,6 +230,115 @@ class E2EStaticAuditMarkerScopeTests(unittest.TestCase):
         )
         findings = audit_text(source, Path("root.spec.ts"))
         self.assertTrue(any("does not match" in finding for finding in findings))
+
+    def fixture_agent_guard(self, route: str, *, path: Path | None = None) -> list[str]:
+        source = (
+            "// E2E_GUARDIAN_IPC_FLOW: Desktop uses real main-process IPC.\n"
+            "import { readEvidence, scenarios } from '../helpers/approved-tools-scenarios'\n"
+            "const cases = scenarios()\n"
+            "test('unauthenticated agent route guard prevents connector use', async ({ page }) => {\n"
+            "  const scenario = cases[0]!\n"
+            "  const before = await readEvidence(scenario)\n"
+            "  // E2E_GUARDIAN_NAVIGATION: fixture-agent-route-guard — prepared agent route stays protected\n"
+            f"  await page.goto({route})\n"
+            "  await expect(page.getByLabel('Username or email')).toBeVisible()\n"
+            "  await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible()\n"
+            "  await expect(page.getByRole('button', { name: 'Add connector', exact: true })).toHaveCount(0)\n"
+            "  await expect(page.getByLabel('Main navigation')).toHaveCount(0)\n"
+            "  expect((await readEvidence(scenario)).calls).toEqual(before.calls)\n"
+            "})\n"
+        )
+        return audit_text(
+            source,
+            path
+            or Path("tests/e2e/playwright/desktop/codex-subscription-approved-tools.spec.ts"),
+        )
+
+    def test_fixture_created_agent_route_is_allowed_only_for_its_evidence_scenario(self) -> None:
+        self.assertFalse(
+            any(
+                "direct page.goto" in item
+                for item in self.fixture_agent_guard("`/agents/${scenario.agentName}/connectors`")
+            )
+        )
+
+    def test_fixture_agent_route_exception_rejects_other_files_and_destinations(self) -> None:
+        cases = [
+            (
+                "`/agents/${scenario.agentName}/connectors`",
+                Path("tests/e2e/playwright/other.spec.ts"),
+            ),
+            ("destination", None),
+            ("`/agents/${scenario.otherName}/connectors`", None),
+            ("`/agents/${scenario.agentName}/connectors/extra`", None),
+            ("`https://outside.invalid/agents/${scenario.agentName}/connectors`", None),
+            ("`/agents/${scenario.agentName}/connectors?next=/`", None),
+            ("`/agents/${scenario.agentName}/connectors#fragment`", None),
+            ("`/agents/${scenario.agentName.replace('/', '')}/connectors`", None),
+            ("`/agents/${scenario.agentName}/../connectors`", None),
+            ("`/agents/${scenario.agentName}/%2e%2e/connectors`", None),
+            ("`/agents/${scenario.agentName}/connectors` + '/extra'", None),
+            ("`/agents/${scenario.agentName}/connectors` + '?next=/'", None),
+        ]
+        for route, path in cases:
+            with self.subTest(route=route, path=path):
+                self.assertTrue(
+                    any("direct page.goto" in item for item in self.fixture_agent_guard(route, path=path))
+                )
+
+    def test_fixture_agent_exception_requires_same_scenario_evidence_before_and_after(self) -> None:
+        source = (
+            "// E2E_GUARDIAN_IPC_FLOW: Desktop uses real main-process IPC.\n"
+            "import { readEvidence, scenarios } from '../helpers/approved-tools-scenarios'\n"
+            "const cases = scenarios()\n"
+            "test('unauthenticated agent route guard prevents connector use', async ({ page }) => {\n"
+            "  const scenario = cases[0]!\n"
+            "  const before = await readEvidence(cases[1]!)\n"
+            "  // E2E_GUARDIAN_NAVIGATION: fixture-agent-route-guard — prepared agent route stays protected\n"
+            "  await page.goto(`/agents/${scenario.agentName}/connectors`)\n"
+            "  await expect(page.getByLabel('Username or email')).toBeVisible()\n"
+            "  await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible()\n"
+            "  await expect(page.getByRole('button', { name: 'Add connector', exact: true })).toHaveCount(0)\n"
+            "  await expect(page.getByLabel('Main navigation')).toHaveCount(0)\n"
+            "  expect((await readEvidence(scenario)).calls).toEqual(before.calls)\n"
+            "})\n"
+        )
+        self.assertTrue(
+            any(
+                "direct page.goto" in item
+                for item in audit_text(
+                    source,
+                    Path("tests/e2e/playwright/desktop/codex-subscription-approved-tools.spec.ts"),
+                )
+            )
+        )
+
+    def test_fixture_agent_exception_requires_scenarios_fixture_provenance(self) -> None:
+        source = (
+            "// E2E_GUARDIAN_IPC_FLOW: Desktop uses real main-process IPC.\n"
+            "import { readEvidence, scenarios } from '../helpers/approved-tools-scenarios'\n"
+            "const cases = loadUntrustedCases()\n"
+            "test('unauthenticated agent route guard prevents connector use', async ({ page }) => {\n"
+            "  const scenario = cases[0]!\n"
+            "  const before = await readEvidence(scenario)\n"
+            "  // E2E_GUARDIAN_NAVIGATION: fixture-agent-route-guard — prepared agent route stays protected\n"
+            "  await page.goto(`/agents/${scenario.agentName}/connectors`)\n"
+            "  await expect(page.getByLabel('Username or email')).toBeVisible()\n"
+            "  await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible()\n"
+            "  await expect(page.getByRole('button', { name: 'Add connector', exact: true })).toHaveCount(0)\n"
+            "  await expect(page.getByLabel('Main navigation')).toHaveCount(0)\n"
+            "  expect((await readEvidence(scenario)).calls).toEqual(before.calls)\n"
+            "})\n"
+        )
+        self.assertTrue(
+            any(
+                "direct page.goto" in item
+                for item in audit_text(
+                    source,
+                    Path("tests/e2e/playwright/desktop/codex-subscription-approved-tools.spec.ts"),
+                )
+            )
+        )
 
 
 def run_tests() -> int:

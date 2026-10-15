@@ -153,8 +153,14 @@ async function receiptApproval(page: Page, scenario: Scenario, previousCalls: nu
 test('unauthenticated agent route guard prevents connector use', async ({ page }) => {
   const scenario = cases[0]!
   const before = await readEvidence(scenario)
-  // E2E_GUARDIAN_NAVIGATION: negative-route-guard — protected editor must stay unavailable
-  await page.goto('/agents/e2e-codex-authoring/connectors')
+  const protectedRoute = `/agents/${scenario.agentName}/connectors`
+  const protectedRouteRequest = page.waitForRequest(
+    request => request.isNavigationRequest() && new URL(request.url()).pathname === protectedRoute
+  )
+  // E2E_GUARDIAN_NAVIGATION: fixture-agent-route-guard — prepared agent route stays protected
+  await page.goto(`/agents/${scenario.agentName}/connectors`)
+  const visitedRoute = await protectedRouteRequest
+  expect(new URL(visitedRoute.url()).pathname).toBe(protectedRoute)
   await expect(page.getByLabel('Username or email')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Add connector', exact: true })).toHaveCount(0)
