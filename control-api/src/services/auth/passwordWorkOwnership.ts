@@ -15,9 +15,8 @@ export interface PasswordMutationLease {
 export interface PasswordWorkLease {
   release(): Promise<void>
 }
-// Existing protocol tests supply the raw acquired view. Both views resolve to
-// the same private reservation; compatibility never reacquires another owner.
-export type MemberPasswordWorkLease = PasswordMutationLease | PasswordWorkLease
+// Preserve the directory/admin lease name while keeping it mutation-only.
+export type MemberPasswordWorkLease = PasswordMutationLease
 
 const logger = rootLogger.child({ module: 'password-admission' })
 let ownerInstance: string | undefined
@@ -149,12 +148,10 @@ async function reservePasswordWork() {
   }
   const raw: PasswordWorkLease = {
     release: () => {
-      if (state === 'running') return Promise.reject(authorityFailure())
       state = 'terminal'
       return release()
     },
   }
-  reservations.set(raw, mutation)
   reservations.set(mutation, mutation)
   return {
     raw,

@@ -6,7 +6,7 @@ import { Pool } from 'pg'
 import request from 'supertest'
 import { initDb } from '../src/db.js'
 import { sendPasswordAdmissionError } from '../src/middleware/passwordLoginAdmission.js'
-import { acquirePasswordWork } from '../src/services/auth/passwordWorkOwnership.js'
+import { withPasswordWorkLease } from '../src/services/auth/passwordWorkOwnership.js'
 import { setInvitationPasswordForEmail } from '../src/services/directory/membership.js'
 import { createSilentPasswordResetInvitation } from '../src/services/directory/passwordResetInvitations.js'
 import { createPostgresFatalCommitReplyInjector } from './helpers/realPostgresFatalCommit.js'
@@ -102,21 +102,13 @@ realPg('R4-M2 PostgreSQL session termination after COMMIT dispatch', () => {
 
   it('treats a post-COMMIT FATAL as unknown and does not issue a replay session', async () => {
     holder.unknownCommitOutcomes = 0
-    const lease = await acquirePasswordWork()
-    expect(lease).not.toBeNull()
-    if (!lease) throw new Error('password-work owner was not acquired')
-
     fault = await createPostgresFatalCommitReplyInjector(connectionString)
     proxyPool = new Pool({ connectionString: fault.connectionString, max: 2 })
-    holder.pool = proxyPool
 
-    const resetOutcome = setInvitationPasswordForEmail(
-      email,
-      resetInvitationId,
-      newPassword,
-      userId,
-      lease
-    ).then(
+    const resetOutcome = withPasswordWorkLease(lease => {
+      holder.pool = proxyPool
+      return setInvitationPasswordForEmail(email, resetInvitationId, newPassword, userId, lease)
+    }).then(
       value => ({ value }),
       error => ({ error })
     )
@@ -175,15 +167,11 @@ realPg('R4-M2 PostgreSQL session termination after COMMIT dispatch', () => {
     expect(publicResponse.headers['set-cookie']).toBeUndefined()
 
     holder.pool = normalPool
-    const replayLease = await acquirePasswordWork()
-    expect(replayLease).not.toBeNull()
-    if (!replayLease) throw new Error('password-work owner was not reacquired')
     const replay = await setInvitationPasswordForEmail(
       email,
       resetInvitationId,
       newPassword,
-      userId,
-      replayLease
+      userId
     )
     expect(replay).toEqual({ error: 'not_pending' })
     expect(

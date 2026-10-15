@@ -3,6 +3,7 @@ import fc from 'fast-check'
 import { PasswordAdmissionError as LeafError } from '../src/services/auth/passwordAdmissionError.js'
 import { PasswordAdmissionError } from '../src/services/auth/passwordCredentialVerification.js'
 import {
+  type PasswordMutationLease,
   acquirePasswordWork,
   runPasswordMutation,
   withPasswordWorkLease,
@@ -204,41 +205,34 @@ describe('password-work reservation preservation', () => {
     expect(query).not.toHaveBeenCalled()
   })
 
-  it('does not release a raw reservation while its terminal callback is running', async () => {
+  it('rejects a raw verifier lease at the mutation provenance boundary', async () => {
     const raw = await acquirePasswordWork()
-    let resume!: () => void
-    const gate = new Promise<void>(resolve => {
-      resume = resolve
-    })
-    const terminal = runPasswordMutation(
-      async () => {
-        await gate
-        return 'committed'
-      },
-      {
+    const work = vi.fn()
+    await expect(
+      runPasswordMutation(work, {
         mode: 'standard',
-        lease: raw!,
-      }
-    )
-    try {
-      await expect(raw!.release()).rejects.toBeInstanceOf(PasswordAdmissionError)
-      expect(query.mock.calls.filter(([sql]) => sql.includes('DELETE FROM'))).toHaveLength(0)
-    } finally {
-      resume()
-    }
-    expect(await terminal).toBe('committed')
+        lease: raw as unknown as PasswordMutationLease,
+      })
+    ).rejects.toBeInstanceOf(PasswordAdmissionError)
+    expect(work).not.toHaveBeenCalled()
+    expect(query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO'))).toHaveLength(1)
+    expect(query.mock.calls.filter(([sql]) => sql.includes('DELETE FROM'))).toHaveLength(0)
     await raw!.release()
     expect(query.mock.calls.filter(([sql]) => sql.includes('DELETE FROM'))).toHaveLength(1)
   })
 
-  it('prevents mutation after raw release was already requested', async () => {
+  it('keeps raw verifier release separate from mutation reservation', async () => {
     const raw = await acquirePasswordWork()
-    const releasing = raw!.release()
+    expect(raw).not.toHaveProperty('commitWith')
+    await raw!.release()
     const work = vi.fn()
     await expect(
-      runPasswordMutation(work, { mode: 'standard', lease: raw! })
+      runPasswordMutation(work, {
+        mode: 'standard',
+        lease: raw as unknown as PasswordMutationLease,
+      })
     ).rejects.toBeInstanceOf(PasswordAdmissionError)
-    await releasing
     expect(work).not.toHaveBeenCalled()
+    expect(query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO'))).toHaveLength(1)
   })
 })

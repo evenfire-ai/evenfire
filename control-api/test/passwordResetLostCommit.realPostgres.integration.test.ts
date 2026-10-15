@@ -6,7 +6,7 @@ import { Pool } from 'pg'
 import request from 'supertest'
 import { initDb } from '../src/db.js'
 import { sendPasswordAdmissionError } from '../src/middleware/passwordLoginAdmission.js'
-import { acquirePasswordWork } from '../src/services/auth/passwordWorkOwnership.js'
+import { withPasswordWorkLease } from '../src/services/auth/passwordWorkOwnership.js'
 import { setInvitationPasswordForEmail } from '../src/services/directory/membership.js'
 import { createSilentPasswordResetInvitation } from '../src/services/directory/passwordResetInvitations.js'
 import { createPostgresCommitReplyBlackhole } from './helpers/realPostgresCancellation.js'
@@ -109,21 +109,13 @@ realPg('R2-H2 lost password-reset COMMIT acknowledgement on PostgreSQL 16', () =
 
   it('reports an unknown outcome without replay when reset committed but PostgreSQL reply was lost', async () => {
     holder.unknownCommitOutcomes = 0
-    const lease = await acquirePasswordWork()
-    expect(lease).not.toBeNull()
-    if (!lease) throw new Error('password-work owner was not acquired')
-
     blackhole = await createPostgresCommitReplyBlackhole(connectionString)
     proxyPool = new Pool({ connectionString: blackhole.connectionString, max: 4 })
-    holder.pool = proxyPool
 
-    const outcomePromise = setInvitationPasswordForEmail(
-      email,
-      resetInvitationId,
-      newPassword,
-      userId,
-      lease
-    ).then(
+    const outcomePromise = withPasswordWorkLease(lease => {
+      holder.pool = proxyPool
+      return setInvitationPasswordForEmail(email, resetInvitationId, newPassword, userId, lease)
+    }).then(
       value => ({ value }),
       error => ({ error })
     )

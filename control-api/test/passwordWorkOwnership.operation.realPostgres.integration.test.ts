@@ -5,6 +5,7 @@ import { Pool } from 'pg'
 import { initDb } from '../src/db.js'
 import { acquirePasswordWork } from '../src/services/auth/passwordWorkOwnership.js'
 import {
+  type PasswordMutationLease,
   runPasswordMutation,
   withPasswordWorkLease,
 } from '../src/services/auth/passwordWorkOwnership.js'
@@ -132,21 +133,29 @@ realPg('password-work operation preservation on PostgreSQL 16', () => {
     expect(await bcrypt.compare('Synthetic-preservation-password', row.password_hash)).toBe(true)
   })
 
-  it('retains a committed raw supplied lease and does not release a successor owner', async () => {
+  it('retains a committed mutation lease and does not release a successor owner', async () => {
     const fixture = await resetFixture()
-    const lease = await acquirePasswordWork()
-    const result = await setInvitationPasswordForEmail(
-      fixture.email,
-      fixture.invitation.id,
-      'Synthetic-preservation-password',
-      fixture.userId,
-      lease!
-    )
+    let lease: PasswordMutationLease | undefined
+    const result = await withPasswordWorkLease(mutationLease => {
+      lease = mutationLease
+      return setInvitationPasswordForEmail(
+        fixture.email,
+        fixture.invitation.id,
+        'Synthetic-preservation-password',
+        fixture.userId,
+        mutationLease
+      )
+    })
     expect(result).toMatchObject({ data: { passwordUpdated: true, status: 'accepted' } })
     const successor = await acquirePasswordWork()
     expect(successor).not.toBeNull()
     try {
-      await lease!.release()
+      await expect(
+        runPasswordMutation(async () => 'must not run', {
+          mode: 'standard',
+          lease: lease!,
+        })
+      ).rejects.toMatchObject({ status: 503, message: 'authority_unavailable' })
       expect(await ownerCount()).toBe(1)
     } finally {
       await successor?.release()
