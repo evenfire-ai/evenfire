@@ -20,7 +20,7 @@ HCC renders the same storage for every Host Deployment
 | `workspacePath`       | `/workspace`; `/config/workspace` for a `spec.desktop` Host            |
 | Conversation database | `<workspacePath>/state.db` (with `-wal` and `-shm`)                    |
 | Store env             | `CLERUM_SESSION_STORE=sqlite`, `CLERUM_SESSION_DB_DIR=<workspacePath>` |
-| Init container        | `workspace-layout-merge`                                               |
+| Init container        | `workspace-layout-merge`, while `CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE` is enabled (the default) |
 | Deployment strategy   | `Recreate`                                                             |
 
 `Recreate` stops the old Pod before the new one starts. A rolling update can
@@ -59,6 +59,16 @@ stop it from starting. A stateful or desktop tree changes only if it carries
 the signature, which only the earlier init or an agent-created
 `state/state.db*` entry produces.
 
+Two agent-made `state/` folders on a stateful Host do stop it from starting:
+
+- a `state/` holding a `state.db*` entry beside the root database. The
+  signature holds and F2 refuses, because the merge cannot tell the agent's
+  file from a second database;
+- a `state/` the container uid cannot list and search. F1 refuses before the
+  signature check, because the merge cannot tell whether it holds a database.
+
+In both cases the operator renames the folder from a helper Pod.
+
 **Moves**, in this order:
 
 1. every entry of `workspace/`, dotfiles and symlinks included, to the root
@@ -79,14 +89,15 @@ stays in `Init:Error`.
 
 | Case                                                                                                                          | Line contains                                                                                                |
 | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| F1: `workspace` or the PVC root is a symlink, not a directory, or escapes the root; a real `state/` cannot be listed and searched; a `state.db*` entry is a symlink or not a regular file; a directory that decides a collision cannot be listed | `directory is a symlink`, `is not a directory`, `escapes the workspace PVC root`, `state directory is not readable and searchable`, `SQLite file is a symlink`, `SQLite file is not a regular file`, `cannot list directory` |
+| F1: `workspace` or the PVC root is a symlink, not a directory, or escapes the root; a real `state/` or a present `workspace/` cannot be listed and searched; a `state.db*` entry is a symlink or not a regular file; a directory that decides a collision cannot be listed | `directory is a symlink`, `is not a directory`, `escapes the workspace PVC root`, `state directory is not readable and searchable`, `workspace directory is not readable and searchable`, `SQLite file is a symlink`, `SQLite file is not a regular file`, `cannot list directory` |
 | F2: more than one live database family across the root, `state/` and `workspace/`                                             | `more than one live SQLite database`                                                                         |
 | F3: a name to move already exists at the root, or under both `state/` and `workspace/`; `workspace/lost+found` exists         | `destination exists`, `exists under both state/ and workspace/`, `lost+found would remain`                   |
 | F4: the PVC root, `state/` or `workspace/` is not writable by the container uid                                               | `not writable by uid`                                                                                        |
 
 The PVC root checks of F1 run on every start, before the signature check.
 
-Two exceptions to F2/F3 cover the earlier init stopped half-way:
+Two exceptions to F2/F3 cover the earlier init or this merge stopped
+half-way:
 
 - root orphan journals with `state/state.db` as the only main file. A journal
   with the same name both at the root and in `state/` still refuses, because
@@ -147,9 +158,21 @@ forced by a deploy.
 
 ## Rollback
 
-- Rolling HCC back is safe for stateful and stateless Hosts. The previous
-  `workspace-layout-init` re-splits stateless trees, and `workspace-layout-merge`
-  merges them again on roll-forward.
+- Rolling HCC back is safe for stateful and stateless Hosts, with the one
+  exception below. The previous `workspace-layout-init` re-splits stateless
+  trees, and `workspace-layout-merge` merges them again on roll-forward.
+- The exception is a tree cut inside the previous init. That init moves the
+  root entries into `workspace/` in one loop and then `workspace/state.db*`
+  into `state/` in a second loop. A crash between the loops leaves
+  `workspace/state.db*` and a `state/` without a database. The previous init
+  completes that tree on its next start; the merge does not, because the tree
+  has no signature: it exits 0, and mcp-host creates an empty root database
+  while the history stays in `workspace/state.db*`. Stateful Hosts never run
+  the previous init, and every dev stateless tree was complete when
+  inventoried, so reaching this needs a rollback, a crash in that window, and
+  a roll-forward before the Host starts again. To recover, scale the Host to
+  zero, rename the new root `state.db*` files from a helper Pod (keep them),
+  and move `workspace/state.db*` to the root.
 - A merged root that holds a symlink (for example one an agent created under
   `workspace/`, which the merge moved to the root) blocks the previous init:
   it creates empty `state/` and `workspace/`, then exits 1 with

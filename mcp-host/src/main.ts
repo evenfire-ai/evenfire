@@ -1577,7 +1577,7 @@ function setupUsageReporting(): void {
 
 /**
  * Resolve the absolute path where `state.db` should live. D3 §1.2 precedence:
- * `CLERUM_SESSION_DB_DIR` (dedicated PVC mount injected by HCC) → explicit
+ * `CLERUM_SESSION_DB_DIR` (the workspace PVC root, injected by HCC) → explicit
  * `CLERUM_SESSION_DB_PATH` → the workspace PVC → tmpdir fallback (dev/test
  * only; forbidden — throws — under the stateless lifecycle).
  */
