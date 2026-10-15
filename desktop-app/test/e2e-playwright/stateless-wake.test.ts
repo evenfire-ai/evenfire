@@ -168,11 +168,23 @@ function requireSuspendPrecondition(): void {
   }
 }
 
-async function visibleAgentNames(appPage: import('@playwright/test').Page): Promise<string[]> {
+// The row's <strong> is the agent's display name (e.g. "chatLLM"), which is not a
+// hostRef: an RPC token requested for it is refused, and that refusal fails the
+// status read of every Host in the same request. FleetBoard renders the hostRef
+// in `.agent-row-description` whenever it differs from the display name.
+async function visibleAgentHostRefs(appPage: import('@playwright/test').Page): Promise<string[]> {
   return appPage
     .locator('.agents-table-row-clickable')
     .evaluateAll(rows =>
-      rows.map(row => row.querySelector('strong')?.textContent?.trim() || '').filter(Boolean)
+      rows
+        .map(row =>
+          (
+            row.querySelector('.agent-row-description')?.textContent ||
+            row.querySelector('strong')?.textContent ||
+            ''
+          ).trim()
+        )
+        .filter(Boolean)
     )
 }
 
@@ -226,7 +238,7 @@ test('Scenario 0 — authenticated catalog prewarms every visible agent before s
       appPage.locator('.agents-table-row-clickable', { hasText: HOST_REF }).first(),
       `[stateless-wake] Expected authorized agent row for "${HOST_REF}" before any stateless chat interaction.`
     ).toBeVisible({ timeout: 20_000 })
-    const names = await visibleAgentNames(appPage)
+    const names = await visibleAgentHostRefs(appPage)
     expect(names, 'Agents page should expose at least one visible authorized agent').toContain(
       HOST_REF
     )
