@@ -743,6 +743,9 @@ jobs:
       - name: Test minikube Makefile targets
         run: bash scripts/tests/test-minikube-makefile.sh
 
+      - name: Test the #825 Desktop gate context guard and report verdict
+        run: node scripts/tests/run-node-test-files.mjs scripts/e2e/playwright-report-gate.test.mjs
+
       # make test-service-matrix fails when Makefile TEST_SERVICES and the
       # `test` job's service matrix above drift apart.
       - name: Test local measurement gate and test-service parity

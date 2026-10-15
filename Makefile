@@ -1410,12 +1410,12 @@ test-e2e-hcc-storage-layout-switch: ## Run the #825 storage-layout gate across l
 test-e2e-825-desktop-continuity: ## Run the #825 Desktop journey across stateful/stateless switches (owned branch profile, forwards held, real model turns)
 	@set -eu; \
 	ctx="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}"; \
-	test -n "$$ctx" || { echo "Refusing #825 Desktop E2E: explicit Kubernetes context is required" >&2; exit 1; }; \
+	. scripts/e2e/e2e-lib.sh; \
+	is_branch_scoped_e2e_context "$$ctx" || { echo "Refusing #825 Desktop E2E: context '$$ctx' is not a branch-scoped Minikube profile (KUBECONTEXT=<profile>)" >&2; exit 1; }; \
 	test -n "$${E2E_DEV_LOGIN_EMAIL:-}" || { echo "Set E2E_DEV_LOGIN_EMAIL to the seeded Desktop login (admin@evenfire.local on a T2 profile)" >&2; exit 1; }; \
 	test -n "$${CONTROL_API_BASE_URL:-}" || { echo "CONTROL_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
 	test -n "$${EXTERNAL_REST_API_BASE_URL:-}" || { echo "EXTERNAL_REST_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
 	test -n "$${RPC_PROXY_BASE_URL:-}" || { echo "RPC_PROXY_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
-	. scripts/e2e/e2e-lib.sh; \
 	require_branch_profile_urls "$$ctx" "$${CLERUM_PROFILE_PORTS_ENV:-$${E2E_PROFILE_PORTS_ENV:-}}"; \
 	report="$${E2E_825_DESKTOP_REPORT:-$(CURDIR)/desktop-app/test-results/e2e-825-desktop-continuity.json}"; \
 	mkdir -p "$$(dirname "$$report")"; rm -f "$$report"; \
@@ -1426,7 +1426,7 @@ test-e2e-825-desktop-continuity: ## Run the #825 Desktop journey across stateful
 		--config test/e2e-playwright/playwright.config.ts --reporter=list,json --retries=0 \
 		stateful-stateless-switch-continuity.spec.ts || status=$$?; \
 	echo "E2E_825_DESKTOP_PLAYWRIGHT_EXIT=$$status"; \
-	node -e 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).stats; console.log(`E2E_825_DESKTOP_STATS expected=$${s.expected} unexpected=$${s.unexpected} skipped=$${s.skipped} flaky=$${s.flaky}`); process.exit(s.expected > 0 && s.unexpected === 0 && s.skipped === 0 && s.flaky === 0 ? 0 : 1)' "$$report" || status=1; \
+	node "$(CURDIR)/scripts/e2e/playwright-report-gate.mjs" E2E_825_DESKTOP_STATS "$$report" || status=1; \
 	if [ "$$status" = 0 ]; then echo E2E_825_DESKTOP_RESULT=PASS; else echo E2E_825_DESKTOP_RESULT=FAIL; fi; \
 	exit $$status
 
