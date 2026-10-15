@@ -3,8 +3,10 @@
  * ChatStore chat-open benchmark (issue #1091, plan sections 7.1 and 11).
  *
  * Run from desktop-app with Node 24 and installed HEAD dependencies:
- *   node scripts/bench-chat-open.mjs --quick --versions v0.10.0,v0.11.0 --out /tmp/chat-open.json
- *   node scripts/bench-chat-open.mjs --out /tmp/chat-open-full.json
+ *   node scripts/bench-chat-open.mjs --quick --versions v0.10.0,v0.11.0 \
+ *     --out <primary-checkout>/.local-notes/issue1091-evidence/chat-open-quick.json
+ *   node scripts/bench-chat-open.mjs \
+ *     --out <primary-checkout>/.local-notes/issue1091-evidence/chat-open-full.json
  *
  * --versions selects any comma-separated subset of v0.10.0,v0.11.0,HEAD.
  * --quick uses 5 agents x 20 chats; both pending-cleanup values and the permanent
@@ -14,8 +16,9 @@
  *
  * Historical sources are extracted using git archive -> tar, made read-only and
  * compiled with HEAD's node_modules/.bin/tsc into os.tmpdir(). HEAD snapshots the
- * live worktree (including uncommitted changes); its source hashes and
- * commit are recorded. No checkout, dependency installation or Electron launch.
+ * live worktree; its source hashes and commit are recorded. A HEAD with
+ * uncommitted changes is refused unless --allow-dirty is passed, and the JSON
+ * then records dirty: true. No checkout, dependency installation or Electron launch.
  * The emitted runtime graph is audited before import. We bypass only Electron's
  * binding module: a fresh ChatStore + setAuthorityScope reproduces the completed
  * bind; HEAD's actual compiled runChatGetIndex implements the measured handler.
@@ -38,14 +41,15 @@
  * Warm stage-p95 sums and paired warm-open p95 are both reported; this Node
  * benchmark does not measure the renderer chat-open time.
  *
- * --out defaults to a unique JSON path under os.tmpdir(). The selected output is
- * exclusively created; an existing file is an error. JSON is also printed to
- * stdout. Sources/data are removed even on failure; the JSON remains for review.
+ * --out is required: results are evidence and must not land in a directory the
+ * OS clears. The output is exclusively created; an existing file is an error.
+ * JSON is also printed to stdout. Sources/data are removed even on failure; the
+ * JSON remains for review.
  */
 import assert from 'node:assert/strict'
 import { promises as fs } from 'node:fs'
 import { arch, cpus, loadavg, platform, tmpdir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
@@ -71,10 +75,17 @@ const ADAPTER_FILES = new Map([
 ])
 
 export function parseOptions(args) {
-  const options = { versions: [...ADAPTER_FILES.keys()], quick: false, out: undefined, help: false }
+  const options = {
+    versions: [...ADAPTER_FILES.keys()],
+    quick: false,
+    allowDirty: false,
+    out: undefined,
+    help: false,
+  }
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]
     if (arg === '--quick') options.quick = true
+    else if (arg === '--allow-dirty') options.allowDirty = true
     else if (arg === '--help') options.help = true
     else if (arg === '--versions' || arg === '--out') {
       const value = args[++index]
@@ -91,6 +102,9 @@ export function parseOptions(args) {
         options.versions = versions
       }
     } else throw new Error(`Unknown option: ${arg}`)
+  }
+  if (!options.help && !options.out) {
+    throw Object.assign(new Error('--out is required'), { code: 'OUT_REQUIRED' })
   }
   return options
 }
@@ -187,13 +201,13 @@ async function runScenario(runDir, adapter, compiled, dimensions) {
         first.ms + active.ms + fullWarm.ms,
       ]
       Object.keys(stageSamples).forEach((stage, index) => stageSamples[stage].push(values[index]))
-      if (adapter.ref === 'HEAD') await context.settle()
+      if (context.settle) await context.settle()
       const state = await inspectFixture(fixture, dimensions.chatsPerAgent)
       const pendingTotal = dimensions.agents * dimensions.pendingCleanupsPerAgent
       if (!adapter.handlesPendingCleanups || dimensions.cleanupFilesystem === 'EACCES') {
         assert.equal(state.pending, pendingTotal)
         assert.equal(state.retainedArtifactDirectories, pendingTotal)
-      } else if (adapter.ref === 'v0.11.0') {
+      } else {
         assert.equal(state.pending, 0)
         assert.equal(state.retainedArtifactDirectories, 0)
       }
@@ -269,7 +283,7 @@ export async function main(args = process.argv.slice(2)) {
   const options = parseOptions(args)
   if (options.help) {
     process.stdout.write(
-      'Usage: node scripts/bench-chat-open.mjs [--quick] [--versions v0.10.0,v0.11.0,HEAD] [--out path]\n'
+      'Usage: node scripts/bench-chat-open.mjs --out path [--quick] [--allow-dirty] [--versions v0.10.0,v0.11.0,HEAD]\n'
     )
     return
   }
@@ -280,13 +294,19 @@ export async function main(args = process.argv.slice(2)) {
   const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
   const repoRoot = git(desktopRoot, ['rev-parse', '--show-toplevel'])
   const runDir = await fs.mkdtemp(join(tmpdir(), 'evenfire-chat-open-'))
-  const out = options.out ?? join(tmpdir(), `${basename(runDir)}.json`)
+  const { out } = options
   const started = performance.now()
   try {
     const prepared = []
     for (const ref of options.versions) {
       const { default: adapter } = await import(`./bench-chat-open/${ADAPTER_FILES.get(ref)}`)
-      const compiled = await compileVersion({ adapter, repoRoot, desktopRoot, runDir })
+      const compiled = await compileVersion({
+        adapter,
+        repoRoot,
+        desktopRoot,
+        runDir,
+        allowDirty: options.allowDirty,
+      })
       prepared.push({ adapter, compiled })
     }
     const results = []

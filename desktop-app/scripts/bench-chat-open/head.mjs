@@ -4,21 +4,26 @@ import { AUTHORITY_SCOPE } from './fixtures.mjs'
 export default {
   ref: 'HEAD',
   handlesPendingCleanups: true,
-  // HEAD's chat:getIndex handler in ipc.ts delegates to chatGetIndexHandler.ts;
-  // the benchmark calls that compiled export.
-  verifyHandler({ source }) {
-    assert.ok(source.includes('runChatGetIndex'))
-  },
   bind(ChatStore, root) {
     const store = new ChatStore(root)
     store.setAuthorityScope(AUTHORITY_SCOPE)
     return store
   },
+  // HEAD's chat:getIndex handler in ipc.ts delegates to chatGetIndexHandler.ts;
+  // the benchmark calls that compiled export.
   context(store, { runChatGetIndex }) {
     assert.equal(typeof runChatGetIndex, 'function')
     let cleanupErrors = 0
+    const started = []
     const deps = {
-      store,
+      store: {
+        retryPendingDeleteCleanups: (...args) => {
+          const cleanup = store.retryPendingDeleteCleanups(...args)
+          started.push(cleanup)
+          return cleanup
+        },
+        getIndex: agentRef => store.getIndex(agentRef),
+      },
       getChatDeletionFenceAuthority: () => ({ authorityScope: AUTHORITY_SCOPE }),
       warnCleanupFailure: () => {
         cleanupErrors += 1
@@ -29,9 +34,11 @@ export default {
         return cleanupErrors
       },
       getIndex: agentRef => runChatGetIndex(deps, agentRef),
-      // Drain the real cleanup outside timing before removing its fixture. This
-      // also keeps a nonblocking handler from leaking work into another run.
-      settle: () => store.retryPendingDeleteCleanups(AUTHORITY_SCOPE),
+      // Waits, outside timing, for exactly the cleanups the handler started, so
+      // the fixture state afterwards is what the handler alone left behind.
+      settle: async () => {
+        await Promise.allSettled(started.splice(0))
+      },
     }
   },
 }

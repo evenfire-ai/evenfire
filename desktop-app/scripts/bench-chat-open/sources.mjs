@@ -84,7 +84,22 @@ export function handlerLines(ipcSource) {
   return { start: start + 1, end: end + 1, source: lines.slice(start, end + 1).join('\n') }
 }
 
-export async function compileVersion({ adapter, repoRoot, desktopRoot, runDir }) {
+/**
+ * HEAD snapshots the live worktree, so its numbers describe the recorded commit
+ * only when the tree is clean. Returns whether the tree is dirty.
+ */
+export function checkWorktreeClean(porcelainStatus, allowDirty) {
+  const dirty = porcelainStatus !== ''
+  if (dirty && !allowDirty) {
+    throw Object.assign(
+      new Error('HEAD has uncommitted changes; commit them or pass --allow-dirty'),
+      { code: 'DIRTY_WORKTREE' }
+    )
+  }
+  return dirty
+}
+
+export async function compileVersion({ adapter, repoRoot, desktopRoot, runDir, allowDirty }) {
   const versionDir = await fs.mkdtemp(join(runDir, 'source-'))
   const snapshotRoot = join(versionDir, 'snapshot')
   const snapshotDesktop = join(snapshotRoot, 'desktop-app')
@@ -92,7 +107,11 @@ export async function compileVersion({ adapter, repoRoot, desktopRoot, runDir })
   const compiledRoot = join(versionDir, 'compiled')
   await fs.mkdir(snapshotDesktop, { recursive: true })
   const commit = git(repoRoot, ['rev-parse', `${adapter.ref}^{commit}`])
+  let dirty = false
+  let handler = null
+  let ipcSha256 = null
   if (adapter.ref === 'HEAD') {
+    dirty = checkWorktreeClean(git(repoRoot, ['status', '--porcelain']), allowDirty)
     // Include the live, possibly uncommitted handler; freeze it before compiling.
     await fs.access(join(desktopRoot, 'src/chatGetIndexHandler.ts'))
     await fs.cp(join(desktopRoot, 'src'), sourceRoot, { recursive: true })
@@ -121,16 +140,18 @@ export async function compileVersion({ adapter, repoRoot, desktopRoot, runDir })
     })
   }
   await fs.symlink(join(desktopRoot, 'node_modules'), join(snapshotDesktop, 'node_modules'), 'dir')
-  const ipcSource = await fs.readFile(join(sourceRoot, 'ipc.ts'), 'utf8')
-  // Verify against git show as well as the archived bytes before trusting an adapter.
-  if (
-    adapter.ref !== 'HEAD' &&
-    ipcSource !== `${git(repoRoot, ['show', `${commit}:desktop-app/src/ipc.ts`])}\n`
-  ) {
-    throw new Error('Archived ipc.ts does not match git show')
+  // A historical handler is inline in ipc.ts, so its pinned lines are checked
+  // against git show. HEAD's handler is the compiled runChatGetIndex export,
+  // which the HEAD adapter asserts it receives.
+  if (adapter.ref !== 'HEAD') {
+    const ipcSource = await fs.readFile(join(sourceRoot, 'ipc.ts'), 'utf8')
+    if (ipcSource !== `${git(repoRoot, ['show', `${commit}:desktop-app/src/ipc.ts`])}\n`) {
+      throw new Error('Archived ipc.ts does not match git show')
+    }
+    handler = handlerLines(ipcSource)
+    adapter.verifyHandler(handler)
+    ipcSha256 = createHash('sha256').update(ipcSource).digest('hex')
   }
-  const handler = handlerLines(ipcSource)
-  adapter.verifyHandler(handler)
   await setSourcePermissions(snapshotRoot, true)
   const entries = ['chatStore.ts', ...(adapter.ref === 'HEAD' ? ['chatGetIndexHandler.ts'] : [])]
   const config = join(versionDir, 'tsconfig.bench.json')
@@ -185,15 +206,15 @@ export async function compileVersion({ adapter, repoRoot, desktopRoot, runDir })
   return {
     ChatStore,
     context: store => adapter.context(store, handlerModule),
-    snapshotRoot,
     metadata: {
       version: adapter.ref,
       commit,
+      dirty,
       sourceMode: adapter.ref === 'HEAD' ? 'live-worktree-snapshot' : 'read-only-git-archive',
       compilerVersion: ts.version,
       sources,
-      ipcSha256: createHash('sha256').update(ipcSource).digest('hex'),
-      handlerLines: { start: handler.start, end: handler.end },
+      ipcSha256,
+      handlerLines: handler && { start: handler.start, end: handler.end },
       runtimeImports: runtime.imports,
       electronIsolation:
         'Only the compiled ChatStore/handler runtime dependency graph is loaded; every dependency is audited as a Node builtin or a relative module. Electron bindings and ipc.ts are never loaded.',
