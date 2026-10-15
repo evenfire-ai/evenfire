@@ -647,7 +647,7 @@ describe('useAgentChatController (cross-chat, migrated)', () => {
   )
 
   it('does not republish a confirmed deleted chat after its pending send resolves', async () => {
-    const { invokeHostMessage, appendMessages } = installClerumHarness()
+    const { invokeHostMessage, appendMessages, upsertMessages } = installClerumHarness()
     let finishInvoke!: (result: { taskId: string; status: string }) => void
     invokeHostMessage.mockImplementationOnce(
       () =>
@@ -677,6 +677,11 @@ describe('useAgentChatController (cross-chat, migrated)', () => {
     )
     expect(getComposerDraft(deletedChatId)).toBe('')
     const writesBeforeLateAck = appendMessages.mock.calls.length
+    // Sends persist through `upsertMessages`, so the late ack's write shows up there.
+    const deletedChatUpserts = () =>
+      upsertMessages.mock.calls.filter(call => call[1] === deletedChatId).length
+    const upsertsBeforeLateAck = deletedChatUpserts()
+    expect(upsertsBeforeLateAck).toBeGreaterThan(0)
 
     finishInvoke({ taskId: 'late-deleted-task', status: 'pending' })
     await waitFor(() => expect(screen.getByTestId('send-state').textContent).toBe('settled'))
@@ -686,6 +691,7 @@ describe('useAgentChatController (cross-chat, migrated)', () => {
     )
     expect(getComposerDraft(deletedChatId)).toBe('')
     expect(appendMessages.mock.calls.length).toBe(writesBeforeLateAck)
+    expect(deletedChatUpserts()).toBe(upsertsBeforeLateAck)
 
     const survivingChatId = screen.getByTestId('active-chat-id').textContent || ''
     expect(survivingChatId).not.toBe('')

@@ -234,6 +234,13 @@ describe('deleteChat', () => {
       authorityScope: TEAM_A_SCOPE,
     })
     await expect(fs.access(chatCacheDir(chatId))).rejects.toThrow()
+
+    // Liveness witness: the same store still writes an append to a chat that
+    // was not deleted, so the refusal above is specific to the tombstone.
+    const keptChatId = 'kept-while-sending'
+    await restartedStore.createChat(agentRef, keptChatId)
+    await restartedStore.appendMessages(agentRef, keptChatId, [message])
+    expect(await restartedStore.loadMessages(agentRef, keptChatId)).toEqual([message])
   })
 
   it('removes from index and deletes message cache', async () => {

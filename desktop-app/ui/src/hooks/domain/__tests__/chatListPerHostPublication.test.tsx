@@ -5,7 +5,7 @@ import type { SessionsListResult } from '../../../../../src/types'
 import { MAX_RENAME_SYNC_ATTEMPTS } from '../useChatListController'
 import { deferred, localIndex, serverSessions } from './__fixtures__/catalogFixtures'
 import { renderController } from './__fixtures__/controllerHarness'
-import { ipcHttpError } from './__fixtures__/ipcErrors'
+import { ipcGenericForbidden, ipcHttpError } from './__fixtures__/ipcErrors'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -519,5 +519,263 @@ describe('per-Host Latest sessions publication', () => {
       'remote-a',
       'saved-b',
     ])
+  })
+})
+
+// §6 (H5): a cross-agent reload keeps the remote rows it already published
+// until that Host's new catalog arrives. Each test observes every committed
+// list, because the defect is a single frame without the row.
+describe('Latest sessions reload keeps published remote rows (H5)', () => {
+  type PublishedRow = { id: string; title: string; remote: boolean }
+  const CATALOG_TTL_ELAPSED_MS = 6_000
+
+  function renderObserved(overrides: Parameters<typeof renderController>[0]) {
+    const commits: PublishedRow[][] = []
+    const controller = renderController(overrides, {
+      onLayoutCommit: value =>
+        commits.push(
+          value.latestChatSessions.map(row => ({
+            id: row.id,
+            title: row.title,
+            remote: row.remote === true,
+          }))
+        ),
+    })
+    return { controller, commits }
+  }
+
+  const ids = (rows: ReadonlyArray<{ id: string }>) => rows.map(row => row.id)
+
+  /** Moves the clock past the catalog cache so the next pass reads the server. */
+  function expireCatalogCache() {
+    vi.setSystemTime(new Date(Date.now() + CATALOG_TTL_ELAPSED_MS))
+  }
+
+  it('T-H5-1: a reload keeps a published remote row until the new catalog of its Host merges', async () => {
+    let indexA = localIndex([])
+    let pageA: Promise<SessionsListResult> = Promise.resolve(
+      serverSessions([
+        { agent: HOST_A, chatId: 'remote-r', title: 'Remote R' },
+        { agent: HOST_A, chatId: 'remote-other', title: 'Old title' },
+      ])
+    )
+    let aReads = 0
+    clerum.chat.getIndex.mockImplementation(async (agentRef: string) =>
+      agentRef === HOST_A ? indexA : localIndex([])
+    )
+    clerum.rpc.listSessions.mockImplementation((agentRef: string) => {
+      if (agentRef !== HOST_A) return Promise.resolve(serverSessions([]))
+      aReads += 1
+      return pageA
+    })
+    const { controller, commits } = renderObserved({ selectedAgent: null, agentNames: HOSTS })
+    await waitFor(() =>
+      expect(ids(controller.result.current.latestChatSessions).sort()).toEqual([
+        'remote-other',
+        'remote-r',
+      ])
+    )
+    const readsBeforeReload = aReads
+
+    const nextPageA = deferred<SessionsListResult>()
+    let nextPageAResolved = false
+    pageA = nextPageA.promise.then(page => {
+      nextPageAResolved = true
+      return page
+    })
+    indexA = localIndex([{ id: 'local-2', title: 'Local 2' }])
+    expireCatalogCache()
+    // The release of another Host is what reloads the cross-agent list.
+    controller.hostAuthority.hold(HOST_B, 'uncertain')
+    const firstCommitOfReload = commits.length
+    controller.hostAuthority.release(HOST_B)
+
+    // Liveness witness: this pass published its new local row and is waiting
+    // on a new catalog read of A.
+    await waitFor(() =>
+      expect(ids(controller.result.current.latestChatSessions)).toContain('local-2')
+    )
+    expect(aReads).toBe(readsBeforeReload + 1)
+    expect(nextPageAResolved).toBe(false)
+    const commitsBeforeMerge = commits.slice(firstCommitOfReload)
+    expect(commitsBeforeMerge.length).toBeGreaterThan(0)
+    expect(commitsBeforeMerge.filter(rows => !ids(rows).includes('remote-r'))).toEqual([])
+
+    await act(async () => {
+      nextPageA.resolve(
+        serverSessions([{ agent: HOST_A, chatId: 'remote-other', title: 'New title' }])
+      )
+      await nextPageA.promise
+    })
+    // Liveness witness: the merge of the new catalog committed.
+    await waitFor(() =>
+      expect(
+        controller.result.current.latestChatSessions.find(row => row.id === 'remote-other')?.title
+      ).toBe('New title')
+    )
+    const afterReload = commits.slice(firstCommitOfReload)
+    const mergeCommit = afterReload.findIndex(rows =>
+      rows.some(row => row.id === 'remote-other' && row.title === 'New title')
+    )
+    expect(ids(afterReload[mergeCommit]!)).not.toContain('remote-r')
+    expect(
+      afterReload.slice(0, mergeCommit).filter(rows => !ids(rows).includes('remote-r'))
+    ).toEqual([])
+  })
+
+  it('T-H5-3: a tombstone read by the next reload is not carried', async () => {
+    let indexA = localIndex([])
+    let pageA: Promise<SessionsListResult> = Promise.resolve(
+      serverSessions([{ agent: HOST_A, chatId: 'remote-r', title: 'Remote R' }])
+    )
+    clerum.chat.getIndex.mockImplementation(async (agentRef: string) =>
+      agentRef === HOST_A ? indexA : localIndex([])
+    )
+    clerum.rpc.listSessions.mockImplementation((agentRef: string) =>
+      agentRef === HOST_A ? pageA : Promise.resolve(serverSessions([]))
+    )
+    const { controller, commits } = renderObserved({ selectedAgent: null, agentNames: HOSTS })
+    await waitFor(() =>
+      expect(ids(controller.result.current.latestChatSessions)).toEqual(['remote-r'])
+    )
+
+    const nextPageA = deferred<SessionsListResult>()
+    pageA = nextPageA.promise
+    indexA = localIndex([{ id: 'local-2', title: 'Local 2' }], ['remote-r'])
+    expireCatalogCache()
+    controller.hostAuthority.hold(HOST_B, 'uncertain')
+    const firstCommitOfReload = commits.length
+    controller.hostAuthority.release(HOST_B)
+
+    // Liveness witness: the reload published its local row.
+    await waitFor(() =>
+      expect(ids(controller.result.current.latestChatSessions)).toContain('local-2')
+    )
+    const afterReload = commits.slice(firstCommitOfReload)
+    const localPublication = afterReload.findIndex(rows => ids(rows).includes('local-2'))
+    expect(localPublication).toBeGreaterThanOrEqual(0)
+    expect(
+      afterReload.slice(localPublication).filter(rows => ids(rows).includes('remote-r'))
+    ).toEqual([])
+
+    // Liveness witness: the tombstone was registered, so the new catalog page
+    // that still lists R is filtered too.
+    await act(async () => {
+      nextPageA.resolve(
+        serverSessions([
+          { agent: HOST_A, chatId: 'remote-r', title: 'Remote R' },
+          { agent: HOST_A, chatId: 'remote-kept', title: 'Remote kept' },
+        ])
+      )
+      await nextPageA.promise
+    })
+    await waitFor(() =>
+      expect(ids(controller.result.current.latestChatSessions)).toContain('remote-kept')
+    )
+    expect(ids(controller.result.current.latestChatSessions)).not.toContain('remote-r')
+  })
+
+  it('T-H5-4: a remote row of a Host held and released does not return before its next catalog', async () => {
+    let pageB: Promise<SessionsListResult> = Promise.resolve(
+      serverSessions([{ agent: HOST_B, chatId: 'remote-b', title: 'Remote B' }])
+    )
+    let bReads = 0
+    clerum.chat.getIndex.mockImplementation(async (agentRef: string) =>
+      agentRef === HOST_B ? localIndex([{ id: 'local-b', title: 'Local B' }]) : localIndex([])
+    )
+    clerum.rpc.listSessions.mockImplementation((agentRef: string) => {
+      if (agentRef !== HOST_B) return Promise.resolve(serverSessions([]))
+      bReads += 1
+      return pageB
+    })
+    const { controller, commits } = renderObserved({ selectedAgent: HOST_B, agentNames: HOSTS })
+    await waitFor(() =>
+      expect(ids(controller.result.current.latestChatSessions).sort()).toEqual([
+        'local-b',
+        'remote-b',
+      ])
+    )
+    await waitFor(() => expect(controller.result.current.latestChatSessionsLoading).toBe(false))
+
+    // The hold enters through a transcript read that gets a generic 403, so it
+    // passes through `hideHostAccess` and never through the store directly.
+    const denial = await ipcGenericForbidden('rpc:loadSessionMessages')
+    clerum.rpc.loadSessionMessages.mockImplementationOnce(async () => {
+      throw denial
+    })
+    await act(async () => {
+      await controller.result.current.switchToChat(HOST_B, 'local-b')
+    })
+    expect(controller.hostAuthority.isBlocked(HOST_B)).toBe(true)
+    // One settled commit between the hold and the release (§6.5).
+    await act(async () => undefined)
+    expect(ids(controller.result.current.latestChatSessions)).toEqual([])
+
+    const nextPageB = deferred<SessionsListResult>()
+    let nextPageBResolved = false
+    pageB = nextPageB.promise.then(page => {
+      nextPageBResolved = true
+      return page
+    })
+    const readsBeforeRelease = bReads
+    expireCatalogCache()
+    const firstCommitAfterRelease = commits.length
+    controller.hostAuthority.release(HOST_B)
+
+    // Liveness witness: B's local row is back and its next catalog is pending.
+    await waitFor(() =>
+      expect(ids(controller.result.current.latestChatSessions)).toContain('local-b')
+    )
+    await waitFor(() => expect(bReads).toBeGreaterThan(readsBeforeRelease))
+    expect(nextPageBResolved).toBe(false)
+    const afterRelease = commits.slice(firstCommitAfterRelease)
+    expect(afterRelease.length).toBeGreaterThan(0)
+    expect(afterRelease.filter(rows => ids(rows).includes('remote-b'))).toEqual([])
+  })
+
+  it('T-H5-5: the first publication of a new scope carries no remote row of the previous scope', async () => {
+    let indexA = localIndex([])
+    let pageA: Promise<SessionsListResult> = Promise.resolve(
+      serverSessions([{ agent: HOST_A, chatId: 'remote-old-scope', title: 'Old scope' }])
+    )
+    let aReads = 0
+    clerum.chat.getIndex.mockImplementation(async () => indexA)
+    clerum.rpc.listSessions.mockImplementation(() => {
+      aReads += 1
+      return pageA
+    })
+    const { controller, commits } = renderObserved({ selectedAgent: null, agentNames: [HOST_A] })
+    await waitFor(() =>
+      expect(ids(controller.result.current.latestChatSessions)).toEqual(['remote-old-scope'])
+    )
+
+    const nextPageA = deferred<SessionsListResult>()
+    let nextPageAResolved = false
+    pageA = nextPageA.promise.then(page => {
+      nextPageAResolved = true
+      return page
+    })
+    indexA = localIndex([{ id: 'local-new-scope', title: 'New scope' }])
+    const readsBeforeScopeChange = aReads
+    expireCatalogCache()
+    const firstCommitOfScope = commits.length
+    controller.rerender({
+      selectedAgent: null,
+      agentNames: [HOST_A],
+      currentTeamId: 'team-2',
+      chatAuthorityTeamId: 'team-2',
+    })
+
+    // Liveness witness: the new scope published its local row of the same
+    // Host name, and its catalog read is pending.
+    await waitFor(() =>
+      expect(ids(controller.result.current.latestChatSessions)).toContain('local-new-scope')
+    )
+    expect(aReads).toBeGreaterThan(readsBeforeScopeChange)
+    expect(nextPageAResolved).toBe(false)
+    const firstPublication = commits
+      .slice(firstCommitOfScope)
+      .find(rows => ids(rows).includes('local-new-scope'))
+    expect(ids(firstPublication!)).toEqual(['local-new-scope'])
   })
 })

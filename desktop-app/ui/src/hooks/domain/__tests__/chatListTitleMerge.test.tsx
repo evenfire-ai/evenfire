@@ -250,10 +250,14 @@ describe('confirmed deletion catalog protection', () => {
     )
     clerum.rpc.listSessions.mockImplementation(async (agentRef: string) =>
       agentRef === 'agent-y'
-        ? serverSessions([{ agent: 'agent-y', chatId: 'deleted-y' }])
+        ? serverSessions([
+            { agent: 'agent-y', chatId: 'deleted-y' },
+            { agent: 'agent-y', chatId: 'kept-remote-y' },
+          ])
         : serverSessions([
             { agent: 'agent-x', chatId: 'deleted-x' },
             { agent: 'agent-x', chatId: 'kept-x' },
+            { agent: 'agent-x', chatId: 'kept-remote-x' },
           ])
     )
 
@@ -261,8 +265,20 @@ describe('confirmed deletion catalog protection', () => {
       selectedAgent: 'agent-x',
       agentNames: ['agent-x', 'agent-y'],
     })
-    await waitFor(() => expect(result.current.chatList.map(chat => chat.id)).toEqual(['kept-x']))
-    await waitFor(() => expect(result.current.latestChatSessionsLoading).toBe(false))
+    // Liveness witness: agent-x's catalog page was merged into the selected-agent list.
+    await waitFor(() =>
+      expect(result.current.chatList.map(chat => chat.id)).toContain('kept-remote-x')
+    )
+    expect(result.current.chatList.map(chat => chat.id)).toContain('kept-x')
+    expect(result.current.chatList.map(chat => chat.id)).not.toContain('deleted-x')
+    // Liveness witness: both catalog pages were merged into Latest sessions.
+    // `latestChatSessionsLoading` turns false before the catalogs arrive, so it
+    // cannot witness the merge.
+    await waitFor(() => {
+      const ids = result.current.latestChatSessions.map(session => session.id)
+      expect(ids).toContain('kept-remote-x')
+      expect(ids).toContain('kept-remote-y')
+    })
     expect(result.current.latestChatSessions.map(session => session.id)).not.toContain('deleted-x')
     expect(result.current.latestChatSessions.map(session => session.id)).not.toContain('deleted-y')
   })

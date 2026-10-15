@@ -519,6 +519,7 @@ export function useAgentChatController({
     latestChatSessions,
     latestChatSessionsLoading,
     hideAgent,
+    hideRemoteRowsOf,
     loadChatList,
     loadMoreChatSessions,
     setChatListLoading,
@@ -2326,6 +2327,8 @@ export function useAgentChatController({
       })
       if (kind === 'revoked') {
         hideAgent(agentRef)
+      } else {
+        hideRemoteRowsOf(agentRef)
       }
       const view = activeChatVisibilityRef.current
       if (view.selectedAgent === agentRef) {
@@ -2357,6 +2360,7 @@ export function useAgentChatController({
       fsm,
       transcriptMemo,
       hideAgent,
+      hideRemoteRowsOf,
       chatStore.clearCachedRemoteData,
       clearList,
       resetComposerAttachments,

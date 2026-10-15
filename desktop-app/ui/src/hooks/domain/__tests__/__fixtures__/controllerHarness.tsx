@@ -117,6 +117,7 @@ export function renderController(
         controller.activeChatId,
         controller.chatMessages,
         controller.chatMessagesLoading,
+        controller.latestChatSessions,
         options.onLayoutCommit,
       ])
       return controller
