@@ -351,6 +351,33 @@ describe('workspace layout merge', () => {
     15_000
   )
 
+  // A workspace/ that can be entered and written but not listed hides its
+  // entries from the globs: without this check the state files and state.db
+  // would move, `rmdir workspace` would fail, and the next start (no
+  // signature left) would exit 0 with the files stranded under workspace/.
+  it.each(['333', '300'])(
+    'refuses a workspace/ directory with mode %s before the first move',
+    mode => {
+      const root = splitRoot()
+      const before = snapshot(root)
+      chmodSync(join(root, 'workspace'), parseInt(mode, 8))
+
+      const refused = merge(root)
+
+      chmodSync(join(root, 'workspace'), 0o755)
+      expect(refused.status).toBe(1)
+      expect(refused.stderr.trim()).toBe(
+        `workspace layout merge refused: workspace directory is not readable and searchable: ${root}/workspace`
+      )
+      expect(snapshot(root)).toEqual(before)
+      // Witness: with its mode restored the same tree merges.
+      expect(merge(root).status).toBe(0)
+      expect(messageCount(join(root, 'state.db'))).toEqual({ rows: ROWS, check: 'ok' })
+      expect(readdirSync(root)).not.toContain('workspace')
+    },
+    15_000
+  )
+
   it('refuses before the first move when a source directory cannot be listed', () => {
     const root = splitRoot()
     mkdirSync(join(root, 'cache'))

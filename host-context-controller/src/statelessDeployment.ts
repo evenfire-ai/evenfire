@@ -35,8 +35,8 @@ function shellSingleQuote(value: string): string {
  * agent can create those on a stateful Host, so they must not stop it).
  *
  * Every refusal prints one line and exits 1 before the first move:
- *   F1 `workspace` is a symlink or not a directory, a real `state/`
- *      cannot be listed and searched, a `state.db*` entry is a
+ *   F1 `workspace` is a symlink or not a directory, a real `state/` or a
+ *      present `workspace/` cannot be listed and searched, a `state.db*` entry is a
  *      symlink or not a regular file, or a directory that decides a
  *      collision cannot be listed;
  *   F2 more than one live database (a `state.db` main file or its journals)
@@ -108,6 +108,9 @@ assert_managed_dir "$root/state" state
 workspace_present=0
 if present "$root/workspace"; then
   assert_managed_dir "$root/workspace" workspace
+  # The move globs cannot see the entries of a workspace/ they cannot list.
+  [ -r "$root/workspace" ] && [ -x "$root/workspace" ] ||
+    fail_merge "workspace directory is not readable and searchable: $root/workspace"
   workspace_present=1
 fi
 for dir in "$root" "$root/state" "$root/workspace"; do
