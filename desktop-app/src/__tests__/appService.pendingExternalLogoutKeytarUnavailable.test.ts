@@ -401,7 +401,7 @@ describe('AppService pending logout when Keytar is unavailable', () => {
       markIssueEntered()
       await issueBlocked
       return {
-        token: 'short-lived-rpc-token',
+        token: 'fixture-short-lived-rpc-token',
         accessScope: 'user',
         teamId: null,
         scopes: [],

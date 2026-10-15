@@ -164,7 +164,7 @@ describe('AppService pending external logout', () => {
       me: unknown
       suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
     }
-    state.sessionToken = 'active-session-token'
+    state.sessionToken = 'fixture-active-session-token'
     state.me = loginResult.me
     const suspendUploads = vi
       .spyOn(state, 'suspendDesktopGfsUploadsForAuthBoundary')
@@ -213,7 +213,7 @@ describe('AppService pending external logout', () => {
       me: unknown
       suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
     }
-    state.sessionToken = 'active-session-token'
+    state.sessionToken = 'fixture-active-session-token'
     state.me = loginResult.me
     const suspendUploads = vi
       .spyOn(state, 'suspendDesktopGfsUploadsForAuthBoundary')
@@ -239,7 +239,7 @@ describe('AppService pending external logout', () => {
       me: unknown
       suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
     }
-    state.sessionToken = 'active-session-token'
+    state.sessionToken = 'fixture-active-session-token'
     state.me = loginResult.me
     const suspendUploads = vi
       .spyOn(state, 'suspendDesktopGfsUploadsForAuthBoundary')
@@ -265,7 +265,7 @@ describe('AppService pending external logout', () => {
       me: unknown
       suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
     }
-    state.sessionToken = 'active-session-token'
+    state.sessionToken = 'fixture-active-session-token'
     state.me = loginResult.me
     const suspendUploads = vi
       .spyOn(state, 'suspendDesktopGfsUploadsForAuthBoundary')
@@ -834,7 +834,7 @@ describe('AppService pending external logout', () => {
     const { safeStorage } = await import('electron')
     vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
     const stalePlaintextPath = path.join(userDataDirectory, `session-token-${activeEnvKey}.json`)
-    await fs.writeFile(stalePlaintextPath, JSON.stringify({ token: 'stale-legacy-token' }))
+    await fs.writeFile(stalePlaintextPath, JSON.stringify({ token: 'fixture-stale-legacy-token' }))
 
     try {
       await expect(
@@ -849,7 +849,7 @@ describe('AppService pending external logout', () => {
       ).toMatchObject({
         intent: 'memory-only-session',
       })
-      expect(await fs.readFile(stalePlaintextPath, 'utf8')).toContain('stale-legacy-token')
+      expect(await fs.readFile(stalePlaintextPath, 'utf8')).toContain('fixture-stale-legacy-token')
       expect(keychain.get(keyOf('Evenfire', account))).toBe(loginResult.token)
       const restarted = createService()
       const getMe = vi.spyOn(internals(restarted.service).authClient, 'getMe')
@@ -1178,7 +1178,7 @@ describe('AppService pending external logout', () => {
   it('surfaces marker-write failure without claiming a quit-time logout succeeded', async () => {
     const { service, tokenStore } = createService()
     const state = internals(service)
-    state.sessionToken = 'active-session-token'
+    state.sessionToken = 'fixture-active-session-token'
     state.me = loginResult.me
     state.quitPreparationStarted = true
     const originalOpen = fsSync.openSync.bind(fsSync)
@@ -1193,7 +1193,7 @@ describe('AppService pending external logout', () => {
     try {
       await expect(service.logout()).rejects.toMatchObject({ code: 'EACCES' })
 
-      expect(state.sessionToken).toBe('active-session-token')
+      expect(state.sessionToken).toBe('fixture-active-session-token')
       expect(state.me).toEqual(loginResult.me)
       expect(clearToken).not.toHaveBeenCalled()
       expect(notifySessionChanged).not.toHaveBeenCalledWith(false)
