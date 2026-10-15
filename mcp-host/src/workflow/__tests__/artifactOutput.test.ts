@@ -125,8 +125,15 @@ describe('writeArtifact', () => {
       const target = claimOutputFile(outputDir, 'r.pdf')
       fs.symlinkSync(path.join(outside, 'victim.txt'), target.filePath)
       writeArtifact(target, 'new')
-      expect(fs.lstatSync(target.filePath).isSymbolicLink()).toBe(false)
-      expect(fs.readFileSync(target.filePath, 'utf8')).toBe('new')
+      // Opened without following a link, then checked and read through that
+      // one descriptor: the name now holds a file of its own.
+      const fd = fs.openSync(target.filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
+      try {
+        expect(fs.fstatSync(fd).isFile()).toBe(true)
+        expect(fs.readFileSync(fd, 'utf8')).toBe('new')
+      } finally {
+        fs.closeSync(fd)
+      }
       expect(fs.readFileSync(path.join(outside, 'victim.txt'), 'utf8')).toBe('original')
     } finally {
       fs.rmSync(outside, { recursive: true, force: true })
