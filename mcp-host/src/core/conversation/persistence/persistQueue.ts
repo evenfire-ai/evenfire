@@ -41,7 +41,10 @@ export interface PersistQueueOptions {
   onHeartbeat?: (payload: HeartbeatPayload) => void
   /** Called on transport-level errors (worker crashed, message channel broke). */
   onTransportError?: (err: Error) => void
-  /** Called when the worker exits. Drives reconnect/degraded handling in main. */
+  /**
+   * Called when the worker exits, for logging. An exit before the `shutdown`
+   * ACK is also reported through `onFailure`, which ends the process.
+   */
   onExit?: (code: number) => void
   /**
    * Called once, with the first failure that makes the queue unusable: an

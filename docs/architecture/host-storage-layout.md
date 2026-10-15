@@ -4,7 +4,10 @@ Every Host keeps its files and its conversation database on one workspace
 PVC, in the same place, whatever its lifecycle. Switching a Host between
 stateful and stateless changes how its Pod runs (replicas, priority class,
 probes, `CLERUM_STATELESS_LIFECYCLE`); it never changes where data lives
-(#825).
+(#825). Through `CLERUM_STATELESS_LIFECYCLE` it also changes SQLite
+durability, as before #825: a stateless Host always writes with
+`PRAGMA synchronous = FULL`, a stateful one only with
+`CLERUM_DB_BARRIER_MODE=full` (`mcp-host/src/main.ts`).
 
 ## Layout
 
@@ -171,8 +174,9 @@ forced by a deploy.
 
 - Unit: `host-context-controller/test/statelessDeployment.workspaceLayoutMerge.test.ts`
   runs the script under `sh` on real trees, including an uncheckpointed WAL,
-  each refusal, re-runs after an interrupted merge and a round trip through
-  the previous init (`test/__fixtures__/base-workspace-layout-init.sh`).
+  at least one case of each refusal family (F1–F4), re-runs after an
+  interrupted merge and a round trip through the previous init
+  (`test/__fixtures__/base-workspace-layout-init.sh`).
 - Live: `make test-e2e-hcc-storage-layout-switch`
   (`scripts/e2e/e2e-hcc-storage-layout-switch.sh`) on an owned branch profile.
 - Desktop: `make test-e2e-825-desktop-continuity`
