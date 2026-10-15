@@ -91,6 +91,8 @@ describe('officePackageHasText', () => {
       'word/media/image1.png': Buffer.from(needle),
     })
     expect(officePackageHasText(docx, holds)).toBe(false)
+    // Witness: the same reader finds what the package does hold.
+    expect(officePackageHasText(docx, text => text.includes('3,141,592,653'))).toBe(true)
   })
 
   it.each([

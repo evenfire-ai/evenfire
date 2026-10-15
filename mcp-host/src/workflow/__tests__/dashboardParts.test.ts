@@ -76,6 +76,8 @@ describe('DashboardCharts', () => {
       'data.charts[0]'
     )
     expect(charts.specs[0].labels).not.toContain('Phantom')
+    // Witness: the kept series' own labels are there.
+    expect(charts.specs[0].labels).toEqual(expect.arrayContaining(['Start', 'Change']))
   })
 
   it('reports a chart it cannot draw in its place, escaped', () => {

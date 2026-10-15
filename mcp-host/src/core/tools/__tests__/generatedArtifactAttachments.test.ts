@@ -3,6 +3,7 @@ import * as fs from 'fs'
 import JSZip from 'jszip'
 import * as os from 'os'
 import * as path from 'path'
+import { officePackageHasText } from '../../../artifacts/officePackageText'
 import { zipEntries } from '../../../workflow/__tests__/support/zipEntries'
 import { INTERNAL_TOOLS } from '../../../workflow/internalTools'
 import type { ArtifactMetadata } from '../../../workflow/types'
@@ -418,6 +419,9 @@ describe('generated internal artifact attachments', () => {
     const leaked = await pdf.execute({ filename: 'quoted.pdf', body: `value: ${secret}` })
     expect(leaked.is_error).toBe(false)
     expect(leaked.attachments ?? []).toHaveLength(0)
+    // Control: the same registry attaches a document without the value.
+    const safe = await pdf.execute({ filename: 'safe.pdf', body: 'value: none' })
+    expect(safe.attachments ?? []).toHaveLength(1)
   })
 
   it('does not attach a DOCX whose table cell prints a secret a link splits', async () => {
@@ -458,6 +462,16 @@ describe('generated internal artifact attachments', () => {
     })
     expect(leaked.is_error).toBe(false)
     expect(leaked.attachments ?? []).toHaveLength(0)
+    // Witness: the file the generator wrote prints the value whole.
+    const written = fs.readFileSync(generated('split.docx'))
+    expect(officePackageHasText(written, text => text.includes('probe-redaction-value'))).toBe(true)
+    // Control: the same registry attaches a table without the value.
+    const safe = await docx.execute({
+      filename: 'safe.docx',
+      body: 'Table:',
+      tables: [{ headers: ['Value'], rows: [['nothing secret']] }],
+    })
+    expect(safe.attachments ?? []).toHaveLength(1)
   })
 
   describe('XLSX record keys, which the sheet prints as its header', () => {

@@ -120,6 +120,9 @@ describe('internal tools, as the Gemini driver actually sends them', () => {
 
   it('sends no field the Gemini schema does not define', async () => {
     const decls = await sendThroughDriver()
+    // Witness: there are declarations, each with parameters to read.
+    expect(decls.length).toBeGreaterThan(0)
+    expect(decls.every(d => d.parameters !== undefined)).toBe(true)
     const bad: string[] = []
     for (const d of decls) {
       const out: string[] = []
