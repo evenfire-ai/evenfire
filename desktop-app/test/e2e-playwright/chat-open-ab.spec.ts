@@ -457,13 +457,19 @@ if (
     // process was doing and whether macOS shows a prompt; never answer or bypass it.
     const diagnoseFirstWindow = (starting: ElectronApplication): string => {
       const samplePath = testInfo.outputPath(`sample-${launches}.txt`)
-      execFileSync('sample', [String(starting.process().pid), '5', '-file', samplePath])
+      // A failed sample is reported in the diagnosis; it must not replace the timeout.
+      let sampleNote = `sample in ${samplePath}`
+      try {
+        execFileSync('sample', [String(starting.process().pid), '5', '-file', samplePath])
+      } catch (error) {
+        sampleNote = `sample failed (${String((error as Error)?.message ?? error)})`
+      }
       const agent = spawnSync('pgrep', ['-x', 'SecurityAgent'])
       if (agent.status !== 0 && agent.status !== 1)
         throw new Error(`pgrep SecurityAgent failed with status ${agent.status}.`)
       return agent.status === 0
-        ? `KEYCHAIN_PROMPT_PENDING: SecurityAgent is running; sample in ${samplePath}`
-        : `FIRST_WINDOW_TIMEOUT: no SecurityAgent process; sample in ${samplePath}`
+        ? `KEYCHAIN_PROMPT_PENDING: SecurityAgent is running; ${sampleNote}`
+        : `FIRST_WINDOW_TIMEOUT: no SecurityAgent process; ${sampleNote}`
     }
     // A closed build's background requests can exhaust control-api's per-minute
     // limits; the next build's session restore then fails. Start each launch in
@@ -502,13 +508,14 @@ if (
         app = launched.app
         page = launched.page
       } catch (error) {
-        const diagnosis =
-          starting && /firstWindow: Timeout/.test(String((error as Error)?.message))
-            ? diagnoseFirstWindow(starting)
-            : undefined
-        await starting?.close()
-        if (diagnosis) throw new Error(diagnosis, { cause: error })
-        throw error
+        // The starting process is closed even when the diagnosis itself throws.
+        try {
+          if (starting && /firstWindow: Timeout/.test(String((error as Error)?.message)))
+            throw new Error(diagnoseFirstWindow(starting), { cause: error })
+          throw error
+        } finally {
+          await starting?.close()
+        }
       }
       launchedBuild = build
       // Public process identities only: the pinned Electron, this build's code and the run's profile.

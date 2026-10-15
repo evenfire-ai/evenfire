@@ -1699,6 +1699,9 @@ export function useChatListController({
               )
               .map(session => ({ ...session, agentRef }))
             seedSessionSnapshots(fsm, agentRef, sessions)
+            // Hardening: tombstones are read again inside the updater. The filter
+            // above already dropped them from `sessions`, and no test deletes a
+            // chat between that filter and this updater.
             setLatestChatSessions(previous => {
               if (!requestStillCurrent()) return previous
               const deleted = deletedChatIdsByAgentRef.current.get(agentRef)

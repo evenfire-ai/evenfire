@@ -402,6 +402,12 @@ describe('switchToChat transcript memo (#1091 A9)', () => {
   const invalidations = [
     ['no invalidating event (control), reopening is served from memory', 'none', false],
     ['a team change, reopening opens blank', 'team', true],
+    ['an environment change and restore, reopening opens blank', 'env', true],
+    [
+      'a rerender with the same environment (control), reopening is served from memory',
+      'env-same',
+      false,
+    ],
     ['a logout and login, reopening opens blank', 'logout', true],
     ['resetChat, reopening opens blank', 'reset', true],
     ['a confirmed revocation of the Host, reopening opens blank', 'revoked', true],
@@ -427,6 +433,11 @@ describe('switchToChat transcript memo (#1091 A9)', () => {
       if (event === 'team') {
         act(() => controller.rerender({ currentTeamId: 'team-2', chatAuthorityTeamId: 'team-2' }))
         act(() => controller.rerender({ currentTeamId: 'team-1', chatAuthorityTeamId: 'team-1' }))
+      } else if (event === 'env') {
+        act(() => controller.rerender({ currentEnvironmentKey: 'env-other' }))
+        act(() => controller.rerender({ currentEnvironmentKey: 'env-test' }))
+      } else if (event === 'env-same') {
+        act(() => controller.rerender({ currentEnvironmentKey: 'env-test' }))
       } else if (event === 'logout') {
         act(() => controller.rerender({ isAuthenticated: false }))
         act(() => controller.rerender({ isAuthenticated: true }))

@@ -296,6 +296,43 @@ describe('mergeByUpdatedDesc', () => {
           .sort(byUpdatedDesc)
       )
 
+  it('breaks a time tie by Host, then chat id', () => {
+    const at = '2026-10-15T10:00:00.000Z'
+    const rows = [
+      { id: 'b', agentRef: 'host-b', updatedAt: at },
+      { id: 'b', agentRef: 'host-a', updatedAt: at },
+      { id: 'a', agentRef: 'host-a', updatedAt: at },
+    ]
+    expect([...rows].sort(byUpdatedDesc).map(row => `${row.agentRef}/${row.id}`)).toEqual([
+      'host-a/a',
+      'host-a/b',
+      'host-b/b',
+    ])
+  })
+
+  it('orders rows with equal times the same whichever Host arrives first', () => {
+    // Few distinct times so most rows tie; each Host's rows are unique by id.
+    const hostRowsArb = (agentRef: string) =>
+      fc
+        .uniqueArray(
+          fc.record({
+            id: fc.constantFrom(...CHAT_IDS),
+            updatedAt: fc.constantFrom('2026-10-15T10:00:00.000Z', '2026-10-15T11:00:00.000Z'),
+          }),
+          { selector: row => row.id, minLength: 1, maxLength: CHAT_IDS.length }
+        )
+        .map(rows => rows.map(row => ({ ...row, agentRef })).sort(byUpdatedDesc))
+    fc.assert(
+      fc.property(hostRowsArb('host-a'), hostRowsArb('host-b'), (hostA, hostB) => {
+        const aFirst = mergeByUpdatedDesc(hostA, hostB)
+        const bFirst = mergeByUpdatedDesc(hostB, hostA)
+        expect(bFirst).toEqual(aFirst)
+        // Witness: both Hosts' rows are present, so a tie between them was possible.
+        expect(aFirst).toHaveLength(hostA.length + hostB.length)
+      })
+    )
+  })
+
   it('equals a stable sort of both sorted lists, first list first on ties', () => {
     fc.assert(
       fc.property(rowsArb('first'), rowsArb('second'), (first, second) => {
