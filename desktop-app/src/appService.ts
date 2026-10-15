@@ -3111,6 +3111,10 @@ export class AppService {
         : null
 
       if (context.teamId === targetTeamId) {
+        // The request was admitted as a potential hop, but an earlier queued
+        // switch already moved the session to this team. It no longer owns
+        // credential work and must not hold quit draining while its read runs.
+        earlyProducer?.()
         if (options.mutation) {
           return this.withNativeAuthEnvironmentCommit(async () => {
             assertContextIsCurrent()

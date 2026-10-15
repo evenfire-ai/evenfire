@@ -215,7 +215,7 @@ describe('AppService team-context quit lifecycle', () => {
     await service.prepareForQuit()
     sameTeamOperation.resolve('current-team-read')
 
-    await expect(firstRead).resolves.toBe('current-team-read')
+    await expect(firstRead).rejects.toThrow(/stale_(auth_epoch|session_generation)/)
     await expect(queuedHomeRead).rejects.toThrow('Application is shutting down')
     service.cancelQuitPreparation()
 
@@ -425,7 +425,7 @@ describe('AppService team-context quit lifecycle', () => {
 
     expect(prepareTokenStore).toHaveBeenCalledOnce()
     queuedOperation.resolve()
-    await expect(firstRead).resolves.toBe('home-read')
+    await expect(firstRead).rejects.toThrow(/stale_(auth_epoch|session_generation)/)
     await expect(queuedRead).resolves.toBe('team-a-read')
   })
 
