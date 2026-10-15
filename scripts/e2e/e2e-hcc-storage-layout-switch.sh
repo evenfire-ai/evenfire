@@ -501,9 +501,12 @@ done
 cp state/state.db state/state.db.pre-20261014.bak
 ln -s /tmp/e2e-825-link-target workspace/e2e-825-link
 ls -la state workspace'
-# Two live database families: the root one and a copy under state/ (F2).
+# Two live database families: the root one and a copy under state/ (F2),
+# with workspace/ present so the tree carries the split-layout signature and
+# a file under each directory the merge would move.
 # shellcheck disable=SC2016
-SEED_TWO_DB_SCRIPT='set -eu; cd "$1"; mkdir state; cp state.db state/state.db; ls -la . state'
+SEED_TWO_DB_SCRIPT='set -eu; cd "$1"; mkdir state workspace; cp state.db state/state.db
+printf "notes\n" > state/notes.txt; printf "x\n" > workspace/x; ls -la . state workspace'
 
 read_seed_file() { # HOST NAME EXPECTED
   local got
@@ -748,12 +751,17 @@ scenario_S5() {
 # S6: two live database families: the merge refuses, the Pod stays in
 # Init:Error and the tree is unchanged.
 scenario_S6() {
-  local name before after elapsed=0 pod logs
+  local name before after list_before list_after elapsed=0 pod logs
   name="$(truncate_rfc1123 "e2e-825-s6-${RUN}")"
   suspended_host_with_history "$name" || return 1
   pvc_fixture "$name" rw seed-two-db "$SEED_TWO_DB_SCRIPT" >/dev/null || return 1
   before="$(pvc_fixture "$name" ro hash-before "$HASH_SCRIPT")" || return 1
+  list_before="$(pvc_fixture "$name" ro list-before "$LIST_SCRIPT")" || return 1
   grep -q ' ./state/state.db$' <<<"$before" || { fail "S6 witness: state/state.db not seeded: ${before}"; return 1; }
+  if ! grep -qx 'f ./state/notes.txt' <<<"$list_before" || ! grep -qx 'f ./workspace/x' <<<"$list_before"; then
+    fail "S6 witness: state/notes.txt or workspace/x not seeded: ${list_before}"
+    return 1
+  fi
   post_wake "$name" || return 1
   while [ "$elapsed" -lt "$POD_READY_TIMEOUT" ]; do
     pod="$(host_pods "$name" | jq -r '[.items[] | select(any(.status.initContainerStatuses[]?;
@@ -773,6 +781,9 @@ scenario_S6() {
   fi
   after="$(pvc_fixture "$name" ro hash-after "$HASH_SCRIPT")" || return 1
   [ "$before" = "$after" ] || { fail "S6: tree changed after the refusal"; diff <(echo "$before") <(echo "$after") >&2 || true; return 1; }
+  list_after="$(pvc_fixture "$name" ro list-after "$LIST_SCRIPT")" || return 1
+  [ "$list_before" = "$list_after" ] ||
+    { fail "S6: tree layout changed after the refusal"; diff <(echo "$list_before") <(echo "$list_after") >&2 || true; return 1; }
   ok 'S6: two live families → Init:Error with the F2 line, tree unchanged'
 }
 

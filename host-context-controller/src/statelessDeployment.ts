@@ -29,17 +29,19 @@ function shellSingleQuote(value: string): string {
  * split with the earlier `workspace-layout-init` (agent files in
  * `workspace/`, the database in `state/`) is merged back to that layout.
  *
- * The merge runs only when `state/` is a real directory holding a
- * `state.db*` entry, the signature the earlier init leaves. Any other tree
- * exits 0 untouched: stateful, desktop, empty, a user folder named `state/`
- * or `workspace/`, and a `state` that is a symlink or not a directory (an
- * agent can create those on a stateful Host, so they must not stop it).
+ * The merge runs only on the signature the earlier init leaves: `state/`
+ * and `workspace/` are both real directories and `state/` holds a file the
+ * init writes (`state.db`, `state.db-wal`, `state.db-shm` or a
+ * `state.db*.pre-*.bak` copy). Any other tree exits 0 untouched: stateful,
+ * desktop, empty, a user folder named `state/` or `workspace/`, a `state/`
+ * holding other `state.db*` names, and a `state` or `workspace` that is a
+ * symlink or not a directory (an agent can create those on a stateful Host,
+ * so they must not stop it).
  *
  * Every refusal prints one line and exits 1 before the first move:
- *   F1 `workspace` is a symlink or not a directory, a real `state/` or a
- *      present `workspace/` cannot be listed and searched, a `state.db*` entry is a
- *      symlink or not a regular file, or a directory that decides a
- *      collision cannot be listed;
+ *   F1 `state/` or `workspace/` cannot be listed and searched, a database
+ *      entry is a symlink or not a regular file, or a directory that
+ *      decides a collision cannot be listed;
  *   F2 more than one live database (a `state.db` main file or its journals)
  *      across the root, `state/` and `workspace/`, except the root journals
  *      a stopped merge leaves next to the remaining `state/state.db`;
@@ -94,29 +96,29 @@ has_journal() {
 root_real="$(canonical_dir "$root")" || fail_merge "cannot resolve workspace PVC root: $root"
 [ "$root_real" != "/" ] || fail_merge "workspace PVC root resolves to /"
 
-# Split-layout signature: a real state/ directory holding a state.db* entry.
+# Split-layout signature: real state/ and workspace/ directories, and a
+# database entry under state/.
 [ ! -L "$root/state" ] && [ -d "$root/state" ] || exit 0
-# The glob below cannot see the entries of a state/ it cannot list or search.
+[ ! -L "$root/workspace" ] && [ -d "$root/workspace" ] || exit 0
+# The globs cannot see the entries of a state/ they cannot list or search.
 [ -r "$root/state" ] && [ -x "$root/state" ] ||
   fail_merge "state directory is not readable and searchable: $root/state"
+# Only the names the earlier init writes count: the database, its journals
+# and the .pre-<ts>.bak copies it keeps of an older source.
 signature=0
-for entry in "$root/state"/state.db*; do
+for entry in "$root/state"/state.db "$root/state"/state.db-wal "$root/state"/state.db-shm "$root/state"/state.db*.pre-*.bak; do
   if present "$entry"; then signature=1; fi
 done
 [ "$signature" -eq 1 ] || exit 0
 
 # F1
 assert_managed_dir "$root/state" state
-workspace_present=0
-if present "$root/workspace"; then
-  assert_managed_dir "$root/workspace" workspace
-  # The move globs cannot see the entries of a workspace/ they cannot list.
-  [ -r "$root/workspace" ] && [ -x "$root/workspace" ] ||
-    fail_merge "workspace directory is not readable and searchable: $root/workspace"
-  workspace_present=1
-fi
+assert_managed_dir "$root/workspace" workspace
+# The move globs cannot see the entries of a workspace/ they cannot list.
+[ -r "$root/workspace" ] && [ -x "$root/workspace" ] ||
+  fail_merge "workspace directory is not readable and searchable: $root/workspace"
 for dir in "$root" "$root/state" "$root/workspace"; do
-  for entry in "$dir"/state.db*; do
+  for entry in "$dir"/state.db "$dir"/state.db-wal "$dir"/state.db-shm "$dir"/state.db*.pre-*.bak; do
     present "$entry" || continue
     [ ! -L "$entry" ] || fail_merge "SQLite file is a symlink: $entry"
     [ -f "$entry" ] || fail_merge "SQLite file is not a regular file: $entry"
@@ -129,7 +131,7 @@ root_live=0
 workspace_live=0
 if has_main "$root" || has_journal "$root"; then root_live=1; live=$((live + 1)); fi
 if has_main "$root/state" || has_journal "$root/state"; then live=$((live + 1)); fi
-if [ "$workspace_present" -eq 1 ] && { has_main "$root/workspace" || has_journal "$root/workspace"; }; then
+if has_main "$root/workspace" || has_journal "$root/workspace"; then
   workspace_live=1
   live=$((live + 1))
 fi
@@ -142,69 +144,62 @@ if [ "$live" -gt 1 ] && [ "$resume" -eq 0 ]; then
 fi
 
 # F3
-if [ "$workspace_present" -eq 1 ]; then
-  ! present "$root/workspace/lost+found" || fail_merge "workspace/lost+found would remain: $root/workspace/lost+found"
-  for entry in "$root/workspace"/* "$root/workspace"/.[!.]* "$root/workspace"/..?*; do
-    present "$entry" || continue
-    base="$(basename "$entry")"
-    if present "$root/$base"; then
-      if is_empty_dir "$entry" && [ -d "$root/$base" ] && [ ! -L "$root/$base" ]; then continue; fi
-      fail_merge "destination exists: $root/$base"
-    fi
-  done
-fi
-for entry in "$root/state"/* "$root/state"/.[!.]* "$root/state"/..?*; do
+! present "$root/workspace/lost+found" || fail_merge "workspace/lost+found would remain: $root/workspace/lost+found"
+for entry in "$root/workspace"/* "$root/workspace"/.[!.]* "$root/workspace"/..?*; do
   present "$entry" || continue
-  base="$(basename "$entry")"
+  base="\${entry##*/}"
   if present "$root/$base"; then
     if is_empty_dir "$entry" && [ -d "$root/$base" ] && [ ! -L "$root/$base" ]; then continue; fi
     fail_merge "destination exists: $root/$base"
   fi
-  if [ "$workspace_present" -eq 1 ] && present "$root/workspace/$base"; then
+done
+for entry in "$root/state"/* "$root/state"/.[!.]* "$root/state"/..?*; do
+  present "$entry" || continue
+  base="\${entry##*/}"
+  if present "$root/$base"; then
+    if is_empty_dir "$entry" && [ -d "$root/$base" ] && [ ! -L "$root/$base" ]; then continue; fi
+    fail_merge "destination exists: $root/$base"
+  fi
+  if present "$root/workspace/$base"; then
     fail_merge "$base exists under both state/ and workspace/"
   fi
 done
 
 # F4
-for dir in "$root" "$root/state"; do
+for dir in "$root" "$root/state" "$root/workspace"; do
   [ -w "$dir" ] || fail_merge "not writable by uid $(id -u): $dir"
 done
-if [ "$workspace_present" -eq 1 ]; then
-  [ -w "$root/workspace" ] || fail_merge "not writable by uid $(id -u): $root/workspace"
-fi
 # Renaming a directory to a new parent rewrites its .. entry, which needs
 # write permission on the directory itself.
 for entry in "$root/workspace"/* "$root/workspace"/.[!.]* "$root/workspace"/..?* \\
   "$root/state"/* "$root/state"/.[!.]* "$root/state"/..?*; do
   [ -d "$entry" ] && [ ! -L "$entry" ] || continue
-  ! present "$root/$(basename "$entry")" || continue
+  ! present "$root/\${entry##*/}" || continue
   [ -w "$entry" ] || fail_merge "not writable by uid $(id -u): $entry"
 done
 
 move_to_root() {
   entry="$1"
-  base="$(basename "$entry")"
+  base="\${entry##*/}"
   assert_managed_dir "$root/state" state
-  if [ "$workspace_present" -eq 1 ]; then assert_managed_dir "$root/workspace" workspace; fi
+  assert_managed_dir "$root/workspace" workspace
   if present "$root/$base"; then
     rmdir "$entry"
   else
     mv "$entry" "$root/$base"
   fi
 }
-if [ "$workspace_present" -eq 1 ]; then
-  for entry in "$root/workspace"/* "$root/workspace"/.[!.]* "$root/workspace"/..?*; do
-    present "$entry" || continue
-    move_to_root "$entry"
-  done
-fi
+for entry in "$root/workspace"/* "$root/workspace"/.[!.]* "$root/workspace"/..?*; do
+  present "$entry" || continue
+  move_to_root "$entry"
+done
 for entry in "$root/state"/* "$root/state"/.[!.]* "$root/state"/..?*; do
   present "$entry" || continue
-  [ "$(basename "$entry")" != state.db ] || continue
+  [ "\${entry##*/}" != state.db ] || continue
   move_to_root "$entry"
 done
 if present "$root/state/state.db"; then move_to_root "$root/state/state.db"; fi
-if [ "$workspace_present" -eq 1 ]; then rmdir "$root/workspace"; fi
+rmdir "$root/workspace"
 rmdir "$root/state"
 sync
 `

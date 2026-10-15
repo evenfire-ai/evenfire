@@ -50,22 +50,27 @@ mounted at `/mnt/workspace-root`, and requests of 10m CPU / 32Mi memory
 (`host-context-controller/src/statelessDeployment.ts`). It never opens
 SQLite.
 
-**Trigger.** It acts only on the split-layout signature: `state/` is a real
-directory (not a symlink) holding at least one `state.db*` entry. Every other
-tree exits 0 unchanged, including an agent folder named `workspace/` or
-`state/` without a database, and a `state` that is a symlink or not a
-directory. An agent can create those on a stateful Host, so they must not
-stop it from starting. A stateful or desktop tree changes only if it carries
-the signature, which only the earlier init or an agent-created
-`state/state.db*` entry produces.
+**Trigger.** It acts only on the split-layout signature the earlier init
+leaves: `state/` and `workspace/` are both real directories (not symlinks),
+and `state/` holds a file that init writes: `state.db`, `state.db-wal`,
+`state.db-shm` or a `state.db*.pre-<ts>.bak` copy. Every other tree exits 0
+unchanged, including an agent folder named `workspace/` or `state/` alone, a
+`state/` holding other `state.db*` names (`state.db.json`, `state.dbx`), and a
+`state` or `workspace` that is a symlink or not a directory. An agent can
+create those on a stateful Host, so they must not stop it from starting. A
+stateful or desktop tree changes only if it carries the signature, which only
+the earlier init or agent-created `state/` and `workspace/` folders with one
+of those exact names produce.
 
-Two agent-made `state/` folders on a stateful Host do stop it from starting:
+Two agent-made folder pairs on a stateful Host do stop it from starting:
 
-- a `state/` holding a `state.db*` entry beside the root database. The
-  signature holds and F2 refuses, because the merge cannot tell the agent's
-  file from a second database;
-- a `state/` the container uid cannot list and search. F1 refuses before the
-  signature check, because the merge cannot tell whether it holds a database.
+- a `state/` holding `state.db` or one of its journals beside the root
+  database, next to a `workspace/` folder. The signature holds and F2
+  refuses, because the merge cannot tell the agent's file from a second
+  database;
+- a `state/` the container uid cannot list and search, next to a
+  `workspace/` folder. F1 refuses before the database check, because the
+  merge cannot tell whether it holds a database.
 
 In both cases the operator renames the folder from a helper Pod.
 
@@ -87,12 +92,12 @@ keep them; the database and its journals are already at the root.
 stderr and exits 1 before the first move, leaving the tree unchanged. The Pod
 stays in `Init:Error`.
 
-| Case                                                                                                                                                                                                                                                                       | Line contains                                                                                                                                                                                                                                                                      |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| F1: `workspace` or the PVC root is a symlink, not a directory, or escapes the root; a real `state/` or a present `workspace/` cannot be listed and searched; a `state.db*` entry is a symlink or not a regular file; a directory that decides a collision cannot be listed | `directory is a symlink`, `is not a directory`, `escapes the workspace PVC root`, `state directory is not readable and searchable`, `workspace directory is not readable and searchable`, `SQLite file is a symlink`, `SQLite file is not a regular file`, `cannot list directory` |
-| F2: more than one live database family across the root, `state/` and `workspace/`                                                                                                                                                                                          | `more than one live SQLite database`                                                                                                                                                                                                                                               |
-| F3: a name to move already exists at the root, or under both `state/` and `workspace/`; `workspace/lost+found` exists                                                                                                                                                      | `destination exists`, `exists under both state/ and workspace/`, `lost+found would remain`                                                                                                                                                                                         |
-| F4: the PVC root, `state/`, `workspace/`, or a directory to be moved out of them is not writable by the container uid                                                                                                                                                      | `not writable by uid`                                                                                                                                                                                                                                                              |
+| Case                                                                                                                                                                                                                                                                                                  | Line contains                                                                                                                                                                                                                                                                      |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| F1: the PVC root is a symlink, not a directory, or resolves to `/`; `state/` or `workspace/` escapes the root or cannot be listed and searched; a database entry (`state.db`, `-wal`, `-shm`, `.pre-*.bak`) is a symlink or not a regular file; a directory that decides a collision cannot be listed | `directory is a symlink`, `is not a directory`, `escapes the workspace PVC root`, `state directory is not readable and searchable`, `workspace directory is not readable and searchable`, `SQLite file is a symlink`, `SQLite file is not a regular file`, `cannot list directory` |
+| F2: more than one live database family across the root, `state/` and `workspace/`                                                                                                                                                                                                                     | `more than one live SQLite database`                                                                                                                                                                                                                                               |
+| F3: a name to move already exists at the root, or under both `state/` and `workspace/`; `workspace/lost+found` exists                                                                                                                                                                                 | `destination exists`, `exists under both state/ and workspace/`, `lost+found would remain`                                                                                                                                                                                         |
+| F4: the PVC root, `state/`, `workspace/`, or a directory to be moved out of them is not writable by the container uid                                                                                                                                                                                 | `not writable by uid`                                                                                                                                                                                                                                                              |
 
 The PVC root checks of F1 run on every start, before the signature check.
 

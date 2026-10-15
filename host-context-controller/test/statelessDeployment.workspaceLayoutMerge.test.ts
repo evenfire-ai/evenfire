@@ -220,30 +220,6 @@ describe('workspace layout merge', () => {
 
   it.each([
     {
-      name: 'workspace is a symlink',
-      prepare: (root: string) => {
-        renameSync(join(root, 'workspace'), join(root, 'workspace-real'))
-        symlinkSync(join(root, 'workspace-real'), join(root, 'workspace'))
-      },
-      undo: (root: string) => {
-        rmSync(join(root, 'workspace'))
-        renameSync(join(root, 'workspace-real'), join(root, 'workspace'))
-      },
-      message: 'workspace directory is a symlink',
-    },
-    {
-      name: 'workspace is a regular file',
-      prepare: (root: string) => {
-        renameSync(join(root, 'workspace'), join(root, 'workspace-real'))
-        writeFileSync(join(root, 'workspace'), 'not a directory')
-      },
-      undo: (root: string) => {
-        rmSync(join(root, 'workspace'))
-        renameSync(join(root, 'workspace-real'), join(root, 'workspace'))
-      },
-      message: 'workspace path is not a directory',
-    },
-    {
       name: 'a state.db file is a symlink',
       prepare: (root: string) => {
         renameSync(join(root, 'state', 'state.db-shm'), join(root, 'shm-real'))
@@ -518,6 +494,22 @@ describe('workspace layout merge', () => {
     expect(messageCount(join(root, 'state.db'))).toEqual({ rows: ROWS, check: 'ok' })
   }, 15_000)
 
+  // $(basename ...) drops trailing newlines, which would rename the entry or
+  // report a collision with a different name.
+  it('moves an entry whose name ends in a newline under its exact name', () => {
+    const root = splitRoot()
+    writeFileSync(join(root, 'workspace', 'notes\n'), 'workspace file')
+    writeFileSync(join(root, 'state', 'SOUL.md\n'), 'state file')
+
+    expect(merge(root)).toEqual({ status: 0, stderr: '' })
+
+    expect(readFileSync(join(root, 'notes\n'), 'utf8')).toBe('workspace file')
+    expect(readFileSync(join(root, 'SOUL.md\n'), 'utf8')).toBe('state file')
+    expect(readdirSync(root)).not.toContain('notes')
+    expect(readFileSync(join(root, 'SOUL.md'), 'utf8')).toBe('SOUL.md content')
+    expect(messageCount(join(root, 'state.db'))).toEqual({ rows: ROWS, check: 'ok' })
+  }, 15_000)
+
   it('removes an empty source directory whose name exists at the root', () => {
     const root = splitRoot()
     mkdirSync(join(root, 'workspace', 'state'))
@@ -602,6 +594,37 @@ describe('workspace layout merge', () => {
         mkdirSync(join(root, 'elsewhere'))
         writeFileSync(join(root, 'elsewhere', 'SOUL.md'), 'user file')
         symlinkSync(join(root, 'elsewhere'), join(root, 'workspace'))
+      },
+      // The base init writes only state.db, its journals and their .bak copies.
+      'user state/ folder with other state.db* names': root => {
+        mkdirSync(join(root, 'state'))
+        for (const name of ['state.db.json', 'state.dbx', 'state.db.notes', 'config.yaml']) {
+          writeFileSync(join(root, 'state', name), 'user file')
+        }
+        mkdirSync(join(root, 'workspace'))
+        writeFileSync(join(root, 'workspace', 'README.md'), 'user file')
+      },
+      // A desktop PVC never held the database before v1; a user project in
+      // state/ must not be adopted as the conversation store.
+      'desktop project state/{state.db,app.yml} without workspace/': root => {
+        for (const name of readdirSync(root).filter(n => n.startsWith('state.db'))) {
+          rmSync(join(root, name))
+        }
+        mkdirSync(join(root, 'state'))
+        writeFileSync(join(root, 'state', 'state.db'), 'user database')
+        writeFileSync(join(root, 'state', 'app.yml'), 'user file')
+        mkdirSync(join(root, 'Desktop'))
+      },
+      'state/state.db with workspace a symlink': root => {
+        mkdirSync(join(root, 'state'))
+        writeFileSync(join(root, 'state', 'state.db'), 'user database')
+        mkdirSync(join(root, 'elsewhere'))
+        symlinkSync(join(root, 'elsewhere'), join(root, 'workspace'))
+      },
+      'state/state.db with workspace a regular file': root => {
+        mkdirSync(join(root, 'state'))
+        writeFileSync(join(root, 'state', 'state.db'), 'user database')
+        writeFileSync(join(root, 'workspace'), 'user file')
       },
     }
     for (const [name, prepare] of Object.entries(cases)) {
