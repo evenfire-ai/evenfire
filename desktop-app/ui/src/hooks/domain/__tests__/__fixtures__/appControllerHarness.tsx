@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { type ReactNode, useLayoutEffect } from 'react'
 import { vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -448,14 +448,33 @@ export interface RenderAppControllerResult {
   queryClient: QueryClient
 }
 
-export function renderAppController(): RenderAppControllerResult {
+export interface RenderAppControllerOptions {
+  /**
+   * Called in a layout effect after every commit with the committed view model.
+   * Unlike a render callback it never sees a render attempt React discarded.
+   */
+  onCommit?: (vm: ReturnType<typeof useAppController>) => void
+}
+
+export function renderAppController(
+  options: RenderAppControllerOptions = {}
+): RenderAppControllerResult {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  const utils = renderHook(() => useAppController(), {
-    wrapper: ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={queryClient}>
-        <AgentTaskTrackerProvider>{children}</AgentTaskTrackerProvider>
-      </QueryClientProvider>
-    ),
-  })
+  const utils = renderHook(
+    () => {
+      const vm = useAppController()
+      useLayoutEffect(() => {
+        options.onCommit?.(vm)
+      })
+      return vm
+    },
+    {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={queryClient}>
+          <AgentTaskTrackerProvider>{children}</AgentTaskTrackerProvider>
+        </QueryClientProvider>
+      ),
+    }
+  )
   return { result: utils.result, unmount: utils.unmount, queryClient }
 }

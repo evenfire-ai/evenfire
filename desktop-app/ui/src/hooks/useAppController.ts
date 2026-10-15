@@ -338,6 +338,10 @@ export function useAppController() {
     (agentRef: string) => hostAuthority.isBlocked(agentRef),
     [hostAuthority]
   )
+  const heldAgentRefs = useMemo(
+    () => agentsData.agentNames.filter(agentRef => hostAuthority.isBlocked(agentRef)),
+    [agentsData.agentNames, hostAuthority, hostAuthorityRevision]
+  )
   const getHostAuthorityEpoch = useCallback(
     (agentRef: string) => hostAuthority.getEpoch(agentRef),
     [hostAuthority]
@@ -1187,7 +1191,10 @@ export function useAppController() {
           })
           return
         }
-        const latestAgent = pickLatestAgent(agentsData.agentNames, activity.agentLastActiveByAgent)
+        const latestAgent = pickLatestAgent(
+          agentsData.agentNames.filter(agentRef => !isHostAccessBlocked(agentRef)),
+          activity.agentLastActiveByAgent
+        )
         if (latestAgent) {
           handleSelectChatAgent(latestAgent, { selectLatest: false })
         }
@@ -1197,6 +1204,7 @@ export function useAppController() {
       activity.agentLastActiveByAgent,
       agentsData.agentNames,
       handleSelectChatAgent,
+      isHostAccessBlocked,
       nav.handleNavSelect,
     ]
   )
@@ -1539,6 +1547,7 @@ export function useAppController() {
     navItem: nav.navItem,
     selectedAgent: nav.selectedAgent,
     isHostAccessBlocked,
+    heldAgentRefs,
     hostAuthorityRevision,
     selectedAgentRoute: nav.selectedAgentRoute,
     setSelectedAgent: nav.setSelectedAgent,

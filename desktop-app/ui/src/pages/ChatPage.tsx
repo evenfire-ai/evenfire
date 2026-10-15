@@ -13,7 +13,11 @@ type ChatPageProps = {
 
 export function ChatPage({ scrollContainerRef }: ChatPageProps) {
   const { agentNames, loading, error } = useAgentsDataController()
-  const { selectedAgent, handleSelectChatAgent: onSelectAgent } = useNavigationContext()
+  const {
+    selectedAgent,
+    heldAgentRefs,
+    handleSelectChatAgent: onSelectAgent,
+  } = useNavigationContext()
   const { agentLastActiveByAgent } = useAgentActivityContext()
   const didAutoSelect = useRef(false)
 
@@ -23,9 +27,12 @@ export function ChatPage({ scrollContainerRef }: ChatPageProps) {
     }
     if (didAutoSelect.current || selectedAgent || !agentNames.length) return
     didAutoSelect.current = true
-    const best = pickLatestAgent(agentNames, agentLastActiveByAgent)
+    const best = pickLatestAgent(
+      agentNames.filter(agentRef => !heldAgentRefs.includes(agentRef)),
+      agentLastActiveByAgent
+    )
     if (best) onSelectAgent(best, { selectLatest: false })
-  }, [agentNames, agentLastActiveByAgent, selectedAgent, onSelectAgent])
+  }, [agentNames, agentLastActiveByAgent, selectedAgent, onSelectAgent, heldAgentRefs])
 
   if (loading && !agentNames.length) {
     return <ChatPageSkeleton />

@@ -153,6 +153,7 @@ function WorkspaceHarness({
         {
           navItem: 'agents',
           selectedAgent: 'agent-x',
+          heldAgentRefs: [],
           selectedAgentRoute: 'mcp-servers',
           handleNavSelect: vi.fn(),
           handleOpenAgentWorkspace: vi.fn(),

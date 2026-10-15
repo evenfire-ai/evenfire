@@ -4,6 +4,7 @@ import type { AgentWorkspaceRoute, NavItem } from '../uiTypes'
 export interface NavigationContextValue {
   navItem: NavItem
   selectedAgent: string | null
+  heldAgentRefs: string[]
   selectedAgentRoute: AgentWorkspaceRoute
   handleNavSelect: (item: NavItem) => void
   handleOpenAgentWorkspace: (agentName: string, route?: AgentWorkspaceRoute) => void
