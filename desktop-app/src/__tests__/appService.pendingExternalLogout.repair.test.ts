@@ -264,6 +264,12 @@ describe('explicit login repair uses the pending-logout storage plan', () => {
     expect(harness.service.getCachedUserId()).toBeNull()
     expect(await harness.tokenStore.getKeytarSessionToken(harness.envKey)).toBeNull()
     expect(notifySessionChanged).toHaveBeenCalledWith(false)
+    const restarted = await createService()
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+    })
+    expect(restarted.authClient.getMe).not.toHaveBeenCalledWith('fixture-fresh-session')
     expect(error).toBeInstanceOf(Error)
     expect(error.message).toMatch(/Pending logout intent changed|mutation was superseded/)
   })

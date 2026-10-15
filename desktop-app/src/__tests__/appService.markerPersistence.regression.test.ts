@@ -499,7 +499,7 @@ describe('team persistence preserves the existing secure session on transient fa
 })
 
 describe('persistence transaction ordering', () => {
-  it('does not let a paused restorative write overwrite a completed newer login', async () => {
+  it('keeps a newer queued login authoritative after a paused restorative write', async () => {
     const h = await harness()
     await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
     h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'active-keytar')
@@ -519,21 +519,31 @@ describe('persistence transaction ordering', () => {
       }
       runtime.keychain.set(keyOf(service, account), token)
     })
-    const switching = h.service.switchTeam('fixture-other')
+    const switching = own(h.service.switchTeam('fixture-other'))
     const switchedResult = switching.then(
       () => undefined,
       () => undefined
     )
-    await restoringEntered.promise
-    const newerMe = { ...homeMe, id: 'fixture-new-user' }
-    const newer = h.state.installAuthenticatedLogin({
-      token: 'fixture-new-user-session',
-      me: newerMe,
+    await awaitPhase(restoringEntered.promise, switching, 'restorative native write')
+    const queued = deferred()
+    const persist = h.state.runSessionPersistence.bind(h.state)
+    vi.spyOn(h.state, 'runSessionPersistence').mockImplementationOnce(operation => {
+      queued.resolve()
+      return persist(operation)
     })
-    await Promise.race([newer, new Promise(resolve => setTimeout(resolve, 250))])
-    restoringRelease.resolve()
+    const newerMe = { ...homeMe, id: 'fixture-new-user' }
+    const newer = own(
+      h.state.installAuthenticatedLogin({
+        token: 'fixture-new-user-session',
+        me: newerMe,
+      })
+    )
+    try {
+      await awaitPhase(queued.promise, newer, 'new login behind restorative write')
+    } finally {
+      restoringRelease.resolve()
+    }
     await Promise.all([switchedResult, newer])
-    expect(h.service.getCachedUserId()).toBe(newerMe.id)
     const restarted = await harness()
     vi.mocked(restarted.state.authClient.getMe).mockResolvedValue(newerMe)
     await expect(restarted.service.initialize()).resolves.toEqual({
@@ -542,6 +552,7 @@ describe('persistence transaction ordering', () => {
     })
     expect(restarted.state.authClient.getMe).toHaveBeenCalledWith('fixture-new-user-session')
     expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith(homeToken)
+    expect(h.service.getCachedUserId()).toBe(newerMe.id)
   })
 
   it('retains the newer user when an older team identity refresh resolves later', async () => {
@@ -554,12 +565,12 @@ describe('persistence transaction ordering', () => {
       await release.promise
       return { ...homeMe, teamId: 'fixture-other' }
     })
-    const switching = h.service.switchTeam('fixture-other')
+    const switching = own(h.service.switchTeam('fixture-other'))
     const switchedResult = switching.then(
       () => undefined,
       () => undefined
     )
-    await entered.promise
+    await awaitPhase(entered.promise, switching, 'older team identity refresh')
     const newerMe = { ...homeMe, id: 'fixture-new-user' }
     await h.state.installAuthenticatedLogin({ token: 'fixture-new-user-session', me: newerMe })
     release.resolve()
@@ -582,24 +593,32 @@ describe('persistence transaction ordering', () => {
       await release.promise
       runtime.keychain.set(keyOf(service, account), token)
     })
-    const switching = h.service.switchTeam('fixture-other')
+    const switching = own(h.service.switchTeam('fixture-other'))
     // Attach rejection immediately: the buggy snapshot rejects after its stale write completes.
     const switchedResult = switching.then(
       () => undefined,
       () => undefined
     )
-    await entered.promise
-    const newerMe = { ...homeMe, id: 'fixture-new-user' }
-    const newer = h.state.installAuthenticatedLogin({
-      token: 'fixture-new-user-session',
-      me: newerMe,
+    await awaitPhase(entered.promise, switching, 'older native team write')
+    const queued = deferred()
+    const persist = h.state.runSessionPersistence.bind(h.state)
+    vi.spyOn(h.state, 'runSessionPersistence').mockImplementationOnce(operation => {
+      queued.resolve()
+      return persist(operation)
     })
-    // A bounded scheduling window lets the buggy ungated login actually finish;
-    // the fixed gate holds it until the admitted older native setter settles.
-    await Promise.race([newer, new Promise(resolve => setTimeout(resolve, 250))])
-    release.resolve()
+    const newerMe = { ...homeMe, id: 'fixture-new-user' }
+    const newer = own(
+      h.state.installAuthenticatedLogin({
+        token: 'fixture-new-user-session',
+        me: newerMe,
+      })
+    )
+    try {
+      await awaitPhase(queued.promise, newer, 'new login behind admitted native setter')
+    } finally {
+      release.resolve()
+    }
     await Promise.all([switchedResult, newer])
-    expect(h.service.getCachedUserId()).toBe(newerMe.id)
     const restarted = await harness()
     vi.mocked(restarted.state.authClient.getMe).mockResolvedValue(newerMe)
     await expect(restarted.service.initialize()).resolves.toEqual({
@@ -608,6 +627,7 @@ describe('persistence transaction ordering', () => {
     })
     expect(restarted.state.authClient.getMe).toHaveBeenCalledWith('fixture-new-user-session')
     expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith('fixture-other-session')
+    expect(h.service.getCachedUserId()).toBe(newerMe.id)
   })
 })
 
@@ -691,11 +711,11 @@ describe('R20-M4 ordinary partial-write recovery', () => {
       }
       return rename(source, destination)
     })
-    await expect(h.service.switchTeam('fixture-other')).rejects.toThrow(
-      'fixture-encrypted rename failed'
+    const error = await h.service.switchTeam('fixture-other').then(
+      () => null,
+      error => error
     )
     expect(fileWriteFailed).toBe(true)
-    expect(h.state.sessionToken).toBe(homeToken)
     const restarted = await harness()
     await expect(restarted.service.initialize()).resolves.toEqual({
       authenticated: true,
@@ -703,6 +723,9 @@ describe('R20-M4 ordinary partial-write recovery', () => {
     })
     expect(restarted.state.authClient.getMe).toHaveBeenCalledWith(homeToken)
     expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith('fixture-other-session')
+    expect(h.state.sessionToken).toBe(homeToken)
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toBe('fixture-encrypted rename failed')
   })
 })
 
@@ -720,19 +743,16 @@ describe('R20-M5 rejected encrypted fallback residue', () => {
       if (String(file).endsWith('.enc')) throw new Error('fixture-encrypted disposal failed')
       return unlink(file)
     })
-    await expect(h.service.switchTeam('fixture-other')).rejects.toThrow('could not be verified')
-    expect(h.state.sessionToken).toBe(homeToken)
+    const error = await h.service.switchTeam('fixture-other').then(
+      () => null,
+      error => error
+    )
     const firstRestart = await harness()
-    await expect(firstRestart.service.initialize()).resolves.toEqual({
-      authenticated: true,
-      me: homeMe,
-    })
-    expect(
-      firstRestart.markers.readPendingExternalLogoutIntent(runtime.directory, h.envKey)
-    ).toEqual({
-      intent: 'keytar-cleanup-pending',
-      credentialSource: 'active-keytar',
-    })
+    const firstState = await firstRestart.service.initialize()
+    const firstMarker = firstRestart.markers.readPendingExternalLogoutIntent(
+      runtime.directory,
+      h.envKey
+    )
     vi.doMock('keytar', () => ({}))
     const secondRestart = await harness()
     await expect(secondRestart.service.initialize()).resolves.toEqual({
@@ -740,6 +760,14 @@ describe('R20-M5 rejected encrypted fallback residue', () => {
       me: null,
     })
     expect(secondRestart.state.authClient.getMe).not.toHaveBeenCalledWith('fixture-other-session')
+    expect(firstState).toEqual({ authenticated: true, me: homeMe })
+    expect(firstMarker).toEqual({
+      intent: 'keytar-cleanup-pending',
+      credentialSource: 'active-keytar',
+    })
+    expect(h.state.sessionToken).toBe(homeToken)
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toContain('could not be verified')
   })
 
   it('does not restore a rejected fallback after cleanup retired and Keytar subsequently disappeared', async () => {
@@ -750,16 +778,16 @@ describe('R20-M5 rejected encrypted fallback residue', () => {
     vi.mocked(keytar.setPassword).mockRejectedValueOnce(new Error('fixture-transient Keytar write'))
     const { safeStorage } = await import('electron')
     vi.mocked(safeStorage.decryptString).mockReturnValueOnce('')
-    await expect(h.service.switchTeam('fixture-other')).rejects.toThrow('could not be verified')
-    expect(h.state.sessionToken).toBe(homeToken)
+    const error = await h.service.switchTeam('fixture-other').then(
+      () => null,
+      error => error
+    )
     const firstRestart = await harness()
-    await expect(firstRestart.service.initialize()).resolves.toEqual({
-      authenticated: true,
-      me: homeMe,
-    })
-    expect(
-      firstRestart.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)
-    ).toBeNull()
+    const firstState = await firstRestart.service.initialize()
+    const firstMarker = firstRestart.markers.readPendingExternalLogoutMarker(
+      runtime.directory,
+      h.envKey
+    )
     vi.doMock('keytar', () => ({}))
     const secondRestart = await harness()
     await expect(secondRestart.service.initialize()).resolves.toEqual({
@@ -767,6 +795,11 @@ describe('R20-M5 rejected encrypted fallback residue', () => {
       me: null,
     })
     expect(secondRestart.state.authClient.getMe).not.toHaveBeenCalledWith('fixture-other-session')
+    expect(firstState).toEqual({ authenticated: true, me: homeMe })
+    expect(firstMarker).toBeNull()
+    expect(h.state.sessionToken).toBe(homeToken)
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toContain('could not be verified')
   })
 })
 
@@ -815,8 +848,8 @@ describe('R18-M3 cleanup-only revision ownership', () => {
       await cleanupRelease.promise
       throw new Error('fixture-legacy cleanup temporarily failed')
     })
-    const restoring = h.service.initialize()
-    await cleanupEntered.promise
+    const restoring = own(h.service.initialize())
+    await awaitPhase(cleanupEntered.promise, restoring, 'startup native cleanup')
     vi.mocked(keytar.setPassword).mockRejectedValueOnce(new Error('fixture-transient Keytar write'))
     const encryptedEntered = deferred()
     const encryptedRelease = deferred()
@@ -826,10 +859,10 @@ describe('R18-M3 cleanup-only revision ownership', () => {
       encryptedEntered.resolve()
       await encryptedRelease.promise
     })
-    const switching = h.service.switchTeam('fixture-other')
+    const switching = own(h.service.switchTeam('fixture-other'))
     await new Promise(resolve => setImmediate(resolve))
     cleanupRelease.resolve()
-    await Promise.race([encryptedEntered.promise, switching.catch(() => undefined)])
+    await awaitPhase(encryptedEntered.promise, switching, 'team encrypted fallback')
     encryptedRelease.resolve()
     await expect(switching).resolves.toEqual({
       authenticated: true,
