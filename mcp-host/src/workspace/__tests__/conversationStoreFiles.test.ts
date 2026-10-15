@@ -85,7 +85,12 @@ describe('conversation-store files are not agent-accessible', () => {
     const names = (await workspace.list()).map(e => e.name)
     // Witness: the listing has the ordinary files.
     expect(names).toEqual(expect.arrayContaining(['mystate.db.txt', 'notes.md']))
-    for (const p of STORE_FILES) expect(names).not.toContain(p)
+    for (const p of PROTECTED) expect(names).not.toContain(p)
+
+    const all = await workspace.listAll()
+    // Witness: the recursive listing has the ordinary files.
+    expect(all).toEqual(expect.arrayContaining(['mystate.db.txt', 'notes.md']))
+    for (const p of PROTECTED) expect(all).not.toContain(p)
 
     const hits = (await workspace.search('needle')).map(r => r.path)
     // Witness: the same query finds the ordinary note.
