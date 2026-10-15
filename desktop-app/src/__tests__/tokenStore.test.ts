@@ -97,13 +97,14 @@ describe('TokenStore per-environment slots (spec §5.2)', () => {
 
   it('rejects new operations after the TokenStore drain begins', async () => {
     const keytar = await import('keytar')
+    const originalSetPassword = vi.mocked(keytar.setPassword).getMockImplementation()!
     let finishWrite!: () => void
-    vi.mocked(keytar.setPassword).mockImplementationOnce(
-      () =>
-        new Promise<void>(resolve => {
-          finishWrite = resolve
-        })
-    )
+    vi.mocked(keytar.setPassword).mockImplementationOnce(async (service, account, token) => {
+      await new Promise<void>(resolve => {
+        finishWrite = resolve
+      })
+      await originalSetPassword(service, account, token)
+    })
     const store = new TokenStore()
     const activeWrite = store.setSessionToken('active-token', ENV_A)
     await vi.waitFor(() => {
@@ -226,12 +227,12 @@ describe('TokenStore per-environment slots (spec §5.2)', () => {
     })
 
     let finishWrite!: () => void
-    vi.mocked(keytar.setPassword).mockImplementationOnce(
-      () =>
-        new Promise<void>(resolve => {
-          finishWrite = resolve
-        })
-    )
+    vi.mocked(keytar.setPassword).mockImplementationOnce(async (service, account, token) => {
+      await new Promise<void>(resolve => {
+        finishWrite = resolve
+      })
+      await originalSetPassword(service, account, token)
+    })
 
     const read = store.getSessionToken(ENV_A)
     await vi.waitFor(() => {
@@ -257,6 +258,9 @@ describe('TokenStore per-environment slots (spec §5.2)', () => {
       await expect(read).resolves.toBe('legacy-token')
       await expect(drain).resolves.toBeUndefined()
       expect(drainFinished).toBe(true)
+      expect(keychain.get(keyOf(SERVICE, `${LEGACY_ACCOUNT}::${ENV_A}`))).toBe('legacy-token')
+      expect(keychain.has(keyOf(SERVICE, LEGACY_ACCOUNT))).toBe(false)
+      await expect(new TokenStore().getSessionToken(ENV_A)).resolves.toBe('legacy-token')
     } finally {
       finishLegacyRead()
       const migrationWriteStarted = await vi

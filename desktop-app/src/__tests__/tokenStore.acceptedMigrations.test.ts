@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { TokenStore } from '../tokenStore.js'
+import {
+  type SessionTokenReadAuthority,
+  type SessionTokenReadSource,
+  TokenStore,
+  isSessionTokenReadAuthorityCurrent,
+} from '../tokenStore.js'
 
 const fixture = vi.hoisted(() => ({
   directory: '',
@@ -46,6 +51,20 @@ function deferred() {
   return { promise, resolve }
 }
 
+async function boundedActor<T>(operation: Promise<T>, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`Producer did not reach ${label}`)), 2000)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 type Migration = {
   name: string
   scope: 'environment' | 'global'
@@ -80,7 +99,9 @@ async function seedMigration(migration: Migration) {
   // no consumer response or token-file representation is handwritten.
   fixture.keytarWritesAvailable = migration.source === 'keytar'
   fixture.encryptionAvailable = migration.source !== 'plaintext'
-  await new TokenStore().setSessionToken(TOKEN, LEGACY_ENV)
+  await new TokenStore(
+    migration.source === 'plaintext' ? { isolatedUserDataPath: fixture.directory } : {}
+  ).setSessionToken(TOKEN, LEGACY_ENV)
   const extension = migration.source === 'encrypted' ? 'enc' : 'json'
   const scopedFile = path.join(fixture.directory, `session-token-${LEGACY_ENV}.${extension}`)
   const sourceAccount = migration.scope === 'global' ? 'session-token' : oldAccount
@@ -110,6 +131,7 @@ describe('TokenStore migrations stay inside an already accepted read', () => {
     const destinationStarted = deferred()
     const releaseDestination = deferred()
     const keytar = await import('keytar')
+    const store = new TokenStore()
     if (migration.source === 'keytar') {
       vi.mocked(keytar.getPassword).mockImplementation(async (_service, account) => {
         if (account === sourceAccount) {
@@ -119,13 +141,21 @@ describe('TokenStore migrations stay inside an already accepted read', () => {
         return fixture.keychain.get(account) ?? null
       })
     } else {
-      const readFile = fs.readFile.bind(fs)
-      vi.spyOn(fs, 'readFile').mockImplementation(async (...args) => {
-        if (String(args[0]) === sourceFile) {
+      const sourceReader = store as unknown as {
+        readMigrationFileSource: (
+          file: string,
+          source: 'safe-storage' | 'historical-plaintext',
+          options: unknown
+        ) => Promise<string | null>
+      }
+      const readSource = sourceReader.readMigrationFileSource.bind(sourceReader)
+      vi.spyOn(sourceReader, 'readMigrationFileSource').mockImplementation(async (...args) => {
+        const token = await readSource(...args)
+        if (args[0] === sourceFile && token !== null) {
           sourceStarted.resolve()
           await releaseSource.promise
         }
-        return readFile(...args)
+        return token
       })
     }
     vi.mocked(keytar.setPassword).mockImplementation(async (_service, account, token) => {
@@ -135,27 +165,42 @@ describe('TokenStore migrations stay inside an already accepted read', () => {
       }
       fixture.keychain.set(account, token)
     })
-    const store = new TokenStore()
+    let selectedAuthority: SessionTokenReadAuthority | undefined
+    let selectedSource: SessionTokenReadSource | undefined
+    let writtenAuthority: SessionTokenReadAuthority | undefined
+    const settlements: string[] = []
     const accepted = store.getSessionToken(ENV, {
       legacyEnvKeys: migration.scope === 'environment' ? [LEGACY_ENV] : [],
+      onTokenRead: (source, authority) => {
+        selectedSource = source
+        selectedAuthority = authority
+      },
+      onMutationSettled: (source, authority) => {
+        settlements.push(source)
+        writtenAuthority = authority
+      },
     })
-    await sourceStarted.promise
     let drained = false
-    const drain = store.prepareForQuit().then(() => {
-      drained = true
-    })
+    let drain: Promise<void> | undefined
     try {
+      await boundedActor(sourceStarted.promise, `${migration.name} selected source`)
+      drain = store.prepareForQuit().then(() => {
+        drained = true
+      })
       await expect(store.getSessionToken(ENV)).rejects.toThrow('Application is shutting down')
       releaseSource.resolve()
-      const next = await Promise.race([
-        destinationStarted.promise.then(() => 'migration-write'),
-        accepted.then(token => {
-          expect(token, 'accepted migration must return the persisted source credential').toBe(
-            TOKEN
-          )
-          return 'read-finished'
-        }),
-      ])
+      const next = await boundedActor(
+        Promise.race([
+          destinationStarted.promise.then(() => 'migration-write'),
+          accepted.then(token => {
+            expect(token, 'accepted migration must return the persisted source credential').toBe(
+              TOKEN
+            )
+            return 'read-finished'
+          }),
+        ]),
+        `${migration.name} destination publication`
+      )
       expect(next, 'the accepted read must persist its migrated credential').toBe('migration-write')
       await new Promise<void>(resolve => setImmediate(resolve))
       expect(drained, 'quit must wait for the accepted migration write').toBe(false)
@@ -163,6 +208,11 @@ describe('TokenStore migrations stay inside an already accepted read', () => {
       await expect(accepted).resolves.toBe(TOKEN)
       await drain
       expect(drained).toBe(true)
+      expect(selectedSource).toBe('keytar')
+      expect(settlements).toEqual(['keytar'])
+      expect(isSessionTokenReadAuthorityCurrent(writtenAuthority, 'keytar', ENV)).toBe(true)
+      expect(isSessionTokenReadAuthorityCurrent(selectedAuthority, 'keytar', ENV)).toBe(true)
+      expect(isSessionTokenReadAuthorityCurrent(selectedAuthority, 'safe-storage', ENV)).toBe(false)
       // Restart restores the migrated token with no legacy upgrade options.
       await expect(new TokenStore().getSessionToken(ENV)).resolves.toBe(TOKEN)
       if (migration.source === 'keytar') {

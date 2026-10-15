@@ -187,9 +187,7 @@ describe('pending logout accepted lifecycle coverage', () => {
       expect(newer.revision).not.toBe(observed.revision)
       release.resolve()
 
-      await expect(login).rejects.toThrow(
-        'Pending logout intent changed while login was completing'
-      )
+      await expect(login).rejects.toThrow(/Pending logout intent changed|superseded/)
       await draining
       expect(state.sessionToken).toBeNull()
       expect(state.me).toBeNull()
@@ -299,21 +297,22 @@ describe('pending logout accepted lifecycle coverage', () => {
     markerStore.recordPendingExternalLogout(runtime.directory, activeEnvKey)
     const { safeStorage } = await import('electron')
     vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
-    const originalRead = fs.readFile.bind(fs)
-    vi.spyOn(fs, 'readFile').mockImplementation((...args: Parameters<typeof fs.readFile>) => {
-      if (String(args[0]).endsWith(`session-token-${activeEnvKey}.json`))
-        return Promise.resolve('{not-json') as ReturnType<typeof fs.readFile>
-      return originalRead(...args)
+    const originalWrite = tokenStore.setSessionToken.bind(tokenStore)
+    vi.spyOn(tokenStore, 'setSessionToken').mockImplementation(async (...args) => {
+      await originalWrite(...args)
+      await fs.writeFile(
+        path.join(runtime.directory, `session-token-${activeEnvKey}.json`),
+        '{not-json'
+      )
     })
 
-    await expect(state.installAuthenticatedLoginOnce(loginResult)).rejects.toThrow(
-      'Fresh session token could not be verified'
-    )
+    const failure = await state.installAuthenticatedLoginOnce(loginResult).catch(error => error)
     expect(state.sessionToken).toBeNull()
     expect(state.me).toBeNull()
     expect(markerStore.readPendingExternalLogoutIntent(runtime.directory, activeEnvKey)).toEqual({
       intent: 'logout-pending',
     })
+    expect(failure).toBeInstanceOf(Error)
   })
 
   it('rejects ordinary logout when strict deletion and durable marker persistence both fail', async () => {

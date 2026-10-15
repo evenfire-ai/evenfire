@@ -49,14 +49,6 @@ vi.mock('../authClient.js', () => ({
   },
 }))
 
-vi.mock('../tokenStore.js', () => ({
-  TokenStore: class {
-    getSessionToken = vi.fn().mockResolvedValue(null)
-    setSessionToken = vi.fn()
-    clearSessionToken = vi.fn()
-  },
-}))
-
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 function makeService(): AppService {

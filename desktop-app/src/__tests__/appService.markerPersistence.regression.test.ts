@@ -13,6 +13,8 @@ const keytarBoundary = vi.hoisted(() => ({
   deletePassword: vi.fn(),
 }))
 const keyOf = (service: string, account: string) => `${service}::${account}`
+const barrierReleases = new Set<() => void>()
+const ownedOperations = new Set<Promise<unknown>>()
 vi.mock('keytar', () => keytarBoundary)
 vi.mock('electron', () => ({
   app: { getPath: vi.fn(() => runtime.directory), isReady: vi.fn(() => true) },
@@ -69,6 +71,9 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  for (const release of barrierReleases) release()
+  await Promise.allSettled([...ownedOperations])
+  barrierReleases.clear()
   vi.restoreAllMocks()
   await fs.rm(runtime.directory, { recursive: true, force: true })
   runtime.directory = ''
@@ -94,6 +99,7 @@ async function harness() {
     sessionToken: string | null
     me: typeof homeMe | null
     installAuthenticatedLogin: (result: { token: string; me: typeof homeMe }) => Promise<unknown>
+    runSessionPersistence: <T>(operation: () => Promise<T>) => Promise<T>
     runWithTeamContext: <T>(team: string, operation: (token: string) => Promise<T>) => Promise<T>
     authClient: {
       getMe: (token: string) => Promise<typeof homeMe>
@@ -113,28 +119,51 @@ async function harness() {
 function deferred() {
   let resolve!: () => void
   const promise = new Promise<void>(done => {
-    resolve = done
+    resolve = () => {
+      barrierReleases.delete(resolve)
+      done()
+    }
   })
+  barrierReleases.add(resolve)
   return { promise, resolve }
 }
 
-describe('failed login fences an already-admitted logout', () => {
-  it('does not restore a rejected credential after the older logout finishes', async () => {
+function own<T>(operation: Promise<T>): Promise<T> {
+  ownedOperations.add(operation)
+  void operation.then(
+    () => ownedOperations.delete(operation),
+    () => ownedOperations.delete(operation)
+  )
+  return operation
+}
+
+async function awaitPhase(phase: Promise<void>, producer: Promise<unknown>, label: string) {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const result = await Promise.race([
+      phase.then(() => 'entered'),
+      producer.then(
+        () => 'settled',
+        () => 'settled'
+      ),
+      new Promise<string>(resolve => {
+        timer = setTimeout(() => resolve('deadline'), 5_000)
+      }),
+    ])
+    expect(result, `The producer must reach ${label} before settling`).toBe('entered')
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+describe('failed login follows an already-admitted logout transaction', () => {
+  it('queues the rejected login behind logout and never restores its credential', async () => {
     const h = await harness()
     h.markers.recordPendingExternalLogout(runtime.directory, h.envKey)
     const entered = deferred()
     const release = deferred()
     const keytar = await import('keytar')
-    const activeAccount = `session-token::${h.envKey}`
-    let firstActiveDelete = true
     vi.mocked(keytar.deletePassword).mockImplementation(async (service, account) => {
-      if (account === activeAccount && firstActiveDelete) {
-        firstActiveDelete = false
-        const deleted = runtime.keychain.delete(keyOf(service, account))
-        entered.resolve()
-        await release.promise
-        return deleted
-      }
       if (runtime.keychain.get(keyOf(service, account)) === 'fixture-rejected-session') {
         throw new Error('fixture-rollback deletion failed')
       }
@@ -145,16 +174,38 @@ describe('failed login fences an already-admitted logout', () => {
       if (token === 'fixture-rejected-session') throw new Error('fixture-read-back failed')
       return token
     })
-    const oldLogout = h.service.logout()
-    await entered.promise
+    // Pause the real clear's response after native effects have settled. The full
+    // logout transaction must retain the persistence lane until that response.
+    const clear = h.tokenStore.clearSessionTokenStrictly.bind(h.tokenStore)
+    vi.spyOn(h.tokenStore, 'clearSessionTokenStrictly').mockImplementationOnce(async (...args) => {
+      const result = await clear(...args)
+      entered.resolve()
+      await release.promise
+      return result
+    })
+    const oldLogout = own(h.service.logout())
+    await awaitPhase(entered.promise, oldLogout, 'completed native logout cleanup')
+    const loginQueued = deferred()
+    const persist = h.state.runSessionPersistence.bind(h.state)
+    vi.spyOn(h.state, 'runSessionPersistence').mockImplementationOnce(operation => {
+      loginQueued.resolve()
+      return persist(operation)
+    })
+    const login = own(
+      h.state.installAuthenticatedLogin({ token: 'fixture-rejected-session', me: homeMe })
+    )
+    const loginOutcome = login.then(
+      () => null,
+      error => error
+    )
     try {
-      await expect(
-        h.state.installAuthenticatedLogin({ token: 'fixture-rejected-session', me: homeMe })
-      ).rejects.toThrow('Fresh session token could not be verified')
+      await awaitPhase(loginQueued.promise, login, 'queued explicit login')
+      expect(keytar.setPassword).not.toHaveBeenCalled()
     } finally {
       release.resolve()
       await oldLogout
     }
+    const error = await loginOutcome
     vi.mocked(keytar.getPassword).mockImplementation(
       async (service, account) => runtime.keychain.get(keyOf(service, account)) ?? null
     )
@@ -165,11 +216,13 @@ describe('failed login fences an already-admitted logout', () => {
     })
     expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith('fixture-rejected-session')
     expect(restarted.service.getCachedUserId()).toBeNull()
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toContain('Fresh session token could not be verified')
   })
 })
 
 describe('team persistence preserves the existing secure session on transient failures', () => {
-  it('preserves old CP-K authentication when native absence precedes a rejected encrypted fallback', async () => {
+  it('preserves Home through verified encrypted recovery after native storage becomes unavailable', async () => {
     const h = await harness()
     await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
     h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'active-keytar')
@@ -181,13 +234,15 @@ describe('team persistence preserves the existing secure session on transient fa
     expect(h.state.me).toEqual(homeMe)
     expect(h.markers.readPendingExternalLogoutIntent(runtime.directory, h.envKey)).toEqual({
       intent: 'keytar-cleanup-pending',
-      credentialSource: 'active-keytar',
+      credentialSource: 'safe-storage',
     })
+    expect(await h.tokenStore.getSafeStorageSessionToken(h.envKey)).toBe(homeToken)
     const restarted = await harness()
     await expect(restarted.service.initialize()).resolves.toEqual({
-      authenticated: false,
-      me: null,
+      authenticated: true,
+      me: homeMe,
     })
+    expect(restarted.state.authClient.getMe).toHaveBeenCalledWith(homeToken)
     expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith('fixture-other-session')
   })
 
@@ -283,10 +338,11 @@ describe('team persistence preserves the existing secure session on transient fa
     })
   })
 
-  it('fences a partial write when restoring the old authoritative credential also fails', async () => {
+  it('denies a rejected partial write without manufacturing logout intent after failed repair', async () => {
     const h = await harness()
     await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
     h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'active-keytar')
+    const originalMarker = h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)
     const { safeStorage } = await import('electron')
     vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
     const keytar = await import('keytar')
@@ -296,9 +352,16 @@ describe('team persistence preserves the existing secure session on transient fa
     })
     await expect(h.service.switchTeam('fixture-other')).rejects.toThrow(/Keytar|safeStorage/)
     expect(h.service.getCachedUserId()).toBeNull()
-    expect(h.markers.readPendingExternalLogoutIntent(runtime.directory, h.envKey)).toEqual({
-      intent: 'logout-pending',
-    })
+    expect(h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)).toEqual(
+      originalMarker
+    )
+    const journal = await import('../sessionPersistenceJournal.js')
+    expect(
+      journal.isSessionPersistenceCandidateDenied(
+        journal.readSessionPersistenceJournal(runtime.directory, h.envKey),
+        'fixture-other-session'
+      )
+    ).toBe(true)
     const restarted = await harness()
     await expect(restarted.service.initialize()).resolves.toEqual({
       authenticated: false,
@@ -321,13 +384,17 @@ describe('team persistence preserves the existing secure session on transient fa
       entered.resolve()
       await release.promise
     })
-    const switching = h.service.switchTeam('fixture-other')
-    await entered.promise
-    const draining = h.service.prepareForQuit()
+    const switching = own(h.service.switchTeam('fixture-other'))
+    const outcome = switching.then(
+      () => null,
+      error => error
+    )
+    await awaitPhase(entered.promise, switching, 'encrypted source write')
+    const draining = own(h.service.prepareForQuit())
     await expect(h.service.logout()).rejects.toThrow('shutting down')
     const newer = h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)
     release.resolve()
-    await expect(switching).rejects.toThrow('Pending logout intent changed')
+    const error = await outcome
     await draining
     expect(h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)).toEqual(newer)
     expect(h.state.sessionToken).toBe(homeToken)
@@ -337,6 +404,8 @@ describe('team persistence preserves the existing secure session on transient fa
       me: null,
     })
     expect(restarted.state.authClient.getMe).not.toHaveBeenCalled()
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toMatch(/Pending logout intent changed|mutation was superseded/)
   })
 
   it.each([
@@ -544,7 +613,7 @@ describe('persistence transaction ordering', () => {
 
 describe('R20-M4 ordinary partial-write recovery', () => {
   it.each(['absent', 'active-keytar'] as const)(
-    'fences a late admitted native writer after logout with an originally %s marker',
+    'drains the admitted writer before logout clears an originally %s marker',
     async markerSource => {
       const h = await harness()
       await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
@@ -558,22 +627,50 @@ describe('R20-M4 ordinary partial-write recovery', () => {
         await release.promise
         runtime.keychain.set(keyOf(service, account), token)
       })
-      const switching = h.service.switchTeam('fixture-other')
-      const rejection = switching.catch(() => undefined)
-      await entered.promise
-      await h.service.logout()
-      const restoring = h.service.initialize()
-      release.resolve()
-      await expect(switching).rejects.toThrow(/changed|superseded/)
+      const switching = own(h.service.switchTeam('fixture-other'))
+      const rejection = switching.then(
+        () => null,
+        error => error
+      )
+      await awaitPhase(entered.promise, switching, 'admitted native writer')
+      const logoutQueued = deferred()
+      const persist = h.state.runSessionPersistence.bind(h.state)
+      vi.spyOn(h.state, 'runSessionPersistence').mockImplementationOnce(operation => {
+        logoutQueued.resolve()
+        return persist(operation)
+      })
+      const clear = vi.spyOn(h.tokenStore, 'clearSessionTokenStrictly')
+      const logout = own(h.service.logout())
+      let logoutSettled = false
+      void logout.then(
+        () => {
+          logoutSettled = true
+        },
+        () => {
+          logoutSettled = true
+        }
+      )
+      try {
+        await awaitPhase(logoutQueued.promise, logout, 'queued logout storage transaction')
+        expect(logoutSettled).toBe(false)
+        expect(clear).not.toHaveBeenCalled()
+      } finally {
+        release.resolve()
+      }
       await rejection
-      await expect(restoring).resolves.toEqual({ authenticated: false, me: null })
-      expect(h.state.authClient.getMe).not.toHaveBeenCalledWith('fixture-other-session')
+      await logout
+      vi.mocked(h.state.authClient.getMe).mockClear()
+      await expect(h.service.initialize()).resolves.toEqual({ authenticated: false, me: null })
       const restarted = await harness()
       await expect(restarted.service.initialize()).resolves.toEqual({
         authenticated: false,
         me: null,
       })
       expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith('fixture-other-session')
+      expect(h.state.authClient.getMe).not.toHaveBeenCalledWith('fixture-other-session')
+      expect(h.service.getCachedUserId()).toBeNull()
+      expect(await h.tokenStore.getKeytarSessionToken(h.envKey)).toBeNull()
+      expect(await h.tokenStore.getSafeStorageSessionToken(h.envKey)).toBeNull()
     }
   )
 
@@ -795,17 +892,26 @@ describe('R20-M7 restore response epoch fencing', () => {
     h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'active-keytar')
     const entered = deferred()
     const release = deferred()
-    const readEncrypted = h.tokenStore.getSafeStorageSessionToken.bind(h.tokenStore)
-    vi.spyOn(h.tokenStore, 'getSafeStorageSessionToken').mockImplementationOnce(async (...args) => {
-      const token = await readEncrypted(...args)
-      entered.resolve()
-      await release.promise
-      return token
-    })
-    const restoring = h.service.initialize()
-    await entered.promise
-    await h.service.logout()
-    release.resolve()
+    const state = h.service as unknown as {
+      retirePendingKeytarCleanupAfterRestore: (plan: unknown, envKey: string) => Promise<void>
+    }
+    const retire = state.retirePendingKeytarCleanupAfterRestore.bind(state)
+    // Hold only the outer response after real retirement releases its storage
+    // lane, so completed logout remains a reachable restore-epoch competitor.
+    vi.spyOn(state, 'retirePendingKeytarCleanupAfterRestore').mockImplementationOnce(
+      async (...args) => {
+        await retire(...args)
+        entered.resolve()
+        await release.promise
+      }
+    )
+    const restoring = own(h.service.initialize())
+    await awaitPhase(entered.promise, restoring, 'restore cleanup retirement')
+    try {
+      await h.service.logout()
+    } finally {
+      release.resolve()
+    }
     await expect(restoring).resolves.toEqual({ authenticated: false, me: null })
     expect(h.state.sessionToken).toBeNull()
     expect(h.state.me).toBeNull()

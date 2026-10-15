@@ -1,13 +1,20 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { AppService } from '../appService.js'
-import { config } from '../config.js'
+import { config, getActiveEnvKey } from '../config.js'
 import { ApiError } from '../httpClient.js'
+import { TokenStore } from '../tokenStore.js'
 import type { EntityChangeStreamEvent } from '../types.js'
 
+const credentialFixture = vi.hoisted(() => ({
+  directory: `${process.cwd()}/.uninitialized-entity-fixture`,
+}))
 vi.mock('electron', () => ({
   app: {
-    isReady: vi.fn(() => false),
-    getPath: vi.fn(() => '/tmp/clerum-desktop-test'),
+    isReady: vi.fn(() => true),
+    getPath: vi.fn(() => credentialFixture.directory),
   },
   safeStorage: {
     isEncryptionAvailable: vi.fn(() => false),
@@ -16,6 +23,15 @@ vi.mock('electron', () => ({
   },
   shell: { openExternal: vi.fn() },
 }))
+
+beforeEach(async () => {
+  credentialFixture.directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-entity-source-'))
+})
+afterEach(async () => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+  await fs.rm(credentialFixture.directory, { recursive: true, force: true })
+})
 
 async function flushAsyncWork(iterations = 6): Promise<void> {
   for (let index = 0; index < iterations; index += 1) await Promise.resolve()
@@ -53,7 +69,8 @@ describe('AppService entity-change fan-out', () => {
     service.beginPrewarmAuthTransition = () => () => undefined
     service.bindCurrentChatStore = vi.fn().mockResolvedValue(undefined)
     service.activateGfsAuthScope = vi.fn()
-    service.tokenStore = { setSessionToken: vi.fn().mockResolvedValue(undefined) }
+    service.tokenStore = new TokenStore({ isolatedUserDataPath: credentialFixture.directory })
+    await service.tokenStore.setSessionToken('old-committed-token', getActiveEnvKey())
     service.rpcTokenManager = { clear: vi.fn() }
     const opened: Array<{
       token: string
@@ -89,6 +106,10 @@ describe('AppService entity-change fan-out', () => {
 
     await service.googleLogin('id-token')
     await flushAsyncWork()
+
+    expect(await service.tokenStore.getSessionToken(getActiveEnvKey())).toBe(
+      'synthetic-new-committed-token'
+    )
 
     expect(opened[0]?.signal.aborted).toBe(true)
     expect(opened[1]).toMatchObject({ token: 'synthetic-new-committed-token', cursor: null })
@@ -498,7 +519,8 @@ describe('AppService entity-change stream team-context lifecycle', () => {
     service.me = { id: 'user-1', teamId: 'team-a' }
     service.gfsScopeIdentity = {}
     service.bindCurrentChatStore = vi.fn()
-    service.tokenStore = { setSessionToken: vi.fn() }
+    service.tokenStore = new TokenStore({ isolatedUserDataPath: credentialFixture.directory })
+    await service.tokenStore.setSessionToken('committed-session-token', getActiveEnvKey())
 
     const opened: Array<{ token: string; signal: AbortSignal }> = []
     let finishFirstStream!: () => void

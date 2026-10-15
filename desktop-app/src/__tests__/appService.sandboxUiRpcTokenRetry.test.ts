@@ -51,14 +51,6 @@ vi.mock('../authClient.js', () => ({
   },
 }))
 
-vi.mock('../tokenStore.js', () => ({
-  TokenStore: class {
-    getSessionToken = vi.fn().mockResolvedValue(null)
-    setSessionToken = vi.fn()
-    clearSessionToken = vi.fn()
-  },
-}))
-
 // rpc-proxy answers with Express `res.status(n).json(body)`. The bodies are the
 // ones its auth middleware (`requireScope`) and sandbox-ui routes emit.
 function rpcProxyJson(status: number, body: unknown): Response {

@@ -974,7 +974,11 @@ describe('AppService GFS upload security scope', () => {
         expect(service.tokenStore.setSessionToken).toHaveBeenCalledWith(
           'token-b',
           getActiveEnvKey(),
-          {}
+          {
+            mayWrite: expect.any(Function),
+            onMutationDispatched: expect.any(Function),
+            onMutationSettled: expect.any(Function),
+          }
         )
       } finally {
         await rm(root, { recursive: true, force: true })

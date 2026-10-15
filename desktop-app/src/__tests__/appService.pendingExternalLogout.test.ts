@@ -338,7 +338,10 @@ describe('AppService pending external logout', () => {
   })
 
   it('keeps an authenticated session when canceled-quit retry only has Keytar cleanup pending', async () => {
-    const { service } = createService()
+    const { service, tokenStore } = createService()
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
+    await tokenStore.setSafeStorageSessionToken(loginResult.token, activeEnvKey)
     const state = internals(service)
     state.sessionToken = loginResult.token
     state.me = loginResult.me
@@ -351,6 +354,7 @@ describe('AppService pending external logout', () => {
     expect(state.me).toEqual(loginResult.me)
     expect(notifySessionChanged).not.toHaveBeenCalledWith(false)
     expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(false)
+    expect(await tokenStore.getSafeStorageSessionToken(activeEnvKey)).toBe(loginResult.token)
   })
 
   it('retires startup cleanup intent only after the recorded credential restores', async () => {
@@ -383,7 +387,10 @@ describe('AppService pending external logout', () => {
 
   it('rewrites cleanup intent if canceled-quit marker unlink cannot be synced', async () => {
     const reportFailure = vi.fn()
-    const { service } = createService(undefined, reportFailure)
+    const { service, tokenStore } = createService(undefined, reportFailure)
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
+    await tokenStore.setSafeStorageSessionToken(loginResult.token, activeEnvKey)
     const state = internals(service)
     state.sessionToken = loginResult.token
     state.me = loginResult.me
@@ -392,7 +399,11 @@ describe('AppService pending external logout', () => {
     const originalFsync = fsSync.fsyncSync.bind(fsSync)
     let failedDirectorySync = false
     const fsync = vi.spyOn(fsSync, 'fsyncSync').mockImplementation(descriptor => {
-      if (!failedDirectorySync && fsSync.fstatSync(descriptor).isDirectory()) {
+      if (
+        !failedDirectorySync &&
+        !fsSync.existsSync(markerPath()) &&
+        fsSync.fstatSync(descriptor).isDirectory()
+      ) {
         failedDirectorySync = true
         throw Object.assign(new Error('directory sync failed'), { code: 'EIO' })
       }
@@ -628,7 +639,7 @@ describe('AppService pending external logout', () => {
     })
 
     releaseStorageWrite.resolve()
-    await expect(login).rejects.toThrow('Pending logout intent changed while login was completing')
+    await expect(login).rejects.toThrow(/Pending logout intent changed|superseded/)
     await draining
 
     expect(markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)).toEqual({
@@ -718,7 +729,10 @@ describe('AppService pending external logout', () => {
     const originalGet = vi.mocked(keytar.getPassword).getMockImplementation()!
     const originalSet = vi.mocked(keytar.setPassword).getMockImplementation()!
     const originalDelete = vi.mocked(keytar.deletePassword).getMockImplementation()!
-    vi.mocked(keytar.getPassword).mockRejectedValue(new Error('keychain unavailable'))
+    vi.mocked(keytar.getPassword).mockImplementation(async (service, readAccount) => {
+      if (readAccount === account) throw new Error('keychain unavailable')
+      return originalGet(service, readAccount)
+    })
     vi.mocked(keytar.setPassword).mockRejectedValue(new Error('keychain unavailable'))
     vi.mocked(keytar.deletePassword).mockImplementation(async (_service, deletedAccount) => {
       if (deletedAccount === account) throw new Error('keychain unavailable')
@@ -835,10 +849,11 @@ describe('AppService pending external logout', () => {
         'file fallback failed'
       )
 
-      expect(reportFailure).toHaveBeenCalledOnce()
-      expect(reportFailure).toHaveBeenCalledWith(
-        expect.objectContaining({ message: 'file fallback failed' })
-      )
+      expect(
+        reportFailure.mock.calls.map(([error]) =>
+          error instanceof Error ? error.message : typeof error
+        )
+      ).toEqual(['file fallback failed'])
       expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
       expect(internals(service).sessionToken).toBeNull()
     } finally {
@@ -869,9 +884,14 @@ describe('AppService pending external logout', () => {
         me: loginResult.me,
       })
 
-      expect(persistToken).toHaveBeenCalledWith(loginResult.token, activeEnvKey, {
-        requireKeytar: true,
-      })
+      expect(persistToken).toHaveBeenCalledWith(
+        loginResult.token,
+        activeEnvKey,
+        expect.objectContaining({
+          requireKeytar: true,
+          mayWrite: expect.any(Function),
+        })
+      )
       expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
       expect(keychain.get(keyOf('Evenfire', legacyAccount))).toBe('legacy-session-token')
     } finally {
@@ -981,7 +1001,11 @@ describe('AppService pending external logout', () => {
     expect(markerStore.hasPendingExternalLogout(userDataDirectory, activeEnvKey)).toBe(true)
     expect(internals(service).sessionToken).toBeNull()
     expect(internals(service).me).toBeNull()
-    expect(reportFailure).toHaveBeenCalledOnce()
+    expect(
+      reportFailure.mock.calls.map(([error]) =>
+        error instanceof Error ? error.message : typeof error
+      )
+    ).toEqual(['credential write failed'])
   })
 
   it('keeps login unauthenticated and the marker when marker retirement fails', async () => {
@@ -1002,7 +1026,11 @@ describe('AppService pending external logout', () => {
         'permission denied'
       )
 
-      expect(reportFailure).toHaveBeenCalledOnce()
+      expect(
+        reportFailure.mock.calls.map(([error]) =>
+          error instanceof Error ? error.message : typeof error
+        )
+      ).toEqual(['permission denied'])
       expect(internals(service).gfsDispatchBlocked).toBe(true)
       expect(internals(service).sessionToken).toBeNull()
       expect(internals(service).me).toBeNull()
@@ -1017,9 +1045,15 @@ describe('AppService pending external logout', () => {
     markerStore.recordPendingExternalLogout(userDataDirectory, activeEnvKey)
     const { service, tokenStore } = createService()
     const originalFsync = fsSync.fsyncSync.bind(fsSync)
+    const originalUnlink = fsSync.unlinkSync.bind(fsSync)
+    let markerUnlinked = false
+    const unlink = vi.spyOn(fsSync, 'unlinkSync').mockImplementation(file => {
+      originalUnlink(file)
+      if (String(file) === markerPath()) markerUnlinked = true
+    })
     let failedDirectorySync = false
     const fsync = vi.spyOn(fsSync, 'fsyncSync').mockImplementation(descriptor => {
-      if (!failedDirectorySync && fsSync.fstatSync(descriptor).isDirectory()) {
+      if (markerUnlinked && !failedDirectorySync && fsSync.fstatSync(descriptor).isDirectory()) {
         failedDirectorySync = true
         throw Object.assign(new Error('directory sync failed'), { code: 'EIO' })
       }
@@ -1032,6 +1066,7 @@ describe('AppService pending external logout', () => {
       )
 
       expect(failedDirectorySync).toBe(true)
+      expect(markerUnlinked).toBe(true)
       expect(markerStore.readPendingExternalLogoutIntent(userDataDirectory, activeEnvKey)).toEqual({
         intent: 'logout-pending',
       })
@@ -1039,6 +1074,7 @@ describe('AppService pending external logout', () => {
       await expect(tokenStore.getSessionToken(activeEnvKey)).resolves.toBeNull()
     } finally {
       fsync.mockRestore()
+      unlink.mockRestore()
     }
   })
 

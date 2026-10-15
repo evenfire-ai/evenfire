@@ -4,6 +4,12 @@ import path from 'node:path'
 
 const PENDING_EXTERNAL_LOGOUT_PREFIX = 'pending-external-logout-'
 const MARKER_VERSION = 1
+const markerReadFailures = new WeakSet<object>()
+
+/** CAS callers distinguish pre-mutation inspection from post-mutation sync failure. */
+export function isPendingExternalLogoutReadFailure(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && markerReadFailures.has(error)
+}
 
 /** Temporary inspection failures do not establish corruption or logout intent. */
 export function isTransientPendingLogoutReadError(error: unknown): boolean {
@@ -29,6 +35,46 @@ export type PendingExternalLogoutIntent =
 export type PendingExternalLogoutMarker = {
   intent: PendingExternalLogoutIntent
   revision: string | null
+}
+
+export type PendingExternalLogoutObservation =
+  | { status: 'observed'; marker: PendingExternalLogoutMarker | null }
+  | { status: 'transient' | 'invalid'; error: unknown }
+
+export type PendingExternalLogoutOwnership =
+  | { status: 'owned'; marker: PendingExternalLogoutMarker | null }
+  | { status: 'superseded' }
+  | { status: 'transient' | 'invalid'; error: unknown }
+
+/** Inspection uncertainty is distinct from both absence and changed authority. */
+export function observePendingExternalLogoutMarker(
+  userDataDirectory: string,
+  envKey: string
+): PendingExternalLogoutObservation {
+  try {
+    return {
+      status: 'observed',
+      marker: readPendingExternalLogoutMarker(userDataDirectory, envKey),
+    }
+  } catch (error) {
+    return { status: isTransientPendingLogoutReadError(error) ? 'transient' : 'invalid', error }
+  }
+}
+
+/** Pure authority decision shared by every phase of a persistence transaction. */
+export function pendingExternalLogoutOwnership(
+  observation: PendingExternalLogoutObservation,
+  expected: readonly (PendingExternalLogoutMarker | null)[],
+  runtimeOwned: boolean
+): PendingExternalLogoutOwnership {
+  if (!runtimeOwned) return { status: 'superseded' }
+  if (observation.status !== 'observed') return observation
+  const owns = expected.some(marker =>
+    marker === null
+      ? observation.marker === null
+      : pendingExternalLogoutMarkersMatch(observation.marker, marker)
+  )
+  return owns ? { status: 'owned', marker: observation.marker } : { status: 'superseded' }
 }
 
 function markerPath(userDataDirectory: string, envKey: string): string {
@@ -62,6 +108,7 @@ function syncDirectory(directory: string): void {
 
 function readMarkerContents(filePath: string): string | null {
   let contents: string
+  let primaryFailure = false
   let descriptor: number | undefined
   try {
     const flags =
@@ -83,6 +130,7 @@ function readMarkerContents(filePath: string): string | null {
       }
     }
   } catch (error) {
+    primaryFailure = true
     const code = (error as NodeJS.ErrnoException | undefined)?.code
     if (code === 'ENOENT') {
       if (process.platform === 'win32') {
@@ -102,7 +150,13 @@ function readMarkerContents(filePath: string): string | null {
     }
     throw error
   } finally {
-    if (descriptor !== undefined) fs.closeSync(descriptor)
+    if (descriptor !== undefined) {
+      try {
+        fs.closeSync(descriptor)
+      } catch (error) {
+        if (!primaryFailure) throw error
+      }
+    }
   }
 
   return contents
@@ -161,7 +215,7 @@ function writeMarkerIntent(
   userDataDirectory: string,
   envKey: string,
   intent: PendingExternalLogoutIntent,
-  revision = randomUUID()
+  revision: string = randomUUID()
 ): void {
   if (typeof revision !== 'string' || revision.length === 0) {
     throw new Error('Pending logout marker requires a nonempty revision')
@@ -220,7 +274,12 @@ export function readPendingExternalLogoutMarker(
   userDataDirectory: string,
   envKey: string
 ): PendingExternalLogoutMarker | null {
-  return readMarker(markerPath(userDataDirectory, envKey))
+  try {
+    return readMarker(markerPath(userDataDirectory, envKey))
+  } catch (error) {
+    if (typeof error === 'object' && error !== null) markerReadFailures.add(error)
+    throw error
+  }
 }
 
 export function readPendingExternalLogoutContentsRevision(
@@ -325,17 +384,20 @@ export function clearPendingExternalLogoutIfUnchanged(
   return true
 }
 
-/** Recreate cleanup intent only after a failed retirement removed the marker. */
+/** Bind cleanup authority only while the caller still observes marker absence. */
 export function recordPendingKeytarCleanupIfMissing(
   userDataDirectory: string,
   envKey: string,
-  credentialSource: 'active-keytar' | 'safe-storage'
+  credentialSource: 'active-keytar' | 'safe-storage',
+  replacementRevision: string = randomUUID()
 ): boolean {
   if (readPendingExternalLogoutMarker(userDataDirectory, envKey) !== null) return false
-  writeMarkerIntent(userDataDirectory, envKey, {
-    intent: 'keytar-cleanup-pending',
-    credentialSource,
-  })
+  writeMarkerIntent(
+    userDataDirectory,
+    envKey,
+    { intent: 'keytar-cleanup-pending', credentialSource },
+    replacementRevision
+  )
   return true
 }
 

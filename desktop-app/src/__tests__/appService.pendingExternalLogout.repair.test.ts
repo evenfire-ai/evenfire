@@ -253,7 +253,10 @@ describe('explicit login repair uses the pending-logout storage plan', () => {
       )
     })
 
-    await expect(harness.login()).rejects.toThrow('Pending logout intent changed')
+    const error = await harness.login().then(
+      () => null,
+      error => error
+    )
 
     expect(
       harness.markers.readPendingExternalLogoutMarker(runtime.directory, harness.envKey)
@@ -261,6 +264,8 @@ describe('explicit login repair uses the pending-logout storage plan', () => {
     expect(harness.service.getCachedUserId()).toBeNull()
     expect(await harness.tokenStore.getKeytarSessionToken(harness.envKey)).toBeNull()
     expect(notifySessionChanged).toHaveBeenCalledWith(false)
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toMatch(/Pending logout intent changed|mutation was superseded/)
   })
 })
 
@@ -524,49 +529,126 @@ describe('durable logout failure policy', () => {
     })
   })
 
-  it('keeps logout durable when a concurrent login retires its upgraded marker', async () => {
+  it('orders a queued fresh login after durable logout cleanup without clearing its session', async () => {
     const harness = await createService()
     await harness.login()
     harness.markers.recordPendingKeytarCleanup(runtime.directory, harness.envKey, 'active-keytar')
     const entered = deferred()
     const release = deferred()
-    keytarMock.deletePassword.mockImplementationOnce(async () => {
-      entered.resolve()
-      await release.promise
-      throw new Error('fixture-logout active delete failed')
-    })
+    keytarMock.deletePassword.mockRejectedValueOnce(
+      new Error('fixture-logout active delete failed')
+    )
+    const clear = harness.tokenStore.clearSessionTokenStrictly.bind(harness.tokenStore)
+    let cleanupSettled = false
+    vi.spyOn(harness.tokenStore, 'clearSessionTokenStrictly').mockImplementationOnce(
+      async (...args) => {
+        const outcome = await clear(...args).then(
+          value => ({ value }),
+          error => ({ error })
+        )
+        cleanupSettled = true
+        entered.resolve()
+        await release.promise
+        if ('error' in outcome) throw outcome.error
+        return outcome.value
+      }
+    )
     const originalRead = fsSync.readFileSync.bind(fsSync)
-    let reads = 0
+    const originalOpen = fsSync.openSync.bind(fsSync)
+    const markerDescriptors = new Set<number>()
+    let rereadFailed = false
+    vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, mode) => {
+      const descriptor = originalOpen(file, flags, mode)
+      if (String(file) === harness.markerPath) markerDescriptors.add(descriptor)
+      else markerDescriptors.delete(descriptor)
+      return descriptor
+    })
     vi.spyOn(fsSync, 'readFileSync').mockImplementation(((
       file: Parameters<typeof originalRead>[0],
       options: Parameters<typeof originalRead>[1]
     ) => {
-      if (typeof file === 'number' && ++reads === 2) {
+      if (
+        cleanupSettled &&
+        !rereadFailed &&
+        typeof file === 'number' &&
+        markerDescriptors.has(file)
+      ) {
+        rereadFailed = true
         throw Object.assign(new Error('fixture-marker reread failed'), { code: 'EIO' })
       }
       return originalRead(file, options)
     }) as typeof fsSync.readFileSync)
     const logout = harness.service.logout()
-    await entered.promise
+    const logoutOutcome = logout.then(
+      () => null,
+      error => error
+    )
+    let loginOutcome: Promise<unknown> | undefined
+    let phaseTimer: ReturnType<typeof setTimeout> | undefined
     try {
-      await expect(harness.login('fixture-concurrent-session')).resolves.toEqual({
-        authenticated: true,
-        me,
+      const phase = await Promise.race([
+        entered.promise.then(() => 'entered'),
+        logout.then(
+          () => 'settled',
+          () => 'settled'
+        ),
+        new Promise<string>(resolve => {
+          phaseTimer = setTimeout(() => resolve('deadline'), 5_000)
+        }),
+      ])
+      expect(phase, 'Native cleanup must settle before its response is held').toBe('entered')
+      const state = harness.service as unknown as {
+        runSessionPersistence: <T>(operation: () => Promise<T>) => Promise<T>
+      }
+      const queued = deferred()
+      const persist = state.runSessionPersistence.bind(state)
+      vi.spyOn(state, 'runSessionPersistence').mockImplementationOnce(operation => {
+        queued.resolve()
+        return persist(operation)
       })
-      expect(
-        harness.markers.readPendingExternalLogoutMarker(runtime.directory, harness.envKey)
-      ).toBeNull()
+      keytarMock.setPassword.mockClear()
+      const login = harness.login('fixture-concurrent-session')
+      loginOutcome = login.then(
+        value => value,
+        error => error
+      )
+      if (phaseTimer) clearTimeout(phaseTimer)
+      const queuedPhase = await Promise.race([
+        queued.promise.then(() => 'entered'),
+        loginOutcome.then(() => 'settled'),
+        new Promise<string>(resolve => {
+          phaseTimer = setTimeout(() => resolve('deadline'), 5_000)
+        }),
+      ])
+      expect(queuedPhase, 'Fresh login must queue behind the held logout transaction').toBe(
+        'entered'
+      )
+      expect(keytarMock.setPassword).not.toHaveBeenCalled()
     } finally {
+      if (phaseTimer) clearTimeout(phaseTimer)
       release.resolve()
-      await logout
+      await logoutOutcome
+      if (loginOutcome) await loginOutcome
     }
 
-    expect(harness.service.getCachedUserId()).toBeNull()
+    const logoutError = await logoutOutcome
+    const loginResult = await loginOutcome
     const restarted = await createService()
     await expect(restarted.service.initialize()).resolves.toEqual({
-      authenticated: false,
-      me: null,
+      authenticated: true,
+      me,
     })
+    expect(restarted.authClient.getMe).toHaveBeenCalledWith('fixture-concurrent-session')
+    expect(harness.service.getCachedUserId()).toBe(me.id)
+    expect(await harness.tokenStore.getKeytarSessionToken(harness.envKey)).toBe(
+      'fixture-concurrent-session'
+    )
+    expect(
+      harness.markers.readPendingExternalLogoutMarker(runtime.directory, harness.envKey)
+    ).toBeNull()
+    expect(loginResult).toEqual({ authenticated: true, me })
+    expect(rereadFailed).toBe(true)
+    expect(logoutError).toMatchObject({ code: 'EIO', message: 'fixture-marker reread failed' })
   })
 
   // Characterization: the owner retained this policy for ordinary UI logout too.
@@ -610,18 +692,43 @@ describe('durable logout failure policy', () => {
     )
   })
 
-  it('resolves logout after a durable upgrade even when reread and redundant rewrite would fail', async () => {
+  it('rejects logout when durable intent cannot be reverified after cleanup fails', async () => {
     const harness = await createService()
     await harness.login()
     harness.markers.recordPendingKeytarCleanup(runtime.directory, harness.envKey, 'active-keytar')
     keytarMock.deletePassword.mockRejectedValue(new Error('fixture-Keytar cleanup failed'))
+    const clear = harness.tokenStore.clearSessionTokenStrictly.bind(harness.tokenStore)
+    let cleanupSettled = false
+    vi.spyOn(harness.tokenStore, 'clearSessionTokenStrictly').mockImplementationOnce(
+      async (...args) => {
+        try {
+          return await clear(...args)
+        } finally {
+          cleanupSettled = true
+        }
+      }
+    )
     const originalRead = fsSync.readFileSync.bind(fsSync)
-    let markerReads = 0
+    const originalOpen = fsSync.openSync.bind(fsSync)
+    const markerDescriptors = new Set<number>()
+    let rereadFailed = false
+    vi.spyOn(fsSync, 'openSync').mockImplementation((file, flags, mode) => {
+      const descriptor = originalOpen(file, flags, mode)
+      if (String(file) === harness.markerPath) markerDescriptors.add(descriptor)
+      else markerDescriptors.delete(descriptor)
+      return descriptor
+    })
     vi.spyOn(fsSync, 'readFileSync').mockImplementation(((
       file: Parameters<typeof originalRead>[0],
       options: Parameters<typeof originalRead>[1]
     ) => {
-      if (typeof file === 'number' && ++markerReads === 2) {
+      if (
+        cleanupSettled &&
+        !rereadFailed &&
+        typeof file === 'number' &&
+        markerDescriptors.has(file)
+      ) {
+        rereadFailed = true
         throw Object.assign(new Error('fixture-marker reread failed'), { code: 'EIO' })
       }
       return originalRead(file, options)
@@ -635,7 +742,10 @@ describe('durable logout failure policy', () => {
       originalRename(source, destination)
     })
 
-    await expect(harness.service.logout()).resolves.toBeUndefined()
+    const error = await harness.service.logout().then(
+      () => null,
+      error => error
+    )
 
     expect(harness.service.getCachedUserId()).toBeNull()
     expect(
@@ -651,5 +761,13 @@ describe('durable logout failure policy', () => {
     )
     expect(notifySessionChanged).toHaveBeenCalledWith(false)
     expect(markerWrites).toBe(1)
+    expect(rereadFailed).toBe(true)
+    const restarted = await createService()
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+    })
+    expect(restarted.authClient.getMe).not.toHaveBeenCalledWith('fixture-fresh-session')
+    expect(error).toMatchObject({ code: 'EIO', message: 'fixture-marker reread failed' })
   })
 })
