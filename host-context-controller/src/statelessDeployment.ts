@@ -34,8 +34,10 @@ function shellSingleQuote(value: string): string {
  * `workspace/`) exits 0 untouched.
  *
  * Every refusal prints one line and exits 1 before the first move:
- *   F1 `state` or `workspace` is a symlink or not a directory, or a
- *      `state.db*` entry is a symlink;
+ *   F1 `state` or `workspace` is a symlink or not a directory, a real
+ *      `state/` cannot be listed and searched, a `state.db*` entry is a
+ *      symlink or not a regular file, or a directory that decides a
+ *      collision cannot be listed;
  *   F2 more than one live database (a `state.db` main file or its journals)
  *      across the root, `state/` and `workspace/`, except the root journals
  *      a stopped merge leaves next to the remaining `state/state.db`;
@@ -73,7 +75,9 @@ assert_managed_dir() {
   esac
 }
 is_empty_dir() {
-  [ -d "$1" ] && [ ! -L "$1" ] && [ -z "$(ls -A "$1")" ]
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  listing="$(ls -A "$1" 2>/dev/null)" || fail_merge "cannot list directory: $1"
+  [ -z "$listing" ]
 }
 has_main() {
   present "$1/state.db"
@@ -89,6 +93,9 @@ root_real="$(canonical_dir "$root")" || fail_merge "cannot resolve workspace PVC
 
 # Split-layout signature: a real state/ directory holding a state.db* entry.
 [ ! -L "$root/state" ] && [ -d "$root/state" ] || exit 0
+# The glob below cannot see the entries of a state/ it cannot list or search.
+[ -r "$root/state" ] && [ -x "$root/state" ] ||
+  fail_merge "state directory is not readable and searchable: $root/state"
 signature=0
 for entry in "$root/state"/state.db*; do
   if present "$entry"; then signature=1; fi
@@ -104,7 +111,9 @@ if present "$root/workspace"; then
 fi
 for dir in "$root" "$root/state" "$root/workspace"; do
   for entry in "$dir"/state.db*; do
+    present "$entry" || continue
     [ ! -L "$entry" ] || fail_merge "SQLite file is a symlink: $entry"
+    [ -f "$entry" ] || fail_merge "SQLite file is not a regular file: $entry"
   done
 done
 

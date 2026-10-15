@@ -256,6 +256,18 @@ describe('workspace layout merge', () => {
       message: 'SQLite file is a symlink',
     },
     {
+      name: 'a state.db entry is a directory',
+      prepare: (root: string) => {
+        renameSync(join(root, 'state', 'state.db-shm'), join(root, 'shm-real'))
+        mkdirSync(join(root, 'state', 'state.db-shm'))
+      },
+      undo: (root: string) => {
+        rmSync(join(root, 'state', 'state.db-shm'), { recursive: true })
+        renameSync(join(root, 'shm-real'), join(root, 'state', 'state.db-shm'))
+      },
+      message: 'SQLite file is not a regular file',
+    },
+    {
       name: 'a second live database at the root (F2)',
       prepare: (root: string) => writeFileSync(join(root, 'state.db'), 'second database'),
       undo: (root: string) => rmSync(join(root, 'state.db')),
@@ -313,6 +325,51 @@ describe('workspace layout merge', () => {
     },
     15_000
   )
+
+  // A state/ that cannot be listed hides the signature from the glob; without
+  // this check the merge would exit 0 and mcp-host would start on an empty
+  // database next to the hidden one.
+  it.each(['111', '333', '666'])(
+    'refuses a state/ directory with mode %s before the signature check',
+    mode => {
+      const root = splitRoot()
+      const before = snapshot(root)
+      chmodSync(join(root, 'state'), parseInt(mode, 8))
+
+      const refused = merge(root)
+
+      chmodSync(join(root, 'state'), 0o755)
+      expect(refused.status).toBe(1)
+      expect(refused.stderr.trim()).toBe(
+        `workspace layout merge refused: state directory is not readable and searchable: ${root}/state`
+      )
+      expect(snapshot(root)).toEqual(before)
+      // Witness: with its mode restored the same tree merges.
+      expect(merge(root).status).toBe(0)
+      expect(messageCount(join(root, 'state.db'))).toEqual({ rows: ROWS, check: 'ok' })
+    },
+    15_000
+  )
+
+  it('refuses before the first move when a source directory cannot be listed', () => {
+    const root = splitRoot()
+    mkdirSync(join(root, 'cache'))
+    mkdirSync(join(root, 'workspace', 'cache'))
+    writeFileSync(join(root, 'workspace', 'cache', 'entry'), 'cached')
+    const before = snapshot(root)
+    chmodSync(join(root, 'workspace', 'cache'), 0o333)
+
+    const refused = merge(root)
+
+    chmodSync(join(root, 'workspace', 'cache'), 0o755)
+    expect(refused.status).toBe(1)
+    expect(refused.stderr.trim()).toBe(
+      `workspace layout merge refused: cannot list directory: ${root}/workspace/cache`
+    )
+    expect(snapshot(root)).toEqual(before)
+    // Witness: once listable, the non-empty source is a real collision (F3).
+    expect(merge(root).stderr).toContain(`destination exists: ${root}/cache`)
+  }, 15_000)
 
   it('moves symlinks under workspace/ as links without following them', () => {
     const root = splitRoot()
