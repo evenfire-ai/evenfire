@@ -114,7 +114,8 @@ export interface ChatListControllerHost {
   dispatchSession: (chatKey: string, event: SessionFsmEvent) => void
   clearComposerDraft: (chatId: string) => void
   getActiveChatId: () => string | null
-  getChatMessagesLoading: () => boolean
+  /** True while a chat switch is unconfirmed: its history is loading, or a remembered transcript is shown before its last-active write settles. */
+  getChatSwitchInFlight: () => boolean
   getAutoSelectedChatId: () => string | null
   markAutoSelectedChat: (chatId: string | null) => void
   shouldAutoSelectLatest: () => boolean
@@ -1051,7 +1052,7 @@ export function useChatListController({
     if (!agentRef) return
     const pendingSelection = readPendingSelection(agentRef)
     const activeChatIdAtCreate = host.current?.getActiveChatId() ?? null
-    const chatMessagesLoadingAtCreate = host.current?.getChatMessagesLoading() ?? false
+    const chatSwitchInFlightAtCreate = host.current?.getChatSwitchInFlight() ?? false
     const selectionIntentRevision = host.current?.beginSelectionIntent()
     host.current?.clearPendingSelection(agentRef)
     const requestGeneration = requestGenerationRef.current
@@ -1077,7 +1078,7 @@ export function useChatListController({
         const restoreChatId =
           pendingSelection?.mode === 'specific'
             ? pendingSelection.chatId
-            : chatMessagesLoadingAtCreate
+            : chatSwitchInFlightAtCreate
               ? activeChatIdAtCreate
               : null
         if (restoreChatId) {
