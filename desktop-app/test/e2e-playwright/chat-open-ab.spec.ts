@@ -429,6 +429,8 @@ if (
       gates: [] as Array<Record<string, string | number | boolean>>,
       // Reported, not gated: another branch profile shares the machine (plan addendum A9.2).
       loadSpread: [] as Array<Record<string, string | number | boolean>>,
+      // L rounds that found the stateless Host suspended and woke it first.
+      statelessWakes: [] as Array<{ build: Build; iteration: number; at: string }>,
       complete: false,
     }
     let app: ElectronApplication | undefined
@@ -576,6 +578,17 @@ if (
     }
     const snapshot = () => readHostSnapshot(HOSTS[1], HOSTS[1], context)
     const ready = () => waitForStatelessReady(270_000, context, HOSTS[1], HOSTS[1])
+    // Between L rounds no Desktop is open, so the idle timer can suspend the stateless Host and
+    // `ready()` alone would wait for a wake nobody requests. Wake it the way phase W does: a
+    // Desktop launch requests its catalog, and rpc-proxy holds that request until the Host is Ready.
+    const wakeStateless = async (build: Build, iteration: number) => {
+      if ((await snapshot()).readyReplicas === 0) {
+        report.statelessWakes.push({ build, iteration, at: new Date().toISOString() })
+        await launch(build)
+        await authenticated()
+      }
+      await ready()
+    }
     let cacheDir: string
     const cacheState = () => {
       if (!fs.existsSync(cacheDir)) return { agents: 0, chats: 0, pending: 0 }
@@ -949,7 +962,8 @@ if (
         // sidebar row (before any click), relaunch_ms at the transcript of the explicit open.
         for (const build of ['before', 'after'] as const)
           for (let iteration = 0; iteration < RELAUNCH_ROUNDS; iteration++) {
-            await ready()
+            // The wake launch runs before the cache restore below, so it cannot change what L reads.
+            await wakeStateless(build, iteration)
             await close()
             fs.rmSync(isolatedPath(runDir, cacheDir!), { recursive: true })
             fs.cpSync(savedCache, isolatedPath(runDir, cacheDir!), { recursive: true })
