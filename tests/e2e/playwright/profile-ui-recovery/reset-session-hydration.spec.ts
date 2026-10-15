@@ -11,7 +11,7 @@ test('retries session hydration after committed reset without resubmitting the r
   await page.getByLabel('Confirm password').fill('Synthetic-Recovery-Password-123')
   const resetResponsePromise = page.waitForResponse(
     response =>
-      response.url().endsWith('/api/v1/invitations/password') &&
+      response.url().endsWith('/api/v1/invitations/password-reset') &&
       response.request().method() === 'POST'
   )
   const firstSessionResponsePromise = page.waitForResponse(

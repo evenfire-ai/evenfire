@@ -58,7 +58,7 @@ const apiServer = createServer(async (request, response) => {
     return
   }
 
-  if (request.method === 'POST' && url.pathname === '/api/v1/invitations/password') {
+  if (request.method === 'POST' && url.pathname === '/api/v1/invitations/password-reset') {
     resetPosts += 1
     let body
     try {
