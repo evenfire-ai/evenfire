@@ -89,29 +89,45 @@ const SAMPLES: Record<
 /** How long a call waits for the reference before checking without it. */
 export const REFERENCE_WAIT_MS = 10_000
 
+/** How long a build of the reference may run before it is given up. */
+export const REFERENCE_BUILD_MS = 60_000
+
+/** How long after a failed or given-up build the next one waits. */
+export const REFERENCE_RETRY_MS = 60_000
+
 const references = new Map<OfficeFormat, Promise<string[]>>()
+const failedAt = new Map<OfficeFormat, number>()
 
 /**
  * The texts a package of `format` holds on its own. Empty when the sample
  * cannot be written, or is not ready within REFERENCE_WAIT_MS, which leaves
- * the scan as strict as before. A failed build is tried again on the next
- * call.
+ * the scan as strict as before. A build that fails, or runs past
+ * REFERENCE_BUILD_MS, is tried again once REFERENCE_RETRY_MS has passed.
  */
 export function boilerplateTexts(format: OfficeFormat): Promise<string[]> {
   let reference = references.get(format)
   if (!reference) {
-    reference = writeSample(format).catch((err: unknown) => {
-      references.delete(format)
-      logger.warn(
-        {
-          component: 'OfficeBoilerplate',
-          format,
-          error: err instanceof Error ? err.name : typeof err,
-        },
-        'Could not build the reference package; protected values are checked against all its text'
-      )
-      return []
-    })
+    const failed = failedAt.get(format)
+    if (failed !== undefined && Date.now() - failed < REFERENCE_RETRY_MS) return Promise.resolve([])
+    reference = withinBuildLimit(writeSample(format)).then(
+      texts => {
+        failedAt.delete(format)
+        return texts
+      },
+      (err: unknown) => {
+        references.delete(format)
+        failedAt.set(format, Date.now())
+        logger.warn(
+          {
+            component: 'OfficeBoilerplate',
+            format,
+            error: err instanceof Error ? err.name : typeof err,
+          },
+          'Could not build the reference package; protected values are checked against all its text'
+        )
+        return []
+      }
+    )
     references.set(format, reference)
   }
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -126,6 +142,19 @@ export function boilerplateTexts(format: OfficeFormat): Promise<string[]> {
     timer.unref?.()
   })
   return Promise.race([reference, waited]).finally(() => clearTimeout(timer))
+}
+
+/** `build`, rejected once it has run REFERENCE_BUILD_MS. */
+function withinBuildLimit<T>(build: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const limit = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error('the reference build ran too long')),
+      REFERENCE_BUILD_MS
+    )
+    timer.unref?.()
+  })
+  return Promise.race([build, limit]).finally(() => clearTimeout(timer))
 }
 
 /** When a package was written, which its document properties hold. */
