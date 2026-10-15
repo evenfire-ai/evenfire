@@ -58,6 +58,7 @@
 // contract this tree actually exposes.
 // ─────────────────────────────────────────────────────────────────────────────
 import { expect, loginAs, test } from './fixtures.js'
+import { fleetRowHostRefs } from './helpers/fleetRowHostRefs.js'
 import { openAgentsPage } from './navigationHelpers.js'
 
 const HOST_REF =
@@ -168,24 +169,8 @@ function requireSuspendPrecondition(): void {
   }
 }
 
-// The row's <strong> is the agent's display name (e.g. "chatLLM"), which is not a
-// hostRef: an RPC token requested for it is refused, and that refusal fails the
-// status read of every Host in the same request. FleetBoard renders the hostRef
-// in `.agent-row-description` whenever it differs from the display name.
 async function visibleAgentHostRefs(appPage: import('@playwright/test').Page): Promise<string[]> {
-  return appPage
-    .locator('.agents-table-row-clickable')
-    .evaluateAll(rows =>
-      rows
-        .map(row =>
-          (
-            row.querySelector('.agent-row-description')?.textContent ||
-            row.querySelector('strong')?.textContent ||
-            ''
-          ).trim()
-        )
-        .filter(Boolean)
-    )
+  return appPage.locator('.agents-table-row-clickable').evaluateAll(fleetRowHostRefs)
 }
 
 async function readHostRuntimeSignal(
