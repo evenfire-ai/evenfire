@@ -15,6 +15,9 @@ const directorySvc = vi.hoisted(() => ({
 }))
 // auth.ts imports provisionAdminDesktopWorkspace from the directory barrel; mock the barrel here.
 vi.mock('../src/services/directory/index.js', () => directorySvc)
+vi.mock('../src/services/directory/membership.js', () => ({
+  withMemberPasswordWorkLease: directorySvc.withMemberPasswordWorkLease,
+}))
 
 const adminSvc = vi.hoisted(() => ({
   completeControlAdminEmailChangeRequest: vi.fn(),

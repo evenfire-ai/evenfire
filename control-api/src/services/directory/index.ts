@@ -71,9 +71,6 @@ export {
   setInvitationPasswordForEmail,
   updateUserPassword,
 } from './memberPassword.js'
-export { withPasswordWorkLease as withMemberPasswordWorkLease } from '../auth/passwordWorkOwnership.js'
-export type { MemberPasswordWorkLease } from '../auth/passwordWorkOwnership.js'
-
 export {
   getTeamContexts,
   getUserContexts,

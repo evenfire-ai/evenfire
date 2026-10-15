@@ -34,13 +34,15 @@ import {
   validateControlAdminPasswordResetToken,
 } from '../../services/controlAdminInvitationRegistrationService.js'
 import {
-  type MemberPasswordWorkLease,
   acceptInvitationById,
   getPendingMemberInvitationForEmail,
   provisionAdminDesktopWorkspace,
   setInvitationPasswordForUser,
-  withMemberPasswordWorkLease,
 } from '../../services/directory/index.js'
+import {
+  type MemberPasswordWorkLease,
+  withMemberPasswordWorkLease,
+} from '../../services/directory/membership.js'
 import { setupInitialAdminWithDesktopWorkspace } from '../../services/initialAdminSetupService.js'
 import { memberRegistrationErrorResponse } from '../../services/memberRegistrationErrors.js'
 import { signAdminToken } from '../../utils/auth/adminAuthToken.js'
