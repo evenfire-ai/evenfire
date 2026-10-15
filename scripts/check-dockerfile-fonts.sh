@@ -16,9 +16,11 @@
 #   Noto Sans Arabic               apk font-noto-arabic  (in fonts-noto-core)
 #   Noto Sans Hebrew               apk font-noto-hebrew  (in fonts-noto-core)
 #   Noto Sans CJK collections      apk font-noto-cjk     apt fonts-noto-cjk
-# Alpine has no package for the further script faces (Devanagari, Thai,
-# Ethiopic and the rest of MORE_SCRIPT_PREFIXES), which Debian's
-# fonts-noto-core ships; the renderer logs the scripts it has no face for.
+# The further script faces (Devanagari, Thai, Ethiopic and the rest of
+# MORE_SCRIPTS) are in Debian's fonts-noto-core. Alpine ships them as one
+# package per script (font-noto-devanagari, font-noto-thai, ...), which the
+# Alpine image does not install yet, so they are not required here; the
+# renderer logs the scripts it has no face for.
 #
 # Only the final stage of a Dockerfile counts: fonts installed in a builder
 # stage do not reach the image. Exempt a deliberate, reviewed case with a
