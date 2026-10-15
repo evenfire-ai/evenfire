@@ -88,7 +88,54 @@ const BOUNDARY_NEUTRALS: ReadonlyArray<readonly [number, number]> = [
 
 const SEPARATORS = new Set([0x2c, 0x2e, 0x2f, 0x3a, 0xa0, 0x060c, 0x202f, 0x2044, 0xfe50, 0xfe52])
 
+/**
+ * Characters the rules below would give the wrong direction (Unicode 16
+ * DerivedBidiClass): signs and digits inside the right-to-left blocks, digits
+ * and modifier letters that are not strong, and marks that are.
+ */
+const OWN_CLASS: ReadonlyArray<readonly [number, number, BidiClass]> = [
+  [0x02b9, 0x02ba, 'ON'],
+  [0x02c6, 0x02cf, 'ON'],
+  [0x02ec, 0x02ec, 'ON'],
+  [0x0374, 0x0374, 'ON'],
+  [0x0606, 0x0607, 'ON'],
+  [0x0609, 0x060a, 'ET'],
+  [0x060e, 0x060f, 'ON'],
+  [0x06dd, 0x06dd, 'AN'],
+  [0x06de, 0x06de, 'ON'],
+  [0x06e9, 0x06e9, 'ON'],
+  [0x07f6, 0x07f9, 'ON'],
+  [0x0890, 0x0891, 'AN'],
+  [0x0cbf, 0x0cbf, 'L'],
+  [0x0cc6, 0x0cc6, 'L'],
+  [0x2071, 0x2071, 'L'],
+  [0x2e2f, 0x2e2f, 'ON'],
+  [0xa67f, 0xa67f, 'ON'],
+  [0xa717, 0xa71f, 'ON'],
+  [0xa788, 0xa788, 'ON'],
+  [0xfd3e, 0xfd4f, 'ON'],
+  [0xfdcf, 0xfdcf, 'ON'],
+  [0xfdfd, 0xfdff, 'ON'],
+  [0x10140, 0x10174, 'ON'],
+  [0x1091f, 0x1091f, 'ON'],
+  [0x10b39, 0x10b3f, 'ON'],
+  [0x10d30, 0x10d39, 'AN'],
+  [0x10d40, 0x10d49, 'AN'],
+  [0x10d6e, 0x10d6e, 'ON'],
+  [0x10e60, 0x10e7e, 'AN'],
+  [0x11a07, 0x11a08, 'L'],
+  [0x11c3f, 0x11c3f, 'L'],
+  [0x1ccf0, 0x1ccf9, 'EN'],
+  [0x1d7ce, 0x1d7ff, 'EN'],
+  [0x1eef0, 0x1eef1, 'ON'],
+  [0x1fbf0, 0x1fbf9, 'EN'],
+]
+
 export function bidiClass(cp: number): BidiClass {
+  if (cp >= 0x02b9) {
+    const own = OWN_CLASS.find(([from, to]) => cp >= from && cp <= to)
+    if (own) return own[2]
+  }
   const ch = String.fromCodePoint(cp)
   if (MARK.test(ch)) return 'NSM'
   if (inRanges(cp, EUROPEAN_DIGITS)) return 'EN'

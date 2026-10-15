@@ -6,7 +6,7 @@ import * as fs from 'fs'
 import { docxDirection } from '../docxScript'
 import { resolveParagraph } from '../pdfBidi'
 import { FONTKIT_RTL_SCRIPTS } from '../pdfText'
-import { isRtlText } from '../textDirection'
+import { bidiClass, isRtlText } from '../textDirection'
 
 /** OpenType script tags fontkit lists as right to left, and their Unicode names. */
 const TAG_SCRIPTS: Record<string, string> = {
@@ -65,9 +65,48 @@ describe('the direction of a paragraph', () => {
     ['a left-to-right mark before Hebrew', '\u200eשלום', true],
     ['Latin', 'Quarterly report', false],
     ['nothing strong', '2026 — 42%', false],
+    ['mathematical bold digits before Arabic', '\u{1D7D0}\u{1D7CE}\u{1D7D0}\u{1D7D4} مرحبا', true],
+    ['segmented digits before Hebrew', '\u{1FBF2} שלום', true],
+    ['Hanifi Rohingya digits before Latin', '\u{10D31}\u{10D32} abc', false],
+    ['ornate parentheses around Latin', '﴾Al-Fatiha﴿ is the first surah.', false],
+    ['the rub el hizb sign before Latin', '۞ Chapter 1', false],
+    ['the Arabic per mille sign before Latin', '؉ rate', false],
   ])('%s is the same in the PDF, Word and PowerPoint', (_label, text, rtl) => {
     expect(isRtlText(text)).toBe(rtl)
     expect(pdfReadsRtl(text)).toBe(rtl)
     expect(docxDirection(text)).toEqual(rtl ? { bidirectional: true } : {})
+  })
+})
+
+describe('the class of a character', () => {
+  // Unicode 16 DerivedBidiClass for characters a block or category would class otherwise.
+  it.each(
+    [
+      [0x0606, 'ON'],
+      [0x0608, 'AL'],
+      [0x0609, 'ET'],
+      [0x06dd, 'AN'],
+      [0x06de, 'ON'],
+      [0x07f6, 'ON'],
+      [0x0890, 'AN'],
+      [0x0cbf, 'L'],
+      [0x2071, 'L'],
+      [0x2070, 'EN'],
+      [0xfd3e, 'ON'],
+      [0xfdfd, 'ON'],
+      [0xfdfc, 'AL'],
+      [0x10d30, 'AN'],
+      [0x10e60, 'AN'],
+      [0x1d7ce, 'EN'],
+      [0x1fbf9, 'EN'],
+      [0x1eef0, 'ON'],
+      [0x02b9, 'ON'],
+      [0x10140, 'ON'],
+    ].map(
+      ([cp, cls]) =>
+        [(cp as number).toString(16).toUpperCase().padStart(4, '0'), cls, cp as number] as const
+    )
+  )('U+%s is %s', (_hex, cls, cp) => {
+    expect(bidiClass(cp)).toBe(cls)
   })
 })
