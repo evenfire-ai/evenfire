@@ -1314,10 +1314,11 @@ S11_POD="$(wait_for_switched_pod stateless)" || { fail "11: no Ready stateless P
 # shellcheck disable=SC2016 # expanded by the Pod shell
 kctl exec "$S11_POD" -n "$MCP_HOST_NS" -c mcp-host -- sh -c 'printf "%s\n" "$1" > "/workspace/$2"' sh "$SEED11_CONTENT" "$SEED11_FILE" \
   || { fail "11: could not seed workspace file on ${S11_POD}"; print_results; exit 1; }
-s11_wait=0
+# Wall-clock deadline: each read_thread_messages can itself take up to 30s.
+s11_deadline=$((SECONDS + 60))
 until read_thread_messages && echo "$THREAD_MESSAGES" | jq -e --arg m "seed-1102-${RUN_ID}" '(.turns[-1].user_input // "") | contains($m)' >/dev/null; do
-  [ "$s11_wait" -lt 60 ] || { fail "11: seed turn not persisted within 60s"; print_results; exit 1; }
-  sleep 3; s11_wait=$((s11_wait + 3))
+  [ "$SECONDS" -lt "$s11_deadline" ] || { fail "11: seed turn not persisted within 60s"; print_results; exit 1; }
+  sleep 3
 done
 SEED11_TURNS="$(echo "$THREAD_MESSAGES" | jq '.turns | length')"
 SEED11_DIGEST="$(history_prefix_digest "$THREAD_MESSAGES" "$SEED11_TURNS")" \
@@ -1369,11 +1370,11 @@ wait_for_deployment_template stateless "$POD_READY_TIMEOUT" "11: stateless re-en
 S11_POD="$(wait_for_switched_pod stateless)" || { fail "host did not recover after re-enabling stateless"; pod_diagnostics; print_results; exit 1; }
 assert_test11_continuity "stateful -> stateless" "$S11_POD" || { print_results; exit 1; }
 send_turn_expect_ok "Reply with exactly: resume-1102-${RUN_ID}" || { fail "11: resume turn failed after the round trip"; print_results; exit 1; }
-s11_wait=0
+s11_deadline=$((SECONDS + 60))
 until read_thread_messages && echo "$THREAD_MESSAGES" | jq -e --argjson n "$SEED11_TURNS" --arg m "resume-1102-${RUN_ID}" \
     '(.turns | length) > $n and ((.turns[-1].user_input // "") | contains($m))' >/dev/null; do
-  [ "$s11_wait" -lt 60 ] || { fail "11: resume turn not appended to the seeded conversation within 60s"; print_results; exit 1; }
-  sleep 3; s11_wait=$((s11_wait + 3))
+  [ "$SECONDS" -lt "$s11_deadline" ] || { fail "11: resume turn not appended to the seeded conversation within 60s"; print_results; exit 1; }
+  sleep 3
 done
 kctl exec "$S11_POD" -n "$MCP_HOST_NS" -c mcp-host -- rm -f "/workspace/${SEED11_FILE}" \
   || { fail "11: could not remove the seeded workspace file"; print_results; exit 1; }

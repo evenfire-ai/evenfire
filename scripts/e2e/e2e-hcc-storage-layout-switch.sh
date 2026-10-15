@@ -84,9 +84,11 @@ BASE_INIT_FIXTURE="${REPO_ROOT}/host-context-controller/test/__fixtures__/base-w
 
 DEFINED_SCENARIOS=(NEG_CTRL NEG_RV S1 S2 S3 RACE S4 S5 S6 S7)
 EXECUTED=0 SCENARIO_FAILURES=0 SCENARIO_LOG=''
-CREATED_HOSTS=() CREATED_CHANNELS=() FIXTURE_PODS=()
+CREATED_HOSTS=() CREATED_CHANNELS=()
 HCC_ENV_SAVED='' HCC_ENV_CHANGED=0
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/e2e-825.XXXXXX")"
+FIXTURE_POD_REGISTRY="${SCRATCH}/fixture-pods"
+: >"$FIXTURE_POD_REGISTRY"
 ADMIN_COOKIE='' SESSION_TOKEN='' RPC_TOKEN='' USER_ID='' TEAM_ID=''
 HTTP_CODE='' HTTP_BODY='' HTTP_HEADERS=()
 
@@ -410,8 +412,12 @@ pvc_fixture() {
         }],
         volumes:[{name:"pvc", persistentVolumeClaim:{claimName:$claim, readOnly:$ro}}]
       }}' "$@")"
+  # Callers usually run this function inside $(...), so an array append would
+  # be lost with the subshell; the registry file is what cleanup() reads.
+  # Registered before the create so a create that times out after the API
+  # accepted it is still cleaned up.
+  printf '%s\n' "$pod" >>"$FIXTURE_POD_REGISTRY"
   kctl create -f - <<<"$body" >/dev/null || { fail "${label}: fixture Pod create failed" >&2; return 1; }
-  FIXTURE_PODS+=("$pod")
   while [ "$elapsed" -lt 180 ]; do
     phase="$(kctl get pod "$pod" -n "$HOST_NS" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
     case "$phase" in Succeeded | Failed) break ;; esac
@@ -419,7 +425,12 @@ pvc_fixture() {
     elapsed=$((elapsed + 2))
   done
   kctl logs "$pod" -n "$HOST_NS" >"${SCRATCH}/${pod}.log" 2>&1 || true
-  kctl delete pod "$pod" -n "$HOST_NS" --wait=true --timeout=60s >/dev/null 2>&1 || true
+  # A Pod left behind keeps the RWO claim attached to its node and blocks the
+  # next fixture or Host Pod on another node, so a failed delete fails the step.
+  if ! kctl delete pod "$pod" -n "$HOST_NS" --wait=true --timeout=60s >/dev/null 2>&1; then
+    fail "${label}: fixture Pod ${pod} delete failed" >&2
+    return 1
+  fi
   if [ "$phase" != Succeeded ]; then
     fail "${label}: fixture Pod ended ${phase:-<timeout>}: $(tail -n 5 "${SCRATCH}/${pod}.log")" >&2
     return 1
@@ -730,7 +741,11 @@ scenario_S7() {
   wait_new_ready_pod "$name" '' "$POD_READY_TIMEOUT" || return 1
   assert_pod "$name" true /workspace || return 1
   listing="$(pvc_fixture "$name" ro list-after "$LIST_SCRIPT")" || return 1
-  [ "$(grep -v ' ./state.db' <<<"$before")" = "$(grep -v ' ./state.db' <<<"$listing")" ] ||
+  # Only the live writer's journals may differ: the suspended Host closed its
+  # database (no -wal/-shm), the woken one holds it open. state.db itself and
+  # any state.db*.bak must match, so a lost or extra backup fails here.
+  grep -qx 'f ./state.db' <<<"$listing" || { fail "S7: no state.db at the PVC root after the merge: ${listing}"; return 1; }
+  [ "$(grep -vxE 'f \./state\.db-(wal|shm)' <<<"$before")" = "$(grep -vxE 'f \./state\.db-(wal|shm)' <<<"$listing")" ] ||
     { fail 'S7: root entries differ from the tree before the re-split'; diff <(echo "$before") <(echo "$listing") >&2 || true; return 1; }
   ok 'S7: re-split tree merged back to the same root entries'
   assert_history "$name" || return 1
@@ -740,7 +755,7 @@ scenario_S7() {
 # RACE: concurrent model selections on new chats create one session each and
 # never restart the Host (A7.13).
 race_host() { # NAME STATELESS
-  local name=$1 stateless=$2 model uid restarts round i chat codes pids
+  local name=$1 stateless=$2 model uid restarts round i chat codes pids pods
   create_host "$name" "$stateless" || return 1
   wait_new_ready_pod "$name" '' "$POD_READY_TIMEOUT" || return 1
   assert_pod "$name" "$stateless" /workspace || return 1
@@ -765,10 +780,14 @@ race_host() { # NAME STATELESS
     rpc GET "${RPC_BASE}/api/v1/rpc/hosts/${name}/sessions?agent=${name}&limit=100" || true
     session_listed "$HTTP_BODY" "$name" "$chat" || { fail "${name}: round ${round} chat not listed exactly once"; return 1; }
   done
-  POD_JSON="$(host_pods "$name" | jq -c '.items[0]')"
-  [ "$(jq -r '.metadata.uid' <<<"$POD_JSON")" = "$uid" ] &&
+  # The original Pod must be the only Pod, not terminating: a replacement
+  # leaves the old Pod Terminating next to a new one, and items[0] could be
+  # either of them.
+  pods="$(host_pods "$name")" || { fail "${name}: could not list Pods after the race"; return 1; }
+  POD_JSON="$(jq -c --arg uid "$uid" '[.items[] | select(.metadata.uid == $uid and .metadata.deletionTimestamp == null)] | first // empty' <<<"$pods")"
+  [ "$(jq '.items | length' <<<"$pods")" = 1 ] && [ -n "$POD_JSON" ] &&
     [ "$(jq -r '[.status.containerStatuses[] | select(.name == "mcp-host") | .restartCount] | first' <<<"$POD_JSON")" = "$restarts" ] ||
-    { fail "${name}: the Pod restarted or was replaced during the race"; return 1; }
+    { fail "${name}: the Pod restarted or was replaced during the race: $(jq -c '[.items[] | {uid: .metadata.uid, deleting: (.metadata.deletionTimestamp != null)}]' <<<"$pods")"; return 1; }
   ok "${name}: 5 rounds x 4 concurrent selections, one session per chat, Pod ${uid:0:8} restartCount ${restarts}"
 }
 scenario_RACE() {
@@ -795,9 +814,9 @@ cleanup() {
   local status=$? failed=0 name pod channel
   # bash 3.2 treats "${empty[@]}" as unbound under set -u.
   set +eu
-  for pod in "${FIXTURE_PODS[@]}"; do
+  while IFS= read -r pod; do
     kctl delete pod "$pod" -n "$HOST_NS" --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || failed=1
-  done
+  done <"$FIXTURE_POD_REGISTRY"
   for channel in "${CREATED_CHANNELS[@]}"; do
     kctl delete communicationchannel "$channel" -n "$CHANNEL_NS" --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || failed=1
   done
@@ -829,6 +848,16 @@ trap cleanup EXIT
 
 # ─── Run ──────────────────────────────────────────────────────────────
 header "#825 storage layout across lifecycle switches (run ${RUN}, ${E2E_KUBECONTEXT})"
+# S5-S7 need HCC to render workspace-layout-merge; its flag defaults to true
+# when unset or empty (A7.24). A literal value is the only one checkable here.
+MERGE_FLAG="$(kctl get "deployment/${HCC_DEPLOY}" -n "$HCC_NS" -o json | jq -r '
+  [.spec.template.spec.containers[].env[]? | select(.name == "CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE")]
+  | if length == 0 then "<unset>" elif .[0].valueFrom then "<valueFrom>" else (.[0].value // "") end')" ||
+  die "could not read deployment/${HCC_DEPLOY}"
+case "$MERGE_FLAG" in
+  '<unset>' | '' | true) ok "HCC CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE=${MERGE_FLAG:-<empty>} (merge init rendered)" ;;
+  *) die "HCC CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE is '${MERGE_FLAG}'; this E2E needs it unset, empty or 'true'" ;;
+esac
 SOURCE_HOST_JSON="$(kctl get host "$SOURCE_HOST" -n "$HOST_NS" -o json)" || die "source Host ${SOURCE_HOST} not found"
 FIXTURE_IMAGE="$(kctl get deployment "$SOURCE_HOST" -n "$HOST_NS" \
   -o jsonpath='{.spec.template.spec.containers[?(@.name=="mcp-host")].image}')"
