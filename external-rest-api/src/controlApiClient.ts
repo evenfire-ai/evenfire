@@ -52,6 +52,26 @@ export class ControlApiError extends Error {
   }
 }
 
+export type ControlApiTransportOperation = 'read' | 'mutation'
+export type ControlApiTransportPhase = 'dispatch' | 'response'
+
+export class ControlApiTransportError extends Error {
+  constructor(
+    readonly operation: ControlApiTransportOperation,
+    readonly phase: ControlApiTransportPhase
+  ) {
+    super('Control API transport failed')
+    this.name = 'ControlApiTransportError'
+  }
+}
+
+export class ControlApiUnexpectedResponseError extends Error {
+  constructor() {
+    super('Control API returned an unsupported response')
+    this.name = 'ControlApiUnexpectedResponseError'
+  }
+}
+
 function forwardableResponseHeaders(response: Response): Record<string, string> {
   const headers: Record<string, string> = {}
   for (const name of FORWARDABLE_RESPONSE_HEADERS) {
@@ -113,13 +133,23 @@ export async function controlApiRequestWithStatus<T>(
     Object.assign(headers, options.extraHeaders)
   }
 
-  const response = await fetch(buildUrl(path, options?.query), {
-    method,
-    headers,
-    body: options?.body !== undefined ? JSON.stringify(options.body) : undefined,
-  })
+  const url = buildUrl(path, options?.query)
+  const body = options?.body !== undefined ? JSON.stringify(options.body) : undefined
+  const operation: ControlApiTransportOperation =
+    method === 'GET' || method === 'HEAD' ? 'read' : 'mutation'
+  let response: Response
+  try {
+    response = await fetch(url, { method, headers, body })
+  } catch {
+    throw new ControlApiTransportError(operation, 'dispatch')
+  }
 
-  const raw = await response.text()
+  let raw: string
+  try {
+    raw = await response.text()
+  } catch {
+    throw new ControlApiTransportError(operation, 'response')
+  }
   let parsed: unknown = null
   let parseError = false
   if (raw) {

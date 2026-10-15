@@ -1,5 +1,9 @@
 import type { ErrorRequestHandler, Response } from 'express'
-import { ControlApiError } from '../controlApiClient.js'
+import {
+  ControlApiError,
+  ControlApiTransportError,
+  ControlApiUnexpectedResponseError,
+} from '../controlApiClient.js'
 
 function sendPublicPasswordAuthorityError(
   res: Response,
@@ -28,7 +32,19 @@ function sendPublicPasswordAuthorityError(
 
 /** Only the bounded public authority contract crosses this credential seam. */
 export function sendPasswordAuthorityError(error: unknown, res: Response): boolean {
-  if (!(error instanceof ControlApiError)) return false
+  if (error instanceof ControlApiTransportError) {
+    sendPublicPasswordAuthorityError(res, 503, 'authority_unavailable')
+    return true
+  }
+  if (error instanceof ControlApiUnexpectedResponseError) {
+    res.status(502).json({ error: 'Password recovery service returned an invalid response' })
+    return true
+  }
+  if (!(error instanceof ControlApiError)) {
+    if (!(error instanceof Error)) return false
+    res.status(500).json({ error: 'Internal Server Error' })
+    return true
+  }
   if (error.status === 429) {
     sendPublicPasswordAuthorityError(res, 429, 'rate_limited', error.headers['retry-after'])
     return true
@@ -57,12 +73,12 @@ export function sendPasswordAuthorityError(error: unknown, res: Response): boole
 
 export const invitationPasswordErrorHandler: ErrorRequestHandler = (error, _req, res, next) => {
   if (sendPasswordAuthorityError(error, res)) return
-  if (error instanceof TypeError) {
-    sendPasswordAuthorityUnavailable(res)
-    return
-  }
   if (error instanceof ControlApiError) {
     res.status(error.status).json({ error: 'Invitation is invalid or unavailable' })
+    return
+  }
+  if (error instanceof Error) {
+    res.status(500).json({ error: 'Internal Server Error' })
     return
   }
   next(error)

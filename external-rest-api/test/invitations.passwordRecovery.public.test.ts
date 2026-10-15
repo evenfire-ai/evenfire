@@ -22,6 +22,7 @@ describe('password reset preview authority failures', () => {
   afterEach(async () => {
     config.controlApiBaseUrl = previousControlApiBaseUrl
     config.controlApiServiceToken = previousControlApiServiceToken
+    vi.unstubAllGlobals()
     if (upstream?.listening) {
       await new Promise<void>((resolve, reject) =>
         upstream!.close(error => (error ? reject(error) : resolve()))
@@ -42,6 +43,15 @@ describe('password reset preview authority failures', () => {
 
   async function submitReset() {
     return request(createApp()).post('/api/v1/invitations/password').send({
+      token: recoveryProof,
+      email: 'member@example.invalid',
+      invitationId: '00000000-0000-4000-8000-000000000001',
+      password: 'Synthetic-Replacement-Password-123',
+    })
+  }
+
+  async function submitDedicatedReset() {
+    return request(createApp()).post('/api/v1/invitations/password-reset').send({
       token: recoveryProof,
       email: 'member@example.invalid',
       invitationId: '00000000-0000-4000-8000-000000000001',
@@ -116,6 +126,78 @@ describe('password reset preview authority failures', () => {
     expect(response.headers['retry-after']).toBe('2')
     expect(requestedPath).toContain(encodeURIComponent(recoveryProof))
   })
+
+  it('keeps a reset dispatch failure unknown and never retries the one-use proof', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValue(new TypeError('private producer URL and signed proof'))
+    vi.stubGlobal('fetch', fetchMock)
+    config.controlApiBaseUrl = 'http://control-api.example.invalid/api/v1'
+
+    const response = await submitDedicatedReset()
+
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ error: 'recovery_outcome_unknown', retryAfterSeconds: 2 })
+    expect(response.headers['retry-after']).toBe('2')
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(response.text).not.toContain('private producer URL')
+    expect(response.text).not.toContain(recoveryProof)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps an unread reset response unknown without replaying the mutation', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: vi.fn().mockRejectedValue(new Error('private response proof')),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    config.controlApiBaseUrl = 'http://control-api.example.invalid/api/v1'
+
+    const response = await submitDedicatedReset()
+
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ error: 'recovery_outcome_unknown', retryAfterSeconds: 2 })
+    expect(response.headers['retry-after']).toBe('2')
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(response.text).not.toContain('private response proof')
+    expect(response.text).not.toContain(recoveryProof)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('sanitizes an unrecognized producer client response without a retry hint', async () => {
+    await startUpstream((_req, res) => {
+      res.writeHead(400, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ error: 'invalid payload', detail: 'private producer data' }))
+    })
+
+    const response = await submitDedicatedReset()
+
+    expect(response.status).toBe(502)
+    expect(response.body).toEqual({
+      error: 'Password recovery service returned an invalid response',
+    })
+    expect(response.headers['retry-after']).toBeUndefined()
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(response.text).not.toContain('private producer data')
+    expect(response.text).not.toContain(recoveryProof)
+  })
+
+  it('returns a sanitized nonretryable error when request construction fails before dispatch', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    config.controlApiBaseUrl = 'not a valid URL'
+
+    const response = await submitDedicatedReset()
+
+    expect(response.status).toBe(500)
+    expect(response.body).toEqual({ error: 'Internal Server Error' })
+    expect(response.headers['retry-after']).toBeUndefined()
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(response.text).not.toContain('not a valid URL')
+    expect(response.text).not.toContain(recoveryProof)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
 })
 
 const fetchMock = vi.fn()
@@ -158,7 +240,7 @@ describe('setupInvitationPasswordWithToken', () => {
     ).resolves.toEqual({ error: 'invalid_password' })
   })
 
-  it('keeps invalid-payload outside the allowlist when a password was supplied', async () => {
+  it('rejects an unrecognized producer error instead of treating it as a password error', async () => {
     fetchMock.mockResolvedValue(
       new Response(JSON.stringify({ error: 'invalid payload' }), { status: 400 })
     )
@@ -170,9 +252,6 @@ describe('setupInvitationPasswordWithToken', () => {
         'synthetic-row-id',
         'Synthetic-Valid-Password-123'
       )
-    ).rejects.toMatchObject({
-      status: 503,
-      body: { error: 'authority_unavailable' },
-    })
+    ).rejects.toMatchObject({ name: 'ControlApiUnexpectedResponseError' })
   })
 })

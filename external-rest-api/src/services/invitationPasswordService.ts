@@ -1,4 +1,9 @@
-import { ControlApiError, controlApiRequest } from '../controlApiClient.js'
+import {
+  ControlApiError,
+  ControlApiTransportError,
+  ControlApiUnexpectedResponseError,
+  controlApiRequest,
+} from '../controlApiClient.js'
 import type { InvitationPreview } from './invitationsService.js'
 
 type AuthContext = {
@@ -101,12 +106,15 @@ export async function setupInvitationPassword(
     )
     return { data }
   } catch (error) {
+    if (error instanceof ControlApiTransportError) throw passwordAuthorityUnavailable()
     if (error instanceof ControlApiError && [429, 503].includes(error.status)) throw error
     if (error instanceof ControlApiError) {
       const domainError = invitationPasswordDomainError(error)
       if (domainError) return { error: domainError }
+      if (error.status >= 500) throw passwordAuthorityUnavailable()
+      throw new ControlApiUnexpectedResponseError()
     }
-    throw passwordAuthorityUnavailable()
+    throw error
   }
 }
 
@@ -134,12 +142,20 @@ export async function setupInvitationPasswordWithToken(
     })
     return { data }
   } catch (error) {
-    if (error instanceof ControlApiError && [429, 503].includes(error.status)) throw error
+    if (error instanceof ControlApiTransportError) throw unknownRecoveryOutcome()
+    if (error instanceof ControlApiError && error.status === 429) throw error
     if (error instanceof ControlApiError) {
+      if (
+        error.status === 503 &&
+        (error.code === 'authority_unavailable' || error.code === 'recovery_outcome_unknown')
+      ) {
+        throw error
+      }
       const domainError = resetPasswordDomainError(error)
       if (domainError) return { error: domainError }
-      if (error.status < 500) throw passwordAuthorityUnavailable()
+      if (error.status >= 500) throw unknownRecoveryOutcome()
+      throw new ControlApiUnexpectedResponseError()
     }
-    throw unknownRecoveryOutcome()
+    throw error
   }
 }
