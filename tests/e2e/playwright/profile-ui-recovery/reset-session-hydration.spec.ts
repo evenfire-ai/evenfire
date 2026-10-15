@@ -2,30 +2,30 @@ import { expect, test } from '@playwright/test'
 
 const resetErrorCases = [
   {
-    token: 'invalid_password',
+    errorCode: 'invalid_password',
     status: 400,
     message: 'Password must be between 8 and 256 characters.',
   },
   {
-    token: 'invalid_invitation',
+    errorCode: 'invalid_invitation',
     status: 400,
     message: 'This recovery link is invalid or expired.',
   },
-  { token: 'forbidden', status: 403, message: 'Invitation email does not match.' },
-  { token: 'expired', status: 410, message: 'This invitation has expired.' },
-  { token: 'not_pending', status: 409, message: 'This invitation has already been used.' },
+  { errorCode: 'forbidden', status: 403, message: 'Invitation email does not match.' },
+  { errorCode: 'expired', status: 410, message: 'This invitation has expired.' },
+  { errorCode: 'not_pending', status: 409, message: 'This invitation has already been used.' },
   {
-    token: 'rate_limited',
+    errorCode: 'rate_limited',
     status: 429,
     message: 'Account recovery is temporarily busy. Please wait a moment and try again.',
   },
   {
-    token: 'authority_unavailable',
+    errorCode: 'authority_unavailable',
     status: 503,
     message: 'Account recovery is temporarily unavailable. Please try again shortly.',
   },
   {
-    token: 'recovery_outcome_unknown',
+    errorCode: 'recovery_outcome_unknown',
     status: 503,
     message:
       'We could not confirm whether your password change completed. Try signing in with the new password. If that does not work, request a new reset link.',
@@ -135,7 +135,7 @@ test('trimmed-too-short password gets password guidance without dispatching a re
 })
 
 for (const failure of resetErrorCases) {
-  test(`real reset route response ${failure.token} reaches Profile UI apiSend`, async ({
+  test(`real reset route response ${failure.errorCode} reaches Profile UI apiSend`, async ({
     page,
   }) => {
     await openRecovery(page)
@@ -143,7 +143,7 @@ for (const failure of resetErrorCases) {
       .get('/external-rest-api/__test/metrics')
       .then(response => response.json())
 
-    const password = `Synthetic-Recovery-Contract-${failure.token}-Password-123`
+    const password = `Synthetic-Recovery-Contract-${failure.errorCode}-Password-123`
     await page.getByLabel('Password', { exact: true }).fill(password)
     await page.getByLabel('Confirm password').fill(password)
     const resetResponsePromise = page.waitForResponse(
@@ -159,7 +159,7 @@ for (const failure of resetErrorCases) {
     await expect(page.getByText(failure.message, { exact: true })).toBeVisible()
     await expect(
       page.getByText('This recovery link is invalid or expired.', { exact: true })
-    ).toHaveCount(failure.token === 'invalid_invitation' ? 1 : 0)
+    ).toHaveCount(failure.errorCode === 'invalid_invitation' ? 1 : 0)
 
     const after = await page.request
       .get('/external-rest-api/__test/metrics')

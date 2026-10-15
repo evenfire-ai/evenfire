@@ -10,6 +10,9 @@ const profileUiRoot = path.join(repositoryRoot, 'profile-ui')
 const externalRestRoot = path.join(repositoryRoot, 'external-rest-api')
 const port = Number(process.env.PROFILE_UI_RECOVERY_PORT || 31873)
 const invitationToken = 'synthetic-reset-proof'
+const syntheticServiceAuthorization = ['Bearer', 'synthetic-profile-recovery-service-token'].join(
+  ' '
+)
 const contractPasswordPrefix = 'Synthetic-Recovery-Contract-'
 const invitation = {
   id: 'synthetic-reset-row',
@@ -158,7 +161,7 @@ const apiServer = createServer(async (request, response) => {
       return
     }
     if (
-      request.headers.authorization !== 'Bearer synthetic-profile-recovery-service-token' ||
+      request.headers.authorization !== syntheticServiceAuthorization ||
       body.token !== invitationToken ||
       body.email !== invitation.email ||
       body.invitationId !== invitation.id ||
