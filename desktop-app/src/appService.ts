@@ -42,7 +42,11 @@ import {
   withTimeout,
 } from './httpClient.js'
 import { MemberRegistrationServiceClient } from './memberRegistrationServiceClient.js'
-import { isMemoryOnlySessionExpired, memoryOnlySessionDeadline } from './memoryOnlySession.js'
+import {
+  isMemoryOnlySessionExpired,
+  memoryOnlySessionDeadline,
+  memoryOnlySessionReplacementDeadline,
+} from './memoryOnlySession.js'
 import {
   type PendingExternalLogoutIntent,
   type PendingExternalLogoutMarker,
@@ -1717,10 +1721,7 @@ export class AppService {
     if (!previousLease || !previousToken || !previousMe || previousLease.envKey !== envKey) {
       throw new SessionTokenStorageSupersededBeforeWriteError()
     }
-    const expiresAt = Math.min(previousLease.expiresAt, memoryOnlySessionDeadline(token))
-    if (isMemoryOnlySessionExpired(expiresAt)) {
-      throw new Error('Temporary session expired. Please sign in again.')
-    }
+    const expiresAt = memoryOnlySessionReplacementDeadline(previousLease.expiresAt, token)
     let receipt: TemporarySessionReceipt | undefined
     await this.runSessionPersistence(async () => {
       if (

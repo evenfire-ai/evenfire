@@ -33,3 +33,16 @@ export function memoryOnlySessionDeadline(token: string, now = Date.now()): numb
 export function isMemoryOnlySessionExpired(deadline: number, now = Date.now()): boolean {
   return !Number.isSafeInteger(deadline) || deadline <= now
 }
+
+/** Token/team replacement may shorten, but never extend, the original lease. */
+export function memoryOnlySessionReplacementDeadline(
+  currentDeadline: number,
+  token: string,
+  now = Date.now()
+): number {
+  const deadline = Math.min(currentDeadline, memoryOnlySessionDeadline(token, now))
+  if (isMemoryOnlySessionExpired(deadline, now)) {
+    throw new Error('Temporary session expired. Please sign in again.')
+  }
+  return deadline
+}
