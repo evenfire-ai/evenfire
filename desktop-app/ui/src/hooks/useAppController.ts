@@ -1083,6 +1083,11 @@ export function useAppController() {
             },
           })
           .catch(() => undefined)
+        // On the Chat nav click this runs in the same batch as
+        // `nav.handleNavSelect`'s `setSelectedAgent(null)`, so no commit shows
+        // an empty selection. For the other fast-path callers the agent is
+        // already selected and this is a no-op.
+        nav.setSelectedAgent(agentName)
         nav.setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
         // Activate the chat tab (dedupes/focuses by chatId). We are already on
         // the chat route, so `navItem` stays `chat` — same-commit derivation, no
