@@ -5117,6 +5117,14 @@ export class AppService {
               },
             })
             requireLogoutOwnership()
+            if (!result.keytarAvailable && !result.keytarDisabled) {
+              const current = this.inspectPendingLogoutMarker(envKey)
+              if (current?.intent.intent === 'keytar-cleanup-pending')
+                throw new SessionTokenStorageSupersededBeforeWriteError()
+              if (current?.intent.intent !== 'logout-pending')
+                recordPendingExternalLogout(userDataDirectory, envKey)
+              return
+            }
             if (journalSnapshot) {
               const retired = retireSessionPersistenceJournalAfterVerifiedLogout(
                 journalSnapshot,

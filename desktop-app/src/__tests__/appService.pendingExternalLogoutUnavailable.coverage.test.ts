@@ -28,6 +28,8 @@ beforeEach(async () => {
   vi.clearAllMocks()
   vi.resetModules()
   runtime.directory = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-marker-absent-coverage-'))
+  const { safeStorage } = await import('electron')
+  vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
 })
 afterEach(async () => {
   vi.restoreAllMocks()
@@ -48,7 +50,7 @@ async function createService() {
   return { service, tokenStore, envKey: config.getActiveEnvKey(), markers }
 }
 
-// Characterization of the accepted missing-Keytar trade-off, not a new storage policy.
+// October 14 owner clarification extends the logout fence to an absent production module.
 describe('pending logout without a Keytar module', () => {
   it('retains logout intent after canceled-quit file cleanup when Keytar cleanup cannot be verified', async () => {
     const { service, tokenStore, envKey, markers } = await createService()
@@ -73,13 +75,54 @@ describe('pending logout without a Keytar module', () => {
     })
   })
 
-  it('allows ordinary no-marker logout after file cleanup when Keytar is missing', async () => {
+  it('requires LP after ordinary no-marker logout when Keytar cleanup cannot be verified', async () => {
     const { service, tokenStore, envKey, markers } = await createService()
     await tokenStore.setSafeStorageSessionToken('fixture-file-session', envKey)
 
     await expect(service.logout()).resolves.toBeUndefined()
     await expect(tokenStore.getSafeStorageSessionToken(envKey)).resolves.toBeNull()
-    expect(markers.readPendingExternalLogoutMarker(runtime.directory, envKey)).toBeNull()
+    expect(markers.readPendingExternalLogoutIntent(runtime.directory, envKey)).toEqual({
+      intent: 'logout-pending',
+    })
     expect(notifySessionChanged).toHaveBeenCalledWith(false)
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
+    const state = service as unknown as {
+      installAuthenticatedLogin: (result: {
+        token: string
+        me: {
+          id: string
+          email: string
+          name: null
+          picture: null
+          teamId: string
+          teamName: string
+          role: string
+        }
+      }) => Promise<unknown>
+    }
+    await expect(
+      state.installAuthenticatedLogin({
+        token: 'fixture-denied-session',
+        me: {
+          id: 'fixture-user',
+          email: 'fixture@example.com',
+          name: null,
+          picture: null,
+          teamId: 'fixture-team',
+          teamName: 'Fixture team',
+          role: 'member',
+        },
+      })
+    ).rejects.toThrow('safeStorage is unavailable')
+    expect(await fs.readdir(runtime.directory)).not.toContain(`session-token-${envKey}.json`)
+    const restarted = await createService()
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+    })
+    expect(markers.readPendingExternalLogoutIntent(runtime.directory, envKey)).toEqual({
+      intent: 'logout-pending',
+    })
   })
 })

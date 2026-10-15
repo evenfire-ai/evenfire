@@ -696,6 +696,53 @@ describe('R21-M2 stale native producer fencing', () => {
   })
 })
 
+describe('R18-H1 owner-approved absent-module outage policy', () => {
+  it('retains LP after ordinary logout without Keytar until verified secure recovery is available', async () => {
+    vi.doMock('keytar', () => ({}))
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
+    const h = await harness()
+    const historicalProducer = await harness({ isolated: true })
+    await historicalProducer.tokenStore.setSessionToken(homeToken, h.envKey)
+    await h.service.initialize()
+    await h.service.logout()
+    expect(h.state.sessionToken).toBeNull()
+    expect(h.markers.readPendingExternalLogoutIntent(runtime.directory, h.envKey)).toEqual({
+      intent: 'logout-pending',
+    })
+    await expect(
+      h.state.installAuthenticatedLogin({ token: 'fixture-denied-session', me: homeMe })
+    ).rejects.toThrow('safeStorage is unavailable')
+    expect(await fs.readdir(runtime.directory)).not.toContain(`session-token-${h.envKey}.json`)
+    const restarted = await harness()
+    await expect(restarted.service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+    })
+    expect(restarted.state.authClient.getMe).not.toHaveBeenCalled()
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(true)
+    await h.state.installAuthenticatedLogin({ token: 'fixture-secure-recovery', me: homeMe })
+    const recovered = await harness()
+    await expect(recovered.service.initialize()).resolves.toEqual({
+      authenticated: true,
+      me: homeMe,
+    })
+    expect(recovered.state.authClient.getMe).toHaveBeenCalledWith('fixture-secure-recovery')
+  })
+
+  it('preserves the explicit isolated-development keytarDisabled exception', async () => {
+    const { safeStorage } = await import('electron')
+    vi.mocked(safeStorage.isEncryptionAvailable).mockReturnValue(false)
+    const h = await harness({ isolated: true })
+    await h.state.installAuthenticatedLogin({ token: homeToken, me: homeMe })
+    await h.service.logout()
+    expect(h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)).toBeNull()
+    await h.state.installAuthenticatedLogin({ token: 'fixture-isolated-fresh-session', me: homeMe })
+    expect(h.service.getCachedUserId()).toBe(homeMe.id)
+    expect(await h.tokenStore.getSessionToken(h.envKey)).toBe('fixture-isolated-fresh-session')
+  })
+})
+
 describe('R21-L1 exact stale encrypted disposal', () => {
   it('retires CP-S after fresh Keytar login without retaining a prior-user encrypted token', async () => {
     const h = await harness()
