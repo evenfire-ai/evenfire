@@ -697,7 +697,8 @@ scenario_S3() {
   assert_history "$name" 'stateful->stateless(channel-deleted)'
 }
 
-# S4: switch to stateful while suspended, then back to stateless and wake.
+# S4: switch to stateful while suspended, then back to stateless (history
+# checked on the active Pod), suspend and wake.
 scenario_S4() {
   local name
   name="$(truncate_rfc1123 "e2e-825-s4-${RUN}")"
@@ -706,6 +707,9 @@ scenario_S4() {
   assert_history "$name" 'suspended->stateful' || return 1
   read_seed_file "$name" seed.txt "seed ${RUN}" || return 1
   switch_and_witness "$name" true || return 1
+  # The active stateless Pod between the switch and the suspend serves the
+  # same history too, not only the Pod that wakes afterwards.
+  assert_history "$name" 'stateful->stateless(active)' || return 1
   wait_suspended "$name" || return 1
   post_wake "$name" || return 1
   wait_new_ready_pod "$name" '' "$POD_READY_TIMEOUT" || return 1
