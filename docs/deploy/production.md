@@ -1,9 +1,12 @@
 # Production deployment (notes)
 
 This repository ships **Kubernetes manifests**, operators, and a Helm chart for
-CRDs. A single turnkey “one cloud vendor” guide is not published in this OSS
-tree yet; use this page as the production checklist and link into in-repo
-assets.
+CRDs. There is no certified in-tree cloud overlay; production cloud overlays
+are customer-local patches on `deploy/base`. For an **existing DigitalOcean
+Kubernetes (DOKS)** cluster, give your coding agent the
+[DOKS agent how-to](digitalocean-doks-agent-guide.md) (skill:
+`.agents/skills/evenfire-digitalocean-doks`). Use this page as the production
+checklist and link into in-repo assets.
 
 ## What “production” means here
 
@@ -88,6 +91,7 @@ modified MPL-licensed files. See [LICENSE](../../LICENSE).
 
 ## Related
 
+- [Evenfire on existing DigitalOcean DOKS (agent how-to)](digitalocean-doks-agent-guide.md)
 - [WorkflowRecipes operations](workflow-recipes-guide.md)
 - [Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md)
 - [Member invitations on self-hosted](../how-to/member-invitations-self-hosted.md)

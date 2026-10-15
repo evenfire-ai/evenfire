@@ -1,5 +1,9 @@
 # Evenfire repository guidance
 
+Customer self-host on an **existing DigitalOcean Kubernetes (DOKS)** cluster is
+not this file. Use `.agents/skills/evenfire-digitalocean-doks/SKILL.md` and
+`docs/deploy/digitalocean-doks-agent-guide.md`.
+
 ## Shared capability naming
 
 Name shared variables, functions, types, database fields, quota families,

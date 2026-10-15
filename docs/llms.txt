@@ -45,6 +45,8 @@
 - Publish a plugin to the registry (efrk_ org key): how-to/publish-plugin-to-registry.md
 - Shared & global files (SFS team workspace + brokered GFS drive): how-to/shared-and-global-files.md
 - Minikube full stack: deploy/minikube.md
+- Evenfire on existing DigitalOcean DOKS (customer coding-agent how-to): deploy/digitalocean-doks-agent-guide.md
+- DOKS agent skill (on-demand): ../.agents/skills/evenfire-digitalocean-doks/SKILL.md
 - Production checklist: deploy/production.md
 - WorkflowRecipes ops: deploy/workflow-recipes-guide.md
 
