@@ -10,7 +10,7 @@ import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { act, cleanup, waitFor } from '@testing-library/react'
 import { resetComposerDraftStore } from '@lib/composerDraftStore'
 import type { AgentChatMessage } from '../../../uiTypes'
-import { deferred, localIndex } from './__fixtures__/catalogFixtures'
+import { deferred } from './__fixtures__/catalogFixtures'
 import { type RenderControllerResult, renderController } from './__fixtures__/controllerHarness'
 import { ipcGenericForbidden, ipcHostAccessRevoked, ipcHttpError } from './__fixtures__/ipcErrors'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
@@ -495,79 +495,6 @@ describe('switchToChat transcript memo (#1091 A9)', () => {
       })
       expect(controller.result.current.activeChatId).toBe('chat-a')
       expectOnlyTranscript(frames.slice(backToA), 'chat-a', disk['chat-a'])
-    }
-  )
-
-  it.each(HOSTS)(
-    "g. %s: a 'specific' open from another Host shows the remembered chat while the index loads",
-    async host => {
-      const otherHost = 'other-host'
-      const disk = { 'chat-a': transcript('chat-a') }
-      serveDisk(disk)
-      const controller = mount(host, { agentNames: [host, otherHost] })
-      await settleMount()
-      await open(controller, host, 'chat-a')
-      act(() => controller.rerender({ selectedAgent: otherHost, agentNames: [host, otherHost] }))
-      await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalledWith(otherHost))
-
-      const hostIndex = deferred<ReturnType<typeof localIndex>>()
-      const defaultIndex = clerum.chat.getIndex.getMockImplementation()
-      clerum.chat.getIndex.mockImplementation((agentRef: string) =>
-        agentRef === host ? hostIndex.promise : defaultIndex?.(agentRef)
-      )
-      const returnStart = frames.length
-      act(() => controller.result.current.setPendingChatSelection(host, 'chat-a'))
-      act(() => controller.rerender({ selectedAgent: host, agentNames: [host, otherHost] }))
-      await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenLastCalledWith(host))
-      // The index read (behind the deleted-chat cleanup on a rebind) is pending.
-      expectOnlyTranscript(frames.slice(returnStart), 'chat-a', disk['chat-a'])
-
-      const hostReadsBefore = clerum.rpc.loadSessionMessages.mock.calls.length
-      await act(async () => {
-        hostIndex.resolve(localIndex([{ id: 'chat-a', title: 'Chat A' }]))
-      })
-      await waitFor(() =>
-        expect(clerum.rpc.loadSessionMessages.mock.calls.length).toBeGreaterThan(hostReadsBefore)
-      )
-      expect(lastHostReadChatId()).toBe('chat-a')
-      expectOnlyTranscript(frames.slice(returnStart), 'chat-a', disk['chat-a'])
-    }
-  )
-
-  it.each(HOSTS)(
-    "h. %s: a 'specific' selection whose tombstone arrives with the index withdraws the remembered chat",
-    async host => {
-      const otherHost = 'other-host'
-      const disk = { 'chat-a': transcript('chat-a') }
-      serveDisk(disk)
-      const controller = mount(host, { agentNames: [host, otherHost] })
-      await settleMount()
-      await open(controller, host, 'chat-a')
-      act(() => controller.rerender({ selectedAgent: otherHost, agentNames: [host, otherHost] }))
-      await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalledWith(otherHost))
-
-      const hostIndex = deferred<ReturnType<typeof localIndex>>()
-      const defaultIndex = clerum.chat.getIndex.getMockImplementation()
-      clerum.chat.getIndex.mockImplementation((agentRef: string) =>
-        agentRef === host ? hostIndex.promise : defaultIndex?.(agentRef)
-      )
-      const returnStart = frames.length
-      act(() => controller.result.current.setPendingChatSelection(host, 'chat-a'))
-      act(() => controller.rerender({ selectedAgent: host, agentNames: [host, otherHost] }))
-      await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenLastCalledWith(host))
-      // Witness: the seed painted the remembered transcript before the index arrived.
-      expectOnlyTranscript(frames.slice(returnStart), 'chat-a', disk['chat-a'])
-
-      const hostReadsBefore = clerum.rpc.loadSessionMessages.mock.calls.length
-      const tombstoneStart = frames.length
-      await act(async () => {
-        hostIndex.resolve(localIndex([], ['chat-a']))
-      })
-      await waitFor(() => expect(controller.result.current.chatMessages).toEqual([]))
-      const after = frames.slice(tombstoneStart)
-      expect(after.at(-1)).toEqual({ activeChatId: 'chat-a', contents: [], loading: false })
-      // The deleted chat is never read from the Host.
-      expect(clerum.rpc.loadSessionMessages.mock.calls.length).toBe(hostReadsBefore)
     }
   )
 

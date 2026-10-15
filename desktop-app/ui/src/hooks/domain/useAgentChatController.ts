@@ -1049,18 +1049,7 @@ export function useAgentChatController({
     async (agentRef: string, chatId: string) => {
       if (isHostAccessBlocked(agentRef)) return
       if (isChatDeleted(agentRef, chatId)) {
-        // A selection seed may already have painted this chat from the memo
-        // before its tombstone arrived; withdraw both the entry and the view.
         transcriptMemo.delete(chatTranscriptMemoKey(agentRef, chatId))
-        const visible = activeChatVisibilityRef.current
-        if (visible.selectedAgent === agentRef && visible.activeChatId === chatId) {
-          chatMessagesRef.current = []
-          setChatMessages([])
-          setChatMessagesLoading(false)
-          setHasOlderMessages(false)
-          cancelOlderMessagesLoad()
-          loadedLocalMessageCountRef.current = 0
-        }
         return
       }
       const key = makeTaskKey(agentRef, chatId)
@@ -1461,7 +1450,7 @@ export function useAgentChatController({
         selectedAgent,
       }
       setActiveChatId(requestedSelection.chatId)
-      presentSelectedTranscript(rememberedTranscript(selectedAgent, requestedSelection.chatId))
+      presentSelectedTranscript(undefined)
       if (requestedSelection.title) {
         upsertProvisionalEntry(
           requestedSelection.chatId,
@@ -1557,7 +1546,6 @@ export function useAgentChatController({
     selectedAgent,
     isHostAccessBlocked,
     presentSelectedTranscript,
-    rememberedTranscript,
   ])
 
   // ─── Activity / progress state updaters (hoisted from sendAgentMessage so the
@@ -3928,14 +3916,13 @@ export function useAgentChatController({
         selectedAgent: agentName,
       }
       setActiveChatId(chatId)
-      presentSelectedTranscript(rememberedTranscript(agentName, chatId))
+      presentSelectedTranscript(undefined)
       if (options.title) {
         upsertProvisionalEntry(chatId, options.title, options.isRemote === true)
       }
     },
     [
       presentSelectedTranscript,
-      rememberedTranscript,
       currentTeamId,
       writePendingSelection,
       upsertProvisionalEntry,
