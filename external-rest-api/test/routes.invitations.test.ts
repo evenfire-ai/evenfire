@@ -186,6 +186,109 @@ describe('routes/invitations', () => {
     )
   })
 
+  it.each([
+    {
+      source: 'invalid_password',
+      status: 400,
+      code: 'invalid_password',
+      message: 'Password must be between 8 and 256 characters',
+    },
+    {
+      source: 'invalid_invitation',
+      status: 400,
+      code: 'invalid_invitation',
+      message: 'This recovery link is invalid or expired',
+    },
+    {
+      source: 'not_found',
+      status: 404,
+      code: 'not_found',
+      message: 'Invitation not found',
+    },
+    {
+      source: 'forbidden',
+      status: 403,
+      code: 'forbidden',
+      message: 'Invitation is invalid or unavailable',
+    },
+    {
+      source: 'not_accepted',
+      status: 409,
+      code: 'invitation_not_accepted',
+      message: 'Invitation must be accepted before setting a password',
+    },
+    {
+      source: 'not_pending',
+      status: 409,
+      code: 'invitation_not_pending',
+      message: 'Invitation has already been used',
+    },
+    {
+      source: 'expired',
+      status: 410,
+      code: 'expired',
+      message: 'Invitation has expired',
+    },
+  ] as const)(
+    'returns stable reset code and safe message for $source without a session cookie',
+    async ({ source, status, code, message }) => {
+      invitationsServiceMock.setupInvitationPasswordWithToken.mockResolvedValue({
+        error: source,
+      })
+
+      const res = await request(makeApp())
+        .post('/invitations/password-reset')
+        .set(
+          'x-forwarded-for',
+          {
+            invalid_password: '198.51.100.151',
+            invalid_invitation: '198.51.100.152',
+            not_found: '198.51.100.153',
+            forbidden: '198.51.100.154',
+            not_accepted: '198.51.100.155',
+            not_pending: '198.51.100.156',
+            expired: '198.51.100.157',
+          }[source]
+        )
+        .send({
+          token: 'Synthetic-reset-proof',
+          email: 'invitee@example.com',
+          invitationId: 'reset-1',
+          password: 'Synthetic-new-password-123',
+        })
+        .expect(status)
+
+      expect(res.body).toEqual({ error: code, message })
+      expect(res.headers['set-cookie']).toBeUndefined()
+    }
+  )
+
+  it('keeps legacy reset error responses unchanged for existing invitation clients', async () => {
+    invitationsServiceMock.getInvitationByToken.mockResolvedValue({
+      id: 'reset-1',
+      email: 'invitee@example.com',
+      purpose: 'password_reset',
+      status: 'pending',
+    })
+    invitationsServiceMock.setupInvitationPasswordWithToken.mockResolvedValue({
+      error: 'invalid_password',
+    })
+
+    const res = await request(makeApp())
+      .post('/invitations/password')
+      .set('x-forwarded-for', '198.51.100.199')
+      .send({
+        token: 'Synthetic-reset-proof',
+        email: 'invitee@example.com',
+        invitationId: 'reset-1',
+        password: 'Synthetic-new-password-123',
+      })
+      .expect(400)
+
+    expect(res.body).toEqual({ error: 'Password must be between 8 and 256 characters' })
+    expect(res.headers['set-cookie']).toBeUndefined()
+  })
+
   it('uses non-enumerating wording when a reset row does not match the verified link', async () => {
     invitationsServiceMock.getInvitationByToken.mockResolvedValue({
       id: 'current-reset-row',

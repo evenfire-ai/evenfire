@@ -86,6 +86,49 @@ function sendInvitationPasswordError(
   res.status(400).json({ error: 'Password must be between 8 and 256 characters' })
 }
 
+function sendPasswordResetError(
+  res: Response,
+  error:
+    | 'not_found'
+    | 'forbidden'
+    | 'not_accepted'
+    | 'not_pending'
+    | 'expired'
+    | 'invalid_invitation'
+    | 'invalid_password'
+): void {
+  const response = {
+    not_found: { status: 404, code: 'not_found', message: 'Invitation not found' },
+    forbidden: {
+      status: 403,
+      code: 'forbidden',
+      message: 'Invitation is invalid or unavailable',
+    },
+    not_accepted: {
+      status: 409,
+      code: 'invitation_not_accepted',
+      message: 'Invitation must be accepted before setting a password',
+    },
+    not_pending: {
+      status: 409,
+      code: 'invitation_not_pending',
+      message: 'Invitation has already been used',
+    },
+    expired: { status: 410, code: 'expired', message: 'Invitation has expired' },
+    invalid_invitation: {
+      status: 400,
+      code: 'invalid_invitation',
+      message: 'This recovery link is invalid or expired',
+    },
+    invalid_password: {
+      status: 400,
+      code: 'invalid_password',
+      message: 'Password must be between 8 and 256 characters',
+    },
+  }[error]
+  res.status(response.status).json({ error: response.code, message: response.message })
+}
+
 async function invitationPasswordAuthFromRequest(req: Request): Promise<
   | { auth: InvitationPasswordAuth }
   | {
@@ -148,11 +191,12 @@ async function completePasswordReset(
   token: string,
   email: string,
   invitationId: string,
-  password: string
+  password: string,
+  sendError: typeof sendInvitationPasswordError = sendInvitationPasswordError
 ): Promise<void> {
   const result = await setupInvitationPasswordWithToken(token, email, invitationId, password)
   if (result.error) {
-    sendInvitationPasswordError(res, result.error)
+    sendError(res, result.error)
     return
   }
   const sessionToken = result.data?.token
@@ -261,7 +305,15 @@ export function createInvitationsRouter(): Router {
         return
       }
       const password = String(req.body?.password || '')
-      await completePasswordReset(req, res, token, email, invitationId, password)
+      await completePasswordReset(
+        req,
+        res,
+        token,
+        email,
+        invitationId,
+        password,
+        sendPasswordResetError
+      )
     } catch (error) {
       if (sendPasswordAuthorityError(error, res)) return
       next(error)

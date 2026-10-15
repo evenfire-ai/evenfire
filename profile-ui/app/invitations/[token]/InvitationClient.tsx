@@ -310,7 +310,8 @@ export function InvitationClient({
       return
     }
     setError('')
-    if (password.length < 8 || password.length > 256) {
+    const normalizedPasswordLength = password.trim().length
+    if (normalizedPasswordLength < 8 || normalizedPasswordLength > 256) {
       setError('Password must be between 8 and 256 characters.')
       return
     }
