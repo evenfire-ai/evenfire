@@ -1083,6 +1083,11 @@ if (
             throw new Error(`L recorded ${found.length} ${build} ${metric} samples.`)
           return found
         }
+        // The L claim is that chat:getIndex no longer waits for the 10 pending cleanups, so AFTER
+        // must keep most of that gain, not merely be faster. On 48fcd0b30 the p50 ratio was 0.05
+        // (rows) and 0.10 (transcript); with the inline cleanup await restored in AFTER it was
+        // 0.93 and 0.90. A ratio of at most 0.5 separates the two by a wide margin.
+        const RELAUNCH_MAX_RATIO = 0.5
         // relaunch_rows_ms: window load to the first stateful sidebar row, observed before the
         // test clicks anything; the non-blocking chat:getIndex is what shortens it.
         const rowsUnclicked = samples
@@ -1096,7 +1101,8 @@ if (
           before: rowsBefore,
           after: rowsAfter,
           observed_before_click: rowsUnclicked,
-          passed: rowsUnclicked && rowsAfter < rowsBefore,
+          max_ratio: RELAUNCH_MAX_RATIO,
+          passed: rowsUnclicked && rowsAfter <= RELAUNCH_MAX_RATIO * rowsBefore,
         })
         // relaunch_ms: window load to the transcript of the selected chat, including the explicit
         // open. Desktop never restores the last active chat on launch.
@@ -1107,7 +1113,8 @@ if (
           definition: 'window load -> sidebar row -> explicit open -> transcript with all messages',
           before,
           after,
-          passed: after < before,
+          max_ratio: RELAUNCH_MAX_RATIO,
+          passed: after <= RELAUNCH_MAX_RATIO * before,
         })
       } else {
         // W needs a control: BEFORE runs the same suspended-Host relaunches as AFTER.

@@ -164,3 +164,61 @@ test('HEAD delegates to the compiled export and settle waits for the cleanups it
   await settling
   assert.deepEqual(calls, ['export', 'cleanup:synthetic', 'index:synthetic', 'cleanup:end'])
 })
+
+test('HEAD drives the real chat:getIndex handler through the adapter deps', async () => {
+  // The stub above witnesses delegation; this runs the shipped handler against
+  // the adapter's untyped deps, so a renamed dependency fails here instead of
+  // surfacing only as a cleanup warning in a benchmark run.
+  const source = await fs.readFile(
+    new URL('../../src/chatGetIndexHandler.ts', import.meta.url),
+    'utf8'
+  )
+  const { outputText } = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  })
+  const compiled = { exports: {} }
+  new Function('module', 'exports', outputText)(compiled, compiled.exports)
+  assert.equal(typeof compiled.exports.runChatGetIndex, 'function')
+
+  const calls = []
+  let release
+  const gate = new Promise(resolve => {
+    release = resolve
+  })
+  const result = { chats: [1] }
+  const store = {
+    async retryPendingDeleteCleanups(scope, agentRef) {
+      assert.deepEqual(scope, AUTHORITY_SCOPE)
+      calls.push(`cleanup:${agentRef}`)
+      await gate
+      calls.push('cleanup:end')
+    },
+    async getIndex(agentRef) {
+      calls.push(`index:${agentRef}`)
+      return result
+    },
+  }
+  const context = head.context(store, {
+    runChatGetIndex: (deps, agentRef) => {
+      calls.push('export')
+      return compiled.exports.runChatGetIndex(deps, agentRef)
+    },
+  })
+
+  let returned
+  const reading = context.getIndex('synthetic').then(index => {
+    returned = index
+  })
+  try {
+    await new Promise(resolve => setImmediate(resolve))
+    // The index is returned while the cleanup it started is still gated.
+    assert.equal(returned, result)
+    assert.deepEqual(calls, ['export', 'cleanup:synthetic', 'index:synthetic'])
+  } finally {
+    release()
+    await reading
+  }
+  await context.settle()
+  assert.deepEqual(calls, ['export', 'cleanup:synthetic', 'index:synthetic', 'cleanup:end'])
+  assert.equal(context.cleanupErrors, 0)
+})
