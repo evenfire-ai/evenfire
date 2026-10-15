@@ -1508,7 +1508,7 @@ log "Handing off to Playwright (cycle 1) with E2E_HOST_REF=${HOST_REF}"
 # fresh suspension and is run in the second pass below. Scenario 5 is excluded
 # here by its title ("second cycle").
 if E2E_HOST_REF="$HOST_REF" E2E_STATELESS_HOST_REF="$HOST_REF" E2E_STATELESS_SUSPENDED=1 \
-   E2E_STATELESS_CYCLE=1 \
+   E2E_STATELESS_CYCLE=1 E2E_STATELESS_RUN_ID="$RUN_ID" \
    bash "${SCRIPT_DIR}/playwright-dev.sh" stateless-wake.test.ts --grep-invert "second cycle"; then
   ok "Desktop Playwright stateless-wake cycle 1 PASSED"
 else
@@ -1531,7 +1531,7 @@ header "Phase 2 (cycle 2) -- repeat suspend/wake (stateless-wake.test.ts -g 'sec
 force_idle_and_suspend || { print_results; exit 1; }
 log "Handing off to Playwright (cycle 2) with E2E_HOST_REF=${HOST_REF}"
 if E2E_HOST_REF="$HOST_REF" E2E_STATELESS_HOST_REF="$HOST_REF" E2E_STATELESS_SUSPENDED=1 \
-   E2E_STATELESS_CYCLE=2 E2E_SKIP_DESKTOP_BUILD=1 \
+   E2E_STATELESS_CYCLE=2 E2E_STATELESS_RUN_ID="$RUN_ID" E2E_SKIP_DESKTOP_BUILD=1 \
    bash "${SCRIPT_DIR}/playwright-dev.sh" stateless-wake.test.ts -g "second cycle"; then
   ok "Desktop Playwright stateless-wake cycle 2 (repeat suspend/wake) PASSED"
 else
