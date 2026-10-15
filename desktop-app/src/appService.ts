@@ -5335,6 +5335,7 @@ export class AppService {
     // the open itself must refuse to install the cleared session's cookie or
     // attach a view for it.
     this.assertSandboxUiSessionEpoch(sessionEpoch)
+    const mintedAt = Date.now()
     const { setCookie } = await this.mintSandboxUiSession(recipeNs, recipeName)
     this.assertSandboxUiSessionEpoch(sessionEpoch)
     const driver = await import('./sandboxUiDriver.js')
@@ -5366,6 +5367,9 @@ export class AppService {
         void active.openGfsResourceFromNavigation(surface.webContentsId, uri)
       },
       onTitleChanged: args.onTitleChanged,
+      onUnauthorizedNavigation: webContentsId => {
+        refreshModule.handleSandboxUiUnauthorizedNavigation(webContentsId)
+      },
       onOauthAuthorize: (oauthClientId, background) => {
         void this.requestSandboxUiOauthAuthorize(
           recipeNs,
@@ -5401,14 +5405,24 @@ export class AppService {
       recipeName,
       webContentsId: activeView.webContentsId,
       parentWindow: args.parentWindow,
-      refresh: (ns, name) => this.mintSandboxUiSession(ns, name),
+      mintedAt,
       // A refresh minted before a session clear can land before the queued
-      // close cancels this loop. Rejecting stops the loop without writing the
-      // cleared session's cookie; the user has nothing to act on, so it is not
+      // close cancels this loop. Rejecting fails the attempt without writing
+      // the cleared session's cookie, and any retry before the close runs is
+      // refused before it reaches rpc-proxy, so the next session's token never
+      // mints for this view. The user has nothing to act on, so it is not
       // reported.
+      refresh: async (ns, name) => {
+        this.assertSandboxUiSessionEpoch(sessionEpoch)
+        return this.mintSandboxUiSession(ns, name)
+      },
       installCookie: async setCookieValue => {
         this.assertSandboxUiSessionEpoch(sessionEpoch)
         await driver.installSandboxUiCookie(setCookieValue)
+      },
+      reload: () => {
+        if (driver.getActiveSandboxUi()?.webContentsId !== activeView.webContentsId) return
+        driver.reloadActiveSandboxUiView()
       },
       onError: err => {
         if (this.sandboxUiSessionEpoch !== sessionEpoch) return

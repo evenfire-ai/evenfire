@@ -343,6 +343,33 @@ describe('mountSandboxUiView lifecycle cleanup', () => {
     })
   })
 
+  it('reports a 401 document navigation inside the app prefix, for as long as the view lives', async () => {
+    const parentWindow = new FakeParentWindow()
+    const onUnauthorizedNavigation = vi.fn()
+    await mountSandboxUiView(mountArgs({ parentWindow, onUnauthorizedNavigation }))
+    const webContents = electronMocks.views[0]!.webContents
+    const inPrefix = 'https://rpc.example/api/v1/sandbox-ui/sandbox-recipes/task-board/view/'
+
+    webContents.emit('did-navigate', {} as Electron.Event, inPrefix, 200, 'OK')
+    webContents.emit('did-navigate', {} as Electron.Event, 'https://elsewhere.example/', 401, '')
+    webContents.emit(
+      'did-navigate',
+      {} as Electron.Event,
+      'https://rpc.example/api/v1/sandbox-ui/sandbox-recipes/other-app/view/',
+      401,
+      ''
+    )
+    expect(onUnauthorizedNavigation).not.toHaveBeenCalled()
+
+    webContents.emit('did-navigate', {} as Electron.Event, `${inPrefix}inbox`, 401, 'Unauthorized')
+    webContents.emit('did-navigate', {} as Electron.Event, `${inPrefix}inbox`, 401, 'Unauthorized')
+    expect(onUnauthorizedNavigation).toHaveBeenCalledTimes(2)
+    expect(onUnauthorizedNavigation).toHaveBeenCalledWith(webContents.id)
+
+    await unmountSandboxUiView()
+    expect(webContents.listenerCount('did-navigate')).toBe(0)
+  })
+
   it('keeps the current document searchable after same-document navigation', async () => {
     const parentWindow = new FakeParentWindow()
     await mountSandboxUiView(mountArgs({ parentWindow }))

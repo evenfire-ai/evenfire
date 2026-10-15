@@ -305,9 +305,11 @@ export function SandboxUiPage({
   }, [onEmbeddedAppBack, setLaunch])
 
   // Surface refresh failures (403 / 410 / network) as an in-chrome banner.
-  // The main-process timer has already stopped firing by the time we get
-  // here — this is informational, not actionable beyond the user closing
-  // and re-opening.
+  // By the time this fires main has exhausted its retries, but the session
+  // loop is still alive: returning to the window, waking the machine, a
+  // 401-ed page load or the embed's own refresh request can still recover
+  // the session. No recovery signal reaches this page, so the banner stays
+  // until the view is closed.
   useEffect(() => {
     return window.clerum.sandboxUi.onRefreshError(({ launchId, message }) => {
       const current = launchRef.current

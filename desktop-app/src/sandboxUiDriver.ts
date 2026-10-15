@@ -126,6 +126,13 @@ export type MountSandboxUiArgs = {
    */
   onGfsOpen?: (uri: string) => void
   /**
+   * Fired when a main-frame navigation inside the app's `view/` prefix
+   * commits with HTTP 401 — the session cookie was rejected and the page left
+   * behind has no script that could ask for a refresh. Lives as long as the
+   * view, unlike the one-shot client-route handoff listener.
+   */
+  onUnauthorizedNavigation?: (webContentsId: number) => void
+  /**
    * Re-checked at every await before a session effect (cookie write, view
    * creation). False means the caller's authenticated session ended while this
    * mount was in flight, so it must not attach anything for it.
@@ -535,13 +542,25 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   const onPageTitleUpdated = (_event: Electron.Event, title: string): void => {
     if (active?.view === view) onTitleChanged?.(title)
   }
+  // `did-navigate` only fires for the main frame.
+  const onDocumentNavigated = (
+    _event: Electron.Event,
+    navigatedUrl: string,
+    httpResponseCode: number
+  ): void => {
+    if (active?.view !== view || httpResponseCode !== 401) return
+    if (!isSandboxUiNavigationWithinPrefix(navigatedUrl, allowedNavigationPrefix)) return
+    args.onUnauthorizedNavigation?.(view.webContents.id)
+  }
   view.webContents.on('did-start-navigation', onDidStartNavigation)
   view.webContents.on('did-finish-load', onDocumentReady)
   view.webContents.on('page-title-updated', onPageTitleUpdated)
+  view.webContents.on('did-navigate', onDocumentNavigated)
   active.cleanupDocumentLifecycle = () => {
     view.webContents.removeListener('did-start-navigation', onDidStartNavigation)
     view.webContents.removeListener('did-finish-load', onDocumentReady)
     view.webContents.removeListener('page-title-updated', onPageTitleUpdated)
+    view.webContents.removeListener('did-navigate', onDocumentNavigated)
   }
 
   active.cleanupShortcutRouting = wireDesktopShortcutRouting({

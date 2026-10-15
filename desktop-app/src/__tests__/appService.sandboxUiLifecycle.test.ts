@@ -11,6 +11,7 @@ import { _resetPluginSurfacesForTests, resolvePluginSurface } from '../pluginSur
 import { SANDBOX_UI_MINT_TIMEOUT_MS } from '../rpcProxyClient.js'
 import { getActiveSandboxUi, unmountSandboxUiView } from '../sandboxUiDriver.js'
 import {
+  SANDBOX_UI_RATE_LIMIT_MS,
   SANDBOX_UI_REFRESH_INTERVAL_MS,
   _resetSandboxUiRefreshForTests,
 } from '../sandboxUiSessionRefresh.js'
@@ -39,6 +40,7 @@ const electronMocks = vi.hoisted(() => {
     findInPage = vi.fn(() => 41)
     focus = vi.fn()
     send = vi.fn()
+    reloadIgnoringCache = vi.fn()
 
     on(event: string, handler: (...args: unknown[]) => void): this {
       if (!this.listeners.has(event)) this.listeners.set(event, new Set())
@@ -201,6 +203,10 @@ class FakeParentWindow {
   removeListener(event: string, handler: Listener): this {
     this.listeners.get(event)?.delete(handler)
     return this
+  }
+
+  emit(event: string): void {
+    this.listeners.get(event)?.forEach(handler => handler())
   }
 }
 
@@ -475,22 +481,90 @@ describe('AppService sandbox-ui mint against a hung rpc-proxy', () => {
     expect(getActiveSandboxUi()).toBeNull()
   })
 
-  it('a refresh whose mint hangs stops and reports the error', async () => {
+  it('a refresh whose mint hangs is retried instead of abandoned', async () => {
     const onRefreshError = vi.fn()
     const service = makeService()
     initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
     const parentWindow = new FakeParentWindow()
     await service.openSandboxUi({ ...openArgs('first-app', parentWindow), onRefreshError })
-    shrinkMintBound()
+    const embed = getActiveSandboxUi()!
+    // The mint bound fires when the test says so, not on the runtime's real
+    // clock, so the retry timing stays on the fake timers alone.
+    const mintBounds: AbortController[] = []
+    const realTimeout = AbortSignal.timeout.bind(AbortSignal)
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation(ms => {
+      if (ms !== SANDBOX_UI_MINT_TIMEOUT_MS) return realTimeout(ms)
+      const bound = new AbortController()
+      mintBounds.push(bound)
+      return bound.signal
+    })
     mintResponders.set('first-app', mintHangs)
 
     await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1_000)
+    expect(mintCallsFor('first-app')).toBe(2)
+    mintBounds.at(-1)!.abort(new DOMException('mint timed out', 'TimeoutError'))
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(mintCallsFor('first-app')).toBe(3)
+    expect(onRefreshError).not.toHaveBeenCalled()
+    expect(getActiveSandboxUi()?.webContentsId).toBe(embed.webContentsId)
+    expect(resolvePluginSurface(embed.webContentsId)?.pluginId).toBe('sandbox-recipes/first-app')
+  })
+})
 
-    await vi.waitFor(() => expect(onRefreshError).toHaveBeenCalledOnce(), { timeout: 1_000 })
-    // Stopped: a further interval issues no mint.
-    const mintsBefore = mintCallsFor('first-app')
-    await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1_000)
-    expect(mintCallsFor('first-app')).toBe(mintsBefore)
+describe('AppService sandbox-ui session against a failing rpc-proxy', () => {
+  it('retries, reports only once the cookie is past its grace period, and resumes on an embed request', async () => {
+    // The retry deadline is wall-clock, so here the wall clock moves with the timers.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    const onRefreshError = vi.fn()
+    const service = makeService()
+    initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
+    const parentWindow = new FakeParentWindow()
+    await service.openSandboxUi({ ...openArgs('first-app', parentWindow), onRefreshError })
+    const embed = getActiveSandboxUi()!
+    mintResponders.set('first-app', () => mintFails(503, 'upstream unavailable'))
+
+    await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1)
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(mintCallsFor('first-app')).toBe(3)
+    expect(onRefreshError).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(onRefreshError).toHaveBeenCalledOnce()
+    expect(onRefreshError.mock.calls[0]![0]).toContain('503')
+    const mintsWhenExhausted = mintCallsFor('first-app')
+    await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS)
+    expect(mintCallsFor('first-app')).toBe(mintsWhenExhausted)
+    // The view and its pins survive the error.
+    expect(getActiveSandboxUi()?.webContentsId).toBe(embed.webContentsId)
+    expect(resolvePluginSurface(embed.webContentsId)?.pluginId).toBe('sandbox-recipes/first-app')
+
+    mintResponders.delete('first-app')
+    electronMocks.sessionObject.cookies.set.mockClear()
+    await service.requestSandboxUiRefresh(embed.webContentsId)
+    expect(mintCallsFor('first-app')).toBe(mintsWhenExhausted + 1)
+    expect(electronMocks.sessionObject.cookies.set).toHaveBeenCalledWith(
+      expect.objectContaining({ value: 'tok-first-app' })
+    )
+  })
+})
+
+describe('AppService sandbox-ui embed whose document comes back 401', () => {
+  it('re-mints through rpc-proxy and reloads the embed once per mint', async () => {
+    const { firstView } = await setupWithLiveFirstApp()
+    const webContents = firstView!.webContents
+    const appUrl = 'https://rpc.example/api/v1/sandbox-ui/sandbox-recipes/first-app/view/'
+
+    webContents.emit('did-navigate', {}, appUrl, 401, 'Unauthorized')
+    await vi.waitFor(() => expect(webContents.reloadIgnoringCache).toHaveBeenCalledOnce(), {
+      timeout: 1_000,
+    })
+    expect(mintCallsFor('first-app')).toBe(2)
+
+    // The reload 401s again under the recovery cookie: no second round.
+    webContents.emit('did-navigate', {}, appUrl, 401, 'Unauthorized')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mintCallsFor('first-app')).toBe(2)
+    expect(webContents.reloadIgnoringCache).toHaveBeenCalledOnce()
   })
 })
 
