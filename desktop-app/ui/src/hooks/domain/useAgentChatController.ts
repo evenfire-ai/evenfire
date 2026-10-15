@@ -1116,14 +1116,36 @@ export function useAgentChatController({
         selectedAgent: agentRef,
       }
       setActiveChatId(chatId)
-      if (!canReuseActiveSwitch) presentSelectedTranscript(undefined)
+      // #1091 A9: a remembered transcript is shown at once; without one the
+      // view is blank with the spinner. History is still read only after the
+      // last-active write below, and the remembered transcript is withdrawn
+      // when that write fails or the chat stops being viewable meanwhile.
+      const remembered = canReuseActiveSwitch ? undefined : rememberedTranscript(agentRef, chatId)
+      if (!canReuseActiveSwitch) presentSelectedTranscript(remembered)
+      // Clears the remembered transcript while this chat is still the visible
+      // one; the loading state stays with whichever selection intent owns it.
+      const withdrawRemembered = () => {
+        const view = activeChatVisibilityRef.current
+        if (!remembered || view.selectedAgent !== agentRef || view.activeChatId !== chatId) return
+        cancelOlderMessagesLoad()
+        chatMessagesRef.current = []
+        setChatMessages([])
+        setHasOlderMessages(false)
+        loadedLocalMessageCountRef.current = 0
+      }
       // The error/resend banner is per-chat view state, not global: clear it on
       // every chat switch (same-agent switches don't trip the selectedAgent
       // cleanup effect, so without this a stream error from chat A would bleed
       // into chat B). The Phase-2 reconcile below re-derives state for this chat.
       setAgentError(null)
       setFailedAgentSend(null)
-      await chatStore.setLastActive(agentRef, chatId)
+      try {
+        await chatStore.setLastActive(agentRef, chatId)
+      } catch (error) {
+        withdrawRemembered()
+        throw error
+      }
+      if (isHostAccessBlocked(agentRef) || isChatDeleted(agentRef, chatId)) withdrawRemembered()
       if (selectionIntentRevisionRef.current !== selectionIntentRevision) return
       if (isHostAccessBlocked(agentRef) || isChatDeleted(agentRef, chatId)) {
         settleChatMessagesLoading(selectionIntentRevision)
@@ -1146,11 +1168,6 @@ export function useAgentChatController({
           visible.activeChatId === chatId
         )
       }
-
-      // #1091 A9: once the selection is persisted, show the remembered transcript
-      // instead of the blank list while the disk page loads.
-      const remembered = canReuseActiveSwitch ? undefined : rememberedTranscript(agentRef, chatId)
-      if (remembered) presentSelectedTranscript(remembered)
 
       // PHASE 1 — render only the newest local page. The authoritative reconcile
       // below requests a delta after the newest cached server turn. A reused

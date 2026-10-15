@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 /**
- * #1091 A9 — reopening a chat renders its remembered transcript as soon as the
- * selection is persisted (#976 orders the last-active write before any history
- * is shown). The disk check and the Host reconcile still run, but the list is
- * not cleared behind a spinner while they do. Every case runs for a stateful
+ * #1091 A9 — reopening a chat renders its remembered transcript at once. History
+ * is still read only after the last-active write (#976), and the remembered
+ * transcript is withdrawn if that write fails or the Host is held meanwhile.
+ * The disk check and the Host reconcile still run, but the list is not cleared
+ * behind a spinner while they do. Every case runs for a stateful
  * and a stateless Host: the renderer has no branch by Host kind.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -619,7 +620,7 @@ describe('switchToChat transcript memo (#1091 A9)', () => {
   )
 
   it.each(HOSTS)(
-    'j. %s: the remembered transcript appears only after the selection is persisted',
+    'j. %s: the remembered transcript is shown while the last-active write is pending, and history is read after it',
     async host => {
       const disk = { 'chat-a': transcript('chat-a'), 'chat-b': transcript('chat-b') }
       serveDisk(disk)
@@ -638,30 +639,28 @@ describe('switchToChat transcript memo (#1091 A9)', () => {
       await act(async () => {
         reopen = controller.result.current.switchToChat(host, 'chat-a')
       })
-      // While the last-active write is pending (#976): blank, spinner, no disk read.
+      // While the last-active write is pending: the remembered transcript, no disk read (#976).
       expect(clerum.chat.setLastActive).toHaveBeenLastCalledWith(host, 'chat-a')
       expect(clerum.chat.loadMessages.mock.calls.length).toBe(readsBefore)
-      expect(frames.at(-1)).toEqual({ activeChatId: 'chat-a', contents: [], loading: true })
+      expectOnlyTranscript(frames.slice(reopenStart), 'chat-a', disk['chat-a'])
 
-      const persistedAt = frames.length
       await act(async () => {
         persisted.resolve()
       })
-      // Persisted: the remembered transcript replaces the spinner before the disk page.
+      // Persisted: the disk page is read only now.
       expect(clerum.chat.loadMessages).toHaveBeenLastCalledWith(host, 'chat-a', 80, undefined)
-      expectOnlyTranscript(frames.slice(persistedAt), 'chat-a', disk['chat-a'])
-      expect(blankFrame(frames.slice(reopenStart), 'chat-a')).toBe(true)
 
       await act(async () => {
         diskRead.resolve(disk['chat-a'])
         await reopen
       })
-      expectOnlyTranscript(frames.slice(persistedAt), 'chat-a', disk['chat-a'])
+      expectOnlyTranscript(frames.slice(reopenStart), 'chat-a', disk['chat-a'])
+      expect(blankFrame(frames.slice(reopenStart), 'chat-a')).toBe(false)
     }
   )
 
   it.each(HOSTS)(
-    'k. %s: a failed last-active write never shows the remembered transcript',
+    'k. %s: a failed last-active write withdraws the remembered transcript',
     async host => {
       const disk = { 'chat-a': transcript('chat-a'), 'chat-b': transcript('chat-b') }
       serveDisk(disk)
@@ -670,26 +669,62 @@ describe('switchToChat transcript memo (#1091 A9)', () => {
       await open(controller, host, 'chat-a')
       await open(controller, host, 'chat-b')
 
-      clerum.chat.setLastActive.mockImplementationOnce(async () => {
-        throw new Error('last-active write failed')
-      })
+      const write = deferred<void>()
+      clerum.chat.setLastActive.mockImplementationOnce(() => write.promise)
       const onCurrentError = vi.fn()
       const readsBefore = clerum.chat.loadMessages.mock.calls.length
       const reopenStart = frames.length
+      let reopen!: Promise<void>
       await act(async () => {
-        await controller.result.current
+        reopen = controller.result.current
           .switchToChat(host, 'chat-a', { onCurrentError })
           .catch(() => undefined)
       })
-      // Witness: the selection reached the write and reported its failure.
+      // Witness: the remembered transcript was on screen before the write failed.
+      expectOnlyTranscript(frames.slice(reopenStart), 'chat-a', disk['chat-a'])
+      await act(async () => {
+        write.reject(new Error('last-active write failed'))
+        await reopen
+      })
       expect(clerum.chat.setLastActive).toHaveBeenLastCalledWith(host, 'chat-a')
       expect(onCurrentError).toHaveBeenCalledTimes(1)
       expect(clerum.chat.loadMessages.mock.calls.length).toBe(readsBefore)
-      const shownA = frames.slice(reopenStart).filter(frame => frame.activeChatId === 'chat-a')
-      expect(shownA.length).toBeGreaterThan(0)
-      for (const frame of shownA) expect(frame.contents).toEqual([])
+      expect(controller.result.current.activeChatId).toBe('chat-a')
       expect(controller.result.current.chatMessages).toEqual([])
       expect(controller.result.current.chatMessagesLoading).toBe(false)
+    }
+  )
+
+  it.each(HOSTS)(
+    'l. %s: an uncertain hold during the last-active write withdraws the remembered transcript',
+    async host => {
+      const disk = { 'chat-a': transcript('chat-a'), 'chat-b': transcript('chat-b') }
+      serveDisk(disk)
+      const controller = mount(host)
+      await settleMount()
+      await open(controller, host, 'chat-a')
+      await open(controller, host, 'chat-b')
+
+      const write = deferred<void>()
+      clerum.chat.setLastActive.mockImplementationOnce(() => write.promise)
+      const readsBefore = clerum.chat.loadMessages.mock.calls.length
+      const reopenStart = frames.length
+      let reopen!: Promise<void>
+      await act(async () => {
+        reopen = controller.result.current.switchToChat(host, 'chat-a')
+      })
+      // Witness: the remembered transcript was on screen before the hold.
+      expectOnlyTranscript(frames.slice(reopenStart), 'chat-a', disk['chat-a'])
+      controller.hostAuthority.hold(host, 'uncertain')
+      expect(controller.hostAuthority.isBlocked(host)).toBe(true)
+      await act(async () => {
+        write.resolve()
+        await reopen
+      })
+      expect(controller.result.current.activeChatId).toBe('chat-a')
+      expect(controller.result.current.chatMessages).toEqual([])
+      expect(controller.result.current.chatMessagesLoading).toBe(false)
+      expect(clerum.chat.loadMessages.mock.calls.length).toBe(readsBefore)
     }
   )
 })
