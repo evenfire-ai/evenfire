@@ -1,7 +1,13 @@
 // The reference texts the delivered-package scan leaves to the payload check.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const control = vi.hoisted(() => ({ failNextTempDir: false, hangDocx: false, docxBuilds: 0 }))
+const control = vi.hoisted(() => ({
+  failNextTempDir: false,
+  hangDocx: false,
+  docxBuilds: 0,
+  /** Ends the build that hangs, as a failure. */
+  release: undefined as (() => void) | undefined,
+}))
 
 vi.mock('fs', async original => {
   const actual = await original<typeof import('fs')>()
@@ -23,10 +29,23 @@ vi.mock('../docxGenerator', async original => {
     ...actual,
     runGenerateDocx: (...args: Parameters<typeof actual.runGenerateDocx>) => {
       control.docxBuilds++
-      return control.hangDocx ? new Promise(() => {}) : actual.runGenerateDocx(...args)
+      if (!control.hangDocx) return actual.runGenerateDocx(...args)
+      return new Promise<Awaited<ReturnType<typeof actual.runGenerateDocx>>>(resolve => {
+        control.release = () => resolve({ success: false, error: 'released' })
+      })
     },
   }
 })
+
+/** The docx reference, once a build in the background has written it. */
+async function builtTexts(texts: (format: 'docx') => Promise<string[]>): Promise<string[]> {
+  for (let tries = 0; tries < 200; tries++) {
+    const found = await texts('docx')
+    if (found.length > 0) return found
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  return []
+}
 
 async function freshModule() {
   vi.resetModules()
@@ -38,6 +57,7 @@ describe('boilerplateTexts', () => {
     control.failNextTempDir = false
     control.hangDocx = false
     control.docxBuilds = 0
+    control.release = undefined
   })
 
   afterEach(() => {
@@ -60,8 +80,28 @@ describe('boilerplateTexts', () => {
     expect(await boilerplateTexts('docx')).toEqual([])
     expect(control.docxBuilds).toBe(0)
     now.mockReturnValue(1_000_000 + REFERENCE_RETRY_MS)
-    expect((await boilerplateTexts('docx')).length).toBeGreaterThan(0)
+    // The call that starts the retry checks without it; a later one has it.
+    expect(await boilerplateTexts('docx')).toEqual([])
+    expect(await builtTexts(boilerplateTexts)).not.toEqual([])
     expect(control.docxBuilds).toBe(1)
+  })
+
+  it('does not make a call wait for a build that retries a failed one', async () => {
+    const { REFERENCE_RETRY_MS, boilerplateTexts } = await freshModule()
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000)
+    control.failNextTempDir = true
+    expect(await boilerplateTexts('docx')).toEqual([])
+    now.mockReturnValue(1_000_000 + REFERENCE_RETRY_MS)
+    control.hangDocx = true
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    let settled = false
+    const texts = boilerplateTexts('docx').then(found => {
+      settled = true
+      return found
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(settled).toBe(true)
+    expect(await texts).toEqual([])
   })
 
   it('does not wait past REFERENCE_WAIT_MS for a build that never ends', async () => {
@@ -73,7 +113,7 @@ describe('boilerplateTexts', () => {
     expect(await texts).toEqual([])
   })
 
-  it('gives up a build that never ends, and builds again later', async () => {
+  it('gives up a build that never ends, and builds again only once it has stopped', async () => {
     const { REFERENCE_BUILD_MS, REFERENCE_RETRY_MS, boilerplateTexts } = await freshModule()
     control.hangDocx = true
     vi.useFakeTimers()
@@ -83,7 +123,11 @@ describe('boilerplateTexts', () => {
     vi.useRealTimers()
     control.hangDocx = false
     vi.spyOn(Date, 'now').mockReturnValue(Date.now() + REFERENCE_BUILD_MS + REFERENCE_RETRY_MS)
-    expect((await boilerplateTexts('docx')).length).toBeGreaterThan(0)
+    // The given-up build still runs, so no second one starts beside it.
+    expect(await boilerplateTexts('docx')).toEqual([])
+    expect(control.docxBuilds).toBe(1)
+    control.release!()
+    expect(await builtTexts(boilerplateTexts)).not.toEqual([])
     expect(control.docxBuilds).toBe(2)
   })
 })

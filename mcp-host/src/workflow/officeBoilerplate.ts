@@ -97,19 +97,27 @@ export const REFERENCE_RETRY_MS = 60_000
 
 const references = new Map<OfficeFormat, Promise<string[]>>()
 const failedAt = new Map<OfficeFormat, number>()
+/** Formats whose sample is being written, including a build given up that has not stopped. */
+const writing = new Set<OfficeFormat>()
 
 /**
  * The texts a package of `format` holds on its own. Empty when the sample
  * cannot be written, or is not ready within REFERENCE_WAIT_MS, which leaves
  * the scan as strict as before. A build that fails, or runs past
- * REFERENCE_BUILD_MS, is tried again once REFERENCE_RETRY_MS has passed.
+ * REFERENCE_BUILD_MS, is tried again once REFERENCE_RETRY_MS has passed and
+ * the given-up build has stopped, so builds that hang do not pile up. Only the
+ * first build makes a call wait: once one has failed, a call checks without
+ * the reference until a retry has built it.
  */
 export function boilerplateTexts(format: OfficeFormat): Promise<string[]> {
   let reference = references.get(format)
   if (!reference) {
     const failed = failedAt.get(format)
     if (failed !== undefined && Date.now() - failed < REFERENCE_RETRY_MS) return Promise.resolve([])
-    reference = withinBuildLimit(writeSample(format)).then(
+    if (writing.has(format)) return Promise.resolve([])
+    writing.add(format)
+    const build = writeSample(format).finally(() => writing.delete(format))
+    reference = withinBuildLimit(build).then(
       texts => {
         failedAt.delete(format)
         return texts
@@ -130,6 +138,7 @@ export function boilerplateTexts(format: OfficeFormat): Promise<string[]> {
     )
     references.set(format, reference)
   }
+  if (failedAt.has(format)) return Promise.resolve([])
   let timer: ReturnType<typeof setTimeout> | undefined
   const waited = new Promise<string[]>(resolve => {
     timer = setTimeout(() => {
