@@ -365,6 +365,9 @@ describe('useAppController — chat drawer keepNavItem', () => {
       { id: 'chat-1-message', role: 'user', content: 'first chat', timestamp: 1 },
     ])
     await clerum.chat.create('agent-x', 'chat-2')
+    await clerum.chat.upsertMessages('agent-x', 'chat-2', [
+      { id: 'chat-2-message', role: 'user', content: 'requested chat history', timestamp: 2 },
+    ])
     const app = renderAppController()
     unmount = app.unmount
 
@@ -383,6 +386,11 @@ describe('useAppController — chat drawer keepNavItem', () => {
       })
 
       const callsBeforeOpen = clerum.chat.setLastActive.mock.calls.length
+      const activeTabBeforeOpen = app.result.current.workspaceTabs.activeTabId
+      expect(
+        app.result.current.workspaceTabs.tabs.find(tab => tab.id === activeTabBeforeOpen)?.chat
+          ?.chatId
+      ).toBe('chat-1')
       clerum.chat.setLastActive.mockRejectedValueOnce(new Error('chat store write failed'))
       await act(async () => {
         await app.result.current.handleOpenNotification({
@@ -399,13 +407,23 @@ describe('useAppController — chat drawer keepNavItem', () => {
       })
       await waitFor(() => expect(app.result.current.chatMessagesLoading).toBe(false))
 
+      expect(app.result.current.workspaceTabs.activeTabId).toBe(activeTabBeforeOpen)
+
       expect({
         switchAttempts: clerum.chat.setLastActive.mock.calls.length - callsBeforeOpen,
+        activeChatId: app.result.current.activeChatId,
+        transcript: app.result.current.activeMessages,
+        errorCount: app.result.current.toasts.filter(toast =>
+          toast.text.includes('Could not open notification')
+        ).length,
         statusText: app.result.current.statusText,
         statusTone: app.result.current.statusTone,
         loading: app.result.current.chatMessagesLoading,
       }).toEqual({
         switchAttempts: 1,
+        activeChatId: 'chat-2',
+        transcript: [],
+        errorCount: 1,
         statusText: expect.stringContaining('Could not open notification'),
         statusTone: 'error',
         loading: false,
@@ -420,6 +438,11 @@ describe('useAppController — chat drawer keepNavItem', () => {
     const { clerum } = installAppControllerClerum({ agentNames: ['agent-x'] })
     await clerum.chat.create('agent-x', 'chat-1')
     await clerum.chat.create('agent-x', 'chat-2')
+    for (const chat of ['chat-1', 'chat-2']) {
+      await clerum.chat.upsertMessages('agent-x', chat, [
+        { id: `${chat}-history`, role: 'user', content: `${chat} stored history`, timestamp: 1 },
+      ])
+    }
     const app = renderAppController()
     unmount = app.unmount
 
@@ -436,6 +459,9 @@ describe('useAppController — chat drawer keepNavItem', () => {
         expect(app.result.current.activeChatId).toBe('chat-1')
         expect(app.result.current.chatMessagesLoading).toBe(false)
       })
+      expect(app.result.current.activeMessages).toEqual([
+        expect.objectContaining({ id: 'chat-1-history' }),
+      ])
 
       const callsBeforeSwitch = clerum.chat.setLastActive.mock.calls.length
       clerum.chat.setLastActive.mockRejectedValueOnce(new Error('chat store write failed'))
@@ -452,6 +478,13 @@ describe('useAppController — chat drawer keepNavItem', () => {
         expect(app.result.current.chatMessagesLoading).toBe(false)
       })
       expect(clerum.chat.setLastActive).toHaveBeenCalledTimes(callsBeforeSwitch + 1)
+      expect(app.result.current.activeChatId).toBe('chat-2')
+      expect(app.result.current.activeMessages).toEqual([])
+      expect(
+        app.result.current.toasts.filter(toast =>
+          toast.text.includes('Could not open conversation')
+        )
+      ).toHaveLength(1)
     } finally {
       app.unmount()
       unmount = null

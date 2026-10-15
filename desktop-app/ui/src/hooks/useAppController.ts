@@ -1344,18 +1344,23 @@ export function useAppController() {
           nav.navItem === DESKTOP_ROUTES.chat
         ) {
           try {
-            await chat.switchToChat(targetAgent, targetChatId)
-            if (!isNavigationIntentCurrent(navigationIntentEpoch)) return
-            nav.activateChatTab(targetAgent, targetChatId)
+            await chat.switchToChat(targetAgent, targetChatId, {
+              onCurrentError: error => {
+                if (!isNavigationIntentCurrent(navigationIntentEpoch)) return
+                fullSetStatus(
+                  `Could not open notification: ${error instanceof Error ? error.message : String(error)}`,
+                  'error'
+                )
+              },
+            })
+          } catch {
+            // The request owns current feedback and still rejects to awaiters.
+            // This UI event observes that rejection without reporting it again.
             return
-          } catch (error) {
-            // A failed old notification load must not report or affect state
-            // after a newer navigation has taken ownership. Current failures
-            // are reported by the outer notification handler; do not launch an
-            // unobserved retry through pending selection.
-            if (!isNavigationIntentCurrent(navigationIntentEpoch)) return
-            throw error
           }
+          if (!isNavigationIntentCurrent(navigationIntentEpoch)) return
+          nav.activateChatTab(targetAgent, targetChatId)
+          return
         }
 
         chat.setPendingChatSelection(targetAgent, targetChatId || null)

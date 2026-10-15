@@ -7,8 +7,6 @@ import { useConfirmDialog } from '../../components/ConfirmDialog'
 import { DashboardLayout } from '../../components/DashboardLayout'
 import { McpServerTable } from '../../components/McpServerTable'
 import type {
-  ConnectorAccessPrincipal,
-  ConnectorAccessSummaryMap,
   ConnectorAgentBinding,
   ConnectorAgentTarget,
 } from '../../components/McpServerTable.types'
@@ -25,15 +23,10 @@ import type { ContextResource, McpServerResource } from '../../lib/api'
 import {
   addConnectorToAgentContexts,
   connectorAccessMutationError,
+  connectorAgentBindingsFromContexts,
+  connectorAgentTargetsFromHosts,
   connectorResourceKey,
-  loadConnectorAccessState,
-  removeConnectorFromAgentContext,
 } from '../../lib/connectorAccessManagement'
-
-function agentListLabel(agents: ConnectorAccessPrincipal[]): string {
-  if (agents.length === 1) return agents[0].label
-  return `${agents.length} agents`
-}
 
 export default function McpServersPage() {
   const router = useRouter()
@@ -46,8 +39,6 @@ export default function McpServersPage() {
   const [bindingsByConnectorName, setBindingsByConnectorName] = useState<
     Record<string, ConnectorAgentBinding[]>
   >({})
-  const [accessByConnectorKey, setAccessByConnectorKey] = useState<ConnectorAccessSummaryMap>({})
-  const [accessWarning, setAccessWarning] = useState('')
   const [deletingKey, setDeletingKey] = useState<string | null>(null)
   const [updatingAgentAccessKey, setUpdatingAgentAccessKey] = useState<string | null>(null)
   const { confirm, confirmDialog } = useConfirmDialog()
@@ -56,7 +47,6 @@ export default function McpServersPage() {
   async function loadAll(): Promise<string> {
     setLoading(true)
     setError('')
-    setAccessWarning('')
     try {
       const [serversResult, hostsResult, contextsResult] = await Promise.all([
         getMcpServers(),
@@ -66,13 +56,11 @@ export default function McpServersPage() {
       const connectors = (serversResult.items || []) as McpServerResource[]
       const hosts = hostsResult.items || []
       const nextContexts = (contextsResult.items || []) as ContextResource[]
-      const accessState = await loadConnectorAccessState(connectors, nextContexts, hosts)
-      setAccessWarning(accessState.warning)
+      const nextAgentTargets = connectorAgentTargetsFromHosts(hosts)
       setMcpServers(connectors)
       setContexts(nextContexts)
-      setAgentTargets(accessState.agentTargets)
-      setBindingsByConnectorName(accessState.bindingsByConnectorName)
-      setAccessByConnectorKey(accessState.accessByConnectorKey)
+      setAgentTargets(nextAgentTargets)
+      setBindingsByConnectorName(connectorAgentBindingsFromContexts(nextContexts, nextAgentTargets))
       return ''
     } catch (e) {
       if (isSilentApiError(e)) return ''
@@ -148,38 +136,6 @@ export default function McpServersPage() {
     }
   }
 
-  async function removeConnectorFromAgents(
-    server: { name: string; namespace: string },
-    binding: ConnectorAgentBinding
-  ) {
-    const key = `${server.namespace}/${server.name}`
-    if (binding.agents.length > 1) {
-      const sharedNames = binding.agents.map(agent => agent.label).join(', ')
-      const shouldRemove = await confirm({
-        title: 'Remove Connector Access',
-        message: `Remove connector ${server.name} from ${binding.agents.length} agents (${sharedNames})? These agents share one connector set, so the change applies to all of them.`,
-        confirmLabel: 'Remove',
-        tone: 'danger',
-      })
-      if (!shouldRemove) return
-    }
-
-    setUpdatingAgentAccessKey(key)
-    setError('')
-    try {
-      await removeConnectorFromAgentContext(server.name, binding, contexts)
-      await loadAll()
-      showToast(`Connector ${server.name} removed from ${agentListLabel(binding.agents)}.`, {
-        tone: 'success',
-      })
-    } catch (e) {
-      if (isSilentApiError(e)) return
-      setError(connectorAccessMutationError(e, `Failed to remove ${server.name} from agent access`))
-    } finally {
-      setUpdatingAgentAccessKey(null)
-    }
-  }
-
   useEffect(() => {
     void loadAll()
   }, [])
@@ -187,18 +143,11 @@ export default function McpServersPage() {
   return (
     <DashboardLayout>
       {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
-      {accessWarning ? (
-        <div className="cu-banner cu-banner--warning" role="status">
-          {accessWarning}
-        </div>
-      ) : null}
       <McpServerTable
         items={mcpServers as any}
-        accessByConnectorKey={accessByConnectorKey}
         agentBindingsByConnectorName={bindingsByConnectorName}
         agentTargets={agentTargets}
         onAddToAgents={addConnectorToAgents}
-        onRemoveFromAgents={removeConnectorFromAgents}
         updatingAgentAccessKey={updatingAgentAccessKey}
         onDelete={handleDelete}
         onOpen={server => router.push(CONTROL_ROUTES.connectors.detail(server.name))}

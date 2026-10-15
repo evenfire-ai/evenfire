@@ -16,6 +16,8 @@ import {
   buildChatMessageAttachments,
   buildResponseFileAttachments,
 } from '@lib/chatMessageAttachments'
+import { runChatSwitchRequest } from '@lib/chatSwitchRequest'
+import type { PendingChatSwitchRequest } from '@lib/chatSwitchRequest.types'
 import { truncateTitle } from '@lib/chatTitle'
 import {
   clearAllComposerDrafts,
@@ -448,15 +450,9 @@ export function useAgentChatController({
 
   const [activeChatId, setActiveChatId] = useState<string | null>(null)
   const selectionIntentRevisionRef = useRef(0)
-  // A caller that starts an imperative switch while the selection effect is
-  // replaying the same pending request owns that request's failure feedback.
-  // The controller dispatches it only while that revision is current; the
-  // effect consumes the same owner instead of presenting a duplicate toast.
-  const selectionErrorOwnerRef = useRef<{
-    revision: number
-    onCurrentError: (error: unknown) => void
-    reported: boolean
-  } | null>(null)
+  // Effects can share an in-flight execution or its successful same-intent
+  // result. A previously rejected execution instead permits an independent retry.
+  const pendingChatSwitchRequestRef = useRef<PendingChatSwitchRequest | null>(null)
   const activeChatSwitchRequestRef = useRef<symbol | null>(null)
   const activeChatSwitchKeyRef = useRef<string | null>(null)
   // Fase 2b (§4.1): the SessionFSM is now the SINGLE writer of the per-chat
@@ -543,7 +539,6 @@ export function useAgentChatController({
   const beginSelectionIntent = useCallback(
     (startsHistoryLoad = false) => {
       selectionIntentRevisionRef.current += 1
-      selectionErrorOwnerRef.current = null
       if (!startsHistoryLoad) {
         setChatMessagesLoading(false)
         activeChatSwitchRequestRef.current = null
@@ -560,24 +555,6 @@ export function useAgentChatController({
       return true
     },
     [setChatMessagesLoading]
-  )
-  const reportCallerOwnedSelectionError = useCallback(
-    (selectionIntentRevision: number, error: unknown) => {
-      const owner = selectionErrorOwnerRef.current
-      if (
-        !owner ||
-        owner.revision !== selectionIntentRevision ||
-        selectionIntentRevisionRef.current !== selectionIntentRevision
-      ) {
-        return false
-      }
-      if (!owner.reported) {
-        owner.reported = true
-        owner.onCurrentError(error)
-      }
-      return true
-    },
-    []
   )
   const [hasOlderMessages, setHasOlderMessages] = useState(false)
   const [olderMessagesLoading, setOlderMessagesLoading] = useState(false)
@@ -1201,6 +1178,30 @@ export function useAgentChatController({
     ]
   )
 
+  const runSwitchForIntent = useCallback(
+    (
+      agentRef: string,
+      chatId: string,
+      revision: number,
+      onCurrentError: (error: unknown) => void,
+      isRelevant: () => boolean = () => true
+    ) => {
+      const scope = currentAuthScopeRef.current
+      return runChatSwitchRequest(
+        () => switchToChatForIntent(agentRef, chatId, revision),
+        () =>
+          selectionIntentRevisionRef.current === revision &&
+          currentAuthScopeRef.current === scope &&
+          isRelevant(),
+        error => {
+          settleChatMessagesLoading(revision)
+          onCurrentError(error)
+        }
+      )
+    },
+    [settleChatMessagesLoading, switchToChatForIntent]
+  )
+
   const switchToChat = useCallback(
     async (
       agentRef: string,
@@ -1212,22 +1213,25 @@ export function useAgentChatController({
       // blocked or deleted chat cannot cancel another chat's pending load.
       if (isHostAccessBlocked(agentRef) || isChatDeleted(agentRef, chatId)) return
       const selectionIntentRevision = beginSelectionIntent(true)
-      if (options.onCurrentError) {
-        selectionErrorOwnerRef.current = {
-          revision: selectionIntentRevision,
-          onCurrentError: options.onCurrentError,
-          reported: false,
-        }
-      }
       clearPendingSelection(agentRef, chatId)
+      const promise = runSwitchForIntent(agentRef, chatId, selectionIntentRevision, error => {
+        options.onCurrentError?.(error)
+      })
+      const request: PendingChatSwitchRequest = {
+        agentRef,
+        chatId,
+        revision: selectionIntentRevision,
+        scope: currentAuthScopeRef.current,
+        state: 'pending',
+        promise,
+      }
+      pendingChatSwitchRequestRef.current = request
       try {
-        await switchToChatForIntent(agentRef, chatId, selectionIntentRevision)
-        if (selectionErrorOwnerRef.current?.revision === selectionIntentRevision) {
-          selectionErrorOwnerRef.current = null
-        }
+        await promise
+        // Settle this execution, not whatever successor now occupies the ref.
+        request.state = 'fulfilled'
       } catch (error) {
-        settleChatMessagesLoading(selectionIntentRevision)
-        reportCallerOwnedSelectionError(selectionIntentRevision, error)
+        request.state = 'rejected'
         throw error
       }
     },
@@ -1236,9 +1240,7 @@ export function useAgentChatController({
       clearPendingSelection,
       isChatDeleted,
       isHostAccessBlocked,
-      reportCallerOwnedSelectionError,
-      settleChatMessagesLoading,
-      switchToChatForIntent,
+      runSwitchForIntent,
     ]
   )
 
@@ -1262,6 +1264,7 @@ export function useAgentChatController({
       beginSelectionIntent,
       getSelectionIntentRevision: () => selectionIntentRevisionRef.current,
       clearPendingSelection,
+      clearActiveChat,
       scrollChatToBottom,
       dispatchSession,
       clearComposerDraft,
@@ -1286,9 +1289,16 @@ export function useAgentChatController({
       )
         return
       autoSelectedChatIdRef.current = null
-      await switchToChat(selectedAgent, chatId)
+      await switchToChat(selectedAgent, chatId, {
+        onCurrentError: error => {
+          pushToast(
+            `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
+            'error'
+          )
+        },
+      }).catch(() => undefined)
     },
-    [selectedAgent, isHostAccessBlocked, isChatDeleted, switchToChat]
+    [selectedAgent, isHostAccessBlocked, isChatDeleted, switchToChat, pushToast]
   )
 
   const handleLoadOlderMessages = useCallback(async () => {
@@ -1456,7 +1466,31 @@ export function useAgentChatController({
     let cancelled = false
     const selectionIntentRevision = selectionIntentRevisionRef.current
     const requestedSelection = readPendingSelection(selectedAgent)
-    if (requestedSelection?.mode === 'specific') {
+    const pendingSwitch = pendingChatSwitchRequestRef.current
+    // Public registration preserves only a matching same-agent specific intent;
+    // a later specific write advances revision, so its destination cannot drift.
+    const sharesPendingSwitch = Boolean(
+      requestedSelection?.mode === 'specific' &&
+      pendingSwitch?.state !== 'rejected' &&
+      pendingSwitch?.revision === selectionIntentRevision &&
+      pendingSwitch.scope === currentAuthScopeRef.current &&
+      pendingSwitch.agentRef === selectedAgent
+    )
+    const switchForEffect = (chatId: string) => {
+      if (sharesPendingSwitch) return pendingSwitch!.promise
+      return runSwitchForIntent(
+        selectedAgent,
+        chatId,
+        selectionIntentRevision,
+        error =>
+          liveDepsRef.current.pushToast(
+            `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
+            'error'
+          ),
+        () => !cancelled
+      )
+    }
+    if (requestedSelection?.mode === 'specific' && !sharesPendingSwitch) {
       activeChatVisibilityRef.current = {
         ...activeChatVisibilityRef.current,
         activeChatId: requestedSelection.chatId,
@@ -1477,7 +1511,7 @@ export function useAgentChatController({
           requestedSelection.isRemote === true
         )
       }
-    } else {
+    } else if (requestedSelection?.mode !== 'specific') {
       activeChatVisibilityRef.current = {
         ...activeChatVisibilityRef.current,
         activeChatId: null,
@@ -1537,7 +1571,7 @@ export function useAgentChatController({
         const latest = merged[0]
         if (latest) {
           autoSelectedChatIdRef.current = latest.id
-          await switchToChatForIntent(selectedAgent, latest.id, selectionIntentRevision)
+          await switchForEffect(latest.id)
         }
         settleChatMessagesLoading(selectionIntentRevision)
         return
@@ -1547,30 +1581,20 @@ export function useAgentChatController({
         // Server-only chats may not appear in the local index or first server
         // catalog page yet. `switchToChat` already owns the cache-first →
         // server-hydrate path, so open the requested id directly.
-        await switchToChatForIntent(
-          selectedAgent,
-          requestedSelection.chatId,
-          selectionIntentRevision
-        )
+        await switchForEffect(requestedSelection.chatId)
         return
       }
       if (navItem === DESKTOP_ROUTES.chat) {
         const latest = merged[0]
         if (latest) {
           autoSelectedChatIdRef.current = latest.id
-          await switchToChatForIntent(selectedAgent, latest.id, selectionIntentRevision)
+          await switchForEffect(latest.id)
         }
       }
       settleChatMessagesLoading(selectionIntentRevision)
-    })().catch(error => {
-      if (cancelled || selectionIntentRevisionRef.current !== selectionIntentRevision) return
-      settleChatMessagesLoading(selectionIntentRevision)
-      if (reportCallerOwnedSelectionError(selectionIntentRevision, error)) return
-      liveDepsRef.current.pushToast(
-        `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
-        'error'
-      )
-    })
+      // List failures are normalized by loadChatList; switch failures are reported
+      // by their request. This continuation observes rejection without a second owner.
+    })().catch(() => undefined)
 
     return () => {
       cancelled = true
@@ -1582,9 +1606,8 @@ export function useAgentChatController({
     navItem,
     selectedAgent,
     isHostAccessBlocked,
-    reportCallerOwnedSelectionError,
     settleChatMessagesLoading,
-    switchToChatForIntent,
+    runSwitchForIntent,
   ])
 
   // ─── Activity / progress state updaters (hoisted from sendAgentMessage so the
@@ -3954,12 +3977,15 @@ export function useAgentChatController({
       } = {}
     ) => {
       if (isHostAccessBlocked(agentName) || (chatId && isChatDeleted(agentName, chatId))) return
-      const selectsSpecificChat = Boolean(
-        chatId && !options.selectLatest && !options.suppressAutoSelect
-      )
+      const selectionMode = options.selectLatest
+        ? 'latest'
+        : options.suppressAutoSelect || !chatId
+          ? 'none'
+          : 'specific'
+      const selectsSpecificChat = selectionMode === 'specific'
       const preservesCurrentChatRoute = Boolean(
         !chatId &&
-        !options.selectLatest &&
+        selectionMode === 'none' &&
         selectedAgent === agentName &&
         navItem === DESKTOP_ROUTES.chat
       )
@@ -3989,17 +4015,17 @@ export function useAgentChatController({
       // history completion here. Route/agent changes and specific/latest
       // selections still advance selection ownership before their effects run.
       if (!preservesCurrentChatRoute) beginSelectionIntent(selectsSpecificChat)
-      if (options.selectLatest) {
+      if (selectionMode === 'latest') {
         writePendingSelection(agentName, { mode: 'latest', chatId: null })
         return
       }
-      if (options.suppressAutoSelect || !chatId) {
+      if (selectionMode === 'none') {
         writePendingSelection(agentName, { mode: 'none', chatId: null })
         return
       }
       const specificSelection: Extract<PendingChatSelection, { mode: 'specific' }> = {
         mode: 'specific',
-        chatId,
+        chatId: chatId!,
       }
       if (options.title) specificSelection.title = options.title
       if (options.isRemote !== undefined) specificSelection.isRemote = options.isRemote
@@ -4018,7 +4044,7 @@ export function useAgentChatController({
       cancelOlderMessagesLoad()
       loadedLocalMessageCountRef.current = 0
       if (options.title) {
-        upsertProvisionalEntry(chatId, options.title, options.isRemote === true)
+        upsertProvisionalEntry(chatId!, options.title, options.isRemote === true)
       }
     },
     [

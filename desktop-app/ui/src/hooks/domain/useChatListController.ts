@@ -108,6 +108,7 @@ export interface ChatListControllerHost {
   beginSelectionIntent: () => number
   getSelectionIntentRevision: () => number
   clearPendingSelection: (agentRef: string, preserveSpecificChatId?: string) => void
+  clearActiveChat: () => void
   scrollChatToBottom: () => void
   dispatchSession: (chatKey: string, event: SessionFsmEvent) => void
   clearComposerDraft: (chatId: string) => void
@@ -1049,6 +1050,11 @@ export function useChatListController({
     host.current?.clearPendingSelection(agentRef)
     const requestGeneration = requestGenerationRef.current
     const authorityScopeAtCreate = currentAuthorityScopeRef.current
+    const isCurrentCreate = () =>
+      selectionIntentRevision !== undefined &&
+      requestGenerationRef.current === requestGeneration &&
+      currentAuthorityScopeRef.current === authorityScopeAtCreate &&
+      host.current?.getSelectionIntentRevision() === selectionIntentRevision
     const chatId = crypto.randomUUID()
     let meta: ChatMetadata
     try {
@@ -1057,12 +1063,11 @@ export function useChatListController({
       // The failed New chat invalidated whichever selection was in flight. Restore
       // its visible conversation only while this create still owns the same scope
       // and selection revision; a newer navigation must remain authoritative.
-      if (
-        selectionIntentRevision !== undefined &&
-        requestGenerationRef.current === requestGeneration &&
-        currentAuthorityScopeRef.current === authorityScopeAtCreate &&
-        host.current?.getSelectionIntentRevision() === selectionIntentRevision
-      ) {
+      if (isCurrentCreate()) {
+        host.current?.pushToast(
+          `Could not create conversation: ${error instanceof Error ? error.message : String(error)}`,
+          'error'
+        )
         const restoreChatId =
           pendingSelection?.mode === 'specific'
             ? pendingSelection.chatId
@@ -1070,30 +1075,38 @@ export function useChatListController({
               ? activeChatIdAtCreate
               : null
         if (restoreChatId) {
-          const restore = host.current?.switchToChat(agentRef, restoreChatId)
-          const restoreSelectionRevision = host.current?.getSelectionIntentRevision()
-          void restore?.catch(error => {
-            if (host.current?.getSelectionIntentRevision() !== restoreSelectionRevision) return
-            host.current?.pushToast(
-              `Could not restore conversation: ${error instanceof Error ? error.message : String(error)}`,
-              'error'
-            )
-          })
+          void host.current
+            ?.switchToChat(agentRef, restoreChatId, {
+              onCurrentError: error => {
+                host.current?.pushToast(
+                  `Could not restore conversation: ${error instanceof Error ? error.message : String(error)}`,
+                  'error'
+                )
+              },
+            })
+            .catch(() => undefined)
         }
       }
       throw error
     }
-    chatStore.clearCachedRemoteData()
-    if (selectedAgentRef.current !== agentRef || requestGenerationRef.current !== requestGeneration)
-      return
-    appendNewEntry(agentRef, meta)
     if (
-      selectionIntentRevision !== undefined &&
-      host.current?.getSelectionIntentRevision() !== selectionIntentRevision
+      selectedAgentRef.current !== agentRef ||
+      requestGenerationRef.current !== requestGeneration ||
+      currentAuthorityScopeRef.current !== authorityScopeAtCreate
     )
       return
+    chatStore.clearCachedRemoteData()
+    appendNewEntry(agentRef, meta)
+    if (!isCurrentCreate()) return
     host.current?.markAutoSelectedChat(null)
-    await host.current?.switchToChat(agentRef, chatId)
+    await host.current?.switchToChat(agentRef, chatId, {
+      onCurrentError: error => {
+        host.current?.pushToast(
+          `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
+          'error'
+        )
+      },
+    })
     host.current?.scrollChatToBottom()
   }, [chatStore, appendNewEntry, host, readPendingSelection])
 
@@ -1408,6 +1421,7 @@ export function useChatListController({
         throw new Error('Chat deletion is unavailable while host access is blocked')
       }
       const hostAuthorityEpoch = getHostAuthorityEpoch(agentRef)
+      const requestScope = currentAuthorityScopeRef.current
       try {
         const fence = await chatStore.captureDeleteFence(authorityScope)
         if (
@@ -1419,7 +1433,11 @@ export function useChatListController({
         }
         return { agentRef, fence, hostAuthorityEpoch }
       } catch (error) {
-        host.current?.pushToast('Could not confirm chat access. Please try again.', 'error')
+        // Confirmation belongs to the destructive operation, not the visible
+        // conversation. Same-scope navigation must not hide its failure.
+        if (currentAuthorityScopeRef.current === requestScope) {
+          host.current?.pushToast('Could not confirm chat access. Please try again.', 'error')
+        }
         throw error
       }
     },
@@ -1439,6 +1457,8 @@ export function useChatListController({
         deletion.hostAuthorityEpoch !== getHostAuthorityEpoch(agentRef) ||
         isHostAccessBlocked(agentRef)
       ) {
+        // This is the current UI's synchronous confirmation click, not a late
+        // result from the old scope. Explain why no deletion was dispatched.
         host.current?.pushToast(
           'Delete cancelled because chat access changed. Please try again.',
           'error'
@@ -1464,7 +1484,9 @@ export function useChatListController({
       try {
         result = await chatStore.deleteChat(agentRef, chatId, deletion.fence)
       } catch {
-        host.current?.pushToast('Could not delete the chat. Please try again.', 'error')
+        if (stillOwned()) {
+          host.current?.pushToast('Could not delete the chat. Please try again.', 'error')
+        }
         return
       }
       if (!stillOwned()) return
@@ -1497,8 +1519,18 @@ export function useChatListController({
       if (host.current?.getActiveChatId() === chatId) {
         if (remaining.length > 0) {
           const sorted = [...remaining].sort(byUpdatedDesc)
-          await host.current?.switchToChat(agentRef, sorted[0]!.id)
+          await host.current?.switchToChat(agentRef, sorted[0]!.id, {
+            onCurrentError: error => {
+              host.current?.pushToast(
+                `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
+                'error'
+              )
+            },
+          })
         } else {
+          // The removed destination cannot remain the visible transcript when
+          // replacement creation fails. Clear only while it is still active.
+          host.current?.clearActiveChat()
           await handleCreateChat()
         }
       }
@@ -1512,7 +1544,6 @@ export function useChatListController({
       removeLatestChatSession,
       handleCreateChat,
       host,
-      isAuthenticated,
     ]
   )
 

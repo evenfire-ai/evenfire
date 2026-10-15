@@ -79,6 +79,8 @@ export interface MockClerum {
   persistedMessages: (agentRef: string, chatId: string) => Promise<Array<Record<string, unknown>>>
   /** The index a real ChatStore read produces for one agent. */
   readIndex: (agentRef: string) => Promise<ChatIndex>
+  /** Persist selection through the same producer used by chat:setLastActive. */
+  persistLastActive: (agentRef: string, chatId: string) => Promise<void>
 }
 
 export function installMockClerum(): MockClerum {
@@ -181,6 +183,8 @@ export function installMockClerum(): MockClerum {
     persistedMessages: async (agentRef: string, chatId: string) =>
       (await store.loadMessages(agentRef, chatId)) as unknown as Array<Record<string, unknown>>,
     readIndex: (agentRef: string) => store.getIndex(agentRef),
+    persistLastActive: (agentRef: string, chatId: string) =>
+      store.setLastActiveChatId(agentRef, chatId),
   }
 
   Object.defineProperty(window, 'clerum', {
