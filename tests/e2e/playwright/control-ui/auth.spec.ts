@@ -25,7 +25,7 @@ test.describe('Control UI — Auth', () => {
   test('unauthenticated deep-link to a host detail page shows the login form, not host data', async ({
     page,
   }) => {
-    // Negative route-guard: unauthenticated visit to a protected host detail.
+    // E2E_GUARDIAN_NAVIGATION: negative-route-guard — unauthenticated protected host detail
     await page.goto('/hosts/chatllm')
     await expect(page.locator(CUI_AUTH.USERNAME_INPUT)).toBeVisible()
     await expect(page.locator(CUI_AUTH.SIGN_IN_BUTTON)).toBeVisible()

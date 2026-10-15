@@ -44,7 +44,7 @@ class E2EStaticAuditMarkerScopeTests(unittest.TestCase):
     def audit_email_reset_entry(self, argument: str) -> list[str]:
         source = (
             "const response = page.waitForResponse(() => true)\n"
-            "// E2E_GUARDIAN_EMAIL_RESET_ENTRY_POINT: synthetic emailed reset entry\n"
+            "// E2E_GUARDIAN_NAVIGATION: email-reset-entry — synthetic emailed reset entry\n"
             f"page.goto({argument})"
         )
         return audit_text(source, Path("email-reset.spec.ts"))
@@ -145,7 +145,7 @@ class E2EStaticAuditMarkerScopeTests(unittest.TestCase):
     def test_explicit_root_marker_remains_scoped_to_static_root(self) -> None:
         source = (
             "const response = page.waitForResponse(() => true)\n"
-            "// E2E_GUARDIAN_ENTRY_POINT\n"
+            "// E2E_GUARDIAN_NAVIGATION: root-entry — public application root\n"
             "page.goto('/')"
         )
         self.assertFalse(
@@ -155,7 +155,7 @@ class E2EStaticAuditMarkerScopeTests(unittest.TestCase):
     def test_explicit_negative_route_guard_remains_allowed(self) -> None:
         source = (
             "const response = page.waitForResponse(() => true)\n"
-            "// Negative route-guard: verifies authorization rejection.\n"
+            "// E2E_GUARDIAN_NAVIGATION: negative-route-guard — verifies authorization rejection\n"
             "page.goto('/admin/secret')"
         )
         self.assertFalse(
@@ -166,30 +166,30 @@ class E2EStaticAuditMarkerScopeTests(unittest.TestCase):
         )
 
     def test_marker_must_be_adjacent_to_its_navigation(self) -> None:
-        source = "// E2E_GUARDIAN_EMAIL_RESET_ENTRY_POINT\n\npage.goto('/invitations/reset-token')"
+        source = "// E2E_GUARDIAN_NAVIGATION: email-reset-entry — emailed entry\n\npage.goto('/invitations/reset-token')"
         self.assertTrue(
             any("direct page.goto" in finding for finding in audit_text(source, Path("scope.spec.ts")))
         )
 
     def test_one_marker_does_not_allow_a_second_navigation(self) -> None:
         source = (
-            "// E2E_GUARDIAN_EMAIL_RESET_ENTRY_POINT\n"
+            "// E2E_GUARDIAN_NAVIGATION: email-reset-entry — emailed entry\n"
             "page.goto('/invitations/reset-token')\n"
             "page.goto('/admin/secret')"
         )
         findings = audit_text(source, Path("scope.spec.ts"))
         navigation_findings = [finding for finding in findings if "direct page.goto" in finding]
         self.assertEqual(len(navigation_findings), 1)
-        self.assertTrue(navigation_findings[0].endswith(":3: direct page.goto outside an explicit negative guard"))
+        self.assertTrue(navigation_findings[0].endswith(":3: direct page.goto outside an explicit navigation annotation"))
 
     def test_one_marker_does_not_allow_two_calls_on_the_same_line(self) -> None:
         source = (
             "const response = page.waitForResponse(() => true)\n"
-            "// E2E_GUARDIAN_EMAIL_RESET_ENTRY_POINT\n"
+            "// E2E_GUARDIAN_NAVIGATION: email-reset-entry — emailed entry\n"
             "page.goto('/invitations/reset-token'); page.goto('/admin/secret')"
         )
         navigation_findings = [
-            item for item in audit_text(source, Path("scope.spec.ts")) if "direct page.goto" in item
+            item for item in audit_text(source, Path("scope.spec.ts")) if "navigation annotation" in item
         ]
         self.assertEqual(len(navigation_findings), 2)
 
@@ -198,7 +198,7 @@ class E2EStaticAuditMarkerScopeTests(unittest.TestCase):
             "tests/e2e/playwright/profile-ui-recovery/reset-session-hydration.spec.ts"
         ).read_text(encoding="utf-8")
         without_marker = spec.replace(
-            "// E2E_GUARDIAN_EMAIL_RESET_ENTRY_POINT: the emailed password-reset URL.\n", ""
+            "// E2E_GUARDIAN_NAVIGATION: email-reset-entry — the emailed password-reset URL\n", ""
         )
         self.assertTrue(
             any(
@@ -206,6 +206,30 @@ class E2EStaticAuditMarkerScopeTests(unittest.TestCase):
                 for finding in audit_text(without_marker, Path("recovery.spec.ts"))
             )
         )
+
+    def test_negative_route_annotation_rejects_dynamic_or_unsafe_destinations(self) -> None:
+        prefix = "// E2E_GUARDIAN_NAVIGATION: negative-route-guard — verify auth rejection\n"
+        for destination in [
+            "`/admin/${resource}`",
+            "'/admin/../secret'",
+            "'/admin/%2e%2e/secret'",
+            "'//outside.invalid/admin'",
+            "'https://outside.invalid/admin'",
+            "'/admin/secret?next=/'",
+            "'/admin/secret#fragment'",
+            "'/admin\\\\secret'",
+        ]:
+            with self.subTest(destination=destination):
+                findings = audit_text(prefix + f"page.goto({destination})", Path("guard.spec.ts"))
+                self.assertTrue(any("direct page.goto" in finding for finding in findings))
+
+    def test_root_annotation_cannot_authorize_another_destination(self) -> None:
+        source = (
+            "// E2E_GUARDIAN_NAVIGATION: root-entry — public application root\n"
+            "page.goto('/admin/secret')"
+        )
+        findings = audit_text(source, Path("root.spec.ts"))
+        self.assertTrue(any("does not match" in finding for finding in findings))
 
 
 def run_tests() -> int:

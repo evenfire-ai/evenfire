@@ -23,6 +23,11 @@ RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 EMAIL_RESET_ENTRY_PATH = re.compile(r"/invitations/[A-Za-z0-9_-]+")
+SAFE_STATIC_APP_PATH = re.compile(r"/(?:[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*)?")
+NAVIGATION_ANNOTATION = re.compile(
+    r"\s*//\s*E2E_GUARDIAN_NAVIGATION:\s*"
+    r"(negative-route-guard|root-entry|email-reset-entry)\s+—\s+(\S.*)"
+)
 STATIC_GOTO_ARGUMENT = re.compile(r"\s*(['\"])([^'\"\\\r\n]*)\1\s*(?=[,)])")
 
 
@@ -69,32 +74,30 @@ def audit_text(text: str, path: Path = Path("<source>")) -> list[str]:
         adjacent = _adjacent_line(text, match.start())
         after = text[match.end() : match.end() + 160]
         root_argument = STATIC_GOTO_ARGUMENT.match(after)
-        if root_argument and root_argument.group(2) in {"", "/"}:
-            continue
-        if re.fullmatch(
-            r"\s*//\s*Negative (?:protected-route guard|route-guard|deep-link guard|"
-            r"legacy terminal-route guard):[^\n]*",
-            adjacent,
-            re.IGNORECASE,
-        ):
-            continue
-        root_entry_marker = re.fullmatch(
-            r"\s*//\s*E2E_GUARDIAN_ENTRY_POINT(?::[^\n]*)?", adjacent
-        )
-        if root_entry_marker and root_argument and root_argument.group(2) in {"", "/"}:
-            continue
-        email_reset_marker = re.fullmatch(
-            r"\s*//\s*E2E_GUARDIAN_EMAIL_RESET_ENTRY_POINT(?::[^\n]*)?", adjacent
-        )
         line = text.count("\n", 0, match.start()) + 1
-        if (
-            email_reset_marker
-            and navigation_counts_by_line.get(line) == 1
-            and root_argument
-            and EMAIL_RESET_ENTRY_PATH.fullmatch(root_argument.group(2))
-        ):
+        if navigation_counts_by_line.get(line) != 1:
+            findings.append(f"{path}:{line}: navigation annotation must authorize one page.goto")
             continue
-        findings.append(f"{path}:{line}: direct page.goto outside an explicit negative guard")
+
+        annotation = NAVIGATION_ANNOTATION.fullmatch(adjacent)
+        destination = root_argument.group(2) if root_argument else None
+        if destination in {"", "/"}:
+            if annotation is None or annotation.group(1) == "root-entry":
+                continue
+            findings.append(f"{path}:{line}: direct page.goto does not match its navigation annotation")
+            continue
+        if not annotation or destination is None:
+            findings.append(f"{path}:{line}: direct page.goto outside an explicit navigation annotation")
+            continue
+
+        kind = annotation.group(1)
+        if kind == "root-entry" and destination in {"", "/"}:
+            continue
+        if kind == "email-reset-entry" and EMAIL_RESET_ENTRY_PATH.fullmatch(destination):
+            continue
+        if kind == "negative-route-guard" and SAFE_STATIC_APP_PATH.fullmatch(destination):
+            continue
+        findings.append(f"{path}:{line}: direct page.goto does not match its navigation annotation")
     return findings
 
 
