@@ -81,6 +81,7 @@ RUN="$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
 POD_READY_TIMEOUT="${E2E_825_POD_READY_TIMEOUT:-300}"
 SUSPEND_TIMEOUT="${E2E_825_SUSPEND_TIMEOUT:-300}"
 TURN_TIMEOUT="${E2E_825_TURN_TIMEOUT:-240}"
+STORE_LOG_TIMEOUT="${E2E_825_STORE_LOG_TIMEOUT:-30}"
 BASE_INIT_FIXTURE="${REPO_ROOT}/host-context-controller/test/__fixtures__/base-workspace-layout-init.sh"
 [ -r "$BASE_INIT_FIXTURE" ] || die "missing base init fixture ${BASE_INIT_FIXTURE}"
 
@@ -110,8 +111,16 @@ http() {
   HTTP_CODE="$(tail -n1 <<<"$resp")"
   HTTP_BODY="$(sed '$d' <<<"$resp")"
 }
-admin() { HTTP_HEADERS=(-H "Cookie: control_ui_admin_session=${ADMIN_COOKIE}"); http "$@"; }
-rpc() { HTTP_HEADERS=(-H "Authorization: Bearer ${RPC_TOKEN}"); http "$@"; }
+# auth_header KIND LINE: write one header line to a 0600 file under $SCRATCH
+# and print its path. Credentials reach curl through `-H @file`, never argv,
+# where any local user can read them with ps.
+auth_header() {
+  local file="${SCRATCH}/${1}.header"
+  (umask 077 && printf '%s\n' "$2" >"$file")
+  printf '%s' "$file"
+}
+admin() { HTTP_HEADERS=(-H "@$(auth_header admin "Cookie: control_ui_admin_session=${ADMIN_COOKIE}")"); http "$@"; }
+rpc() { HTTP_HEADERS=(-H "@$(auth_header rpc "Authorization: Bearer ${RPC_TOKEN}")"); http "$@"; }
 
 admin_login() {
   local headers="${SCRATCH}/admin-login.headers" line cookie
@@ -144,7 +153,7 @@ user_login() {
 mint_rpc_token() {
   local refs
   refs="$(printf '%s\n' "${CREATED_HOSTS[@]}" | jq -R . | jq -cs .)"
-  HTTP_HEADERS=(-H "Authorization: Bearer ${SESSION_TOKEN}")
+  HTTP_HEADERS=(-H "@$(auth_header session "Authorization: Bearer ${SESSION_TOKEN}")")
   http POST "${EXT_BASE}/api/v1/rpc/token" "$(jq -cn --argjson refs "$refs" '{hostRefs:$refs,scopes:[
     "host:message:invoke","host:session:read","host:status:read","host:health:read",
     "host:wake:write","host:model:write"]}')" || true
@@ -273,7 +282,7 @@ assert_pod() {
     return 1
   fi
   printf '%s' "$storage" >"${SCRATCH}/${name}.storage"
-  db="$(store_path "$name")" || return 1
+  db="$(store_path "$name")" || { fail "${name}: no store-opened log line (reason above)"; return 1; }
   [ "$db" = "${path}/state.db" ] || { fail "${name}: mcp-host opened ${db}, expected ${path}/state.db"; return 1; }
   if [ -s "${SCRATCH}/${name}.dbpath" ] && [ "$(cat "${SCRATCH}/${name}.dbpath")" != "$db" ]; then
     fail "${name}: store changed across the switch: $(cat "${SCRATCH}/${name}.dbpath") -> ${db}"
@@ -284,16 +293,28 @@ assert_pod() {
 }
 
 # store_path NAME: the database the running mcp-host opened, read from its one
-# "[ConversationStore] opened" log line (kubectl logs, no exec).
+# "[ConversationStore] opened" log line (kubectl logs, no exec). mcp-host
+# writes the line after the worker's first answer, which can come after Pod
+# Ready, so the log is re-read for up to STORE_LOG_TIMEOUT seconds. Callers
+# run it inside $(...), so the reason goes to stderr and the caller records
+# the FAIL.
 store_path() {
-  local pod lines
+  local pod lines deadline=$((SECONDS + STORE_LOG_TIMEOUT))
   pod="$(jq -r '.metadata.name' <<<"$POD_JSON")"
-  lines="$(kctl logs "$pod" -n "$HOST_NS" -c mcp-host |
-    jq -Rr 'fromjson? | select(.msg == "[ConversationStore] opened") | .dbPath')" ||
-    { fail "${1}: could not read the mcp-host log of ${pod}"; return 1; }
-  [ -n "$lines" ] && [ "$(wc -l <<<"$lines" | tr -d ' ')" = 1 ] ||
-    { fail "${1}: expected one store-opened line in ${pod}, got: ${lines:-<none>}"; return 1; }
-  printf '%s' "$lines"
+  while :; do
+    lines="$(kctl logs "$pod" -n "$HOST_NS" -c mcp-host |
+      jq -Rr 'fromjson? | select(.msg == "[ConversationStore] opened") | .dbPath')" ||
+      { echo "${1}: could not read the mcp-host log of ${pod}" >&2; return 1; }
+    if [ -n "$lines" ]; then
+      [ "$(wc -l <<<"$lines" | tr -d ' ')" = 1 ] ||
+        { echo "${1}: expected one store-opened line in ${pod}, got: ${lines}" >&2; return 1; }
+      printf '%s' "$lines"
+      return 0
+    fi
+    [ "$SECONDS" -lt "$deadline" ] ||
+      { echo "${1}: expected one store-opened line in ${pod}, got: <none> after ${STORE_LOG_TIMEOUT}s" >&2; return 1; }
+    sleep 1
+  done
 }
 
 # switch_and_witness NAME STATELESS: request the switch, then require a new
@@ -819,7 +840,7 @@ scenario_S7() {
 # RACE: concurrent model selections on new chats create one session each and
 # never restart the Host (A7.13).
 race_host() { # NAME STATELESS
-  local name=$1 stateless=$2 model uid restarts round i chat codes pids pods
+  local name=$1 stateless=$2 model uid restarts round i chat codes pids pods rpc_header
   create_host "$name" "$stateless" || return 1
   wait_new_ready_pod "$name" '' "$POD_READY_TIMEOUT" || return 1
   assert_pod "$name" "$stateless" /workspace || return 1
@@ -827,12 +848,13 @@ race_host() { # NAME STATELESS
   restarts="$(jq -r '[.status.containerStatuses[] | select(.name == "mcp-host") | .restartCount] | first' <<<"$POD_JSON")"
   rpc GET "${RPC_BASE}/api/v1/rpc/hosts/${name}/models" || true
   model="$(jq -er '.hostDefault' <<<"$HTTP_BODY")" || { fail "${name}: models returned ${HTTP_CODE}: ${HTTP_BODY}"; return 1; }
+  rpc_header="$(auth_header rpc "Authorization: Bearer ${RPC_TOKEN}")"
   for round in 1 2 3 4 5; do
     chat="e2e-825-race-${RUN}-${round}"
     pids=()
     for i in 1 2 3 4; do
       curl -sS -m 60 -o /dev/null -w '%{http_code}\n' -X POST "${RPC_BASE}/api/v1/rpc/hosts/${name}/model" \
-        -H "Authorization: Bearer ${RPC_TOKEN}" -H 'Content-Type: application/json' \
+        -H "@${rpc_header}" -H 'Content-Type: application/json' \
         -d "$(jq -cn --arg c "$chat" --arg m "$model" '{chatId:$c,model:$m}')" >"${SCRATCH}/race-${round}-${i}" &
       pids+=("$!")
     done

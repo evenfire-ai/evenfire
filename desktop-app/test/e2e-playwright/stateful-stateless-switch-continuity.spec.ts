@@ -13,8 +13,8 @@
  * - `E2E_825_DESKTOP_CONTINUITY=1` opts in. Without exactly `1` the file is
  *   skipped, so the default lane never mutates a cluster.
  * - `E2E_K8S_CONTEXT` (or `KUBECONTEXT`) names the branch-owned Minikube
- *   profile; the spec refuses any context that is not a Minikube node of that
- *   name.
+ *   profile; the spec refuses any context whose name is not branch-scoped
+ *   (`clerum-<branch>-<8 hex>`) or that is not a Minikube node of that name.
  * - `CONTROL_API_BASE_URL` (or `E2E_CONTROL_API_URL`) and the admin password
  *   (`E2E_ADMIN_PASSWORD` / `ADMIN_PASSWORD` / `ADMIN_PASS` /
  *   `TEST_ADMIN_PASSWORD`) are required; `TEST_ADMIN_USERNAME` defaults to
@@ -37,6 +37,7 @@ import { execFile } from 'node:child_process'
 import { realpathSync } from 'node:fs'
 import nodePath from 'node:path'
 import { promisify } from 'node:util'
+import { assertBranchProfileContext } from './helpers/branchProfileContext'
 import {
   DESKTOP_APP_ROOT,
   EXTERNAL_REST_API_BASE_URL,
@@ -102,6 +103,7 @@ async function kubectlJson(args: string[]): Promise<any> {
 }
 
 async function assertMinikubeProfile(): Promise<void> {
+  assertBranchProfileContext(kubeContext())
   const nodes = await kubectlJson(['get', 'nodes'])
   const names = (nodes.items ?? []).map(
     (node: any) => node.metadata?.labels?.['minikube.k8s.io/name'] ?? ''

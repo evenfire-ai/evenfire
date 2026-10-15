@@ -65,6 +65,27 @@ function runDesktopTarget(context, extraEnv = {}) {
   })
 }
 
+test('make test-e2e-hcc-storage-layout-switch keeps the caller KUBECONTEXT', () => {
+  const env = {
+    PATH: process.env.PATH,
+    HOME: process.env.HOME,
+    KUBECONTEXT: 'clerum-fix-issue-825-gate-test-0123abcd',
+    E2E_PROFILE_PORTS_ENV: path.join(tmpdir(), 'playwright-report-gate-no-such-ports.env'),
+  }
+  const run = spawnSync(
+    'make',
+    ['--no-print-directory', '-C', REPO_ROOT, 'test-e2e-hcc-storage-layout-switch'],
+    { encoding: 'utf8', env, timeout: 60_000 }
+  )
+  assert.notEqual(run.status, 0)
+  // The caller's branch context passes the context check (the Makefile
+  // default MINIKUBE_PROFILE would not) and the run stops at the ports.env
+  // check, before any cluster call.
+  const out = `${run.stdout}${run.stderr}`
+  assert.doesNotMatch(out, /select an explicit branch-scoped Minikube context/)
+  assert.match(out, /provide E2E_PROFILE_PORTS_ENV from the owned branch profile/)
+})
+
 test('make test-e2e-825-desktop-continuity refuses a context that is not a branch profile', () => {
   const shared = runDesktopTarget('minikube')
   assert.notEqual(shared.status, 0)

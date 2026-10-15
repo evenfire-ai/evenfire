@@ -1404,7 +1404,7 @@ test-e2e-stateless-suspend-wake: ## Run stateless suspend/wake E2E gate (Phase 1
 .PHONY: test-e2e-hcc-storage-layout-switch
 test-e2e-hcc-storage-layout-switch: ## Run the #825 storage-layout gate across lifecycle switches (needs an owned branch profile, E2E_PROFILE_PORTS_ENV, E2E_DEV_LOGIN_EMAIL, forwards held)
 	@echo "Running HCC storage-layout switch E2E gate..."
-	E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-storage-layout-switch.sh
+	E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 KUBECONTEXT="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}" bash scripts/e2e/e2e-hcc-storage-layout-switch.sh
 
 .PHONY: test-e2e-825-desktop-continuity
 test-e2e-825-desktop-continuity: ## Run the #825 Desktop journey across stateful/stateless switches (owned branch profile, forwards held, real model turns)
