@@ -49,6 +49,7 @@ vi.mock('../sandboxUiSessionRefresh.js', () => ({
 }))
 
 vi.mock('../config.js', () => ({
+  getActiveRuntimeConfigOptionId: () => null,
   getActiveEnvKey: () => 'test-env',
   config: {
     rpcProxyBaseUrl: 'http://proxy',

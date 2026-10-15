@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { createApp } from '../src/app.js'
@@ -133,6 +133,8 @@ function issueExpiredRefreshToken(
 
 describe('POST /api/v1/workflow-auth/reissue', () => {
   let app: ReturnType<typeof createApp>
+
+  afterEach(() => vi.restoreAllMocks())
 
   beforeEach(() => {
     vi.clearAllMocks()
@@ -389,33 +391,53 @@ describe('POST /api/v1/workflow-auth/reissue', () => {
     expect(res.body.error).toBe('Internal Server Error')
   })
 
-  it('rate-limits by jti: bursts over approvalRlReissuePerMin return 429', async () => {
-    const limit = config.approvalRlReissuePerMin
-    // Note: each reissue needs a DIFFERENT token (jti is single-use), so the
-    // rate limiter bucket is keyed on (namespace/recipe) NOT per-jti — we
-    // re-read the middleware to confirm. Actually per the route config the
-    // bucket key is `reissue:${recipeNamespace}/${recipeName}` because
-    // getMcpHostRefreshRateLimitKey returns ns/recipe (not jti).
-    //
-    // So: limit+1 calls with DIFFERENT tokens for the SAME recipe should
-    // trip the limiter on the (limit+1)-th call.
-    for (let i = 0; i < limit; i++) {
-      const token = issueExpiredRefreshToken()
-      const res = await request(app)
-        .post('/api/v1/workflow-auth/reissue')
-        .set('Authorization', `Bearer ${token}`)
-        .send({ recipe_name: RECIPE })
-      expect(res.status).toBe(200)
-    }
+  it.each([
+    { offsetMs: 10_000, retryAfter: '50' },
+    { offsetMs: 59_999, retryAfter: '1' },
+  ])(
+    'rate-limits a recipe within one window at offset $offsetMs ms',
+    async ({ offsetMs, retryAfter }) => {
+      const limit = config.approvalRlReissuePerMin
+      // Every request must stay in one fixed window, even at its final millisecond.
+      // Keep real timers/HTTP and the actual RS256 sign/verify path running.
+      const baseNow = Math.floor(Date.now() / 60_000) * 60_000 + offsetMs
+      const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(baseNow)
+      // JTIs are single-use; distinct tokens still share the namespace/recipe quota.
+      for (let i = 0; i < limit; i++) {
+        const token = issueExpiredRefreshToken()
+        const res = await request(app)
+          .post('/api/v1/workflow-auth/reissue')
+          .set('Authorization', `Bearer ${token}`)
+          .send({ recipe_name: RECIPE })
+        expect(res.status).toBe(200)
+      }
 
-    const overflowToken = issueExpiredRefreshToken()
-    const limited = await request(app)
-      .post('/api/v1/workflow-auth/reissue')
-      .set('Authorization', `Bearer ${overflowToken}`)
-      .send({ recipe_name: RECIPE })
-    expect(limited.status).toBe(429)
-    expect(limited.headers['retry-after']).toBeDefined()
-  })
+      const overflowToken = issueExpiredRefreshToken()
+      const limited = await request(app)
+        .post('/api/v1/workflow-auth/reissue')
+        .set('Authorization', `Bearer ${overflowToken}`)
+        .send({ recipe_name: RECIPE })
+      expect(limited.status).toBe(429)
+      expect(limited.headers['retry-after']).toBe(retryAfter)
+      expect(limited.headers['x-ratelimit-remaining']).toBe('0')
+      expect(limited.body.code).toBe('rate_limited')
+
+      // Denial must not consume the token: the same token works in the next window.
+      nowSpy.mockReturnValue(baseNow + 60_000)
+      const retried = await request(app)
+        .post('/api/v1/workflow-auth/reissue')
+        .set('Authorization', `Bearer ${overflowToken}`)
+        .send({ recipe_name: RECIPE })
+      expect(retried.status).toBe(200)
+      expect(retried.body.refreshToken).toBeTypeOf('string')
+
+      const replayed = await request(app)
+        .post('/api/v1/workflow-auth/reissue')
+        .set('Authorization', `Bearer ${overflowToken}`)
+        .send({ recipe_name: RECIPE })
+      expect(replayed.status).toBe(401)
+    }
+  )
 
   it('does not let forged expired refresh claims poison the reissue rate-limit bucket', async () => {
     const now = Math.floor(Date.now() / 1000)
