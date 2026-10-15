@@ -1098,21 +1098,29 @@ describe('invitation/password producer response mappings', () => {
           const busy = resetFault === 'legacy_busy'
           expect(response.status).toBe(busy ? 429 : 503)
           expect(response.body).toEqual({
-            error: busy ? 'rate_limited' : 'authority_unavailable',
-            retryAfterSeconds: busy ? 9 : 900,
+            error: busy ? 'rate_limited' : 'recovery_outcome_unknown',
+            retryAfterSeconds: busy ? 9 : 2,
           })
-          expect(response.headers['retry-after']).toBe(busy ? '9' : '900')
+          expect(response.headers['retry-after']).toBe(busy ? '9' : '2')
           expect(response.headers['x-ratelimit-remaining']).toBeUndefined()
           expect(JSON.stringify(response.body)).not.toMatch(
             /diagnostic|private Control API detail|verification_busy|authority_failure/i
           )
         } else {
-          expect(response.status).toBe(503)
-          expect(response.body).toEqual({
-            error: resetFault === 'html' ? 'recovery_outcome_unknown' : 'authority_unavailable',
-            retryAfterSeconds: 2,
-          })
-          expect(response.headers['retry-after']).toBe('2')
+          if (resetFault === 'html') {
+            expect(response.status).toBe(503)
+            expect(response.body).toEqual({
+              error: 'recovery_outcome_unknown',
+              retryAfterSeconds: 2,
+            })
+            expect(response.headers['retry-after']).toBe('2')
+          } else {
+            expect(response.status).toBe(502)
+            expect(response.body).toEqual({
+              error: 'Password recovery service returned an invalid response',
+            })
+            expect(response.headers['retry-after']).toBeUndefined()
+          }
         }
         expect(response.headers['set-cookie']).toBeUndefined()
         expect(JSON.stringify(response.body)).not.toMatch(/r6-|gateway|sql|stack|connection reset/i)
