@@ -8368,6 +8368,12 @@ export class AppService {
       return { requested: true, status: result.status }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
+      // A generation change is expected when logout or account replacement wins
+      // while this best-effort request is waiting for its team-scoped token.
+      // Report cancellation as such; it is not a host prewarm failure.
+      if (message === 'stale_session_generation') {
+        return { requested: false, skipped: 'auth-changed' }
+      }
       desktopRuntimeLog.warn(`[AppService] prewarmHost failed host=${targetHostRef}`, error)
       return { requested: false, error: message }
     }
