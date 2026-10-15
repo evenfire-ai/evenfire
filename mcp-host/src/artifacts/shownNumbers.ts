@@ -131,24 +131,6 @@ export function showsIntegerAsStored(code: string, value: number): boolean {
 /** Locales rendered natively: their month and day names differ. */
 const NAME_LOCALES = ['de', 'fr', 'es']
 
-/**
- * Characters locales use to group digits or mark decimals: comma, period,
- * apostrophe (de-CH), typographic apostrophe, no-break and narrow no-break
- * space (fr), space.
- */
-const SEPARATORS = /[,.'\u2019\u00A0\u202F ]/g
-
-/**
- * `text` without separators. A value shown in any locale ("1,234.5",
- * "1.234,5", "1 234,5", "1'234.5", "12,34,567") reads the same this way, so a
- * protected value is compared in this form with each rendering: whenever it
- * occurs in some locale's rendering, its separator-free form occurs in the
- * separator-free rendering.
- */
-export function withoutSeparators(text: string): string {
-  return text.replace(SEPARATORS, '')
-}
-
 /** Month and day names, and AM/PM, are words a locale translates. */
 const NAMED = /m{3,}|d{3,}|AM\/PM|A\/P/i
 
@@ -210,11 +192,24 @@ export function shownForms(value: number, code: string, shortDate = false): stri
   return out
 }
 
+/*
+ * Text is read in NFKC, which turns no-break, narrow, thin and figure spaces
+ * into a space and fullwidth digits into ASCII ones. Thousands are grouped by
+ * a comma, period, apostrophe or space; hyphens, slashes and spaces set apart
+ * the blocks of a card, phone or date.
+ */
+const RUN_SEPARATORS = ",.'\u2019 \\-\u2010\u2012/"
 /** A run of digits with single separators between them, as a number is shown. */
-const NUMBER_RUN = /\d+(?:[,.'\u2019\u00A0\u202F ]\d+)*/g
-const RUN_PART = /\d+|[,.'\u2019\u00A0\u202F ]/g
-/** Separators that only ever group digits: spaces and apostrophes, never a decimal mark. */
-const BLOCK_SEPARATOR = /^[ \u00A0\u202F'\u2019]$/
+const NUMBER_RUN = new RegExp(`\\d+(?:[${RUN_SEPARATORS}]\\d+)*`, 'g')
+const RUN_PART = new RegExp(`\\d+|[${RUN_SEPARATORS}]`, 'g')
+const ANY_SEPARATOR = new RegExp(`[${RUN_SEPARATORS}]`, 'g')
+const THOUSANDS_SEPARATOR = /^[,.'\u2019 ]$/
+const BLOCK_SEPARATOR = /^[ '\u2019\-\u2010\u2012/]$/
+/**
+ * A secret that is a number, possibly signed or with literal text before or
+ * after it ("sk-123456"): the text, then digits with single separators.
+ */
+const NUMERIC_SECRET = new RegExp(`^(\\D*?)(\\d(?:[${RUN_SEPARATORS}]?\\d)*)(\\D*)$`)
 
 /** Whether `groups` are the digit groups of one number as a locale groups thousands. */
 function groupedValidly(groups: string[]): boolean {
@@ -241,65 +236,148 @@ const MAX_GROUPS = 8
 
 /**
  * The digits a stretch of digit groups and the separators between them may
- * stand for: all of them, where the separators group thousands as some locale
- * does; those before the last separator, where that one is a decimal point
- * and the rest group thousands; and, for groups set apart by spaces or
- * apostrophes only (a card or phone number), all of them as a whole number.
+ * stand for as a number: all of them, where the separators group thousands as
+ * some locale does, and, unless `decimal` is false, those before the last
+ * separator, where that one is a decimal point and the rest group thousands.
  * A decimal part is never joined to what comes before it: "54.32" shows 54
  * and 32, not 5432.
  */
-function readStretch(groups: string[], separators: string[], within: string[], whole: string[]) {
-  if (oneSeparator(separators) && groupedValidly(groups)) within.push(groups.join(''))
-  const decimal = separators[separators.length - 1]
+function numberReadings(groups: string[], separators: string[], decimal = true): string[] {
+  const out: string[] = []
+  if (oneSeparator(separators) && THOUSANDS_SEPARATOR.test(separators[0]) && groupedValidly(groups))
+    out.push(groups.join(''))
+  const point = separators[separators.length - 1]
   const grouping = separators.slice(0, -1)
   if (
-    (decimal === '.' || decimal === ',') &&
-    (grouping.length === 0 || (oneSeparator(grouping) && grouping[0] !== decimal)) &&
+    decimal &&
+    (point === '.' || point === ',') &&
+    (grouping.length === 0 ||
+      (oneSeparator(grouping) && THOUSANDS_SEPARATOR.test(grouping[0]) && grouping[0] !== point)) &&
     groupedValidly(groups.slice(0, -1))
   ) {
-    within.push(groups.slice(0, -1).join(''))
+    out.push(groups.slice(0, -1).join(''))
   }
-  if (separators.every(sep => BLOCK_SEPARATOR.test(sep))) whole.push(groups.join(''))
+  return out
 }
 
 /**
- * Every reading of a shown run of digits and separators: each group on its
- * own, and each stretch of up to MAX_GROUPS groups read as one number (a space
- * may group thousands or just stand between two numbers, as in "Q1 15,432").
+ * Whether `separators` set apart the blocks of one whole number: spaces,
+ * apostrophes, hyphens and slashes (a card, phone or date), or periods
+ * between three or more blocks ("02.01.2026"), which one decimal point is not.
  */
-function readings(run: string): { within: string[]; whole: string[] } {
+function blocksOfOneNumber(separators: string[]): boolean {
+  return (
+    separators.every(sep => BLOCK_SEPARATOR.test(sep)) ||
+    (separators.length >= 2 && separators.every(sep => sep === '.'))
+  )
+}
+
+function split(run: string): { groups: string[]; separators: string[] } {
   const groups: string[] = []
   const separators: string[] = []
   for (const part of run.match(RUN_PART) ?? []) {
     if (/\d/.test(part)) groups.push(part)
     else separators.push(part)
   }
-  const within = [...groups]
-  const whole: string[] = []
+  return { groups, separators }
+}
+
+/**
+ * Whether a shown run of digits and separators shows `digits`: in one of its
+ * groups, in a stretch of up to MAX_GROUPS groups read as one number (a space
+ * may group thousands or just stand between two numbers, as in "Q1 15,432"),
+ * or as a stretch of blocks that spells exactly `digits`, however many.
+ */
+function runShows(run: string, digits: string): boolean {
+  const { groups, separators } = split(run)
+  if (groups.some(group => group.includes(digits))) return true
   for (let from = 0; from < groups.length; from++) {
     for (let to = from + 1; to < Math.min(groups.length, from + MAX_GROUPS); to++) {
-      readStretch(groups.slice(from, to + 1), separators.slice(from, to), within, whole)
+      const readings = numberReadings(groups.slice(from, to + 1), separators.slice(from, to))
+      if (readings.some(reading => reading.includes(digits))) return true
+    }
+    let length = groups[from].length
+    for (let to = from + 1; to < groups.length && length < digits.length; to++) {
+      length += groups[to].length
+      if (
+        length === digits.length &&
+        blocksOfOneNumber(separators.slice(from, to)) &&
+        groups.slice(from, to + 1).join('') === digits
+      ) {
+        return true
+      }
     }
   }
-  return { within, whole }
+  return false
+}
+
+/**
+ * Whether the run at `at`, with `prefix` right before it and `suffix` right
+ * after the part read, starts with a number that is exactly `digits`.
+ */
+function affixedRunShows(
+  shown: string,
+  at: number,
+  run: string,
+  affix: { prefix: string; suffix: string },
+  digits: string,
+  asWritten: boolean
+): boolean {
+  if (at < affix.prefix.length || shown.slice(at - affix.prefix.length, at) !== affix.prefix)
+    return false
+  const { groups, separators } = split(run)
+  let length = 0
+  for (let to = 0; to < groups.length && length < digits.length; to++) {
+    length += groups[to].length
+    const last = to === groups.length - 1
+    if (affix.suffix && !(last && shown.startsWith(affix.suffix, at + run.length))) continue
+    const stretch = groups.slice(0, to + 1)
+    const between = separators.slice(0, to)
+    const readings = asWritten
+      ? [stretch.join('')]
+      : to === 0
+        ? [stretch[0]]
+        : [
+            ...numberReadings(stretch, between, !affix.suffix),
+            ...(blocksOfOneNumber(between) ? [stretch.join('')] : []),
+          ]
+    if (readings.includes(digits)) return true
+  }
+  return false
 }
 
 /**
  * Whether `text` shows `secret` as a number, written as any locale writes it.
- * Only a secret that is a number counts: digits, with separators or not, at
- * least four of them; any other secret is found by its exact text instead.
+ * Only a secret that is a number counts: at least four digits with single
+ * separators between them, possibly signed or with text before or after them
+ * ("sk-123456" shown as "sk-123,456"); any other secret is found by its exact
+ * text instead.
  */
 export function showsNumber(text: string, secret: string): boolean {
-  if (!/^[\d,.'\u2019\u00A0\u202F ]+$/.test(secret)) return false
-  const digits = withoutSeparators(secret)
-  if (digits.length < 4 || !/\d/.test(text)) return false
+  if (!/\d/.test(text)) return false
+  const parts = NUMERIC_SECRET.exec(secret.normalize('NFKC'))
+  if (!parts) return false
+  const [, before, core, suffix] = parts
+  // A sign is read with the number, as a locale writes it.
+  const prefix = /^[+\-\u2212]$/.test(before) ? '' : before
+  const digits = core.replace(ANY_SEPARATOR, '')
+  if (digits.length < 4) return false
+  const shown = text.normalize('NFKC')
+  // Every reading joins neighbouring groups of one run, so the digits of a
+  // run, separators taken out, hold every reading of it: most text is passed
+  // over without reading any.
+  if (!shown.replace(ANY_SEPARATOR, '').includes(digits)) return false
   // A secret written with separators may use another locale's decimal mark.
-  const asWritten = digits !== secret
-  for (const run of text.match(NUMBER_RUN) ?? []) {
-    const { within, whole } = readings(run)
-    if (within.some(reading => reading.includes(digits))) return true
-    if (whole.includes(digits)) return true
-    if (asWritten && withoutSeparators(run).includes(digits)) return true
+  const asWritten = digits !== core
+  for (const match of shown.matchAll(NUMBER_RUN)) {
+    const run = match[0]
+    if (!run.replace(ANY_SEPARATOR, '').includes(digits)) continue
+    if (prefix || suffix) {
+      if (affixedRunShows(shown, match.index, run, { prefix, suffix }, digits, asWritten))
+        return true
+    } else if (asWritten || runShows(run, digits)) {
+      return true
+    }
   }
   return false
 }

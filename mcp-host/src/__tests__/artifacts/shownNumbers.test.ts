@@ -5,7 +5,6 @@ import {
   renderCount,
   shownForms,
   showsNumber,
-  withoutSeparators,
 } from '../../artifacts/shownNumbers'
 import { CURRENCY_SYMBOLS } from '../../workflow/xlsxCells'
 import { NUMBER_FORMATS, currencyFormat } from '../../workflow/xlsxFormats'
@@ -117,6 +116,20 @@ describe('showsNumber', () => {
     ['inside a longer grouped number', 'Q1 15,432 units', '5432'],
     ['after a decimal point', '0.1234', '1234'],
     ['as the secret writes it, separators and all', '1,234.50', '1.234,50'],
+    ['in blocks set apart by hyphens', 'Card 4111-1111-1111-1111', '4111111111111111'],
+    ['in blocks set apart by slashes', '4111/1111/1111/1111', '4111111111111111'],
+    [
+      'in blocks set apart by thin spaces',
+      '4111\u20091111\u20091111\u20091111',
+      '4111111111111111',
+    ],
+    ['in fullwidth digits', '\uff14\uff11\uff11\uff11 1111 1111 1111', '4111111111111111'],
+    ['in more blocks than a number groups', '4 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1', '4111111111111111'],
+    ['as a date with periods', '02.01.2026', '02012026'],
+    ['with its sign', '-12,345,678', '-12345678'],
+    ['without its sign', '12,345,678', '-12345678'],
+    ['after the text the secret starts with', 'Key sk-123,456', 'sk-123456'],
+    ['before the text the secret ends with', '123 456 USD', '123456 USD'],
   ])('finds a number shown %s', (_label, text, secret) => {
     expect(showsNumber(text, secret)).toBe(true)
   })
@@ -125,9 +138,21 @@ describe('showsNumber', () => {
     ['across a decimal point', '54.32%', '5432'],
     ['from a value that rounds elsewhere', '3,141,592,652.6', '3141592653'],
     ['across two numbers in a list', '54, 32', '5432'],
-    ['in a secret that is not a number', 'sk-123456', 'sk-123456'],
+    ['in a secret whose digits letters split', 'ab12cd34', 'ab12cd34'],
+    ['without the text the secret starts with', '123,456', 'sk-123456'],
+    ['after other text', 'pk-123,456', 'sk-123456'],
+    ['before other text', '123,456 EUR', '123456 USD'],
+    ['in blocks that spell a longer number', '4111 1111 1111 11112', '4111111111111111'],
   ])('does not read a number %s', (_label, text, secret) => {
     expect(showsNumber(text, secret)).toBe(false)
+  })
+
+  it('passes over a long list of numbers that cannot hold the secret without reading it', () => {
+    // Reading every stretch of a million numbers takes seconds.
+    const text = Array.from({ length: 1_000_000 }, (_, i) => String(100 + (i % 900))).join(' ')
+    const started = Date.now()
+    expect(showsNumber(text, '987654321012')).toBe(false)
+    expect(Date.now() - started).toBeLessThan(1000)
   })
 })
 
@@ -139,19 +164,5 @@ describe('renderCount', () => {
     ['m/d/yy h:mm', true, 84],
   ])('renders %s (short date %s) %i times', (code, shortDate, count) => {
     expect(renderCount(code, shortDate)).toBe(count)
-  })
-})
-
-describe('withoutSeparators', () => {
-  it.each([
-    ['1,234.5', '12345'],
-    ['1.234,5', '12345'],
-    ['1\u202f234,5', '12345'],
-    ['1\u00a0234,5', '12345'],
-    ["1'234.5", '12345'],
-    ['1’234.5', '12345'],
-    ['3,14,15,92,653', '3141592653'],
-  ])('reads %s as %s', (shown, digits) => {
-    expect(withoutSeparators(shown)).toBe(digits)
   })
 })

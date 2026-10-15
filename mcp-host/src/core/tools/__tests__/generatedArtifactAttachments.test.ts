@@ -578,6 +578,8 @@ describe('generated internal artifact attachments', () => {
       ['grouped digits', '3,141,592,653', 3141592653, '#,##0'],
       ['digits grouped the German way', '3.141.592.653', 3141592653, '#,##0'],
       ['digits beside quoted text', 'sk-123456', 123456, '"sk-"0'],
+      ['grouped digits beside quoted text', 'sk-123456', 123456, '"sk-"#,##0'],
+      ['a date under a format with periods', '02012026', '2026-01-02', 'dd.mm.yyyy'],
     ])('does not attach a sheet that shows %s', async (_label, secret, cell, format) => {
       const result = await toolWith('clerum__generate_xlsx', [secret]).execute(sheet(cell, format))
       expect(result.is_error).toBe(false)
@@ -721,6 +723,11 @@ describe('generated internal artifact attachments', () => {
         { filename: 'card.md', content: 'Card 4111 1111 1111 1111' },
       ],
       ['a PDF', 'clerum__generate_pdf', { filename: 'card.pdf', body: 'Card 4111 1111 1111 1111' }],
+      [
+        'markdown, with hyphens,',
+        'clerum__generate_markdown',
+        { filename: 'card.md', content: 'Card 4111-1111-1111-1111' },
+      ],
     ])(
       'does not attach %s that writes a protected number in groups',
       async (_label, name, args) => {
