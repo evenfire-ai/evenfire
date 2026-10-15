@@ -252,20 +252,22 @@ describe('team persistence preserves the existing secure session on transient fa
     h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'active-keytar')
     const entered = deferred()
     const release = deferred()
-    const read = h.tokenStore.getSafeStorageSessionToken.bind(h.tokenStore)
-    vi.spyOn(h.tokenStore, 'getSafeStorageSessionToken').mockImplementation(async (...args) => {
-      const result = await read(...args)
-      entered.resolve()
-      await release.promise
-      return result
-    })
+    const snapshot = h.tokenStore.snapshotSessionTokenFallbackFiles.bind(h.tokenStore)
+    vi.spyOn(h.tokenStore, 'snapshotSessionTokenFallbackFiles').mockImplementationOnce(
+      async (...args) => {
+        const result = await snapshot(...args)
+        entered.resolve()
+        await release.promise
+        return result
+      }
+    )
     const events: string[] = []
-    const retry = h.service.applyPendingExternalLogoutIntent().then(result => {
+    const retry = own(h.service.applyPendingExternalLogoutIntent()).then(result => {
       events.push('retry')
       return result
     })
-    await entered.promise
-    const quitting = h.service.prepareForQuit().then(() => {
+    await awaitPhase(entered.promise, retry, 'whole-source cleanup eligibility snapshot')
+    const quitting = own(h.service.prepareForQuit()).then(() => {
       events.push('quit')
     })
     await new Promise(resolve => setImmediate(resolve))
@@ -277,7 +279,7 @@ describe('team persistence preserves the existing secure session on transient fa
     expect(h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)).toBeNull()
   })
 
-  it('quarantines old encrypted credentials after a fresh Keytar login from CP-S', async () => {
+  it('disposes old encrypted credentials after a fresh Keytar login from CP-S', async () => {
     const h = await harness()
     await h.tokenStore.setSafeStorageSessionToken('fixture-previous-user-session', h.envKey)
     h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'safe-storage')
@@ -285,10 +287,8 @@ describe('team persistence preserves the existing secure session on transient fa
     await expect(
       h.state.installAuthenticatedLogin({ token: 'fixture-new-user-session', me: freshMe })
     ).resolves.toEqual({ authenticated: true, me: freshMe })
-    expect(h.markers.readPendingExternalLogoutIntent(runtime.directory, h.envKey)).toEqual({
-      intent: 'keytar-cleanup-pending',
-      credentialSource: 'active-keytar',
-    })
+    expect(h.markers.readPendingExternalLogoutIntent(runtime.directory, h.envKey)).toBeNull()
+    expect(await h.tokenStore.getSafeStorageSessionToken(h.envKey)).toBeNull()
     vi.doMock('keytar', () => ({}))
     const restarted = await harness()
     await expect(restarted.service.initialize()).resolves.toEqual({
@@ -856,25 +856,35 @@ describe('R20-M6 queued source-plan fencing', () => {
     h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'active-keytar')
     const entered = deferred()
     const release = deferred()
-    const readEncrypted = h.tokenStore.getSafeStorageSessionToken.bind(h.tokenStore)
-    vi.spyOn(h.tokenStore, 'getSafeStorageSessionToken').mockImplementationOnce(async (...args) => {
-      const token = await readEncrypted(...args)
-      entered.resolve()
-      await release.promise
-      return token
+    const snapshot = h.tokenStore.snapshotSessionTokenFallbackFiles.bind(h.tokenStore)
+    vi.spyOn(h.tokenStore, 'snapshotSessionTokenFallbackFiles').mockImplementationOnce(
+      async (...args) => {
+        const observed = await snapshot(...args)
+        entered.resolve()
+        await release.promise
+        return observed
+      }
+    )
+    const cleanup = own(h.service.applyPendingExternalLogoutIntent())
+    await awaitPhase(entered.promise, cleanup, 'queued cleanup retirement')
+    const teamQueued = deferred()
+    const persist = h.state.runSessionPersistence.bind(h.state)
+    vi.spyOn(h.state, 'runSessionPersistence').mockImplementationOnce(operation => {
+      teamQueued.resolve()
+      return persist(operation)
     })
-    const cleanup = h.service.applyPendingExternalLogoutIntent()
-    await entered.promise
-    const switching = h.service.switchTeam('fixture-other')
-    const rejected = switching.catch(() => undefined)
-    await new Promise(resolve => setImmediate(resolve))
-    release.resolve()
+    const switching = own(h.service.switchTeam('fixture-other'))
+    const rejected = switching.then(
+      () => null,
+      error => error
+    )
+    try {
+      await awaitPhase(teamQueued.promise, switching, 'team transaction queued behind cleanup')
+    } finally {
+      release.resolve()
+    }
     await cleanup
-    await expect(switching).rejects.toThrow('Pending logout intent changed')
-    await rejected
-    expect(h.state.sessionToken).toBe(homeToken)
-    expect(h.state.me).toEqual(homeMe)
-    expect(h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)).toBeNull()
+    const error = await rejected
     const restarted = await harness()
     await expect(restarted.service.initialize()).resolves.toEqual({
       authenticated: true,
@@ -882,6 +892,11 @@ describe('R20-M6 queued source-plan fencing', () => {
     })
     expect(restarted.state.authClient.getMe).toHaveBeenCalledWith(homeToken)
     expect(restarted.state.authClient.getMe).not.toHaveBeenCalledWith('fixture-other-session')
+    expect(h.state.sessionToken).toBe(homeToken)
+    expect(h.state.me).toEqual(homeMe)
+    expect(h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)).toBeNull()
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toContain('Pending logout intent changed')
   })
 })
 

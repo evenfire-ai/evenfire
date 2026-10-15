@@ -695,3 +695,30 @@ describe('R21-M2 stale native producer fencing', () => {
     expect(h.state.sessionToken).toBeNull()
   })
 })
+
+describe('R21-L1 exact stale encrypted disposal', () => {
+  it('retires CP-S after fresh Keytar login without retaining a prior-user encrypted token', async () => {
+    const h = await harness()
+    const previous = 'fixture-previous-user-session'
+    const fresh = 'fixture-new-user-session'
+    await h.tokenStore.setSafeStorageSessionToken(previous, h.envKey)
+    h.markers.recordPendingKeytarCleanup(runtime.directory, h.envKey, 'safe-storage')
+    await h.state.installAuthenticatedLogin({ token: fresh, me: homeMe })
+    expect(await h.tokenStore.getSafeStorageSessionToken(h.envKey)).toBeNull()
+    expect(h.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)).toBeNull()
+    for (let restart = 0; restart < 3; restart += 1) {
+      const next = await harness()
+      await expect(next.service.initialize()).resolves.toEqual({ authenticated: true, me: homeMe })
+      expect(next.state.authClient.getMe).toHaveBeenCalledWith(fresh)
+      expect(next.state.authClient.getMe).not.toHaveBeenCalledWith(previous)
+      expect(next.markers.readPendingExternalLogoutMarker(runtime.directory, h.envKey)).toBeNull()
+    }
+    vi.doMock('keytar', () => ({}))
+    const unavailable = await harness()
+    await expect(unavailable.service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+    })
+    expect(unavailable.state.authClient.getMe).not.toHaveBeenCalledWith(previous)
+  })
+})

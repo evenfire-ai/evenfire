@@ -332,7 +332,7 @@ describe('team persistence respects pending-marker authority', () => {
   )
 
   // Characterization: successful source-bound team writes retain the established restore path.
-  it('restores a successful active-Keytar team switch instead of an unrelated safeStorage token', async () => {
+  it('restores a successful active-Keytar team switch and retires unrelated safeStorage bytes', async () => {
     const harness = await createService()
     await harness.login()
     harness.markers.recordPendingKeytarCleanup(runtime.directory, harness.envKey, 'active-keytar')
@@ -354,9 +354,7 @@ describe('team persistence respects pending-marker authority', () => {
     expect(await harness.tokenStore.getKeytarSessionToken(harness.envKey)).toBe(
       'fixture-other-team-session'
     )
-    expect(await harness.tokenStore.getSafeStorageSessionToken(harness.envKey)).toBe(
-      'fixture-unrelated-file-token'
-    )
+    expect(await harness.tokenStore.getSafeStorageSessionToken(harness.envKey)).toBeNull()
     const restarted = await createService()
     vi.mocked(restarted.authClient.getMe).mockResolvedValue(switchedMe)
     await expect(restarted.service.initialize()).resolves.toEqual({
@@ -364,6 +362,14 @@ describe('team persistence respects pending-marker authority', () => {
       me: switchedMe,
     })
     expect(restarted.authClient.getMe).toHaveBeenCalledWith('fixture-other-team-session')
+    expect(restarted.authClient.getMe).not.toHaveBeenCalledWith('fixture-unrelated-file-token')
+    vi.doMock('keytar', () => ({}))
+    const unavailable = await createService()
+    await expect(unavailable.service.initialize()).resolves.toEqual({
+      authenticated: false,
+      me: null,
+    })
+    expect(unavailable.authClient.getMe).not.toHaveBeenCalledWith('fixture-unrelated-file-token')
   })
 
   it('reports marker corruption and clears runtime authentication before team persistence', async () => {

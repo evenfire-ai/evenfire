@@ -1990,6 +1990,14 @@ export class AppService {
       return 'active-keytar'
     }
     try {
+      if (!this.tokenStore.isIsolatedDevelopmentStorage())
+        installedFallbackSnapshot = await this.tokenStore.snapshotSessionTokenFallbackFiles(
+          envKey,
+          {
+            legacyEnvKeys: getActiveLegacyEnvKeys(),
+            mayWrite: mayDispatch,
+          }
+        )
       if (source === null) {
         encryptedWriteAttempted = true
         if (this.tokenStore.isIsolatedDevelopmentStorage()) {
@@ -2025,6 +2033,19 @@ export class AppService {
             attemptedMarker = await this.bindVerifiedEncryptedCredentialIfMarkerMissing(
               token,
               envKey,
+              mayDispatch,
+              attempted => {
+                producer.declareMarker(attempted)
+                attemptedMarker = attempted
+              },
+              selectedSource
+            )
+          else if (installedFallbackSnapshot)
+            attemptedMarker = await this.bindVerifiedNativeCredentialAfterFallbackCleanup(
+              token,
+              envKey,
+              marker,
+              installedFallbackSnapshot,
               mayDispatch,
               attempted => {
                 producer.declareMarker(attempted)
@@ -2101,6 +2122,19 @@ export class AppService {
       } else if (!assertInspectedOwnership()) {
         throw new Error('Pending logout intent changed while team persistence was completing')
       }
+      if (writtenSource === 'active-keytar' && installedFallbackSnapshot)
+        attemptedMarker = await this.bindVerifiedNativeCredentialAfterFallbackCleanup(
+          token,
+          envKey,
+          attemptedMarker ?? marker,
+          installedFallbackSnapshot,
+          mayDispatch,
+          attempted => {
+            producer.declareMarker(attempted)
+            attemptedMarker = attempted
+          },
+          selectedSource
+        )
       await this.verifySessionTokenSource(selectedSource, envKey, mayDispatch)
       return {
         envKey,
@@ -3448,6 +3482,13 @@ export class AppService {
           return this.sessionToken
         }
         const mayWrite = mayContinueRestore
+        const fallbackBeforeRestore =
+          restorePlan.policy === 'normal'
+            ? await this.tokenStore.snapshotSessionTokenFallbackFiles(envKey, {
+                legacyEnvKeys,
+                mayWrite,
+              })
+            : undefined
         const storedToken =
           restorePlan.policy === 'safe-storage-only'
             ? await this.tokenStore.getSafeStorageSessionToken(envKey, {
@@ -3512,6 +3553,32 @@ export class AppService {
           (await this.tokenStore.getKeytarSessionToken(envKey)) !== storedToken
         ) {
           throw new Error('Migrated native credential could not be verified')
+        }
+        if (
+          storedToken &&
+          fallbackBeforeRestore &&
+          (producedSource === 'keytar' || selectedSource === 'keytar')
+        ) {
+          const bound = await this.bindVerifiedNativeCredentialAfterFallbackCleanup(
+            storedToken,
+            envKey,
+            restorePlan.pendingCleanupMarker,
+            fallbackBeforeRestore,
+            mayContinueRestore,
+            attempted => {
+              producer.declareMarker(attempted)
+              attemptedRestoreMarker = attempted
+            },
+            selected
+          )
+          if (bound) {
+            restorePlan = {
+              policy: 'keytar-active-only',
+              pendingCleanupMarker: bound,
+              retireMarkerAfterRestore: false,
+            }
+            attemptedRestoreMarker = null
+          }
         }
         requireRestoreSource()
         if (storedToken) await this.verifySessionTokenSource(selected, envKey, mayContinueRestore)
@@ -3657,16 +3724,23 @@ export class AppService {
         ownsCleanup
       )
       await this.verifySessionTokenSource(selected, envKey, ownsCleanup)
-      if (source === 'active-keytar') {
-        const encryptedToken = await this.tokenStore.getSafeStorageSessionToken(envKey)
-        if (encryptedToken !== null && encryptedToken !== expectedToken) return false
-      }
+      const snapshot =
+        options.fallbackSnapshot ??
+        (await this.tokenStore.snapshotSessionTokenFallbackFiles(envKey, {
+          legacyEnvKeys: getActiveLegacyEnvKeys(),
+          mayWrite: ownsCleanup,
+        }))
       const cleared = await this.tokenStore.clearKeytarSessionTokensStrictly(envKey, {
         legacyEnvKeys: getActiveLegacyEnvKeys(),
         preserveActiveEnvKey: source === 'active-keytar',
         mayWrite: ownsCleanup,
       })
       if (!(cleared.keytarAvailable || cleared.keytarDisabled) || !ownsCleanup()) return false
+      const retired = await this.tokenStore.retireSessionTokenFallbackFilesIfUnchanged(snapshot, {
+        mayWrite: ownsCleanup,
+        ...(source === 'safe-storage' ? { preserveActiveEncryptedToken: expectedToken } : {}),
+      })
+      if (!retired || !ownsCleanup()) return false
       await this.verifySessionTokenSource(selected, envKey, ownsCleanup)
       return true
     } catch (error) {
@@ -3675,6 +3749,55 @@ export class AppService {
         await this.failClosedForPendingLogout(error)
     }
     return false
+  }
+
+  private async bindVerifiedNativeCredentialAfterFallbackCleanup(
+    token: string,
+    envKey: string,
+    marker: PendingExternalLogoutMarker | null,
+    fallbackSnapshot: SessionTokenFallbackSnapshot,
+    mayContinue: () => boolean,
+    markerAttempted: (marker: PendingExternalLogoutMarker) => void,
+    selected?: VerifiedSessionTokenSource
+  ): Promise<PendingExternalLogoutMarker | null> {
+    if (!mayContinue()) throw new SessionTokenStorageSupersededBeforeWriteError()
+    selected ??= await this.readVerifiedSessionTokenSource(token, envKey, 'keytar', mayContinue)
+    await this.verifySessionTokenSource(selected, envKey, mayContinue)
+    const cleaned = await this.canRetireSourceCleanup(envKey, token, 'active-keytar', {
+      marker: marker ?? undefined,
+      mayContinue,
+      fallbackSnapshot,
+      selectedSource: selected,
+    })
+    await this.verifySessionTokenSource(selected, envKey, mayContinue)
+    if (
+      cleaned ||
+      (marker?.intent.intent === 'keytar-cleanup-pending' &&
+        marker.intent.credentialSource === 'active-keytar')
+    )
+      return marker
+    const revision = randomUUID()
+    const quarantine: PendingExternalLogoutMarker = {
+      intent: { intent: 'keytar-cleanup-pending', credentialSource: 'active-keytar' },
+      revision,
+    }
+    markerAttempted(quarantine)
+    const written = marker
+      ? recordPendingKeytarCleanupIfUnchanged(
+          this.getUserDataDirectory(),
+          envKey,
+          marker,
+          'active-keytar',
+          revision
+        )
+      : recordPendingKeytarCleanupIfMissing(
+          this.getUserDataDirectory(),
+          envKey,
+          'active-keytar',
+          revision
+        )
+    if (!written) throw new SessionTokenStorageSupersededBeforeWriteError()
+    return quarantine
   }
 
   private async retirePendingKeytarCleanupAfterRestore(
@@ -3883,6 +4006,7 @@ export class AppService {
       let attemptedCleanupMarker: PendingExternalLogoutMarker | null = null
       let completedMarker: PendingExternalLogoutMarker | null | undefined
       let dispatchInspectionError: unknown
+      let fallbackBeforePersistence: SessionTokenFallbackSnapshot | undefined
       let selected: VerifiedSessionTokenSource | undefined
       const publications = new Map<SessionTokenReadSource, VerifiedSessionTokenSource>()
       const priorPublications = new Map<SessionTokenReadSource, VerifiedSessionTokenSource>()
@@ -4005,6 +4129,16 @@ export class AppService {
           }
         }
         requireOwnedTransaction()
+        if (!this.tokenStore.isIsolatedDevelopmentStorage()) {
+          fallbackBeforePersistence = await this.tokenStore.snapshotSessionTokenFallbackFiles(
+            envKey,
+            {
+              legacyEnvKeys: getActiveLegacyEnvKeys(),
+              mayWrite: transactionMayWrite,
+            }
+          )
+          requireOwnedTransaction()
+        }
         if (pendingLogout.intent && pendingLogout.writeKeytar) {
           const writtenSource = await this.persistRequiredKeytarOrSafeStorage(
             result.token,
@@ -4095,16 +4229,18 @@ export class AppService {
           pendingLogout.intent &&
           retirePendingLogoutMarker &&
           (freshTokenUsesActiveKeytar || freshTokenUsesSafeStorageOnly) &&
-          !(await this.canRetireSourceCleanup(
-            envKey,
-            result.token,
-            freshTokenUsesActiveKeytar ? 'active-keytar' : 'safe-storage',
-            {
-              marker: pendingLogout.marker ?? undefined,
-              mayContinue: transactionOwned,
-              selectedSource: selected,
-            }
-          ))
+          (!fallbackBeforePersistence ||
+            !(await this.canRetireSourceCleanup(
+              envKey,
+              result.token,
+              freshTokenUsesActiveKeytar ? 'active-keytar' : 'safe-storage',
+              {
+                marker: pendingLogout.marker ?? undefined,
+                mayContinue: transactionOwned,
+                fallbackSnapshot: fallbackBeforePersistence,
+                selectedSource: selected,
+              }
+            )))
         ) {
           retirePendingLogoutMarker = false
           credentialSource = freshTokenUsesActiveKeytar ? 'active-keytar' : 'safe-storage'
@@ -4156,7 +4292,20 @@ export class AppService {
                 },
                 selected
               )
-            : null
+            : freshTokenUsesActiveKeytar && fallbackBeforePersistence
+              ? await this.bindVerifiedNativeCredentialAfterFallbackCleanup(
+                  result.token,
+                  envKey,
+                  null,
+                  fallbackBeforePersistence,
+                  transactionMayWrite,
+                  attempted => {
+                    producer.declareMarker(attempted)
+                    attemptedCleanupMarker = attempted
+                  },
+                  selected
+                )
+              : null
         }
         requireOwnedTransaction()
         await this.verifySessionTokenSource(selected, envKey, transactionMayWrite)
