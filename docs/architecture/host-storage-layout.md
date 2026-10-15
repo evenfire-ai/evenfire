@@ -183,7 +183,7 @@ forced by a deploy.
 
 ## Rollback
 
-- Rolling HCC back is safe for stateful and stateless Hosts, with the two
+- Rolling HCC back is safe for stateful and stateless Hosts, with the
   exceptions below (risk R6 of #825). The previous `workspace-layout-init`
   re-splits stateless trees, and `workspace-layout-merge` merges them again
   on roll-forward.
@@ -210,6 +210,22 @@ forced by a deploy.
   `Init:Error` with the database and its journals on the PVC. To recover,
   move the remaining `workspace/state.db-*` journals to the root from a
   helper Pod.
+- A rollback over a merge cut between the journals and the main database
+  (journals already at the root, `state/state.db` not yet moved) loses the
+  journals' pairing. The previous init sees a root SQLite source next to
+  `state/state.db`, renames that main file to `state/state.db.pre-<ts>.bak`,
+  and then moves the root journals into `state/` without their main file. The
+  backup holds the database only up to its last checkpoint, and the previous
+  mcp-host creates a new `state/state.db` next to a WAL that belongs to the
+  backup. A Pod in this window is Pending with the merge init still running,
+  not in `Init:Error`, so the rule below names it explicitly.
+- After a rollback, the previous init moves every root entry into
+  `workspace/`, including `state.db*.pre-<ts>.bak` backups, and moves back to
+  `state/` only the exact names `state.db`, `state.db-wal` and `state.db-shm`.
+  The backups stay under `workspace/`, the agent's workspace on a stateless
+  Host, where the previous mcp-host (which protects only those three exact
+  names) lets agent file tools read them. Move them into `state/` from a helper
+  Pod after the rollback, or roll forward.
 - A merged root that holds a symlink (for example one an agent created under
   `workspace/`, which the merge moved to the root) blocks the previous init:
   it creates empty `state/` and `workspace/`, then exits 1 with
@@ -222,7 +238,8 @@ forced by a deploy.
   `deploy-clerum-prod.yml:643-670`). This is safe for a Host in `Init:Error`,
   because every refusal exits before the first move.
 - For an operator-initiated rollback: do not roll back while any Host is in
-  `Init:Error` in `workspace-layout-merge`, and do not change a Host's
+  `Init:Error` in `workspace-layout-merge` or any Host Pod is still running
+  that init (Pending, init not finished), and do not change a Host's
   lifecycle while rolled back.
 - Never roll back the Host image alone; HCC's Deployment carries it. The
   gcp-dev and gcp-prod overlays set both `CONTEXT_MAPPER_HOST_IMAGE` and
