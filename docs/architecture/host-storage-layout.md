@@ -14,14 +14,14 @@ durability, as before #825: a stateless Host always writes with
 HCC renders the same storage for every Host Deployment
 (`host-context-controller/src/hostReconciler.ts`):
 
-| Item                  | Value                                                                  |
-| --------------------- | ---------------------------------------------------------------------- |
-| Volume mount          | the PVC `<host>-workspace` root at `workspacePath`, no `subPath`       |
-| `workspacePath`       | `/workspace`; `/config/workspace` for a `spec.desktop` Host            |
-| Conversation database | `<workspacePath>/state.db` (with `-wal` and `-shm`)                    |
-| Store env             | `CLERUM_SESSION_STORE=sqlite`, `CLERUM_SESSION_DB_DIR=<workspacePath>` |
+| Item                  | Value                                                                                            |
+| --------------------- | ------------------------------------------------------------------------------------------------ |
+| Volume mount          | the PVC `<host>-workspace` root at `workspacePath`, no `subPath`                                 |
+| `workspacePath`       | `/workspace`; `/config/workspace` for a `spec.desktop` Host                                      |
+| Conversation database | `<workspacePath>/state.db` (with `-wal` and `-shm`)                                              |
+| Store env             | `CLERUM_SESSION_STORE=sqlite`, `CLERUM_SESSION_DB_DIR=<workspacePath>`                           |
 | Init container        | `workspace-layout-merge`, while `CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE` is enabled (the default) |
-| Deployment strategy   | `Recreate`                                                             |
+| Deployment strategy   | `Recreate`                                                                                       |
 
 `Recreate` stops the old Pod before the new one starts. A rolling update can
 run both Pods on the same node at once, and a `ReadWriteOnce` PVC does not
@@ -87,12 +87,12 @@ keep them; the database and its journals are already at the root.
 stderr and exits 1 before the first move, leaving the tree unchanged. The Pod
 stays in `Init:Error`.
 
-| Case                                                                                                                          | Line contains                                                                                                |
-| ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Case                                                                                                                                                                                                                                                                       | Line contains                                                                                                                                                                                                                                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | F1: `workspace` or the PVC root is a symlink, not a directory, or escapes the root; a real `state/` or a present `workspace/` cannot be listed and searched; a `state.db*` entry is a symlink or not a regular file; a directory that decides a collision cannot be listed | `directory is a symlink`, `is not a directory`, `escapes the workspace PVC root`, `state directory is not readable and searchable`, `workspace directory is not readable and searchable`, `SQLite file is a symlink`, `SQLite file is not a regular file`, `cannot list directory` |
-| F2: more than one live database family across the root, `state/` and `workspace/`                                             | `more than one live SQLite database`                                                                         |
-| F3: a name to move already exists at the root, or under both `state/` and `workspace/`; `workspace/lost+found` exists         | `destination exists`, `exists under both state/ and workspace/`, `lost+found would remain`                   |
-| F4: the PVC root, `state/` or `workspace/` is not writable by the container uid                                               | `not writable by uid`                                                                                        |
+| F2: more than one live database family across the root, `state/` and `workspace/`                                                                                                                                                                                          | `more than one live SQLite database`                                                                                                                                                                                                                                               |
+| F3: a name to move already exists at the root, or under both `state/` and `workspace/`; `workspace/lost+found` exists                                                                                                                                                      | `destination exists`, `exists under both state/ and workspace/`, `lost+found would remain`                                                                                                                                                                                         |
+| F4: the PVC root, `state/`, `workspace/`, or a directory to be moved out of them is not writable by the container uid                                                                                                                                                      | `not writable by uid`                                                                                                                                                                                                                                                              |
 
 The PVC root checks of F1 run on every start, before the signature check.
 

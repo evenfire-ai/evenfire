@@ -46,7 +46,8 @@ function shellSingleQuote(value: string): string {
  *   F3 a name to move already exists at the root, or exists under both
  *      `state/` and `workspace/` (an empty source directory is removed
  *      instead), or `workspace/lost+found` would keep `workspace/` alive;
- *   F4 the root, `state/` or `workspace/` is not writable.
+ *   F4 the root, `state/`, `workspace/`, or a directory to be moved out of
+ *      them is not writable (renaming a directory rewrites its `..`).
  * Moves: `workspace/*`, then `state/*` except `state.db`, then
  * `state/state.db` last, so a stopped merge keeps the signature and the
  * next start finishes it. Symlinks are renamed, never followed. The script
@@ -171,6 +172,14 @@ done
 if [ "$workspace_present" -eq 1 ]; then
   [ -w "$root/workspace" ] || fail_merge "not writable by uid $(id -u): $root/workspace"
 fi
+# Renaming a directory to a new parent rewrites its .. entry, which needs
+# write permission on the directory itself.
+for entry in "$root/workspace"/* "$root/workspace"/.[!.]* "$root/workspace"/..?* \\
+  "$root/state"/* "$root/state"/.[!.]* "$root/state"/..?*; do
+  [ -d "$entry" ] && [ ! -L "$entry" ] || continue
+  ! present "$root/$(basename "$entry")" || continue
+  [ -w "$entry" ] || fail_merge "not writable by uid $(id -u): $entry"
+done
 
 move_to_root() {
   entry="$1"

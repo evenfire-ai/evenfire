@@ -398,6 +398,57 @@ describe('workspace layout merge', () => {
     expect(merge(root).stderr).toContain(`destination exists: ${root}/cache`)
   }, 15_000)
 
+  // Renaming a directory to a new parent rewrites its `..` entry, so it needs
+  // write permission on that directory. Without this check the merge would
+  // stop part-way with `mv: Permission denied` on every start.
+  it.each(['workspace', 'state'])(
+    'refuses before the first move when a directory under %s/ is not writable (F4)',
+    source => {
+      const root = splitRoot()
+      const locked = join(root, source, 'readonly')
+      mkdirSync(locked)
+      writeFileSync(join(locked, 'entry'), 'kept')
+      chmodSync(locked, 0o555)
+      const before = snapshot(root)
+
+      const refused = merge(root)
+
+      expect(refused).toEqual({
+        status: 1,
+        stderr: `workspace layout merge refused: not writable by uid ${process.getuid!()}: ${locked}\n`,
+      })
+      expect(snapshot(root)).toEqual(before)
+      // Witness: once writable, the same tree merges and the directory moves.
+      chmodSync(locked, 0o755)
+      expect(merge(root)).toEqual({ status: 0, stderr: '' })
+      expect(readFileSync(join(root, 'readonly', 'entry'), 'utf8')).toBe('kept')
+      expect(messageCount(join(root, 'state.db'))).toEqual({ rows: ROWS, check: 'ok' })
+    },
+    15_000
+  )
+
+  // A directory moved whole is renamed, never listed: an unlistable one with a
+  // free name moves intact. Refusing it would let an agent's chmod stop the Host.
+  it.each(['workspace', 'state'])(
+    'moves an unlistable directory under %s/ whose name is free at the root',
+    source => {
+      const root = splitRoot()
+      const hidden = join(root, source, 'hidden')
+      mkdirSync(hidden)
+      writeFileSync(join(hidden, 'entry'), 'kept')
+      chmodSync(hidden, 0o333)
+
+      const merged = merge(root)
+
+      chmodSync(join(root, 'hidden'), 0o755)
+      expect(merged).toEqual({ status: 0, stderr: '' })
+      expect(readFileSync(join(root, 'hidden', 'entry'), 'utf8')).toBe('kept')
+      expect(readdirSync(root)).not.toContain(source)
+      expect(messageCount(join(root, 'state.db'))).toEqual({ rows: ROWS, check: 'ok' })
+    },
+    15_000
+  )
+
   it('refuses a journal present both at the root and under state/ in a resumed merge', () => {
     const root = splitRoot()
     // A merge stopped after the journals moved, with a second copy of one.
