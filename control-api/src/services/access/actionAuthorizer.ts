@@ -207,15 +207,16 @@ export async function authorizeActionV2(
         preparedTarget,
         authorization: result,
       })
-      const mcpServerBinding =
-        input.operationId === 'mcp.invoke'
-          ? result.operationalBindings.find(
-              binding =>
-                binding.resourceType === 'mcp_server' &&
-                binding.logicalId === input.resource.logicalId
-            )
-          : undefined
-      if (input.operationId === 'mcp.invoke' && !mcpServerBinding) return unavailable()
+      const requiresMcpServerBinding =
+        input.operationId === 'mcp.invoke' || input.operationId === 'mcp.tools.read'
+      const mcpServerBinding = requiresMcpServerBinding
+        ? result.operationalBindings.find(
+            binding =>
+              binding.resourceType === 'mcp_server' &&
+              binding.logicalId === input.resource.logicalId
+          )
+        : undefined
+      if (requiresMcpServerBinding && !mcpServerBinding) return unavailable()
       return Object.freeze({
         status: 'allowed',
         context,
