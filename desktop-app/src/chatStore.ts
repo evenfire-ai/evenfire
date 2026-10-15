@@ -1932,6 +1932,16 @@ export class ChatStore {
     }
     let artifactsRemoved = false
     try {
+      // Every catalog read starts a retry pass from its own snapshot of the
+      // queue, so overlapping passes reach the same tombstone. They are
+      // serialized per chat; the later one finds it already dequeued and stops.
+      const index = await this.getIndex(agentRef)
+      const stillPending = (index.pendingChatCleanup ?? []).some(
+        existing =>
+          existing.chatId === tombstone.chatId &&
+          sameChatDeletionIdentity(existing.authorityScope, tombstone.authorityScope)
+      )
+      if (!stillPending) return true
       artifactsRemoved = await this.removeChatArtifacts(
         agentRef,
         tombstone.chatId,

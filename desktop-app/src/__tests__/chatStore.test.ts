@@ -1054,16 +1054,17 @@ describe('pending cleanup retry per agent', () => {
     const reads = recordIndexReads()
 
     await store.retryPendingDeleteCleanups(TEAM_A_SCOPE, 'agent-1')
-    // The sweep reads each agent's index to find its queue, and once more to
+    // The sweep reads each agent's index to find its queue, again to confirm the
+    // entry is still queued before removing its artifacts, and once more to
     // drop the finished entry.
-    expect(reads).toHaveLength(2 * AGENTS.length)
+    expect(reads).toHaveLength(3 * AGENTS.length)
     const afterSweep = reads.length
     for (const agentRef of AGENTS.slice(1)) {
       await store.retryPendingDeleteCleanups(TEAM_A_SCOPE, agentRef)
     }
 
     expect(reads.slice(afterSweep)).toEqual(AGENTS.slice(1).map(indexPathOf))
-    expect(reads).toHaveLength(3 * AGENTS.length - 1)
+    expect(reads).toHaveLength(4 * AGENTS.length - 1)
     vi.restoreAllMocks()
     for (const agentRef of AGENTS) expect(await pendingOf(agentRef)).toEqual([])
   })
@@ -1086,8 +1087,13 @@ describe('pending cleanup retry per agent', () => {
     vi.restoreAllMocks()
     expect(await pendingOf('agent-3')).toEqual([])
     await expect(fs.access(join(tempDir, 'agent-3', 'chats', 'late-delete'))).rejects.toThrow()
-    // Only agent-3 was touched: read to find its queue, then to drop the entry.
-    expect(retryReads).toEqual([indexPathOf('agent-3'), indexPathOf('agent-3')])
+    // Only agent-3 was touched: read to find its queue, to confirm the entry is
+    // still queued, then to drop the entry.
+    expect(retryReads).toEqual([
+      indexPathOf('agent-3'),
+      indexPathOf('agent-3'),
+      indexPathOf('agent-3'),
+    ])
   })
 
   it('walks every agent again after the next bind', async () => {

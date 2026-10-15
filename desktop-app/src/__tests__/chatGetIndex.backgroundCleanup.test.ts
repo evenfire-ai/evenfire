@@ -133,4 +133,63 @@ describe('runChatGetIndex background artifact cleanup', () => {
       expect(visible.map(chat => chat.id)).toEqual(['kept-chat'])
     })
   })
+
+  it('finishes a pending cleanup once when two reads overlap', async () => {
+    await queuePendingCleanup()
+    let release!: () => void
+    const blocked = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const remove = fs.rm.bind(fs)
+    let artifactRemovals = 0
+    vi.spyOn(fs, 'rm').mockImplementation(async (...args) => {
+      if (String(args[0]) === artifactPath) {
+        artifactRemovals += 1
+        await blocked
+      }
+      return remove(...args)
+    })
+    const serializeChat = vi.spyOn(
+      store as unknown as { serializeChat: (...args: unknown[]) => Promise<unknown> },
+      'serializeChat'
+    )
+    const saveIndex = vi.spyOn(
+      store as unknown as { saveIndex: (...args: unknown[]) => Promise<void> },
+      'saveIndex'
+    )
+    const retry = vi.spyOn(store, 'retryPendingDeleteCleanups')
+    const warnCleanupFailure = vi.fn()
+    const deps = {
+      store,
+      getChatDeletionFenceAuthority: () => ({ authorityScope }),
+      warnCleanupFailure,
+    }
+
+    const reads = [runChatGetIndex(deps, agentRef), runChatGetIndex(deps, agentRef)]
+    try {
+      // Both passes snapshot the queue with the tombstone in it: the first is
+      // blocked removing the artifact, the second waits behind it for the chat.
+      await vi.waitFor(() => {
+        expect(artifactRemovals).toBe(1)
+        expect(serializeChat).toHaveBeenCalledTimes(2)
+      })
+      for (const index of await Promise.all(reads)) {
+        expect(index.pendingChatCleanup).toEqual([tombstone])
+      }
+    } finally {
+      release()
+      await Promise.allSettled([...reads, ...retry.mock.results.map(result => result.value)])
+    }
+
+    expect(retry).toHaveBeenCalledTimes(2)
+    // Liveness: the cleanup ran to completion and the kept chat is untouched.
+    await expect(fs.access(artifactPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    const finishedIndex = await store.getIndex(agentRef)
+    expect(finishedIndex.pendingChatCleanup).toEqual([])
+    expect(finishedIndex.chats.map(chat => chat.id)).toEqual(['kept-chat'])
+    // The second pass found the tombstone dequeued: no second removal or save.
+    expect(artifactRemovals).toBe(1)
+    expect(saveIndex).toHaveBeenCalledTimes(1)
+    expect(warnCleanupFailure).not.toHaveBeenCalled()
+  })
 })
