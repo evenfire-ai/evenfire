@@ -579,6 +579,10 @@ export function useAgentChatController({
     activeChatSwitchKeyRef.current = null
     activeChatLocalPageRequestRef.current = null
     cancelOlderMessagesLoad()
+    // Invariant: the ref is cleared with the state, not by the passive sync
+    // effect. Merges read the ref, and a merge that runs before that effect
+    // would otherwise build on the withdrawn transcript. Under `act` the effect
+    // always runs first, so no unit test can observe this line.
     chatMessagesRef.current = []
     setChatMessages([])
     setHasOlderMessages(false)

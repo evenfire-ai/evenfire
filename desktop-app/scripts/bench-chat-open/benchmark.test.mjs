@@ -165,10 +165,8 @@ test('HEAD delegates to the compiled export and settle waits for the cleanups it
   assert.deepEqual(calls, ['export', 'cleanup:synthetic', 'index:synthetic', 'cleanup:end'])
 })
 
-test('HEAD drives the real chat:getIndex handler through the adapter deps', async () => {
-  // The stub above witnesses delegation; this runs the shipped handler against
-  // the adapter's untyped deps, so a renamed dependency fails here instead of
-  // surfacing only as a cleanup warning in a benchmark run.
+/** The shipped `runChatGetIndex`, transpiled from source. */
+async function realRunChatGetIndex() {
   const source = await fs.readFile(
     new URL('../../src/chatGetIndexHandler.ts', import.meta.url),
     'utf8'
@@ -179,6 +177,14 @@ test('HEAD drives the real chat:getIndex handler through the adapter deps', asyn
   const compiled = { exports: {} }
   new Function('module', 'exports', outputText)(compiled, compiled.exports)
   assert.equal(typeof compiled.exports.runChatGetIndex, 'function')
+  return compiled.exports.runChatGetIndex
+}
+
+test('HEAD drives the real chat:getIndex handler through the adapter deps', async () => {
+  // The stub above witnesses delegation; this runs the shipped handler against
+  // the adapter's untyped deps, so a renamed dependency fails here instead of
+  // surfacing only as a cleanup warning in a benchmark run.
+  const runChatGetIndex = await realRunChatGetIndex()
 
   const calls = []
   let release
@@ -201,7 +207,7 @@ test('HEAD drives the real chat:getIndex handler through the adapter deps', asyn
   const context = head.context(store, {
     runChatGetIndex: (deps, agentRef) => {
       calls.push('export')
-      return compiled.exports.runChatGetIndex(deps, agentRef)
+      return runChatGetIndex(deps, agentRef)
     },
   })
 
@@ -221,4 +227,26 @@ test('HEAD drives the real chat:getIndex handler through the adapter deps', asyn
   await context.settle()
   assert.deepEqual(calls, ['export', 'cleanup:synthetic', 'index:synthetic', 'cleanup:end'])
   assert.equal(context.cleanupErrors, 0)
+})
+
+test('HEAD counts a rejected cleanup from the real handler and still returns the index', async () => {
+  const runChatGetIndex = await realRunChatGetIndex()
+  const calls = []
+  const result = { chats: [1] }
+  const store = {
+    async retryPendingDeleteCleanups(_scope, agentRef) {
+      calls.push(`cleanup:${agentRef}`)
+      throw new Error('Synthetic cleanup failure')
+    },
+    async getIndex(agentRef) {
+      calls.push(`index:${agentRef}`)
+      return result
+    },
+  }
+  const context = head.context(store, { runChatGetIndex })
+  assert.equal(await context.getIndex('synthetic'), result)
+  await context.settle()
+  // Witness: the handler started the cleanup that rejected.
+  assert.deepEqual(calls, ['cleanup:synthetic', 'index:synthetic'])
+  assert.equal(context.cleanupErrors, 1)
 })
