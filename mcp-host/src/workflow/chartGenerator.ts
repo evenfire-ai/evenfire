@@ -40,6 +40,7 @@ import { drawnTexts, recordDrawnText } from './drawnText'
 import { PNG_BASE_PPM } from './embeddedImages'
 import { CHART_FONT_STACK, ensureFontsReady, sanitizeForFont } from './fonts'
 import { choose } from './ownEntry'
+import { datasetKind, seriesDefaults } from './seriesPaint'
 import type { InternalToolResult } from './types'
 
 // Register Chart.js controllers/scales/elements/plugins once. Chart.js v4 ships
@@ -57,9 +58,6 @@ function prepareChartFonts(): void {
   Chart.defaults.font.family = CHART_FONT_STACK
   Chart.defaults.color = '#0f172a'
 }
-
-/** Types whose series overlap, so their fill has to let the one below show. */
-const TRANSLUCENT_FILL_TYPES = new Set(['line', 'area', 'radar'])
 
 /** Widest a single bar may be drawn, in nominal pixels. */
 const MAX_BAR_THICKNESS = 120
@@ -255,20 +253,28 @@ function applyThemePalette(
       }
     } else {
       const color = theme.palette[idx % theme.palette.length]
-      // Translucent wherever series are drawn over one another — a solid
-      // radar fill hides every series behind the first.
-      const fill = TRANSLUCENT_FILL_TYPES.has(chartType) ? `${color}33` : color
-      if (!out.borderColor) out.borderColor = color
-      if (!out.backgroundColor) out.backgroundColor = fill
-      // A value with no color of its own in a list takes the series color.
-      if (Array.isArray(out.borderColor)) out.borderColor = out.borderColor.map(c => c ?? color)
+      // Shared with the dashboard (seriesPaint.ts); `${color}33` is the
+      // palette color at TINT_ALPHA.
+      const paint = seriesDefaults(datasetKind(chartType, idx), ds, {
+        color,
+        tint: `${color}33`,
+      })
+      if (!out.borderColor) out.borderColor = paint.borderColor
+      if (!out.backgroundColor) out.backgroundColor = paint.backgroundColor
+      // A value with no color of its own in a list takes the series default.
+      if (Array.isArray(out.borderColor)) {
+        out.borderColor = out.borderColor.map(c => c ?? paint.borderColor)
+      }
       if (Array.isArray(out.backgroundColor)) {
-        out.backgroundColor = out.backgroundColor.map(c => c ?? fill)
+        out.backgroundColor = out.backgroundColor.map(c => c ?? paint.backgroundColor)
       }
       if (chartType === 'area' && out.fill === undefined) {
         out.fill = true
       }
       const point = out as unknown as Record<string, unknown>
+      if (paint.pointBackgroundColor && point.pointBackgroundColor === undefined) {
+        point.pointBackgroundColor = paint.pointBackgroundColor
+      }
       const points = Array.isArray(ds.data) ? ds.data.length : 0
       if (chartType === 'scatter') {
         if (point.pointRadius === undefined) point.pointRadius = pointRadius(6, 100, points)
@@ -276,7 +282,6 @@ function applyThemePalette(
         // A value with a gap on both sides gets no segment, so its point is
         // its only mark.
         if (point.pointRadius === undefined) point.pointRadius = pointRadius(4, 60, points)
-        if (point.pointBackgroundColor === undefined) point.pointBackgroundColor = color
       }
     }
     return out
@@ -646,6 +651,23 @@ function crc32(buf: Buffer): number {
   return (crc ^ 0xffffffff) >>> 0
 }
 
+/**
+ * The datasets as Chart.js draws them: the theme's colors applied, then the
+ * composed types lowered. Also read by the check that the PNG and the
+ * dashboard paint a chart alike.
+ */
+export function paintedDatasets(
+  chartTypeRaw: string,
+  datasets: ChartDataset[],
+  labels: string[] | undefined,
+  theme: ChartTheme,
+  args: Record<string, unknown>,
+  warnings: string[]
+): { datasets: ChartDataset[]; resolved: ResolvedChartType } {
+  const themed = applyThemePalette(datasets, theme, chartTypeRaw, warnings)
+  return { datasets: themed, resolved: resolveChartType(chartTypeRaw, themed, labels, theme, args) }
+}
+
 export async function runGenerateChart(
   args: Record<string, unknown>,
   outputDir: string
@@ -696,8 +718,14 @@ export async function runGenerateChart(
       ...(ds.label ? { label: sanitizeForFont(ds.label) } : {}),
     })) as ChartDataset[]
 
-    const themedDatasets = applyThemePalette(datasets, theme, chartTypeRaw, warnings)
-    const resolved = resolveChartType(chartTypeRaw, themedDatasets, labels, theme, args)
+    const { datasets: themedDatasets, resolved } = paintedDatasets(
+      chartTypeRaw,
+      datasets,
+      labels,
+      theme,
+      args,
+      warnings
+    )
     const chartType = resolved.chartType
     if (resolved.labels !== undefined) labels = resolved.labels
     warnings.push(...resolved.notes)

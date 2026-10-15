@@ -8,13 +8,13 @@ import { ChartDataError, coerceNumber, normalizeChartData } from './chartData'
 import type { NormalizedDataset, NormalizedPoint } from './chartData'
 import { escapeHtml } from './dashboardHtml'
 import { DASHBOARD_CHART_TYPES } from './dashboardVocabulary'
+import { TINT_ALPHA, seriesDefaults } from './seriesPaint'
 
 export { DASHBOARD_CHART_TYPES } from './dashboardVocabulary'
 
 const KNOWN_TYPES = new Set<string>(DASHBOARD_CHART_TYPES)
 const SLICE_TYPES = new Set(['pie', 'doughnut', 'polarArea'])
 const XY_TYPES = new Set(['scatter', 'bubble'])
-const TRANSLUCENT_TYPES = new Set(['line', 'area', 'stackedArea', 'radar', 'scatter', 'bubble'])
 
 /**
  * What the page script needs to draw one chart. Colors are left as tokens
@@ -91,16 +91,16 @@ function seriesColors(ds: NormalizedDataset, index: number, type: string): Recor
     }
   }
   const { color, dash } = paletteColor(index)
-  const border = ds.borderColor ?? color
+  // Shared with the PNG renderer (seriesPaint.ts).
+  const paint = seriesDefaults(type, ds, { color, tint: paletteColor(index, TINT_ALPHA).color })
   const dashed = dash && ds.borderColor === undefined ? { borderDash: dash } : {}
-  if (!TRANSLUCENT_TYPES.has(type)) {
-    return { borderColor: border, backgroundColor: ds.backgroundColor ?? color, ...dashed }
-  }
-  // Points take the fill color by default, which here is the faint area tint.
+  // A value with no color of its own in a list takes the series default.
+  const filled = (value: NormalizedDataset['borderColor'], fallback: string) =>
+    Array.isArray(value) ? value.map(c => c ?? fallback) : (value ?? fallback)
   return {
-    borderColor: border,
-    backgroundColor: ds.backgroundColor ?? paletteColor(index, 0.2).color,
-    pointBackgroundColor: border,
+    borderColor: filled(ds.borderColor, paint.borderColor),
+    backgroundColor: filled(ds.backgroundColor, paint.backgroundColor),
+    ...(paint.pointBackgroundColor ? { pointBackgroundColor: paint.pointBackgroundColor } : {}),
     ...dashed,
   }
 }
@@ -172,9 +172,10 @@ function checkColors(
     }
     out[key] = value.map((v, j) => {
       if (isCssColor(v)) return v
-      // A value placed by its label with no color of its own takes the palette's.
       if (v !== undefined) bad.push({ at: `${at}[${j}]`, value: v })
-      return paletteColor(SLICE_TYPES.has(type) ? j : index).color
+      // A slice with no usable color takes its palette color; a value of a
+      // series takes the series default (seriesColors).
+      return SLICE_TYPES.has(type) ? paletteColor(j).color : undefined
     })
   }
   return out
@@ -408,7 +409,7 @@ export interface PreparedChart {
 }
 
 /** Validate one chart spec found at `where` in the arguments. */
-function prepareDashboardChart(raw: unknown, where: string): PreparedChart {
+export function prepareDashboardChart(raw: unknown, where: string): PreparedChart {
   if (!isRecord(raw)) {
     return {
       warnings: [],
