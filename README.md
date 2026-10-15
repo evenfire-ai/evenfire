@@ -19,12 +19,12 @@
 <p align="center">
   <a href="LICENSE"><img alt="License: MPL-2.0" src="https://img.shields.io/badge/License-MPL--2.0-brightgreen.svg"></a>
   <a href="https://github.com/evenfire-ai/evenfire/actions"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/evenfire-ai/evenfire/ci-public.yml?branch=main&label=CI"></a>
-  <a href="https://github.com/evenfire-ai/evenfire/releases"><img alt="GitHub release" src="https://img.shields.io/github/v/release/evenfire-ai/evenfire?sort=semver"></a>
+  <a href="https://github.com/evenfire-ai/evenfire/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/evenfire-ai/evenfire?sort=semver"></a>
   <img alt="Status: Beta" src="https://img.shields.io/badge/status-beta-blue.svg">
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick start</a> · <a href="#what-is-evenfire">What is Evenfire</a> · <a href="#the-platform">The platform</a> · <a href="#why-evenfire">Why</a> · <a href="#security-model">Security</a> · <a href="#supported-llm-providers">Providers</a> · <a href="#deploying-to-a-remote-cluster">Deploy</a> · <a href="docs/README.md">Docs</a> · <a href="#status">Status</a> · <a href="#community-and-license">License</a>
+  <a href="#quick-start">Quick start</a> · <a href="#download">Download</a> · <a href="#what-is-evenfire">What is Evenfire</a> · <a href="#the-platform">The platform</a> · <a href="#why-evenfire">Why</a> · <a href="#security-model">Security</a> · <a href="#supported-llm-providers">Providers</a> · <a href="#deploying-to-a-remote-cluster">Deploy</a> · <a href="docs/README.md">Docs</a> · <a href="#status">Status</a> · <a href="#community-and-license">License</a>
 </p>
 
 <p align="center">
@@ -68,6 +68,24 @@ The full walkthrough (prerequisites, login, and the pure-API path) is in
 [Get started on minikube](docs/get-started/minikube.md).
 
 Evenfire is meant to be run on a remote cluster — see [Deploying to a remote cluster](#deploying-to-a-remote-cluster).
+
+---
+
+## Download
+
+The **Desktop App** ships with every release. These links always fetch the
+build from the [latest release](https://github.com/evenfire-ai/evenfire/releases/latest),
+so they never go stale:
+
+| Platform | ARM64                                                                                                            | x64                                                                                                      |
+| -------- | ---------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| macOS    | [Apple silicon](https://github.com/evenfire-ai/evenfire/releases/latest/download/evenfire-desktop-mac-arm64.zip) | [Intel](https://github.com/evenfire-ai/evenfire/releases/latest/download/evenfire-desktop-mac-x64.zip)   |
+| Windows  | [ARM64](https://github.com/evenfire-ai/evenfire/releases/latest/download/evenfire-desktop-windows-arm64.zip)     | [x64](https://github.com/evenfire-ai/evenfire/releases/latest/download/evenfire-desktop-windows-x64.zip) |
+| Linux    | [ARM64](https://github.com/evenfire-ai/evenfire/releases/latest/download/evenfire-desktop-linux-arm64.zip)       | [x64](https://github.com/evenfire-ai/evenfire/releases/latest/download/evenfire-desktop-linux-x64.zip)   |
+
+The Desktop App signs in to an Evenfire platform: run one with the
+[quick start](#quick-start) or [deploy it to a remote cluster](#deploying-to-a-remote-cluster).
+Need an older version? Every build is on the [releases page](https://github.com/evenfire-ai/evenfire/releases).
 
 ---
 
@@ -208,6 +226,10 @@ kustomize [`deploy/overlays`](deploy/overlays/) — the shipped `minikube` overl
 is the reference to copy and adapt for your own cluster. Then follow the
 [production deployment guide](docs/deploy/production.md) for the rollout order,
 signing/JWT keys, secrets, and the security non-negotiables.
+
+To pin the platform images by digest, every release also ships
+[`release-images.json`](https://github.com/evenfire-ai/evenfire/releases/latest/download/release-images.json): the digest of each
+`ghcr.io/evenfire-ai/*` image promoted for the latest release.
 
 ---
 
