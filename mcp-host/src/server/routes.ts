@@ -10,11 +10,16 @@ import { ConversationError, ConversationErrorCode } from '../core/errors'
 import type { ApprovalDecision } from '../core/extensions/approvalTypes'
 import { isTraceContextV1 } from '../core/types'
 import { logger } from '../logger'
-import { authorityBindingFromTrustedEdge } from '../runtime/actionAuthority'
+import {
+  RuntimeActionAuthorityError,
+  assertRuntimeActionCurrent,
+  authorityBindingFromTrustedEdge,
+} from '../runtime/actionAuthority'
 import { getRuntimeCallerContext, runtimeActionTargetMatches } from './edgeRuntimeAuth'
 import { badRequest, json } from './httpUtils'
 import type {
   ActivitySnapshotHandler,
+  ActivityStreamCheckpointHandler,
   ActivityStreamHandler,
   ApprovalHandler,
   CompactionHandler,
@@ -48,6 +53,8 @@ import type {
 import type { RuntimeCallerContext } from './types'
 import { decodeSessionsCursor, sessionsCursorScope } from './wireProjections'
 
+const MAX_PENDING_ACTIVITY_STREAM_EVENTS = 64
+
 export type RouteHandlers = {
   directServiceAdmission?: () => { allowed: true } | { allowed: false; retryAfterSeconds: number }
   afterDirectMessageAdmission?: (req: Request, res: Response) => boolean
@@ -64,6 +71,7 @@ export type RouteHandlers = {
   telegramWorkflowApprovalVerificationHandler: TelegramWorkflowApprovalVerificationHandler | null
   activitySnapshotHandler: ActivitySnapshotHandler | null
   activityStreamHandler: ActivityStreamHandler | null
+  activityStreamCheckpointHandler?: ActivityStreamCheckpointHandler | null
   taskResultHandler: TaskResultHandler | null
   cronResultsHandler: CronResultsHandler | null
   cronResultAckHandler: CronResultAckHandler | null
@@ -578,15 +586,24 @@ export async function handleActivityStreamRoute(
   handlers: RouteHandlers
 ): Promise<void> {
   const caller = getRuntimeCallerContext(req)
-  const visibility =
-    caller?.actionContextV2?.operationId === 'host.activity.read_all' ? 'host_all' : 'caller_path'
+  const actionContext = caller?.actionContextV2
+  const operationId =
+    actionContext?.operationId === 'host.activity.read' ||
+    actionContext?.operationId === 'host.activity.read_all'
+      ? actionContext.operationId
+      : null
+  if (actionContext && !operationId) {
+    json(res, 403, { error: 'Activity stream requires an explicit activity operation' })
+    return
+  }
+  const visibility = operationId === 'host.activity.read_all' ? 'host_all' : 'caller_path'
   if (req.query.visibility === 'host_all' && visibility !== 'host_all') {
     json(res, 403, { error: 'Host-wide activity requires explicit current path authority' })
     return
   }
   if (
     rejectV2TargetMismatch(req, res, {
-      hostRef: caller?.actionContextV2?.target?.hostRef,
+      hostRef: actionContext?.target?.hostRef,
       visibility,
     })
   ) {
@@ -597,43 +614,145 @@ export async function handleActivityStreamRoute(
     return
   }
 
+  const checkpoint = handlers.activityStreamCheckpointHandler
+  if (operationId && !checkpoint) {
+    json(res, 503, { error: 'Activity authority unavailable' })
+    return
+  }
+
   res.setHeader('Content-Type', 'text/event-stream')
   res.setHeader('Cache-Control', 'no-cache, no-transform')
   res.setHeader('Connection', 'keep-alive')
   res.flushHeaders()
 
+  const pendingEvents: HostActivityEvent[] = []
   let unsubscribe: (() => void) | null = null
-  const cleanup = (reason: string) => {
-    if (unsubscribe) {
-      unsubscribe()
-      unsubscribe = null
+  let closed = false
+  let draining = false
+  let keepalive: ReturnType<typeof setInterval> | null = null
+  let expiryTimer: ReturnType<typeof setTimeout> | null = null
+  const cleanup = (reason?: string, endResponse = true) => {
+    if (closed) return
+    closed = true
+    pendingEvents.length = 0
+    if (keepalive) {
+      clearInterval(keepalive)
+      keepalive = null
     }
-    writeSseEvent(res, 'closed', { reason })
-    res.end()
+    if (expiryTimer) {
+      clearTimeout(expiryTimer)
+      expiryTimer = null
+    }
+    if (unsubscribe) {
+      const stop = unsubscribe
+      unsubscribe = null
+      try {
+        stop()
+      } catch {
+        // A failed unsubscribe must not prevent transport cleanup.
+      }
+    }
+    if (reason && !res.writableEnded) {
+      writeSseEvent(res, 'closed', { reason })
+    }
+    if (endResponse && !res.writableEnded) {
+      res.end()
+    }
+  }
+
+  const closeForCheckpointError = (error: unknown) => {
+    cleanup(
+      error instanceof RuntimeActionAuthorityError && error.code === 'access_path_stale'
+        ? 'authority_denied'
+        : 'authority_unavailable'
+    )
+  }
+
+  const drainPendingEvents = async (): Promise<void> => {
+    if (draining || closed || !operationId || !actionContext || !checkpoint) return
+    draining = true
+    try {
+      const binding = authorityBindingFromTrustedEdge(actionContext)
+      while (!closed && pendingEvents.length > 0) {
+        const event = pendingEvents.shift()
+        if (!event) continue
+        try {
+          assertRuntimeActionCurrent(actionContext, operationId)
+          const decision = await checkpoint(binding)
+          if (closed) return
+          assertRuntimeActionCurrent(actionContext, operationId)
+          if (decision !== 'allowed') {
+            cleanup(decision === 'denied' ? 'authority_denied' : 'authority_unavailable')
+            return
+          }
+          writeSseEvent(res, 'activity', publicActivityEvent(event))
+        } catch (error) {
+          if (closed) return
+          closeForCheckpointError(error)
+          return
+        }
+      }
+    } finally {
+      draining = false
+      if (!closed && pendingEvents.length > 0) void drainPendingEvents()
+    }
+  }
+
+  const onActivity = (event: HostActivityEvent) => {
+    if (closed) return
+    if (
+      operationId === 'host.activity.read' &&
+      (event.authorityV2?.userId !== actionContext?.userId ||
+        event.authorityV2?.accessPathId !== actionContext?.accessPathId)
+    ) {
+      return
+    }
+    if (!operationId) {
+      writeSseEvent(res, 'activity', publicActivityEvent(event))
+      return
+    }
+    if (pendingEvents.length >= MAX_PENDING_ACTIVITY_STREAM_EVENTS) {
+      cleanup('stream_overloaded')
+      return
+    }
+    pendingEvents.push(event)
+    void drainPendingEvents()
   }
 
   try {
-    const registration = handlers.activityStreamHandler((event: HostActivityEvent) => {
-      if (
-        caller?.actionContextV2?.operationId === 'host.activity.read' &&
-        (event.authorityV2?.userId !== caller.actionContextV2.userId ||
-          event.authorityV2?.accessPathId !== caller.actionContextV2.accessPathId)
-      ) {
-        return
+    if (operationId && actionContext) {
+      const expiresAt = Date.parse(actionContext.expiresAt)
+      const expireStream = () => {
+        if (closed) return
+        const remainingMs = expiresAt - Date.now()
+        if (remainingMs <= 0) {
+          cleanup('authority_expired')
+          return
+        }
+        expiryTimer = setTimeout(expireStream, Math.min(remainingMs, 2_147_483_647))
       }
-      writeSseEvent(res, 'activity', publicActivityEvent(event))
-    })
+      expireStream()
+      if (closed) return
+    }
+
+    const registration = handlers.activityStreamHandler(onActivity)
     unsubscribe = registration.unsubscribe
+    if (closed) {
+      unsubscribe()
+      unsubscribe = null
+      return
+    }
     writeSseEvent(res, 'open', { hostRef: registration.hostRef, ts: new Date().toISOString() })
 
-    const keepalive = setInterval(() => {
+    keepalive = setInterval(() => {
+      if (operationId && actionContext && Date.parse(actionContext.expiresAt) <= Date.now()) {
+        cleanup('authority_expired')
+        return
+      }
       res.write(': keepalive\n\n')
     }, 15000)
 
-    req.on('close', () => {
-      clearInterval(keepalive)
-      if (unsubscribe) unsubscribe()
-    })
+    res.on('close', () => cleanup(undefined, false))
   } catch {
     writeSseEvent(res, 'error', { message: 'Activity stream unavailable' })
     cleanup('upstream_unavailable')

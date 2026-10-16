@@ -55,6 +55,7 @@ import {
 import { sessionSearchAuthority } from './server/sessionSearchAuth'
 import type {
   ActivitySnapshotHandler,
+  ActivityStreamCheckpointHandler,
   ActivityStreamHandler,
   ApprovalHandler,
   CancelHandler,
@@ -114,6 +115,7 @@ export type {
   MessageHandler,
   StatusHandler,
   ActivitySnapshotHandler,
+  ActivityStreamCheckpointHandler,
   ActivityStreamHandler,
   ApprovalHandler,
   ProviderMessageAuthorizationHandler,
@@ -351,6 +353,7 @@ export class RPCServer {
     null
   private activitySnapshotHandler: ActivitySnapshotHandler | null = null
   private activityStreamHandler: ActivityStreamHandler | null = null
+  private activityStreamCheckpointHandler: ActivityStreamCheckpointHandler | null = null
   private taskResultHandler: TaskResultHandler | null = null
   private cronResultsHandler: CronResultsHandler | null = null
   private cronResultAckHandler: CronResultAckHandler | null = null
@@ -928,6 +931,10 @@ export class RPCServer {
     this.activityStreamHandler = handler
   }
 
+  onActivityStreamCheckpoint(handler: ActivityStreamCheckpointHandler): void {
+    this.activityStreamCheckpointHandler = handler
+  }
+
   onTaskResult(handler: TaskResultHandler): void {
     this.taskResultHandler = handler
   }
@@ -1020,6 +1027,7 @@ export class RPCServer {
       telegramWorkflowApprovalVerificationHandler: this.telegramWorkflowApprovalVerificationHandler,
       activitySnapshotHandler: this.activitySnapshotHandler,
       activityStreamHandler: this.activityStreamHandler,
+      activityStreamCheckpointHandler: this.activityStreamCheckpointHandler,
       taskResultHandler: this.taskResultHandler,
       cronResultsHandler: this.cronResultsHandler,
       cronResultAckHandler: this.cronResultAckHandler,

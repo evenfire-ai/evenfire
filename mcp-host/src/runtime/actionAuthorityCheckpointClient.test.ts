@@ -10,6 +10,7 @@ import type { McpHostRuntimeAuth } from '../workflow/userApprovalRequester'
 import {
   McpHostActionAuthorityCheckpointError,
   checkpointMcpHostActionAuthority,
+  checkpointMcpHostActivityStreamAuthority,
   mcpHostActionAuthorityCheckpointRequest,
   runtimeActionCheckpointDecision,
 } from './actionAuthorityCheckpointClient'
@@ -119,6 +120,18 @@ describe('mcp-host action-authority checkpoint client', () => {
     expect(runtimeAuth.refreshWithRecovery).toHaveBeenCalledWith(credential)
     expect(fetchImpl.mock.calls[0][1].headers.authorization).toBe('Bearer runtime-access-one')
     expect(fetchImpl.mock.calls[1][1].headers.authorization).toBe('Bearer runtime-access-two')
+  })
+
+  it('does not consume or reissue refresh credentials for an activity stream checkpoint', async () => {
+    const credential = auth()
+    const fetchImpl = vi.fn().mockResolvedValue(new Response('{}', { status: 401 }))
+
+    await expect(
+      checkpointMcpHostActivityStreamAuthority(binding, credential, fetchImpl)
+    ).rejects.toEqual(new McpHostActionAuthorityCheckpointError('authority_unavailable'))
+
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    expect(runtimeAuth.refreshWithRecovery).not.toHaveBeenCalled()
   })
 
   it('fails closed when Control returns a malformed or status-mismatched envelope', async () => {

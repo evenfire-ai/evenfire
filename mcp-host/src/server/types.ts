@@ -300,6 +300,9 @@ export type ActivityStreamHandler = (onEvent: (event: HostActivityEvent) => void
   hostRef: string
   unsubscribe: () => void
 }
+export type ActivityStreamCheckpointHandler = (
+  binding: AuthorityBindingV2
+) => Promise<'allowed' | 'denied' | 'unavailable'>
 export type ApprovalHandler = (
   decision: ApprovalDecision
 ) => Promise<{ success: boolean; error?: string }>

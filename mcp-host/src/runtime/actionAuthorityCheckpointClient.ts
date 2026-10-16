@@ -78,6 +78,33 @@ async function postCheckpoint(
   })
 }
 
+async function parseCheckpointResponse(
+  response: Response,
+  binding: AuthorityBindingV2
+): Promise<ActionAuthorityCheckpointResponseV2> {
+  let parsed: ActionAuthorityCheckpointResponseV2
+  try {
+    parsed = validateActionAuthorityCheckpointResponse(await response.json())
+  } catch {
+    throw new McpHostActionAuthorityCheckpointError('authority_unavailable')
+  }
+  const expectedStatus = {
+    allowed: 200,
+    denied: 403,
+    not_found: 404,
+    access_path_stale: 409,
+    authority_unavailable: 503,
+    invalid_binding: 400,
+  }[parsed.status]
+  if (response.status !== expectedStatus) {
+    throw new McpHostActionAuthorityCheckpointError('authority_unavailable')
+  }
+  if (!responseMatchesRequestedAuthority(parsed, binding)) {
+    throw new McpHostActionAuthorityCheckpointError('authority_unavailable')
+  }
+  return parsed
+}
+
 function responseMatchesRequestedAuthority(
   response: ActionAuthorityCheckpointResponseV2,
   binding: AuthorityBindingV2,
@@ -118,25 +145,24 @@ export async function checkpointMcpHostActionAuthority(
     throw new McpHostActionAuthorityCheckpointError('authority_unavailable')
   }
 
-  let parsed: ActionAuthorityCheckpointResponseV2
+  return parseCheckpointResponse(response, binding)
+}
+
+/**
+ * Stream checkpoints use the current access token once and fail closed on 401.
+ * A long-lived stream must not consume or reissue a refresh token to outlive
+ * the signed activity envelope's original expiry.
+ */
+export async function checkpointMcpHostActivityStreamAuthority(
+  binding: AuthorityBindingV2,
+  auth: McpHostRuntimeAuth,
+  fetchImpl: typeof fetch = fetch
+): Promise<ActionAuthorityCheckpointResponseV2> {
+  let response: Response
   try {
-    parsed = validateActionAuthorityCheckpointResponse(await response.json())
+    response = await postCheckpoint(binding, auth, fetchImpl)
   } catch {
     throw new McpHostActionAuthorityCheckpointError('authority_unavailable')
   }
-  const expectedStatus = {
-    allowed: 200,
-    denied: 403,
-    not_found: 404,
-    access_path_stale: 409,
-    authority_unavailable: 503,
-    invalid_binding: 400,
-  }[parsed.status]
-  if (response.status !== expectedStatus) {
-    throw new McpHostActionAuthorityCheckpointError('authority_unavailable')
-  }
-  if (!responseMatchesRequestedAuthority(parsed, binding)) {
-    throw new McpHostActionAuthorityCheckpointError('authority_unavailable')
-  }
-  return parsed
+  return parseCheckpointResponse(response, binding)
 }

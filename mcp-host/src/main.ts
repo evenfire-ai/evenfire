@@ -130,6 +130,7 @@ import { MessageQueue, Task } from './queue'
 import { ResultStore } from './resultStore'
 import {
   checkpointMcpHostActionAuthority,
+  checkpointMcpHostActivityStreamAuthority,
   runtimeActionCheckpointDecision,
 } from './runtime/actionAuthorityCheckpointClient'
 import { markFileAttachmentsDelivered } from './runtime/fileAttachmentDelivery'
@@ -2780,6 +2781,17 @@ async function startRPCServer(): Promise<void> {
   rpcServer.onStatus(getStatus)
   rpcServer.onActivitySnapshot(getActivitySnapshot)
   rpcServer.onActivityStream(subscribeActivity)
+  rpcServer.onActivityStreamCheckpoint(async binding => {
+    const auth = runtimeAuth
+    if (!auth) return 'unavailable'
+    try {
+      return runtimeActionCheckpointDecision(
+        await checkpointMcpHostActivityStreamAuthority(binding, auth)
+      )
+    } catch {
+      return 'unavailable'
+    }
+  })
   rpcServer.onApproval(handleApprovalDecision)
   wireWorkflowApprovalRuntimeRoutes(rpcServer, {
     providerMessageAuthorization: handleProviderMessageAuthorization,
