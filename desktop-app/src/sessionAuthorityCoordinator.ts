@@ -239,6 +239,8 @@ export class SessionAuthorityCoordinator {
   private acceptedSource: AcceptedSessionTokenSource | undefined
   private memoryLease: MemoryOnlySessionLease | undefined
   private persistenceQueue: Promise<void> = Promise.resolve()
+  private rpcCredentialOwnerBinding: string | null = null
+  private rpcCredentialOwners = new Map<string, RpcSessionOwner>()
 
   constructor(private readonly options: SessionAuthorityCoordinatorOptions) {}
 
@@ -323,7 +325,11 @@ export class SessionAuthorityCoordinator {
     const lease = this.memoryLease
     if (!lease) return
     this.assertMemoryOnlySessionCurrent(lease)
-    if (token !== this.sessionToken) throw new TemporarySessionReplacedError()
+    if (token === this.sessionToken) return
+    const digest = credentialDigest(token)
+    const owner = this.rpcCredentialOwners.get(digest)
+    if (!owner) throw new SessionRequestOwnershipError()
+    this.assertRpcCredentialOwnerCurrent(owner)
   }
 
   /** Issue an RPC credential only while its exact session owner remains current. */
@@ -332,9 +338,22 @@ export class SessionAuthorityCoordinator {
     issue: (bindingKey: string) => Promise<T>
   ): Promise<T> {
     const owner = this.captureRpcCredentialOwner(sessionToken)
-    const result = await issue(this.rpcCredentialBindingKey(owner))
+    const bindingKey = this.rpcCredentialBindingKey(owner)
+    const result = await issue(bindingKey)
     this.assertRpcCredentialOwnerCurrent(owner)
+    if (owner.memoryLease) {
+      if (this.rpcCredentialOwnerBinding !== bindingKey) {
+        this.rpcCredentialOwners.clear()
+        this.rpcCredentialOwnerBinding = bindingKey
+      }
+      this.rpcCredentialOwners.set(credentialDigest(result.token), owner)
+    }
     return result
+  }
+
+  clearRpcCredentialOwners(): void {
+    this.rpcCredentialOwners.clear()
+    this.rpcCredentialOwnerBinding = null
   }
 
   private captureRpcCredentialOwner(sessionToken: string): RpcSessionOwner {

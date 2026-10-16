@@ -450,7 +450,7 @@ const gfsUploadTransport: DesktopUploadTransport = {
       duplex: 'half',
       signal: withTimeout(signal, timeoutMs),
     } as RequestInit & { duplex: 'half' })
-    reportSessionUnauthorized(token, response.status)
+    reportSessionUnauthorized(token, response.status, requestOwner)
     const text = await response.text()
     return {
       status: response.status,
