@@ -145,7 +145,10 @@ four layers constrain what it can do:
   channel, and callbacks are signature-verified.
 - **Least privilege.** Each agent reaches only the connectors its `Context`
   grants, through short-lived, scope-narrowed tokens that can't widen
-  themselves; container images must match a pinned digest and an allowlist.
+  themselves. Connector images can be restricted to an allowlist, but the check
+  is off by default (`CONTROL_API_ENFORCE_IMAGE_ALLOWLIST=true` turns it on),
+  and custom workflow coordinator images must be digest-pinned (the minikube
+  overlay relaxes this for local test fixtures).
 - **Deny-all networking.** Runtime namespaces start with no connectivity;
   access is opened per (agent, connector), and outbound traffic is pinned to
   the specific hosts a connector declares, never the open internet.
