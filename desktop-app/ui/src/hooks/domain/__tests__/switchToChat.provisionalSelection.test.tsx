@@ -5,8 +5,9 @@
  * it confirms or withdraws it; an invalidation withdraws it at once; New chat
  * restores it; paging and send refuse it. Rows 1, 2 and 4 of the A17 table are
  * tests j, k and m in `switchToChat.transcriptMemo.test.tsx`; row 14 (blank
- * path) is #976's `createChatFailure*` suites. Every case runs for a stateful
- * and a stateless Host.
+ * path) is #976's `createChatFailure*` suites. Row 15 covers a newer selection
+ * intent that supersedes the click without switching. Every case runs for a
+ * stateful and a stateless Host.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, waitFor } from '@testing-library/react'
@@ -420,6 +421,38 @@ describe('provisional selection (#1091 A17)', () => {
       // Liveness: the same send dispatches once the selection is confirmed.
       expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
       expect(shows(controller)).toContain('hello')
+    }
+  )
+
+  it.each(HOSTS)(
+    '15. %s: a same-chat notification whose catalog load fails leaves no stale mark that refuses send',
+    async host => {
+      const { controller } = await rememberA(host)
+      const { write, click } = await clickHeld(controller, host)
+      const getIndexCalls = clerum.chat.getIndex.mock.calls.length
+      clerum.chat.getIndex.mockRejectedValue(new Error('catalog unavailable'))
+      // A notification for the same chat from another route, then the route change.
+      act(() => controller.result.current.setPendingChatSelection(host, 'chat-a'))
+      act(() => controller.rerender({ navItem: 'chat' }))
+      // Witness: the selection effect tried the catalog and settled without a switch.
+      await waitFor(() =>
+        expect(clerum.chat.getIndex.mock.calls.length).toBeGreaterThan(getIndexCalls)
+      )
+      await waitFor(() => expect(controller.result.current.chatMessagesLoading).toBe(false))
+      await act(async () => {
+        write.resolve()
+        await click
+      })
+      clerum.chat.getIndex.mockResolvedValue({ chats: [], lastActiveChatId: null } as never)
+      expect(controller.result.current.activeChatId).toBe('chat-a')
+      expect(shows(controller)).toEqual([])
+      act(() => setComposerDraft('chat-a', 'hello', host))
+      await act(async () => {
+        await controller.result.current.handleSendAgentMessage('hello')
+      })
+      // The superseded click no longer owns a provisional mark, so send dispatches.
+      expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+      expect(getComposerDraft('chat-a', host)).toBe('')
     }
   )
 })

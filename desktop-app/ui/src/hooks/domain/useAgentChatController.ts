@@ -559,12 +559,15 @@ export function useAgentChatController({
   // #1091 A17: a chat shown from memory before its last-active write and first
   // local page settled. Without the memo this state was the blank view with the
   // spinner, and every path below relied on that. `revision` is the selection
-  // intent that owns it; a same-row click takes it over.
+  // intent that owns it; a same-row click takes it over. A newer intent that
+  // never reaches a switch (a pending selection whose catalog load fails) leaves
+  // the mark in place, so the revision check retires it for the guards.
   const provisionalSelectionRef = useRef<ProvisionalSelection | null>(null)
   const provisionalSelectionFor = useCallback((agentRef: string | null, chatId: string | null) => {
     const selection = provisionalSelectionRef.current
     return selection &&
       selection.request === activeChatSwitchRequestRef.current &&
+      selection.revision === selectionIntentRevisionRef.current &&
       selection.agentRef === agentRef &&
       selection.chatId === chatId
       ? selection
