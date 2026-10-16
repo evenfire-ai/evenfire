@@ -7,9 +7,9 @@ reusable anti-patterns**. Four of the five share one root cause: _a decision
 made on evidence that had already aged between its producer and its
 consumer._ Encode these as guardrails so the class does not reappear.
 
-This doc is the "how to not reintroduce the class" companion to the Host
-stateless lifecycle fields (`spec.lifecycle.stateless`, `status.lifecycle`) in
-the [Host CRD reference](../crds/host.md#spec-fields).
+This doc is the "how to not reintroduce the class" companion to the
+`spec.lifecycle.stateless` field and `status.lifecycle` states in the
+[Host CRD reference](../crds/host.md#spec-fields).
 
 ---
 
