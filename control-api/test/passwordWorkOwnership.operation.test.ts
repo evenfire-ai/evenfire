@@ -73,6 +73,87 @@ describe('password-work reservation preservation', () => {
     ).rejects.toBe(failure)
   })
 
+  it.each([
+    ['TypeError', () => new TypeError('private callback details')],
+    ['Error', () => new Error('private callback details')],
+  ])(
+    'classifies an unexpected %s from commitWith as a non-retryable internal error',
+    async (_name, makeError) => {
+      await expect(
+        withPasswordWorkLease(lease =>
+          lease.commitWith(
+            async () => {
+              throw makeError()
+            },
+            { mode: 'one_use_recovery' }
+          )
+        )
+      ).rejects.toMatchObject({
+        name: 'PasswordMutationInternalError',
+        code: 'internal_error',
+        message: 'internal_error',
+      })
+      expect(query.mock.calls.filter(([sql]) => sql.includes('DELETE FROM'))).toHaveLength(1)
+    }
+  )
+
+  it('keeps a TypeError from the transaction query boundary as authority unavailable', async () => {
+    query.mockImplementation(async (sql: string) => {
+      if (sql === 'SELECT synthetic driver failure') {
+        throw new TypeError('private driver diagnostic')
+      }
+      if (sql.includes('INSERT INTO password_verification_work')) {
+        return { rows: [{ singleton: true }] }
+      }
+      if (sql.includes('DELETE FROM password_verification_work')) {
+        return { rows: [{ singleton: true }] }
+      }
+      return { rows: [] }
+    })
+
+    await expect(
+      runPasswordMutation(
+        async db => {
+          await db.query('SELECT synthetic driver failure')
+          return 'unreachable'
+        },
+        { mode: 'standard' }
+      )
+    ).rejects.toMatchObject({
+      status: 503,
+      publicError: 'authority_unavailable',
+      message: 'authority_unavailable',
+    })
+  })
+
+  it('classifies a distinct callback failure after a caught query error as internal', async () => {
+    query.mockImplementation(async (sql: string) => {
+      if (sql === 'SELECT synthetic driver failure') {
+        throw new TypeError('private driver diagnostic')
+      }
+      if (sql.includes('INSERT INTO password_verification_work')) {
+        return { rows: [{ singleton: true }] }
+      }
+      if (sql.includes('DELETE FROM password_verification_work')) {
+        return { rows: [{ singleton: true }] }
+      }
+      return { rows: [] }
+    })
+
+    await expect(
+      runPasswordMutation(
+        async db => {
+          await db.query('SELECT synthetic driver failure').catch(() => undefined)
+          throw new TypeError('private callback defect')
+        },
+        { mode: 'standard' }
+      )
+    ).rejects.toMatchObject({
+      name: 'PasswordMutationInternalError',
+      code: 'internal_error',
+    })
+  })
+
   it.each([false, true])('release failure wins over outer work failure=%s safely', async fails => {
     state.failRelease = true
     const outcome = withMemberPasswordWorkLease(async () => {

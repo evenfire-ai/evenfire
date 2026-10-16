@@ -27,6 +27,7 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
   let publicProcess: ExternalRestHttpProcess
   let bcrypt: typeof import('bcryptjs').default
   let sourceCounter = 1
+  let oneUseResetMutationPosts = 0
   const invitationFlowFixtures = new Map<string, { email: string; invitationUuid: string }>()
 
   beforeAll(async () => {
@@ -64,18 +65,26 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
     await db.initDb()
     const { requireInternalService, requireInternalToken } =
       await import('../src/middleware/internalServiceAuth.js')
+    const { clerumErrorHandler } = await import('../src/http/errorHandler.js')
     const { createExternalInvitationsRouter } =
       await import('../src/routes/external/invitations.js')
     const { createExternalUsersRouter } = await import('../src/routes/external/users.js')
 
     controlApp = express()
     controlApp.use(express.json())
+    controlApp.use((req, _res, next) => {
+      if (req.method === 'POST' && req.path === '/api/v1/external/invitations/password-token') {
+        oneUseResetMutationPosts++
+      }
+      next()
+    })
     controlApp.use(requireInternalToken)
     const controlApi = express.Router()
     controlApi.use('/external', requireInternalService('external-rest-api'))
     controlApi.use(createExternalInvitationsRouter())
     controlApi.use(createExternalUsersRouter({} as Parameters<typeof createExternalUsersRouter>[0]))
     controlApp.use('/api/v1', controlApi)
+    controlApp.use(clerumErrorHandler)
     controlServer = controlApp.listen(0, '127.0.0.1')
     await new Promise<void>(resolve => controlServer.once('listening', resolve))
 
@@ -252,6 +261,88 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
           .rows[0].password_hash
       )
     ).toBe(true)
+  })
+
+  it('rolls back a callback TypeError and returns a sanitized non-retryable 500', async () => {
+    const session = await acceptedInvitationSession()
+    const failure = new TypeError('private SQL and credential diagnostic')
+    const hash = vi.spyOn(bcrypt, 'hash').mockRejectedValueOnce(failure)
+
+    let response: Awaited<ReturnType<typeof invitationPasswordRequest>>
+    try {
+      response = await invitationPasswordRequest(session, nextSourceIp())
+    } finally {
+      hash.mockRestore()
+    }
+
+    expect(response.status).toBe(500)
+    expect(response.body).toMatchObject({ error: 'internal_error' })
+    expect(response.headers['retry-after']).toBeUndefined()
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(response.headers['cache-control']).toContain('no-store')
+    expect(response.text).not.toContain('private SQL')
+    expect(response.text).not.toContain('credential diagnostic')
+    expect(
+      (await db.pool.query('SELECT status FROM invitations WHERE id = $1', [session.invitationId]))
+        .rows[0].status
+    ).toBe('accepted')
+    expect(
+      (await db.pool.query('SELECT password_hash FROM users WHERE id = $1', [session.userId]))
+        .rows[0].password_hash
+    ).toBeNull()
+    expect(
+      (await db.pool.query('SELECT COUNT(*)::int AS count FROM password_verification_work')).rows[0]
+        .count
+    ).toBe(0)
+  })
+
+  it('rolls back a one-use reset callback TypeError without retrying the proof', async () => {
+    const email = `r2m1-reset-callback-${randomBytes(8).toString('hex')}@example.invalid`
+    const user = await db.pool.query('INSERT INTO users(email) VALUES ($1) RETURNING id', [email])
+    const { createSilentPasswordResetInvitation } =
+      await import('../src/services/directory/passwordResetInvitations.js')
+    const invitation = await createSilentPasswordResetInvitation({
+      inviteeName: 'Synthetic callback-failure reset',
+      email,
+    })
+    const flowToken = `synthetic-reset-callback-${randomBytes(20).toString('hex')}`
+    invitationFlowFixtures.set(flowToken, { email, invitationUuid: invitation.token })
+    const mutationPostsBefore = oneUseResetMutationPosts
+    const failure = new TypeError('private reset SQL and proof diagnostic')
+    const hash = vi.spyOn(bcrypt, 'hash').mockRejectedValueOnce(failure)
+
+    let response: Awaited<ReturnType<typeof invitationPasswordRequestWithoutSession>>
+    try {
+      response = await invitationPasswordRequestWithoutSession(
+        { id: invitation.id, token: flowToken },
+        email,
+        nextSourceIp()
+      )
+    } finally {
+      hash.mockRestore()
+    }
+
+    expect(response.status).toBe(500)
+    expect(response.body).toMatchObject({ error: 'internal_error' })
+    expect(response.headers['retry-after']).toBeUndefined()
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(response.text).not.toContain('private reset SQL')
+    expect(response.text).not.toContain('proof diagnostic')
+    expect(oneUseResetMutationPosts - mutationPostsBefore).toBe(1)
+    expect(
+      (
+        await db.pool.query(
+          `SELECT i.status, u.password_hash
+             FROM invitations i JOIN users u ON u.id = $2
+            WHERE i.id = $1`,
+          [invitation.id, user.rows[0].id]
+        )
+      ).rows[0]
+    ).toMatchObject({ status: 'pending', password_hash: null })
+    expect(
+      (await db.pool.query('SELECT COUNT(*)::int AS count FROM password_verification_work')).rows[0]
+        .count
+    ).toBe(0)
   })
 
   it.each(['member_invitation', 'admin_desktop_access'] as const)(

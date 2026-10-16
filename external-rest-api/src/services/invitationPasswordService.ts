@@ -13,12 +13,7 @@ type AuthContext = {
 }
 
 type ResetPasswordDomainError =
-  | 'not_found'
-  | 'forbidden'
-  | 'not_pending'
-  | 'expired'
-  | 'invalid_invitation'
-  | 'invalid_password'
+  'not_found' | 'forbidden' | 'not_pending' | 'expired' | 'invalid_invitation' | 'invalid_password'
 
 function invitationPasswordDomainError(
   error: ControlApiError
@@ -82,12 +77,7 @@ export async function setupInvitationPassword(
   password: string
 ): Promise<{
   error?:
-    | 'not_found'
-    | 'forbidden'
-    | 'not_accepted'
-    | 'not_pending'
-    | 'expired'
-    | 'invalid_password'
+    'not_found' | 'forbidden' | 'not_accepted' | 'not_pending' | 'expired' | 'invalid_password'
   data?: InvitationPreview & { passwordUpdated: boolean }
 }> {
   try {
@@ -107,6 +97,13 @@ export async function setupInvitationPassword(
     return { data }
   } catch (error) {
     if (error instanceof ControlApiTransportError) throw passwordAuthorityUnavailable()
+    if (
+      error instanceof ControlApiError &&
+      error.status === 500 &&
+      error.code === 'internal_error'
+    ) {
+      throw error
+    }
     if (error instanceof ControlApiError && [429, 503].includes(error.status)) throw error
     if (error instanceof ControlApiError) {
       const domainError = invitationPasswordDomainError(error)
@@ -146,6 +143,7 @@ export async function setupInvitationPasswordWithToken(
     if (error instanceof ControlApiTransportError) throw unknownRecoveryOutcome()
     if (error instanceof ControlApiError && error.status === 429) throw error
     if (error instanceof ControlApiError) {
+      if (error.status === 500 && error.code === 'internal_error') throw error
       if (
         error.status === 503 &&
         (error.code === 'authority_unavailable' || error.code === 'recovery_outcome_unknown')

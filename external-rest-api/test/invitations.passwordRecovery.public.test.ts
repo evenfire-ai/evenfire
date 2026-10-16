@@ -165,6 +165,31 @@ describe('password reset preview authority failures', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  it('preserves a definite internal callback failure without retry or proof replay', async () => {
+    let resetPosts = 0
+    await startUpstream((req, res) => {
+      if (req.method === 'POST') resetPosts += 1
+      res.writeHead(500, {
+        'content-type': 'application/json',
+        'retry-after': '1200',
+        'x-ratelimit-remaining': '0',
+      })
+      res.end(JSON.stringify({ error: 'internal_error', detail: 'private reset diagnostic' }))
+    })
+
+    const response = await submitDedicatedReset()
+
+    expect(response.status).toBe(500)
+    expect(response.body).toEqual({ error: 'internal_error' })
+    expect(response.headers['retry-after']).toBeUndefined()
+    expect(response.headers['x-ratelimit-remaining']).toBeUndefined()
+    expect(response.headers['cache-control']).toContain('no-store')
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(response.text).not.toContain('private reset diagnostic')
+    expect(response.text).not.toContain(recoveryProof)
+    expect(resetPosts).toBe(1)
+  })
+
   it('sanitizes an unrecognized producer client response without a retry hint', async () => {
     await startUpstream((_req, res) => {
       res.writeHead(400, { 'content-type': 'application/json' })

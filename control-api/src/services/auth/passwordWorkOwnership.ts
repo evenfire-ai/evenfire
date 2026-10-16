@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
 import { type DbTransactionClient, withTransaction } from '../../db.js'
 import { rootLogger } from '../../observability/logger.js'
-import { PasswordAdmissionError } from './passwordAdmissionError.js'
+import { PasswordAdmissionError, PasswordMutationInternalError } from './passwordAdmissionError.js'
 import { PASSWORD_ADMISSION_POLICY } from './passwordAdmissionState.js'
 
 export type PasswordCommitMode = 'standard' | 'one_use_recovery'
@@ -29,7 +29,9 @@ function warn(event: string, message: string) {
   logger.warn({ event }, message)
 }
 function sanitize(error: unknown): never {
-  if (error instanceof PasswordAdmissionError) throw error
+  if (error instanceof PasswordAdmissionError || error instanceof PasswordMutationInternalError) {
+    throw error
+  }
   warn('password_authority_unavailable', 'password authority unavailable')
   throw authorityFailure()
 }
@@ -86,7 +88,30 @@ async function reservePasswordWork() {
         try {
           return await withTransaction(
             async db => {
-              outcome = await work(db)
+              const queryFailures = new Set<unknown>()
+              const mutationDb: DbTransactionClient = {
+                ...db,
+                query: async (text, values) => {
+                  try {
+                    return await db.query(text, values)
+                  } catch (error) {
+                    queryFailures.add(error)
+                    throw error
+                  }
+                },
+              } as DbTransactionClient
+              try {
+                outcome = await work(mutationDb)
+              } catch (error) {
+                if (error instanceof PasswordAdmissionError || queryFailures.has(error)) {
+                  throw error
+                }
+                logger.error(
+                  { event: 'password_mutation_callback_failed' },
+                  'password mutation callback failed'
+                )
+                throw new PasswordMutationInternalError()
+              }
               await releaseOwned(db)
               return outcome
             },

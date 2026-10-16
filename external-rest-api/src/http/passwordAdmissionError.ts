@@ -59,6 +59,24 @@ export function sendPasswordAuthorityError(error: unknown, res: Response): boole
     )
     return true
   }
+  if (error.status === 500 && error.code === 'internal_error') {
+    for (const name of [
+      'Retry-After',
+      'X-RateLimit-Limit',
+      'X-RateLimit-Remaining',
+      'X-RateLimit-Reset',
+      'RateLimit',
+      'RateLimit-Policy',
+      'RateLimit-Limit',
+      'RateLimit-Remaining',
+      'RateLimit-Reset',
+    ]) {
+      res.removeHeader(name)
+    }
+    res.setHeader('Cache-Control', 'no-store')
+    res.status(500).json({ error: 'internal_error' })
+    return true
+  }
   if (error.status >= 500) {
     sendPublicPasswordAuthorityError(
       res,

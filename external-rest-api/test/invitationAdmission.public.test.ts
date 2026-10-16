@@ -116,4 +116,26 @@ describe('accepted invitation password authority outcomes', () => {
     expect(JSON.stringify(response.body)).not.toContain('database')
     expect(fetchMock).toHaveBeenCalledOnce()
   })
+
+  it('returns a sanitized non-retryable internal error for callback programming failures', async () => {
+    fetchMock.mockResolvedValueOnce(
+      upstreamResponse(
+        500,
+        { error: 'internal_error', detail: 'private SQL and credential diagnostic' },
+        { 'retry-after': '1200', 'x-ratelimit-remaining': '0' }
+      )
+    )
+
+    const response = await submitPassword()
+
+    expect(response.status).toBe(500)
+    expect(response.body).toEqual({ error: 'internal_error' })
+    expect(response.headers['retry-after']).toBeUndefined()
+    expect(response.headers['x-ratelimit-remaining']).toBeUndefined()
+    expect(response.headers['cache-control']).toContain('no-store')
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(response.text).not.toContain('private SQL')
+    expect(response.text).not.toContain('credential diagnostic')
+    expect(fetchMock).toHaveBeenCalledOnce()
+  })
 })
