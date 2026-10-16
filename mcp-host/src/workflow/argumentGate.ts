@@ -10,6 +10,11 @@ import { withoutUnsetNulls } from './schemaArguments'
 import type { InternalToolDefinition } from './types'
 
 const ajv = new Ajv({ allErrors: true, strict: false, useDefaults: true })
+/**
+ * One validator per schema object, kept as long as the schema is. Tools built
+ * for one conversation or one step (GFS, capabilities, the catalog bridge)
+ * come with schema objects of their own, so the validators go with them.
+ */
 const compiled = new WeakMap<object, ValidateFunction | null>()
 
 /**
@@ -33,6 +38,11 @@ export function argumentValidator(tool: InternalToolDefinition): ValidateFunctio
   } catch (err) {
     // Surface the failure so a schema regression does not pass silently.
     logger.warn({ err, toolName: tool.name }, 'Internal tool schema compilation failed')
+  } finally {
+    // Ajv keeps every schema it compiled, for good; the validator above is
+    // whole without that entry, so dropping it keeps the process from growing
+    // with every conversation's tools.
+    ajv.removeSchema(schema)
   }
   compiled.set(schema, validator)
   return validator
