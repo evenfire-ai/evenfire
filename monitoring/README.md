@@ -19,6 +19,11 @@ Helm values and Grafana dashboard configs for the Clerum observability stack. Th
 
 ## Setup
 
+> **On minikube**, follow [Monitoring and observability](../docs/operations/monitoring.md#install-on-minikube)
+> instead: it overrides the storage class and the 100 Gi Loki volume. That page
+> also explains what this starter covers (logs only; no metrics scraping is
+> shipped).
+
 ```bash
 # Add Grafana Helm repo and create namespace
 make setup
@@ -47,6 +52,12 @@ make install_loki install_grafana STORAGE_CLASS=standard LOKI_SIZE=10Gi GRAFANA_
 | `LOKI_CHART_VERSION` | `2.9.10`           | loki-stack chart version                    |
 
 ## Makefile Targets
+
+These targets pass no `--context` / `--kube-context`: they run `kubectl` and
+`helm` against your kubeconfig's **current** context. Check
+`kubectl config current-context` before you run any of them, or use the
+explicit commands in
+[docs/operations/monitoring.md](../docs/operations/monitoring.md#install-on-minikube).
 
 | Target                 | Description                                                                                       |
 | ---------------------- | ------------------------------------------------------------------------------------------------- |
@@ -82,9 +93,12 @@ The Grafana values mount the `grafana-dashboards` ConfigMap, so it must exist be
 
 ```bash
 make port_forward_grafana
-# Open http://localhost:3000
+# Open localhost:3000
 # Default user: admin (password set via secret or Helm override)
 
 # Control UI also uses localhost:3000 on minikube; pick another port if both run:
 make port_forward_grafana GRAFANA_PORT=3001
 ```
+
+To forward against an explicit cluster context instead of the current one:
+`kubectl --context <your-context> port-forward -n monitoring svc/grafana 3001:80`.
