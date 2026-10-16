@@ -1896,21 +1896,22 @@ async function initializeAgent(): Promise<void> {
 
     // Boot-only retention sweep (T3.1 §8). Failures are non-fatal so a
     // corrupt DB does not block traffic — the metric / log surfaces the issue.
-    sessionSearchService.sweepRetention(config.searchRetentionDays).then(
-      deleted => {
-        logger.info(
-          {
-            event: 'search_retention_sweep',
-            deleted_sessions: deleted,
-            retention_days: config.searchRetentionDays,
-          },
-          'Host runtime event'
-        )
-      },
-      err => {
-        logger.error({ err: err }, '[Main] Session search retention sweep failed (non-fatal):')
-      }
-    )
+    // Awaited before bootstrap: the sweep runs in batches that delete an
+    // expired session's messages before the session row, so no load may run
+    // between them. It therefore counts against the Host startup window.
+    try {
+      const deleted = await sessionSearchService.sweepRetention(config.searchRetentionDays)
+      logger.info(
+        {
+          event: 'search_retention_sweep',
+          deleted_sessions: deleted,
+          retention_days: config.searchRetentionDays,
+        },
+        'Host runtime event'
+      )
+    } catch (err) {
+      logger.error({ err: err }, '[Main] Session search retention sweep failed (non-fatal):')
+    }
     logger.info(
       { searchRetentionDays: config.searchRetentionDays },
       '[Main] Session search enabled (retentionDays=)'

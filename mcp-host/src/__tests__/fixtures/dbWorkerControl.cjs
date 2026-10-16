@@ -7,6 +7,9 @@
 //   as if the worker were wedged in its close checkpoint.
 // - DB_WORKER_CONTROL=terminate-on-sigusr2: SIGUSR2 terminates the DB worker,
 //   an unexpected worker exit while the Host is serving.
+// - DB_WORKER_CONTROL=record-ops: every message reaches the worker; the
+//   preload prints `PRELOAD_POST <kind>` for each op posted and
+//   `PRELOAD_REPLY <kind>` for each reply, in the order they happen.
 //
 // Every other message reaches the real worker unchanged.
 //
@@ -24,7 +27,7 @@ sigtermReady.unref()
 
 const RealWorker = workerThreads.Worker
 const mode = process.env.DB_WORKER_CONTROL
-if (mode !== 'withhold-shutdown' && mode !== 'terminate-on-sigusr2') {
+if (mode !== 'withhold-shutdown' && mode !== 'terminate-on-sigusr2' && mode !== 'record-ops') {
   throw new Error(`dbWorkerControl: unknown DB_WORKER_CONTROL '${mode}'`)
 }
 
@@ -38,12 +41,27 @@ class ControlledWorker extends RealWorker {
         void this.terminate()
       })
     }
+    if (this.isDbWorker && mode === 'record-ops') {
+      this.postedKinds = new Map()
+      // Registered before the PersistQueue's listener, so a reply is printed
+      // before the queue resolves its caller.
+      this.on('message', reply => {
+        const kind = this.postedKinds.get(reply?.id)
+        if (kind === undefined) return
+        this.postedKinds.delete(reply.id)
+        process.stdout.write(`PRELOAD_REPLY ${kind}\n`)
+      })
+    }
   }
 
   postMessage(msg, transfer) {
     if (this.isDbWorker && mode === 'withhold-shutdown' && msg?.op?.kind === 'shutdown') {
       process.stdout.write('PRELOAD_WITHHELD_SHUTDOWN\n')
       return
+    }
+    if (this.isDbWorker && mode === 'record-ops' && msg?.op?.kind) {
+      this.postedKinds.set(msg.id, msg.op.kind)
+      process.stdout.write(`PRELOAD_POST ${msg.op.kind}\n`)
     }
     return super.postMessage(msg, transfer)
   }

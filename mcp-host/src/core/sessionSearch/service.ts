@@ -146,10 +146,12 @@ export class SessionSearchService {
    *
    * The sweep runs as a sequence of worker operations of at most
    * `RETENTION_SWEEP_BATCH_ROWS` rows each, so the worker acknowledges every
-   * batch and a large backlog never trips the queue's progress bound. Between
-   * batches an expired session can show part of its history. The cutoff is
-   * fixed before the first batch, so the loop ends once the expired set is
-   * empty.
+   * batch and a large backlog never trips the queue's progress bound. A batch
+   * deletes an expired session's messages before its row, so between batches
+   * the session would load with part of its history; `main.ts` awaits the
+   * whole sweep before bootstrap and before the Host serves traffic, so no
+   * load runs between batches. The cutoff is fixed before the first batch,
+   * so the loop ends once the expired set is empty.
    *
    * Idempotent. Failures are propagated to the caller; `main.ts` logs them.
    */
