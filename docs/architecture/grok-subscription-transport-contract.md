@@ -205,7 +205,7 @@ both, not a proven minimum. The manifest therefore sets
 `--max-old-space-size=768`, a 2048Mi limit and a 768Mi request, and
 `grok-llm-proxy/test/deployManifest.test.ts` requires the limit to be at least
 1.25 × the largest peak (`ceil(1481.6 × 1.25)` = 1852 MiB). The in-cluster peak
-is not measured (keyper-labs/evenfire-infra#102). The heap cap is a resource
+is not measured yet. The heap cap is a resource
 change only: the resident heap after GC at that load was 420.8 MiB, above the
 200 MiB target recorded for
 `BODY_STRUCTURE_LIMITS`, so lowering the resident set needs a code change

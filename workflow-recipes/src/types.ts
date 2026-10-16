@@ -705,6 +705,7 @@ export interface WorkflowRecipeSpec {
     schedule?: {
       cron: string
       timezone?: string
+      concurrencyPolicy?: 'Forbid' | 'Replace' | 'Allow'
       suspend?: boolean
     }
   }
