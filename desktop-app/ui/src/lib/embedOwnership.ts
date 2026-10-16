@@ -13,9 +13,12 @@ import type {
 } from './embedOwnership.types'
 
 /**
- * Who owns the embedded app view — pure algebra, same contract as
- * `workspaceTabs.ts`: `(state, event) → { state, effects }`, no I/O, no clocks, no
- * id generation, and an unchanged state is returned by reference with `[]`.
+ * Who owns the embedded app view — pure algebra like `workspaceTabs.ts` (no I/O,
+ * no clocks, no id generation), shaped as `(state, event) → { state, effects }`.
+ * A transition that changes no field returns the input state by reference. Its
+ * effects are `[]` unless the event still has something to report: a launch it
+ * abandons (`launchSettled`), a handoff with no view to wait for
+ * (`handoffReady`), or the owner's new title (`setTitle`).
  *
  * Main is the only authority on which view exists; the tab store is the only
  * authority on which tab is active (it arrives here as `projected`). This reducer
