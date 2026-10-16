@@ -7,7 +7,9 @@
  * tests j, k and m in `switchToChat.transcriptMemo.test.tsx`; row 14 (blank
  * path) is #976's `createChatFailure*` suites. Rows 15 and 16 cover a newer
  * selection intent that supersedes the click without switching, on the same
- * Host and across Hosts. Every case runs for a
+ * Host and across Hosts. Rows 17 and 18 check that the superseded mark stays
+ * dead when a later click or effect reuses the same switch request. Every case
+ * runs for a
  * stateful and a stateless Host.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -18,7 +20,7 @@ import {
   setComposerDraft,
 } from '@lib/composerDraftStore'
 import type { AgentChatMessage } from '../../../uiTypes'
-import { deferred } from './__fixtures__/catalogFixtures'
+import { deferred, localIndex } from './__fixtures__/catalogFixtures'
 import { type RenderControllerResult, renderController } from './__fixtures__/controllerHarness'
 import { ipcGenericForbidden } from './__fixtures__/ipcErrors'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
@@ -511,6 +513,85 @@ describe('provisional selection (#1091 A17)', () => {
       // The superseded click no longer owns a provisional mark, so send dispatches.
       expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
       expect(getComposerDraft('chat-a', host)).toBe('')
+    }
+  )
+
+  /** Rows 17/18 setup: row 15, then a message sent and rendered in A. */
+  async function sendAfterSupersededClick(host: string) {
+    const { controller } = await rememberA(host)
+    const { write, click } = await clickHeld(controller, host)
+    const getIndexCalls = clerum.chat.getIndex.mock.calls.length
+    clerum.chat.getIndex.mockRejectedValue(new Error('catalog unavailable'))
+    act(() => controller.result.current.setPendingChatSelection(host, 'chat-a'))
+    act(() => controller.rerender({ navItem: 'chat' }))
+    await waitFor(() =>
+      expect(clerum.chat.getIndex.mock.calls.length).toBeGreaterThan(getIndexCalls)
+    )
+    await waitFor(() => expect(controller.result.current.chatMessagesLoading).toBe(false))
+    await act(async () => {
+      write.resolve()
+      await click
+    })
+    clerum.chat.getIndex.mockResolvedValue(
+      localIndex([
+        { id: 'chat-a', title: 'A' },
+        { id: 'chat-b', title: 'B' },
+      ]) as never
+    )
+    act(() => setComposerDraft('chat-a', 'hello', host))
+    await act(async () => {
+      await controller.result.current.handleSendAgentMessage('hello')
+    })
+    // Liveness: the message was dispatched once and rendered.
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(shows(controller)).toContain('hello')
+    return controller
+  }
+
+  it.each(HOSTS)(
+    '17. %s: a later same-row click whose write fails does not revive the superseded mark',
+    async host => {
+      const controller = await sendAfterSupersededClick(host)
+      const shown = shows(controller)
+      const writesBefore = clerum.chat.setLastActive.mock.calls.length
+      const reclickError = vi.fn()
+      const reclick = await clickHeld(controller, host, { onCurrentError: reclickError })
+      // Witness: the reclick issued its own write and did not repaint.
+      expect(clerum.chat.setLastActive.mock.calls.length).toBe(writesBefore + 1)
+      expect(shows(controller)).toEqual(shown)
+      await act(async () => {
+        reclick.write.reject(new Error('last-active write failed'))
+        await reclick.click
+      })
+      // Witness: the failure reached the caller, once.
+      expect(reclickError).toHaveBeenCalledTimes(1)
+      expect(controller.result.current.activeChatId).toBe('chat-a')
+      expect(shows(controller)).toEqual(shown)
+    }
+  )
+
+  it.each(HOSTS)(
+    '18. %s: a later effect-driven switch whose write fails does not revive the superseded mark',
+    async host => {
+      const controller = await sendAfterSupersededClick(host)
+      const shown = shows(controller)
+      const writesBefore = clerum.chat.setLastActive.mock.calls.length
+      clerum.chat.setLastActive.mockRejectedValueOnce(new Error('last-active write failed'))
+      // A same-chat notification whose catalog load now succeeds: the switch runs in the effect.
+      act(() => controller.result.current.setPendingChatSelection(host, 'chat-a'))
+      act(() => controller.rerender({ navItem: 'chat' }))
+      // Witness: the effect's switch issued its write and its failure was reported.
+      await waitFor(() =>
+        expect(clerum.chat.setLastActive.mock.calls.length).toBe(writesBefore + 1)
+      )
+      await waitFor(() =>
+        expect(controller.spies.pushToast).toHaveBeenCalledWith(
+          expect.stringContaining('Could not open conversation'),
+          'error'
+        )
+      )
+      expect(controller.result.current.activeChatId).toBe('chat-a')
+      expect(shows(controller)).toEqual(shown)
     }
   )
 })

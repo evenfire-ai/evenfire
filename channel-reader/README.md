@@ -1,6 +1,6 @@
 # Clerum Channel Reader
 
-A Node.js/TypeScript application that fetches messages from Telegram, Email (IMAP), and Slack. `CommunicationChannel` config controls transport reachability and optional sender pre-filters. Workflow approval identity verification is a separate Profile UI flow and is enforced only by workflow approval/trigger handling.
+A Node.js/TypeScript application that receives messages from Telegram, Email (IMAP), Slack, and Microsoft Teams. `CommunicationChannel` config controls transport reachability and optional sender pre-filters. Workflow approval identity verification is a separate Profile UI flow and is enforced only by workflow approval/trigger handling.
 
 ## Modes
 

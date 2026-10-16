@@ -48,9 +48,13 @@ records the governed `initial_setup` GFS operator link atomically:
 git clone https://github.com/evenfire-ai/evenfire.git && cd evenfire
 cp .env.example .env
 # edit .env: set ADMIN_PASSWORD (required, no default ships) and ONE LLM key
-MINIKUBE_IMAGE_TAG=latest make minikube-setup   # see the note below on this override
-make minikube-status                            # wait for every deployment READY
+make minikube-setup    # pulls the pinned release images; first run ~15 min
+make minikube-status   # wait for every deployment READY
 ```
+
+If setup reports that a pinned image tag does not exist (between a release bump
+and its promotion), re-run with `MINIKUBE_IMAGE_TAG=latest`; see the
+[Quickstart](docs/get-started/quickstart.md).
 
 The seeded `admin@evenfire.local` Desktop account is therefore the initial GFS
 operator. Re-running setup is idempotent: it may log in to verify the existing
@@ -64,8 +68,8 @@ make install-all && npm --prefix control-ui install
 npm run ui              # Control UI + Profile UI + Desktop App
 ```
 
-The full walkthrough (prerequisites, login, and the pure-API path) is in
-[Get started on minikube](docs/get-started/minikube.md).
+The full walkthrough (prerequisites, login, and the pure-API path) is in the
+[Quickstart](docs/get-started/quickstart.md).
 
 Evenfire is meant to be run on a remote cluster — see [Deploying to a remote cluster](#deploying-to-a-remote-cluster).
 
@@ -78,7 +82,7 @@ Evenfire is a complete platform for running LLM agents that take
 
 Agents in Evenfire can:
 
-- **Converse** across the native desktop app, Telegram, Microsoft Teams and Slack
+- **Converse** across the native desktop app, Telegram, Microsoft Teams, Slack and email
 - **Call tools** over the [Model Context Protocol](https://modelcontextprotocol.io) (MCP)
 - **Share** teams, files, and cost budgets
 - **Compose** multi-step workflows
@@ -103,7 +107,7 @@ to its deep dive.
 
 | Capability             | What you get                                                                                                                               | Deep dive                                               |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
-| **Agents**             | Real actions across Telegram / Email / Slack / desktop (`shell_exec`, HTTP, a real browser, files), plus memory and approval gates         | [mcp-host](mcp-host/README.md)                          |
+| **Agents**             | Real actions across Telegram / Email / Slack / Teams / desktop (`shell_exec`, HTTP, a real browser, files), plus memory and approval gates | [mcp-host](mcp-host/README.md)                          |
 | **Console & client**   | An admin **Control UI** console and an Electron **Desktop App**, plus a small Profile UI for invites                                       | [surfaces](docs/surfaces/README.md)                     |
 | **Connectors (MCP)**   | Governed MCP servers with per-`Context` allowlists; stdio tools via the bridge; remote SaaS behind a pinned egress proxy                   | [mcp-servers](mcp-servers/README.md)                    |
 | **Workflows**          | Declarative multi-workload `WorkflowRecipe`s with a lifecycle: risk-based approval, shadow testing, rollback                               | [workflowrecipe](docs/crds/workflowrecipe.md)           |
@@ -111,7 +115,7 @@ to its deep dive.
 | **Teams & access**     | Profiles, teams, roles (admin / inviter / member), invitations, and session → scoped-RPC token brokerage                                   | [external-rest-api](external-rest-api/README.md)        |
 | **Files**              | Read-only team workspaces agents can draw on, plus a brokered, audited shared drive where every read and write is checked and logged       | [gfs-controller](gfs-controller/README.md)              |
 | **Cost & governance**  | Token budgets per scope (block/warn), usage and LLM-price accounting, and a connector-image allowlist                                      | [token budgets](docs/how-to/token-budgets-and-usage.md) |
-| **Config as code**     | The whole fleet as eight `clerum.io` ([why that name?](docs/concepts/code-names.md)) CRDs: version-controlled, reviewable, GitOps-friendly | [crds](docs/crds/README.md)                             |
+| **Config as code**     | The whole fleet as nine `clerum.io` ([why that name?](docs/concepts/code-names.md)) CRDs: version-controlled, reviewable, GitOps-friendly  | [crds](docs/crds/README.md)                             |
 
 ---
 
@@ -119,8 +123,7 @@ to its deep dive.
 
 - **vs a hosted assistant**: you own the data and the infrastructure. Evenfire
   adds no vendor to the request path: with your own model keys, prompts and files
-  go straight to the model provider you choose. Point an agent at a self-hosted
-  or local model and nothing leaves your environment at all.
+  go straight to the model provider you choose.
 - **vs an in-process agent framework**: real isolation and governance:
   per-agent pods, default-deny networking, multi-tenant teams and roles, and
   approvals enforced by the platform rather than by the calling application.
@@ -128,7 +131,7 @@ to its deep dive.
   connector registry, shared files, and cost accounting, all declared as
   configuration instead of assembled by hand.
 - **vs betting on one provider**: the same agents, tools, and configuration run
-  across a growing roster of providers, from frontier labs to local LLMs. Pick
+  across a growing roster of providers. Pick
   whichever model gives the best cost/quality tradeoff for each job, and switch
   providers without rebuilding, so your setup and data are never locked to a
   single vendor.
@@ -145,10 +148,16 @@ four layers constrain what it can do:
   channel, and callbacks are signature-verified.
 - **Least privilege.** Each agent reaches only the connectors its `Context`
   grants, through short-lived, scope-narrowed tokens that can't widen
-  themselves; container images must match a pinned digest and an allowlist.
-- **Deny-all networking.** Runtime namespaces start with no connectivity;
-  access is opened per (agent, connector), and outbound traffic is pinned to
-  the specific hosts a connector declares, never the open internet.
+  themselves. Connector images can be restricted to an allowlist, but the check
+  is off by default (`CONTROL_API_ENFORCE_IMAGE_ALLOWLIST=true` turns it on),
+  and custom workflow coordinator images must be digest-pinned (the minikube
+  overlay relaxes this for local test fixtures).
+- **Deny-all networking.** Runtime namespaces start with no connectivity, and
+  access is opened per (agent, connector). A connector's egress is limited to
+  the hosts and ports it declares, unless an operator approves explicit
+  `public-web` egress. Agent pods may reach the public internet on ports
+  80/443 (for the LLM API and the approval-gated `http_request` tool);
+  private, metadata and cluster-internal ranges stay blocked.
 - **Authenticated internals.** Every service-to-service call carries a
   short-lived, audience-scoped token; shared-file access is re-checked and
   audited on each request, and inbound webhooks are signature-verified.
@@ -159,37 +168,40 @@ Report vulnerabilities privately: **[SECURITY.md](SECURITY.md)**.
 
 ## Supported LLM providers
 
-A broad, growing set of providers behind one interface, from frontier labs to
-local models. Keys live in a Kubernetes Secret you create (dev mode: a single
+A broad, growing set of hosted model providers behind one interface. Keys live in a Kubernetes Secret you create (dev mode: a single
 environment variable; setup infers the matching provider).
 
-| Provider         | `provider` value | Integration       |
-| ---------------- | ---------------- | ----------------- |
-| OpenAI           | `openai`         | Native SDK        |
-| Anthropic        | `claude`         | Native SDK        |
-| Z.AI             | `zai`            | OpenAI-compatible |
-| Bailian          | `bailian`        | OpenAI-compatible |
-| Google Vertex AI | `vertex`         | Native SDK        |
-| Amazon Bedrock   | `bedrock`        | Native SDK        |
-| OpenRouter       | `openrouter`     | OpenAI-compatible |
-| Google Gemini    | `gemini`         | OpenAI-compatible |
-| DeepSeek         | `deepseek`       | OpenAI-compatible |
-| Groq             | `groq`           | OpenAI-compatible |
-| Together AI      | `together`       | OpenAI-compatible |
-| Fireworks AI     | `fireworks`      | OpenAI-compatible |
-| Mistral AI       | `mistral`        | OpenAI-compatible |
-| xAI (Grok)       | `xai`            | OpenAI-compatible |
-| Cerebras         | `cerebras`       | OpenAI-compatible |
-| DeepInfra        | `deepinfra`      | OpenAI-compatible |
-| Perplexity       | `perplexity`     | OpenAI-compatible |
-| Moonshot (Kimi)  | `moonshot`       | OpenAI-compatible |
-| Nebius           | `nebius`         | OpenAI-compatible |
-| Novita AI        | `novita`         | OpenAI-compatible |
-| MiniMax          | `minimax`        | OpenAI-compatible |
-| Azure OpenAI     | `azure`          | Light driver      |
+| Provider                     | `provider` value     | Integration                           |
+| ---------------------------- | -------------------- | ------------------------------------- |
+| OpenAI                       | `openai`             | Native SDK                            |
+| Anthropic                    | `claude`             | Native SDK                            |
+| Z.AI                         | `zai`                | OpenAI-compatible                     |
+| Bailian                      | `bailian`            | OpenAI-compatible                     |
+| Google Vertex AI             | `vertex`             | Native SDK                            |
+| Amazon Bedrock               | `bedrock`            | Native SDK                            |
+| OpenRouter                   | `openrouter`         | OpenAI-compatible                     |
+| Google Gemini                | `gemini`             | OpenAI-compatible                     |
+| DeepSeek                     | `deepseek`           | OpenAI-compatible                     |
+| Groq                         | `groq`               | OpenAI-compatible                     |
+| Together AI                  | `together`           | OpenAI-compatible                     |
+| Fireworks AI                 | `fireworks`          | OpenAI-compatible                     |
+| Mistral AI                   | `mistral`            | OpenAI-compatible                     |
+| xAI (Grok)                   | `xai`                | OpenAI-compatible                     |
+| Cerebras                     | `cerebras`           | OpenAI-compatible                     |
+| DeepInfra                    | `deepinfra`          | OpenAI-compatible                     |
+| Perplexity                   | `perplexity`         | OpenAI-compatible                     |
+| Moonshot (Kimi)              | `moonshot`           | OpenAI-compatible                     |
+| Nebius                       | `nebius`             | OpenAI-compatible                     |
+| Novita AI                    | `novita`             | OpenAI-compatible                     |
+| MiniMax                      | `minimax`            | OpenAI-compatible                     |
+| Azure OpenAI                 | `azure`              | Light driver                          |
+| ChatGPT (Codex) subscription | `codex-subscription` | Subscription sign-in (off by default) |
+| Grok subscription            | `grok-subscription`  | Subscription sign-in (off by default) |
 
 Most providers are OpenAI-compatible and plug in as config with no custom code;
 only a few (`claude`, `vertex`, `bedrock`, `azure`) need a dedicated integration.
+The two subscription providers use an admin's sign-in instead of an API key and
+are switched off in `deploy/base` (on in the minikube overlay).
 Overview: [docs/llm-providers/README.md](docs/llm-providers/README.md) ·
 Configure: [docs/deploy/llm-providers.md](docs/deploy/llm-providers.md) ·
 Add one: [docs/llm-providers/adding-a-provider.md](docs/llm-providers/adding-a-provider.md) ·
@@ -214,9 +226,7 @@ signing/JWT keys, secrets, and the security non-negotiables.
 ## Development and testing
 
 Each service is an independent npm package. Run `npm test` in a package, or
-`make test-unit-all` after installing deps; `make test-counts` prints the live
-unit-test file and case totals: "is it real, is it tested" without a hardcoded
-number to drift. E2E suites run against minikube with Calico NetworkPolicies and
+`make test-unit-all` after installing deps. E2E suites run against minikube with Calico NetworkPolicies and
 the approval flow: [docs/testing/e2e-guide.md](docs/testing/e2e-guide.md).
 Contributor loop: [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -234,7 +244,7 @@ Contributor loop: [CONTRIBUTING.md](CONTRIBUTING.md).
 | [docs/concepts/when-to-use-evenfire.md](docs/concepts/when-to-use-evenfire.md) | Fit by category             |
 | [docs/faq.md](docs/faq.md)                                                     | FAQ & troubleshooting       |
 | [ARCHITECTURE.md](ARCHITECTURE.md)                                             | Architecture & data flow    |
-| [docs/crds/README.md](docs/crds/README.md)                                     | Config as code (the 8 CRDs) |
+| [docs/crds/README.md](docs/crds/README.md)                                     | Config as code (the 9 CRDs) |
 | [docs/llms.txt](docs/llms.txt)                                                 | Map for coding agents       |
 
 **Components**: every deployable service has its own README (the deep dive):
@@ -242,7 +252,7 @@ Contributor loop: [CONTRIBUTING.md](CONTRIBUTING.md).
 | Component                                                                      | Role                                                  |
 | ------------------------------------------------------------------------------ | ----------------------------------------------------- |
 | [mcp-host](mcp-host/README.md)                                                 | Agent runtime: LLM loop, tools, approval gate         |
-| [channel-reader](channel-reader/README.md)                                     | Telegram / Email / Slack ingress                      |
+| [channel-reader](channel-reader/README.md)                                     | Telegram / Email / Slack / Teams ingress              |
 | [control-api](control-api/README.md)                                           | Control plane: CRDs, secrets, token mint, usage       |
 | [control-ui](control-ui/README.md)                                             | Admin dashboard                                       |
 | [profile-ui](profile-ui/README.md)                                             | End-user profile and invitation confirmation          |
@@ -260,6 +270,8 @@ Contributor loop: [CONTRIBUTING.md](CONTRIBUTING.md).
 | [webhook-gateway](webhook-gateway/README.md)                                   | Per-recipe webhook signature verifier                 |
 | [webhook-proxy](webhook-proxy/README.md)                                       | Stateless public webhook router                       |
 | [workflow-approval-request-reader](workflow-approval-request-reader/README.md) | Inbound Telegram/Slack approval callbacks             |
+| [codex-llm-proxy](codex-llm-proxy/README.md)                                   | ChatGPT/Codex subscription broker (off by default)    |
+| [grok-llm-proxy](grok-llm-proxy/README.md)                                     | Grok subscription broker (off by default)             |
 
 Ops & platform directories:
 

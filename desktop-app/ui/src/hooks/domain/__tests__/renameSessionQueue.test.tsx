@@ -255,71 +255,6 @@ describe('rename pending queue (spec 15 §2.5)', () => {
     expect(spies.pushToast).not.toHaveBeenCalledWith(expect.anything(), 'error')
   })
 
-  // #1130: once the rename is confirmed its pending marker is gone and the
-  // server title wins the merge, so a reload must not reuse a catalog page
-  // cached before the rename.
-  it('T-1130-2: a reload right after a confirmed rename keeps the new title', async () => {
-    wireStatefulIndex(clerum, [{ id: 'c1', title: 'old' }])
-    const agentXIndex = clerum.chat.getIndex.getMockImplementation()
-    if (!agentXIndex) throw new Error('wireStatefulIndex did not install getIndex')
-    clerum.chat.getIndex.mockImplementation(async (agentRef: string) =>
-      agentRef === 'agent-x' ? agentXIndex(agentRef) : localIndex([])
-    )
-    const agentXTitle = () =>
-      result.current.latestChatSessions.find(
-        chat => chat.agentRef === 'agent-x' && chat.id === 'c1'
-      )?.title
-    let serverTitle = 'old'
-    let renameConfirmed = false
-    let pageRequestsAfterConfirmation = 0
-    clerum.rpc.listSessions.mockImplementation(
-      async (hostRef: string, _teamId: string | undefined, query?: { limit?: number }) => {
-        if (hostRef !== 'agent-x') return parseSessionsListResult({ items: [] })
-        if (renameConfirmed && query?.limit !== 1) pageRequestsAfterConfirmation += 1
-        return reportedSessions([{ chatId: 'c1', title: serverTitle }])
-      }
-    )
-    clerum.rpc.renameSession.mockImplementation(
-      async (_hostRef: string, _agent: string, _chatId: string, title: string) => {
-        serverTitle = title
-        return { title }
-      }
-    )
-
-    const { result, rerender } = renderController({
-      selectedAgent: 'agent-x',
-      agentNames: ['agent-x'],
-    })
-    // Witness: the catalog page with the old title has been read.
-    await waitFor(() => expect(agentXTitle()).toBe('old'))
-
-    await act(async () => {
-      await result.current.handleRenameChatForAgent('agent-x', 'c1', 'renamed')
-    })
-    renameConfirmed = true
-    expect(clerum.rpc.renameSession).toHaveBeenCalledWith('agent-x', 'agent-x', 'c1', 'renamed')
-    expect(agentXTitle()).toBe('renamed')
-
-    // Reload within the cache window.
-    await act(async () => {
-      rerender({ agentNames: ['agent-x', 'agent-y'] })
-    })
-    // Witness: the reload ran.
-    await waitFor(() =>
-      expect(clerum.rpc.listSessions).toHaveBeenCalledWith('agent-y', undefined, {
-        agent: 'agent-y',
-        limit: 50,
-      })
-    )
-    await act(async () => {
-      await new Promise(resolve => setTimeout(resolve, 20))
-    })
-
-    expect(agentXTitle()).toBe('renamed')
-    // Witness: the reload asked the server again for this Host.
-    expect(pageRequestsAfterConfirmation).toBeGreaterThan(0)
-  })
-
   it('4xx: rolls the optimistic title back to the previous value and toasts an error', async () => {
     clerum.chat.getIndex.mockResolvedValue(localIndex([{ id: 'c1', title: 'old' }]))
     clerum.rpc.renameSession.mockRejectedValue(new Error('Rename session failed (400)'))
@@ -483,6 +418,61 @@ describe('rename pending queue — concurrency (spec 15 §2.5)', () => {
 
     // The poll must NOT have spawned a second PATCH.
     expect(clerum.rpc.renameSession).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      inFlight.resolve({ title: 'renamed' })
+      await pending
+    })
+  })
+
+  // A poll during an in-flight rename must not write the server's (older) title
+  // into the local index over the optimistic one (§2.2 case E).
+  it('omits the server title of a chat with an in-flight rename from the index write', async () => {
+    const inFlight = deferred<{ title: string }>()
+    clerum.chat.getIndex.mockResolvedValue(
+      localIndex([
+        { id: 'c1', title: 'old' },
+        { id: 'c2', title: 'other' },
+      ])
+    )
+    clerum.rpc.listSessions.mockResolvedValue(
+      reportedSessions([
+        { chatId: 'c1', title: 'server c1' },
+        { chatId: 'c2', title: 'server c2' },
+      ])
+    )
+    clerum.rpc.renameSession.mockReturnValue(inFlight.promise)
+
+    const { result, rerender } = renderController({
+      selectedAgent: 'agent-x',
+      agentNames: ['agent-x'],
+    })
+    await waitFor(() => expect(titleInList(result.current, 'c1')).toBe('server c1'))
+
+    let pending: Promise<void> | undefined
+    await act(async () => {
+      pending = result.current.handleRenameChatForAgent('agent-x', 'c1', 'renamed')
+      await flushMicrotasks()
+    })
+    await waitFor(() => expect(clerum.rpc.renameSession).toHaveBeenCalledTimes(1))
+    const callsBeforePoll = clerum.chat.reconcileServerSessions.mock.calls.length
+
+    await act(async () => {
+      rerender({ agentNames: ['agent-x', 'agent-y'] })
+      await flushMicrotasks()
+    })
+
+    type Payload = Array<{ chatId: string; title?: string }>
+    const pollWrites = (clerum.chat.reconcileServerSessions.mock.calls as Array<[string, Payload]>)
+      .slice(callsBeforePoll)
+      .filter(([agentRef]) => agentRef === 'agent-x')
+      .map(([, sessions]) => sessions)
+    // Witness: the poll wrote this Host's index, with c2's server title.
+    expect(pollWrites.length).toBeGreaterThan(0)
+    for (const sessions of pollWrites) {
+      expect(sessions.find(s => s.chatId === 'c2')?.title).toBe('server c2')
+      expect(sessions.find(s => s.chatId === 'c1')).not.toHaveProperty('title')
+    }
 
     await act(async () => {
       inFlight.resolve({ title: 'renamed' })

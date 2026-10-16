@@ -20,17 +20,20 @@ import {
   isNetworkError,
 } from '../../lib/format'
 import { scheduleAfterFirstPaint } from '../scheduleAfterFirstPaint'
-import type { useChatStore } from '../useChatStore'
+import { nextCatalogSequence, type useChatStore } from '../useChatStore'
 import { type SessionFsmEvent, type SessionFsmStore, seedSessionSnapshots } from './sessionFsm'
 
 const SESSION_CATALOG_PAGE_LIMIT = 50
+
+/** A catalog page and the sequence number of the request that produced it. */
+type IssuedCatalogPage = Awaited<ReturnType<ReturnType<typeof useChatStore>['listSessions']>>
 
 async function readSessionCatalog(
   chatStore: ReturnType<typeof useChatStore>,
   agentRef: string,
   query: Parameters<ReturnType<typeof useChatStore>['listSessions']>[1],
   options: { force?: boolean } = {}
-): Promise<SessionsListResult> {
+): Promise<IssuedCatalogPage> {
   try {
     return await chatStore.listSessions(agentRef, query, options)
   } catch (error) {
@@ -229,20 +232,48 @@ function knownServerMessageCount(session: SessionsListResult['items'][number]): 
 /** A cross-agent catalog session tagged with the agent whose page reported it. */
 type LatestCatalogSession = SessionsListResult['items'][number] & { agentRef: string }
 
+/** One user rename waiting for the server (spec 15 §2.5). */
+type PendingRenameEntry = {
+  agentRef: string
+  chatId: string
+  title: string
+  // Title BEFORE the first rename of the current pending chain (the last
+  // non-pending value) — the rollback target. Preserved across a re-rename
+  // so a rollback never restores an unconfirmed optimistic title (FIX 2).
+  previousTitle: string
+  state: PendingRename
+  // A PATCH for this exact entry is in flight right now (FIX 1), or the local
+  // write that precedes the first PATCH has not finished. Distinct from `state`
+  // (the durable 'in-flight'/'offline' pending kind): this gates re-entrancy so
+  // a flush poll never fires a duplicate or early PATCH.
+  sending: boolean
+  // R1-M1: count of GENUINE ('offline' network / 5xx) failed sync attempts
+  // for THIS entry (never reset while the entry lives). A 404 ('in-flight')
+  // does NOT increment it — that is a wait for materialization, not a
+  // failure. Drives the retry budget above.
+  failureCount: number
+  // R1-M1: budget exhausted — keep the optimistic local title but stop
+  // auto-retrying on polls/online. Only 'offline' entries can reach this;
+  // a fresh user rename makes a new entry.
+  retriesExhausted: boolean
+  // The entry has left the queue for good (confirmed, rejected or revoked),
+  // whether or not it was still the current entry for its key.
+  settled: boolean
+}
+
 /** The selected agent's sidebar: entries keyed by chat id, "Chat <id>" placeholder. */
 function mergeSelectedAgentCatalogPage(
   cached: SidebarChatEntry[],
   sessions: SessionsListResult['items'],
-  agentRef: string,
-  pendingRenameStateFor: (agentRef: string, chatId: string) => PendingRename
+  renameStateFor: (chatId: string) => PendingRename
 ): SidebarChatEntry[] {
   return mergeCatalogPage<SidebarChatEntry, SessionsListResult['items'][number]>({
     cached,
     sessions,
     entryKey: entry => entry.id,
     sessionKey: session => session.chatId,
-    entryPendingRename: entry => pendingRenameStateFor(agentRef, entry.id),
-    sessionPendingRename: session => pendingRenameStateFor(agentRef, session.chatId),
+    entryPendingRename: entry => renameStateFor(entry.id),
+    sessionPendingRename: session => renameStateFor(session.chatId),
     placeholderFor: agentChatPlaceholder,
     serverOnlyEntry: (session, title) => ({
       id: session.chatId,
@@ -338,34 +369,11 @@ export function useChatListController({
   // `${agentRef}:${chatId}`. `state` maps directly to `resolveSessionTitle`'s
   // `pendingRename`: 'in-flight' (PATCH sent / awaiting the session to exist
   // server-side after a 404) or 'offline' (network failure, retry on reconnect).
-  const pendingRenamesRef = useRef<
-    Map<
-      string,
-      {
-        agentRef: string
-        chatId: string
-        title: string
-        // Title BEFORE the first rename of the current pending chain (the last
-        // non-pending value) — the rollback target. Preserved across a re-rename
-        // so a rollback never restores an unconfirmed optimistic title (FIX 2).
-        previousTitle: string
-        state: PendingRename
-        // A PATCH for this exact entry is in flight right now (FIX 1). Distinct
-        // from `state` (which is the durable 'in-flight'/'offline' pending kind):
-        // this gates re-entrancy so a flush poll never fires a duplicate PATCH.
-        sending: boolean
-        // R1-M1: count of GENUINE ('offline' network / 5xx) failed sync attempts
-        // for THIS entry (never reset while the entry lives). A 404 ('in-flight')
-        // does NOT increment it — that is a wait for materialization, not a
-        // failure. Drives the retry budget below.
-        failureCount: number
-        // R1-M1: budget exhausted — keep the optimistic local title but stop
-        // auto-retrying on polls/online. Only 'offline' entries can reach this;
-        // a fresh user rename makes a new entry.
-        retriesExhausted: boolean
-      }
-    >
-  >(new Map())
+  const pendingRenamesRef = useRef<Map<string, PendingRenameEntry>>(new Map())
+  // When each chat's latest rename left the queue, on the catalog clock
+  // (`nextCatalogSequence`). A catalog page requested before that moment may
+  // still carry the title the rename replaced (#1091 A21).
+  const renameSettledSeqRef = useRef(new Map<string, number>())
 
   const pendingRenameKey = (agentRef: string, chatId: string): string => `${agentRef}:${chatId}`
   const authUserKeyRef = useRef(authUserKey)
@@ -374,9 +382,68 @@ export function useChatListController({
     authUserKeyRef.current = authUserKey
   }, [authUserKey])
 
-  const pendingRenameStateFor = useCallback((agentRef: string, chatId: string): PendingRename => {
-    return pendingRenamesRef.current.get(pendingRenameKey(agentRef, chatId))?.state ?? 'none'
+  /**
+   * Takes `entry` out of the queue. Only the key's current entry deletes the key
+   * and stamps the settle time; a superseded entry is only marked settled, and
+   * the current entry's own settle stamps the key later. Returns whether `entry`
+   * was current.
+   */
+  const settlePendingRename = useCallback((key: string, entry: PendingRenameEntry): boolean => {
+    entry.settled = true
+    if (pendingRenamesRef.current.get(key) !== entry) return false
+    pendingRenamesRef.current.delete(key)
+    renameSettledSeqRef.current.set(key, nextCatalogSequence())
+    return true
   }, [])
+
+  /**
+   * The rename state a catalog page must respect for one chat (§2.2 E/F): a
+   * pending rename's own state; 'in-flight' when the page was requested before
+   * the chat's last rename settled (its title may predate the rename, so the
+   * local title keeps winning); otherwise 'none'. `issueSeq` undefined means the
+   * page's request time is unknown, which is treated as before the settle.
+   */
+  const catalogTitleRenameState = useCallback(
+    (agentRef: string, chatId: string, issueSeq: number | undefined): PendingRename => {
+      const key = pendingRenameKey(agentRef, chatId)
+      const pending = pendingRenamesRef.current.get(key)
+      if (pending) return pending.state
+      const settledSeq = renameSettledSeqRef.current.get(key)
+      if (settledSeq !== undefined && (issueSeq === undefined || issueSeq <= settledSeq)) {
+        return 'in-flight'
+      }
+      return 'none'
+    },
+    []
+  )
+
+  // Persist server freshness and titles into the local index (spec §5.3), so a
+  // cold start paints the last server title instead of the hydration
+  // placeholder. A chat with a pending local rename, or a page requested before
+  // its last rename settled, keeps its local title (§2.2 cases E/F).
+  // Best-effort: must never block or fail the visible render.
+  const persistServerSessions = useCallback(
+    (agentRef: string, sessions: SessionsListResult['items'], issueSeq: number | undefined) => {
+      try {
+        void chatStore
+          .reconcileServerSessions(
+            agentRef,
+            sessions.map(session => ({
+              chatId: session.chatId,
+              lastActivityAt: session.lastActivityAt,
+              ...(session.title &&
+              catalogTitleRenameState(agentRef, session.chatId, issueSeq) === 'none'
+                ? { title: session.title }
+                : {}),
+            }))
+          )
+          .catch(() => undefined)
+      } catch {
+        // ignore — reconciliation is best-effort freshness only
+      }
+    },
+    [chatStore.reconcileServerSessions, catalogTitleRenameState]
+  )
 
   // Indirection so the catalog loaders (defined above the queue) can trigger a
   // retry of pending renames after a listSessions poll without depending on the
@@ -426,6 +493,7 @@ export function useChatListController({
   // (attemptRenameRpc's `pendingRenamesRef.current.get(key) !== entry` guard).
   useEffect(() => {
     pendingRenamesRef.current.clear()
+    renameSettledSeqRef.current.clear()
   }, [authUserKey])
 
   const reportCatalogOffline = (agentRef: string) => {
@@ -564,7 +632,7 @@ export function useChatListController({
 
       const suppressionMarkerAtRequest = suppressAutoSelectionByAgentRef.current.get(agentRef)
       scheduleAfterFirstPaint(async () => {
-        let serverResult: SessionsListResult
+        let serverResult: IssuedCatalogPage
         try {
           serverResult = await readSessionCatalog(chatStore, agentRef, {
             agent: agentRef,
@@ -636,11 +704,8 @@ export function useChatListController({
             chat => !deletedChatIdsByAgentRef.current.get(agentRef)?.has(chat.id)
           )
           // §2.2 precedence (cases A-F) lives in `mergeCatalogPage`.
-          return mergeSelectedAgentCatalogPage(
-            dedupedPrevious,
-            visibleSessions,
-            agentRef,
-            pendingRenameStateFor
+          return mergeSelectedAgentCatalogPage(dedupedPrevious, visibleSessions, chatId =>
+            catalogTitleRenameState(agentRef, chatId, serverResult.issueSeq)
           )
         })
 
@@ -689,19 +754,7 @@ export function useChatListController({
             .catch(() => undefined)
         }
 
-        // Persist server freshness into the local index (spec §5.3): keeps the
-        // durable sidebar order aligned with the source of truth. Best-effort:
-        // must never block or fail the visible local-cache render.
-        try {
-          void chatStore
-            .reconcileServerSessions(
-              agentRef,
-              serverSessions.map(s => ({ chatId: s.chatId, lastActivityAt: s.lastActivityAt }))
-            )
-            .catch(() => undefined)
-        } catch {
-          // ignore — reconciliation is best-effort freshness only
-        }
+        persistServerSessions(agentRef, serverSessions, serverResult.issueSeq)
       })
 
       return { index, merged }
@@ -710,12 +763,13 @@ export function useChatListController({
       authorityScope,
       chatStore.getIndex,
       chatStore.listSessions,
-      chatStore.reconcileServerSessions,
       fsm,
       getHostAuthorityEpoch,
       isHostAccessBlocked,
       onHostAccessRevoked,
       host,
+      persistServerSessions,
+      catalogTitleRenameState,
     ]
   )
 
@@ -737,7 +791,7 @@ export function useChatListController({
     const hostAuthorityEpoch = getHostAuthorityEpoch(agentRef)
     setChatListMoreLoading(true)
     try {
-      let serverResult: SessionsListResult
+      let serverResult: IssuedCatalogPage
       try {
         serverResult = await readSessionCatalog(
           chatStore,
@@ -823,24 +877,12 @@ export function useChatListController({
           chat => !deletedChatIdsByAgentRef.current.get(agentRef)?.has(chat.id)
         )
         // §2.2 precedence (cases A-F) lives in `mergeCatalogPage`.
-        return mergeSelectedAgentCatalogPage(
-          dedupedPrevious,
-          visibleSessions,
-          agentRef,
-          pendingRenameStateFor
+        return mergeSelectedAgentCatalogPage(dedupedPrevious, visibleSessions, chatId =>
+          catalogTitleRenameState(agentRef, chatId, serverResult.issueSeq)
         )
       })
 
-      try {
-        void chatStore
-          .reconcileServerSessions(
-            agentRef,
-            serverSessions.map(s => ({ chatId: s.chatId, lastActivityAt: s.lastActivityAt }))
-          )
-          .catch(() => undefined)
-      } catch {
-        // ignore — reconciliation is best-effort freshness only
-      }
+      persistServerSessions(agentRef, serverSessions, serverResult.issueSeq)
     } finally {
       chatListLoadingMoreByAgentRef.current.delete(agentRef)
       if (selectedAgentRef.current === agentRef) {
@@ -849,11 +891,12 @@ export function useChatListController({
     }
   }, [
     chatStore.listSessions,
-    chatStore.reconcileServerSessions,
     fsm,
     getHostAuthorityEpoch,
     isHostAccessBlocked,
     onHostAccessRevoked,
+    persistServerSessions,
+    catalogTitleRenameState,
   ])
 
   const loadChatList = useCallback(
@@ -1184,16 +1227,7 @@ export function useChatListController({
    * rolls the optimistic title back and toasts. Never logs the raw title.
    */
   const attemptRenameRpc = useCallback(
-    async (entry: {
-      agentRef: string
-      chatId: string
-      title: string
-      previousTitle: string
-      state: PendingRename
-      sending: boolean
-      failureCount: number
-      retriesExhausted: boolean
-    }) => {
+    async (entry: PendingRenameEntry) => {
       const key = pendingRenameKey(entry.agentRef, entry.chatId)
       // FIX 1: never fire a duplicate PATCH for a key whose entry is already
       // sending (a flush poll landing during the initial/awaited attempt), and
@@ -1212,12 +1246,7 @@ export function useChatListController({
         await chatStore.renameSession(entry.agentRef, entry.chatId, entry.title)
         // Only clear if this attempt still owns the key (a stale 200 must never
         // delete a newer rename's marker — that would drop its case-E protection).
-        if (pendingRenamesRef.current.get(key) === entry) {
-          pendingRenamesRef.current.delete(key)
-          // #1130: without the marker the server title wins the merge, so a
-          // catalog page cached before the rename must not be reused.
-          chatStore.invalidateSessionCatalog(entry.agentRef)
-        }
+        settlePendingRename(key, entry)
       } catch (error) {
         if (
           isConfirmedHostAccessRevoked(error) &&
@@ -1225,9 +1254,7 @@ export function useChatListController({
           !isHostAccessBlocked(entry.agentRef)
         ) {
           onHostAccessRevoked(entry.agentRef)
-          if (pendingRenamesRef.current.get(key) === entry) {
-            pendingRenamesRef.current.delete(key)
-          }
+          settlePendingRename(key, entry)
           return
         }
         if (isAuthorizationError(error)) {
@@ -1250,9 +1277,7 @@ export function useChatListController({
             if (!requestStillCurrent() || isHostAccessBlocked(entry.agentRef)) return
             if (isConfirmedHostAccessRevoked(readError)) {
               onHostAccessRevoked(entry.agentRef)
-              if (pendingRenamesRef.current.get(key) === entry) {
-                pendingRenamesRef.current.delete(key)
-              }
+              settlePendingRename(key, entry)
               return
             }
           }
@@ -1264,11 +1289,8 @@ export function useChatListController({
             return
           }
           if (readSucceeded) {
-            if (pendingRenamesRef.current.get(key) === entry) {
-              pendingRenamesRef.current.delete(key)
-              if (entry.previousTitle) {
-                await applyLocalTitleOnly(entry.agentRef, entry.chatId, entry.previousTitle)
-              }
+            if (settlePendingRename(key, entry) && entry.previousTitle) {
+              await applyLocalTitleOnly(entry.agentRef, entry.chatId, entry.previousTitle)
             }
             host.current?.pushToast('You do not have permission to rename this chat.', 'error')
             return
@@ -1291,7 +1313,7 @@ export function useChatListController({
         if (pendingRenamesRef.current.get(key) !== entry) return
         const kind = classifyRenameError(error)
         if (kind === 'client-error') {
-          pendingRenamesRef.current.delete(key)
+          settlePendingRename(key, entry)
           // FIX 3: never roll back to an empty title (would blank the sidebar for
           // a chat that had no local cache entry). Clear the marker and let the
           // next poll's merge re-resolve from the server title / placeholder.
@@ -1335,6 +1357,7 @@ export function useChatListController({
       isHostAccessBlocked,
       onHostAccessRevoked,
       onHostAuthorityUncertain,
+      settlePendingRename,
     ]
   )
 
@@ -1398,24 +1421,44 @@ export function useChatListController({
         if (authUserKeyRef.current !== authUserKeyAtRequest) return
         previousTitle = index.chats.find(c => c.id === chatId)?.title ?? ''
       }
-      await applyLocalTitleOnly(agentRef, chatId, newTitle)
-      if (authUserKeyRef.current !== authUserKeyAtRequest) return
       // Replace any prior entry: this is now the current rename for the key. A
       // still-in-flight older attempt will no-op on completion (identity guard).
-      const entry = {
+      // It is registered before the local write, so a catalog page handled while
+      // the write runs cannot store the old server title over it (#1091 A21);
+      // `sending` keeps flushes from sending the PATCH before the write lands.
+      const entry: PendingRenameEntry = {
         agentRef,
         chatId,
         title: newTitle,
         previousTitle,
-        state: 'in-flight' as PendingRename,
-        sending: false,
+        state: 'in-flight',
+        sending: true,
         failureCount: 0,
         retriesExhausted: false,
+        settled: false,
       }
       pendingRenamesRef.current.set(key, entry)
+      try {
+        await applyLocalTitleOnly(agentRef, chatId, newTitle)
+      } catch (error) {
+        // The local title did not change, so this rename is over. When it is
+        // still current, hand the key back to the rename it replaced while that
+        // rename is unsettled, so its PATCH keeps protecting its title.
+        if (pendingRenamesRef.current.get(key) === entry && existing && !existing.settled) {
+          pendingRenamesRef.current.set(key, existing)
+        } else {
+          settlePendingRename(key, entry)
+        }
+        throw error
+      }
+      entry.sending = false
+      if (authUserKeyRef.current !== authUserKeyAtRequest) {
+        settlePendingRename(key, entry)
+        return
+      }
       await attemptRenameRpc(entry)
     },
-    [authUserKey, chatStore, applyLocalTitleOnly, attemptRenameRpc]
+    [authUserKey, chatStore, applyLocalTitleOnly, attemptRenameRpc, settlePendingRename]
   )
 
   const handleRenameChat = useCallback(
@@ -1707,6 +1750,8 @@ export function useChatListController({
             // cursors here; the selected-agent session list exposes explicit
             // on-demand pagination through `loadMoreChatSessions`.
             let serverSessions: SessionsListResult['items'] = []
+            // Undefined when the read failed: no page, so no request time.
+            let issueSeq: number | undefined
             try {
               const serverResult = await readSessionCatalog(chatStore, agentRef, {
                 agent: agentRef,
@@ -1715,6 +1760,7 @@ export function useChatListController({
               if (!requestStillCurrent()) return
               reportCatalogOnline(agentRef, authorityScopeGeneration)
               serverSessions = serverResult.items
+              issueSeq = serverResult.issueSeq
             } catch (error) {
               if (requestStillCurrent()) {
                 if (isConfirmedHostAccessRevoked(error)) onHostAccessRevoked(agentRef)
@@ -1755,9 +1801,10 @@ export function useChatListController({
                 sessions: sessions.filter(session => !deleted?.has(session.chatId)),
                 entryKey: item => `${item.agentRef}:${item.id}`,
                 sessionKey: session => `${session.agentRef}:${session.chatId}`,
-                entryPendingRename: item => pendingRenameStateFor(item.agentRef, item.id),
+                entryPendingRename: item =>
+                  catalogTitleRenameState(item.agentRef, item.id, issueSeq),
                 sessionPendingRename: session =>
-                  pendingRenameStateFor(session.agentRef, session.chatId),
+                  catalogTitleRenameState(session.agentRef, session.chatId, issueSeq),
                 placeholderFor: remotePlaceholder,
                 serverOnlyEntry: (session, title) => ({
                   id: session.chatId,
@@ -1776,6 +1823,9 @@ export function useChatListController({
                 previous.filter(item => item.agentRef !== agentRef)
               )
             })
+
+            // A Host the user never selects keeps its titles across restarts too.
+            if (requestStillCurrent()) persistServerSessions(agentRef, sessions, issueSeq)
 
             // §2.5: retry only this Host's pending renames as its poll settles.
             if (requestStillCurrent()) {
@@ -1815,6 +1865,8 @@ export function useChatListController({
     isHostAccessBlocked,
     onHostAccessRevoked,
     latestReloadRevision,
+    persistServerSessions,
+    catalogTitleRenameState,
   ])
 
   // Stable across renders whose inputs did not change, so consumers keyed on the
