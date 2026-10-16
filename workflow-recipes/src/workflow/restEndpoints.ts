@@ -5,6 +5,7 @@ import * as k8s from '@kubernetes/client-node'
 import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import {
   MAX_STATUS_TOOL_CALLS,
+  normalizeArtifactForStatus,
   normalizeToolArgsForStatus,
   normalizeToolResultForStatus,
 } from '@clerum/workflow-runtime-core'
@@ -34,10 +35,6 @@ import { type AuthenticatedRequest, CONTROL_API_ISSUER } from './workflowAuth'
 import { workflowStatusMessage } from './workflowStatusMessage'
 
 const log = createLogger('wrc', 'restEndpoints')
-const MAX_ARTIFACT_NAME_LENGTH = 128
-const MAX_ARTIFACT_FORMAT_LENGTH = 64
-const MAX_ARTIFACT_PATH_LENGTH = 512
-const MAX_ARTIFACT_CREATED_AT_LENGTH = 64
 const MAX_CUSTOM_ARTIFACTS_PER_STEP = 20
 const ARTIFACT_READER_NOT_FOUND_RETRY_DELAYS_MS = [250, 750, 1500, 3000, 5000, 8000]
 const MODEL_INJECTION_REQUEST_SCOPE = 'model_injection_request'
@@ -169,7 +166,7 @@ function parseUnknownArtifactResult(result: unknown): ArtifactStatus | null {
   try {
     const parsed = typeof result === 'object' ? result : JSON.parse(String(result ?? '{}'))
     if (!isRecord(parsed) || parsed.success !== true || !isRecord(parsed.artifact)) return null
-    return normalizeArtifact(parsed.artifact)
+    return normalizeArtifactForStatus(parsed.artifact)
   } catch {
     return null
   }
@@ -181,14 +178,14 @@ function extractCustomArtifacts(output: unknown): ArtifactStatus[] {
 
   const artifacts: ArtifactStatus[] = []
   if (isRecord(parsedOutput.artifact)) {
-    const artifact = normalizeArtifact(parsedOutput.artifact)
+    const artifact = normalizeArtifactForStatus(parsedOutput.artifact)
     if (artifact) artifacts.push(artifact)
   }
 
   if (Array.isArray(parsedOutput.artifacts)) {
     for (const item of parsedOutput.artifacts.slice(0, MAX_CUSTOM_ARTIFACTS_PER_STEP)) {
       if (!isRecord(item)) continue
-      const artifact = normalizeArtifact(item)
+      const artifact = normalizeArtifactForStatus(item)
       if (artifact) artifacts.push(artifact)
     }
   }
@@ -204,37 +201,6 @@ function parseOutputRecord(output: unknown): Record<string, unknown> | null {
     return isRecord(parsed) ? parsed : null
   } catch {
     return null
-  }
-}
-
-function normalizeArtifact(value: Record<string, unknown>): ArtifactStatus | null {
-  if (typeof value.name !== 'string') return null
-  const name = value.name.trim()
-  if (!name || name.length > MAX_ARTIFACT_NAME_LENGTH) return null
-  if (/[/\\\x00]/.test(name) || name.includes('..')) return null
-
-  if (typeof value.path !== 'string') return null
-  const path = value.path.trim()
-  if (!path.startsWith('/output/') || path.length > MAX_ARTIFACT_PATH_LENGTH) return null
-  if (path.includes('\x00') || path.split('/').includes('..')) return null
-
-  const format = typeof value.format === 'string' ? value.format.trim() : ''
-  if (format.length > MAX_ARTIFACT_FORMAT_LENGTH) return null
-
-  const sizeBytes = typeof value.sizeBytes === 'number' ? value.sizeBytes : 0
-  if (!Number.isSafeInteger(sizeBytes) || sizeBytes < 0) return null
-
-  const createdAt =
-    typeof value.createdAt === 'string' && value.createdAt.length <= MAX_ARTIFACT_CREATED_AT_LENGTH
-      ? value.createdAt
-      : new Date().toISOString()
-
-  return {
-    name,
-    format,
-    sizeBytes,
-    path,
-    createdAt,
   }
 }
 
