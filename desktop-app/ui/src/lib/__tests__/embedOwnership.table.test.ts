@@ -442,7 +442,7 @@ describe('decision table rows', () => {
     }
   })
 
-  it('R1b sobre dueño en `opening` → `abandoned`', () => {
+  it('R1b: the opening owner released for a non-crash reason settles as abandoned', () => {
     const out = reduceEmbedOwnership(stateOf(openingSeq), ev.released(A, 'session', null))
     expect(out.state.owner).toBeNull()
     expect(out.state.views.size).toBe(0)
