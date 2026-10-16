@@ -337,13 +337,13 @@ describe('SessionSearchService — retention sweep', () => {
     seedSession(h.db, {
       id: 'old-closed',
       userId: 'u1',
-      endReason: 'compression',
+      endReason: 'cancelled',
       endedAt: oneHundredDaysAgo,
     })
     seedSession(h.db, {
       id: 'recent-closed',
       userId: 'u1',
-      endReason: 'user_closed',
+      endReason: 'cancelled',
       endedAt: thirtyDaysAgo,
     })
     seedSession(h.db, {
@@ -380,7 +380,7 @@ describe('SessionSearchService — retention sweep', () => {
     seedSession(h.db, {
       id: 'gone',
       userId: 'u1',
-      endReason: 'compression',
+      endReason: 'cancelled',
       endedAt: nowSec - 1000 * 86400,
     })
     seedMessage(h.db, {
@@ -403,7 +403,7 @@ describe('SessionSearchService — retention sweep', () => {
     seedSession(h.db, {
       id: 'x1',
       userId: 'u1',
-      endReason: 'compression',
+      endReason: 'cancelled',
       endedAt: nowSec - 1000 * 86400,
     })
     const first = await h.service.sweepRetention(90)
@@ -418,7 +418,7 @@ describe('SessionSearchService — retention sweep', () => {
       seedSession(h.db, {
         id,
         userId: 'u1',
-        endReason: 'compression',
+        endReason: 'cancelled',
         endedAt: nowSec - 100 * 86400,
       })
       for (let ordinal = 0; ordinal < 300; ordinal++) {
@@ -428,7 +428,7 @@ describe('SessionSearchService — retention sweep', () => {
     seedSession(h.db, {
       id: 'recent-closed',
       userId: 'u1',
-      endReason: 'user_closed',
+      endReason: 'cancelled',
       endedAt: nowSec - 30 * 86400,
     })
     seedMessage(h.db, {
@@ -438,6 +438,13 @@ describe('SessionSearchService — retention sweep', () => {
       content: 'keptmarker',
     })
     seedSession(h.db, { id: 'inflight', userId: 'u1', endReason: null, endedAt: null })
+    // Old ended_at but no end_reason: not properly closed, so never swept.
+    seedSession(h.db, {
+      id: 'unclosed-old',
+      userId: 'u1',
+      endReason: null,
+      endedAt: nowSec - 100 * 86400,
+    })
 
     const enqueueSync = vi.spyOn(h.persistQueue, 'enqueueSync')
     const deleted = await h.service.sweepRetention(90)
@@ -456,7 +463,7 @@ describe('SessionSearchService — retention sweep', () => {
     const remaining = h.db.prepare('SELECT id FROM sessions ORDER BY id').all() as Array<{
       id: string
     }>
-    expect(remaining.map(r => r.id)).toEqual(['inflight', 'recent-closed'])
+    expect(remaining.map(r => r.id)).toEqual(['inflight', 'recent-closed', 'unclosed-old'])
     const swept = h.db
       .prepare("SELECT rowid FROM messages_fts WHERE messages_fts MATCH 'expiredmarker'")
       .all()

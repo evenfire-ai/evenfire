@@ -32,7 +32,7 @@ function seedBacklog(file: string): void {
       `INSERT INTO sessions (id, session_key, source, user_id, channel_type, channel_id,
          started_at, ended_at, end_reason, message_count, tool_call_count,
          input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, state)
-       VALUES (@id, @id, 'rpc', 'u1', 'rpc', 'agent', @ended_at, @ended_at, 'compression',
+       VALUES (@id, @id, 'rpc', 'u1', 'rpc', 'agent', @ended_at, @ended_at, 'cancelled',
          0, 0, 0, 0, 0, 0, 'idle')`
     )
     const insertMessage = db.prepare(
