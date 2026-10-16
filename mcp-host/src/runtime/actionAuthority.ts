@@ -6,6 +6,7 @@ import type {
 import type {
   ContextManageOptions,
   ContextManager,
+  ExecutionContext,
   LlmPort,
   ReasoningPort,
 } from '../core/interfaces'
@@ -143,33 +144,24 @@ export function withRuntimeActionAuthorityForToolRegistry(
       if (!tool) return null
       const cached = wrappedTools.get(tool)
       if (cached) return cached
-      const wrapped: Tool = {
-        name: () => tool.name(),
-        description: () => tool.description(),
-        parametersSchema: () => tool.parametersSchema(),
-        execute: (params, context) =>
-          executeAuthorityBoundEffect({
-            binding,
-            operationId: 'chat.message.invoke',
-            checkpoint,
-            effect: () => tool.execute(params, context),
-          }),
-        requiresSanitization: () => tool.requiresSanitization(),
-        requiresApproval: () => tool.requiresApproval(),
-        ...(tool.validateParams
-          ? { validateParams: (params: Record<string, unknown>) => tool.validateParams!(params) }
-          : {}),
-        ...(tool.traceDescriptor
-          ? {
-              traceDescriptor: (params: Record<string, unknown>, output?: ToolOutput) =>
-                tool.traceDescriptor!(params, output),
-            }
-          : {}),
-        ...(tool.supportsProgressOutput
-          ? { supportsProgressOutput: () => tool.supportsProgressOutput!() }
-          : {}),
-        ...(tool.timeoutCleanupMs ? { timeoutCleanupMs: () => tool.timeoutCleanupMs!() } : {}),
-      }
+      const wrapped: Tool = new Proxy(tool, {
+        get(target, property) {
+          const value = Reflect.get(target, property, target)
+          if (property === 'execute') {
+            return (params: Record<string, unknown>, context?: ExecutionContext) =>
+              executeAuthorityBoundEffect({
+                binding,
+                operationId: 'chat.message.invoke',
+                checkpoint,
+                effect: () =>
+                  Reflect.apply(value, target, [params, context]) as Promise<ToolOutput>,
+              })
+          }
+          return typeof value === 'function' && property !== 'constructor'
+            ? value.bind(target)
+            : value
+        },
+      })
       wrappedTools.set(tool, wrapped)
       return wrapped
     },
