@@ -2119,8 +2119,15 @@ export function useAgentChatController({
       // a client-derived title would only (a) diverge from the server's own
       // auto-title and (b) linger as a stale case-D fallback. On the next catalog
       // load the §2.2 merge shows the server title when the host reports one.
+      // The index holds the server's title when one was reported
+      // (`ChatStore.upsertServerSessions`), so the first user turn names the
+      // chat only while it has no title yet.
       let title = meta.title
-      if (localMessages.length === 0 && (resp.oldestTurnNumber ?? resp.turns[0]?.number) === 1) {
+      if (
+        title === 'New Chat' &&
+        localMessages.length === 0 &&
+        (resp.oldestTurnNumber ?? resp.turns[0]?.number) === 1
+      ) {
         const firstUserInput = resp.turns.find(t => t.user_input?.trim())?.user_input?.trim() || ''
         const hydratedTitle = truncateTitle(firstUserInput)
         if (hydratedTitle) {
