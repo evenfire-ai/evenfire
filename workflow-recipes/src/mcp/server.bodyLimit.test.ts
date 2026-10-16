@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { PassThrough } from 'node:stream'
@@ -78,6 +78,19 @@ describe('WRC request body limit over a real socket', () => {
 })
 
 describe('parseJsonBody', () => {
+  it('rejects a declared Content-Length past the drain cap before reading', async () => {
+    const request = Object.assign(new PassThrough(), {
+      headers: { 'content-length': String(MAX_DRAIN_BYTES + 1) },
+    })
+    const destroy = vi.spyOn(request, 'destroy')
+    await expect(parseJsonBody(request as never)).resolves.toEqual({
+      ok: false,
+      reason: 'too_large',
+      bytesRead: 0,
+    })
+    expect(destroy).toHaveBeenCalled()
+  })
+
   it('decodes a multi-byte character split across chunks', async () => {
     const request = new PassThrough()
     const parsed = parseJsonBody(request as never)

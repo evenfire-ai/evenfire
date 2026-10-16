@@ -47,6 +47,24 @@ describe('normalizeToolResultForStatus', () => {
   })
 })
 
+describe('preview pass-through guard', () => {
+  it('re-bounds a preview-shaped value that carries extra keys', () => {
+    const smuggled = { truncated: true, preview: 'p', payload: 'z'.repeat(5_000) }
+    for (const normalize of [normalizeToolResultForStatus, normalizeToolArgsForStatus]) {
+      const out = normalize(smuggled) as { preview: string }
+      expect(out).not.toBe(smuggled)
+      expect(out.preview).toHaveLength(1024)
+    }
+  })
+
+  it('re-bounds a preview whose text exceeds the limit', () => {
+    const oversized = { truncated: true, preview: 'x'.repeat(100_000) }
+    const out = normalizeToolResultForStatus(oversized) as { preview: string }
+    expect(out).not.toBe(oversized)
+    expect(out.preview).toHaveLength(STATUS_TOOL_RESULT_PREVIEW_LIMIT)
+  })
+})
+
 describe('normalizeToolArgsForStatus', () => {
   it('replaces oversized args with a bounded preview', () => {
     const normalized = normalizeToolArgsForStatus({ query: 'q'.repeat(5_000) })
@@ -139,6 +157,41 @@ describe('boundToolsCalledForStatus', () => {
       })
     }
     expect(boundToolsCalledForStatus(calls)).toHaveLength(MAX_STATUS_TOOL_CALLS * 2)
+  })
+
+  it('reduces an oversized artifact result to the artifact instead of a preview', () => {
+    const oversized = { ...artifactResult('big.pdf'), content: 'q'.repeat(5_000) }
+    const calls = [
+      { serverName: 'clerum', toolName: 'generate_pdf', args: {}, result: oversized },
+      {
+        serverName: 'clerum',
+        toolName: 'generate_pdf',
+        args: {},
+        result: JSON.stringify(oversized),
+      },
+    ]
+
+    const bounded = boundToolsCalledForStatus(calls) as Array<{ result: unknown }>
+
+    expect(bounded[0].result).toEqual(artifactResult('big.pdf'))
+    expect(bounded[1].result).toEqual(artifactResult('big.pdf'))
+  })
+
+  it('bounds every string field of a reduced artifact result', () => {
+    const result = {
+      success: true,
+      content: 'q'.repeat(5_000),
+      artifact: { name: 'n'.repeat(5_000), format: 'pdf', path: '/output/x', extra: 'e' },
+    }
+    const bounded = boundToolsCalledForStatus([
+      { serverName: 'clerum', toolName: 'generate_pdf', result },
+    ]) as Array<{ result: { artifact: Record<string, unknown> } }>
+
+    expect(bounded[0].result.artifact).toEqual({
+      name: 'n'.repeat(STATUS_TOOL_RESULT_PREVIEW_LIMIT),
+      format: 'pdf',
+      path: '/output/x',
+    })
   })
 
   it('passes malformed entries through for the server to reject', () => {

@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { exportPKCS8, exportSPKI, generateKeyPair } from 'jose'
+import { SignJWT, exportPKCS8, exportSPKI, generateKeyPair } from 'jose'
 import type { AddressInfo } from 'node:net'
 import { ClerumMcpServer, MAX_BODY_BYTES } from '../../../src/mcp/server'
 import { JwtTokenFactory } from '../../../src/workflow/jwtTokenFactory'
-import { initializePublicKey } from '../../../src/workflow/restEndpoints'
+import {
+  initializeControlApiPublicKey,
+  initializePublicKey,
+} from '../../../src/workflow/restEndpoints'
 
 const logSpy = vi.hoisted(() => {
   const logger = {
@@ -139,7 +142,8 @@ describe('ClerumMcpServer workflow routes', () => {
     expect(customApi.getNamespacedCustomObject).not.toHaveBeenCalled()
     expect(logSpy.warn).toHaveBeenCalledWith('Rejected oversized request body', {
       method: 'POST',
-      path: '/api/v1/workflow/my-recipe/status',
+      route: 'workflow',
+      recipeName: 'my-recipe',
       bytesRead: Buffer.byteLength(body),
       contentLength: Buffer.byteLength(body),
       limitBytes: MAX_BODY_BYTES,
@@ -148,5 +152,69 @@ describe('ClerumMcpServer workflow routes', () => {
     expect(logged).not.toContain('BODY-MARKER')
     expect(logged).not.toContain('QUERY-MARKER')
     expect(logged).not.toContain(token)
+
+    // The drained connection keeps serving the next request.
+    const next = await fetch(`http://127.0.0.1:${port}/api/v1/workflow/my-recipe/trigger`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: '{}',
+    })
+    expect(next.status).toBe(404)
+  })
+
+  it('answers an oversized credential broker request with a readable 413', async () => {
+    const { port } = await startTestServer()
+    const controlApiKeys = await generateKeyPair('RS256', { extractable: true })
+    await initializeControlApiPublicKey(await exportSPKI(controlApiKeys.publicKey))
+    const brokerToken = await new SignJWT({
+      scope: 'workflow:approval:request',
+      recipeName: 'my-recipe',
+      recipeNamespace: 'sandbox-recipes',
+      workflowControlScopes: ['plugin-workload-sdk'],
+    })
+      .setProtectedHeader({ alg: 'RS256' })
+      .setSubject('sandbox-recipes/my-recipe')
+      .setIssuer('control-api')
+      .setAudience('workflow-approvals')
+      .setIssuedAt()
+      .setExpirationTime('5m')
+      .sign(controlApiKeys.privateKey)
+    const body = JSON.stringify({ target: `BODY-MARKER-${'x'.repeat(MAX_BODY_BYTES)}` })
+
+    const response = await fetch(
+      `http://127.0.0.1:${port}/api/v1/workflow/my-recipe/plugin-workload-sdk/credentials`,
+      {
+        method: 'POST',
+        headers: { authorization: `Bearer ${brokerToken}`, 'content-type': 'application/json' },
+        body,
+      }
+    )
+
+    expect(response.status).toBe(413)
+    await expect(response.json()).resolves.toEqual({ error: 'Invalid credential broker request' })
+    expect(logSpy.warn).toHaveBeenCalledWith('Rejected oversized request body', {
+      method: 'POST',
+      route: 'plugin-workload-sdk-credentials',
+      recipeName: 'my-recipe',
+      bytesRead: Buffer.byteLength(body),
+      contentLength: Buffer.byteLength(body),
+      limitBytes: MAX_BODY_BYTES,
+    })
+    expect(JSON.stringify(logSpy.warn.mock.calls)).not.toContain('BODY-MARKER')
+  })
+
+  it('passes an unhandled handler error to the logger as an Error so it is redacted', async () => {
+    const { token, port, customApi } = await startTestServer()
+    const failure = new Error('HTTP-Code: 403\nBody: {"url":"https://10.0.0.1/apis/x"}')
+    customApi.getNamespacedCustomObject.mockRejectedValue(failure)
+
+    const response = await fetch(`http://127.0.0.1:${port}/api/v1/workflow/my-recipe/status`, {
+      headers: { authorization: `Bearer ${token}` },
+    })
+
+    expect(response.status).toBe(500)
+    expect(logSpy.error).toHaveBeenCalledWith('Unhandled error in request handler', {
+      error: failure,
+    })
   })
 })
