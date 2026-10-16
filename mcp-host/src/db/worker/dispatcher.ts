@@ -889,8 +889,11 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
     case 'sweep_closed_sessions':
       return withBusyRetry(() => {
         const tx = db.transaction(() => {
-          const result = s.sweepClosedSessions.run({ cutoff: op.cutoffEpoch })
-          return { deleted_sessions: result.changes }
+          const params = { cutoff: op.cutoffEpoch, limit: op.limit }
+          const deletedMessages = s.sweepClosedSessionMessages.run(params).changes
+          const deletedSessions =
+            deletedMessages === 0 ? s.sweepClosedSessionsEmpty.run(params).changes : 0
+          return { deleted_messages: deletedMessages, deleted_sessions: deletedSessions }
         })
         return tx.immediate()
       })

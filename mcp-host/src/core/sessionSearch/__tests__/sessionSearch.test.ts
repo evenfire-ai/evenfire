@@ -411,6 +411,61 @@ describe('SessionSearchService — retention sweep', () => {
     expect(first).toBe(1)
     expect(second).toBe(0)
   })
+
+  it('#13 sweeps a backlog in bounded worker operations', async () => {
+    const nowSec = Date.now() / 1000
+    for (const id of ['old-a', 'old-b', 'old-c']) {
+      seedSession(h.db, {
+        id,
+        userId: 'u1',
+        endReason: 'compression',
+        endedAt: nowSec - 100 * 86400,
+      })
+      for (let ordinal = 0; ordinal < 300; ordinal++) {
+        seedMessage(h.db, { sessionId: id, ordinal, role: 'user', content: 'expiredmarker' })
+      }
+    }
+    seedSession(h.db, {
+      id: 'recent-closed',
+      userId: 'u1',
+      endReason: 'user_closed',
+      endedAt: nowSec - 30 * 86400,
+    })
+    seedMessage(h.db, {
+      sessionId: 'recent-closed',
+      ordinal: 0,
+      role: 'user',
+      content: 'keptmarker',
+    })
+    seedSession(h.db, { id: 'inflight', userId: 'u1', endReason: null, endedAt: null })
+
+    const enqueueSync = vi.spyOn(h.persistQueue, 'enqueueSync')
+    const deleted = await h.service.sweepRetention(90)
+    expect(deleted).toBe(3)
+
+    const sweeps = enqueueSync.mock.calls.filter(([op]) => op.kind === 'sweep_closed_sessions')
+    // 900 messages at 250 per op, then the empty sessions, then the empty batch.
+    expect(sweeps.length).toBeGreaterThanOrEqual(5)
+    expect(enqueueSync.mock.results).toHaveLength(sweeps.length)
+    for (const result of enqueueSync.mock.results) {
+      const batch = (await result.value) as { deleted_messages: number; deleted_sessions: number }
+      expect(batch.deleted_messages).toBeLessThanOrEqual(250)
+      expect(batch.deleted_sessions).toBeLessThanOrEqual(250)
+    }
+
+    const remaining = h.db.prepare('SELECT id FROM sessions ORDER BY id').all() as Array<{
+      id: string
+    }>
+    expect(remaining.map(r => r.id)).toEqual(['inflight', 'recent-closed'])
+    const swept = h.db
+      .prepare("SELECT rowid FROM messages_fts WHERE messages_fts MATCH 'expiredmarker'")
+      .all()
+    expect(swept).toHaveLength(0)
+    const kept = h.db
+      .prepare("SELECT rowid FROM messages_fts WHERE messages_fts MATCH 'keptmarker'")
+      .all()
+    expect(kept).toHaveLength(1)
+  })
 })
 
 describe('Schema invariants', () => {

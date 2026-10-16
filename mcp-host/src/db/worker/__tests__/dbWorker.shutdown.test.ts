@@ -4,46 +4,11 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { Worker } from 'node:worker_threads'
-import ts from 'typescript'
 import type { SessionRow, WorkerMessage, WorkerReply } from '../protocol'
-
-// The real worker is compiled from source into a temp dir: Node cannot load
-// dbWorker.ts and its extensionless imports directly. The temp dir links the
-// package's node_modules so better-sqlite3 and the logger resolve.
-const MCP_HOST_ROOT = path.resolve(__dirname, '..', '..', '..', '..')
+import { MCP_HOST_ROOT, compileSources } from './compileSources'
 
 let tmpRoot: string
 let workerScript: string
-
-function compileWorker(outDir: string): string {
-  const config = ts.getParsedCommandLineOfConfigFile(
-    path.join(MCP_HOST_ROOT, 'tsconfig.json'),
-    {},
-    {
-      ...ts.sys,
-      onUnRecoverableConfigFileDiagnostic: d => {
-        throw new Error(ts.flattenDiagnosticMessageText(d.messageText, '\n'))
-      },
-    }
-  )
-  if (!config) throw new Error('tsconfig.json could not be parsed')
-  const program = ts.createProgram([path.join(MCP_HOST_ROOT, 'src/db/worker/dbWorker.ts')], {
-    ...config.options,
-    rootDir: path.join(MCP_HOST_ROOT, 'src'),
-    outDir,
-    noEmit: false,
-    declaration: false,
-    declarationMap: false,
-    sourceMap: false,
-    incremental: false,
-    composite: false,
-  })
-  const result = program.emit()
-  if (result.emitSkipped) throw new Error('dbWorker.ts emit was skipped')
-  const script = path.join(outDir, 'db', 'worker', 'dbWorker.js')
-  if (!fs.existsSync(script)) throw new Error(`compiled worker missing: ${script}`)
-  return script
-}
 
 function session(id: string): SessionRow {
   return {
@@ -96,7 +61,7 @@ function request(worker: Worker, msg: WorkerMessage, onReply?: () => void): Prom
 beforeAll(() => {
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dbworker-shutdown-'))
   fs.symlinkSync(path.join(MCP_HOST_ROOT, 'node_modules'), path.join(tmpRoot, 'node_modules'))
-  workerScript = compileWorker(path.join(tmpRoot, 'dist'))
+  ;[workerScript] = compileSources(['db/worker/dbWorker.ts'], path.join(tmpRoot, 'dist'))
 }, 60_000)
 
 afterAll(() => {
