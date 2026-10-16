@@ -122,6 +122,41 @@ describe('mergeGfsInheritedAccessItem', () => {
     assert.deepEqual(item.sources[0].shareEntries, [])
   })
 
+  it('rowless observations fold permissions without touching row ids or flags', () => {
+    let item = mergeGfsInheritedAccessItem(
+      null,
+      grantContribution(userA, ['read'], 'g1', true),
+      folder('f1', 'Projects')
+    )
+    item = mergeGfsInheritedAccessItem(
+      item,
+      { subject: userA, permissions: ['write'], rowKind: 'grant', rowId: null },
+      folder('f1', 'Projects')
+    )
+    item = mergeGfsInheritedAccessItem(
+      item,
+      { subject: userA, permissions: ['share'], rowKind: 'share', rowId: null },
+      folder('f1', 'Projects')
+    )
+    assert.equal(item.sources.length, 1)
+    assert.deepEqual(item.permissions.sort(), ['read', 'share', 'write'])
+    assert.equal(item.sources[0].grantId, 'g1')
+    assert.equal(item.sources[0].grantInherit, true)
+    assert.deepEqual(item.sources[0].grantPermissions, ['read'])
+    assert.deepEqual(item.sources[0].shareIds, [])
+    assert.deepEqual(item.sources[0].shareEntries, [])
+    // A rowless first observation creates the source with no row handles.
+    const bare = mergeGfsInheritedAccessItem(
+      null,
+      { subject: userB, permissions: ['read'], rowKind: 'grant', rowId: null },
+      folder('f1', 'Projects')
+    )
+    assert.equal(bare.subject, userB)
+    assert.equal(bare.sources[0].grantId, null)
+    assert.deepEqual(bare.sources[0].shareIds, [])
+    assert.deepEqual(bare.sources[0].permissions, ['read'])
+  })
+
   it('same folder grant + share consolidate, keeping each row separately addressable', () => {
     let item = mergeGfsInheritedAccessItem(
       null,

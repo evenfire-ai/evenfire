@@ -120,9 +120,18 @@ function strongestGfsInheritedSource(sources) {
  * folder consolidate into one source while their row ids, bits, and scope
  * flags (inherit / includeDescendants) stay separately recorded — no OR'd
  * coverage is ever written back from this model.
+ *
+ * A contribution whose `rowId` is null/absent is an OBSERVATION without an
+ * editable row handle (the legacy app cores folded such rows): its
+ * permissions still union into the subject's folder source, but no grant id,
+ * grant scope flags, or share ids are created or modified.
  */
 function mergeGfsInheritedAccessItem(current, contribution, folder) {
   const contributionPermissions = [...(contribution.permissions ?? [])]
+  const hasGrantRow =
+    contribution.rowKind === 'grant' && contribution.rowId != null && contribution.rowId !== ''
+  const hasShareRow =
+    contribution.rowKind === 'share' && contribution.rowId != null && contribution.rowId !== ''
   if (current === null) {
     return {
       subject: contribution.subject,
@@ -133,20 +142,19 @@ function mergeGfsInheritedAccessItem(current, contribution, folder) {
           resourceId: folder.resourceId,
           name: folder.name,
           permissions: [...contributionPermissions],
-          grantId: contribution.rowKind === 'grant' ? contribution.rowId : null,
-          shareIds: contribution.rowKind === 'share' ? [contribution.rowId] : [],
-          grantPermissions: contribution.rowKind === 'grant' ? [...contributionPermissions] : null,
-          grantInherit: contribution.rowKind === 'grant' ? Boolean(contribution.inherit) : null,
-          shareEntries:
-            contribution.rowKind === 'share'
-              ? [
-                  {
-                    rowId: contribution.rowId,
-                    permissions: [...contributionPermissions],
-                    includeDescendants: Boolean(contribution.includeDescendants),
-                  },
-                ]
-              : [],
+          grantId: hasGrantRow ? contribution.rowId : null,
+          shareIds: hasShareRow ? [contribution.rowId] : [],
+          grantPermissions: hasGrantRow ? [...contributionPermissions] : null,
+          grantInherit: hasGrantRow ? Boolean(contribution.inherit) : null,
+          shareEntries: hasShareRow
+            ? [
+                {
+                  rowId: contribution.rowId,
+                  permissions: [...contributionPermissions],
+                  includeDescendants: Boolean(contribution.includeDescendants),
+                },
+              ]
+            : [],
         },
       ],
     }
@@ -166,11 +174,11 @@ function mergeGfsInheritedAccessItem(current, contribution, folder) {
   const sameFolder = next.sources.find(source => source.resourceId === folder.resourceId)
   if (sameFolder) {
     sameFolder.permissions = [...new Set([...sameFolder.permissions, ...contributionPermissions])]
-    if (contribution.rowKind === 'grant') {
+    if (hasGrantRow) {
       sameFolder.grantId = sameFolder.grantId ?? contribution.rowId
       sameFolder.grantPermissions = [...contributionPermissions]
       sameFolder.grantInherit = Boolean(contribution.inherit)
-    } else {
+    } else if (hasShareRow) {
       sameFolder.shareIds = [...new Set([...sameFolder.shareIds, contribution.rowId])]
       sameFolder.shareEntries = [
         ...sameFolder.shareEntries.filter(entry => entry.rowId !== contribution.rowId),
@@ -181,25 +189,26 @@ function mergeGfsInheritedAccessItem(current, contribution, folder) {
         },
       ]
     }
+    // A rowless observation unions permissions only: no row ids or scope
+    // flags are touched.
   } else {
     next.sources.push({
       resourceId: folder.resourceId,
       name: folder.name,
       permissions: [...contributionPermissions],
-      grantId: contribution.rowKind === 'grant' ? contribution.rowId : null,
-      shareIds: contribution.rowKind === 'share' ? [contribution.rowId] : [],
-      grantPermissions: contribution.rowKind === 'grant' ? [...contributionPermissions] : null,
-      grantInherit: contribution.rowKind === 'grant' ? Boolean(contribution.inherit) : null,
-      shareEntries:
-        contribution.rowKind === 'share'
-          ? [
-              {
-                rowId: contribution.rowId,
-                permissions: [...contributionPermissions],
-                includeDescendants: Boolean(contribution.includeDescendants),
-              },
-            ]
-          : [],
+      grantId: hasGrantRow ? contribution.rowId : null,
+      shareIds: hasShareRow ? [contribution.rowId] : [],
+      grantPermissions: hasGrantRow ? [...contributionPermissions] : null,
+      grantInherit: hasGrantRow ? Boolean(contribution.inherit) : null,
+      shareEntries: hasShareRow
+        ? [
+            {
+              rowId: contribution.rowId,
+              permissions: [...contributionPermissions],
+              includeDescendants: Boolean(contribution.includeDescendants),
+            },
+          ]
+        : [],
     })
   }
   return next

@@ -12,7 +12,12 @@ export interface GfsInheritedContribution {
   subject: GfsSubjectRef
   permissions: string[]
   rowKind: 'grant' | 'share'
-  rowId: string
+  /**
+   * Row handle, or null/absent for an OBSERVATION without an editable row:
+   * permissions still fold into the subject's folder source, but no row ids
+   * or scope flags are created or modified (legacy app-core behavior).
+   */
+  rowId?: string | null
   inherit?: boolean
   includeDescendants?: boolean
 }
