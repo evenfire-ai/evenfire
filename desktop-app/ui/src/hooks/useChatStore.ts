@@ -45,9 +45,26 @@ type CachedRequest<T> = {
   promise: Promise<T>
 }
 
-const sessionCatalogRequests = new Map<string, CachedRequest<SessionsListResult>>()
+/**
+ * A catalog page with the sequence number taken when its request was sent. A
+ * cached page keeps the number of the request that produced it.
+ */
+type IssuedSessionsListResult = SessionsListResult & { issueSeq: number }
+
+const sessionCatalogRequests = new Map<string, CachedRequest<IssuedSessionsListResult>>()
 let sessionCatalogSource: typeof window.clerum.rpc.listSessions | null = null
 let remoteCacheScope = 'unknown'
+
+/**
+ * One monotonic clock for catalog requests and local renames, so the renderer
+ * can tell whether a catalog page was requested before or after a rename
+ * settled (#1091 A21).
+ */
+let catalogSequence = 0
+export function nextCatalogSequence(): number {
+  catalogSequence += 1
+  return catalogSequence
+}
 
 function pruneExpiredSessionCatalogRequests(now = Date.now()): void {
   for (const [key, cached] of sessionCatalogRequests) {
@@ -137,8 +154,10 @@ export function useChatStore() {
   )
   const getIndex = useCallback((agentRef: string) => window.clerum.chat.getIndex(agentRef), [])
   const reconcileServerSessions = useCallback(
-    (agentRef: string, sessions: Array<{ chatId: string; lastActivityAt?: string }>) =>
-      window.clerum.chat.reconcileServerSessions(agentRef, sessions),
+    (
+      agentRef: string,
+      sessions: Array<{ chatId: string; lastActivityAt?: string; title?: string }>
+    ) => window.clerum.chat.reconcileServerSessions(agentRef, sessions),
     []
   )
   const dismissOnboarding = useCallback(
@@ -164,15 +183,19 @@ export function useChatStore() {
       const cached = sessionCatalogRequests.get(key)
       if (!options.force && cached && cached.expiresAt > Date.now()) return cached.promise
 
-      const entry: CachedRequest<SessionsListResult> = {
+      const issueSeq = nextCatalogSequence()
+      const entry: CachedRequest<IssuedSessionsListResult> = {
         expiresAt: Date.now() + SESSION_CATALOG_TTL_MS,
         hostRef,
-        promise: source(hostRef, undefined, query).catch(error => {
-          // An invalidation may have replaced this entry with a newer request
-          // under the same key; only this request's own entry is evicted.
-          if (sessionCatalogRequests.get(key) === entry) sessionCatalogRequests.delete(key)
-          throw error
-        }),
+        promise: source(hostRef, undefined, query).then(
+          result => ({ ...result, issueSeq }),
+          error => {
+            // An invalidation may have replaced this entry with a newer request
+            // under the same key; only this request's own entry is evicted.
+            if (sessionCatalogRequests.get(key) === entry) sessionCatalogRequests.delete(key)
+            throw error
+          }
+        ),
       }
       sessionCatalogRequests.set(key, entry)
       return entry.promise

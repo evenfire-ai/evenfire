@@ -202,6 +202,11 @@ jobs:
         if: matrix.service == 'desktop-app'
         run: node --test scripts/tests/subscription-private-ui-input.test.mjs
 
+      # Hermetic node:test suite of the chat-open benchmark harness (#1091).
+      - name: Test the chat-open benchmark harness
+        if: matrix.service == 'desktop-app'
+        run: node scripts/tests/run-node-test-files.mjs desktop-app/scripts/bench-chat-open/benchmark.test.mjs
+
       # Hermetic subscription-image and Control API memory-calibration node:test
       # suites. Their only installed dependency is mcp-host's @napi-rs/canvas,
       # which this leg installs for the Desktop fixture checks above.
