@@ -172,9 +172,8 @@ workflow-recipes/samples/ai-recipe-builder/
 Supporting documentation:
 
 ```text
-docs/features/ai-recipe-builder-minikube-operator-cheatsheet.md
-docs/features/ai-recipe-builder-app-architecture.md
-docs/features/control-ui-workflow-recipes-and-registry-guide.md
+docs/design/ai-recipe-builder-app-architecture.md
+docs/deploy/workflow-recipes-guide.md
 ```
 
 ## WorkflowRecipe Definition
