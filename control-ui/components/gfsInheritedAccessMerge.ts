@@ -83,10 +83,11 @@ export function planInheritedRoleChange(
 
 /**
  * Folds one inheriting row into a subject's derived access item (creating it
- * on first sight) through the shared pure core. A contribution with ids for
- * both row kinds (legacy generators produce them) translates into one grant
- * fold plus one fold per share id; an id-less contribution folds permissions
- * only, exactly like the legacy core.
+ * on first sight) through the shared pure core, then projects the result back
+ * to the app's legacy-exact source shape. The policy core carries richer
+ * per-row provenance (grant bits/scope flag, share entries) for the upcoming
+ * scoped per-source edit work; this adapter exposes exactly the fields the
+ * app consumes today, so importers and tests observe byte-identical items.
  */
 export function mergeInheritedAccessItem(
   current: GfsInheritedAccessItem | null,
@@ -135,5 +136,21 @@ export function mergeInheritedAccessItem(
       folder
     )
   }
-  return folded as unknown as GfsInheritedAccessItem
+  return toAppInheritedAccessItem(folded)
+}
+
+/** Project a policy item onto the app's legacy-exact item/source shape. */
+function toAppInheritedAccessItem(item: PolicyInheritedAccessItem | null): GfsInheritedAccessItem {
+  return {
+    subject: item?.subject ?? { type: 'user' },
+    permissions: [...(item?.permissions ?? [])],
+    inheritedFrom: [...(item?.inheritedFrom ?? [])],
+    sources: (item?.sources ?? []).map(source => ({
+      resourceId: source.resourceId,
+      name: source.name,
+      permissions: [...source.permissions],
+      grantId: source.grantId,
+      shareIds: [...source.shareIds],
+    })),
+  } as GfsInheritedAccessItem
 }
