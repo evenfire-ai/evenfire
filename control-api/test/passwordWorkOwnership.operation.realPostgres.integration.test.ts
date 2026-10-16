@@ -192,6 +192,36 @@ realPg('password-work operation preservation on PostgreSQL 16', () => {
     }
   })
 
+  it('rolls back a prior database write when the mutation callback throws a TypeError', async () => {
+    const fixture = await resetFixture()
+    const originalName = (
+      await local.query('SELECT name FROM users WHERE id = $1', [fixture.userId])
+    ).rows[0].name
+
+    await expect(
+      runPasswordMutation(
+        async transaction => {
+          await transaction.query('UPDATE users SET name = $2 WHERE id = $1', [
+            fixture.userId,
+            'Must be rolled back',
+          ])
+          throw new TypeError('private callback diagnostic')
+        },
+        { mode: 'standard' }
+      )
+    ).rejects.toMatchObject({
+      name: 'PasswordMutationInternalError',
+      code: 'internal_error',
+      message: 'internal_error',
+    })
+
+    const persistedName = (
+      await local.query('SELECT name FROM users WHERE id = $1', [fixture.userId])
+    ).rows[0].name
+    expect(persistedName).toBe(originalName)
+    expect(await ownerCount()).toBe(0)
+  })
+
   it('keeps a real lost-COMMIT outcome above failed owner cleanup in an outer reservation', async () => {
     const fixture = await resetFixture()
     const sibling = await createSilentPasswordResetInvitation({
