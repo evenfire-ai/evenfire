@@ -38,4 +38,16 @@ describe('PR2 readiness reporter', () => {
     expect(new Headers(init.headers).get('x-service-token')).toBe('workspace-files-controller')
     expect(JSON.parse(String(init.body)).hop).toBe('workspace_files_controller_checkpoint')
   })
+
+  it('does not report readiness without the optional checkpoint credential', async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 201 }))
+    const stop = startPr2ReadinessReporter({
+      baseUrl: 'http://control-api.test',
+      fetchImpl,
+    })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    stop()
+
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
 })

@@ -32,14 +32,29 @@ describe('GFS_STORAGE_ROLE', () => {
   })
 })
 
-describe('GFS controller checkpoint identity', () => {
+describe('GFS controller checkpoint configuration', () => {
   afterEach(() => vi.unstubAllEnvs())
 
-  it('requires a dedicated service token even in development mode', () => {
+  it('allows the checkpoint endpoint to be absent for legacy controller startup', () => {
     vi.stubEnv('GFS_DEV_MODE', 'true')
     vi.stubEnv('GFS_STORAGE_ROLE', 'reader')
+    vi.stubEnv('GFS_CONTROL_API_BASE_URL', '')
     vi.stubEnv('GFS_CONTROL_API_SERVICE_TOKEN', '')
-    expect(() => loadConfig()).toThrow(/GFS_CONTROL_API_SERVICE_TOKEN/)
+    expect(loadConfig()).toMatchObject({
+      controlApiBaseUrl: undefined,
+      controlApiServiceToken: undefined,
+    })
+  })
+
+  it('retains the configured endpoint and service token when projected together', () => {
+    vi.stubEnv('GFS_DEV_MODE', 'true')
+    vi.stubEnv('GFS_STORAGE_ROLE', 'reader')
+    vi.stubEnv('GFS_CONTROL_API_BASE_URL', 'http://control-api.test')
+    vi.stubEnv('GFS_CONTROL_API_SERVICE_TOKEN', 'test-gfs-controller-service-token')
+    expect(loadConfig()).toMatchObject({
+      controlApiBaseUrl: 'http://control-api.test',
+      controlApiServiceToken: 'test-gfs-controller-service-token',
+    })
   })
 })
 

@@ -1,8 +1,12 @@
 export function startPr2ReadinessReporter(input: {
-  baseUrl: string
-  serviceToken: string
+  baseUrl?: string
+  serviceToken?: string
   fetchImpl?: typeof fetch
 }): () => void {
+  const baseUrl = input.baseUrl?.trim()
+  const serviceToken = input.serviceToken?.trim()
+  if (!baseUrl || !serviceToken) return () => undefined
+
   const sourceRevision = process.env.EVENFIRE_SOURCE_REVISION?.trim() ?? ''
   const environmentId = process.env.PR2_READINESS_ENVIRONMENT_ID?.trim() ?? ''
   const serviceVersion = process.env.EVENFIRE_SERVICE_VERSION?.trim() ?? ''
@@ -21,11 +25,11 @@ export function startPr2ReadinessReporter(input: {
     return () => undefined
   const report = async () => {
     const response = await (input.fetchImpl ?? fetch)(
-      `${input.baseUrl.replace(/\/+$/, '')}/api/v1/internal/pr2-readiness/runtime-evidence`,
+      `${baseUrl.replace(/\/+$/, '')}/api/v1/internal/pr2-readiness/runtime-evidence`,
       {
         method: 'POST',
         headers: {
-          authorization: `Bearer ${input.serviceToken}`,
+          authorization: `Bearer ${serviceToken}`,
           'content-type': 'application/json',
           'x-service-token': 'gfs-controller',
         },

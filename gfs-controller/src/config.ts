@@ -97,8 +97,8 @@ export interface GfsConfig {
   syncRenameTimeoutMs: number
   uploadV2: GfsUploadConfig
   devMode: boolean
-  controlApiBaseUrl: string
-  controlApiServiceToken: string
+  controlApiBaseUrl?: string
+  controlApiServiceToken?: string
   authorityCheckpointTimeoutMs: number
 }
 
@@ -460,12 +460,11 @@ export function loadConfig(): GfsConfig {
     syncRenameTimeoutMs: strictPositiveInteger('GFS_SYNC_RENAME_TIMEOUT_MS', 30000),
     uploadV2: uploadConfig(),
     devMode,
-    controlApiBaseUrl: required(
-      'GFS_CONTROL_API_BASE_URL',
-      devMode,
-      'http://control-api.control-plane.svc.cluster.local:8090'
-    ),
-    controlApiServiceToken: required('GFS_CONTROL_API_SERVICE_TOKEN', false),
+    controlApiBaseUrl: process.env.GFS_CONTROL_API_BASE_URL?.trim() || undefined,
+    // Older HCC replicas do not project the checkpoint credential. Keep
+    // legacy GFS serving available, while callers with V2 authority still
+    // fail closed when no checkpoint client can be constructed.
+    controlApiServiceToken: process.env.GFS_CONTROL_API_SERVICE_TOKEN?.trim() || undefined,
     authorityCheckpointTimeoutMs: positiveInteger(
       'GFS_AUTHORITY_CHECKPOINT_TIMEOUT_MS',
       5000,

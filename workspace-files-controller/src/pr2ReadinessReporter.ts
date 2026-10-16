@@ -1,8 +1,10 @@
 export function startPr2ReadinessReporter(input: {
   baseUrl: string
-  serviceToken: string
+  serviceToken?: string
   fetchImpl?: typeof fetch
 }): () => void {
+  if (!input.baseUrl.trim() || !input.serviceToken?.trim()) return () => undefined
+
   const sourceRevision = process.env.EVENFIRE_SOURCE_REVISION?.trim() ?? ''
   const environmentId = process.env.PR2_READINESS_ENVIRONMENT_ID?.trim() ?? ''
   const serviceVersion = process.env.EVENFIRE_SERVICE_VERSION?.trim() ?? ''

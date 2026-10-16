@@ -60,7 +60,11 @@ export function loadConfig(): Config {
       'WSF_CONTROL_API_BASE_URL',
       'http://control-api.control-plane.svc.cluster.local:8090'
     ),
-    controlApiServiceToken: getEnv('WSF_CONTROL_API_SERVICE_TOKEN'),
+    // The checkpoint credential was added after the controller's original
+    // deployment contract. Older HCC replicas may still render this pod
+    // without it, so keep legacy file access available while V2 checkpoints
+    // remain unavailable and fail closed at the protected effect boundary.
+    controlApiServiceToken: getEnv('WSF_CONTROL_API_SERVICE_TOKEN', '').trim(),
     authorityCheckpointTimeoutMs: getEnvInt('WSF_AUTHORITY_CHECKPOINT_TIMEOUT_MS', 5000),
   }
 }

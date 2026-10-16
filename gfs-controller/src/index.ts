@@ -197,11 +197,13 @@ async function main(): Promise<void> {
       config.storageRole === 'writer'
         ? new GfsWriteService(new PgTransactor(pool), blobs, blobManifests!)
         : undefined
-    const checkpointAuthority = createGfsAuthorityCheckpointer({
-      baseUrl: config.controlApiBaseUrl,
-      serviceToken: config.controlApiServiceToken,
-      timeoutMs: config.authorityCheckpointTimeoutMs,
-    })
+    const checkpointAuthority = config.controlApiBaseUrl && config.controlApiServiceToken
+      ? createGfsAuthorityCheckpointer({
+          baseUrl: config.controlApiBaseUrl,
+          serviceToken: config.controlApiServiceToken,
+          timeoutMs: config.authorityCheckpointTimeoutMs,
+        })
+      : undefined
 
     if (config.storageRole === 'writer') {
       runCleanup = createWriterCleanupRunner({

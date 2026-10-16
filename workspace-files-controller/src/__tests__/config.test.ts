@@ -8,10 +8,7 @@ function stubRequiredEnv(overrides: Record<string, string | undefined> = {}) {
     overrides.WSF_SHARED_FILESYSTEM_NAMESPACE ?? 'mcp-host'
   )
   vi.stubEnv('WSF_JWT_PUBLIC_KEY', overrides.WSF_JWT_PUBLIC_KEY ?? 'public-key')
-  vi.stubEnv(
-    'WSF_CONTROL_API_SERVICE_TOKEN',
-    overrides.WSF_CONTROL_API_SERVICE_TOKEN ?? 'test-workspace-files-controller-token'
-  )
+  vi.stubEnv('WSF_CONTROL_API_SERVICE_TOKEN', overrides.WSF_CONTROL_API_SERVICE_TOKEN ?? '')
 }
 
 describe('loadConfig', () => {
@@ -32,9 +29,16 @@ describe('loadConfig', () => {
     expect(loadConfig().sharedFileSystemNamespace).toBe('sandbox-recipes')
   })
 
-  it('requires the dedicated checkpoint service token', () => {
+  it('keeps the checkpoint token optional for legacy HCC deployments', () => {
+    // PR1 HCC head 13753fe does not project WSF_CONTROL_API_SERVICE_TOKEN.
     stubRequiredEnv()
-    vi.stubEnv('WSF_CONTROL_API_SERVICE_TOKEN', '')
-    expect(() => loadConfig()).toThrow(/WSF_CONTROL_API_SERVICE_TOKEN/)
+
+    expect(loadConfig().controlApiServiceToken).toBe('')
+  })
+
+  it('uses the dedicated checkpoint token when HCC projects it', () => {
+    stubRequiredEnv({ WSF_CONTROL_API_SERVICE_TOKEN: 'test-workspace-files-controller-token' })
+
+    expect(loadConfig().controlApiServiceToken).toBe('test-workspace-files-controller-token')
   })
 })

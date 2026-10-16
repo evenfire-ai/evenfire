@@ -111,6 +111,42 @@ const DIR: GfsResource = {
 }
 const RID = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' // FILE.resourceId, hyphen-stripped
 
+function v2ReadClaims(): GfsVerifiedClaims {
+  const now = Math.floor(Date.now() / 1000)
+  return {
+    ...CLAIMS,
+    sub: '11111111-1111-4111-8111-111111111111',
+    iat: now,
+    exp: now + 300,
+    actionAuthority: {
+      binding: {
+        version: 2,
+        userId: '11111111-1111-4111-8111-111111111111',
+        sid: '22222222-2222-4222-8222-222222222222',
+        sessionVersion: 1,
+        delegationJti: '33333333-3333-4333-8333-333333333333',
+        operationId: 'gfs.read',
+        resource: {
+          environmentId: 'development:local-cluster',
+          type: 'gfs_resource',
+          canonicalId: `gfs_resource:${FILE.resourceId}`,
+          logicalId: FILE.resourceId,
+          displayName: FILE.resourceId,
+        },
+        target: { drive: 'main', resourceId: FILE.resourceId },
+        targetHash: 'ath1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        accessPathId: 'ap1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        authorizationRevision: 'ar1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        pathKind: 'direct',
+        effectiveTeamId: null,
+        behaviorBindingHash: 'abh1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      },
+      sourceIssuedAt: now,
+      sourceExpiresAt: now + 300,
+    },
+  }
+}
+
 /** Build deps with sensible allow-all defaults; override per test. */
 function deps(over: Partial<ServingDeps> = {}): ServingDeps {
   return {
@@ -161,40 +197,8 @@ describe('GfsReadServer.tryHandle — routing', () => {
   })
 
   it('blocks the protected read effect when a v2 live checkpoint is unavailable', async () => {
-    const now = Math.floor(Date.now() / 1000)
     let resourceLoads = 0
-    const authorityClaims: GfsVerifiedClaims = {
-      ...CLAIMS,
-      sub: '11111111-1111-4111-8111-111111111111',
-      iat: now,
-      exp: now + 300,
-      actionAuthority: {
-        binding: {
-          version: 2,
-          userId: '11111111-1111-4111-8111-111111111111',
-          sid: '22222222-2222-4222-8222-222222222222',
-          sessionVersion: 1,
-          delegationJti: '33333333-3333-4333-8333-333333333333',
-          operationId: 'gfs.read',
-          resource: {
-            environmentId: 'development:local-cluster',
-            type: 'gfs_resource',
-            canonicalId: `gfs_resource:${FILE.resourceId}`,
-            logicalId: FILE.resourceId,
-            displayName: FILE.resourceId,
-          },
-          target: { drive: 'main', resourceId: FILE.resourceId },
-          targetHash: 'ath1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-          accessPathId: 'ap1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-          authorizationRevision: 'ar1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-          pathKind: 'direct',
-          effectiveTeamId: null,
-          behaviorBindingHash: 'abh1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-        },
-        sourceIssuedAt: now,
-        sourceExpiresAt: now + 300,
-      },
-    }
+    const authorityClaims = v2ReadClaims()
     const res = new FakeRes()
     await run(
       deps({
@@ -215,6 +219,29 @@ describe('GfsReadServer.tryHandle — routing', () => {
     )
 
     expect(res.statusCode).toBe(503)
+    expect(resourceLoads).toBe(0)
+  })
+
+  it('blocks a v2 read when an old HCC deployment leaves the checkpoint client absent', async () => {
+    let resourceLoads = 0
+    const res = new FakeRes()
+    await run(
+      deps({
+        verifyToken: () => v2ReadClaims(),
+        store: {
+          getResource: async () => {
+            resourceLoads += 1
+            return FILE
+          },
+          listChildren: async () => [FILE],
+        },
+      }),
+      req(`/v1/resources/${RID}`, { auth: 'Bearer t' }),
+      res
+    )
+
+    expect(res.statusCode).toBe(503)
+    expect((res.json as { error: { code: string } }).error.code).toBe('not_mounted')
     expect(resourceLoads).toBe(0)
   })
 })
