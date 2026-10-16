@@ -108,6 +108,7 @@ export type MountSandboxUiArgs = {
   parentWindow: BrowserWindow
   bounds: SandboxUiBounds
   routePath?: string
+  /** Main-side cleanup for a teardown nobody asked for (crash, parent closed). */
   onClosed?: () => void
   /**
    * Fired exactly once when the view this mount created is torn down, for any
@@ -566,8 +567,8 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
 
   // `onClosed` reports a teardown nobody asked for: the parent window closed
   // or the embed's renderer died. Solicited teardowns (`unmountSandboxUiView`,
-  // a replacing mount) stay silent — the caller already knows, and the
-  // renderer drops its owner of the embed on that signal.
+  // a replacing mount) stay silent — the caller already ran its own cleanup.
+  // The renderer learns of every teardown from `onReleased` instead.
   const onParentClosed = (): void => {
     teardownActive('parent_closed')
     onClosed?.()
@@ -1093,10 +1094,10 @@ export function reloadSandboxUiWebContents(
 }
 
 /**
- * Reload the active embed in place (user-initiated "Refresh"). No-op when
- * nothing is mounted or the view was already torn down. This is the only
- * in-place refresh path — without it, the embed's content stays as of its
- * initial `loadURL` until the user navigates away and back (which remounts).
+ * Reload the active embed in place once its session refresh has re-minted the
+ * cookie after the document came back 401. No-op when nothing is mounted or the
+ * view was already torn down. The user-facing Refresh relaunches the view
+ * instead, so it never comes through here.
  */
 export function reloadActiveSandboxUiView(): void {
   reloadSandboxUiWebContents(active?.view.webContents)

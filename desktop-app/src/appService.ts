@@ -5292,7 +5292,6 @@ export class AppService {
     routePath?: string
     bounds: import('./sandboxUiDriver.js').SandboxUiBounds
     parentWindow: import('electron').BrowserWindow
-    onClosed?: () => void
     /** Exactly once per view this open mounts, even if the open then rejects. */
     onReleased?: (event: import('./sandboxUiDriver.js').SandboxUiReleasedEvent) => void
     onRefreshError?: (message: string) => void
@@ -5317,10 +5316,7 @@ export class AppService {
     // An open replaces the current view whatever its outcome, so the outgoing
     // view goes BEFORE the network mint: a failed mint must not leave it
     // painted (with its refresh loop still minting) after the renderer has been
-    // told the open failed. Deliberately silent — no `onClosed`: the renderer
-    // drops its owner of the embed on `sandboxUi:closed`, which here would
-    // orphan the view this open is about to mount. Failure is reported only by
-    // the rejection.
+    // told the open failed. Failure is reported only by the rejection.
     await this.teardownSandboxUiView('replaced')
     try {
       await this.mintAndMountSandboxUiView(args, recipeNs, recipeName, sessionEpoch)
@@ -5360,6 +5356,8 @@ export class AppService {
       bounds: args.bounds,
       launchId: args.launchId,
       onReleased: args.onReleased,
+      // A teardown main did not ask for (crash, parent window closed) skips
+      // `teardownSandboxUiView`, so its cleanup runs here.
       onClosed: () => {
         // Cancel refresh first so the timer doesn't keep firing against a
         // partition we're about to evict on the next mount.
@@ -5368,7 +5366,6 @@ export class AppService {
         // per-mount SDK state (session denials, prompt budget, rate budget)
         // dies with the mount.
         tryGetPluginSdkRuntime()?.unpinAllSandboxUiSurfaces()
-        args.onClosed?.()
       },
       onGfsOpen: uri => {
         const active = tryGetPluginSdkRuntime()
@@ -5444,8 +5441,9 @@ export class AppService {
   /**
    * With a `launchId`, closes the view only if that launch still owns it: a
    * close that arrives after its view was replaced must not take down the
-   * replacement. Without one, closes whatever is live. Enqueued synchronously,
-   * like `openSandboxUi`.
+   * replacement. Without one, closes whatever is live; only main's own callers
+   * (session change, renderer replaced) do that, the renderer must always name
+   * its launch. Enqueued synchronously, like `openSandboxUi`.
    */
   closeSandboxUi(
     options: {
@@ -5481,25 +5479,6 @@ export class AppService {
     await driver.unmountSandboxUiView(reason)
   }
 
-  // Read the active embed's current in-app route for the renderer's tab store
-  // (mini-spec 05 §1). Mirrors `createSandboxUiDeepLink`'s read: it wraps
-  // `driver.getActiveSandboxUiLocation()` and reshapes to the renderer contract.
-  // Returns null when no embed is mounted or its webContents is destroyed.
-  // While the view has not yet applied the route its open asked for, that route
-  // is returned without reading the URL. Once applied, an out-of-prefix current
-  // URL makes `getActiveSandboxUiLocation` THROW ('Cannot read the current app
-  // route'); that propagates so the renderer can fall back to the default route
-  // instead of persisting a stale one.
-  async getSandboxUiLocation(): Promise<{ appRef: string; routePath?: string } | null> {
-    const driver = await import('./sandboxUiDriver.js')
-    const location = driver.getActiveSandboxUiLocation()
-    if (!location) return null
-    return {
-      appRef: `${location.recipeNs}/${location.recipeName}`,
-      ...(location.path ? { routePath: location.path } : {}),
-    }
-  }
-
   async createSandboxUiDeepLink(teamId?: string): Promise<{ url: string }> {
     const driver = await import('./sandboxUiDriver.js')
     const { buildSandboxUiWebLink } = await import('./sandboxUiDeepLinks.js')
@@ -5514,15 +5493,6 @@ export class AppService {
         teamId: String(teamId || '').trim() || undefined,
       }),
     }
-  }
-
-  // In-place hard-reload of the active embed (user-initiated "Refresh"). The
-  // session cookie is still valid, so this only reloads page content — it does
-  // NOT re-mint the session or cancel the refresh timer. No-op when nothing is
-  // mounted.
-  async reloadSandboxUi(): Promise<void> {
-    const driver = await import('./sandboxUiDriver.js')
-    driver.reloadActiveSandboxUiView()
   }
 
   async setSandboxUiBounds(bounds: import('./sandboxUiDriver.js').SandboxUiBounds): Promise<void> {

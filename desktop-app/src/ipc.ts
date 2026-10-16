@@ -2078,10 +2078,6 @@ export function registerIpcHandlers(service: AppService): void {
         routePath: typeof payload?.routePath === 'string' ? payload.routePath : undefined,
         bounds,
         parentWindow,
-        onClosed: () => {
-          if (parentWindow.isDestroyed()) return
-          parentWindow.webContents.send('sandboxUi:closed', { appRef, launchId })
-        },
         // Only the window the view was mounted in owns it.
         onReleased: released => {
           if (parentWindow.isDestroyed()) return
@@ -2103,31 +2099,13 @@ export function registerIpcHandlers(service: AppService): void {
     }
   )
 
-  // Without a payload this is the legacy close of whatever is live. With one,
-  // the launch id is mandatory: a malformed id must not degrade into closing
-  // another launch's view.
+  // The launch id is mandatory: a close that names no launch, or a malformed
+  // one, must not degrade into closing whatever view is live, which another
+  // launch may own by the time the queue reaches it.
   ipcMain.handle('sandboxUi:close', async (event, payload?: { launchId?: unknown } | null) => {
     assertTrustedSender(event)
-    if (payload === undefined || payload === null) {
-      await service.closeSandboxUi()
-      return
-    }
-    const launchId = parseSandboxUiLaunchId(payload.launchId)
+    const launchId = parseSandboxUiLaunchId(payload?.launchId)
     await service.closeSandboxUi({ launchId })
-  })
-
-  ipcMain.handle('sandboxUi:reload', async event => {
-    assertTrustedSender(event)
-    await service.reloadSandboxUi()
-  })
-
-  // Read the active embed's current in-app route so the renderer can persist it
-  // on the app tab before deactivation (mini-spec 05 §1). Returns null when no
-  // embed is mounted; rejects when the current URL is outside the recipe prefix
-  // (the renderer treats a rejection as "fall back to the default route").
-  ipcMain.handle('sandboxUi:getLocation', async event => {
-    assertTrustedSender(event)
-    return service.getSandboxUiLocation()
   })
 
   ipcMain.handle('sandboxUi:copyDeepLink', async (event, payload: { teamId?: unknown }) => {

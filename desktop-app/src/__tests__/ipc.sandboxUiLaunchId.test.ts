@@ -73,13 +73,11 @@ describe('sandboxUi:open launch id', () => {
     const [first, second] = opens
 
     // The replaced view reports after the relaunch of the same app.
-    first!.onClosed?.()
     first!.onRefreshError?.('refresh failed')
     first!.onTitleChanged?.('Old title')
     second!.onTitleChanged?.('New title')
 
     expect(electron.send.mock.calls).toEqual([
-      ['sandboxUi:closed', { appRef: 'sandbox-recipes/alpha', launchId: launch1 }],
       [
         'sandboxUi:refreshError',
         { appRef: 'sandbox-recipes/alpha', launchId: launch1, message: 'refresh failed' },
@@ -115,10 +113,11 @@ describe('sandboxUi:open launch id', () => {
   it('accepts a renderer-minted UUID', async () => {
     const launchId = crypto.randomUUID()
     await open({ launchId })
-    opens[0]!.onClosed?.()
-    expect(electron.send).toHaveBeenCalledWith('sandboxUi:closed', {
+    opens[0]!.onTitleChanged?.('Title')
+    expect(electron.send).toHaveBeenCalledWith('sandboxUi:titleChanged', {
       appRef: 'sandbox-recipes/alpha',
       launchId,
+      title: 'Title',
     })
   })
 })

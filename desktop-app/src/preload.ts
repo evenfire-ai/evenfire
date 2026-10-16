@@ -672,11 +672,8 @@ const clerum = Object.freeze({
       bounds: { x: number; y: number; width: number; height: number; dpr?: number }
       launchId: string
     }) => ipcRenderer.invoke('sandboxUi:open', args),
-    // Without args: legacy close of whatever is live. With a launch id: closes
-    // that launch's view only if it is still the live one.
-    close: (args?: { launchId: string }) => ipcRenderer.invoke('sandboxUi:close', args),
-    reload: () => ipcRenderer.invoke('sandboxUi:reload'),
-    getLocation: () => ipcRenderer.invoke('sandboxUi:getLocation'),
+    // Closes that launch's view only if it is still the live one.
+    close: (args: { launchId: string }) => ipcRenderer.invoke('sandboxUi:close', args),
     copyDeepLink: (teamId?: string) => ipcRenderer.invoke('sandboxUi:copyDeepLink', { teamId }),
     listPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:listPendingDeepLinks'),
     clearPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:clearPendingDeepLinks'),
@@ -731,12 +728,6 @@ const clerum = Object.freeze({
       const listener = (_event: unknown, args: SandboxUiDeepLinkEnvelope) => callback(args)
       ipcRenderer.on('sandboxUi:deepLink', listener)
       return () => ipcRenderer.off('sandboxUi:deepLink', listener)
-    },
-    onClosed: (callback: (args: { appRef: string; launchId: string }) => void) => {
-      const listener = (_event: unknown, args: { appRef: string; launchId: string }) =>
-        callback(args)
-      ipcRenderer.on('sandboxUi:closed', listener)
-      return () => ipcRenderer.off('sandboxUi:closed', listener)
     },
     onReleased: (callback: (args: SandboxUiReleasedEvent) => void) => {
       const listener = (_event: unknown, args: SandboxUiReleasedEvent) => callback(args)

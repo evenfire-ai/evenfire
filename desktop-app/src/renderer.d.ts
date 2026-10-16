@@ -763,15 +763,12 @@ declare global {
           defaultPath?: string
           routePath?: string
           bounds: { x: number; y: number; width: number; height: number; dpr?: number }
-          // Echoed by main on `onClosed` / `onRefreshError` / `onTitleChanged`
+          // Echoed by main on `onReleased` / `onRefreshError` / `onTitleChanged`
           // for the view this open mounts.
           launchId: string
         }) => Promise<void>
-        // Without args: closes whatever is live (legacy). With a launch id:
-        // closes that launch's view only if it is still the live one.
-        close: (args?: { launchId: string }) => Promise<void>
-        reload: () => Promise<void>
-        getLocation: () => Promise<{ appRef: string; routePath?: string } | null>
+        // Closes that launch's view only if it is still the live one.
+        close: (args: { launchId: string }) => Promise<void>
         copyDeepLink: (teamId?: string) => Promise<{ url: string }>
         listPendingDeepLinks: () => Promise<{ links: SandboxUiDeepLinkEnvelope[] }>
         clearPendingDeepLinks: () => Promise<void>
@@ -810,7 +807,6 @@ declare global {
           }) => void
         ) => () => void
         onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => () => void
-        onClosed: (callback: (args: { appRef: string; launchId: string }) => void) => () => void
         // Once per view main tears down, whatever the reason, with the route it
         // represented (`null`: unreadable, keep the last known one).
         onReleased: (callback: (args: SandboxUiReleasedEvent) => void) => () => void

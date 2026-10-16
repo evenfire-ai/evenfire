@@ -9,7 +9,11 @@ import { wireMainWindowRendererReadiness } from '../mainWindowReadiness.js'
 import { _resetPluginSdkRuntimeForTests, initPluginSdkRuntime } from '../pluginSdkRuntime.js'
 import { _resetPluginSurfacesForTests, resolvePluginSurface } from '../pluginSurfaceRegistry.js'
 import { SANDBOX_UI_MINT_TIMEOUT_MS } from '../rpcProxyClient.js'
-import { getActiveSandboxUi, unmountSandboxUiView } from '../sandboxUiDriver.js'
+import {
+  getActiveSandboxUi,
+  getActiveSandboxUiLocation,
+  unmountSandboxUiView,
+} from '../sandboxUiDriver.js'
 import {
   SANDBOX_UI_RATE_LIMIT_MS,
   SANDBOX_UI_REFRESH_INTERVAL_MS,
@@ -149,7 +153,7 @@ type OpenArgs = Parameters<AppService['openSandboxUi']>[0]
 function openArgs(
   recipeName: string,
   parentWindow: FakeParentWindow,
-  onClosed: () => void = vi.fn(),
+  onReleased: NonNullable<OpenArgs['onReleased']> = vi.fn(),
   overrides: Partial<Omit<OpenArgs, 'parentWindow'>> = {}
 ): OpenArgs {
   return {
@@ -160,7 +164,7 @@ function openArgs(
     bounds: { x: 0, y: 0, width: 400, height: 300 },
     parentWindow: parentWindow as unknown as OpenArgs['parentWindow'],
     launchId: crypto.randomUUID(),
-    onClosed,
+    onReleased,
     ...overrides,
   }
 }
@@ -191,11 +195,11 @@ afterEach(async () => {
   await rm(userDataDir, { recursive: true, force: true })
 })
 
-async function setupWithLiveFirstApp(onClosed: () => void = vi.fn()) {
+async function setupWithLiveFirstApp(onReleased: NonNullable<OpenArgs['onReleased']> = vi.fn()) {
   const service = makeService()
   initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
   const parentWindow = new FakeParentWindow()
-  await service.openSandboxUi(openArgs('first-app', parentWindow, onClosed))
+  await service.openSandboxUi(openArgs('first-app', parentWindow, onReleased))
   const first = getActiveSandboxUi()
   expect(first?.appRef).toBe('sandbox-recipes/first-app')
   expect(resolvePluginSurface(first!.webContentsId)?.pluginId).toBe('sandbox-recipes/first-app')
@@ -274,54 +278,20 @@ describe('AppService sandbox-ui open replaces the live view whatever its outcome
     expect(mintCallsFor('first-app')).toBe(0)
     expect(mintCallsFor('second-app')).toBe(1)
   })
-
-  // The renderer's `sandboxUi:closed` listener drops ownership of the live
-  // embed. If the solicited teardown inside an open signalled it, the renderer
-  // would lose the owner of the view main is about to mount — the very orphan
-  // this teardown prevents. An open reports failure only through its rejection.
-  it('never signals onClosed from a reopen, whether it succeeds or fails', async () => {
-    const onClosed = vi.fn()
-    const { service, parentWindow } = await setupWithLiveFirstApp(onClosed)
-
-    await service.openSandboxUi(openArgs('first-app', parentWindow, onClosed))
-    expect(getActiveSandboxUi()?.appRef).toBe('sandbox-recipes/first-app')
-
-    mintResponders.set('first-app', () => mintFails(409, 'app is starting'))
-    await expect(
-      service.openSandboxUi(openArgs('first-app', parentWindow, onClosed))
-    ).rejects.toThrow(/\(409\)/)
-    expect(getActiveSandboxUi()).toBeNull()
-
-    expect(onClosed).not.toHaveBeenCalled()
-  })
-
-  // On an app→app switch the renderer reads the outgoing view's route and then
-  // asks main to open the incoming app, in that order and in the same tick. The
-  // open's teardown must not overtake that read, or the outgoing tab's route is
-  // read from nothing.
-  it('a location read issued before an open in the same tick still sees the outgoing view', async () => {
-    const { service, parentWindow } = await setupWithLiveFirstApp()
-
-    const location = service.getSandboxUiLocation()
-    const reopen = service.openSandboxUi(openArgs('second-app', parentWindow))
-
-    await expect(location).resolves.toMatchObject({ appRef: 'sandbox-recipes/first-app' })
-    await reopen
-    expect(getActiveSandboxUi()?.appRef).toBe('sandbox-recipes/second-app')
-  })
 })
 
 describe('AppService sandbox-ui embed whose renderer dies', () => {
-  it('leaves no view, no refresh loop and no pin, and reports the close once', async () => {
-    const onClosed = vi.fn()
-    const { parentWindow, firstWebContentsId, firstView } = await setupWithLiveFirstApp(onClosed)
+  it('leaves no view, no refresh loop and no pin, and reports the release once', async () => {
+    const onReleased = vi.fn()
+    const { parentWindow, firstWebContentsId, firstView } = await setupWithLiveFirstApp(onReleased)
 
     firstView!.webContents.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 139 })
 
     expect(getActiveSandboxUi()).toBeNull()
     expect(parentWindow.contentView.removeChildView).toHaveBeenCalledWith(firstView)
     expect(resolvePluginSurface(firstWebContentsId)).toBeNull()
-    expect(onClosed).toHaveBeenCalledOnce()
+    expect(onReleased).toHaveBeenCalledOnce()
+    expect(onReleased).toHaveBeenCalledWith(expect.objectContaining({ reason: 'crashed' }))
     const mintsBefore = mintCallsFor('first-app')
     await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1_000)
     expect(mintCallsFor('first-app')).toBe(mintsBefore)
@@ -484,9 +454,7 @@ async function expectEmbedGoneWithoutRefresh(
 
 describe('AppService sandbox-ui embed whose trusted renderer is replaced', () => {
   it('a committed document navigation of the main window closes the embed', async () => {
-    const onClosed = vi.fn()
-    const { service, parentWindow, firstWebContentsId, firstView } =
-      await setupWithLiveFirstApp(onClosed)
+    const { service, parentWindow, firstWebContentsId, firstView } = await setupWithLiveFirstApp()
     const mainWebContents = wireMainWindow(service)
 
     // A reload (Cmd+R / View > Reload with the renderer focused) or a new
@@ -495,8 +463,6 @@ describe('AppService sandbox-ui embed whose trusted renderer is replaced', () =>
     mainWebContents.emit('did-navigate', {}, 'file:///ui-dist/index.html', 200, 'OK')
 
     await expectEmbedGoneWithoutRefresh(parentWindow, firstView, firstWebContentsId)
-    // The replacement renderer starts without state: nothing to notify.
-    expect(onClosed).not.toHaveBeenCalled()
   })
 
   it('in-page, subframe and cancelled navigations of the main window leave the embed', async () => {
@@ -562,13 +528,13 @@ describe('AppService sandbox-ui embed across a session clear', () => {
   }
 
   it('an open whose mint lands after logout installs nothing and rejects', async () => {
-    const onClosed = vi.fn()
+    const onReleased = vi.fn()
     const service = makeService()
     initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
     const parentWindow = new FakeParentWindow()
     const answerMint = holdMint('first-app')
 
-    const open = service.openSandboxUi(openArgs('first-app', parentWindow, onClosed))
+    const open = service.openSandboxUi(openArgs('first-app', parentWindow, onReleased))
     const outcome = open.then(
       () => 'opened',
       (error: unknown) => error
@@ -580,7 +546,8 @@ describe('AppService sandbox-ui embed across a session clear', () => {
     const settled = await outcome
     await expectNothingMountedFor(parentWindow, service)
     expect(settled).toMatchObject({ message: expect.stringMatching(/session changed/) })
-    expect(onClosed).not.toHaveBeenCalled()
+    // No view was ever assigned to this launch, so it is never released.
+    expect(onReleased).not.toHaveBeenCalled()
   })
 
   it('an open whose mint lands after another user logged in installs nothing and rejects', async () => {
@@ -692,13 +659,13 @@ describe('AppService sandbox-ui embed across a session clear', () => {
   })
 
   it('an open whose mint fails after logout leaves nothing behind and rejects once', async () => {
-    const onClosed = vi.fn()
+    const onReleased = vi.fn()
     const service = makeService()
     initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
     const parentWindow = new FakeParentWindow()
     const answerMint = holdMint('first-app')
 
-    const open = service.openSandboxUi(openArgs('first-app', parentWindow, onClosed))
+    const open = service.openSandboxUi(openArgs('first-app', parentWindow, onReleased))
     const outcome = open.then(
       () => 'opened',
       (error: unknown) => error
@@ -716,7 +683,8 @@ describe('AppService sandbox-ui embed across a session clear', () => {
     expect(getActiveSandboxUi()).toBeNull()
     expect(parentWindow.contentView.addChildView).not.toHaveBeenCalled()
     expect(parentWindow.contentView.removeChildView).not.toHaveBeenCalled()
-    expect(onClosed).not.toHaveBeenCalled()
+    // No view was ever assigned to this launch, so it is never released.
+    expect(onReleased).not.toHaveBeenCalled()
     await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1_000)
     expect(mintCallsFor('first-app')).toBe(1)
   })
@@ -775,12 +743,12 @@ describe('AppService sandbox-ui embed across a login that replaces a live sessio
   }
 
   it('an open whose mint lands after B logged in over A installs nothing and rejects', async () => {
-    const onClosed = vi.fn()
+    const onReleased = vi.fn()
     const service = await serviceLoggedInAsA()
     const parentWindow = new FakeParentWindow()
     const answerMint = holdMint('first-app')
 
-    const outcome = service.openSandboxUi(openArgs('first-app', parentWindow, onClosed)).then(
+    const outcome = service.openSandboxUi(openArgs('first-app', parentWindow, onReleased)).then(
       () => 'opened',
       (error: unknown) => error
     )
@@ -795,7 +763,8 @@ describe('AppService sandbox-ui embed across a login that replaces a live sessio
     expect(electronMocks.views).toHaveLength(0)
     expect(parentWindow.contentView.addChildView).not.toHaveBeenCalled()
     expect(getActiveSandboxUi()).toBeNull()
-    expect(onClosed).not.toHaveBeenCalled()
+    // No view was ever assigned to this launch, so it is never released.
+    expect(onReleased).not.toHaveBeenCalled()
     await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1_000)
     expect(mintCallsFor('first-app')).toBe(1)
   })
@@ -1014,7 +983,7 @@ describe('AppService sandbox-ui view release', () => {
     expect(released).toEqual([])
     expectNoOrphanView(parentWindow)
 
-    // The legacy close names no launch and still closes whatever is live.
+    // Main's own close names no launch and closes whatever is live.
     await service.closeSandboxUi()
     expect(getActiveSandboxUi()).toBeNull()
     expect(released).toEqual([{ launchId: args.launchId, reason: 'closed', location: {} }])
@@ -1123,9 +1092,10 @@ describe('AppService sandbox-ui represented location', () => {
     await service.openSandboxUi(first)
     const webContents = electronMocks.views[0]!.webContents
 
-    await expect(service.getSandboxUiLocation()).resolves.toEqual({
-      appRef: 'sandbox-recipes/first-app',
-      routePath: '/r/first',
+    expect(getActiveSandboxUiLocation()).toEqual({
+      recipeNs: 'sandbox-recipes',
+      recipeName: 'first-app',
+      path: '/r/first',
     })
 
     // The document commits and the driver hands the route to the app.
@@ -1134,9 +1104,10 @@ describe('AppService sandbox-ui represented location', () => {
       timeout: 1_000,
     })
     webContents.navigateInPage(`${APP_VIEW_URL}/inbox`)
-    await expect(service.getSandboxUiLocation()).resolves.toEqual({
-      appRef: 'sandbox-recipes/first-app',
-      routePath: '/inbox',
+    expect(getActiveSandboxUiLocation()).toEqual({
+      recipeNs: 'sandbox-recipes',
+      recipeName: 'first-app',
+      path: '/inbox',
     })
 
     await service.closeSandboxUi({ launchId: first.launchId })
@@ -1165,9 +1136,10 @@ describe('AppService sandbox-ui represented location', () => {
 
     // rpc-proxy answers with a "starting" interstitial: the handoff waits.
     webContents.commitLoad(503)
-    await expect(service.getSandboxUiLocation()).resolves.toEqual({
-      appRef: 'sandbox-recipes/first-app',
-      routePath: '/r/first',
+    expect(getActiveSandboxUiLocation()).toEqual({
+      recipeNs: 'sandbox-recipes',
+      recipeName: 'first-app',
+      path: '/r/first',
     })
 
     webContents.navigateInPage(`${APP_VIEW_URL}/elsewhere`)
@@ -1183,8 +1155,9 @@ describe('AppService sandbox-ui represented location', () => {
     await service.openSandboxUi(first)
     const webContents = electronMocks.views[0]!.webContents
 
-    await expect(service.getSandboxUiLocation()).resolves.toEqual({
-      appRef: 'sandbox-recipes/first-app',
+    expect(getActiveSandboxUiLocation()).toEqual({
+      recipeNs: 'sandbox-recipes',
+      recipeName: 'first-app',
     })
     webContents.commitLoad()
     webContents.navigateInPage(`${APP_VIEW_URL}/settings`)
@@ -1414,10 +1387,8 @@ describe('AppService sandbox-ui teardown isolates every step', () => {
     const { service, parentWindow, released, args, view } = await openLive()
     view.webContents.commitLoad()
     view.webContents.navigateInPage('https://elsewhere.example/landing')
-    // The legacy reader keeps rejecting, so the renderer falls back.
-    await expect(service.getSandboxUiLocation()).rejects.toThrow(
-      'Cannot read the current app route'
-    )
+    // The deep link refuses it, and the release reports no location.
+    expect(() => getActiveSandboxUiLocation()).toThrow('Cannot read the current app route')
 
     await expect(service.closeSandboxUi({ launchId: args.launchId })).resolves.toBeUndefined()
 
@@ -1438,28 +1409,29 @@ describe('AppService sandbox-ui route settling', () => {
   }
 
   const location = (routePath?: string) => ({
-    appRef: 'sandbox-recipes/first-app',
-    ...(routePath ? { routePath } : {}),
+    recipeNs: 'sandbox-recipes',
+    recipeName: 'first-app',
+    ...(routePath ? { path: routePath } : {}),
   })
 
   it('a view with no requested route reports where the server sent its first load', async () => {
     const { service, webContents } = await openLoading()
     webContents.commitLoad(200, `${APP_VIEW_URL}/welcome`)
-    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/welcome'))
+    expect(getActiveSandboxUiLocation()).toEqual(location('/welcome'))
   })
 
   it('an in-page navigation before the first load does not replace the requested route', async () => {
     const { service, webContents } = await openLoading('/r/first')
     webContents.navigateInPage(`${APP_VIEW_URL}/#boot`)
     webContents.commitLoad(503)
-    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/r/first'))
+    expect(getActiveSandboxUiLocation()).toEqual(location('/r/first'))
   })
 
   it('an in-page navigation of a subframe does not replace the requested route', async () => {
     const { service, webContents } = await openLoading('/r/first')
     webContents.commitLoad(503)
     webContents.emit('did-navigate-in-page', {}, `${APP_VIEW_URL}/frame`, false)
-    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/r/first'))
+    expect(getActiveSandboxUiLocation()).toEqual(location('/r/first'))
   })
 
   it('a handoff that finds the app already on the route settles it', async () => {
@@ -1469,7 +1441,7 @@ describe('AppService sandbox-ui route settling', () => {
       timeout: 1_000,
     })
     await expect(webContents.executeJavaScript.mock.results[0]!.value).resolves.toBe(true)
-    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/r/first'))
+    expect(getActiveSandboxUiLocation()).toEqual(location('/r/first'))
   })
 
   it('a handoff the app does not take keeps the requested route', async () => {
@@ -1480,7 +1452,7 @@ describe('AppService sandbox-ui route settling', () => {
       timeout: 1_000,
     })
     await expect(webContents.executeJavaScript.mock.results[0]!.value).resolves.toBe(false)
-    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/r/first'))
+    expect(getActiveSandboxUiLocation()).toEqual(location('/r/first'))
   })
 
   it('a new document the user opens after the handoff gave up is the live route', async () => {
@@ -1490,10 +1462,10 @@ describe('AppService sandbox-ui route settling', () => {
 
     // A reload commits the same document: still the requested route.
     webContents.commitLoad()
-    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/r/first'))
+    expect(getActiveSandboxUiLocation()).toEqual(location('/r/first'))
 
     webContents.navigateTo(`${APP_VIEW_URL}/reports`)
-    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/reports'))
+    expect(getActiveSandboxUiLocation()).toEqual(location('/reports'))
     await service.closeSandboxUi()
     expect(released.map(event => event.location)).toEqual([{ routePath: '/reports' }])
   })
@@ -1503,7 +1475,7 @@ describe('AppService sandbox-ui route settling', () => {
     const { service, webContents } = await openLoading('/r/first')
     await vi.advanceTimersByTimeAsync(30_000)
     webContents.commitLoad()
-    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/r/first'))
+    expect(getActiveSandboxUiLocation()).toEqual(location('/r/first'))
   })
 
   it('a document committed outside the app does not replace the requested route', async () => {
@@ -1511,7 +1483,7 @@ describe('AppService sandbox-ui route settling', () => {
     webContents.commitLoad(503)
     await vi.advanceTimersByTimeAsync(30_000)
     webContents.navigateTo('https://elsewhere.example/landing')
-    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/r/first'))
+    expect(getActiveSandboxUiLocation()).toEqual(location('/r/first'))
   })
 
   it('a reload after the router moved the URL during boot keeps the requested route', async () => {
@@ -1521,23 +1493,23 @@ describe('AppService sandbox-ui route settling', () => {
     webContents.navigateInPage(`${APP_VIEW_URL}/home`)
     await vi.advanceTimersByTimeAsync(30_000)
     webContents.emit('did-finish-load')
-    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/r/first'))
+    expect(getActiveSandboxUiLocation()).toEqual(location('/r/first'))
 
     // A reload commits the document the view is already showing.
     webContents.emit('did-navigate', {}, `${APP_VIEW_URL}/home`, 200, '')
     webContents.emit('did-finish-load')
-    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/r/first'))
+    expect(getActiveSandboxUiLocation()).toEqual(location('/r/first'))
   })
 
   it('a new document committed while the handoff still waits keeps the requested route', async () => {
     const { service, webContents } = await openLoading('/r/first')
     webContents.commitLoad(503)
     webContents.navigateTo(`${APP_VIEW_URL}/starting`, 503)
-    await expect(service.getSandboxUiLocation()).resolves.toEqual(location('/r/first'))
+    expect(getActiveSandboxUiLocation()).toEqual(location('/r/first'))
   })
 })
 
-describe('sandbox-ui IPC close ordering and legacy payloads', () => {
+describe('sandbox-ui IPC close ordering and payloads', () => {
   type Sender = { id: number }
 
   async function setupIpc() {
@@ -1570,17 +1542,42 @@ describe('sandbox-ui IPC close ordering and legacy payloads', () => {
     return { service, parentWindow, invoke, open, releasedSends }
   }
 
-  it('a null payload is the legacy close of whatever is live', async () => {
-    const { invoke, open, releasedSends, parentWindow } = await setupIpc()
+  // The renderer always names its launch. A close without one used to close
+  // whatever was live, which by the time the queue reached it could be a view
+  // another launch owned.
+  it.each([undefined, null, {}])(
+    'rejects a close with payload %j without closing the live view',
+    async payload => {
+      const { service, invoke, open, releasedSends, parentWindow } = await setupIpc()
+      const launchId = crypto.randomUUID()
+      await open(launchId)
+
+      await expect(invoke('sandboxUi:close', payload)).rejects.toThrow(/launchId/)
+      await drainLifecycleQueue(service)
+
+      expect(getActiveSandboxUi()?.launchId).toBe(launchId)
+      expect(parentWindow.contentView.children).toHaveLength(1)
+      expect(releasedSends()).toEqual([])
+    }
+  )
+
+  // A view main tears down on its own (crash, parent closed) reaches the
+  // renderer only as its release; there is no second "closed" signal for the
+  // renderer to reconcile against it.
+  it('a view whose renderer dies is reported to its window only by its release', async () => {
+    const { open, parentWindow } = await setupIpc()
     const launchId = crypto.randomUUID()
     await open(launchId)
+    parentWindow.webContents.send.mockClear()
 
-    await invoke('sandboxUi:close', null)
+    electronMocks.views[0]!.webContents.emit(
+      'render-process-gone',
+      {},
+      { reason: 'crashed', exitCode: 139 }
+    )
 
-    expect(getActiveSandboxUi()).toBeNull()
-    expectNoOrphanView(parentWindow)
-    expect(releasedSends()).toEqual([
-      ['sandboxUi:released', { launchId, reason: 'closed', location: {} }],
+    expect(parentWindow.webContents.send.mock.calls).toEqual([
+      ['sandboxUi:released', { launchId, reason: 'crashed', location: null }],
     ])
   })
 
