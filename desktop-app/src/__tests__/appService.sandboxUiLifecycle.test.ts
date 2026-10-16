@@ -295,7 +295,9 @@ describe('AppService sandbox-ui effective RPC endpoint', () => {
         url: `${discoveredRpcUrl}/api/v1/sandbox-ui/sandbox-recipes/effective-app/`,
       })
     )
-    expect(electronMocks.views.at(-1)?.webContents.currentUrl).toBe(
+    const { webContents } = electronMocks.views.at(-1)!
+    webContents.commitLoad()
+    expect(webContents.currentUrl).toBe(
       `${discoveredRpcUrl}/api/v1/sandbox-ui/sandbox-recipes/effective-app/view/`
     )
   })
