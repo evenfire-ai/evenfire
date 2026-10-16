@@ -229,6 +229,7 @@ describeRealPostgres(
         recipeReader: { read: async () => null },
         mcpServerReader: subjectReader(gateway),
         userContextsReader: async () => ({ contextIds: ['ctx-A'] }),
+        userServerAccessReader: async () => true,
         secretReader: { read: async () => ({}) },
         fetchFn: (async () => {
           throw new Error('remote lane must not use fetchFn')

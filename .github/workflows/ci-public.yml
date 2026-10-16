@@ -129,6 +129,14 @@ jobs:
         working-directory: ${{ matrix.service }}
         run: npm ci
 
+      # The mcp-host images ship these faces, and the tests that set Arabic,
+      # Hebrew and Han text in a PDF fail in CI instead of skipping without them.
+      - name: Install the mcp-host image fonts
+        if: matrix.service == 'mcp-host'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fonts-dejavu-core fonts-noto-core fonts-noto-cjk
+
       - name: Install External REST contract-test dependencies
         if: matrix.service == 'control-api'
         working-directory: external-rest-api
@@ -231,7 +239,7 @@ jobs:
         timeout-minutes: 10
         run: |
           node ../../scripts/minikube/run-with-deadline.mjs --timeout-seconds 300 --heartbeat-seconds 20 --kill-grace-seconds 5 --label web-search-ci-image-build -- \
-            docker build -t issue198-ci-image:test .
+            docker build --build-arg NODE_IMAGE=mirror.gcr.io/library/node:24-alpine -t issue198-ci-image:test .
           web_search_image_id="$(node ../../scripts/minikube/run-with-deadline.mjs --timeout-seconds 10 --heartbeat-seconds 5 --kill-grace-seconds 5 --label web-search-ci-image-inspect -- \
             docker image inspect issue198-ci-image:test --format '{{.Id}}')"
           node test/run-network.mjs --image "$web_search_image_id"
@@ -312,7 +320,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16-alpine
+        image: mirror.gcr.io/library/postgres:16-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_DB: postgres
@@ -503,7 +511,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16-alpine
+        image: mirror.gcr.io/library/postgres:16-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -854,6 +862,20 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Every image shipping a TLS tool installs ca-certificates
         run: bash scripts/check-dockerfile-ca-certificates.sh
+
+  # ─── Dockerfile font guard ────────────────────────────────────────────────
+  # The renderers find their faces by file name and the packages that ship
+  # them are listed in each Dockerfile; an image missing one builds and runs,
+  # and its Arabic, Hebrew or Han text silently loses its face.
+  dockerfile-font-guard:
+    name: Validate mcp-host font packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Every mcp-host image and CI job installs the renderers' fonts
+        run: bash scripts/check-dockerfile-fonts.sh
+      - name: The font check passes complete lists and names what one misses
+        run: bash scripts/tests/test-check-dockerfile-fonts.sh
 
   # ─── Deploy manifest check (public overlays) ──────────────────────────────
   # The public repo carries base + minikube overlays only; the gcp-dev/gcp-prod
