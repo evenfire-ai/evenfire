@@ -213,7 +213,8 @@ Every other org is capped at `CONTROL_API_DEFAULT_HOOK_TRUST_CAP` (default
 
 Open **Agents** → the agent → **Advanced** → **Hooks**. The table lists each
 `{hook, phase}` reference. Row actions are **View details** and
-**Remove from \<phase\>**. Removing a reference leaves the hook installed. To
+**Remove from \<phase\>**. Removing a reference stops the hook at that
+phase but leaves it installed. To
 remove it from the cluster, uninstall it on **Installed Guardrails**. That
 strips the reference from every Host first, then deletes the CR. **Add
 hook** goes to the same Marketplace list.
@@ -246,25 +247,30 @@ the fields it does not edit when it saves.
   fail mode (or `open`), and **May deny** forces `closed`.
 
 - **Timeouts.** The Host's `limits.maxHookTimeoutMs` (default 5000 ms) is
-  the transport timeout for each hook call on both lanes. LLM-lane hooks
-  also have a fixed 15000 ms hard deadline, so on that lane a value above
-  15000 has no effect: the call reports unavailable after 15 seconds.
+  the transport timeout for each hook call on both lanes. Every hook call
+  also has a fixed 15000 ms hard deadline, so a value above 15000 has no
+  effect: the call reports unavailable after 15 seconds.
   mcp-host does not read `LlmHook.spec.timeoutMs`.
 - **Circuit breaker.** `onUnavailable.mode: breaker` (threshold 5, cooldown
   30000 ms by default) short-circuits a down hook without dialing it. It
-  applies only to LLM-lane hooks **without** `may_deny`. A deny-capable hook
-  is always dialed.
+  applies on both lanes, only to hooks **without** `may_deny`, and a hook
+  has one breaker state shared by both lanes. A deny-capable hook is always
+  dialed.
 - **Digest binding.** For image hooks whose Host reference pins a `digest`,
   mcp-host compares it with `LlmHook.status.observedDigest` (once that is
-  set). On a mismatch it quarantines the hook. Quarantine is enforced on the
-  LLM lane only: there every call reports unavailable, so the fail-mode
-  rules above apply. A tool-lane hook (`preToolUse`/`postToolUse`) with a
-  mismatched digest is still dialed. The same quarantine applies to a
+  set). On a mismatch it quarantines the hook on both lanes: every call
+  reports unavailable without dialing, so the fail-mode rules above apply.
+  The same quarantine applies to a
   co-located hook that lost a `DuplicatePath` collision. Upgrade with
   `POST /admin/registry/upgrade-hook`, which bumps the CR and every Host's
   digest together.
-- **The Host phase key does not filter.** mcp-host collects hook ids from
-  all phases. The `LlmHook`'s own `lifecyclePoints` decide where it runs.
+- **The Host phase key decides where a hook runs.** A hook runs only at the
+  points that are both declared in its `lifecyclePoints` and referenced on
+  the Host. A Host phase the hook does not declare is ignored. Upgrade keeps
+  each Host's phases: it drops phases the new version no longer declares and
+  adds none the Host did not already reference, including newly declared
+  ones. If no phase survives, the hook is re-referenced at all of its new
+  points.
 
 ## Try the reference hook
 
@@ -338,9 +344,6 @@ guardrail policy` result or a pending approval. The
   responses. The CRD default (65536) applies only when a `limits` object is
   present; otherwise mcp-host uses 1 MiB, and `preCall` rewrites get 5 MiB.
   Tool-lane hooks are not capped by this field.
-- **LLM-lane only.** Quarantine on digest mismatch and the circuit breaker
-  are implemented for LLM-lane hooks only. Tool-lane hooks are dialed
-  without them.
 - **Doom-loop guard.** It is active whenever tool-lane rules or hooks exist:
   the third consecutive identical call is denied (`repeated_identical_call`).
   It is a runaway guard, not a security control, because alternating calls
