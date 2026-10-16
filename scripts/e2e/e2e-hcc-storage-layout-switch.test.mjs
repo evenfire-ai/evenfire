@@ -146,7 +146,7 @@ curl() {
   printf '{"token":"t1"}\\n200'
 }
 SCRATCH="$DIR" CAPI=http://127.0.0.1:1 EXT_BASE=http://127.0.0.1:2 HTTP_HEADERS=()
-ADMIN_USERNAME=admin ADMIN_PASSWORD='admin pw-secret-1' DEV_EMAIL=dev@example.test DEV_PASSWORD='dev"pw-secret-2'
+ADMIN_USERNAME=admin ADMIN_PASSWORD='admin fixture-pw-1' DEV_EMAIL=dev@example.test DEV_PASSWORD='dev"fixture-pw-2'
 ${helper('http')}
 ${helper('admin_login')}
 ${helper('user_login')}
@@ -161,15 +161,15 @@ admin_login && user_login && echo "OK $ADMIN_COOKIE $SESSION_TOKEN"
     assert.equal(run.status, 0, run.stderr)
     assert.equal(run.stdout.trim(), 'OK c1 t1')
     const args = readFileSync(jqArgv, 'utf8')
-    assert.doesNotMatch(args, /pw-secret/)
+    assert.doesNotMatch(args, /fixture-pw/)
     // Witness: jq built both login bodies, and they carry the exact passwords.
     assert.match(args, /username/)
     assert.match(args, /email/)
     assert.deepEqual(
       readFileSync(sent, 'utf8').trim().split('\n').map(line => JSON.parse(line)),
       [
-        { username: 'admin', password: 'admin pw-secret-1' },
-        { email: 'dev@example.test', password: 'dev"pw-secret-2' },
+        { username: 'admin', password: 'admin fixture-pw-1' },
+        { email: 'dev@example.test', password: 'dev"fixture-pw-2' },
       ]
     )
   } finally {
