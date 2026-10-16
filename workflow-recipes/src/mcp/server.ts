@@ -127,12 +127,21 @@ export async function revalidatePluginSdkCredentialTicket(input: {
   }
 }
 
-/** Log an oversized request body by size and path only: never the body or query. */
-function logOversizedBody(req: http.IncomingMessage, bytesRead: number): void {
+/**
+ * Log an oversized request body by route and size only: never the body, and
+ * never the request URL, whose suffix is caller-controlled.
+ */
+function logOversizedBody(
+  req: http.IncomingMessage,
+  route: 'workflow' | 'plugin-workload-sdk-credentials',
+  recipeName: string,
+  bytesRead: number
+): void {
   const contentLength = Number(req.headers['content-length'])
   log.warn('Rejected oversized request body', {
     method: req.method,
-    path: (req.url ?? '').split('?')[0],
+    route,
+    recipeName,
     bytesRead,
     contentLength: Number.isFinite(contentLength) ? contentLength : undefined,
     limitBytes: MAX_BODY_BYTES,
@@ -478,7 +487,9 @@ export class ClerumMcpServer {
     if (req.method === 'POST') {
       const parseResult = await parseJsonBody(req)
       if (!parseResult.ok) {
-        if (parseResult.reason === 'too_large') logOversizedBody(req, parseResult.bytesRead)
+        if (parseResult.reason === 'too_large') {
+          logOversizedBody(req, 'workflow', recipeName, parseResult.bytesRead)
+        }
         const status = parseResult.reason === 'too_large' ? 413 : 400
         const error =
           parseResult.reason === 'too_large' ? 'Request body too large' : 'Invalid JSON body'
@@ -660,7 +671,14 @@ export class ClerumMcpServer {
 
     const parseResult = await parseJsonBody(req)
     if (!parseResult.ok) {
-      if (parseResult.reason === 'too_large') logOversizedBody(req, parseResult.bytesRead)
+      if (parseResult.reason === 'too_large') {
+        logOversizedBody(
+          req,
+          'plugin-workload-sdk-credentials',
+          boundRecipeName,
+          parseResult.bytesRead
+        )
+      }
       res.writeHead(parseResult.reason === 'too_large' ? 413 : 400, {
         'Content-Type': 'application/json',
       })
@@ -781,9 +799,9 @@ export class ClerumMcpServer {
   async start(): Promise<void> {
     this.httpServer = http.createServer((req, res) => {
       this.handleHttpRequest(req, res).catch((error: unknown) => {
-        log.error('Unhandled error in request handler', {
-          error: error instanceof Error ? error.message : String(error),
-        })
+        // Pass the Error itself: the logger redacts ApiException bodies,
+        // headers and URLs only inside native errors.
+        log.error('Unhandled error in request handler', { error })
         if (!res.headersSent) {
           res.writeHead(500, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: 'Internal server error' }))

@@ -36,7 +36,10 @@ export function normalizeToolResultForStatus(result: unknown): unknown {
  * MAX_STATUS_TOOL_CALLS calls with previewed args/results (what WRC stores),
  * plus up to MAX_STATUS_TOOL_CALLS later calls whose result reports a
  * generated artifact. WRC extracts artifacts from every reported call, so those
- * later calls are kept (without args) to leave status.artifacts unchanged.
+ * later calls are kept (without args), and an artifact result too large for a
+ * preview is reduced to its artifact metadata rather than truncated. Past the
+ * cap, artifacts from a step with more than 2 x MAX_STATUS_TOOL_CALLS calls
+ * are dropped to keep the report bounded.
  * Entries are not validated here; WRC rejects malformed ones.
  */
 export function boundToolsCalledForStatus(toolsCalled: readonly unknown[]): unknown[] {
@@ -46,27 +49,47 @@ export function boundToolsCalledForStatus(toolsCalled: readonly unknown[]): unkn
     return {
       ...rest,
       ...(args !== undefined && { args: normalizeToolArgsForStatus(args) }),
-      ...(result !== undefined && { result: normalizeToolResultForStatus(result) }),
+      ...(result !== undefined && { result: boundToolResultForStatus(result) }),
     }
   })
 
   let laterArtifactCalls = 0
   for (const call of toolsCalled.slice(MAX_STATUS_TOOL_CALLS)) {
     if (laterArtifactCalls >= MAX_STATUS_TOOL_CALLS) break
-    if (!isRecord(call) || !isArtifactToolResult(call.result)) continue
+    if (!isRecord(call) || !parseArtifactToolResult(call.result)) continue
     const { args: _args, result, ...rest } = call
-    bounded.push({ ...rest, result: normalizeToolResultForStatus(result) })
+    bounded.push({ ...rest, result: boundToolResultForStatus(result) })
     laterArtifactCalls += 1
   }
   return bounded
 }
 
-function isArtifactToolResult(result: unknown): boolean {
+const ARTIFACT_FIELDS = ['name', 'format', 'path', 'sizeBytes', 'createdAt'] as const
+
+function boundToolResultForStatus(result: unknown): unknown {
+  const normalized = normalizeToolResultForStatus(result)
+  if (normalized === result) return result
+  const artifact = parseArtifactToolResult(result)
+  if (!artifact) return normalized
+  // Strings are cut to the preview limit; WRC's own artifact limits are far
+  // smaller, so it accepts and rejects exactly the artifacts it did before.
+  const fields: Record<string, string | number> = {}
+  for (const key of ARTIFACT_FIELDS) {
+    const value = artifact[key]
+    if (typeof value === 'string') fields[key] = value.slice(0, STATUS_TOOL_RESULT_PREVIEW_LIMIT)
+    else if (typeof value === 'number') fields[key] = value
+  }
+  return { success: true, artifact: fields }
+}
+
+function parseArtifactToolResult(result: unknown): Record<string, unknown> | null {
   try {
     const parsed = typeof result === 'object' ? result : JSON.parse(String(result ?? '{}'))
     return isRecord(parsed) && parsed.success === true && isRecord(parsed.artifact)
+      ? parsed.artifact
+      : null
   } catch {
-    return false
+    return null
   }
 }
 

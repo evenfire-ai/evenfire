@@ -417,6 +417,43 @@ describe('postStepStatus — step-level update', () => {
     expect(fromBounded).toEqual(fromRaw)
   })
 
+  it('still extracts an artifact whose tool result is too large for a preview', async () => {
+    const customApi = makeCustomApi({
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: { name: 'my-recipe', resourceVersion: '1' },
+        spec: { steps: [{ id: 's1' }] },
+        status: { workflowExecution: { phase: 'running', attempt: 1 }, steps: [], artifacts: [] },
+      }),
+    })
+    const h = createWorkflowEndpointHandlers(customApi, 'sandbox-recipes')
+    const artifact = {
+      name: 'big.pdf',
+      format: 'pdf',
+      path: '/output/big.pdf',
+      sizeBytes: 4096,
+      createdAt: '2026-10-16T00:00:00.000Z',
+    }
+
+    const result = await h.postStepStatus('my-recipe', makeClaims(), {
+      stepId: 's1',
+      phase: 'completed',
+      toolsCalled: boundToolsCalledForStatus([
+        {
+          serverName: 'clerum',
+          toolName: 'generate_pdf',
+          args: {},
+          result: { success: true, artifact, content: 'q'.repeat(5_000) },
+          durationMs: 1,
+        },
+      ]) as never,
+    })
+
+    expect(result.status).toBe(200)
+    expect(
+      getStatusPatchOps(customApi).find(op => op.path === '/status/artifacts/-')?.value
+    ).toEqual(artifact)
+  })
+
   it('patches only the touched step so stale reads cannot overwrite sibling step status', async () => {
     const raceApi = makeCustomApi({
       getNamespacedCustomObject: vi.fn().mockResolvedValue({

@@ -53,7 +53,11 @@ export class StatusReporter {
         // Duplicate terminal step reports can happen when the first response is lost
         // after WRC already committed the status patch. Treat that idempotent conflict
         // as accepted, but fail closed for every other write error.
-        if (resp.status === 409 && (await responseHasAlreadyTerminalPhase(resp))) {
+        const responseText = await readResponseText(resp)
+        if (
+          resp.status === 409 &&
+          responseText.toLowerCase().includes('already in terminal phase')
+        ) {
           return
         }
 
@@ -68,7 +72,7 @@ export class StatusReporter {
             httpStatus: resp.status,
             bodyBytes,
           })
-          const reason = await responseErrorReason(resp)
+          const reason = responseErrorReason(responseText)
           throw new Error(
             `WRC rejected ${label} with HTTP ${resp.status}${reason ? `: ${reason}` : ''}`
           )
@@ -146,21 +150,20 @@ export class StatusReporter {
   }
 }
 
-async function responseHasAlreadyTerminalPhase(resp: Response): Promise<boolean> {
+async function readResponseText(resp: Response): Promise<string> {
   try {
-    const text = await resp.text()
-    return text.toLowerCase().includes('already in terminal phase')
+    return await resp.text()
   } catch {
-    return false
+    return ''
   }
 }
 
 const MAX_ERROR_REASON_CHARS = 200
 
 /** WRC's own `{ error }` text for a rejected write; never the request body. */
-async function responseErrorReason(resp: Response): Promise<string | undefined> {
+function responseErrorReason(responseText: string): string | undefined {
   try {
-    const parsed: unknown = JSON.parse(await resp.text())
+    const parsed: unknown = JSON.parse(responseText)
     const error = (parsed as { error?: unknown } | null)?.error
     return typeof error === 'string' ? error.slice(0, MAX_ERROR_REASON_CHARS) : undefined
   } catch {

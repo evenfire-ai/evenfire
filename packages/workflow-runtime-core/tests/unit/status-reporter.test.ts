@@ -184,6 +184,46 @@ describe('StatusReporter', () => {
     expect(JSON.stringify(logSpy.mock.calls)).not.toContain('sensitive output')
   })
 
+  it('names WRC’s reason for a conflict that is not an already-terminal step', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ error: 'Workflow is not running' }), { status: 409 })
+      )
+    vi.spyOn(logger, 'emitLog').mockImplementation(() => undefined)
+    vi.stubGlobal('fetch', fetchMock)
+
+    const reporter = new StatusReporter({
+      wrcUrl: 'http://wrc:8082',
+      workflowName: 'wf',
+      tokenProvider: tokenProvider(),
+    })
+
+    await expect(reporter.reportStepStatus('s1', 'completed')).rejects.toThrow(
+      'WRC rejected step status with HTTP 409: Workflow is not running'
+    )
+  })
+
+  it('caps WRC’s reason text in the error message', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 422,
+      ok: false,
+      text: async () => JSON.stringify({ error: 'r'.repeat(500) }),
+    })
+    vi.spyOn(logger, 'emitLog').mockImplementation(() => undefined)
+    vi.stubGlobal('fetch', fetchMock)
+
+    const reporter = new StatusReporter({
+      wrcUrl: 'http://wrc:8082',
+      workflowName: 'wf',
+      tokenProvider: tokenProvider(),
+    })
+
+    await expect(reporter.reportStepStatus('s1', 'completed')).rejects.toThrow(
+      new Error(`WRC rejected step status with HTTP 422: ${'r'.repeat(200)}`)
+    )
+  })
+
   it('includes the network error cause code when retries are exhausted', async () => {
     const cause = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })
     const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed', { cause }))
