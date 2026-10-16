@@ -72,7 +72,7 @@ CLERUM_MODEL_PROVIDER=openai     # optional with one key: openai | claude | zai 
 ## 2. Set up the cluster (one command)
 
 ```bash
-MINIKUBE_IMAGE_TAG=latest make minikube-setup   # see the override note below
+make minikube-setup
 ```
 
 This runs an idempotent 12-step setup: minikube cluster (Calico) → namespaces →
@@ -80,16 +80,16 @@ CRDs → JWT signing keys → secrets from `.env` → service images pulled from
 `ghcr.io/evenfire-ai` → deploy → readiness wait with auto-recovery → seed →
 verify.
 
-**You do not build images.** The 23 service images are published for
+**You do not build images.** The 25 service images are published for
 `linux/amd64` and `linux/arm64`, so an Apple Silicon Mac pulls a native image
 instead of compiling anything. MCP servers are not loaded into the cluster at
 all — they are installed on demand from the evenfire registry.
 
-`MINIKUBE_IMAGE_TAG=latest` is required today. The cluster manifests pin the
-next release tag, whose images are created by promotion _on_ that tag, so the
-pin currently names something that does not exist yet. Without the override the
-pull fails with a message naming the image, the tag, and this variable. Drop the
-override once that release is tagged and promoted.
+The manifests pin a release tag. Right after a release bump, that tag's images
+may not be promoted yet, and the pull fails with a message naming the image, the
+tag, and `MINIKUBE_IMAGE_TAG`. In that case run
+`MINIKUBE_IMAGE_TAG=latest make minikube-setup` to use the newest `dev` images
+instead. See [Releases and upgrades](../deploy/releases-and-upgrades.md).
 
 To build every image from source instead, use `make minikube-setup-local`
 (equivalently `IMAGE_SOURCE=local`). That path needs no tag override.
@@ -112,8 +112,11 @@ Verify:
 make minikube-status    # every deployment should show READY
 ```
 
-Useful re-runs: `make minikube-setup ARGS="--skip-build"` (redeploy in ~1 min) ·
-`ARGS="--reset-db"` (fix postgres after a cold-start crash) ·
+Useful re-runs (setup rebuilds the database by default, so keep it with
+`REUSE_DB=true` on an existing cluster):
+`make minikube-setup REUSE_DB=true ARGS="--skip-build"` (redeploy in ~1 min) ·
+`ARGS="--reset-db"` with `CONTROL_DB_RESET_PVC_UID` (fix postgres after a
+cold-start crash; see the troubleshooting table) ·
 `ARGS="--force-keys"` (regenerate the JWT chain) ·
 `ARGS="--seed-profile=e2e"` or `make minikube-setup-e2e` (adds the E2E fixture
 set: test user, `e2e-*` recipes, demo MCP servers).
@@ -201,9 +204,9 @@ Details: [Connect Telegram](../how-to/connect-telegram.md).
 | Symptom                                    | Fix                                                                                                                                                                                                                                                                                                                         |
 | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Agent never replies                        | No real LLM key in `.env`; with several keys, set `CLERUM_MODEL_PROVIDER` explicitly (see step 1)                                                                                                                                                                                                                           |
-| `minikube start` fails on memory           | Raise Docker Desktop to ≥10 GB RAM / 6 CPUs — or, if you can't spare it, `MINIKUBE_MEMORY=9216 MINIKUBE_IMAGE_TAG=latest make minikube-setup` (stock Docker Desktop's ~9.9 GB is just under the 10 GB default)                                                                                                              |
+| `minikube start` fails on memory           | Raise Docker Desktop to ≥10 GB RAM / 6 CPUs — or, if you can't spare it, `MINIKUBE_MEMORY=9216 make minikube-setup` (stock Docker Desktop's ~9.9 GB is just under the 10 GB default)                                                                                                              |
 | Pods `Pending` early on                    | Calico is still coming up — wait, then `make minikube-status`                                                                                                                                                                                                                                                               |
-| postgres CrashLoopBackOff after cold start | `make minikube-setup ARGS="--reset-db --skip-build"`                                                                                                                                                                                                                                                                        |
+| postgres CrashLoopBackOff after cold start | Rebuild the DB — this deletes all its data. First print and check the volume's UID: `kubectl --context clerum-test -n control-plane get pvc control-postgres-data -o jsonpath='{.metadata.uid}'`. Then paste it: `CONTROL_DB_RESET_PVC_UID=<uid-from-previous-step> make minikube-setup ARGS="--reset-db --skip-build"` ([details](../deploy/minikube.md#postgres-crashloopbackoff-wal-corruption)) |
 | Port-forwards die                          | Re-run `make minikube-pf-all` (it holds them open; Ctrl-C stops) |
 
 ## Next steps

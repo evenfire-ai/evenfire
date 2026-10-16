@@ -16,12 +16,13 @@ say so. [Design records](#design-records) are point-in-time and not maintained.
 
 ## Get started
 
-| Doc                                                       | Description                                        |
-| --------------------------------------------------------- | -------------------------------------------------- |
-| [Quickstart](get-started/quickstart.md)                   | Full platform on minikube: set `.env`, one command |
-| [Registry quickstart](get-started/registry-quickstart.md) | Connect, install, and publish as a self-hoster     |
-| [Learning path](get-started/learning-path.md)             | Choose a path by role and goal                     |
-| [FAQ](faq.md)                                             | Common questions and troubleshooting               |
+| Doc                                                       | Description                                                                 |
+| --------------------------------------------------------- | --------------------------------------------------------------------------- |
+| [Quickstart](get-started/quickstart.md)                   | Full platform on minikube: set `.env`, one command                          |
+| [Registry quickstart](get-started/registry-quickstart.md) | Connect, install, and publish as a self-hoster                              |
+| [Dev mode](get-started/dev-mode.md)                       | Run mcp-host alone without Kubernetes (contributors; not platform security) |
+| [Learning path](get-started/learning-path.md)             | Choose a path by role and goal                                              |
+| [FAQ](faq.md)                                             | Common questions and troubleshooting                                        |
 
 ## Concepts
 
@@ -47,27 +48,32 @@ say so. [Design records](#design-records) are point-in-time and not maintained.
 
 ## How-to guides
 
-| Doc                                                                           | Description                                                    |
-| ----------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| [Connect Telegram](how-to/connect-telegram.md)                                | Minikube env or CRD channel path                               |
-| [Connect Slack](how-to/connect-slack.md)                                      | Slack app scopes, request URL, conversation verification       |
-| [Connect Microsoft Teams](how-to/connect-teams.md)                            | Teams CLI bot registration, endpoint, conversation verify      |
-| [Configure approvals](how-to/configure-approvals.md)                          | Human-in-the-loop tool gates                                   |
-| [Add an MCP server](how-to/add-mcp-server.md)                                 | Dev-mode JSON, CRD, or Control UI path                         |
-| [Desktop setup & updates](how-to/desktop-setup-and-updates.md)                | Environments, invitation setup, updates                        |
-| [Member invitations on self-hosted](how-to/member-invitations-self-hosted.md) | Hosted mode zero-config emails vs running your own service     |
-| [Track usage & set budgets](how-to/token-budgets-and-usage.md)                | Enable budgets, scope, block vs warn                           |
-| [Connect to the registry](how-to/connect-to-registry.md)                      | Self-hosted registry connect flow                              |
-| [Publish a plugin](how-to/publish-plugin-to-registry.md)                      | Publish under your org with an `efrk_` key                     |
-| [Shared & global files](how-to/shared-and-global-files.md)                    | Team workspaces (SFS) and the brokered drive (EvenDrive / GFS) |
+| Doc                                                                           | Description                                                               |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| [Connect Telegram](how-to/connect-telegram.md)                                | Minikube env or CRD channel path                                          |
+| [Connect Slack](how-to/connect-slack.md)                                      | Slack app scopes, request URL, conversation verification                  |
+| [Connect Microsoft Teams](how-to/connect-teams.md)                            | Teams CLI bot registration, endpoint, conversation verify                 |
+| [Use the Desktop App](how-to/use-the-desktop-app.md)                          | Daily use: chat, attachments, approvals, EvenDrive, shortcuts, deep links |
+| [Configure guardrails](how-to/configure-guardrails.md)                        | Tool-call rules, installed guardrail hooks, built-ins                     |
+| [Connect an OAuth connector](how-to/connect-oauth-connector.md)               | Remote and OAuth MCP servers, user authorization, connector credentials   |
+| [Configure approvals](how-to/configure-approvals.md)                          | Human-in-the-loop tool gates                                              |
+| [Add an MCP server](how-to/add-mcp-server.md)                                 | Dev-mode JSON, CRD, or Control UI path                                    |
+| [Desktop setup & updates](how-to/desktop-setup-and-updates.md)                | Environments, invitation setup, updates                                   |
+| [Manage users and teams](how-to/manage-users-and-teams.md)                    | Members, teams, roles, control admins, agent access                       |
+| [Member invitations on self-hosted](how-to/member-invitations-self-hosted.md) | Hosted mode zero-config emails vs running your own service                |
+| [Track usage & set budgets](how-to/token-budgets-and-usage.md)                | Enable budgets, scope, block vs warn                                      |
+| [Connect to the registry](how-to/connect-to-registry.md)                      | Self-hosted registry connect flow                                         |
+| [Publish a plugin](how-to/publish-plugin-to-registry.md)                      | Publish under your org with an `efrk_` key                                |
+| [Shared & global files](how-to/shared-and-global-files.md)                    | Team workspaces (SFS) and the brokered drive (EvenDrive / GFS)            |
 
 ## LLM providers
 
-| Doc                                                       | Description                                                            |
-| --------------------------------------------------------- | ---------------------------------------------------------------------- |
-| [LLM providers overview](llm-providers/README.md)         | The 24 providers, mental model, support matrix, request flow, fallback |
-| [Configure LLM providers](deploy/llm-providers.md)        | Operator guide: credentials, Vertex/Bedrock/Azure, allowlist, selector |
-| [Add an LLM provider](llm-providers/adding-a-provider.md) | Data-only vs driver-based integration paths                            |
+| Doc                                                                      | Description                                                            |
+| ------------------------------------------------------------------------ | ---------------------------------------------------------------------- |
+| [LLM providers overview](llm-providers/README.md)                        | The 24 providers, mental model, support matrix, request flow, fallback |
+| [Configure LLM providers](deploy/llm-providers.md)                       | Operator guide: credentials, Vertex/Bedrock/Azure, allowlist, selector |
+| [Use a ChatGPT or Grok subscription](how-to/connect-llm-subscription.md) | Sign in with a subscription instead of an API key (off by default)     |
+| [Add an LLM provider](llm-providers/adding-a-provider.md)                | Data-only vs driver-based integration paths                            |
 
 ## Deploy & operate
 
@@ -76,6 +82,8 @@ say so. [Design records](#design-records) are point-in-time and not maintained.
 | [Minikube full stack](deploy/minikube.md)                                        | In-depth reference for the local platform                        |
 | [Production notes](deploy/production.md)                                         | Checklist and in-repo deploy assets                              |
 | [WorkflowRecipes operations](deploy/workflow-recipes-guide.md)                   | Recipe ops, RBAC, debugging                                      |
+| [Releases and upgrades](deploy/releases-and-upgrades.md)                         | Versioning, release images, pinning a release, upgrade order     |
+| [Monitoring and observability](operations/monitoring.md)                         | Logs starter, metrics endpoints, health checks, what to alert on |
 | **Upgrade notes**                                                                |                                                                  |
 | [Workflow output PVC upgrade](deploy/workflow-output-pvc-upgrade.md)             | Per-recipe output PVC ownership change                           |
 | [Plugin Workload SDK upgrade](deploy/plugin-workload-sdk-upgrade.md)             | promptBridge / clientNotifications rollout order and migration   |
@@ -87,12 +95,14 @@ say so. [Design records](#design-records) are point-in-time and not maintained.
 
 ## Reference
 
-| Doc                                                | Description                                                                                       |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| [CRD index](crds/README.md)                        | All 9 `clerum.io` CRDs                                                                            |
-| [Workflow SDK](../packages/workflow-sdk/README.md) | `@clerum/workflow-sdk` — build custom workflow coordinator images                                 |
-| [llms.txt](llms.txt)                               | Machine-readable doc map for coding agents                                                        |
-| Service READMEs                                    | One-line map per component in the root [README components list](../README.md#docs-and-components) |
+| Doc                                                  | Description                                                                                                     |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| [Configuration switches](reference/configuration.md) | Feature flags that differ between `deploy/base` and minikube, and where each service's variables are documented |
+| [Plugin UI SDK](reference/plugin-ui-sdk.md)          | `window.clerum` API for plugin apps embedded in the Desktop App                                                 |
+| [CRD index](crds/README.md)                          | All 9 `clerum.io` CRDs                                                                                          |
+| [Workflow SDK](../packages/workflow-sdk/README.md)   | `@clerum/workflow-sdk` — build custom workflow coordinator images                                               |
+| [llms.txt](llms.txt)                                 | Machine-readable doc map for coding agents                                                                      |
+| Service READMEs                                      | One-line map per component in the root [README components list](../README.md#docs-and-components)               |
 
 ## Architecture deep dives
 
@@ -170,7 +180,7 @@ as user docs: [design/](design/README.md).
 | Pick or configure an LLM provider    | [LLM providers overview](llm-providers/README.md)        |
 | Run the full stack locally           | [Minikube](deploy/minikube.md)                           |
 | Ship to a real cluster               | [Production notes](deploy/production.md)                 |
-| Upgrade an existing install          | [Deploy & operate › Upgrade notes](#deploy--operate)     |
+| Upgrade an existing install          | [Releases and upgrades](deploy/releases-and-upgrades.md) |
 | Debug E2E                            | [E2E guide](testing/e2e-guide.md)                        |
 | Feed docs to an LLM                  | [llms.txt](llms.txt)                                     |
 | Use the admin console                | [Control UI](surfaces/control-ui.md)                     |
