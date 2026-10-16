@@ -387,6 +387,10 @@ export function SandboxUiPage({
   }, [currentTeamId, onNotify])
 
   const embedLive = view.kind === 'mounted' || view.kind === 'minting'
+  // Main only honours setVisible/setBounds for a view it has already attached,
+  // and attaches a freshly opened one visible. Re-running the visibility effect
+  // per mounted view re-applies a hide requested while it was still opening.
+  const mountedLaunchId = view.kind === 'mounted' ? view.launch.launchId : null
 
   // Track bounds while mounted; also while minting so the slot is placed by
   // the time the open reads it.
@@ -445,7 +449,7 @@ export function SandboxUiPage({
     return () => {
       cancelled = true
     }
-  }, [embedLive, shellOverlayOpen])
+  }, [embedLive, mountedLaunchId, shellOverlayOpen])
 
   if (view.kind === 'mounted' || view.kind === 'minting') {
     // Only failures of the launch that owns the tab right now; one from a view

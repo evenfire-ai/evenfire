@@ -3,6 +3,7 @@ import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
+import { createSandboxUiMainFake } from '../../__tests__/__fixtures__/sandboxUiMainFake'
 import { SandboxUiPage as SandboxUiPageBase } from '../SandboxUiPage'
 import {
   LaunchingSandboxUiPage as SandboxUiPage,
@@ -1032,5 +1033,84 @@ describe('SandboxUiPage', () => {
     await waitFor(() => {
       expect(sandboxUi.setVisible).toHaveBeenCalledWith(false)
     })
+  })
+
+  // Main ignores setVisible until the view is attached, then attaches it
+  // visible: a hide sent while the app is still opening is lost unless the page
+  // repeats it once the view mounts.
+  it('hides an app that finishes opening while a shell overlay is already open', async () => {
+    sandboxUi.listApps.mockResolvedValue({ apps: [] })
+    let finishOpen!: () => void
+    sandboxUi.open.mockImplementation(
+      () =>
+        new Promise<void>(resolve => {
+          finishOpen = resolve
+        })
+    )
+    sandboxUi.capturePreview.mockResolvedValue('data:image/png;base64,opened')
+    const app = { appRef: 'sandbox-recipes/task-board', label: 'Task', defaultPath: '/' }
+    render(<SandboxUiPage toastShellOverlayOpen initialLaunch={app} />)
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledOnce())
+    await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenCalledWith(false))
+    sandboxUi.setVisible.mockClear()
+
+    await act(async () => finishOpen())
+    await screen.findByRole('button', { name: 'Refresh app content' })
+    await act(async () => {
+      await new Promise(resolve => window.setTimeout(resolve, 0))
+    })
+
+    expect(sandboxUi.setVisible.mock.calls).toEqual([[false]])
+    expect(screen.getByTestId('sandbox-ui-embed-preview').getAttribute('src')).toBe(
+      'data:image/png;base64,opened'
+    )
+  })
+
+  it('hides the replacement view of a relaunch made while a shell overlay is open', async () => {
+    sandboxUi.listApps.mockResolvedValue({ apps: [] })
+    sandboxUi.capturePreview.mockResolvedValue(null)
+    // The relaunch waits for main to release the old view, so main's lifecycle
+    // events are needed here; they come from the shared fake, wired the way App
+    // wires them.
+    const main = createSandboxUiMainFake()
+    sandboxUi.open.mockImplementation(main.bridge.open)
+    sandboxUi.close.mockImplementation(main.bridge.close)
+    const embed = createPageEmbed()
+    main.bridge.onReleased(event => embed.onReleased(event))
+    const app = { appRef: 'sandbox-recipes/task-board', label: 'Task', defaultPath: '/' }
+    const { rerender } = render(<SandboxUiPage embed={embed} initialLaunch={app} />)
+    await screen.findByRole('button', { name: 'Refresh app content' })
+    rerender(<SandboxUiPage embed={embed} headerShellOverlayOpen />)
+    await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(false))
+
+    const heldOpen = main.holdNextOpen()
+    const previous = main.live()
+    if (!previous) throw new Error('expected a live view before the relaunch')
+    const tabId = embed.getSnapshot().views.get(previous.launchId)?.tabId
+    if (!tabId) throw new Error('expected the live view to belong to a tab')
+    // The same relaunch App dispatches for Refresh: a new launch on the same tab.
+    act(() =>
+      embed.relaunch({
+        launchId: crypto.randomUUID(),
+        tabId,
+        appRef: app.appRef,
+        route: { kind: 'tab' },
+        app: { label: app.label, defaultPath: app.defaultPath },
+      })
+    )
+    await waitFor(() => expect(main.bridge.open).toHaveBeenCalledTimes(2))
+    await act(async () => {
+      await new Promise(resolve => window.setTimeout(resolve, 0))
+    })
+    sandboxUi.setVisible.mockClear()
+
+    await act(async () => heldOpen().resolve())
+    await screen.findByRole('button', { name: 'Refresh app content' })
+    await act(async () => {
+      await new Promise(resolve => window.setTimeout(resolve, 0))
+    })
+
+    expect(main.live()?.launchId).not.toBe(previous.launchId)
+    expect(sandboxUi.setVisible.mock.calls).toEqual([[false]])
   })
 })
