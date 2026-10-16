@@ -181,6 +181,7 @@ function createGfsUploadNameReservationBook() {
 module.exports = {
   ...require('./fileClassifier.cjs'),
   ...require('./fileReference.cjs'),
+  ...require('./dragPolicy.cjs'),
   GFS_RESOURCE_NAME_MAX_LENGTH,
   GFS_UPLOAD_NAME_EXHAUSTED_MESSAGE,
   GFS_UPLOAD_NAME_RETRY_LIMIT,
