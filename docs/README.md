@@ -64,6 +64,7 @@ Use this index for long-form docs.
 | [Shared & global files](how-to/shared-and-global-files.md)                    | Team workspaces (SFS) and the brokered drive (GFS)         |
 | [Minikube full stack](deploy/minikube.md)                                     | Local Kubernetes platform                                  |
 | [Production notes](deploy/production.md)                                      | Checklist and in-repo deploy assets                        |
+| [Host PVC layout upgrade](deploy/host-pvc-layout-upgrade.md)                  | Upgrading stateless Hosts from v0.10.x / v0.11.x           |
 | [WorkflowRecipes operations](deploy/workflow-recipes-guide.md)                | Recipe ops, RBAC, debugging                                |
 
 ## Reference

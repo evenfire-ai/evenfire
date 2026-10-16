@@ -92,7 +92,11 @@ Two agent-made folder pairs on a stateful Host do stop it from starting:
 - a `state/` holding `state.db` or one of its journals beside the root
   database, next to a `workspace/` folder. The signature holds and F2
   refuses, because the merge cannot tell the agent's file from a second
-  database;
+  database. The earlier release produces the same tree without any agent: a
+  Host created stateless and switched to stateful on v0.10 or v0.11 keeps its
+  old history in `state/state.db` and writes new chats to a root `state.db`.
+  `host-layout-merge.sh inventory` reports it as `WILL_REFUSE_F2` before the
+  upgrade, and the upgrade note describes the repair;
 - a `state/` the container uid cannot list and search, next to a
   `workspace/` folder. F1 refuses before the database check, because the
   merge cannot tell whether it holds a database.
@@ -180,12 +184,18 @@ renames the entry.
      and no `workspace-layout-init`;
   2. every running Host Pod's `workspace-layout-merge` exited 0;
   3. no Host is in `Init:Error` in `workspace-layout-merge`;
-  4. every Host that was suspended at deploy time has woken once with that
-     init exiting 0.
-- The turn-off is an overlay patch in `keyper-labs/evenfire-infra`
-  (`patches/hcc-workspace-layout-merge.yaml`, value `"false"`), never in
-  `dynamic-images.yaml`. Turning it off changes the pod template, so every
-  running Host restarts once.
+  4. no Host PVC still carries the split-layout signature.
+
+  [`deploy/scripts/host-layout-merge.sh verify`](../../deploy/scripts/host-layout-merge.sh)
+  checks all four and reads each PVC without a Pod from a read-only check
+  Pod; it prints `HOST_LAYOUT_VERIFY=PASS` only when they hold. The procedure
+  for any installation is in
+  [Host PVC Layout Upgrade Note](../deploy/host-pvc-layout-upgrade.md).
+
+- The turn-off is a patch in the installation's own overlay (clerum:
+  `keyper-labs/evenfire-infra`, `patches/hcc-workspace-layout-merge.yaml`,
+  value `"false"`), never in `dynamic-images.yaml`. Turning it off changes the
+  pod template, so every running Host restarts once.
 - Never turn it off in the deploy that first introduces this HCC.
 - Before any manual HCC undo to a revision older than #825's, set it back to
   `true`. The older init re-splits stateless trees, and only a roll-forward
@@ -300,8 +310,15 @@ forced by a deploy.
   at least one case of each refusal family (F1–F4), re-runs after an
   interrupted merge and a round trip through the previous init
   (`test/__fixtures__/base-workspace-layout-init.sh`).
+- Script: `deploy/scripts/host-layout-merge.test.mjs` runs
+  `host-layout-merge.sh` against a fake `kubectl`, and runs its check script
+  on real trees. The HCC merge suite above also checks that the check script
+  predicts the merge's outcome (merge, no-op or the refusal line) on every
+  tree it tests.
 - Live: `make test-e2e-hcc-storage-layout-switch`
   (`scripts/e2e/e2e-hcc-storage-layout-switch.sh`) on an owned branch profile.
+  S5 and S6 also run `host-layout-merge.sh inventory` and `verify` on their
+  Hosts.
 - Desktop: `make test-e2e-825-desktop-continuity`
   (`desktop-app/test/e2e-playwright/stateful-stateless-switch-continuity.spec.ts`)
   keeps one conversation across stateful → stateless → stateful switches.

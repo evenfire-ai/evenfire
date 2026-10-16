@@ -17,15 +17,16 @@ assets.
 
 ## Building blocks in this repo
 
-| Asset                      | Path                                                               |
-| -------------------------- | ------------------------------------------------------------------ |
-| CRDs (Helm)                | [charts/clerum-crds](../../charts/clerum-crds/README.md)           |
-| Base manifests             | [deploy/base](../../deploy/base)                                   |
-| Overlays                   | [deploy/overlays](../../deploy/overlays)                           |
-| Bootstrap scripts          | [scripts/](../../scripts/), [deploy/scripts](../../deploy/scripts) |
-| Local full-stack reference | [minikube.md](minikube.md)                                         |
-| Plugin Workload SDK upgrade | [plugin-workload-sdk-upgrade.md](plugin-workload-sdk-upgrade.md) |
-| Observability starter      | [monitoring/](../../monitoring/README.md)                          |
+| Asset                       | Path                                                               |
+| --------------------------- | ------------------------------------------------------------------ |
+| CRDs (Helm)                 | [charts/clerum-crds](../../charts/clerum-crds/README.md)           |
+| Base manifests              | [deploy/base](../../deploy/base)                                   |
+| Overlays                    | [deploy/overlays](../../deploy/overlays)                           |
+| Bootstrap scripts           | [scripts/](../../scripts/), [deploy/scripts](../../deploy/scripts) |
+| Local full-stack reference  | [minikube.md](minikube.md)                                         |
+| Plugin Workload SDK upgrade | [plugin-workload-sdk-upgrade.md](plugin-workload-sdk-upgrade.md)   |
+| Host PVC layout upgrade     | [host-pvc-layout-upgrade.md](host-pvc-layout-upgrade.md)           |
+| Observability starter       | [monitoring/](../../monitoring/README.md)                          |
 
 Install CRDs:
 
@@ -90,6 +91,7 @@ modified MPL-licensed files. See [LICENSE](../../LICENSE).
 
 - [WorkflowRecipes operations](workflow-recipes-guide.md)
 - [Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md)
+- [Host PVC layout upgrade from v0.10.x / v0.11.x](host-pvc-layout-upgrade.md)
 - [Member invitations on self-hosted](../how-to/member-invitations-self-hosted.md)
 - [Architecture / topology](../architecture/platform-topology.md)
 - [FAQ](../faq.md)
