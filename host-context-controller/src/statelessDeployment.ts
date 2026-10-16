@@ -39,15 +39,15 @@ function shellSingleQuote(value: string): string {
  * so they must not stop it).
  *
  * Every refusal prints one line and exits 1 before the first move:
- *   F1 `state/` or `workspace/` cannot be listed and searched, a database
- *      entry is a symlink or not a regular file, or a directory that
- *      decides a collision cannot be listed;
+ *   F1 `state/` or `workspace/` cannot be listed and searched, or a database
+ *      entry is a symlink or not a regular file;
  *   F2 more than one live database (a `state.db` main file or its journals)
  *      across the root, `state/` and `workspace/`, except the root journals
  *      a stopped merge leaves next to the remaining `state/state.db`;
  *   F3 a name to move already exists at the root, or exists under both
  *      `state/` and `workspace/` (an empty source directory is removed
- *      instead), or `workspace/lost+found` would keep `workspace/` alive;
+ *      instead), a directory that decides such a collision cannot be listed,
+ *      or `workspace/lost+found` would keep `workspace/` alive;
  *   F4 the root, `state/`, `workspace/`, or a directory to be moved out of
  *      them is not writable (renaming a directory rewrites its `..`).
  * Moves: `workspace/*`, then `state/*` except `state.db`, then

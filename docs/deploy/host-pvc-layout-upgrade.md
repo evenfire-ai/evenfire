@@ -57,15 +57,16 @@ deploy/scripts/host-layout-merge.sh inventory --context <ctx>
 `workspace-layout-init` and `subPath` mounts. Each `PVC` line ends with a
 result:
 
-| Result                    | Meaning                                                                                       | Action                                                 |
-| ------------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| `NO_SPLIT_SIGNATURE`      | The tree does not carry the split-layout signature; the merge exits 0 and changes nothing     | None                                                   |
-| `WILL_MERGE`              | The merge moves the tree to the PVC root on the Host's next start                             | None                                                   |
-| `WILL_REFUSE_F<n> <line>` | The merge will refuse with that line and the Host will stay in `Init:Error` after the upgrade | See [Repairs](#repairs); counted in `UPGRADE_BLOCKERS` |
-| `UNREADABLE <reason>`     | The check Pod could not read the PVC (pull error, timeout, unexpected output)                 | Fix the reason and run the command again               |
+| Result                    | Meaning                                                                                       | Action                                                   |
+| ------------------------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `NO_SPLIT_SIGNATURE`      | The tree does not carry the split-layout signature; the merge exits 0 and changes nothing     | None                                                     |
+| `WILL_MERGE`              | The merge moves the tree to the PVC root on the Host's next start                             | None                                                     |
+| `WILL_REFUSE_F<n> <line>` | The merge will refuse with that line and the Host will stay in `Init:Error` after the upgrade | See [Repairs](#repairs); counted in `UPGRADE_BLOCKERS`   |
+| `UNREADABLE <reason>`     | The check Pod could not read the PVC (pull error, timeout, unexpected output)                 | Fix the reason and run the command again                 |
+| `UNKNOWN <reason>`        | A Host's claim is missing from the PVC list, or a PVC labelled for a Host has another name    | Find the claim the Host mounts and run the command again |
 
 The command exits 1 while `UPGRADE_BLOCKERS` is above 0, while a PVC is
-`UNREADABLE`, or when the flag is set to an invalid value or to `false` with a
+`UNREADABLE` or `UNKNOWN`, when Hosts exist but no PVC was inspected, or when the flag is set to an invalid value or to `false` with a
 split tree present. `DESKTOP_HOSTS` repeats the export warning above.
 
 A `NO_SPLIT_SIGNATURE` result says only that the merge will not touch the
@@ -77,8 +78,13 @@ signature in [Host Storage Layout](../architecture/host-storage-layout.md).
 Deploy the release with the flag unset or `"true"`. **Never set it to
 `"false"` in the upgrade deploy**: without the init, a split Host starts on an
 empty database at the PVC root and reports no error. `inventory` and `verify`
-print `FLAG_FALSE_WITH_SPLIT_TREES=<n>` and exit 1 in that state; set the
-flag back to `"true"` and the next start merges the tree.
+print `FLAG_FALSE_WITH_SPLIT_TREES=<n>` and exit 1 in that state. Set the
+flag back to `"true"` before the split Host starts: the next start then
+merges the tree. If the Host already started with the flag off, it created a
+root `state.db` next to `state/state.db`; with the flag back on, that start
+refuses with F2 (`more than one live SQLite database`). Repair it as a Host
+switched from stateless to stateful (see [Repairs](#repairs)): the root
+family holds only the chats since the flag-off start.
 
 Running Hosts restart with the new template and merge on that start.
 Suspended Hosts merge on their next wake; the upgrade does not wake them.
@@ -89,15 +95,15 @@ Suspended Hosts merge on their next wake; the upgrade does not wake them.
 deploy/scripts/host-layout-merge.sh verify --context <ctx>
 ```
 
-| Result                                | Meaning                                                  | Action                                                                                      |
-| ------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `POD_OK`                              | The running Host Pod's merge init exited 0               | None                                                                                        |
-| `NO_SPLIT_SIGNATURE`                  | A Host without a Pod whose tree the merge will not touch | None                                                                                        |
-| `SPLIT`                               | A Host without a Pod whose tree is still split           | Wake the Host (open one of its chats, or `POST /api/v1/rpc/hosts/<host>/wake` on rpc-proxy) |
-| `WILL_REFUSE_F<n> <line>`             | A Host without a Pod whose next start will refuse        | See [Repairs](#repairs)                                                                     |
-| `MERGE_REFUSED <line>`                | The running Host Pod is in `Init:Error` with that line   | See [Repairs](#repairs)                                                                     |
-| `MERGE_RUNNING`                       | The merge init has not finished                          | Run `verify` again                                                                          |
-| `UNKNOWN`, `UNREADABLE`, `UNVERIFIED` | The script could not decide                              | Fix the reason and run `verify` again                                                       |
+| Result                                | Meaning                                                                                         | Action                                                                                      |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `POD_OK`                              | The running Host Pod's merge init exited 0 and its tree carries no signature                    | None                                                                                        |
+| `NO_SPLIT_SIGNATURE`                  | A Host without a Pod whose tree the merge will not touch                                        | None                                                                                        |
+| `SPLIT`                               | A Host whose tree is still split (with a running Pod, the tree was split again after its start) | Wake the Host (open one of its chats, or `POST /api/v1/rpc/hosts/<host>/wake` on rpc-proxy) |
+| `WILL_REFUSE_F<n> <line>`             | A Host whose next start will refuse                                                             | See [Repairs](#repairs)                                                                     |
+| `MERGE_REFUSED <line>`                | The running Host Pod is in `Init:Error` with that line                                          | See [Repairs](#repairs)                                                                     |
+| `MERGE_RUNNING`                       | The merge init has not finished                                                                 | Run `verify` again                                                                          |
+| `UNKNOWN`, `UNREADABLE`, `UNVERIFIED` | The script could not decide                                                                     | Fix the reason and run `verify` again                                                       |
 
 `HOST_LAYOUT_VERIFY=PRE_825` (exit 1) means a Host Deployment still renders
 `workspace-layout-init` or a `subPath` mount: the upgrade has not reached it.
@@ -110,9 +116,13 @@ merge init and no Host PVC is split, refused, running, or undecided.
 `PVC_CONTENTS=NOT_INSPECTED` is a reminder that the script checks the layout,
 not the database contents.
 
+`verify` reads the PVC of every Host, running or not; for a running Host the
+init exit code and the tree must both agree.
+
 Orphan PVCs, whose `clerum.io/host` label names no Host, are listed with
-`kind=ORPHAN` and counted in `ORPHAN_SPLIT` when split. They do not block the
-verdict, because no Host will start on them. A Host created later with the
+`kind=ORPHAN` and counted in `ORPHAN_SPLIT` when split. A split orphan does not
+block the verdict, because no Host will start on it; an orphan the script
+could not read is counted in `ORPHAN_UNDECIDED` and blocks it. A Host created later with the
 same name would start on that PVC: with the flag off, on an empty database.
 Delete the orphan PVC, or recreate its Host before turning the flag off.
 
@@ -216,8 +226,9 @@ spec:
 - `kubectl set env` works only until the next apply of the overlay.
 - On Minikube the overlays in this repository do not pin the flag, so a new
   setup returns it to `true`.
-- After the turn-off, `verify` reports `HOST_LAYOUT_VERIFY=ALREADY_OFF`, or
-  `FLAG_FALSE_WITH_SPLIT_TREES` if a split tree appeared since.
+- After the turn-off, `verify` reports `HOST_LAYOUT_VERIFY=ALREADY_OFF`,
+  `FLAG_FALSE_WITH_SPLIT_TREES` if a split tree appeared since, or `FAIL` if
+  a PVC could not be read.
 
 ## Rollback
 
