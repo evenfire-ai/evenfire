@@ -225,7 +225,7 @@ export function FilePreviewPage({
       return
     }
     if (!copyContentReady) return
-    const action = toolbarActions.find(candidate => candidate.id === request.actionId)
+    const action = resourceActions.find(candidate => candidate.id === request.actionId)
     if (!action || action.disabled) return
     lastHandledResourceActionIdRef.current = request.id
     pendingResourceActionRef.current = null
@@ -239,7 +239,7 @@ export function FilePreviewPage({
     onPendingResourceActionHandled,
     pendingResourceAction,
     pushToast,
-    toolbarActions,
+    resourceActions,
     unavailable,
   ])
 
