@@ -182,7 +182,7 @@ export const electronModule = {
       return false
     }
   },
-  app: { getPath: vi.fn(() => tmpdir()) },
+  app: { getPath: vi.fn(() => tmpdir()), isReady: () => false },
   safeStorage: {
     isEncryptionAvailable: vi.fn(() => false),
     encryptString: vi.fn(),

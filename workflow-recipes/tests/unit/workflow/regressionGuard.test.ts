@@ -350,13 +350,18 @@ describe('REG-13: Internal tools in StepMcpRouter', () => {
     expect(content).toMatch(/resolveInternalTools|INTERNAL_TOOLS/)
   })
 
-  it('internalTools.ts is not empty', () => {
+  it('internalTools.ts lists the document tools, whose schemas live in toolSchemas/', () => {
     const content = readMcpHostSource('workflow/internalTools.ts')
     expect(content.length).toBeGreaterThan(100)
-    expect(content).toContain('clerum__generate_pdf')
-    expect(content).toContain('clerum__generate_docx')
-    expect(content).toContain('clerum__generate_xlsx')
-    expect(content).toContain('clerum__generate_markdown')
+    for (const [file, name] of [
+      ['pdf', 'clerum__generate_pdf'],
+      ['docx', 'clerum__generate_docx'],
+      ['xlsx', 'clerum__generate_xlsx'],
+      ['markdown', 'clerum__generate_markdown'],
+    ]) {
+      expect(content).toContain(`from './toolSchemas/${file}'`)
+      expect(readMcpHostSource(`workflow/toolSchemas/${file}.ts`)).toContain(name)
+    }
   })
 })
 
@@ -781,7 +786,7 @@ describe('REG-26: Parent PVC + subPath output storage', () => {
   })
 
   it('internalTools uses /output in workflow mode', () => {
-    const content = readMcpHostSource('workflow/internalTools.ts')
+    const content = readMcpHostSource('workflow/outputDirectory.ts')
     expect(content).toMatch(/['"]\/output['"]/)
     expect(content).toContain('CLERUM_WORKFLOW_ENABLED')
     // Fallback for non-workflow mode
