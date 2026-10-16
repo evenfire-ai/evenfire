@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import { createPublicKey, randomBytes, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
@@ -542,6 +542,32 @@ describeRealPostgres('external GFS session generation on real PostgreSQL', () =>
       target: { drive: 'main', resourceId: teamResourceId },
     })
     expect(mismatched.status).toBe(403)
+  })
+
+  it('rejects a real V2 session on mediated capabilities before contacting GFSC', async () => {
+    const authentication = await authenticateExternalUserSession(v2Token, {
+      purpose: 'protected',
+    })
+    expect(authentication.status).toBe('authenticated')
+    if (authentication.status !== 'authenticated') return
+    expect(authentication.contract).toBe('v2')
+
+    if (!appServer) throw new Error('GFS test app did not start')
+    const gatewayReadsBefore = gatewayReads
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    try {
+      const response = await request(appServer)
+        .get('/external/gfs/capabilities')
+        .set('x-user-session-token', v2Token)
+        .set('x-forwarded-for', '127.0.0.1')
+
+      expect(response.status).toBe(403)
+      expect(response.body).toEqual({ error: 'action_delegation_required' })
+      expect(fetchSpy).not.toHaveBeenCalled()
+      expect(gatewayReads).toBe(gatewayReadsBefore)
+    } finally {
+      fetchSpy.mockRestore()
+    }
   })
 
   it.each([
