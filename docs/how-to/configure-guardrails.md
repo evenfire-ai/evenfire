@@ -123,7 +123,17 @@ spec:
 
 `server` and `name` are optional. They support only `*` and `?` wildcards,
 anchored to the whole value. If you omit them, the rule matches every tool of
-that provenance. A rule's `arguments[]` predicates must **all** match. Each
+that provenance.
+
+- **MCP tool names carry the server prefix.** `name` is matched against the
+  registered name, `<server>__<tool>` (double underscore), not the bare tool
+  name. A tool `create_issue` on the `github` server is `github__create_issue`,
+  so `name: create_issue` never matches; use `name: github__create_issue` or a
+  wildcard such as `'*create*'`. Use `server` to scope by server.
+- **`clerum__*` tools are native.** The platform's own tools (for example
+  `clerum__gfs_read`, `clerum__generate_pdf`, `clerum__session_search`) have
+  `__` in their names but are registered as native tools. Match them with
+  `provenance: native`; a `provenance: mcp` rule never matches them. A rule's `arguments[]` predicates must **all** match. Each
 predicate has a `type`, a JSON Pointer into the arguments, an `op` and a
 `value`:
 
