@@ -385,17 +385,21 @@ export function useChatListController({
     () => {}
   )
 
+  // Remote rows of the previous scope must not be carried into the first
+  // publication of the next one, where a Host can have the same name.
+  const hideAllRemoteRows = useCallback(() => {
+    setLatestChatSessions(previous =>
+      previous.some(row => row.remote) ? previous.filter(row => !row.remote) : previous
+    )
+  }, [])
+
   useEffect(() => {
     requestGenerationRef.current += 1
     authorityScopeGenerationRef.current += 1
     deletedChatIdsByAgentRef.current.clear()
     catalogOfflineByAgentRef.current.clear()
     catalogOfflineToastShownRef.current = false
-    // Remote rows of the previous scope must not be carried into the first
-    // publication of this one, where a Host can have the same name.
-    setLatestChatSessions(previous =>
-      previous.some(row => row.remote) ? previous.filter(row => !row.remote) : previous
-    )
+    hideAllRemoteRows()
     // A toast queued for this scope must never flush into the next scope or
     // after unmount: the cleanup runs on both.
     return () => {
@@ -405,7 +409,7 @@ export function useChatListController({
       }
       catalogOfflineToastQueuedRef.current = false
     }
-  }, [isAuthenticated, scopeKey])
+  }, [hideAllRemoteRows, isAuthenticated, scopeKey])
 
   // R1-H1 — the pending-rename queue is per-USER identity. mcp-host keys a chat
   // session by userId (`${userSub}:rpc:${agent}:${chatId}`) and filters by
@@ -1832,6 +1836,7 @@ export function useChatListController({
     latestChatSessionsLoading,
     hideAgent,
     hideRemoteRowsOf,
+    hideAllRemoteRows,
     // CRUD (public contract).
     handleCreateChat,
     handleRenameChat,
