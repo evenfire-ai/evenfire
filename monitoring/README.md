@@ -8,13 +8,13 @@ password-admission metrics and suggested alert queries are documented in
 
 ## Contents
 
-| Path                                     | Description                                                                              |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `namespace.yaml`                         | Creates the `monitoring` Kubernetes namespace                                            |
-| `grafana/values.yaml`                    | Grafana Helm values (Loki datasource, dashboard provider, persistence, security context) |
-| `loki/values.yaml`                       | Loki-stack Helm values (Loki + Promtail, 100 Gi persistence)                             |
-| `dashboards/loki-grafana-dashboard.json` | Pre-built Grafana dashboard for Loki log exploration                                     |
-| `Makefile`                               | Install/upgrade/uninstall targets for both charts                                        |
+| Path | Description |
+|------|-------------|
+| `namespace.yaml` | Creates the `monitoring` Kubernetes namespace |
+| `grafana/values.yaml` | Grafana Helm values (Loki datasource, dashboard provider, persistence, security context) |
+| `loki/values.yaml` | Loki-stack Helm values (Loki + Promtail, 100 Gi persistence) |
+| `dashboards/loki-grafana-dashboard.json` | Pre-built Grafana dashboard for Loki log exploration |
+| `Makefile` | Install/upgrade/uninstall targets for both charts |
 
 ## Prerequisites
 
@@ -23,6 +23,11 @@ password-admission metrics and suggested alert queries are documented in
 
 ## Setup
 
+> **On minikube**, follow [Monitoring and observability](../docs/operations/monitoring.md#install-on-minikube)
+> instead: it overrides the storage class and the 100 Gi Loki volume. That page
+> also explains what this starter covers (logs only; no metrics scraping is
+> shipped).
+
 ```bash
 # Add Grafana Helm repo and create namespace
 make setup
@@ -30,28 +35,39 @@ make setup
 # Install Loki stack (Loki + Promtail)
 make install_loki
 
+# Create the dashboards ConfigMap first: Grafana's values mount it
+kubectl --context <your-context> create configmap grafana-dashboards \
+  --from-file=dashboards/loki-grafana-dashboard.json \
+  -n monitoring
+
 # Install Grafana
 make install_grafana
 ```
 
+
 ## Makefile Targets
 
-| Target                 | Description                                                 |
-| ---------------------- | ----------------------------------------------------------- |
-| `setup`                | Add Grafana Helm repo + create namespace                    |
-| `install_loki`         | Install loki-stack chart (v2.9.10)                          |
-| `upgrade_loki`         | Upgrade loki-stack release                                  |
-| `uninstall_loki`       | Remove loki-stack release                                   |
-| `install_grafana`      | Install Grafana chart                                       |
-| `upgrade_grafana`      | Upgrade Grafana release                                     |
-| `uninstall_grafana`    | Remove Grafana release                                      |
-| `port_forward_grafana` | Forward Grafana UI to `localhost:3000`                      |
-| `status`               | Show pods, DaemonSets, and PVCs in the monitoring namespace |
+These targets pass no `--context` / `--kube-context`: they run `kubectl` and
+`helm` against your kubeconfig's **current** context. Check
+`kubectl config current-context` before you run any of them, or use the
+explicit commands in
+[docs/operations/monitoring.md](../docs/operations/monitoring.md#install-on-minikube).
+
+| Target | Description |
+|--------|-------------|
+| `setup` | Add Grafana Helm repo + create namespace |
+| `install_loki` | Install loki-stack chart (v2.9.10) |
+| `upgrade_loki` | Upgrade loki-stack release |
+| `uninstall_loki` | Remove loki-stack release |
+| `install_grafana` | Install Grafana chart |
+| `upgrade_grafana` | Upgrade Grafana release |
+| `uninstall_grafana` | Remove Grafana release |
+| `port_forward_grafana` | Forward Grafana UI to `localhost:3000` |
+| `status` | Show pods, DaemonSets, and PVCs in the monitoring namespace |
 
 ## Grafana Configuration
 
 The `grafana/values.yaml` configures:
-
 - Loki as a datasource at `http://loki.monitoring:3100`
 - Dashboard auto-provisioning from the `grafana-dashboards` ConfigMap
 - 10 Gi persistent storage
@@ -59,14 +75,14 @@ The `grafana/values.yaml` configures:
 
 ## Dashboard Inventory
 
-| File                                     | Description                                                             |
-| ---------------------------------------- | ----------------------------------------------------------------------- |
+| File | Description |
+|------|-------------|
 | `dashboards/loki-grafana-dashboard.json` | Log exploration dashboard sourced from Grafana community (gnetId 15141) |
 
-To load the dashboard, create a ConfigMap and reference it in the Grafana values:
+The setup steps above create the `grafana-dashboards` ConfigMap that Grafana's values reference. To recreate it after editing the dashboard:
 
 ```bash
-kubectl create configmap grafana-dashboards \
+kubectl --context <your-context> create configmap grafana-dashboards \
   --from-file=dashboards/loki-grafana-dashboard.json \
   -n monitoring
 ```
@@ -75,6 +91,10 @@ kubectl create configmap grafana-dashboards \
 
 ```bash
 make port_forward_grafana
-# Open http://localhost:3000
+# Open localhost:3000
 # Default user: admin (password set via secret or Helm override)
 ```
+
+On minikube the Control UI already uses local port 3000. Forward Grafana to
+another port instead:
+`kubectl --context <your-context> port-forward -n monitoring svc/grafana 3001:80`.
