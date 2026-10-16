@@ -1,3 +1,4 @@
+import { gfsAncestorPathsOf } from '@clerum/gfs-interaction-policy'
 import {
   type GfsResourceByPathView,
   getGfsGrants,
@@ -16,20 +17,21 @@ export { planInheritedRoleChange, strongestInheritedSource } from './gfsInherite
  * resource's canonical path and keeping the rows that apply to descendants
  * (grants with inherit=true, shares with includeDescendants=true — the same
  * rule the server's allow() evaluation uses). Rows are merged per subject
- * through the pure merge core (`gfsInheritedAccessMerge.ts`, property tested
- * in R1-M4); EVERY contributing ancestor folder is kept as an editable source
- * (with the grant/share ids to mutate), so a confirmed removal revokes all of
- * them and a confirmed downgrade lowers each one above the target role
- * (R1-H1). If any required ancestor or ACL read fails, the derivation fails
- * visibly instead of returning a result that looks complete.
+ * through the shared pure merge core (`@clerum/gfs-interaction-policy`,
+ * property tested there and in R1-M4); EVERY contributing ancestor folder is
+ * kept as an editable source (with the grant/share ids to mutate), so a
+ * confirmed removal revokes all of them and a confirmed downgrade lowers
+ * each one above the target role (R1-H1). If any required ancestor or ACL
+ * read fails, the derivation fails visibly instead of returning a result
+ * that looks complete.
  */
 
 /**
  * Walk semantics (R1-M1, unified with the desktop walk in
  * desktop-app/ui/src/gfs/inheritedAccess.ts):
- * - BOUNDED in depth: at most GFS_INHERITED_WALK_MAX_DEPTH ancestors are
- *   visited (the desktop rid-chain walk bounds itself with the same number
- *   via GFS_BREADCRUMB_MAX_DEPTH).
+ * - BOUNDED in depth: at most 64 ancestors are visited (the shared policy's
+ *   GFS_INHERITED_WALK_MAX_DEPTH; the desktop rid-chain walk bounds itself
+ *   with the same number via GFS_BREADCRUMB_MAX_DEPTH).
  * - COMPLETE or FAILED: every ancestor path must resolve to a directory and
  *   both ACL lists must load. Any failure throws the same derivation error as
  *   Desktop, so the UI cannot mistake partial data for no inherited access.
@@ -37,21 +39,10 @@ export { planInheritedRoleChange, strongestInheritedSource } from './gfsInherite
  *   parent resource IDs. The traversal differs, but the failure contract is
  *   shared.
  */
-const GFS_INHERITED_WALK_MAX_DEPTH = 64
 
 /** `/docs/report.md` → `['/docs', '/']` (nearest ancestor first, depth-capped). */
 export function gfsAncestorPaths(path: string): string[] {
-  const segments = (path.startsWith('/') ? path : `/${path}`)
-    .split('/')
-    .filter(segment => segment.length > 0)
-  if (segments.length === 0) return []
-  const ancestors: string[] = []
-  for (let count = segments.length - 1; count > 0; count -= 1) {
-    ancestors.push(`/${segments.slice(0, count).join('/')}`)
-  }
-  ancestors.push('/')
-  // Nearest-first cap, mirroring the desktop rid-chain walk's bound.
-  return ancestors.slice(0, GFS_INHERITED_WALK_MAX_DEPTH)
+  return gfsAncestorPathsOf(path)
 }
 
 interface InheritingRow {
