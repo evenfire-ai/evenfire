@@ -8,11 +8,10 @@
  *
  * Source of truth: STAGE-2-STEP-EXECUTION-ENGINE.md §4.3–§4.4
  */
-import Ajv, { type ValidateFunction } from 'ajv'
 import { logger } from '../logger'
 import { VisualInputBudget } from '../visualInput/policy'
+import { argumentValidator, checkToolArguments } from './argumentGate'
 import { projectInternalToolResult } from './internalToolProjection'
-import { withoutUnsetNulls } from './schemaArguments'
 import {
   AllowedToolsConfig,
   InternalToolDefinition,
@@ -98,10 +97,8 @@ export class StepMcpRouter {
   private connections = new Map<string, McpClientConnection>()
   private toolMap = new Map<string, { serverName: string; rawToolName: string }>()
   private internalToolMap = new Map<string, InternalToolDefinition>()
-  private internalToolValidators = new Map<string, ValidateFunction>()
   private allTools: ToolDefinition[] = []
   private readonly clientFactory: McpClientFactory
-  private readonly ajv = new Ajv({ allErrors: true, strict: false, useDefaults: true })
   private outputDir = '/output'
   // Names callTool() may dispatch when the step declares a non-empty
   // allowedTools.include. null = no allowlist in effect (every registered tool
@@ -118,9 +115,10 @@ export class StepMcpRouter {
    * Register internal tools (clerum__*) that execute locally without MCP connection.
    * Must be called before connect() so they appear in getFilteredTools().
    *
-   * The tool's `parameters` JSON Schema is compiled into an AJV validator that
-   * runs before each dispatch. Bad LLM output (wrong type, missing required,
-   * unknown enum value) is rejected before reaching `execute()`.
+   * The tool's `parameters` JSON Schema is compiled here into the validator
+   * that runs before each dispatch (argumentGate.ts, shared with chat). Bad LLM
+   * output (wrong type, missing required, unknown enum value) is rejected
+   * before reaching `execute()`.
    */
   registerInternalTools(tools: InternalToolDefinition[], outputDir: string): void {
     this.outputDir = outputDir
@@ -131,13 +129,9 @@ export class StepMcpRouter {
         inputSchema: tool.parameters,
       })
       this.internalToolMap.set(tool.name, tool)
-      try {
-        this.internalToolValidators.set(tool.name, this.ajv.compile(tool.parameters))
-      } catch (err) {
-        // Schema failed to compile — dispatch falls through to runtime arg type-checking.
-        // Surface the failure so schema regressions don't pass silently.
-        logger.warn({ err, toolName: tool.name }, 'Internal tool schema compilation failed')
-      }
+      // Compiled now so a schema that fails to compile is reported at
+      // registration; dispatch then falls through to the tool's own checks.
+      argumentValidator(tool)
       // Also register in toolMap for consistent dispatch
       this.toolMap.set(tool.name, {
         serverName: 'clerum',
@@ -292,19 +286,15 @@ export class StepMcpRouter {
     // Check internal tools first
     const internalTool = this.internalToolMap.get(toolName)
     if (internalTool) {
-      // A null sent for an optional argument counts as unset, as the tool
-      // itself reads it on the chat path, here before validation so it passes.
+      // The same check as on the chat path: unset nulls dropped, then the
+      // schema. Failures come back as recoverable tool-error results (not
+      // thrown) so the LLM can read the error and retry within the same step.
       // The record keeps what the model sent.
-      const input = withoutUnsetNulls(internalTool.parameters, args) as Record<string, unknown>
-      // Validate args against the tool's JSON Schema before dispatch.
-      // Failures come back as recoverable tool-error results (not thrown)
-      // so the LLM can read the error and retry within the same step.
-      const validator = this.internalToolValidators.get(toolName)
-      if (validator && !validator(input)) {
-        const errorText = this.ajv.errorsText(validator.errors, { separator: '; ' })
+      const checked = checkToolArguments(internalTool, args)
+      if (!checked.ok) {
         const errorResult = {
           success: false,
-          error: `Invalid arguments: ${errorText}`,
+          error: checked.error,
         }
         const record: ToolCallRecord = {
           serverName: 'clerum',
@@ -320,7 +310,7 @@ export class StepMcpRouter {
       }
       const start = Date.now()
       const internalResult = projectInternalToolResult(
-        await internalTool.execute(input, this.outputDir, {
+        await internalTool.execute(checked.input, this.outputDir, {
           signal: options.signal,
           timeoutMs: options.timeoutMs,
           readBudget: this.readBudget,
@@ -375,7 +365,6 @@ export class StepMcpRouter {
     this.connections.clear()
     this.toolMap.clear()
     this.internalToolMap.clear()
-    this.internalToolValidators.clear()
     this.allTools = []
   }
 }

@@ -20,6 +20,7 @@ import type { LlmProvider } from '../../llm/registryCore'
 import type { McpManager } from '../../mcp/manager'
 import type { IncomingMessage } from '../../server'
 import type { McpTool } from '../../types'
+import { checkToolArguments } from '../../workflow/argumentGate'
 import { resolveInternalTools } from '../../workflow/internalTools'
 import { boilerplateTexts } from '../../workflow/officeBoilerplate'
 import { printedForms } from '../../workflow/toolText'
@@ -115,6 +116,12 @@ class InternalToolAdapter implements Tool {
   }
   async execute(params: Record<string, unknown>, context?: ExecutionContext): Promise<ToolOutput> {
     const start = Date.now()
+    // The schema check a workflow step runs, before anything is resolved or
+    // written: a call it rejects creates no folder, file or attachment.
+    const checked = checkToolArguments(this.def, params)
+    if (!checked.ok) {
+      return { content: `Error: ${checked.error}`, duration_ms: Date.now() - start, is_error: true }
+    }
     let outputDir = this.outputDir
     if (this.callerOutputs) {
       const resolved = this.callerOutputs()
@@ -129,7 +136,7 @@ class InternalToolAdapter implements Tool {
       outputDir = resolved.dir
     }
     try {
-      const result = await this.def.execute(params, outputDir, {
+      const result = await this.def.execute(checked.input, outputDir, {
         signal: context?.signal,
         timeoutMs: context?.timeoutMs,
         visualInput: context?.visualInput,
