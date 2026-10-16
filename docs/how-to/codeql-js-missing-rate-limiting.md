@@ -70,16 +70,16 @@ Follow-up implementation tracked separately (`fix/codeql-control-api-rate-limit-
 
 ### False positive — PG limiter or non-route sink present
 
-| Alert                                                                        | Location                                                             | Evidence                                                                 |
-| ---------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| [#57](https://github.com/evenfire-ai/evenfire/security/code-scanning/57)     | `app.ts:131`                                                         | Middleware mount only; per-route limiters apply downstream               |
-| [#58](https://github.com/evenfire-ai/evenfire/security/code-scanning/58)     | `app.ts:219`                                                         | 404 guard for unknown `/gfs/*`; no expensive work                        |
-| [#60](https://github.com/evenfire-ai/evenfire/security/code-scanning/60)     | `auth.ts:572`                                                        | Handler under `publicAdminTokenRateLimit()` (`adminPublicTokenRlPerMin`) |
-| [#171](https://github.com/evenfire-ai/evenfire/security/code-scanning/171)   | `registry.ts:24`                                                     | `rateLimitMiddleware` 30/min at `:28-35`                                 |
-| [#826](https://github.com/evenfire-ai/evenfire/security/code-scanning/826)   | `registryConnect.ts:321`                                             | `rateLimitMiddleware` 3/min at `:329-336`                                |
-| [#803](https://github.com/evenfire-ai/evenfire/security/code-scanning/803)   | `gfs/grants.ts:849`                                                  | Internal DB helper, not an HTTP route handler                            |
-| [#1767](https://github.com/evenfire-ai/evenfire/security/code-scanning/1767) | `app.ts:73`                                                          | False positive — invitation error-response middleware; evidence below    |
-| [#1769](https://github.com/evenfire-ai/evenfire/security/code-scanning/1769) | `passwordResetPayload.externalRest.realPostgres.integration.test.ts` | False positive — Supertest-only invitation app; evidence below           |
+| Alert                                                                        | Location                                                             | Evidence                                                                  |
+| ---------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| [#57](https://github.com/evenfire-ai/evenfire/security/code-scanning/57)     | `app.ts:131`                                                         | Middleware mount only; per-route limiters apply downstream                |
+| [#58](https://github.com/evenfire-ai/evenfire/security/code-scanning/58)     | `app.ts:219`                                                         | 404 guard for unknown `/gfs/*`; no expensive work                         |
+| [#60](https://github.com/evenfire-ai/evenfire/security/code-scanning/60)     | `auth.ts:572`                                                        | Handler under `publicAdminTokenRateLimit()` (`adminPublicTokenRlPerMin`)  |
+| [#171](https://github.com/evenfire-ai/evenfire/security/code-scanning/171)   | `registry.ts:24`                                                     | `rateLimitMiddleware` 30/min at `:28-35`                                  |
+| [#826](https://github.com/evenfire-ai/evenfire/security/code-scanning/826)   | `registryConnect.ts:321`                                             | `rateLimitMiddleware` 3/min at `:329-336`                                 |
+| [#803](https://github.com/evenfire-ai/evenfire/security/code-scanning/803)   | `gfs/grants.ts:849`                                                  | Internal DB helper, not an HTTP route handler                             |
+| [#1767](https://github.com/evenfire-ai/evenfire/security/code-scanning/1767) | `app.ts:73`                                                          | False positive — invitation error-response middleware; evidence below     |
+| [#1769](https://github.com/evenfire-ai/evenfire/security/code-scanning/1769) | `passwordResetPayload.externalRest.realPostgres.integration.test.ts` | False positive — test-only loopback services; no deployed public listener |
 
 Alert #1767 is attached to the invitation error-response middleware mount, which maps upstream
 failures to bounded public responses. External REST token lookup is limited to 30 requests/minute
@@ -91,18 +91,35 @@ dataflow points through error presentation and does not model this custom and cr
 chain. `external-rest-api/test/routes.invitations.test.ts` asserts the 429 and `Retry-After`
 contract; `external-rest-api/test/middleware.rateLimit.test.ts` verifies trusted-source bucketing.
 
-Alert #1769 points to the error-response middleware in a test-only Express app. That app is
-passed directly to Supertest and is never bound to a listening server. It mounts the real
-`createInvitationsRouter()`, whose `POST /invitations/password` handler has the existing
-`acceptRateLimit` limit of 10 requests per minute. The upstream Control API password-token route
-also has trusted-source edge limiters and its 10/minute admission bucket. The alert does not
-identify an unbounded deployed route. In the PostgreSQL integration test, the response proxy copies
-the upstream status and body, sets a constant `application/json` content type, and deliberately
-does not forward upstream response headers, including `Retry-After` or `Set-Cookie`. Separately,
-the public External REST route creates its own bounded retry response and issues its own session
-cookie only after a successful reset with a valid session token. Focused invitation and
-trusted-source tests verify the public 429/`Retry-After` behavior; they do not assert that the test
-proxy forwards those headers.
+Alert #1769 points to error-response handling in
+`control-api/test/passwordResetPayload.externalRest.realPostgres.integration.test.ts`. The test
+mounts `requireInternalToken`, `requireInternalService('external-rest-api')`, and the real
+`createExternalInvitationsRouter()` on a task-owned Control API Express app, then binds that app to
+an ephemeral `127.0.0.1` port. It also starts the built External REST app in a child process on a
+second ephemeral loopback port. Supertest sends HTTP requests to that child process; it does not
+receive the Express app object directly. These are test-owned loopback listeners, not a public or
+deployed service listener.
+
+The production External REST `POST /invitations/password` route retains its 10/minute
+`acceptRateLimit`. The Control API password-token route applies its external-client source limiters
+and 10/minute admission bucket, with the documented process-memory fallback when the limiter
+backend is unavailable. The real mounted route is also behind the internal service authentication
+in the test fixture. These controls support the test-only false-positive disposition; the alert
+does not identify an unbounded deployed route.
+
+Only the ambiguous-reset case uses `createDropResetResponseProxy`. For ordinary proxy responses it
+copies the upstream status and body, sets a constant `application/json` content type, and forwards
+no response headers, including `Retry-After` or `Set-Cookie`. For the one-use password-token POST it
+consumes the upstream response and destroys the downstream connection to model a lost reset
+acknowledgement. The public External REST route owns its bounded retry response and issues its own
+session cookie only after a successful reset with a valid session token. Focused invitation and
+trusted-source tests verify the public 429/`Retry-After` behavior; they do not assert that the
+fault-injection proxy forwards those headers.
+
+GitHub currently records alert #1769 as dismissed with reason `false positive`. Its 2026-10-12
+dismissal note relied on the earlier Supertest-only topology. This entry updates the repository's
+current evidence to the loopback child-service topology; the alert state and historical dismissal
+were not changed.
 
 ### Won't fix (accepted) — real gap, follow-up backstop PR
 
