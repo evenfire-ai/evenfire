@@ -8002,7 +8002,11 @@ export class AppService {
       // A generation change is expected when logout or account replacement wins
       // while this best-effort request is waiting for its team-scoped token.
       // Report cancellation as such; it is not a host prewarm failure.
-      if (message === 'stale_session_generation') {
+      if (
+        message === 'stale_session_generation' ||
+        this.prewarmAuthEpoch !== authEpoch ||
+        this.prewarmAuthTransitionCount > 0
+      ) {
         return { requested: false, skipped: 'auth-changed' }
       }
       desktopRuntimeLog.warn(`[AppService] prewarmHost failed host=${targetHostRef}`, error)

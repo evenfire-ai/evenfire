@@ -321,9 +321,9 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
   it('a late prewarm result cannot erase the next session cooldown', async () => {
     const grant = await mockGetOrIssue()
     mockGetOrIssue.mockClear()
-    let complete!: (value: typeof grant) => void
-    const pending = new Promise<typeof grant>(resolve => {
-      complete = resolve
+    let reject!: (error: Error) => void
+    const pending = new Promise<typeof grant>((_resolve, rejectPending) => {
+      reject = rejectPending
     })
     mockGetOrIssue.mockReturnValueOnce(pending)
     mockPrewarmHost.mockResolvedValue({ status: 'active' })
@@ -344,7 +344,7 @@ describe('AppService.prewarmHost — bounded wake re-emission', () => {
       requested: true,
       status: 'active',
     })
-    complete(grant)
+    reject(new Error('credential owner superseded'))
     await expect(oldAttempt).resolves.toEqual({ requested: false, skipped: 'auth-changed' })
     await expect(svc.prewarmHost('chatllm')).resolves.toEqual({
       requested: false,
