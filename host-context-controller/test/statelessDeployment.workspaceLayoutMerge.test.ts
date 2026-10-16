@@ -6,7 +6,7 @@
  * uncheckpointed WAL frames, split by the base `workspace-layout-init`
  * (committed verbatim as a fixture), then merged by the new script.
  */
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
@@ -65,9 +65,62 @@ function runScript(script: string, args: string[] = [], env?: NodeJS.ProcessEnv)
   return { status: res.status ?? -1, stderr: res.stderr ?? '' }
 }
 
-function merge(root: string, env?: NodeJS.ProcessEnv): RunResult {
-  return runScript(buildWorkspaceLayoutMergeScript(root), [], env)
+// deploy/scripts/host-layout-merge.sh predicts this merge on clusters from a
+// committed copy of the script, run read-only. Every merge below without a
+// crash env first asks it for a prediction and then checks it against what
+// the merge did, so each tree in this file is also a drift case.
+const DEPLOY_SCRIPTS = join(__dirname, '..', '..', 'deploy', 'scripts')
+const MERGE_SCRIPT_COPY = join(DEPLOY_SCRIPTS, 'workspace-layout-merge.sh')
+const VERIFY_SCRIPT = join(DEPLOY_SCRIPTS, 'host-layout-merge.sh')
+const PREDICTED_TOKENS = new Set<string>()
+
+function predictMerge(root: string): string {
+  const printed = spawnSync('bash', [VERIFY_SCRIPT, 'check-script', '--root', root], {
+    encoding: 'utf8',
+  })
+  if (printed.error) throw printed.error
+  expect(printed.status, printed.stderr).toBe(0)
+  const res = spawnSync('/bin/sh', ['-c', printed.stdout], { encoding: 'utf8' })
+  if (res.error) throw res.error
+  expect(res, `check on ${root}`).toMatchObject({ status: 0, stderr: '' })
+  return res.stdout
 }
+
+function rootListing(root: string): string {
+  return readdirSync(root).sort().join('\0')
+}
+
+function merge(root: string, env?: NodeJS.ProcessEnv): RunResult {
+  if (env) return runScript(buildWorkspaceLayoutMergeScript(root), [], env)
+  const predicted = predictMerge(root)
+  // A root that is not a directory is refused, so it has no listing to compare.
+  const before = statSync(root).isDirectory() ? rootListing(root) : null
+  const res = runScript(buildWorkspaceLayoutMergeScript(root))
+  const token = predicted.split(/[ \n]/, 1)[0]
+  PREDICTED_TOKENS.add(token)
+  if (res.status === 1) {
+    expect(token, predicted).toMatch(/^WILL_REFUSE_F[1-4]$/)
+    expect(predicted.slice(token.length + 1)).toBe(res.stderr)
+  } else {
+    expect(res.status, res.stderr).toBe(0)
+    expect(before, `${root} merged without being a directory`).not.toBeNull()
+    const expected = rootListing(root) === before ? 'NO_SPLIT_SIGNATURE' : 'WILL_MERGE'
+    expect(predicted).toBe(`${expected}\n`)
+  }
+  return res
+}
+
+afterAll(() => {
+  // Liveness of the drift check: every outcome was predicted at least once.
+  expect([...PREDICTED_TOKENS].sort()).toEqual([
+    'NO_SPLIT_SIGNATURE',
+    'WILL_MERGE',
+    'WILL_REFUSE_F1',
+    'WILL_REFUSE_F2',
+    'WILL_REFUSE_F3',
+    'WILL_REFUSE_F4',
+  ])
+})
 
 function baseInit(root: string): void {
   const res = runScript(readFileSync(BASE_INIT, 'utf8'), [root])
@@ -176,6 +229,24 @@ function mvCalls(env: NodeJS.ProcessEnv): number {
 }
 
 describe('workspace layout merge', () => {
+  it('ships the rendered script as the copy the verify script reads', () => {
+    expect(
+      readFileSync(MERGE_SCRIPT_COPY, 'utf8'),
+      'regenerate deploy/scripts/workspace-layout-merge.sh from buildWorkspaceLayoutMergeScript()'
+    ).toBe(buildWorkspaceLayoutMergeScript())
+  })
+
+  it('predicts a refusal for a Host switched to stateful before the upgrade (T5)', () => {
+    // A v0.10/v0.11 stateless Host switched to stateful: new chats in the
+    // root database, the older history still under state/.
+    const root = splitRoot()
+    cpSync(join(root, 'state', 'state.db'), join(root, 'state.db'))
+    expect(predictMerge(root)).toBe(
+      `WILL_REFUSE_F2 workspace layout merge refused: more than one live SQLite database across ${root}, ${root}/state and ${root}/workspace\n`
+    )
+    expect(merge(root).status).toBe(1)
+  })
+
   it('merges a split tree with an uncheckpointed WAL back to the PVC root', () => {
     const root = splitRoot()
     // Witness that the split tree is the real one: the database and its

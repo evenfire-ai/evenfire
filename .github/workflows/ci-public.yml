@@ -743,12 +743,13 @@ jobs:
       - name: Test minikube Makefile targets
         run: bash scripts/tests/test-minikube-makefile.sh
 
-      - name: Test the #825 gate context guards, report verdict and E2E helpers
+      - name: Test the #825 gate context guards, report verdict, E2E helpers and layout merge check
         run: >-
           node scripts/tests/run-node-test-files.mjs
           scripts/e2e/playwright-report-gate.test.mjs
           scripts/e2e/e2e-hcc-storage-layout-switch.test.mjs
           scripts/e2e/e2e-stateless-suspend-wake.test.mjs
+          deploy/scripts/host-layout-merge.test.mjs
 
       # make test-service-matrix fails when Makefile TEST_SERVICES and the
       # `test` job's service matrix above drift apart.
