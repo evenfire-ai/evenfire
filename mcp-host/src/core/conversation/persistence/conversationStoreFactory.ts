@@ -25,6 +25,8 @@ export interface ConversationStoreFactoryOptions {
   cacheSize: number
   syncTimeoutMs: number
   asyncTimeoutMs: number
+  /** Progress bound of the persist queue (`PersistQueueOptions.stallTimeoutMs`). */
+  stallTimeoutMs: number
   checkpointEveryWrites: number
   heartbeatMs: number
   /**
@@ -95,6 +97,7 @@ export function createConversationStore(
   const persistQueue = new PersistQueue(worker, {
     syncTimeoutMs: opts.syncTimeoutMs,
     asyncTimeoutMs: opts.asyncTimeoutMs,
+    stallTimeoutMs: opts.stallTimeoutMs,
     onTransportError: err => {
       logger.error({ err }, '[ConversationStore] worker transport error')
     },

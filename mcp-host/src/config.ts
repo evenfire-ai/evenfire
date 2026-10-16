@@ -233,6 +233,7 @@ export interface Config {
   dbWorkerHeartbeatMs: number
   dbPersistSyncTimeoutMs: number
   dbPersistAsyncTimeoutMs: number
+  dbWorkerStallTimeoutMs: number
   dbCheckpointEveryWrites: number
   dbWalSizeAlarmBytes: number
 
@@ -471,6 +472,31 @@ export function parseStatelessHeartbeatIntervalMs(raw: string | undefined): numb
     )
   }
   return parsed
+}
+
+/**
+ * Parse CLERUM_DB_WORKER_STALL_TIMEOUT_MS, the longest time the db worker may
+ * go without completing an operation while it has work in flight. It must
+ * exceed the sync write timeout, so a sync write times out on its own budget
+ * before the worker is declared stalled. An explicit invalid value fails at
+ * boot.
+ */
+export function parseDbWorkerStallTimeoutMs(
+  raw: string | undefined,
+  syncTimeoutMs: number
+): number {
+  if (raw === undefined || raw.trim() === '') return 30_000
+  const name = 'CLERUM_DB_WORKER_STALL_TIMEOUT_MS'
+  const value = /^\d+$/.test(raw) ? Number(raw) : NaN
+  if (!Number.isSafeInteger(value) || value < 1000) {
+    throw new Error(`${name}='${raw}' must be an integer of at least 1000`)
+  }
+  if (value <= syncTimeoutMs) {
+    throw new Error(
+      `${name}='${raw}' must exceed CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS (${syncTimeoutMs})`
+    )
+  }
+  return value
 }
 
 /**
@@ -1069,6 +1095,10 @@ export const config: Config = {
   dbWorkerHeartbeatMs: parseInt(getEnv('CLERUM_DB_WORKER_HEARTBEAT_MS', '5000')!, 10),
   dbPersistSyncTimeoutMs: parseInt(getEnv('CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS', '2000')!, 10),
   dbPersistAsyncTimeoutMs: parseInt(getEnv('CLERUM_DB_PERSIST_ASYNC_TIMEOUT_MS', '5000')!, 10),
+  dbWorkerStallTimeoutMs: parseDbWorkerStallTimeoutMs(
+    getEnv('CLERUM_DB_WORKER_STALL_TIMEOUT_MS', ''),
+    parseInt(getEnv('CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS', '2000')!, 10)
+  ),
   dbCheckpointEveryWrites: parseInt(getEnv('CLERUM_DB_CHECKPOINT_EVERY_WRITES', '100')!, 10),
   dbWalSizeAlarmBytes: parseInt(getEnv('CLERUM_DB_WAL_SIZE_ALARM_BYTES', '52428800')!, 10),
 

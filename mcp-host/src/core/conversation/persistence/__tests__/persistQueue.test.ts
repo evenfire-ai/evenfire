@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
-import type { WorkerMessage, WorkerReply } from '../../../../db/worker/protocol'
+import { Worker } from 'node:worker_threads'
+import type { WorkerMessage, WorkerOp, WorkerReply } from '../../../../db/worker/protocol'
 import { PersistQueue, type WorkerLike } from '../persistQueue'
 
 class FakeWorker extends EventEmitter implements WorkerLike {
@@ -23,7 +24,11 @@ class FakeWorker extends EventEmitter implements WorkerLike {
 describe('PersistQueue', () => {
   it('resolves enqueueSync when worker replies ok', async () => {
     const worker = new FakeWorker()
-    const q = new PersistQueue(worker, { syncTimeoutMs: 200, asyncTimeoutMs: 500 })
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 200,
+      asyncTimeoutMs: 500,
+      stallTimeoutMs: 30_000,
+    })
     const promise = q.enqueueSync({ kind: 'ping' })
     const sent = worker.sent[0]
     worker.emit('message', { id: sent.id, ok: true, result: 'pong' } satisfies WorkerReply)
@@ -32,7 +37,11 @@ describe('PersistQueue', () => {
 
   it('rejects enqueueSync when worker replies with error', async () => {
     const worker = new FakeWorker()
-    const q = new PersistQueue(worker, { syncTimeoutMs: 200, asyncTimeoutMs: 500 })
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 200,
+      asyncTimeoutMs: 500,
+      stallTimeoutMs: 30_000,
+    })
     const promise = q.enqueueSync({ kind: 'ping' })
     const sent = worker.sent[0]
     worker.emit('message', {
@@ -45,13 +54,21 @@ describe('PersistQueue', () => {
 
   it('times out enqueueSync', async () => {
     const worker = new FakeWorker()
-    const q = new PersistQueue(worker, { syncTimeoutMs: 30, asyncTimeoutMs: 30 })
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 30,
+      asyncTimeoutMs: 30,
+      stallTimeoutMs: 30_000,
+    })
     await expect(q.enqueueSync({ kind: 'ping' })).rejects.toThrow(/timeout/)
   })
 
   it('awaitOpen outlasts the sync timeout and resolves on the worker reply', async () => {
     const worker = new FakeWorker()
-    const q = new PersistQueue(worker, { syncTimeoutMs: 30, asyncTimeoutMs: 30 })
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 30,
+      asyncTimeoutMs: 30,
+      stallTimeoutMs: 30_000,
+    })
     let settled = false
     const open = q.awaitOpen().finally(() => {
       settled = true
@@ -70,7 +87,11 @@ describe('PersistQueue', () => {
 
   it('awaitOpen rejects when the worker exits before answering', async () => {
     const worker = new FakeWorker()
-    const q = new PersistQueue(worker, { syncTimeoutMs: 30, asyncTimeoutMs: 30 })
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 30,
+      asyncTimeoutMs: 30,
+      stallTimeoutMs: 30_000,
+    })
     const open = q.awaitOpen()
     expect(worker.sent.map(m => m.op.kind)).toEqual(['ping'])
     worker.emit('exit', 1)
@@ -79,7 +100,11 @@ describe('PersistQueue', () => {
 
   it('enqueueAsync preserves order per sessionKey', async () => {
     const worker = new FakeWorker()
-    const q = new PersistQueue(worker, { syncTimeoutMs: 200, asyncTimeoutMs: 500 })
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 200,
+      asyncTimeoutMs: 500,
+      stallTimeoutMs: 30_000,
+    })
     q.enqueueAsync('s1', { kind: 'ping' })
     q.enqueueAsync('s1', { kind: 'ping' })
     // After microtasks the first one is sent but the second is awaiting the
@@ -94,7 +119,11 @@ describe('PersistQueue', () => {
 
   it('drainPrefix waits only for chains whose sessionKey matches the prefix', async () => {
     const worker = new FakeWorker()
-    const q = new PersistQueue(worker, { syncTimeoutMs: 200, asyncTimeoutMs: 500 })
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 200,
+      asyncTimeoutMs: 500,
+      stallTimeoutMs: 30_000,
+    })
     // Two in-flight async writes under the same prefix + one unrelated key.
     q.enqueueAsync('alice:rpc:a:1', { kind: 'ping' })
     q.enqueueAsync('alice:rpc:b:2', { kind: 'ping' })
@@ -120,7 +149,11 @@ describe('PersistQueue', () => {
 
   it('rejects pending writes when the worker exits', async () => {
     const worker = new FakeWorker()
-    const q = new PersistQueue(worker, { syncTimeoutMs: 500, asyncTimeoutMs: 500 })
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 500,
+      asyncTimeoutMs: 500,
+      stallTimeoutMs: 30_000,
+    })
     const promise = q.enqueueSync({ kind: 'ping' })
     worker.emit('exit', 137)
     await expect(promise).rejects.toThrow(/db worker exited/)
@@ -128,7 +161,11 @@ describe('PersistQueue', () => {
 
   it('rejects async writes admitted after the worker exited instead of dropping them', async () => {
     const worker = new FakeWorker()
-    const q = new PersistQueue(worker, { syncTimeoutMs: 500, asyncTimeoutMs: 500 })
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 500,
+      asyncTimeoutMs: 500,
+      stallTimeoutMs: 30_000,
+    })
     q.enqueueAsync('s1', { kind: 'ping' })
     await Promise.resolve()
     // Liveness witness: while the worker is alive the async write is posted.
@@ -141,7 +178,11 @@ describe('PersistQueue', () => {
 
   it('fails the next write on the same queue after an async write failed', async () => {
     const worker = new FakeWorker()
-    const q = new PersistQueue(worker, { syncTimeoutMs: 500, asyncTimeoutMs: 500 })
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 500,
+      asyncTimeoutMs: 500,
+      stallTimeoutMs: 30_000,
+    })
     // Witness: a sync write before any failure resolves.
     const first = q.enqueueSync({ kind: 'ping' })
     worker.emit('message', {
@@ -173,6 +214,7 @@ describe('PersistQueue', () => {
     const q = new PersistQueue(worker, {
       syncTimeoutMs: 500,
       asyncTimeoutMs: 500,
+      stallTimeoutMs: 30_000,
       onFailure: err => failures.push(err),
       onExit: code => exits.push(code),
     })
@@ -201,6 +243,7 @@ describe('PersistQueue', () => {
     const q = new PersistQueue(worker, {
       syncTimeoutMs: 500,
       asyncTimeoutMs: 500,
+      stallTimeoutMs: 30_000,
       onFailure: err => failures.push(err),
     })
     q.enqueueAsync('s1', { kind: 'ping' })
@@ -238,6 +281,7 @@ describe('PersistQueue', () => {
     const q = new PersistQueue(worker, {
       syncTimeoutMs: 500,
       asyncTimeoutMs: 20,
+      stallTimeoutMs: 30_000,
       onFailure: err => failures.push(err),
     })
     q.enqueueAsync('s1', { kind: 'ping' })
@@ -262,28 +306,6 @@ describe('PersistQueue', () => {
     expect(worker.sent).toHaveLength(3)
   })
 
-  it('bounds the close() drain of an unacknowledged async write by asyncTimeoutMs', async () => {
-    const worker = new FakeWorker()
-    const failures: Error[] = []
-    const exits: number[] = []
-    worker.on('exit', code => exits.push(code))
-    const q = new PersistQueue(worker, {
-      syncTimeoutMs: 500,
-      asyncTimeoutMs: 20,
-      onFailure: err => failures.push(err),
-    })
-    q.enqueueAsync('s1', { kind: 'ping' })
-    await Promise.resolve()
-    expect(worker.sent).toHaveLength(1)
-    const started = Date.now()
-    await expect(q.close()).rejects.toThrow(/not acknowledged within 20ms of close/)
-    expect(Date.now() - started).toBeLessThan(400)
-    // The worker was terminated and the failure reported once.
-    expect(exits).toEqual([0])
-    expect(failures).toHaveLength(1)
-    expect(worker.sent.map(m => m.op.kind)).toEqual(['ping'])
-  })
-
   it('reports neither onFailure nor onExit for the worker exit that follows a shutdown ACK', async () => {
     const worker = new FakeWorker()
     const failures: Error[] = []
@@ -293,6 +315,7 @@ describe('PersistQueue', () => {
     const q = new PersistQueue(worker, {
       syncTimeoutMs: 500,
       asyncTimeoutMs: 500,
+      stallTimeoutMs: 30_000,
       onFailure: err => failures.push(err),
       onExit: code => reportedExits.push(code),
     })
@@ -315,7 +338,11 @@ describe('PersistQueue', () => {
     worker.terminate = () => {
       terminateCalls += 1
     }
-    const q = new PersistQueue(worker, { syncTimeoutMs: 500, asyncTimeoutMs: 500 })
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 500,
+      asyncTimeoutMs: 500,
+      stallTimeoutMs: 30_000,
+    })
     const closing = q.close()
     await new Promise(r => setImmediate(r))
 
@@ -331,7 +358,11 @@ describe('PersistQueue', () => {
 
   it('drains queued async writes before posting shutdown and rejects close on a failed one', async () => {
     const worker = new FakeWorker()
-    const q = new PersistQueue(worker, { syncTimeoutMs: 500, asyncTimeoutMs: 500 })
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 500,
+      asyncTimeoutMs: 500,
+      stallTimeoutMs: 30_000,
+    })
     q.enqueueAsync('s1', { kind: 'ping' })
     await Promise.resolve()
     const closing = q.close()
@@ -353,7 +384,11 @@ describe('PersistQueue', () => {
 
   it('never posts a write chained behind a failed async write on the same key', async () => {
     const worker = new FakeWorker()
-    const q = new PersistQueue(worker, { syncTimeoutMs: 500, asyncTimeoutMs: 500 })
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 500,
+      asyncTimeoutMs: 500,
+      stallTimeoutMs: 30_000,
+    })
     q.enqueueAsync('s1', { kind: 'ping' })
     q.enqueueAsync('s1', { kind: 'ping' })
     const chainedSync = q.enqueueSync({ kind: 'ping' }, 's1')
@@ -375,7 +410,11 @@ describe('PersistQueue', () => {
 
   it('resolves a concurrent second close only after the shutdown ACK', async () => {
     const worker = new FakeWorker()
-    const q = new PersistQueue(worker, { syncTimeoutMs: 500, asyncTimeoutMs: 500 })
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 500,
+      asyncTimeoutMs: 500,
+      stallTimeoutMs: 30_000,
+    })
     let secondSettled = false
     const first = q.close()
     const second = q.close().finally(() => {
@@ -398,6 +437,7 @@ describe('PersistQueue', () => {
     const q = new PersistQueue(worker, {
       syncTimeoutMs: 500,
       asyncTimeoutMs: 500,
+      stallTimeoutMs: 30_000,
       onFailure: err => failures.push(err),
     })
     const closing = q.close()
@@ -413,5 +453,286 @@ describe('PersistQueue', () => {
     // The shutdown failure is the queue's failure; the exit that terminate()
     // causes afterwards is not reported as a second one.
     expect(failures.map(e => e.message)).toEqual(['database is locked'])
+  })
+})
+
+// A slow worker and a wedged worker differ in progress, not in how long a
+// write waits: a slow worker keeps completing operations, a wedged one stops.
+// These cases pin both, in service and at close(), so a change that fixes one
+// by breaking another fails here.
+describe('PersistQueue progress bound: slow vs wedged, in service and at close()', () => {
+  const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
+  const ack = (worker: FakeWorker, msg: WorkerMessage) =>
+    worker.emit('message', { id: msg.id, ok: true, result: null } satisfies WorkerReply)
+
+  /** A queue whose open ping was answered, so the progress bound is armed. */
+  async function openQueue(opts: {
+    stallTimeoutMs: number
+    asyncTimeoutMs?: number
+    syncTimeoutMs?: number
+  }) {
+    const worker = new FakeWorker()
+    const failures: Error[] = []
+    let terminateCalls = 0
+    worker.terminate = () => {
+      terminateCalls += 1
+      worker.emit('exit', 1)
+    }
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: opts.syncTimeoutMs ?? 5000,
+      asyncTimeoutMs: opts.asyncTimeoutMs ?? 5000,
+      stallTimeoutMs: opts.stallTimeoutMs,
+      onFailure: err => failures.push(err),
+    })
+    const open = q.awaitOpen()
+    ack(worker, worker.sent[0])
+    await open
+    return { worker, q, failures, terminateCalls: () => terminateCalls }
+  }
+
+  /**
+   * Answers every posted operation in order, one at a time, `delayMs` after
+   * the previous answer: a single-writer worker that is slow but alive.
+   */
+  function autoAck(worker: FakeWorker, delayMs: number): WorkerMessage[] {
+    const acked: WorkerMessage[] = []
+    let busy = false
+    const queue: WorkerMessage[] = []
+    const next = () => {
+      const msg = queue.shift()
+      if (!msg) {
+        busy = false
+        return
+      }
+      busy = true
+      setTimeout(() => {
+        acked.push(msg)
+        ack(worker, msg)
+        next()
+      }, delayMs)
+    }
+    const post = worker.postMessage.bind(worker)
+    worker.postMessage = msg => {
+      post(msg)
+      queue.push(msg)
+      if (!busy) next()
+    }
+    return acked
+  }
+
+  it('fails a wedged worker in service within the bound and releases everything queued behind it', async () => {
+    const { worker, q, failures, terminateCalls } = await openQueue({
+      stallTimeoutMs: 100,
+      asyncTimeoutMs: 20,
+    })
+    // Liveness witness: a write on the same key is acknowledged first.
+    q.enqueueAsync('s1', { kind: 'ping' })
+    await Promise.resolve()
+    ack(worker, worker.sent[1])
+    await q.drainSessionKey('s1')
+    expect(failures).toHaveLength(0)
+
+    // The worker stops answering.
+    q.enqueueAsync('s1', { kind: 'ping' })
+    const keyedSync = q.enqueueSync({ kind: 'ping' }, 's1')
+    await Promise.resolve()
+    expect(worker.sent).toHaveLength(3)
+    const started = Date.now()
+    const prefixDrained = q.drainPrefix('s')
+
+    await vi.waitFor(() => expect(failures).toHaveLength(1), { timeout: 1000, interval: 5 })
+    expect(Date.now() - started).toBeLessThan(400)
+    expect(failures[0].message).toMatch(/db worker made no progress for 100ms/)
+    await expect(keyedSync).rejects.toBe(failures[0])
+    await prefixDrained
+    expect(terminateCalls()).toBe(1)
+    // The write chained behind the stalled one was never posted.
+    expect(worker.sent).toHaveLength(3)
+    expect(() => q.enqueueAsync('s2', { kind: 'ping' })).toThrow(failures[0].message)
+  })
+
+  it('never fails a slow but alive worker with a backlog far longer than the bound', async () => {
+    const { worker, q, failures } = await openQueue({ stallTimeoutMs: 100, asyncTimeoutMs: 20 })
+    const acked = autoAck(worker, 50)
+    const keys = ['a', 'b', 'c']
+    // The tag only identifies the write in this test; the queue never reads it.
+    const tagged = (tag: string) => ({ kind: 'ping', tag }) as WorkerOp
+    for (let i = 0; i < 10; i++) {
+      for (const key of keys) q.enqueueAsync(key, tagged(`${key}${i}`))
+    }
+    await Promise.all(keys.map(k => q.drainSessionKey(k)))
+    const tags = acked.map(m => (m.op as WorkerOp & { tag: string }).tag)
+    // Liveness witness: all 30 writes were acknowledged, 1.5 s of backlog
+    // against a 100 ms bound, each key in its enqueue order.
+    expect(tags).toHaveLength(30)
+    for (const key of keys) {
+      expect(tags.filter(t => t.startsWith(key))).toEqual(
+        Array.from({ length: 10 }, (_, i) => `${key}${i}`)
+      )
+    }
+    expect(failures).toHaveLength(0)
+  })
+
+  it('drains a slow backlog completely on close() before posting shutdown', async () => {
+    const { worker, q, failures } = await openQueue({ stallTimeoutMs: 1000, asyncTimeoutMs: 50 })
+    const acked = autoAck(worker, 10)
+    for (let i = 0; i < 10; i++) q.enqueueAsync('s1', { kind: 'ping' })
+    await q.close()
+    const kinds = acked.map(m => m.op.kind)
+    // Liveness witness: the ten writes and then shutdown were acknowledged.
+    expect(kinds).toEqual([...Array(10).fill('ping'), 'shutdown'])
+    expect(failures).toHaveLength(0)
+  })
+
+  it('fails close() within the bound when the worker is wedged', async () => {
+    const { worker, q, failures, terminateCalls } = await openQueue({ stallTimeoutMs: 100 })
+    // Liveness witness: a write is acknowledged before the worker stops.
+    const first = q.enqueueSync({ kind: 'ping' })
+    ack(worker, worker.sent[1])
+    await first
+    q.enqueueAsync('s1', { kind: 'ping' })
+    await Promise.resolve()
+    const started = Date.now()
+    await expect(q.close()).rejects.toThrow(/db worker made no progress for 100ms/)
+    expect(Date.now() - started).toBeLessThan(400)
+    expect(terminateCalls()).toBe(1)
+    expect(failures).toHaveLength(1)
+    expect(worker.sent.map(m => m.op.kind)).not.toContain('shutdown')
+  })
+
+  it('waits on close() for a sync write without a sessionKey before posting shutdown', async () => {
+    const { worker, q } = await openQueue({ stallTimeoutMs: 1000 })
+    const unkeyed = q.enqueueSync<string>({ kind: 'ping' })
+    const closing = q.close()
+    await sleep(20)
+    expect(worker.sent.map(m => m.op.kind)).toEqual(['ping', 'ping'])
+
+    worker.emit('message', {
+      id: worker.sent[1].id,
+      ok: true,
+      result: 'pong',
+    } satisfies WorkerReply)
+    // Liveness witness: the sync write resolves with the worker's result.
+    await expect(unkeyed).resolves.toBe('pong')
+    await vi.waitFor(() => expect(worker.sent.map(m => m.op.kind)).toContain('shutdown'))
+    ack(worker, worker.sent[2])
+    await closing
+  })
+
+  it('does not fail a healthy worker whose answer waited behind a main-thread stall', async () => {
+    const realWorker = new Worker(
+      `const { parentPort } = require('node:worker_threads')
+       parentPort.on('message', msg => setTimeout(() => parentPort.postMessage({ id: msg.id, ok: true, result: null }), 10))`,
+      { eval: true }
+    )
+    const failures: Error[] = []
+    const q = new PersistQueue(realWorker as unknown as WorkerLike, {
+      syncTimeoutMs: 5000,
+      asyncTimeoutMs: 5000,
+      stallTimeoutMs: 100,
+      onFailure: err => failures.push(err),
+    })
+    try {
+      await q.awaitOpen()
+      const write = q.enqueueSync({ kind: 'ping' }, 's1')
+      await sleep(1)
+      // The main thread is blocked well past the bound while the answer
+      // waits in the port. Blocking in the check phase makes the next loop
+      // iteration run the overdue timer before the poll phase reads the
+      // answer (blocking in the timers phase would not: libuv compares
+      // timers against the loop time cached when that phase started).
+      await new Promise<void>(resolve =>
+        setImmediate(() => {
+          const until = Date.now() + 300
+          while (Date.now() < until) {
+            /* block the event loop */
+          }
+          resolve()
+        })
+      )
+      // Liveness witness: the write resolves.
+      await expect(write).resolves.toBeNull()
+      await sleep(150)
+      expect(failures).toHaveLength(0)
+    } finally {
+      await realWorker.terminate()
+    }
+  })
+
+  it('does not start the bound before the database is open', async () => {
+    const worker = new FakeWorker()
+    const failures: Error[] = []
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 5000,
+      asyncTimeoutMs: 5000,
+      stallTimeoutMs: 100,
+      onFailure: err => failures.push(err),
+    })
+    const open = q.awaitOpen()
+    q.enqueueAsync('s1', { kind: 'ping' })
+    await Promise.resolve()
+    expect(worker.sent).toHaveLength(2)
+    await sleep(300)
+    expect(failures).toHaveLength(0)
+
+    ack(worker, worker.sent[0])
+    await open
+    ack(worker, worker.sent[1])
+    await q.drainSessionKey('s1')
+    expect(failures).toHaveLength(0)
+
+    // Liveness witness: once open, a wedged write does fail the queue.
+    q.enqueueAsync('s1', { kind: 'ping' })
+    await vi.waitFor(() => expect(failures).toHaveLength(1), { timeout: 1000, interval: 5 })
+    expect(failures[0].message).toMatch(/no progress for 100ms/)
+  })
+
+  it('stays failed when the stalled operation is acknowledged late', async () => {
+    const { worker, q, failures } = await openQueue({ stallTimeoutMs: 100 })
+    const stalled = q.enqueueSync({ kind: 'ping' }).catch((err: unknown) => err)
+    await vi.waitFor(() => expect(failures).toHaveLength(1), { timeout: 1000, interval: 5 })
+    expect(await stalled).toBe(failures[0])
+
+    worker.emit('message', {
+      id: worker.sent[1].id,
+      ok: true,
+      result: 'late',
+    } satisfies WorkerReply)
+    await sleep(1)
+    expect(() => q.enqueueAsync('s1', { kind: 'ping' })).toThrow(failures[0].message)
+    await expect(q.enqueueSync({ kind: 'ping' })).rejects.toBe(failures[0])
+    expect(failures).toHaveLength(1)
+  })
+
+  it('waits for a shutdown that takes longer than syncTimeoutMs while within the bound', async () => {
+    const { worker, q, failures } = await openQueue({ stallTimeoutMs: 1000, syncTimeoutMs: 30 })
+    const closing = q.close()
+    await vi.waitFor(() => expect(worker.sent.map(m => m.op.kind)).toContain('shutdown'))
+    await sleep(90)
+    ack(worker, worker.sent.find(m => m.op.kind === 'shutdown')!)
+    // Liveness witness: close() resolves after the late shutdown ACK.
+    await expect(closing).resolves.toBeUndefined()
+    expect(failures).toHaveLength(0)
+  })
+
+  it('keeps the bound after an earlier failure, so close() does not wait forever', async () => {
+    const { worker, q, failures, terminateCalls } = await openQueue({ stallTimeoutMs: 100 })
+    q.enqueueAsync('a', { kind: 'ping' })
+    await vi.waitFor(() => expect(worker.sent).toHaveLength(2))
+    const hung = q.enqueueSync({ kind: 'ping' }).catch((err: unknown) => err)
+    expect(worker.sent).toHaveLength(3)
+    worker.emit('message', {
+      id: worker.sent[1].id,
+      ok: false,
+      error: { code: 'SQLITE_FULL', message: 'database or disk is full' },
+    } satisfies WorkerReply)
+    // Liveness witness: the async failure is latched first.
+    await vi.waitFor(() => expect(failures).toHaveLength(1))
+    const started = Date.now()
+    await expect(q.close()).rejects.toThrow(/database or disk is full/)
+    expect(Date.now() - started).toBeLessThan(400)
+    expect(terminateCalls()).toBe(1)
+    expect(await hung).toBeInstanceOf(Error)
+    expect(failures).toHaveLength(1)
   })
 })

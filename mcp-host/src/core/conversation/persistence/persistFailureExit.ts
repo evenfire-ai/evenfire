@@ -11,6 +11,21 @@ export interface PersistFailureExitOptions {
 }
 
 /**
+ * Exit code of a graceful shutdown: 1 when closing the conversation store
+ * rejects (a write was lost or the worker stalled), so the loss shows in the
+ * container's termination state; 0 otherwise.
+ */
+export async function storeShutdownExitCode(shutdown: () => Promise<void>): Promise<number> {
+  try {
+    await shutdown()
+    return 0
+  } catch (err) {
+    logger.error({ err }, 'ConversationStore shutdown failed; exiting with code 1')
+    return 1
+  }
+}
+
+/**
  * `onPersistFailure` handler for the Host process. A persist queue that can
  * no longer write never recovers in-process, so the process exits 1 and the
  * kubelet restarts the container, after a bounded `beforeExit`. During

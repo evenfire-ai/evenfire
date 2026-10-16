@@ -12,6 +12,12 @@
  *   with that failure and `onFailure` fires once, so the Host stops instead
  *   of accepting writes it can no longer persist. The same holds after an
  *   unexpected worker exit.
+ * - Progress bound: once the database is open, while the worker has
+ *   operations in flight it must complete one within `stallTimeoutMs` of the
+ *   previous completion (or of the moment work became in flight). A slow
+ *   worker keeps completing operations, however long its backlog; a wedged
+ *   one stops, and the queue fails the same way as after a worker exit. The
+ *   bound measures worker progress, never how long a write has waited.
  *
  * The implementation is transport-agnostic: callers inject a `WorkerLike`
  * (typically a `node:worker_threads.Worker`, but tests inject an in-process
@@ -38,11 +44,14 @@ export interface WorkerLike {
 
 export interface PersistQueueOptions {
   syncTimeoutMs: number
-  /**
-   * An async write not ACKed within this time is logged and kept pending.
-   * `close()` waits this long for the queued async writes to settle.
-   */
+  /** An async write not ACKed within this time is logged and kept pending. */
   asyncTimeoutMs: number
+  /**
+   * Longest time the worker may go without completing an operation while it
+   * has operations in flight, in service and during `close()`. Not applied
+   * before the `awaitOpen()` ping is answered.
+   */
+  stallTimeoutMs: number
   /** Called whenever a heartbeat reply is observed (id === HEARTBEAT_ID). */
   onHeartbeat?: (payload: HeartbeatPayload) => void
   /** Called on transport-level errors (worker crashed, message channel broke). */
@@ -55,7 +64,8 @@ export interface PersistQueueOptions {
   onExit?: (code: number) => void
   /**
    * Called once, with the first failure that makes the queue unusable: an
-   * async write failed, or the worker exited before ACKing `shutdown`.
+   * async write failed, the worker made no progress within `stallTimeoutMs`,
+   * or the worker exited before ACKing `shutdown`.
    */
   onFailure?: (err: Error) => void
 }
@@ -79,6 +89,19 @@ export class PersistQueue {
   /** First failure that makes further writes unsafe; never cleared. */
   private failure: Error | null = null
   private closePromise: Promise<void> | null = null
+  /**
+   * Ids posted to the worker and not yet answered. Unlike `pending`, an id
+   * stays here after its caller's timeout: the worker is still busy with it.
+   */
+  private readonly inFlight = new Set<string>()
+  private inFlightWaiters: Array<() => void> = []
+  /** The `awaitOpen()` ping was answered; the progress bound applies. */
+  private opened = false
+  /** `performance.now()` of the last completion, or of in-flight going 0 → 1. */
+  private lastProgressAt = 0
+  private stallTimer: ReturnType<typeof setTimeout> | undefined
+  /** The progress bound expired and the worker was terminated. */
+  private stalled = false
 
   constructor(
     private readonly worker: WorkerLike,
@@ -99,6 +122,7 @@ export class PersistQueue {
         )
       }
       this.pending.clear()
+      this.settleInFlight()
       if (this.shutdownAcked) return
       if (this.opts.onExit) this.opts.onExit(code)
       this.recordFailure(new Error(`db worker exited (code=${code})`))
@@ -186,7 +210,8 @@ export class PersistQueue {
    * Resolves when the worker answers a `ping`. The worker registers its
    * message handler only after it has opened and migrated the database, so
    * this resolves once the database is open. No timeout: opening (spawn,
-   * migrations, recovery of a large WAL) can outlast any write budget.
+   * migrations, recovery of a large WAL) can outlast any write budget, so
+   * the progress bound applies only once this ping is answered.
    * Rejects on a worker error reply, a worker exit, or `close()`.
    */
   awaitOpen(): Promise<void> {
@@ -195,7 +220,11 @@ export class PersistQueue {
     } catch (err) {
       return Promise.reject(err as Error)
     }
-    return this.send<unknown>({ kind: 'ping' }, null).then(() => undefined)
+    return this.send<unknown>({ kind: 'ping' }, null).then(() => {
+      this.opened = true
+      this.lastProgressAt = performance.now()
+      this.armStallTimer()
+    })
   }
 
   /**
@@ -240,16 +269,14 @@ export class PersistQueue {
   }
 
   /**
-   * Graceful shutdown: close admission, drain the keyed writes in
-   * `writeChain` (async writes and sync writes with a `sessionKey`) for at
-   * most `asyncTimeoutMs` (past it, a failure is recorded and the worker is
-   * terminated without `shutdown`), wait for
-   * the worker to ACK `shutdown` (it closes the database before replying),
-   * then terminate it. A sync write without a `sessionKey` is not in
-   * `writeChain`; if the worker is still retrying it on a busy database,
-   * `shutdown` can close the database first and the write is rejected.
-   * Rejects with the first write failure, or with the shutdown failure, so
-   * the caller sees that the durable trail is incomplete.
+   * Graceful shutdown: close admission, wait until every accepted write has
+   * settled (the keyed chains and every operation in flight, sync writes
+   * without a `sessionKey` included), wait for the worker to ACK `shutdown`
+   * (it closes the database before replying), then terminate it. There is no
+   * total deadline: a slow worker drains its whole backlog, and only the
+   * progress bound (`stallTimeoutMs`) ends the wait for a wedged one.
+   * Rejects with the first failure, so the caller sees that the durable
+   * trail is incomplete.
    */
   close(): Promise<void> {
     // A second caller waits for the same shutdown instead of returning early.
@@ -259,23 +286,26 @@ export class PersistQueue {
 
   private async shutdown(): Promise<void> {
     this.closed = true
-    if (!(await this.drainWithin(this.opts.asyncTimeoutMs))) {
-      // The worker is stuck on a write; terminate() below rejects it.
-      this.recordFailure(
-        new Error(`async writes not acknowledged within ${this.opts.asyncTimeoutMs}ms of close()`)
-      )
-    } else if (!this.exited) {
+    // Admission is closed, so no chain starts after this snapshot.
+    await Promise.allSettled(Array.from(this.writeChain.values()))
+    await this.inFlightSettled()
+    if (!this.exited && !this.stalled) {
       try {
-        await this.send({ kind: 'shutdown' }, this.opts.syncTimeoutMs)
+        // Checkpointing on close can outlast `syncTimeoutMs`; the progress
+        // bound covers this operation like any other.
+        await this.send({ kind: 'shutdown' }, null)
       } catch (err) {
         // Recorded before terminate(), so the exit it causes is not reported
         // as a second failure.
         this.recordFailure(err as Error)
       }
     }
-    const terminated = this.worker.terminate()
-    if (terminated && typeof (terminated as Promise<number>).then === 'function') {
-      await terminated
+    if (!this.stalled) {
+      // A stalled worker was already terminated by checkStall().
+      const terminated = this.worker.terminate()
+      if (terminated && typeof (terminated as Promise<number>).then === 'function') {
+        await terminated
+      }
     }
     for (const entry of this.pending.values()) {
       clearTimeout(entry.timeoutHandle)
@@ -285,15 +315,71 @@ export class PersistQueue {
     if (this.failure) throw this.failure
   }
 
-  private async drainWithin(ms: number): Promise<boolean> {
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const expired = new Promise<boolean>(resolve => {
-      timer = setTimeout(() => resolve(false), ms)
-    })
-    try {
-      return await Promise.race([this.drain().then(() => true), expired])
-    } finally {
-      clearTimeout(timer)
+  private inFlightSettled(): Promise<void> {
+    if (this.inFlight.size === 0) return Promise.resolve()
+    return new Promise(resolve => this.inFlightWaiters.push(resolve))
+  }
+
+  /** Forget every in-flight id (worker gone or stalled) and wake waiters. */
+  private settleInFlight(): void {
+    this.inFlight.clear()
+    clearTimeout(this.stallTimer)
+    this.stallTimer = undefined
+    this.notifyInFlightSettled()
+  }
+
+  private notifyInFlightSettled(): void {
+    if (this.inFlight.size !== 0) return
+    const waiters = this.inFlightWaiters
+    this.inFlightWaiters = []
+    for (const resolve of waiters) resolve()
+  }
+
+  private armStallTimer(): void {
+    // Still armed after another failure: close() waits for in-flight work.
+    if (!this.opened || this.stalled || this.stallTimer || this.inFlight.size === 0) return
+    const remaining = this.opts.stallTimeoutMs - (performance.now() - this.lastProgressAt)
+    this.stallTimer = setTimeout(
+      () => {
+        this.stallTimer = undefined
+        // Timers run before the poll phase that delivers worker replies. After
+        // a main-thread stall an answer can be waiting; read it first.
+        setImmediate(() => this.checkStall())
+      },
+      Math.max(0, remaining)
+    )
+  }
+
+  private checkStall(): void {
+    if (this.stalled || this.inFlight.size === 0) return
+    if (performance.now() - this.lastProgressAt < this.opts.stallTimeoutMs) {
+      this.armStallTimer()
+      return
+    }
+    const count = this.inFlight.size
+    this.stalled = true
+    const failure = new Error(
+      `db worker made no progress for ${this.opts.stallTimeoutMs}ms with ${count} operation(s) in flight`
+    )
+    // The logger keeps only an error's name, so the cause is logged as fields.
+    logger.error(
+      { stallTimeoutMs: this.opts.stallTimeoutMs, inFlight: count },
+      '[PersistQueue] db worker made no progress; terminating it'
+    )
+    this.recordFailure(failure)
+    for (const entry of this.pending.values()) {
+      clearTimeout(entry.timeoutHandle)
+      entry.reject(failure)
+    }
+    this.pending.clear()
+    this.settleInFlight()
+    // The failure is recorded first, so the exit that follows is not reported
+    // as a second one. Not awaited: a wedged thread may take a while to stop.
+    const terminated = this.worker.terminate()
+    if (terminated && typeof (terminated as Promise<number>).then === 'function') {
+      ;(terminated as Promise<number>).catch((err: unknown) => {
+        logger.warn({ err }, '[PersistQueue] terminating the stalled db worker failed')
+      })
     }
   }
 
@@ -360,7 +446,11 @@ export class PersistQueue {
         this.pending.delete(id)
         clearTimeout(timeoutHandle)
         reject(err as Error)
+        return
       }
+      if (this.inFlight.size === 0) this.lastProgressAt = performance.now()
+      this.inFlight.add(id)
+      this.armStallTimer()
     })
   }
 
@@ -370,6 +460,13 @@ export class PersistQueue {
         this.opts.onHeartbeat(reply.result as HeartbeatPayload)
       }
       return
+    }
+    if (this.inFlight.delete(reply.id)) {
+      this.lastProgressAt = performance.now()
+      clearTimeout(this.stallTimer)
+      this.stallTimer = undefined
+      this.armStallTimer()
+      this.notifyInFlightSettled()
     }
     const entry = this.pending.get(reply.id)
     if (!entry) return

@@ -28,6 +28,7 @@ function makeHarness(): Harness {
   const persistQueue = new PersistQueue(handle.worker, {
     syncTimeoutMs: 2000,
     asyncTimeoutMs: 2000,
+    stallTimeoutMs: 30_000,
   })
   const service = new SessionSearchService({ persistQueue })
   return {

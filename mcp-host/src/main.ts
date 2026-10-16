@@ -45,7 +45,10 @@ import {
   SqliteColdStartLoader,
   createConversationStore,
 } from './core/conversation/persistence'
-import { exitOnPersistFailure } from './core/conversation/persistence/persistFailureExit'
+import {
+  exitOnPersistFailure,
+  storeShutdownExitCode,
+} from './core/conversation/persistence/persistFailureExit'
 import { validateApprovalConfig } from './core/extensions'
 import type { ApprovalDecision } from './core/extensions/approvalTypes'
 import { BasicSafety } from './core/safety/safety'
@@ -1627,6 +1630,7 @@ async function initializeConversationStore(): Promise<ConversationStoreHandle | 
     cacheSize: config.conversationCacheSize,
     syncTimeoutMs: config.dbPersistSyncTimeoutMs,
     asyncTimeoutMs: config.dbPersistAsyncTimeoutMs,
+    stallTimeoutMs: config.dbWorkerStallTimeoutMs,
     checkpointEveryWrites: config.dbCheckpointEveryWrites,
     heartbeatMs: config.dbWorkerHeartbeatMs,
     pendingApprovalTtlMs: config.pendingApprovalTtlMs,
@@ -3109,13 +3113,12 @@ async function shutdown(signal: string): Promise<void> {
   await pluginWorkloadSdkServer?.stop()
   await rpcServer?.stop()
 
-  // T2.1 — drain pending DB writes, then terminate the SQLite worker.
+  // T2.1 — drain pending DB writes, then terminate the SQLite worker. A
+  // write that could not be persisted makes the process exit 1.
+  let exitCode = 0
   if (conversationStoreHandle) {
-    try {
-      await conversationStoreHandle.shutdown()
-    } catch (err) {
-      logger.warn({ err: err }, '[Main] ConversationStore shutdown raised:')
-    }
+    const handle = conversationStoreHandle
+    exitCode = await storeShutdownExitCode(() => handle.shutdown())
   }
 
   if (gfsRuntimeStop) {
@@ -3128,7 +3131,7 @@ async function shutdown(signal: string): Promise<void> {
     }
   }
 
-  process.exit(0)
+  process.exit(exitCode)
 }
 
 /**

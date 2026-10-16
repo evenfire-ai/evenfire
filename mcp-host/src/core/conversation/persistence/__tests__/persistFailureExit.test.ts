@@ -3,12 +3,13 @@ import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { exitOnPersistFailure } from '../persistFailureExit'
+import { exitOnPersistFailure, storeShutdownExitCode } from '../persistFailureExit'
 
 // Runs the real factory, PersistQueue and exitOnPersistFailure in a child
 // Node process and reads that process's exit code. The worker thread is a
-// JS stand-in: it acknowledges writes by appending them to a file, fails the
-// `fail` op and exits on `crash`.
+// JS stand-in: it answers the open ping, acknowledges writes by appending them
+// to a file (`slow` after 30 ms), fails the `fail` op, never answers `hang`
+// and exits on `crash`.
 
 const SRC = path.resolve(__dirname, '..', '..', '..', '..')
 const HOOK = path.join(__dirname, 'fixtures', 'tsResolveHook.cjs')
@@ -23,6 +24,13 @@ const fs = require('node:fs')
 const { parentPort, workerData } = require('node:worker_threads')
 parentPort.on('message', msg => {
   const kind = msg.op.kind
+  if (kind === 'ping') parentPort.postMessage({ id: msg.id, ok: true, result: null })
+  if (kind === 'slow') {
+    setTimeout(() => {
+      fs.appendFileSync(workerData.dbPath, msg.op.value + '\\n')
+      parentPort.postMessage({ id: msg.id, ok: true, result: null })
+    }, 30)
+  }
   if (kind === 'write') {
     fs.appendFileSync(workerData.dbPath, msg.op.value + '\\n')
     parentPort.postMessage({ id: msg.id, ok: true, result: null })
@@ -44,17 +52,25 @@ const path = require('node:path')
 const [srcRoot, workerPath, dataPath, scenario] = process.argv.slice(2)
 const persistence = path.join(srcRoot, 'core/conversation/persistence')
 const { createConversationStore } = require(path.join(persistence, 'conversationStoreFactory.ts'))
-const { exitOnPersistFailure } = require(path.join(persistence, 'persistFailureExit.ts'))
+const { exitOnPersistFailure, storeShutdownExitCode } = require(path.join(persistence, 'persistFailureExit.ts'))
+// Mirrors main.ts: the graceful path marks the Host as shutting down, closes
+// the store and exits with the code storeShutdownExitCode returns.
+let shuttingDown = false
+async function gracefulExit() {
+  shuttingDown = true
+  process.exit(await storeShutdownExitCode(() => handle.shutdown()))
+}
 const handle = createConversationStore({
   mode: 'sqlite',
   dbPath: dataPath,
   cacheSize: 10,
   syncTimeoutMs: 5000,
-  asyncTimeoutMs: 5000,
+  asyncTimeoutMs: 50,
+  stallTimeoutMs: 300,
   checkpointEveryWrites: 100,
   heartbeatMs: 60000,
   workerScriptPath: workerPath,
-  onPersistFailure: exitOnPersistFailure(() => false, {
+  onPersistFailure: exitOnPersistFailure(() => shuttingDown, {
     beforeExit: async () => console.log('PRE_EXIT_FLUSH'),
     beforeExitTimeoutMs: 1000,
   }),
@@ -69,6 +85,24 @@ const queue = handle.persistQueue
     console.log('SHUTDOWN_CLEAN')
     return
   }
+  if (scenario === 'shutdown-slow-backlog') {
+    for (let i = 0; i < 20; i++) queue.enqueueAsync('s1', { kind: 'slow', value: 'slow' + i })
+    await gracefulExit()
+    return
+  }
+  if (scenario === 'shutdown-wedged') {
+    queue.enqueueAsync('s1', { kind: 'hang' })
+    await gracefulExit()
+    return
+  }
+  if (scenario === 'wedged') {
+    queue.enqueueAsync('s1', { kind: 'hang' })
+    setTimeout(() => {
+      console.log('STILL_RUNNING')
+      process.exit(0)
+    }, 5000)
+    return
+  }
   queue.enqueueAsync('s1', { kind: scenario === 'async-write-failure' ? 'fail' : 'crash' })
   setTimeout(() => {
     console.log('STILL_RUNNING')
@@ -77,7 +111,15 @@ const queue = handle.persistQueue
 })()
 `
 
-function runChild(scenario: 'alive' | 'async-write-failure' | 'worker-exit') {
+type Scenario =
+  | 'alive'
+  | 'async-write-failure'
+  | 'worker-exit'
+  | 'wedged'
+  | 'shutdown-slow-backlog'
+  | 'shutdown-wedged'
+
+function runChild(scenario: Scenario) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'persist-failure-exit-'))
   roots.push(root)
   const worker = path.join(root, 'worker.cjs')
@@ -85,6 +127,7 @@ function runChild(scenario: 'alive' | 'async-write-failure' | 'worker-exit') {
   const data = path.join(root, 'writes.log')
   fs.writeFileSync(worker, WORKER)
   fs.writeFileSync(child, CHILD)
+  const started = Date.now()
   const result = spawnSync(
     process.execPath,
     [
@@ -100,10 +143,11 @@ function runChild(scenario: 'alive' | 'async-write-failure' | 'worker-exit') {
     ],
     { encoding: 'utf8', timeout: 20_000 }
   )
+  const elapsedMs = Date.now() - started
   const writes = fs.existsSync(data)
     ? fs.readFileSync(data, 'utf8').split('\n').filter(Boolean)
     : []
-  return { status: result.status, out: `${result.stdout}${result.stderr}`, writes }
+  return { status: result.status, out: `${result.stdout}${result.stderr}`, writes, elapsedMs }
 }
 
 describe('exitOnPersistFailure in a Host process', () => {
@@ -131,6 +175,51 @@ describe('exitOnPersistFailure in a Host process', () => {
     expect(run.out).toContain('Conversation store can no longer persist writes')
     expect(run.out).not.toContain('STILL_RUNNING')
     expect(run.status).toBe(1)
+  })
+
+  it('exits 1, bounded, when the worker stays alive but stops answering', () => {
+    const run = runChild('wedged')
+    expect(run.out).toContain('FIRST_WRITE_ACKED')
+    expect(run.out).toContain('db worker made no progress')
+    expect(run.out).toContain('"stallTimeoutMs":300')
+    expect(run.out).toContain('PRE_EXIT_FLUSH')
+    expect(run.out).not.toContain('STILL_RUNNING')
+    expect(run.status).toBe(1)
+    // 300 ms bound + 1 s flush deadline + process start-up.
+    expect(run.elapsedMs).toBeLessThan(4000)
+  })
+})
+
+describe('Host process exit on a graceful shutdown', () => {
+  it('drains a slow backlog longer than asyncTimeoutMs and exits 0', () => {
+    const run = runChild('shutdown-slow-backlog')
+    expect(run.out).toContain('FIRST_WRITE_ACKED')
+    // Liveness witness: every queued write reached the store.
+    expect(run.writes).toEqual(['first', ...Array.from({ length: 20 }, (_, i) => `slow${i}`)])
+    expect(run.out).not.toContain('ConversationStore shutdown failed')
+    expect(run.status).toBe(0)
+  })
+
+  it('exits 1 when the store cannot drain because the worker is wedged', () => {
+    const run = runChild('shutdown-wedged')
+    expect(run.out).toContain('FIRST_WRITE_ACKED')
+    expect(run.out).toContain('ConversationStore shutdown failed; exiting with code 1')
+    expect(run.out).toContain('db worker made no progress')
+    expect(run.out).toContain('"stallTimeoutMs":300')
+    expect(run.status).toBe(1)
+    expect(run.elapsedMs).toBeLessThan(4000)
+  })
+})
+
+describe('storeShutdownExitCode', () => {
+  it('returns 0 when the store closes and 1 when closing rejects', async () => {
+    // Liveness witness: a clean close is 0, so the 1 below comes from the rejection.
+    await expect(storeShutdownExitCode(async () => undefined)).resolves.toBe(0)
+    await expect(
+      storeShutdownExitCode(async () => {
+        throw new Error('async write failed (sessionKey=s1): disk I/O error')
+      })
+    ).resolves.toBe(1)
   })
 })
 

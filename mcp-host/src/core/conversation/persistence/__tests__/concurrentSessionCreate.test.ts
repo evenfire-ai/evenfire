@@ -26,6 +26,7 @@ function setup() {
   const queue = new PersistQueue(worker, {
     syncTimeoutMs: 2000,
     asyncTimeoutMs: 5000,
+    stallTimeoutMs: 30_000,
     onFailure,
   })
   const manager = new ConversationManager(new SqliteConversationStore(queue, { cacheSize: 8 }))
