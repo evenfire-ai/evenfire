@@ -36,9 +36,13 @@
 - Connect Telegram: how-to/connect-telegram.md
 - Connect Slack (app scopes, request URL, verify flow, approval buttons): how-to/connect-slack.md
 - Connect Microsoft Teams (Teams CLI registration, derived endpoint, single-tenant requirement, verify flow): how-to/connect-teams.md
+- Use the Desktop App (chat, attachments, EvenDrive, shortcuts, deep links): how-to/use-the-desktop-app.md
+- Configure guardrails (rules, installed hooks, built-ins): how-to/configure-guardrails.md
+- Connect an OAuth connector (remote MCP servers, user authorization, connector credentials): how-to/connect-oauth-connector.md
 - Configure approvals: how-to/configure-approvals.md
 - Add MCP server: how-to/add-mcp-server.md
 - Desktop setup & updates (environments, invitation, updates): how-to/desktop-setup-and-updates.md
+- Manage users and teams (roles, control admins, agent access): how-to/manage-users-and-teams.md
 - Member invitations on self-hosted (hosted mode vs your own service): how-to/member-invitations-self-hosted.md
 - Track usage & set token budgets: how-to/token-budgets-and-usage.md
 - Connect a self-hosted deployment to the registry: how-to/connect-to-registry.md
@@ -49,6 +53,7 @@
 
 - LLM providers overview (the 24 providers, including the Codex and Grok subscription sign-ins, mental model, support matrix): llm-providers/README.md
 - Configure LLM providers — operator guide (credentials, Vertex/Bedrock/Azure, allowlist, session selector): deploy/llm-providers.md
+- Use a ChatGPT (Codex) or Grok subscription instead of an API key: how-to/connect-llm-subscription.md
 - Add an LLM provider (data-only vs driver-based integration): llm-providers/adding-a-provider.md
 
 ## Deploy & operate
@@ -65,6 +70,8 @@
 
 ## Reference
 
+- Configuration switches (feature flags, base vs minikube): reference/configuration.md
+- Plugin UI SDK (window.clerum for embedded plugin apps): reference/plugin-ui-sdk.md
 - CRD index: crds/README.md
 - Host: crds/host.md
 - Context: crds/context.md
@@ -132,5 +139,7 @@
 - ../control-ui/README.md — admin console routes, config, tests
 - ../desktop-app/README.md — Electron client, scopes, endpoint table, E2E
 - ../profile-ui/README.md — profile and invitation flows
+- ../codex-llm-proxy/README.md — Codex subscription model proxy
+- ../grok-llm-proxy/README.md — Grok subscription model proxy
 - ../rpc-proxy/README.md — external JWT-gated gateway for desktop traffic
 - ../external-rest-api/README.md — auth, profiles, teams, RPC-token brokerage
