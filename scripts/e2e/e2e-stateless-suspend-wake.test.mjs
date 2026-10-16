@@ -91,7 +91,7 @@ curl() {
   for a in "$@"; do
     case "$a" in @-) cat >>"$SENT" ;; esac
   done
-  printf '{"token":"session-1"}\\n200'
+  printf '{"token":"fixture-session"}\\n200'
 }
 ${helper('mint_session_token')}
 mint_session_token && printf 'TOKEN=%s\\n' "$SESSION_TOKEN"
@@ -103,7 +103,7 @@ mint_session_token && printf 'TOKEN=%s\\n' "$SESSION_TOKEN"
     })
     assert.equal(run.status, 0, run.stderr)
     // Liveness witness: the helper parsed the stubbed login response.
-    assert.equal(run.stdout.trim(), 'TOKEN=session-1')
+    assert.equal(run.stdout.trim(), 'TOKEN=fixture-session')
     const args = readFileSync(argv, 'utf8')
     assert.doesNotMatch(args, /pw-secret/)
     // Witness: jq built the body and curl was called, and the body that
