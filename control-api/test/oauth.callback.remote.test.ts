@@ -146,6 +146,7 @@ describe('handleOAuthCallback — remote exchange is IP-pinned (DEC-17, T3)', ()
       recipeReader: { read: vi.fn(async () => null) },
       mcpServerReader: remoteReader(),
       userContextsReader: vi.fn(async () => ({ contextIds: ['ctx-A'] })),
+      userServerAccessReader: vi.fn(async () => true),
       secretReader: { read: vi.fn(async () => ({})) } as unknown as CallbackDeps['secretReader'],
       fetchFn: fetchFn as unknown as typeof fetch,
       stateSecret: STATE_SECRET,
@@ -215,6 +216,7 @@ describe('baked mcp exchange stays on fetchFn (byte-identical, T5c)', () => {
       recipeReader: { read: vi.fn(async () => null) },
       mcpServerReader: { read: vi.fn(async () => subject) },
       userContextsReader: vi.fn(async () => ({ contextIds: ['ctx-A'] })),
+      userServerAccessReader: vi.fn(async () => true),
       secretReader: {
         read: vi.fn(async () => ({ 'client-id': 'CID', 'client-secret': 'CSEC' })),
       } as unknown as CallbackDeps['secretReader'],
