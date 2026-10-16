@@ -113,7 +113,7 @@ dmg/squirrel/deb/rpm/zip, covering macOS, Windows, and Linux. See
 
 ### How many CRDs are there?
 
-Eight under `clerum.io`: Host, Context, McpServer, CommunicationChannel,
+Nine under `clerum.io`: Host, Context, McpServer, LlmHook, CommunicationChannel,
 WorkflowRecipe, WorkflowRecipePolicy, SharedFileSystem, GlobalFileSystem.
 Index: [CRDs](crds/README.md).
 
