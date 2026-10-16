@@ -49,7 +49,9 @@ workspace root as its working directory (`mcp-host/src/core/tools/shell.ts`),
 so a command such as `rm -f *`, `find . -type f -delete` or `git clean -fdx`
 run there deletes `state.db` and its journals, and a hard link
 (`ln state.db notes`) exposes its contents under a name the prefix rule
-allows. Stateful Hosts had this exposure before #825; stateless Hosts gain it,
+allows. A repository or archive operation run there, such as
+`git add -A && git push` or a `tar` of the workspace, copies the database out
+with the agent's files; neither prefix check sees it. Stateful Hosts had this exposure before #825; stateless Hosts gain it,
 because their database moves from the separate `state/` mount to the root.
 Isolating the database from the agent tree is a follow-up.
 
@@ -157,7 +159,11 @@ HCC renders `workspace-layout-merge` only while this flag is enabled
 (`host-context-controller/src/config.ts`, `parseWorkspaceLayoutMerge`). On a
 stateful Host the PVC root is the agent workspace, so an agent can create a
 `state/state.db*` entry and trigger the merge; the merge is needed once per
-Host, and the flag closes that window once every Host is merged.
+Host, and the flag closes that window once every Host is merged. While the
+flag is on, the init runs on every Host at every start, so such an entry can
+also make it refuse (F2 next to a root `state.db`, F1 for a symlinked
+`state.db*` entry) and leave a stateful Host in `Init:Error` until an operator
+renames the entry.
 
 - Unset or empty means `true`. Only the exact strings `true` and `false` are
   accepted; any other value fails HCC config load with
@@ -187,6 +193,18 @@ Host, and the flag closes that window once every Host is merged.
 - If the database worker exits, or an asynchronous write fails, the persist
   queue rejects later writes and the process exits with code 1. The kubelet
   restarts the container; a persistent cause shows as `CrashLoopBackOff`.
+- A slow write is not a failure. If the worker has operations in flight and
+  completes none of them for `CLERUM_DB_WORKER_STALL_TIMEOUT_MS` (default
+  `30000`, at least `1000` and above `CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS`), the
+  queue fails the same way and the worker is terminated.
+- At shutdown mcp-host waits for every queued write, bounded only by that
+  stall timeout and the Pod's termination grace period. A persistence failure
+  during shutdown exits 1 instead of 0.
+- A failed synchronous write, such as `SQLITE_FULL` on the first write of a
+  turn, rejects only that request; the queue stays usable and the process
+  keeps running. A full PVC therefore shows either as turns that fail while
+  the Pod stays Ready, or as `CrashLoopBackOff` once an asynchronous write
+  fails.
 - mcp-host never creates `state.db` next to an orphan `state.db-wal` or
   `state.db-shm`; opening the store fails with `ORPHAN_WAL` instead
   (`mcp-host/src/db/worker/openDatabase.ts`).
@@ -253,7 +271,11 @@ forced by a deploy.
 - The deploy workflows roll HCC back automatically when its rollout gate fails
   (`keyper-labs/evenfire-infra`, `deploy-clerum-dev.yml:715-742`,
   `deploy-clerum-prod.yml:643-670`). This is safe for a Host in `Init:Error`,
-  because every refusal exits before the first move.
+  because every refusal exits before the first move. The workflow reads no
+  Host state, so it can also roll back while a Host Pod is still running
+  `workspace-layout-merge`, the window the operator rule below forbids, and
+  the case above of a merge cut between the journals and the main database
+  can then occur.
 - For an operator-initiated rollback: do not roll back while any Host is in
   `Init:Error` in `workspace-layout-merge` or any Host Pod is still running
   that init (Pending, init not finished), and do not change a Host's

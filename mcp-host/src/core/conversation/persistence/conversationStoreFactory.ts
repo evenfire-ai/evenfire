@@ -109,9 +109,10 @@ export function createConversationStore(
   // The worker answers only after it has opened and migrated the database, so
   // the path is logged once that is true. One line per process names the
   // database this Host reads and writes, so a Pod replacement that changes the
-  // store is visible in the Pod logs. On a worker exit, `onFailure` ends the
-  // process in production before this rejection handler runs; the worker's
-  // fatal log and the exit log name the cause there.
+  // store is visible in the Pod logs. A worker exit before the answer rejects
+  // the ping and fires `onFailure`; in production the process then exits 1
+  // once the pre-exit flush ends, so this handler still logs, next to the
+  // worker's fatal log and the exit log that name the cause.
   persistQueue.awaitOpen().then(
     () => logger.info({ dbPath: opts.dbPath, mode: opts.mode }, '[ConversationStore] opened'),
     (err: unknown) => logger.error({ err }, '[ConversationStore] database did not open')
