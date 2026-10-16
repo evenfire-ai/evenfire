@@ -3,6 +3,11 @@
  */
 import * as k8s from '@kubernetes/client-node'
 import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
+import {
+  MAX_STATUS_TOOL_CALLS,
+  normalizeToolArgsForStatus,
+  normalizeToolResultForStatus,
+} from '@clerum/workflow-runtime-core'
 import { loadConfig } from '../config'
 import type {
   GovernedTraceReporter,
@@ -36,9 +41,6 @@ const MAX_ARTIFACT_CREATED_AT_LENGTH = 64
 const MAX_CUSTOM_ARTIFACTS_PER_STEP = 20
 const ARTIFACT_READER_NOT_FOUND_RETRY_DELAYS_MS = [250, 750, 1500, 3000, 5000, 8000]
 const MODEL_INJECTION_REQUEST_SCOPE = 'model_injection_request'
-const MAX_STATUS_TOOL_CALLS = 50
-const STATUS_TOOL_ARGS_PREVIEW_LIMIT = 1024
-const STATUS_TOOL_RESULT_PREVIEW_LIMIT = 1024
 const WORKFLOW_RUN_ID_LABEL = 'clerum.io/workflow-run-id'
 
 type WorkflowEndpointHandlerOptions = {
@@ -389,40 +391,6 @@ function resolveBulkArtifactBackends(
   }
 
   return Array.from(backends.values())
-}
-
-function stringifyStatusPreview(value: unknown): string {
-  if (typeof value === 'string') return value
-  try {
-    return JSON.stringify(value)
-  } catch {
-    return String(value)
-  }
-}
-
-function normalizeToolArgsForStatus(args: unknown): Record<string, unknown> | undefined {
-  if (args === undefined) return undefined
-  const serialized = stringifyStatusPreview(args)
-  if (serialized.length > STATUS_TOOL_ARGS_PREVIEW_LIMIT) {
-    return {
-      truncated: true,
-      preview: serialized.slice(0, STATUS_TOOL_ARGS_PREVIEW_LIMIT),
-    }
-  }
-  if (isRecord(args)) return args
-  return { value: args }
-}
-
-function normalizeToolResultForStatus(result: unknown): unknown {
-  if (result === undefined) return undefined
-  const serialized = stringifyStatusPreview(result)
-  if (serialized.length > STATUS_TOOL_RESULT_PREVIEW_LIMIT) {
-    return {
-      truncated: true,
-      preview: serialized.slice(0, STATUS_TOOL_RESULT_PREVIEW_LIMIT),
-    }
-  }
-  return result
 }
 
 type NormalizedToolCallStatus = {

@@ -61,6 +61,33 @@ describe('StatusReporter', () => {
     )
   })
 
+  it('bounds toolsCalled in step reports while keeping the full output', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ status: 200, ok: true })
+    vi.stubGlobal('fetch', fetchMock)
+    const toolsCalled = Array.from({ length: 22 }, (_, i) => ({
+      serverName: 'git',
+      toolName: 'read_file',
+      args: { path: `src/file-${i}.ts` },
+      result: [{ type: 'text', text: 'x'.repeat(27_000) }],
+      durationMs: 3,
+    }))
+    const output = 'r'.repeat(150_000)
+
+    const reporter = new StatusReporter({
+      wrcUrl: 'http://wrc:8082',
+      workflowName: 'wf',
+      tokenProvider: tokenProvider(),
+    })
+    await reporter.reportStepStatus('review', 'completed', { output, toolsCalled })
+
+    const rawBody: string = fetchMock.mock.calls[0][1].body
+    const body = JSON.parse(rawBody)
+    expect(body.output).toBe(output)
+    expect(body.toolsCalled).toHaveLength(22)
+    expect(body.toolsCalled[0].result).toEqual({ truncated: true, preview: expect.any(String) })
+    expect(rawBody.length - output.length).toBeLessThan(64 * 1024)
+  })
+
   it('retries 5xx status reports and succeeds on a later attempt', async () => {
     const fetchMock = vi
       .fn()
