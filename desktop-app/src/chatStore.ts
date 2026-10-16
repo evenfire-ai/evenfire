@@ -462,6 +462,14 @@ export class ChatStore {
   private compatibilityWindows = new Map<string, ChatMessage[]>()
   private compatibilityWindowBytes = new Map<string, number>()
   private compatibilityWindowsTotalBytes = 0
+  /**
+   * Server titles of sessions the catalog reported before they were in the
+   * index, keyed by agent then chat. `createChat` reads (and drops) the entry
+   * when the user opens such a chat, so hydration stores the title the
+   * catalog already showed instead of the 'New Chat' placeholder. Written and
+   * read only inside `serializeIndex` for the agent.
+   */
+  private serverOnlyTitles = new Map<string, Map<string, string>>()
 
   private dropCompatibilityWindow(key: string): void {
     this.compatibilityWindows.delete(key)
@@ -1778,10 +1786,13 @@ export class ChatStore {
       const existing = index.chats.find(c => c.id === chatId)
       if (existing) return existing
 
+      const rememberedTitles = this.serverOnlyTitles.get(agentRef)
+      const serverTitle = rememberedTitles?.get(chatId)
+      rememberedTitles?.delete(chatId)
       const now = new Date().toISOString()
       const meta: ChatMetadata = {
         id: chatId,
-        title: 'New Chat',
+        title: serverTitle ?? 'New Chat',
         createdAt: now,
         updatedAt: now,
         messageCount: 0,
@@ -2250,7 +2261,8 @@ export class ChatStore {
    * Deliberately does NOT create entries for server-only sessions: the sidebar's
    * in-memory merge (`useChatListController`) already surfaces those, and a local
    * `deleteChat` doesn't remove the server session — eagerly re-persisting it
-   * would resurrect a chat the user just deleted.
+   * would resurrect a chat the user just deleted. Their titles are only kept in
+   * memory (`serverOnlyTitles`) so `createChat` can use them on first open.
    *
    * `title`, when present, is the server's own title for the session. It is
    * stored so a cold start paints the last title the server reported instead of
@@ -2271,7 +2283,13 @@ export class ChatStore {
       let changed = 0
       for (const session of sessions) {
         const chat = byId.get(session.chatId)
-        if (!chat) continue // server-only session — do not resurrect a local delete
+        if (!chat) {
+          // Server-only session: never create an entry (that would resurrect a
+          // local delete). Remember its title for `createChat`; a session sent
+          // without one (e.g. a pending local rename) forgets the old title.
+          this.rememberServerOnlyTitle(agentRef, session.chatId, session.title)
+          continue
+        }
         let chatChanged = false
         const lastActivityAt = session.lastActivityAt
         if (
@@ -2290,6 +2308,19 @@ export class ChatStore {
       if (changed > 0) await this.saveIndex(agentRef, index)
       return changed
     })
+  }
+
+  private rememberServerOnlyTitle(agentRef: string, chatId: string, title?: string): void {
+    let titles = this.serverOnlyTitles.get(agentRef)
+    if (!title) {
+      titles?.delete(chatId)
+      return
+    }
+    if (!titles) {
+      titles = new Map()
+      this.serverOnlyTitles.set(agentRef, titles)
+    }
+    titles.set(chatId, title)
   }
 
   /** Clear the unread-terminal flag (D.5), e.g. when the user opens the chat. */

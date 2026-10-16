@@ -3034,3 +3034,88 @@ describe('upsertServerSessions', () => {
     expect(saveIndex).toHaveBeenCalledTimes(1)
   })
 })
+
+// ── server-only titles reach the index at hydration (A19.1) ───────────────────
+
+describe('createChat after a catalog page reported the session', () => {
+  function rememberedTitles(): Map<string, Map<string, string>> {
+    return (store as unknown as { serverOnlyTitles: Map<string, Map<string, string>> })
+      .serverOnlyTitles
+  }
+
+  it('stores the server title on disk when a server-only chat is opened', async () => {
+    await store.upsertServerSessions('agent-1', [{ chatId: 'remote', title: 'Quarterly plan' }])
+
+    const meta = await store.createChat('agent-1', 'remote')
+
+    expect(meta.title).toBe('Quarterly plan')
+    const chats = await new ChatStore(tempDir).listChats('agent-1')
+    expect(chats.map(c => [c.id, c.title])).toEqual([['remote', 'Quarterly plan']])
+  })
+
+  it('keeps New Chat for an id the catalog never reported', async () => {
+    await store.upsertServerSessions('agent-1', [{ chatId: 'remote', title: 'Remote' }])
+
+    const fresh = await store.createChat('agent-1', 'fresh')
+    // Witness: the reported id in the same store does get its title.
+    const remote = await store.createChat('agent-1', 'remote')
+
+    expect(fresh.title).toBe('New Chat')
+    expect(remote.title).toBe('Remote')
+  })
+
+  it('forgets the remembered title when the session arrives without one', async () => {
+    await store.upsertServerSessions('agent-1', [
+      { chatId: 'renamed', title: 'Before rename' },
+      { chatId: 'kept', title: 'Kept' },
+    ])
+    // A pending local rename: the renderer omits the title for that chat only.
+    await store.upsertServerSessions('agent-1', [
+      { chatId: 'renamed' },
+      { chatId: 'kept', title: 'Kept' },
+    ])
+
+    const renamed = await store.createChat('agent-1', 'renamed')
+    // Witness: the sibling sent with a title in the same call keeps it.
+    const kept = await store.createChat('agent-1', 'kept')
+
+    expect(renamed.title).toBe('New Chat')
+    expect(kept.title).toBe('Kept')
+  })
+
+  it('keeps remembered titles per agent', async () => {
+    await store.upsertServerSessions('agent-1', [{ chatId: 'shared-id', title: 'Agent one' }])
+
+    const other = await store.createChat('agent-2', 'shared-id')
+    // Witness: the owning agent gets its title.
+    const own = await store.createChat('agent-1', 'shared-id')
+
+    expect(other.title).toBe('New Chat')
+    expect(own.title).toBe('Agent one')
+  })
+
+  it('does not reopen a chat deleted locally', async () => {
+    await store.createChat('agent-1', 'gone')
+    await store.deleteChat('agent-1', 'gone', TEAM_A_SCOPE)
+    await store.upsertServerSessions('agent-1', [
+      { chatId: 'gone', title: 'Deleted' },
+      { chatId: 'live', title: 'Live' },
+    ])
+
+    await expect(store.createChat('agent-1', 'gone')).rejects.toThrow('Chat was deleted locally')
+    // Witness: the live sibling from the same catalog page is created with its title.
+    expect((await store.createChat('agent-1', 'live')).title).toBe('Live')
+    const chats = await new ChatStore(tempDir).listChats('agent-1')
+    expect(chats.map(c => [c.id, c.title])).toEqual([['live', 'Live']])
+  })
+
+  it('drops the remembered title once hydration used it', async () => {
+    await store.upsertServerSessions('agent-1', [{ chatId: 'remote', title: 'Remote' }])
+    // Witness: the title is held before the chat is opened.
+    expect(rememberedTitles().get('agent-1')?.get('remote')).toBe('Remote')
+
+    await store.createChat('agent-1', 'remote')
+
+    expect(rememberedTitles().get('agent-1')?.has('remote')).toBe(false)
+  })
+})
