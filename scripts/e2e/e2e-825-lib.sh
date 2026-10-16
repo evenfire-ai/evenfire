@@ -9,7 +9,8 @@
 # ─── HTTP ─────────────────────────────────────────────────────────────
 # http METHOD URL [BODY] [MAX_SECONDS] → HTTP_CODE, HTTP_BODY. A transport
 # failure is HTTP_CODE=000 and a non-zero return. The body goes to curl on
-# stdin, never in argv, because login bodies carry passwords.
+# stdin, never in argv, because login bodies carry passwords; the login
+# helpers hand the password to jq through its environment for the same reason.
 http() {
   local method=$1 url=$2 body=${3:-} max=${4:-60} resp
   local args=(-sS -m "$max" -w '\n%{http_code}' -X "$method" "$url")
@@ -37,7 +38,7 @@ admin_login() {
   local headers="${SCRATCH}/admin-login.headers" line cookie
   HTTP_HEADERS=(-D "$headers")
   http POST "${CAPI}/admin/auth/login" \
-    "$(jq -cn --arg u "$ADMIN_USERNAME" --arg p "$ADMIN_PASSWORD" '{username:$u,password:$p}')" || true
+    "$(ADMIN_PASSWORD="$ADMIN_PASSWORD" jq -cn --arg u "$ADMIN_USERNAME" '{username:$u,password:env.ADMIN_PASSWORD}')" || true
   [[ "$HTTP_CODE" =~ ^2 ]] || { fail "admin login returned ${HTTP_CODE}"; return 1; }
   while IFS= read -r line; do
     line="${line%$'\r'}"
@@ -55,7 +56,7 @@ admin_login() {
 user_login() {
   HTTP_HEADERS=()
   http POST "${EXT_BASE}/api/v1/auth/password-login" \
-    "$(jq -cn --arg e "$DEV_EMAIL" --arg p "$DEV_PASSWORD" '{email:$e,password:$p}')" || true
+    "$(DEV_PASSWORD="$DEV_PASSWORD" jq -cn --arg e "$DEV_EMAIL" '{email:$e,password:env.DEV_PASSWORD}')" || true
   [ "$HTTP_CODE" = 200 ] || { fail "password login for ${DEV_EMAIL} returned ${HTTP_CODE} (a 429 means the lockout window; wait, do not retry blindly)"; return 1; }
   SESSION_TOKEN="$(jq -er '.token' <<<"$HTTP_BODY")" || { fail 'password login returned no token'; return 1; }
 }

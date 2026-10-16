@@ -118,6 +118,65 @@ admin GET http://127.0.0.1:1/admin && rpc GET http://127.0.0.1:2/rpc && echo "CO
   }
 })
 
+test('admin_login and user_login keep passwords out of jq argv', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'e2e-825-login-'))
+  try {
+    const realJq = spawnSync('bash', ['-c', 'command -v jq'], { encoding: 'utf8' }).stdout.trim()
+    assert.ok(realJq, 'jq not found on PATH')
+    const bin = path.join(dir, 'bin')
+    const jqArgv = path.join(dir, 'jq-argv')
+    const sent = path.join(dir, 'sent-bodies')
+    spawnSync('mkdir', [bin])
+    // A PATH executable, not a shell function: what ps would show is the argv
+    // of this process.
+    writeFileSync(
+      path.join(bin, 'jq'),
+      `#!/bin/sh\nprintf '%s\\n' "$@" >>"$JQ_ARGV"\nexec '${realJq}' "$@"\n`,
+      { mode: 0o755 }
+    )
+    const body = `
+fail() { echo "FAIL — $*"; }
+curl() {
+  local prev= a
+  for a in "$@"; do
+    [ "$prev" = -D ] && printf 'Set-Cookie: control_ui_admin_session=c1; Path=/\\r\\n' >"$a"
+    prev=$a
+  done
+  cat >>"$SENT"; echo >>"$SENT"
+  printf '{"token":"t1"}\\n200'
+}
+SCRATCH="$DIR" CAPI=http://127.0.0.1:1 EXT_BASE=http://127.0.0.1:2 HTTP_HEADERS=()
+ADMIN_USERNAME=admin ADMIN_PASSWORD='admin pw-secret-1' DEV_EMAIL=dev@example.test DEV_PASSWORD='dev"pw-secret-2'
+${helper('http')}
+${helper('admin_login')}
+${helper('user_login')}
+admin_login && user_login && echo "OK $ADMIN_COOKIE $SESSION_TOKEN"
+`
+    const run = bash(body, {
+      DIR: dir,
+      SENT: sent,
+      JQ_ARGV: jqArgv,
+      PATH: `${bin}:${process.env.PATH}`,
+    })
+    assert.equal(run.status, 0, run.stderr)
+    assert.equal(run.stdout.trim(), 'OK c1 t1')
+    const args = readFileSync(jqArgv, 'utf8')
+    assert.doesNotMatch(args, /pw-secret/)
+    // Witness: jq built both login bodies, and they carry the exact passwords.
+    assert.match(args, /username/)
+    assert.match(args, /email/)
+    assert.deepEqual(
+      readFileSync(sent, 'utf8').trim().split('\n').map(line => JSON.parse(line)),
+      [
+        { username: 'admin', password: 'admin pw-secret-1' },
+        { email: 'dev@example.test', password: 'dev"pw-secret-2' },
+      ]
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('main_evidence_ok accepts only a passing main log of the same HEAD', () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'e2e-825-upgrade-evidence-'))
   try {
