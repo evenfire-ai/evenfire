@@ -2973,4 +2973,64 @@ describe('upsertServerSessions', () => {
     await store.createChat('agent-1', 'c1')
     expect(await store.upsertServerSessions('agent-1', [])).toBe(0)
   })
+
+  it('stores the server title of a cached chat on disk without moving updatedAt', async () => {
+    await store.createChat('agent-1', 'c1')
+    const before = (await store.listChats('agent-1')).find(c => c.id === 'c1')!
+    expect(before.title).toBe('New Chat')
+
+    const changed = await store.upsertServerSessions('agent-1', [
+      { chatId: 'c1', lastActivityAt: before.updatedAt, title: 'Quarterly plan' },
+    ])
+
+    expect(changed).toBe(1)
+    const restarted = new ChatStore(tempDir)
+    const after = (await restarted.listChats('agent-1')).find(c => c.id === 'c1')!
+    expect(after.title).toBe('Quarterly plan')
+    expect(after.updatedAt).toBe(before.updatedAt)
+  })
+
+  it('creates no entry for a titled server-only session and does not resurrect a deleted chat', async () => {
+    await store.createChat('agent-1', 'c1')
+    await store.createChat('agent-1', 'gone')
+    await store.deleteChat('agent-1', 'gone', TEAM_A_SCOPE)
+
+    const changed = await store.upsertServerSessions('agent-1', [
+      { chatId: 'c1', title: 'Kept' },
+      { chatId: 'server-only', title: 'Remote' },
+      { chatId: 'gone', title: 'Deleted' },
+    ])
+
+    // Witness: the cached chat in the same call was updated.
+    expect(changed).toBe(1)
+    const chats = await new ChatStore(tempDir).listChats('agent-1')
+    expect(chats.map(c => [c.id, c.title])).toEqual([['c1', 'Kept']])
+  })
+
+  it('keeps the local title when the server reports none', async () => {
+    await store.createChat('agent-1', 'c1')
+    await store.upsertServerSessions('agent-1', [{ chatId: 'c1', title: 'First' }])
+
+    const changed = await store.upsertServerSessions('agent-1', [
+      { chatId: 'c1' },
+      { chatId: 'c1', title: '' },
+    ])
+
+    expect(changed).toBe(0)
+    expect((await store.listChats('agent-1')).find(c => c.id === 'c1')!.title).toBe('First')
+  })
+
+  it('saves the index once for a new title and not again for the same title', async () => {
+    await store.createChat('agent-1', 'c1')
+    const saveIndex = vi.spyOn(
+      store as unknown as { saveIndex: (agentRef: string, index: unknown) => Promise<void> },
+      'saveIndex'
+    )
+
+    expect(await store.upsertServerSessions('agent-1', [{ chatId: 'c1', title: 'Plan' }])).toBe(1)
+    expect(saveIndex).toHaveBeenCalledTimes(1)
+
+    expect(await store.upsertServerSessions('agent-1', [{ chatId: 'c1', title: 'Plan' }])).toBe(0)
+    expect(saveIndex).toHaveBeenCalledTimes(1)
+  })
 })

@@ -1856,7 +1856,7 @@ export function registerIpcHandlers(service: AppService): void {
       event,
       payload: {
         agentRef: string
-        sessions?: Array<{ chatId?: unknown; lastActivityAt?: unknown }>
+        sessions?: Array<{ chatId?: unknown; lastActivityAt?: unknown; title?: unknown }>
       }
     ) => {
       assertTrustedSender(event)
@@ -1868,6 +1868,8 @@ export function registerIpcHandlers(service: AppService): void {
               chatId: sanitizeString(session?.chatId),
               lastActivityAt:
                 typeof session?.lastActivityAt === 'string' ? session.lastActivityAt : undefined,
+              title:
+                typeof session?.title === 'string' ? session.title.trim() || undefined : undefined,
             }))
             .filter(session => Boolean(session.chatId))
         : []

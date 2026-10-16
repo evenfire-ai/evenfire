@@ -378,6 +378,32 @@ export function useChatListController({
     return pendingRenamesRef.current.get(pendingRenameKey(agentRef, chatId))?.state ?? 'none'
   }, [])
 
+  // Persist server freshness and titles into the local index (spec §5.3), so a
+  // cold start paints the last server title instead of the hydration
+  // placeholder. A chat with a pending local rename keeps its local title (§2.2
+  // cases E/F). Best-effort: must never block or fail the visible render.
+  const persistServerSessions = useCallback(
+    (agentRef: string, sessions: SessionsListResult['items']) => {
+      try {
+        void chatStore
+          .reconcileServerSessions(
+            agentRef,
+            sessions.map(session => ({
+              chatId: session.chatId,
+              lastActivityAt: session.lastActivityAt,
+              ...(session.title && pendingRenameStateFor(agentRef, session.chatId) === 'none'
+                ? { title: session.title }
+                : {}),
+            }))
+          )
+          .catch(() => undefined)
+      } catch {
+        // ignore — reconciliation is best-effort freshness only
+      }
+    },
+    [chatStore.reconcileServerSessions, pendingRenameStateFor]
+  )
+
   // Indirection so the catalog loaders (defined above the queue) can trigger a
   // retry of pending renames after a listSessions poll without depending on the
   // queue's identity. Wired in an effect once the queue is defined.
@@ -670,19 +696,7 @@ export function useChatListController({
             .catch(() => undefined)
         }
 
-        // Persist server freshness into the local index (spec §5.3): keeps the
-        // durable sidebar order aligned with the source of truth. Best-effort:
-        // must never block or fail the visible local-cache render.
-        try {
-          void chatStore
-            .reconcileServerSessions(
-              agentRef,
-              serverSessions.map(s => ({ chatId: s.chatId, lastActivityAt: s.lastActivityAt }))
-            )
-            .catch(() => undefined)
-        } catch {
-          // ignore — reconciliation is best-effort freshness only
-        }
+        persistServerSessions(agentRef, serverSessions)
       })
 
       return { index, merged }
@@ -691,12 +705,12 @@ export function useChatListController({
       authorityScope,
       chatStore.getIndex,
       chatStore.listSessions,
-      chatStore.reconcileServerSessions,
       fsm,
       getHostAuthorityEpoch,
       isHostAccessBlocked,
       onHostAccessRevoked,
       host,
+      persistServerSessions,
     ]
   )
 
@@ -812,16 +826,7 @@ export function useChatListController({
         )
       })
 
-      try {
-        void chatStore
-          .reconcileServerSessions(
-            agentRef,
-            serverSessions.map(s => ({ chatId: s.chatId, lastActivityAt: s.lastActivityAt }))
-          )
-          .catch(() => undefined)
-      } catch {
-        // ignore — reconciliation is best-effort freshness only
-      }
+      persistServerSessions(agentRef, serverSessions)
     } finally {
       chatListLoadingMoreByAgentRef.current.delete(agentRef)
       if (selectedAgentRef.current === agentRef) {
@@ -830,11 +835,11 @@ export function useChatListController({
     }
   }, [
     chatStore.listSessions,
-    chatStore.reconcileServerSessions,
     fsm,
     getHostAuthorityEpoch,
     isHostAccessBlocked,
     onHostAccessRevoked,
+    persistServerSessions,
   ])
 
   const loadChatList = useCallback(
@@ -1737,6 +1742,9 @@ export function useChatListController({
               )
             })
 
+            // A Host the user never selects keeps its titles across restarts too.
+            if (requestStillCurrent()) persistServerSessions(agentRef, sessions)
+
             // §2.5: retry only this Host's pending renames as its poll settles.
             if (requestStillCurrent()) {
               flushPendingRenamesRef.current(
@@ -1775,6 +1783,7 @@ export function useChatListController({
     isHostAccessBlocked,
     onHostAccessRevoked,
     latestReloadRevision,
+    persistServerSessions,
   ])
 
   // Stable across renders whose inputs did not change, so consumers keyed on the

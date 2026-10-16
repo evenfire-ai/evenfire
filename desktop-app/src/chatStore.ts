@@ -2250,14 +2250,19 @@ export class ChatStore {
    * Deliberately does NOT create entries for server-only sessions: the sidebar's
    * in-memory merge (`useChatListController`) already surfaces those, and a local
    * `deleteChat` doesn't remove the server session — eagerly re-persisting it
-   * would resurrect a chat the user just deleted. Titles are never touched here:
-   * the server title is applied by the in-memory §2.2 catalog merge in
-   * `useChatListController`, not persisted into this local index. Returns the
-   * count of entries reconciled.
+   * would resurrect a chat the user just deleted.
+   *
+   * `title`, when present, is the server's own title for the session. It is
+   * stored so a cold start paints the last title the server reported instead of
+   * the hydration placeholder; the next catalog page overwrites it, so it never
+   * diverges from the server for longer than one load. The caller omits it while
+   * a local rename is pending. A title change does not touch `updatedAt`: the
+   * sidebar order stays driven by server activity. Returns the count of entries
+   * changed.
    */
   async upsertServerSessions(
     agentRef: string,
-    sessions: Array<{ chatId: string; lastActivityAt?: string }>
+    sessions: Array<{ chatId: string; lastActivityAt?: string; title?: string }>
   ): Promise<number> {
     if (!sessions.length) return 0
     return this.serializeIndex(agentRef, async () => {
@@ -2267,12 +2272,20 @@ export class ChatStore {
       for (const session of sessions) {
         const chat = byId.get(session.chatId)
         if (!chat) continue // server-only session — do not resurrect a local delete
+        let chatChanged = false
         const lastActivityAt = session.lastActivityAt
-        if (!lastActivityAt) continue
-        if (new Date(lastActivityAt).getTime() > new Date(chat.updatedAt).getTime()) {
+        if (
+          lastActivityAt &&
+          new Date(lastActivityAt).getTime() > new Date(chat.updatedAt).getTime()
+        ) {
           chat.updatedAt = lastActivityAt
-          changed += 1
+          chatChanged = true
         }
+        if (session.title && session.title !== chat.title) {
+          chat.title = session.title
+          chatChanged = true
+        }
+        if (chatChanged) changed += 1
       }
       if (changed > 0) await this.saveIndex(agentRef, index)
       return changed
