@@ -122,6 +122,45 @@ describe('mergeGfsInheritedAccessItem', () => {
     assert.deepEqual(item.sources[0].shareEntries, [])
   })
 
+  it('folding a provenance-projected source back in is safe and idempotent', () => {
+    // App adapters feed their legacy-exact shape (no grantPermissions /
+    // grantInherit / shareEntries) back through the core; the core must treat
+    // those missing optional fields as empty rather than crash.
+    let item = mergeGfsInheritedAccessItem(
+      null,
+      grantContribution(userA, ['read'], 'g1', true),
+      folder('f1', 'Projects')
+    )
+    const projected = {
+      subject: item.subject,
+      permissions: [...item.permissions],
+      inheritedFrom: [...item.inheritedFrom],
+      sources: item.sources.map(source => ({
+        resourceId: source.resourceId,
+        name: source.name,
+        permissions: [...source.permissions],
+        grantId: source.grantId,
+        shareIds: [...source.shareIds],
+      })),
+    }
+    const refolded = mergeGfsInheritedAccessItem(
+      projected,
+      shareContribution(userA, ['read'], 's1', true),
+      folder('f1', 'Projects')
+    )
+    assert.equal(refolded.sources.length, 1)
+    assert.deepEqual(refolded.sources[0].shareIds, ['s1'])
+    assert.deepEqual(refolded.sources[0].shareEntries, [
+      { rowId: 's1', permissions: ['read'], includeDescendants: true },
+    ])
+    const again = mergeGfsInheritedAccessItem(
+      refolded,
+      shareContribution(userA, ['read'], 's1', true),
+      folder('f1', 'Projects')
+    )
+    assert.deepEqual(again, refolded)
+  })
+
   it('rowless observations fold permissions without touching row ids or flags', () => {
     let item = mergeGfsInheritedAccessItem(
       null,

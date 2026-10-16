@@ -161,14 +161,16 @@ function mergeGfsInheritedAccessItem(current, contribution, folder) {
   }
   const next = {
     ...current,
-    permissions: [...new Set([...current.permissions, ...contributionPermissions])],
-    inheritedFrom: current.inheritedFrom.includes(folder.name)
-      ? [...current.inheritedFrom]
-      : [...current.inheritedFrom, folder.name],
-    sources: current.sources.map(source => ({
+    permissions: [...new Set([...(current.permissions ?? []), ...contributionPermissions])],
+    inheritedFrom: (current.inheritedFrom ?? []).includes(folder.name)
+      ? [...(current.inheritedFrom ?? [])]
+      : [...(current.inheritedFrom ?? []), folder.name],
+    // Sources may arrive provenance-projected (an app adapter feeding its
+    // legacy-exact shape back in): treat missing optional fields as empty.
+    sources: (current.sources ?? []).map(source => ({
       ...source,
-      shareIds: [...source.shareIds],
-      shareEntries: source.shareEntries.map(entry => ({ ...entry })),
+      shareIds: [...(source.shareIds ?? [])],
+      shareEntries: (source.shareEntries ?? []).map(entry => ({ ...entry })),
     })),
   }
   const sameFolder = next.sources.find(source => source.resourceId === folder.resourceId)
@@ -179,9 +181,9 @@ function mergeGfsInheritedAccessItem(current, contribution, folder) {
       sameFolder.grantPermissions = [...contributionPermissions]
       sameFolder.grantInherit = Boolean(contribution.inherit)
     } else if (hasShareRow) {
-      sameFolder.shareIds = [...new Set([...sameFolder.shareIds, contribution.rowId])]
+      sameFolder.shareIds = [...new Set([...(sameFolder.shareIds ?? []), contribution.rowId])]
       sameFolder.shareEntries = [
-        ...sameFolder.shareEntries.filter(entry => entry.rowId !== contribution.rowId),
+        ...(sameFolder.shareEntries ?? []).filter(entry => entry.rowId !== contribution.rowId),
         {
           rowId: contribution.rowId,
           permissions: [...contributionPermissions],
