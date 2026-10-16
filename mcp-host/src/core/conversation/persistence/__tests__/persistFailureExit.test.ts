@@ -66,7 +66,11 @@ const handle = createConversationStore({
   cacheSize: 10,
   syncTimeoutMs: 5000,
   asyncTimeoutMs: 50,
-  stallTimeoutMs: 300,
+  // The slow backlog needs room above a loaded machine's ACK gap: 30 ms per
+  // write, yet one full-suite run stopped it after 4 writes in 1.5 s, which
+  // in this stand-in only the 300 ms bound can do. It still has to finish
+  // past asyncTimeoutMs, the old close() budget.
+  stallTimeoutMs: scenario === 'shutdown-slow-backlog' ? 5000 : 300,
   checkpointEveryWrites: 100,
   heartbeatMs: 60000,
   workerScriptPath: workerPath,
@@ -195,9 +199,12 @@ describe('Host process exit on a graceful shutdown', () => {
     const run = runChild('shutdown-slow-backlog')
     expect(run.out).toContain('FIRST_WRITE_ACKED')
     // Liveness witness: every queued write reached the store.
-    expect(run.writes).toEqual(['first', ...Array.from({ length: 20 }, (_, i) => `slow${i}`)])
+    expect(run.writes, run.out).toEqual([
+      'first',
+      ...Array.from({ length: 20 }, (_, i) => `slow${i}`),
+    ])
     expect(run.out).not.toContain('ConversationStore shutdown failed')
-    expect(run.status).toBe(0)
+    expect(run.status, run.out).toBe(0)
   })
 
   it('exits 1 when the store cannot drain because the worker is wedged', () => {
