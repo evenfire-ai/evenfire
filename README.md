@@ -48,9 +48,13 @@ records the governed `initial_setup` GFS operator link atomically:
 git clone https://github.com/evenfire-ai/evenfire.git && cd evenfire
 cp .env.example .env
 # edit .env: set ADMIN_PASSWORD (required, no default ships) and ONE LLM key
-MINIKUBE_IMAGE_TAG=latest make minikube-setup   # see the note below on this override
-make minikube-status                            # wait for every deployment READY
+make minikube-setup    # pulls the pinned release images; first run ~15 min
+make minikube-status   # wait for every deployment READY
 ```
+
+If setup reports that a pinned image tag does not exist (between a release bump
+and its promotion), re-run with `MINIKUBE_IMAGE_TAG=latest`; see the
+[Quickstart](docs/get-started/quickstart.md).
 
 The seeded `admin@evenfire.local` Desktop account is therefore the initial GFS
 operator. Re-running setup is idempotent: it may log in to verify the existing
@@ -266,6 +270,8 @@ Contributor loop: [CONTRIBUTING.md](CONTRIBUTING.md).
 | [webhook-gateway](webhook-gateway/README.md)                                   | Per-recipe webhook signature verifier                 |
 | [webhook-proxy](webhook-proxy/README.md)                                       | Stateless public webhook router                       |
 | [workflow-approval-request-reader](workflow-approval-request-reader/README.md) | Inbound Telegram/Slack approval callbacks             |
+| [codex-llm-proxy](codex-llm-proxy/README.md)                                   | ChatGPT/Codex subscription broker (off by default)    |
+| [grok-llm-proxy](grok-llm-proxy/README.md)                                     | Grok subscription broker (off by default)             |
 
 Ops & platform directories:
 
