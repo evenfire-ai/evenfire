@@ -1,5 +1,6 @@
 export * from './fileClassifier'
 export * from './fileReference'
+export * from './inheritedAccess'
 export * from './dragPolicy'
 
 export declare const GFS_RESOURCE_NAME_MAX_LENGTH: number
