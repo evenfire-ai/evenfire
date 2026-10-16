@@ -748,6 +748,7 @@ jobs:
           node scripts/tests/run-node-test-files.mjs
           scripts/e2e/playwright-report-gate.test.mjs
           scripts/e2e/e2e-hcc-storage-layout-switch.test.mjs
+          scripts/e2e/e2e-stateless-suspend-wake.test.mjs
 
       # make test-service-matrix fails when Makefile TEST_SERVICES and the
       # `test` job's service matrix above drift apart.

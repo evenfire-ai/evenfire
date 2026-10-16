@@ -158,9 +158,21 @@ restore_hcc_env() {
   HCC_ENV_SAVED=""
 }
 
+# Bearer values never go in curl argv (visible in `ps`). auth_header writes one
+# header to a new 0600 file under SCRATCH and prints its path for `-H @file`;
+# one file per call because background turns mint tokens concurrently.
+SCRATCH="$(mktemp -d)"
+auth_header() {
+  local file
+  file="$(umask 077 && mktemp "${SCRATCH}/auth.XXXXXX")" || return 1
+  printf '%s\n' "$1" >"$file"
+  printf '%s' "$file"
+}
+
 cleanup_on_exit() {
   local status=$?
   set +e
+  rm -rf "$SCRATCH"
   if [ "$CONTEXT_PATCH_APPLIED" = "1" ]; then restore_context_mcpserver; fi
   if [ "$SECRET_ROTATED" = "1" ] && [ -n "$SECRET_NAME" ] && [ -n "$SECRET_DATA_BACKUP" ]; then
     kctl patch secret "$SECRET_NAME" -n "$MCP_HOST_NS" --type=merge \
@@ -275,7 +287,7 @@ mint_rpc_token() {
   local resp code body hostrefs
   hostrefs="${RPC_HOSTREFS_JSON:-$(jq -cn --arg h "$HOST_REF" '[$h]')}"
   resp=$(curl -sS -m 30 -w '\n%{http_code}' -X POST "${EXT_BASE}/api/v1/rpc/token" \
-    -H "Authorization: Bearer ${SESSION_TOKEN}" -H 'Content-Type: application/json' \
+    -H "@$(auth_header "Authorization: Bearer ${SESSION_TOKEN}")" -H 'Content-Type: application/json' \
     -d "$(jq -cn --argjson h "$hostrefs" --argjson s "$RPC_SCOPES_JSON" '{hostRefs:$h,scopes:$s}')") || {
     echo "rpc/token request failed at ${EXT_BASE}" >&2; return 1; }
   code="$(echo "$resp" | tail -n1)"; body="$(echo "$resp" | sed '$d')"
@@ -291,7 +303,7 @@ send_turn() {
   payload="$(jq -cn --arg c "$content" --arg t "$THREAD_ID" '{content:$c,threadId:$t}')"
   resp=$(curl -sS -m "$E2E_TURN_TIMEOUT" -w '\n%{http_code}' -X POST \
     "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/messages" \
-    -H "Authorization: Bearer ${RPC_TOKEN}" -H 'Content-Type: application/json' \
+    -H "@$(auth_header "Authorization: Bearer ${RPC_TOKEN}")" -H 'Content-Type: application/json' \
     -d "$payload") || { echo "message POST failed at ${RPC_BASE}" >&2; return 1; }
   TURN_STATUS="$(echo "$resp" | tail -n1)"; TURN_BODY="$(echo "$resp" | sed '$d')"
 }
@@ -305,7 +317,7 @@ read_thread_messages() {
   mint_rpc_token || return 1
   resp=$(curl -sS -m 30 -w '\n%{http_code}' \
     "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/sessions/${HOST_REF}/${THREAD_ID}/messages?limit=100" \
-    -H "Authorization: Bearer ${RPC_TOKEN}") || { echo "messages GET failed at ${RPC_BASE}" >&2; return 1; }
+    -H "@$(auth_header "Authorization: Bearer ${RPC_TOKEN}")") || { echo "messages GET failed at ${RPC_BASE}" >&2; return 1; }
   code="$(echo "$resp" | tail -n1)"; THREAD_MESSAGES="$(echo "$resp" | sed '$d')"
   [ "$code" = "200" ] || { echo "messages GET -> HTTP ${code}: ${THREAD_MESSAGES}" >&2; return 1; }
 }
@@ -333,10 +345,6 @@ send_turn_expect_ok() {
   return 1
 }
 
-rpc_auth_header() {
-  printf '%s: %s %s' "Authorization" "Bearer" "$RPC_TOKEN"
-}
-
 ASYNC_STATUS=""; ASYNC_BODY=""
 send_async_turn() {
   local content=$1 payload resp
@@ -344,7 +352,7 @@ send_async_turn() {
   payload="$(jq -cn --arg c "$content" --arg t "$THREAD_ID" '{content:$c,threadId:$t}')"
   resp=$(curl -sS -m "$E2E_TURN_TIMEOUT" -w '\n%{http_code}' -X POST \
     "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/messages?async=true" \
-    -H "$(rpc_auth_header)" -H 'Content-Type: application/json' \
+    -H "@$(auth_header "Authorization: Bearer ${RPC_TOKEN}")" -H 'Content-Type: application/json' \
     -d "$payload") || { echo "async message POST failed at ${RPC_BASE}" >&2; return 1; }
   ASYNC_STATUS="$(echo "$resp" | tail -n1)"; ASYNC_BODY="$(echo "$resp" | sed '$d')"
 }
@@ -355,7 +363,7 @@ wait_for_async_result_ok() {
     mint_rpc_token || return 1
     resp=$(curl -sS -m 30 -w '\n%{http_code}' \
       "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/tasks/${task_id}/result" \
-      -H "$(rpc_auth_header)") || {
+      -H "@$(auth_header "Authorization: Bearer ${RPC_TOKEN}")") || {
       echo "${label}: task result poll failed at ${RPC_BASE}" >&2
       return 1
     }
@@ -406,7 +414,7 @@ post_wake() {
   fi
   resp=$(curl -sS -m 30 -w '\n%{http_code}' -X POST \
     "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/wake" \
-    -H "Authorization: Bearer ${auth}" -H 'Content-Type: application/json') || {
+    -H "@$(auth_header "Authorization: Bearer ${auth}")" -H 'Content-Type: application/json') || {
     echo "wake POST failed at ${RPC_BASE}" >&2; return 1; }
   WAKE_STATUS="$(echo "$resp" | tail -n1)"; WAKE_BODY="$(echo "$resp" | sed '$d')"
   case "$WAKE_STATUS" in
@@ -830,7 +838,7 @@ C_MARKER="refusal-c-${RUN_ID}"
 mint_rpc_token || true
 c_payload="$(jq -cn --arg c "Reply exactly marker ${C_MARKER} in plain text. Do not call tools." --arg t "$THREAD_ID" "{content:\$c,threadId:\$t}")"
 c_resp="$(curl -sS -m "$E2E_TURN_TIMEOUT" -w "\n%{http_code}" -X POST "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/messages?async=true" \
-  -H "Authorization: Bearer ${RPC_TOKEN}" -H 'Content-Type: application/json' -d "$c_payload")" || {
+  -H "@$(auth_header "Authorization: Bearer ${RPC_TOKEN}")" -H 'Content-Type: application/json' -d "$c_payload")" || {
   fail "2c: async message POST failed at ${RPC_BASE}"
   print_results
   exit 1
@@ -846,7 +854,7 @@ fi
 if assert_refusal "2c pendingResults" "pendingResults"; then
   ok "2c: parked async result blocks suspend"
   mint_rpc_token || true
-  curl -sS -m 30 "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/tasks/${C_TASK_ID}/result" -H "Authorization: Bearer ${RPC_TOKEN}" >/dev/null 2>&1 || true
+  curl -sS -m 30 "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/tasks/${C_TASK_ID}/result" -H "@$(auth_header "Authorization: Bearer ${RPC_TOKEN}")" >/dev/null 2>&1 || true
   if force_idle_and_suspend; then ok "2c: suspends after pending result is drained"; else print_results; exit 1; fi
 else
   fail "2c: could not induce pendingResults (see mcp-host resultStore/pendingTaskResults flow -- the async intake did not park a result)"
@@ -1256,7 +1264,7 @@ MISMATCH_HOST="${E2E_OTHER_HOST_REF:-chatllm}"
 TARGET_RUNTIME_TOKEN="$(kctl get secret "host-${HOST_REF}-mcp-host-runtime-tokens" -n "$MCP_HOST_NS"   -o jsonpath='{.data.mcp-host-runtime-access-token}' 2>/dev/null | base64 -d 2>/dev/null || true)"
 if [ -n "$TARGET_RUNTIME_TOKEN" ]; then
   HB_MISMATCH_BODY="$(jq -cn --arg h "$MISMATCH_HOST" --arg p "$HB_POD_UID" '{schemaVersion:1,state:"active",activeWork:false,lastActivityTs:0,hostRef:$h,podUid:$p,conditions:{activeTask:false,awaitingApproval:false,pendingResults:false}}')"
-  hb2_code="$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -X POST "${GATEWAY_BASE}${HB_PATH}"     -H "Authorization: Bearer ${TARGET_RUNTIME_TOKEN}" -H 'Content-Type: application/json'     -d "$HB_MISMATCH_BODY" 2>/dev/null || echo "000")"
+  hb2_code="$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -X POST "${GATEWAY_BASE}${HB_PATH}"     -H "@$(auth_header "Authorization: Bearer ${TARGET_RUNTIME_TOKEN}")" -H 'Content-Type: application/json'     -d "$HB_MISMATCH_BODY" 2>/dev/null || echo "000")"
   if [ "$hb2_code" = "403" ]; then
     ok "heartbeat with valid target token but mismatched payload hostRef -> 403 (claims win)"
   else
@@ -1406,7 +1414,7 @@ else
 fi
 wait_for_ready_pod "$POD_READY_TIMEOUT" >/dev/null || { fail "test 12: no pod after wake"; print_results; exit 1; }
 mint_rpc_token || true
-status_snap="$(curl -sS -m 30 "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/status" -H "Authorization: Bearer ${RPC_TOKEN}" 2>/dev/null || echo '{}')"
+status_snap="$(curl -sS -m 30 "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/status" -H "@$(auth_header "Authorization: Bearer ${RPC_TOKEN}")" 2>/dev/null || echo '{}')"
 if echo "$status_snap" | jq -e --arg s "$DISABLED_MCP_SERVER" \
     '((.mcpServers // []) | map(if type == "object" then (.name // "") else . end) | index($s)) == null' >/dev/null 2>&1; then
   ok "post-wake status.mcpServers no longer lists '${DISABLED_MCP_SERVER}' (re-resolution honored)"
