@@ -2,10 +2,11 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { EmptyState } from '@components/Common'
 import { GfsImagePreviewBody } from '@components/GfsImagePreview'
 import { GfsMarkdownPreviewBody } from '@components/GfsMarkdownPreview'
+import { GfsResourceMenu } from '@components/GfsResourceMenu'
 import { GfsResourceToolbar } from '@components/GfsResourceToolbar'
 import { GfsVideoPreviewBody } from '@components/GfsVideoPreview'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
-import { buildGfsResourceActions } from '@lib/gfsResourceActions'
+import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
 import type { FilePreviewPageProps } from './FilePreviewPage.types'
 
 function toMessage(error: unknown): string {
@@ -170,6 +171,9 @@ export function FilePreviewPage({
     canCopyContent: copyContentReady,
     refreshing,
   })
+  const fileActionsMenu = (
+    <GfsResourceMenu actions={getGfsMenuActions(toolbarActions)} resourceName={fileName} />
+  )
 
   const revalidateAccess = useCallback(async () => {
     if (denied || accessRevoked) return
@@ -215,6 +219,7 @@ export function FilePreviewPage({
                   mimeType={mimeType ?? ''}
                   onDownloadError={handleDownloadError}
                   onCopyContentReady={handleCopyContentReady}
+                  titleActions={fileActionsMenu}
                   headingLevel={2}
                 />
               ) : null}
@@ -226,6 +231,7 @@ export function FilePreviewPage({
                   gfsUri={gfsUri}
                   onDownloadError={handleDownloadError}
                   onCopyContentReady={handleCopyContentReady}
+                  titleActions={fileActionsMenu}
                   headingLevel={2}
                 />
               ) : null}
@@ -237,6 +243,7 @@ export function FilePreviewPage({
                   gfsUri={gfsUri}
                   mimeType={mimeType ?? ''}
                   onDownloadError={handleDownloadError}
+                  titleActions={fileActionsMenu}
                   headingLevel={2}
                 />
               ) : null}

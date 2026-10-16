@@ -20,12 +20,14 @@ function directoryActions(run: () => void) {
       'new-folder': run,
       'upload-file': run,
       share: run,
+      delete: run,
     },
     canRename: true,
     canMove: true,
     canCreateFolder: true,
     canUpload: true,
     canShare: true,
+    canDelete: true,
   })
 }
 
@@ -49,6 +51,7 @@ describe('GfsResourceToolbar', () => {
           .map(button => button.getAttribute('aria-label'))
       ).toEqual([
         'Refresh',
+        'Share',
         'Copy link',
         'Copy route',
         'Open route',
@@ -56,7 +59,7 @@ describe('GfsResourceToolbar', () => {
         'Move to',
         'New folder',
         'Upload file',
-        'Share',
+        'Delete',
       ])
 
       const refresh = within(toolbar).getByRole('button', { name: 'Refresh' })
@@ -70,6 +73,12 @@ describe('GfsResourceToolbar', () => {
       expect(within(toolbar).queryByRole('tooltip')).toBeNull()
       fireEvent.focus(refresh)
       expect(within(toolbar).getByRole('tooltip').textContent).toBe('Refresh')
+
+      expect(
+        within(toolbar)
+          .getByRole('button', { name: 'Delete' })
+          .classList.contains('ui-icon-button--danger')
+      ).toBe(true)
 
       fireEvent.click(refresh)
       expect(run).toHaveBeenCalledOnce()

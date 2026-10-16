@@ -100,6 +100,15 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       loading: options.refreshing ?? false,
     },
     {
+      id: 'share',
+      label: 'Share',
+      icon: <IconShare />,
+      toolbar: true,
+      menu: true,
+      eligible: Boolean(options.canShare && options.handlers.share),
+      disabled: mutating,
+    },
+    {
       id: 'copy-link',
       label: 'Copy link',
       icon: <IconLink />,
@@ -122,6 +131,16 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       toolbar: true,
       menu: true,
       eligible: Boolean(options.handlers['open-route']),
+    },
+    {
+      id: 'open-folder',
+      label: 'Open folder',
+      icon: <IconContexts />,
+      toolbar: false,
+      menu: true,
+      eligible: Boolean(
+        options.kind === 'directory' && options.canOpenFolder && options.handlers['open-folder']
+      ),
     },
     {
       id: 'rename',
@@ -164,15 +183,6 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       disabled: mutating,
     },
     {
-      id: 'share',
-      label: 'Share',
-      icon: <IconShare />,
-      toolbar: true,
-      menu: true,
-      eligible: Boolean(options.canShare && options.handlers.share),
-      disabled: mutating,
-    },
-    {
       id: 'copy-content',
       label: 'Copy content',
       icon: <IconCopyContent />,
@@ -208,20 +218,10 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       eligible: Boolean(options.kind === 'file' && options.canReplace && options.handlers.replace),
     },
     {
-      id: 'open-folder',
-      label: 'Open folder',
-      icon: <IconContexts />,
-      toolbar: false,
-      menu: true,
-      eligible: Boolean(
-        options.kind === 'directory' && options.canOpenFolder && options.handlers['open-folder']
-      ),
-    },
-    {
       id: 'delete',
       label: 'Delete',
       icon: <IconTrash />,
-      toolbar: false,
+      toolbar: options.kind === 'directory',
       menu: true,
       eligible: Boolean(options.canDelete && options.handlers.delete),
       disabled: mutating,

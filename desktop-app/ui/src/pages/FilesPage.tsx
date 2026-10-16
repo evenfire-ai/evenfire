@@ -262,6 +262,8 @@ export function FilesPage({
 }: FilesPageProps) {
   const [createFolderName, setCreateFolderName] = useState('')
   const [createFolderOpen, setCreateFolderOpen] = useState(false)
+  const [createFolderParentId, setCreateFolderParentId] = useState<string | null>(null)
+  const [createFolderParentName, setCreateFolderParentName] = useState<string | null>(null)
   const [createFolderError, setCreateFolderError] = useState<string | null>(null)
   const [renameName, setRenameName] = useState('')
   const [renameOpen, setRenameOpen] = useState(false)
@@ -280,6 +282,7 @@ export function FilesPage({
     null
   )
   const [refreshingCurrent, setRefreshingCurrent] = useState(false)
+  const [refreshingResourceIds, setRefreshingResourceIds] = useState<Set<string>>(() => new Set())
   const [manageOpen, setManageOpen] = useState(false)
   const [shareDetailsOpen, setShareDetailsOpen] = useState(false)
   const [updatingAccessRole, setUpdatingAccessRole] = useState(false)
@@ -312,6 +315,10 @@ export function FilesPage({
   const dragSessionRef = useRef(0)
   const manageReturnCrumbsRef = useRef<GfsCrumb[] | null>(null)
   const uploadInputRef = useRef<HTMLInputElement | null>(null)
+  const uploadTargetRef = useRef<{
+    parentResourceId: string
+    occupiedNames: Set<string>
+  } | null>(null)
   const uploadNameReservationsRef = useRef(createGfsUploadNameReservationBook())
   const handledRouteDialogRequestIdRef = useRef(0)
   const createFolderTitleId = useId()
@@ -465,13 +472,17 @@ export function FilesPage({
     setCreateFolderOpen(false)
     setCreateFolderName('')
     setCreateFolderError(null)
+    setCreateFolderParentId(null)
+    setCreateFolderParentName(null)
     const returnCrumbs = manageReturnCrumbsRef.current
     manageReturnCrumbsRef.current = null
     if (returnCrumbs) ctrl.restoreCrumbs(returnCrumbs)
   }, [ctrl.restoreCrumbs])
-  const openCreateFolder = useCallback(() => {
+  const openCreateFolder = useCallback((parentResourceId: string, parentName: string) => {
     setCreateFolderName('')
     setCreateFolderError(null)
+    setCreateFolderParentId(parentResourceId)
+    setCreateFolderParentName(parentName)
     setRenameOpen(false)
     setDeleteOpen(false)
     setShareDetailsOpen(false)
@@ -505,6 +516,9 @@ export function FilesPage({
   useEffect(() => {
     if (!accessRevoked) return
     manageReturnCrumbsRef.current = null
+    uploadTargetRef.current = null
+    setCreateFolderParentId(null)
+    setCreateFolderParentName(null)
     setManageOpen(false)
     setMoveTarget(null)
     setRenameTarget(null)
@@ -898,6 +912,37 @@ export function FilesPage({
     }
   }
 
+  const handleRefreshFolderResource = async (resource: GfsDriveResource) => {
+    if (refreshingResourceIds.has(resource.resourceId)) return
+    setRefreshingResourceIds(current => new Set(current).add(resource.resourceId))
+    try {
+      await queryClient.fetchInfiniteQuery({
+        queryKey: desktopQueryKeys.gfsChildren(
+          ctrl.sessionScope,
+          resource.resourceId,
+          GFS_DRIVE_MAIN
+        ),
+        queryFn: ({ pageParam }) =>
+          window.clerum.gfs.listChildren(resource.resourceId, GFS_DRIVE_MAIN, pageParam),
+        initialPageParam: undefined as string | undefined,
+        staleTime: 0,
+      })
+      pushToast?.('EvenDrive refreshed', 'success')
+    } catch (refreshError) {
+      if (failClosedOnAuthorizationError(refreshError)) return
+      pushToast?.(
+        refreshError instanceof Error ? refreshError.message : 'Could not refresh EvenDrive',
+        'error'
+      )
+    } finally {
+      setRefreshingResourceIds(current => {
+        const next = new Set(current)
+        next.delete(resource.resourceId)
+        return next
+      })
+    }
+  }
+
   const handleOpenGfsLink = async (
     uri: string,
     onFailure?: (failure: GfsUriOpenFailure) => void,
@@ -1067,11 +1112,12 @@ export function FilesPage({
 
   const handleCreateFolder = async () => {
     const requestedName = createFolderName.trim()
-    if (!requestedName) return
+    const parentResourceId = createFolderParentId
+    if (!requestedName || !parentResourceId) return
     setCreateFolderError(null)
     try {
       const name = await normalizeGfsResourceName(requestedName)
-      await ctrl.createFolder(name)
+      await ctrl.createFolder(parentResourceId, name)
       closeCreateFolder()
       pushToast?.(`Folder ${name} created`, 'success')
     } catch (createError) {
@@ -1122,6 +1168,11 @@ export function FilesPage({
       if (failClosedOnAuthorizationError(uploadError)) return
       pushToast?.(uploadError instanceof Error ? uploadError.message : String(uploadError), 'error')
     }
+  }
+
+  const requestUploadForFolder = (parentResourceId: string, occupiedNames: Set<string>) => {
+    uploadTargetRef.current = { parentResourceId, occupiedNames }
+    uploadInputRef.current?.click()
   }
 
   const clearResourceDrag = () => {
@@ -1406,6 +1457,12 @@ export function FilesPage({
     return Boolean(resource.permissions?.includes('write'))
   }
 
+  /** Child folder operations use the server-derived write bit for that row. */
+  const rowCanWrite = (resource: GfsDriveResource): boolean => {
+    if (currentIsFolder) return hasBit(rowAffordancesFor(resource), 'write')
+    return Boolean(resource.permissions?.includes('write'))
+  }
+
   /** Manage gate: the ACL modal needs `manage_acl` (view-ACL = manage-ACL
    *  server-side). A read-only row must not offer a Manage entry that would
    *  only 403 on open. */
@@ -1587,8 +1644,9 @@ export function FilesPage({
           'open-route': () => setOpenLinkOpen(true),
           rename: () => openRenameTarget(current),
           move: () => setMoveTarget(current),
-          'new-folder': () => openCreateFolder(),
-          'upload-file': () => uploadInputRef.current?.click(),
+          'new-folder': () => openCreateFolder(current.resourceId, current.name),
+          'upload-file': () =>
+            requestUploadForFolder(current.resourceId, new Set(items.map(item => item.name))),
           share: () => openManageCurrent(),
           preview:
             currentIsFile && currentPreviewAvailable
@@ -1645,6 +1703,7 @@ export function FilesPage({
       !isDirectory && resource.readable !== false && isGfsPreviewFile(resource.name)
     const canDownload = !isDirectory && resource.readable !== false
     const canRename = rowCanRename(resource)
+    const canWrite = isDirectory && rowCanWrite(resource)
     const canManage = rowCanManage(resource)
     const canDelete = rowCanDelete(resource)
     return getGfsMenuActions(
@@ -1652,10 +1711,20 @@ export function FilesPage({
         kind: resource.kind,
         uri: resource.gfsUri,
         handlers: {
+          refresh:
+            isDirectory && resource.readable !== false
+              ? () => void handleRefreshFolderResource(resource)
+              : undefined,
           'copy-link': () => void handleCopyLink(resource.gfsUri),
           'copy-route': () => void handleCopyRoute(resource.gfsUri),
           'open-route': () => setOpenLinkOpen(true),
           'open-folder': isDirectory ? () => openResource(resource) : undefined,
+          'new-folder': canWrite
+            ? () => openCreateFolder(resource.resourceId, resource.name)
+            : undefined,
+          'upload-file': canWrite
+            ? () => requestUploadForFolder(resource.resourceId, new Set())
+            : undefined,
           rename: () => openRenameTarget(resource),
           move: () => setMoveTarget(resource),
           share: () => openManage(resource),
@@ -1668,11 +1737,14 @@ export function FilesPage({
         canOpenFolder: isDirectory,
         canRename,
         canMove: !accessRevoked,
+        canCreateFolder: canWrite,
+        canUpload: canWrite,
         canShare: canManage,
         canDelete,
         canPreview,
         canDownload,
         mutating: ctrl.mutating,
+        refreshing: refreshingResourceIds.has(resource.resourceId),
       })
     )
   }
@@ -1778,7 +1850,8 @@ export function FilesPage({
                 portalTarget={titlebarLeadingTarget}
               />
             ) : null}
-            {currentIsFolder && canWriteCurrent ? (
+            {(currentIsFolder && canWriteCurrent) ||
+            items.some(item => item.kind === 'directory' && rowCanWrite(item)) ? (
               <div className="da-gfs-drive__upload-input">
                 <input
                   aria-label="Upload file"
@@ -1787,8 +1860,10 @@ export function FilesPage({
                   type="file"
                   onChange={event => {
                     const file = event.currentTarget.files?.[0]
+                    const target = uploadTargetRef.current
+                    uploadTargetRef.current = null
                     event.currentTarget.value = ''
-                    void handleUploadFile(file)
+                    void handleUploadFile(file, target?.parentResourceId, target?.occupiedNames)
                   }}
                 />
               </div>
@@ -2355,7 +2430,7 @@ export function FilesPage({
         onConfirm={() => void confirmParentUpdate()}
       />
 
-      {createFolderOpen && currentIsFolder && canWriteCurrent ? (
+      {createFolderOpen && createFolderParentId && createFolderParentName ? (
         <div
           className="da-gfs-manage-modal da-gfs-new-folder-modal"
           role="presentation"
@@ -2375,7 +2450,7 @@ export function FilesPage({
               <h3 id={createFolderTitleId}>New folder</h3>
             </header>
             <p className="da-gfs-new-folder-dialog__copy" id={createFolderDescriptionId}>
-              Create a new folder in {current.name}.
+              Create a new folder in {createFolderParentName}.
             </p>
             <form
               aria-label="Create folder"

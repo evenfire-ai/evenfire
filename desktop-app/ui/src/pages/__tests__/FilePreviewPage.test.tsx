@@ -80,7 +80,20 @@ describe('FilePreviewPage', () => {
 
     expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
     // The preview page title is a page-level h2 (not a dialog h3).
-    expect(screen.getByRole('heading', { name: 'diagram.png', level: 2 })).toBeTruthy()
+    const title = screen.getByRole('heading', { name: 'diagram.png', level: 2 })
+    expect(title).toBeTruthy()
+    const titleRow = title.closest('.da-gfs-preview-title-row')
+    expect(titleRow).toBeTruthy()
+    fireEvent.click(
+      within(titleRow as HTMLElement).getByRole('button', { name: 'Options for diagram.png' })
+    )
+    expect(screen.getAllByRole('menuitem').map(item => item.textContent)).toEqual([
+      'Refresh',
+      'Copy link',
+      'Copy route',
+      'Open route',
+      'Copy content',
+    ])
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(screen.getByRole('button', { name: 'Refresh' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Copy link' })).toBeTruthy()
@@ -154,6 +167,18 @@ describe('FilePreviewPage', () => {
     expect(screen.getByRole('button', { name: 'Copy route' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Open route' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Copy content' })).toBeNull()
+    const title = screen.getByRole('heading', { name: 'demo.mp4', level: 2 })
+    const titleRow = title.closest('.da-gfs-preview-title-row')
+    expect(titleRow).toBeTruthy()
+    fireEvent.click(
+      within(titleRow as HTMLElement).getByRole('button', { name: 'Options for demo.mp4' })
+    )
+    expect(screen.getAllByRole('menuitem').map(item => item.textContent)).toEqual([
+      'Refresh',
+      'Copy link',
+      'Copy route',
+      'Open route',
+    ])
   })
 
   it('uses the shareable link, canonical route, and preview copy semantics from the toolbar', async () => {

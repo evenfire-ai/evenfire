@@ -15786,6 +15786,22 @@ pre {
   gap: var(--space-2);
 }
 
+.da-gfs-preview-title-row {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.da-gfs-preview-title-row > .da-gfs-preview-title {
+  flex: 0 1 auto;
+}
+
+.da-gfs-preview-title-row > .da-gfs-resource-menu {
+  flex: 0 0 auto;
+}
+
 .da-gfs-image-preview-dialog__header-main {
   display: flex;
   align-items: center;

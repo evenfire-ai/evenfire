@@ -88,6 +88,7 @@ export function GfsMarkdownPreviewBody({
   onDownloadError,
   onCopyContentReady,
   titleId,
+  titleActions,
   headerActions,
   headingLevel = 3,
 }: GfsMarkdownPreviewBodyProps) {
@@ -171,9 +172,12 @@ export function GfsMarkdownPreviewBody({
   return (
     <>
       <header className="da-gfs-markdown-preview-dialog__header">
-        <HeadingTag className="da-gfs-preview-title" id={headingId}>
-          {fileName}
-        </HeadingTag>
+        <div className="da-gfs-preview-title-row">
+          <HeadingTag className="da-gfs-preview-title" id={headingId}>
+            {fileName}
+          </HeadingTag>
+          {titleActions}
+        </div>
         <div className="da-gfs-markdown-preview-dialog__header-actions">{headerActions}</div>
       </header>
       <div className="da-gfs-markdown-preview-dialog__body">

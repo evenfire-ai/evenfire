@@ -666,10 +666,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     onError: failClosedOnMutationError,
   })
   const createFolderMutation = useMutation({
-    mutationFn: async (name: string) => {
-      if (!current) throw new Error('No folder selected')
-      return window.clerum.gfs.createFolder(current.resourceId, name, DRIVE)
-    },
+    mutationFn: (input: { parentResourceId: string; name: string }) =>
+      window.clerum.gfs.createFolder(input.parentResourceId, input.name, DRIVE),
     onSuccess: refreshGfs,
     onError: failClosedOnMutationError,
   })
@@ -1373,7 +1371,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     revokeShare: (shareId: string) => revokeShareMutation.mutateAsync(shareId),
     revokingShare: revokeShareMutation.isPending,
     createShare,
-    createFolder: (name: string) => createFolderMutation.mutateAsync(name),
+    createFolder: (parentResourceId: string, name: string) =>
+      createFolderMutation.mutateAsync({ parentResourceId, name }),
     createFile: (parentResourceId: string, name: string, encodedData: string) =>
       createFileMutation.mutateAsync({ parentResourceId, name, encodedData }),
     createFileFromPath: (parentResourceId: string, name: string, filePath: string) =>

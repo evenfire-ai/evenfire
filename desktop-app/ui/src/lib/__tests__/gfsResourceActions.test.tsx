@@ -18,23 +18,25 @@ const allHandlers = () => ({
   'upload-file': handler(),
   share: handler(),
   'copy-content': handler(),
+  'open-folder': handler(),
   delete: handler(),
 })
 
 describe('GFS resource action model', () => {
   it('keeps the canonical folder and file toolbar order with unique icons', () => {
-    const folderActions = getGfsToolbarActions(
-      buildGfsResourceActions({
-        kind: 'directory',
-        uri: 'gfs://main/0123456789abcdef0123456789abcdef',
-        handlers: allHandlers(),
-        canRename: true,
-        canMove: true,
-        canCreateFolder: true,
-        canUpload: true,
-        canShare: true,
-      })
-    )
+    const folderDescriptors = buildGfsResourceActions({
+      kind: 'directory',
+      uri: 'gfs://main/0123456789abcdef0123456789abcdef',
+      handlers: allHandlers(),
+      canRename: true,
+      canMove: true,
+      canCreateFolder: true,
+      canUpload: true,
+      canShare: true,
+      canOpenFolder: true,
+      canDelete: true,
+    })
+    const folderActions = getGfsToolbarActions(folderDescriptors)
     const fileActions = getGfsToolbarActions(
       buildGfsResourceActions({
         kind: 'file',
@@ -49,6 +51,7 @@ describe('GFS resource action model', () => {
 
     expect(folderActions.map(action => action.label)).toEqual([
       'Refresh',
+      'Share',
       'Copy link',
       'Copy route',
       'Open route',
@@ -56,17 +59,30 @@ describe('GFS resource action model', () => {
       'Move to',
       'New folder',
       'Upload file',
-      'Share',
+      'Delete',
     ])
     expect(fileActions.map(action => action.label)).toEqual([
       'Refresh',
+      'Share',
       'Copy link',
       'Copy route',
       'Open route',
       'Rename',
       'Move to',
-      'Share',
       'Copy content',
+    ])
+    expect(getGfsMenuActions(folderDescriptors).map(action => action.id)).toEqual([
+      'refresh',
+      'share',
+      'copy-link',
+      'copy-route',
+      'open-route',
+      'open-folder',
+      'rename',
+      'move',
+      'new-folder',
+      'upload-file',
+      'delete',
     ])
     for (const actions of [folderActions, fileActions]) {
       const iconTypes = actions.map(action => {

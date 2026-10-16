@@ -46,6 +46,7 @@ export function GfsResourceToolbar({
               aria-busy={action.loading || undefined}
               aria-describedby={tooltipVisible ? tooltipId : undefined}
               className="titlebar-leading-action__btn da-gfs-resource-toolbar__button"
+              color={action.id === 'delete' ? 'danger' : 'neutral'}
               data-gfs-action={action.id}
               disabled={action.disabled}
               label={action.label}

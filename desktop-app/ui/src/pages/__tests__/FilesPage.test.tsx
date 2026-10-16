@@ -142,14 +142,12 @@ async function openManageDialog(resourceName: string) {
   await act(async () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }))
   })
-  await act(async () => {
-    fireEvent.click(
-      within(screen.getByRole('menu', { name: `Share options for ${resourceName}` })).getByRole(
-        'menuitem',
-        { name: 'Share' }
-      )
-    )
-  })
+  const shareMenu = screen.queryByRole('menu', { name: `Share options for ${resourceName}` })
+  if (shareMenu) {
+    await act(async () => {
+      fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Share' }))
+    })
+  }
 }
 
 async function chooseResourceAction(resourceName: string, actionName: string) {
@@ -823,7 +821,7 @@ describe('FilesPage', () => {
       fireEvent.click(within(deleteDialog).getByRole('button', { name: 'Delete' }))
     })
 
-    expect(createFolder).toHaveBeenCalledWith('new-folder')
+    expect(createFolder).toHaveBeenCalledWith('folder-1', 'new-folder')
     expect(renameResource).toHaveBeenCalledWith('folder-1', 'renamed', 7)
     expect(deleteResource).toHaveBeenCalledWith('folder-1', 7)
   })
@@ -1581,14 +1579,7 @@ describe('FilesPage', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }))
     })
-    await act(async () => {
-      fireEvent.click(
-        within(screen.getByRole('menu', { name: 'Share options for notes.txt' })).getByRole(
-          'menuitem',
-          { name: 'Share' }
-        )
-      )
-    })
+    expect(screen.queryByRole('menu', { name: 'Share options for notes.txt' })).toBeNull()
     // The manage modal opens (titled for the current selection — the mocked
     // controller does not navigate, so it stays on the parent folder).
     expect(screen.getByRole('dialog')).toBeTruthy()
@@ -4328,24 +4319,29 @@ describe('FilesPage', () => {
       canCreateShare: false,
     }
     const parentViewRowOptions = [
+      'Refresh',
+      'Share',
+      'Copy link',
       'Copy route',
       'Open route',
+      'Open folder',
       'Rename',
       'Move to',
-      'Share',
-      'Open folder',
+      'New folder',
+      'Upload file',
       'Delete',
     ]
     // The active folder menu uses the same action descriptors as its toolbar.
     const activeFolderOptions = [
       'Refresh',
+      'Share',
+      'Copy link',
       'Copy route',
       'Open route',
       'Rename',
       'Move to',
       'New folder',
       'Upload file',
-      'Share',
       'Delete',
     ]
 
@@ -4489,6 +4485,7 @@ describe('FilesPage', () => {
 
   it('opens nested folders and exposes open and copy actions in the resource menu', async () => {
     const openChild = vi.fn()
+    const openResource = vi.fn()
     const parent = await resolveResource(
       resolvedDirectory('22222222222222222222222222222222', 'Product')
     )
@@ -4517,6 +4514,7 @@ describe('FilesPage', () => {
       rowAffordancesResourceId: nestedFolder.resourceId,
       rowAffordances: delegationAffordances(new Set(['read', 'write', 'manage_acl']), false),
       openChild,
+      openResource,
     })
     renderFilesPage()
 
@@ -4527,18 +4525,98 @@ describe('FilesPage', () => {
     const firstItem = screen.getAllByRole('menuitem')[0]!
     await waitFor(() => expect(document.activeElement).toBe(firstItem))
     fireEvent.keyDown(firstItem, { key: 'ArrowDown' })
-    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Open route' }))
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Share' }))
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Copy link' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Open folder' }))
     expect(openChild).toHaveBeenCalledTimes(2)
 
     fireEvent.click(screen.getByRole('button', { name: 'Options for Nested' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }))
-    fireEvent.click(
-      within(screen.getByRole('menu', { name: 'Share options for Nested' })).getByRole('menuitem', {
-        name: 'Copy link',
-      })
-    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy link' }))
     await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(nestedFolder.gfsUri))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Options for Nested' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }))
+    expect(openResource).toHaveBeenCalledWith(nestedFolder)
+  })
+
+  it('targets folder row refresh, create, and upload actions at that exact folder', async () => {
+    const parent = await resolveResource(
+      resolvedDirectory('22222222222222222222222222222222', 'Product')
+    )
+    const [targetFolder] = (
+      await listChildrenPage([
+        childView('11111111111111111111111111111111', 'Nested', 'directory', {
+          parentResourceId: parent.resourceId,
+          path: '/Product/Nested',
+        }),
+      ])
+    ).items
+    if (!targetFolder) throw new Error('The GFS producer did not return the nested folder fixture')
+    const listChildren = vi.fn(async () => ({ items: [], nextCursor: null }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          getPathForFile: vi.fn((file: File) => `/tmp/${file.name}`),
+          listChildren,
+        },
+      },
+    })
+    const createFolder = vi.fn(async () => undefined)
+    const createFileFromPath = vi.fn(async () => undefined)
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: parent,
+      crumbs: [parent],
+      items: [targetFolder],
+      rowAffordancesByResourceId: {
+        [targetFolder.resourceId]: {
+          held: ['read', 'write', 'delete', 'manage_acl'],
+          canDelegate: false,
+          grantableBits: [],
+          canCreateShare: false,
+        },
+      },
+      createFolder,
+      createFileFromPath,
+    })
+    renderFilesPage()
+
+    await waitFor(() =>
+      expect(listChildren).toHaveBeenCalledWith(targetFolder.resourceId, 'main', undefined)
+    )
+    listChildren.mockClear()
+    fireEvent.click(screen.getByRole('button', { name: 'Options for Nested' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Refresh' }))
+    await waitFor(() =>
+      expect(listChildren).toHaveBeenCalledWith(targetFolder.resourceId, 'main', undefined)
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Options for Nested' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'New folder' }))
+    const createDialog = screen.getByRole('dialog', { name: 'New folder' })
+    expect(within(createDialog).getByText('Create a new folder in Nested.')).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('Folder name'), { target: { value: 'Child folder' } })
+    fireEvent.click(within(createDialog).getByRole('button', { name: 'Create folder' }))
+    await waitFor(() =>
+      expect(createFolder).toHaveBeenCalledWith(targetFolder.resourceId, 'Child folder')
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Options for Nested' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Upload file' }))
+    const upload = new File(['notes'], 'notes.md', { type: 'text/markdown' })
+    await act(async () => {
+      fireEvent.change(uploadInput(), { target: { files: [upload] } })
+      await Promise.resolve()
+    })
+    await waitFor(() =>
+      expect(createFileFromPath).toHaveBeenCalledWith(
+        targetFolder.resourceId,
+        'notes.md',
+        '/tmp/notes.md'
+      )
+    )
   })
 
   it('clears a cancelled create-folder draft before reopening the form', async () => {
