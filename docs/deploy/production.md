@@ -133,6 +133,12 @@ port-forwards; set them in your overlay:
 | `CONTROL_API_GOOGLE_CLIENT_ID` (placeholder in base)                                                                                  | `control-api-config` |
 | `RPC_PROXY_CORS_ORIGIN`, `RPC_PROXY_OAUTH_CALLBACK_BASE_URL`                                                                          | `rpc-proxy-config`   |
 
+Set `CONTROL_API_OAUTH_CALLBACK_BASE_URL` and `RPC_PROXY_OAUTH_CALLBACK_BASE_URL`
+to the same public origin, with no path or trailing slash. If you use OAuth
+connectors, also set `MCP_OAUTH_BROKER_ENABLED: "true"` in `control-api-config`.
+Base leaves it off, and without it the agent asks for consent forever even after
+the user authorizes. See [OAuth connectors](../how-to/connect-oauth-connector.md).
+
 ## Outbound destinations
 
 The NetworkPolicies are port and CIDR rules, not hostname rules. Agent pods
