@@ -468,7 +468,13 @@ export function FileExplorerTree({
   }, [])
 
   const clearDragState = useCallback(() => {
-    dragSessionEpochRef.current += 1
+    // NOTE: deliberately does NOT bump dragSessionEpochRef. The epoch marks
+    // GESTURES (dragstart); the drop handler compares its captured epoch after
+    // the async drop adjudication. dragend fires ~immediately after drop —
+    // bumping here invalidated the drop's OWN commit once adjudication
+    // resolved (cache-cold drops lost that race and died silently, so the
+    // folder confirmation never appeared). A new dragstart still invalidates
+    // in-flight decisions.
     draggingSourceRef.current = null
     dragSession?.endDrag()
     adjudication.endDragSession()

@@ -968,7 +968,12 @@ export function FilesPage({
   }
 
   const clearResourceDrag = () => {
-    dragSessionRef.current += 1
+    // NOTE: deliberately does NOT bump dragSessionRef. The counter marks
+    // GESTURES (dragstart); the drop handler compares its captured generation
+    // after its async adjudication. The browser fires dragend ~immediately
+    // after drop — bumping here invalidated the drop's OWN commit once the
+    // adjudication resolved (cache-cold drops lost that race every time and
+    // died silently). A new dragstart still invalidates in-flight decisions.
     draggingResourceRef.current = null
     draggingSourceRef.current = null
     hoveredFolderRef.current = null

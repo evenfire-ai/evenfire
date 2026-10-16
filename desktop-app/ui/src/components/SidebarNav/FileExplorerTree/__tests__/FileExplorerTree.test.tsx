@@ -795,6 +795,65 @@ function renderTreeWithSession(props: Partial<Parameters<typeof FileExplorerTree
 }
 
 describe('FileExplorerTree — drag-and-drop moves', () => {
+  it('still opens the confirmation when adjudication resolves after the gesture’s dragend', async () => {
+    // Regression: the browser fires dragend ~immediately after drop.
+    // clearDragState used to bump the gesture epoch on that dragend, so the
+    // drop's own decision — resuming after its async affordances probes — saw
+    // a stale epoch and returned silently: no confirmation, no move, no toast.
+    // Cache-cold drops (the common case for fresh folders) lost every time.
+    const moveResource = vi.fn(async () => ({ resourceId: 'foldera', version: 9 }))
+    const delayed = <T,>(value: T) =>
+      new Promise<T>(resolve => setTimeout(() => resolve(value), 25))
+    const affordances = vi.fn((resourceId: string) =>
+      delayed(
+        resourceId === 'folderb'
+          ? { held: ['read', 'write'] }
+          : { held: ['read', 'write', 'delete'] }
+      )
+    )
+    const resolve = vi.fn(async (uri: string) => {
+      const id = uri.split('/').pop()
+      const parent = id === 'grand' ? null : 'grand'
+      const name = id === 'foldera' ? 'A' : id === 'folderb' ? 'B' : 'Grand'
+      const resourceId = id === 'grand' ? 'grand' : id
+      return {
+        drive: 'main',
+        resourceId,
+        parentResourceId: parent,
+        name,
+        kind: 'directory',
+        version: id === 'foldera' ? 4 : 1,
+      }
+    })
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('foldera', 'A', 'directory', { version: 4 }),
+          accessibleResource('folderb', 'B', 'directory'),
+        ])
+      ),
+      affordances,
+      resolve,
+      moveResource,
+    })
+    renderTreeWithSession()
+
+    const rowA = await screen.findByRole('button', { name: 'A' })
+    const rowB = await screen.findByRole('button', { name: 'B' })
+    const dataTransfer = dragTypes()
+    const aRow = rowA.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+
+    fireEvent.dragStart(rowA, { dataTransfer })
+    fireEvent.dragOver(bRow, { dataTransfer })
+    fireEvent.drop(bRow, { dataTransfer })
+    // The browser ends the gesture right after the drop — before the delayed
+    // probes resolve. This used to invalidate the drop's own decision.
+    fireEvent.dragEnd(aRow, { dataTransfer })
+
+    await screen.findByRole('dialog', { name: 'Move folder A to B' })
+  })
+
   it('moves a dragged folder into an unrelated folder through the one confirmation', async () => {
     // Two directly-shared folders under one unshared common parent 'grand':
     // the drop must walk B's (bounded) ancestry, find the common anchor via

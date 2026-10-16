@@ -3749,6 +3749,109 @@ describe('FilesPage', () => {
     })
   })
 
+  it('commits a file drop whose adjudication resolves after the gesture’s dragend', async () => {
+    // Regression: the browser fires dragend ~immediately after drop.
+    // clearResourceDrag used to bump the gesture counter on that dragend, so
+    // the drop's own commit — resuming after its async affordances probes —
+    // saw a stale generation and returned silently. Cache-cold drops lost
+    // that race every time: no move, no dialog, no toast.
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(async (_resourceId: string, _destinationId: string) => ({}))
+    const affordances = vi.fn(
+      () =>
+        new Promise(resolve =>
+          setTimeout(
+            () =>
+              resolve({
+                held: ['read', 'write', 'delete'],
+                canDelegate: false,
+                grantableBits: [],
+                canCreateShare: false,
+              }),
+            25
+          )
+        )
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          affordances,
+          resolve: vi.fn(async () => ({
+            resourceId: 'file-1',
+            gfsUri: 'gfs://main/file-1',
+            kind: 'file',
+            name: 'notes.txt',
+            version: 3,
+            parentResourceId: 'folder-1',
+          })),
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'notes.txt',
+          kind: 'file',
+          path: '/Product/notes.txt',
+          version: 3,
+          bytes: 12,
+        },
+        {
+          resourceId: 'dest-1',
+          rid: 'dest-1',
+          gfsUri: 'gfs://main/dest-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Dest',
+          kind: 'directory',
+          path: '/Product/Dest',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+
+    const sourceRow = screen.getByRole('button', { name: 'Open notes.txt' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Dest' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragOver(destinationRow, { dataTransfer })
+    fireEvent.drop(destinationRow, { dataTransfer })
+    // The browser ends the gesture right after the drop — before the delayed
+    // probes resolve. This used to invalidate the drop's own commit.
+    fireEvent.dragEnd(sourceRow, { dataTransfer })
+
+    await waitFor(() => expect(moveResource).toHaveBeenCalled())
+    expect(moveResource.mock.calls[0]![0]).toBe('file-1')
+    expect(moveResource.mock.calls[0]![1]).toBe('dest-1')
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Dest', 'success')
+    )
+  })
+
   it('presents a rate-limited drop check in the shared read-plane words', async () => {
     // The affordances check is one of the nine methods `surfaceGfsGrantError`
     // wraps, so its rejection reaches the renderer as the IPC wrapper plus the
