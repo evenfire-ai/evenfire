@@ -8,8 +8,9 @@ platform enforces that with NetworkPolicies on Kubernetes.
 
 When running `mcp-host` standalone (`CLERUM_DEV_MODE=true npm run dev`), wire
 servers with `CLERUM_MCP_SERVERS` (JSON array). Each entry needs `name`,
-`contextRef`, `transport`, `enabled`, and
-`status: { deployed: true, ready: true }` or it is skipped as not ready:
+`contextRef`, `transport`, `enabled`, and `status.ready: true`, or it is
+skipped as not ready (mcp-host checks only `ready`; `deployed` in the example
+is not read):
 
 ```bash
 CLERUM_MCP_SERVERS=[{"name":"my-mcp","contextRef":"dev-context","transport":{"type":"streamableHttp","url":"http://my-mcp:3000/mcp"},"enabled":true,"status":{"deployed":true,"ready":true}}]
@@ -116,5 +117,6 @@ See [stdio-bridge README](../../stdio-bridge/README.md) and
 
 ## Related
 
+- [Connect an OAuth connector](connect-oauth-connector.md): remote MCP servers, OAuth sign-in, and updating connector credentials
 - [CRD index](../crds/README.md)
 - [Architecture overview](../architecture/overview.md)

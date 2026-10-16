@@ -92,7 +92,9 @@ after creation:
   With dynamic registration, the install id is appended and registered
   automatically.
 
-The Control UI wizard shows the exact URI.
+The remote-connector wizard in Control UI shows the exact URI. See
+[Connect an OAuth connector](../how-to/connect-oauth-connector.md) for the
+full walkthrough.
 
 ### Server Configuration
 
