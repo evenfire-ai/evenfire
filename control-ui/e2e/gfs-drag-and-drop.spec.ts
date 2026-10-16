@@ -445,4 +445,88 @@ test.describe('EvenDrive drag and drop', () => {
       await cleanupGfsDragDropFixtures(page.request, new Set([parentName, fileName]))
     }
   })
+
+  test('folder move with a name conflict numbered-renames when opted in', async ({ page }) => {
+    const parentName = fixtureName('conflict-parent')
+    const sourceName = fixtureName('clash')
+    const destinationName = fixtureName('bin')
+    try {
+      await beginJourney(page)
+      await createFolderViaUi(page, parentName)
+      await openFolderViaUi(page, parentName)
+      await createFolderViaUi(page, sourceName)
+      await createFolderViaUi(page, destinationName)
+      // Seed the destination with a same-named folder so the move conflicts.
+      await openFolderViaUi(page, destinationName)
+      await createFolderViaUi(page, sourceName)
+      await goUpToFolderViaUi(page, parentName)
+
+      await dragRowToRow(page, resourceRow(page, sourceName), resourceRow(page, destinationName))
+      const dialog = page.getByRole('dialog', {
+        name: `Move folder ${sourceName} to ${destinationName}`,
+        exact: true,
+      })
+      await expect(dialog).toBeVisible({ timeout: 20_000 })
+      const numberedToggle = dialog.getByLabel(/Use a numbered name if needed/)
+      await expect(numberedToggle).toBeVisible()
+      await numberedToggle.check()
+      await dialog.getByRole('button', { name: 'Move', exact: true }).click()
+
+      await expect(
+        toast(page, `Moved "${sourceName}" to "${destinationName}" as "${sourceName} (1)".`)
+      ).toBeVisible({ timeout: 30_000 })
+      await openFolderViaUi(page, destinationName)
+      await expect(resourceRow(page, `${sourceName} (1)`)).toBeVisible({ timeout: 20_000 })
+    } finally {
+      await cleanupGfsDragDropFixtures(
+        page.request,
+        new Set([parentName, sourceName, `${sourceName} (1)`, destinationName])
+      )
+    }
+  })
+
+  test('folder move with a name conflict refuses without the numbered-name opt-in', async ({
+    page,
+  }) => {
+    const parentName = fixtureName('clash-parent')
+    const sourceName = fixtureName('stubborn')
+    const destinationName = fixtureName('vault')
+    try {
+      await beginJourney(page)
+      await createFolderViaUi(page, parentName)
+      await openFolderViaUi(page, parentName)
+      await createFolderViaUi(page, sourceName)
+      await createFolderViaUi(page, destinationName)
+      await openFolderViaUi(page, destinationName)
+      await createFolderViaUi(page, sourceName)
+      await goUpToFolderViaUi(page, parentName)
+
+      await dragRowToRow(page, resourceRow(page, sourceName), resourceRow(page, destinationName))
+      const dialog = page.getByRole('dialog', {
+        name: `Move folder ${sourceName} to ${destinationName}`,
+        exact: true,
+      })
+      await expect(dialog).toBeVisible({ timeout: 20_000 })
+      // Leave "Use a numbered name if needed" unchecked.
+      await dialog.getByRole('button', { name: 'Move', exact: true }).click()
+      await page.waitForTimeout(1500)
+      const toastTexts = await page.locator('.cu-toast').allTextContents()
+      // eslint-disable-next-line no-console
+      console.log('POST-MOVE-TOASTS:', JSON.stringify(toastTexts))
+
+      await expect(
+        toast(
+          page,
+          'An item with this name already exists. Choose another folder, or use Move to change its name.'
+        )
+      ).toBeVisible({ timeout: 30_000 })
+      // The source folder did not move.
+      await expect(resourceRow(page, sourceName)).toBeVisible({ timeout: 20_000 })
+    } finally {
+      await cleanupGfsDragDropFixtures(
+        page.request,
+        new Set([parentName, sourceName, destinationName])
+      )
+    }
+  })
 })
