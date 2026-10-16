@@ -20,15 +20,11 @@ import { isGfsChildrenDenied, purgeDeniedGfsChildren } from '@/gfs/deniedChildre
 import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
 import type { GfsDragSource } from '@/gfs/dragSession'
 import { useGfsDragSession } from '@/gfs/dragSession'
-import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { commitGfsMove, moveDenialMessage, toastMoveOutcome } from '@/gfs/moveCommit'
+import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
-import { IconChevronRight, IconContexts, IconMoreHorizontal } from '../icons'
-import type {
-  FileExplorerDropState,
-  FileExplorerNodeProps,
-  FileExplorerTreeProps,
-} from './types'
+import { IconChevronRight, IconContexts } from '../icons'
+import type { FileExplorerDropState, FileExplorerNodeProps, FileExplorerTreeProps } from './types'
 
 // A folder's single-click (toggle) must not act before we know a double-click
 // (open its files tab) is not coming, so it is deferred by this window to let a
@@ -190,8 +186,8 @@ function FileExplorerNode({
         runActivate()
         return
       }
-      // Shift+F10 opens the row's Move action contextually, matching the
-      // row-action discoverability of the Files page.
+      // Shift+F10 opens the Move dialog for the focused row — the keyboard
+      // path after the visible per-row Move button was rejected as clutter.
       if (event.shiftKey && event.key === 'F10') {
         event.preventDefault()
         clearClickTimer()
@@ -357,18 +353,6 @@ function FileExplorerNode({
             </Badge>
           ) : null}
         </Button>
-        <IconButton
-          className="da-file-explorer__move-action"
-          label={`Move ${label} to another folder`}
-          onClick={() => {
-            clearClickTimer()
-            onRequestMove(node, ancestorCrumbs)
-          }}
-          size="sm"
-          variant="ghost"
-        >
-          <IconMoreHorizontal />
-        </IconButton>
       </div>
       {isExpanded ? (
         <div className="da-file-explorer__group" role="group">
@@ -890,9 +874,7 @@ export function FileExplorerTree({
           onClose={() => setMoveDialogTarget(null)}
           onMove={async (destinationId, destinationName) => {
             const target = moveDialogTarget
-            const allowNumberedRename = await adjudication.probeSourceWrite(
-              target.node.resourceId
-            )
+            const allowNumberedRename = await adjudication.probeSourceWrite(target.node.resourceId)
             const source: GfsDragSource = {
               resourceId: target.node.resourceId,
               gfsUri: target.node.gfsUri,

@@ -2010,24 +2010,6 @@ h3 {
   background: rgba(var(--accent-rgb), 0.12);
 }
 
-/* The per-row Move action is revealed on hover/focus-within so the compact
-   chrome is unchanged at rest (keyboard users reach it via Tab). */
-.da-file-explorer__move-action {
-  flex: 0 0 auto;
-  opacity: 0;
-}
-
-.da-file-explorer__row:hover .da-file-explorer__move-action,
-.da-file-explorer__row:focus-within .da-file-explorer__move-action {
-  opacity: 1;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .da-file-explorer__move-action {
-    transition: opacity var(--motion-fast, 120ms) ease;
-  }
-}
-
 /* Draggable tree labels and grid rows show the grab affordance. */
 .da-file-explorer__label.ui-button[draggable='true'] {
   cursor: grab;

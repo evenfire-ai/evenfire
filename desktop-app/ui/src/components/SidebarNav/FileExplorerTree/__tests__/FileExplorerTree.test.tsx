@@ -15,6 +15,9 @@ import {
   listChildrenPage,
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+// ── drag-and-drop (rev-2 D1) ─────────────────────────────────────────────────
+
+import { GfsDragSessionProvider } from '@/gfs/dragSession'
 import { FileExplorerTree } from '..'
 
 // useGfsBrowserController only reads { isAuthenticated, me, runtimeConfigState }
@@ -727,10 +730,6 @@ describe('FileExplorerTree — download-path authority wiring (R1-H8)', () => {
   })
 })
 
-// ── drag-and-drop (rev-2 D1) ─────────────────────────────────────────────────
-
-import { GfsDragSessionProvider } from '@/gfs/dragSession'
-
 type DndProducers = Producers & {
   affordances?: (resourceId: string, drive?: string) => Promise<unknown>
   resolve?: (uri: string) => Promise<unknown>
@@ -754,8 +753,13 @@ function installDndClerum(producers: DndProducers) {
           producers.download ??
           vi.fn(async () => downloadResult(resolvedFile('fallback', 'fallback.bin'))),
         affordances: producers.affordances ?? vi.fn(async () => ({ held: ['read'] })),
-        resolve: producers.resolve ?? vi.fn(async () => { throw new Error('resolve not stubbed') }),
-        moveResource: producers.moveResource ?? vi.fn(async () => ({ resourceId: 'x', version: 2 })),
+        resolve:
+          producers.resolve ??
+          vi.fn(async () => {
+            throw new Error('resolve not stubbed')
+          }),
+        moveResource:
+          producers.moveResource ?? vi.fn(async () => ({ resourceId: 'x', version: 2 })),
       },
     },
   })
@@ -843,7 +847,9 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
 
     const dialog = await screen.findByRole('dialog', { name: 'Move folder A to B' })
     expect(
-      within(dialog).getByText(/Inherited access to this folder and its contents follows the new location/)
+      within(dialog).getByText(
+        /Inherited access to this folder and its contents follows the new location/
+      )
     ).toBeTruthy()
     await act(async () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
@@ -852,9 +858,7 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     await waitFor(() => {
       expect(moveResource).toHaveBeenCalledWith('foldera', 'folderb', 'main', 4, undefined)
     })
-    await waitFor(() =>
-      expect(pushToast).toHaveBeenCalledWith('Moved A to B', 'success')
-    )
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith('Moved A to B', 'success'))
     // Folder-impact info accompanies the success toast (rev-2 §1/§8).
     expect(pushToast).toHaveBeenCalledWith(
       'Moving a folder changes who can access its contents — access now follows the new location.',
@@ -871,7 +875,9 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
         listAccessiblePage([accessibleResource('parent-1', 'P', 'directory')])
       ),
       listChildren: vi.fn(async () =>
-        listChildrenPage([childView('folder-a', 'A', 'directory', { parentResourceId: 'parent-1' })])
+        listChildrenPage([
+          childView('folder-a', 'A', 'directory', { parentResourceId: 'parent-1' }),
+        ])
       ),
       affordances,
       moveResource,
@@ -963,7 +969,7 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     expect(treeItem.getAttribute('aria-expanded')).toBe('false')
   })
 
-  it('row Move action and Shift+F10 open the existing Move dialog', async () => {
+  it('Shift+F10 opens the existing Move dialog from the tree row', async () => {
     installDndClerum({
       listAccessible: vi.fn(async () =>
         listAccessiblePage([accessibleResource('folder-a', 'A', 'directory')])
@@ -971,15 +977,10 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     })
     renderTreeWithSession()
 
-    await act(async () => {
-      fireEvent.click(
-        await screen.findByRole('button', { name: 'Move A to another folder' })
-      )
-    })
-    expect(await screen.findByRole('dialog', { name: 'Move folder A' })).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Close move dialog' }))
+    // The rejected per-row Move affordance stays gone: no row button renders.
+    await screen.findByRole('button', { name: 'A' })
+    expect(screen.queryByRole('button', { name: 'Move A to another folder' })).toBeNull()
 
-    // Shift+F10 on the row label opens the same dialog.
     await act(async () => {
       fireEvent.keyDown(await screen.findByRole('button', { name: 'A' }), {
         key: 'F10',
