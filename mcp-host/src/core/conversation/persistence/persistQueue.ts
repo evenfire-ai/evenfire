@@ -265,8 +265,9 @@ export class PersistQueue {
   }
 
   /**
-   * Wait until every pending async write settles. Intended for graceful
-   * shutdown so SIGTERM doesn't truncate the durable trail.
+   * Wait for the keyed async chains, not for in-flight sync operations. Used
+   * by the stateless suspend checkpoint (`main.ts`, `flushFinalCheckpoint`).
+   * `close()` does its own stricter wait.
    */
   async drain(): Promise<void> {
     const chains = Array.from(this.writeChain.values())

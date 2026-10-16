@@ -210,10 +210,21 @@ renames the entry.
   completes none of them for `CLERUM_DB_WORKER_STALL_TIMEOUT_MS` (default
   `30000`, at least `1000`, at most `2147483647` and above
   `CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS`, or config load fails), the queue fails
-  the same way and the worker is terminated.
+  the same way and the worker is terminated. The bound counts completed
+  operations, so a single operation that runs longer than it counts as a
+  stall too: the boot reaps of processing and awaiting-approval sessions and
+  the checkpoint the worker runs when it closes the database are such single
+  operations.
 - At shutdown mcp-host waits for every queued write, bounded only by that
   stall timeout and the Pod's termination grace period. A persistence failure
-  during shutdown exits 1 instead of 0.
+  detected during shutdown exits 1 instead of 0. With the default settings
+  the stall timeout (30 s) equals the default grace period (30 s), so a worker
+  that stalls during shutdown is killed by the kubelet first and the container
+  ends with SIGKILL (137), not 1.
+- The boot retention sweep of session search runs before the Host listens:
+  `main.ts` awaits it before bootstrap, so its duration counts against the
+  Host startup probe window (310 s; 630 s for desktop Hosts). A restart keeps
+  the batches already committed.
 - A failed synchronous write, such as `SQLITE_FULL` on the first write of a
   turn, rejects only that request; the queue stays usable and the process
   keeps running. A full PVC therefore shows either as turns that fail while

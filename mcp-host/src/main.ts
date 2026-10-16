@@ -1639,7 +1639,8 @@ async function initializeConversationStore(): Promise<ConversationStoreHandle | 
     onPersistFailure: exitOnPersistFailure(() => isShuttingDown, {
       // Flush buffered usage and governed-run events before the exit 1.
       // Marking the Host as shutting down keeps a SIGTERM during the flush
-      // from running the graceful path, which exits 0.
+      // from starting the graceful shutdown path as a second, concurrent
+      // shutdown.
       beforeExit: async () => {
         isShuttingDown = true
         usageReporter?.stop()

@@ -93,8 +93,12 @@ export {
 
 /**
  * Rows one retention-sweep operation may delete. Measured on the real worker
- * with 400k expired messages: max 123 ms per batch, far below the sync
- * timeout and the worker progress bound.
+ * with 400k expired messages: max 123 ms per message-phase batch. Session
+ * phase, with 200k expired sessions and the `parent_session_id` index
+ * (migration 017): max 32 ms per batch (about 2.4 s without the index).
+ * Both are far below the sync timeout and the worker progress bound.
+ * The cap counts rows, not bytes: the FTS delete trigger re-tokenizes each
+ * deleted message's content, so a batch of very large messages takes longer.
  */
 const RETENTION_SWEEP_BATCH_ROWS = 250
 
