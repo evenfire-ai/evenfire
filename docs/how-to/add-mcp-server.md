@@ -6,7 +6,8 @@ platform enforces that with NetworkPolicies on Kubernetes.
 
 ## Option A — mcp-host dev mode (contributors, no cluster)
 
-When running `mcp-host` standalone (`CLERUM_DEV_MODE=true npm run dev`), wire
+When running `mcp-host` standalone (`CLERUM_DEV_MODE=true CLERUM_ENABLE_AUTH=false npm run dev`; see
+[Dev mode](../get-started/dev-mode.md)), wire
 servers with `CLERUM_MCP_SERVERS` (JSON array). Each entry needs `name`,
 `contextRef`, `transport`, `enabled`, and `status.ready: true`, or it is
 skipped as not ready (mcp-host checks only `ready`; `deployed` in the example
