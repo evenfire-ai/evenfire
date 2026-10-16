@@ -203,7 +203,7 @@ describe('ClerumMcpServer workflow routes', () => {
     expect(JSON.stringify(logSpy.warn.mock.calls)).not.toContain('BODY-MARKER')
   })
 
-  it('passes an unhandled handler error to the logger as an Error so it is redacted', async () => {
+  it('passes an unhandled handler error to the logger as the Error object it redacts', async () => {
     const { token, port, customApi } = await startTestServer()
     const failure = new Error('HTTP-Code: 403\nBody: {"url":"https://10.0.0.1/apis/x"}')
     customApi.getNamespacedCustomObject.mockRejectedValue(failure)

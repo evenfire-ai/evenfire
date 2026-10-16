@@ -177,21 +177,62 @@ describe('boundToolsCalledForStatus', () => {
     expect(bounded[1].result).toEqual(artifactResult('big.pdf'))
   })
 
-  it('bounds every string field of a reduced artifact result', () => {
+  it('reduces an oversized artifact result to the artifact WRC would accept', () => {
     const result = {
       success: true,
       content: 'q'.repeat(5_000),
-      artifact: { name: 'n'.repeat(5_000), format: 'pdf', path: '/output/x', extra: 'e' },
+      artifact: {
+        name: `${' '.repeat(1_030)}report.pdf`,
+        format: 'pdf',
+        path: '/output/report.pdf',
+        sizeBytes: 10,
+        createdAt: '2026-10-16T00:00:00.000Z',
+        extra: 'e',
+      },
     }
     const bounded = boundToolsCalledForStatus([
       { serverName: 'clerum', toolName: 'generate_pdf', result },
     ]) as Array<{ result: { artifact: Record<string, unknown> } }>
 
     expect(bounded[0].result.artifact).toEqual({
-      name: 'n'.repeat(STATUS_TOOL_RESULT_PREVIEW_LIMIT),
+      name: 'report.pdf',
       format: 'pdf',
-      path: '/output/x',
+      path: '/output/report.pdf',
+      sizeBytes: 10,
+      createdAt: '2026-10-16T00:00:00.000Z',
     })
+  })
+
+  it('previews an oversized artifact result that WRC would reject', () => {
+    const result = {
+      success: true,
+      artifact: { name: `abc${' '.repeat(1_030)}\u0000`, format: 'pdf', path: '/output/x' },
+    }
+    const bounded = boundToolsCalledForStatus([
+      { serverName: 'clerum', toolName: 'generate_pdf', result },
+    ]) as Array<{ result: unknown }>
+
+    expect(bounded[0].result).toEqual({ truncated: true, preview: expect.any(String) })
+  })
+
+  it('keeps 100 oversized multi-byte artifact results under the WRC body limit', () => {
+    const calls = Array.from({ length: 100 }, (_, i) => ({
+      serverName: 'clerum',
+      toolName: 'generate_pdf',
+      result: {
+        success: true,
+        artifact: {
+          name: `${'€'.repeat(2_000)}${i}`,
+          format: '€'.repeat(2_000),
+          path: `/output/${'€'.repeat(2_000)}`,
+          createdAt: '€'.repeat(2_000),
+          sizeBytes: 1,
+        },
+        content: '€'.repeat(5_000),
+      },
+    }))
+    const bytes = Buffer.byteLength(JSON.stringify(boundToolsCalledForStatus(calls)))
+    expect(bytes).toBeLessThan(512 * 1024)
   })
 
   it('passes malformed entries through for the server to reject', () => {

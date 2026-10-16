@@ -18,9 +18,11 @@ export {
   STATUS_TOOL_ARGS_PREVIEW_LIMIT,
   STATUS_TOOL_RESULT_PREVIEW_LIMIT,
   boundToolsCalledForStatus,
+  normalizeArtifactForStatus,
   normalizeToolArgsForStatus,
   normalizeToolResultForStatus,
 } from './status-reporter/toolCallStatus'
+export type { StatusArtifact } from './status-reporter/toolCallStatus'
 export {
   AUTH_RETRY_DELAY_MS,
   AUTH_RETRY_MAX_ATTEMPTS,

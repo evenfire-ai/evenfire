@@ -7,6 +7,18 @@
 export const MAX_STATUS_TOOL_CALLS = 50
 export const STATUS_TOOL_ARGS_PREVIEW_LIMIT = 1024
 export const STATUS_TOOL_RESULT_PREVIEW_LIMIT = 1024
+const MAX_ARTIFACT_NAME_LENGTH = 128
+const MAX_ARTIFACT_FORMAT_LENGTH = 64
+const MAX_ARTIFACT_PATH_LENGTH = 512
+const MAX_ARTIFACT_CREATED_AT_LENGTH = 64
+
+export interface StatusArtifact {
+  name: string
+  format: string
+  sizeBytes: number
+  path: string
+  createdAt: string
+}
 
 type StatusPreview = { truncated: true; preview: string }
 
@@ -37,7 +49,8 @@ export function normalizeToolResultForStatus(result: unknown): unknown {
  * plus up to MAX_STATUS_TOOL_CALLS later calls whose result reports a
  * generated artifact. WRC extracts artifacts from every reported call, so those
  * later calls are kept (without args), and an artifact result too large for a
- * preview is reduced to its artifact metadata rather than truncated. Past the
+ * preview is reduced to the artifact metadata WRC accepts (normalized, so
+ * at most a few hundred chars) rather than truncated. Past the
  * cap, artifacts from a step with more than 2 x MAX_STATUS_TOOL_CALLS calls
  * are dropped to keep the report bounded.
  * Entries are not validated here; WRC rejects malformed ones.
@@ -64,22 +77,46 @@ export function boundToolsCalledForStatus(toolsCalled: readonly unknown[]): unkn
   return bounded
 }
 
-const ARTIFACT_FIELDS = ['name', 'format', 'path', 'sizeBytes', 'createdAt'] as const
-
 function boundToolResultForStatus(result: unknown): unknown {
   const normalized = normalizeToolResultForStatus(result)
   if (normalized === result) return result
+  // Send only what WRC would extract from the full result; a result whose
+  // artifact WRC rejects carries nothing to extract and stays a preview.
   const artifact = parseArtifactToolResult(result)
-  if (!artifact) return normalized
-  // Strings are cut to the preview limit; WRC's own artifact limits are far
-  // smaller, so it accepts and rejects exactly the artifacts it did before.
-  const fields: Record<string, string | number> = {}
-  for (const key of ARTIFACT_FIELDS) {
-    const value = artifact[key]
-    if (typeof value === 'string') fields[key] = value.slice(0, STATUS_TOOL_RESULT_PREVIEW_LIMIT)
-    else if (typeof value === 'number') fields[key] = value
+  const accepted = artifact ? normalizeArtifactForStatus(artifact) : null
+  return accepted ? { success: true, artifact: accepted } : normalized
+}
+
+/** WRC's validation of reported artifact metadata; null when WRC rejects it. */
+export function normalizeArtifactForStatus(value: Record<string, unknown>): StatusArtifact | null {
+  if (typeof value.name !== 'string') return null
+  const name = value.name.trim()
+  if (!name || name.length > MAX_ARTIFACT_NAME_LENGTH) return null
+  if (/[/\\\x00]/.test(name) || name.includes('..')) return null
+
+  if (typeof value.path !== 'string') return null
+  const path = value.path.trim()
+  if (!path.startsWith('/output/') || path.length > MAX_ARTIFACT_PATH_LENGTH) return null
+  if (path.includes('\x00') || path.split('/').includes('..')) return null
+
+  const format = typeof value.format === 'string' ? value.format.trim() : ''
+  if (format.length > MAX_ARTIFACT_FORMAT_LENGTH) return null
+
+  const sizeBytes = typeof value.sizeBytes === 'number' ? value.sizeBytes : 0
+  if (!Number.isSafeInteger(sizeBytes) || sizeBytes < 0) return null
+
+  const createdAt =
+    typeof value.createdAt === 'string' && value.createdAt.length <= MAX_ARTIFACT_CREATED_AT_LENGTH
+      ? value.createdAt
+      : new Date().toISOString()
+
+  return {
+    name,
+    format,
+    sizeBytes,
+    path,
+    createdAt,
   }
-  return { success: true, artifact: fields }
 }
 
 function parseArtifactToolResult(result: unknown): Record<string, unknown> | null {
