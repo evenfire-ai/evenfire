@@ -446,7 +446,7 @@ describeRealPostgres('external GFS session generation on real PostgreSQL', () =>
     expect(body.data?.resourceId).toBe(directResourceId)
   })
 
-  it('mints a current V2 generation for GFSC and preserves direct/team access checks', async () => {
+  it('rejects unbound V2 reads and preserves legacy direct/team access checks', async () => {
     const authentication = await authenticateExternalUserSession(v2Token, { purpose: 'protected' })
     expect(authentication.status).toBe('authenticated')
     if (authentication.status !== 'authenticated') return
@@ -471,14 +471,25 @@ describeRealPostgres('external GFS session generation on real PostgreSQL', () =>
     )
     expect([401, 403]).toContain(staleGenerationResult.status)
 
-    const direct = await resolve(v2Token, directResourceId)
-    if (direct.status === 403) {
-      expect(direct.body).toMatchObject({ error: { code: 'forbidden' } })
+    const gatewayReadsBefore = gatewayReads
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('unexpected_gfsc_fetch_for_unbound_v2'))
+    try {
+      const unboundV2 = await resolve(v2Token, directResourceId)
+      expect(unboundV2.status).toBe(403)
+      expect(unboundV2.body).toEqual({ error: 'action_delegation_required' })
+      expect(fetchSpy).not.toHaveBeenCalled()
+      expect(gatewayReads).toBe(gatewayReadsBefore)
+    } finally {
+      fetchSpy.mockRestore()
     }
+
+    const direct = await resolve(v1Token, directResourceId)
     expect(direct.status).toBe(200)
     expect(direct.body.data?.resourceId).toBe(directResourceId)
 
-    const team = await resolve(v2Token, teamResourceId)
+    const team = await resolve(v1Token, teamResourceId)
     expect(team.status).toBe(200)
     expect(team.body.data?.resourceId).toBe(teamResourceId)
 
@@ -486,9 +497,9 @@ describeRealPostgres('external GFS session generation on real PostgreSQL', () =>
       `UPDATE team_members SET status = 'deleted' WHERE team_id = $1 AND user_id = $2`,
       [teamId, userId]
     )
-    const revokedTeam = await resolve(v2Token, teamResourceId)
+    const revokedTeam = await resolve(v1Token, teamResourceId)
     expect(revokedTeam.status).toBe(403)
-    const survivingDirect = await resolve(v2Token, directResourceId)
+    const survivingDirect = await resolve(v1Token, directResourceId)
     expect(survivingDirect.status).toBe(200)
   })
 
