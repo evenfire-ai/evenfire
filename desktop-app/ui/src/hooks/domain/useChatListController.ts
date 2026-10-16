@@ -1422,12 +1422,13 @@ export function useChatListController({
       try {
         await applyLocalTitleOnly(agentRef, chatId, newTitle)
       } catch (error) {
-        // The local title did not change. Hand the key back to the rename this
-        // one replaced while that rename is still unsettled, so its PATCH keeps
-        // protecting its title; otherwise the key has no pending rename left.
-        if (pendingRenamesRef.current.get(key) === entry) {
-          if (existing && !existing.settled) pendingRenamesRef.current.set(key, existing)
-          else settlePendingRename(key, entry)
+        // The local title did not change, so this rename is over. When it is
+        // still current, hand the key back to the rename it replaced while that
+        // rename is unsettled, so its PATCH keeps protecting its title.
+        if (pendingRenamesRef.current.get(key) === entry && existing && !existing.settled) {
+          pendingRenamesRef.current.set(key, existing)
+        } else {
+          settlePendingRename(key, entry)
         }
         throw error
       }

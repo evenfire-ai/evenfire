@@ -512,4 +512,55 @@ describe('re-renames', () => {
     // Nothing is pending any more, so a later server title is accepted.
     await expectFreshPageAccepted(view)
   })
+
+  it('T6d: two overlapping failed local writes leave no stuck pending rename', async () => {
+    serveImmediately()
+    const view = await mountWithOldTitle()
+    const firstPatch = deferred()
+    gatePatch(firstPatch.promise)
+    let first: Promise<void> | undefined
+    await act(async () => {
+      first = view.result.current.handleRenameChatForAgent(AGENT, 'c1', 'first')
+    })
+    await waitFor(() => expect(patchTitles).toEqual(['first']))
+
+    const secondReply = deferred()
+    const thirdReply = deferred()
+    renameIpcBehaviour.set('second', { gate: secondReply.promise, fail: true })
+    renameIpcBehaviour.set('third', { gate: thirdReply.promise, fail: true })
+    let second: Promise<void> | undefined
+    let third: Promise<void> | undefined
+    await act(async () => {
+      second = view.result.current.handleRenameChatForAgent(AGENT, 'c1', 'second')
+    })
+    await waitFor(() => expect(renameIpcTitles).toEqual(['first', 'second']))
+    await act(async () => {
+      third = view.result.current.handleRenameChatForAgent(AGENT, 'c1', 'third')
+    })
+    await waitFor(() => expect(renameIpcTitles).toEqual(['first', 'second', 'third']))
+
+    // The superseded second write fails first, then the current third one.
+    const errors: unknown[] = []
+    await act(async () => {
+      secondReply.resolve()
+      await second?.catch(error => errors.push(error))
+    })
+    await act(async () => {
+      thirdReply.resolve()
+      await third?.catch(error => errors.push(error))
+    })
+    expect(errors).toHaveLength(2)
+
+    await act(async () => {
+      firstPatch.resolve()
+      await first
+    })
+    // Witness: only the first rename reached the server.
+    expect(patchTitles).toEqual(['first'])
+    expect(serverTitle).toBe('first')
+    expect(await diskTitleAfterRestart()).toBe('first')
+
+    // No failed rename is left pending, so a later server title is accepted.
+    await expectFreshPageAccepted(view)
+  })
 })
