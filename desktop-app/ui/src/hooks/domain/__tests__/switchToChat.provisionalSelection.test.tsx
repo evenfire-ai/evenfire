@@ -5,8 +5,9 @@
  * it confirms or withdraws it; an invalidation withdraws it at once; New chat
  * restores it; paging and send refuse it. Rows 1, 2 and 4 of the A17 table are
  * tests j, k and m in `switchToChat.transcriptMemo.test.tsx`; row 14 (blank
- * path) is #976's `createChatFailure*` suites. Row 15 covers a newer selection
- * intent that supersedes the click without switching. Every case runs for a
+ * path) is #976's `createChatFailure*` suites. Rows 15 and 16 cover a newer
+ * selection intent that supersedes the click without switching, on the same
+ * Host and across Hosts. Every case runs for a
  * stateful and a stateless Host.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -444,6 +445,63 @@ describe('provisional selection (#1091 A17)', () => {
         await click
       })
       clerum.chat.getIndex.mockResolvedValue({ chats: [], lastActiveChatId: null } as never)
+      expect(controller.result.current.activeChatId).toBe('chat-a')
+      expect(shows(controller)).toEqual([])
+      act(() => setComposerDraft('chat-a', 'hello', host))
+      await act(async () => {
+        await controller.result.current.handleSendAgentMessage('hello')
+      })
+      // The superseded click no longer owns a provisional mark, so send dispatches.
+      expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+      expect(getComposerDraft('chat-a', host)).toBe('')
+    }
+  )
+
+  it.each([
+    [HOSTS[0], HOSTS[1]],
+    [HOSTS[1], HOSTS[0]],
+  ])(
+    '16. %s: a cross-Host open from the sidebar, then a return whose catalog load fails, leaves no stale mark that refuses send (other Host %s)',
+    async (host, other) => {
+      const disk = { 'chat-a': transcript('chat-a'), 'chat-b': transcript('chat-b') }
+      serveDisk(disk)
+      const defaultIndex = clerum.chat.getIndex.getMockImplementation()!
+      const otherIndex = deferred<never>()
+      let hostFails = false
+      clerum.chat.getIndex.mockImplementation(async (agentRef: string) => {
+        if (agentRef === other) return otherIndex.promise
+        if (hostFails) throw new Error('catalog unavailable')
+        return defaultIndex(agentRef)
+      })
+      const controller = mount(host, { agentNames: [host, other] })
+      await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalled())
+      await open(controller, host, 'chat-a')
+      await open(controller, host, 'chat-b')
+      const { write, click } = await clickHeld(controller, host)
+      // Open the other Host's chat from the sidebar while its catalog load is pending.
+      await act(async () => {
+        controller.result.current.setPendingChatSelection(other, 'chat-c')
+        controller.rerender({ selectedAgent: other })
+      })
+      await act(async () => {
+        write.resolve()
+        await click
+      })
+      // Return to A from the sidebar; this Host's catalog load fails.
+      hostFails = true
+      const hostIndexCalls = () =>
+        clerum.chat.getIndex.mock.calls.filter(call => call[0] === host).length
+      const callsBefore = hostIndexCalls()
+      await act(async () => {
+        controller.result.current.setPendingChatSelection(host, 'chat-a')
+        controller.rerender({ selectedAgent: host })
+      })
+      // Witness: the selection effect tried this Host's catalog and settled without a switch.
+      await waitFor(() => expect(hostIndexCalls()).toBeGreaterThan(callsBefore))
+      await waitFor(() => {
+        expect(controller.result.current.chatMessagesLoading).toBe(false)
+        expect(controller.result.current.chatListLoading).toBe(false)
+      })
       expect(controller.result.current.activeChatId).toBe('chat-a')
       expect(shows(controller)).toEqual([])
       act(() => setComposerDraft('chat-a', 'hello', host))
