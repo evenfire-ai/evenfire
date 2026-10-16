@@ -93,28 +93,35 @@ contract; `external-rest-api/test/middleware.rateLimit.test.ts` verifies trusted
 
 Alert #1769 points to error-response handling in
 `control-api/test/passwordResetPayload.externalRest.realPostgres.integration.test.ts`. The test
-mounts `requireInternalToken`, `requireInternalService('external-rest-api')`, and the real
-`createExternalInvitationsRouter()` on a task-owned Control API Express app, then binds that app to
-an ephemeral `127.0.0.1` port. It also starts the built External REST app in a child process on a
-second ephemeral loopback port. Supertest sends HTTP requests to that child process; it does not
-receive the Express app object directly. These are test-owned loopback listeners, not a public or
-deployed service listener.
+mounts `requireInternalToken` and the real `createExternalInvitationsRouter()` on a task-owned
+Control API Express app, then binds that app to an ephemeral `127.0.0.1` port. The middleware
+validates the bearer token against the service named by `x-service-token` and attaches that service
+identity for downstream authorization. The test also starts its task-local Member Registration
+service on a selected ephemeral port; the test addresses it through `127.0.0.1`, while the
+producer app does not specify a host bind. The built External REST app runs in a separate child
+process on its own ephemeral port explicitly bound to `127.0.0.1`. Supertest sends HTTP requests
+to the External REST child; it does not receive the Express app object directly. These listeners
+are test-owned, not deployed service listeners.
 
 The production External REST `POST /invitations/password` route retains its 10/minute
 `acceptRateLimit`. The Control API password-token route applies its external-client source limiters
 and 10/minute admission bucket, with the documented process-memory fallback when the limiter
-backend is unavailable. The real mounted route is also behind the internal service authentication
-in the test fixture. These controls support the test-only false-positive disposition; the alert
-does not identify an unbounded deployed route.
+backend is unavailable. In production, the Control API mounts this router behind
+`requireInternalService('external-rest-api')`. The composed test fixture mounts
+`requireInternalToken` directly and does not exercise that expected-service gate; it does validate
+the bearer token and exercise the real route and its limiter/admission behavior. These controls
+support the test-only false-positive disposition; the alert does not identify an unbounded deployed
+route.
 
-Only the ambiguous-reset case uses `createDropResetResponseProxy`. For ordinary proxy responses it
-copies the upstream status and body, sets a constant `application/json` content type, and forwards
-no response headers, including `Retry-After` or `Set-Cookie`. For the one-use password-token POST it
-consumes the upstream response and destroys the downstream connection to model a lost reset
-acknowledgement. The public External REST route owns its bounded retry response and issues its own
-session cookie only after a successful reset with a valid session token. Focused invitation and
-trusted-source tests verify the public 429/`Retry-After` behavior; they do not assert that the
-fault-injection proxy forwards those headers.
+The `createDropResetResponseProxy` helper is exercised both for ordinary response forwarding and
+for the ambiguous-reset case. For ordinary proxy responses it copies the upstream status and body,
+sets a constant `application/json` content type, and forwards no response headers, including
+`Retry-After` or `Set-Cookie`. For the one-use password-token POST it consumes the upstream
+response and destroys the downstream connection to model a lost reset acknowledgement. The public
+External REST route owns its bounded retry response and issues its own session cookie only after a
+successful reset with a valid session token. Focused invitation and trusted-source tests verify the
+public 429/`Retry-After` behavior; they do not assert that the fault-injection proxy forwards those
+headers.
 
 GitHub currently records alert #1769 as dismissed with reason `false positive`. Its 2026-10-12
 dismissal note relied on the earlier Supertest-only topology. This entry updates the repository's
