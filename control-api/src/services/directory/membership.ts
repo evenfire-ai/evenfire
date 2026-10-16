@@ -223,12 +223,12 @@ export async function listMembers(teamId: string) {
 
 export async function findMemberRole(teamId: string, userId: string) {
   const result = await pool.query(
-    `SELECT role
-       FROM team_members
-       JOIN users u ON u.id = team_members.user_id
-      WHERE team_id = $1
-        AND user_id = $2
-        AND status = 'active'
+    `SELECT tm.role
+       FROM team_members tm
+       JOIN users u ON u.id = tm.user_id
+      WHERE tm.team_id = $1
+        AND tm.user_id = $2
+        AND tm.status = 'active'
         AND u.lifecycle_state = 'active'
       LIMIT 1`,
     [teamId, userId]

@@ -95,11 +95,7 @@ async function healAcceptedInvitationMemberships(
           AND i.status = 'accepted'
         ORDER BY COALESCE(it.team_id, i.team_id), i.accepted_at DESC NULLS LAST, i.created_at DESC
          ) assignment
-       ON CONFLICT (team_id, user_id) DO UPDATE SET
-         role = EXCLUDED.role,
-         status = 'active',
-         updated_at = NOW()
-       WHERE team_members.status <> 'deleted'`,
+       ON CONFLICT (team_id, user_id) DO NOTHING`,
     [userId, email]
   )
 }
