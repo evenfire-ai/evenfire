@@ -121,9 +121,10 @@ After you authenticate, the app checks the **currently selected tenant** for its
 update policy, so different tenants can be on different versions at the same
 time. It asks that tenant's External REST API for its release info, including a
 `minimumDesktopVersion`. If the installed version is **below** that minimum, the
-app shows an **update-required** screen and opens the release page for the new
-build (tag `desktop-app-<version>`) in your browser. (A packaged distribution is
-where this matters most — a source checkout can just pull the latest.)
+app shows a **Desktop update required** dialog; **Download update** opens the
+`releaseUrl` the server returns (the release tagged `v<desktopVersion>`) in
+your browser. (A packaged distribution is where this matters most — a source
+checkout can just pull the latest.)
 
 This is update **detection**, not silent auto-install: the app tells the user an
 update is required and links the release. Code signing, notarization, and

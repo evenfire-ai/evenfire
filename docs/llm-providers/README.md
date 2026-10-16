@@ -126,7 +126,9 @@ keeps the OAuth tokens, and model traffic goes through the in-cluster
 `spec.model.connectionRef` and needs no `secretRef` when every target is
 the same subscription provider. A Host may use at most one subscription
 provider. They are **off in `deploy/base`** and switched on in the minikube
-overlay. Wire-level details:
+overlay. Setup guide:
+[Use a ChatGPT or Grok subscription](../how-to/connect-llm-subscription.md).
+Wire-level details:
 [Codex transport contract](../architecture/codex-subscription-transport-contract.md),
 [Grok transport contract](../architecture/grok-subscription-transport-contract.md).
 
