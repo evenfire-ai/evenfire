@@ -75,9 +75,12 @@ SQLite.
 **Trigger.** It acts only on the split-layout signature the earlier init
 leaves: `state/` and `workspace/` are both real directories (not symlinks),
 and `state/` holds a file that init writes: `state.db`, `state.db-wal`,
-`state.db-shm` or a `state.db*.pre-<ts>.bak` copy. Every other tree exits 0
+`state.db-shm` or a `.pre-<ts>.bak` copy of one of those three
+(`state.db.pre-<ts>.bak`, `state.db-wal.pre-<ts>.bak`,
+`state.db-shm.pre-<ts>.bak`). Every other tree exits 0
 unchanged, including an agent folder named `workspace/` or `state/` alone, a
-`state/` holding other `state.db*` names (`state.db.json`, `state.dbx`), and a
+`state/` holding other `state.db*` names (`state.db.json`, `state.dbx`,
+`state.dbX.pre-1.bak`), and a
 `state` or `workspace` that is a symlink or not a directory. An agent can
 create those on a stateful Host, so they must not stop it from starting. A
 stateful or desktop tree changes only if it carries the signature, which only
@@ -118,7 +121,7 @@ Host). Recovery, with the Host stopped and the PVC mounted in a helper Pod:
 1. every entry of `workspace/`, dotfiles and symlinks included, to the root
    (`mv` renames a symlink and never follows it);
 2. every entry of `state/` except `state.db`, including journals and
-   `state.db*.pre-<ts>.bak` backups;
+   `.pre-<ts>.bak` backups;
 3. `state/state.db` last, so an interrupted merge still carries the
    signature and completes on the next start;
 4. remove the empty `state/` and `workspace/`, then `sync`.
@@ -235,7 +238,7 @@ forced by a deploy.
   zero, rename the new root `state.db*` files from a helper Pod (keep them),
   and move `workspace/state.db*` to the root.
 - The second exception is the same cut when `state/` already holds a
-  `state.db*.pre-<ts>.bak` from an earlier start. The tree then carries the
+  `.pre-<ts>.bak` backup from an earlier start. The tree then carries the
   signature, and the merge moves `workspace/` entries in name order:
   `state.db` before `state.db-shm` and `state.db-wal`. Resume covers only
   journals at the root next to `state/state.db`, so a merge cut after
@@ -255,7 +258,7 @@ forced by a deploy.
   backup. A Pod in this window is Pending with the merge init still running,
   not in `Init:Error`, so the rule below names it explicitly.
 - After a rollback, the previous init moves every root entry into
-  `workspace/`, including `state.db*.pre-<ts>.bak` backups, and moves back to
+  `workspace/`, including `.pre-<ts>.bak` backups, and moves back to
   `state/` only the exact names `state.db`, `state.db-wal` and `state.db-shm`.
   The backups stay under `workspace/`, the agent's workspace on a stateless
   Host, where the previous mcp-host (which protects only those three exact

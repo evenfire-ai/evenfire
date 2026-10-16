@@ -604,6 +604,20 @@ describe('workspace layout merge', () => {
         mkdirSync(join(root, 'workspace'))
         writeFileSync(join(root, 'workspace', 'README.md'), 'user file')
       },
+      // Its backups are state.db.pre-<ts>.bak, state.db-wal.pre-<ts>.bak and
+      // state.db-shm.pre-<ts>.bak; any other .pre-*.bak name is a user file.
+      'user state/ folder with .pre-*.bak names the base init never writes': root => {
+        mkdirSync(join(root, 'state'))
+        for (const name of [
+          'state.dbX.pre-1.bak',
+          'state.db.x.pre-1.bak',
+          'state.db-journal.pre-1.bak',
+        ]) {
+          writeFileSync(join(root, 'state', name), 'user file')
+        }
+        mkdirSync(join(root, 'workspace'))
+        writeFileSync(join(root, 'workspace', 'README.md'), 'user file')
+      },
       // A desktop PVC never held the database before v1; a user project in
       // state/ must not be adopted as the conversation store.
       'desktop project state/{state.db,app.yml} without workspace/': root => {

@@ -31,8 +31,8 @@ function shellSingleQuote(value: string): string {
  *
  * The merge runs only on the signature the earlier init leaves: `state/`
  * and `workspace/` are both real directories and `state/` holds a file the
- * init writes (`state.db`, `state.db-wal`, `state.db-shm` or a
- * `state.db*.pre-*.bak` copy). Any other tree exits 0 untouched: stateful,
+ * init writes (`state.db`, `state.db-wal`, `state.db-shm` or a `.pre-*.bak`
+ * copy of one of those three). Any other tree exits 0 untouched: stateful,
  * desktop, empty, a user folder named `state/` or `workspace/`, a `state/`
  * holding other `state.db*` names, and a `state` or `workspace` that is a
  * symlink or not a directory (an agent can create those on a stateful Host,
@@ -104,9 +104,10 @@ root_real="$(canonical_dir "$root")" || fail_merge "cannot resolve workspace PVC
 [ -r "$root/state" ] && [ -x "$root/state" ] ||
   fail_merge "state directory is not readable and searchable: $root/state"
 # Only the names the earlier init writes count: the database, its journals
-# and the .pre-<ts>.bak copies it keeps of an older source.
+# and the .pre-<ts>.bak copy it keeps of each of them from an older source.
 signature=0
-for entry in "$root/state"/state.db "$root/state"/state.db-wal "$root/state"/state.db-shm "$root/state"/state.db*.pre-*.bak; do
+for entry in "$root/state"/state.db "$root/state"/state.db-wal "$root/state"/state.db-shm \\
+  "$root/state"/state.db.pre-*.bak "$root/state"/state.db-wal.pre-*.bak "$root/state"/state.db-shm.pre-*.bak; do
   if present "$entry"; then signature=1; fi
 done
 [ "$signature" -eq 1 ] || exit 0
@@ -118,7 +119,8 @@ assert_managed_dir "$root/workspace" workspace
 [ -r "$root/workspace" ] && [ -x "$root/workspace" ] ||
   fail_merge "workspace directory is not readable and searchable: $root/workspace"
 for dir in "$root" "$root/state" "$root/workspace"; do
-  for entry in "$dir"/state.db "$dir"/state.db-wal "$dir"/state.db-shm "$dir"/state.db*.pre-*.bak; do
+  for entry in "$dir"/state.db "$dir"/state.db-wal "$dir"/state.db-shm \\
+    "$dir"/state.db.pre-*.bak "$dir"/state.db-wal.pre-*.bak "$dir"/state.db-shm.pre-*.bak; do
     present "$entry" || continue
     [ ! -L "$entry" ] || fail_merge "SQLite file is a symlink: $entry"
     [ -f "$entry" ] || fail_merge "SQLite file is not a regular file: $entry"
