@@ -5,7 +5,9 @@ import { SingleValueEditDialog } from '@clerum/frontend-components'
 import {
   GFS_UPLOAD_NAME_EXHAUSTED_MESSAGE,
   GFS_UPLOAD_NAME_RETRY_LIMIT,
+  GFS_MOVE_MAX_NETWORK_ATTEMPTS,
   createGfsUploadNameReservationBook,
+  decideDragPathStructure,
   gfsUploadNameRetryDecision,
   isGfsNameConflict,
   nextAvailableGfsResourceName,
@@ -14,6 +16,7 @@ import {
 import { FileUploadModal } from '@components/FileUploadModal'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { GfsMarkdownPreview } from '@components/GfsMarkdownPreview'
+import { GfsMoveConfirmDialog } from '@components/GfsMoveConfirmDialog'
 import { GfsMoveDialog } from '@components/GfsMoveDialog'
 import { GfsOpenLinkModal } from '@components/GfsOpenLinkModal'
 import { GfsVideoPreview } from '@components/GfsVideoPreview'
@@ -212,8 +215,6 @@ type TrailReconstructionOutcome = 'applied' | 'failed' | 'superseded'
 const DRIVE = 'main'
 const PENDING_GFS_UPLOAD_KEY = 'evenfire:gfs-upload-v2:pending'
 const GFS_RESOURCE_DRAG_TYPE = 'application/x-evenfire-gfs-resource'
-const GFS_MOVE_NAME_EXHAUSTED_MESSAGE =
-  'Could not move this resource because all numbered names are already in use.'
 
 interface PendingGfsUpload {
   uploadId?: string
@@ -402,6 +403,13 @@ export function GfsBrowser(): React.JSX.Element {
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null)
   const [movingResourceId, setMovingResourceId] = useState<string | null>(null)
   const [moveTarget, setMoveTarget] = useState<GfsChild | null>(null)
+  // rev-2 §1: a folder DROP stops at ONE confirmation (impact + naming
+  // policy); files move directly; the Move dialog is its own confirmation.
+  const [confirmMoveTarget, setConfirmMoveTarget] = useState<{
+    source: GfsChild
+    destination: GfsChild
+    suggestedName?: string
+  } | null>(null)
   const moveTargetRef = useRef(moveTarget)
   moveTargetRef.current = moveTarget
   // R5-M1 recovery: the Move PATCH succeeded but the breadcrumb trail could
@@ -1294,7 +1302,8 @@ export function GfsBrowser(): React.JSX.Element {
   }
 
   function handleResourceDragStart(event: React.DragEvent<HTMLLIElement>, child: GfsChild): void {
-    if (child.kind === 'directory' || movingResourceRef.current) {
+    // Files AND folders drag (rev-2 D2); an in-flight move freezes sources.
+    if (movingResourceRef.current) {
       event.preventDefault()
       return
     }
@@ -1337,8 +1346,9 @@ export function GfsBrowser(): React.JSX.Element {
   async function moveResource(
     source: GfsChild,
     destination: Pick<GfsChild, 'resourceId' | 'name' | 'kind'>,
-    bubbleError = false
+    options: { bubbleError?: boolean; allowNumberedRename?: boolean } = {}
   ): Promise<void> {
+    const { bubbleError = false, allowNumberedRename = true } = options
     if (
       destination.kind !== 'directory' ||
       source.resourceId === destination.resourceId ||
@@ -1354,7 +1364,10 @@ export function GfsBrowser(): React.JSX.Element {
       let moveName = source.name
       let moved = false
       let moveResult: unknown
-      for (let attempt = 0; attempt < GFS_UPLOAD_NAME_RETRY_LIMIT; attempt += 1) {
+      // rev-2 §5: at most three network attempts per gesture under an
+      // approved numbered-name policy; a single attempt otherwise.
+      const maxAttempts = allowNumberedRename ? GFS_MOVE_MAX_NETWORK_ATTEMPTS : 1
+      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         try {
           moveResult = await apiSend(
             'PATCH',
@@ -1371,14 +1384,20 @@ export function GfsBrowser(): React.JSX.Element {
           break
         } catch (error) {
           if (!isGfsNameConflict(error)) throw error
-          occupiedNames.add(moveName)
-          if (attempt + 1 >= GFS_UPLOAD_NAME_RETRY_LIMIT) {
-            throw new Error(GFS_MOVE_NAME_EXHAUSTED_MESSAGE)
+          if (!allowNumberedRename) {
+            throw new Error(
+              'An item with this name already exists. Choose another folder, or use Move to change its name.'
+            )
           }
+          occupiedNames.add(moveName)
+          if (attempt + 1 >= maxAttempts) break
           moveName = nextAvailableGfsResourceName(source.name, occupiedNames)
         }
       }
-      if (!moved) throw new Error(GFS_MOVE_NAME_EXHAUSTED_MESSAGE)
+      if (!moved) {
+        // A concurrent naming storm, not "all numbered names used".
+        throw new Error('The destination changed. Refresh it or choose another folder.')
+      }
       const movedResource = (
         moveResult as { data?: { resourceId?: string; version?: number } } | undefined
       )?.data
@@ -1396,6 +1415,12 @@ export function GfsBrowser(): React.JSX.Element {
           : `Moved "${source.name}" to "${destination.name}" as "${moveName}".`,
         { tone: 'success' }
       )
+      if (source.kind === 'directory') {
+        showToast(
+          'Moving a folder changes who can access its contents — access now follows the new location.',
+          { tone: 'info' }
+        )
+      }
       // A move changes the moved folder's ANCESTRY. When the moved resource
       // is part of the open breadcrumb trail, patching only its own crumb
       // would leave every crumb above it describing the OLD location (R5-M1):
@@ -1538,6 +1563,36 @@ export function GfsBrowser(): React.JSX.Element {
     await rebuildTrailFromNewLocation(recovery.resourceId, recovery.gfsUri)
   }
 
+  /** Resolve a resource's canonical path from a current authorized view
+   *  (rev-2 §3.2): the operator resolve contract returns `path`; a null or
+   *  absent path NEVER certifies structure — callers fall back to the atomic
+   *  server check. */
+  async function canonicalPathOf(child: Pick<GfsChild, 'gfsUri' | 'path'>): Promise<string | null> {
+    if (typeof child.path === 'string' && child.path.length > 0) return child.path
+    try {
+      const view = (await apiGet('/api/v1/gfs/resolve', { uri: child.gfsUri })) as {
+        path?: string | null
+      }
+      return typeof view.path === 'string' && view.path.length > 0 ? view.path : null
+    } catch {
+      return null
+    }
+  }
+
+  function structureDenialMessage(reason: 'self' | 'descendant' | 'same-parent' | 'root-source' | 'cross-drive'): string {
+    switch (reason) {
+      case 'same-parent':
+        return 'This item is already in this folder.'
+      case 'descendant':
+      case 'self':
+        return 'A folder cannot be moved into itself or one of its subfolders.'
+      case 'root-source':
+        return 'The top-level folder cannot be moved.'
+      default:
+        return 'Items can’t be moved between drives.'
+    }
+  }
+
   async function handleFolderDrop(
     event: React.DragEvent<HTMLLIElement>,
     folder: GfsChild
@@ -1548,7 +1603,34 @@ export function GfsBrowser(): React.JSX.Element {
     setDragOverFolderId(null)
     const source = draggingResourceRef.current
     if (!source) return
-    await moveResource(source, folder)
+    if (source.kind === 'file') {
+      // Files cannot be ancestors: no structural risk; move directly.
+      await moveResource(source, folder)
+      return
+    }
+    // Folder drops stop at ONE confirmation (rev-2 §1) after the fresh-path
+    // structural guard — the impact dialog also records the naming policy.
+    const [sourcePath, targetPath] = await Promise.all([
+      canonicalPathOf(source),
+      canonicalPathOf(folder),
+    ])
+    const structure = decideDragPathStructure({ sourcePath, targetPath })
+    if (structure.kind === 'deny') {
+      showToast(structureDenialMessage(structure.reason), { tone: 'error' })
+      return
+    }
+    const occupiedNames = new Set<string>(
+      (childCacheRef.current.get(folder.resourceId)?.items ?? []).map(item => item.name)
+    )
+    const suggested =
+      occupiedNames.size > 0 && occupiedNames.has(source.name)
+        ? nextAvailableGfsResourceName(source.name, occupiedNames)
+        : undefined
+    setConfirmMoveTarget({
+      source,
+      destination: folder,
+      ...(suggested !== undefined ? { suggestedName: suggested } : {}),
+    })
   }
 
   async function uploadWithCompatibility(
@@ -2256,7 +2338,7 @@ export function GfsBrowser(): React.JSX.Element {
                   const rowOpenable = child.kind === 'directory' || isGfsPreviewFile(child.name)
                   const isDragging = draggingResourceId === child.resourceId
                   const isDropTarget = dragOverFolderId === child.resourceId
-                  const canDragResource = child.kind !== 'directory' && movingResourceId === null
+                  const canDragResource = movingResourceId === null
                   const openRow = () => {
                     if (child.kind === 'directory') openDirectory(child)
                     else openFilePreview(child)
@@ -2611,11 +2693,33 @@ export function GfsBrowser(): React.JSX.Element {
             await moveResource(
               moveTarget,
               { resourceId: destinationId, name: destinationName, kind: 'directory' },
-              true
+              { bubbleError: true }
             )
             setMoveTarget(null)
           }}
           target={moveTarget}
+        />
+      ) : null}
+
+      {confirmMoveTarget ? (
+        <GfsMoveConfirmDialog
+          busy={movingResourceId === confirmMoveTarget.source.resourceId}
+          onCancel={() => setConfirmMoveTarget(null)}
+          onConfirm={({ allowNumberedRename }) => {
+            const pending = confirmMoveTarget
+            setConfirmMoveTarget(null)
+            if (pending) {
+              void moveResource(pending.source, pending.destination, { allowNumberedRename })
+            }
+          }}
+          request={{
+            sourceName: confirmMoveTarget.source.name,
+            destinationName: confirmMoveTarget.destination.name,
+            canRename: true,
+            ...(confirmMoveTarget.suggestedName !== undefined
+              ? { suggestedName: confirmMoveTarget.suggestedName }
+              : {}),
+          }}
         />
       ) : null}
 

@@ -14710,3 +14710,38 @@ button.cu-gfs-tree__button:focus-visible,
     }
   }
 }
+
+/* ── GfsMoveConfirmDialog (rev-2 drag-and-drop D2) ─────────────────────────
+   One confirmation for folder drag moves: impact + naming policy. Reuses the
+   established move-dialog action/token vocabulary. */
+.cu-gfs-move-confirm {
+  max-width: 30rem;
+}
+
+.cu-gfs-move-confirm__header h3 {
+  margin: 0;
+}
+
+.cu-gfs-move-confirm__body {
+  display: grid;
+  gap: var(--cu-space-3);
+  padding: var(--cu-space-3) 0;
+}
+
+.cu-gfs-move-confirm__impact {
+  margin: 0;
+  color: var(--cu-text-muted, var(--cu-text-dim));
+}
+
+.cu-gfs-move-confirm__rename-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--cu-space-1);
+  cursor: pointer;
+}
+
+.cu-gfs-move-confirm__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--cu-space-1);
+}

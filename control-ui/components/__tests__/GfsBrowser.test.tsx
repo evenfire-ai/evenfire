@@ -1844,7 +1844,8 @@ describe('GfsBrowser', () => {
     expect(fileRow).not.toBeNull()
     expect(folderRow).not.toBeNull()
     expect(fileRow).toHaveAttribute('draggable', 'true')
-    expect(folderRow).toHaveAttribute('draggable', 'false')
+    // rev-2 D2: folders drag too (moves via the drop-target rows).
+    expect(folderRow).toHaveAttribute('draggable', 'true')
 
     const dataTransfer = {
       dropEffect: 'none',
@@ -3829,5 +3830,219 @@ describe('GfsBrowser', () => {
 
     expect(await screen.findByText('Showing the first 1 item.')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Load more' })).toBeTruthy()
+  })
+})
+
+// ── folder drag moves (rev-2 D2) ─────────────────────────────────────────────
+
+describe('GfsBrowser — folder drag-and-drop', () => {
+  // The file's shared mock reset lives inside the sibling describe('GfsBrowser')
+  // block; this block resets the same API mocks for itself.
+  beforeEach(() => {
+    mockApiGet.mockReset()
+    mockApiSend.mockReset()
+  })
+
+  function folderPage() {
+    const archive = child('archive', 'directory', 1)
+    const projects = child('projects', 'directory', 2)
+    mockApiGet.mockImplementation(async (path: string) => {
+      if (path === '/api/v1/gfs/tree' || path === '/api/v1/gfs/resources/11111111-1111-1111-1111-111111111111/children') {
+        return {
+          rootResourceId: '11111111-1111-1111-1111-111111111111',
+          items: [archive, projects],
+          nextCursor: null,
+        }
+      }
+      return { items: [], nextCursor: null }
+    })
+    return { archive, projects }
+  }
+
+  function dragAndDrop(sourceRow: HTMLElement, destinationRow: HTMLElement) {
+    const dataTransfer = {
+      dropEffect: 'none',
+      effectAllowed: 'uninitialized',
+      files: [],
+      types: ['application/x-evenfire-gfs-resource'],
+      setData: vi.fn(),
+      getData: vi.fn(),
+    }
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(destinationRow, { dataTransfer })
+    fireEvent.dragOver(destinationRow, { dataTransfer })
+    fireEvent.drop(destinationRow, { dataTransfer })
+    fireEvent.dragEnd(sourceRow, { dataTransfer })
+  }
+
+  it('stops a folder drop at the one confirmation and commits on Move', async () => {
+    const { archive, projects } = folderPage()
+    mockApiSend.mockResolvedValueOnce({ ok: true, data: { resourceId: 'id-2', version: 1 } })
+    renderBrowser()
+
+    await waitFor(() =>
+      expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull()
+    )
+    const projectsRow = within(screen.getByRole('list', { name: 'Current folder resources' }))
+      .getByText('projects')
+      .closest('li')!
+    const archiveRow = within(screen.getByRole('list', { name: 'Current folder resources' }))
+      .getByText('archive')
+      .closest('li')!
+
+    dragAndDrop(projectsRow, archiveRow)
+
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Move folder projects to archive',
+    })
+    expect(
+      within(dialog).getByText(/Inherited access to this folder and its contents follows the new location/)
+    ).toBeTruthy()
+    // The structure guard passed on fresh canonical paths (both rows carry
+    // paths; sibling folders are structurally safe) — no request yet.
+    expect(mockApiSend).not.toHaveBeenCalled()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move', exact: true }))
+
+    await waitFor(() =>
+      expect(mockApiSend).toHaveBeenCalledWith(
+        'PATCH',
+        '/api/v1/gfs/resources/id-2',
+        { drive: 'main', newParentId: 'id-1', ifMatch: 0 },
+        { drive: 'main' }
+      )
+    )
+    expect(await screen.findByText('Moved "projects" to "archive".')).toBeTruthy()
+    expect(await screen.findByText(/access now follows the new location/)).toBeTruthy()
+    expect(screen.queryByRole('dialog')).toBeNull()
+    void projects
+  })
+
+  it('cancelling the folder confirmation sends no PATCH and claims no move', async () => {
+    folderPage()
+    renderBrowser()
+
+    await waitFor(() =>
+      expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull()
+    )
+    const list = screen.getByRole('list', { name: 'Current folder resources' })
+    const projectsRow = within(list).getByText('projects').closest('li')!
+    const archiveRow = within(list).getByText('archive').closest('li')!
+
+    dragAndDrop(projectsRow, archiveRow)
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Move folder projects to archive',
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+
+    expect(mockApiSend).not.toHaveBeenCalled()
+    expect(screen.queryByText(/Moved/)).toBeNull()
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('refuses a folder drop into its own descendant using canonical paths', async () => {
+    // projects lives at /projects; archive lives at /projects/archive — a
+    // child of the source. The listing rows carry those paths.
+    const projects = child('projects', 'directory', 2)
+    const nestedArchive = child('archive', 'directory', 1)
+    nestedArchive.path = '/projects/archive'
+    mockApiGet.mockImplementation(async (path: string) => {
+      if (path === '/api/v1/gfs/tree' || path === '/api/v1/gfs/resources/11111111-1111-1111-1111-111111111111/children') {
+        return {
+          rootResourceId: '11111111-1111-1111-1111-111111111111',
+          items: [projects, nestedArchive],
+          nextCursor: null,
+        }
+      }
+      return { items: [], nextCursor: null }
+    })
+    renderBrowser()
+
+    await waitFor(() =>
+      expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull()
+    )
+    const list = screen.getByRole('list', { name: 'Current folder resources' })
+    const projectsRow = within(list).getByText('projects').closest('li')!
+    const archiveRow = within(list).getByText('archive').closest('li')!
+
+    dragAndDrop(projectsRow, archiveRow)
+
+    expect(
+      await screen.findByText('A folder cannot be moved into itself or one of its subfolders.')
+    ).toBeTruthy()
+    expect(mockApiSend).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('a folder conflict without the numbered-name opt-in stops after one attempt', async () => {
+    folderPage()
+    const actualApi = await vi.importActual<typeof import('@lib/api')>('@lib/api')
+    const conflict = () => {
+      const text = JSON.stringify({
+        error: { code: 'already_exists', message: 'a resource with this name already exists' },
+      })
+      return actualApi.formatApiError(new Response(text, { status: 409, statusText: 'Conflict' }), text)
+    }
+    mockApiSend.mockRejectedValueOnce(conflict())
+    renderBrowser()
+
+    await waitFor(() =>
+      expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull()
+    )
+    const list = screen.getByRole('list', { name: 'Current folder resources' })
+    const projectsRow = within(list).getByText('projects').closest('li')!
+    const archiveRow = within(list).getByText('archive').closest('li')!
+
+    dragAndDrop(projectsRow, archiveRow)
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Move folder projects to archive',
+    })
+    // The numbered-name policy is an explicit opt-in (unchecked by default).
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move', exact: true }))
+
+    expect(
+      await screen.findByText(/An item with this name already exists/)
+    ).toBeTruthy()
+    expect(mockApiSend).toHaveBeenCalledTimes(1)
+  })
+
+  it('a folder conflict with the numbered-name opt-in renames the whole folder within 3 attempts', async () => {
+    folderPage()
+    const actualApi = await vi.importActual<typeof import('@lib/api')>('@lib/api')
+    const conflict = () => {
+      const text = JSON.stringify({
+        error: { code: 'already_exists', message: 'a resource with this name already exists' },
+      })
+      return actualApi.formatApiError(new Response(text, { status: 409, statusText: 'Conflict' }), text)
+    }
+    mockApiSend
+      .mockRejectedValueOnce(conflict())
+      .mockRejectedValueOnce(conflict())
+      .mockResolvedValueOnce({ ok: true, data: { resourceId: 'id-2', version: 1 } })
+    renderBrowser()
+
+    await waitFor(() =>
+      expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull()
+    )
+    const list = screen.getByRole('list', { name: 'Current folder resources' })
+    const projectsRow = within(list).getByText('projects').closest('li')!
+    const archiveRow = within(list).getByText('archive').closest('li')!
+
+    dragAndDrop(projectsRow, archiveRow)
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Move folder projects to archive',
+    })
+    fireEvent.click(within(dialog).getByRole('checkbox'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move', exact: true }))
+
+    await waitFor(() => expect(mockApiSend).toHaveBeenCalledTimes(3))
+    expect(mockApiSend).toHaveBeenNthCalledWith(
+      3,
+      'PATCH',
+      '/api/v1/gfs/resources/id-2',
+      { drive: 'main', newParentId: 'id-1', ifMatch: 0, newName: 'projects (2)' },
+      { drive: 'main' }
+    )
+    expect(await screen.findByText('Moved "projects" to "archive" as "projects (2)".')).toBeTruthy()
   })
 })
