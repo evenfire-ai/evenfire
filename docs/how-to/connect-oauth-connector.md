@@ -36,13 +36,10 @@ also rejects an OAuth server that pins a static `Authorization` header.
 | `OAUTH_PROACTIVE_REFRESH_CRON_ENABLED`                                    | **Off**, including in minikube                                                                                                                    | Remote-server tokens are only refreshed when someone uses them. See [Refresh and background use](#refresh-and-background-use).                                                                                                                                                                                                                                                                                                                                         |
 
 The Control UI **Marketplace** OAuth install form (built-in and generic
-providers) shows the redirect URI using
-`NEXT_PUBLIC_CONTROL_API_OAUTH_CALLBACK_BASE_URL`. Next.js compiles this value
-into the Control UI bundle at build time. The shipped Dockerfile and the
-minikube image build do not set it. Without it, the form shows "not configured"
-and keeps **Install connector** disabled. The remote-server wizard is not affected,
-because control-api computes its redirect URI. If your build does not set the
-variable, install built-in and generic connectors with YAML (below).
+providers) reads the redirect URI from control-api at runtime
+(`GET /admin/oauth/callback`), so it always matches
+`CONTROL_API_OAUTH_CALLBACK_BASE_URL`. While that setting is unset, the form
+shows "not configured" and keeps **Install connector** disabled.
 
 The desktop app opens the provider's authorize URL only if it uses `https:`.
 
@@ -263,7 +260,7 @@ out too, but the screen only tracks the current one.
 | Remote install returns `callback_base_url_unconfigured`                             | CIMD, DCR, or a server without RFC 9207 needs the public callback origin                                       | Set `CONTROL_API_OAUTH_CALLBACK_BASE_URL`                                                                |
 | CIMD authorization fails; the authorization server cannot fetch the client ID       | The gateway does not route `/api/v1/.well-known/evenfire-mcp-client` (the `deploy/base` gateway returns `403`) | Forward that path to control-api in your gateway or ingress                                              |
 | **Detect** stops with an unreachable transport (`transport_unreachable` on install) | The URL is not the MCP endpoint                                                                                | Use the URL the wizard suggests, or the server's documented MCP path                                     |
-| Marketplace OAuth form says the callback URL is not configured                      | `NEXT_PUBLIC_CONTROL_API_OAUTH_CALLBACK_BASE_URL` was not set when Control UI was built                        | Rebuild Control UI with it, or install with YAML                                                         |
+| Marketplace OAuth form says the callback URL is not configured                      | `CONTROL_API_OAUTH_CALLBACK_BASE_URL` is unset on control-api                                                  | Set it, restart control-api, and reload the form                                                         |
 | `503 integration_not_configured`                                                    | The client ID or secret Secret, or one of its keys, is missing                                                 | Create the Secret the hint names                                                                         |
 | `403 context_membership_denied`                                                     | The user is not a member of the server's Context                                                               | Add the user to the Context                                                                              |
 | Users must authorize again after a reinstall                                        | Grants are bound to the old McpServer UID                                                                      | Expected                                                                                                 |
