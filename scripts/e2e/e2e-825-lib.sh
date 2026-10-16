@@ -424,17 +424,18 @@ read_seed_file() { # HOST NAME EXPECTED
 
 # ─── Operator script ──────────────────────────────────────────────────
 # layout_row inventory|verify HOST EXITS: runs deploy/scripts/host-layout-merge.sh
-# on this profile and prints the result of the Host's PVC row. EXITS is a case
-# pattern; the fleet verdict is left alone because other Hosts on the profile
-# decide it, and exit 2 (read failure) never matches.
+# on this profile and prints the result of the Host's PVC row. EXITS is a
+# space-separated list of accepted exit codes (a `|` inside an expanded case
+# pattern is matched literally, not as alternation); the fleet verdict is left
+# alone because other Hosts on the profile decide it, and exit 2 (read failure)
+# never matches.
 layout_row() {
   local cmd=$1 host=$2 exits=$3 rc=0 out row
   out="$(mktemp "${SCRATCH}/layout-${cmd}-${host}.XXXXXX")"
   log "host-layout-merge.sh ${cmd} for ${HOST_NS}/${host}-workspace" >&2
   bash "$LAYOUT_SCRIPT" "$cmd" --context "$E2E_KUBECONTEXT" >"$out" 2>"${out}.err" || rc=$?
-  # shellcheck disable=SC2254 # EXITS is a case pattern on purpose
-  case "$rc" in
-    $exits) ;;
+  case " ${exits} " in
+    *" ${rc} "*) ;;
     *)
       fail "${host}: host-layout-merge.sh ${cmd} exited ${rc} (expected ${exits}): $(tail -n 3 "${out}.err" | tr '\n' ' ') $(tail -n 3 "$out" | tr '\n' ' ')" >&2
       return 1

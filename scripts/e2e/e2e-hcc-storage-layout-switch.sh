@@ -280,7 +280,7 @@ scenario_S5() {
     fail "S5: seeded tree is not split: ${listing}"
     return 1
   fi
-  row="$(layout_row inventory "$name" '0|1')" || return 1
+  row="$(layout_row inventory "$name" '0 1')" || return 1
   [ "$row" = WILL_MERGE ] || { fail "S5: inventory reads ${name}-workspace as '${row}', expected WILL_MERGE"; return 1; }
   # A split tree is a blocker for turning the flag off, whatever the rest of the fleet.
   row="$(layout_row verify "$name" 1)" || return 1
@@ -298,7 +298,7 @@ scenario_S5() {
     return 1
   fi
   ok "S5: split tree merged to the root"
-  row="$(layout_row verify "$name" '0|1')" || return 1
+  row="$(layout_row verify "$name" '0 1')" || return 1
   [ "$row" = POD_OK ] || { fail "S5: verify reads ${name}-workspace as '${row}' after the merge, expected POD_OK"; return 1; }
   ok "S5: host-layout-merge.sh verify reads the merged Host as POD_OK"
   assert_history "$name" 'suspend->wake(split-tree-merged)' || return 1

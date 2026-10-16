@@ -250,3 +250,45 @@ test('no curl call in the #825 scripts puts a Cookie or Authorization header in 
   const uses = SOURCE.match(/auth_header (admin|session|rpc) /g) ?? []
   assert.ok(uses.length >= 4, `auth_header uses: ${uses.length}`)
 })
+
+function runLayoutRow(dir, exits, rc) {
+  const script = path.join(dir, 'host-layout-merge.sh')
+  writeFileSync(script, `echo "PVC e2e/h1-workspace host=h1 result=WILL_MERGE"\nexit ${rc}\n`)
+  const body = `
+fail() { echo "FAIL — $*"; }
+log() { :; }
+SCRATCH="$DIR" LAYOUT_SCRIPT="$DIR/host-layout-merge.sh" E2E_KUBECONTEXT=ctx HOST_NS=e2e
+${helper('layout_row')}
+row="$(layout_row inventory h1 "$EXITS")"; rc=$?
+printf 'RC=%s ROW=[%s]\\n' "$rc" "$row"
+`
+  return bash(body, { DIR: dir, EXITS: exits })
+}
+
+test('layout_row accepts every exit code in its list and refuses the others', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'e2e-825-layout-row-'))
+  try {
+    for (const [exits, rc, expected] of [
+      ['0 1', 0, 'RC=0 ROW=[WILL_MERGE]'],
+      ['0 1', 1, 'RC=0 ROW=[WILL_MERGE]'],
+      ['1', 1, 'RC=0 ROW=[WILL_MERGE]'],
+      ['1', 0, 'RC=1 ROW=[]'],
+      ['0 1', 2, 'RC=1 ROW=[]'],
+      ['0 1', 10, 'RC=1 ROW=[]'],
+    ]) {
+      const run = runLayoutRow(dir, exits, rc)
+      assert.equal(run.status, 0, run.stderr)
+      assert.equal(run.stdout.trim().split('\n').at(-1), expected, `exits=[${exits}] rc=${rc}: ${run.stdout}`)
+      if (expected.startsWith('RC=1')) assert.match(run.stderr, new RegExp(`exited ${rc} \\(expected ${exits}\\)`))
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('layout_row callers pass exit codes as a space-separated list', () => {
+  const calls = SOURCE.match(/layout_row (inventory|verify) "\$name" \S+/g) ?? []
+  // Witness: S5 and S6 call it five times.
+  assert.equal(calls.length, 5, calls.join('\n'))
+  for (const call of calls) assert.doesNotMatch(call, /\|/, call)
+})
