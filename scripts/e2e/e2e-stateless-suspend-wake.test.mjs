@@ -65,6 +65,60 @@ read_thread_messages && printf 'MESSAGES=%s\\n' "$THREAD_MESSAGES"
   }
 })
 
+test('mint_session_token keeps the password out of jq and curl argv', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'e2e-suspend-wake-login-'))
+  try {
+    const realJq = spawnSync('bash', ['-c', 'command -v jq'], { encoding: 'utf8' }).stdout.trim()
+    assert.ok(realJq, 'jq not found on PATH')
+    const bin = path.join(dir, 'bin')
+    const argv = path.join(dir, 'argv')
+    const sent = path.join(dir, 'sent')
+    spawnSync('mkdir', [bin])
+    writeFileSync(argv, '')
+    writeFileSync(sent, '')
+    // A PATH executable, not a shell function: what ps would show is the argv
+    // of this process.
+    writeFileSync(
+      path.join(bin, 'jq'),
+      `#!/bin/sh\nprintf '%s\\n' "$@" >>"$ARGV"\nexec '${realJq}' "$@"\n`,
+      { mode: 0o755 }
+    )
+    const body = `
+EXT_BASE=http://127.0.0.1:1 DEV_EMAIL=dev@example.test DEV_PASSWORD='dev"pw-secret-1'
+curl() {
+  printf '%s\\n' "$@" >>"$ARGV"
+  local a
+  for a in "$@"; do
+    case "$a" in @-) cat >>"$SENT" ;; esac
+  done
+  printf '{"token":"session-1"}\\n200'
+}
+${helper('mint_session_token')}
+mint_session_token && printf 'TOKEN=%s\\n' "$SESSION_TOKEN"
+`
+    const run = spawnSync('bash', ['-c', body], {
+      encoding: 'utf8',
+      env: { PATH: `${bin}:${process.env.PATH}`, ARGV: argv, SENT: sent },
+      timeout: 30_000,
+    })
+    assert.equal(run.status, 0, run.stderr)
+    // Liveness witness: the helper parsed the stubbed login response.
+    assert.equal(run.stdout.trim(), 'TOKEN=session-1')
+    const args = readFileSync(argv, 'utf8')
+    assert.doesNotMatch(args, /pw-secret/)
+    // Witness: jq built the body and curl was called, and the body that
+    // reached curl carries the exact password.
+    assert.match(args, /email/)
+    assert.match(args, /password-login/)
+    assert.deepEqual(JSON.parse(readFileSync(sent, 'utf8')), {
+      email: 'dev@example.test',
+      password: 'dev"pw-secret-1',
+    })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('no curl call in the script puts a Cookie or Authorization header in argv', () => {
   assert.doesNotMatch(SOURCE, /-H\s+["']?(Cookie|Authorization):/i)
   assert.doesNotMatch(SOURCE, /-H\s+["']?\$\(rpc_auth_header\)/)

@@ -271,11 +271,13 @@ SESSION_TOKEN=""; RPC_TOKEN=""
 RPC_SCOPES_JSON='["host:message:invoke","host:approval:write","host:session:read","host:status:read","host:health:read","host:wake:write"]'
 RPC_HOSTREFS_JSON=""
 
+# The password never goes in argv (visible in `ps`): jq reads it from its
+# environment and curl reads the body from stdin.
 mint_session_token() {
   local resp code body
-  resp=$(curl -sS -m 30 -w '\n%{http_code}' -X POST "${EXT_BASE}/api/v1/auth/password-login" \
-    -H 'Content-Type: application/json' \
-    -d "$(jq -cn --arg e "$DEV_EMAIL" --arg p "$DEV_PASSWORD" '{email:$e,password:$p}')") || {
+  resp=$(DEV_PASSWORD="$DEV_PASSWORD" jq -cn --arg e "$DEV_EMAIL" '{email:$e,password:env.DEV_PASSWORD}' |
+    curl -sS -m 30 -w '\n%{http_code}' -X POST "${EXT_BASE}/api/v1/auth/password-login" \
+      -H 'Content-Type: application/json' --data-binary @-) || {
     echo "password-login request failed at ${EXT_BASE}" >&2; return 1; }
   code="$(echo "$resp" | tail -n1)"; body="$(echo "$resp" | sed '$d')"
   [ "$code" = "200" ] || { echo "password-login -> HTTP ${code}: ${body}" >&2; return 1; }
