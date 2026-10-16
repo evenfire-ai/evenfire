@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 set -eu
 root='/mnt/workspace-root'
 fail_merge() {

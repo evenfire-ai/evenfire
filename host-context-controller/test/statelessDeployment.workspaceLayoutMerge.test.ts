@@ -230,10 +230,12 @@ function mvCalls(env: NodeJS.ProcessEnv): number {
 
 describe('workspace layout merge', () => {
   it('ships the rendered script as the copy the verify script reads', () => {
+    // The copy has no shebang (HCC runs it with `sh -c`), so its first line
+    // names the shell for the T0 shellcheck gate.
     expect(
       readFileSync(MERGE_SCRIPT_COPY, 'utf8'),
       'regenerate deploy/scripts/workspace-layout-merge.sh from buildWorkspaceLayoutMergeScript()'
-    ).toBe(buildWorkspaceLayoutMergeScript())
+    ).toBe(`# shellcheck shell=sh\n${buildWorkspaceLayoutMergeScript()}`)
   })
 
   it('predicts a refusal for a Host switched to stateful before the upgrade (T5)', () => {
