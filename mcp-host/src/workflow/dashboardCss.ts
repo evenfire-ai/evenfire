@@ -253,6 +253,12 @@ em, i { font-style: italic; }
   overflow: hidden;
   contain: size layout;
 }
+.kpi-card__sparkline-note {
+  margin: 8px 0 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
 .kpi-card__sparkline {
   position: absolute !important;
   inset: 0 !important;

@@ -2,8 +2,8 @@
  * The script that draws a dashboard's charts in the browser.
  *
  * Each chart and each sparkline is drawn on its own: a chart Chart.js refuses
- * shows why in its card, a sparkline it refuses is removed, and neither blanks
- * the others. Colors are read
+ * shows why in its card, a sparkline it refuses leaves a short note in its
+ * place, and neither blanks the others. Colors are read
  * from the page's CSS variables and read again when the color scheme or the
  * print media changes, so the series stay legible in light, dark and print.
  * Animation is off: headless HTML-to-PDF converters print a chart the moment it
@@ -222,7 +222,11 @@ const PAGE_SCRIPT = String.raw`
       instances.push({ chart: chart });
     } catch (err) {
       discard(canvas);
-      if (canvas.parentNode) canvas.parentNode.remove();
+      // A fixed text: the KPI says its trend is missing without the error's details.
+      var note = document.createElement('p');
+      note.className = 'kpi-card__sparkline-note';
+      note.textContent = 'Trend could not be drawn';
+      (canvas.parentNode || canvas).replaceWith(note);
     }
   }
 
