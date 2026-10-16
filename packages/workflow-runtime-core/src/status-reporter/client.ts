@@ -3,6 +3,7 @@ import type { RuntimeTokenProvider } from '../runtime-token-provider/provider'
 import { requireRuntimeToken } from '../runtime-token-provider/provider'
 import { sendWithAuthRetryOn401 } from './authRetry'
 import { emitLog } from './logger'
+import { boundToolsCalledForStatus } from './toolCallStatus'
 
 const MAX_RETRIES = 3
 const RETRY_BASE_DELAY_MS = 200
@@ -98,7 +99,9 @@ export class StatusReporter {
       approvalBindingSha256?: string
     }
   ): Promise<void> {
-    await this.report('/status', { stepId, phase, ...meta }, 'step status')
+    const body: Record<string, unknown> = { stepId, phase, ...meta }
+    if (meta?.toolsCalled) body.toolsCalled = boundToolsCalledForStatus(meta.toolsCalled)
+    await this.report('/status', body, 'step status')
   }
 
   async reportWorkflowStatus(
