@@ -153,10 +153,6 @@ export function createTeamRouter(): Router {
         res.status(403).json({ error: 'You are not allowed to invite members' })
         return
       }
-      if (result.error === 'forbidden_role') {
-        res.status(403).json({ error: 'Only team admins can invite admins' })
-        return
-      }
       res.status(201).json(result.invited)
     } catch (error) {
       next(error)

@@ -31,9 +31,14 @@
 
 ## Roles
 
-- `admin`: invite and delete members
-- `inviter`: invite members
+- `admin`: invite members with any role, change member roles, remove members,
+  rename the team
+- `inviter`: invite members as `inviter` or `member`
 - `member`: basic profile usage
+
+Team management is authorized by Control API from the caller's current team
+membership, not from the role in the session token, so a role change applies
+immediately. A refused request returns `403`.
 
 ## Environment
 
