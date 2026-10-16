@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { asApiserverDeployment } from '../src/__tests__/asApiserverDeployment'
 import type { AdministrativeOutcomeReporter } from '../src/administrativeOutcomeReporter'
@@ -5237,6 +5239,80 @@ describe('HostReconciler storage layout — one shape for every lifecycle', () =
       }
     )
   })
+})
+
+describe('HostReconciler storage layout — upgrade from a v0.11.0 Deployment', () => {
+  // The fixtures are the Deployments v0.11.0's HostReconciler renders for these
+  // Hosts with this file's mocks (dumped from the tag, not written by hand).
+  // v0.10.0 renders the same template: statelessDeployment.ts is identical.
+  const legacy = (file: string): k8s.V1Deployment =>
+    JSON.parse(readFileSync(join(__dirname, '__fixtures__', file), 'utf8'))
+
+  const cases = [
+    {
+      state: 'active',
+      host: () => makeStatelessHost({ name: 'upgrade-active' }),
+      fixture: 'v0.11.0-stateless-active-deployment.json',
+      replicas: 1,
+    },
+    {
+      state: 'suspended',
+      host: () => makeStatelessHost({ name: 'upgrade-suspended', status: suspendedStatus(7) }),
+      fixture: 'v0.11.0-stateless-suspended-deployment.json',
+      replicas: 0,
+    },
+  ]
+
+  it.each(cases)(
+    'replaces the split template of a $state stateless Host once',
+    async ({ host: makeUpgradeHost, fixture, replicas }) => {
+      const host = makeUpgradeHost()
+      const previous = legacy(fixture)
+      // Witness: the fixture carries the v0.11.0 split layout.
+      expect(previous.spec?.template.spec?.initContainers?.map(init => init.name)).toEqual([
+        'workspace-layout-init',
+      ])
+      expect(previous.spec?.template.spec?.containers?.[0]?.volumeMounts).toContainEqual({
+        name: 'workspace',
+        mountPath: '/var/lib/clerum/state',
+        subPath: 'state',
+      })
+      expect(previous.spec?.replicas).toBe(replicas)
+
+      const { reconciler, appsApi, customApi } = createReconciler()
+      customApi.getNamespacedCustomObject.mockResolvedValue({
+        ...hostApiObject(host),
+        status: host.status ?? { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
+      })
+      const live = persistHostDeployment(appsApi, host, previous)
+
+      await reconciler.reconcile(host)
+
+      const replacements = () =>
+        appsApi.replaceNamespacedDeployment.mock.calls.filter(
+          ([request]) => request.name === host.name
+        )
+      expect(replacements()).toHaveLength(1)
+      const replaced = live()
+      expect(replaced.spec?.template.spec?.initContainers?.map(init => init.name)).toEqual([
+        'workspace-layout-merge',
+      ])
+      expect(JSON.stringify(replaced)).not.toContain('subPath')
+      expect(replaced.spec?.template.spec?.containers?.[0]?.volumeMounts).toContainEqual({
+        name: 'workspace',
+        mountPath: '/workspace',
+      })
+      expect(envValue(replaced, 'CLERUM_SESSION_DB_DIR')).toBe('/workspace')
+      expect(replaced.spec?.strategy).toEqual({ type: 'Recreate' })
+      expect(replaced.spec?.replicas).toBe(replicas)
+      expect(envValue(replaced, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
+
+      // Witness: the replaced template is up to date, so the next reconcile
+      // leaves it alone.
+      await reconciler.reconcile(host)
+      expect(replacements()).toHaveLength(1)
+    }
+  )
 })
 
 describe('HostReconciler stateless lifecycle — suspension durability', () => {
