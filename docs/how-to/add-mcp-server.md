@@ -83,7 +83,7 @@ Check:
 
 ## Option C — the Control UI
 
-Connectors → `/mcp-servers` → **Create** builds the same `McpServer` resource
+**Installed Connectors** (`/connectors`) → **Create** builds the same `McpServer` resource
 as Option B, through a guided form (identity, transport/runtime, secrets) plus
 an `EgressEditor` step for the egress policy: closed-by-default, with
 private, metadata, link-local, and reserved IPv4 ranges rejected outright.

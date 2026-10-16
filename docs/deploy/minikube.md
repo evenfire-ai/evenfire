@@ -4,9 +4,10 @@ Reference guide for deploying the **full** evenfire platform on local minikube
 (all services, JWT auth chain, NetworkPolicies). Historical scripts and profiles
 may still say **clerum** ([code names](../concepts/code-names.md)).
 
-> **New here?** For a 10-minute agent-only try without Kubernetes, use the
-> [Quickstart](../get-started/quickstart.md) first. This guide is the full local
-> platform path (Path C in the [learning path](../get-started/learning-path.md)).
+> **New here?** Start with the [Quickstart](../get-started/quickstart.md): it
+> brings up this same full platform with one command and walks you to a first
+> chat. This guide is the in-depth reference for the full local platform path
+> (Path C in the [learning path](../get-started/learning-path.md)).
 
 Includes the correct order of operations, the JWT authentication chain, and known issues.
 
@@ -124,9 +125,9 @@ before enabling the feature flag.
 When deployable code changed and the E2E runner will manage port-forwards
 itself, force the sync and skip the short-lived background port-forward refresh.
 Inner `pre-gate-sync` may use `--skip-port-forwards`; never pass that globally
-into `make minikube-t2`. Do not kill this lane's `branch-profile-pf`.
-`make minikube-pf-all-bg` is a gate refresh only; it must not replace
-`branch-profile-pf`.
+into `make minikube-t2`. On a branch-owned profile, keep `branch-profile-pf`
+running: `make minikube-pf-all-bg` only refreshes forwards for a gate and does
+not replace it.
 
 ```bash
 make minikube-pre-gate-sync GATE=<gate-name> ARGS="--force-cluster-sync --skip-port-forwards"
@@ -160,18 +161,15 @@ npm run ui
 open http://localhost:3000
 ```
 
-`make minikube-setup` seeds the default test user and agent/context access. `npm run ui` keeps the required API port-forwards open while it runs the local frontends.
+`make minikube-setup` seeds the `admin@evenfire.local` admin (default `minimal`
+seed profile) and the `chatllm` agent with its context. `npm run ui` keeps the required API port-forwards open while it runs the local frontends.
 
-For a branch-owned profile, the host-side hold for Control UI / Desktop is
-the first-hand entry point `scripts/minikube-profiles/branch.mk`.
-Implementation: `scripts/minikube-profiles/branch-profile.sh`.
-HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
-Profile-owned random ports only (never shared `:3000`/`:8090`).
-`make minikube-pf-all-bg` is a gate refresh only; it must not replace
-`branch-profile-pf`. Do not start UI PFs from a sandboxed agent shell. Run
-the make target on the host. Do not kill this lane's `branch-profile-pf`.
-`branch-profile-pf-health` starts PFs then STOPS them on EXIT — do not use
-it as the lasting hold.
+**Branch-owned profiles** (contributors running several clusters side by
+side) use `scripts/minikube-profiles/branch.mk` instead of the shared
+`:3000`/`:8090` mapping. It forwards on profile-owned random ports and must
+run on the host, not inside a sandboxed shell. `branch-profile-pf` is the
+lasting hold; `branch-profile-pf-health` starts forwards, checks them, and
+stops them on exit.
 
 ```bash
 MINIKUBE_PROFILE=<owned-profile> \
@@ -606,8 +604,8 @@ kubectl rollout restart deployment/rpc-proxy -n rpc-proxy --context clerum-test
 
 ## Port Forwards for the Desktop App
 
-On a branch-owned profile, do not use the shared `:3000`/`:8090` mapping
-below. First-hand entry point `scripts/minikube-profiles/branch.mk`:
+On a branch-owned profile, use `scripts/minikube-profiles/branch.mk` instead
+of the shared `:3000`/`:8090` mapping below:
 
 ```bash
 MINIKUBE_PROFILE=<owned-profile> \
@@ -617,11 +615,8 @@ MINIKUBE_PROFILE=<owned-profile> \
   make -f scripts/minikube-profiles/branch.mk branch-profile-health
 ```
 
-Implementation: `scripts/minikube-profiles/branch-profile.sh`.
-HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
-`make minikube-pf-all-bg` is a gate refresh only; it must not replace
-`branch-profile-pf`. `branch-profile-pf-health` starts PFs then STOPS them
-on EXIT — do not use it as the lasting hold.
+`branch-profile-pf` is the lasting hold; `branch-profile-pf-health` stops its
+forwards on exit, and `make minikube-pf-all-bg` does not replace either.
 
 The shared `clerum-test` Desktop mapping remains:
 
