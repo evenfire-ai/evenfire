@@ -70,6 +70,29 @@ function baseProps(overrides: Partial<SidebarNavProps> = {}): SidebarNavProps {
   }
 }
 
+// Swaps in a narrow-window viewport for one test and puts the previous stub
+// back afterwards, so the mobile layout never leaks into another test whatever
+// the order. Restoring a `vi.spyOn` on the shared stub would reset it instead.
+function stubNarrowViewport() {
+  const previous = window.matchMedia
+  window.matchMedia = vi.fn(
+    (query: string) =>
+      ({
+        matches: true,
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }) as MediaQueryList
+  )
+  onTestFinished(() => {
+    window.matchMedia = previous
+  })
+}
+
 describe('SidebarNav logo', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -172,19 +195,7 @@ describe('SidebarNav logo', () => {
   })
 
   it('routes a controlled palette request through the mobile drawer behavior', () => {
-    vi.spyOn(window, 'matchMedia').mockImplementation(
-      query =>
-        ({
-          matches: true,
-          media: query,
-          onchange: null,
-          addListener: vi.fn(),
-          removeListener: vi.fn(),
-          addEventListener: vi.fn(),
-          removeEventListener: vi.fn(),
-          dispatchEvent: vi.fn(),
-        }) as MediaQueryList
-    )
+    stubNarrowViewport()
     const onCollapsedChange = vi.fn()
     const { container, rerender } = render(
       <SidebarNav {...baseProps({ onCollapsedChange, toggleRequestId: 0 })} />
@@ -459,6 +470,8 @@ describe('SidebarNav Files label engages the file explorer', () => {
     render(<SidebarNav {...baseProps()} />)
 
     expect(screen.getAllByRole('button', { name: /^Retry access to / })).toHaveLength(2)
+    // The visible word stays "Retry": the F3 toast tells the user to use it.
+    expect(screen.getByRole('button', { name: 'Retry access to host-c' }).textContent).toBe('Retry')
     fireEvent.click(screen.getByRole('button', { name: 'Retry access to host-c' }))
     fireEvent.click(screen.getByRole('button', { name: 'Retry access to host-b' }))
     expect(vi.mocked(sidebarContext.handleSelectChatAgent).mock.calls).toEqual([
@@ -468,20 +481,7 @@ describe('SidebarNav Files label engages the file explorer', () => {
   })
 
   it('T-D13-2: closes the mobile menu when Retry is clicked', () => {
-    const matchMedia = vi.spyOn(window, 'matchMedia').mockImplementation(
-      query =>
-        ({
-          matches: true,
-          media: query,
-          onchange: null,
-          addListener: vi.fn(),
-          removeListener: vi.fn(),
-          addEventListener: vi.fn(),
-          removeEventListener: vi.fn(),
-          dispatchEvent: vi.fn(),
-        }) as MediaQueryList
-    )
-    onTestFinished(() => matchMedia.mockRestore())
+    stubNarrowViewport()
     sidebarContext.heldAgentRefs = ['host-b']
     const { container, rerender } = render(<SidebarNav {...baseProps({ toggleRequestId: 0 })} />)
     rerender(<SidebarNav {...baseProps({ toggleRequestId: 1 })} />)
@@ -501,5 +501,78 @@ describe('SidebarNav Files label engages the file explorer', () => {
     })
     expect(nav?.classList.contains('mobile-open')).toBe(false)
     expect(document.body.classList.contains('mobile-sidebar-open')).toBe(false)
+  })
+
+  it('T-D15-1: moves focus to the menu button when Retry closes the narrow-window menu', () => {
+    stubNarrowViewport()
+    sidebarContext.heldAgentRefs = ['host-b']
+    const { container, rerender } = render(<SidebarNav {...baseProps({ toggleRequestId: 0 })} />)
+    rerender(<SidebarNav {...baseProps({ toggleRequestId: 1 })} />)
+    expect(container.querySelector('.left-nav')?.classList.contains('mobile-open')).toBe(true)
+
+    // Liveness witness: keyboard focus is on Retry before it is activated.
+    const retry = screen.getByRole('button', { name: 'Retry access to host-b' })
+    retry.focus()
+    expect(document.activeElement).toBe(retry)
+    fireEvent.click(retry)
+
+    // Verification is still pending, so the row stays, hidden with the menu.
+    expect(sidebarContext.handleSelectChatAgent).toHaveBeenCalledTimes(1)
+    expect(container.querySelector('.left-nav')?.classList.contains('mobile-open')).toBe(false)
+    expect(document.activeElement).toBe(
+      screen.getByRole('button', { name: 'Open navigation menu' })
+    )
+  })
+
+  it('T-D15-2: closes an open session options menu when Retry is clicked', () => {
+    sidebarContext.latestChatSessions = [{ id: 'chat-a1', agentRef: 'host-a', title: 'Session A1' }]
+    sidebarContext.heldAgentRefs = ['host-b']
+    const { container } = render(<SidebarNav {...baseProps()} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Session options for Session A1' }))
+    // Liveness witness: the options menu is open before Retry.
+    expect(container.querySelector('.nav-latest-session__menu')).not.toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry access to host-b' }))
+    expect(sidebarContext.handleSelectChatAgent).toHaveBeenCalledWith('host-b', {
+      selectLatest: false,
+    })
+    expect(container.querySelector('.nav-latest-session__menu')).toBeNull()
+  })
+
+  it('T-D15-3: moves focus to the Chat item when the verified Host leaves the held rows', () => {
+    sidebarContext.heldAgentRefs = ['host-b', 'host-c']
+    const { rerender } = render(<SidebarNav {...baseProps()} />)
+    const retry = screen.getByRole('button', { name: 'Retry access to host-b' })
+    retry.focus()
+    fireEvent.click(retry)
+
+    // A failed verification keeps host-b held: its row and focus stay.
+    sidebarContext.heldAgentRefs = ['host-b', 'host-c']
+    rerender(<SidebarNav {...baseProps()} />)
+    expect(document.activeElement).toBe(retry)
+    // Another Host is released: host-b's row and focus stay.
+    sidebarContext.heldAgentRefs = ['host-b']
+    rerender(<SidebarNav {...baseProps()} />)
+    expect(document.activeElement).toBe(retry)
+
+    sidebarContext.heldAgentRefs = []
+    rerender(<SidebarNav {...baseProps()} />)
+    expect(screen.queryByRole('button', { name: /^Retry access to / })).toBeNull()
+    expect(document.activeElement).toBe(screen.getByTestId('nav-chat'))
+  })
+
+  it('T-D15-4: leaves focus where the user moved it before the Host verified', () => {
+    sidebarContext.heldAgentRefs = ['host-b']
+    const { rerender } = render(<SidebarNav {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Retry access to host-b' }))
+    const files = screen.getByTestId('nav-files')
+    files.focus()
+
+    sidebarContext.heldAgentRefs = []
+    rerender(<SidebarNav {...baseProps()} />)
+    // Liveness witness: the Retry row is gone, so the focus effect had its trigger.
+    expect(screen.queryByRole('button', { name: /^Retry access to / })).toBeNull()
+    expect(document.activeElement).toBe(files)
   })
 })

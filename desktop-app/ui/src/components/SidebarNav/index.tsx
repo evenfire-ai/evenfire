@@ -89,6 +89,9 @@ export function SidebarNav({
   const settingsTriggerRef = useRef<HTMLButtonElement | null>(null)
   const sessionsRef = useRef<HTMLDivElement | null>(null)
   const renameInputRef = useRef<HTMLInputElement | null>(null)
+  const logoTriggerRef = useRef<HTMLButtonElement | null>(null)
+  const chatNavItemRef = useRef<HTMLButtonElement | null>(null)
+  const retriedAgentRefRef = useRef<string | null>(null)
   const updateSettingsMenuOpen = React.useCallback(
     (open: boolean) => {
       setSettingsMenuOpen(open)
@@ -218,12 +221,29 @@ export function SidebarNav({
   )
   const latestSessionsToggleVisible = latestChatSessions.length > SIDEBAR_SESSION_PREVIEW_LIMIT
 
-  const handleSelect = (item: NavItem) => {
-    onSelect(item)
+  // Every navigation from the sidebar closes its menus. Closing the mobile
+  // menu hides the surface that holds the focused control, so focus moves to
+  // the logo button that reopens it.
+  const closeMenusAfterNavigation = () => {
+    if (mobileMenuOpen) logoTriggerRef.current?.focus()
     setMobileMenuOpen(false)
     updateSettingsMenuOpen(false)
     setSessionMenuId(null)
   }
+
+  const handleSelect = (item: NavItem) => {
+    onSelect(item)
+    closeMenusAfterNavigation()
+  }
+
+  // A successful Retry unmounts its row together with the focused button.
+  // Keep keyboard focus in the sidebar instead of letting it fall to the body.
+  useEffect(() => {
+    const agentRef = retriedAgentRefRef.current
+    if (!agentRef || heldAgentRefs.includes(agentRef)) return
+    retriedAgentRefRef.current = null
+    if (document.activeElement === document.body) chatNavItemRef.current?.focus()
+  }, [heldAgentRefs])
 
   const handleFilesNavSelect = () => {
     handleSelect(DESKTOP_ROUTES.files)
@@ -305,6 +325,7 @@ export function SidebarNav({
         />
         <div className="sidebar-logo">
           <button
+            ref={logoTriggerRef}
             type="button"
             className="sidebar-logo-link"
             onClick={handleLogoClick}
@@ -360,6 +381,7 @@ export function SidebarNav({
                   data-tooltip={item.label}
                 >
                   <NavItemControl
+                    ref={item.id === DESKTOP_ROUTES.chat ? chatNavItemRef : undefined}
                     data-testid={item.testId}
                     className="nav-link-main"
                     onClick={() => handleSelect(item.id)}
@@ -429,8 +451,9 @@ export function SidebarNav({
                         <Button
                           aria-label={`Retry access to ${agentRef}`}
                           onClick={() => {
+                            retriedAgentRefRef.current = agentRef
                             onSelectChatAgent(agentRef, { selectLatest: false })
-                            setMobileMenuOpen(false)
+                            closeMenusAfterNavigation()
                           }}
                           color="neutral"
                           size="xs"
@@ -499,8 +522,7 @@ export function SidebarNav({
                                         isRemote: session.remote === true,
                                         title: session.title,
                                       })
-                                      setMobileMenuOpen(false)
-                                      setSessionMenuId(null)
+                                      closeMenusAfterNavigation()
                                     }}
                                   >
                                     <span className="nav-latest-session__copy">
@@ -592,7 +614,7 @@ export function SidebarNav({
                             aria-label={`Open ${app.label}`}
                             onClick={() => {
                               onOpenSandboxUiApp(app)
-                              setMobileMenuOpen(false)
+                              closeMenusAfterNavigation()
                             }}
                           >
                             <span className="nav-available-app__label">{app.label}</span>
@@ -730,8 +752,7 @@ export function SidebarNav({
                     className="sidebar-settings-menu-item sidebar-settings-route logout-link"
                     color="danger"
                     onClick={() => {
-                      updateSettingsMenuOpen(false)
-                      setMobileMenuOpen(false)
+                      closeMenusAfterNavigation()
                       onLogout()
                     }}
                     disabled={busy}
