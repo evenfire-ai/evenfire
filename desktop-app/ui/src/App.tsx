@@ -1,4 +1,5 @@
 import React from 'react'
+import { flushSync } from 'react-dom'
 import {
   AgentActivityProvider,
   AgentChatProviders,
@@ -88,7 +89,7 @@ import {
   setAppTabTitle,
   setFilesTabPath,
 } from '@lib/workspaceTabs'
-import type { WorkspaceTab } from '@lib/workspaceTabs.types'
+import type { WorkspaceTab, WorkspaceTabsState } from '@lib/workspaceTabs.types'
 import { AgentsPage } from '@pages/AgentsPage'
 import { AuthPage } from '@pages/AuthPage'
 import { ChatPage } from '@pages/ChatPage'
@@ -396,8 +397,8 @@ export function App() {
   const sandboxUiDeepLinkGenerationRef = React.useRef(0)
   const sandboxUiShortcutOpenRequestIdRef = React.useRef(0)
   // Relaunches a backgrounded app tab through the live-app machinery. A ref so
-  // `revealWorkspaceTab` (defined above `launchSandboxUiApp`) can call it without
-  // a TDZ on the launch callback.
+  // `revealWorkspaceTab` (defined above `beginSandboxUiLaunch`) can call it
+  // without a TDZ on the launch callback.
   const relaunchSandboxUiAppRef = React.useRef<
     ((app: ActiveSandboxUiApp, tabId: string) => void) | null
   >(null)
@@ -422,10 +423,10 @@ export function App() {
   // must abort — it must neither close the newer embed nor persist the newer
   // tab's route with a value read from a view that is already gone.
   const sandboxUiActivationGenRef = React.useRef(0)
-  // Tab the latest `launchSandboxUiApp` targeted. Activating an app tab hands the
-  // embed over (app→app) only when a launch is about to `open()` into it: a tab
-  // whose app App cannot resolve gets no launch, and leaving the outgoing view
-  // up would paint it inside that tab.
+  // Tab the latest `beginSandboxUiLaunch` targeted (new tab or relaunch).
+  // Activating an app tab hands the embed over (app→app) only when a launch is
+  // about to `open()` into it: a tab whose app App cannot resolve gets no
+  // launch, and leaving the outgoing view up would paint it inside that tab.
   const launchTargetTabIdRef = React.useRef<string | null>(null)
   workspaceTabsRef.current = workspaceTabs
 
@@ -436,6 +437,30 @@ export function App() {
     setHeaderShellOverlayOpen(false)
     setSidebarSettingsMenuOpen(false)
   }, [])
+
+  // The single seam through which a gesture activates a tab and launches what it
+  // reveals. Everything commits together under `flushSync`, so the deactivation
+  // effect (flushed at the end of that sync commit) already sees the launch's
+  // `launchTargetTabIdRef` and launch state; a launch committed in a later render
+  // would make an app→app switch look like a departure and close the incoming
+  // embed. `update` must be an updater, never a value derived from
+  // `workspaceTabsRef`: `flushSync` also commits any pending store update, and a
+  // stale value applied after it would silently undo it. The updater keeps the
+  // store right, but callers still pick the tab to reveal from the last committed
+  // state: if a pending update shifts the base a relative updater (cycle, close)
+  // works on, the store and the reveal can disagree for that gesture. Must only
+  // run from an event or async continuation — inside a render or effect
+  // `flushSync` does not flush.
+  const activateAndLaunch = React.useCallback(
+    (update: (state: WorkspaceTabsState) => WorkspaceTabsState, launch?: () => void) => {
+      flushSync(() => {
+        vm.clearAppsPicker()
+        setWorkspaceTabs(update)
+        launch?.()
+      })
+    },
+    [setWorkspaceTabs, vm.clearAppsPicker]
+  )
 
   // Load the CONTENT of a workspace tab once it is (about to be) active — the
   // universal reveal seam. It never selects the tab itself (the store already
@@ -511,11 +536,12 @@ export function App() {
     (id: string) => {
       const tab = workspaceTabsRef.current.tabs.find(candidate => candidate.id === id)
       if (!tab) return
-      vm.clearAppsPicker()
-      setWorkspaceTabs(state => selectWorkspaceTab(state, id))
-      revealWorkspaceTab(tab, false)
+      activateAndLaunch(
+        state => selectWorkspaceTab(state, id),
+        () => revealWorkspaceTab(tab, false)
+      )
     },
-    [revealWorkspaceTab, setWorkspaceTabs, vm.clearAppsPicker]
+    [activateAndLaunch, revealWorkspaceTab]
   )
 
   // Drawer switcher selection: reveal the chat IN the drawer (keepNavItem), never
@@ -534,15 +560,16 @@ export function App() {
     (id: string) => {
       const current = workspaceTabsRef.current
       const wasActive = current.activeTabId === id
-      const next = closeWorkspaceTab(current, id)
-      if (next === current) return
-      vm.clearAppsPicker()
-      setWorkspaceTabs(next)
+      const projected = closeWorkspaceTab(current, id)
+      if (projected === current) return
       // Closing the active tab activates a neighbor (or empties the workspace,
       // §5). Reveal it so its content follows the strip.
-      if (wasActive) revealWorkspaceTab(activeWorkspaceTab(next), false)
+      activateAndLaunch(
+        state => closeWorkspaceTab(state, id),
+        wasActive ? () => revealWorkspaceTab(activeWorkspaceTab(projected), false) : undefined
+      )
     },
-    [revealWorkspaceTab, setWorkspaceTabs, vm.clearAppsPicker]
+    [activateAndLaunch, revealWorkspaceTab]
   )
 
   // Session-only strip reorder (drag & drop / keyboard). It never changes the
@@ -1406,30 +1433,20 @@ export function App() {
     if (chatDrawerVisible) setChatDrawerReady(true)
   }, [appNotificationDrawerOpen, chatDrawerVisible])
 
-  const launchSandboxUiApp = React.useCallback(
+  // The launch half of an activation. It writes no activation of its own, so it
+  // must run inside `activateAndLaunch`, in the same commit as the tab it targets.
+  const beginSandboxUiLaunch = React.useCallback(
     (
       app: ActiveSandboxUiApp,
       conversationOrigin: SandboxUiConversationOrigin | null,
-      existingTabId?: string
+      targetTabId: string
     ) => {
       const requestId = sandboxUiShortcutOpenRequestIdRef.current + 1
       sandboxUiShortcutOpenRequestIdRef.current = requestId
       setSandboxUiMounted(false)
       setSandboxUiConversationOrigin(conversationOrigin)
       setActiveSandboxUiApp(app)
-      // Store→embed: activate the app tab (a new one, or the backgrounded one on
-      // relaunch). Its `kind:'app'` derives `navItem` to the Apps route this
-      // commit and clears the instance-less picker residual.
-      vm.clearAppsPicker()
-      // Compute the id only on the open-new branch so the sequence counter
-      // advances exactly as before: relaunch of an existing tab must not burn one.
-      const newAppTabId = existingTabId ? null : nextChatTabId()
-      launchTargetTabIdRef.current = existingTabId ?? newAppTabId
-      setWorkspaceTabs(state =>
-        existingTabId
-          ? selectWorkspaceTab(state, existingTabId)
-          : openAppTab(state, { id: newAppTabId!, appRef: app.appRef, title: app.label })
-      )
+      launchTargetTabIdRef.current = targetTabId
       setSandboxUiShortcutOpenRequestId(requestId)
       if (conversationOrigin) {
         // Opened from a chat: bring that conversation straight into the drawer
@@ -1447,10 +1464,31 @@ export function App() {
       }
       return requestId
     },
-    [nextChatTabId, setWorkspaceTabs, vm.clearAppsPicker, vm.handleSelectChatAgent]
+    [vm.handleSelectChatAgent]
   )
+  // Grid and deep-link launches: always a new app tab (apps never dedupe by
+  // appRef). Its `kind:'app'` derives `navItem` to the Apps route this commit.
+  const launchSandboxUiApp = React.useCallback(
+    (app: ActiveSandboxUiApp, conversationOrigin: SandboxUiConversationOrigin | null) => {
+      const tabId = nextChatTabId()
+      let requestId = 0
+      activateAndLaunch(
+        state => openAppTab(state, { id: tabId, appRef: app.appRef, title: app.label }),
+        () => {
+          requestId = beginSandboxUiLaunch(app, conversationOrigin, tabId)
+        }
+      )
+      return requestId
+    },
+    [activateAndLaunch, beginSandboxUiLaunch, nextChatTabId]
+  )
+  // Relaunch of a backgrounded app tab, reached only from `revealWorkspaceTab`
+  // inside the activating gesture's seam. The re-select keeps the store on the
+  // tab being launched when a pending store update moved the active tab, as long
+  // as that tab still exists; a tab the pending update removed is not restored.
   relaunchSandboxUiAppRef.current = (app, tabId) => {
-    launchSandboxUiApp(app, null, tabId)
+    setWorkspaceTabs(state => selectWorkspaceTab(state, tabId))
+    beginSandboxUiLaunch(app, null, tabId)
   }
 
   // Store-governed embed lifecycle (mini-spec 05 §3, replaces the old
@@ -1736,11 +1774,11 @@ export function App() {
   // from a torn-down embed (even one of the same app being relaunched) can't
   // relabel whichever view is live now. The launchId alone is enough: main tags
   // each event with the appRef/launchId pair of the open that created the view,
-  // and every open goes through `launchSandboxUiApp`, which activates a tab of
-  // that same app in the commit that publishes the launchId — so whenever the
-  // launchId is current, the live tab (if any) holds the event's app. The store
-  // ignores empty titles, so the tab keeps its `app.label` until a real title
-  // arrives.
+  // and every open goes through `beginSandboxUiLaunch` inside `activateAndLaunch`,
+  // which activates a tab of that same app in the commit that publishes the
+  // launchId — so whenever the launchId is current, the live tab (if any) holds
+  // the event's app. The store ignores empty titles, so the tab keeps its
+  // `app.label` until a real title arrives.
   React.useEffect(() => {
     const off = window.clerum.sandboxUi.onTitleChanged?.(({ launchId, title }) => {
       if (launchId !== currentSandboxUiLaunchIdRef.current) return
@@ -2137,11 +2175,10 @@ export function App() {
       // Universal tab commands: activate a tab then reveal its content (chat load
       // / app relaunch / DOM route). `tabs.*` cycle over ALL tabs; `chat.*` are
       // chat-specific.
-      const selectAndReveal = (next: typeof state) => {
-        if (next === state) return
-        vm.clearAppsPicker()
-        setWorkspaceTabs(next)
-        revealWorkspaceTab(activeWorkspaceTab(next), false)
+      const selectAndReveal = (update: (current: WorkspaceTabsState) => WorkspaceTabsState) => {
+        const projected = update(state)
+        if (projected === state) return
+        activateAndLaunch(update, () => revealWorkspaceTab(activeWorkspaceTab(projected), false))
       }
       if (commandId === 'commands.open') {
         closeChatLocalSearch(false)
@@ -2237,16 +2274,18 @@ export function App() {
         return
       }
       if (command.eligibility === 'tab-index' && command.tabIndex !== undefined) {
-        selectAndReveal(selectWorkspaceTabAt(state, command.tabIndex))
+        const tabIndex = command.tabIndex
+        selectAndReveal(current => selectWorkspaceTabAt(current, tabIndex))
         return
       }
       if (commandId === 'tabs.selectLast') {
-        selectAndReveal(selectLastWorkspaceTab(state))
+        selectAndReveal(selectLastWorkspaceTab)
         return
       }
       if (commandId === 'tabs.next' || commandId === 'tabs.previous') {
         if (state.tabs.length < 2) return
-        selectAndReveal(cycleWorkspaceTab(state, commandId === 'tabs.next' ? 'next' : 'previous'))
+        const direction = commandId === 'tabs.next' ? 'next' : 'previous'
+        selectAndReveal(current => cycleWorkspaceTab(current, direction))
         return
       }
       if (commandId === 'composer.focus') {
@@ -2263,7 +2302,10 @@ export function App() {
             })
           }
         } else {
-          revealWorkspaceTab(activeWorkspaceTab(state), false)
+          activateAndLaunch(
+            current => current,
+            () => revealWorkspaceTab(activeWorkspaceTab(state), false)
+          )
         }
         setComposerFocusRequestId(value => value + 1)
         return
@@ -2284,6 +2326,7 @@ export function App() {
       }
     },
     [
+      activateAndLaunch,
       activeSandboxUiApp,
       closeChatLocalSearch,
       closeCommandPalette,
@@ -2295,9 +2338,7 @@ export function App() {
       openChatDrawer,
       revealWorkspaceTab,
       sandboxUiMounted,
-      setWorkspaceTabs,
       vm.activeChatId,
-      vm.clearAppsPicker,
       vm.handleNavSelect,
       vm.handleLogout,
       vm.handleSelectChatAgent,
