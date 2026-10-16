@@ -127,8 +127,9 @@ your browser. (A packaged distribution is where this matters most — a source
 checkout can just pull the latest.)
 
 This is update **detection**, not silent auto-install: the app tells the user an
-update is required and links the release. Code signing, notarization, and
-automatic download/install are not part of this repo — see
+update is required and links the release; it never downloads or installs on
+its own. macOS signing and notarization are available as an opt-in build step,
+and Windows and Linux builds are unsigned — see
 [Ship it to your users](../surfaces/desktop-app.md#ship-it-to-your-users).
 
 ## Troubleshooting

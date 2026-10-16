@@ -9,6 +9,7 @@
 - README: ../README.md — product pitch, security model, providers, license
 - Quickstart: get-started/quickstart.md — full platform on minikube: fill in .env, then one command
 - Registry quickstart: get-started/registry-quickstart.md — self-hosted connect → install → publish round trip
+- Dev mode (mcp-host without Kubernetes): get-started/dev-mode.md
 - Learning path: get-started/learning-path.md
 - FAQ: faq.md
 
@@ -61,6 +62,8 @@
 - Minikube full stack (in-depth reference): deploy/minikube.md
 - Production checklist: deploy/production.md
 - WorkflowRecipes ops: deploy/workflow-recipes-guide.md
+- Releases and upgrades (versions, release images, pinning, upgrade order): deploy/releases-and-upgrades.md
+- Monitoring and observability: operations/monitoring.md
 - Upgrade: workflow output PVC ownership: deploy/workflow-output-pvc-upgrade.md
 - Upgrade: Plugin Workload SDK (promptBridge / clientNotifications): deploy/plugin-workload-sdk-upgrade.md
 - GFS permission store credential (provision, rotate, recover): deploy/gfs-permission-store.md

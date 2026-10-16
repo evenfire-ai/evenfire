@@ -375,7 +375,7 @@ Available models: `qwen3-coder-plus`, `qwen3.5-plus`, `qwen3-coder-next`,
 **Dev mode:**
 
 ```bash
-CLERUM_DEV_MODE=true BAILIAN_API_KEY=sk-... CLERUM_MODEL_PROVIDER=bailian npm run dev
+CLERUM_DEV_MODE=true CLERUM_ENABLE_AUTH=false BAILIAN_API_KEY=sk-... CLERUM_MODEL_PROVIDER=bailian npm run dev
 ```
 
 Get your Coding Plan API key at: https://modelstudio.console.alibabacloud.com/
@@ -436,19 +436,19 @@ The Secret name is what you reference from `Host.spec.secretRef`.
 
    ```bash
    # OpenAI (auto-detected from API key)
-   OPENAI_API_KEY=sk-xxx make dev
+   CLERUM_ENABLE_AUTH=false OPENAI_API_KEY=sk-xxx make dev
 
    # Claude
-   CLAUDE_API_KEY=sk-ant-xxx make dev-claude
+   CLERUM_ENABLE_AUTH=false CLAUDE_API_KEY=sk-ant-xxx make dev-claude
 
    # Specific model
-   OPENAI_API_KEY=sk-xxx make dev-model MODEL=gpt-5.4-mini
+   CLERUM_ENABLE_AUTH=false OPENAI_API_KEY=sk-xxx make dev-model MODEL=gpt-5.4-mini
    ```
 
    You can also export the API key first:
 
    ```bash
-   export OPENAI_API_KEY=sk-xxx
+   export OPENAI_API_KEY=sk-xxx CLERUM_ENABLE_AUTH=false
    make dev
    ```
 
