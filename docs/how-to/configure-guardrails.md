@@ -133,9 +133,13 @@ that provenance.
 - **`clerum__*` tools are native.** The platform's own tools (for example
   `clerum__gfs_read`, `clerum__generate_pdf`, `clerum__session_search`) have
   `__` in their names but are registered as native tools. Match them with
-  `provenance: native`; a `provenance: mcp` rule never matches them. A rule's `arguments[]` predicates must **all** match. Each
-predicate has a `type`, a JSON Pointer into the arguments, an `op` and a
-`value`:
+  `provenance: native`; a `provenance: mcp` rule never matches them. Keep a
+  catch-all native `allow` rather than listing native tools one by one. An
+  unlisted platform tool falls to `unmatched_ask`; for example, a GFS file
+  attached in chat is then left unprepared, with no prompt shown.
+
+A rule's `arguments[]` predicates must **all** match. Each predicate has a
+`type`, a JSON Pointer into the arguments, an `op` and a `value`:
 
 | `type`    | `op` values                                     | Notes                                                                                       |
 | --------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------- |
