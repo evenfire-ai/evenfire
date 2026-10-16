@@ -16,6 +16,7 @@ import {
   attachmentReadBudgets,
 } from '../../core/attachments/attachmentReadBudget'
 import { ConversationManager } from '../../core/conversation/conversation'
+import * as contextManager from '../../core/extensions/contextManager'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { ATTACHED_FILES_INSTRUCTION } from '../../core/orchestration/turnContext'
 import { ATTACHMENT_READ_TURN_STOP_MESSAGE } from '../../core/tools/attachmentRead'
@@ -222,6 +223,7 @@ describe('clerum__attachment_read through a complete task (#666)', () => {
 
   afterEach(() => {
     Object.assign(appConfig, saved)
+    vi.restoreAllMocks()
   })
 
   it('lists the text file, reads it in the same turn and answers with its sentinel', async () => {
@@ -390,6 +392,7 @@ describe('clerum__attachment_read through a complete task (#666)', () => {
     }
 
     it('ends the task with a stop message instead of failing it when the model keeps reading', async () => {
+      const measurement = vi.spyOn(contextManager, 'toolMessageBudgetTokens')
       Object.assign(appConfig, {
         enableApproval: false,
         dynamicToolsEnabled: false,
@@ -416,6 +419,16 @@ describe('clerum__attachment_read through a complete task (#666)', () => {
       const kinds = Array.from({ length: 18 }, (_, i) => kindSeenAfter(providerCalls, i + 1, i + 1))
       expect(kinds.slice(0, 2)).toEqual(['text', 'text'])
       expect(kinds.slice(2).every(kind => kind === 'read_budget_exhausted')).toBe(true)
+      // After the first exhausted reply, retries must not keep fitting full
+      // text candidates that cannot reach the model. Keep the real measurer:
+      // this exercises TaskExecutor's budget fence, not a cheaper test counter.
+      const retryMeasurements = measurement.mock.calls
+        .map(([message]) => message)
+        .filter(message => Number(message.tool_call_id?.slice('read-'.length)) >= 4)
+      expect(retryMeasurements.length).toBeGreaterThan(0)
+      expect(
+        retryMeasurements.some(message => toolPayload(message.content ?? '').kind === 'text')
+      ).toBe(false)
       expect(ledgerOf(executor).spentTokens).toBeGreaterThan(turnTokens)
       expect(ledgerOf(executor).spentTokens).toBeLessThanOrEqual(ceiling)
     })
