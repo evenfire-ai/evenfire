@@ -28,6 +28,8 @@ export class StatusReporter {
   }
 
   private async report(path: string, body: Record<string, unknown>, label: string): Promise<void> {
+    const payload = JSON.stringify(body)
+    const bodyBytes = Buffer.byteLength(payload)
     let lastErr: Error | undefined
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
@@ -39,7 +41,7 @@ export class StatusReporter {
               {
                 method: 'POST',
                 headers: await this.authHeaders(),
-                body: JSON.stringify(body),
+                body: payload,
               }
             ),
           label
@@ -64,8 +66,12 @@ export class StatusReporter {
           emitLog('warn', `Non-retryable error reporting ${label}: HTTP ${resp.status}`, {
             label,
             httpStatus: resp.status,
+            bodyBytes,
           })
-          throw new Error(`WRC rejected ${label} with HTTP ${resp.status}`)
+          const reason = await responseErrorReason(resp)
+          throw new Error(
+            `WRC rejected ${label} with HTTP ${resp.status}${reason ? `: ${reason}` : ''}`
+          )
         }
         lastErr = new Error(`HTTP ${resp.status}`)
       } catch (err) {
@@ -78,8 +84,12 @@ export class StatusReporter {
     }
 
     // Log only structural fields because status payloads can include step output.
-    const message = `Failed to report ${label} after ${MAX_RETRIES} attempts: ${lastErr?.message}`
-    emitLog('warn', message, { label })
+    // undici reports every socket failure as `fetch failed`; the cause code
+    // (ECONNRESET, UND_ERR_SOCKET, ...) is what tells them apart.
+    const cause = errorCauseCode(lastErr)
+    const detail = cause ? `${lastErr?.message} (${cause})` : lastErr?.message
+    const message = `Failed to report ${label} after ${MAX_RETRIES} attempts: ${detail}`
+    emitLog('warn', message, { label, bodyBytes, ...(cause && { cause }) })
     throw new Error(message)
   }
 
@@ -143,4 +153,23 @@ async function responseHasAlreadyTerminalPhase(resp: Response): Promise<boolean>
   } catch {
     return false
   }
+}
+
+const MAX_ERROR_REASON_CHARS = 200
+
+/** WRC's own `{ error }` text for a rejected write; never the request body. */
+async function responseErrorReason(resp: Response): Promise<string | undefined> {
+  try {
+    const parsed: unknown = JSON.parse(await resp.text())
+    const error = (parsed as { error?: unknown } | null)?.error
+    return typeof error === 'string' ? error.slice(0, MAX_ERROR_REASON_CHARS) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** The error code only: cause messages can carry peer addresses. */
+function errorCauseCode(err: Error | undefined): string | undefined {
+  const code = (err?.cause as { code?: unknown } | undefined)?.code
+  return typeof code === 'string' ? code : undefined
 }

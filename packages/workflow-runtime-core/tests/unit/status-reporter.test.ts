@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { createStaticRuntimeTokenProvider } from '../../src/runtime-token-provider/provider'
 import { AUTH_RETRY_DELAY_MS } from '../../src/status-reporter/authRetry'
 import { StatusReporter } from '../../src/status-reporter/client'
@@ -126,7 +128,7 @@ describe('StatusReporter', () => {
     expect(logSpy).toHaveBeenCalledWith(
       'warn',
       'Non-retryable error reporting step status: HTTP 403',
-      { label: 'step status', httpStatus: 403 }
+      { label: 'step status', httpStatus: 403, bodyBytes: expect.any(Number) }
     )
   })
 
@@ -149,8 +151,85 @@ describe('StatusReporter', () => {
     expect(logSpy).toHaveBeenCalledWith(
       'warn',
       'Failed to report workflow status after 3 attempts: HTTP 500',
-      { label: 'workflow status' }
+      { label: 'workflow status', bodyBytes: expect.any(Number) }
     )
+  })
+
+  it('names WRC’s reason and the body size when a report is rejected as too large', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      status: 413,
+      ok: false,
+      text: async () => JSON.stringify({ error: 'Request body too large' }),
+    })
+    const logSpy = vi.spyOn(logger, 'emitLog').mockImplementation(() => undefined)
+    vi.stubGlobal('fetch', fetchMock)
+
+    const reporter = new StatusReporter({
+      wrcUrl: 'http://wrc:8082',
+      workflowName: 'wf',
+      tokenProvider: tokenProvider(),
+    })
+
+    await expect(
+      reporter.reportStepStatus('s1', 'completed', { output: 'sensitive output' })
+    ).rejects.toThrow('WRC rejected step status with HTTP 413: Request body too large')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const sentBytes = Buffer.byteLength(fetchMock.mock.calls[0][1].body)
+    expect(logSpy).toHaveBeenCalledWith(
+      'warn',
+      'Non-retryable error reporting step status: HTTP 413',
+      { label: 'step status', httpStatus: 413, bodyBytes: sentBytes }
+    )
+    expect(JSON.stringify(logSpy.mock.calls)).not.toContain('sensitive output')
+  })
+
+  it('includes the network error cause code when retries are exhausted', async () => {
+    const cause = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed', { cause }))
+    const logSpy = vi.spyOn(logger, 'emitLog').mockImplementation(() => undefined)
+    vi.stubGlobal('fetch', fetchMock)
+
+    const reporter = new StatusReporter({
+      wrcUrl: 'http://wrc:8082',
+      workflowName: 'wf',
+      tokenProvider: tokenProvider(),
+    })
+
+    await expect(reporter.reportStepStatus('s1', 'completed', { output: 'x' })).rejects.toThrow(
+      'Failed to report step status after 3 attempts: fetch failed (ECONNRESET)'
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(logSpy).toHaveBeenCalledWith(
+      'warn',
+      'Failed to report step status after 3 attempts: fetch failed (ECONNRESET)',
+      { label: 'step status', cause: 'ECONNRESET', bodyBytes: expect.any(Number) }
+    )
+  })
+
+  it('reports the real socket error when WRC drops the connection', async () => {
+    const server = http.createServer(req => req.destroy())
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    vi.spyOn(logger, 'emitLog').mockImplementation(() => undefined)
+    try {
+      const observed = await fetch(url, { method: 'POST', body: '{}' }).catch(
+        (err: Error & { cause?: { code?: string } }) => err.cause?.code
+      )
+      expect(observed).toEqual(expect.any(String))
+
+      const reporter = new StatusReporter({
+        wrcUrl: url,
+        workflowName: 'wf',
+        tokenProvider: tokenProvider(),
+      })
+      await expect(reporter.reportStepStatus('s1', 'completed')).rejects.toThrow(
+        `fetch failed (${observed})`
+      )
+    } finally {
+      server.closeAllConnections()
+      await new Promise(resolve => server.close(resolve))
+    }
   })
 
   it('treats duplicate terminal step conflicts as idempotent success', async () => {
