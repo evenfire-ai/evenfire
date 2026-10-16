@@ -94,6 +94,23 @@ Two agent-made folder pairs on a stateful Host do stop it from starting:
 
 In both cases the operator renames the folder from a helper Pod.
 
+A split tree whose `workspace` is missing, a symlink or a regular file also
+carries no signature, because the earlier init always leaves a real
+`workspace/` directory. The merge exits 0 and changes nothing; mcp-host then
+finds no `state.db` at the root and creates an empty one, while the history
+stays in `state/state.db`. No dev or prod Host had this tree when #825 shipped
+(all five dev stateless roots had a real `workspace/`; prod had no stateless
+Host). Recovery, with the Host stopped and the PVC mounted in a helper Pod:
+
+1. restore `workspace` as a real directory (move the symlink target or the
+   file aside and `mkdir workspace`);
+2. if mcp-host already created a root `state.db`, rename the root
+   `state.db`, `state.db-wal` and `state.db-shm` to `state.db.<label>.bak`
+   names, or the next start refuses with F2 (two live databases). Chats
+   written to that database stay in the backup;
+3. start the Host: the signature holds and the merge moves the history to
+   the root.
+
 **Moves**, in this order:
 
 1. every entry of `workspace/`, dotfiles and symlinks included, to the root

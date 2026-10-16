@@ -642,6 +642,41 @@ describe('workspace layout merge', () => {
     expect(snapshot(split)).not.toEqual(splitBefore)
   }, 30_000)
 
+  // The base init always leaves a real workspace/ directory. A split tree
+  // without one carries no signature: the merge leaves it for an operator
+  // (docs/architecture/host-storage-layout.md) rather than adopting it.
+  it('leaves a split tree whose workspace/ is missing, a symlink or a file unchanged', () => {
+    const cases: Record<string, (root: string) => void> = {
+      'workspace/ is missing': root => {
+        rmSync(join(root, 'workspace'), { recursive: true })
+      },
+      'workspace is a symlink': root => {
+        renameSync(join(root, 'workspace'), join(root, 'workspace-real'))
+        symlinkSync(join(root, 'workspace-real'), join(root, 'workspace'))
+      },
+      'workspace is a regular file': root => {
+        renameSync(join(root, 'workspace'), join(root, 'workspace-real'))
+        writeFileSync(join(root, 'workspace'), 'not a directory')
+      },
+    }
+    for (const [name, prepare] of Object.entries(cases)) {
+      const root = splitRoot()
+      prepare(root)
+      const before = snapshot(root)
+      expect.soft(merge(root), name).toEqual({ status: 0, stderr: '' })
+      expect.soft(snapshot(root), name).toEqual(before)
+      // The history stays where the base init put it.
+      expect.soft(messageCount(join(root, 'state', 'state.db')), name).toEqual({
+        rows: ROWS,
+        check: 'ok',
+      })
+    }
+    // Witness: an intact split tree is merged by the same script.
+    const split = splitRoot()
+    expect(merge(split)).toEqual({ status: 0, stderr: '' })
+    expect(messageCount(join(split, 'state.db'))).toEqual({ rows: ROWS, check: 'ok' })
+  }, 30_000)
+
   it('restores the merged tree after a rollback re-splits it with the base init', () => {
     const root = splitRoot()
     expect(merge(root).status).toBe(0)
