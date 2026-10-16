@@ -199,6 +199,9 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   let liveTeamId = String(overrides.currentTeamId || 'team-a')
   let controller: AppController
   let tabSequence = 2
+  let navigationIntent = 0
+  const beginNavigationIntent = vi.fn(() => ++navigationIntent)
+  const isNavigationIntentCurrent = vi.fn((intent: number) => navigationIntent === intent)
   const nextWorkspaceTabId = vi.fn(() => `ws-tab-${tabSequence++}`)
   const setWorkspaceTabs = vi.fn((updater: unknown) => {
     const next =
@@ -292,6 +295,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
       role: 'member',
     },
     currentTeamId: 'team-a',
+    teamContextRevision: 0,
     navItem: DESKTOP_ROUTES.chat,
     selectedAgent: null,
     selectedAgentRoute: null,
@@ -309,6 +313,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     notifications: [],
     toasts: [],
     pendingApprovals: [],
+    markNotificationRead: vi.fn(),
     composerImageAttachments: [],
     composerReferenceAttachments: [],
     groupedMessages: [],
@@ -329,7 +334,20 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     authTransitioning: false,
     handleEnsureTeamContext: ensureTeamContext,
     getCurrentTeamId: vi.fn(() => liveTeamId),
+    verifyConversationAccess: vi.fn(async () => ({
+      authorityScope: 'test-scope',
+      teamContextRevision: controller.teamContextRevision,
+      hostAuthorityEpoch: 0,
+    })),
+    isConversationAccessProofCurrent: vi.fn(
+      (_agentRef: string, _chatId: string, proof: { teamContextRevision: number }) =>
+        proof.teamContextRevision === controller.teamContextRevision
+    ),
+    isConversationAccessVerifiedForCurrentTeam: vi.fn(() => false),
+    beginNavigationIntent,
+    isNavigationIntentCurrent,
     isHostAccessBlocked: vi.fn(() => false),
+    isChatDeleted: vi.fn(() => false),
     handleSelectChatAgent,
     handleNavSelect,
     handleLogout: vi.fn(),
@@ -734,7 +752,10 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleNavSelect).toHaveBeenLastCalledWith(DESKTOP_ROUTES.settings)
 
     act(() => commandPaletteHarness.props?.onExecute('navigate.chat'))
-    expect(currentController.handleNavSelect).toHaveBeenLastCalledWith(DESKTOP_ROUTES.chat)
+    expect(currentController.handleNavSelect).toHaveBeenLastCalledWith(
+      DESKTOP_ROUTES.chat,
+      expect.objectContaining({ onFocusedChat: expect.any(Function) })
+    )
     act(() => commandPaletteHarness.props?.onExecute('navigate.apps'))
     expect(currentController.handleNavSelect).toHaveBeenLastCalledWith(DESKTOP_ROUTES.apps)
     act(() => commandPaletteHarness.props?.onExecute('navigate.agents'))
@@ -1240,11 +1261,16 @@ describe('App deep-link orchestration', () => {
       teamId: 'team-a',
       announce: true,
     })
-    expect(currentController.handleSelectChatAgent).toHaveBeenCalledWith('alpha', {
-      selectLatest: false,
-      chatId: 'chat-1',
-      title: 'Conversation',
-    })
+    await waitFor(() =>
+      expect(currentController.verifyConversationAccess).toHaveBeenCalledWith('alpha', 'chat-1')
+    )
+    await waitFor(() =>
+      expect(currentController.handleSelectChatAgent).toHaveBeenCalledWith('alpha', {
+        selectLatest: false,
+        chatId: 'chat-1',
+        title: 'Conversation',
+      })
+    )
   })
 
   it('closes the active embed before switching teams for a failed cross-team handoff', async () => {
