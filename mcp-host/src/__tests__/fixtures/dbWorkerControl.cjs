@@ -9,7 +9,18 @@
 //   an unexpected worker exit while the Host is serving.
 //
 // Every other message reaches the real worker unchanged.
+//
+// In every mode the preload prints PRELOAD_SIGTERM_HANDLER_READY once main.ts
+// has installed its SIGTERM handler, so a test never signals before it.
 const workerThreads = require('node:worker_threads')
+
+const sigtermReady = setInterval(() => {
+  if (process.listenerCount('SIGTERM') > 0) {
+    process.stdout.write('PRELOAD_SIGTERM_HANDLER_READY\n')
+    clearInterval(sigtermReady)
+  }
+}, 5)
+sigtermReady.unref()
 
 const RealWorker = workerThreads.Worker
 const mode = process.env.DB_WORKER_CONTROL

@@ -26,7 +26,8 @@ interface ChildRun {
 
 function runHost(
   control: 'withhold-shutdown' | 'terminate-on-sigusr2',
-  signal: 'SIGTERM' | 'SIGUSR2'
+  signal: 'SIGTERM' | 'SIGUSR2',
+  readyMarker: string
 ): Promise<ChildRun> {
   const home = fs.mkdtempSync(path.join(tmpRoot, 'host-'))
   const child = spawn(process.execPath, ['--require', PRELOAD, mainScript], {
@@ -55,7 +56,7 @@ function runHost(
       if (
         !signalled &&
         output.includes('[ConversationStore] opened') &&
-        output.includes('MCP Host running in dev mode')
+        output.includes(readyMarker)
       ) {
         signalled = true
         child.kill(signal)
@@ -86,11 +87,14 @@ afterAll(() => {
 
 describe('main.ts persist-failure exit wiring (real entrypoint)', () => {
   it('exits 1 when the store cannot close during a graceful shutdown', async () => {
-    const run = await runHost('withhold-shutdown', 'SIGTERM')
+    // Signalled only once main.ts has installed its SIGTERM handler; before
+    // that, the default action would kill the child.
+    const run = await runHost('withhold-shutdown', 'SIGTERM', 'PRELOAD_SIGTERM_HANDLER_READY')
 
     // Witnesses: the real store opened, the preload engaged, and the
     // progress bound fired inside the shutdown window.
     expect(run.output, run.output).toContain('[ConversationStore] opened')
+    expect(run.output, run.output).toContain('PRELOAD_SIGTERM_HANDLER_READY')
     expect(run.output, run.output).toContain('PRELOAD_WITHHELD_SHUTDOWN')
     expect(run.output, run.output).toContain('db worker made no progress')
     expect(run.output, run.output).toContain(
@@ -102,7 +106,8 @@ describe('main.ts persist-failure exit wiring (real entrypoint)', () => {
   }, 30_000)
 
   it('exits 1 when the DB worker exits while the Host is serving', async () => {
-    const run = await runHost('terminate-on-sigusr2', 'SIGUSR2')
+    // The preload installs the SIGUSR2 handler before main.ts runs.
+    const run = await runHost('terminate-on-sigusr2', 'SIGUSR2', 'MCP Host running in dev mode')
 
     expect(run.output, run.output).toContain('[ConversationStore] opened')
     expect(run.output, run.output).toContain('PRELOAD_TERMINATING_DB_WORKER')
