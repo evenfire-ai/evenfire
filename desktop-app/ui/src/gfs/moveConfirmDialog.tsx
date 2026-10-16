@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@components/Common'
-import { IconContexts } from '@components/SidebarNav/icons'
 
 export interface GfsMoveConfirmRequest {
   /** Sanitizable display facts of the moving folder. */
@@ -63,9 +62,6 @@ export function GfsMoveConfirmDialog({
         role="dialog"
       >
         <header className="da-gfs-manage-dialog__header">
-          <span className="da-gfs-manage-dialog__icon" aria-hidden="true">
-            <IconContexts />
-          </span>
           <span className="da-gfs-manage-dialog__heading">
             <h3>
               Move “{request.sourceName}” to “{request.destinationName}”?

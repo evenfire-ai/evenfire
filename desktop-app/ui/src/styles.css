@@ -16111,6 +16111,48 @@ pre {
   padding: 0 var(--space-5) var(--space-5);
 }
 
+/* GfsMoveConfirmDialog — the compact folder-move confirmation (rev-2 §1).
+   Scoped restyling of the share-dialog shell to match the Control UI
+   treatment: ~30rem panel, plain h3 header without icon chrome, muted
+   impact copy, tight right-aligned actions. */
+.da-gfs-move-confirm-dialog.da-gfs-manage-dialog {
+  width: min(30rem, 96vw);
+  max-height: none;
+  grid-template-rows: auto auto auto;
+}
+
+.da-gfs-move-confirm-dialog .da-gfs-manage-dialog__header {
+  grid-template-columns: minmax(0, 1fr);
+  padding: var(--space-5) var(--space-5) var(--space-2);
+}
+
+.da-gfs-move-confirm-dialog .da-gfs-manage-dialog__heading h3 {
+  font-size: var(--font-size-lg);
+}
+
+.da-gfs-move-confirm-dialog .da-gfs-manage-dialog__body {
+  padding: 0 var(--space-5);
+}
+
+.da-gfs-move-confirm-dialog__impact {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.da-gfs-move-confirm-dialog__rename-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  cursor: pointer;
+}
+
+.da-gfs-move-confirm-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-5) var(--space-5);
+}
+
 .da-gfs-manage-section {
   display: grid;
   gap: var(--space-3);
