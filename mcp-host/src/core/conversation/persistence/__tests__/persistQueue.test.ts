@@ -35,6 +35,32 @@ describe('PersistQueue', () => {
     await expect(promise).resolves.toBe('pong')
   })
 
+  it.each([
+    ['ok', { ok: true, result: 'pong' }],
+    ['error', { ok: false, error: { code: 'BOOM', message: 'kaboom' } }],
+  ] as const)(
+    'drops the chain entry of a keyed enqueueSync once its %s reply settles',
+    async (_label, reply) => {
+      const worker = new FakeWorker()
+      const q = new PersistQueue(worker, {
+        syncTimeoutMs: 200,
+        asyncTimeoutMs: 500,
+        stallTimeoutMs: 30_000,
+      })
+      const chains = (q as unknown as { writeChain: Map<string, unknown> }).writeChain
+      const promise = q.enqueueSync({ kind: 'ping' }, 'session-1').catch((err: Error) => err)
+      // Liveness witness: the write is chained under its key while in flight.
+      expect(chains.has('session-1')).toBe(true)
+      await vi.waitFor(() => expect(worker.sent).toHaveLength(1))
+      worker.emit('message', { id: worker.sent[0].id, ...reply } as WorkerReply)
+      const outcome = await promise
+      expect(outcome instanceof Error ? outcome.message : outcome).toBe(
+        reply.ok ? 'pong' : 'kaboom'
+      )
+      await vi.waitFor(() => expect(chains.has('session-1')).toBe(false))
+    }
+  )
+
   it('rejects enqueueSync when worker replies with error', async () => {
     const worker = new FakeWorker()
     const q = new PersistQueue(worker, {

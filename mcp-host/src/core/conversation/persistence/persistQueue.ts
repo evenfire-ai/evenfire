@@ -183,24 +183,24 @@ export class PersistQueue {
     }
     if (sessionKey) {
       const prev = this.writeChain.get(sessionKey) ?? Promise.resolve()
-      const next = prev
-        .then(() => this.sendUnlessFailed<T>(op, this.opts.syncTimeoutMs))
-        .finally(() => {
-          if (this.writeChain.get(sessionKey) === (next as Promise<unknown>)) {
-            this.writeChain.delete(sessionKey)
-          }
-        })
+      const next = prev.then(() => this.sendUnlessFailed<T>(op, this.opts.syncTimeoutMs))
       // The chain derivative must never surface the rejection itself — the
       // caller gets it via the returned `next` (loud there). Without the
       // rejection handler a failed sync write would ALSO raise a process-level
-      // unhandledRejection from this internal bookkeeping copy (D3).
-      this.writeChain.set(
-        sessionKey,
-        next.then(
+      // unhandledRejection from this internal bookkeeping copy (D3). The
+      // cleanup compares against the derivative, because that is what the map
+      // holds.
+      const chained: Promise<void> = next
+        .then(
           () => undefined,
           () => undefined
         )
-      )
+        .finally(() => {
+          if (this.writeChain.get(sessionKey) === chained) {
+            this.writeChain.delete(sessionKey)
+          }
+        })
+      this.writeChain.set(sessionKey, chained)
       return next
     }
     return this.send<T>(op, this.opts.syncTimeoutMs)
