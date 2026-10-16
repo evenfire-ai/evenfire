@@ -165,7 +165,9 @@ function blockList(
   const { field, alias, noun } = own(BLOCK_LISTS, String(block.type))!
   if (listUnderAlias(block)) {
     ctx.warnings.push(`${where}: the list was read from ${alias}; name it ${field}.`)
-    return { value: block[alias], at: `${where}.${alias}` }
+    const at = `${where}.${alias}`
+    ctx.aliased.push(at)
+    return { value: block[alias], at }
   }
   if (isEmptyList(block[field])) {
     throw new Error(

@@ -224,6 +224,13 @@ export interface InternalToolResult {
    * is never sent to the model.
    */
   writtenSha256?: string
+  /**
+   * Arguments the schema does not declare that the generator took under
+   * another name, or named in a note of its own, as paths ("images",
+   * "data.team[0].label"). The ignored-arguments note leaves them out. It is
+   * never sent to the model.
+   */
+  aliasedArguments?: string[]
 }
 
 /**

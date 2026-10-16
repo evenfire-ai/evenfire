@@ -127,6 +127,8 @@ export function fieldPath(slide: PptxSlide, field: string): string {
 export interface ReadContext {
   outputDir: string
   warnings: string[]
+  /** Undeclared argument paths taken under another name (InternalToolResult.aliasedArguments). */
+  aliased?: string[]
   /** Set once a text field holding markup has been reported. */
   markupNoted?: boolean
 }
@@ -409,6 +411,8 @@ export function readChart(value: unknown, where: string, ctx: ReadContext): Pptx
     title: readText(value.title, `${where}.title`, TEXT_LIMITS.title, ctx),
     caption: readText(value.caption, `${where}.caption`, TEXT_LIMITS.caption, ctx),
   }
+  // Chart.js nests labels and datasets under data; they are read there too.
+  if (isRecord(value.data)) ctx.aliased?.push(`${where}.data`)
   try {
     chart.native = readNativeChart(value, where, ctx.warnings)
   } catch (err) {

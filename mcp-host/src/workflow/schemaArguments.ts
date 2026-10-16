@@ -66,14 +66,14 @@ function readablePath(parts: Array<string | number>): string {
     .join('')
 }
 
-interface UnknownArgument {
-  path: string
-  holder: Record<string, unknown>
-  key: string
-}
-
-function unknownEntries(schema: unknown, value: unknown): UnknownArgument[] {
-  const found: UnknownArgument[] = []
+/**
+ * Arguments the schema does not declare. An extra key is not a validation
+ * error (additionalProperties is not a field every provider accepts), so these
+ * are reported back instead. Objects that declare additionalProperties are
+ * open maps and are not checked.
+ */
+export function unknownArguments(schema: unknown, value: unknown): string[] {
+  const found: string[] = []
   const visit = (raw: SchemaNode | undefined, item: unknown, at: Array<string | number>) => {
     const node = nodeFor(raw, item)
     if (!node || at.length > 64) return
@@ -85,45 +85,9 @@ function unknownEntries(schema: unknown, value: unknown): UnknownArgument[] {
     for (const [key, entry] of Object.entries(item)) {
       const child = node.properties[key]
       if (child) visit(child, entry, [...at, key])
-      else found.push({ path: readablePath([...at, key]), holder: item, key })
+      else found.push(readablePath([...at, key]))
     }
   }
   visit(schema as SchemaNode, value, [])
   return found
-}
-
-/**
- * Arguments the schema does not declare. An extra key is not a validation
- * error (additionalProperties is not a field every provider accepts), so these
- * are reported back instead. Objects that declare additionalProperties are
- * open maps and are not checked.
- */
-export function unknownArguments(schema: unknown, value: unknown): string[] {
-  return unknownEntries(schema, value).map(entry => entry.path)
-}
-
-/**
- * The undeclared arguments of `value`, each made a getter that records whether
- * it was read, so that after a generator ran `ignored()` names only the ones it
- * never looked at. A generator reads some arguments under names the schema
- * leaves out; those are not ignored. `value` must be the caller's own copy.
- */
-export function watchUnknownArguments(schema: unknown, value: unknown): { ignored(): string[] } {
-  const entries = unknownEntries(schema, value)
-  const read = new Set<number>()
-  entries.forEach(({ holder, key }, i) => {
-    let current = holder[key]
-    Object.defineProperty(holder, key, {
-      get() {
-        read.add(i)
-        return current
-      },
-      set(next: unknown) {
-        current = next
-      },
-      enumerable: true,
-      configurable: true,
-    })
-  })
-  return { ignored: () => entries.filter((_, i) => !read.has(i)).map(entry => entry.path) }
 }

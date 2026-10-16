@@ -1,5 +1,5 @@
 /** How every internal tool runs: lazy generator modules and the argument preparation around them. */
-import { watchUnknownArguments, withoutUnsetNulls } from './schemaArguments'
+import { unknownArguments, withoutUnsetNulls } from './schemaArguments'
 import { cleanToolArgs } from './toolText'
 import type { InternalToolDefinition, InternalToolResult } from './types'
 
@@ -23,7 +23,9 @@ export async function fromModule<M>(
 
 /**
  * A generator that runs on cleaned arguments (cleanToolArgs, unset nulls
- * dropped, named images decoded) and reports the arguments it did not read.
+ * dropped, named images decoded) and reports the arguments it does not take:
+ * those its schema does not declare, less the ones the generator says it took
+ * under another name (aliasedArguments).
  */
 export function prepared(tool: InternalToolDefinition): InternalToolDefinition {
   return {
@@ -41,14 +43,18 @@ export function prepared(tool: InternalToolDefinition): InternalToolDefinition {
       } catch (err) {
         return { success: false, error: err instanceof Error ? err.message : String(err) }
       }
-      const unknown = watchUnknownArguments(tool.parameters, clean)
-      let result: InternalToolResult
+      // Named from the arguments as sent, before the generator runs, so nothing
+      // it does with them (a copy, a spread) changes what is reported.
+      const undeclared = unknownArguments(tool.parameters, clean)
+      let outcome: InternalToolResult
       try {
-        result = await tool.execute(clean, outputDir)
+        outcome = await tool.execute(clean, outputDir)
       } finally {
         release()
       }
-      const ignored = unknown.ignored()
+      const { aliasedArguments, ...result } = outcome
+      const taken = new Set(aliasedArguments ?? [])
+      const ignored = undeclared.filter(entry => !taken.has(entry))
       if (!result.success || ignored.length === 0) return result
       const listed = ignored.slice(0, 10).map(name => `'${name}'`)
       if (ignored.length > 10) listed.push(`and ${ignored.length - 10} more`)

@@ -607,7 +607,8 @@ export async function buildXlsxWorkbook(
   args: Record<string, unknown>,
   outputDir: string,
   imageBox: ImageSize,
-  warnings: string[]
+  warnings: string[],
+  aliased: string[] = []
 ): Promise<XlsxBuild> {
   const requested = args.sheets
   if (!Array.isArray(requested) || requested.length === 0) {
@@ -623,19 +624,8 @@ export async function buildXlsxWorkbook(
   if (topLevelImagesPlaced(args)) {
     const first = sheets[0] as Record<string, unknown>
     const own = Array.isArray(first.images) ? first.images : []
-    // A copy of the sheet's property descriptors, not of its values: a spread
-    // would read every field, and a field read counts as used (prepared()).
-    const moved = Object.defineProperties({}, Object.getOwnPropertyDescriptors(first)) as Record<
-      string,
-      unknown
-    >
-    Object.defineProperty(moved, 'images', {
-      value: [...own, ...(args.images as unknown[])],
-      enumerable: true,
-      writable: true,
-      configurable: true,
-    })
-    sheets = [moved, ...sheets.slice(1)]
+    sheets = [{ ...first, images: [...own, ...(args.images as unknown[])] }, ...sheets.slice(1)]
+    aliased.push('images')
     warnings.push(
       'images belongs inside each sheet (sheets[i].images); the top-level images were placed on the first sheet.'
     )

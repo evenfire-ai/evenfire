@@ -88,6 +88,7 @@ function placeFields(
     if (camel !== undefined) {
       fields[camel] = value
       ctx.warnings.push(`data.${key} was read as data.${camel}.`)
+      ctx.aliased?.push(`data.${key}`)
       continue
     }
     unknown.push(key)
@@ -356,6 +357,12 @@ function pitchDeck(f: Record<string, unknown>, ctx: ReadContext): PptxSlide[] {
       const at = `data.team[${i}]`
       if (!isRecord(p)) throw new PptxInputError(`${at} must be an object with name and role.`)
       // Workflows written against the KPI-card shape send {label: name, value: role}.
+      if ((p.name === undefined || p.name === null) && p.label !== undefined) {
+        ctx.aliased?.push(`${at}.label`)
+      }
+      if ((p.role === undefined || p.role === null) && p.value !== undefined) {
+        ctx.aliased?.push(`${at}.value`)
+      }
       const name = readText(p.name ?? p.label, `${at}.name`, TEXT_LIMITS.value, ctx)
       if (!name) throw new PptxInputError(`${at}.name is missing.`)
       return {
@@ -438,6 +445,8 @@ export function buildTemplateSlides(
       throw new PptxInputError(`${message} As sent, the deck would hold only its cover.`)
     }
     ctx.warnings.push(`${message} ${unknown.length > 1 ? 'They were' : 'It was'} left out.`)
+    // Named in the template's own note, so not again as ignored arguments.
+    for (const k of unknown) ctx.aliased?.push(`data.${k}`)
   }
   return slides
 }

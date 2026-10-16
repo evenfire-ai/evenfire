@@ -72,9 +72,10 @@ function readDeck(args: Record<string, unknown>, ctx: ReadContext): PptxSlide[] 
 export async function buildPptxDeck(
   args: Record<string, unknown>,
   outputDir: string,
-  warnings: string[]
+  warnings: string[],
+  aliased: string[] = []
 ): Promise<{ buffer: Buffer; slides: number }> {
-  const ctx: ReadContext = { outputDir, warnings }
+  const ctx: ReadContext = { outputDir, warnings, aliased }
   const specs = readDeck(args, ctx)
   const palette =
     PPTX_PALETTES[choose(args.palette, Object.keys(PPTX_PALETTES), 'default', 'palette', warnings)]

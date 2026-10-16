@@ -1,8 +1,8 @@
-// Every generator reports each argument it does not read. The note is built
-// from getters on the undeclared arguments (schemaArguments.ts), so a reader
-// that copies or spreads an object would read them all and hide them; this
-// contract puts an undeclared key in every object the schema closes and
-// expects each one named.
+// Every generator reports each argument it does not take: those its schema
+// does not declare, less the ones it says it took under another name
+// (prepared(), toolExecution.ts). This contract puts an undeclared key in
+// every object the schema closes and expects each one named, so a generator
+// that claims a field it does not show is caught.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as fs from 'fs'
 import * as os from 'os'

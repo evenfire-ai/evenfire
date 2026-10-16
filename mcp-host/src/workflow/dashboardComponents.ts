@@ -30,6 +30,33 @@ export interface DashRender {
   rendered: number
   /** Why each part that could not be shown failed. */
   failures: string[]
+  /**
+   * Argument paths the page shows that their schema may not declare: a list
+   * read under its other name, and the fields of an entry it renders
+   * (InternalToolResult.aliasedArguments).
+   */
+  aliased: string[]
+}
+
+const KPI_CARD_FIELDS = [
+  'label',
+  'value',
+  'delta',
+  'deltaDirection',
+  'deltaSentiment',
+  'accent',
+  'sparkline',
+] as const
+const SERVICE_CARD_FIELDS = ['name', 'status', 'metric', 'delta', 'deltaDirection'] as const
+
+/** Records the `fields` of `entry` a card shows (DashRender.aliased). */
+function takenFields(
+  ctx: DashRender,
+  entry: Record<string, unknown>,
+  at: string,
+  fields: readonly string[]
+): void {
+  for (const key of fields) if (own(entry, key) !== undefined) ctx.aliased.push(`${at}.${key}`)
 }
 
 /**
@@ -265,6 +292,7 @@ export function renderKpis(items: unknown, where: string, ctx: DashRender, title
     where,
     (item, at) => {
       const kpi = dashRecord(item, at, 'a KPI object {label, value}')
+      takenFields(ctx, kpi, at, KPI_CARD_FIELDS)
       // A year is not grouped: 2026, not 2,026. Only a figure that could be one
       // is taken for it; revenue per year is still grouped.
       const year =
@@ -564,6 +592,8 @@ export function renderServiceHealthGrid(
       const sentiment = direction === 'up' ? 'good' : direction === 'down' ? 'bad' : 'neutral'
       const delta = deltaHtml(text, direction, sentiment)
       const metric = dashFigure(s.metric)
+      // The fields a card shows, whichever list the entries came under.
+      takenFields(ctx, s, at, SERVICE_CARD_FIELDS)
       return `
 <div class="health-card" data-status="${status}">
   <div class="health-card__head">

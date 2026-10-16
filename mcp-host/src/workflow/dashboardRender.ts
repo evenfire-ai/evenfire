@@ -93,6 +93,7 @@ function renderDashboard(opts: DashboardRenderOptions): { html: string; ctx: Das
     skippedSparklines: 0,
     rendered: 0,
     failures,
+    aliased: [],
   }
   const parts = (DASHBOARD_TEMPLATES[opts.template] ?? DASHBOARD_TEMPLATES['executive-brief'])(
     opts.data,
@@ -196,7 +197,7 @@ export async function runGenerateDashboard(
     enforceQuota(outputDir, Buffer.byteLength(html, 'utf-8'), replacedBytes(target))
     writeArtifact(target, html)
 
-    return artifactResult(target, 'html', { warnings })
+    return { ...artifactResult(target, 'html', { warnings }), aliasedArguments: ctx.aliased }
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) }
   }

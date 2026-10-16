@@ -21,12 +21,14 @@ export async function runGenerateXlsx(
   try {
     const filename = outputFilename(args.filename, 'xlsx', 'output')
     const warnings: string[] = []
+    const aliased: string[] = []
     const { buildXlsxWorkbook } = await import('./xlsxWorkbook')
     const built = await buildXlsxWorkbook(
       args,
       outputDir,
       { width: XLSX_MAX_IMAGE_WIDTH, height: XLSX_MAX_IMAGE_HEIGHT },
-      warnings
+      warnings,
+      aliased
     )
     if (!built.ok) return { success: false, error: built.error }
     // The workbook is already in memory, so a quota breach leaves no partial file.
@@ -34,10 +36,13 @@ export async function runGenerateXlsx(
     const target = claimOutputFile(outputDir, filename)
     enforceQuota(outputDir, built.buffer.byteLength, replacedBytes(target))
     writeArtifact(target, built.buffer)
-    return artifactResult(target, 'xlsx', {
-      summary: `File generated: ${target.filename} (xlsx): ${built.summary}.`,
-      warnings,
-    })
+    return {
+      ...artifactResult(target, 'xlsx', {
+        summary: `File generated: ${target.filename} (xlsx): ${built.summary}.`,
+        warnings,
+      }),
+      aliasedArguments: aliased,
+    }
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) }
   }
