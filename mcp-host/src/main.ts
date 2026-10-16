@@ -173,7 +173,7 @@ import {
   createGovernedRunReporter,
 } from './usage/usageReporter'
 import { VISUAL_INPUT_LIMITS } from './visualInput/policy'
-import { setOutputDirHostAccessor } from './workflow/internalTools'
+import { getOutputDir, setOutputDirHostAccessor } from './workflow/internalTools'
 import { loadPersistedWorkflowControlToken } from './workflow/mcpHostJwtState'
 import { submitProviderWorkflowApprovalDecision } from './workflow/providerWorkflowApprovalDecisionClient'
 import { confirmProviderWorkflowApprovalMediumEnrollment } from './workflow/providerWorkflowApprovalMediumEnrollmentClient'
@@ -194,6 +194,7 @@ import {
   stopRuntimeAuthProactiveRefresh,
 } from './workflow/runtimeAuthRefreshScheduler'
 import { type McpHostRuntimeAuth, refreshWithRecovery } from './workflow/userApprovalRequester'
+import { countSharedOutputs, resolveRpcCallerOutputDir } from './workspace/callerOutputs'
 import { resolveCallerRootBinding } from './workspace/callerRootBinding'
 import { ScopedWorkspaceProvider } from './workspace/scopedWorkspace'
 
@@ -2653,6 +2654,34 @@ function subscribeActivity(onEvent: (event: HostActivityEvent) => void): {
 /**
  * Start the RPC server.
  */
+/**
+ * Chat files generated before they became per user stay where they were,
+ * unserved and untouched; one line says how many there are.
+ */
+function logSharedOutputs(): void {
+  if (process.env.CLERUM_OUTPUT_DIR) {
+    logger.warn(
+      { component: 'GeneratedOutputs' },
+      'CLERUM_OUTPUT_DIR is not used in chat; generated files go to each caller folder'
+    )
+  }
+  countSharedOutputs(getOutputDir()).then(
+    found => {
+      if (found?.files) {
+        logger.info(
+          { component: 'GeneratedOutputs', files: found.files, bytes: found.bytes },
+          'Files from the former shared output folder are no longer listed or served'
+        )
+      }
+    },
+    (err: unknown) =>
+      logger.warn(
+        { component: 'GeneratedOutputs', code: (err as NodeJS.ErrnoException)?.code },
+        'Could not count the former shared output folder'
+      )
+  )
+}
+
 async function startRPCServer(): Promise<void> {
   const port = config.serverPort
   rpcServer = new RPCServer(port)
@@ -2781,6 +2810,14 @@ async function startRPCServer(): Promise<void> {
 
   rpcServer.onMessage(handleIncomingMessage)
   rpcServer.setArtifactSecretEntriesProvider(() => configStore?.listSecretEntries() ?? [])
+  // Generated files are per user: each Desktop user lists and downloads only
+  // their own folder under the Host's caller roots.
+  rpcServer.setChatArtifactDirResolver(userId =>
+    gfsWorkspaceProvider
+      ? resolveRpcCallerOutputDir(gfsWorkspaceProvider.baseRootPath, userId)
+      : { failureCode: 'ENOENT' }
+  )
+  if (process.env.CLERUM_WORKFLOW_ENABLED !== 'true') logSharedOutputs()
   rpcServer.onStatus(getStatus)
   rpcServer.onActivitySnapshot(getActivitySnapshot)
   rpcServer.onActivityStream(subscribeActivity)

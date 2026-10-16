@@ -4,6 +4,9 @@ export const PROTECTED_WORKSPACE_DIRS: ReadonlySet<string> = new Set([
   '.clerum-state',
   '.gfs-download-store',
   '.gfs-downloads',
+  // Each caller's generated files (callerOutputs.ts): written only by the
+  // document generators and read through the artifact routes.
+  '.clerum-outputs',
 ])
 
 /**
@@ -115,8 +118,26 @@ export class GfsDownloadPathError extends ProtectedWorkspacePathError {
   }
 }
 
+export function isGeneratedOutputsPath(relativePath: string): boolean {
+  if (typeof relativePath !== 'string' || relativePath.length === 0) return false
+  return normalizeWorkspacePath(relativePath)
+    .split('/')
+    .some(segment => segment === '.clerum-outputs')
+}
+
+export class GeneratedOutputsPathError extends ProtectedWorkspacePathError {
+  constructor(filename: string) {
+    super(
+      `${filename} is in the folder of generated documents, which only the clerum__generate_* tools write; ` +
+        'pass a generated file by name to the generator that embeds it instead.'
+    )
+    this.name = 'GeneratedOutputsPathError'
+  }
+}
+
 export function protectedWorkspacePathError(relativePath: string): ProtectedWorkspacePathError {
   if (isGfsDownloadPath(relativePath)) return new GfsDownloadPathError(relativePath)
+  if (isGeneratedOutputsPath(relativePath)) return new GeneratedOutputsPathError(relativePath)
   return new StateDbPathError(relativePath)
 }
 
