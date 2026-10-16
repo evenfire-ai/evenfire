@@ -352,8 +352,8 @@ describe('useComposerAttachments — documents (#678)', () => {
 
   it.each([
     [
-      'a send',
-      (hook: ReturnType<typeof render>) => hook.result.current.clearComposerAfterSend(null),
+      'the send cleanup action',
+      (hook: ReturnType<typeof render>) => hook.result.current.resetComposerAttachments(),
     ],
     [
       'an agent change',
