@@ -12,9 +12,10 @@
  *   with that failure and `onFailure` fires once, so the Host stops instead
  *   of accepting writes it can no longer persist. The same holds after an
  *   unexpected worker exit.
- * - Progress bound: once the database is open, while the worker has
- *   operations in flight it must complete one within `stallTimeoutMs` of the
- *   previous completion (or of the moment work became in flight). A slow
+ * - Progress bound: once the database is open, or once `close()` has started,
+ *   while the worker has operations in flight it must complete one within
+ *   `stallTimeoutMs` of the previous completion (or of the moment work became
+ *   in flight, or of the start of `close()` before open). A slow
  *   worker keeps completing operations, however long its backlog; a wedged
  *   one stops, and the queue fails the same way as after a worker exit. The
  *   bound measures worker progress, never how long a write has waited.
@@ -48,8 +49,10 @@ export interface PersistQueueOptions {
   asyncTimeoutMs: number
   /**
    * Longest time the worker may go without completing an operation while it
-   * has operations in flight, in service and during `close()`. Not applied
-   * before the `awaitOpen()` ping is answered.
+   * has operations in flight, in service and during `close()`. In service it
+   * applies only once the `awaitOpen()` ping is answered; once `close()` has
+   * started it applies even if the database never opened, counted from the
+   * start of `close()`.
    */
   stallTimeoutMs: number
   /** Called whenever a heartbeat reply is observed (id === HEARTBEAT_ID). */
@@ -211,8 +214,11 @@ export class PersistQueue {
    * message handler only after it has opened and migrated the database, so
    * this resolves once the database is open. No timeout: opening (spawn,
    * migrations, recovery of a large WAL) can outlast any write budget, so
-   * the progress bound applies only once this ping is answered.
-   * Rejects on a worker error reply, a worker exit, or `close()`.
+   * the progress bound applies only once this ping is answered, or once
+   * `close()` has started.
+   * Rejects on a worker error reply, a worker exit, or when the worker makes
+   * no progress within `stallTimeoutMs` after `close()` started; a `close()`
+   * that finds the ping answered in time lets it resolve.
    */
   awaitOpen(): Promise<void> {
     try {
@@ -274,7 +280,10 @@ export class PersistQueue {
    * without a `sessionKey` included), wait for the worker to ACK `shutdown`
    * (it closes the database before replying), then terminate it. There is no
    * total deadline: a slow worker drains its whole backlog, and only the
-   * progress bound (`stallTimeoutMs`) ends the wait for a wedged one.
+   * progress bound (`stallTimeoutMs`) ends the wait for a wedged one. If the
+   * database has not opened yet, the bound starts with this call, so a worker
+   * that never answers the open ping fails within `stallTimeoutMs` while a
+   * slow but healthy open can still finish.
    * Rejects with the first failure, so the caller sees that the durable
    * trail is incomplete.
    */
@@ -286,6 +295,12 @@ export class PersistQueue {
 
   private async shutdown(): Promise<void> {
     this.closed = true
+    if (!this.opened) {
+      // The open ping may still be in flight; the bound starts now, not when
+      // the ping was posted, so a slow but healthy open can still finish.
+      this.lastProgressAt = performance.now()
+      this.armStallTimer()
+    }
     // Admission is closed, so no chain starts after this snapshot.
     await Promise.allSettled(Array.from(this.writeChain.values()))
     await this.inFlightSettled()
@@ -337,7 +352,15 @@ export class PersistQueue {
 
   private armStallTimer(): void {
     // Still armed after another failure: close() waits for in-flight work.
-    if (!this.opened || this.stalled || this.stallTimer || this.inFlight.size === 0) return
+    // Before open the bound applies only once close() has started.
+    if (
+      (!this.opened && !this.closed) ||
+      this.stalled ||
+      this.stallTimer ||
+      this.inFlight.size === 0
+    ) {
+      return
+    }
     const remaining = this.opts.stallTimeoutMs - (performance.now() - this.lastProgressAt)
     this.stallTimer = setTimeout(
       () => {

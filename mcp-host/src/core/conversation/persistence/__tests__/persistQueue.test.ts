@@ -713,6 +713,78 @@ describe('PersistQueue progress bound: slow vs wedged, in service and at close()
     expect(failures[0].message).toMatch(/no progress for 100ms/)
   })
 
+  it('fails close() within the bound when the worker never answers the open ping', async () => {
+    const worker = new FakeWorker()
+    const failures: Error[] = []
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 5000,
+      asyncTimeoutMs: 5000,
+      stallTimeoutMs: 100,
+      onFailure: err => failures.push(err),
+    })
+    const open = q.awaitOpen().catch((err: unknown) => err)
+    q.enqueueAsync('s1', { kind: 'ping' })
+    await Promise.resolve()
+    // Both are posted before close(), so nothing sent after it can arm the bound.
+    expect(worker.sent).toHaveLength(2)
+    const closing = q.close()
+    let settled = false
+    const outcome = closing.then(
+      () => ({ ok: true as const }),
+      (err: Error) => ({ ok: false as const, err })
+    )
+    void outcome.then(() => {
+      settled = true
+    })
+    const started = Date.now()
+    // Bounded wait, so a hang fails the assertion instead of the test timeout.
+    await Promise.race([outcome, sleep(500)])
+    // Liveness witnesses: the open ping was posted, and close() started.
+    expect(worker.sent[0].op.kind).toBe('ping')
+    expect(() => q.enqueueAsync('s2', { kind: 'ping' })).toThrow()
+    expect(settled).toBe(true)
+    const result = await outcome
+    expect(result.ok).toBe(false)
+    expect(result.ok ? null : result.err.message).toMatch(/db worker made no progress for 100ms/)
+    expect(Date.now() - started).toBeLessThan(500)
+    expect(failures).toHaveLength(1)
+    expect(await open).toBe(failures[0])
+  })
+
+  it('lets a slow but healthy open finish during close()', async () => {
+    const worker = new FakeWorker()
+    const failures: Error[] = []
+    let terminateCalls = 0
+    worker.terminate = () => {
+      terminateCalls += 1
+      worker.emit('exit', 0)
+    }
+    const q = new PersistQueue(worker, {
+      syncTimeoutMs: 5000,
+      asyncTimeoutMs: 5000,
+      stallTimeoutMs: 300,
+      onFailure: err => failures.push(err),
+    })
+    const open = q.awaitOpen()
+    q.enqueueAsync('s1', { kind: 'ping' })
+    // The open takes longer than the bound before close() starts; the bound
+    // counts from close(), not from the ping.
+    await sleep(400)
+    expect(worker.sent).toHaveLength(2)
+    const closing = q.close()
+    await sleep(30)
+    ack(worker, worker.sent[0])
+    await open
+    ack(worker, worker.sent[1])
+    await vi.waitFor(() => expect(worker.sent.map(m => m.op.kind)).toContain('shutdown'))
+    // Liveness witness: the async write was acknowledged and shutdown posted.
+    expect(worker.sent.map(m => m.op.kind)).toEqual(['ping', 'ping', 'shutdown'])
+    ack(worker, worker.sent[2])
+    await expect(closing).resolves.toBeUndefined()
+    expect(failures).toHaveLength(0)
+    expect(terminateCalls).toBe(1)
+  })
+
   it('stays failed when the stalled operation is acknowledged late', async () => {
     const { worker, q, failures } = await openQueue({ stallTimeoutMs: 100 })
     const stalled = q.enqueueSync({ kind: 'ping' }).catch((err: unknown) => err)
