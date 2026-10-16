@@ -1,5 +1,11 @@
 import { config } from './config.js'
-import { ApiError, assertSessionRequestAllowed, requestJson, withTimeout } from './httpClient.js'
+import {
+  ApiError,
+  assertSessionRequestAllowed,
+  reportSessionUnauthorized,
+  requestJson,
+  withTimeout,
+} from './httpClient.js'
 import { assertSafeRouteSegment } from './pathSafety.js'
 import {
   ApprovalDecisionResult,
@@ -32,8 +38,10 @@ async function fetchWithSession(
   input: RequestInfo | URL,
   init?: RequestInit
 ): Promise<Response> {
-  assertSessionRequestAllowed(token)
-  return fetch(input, init)
+  const requestOwner = assertSessionRequestAllowed(token)
+  const response = await fetch(input, init)
+  reportSessionUnauthorized(token, response.status, requestOwner)
+  return response
 }
 
 /**

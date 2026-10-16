@@ -512,7 +512,7 @@ export class AuthClient {
     onEvent: (event: WorkflowNotificationStreamEvent) => void,
     signal: AbortSignal
   ): Promise<void> {
-    assertSessionRequestAllowed(sessionToken)
+    const requestOwner = assertSessionRequestAllowed(sessionToken)
     const response = await fetch(url('/api/v1/notifications/stream'), {
       method: 'GET',
       headers: {
@@ -522,7 +522,7 @@ export class AuthClient {
       signal,
     })
     if (!response.ok) {
-      reportSessionUnauthorized(sessionToken, response.status)
+      reportSessionUnauthorized(sessionToken, response.status, requestOwner)
       const body = await readErrorBody(response)
       throw new ApiError(
         `Notification stream failed (${response.status}): ${boundedErrorExcerpt(body) || response.statusText}`,
@@ -575,7 +575,7 @@ export class AuthClient {
     onEvent: (event: EntityChangeStreamEvent) => void,
     signal: AbortSignal
   ): Promise<void> {
-    assertSessionRequestAllowed(sessionToken)
+    const requestOwner = assertSessionRequestAllowed(sessionToken)
     const streamUrl = new URL(url('/api/v1/entity-changes/stream'))
     // The user stream intentionally starts from a fixed coarse invalidation
     // checkpoint. Sending the local cursor would disclose feed position while
@@ -589,7 +589,7 @@ export class AuthClient {
       signal,
     })
     if (!response.ok) {
-      reportSessionUnauthorized(sessionToken, response.status)
+      reportSessionUnauthorized(sessionToken, response.status, requestOwner)
       const body = await readErrorBody(response)
       throw new ApiError(
         `Entity change stream failed (${response.status}): ${boundedErrorExcerpt(body) || response.statusText}`,
@@ -730,7 +730,7 @@ export class AuthClient {
     runId: string,
     artifactName: string
   ): Promise<Buffer> {
-    assertSessionRequestAllowed(sessionToken)
+    const requestOwner = assertSessionRequestAllowed(sessionToken)
     const response = await fetch(
       url(
         `/api/v1/workflows/${encodeURIComponent(ns)}/${encodeURIComponent(name)}/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactName)}/download`
@@ -742,7 +742,7 @@ export class AuthClient {
       }
     )
     if (!response.ok) {
-      reportSessionUnauthorized(sessionToken, response.status)
+      reportSessionUnauthorized(sessionToken, response.status, requestOwner)
       const body = await readErrorBody(response)
       throw new ApiError(
         `Download workflow artifact failed (${response.status}): ${boundedErrorExcerpt(body) || response.statusText}`,

@@ -95,13 +95,13 @@ export class SharedFilesClient {
         `/api/v1/me/contexts/${encodeURIComponent(contextId)}/shared-filesystems/` +
           `${encodeURIComponent(sfsName)}/proxy/v1/files/download`
       ) + `?path=${encodeURIComponent(relPath)}`
-    assertSessionRequestAllowed(sessionToken)
+    const requestOwner = assertSessionRequestAllowed(sessionToken)
     const response = await fetch(target, {
       method: 'GET',
       headers: { authorization: `Bearer ${sessionToken}` },
     })
     if (!response.ok) {
-      reportSessionUnauthorized(sessionToken, response.status)
+      reportSessionUnauthorized(sessionToken, response.status, requestOwner)
       const body = await response.text()
       throw new ApiError(
         `${response.status} ${response.statusText}: ${boundedErrorExcerpt(body)}`,

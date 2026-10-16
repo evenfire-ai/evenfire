@@ -441,7 +441,7 @@ const SAVED_SESSION_RESTORE_RETRY_DELAY_MS = 5_000
 const gfsUploadTransport: DesktopUploadTransport = {
   requestJson,
   requestPart: async (url, token, headers, body, timeoutMs, signal) => {
-    assertSessionRequestAllowed(token)
+    const requestOwner = assertSessionRequestAllowed(token)
     const response = await fetch(url, {
       method: 'PUT',
       headers: { authorization: `Bearer ${token}`, ...headers },
@@ -1095,7 +1095,7 @@ export class AppService {
       failClosedForPendingLogout: error => this.failClosedForPendingLogout(error),
     })
     setSessionInvalidationHandler(
-      token => this.endInvalidatedMemoryOnlySession(token),
+      (token, requestOwner) => this.endInvalidatedMemoryOnlySession(token, requestOwner),
       token => this.assertTemporarySessionRequestAllowed(token)
     )
   }
@@ -3120,6 +3120,7 @@ export class AppService {
   private clearAuthenticatedSessionState(options: { notifySessionChanged?: boolean } = {}): void {
     this.acceptedSessionSource = undefined
     this.memoryOnlySession = undefined
+    this.sessionAuthority.clearRpcCredentialOwners()
     if (this.memoryOnlySessionExpiryTimer) clearTimeout(this.memoryOnlySessionExpiryTimer)
     this.memoryOnlySessionExpiryTimer = null
     this.sessionGeneration += 1
@@ -6802,14 +6803,14 @@ export class AppService {
     this.endMemoryOnlySession()
   }
 
-  private endInvalidatedMemoryOnlySession(token: string): void {
-    if (!this.memoryOnlySession || token !== this.sessionToken) return
+  private endInvalidatedMemoryOnlySession(token: string, requestOwner?: unknown): void {
+    if (!this.sessionAuthority.isCurrentMemorySessionTokenRequest(token, requestOwner)) return
     this.endMemoryOnlySession()
   }
 
-  private assertTemporarySessionRequestAllowed(token: string): void {
+  private assertTemporarySessionRequestAllowed(token: string): unknown {
     if (this.memoryOnlySession) this.assertMemoryOnlySessionCurrent()
-    this.sessionAuthority.assertTemporaryRequestAllowed(token)
+    return this.sessionAuthority.assertTemporaryRequestAllowed(token)
   }
 
   private assertMemoryOnlySessionCurrent(expected = this.memoryOnlySession): void {

@@ -81,6 +81,12 @@ type RpcSessionOwner = {
   memoryLease: MemoryOnlySessionLease | undefined
 }
 
+type SessionRequestOwner = {
+  owner: RpcSessionOwner
+  credentialDigest: string
+  credentialKind: 'session' | 'rpc'
+}
+
 function credentialDigest(value: string): string {
   return createHash('sha256').update(value).digest('hex')
 }
@@ -321,15 +327,22 @@ export class SessionAuthorityCoordinator {
     if (ownership.status !== 'owned') throw new TemporarySessionAuthorityUnavailableError()
   }
 
-  assertTemporaryRequestAllowed(token: string): void {
+  assertTemporaryRequestAllowed(token: string): SessionRequestOwner | undefined {
     const lease = this.memoryLease
-    if (!lease) return
+    if (!lease) return undefined
     this.assertMemoryOnlySessionCurrent(lease)
-    if (token === this.sessionToken) return
+    if (token === this.sessionToken) {
+      return {
+        owner: this.captureRpcCredentialOwner(token),
+        credentialDigest: credentialDigest(token),
+        credentialKind: 'session',
+      }
+    }
     const digest = credentialDigest(token)
     const owner = this.rpcCredentialOwners.get(digest)
     if (!owner) throw new SessionRequestOwnershipError()
     this.assertRpcCredentialOwnerCurrent(owner)
+    return { owner, credentialDigest: digest, credentialKind: 'rpc' }
   }
 
   /** Issue an RPC credential only while its exact session owner remains current. */
@@ -354,6 +367,24 @@ export class SessionAuthorityCoordinator {
   clearRpcCredentialOwners(): void {
     this.rpcCredentialOwners.clear()
     this.rpcCredentialOwnerBinding = null
+  }
+
+  isCurrentMemorySessionTokenRequest(token: string, requestOwner: unknown): boolean {
+    if (!this.memoryLease || !requestOwner || typeof requestOwner !== 'object') return false
+    const receipt = requestOwner as SessionRequestOwner
+    if (
+      receipt.credentialKind !== 'session' ||
+      receipt.credentialDigest !== credentialDigest(token) ||
+      receipt.owner.memoryLease !== this.memoryLease
+    ) {
+      return false
+    }
+    try {
+      this.assertRpcCredentialOwnerCurrent(receipt.owner)
+      return true
+    } catch {
+      return false
+    }
   }
 
   private captureRpcCredentialOwner(sessionToken: string): RpcSessionOwner {

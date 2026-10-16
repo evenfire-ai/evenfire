@@ -127,7 +127,7 @@ describe('authenticated session invalidation', () => {
     await expect(
       requestJson('GET', 'http://rest/protected', { token: 'fixture-session-token' })
     ).rejects.toBeInstanceOf(ApiError)
-    expect(invalidate).toHaveBeenCalledExactlyOnceWith('fixture-session-token')
+    expect(invalidate).toHaveBeenCalledExactlyOnceWith('fixture-session-token', undefined)
 
     invalidate.mockClear()
     stubResponse(403, 'Forbidden', '{}')
@@ -150,7 +150,7 @@ describe('authenticated session invalidation', () => {
       )
     ).rejects.toBeInstanceOf(ApiError)
 
-    expect(invalidate).toHaveBeenCalledExactlyOnceWith('fixture-stream-session-token')
+    expect(invalidate).toHaveBeenCalledExactlyOnceWith('fixture-stream-session-token', undefined)
   })
 
   it('does not report non-401 responses through the shared session invalidation hook', async () => {

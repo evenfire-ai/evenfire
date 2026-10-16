@@ -30,13 +30,13 @@ export async function fetchBoundedBytes(
 ): Promise<ArrayBuffer> {
   const maxBytes = opts?.maxBytes
   const controller = new AbortController()
-  assertSessionRequestAllowed(token)
+  const requestOwner = assertSessionRequestAllowed(token)
   const res = await deps.fetch(url, {
     headers: { authorization: `Bearer ${token}` },
     signal: controller.signal,
   })
   if (!res.ok) {
-    reportSessionUnauthorized(token, res.status)
+    reportSessionUnauthorized(token, res.status, requestOwner)
     // Keep the body AND Retry-After. `surfaceGfsGrantError` reads the retry
     // window from `{ retryAfterSeconds }` in the body and falls back to the
     // header when the 429 came from an upstream proxy whose body it cannot
