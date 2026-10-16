@@ -15,7 +15,9 @@
 #   - pvc-fixture: a short-lived Pod (the Host image, uid 1001, no token) that
 #     mounts a Host PVC to list it or, on a suspended Host, to seed a tree;
 #   - channel: a CommunicationChannel CR that makes HCC run a stateless Host
-#     as stateful.
+#     as stateful;
+#   - host-layout-merge: S5 and S6 run deploy/scripts/host-layout-merge.sh,
+#     whose check Pods mount Host PVCs read-only and are deleted afterwards.
 # No kubectl exec into Host Pods, no SQLite writes, no apply/patch of Hosts or
 # their Deployments.
 #
@@ -84,6 +86,8 @@ TURN_TIMEOUT="${E2E_825_TURN_TIMEOUT:-240}"
 STORE_LOG_TIMEOUT="${E2E_825_STORE_LOG_TIMEOUT:-30}"
 BASE_INIT_FIXTURE="${REPO_ROOT}/host-context-controller/test/__fixtures__/base-workspace-layout-init.sh"
 [ -r "$BASE_INIT_FIXTURE" ] || die "missing base init fixture ${BASE_INIT_FIXTURE}"
+LAYOUT_SCRIPT="${REPO_ROOT}/deploy/scripts/host-layout-merge.sh"
+[ -r "$LAYOUT_SCRIPT" ] || die "missing operator script ${LAYOUT_SCRIPT}"
 
 DEFINED_SCENARIOS=(NEG_CTRL NEG_RV S1 S2 S3 RACE S4 S5 S6 S7)
 EXECUTED=0 SCENARIO_FAILURES=0 SCENARIO_LOG=''
@@ -536,6 +540,30 @@ read_seed_file() { # HOST NAME EXPECTED
   ok "$1: seeded file e2e-825/$2 intact at the PVC root"
 }
 
+# ─── Operator script ──────────────────────────────────────────────────
+# layout_row inventory|verify HOST EXITS: runs deploy/scripts/host-layout-merge.sh
+# on this profile and prints the result of the Host's PVC row. EXITS is a case
+# pattern; the fleet verdict is left alone because other Hosts on the profile
+# decide it, and exit 2 (read failure) never matches.
+layout_row() {
+  local cmd=$1 host=$2 exits=$3 rc=0 out row
+  out="$(mktemp "${SCRATCH}/layout-${cmd}-${host}.XXXXXX")"
+  log "host-layout-merge.sh ${cmd} for ${HOST_NS}/${host}-workspace" >&2
+  bash "$LAYOUT_SCRIPT" "$cmd" --context "$E2E_KUBECONTEXT" >"$out" 2>"${out}.err" || rc=$?
+  # shellcheck disable=SC2254 # EXITS is a case pattern on purpose
+  case "$rc" in
+    $exits) ;;
+    *)
+      fail "${host}: host-layout-merge.sh ${cmd} exited ${rc} (expected ${exits}): $(tail -n 3 "${out}.err" | tr '\n' ' ') $(tail -n 3 "$out" | tr '\n' ' ')" >&2
+      return 1
+      ;;
+  esac
+  [ "$rc" != 2 ] || { fail "${host}: host-layout-merge.sh ${cmd} could not read the cluster" >&2; return 1; }
+  row="$(grep -F "PVC ${HOST_NS}/${host}-workspace " "$out")" ||
+    { fail "${host}: host-layout-merge.sh ${cmd} printed no row for ${host}-workspace" >&2; return 1; }
+  printf '%s\n' "${row#*result=}"
+}
+
 # ─── Suspend and wake ─────────────────────────────────────────────────
 wait_suspended() { # HOST: state suspended, replicas 0, zero Pods (Terminating included)
   local host=$1 elapsed=0 state reps pods
@@ -744,7 +772,7 @@ scenario_S4() {
 # S5: the inventoried split tree (state/ with a backup, workspace/ with a
 # symlink) merges on wake; history, file, backup and link at the root.
 scenario_S5() {
-  local name listing
+  local name listing row
   name="$(truncate_rfc1123 "e2e-825-s5-${RUN}")"
   suspended_host_with_history "$name" || return 1
   pvc_fixture "$name" rw seed-split "$SEED_SPLIT_SCRIPT" >/dev/null || return 1
@@ -753,6 +781,12 @@ scenario_S5() {
     fail "S5: seeded tree is not split: ${listing}"
     return 1
   fi
+  row="$(layout_row inventory "$name" '0|1')" || return 1
+  [ "$row" = WILL_MERGE ] || { fail "S5: inventory reads ${name}-workspace as '${row}', expected WILL_MERGE"; return 1; }
+  # A split tree is a blocker for turning the flag off, whatever the rest of the fleet.
+  row="$(layout_row verify "$name" 1)" || return 1
+  [ "$row" = SPLIT ] || { fail "S5: verify reads ${name}-workspace as '${row}', expected SPLIT"; return 1; }
+  ok "S5: host-layout-merge.sh reads the seeded tree as WILL_MERGE (inventory) and SPLIT (verify)"
   post_wake "$name" || return 1
   wait_new_ready_pod "$name" '' "$POD_READY_TIMEOUT" || return 1
   assert_pod "$name" true /workspace || return 1
@@ -765,6 +799,9 @@ scenario_S5() {
     return 1
   fi
   ok "S5: split tree merged to the root"
+  row="$(layout_row verify "$name" '0|1')" || return 1
+  [ "$row" = POD_OK ] || { fail "S5: verify reads ${name}-workspace as '${row}' after the merge, expected POD_OK"; return 1; }
+  ok "S5: host-layout-merge.sh verify reads the merged Host as POD_OK"
   assert_history "$name" 'suspend->wake(split-tree-merged)' || return 1
   read_seed_file "$name" seed.txt "seed ${RUN}"
 }
@@ -772,7 +809,8 @@ scenario_S5() {
 # S6: two live database families: the merge refuses, the Pod stays in
 # Init:Error and the tree is unchanged.
 scenario_S6() {
-  local name before after list_before list_after elapsed=0 pod logs
+  local name before after list_before list_after elapsed=0 pod logs row
+  local f2='workspace layout merge refused: more than one live SQLite database across'
   name="$(truncate_rfc1123 "e2e-825-s6-${RUN}")"
   suspended_host_with_history "$name" || return 1
   pvc_fixture "$name" rw seed-two-db "$SEED_TWO_DB_SCRIPT" >/dev/null || return 1
@@ -783,6 +821,13 @@ scenario_S6() {
     fail "S6 witness: state/notes.txt or workspace/x not seeded: ${list_before}"
     return 1
   fi
+  # The seeded tree is the T5 shape (root DB, state/state.db, workspace/):
+  # inventory must name it as an upgrade blocker before the merge runs. Its
+  # check Pod runs between the two hashes, so the comparison below also
+  # proves it changed nothing.
+  row="$(layout_row inventory "$name" 1)" || return 1
+  case "$row" in "WILL_REFUSE_F2 ${f2}"*) ;; *) fail "S6: inventory reads ${name}-workspace as '${row}', expected WILL_REFUSE_F2"; return 1 ;; esac
+  ok "S6: host-layout-merge.sh inventory predicts the F2 refusal"
   post_wake "$name" || return 1
   while [ "$elapsed" -lt "$POD_READY_TIMEOUT" ]; do
     pod="$(host_pods "$name" | jq -r '[.items[] | select(any(.status.initContainerStatuses[]?;
@@ -794,8 +839,10 @@ scenario_S6() {
   [ -n "$pod" ] || { fail "S6: no Pod with workspace-layout-merge exit 1 within ${POD_READY_TIMEOUT}s"; return 1; }
   logs="$(kctl logs "$pod" -n "$HOST_NS" -c workspace-layout-merge --previous 2>/dev/null ||
     kctl logs "$pod" -n "$HOST_NS" -c workspace-layout-merge)"
-  grep -q 'workspace layout merge refused: more than one live SQLite database across' <<<"$logs" ||
-    { fail "S6: merge refused without the F2 line: ${logs}"; return 1; }
+  grep -q "$f2" <<<"$logs" || { fail "S6: merge refused without the F2 line: ${logs}"; return 1; }
+  row="$(layout_row verify "$name" 1)" || return 1
+  case "$row" in "MERGE_REFUSED ${f2}"*) ;; *) fail "S6: verify reads ${name}-workspace as '${row}', expected MERGE_REFUSED with the F2 line"; return 1 ;; esac
+  ok "S6: host-layout-merge.sh verify reports MERGE_REFUSED with the F2 line"
   if host_pods "$name" | jq -e 'any(.items[]; any(.status.conditions[]?; .type == "Ready" and .status == "True"))' >/dev/null; then
     fail 'S6: a Pod became Ready on a refused tree'
     return 1
