@@ -15,6 +15,6 @@ export interface FilePreviewPageProps {
   unavailable?: boolean
   pushToast?: (message: string, tone: Tone) => void
   onOpenRoute?: () => void
-  /** Native title-bar leading slot supplied by App for the active GFS resource actions. */
+  /** @deprecated Kept for App compatibility; GFS actions now use resource-local menus. */
   titlebarLeadingTarget?: HTMLElement | null
 }

@@ -3,7 +3,6 @@ import { EmptyState } from '@components/Common'
 import { GfsImagePreviewBody } from '@components/GfsImagePreview'
 import { GfsMarkdownPreviewBody } from '@components/GfsMarkdownPreview'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
-import { GfsResourceToolbar } from '@components/GfsResourceToolbar'
 import { GfsVideoPreviewBody } from '@components/GfsVideoPreview'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
@@ -63,7 +62,6 @@ export function FilePreviewPage({
   unavailable = false,
   pushToast,
   onOpenRoute,
-  titlebarLeadingTarget,
 }: FilePreviewPageProps) {
   const ctrl = useGfsBrowserController()
   const [reloadToken, setReloadToken] = useState(0)
@@ -152,7 +150,7 @@ export function FilePreviewPage({
     setCopyContentReady(Boolean(copy))
   }, [])
 
-  const toolbarActions = buildGfsResourceActions({
+  const resourceActions = buildGfsResourceActions({
     kind: 'file',
     uri: gfsUri,
     handlers: {
@@ -172,7 +170,7 @@ export function FilePreviewPage({
     refreshing,
   })
   const fileActionsMenu = (
-    <GfsResourceMenu actions={getGfsMenuActions(toolbarActions)} resourceName={fileName} />
+    <GfsResourceMenu actions={getGfsMenuActions(resourceActions)} resourceName={fileName} />
   )
 
   const revalidateAccess = useCallback(async () => {
@@ -204,7 +202,6 @@ export function FilePreviewPage({
   return (
     <section className="page">
       <div className="da-gfs-preview-page">
-        <GfsResourceToolbar actions={toolbarActions} portalTarget={titlebarLeadingTarget} />
         <div className="da-gfs-preview-content">
           {denied || unavailable || accessRevoked ? (
             <EmptyState title="File unavailable" body="This item is no longer available." />

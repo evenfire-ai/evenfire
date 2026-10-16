@@ -45,7 +45,6 @@ export type GfsResourceAction = {
   label: string
   icon: ReactNode
   targetUri: string
-  toolbar: boolean
   menu: boolean
   disabled: boolean
   loading: boolean
@@ -79,7 +78,6 @@ type ActionDefinition = {
   id: GfsResourceActionId
   label: string
   icon: ReactNode
-  toolbar: boolean
   menu: boolean
   eligible: boolean
   disabled?: boolean
@@ -93,7 +91,6 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       id: 'refresh',
       label: 'Refresh',
       icon: <IconRefresh />,
-      toolbar: true,
       menu: true,
       eligible: Boolean(options.handlers.refresh),
       disabled: mutating || (options.refreshing ?? false),
@@ -103,7 +100,6 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       id: 'share',
       label: 'Share',
       icon: <IconShare />,
-      toolbar: true,
       menu: true,
       eligible: Boolean(options.canShare && options.handlers.share),
       disabled: mutating,
@@ -112,7 +108,6 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       id: 'copy-link',
       label: 'Copy link',
       icon: <IconLink />,
-      toolbar: true,
       menu: true,
       eligible: Boolean(options.handlers['copy-link']),
     },
@@ -120,7 +115,6 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       id: 'copy-route',
       label: 'Copy route',
       icon: <IconRoute />,
-      toolbar: true,
       menu: true,
       eligible: Boolean(options.handlers['copy-route']),
     },
@@ -128,7 +122,6 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       id: 'open-route',
       label: 'Open route',
       icon: <IconOpenRoute />,
-      toolbar: true,
       menu: true,
       eligible: Boolean(options.handlers['open-route']),
     },
@@ -136,7 +129,6 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       id: 'open-folder',
       label: 'Open folder',
       icon: <IconContexts />,
-      toolbar: false,
       menu: true,
       eligible: Boolean(
         options.kind === 'directory' && options.canOpenFolder && options.handlers['open-folder']
@@ -146,7 +138,6 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       id: 'rename',
       label: 'Rename',
       icon: <IconEdit />,
-      toolbar: true,
       menu: true,
       eligible: Boolean(options.canRename && options.handlers.rename),
       disabled: mutating,
@@ -155,7 +146,6 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       id: 'move',
       label: 'Move to',
       icon: <IconMove />,
-      toolbar: true,
       menu: true,
       eligible: Boolean(options.canMove && options.handlers.move),
       disabled: mutating,
@@ -164,7 +154,6 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       id: 'new-folder',
       label: 'New folder',
       icon: <IconFolderPlus />,
-      toolbar: true,
       menu: true,
       eligible: Boolean(
         options.kind === 'directory' && options.canCreateFolder && options.handlers['new-folder']
@@ -175,7 +164,6 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       id: 'upload-file',
       label: 'Upload file',
       icon: <IconUpload />,
-      toolbar: true,
       menu: true,
       eligible: Boolean(
         options.kind === 'directory' && options.canUpload && options.handlers['upload-file']
@@ -186,7 +174,6 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       id: 'copy-content',
       label: 'Copy content',
       icon: <IconCopyContent />,
-      toolbar: true,
       menu: true,
       eligible: Boolean(options.kind === 'file' && options.handlers['copy-content']),
       disabled: !options.canCopyContent,
@@ -195,7 +182,6 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       id: 'preview',
       label: 'Preview',
       icon: <IconEye />,
-      toolbar: false,
       menu: true,
       eligible: Boolean(options.kind === 'file' && options.canPreview && options.handlers.preview),
     },
@@ -203,7 +189,6 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       id: 'download',
       label: 'Download',
       icon: <IconDownload />,
-      toolbar: false,
       menu: true,
       eligible: Boolean(
         options.kind === 'file' && options.canDownload && options.handlers.download
@@ -213,7 +198,6 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       id: 'replace',
       label: 'Replace file',
       icon: <IconUpload />,
-      toolbar: false,
       menu: true,
       eligible: Boolean(options.kind === 'file' && options.canReplace && options.handlers.replace),
     },
@@ -221,7 +205,6 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       id: 'delete',
       label: 'Delete',
       icon: <IconTrash />,
-      toolbar: options.kind === 'directory',
       menu: true,
       eligible: Boolean(options.canDelete && options.handlers.delete),
       disabled: mutating,
@@ -237,7 +220,6 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
         label: definition.label,
         icon: definition.icon,
         targetUri: options.uri,
-        toolbar: definition.toolbar,
         menu: definition.menu,
         disabled: definition.disabled ?? false,
         loading: definition.loading ?? false,
@@ -245,10 +227,6 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       },
     ]
   })
-}
-
-export function getGfsToolbarActions(actions: GfsResourceAction[]): GfsResourceAction[] {
-  return actions.filter(action => action.toolbar)
 }
 
 export function getGfsMenuActions(actions: GfsResourceAction[]): GfsResourceAction[] {

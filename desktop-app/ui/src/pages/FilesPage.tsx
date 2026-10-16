@@ -21,7 +21,6 @@ import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
-import { GfsResourceToolbar } from '@components/GfsResourceToolbar'
 import {
   IconAttachFile,
   IconCheck,
@@ -250,7 +249,6 @@ export function FilesPage({
   workspaceTabId,
   pendingGfsDeepLinkOwnerTabId,
   isPendingGfsDeepLinkCurrent,
-  titlebarLeadingTarget,
   onExplicitNavigationIntent,
   onPendingGfsDeepLinkOutcome,
   remoteGfsChangeEpoch,
@@ -1844,12 +1842,6 @@ export function FilesPage({
                 />
               ) : null}
             </div>
-            {current ? (
-              <GfsResourceToolbar
-                actions={currentResourceActions}
-                portalTarget={titlebarLeadingTarget}
-              />
-            ) : null}
             {(currentIsFolder && canWriteCurrent) ||
             items.some(item => item.kind === 'directory' && rowCanWrite(item)) ? (
               <div className="da-gfs-drive__upload-input">

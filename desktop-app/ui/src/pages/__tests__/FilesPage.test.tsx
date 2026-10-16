@@ -128,14 +128,6 @@ function uploadInput(): HTMLInputElement {
 }
 
 async function openManageDialog(resourceName: string) {
-  const toolbar = screen.queryByRole('toolbar', { name: 'EvenDrive actions' })
-  const toolbarShare = toolbar ? within(toolbar).queryByRole('button', { name: 'Share' }) : null
-  if (toolbarShare) {
-    await act(async () => {
-      fireEvent.click(toolbarShare)
-    })
-    return
-  }
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name: `Options for ${resourceName}` }))
   })
@@ -151,23 +143,13 @@ async function openManageDialog(resourceName: string) {
 }
 
 async function chooseResourceAction(resourceName: string, actionName: string) {
-  const toolbar = screen.queryByRole('toolbar', { name: 'EvenDrive actions' })
-  const toolbarAction = toolbar
-    ? within(toolbar).queryByRole('button', {
-        name: actionName === 'Move to…' ? 'Move to' : actionName,
-      })
-    : null
-  if (toolbarAction) {
-    await act(async () => {
-      fireEvent.click(toolbarAction)
-    })
-    return
-  }
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name: `Options for ${resourceName}` }))
   })
   await act(async () => {
-    fireEvent.click(screen.getByRole('menuitem', { name: actionName }))
+    fireEvent.click(
+      screen.getByRole('menuitem', { name: actionName === 'Move to…' ? 'Move to' : actionName })
+    )
   })
 }
 
@@ -798,7 +780,7 @@ describe('FilesPage', () => {
     renderFilesPage()
 
     expect(screen.queryByText('Manage folder')).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: 'New folder' }))
+    await chooseResourceAction('Team folder', 'New folder')
     const newFolderDialog = screen.getByRole('dialog', { name: 'New folder' })
     const createFolderForm = screen.getByRole('form', { name: 'Create folder' })
     expect(within(newFolderDialog).queryByText('People with access')).toBeNull()
@@ -826,7 +808,7 @@ describe('FilesPage', () => {
     expect(deleteResource).toHaveBeenCalledWith('folder-1', 7)
   })
 
-  it('shows top-right create and upload actions for the open writable folder', async () => {
+  it('keeps open-folder actions in its breadcrumb menu', async () => {
     const gfsUri = 'gfs://main/0123456789abcdef0123456789abcdef'
     const folderName = 'Résumé # ? % folder'
     const current = await resolveResource(
@@ -856,27 +838,21 @@ describe('FilesPage', () => {
 
     renderFilesPage()
 
-    const toolbar = document.querySelector('.da-gfs-resource-toolbar')
-    const newFolderButton = screen.getByRole('button', { name: 'New folder' })
-    const uploadButton = screen.getByRole('button', { name: 'Upload file' })
-    expect(toolbar?.contains(newFolderButton)).toBe(true)
-    expect(toolbar?.contains(uploadButton)).toBe(true)
-    expect(screen.getByRole('button', { name: 'Open route' })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: 'Copy content' })).toBeNull()
+    expect(screen.queryByRole('toolbar', { name: 'EvenDrive actions' })).toBeNull()
+    expect(screen.getByRole('button', { name: `Options for ${folderName}` })).toBeTruthy()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    await chooseResourceAction(folderName, 'Refresh')
     await waitFor(() => expect(refreshCurrentLocation).toHaveBeenCalledOnce())
-    fireEvent.click(screen.getByRole('button', { name: 'Copy link' }))
+    await chooseResourceAction(folderName, 'Copy link')
     await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(gfsUri))
-    fireEvent.click(screen.getByRole('button', { name: 'Copy route' }))
+    await chooseResourceAction(folderName, 'Copy route')
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(gfsUri))
 
-    fireEvent.click(screen.getByRole('button', { name: `Options for ${folderName}` }))
-    fireEvent.click(screen.getByRole('button', { name: 'Open route' }))
+    await chooseResourceAction(folderName, 'Open route')
     expect(screen.getByRole('dialog', { name: 'Open route' })).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Close EvenDrive link dialog' }))
 
-    fireEvent.click(newFolderButton)
+    await chooseResourceAction(folderName, 'New folder')
     const newFolderDialog = screen.getByRole('dialog', { name: 'New folder' })
     const createFolderForm = screen.getByRole('form', { name: 'Create folder' })
     expect(within(newFolderDialog).getByRole('heading', { name: 'New folder' })).toBeTruthy()
@@ -885,6 +861,7 @@ describe('FilesPage', () => {
     expect(createFolderForm.querySelector('.da-gfs-new-folder-dialog__actions')).not.toBeNull()
     fireEvent.click(within(createFolderForm).getByRole('button', { name: 'Cancel' }))
 
+    await chooseResourceAction(folderName, 'Upload file')
     const upload = new File(['desktop file'], 'notes.md', { type: 'text/markdown' })
     await act(async () => {
       fireEvent.change(uploadInput(), { target: { files: [upload] } })
@@ -894,7 +871,7 @@ describe('FilesPage', () => {
     expect(createFileFromPath).toHaveBeenCalledWith(current.resourceId, 'notes.md', '/tmp/notes.md')
   })
 
-  it('renders the active folder toolbar in the supplied title-bar slot', () => {
+  it('keeps folder actions in the breadcrumb menu without populating the navbar slot', () => {
     const titlebarLeadingRoot = document.createElement('div')
     document.body.appendChild(titlebarLeadingRoot)
     hookMock.useGfsBrowserController.mockReturnValue({
@@ -911,18 +888,17 @@ describe('FilesPage', () => {
 
     const view = renderFilesPage(undefined, undefined, undefined, undefined, titlebarLeadingRoot)
     try {
-      const toolbar = within(titlebarLeadingRoot).getByRole('toolbar', {
-        name: 'EvenDrive actions',
-      })
-      expect(within(toolbar).getByRole('button', { name: 'Refresh' })).toBeTruthy()
-      expect(document.querySelector('.da-gfs-drive__header .da-gfs-resource-toolbar')).toBeNull()
+      expect(within(titlebarLeadingRoot).queryByRole('toolbar')).toBeNull()
+      const menuTrigger = screen.getByRole('button', { name: 'Options for Product' })
+      fireEvent.click(menuTrigger)
+      expect(screen.getByRole('menuitem', { name: 'Refresh' })).toBeTruthy()
     } finally {
       view.unmount()
       titlebarLeadingRoot.remove()
     }
   })
 
-  it('hides top-right create and upload actions without write access to the open folder', () => {
+  it('hides create and upload menu actions without write access to the open folder', () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
       current: {
@@ -942,8 +918,9 @@ describe('FilesPage', () => {
 
     renderFilesPage()
 
-    expect(screen.queryByRole('button', { name: 'New folder' })).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Upload file' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Options for Restricted folder' }))
+    expect(screen.queryByRole('menuitem', { name: 'New folder' })).toBeNull()
+    expect(screen.queryByRole('menuitem', { name: 'Upload file' })).toBeNull()
     expect(screen.queryByLabelText('Upload file')).toBeNull()
   })
 
@@ -1673,7 +1650,7 @@ describe('FilesPage', () => {
     renderFilesPage(pushToast)
 
     fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Rename' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
 
     const renameForm = screen.getByRole('form', { name: 'Rename resource' })
     expect(screen.getAllByRole('form', { name: 'Rename resource' })).toHaveLength(1)
@@ -4331,7 +4308,7 @@ describe('FilesPage', () => {
       'Upload file',
       'Delete',
     ]
-    // The active folder menu uses the same action descriptors as its toolbar.
+    // The active folder menu retains the shared action descriptors and canonical order.
     const activeFolderOptions = [
       'Refresh',
       'Share',
@@ -4474,7 +4451,7 @@ describe('FilesPage', () => {
       activeFolderOptions
     )
 
-    // The active folder's menu uses the same Open route action as the toolbar.
+    // The active folder menu retains the established Open route dialog action.
     fireEvent.click(
       within(screen.getByRole('menu', { name: 'Actions for Nested' })).getByRole('menuitem', {
         name: 'Open route',
@@ -4638,14 +4615,14 @@ describe('FilesPage', () => {
     })
     renderFilesPage()
 
-    fireEvent.click(screen.getByRole('button', { name: 'New folder' }))
+    await chooseResourceAction('Product', 'New folder')
     fireEvent.change(screen.getByLabelText('Folder name'), { target: { value: 'unfinished' } })
     fireEvent.click(
       within(screen.getByRole('form', { name: 'Create folder' })).getByRole('button', {
         name: 'Cancel',
       })
     )
-    fireEvent.click(screen.getByRole('button', { name: 'New folder' }))
+    await chooseResourceAction('Product', 'New folder')
 
     expect((screen.getByLabelText('Folder name') as HTMLInputElement).value).toBe('')
   })

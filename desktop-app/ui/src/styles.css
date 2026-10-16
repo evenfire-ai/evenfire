@@ -15239,63 +15239,6 @@ pre {
   opacity: 1;
 }
 
-.da-gfs-resource-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: nowrap;
-  gap: var(--space-1);
-  flex: 0 0 auto;
-  min-width: 0;
-  max-width: 100%;
-}
-
-.da-gfs-resource-toolbar__item {
-  display: inline-flex;
-  flex: 0 0 auto;
-  position: relative;
-}
-
-.da-gfs-resource-toolbar__button {
-  flex: 0 0 auto;
-}
-
-.da-gfs-resource-toolbar__button > svg {
-  width: 16px;
-  height: 16px;
-}
-
-.da-gfs-resource-toolbar__tooltip {
-  display: block;
-  position: absolute;
-  top: calc(100% + var(--space-1));
-  left: 50%;
-  z-index: var(--layer-dropdown);
-  padding: var(--space-1) var(--space-2);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-control);
-  background: var(--surface-4);
-  box-shadow: var(--shadow-soft);
-  color: var(--text);
-  font-size: var(--font-size-sm);
-  line-height: var(--line-height-normal);
-  pointer-events: none;
-  text-align: center;
-  transform: translateX(-50%);
-  white-space: nowrap;
-}
-
-.da-gfs-resource-toolbar__item:first-child .da-gfs-resource-toolbar__tooltip {
-  left: 0;
-  transform: none;
-}
-
-.da-gfs-resource-toolbar__item:last-child .da-gfs-resource-toolbar__tooltip {
-  left: auto;
-  right: 0;
-  transform: none;
-}
-
 .da-gfs-drive__upload-input {
   display: none;
 }
