@@ -466,6 +466,31 @@ describe('SessionSearchService — retention sweep', () => {
       .all()
     expect(kept).toHaveLength(1)
   })
+
+  it('#14 rejects a sweep limit that is not a positive integer', async () => {
+    const cutoffEpoch = Date.now() / 1000 - 90 * 86400
+    for (const id of ['old-a', 'old-b']) {
+      seedSession(h.db, {
+        id,
+        userId: 'u1',
+        endReason: 'cancelled',
+        endedAt: Date.now() / 1000 - 100 * 86400,
+      })
+    }
+    for (const limit of [0, -1, 1.5]) {
+      await expect(
+        h.persistQueue.enqueueSync({ kind: 'sweep_closed_sessions', cutoffEpoch, limit })
+      ).rejects.toThrow('sweep_closed_sessions: limit must be a positive integer')
+    }
+    const count = () =>
+      (h.db.prepare('SELECT COUNT(*) AS n FROM sessions').get() as { n: number }).n
+    expect(count()).toBe(2)
+    // Liveness witness: a valid limit deletes exactly that many rows.
+    await expect(
+      h.persistQueue.enqueueSync({ kind: 'sweep_closed_sessions', cutoffEpoch, limit: 1 })
+    ).resolves.toEqual({ deleted_messages: 0, deleted_sessions: 1 })
+    expect(count()).toBe(1)
+  })
 })
 
 describe('Schema invariants', () => {

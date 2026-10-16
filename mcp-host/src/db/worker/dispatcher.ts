@@ -887,6 +887,11 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
     }
 
     case 'sweep_closed_sessions':
+      // SQLite reads LIMIT 0 as "delete nothing" and a negative LIMIT as "no
+      // limit"; either would break the bounded-batch contract silently.
+      if (!Number.isSafeInteger(op.limit) || op.limit <= 0) {
+        throw new Error('sweep_closed_sessions: limit must be a positive integer')
+      }
       return withBusyRetry(() => {
         const tx = db.transaction(() => {
           const params = { cutoff: op.cutoffEpoch, limit: op.limit }
