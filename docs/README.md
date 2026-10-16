@@ -69,7 +69,7 @@ Use this index for long-form docs.
 
 | Doc                                                | Description                                                                                       |
 | -------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| [CRD index](crds/README.md)                        | All 8 `clerum.io` CRDs                                                                            |
+| [CRD index](crds/README.md)                        | All 9 `clerum.io` CRDs                                                                            |
 | [Workflow SDK](../packages/workflow-sdk/README.md) | `@clerum/workflow-sdk` — build custom workflow coordinator images                                 |
 | [llms.txt](llms.txt)                               | Machine-readable doc map for coding agents                                                        |
 | Service READMEs                                    | One-line map per component in the root [README components list](../README.md#docs-and-components) |

@@ -8,7 +8,7 @@
 > function that changes, grouped by the spec's five phases.
 >
 > **Scope boundary:** control-ui only. Confirmed **zero new backend endpoints**
-> are required for phases 1–5 (see [Backend: no new endpoints](#backend-no-new-endpoints)).
+> are required for phases 1–5 (see [Backend: no new endpoints](#04-backend-no-new-endpoints)).
 
 ---
 

@@ -19,25 +19,26 @@ Control UI requires an admin login — it is not an open dashboard.
 
 ## Sections
 
-Sidebar destinations map to canonical App Router routes (`components/Sidebar/constants.tsx`):
+Sidebar destinations map to the public routes in `app/constants/routes.ts` (`components/Sidebar/constants.tsx`). Several public routes are rewrites onto older physical `app/` folders (for example `/agents` → `app/hosts`, `/connectors` → `app/mcp-servers`, `/agent-files` → `app/shared-filesystems`); see `next.config.js`.
 
-| Sidebar label     | Route                                                    | Contents                                                                                                               |
-| ----------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| Agents            | `/hosts`                                                 | Host list, detail tabs, guided creation wizard, per-tool approval overrides                                            |
-| Connectors        | `/mcp-servers`                                           | MCP server resources: list, create, edit, egress policy                                                                |
-| Installed plugins | `/plugins`                                               | Installed plugins by namespace/name: editor, secrets, integrations, runs                                               |
-| Shared Files      | `/shared-filesystems`                                    | Shared filesystem resources                                                                                            |
-| Global Files      | `/gfs`                                                   | Global File System browser and grant delegation                                                                        |
-| Marketplace       | `/marketplace`                                           | Connectors catalog plus the org-named tab `/marketplace/org` (entries, credentials, connection) — the folded Publisher |
-| External Channels | `/communication-channels`                                | Communication channel resources                                                                                        |
-| Users & Teams     | `/profile-admin/users`                                   | Users, teams, and admins administration                                                                                |
-| Contexts          | `/contexts`                                              | Context resources with per-context tabs                                                                                |
-| Secrets           | `/secrets`                                               | Secrets by scope, plus recipe secrets (values are write-only from the UI)                                              |
-| Outputs           | `/outputs`                                               | Generated outputs                                                                                                      |
-| Cost & Usage      | `/cost/usage`, `/cost/llm-prices`, `/cost/token-budgets` | Token usage dashboard, model prices, token budgets                                                                     |
-| Settings          | `/settings`                                              | Control settings panel                                                                                                 |
+| Sidebar label         | Public route                                                                           | Contents                                                                                           |
+| --------------------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Users & Teams         | `/users-and-teams/users`                                                               | Users, teams (admin / inviter / member roles), and control admins                                  |
+| Agents                | `/agents`                                                                              | Agent (Host) list, detail tabs, guided creation wizard; creates a private Context per agent        |
+| Marketplace           | `/marketplace`                                                                         | Catalog plus the org tab `/marketplace/org` (entries, credentials, connection), formerly Publisher |
+| Installed Connectors  | `/connectors`                                                                          | MCP servers: list, create (incl. remote/OAuth), edit, credentials, egress policy                   |
+| Installed Plugins     | `/plugins`                                                                             | Installed plugins by namespace/name: editor, secrets, integrations, runs                           |
+| Installed Guardrails  | `/guardrails`                                                                          | Installed guardrail hooks (`LlmHook`) and their install editor                                     |
+| Files                 | `/agent-files`                                                                         | Shared filesystem resources                                                                        |
+| Files › EvenDrive     | `/global-file-system`                                                                  | Global File System browser and grant delegation                                                    |
+| Files › Agent Outputs | `/agent-outputs/recipe-artifacts`                                                      | Generated outputs                                                                                  |
+| External Channels     | `/external-channels`                                                                   | Communication channel resources                                                                    |
+| LLM Models            | `/llm-models`                                                                          | Model allowlist catalog and discovery review                                                       |
+| Secrets               | `/secrets/llm`                                                                         | Secrets by scope, LLM subscriptions, recipe secrets (values are write-only from the UI)            |
+| Cost & Usage          | `/cost-and-usage/usage`, `/cost-and-usage/llm-prices`, `/cost-and-usage/token-budgets` | Token usage dashboard, model prices, token budgets                                                 |
+| Settings              | `/settings/ui`                                                                         | Control settings panel                                                                             |
 
-Routes not in the sidebar: `/control-admins/new` (invite a control admin), `/plugin-workload-sdk` (SDK grants and invocation search), and the public token flows listed above. Old top-level `/usage`, `/llm-prices`, and `/token-budgets` paths permanently redirect under `/cost/*` (`next.config.js`).
+Routes not in the sidebar: `/users-and-teams/admins/new` (invite a control admin; `/control-admins/new` redirects there), `/plugins/sdk` (SDK grants and invocation search), `/traces/*` (hidden Traces section), and the public token flows listed above. Legacy paths such as `/cost/*`, `/registry`, `/publisher/*`, `/mcp-servers`, `/hosts` and `/contexts` redirect to their current locations (`next.config.js`, `components/LegacyContextRedirect`).
 
 ## Notable Features
 
