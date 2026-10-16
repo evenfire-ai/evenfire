@@ -504,6 +504,35 @@ describe('embed ownership machine — re-entrant dispatch', () => {
     expect(h.bridge.open.mock.calls.map(([request]) => request.launchId)).toEqual(['l-0'])
     expect(h.machine.getSnapshot().views.size).toBe(0)
   })
+
+  it('settles an open the bridge throws on ahead of events already queued, so no close goes out for it', async () => {
+    let machine: ReturnType<typeof harness>['machine'] | null = null
+    let reenter = false
+    const h = harness({
+      updateTabs: () => {
+        if (!reenter) return
+        reenter = false
+        machine!.dispatch({ type: 'slotMeasured', launchId: 'l-1', bounds: BOUNDS })
+        machine!.projected(TAB_B)
+      },
+    })
+    machine = h.machine
+    await mountedOwner(h, launch('l-0'))
+    h.bridge.open.mockImplementationOnce((request: EmbedOpenRequest) => {
+      h.log.push(`open-threw:${request.launchId}`)
+      throw new Error('bridge unavailable')
+    })
+    const settled = h.machine.registerWhenSettled('l-1')
+    h.machine.relaunch(launch('l-1'))
+    reenter = true
+
+    h.machine.onReleased({ launchId: 'l-0', reason: 'closed', location: { routePath: '/x' } })
+
+    expect(h.log).toEqual(['open:l-0', 'close:l-0', 'open-threw:l-1'])
+    expect(h.machine.getSnapshot().views.size).toBe(0)
+    expect(h.machine.pendingWhenSettled()).toBe(0)
+    await expect(settled).resolves.toBe('failed')
+  })
 })
 
 describe('embed ownership machine — dispose', () => {
