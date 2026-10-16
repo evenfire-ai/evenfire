@@ -247,6 +247,35 @@ jobs:
             node ../scripts/ci/assert-pinned-vitest-suites.mjs --cases "$report" "$PINNED_CASES"
           fi
 
+      # This browser journey is part of the branch-protection-required External
+      # REST matrix context. Keep it here so its failure blocks the existing
+      # required check instead of creating an optional standalone CI job.
+      - name: Install frontend components for Profile UI recovery browser tests
+        if: matrix.service == 'external-rest-api'
+        working-directory: packages/frontend-components
+        run: npm ci
+
+      - name: Install Profile UI dependencies for recovery browser tests
+        if: matrix.service == 'external-rest-api'
+        working-directory: profile-ui
+        run: npm ci
+
+      - name: Install Profile UI recovery Playwright dependencies
+        if: matrix.service == 'external-rest-api'
+        working-directory: tests/e2e/playwright
+        run: npm ci
+
+      - name: Install Profile UI recovery Chromium
+        if: matrix.service == 'external-rest-api'
+        working-directory: tests/e2e/playwright
+        timeout-minutes: 15
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Profile UI recovery browser journeys
+        if: matrix.service == 'external-rest-api'
+        timeout-minutes: 25
+        run: make test-playwright-profile-ui-recovery
+
       - name: Test web-search image with isolated DNS TLS and MCP
         if: matrix.service == 'mcp-servers/web-search'
         working-directory: mcp-servers/web-search
@@ -542,7 +571,10 @@ jobs:
       - name: Run E2E static-audit regression matrix
         run: python3 -m tools.test_e2e_static_audit_scope
       - name: Audit live Profile UI recovery Playwright spec
-        run: python3 tools/e2e_static_audit.py tests/e2e/playwright/profile-ui-recovery/reset-session-hydration.spec.ts
+        run: >-
+          python3 tools/e2e_static_audit.py
+          tests/e2e/playwright/profile-ui-recovery/reset-session-hydration.spec.ts
+          tests/e2e/playwright/profile-ui-recovery/ordinary-invitation-onboarding.spec.ts
 
   # ─── Registry contract — boot evenfire-registry and drive the real client ──
   # Catches wire-format drift in clerumRegistryClient.ts before merge. Requires
