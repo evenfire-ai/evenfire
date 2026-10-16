@@ -787,7 +787,13 @@ export function registerIpcHandlers(service: AppService): void {
     'gfs:moveResource',
     async (
       event,
-      payload: { resourceId: string; destinationId: string; drive?: string; ifMatch?: number }
+      payload: {
+        resourceId: string
+        destinationId: string
+        drive?: string
+        ifMatch?: number
+        newName?: string
+      }
     ) => {
       assertTrustedSender(event)
       const drive = payload?.drive ? sanitizeString(payload.drive) : undefined
@@ -795,7 +801,8 @@ export function registerIpcHandlers(service: AppService): void {
         sanitizeString(payload?.resourceId),
         sanitizeString(payload?.destinationId),
         drive,
-        sanitizeOptionalInteger(payload?.ifMatch)
+        sanitizeOptionalInteger(payload?.ifMatch),
+        payload?.newName !== undefined ? sanitizeString(payload.newName) : undefined
       )
     }
   )

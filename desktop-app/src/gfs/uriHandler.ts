@@ -253,6 +253,8 @@ export interface GfsMoveInput {
   drive?: string
   destinationId: string
   ifMatch?: number
+  /** Optional combined rename+move; the server requires `write` on the resource for it. */
+  newName?: string
 }
 
 export interface GfsDeleteInput {
@@ -382,6 +384,7 @@ async function moveGfsResource(
   q.set('drive', input.drive ?? DEFAULT_DRIVE)
   const body: Record<string, unknown> = { newParentId: input.destinationId }
   if (input.ifMatch !== undefined) body.ifMatch = input.ifMatch
+  if (input.newName !== undefined) body.newName = input.newName
   const path = `/api/v1/me/gfs/resources/${encodeURIComponent(input.resourceId)}?${q.toString()}`
   const options = { body } as { token?: string; body?: unknown }
   options[TRANSPORT_TOKEN_FIELD] = session
