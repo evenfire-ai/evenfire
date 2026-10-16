@@ -250,6 +250,7 @@ export function FilesPage({
   workspaceTabId,
   pendingGfsDeepLinkOwnerTabId,
   isPendingGfsDeepLinkCurrent,
+  titlebarLeadingTarget,
   onExplicitNavigationIntent,
   onPendingGfsDeepLinkOutcome,
   remoteGfsChangeEpoch,
@@ -1771,7 +1772,12 @@ export function FilesPage({
                 />
               ) : null}
             </div>
-            {current ? <GfsResourceToolbar actions={currentResourceActions} /> : null}
+            {current ? (
+              <GfsResourceToolbar
+                actions={currentResourceActions}
+                portalTarget={titlebarLeadingTarget}
+              />
+            ) : null}
             {currentIsFolder && canWriteCurrent ? (
               <div className="da-gfs-drive__upload-input">
                 <input

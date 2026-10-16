@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { useEffect, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
 import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
 import { resolveDeniedMessage } from '@/gfs/__fixtures__/gfsProducerFixtures'
@@ -87,6 +87,34 @@ describe('FilePreviewPage', () => {
     expect(screen.getByRole('button', { name: 'Copy route' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Open route' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Copy content' })).toBeTruthy()
+  })
+
+  it('renders preview actions in the supplied title-bar slot', () => {
+    hookMock.useGfsBrowserController.mockReturnValue(controller())
+    const titlebarLeadingRoot = document.createElement('div')
+    document.body.appendChild(titlebarLeadingRoot)
+
+    const view = render(
+      <FilePreviewPage
+        gfsUri="gfs://main/image-1"
+        fileName="diagram.png"
+        fileKind="image"
+        byteLength={3}
+        unavailable
+        titlebarLeadingTarget={titlebarLeadingRoot}
+      />
+    )
+
+    try {
+      const toolbar = within(titlebarLeadingRoot).getByRole('toolbar', {
+        name: 'EvenDrive actions',
+      })
+      expect(within(toolbar).getByRole('button', { name: 'Copy link' })).toBeTruthy()
+      expect(document.querySelector('.da-gfs-preview-page > .da-gfs-resource-toolbar')).toBeNull()
+    } finally {
+      view.unmount()
+      titlebarLeadingRoot.remove()
+    }
   })
 
   it('mounts the markdown body for a markdown preview tab', async () => {

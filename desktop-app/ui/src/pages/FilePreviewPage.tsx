@@ -62,6 +62,7 @@ export function FilePreviewPage({
   unavailable = false,
   pushToast,
   onOpenRoute,
+  titlebarLeadingTarget,
 }: FilePreviewPageProps) {
   const ctrl = useGfsBrowserController()
   const [reloadToken, setReloadToken] = useState(0)
@@ -199,7 +200,7 @@ export function FilePreviewPage({
   return (
     <section className="page">
       <div className="da-gfs-preview-page">
-        <GfsResourceToolbar actions={toolbarActions} />
+        <GfsResourceToolbar actions={toolbarActions} portalTarget={titlebarLeadingTarget} />
         <div className="da-gfs-preview-content">
           {denied || unavailable || accessRevoked ? (
             <EmptyState title="File unavailable" body="This item is no longer available." />

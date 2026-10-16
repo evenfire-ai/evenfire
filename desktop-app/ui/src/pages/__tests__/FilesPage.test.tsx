@@ -104,7 +104,8 @@ function renderFilesPage(
   pushToast?: (message: string, tone: Tone) => void,
   onOpenPreview?: (preview: unknown) => void,
   pendingGfsUri?: string | null,
-  onPendingGfsUriHandled?: () => void
+  onPendingGfsUriHandled?: () => void,
+  titlebarLeadingTarget?: HTMLElement | null
 ) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
@@ -114,6 +115,7 @@ function renderFilesPage(
         onOpenPreview={onOpenPreview}
         pendingGfsUri={pendingGfsUri}
         onPendingGfsUriHandled={onPendingGfsUriHandled}
+        titlebarLeadingTarget={titlebarLeadingTarget}
       />
     </QueryClientProvider>
   )
@@ -892,6 +894,34 @@ describe('FilesPage', () => {
     })
 
     expect(createFileFromPath).toHaveBeenCalledWith(current.resourceId, 'notes.md', '/tmp/notes.md')
+  })
+
+  it('renders the active folder toolbar in the supplied title-bar slot', () => {
+    const titlebarLeadingRoot = document.createElement('div')
+    document.body.appendChild(titlebarLeadingRoot)
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/0123456789abcdef0123456789abcdef',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      affordances: delegationAffordances(new Set(['read', 'write']), false),
+    })
+
+    const view = renderFilesPage(undefined, undefined, undefined, undefined, titlebarLeadingRoot)
+    try {
+      const toolbar = within(titlebarLeadingRoot).getByRole('toolbar', {
+        name: 'EvenDrive actions',
+      })
+      expect(within(toolbar).getByRole('button', { name: 'Refresh' })).toBeTruthy()
+      expect(document.querySelector('.da-gfs-drive__header .da-gfs-resource-toolbar')).toBeNull()
+    } finally {
+      view.unmount()
+      titlebarLeadingRoot.remove()
+    }
   })
 
   it('hides top-right create and upload actions without write access to the open folder', () => {

@@ -3328,6 +3328,7 @@ export function App() {
                                   <FilesPage
                                     key={activeFilesTabId ?? 'files'}
                                     pushToast={vm.pushToast}
+                                    titlebarLeadingTarget={titlebarLeadingRoot}
                                     workspaceTabId={activeFilesTabId ?? undefined}
                                     pendingGfsUri={filesSeedPath}
                                     pendingGfsDeepLink={
@@ -3364,6 +3365,7 @@ export function App() {
                                     unavailable={activePreviewPayload.unavailable}
                                     pushToast={vm.pushToast}
                                     onOpenRoute={handleOpenGfsRoute}
+                                    titlebarLeadingTarget={titlebarLeadingRoot}
                                   />
                                 )}
                                 {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}
