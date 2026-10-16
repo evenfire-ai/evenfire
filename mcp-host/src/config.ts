@@ -478,22 +478,33 @@ export function parseStatelessHeartbeatIntervalMs(raw: string | undefined): numb
  * Parse CLERUM_DB_WORKER_STALL_TIMEOUT_MS, the longest time the db worker may
  * go without completing an operation while it has work in flight. It must
  * exceed the sync write timeout, so a sync write times out on its own budget
- * before the worker is declared stalled. An explicit invalid value fails at
- * boot.
+ * before the worker is declared stalled. It must fit a Node timer (at most
+ * 2147483647 ms; a larger delay becomes 1 ms). An invalid value, the default
+ * included, fails at boot, as does a sync timeout that is not a positive
+ * integer.
  */
 export function parseDbWorkerStallTimeoutMs(
   raw: string | undefined,
   syncTimeoutMs: number
 ): number {
-  if (raw === undefined || raw.trim() === '') return 30_000
+  if (!Number.isSafeInteger(syncTimeoutMs) || syncTimeoutMs <= 0) {
+    throw new Error(
+      `CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS (${syncTimeoutMs}) must be a positive integer`
+    )
+  }
   const name = 'CLERUM_DB_WORKER_STALL_TIMEOUT_MS'
-  const value = /^\d+$/.test(raw) ? Number(raw) : NaN
+  const isDefault = raw === undefined || raw.trim() === ''
+  const label = isDefault ? "'30000' (default)" : `'${raw}'`
+  const value = isDefault ? 30_000 : /^\d+$/.test(raw) ? Number(raw) : NaN
   if (!Number.isSafeInteger(value) || value < 1000) {
-    throw new Error(`${name}='${raw}' must be an integer of at least 1000`)
+    throw new Error(`${name}=${label} must be an integer of at least 1000`)
+  }
+  if (value > 2_147_483_647) {
+    throw new Error(`${name}=${label} must not exceed 2147483647`)
   }
   if (value <= syncTimeoutMs) {
     throw new Error(
-      `${name}='${raw}' must exceed CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS (${syncTimeoutMs})`
+      `${name}=${label} must exceed CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS (${syncTimeoutMs})`
     )
   }
   return value

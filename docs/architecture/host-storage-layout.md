@@ -208,8 +208,9 @@ renames the entry.
   restarts the container; a persistent cause shows as `CrashLoopBackOff`.
 - A slow write is not a failure. If the worker has operations in flight and
   completes none of them for `CLERUM_DB_WORKER_STALL_TIMEOUT_MS` (default
-  `30000`, at least `1000` and above `CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS`), the
-  queue fails the same way and the worker is terminated.
+  `30000`, at least `1000`, at most `2147483647` and above
+  `CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS`, or config load fails), the queue fails
+  the same way and the worker is terminated.
 - At shutdown mcp-host waits for every queued write, bounded only by that
   stall timeout and the Pod's termination grace period. A persistence failure
   during shutdown exits 1 instead of 0.
