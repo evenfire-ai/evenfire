@@ -524,6 +524,24 @@ describe('SidebarNav Files label engages the file explorer', () => {
     )
   })
 
+  it('T-D17-1: moves focus to the menu button when the backdrop closes the narrow-window menu', () => {
+    stubNarrowViewport()
+    const { container, rerender } = render(<SidebarNav {...baseProps({ toggleRequestId: 0 })} />)
+    rerender(<SidebarNav {...baseProps({ toggleRequestId: 1 })} />)
+    expect(container.querySelector('.left-nav')?.classList.contains('mobile-open')).toBe(true)
+
+    // Liveness witness: keyboard focus is on the backdrop before it is activated.
+    const backdrop = screen.getByRole('button', { name: 'Close navigation menu' })
+    backdrop.focus()
+    expect(document.activeElement).toBe(backdrop)
+    fireEvent.click(backdrop)
+
+    expect(container.querySelector('.left-nav')?.classList.contains('mobile-open')).toBe(false)
+    expect(document.activeElement).toBe(
+      screen.getByRole('button', { name: 'Open navigation menu' })
+    )
+  })
+
   it('T-D15-2: closes an open session options menu when Retry is clicked', () => {
     sidebarContext.latestChatSessions = [{ id: 'chat-a1', agentRef: 'host-a', title: 'Session A1' }]
     sidebarContext.heldAgentRefs = ['host-b']
@@ -563,15 +581,19 @@ describe('SidebarNav Files label engages the file explorer', () => {
   })
 
   it('T-D15-4: leaves focus where the user moved it before the Host verified', () => {
-    sidebarContext.heldAgentRefs = ['host-b']
+    sidebarContext.heldAgentRefs = ['host-b', 'host-c']
     const { rerender } = render(<SidebarNav {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Retry access to host-c' }))
+    sidebarContext.heldAgentRefs = ['host-b']
+    rerender(<SidebarNav {...baseProps()} />)
+    // Liveness witness: the focus effect runs in this test and moves body focus.
+    expect(document.activeElement).toBe(screen.getByTestId('nav-chat'))
+
     fireEvent.click(screen.getByRole('button', { name: 'Retry access to host-b' }))
     const files = screen.getByTestId('nav-files')
     files.focus()
-
     sidebarContext.heldAgentRefs = []
     rerender(<SidebarNav {...baseProps()} />)
-    // Liveness witness: the Retry row is gone, so the focus effect had its trigger.
     expect(screen.queryByRole('button', { name: /^Retry access to / })).toBeNull()
     expect(document.activeElement).toBe(files)
   })

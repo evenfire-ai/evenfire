@@ -221,10 +221,10 @@ export function SidebarNav({
   )
   const latestSessionsToggleVisible = latestChatSessions.length > SIDEBAR_SESSION_PREVIEW_LIMIT
 
-  // Every navigation from the sidebar closes its menus. Closing the mobile
-  // menu hides the surface that holds the focused control, so focus moves to
-  // the logo button that reopens it.
-  const closeMenusAfterNavigation = () => {
+  // Every navigation from the sidebar, and the mobile backdrop, closes its
+  // menus. Closing the mobile menu hides the surface that holds the focused
+  // control, so focus moves to the logo button that reopens it.
+  const closeSidebarMenus = () => {
     if (mobileMenuOpen) logoTriggerRef.current?.focus()
     setMobileMenuOpen(false)
     updateSettingsMenuOpen(false)
@@ -233,7 +233,7 @@ export function SidebarNav({
 
   const handleSelect = (item: NavItem) => {
     onSelect(item)
-    closeMenusAfterNavigation()
+    closeSidebarMenus()
   }
 
   // A successful Retry unmounts its row together with the focused button.
@@ -318,10 +318,7 @@ export function SidebarNav({
           type="button"
           className="sidebar-mobile-backdrop"
           aria-label="Close navigation menu"
-          onClick={() => {
-            setMobileMenuOpen(false)
-            updateSettingsMenuOpen(false)
-          }}
+          onClick={closeSidebarMenus}
         />
         <div className="sidebar-logo">
           <button
@@ -453,7 +450,7 @@ export function SidebarNav({
                           onClick={() => {
                             retriedAgentRefRef.current = agentRef
                             onSelectChatAgent(agentRef, { selectLatest: false })
-                            closeMenusAfterNavigation()
+                            closeSidebarMenus()
                           }}
                           color="neutral"
                           size="xs"
@@ -522,7 +519,7 @@ export function SidebarNav({
                                         isRemote: session.remote === true,
                                         title: session.title,
                                       })
-                                      closeMenusAfterNavigation()
+                                      closeSidebarMenus()
                                     }}
                                   >
                                     <span className="nav-latest-session__copy">
@@ -614,7 +611,7 @@ export function SidebarNav({
                             aria-label={`Open ${app.label}`}
                             onClick={() => {
                               onOpenSandboxUiApp(app)
-                              closeMenusAfterNavigation()
+                              closeSidebarMenus()
                             }}
                           >
                             <span className="nav-available-app__label">{app.label}</span>
@@ -752,7 +749,7 @@ export function SidebarNav({
                     className="sidebar-settings-menu-item sidebar-settings-route logout-link"
                     color="danger"
                     onClick={() => {
-                      closeMenusAfterNavigation()
+                      closeSidebarMenus()
                       onLogout()
                     }}
                     disabled={busy}
