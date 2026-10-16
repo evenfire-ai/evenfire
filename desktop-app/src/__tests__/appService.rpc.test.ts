@@ -161,7 +161,8 @@ describe('AppService.invokeHostMessage', () => {
     expect(service.rpcTokenManager.getOrIssue).toHaveBeenCalledWith(
       'session-token',
       [...MESSAGE_SCOPES],
-      ['chatllm']
+      ['chatllm'],
+      expect.any(String)
     )
     expect(service.rpcClient.invokeHostMessage).toHaveBeenCalledTimes(1)
     expect(service.rpcClient.invokeHostMessage.mock.calls[0][0]).toBe('rpc-test-token')
@@ -219,7 +220,8 @@ describe('AppService.invokeHostMessage', () => {
     expect(service.rpcTokenManager.getOrIssue).toHaveBeenCalledWith(
       'session-token',
       [...MESSAGE_SCOPES],
-      ['chatllm']
+      ['chatllm'],
+      expect.any(String)
     )
     const forwarded = service.rpcClient.invokeHostMessage.mock.calls[0][2]
     expect(forwarded.channelType).toBe('rpc')
@@ -421,7 +423,8 @@ describe('AppService.invokeHostMessage', () => {
     expect(service.rpcTokenManager.getOrIssue).toHaveBeenCalledWith(
       'team-test-token',
       ['host:message:invoke', 'host:task:read', 'host:wake:write'],
-      ['pro-agent']
+      ['pro-agent'],
+      expect.any(String)
     )
   })
 
@@ -893,7 +896,8 @@ describe('AppService.invokeHostMessage', () => {
     expect(service.rpcTokenManager.getOrIssue).toHaveBeenCalledWith(
       'teamless-token',
       ['host:message:invoke', 'host:task:read', 'host:wake:write'],
-      ['pro-agent']
+      ['pro-agent'],
+      expect.any(String)
     )
     expect(service.rpcClient.invokeHostMessage).toHaveBeenCalled()
   })

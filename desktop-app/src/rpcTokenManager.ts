@@ -8,17 +8,27 @@ type RpcCache = {
   scopes: RpcScope[]
   hostRefs: string[]
   expiresAtMs: number
+  bindingKey: string
+}
+
+export class RpcTokenIssuanceSupersededError extends Error {
+  constructor() {
+    super('RPC token issuance was superseded by a newer authenticated session')
+    this.name = 'RpcTokenIssuanceSupersededError'
+  }
 }
 
 export class RpcTokenManager {
   private cache: RpcCache | null = null
   private cacheGeneration = 0
+  private activeBindingKey = ''
 
   constructor(private readonly authClient: AuthClient) {}
 
   clear(): void {
     this.cacheGeneration += 1
     this.cache = null
+    this.activeBindingKey = ''
   }
 
   getMetadata(): { expiresAtMs: number | null; scopes: RpcScope[]; hostRefs: string[] } {
@@ -46,9 +56,19 @@ export class RpcTokenManager {
   async getOrIssue(
     sessionToken: string,
     requiredScopes: RpcScope[],
-    requestedHostRefs?: string[]
+    requestedHostRefs: string[] | undefined,
+    bindingKey: string
   ): Promise<RpcTokenResult> {
-    if (this.satisfies(requiredScopes, requestedHostRefs) && this.cache) {
+    if (this.activeBindingKey !== bindingKey) {
+      this.cacheGeneration += 1
+      this.cache = null
+      this.activeBindingKey = bindingKey
+    }
+    if (
+      this.satisfies(requiredScopes, requestedHostRefs) &&
+      this.cache &&
+      this.cache.bindingKey === bindingKey
+    ) {
       return {
         token: this.cache.token,
         accessScope: this.cache.accessScope,
@@ -65,15 +85,17 @@ export class RpcTokenManager {
       requiredScopes,
       requestedHostRefs
     )
-    if (generation === this.cacheGeneration) {
-      this.cache = {
-        token: issued.token,
-        accessScope: issued.accessScope,
-        teamId: issued.teamId,
-        scopes: issued.scopes,
-        hostRefs: issued.hostRefs,
-        expiresAtMs: Date.now() + issued.expiresInSeconds * 1000,
-      }
+    if (generation !== this.cacheGeneration || this.activeBindingKey !== bindingKey) {
+      throw new RpcTokenIssuanceSupersededError()
+    }
+    this.cache = {
+      token: issued.token,
+      accessScope: issued.accessScope,
+      teamId: issued.teamId,
+      scopes: issued.scopes,
+      hostRefs: issued.hostRefs,
+      expiresAtMs: Date.now() + issued.expiresInSeconds * 1000,
+      bindingKey,
     }
     return issued
   }

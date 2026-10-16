@@ -81,7 +81,8 @@ describe('AppService.cancelTask', () => {
     expect(mockGetOrIssue).toHaveBeenCalledWith(
       'session-token',
       ['host:message:invoke', 'host:task:read', 'host:wake:write'],
-      ['myhost']
+      ['myhost'],
+      expect.any(String)
     )
     expect(mockCancelTask).toHaveBeenCalledWith('rpc-token', 'myhost', 'abc')
   })

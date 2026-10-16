@@ -99,6 +99,7 @@ vi.mock('../authClient.js', () => ({
 function makeService(): AppService {
   const svc = new AppService()
   ;(svc as unknown as { sessionToken: string }).sessionToken = 'session-token'
+  ;(svc as unknown as { me: unknown }).me = { id: 'test-user', teamId: 'team-1' }
   return svc
 }
 
@@ -136,7 +137,8 @@ describe('AppService.listSandboxUiApps', () => {
     expect(mockGetOrIssue).toHaveBeenCalledWith(
       'session-token',
       ['sandbox:ui:view'],
-      ['sandbox-ui']
+      ['sandbox-ui'],
+      expect.any(String)
     )
     expect(mockListSandboxUiApps).toHaveBeenCalledWith('rpc-token')
     expect(result.apps.map(app => app.title)).toEqual(["Andy's Sales CRM", 'Support Desk'])
@@ -157,13 +159,15 @@ describe('AppService.listSandboxUiApps', () => {
       1,
       'session-token',
       ['sandbox:ui:view'],
-      ['sandbox-ui']
+      ['sandbox-ui'],
+      expect.any(String)
     )
     expect(mockGetOrIssue).toHaveBeenNthCalledWith(
       2,
       'session-token',
       ['sandbox:ui:view'],
-      ['sandbox-ui']
+      ['sandbox-ui'],
+      expect.any(String)
     )
     expect(mockListSandboxUiApps).toHaveBeenNthCalledWith(1, 'stale-rpc-token')
     expect(mockListSandboxUiApps).toHaveBeenNthCalledWith(2, 'fresh-rpc-token')

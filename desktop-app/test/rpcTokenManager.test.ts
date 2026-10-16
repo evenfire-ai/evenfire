@@ -46,12 +46,12 @@ describe('RpcTokenManager — clear()', () => {
     const manager = new RpcTokenManager(authClient)
 
     // Prime cache
-    await manager.getOrIssue('sess-token', ['host:message:invoke'])
+    await manager.getOrIssue('sess-token', ['host:message:invoke'], undefined, 'sess-token')
     expect(authClient.issueRpcToken).toHaveBeenCalledOnce()
 
     // After clear(), a second getOrIssue() should re-fetch
     manager.clear()
-    await manager.getOrIssue('sess-token', ['host:message:invoke'])
+    await manager.getOrIssue('sess-token', ['host:message:invoke'], undefined, 'sess-token')
     expect(authClient.issueRpcToken).toHaveBeenCalledTimes(2)
   })
 })
@@ -61,7 +61,12 @@ describe('RpcTokenManager — getOrIssue()', () => {
     const authClient = makeAuthClient('rpc-fresh-token')
     const manager = new RpcTokenManager(authClient)
 
-    const result = await manager.getOrIssue('sess-token', ['host:message:invoke'])
+    const result = await manager.getOrIssue(
+      'sess-token',
+      ['host:message:invoke'],
+      undefined,
+      'sess-token'
+    )
     expect(result.token).toBe('rpc-fresh-token')
     expect(authClient.issueRpcToken).toHaveBeenCalledOnce()
   })
@@ -70,8 +75,18 @@ describe('RpcTokenManager — getOrIssue()', () => {
     const authClient = makeAuthClient('rpc-cached-token', 60)
     const manager = new RpcTokenManager(authClient)
 
-    const first = await manager.getOrIssue('sess-token', ['host:message:invoke'])
-    const second = await manager.getOrIssue('sess-token', ['host:message:invoke'])
+    const first = await manager.getOrIssue(
+      'sess-token',
+      ['host:message:invoke'],
+      undefined,
+      'sess-token'
+    )
+    const second = await manager.getOrIssue(
+      'sess-token',
+      ['host:message:invoke'],
+      undefined,
+      'sess-token'
+    )
 
     expect(first.token).toBe(second.token)
     // Should only have fetched once (cache hit)
@@ -83,7 +98,7 @@ describe('RpcTokenManager — getOrIssue()', () => {
     const manager = new RpcTokenManager(authClient)
 
     // First call populates cache with 0s TTL (expired immediately)
-    await manager.getOrIssue('sess-token', ['host:message:invoke'])
+    await manager.getOrIssue('sess-token', ['host:message:invoke'], undefined, 'sess-token')
 
     // Override to return fresh token
     vi.mocked(authClient.issueRpcToken).mockResolvedValueOnce({
@@ -95,14 +110,19 @@ describe('RpcTokenManager — getOrIssue()', () => {
       expiresInSeconds: 60,
     })
 
-    const result = await manager.getOrIssue('sess-token', ['host:message:invoke'])
+    const result = await manager.getOrIssue(
+      'sess-token',
+      ['host:message:invoke'],
+      undefined,
+      'sess-token'
+    )
     expect(result.token).toBe('rpc-fresh-2')
     expect(authClient.issueRpcToken).toHaveBeenCalledTimes(2)
   })
 
   it('returns metadata reflecting cached token after first fetch', async () => {
     const manager = new RpcTokenManager(makeAuthClient('tok', 120))
-    await manager.getOrIssue('sess', ['host:message:invoke'])
+    await manager.getOrIssue('sess', ['host:message:invoke'], undefined, 'sess')
 
     const meta = manager.getMetadata()
     expect(meta.expiresAtMs).toBeGreaterThan(Date.now())
@@ -143,12 +163,18 @@ describe('RpcTokenManager — subset scope reuse', () => {
     await manager.getOrIssue(
       'sess-token',
       ['host:activity:read', 'host:task:read', 'host:wake:write'],
-      ['chatllm']
+      ['chatllm'],
+      'sess-token'
     )
     expect(authClient.issueRpcToken).toHaveBeenCalledOnce()
 
     // Narrower request (e.g. an observability read) — served from cache.
-    const reused = await manager.getOrIssue('sess-token', ['host:activity:read'], ['chatllm'])
+    const reused = await manager.getOrIssue(
+      'sess-token',
+      ['host:activity:read'],
+      ['chatllm'],
+      'sess-token'
+    )
 
     // 1. Exactly ONE issuance: the subset did not trigger a second round trip.
     expect(authClient.issueRpcToken).toHaveBeenCalledOnce()

@@ -36,6 +36,33 @@ vi.mock('../chatStoreBinding.js', () => ({
 
 const RESOURCE_ID = '11111111-1111-1111-1111-111111111111'
 
+function setGfsFixtureSession(service: unknown, token: string): void {
+  const runtime = service as {
+    sessionToken: string | null
+    sessionAuthority: {
+      me: {
+        id: string
+        email: string
+        name: string | null
+        picture: string | null
+        teamId: string
+        teamName: string
+        role: string
+      } | null
+    }
+  }
+  runtime.sessionToken = token
+  runtime.sessionAuthority.me = {
+    id: 'gfs-fixture-user',
+    email: 'gfs-fixture@example.test',
+    name: null,
+    picture: null,
+    teamId: 'gfs-fixture-team',
+    teamName: 'GFS fixture team',
+    role: 'member',
+  }
+}
+
 function gfsService() {
   const service = new AppService() as unknown as {
     sessionToken: string | null
@@ -63,7 +90,7 @@ function gfsService() {
       ifMatch?: number
     ) => Promise<{ resourceId: string; version: number }>
   }
-  service.sessionToken = 'session-token'
+  setGfsFixtureSession(service, 'session-token')
   service.gfsClient = {
     grant: vi.fn().mockResolvedValue(undefined),
     createShare: vi.fn().mockResolvedValue(undefined),
@@ -319,7 +346,7 @@ async function authenticatedUploadService(statePath: string): Promise<UploadScop
     tokenStore,
     getUserDataDirectory: () => dirname(statePath),
   }) as unknown as UploadScopeTestService
-  service.sessionToken = 'token-a'
+  setGfsFixtureSession(service, 'token-a')
   service.me = {
     id: 'user-a',
     email: 'a@example.test',
@@ -733,7 +760,7 @@ describe('AppService GFS upload security scope', () => {
         startDesktopGfsUpload: (input: Record<string, unknown>) => Promise<unknown>
         suspendDesktopGfsUploadsForAuthBoundary: () => Promise<void>
       }
-      service.sessionToken = 'token-a'
+      setGfsFixtureSession(service, 'token-a')
       service.me = {
         id: 'user-a',
         email: 'a@example.test',
@@ -819,7 +846,7 @@ describe('AppService GFS upload security scope', () => {
       await expect(service.tokenStore.getSessionToken(getActiveEnvKey())).resolves.toBeNull()
       expect(readPendingExternalLogoutMarker(root, getActiveEnvKey())).toBeNull()
 
-      service.sessionToken = 'token-b'
+      setGfsFixtureSession(service, 'token-b')
       service.me = {
         id: 'user-b',
         email: 'b@example.test',
@@ -842,7 +869,7 @@ describe('AppService GFS upload security scope', () => {
       )
       expect(service.startDesktopGfsUpload).not.toHaveBeenCalled()
 
-      service.sessionToken = 'token-a-new'
+      setGfsFixtureSession(service, 'token-a-new')
       service.me = {
         id: 'user-a',
         email: 'a@example.test',
@@ -1038,7 +1065,7 @@ describe('AppService GFS proxy read transport', () => {
       sessionToken: string | null
       downloadGfsUri: (uri: string) => Promise<{ bytes: ArrayBuffer }>
     }
-    service.sessionToken = 'session-token'
+    setGfsFixtureSession(service, 'session-token')
 
     const resolved = {
       drive: 'main',
@@ -1104,7 +1131,7 @@ describe('AppService GFS proxy read transport', () => {
       sessionToken: string | null
       listGfsChildren: (resourceId: string) => Promise<unknown>
     }
-    service.sessionToken = 'session-token'
+    setGfsFixtureSession(service, 'session-token')
 
     const originalFetch = globalThis.fetch
     const fetchMock = vi.fn(
@@ -1148,7 +1175,7 @@ describe('AppService GFS proxy read transport', () => {
       sessionToken: string | null
       downloadGfsUri: (uri: string) => Promise<{ bytes: ArrayBuffer }>
     }
-    service.sessionToken = 'session-token'
+    setGfsFixtureSession(service, 'session-token')
 
     const resolved = {
       drive: 'main',

@@ -182,7 +182,7 @@ vi.mock('../sandboxUiPartitionGc.js', () => ({
 // real RpcProxyClient below.
 vi.mock('../rpcTokenManager.js', () => ({
   RpcTokenManager: class {
-    getOrIssue = vi.fn(async () => ({ token: 'fake-rpc-token' }))
+    getOrIssue = vi.fn(async (sessionToken: string) => ({ token: `fake-rpc-${sessionToken}` }))
     clear = vi.fn()
     getMetadata = vi.fn(() => ({ expiresAtMs: null, scopes: [], hostRefs: [] }))
   },
@@ -312,6 +312,7 @@ function createService(): AppService {
 function makeService(): AppService {
   const svc = createService()
   ;(svc as unknown as { sessionToken: string }).sessionToken = 'fake-session-token'
+  ;(svc as unknown as { me: unknown }).me = { id: 'fake-user', teamId: 'team-1' }
   return svc
 }
 

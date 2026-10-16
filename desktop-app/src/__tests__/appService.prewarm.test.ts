@@ -122,7 +122,8 @@ describe('AppService.prewarmHost', () => {
     expect(mockGetOrIssue).toHaveBeenCalledWith(
       'session-token',
       ['host:message:invoke', 'host:task:read', 'host:wake:write'],
-      ['chatllm']
+      ['chatllm'],
+      expect.any(String)
     )
     expect(mockPrewarmHost).toHaveBeenCalledTimes(1)
     expect(mockPrewarmHost).toHaveBeenCalledWith('rpc-token', 'chatllm')

@@ -3112,9 +3112,9 @@ export class AppService {
     scopes: RpcScope[],
     hostRefs: string[]
   ) {
-    const rpcToken = await this.rpcTokenManager.getOrIssue(sessionToken, scopes, hostRefs)
-    if (this.memoryOnlySession) this.assertMemoryOnlySessionCurrent()
-    return rpcToken
+    return this.sessionAuthority.issueRpcCredential(sessionToken, bindingKey =>
+      this.rpcTokenManager.getOrIssue(sessionToken, scopes, hostRefs, bindingKey)
+    )
   }
 
   private clearAuthenticatedSessionState(options: { notifySessionChanged?: boolean } = {}): void {
@@ -9087,7 +9087,7 @@ export class AppService {
     } catch (error) {
       if (AppService.shouldRefreshRpcToken(error)) {
         this.rpcTokenManager.clear()
-        const retried = await this.rpcTokenManager.getOrIssue(token, SANDBOX_UI_VIEW_SCOPES, [
+        const retried = await this.getRpcTokenForCurrentSession(token, SANDBOX_UI_VIEW_SCOPES, [
           SANDBOX_UI_HOST_REF_SENTINEL,
         ])
         return this.rpcClient.mintSandboxUiSession(retried.token, ns, name)

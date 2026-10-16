@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { getActiveEnvKey, getActiveLegacyEnvKeys } from './config.js'
 import {
   isMemoryOnlySessionExpired,
@@ -69,6 +70,26 @@ export type MemoryOnlySessionLease = {
 
 export type MemoryOnlySessionMarker = Omit<PendingExternalLogoutMarker, 'intent'> & {
   intent: Extract<PendingExternalLogoutIntent, { intent: 'memory-only-session' }>
+}
+
+type RpcSessionOwner = {
+  sessionDigest: string
+  envKey: string
+  generation: number
+  userId: string
+  teamId: string | null
+  memoryLease: MemoryOnlySessionLease | undefined
+}
+
+function credentialDigest(value: string): string {
+  return createHash('sha256').update(value).digest('hex')
+}
+
+export class SessionRequestOwnershipError extends Error {
+  constructor() {
+    super('The credential is not owned by the current authenticated session')
+    this.name = 'SessionRequestOwnershipError'
+  }
 }
 
 export type PendingLogoutLoginPlan = {
@@ -303,6 +324,56 @@ export class SessionAuthorityCoordinator {
     if (!lease) return
     this.assertMemoryOnlySessionCurrent(lease)
     if (token !== this.sessionToken) throw new TemporarySessionReplacedError()
+  }
+
+  /** Issue an RPC credential only while its exact session owner remains current. */
+  async issueRpcCredential<T extends { token: string; expiresInSeconds: number }>(
+    sessionToken: string,
+    issue: (bindingKey: string) => Promise<T>
+  ): Promise<T> {
+    const owner = this.captureRpcCredentialOwner(sessionToken)
+    const result = await issue(this.rpcCredentialBindingKey(owner))
+    this.assertRpcCredentialOwnerCurrent(owner)
+    return result
+  }
+
+  private captureRpcCredentialOwner(sessionToken: string): RpcSessionOwner {
+    if (this.sessionToken !== sessionToken || !this.me) throw new SessionRequestOwnershipError()
+    if (this.memoryLease) this.assertMemoryOnlySessionCurrent(this.memoryLease)
+    return {
+      sessionDigest: credentialDigest(sessionToken),
+      envKey: getActiveEnvKey(),
+      generation: this.sessionGeneration,
+      userId: this.me.id,
+      teamId: this.me.teamId ?? null,
+      memoryLease: this.memoryLease,
+    }
+  }
+
+  private rpcCredentialBindingKey(owner: RpcSessionOwner): string {
+    return JSON.stringify([
+      owner.envKey,
+      owner.generation,
+      owner.sessionDigest,
+      owner.userId,
+      owner.teamId,
+      owner.memoryLease?.volatileSessionId ?? null,
+    ])
+  }
+
+  private assertRpcCredentialOwnerCurrent(owner: RpcSessionOwner): void {
+    if (
+      this.sessionToken === null ||
+      credentialDigest(this.sessionToken) !== owner.sessionDigest ||
+      getActiveEnvKey() !== owner.envKey ||
+      this.sessionGeneration !== owner.generation ||
+      this.me?.id !== owner.userId ||
+      (this.me?.teamId ?? null) !== owner.teamId ||
+      this.memoryLease !== owner.memoryLease
+    ) {
+      throw new SessionRequestOwnershipError()
+    }
+    if (owner.memoryLease) this.assertMemoryOnlySessionCurrent(owner.memoryLease)
   }
 
   inspectPendingLogoutMarker(envKey: string): PendingExternalLogoutMarker | null {

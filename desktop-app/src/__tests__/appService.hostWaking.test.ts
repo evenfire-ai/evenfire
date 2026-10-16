@@ -126,13 +126,15 @@ describe('AppService.invokeHostMessage host-availability plumbing', () => {
       1,
       'session-token',
       ['host:message:invoke', 'host:task:read', 'host:wake:write'],
-      ['myhost']
+      ['myhost'],
+      expect.any(String)
     )
     expect(mockGetOrIssue).toHaveBeenNthCalledWith(
       2,
       'session-token',
       ['host:message:invoke', 'host:task:read', 'host:wake:write'],
-      ['myhost']
+      ['myhost'],
+      expect.any(String)
     )
   })
 

@@ -79,6 +79,7 @@ vi.mock('../authClient.js', () => ({
 function makeService(): AppService {
   const svc = new AppService()
   ;(svc as unknown as { sessionToken: string }).sessionToken = 'session-token'
+  ;(svc as unknown as { me: unknown }).me = { id: 'test-user', teamId: 'team-1' }
   return svc
 }
 
