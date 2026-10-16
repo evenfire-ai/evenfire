@@ -1,11 +1,10 @@
-import { Router } from 'express'
+import { type NextFunction, type Response, Router } from 'express'
 import { config } from '../../config.js'
 import type { K8sGateway } from '../../k8s.js'
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import type { ExternalAuthedRequest } from '../../middleware/externalSessionAuth.js'
 import {
   rejectBodyUserTeamMismatch,
-  requireExternalRole,
   requireExternalTeamParamMatch,
   requireExternalUserParamMatch,
   requireValidExternalSessionToken,
@@ -44,11 +43,23 @@ function sendInvitationServiceError(
   return true
 }
 
-async function currentTeamRole(
-  req: ExternalAuthedRequest,
-  teamId: string
-): Promise<TeamRole | undefined> {
-  return (await findMemberRole(teamId, req.externalAuth!.userId))?.role
+async function currentTeamRole(teamId: string, userId: string): Promise<TeamRole | undefined> {
+  return (await findMemberRole(teamId, userId))?.role
+}
+
+function requireCurrentTeamAdmin() {
+  return async (req: ExternalAuthedRequest, res: Response, next: NextFunction) => {
+    try {
+      const role = await currentTeamRole(req.params.teamId, req.externalAuth!.userId)
+      if (!roleCanDeleteMembers(role)) {
+        res.status(403).json({ error: 'forbidden' })
+        return
+      }
+      next()
+    } catch (error) {
+      next(error)
+    }
+  }
 }
 
 export function createExternalTeamsRouter(gateway: K8sGateway): Router {
@@ -91,6 +102,7 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
     '/external/teams/:teamId/name',
     requireExternalTeamParamMatch(),
     rejectBodyUserTeamMismatch,
+    requireCurrentTeamAdmin(),
     async (req, res, next) => {
       try {
         const name = String(req.body?.name || '').trim()
@@ -198,19 +210,12 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
   router.patch(
     '/external/teams/:teamId/members/:userId/role',
     requireExternalTeamParamMatch(),
-    requireExternalRole(['admin']),
     rejectBodyUserTeamMismatch,
+    requireCurrentTeamAdmin(),
     async (req, res, next) => {
       try {
         const role = normalizeTeamRoleInput(req.body?.role)
         if (!role) return res.status(400).json({ error: 'invalid role' })
-        if (
-          !roleCanDeleteMembers(
-            await currentTeamRole(req as ExternalAuthedRequest, req.params.teamId)
-          )
-        ) {
-          return res.status(403).json({ error: 'forbidden' })
-        }
         return res
           .status(200)
           .json(
@@ -230,7 +235,6 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
   router.post(
     '/external/teams/:teamId/invitations',
     requireExternalTeamParamMatch(),
-    requireExternalRole(['admin', 'inviter']),
     rejectBodyUserTeamMismatch,
     async (req, res, next) => {
       try {
@@ -242,7 +246,10 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
         if (!email || !role) {
           return res.status(400).json({ error: 'invalid invitation payload' })
         }
-        const callerRole = await currentTeamRole(req as ExternalAuthedRequest, req.params.teamId)
+        const callerRole = await currentTeamRole(
+          req.params.teamId,
+          (req as ExternalAuthedRequest).externalAuth!.userId
+        )
         if (!canManagerInviteAssignment(callerRole, role)) {
           return res.status(403).json({ error: 'forbidden' })
         }
@@ -259,16 +266,9 @@ export function createExternalTeamsRouter(gateway: K8sGateway): Router {
   router.delete(
     '/external/teams/:teamId/members/:userId',
     requireExternalTeamParamMatch(),
-    requireExternalRole(['admin']),
+    requireCurrentTeamAdmin(),
     async (req, res, next) => {
       try {
-        if (
-          !roleCanDeleteMembers(
-            await currentTeamRole(req as ExternalAuthedRequest, req.params.teamId)
-          )
-        ) {
-          return res.status(403).json({ error: 'forbidden' })
-        }
         const deleted = await softDeleteMember(
           req.params.teamId,
           req.params.userId,

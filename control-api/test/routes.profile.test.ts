@@ -477,7 +477,8 @@ describe('routes/profile', () => {
         'inviter'
       )
         .send({ email: 'new@example.com', role: 'Leader' })
-        .expect(403)
+        .expect(403, { error: 'forbidden' })
+      expect(svc.findMemberRole).toHaveBeenCalledWith('t1', 'u1')
       expect(svc.createInvitation).not.toHaveBeenCalled()
     })
 
@@ -531,14 +532,26 @@ describe('routes/profile', () => {
       expect(svc.createInvitation).not.toHaveBeenCalled()
     })
 
-    it('rejects a member session before the role check', async () => {
+    it('uses the current team role when the session role is lower', async () => {
+      svc.findMemberRole.mockResolvedValue({ role: 'admin' })
+      svc.createInvitation.mockResolvedValue({ email: 'new@example.com', token: 'tok' })
       await withTeamRoleSession(
         request(invitationApp()).post('/external/teams/t1/invitations'),
         'member'
       )
+        .send({ email: 'new@example.com', role: 'admin' })
+        .expect(200)
+      expect(svc.createInvitation).toHaveBeenCalledWith('t1', 'new', 'new@example.com', 'admin')
+    })
+
+    it('fails without creating an invitation when the role lookup fails', async () => {
+      svc.findMemberRole.mockRejectedValue(new Error('db unavailable'))
+      await withTeamRoleSession(
+        request(invitationApp()).post('/external/teams/t1/invitations'),
+        'admin'
+      )
         .send({ email: 'new@example.com', role: 'member' })
-        .expect(403)
-      expect(svc.findMemberRole).not.toHaveBeenCalled()
+        .expect(500)
       expect(svc.createInvitation).not.toHaveBeenCalled()
     })
 
@@ -615,6 +628,57 @@ describe('routes/profile', () => {
         200
       )
       expect(svc.softDeleteMember).toHaveBeenCalledWith('t1', 'u2', 'u1')
+    })
+
+    const memberSession = signExternalSessionToken({
+      userId: 'u1',
+      email: 'u@example.com',
+      teamId: 't1',
+      role: 'member',
+      authGeneration: 1,
+    })
+
+    function memberRequest(req: any) {
+      return withInternalServiceAuth(req).set('x-user-session-token', memberSession)
+    }
+
+    it('allows a role change when the current team role is admin and the session role is lower', async () => {
+      svc.findMemberRole.mockResolvedValue({ role: 'admin' })
+      svc.updateMemberRole.mockResolvedValue({ team_id: 't1', user_id: 'u2', role: 'inviter' })
+      await memberRequest(request(managementApp()).patch('/external/teams/t1/members/u2/role'))
+        .send({ role: 'inviter' })
+        .expect(200)
+      expect(svc.updateMemberRole).toHaveBeenCalledWith('t1', 'u2', 'inviter', 'u1')
+    })
+
+    it('allows a member removal when the current team role is admin and the session role is lower', async () => {
+      svc.findMemberRole.mockResolvedValue({ role: 'admin' })
+      svc.softDeleteMember.mockResolvedValue({ team_id: 't1', user_id: 'u2' })
+      await memberRequest(request(managementApp()).delete('/external/teams/t1/members/u2')).expect(
+        200
+      )
+      expect(svc.softDeleteMember).toHaveBeenCalledWith('t1', 'u2', 'u1')
+    })
+
+    it.each([[{ role: 'inviter' }], [{ role: 'member' }], [null]])(
+      'rejects a team rename when the current team role is %j',
+      async currentRole => {
+        svc.findMemberRole.mockResolvedValue(currentRole)
+        await adminRequest(request(managementApp()).put('/external/teams/t1/name'))
+          .send({ name: 'Renamed' })
+          .expect(403, { error: 'forbidden' })
+        expect(svc.findMemberRole).toHaveBeenCalledWith('t1', 'u1')
+        expect(svc.renameTeam).not.toHaveBeenCalled()
+      }
+    )
+
+    it('allows a team rename when the current team role is admin', async () => {
+      svc.findMemberRole.mockResolvedValue({ role: 'admin' })
+      svc.renameTeam.mockResolvedValue({ id: 't1', name: 'Renamed' })
+      await memberRequest(request(managementApp()).put('/external/teams/t1/name'))
+        .send({ name: 'Renamed' })
+        .expect(200, { id: 't1', name: 'Renamed' })
+      expect(svc.renameTeam).toHaveBeenCalledWith('t1', 'Renamed')
     })
   })
 
