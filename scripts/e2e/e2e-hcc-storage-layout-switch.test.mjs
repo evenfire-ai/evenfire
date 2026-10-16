@@ -6,11 +6,16 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-// Runs single helpers of e2e-hcc-storage-layout-switch.sh under bash with
-// stubbed kubectl/curl, so their failure paths are checked without a cluster.
+// Runs single helpers of the #825 live gates (the switch script, the upgrade
+// lane and their shared e2e-825-lib.sh) under bash with stubbed kubectl/curl,
+// so their failure paths are checked without a cluster.
 
-const SCRIPT = fileURLToPath(new URL('./e2e-hcc-storage-layout-switch.sh', import.meta.url))
-const SOURCE = readFileSync(SCRIPT, 'utf8')
+const SCRIPTS = [
+  './e2e-hcc-storage-layout-switch.sh',
+  './e2e-825-lib.sh',
+  './e2e-hcc-layout-upgrade.sh',
+].map(rel => fileURLToPath(new URL(rel, import.meta.url)))
+const SOURCE = SCRIPTS.map(file => readFileSync(file, 'utf8')).join('\n')
 
 function helper(name) {
   const lines = SOURCE.split('\n')
@@ -113,7 +118,74 @@ admin GET http://127.0.0.1:1/admin && rpc GET http://127.0.0.1:2/rpc && echo "CO
   }
 })
 
-test('no curl call in the script puts a Cookie or Authorization header in argv', () => {
+test('main_evidence_ok accepts only a passing main log of the same HEAD', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'e2e-825-upgrade-evidence-'))
+  try {
+    const head = 'a'.repeat(40)
+    const write = (name, lines) => {
+      const file = path.join(dir, name)
+      writeFileSync(file, `${lines.join('\n')}\n`)
+      return file
+    }
+    const cases = [
+      ['pass', write('pass', ['PASS: x', 'E2E_UPGRADE_HEAD=' + head, 'E2E_UPGRADE_MAIN=PASS']), 0],
+      ['fail', write('fail', ['E2E_UPGRADE_HEAD=' + head, 'E2E_UPGRADE_MAIN=FAIL']), 1],
+      [
+        'other head',
+        write('other', ['E2E_UPGRADE_HEAD=' + 'b'.repeat(40), 'E2E_UPGRADE_MAIN=PASS']),
+        1,
+      ],
+      [
+        'head prefix only',
+        write('prefix', ['E2E_UPGRADE_HEAD=' + head.slice(0, 9), 'E2E_UPGRADE_MAIN=PASS']),
+        1,
+      ],
+      ['missing file', path.join(dir, 'absent'), 1],
+    ]
+    const body = `
+${helper('main_evidence_ok')}
+for f in "$@"; do main_evidence_ok "$f" "$HEAD" && echo 0 || echo 1; done
+`
+    const run = spawnSync('bash', ['-c', body, 'bash', ...cases.map(c => c[1])], {
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH, HEAD: head },
+    })
+    assert.equal(run.status, 0, run.stderr)
+    assert.deepEqual(
+      run.stdout.trim().split('\n').map(Number),
+      cases.map(c => c[2]),
+      cases.map(c => c[0]).join(', ')
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+function runUpgrade(args, env) {
+  return spawnSync('bash', [SCRIPTS[2], ...args], {
+    encoding: 'utf8',
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, ...env },
+    timeout: 30_000,
+  })
+}
+
+test('the upgrade lane refuses an unknown mode before touching the cluster', () => {
+  const run = runUpgrade(['bogus'], { KUBECONTEXT: 'clerum-test-upgrade-lane-0123abcd' })
+  assert.equal(run.status, 1, run.stdout + run.stderr)
+  assert.match(run.stdout + run.stderr, /usage: e2e-hcc-layout-upgrade\.sh main\|control/)
+  // Witness: a valid mode passes the mode check and stops at a later precondition.
+  const valid = runUpgrade(['main'], { KUBECONTEXT: 'minikube' })
+  assert.equal(valid.status, 1, valid.stdout + valid.stderr)
+  assert.doesNotMatch(valid.stdout + valid.stderr, /usage:/)
+})
+
+test('the upgrade lane refuses a context that is not a branch profile', () => {
+  const run = runUpgrade(['main'], { KUBECONTEXT: 'minikube' })
+  assert.equal(run.status, 1, run.stdout + run.stderr)
+  assert.match(run.stdout + run.stderr, /select an explicit branch-scoped Minikube context/)
+})
+
+test('no curl call in the #825 scripts puts a Cookie or Authorization header in argv', () => {
   assert.doesNotMatch(SOURCE, /-H\s+["']?(Cookie|Authorization):/i)
   // Witness: the credentials are still sent, through auth_header.
   const uses = SOURCE.match(/auth_header (admin|session|rpc) /g) ?? []

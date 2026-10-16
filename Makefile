@@ -1406,6 +1406,11 @@ test-e2e-hcc-storage-layout-switch: ## Run the #825 storage-layout gate across l
 	@echo "Running HCC storage-layout switch E2E gate..."
 	E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 KUBECONTEXT="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}" bash scripts/e2e/e2e-hcc-storage-layout-switch.sh
 
+.PHONY: test-e2e-hcc-layout-upgrade
+test-e2e-hcc-layout-upgrade: ## Run the #825 upgrade lane from v0.11.0 to this head (UPGRADE_MODE=main|control; fresh owned branch profile, E2E_PROFILE_PORTS_ENV, E2E_DEV_LOGIN_EMAIL, E2E_UPGRADE_EVIDENCE_DIR)
+	@echo "Running HCC layout upgrade E2E lane ($(UPGRADE_MODE))..."
+	E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 KUBECONTEXT="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}" bash scripts/e2e/e2e-hcc-layout-upgrade.sh "$(UPGRADE_MODE)"
+
 .PHONY: test-e2e-825-desktop-continuity
 test-e2e-825-desktop-continuity: ## Run the #825 Desktop journey across stateful/stateless switches (owned branch profile, forwards held, real model turns)
 	@set -eu; \
