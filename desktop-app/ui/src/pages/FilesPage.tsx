@@ -55,9 +55,6 @@ import {
 } from '@lib/gfsGrantErrors'
 import { isGfsPreviewFile, resolveGfsPreview } from '@lib/gfsPreview'
 import { formatSharedFileSize } from '@lib/sharedFiles'
-import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
-import type { GfsDragSource, GfsDropRejection, GfsDropVerdict } from '@/gfs/dragSession'
-import { useGfsDragSession } from '@/gfs/dragSession'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
 import type { GfsAccessRole } from '@/gfs/GfsGrantList'
 import type { GfsMergedAccessRow } from '@/gfs/GfsGrantList/types'
@@ -70,11 +67,14 @@ import {
   type GfsGrantListItem,
 } from '@/gfs/delegation'
 import type { GfsInheritedAccessSource } from '@/gfs/delegation.types'
+import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
+import type { GfsDragSource, GfsDropRejection, GfsDropVerdict } from '@/gfs/dragSession'
+import { useGfsDragSession } from '@/gfs/dragSession'
 import { GfsFilePicker } from '@/gfs/filePicker'
 import { planInheritedRoleChange } from '@/gfs/inheritedAccess'
-import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { commitGfsMove, suggestNumberedMoveName } from '@/gfs/moveCommit'
 import type { MoveCommitOutcome } from '@/gfs/moveCommit'
+import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
 import type { TeamDirectoryResult } from '../../../src/types'
 import type { FilesPageProps, GfsDriveResource, MyAgentEntry } from './FilesPage.types'
@@ -332,10 +332,7 @@ export function FilesPage({
   const adjudication = useGfsDragAdjudication({
     scope: sessionScope,
     drive: GFS_DRIVE_MAIN,
-    resolve: useCallback(
-      (uri: string) => window.clerum.gfs.resolve(uri),
-      []
-    ),
+    resolve: useCallback((uri: string) => window.clerum.gfs.resolve(uri), []),
   })
 
   const lastRemoteGfsChangeEpochRef = useRef(remoteGfsChangeEpoch)
@@ -985,9 +982,7 @@ export function FilesPage({
   /** Ancestor chain of rows in the current listing, nearest-first: the open
    * folder and its breadcrumb ancestors (an observation, never a guess). */
   const rowTargetAncestorIds = (): (string | null)[] =>
-    currentIsFolder && current
-      ? [...crumbs].map(crumb => crumb.resourceId).reverse()
-      : []
+    currentIsFolder && current ? [...crumbs].map(crumb => crumb.resourceId).reverse() : []
 
   /** Build the cross-surface drag descriptor for a row of this surface. */
   const dragSourceFrom = (resource: GfsDriveResource): Omit<GfsDragSource, 'generation'> => {
@@ -1003,9 +998,8 @@ export function FilesPage({
       ...(Number.isSafeInteger(resource.version) ? { version: resource.version } : {}),
       parentKnown,
       parentResourceId,
-      knownAncestorIds: currentIsFolder && current
-        ? [...crumbs].map(crumb => crumb.resourceId).reverse()
-        : [],
+      knownAncestorIds:
+        currentIsFolder && current ? [...crumbs].map(crumb => crumb.resourceId).reverse() : [],
       origin: 'files',
       scope: sessionScope ?? 'anonymous',
     }
@@ -1032,9 +1026,7 @@ export function FilesPage({
       setDragOverFolderId(null)
     }
     setDropStatesById(previous =>
-      previous[folderId] === verdict.state
-        ? previous
-        : { ...previous, [folderId]: verdict.state }
+      previous[folderId] === verdict.state ? previous : { ...previous, [folderId]: verdict.state }
     )
     return verdict
   }
@@ -1083,20 +1075,23 @@ export function FilesPage({
       kind: folder.kind,
       ancestorIds: rowTargetAncestorIds(),
     } as const
-    const verdict = applyHoverVerdict(
-      folder.resourceId,
-      adjudication.hoverVerdict(source, target)
-    )
-    event.dataTransfer.dropEffect = verdict.state === 'allowed' ? 'move' : 'none'
+    const verdict = applyHoverVerdict(folder.resourceId, adjudication.hoverVerdict(source, target))
+    // 'checking' must keep the drop LANDABLE: with dropEffect 'none' Chromium
+    // cancels the drag at release, so the drop-time priority adjudication
+    // (rev-2 §4.1 — "priority check on drop instead of a false deny") could
+    // never run and every authority check that had not finished resolving
+    // silently swallowed the gesture. Only an observed deny refuses the drop.
+    event.dataTransfer.dropEffect = verdict.state === 'denied' ? 'none' : 'move'
     if (verdict.state === 'checking') {
       adjudication.scheduleColdCheck(
         target,
         source.parentKnown ? source.parentResourceId : null,
         () => {
-        if (hoveredFolderRef.current !== folder.resourceId) return
-        const fresh = adjudication.hoverVerdict(source, target)
-        applyHoverVerdict(folder.resourceId, fresh)
-      })
+          if (hoveredFolderRef.current !== folder.resourceId) return
+          const fresh = adjudication.hoverVerdict(source, target)
+          applyHoverVerdict(folder.resourceId, fresh)
+        }
+      )
     }
   }
 
@@ -1919,26 +1914,24 @@ export function FilesPage({
                   const isDragging =
                     draggingResourceId === resource.resourceId ||
                     movingResourceId === resource.resourceId
-                   const isDropTarget = dragOverFolderId === resource.resourceId
-                   const dropState =
-                     resource.kind === 'directory' ? dropStatesById[resource.resourceId] : undefined
-                   const canDragResource =
-                     resource.readable !== false &&
-                     movingResourceId === null &&
-                     !ctrl.mutating
-                   return (
-                     <div
-                       className="da-grid__row da-grid__row--clickable da-grid__row--compact"
-                       key={resource.resourceId}
-                       draggable={canDragResource}
-                       title={
-                         canDragResource
-                           ? `Drag ${resource.name} into a folder to move it`
-                           : undefined
-                       }
-                       data-dragging={isDragging ? 'true' : undefined}
-                       data-drop-target={isDropTarget ? 'true' : undefined}
-                       data-drop-state={dropState}
+                  const isDropTarget = dragOverFolderId === resource.resourceId
+                  const dropState =
+                    resource.kind === 'directory' ? dropStatesById[resource.resourceId] : undefined
+                  const canDragResource =
+                    resource.readable !== false && movingResourceId === null && !ctrl.mutating
+                  return (
+                    <div
+                      className="da-grid__row da-grid__row--clickable da-grid__row--compact"
+                      key={resource.resourceId}
+                      draggable={canDragResource}
+                      title={
+                        canDragResource
+                          ? `Drag ${resource.name} into a folder to move it`
+                          : undefined
+                      }
+                      data-dragging={isDragging ? 'true' : undefined}
+                      data-drop-target={isDropTarget ? 'true' : undefined}
+                      data-drop-state={dropState}
                       role="button"
                       tabIndex={0}
                       aria-label={

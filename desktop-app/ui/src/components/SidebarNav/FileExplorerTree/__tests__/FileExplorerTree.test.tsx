@@ -867,6 +867,54 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 
+  it('keeps a checking hover landable (dropEffect move) and only a deny refuses the drop', async () => {
+    // Regression: mapping every non-'allowed' verdict to dropEffect 'none'
+    // made Chromium CANCEL the drag at release — the drop event never fired,
+    // so the drop-time priority check could not run and any hover whose
+    // affordances had not resolved yet silently swallowed the gesture.
+    const moveResource = vi.fn()
+    const affordances = vi.fn(() => new Promise<{ held: string[] }>(() => {}))
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('folder-a', 'A', 'directory'),
+          accessibleResource('folder-b', 'B', 'directory'),
+        ])
+      ),
+      listChildren: vi.fn(async () =>
+        listChildrenPage([childView('child-c', 'C', 'directory', { parentResourceId: 'folder-a' })])
+      ),
+      affordances,
+      moveResource,
+    })
+    renderTreeWithSession()
+
+    const rowA = await screen.findByRole('button', { name: 'A' })
+    const rowB = await screen.findByRole('button', { name: 'B' })
+    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const dataTransfer = dragTypes()
+
+    // Authority unresolved (affordances never settle): the hover must stay
+    // LANDABLE so the drop-time priority adjudication can decide.
+    fireEvent.dragStart(rowA, { dataTransfer })
+    fireEvent.dragOver(bRow, { dataTransfer })
+    expect(dataTransfer.dropEffect).toBe('move')
+
+    // Expand A to reveal its child C; a drop into the source's own descendant
+    // is structurally denied and must keep the no-drop cursor.
+    await act(async () => {
+      fireEvent.click(rowA)
+    })
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'C' })).toBeTruthy()
+    })
+    const rowC = screen.getByRole('button', { name: 'C' })
+    const cRow = rowC.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    fireEvent.dragOver(cRow, { dataTransfer })
+    expect(cRow.getAttribute('data-drop-state')).toBe('denied')
+    expect(dataTransfer.dropEffect).toBe('none')
+  })
+
   it('refuses a same-parent drop before any request or confirmation', async () => {
     const moveResource = vi.fn()
     const affordances = vi.fn(async () => ({ held: ['read', 'write', 'delete'] }))

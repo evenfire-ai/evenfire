@@ -3732,7 +3732,12 @@ describe('FilesPage', () => {
     await waitFor(() => expect(affordances).toHaveBeenCalledWith('private-1', 'main'))
 
     expect(destinationRow.getAttribute('data-drop-target')).toBeNull()
+    // The initial hover stays landable while authority is unresolved (the
+    // drop-time priority check must be reachable); once the cold check
+    // observes the missing write, a further hover refuses the drop.
+    fireEvent.dragOver(destinationRow, { dataTransfer })
     expect(dataTransfer.dropEffect).toBe('none')
+    expect(destinationRow.getAttribute('data-drop-state')).toBe('denied')
     fireEvent.drop(destinationRow, { dataTransfer })
 
     await waitFor(() => {
@@ -5109,28 +5114,27 @@ describe('FilesPage — folder drag-and-drop', () => {
     vi.restoreAllMocks()
   })
 
-  function folderDragHarness(options: {
-    destinationHeld?: string[]
-    sourceParentHeld?: string[]
-    sourceResourceHeld?: string[]
-    resolveParent?: string | null
-    resolveVersion?: number
-    moveResult?: () => Promise<{ resourceId: string; version: number }>
-    conflictOnce?: boolean
-  } = {}) {
+  function folderDragHarness(
+    options: {
+      destinationHeld?: string[]
+      sourceParentHeld?: string[]
+      sourceResourceHeld?: string[]
+      resolveParent?: string | null
+      resolveVersion?: number
+      moveResult?: () => Promise<{ resourceId: string; version: number }>
+      conflictOnce?: boolean
+    } = {}
+  ) {
     const pushToast = vi.fn()
     const moveResource = vi.fn(
-      options.moveResult ??
-        (async () => ({ resourceId: 'folder-src', version: 5 }))
+      options.moveResult ?? (async () => ({ resourceId: 'folder-src', version: 5 }))
     )
     if (options.conflictOnce) {
       let conflicted = false
       moveResource.mockImplementation(async () => {
         if (!conflicted) {
           conflicted = true
-          throw new Error(
-            '409 Conflict: a resource with this name already exists httpStatus=409'
-          )
+          throw new Error('409 Conflict: a resource with this name already exists httpStatus=409')
         }
         return { resourceId: 'folder-src', version: 5 }
       })
@@ -5229,7 +5233,9 @@ describe('FilesPage — folder drag-and-drop', () => {
 
     const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects to Archive' })
     expect(
-      within(dialog).getByText(/Inherited access to this folder and its contents follows the new location/)
+      within(dialog).getByText(
+        /Inherited access to this folder and its contents follows the new location/
+      )
     ).toBeTruthy()
     expect(moveResource).not.toHaveBeenCalled()
 
@@ -5267,10 +5273,7 @@ describe('FilesPage — folder drag-and-drop', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects to Archive' })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
     expect(moveResource).not.toHaveBeenCalled()
-    expect(pushToast).not.toHaveBeenCalledWith(
-      expect.stringContaining('Moved'),
-      expect.anything()
-    )
+    expect(pushToast).not.toHaveBeenCalledWith(expect.stringContaining('Moved'), expect.anything())
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 
@@ -5308,9 +5311,7 @@ describe('FilesPage — folder drag-and-drop', () => {
     const moveResource = vi.fn(async (_id: string, _dest: string, _v: number, newName?: string) => {
       if (newName === undefined && !conflicted) {
         conflicted = true
-        throw new Error(
-          '409 Conflict: a resource with this name already exists httpStatus=409'
-        )
+        throw new Error('409 Conflict: a resource with this name already exists httpStatus=409')
       }
       return { resourceId: 'file-1', version: 6 }
     })

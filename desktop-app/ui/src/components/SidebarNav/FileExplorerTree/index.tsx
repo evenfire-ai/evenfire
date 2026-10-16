@@ -563,7 +563,11 @@ export function FileExplorerTree({
           ? previous
           : { ...previous, [node.resourceId]: verdict.state }
       )
-      event.dataTransfer.dropEffect = verdict.state === 'allowed' ? 'move' : 'none'
+      // 'checking' must keep the drop LANDABLE (rev-2 §4.1): dropEffect 'none'
+      // makes Chromium cancel the drag at release, so the drop-time priority
+      // adjudication could never run and unresolved authority checks silently
+      // swallowed the gesture. Only an observed deny refuses the drop.
+      event.dataTransfer.dropEffect = verdict.state === 'denied' ? 'none' : 'move'
       if (verdict.state === 'checking') {
         adjudication.scheduleColdCheck(
           { resourceId: node.resourceId, name: node.name, kind: node.kind, ancestorIds },
