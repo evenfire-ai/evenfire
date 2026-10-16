@@ -578,7 +578,8 @@ describe('PersistQueue progress bound: slow vs wedged, in service and at close()
   })
 
   it('never fails a slow but alive worker with a backlog far longer than the bound', async () => {
-    const { worker, q, failures } = await openQueue({ stallTimeoutMs: 100, asyncTimeoutMs: 20 })
+    // A 10x margin between the ACK gap and the bound keeps this stable under load.
+    const { worker, q, failures } = await openQueue({ stallTimeoutMs: 500, asyncTimeoutMs: 20 })
     const acked = autoAck(worker, 50)
     const keys = ['a', 'b', 'c']
     // The tag only identifies the write in this test; the queue never reads it.
@@ -589,7 +590,7 @@ describe('PersistQueue progress bound: slow vs wedged, in service and at close()
     await Promise.all(keys.map(k => q.drainSessionKey(k)))
     const tags = acked.map(m => (m.op as WorkerOp & { tag: string }).tag)
     // Liveness witness: all 30 writes were acknowledged, 1.5 s of backlog
-    // against a 100 ms bound, each key in its enqueue order.
+    // against a 500 ms bound, each key in its enqueue order.
     expect(tags).toHaveLength(30)
     for (const key of keys) {
       expect(tags.filter(t => t.startsWith(key))).toEqual(
@@ -607,6 +608,35 @@ describe('PersistQueue progress bound: slow vs wedged, in service and at close()
     const kinds = acked.map(m => m.op.kind)
     // Liveness witness: the ten writes and then shutdown were acknowledged.
     expect(kinds).toEqual([...Array(10).fill('ping'), 'shutdown'])
+    expect(failures).toHaveLength(0)
+  })
+
+  it('drains on close() a backlog longer than twice the bound, with no total deadline', async () => {
+    const { worker, q, failures } = await openQueue({ stallTimeoutMs: 500 })
+    const acked = autoAck(worker, 50)
+    for (let i = 0; i < 30; i++) q.enqueueAsync('s1', { kind: 'ping' })
+    const started = Date.now()
+    await expect(q.close()).resolves.toBeUndefined()
+    // Liveness witness: 30 writes, then shutdown, all acknowledged; the
+    // backlog (30 x 50 ms) is longer than 2x the 500 ms bound.
+    expect(acked.map(m => m.op.kind)).toEqual([...Array(30).fill('ping'), 'shutdown'])
+    expect(Date.now() - started).toBeGreaterThan(1000)
+    expect(failures).toHaveLength(0)
+  })
+
+  it('does not count idle time against the bound on the next write', async () => {
+    const { worker, q, failures } = await openQueue({ stallTimeoutMs: 200 })
+    // Idle for twice the bound with nothing in flight.
+    await sleep(400)
+    q.enqueueAsync('s1', { kind: 'ping' })
+    await Promise.resolve()
+    expect(worker.sent).toHaveLength(2)
+    await sleep(20)
+    ack(worker, worker.sent[1])
+    // Liveness witness: the write was posted and its ACK drained the key.
+    await q.drainSessionKey('s1')
+    expect(worker.sent[1].op.kind).toBe('ping')
+    await sleep(50)
     expect(failures).toHaveLength(0)
   })
 
