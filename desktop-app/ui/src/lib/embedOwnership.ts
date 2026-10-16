@@ -220,17 +220,23 @@ function applyRow(state: EmbedOwnershipState, event: EmbedEvent): RowResult {
         next = { ...next, lastRoute }
         effects.push({ type: 'persistRoute', tabId: record.tabId, route })
       }
-      // Only a view the user was looking at counts as a crash; one still opening
-      // settles as abandoned instead of showing "closed unexpectedly".
-      const crashed = event.reason === 'crashed' && wasOwner && record.phase === 'mounted'
+      // A crash of the view the user is waiting on or looking at must leave the tab
+      // something to show and a way back. Any other release (session end, a view
+      // being closed) is not the app's fault and leaves the tab simply unowned.
+      const crashed =
+        event.reason === 'crashed' &&
+        wasOwner &&
+        (record.phase === 'mounted' || record.phase === 'opening')
+      if (!crashed) return { state: next, effects }
+      // A crash before the mount is a failed launch, not an abandoned one: a deep
+      // link waiting on it must retry instead of being dropped.
+      if (record.phase === 'opening') {
+        effects.push({ type: 'launchSettled', launchId: record.launchId, outcome: 'failed' })
+      }
       return {
         state: next,
         effects,
-        ...(crashed
-          ? {
-              failure: { tabId: record.tabId, launchId: record.launchId, kind: 'crashed' as const },
-            }
-          : {}),
+        failure: { tabId: record.tabId, launchId: record.launchId, kind: 'crashed' },
       }
     }
 

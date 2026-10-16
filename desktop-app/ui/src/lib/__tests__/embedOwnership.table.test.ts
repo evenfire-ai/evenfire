@@ -458,10 +458,15 @@ describe('decision table rows', () => {
     expect(out.state.views.size).toBe(0)
   })
 
-  it('R1b: a crash of an opening owner is abandoned, not a crash failure', () => {
+  it('R1a: a crash of the owner while it opens is a crash failure and a failed launch', () => {
     const out = reduceEmbedOwnership(stateOf(openingSeq), ev.released(A, 'crashed', null))
-    expect(out.state.failure).toBeNull()
-    expect(out.effects).toEqual([{ type: 'launchSettled', launchId: A, outcome: 'abandoned' }])
+    expect(out.state.owner).toBeNull()
+    expect(out.state.views.size).toBe(0)
+    expect(out.state.failure).toEqual({ tabId: T1, launchId: A, kind: 'crashed' })
+    expect(out.state.lastRoute.size).toBe(0)
+    expect(out.effects).toEqual([{ type: 'launchSettled', launchId: A, outcome: 'failed' }])
+    // The late rejection of that open is then a duplicate.
+    expectNoop(out.state, ev.openFailed(A))
   })
 
   it('R2: released for an unknown launch is ignored', () => {
@@ -916,6 +921,7 @@ describe('R-settle walks every row', () => {
     O3: [...openingSeq, ev.openFailed(A)],
     O4: [...mountedSeq, ev.mounted(C)],
     R1a: [...mountedSeq, ev.released(A, 'crashed', null)],
+    'R1a (opening)': [...openingSeq, ev.released(A, 'crashed', null)],
     R1b: [...openingSeq, ev.released(A, 'session', null)],
     R2: [...closeRequestedSeq, ev.released(A), ev.released(A)],
     X1: [...closeRequestedSeq, ev.closeFailed(A)],

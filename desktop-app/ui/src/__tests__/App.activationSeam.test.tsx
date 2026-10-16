@@ -20,6 +20,7 @@ import { mapKindToRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
 import type { SandboxUiDeepLinkEnvelope } from '@/App.types'
 import { openGfsResourcePayload, resolvedFile } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { type SandboxUiMainFake, createSandboxUiMainFake } from './__fixtures__/sandboxUiMainFake'
 
 // Every gesture that activates an app tab must do it through App's single
 // activation seam, which commits the store and the launch together under
@@ -270,26 +271,20 @@ const MEASURED_SLOT = {
   toJSON: () => ({}),
 } as DOMRect
 
-function makeSandboxUiBridge() {
+function makeSandboxUiBridge(main: SandboxUiMainFake) {
   return {
+    ...main.bridge,
     listApps: vi.fn().mockResolvedValue({ apps: APP_LISTING }),
     listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
     clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
     acknowledgeDeepLink: vi.fn().mockResolvedValue(undefined),
     onDeepLink: vi.fn(() => vi.fn()),
-    onTitleChanged: vi.fn(() => vi.fn()),
-    onClosed: vi.fn(() => vi.fn()),
-    onRefreshError: vi.fn(() => vi.fn()),
     onFindResult: vi.fn(() => vi.fn()),
-    open: vi.fn().mockResolvedValue(undefined),
-    close: vi.fn().mockResolvedValue(undefined),
-    getLocation: vi.fn().mockResolvedValue(null),
     setVisible: vi.fn().mockResolvedValue(undefined),
     setBounds: vi.fn().mockResolvedValue(undefined),
     capturePreview: vi.fn().mockResolvedValue(null),
     stopFindInPage: vi.fn().mockResolvedValue(undefined),
     focusActive: vi.fn().mockResolvedValue(true),
-    reload: vi.fn().mockResolvedValue(undefined),
   }
 }
 
@@ -316,6 +311,7 @@ describe('App activates app tabs only through its activation seam', () => {
   let openGfsResourceCb: ((resource: OpenGfsPayload) => void) | null
   let shortcutCommandCb: ShortcutListener | null
   let sandboxUi: ReturnType<typeof makeSandboxUiBridge>
+  let main: SandboxUiMainFake
 
   beforeEach(() => {
     vi.clearAllMocks()
@@ -347,7 +343,8 @@ describe('App activates app tabs only through its activation seam', () => {
       }
     )
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(MEASURED_SLOT)
-    sandboxUi = makeSandboxUiBridge()
+    main = createSandboxUiMainFake()
+    sandboxUi = makeSandboxUiBridge(main)
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
@@ -504,14 +501,9 @@ describe('App activates app tabs only through its activation seam', () => {
 
     await openFromSidebar(ALPHA, 1)
     // A title from the live embed renames its tab.
-    const openRequest = sandboxUi.open.mock.calls[0]![0] as { launchId: string }
-    act(() =>
-      latestListener<{ appRef: string; launchId: string; title: string }>(sandboxUi.onTitleChanged)(
-        { appRef: ALPHA!.appRef, launchId: openRequest.launchId, title: 'Alpha Inbox' }
-      )
-    )
+    act(() => main.retitle('Alpha Inbox'))
     // Leaving the app persists its route, and a plugin handoff opens a preview.
-    sandboxUi.getLocation.mockResolvedValue({ appRef: ALPHA!.appRef, routePath: '/inbox' })
+    main.navigate('/inbox')
     const payload = await openGfsResourcePayload(
       resolvedFile('md1', 'README.md', { gfsUri: 'gfs://main/md1' })
     )
@@ -542,12 +534,8 @@ describe('App activates app tabs only through its activation seam', () => {
   async function renderWithRetitledLiveAlpha(gesture: () => void) {
     await renderApp()
     await openFromSidebar(ALPHA, 1)
-    const openRequest = sandboxUi.open.mock.calls[0]![0] as { launchId: string }
-    const titleListener = latestListener<{ appRef: string; launchId: string; title: string }>(
-      sandboxUi.onTitleChanged
-    )
     act(() => {
-      titleListener({ appRef: ALPHA!.appRef, launchId: openRequest.launchId, title: 'Alpha Inbox' })
+      main.retitle('Alpha Inbox')
       gesture()
     })
     await flushMacrotask()

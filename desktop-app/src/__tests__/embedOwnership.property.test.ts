@@ -1042,7 +1042,8 @@ class World {
       event.type === 'released' &&
       event.reason === 'crashed' &&
       previous.owner === event.launchId &&
-      previous.views.get(event.launchId)?.phase === 'mounted'
+      (previous.views.get(event.launchId)?.phase === 'mounted' ||
+        previous.views.get(event.launchId)?.phase === 'opening')
     ) {
       if (next.failure?.launchId !== event.launchId || next.failure.kind !== 'crashed') {
         this.violation('P17', `${where}: the owner's crash left no crash failure`)
@@ -1615,7 +1616,7 @@ describe('embed ownership named cases (real main process)', () => {
     assertClean(world)
   })
 
-  it('K20: a view whose renderer dies before its open resolves settles abandoned, not crashed', async () => {
+  it('K20/K25: a view whose renderer dies before its open resolves fails with a crash failure', async () => {
     const { sink, world } = await manualWorld()
     world.crashNextLoad = true
 
@@ -1624,8 +1625,12 @@ describe('embed ownership named cases (real main process)', () => {
 
     // main reports the release first, then rejects the open.
     expect(world.releases).toEqual([{ launchId, reason: 'crashed', location: null }])
-    expect(world.outcomes.get(launchId)).toBe('abandoned')
-    expect(world.machine.getSnapshot().failure).toBeNull()
+    expect(world.outcomes.get(launchId)).toBe('failed')
+    expect(world.machine.getSnapshot().failure).toEqual({
+      tabId: TAB_ALPHA,
+      launchId,
+      kind: 'crashed',
+    })
     expect(world.machine.getSnapshot().owner).toBeNull()
     expectNoView(world)
   })

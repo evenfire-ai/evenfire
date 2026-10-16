@@ -47,7 +47,10 @@ export type EmbedOwnershipMachineDeps = {
   onHandoffReady?: (requestId: number) => void
   /** Only refresh failures of the launch that owns the embed when they arrive. */
   onOwnerRefreshError?: (event: EmbedRefreshErrorEvent) => void
-  /** Observability for tests: every reduced event with the state around it and its effects. */
+  /**
+   * Every reduced event with the state around it and its effects, before the
+   * effects run. It must not dispatch: it observes, it does not decide.
+   */
   onTransition?: (transition: {
     event: EmbedEvent
     previous: EmbedOwnershipState

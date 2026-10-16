@@ -1,15 +1,18 @@
 // @vitest-environment jsdom
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
 import { SandboxUiPage as SandboxUiPageBase } from '../SandboxUiPage'
-import { LaunchingSandboxUiPage as SandboxUiPage } from './__fixtures__/launchingSandboxUiPage'
+import {
+  LaunchingSandboxUiPage as SandboxUiPage,
+  createPageEmbed,
+} from './__fixtures__/launchingSandboxUiPage'
 
 const sandboxUi = {
   listApps: vi.fn(),
   open: vi.fn(),
   close: vi.fn(),
-  reload: vi.fn(),
   copyDeepLink: vi.fn(),
   setBounds: vi.fn(),
   setVisible: vi.fn(),
@@ -18,8 +21,6 @@ const sandboxUi = {
   stopFindInPage: vi.fn(),
   focusActive: vi.fn(),
   onFindResult: vi.fn((_callback: (result: FindResultPayload) => void) => vi.fn()),
-  onClosed: vi.fn(() => vi.fn()),
-  onRefreshError: vi.fn(() => vi.fn()),
 }
 type FindResultPayload = {
   requestId: number
@@ -125,11 +126,8 @@ describe('SandboxUiPage', () => {
       ],
     })
     const onLaunchApp = vi.fn()
-    const onEmbeddedAppOpening = vi.fn()
 
-    render(
-      <SandboxUiPageBase onLaunchApp={onLaunchApp} onEmbeddedAppOpening={onEmbeddedAppOpening} />
-    )
+    render(<SandboxUiPageBase embed={createPageEmbed()} onLaunchApp={onLaunchApp} />)
     fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
 
     expect(onLaunchApp).toHaveBeenCalledExactlyOnceWith({
@@ -141,7 +139,6 @@ describe('SandboxUiPage', () => {
     await new Promise(resolve => window.setTimeout(resolve, 0))
     // Without an owner feeding the app back, the page stays on the picker.
     expect(sandboxUi.open).not.toHaveBeenCalled()
-    expect(onEmbeddedAppOpening).not.toHaveBeenCalled()
     expect(screen.queryByTestId('sandbox-ui-mounted')).toBeNull()
   })
 
@@ -160,7 +157,7 @@ describe('SandboxUiPage', () => {
     })
     const onLaunchApp = vi.fn()
 
-    render(<SandboxUiPageBase onLaunchApp={onLaunchApp} />)
+    render(<SandboxUiPageBase embed={createPageEmbed()} onLaunchApp={onLaunchApp} />)
     fireEvent.click(await screen.findByText("Andy's Sales CRM"))
 
     expect(screen.queryByRole('button', { name: "Open Andy's Sales CRM" })).toBeNull()
@@ -307,50 +304,7 @@ describe('SandboxUiPage', () => {
     expect(screen.getByRole('button', { name: 'Copy current app link' })).toBeTruthy()
   })
 
-  it('routes controlled refresh and back requests through mounted-app owners', async () => {
-    sandboxUi.listApps.mockResolvedValue({
-      apps: [
-        {
-          appRef: 'sandbox-recipes/sales-crm',
-          title: 'Sales CRM',
-          defaultPath: '/',
-          ready: true,
-          phase: 'active',
-          updatedAt: null,
-        },
-      ],
-    })
-    sandboxUi.open.mockResolvedValue(undefined)
-    sandboxUi.close.mockResolvedValue(undefined)
-    sandboxUi.reload.mockResolvedValue(undefined)
-    const onEmbeddedAppBack = vi.fn()
-    const { rerender } = render(
-      <SandboxUiPage actionRequest={null} onEmbeddedAppBack={onEmbeddedAppBack} />
-    )
-    fireEvent.click(await screen.findByRole('button', { name: 'Open Sales CRM' }))
-    await screen.findByRole('button', { name: 'Refresh app content' })
-
-    rerender(
-      <SandboxUiPage
-        actionRequest={{ id: 1, action: 'refresh' }}
-        onEmbeddedAppBack={onEmbeddedAppBack}
-      />
-    )
-    await waitFor(() => expect(sandboxUi.reload).toHaveBeenCalledOnce())
-
-    rerender(
-      <SandboxUiPage
-        actionRequest={{ id: 2, action: 'back-to-apps' }}
-        onEmbeddedAppBack={onEmbeddedAppBack}
-      />
-    )
-    await waitFor(() => {
-      expect(sandboxUi.close).toHaveBeenCalledOnce()
-      expect(onEmbeddedAppBack).toHaveBeenCalledOnce()
-    })
-  })
-
-  it('does not replay an app action requested while the native view is mounting', async () => {
+  it('asks its owner to relaunch on Refresh, only once the app is mounted', async () => {
     sandboxUi.listApps.mockResolvedValue({
       apps: [
         {
@@ -370,25 +324,19 @@ describe('SandboxUiPage', () => {
           finishOpen = resolve
         })
     )
-    sandboxUi.reload.mockResolvedValue(undefined)
-    const onEmbeddedAppMounted = vi.fn()
-    const { rerender } = render(
-      <SandboxUiPage actionRequest={null} onEmbeddedAppMounted={onEmbeddedAppMounted} />
-    )
+    const onRelaunch = vi.fn()
+    render(<SandboxUiPage onRelaunch={onRelaunch} />)
     fireEvent.click(await screen.findByRole('button', { name: 'Open Sales CRM' }))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledOnce())
+    // While the view is still opening there is nothing to refresh.
+    expect(screen.queryByRole('button', { name: 'Refresh app content' })).toBeNull()
 
-    rerender(
-      <SandboxUiPage
-        actionRequest={{ id: 1, action: 'refresh' }}
-        onEmbeddedAppMounted={onEmbeddedAppMounted}
-      />
-    )
-    expect(sandboxUi.reload).not.toHaveBeenCalled()
+    await act(async () => finishOpen())
+    fireEvent.click(await screen.findByRole('button', { name: 'Refresh app content' }))
 
-    finishOpen()
-    await waitFor(() => expect(onEmbeddedAppMounted).toHaveBeenCalledOnce())
-    expect(sandboxUi.reload).not.toHaveBeenCalled()
+    expect(onRelaunch).toHaveBeenCalledOnce()
+    // The relaunch is the owner's: the page itself neither reloads nor closes.
+    expect(sandboxUi.close).not.toHaveBeenCalled()
   })
 
   it('runs contextual find only against the mounted active WebContents contract', async () => {
@@ -539,20 +487,15 @@ describe('SandboxUiPage', () => {
   it('opens a deep-linked app at its stable entry point before handing off the client route', async () => {
     sandboxUi.listApps.mockResolvedValueOnce({ apps: [] })
     sandboxUi.open.mockResolvedValueOnce(undefined)
-    const onEmbeddedAppOpening = vi.fn()
-    const onShortcutOpenResult = vi.fn()
 
     render(
       <SandboxUiPage
-        shortcutApp={{
+        initialLaunch={{
           appRef: 'sandbox-recipes/task-board',
           label: 'Agentic Task Board',
           defaultPath: '/',
           routePath: '/tasks/task-42',
         }}
-        shortcutOpenRequestId={1}
-        onEmbeddedAppOpening={onEmbeddedAppOpening}
-        onShortcutOpenResult={onShortcutOpenResult}
       />
     )
 
@@ -575,45 +518,128 @@ describe('SandboxUiPage', () => {
         launchId: expect.any(String),
       })
     })
-    // The owner learns the same launch id main will echo on this view's events.
-    const { launchId } = sandboxUi.open.mock.calls[0]![0] as { launchId: string }
-    expect(onEmbeddedAppOpening).toHaveBeenCalledWith(
-      {
-        appRef: 'sandbox-recipes/task-board',
-        label: 'Agentic Task Board',
-        defaultPath: '/',
-        routePath: '/tasks/task-42',
-      },
-      launchId
-    )
-    await waitFor(() => {
-      expect(onShortcutOpenResult).toHaveBeenCalledWith(1, { status: 'mounted' })
-    })
+    expect(await screen.findByTestId('sandbox-ui-mounted')).toBeTruthy()
   })
 
-  it('reports a failed deep-linked shortcut open without acknowledging success', async () => {
-    sandboxUi.listApps.mockResolvedValueOnce({ apps: [] })
+  it('shows a failed open as the failure banner of the active app', async () => {
+    sandboxUi.listApps.mockResolvedValue({ apps: [] })
     sandboxUi.open.mockRejectedValueOnce(new Error('native mount failed'))
-    const onShortcutOpenResult = vi.fn()
 
     render(
       <SandboxUiPage
-        shortcutApp={{
+        activeAppRef="sandbox-recipes/task-board"
+        initialLaunch={{
           appRef: 'sandbox-recipes/task-board',
           label: 'Agentic Task Board',
           defaultPath: '/',
         }}
-        shortcutOpenRequestId={1}
-        onShortcutOpenResult={onShortcutOpenResult}
       />
     )
 
-    await waitFor(() => {
-      expect(onShortcutOpenResult).toHaveBeenCalledWith(1, {
-        status: 'failed',
-        message: 'native mount failed',
-      })
-    })
+    expect(await screen.findByText('sandbox-recipes/task-board: native mount failed')).toBeTruthy()
+    expect(screen.queryByTestId('sandbox-ui-mounted')).toBeNull()
+  })
+
+  it('maps the session status of a failed open to its user-facing copy', async () => {
+    sandboxUi.listApps.mockResolvedValue({ apps: [] })
+    sandboxUi.open.mockRejectedValueOnce(new Error('Sandbox UI session failed (404): gone'))
+
+    render(
+      <SandboxUiPage
+        activeAppRef="sandbox-recipes/task-board"
+        initialLaunch={{ appRef: 'sandbox-recipes/task-board', label: 'Task', defaultPath: '/' }}
+      />
+    )
+
+    expect(
+      await screen.findByText('sandbox-recipes/task-board: This app was removed.')
+    ).toBeTruthy()
+  })
+
+  it('shows a slot that never laid out as the slot failure', async () => {
+    sandboxUi.listApps.mockResolvedValue({ apps: [] })
+    vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockReturnValue({
+      x: 0,
+      y: 0,
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      width: 0,
+      height: 0,
+      toJSON: () => ({}),
+    } as DOMRect)
+
+    render(
+      <SandboxUiPage
+        activeAppRef="sandbox-recipes/task-board"
+        initialLaunch={{ appRef: 'sandbox-recipes/task-board', label: 'Task', defaultPath: '/' }}
+      />
+    )
+
+    expect(
+      await screen.findByText(
+        'sandbox-recipes/task-board: Embed slot is not laid out — cannot determine bounds'
+      )
+    ).toBeTruthy()
+    expect(sandboxUi.open).not.toHaveBeenCalled()
+  })
+
+  // What main reports when the mounted view's renderer dies.
+  function crashOf(embed: EmbedOwnershipMachine, openCall = 0) {
+    const { launchId } = sandboxUi.open.mock.calls[openCall]![0] as { launchId: string }
+    act(() => embed.onReleased({ launchId, reason: 'crashed', location: null }))
+  }
+
+  it('shows a crash of the mounted app with a Reopen that asks the owner to relaunch', async () => {
+    sandboxUi.listApps.mockResolvedValue({ apps: [] })
+    sandboxUi.open.mockResolvedValue(undefined)
+    const embed = createPageEmbed()
+    const onRelaunch = vi.fn()
+
+    render(
+      <SandboxUiPage
+        embed={embed}
+        onRelaunch={onRelaunch}
+        initialLaunch={{ appRef: 'sandbox-recipes/task-board', label: 'Task', defaultPath: '/' }}
+      />
+    )
+    await screen.findByRole('button', { name: 'Refresh app content' })
+
+    crashOf(embed)
+
+    expect(await screen.findByText('The app closed unexpectedly.')).toBeTruthy()
+    expect(screen.queryByTestId('sandbox-ui-mounted')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Reopen' }))
+    expect(onRelaunch).toHaveBeenCalledOnce()
+  })
+
+  it("shows the live view's session failure with a Retry that asks the owner to relaunch", async () => {
+    sandboxUi.listApps.mockResolvedValue({ apps: [] })
+    sandboxUi.open.mockResolvedValue(undefined)
+    const onRelaunch = vi.fn()
+    const app = { appRef: 'sandbox-recipes/task-board', label: 'Task', defaultPath: '/' }
+
+    const { rerender } = render(<SandboxUiPage onRelaunch={onRelaunch} initialLaunch={app} />)
+    await screen.findByRole('button', { name: 'Refresh app content' })
+    const { launchId } = sandboxUi.open.mock.calls[0]![0] as { launchId: string }
+
+    // A failure of a view that is not the live one is not shown.
+    rerender(
+      <SandboxUiPage
+        onRelaunch={onRelaunch}
+        refreshError={{ launchId: crypto.randomUUID(), message: 'stale' }}
+      />
+    )
+    expect(screen.queryByText(/Session refresh failed/)).toBeNull()
+
+    rerender(
+      <SandboxUiPage onRelaunch={onRelaunch} refreshError={{ launchId, message: 'mint failed' }} />
+    )
+    expect(await screen.findByText('Session refresh failed: mint failed.')).toBeTruthy()
+    expect(screen.queryByText(/Close and re-open/)).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(onRelaunch).toHaveBeenCalledOnce()
   })
 
   it('keeps the embed mounted during Strict Mode effect replay', async () => {
@@ -630,11 +656,10 @@ describe('SandboxUiPage', () => {
       ],
     })
     sandboxUi.open.mockResolvedValueOnce(undefined)
-    const onEmbeddedAppBack = vi.fn()
 
     render(
       <React.StrictMode>
-        <SandboxUiPage onEmbeddedAppBack={onEmbeddedAppBack} />
+        <SandboxUiPage />
       </React.StrictMode>
     )
 
@@ -643,7 +668,8 @@ describe('SandboxUiPage', () => {
     // The mounted embed survives StrictMode's double-invoke without tearing down;
     // its leading refresh control is the observable that it stayed mounted.
     expect(await screen.findByRole('button', { name: 'Refresh app content' })).toBeTruthy()
-    expect(onEmbeddedAppBack).not.toHaveBeenCalled()
+    expect(sandboxUi.open).toHaveBeenCalledOnce()
+    expect(sandboxUi.close).not.toHaveBeenCalled()
   })
 
   it('copies a deep link for the current app route and active team', async () => {
@@ -771,36 +797,6 @@ describe('SandboxUiPage', () => {
     await waitFor(() => {
       expect(onEmbedSlotRightChange).toHaveBeenCalledWith(416)
     })
-  })
-
-  it('reloads the embed in place when the Refresh button is clicked (no navigate-away needed)', async () => {
-    sandboxUi.listApps.mockResolvedValueOnce({
-      apps: [
-        {
-          appRef: 'sandbox-recipes/sales-crm',
-          title: "Andy's Sales CRM",
-          defaultPath: '/',
-          ready: true,
-          phase: 'active',
-          updatedAt: null,
-        },
-      ],
-    })
-    sandboxUi.open.mockResolvedValueOnce(undefined)
-    sandboxUi.reload.mockResolvedValueOnce(undefined)
-
-    render(<SandboxUiPage />)
-
-    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
-    await screen.findByTestId('sandbox-ui-mounted')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh app content' }))
-
-    await waitFor(() => {
-      expect(sandboxUi.reload).toHaveBeenCalledTimes(1)
-    })
-    // Refresh must NOT tear the embed down (that's the old navigate-away workaround).
-    expect(sandboxUi.close).not.toHaveBeenCalled()
   })
 
   it('shows an embed preview and hides the native view while shell overlays are open', async () => {
@@ -996,6 +992,35 @@ describe('SandboxUiPage', () => {
 
     await waitFor(() => expect(screen.queryByTestId('sandbox-ui-embed-preview')).toBeNull())
     expect(sandboxUi.setVisible.mock.calls).toEqual([[true]])
+  })
+
+  it('hides the native view without a preview when the capture does not answer in time', async () => {
+    sandboxUi.listApps.mockResolvedValue({ apps: [] })
+    sandboxUi.open.mockResolvedValue(undefined)
+    sandboxUi.capturePreview.mockReturnValue(new Promise<string | null>(() => {}))
+    const app = { appRef: 'sandbox-recipes/task-board', label: 'Task', defaultPath: '/' }
+    const { rerender } = render(<SandboxUiPage initialLaunch={app} />)
+    await screen.findByRole('button', { name: 'Refresh app content' })
+    await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(true))
+    sandboxUi.setVisible.mockClear()
+
+    vi.useFakeTimers()
+    try {
+      rerender(<SandboxUiPage headerShellOverlayOpen />)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(499)
+      })
+      expect(sandboxUi.capturePreview).toHaveBeenCalled()
+      expect(sandboxUi.setVisible).not.toHaveBeenCalled()
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1)
+      })
+      expect(sandboxUi.setVisible.mock.calls).toEqual([[false]])
+      expect(screen.queryByTestId('sandbox-ui-embed-preview')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('hides an active native view even before local launch state is available', async () => {
