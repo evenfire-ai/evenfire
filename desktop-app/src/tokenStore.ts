@@ -163,6 +163,8 @@ declare const readAuthorityBrand: unique symbol
 export type SessionTokenReadAuthority = { readonly [readAuthorityBrand]: true }
 export type SessionTokenReadOptions = SessionTokenMutationOptions & {
   legacyEnvKeys?: readonly string[]
+  /** Source order selected by the main-process session authority coordinator. */
+  sourceOrder?: readonly SessionTokenReadSource[]
   /** Verification-only selection: never write or retire a legacy credential. */
   allowLegacyMigration?: boolean
   /** Selected active read or completed migration source; authentication still requires verification. */
@@ -1087,6 +1089,7 @@ export class TokenStore {
   ): Promise<string | null> {
     assertEnvKey(envKey)
     assertMutationOwnership(options)
+    const sourceOrder = options.sourceOrder ?? ['keytar', 'safe-storage', 'historical-plaintext']
     if (this.isolatedUserDataPath !== undefined) await this.verifiedStorageBase()
     const account = accountFor(envKey)
     const scopePromise = this.readAuthorityScope(envKey, options)
@@ -1112,10 +1115,11 @@ export class TokenStore {
             }
           })
         : { keytar: null, stored: null, authority: captureReadAuthority(await scopePromise) }
-    if (stored && authority) return reportSelectedSessionToken(stored, 'keytar', options, authority)
+    if (sourceOrder.includes('keytar') && stored && authority)
+      return reportSelectedSessionToken(stored, 'keytar', options, authority)
 
     let encryptedSelection: { token: string; authority: SessionTokenReadAuthority } | null = null
-    if (isQualifiedSafeStorageAvailable()) {
+    if (sourceOrder.includes('safe-storage') && isQualifiedSafeStorageAvailable()) {
       try {
         const file = await this.encryptedFilePath(envKey)
         encryptedSelection = await this.readFileSelection(file, 'safe-storage', await scopePromise)
@@ -1135,16 +1139,18 @@ export class TokenStore {
     // Retain historical plaintext read compatibility. New production writes
     // require secure storage; only explicit isolated development may write it.
     let plaintextSelection: { token: string; authority: SessionTokenReadAuthority } | null = null
-    try {
-      const file = await this.plainFilePath(envKey)
-      plaintextSelection = await this.readFileSelection(
-        file,
-        'historical-plaintext',
-        await scopePromise
-      )
-    } catch (error) {
-      if (isSessionTokenFallbackReadFailure(error)) throw error
-      // No per-env plain-text token — fall through to legacy migration.
+    if (sourceOrder.includes('historical-plaintext')) {
+      try {
+        const file = await this.plainFilePath(envKey)
+        plaintextSelection = await this.readFileSelection(
+          file,
+          'historical-plaintext',
+          await scopePromise
+        )
+      } catch (error) {
+        if (isSessionTokenFallbackReadFailure(error)) throw error
+        // No per-env plain-text token — fall through to legacy migration.
+      }
     }
     if (plaintextSelection)
       return reportSelectedSessionToken(
