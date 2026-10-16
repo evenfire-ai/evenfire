@@ -154,6 +154,7 @@ function WorkspaceHarness({
           navItem: 'agents',
           selectedAgent: 'agent-x',
           heldAgentRefs: [],
+          focusedChatAgentRef: null,
           selectedAgentRoute: 'mcp-servers',
           handleNavSelect: vi.fn(),
           handleOpenAgentWorkspace: vi.fn(),

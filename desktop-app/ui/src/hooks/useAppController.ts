@@ -1579,6 +1579,8 @@ export function useAppController() {
     selectedAgent: nav.selectedAgent,
     isHostAccessBlocked,
     heldAgentRefs,
+    focusedChatAgentRef:
+      nav.activeTab?.kind === 'chat' ? (nav.activeTab.chat?.agentRef ?? null) : null,
     hostAuthorityRevision,
     selectedAgentRoute: nav.selectedAgentRoute,
     setSelectedAgent: nav.setSelectedAgent,

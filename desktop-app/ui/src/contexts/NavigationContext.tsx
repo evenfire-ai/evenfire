@@ -5,6 +5,8 @@ export interface NavigationContextValue {
   navItem: NavItem
   selectedAgent: string | null
   heldAgentRefs: string[]
+  /** The Host of the active chat tab, or null when no chat tab is active or it has no Host. */
+  focusedChatAgentRef: string | null
   selectedAgentRoute: AgentWorkspaceRoute
   handleNavSelect: (item: NavItem) => void
   handleOpenAgentWorkspace: (agentName: string, route?: AgentWorkspaceRoute) => void
