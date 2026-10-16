@@ -19,10 +19,10 @@ Helm values and Grafana dashboard configs for the Clerum observability stack. Th
 
 ## Setup
 
-> **On minikube**, follow [Monitoring and observability](../docs/operations/monitoring.md#install-on-minikube)
-> instead: it overrides the storage class and the 100 Gi Loki volume. That page
-> also explains what this starter covers (logs only; no metrics scraping is
-> shipped).
+> **On minikube**, the safer path is [Monitoring and observability](../docs/operations/monitoring.md#install-on-minikube):
+> it uses explicit `--context` commands with the minikube storage class and a
+> smaller Loki volume. That page also explains what this starter covers (logs
+> only; no metrics scraping is shipped).
 
 ```bash
 # Add Grafana Helm repo and create namespace
@@ -62,7 +62,7 @@ explicit commands in
 | Target                 | Description                                                                                       |
 | ---------------------- | ------------------------------------------------------------------------------------------------- |
 | `setup`                | Add Grafana Helm repo + create namespace                                                          |
-| `install_loki`         | Install loki-stack chart (v2.9.10)                                                                |
+| `install_loki`         | Install loki-stack chart (`LOKI_CHART_VERSION`, default 2.9.10)                                   |
 | `upgrade_loki`         | Upgrade loki-stack release                                                                        |
 | `uninstall_loki`       | Remove loki-stack release                                                                         |
 | `dashboards`           | Create or update the `grafana-dashboards` ConfigMap from every file in `dashboards/` (idempotent) |
