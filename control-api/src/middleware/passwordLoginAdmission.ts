@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from 'express'
 import { isIP } from 'node:net'
 import { z } from 'zod'
+import { passwordAdmissionDenialsTotal } from '../observability/metrics.js'
 import { PASSWORD_ADMISSION_POLICY } from '../services/auth/passwordAdmissionState.js'
 import { PasswordAdmissionError } from '../services/auth/passwordCredentialVerification.js'
 import { clearRateLimitHeaders, rateLimitMiddleware } from './rateLimitMiddleware.js'
@@ -16,9 +17,10 @@ export function sendPasswordAdmissionError(error: unknown, res: Response): boole
   res.setHeader('Cache-Control', 'no-store')
   res.setHeader('Retry-After', String(error.retryAfterSeconds))
   res.status(error.status).json({
-    error: error.status === 429 ? 'rate_limited' : 'authority_unavailable',
+    error: error.publicError,
     retryAfterSeconds: error.retryAfterSeconds,
   })
+  passwordAdmissionDenialsTotal.inc({ reason: error.reason })
   return true
 }
 
@@ -51,7 +53,7 @@ export const passwordLoginSourceAdmission = rateLimitMiddleware({
   },
   onLimited: (_req, res, retryAfterSeconds) => {
     sendPasswordAdmissionError(
-      new PasswordAdmissionError(429, Math.min(60, retryAfterSeconds)),
+      new PasswordAdmissionError(429, Math.min(60, retryAfterSeconds), 'source_rate'),
       res
     )
   },

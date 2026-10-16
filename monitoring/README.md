@@ -2,6 +2,10 @@
 
 Helm values and Grafana dashboard configs for the Clerum observability stack. This directory does not contain applications -- it provides configuration for Grafana and Loki deployed via their official Helm charts.
 
+This starter does not configure a Prometheus scraper or Alertmanager. Control API
+password-admission metrics and suggested alert queries are documented in
+[password admission availability and monitoring](../docs/operations/password-admission.md).
+
 ## Contents
 
 | Path | Description |
