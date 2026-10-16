@@ -312,6 +312,24 @@ assert_invalid_knob retry-over-max MINIKUBE_BASE_IMAGE_PULL_RETRIES=11
 assert_invalid_knob delay-over-max MINIKUBE_BASE_IMAGE_PULL_DELAY_SECS=301
 assert_invalid_knob delay-not-numeric MINIKUBE_BASE_IMAGE_PULL_DELAY_SECS=forever
 
+assert_invalid_handoff_flag() {
+  local value="$1" output status=0
+  output="$TMP_DIR/handoff-${value}.out"
+  clear_runtime_state
+  run_build "$output" valid "PROFILE_DESKTOP_HANDOFF_ENABLED=$value" \
+    bash "$BUILD_SCRIPT" --only=profile-ui || status=$?
+  if [[ "$status" -eq 2 ]] \
+    && grep -Fq 'PROFILE_DESKTOP_HANDOFF_INVALID: expected true or false' "$output" \
+    && runtime_logs_are_empty; then
+    pass "PROFILE_DESKTOP_HANDOFF_ENABLED=$value is rejected before runtime"
+  else
+    fail "PROFILE_DESKTOP_HANDOFF_ENABLED=$value was accepted or reached runtime (status=$status)"
+  fi
+}
+
+assert_invalid_handoff_flag 1
+assert_invalid_handoff_flag yes
+
 assert_lease_failure() {
   local mode="$1" name="$2" status=0
   local output="$TMP_DIR/lease-${mode}.out"
@@ -341,6 +359,21 @@ if [[ "$valid_status" -eq 47 ]] \
 else
   fail "the valid inherited lease was rejected (status=$valid_status)"
 fi
+
+for handoff_flag in true false; do
+  clear_runtime_state
+  handoff_output="$TMP_DIR/handoff-${handoff_flag}.out"
+  handoff_status=0
+  run_build "$handoff_output" valid \
+    "PROFILE_DESKTOP_HANDOFF_ENABLED=$handoff_flag" \
+    FAKE_MINIKUBE_STATUS_MODE=exit-47 \
+    bash "$BUILD_SCRIPT" --only=profile-ui || handoff_status=$?
+  if [[ "$handoff_status" -eq 47 ]] && grep -Fq -- "-p $PROFILE status" "$MINIKUBE_LOG"; then
+    pass "PROFILE_DESKTOP_HANDOFF_ENABLED=$handoff_flag is accepted"
+  else
+    fail "PROFILE_DESKTOP_HANDOFF_ENABLED=$handoff_flag was rejected (status=$handoff_status)"
+  fi
+done
 
 clear_runtime_state
 verify_output="$TMP_DIR/verify-only.out"
