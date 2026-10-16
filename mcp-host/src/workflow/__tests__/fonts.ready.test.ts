@@ -7,6 +7,7 @@ import { GlobalFonts } from '@napi-rs/canvas'
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.useRealTimers()
 })
 
 /** A letter of each script the PDF warns about. */
@@ -129,5 +130,97 @@ describe('ensureFontsReady', () => {
       expect(LETTER[script], script).toBeDefined()
       expect(glyphs.familyFor(LETTER[script], fonts.PDF_FONT_FAMILY), script).toBeUndefined()
     }
+  })
+})
+
+describe('a failed bundled-font load', () => {
+  const MINUTE = 60_000
+
+  async function freshFonts() {
+    vi.resetModules()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-16T10:00:00Z'))
+    const { logger } = await import('../../logger')
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined)
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined)
+    const system = vi.spyOn(GlobalFonts, 'registerFromPath')
+    return { error, info, system, fonts: await import('../fonts') }
+  }
+
+  const later = (ms: number) => vi.setSystemTime(Date.now() + ms)
+
+  it('loads the bundled faces once when nothing fails', async () => {
+    const register = vi.spyOn(GlobalFonts, 'register')
+    const { error, fonts } = await freshFonts()
+
+    fonts.ensureFontsReady()
+    later(60 * MINUTE)
+    fonts.ensureFontsReady()
+    expect(register).toHaveBeenCalledTimes(2)
+    expect(error).not.toHaveBeenCalled()
+  })
+
+  it('tries again after a passing failure, registers only the missing face, and the system faces once', async () => {
+    const register = vi.spyOn(GlobalFonts, 'register').mockImplementationOnce(() => null)
+    const { error, info, system, fonts } = await freshFonts()
+
+    fonts.ensureFontsReady()
+    expect(error).toHaveBeenCalledWith(
+      { err: 'the renderer refused the regular face', attempts: 1, retryInMs: 30_000 },
+      'Bundled Roboto faces could not be loaded'
+    )
+    const systemCalls = system.mock.calls.length
+    expect(register).toHaveBeenCalledTimes(2)
+
+    // Not again before the delay.
+    later(10_000)
+    fonts.ensureFontsReady()
+    expect(register).toHaveBeenCalledTimes(2)
+
+    later(20_000)
+    fonts.ensureFontsReady()
+    // Only the regular face, which was refused; the bold one is already in.
+    expect(register).toHaveBeenCalledTimes(3)
+    expect(register.mock.calls[2][1]).toBe(fonts.CHART_FONT_FAMILY)
+    expect(info).toHaveBeenCalledWith(
+      { attempts: 2 },
+      'Bundled Roboto faces loaded after a failed try'
+    )
+
+    later(60 * MINUTE)
+    fonts.ensureFontsReady()
+    expect(register).toHaveBeenCalledTimes(3)
+    expect(error).toHaveBeenCalledTimes(1)
+    expect(system.mock.calls.length).toBe(systemCalls)
+  })
+
+  it('stops trying after a persistent failure and keeps drawing with the system faces', async () => {
+    const register = vi.spyOn(GlobalFonts, 'register').mockImplementation(() => {
+      throw new Error('unreadable face')
+    })
+    const { error, system, fonts } = await freshFonts()
+
+    fonts.ensureFontsReady()
+    const systemCalls = system.mock.calls.length
+    expect(systemCalls).toBeGreaterThan(0)
+    for (const wait of [30_000, 5 * MINUTE, 30 * MINUTE]) {
+      later(wait)
+      fonts.ensureFontsReady()
+    }
+    expect(register).toHaveBeenCalledTimes(4)
+    expect(error.mock.calls.map(([fields]) => fields)).toEqual([
+      { err: 'unreadable face', attempts: 1, retryInMs: 30_000 },
+      { err: 'unreadable face', attempts: 2, retryInMs: 5 * MINUTE },
+      { err: 'unreadable face', attempts: 3, retryInMs: 30 * MINUTE },
+      { err: 'unreadable face', attempts: 4 },
+    ])
+    expect(error.mock.calls[3][1]).toBe(
+      'Bundled Roboto faces could not be loaded; system faces are used from now on'
+    )
+
+    later(24 * 60 * MINUTE)
+    fonts.ensureFontsReady()
+    expect(register).toHaveBeenCalledTimes(4)
+    expect(system.mock.calls.length).toBe(systemCalls)
   })
 })

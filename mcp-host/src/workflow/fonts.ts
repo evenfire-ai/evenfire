@@ -72,7 +72,23 @@ const SYSTEM_FONT_DIRS = [
 const MISSING_PROBE = '\uE000'
 
 let faces: RobotoFaces | undefined
-let ready = false
+
+/**
+ * When the bundled faces are tried again after a failed load. A failure can
+ * pass (a read under memory or descriptor pressure), but a damaged package
+ * fails every time, so the tries are few and spaced; after the last one the
+ * system faces are used for the life of the process.
+ */
+const BUNDLED_RETRY_DELAYS_MS = [30_000, 5 * 60_000, 30 * 60_000]
+
+const bundled = {
+  /** Faces registered so far, so a retry registers only the ones still missing. */
+  registered: new Set<string>(),
+  failures: 0,
+  nextAttemptAt: 0,
+  settled: false,
+}
+let systemFontsRegistered = false
 
 function loadRobotoFaces(): RobotoFaces {
   if (faces) return faces
@@ -126,27 +142,59 @@ function registerSystemFonts(): void {
 }
 
 /**
- * Register the bundled faces (and any system faces) exactly once. Safe to call
- * from every render path; later calls are free.
+ * Register the bundled faces and the system faces. Safe to call from every
+ * render path: once the bundled faces are in, or their retries are spent,
+ * later calls are free.
  */
 export function ensureFontsReady(): void {
-  if (ready) return
-  ready = true
+  if (!bundled.settled && Date.now() >= bundled.nextAttemptAt) loadBundledFaces()
+  if (!systemFontsRegistered) {
+    systemFontsRegistered = true
+    // Also the fallback: charts draw in these while the bundled faces are missing.
+    registerSystemFonts()
+  }
+}
+
+function loadBundledFaces(): void {
   try {
     const f = loadRobotoFaces()
-    // register answers null, without throwing, for a face it cannot use.
-    const refused = [
-      GlobalFonts.register(f.normal, CHART_FONT_FAMILY) ? undefined : 'regular',
-      GlobalFonts.register(f.bold, `${CHART_FONT_FAMILY} Bold`) ? undefined : 'bold',
-    ].filter(Boolean)
+    const refused: string[] = []
+    for (const [label, data, alias] of [
+      ['regular', f.normal, CHART_FONT_FAMILY],
+      ['bold', f.bold, `${CHART_FONT_FAMILY} Bold`],
+    ] as const) {
+      if (bundled.registered.has(label)) continue
+      // register answers null, without throwing, for a face it cannot use.
+      if (GlobalFonts.register(data, alias)) bundled.registered.add(label)
+      else refused.push(label)
+    }
     if (refused.length > 0) {
       throw new Error(`the renderer refused the ${refused.join(' and ')} face`)
     }
+    bundled.settled = true
+    if (bundled.failures > 0) {
+      logger.info(
+        { attempts: bundled.failures + 1 },
+        'Bundled Roboto faces loaded after a failed try'
+      )
+    }
   } catch (err) {
-    // The system faces still register, so charts draw in them rather than in nothing.
-    logger.error({ err: errorText(err) }, 'Bundled Roboto faces could not be loaded')
+    const delay = BUNDLED_RETRY_DELAYS_MS[bundled.failures]
+    bundled.failures++
+    if (delay === undefined) {
+      bundled.settled = true
+      logger.error(
+        { err: errorText(err), attempts: bundled.failures },
+        'Bundled Roboto faces could not be loaded; system faces are used from now on'
+      )
+    } else {
+      bundled.nextAttemptAt = Date.now() + delay
+      logger.error(
+        { err: errorText(err), attempts: bundled.failures, retryInMs: delay },
+        'Bundled Roboto faces could not be loaded'
+      )
+    }
   }
-  registerSystemFonts()
 }
 
 function errorText(err: unknown): string {
