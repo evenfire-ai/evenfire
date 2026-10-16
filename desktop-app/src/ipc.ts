@@ -1,5 +1,6 @@
 import {
   BrowserWindow,
+  IpcMainEvent,
   IpcMainInvokeEvent,
   Notification,
   app,
@@ -309,7 +310,7 @@ function parseHostMessageRequest(raw: unknown): HostMessageRequest {
   return parsed
 }
 
-export function assertTrustedSender(event: IpcMainInvokeEvent): void {
+export function assertTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): void {
   const senderUrl = String(event.senderFrame?.url || '')
   const devUrl = String(process.env.EVENFIRE_RENDERER_URL || '').trim()
   const isFileSender = senderUrl.startsWith('file://')
@@ -349,7 +350,10 @@ function sanitizeDesktopNotificationActions(
     .slice(0, 3)
 }
 
-export function registerIpcHandlers(service: AppService): void {
+export function registerIpcHandlers(
+  service: AppService,
+  logout: () => Promise<number> = () => service.logout()
+): void {
   const streamOwnerCleanupRegistered = new Set<number>()
   const entityChangeOwnerCleanupRegistered = new Set<number>()
   const activeDesktopNotifications = new Map<string, Notification>()
@@ -357,6 +361,10 @@ export function registerIpcHandlers(service: AppService): void {
   ipcMain.handle('auth:getSessionState', async event => {
     assertTrustedSender(event)
     return service.getSessionState()
+  })
+  ipcMain.handle('auth:getSessionGeneration', async event => {
+    assertTrustedSender(event)
+    return service.getSessionGeneration()
   })
   ipcMain.handle('auth:getDependenciesHealth', async event => {
     assertTrustedSender(event)
@@ -370,18 +378,52 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     return service.selectRuntimeConfig(sanitizeString(payload?.optionId))
   })
+  ipcMain.handle(
+    'auth:selectRuntimeConfigForHandoff',
+    async (event, payload: { optionId: string; expectedSessionGeneration: unknown }) => {
+      assertTrustedSender(event)
+      const expectedSessionGeneration = payload?.expectedSessionGeneration
+      if (
+        typeof expectedSessionGeneration !== 'number' ||
+        !Number.isSafeInteger(expectedSessionGeneration) ||
+        expectedSessionGeneration < 0
+      ) {
+        throw new Error('Invalid session generation')
+      }
+      return service.selectRuntimeConfigForHandoff(
+        sanitizeString(payload?.optionId),
+        expectedSessionGeneration
+      )
+    }
+  )
   ipcMain.handle('auth:clearRuntimeConfigSelection', async event => {
     assertTrustedSender(event)
     return service.clearRuntimeConfigSelection()
   })
-  ipcMain.handle('auth:saveRuntimeConfig', async (event, payload: DesktopRuntimeConfig) => {
-    assertTrustedSender(event)
-    return service.saveRuntimeConfig({
-      externalRestApiBaseUrl: sanitizeString(payload?.externalRestApiBaseUrl),
-      rpcProxyBaseUrl: sanitizeString(payload?.rpcProxyBaseUrl),
-      appName: sanitizeString(payload?.appName),
-    })
-  })
+  ipcMain.handle(
+    'auth:saveRuntimeConfig',
+    async (event, payload: DesktopRuntimeConfig & { expectedSessionGeneration?: unknown }) => {
+      assertTrustedSender(event)
+      const rawExpectedSessionGeneration = payload?.expectedSessionGeneration
+      if (
+        rawExpectedSessionGeneration !== undefined &&
+        (typeof rawExpectedSessionGeneration !== 'number' ||
+          !Number.isSafeInteger(rawExpectedSessionGeneration) ||
+          rawExpectedSessionGeneration < 0)
+      ) {
+        throw new Error('Invalid session generation')
+      }
+      const runtimeConfig = {
+        externalRestApiBaseUrl: sanitizeString(payload?.externalRestApiBaseUrl),
+        rpcProxyBaseUrl: sanitizeString(payload?.rpcProxyBaseUrl),
+        appName: sanitizeString(payload?.appName),
+      }
+      if (rawExpectedSessionGeneration === undefined) {
+        return service.saveRuntimeConfig(runtimeConfig)
+      }
+      return service.saveRuntimeConfig(runtimeConfig, rawExpectedSessionGeneration)
+    }
+  )
   ipcMain.handle('auth:deleteRuntimeConfig', async (event, payload: { optionId: string }) => {
     assertTrustedSender(event)
     return service.deleteRuntimeConfig(sanitizeString(payload?.optionId))
@@ -464,8 +506,8 @@ export function registerIpcHandlers(service: AppService): void {
   })
   ipcMain.handle('auth:logout', async event => {
     assertTrustedSender(event)
-    await service.logout()
-    return { ok: true }
+    const sessionGeneration = await logout()
+    return { ok: true, sessionGeneration }
   })
 
   ipcMain.handle('notifications:isSupported', async event => {

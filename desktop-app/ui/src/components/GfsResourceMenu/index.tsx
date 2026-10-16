@@ -339,7 +339,7 @@ export function GfsResourceMenu({
       ),
       onManage ? null : menuAction('copy-link', 'Copy link', <IconCopy />, onCopyLink),
       menuAction('open-folder', 'Open folder', <IconContexts />, onOpen),
-      menuAction('open-route', 'Open route', <IconOpenRoute />, onOpenGfsLink),
+      menuAction('open-route', 'Open from ID', <IconOpenRoute />, onOpenGfsLink),
       menuAction('preview', 'Preview', <IconEye />, onPreview),
     ].filter(isMenuAction),
     [
@@ -362,26 +362,21 @@ export function GfsResourceMenu({
   ].filter(group => group.length > 0)
   const shareAction = actions?.find(action => action.id === 'share')
   const copyLinkAction = actions?.find(action => action.id === 'copy-link')
-  const sharedActions = actions?.map(action => ({
-    color: action.id === 'delete' ? ('danger' as const) : undefined,
+  const sharedActions: GfsResourceMenuAction[] | undefined = actions?.map(action => ({
+    color: action.id === 'delete' ? 'danger' : undefined,
     disabled: action.disabled,
     icon: action.icon,
     key: action.id,
     label: action.label,
     onClick:
-      action.id === 'share'
-        ? () => setShareOpen(value => !value)
-        : action.id === 'replace'
-          ? () =>
-              action.run(undefined, {
-                requestFileSelection: () => replaceInputRef.current?.click(),
-              })
-          : () => action.run(),
-    submenu: action.id === 'share',
+      action.id === 'replace'
+        ? () =>
+            action.run(undefined, {
+              requestFileSelection: () => replaceInputRef.current?.click(),
+            })
+        : () => action.run(),
   }))
-  const visibleSharedActions = sharedActions?.filter(
-    action => action.key !== 'delete' && !(action.key === 'copy-link' && shareAction !== undefined)
-  )
+  const visibleSharedActions = sharedActions?.filter(action => action.key !== 'delete')
   const actionGroups = actions
     ? [
         ...(visibleSharedActions?.length ? [visibleSharedActions] : []),

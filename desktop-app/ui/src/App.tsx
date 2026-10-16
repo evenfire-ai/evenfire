@@ -50,8 +50,10 @@ import {
   shouldRevalidateGfsQuery,
 } from '@lib/gfsEntityChangeState'
 import { resolveGfsPreview } from '@lib/gfsPreview'
+import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { retireClosedGfsPreviewOwners } from '@lib/gfsPreviewRetryOwnership'
 import type { GfsResourceActionId, GfsResourceActionRequest } from '@lib/gfsResourceActions'
+import type { GfsResourceNavigationRequest } from '@lib/gfsResourceNavigationIntent'
 import { desktopQueryClient } from '@lib/queryClient'
 import {
   canProcessSandboxUiDeepLinks,
@@ -130,6 +132,12 @@ type PendingSandboxUiDeepLinkLaunch = {
   linkTeamId?: string
   switchedTeam: boolean
   conversationOrigin: SandboxUiConversationOrigin | null
+}
+
+function formatLinkProvidedEnvironmentName(name: string): string {
+  const characters = Array.from(name.trim())
+  if (characters.length <= 64) return characters.join('')
+  return `${characters.slice(0, 63).join('')}…`
 }
 
 const TRANSIENT_TEAM_CONTEXT_ERROR_CODES = new Set([
@@ -339,7 +347,7 @@ export function App() {
     PendingSandboxUiDeepLink[]
   >([])
   const [pendingGfsDeepLinks, setPendingGfsDeepLinks] = React.useState<
-    GfsResourceDeepLinkEnvelope[]
+    GfsResourceNavigationRequest[]
   >([])
   const [pendingGfsResourceAction, setPendingGfsResourceAction] =
     React.useState<GfsResourceActionRequest | null>(null)
@@ -350,6 +358,8 @@ export function App() {
     navigationUri: string | null
     destinationObserved: boolean
   } | null>(null)
+  const [activeGfsDeepLink, setActiveGfsDeepLink] =
+    React.useState<GfsResourceNavigationRequest | null>(null)
   const [gfsRouteDialogRequestId, setGfsRouteDialogRequestId] = React.useState(0)
   const [sandboxUiDeepLinkRetryTick, setSandboxUiDeepLinkRetryTick] = React.useState(0)
   // The universal tab store lives in the controller (single writer; `vm.navItem`
@@ -365,6 +375,8 @@ export function App() {
     [workspaceTabs.tabs, vm.hostAuthorityRevision, vm.isHostAccessBlocked]
   )
   const setWorkspaceTabs = vm.setWorkspaceTabs
+  const navigationIntentSequenceRef = React.useRef(vm.navigationIntentSequence)
+  navigationIntentSequenceRef.current = vm.navigationIntentSequence
   const nextChatTabId = vm.nextWorkspaceTabId
   const workspaceTabsRef = React.useRef(workspaceTabs)
   const chatDrawerRef = React.useRef<HTMLElement | null>(null)
@@ -412,8 +424,16 @@ export function App() {
   const processingSandboxUiDeepLinkIdRef = React.useRef<number | null>(null)
   const launchingSandboxUiDeepLinkRef = React.useRef<PendingSandboxUiDeepLinkLaunch | null>(null)
   const pendingSandboxUiDeepLinksRef = React.useRef<PendingSandboxUiDeepLink[]>([])
-  const pendingGfsDeepLinksRef = React.useRef<GfsResourceDeepLinkEnvelope[]>([])
+  const pendingGfsDeepLinksRef = React.useRef<GfsResourceNavigationRequest[]>([])
   const processingGfsDeepLinkIdRef = React.useRef<number | null>(null)
+  const activeGfsDeepLinkRef = React.useRef<GfsResourceNavigationRequest | null>(null)
+  activeGfsDeepLinkRef.current = activeGfsDeepLink
+  const acknowledgedGfsDeepLinkIdsRef = React.useRef(new Set<number>())
+  const gfsDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
+  const gfsDeepLinkGenerationRef = React.useRef(0)
+  const gfsDeepLinkMinimumIdRef = React.useRef(0)
+  const gfsDeepLinkAcceptingRef = React.useRef(true)
+  const gfsRouteDialogRequestSequenceRef = React.useRef(0)
   const sandboxUiDeepLinkRestoreTeamByIdRef = React.useRef(new Map<number, string>())
   const sandboxUiDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
   const sandboxUiDeepLinkGenerationRef = React.useRef(0)
@@ -534,11 +554,10 @@ export function App() {
     (id: string) => {
       const tab = workspaceTabsRef.current.tabs.find(candidate => candidate.id === id)
       if (!tab) return
-      vm.clearAppsPicker()
-      setWorkspaceTabs(state => selectWorkspaceTab(state, id))
+      if (!vm.selectWorkspaceTabById(id)) return
       revealWorkspaceTab(tab, false)
     },
-    [revealWorkspaceTab, setWorkspaceTabs, vm.clearAppsPicker]
+    [revealWorkspaceTab, vm.selectWorkspaceTabById]
   )
 
   // Drawer switcher selection: reveal the chat IN the drawer (keepNavItem), never
@@ -548,9 +567,12 @@ export function App() {
       const tab = workspaceTabsRef.current.tabs.find(
         candidate => candidate.id === id && candidate.kind === 'chat'
       )
-      if (tab) revealWorkspaceTab(tab, true)
+      if (tab) {
+        vm.beginUserNavigationIntent()
+        revealWorkspaceTab(tab, true)
+      }
     },
-    [revealWorkspaceTab]
+    [revealWorkspaceTab, vm.beginUserNavigationIntent]
   )
 
   const handleCloseWorkspaceTab = React.useCallback(
@@ -559,13 +581,16 @@ export function App() {
       const wasActive = current.activeTabId === id
       const next = closeWorkspaceTab(current, id)
       if (next === current) return
+      if (wasActive || activeGfsDeepLinkRef.current?.ownerTabId === id) {
+        vm.beginUserNavigationIntent()
+      }
       vm.clearAppsPicker()
       setWorkspaceTabs(next)
       // Closing the active tab activates a neighbor (or empties the workspace,
       // §5). Reveal it so its content follows the strip.
       if (wasActive) revealWorkspaceTab(activeWorkspaceTab(next), false)
     },
-    [revealWorkspaceTab, setWorkspaceTabs, vm.clearAppsPicker]
+    [revealWorkspaceTab, setWorkspaceTabs, vm.beginUserNavigationIntent, vm.clearAppsPicker]
   )
 
   // Session-only strip reorder (drag & drop / keyboard). It never changes the
@@ -578,6 +603,7 @@ export function App() {
   )
 
   const handleNewWorkspaceChatTab = React.useCallback(() => {
+    vm.beginUserNavigationIntent()
     vm.clearAppsPicker()
     const agentRef = vm.selectedAgent
     prefillNewConversationWithGfsResource(vm.activeWorkspaceTab, agentRef)
@@ -608,11 +634,13 @@ export function App() {
     vm.clearAppsPicker,
     vm.handleSelectChatAgent,
     vm.activeWorkspaceTab,
+    vm.beginUserNavigationIntent,
     vm.selectedAgent,
   ])
 
   const handleOpenGfsRoute = React.useCallback(() => {
-    setGfsRouteDialogRequestId(value => value + 1)
+    const requestId = ++gfsRouteDialogRequestSequenceRef.current
+    setGfsRouteDialogRequestId(requestId)
     vm.openFilesSection(null)
   }, [vm.openFilesSection])
 
@@ -1086,8 +1114,11 @@ export function App() {
   // page reports back don't re-arm FilesPage's open-once seed effect.
   const activeFilesTab = vm.activeWorkspaceTab?.kind === 'files' ? vm.activeWorkspaceTab : undefined
   const activeFilesTabId = activeFilesTab?.id ?? null
-  const activeFilesTabIdRef = React.useRef<string | null>(null)
-  activeFilesTabIdRef.current = activeFilesTabId
+  const activeGfsDeepLinkForFiles =
+    activeGfsDeepLink?.ownerTabId === activeFilesTabId &&
+    vm.isGfsResourceNavigationCurrent(activeGfsDeepLink, gfsDeepLinkGenerationRef.current)
+      ? activeGfsDeepLink
+      : null
   const filesSeedRef = React.useRef<{ id: string | null; path: string | null }>({
     id: null,
     path: null,
@@ -1096,25 +1127,62 @@ export function App() {
     filesSeedRef.current = { id: activeFilesTabId, path: activeFilesTab?.files?.path ?? null }
   }
   const filesSeedPath = filesSeedRef.current.path
-  // Persist the browser's live location onto the active files tab. Stable
-  // (reads the active id from a ref), so FilesPage's effect fires only when the
-  // location actually changes; `setFilesTabPath` no-ops when nothing moved.
+  // The route writer receives the stable tab and intent from this render. A
+  // callback retained by an unmounted FilesPage cannot retarget the current tab.
   const handleFilesLocationChange = React.useCallback(
-    (gfsUri: string | null, name: string | null) => {
-      const id = activeFilesTabIdRef.current
-      if (!id) return
-      const route = gfsResourceActionRouteRef.current
-      if (route && pendingGfsResourceAction?.id === route.id) {
-        if (gfsUri === route.navigationUri) {
-          route.destinationObserved = true
-        } else if (route.destinationObserved || gfsUri !== route.sourceUri) {
-          gfsResourceActionRouteRef.current = null
-          setPendingGfsResourceAction(current => (current?.id === route.id ? null : current))
+    (ownerTabId: string, intentSequence: number, gfsUri: string | null, name: string | null) => {
+      if (!vm.isNavigationIntentCurrent(intentSequence)) return
+      if (workspaceTabsRef.current.activeTabId !== ownerTabId) return
+      setWorkspaceTabs(state => {
+        if (!vm.isNavigationIntentCurrent(intentSequence) || state.activeTabId !== ownerTabId) {
+          return state
         }
-      }
-      setWorkspaceTabs(state => setFilesTabPath(state, id, gfsUri, name ?? undefined))
+        return setFilesTabPath(state, ownerTabId, gfsUri, name ?? undefined)
+      })
     },
-    [pendingGfsResourceAction?.id, setWorkspaceTabs]
+    [setWorkspaceTabs, vm.isNavigationIntentCurrent]
+  )
+  const handleActiveFilesLocationChange = React.useCallback(
+    (gfsUri: string | null, name: string | null) => {
+      if (!activeFilesTabId) return
+      handleFilesLocationChange(
+        activeFilesTabId,
+        activeGfsDeepLinkForFiles?.intentSequence ?? vm.navigationIntentSequence,
+        gfsUri,
+        name
+      )
+    },
+    [
+      activeFilesTabId,
+      activeGfsDeepLinkForFiles?.intentSequence,
+      handleFilesLocationChange,
+      vm.navigationIntentSequence,
+    ]
+  )
+  const isActiveGfsDeepLinkCurrent = React.useCallback(() => {
+    const request = activeGfsDeepLinkRef.current
+    return Boolean(
+      activeFilesTabId &&
+      request?.ownerTabId === activeFilesTabId &&
+      vm.isGfsResourceNavigationCurrent(request, gfsDeepLinkGenerationRef.current)
+    )
+  }, [activeFilesTabId, vm.isGfsResourceNavigationCurrent])
+  const openActiveGfsDeepLinkPreview = React.useCallback(
+    (
+      id: number,
+      preview: GfsPreviewResource,
+      returnLocation: { gfsUri: string | null; name: string | null }
+    ) => {
+      const request = activeGfsDeepLinkRef.current
+      if (!request || request.id !== id) return false
+      return vm.completeGfsResourceNavigationPreview(
+        request,
+        preview,
+        gfsDeepLinkGenerationRef.current,
+        returnLocation
+      )
+    },
+    [vm.completeGfsResourceNavigationPreview]
   )
 
   const refreshOpenPreview = React.useCallback(
@@ -1561,6 +1629,7 @@ export function App() {
       // Store→embed: activate the app tab (a new one, or the backgrounded one on
       // relaunch). Its `kind:'app'` derives `navItem` to the Apps route this
       // commit and clears the instance-less picker residual.
+      vm.beginUserNavigationIntent()
       vm.clearAppsPicker()
       // Compute the id only on the open-new branch so the sequence counter
       // advances exactly as before: relaunch of an existing tab must not burn one.
@@ -1588,7 +1657,13 @@ export function App() {
       }
       return requestId
     },
-    [nextChatTabId, setWorkspaceTabs, vm.clearAppsPicker, vm.handleSelectChatAgent]
+    [
+      nextChatTabId,
+      setWorkspaceTabs,
+      vm.beginUserNavigationIntent,
+      vm.clearAppsPicker,
+      vm.handleSelectChatAgent,
+    ]
   )
   relaunchSandboxUiAppRef.current = (app, tabId) => {
     launchSandboxUiApp(app, null, tabId)
@@ -1715,32 +1790,79 @@ export function App() {
     setPendingSandboxUiDeepLinks(next)
   }, [])
 
-  const setPendingGfsDeepLinkState = React.useCallback((next: GfsResourceDeepLinkEnvelope[]) => {
-    pendingGfsDeepLinksRef.current = next
-    setPendingGfsDeepLinks(next)
+  const setPendingGfsDeepLinkState = React.useCallback((next: GfsResourceNavigationRequest[]) => {
+    const ordered = [...next].sort((left, right) => left.id - right.id)
+    pendingGfsDeepLinksRef.current = ordered
+    setPendingGfsDeepLinks(ordered)
   }, [])
-
-  const enqueueGfsDeepLink = React.useCallback(
-    (value: GfsResourceDeepLinkEnvelope) => {
-      const uri = normalizeGfsResourceUri(value?.uri)
-      if (!Number.isSafeInteger(value?.id) || value.id <= 0 || !uri) return
-      if (pendingGfsDeepLinksRef.current.some(item => item.id === value.id)) return
-      setPendingGfsDeepLinkState([...pendingGfsDeepLinksRef.current, { id: value.id, uri }])
-    },
-    [setPendingGfsDeepLinkState]
-  )
 
   const acknowledgeGfsDeepLink = React.useCallback(
     async (id: number) => {
+      if (acknowledgedGfsDeepLinkIdsRef.current.has(id)) return
+      acknowledgedGfsDeepLinkIdsRef.current.add(id)
       setPendingGfsDeepLinkState(pendingGfsDeepLinksRef.current.filter(item => item.id !== id))
+      if (activeGfsDeepLinkRef.current?.id === id) {
+        activeGfsDeepLinkRef.current = null
+        setActiveGfsDeepLink(null)
+      }
       if (processingGfsDeepLinkIdRef.current === id) processingGfsDeepLinkIdRef.current = null
       try {
         await window.clerum.gfs?.acknowledgeDeepLink?.(id)
       } catch {
-        // The route is open; main can safely replay its unacknowledged queue entry later.
+        // Main can replay an unacknowledged entry after renderer restart.
       }
     },
     [setPendingGfsDeepLinkState]
+  )
+
+  const enqueueGfsDeepLink = React.useCallback(
+    (value: GfsResourceDeepLinkEnvelope) => {
+      if (!Number.isSafeInteger(value?.id) || value.id <= 0) return
+      if (!gfsDeepLinkAcceptingRef.current || value.id < gfsDeepLinkMinimumIdRef.current) return
+      if (acknowledgedGfsDeepLinkIdsRef.current.has(value.id)) return
+      if (pendingGfsDeepLinksRef.current.some(item => item.id === value.id)) return
+      const uri = normalizeGfsResourceUri(value?.uri)
+      if (!uri) {
+        vm.pushToast('Could not open EvenDrive link: the resource route is malformed.', 'error')
+        void acknowledgeGfsDeepLink(value.id)
+        return
+      }
+      const request = vm.beginGfsResourceNavigation(
+        value.id,
+        uri,
+        gfsDeepLinkGenerationRef.current,
+        value.userNavigationGenerationAtActivation
+      )
+      if (!request) {
+        void acknowledgeGfsDeepLink(value.id)
+        return
+      }
+      setPendingGfsDeepLinkState([...pendingGfsDeepLinksRef.current, request])
+    },
+    [
+      acknowledgeGfsDeepLink,
+      setPendingGfsDeepLinkState,
+      vm.beginGfsResourceNavigation,
+      vm.pushToast,
+    ]
+  )
+
+  const handleGfsDeepLinkOutcome = React.useCallback(
+    (id: number, outcome: 'opened' | 'terminal' | 'retryable' | 'superseded') => {
+      if (processingGfsDeepLinkIdRef.current !== id) return
+      const request = activeGfsDeepLinkRef.current
+      if (!request || request.id !== id) return
+      if (
+        request.principalGeneration !== gfsDeepLinkGenerationRef.current ||
+        !vm.isNavigationIntentCurrent(request.intentSequence)
+      ) {
+        void acknowledgeGfsDeepLink(id)
+        return
+      }
+      if (outcome === 'retryable') return
+      void acknowledgeGfsDeepLink(id)
+    },
+    [acknowledgeGfsDeepLink, vm.isNavigationIntentCurrent]
   )
 
   const clearSandboxUiDeepLinkProcessing = React.useCallback((linkId?: number) => {
@@ -1900,21 +2022,114 @@ export function App() {
   }, [setPendingSandboxUiDeepLinkState])
 
   React.useEffect(() => {
+    const identity = vm.authenticatedPrincipalIdentity
+    const previousIdentity = gfsDeepLinkIdentityRef.current
+    gfsDeepLinkIdentityRef.current = identity
+    if (!shouldPurgeSandboxUiDeepLinks(previousIdentity, identity)) return
+
+    const generation = ++gfsDeepLinkGenerationRef.current
+    gfsDeepLinkAcceptingRef.current = false
+    setPendingGfsDeepLinkState([])
+    processingGfsDeepLinkIdRef.current = null
+    activeGfsDeepLinkRef.current = null
+    setActiveGfsDeepLink(null)
+    const listIntentSequence = navigationIntentSequenceRef.current
+
+    void (async () => {
+      try {
+        const minimumId = await window.clerum.gfs?.clearPendingDeepLinks?.()
+        if (generation !== gfsDeepLinkGenerationRef.current) return
+        if (!Number.isSafeInteger(minimumId) || minimumId === undefined || minimumId < 1) {
+          throw new Error('The EvenDrive deep-link queue did not return a valid reset boundary')
+        }
+        gfsDeepLinkMinimumIdRef.current = Math.max(gfsDeepLinkMinimumIdRef.current, minimumId)
+        gfsDeepLinkAcceptingRef.current = true
+
+        const pending = await window.clerum.gfs?.listPendingDeepLinks?.()
+        if (generation !== gfsDeepLinkGenerationRef.current) return
+        const currentLinks = pending?.links.filter(
+          link => link.id >= gfsDeepLinkMinimumIdRef.current
+        )
+        if (!vm.isNavigationIntentCurrent(listIntentSequence)) {
+          currentLinks
+            ?.filter(link => !pendingGfsDeepLinksRef.current.some(item => item.id === link.id))
+            .forEach(link => void acknowledgeGfsDeepLink(link.id))
+          return
+        }
+        currentLinks?.forEach(enqueueGfsDeepLink)
+      } catch {
+        if (generation === gfsDeepLinkGenerationRef.current) {
+          vm.pushToast(
+            'Could not safely refresh pending EvenDrive links after the account changed.',
+            'error'
+          )
+        }
+      }
+    })()
+  }, [
+    enqueueGfsDeepLink,
+    acknowledgeGfsDeepLink,
+    setPendingGfsDeepLinkState,
+    vm.isNavigationIntentCurrent,
+    vm.authenticatedPrincipalIdentity,
+    vm.pushToast,
+  ])
+
+  React.useEffect(() => {
     let cancelled = false
     const unsubscribe = window.clerum.gfs?.onDeepLink?.(enqueueGfsDeepLink)
-    const pendingLinks = window.clerum.gfs?.listPendingDeepLinks?.()
+    const listGeneration = gfsDeepLinkGenerationRef.current
+    const listIntentSequence = navigationIntentSequenceRef.current
+    const pendingLinks = gfsDeepLinkAcceptingRef.current
+      ? window.clerum.gfs?.listPendingDeepLinks?.()
+      : undefined
     void pendingLinks
       ?.then(result => {
-        if (!cancelled) result?.links.forEach(enqueueGfsDeepLink)
+        if (
+          cancelled ||
+          listGeneration !== gfsDeepLinkGenerationRef.current ||
+          !gfsDeepLinkAcceptingRef.current
+        )
+          return
+        const currentLinks = result?.links.filter(
+          link => link.id >= gfsDeepLinkMinimumIdRef.current
+        )
+        if (!vm.isNavigationIntentCurrent(listIntentSequence)) {
+          currentLinks
+            ?.filter(link => !pendingGfsDeepLinksRef.current.some(item => item.id === link.id))
+            .forEach(link => void acknowledgeGfsDeepLink(link.id))
+          return
+        }
+        currentLinks?.forEach(enqueueGfsDeepLink)
       })
       .catch(() => undefined)
     return () => {
       cancelled = true
       unsubscribe?.()
     }
-  }, [enqueueGfsDeepLink])
+  }, [acknowledgeGfsDeepLink, enqueueGfsDeepLink, vm.isNavigationIntentCurrent])
 
   React.useEffect(() => {
+    const active = activeGfsDeepLinkRef.current
+    if (
+      active &&
+      (active.principalGeneration !== gfsDeepLinkGenerationRef.current ||
+        !vm.isNavigationIntentCurrent(active.intentSequence))
+    ) {
+      void acknowledgeGfsDeepLink(active.id)
+      return
+    }
+
+    const pending = pendingGfsDeepLinksRef.current[0]
+    if (
+      pending &&
+      (pending.principalGeneration !== gfsDeepLinkGenerationRef.current ||
+        !vm.isNavigationIntentCurrent(pending.intentSequence))
+    ) {
+      void acknowledgeGfsDeepLink(pending.id)
+      return
+    }
+
     if (
       bootSplashLoading ||
       !vm.isAuthenticated ||
@@ -1923,7 +2138,6 @@ export function App() {
     ) {
       return
     }
-    const pending = pendingGfsDeepLinksRef.current[0]
     if (!pending) return
     const uri = normalizeGfsResourceUri(pending.uri)
     if (!uri) {
@@ -1932,11 +2146,17 @@ export function App() {
       return
     }
     processingGfsDeepLinkIdRef.current = pending.id
+    activeGfsDeepLinkRef.current = pending
+    setActiveGfsDeepLink(pending)
     try {
-      vm.openFilesSection(uri)
-      void acknowledgeGfsDeepLink(pending.id)
+      if (!vm.activateGfsResourceNavigation(pending, gfsDeepLinkGenerationRef.current)) {
+        void acknowledgeGfsDeepLink(pending.id)
+      }
     } catch (error) {
       processingGfsDeepLinkIdRef.current = null
+      activeGfsDeepLinkRef.current = null
+      setActiveGfsDeepLink(null)
+      void acknowledgeGfsDeepLink(pending.id)
       vm.pushToast(
         `Could not open EvenDrive link: ${error instanceof Error ? error.message : String(error)}`,
         'error'
@@ -1946,9 +2166,11 @@ export function App() {
     acknowledgeGfsDeepLink,
     bootSplashLoading,
     pendingGfsDeepLinks,
+    vm.activateGfsResourceNavigation,
     vm.authenticatedPrincipalIdentity,
+    vm.isNavigationIntentCurrent,
     vm.isAuthenticated,
-    vm.openFilesSection,
+    vm.navigationIntentSequence,
     vm.pushToast,
   ])
 
@@ -2361,6 +2583,7 @@ export function App() {
       // chat-specific.
       const selectAndReveal = (next: typeof state) => {
         if (next === state) return
+        vm.beginUserNavigationIntent()
         vm.clearAppsPicker()
         setWorkspaceTabs(next)
         revealWorkspaceTab(activeWorkspaceTab(next), false)
@@ -2520,6 +2743,7 @@ export function App() {
       setWorkspaceTabs,
       vm.activeChatId,
       vm.clearAppsPicker,
+      vm.beginUserNavigationIntent,
       vm.handleNavSelect,
       vm.handleLogout,
       vm.handleSelectChatAgent,
@@ -2965,25 +3189,87 @@ export function App() {
         }
       })()
     : ''
+  const pendingSwitchTargetHost = vm.pendingDesktopEnvironmentSwitchConfirmation
+    ? (() => {
+        try {
+          return new URL(
+            vm.pendingDesktopEnvironmentSwitchConfirmation.targetExternalRestApiBaseUrl
+          ).host
+        } catch {
+          return vm.pendingDesktopEnvironmentSwitchConfirmation.targetExternalRestApiBaseUrl
+        }
+      })()
+    : ''
+  const pendingSwitchCurrentHost = vm.pendingDesktopEnvironmentSwitchConfirmation
+    ? (() => {
+        try {
+          return new URL(
+            vm.pendingDesktopEnvironmentSwitchConfirmation.activeExternalRestApiBaseUrl
+          ).host
+        } catch {
+          return vm.pendingDesktopEnvironmentSwitchConfirmation.activeExternalRestApiBaseUrl
+        }
+      })()
+    : ''
+  const environmentSwitchConfirmationDialog = vm.pendingDesktopEnvironmentSwitchConfirmation ? (
+    <ConfirmDialog
+      title="Switch desktop environment?"
+      body={
+        <>
+          <p>
+            You are signed in to the REST API host{' '}
+            <strong>{pendingSwitchCurrentHost || 'unknown'}</strong>. The Profile UI link requests{' '}
+            the REST API host <strong>{pendingSwitchTargetHost || 'unknown'}</strong>. Switching
+            will sign you out and interrupt activity in the current environment.
+          </p>
+          <p className="muted">
+            Profile link label (unverified):{' '}
+            {formatLinkProvidedEnvironmentName(
+              vm.pendingDesktopEnvironmentSwitchConfirmation.targetEnvironmentName
+            )}
+          </p>
+          {vm.pendingDesktopEnvironmentSwitchConfirmation.activeExternalRestApiBaseUrl ? (
+            <p className="auth-environment-confirm-url">
+              Current REST API:{' '}
+              {vm.pendingDesktopEnvironmentSwitchConfirmation.activeExternalRestApiBaseUrl}
+            </p>
+          ) : null}
+          <p>Continue only if you trust this External REST API host:</p>
+          <p className="auth-environment-confirm-url">
+            {vm.pendingDesktopEnvironmentSwitchConfirmation.targetExternalRestApiBaseUrl}
+          </p>
+          {pendingSwitchTargetHost ? (
+            <p className="muted">Host: {pendingSwitchTargetHost}</p>
+          ) : null}
+        </>
+      }
+      cancelLabel="Stay signed in"
+      confirmLabel="Sign out and switch"
+      onCancel={vm.handleCancelDesktopEnvironmentSwitchConfirmation}
+      onConfirm={vm.handleConfirmDesktopEnvironmentSwitchConfirmation}
+      tone="danger"
+    />
+  ) : null
   const environmentSetupConfirmationDialog = vm.pendingDesktopEnvironmentSetup ? (
     <ConfirmDialog
       title="Add desktop environment?"
       body={
         <>
-          <p>
-            Review the service URLs for{' '}
-            <strong>{vm.pendingDesktopEnvironmentSetup.appName || 'Evenfire'}</strong>. Continue
-            only if you trust them.
+          <p>Review this External REST API host. Continue only if you trust it.</p>
+          {pendingEnvironmentHost ? (
+            <p>
+              Host: <strong>{pendingEnvironmentHost}</strong>
+            </p>
+          ) : null}
+          <p className="muted">
+            Profile link label (unverified):{' '}
+            {formatLinkProvidedEnvironmentName(
+              vm.pendingDesktopEnvironmentSetup.appName || 'Evenfire'
+            )}
           </p>
           <p className="auth-environment-confirm-url">
             {vm.pendingDesktopEnvironmentSetup.externalRestApiBaseUrl}
           </p>
-          {pendingEnvironmentHost ? <p className="muted">Host: {pendingEnvironmentHost}</p> : null}
-          {vm.pendingDesktopEnvironmentSetup.rpcProxyBaseUrl ? (
-            <p className="auth-environment-confirm-url">
-              RPC proxy: {vm.pendingDesktopEnvironmentSetup.rpcProxyBaseUrl}
-            </p>
-          ) : null}
         </>
       }
       cancelLabel="Cancel"
@@ -3153,10 +3439,27 @@ export function App() {
                                   <FilesPage
                                     key={activeFilesTabId ?? 'files'}
                                     pushToast={vm.pushToast}
+                                    titlebarLeadingTarget={titlebarLeadingRoot}
+                                    workspaceTabId={activeFilesTabId ?? undefined}
                                     pendingGfsUri={filesSeedPath}
+                                    pendingGfsDeepLink={
+                                      activeGfsDeepLinkForFiles
+                                        ? {
+                                            id: activeGfsDeepLinkForFiles.id,
+                                            uri: activeGfsDeepLinkForFiles.uri,
+                                          }
+                                        : null
+                                    }
+                                    pendingGfsDeepLinkOwnerTabId={
+                                      activeGfsDeepLinkForFiles?.ownerTabId
+                                    }
+                                    isPendingGfsDeepLinkCurrent={isActiveGfsDeepLinkCurrent}
+                                    onExplicitNavigationIntent={vm.beginUserNavigationIntent}
+                                    onPendingGfsDeepLinkOutcome={handleGfsDeepLinkOutcome}
                                     remoteGfsChangeEpoch={remoteGfsChangeEpoch}
-                                    onLocationChange={handleFilesLocationChange}
+                                    onLocationChange={handleActiveFilesLocationChange}
                                     onOpenPreview={vm.openPreviewSection}
+                                    onOpenPendingGfsPreview={openActiveGfsDeepLinkPreview}
                                     routeDialogRequestId={gfsRouteDialogRequestId}
                                     onRouteDialogRequestHandled={handleGfsRouteDialogRequestHandled}
                                     pendingResourceAction={pendingGfsResourceAction}
@@ -3177,6 +3480,7 @@ export function App() {
                                     onOpenRoute={handleOpenGfsRoute}
                                     pendingResourceAction={pendingGfsResourceAction}
                                     onPendingResourceActionHandled={handleGfsResourceActionHandled}
+                                    titlebarLeadingTarget={titlebarLeadingRoot}
                                   />
                                 )}
                                 {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}
@@ -3288,6 +3592,7 @@ export function App() {
                           ) : null}
                           {desktopUpdateRequiredDialog}
                           {environmentSetupConfirmationDialog}
+                          {environmentSwitchConfirmationDialog}
                           {environmentSetupSuccessDialog}
                           {sandboxUiDeepLinkDialog}
                           {pluginConsentPrompt ? (
@@ -3324,6 +3629,7 @@ export function App() {
                 <AuthPage />
               )}
               {environmentSetupConfirmationDialog}
+              {environmentSwitchConfirmationDialog}
               {environmentSetupSuccessDialog}
               <ToastStack items={vm.toasts} />
             </>

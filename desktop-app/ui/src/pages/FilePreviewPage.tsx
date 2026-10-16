@@ -2,10 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { EmptyState } from '@components/Common'
 import { GfsImagePreviewBody } from '@components/GfsImagePreview'
 import { GfsMarkdownPreviewBody } from '@components/GfsMarkdownPreview'
-import { GfsResourceToolbar } from '@components/GfsResourceToolbar'
+import { GfsResourceMenu } from '@components/GfsResourceMenu'
 import { GfsVideoPreviewBody } from '@components/GfsVideoPreview'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
-import { buildGfsResourceActions } from '@lib/gfsResourceActions'
+import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
 import type { FilePreviewPageProps } from './FilePreviewPage.types'
 
 function toMessage(error: unknown): string {
@@ -153,9 +153,9 @@ export function FilePreviewPage({
   const handleCopyRoute = useCallback(async () => {
     try {
       await navigator.clipboard.writeText(gfsUri)
-      pushToast?.('EvenDrive route copied', 'success')
+      pushToast?.('File ID copied', 'success')
     } catch (error) {
-      pushToast?.(`Could not copy the EvenDrive route: ${toMessage(error)}`, 'error')
+      pushToast?.(`Could not copy the file ID: ${toMessage(error)}`, 'error')
     }
   }, [gfsUri, pushToast])
 
@@ -184,7 +184,7 @@ export function FilePreviewPage({
 
   const copyContentReady = copyContentReadyUri === gfsUri
 
-  const toolbarActions = buildGfsResourceActions({
+  const resourceActions = buildGfsResourceActions({
     kind: 'file',
     uri: gfsUri,
     handlers: {
@@ -203,6 +203,9 @@ export function FilePreviewPage({
     canCopyContent: copyContentReady,
     refreshing,
   })
+  const fileActionsMenu = (
+    <GfsResourceMenu actions={getGfsMenuActions(resourceActions)} resourceName={fileName} />
+  )
 
   useEffect(() => {
     const request = pendingResourceAction
@@ -269,7 +272,6 @@ export function FilePreviewPage({
   return (
     <section className="page">
       <div className="da-gfs-preview-page">
-        <GfsResourceToolbar actions={toolbarActions} />
         <div className="da-gfs-preview-content">
           {denied || unavailable || accessRevoked ? (
             <EmptyState title="File unavailable" body="This item is no longer available." />
@@ -284,6 +286,7 @@ export function FilePreviewPage({
                   mimeType={mimeType ?? ''}
                   onDownloadError={handleDownloadError}
                   onCopyContentReady={handleCopyContentReady}
+                  titleActions={fileActionsMenu}
                   headingLevel={2}
                 />
               ) : null}
@@ -295,6 +298,7 @@ export function FilePreviewPage({
                   gfsUri={gfsUri}
                   onDownloadError={handleDownloadError}
                   onCopyContentReady={handleCopyContentReady}
+                  titleActions={fileActionsMenu}
                   headingLevel={2}
                 />
               ) : null}
@@ -306,6 +310,7 @@ export function FilePreviewPage({
                   gfsUri={gfsUri}
                   mimeType={mimeType ?? ''}
                   onDownloadError={handleDownloadError}
+                  titleActions={fileActionsMenu}
                   headingLevel={2}
                 />
               ) : null}

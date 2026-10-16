@@ -38,6 +38,8 @@ import { desktopQueryKeys } from './queryKeys'
 const DRIVE = 'main'
 export const GFS_UNAVAILABLE_LOCATION_MESSAGE = 'This folder or file is no longer available.'
 
+export type GfsUriOpenFailure = { kind: 'superseded' } | { kind: 'error'; error: unknown }
+
 type GfsAccessState = 'active' | 'revoked'
 
 export interface GfsBrowserChild {
@@ -664,10 +666,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     onError: failClosedOnMutationError,
   })
   const createFolderMutation = useMutation({
-    mutationFn: async (name: string) => {
-      if (!current) throw new Error('No folder selected')
-      return window.clerum.gfs.createFolder(current.resourceId, name, DRIVE)
-    },
+    mutationFn: (input: { parentResourceId: string; name: string }) =>
+      window.clerum.gfs.createFolder(input.parentResourceId, input.name, DRIVE),
     onSuccess: refreshGfs,
     onError: failClosedOnMutationError,
   })
@@ -960,7 +960,15 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         : null
 
   const openUri = useCallback(
-    async (uri: string, options?: { clearIfUnavailable?: boolean; background?: boolean }) => {
+    async (
+      uri: string,
+      options?: {
+        clearIfUnavailable?: boolean
+        background?: boolean
+        onFailure?: (failure: GfsUriOpenFailure) => void
+        shouldContinue?: () => boolean
+      }
+    ) => {
       const background = options?.background === true
       // User navigation owns the location until its authoritative resolution
       // settles. A background refresh that starts before React commits that
@@ -969,6 +977,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       const generation = background ? openUriGenerationRef.current : ++openUriGenerationRef.current
       const backgroundGeneration = background ? ++backgroundOpenUriGenerationRef.current : undefined
       const isCurrent = () =>
+        options?.shouldContinue?.() !== false &&
         openUriGenerationRef.current === generation &&
         (!background ||
           (backgroundOpenUriGenerationRef.current === backgroundGeneration &&
@@ -986,7 +995,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       }
       try {
         const resource = await window.clerum.gfs.resolve(uri.trim())
-        if (!isCurrent()) return false
+        if (!isCurrent()) {
+          if (!background) options?.onFailure?.({ kind: 'superseded' })
+          return false
+        }
         const crumb: GfsCrumb = {
           resourceId: resource.resourceId,
           gfsUri: resource.gfsUri,
@@ -1007,7 +1019,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           try {
             const parentRid = parentResourceId.replace(/-/g, '').toLowerCase()
             const parent = await window.clerum.gfs.resolve(`gfs://${resource.drive}/${parentRid}`)
-            if (!isCurrent()) return false
+            if (!isCurrent()) {
+              if (!background) options?.onFailure?.({ kind: 'superseded' })
+              return false
+            }
             if (parent.kind !== 'directory') break
             if (parent.name) {
               ancestors.push({
@@ -1041,7 +1056,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           }
         }
 
-        if (!isCurrent()) return false
+        if (!isCurrent()) {
+          if (!background) options?.onFailure?.({ kind: 'superseded' })
+          return false
+        }
         // A background resolve may recover its own transient error, but it
         // must not erase a foreground link/navigation error being shown for a
         // separate user action.
@@ -1059,7 +1077,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         setCrumbsState([...ancestors.reverse(), crumb])
         return crumb
       } catch (error) {
-        if (!isCurrent()) return false
+        if (!isCurrent()) {
+          if (!background) options?.onFailure?.({ kind: 'superseded' })
+          return false
+        }
         const message = toMessage(error)
         // Opening a URI is an operation on one resource. A generic 403 may be
         // a per-resource policy decision; only a session-authority failure
@@ -1077,6 +1098,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
             if (background) scheduleBackgroundLocationRetry(uri, error)
           }
         }
+        options?.onFailure?.({ kind: 'error', error })
         return false
       } finally {
         if (!background && foregroundOpenUriPendingRef.current === generation) {
@@ -1349,7 +1371,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     revokeShare: (shareId: string) => revokeShareMutation.mutateAsync(shareId),
     revokingShare: revokeShareMutation.isPending,
     createShare,
-    createFolder: (name: string) => createFolderMutation.mutateAsync(name),
+    createFolder: (parentResourceId: string, name: string) =>
+      createFolderMutation.mutateAsync({ parentResourceId, name }),
     createFile: (parentResourceId: string, name: string, encodedData: string) =>
       createFileMutation.mutateAsync({ parentResourceId, name, encodedData }),
     createFileFromPath: (parentResourceId: string, name: string, filePath: string) =>

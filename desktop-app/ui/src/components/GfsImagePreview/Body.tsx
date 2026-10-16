@@ -23,6 +23,7 @@ export function GfsImagePreviewBody({
   onDownloadError,
   onCopyContentReady,
   titleId,
+  titleActions,
   headerActions,
   headingLevel = 3,
 }: GfsImagePreviewBodyProps) {
@@ -129,10 +130,11 @@ export function GfsImagePreviewBody({
   return (
     <>
       <header className="da-gfs-image-preview-dialog__header">
-        <div className="da-gfs-image-preview-dialog__header-main">
+        <div className="da-gfs-image-preview-dialog__header-main da-gfs-preview-title-row">
           <HeadingTag className="da-gfs-preview-title" id={headingId}>
             {fileName}
           </HeadingTag>
+          {titleActions}
         </div>
         <div className="da-gfs-image-preview-dialog__header-actions">{headerActions}</div>
       </header>

@@ -21,6 +21,8 @@ export type GfsResourceDeepLinkTarget = {
 
 export type GfsResourceDeepLinkEnvelope = GfsResourceDeepLinkTarget & {
   id: number
+  /** Main-issued renderer navigation generation captured when this link activates. */
+  userNavigationGenerationAtActivation: number
 }
 
 export type SandboxUiDeepLinkParts = {

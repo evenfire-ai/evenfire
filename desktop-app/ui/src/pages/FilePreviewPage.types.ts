@@ -19,4 +19,6 @@ export interface FilePreviewPageProps {
   /** One-shot Copy content action requested by a sidebar resource row. */
   pendingResourceAction?: GfsResourceActionRequest | null
   onPendingResourceActionHandled?: (requestId: number) => void
+  /** @deprecated Kept for App compatibility; GFS actions now use resource-local menus. */
+  titlebarLeadingTarget?: HTMLElement | null
 }

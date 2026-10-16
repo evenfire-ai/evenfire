@@ -40,6 +40,7 @@ export type GfsImagePreviewBodyProps = {
   onDownloadError?: (error: unknown) => void
   onCopyContentReady?: (copy: (() => Promise<boolean>) | null) => void
   titleId?: string
+  titleActions?: ReactNode
   headerActions?: ReactNode
   headingLevel?: 2 | 3
 } & GfsImagePreviewSource

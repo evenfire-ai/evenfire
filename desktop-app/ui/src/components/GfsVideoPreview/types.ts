@@ -12,6 +12,7 @@ export type GfsVideoPreviewBodyProps = {
   mimeType: string
   onDownloadError?: (error: unknown) => void
   titleId?: string
+  titleActions?: ReactNode
   headerActions?: ReactNode
   headingLevel?: 2 | 3
 }

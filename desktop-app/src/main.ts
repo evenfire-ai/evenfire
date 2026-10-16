@@ -1,4 +1,4 @@
-import { BrowserWindow, app, ipcMain, nativeTheme, powerMonitor } from 'electron'
+import { BrowserWindow, IpcMainEvent, app, ipcMain, nativeTheme, powerMonitor } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
 import { AppService } from './appService.js'
@@ -20,7 +20,11 @@ import {
 } from './devIsolation.js'
 import { createEvenfireDeepLinkRouter } from './evenfireDeepLinkRouter.js'
 import { GFS_RESOURCE_DEEP_LINK_HOST, parseGfsResourceDeepLink } from './gfsDeepLinks.js'
-import { GfsResourceDeepLinkQueue } from './gfsResourceDeepLinkQueue.js'
+import {
+  GfsResourceDeepLinkQueue,
+  GfsUserNavigationGeneration,
+  createLogoutWithGfsResourceDeepLinkClear,
+} from './gfsResourceDeepLinkQueue.js'
 import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
 import { createMainWindowCoordinator, createRetryableInitializer } from './mainWindowCoordinator.js'
 import { wireMainWindowRendererReadiness } from './mainWindowReadiness.js'
@@ -73,6 +77,11 @@ const appService = new AppService(
 )
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
 const gfsResourceDeepLinkQueue = new GfsResourceDeepLinkQueue()
+const gfsUserNavigationGeneration = new GfsUserNavigationGeneration()
+const logoutAndClearGfsResourceDeepLinks = createLogoutWithGfsResourceDeepLinkClear(
+  gfsResourceDeepLinkQueue,
+  () => appService.logout()
+)
 // U5: deliver mcp-oauth completions to the renderer, or queue them when the
 // renderer is not yet ready (cold start), draining after `app:rendererReady`.
 const mcpOauthCompletionQueue = new McpOauthCompletionQueue(completion => {
@@ -267,6 +276,28 @@ ipcMain.handle('gfs:listPendingDeepLinks', event => {
   return { links: gfsResourceDeepLinkQueue.list() }
 })
 
+function assertTrustedGfsNavigationSender(event: IpcMainEvent): void {
+  assertTrustedSender(event)
+  if (!mainWindow || event.sender !== mainWindow.webContents) {
+    throw new Error('Untrusted GFS navigation sender')
+  }
+}
+
+ipcMain.on('gfs:getUserNavigationGeneration', event => {
+  assertTrustedGfsNavigationSender(event)
+  event.returnValue = gfsUserNavigationGeneration.current()
+})
+
+ipcMain.on('gfs:advanceUserNavigationGeneration', event => {
+  assertTrustedGfsNavigationSender(event)
+  event.returnValue = gfsUserNavigationGeneration.advance()
+})
+
+ipcMain.handle('gfs:clearPendingDeepLinks', event => {
+  assertTrustedSender(event)
+  return gfsResourceDeepLinkQueue.clear()
+})
+
 ipcMain.handle('gfs:acknowledgeDeepLink', (event, payload: { id?: unknown }) => {
   assertTrustedSender(event)
   const id = Number(payload?.id)
@@ -311,7 +342,7 @@ function handleSandboxUiDeepLink(rawUrl: string): boolean {
 function handleGfsResourceDeepLink(rawUrl: string): boolean {
   const target = parseGfsResourceDeepLink(rawUrl)
   if (!target) return false
-  const envelope = gfsResourceDeepLinkQueue.enqueue(target)
+  const envelope = gfsResourceDeepLinkQueue.enqueue(target, gfsUserNavigationGeneration.current())
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('gfs:deepLink', envelope)
   }
@@ -327,7 +358,7 @@ const evenfireDeepLinkRouter = createEvenfireDeepLinkRouter<BrowserWindow>({
   handleGfsResourceDeepLink,
   gfsResourceDeepLinkHost: GFS_RESOURCE_DEEP_LINK_HOST,
   isRendererReady: () => mainWindowRendererReady,
-  logout: () => appService.logout(),
+  logout: logoutAndClearGfsResourceDeepLinks,
   requestMainWindow,
   sandboxUiDeepLinkHost: SANDBOX_UI_DEEP_LINK_HOST,
   shouldAcceptSandboxUiProtocolLink,
@@ -591,7 +622,7 @@ if (gotSingleInstanceLock) {
       // runtime eagerly on first call, and a plugin can be mounted the moment
       // the window paints.
       initPluginSdkRuntime({ service: appService, getMainWindow: () => mainWindow })
-      registerIpcHandlers(appService)
+      registerIpcHandlers(appService, logoutAndClearGfsResourceDeepLinks)
       mainWindowLifecycleReady = true
       wirePowerMonitor()
       app.on('activate', () => {
