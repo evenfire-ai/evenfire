@@ -263,6 +263,22 @@ export async function setupInvitationPasswordWithToken(
   return response
 }
 
+export async function setupAcceptedInvitationPasswordWithToken(
+  invitationUrlId: string,
+  email: string,
+  invitationId: string,
+  password: string
+): Promise<InvitationPreview & { passwordUpdated: boolean }> {
+  const response = (await apiSend('POST', '/api/v1/invitations/password', {
+    token: invitationUrlId,
+    email,
+    invitationId,
+    password,
+  })) as InvitationPreview & { passwordUpdated: boolean }
+  clearToken()
+  return response
+}
+
 export async function getMe(options: ApiRequestOptions = {}): Promise<Me> {
   return apiGet('/api/v1/me', {}, options) as Promise<Me>
 }

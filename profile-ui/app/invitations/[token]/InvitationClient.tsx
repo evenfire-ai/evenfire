@@ -19,6 +19,7 @@ import {
   ProfileApiError,
   acceptInvitation,
   getEvenfireDownloadUrl,
+  setupAcceptedInvitationPasswordWithToken,
   setupInvitationPasswordWithToken,
 } from '@lib/api'
 import {
@@ -323,7 +324,10 @@ export function InvitationClient({
     setSubmitting('password')
     if (isPasswordReset) setRecoveryPhase({ state: 'submitting' })
     try {
-      const response = await setupInvitationPasswordWithToken(
+      const setupPassword = isPasswordReset
+        ? setupInvitationPasswordWithToken
+        : setupAcceptedInvitationPasswordWithToken
+      const response = await setupPassword(
         invitationToken,
         invitation.email,
         invitation.id,

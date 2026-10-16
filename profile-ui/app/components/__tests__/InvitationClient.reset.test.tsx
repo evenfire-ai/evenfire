@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   acceptInvitation: vi.fn(),
   checkAuth: vi.fn(),
   routerReplace: vi.fn(),
+  setupAcceptedInvitationPasswordWithToken: vi.fn(),
   setupInvitationPasswordWithToken: vi.fn(),
 }))
 
@@ -26,6 +27,7 @@ vi.mock('@lib/api', async () => {
     ...actual,
     acceptInvitation: mocks.acceptInvitation,
     getEvenfireDownloadUrl: () => 'https://downloads.example.invalid/evenfire',
+    setupAcceptedInvitationPasswordWithToken: mocks.setupAcceptedInvitationPasswordWithToken,
     setupInvitationPasswordWithToken: mocks.setupInvitationPasswordWithToken,
   }
 })
@@ -44,6 +46,24 @@ const passwordReset: InvitationPreview = {
   passwordPending: true,
 }
 
+const acceptedMemberInvitation: InvitationPreview = {
+  ...passwordReset,
+  purpose: 'member_invitation',
+  status: 'accepted',
+  passwordPending: true,
+}
+
+const acceptedAdminDesktopInvitation: InvitationPreview = {
+  ...passwordReset,
+  id: 'admin-invite-1',
+  email: 'admin@example.invalid',
+  role: 'admin',
+  purpose: 'admin_desktop_access',
+  status: 'accepted',
+  passwordPending: true,
+  userId: 'admin-user-1',
+}
+
 function fillPassword() {
   fireEvent.change(screen.getByLabelText('Password'), {
     target: { value: 'new-synthetic-password' },
@@ -60,6 +80,11 @@ beforeEach(() => {
     me: { id: 'user-1', email: 'member@example.invalid' },
   })
   mocks.routerReplace.mockReset()
+  mocks.setupAcceptedInvitationPasswordWithToken.mockReset().mockResolvedValue({
+    ...acceptedMemberInvitation,
+    passwordPending: false,
+    passwordUpdated: true,
+  })
   mocks.setupInvitationPasswordWithToken.mockReset().mockResolvedValue({
     ...passwordReset,
     status: 'accepted',
@@ -156,22 +181,13 @@ describe('InvitationClient verified password recovery', () => {
   })
 
   it('keeps member invitation password setup on its existing page flow', async () => {
-    mocks.setupInvitationPasswordWithToken.mockResolvedValue({
-      ...passwordReset,
-      purpose: 'member_invitation',
-      status: 'accepted',
-      passwordPending: false,
-      passwordUpdated: true,
-    })
+    mocks.setupInvitationPasswordWithToken.mockRejectedValue(
+      new ProfileApiError(409, 'invitation_not_pending', '409 Conflict - invitation_not_pending')
+    )
     render(
       <InvitationClient
         invitationToken="member-invitation-proof"
-        initialInvitation={{
-          ...passwordReset,
-          purpose: 'member_invitation',
-          status: 'accepted',
-          passwordPending: true,
-        }}
+        initialInvitation={acceptedMemberInvitation}
         initialError=""
       />
     )
@@ -181,6 +197,40 @@ describe('InvitationClient verified password recovery', () => {
 
     await waitFor(() => expect(screen.getByText('You are now registered with Evenfire.')))
     expect(mocks.routerReplace).not.toHaveBeenCalled()
+    expect(mocks.setupAcceptedInvitationPasswordWithToken).toHaveBeenCalledWith(
+      'member-invitation-proof',
+      'member@example.invalid',
+      'reset-1',
+      'new-synthetic-password'
+    )
+    expect(mocks.setupInvitationPasswordWithToken).not.toHaveBeenCalled()
+  })
+
+  it('keeps admin desktop password setup on the ordinary invitation operation', async () => {
+    mocks.setupAcceptedInvitationPasswordWithToken.mockResolvedValue({
+      ...acceptedAdminDesktopInvitation,
+      passwordPending: false,
+      passwordUpdated: true,
+    })
+    render(
+      <InvitationClient
+        invitationToken="admin-invitation-proof"
+        initialInvitation={acceptedAdminDesktopInvitation}
+        initialError=""
+      />
+    )
+
+    fillPassword()
+    fireEvent.click(screen.getByRole('button', { name: 'Set password and continue' }))
+
+    await waitFor(() => expect(screen.getByText('You are now registered with Evenfire.')))
+    expect(mocks.setupAcceptedInvitationPasswordWithToken).toHaveBeenCalledWith(
+      'admin-invitation-proof',
+      'admin@example.invalid',
+      'admin-invite-1',
+      'new-synthetic-password'
+    )
+    expect(mocks.setupInvitationPasswordWithToken).not.toHaveBeenCalled()
   })
 
   it('shows a retryable message when bounded recovery admission is busy', async () => {

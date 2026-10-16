@@ -27,6 +27,7 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
   let publicProcess: ExternalRestHttpProcess
   let bcrypt: typeof import('bcryptjs').default
   let sourceCounter = 1
+  const invitationFlowFixtures = new Map<string, { email: string; invitationUuid: string }>()
 
   beforeAll(async () => {
     admin = new Pool({ connectionString: adminUrl })
@@ -47,6 +48,16 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
       publicKey.export({ type: 'spki', format: 'pem' }).toString()
     )
     vi.resetModules()
+    vi.doMock('../src/services/invitationFlowRegistrationService.js', () => ({
+      validateInvitationFlowToken: vi.fn(async (token: string, email?: string) => {
+        const flow = invitationFlowFixtures.get(token)
+        if (!flow || (email && flow.email !== email.toLowerCase())) {
+          throw new Error('invalid synthetic invitation flow')
+        }
+        return flow
+      }),
+      storeDesktopAuthorizationToken: vi.fn(),
+    }))
 
     bcrypt = (await import('bcryptjs')).default
     db = await import('../src/db.js')
@@ -171,6 +182,18 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
       .send({ invitationId: session.invitationId, password })
   }
 
+  async function invitationPasswordRequestWithoutSession(
+    invitation: { id: string; token: string },
+    email: string,
+    sourceIp: string,
+    password = invitationPassword
+  ) {
+    return request(publicApp)
+      .post('/api/v1/invitations/password')
+      .set('x-forwarded-for', sourceIp)
+      .send({ token: invitation.token, email, invitationId: invitation.id, password })
+  }
+
   async function memberPasswordRequest(
     token: string,
     sourceIp: string,
@@ -230,6 +253,79 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
       )
     ).toBe(true)
   })
+
+  it.each(['member_invitation', 'admin_desktop_access'] as const)(
+    'composes token-based %s onboarding through the ordinary endpoint and persists its identity',
+    async purpose => {
+      const { createSilentInvitationForTeams } =
+        await import('../src/services/directory/membership.js')
+      const email = `r16-${purpose}-${randomBytes(8).toString('hex')}@example.invalid`
+      const teamId = (
+        await db.pool.query('INSERT INTO teams(name) VALUES ($1) RETURNING id', [
+          `Synthetic ${purpose} onboarding team`,
+        ])
+      ).rows[0].id as string
+      const role = purpose === 'admin_desktop_access' ? 'admin' : 'member'
+      const invitation = await createSilentInvitationForTeams({
+        inviteeName: `Synthetic ${purpose} invitee`,
+        email,
+        purpose,
+        teamAssignments: [{ teamId, role }],
+        fallbackRole: role,
+      })
+      const flowToken = `synthetic-r16-flow-${randomBytes(20).toString('hex')}`
+      invitationFlowFixtures.set(flowToken, { email, invitationUuid: invitation.token })
+      const password = `Synthetic-${purpose}-Onboarding-123`
+      const response = await invitationPasswordRequestWithoutSession(
+        { id: invitation.id, token: flowToken },
+        email,
+        nextSourceIp(),
+        password
+      )
+
+      expect(response.status, JSON.stringify(response.body)).toBe(200)
+      expect(response.body).toMatchObject({
+        passwordUpdated: true,
+        purpose,
+        status: 'accepted',
+        email,
+        role,
+      })
+      expect(String(response.headers['set-cookie'])).toContain('profile_session=')
+
+      const invitationRow = await db.pool.query(
+        'SELECT purpose, status, accepted_user_id FROM invitations WHERE id = $1',
+        [invitation.id]
+      )
+      expect(invitationRow.rows).toEqual([
+        expect.objectContaining({
+          purpose,
+          status: 'accepted',
+          accepted_user_id: response.body.userId,
+        }),
+      ])
+      const userRow = await db.pool.query(
+        'SELECT id, email, password_hash FROM users WHERE id = $1',
+        [response.body.userId]
+      )
+      expect(userRow.rows[0]).toMatchObject({ id: response.body.userId, email })
+      expect(await bcrypt.compare(password, userRow.rows[0].password_hash)).toBe(true)
+      const memberships = await db.pool.query(
+        'SELECT team_id, role, status FROM team_members WHERE user_id = $1 AND team_id = $2',
+        [response.body.userId, teamId]
+      )
+      expect(memberships.rows).toEqual([{ team_id: teamId, role, status: 'active' }])
+
+      const sessionCookie = String(response.headers['set-cookie'])
+        .split(';', 1)[0]
+        .replace(/^profile_session=/, '')
+      const identity = await request(publicApp)
+        .get('/api/v1/me')
+        .set('cookie', `profile_session=${sessionCookie}`)
+      expect(identity.status).toBe(200)
+      expect(identity.body).toMatchObject({ id: response.body.userId, email, role })
+    }
+  )
 
   it('returns sanitized authority unavailability without consuming invitation state', async () => {
     const session = await acceptedInvitationSession()

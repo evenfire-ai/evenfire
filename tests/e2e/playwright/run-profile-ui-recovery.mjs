@@ -22,6 +22,9 @@ if (listing.status !== 0) process.exit(listing.status || 1)
 if (!listingOutput.includes('reset-session-hydration.spec.ts')) {
   throw new Error('Profile UI recovery runner did not collect the recovery spec')
 }
+if (!listingOutput.includes('ordinary-invitation-onboarding.spec.ts')) {
+  throw new Error('Profile UI recovery runner did not collect ordinary invitation onboarding')
+}
 if (!/Total:\s*[1-9]\d* tests?\b/.test(listingOutput)) {
   throw new Error('Profile UI recovery runner collected zero tests')
 }
@@ -33,4 +36,15 @@ if (run.error) throw run.error
 if (run.status !== 0) process.exit(run.status || 1)
 if (!/[1-9]\d* passed/.test(runOutput)) {
   throw new Error('Profile UI recovery runner did not report a passing test')
+}
+for (const requiredSuite of [
+  'reset-session-hydration.spec.ts',
+  'ordinary-invitation-onboarding.spec.ts',
+]) {
+  if (!runOutput.includes(requiredSuite)) {
+    throw new Error(`Profile UI recovery runner did not execute ${requiredSuite}`)
+  }
+}
+if (/\b[1-9]\d* skipped\b/.test(runOutput)) {
+  throw new Error('Profile UI recovery runner skipped a required test')
 }
