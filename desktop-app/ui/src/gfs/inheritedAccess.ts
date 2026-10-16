@@ -13,11 +13,12 @@ export { planInheritedRoleChange, strongestInheritedSource } from './inheritedAc
  * includeDescendants=true — the server's allow() rule. Derivation is
  * all-or-nothing: if a required ancestor or its ACL cannot be read, callers
  * must show an incomplete-access notice rather than an empty/partial result.
- * Rows are merged per subject through the pure merge core
- * (`inheritedAccessMerge.ts`, property
- * tested in R1-M4); EVERY contributing ancestor folder is kept as an editable
- * source, so a confirmed removal revokes all of them and a confirmed
- * downgrade lowers each one above the target role (R1-H1).
+ * Rows are merged per subject through the shared pure core
+ * (`@clerum/gfs-interaction-policy`, via the app adapter in
+ * `inheritedAccessMerge.ts`, property tested in R1-M4); EVERY contributing
+ * ancestor folder is kept as an editable source, so a confirmed removal
+ * revokes all of them and a confirmed downgrade lowers each one above the
+ * target role (R1-H1).
  */
 
 const DEFAULT_DRIVE = 'main'
