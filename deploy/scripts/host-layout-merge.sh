@@ -83,11 +83,20 @@ print_check_script() {
 # Mode-bit write test: the check Pod mounts the PVC read-only, so the
 # shell's -w test would refuse every tree. Same owner/group/other rule as
 # access(2).
-writable() (
+# A `+` in the mode string is a POSIX ACL, which the mode bits do not
+# account for, so the check reports the tree UNREADABLE instead of guessing.
+writable() {
+  mode_writable "$1" && return 0
+  [ "$?" -eq 2 ] || return 1
+  echo "UNREADABLE ACL on $1: mode bits do not decide access"
+  exit 0
+}
+mode_writable() (
   set -f
   [ "$(id -u)" -ne 0 ] || exit 0
   listing="$(ls -ldn "$1")" || exit 1
   set -- $listing
+  case "$1" in *+*) exit 2 ;; esac
   if [ "$3" = "$(id -u)" ]; then
     case "$1" in ??w*) exit 0 ;; *) exit 1 ;; esac
   fi
@@ -202,6 +211,10 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 2' INT TERM
+# Check Pod names carry this run's id, so a name held by another run (or any
+# other Pod) is never reused, and cleanup deletes only Pods this run created.
+RUN_ID="$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+case "$RUN_ID" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) die "cannot draw a run id from /dev/urandom" ;; esac
 
 # read_json <file> <kubectl args...>: a JSON object or exit 2 with stderr.
 read_json() {
@@ -220,10 +233,15 @@ jq -e '[.spec.template.spec.containers[]? | select(.name == "host-context-contro
 jq -e '(.spec.replicas // 1) as $r | $r > 0 and (.status.readyReplicas // 0) == $r and (.status.updatedReplicas // 0) == $r' \
   "$WORK/hcc.json" >/dev/null || die "HCC_NOT_READY: $HCC_NAMESPACE/$HCC_DEPLOYMENT is not fully rolled out and Ready"
 
-# hcc_env <name>: <unset>, <valueFrom> or the literal value.
+# hcc_env <name>: <unset>, <valueFrom> or the literal value. A variable not
+# set in env but possibly set through envFrom is <valueFrom>: its value is
+# not in the Deployment, so its default must not be assumed.
 hcc_env() {
-  jq -r --arg n "$1" '[.spec.template.spec.containers[] | select(.name == "host-context-controller") | .env[]? | select(.name == $n)]
-    | if length == 0 then "<unset>" elif .[0].valueFrom then "<valueFrom>" else (.[0].value // "") end' "$WORK/hcc.json"
+  jq -r --arg n "$1" '.spec.template.spec.containers[] | select(.name == "host-context-controller")
+    | ((.envFrom // []) | length > 0) as $from
+    | [.env[]? | select(.name == $n)]
+    | if length == 0 then (if $from then "<valueFrom>" else "<unset>" end)
+      elif .[0].valueFrom then "<valueFrom>" else (.[0].value // "") end' "$WORK/hcc.json"
 }
 
 FLAG_RAW="$(hcc_env CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE)"
@@ -296,11 +314,24 @@ jq -r -n \
         secrets: ($dep.spec.template.spec.imagePullSecrets // [] | map(.name) | join(","))
       };
   ($hosts[0].items | map({key: .metadata.name, value: kind}) | from_entries) as $kinds
+  | [$pvcs[0].items[] | select(.metadata.name == "\(.metadata.labels["clerum.io/host"])-workspace") | .metadata.name] as $listed
   | ($hosts[0].items[] | .metadata.name as $h | host_facts($h) as $f
-      | ["H", $h, $kinds[$h], $f.state, ($f.template | dash), ($f.subpath | dash)] | @tsv),
+      | (["H", $h, $kinds[$h], $f.state, ($f.template | dash), ($f.subpath | dash)] | @tsv),
+        # Every Host with a Deployment must have its <host>-workspace claim
+        # mounted and in the PVC list; otherwise nothing reads that tree.
+        ([$deps[0].items[] | owned($h)][0] // null
+          | if . == null then empty
+            elif ([.spec.template.spec.volumes[]?.persistentVolumeClaim.claimName] | index("\($h)-workspace")) == null then
+              ["U", "\($h)-workspace", $h, $kinds[$h], $f.state, "Deployment mounts no \($h)-workspace claim"] | @tsv
+            elif ($listed | index("\($h)-workspace")) == null then
+              ["U", "\($h)-workspace", $h, $kinds[$h], $f.state, "claim not in the PVC list (clerum.io/managed-by=host-context-controller, clerum.io/host=\($h))"] | @tsv
+            else empty end)),
     ($pvcs[0].items[] | .metadata.labels["clerum.io/host"] as $h
-      | if $h == null or .metadata.name != "\($h)-workspace" then
+      | if $h == null then
           ["I", .metadata.name] | @tsv
+        elif .metadata.name != "\($h)-workspace" then
+          ["U", .metadata.name, $h, ($kinds[$h] // "ORPHAN"), (if $kinds[$h] == null then "NO_HOST" else host_facts($h).state end),
+           "clerum.io/host=\($h) on a claim not named \($h)-workspace"] | @tsv
         elif $kinds[$h] == null then
           ["P", .metadata.name, $h, "ORPHAN", "NO_HOST", "-", "-", "0", "-", "-", "-", "-", "-"] | @tsv
         else
@@ -325,9 +356,9 @@ while IFS=$'\t' read -r type name kind state template subpath; do
 done <"$WORK/rows.tsv"
 while IFS=$'\t' read -r type name _; do
   [ "$type" = I ] || continue
-  echo "IGNORED_PVC $HOST_NS/$name (not <host>-workspace of a clerum.io/host label)"
+  echo "IGNORED_PVC $HOST_NS/$name (no clerum.io/host label)"
 done <"$WORK/rows.tsv"
-PVC_ROWS="$(awk -F'\t' '$1 == "P"' "$WORK/rows.tsv" | wc -l | tr -d ' ')"
+PVC_ROWS="$(awk -F'\t' '$1 == "P" || $1 == "U"' "$WORK/rows.tsv" | wc -l | tr -d ' ')"
 [ "$HOSTS" -gt 0 ] || [ "$PVC_ROWS" -gt 0 ] || die "no Host and no Host PVC in namespace $HOST_NS; wrong --context or namespace?"
 echo "PRE_825=$PRE_825"
 
@@ -349,7 +380,7 @@ fi
 # token (and refusal line) for that PVC.
 run_check() {
   local claim=$1 node=$2 image=$3 policy=$4 secrets=$5 pod phase elapsed=0 first lines
-  pod="$(printf 'host-layout-check-%s' "$claim" | cut -c1-63 | sed 's/[-.]*$//')"
+  pod="$(printf 'host-layout-check-%s' "$claim" | cut -c1-54 | sed 's/[-.]*$//')-$RUN_ID"
   jq -cn --arg pod "$pod" --arg ns "$HOST_NS" --arg node "$node" --arg image "$image" --arg policy "$policy" \
     --arg secrets "$secrets" --arg claim "$claim" --arg script "$CHECK_SCRIPT" --arg root "$PVC_ROOT" '{
       apiVersion: "v1", kind: "Pod",
@@ -428,16 +459,25 @@ merge_line() {
 }
 
 TOTAL=0 POD_OK=0 NO_SPLIT=0 SPLIT=0 REFUSED=0 RUNNING=0 UNREADABLE=0 UNVERIFIED=0 UNKNOWN=0
-ORPHANS=0 ORPHAN_SPLIT=0 UPGRADE_BLOCKERS=0 SPLIT_TREES=0
-while IFS=$'\t' read -r type pvc host kind state _template _subpath pods nodes merge image policy secrets; do
-  [ "$type" = P ] || continue
+ORPHANS=0 ORPHAN_SPLIT=0 ORPHAN_UNREADABLE=0 ORPHAN_UNVERIFIED=0 UPGRADE_BLOCKERS=0 SPLIT_TREES=0
+while IFS=$'\t' read -r type pvc host kind state detail _subpath pods nodes merge image policy secrets; do
+  case "$type" in P | U) ;; *) continue ;; esac
   result=""
-  if [ "$COMMAND" = verify ] && [ "$FLAG" = on ] && [ "$pods" -gt 0 ]; then
+  merge_ok=0
+  if [ "$type" = U ]; then
+    result="UNKNOWN $detail"
+  elif [ "$COMMAND" = verify ] && [ "$FLAG" = on ] && [ "$pods" -gt 0 ]; then
+    # An init that exited 0 is not proof the tree has no split-layout
+    # signature (it can be rewritten after the start), so POD_OK still reads it.
     case "${merge%%:*}" in
-      POD_OK | MERGE_RUNNING | UNKNOWN) result="${merge%%:*}" ;;
+      POD_OK) merge_ok=1 ;;
+      MERGE_RUNNING | UNKNOWN) result="${merge%%:*}" ;;
       MERGE_REFUSED) result="MERGE_REFUSED $(merge_line "${merge#MERGE_REFUSED:}")" ;;
       *) die "unexpected merge status $merge for $pvc" ;;
     esac
+  fi
+  if [ -n "$result" ]; then
+    :
   elif [ "$NO_PVC_PODS" -eq 1 ]; then
     result=UNVERIFIED
   else
@@ -456,12 +496,20 @@ while IFS=$'\t' read -r type pvc host kind state _template _subpath pods nodes m
       result="$(run_check "$pvc" "$node" "$image" "$policy" "$secrets" </dev/null)"
       # verify names a tree the merge will still change SPLIT.
       [ "$COMMAND" = inventory ] || [ "$result" != WILL_MERGE ] || result=SPLIT
+      [ "$merge_ok" -eq 0 ] || [ "$result" != NO_SPLIT_SIGNATURE ] || result=POD_OK
     fi
   fi
-  if [ "$kind" = ORPHAN ]; then
+  # A known split orphan does not block (T9); an orphan nobody could read does.
+  if [ "$type" = P ] && [ "$kind" = ORPHAN ]; then
     echo "PVC $HOST_NS/$pvc host=$host kind=ORPHAN state=$state result=$result"
     ORPHANS=$((ORPHANS + 1))
-    case "$result" in WILL_MERGE | SPLIT | WILL_REFUSE_*) ORPHAN_SPLIT=$((ORPHAN_SPLIT + 1)) ;; esac
+    case "$result" in
+      WILL_MERGE | SPLIT | WILL_REFUSE_*) ORPHAN_SPLIT=$((ORPHAN_SPLIT + 1)) ;;
+      NO_SPLIT_SIGNATURE) ;;
+      UNREADABLE*) ORPHAN_UNREADABLE=$((ORPHAN_UNREADABLE + 1)) ;;
+      UNVERIFIED) ORPHAN_UNVERIFIED=$((ORPHAN_UNVERIFIED + 1)) ;;
+      *) die "unclassified orphan result for $pvc: $result" ;;
+    esac
     continue
   fi
   echo "PVC $HOST_NS/$pvc host=$host kind=$kind state=$state result=$result"
@@ -475,7 +523,7 @@ while IFS=$'\t' read -r type pvc host kind state _template _subpath pods nodes m
     MERGE_RUNNING) RUNNING=$((RUNNING + 1)) ;;
     UNREADABLE*) UNREADABLE=$((UNREADABLE + 1)) ;;
     UNVERIFIED) UNVERIFIED=$((UNVERIFIED + 1)) ;;
-    UNKNOWN) UNKNOWN=$((UNKNOWN + 1)) ;;
+    UNKNOWN | 'UNKNOWN '*) UNKNOWN=$((UNKNOWN + 1)) ;;
     *) die "unclassified result for $pvc: $result" ;;
   esac
 done <"$WORK/rows.tsv"
@@ -484,6 +532,7 @@ SUM=$((POD_OK + NO_SPLIT + SPLIT + REFUSED + RUNNING + UNREADABLE + UNVERIFIED +
 [ "$SUM" -eq "$TOTAL" ] || die "counted $SUM results for $TOTAL Host PVCs"
 echo "COUNTS total=$TOTAL pod_ok=$POD_OK no_split=$NO_SPLIT split=$SPLIT refused=$REFUSED running=$RUNNING unreadable=$UNREADABLE unverified=$UNVERIFIED unknown=$UNKNOWN template_stale=$TEMPLATE_STALE"
 echo "ORPHANS=$ORPHANS ORPHAN_SPLIT=$ORPHAN_SPLIT"
+echo "ORPHAN_UNDECIDED=$((ORPHAN_UNREADABLE + ORPHAN_UNVERIFIED))"
 if [ "$ORPHAN_SPLIT" -gt 0 ]; then
   echo "note: a Host recreated with an orphan's name after the flag is off starts on an empty database; delete the orphan PVC first or recreate the Host before turning the flag off"
 fi
@@ -499,7 +548,8 @@ if [ "$COMMAND" = inventory ]; then
   else
     echo "DESKTOP_HOSTS=0"
   fi
-  if [ "$UPGRADE_BLOCKERS" -gt 0 ] || [ "$UNREADABLE" -gt 0 ] ||
+  if [ "$UPGRADE_BLOCKERS" -gt 0 ] || [ "$UNREADABLE" -gt 0 ] || [ "$UNKNOWN" -gt 0 ] ||
+    [ "$ORPHAN_UNREADABLE" -gt 0 ] || { [ "$HOSTS" -gt 0 ] && [ "$TOTAL" -eq 0 ]; } ||
     { [ "$FLAG" = off ] && [ "$SPLIT_TREES" -gt 0 ]; } ||
     [ "$FLAG" = invalid ] || [ "$FLAG" = unresolved ]; then
     echo "HOST_LAYOUT_INVENTORY=BLOCKED"
@@ -509,15 +559,20 @@ if [ "$COMMAND" = inventory ]; then
   exit 0
 fi
 
+# A PVC nobody read is undecided whatever the flag says: ALREADY_OFF is
+# printed only when every PVC was read and none is split.
+UNDECIDED=$((UNREADABLE + UNVERIFIED + UNKNOWN + ORPHAN_UNREADABLE + ORPHAN_UNVERIFIED))
 if [ "$FLAG" = off ]; then
   if [ "$SPLIT_TREES" -gt 0 ]; then
     echo "HOST_LAYOUT_VERIFY=FLAG_FALSE_WITH_SPLIT_TREES"
+  elif [ "$UNDECIDED" -gt 0 ]; then
+    echo "HOST_LAYOUT_VERIFY=FAIL"
   else
     echo "HOST_LAYOUT_VERIFY=ALREADY_OFF"
   fi
   exit 1
 fi
-if [ "$TOTAL" -gt 0 ] && [ "$((SPLIT + REFUSED + RUNNING + UNREADABLE + UNVERIFIED + UNKNOWN + TEMPLATE_STALE))" -eq 0 ]; then
+if [ "$TOTAL" -gt 0 ] && [ "$((SPLIT + REFUSED + RUNNING + UNDECIDED + TEMPLATE_STALE))" -eq 0 ]; then
   echo "HOST_LAYOUT_VERIFY=PASS"
   exit 0
 fi

@@ -32,10 +32,11 @@ const out = (s, code = 0) => { process.stdout.write(s); process.exit(code) }
 if (!args.includes('--context=' + fx.context)) { process.stderr.write('missing --context'); process.exit(97) }
 const rest = args.filter(a => !a.startsWith('--context=')).join(' ')
 const statePath = process.env.FAKE_KUBECTL_LOG + '.pods.json'
-const pods = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, 'utf8')) : {}
+const pods = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, 'utf8')) : { ...fx.preexisting }
 const save = () => fs.writeFileSync(statePath, JSON.stringify(pods))
 if (rest === 'create -f -') {
   const m = JSON.parse(stdin)
+  if (pods[m.metadata.name]) { process.stderr.write('Error from server (AlreadyExists): pods "' + m.metadata.name + '" already exists'); process.exit(1) }
   const claim = m.spec.volumes[0].persistentVolumeClaim.claimName
   pods[m.metadata.name] = claim
   save()
@@ -185,7 +186,7 @@ function run(f, args) {
     const kubectl = path.join(dir, 'kubectl')
     writeFileSync(kubectl, FAKE_KUBECTL, { mode: 0o755 })
     const fixture = path.join(dir, 'fixture.json')
-    writeFileSync(fixture, JSON.stringify({ context: CONTEXT, responses: responses(f), checks: f.checks }))
+    writeFileSync(fixture, JSON.stringify({ context: CONTEXT, responses: responses(f), checks: f.checks, preexisting: f.preexisting ?? {} }))
     const log = path.join(dir, 'calls.jsonl')
     writeFileSync(log, '')
     const res = spawnSync('bash', [SCRIPT, ...args], {
@@ -211,6 +212,7 @@ function row(out, pvcName) {
 
 const verbs = calls => calls.map(c => c.args.filter(a => !a.startsWith('--context='))[0])
 const creates = calls => calls.filter(c => verbs([c])[0] === 'create').map(c => JSON.parse(c.stdin))
+const claimOf = m => m.spec.volumes[0].persistentVolumeClaim.claimName
 
 function assertReadOnlyCalls(calls) {
   assert.ok(calls.length > 0, 'kubectl was called')
@@ -225,7 +227,7 @@ function assertCheckPodsOnly(calls, claims) {
   assert.deepEqual(creates(calls).map(m => m.spec.volumes[0].persistentVolumeClaim.claimName).sort(), [...claims].sort())
 }
 
-test('verify passes a merged fleet and checks only the PVC without a Pod', () => {
+test('verify passes a merged fleet and reads every PVC, pinning running Hosts to their node', () => {
   const r = verify(fleet())
   assert.equal(r.status, 0, r.stdout + r.stderr)
   assert.match(r.stdout, /^HOST_LAYOUT_VERIFY=PASS$/m)
@@ -234,9 +236,11 @@ test('verify passes a merged fleet and checks only the PVC without a Pod', () =>
   assert.match(row(r.stdout, 'gamma-workspace'), /host=gamma kind=DESKTOP state=ACTIVE result=POD_OK$/)
   assert.match(r.stdout, /^COUNTS total=3 pod_ok=2 no_split=1 split=0 refused=0 running=0 unreadable=0 unverified=0 unknown=0 template_stale=0$/m)
   assert.match(r.stdout, /^PVC_CONTENTS=NOT_INSPECTED$/m)
-  assertCheckPodsOnly(r.calls, ['beta-workspace'])
+  assertCheckPodsOnly(r.calls, ['alpha-workspace', 'beta-workspace', 'gamma-workspace'])
+  const nodes = Object.fromEntries(creates(r.calls).map(m => [claimOf(m), m.spec.nodeName]))
+  assert.deepEqual(nodes, { 'alpha-workspace': 'node-a', 'beta-workspace': undefined, 'gamma-workspace': 'node-b' })
 
-  const [pod] = creates(r.calls)
+  const pod = creates(r.calls).find(m => claimOf(m) === 'beta-workspace')
   assert.equal(pod.spec.nodeName, undefined)
   assert.equal(pod.spec.automountServiceAccountToken, false)
   assert.equal(pod.spec.securityContext.fsGroup, undefined)
@@ -295,7 +299,8 @@ test('--no-pvc-pods starts no Pod: inventory reports UNVERIFIED, verify fails', 
 
   const ver = verify(fleet(), '--no-pvc-pods')
   assert.equal(ver.status, 1, ver.stdout + ver.stderr)
-  assert.match(row(ver.stdout, 'alpha-workspace'), /result=POD_OK$/)
+  // An init that exited 0 does not stand in for reading the tree.
+  assert.match(row(ver.stdout, 'alpha-workspace'), /result=UNVERIFIED$/)
   assert.match(row(ver.stdout, 'beta-workspace'), /result=UNVERIFIED$/)
   assert.match(ver.stdout, /^HOST_LAYOUT_VERIFY=FAIL$/m)
   assertReadOnlyCalls(ver.calls)
@@ -402,8 +407,8 @@ test('verify fails a suspended Host whose PVC is still split or unreadable', () 
     assert.ok(row(r.stdout, 'beta-workspace').includes(`result=${result}`), row(r.stdout, 'beta-workspace'))
     assert.match(r.stdout, count)
     assert.match(r.stdout, /^HOST_LAYOUT_VERIFY=FAIL$/m)
-    // The check Pod is deleted whatever it printed.
-    assertCheckPodsOnly(r.calls, ['beta-workspace'])
+    // Every check Pod is deleted whatever it printed.
+    assertCheckPodsOnly(r.calls, ['alpha-workspace', 'beta-workspace', 'gamma-workspace'])
   }
 })
 
@@ -420,6 +425,130 @@ test('an orphan split PVC is reported without blocking the verdict (T9)', () => 
   assert.equal(orphanPod.spec.containers[0].image, 'registry.test/mcp-host:head')
   assert.equal(orphanPod.spec.containers[0].imagePullPolicy, 'Always')
   assert.deepEqual(orphanPod.spec.imagePullSecrets, [{ name: 'clerum' }])
+})
+
+test('r5 C1: a Host whose workspace PVC was not inspected fails both verdicts', () => {
+  // Witness: the unmodified fleet passes with all three claims read.
+  assert.equal(verify(fleet()).status, 0)
+
+  const missing = fleet()
+  missing.pvcs = missing.pvcs.filter(p => p.metadata.name !== 'beta-workspace')
+  const mv = verify(missing)
+  const mi = inventory(missing)
+  for (const r of [mv, mi]) {
+    assert.equal(r.status, 1, r.stdout + r.stderr)
+    assert.match(row(r.stdout, 'beta-workspace'), /host=beta kind=STATELESS state=SUSPENDED result=UNKNOWN /)
+    assert.match(r.stdout, / unknown=1 /)
+  }
+  assert.match(mv.stdout, /^HOST_LAYOUT_VERIFY=FAIL$/m)
+  assert.match(mi.stdout, /^HOST_LAYOUT_INVENTORY=BLOCKED$/m)
+
+  const renamed = fleet()
+  renamed.deployments[1].spec.template.spec.volumes[0].persistentVolumeClaim.claimName = 'beta-legacy'
+  renamed.pvcs[1] = { metadata: { name: 'beta-legacy', labels: { 'clerum.io/managed-by': 'host-context-controller', 'clerum.io/host': 'beta' } } }
+  const rv = verify(renamed)
+  assert.equal(rv.status, 1, rv.stdout + rv.stderr)
+  assert.match(row(rv.stdout, 'beta-legacy'), /host=beta kind=STATELESS state=SUSPENDED result=UNKNOWN /)
+  assert.match(row(rv.stdout, 'beta-workspace'), /host=beta kind=STATELESS state=SUSPENDED result=UNKNOWN /)
+  assert.match(rv.stdout, /^HOST_LAYOUT_VERIFY=FAIL$/m)
+
+  const none = fleet()
+  none.pvcs = []
+  const ni = inventory(none)
+  assert.equal(ni.status, 1, ni.stdout + ni.stderr)
+  assert.match(ni.stdout, / unknown=3 /)
+  assert.match(ni.stdout, /^HOST_LAYOUT_INVENTORY=BLOCKED$/m)
+
+  // A PVC with no Host label (a SharedFileSystem claim) stays out of the verdict.
+  const sfs = fleet()
+  sfs.pvcs.push({ metadata: { name: 'shared-files', labels: { 'clerum.io/managed-by': 'host-context-controller' } } })
+  const sv = verify(sfs)
+  assert.equal(sv.status, 0, sv.stdout + sv.stderr)
+  assert.match(sv.stdout, /^IGNORED_PVC mcp-host\/shared-files /m)
+  assert.match(sv.stdout, /^HOST_LAYOUT_VERIFY=PASS$/m)
+})
+
+test('r5 C2: a check Pod name held by another run is neither reused nor deleted', () => {
+  const foreign = 'host-layout-check-beta-workspace'
+  const f = fleet()
+  f.preexisting = { [foreign]: 'other-run' }
+  const r = verify(f)
+  assert.equal(r.status, 0, r.stdout + r.stderr)
+  assert.match(r.stdout, /^HOST_LAYOUT_VERIFY=PASS$/m)
+  const created = creates(r.calls).map(m => m.metadata.name)
+  const beta = creates(r.calls).find(m => claimOf(m) === 'beta-workspace')
+  assert.match(beta.metadata.name, /^host-layout-check-beta-workspace-[0-9a-f]{8}$/)
+  const deleted = r.calls.filter(c => verbs([c])[0] === 'delete').map(c => c.args[c.args.indexOf('pod') + 1])
+  // Witness: every Pod this run created was deleted, and nothing else.
+  assert.deepEqual(deleted.sort(), created.sort())
+  assert.ok(!deleted.includes(foreign))
+})
+
+test('r5 C3: an orphan PVC that could not be read fails both verdicts', () => {
+  const f = fleet()
+  f.pvcs.push(pvc('delta'))
+  f.checks['delta-workspace'] = { phase: 'Failed', output: 'read failed\n' }
+  const v = verify(f)
+  assert.equal(v.status, 1, v.stdout + v.stderr)
+  assert.match(row(v.stdout, 'delta-workspace'), /host=delta kind=ORPHAN state=NO_HOST result=UNREADABLE /)
+  assert.match(v.stdout, /^ORPHAN_UNDECIDED=1$/m)
+  assert.match(v.stdout, /^HOST_LAYOUT_VERIFY=FAIL$/m)
+  const i = inventory(f)
+  assert.equal(i.status, 1, i.stdout + i.stderr)
+  assert.match(i.stdout, /^HOST_LAYOUT_INVENTORY=BLOCKED$/m)
+})
+
+test('r5 C4: verify reads the tree of a running Host and fails one still split', () => {
+  const f = fleet()
+  f.checks['alpha-workspace'].output = 'WILL_MERGE\n'
+  const r = verify(f)
+  assert.equal(r.status, 1, r.stdout + r.stderr)
+  assert.match(row(r.stdout, 'alpha-workspace'), /host=alpha kind=STATEFUL state=ACTIVE result=SPLIT$/)
+  assert.match(r.stdout, / split=1 /)
+  assert.match(r.stdout, /^HOST_LAYOUT_VERIFY=FAIL$/m)
+  const alpha = creates(r.calls).find(m => claimOf(m) === 'alpha-workspace')
+  assert.equal(alpha?.spec.nodeName, 'node-a')
+})
+
+test('r5 C5: flag off with a PVC left unread is FAIL, not ALREADY_OFF', () => {
+  const f = fleet()
+  f.hcc = hcc([{ name: 'CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE', value: 'false' }])
+  f.checks['beta-workspace'] = { phase: 'Failed', output: 'boom\n' }
+  const r = verify(f)
+  assert.equal(r.status, 1, r.stdout + r.stderr)
+  assert.match(row(r.stdout, 'beta-workspace'), /result=UNREADABLE /)
+  assert.match(r.stdout, /^HOST_LAYOUT_VERIFY=FAIL$/m)
+
+  const unread = fleet()
+  unread.hcc = hcc([{ name: 'CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE', value: 'false' }])
+  const u = verify(unread, '--no-pvc-pods')
+  assert.equal(u.status, 1, u.stdout + u.stderr)
+  assert.match(row(u.stdout, 'beta-workspace'), /result=UNVERIFIED$/)
+  assert.match(u.stdout, /^HOST_LAYOUT_VERIFY=FAIL$/m)
+})
+
+test('r5 C10: HCC settings that may come from envFrom are unresolved, never defaults', () => {
+  const ns = fleet()
+  ns.hcc.spec.template.spec.containers[0].envFrom = [{ configMapRef: { name: 'hcc-env' } }]
+  const n = verify(ns)
+  assert.equal(n.status, 2, n.stdout + n.stderr)
+  assert.match(n.stderr, /cannot resolve CONTEXT_MAPPER_HOST_NAMESPACE/)
+  assertReadOnlyCalls(n.calls)
+
+  const literalNs = [{ name: 'CONTEXT_MAPPER_HOST_NAMESPACE', value: NS }]
+  const witness = fleet()
+  witness.hcc = hcc(literalNs)
+  assert.equal(verify(witness).status, 0)
+
+  const flag = fleet()
+  flag.hcc = hcc(literalNs)
+  flag.hcc.spec.template.spec.containers[0].envFrom = [{ secretRef: { name: 'hcc-env' } }]
+  const v = verify(flag)
+  assert.equal(v.status, 1, v.stdout + v.stderr)
+  assert.match(v.stdout, /^HOST_LAYOUT_VERIFY=FLAG_UNRESOLVED$/m)
+  const i = inventory(flag)
+  assert.equal(i.status, 1, i.stdout + i.stderr)
+  assert.match(i.stdout, /^HOST_LAYOUT_INVENTORY=BLOCKED$/m)
 })
 
 test('read failures, an empty scope and a failed cleanup exit 2', () => {
@@ -468,10 +597,10 @@ function tree(build) {
   return root
 }
 
-function check(root) {
+function check(root, env = {}) {
   const printed = spawnSync('bash', [SCRIPT, 'check-script', '--root', root], { encoding: 'utf8' })
   assert.equal(printed.status, 0, printed.stderr)
-  const res = spawnSync('/bin/sh', ['-c', printed.stdout], { encoding: 'utf8' })
+  const res = spawnSync('/bin/sh', ['-c', printed.stdout], { encoding: 'utf8', env: { ...process.env, ...env } })
   assert.equal(res.stderr, '')
   assert.equal(res.status, 0)
   return res.stdout
@@ -511,6 +640,24 @@ test('check-script refuses an unlistable state/ like the merge init does', { ski
   } finally {
     chmodTree(root)
     rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// An `ls -l` mode string ending in `+` means a POSIX ACL, which the mode bits
+// do not account for. A PATH wrapper adds the marker to `ls -ldn` output only.
+test('r5 C9: an ACL on a directory the merge writes makes the check UNREADABLE', { skip: process.getuid() === 0 && 'root reads any mode' }, () => {
+  const bin = mkdtempSync(path.join(tmpdir(), 'host-layout-check-bin-'))
+  writeFileSync(path.join(bin, 'ls'), `#!/bin/sh
+if [ "$1" = -ldn ]; then /bin/ls "$@" | sed '1s/^\\([^ ]*\\)/\\1+/'; else exec /bin/ls "$@"; fi
+`, { mode: 0o755 })
+  const root = tree(r => { mkdirSync(`${r}/state`); mkdirSync(`${r}/workspace`); file(`${r}/state/state.db`) })
+  try {
+    // Witness: the same tree without the marker is predicted to merge.
+    assert.equal(check(root), 'WILL_MERGE\n')
+    assert.equal(check(root, { PATH: `${bin}:${process.env.PATH}` }), `UNREADABLE ACL on ${root}: mode bits do not decide access\n`)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+    rmSync(bin, { recursive: true, force: true })
   }
 })
 
