@@ -3451,9 +3451,30 @@ describe('FilesPage', () => {
       ],
       nextCursor: null,
     }))
+    // rev-2 shared dispatch: the dialog commit re-resolves the source before
+    // the PATCH (fresh ifMatch) and probes source-resource write for the
+    // numbered-name policy.
+    const resolve = vi.fn(async () => ({
+      drive: 'main',
+      resourceId: 'child-1',
+      parentResourceId: 'folder-1',
+      rid: 'child-1',
+      gfsUri: 'gfs://main/child-1',
+      name: 'notes.txt',
+      kind: 'file',
+      pathCache: '/Product/notes.txt',
+      version: 3,
+      bytes: 12,
+    }))
+    const affordances = vi.fn(async () => ({
+      held: ['read', 'write'],
+      canDelegate: false,
+      grantableBits: [],
+      canCreateShare: false,
+    }))
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { listChildren } },
+      value: { gfs: { listChildren, resolve, affordances } },
     })
     const child = {
       resourceId: 'child-1',
@@ -3525,7 +3546,7 @@ describe('FilesPage', () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Subfolder)' }))
     })
 
-    expect(moveResource).toHaveBeenCalledWith('child-1', 'sub-1', 3)
+    expect(moveResource).toHaveBeenCalledWith('child-1', 'sub-1', 3, undefined, 'folder-1')
     expect(moveResource).toHaveBeenCalledTimes(1)
     expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Subfolder', 'success')
   })
@@ -3533,15 +3554,39 @@ describe('FilesPage', () => {
   it('moves a dragged file onto a folder only after confirming destination write access', async () => {
     const pushToast = vi.fn()
     const moveResource = vi.fn(async () => ({}))
-    const affordances = vi.fn(async () => ({
-      held: ['read', 'write'],
-      canDelegate: false,
-      grantableBits: [],
-      canCreateShare: false,
+    // rev-2 exact-bit authority: the source parent needs write+delete, the
+    // destination write, and the source resource write unlocks numbered names.
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folder-1') {
+        return {
+          held: ['read', 'write', 'delete'],
+          canDelegate: false,
+          grantableBits: [],
+          canCreateShare: false,
+        }
+      }
+      return {
+        held: ['read', 'write'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      }
+    })
+    const resolve = vi.fn(async () => ({
+      drive: 'main',
+      resourceId: 'file-1',
+      parentResourceId: 'folder-1',
+      rid: 'file-1',
+      gfsUri: 'gfs://main/file-1',
+      name: 'notes.txt',
+      kind: 'file',
+      pathCache: '/Product/notes.txt',
+      version: 3,
+      bytes: 12,
     }))
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { affordances } },
+      value: { gfs: { affordances, resolve } },
     })
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
@@ -3605,7 +3650,7 @@ describe('FilesPage', () => {
     fireEvent.drop(destinationRow, { dataTransfer })
 
     await waitFor(() => {
-      expect(moveResource).toHaveBeenCalledWith('file-1', 'archive-1', 3)
+      expect(moveResource).toHaveBeenCalledWith('file-1', 'archive-1', 3, undefined, 'folder-1')
       expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Archive', 'success')
     })
   })
@@ -3613,12 +3658,22 @@ describe('FilesPage', () => {
   it('rejects a file drop when the destination folder lacks write access', async () => {
     const pushToast = vi.fn()
     const moveResource = vi.fn(async () => ({}))
-    const affordances = vi.fn(async () => ({
-      held: ['read'],
-      canDelegate: false,
-      grantableBits: [],
-      canCreateShare: false,
-    }))
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folder-1') {
+        return {
+          held: ['read', 'write', 'delete'],
+          canDelegate: false,
+          grantableBits: [],
+          canCreateShare: false,
+        }
+      }
+      return {
+        held: ['read'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      }
+    })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: { gfs: { affordances } },
@@ -5041,5 +5096,316 @@ describe('FilesPage', () => {
     expect(screen.queryByTestId('gfs-discovery-retry-seconds')).toBeNull()
     // Still surfaced, as the banner — and presented, not as the IPC wrapper.
     expect(screen.getByText(/Too many file requests — try again in 7s\./)).toBeTruthy()
+  })
+})
+
+// ── folder drag moves + conflict parity (rev-2 D1) ───────────────────────────
+
+describe('FilesPage — folder drag-and-drop', () => {
+  // The file's shared afterEach(cleanup) lives inside the sibling
+  // describe('FilesPage') block; this block needs its own unmount.
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+  })
+
+  function folderDragHarness(options: {
+    destinationHeld?: string[]
+    sourceParentHeld?: string[]
+    sourceResourceHeld?: string[]
+    resolveParent?: string | null
+    resolveVersion?: number
+    moveResult?: () => Promise<{ resourceId: string; version: number }>
+    conflictOnce?: boolean
+  } = {}) {
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(
+      options.moveResult ??
+        (async () => ({ resourceId: 'folder-src', version: 5 }))
+    )
+    if (options.conflictOnce) {
+      let conflicted = false
+      moveResource.mockImplementation(async () => {
+        if (!conflicted) {
+          conflicted = true
+          throw new Error(
+            '409 Conflict: a resource with this name already exists httpStatus=409'
+          )
+        }
+        return { resourceId: 'folder-src', version: 5 }
+      })
+    }
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folder-1') {
+        return { held: options.sourceParentHeld ?? ['read', 'write', 'delete'] }
+      }
+      if (resourceId === 'folder-src') {
+        return { held: options.sourceResourceHeld ?? ['read', 'write'] }
+      }
+      return { held: options.destinationHeld ?? ['read', 'write'] }
+    })
+    const resolve = vi.fn(async () => ({
+      drive: 'main',
+      resourceId: 'folder-src',
+      parentResourceId: options.resolveParent ?? 'folder-1',
+      rid: 'foldersrc',
+      gfsUri: 'gfs://main/foldersrc',
+      name: 'Projects',
+      kind: 'directory',
+      pathCache: '/Product/Projects',
+      version: options.resolveVersion ?? 4,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances, resolve } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      crumbs: [
+        {
+          resourceId: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          name: 'Product',
+          kind: 'directory',
+          version: 1,
+          bytes: 0,
+        },
+      ],
+      items: [
+        {
+          resourceId: 'folder-src',
+          rid: 'folder-src',
+          gfsUri: 'gfs://main/folder-src',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Projects',
+          kind: 'directory',
+          path: '/Product/Projects',
+          version: 4,
+          bytes: 0,
+        },
+        {
+          resourceId: 'archive-1',
+          rid: 'archive-1',
+          gfsUri: 'gfs://main/archive-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Archive',
+          kind: 'directory',
+          path: '/Product/Archive',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+    return { pushToast, moveResource }
+  }
+
+  it('stops a folder drop at the one confirmation and commits on Move', async () => {
+    const { pushToast, moveResource } = folderDragHarness()
+    const sourceRow = screen.getByRole('button', { name: 'Open Projects' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Archive' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(destinationRow, { dataTransfer })
+    fireEvent.dragOver(destinationRow, { dataTransfer })
+    fireEvent.drop(destinationRow, { dataTransfer })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects to Archive' })
+    expect(
+      within(dialog).getByText(/Inherited access to this folder and its contents follows the new location/)
+    ).toBeTruthy()
+    expect(moveResource).not.toHaveBeenCalled()
+
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
+    })
+    await waitFor(() => {
+      expect(moveResource).toHaveBeenCalledWith('folder-src', 'archive-1', 4, undefined, 'folder-1')
+    })
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith('Moved Projects to Archive', 'success')
+    )
+    expect(pushToast).toHaveBeenCalledWith(
+      'Moving a folder changes who can access its contents — access now follows the new location.',
+      'info'
+    )
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('cancelling the folder confirmation sends nothing and never claims a move', async () => {
+    const { pushToast, moveResource } = folderDragHarness()
+    const sourceRow = screen.getByRole('button', { name: 'Open Projects' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Archive' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(destinationRow, { dataTransfer })
+    fireEvent.drop(destinationRow, { dataTransfer })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects to Archive' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(moveResource).not.toHaveBeenCalled()
+    expect(pushToast).not.toHaveBeenCalledWith(
+      expect.stringContaining('Moved'),
+      expect.anything()
+    )
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('a folder conflict without the numbered-name opt-in stops with alternatives', async () => {
+    const { pushToast, moveResource } = folderDragHarness({ conflictOnce: true })
+    const sourceRow = screen.getByRole('button', { name: 'Open Projects' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Archive' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(destinationRow, { dataTransfer })
+    fireEvent.drop(destinationRow, { dataTransfer })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects to Archive' })
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
+    })
+    await waitFor(() => {
+      expect(pushToast).toHaveBeenCalledWith(
+        expect.stringContaining('An item with this name already exists'),
+        'error'
+      )
+    })
+    expect(moveResource).toHaveBeenCalledTimes(1)
+  })
+
+  it('a file conflict resolves with a numbered whole-resource rename (CU parity)', async () => {
+    const pushToast = vi.fn()
+    let conflicted = false
+    const moveResource = vi.fn(async (_id: string, _dest: string, _v: number, newName?: string) => {
+      if (newName === undefined && !conflicted) {
+        conflicted = true
+        throw new Error(
+          '409 Conflict: a resource with this name already exists httpStatus=409'
+        )
+      }
+      return { resourceId: 'file-1', version: 6 }
+    })
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folder-1') return { held: ['read', 'write', 'delete'] }
+      return { held: ['read', 'write'] }
+    })
+    const resolve = vi.fn(async () => ({
+      drive: 'main',
+      resourceId: 'file-1',
+      parentResourceId: 'folder-1',
+      rid: 'file-1',
+      gfsUri: 'gfs://main/file-1',
+      name: 'notes.txt',
+      kind: 'file',
+      pathCache: '/Product/notes.txt',
+      version: 3,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances, resolve } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'notes.txt',
+          kind: 'file',
+          path: '/Product/notes.txt',
+          version: 3,
+          bytes: 12,
+        },
+        {
+          resourceId: 'archive-1',
+          rid: 'archive-1',
+          gfsUri: 'gfs://main/archive-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Archive',
+          kind: 'directory',
+          path: '/Product/Archive',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+
+    const sourceRow = screen.getByRole('button', { name: 'Open notes.txt' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Archive' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(destinationRow, { dataTransfer })
+    fireEvent.drop(destinationRow, { dataTransfer })
+
+    await waitFor(() => {
+      expect(pushToast).toHaveBeenCalledWith(
+        'Moved notes.txt to Archive as notes (1).txt',
+        'success'
+      )
+    })
+    expect(moveResource).toHaveBeenLastCalledWith(
+      'file-1',
+      'archive-1',
+      3,
+      'notes (1).txt',
+      'folder-1'
+    )
+  })
+
+  it('folder rows are draggable sources (title hint present)', () => {
+    folderDragHarness()
+    const folderRow = screen
+      .getByRole('button', { name: 'Open Projects' })
+      .closest('.da-grid__row') as HTMLElement
+    expect(folderRow.getAttribute('draggable')).toBe('true')
+    expect(folderRow.getAttribute('title')).toBe('Drag Projects into a folder to move it')
   })
 })

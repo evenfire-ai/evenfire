@@ -315,7 +315,11 @@ describe('dragPolicy: decideDragAuthority', () => {
     }
   })
 
-  it('evaluate source-write before source-delete (message order matches the UX matrix)', () => {
+  it('destination is evaluated first, then source-write before source-delete', () => {
+    assert.deepEqual(
+      decideDragAuthority({ sourceParentHeld: [], destinationHeld: [] }),
+      { kind: 'deny', reason: 'destination-write' }
+    )
     assert.deepEqual(
       decideDragAuthority({ sourceParentHeld: [], destinationHeld: ['write'] }),
       { kind: 'deny', reason: 'source-write' }

@@ -2082,7 +2082,7 @@ describe('useGfsBrowserController', () => {
       screen.getByRole('button', { name: 'move current' }).click()
     })
     await waitFor(() =>
-      expect(moveResource).toHaveBeenCalledWith(docsId, 'destination-1', 'main', 3)
+      expect(moveResource).toHaveBeenCalledWith(docsId, 'destination-1', 'main', 3, undefined)
     )
     // Navigation reconciles to the new location and consumes the new version.
     await waitFor(() =>

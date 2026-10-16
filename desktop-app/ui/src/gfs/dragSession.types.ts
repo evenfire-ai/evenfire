@@ -49,8 +49,9 @@ export interface GfsDropTargetFact {
   resourceId: string
   name: string
   kind: 'file' | 'directory'
-  /** Loaded ancestors of the target, nearest-first (observation only). */
-  ancestorIds: readonly string[]
+  /** Loaded ancestors of the target, nearest-first; trailing null = observed
+   * to the physical root (observation only). */
+  ancestorIds: readonly (string | null)[]
 }
 
 export type GfsDropVerdict =

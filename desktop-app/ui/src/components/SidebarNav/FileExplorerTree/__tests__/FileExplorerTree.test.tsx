@@ -726,3 +726,266 @@ describe('FileExplorerTree — download-path authority wiring (R1-H8)', () => {
     expect(pushToast).not.toHaveBeenCalledWith('401 Unauthorized', 'error')
   })
 })
+
+// ── drag-and-drop (rev-2 D1) ─────────────────────────────────────────────────
+
+import { GfsDragSessionProvider } from '@/gfs/dragSession'
+
+type DndProducers = Producers & {
+  affordances?: (resourceId: string, drive?: string) => Promise<unknown>
+  resolve?: (uri: string) => Promise<unknown>
+  moveResource?: (
+    resourceId: string,
+    destinationId: string,
+    drive?: string,
+    ifMatch?: number,
+    newName?: string
+  ) => Promise<unknown>
+}
+
+function installDndClerum(producers: DndProducers) {
+  Object.defineProperty(window, 'clerum', {
+    configurable: true,
+    value: {
+      gfs: {
+        listAccessible: producers.listAccessible ?? vi.fn(async () => listAccessiblePage([])),
+        listChildren: producers.listChildren ?? vi.fn(async () => listChildrenPage([])),
+        download:
+          producers.download ??
+          vi.fn(async () => downloadResult(resolvedFile('fallback', 'fallback.bin'))),
+        affordances: producers.affordances ?? vi.fn(async () => ({ held: ['read'] })),
+        resolve: producers.resolve ?? vi.fn(async () => { throw new Error('resolve not stubbed') }),
+        moveResource: producers.moveResource ?? vi.fn(async () => ({ resourceId: 'x', version: 2 })),
+      },
+    },
+  })
+}
+
+function dragTypes() {
+  return {
+    types: ['application/x-evenfire-gfs-resource'],
+    files: [],
+    effectAllowed: 'move',
+    dropEffect: 'none',
+    setData: vi.fn(),
+  }
+}
+
+function renderTreeWithSession(props: Partial<Parameters<typeof FileExplorerTree>[0]> = {}) {
+  const onOpenFolder = props.onOpenFolder ?? vi.fn()
+  const onOpenPreview = props.onOpenPreview ?? vi.fn()
+  const pushToast = props.pushToast ?? vi.fn()
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  render(
+    <QueryClientProvider client={queryClient}>
+      <GfsDragSessionProvider>
+        <FileExplorerTree
+          onOpenFolder={onOpenFolder}
+          onOpenPreview={onOpenPreview}
+          pushToast={pushToast}
+        />
+      </GfsDragSessionProvider>
+    </QueryClientProvider>
+  )
+  return { onOpenFolder, onOpenPreview, pushToast }
+}
+
+describe('FileExplorerTree — drag-and-drop moves', () => {
+  it('moves a dragged folder into an unrelated folder through the one confirmation', async () => {
+    // Two directly-shared folders under one unshared common parent 'grand':
+    // the drop must walk B's (bounded) ancestry, find the common anchor via
+    // the root, and admit the move on exact bits.
+    const moveResource = vi.fn(async () => ({ resourceId: 'foldera', version: 9 }))
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folderb') return { held: ['read', 'write'] }
+      return { held: ['read', 'write', 'delete'] }
+    })
+    const resolve = vi.fn(async (uri: string) => {
+      const id = uri.split('/').pop()
+      const parent = id === 'grand' ? null : 'grand'
+      const name = id === 'foldera' ? 'A' : id === 'folderb' ? 'B' : 'Grand'
+      const resourceId = id === 'grand' ? 'grand' : id
+      return {
+        drive: 'main',
+        resourceId,
+        parentResourceId: parent,
+        name,
+        kind: 'directory',
+        version: id === 'foldera' ? 4 : 1,
+      }
+    })
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('foldera', 'A', 'directory', { version: 4 }),
+          accessibleResource('folderb', 'B', 'directory'),
+        ])
+      ),
+      affordances,
+      resolve,
+      moveResource,
+    })
+    const { pushToast } = renderTreeWithSession()
+
+    const rowA = await screen.findByRole('button', { name: 'A' })
+    const rowB = await screen.findByRole('button', { name: 'B' })
+    const dataTransfer = dragTypes()
+
+    fireEvent.dragStart(rowA, { dataTransfer })
+    const bTreeItem = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    fireEvent.dragEnter(bTreeItem, { dataTransfer })
+
+    // Root-level folder sources resolve ancestry on DROP (bounded), not on
+    // hover; hover shows checking until cached bits decide structure-free
+    // facts. Drop performs the priority check.
+    fireEvent.dragOver(bTreeItem, { dataTransfer })
+    fireEvent.drop(bTreeItem, { dataTransfer })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move folder A to B' })
+    expect(
+      within(dialog).getByText(/Inherited access to this folder and its contents follows the new location/)
+    ).toBeTruthy()
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
+    })
+
+    await waitFor(() => {
+      expect(moveResource).toHaveBeenCalledWith('foldera', 'folderb', 'main', 4, undefined)
+    })
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith('Moved A to B', 'success')
+    )
+    // Folder-impact info accompanies the success toast (rev-2 §1/§8).
+    expect(pushToast).toHaveBeenCalledWith(
+      'Moving a folder changes who can access its contents — access now follows the new location.',
+      'info'
+    )
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('refuses a same-parent drop before any request or confirmation', async () => {
+    const moveResource = vi.fn()
+    const affordances = vi.fn(async () => ({ held: ['read', 'write', 'delete'] }))
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('parent-1', 'P', 'directory')])
+      ),
+      listChildren: vi.fn(async () =>
+        listChildrenPage([childView('folder-a', 'A', 'directory', { parentResourceId: 'parent-1' })])
+      ),
+      affordances,
+      moveResource,
+    })
+    const { pushToast } = renderTreeWithSession()
+
+    await screen.findByRole('button', { name: 'P' })
+    // Expand P (single-click, deferred) to reveal A.
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'P' }))
+    })
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'A' })).toBeTruthy()
+    })
+
+    const rowA = screen.getByRole('button', { name: 'A' })
+    const rowP = screen.getByRole('button', { name: 'P' })
+    const dataTransfer = dragTypes()
+    fireEvent.dragStart(rowA, { dataTransfer })
+    const pRow = rowP.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    fireEvent.dragOver(pRow, { dataTransfer })
+    fireEvent.drop(pRow, { dataTransfer })
+
+    await waitFor(() => {
+      expect(pushToast).toHaveBeenCalledWith('This item is already in this folder.', 'error')
+    })
+    expect(moveResource).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('refuses a drop into the source folder’s own loaded descendant', async () => {
+    const moveResource = vi.fn()
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('folder-a', 'A', 'directory')])
+      ),
+      listChildren: vi.fn(async () =>
+        listChildrenPage([childView('child-c', 'C', 'directory', { parentResourceId: 'folder-a' })])
+      ),
+      affordances: vi.fn(async () => ({ held: ['read', 'write', 'delete'] })),
+      moveResource,
+    })
+    const { pushToast } = renderTreeWithSession()
+
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: 'A' }))
+    })
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'C' })).toBeTruthy()
+    })
+
+    const rowA = screen.getByRole('button', { name: 'A' })
+    const rowC = screen.getByRole('button', { name: 'C' })
+    const dataTransfer = dragTypes()
+    fireEvent.dragStart(rowA, { dataTransfer })
+    const cRow = rowC.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    fireEvent.dragOver(cRow, { dataTransfer })
+    expect(cRow.getAttribute('data-drop-state')).toBe('denied')
+    fireEvent.drop(cRow, { dataTransfer })
+
+    await waitFor(() => {
+      expect(pushToast).toHaveBeenCalledWith(
+        'A folder cannot be moved into itself or one of its subfolders.',
+        'error'
+      )
+    })
+    expect(moveResource).not.toHaveBeenCalled()
+  })
+
+  it('dragstart cancels the deferred folder toggle (no expansion after a drag)', async () => {
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('folder-a', 'A', 'directory')])
+      ),
+    })
+    renderTreeWithSession()
+
+    const rowA = await screen.findByRole('button', { name: 'A' })
+    const dataTransfer = dragTypes()
+    fireEvent.click(rowA) // schedules the deferred toggle
+    fireEvent.dragStart(rowA, { dataTransfer }) // drag cancels the timer
+    fireEvent.dragEnd(rowA, { dataTransfer })
+    // Within the 250ms window the folder would have expanded without the
+    // cancellation; advance and assert it did not.
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 320))
+    })
+    const treeItem = rowA.closest('[role="treeitem"]')!
+    expect(treeItem.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('row Move action and Shift+F10 open the existing Move dialog', async () => {
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('folder-a', 'A', 'directory')])
+      ),
+    })
+    renderTreeWithSession()
+
+    await act(async () => {
+      fireEvent.click(
+        await screen.findByRole('button', { name: 'Move A to another folder' })
+      )
+    })
+    expect(await screen.findByRole('dialog', { name: 'Move folder A' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Close move dialog' }))
+
+    // Shift+F10 on the row label opens the same dialog.
+    await act(async () => {
+      fireEvent.keyDown(await screen.findByRole('button', { name: 'A' }), {
+        key: 'F10',
+        shiftKey: true,
+      })
+    })
+    expect(await screen.findByRole('dialog', { name: 'Move folder A' })).toBeTruthy()
+  })
+})

@@ -1978,6 +1978,65 @@ h3 {
   flex: 0 0 auto;
 }
 
+/* ── Drag-and-drop states (rev-2 D1) ──────────────────────────────────────
+   Existing tokens only; no motion. `checking` reads as neutral-active so the
+   row is visibly being adjudicated without implying a verdict; `allowed`
+   reuses the selected-row accent; `denied` keeps the error border tone. The
+   row-level attribute also styles Files-page rows which reuse the same
+   attribute names on their grid rows. */
+.da-file-explorer__row[data-drop-state='checking'] {
+  background: rgba(var(--accent-rgb), 0.06);
+}
+
+.da-file-explorer__row[data-drop-state='allowed'] {
+  background: rgba(var(--accent-rgb), 0.12);
+}
+
+.da-file-explorer__row[data-drop-state='allowed'] .da-file-explorer__label.ui-button {
+  background: transparent;
+}
+
+.da-file-explorer__row[data-drop-state='denied'] .da-file-explorer__label.ui-button,
+.da-file-explorer__row[data-drop-state='unavailable'] .da-file-explorer__label.ui-button {
+  color: var(--text-dim);
+}
+
+/* Files-page grid rows use the same attribute vocabulary. */
+.da-grid__row--compact[data-drop-state='checking'] {
+  background: rgba(var(--accent-rgb), 0.06);
+}
+
+.da-grid__row--compact[data-drop-state='allowed'] {
+  background: rgba(var(--accent-rgb), 0.12);
+}
+
+/* The per-row Move action is revealed on hover/focus-within so the compact
+   chrome is unchanged at rest (keyboard users reach it via Tab). */
+.da-file-explorer__move-action {
+  flex: 0 0 auto;
+  opacity: 0;
+}
+
+.da-file-explorer__row:hover .da-file-explorer__move-action,
+.da-file-explorer__row:focus-within .da-file-explorer__move-action {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .da-file-explorer__move-action {
+    transition: opacity var(--motion-fast, 120ms) ease;
+  }
+}
+
+/* Draggable tree labels and grid rows show the grab affordance. */
+.da-file-explorer__label.ui-button[draggable='true'] {
+  cursor: grab;
+}
+
+.da-grid__row--compact[draggable='true'] {
+  cursor: grab;
+}
+
 .da-file-explorer__icon {
   display: inline-flex;
   flex: 0 0 auto;

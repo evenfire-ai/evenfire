@@ -1,3 +1,6 @@
+import type { QueryClient } from '@tanstack/react-query'
+import { planMoveConvergence } from '@clerum/gfs-interaction-policy'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { parseHttpStatus } from './gfsGrantErrors'
 import { refreshPreviewTab } from './workspaceTabs'
 import type { WorkspaceTabsState } from './workspaceTabs.types'
@@ -38,4 +41,104 @@ export function markPluginGfsPreviewUnavailable<
 >(current: T | null, gfsUri: string): T | null {
   if (!current || current.gfsUri !== gfsUri || current.unavailable) return current
   return { ...current, unavailable: true, reloadVersion: current.reloadVersion + 1 }
+}
+
+// ── selective move convergence (rev-2 drag-and-drop §6) ──────────────────────
+
+interface ChildrenPageLike {
+  items?: Array<{ resourceId: string }>
+}
+
+type ChildrenCacheEntry = { pages?: ChildrenPageLike[] }
+
+export interface GfsMoveReceiptInput {
+  resourceId: string
+  oldParentId: string | null
+  newParentId: string | null
+}
+
+/**
+ * Collect the child→parent links currently present in cached children
+ * listings (an observation of what this session has loaded — never a claim
+ * that it covers the physical subtree). Children keys are
+ * ['desktop-app','gfs',scope,'children',drive,parentId].
+ */
+export function collectKnownChildParents(
+  queryClient: QueryClient,
+  scope: string,
+  drive: string
+): Map<string, string | null> {
+  const links = new Map<string, string | null>()
+  for (const query of queryClient.getQueryCache().getAll()) {
+    const key = query.queryKey
+    if (!Array.isArray(key) || key.length !== 6) continue
+    if (
+      key[0] === 'desktop-app' &&
+      key[1] === 'gfs' &&
+      key[2] === scope &&
+      key[3] === 'children' &&
+      key[4] === drive &&
+      typeof key[5] === 'string'
+    ) {
+      const parentId = key[5] as string
+      const data = query.state.data as ChildrenCacheEntry | undefined
+      const items = data?.pages?.flatMap(page => page.items ?? []) ?? []
+      for (const item of items) links.set(item.resourceId, parentId)
+    }
+  }
+  return links
+}
+
+/**
+ * Selective move convergence: apply the pure plan from
+ * gfs-interaction-policy to the SHARED query cache — refetch the old/new
+ * parent children listings and the accessible roots (active surfaces only),
+ * and mark the moved resource plus its KNOWN cached descendants stale
+ * (affordances, grants, shares, inherited access) without eager refetches.
+ * Local receipts and remote hints converge through the same cache; there is
+ * deliberately no echo matching (user hint frames carry no operation ids).
+ */
+export function applyMoveConvergence(
+  queryClient: QueryClient,
+  scope: string,
+  drive: string,
+  receipt: GfsMoveReceiptInput
+): void {
+  const known = { childParentByResourceId: collectKnownChildParents(queryClient, scope, drive) }
+  const plan = planMoveConvergence(receipt, known)
+
+  for (const parentId of plan.refetchChildIds) {
+    void queryClient.invalidateQueries({
+      exact: true,
+      queryKey: desktopQueryKeys.gfsChildren(scope, parentId, drive),
+    })
+  }
+  void queryClient.invalidateQueries({
+    exact: true,
+    queryKey: desktopQueryKeys.gfsAccessible(scope, drive),
+  })
+  for (const resourceId of plan.staleResourceIds) {
+    // Stale-on-entry: inactive permission caches re-read when next observed,
+    // not eagerly here (bounded feature traffic).
+    void queryClient.invalidateQueries({
+      exact: true,
+      queryKey: desktopQueryKeys.gfsAffordances(scope, resourceId, drive),
+      refetchType: 'none',
+    })
+    void queryClient.invalidateQueries({
+      exact: true,
+      queryKey: desktopQueryKeys.gfsGrants(scope, resourceId, drive),
+      refetchType: 'none',
+    })
+    void queryClient.invalidateQueries({
+      exact: true,
+      queryKey: desktopQueryKeys.gfsShares(scope, resourceId, drive),
+      refetchType: 'none',
+    })
+    void queryClient.invalidateQueries({
+      exact: true,
+      queryKey: desktopQueryKeys.gfsInheritedAccess(scope, resourceId, drive),
+      refetchType: 'none',
+    })
+  }
 }

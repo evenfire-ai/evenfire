@@ -42,8 +42,9 @@ export interface GfsDragStructureTargetFact {
 export interface GfsDragStructureInput {
   source: GfsDragStructureSourceFact
   target: GfsDragStructureTargetFact
-  /** Ancestors of the target from a currently loaded chain, nearest-first. */
-  targetAncestorIds?: readonly string[]
+  /** Ancestors of the target from a currently loaded chain, nearest-first; a
+   * trailing `null` marks a chain observed to the physical root. */
+  targetAncestorIds?: readonly (string | null)[]
   /** Currently known ancestors of the source (physical parent and above). */
   knownSourceAncestorIds?: ReadonlySet<string>
 }

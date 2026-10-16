@@ -17,6 +17,7 @@ import {
 } from '@lib/gfsGrantErrors'
 import type { GfsGrantListItem, GfsShareListItem } from '@/gfs/delegation.types'
 import { deriveGfsInheritedAccess } from '@/gfs/inheritedAccess'
+import { applyMoveConvergence } from '@lib/gfsEntityChangeState'
 import { desktopQueryKeys } from './queryKeys'
 
 /**
@@ -1109,25 +1110,53 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     [current?.gfsUri, openUri]
   )
 
-  // Move refreshes the old parent's children, the destination's children,
-  // and the accessible roots in one shot via refreshGfs. The moved resource's
-  // id does not change, but its version does, and when the OPEN folder (or
-  // file) itself moved, its breadcrumb trail is stale: the ancestors above it
+  // Move refreshes through the shared convergence planner (rev-2 §6): the
+  // receipt selectively invalidates the old/new parent children listings and
+  // accessible roots, and marks the moved resource plus its KNOWN cached
+  // descendants' permission data stale-on-entry. The moved resource's id does
+  // not change, but its version does, and when the OPEN folder (or file)
+  // itself moved, its breadcrumb trail is stale: the ancestors above it
   // belong to the old location. Consume the returned version immediately and
   // reconcile navigation to the new location (resolve + ancestor walk) so a
   // follow-up Rename/Delete/Move runs with the post-move version, not the
   // pre-move one (which would 409 on ifMatch).
   const moveResourceMutation = useMutation({
-    mutationFn: (input: { resourceId: string; destinationId: string; ifMatch?: number }) =>
-      window.clerum.gfs.moveResource(input.resourceId, input.destinationId, DRIVE, input.ifMatch),
+    mutationFn: (input: {
+      resourceId: string
+      destinationId: string
+      ifMatch?: number
+      newName?: string
+      oldParentId?: string | null
+    }) =>
+      window.clerum.gfs.moveResource(
+        input.resourceId,
+        input.destinationId,
+        DRIVE,
+        input.ifMatch,
+        input.newName
+      ),
     onSuccess: async (receipt, input) => {
       const movedCrumb = crumbs.find(crumb => crumb.resourceId === input.resourceId)
       setCrumbs(prev =>
         prev.map(crumb =>
-          crumb.resourceId === input.resourceId ? { ...crumb, version: receipt.version } : crumb
+          crumb.resourceId === input.resourceId
+            ? {
+                ...crumb,
+                version: receipt.version,
+                ...(input.newName !== undefined ? { name: input.newName } : {}),
+              }
+            : crumb
         )
       )
-      await refreshGfs()
+      if (sessionScope) {
+        applyMoveConvergence(queryClient, sessionScope, DRIVE, {
+          resourceId: input.resourceId,
+          oldParentId: input.oldParentId ?? null,
+          newParentId: input.destinationId,
+        })
+      } else {
+        await refreshGfs()
+      }
       if (movedCrumb) await openUri(movedCrumb.gfsUri)
     },
     onError: failClosedOnMutationError,
@@ -1360,8 +1389,14 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       replaceFileFromPathMutation.mutateAsync({ resourceId, filePath, ifMatch }),
     renameResource: (resourceId: string, name: string, ifMatch?: number) =>
       renameResourceMutation.mutateAsync({ resourceId, name, ifMatch }),
-    moveResource: (resourceId: string, destinationId: string, ifMatch?: number) =>
-      moveResourceMutation.mutateAsync({ resourceId, destinationId, ifMatch }),
+    moveResource: (
+      resourceId: string,
+      destinationId: string,
+      ifMatch?: number,
+      newName?: string,
+      oldParentId?: string | null
+    ) =>
+      moveResourceMutation.mutateAsync({ resourceId, destinationId, ifMatch, newName, oldParentId }),
     deleteResource: (resourceId: string, ifMatch?: number) =>
       deleteResourceMutation.mutateAsync({ resourceId, ifMatch }),
     mutating:

@@ -2,18 +2,33 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge, Button, IconButton, StatusBanner } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
-import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
+import {
+  FOLDER_HOVER_EXPAND_DELAY_MS,
+  GFS_DRIVE_MAIN,
+  GFS_RESOURCE_DRAG_TYPE,
+} from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import {
   type GfsBrowserChild,
+  type GfsCrumb,
   useGfsBrowserController,
 } from '@hooks/domain/useGfsBrowserController'
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import { resolveGfsPreview } from '@lib/gfsPreview'
 import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
 import { isGfsChildrenDenied, purgeDeniedGfsChildren } from '@/gfs/deniedChildren'
-import { IconChevronRight, IconContexts } from '../icons'
-import type { FileExplorerNodeProps, FileExplorerTreeProps } from './types'
+import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
+import type { GfsDragSource } from '@/gfs/dragSession'
+import { useGfsDragSession } from '@/gfs/dragSession'
+import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
+import { commitGfsMove, moveDenialMessage, toastMoveOutcome } from '@/gfs/moveCommit'
+import { GfsMoveDialog } from '@/gfs/moveDialog'
+import { IconChevronRight, IconContexts, IconMoreHorizontal } from '../icons'
+import type {
+  FileExplorerDropState,
+  FileExplorerNodeProps,
+  FileExplorerTreeProps,
+} from './types'
 
 // A folder's single-click (toggle) must not act before we know a double-click
 // (open its files tab) is not coming, so it is deferred by this window to let a
@@ -52,6 +67,8 @@ function sortTreeItems(items: GfsBrowserChild[]): GfsBrowserChild[] {
  * Gestures differ by kind: a file activates on single-click (open its preview,
  * or download when it is not previewable); a folder toggles expand/collapse on
  * single-click and opens its files tab on double-click. Enter activates either.
+ * Files AND folders are draggable (rev-2 D1); directory rows are move targets,
+ * and a hover-dwelling collapsed folder expands through its existing loader.
  */
 function FileExplorerNode({
   node,
@@ -60,10 +77,21 @@ function FileExplorerNode({
   accessActive,
   expandedIds,
   selectedId,
+  movingResourceId,
+  ancestorIds,
+  ancestorCrumbs,
+  dropState,
+  dropStatesByResourceId,
   onToggle,
   onActivateFolder,
   onActivateFile,
   onAuthorityFailure,
+  onNodeDragStart,
+  onNodeDragEnd,
+  onNodeDragOver,
+  onNodeDragLeave,
+  onNodeDrop,
+  onRequestMove,
 }: FileExplorerNodeProps) {
   const queryClient = useQueryClient()
   const isDirectory = node.kind === 'directory'
@@ -153,19 +181,123 @@ function FileExplorerNode({
 
   const handleRowKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLButtonElement>) => {
-      if (event.key !== 'Enter') return
-      // Stop the native button click Enter would otherwise fire (which would run
-      // the row's single-click handler — a folder's deferred toggle); Enter
-      // activates instead, matching the folder double-click / file single-click.
-      event.preventDefault()
-      clearClickTimer()
-      runActivate()
+      if (event.key === 'Enter') {
+        // Stop the native button click Enter would otherwise fire (which would run
+        // the row's single-click handler — a folder's deferred toggle); Enter
+        // activates instead, matching the folder double-click / file single-click.
+        event.preventDefault()
+        clearClickTimer()
+        runActivate()
+        return
+      }
+      // Shift+F10 opens the row's Move action contextually, matching the
+      // row-action discoverability of the Files page.
+      if (event.shiftKey && event.key === 'F10') {
+        event.preventDefault()
+        clearClickTimer()
+        onRequestMove(node, ancestorCrumbs)
+      }
     },
-    [clearClickTimer, runActivate]
+    [ancestorCrumbs, clearClickTimer, node, onRequestMove, runActivate]
+  )
+
+  const handleDragStart = useCallback(
+    (event: React.DragEvent<HTMLElement>) => {
+      // A drag must not fire the deferred folder toggle after release.
+      clearClickTimer()
+      onNodeDragStart(node, event, ancestorIds)
+    },
+    [ancestorIds, clearClickTimer, node, onNodeDragStart]
+  )
+
+  const isDirectoryRow = isDirectory
+  const canDrag = isUnreadable !== true && movingResourceId == null
+
+  const handleRowDragOver = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      // Nested rows live in the sibling `.da-file-explorer__group`, so a child
+      // drop cannot bubble through an ancestor ROW — verify the closest marked
+      // row still matches before adjudicating (rev-2 §4.1).
+      if (event.target instanceof Element) {
+        const closestRow = event.target.closest('.da-file-explorer__row')
+        if (closestRow !== null && closestRow !== event.currentTarget) return
+      }
+      onNodeDragOver(node, event, ancestorIds)
+    },
+    [ancestorIds, node, onNodeDragOver]
+  )
+
+  const handleRowDrop = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      if (event.target instanceof Element) {
+        const closestRow = event.target.closest('.da-file-explorer__row')
+        if (closestRow !== null && closestRow !== event.currentTarget) return
+      }
+      onNodeDrop(node, event, ancestorIds)
+    },
+    [ancestorIds, node, onNodeDrop]
+  )
+
+  // Hover a collapsed directory for FOLDER_HOVER_EXPAND_DELAY_MS to expand it
+  // through its existing loader (rev-2 §4.1). The timer is owned here so a
+  // leave/drop/drag-end in this row cancels exactly its own expansion.
+  const hoverExpandTimerRef = useRef<number | null>(null)
+  const clearHoverExpand = useCallback(() => {
+    if (hoverExpandTimerRef.current !== null) {
+      clearTimeout(hoverExpandTimerRef.current)
+      hoverExpandTimerRef.current = null
+    }
+  }, [])
+  useEffect(() => clearHoverExpand, [clearHoverExpand])
+
+  const handleRowDragEnterOrOver = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      handleRowDragOver(event)
+      if (
+        isDirectoryRow &&
+        !isExpanded &&
+        (dropState === undefined || dropState === 'allowed' || dropState === 'checking')
+      ) {
+        if (hoverExpandTimerRef.current === null) {
+          hoverExpandTimerRef.current = window.setTimeout(() => {
+            hoverExpandTimerRef.current = null
+            onToggle(node.resourceId)
+          }, FOLDER_HOVER_EXPAND_DELAY_MS)
+        }
+      }
+    },
+    [dropState, handleRowDragOver, isDirectoryRow, isExpanded, node.resourceId, onToggle]
+  )
+
+  const handleRowDragLeave = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      if (event.currentTarget.contains(event.relatedTarget as Node | null)) return
+      clearHoverExpand()
+      onNodeDragLeave(node, event)
+    },
+    [clearHoverExpand, node, onNodeDragLeave]
   )
 
   const loadingChildren = Boolean(isExpanded && childQuery.isFetching && !childQuery.data)
   const hasMoreChildren = Boolean(childQuery.hasNextPage)
+  const nextAncestorIds = useMemo(
+    () => [node.resourceId, ...ancestorIds],
+    [ancestorIds, node.resourceId]
+  )
+  const nextAncestorCrumbs = useMemo<GfsCrumb[]>(
+    () => [
+      ...ancestorCrumbs,
+      {
+        resourceId: node.resourceId,
+        gfsUri: node.gfsUri,
+        name: node.name,
+        kind: 'directory',
+        version: node.version,
+        bytes: node.bytes,
+      },
+    ],
+    [ancestorCrumbs, node]
+  )
 
   return (
     <div
@@ -175,7 +307,14 @@ function FileExplorerNode({
       className="da-file-explorer__item"
       role="treeitem"
     >
-      <div className="da-file-explorer__row">
+      <div
+        className={`da-file-explorer__row${dropState ? ` is-drop-${dropState}` : ''}`}
+        data-drop-state={isDirectory ? dropState : undefined}
+        onDragEnter={isDirectory ? handleRowDragEnterOrOver : undefined}
+        onDragOver={isDirectory ? handleRowDragEnterOrOver : undefined}
+        onDragLeave={isDirectory ? handleRowDragLeave : undefined}
+        onDrop={isDirectory ? handleRowDrop : undefined}
+      >
         {isDirectory ? (
           <IconButton
             aria-expanded={isExpanded}
@@ -197,9 +336,13 @@ function FileExplorerNode({
             isUnreadable ? ' da-file-explorer__label--no-access' : ''
           }`}
           color="neutral"
+          draggable={canDrag}
           onClick={handleRowClick}
           onDoubleClick={handleRowDoubleClick}
+          onDragStart={canDrag ? handleDragStart : undefined}
+          onDragEnd={canDrag ? onNodeDragEnd : undefined}
           onKeyDown={handleRowKeyDown}
+          title={canDrag ? `Drag ${label} into a folder to move it` : undefined}
           variant="text"
         >
           <span className="da-file-explorer__icon" aria-hidden="true">
@@ -214,6 +357,18 @@ function FileExplorerNode({
             </Badge>
           ) : null}
         </Button>
+        <IconButton
+          className="da-file-explorer__move-action"
+          label={`Move ${label} to another folder`}
+          onClick={() => {
+            clearClickTimer()
+            onRequestMove(node, ancestorCrumbs)
+          }}
+          size="sm"
+          variant="ghost"
+        >
+          <IconMoreHorizontal />
+        </IconButton>
       </div>
       {isExpanded ? (
         <div className="da-file-explorer__group" role="group">
@@ -226,13 +381,24 @@ function FileExplorerNode({
           {childItems.map(child => (
             <FileExplorerNode
               accessActive={accessActive}
+              ancestorCrumbs={nextAncestorCrumbs}
+              ancestorIds={nextAncestorIds}
+              dropState={dropStatesByResourceId[child.resourceId]}
+              dropStatesByResourceId={dropStatesByResourceId}
               expandedIds={expandedIds}
               key={child.resourceId}
               level={level + 1}
+              movingResourceId={movingResourceId}
               node={child}
               onActivateFile={onActivateFile}
               onActivateFolder={onActivateFolder}
               onAuthorityFailure={onAuthorityFailure}
+              onNodeDragEnd={onNodeDragEnd}
+              onNodeDragLeave={onNodeDragLeave}
+              onNodeDragOver={onNodeDragOver}
+              onNodeDragStart={onNodeDragStart}
+              onNodeDrop={onNodeDrop}
+              onRequestMove={onRequestMove}
               onToggle={onToggle}
               scope={scope}
               selectedId={selectedId}
@@ -267,6 +433,12 @@ function FileExplorerNode({
  * instance shares the Files page's TanStack cache by query key, so folders the
  * page already warmed render instantly and the discovery authority/fail-closed
  * boundary is reused.
+ *
+ * Drag-and-drop (rev-2 D1): files AND folders drag from the tree; directory
+ * rows are move targets adjudicated by the shared drag session + policy
+ * (cross-surface drags from/to the Files page share one active source); a
+ * folder drop stops at ONE confirmation; commits run through the same shared
+ * move dispatch as the Files page.
  */
 export function FileExplorerTree({
   onOpenFolder,
@@ -274,8 +446,31 @@ export function FileExplorerTree({
   pushToast,
 }: FileExplorerTreeProps) {
   const ctrl = useGfsBrowserController()
+  const dragSession = useGfsDragSession()
+  const adjudication = useGfsDragAdjudication({
+    scope: ctrl.sessionScope,
+    drive: GFS_DRIVE_MAIN,
+    resolve: (uri: string) => window.clerum.gfs.resolve(uri),
+  })
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set())
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [dropStatesByResourceId, setDropStatesByResourceId] = useState<
+    Record<string, FileExplorerDropState>
+  >({})
+  const [movingResourceId, setMovingResourceId] = useState<string | null>(null)
+  const movingResourceIdRef = useRef<string | null>(null)
+  const draggingSourceRef = useRef<GfsDragSource | null>(null)
+  const dragSessionEpochRef = useRef(0)
+  const [pendingFolderMove, setPendingFolderMove] = useState<{
+    source: GfsDragSource
+    destination: { resourceId: string; name: string }
+    allowNumberedRename: boolean
+    suggestedName?: string
+  } | null>(null)
+  const [moveDialogTarget, setMoveDialogTarget] = useState<{
+    node: GfsBrowserChild
+    initialCrumbs: GfsCrumb[]
+  } | null>(null)
 
   const roots = useMemo(() => sortTreeItems(ctrl.accessibleResources), [ctrl.accessibleResources])
 
@@ -287,6 +482,251 @@ export function FileExplorerTree({
       return next
     })
   }, [])
+
+  const clearDragState = useCallback(() => {
+    dragSessionEpochRef.current += 1
+    draggingSourceRef.current = null
+    dragSession?.endDrag()
+    adjudication.endDragSession()
+    setDropStatesByResourceId({})
+  }, [adjudication, dragSession])
+
+  const treeDragSourceFrom = useCallback(
+    (
+      node: GfsBrowserChild,
+      ancestorIds: readonly (string | null)[]
+    ): Omit<GfsDragSource, 'generation'> => {
+      // Nested rows observe their loaded parent (nearest ancestor); forest
+      // roots only know the parent the accessible payload carried — unknown is
+      // never an invented root fact.
+      const parentKnown = ancestorIds.length > 0 || node.parentResourceId != null
+      const parentResourceId =
+        ancestorIds.length > 0 ? (ancestorIds[0] ?? null) : (node.parentResourceId ?? null)
+      return {
+        resourceId: node.resourceId,
+        gfsUri: node.gfsUri,
+        drive: node.drive || GFS_DRIVE_MAIN,
+        kind: node.kind === 'directory' ? 'directory' : 'file',
+        name: node.name,
+        ...(Number.isSafeInteger(node.version) ? { version: node.version } : {}),
+        parentKnown,
+        parentResourceId,
+        knownAncestorIds: ancestorIds.filter((id): id is string => id !== null),
+        origin: 'sidebar',
+        scope: ctrl.sessionScope ?? 'anonymous',
+      }
+    },
+    [ctrl.sessionScope]
+  )
+
+  const handleNodeDragStart = useCallback(
+    (
+      node: GfsBrowserChild,
+      event: React.DragEvent<HTMLElement>,
+      ancestorIds: readonly (string | null)[]
+    ) => {
+      if (node.readable === false || movingResourceIdRef.current) {
+        event.preventDefault()
+        return
+      }
+      dragSessionEpochRef.current += 1
+      const source: GfsDragSource = {
+        ...treeDragSourceFrom(node, ancestorIds),
+        generation: dragSessionEpochRef.current,
+      }
+      const { generation: _generation, ...sourceForStore } = source
+      dragSession?.beginDrag(sourceForStore)
+      adjudication.beginDragSession()
+      event.dataTransfer.effectAllowed = 'move'
+      event.dataTransfer.setData(GFS_RESOURCE_DRAG_TYPE, node.resourceId)
+      event.dataTransfer.setData('text/plain', node.name)
+      draggingSourceRef.current = source
+    },
+    [adjudication, dragSession, treeDragSourceFrom]
+  )
+
+  const resolveActiveSource = useCallback((): GfsDragSource | null => {
+    const fromSession = dragSession?.activeSource()
+    if (
+      fromSession &&
+      dragSession?.matchesScope(ctrl.sessionScope ?? 'anonymous') &&
+      fromSession.drive === GFS_DRIVE_MAIN
+    ) {
+      return fromSession
+    }
+    return draggingSourceRef.current
+  }, [ctrl.sessionScope, dragSession])
+
+  const handleNodeDragOver = useCallback(
+    (
+      node: GfsBrowserChild,
+      event: React.DragEvent<HTMLElement>,
+      ancestorIds: readonly (string | null)[]
+    ) => {
+      if (!Array.from(event.dataTransfer.types || []).includes(GFS_RESOURCE_DRAG_TYPE)) return
+      const source = resolveActiveSource()
+      if (!source || node.kind !== 'directory' || source.resourceId === node.resourceId) return
+      event.preventDefault()
+      event.stopPropagation()
+      const verdict = adjudication.hoverVerdict(source, {
+        resourceId: node.resourceId,
+        name: node.name,
+        kind: node.kind,
+        ancestorIds,
+      })
+      setDropStatesByResourceId(previous =>
+        previous[node.resourceId] === verdict.state
+          ? previous
+          : { ...previous, [node.resourceId]: verdict.state }
+      )
+      event.dataTransfer.dropEffect = verdict.state === 'allowed' ? 'move' : 'none'
+      if (verdict.state === 'checking') {
+        adjudication.scheduleColdCheck(
+          { resourceId: node.resourceId, name: node.name, kind: node.kind, ancestorIds },
+          source.parentKnown ? source.parentResourceId : null,
+          () => {
+            setDropStatesByResourceId(previous => {
+              const fresh = adjudication.hoverVerdict(source, {
+                resourceId: node.resourceId,
+                name: node.name,
+                kind: node.kind,
+                ancestorIds,
+              })
+              return previous[node.resourceId] === fresh.state
+                ? previous
+                : { ...previous, [node.resourceId]: fresh.state }
+            })
+          }
+        )
+      }
+    },
+    [adjudication, resolveActiveSource]
+  )
+
+  const handleNodeDragLeave = useCallback(
+    (node: GfsBrowserChild, event: React.DragEvent<HTMLElement>) => {
+      if (!Array.from(event.dataTransfer.types || []).includes(GFS_RESOURCE_DRAG_TYPE)) return
+      event.preventDefault()
+      event.stopPropagation()
+      setDropStatesByResourceId(previous => {
+        if (!(node.resourceId in previous)) return previous
+        const next = { ...previous }
+        delete next[node.resourceId]
+        return next
+      })
+    },
+    []
+  )
+
+  const commitMove = useCallback(
+    async (
+      source: GfsDragSource,
+      destination: { resourceId: string; name: string },
+      allowNumberedRename: boolean
+    ) => {
+      movingResourceIdRef.current = source.resourceId
+      setMovingResourceId(source.resourceId)
+      try {
+        const outcome = await commitGfsMove(
+          {
+            resolveSource: async gfsUri => {
+              const resolved = await window.clerum.gfs.resolve(gfsUri)
+              return {
+                resourceId: resolved.resourceId,
+                gfsUri,
+                kind: resolved.kind === 'directory' ? 'directory' : 'file',
+                name: resolved.name,
+                version: resolved.version,
+                parentResourceId: resolved.parentResourceId,
+              }
+            },
+            moveResource: (resourceId, destinationId, ifMatch, newName) =>
+              ctrl.moveResource(
+                resourceId,
+                destinationId,
+                ifMatch,
+                newName,
+                source.parentKnown ? source.parentResourceId : null
+              ),
+            isSessionAuthorityFailure: error =>
+              ctrl.handleAuthorityFailure(
+                error instanceof Error ? error.message : String(error),
+                'operation'
+              ),
+          },
+          {
+            source: {
+              resourceId: source.resourceId,
+              gfsUri: source.gfsUri,
+              kind: source.kind,
+              name: source.name,
+            },
+            destination,
+            allowNumberedRename,
+          }
+        )
+        toastMoveOutcome(pushToast, outcome, source.name, destination.name, source.kind)
+        return outcome
+      } finally {
+        movingResourceIdRef.current = null
+        setMovingResourceId(null)
+      }
+    },
+    [ctrl, pushToast]
+  )
+
+  const handleNodeDrop = useCallback(
+    async (
+      node: GfsBrowserChild,
+      event: React.DragEvent<HTMLElement>,
+      ancestorIds: readonly (string | null)[]
+    ) => {
+      if (!Array.from(event.dataTransfer.types || []).includes(GFS_RESOURCE_DRAG_TYPE)) return
+      event.preventDefault()
+      event.stopPropagation()
+      setDropStatesByResourceId({})
+      const source = resolveActiveSource()
+      if (!source || node.kind !== 'directory' || movingResourceIdRef.current) return
+      const epoch = dragSessionEpochRef.current
+      try {
+        const decision = await adjudication.adjudicateDrop(source, {
+          resourceId: node.resourceId,
+          name: node.name,
+          kind: node.kind,
+          ancestorIds,
+        })
+        if (epoch !== dragSessionEpochRef.current) return
+        if (!decision.allowed) {
+          const message = moveDenialMessage(decision, node.name)
+          if (message) pushToast(message, 'error')
+          return
+        }
+        if (source.kind === 'directory') {
+          setPendingFolderMove({
+            source,
+            destination: { resourceId: node.resourceId, name: node.name },
+            allowNumberedRename: decision.allowNumberedRename,
+          })
+          return
+        }
+        await commitMove(
+          source,
+          { resourceId: node.resourceId, name: node.name },
+          decision.allowNumberedRename
+        )
+      } finally {
+        clearDragState()
+      }
+    },
+    [adjudication, clearDragState, commitMove, dragSessionEpochRef, pushToast, resolveActiveSource]
+  )
+
+  const handleRequestMove = useCallback(
+    (node: GfsBrowserChild, ancestorCrumbs: readonly GfsCrumb[]) => {
+      setMoveDialogTarget({ node, initialCrumbs: [...ancestorCrumbs] })
+    },
+    []
+  )
 
   const handleActivateFolder = useCallback(
     (node: GfsBrowserChild) => {
@@ -384,15 +824,25 @@ export function FileExplorerTree({
           {roots.map(node => (
             <FileExplorerNode
               accessActive={ctrl.accessState === 'active'}
+              ancestorCrumbs={[]}
+              ancestorIds={node.parentResourceId != null ? [node.parentResourceId] : []}
+              dropStatesByResourceId={dropStatesByResourceId}
               expandedIds={expandedIds}
               key={node.resourceId}
               level={1}
+              movingResourceId={movingResourceId}
               node={node}
               onActivateFile={handleActivateFile}
               onActivateFolder={handleActivateFolder}
               onAuthorityFailure={handleAuthorityFailure}
+              onNodeDragEnd={clearDragState}
+              onNodeDragLeave={handleNodeDragLeave}
+              onNodeDragOver={handleNodeDragOver}
+              onNodeDragStart={handleNodeDragStart}
+              onNodeDrop={handleNodeDrop}
+              onRequestMove={handleRequestMove}
               onToggle={handleToggle}
-              scope={ctrl.sessionScope}
+              scope={ctrl.sessionScope ?? 'anonymous'}
               selectedId={selectedId}
             />
           ))}
@@ -410,6 +860,82 @@ export function FileExplorerTree({
           ) : null}
         </div>
       )}
+
+      {pendingFolderMove ? (
+        <GfsMoveConfirmDialog
+          busy={movingResourceId === pendingFolderMove.source.resourceId}
+          request={{
+            sourceName: displayName(pendingFolderMove.source.name),
+            destinationName: displayName(pendingFolderMove.destination.name),
+            canRename: pendingFolderMove.allowNumberedRename,
+            ...(pendingFolderMove.suggestedName !== undefined
+              ? { suggestedName: pendingFolderMove.suggestedName }
+              : {}),
+          }}
+          onCancel={() => setPendingFolderMove(null)}
+          onConfirm={({ allowNumberedRename }) => {
+            const pending = pendingFolderMove
+            setPendingFolderMove(null)
+            if (pending) {
+              void commitMove(pending.source, pending.destination, allowNumberedRename)
+            }
+          }}
+        />
+      ) : null}
+
+      {moveDialogTarget ? (
+        <GfsMoveDialog
+          busy={ctrl.mutating}
+          initialCrumbs={moveDialogTarget.initialCrumbs}
+          onClose={() => setMoveDialogTarget(null)}
+          onMove={async (destinationId, destinationName) => {
+            const target = moveDialogTarget
+            const allowNumberedRename = await adjudication.probeSourceWrite(
+              target.node.resourceId
+            )
+            const source: GfsDragSource = {
+              resourceId: target.node.resourceId,
+              gfsUri: target.node.gfsUri,
+              drive: target.node.drive || GFS_DRIVE_MAIN,
+              kind: target.node.kind === 'directory' ? 'directory' : 'file',
+              name: target.node.name,
+              ...(Number.isSafeInteger(target.node.version)
+                ? { version: target.node.version }
+                : {}),
+              parentKnown: target.node.parentResourceId != null,
+              parentResourceId: target.node.parentResourceId ?? null,
+              knownAncestorIds: [],
+              origin: 'sidebar',
+              scope: ctrl.sessionScope ?? 'anonymous',
+              generation: dragSessionEpochRef.current,
+            }
+            const outcome = await commitMove(
+              source,
+              { resourceId: destinationId, name: destinationName },
+              allowNumberedRename
+            )
+            if (outcome.status === 'session-lost') {
+              setMoveDialogTarget(null)
+              return
+            }
+            if (outcome.status !== 'committed' && outcome.status !== 'no-op') {
+              throw new Error(outcome.message)
+            }
+            setMoveDialogTarget(null)
+          }}
+          onAuthorityFailure={message => {
+            handleAuthorityFailure(message)
+            return false
+          }}
+          sessionScope={ctrl.sessionScope}
+          target={{
+            resourceId: moveDialogTarget.node.resourceId,
+            name: moveDialogTarget.node.name,
+            kind: moveDialogTarget.node.kind === 'directory' ? 'directory' : 'file',
+            parentResourceId: moveDialogTarget.node.parentResourceId ?? null,
+          }}
+        />
+      ) : null}
     </div>
   )
 }

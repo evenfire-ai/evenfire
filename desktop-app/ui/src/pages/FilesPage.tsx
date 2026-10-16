@@ -32,7 +32,11 @@ import {
   IconShare,
   IconUpload,
 } from '@components/SidebarNav/icons'
-import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
+import {
+  FOLDER_HOVER_EXPAND_DELAY_MS,
+  GFS_DRIVE_MAIN,
+  GFS_RESOURCE_DRAG_TYPE,
+} from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import {
   GFS_UNAVAILABLE_LOCATION_MESSAGE,
@@ -51,6 +55,9 @@ import {
 } from '@lib/gfsGrantErrors'
 import { isGfsPreviewFile, resolveGfsPreview } from '@lib/gfsPreview'
 import { formatSharedFileSize } from '@lib/sharedFiles'
+import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
+import type { GfsDragSource, GfsDropRejection, GfsDropVerdict } from '@/gfs/dragSession'
+import { useGfsDragSession } from '@/gfs/dragSession'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
 import type { GfsAccessRole } from '@/gfs/GfsGrantList'
 import type { GfsMergedAccessRow } from '@/gfs/GfsGrantList/types'
@@ -65,6 +72,9 @@ import {
 import type { GfsInheritedAccessSource } from '@/gfs/delegation.types'
 import { GfsFilePicker } from '@/gfs/filePicker'
 import { planInheritedRoleChange } from '@/gfs/inheritedAccess'
+import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
+import { commitGfsMove, suggestNumberedMoveName } from '@/gfs/moveCommit'
+import type { MoveCommitOutcome } from '@/gfs/moveCommit'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
 import type { TeamDirectoryResult } from '../../../src/types'
 import type { FilesPageProps, GfsDriveResource, MyAgentEntry } from './FilesPage.types'
@@ -94,16 +104,12 @@ function hasDraggedFiles(event: ReactDragEvent<HTMLElement>): boolean {
   return Array.from(event.dataTransfer.types || []).includes('Files')
 }
 
-const GFS_RESOURCE_DRAG_TYPE = 'application/x-evenfire-gfs-resource'
-
-const INHERITED_DERIVATION_NOTICE =
-  'Inherited access could not be loaded. Members with access from a parent folder may be missing.'
-
 function hasDraggedGfsResource(event: ReactDragEvent<HTMLElement>): boolean {
   return Array.from(event.dataTransfer.types || []).includes(GFS_RESOURCE_DRAG_TYPE)
 }
 
-type FolderDropAccessResult = { allowed: boolean; error?: unknown }
+const INHERITED_DERIVATION_NOTICE =
+  'Inherited access could not be loaded. Members with access from a parent folder may be missing.'
 
 function delegationSubjectOptions(
   directory: TeamDirectoryResult | undefined
@@ -279,11 +285,19 @@ export function FilesPage({
   const [draggingResourceId, setDraggingResourceId] = useState<string | null>(null)
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null)
   const [movingResourceId, setMovingResourceId] = useState<string | null>(null)
+  const [dropStatesById, setDropStatesById] = useState<Record<string, GfsDropVerdict['state']>>({})
+  // Folder drops stop at ONE confirmation (impact + naming policy) before the
+  // shared dispatch; files commit directly on an allowed admission.
+  const [pendingFolderMove, setPendingFolderMove] = useState<{
+    source: GfsDragSource
+    destination: { resourceId: string; name: string }
+    allowNumberedRename: boolean
+    suggestedName?: string
+  } | null>(null)
   const draggingResourceRef = useRef<GfsDriveResource | null>(null)
+  const draggingSourceRef = useRef<GfsDragSource | null>(null)
   const movingResourceRef = useRef<string | null>(null)
   const hoveredFolderRef = useRef<string | null>(null)
-  const folderDropAccessRef = useRef(new Map<string, FolderDropAccessResult>())
-  const folderDropChecksRef = useRef(new Map<string, Promise<FolderDropAccessResult>>())
   const dragSessionRef = useRef(0)
   const manageReturnCrumbsRef = useRef<GfsCrumb[] | null>(null)
   const uploadInputRef = useRef<HTMLInputElement | null>(null)
@@ -311,6 +325,18 @@ export function FilesPage({
     resolving,
     refreshAffordances,
   } = ctrl
+
+  // Cross-surface drag coordinator (null outside the provider — e.g. unit
+  // tests — where the local per-surface ref drives same-surface drags).
+  const dragSession = useGfsDragSession()
+  const adjudication = useGfsDragAdjudication({
+    scope: sessionScope,
+    drive: GFS_DRIVE_MAIN,
+    resolve: useCallback(
+      (uri: string) => window.clerum.gfs.resolve(uri),
+      []
+    ),
+  })
 
   const lastRemoteGfsChangeEpochRef = useRef(remoteGfsChangeEpoch)
   useEffect(() => {
@@ -532,13 +558,17 @@ export function FilesPage({
   }
 
   useEffect(() => {
-    if (!manageOpen && !openLinkOpen && !moveTarget && !renameTarget) return
+    if (!manageOpen && !openLinkOpen && !moveTarget && !renameTarget && !pendingFolderMove) return
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
       // The parent-folder confirmation is the top-most dialog: Escape cancels
       // it alone and leaves the Share dialog open.
       if (parentUpdate) {
         setParentUpdate(null)
+        return
+      }
+      if (pendingFolderMove) {
+        setPendingFolderMove(null)
         return
       }
       closeManage()
@@ -548,7 +578,15 @@ export function FilesPage({
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [closeManage, manageOpen, openLinkOpen, moveTarget, parentUpdate, renameTarget])
+  }, [
+    closeManage,
+    manageOpen,
+    openLinkOpen,
+    moveTarget,
+    parentUpdate,
+    pendingFolderMove,
+    renameTarget,
+  ])
 
   // One atomic bulk grant for every selected subject — the server grants all or
   // none (a `subjects_invalid` rejects the whole request), so there is no
@@ -935,61 +973,95 @@ export function FilesPage({
   const clearResourceDrag = () => {
     dragSessionRef.current += 1
     draggingResourceRef.current = null
+    draggingSourceRef.current = null
     hoveredFolderRef.current = null
-    folderDropAccessRef.current.clear()
-    folderDropChecksRef.current.clear()
+    dragSession?.endDrag()
+    adjudication.endDragSession()
     setDraggingResourceId(null)
     setDragOverFolderId(null)
+    setDropStatesById({})
   }
 
-  const resolveFolderDropAccess = (folder: GfsDriveResource): Promise<FolderDropAccessResult> => {
-    const cached = folderDropAccessRef.current.get(folder.resourceId)
-    if (cached) return Promise.resolve(cached)
-    const pending = folderDropChecksRef.current.get(folder.resourceId)
-    if (pending) return pending
+  /** Ancestor chain of rows in the current listing, nearest-first: the open
+   * folder and its breadcrumb ancestors (an observation, never a guess). */
+  const rowTargetAncestorIds = (): (string | null)[] =>
+    currentIsFolder && current
+      ? [...crumbs].map(crumb => crumb.resourceId).reverse()
+      : []
 
-    const dragSession = dragSessionRef.current
-    const check = Promise.resolve()
-      .then(() => window.clerum.gfs.affordances(folder.resourceId, 'main'))
-      .then(result => ({ allowed: result.held.includes('write') }))
-      .catch((permissionError: unknown) => {
-        const failedClosed = failClosedOnAuthorizationError(permissionError)
-        return { allowed: false, error: failedClosed ? undefined : permissionError }
-      })
-      .then(result => {
-        if (dragSession === dragSessionRef.current) {
-          folderDropAccessRef.current.set(folder.resourceId, result)
-          if (result.allowed && hoveredFolderRef.current === folder.resourceId) {
-            setDragOverFolderId(folder.resourceId)
-          }
-        }
-        return result
-      })
-      .finally(() => {
-        if (dragSession === dragSessionRef.current) {
-          folderDropChecksRef.current.delete(folder.resourceId)
-        }
-      })
+  /** Build the cross-surface drag descriptor for a row of this surface. */
+  const dragSourceFrom = (resource: GfsDriveResource): Omit<GfsDragSource, 'generation'> => {
+    const parentKnown = currentIsFolder && current ? true : resource.parentResourceId != null
+    const parentResourceId =
+      currentIsFolder && current ? current.resourceId : (resource.parentResourceId ?? null)
+    return {
+      resourceId: resource.resourceId,
+      gfsUri: resource.gfsUri,
+      drive: resource.drive || GFS_DRIVE_MAIN,
+      kind: resource.kind === 'directory' ? 'directory' : 'file',
+      name: resource.name,
+      ...(Number.isSafeInteger(resource.version) ? { version: resource.version } : {}),
+      parentKnown,
+      parentResourceId,
+      knownAncestorIds: currentIsFolder && current
+        ? [...crumbs].map(crumb => crumb.resourceId).reverse()
+        : [],
+      origin: 'files',
+      scope: sessionScope ?? 'anonymous',
+    }
+  }
 
-    folderDropChecksRef.current.set(folder.resourceId, check)
-    return check
+  /** The active source is the session descriptor when its scope matches
+   * (cross-surface drags), else this surface's local ref. */
+  const resolveActiveSource = (): GfsDragSource | null => {
+    const fromSession = dragSession?.activeSource()
+    if (
+      fromSession &&
+      dragSession?.matchesScope(sessionScope ?? 'anonymous') &&
+      fromSession.drive === GFS_DRIVE_MAIN
+    ) {
+      return fromSession
+    }
+    return draggingSourceRef.current
+  }
+
+  const applyHoverVerdict = (folderId: string, verdict: GfsDropVerdict): GfsDropVerdict => {
+    if (verdict.state === 'allowed') {
+      setDragOverFolderId(folderId)
+    } else if (hoveredFolderRef.current === folderId) {
+      setDragOverFolderId(null)
+    }
+    setDropStatesById(previous =>
+      previous[folderId] === verdict.state
+        ? previous
+        : { ...previous, [folderId]: verdict.state }
+    )
+    return verdict
   }
 
   const handleResourceDragStart = (
     event: ReactDragEvent<HTMLElement>,
     resource: GfsDriveResource
   ) => {
-    if (resource.kind === 'directory' || movingResourceRef.current) {
+    // Files AND folders drag; unreadable rows, in-flight moves and any pending
+    // controller mutation stay frozen.
+    if (resource.readable === false || movingResourceRef.current || ctrl.mutating) {
       event.preventDefault()
       return
     }
     dragSessionRef.current += 1
-    folderDropAccessRef.current.clear()
-    folderDropChecksRef.current.clear()
+    const source: GfsDragSource = {
+      ...dragSourceFrom(resource),
+      generation: dragSessionRef.current,
+    }
+    const { generation: _generation, ...sourceForStore } = source
+    dragSession?.beginDrag(sourceForStore)
+    adjudication.beginDragSession()
     event.dataTransfer.effectAllowed = 'move'
     event.dataTransfer.setData(GFS_RESOURCE_DRAG_TYPE, resource.resourceId)
     event.dataTransfer.setData('text/plain', resource.name)
     draggingResourceRef.current = resource
+    draggingSourceRef.current = source
     setDraggingResourceId(resource.resourceId)
   }
 
@@ -999,22 +1071,33 @@ export function FilesPage({
 
   const handleFolderDragOver = (event: ReactDragEvent<HTMLElement>, folder: GfsDriveResource) => {
     if (!hasDraggedGfsResource(event)) return
-    const source = draggingResourceRef.current
+    const source = resolveActiveSource()
     if (!source || folder.kind !== 'directory' || source.resourceId === folder.resourceId) return
 
     event.preventDefault()
     event.stopPropagation()
     hoveredFolderRef.current = folder.resourceId
-    const access = folderDropAccessRef.current.get(folder.resourceId)
-    if (access?.allowed) {
-      event.dataTransfer.dropEffect = 'move'
-      setDragOverFolderId(folder.resourceId)
-      return
+    const target = {
+      resourceId: folder.resourceId,
+      name: folder.name,
+      kind: folder.kind,
+      ancestorIds: rowTargetAncestorIds(),
+    } as const
+    const verdict = applyHoverVerdict(
+      folder.resourceId,
+      adjudication.hoverVerdict(source, target)
+    )
+    event.dataTransfer.dropEffect = verdict.state === 'allowed' ? 'move' : 'none'
+    if (verdict.state === 'checking') {
+      adjudication.scheduleColdCheck(
+        target,
+        source.parentKnown ? source.parentResourceId : null,
+        () => {
+        if (hoveredFolderRef.current !== folder.resourceId) return
+        const fresh = adjudication.hoverVerdict(source, target)
+        applyHoverVerdict(folder.resourceId, fresh)
+      })
     }
-
-    event.dataTransfer.dropEffect = 'none'
-    setDragOverFolderId(null)
-    if (!access) void resolveFolderDropAccess(folder)
   }
 
   const handleFolderDragLeave = (event: ReactDragEvent<HTMLElement>) => {
@@ -1027,6 +1110,116 @@ export function FilesPage({
     }
   }
 
+  /** Cached destination names for the suggested numbered-name candidate. */
+  const cachedDestinationNames = (destinationId: string): Set<string> => {
+    const cached = queryClient.getQueryData<{ pages?: Array<{ items?: GfsDriveResource[] }> }>(
+      desktopQueryKeys.gfsChildren(sessionScope ?? 'anonymous', destinationId, GFS_DRIVE_MAIN)
+    )
+    return new Set((cached?.pages ?? []).flatMap(page => page.items?.map(item => item.name) ?? []))
+  }
+
+  const dropDenialMessage = (
+    rejection: GfsDropRejection,
+    destinationName: string
+  ): string | null => {
+    switch (rejection.reason) {
+      case 'destination-write':
+        return `You can’t move files to ${destinationName} because you don’t have write permission for this folder.`
+      case 'source-write':
+        return 'You cannot move this item out of its current folder without write access there.'
+      case 'source-delete':
+        return 'You do not have permission to remove this item from its current folder.'
+      case 'same-parent':
+        return 'This item is already in this folder.'
+      case 'self':
+      case 'descendant':
+        return 'A folder cannot be moved into itself or one of its subfolders.'
+      case 'root-source':
+        return 'The top-level folder cannot be moved.'
+      case 'cross-drive':
+        return 'Items can’t be moved between drives.'
+      case 'session-lost':
+        return null
+      default:
+        return rejection.message ?? 'This move is not available right now. Try again in a moment.'
+    }
+  }
+
+  /** Shared move dispatch (rev-2 §5) used by the drag path, the folder
+   * confirmation and the Move dialog — one service, one code path. */
+  const runMoveCommit = async (
+    source: GfsDragSource,
+    destination: { resourceId: string; name: string },
+    allowNumberedRename: boolean
+  ): Promise<MoveCommitOutcome> => {
+    movingResourceRef.current = source.resourceId
+    setMovingResourceId(source.resourceId)
+    try {
+      const outcome = await commitGfsMove(
+        {
+          resolveSource: async gfsUri => {
+            const resolved = await window.clerum.gfs.resolve(gfsUri)
+            return {
+              resourceId: resolved.resourceId,
+              gfsUri,
+              kind: resolved.kind === 'directory' ? 'directory' : 'file',
+              name: resolved.name,
+              version: resolved.version,
+              parentResourceId: resolved.parentResourceId,
+            }
+          },
+          moveResource: (resourceId, destinationId, ifMatch, newName) =>
+            ctrl.moveResource(
+              resourceId,
+              destinationId,
+              ifMatch,
+              newName,
+              source.parentKnown ? source.parentResourceId : null
+            ),
+          isSessionAuthorityFailure: error => failClosedOnAuthorizationError(error),
+        },
+        {
+          source: {
+            resourceId: source.resourceId,
+            gfsUri: source.gfsUri,
+            kind: source.kind,
+            name: source.name,
+          },
+          destination,
+          allowNumberedRename,
+          occupiedDestinationNames: cachedDestinationNames(destination.resourceId),
+        }
+      )
+      switch (outcome.status) {
+        case 'committed':
+          pushToast?.(
+            outcome.renamedTo
+              ? `Moved ${source.name} to ${destination.name} as ${outcome.renamedTo}`
+              : `Moved ${source.name} to ${destination.name}`,
+            'success'
+          )
+          if (source.kind === 'directory') {
+            pushToast?.(
+              'Moving a folder changes who can access its contents — access now follows the new location.',
+              'info'
+            )
+          }
+          break
+        case 'no-op':
+          pushToast?.(outcome.message, 'info')
+          break
+        case 'session-lost':
+          break
+        default:
+          pushToast?.(outcome.message, 'error')
+      }
+      return outcome
+    } finally {
+      movingResourceRef.current = null
+      setMovingResourceId(null)
+    }
+  }
+
   const handleFolderDrop = async (
     event: ReactDragEvent<HTMLElement>,
     destination: GfsDriveResource
@@ -1036,37 +1229,42 @@ export function FilesPage({
     event.stopPropagation()
     hoveredFolderRef.current = null
     setDragOverFolderId(null)
-    const source = draggingResourceRef.current
+    setDropStatesById({})
+    const source = resolveActiveSource()
     if (!source || destination.kind !== 'directory' || movingResourceRef.current) return
 
+    const dragGeneration = dragSessionRef.current
     try {
-      const access = await resolveFolderDropAccess(destination)
-      if (!access.allowed) {
-        // Through the read-plane presenter, like `handleDownload`. The
-        // affordances check is one of the methods `surfaceGfsGrantError`
-        // wraps, so its rejection carries the IPC wrapper and the vetted
-        // markers; raw, this toast read "… httpStatus=403". A 403 or 429 here
-        // is a policy verdict, not an authority failure, so it does not fail
-        // closed and this really is the path the user sees.
-        const message = access.error
-          ? describeGfsReadError(access.error).message
-          : `You can’t move files to ${destination.name} because you don’t have write permission for this folder.`
-        pushToast?.(message, 'error')
+      const decision = await adjudication.adjudicateDrop(source, {
+        resourceId: destination.resourceId,
+        name: destination.name,
+        kind: destination.kind,
+        ancestorIds: rowTargetAncestorIds(),
+      })
+      if (dragGeneration !== dragSessionRef.current) return
+      if (!decision.allowed) {
+        const message = dropDenialMessage(decision, destination.name)
+        if (message) pushToast?.(message, 'error')
         return
       }
-
-      movingResourceRef.current = source.resourceId
-      setMovingResourceId(source.resourceId)
-      try {
-        await ctrl.moveResource(source.resourceId, destination.resourceId, source.version)
-        pushToast?.(`Moved ${source.name} to ${destination.name}`, 'success')
-      } catch (moveError) {
-        if (failClosedOnAuthorizationError(moveError)) return
-        pushToast?.(moveError instanceof Error ? moveError.message : String(moveError), 'error')
-      } finally {
-        movingResourceRef.current = null
-        setMovingResourceId(null)
+      if (source.kind === 'directory') {
+        // The ONE folder confirmation (rev-2 §1): impact + naming policy in a
+        // single dialog; dispatch happens on explicit Move.
+        const occupied = cachedDestinationNames(destination.resourceId)
+        const suggested = suggestNumberedMoveName(source.name, occupied)
+        setPendingFolderMove({
+          source,
+          destination: { resourceId: destination.resourceId, name: destination.name },
+          allowNumberedRename: decision.allowNumberedRename,
+          ...(suggested !== undefined ? { suggestedName: suggested } : {}),
+        })
+        return
       }
+      await runMoveCommit(
+        source,
+        { resourceId: destination.resourceId, name: destination.name },
+        decision.allowNumberedRename
+      )
     } finally {
       clearResourceDrag()
     }
@@ -1222,24 +1420,42 @@ export function FilesPage({
     return Boolean(resource.permissions?.includes('manage_acl'))
   }
 
-  /** Move commits bubble their failure back to the dialog (in-place banner);
-   *  success toasts and closes it. An authority rejection instead fails the
-   *  session closed and closes the dialog — the revoked state takes over.
-   *  ifMatch pins the resource version. */
+  /** Move-dialog commit through the shared dispatch: success toasts and
+   *  closes; failure throws the presented verdict so the dialog shows it
+   *  in place; an authority rejection fails the session closed instead. */
   const handleMoveTarget = async (destinationId: string, destinationName: string) => {
     if (!moveTarget) return
     const target = moveTarget
-    try {
-      await ctrl.moveResource(target.resourceId, destinationId, target.version)
-    } catch (moveError) {
-      if (failClosedOnAuthorizationError(moveError)) {
-        setMoveTarget(null)
-        return
-      }
-      throw moveError
+    const source: GfsDragSource = {
+      resourceId: target.resourceId,
+      gfsUri: `gfs://${GFS_DRIVE_MAIN}/${target.resourceId.replace(/-/g, '').toLowerCase()}`,
+      drive: GFS_DRIVE_MAIN,
+      kind: target.kind,
+      name: target.name,
+      ...(Number.isSafeInteger(target.version) ? { version: target.version } : {}),
+      parentKnown: target.parentResourceId != null,
+      parentResourceId: target.parentResourceId ?? null,
+      knownAncestorIds: [],
+      origin: 'files',
+      scope: sessionScope ?? 'anonymous',
+      generation: dragSessionRef.current,
+    }
+    // Files and explicit dialog moves may use numbered names when the source
+    // resource is writable (rev-2 §5).
+    const allowNumberedRename = await adjudication.probeSourceWrite(target.resourceId)
+    const outcome = await runMoveCommit(
+      source,
+      { resourceId: destinationId, name: destinationName },
+      allowNumberedRename
+    )
+    if (outcome.status === 'session-lost') {
+      setMoveTarget(null)
+      return
+    }
+    if (outcome.status !== 'committed' && outcome.status !== 'no-op') {
+      throw new Error(outcome.message)
     }
     setMoveTarget(null)
-    pushToast?.(`Moved ${target.name} to ${destinationName}`, 'success')
   }
 
   const requestMoveCurrent = () => {
@@ -1703,24 +1919,26 @@ export function FilesPage({
                   const isDragging =
                     draggingResourceId === resource.resourceId ||
                     movingResourceId === resource.resourceId
-                  const isDropTarget = dragOverFolderId === resource.resourceId
-                  const canDragResource =
-                    resource.kind === 'file' &&
-                    resource.readable !== false &&
-                    movingResourceId === null &&
-                    !ctrl.mutating
-                  return (
-                    <div
-                      className="da-grid__row da-grid__row--clickable da-grid__row--compact"
-                      key={resource.resourceId}
-                      draggable={canDragResource}
-                      title={
-                        canDragResource
-                          ? `Drag ${resource.name} into a folder to move it`
-                          : undefined
-                      }
-                      data-dragging={isDragging ? 'true' : undefined}
-                      data-drop-target={isDropTarget ? 'true' : undefined}
+                   const isDropTarget = dragOverFolderId === resource.resourceId
+                   const dropState =
+                     resource.kind === 'directory' ? dropStatesById[resource.resourceId] : undefined
+                   const canDragResource =
+                     resource.readable !== false &&
+                     movingResourceId === null &&
+                     !ctrl.mutating
+                   return (
+                     <div
+                       className="da-grid__row da-grid__row--clickable da-grid__row--compact"
+                       key={resource.resourceId}
+                       draggable={canDragResource}
+                       title={
+                         canDragResource
+                           ? `Drag ${resource.name} into a folder to move it`
+                           : undefined
+                       }
+                       data-dragging={isDragging ? 'true' : undefined}
+                       data-drop-target={isDropTarget ? 'true' : undefined}
+                       data-drop-state={dropState}
                       role="button"
                       tabIndex={0}
                       aria-label={
@@ -2223,6 +2441,28 @@ export function FilesPage({
           onAuthorityFailure={message => ctrl.handleAuthorityFailure(message, 'operation')}
           sessionScope={sessionScope}
           target={moveTarget}
+        />
+      ) : null}
+
+      {pendingFolderMove ? (
+        <GfsMoveConfirmDialog
+          busy={movingResourceId === pendingFolderMove.source.resourceId}
+          request={{
+            sourceName: pendingFolderMove.source.name,
+            destinationName: pendingFolderMove.destination.name,
+            canRename: pendingFolderMove.allowNumberedRename,
+            ...(pendingFolderMove.suggestedName !== undefined
+              ? { suggestedName: pendingFolderMove.suggestedName }
+              : {}),
+          }}
+          onCancel={() => setPendingFolderMove(null)}
+          onConfirm={({ allowNumberedRename }) => {
+            const pending = pendingFolderMove
+            setPendingFolderMove(null)
+            if (pending) {
+              void runMoveCommit(pending.source, pending.destination, allowNumberedRename)
+            }
+          }}
         />
       ) : null}
     </section>

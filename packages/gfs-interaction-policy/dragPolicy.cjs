@@ -148,9 +148,11 @@ function decideDragAuthority(input) {
   const sourceBits = sourceParentHeld instanceof Set ? sourceParentHeld : new Set(sourceParentHeld)
   const destinationBits =
     destinationHeld instanceof Set ? destinationHeld : new Set(destinationHeld)
+  // Destination first (the surface the user is acting on), then the two
+  // independent source-parent bits in UX-matrix order.
+  if (!destinationBits.has('write')) return { kind: 'deny', reason: 'destination-write' }
   if (!sourceBits.has('write')) return { kind: 'deny', reason: 'source-write' }
   if (!sourceBits.has('delete')) return { kind: 'deny', reason: 'source-delete' }
-  if (!destinationBits.has('write')) return { kind: 'deny', reason: 'destination-write' }
   return { kind: 'observed-allowed', checkedAt: input.checkedAt ?? 0 }
 }
 

@@ -4,6 +4,8 @@ import { useAuthContext } from '@contexts/AuthContext'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsDragSessionApi, GfsDragSource } from './dragSession.types'
 
+type GfsAccessState = 'active' | 'revoked'
+
 /**
  * Per-session drag coordinator (rev-2 §4): exactly one active in-window
  * source, held in refs (dragover never re-renders the tree). The store is
@@ -37,7 +39,7 @@ export class GfsDragSessionStore implements GfsDragSessionApi {
     return this.active !== null && scope !== null && this.boundScope === scope
   }
 
-  invalidate(): void {
+  invalidate(_reason?: 'authority' | 'scope-change'): void {
     this.active = null
     // Bump so in-flight callbacks captured against an older generation are
     // discarded by their owners (`source.generation !== activeSource()`).
@@ -48,6 +50,13 @@ export class GfsDragSessionStore implements GfsDragSessionApi {
     return this.generation
   }
 }
+
+export type {
+  GfsDragSource,
+  GfsDropDecision,
+  GfsDropRejection,
+  GfsDropVerdict,
+} from './dragSession.types'
 
 const GfsDragSessionContext = createContext<GfsDragSessionApi | null>(null)
 
@@ -80,13 +89,13 @@ export function GfsDragSessionProvider({ children }: { children: React.ReactNode
   // a revocation, and 'active' is the safe default while nothing wrote yet).
   const accessStateQuery = useQuery({
     queryKey: desktopQueryKeys.gfsAccessState(scope ?? 'anonymous'),
-    queryFn: () => 'active' as const,
+    queryFn: (): GfsAccessState => 'active',
     enabled: false,
-    initialData: 'active' as const,
+    initialData: 'active' as GfsAccessState,
     gcTime: Infinity,
     staleTime: Infinity,
   })
-  const accessState = accessStateQuery.data ?? 'active'
+  const accessState: GfsAccessState = accessStateQuery.data ?? 'active'
 
   useEffect(() => {
     if (scope === null || accessState === 'revoked') store.invalidate('authority')
@@ -98,6 +107,9 @@ export function GfsDragSessionProvider({ children }: { children: React.ReactNode
     () => ({
       beginDrag: source => {
         if (scope === null || accessState !== 'active') return false
+        // A drag started under another env/user/team never crosses into this
+        // session (foreign/other-window drags stay inert).
+        if (source.scope !== scope) return false
         return store.beginDrag(source)
       },
       endDrag: () => store.endDrag(),

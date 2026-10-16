@@ -9,6 +9,7 @@ import {
   NotificationsContext,
   WorkspaceActionsProvider,
 } from '@contexts/index'
+import { GfsDragSessionProvider } from '@/gfs/dragSession'
 import { AppHeader } from '@components/AppHeader'
 import { BootSplash } from '@components/BootSplash'
 import { ChatDrawer } from '@components/ChatDrawer'
@@ -2812,6 +2813,7 @@ export function App() {
                     >
                       <McpRuntimeProvider value={mcpRuntimeValue}>
                         <DesktopStateProvider value={desktopStateValue}>
+                          <GfsDragSessionProvider>
                           <main className="app-shell">
                             <SidebarNav
                               navItem={vm.navItem}
@@ -3076,6 +3078,7 @@ export function App() {
                               onClose={closePluginGfsPreview}
                             />
                           ) : null}
+                          </GfsDragSessionProvider>
                         </DesktopStateProvider>
                       </McpRuntimeProvider>
                     </AgentChatProviders>
