@@ -640,6 +640,20 @@ export function createExternalGfsRouter(gateway?: Pick<K8sGateway, 'getResourceE
     })
   )
 
+  // Only the token-mint route currently carries a selected filesystem action
+  // through delegation verification and into the signed GFSC token. Do not let
+  // V2 sessions use other mediated routes that mint unbound legacy child tokens
+  // or mutate grants/shares directly. This includes the capabilities relay,
+  // which currently mints an unbound GFS write token even though GFSC only
+  // returns protocol metadata. V1 remains on its existing path.
+  router.use('/external/gfs', (req: ExternalAuthedRequest, res, next) => {
+    if (req.externalSessionAuthority?.contract !== 'v2') {
+      next()
+      return
+    }
+    res.status(403).json({ error: 'action_delegation_required' })
+  })
+
   // Indexed upload-v2 relay. Part PUTs stay a Node stream all the way from
   // external-rest-api to the writer GFSC; lifecycle requests use the same
   // writer-scoped token and never fall back to the legacy JSON/base64 path.

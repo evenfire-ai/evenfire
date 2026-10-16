@@ -342,7 +342,7 @@ describeRealPostgres('external GFS session generation on real PostgreSQL', () =>
     return call
   }
 
-  async function issueSelectedGfsReadDelegation(resourceId: string) {
+  async function issueSelectedGfsReadDelegation(resourceId: string, issuedAtSeconds?: number) {
     const authentication = await authenticateExternalUserSession(v2Token, {
       purpose: 'protected',
     })
@@ -412,6 +412,7 @@ describeRealPostgres('external GFS session generation on real PostgreSQL', () =>
         behaviorBindingHash: result.context.behaviorBindingHash,
         pathKind: result.context.pathKind,
         effectiveTeamId: result.context.effectiveTeamId,
+        ...(issuedAtSeconds === undefined ? {} : { issuedAtSeconds }),
       }),
       context: result.context,
     }
@@ -543,6 +544,44 @@ describeRealPostgres('external GFS session generation on real PostgreSQL', () =>
     expect(mismatched.status).toBe(403)
   })
 
+  it.each([
+    ['omitted', undefined],
+    ['forged', 'forged-action-delegation'],
+  ] as const)(
+    'rejects an %s V2 delegation before issuing a GFS token',
+    async (_label, delegation) => {
+      const response = await mintGfsToken(v2Token, delegation).send({
+        drive: 'main',
+        scopes: ['gfs.read'],
+        operationId: 'gfs.read',
+        resourceId: directResourceId,
+        target: { drive: 'main', resourceId: directResourceId },
+      })
+
+      expect(response.status).toBe(400)
+      expect(response.body).toEqual({ error: 'invalid_action_delegation' })
+      expect(response.body.token).toBeUndefined()
+    }
+  )
+
+  it('rejects an expired signed delegation before issuing a GFS token', async () => {
+    const stale = await issueSelectedGfsReadDelegation(
+      directResourceId,
+      Math.floor(Date.now() / 1000) - 3600
+    )
+    const response = await mintGfsToken(v2Token, stale.token).send({
+      drive: 'main',
+      scopes: ['gfs.read'],
+      operationId: 'gfs.read',
+      resourceId: directResourceId,
+      target: { drive: 'main', resourceId: directResourceId },
+    })
+
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({ error: 'invalid_action_delegation' })
+    expect(response.body.token).toBeUndefined()
+  })
+
   it('does not use a revoked V2 session as a legacy fallback', async () => {
     const issued = await transaction(db =>
       createUserSession(
@@ -561,5 +600,37 @@ describeRealPostgres('external GFS session generation on real PostgreSQL', () =>
     expect(result.status).toBe(401)
     const mintAfterRevocation = await mintGfsToken(issued.token)
     expect(mintAfterRevocation.status).toBe(401)
+  })
+
+  it('blocks a previously minted V2 GFS token after its selected permission is revoked', async () => {
+    const delegation = await issueSelectedGfsReadDelegation(directResourceId)
+    const minted = await mintGfsToken(v2Token, delegation.token).send({
+      drive: 'main',
+      scopes: ['gfs.read'],
+      operationId: 'gfs.read',
+      resourceId: directResourceId,
+      target: { drive: 'main', resourceId: directResourceId },
+    })
+    expect(minted.status).toBe(200)
+
+    await controlPool!.query(
+      `DELETE FROM gfs_grants
+        WHERE drive = 'main' AND resource_id = $1 AND subject_type = 'user' AND subject_id = $2`,
+      [directResourceId, userId]
+    )
+    try {
+      const consumed = await fetch(
+        `http://127.0.0.1:${gfscPort}/v1/resolve?uri=${encodeURIComponent(`gfs://main/${directResourceId}`)}`,
+        { headers: { authorization: `Bearer ${minted.body.token}` } }
+      )
+      expect(consumed.status).toBe(403)
+      expect(await consumed.text()).not.toContain(directResourceId)
+    } finally {
+      await controlPool!.query(
+        `INSERT INTO gfs_grants (drive, resource_id, subject_type, subject_id, permissions)
+         VALUES ('main', $1, 'user', $2, ARRAY['read']::text[])`,
+        [directResourceId, userId]
+      )
+    }
   })
 })

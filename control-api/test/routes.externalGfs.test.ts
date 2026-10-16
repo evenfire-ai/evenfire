@@ -2471,6 +2471,43 @@ describe('GET /external/gfs/resources/:id/affordances', () => {
 })
 
 describe('user resource mutations via gfsc proxy', () => {
+  it.each([
+    ['resource read without delegation', 'get', `/external/gfs/proxy/${R}`, undefined],
+    ['resource read with forged delegation', 'get', `/external/gfs/proxy/${R}`, 'forged-token'],
+    ['resource write', 'post', `/external/gfs/resources/${R}/children`, undefined],
+    ['resource delete', 'delete', `/external/gfs/resources/${R}`, undefined],
+    ['upload', 'post', '/external/gfs/uploads', undefined],
+    // This metadata relay currently mints an unbound GFS write token too, so
+    // V2 capability discovery stays disabled until it has an action-bound path.
+    ['upload capabilities', 'get', '/external/gfs/capabilities', undefined],
+    ['grant mutation', 'put', '/external/gfs/grants', undefined],
+    ['share mutation', 'post', '/external/gfs/shares', undefined],
+  ] as const)(
+    'rejects V2 %s mediation without minting a legacy child token or producing effects',
+    async (_label, method, path, delegation) => {
+      v2Auth()
+      const fetchMock = vi.fn(
+        async () => new Response('legacy child reached GFSC', { status: 200 })
+      )
+      vi.stubGlobal('fetch', fetchMock)
+      const app = await buildApp()
+      const call = request(app)[method](path).set('x-user-session-token', 'v2-session')
+      if (delegation) call.set('x-evenfire-action-delegation', delegation)
+      call.send({ name: 'child', kind: 'directory', permissions: ['read'] })
+
+      const response = await call
+
+      expect(response.status).toBe(403)
+      expect(response.body).toEqual({ error: 'action_delegation_required' })
+      expect(mockSignCurrentExternalGfsUserToken).not.toHaveBeenCalled()
+      expect(mockSignGfsToken).not.toHaveBeenCalled()
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(
+        mockQuery.mock.calls.some(call => /INSERT INTO gfs_(?:grants|shares)/.test(String(call[0])))
+      ).toBe(false)
+    }
+  )
+
   it('rejects non-session tokens on external mutation routes before minting a GFS token', async () => {
     mockVerifyExternalSessionToken.mockResolvedValue({
       status: 'invalid',
