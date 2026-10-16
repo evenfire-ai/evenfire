@@ -300,7 +300,7 @@ export function GfsResourceMenu({
       ),
       onManage ? null : menuAction('copy-link', 'Copy link', <IconCopy />, onCopyLink),
       menuAction('open-folder', 'Open folder', <IconContexts />, onOpen),
-      menuAction('open-route', 'Open route', <IconOpenRoute />, onOpenGfsLink),
+      menuAction('open-route', 'Open from ID', <IconOpenRoute />, onOpenGfsLink),
       menuAction('preview', 'Preview', <IconEye />, onPreview),
     ].filter(isMenuAction),
     [

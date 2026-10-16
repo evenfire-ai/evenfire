@@ -878,17 +878,16 @@ export function FilesPage({
     }
   }
 
-  const handleCopyRoute = async (uri: string) => {
+  const handleCopyRoute = async (uri: string, kind: GfsDriveResource['kind']) => {
+    const resourceType = kind === 'directory' ? 'folder' : 'file'
+    const resourceTypeTitle = kind === 'directory' ? 'Folder' : 'File'
     try {
       await navigator.clipboard.writeText(uri)
-      pushToast?.('EvenDrive route copied', 'success')
+      pushToast?.(`${resourceTypeTitle} ID copied`, 'success')
     } catch (clipboardError) {
-      pushToast?.(
-        clipboardError instanceof Error
-          ? clipboardError.message
-          : 'Could not copy the EvenDrive route',
-        'error'
-      )
+      const message =
+        clipboardError instanceof Error ? clipboardError.message : 'clipboard is unavailable'
+      pushToast?.(`Could not copy the ${resourceType} ID: ${message}`, 'error')
     }
   }
 
@@ -1638,7 +1637,7 @@ export function FilesPage({
         handlers: {
           refresh: () => void handleRefreshCurrent(),
           'copy-link': () => void handleCopyLink(current.gfsUri),
-          'copy-route': () => void handleCopyRoute(current.gfsUri),
+          'copy-route': () => void handleCopyRoute(current.gfsUri, current.kind),
           'open-route': () => setOpenLinkOpen(true),
           rename: () => openRenameTarget(current),
           move: () => setMoveTarget(current),
@@ -1714,7 +1713,7 @@ export function FilesPage({
               ? () => void handleRefreshFolderResource(resource)
               : undefined,
           'copy-link': () => void handleCopyLink(resource.gfsUri),
-          'copy-route': () => void handleCopyRoute(resource.gfsUri),
+          'copy-route': () => void handleCopyRoute(resource.gfsUri, resource.kind),
           'open-route': () => setOpenLinkOpen(true),
           'open-folder': isDirectory ? () => openResource(resource) : undefined,
           'new-folder': canWrite
@@ -1817,7 +1816,7 @@ export function FilesPage({
               </nav>
               {!current ? (
                 <IconButton
-                  label="Open route"
+                  label="Open from ID"
                   onClick={() => setOpenLinkOpen(true)}
                   size="sm"
                   variant="ghost"
@@ -2205,13 +2204,13 @@ export function FilesPage({
               </span>
               <span className="da-gfs-link-dialog__heading">
                 <span className="da-gfs-eyebrow">Direct access</span>
-                <h3 id="gfs-link-dialog-title">Open route</h3>
+                <h3 id="gfs-link-dialog-title">Open from ID</h3>
                 <span className="muted">
-                  Paste a canonical EvenDrive route to open the shared resource.
+                  Paste a canonical file or folder ID to open the shared resource.
                 </span>
               </span>
               <IconButton
-                label="Close EvenDrive link dialog"
+                label="Close EvenDrive ID dialog"
                 onClick={() => setOpenLinkOpen(false)}
                 size="sm"
                 variant="ghost"

@@ -113,14 +113,14 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
     },
     {
       id: 'copy-route',
-      label: 'Copy route',
+      label: options.kind === 'directory' ? 'Copy folder ID' : 'Copy file ID',
       icon: <IconRoute />,
       menu: true,
       eligible: Boolean(options.handlers['copy-route']),
     },
     {
       id: 'open-route',
-      label: 'Open route',
+      label: options.kind === 'directory' ? 'Open folder from ID' : 'Open file from ID',
       icon: <IconOpenRoute />,
       menu: true,
       eligible: Boolean(options.handlers['open-route']),

@@ -845,12 +845,12 @@ describe('FilesPage', () => {
     await waitFor(() => expect(refreshCurrentLocation).toHaveBeenCalledOnce())
     await chooseResourceAction(folderName, 'Copy link')
     await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(gfsUri))
-    await chooseResourceAction(folderName, 'Copy route')
+    await chooseResourceAction(folderName, 'Copy folder ID')
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(gfsUri))
 
-    await chooseResourceAction(folderName, 'Open route')
-    expect(screen.getByRole('dialog', { name: 'Open route' })).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Close EvenDrive link dialog' }))
+    await chooseResourceAction(folderName, 'Open folder from ID')
+    expect(screen.getByRole('dialog', { name: 'Open from ID' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Close EvenDrive ID dialog' }))
 
     await chooseResourceAction(folderName, 'New folder')
     const newFolderDialog = screen.getByRole('dialog', { name: 'New folder' })
@@ -1623,7 +1623,7 @@ describe('FilesPage', () => {
     await waitFor(() => expect(restoreCrumbs).toHaveBeenCalledWith([]))
     expect(screen.getByRole('button', { name: 'report.txt' })).toBeTruthy()
     expect(screen.queryByText(/Preview this file again/)).toBeNull()
-    expect(screen.getByRole('button', { name: 'Open route' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Open from ID' })).toBeTruthy()
   })
 
   it('renames the current file inline from its title menu', async () => {
@@ -4118,9 +4118,9 @@ describe('FilesPage', () => {
     hookMock.useGfsBrowserController.mockReturnValue({ ...baseController(), openUri })
     renderFilesPage()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Open route' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Open route' })
-    fireEvent.change(within(dialog).getByLabelText('EvenDrive link'), {
+    fireEvent.click(screen.getByRole('button', { name: 'Open from ID' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Open from ID' })
+    fireEvent.change(within(dialog).getByLabelText('File or folder ID'), {
       target: { value: 'gfs://main/resource-1' },
     })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Open' }))
@@ -4131,7 +4131,7 @@ describe('FilesPage', () => {
         expect.objectContaining({ shouldContinue: expect.any(Function) })
       )
     )
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open route' })).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open from ID' })).toBeNull())
   })
 
   it('opens a preview tab for a markdown file (no mimeType in the descriptor)', () => {
@@ -4227,9 +4227,9 @@ describe('FilesPage', () => {
     hookMock.useGfsBrowserController.mockImplementation(useResolvedFileController)
 
     renderFilesPage(undefined, onOpenPreview)
-    fireEvent.click(screen.getByRole('button', { name: 'Open route' }))
-    const linkDialog = await screen.findByRole('dialog', { name: 'Open route' })
-    fireEvent.change(within(linkDialog).getByLabelText('EvenDrive link'), {
+    fireEvent.click(screen.getByRole('button', { name: 'Open from ID' }))
+    const linkDialog = await screen.findByRole('dialog', { name: 'Open from ID' })
+    fireEvent.change(within(linkDialog).getByLabelText('File or folder ID'), {
       target: { value: 'gfs://main/svg-1' },
     })
     fireEvent.click(within(linkDialog).getByRole('button', { name: 'Open' }))
@@ -4244,8 +4244,8 @@ describe('FilesPage', () => {
         version: 1,
       })
     )
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open route' })).toBeNull())
-    expect(screen.getByRole('button', { name: 'Open route' })).toBeTruthy()
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open from ID' })).toBeNull())
+    expect(screen.getByRole('button', { name: 'Open from ID' })).toBeTruthy()
   })
 
   it('navigates through breadcrumbs and resets to Shared with me', async () => {
@@ -4299,8 +4299,8 @@ describe('FilesPage', () => {
       'Refresh',
       'Share',
       'Copy link',
-      'Copy route',
-      'Open route',
+      'Copy folder ID',
+      'Open folder from ID',
       'Open folder',
       'Rename',
       'Move to',
@@ -4313,8 +4313,8 @@ describe('FilesPage', () => {
       'Refresh',
       'Share',
       'Copy link',
-      'Copy route',
-      'Open route',
+      'Copy folder ID',
+      'Open folder from ID',
       'Rename',
       'Move to',
       'New folder',
@@ -4451,13 +4451,13 @@ describe('FilesPage', () => {
       activeFolderOptions
     )
 
-    // The active folder menu retains the established Open route dialog action.
+    // The active folder menu retains the established Open from ID dialog action.
     fireEvent.click(
       within(screen.getByRole('menu', { name: 'Actions for Nested' })).getByRole('menuitem', {
-        name: 'Open route',
+        name: 'Open folder from ID',
       })
     )
-    expect(screen.getByRole('dialog', { name: 'Open route' })).toBeTruthy()
+    expect(screen.getByRole('dialog', { name: 'Open from ID' })).toBeTruthy()
   })
 
   it('opens nested folders and exposes open and copy actions in the resource menu', async () => {

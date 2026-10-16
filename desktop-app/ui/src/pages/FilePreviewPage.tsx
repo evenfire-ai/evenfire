@@ -129,9 +129,9 @@ export function FilePreviewPage({
   const handleCopyRoute = useCallback(async () => {
     try {
       await navigator.clipboard.writeText(gfsUri)
-      pushToast?.('EvenDrive route copied', 'success')
+      pushToast?.('File ID copied', 'success')
     } catch (error) {
-      pushToast?.(`Could not copy the EvenDrive route: ${toMessage(error)}`, 'error')
+      pushToast?.(`Could not copy the file ID: ${toMessage(error)}`, 'error')
     }
   }, [gfsUri, pushToast])
 

@@ -105,16 +105,16 @@ describe('FilePreviewPage', () => {
     expect(screen.getAllByRole('menuitem').map(item => item.textContent)).toEqual([
       'Refresh',
       'Copy link',
-      'Copy route',
-      'Open route',
+      'Copy file ID',
+      'Open file from ID',
       'Copy content',
     ])
     expect(screen.queryByRole('dialog')).toBeNull()
     const menu = screen.getByRole('menu', { name: 'Actions for diagram.png' })
     expect(within(menu).getByRole('menuitem', { name: 'Refresh' })).toBeTruthy()
     expect(within(menu).getByRole('menuitem', { name: 'Copy link' })).toBeTruthy()
-    expect(within(menu).getByRole('menuitem', { name: 'Copy route' })).toBeTruthy()
-    expect(within(menu).getByRole('menuitem', { name: 'Open route' })).toBeTruthy()
+    expect(within(menu).getByRole('menuitem', { name: 'Copy file ID' })).toBeTruthy()
+    expect(within(menu).getByRole('menuitem', { name: 'Open file from ID' })).toBeTruthy()
     expect(within(menu).getByRole('menuitem', { name: 'Copy content' })).toBeTruthy()
   })
 
@@ -183,10 +183,10 @@ describe('FilePreviewPage', () => {
       within(menu)
         .getAllByRole('menuitem')
         .map(item => item.textContent)
-    ).toEqual(['Refresh', 'Copy link', 'Copy route', 'Open route'])
+    ).toEqual(['Refresh', 'Copy link', 'Copy file ID', 'Open file from ID'])
   })
 
-  it('uses the shareable link, canonical route, and preview copy semantics from the filename menu', async () => {
+  it('uses the shareable link, canonical ID, and preview copy semantics from the filename menu', async () => {
     const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
     const markdown = '# Hello\n\nText to copy.'
     const copyDeepLink = vi.fn(async () => ({
@@ -222,7 +222,7 @@ describe('FilePreviewPage', () => {
 
     await screen.findByRole('heading', { name: 'Hello' })
     clickPreviewAction('Résumé # ? %.md', 'Copy link')
-    clickPreviewAction('Résumé # ? %.md', 'Copy route')
+    clickPreviewAction('Résumé # ? %.md', 'Copy file ID')
     const menu = openPreviewActions('Résumé # ? %.md')
     const copyContent = within(menu).getByRole('menuitem', { name: 'Copy content' })
     await waitFor(() => expect((copyContent as HTMLButtonElement).disabled).toBe(false))
