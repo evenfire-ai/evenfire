@@ -24,6 +24,16 @@ import path from 'node:path'
 
 export const DESKTOP_APP_ROOT = path.resolve(__dirname, '../..')
 export const MAIN_ENTRY = path.join(DESKTOP_APP_ROOT, 'dist/main.js')
+
+export function validateMainEntry(mainEntry: string): void {
+  if (!path.isAbsolute(mainEntry) || !mainEntry.endsWith(`${path.sep}dist${path.sep}main.js`)) {
+    throw new Error('Desktop mainEntry must be an absolute path ending in dist/main.js.')
+  }
+  if (!fs.existsSync(mainEntry) || !fs.statSync(mainEntry).isFile()) {
+    throw new Error(`Desktop app build missing at ${mainEntry}. Run npm run build first.`)
+  }
+}
+
 export const EXTERNAL_REST_API_BASE_URL =
   process.env.EXTERNAL_REST_API_BASE_URL ||
   process.env.EXTERNAL_REST_API_URL ||
@@ -121,17 +131,22 @@ export function configuredHostRef(): string {
  * 1280x720 WebM. Returns the app handle and its first window page. Caller owns
  * closing the app (use finalizeRecording in a finally block) so the video file
  * is finalized on disk.
+ * `launch.executablePath` pins the Electron binary; `launch.beforeFirstWindow`
+ * receives the app before its first window opens (to attach output streams).
  */
 export async function launchDesktopApp(
   testInfo: TestInfo,
-  isolationTarget?: string
+  isolationTarget?: string,
+  mainEntry: string = MAIN_ENTRY,
+  launch: {
+    executablePath?: string
+    beforeFirstWindow?: (app: ElectronApplication) => void
+  } = {}
 ): Promise<{
   app: ElectronApplication
   page: Page
 }> {
-  if (!fs.existsSync(MAIN_ENTRY)) {
-    throw new Error(`Desktop app build missing at ${MAIN_ENTRY}. Run npm run build first.`)
-  }
+  validateMainEntry(mainEntry)
 
   const isolationRunDir = testInfo.outputPath('electron-isolation')
   const userDataDir = isolationTarget
@@ -144,7 +159,8 @@ export async function launchDesktopApp(
   const slowMo = Number(process.env.QA_RECORDER_SLOW_MO_MS ?? 75)
 
   const app = await electron.launch({
-    args: [`--user-data-dir=${userDataDir}`, MAIN_ENTRY],
+    executablePath: launch.executablePath,
+    args: [`--user-data-dir=${userDataDir}`, mainEntry],
     env: {
       ...process.env,
       ELECTRON_RENDERER_URL: '',
@@ -161,7 +177,7 @@ export async function launchDesktopApp(
             EVENFIRE_DEV_ISOLATION_TARGET: isolationTarget,
             EVENFIRE_DEV_ISOLATION_REST_URL: EXTERNAL_REST_API_BASE_URL,
             EVENFIRE_DEV_ISOLATION_RPC_URL: RPC_PROXY_BASE_URL,
-            EVENFIRE_DEV_ISOLATION_APP_PATH: path.dirname(MAIN_ENTRY),
+            EVENFIRE_DEV_ISOLATION_APP_PATH: path.dirname(mainEntry),
           }
         : {}),
     },
@@ -179,6 +195,7 @@ export async function launchDesktopApp(
     slowMo: Number.isFinite(slowMo) ? slowMo : 75,
   })
 
+  launch.beforeFirstWindow?.(app)
   const actualUserDataDir = await app.evaluate(({ app: electronApp }) =>
     electronApp.getPath('userData')
   )
