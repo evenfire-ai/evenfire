@@ -1895,9 +1895,26 @@ h3 {
 .da-file-explorer__row {
   min-width: 0;
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-columns: 22px minmax(0, 1fr) 28px;
   align-items: center;
   gap: var(--space-0-5);
+}
+
+.da-file-explorer__actions {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.da-file-explorer__actions .da-gfs-resource-menu__trigger.ui-icon-button {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
 }
 
 .da-file-explorer__toggle.ui-icon-button {
@@ -7702,6 +7719,68 @@ h3 {
 .composer-textarea-viewport {
   overflow: hidden;
   border-radius: calc(var(--radius-md) - 1px);
+}
+
+.composer-markdown-editor.w-md-editor {
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text);
+}
+
+.composer-markdown-editor .w-md-editor-content,
+.composer-markdown-editor .w-md-editor-input,
+.composer-markdown-editor .w-md-editor-text {
+  min-height: 100%;
+}
+
+.composer-markdown-editor .w-md-editor-text {
+  padding: var(--space-2-5);
+  font-size: var(--font-size-lg) !important;
+  line-height: 20px !important;
+}
+
+.composer-markdown-editor .w-md-editor-text-input {
+  width: 100%;
+  color: var(--text);
+  font-size: var(--font-size-lg) !important;
+  line-height: 20px !important;
+}
+
+.composer-markdown-editor--hidden {
+  display: none !important;
+}
+
+.composer-markdown-preview {
+  box-sizing: border-box;
+  min-height: 56px;
+  max-height: 240px;
+  overflow: auto;
+  padding: var(--space-2-5);
+  color: var(--text);
+  font-size: var(--font-size-lg);
+  line-height: 20px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  outline: none;
+  cursor: text;
+}
+
+.composer-markdown-preview > :first-child {
+  margin-top: 0;
+}
+
+.composer-markdown-preview > :last-child {
+  margin-bottom: 0;
+}
+
+.composer-markdown-preview a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: text;
 }
 
 .composer-input-shell:focus-within {
@@ -14029,6 +14108,64 @@ pre {
 
 .composer-reference-submenu::-webkit-scrollbar-thumb:hover {
   background: rgba(var(--edge-rgb), 0.6);
+}
+
+.composer-gfs-picker {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.composer-gfs-picker-path {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-1);
+  padding-bottom: var(--space-1);
+  border-bottom: 1px solid var(--edge-subtle);
+}
+
+.composer-gfs-picker-current {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-gfs-picker-list {
+  display: grid;
+  gap: var(--space-0-5);
+}
+
+.composer-gfs-picker-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-0-5);
+}
+
+.composer-gfs-picker-open {
+  min-width: 0;
+}
+
+.composer-gfs-picker-open .ui-menu-item__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-gfs-picker-insert {
+  white-space: nowrap;
+}
+
+.composer-gfs-picker-more {
+  justify-content: center;
+}
+
+.composer-gfs-picker-error {
+  color: var(--danger-text, var(--text-secondary));
 }
 
 .composer-inline .composer-reference-menu-panel {

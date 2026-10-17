@@ -7,6 +7,7 @@ import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
 import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsCrumb } from '@hooks/domain/useGfsBrowserController'
+import type { GfsResourceActionRequest } from '@lib/gfsResourceActions'
 import {
   childView,
   listChildrenPage,
@@ -105,6 +106,8 @@ function renderFilesPage(
   onOpenPreview?: (preview: unknown) => void,
   pendingGfsUri?: string | null,
   onPendingGfsUriHandled?: () => void,
+  pendingResourceAction?: GfsResourceActionRequest | null,
+  onPendingResourceActionHandled?: (requestId: number) => void,
   titlebarLeadingTarget?: HTMLElement | null
 ) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -115,6 +118,8 @@ function renderFilesPage(
         onOpenPreview={onOpenPreview}
         pendingGfsUri={pendingGfsUri}
         onPendingGfsUriHandled={onPendingGfsUriHandled}
+        pendingResourceAction={pendingResourceAction}
+        onPendingResourceActionHandled={onPendingResourceActionHandled}
         titlebarLeadingTarget={titlebarLeadingTarget}
       />
     </QueryClientProvider>
@@ -288,6 +293,230 @@ describe('FilesPage', () => {
       expect.objectContaining({ shouldContinue: expect.any(Function) })
     )
     expect(handled).toHaveBeenCalledOnce()
+  })
+
+  it('runs a sidebar action only after Files resolves the exact requested resource', async () => {
+    const selected = await resolveResource(resolvedDirectory('selected', 'Selected folder'))
+    const target = await resolveResource(resolvedDirectory('target', 'Target folder'))
+    const handled = vi.fn()
+    const refreshCurrentLocation = vi.fn(async () => true)
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: selected,
+      refreshCurrentLocation,
+    })
+
+    const mismatchView = renderFilesPage(
+      undefined,
+      undefined,
+      target.gfsUri,
+      undefined,
+      { id: 11, targetUri: target.gfsUri, actionId: 'refresh' },
+      handled
+    )
+
+    expect(refreshCurrentLocation).not.toHaveBeenCalled()
+    expect(handled).not.toHaveBeenCalled()
+    mismatchView.unmount()
+    handled.mockClear()
+
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: target,
+      refreshCurrentLocation,
+    })
+    renderFilesPage(
+      undefined,
+      undefined,
+      target.gfsUri,
+      undefined,
+      { id: 12, targetUri: target.gfsUri, actionId: 'refresh' },
+      handled
+    )
+
+    await waitFor(() => expect(refreshCurrentLocation).toHaveBeenCalledTimes(1))
+    expect(handled).toHaveBeenCalledWith(12)
+  })
+
+  it('runs a seeded previewable file action in Files without handing the file to Preview', async () => {
+    const file = await resolveResource(
+      resolvedFile('abcdefabcdefabcdefabcdefabcdefab', 'report.md')
+    )
+    const fileCrumb: GfsCrumb = { ...file, kind: 'file', bytes: file.bytes ?? 0 }
+    const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
+    const onOpenPreview = vi.fn()
+    const handled = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { download, getPathForFile: vi.fn() } },
+    })
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:gfs-download'),
+    })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+
+    let setCrumbs: (crumbs: GfsCrumb[]) => void = () => undefined
+    const openUri = vi.fn(async () => {
+      setCrumbs([fileCrumb])
+      return fileCrumb
+    })
+    function useSeededFileController() {
+      const [crumbs, updateCrumbs] = useState<GfsCrumb[]>([])
+      setCrumbs = updateCrumbs
+      return {
+        ...baseController(),
+        crumbs,
+        current: crumbs.at(-1) ?? null,
+        openUri,
+      }
+    }
+    hookMock.useGfsBrowserController.mockImplementation(useSeededFileController)
+
+    renderFilesPage(
+      undefined,
+      onOpenPreview,
+      file.gfsUri,
+      undefined,
+      { id: 13, targetUri: file.gfsUri, actionId: 'download' },
+      handled
+    )
+
+    await waitFor(() => expect(download).toHaveBeenCalledWith(file.gfsUri))
+    expect(download).toHaveBeenCalledTimes(1)
+    expect(openUri).toHaveBeenCalledWith(
+      file.gfsUri,
+      expect.objectContaining({ shouldContinue: expect.any(Function) })
+    )
+    expect(onOpenPreview).not.toHaveBeenCalled()
+    expect(handled).toHaveBeenCalledWith(13)
+  })
+
+  it('does not run a stale Replace request after navigation leaves and later returns to its file', async () => {
+    const file = await resolveResource(
+      resolvedFile('abcdefabcdefabcdefabcdefabcdefab', 'report.md')
+    )
+    const fileCrumb: GfsCrumb = { ...file, kind: 'file', bytes: file.bytes ?? 0 }
+    const replacement = new File(['replacement'], 'replacement.md', { type: 'text/markdown' })
+    const handled = vi.fn()
+    const replaceFileFromPath = vi.fn(async () => undefined)
+    const getPathForFile = vi.fn(async () => '/isolated/replacement.md')
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { getPathForFile } },
+    })
+
+    let setCrumbs: (crumbs: GfsCrumb[]) => void = () => undefined
+    let targetOpenCount = 0
+    const openUri = vi.fn(async (uri: string) => {
+      if (uri !== file.gfsUri || targetOpenCount === 0) {
+        if (uri === file.gfsUri) targetOpenCount += 1
+        return false
+      }
+      targetOpenCount += 1
+      setCrumbs([fileCrumb])
+      return fileCrumb
+    })
+    function useSeededFileController() {
+      const [crumbs, updateCrumbs] = useState<GfsCrumb[]>([])
+      setCrumbs = updateCrumbs
+      return {
+        ...baseController(),
+        crumbs,
+        current: crumbs.at(-1) ?? null,
+        affordances: delegationAffordances(new Set(['read', 'write']), false),
+        openUri,
+        replaceFileFromPath,
+      }
+    }
+    hookMock.useGfsBrowserController.mockImplementation(useSeededFileController)
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const action = {
+      id: 14,
+      targetUri: file.gfsUri,
+      actionId: 'replace' as const,
+      file: replacement,
+    }
+    const renderRoute = (uri: string | null) => (
+      <QueryClientProvider client={queryClient}>
+        <FilesPage
+          pendingGfsUri={uri}
+          pendingResourceAction={action}
+          onPendingResourceActionHandled={handled}
+        />
+      </QueryClientProvider>
+    )
+    const view = render(renderRoute(file.gfsUri))
+
+    await waitFor(() =>
+      expect(openUri).toHaveBeenCalledWith(
+        file.gfsUri,
+        expect.objectContaining({ shouldContinue: expect.any(Function) })
+      )
+    )
+    view.rerender(renderRoute('gfs://main/0123456789abcdef0123456789abcdef'))
+    await waitFor(() => expect(openUri).toHaveBeenCalledTimes(2))
+    view.rerender(renderRoute(file.gfsUri))
+
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'report.md', level: 3 })))
+    await waitFor(() => expect(openUri).toHaveBeenCalledTimes(3))
+    expect(handled).toHaveBeenCalledWith(14)
+    expect(getPathForFile).not.toHaveBeenCalled()
+    expect(replaceFileFromPath).not.toHaveBeenCalled()
+  })
+
+  it('opens Move for an unreadable row from its parent route', async () => {
+    const parentResourceId = '0123456789abcdef0123456789abcdef'
+    const parent = await resolveResource(resolvedDirectory(parentResourceId, 'Shared folder'))
+    const child = (
+      await listChildrenPage([
+        childView('abcdefabcdefabcdefabcdefabcdefab', 'secret.pdf', 'file', {
+          parentResourceId,
+          readable: false,
+        }),
+      ])
+    ).items[0]
+    if (!child) throw new Error('The producer fixture did not return the unreadable file')
+    const parentCrumb: GfsCrumb = {
+      resourceId: parent.resourceId,
+      gfsUri: parent.gfsUri,
+      name: parent.name,
+      kind: 'directory',
+      version: parent.version,
+      bytes: 0,
+    }
+    const handled = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: parentCrumb,
+      crumbs: [parentCrumb],
+      items: [child],
+    })
+
+    renderFilesPage(
+      undefined,
+      undefined,
+      parent.gfsUri,
+      undefined,
+      {
+        id: 15,
+        targetUri: child.gfsUri,
+        actionId: 'move',
+        navigationUri: parent.gfsUri,
+        targetResource: {
+          resourceId: child.resourceId,
+          name: child.name,
+          kind: child.kind,
+          version: child.version,
+          parentResourceId,
+        },
+      },
+      handled
+    )
+
+    expect(await screen.findByRole('dialog', { name: 'Move file secret.pdf' })).toBeTruthy()
+    expect(handled).toHaveBeenCalledWith(15)
   })
 
   it.each([
@@ -886,7 +1115,15 @@ describe('FilesPage', () => {
       affordances: delegationAffordances(new Set(['read', 'write']), false),
     })
 
-    const view = renderFilesPage(undefined, undefined, undefined, undefined, titlebarLeadingRoot)
+    const view = renderFilesPage(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      titlebarLeadingRoot
+    )
     try {
       expect(within(titlebarLeadingRoot).queryByRole('toolbar')).toBeNull()
       const menuTrigger = screen.getByRole('button', { name: 'Options for Product' })
@@ -4100,14 +4337,17 @@ describe('FilesPage', () => {
     renderFilesPage(undefined, onOpenPreview)
     fireEvent.click(screen.getByRole('button', { name: 'diagram.PNG' }))
 
-    expect(onOpenPreview).toHaveBeenCalledWith({
-      gfsUri: 'gfs://main/image-1',
-      kind: 'image',
-      mimeType: 'image/png',
-      name: 'diagram.PNG',
-      bytes: 3,
-      version: 1,
-    })
+    expect(onOpenPreview).toHaveBeenCalledWith(
+      {
+        gfsUri: 'gfs://main/image-1',
+        kind: 'image',
+        mimeType: 'image/png',
+        name: 'diagram.PNG',
+        bytes: 3,
+        version: 1,
+      },
+      'env-1:user-1:team-1'
+    )
     // No modal, and FilesPage itself never fetches the bytes.
     expect(screen.queryByRole('dialog', { name: 'diagram.PNG' })).toBeNull()
     expect(download).not.toHaveBeenCalled()
@@ -4143,13 +4383,16 @@ describe('FilesPage', () => {
     renderFilesPage(undefined, onOpenPreview)
     fireEvent.click(screen.getByRole('button', { name: 'README.md' }))
 
-    expect(onOpenPreview).toHaveBeenCalledWith({
-      gfsUri: 'gfs://main/markdown-1',
-      kind: 'markdown',
-      name: 'README.md',
-      bytes: 12,
-      version: 1,
-    })
+    expect(onOpenPreview).toHaveBeenCalledWith(
+      {
+        gfsUri: 'gfs://main/markdown-1',
+        kind: 'markdown',
+        name: 'README.md',
+        bytes: 12,
+        version: 1,
+      },
+      'env-1:user-1:team-1'
+    )
   })
 
   it('opens a preview tab for a video file with its detected mimeType', () => {
@@ -4162,14 +4405,17 @@ describe('FilesPage', () => {
     renderFilesPage(undefined, onOpenPreview)
     fireEvent.click(screen.getByRole('button', { name: 'demo.mp4' }))
 
-    expect(onOpenPreview).toHaveBeenCalledWith({
-      gfsUri: 'gfs://main/video-1',
-      kind: 'video',
-      mimeType: 'video/mp4',
-      name: 'demo.mp4',
-      bytes: 3,
-      version: 1,
-    })
+    expect(onOpenPreview).toHaveBeenCalledWith(
+      {
+        gfsUri: 'gfs://main/video-1',
+        kind: 'video',
+        mimeType: 'video/mp4',
+        name: 'demo.mp4',
+        bytes: 3,
+        version: 1,
+      },
+      'env-1:user-1:team-1'
+    )
   })
 
   it('downloads a previewable file when no preview surface is wired (fail-open to download)', async () => {
@@ -4235,14 +4481,17 @@ describe('FilesPage', () => {
     fireEvent.click(within(linkDialog).getByRole('button', { name: 'Open' }))
 
     await waitFor(() =>
-      expect(onOpenPreview).toHaveBeenCalledWith({
-        gfsUri: 'gfs://main/svg-1',
-        kind: 'image',
-        mimeType: 'image/svg+xml',
-        name: 'architecture.svg',
-        bytes: 4,
-        version: 1,
-      })
+      expect(onOpenPreview).toHaveBeenCalledWith(
+        {
+          gfsUri: 'gfs://main/svg-1',
+          kind: 'image',
+          mimeType: 'image/svg+xml',
+          name: 'architecture.svg',
+          bytes: 4,
+          version: 1,
+        },
+        'env-1:user-1:team-1'
+      )
     )
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open from ID' })).toBeNull())
     expect(screen.getByRole('button', { name: 'Open from ID' })).toBeTruthy()

@@ -49,6 +49,7 @@ export function SidebarNav({
   onSelect,
   onOpenFilesSection,
   onOpenPreviewSection,
+  onGfsResourceAction = () => {},
   pushToast,
   toggleRequestId = 0,
 }: SidebarNavProps) {
@@ -620,6 +621,7 @@ export function SidebarNav({
                 <FileExplorerTree
                   onOpenFolder={onOpenFilesSection}
                   onOpenPreview={onOpenPreviewSection}
+                  onResourceAction={onGfsResourceAction}
                   pushToast={pushToast}
                 />
               </div>

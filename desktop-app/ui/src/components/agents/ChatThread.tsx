@@ -58,6 +58,8 @@ import { NudgeArea } from './NudgeArea'
 type ChatThreadProps = {
   showAgentLabel?: boolean
   onScrollPositionChange?: (isScrolledAwayFromBottom: boolean) => void
+  onOpenGfsResource?: (uri: string) => void
+  remoteGfsChangeEpoch?: number
 }
 type RenderableChatMessage = AgentChatMessage & {
   messageKey: string
@@ -272,7 +274,12 @@ function MessageAttachmentList({ attachments }: { attachments: ChatMessageAttach
   )
 }
 
-export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: ChatThreadProps) {
+export function ChatThread({
+  showAgentLabel = false,
+  onScrollPositionChange,
+  onOpenGfsResource,
+  remoteGfsChangeEpoch = 0,
+}: ChatThreadProps) {
   const { selectedAgent, handleSelectChatAgent: onStartNewChat } = useNavigationContext()
   const { decideApproval, pushToast } = useNotificationsContext()
   const { composerImageAttachments, composerReferenceAttachments, requestComposerFocus } =
@@ -800,6 +807,8 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                       model={semanticModel}
                                       query={localSearchQuery}
                                       activeOccurrence={activeSearchOccurrence}
+                                      onOpenGfsResource={onOpenGfsResource}
+                                      remoteGfsChangeEpoch={remoteGfsChangeEpoch}
                                     />
                                   ) : message.content.length <= 180 ? (
                                     message.content
@@ -829,6 +838,8 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                     model={semanticModel}
                                     query={localSearchQuery}
                                     activeOccurrence={activeSearchOccurrence}
+                                    onOpenGfsResource={onOpenGfsResource}
+                                    remoteGfsChangeEpoch={remoteGfsChangeEpoch}
                                   />
                                 </pre>
                               ) : message.role === 'assistant' ? (
@@ -837,6 +848,8 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                     model={semanticModel}
                                     query={localSearchQuery}
                                     activeOccurrence={activeSearchOccurrence}
+                                    onOpenGfsResource={onOpenGfsResource}
+                                    remoteGfsChangeEpoch={remoteGfsChangeEpoch}
                                   />
                                   {selectedAgent && !hasResponseFileAttachment && (
                                     <MessageArtifactActions
@@ -851,13 +864,15 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                                   ) : null}
                                 </div>
                               ) : displayContent ? (
-                                <p className="message-block">
+                                <div className="message-block">
                                   <ChatMarkdownContent
                                     model={semanticModel}
                                     query={localSearchQuery}
                                     activeOccurrence={activeSearchOccurrence}
+                                    onOpenGfsResource={onOpenGfsResource}
+                                    remoteGfsChangeEpoch={remoteGfsChangeEpoch}
                                   />
-                                </p>
+                                </div>
                               ) : null}
                             </>
                           )}

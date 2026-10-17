@@ -71,6 +71,57 @@ describe('chat message Markdown semantic model', () => {
     expect(findChatSemanticMatches(model, 'needle')).toHaveLength(2)
   })
 
+  it('links bare exact GFS routes while preserving source positions and code spans', () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const oneCharacterDriveUri = 'gfs://A/abcdefabcdefabcdefabcdefabcdefab'
+    const desktopLink = `evenfire://files?uri=${encodeURIComponent(uri)}`
+    const source = `Open ${uri}. Or ${oneCharacterDriveUri}. Or ${desktopLink}, but keep \`${uri}\` as code.`
+    const model = buildChatMessageSemanticModel(assistant(source))
+    const links: Array<{ href: string; start: number; end: number }> = []
+    const visit = (node: unknown) => {
+      if (!node || typeof node !== 'object') return
+      const value = node as {
+        type?: string
+        tagName?: string
+        data?: { originalHref?: string }
+        position?: { start?: { offset?: number }; end?: { offset?: number } }
+        children?: unknown[]
+      }
+      if (
+        value.type === 'element' &&
+        value.tagName === 'a' &&
+        value.data?.originalHref &&
+        typeof value.position?.start?.offset === 'number' &&
+        typeof value.position?.end?.offset === 'number'
+      ) {
+        links.push({
+          href: value.data.originalHref,
+          start: value.position.start.offset,
+          end: value.position.end.offset,
+        })
+      }
+      value.children?.forEach(visit)
+    }
+    visit(model.renderTree)
+
+    expect(links).toEqual([
+      { href: uri, start: source.indexOf(uri), end: source.indexOf(uri) + uri.length },
+      {
+        href: oneCharacterDriveUri,
+        start: source.indexOf(oneCharacterDriveUri),
+        end: source.indexOf(oneCharacterDriveUri) + oneCharacterDriveUri.length,
+      },
+      {
+        href: desktopLink,
+        start: source.indexOf(desktopLink),
+        end: source.indexOf(desktopLink) + desktopLink.length,
+      },
+    ])
+    expect(source.slice(links[0]!.start, links[0]!.end)).toBe(uri)
+    expect(model.searchText).toContain(uri)
+    expect(links.some(link => link.start > source.lastIndexOf('`'))).toBe(false)
+  })
+
   it('prevents logical matches from crossing blocks and GFM table cells', () => {
     const blocks = buildChatMessageSemanticModel(assistant('alpha\n\nbeta'))
     const table = buildChatMessageSemanticModel(assistant('| alpha | beta |\n| --- | --- |'))

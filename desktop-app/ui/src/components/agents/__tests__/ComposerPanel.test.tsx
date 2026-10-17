@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
+import { useLayoutEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatComposerStateContextValue } from '@contexts/ChatComposerStateContext'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {
@@ -13,7 +14,17 @@ import {
   GROK_COMPOSER_MAX_IMAGE_BYTES,
 } from '@constants/attachments'
 import type { HostModelsResult } from '@hooks/useChatStore'
+import {
+  clearComposerDraft,
+  getComposerDraft,
+  resetComposerDraftStore,
+  setComposerDraft,
+} from '@lib/composerDraftStore'
 import { readComposerFile } from '@lib/composerFileAdmission'
+import {
+  clearLatestGfsConversationContext,
+  recordLatestGfsConversationContext,
+} from '@lib/gfsConversationPrefill'
 import {
   type ImageInputDecision,
   imageInputBlockMessage,
@@ -135,7 +146,51 @@ vi.mock('../ComposerAgentFilesModal', () => ({ ComposerAgentFilesModal: () => nu
 const globalFilesMock = vi.hoisted(() => ({
   showComposerItem: false,
   modalProps: undefined as { attachedIds: readonly string[] } | undefined,
+  lastInsert: null as null | {
+    sessionId: number
+    sessionScope: string
+    onInsert: (
+      selection: { label: string; uri: string },
+      sessionScope: string,
+      sessionId: number
+    ) => void
+  },
 }))
+vi.mock('../ComposerGfsLinkPicker', async () => {
+  const React = await import('react')
+  return {
+    ComposerGfsLinkPicker: (props: {
+      sessionId: number
+      onInsert: (
+        selection: { label: string; uri: string },
+        scope: string,
+        sessionId: number
+      ) => void
+      onSessionScope: (sessionId: number, scope: string) => void
+    }) => {
+      props.onSessionScope(props.sessionId, 'test-env:test-user:test-team')
+      globalFilesMock.lastInsert = {
+        sessionId: props.sessionId,
+        sessionScope: 'test-env:test-user:test-team',
+        onInsert: props.onInsert,
+      }
+      return React.createElement(
+        'button',
+        {
+          type: 'button',
+          role: 'menuitem',
+          onClick: () =>
+            props.onInsert(
+              { label: 'Plan [2026]', uri: 'gfs://main/0123456789abcdef0123456789abcdef' },
+              'test-env:test-user:test-team',
+              props.sessionId
+            ),
+        },
+        'Insert fixture link'
+      )
+    },
+  }
+})
 
 vi.mock('@constants/agentFeatures', async importOriginal => ({
   ...(await importOriginal<typeof import('@constants/agentFeatures')>()),
@@ -180,7 +235,10 @@ afterEach(() => {
   annotationCanvasMock.onSave = undefined
   globalFilesMock.showComposerItem = false
   globalFilesMock.modalProps = undefined
+  globalFilesMock.lastInsert = null
   draftState.value = ''
+  clearLatestGfsConversationContext()
+  resetComposerDraftStore()
   draftState.set.mockReset()
   Object.assign(composerState, {
     composerImageAttachments: [],
@@ -221,9 +279,50 @@ describe.each([
   ['inline new-chat', true],
   ['docked conversation', false],
 ])('ComposerPanel %s', (_name, inline) => {
+  it('prefills a focused empty existing chat from the latest visible GFS route once', () => {
+    recordLatestGfsConversationContext({
+      id: 'files-1',
+      kind: 'files',
+      title: 'Reports',
+      files: { path: 'gfs://main/0123456789abcdef0123456789abcdef' },
+    })
+    Object.assign(composerState, { activeChatId: 'chat-1' })
+
+    const { rerender } = render(<ComposerPanel inline={inline} />)
+
+    expect(getComposerDraft('chat-1', 'agent-1')).toBe(
+      'gfs://main/0123456789abcdef0123456789abcdef'
+    )
+    clearComposerDraft('chat-1', 'agent-1')
+    composerState.composerFocusRequestId += 1
+    rerender(<ComposerPanel inline={inline} />)
+    expect(getComposerDraft('chat-1', 'agent-1')).toBe('')
+  })
+
+  it('preserves whitespace and existing drafts during contextual prefill', () => {
+    recordLatestGfsConversationContext({
+      id: 'preview-1',
+      kind: 'preview',
+      title: 'Report',
+      preview: {
+        gfsUri: 'gfs://main/abcdefabcdefabcdefabcdefabcdefab',
+        fileKind: 'markdown',
+        byteLength: 12,
+      },
+    })
+    Object.assign(composerState, { activeChatId: 'chat-1' })
+    draftState.value = '   '
+    setComposerDraft('chat-1', '   ', 'agent-1')
+
+    render(<ComposerPanel inline={inline} />)
+
+    expect(getComposerDraft('chat-1', 'agent-1')).toBe('   ')
+  })
+
   it('grows, caps scrolling, and shrinks its text viewport without covering it with actions', () => {
     const { container, rerender } = render(<ComposerPanel inline={inline} />)
     const textarea = screen.getByTestId('chat-input') as HTMLTextAreaElement
+    const editor = container.querySelector('.composer-markdown-editor') as HTMLElement
     const shell = container.querySelector('.composer-input-shell')
     const viewport = container.querySelector('.composer-textarea-viewport')
     const toolbar = container.querySelector('.composer-input-actions')
@@ -237,12 +336,12 @@ describe.each([
 
     setScrollHeight(textarea, 96)
     fireEvent.change(textarea, { target: { value: 'first\nsecond\nthird' } })
-    expect(textarea.style.height).toBe('96px')
+    expect(editor.style.height).toBe('96px')
     expect(textarea.style.overflowY).toBe('hidden')
 
     setScrollHeight(textarea, 1000)
     fireEvent.change(textarea, { target: { value: 'a very long draft' } })
-    expect(textarea.style.height).toBe('240px')
+    expect(editor.style.height).toBe('240px')
     expect(textarea.style.overflowY).toBe('auto')
 
     draftState.value = 'a very long draft'
@@ -250,7 +349,7 @@ describe.each([
     draftState.value = ''
     setScrollHeight(textarea, inline ? 48 : 56)
     rerender(<ComposerPanel inline={inline} />)
-    expect(textarea.style.height).toBe(inline ? '48px' : '56px')
+    expect(editor.style.height).toBe(inline ? '48px' : '56px')
     expect(textarea.style.overflowY).toBe('hidden')
   })
 
@@ -337,9 +436,175 @@ describe('ComposerPanel EvenDrive picker', () => {
     expect(globalFilesMock.modalProps).toBeUndefined()
 
     fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: /EvenDrive/ }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /Attach EvenDrive files/ }))
 
     expect(globalFilesMock.modalProps?.attachedIds).toEqual(['global-file:main:aaaa'])
+  })
+
+  it('inserts exact resource Markdown after selected text and keeps the picker open', async () => {
+    globalFilesMock.showComposerItem = true
+    Object.assign(composerState, { activeChatId: 'chat-1' })
+    const initialDraft = 'keep this text'
+    draftState.value = initialDraft
+    draftState.set.mockImplementation(value => {
+      draftState.value = value
+      setComposerDraft('chat-1', value, 'agent-1')
+    })
+    setComposerDraft('chat-1', initialDraft, 'agent-1')
+
+    const { rerender } = render(<ComposerPanel inline={false} />)
+    const textarea = screen.getByTestId('chat-input') as HTMLTextAreaElement
+    textarea.setSelectionRange(4, 9)
+    fireEvent.select(textarea)
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Insert EvenDrive link' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Insert fixture link' }))
+
+    const inserted = 'keep this[Plan \\[2026\\]](gfs://main/0123456789abcdef0123456789abcdef)  text'
+    await waitFor(() => expect(getComposerDraft('chat-1', 'agent-1')).toBe(inserted))
+    rerender(<ComposerPanel inline={false} />)
+    const caretAfterLink = inserted.indexOf('  text') + 1
+    await waitFor(() => expect(textarea.selectionStart).toBe(caretAfterLink))
+    expect(textarea.selectionEnd).toBe(caretAfterLink)
+    await waitFor(() => expect(document.activeElement).toBe(textarea))
+    expect(screen.getByRole('menuitem', { name: 'Insert fixture link' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Add context' }).getAttribute('aria-expanded')).toBe(
+      'true'
+    )
+  })
+
+  it('rejects an insertion callback retained from a previous picker session', async () => {
+    globalFilesMock.showComposerItem = true
+    Object.assign(composerState, { activeChatId: 'chat-1' })
+    const initialDraft = 'keep this text'
+    draftState.value = initialDraft
+    draftState.set.mockImplementation(value => {
+      draftState.value = value
+      setComposerDraft('chat-1', value, 'agent-1')
+    })
+    setComposerDraft('chat-1', initialDraft, 'agent-1')
+
+    render(<ComposerPanel inline={false} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Insert EvenDrive link' }))
+    await waitFor(() => expect(globalFilesMock.lastInsert).not.toBeNull())
+    const stalePicker = globalFilesMock.lastInsert!
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Insert EvenDrive link' }))
+    await waitFor(() =>
+      expect(globalFilesMock.lastInsert?.sessionId).toBeGreaterThan(stalePicker.sessionId)
+    )
+
+    act(() =>
+      stalePicker.onInsert(
+        { label: 'Stale resource', uri: 'gfs://main/abcdefabcdefabcdefabcdefabcdefab' },
+        stalePicker.sessionScope,
+        stalePicker.sessionId
+      )
+    )
+    expect(getComposerDraft('chat-1', 'agent-1')).toBe(initialDraft)
+    expect(screen.getByRole('menuitem', { name: 'Insert fixture link' })).toBeTruthy()
+  })
+
+  it('rejects a picker callback when the active chat changes before passive cleanup', async () => {
+    globalFilesMock.showComposerItem = true
+    const initialDraft = 'chat one draft'
+    draftState.value = initialDraft
+    draftState.set.mockImplementation(value => {
+      draftState.value = value
+      setComposerDraft('chat-1', value, 'agent-1')
+    })
+    setComposerDraft('chat-1', initialDraft, 'agent-1')
+
+    const SwitchHarness = ({ chatId, onLayout }: { chatId: string; onLayout?: () => void }) => {
+      Object.assign(composerState, { activeChatId: chatId })
+      useLayoutEffect(() => onLayout?.(), [chatId, onLayout])
+      return <ComposerPanel inline={false} />
+    }
+    const view = render(<SwitchHarness chatId="chat-1" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Insert EvenDrive link' }))
+    await waitFor(() => expect(globalFilesMock.lastInsert).not.toBeNull())
+    const stalePicker = globalFilesMock.lastInsert!
+
+    view.rerender(
+      <SwitchHarness
+        chatId="chat-2"
+        onLayout={() =>
+          stalePicker.onInsert(
+            { label: 'Stale resource', uri: 'gfs://main/abcdefabcdefabcdefabcdefabcdefab' },
+            stalePicker.sessionScope,
+            stalePicker.sessionId
+          )
+        }
+      />
+    )
+
+    expect(getComposerDraft('chat-1', 'agent-1')).toBe(initialDraft)
+    expect(getComposerDraft('chat-2', 'agent-1')).toBe('')
+  })
+})
+
+describe('ComposerPanel Markdown link presentation', () => {
+  it('shows authored labels, opens the canonical source range, and preserves the draft', async () => {
+    const source = 'before [Project Plan](gfs://main/0123456789abcdef0123456789abcdef) after'
+    draftState.value = source
+    setComposerDraft('chat-1', source, 'agent-1')
+    Object.assign(composerState, { activeChatId: 'chat-1' })
+
+    const { container } = render(<ComposerPanel inline={false} />)
+
+    const visibleLink = screen.getByRole('link', { name: 'Project Plan' })
+    expect(visibleLink).toBeTruthy()
+    expect(container.querySelector('.composer-markdown-preview')?.textContent).toBe(
+      'before Project Plan after'
+    )
+    fireEvent.click(visibleLink)
+
+    const textarea = screen.getByTestId('chat-input') as HTMLTextAreaElement
+    const start = source.indexOf('[Project Plan]')
+    const end = source.indexOf(') after') + 1
+    await waitFor(() => {
+      expect(document.activeElement).toBe(textarea)
+      expect(textarea.selectionStart).toBe(start)
+      expect(textarea.selectionEnd).toBe(end)
+    })
+    expect(textarea.value).toBe(source)
+    expect(getComposerDraft('chat-1', 'agent-1')).toBe(source)
+
+    fireEvent.blur(textarea)
+    expect(await screen.findByRole('link', { name: 'Project Plan' })).toBeTruthy()
+  })
+
+  it('edits adjacent multiline Markdown links without changing the sent source', async () => {
+    const initial =
+      '[First](gfs://main/0123456789abcdef0123456789abcdef)[Second](gfs://main/abcdefabcdefabcdefabcdefabcdefab)'
+    const edited =
+      'Read [Release notes](gfs://main/0123456789abcdef0123456789abcdef) and [Plan](gfs://main/abcdefabcdefabcdefabcdefabcdefab).\nKeep this line.'
+    draftState.value = initial
+    draftState.set.mockImplementation(value => {
+      draftState.value = value
+      setComposerDraft('chat-1', value, 'agent-1')
+    })
+    setComposerDraft('chat-1', initial, 'agent-1')
+    Object.assign(composerState, { activeChatId: 'chat-1' })
+
+    const view = render(<ComposerPanel inline={false} />)
+    fireEvent.click(screen.getByRole('link', { name: 'First' }))
+
+    let textarea = screen.getByTestId('chat-input') as HTMLTextAreaElement
+    await waitFor(() => expect(document.activeElement).toBe(textarea))
+    fireEvent.change(textarea, { target: { value: edited, selectionStart: edited.length } })
+    expect(draftState.set).toHaveBeenLastCalledWith(edited)
+    expect(getComposerDraft('chat-1', 'agent-1')).toBe(edited)
+
+    view.rerender(<ComposerPanel inline={false} />)
+    textarea = screen.getByTestId('chat-input') as HTMLTextAreaElement
+    expect(textarea.value).toBe(edited)
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    expect(actionsMock.handleSendAgentMessage).toHaveBeenCalledWith(edited)
   })
 })
 

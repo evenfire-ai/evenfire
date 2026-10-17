@@ -74,6 +74,7 @@ describe('chat IPC pagination validation', () => {
 describe('ipc host status stream handlers', () => {
   const service = {
     getSessionState: vi.fn(),
+    getSessionGeneration: vi.fn(() => 1),
     getDependenciesHealth: vi.fn(),
     saveRuntimeConfig: vi.fn(),
     deleteRuntimeConfig: vi.fn(),

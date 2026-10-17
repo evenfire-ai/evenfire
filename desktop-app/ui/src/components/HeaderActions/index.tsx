@@ -1,18 +1,30 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { AuthContext } from '@contexts/AuthContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
+import { QueryClientContext } from '@tanstack/react-query'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { normalizeGfsResourceUri } from '@clerum/desktop-app-links'
 import { Button, IconButton, Pill, SelectableOption, TextInput } from '@components/Common'
-import { IconChat } from '@components/SidebarNav/icons'
+import { GfsFileIcon } from '@components/GfsFileIcon'
+import { IconChat, IconContexts } from '@components/SidebarNav/icons'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
+import {
+  isGfsSessionAuthorityFailure,
+  revokeGfsSessionAccess,
+  useGfsSessionAccessState,
+} from '@hooks/domain/useGfsBrowserController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
 import { useSearchPluginsAppsController } from '@hooks/domain/useSearchPluginsAppsController'
 import { useTeamsDataController } from '@hooks/domain/useTeamsDataController'
 import { useClickOutside } from '@hooks/useClickOutside'
+import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
 import { notificationKindLabel, notificationPreviewText } from '@/lib/notifications'
 import type { AppNotificationKind } from '@/uiTypes'
+import { useGfsResourceProfileOrigin } from '../../hooks/domain/useGfsResourceProfileOrigin'
+import { parseGfsResourceLink } from '../../lib/gfsResourceLinks'
 import type {
   HeaderActionsProps,
   SearchAppResult,
@@ -21,7 +33,8 @@ import type {
 } from './types'
 
 const SEARCH_PLACEHOLDER = 'Search'
-const SEARCH_RESULTS_PROMPT = 'Search agents, connectors, plugins or apps...'
+const SEARCH_RESULTS_PROMPT =
+  'Paste an exact EvenDrive link or search agents, connectors, plugins or apps...'
 
 function formatApprovalTimestamp(value: string, mode: 'relative' | 'absolute'): string {
   const date = new Date(value)
@@ -94,7 +107,17 @@ export const HeaderActions = React.memo(function HeaderActions({
   drawerAvailable = false,
   chatDrawerOpen = false,
   onToggleChatDrawer,
+  onOpenGfsResource,
+  gfsAuthorizationChangeEpoch = 0,
 }: HeaderActionsProps) {
+  const auth = useContext(AuthContext)
+  const queryClient = useContext(QueryClientContext)
+  const profileOrigin = useGfsResourceProfileOrigin()
+  const principalIdentity =
+    auth?.isAuthenticated && !auth.authTransitioning && auth.me
+      ? `${auth.runtimeConfigState?.envKey ?? ''}:${auth.me.id}:${auth.me.teamId ?? ''}`
+      : null
+  const gfsAccessState = useGfsSessionAccessState(principalIdentity)
   const { accessCatalog: agentsAccessCatalog, loading: agentsCatalogLoading } =
     useAgentsDataController()
   const { globalMcpServers, mcpServersByAgent } = useMcpServersDataController()
@@ -134,11 +157,28 @@ export const HeaderActions = React.memo(function HeaderActions({
   const onOpenConnectors = () => handleNavSelect(DESKTOP_ROUTES.connectors)
   const [now, setNow] = useState(Date.now())
   const [searchQuery, setSearchQuery] = useState('')
+  const [gfsSearchResult, setGfsSearchResult] = useState<{
+    query: string
+    uri: string
+    principalIdentity: string | null
+    authorizationEpoch: number
+    status: 'loading' | 'resolved' | 'unavailable'
+    name?: string
+    kind?: 'directory' | 'file'
+  } | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [notificationTraySettled, setNotificationTraySettled] = useState(false)
   const searchRef = useRef<HTMLDivElement | null>(null)
   const searchInputRef = useRef<HTMLInputElement | null>(null)
+  const searchQueryRef = useRef('')
+  const gfsSearchGenerationRef = useRef(0)
+  const principalIdentityRef = useRef(principalIdentity)
+  principalIdentityRef.current = principalIdentity
+  const gfsAccessStateRef = useRef(gfsAccessState)
+  gfsAccessStateRef.current = gfsAccessState
+  const gfsAuthorizationChangeEpochRef = useRef(gfsAuthorizationChangeEpoch)
+  gfsAuthorizationChangeEpochRef.current = gfsAuthorizationChangeEpoch
   const notificationsRef = useRef<HTMLDivElement | null>(null)
   const searchDirectoryInFlightRef = useRef(false)
   const searchDirectoryRefreshQueryRef = useRef('')
@@ -209,6 +249,138 @@ export const HeaderActions = React.memo(function HeaderActions({
 
   const normalizedSearch = searchQuery.trim().toLowerCase()
   const hasSearch = normalizedSearch.length > 0
+  const exactGfsUri = useMemo(
+    () => parseGfsResourceLink(searchQuery, profileOrigin),
+    [profileOrigin, searchQuery]
+  )
+  const isExactGfsLinkQuery = exactGfsUri !== null
+
+  useEffect(() => {
+    const generation = ++gfsSearchGenerationRef.current
+    if (!searchOpen || !exactGfsUri || gfsAccessState !== 'active') {
+      setGfsSearchResult(current =>
+        gfsAccessState === 'revoked' && current?.status === 'unavailable' ? current : null
+      )
+      return
+    }
+    if (!auth?.isAuthenticated || !principalIdentity) {
+      setGfsSearchResult({
+        query: searchQuery,
+        uri: exactGfsUri,
+        principalIdentity: null,
+        authorizationEpoch: gfsAuthorizationChangeEpoch,
+        status: 'unavailable',
+      })
+      return
+    }
+
+    const currentIdentity = principalIdentity
+    setGfsSearchResult({
+      query: searchQuery,
+      uri: exactGfsUri,
+      principalIdentity: currentIdentity,
+      authorizationEpoch: gfsAuthorizationChangeEpoch,
+      status: 'loading',
+    })
+    let cancelled = false
+    const isCurrentRequest = () =>
+      !cancelled &&
+      generation === gfsSearchGenerationRef.current &&
+      searchQueryRef.current === searchQuery &&
+      principalIdentityRef.current === currentIdentity &&
+      gfsAuthorizationChangeEpochRef.current === gfsAuthorizationChangeEpoch &&
+      gfsAccessStateRef.current === 'active'
+    void (async () => {
+      let expectedSessionGeneration: number | null = null
+      try {
+        const getSessionGeneration = window.clerum.auth?.getSessionGeneration
+        if (!getSessionGeneration) throw new Error('Main session ownership is unavailable')
+        expectedSessionGeneration = await getSessionGeneration()
+        if (!Number.isSafeInteger(expectedSessionGeneration) || expectedSessionGeneration < 0) {
+          throw new Error('Main session ownership is unavailable')
+        }
+        if (!isCurrentRequest()) return
+        const resource = await window.clerum.gfs.resolve(exactGfsUri)
+        const currentSessionGeneration = await getSessionGeneration()
+        if (currentSessionGeneration !== expectedSessionGeneration || !isCurrentRequest()) {
+          return
+        }
+        const kind =
+          resource.kind === 'directory' ? 'directory' : resource.kind === 'file' ? 'file' : null
+        if (
+          normalizeGfsResourceUri(resource.gfsUri) !== exactGfsUri ||
+          !resource.name.trim() ||
+          !kind
+        ) {
+          setGfsSearchResult({
+            query: searchQuery,
+            uri: exactGfsUri,
+            principalIdentity: currentIdentity,
+            authorizationEpoch: gfsAuthorizationChangeEpoch,
+            status: 'unavailable',
+          })
+          return
+        }
+        setGfsSearchResult({
+          query: searchQuery,
+          uri: exactGfsUri,
+          principalIdentity: currentIdentity,
+          authorizationEpoch: gfsAuthorizationChangeEpoch,
+          status: 'resolved',
+          name: sanitizeAppTabTitle(resource.name) || 'Unnamed',
+          kind,
+        })
+      } catch (error) {
+        if (expectedSessionGeneration === null) {
+          if (isCurrentRequest()) {
+            setGfsSearchResult({
+              query: searchQuery,
+              uri: exactGfsUri,
+              principalIdentity: currentIdentity,
+              authorizationEpoch: gfsAuthorizationChangeEpoch,
+              status: 'unavailable',
+            })
+          }
+          return
+        }
+        let currentSessionGeneration: number
+        try {
+          const getSessionGeneration = window.clerum.auth?.getSessionGeneration
+          if (!getSessionGeneration) return
+          currentSessionGeneration = await getSessionGeneration()
+        } catch {
+          return
+        }
+        if (currentSessionGeneration !== expectedSessionGeneration || !isCurrentRequest()) {
+          return
+        }
+        const message = error instanceof Error ? error.message : String(error)
+        if (queryClient && isGfsSessionAuthorityFailure(message, 'operation')) {
+          revokeGfsSessionAccess(queryClient, currentIdentity)
+        }
+        setGfsSearchResult({
+          query: searchQuery,
+          uri: exactGfsUri,
+          principalIdentity: currentIdentity,
+          authorizationEpoch: gfsAuthorizationChangeEpoch,
+          status: 'unavailable',
+        })
+      }
+    })()
+    return () => {
+      cancelled = true
+      if (gfsSearchGenerationRef.current === generation) gfsSearchGenerationRef.current += 1
+    }
+  }, [
+    auth?.isAuthenticated,
+    exactGfsUri,
+    gfsAccessState,
+    gfsAuthorizationChangeEpoch,
+    principalIdentity,
+    queryClient,
+    searchOpen,
+    searchQuery,
+  ])
 
   const teamNameById = useMemo(() => {
     const mapping: Record<string, string> = {}
@@ -422,8 +594,22 @@ export const HeaderActions = React.memo(function HeaderActions({
       .sort((left, right) => left.label.localeCompare(right.label))
   }, [hasSearch, normalizedSearch, searchApps])
 
-  const totalMatches =
-    filteredAgents.length + filteredConnectors.length + filteredPlugins.length + filteredApps.length
+  const currentGfsSearchResult =
+    (gfsAccessState === 'active' || gfsSearchResult?.status === 'unavailable') &&
+    gfsSearchResult?.query === searchQuery &&
+    gfsSearchResult.uri === exactGfsUri &&
+    gfsSearchResult.principalIdentity === principalIdentity &&
+    gfsSearchResult.authorizationEpoch === gfsAuthorizationChangeEpoch
+      ? gfsSearchResult
+      : null
+  const totalMatches = isExactGfsLinkQuery
+    ? currentGfsSearchResult?.status === 'resolved'
+      ? 1
+      : 0
+    : filteredAgents.length +
+      filteredConnectors.length +
+      filteredPlugins.length +
+      filteredApps.length
   const pendingApprovalsCount = pendingApprovals.length
   const inboxNotificationCount = notifications.length
   const totalAttentionCount = pendingApprovalsCount + unreadNotificationCount
@@ -497,7 +683,11 @@ export const HeaderActions = React.memo(function HeaderActions({
             title={SEARCH_PLACEHOLDER}
             value={searchQuery}
             onChange={event => {
-              setSearchQuery(event.target.value)
+              const nextQuery = event.target.value
+              searchQueryRef.current = nextQuery
+              gfsSearchGenerationRef.current += 1
+              setGfsSearchResult(null)
+              setSearchQuery(nextQuery)
               setSearchOpen(true)
             }}
             onFocus={() => setSearchOpen(true)}
@@ -534,7 +724,45 @@ export const HeaderActions = React.memo(function HeaderActions({
                   <p className="search-results-loading">Loading plugins and apps...</p>
                 )}
 
-                {Boolean(filteredAgents.length) && (
+                {isExactGfsLinkQuery && currentGfsSearchResult?.status === 'loading' ? (
+                  <p className="search-results-loading" role="status">
+                    Resolving EvenDrive link…
+                  </p>
+                ) : null}
+                {isExactGfsLinkQuery && currentGfsSearchResult?.status === 'unavailable' ? (
+                  <p className="search-results-empty" role="status">
+                    No accessible EvenDrive resource was found for this link.
+                  </p>
+                ) : null}
+                {isExactGfsLinkQuery && currentGfsSearchResult?.status === 'resolved' ? (
+                  <section className="search-results-group">
+                    <header className="search-results-group-title">EvenDrive</header>
+                    <div className="search-results-list">
+                      <SelectableOption
+                        className="search-result-item search-result-item-button"
+                        onClick={() => {
+                          onOpenGfsResource?.(currentGfsSearchResult.uri)
+                          setSearchOpen(false)
+                        }}
+                        size="sm"
+                      >
+                        <div className="search-result-main">
+                          <strong>{currentGfsSearchResult.name}</strong>
+                          <span className="search-result-subline">
+                            {currentGfsSearchResult.kind === 'directory' ? 'Folder' : 'File'}
+                          </span>
+                        </div>
+                        {currentGfsSearchResult.kind === 'directory' ? (
+                          <IconContexts aria-hidden="true" />
+                        ) : (
+                          <GfsFileIcon name={currentGfsSearchResult.name ?? ''} />
+                        )}
+                      </SelectableOption>
+                    </div>
+                  </section>
+                ) : null}
+
+                {!isExactGfsLinkQuery && Boolean(filteredAgents.length) && (
                   <section className="search-results-group">
                     <header className="search-results-group-title">Agents</header>
                     <div className="search-results-list">
@@ -559,7 +787,7 @@ export const HeaderActions = React.memo(function HeaderActions({
                   </section>
                 )}
 
-                {Boolean(filteredConnectors.length) && (
+                {!isExactGfsLinkQuery && Boolean(filteredConnectors.length) && (
                   <section className="search-results-group">
                     <header className="search-results-group-title">Connectors</header>
                     <div className="search-results-list">
@@ -584,7 +812,7 @@ export const HeaderActions = React.memo(function HeaderActions({
                   </section>
                 )}
 
-                {Boolean(filteredPlugins.length) && (
+                {!isExactGfsLinkQuery && Boolean(filteredPlugins.length) && (
                   <section className="search-results-group">
                     <header className="search-results-group-title">Plugins</header>
                     <div className="search-results-list">
@@ -608,7 +836,7 @@ export const HeaderActions = React.memo(function HeaderActions({
                   </section>
                 )}
 
-                {Boolean(filteredApps.length) && (
+                {!isExactGfsLinkQuery && Boolean(filteredApps.length) && (
                   <section className="search-results-group">
                     <header className="search-results-group-title">Apps</header>
                     <div className="search-results-list">
@@ -633,11 +861,16 @@ export const HeaderActions = React.memo(function HeaderActions({
                   </section>
                 )}
 
-                {hasSearch && !totalMatches && !teamDirectoryLoading && !pluginsAppsLoading && (
-                  <p className="search-results-empty">
-                    No matches for "{searchQuery.trim()}". Try an agent, connector, plugin, or app.
-                  </p>
-                )}
+                {hasSearch &&
+                  !isExactGfsLinkQuery &&
+                  !totalMatches &&
+                  !teamDirectoryLoading &&
+                  !pluginsAppsLoading && (
+                    <p className="search-results-empty">
+                      No matches for "{searchQuery.trim()}". Try an agent, connector, plugin, or
+                      app.
+                    </p>
+                  )}
               </div>
             </div>
           )}

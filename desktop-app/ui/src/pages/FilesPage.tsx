@@ -77,6 +77,20 @@ function hasBit(affordances: { held?: string[] } | null, bit: string): boolean {
   return Boolean(affordances?.held?.includes(bit))
 }
 
+function matchesCurrentResourceUri(
+  current: GfsCrumb | null | undefined,
+  targetUri: string | null
+): current is GfsCrumb {
+  if (!current || !targetUri) return false
+  if (current.gfsUri !== targetUri) return false
+  const targetResourceId = targetUri.slice(targetUri.lastIndexOf('/') + 1)
+  const currentResourceId = current.resourceId.replace(/-/g, '').toLowerCase()
+  return (
+    currentResourceId === targetResourceId.replace(/-/g, '').toLowerCase() &&
+    (current.kind === 'file' || current.kind === 'directory')
+  )
+}
+
 /** Maps a permission set onto the Share dialog's two roles (Editor > Read). */
 function roleForAccessPermissions(permissions: string[]): GfsAccessRole {
   return permissions.some(permission => ['write', 'delete', 'manage_acl'].includes(permission))
@@ -257,6 +271,8 @@ export function FilesPage({
   onOpenPendingGfsPreview,
   routeDialogRequestId = 0,
   onRouteDialogRequestHandled,
+  pendingResourceAction,
+  onPendingResourceActionHandled,
 }: FilesPageProps) {
   const [createFolderName, setCreateFolderName] = useState('')
   const [createFolderOpen, setCreateFolderOpen] = useState(false)
@@ -304,6 +320,37 @@ export function FilesPage({
   const [draggingResourceId, setDraggingResourceId] = useState<string | null>(null)
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null)
   const [movingResourceId, setMovingResourceId] = useState<string | null>(null)
+  const lastHandledResourceActionIdRef = useRef<number | null>(null)
+  const pendingResourceActionRef = useRef(pendingResourceAction)
+  pendingResourceActionRef.current =
+    pendingResourceAction?.id === lastHandledResourceActionIdRef.current
+      ? null
+      : pendingResourceAction
+  const pendingActionSeedRef = useRef<{ id: number; path: string | null | undefined } | null>(null)
+  if (!pendingResourceActionRef.current) {
+    pendingActionSeedRef.current = null
+  } else if (pendingActionSeedRef.current?.id !== pendingResourceActionRef.current.id) {
+    pendingActionSeedRef.current = {
+      id: pendingResourceActionRef.current.id,
+      path: pendingGfsUri,
+    }
+  }
+
+  useEffect(
+    () => () => {
+      const request = pendingResourceActionRef.current
+      if (
+        request &&
+        request.id !== lastHandledResourceActionIdRef.current &&
+        request.actionId !== 'copy-content' &&
+        request.actionId !== 'preview' &&
+        request.actionId !== 'open-folder'
+      ) {
+        onPendingResourceActionHandled?.(request.id)
+      }
+    },
+    [onPendingResourceActionHandled]
+  )
   const draggingResourceRef = useRef<GfsDriveResource | null>(null)
   const movingResourceRef = useRef<string | null>(null)
   const pageActiveRef = useRef(true)
@@ -530,11 +577,7 @@ export function FilesPage({
    *  controller's authority classifier before toasting. Returns true when the
    *  session failed closed (caller should stop; the revoked state takes over). */
   const failClosedOnAuthorizationError = useCallback(
-    (error: unknown): boolean =>
-      ctrl.handleAuthorityFailure(
-        error instanceof Error ? error.message : String(error),
-        'operation'
-      ),
+    (error: unknown): boolean => ctrl.handleAuthorityFailure(error, 'operation'),
     [ctrl]
   )
   const canWriteCurrent = !accessRevoked && hasBit(affordances, 'write')
@@ -582,11 +625,12 @@ export function FilesPage({
   // "not previewable" so the caller downloads instead of silently doing nothing.
   const openFilePreview = (
     resource: Pick<GfsDriveResource, 'bytes' | 'gfsUri' | 'name' | 'version'>,
-    openPreview = onOpenPreview
+    openPreview = onOpenPreview,
+    originatingSessionScope: string | null = ctrl.sessionScope
   ): boolean => {
     const preview = resolveGfsPreview(resource)
     if (!preview || !openPreview) return false
-    return openPreview(preview) !== false
+    return openPreview(preview, originatingSessionScope) !== false
   }
 
   useEffect(() => {
@@ -947,8 +991,10 @@ export function FilesPage({
     isCurrent?: () => boolean,
     openPendingPreview?: (
       preview: GfsPreviewResource,
-      returnLocation: { gfsUri: string | null; name: string | null }
-    ) => boolean
+      returnLocation: { gfsUri: string | null; name: string | null },
+      originatingSessionScope: string | null
+    ) => boolean,
+    filesActionSeedRequestId?: number
   ) => {
     const returnCrumbs = [...crumbs]
     const shouldContinue = () => pageActiveRef.current && (isCurrent?.() ?? true)
@@ -969,15 +1015,37 @@ export function FilesPage({
       // the Files-page ownership predicate.
       if (preview && openPendingPreview) {
         const returnCrumb = returnCrumbs.at(-1)
-        const previewOpened = openPendingPreview(preview, {
-          gfsUri: returnCrumb?.gfsUri ?? null,
-          name: returnCrumb?.name ?? null,
-        })
+        const previewOpened = openPendingPreview(
+          preview,
+          {
+            gfsUri: returnCrumb?.gfsUri ?? null,
+            name: returnCrumb?.name ?? null,
+          },
+          opened.originatingSessionScope
+        )
         if (!previewOpened) return false
         onOpened?.()
         return true
       }
-      const previewOpened = openFilePreview(opened)
+      const currentFilesAction = pendingResourceActionRef.current
+      const filesActionStillOwnsSeed =
+        filesActionSeedRequestId !== undefined &&
+        ((currentFilesAction?.id === filesActionSeedRequestId &&
+          currentFilesAction.actionId !== 'copy-content' &&
+          currentFilesAction.actionId !== 'preview' &&
+          currentFilesAction.actionId !== 'open-folder' &&
+          (currentFilesAction.navigationUri === undefined
+            ? currentFilesAction.targetUri
+            : currentFilesAction.navigationUri) === uri) ||
+          lastHandledResourceActionIdRef.current === filesActionSeedRequestId)
+      if (filesActionStillOwnsSeed) {
+        // The seed has already resolved the exact Files target. Keep it in this
+        // page so the pending-action consumer can run its existing descriptor;
+        // generic link handling would open Preview or start a second download.
+        onOpened?.()
+        return true
+      }
+      const previewOpened = openFilePreview(opened, onOpenPreview, opened.originatingSessionScope)
       if (!shouldContinue()) return false
       ctrl.restoreCrumbs(returnCrumbs)
       if (!previewOpened) {
@@ -996,11 +1064,44 @@ export function FilesPage({
    */
   useEffect(() => {
     if (!pendingGfsUri || pendingGfsDeepLink) return
+    const request = pendingResourceActionRef.current
+    const navigationUri = request
+      ? request.navigationUri === undefined
+        ? request.targetUri
+        : request.navigationUri
+      : null
+    const filesActionOwnsSeed = Boolean(
+      request &&
+      request.actionId !== 'copy-content' &&
+      request.actionId !== 'preview' &&
+      request.actionId !== 'open-folder' &&
+      navigationUri === pendingGfsUri &&
+      pendingActionSeedRef.current?.id === request.id &&
+      pendingActionSeedRef.current.path === pendingGfsUri
+    )
+    const isCurrentActionSeed =
+      filesActionOwnsSeed && request
+        ? () =>
+            lastHandledResourceActionIdRef.current === request.id ||
+            (pendingResourceActionRef.current?.id === request.id &&
+              pendingActionSeedRef.current?.id === request.id &&
+              pendingActionSeedRef.current.path === pendingGfsUri &&
+              (pendingResourceActionRef.current.navigationUri === undefined
+                ? pendingResourceActionRef.current.targetUri
+                : pendingResourceActionRef.current.navigationUri) === pendingGfsUri)
+        : undefined
     // Re-arm on every non-null seed so a deep-link onto an already-mounted page
     // suppresses the pre-open location the same way the initial mount does.
     seedPendingRef.current = true
     onPendingGfsUriHandled?.()
-    void handleOpenGfsLink(pendingGfsUri)
+    void handleOpenGfsLink(
+      pendingGfsUri,
+      undefined,
+      undefined,
+      isCurrentActionSeed,
+      undefined,
+      filesActionOwnsSeed ? request?.id : undefined
+    )
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingGfsUri])
 
@@ -1076,7 +1177,8 @@ export function FilesPage({
       },
       isCurrent,
       onOpenPendingGfsPreview
-        ? (preview, returnLocation) => onOpenPendingGfsPreview(link.id, preview, returnLocation)
+        ? (preview, returnLocation, originatingSessionScope) =>
+            onOpenPendingGfsPreview(link.id, preview, returnLocation, originatingSessionScope)
         : undefined
     ).catch(error => reportFailure({ kind: 'error', error }))
 
@@ -1674,6 +1776,132 @@ export function FilesPage({
         refreshing: refreshingCurrent,
       })
     : []
+
+  useEffect(() => {
+    const request = pendingResourceAction
+    if (
+      !request ||
+      request.actionId === 'copy-content' ||
+      request.actionId === 'preview' ||
+      request.actionId === 'open-folder' ||
+      lastHandledResourceActionIdRef.current === request.id
+    ) {
+      return
+    }
+    const navigationUri =
+      request.navigationUri === undefined ? request.targetUri : request.navigationUri
+    const markHandled = () => {
+      lastHandledResourceActionIdRef.current = request.id
+      pendingResourceActionRef.current = null
+      onPendingResourceActionHandled?.(request.id)
+    }
+    // A changed activation seed means this mounted page has been superseded.
+    // The seed never establishes readiness: that comes from live `current` below.
+    if (
+      pendingActionSeedRef.current?.id === request.id &&
+      pendingActionSeedRef.current.path !== pendingGfsUri
+    ) {
+      markHandled()
+      return
+    }
+    if (request.actionId === 'move' && request.targetResource) {
+      if (ctrl.resolving) return
+      if (navigationUri === null) {
+        if (current) {
+          markHandled()
+          pushToast?.('The parent location changed before this action could run.', 'error')
+          return
+        }
+        if (loadingAccessible || ctrl.authorityPending) return
+        if (accessibleError || ctrl.discoveryFailure) {
+          markHandled()
+          pushToast?.(
+            accessibleError ??
+              ctrl.discoveryFailure?.message ??
+              'Shared files could not be loaded.',
+            'error'
+          )
+          return
+        }
+      } else if (
+        !matchesCurrentResourceUri(current, navigationUri) ||
+        current.kind !== 'directory'
+      ) {
+        if (ctrl.openError && !ctrl.resolving) {
+          markHandled()
+          pushToast?.(ctrl.openError, 'error')
+        }
+        return
+      } else {
+        if (loading || ctrl.authorityPending) return
+        if (error) {
+          markHandled()
+          pushToast?.(error, 'error')
+          return
+        }
+      }
+      const target = visibleResources.find(
+        resource =>
+          resource.resourceId.replace(/-/g, '').toLowerCase() ===
+            request.targetResource?.resourceId.replace(/-/g, '').toLowerCase() &&
+          resource.kind === request.targetResource?.kind &&
+          resource.gfsUri === request.targetUri
+      )
+      if (!target) {
+        markHandled()
+        pushToast?.('This resource is no longer available from its parent folder.', 'error')
+        return
+      }
+      markHandled()
+      setMoveTarget({
+        resourceId: target.resourceId,
+        name: target.name,
+        kind: target.kind,
+        version: target.version,
+        parentResourceId: target.parentResourceId,
+      })
+      return
+    }
+    if (matchesCurrentResourceUri(current, request.targetUri)) {
+      if (ctrl.resolving || ctrl.authorityPending) return
+      const action = currentResourceActions.find(candidate => candidate.id === request.actionId)
+      if (!action) {
+        markHandled()
+        pushToast?.('This action is no longer available for this resource.', 'error')
+        return
+      }
+      if (action.disabled) return
+      markHandled()
+      try {
+        action.run(request.file)
+      } catch (error) {
+        pushToast?.(error instanceof Error ? error.message : String(error), 'error')
+      }
+      return
+    }
+    if (pendingGfsUri === navigationUri && ctrl.openError && !ctrl.resolving) {
+      markHandled()
+      pushToast?.(ctrl.openError, 'error')
+    }
+  }, [
+    accessibleError,
+    ctrl.openError,
+    ctrl.resolving,
+    ctrl.authorityPending,
+    ctrl.discoveryFailure,
+    current?.gfsUri,
+    current?.resourceId,
+    current?.kind,
+    currentResourceActions,
+    error,
+    loading,
+    loadingAccessible,
+    onPendingResourceActionHandled,
+    pendingGfsUri,
+    pendingResourceAction,
+    pushToast,
+    visibleResources,
+  ])
 
   const openResource = (resource: GfsDriveResource) => {
     // The children listing marks rows the session cannot read (e.g. a folder
@@ -2507,7 +2735,7 @@ export function FilesPage({
           }
           onClose={() => setMoveTarget(null)}
           onMove={handleMoveTarget}
-          onAuthorityFailure={message => ctrl.handleAuthorityFailure(message, 'operation')}
+          onAuthorityFailure={error => ctrl.handleAuthorityFailure(error, 'operation')}
           sessionScope={sessionScope}
           target={moveTarget}
         />

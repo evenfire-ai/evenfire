@@ -12,6 +12,7 @@ import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
   childView,
+  listChildrenDeniedMessage,
   listChildrenPage,
   resolveDeniedMessage,
   resolveResource,
@@ -19,7 +20,11 @@ import {
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { shouldRevalidateGfsQuery } from '@/lib/gfsEntityChangeState'
 import { desktopQueryKeys } from '../queryKeys'
-import { useGfsBrowserController } from '../useGfsBrowserController'
+import {
+  revokeGfsSessionAccess,
+  useGfsBrowserController,
+  useGfsSessionAccessState,
+} from '../useGfsBrowserController'
 
 // Fire-and-forget UI actions in these probes mirror the production callers,
 // which await the same promises inside try/catch (see FilesPage). Swallow
@@ -259,6 +264,11 @@ function Probe() {
   )
 }
 
+function GfsAccessStateProbe() {
+  const accessState = useGfsSessionAccessState(':user-a:team-a')
+  return <div data-testid="shared-access-state">{accessState}</div>
+}
+
 function Harness({
   children,
   productionQueryDefaults = false,
@@ -425,6 +435,113 @@ describe('useGfsBrowserController', () => {
 
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('none'))
     expect(lastHarnessQueryClient?.getQueryData(grantsKey)).toBeUndefined()
+  })
+
+  it('clears a mounted browser location after another surface revokes shared GFS access', async () => {
+    const root = await resolveResource(
+      resolvedDirectory('root', 'Private Folder', { gfsUri: 'gfs://main/root' })
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => root),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+    await act(async () => screen.getByRole('button', { name: 'open' }).click())
+    await waitFor(() => expect(screen.getByTestId('crumbs').textContent).toBe('Private Folder'))
+
+    act(() => {
+      if (!lastHarnessQueryClient) throw new Error('GFS browser query client is missing')
+      revokeGfsSessionAccess(lastHarnessQueryClient, ':user-a:team-a')
+    })
+
+    await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('revoked'))
+    expect(screen.getByTestId('current').textContent).toBe('none')
+    expect(screen.getByTestId('crumbs').textContent).toBe('')
+  })
+
+  it('keeps shared revocation after the last GFS surface unmounts', async () => {
+    const { unmount } = render(<GfsAccessStateProbe />, { wrapper: ProductionHarness })
+    const client = lastHarnessQueryClient
+    if (!client) throw new Error('GFS browser query client is missing')
+    const accessKey = desktopQueryKeys.gfsAccessState(':user-a:team-a')
+
+    expect(screen.getByTestId('shared-access-state').textContent).toBe('active')
+    expect(client.getQueryData(accessKey)).toBe('active')
+    act(() => revokeGfsSessionAccess(client, ':user-a:team-a'))
+    expect(client.getQueryData(accessKey)).toBe('revoked')
+    await waitFor(() =>
+      expect(screen.getByTestId('shared-access-state').textContent).toBe('revoked')
+    )
+    unmount()
+
+    vi.useFakeTimers()
+    act(() => {
+      vi.advanceTimersByTime(31 * 60 * 1000)
+    })
+    expect(client.getQueryData(accessKey)).toBe('revoked')
+  })
+
+  it('does not let an old-session folder 401 revoke a renewed same-principal session', async () => {
+    const root = await resolveResource(
+      resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
+    )
+    let rejectOldRequest!: (error: Error) => void
+    const oldRequest = new Promise<never>((_resolve, reject) => {
+      rejectOldRequest = reject
+    })
+    let sessionGeneration = 1
+    const listChildren = vi.fn(() => oldRequest)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        auth: { getSessionGeneration: vi.fn(async () => sessionGeneration) },
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => root),
+          listChildren,
+          affordances: vi.fn(async () => ({
+            held: ['read'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+    await act(async () => screen.getByRole('button', { name: 'open' }).click())
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    await waitFor(() => expect(listChildren).toHaveBeenCalledOnce())
+
+    // Main-process token replacement keeps the same renderer principal/team but
+    // advances the request generation before the old authenticated request fails.
+    sessionGeneration = 2
+    const staleUnauthorized = new Error(await listChildrenDeniedMessage('root'))
+    staleUnauthorized.name = 'GfsStaleSessionAuthorityError'
+    await act(async () => rejectOldRequest(staleUnauthorized))
+    const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main')
+    await waitFor(() =>
+      expect(lastHarnessQueryClient?.getQueryState(childrenKey)?.status).toBe('error')
+    )
+    await act(async () => new Promise(resolvePromise => setTimeout(resolvePromise, 0)))
+
+    expect(sessionGeneration).toBe(2)
+    expect(screen.getByTestId('access-state').textContent).toBe('active')
+    expect(screen.getByTestId('current').textContent).toBe('root')
   })
 
   it('preserves a failed link error when a background refresh resolves the current folder', async () => {

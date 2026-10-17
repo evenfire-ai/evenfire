@@ -10,6 +10,62 @@ import type {
   SandboxUiDeepLinkEnvelope,
 } from './types.js'
 
+const STALE_GFS_AUTHORITY_MARKER = '__CLERUM_GFS_STALE_AUTHORITY_V1__:'
+const STALE_GFS_AUTHORITY_STALE_TAG = 'stale:'
+const STALE_GFS_AUTHORITY_MESSAGE_TAG = 'message:'
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error
+    ? error.message
+    : error && typeof error === 'object' && 'message' in error
+      ? String((error as { message?: unknown }).message ?? '')
+      : String(error ?? '')
+}
+
+function decodeGfsIpcErrorMessage(encoded: string): string | undefined {
+  try {
+    const decoded = JSON.parse(decodeURIComponent(encoded)) as unknown
+    return typeof decoded === 'string' ? decoded : undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function invokeGfs<T = unknown>(channel: string, payload?: unknown): Promise<T> {
+  try {
+    return (
+      payload === undefined
+        ? await ipcRenderer.invoke(channel)
+        : await ipcRenderer.invoke(channel, payload)
+    ) as T
+  } catch (error) {
+    const message = getErrorMessage(error)
+    // Electron 41's ipcRenderer.invoke wraps a rejected main error as:
+    // "Error invoking remote method '<channel>': Error: <message>".
+    // Normalize only this exact GFS bridge envelope and its main-owned tag.
+    const prefix = `Error invoking remote method '${channel}': Error: ${STALE_GFS_AUTHORITY_MARKER}`
+    if (!message.startsWith(prefix)) throw error
+
+    const payload = message.slice(prefix.length)
+    const staleMessage = payload.startsWith(STALE_GFS_AUTHORITY_STALE_TAG)
+      ? decodeGfsIpcErrorMessage(payload.slice(STALE_GFS_AUTHORITY_STALE_TAG.length))
+      : undefined
+    if (staleMessage !== undefined) {
+      const staleError = new Error(staleMessage)
+      staleError.name = 'GfsStaleSessionAuthorityError'
+      Object.assign(staleError, { code: 'GFS_STALE_SESSION_AUTHORITY' })
+      throw staleError
+    }
+
+    const ordinaryMessage = payload.startsWith(STALE_GFS_AUTHORITY_MESSAGE_TAG)
+      ? decodeGfsIpcErrorMessage(payload.slice(STALE_GFS_AUTHORITY_MESSAGE_TAG.length))
+      : undefined
+    if (ordinaryMessage !== undefined) throw new Error(ordinaryMessage)
+
+    throw error
+  }
+}
+
 // Sandboxed Electron preloads cannot load relative runtime modules. Keep this
 // allowlist self-contained and pin it to the authoritative registry in
 // desktopCommands.test.ts, matching the existing sandbox embed-preload pattern.
@@ -155,35 +211,36 @@ const clerum = Object.freeze({
     getUserNavigationGeneration: () => ipcRenderer.sendSync('gfs:getUserNavigationGeneration'),
     advanceUserNavigationGeneration: () =>
       ipcRenderer.sendSync('gfs:advanceUserNavigationGeneration'),
-    listPendingDeepLinks: () => ipcRenderer.invoke('gfs:listPendingDeepLinks'),
-    clearPendingDeepLinks: () => ipcRenderer.invoke('gfs:clearPendingDeepLinks'),
-    acknowledgeDeepLink: (id: number) => ipcRenderer.invoke('gfs:acknowledgeDeepLink', { id }),
+    listPendingDeepLinks: () => invokeGfs('gfs:listPendingDeepLinks'),
+    clearPendingDeepLinks: () => invokeGfs('gfs:clearPendingDeepLinks'),
+    acknowledgeDeepLink: (id: number) => invokeGfs('gfs:acknowledgeDeepLink', { id }),
     onDeepLink: (callback: (link: GfsResourceDeepLinkEnvelope) => void) => {
       const listener = (_event: unknown, payload: GfsResourceDeepLinkEnvelope) => callback(payload)
       ipcRenderer.on('gfs:deepLink', listener)
       return () => ipcRenderer.off('gfs:deepLink', listener)
     },
-    copyDeepLink: (uri: string) => ipcRenderer.invoke('gfs:copyDeepLink', { uri }),
-    resolve: (uri: string) => ipcRenderer.invoke('gfs:resolve', { uri }),
-    download: (uri: string) => ipcRenderer.invoke('gfs:download', { uri }),
+    copyDeepLink: (uri: string) => invokeGfs('gfs:copyDeepLink', { uri }),
+    getResourceProfileOrigin: () => invokeGfs('gfs:getResourceProfileOrigin'),
+    resolve: (uri: string) => invokeGfs('gfs:resolve', { uri }),
+    download: (uri: string) => invokeGfs('gfs:download', { uri }),
     downloadPreview: (uri: string, maxBytes: number) =>
-      ipcRenderer.invoke('gfs:downloadPreview', { uri, maxBytes }),
+      invokeGfs('gfs:downloadPreview', { uri, maxBytes }),
     listAccessible: (drive?: string, cursor?: string) =>
-      ipcRenderer.invoke('gfs:listAccessible', { drive, cursor }),
+      invokeGfs('gfs:listAccessible', { drive, cursor }),
     listChildren: (resourceId: string, drive?: string, cursor?: string) =>
-      ipcRenderer.invoke('gfs:listChildren', { resourceId, drive, cursor }),
+      invokeGfs('gfs:listChildren', { resourceId, drive, cursor }),
     affordances: (resourceId: string, drive?: string) =>
-      ipcRenderer.invoke('gfs:affordances', { resourceId, drive }),
+      invokeGfs('gfs:affordances', { resourceId, drive }),
     createFolder: (parentResourceId: string, name: string, drive?: string) =>
-      ipcRenderer.invoke('gfs:createFolder', { parentResourceId, name, drive }),
+      invokeGfs('gfs:createFolder', { parentResourceId, name, drive }),
     createFile: (parentResourceId: string, name: string, encodedData: string, drive?: string) =>
-      ipcRenderer.invoke('gfs:createFile', { parentResourceId, name, encodedData, drive }),
+      invokeGfs('gfs:createFile', { parentResourceId, name, encodedData, drive }),
     createFileFromPath: (
       parentResourceId: string,
       name: string,
       filePath: string,
       drive?: string
-    ) => ipcRenderer.invoke('gfs:createFileFromPath', { parentResourceId, name, filePath, drive }),
+    ) => invokeGfs('gfs:createFileFromPath', { parentResourceId, name, filePath, drive }),
     startFileUpload: (
       parentResourceId: string,
       name: string,
@@ -191,7 +248,7 @@ const clerum = Object.freeze({
       drive?: string,
       resumeUploadId?: string
     ) =>
-      ipcRenderer.invoke('gfs:startFileUpload', {
+      invokeGfs('gfs:startFileUpload', {
         parentResourceId,
         name,
         filePath,
@@ -205,7 +262,7 @@ const clerum = Object.freeze({
       ifMatch?: number,
       resumeUploadId?: string
     ) =>
-      ipcRenderer.invoke('gfs:startFileReplace', {
+      invokeGfs('gfs:startFileReplace', {
         resourceId,
         filePath,
         drive,
@@ -213,43 +270,43 @@ const clerum = Object.freeze({
         resumeUploadId,
       }),
     getUploadSnapshot: (uploadId: string, drive = 'main') =>
-      ipcRenderer.invoke('gfs:getUploadSnapshot', { uploadId, drive }),
-    listUploadSessions: (drive = 'main') => ipcRenderer.invoke('gfs:listUploadSessions', { drive }),
+      invokeGfs('gfs:getUploadSnapshot', { uploadId, drive }),
+    listUploadSessions: (drive = 'main') => invokeGfs('gfs:listUploadSessions', { drive }),
     pauseUpload: (uploadId: string, drive = 'main') =>
-      ipcRenderer.invoke('gfs:pauseUpload', { uploadId, drive }),
+      invokeGfs('gfs:pauseUpload', { uploadId, drive }),
     resumeUpload: (uploadId: string, drive = 'main') =>
-      ipcRenderer.invoke('gfs:resumeUpload', { uploadId, drive }),
+      invokeGfs('gfs:resumeUpload', { uploadId, drive }),
     cancelUpload: (uploadId: string, drive = 'main') =>
-      ipcRenderer.invoke('gfs:cancelUpload', { uploadId, drive }),
+      invokeGfs('gfs:cancelUpload', { uploadId, drive }),
     replaceFile: (resourceId: string, encodedData: string, drive?: string, ifMatch?: number) =>
-      ipcRenderer.invoke('gfs:replaceFile', { resourceId, encodedData, drive, ifMatch }),
+      invokeGfs('gfs:replaceFile', { resourceId, encodedData, drive, ifMatch }),
     replaceFileFromPath: (resourceId: string, filePath: string, drive?: string, ifMatch?: number) =>
-      ipcRenderer.invoke('gfs:replaceFileFromPath', { resourceId, filePath, drive, ifMatch }),
+      invokeGfs('gfs:replaceFileFromPath', { resourceId, filePath, drive, ifMatch }),
     getPathForFile: (file: File) => webUtils.getPathForFile(file),
     renameResource: (resourceId: string, newName: string, drive?: string, ifMatch?: number) =>
-      ipcRenderer.invoke('gfs:renameResource', { resourceId, newName, drive, ifMatch }),
+      invokeGfs('gfs:renameResource', { resourceId, newName, drive, ifMatch }),
     moveResource: (resourceId: string, destinationId: string, drive?: string, ifMatch?: number) =>
-      ipcRenderer.invoke('gfs:moveResource', { resourceId, destinationId, drive, ifMatch }),
+      invokeGfs('gfs:moveResource', { resourceId, destinationId, drive, ifMatch }),
     deleteResource: (resourceId: string, drive?: string, ifMatch?: number) =>
-      ipcRenderer.invoke('gfs:deleteResource', { resourceId, drive, ifMatch }),
+      invokeGfs('gfs:deleteResource', { resourceId, drive, ifMatch }),
     grant: (
       resourceId: string,
       subjectKeys: string[],
       bits: string[],
       drive?: string,
       inherit?: boolean
-    ) => ipcRenderer.invoke('gfs:grant', { resourceId, subjectKeys, bits, drive, inherit }),
+    ) => invokeGfs('gfs:grant', { resourceId, subjectKeys, bits, drive, inherit }),
     listGrants: (resourceId: string, drive?: string) =>
-      ipcRenderer.invoke('gfs:listGrants', { resourceId, drive }),
-    revokeGrant: (grantId: string) => ipcRenderer.invoke('gfs:revokeGrant', { grantId }),
+      invokeGfs('gfs:listGrants', { resourceId, drive }),
+    revokeGrant: (grantId: string) => invokeGfs('gfs:revokeGrant', { grantId }),
     listShares: (resourceId: string, drive?: string) =>
-      ipcRenderer.invoke('gfs:listShares', { resourceId, drive }),
-    revokeShare: (shareId: string) => ipcRenderer.invoke('gfs:revokeShare', { shareId }),
+      invokeGfs('gfs:listShares', { resourceId, drive }),
+    revokeShare: (shareId: string) => invokeGfs('gfs:revokeShare', { shareId }),
     // A desktop share grants READ access only (the minimal shared capability) —
     // unlike `grant`, it takes no permission bits by design. The server still
     // enforces the caller holds read + share (no-escalation).
     createShare: (resourceId: string, subjectKeys: string[], drive?: string) =>
-      ipcRenderer.invoke('gfs:createShare', { resourceId, subjectKeys, drive }),
+      invokeGfs('gfs:createShare', { resourceId, subjectKeys, drive }),
   },
   agents: {
     listMine: () => ipcRenderer.invoke('agents:listMine'),
