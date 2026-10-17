@@ -1,24 +1,53 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { randomUUID } from 'node:crypto'
+import { EventEmitter } from 'node:events'
 import request from 'supertest'
+import { canonicalResourceIdentity, hashActionTarget } from '@clerum/action-context-contracts'
+import { config } from '../config.js'
 import { DesktopSessionService } from '../services/desktopSessionService.js'
-import { createDesktopRouter, handleDesktopUpgrade, parseCookies } from './desktopProxy.js'
+import {
+  createDesktopRouter,
+  handleDesktopUpgrade,
+  parseCookies,
+  stripDesktopEdgeCredentials,
+} from './desktopProxy.js'
 
 // ── Hoisted mocks ───────────────────────────────────────────────────
 const authTokenMock = vi.hoisted(() => ({
   verifyRpcToken: vi.fn(),
 }))
 
+const delegationMock = vi.hoisted(() => ({
+  tokenDeclaresV2: vi.fn((token: string) => token.startsWith('v2.')),
+  verifyUserDelegationV2: vi.fn(),
+}))
+
+const authorityMock = vi.hoisted(() => ({ authorizeActionV2: vi.fn() }))
+const leaseMock = vi.hoisted(() => ({ startActiveViewLease: vi.fn() }))
+const legacyAdmissionMock = vi.hoisted(() => ({ admit: vi.fn() }))
+const proxyMock = vi.hoisted(() => ({
+  web: vi.fn((_req: unknown, res: express.Response) => res.status(200).end()),
+  ws: vi.fn(),
+  on: vi.fn(),
+}))
+
 vi.mock('../authToken.js', () => authTokenMock)
+vi.mock('../userDelegationV2.js', () => delegationMock)
+vi.mock('../actionAuthorityV2.js', async importOriginal => ({
+  ...(await importOriginal<typeof import('../actionAuthorityV2.js')>()),
+  authorizeActionV2: authorityMock.authorizeActionV2,
+}))
+vi.mock('../services/activeViewLease.js', () => leaseMock)
+vi.mock('../services/controlApiRestService.js', async importOriginal => ({
+  ...(await importOriginal<typeof import('../services/controlApiRestService.js')>()),
+  admitLegacySessionCreation: legacyAdmissionMock.admit,
+}))
 
 // Mock http-proxy to avoid real proxy connections
 vi.mock('http-proxy', () => ({
   default: {
-    createProxyServer: () => ({
-      web: vi.fn(),
-      ws: vi.fn(),
-      on: vi.fn(),
-    }),
+    createProxyServer: () => proxyMock,
   },
 }))
 
@@ -36,9 +65,9 @@ const VALID_CLAIMS = {
 }
 
 const sessionService = new DesktopSessionService(
-  'test-secret-32-chars-minimum!!',
-  60_000,
-  'clerum_desktop_session'
+  config.desktopCookieSecret,
+  config.desktopCookieMaxAgeMs,
+  config.desktopCookieName
 )
 
 function makeApp() {
@@ -67,12 +96,50 @@ function signTestJwt(scopes: string[], hostRefs: string[]): string {
   return token
 }
 
+function desktopDelegation(
+  operationId: 'remote_desktop.open' | 'remote_desktop.reconnect' = 'remote_desktop.reconnect'
+) {
+  const resource = canonicalResourceIdentity({
+    environmentId: 'test',
+    type: 'host',
+    logicalId: 'mcp-host/chatllm',
+  })
+  const target = { hostRef: 'mcp-host/chatllm' }
+  return {
+    typ: 'user_delegation' as const,
+    ver: 2 as const,
+    sub: randomUUID(),
+    sid: randomUUID(),
+    sv: 1,
+    jti: randomUUID(),
+    iat: 1,
+    exp: Math.floor(Date.now() / 1000) + 300,
+    operationIds: [operationId],
+    scopes: [`action:${operationId}` as const],
+    resource,
+    targets: { [operationId]: target },
+    targetHashes: { [operationId]: hashActionTarget(target) },
+    accessPathId: `ap1_${'A'.repeat(43)}`,
+    authorizationRevision: `ar1_${'B'.repeat(43)}`,
+    behaviorBindingHash: `bh2_${'C'.repeat(43)}`,
+    pathKind: 'direct' as const,
+    effectiveTeamId: null,
+  }
+}
+
 // ── Setup / Teardown ────────────────────────────────────────────────
 const originalFetch = globalThis.fetch
 
 beforeEach(() => {
   authTokenMock.verifyRpcToken.mockReset()
   authTokenMock.verifyRpcToken.mockReturnValue({ ...VALID_CLAIMS })
+  delegationMock.verifyUserDelegationV2.mockReset()
+  authorityMock.authorizeActionV2.mockReset()
+  leaseMock.startActiveViewLease.mockReset()
+  legacyAdmissionMock.admit.mockReset().mockResolvedValue({ allowed: true })
+  proxyMock.web.mockClear()
+  proxyMock.ws.mockClear()
+  leaseMock.startActiveViewLease.mockReturnValue({ close: vi.fn() })
   globalThis.fetch = originalFetch
 })
 
@@ -107,6 +174,21 @@ describe('POST /desktop/:hostRef/session (JWT-only)', () => {
     global.fetch = mockHcc as any
   })
 
+  it('rejects v2 Desktop open before the HCC readiness check', async () => {
+    delegationMock.verifyUserDelegationV2.mockReturnValue(desktopDelegation('remote_desktop.open'))
+
+    const res = await request(makeApp())
+      .post('/desktop/chatllm/session')
+      .set('authorization', 'Bearer v2.open')
+      .send({})
+
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'authority_unavailable' })
+    expect(mockHcc).not.toHaveBeenCalled()
+    expect(authorityMock.authorizeActionV2).not.toHaveBeenCalled()
+    expect(legacyAdmissionMock.admit).not.toHaveBeenCalled()
+  })
+
   it('issues session cookie when desktop is running', async () => {
     mockHcc.mockResolvedValueOnce({
       ok: true,
@@ -126,8 +208,70 @@ describe('POST /desktop/:hostRef/session (JWT-only)', () => {
     expect(res.headers['set-cookie']?.[0]).toMatch(
       /^clerum_desktop_session=.+; Path=\/api\/v1\/desktop\/chatllm; HttpOnly; SameSite=Strict; Max-Age=\d+$/
     )
+    expect(legacyAdmissionMock.admit).toHaveBeenCalledWith(token)
     // No Secure flag in dev/test (NODE_ENV !== production); cookie must work over HTTP port-forwards.
     expect(res.headers['set-cookie']?.[0]).not.toMatch(/; Secure/)
+  })
+
+  it('limits repeated legacy session opens before HCC readiness work', async () => {
+    mockHcc.mockImplementation(async () => ({
+      ok: true,
+      json: async () => ({ status: 'running', hostRef: 'chatllm' }),
+    }))
+
+    const app = makeApp()
+    const token = signTestJwt(['desktop:view'], ['chatllm'])
+    let admitted = 0
+    legacyAdmissionMock.admit.mockImplementation(async () => {
+      admitted += 1
+      return admitted <= 60
+        ? { allowed: true }
+        : {
+            allowed: false,
+            status: 429,
+            retryAfterSeconds: 7,
+            headers: {
+              'X-RateLimit-Limit': '60',
+              'X-RateLimit-Remaining': '0',
+              'X-RateLimit-Reset': '1800000000',
+            },
+          }
+    })
+    const responses = []
+    for (let index = 0; index < 61; index += 1) {
+      responses.push(
+        await request(app)
+          .post('/desktop/chatllm/session')
+          .set('authorization', `Bearer ${token}`)
+          .send({})
+      )
+    }
+
+    expect(responses.slice(0, 60).every(response => response.status === 200)).toBe(true)
+    expect(responses[60].status).toBe(429)
+    expect(responses[60].headers['retry-after']).toBe('7')
+    expect(mockHcc).toHaveBeenCalledTimes(60)
+    expect(legacyAdmissionMock.admit).toHaveBeenCalledTimes(61)
+  })
+
+  it('fails closed on admission-store unavailability before HCC work', async () => {
+    legacyAdmissionMock.admit.mockResolvedValue({
+      allowed: false,
+      status: 503,
+      retryAfterSeconds: 2,
+      headers: {},
+    })
+    const token = signTestJwt(['desktop:view'], ['chatllm'])
+
+    const res = await request(makeApp())
+      .post('/desktop/chatllm/session')
+      .set('authorization', `Bearer ${token}`)
+      .send({})
+      .expect(503)
+
+    expect(res.body).toEqual({ error: 'rate_limit_unavailable', retryAfterSeconds: 2 })
+    expect(res.headers['retry-after']).toBe('2')
+    expect(mockHcc).not.toHaveBeenCalled()
   })
 
   it('adds Secure flag to session cookie when NODE_ENV=production', async () => {
@@ -207,6 +351,7 @@ describe('POST /desktop/:hostRef/session (JWT-only)', () => {
       .send({})
 
     expect(res.status).toBe(403)
+    expect(legacyAdmissionMock.admit).not.toHaveBeenCalled()
   })
 
   it('returns 403 when hostRef not in JWT hostRefs', async () => {
@@ -219,10 +364,22 @@ describe('POST /desktop/:hostRef/session (JWT-only)', () => {
       .send({})
 
     expect(res.status).toBe(403)
+    expect(legacyAdmissionMock.admit).not.toHaveBeenCalled()
   })
 })
 
 describe('ALL /desktop/:hostRef/view/*', () => {
+  it('proxies a valid legacy-only desktop session', async () => {
+    const cookie = sessionService.createSession('chatllm', 'user-123')
+
+    const res = await request(makeApp())
+      .get('/desktop/chatllm/view/index.html')
+      .set('Cookie', `clerum_desktop_session=${cookie}`)
+
+    expect(res.status).toBe(200)
+    expect(proxyMock.web).toHaveBeenCalledOnce()
+  })
+
   it('returns 401 without session cookie', async () => {
     const app = makeApp()
     const res = await request(app).get('/desktop/chatllm/view/index.html')
@@ -247,6 +404,119 @@ describe('ALL /desktop/:hostRef/view/*', () => {
       .set('Cookie', `clerum_desktop_session=${cookie}`)
     expect(res.status).toBe(401)
     expect(res.body.error).toBe('Invalid desktop session')
+  })
+
+  it('keeps the v2 Desktop view capability unavailable before checkpoint or proxy work', async () => {
+    const claims = desktopDelegation()
+    const leaseState = { live: true }
+    leaseMock.startActiveViewLease.mockReturnValue({
+      close: () => {
+        leaseState.live = false
+      },
+    })
+    delegationMock.verifyUserDelegationV2.mockReturnValue(claims)
+    authorityMock.authorizeActionV2.mockImplementation(async (_claims, bound) => ({
+      claims,
+      bound,
+      checkpoint: { status: 'allowed' },
+      trustedEdgeContext: {},
+      trustedEdgeHeader: 'trusted',
+    }))
+
+    const response = await request(makeApp())
+      .get('/desktop/chatllm/view/index.html')
+      .set('Authorization', 'Bearer v2.valid')
+      .set('Cookie', 'legacy=must-not-forward')
+      .set('x-clerum-edge-action-context', 'must-not-forward')
+      .expect(503)
+
+    expect(response.body).toEqual({ error: 'authority_unavailable' })
+    expect(authorityMock.authorizeActionV2).not.toHaveBeenCalled()
+    expect(leaseMock.startActiveViewLease).not.toHaveBeenCalled()
+    expect(proxyMock.web).not.toHaveBeenCalled()
+    expect(leaseState.live).toBe(true)
+  })
+
+  it('keeps a replayed v2 view delegation out of unbounded Desktop consumer work', async () => {
+    const claims = desktopDelegation()
+    delegationMock.verifyUserDelegationV2.mockReturnValue(claims)
+    authorityMock.authorizeActionV2.mockImplementation(async (_claims, bound) => ({
+      claims,
+      bound,
+      checkpoint: { status: 'allowed' },
+      trustedEdgeContext: {},
+      trustedEdgeHeader: 'trusted',
+    }))
+
+    const app = makeApp()
+    const responses = []
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      responses.push(
+        await request(app)
+          .get('/desktop/chatllm/view/index.html')
+          .set('Authorization', 'Bearer v2.replayed')
+      )
+    }
+
+    expect(responses.map(response => response.status)).toEqual([503, 503, 503])
+    expect(responses.map(response => response.body.error)).toEqual(
+      Array(3).fill('authority_unavailable')
+    )
+    expect(authorityMock.authorizeActionV2).not.toHaveBeenCalled()
+    expect(proxyMock.web).not.toHaveBeenCalled()
+  })
+
+  it('does not downgrade a malformed declared-v2 request to a valid legacy session', async () => {
+    delegationMock.verifyUserDelegationV2.mockReturnValue(null)
+    const cookie = sessionService.createSession('chatllm', 'user-123')
+
+    const res = await request(makeApp())
+      .get('/desktop/chatllm/view/index.html')
+      .set('Authorization', 'Bearer v2.invalid')
+      .set('Cookie', `clerum_desktop_session=${cookie}`)
+
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'Unauthorized' })
+    expect(proxyMock.web).not.toHaveBeenCalled()
+    expect(leaseMock.startActiveViewLease).not.toHaveBeenCalled()
+  })
+
+  it('does not downgrade a valid legacy session when v2 view capability is disabled', async () => {
+    delegationMock.verifyUserDelegationV2.mockReturnValue(desktopDelegation())
+    const cookie = sessionService.createSession('chatllm', 'user-123')
+
+    const res = await request(makeApp())
+      .get('/desktop/chatllm/view/index.html')
+      .set('Authorization', 'Bearer v2.view-disabled')
+      .set('Cookie', `clerum_desktop_session=${cookie}`)
+
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'authority_unavailable' })
+    expect(authorityMock.authorizeActionV2).not.toHaveBeenCalled()
+    expect(proxyMock.web).not.toHaveBeenCalled()
+    expect(leaseMock.startActiveViewLease).not.toHaveBeenCalled()
+  })
+
+  it('does not downgrade a mismatched v2 HTTP target to a valid legacy session', async () => {
+    const claims = desktopDelegation()
+    delegationMock.verifyUserDelegationV2.mockReturnValue({
+      ...claims,
+      targets: { 'remote_desktop.reconnect': { hostRef: 'mcp-host/other' } },
+      targetHashes: {
+        'remote_desktop.reconnect': hashActionTarget({ hostRef: 'mcp-host/other' }),
+      },
+    })
+    const cookie = sessionService.createSession('chatllm', 'user-123')
+
+    const res = await request(makeApp())
+      .get('/desktop/chatllm/view/index.html')
+      .set('Authorization', 'Bearer v2.wrong-target')
+      .set('Cookie', `clerum_desktop_session=${cookie}`)
+
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ error: 'invalid_binding' })
+    expect(authorityMock.authorizeActionV2).not.toHaveBeenCalled()
+    expect(proxyMock.web).not.toHaveBeenCalled()
   })
 })
 
@@ -279,5 +549,138 @@ describe('handleDesktopUpgrade', () => {
     expect(result).toBe(true)
     expect(socket.write).toHaveBeenCalledWith('HTTP/1.1 401 Unauthorized\r\n\r\n')
     expect(socket.destroy).toHaveBeenCalled()
+  })
+
+  it('proxies a valid legacy WebSocket without forwarding edge credentials', () => {
+    const cookie = sessionService.createSession('chatllm', 'user-123')
+    const socket = Object.assign(new EventEmitter(), { write: vi.fn(), destroy: vi.fn() }) as any
+    const req = {
+      url: '/api/v1/desktop/chatllm/view/websockify',
+      headers: {
+        authorization: 'Bearer legacy-token',
+        cookie: `clerum_desktop_session=${cookie}`,
+        'x-evenfire-action-delegation': 'must-not-forward',
+        'x-clerum-edge-action-context': 'must-not-forward',
+      },
+    } as any
+
+    expect(handleDesktopUpgrade(req, socket, Buffer.alloc(0))).toBe(true)
+
+    expect(proxyMock.ws).toHaveBeenCalledOnce()
+    expect(req.headers.authorization).toBeUndefined()
+    expect(req.headers.cookie).toBeUndefined()
+    expect(req.headers['x-evenfire-action-delegation']).toBeUndefined()
+    expect(req.headers['x-clerum-edge-action-context']).toBeUndefined()
+  })
+
+  it('rejects valid v2 Desktop WebSocket views before checkpoint or proxy work', async () => {
+    const claims = desktopDelegation()
+    delegationMock.verifyUserDelegationV2.mockReturnValue(claims)
+    authorityMock.authorizeActionV2.mockImplementation(async (_claims, bound) => ({
+      claims,
+      bound,
+      checkpoint: { status: 'allowed' },
+      trustedEdgeContext: {},
+      trustedEdgeHeader: 'trusted',
+    }))
+    const socket = Object.assign(new EventEmitter(), { write: vi.fn(), destroy: vi.fn() }) as any
+    const req = {
+      url: '/api/v1/desktop/chatllm/view/websockify',
+      headers: {
+        authorization: 'Bearer v2.valid',
+        cookie: 'legacy=must-not-forward',
+        'x-clerum-edge-action-context': 'must-not-forward',
+      },
+    } as any
+
+    expect(handleDesktopUpgrade(req, socket, Buffer.alloc(0))).toBe(true)
+    await vi.waitFor(() => expect(socket.destroy).toHaveBeenCalled())
+    expect(socket.write).toHaveBeenCalledWith('HTTP/1.1 503 Service Unavailable\r\n\r\n')
+    expect(authorityMock.authorizeActionV2).not.toHaveBeenCalled()
+    expect(leaseMock.startActiveViewLease).not.toHaveBeenCalled()
+    expect(proxyMock.ws).not.toHaveBeenCalled()
+  })
+
+  it('does not downgrade malformed declared-v2 WebSockets to a valid legacy session', async () => {
+    delegationMock.verifyUserDelegationV2.mockReturnValue(null)
+    const cookie = sessionService.createSession('chatllm', 'user-123')
+    const socket = Object.assign(new EventEmitter(), { write: vi.fn(), destroy: vi.fn() }) as any
+    const req = {
+      url: '/api/v1/desktop/chatllm/view/websockify',
+      headers: {
+        authorization: 'Bearer v2.invalid',
+        cookie: `clerum_desktop_session=${cookie}`,
+      },
+    } as any
+
+    expect(handleDesktopUpgrade(req, socket, Buffer.alloc(0))).toBe(true)
+    await vi.waitFor(() => expect(socket.destroy).toHaveBeenCalled())
+
+    expect(socket.write).toHaveBeenCalledWith('HTTP/1.1 401 Unauthorized\r\n\r\n')
+    expect(proxyMock.ws).not.toHaveBeenCalled()
+    expect(leaseMock.startActiveViewLease).not.toHaveBeenCalled()
+  })
+
+  it('does not downgrade a valid legacy session when v2 WebSocket view is disabled', async () => {
+    delegationMock.verifyUserDelegationV2.mockReturnValue(desktopDelegation())
+    const cookie = sessionService.createSession('chatllm', 'user-123')
+    const socket = Object.assign(new EventEmitter(), { write: vi.fn(), destroy: vi.fn() }) as any
+    const req = {
+      url: '/api/v1/desktop/chatllm/view/websockify',
+      headers: {
+        authorization: 'Bearer v2.view-disabled',
+        cookie: `clerum_desktop_session=${cookie}`,
+      },
+    } as any
+
+    expect(handleDesktopUpgrade(req, socket, Buffer.alloc(0))).toBe(true)
+    await vi.waitFor(() => expect(socket.destroy).toHaveBeenCalled())
+
+    expect(socket.write).toHaveBeenCalledWith('HTTP/1.1 503 Service Unavailable\r\n\r\n')
+    expect(proxyMock.ws).not.toHaveBeenCalled()
+    expect(leaseMock.startActiveViewLease).not.toHaveBeenCalled()
+  })
+
+  it('does not downgrade a mismatched v2 WebSocket target to a valid legacy session', async () => {
+    const claims = desktopDelegation()
+    delegationMock.verifyUserDelegationV2.mockReturnValue({
+      ...claims,
+      targets: { 'remote_desktop.reconnect': { hostRef: 'mcp-host/other' } },
+      targetHashes: {
+        'remote_desktop.reconnect': hashActionTarget({ hostRef: 'mcp-host/other' }),
+      },
+    })
+    const cookie = sessionService.createSession('chatllm', 'user-123')
+    const socket = Object.assign(new EventEmitter(), { write: vi.fn(), destroy: vi.fn() }) as any
+    const req = {
+      url: '/api/v1/desktop/chatllm/view/websockify',
+      headers: {
+        authorization: 'Bearer v2.wrong-target',
+        cookie: `clerum_desktop_session=${cookie}`,
+      },
+    } as any
+
+    expect(handleDesktopUpgrade(req, socket, Buffer.alloc(0))).toBe(true)
+    await vi.waitFor(() => expect(socket.destroy).toHaveBeenCalled())
+
+    expect(socket.write).toHaveBeenCalledWith('HTTP/1.1 400 Bad Request\r\n\r\n')
+    expect(authorityMock.authorizeActionV2).not.toHaveBeenCalled()
+    expect(proxyMock.ws).not.toHaveBeenCalled()
+  })
+})
+
+describe('stripDesktopEdgeCredentials', () => {
+  it('removes bearer, cookie, delegation, and trusted-edge shadow headers', () => {
+    const headers: express.Request['headers'] = {
+      authorization: 'Bearer secret',
+      cookie: 'secret=value',
+      'x-evenfire-action-delegation': 'delegation',
+      'x-clerum-edge-action-context': 'shadow',
+      accept: 'text/html',
+    }
+
+    stripDesktopEdgeCredentials(headers)
+
+    expect(headers).toEqual({ accept: 'text/html' })
   })
 })

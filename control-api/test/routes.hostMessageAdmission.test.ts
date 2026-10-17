@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import { fetchHostConnectionFromControlApi } from '../../rpc-proxy/src/services/controlApiRestService.js'
 import type { K8sGateway } from '../src/k8s.js'
 import { createRpcAccessUsersRouter } from '../src/routes/rpc-access/users.js'
 import { signRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
@@ -114,6 +113,16 @@ describe('R44-H1 legacy Host-message admission', () => {
     expect(gateway.listResource).toHaveBeenCalledTimes(resolverCalls)
     expect(bindingService.bind).toHaveBeenCalledTimes(bindingCalls)
     expect(new Set(limiter.checkAndIncrement.mock.calls.map(call => call[0])).size).toBe(1)
+    const producerClient =
+      await import('../../rpc-proxy/src/services/controlApiRestService.js').then(
+        module => ({ module }),
+        error => ({ error })
+      )
+    expect(producerClient).toHaveProperty('module')
+    if (!('module' in producerClient)) return
+
+    const fetchHostConnectionFromControlApi =
+      producerClient.module.fetchHostConnectionFromControlApi
     const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
       const rpcPath = new URL(url).pathname.split('/rpc/access')[1]
       expect(rpcPath).toBeDefined()

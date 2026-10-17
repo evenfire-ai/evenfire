@@ -74,15 +74,20 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL readiness', () => {
     }
   })
 
-  it('keeps Control API readiness when the latest migration has an accepted historical receipt', async () => {
-    const acceptedAliases = latestMigration.legacyVersions ?? []
+  it('keeps Control API readiness when an aliased migration has a historical receipt', async () => {
+    const aliasedMigration = CONTROL_API_MIGRATIONS.find(
+      migration => migration.version === '0144_authorization_revision_delete_compatibility'
+    )
+    expect(aliasedMigration).toBeDefined()
+    if (!aliasedMigration) return
+    const acceptedAliases = aliasedMigration.legacyVersions ?? []
     expect(acceptedAliases.length).toBeGreaterThan(0)
 
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
       await client.query('DELETE FROM schema_migrations WHERE version = $1', [
-        latestMigration.version,
+        aliasedMigration.version,
       ])
       const aliasReceipts = await client.query<{ version: string }>(
         `SELECT version FROM schema_migrations WHERE version = ANY($1::text[])`,

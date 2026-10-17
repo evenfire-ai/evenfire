@@ -85,6 +85,7 @@ TEST_SERVICES := \
 	packages/jwt-key-policy \
 	packages/codex-catalog-projection \
 	packages/llm-provider-attempt-contract \
+	packages/action-context-contracts \
 	packages/llm-providers \
 	packages/grok-provider-attempt-contract
 
@@ -442,6 +443,8 @@ minikube-deploy-all-body:
 	@# already contain the generated k8s-api-ip.yaml.
 	@set -o pipefail; \
 	render_dir="$$(bash scripts/minikube/image-mode.sh --render-dir)" && \
+	RUBYOPT=--disable=gems ruby scripts/minikube/assert-rpc-proxy-edge-apply-safe.rb \
+		--context "$(MINIKUBE_PROFILE)" --overlay "$$render_dir" && \
 	if [ "$(MINIKUBE_GFS_MUTATION)" = "true" ]; then \
 		kubectl --context=$(MINIKUBE_PROFILE) kustomize "$$render_dir" | kubectl --context=$(MINIKUBE_PROFILE) apply -f -; \
 	else \
@@ -521,10 +524,26 @@ minikube-verify-networkpolicies: ## Verify rendered minikube NetworkPolicies exi
 
 .PHONY: minikube-restart-all
 minikube-restart-all: ## Restart all Clerum deployments
-	@for ns in control-plane mcp-host mcp-server profiles rpc-proxy channels; do \
-		$(KC) rollout restart deploy -n $$ns 2>/dev/null || true; \
-	done
-	@echo "All deployments restarted."
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		T2_GATE_ID="minikube-restart-all" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		bash scripts/minikube/rollout-rpc-proxy-edge-protocol.sh restart-targets \
+			--context "$(MINIKUBE_PROFILE)" --restart-all-non-edge --restart-proxy \
+			--restart-hcc --restart-all-hosts
+
+.PHONY: minikube-rollback-rpc-proxy
+minikube-rollback-rpc-proxy: ## Roll HCC-managed Hosts back before RPC Proxy
+	@test -n "$(MINIKUBE_PROFILE)" || { echo "MINIKUBE_PROFILE is required" >&2; exit 2; }
+	@test -n "$(HCC_TO_REVISION)" || { echo "HCC_TO_REVISION is required" >&2; exit 2; }
+	@test -n "$(RPC_PROXY_TO_REVISION)" || { echo "RPC_PROXY_TO_REVISION is required" >&2; exit 2; }
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		T2_GATE_ID="minikube-rpc-proxy-rollback" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		bash scripts/minikube/rollout-rpc-proxy-edge-protocol.sh rollback-proxy \
+			--context "$(MINIKUBE_PROFILE)" --to-hcc-revision "$(HCC_TO_REVISION)" \
+			--to-proxy-revision "$(RPC_PROXY_TO_REVISION)"
 
 .PHONY: minikube-deploy-crds minikube-deploy-crds-body
 minikube-deploy-crds: ## Install/upgrade CRDs via Helm chart + apply CRD YAML (idempotent)
@@ -572,8 +591,16 @@ minikube-deploy-service-body:
 	@$(if $(MINIKUBE_EFFECTIVE_DEPLOYMENT),:,echo "ERROR: effective DEPLOYMENT could not be resolved from SVC"; exit 1)
 	@echo "Deploying image selector $(MINIKUBE_DEPLOY_SERVICE) to deployment/$(MINIKUBE_EFFECTIVE_DEPLOYMENT) in namespace $(MINIKUBE_DEPLOY_NAMESPACE)"
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=$(MINIKUBE_DEPLOY_SERVICE)
-	kubectl --context=$(MINIKUBE_PROFILE) -n $(MINIKUBE_DEPLOY_NAMESPACE) rollout restart deployment/$(MINIKUBE_EFFECTIVE_DEPLOYMENT)
-	kubectl --context=$(MINIKUBE_PROFILE) -n $(MINIKUBE_DEPLOY_NAMESPACE) rollout status deployment/$(MINIKUBE_EFFECTIVE_DEPLOYMENT) --timeout=180s
+	@if [ "$(MINIKUBE_DEPLOY_SERVICE)" = "rpc-proxy" ]; then \
+		bash scripts/minikube/rollout-rpc-proxy-edge-protocol.sh restart-targets \
+			--context "$(MINIKUBE_PROFILE)" --restart-proxy; \
+	elif [ "$(MINIKUBE_DEPLOY_SERVICE)" = "mcp-host" ]; then \
+		bash scripts/minikube/rollout-rpc-proxy-edge-protocol.sh restart-targets \
+			--context "$(MINIKUBE_PROFILE)" --restart-host "$(MINIKUBE_EFFECTIVE_DEPLOYMENT)"; \
+	else \
+		kubectl --context=$(MINIKUBE_PROFILE) -n $(MINIKUBE_DEPLOY_NAMESPACE) rollout restart deployment/$(MINIKUBE_EFFECTIVE_DEPLOYMENT) && \
+		kubectl --context=$(MINIKUBE_PROFILE) -n $(MINIKUBE_DEPLOY_NAMESPACE) rollout status deployment/$(MINIKUBE_EFFECTIVE_DEPLOYMENT) --timeout=180s; \
+	fi
 
 .PHONY: minikube-restart-deploy minikube-restart-deploy-body
 minikube-restart-deploy: ## Restart a single deployment without rebuilding (usage: make minikube-restart-deploy SVC=mcp-host NS=mcp-host [DEPLOYMENT=chatllm])
@@ -595,8 +622,16 @@ minikube-restart-deploy-body:
 	@$(if $(MINIKUBE_DEPLOY_NAMESPACE),:,echo "ERROR: NS required. Usage: make minikube-restart-deploy SVC=mcp-host NS=mcp-host [DEPLOYMENT=chatllm]"; exit 1)
 	@$(if $(MINIKUBE_EFFECTIVE_DEPLOYMENT),:,echo "ERROR: effective DEPLOYMENT could not be resolved from SVC"; exit 1)
 	@echo "Restarting deployment/$(MINIKUBE_EFFECTIVE_DEPLOYMENT) in namespace $(MINIKUBE_DEPLOY_NAMESPACE)"
-	kubectl --context=$(MINIKUBE_PROFILE) -n $(MINIKUBE_DEPLOY_NAMESPACE) rollout restart deployment/$(MINIKUBE_EFFECTIVE_DEPLOYMENT)
-	kubectl --context=$(MINIKUBE_PROFILE) -n $(MINIKUBE_DEPLOY_NAMESPACE) rollout status deployment/$(MINIKUBE_EFFECTIVE_DEPLOYMENT) --timeout=180s
+	@if [ "$(MINIKUBE_DEPLOY_SERVICE)" = "rpc-proxy" ]; then \
+		bash scripts/minikube/rollout-rpc-proxy-edge-protocol.sh restart-targets \
+			--context "$(MINIKUBE_PROFILE)" --restart-proxy; \
+	elif [ "$(MINIKUBE_DEPLOY_SERVICE)" = "mcp-host" ]; then \
+		bash scripts/minikube/rollout-rpc-proxy-edge-protocol.sh restart-targets \
+			--context "$(MINIKUBE_PROFILE)" --restart-host "$(MINIKUBE_EFFECTIVE_DEPLOYMENT)"; \
+	else \
+		kubectl --context=$(MINIKUBE_PROFILE) -n $(MINIKUBE_DEPLOY_NAMESPACE) rollout restart deployment/$(MINIKUBE_EFFECTIVE_DEPLOYMENT) && \
+		kubectl --context=$(MINIKUBE_PROFILE) -n $(MINIKUBE_DEPLOY_NAMESPACE) rollout status deployment/$(MINIKUBE_EFFECTIVE_DEPLOYMENT) --timeout=180s; \
+	fi
 
 # ── Minikube Secrets & Keys ─────────────────────────────────────────
 #

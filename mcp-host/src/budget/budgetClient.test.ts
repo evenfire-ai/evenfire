@@ -366,6 +366,54 @@ describe('BudgetClient.release', () => {
 })
 
 describe('deriveBudgetAttribution', () => {
+  it.each([
+    ['direct', null],
+    ['team', '33333333-3333-4333-8333-333333333333'],
+  ] as const)(
+    'uses the selected %s path and ignores spoofed legacy team metadata',
+    (pathKind, effectiveTeamId) => {
+      const task = mkTask({
+        source: 'channel',
+        sourceMessage: mkMessage({
+          sender: 'spoofed-user',
+          metadata: { teamId: 'spoofed-team' },
+          authorityV2: {
+            version: 2,
+            userId: '11111111-1111-4111-8111-111111111111',
+            sid: '22222222-2222-4222-8222-222222222222',
+            sessionVersion: 4,
+            delegationJti: '44444444-4444-4444-8444-444444444444',
+            operationId: 'chat.message.invoke',
+            resource: {
+              environmentId: 'cluster.local/evenfire',
+              type: 'host',
+              canonicalId: 'host:mcp-host/chatllm',
+              logicalId: 'mcp-host/chatllm',
+              displayName: 'chatllm',
+            },
+            target: {
+              hostRef: 'mcp-host/chatllm',
+              channelType: 'rpc',
+              channelId: 'chatllm',
+              messageId: '55555555-5555-4555-8555-555555555555',
+            },
+            targetHash: `ath2_${'a'.repeat(43)}`,
+            accessPathId: `ap1_${'b'.repeat(43)}`,
+            authorizationRevision: `ar1_${'c'.repeat(43)}`,
+            pathKind,
+            effectiveTeamId,
+            behaviorBindingHash: `bh2_${'d'.repeat(43)}`,
+          },
+        }),
+      })
+      expect(deriveBudgetAttribution(task)).toMatchObject({
+        source_kind: 'desktop',
+        user_id: '11111111-1111-4111-8111-111111111111',
+        team_id: effectiveTeamId,
+      })
+    }
+  )
+
   it('maps a desktop (rpc) task to source_kind=desktop with user_id + team_id', () => {
     const task = mkTask({
       source: 'channel',

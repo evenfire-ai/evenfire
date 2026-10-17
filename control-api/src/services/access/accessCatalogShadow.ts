@@ -11,6 +11,7 @@ import {
   AccessExecutionCancelledError,
 } from './accessExecutionBudget.js'
 import type { CatalogFamily } from './catalogContracts.js'
+import { catalogShadowProducerCallReserve } from './catalogProducers.js'
 import { configuredCatalogBudgetOptions, configuredUserAccessIntent } from './userAccessPolicy.js'
 import { resolveEffectiveUserAccessPolicy } from './userAccessRuntimePolicy.js'
 
@@ -129,7 +130,7 @@ export async function compareAccessCatalogShadow(
   let child: AccessExecutionBudget | undefined
   try {
     child = parent.child({
-      producerCalls: 8,
+      producerCalls: catalogShadowProducerCallReserve(input.family),
       databaseStatements: 109,
       objects: 200,
       decodedBytes: 2 * 1024 * 1024,

@@ -7,6 +7,7 @@ import type { RPCServer } from '../server'
 import { MAX_ARTIFACT_BYTES } from '../workflow/artifactPaths'
 import { CALLER_OUTPUTS_DIR, resolveRpcCallerOutputDir } from '../workspace/callerOutputs'
 import { deriveUserKeyFromSource } from '../workspace/userKey'
+import { withRpcProxyEdgeTestAuthentication } from './rpcProxyEdgeTestHeaders'
 
 const ORIGINAL_ENABLE_AUTH = process.env.CLERUM_ENABLE_AUTH
 const ORIGINAL_OUTPUT_DIR = process.env.CLERUM_OUTPUT_DIR
@@ -42,11 +43,11 @@ async function startServer(
 }
 
 function edgeHeaders(userId: string): Record<string, string> {
-  return {
+  return withRpcProxyEdgeTestAuthentication({
     'x-clerum-edge-caller': 'rpc-proxy',
     'x-clerum-edge-host-ref': 'chatllm',
     'x-clerum-edge-user-id': userId,
-  }
+  })
 }
 
 const rpcEdgeHeaders = edgeHeaders('user-1')

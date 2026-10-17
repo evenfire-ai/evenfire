@@ -7,11 +7,16 @@ import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { GfsError } from '../api/errors'
 import { ResourceNameError, normalizeResourceName } from '../api/resourceName'
+import {
+  type FilesystemActionAuthorityV2,
+  parseStoredGfsActionAuthority,
+  sameGfsAuthorityOrigin,
+} from '../auth/actionAuthority'
+import type { GfsBrokeredAuthority } from '../auth/verify'
 import type { GfsUploadConfig } from '../config'
 import { CommitOutcomeUnknownError, RollbackOutcomeUnknownError } from '../db/writeStore'
 import type { BlobWriter, Transactor, TxClient } from '../db/writeStore'
 import { PathError, normalizeResourceId } from '../storage/paths'
-import type { GfsBrokeredAuthority } from '../auth/verify'
 import {
   GFS_UPLOAD_V2_COMPLETE_BODY_MAX_BYTES,
   GFS_UPLOAD_V2_METADATA_BODY_MAX_BYTES,
@@ -38,6 +43,8 @@ export interface UploadPrincipal {
   authGeneration?: number
   principalType?: 'user' | 'control-admin'
   brokeredAuthority?: GfsBrokeredAuthority
+  /** Immutable selected-path provenance; never a reusable bearer credential. */
+  actionAuthority?: FilesystemActionAuthorityV2
 }
 
 export interface CreateUploadSessionInput extends UploadPrincipal {
@@ -134,6 +141,7 @@ export interface UploadSessionRow {
   resultVersion: number | null
   resultSha256: string | null
   failureCode: string | null
+  actionAuthority: FilesystemActionAuthorityV2 | null
   expiresAt: string
 }
 
@@ -200,6 +208,8 @@ function rowToSession(row: Record<string, unknown>): UploadSessionRow {
     resultVersion: row.result_version == null ? null : Number(row.result_version),
     resultSha256: row.result_sha256 == null ? null : String(row.result_sha256),
     failureCode: row.failure_code == null ? null : String(row.failure_code),
+    actionAuthority:
+      row.action_authority == null ? null : parseStoredGfsActionAuthority(row.action_authority),
     expiresAt: new Date(String(row.expires_at)).toISOString(),
   }
 }
@@ -306,6 +316,17 @@ function assertNotExpired(session: UploadSessionRow, now: number): void {
     !['completed', 'aborted', 'expired'].includes(session.state)
   ) {
     throw new GfsError('upload_expired', 'upload session has expired')
+  }
+}
+
+function assertUploadAuthorityOrigin(session: UploadSessionRow, principal: UploadPrincipal): void {
+  if (session.actionAuthority === null && principal.actionAuthority === undefined) return
+  if (
+    session.actionAuthority === null ||
+    principal.actionAuthority === undefined ||
+    !sameGfsAuthorityOrigin(session.actionAuthority, principal.actionAuthority)
+  ) {
+    throw new GfsError('forbidden', 'upload authority does not match its initiating binding')
   }
 }
 
@@ -573,6 +594,7 @@ export class GfsUploadSessionService {
     )
     if (existing.rows[0]) {
       const row = rowToSession(existing.rows[0])
+      assertUploadAuthorityOrigin(row, input)
       if (row.requestFingerprint !== requestFingerprint)
         throw new GfsError(
           'idempotency_conflict',
@@ -644,8 +666,8 @@ export class GfsUploadSessionService {
              (upload_id, idempotency_key, drive, owner_subject, primary_subject,
               operation, request_fingerprint, parent_rid, resource_rid,
               resource_name, if_match, expected_bytes, part_bytes, part_count,
-              whole_sha256, state, expires_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'initiated',$16)
+              whole_sha256, state, expires_at, action_authority)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'initiated',$16,$17::jsonb)
            RETURNING *`,
           [
             uploadId,
@@ -664,6 +686,7 @@ export class GfsUploadSessionService {
             partCount,
             wholeSha256,
             expiresAt,
+            input.actionAuthority ? JSON.stringify(input.actionAuthority) : null,
           ]
         )
         return rowToSession(inserted.rows[0]!)
@@ -677,6 +700,7 @@ export class GfsUploadSessionService {
       )
       const row = replay.rows[0] ? rowToSession(replay.rows[0]) : null
       if (!row) throw error
+      assertUploadAuthorityOrigin(row, input)
       if (row.requestFingerprint !== requestFingerprint)
         throw new GfsError(
           'idempotency_conflict',
@@ -695,6 +719,7 @@ export class GfsUploadSessionService {
     )
     const row = result.rows[0] ? rowToSession(result.rows[0]) : null
     if (!row) throw new GfsError('not_found', 'upload session not found')
+    assertUploadAuthorityOrigin(row, principal)
     assertNotExpired(row, this.now())
     if (row.state === 'expired') throw new GfsError('upload_expired', 'upload session has expired')
     if (row.state === 'aborted') throw new GfsError('upload_aborted', 'upload session was canceled')
@@ -737,6 +762,7 @@ export class GfsUploadSessionService {
       const sessionRow = sessionResult.rows[0]
       if (!sessionRow) throw new GfsError('not_found', 'upload session not found')
       const session = rowToSession(sessionRow)
+      assertUploadAuthorityOrigin(session, principal)
       assertNotExpired(session, this.now())
 
       const result = await client.query(
@@ -1781,6 +1807,7 @@ export class GfsUploadSessionService {
     )
     if (!result.rows[0]) throw new GfsError('not_found', 'upload session not found')
     const session = rowToSession(result.rows[0])
+    assertUploadAuthorityOrigin(session, principal)
     assertNotExpired(session, this.now())
     return session
   }
@@ -1797,6 +1824,7 @@ export class GfsUploadSessionService {
       )
       const row = result.rows[0] ? rowToSession(result.rows[0]) : null
       if (!row) throw new GfsError('not_found', 'upload session not found')
+      assertUploadAuthorityOrigin(row, principal)
       const localInFlight = this.hasInFlight(uploadId)
       if (row.activePartCount === 0 && !localInFlight) return
       if (this.now() >= deadline)
@@ -1847,6 +1875,7 @@ export class GfsUploadSessionService {
     )
     if (!sessionResult.rows[0]) return null
     const session = rowToSession(sessionResult.rows[0])
+    assertUploadAuthorityOrigin(session, principal)
     if (['aborted', 'expired', 'failed'].includes(session.state)) return null
     return { part: committedPart, session }
   }
@@ -1861,7 +1890,9 @@ export class GfsUploadSessionService {
       [uploadId, principal.drive, principal.ownerSubject]
     )
     if (!result.rows[0]) throw new GfsError('not_found', 'upload session not found')
-    return rowToSession(result.rows[0])
+    const session = rowToSession(result.rows[0])
+    assertUploadAuthorityOrigin(session, principal)
+    return session
   }
 }
 

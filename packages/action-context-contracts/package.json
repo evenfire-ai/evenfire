@@ -1,0 +1,20 @@
+{
+  "name": "@clerum/action-context-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pure shared wire contracts for Evenfire action-context v2",
+  "main": "index.cjs",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "require": "./index.cjs",
+      "default": "./index.cjs"
+    }
+  },
+  "scripts": {
+    "build": "node --check index.cjs",
+    "test": "node --test index.test.cjs"
+  },
+  "license": "SEE LICENSE IN LICENSE"
+}

@@ -14,6 +14,7 @@ COPY packages/llm-providers ./packages/llm-providers
 # imports validateDisplayField from it.
 COPY packages/display-field ./packages/display-field
 COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
+COPY packages/action-context-contracts ./packages/action-context-contracts
 COPY packages/grok-provider-attempt-contract ./packages/grok-provider-attempt-contract
 
 # Build the shared @clerum/workflow-runtime-core package (TS → dist) BEFORE
@@ -41,6 +42,8 @@ RUN npm prune --production
 RUN npm --prefix /app/packages/workflow-runtime-core prune --omit=dev
 
 FROM node:24-alpine
+ARG EVENFIRE_SOURCE_REVISION
+ARG EVENFIRE_SERVICE_VERSION
 RUN addgroup -S app && adduser -S app -G app
 WORKDIR /app
 
@@ -50,6 +53,9 @@ COPY --from=builder --chown=app:app /app/control-api/dist ./control-api/dist
 COPY --from=builder --chown=app:app /app/control-api/node_modules ./control-api/node_modules
 
 ENV NODE_ENV=production
+ENV EVENFIRE_SOURCE_REVISION=$EVENFIRE_SOURCE_REVISION
+ENV EVENFIRE_IMAGE_REVISION=$EVENFIRE_SOURCE_REVISION
+ENV EVENFIRE_SERVICE_VERSION=$EVENFIRE_SERVICE_VERSION
 EXPOSE 8090
 USER app
 WORKDIR /app/control-api

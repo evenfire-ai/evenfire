@@ -1,0 +1,12 @@
+edges
+nodes
+| gfs-controller/src/storage/immutableBlobFilesystem.ts:5:14:5:38 | "/tmp/g ... d-only" | semmle.label | "/tmp/g ... d-only" |
+| gfs-controller/src/storage/immutableBlobFilesystem.ts:6:14:6:45 | "/tmp/g ... ronous" | semmle.label | "/tmp/g ... ronous" |
+| gfs-controller/src/storage/immutableBlobFilesystem.ts:10:14:10:35 | "/tmp/g ... open-w" | semmle.label | "/tmp/g ... open-w" |
+| gfs-controller/src/storage/immutableBlobFilesystem.ts:14:19:14:44 | "/tmp/g ... e-file" | semmle.label | "/tmp/g ... e-file" |
+| gfs-controller/src/storage/immutableBlobFilesystem.ts:18:12:18:38 | "/tmp/g ... sync-w" | semmle.label | "/tmp/g ... sync-w" |
+subpaths
+#select
+| gfs-controller/src/storage/immutableBlobFilesystem.ts:10:14:10:35 | "/tmp/g ... open-w" | gfs-controller/src/storage/immutableBlobFilesystem.ts:10:14:10:35 | "/tmp/g ... open-w" | gfs-controller/src/storage/immutableBlobFilesystem.ts:10:14:10:35 | "/tmp/g ... open-w" | Insecure creation of file in $@. | gfs-controller/src/storage/immutableBlobFilesystem.ts:10:14:10:35 | "/tmp/g ... open-w" | the os temp dir |
+| gfs-controller/src/storage/immutableBlobFilesystem.ts:14:19:14:44 | "/tmp/g ... e-file" | gfs-controller/src/storage/immutableBlobFilesystem.ts:14:19:14:44 | "/tmp/g ... e-file" | gfs-controller/src/storage/immutableBlobFilesystem.ts:14:19:14:44 | "/tmp/g ... e-file" | Insecure creation of file in $@. | gfs-controller/src/storage/immutableBlobFilesystem.ts:14:19:14:44 | "/tmp/g ... e-file" | the os temp dir |
+| gfs-controller/src/storage/immutableBlobFilesystem.ts:18:12:18:38 | "/tmp/g ... sync-w" | gfs-controller/src/storage/immutableBlobFilesystem.ts:18:12:18:38 | "/tmp/g ... sync-w" | gfs-controller/src/storage/immutableBlobFilesystem.ts:18:12:18:38 | "/tmp/g ... sync-w" | Insecure creation of file in $@. | gfs-controller/src/storage/immutableBlobFilesystem.ts:18:12:18:38 | "/tmp/g ... sync-w" | the os temp dir |

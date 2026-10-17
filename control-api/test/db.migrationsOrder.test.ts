@@ -73,6 +73,13 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       '0134_gfs_catalog_revision_components',
       '0135_user_access_foundation_definer_temp_shadow_hardening',
       '0136_legacy_password_security_epoch_backfill',
+      '0137_workflow_authority_bindings',
+      '0138_gfs_upload_authority_bindings',
+      '0139_pr2_readiness_evidence',
+      '0140_pr2_runtime_privileges',
+      '0141_workflow_recipe_authority_entity',
+      '0142_workflow_run_failure_reason',
+      '0143_r31_runtime_behavior_sources',
       '0144_authorization_revision_delete_compatibility',
     ]
 
@@ -82,7 +89,7 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     expect(versions[versions.indexOf(parentDev.at(-1)!) + 1]).toBe(incomingDev)
     expect(versions.indexOf(incomingDev)).toBeLessThan(versions.indexOf(task106[0]!))
     expect(
-      versions.slice(versions.indexOf(task106[0]!), versions.indexOf(task106[0]!) + 8)
+      versions.slice(versions.indexOf(task106[0]!), versions.indexOf(task106[0]!) + 15)
     ).toEqual(task106)
     expect(versions.indexOf(parentDev.at(-1)!)).toBeLessThan(versions.indexOf(task106[0]!))
   })
@@ -353,9 +360,7 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
 
     expect(predecessorIndex).toBeGreaterThanOrEqual(0)
     expect(migration).toBeDefined()
-    expect(CONTROL_API_MIGRATIONS.at(-1)?.version).toBe(
-      '0144_authorization_revision_delete_compatibility'
-    )
+    expect(CONTROL_API_MIGRATIONS.at(-1)?.version).toBe('0145_workflow_authorization_pause')
     expect(migration?.legacyVersions).toEqual([
       '0143_authorization_revision_delete_compatibility',
       '0138_authorization_revision_delete_compatibility',

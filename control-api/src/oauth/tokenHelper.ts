@@ -25,6 +25,7 @@ import {
   refreshOAuthGrantTokens,
   resolveOwnerKind,
 } from './store.js'
+import { resolveExactRecipeOAuthClient } from './recipeOAuthClient.js'
 
 /**
  * Fetch the current access token for a grant (user or service), refreshing on
@@ -111,8 +112,23 @@ export async function getAccessToken(
   input: GetAccessTokenInput,
   deps: GetAccessTokenDeps
 ): Promise<GetAccessTokenResult> {
+  // Resolve the CURRENT declaration before reading or returning any grant.
+  // A cached provider token must not outlive removal or ambiguity of its
+  // recipe-client identity.
+  let recipe: RecipeWithOAuthClients | null
+  try {
+    recipe = await deps.recipeReader.read(input.recipeName, input.recipeNamespace)
+  } catch (err) {
+    if (err instanceof RecipeNotFoundError) return { kind: 'recipe_not_found' }
+    throw err
+  }
+  if (!recipe) return { kind: 'recipe_not_found' }
+
+  let decl = resolveExactRecipeOAuthClient(recipe, input.oauthClientId)
+  if (!decl) return { kind: 'unknown_oauth_client' }
+
   const grant = await getOAuthGrant(deps.db, deps.encryptionKey, input)
-  if (!grant) return { kind: 'no_grant' }
+  if (!grant || grant.provider !== decl.provider) return { kind: 'no_grant' }
 
   const refreshBufferMs = deps.refreshBufferMs ?? REACTIVE_REFRESH_BUFFER_MS
   if (!isAccessTokenStale(grant, refreshBufferMs)) {
@@ -124,14 +140,14 @@ export async function getAccessToken(
   if (!grant.refreshToken) return { kind: 'no_grant' }
 
   // Resolve recipe + secrets + provider for the refresh exchange.
-  let recipe: RecipeWithOAuthClients | null
+  let currentRecipe: RecipeWithOAuthClients | null
   try {
-    recipe = await deps.recipeReader.read(input.recipeName, input.recipeNamespace)
+    currentRecipe = await deps.recipeReader.read(input.recipeName, input.recipeNamespace)
   } catch (err) {
     if (err instanceof RecipeNotFoundError) return { kind: 'recipe_not_found' }
     throw err
   }
-  if (!recipe) return { kind: 'recipe_not_found' }
+  if (!currentRecipe) return { kind: 'recipe_not_found' }
 
   // A grant sealed with another installation's uid is inert: the owner was
   // uninstalled and a same-name server now exists. Refreshing it would spend the
@@ -139,10 +155,10 @@ export async function getAccessToken(
   // rejected POST would be misread as the new client being invalid). The fenced
   // reader above cannot catch this when the key came from the row itself (the
   // proactive sweep) or when the CR was replaced after the caller read it.
-  const ownerCrUid = recipe.metadata?.uid
+  const ownerCrUid = currentRecipe.metadata?.uid
   if (grant.crUid !== undefined && grant.crUid !== ownerCrUid) return { kind: 'no_grant' }
 
-  const decl = recipe.spec?.oauthClients?.find(c => c.id === input.oauthClientId)
+  decl = resolveExactRecipeOAuthClient(currentRecipe, input.oauthClientId)
   if (!decl) return { kind: 'unknown_oauth_client' }
 
   // Only pods without install identity wrote unsealed rows, and those only spoke

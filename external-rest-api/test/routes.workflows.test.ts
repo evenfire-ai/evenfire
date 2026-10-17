@@ -48,6 +48,47 @@ describe('routes/workflows', () => {
     return app
   }
 
+  it('forwards one exact action delegation for a v2 workflow trigger', async () => {
+    authTokenMock.verifyToken.mockReturnValueOnce({ ...claims, sessionContract: 'v2' })
+    controlApiClientMock.controlApiRequestWithStatus.mockResolvedValueOnce({
+      status: 201,
+      data: { runId: 'run-1' },
+    })
+
+    await request(makeApp())
+      .post('/api/v1/workflows/sandbox-recipes/recipe-a/trigger')
+      .set('authorization', 'Bearer user-session-token')
+      .set('idempotency-key', 'trigger-1')
+      .set('x-evenfire-action-delegation', 'opaque-v2-delegation')
+      .send({ inputs: {} })
+      .expect(201)
+
+    expect(controlApiClientMock.controlApiRequestWithStatus).toHaveBeenCalledWith(
+      'POST',
+      '/external/workflows/sandbox-recipes/recipe-a/trigger',
+      {
+        userSessionToken: 'user-session-token',
+        body: { inputs: {} },
+        extraHeaders: {
+          'idempotency-key': 'trigger-1',
+          'x-evenfire-action-delegation': 'opaque-v2-delegation',
+        },
+      }
+    )
+  })
+
+  it('fails a v2 workflow request closed when the action delegation is absent', async () => {
+    authTokenMock.verifyToken.mockReturnValueOnce({ ...claims, sessionContract: 'v2' })
+
+    const response = await request(makeApp())
+      .get('/api/v1/workflows/sandbox-recipes/recipe-a')
+      .set('authorization', 'Bearer user-session-token')
+      .expect(400)
+
+    expect(response.body).toEqual({ error: 'invalid_action_delegation' })
+    expect(controlApiClientMock.controlApiRequest).not.toHaveBeenCalled()
+  })
+
   it('lists run-scoped workflow artifacts through Control API with the user session token', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
     controlApiClientMock.controlApiRequest.mockResolvedValueOnce({

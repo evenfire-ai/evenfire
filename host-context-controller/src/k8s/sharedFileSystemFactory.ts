@@ -80,6 +80,9 @@ export interface SharedFileSystemFactoryConfig {
   wfcMaxListEntries: number
   /** Max path depth, forwarded as WSF_MAX_PATH_DEPTH. */
   wfcMaxPathDepth: number
+  controlApiBaseUrl?: string
+  serviceTokenSecretName?: string
+  serviceTokenSecretKey?: string
 }
 
 /** Returns the short stable hash used in every per-SharedFileSystem resource name. */
@@ -379,6 +382,22 @@ export function buildDeployment(
                 { name: 'WSF_MAX_UPLOAD_BYTES', value: String(config.wfcMaxUploadBytes) },
                 { name: 'WSF_MAX_LIST_ENTRIES', value: String(config.wfcMaxListEntries) },
                 { name: 'WSF_MAX_PATH_DEPTH', value: String(config.wfcMaxPathDepth) },
+                {
+                  name: 'WSF_CONTROL_API_BASE_URL',
+                  value:
+                    config.controlApiBaseUrl ??
+                    `http://control-api.${config.controlPlaneNamespace}.svc.cluster.local:8090`,
+                },
+                {
+                  name: 'WSF_CONTROL_API_SERVICE_TOKEN',
+                  valueFrom: {
+                    secretKeyRef: {
+                      name:
+                        config.serviceTokenSecretName ?? 'workspace-files-controller-service-token',
+                      key: config.serviceTokenSecretKey ?? 'token',
+                    },
+                  },
+                },
               ],
               volumeMounts: [{ name: 'workspace', mountPath: WFC_MOUNT_PATH }],
               securityContext: {
@@ -490,8 +509,8 @@ export function buildIngressNetworkPolicy(
 }
 
 /**
- * Egress: DNS only. The wfc has no business calling external services or
- * other cluster-internal pods — it only reads/writes a mounted PVC.
+ * Egress: DNS plus the exact Control API checkpoint endpoint. The controller
+ * has no general internet or namespace-wide egress.
  */
 export function buildEgressNetworkPolicy(
   sfs: SharedFileSystemCRD,
@@ -525,6 +544,17 @@ export function buildEgressNetworkPolicy(
             { port: 53, protocol: 'UDP' },
             { port: 53, protocol: 'TCP' },
           ],
+        },
+        {
+          to: [
+            {
+              namespaceSelector: {
+                matchLabels: { 'kubernetes.io/metadata.name': config.controlPlaneNamespace },
+              },
+              podSelector: { matchLabels: { app: 'control-api' } },
+            },
+          ],
+          ports: [{ port: 8090, protocol: 'TCP' }],
         },
       ],
     },

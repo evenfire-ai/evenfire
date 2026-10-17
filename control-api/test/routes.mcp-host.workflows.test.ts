@@ -411,7 +411,7 @@ describe('routes/mcp-host/workflows', () => {
     )
     expect(scopedQueries).toHaveLength(2)
     for (const [sql, values] of scopedQueries) {
-      expect(String(sql)).toContain("phase IN ('Pending', 'Running')")
+      expect(String(sql)).toContain("phase IN ('Pending', 'Running', 'AuthorizationPaused')")
       expect(sql).toContain("workflowTrigger'->>'conversationId' = $6")
       expect(values).toEqual([
         'sandbox-recipes',

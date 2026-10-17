@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { GfsError } from '../api/errors'
+import type { FilesystemActionAuthorityV2 } from '../auth/actionAuthority'
 import type { DbAuditSink, PermissionClient } from '../authz/permissionClient'
 import { createGfsUploadFinalizer } from './uploadFinalizer'
 import type { UploadPartRow, UploadSessionRow } from './uploadSession'
@@ -40,7 +42,38 @@ function session(): UploadSessionRow {
     resultVersion: null,
     resultSha256: null,
     failureCode: null,
+    actionAuthority: null,
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  }
+}
+
+function actionAuthority(): FilesystemActionAuthorityV2 {
+  const now = Math.floor(Date.now() / 1000)
+  return {
+    binding: {
+      version: 2,
+      userId: '11111111-1111-4111-8111-111111111111',
+      sid: '22222222-2222-4222-8222-222222222222',
+      sessionVersion: 1,
+      delegationJti: '33333333-3333-4333-8333-333333333333',
+      operationId: 'gfs.write',
+      resource: {
+        environmentId: 'development:local-cluster',
+        type: 'gfs_resource',
+        canonicalId: `gfs_resource:${PARENT_ID}`,
+        logicalId: PARENT_ID,
+        displayName: PARENT_ID,
+      },
+      target: { drive: 'main', resourceId: PARENT_ID, action: 'finalize', uploadId: UPLOAD_ID },
+      targetHash: 'ath1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      accessPathId: 'ap1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      authorizationRevision: 'ar1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      pathKind: 'direct',
+      effectiveTeamId: null,
+      behaviorBindingHash: 'abh1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    },
+    sourceIssuedAt: now - 1,
+    sourceExpiresAt: now + 300,
   }
 }
 
@@ -59,7 +92,8 @@ function part(root: string): UploadPartRow {
 
 function finalizerHarness(
   root: string,
-  permissionEpoch: () => { generation: number; bypassed: boolean }
+  permissionEpoch: () => { generation: number; bypassed: boolean },
+  checkpointAuthority = vi.fn(async () => undefined)
 ) {
   const permissions = {
     permissionEpoch,
@@ -100,8 +134,9 @@ function finalizerHarness(
     permissions,
     writeService: writeService as never,
     audit: {} as DbAuditSink,
+    checkpointAuthority,
   })
-  return { finalizer, permissions, client, writeService }
+  return { finalizer, permissions, client, writeService, checkpointAuthority }
 }
 
 describe('production GFS upload finalizer seam', () => {
@@ -164,6 +199,37 @@ describe('production GFS upload finalizer seam', () => {
       await expect(harness.finalizer(session(), [part(root)])).rejects.toMatchObject({
         code: 'forbidden',
       })
+      expect(harness.client.query).not.toHaveBeenCalled()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rechecks live v2 authority before publishing a durable upload', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'gfs-upload-finalizer-authority-'))
+    try {
+      const partPath = join(root, '.uploads', UPLOAD_ID, 'parts', '0.part')
+      await mkdir(join(root, '.uploads', UPLOAD_ID, 'parts'), { recursive: true })
+      await writeFile(partPath, BODY)
+      const checkpointAuthority = vi.fn(async () => {
+        throw new GfsError('forbidden', 'authority revoked')
+      })
+      const harness = finalizerHarness(
+        root,
+        () => ({ generation: 1, bypassed: false }),
+        checkpointAuthority
+      )
+      const current = actionAuthority()
+
+      await expect(
+        harness.finalizer(session(), [part(root)], undefined, undefined, {
+          drive: 'main',
+          ownerSubject: current.binding.userId,
+          primarySubject: `user:${current.binding.userId}`,
+          actionAuthority: current,
+        })
+      ).rejects.toMatchObject({ code: 'forbidden' })
+      expect(checkpointAuthority).toHaveBeenCalledWith(current)
       expect(harness.client.query).not.toHaveBeenCalled()
     } finally {
       await rm(root, { recursive: true, force: true })

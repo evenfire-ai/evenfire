@@ -82,6 +82,9 @@ beforeEach(() => {
   }
   globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
     const url = String(input)
+    if (url.endsWith('/host-rpc-admission')) {
+      return new Response(null, { status: 204 })
+    }
     if (url.includes('/rpc/access/users/')) {
       controlApiCalls.push(url)
       return new Response(
@@ -148,7 +151,7 @@ const DENYING_ROUTES: RouteCase[] = [
     label: 'session rename',
     method: 'patch',
     path: '/rpc/hosts/chatllm/sessions/agent-a/chat-1/name',
-    body: { name: 'renamed' },
+    body: { title: 'renamed' },
   },
   { label: 'models', method: 'get', path: '/rpc/hosts/chatllm/models' },
   {

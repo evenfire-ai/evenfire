@@ -44,7 +44,7 @@ describe('authorizeProviderMessage response shape', () => {
   // the assertion would hold with the `!response.ok` guard deleted. Only a
   // parseable `reason: 'unresolved'` on a non-2xx proves the status is what
   // suppresses the reason.
-  it('returns no reason when the response is not ok, so callers stay silent', async () => {
+  it('classifies non-2xx provider authorization as unavailable, not a user denial', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(
@@ -53,10 +53,13 @@ describe('authorizeProviderMessage response shape', () => {
       )
     )
     const client = new RPCClient('http://mcp-host.test')
-    expect(await client.authorizeProviderMessage(identity as never)).toEqual({ authorized: false })
+    expect(await client.authorizeProviderMessage(identity as never)).toEqual({
+      authorized: false,
+      reason: 'error',
+    })
   })
 
-  it('returns no reason when the request throws', async () => {
+  it('classifies transport failure as unavailable, not a user denial', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => {
@@ -64,7 +67,10 @@ describe('authorizeProviderMessage response shape', () => {
       })
     )
     const client = new RPCClient('http://mcp-host.test')
-    expect(await client.authorizeProviderMessage(identity as never)).toEqual({ authorized: false })
+    expect(await client.authorizeProviderMessage(identity as never)).toEqual({
+      authorized: false,
+      reason: 'error',
+    })
   })
 
   it('omits the reason when an older mcp-host returns only authorized', async () => {

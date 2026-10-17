@@ -1,6 +1,6 @@
 import type { DbClient } from '../db.js'
 import { migrationSessionBoundsSql } from './migrationExecutionPolicy.js'
-import { preparePr1Migration } from './pr1OnlineIndexPlan.js'
+import { hasPostSchemaOnlineIndexes, preparePr1Migration } from './pr1OnlineIndexPlan.js'
 
 export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '0130_user_access_foundation',
@@ -40,11 +40,30 @@ export const DEV_POST_0106_MIGRATION_VERSIONS = Object.freeze([
   '0129_workflow_schedules_concurrency_policy',
 ] as const)
 
+export const PR2_MIGRATION_VERSIONS = Object.freeze([
+  '0137_workflow_authority_bindings',
+  '0138_gfs_upload_authority_bindings',
+  '0139_pr2_readiness_evidence',
+  '0140_pr2_runtime_privileges',
+  '0141_workflow_recipe_authority_entity',
+  '0142_workflow_run_failure_reason',
+  '0143_r31_runtime_behavior_sources',
+  '0145_workflow_authorization_pause',
+])
+
+const AUTHORIZATION_REVISION_COMPATIBILITY_PREREQUISITE = '0130_user_access_foundation'
+const AUTHORIZATION_REVISION_COMPATIBILITY_VERSION =
+  '0144_authorization_revision_delete_compatibility'
+
 const NON_PR1_POST_0106_MIGRATION_VERSIONS = new Set<string>(DEV_POST_0106_MIGRATION_VERSIONS)
 
 const CLASSIFIED_POST_0106_MIGRATION_VERSIONS = Object.freeze([
   ...DEV_POST_0106_MIGRATION_VERSIONS,
-  ...PR1_MIGRATION_VERSIONS,
+  ...PR1_MIGRATION_VERSIONS.filter(
+    version => version !== AUTHORIZATION_REVISION_COMPATIBILITY_VERSION
+  ),
+  ...PR2_MIGRATION_VERSIONS,
+  AUTHORIZATION_REVISION_COMPATIBILITY_VERSION,
 ] as const)
 
 export type MigrationDescriptor = {
@@ -54,10 +73,6 @@ export type MigrationDescriptor = {
   preserveLegacyReceipts?: boolean
   apply: (db: DbClient) => Promise<void>
 }
-
-const AUTHORIZATION_REVISION_COMPATIBILITY_PREREQUISITE = '0130_user_access_foundation'
-const AUTHORIZATION_REVISION_COMPATIBILITY_VERSION =
-  '0144_authorization_revision_delete_compatibility'
 
 type ApplyPendingPr1MigrationsInput = {
   db: DbClient
@@ -112,7 +127,7 @@ export async function applyPendingPr1Migrations({
       aliasOwners.set(alias, migration.version)
     }
   }
-  const expected = new Set<string>(PR1_MIGRATION_VERSIONS)
+  const expected = new Set<string>([...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS])
   const unclassified = migrations.filter(
     migration =>
       migration.version > '0106_oauth_grants_owner_generalization' &&
@@ -207,8 +222,23 @@ export async function applyPendingPr1Migrations({
         `Team revision compatibility is recorded before its prerequisite: ${compatibilityMigration.version}`
       )
     }
-    if (isPr1Migration && !acceptedLegacyVersion) {
+    const hasPostSchemaIndexes = hasPostSchemaOnlineIndexes(version)
+    if (isPr1Migration && !acceptedLegacyVersion && !hasPostSchemaIndexes) {
       await preparePr1Migration(db, version)
+    }
+
+    if (isPr1Migration && !acceptedLegacyVersion && hasPostSchemaIndexes) {
+      await runBoundedTransaction(db, async () => migration.apply(db))
+      await preparePr1Migration(db, version, 'after-schema')
+      await runBoundedTransaction(db, async () => {
+        await recordMigration(db, version)
+        for (const alias of preservedMigrationReceipts) {
+          if (!appliedVersions.has(alias)) await recordMigration(db, alias)
+        }
+      })
+      appliedVersions.add(version)
+      for (const alias of preservedMigrationReceipts) appliedVersions.add(alias)
+      continue
     }
 
     await runBoundedTransaction(db, async () => {

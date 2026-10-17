@@ -6,10 +6,18 @@ import {
   decideUserApprovalDecision,
   listPendingUserApprovalDecisions,
 } from '../services/userApprovalDecisionsService.js'
+import {
+  WorkflowActionDelegationTransportError,
+  workflowActionDelegationForRequest,
+} from '../workflowActionDelegation.js'
 
 const PROPAGATED_STATUSES = new Set([400, 403, 404, 409, 410, 422])
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
+  if (error instanceof WorkflowActionDelegationTransportError) {
+    res.status(400).json({ error: 'invalid_action_delegation' })
+    return
+  }
   const sanitized = sanitizeControlApiPublicError(
     error,
     PROPAGATED_STATUSES,
@@ -62,9 +70,17 @@ export function createUserApprovalDecisionsRouter(): Router {
         }
 
         const sessionToken = extractAuthToken(req)
-        res
-          .status(200)
-          .json(await decideUserApprovalDecision(sessionToken, approvalId, decision, note))
+        const actionDelegation = workflowActionDelegationForRequest(req)
+        const result = actionDelegation
+          ? await decideUserApprovalDecision(
+              sessionToken,
+              approvalId,
+              decision,
+              note,
+              actionDelegation
+            )
+          : await decideUserApprovalDecision(sessionToken, approvalId, decision, note)
+        res.status(200).json(result)
       } catch (error) {
         forwardControlApiError(error, res, next)
       }

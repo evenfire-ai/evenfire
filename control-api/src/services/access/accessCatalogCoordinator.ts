@@ -36,6 +36,7 @@ import {
   type CatalogHydrationResult,
   type CatalogIdentityCandidate,
   type CatalogKey,
+  type CatalogOperationalHydration,
   type CatalogProducerPage,
   type CatalogRelationship,
   type CatalogRequestContext,
@@ -46,7 +47,16 @@ import {
 import { CatalogProducerContractError } from './catalogProducerSupport.js'
 import { requireCatalogProducer } from './catalogProducers.js'
 import { canonicalEnvironmentId } from './operationalAccessProjection.js'
-import type { CanonicalResourceIdentity } from './resourceIdentity.js'
+import {
+  isOperationalAccessResourceType,
+  loadOperationalResourceGraphs,
+  operationalResourceGraphKey,
+} from './operationalAccessReader.js'
+import type { AccessResourceType, CanonicalResourceIdentity } from './resourceIdentity.js'
+import {
+  budgetContextRefsForGraph,
+  loadRuntimeBehaviorPolicySnapshot,
+} from './runtimeBehaviorSource.js'
 import { configuredCatalogBudgetOptions } from './userAccessPolicy.js'
 
 export type PublicCatalogAccessPath = Readonly<{
@@ -94,6 +104,11 @@ type ProducerRuntime = {
   page: CatalogProducerPage
 }
 
+type PreparedOperationalHydration = Readonly<{
+  hydration: CatalogOperationalHydration | undefined
+  unavailableRootKeys: ReadonlySet<string>
+}>
+
 function normalizeFamilies(value: readonly CatalogFamily[] | undefined): CatalogFamily[] {
   if (value === undefined) return [...CATALOG_FAMILIES]
   if (value.length === 0 || value.length > CATALOG_FAMILIES.length) {
@@ -140,7 +155,8 @@ function safePartialErrors(
 
 async function hydrateSelected(
   context: CatalogRequestContext,
-  selected: readonly CatalogIdentityCandidate[]
+  selected: readonly CatalogIdentityCandidate[],
+  operationalHydration?: CatalogOperationalHydration
 ): Promise<{
   resources: Map<string, HydratedCatalogResource>
   incompleteRoots: ReadonlyMap<string, CatalogHydrationIncompleteRoot['reason']>
@@ -156,7 +172,11 @@ async function hydrateSelected(
   for (const family of CATALOG_FAMILIES) {
     const keys = byFamily.get(family)
     if (!keys?.length) continue
-    const values = await requireCatalogProducer(family).hydrateCanonicalKeys(context, keys)
+    const values = await requireCatalogProducer(family).hydrateCanonicalKeys(
+      context,
+      keys,
+      operationalHydration
+    )
     if (Array.isArray(values)) {
       hydratedValues.push(...values)
     } else {
@@ -195,6 +215,53 @@ async function hydrateSelected(
     }
   }
   return { resources, incompleteRoots: incompleteByKey }
+}
+
+async function prepareOperationalHydration(
+  context: CatalogRequestContext,
+  selected: readonly CatalogIdentityCandidate[]
+): Promise<PreparedOperationalHydration> {
+  const roots = selected.flatMap(candidate => {
+    const resourceType = candidate.key[1]
+    return isOperationalAccessResourceType(resourceType as AccessResourceType)
+      ? [{ resourceType: resourceType as AccessResourceType, logicalId: candidate.key[2] }]
+      : []
+  })
+  if (roots.length === 0) return { hydration: undefined, unavailableRootKeys: new Set() }
+
+  const graphs = await loadOperationalResourceGraphs({
+    db: context.db,
+    budget: context.budget,
+    environmentId: context.environmentId,
+    roots,
+    sourceStates: context.sourceStates,
+  })
+  const unavailableRootKeys = new Set<string>()
+  for (const root of roots) {
+    const graph = graphs.get(operationalResourceGraphKey(root.resourceType, root.logicalId))
+    if (
+      graph?.status === 'unavailable' &&
+      graph.safeCode === 'operational_related_resource_incomplete'
+    ) {
+      unavailableRootKeys.add(operationalResourceGraphKey(root.resourceType, root.logicalId))
+      continue
+    }
+    if (!graph || graph.status !== 'current') {
+      throw new CatalogProducerContractError('operational_source_changed_before_hydration')
+    }
+  }
+  const contextRefs = [...graphs.values()].flatMap(graph =>
+    graph.status === 'current' ? budgetContextRefsForGraph(graph) : []
+  )
+  const policySnapshot = await loadRuntimeBehaviorPolicySnapshot({
+    db: context.db,
+    budget: context.budget,
+    contextRefs,
+  })
+  return Object.freeze({
+    hydration: Object.freeze({ graphs, policySnapshot }),
+    unavailableRootKeys,
+  })
 }
 
 function catalogItem(
@@ -343,15 +410,43 @@ async function buildInTransaction(input: {
     input.limit + 1
   )
   const selected = merged.slice(0, input.limit)
-  const hydration = await hydrateSelected(context, selected)
-  const items = selected.flatMap(candidate => {
+  const preparedOperationalHydration = await prepareOperationalHydration(context, selected)
+  const selectedHydratable = selected.filter(
+    candidate =>
+      !preparedOperationalHydration.unavailableRootKeys.has(
+        operationalResourceGraphKey(candidate.key[1] as AccessResourceType, candidate.key[2])
+      )
+  )
+  const hydrated = await hydrateSelected(
+    context,
+    selectedHydratable,
+    preparedOperationalHydration.hydration
+  )
+  const items = selectedHydratable.flatMap(candidate => {
     const key = JSON.stringify(candidate.key)
-    if (hydration.incompleteRoots.has(key)) return []
-    const resource = hydration.resources.get(key)
+    if (hydrated.incompleteRoots.has(key)) return []
+    const resource = hydrated.resources.get(key)
     if (!resource) throw new AccessCatalogRequestError('authority_unavailable')
     return [catalogItem(context, resource)]
   })
-  const partialErrors = safePartialErrors(runtimes, hydration.incompleteRoots.size > 0)
+  const partialErrorsByIdentity = new Map(
+    safePartialErrors(runtimes, hydrated.incompleteRoots.size > 0).map(error => [
+      JSON.stringify([error.producer, error.code]),
+      error,
+    ])
+  )
+  for (const key of preparedOperationalHydration.unavailableRootKeys) {
+    const [family] = JSON.parse(key) as [CatalogFamily, string]
+    const error = Object.freeze({
+      producer: family,
+      code: 'operational_related_resource_incomplete' as const,
+      retryable: true as const,
+    })
+    partialErrorsByIdentity.set(JSON.stringify([error.producer, error.code]), error)
+  }
+  const partialErrors = [...partialErrorsByIdentity.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, error]) => error)
   const continuations = finalContinuations({
     requestedFamilies: input.families,
     runtimes,
@@ -364,7 +459,7 @@ async function buildInTransaction(input: {
       const continuation = continuations[runtime.family]
       return runtime.page.sourceCompleteness === 'complete' && !continuation.exhausted
     })
-  const validUntil = earliestValidUntil(merged, hydration.resources)
+  const validUntil = earliestValidUntil(merged, hydrated.resources)
   const lastCanonicalKey = selected.at(-1)?.key
   const nextCursor =
     hasNext && lastCanonicalKey

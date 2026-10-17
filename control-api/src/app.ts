@@ -20,6 +20,8 @@ import { createExternalRouter } from './routes/external/index.js'
 import { createOAuthCallbackRouter } from './routes/external/oauthCallback.js'
 import { createGfsRouter } from './routes/gfs/index.js'
 import { createHealthRouter } from './routes/health.js'
+import { createInternalActionAuthorityCheckpointRouter } from './routes/internal/actionAuthorityCheckpoint.js'
+import { createInternalActionAuthorityHostWakeRouter } from './routes/internal/actionAuthorityHostWake.js'
 import { createInternalAdministrativeEventsRouter } from './routes/internal/administrativeEvents.js'
 import { createInternalAgentRunEventsRouter } from './routes/internal/agentRunEvents.js'
 import { createInternalBudgetsCheckRouter } from './routes/internal/budgetsCheck.js'
@@ -27,6 +29,8 @@ import { createInternalInfrastructureTelemetryEventsRouter } from './routes/inte
 import { createInternalLlmProviderAttemptRoutes } from './routes/internal/llmProviderAttempts.js'
 import { createInternalOAuthRouter } from './routes/internal/oauth.js'
 import { createInternalPluginWorkloadSdkRouter } from './routes/internal/pluginWorkloadSdk.js'
+import { createInternalPr2ReadinessEvidenceRouter } from './routes/internal/pr2ReadinessEvidence.js'
+import { createInternalRpcProxyLegacySessionAdmissionRouter } from './routes/internal/rpcProxyLegacySessionAdmission.js'
 import { createInternalSandboxUiRouter } from './routes/internal/sandboxUi.js'
 import { createInternalApprovalPromptHistoryRouter } from './routes/internal/tracing/approvalPromptHistory.routes.js'
 import { createInternalUsageEventsRouter } from './routes/internal/usageEvents.js'
@@ -206,6 +210,9 @@ export function createApp(gateway: K8sGateway) {
   // mcp-host runtime routes use mcpHostJwt; provisioner issuance routes use InternalControl JWT.
   // Must be mounted BEFORE requireInternalToken which would block them.
   api.use(createMcpHostRoutes(gateway, directRunAttributionBindingService))
+  api.use(createInternalActionAuthorityCheckpointRouter(gateway))
+  api.use(createInternalPr2ReadinessEvidenceRouter())
+  api.use(createInternalActionAuthorityHostWakeRouter(gateway))
   api.use(
     createInternalAgentRunEventsRouter({
       submit: input => tracingSubmissionService.submit(input),
@@ -289,6 +296,7 @@ export function createApp(gateway: K8sGateway) {
   // the router so the `/internal/sandbox-ui/...` path does not collide with
   // the `/external` and `/rpc` prefix gates above.
   api.use(createInternalSandboxUiRouter(gateway))
+  api.use(createInternalRpcProxyLegacySessionAdmissionRouter())
   // OAuth helpers (rpc-proxy → control-api). Route-level requireInternalService
   // gates the boundary; the public-facing cookie-authed endpoints live in
   // rpc-proxy and forward here with the user identity asserted in the body.
