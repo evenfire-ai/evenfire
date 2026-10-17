@@ -1,5 +1,7 @@
 import { pool, withTransaction } from '../../db.js'
 import type { DbClient } from '../../db.js'
+import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAuthentication.js'
+import { validateExternalSessionAuthorityContext } from '../auth/userSessionService.js'
 import type { AdminDeleteTeamResult, TeamRole } from './types.js'
 
 export async function listTeams(userId: string, currentTeamId: string) {
@@ -99,6 +101,43 @@ export async function renameTeam(teamId: string, name: string) {
     [teamId, name]
   )
   return (updated.rows[0] as { id: string; name: string } | undefined) || null
+}
+
+export async function renameTeamForUser(
+  userId: string,
+  teamId: string,
+  name: string,
+  authority?: ExternalSessionAuthorityContext
+) {
+  return withTransaction(async db => {
+    if (authority) {
+      const session = await validateExternalSessionAuthorityContext(authority, { db })
+      if (session.status !== 'valid' || session.identity.userId !== userId.trim()) {
+        return { error: 'forbidden' as const }
+      }
+    }
+    const membership = await db.query(
+      `SELECT role
+         FROM team_members
+        WHERE team_id = $1
+          AND user_id = $2
+          AND status = 'active'
+        FOR UPDATE`,
+      [teamId, userId]
+    )
+    if ((membership.rows[0] as { role?: string } | undefined)?.role !== 'admin') {
+      return { error: 'forbidden' as const }
+    }
+    const updated = await db.query(
+      `UPDATE teams
+          SET name = $2
+        WHERE id = $1
+      RETURNING id, name`,
+      [teamId, name]
+    )
+    const team = (updated.rows[0] as { id: string; name: string } | undefined) || null
+    return team ? { team } : { error: 'not_found' as const }
+  })
 }
 
 /**

@@ -27,7 +27,7 @@ rules:
   # proxy endpoint reads the CRD before forwarding to the per-SFS wfc.
   - apiGroups: ['clerum.io']
     resources: ['sharedfilesystems']
-    verbs: ['get', 'list', 'create', 'update', 'delete']
+    verbs: ['get', 'list', 'watch', 'create', 'update', 'delete']
   - apiGroups: ['']
     resources: ['secrets']
     verbs: ['get', 'list', 'create', 'update', 'delete']

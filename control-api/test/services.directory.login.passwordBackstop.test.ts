@@ -61,6 +61,10 @@ describe('directory Google login without team memberships', () => {
       expect.stringContaining("WHERE team_members.status <> 'deleted'"),
       ['u1', 'a@b.com']
     )
+    expect(dbMocks.txQuery).not.toHaveBeenCalledWith(
+      expect.stringContaining("i.status = 'pending'"),
+      expect.anything()
+    )
   })
 
   it('denies Google login for a retired user before profile healing or identity update', async () => {

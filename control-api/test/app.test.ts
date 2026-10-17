@@ -1,12 +1,16 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { createApp } from '../src/app.js'
 import { config } from '../src/config.js'
 import { pool } from '../src/db.js'
+import { signExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
 import { issueMcpHostAccessJwt } from '../src/utils/auth/mcpHostJwtToken.js'
 import { signRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
 import { MockGateway } from './mockGateway.js'
+
+const rateLimiter = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
+vi.mock('../src/services/rateLimiterService.js', () => rateLimiter)
 
 function signHccInternalControl(): string {
   return jwt.sign(
@@ -17,6 +21,17 @@ function signHccInternalControl(): string {
 }
 
 describe('app router wiring', () => {
+  beforeEach(() => {
+    rateLimiter.checkAndIncrement.mockResolvedValue({
+      allowed: true,
+      backendAvailable: true,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+  })
+
   it('requires the real admin session guard for subscription capability discovery', async () => {
     const app = createApp(new MockGateway('mcp-server') as never)
     await request(app).get('/api/v1/admin/llm/providers/capabilities').expect(401)
@@ -144,6 +159,27 @@ describe('app router wiring', () => {
       .expect(413)
   })
 
+  it('uses the dedicated 2 KiB parser for Host message-resolution requests', async () => {
+    const app = createApp(new MockGateway('mcp-server') as never)
+    const rpcToken = signRpcAccessToken({
+      sub: 'user-1',
+      typ: 'user',
+      teamId: 'team-1',
+      role: 'member',
+      scopes: ['host:message:invoke'],
+      hostRefs: ['host-a'],
+      jti: 'app-message-resolution-body-limit',
+    })
+
+    await request(app)
+      .post('/api/v1/rpc/access/users/user-1/mcp-hosts/host-a/message-resolution')
+      .set('authorization', 'Bearer dev-rpc-proxy-token')
+      .set('x-service-token', 'rpc-proxy')
+      .set('x-rpc-access-token', rpcToken)
+      .send({ sessionId: 'x'.repeat(3_000) })
+      .expect(413)
+  })
+
   it('rejects an HCC health transition when no server-verifiable Host binding source exists', async () => {
     const app = createApp(new MockGateway('mcp-server') as never)
 
@@ -178,7 +214,9 @@ describe('app router wiring', () => {
       userId: 'user-1',
       email: 'user@example.com',
       teamId: 'team-1',
+      authGeneration: 1,
     }
+    const currentToken = signExternalSessionToken(payload)
 
     await request(app)
       .post('/api/v1/external/auth/session-token')
@@ -187,18 +225,104 @@ describe('app router wiring', () => {
       .send(payload)
       .expect(401)
 
-    vi.spyOn(pool, 'query').mockResolvedValueOnce({
-      rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }],
-      rowCount: 1,
+    vi.spyOn(pool, 'query').mockImplementation(async sql => {
+      const text = String(sql)
+      if (text.includes('clock_timestamp()')) {
+        return { rows: [{ db_now: new Date('2026-09-01T12:00:00.000Z') }], rowCount: 1 } as never
+      }
+      if (text.includes('external_user_session_security_epochs')) {
+        return {
+          rows: [
+            {
+              id: payload.userId,
+              lifecycle_state: 'active',
+              lifecycle_version: 1,
+              valid_after: null,
+              token_revoked: false,
+            },
+          ],
+          rowCount: 1,
+        } as never
+      }
+      if (text.includes('FROM team_members')) {
+        return {
+          rows: [{ team_id: payload.teamId, role: payload.role }],
+          rowCount: 1,
+        } as never
+      }
+      return {
+        rows: [
+          {
+            id: payload.userId,
+            email: payload.email,
+            lifecycle_state: 'active',
+            lifecycle_version: 1,
+          },
+        ],
+        rowCount: 1,
+      } as never
     })
+    const transactionQuery = vi.fn(async (sql: string) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [], rowCount: 0 }
+      if (sql.includes('SELECT id FROM users')) {
+        return { rows: [{ id: payload.userId }], rowCount: 1 }
+      }
+      if (sql.includes('clock_timestamp()')) {
+        return { rows: [{ db_now: new Date('2026-09-01T12:00:00.000Z') }], rowCount: 1 }
+      }
+      if (sql.includes('external_user_session_security_epochs')) {
+        return {
+          rows: [
+            {
+              id: payload.userId,
+              lifecycle_state: 'active',
+              lifecycle_version: 1,
+              valid_after: null,
+              token_revoked: false,
+            },
+          ],
+          rowCount: 1,
+        }
+      }
+      if (sql.includes('SELECT lifecycle_state, lifecycle_version')) {
+        return {
+          rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }],
+          rowCount: 1,
+        }
+      }
+      if (sql.includes('JOIN team_members')) {
+        return { rows: [{ role: payload.role, lifecycle_version: 1 }], rowCount: 1 }
+      }
+      throw new Error(`unexpected session exchange query: ${sql}`)
+    })
+    vi.spyOn(pool, 'connect').mockResolvedValue({
+      query: transactionQuery,
+      on: vi.fn(),
+      removeListener: vi.fn(),
+      release: vi.fn(),
+    } as never)
 
     const res = await request(app)
       .post('/api/v1/external/auth/session-token')
       .set('authorization', 'Bearer dev-external-rest-api-token')
       .set('x-service-token', 'external-rest-api')
+      .set('x-user-session-token', currentToken)
       .send(payload)
-      .expect(200)
+      .expect(response => {
+        expect(response.status, JSON.stringify(response.body)).toBe(200)
+      })
     expect(res.body.token).toBeTruthy()
+    expect(transactionQuery.mock.calls.map(([sql]) => String(sql))).toEqual([
+      'BEGIN',
+      expect.stringContaining('SELECT id FROM users'),
+      expect.stringContaining('clock_timestamp()'),
+      expect.stringContaining('external_user_session_security_epochs'),
+      expect.stringContaining('JOIN team_members'),
+      expect.stringContaining('SELECT lifecycle_state, lifecycle_version'),
+      expect.stringContaining('clock_timestamp()'),
+      expect.stringContaining('SELECT valid_after'),
+      'COMMIT',
+    ])
   })
 
   it('enforces UI auth for control-ui routes', async () => {

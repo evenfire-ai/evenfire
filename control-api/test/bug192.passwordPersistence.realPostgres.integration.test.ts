@@ -17,6 +17,7 @@ import {
   verifyMemberPassword,
 } from '../src/services/auth/passwordCredentialVerification.js'
 import {
+  createInvitationForTeams,
   setInvitationPasswordForEmail,
   updateUserPassword,
 } from '../src/services/directory/membership.js'
@@ -26,6 +27,7 @@ const holder = vi.hoisted(() => ({
   pool: null as unknown as Pool,
   leaseClient: null as unknown as import('pg').PoolClient,
 }))
+const registration = vi.hoisted(() => ({ registerAndSendInvitation: vi.fn() }))
 vi.mock('../src/db.js', async importOriginal => {
   const real = await importOriginal<typeof import('../src/db.js')>()
   const proxy = {
@@ -49,6 +51,7 @@ vi.mock('../src/services/rateLimiterService.js', async importOriginal => {
     ) => real.acquireRateLimitConcurrencyLease(r, { client: holder.leaseClient }),
   }
 })
+vi.mock('../src/services/invitationFlowRegistrationService.js', () => registration)
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const realPg = adminUrl ? describe : describe.skip
 realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance', () => {
@@ -65,6 +68,7 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
     holder.pool = new Pool({ connectionString })
     await initDb(holder.pool)
     holder.leaseClient = await holder.pool.connect()
+    registration.registerAndSendInvitation.mockResolvedValue(undefined)
     hash = await bcrypt.hash(password, 12)
   }, 60_000)
   beforeEach(async () => {
@@ -231,17 +235,17 @@ realPg('Spec 043 persistence, migration, atomicity and fencing design acceptance
   it('real reset/establishment producer clears cooldown and fences old work', async () => {
     const stale = await capturePasswordEvaluation(email, false)
     await completedFailures()
-    // Database producer for a pending reset; the real reset function owns the
-    // credential write/acceptance and its generation trigger in one transaction.
-    const invitation = (
-      await holder.pool.query(
-        "INSERT INTO invitations(email,role,purpose,status) VALUES ($1,'member','password_reset','pending') RETURNING id",
-        [email]
-      )
-    ).rows[0]
+    const invitation = await createInvitationForTeams({
+      inviteeName: 'Password reset',
+      email,
+      purpose: 'password_reset',
+      teamAssignments: [],
+      fallbackRole: 'member',
+    })
     const result = await setInvitationPasswordForEmail(
       email,
-      invitation.id,
+      invitation.token,
+      String(invitation.id),
       'Synthetic-BUG192-reset-password'
     )
     expect(result).not.toHaveProperty('error')

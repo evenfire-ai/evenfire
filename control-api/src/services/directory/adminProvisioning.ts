@@ -1,5 +1,6 @@
 import { type DbClient, pool, withTransaction } from '../../db.js'
 import { rootLogger } from '../../observability/logger.js'
+import { revokeAllUserSessions } from '../auth/userSessionService.js'
 import { gfsDesktopOperatorLinkService } from '../gfsDesktopOperatorLinkService.js'
 import {
   type ControlApiPermissionChange,
@@ -115,6 +116,7 @@ export async function provisionAdminDesktopWorkspace(
   const provision = async (db: Pick<DbClient, 'query'>): Promise<{ userId: string }> => {
     const existing = await db.query(`SELECT id FROM users WHERE email = $1 LIMIT 1`, [email])
     let userId = (existing.rows[0] as { id: string } | undefined)?.id
+    const existingUser = Boolean(userId)
     if (!userId) {
       const inserted = await db.query(
         `INSERT INTO users(email, name) VALUES($1, $2) RETURNING id`,
@@ -135,6 +137,9 @@ export async function provisionAdminDesktopWorkspace(
           WHERE id = $1`,
         [userId, input.passwordHash]
       )
+      if (existingUser) {
+        await revokeAllUserSessions(userId, 'password_changed', db)
+      }
     }
 
     await ensureDefaultTeamAndGrants(db, userId, teamLabel, input.agentNames, input.contextIds)
@@ -252,6 +257,9 @@ export async function provisionMemberFromAdmin(input: {
           WHERE id = $1`,
         [user.id, admin.password_hash]
       )
+      if (!created) {
+        await revokeAllUserSessions(user.id, 'password_changed', db)
+      }
     }
 
     if (assignments.size > 0) {

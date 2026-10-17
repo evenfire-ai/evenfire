@@ -20,6 +20,26 @@ const BACKPRESSURE_TIMEOUT_MS = 5000
 const AUTHORIZATION_RECHECK_MS = 15_000
 const ZERO_CURSOR = '00000000-0000-0000-0000-000000000000'
 
+type AuthorizationObservation =
+  | boolean
+  | { status: 'current' | 'denied' | 'unavailable'; error?: unknown }
+
+function authorizationStatus(
+  observation: AuthorizationObservation
+): 'current' | 'denied' | 'unavailable' {
+  return typeof observation === 'boolean'
+    ? observation
+      ? 'current'
+      : 'denied'
+    : observation.status
+}
+
+function sendSessionBackendUnavailable(res: Response): void {
+  res.setHeader('retry-after', '2')
+  res.setHeader('cache-control', 'no-store')
+  res.status(503).json({ error: 'session_backend_unavailable', retryAfterSeconds: 2 })
+}
+
 type EntityChangeStreamMessage =
   | {
       schemaVersion: 1
@@ -67,7 +87,7 @@ export function streamEntityChanges(
   req: Request,
   res: Response,
   initialCursor: string | null,
-  isAuthorized: () => Promise<boolean>,
+  isAuthorized: () => Promise<AuthorizationObservation>,
   principalKind: 'user' | 'operator',
   principalId: string = principalKind
 ): void {
@@ -178,7 +198,10 @@ export function streamEntityChanges(
           // therefore use a fixed-cadence, generic invalidation and always
           // refetch current authorized state; their frames never depend on
           // global feed contents, retention, or hidden mutations.
-          if (!(await isAuthorized())) {
+          const authorization = await isAuthorized()
+          const authorizationState = authorizationStatus(authorization)
+          if (authorizationState === 'unavailable') return
+          if (authorizationState === 'denied') {
             await closeForFailure('session_expired', ZERO_CURSOR)
             return
           }
@@ -193,6 +216,15 @@ export function streamEntityChanges(
             await closeForFailure('slow_consumer', ZERO_CURSOR)
             return
           }
+          // A generic invalidation is not protected payload, but verify again
+          // after any drain wait before letting this poll complete.
+          const afterObservation = await isAuthorized()
+          const afterWrite = authorizationStatus(afterObservation)
+          if (afterWrite === 'unavailable') return
+          if (afterWrite === 'denied') {
+            await closeForFailure('session_expired', ZERO_CURSOR)
+            return
+          }
           userInitialResyncPending = false
           if (type === 'resync_required') {
             entityChangeStreamResyncRequiredTotal.inc({ principal_kind: principalKind })
@@ -204,7 +236,13 @@ export function streamEntityChanges(
         if (hasChange || Date.now() - lastAuthorizationCheck >= AUTHORIZATION_RECHECK_MS) {
           if (Date.now() < authorizationRetryAfter) return
           try {
-            if (!(await isAuthorized())) {
+            const authorization = await isAuthorized()
+            const authorizationState = authorizationStatus(authorization)
+            if (authorizationState === 'unavailable') {
+              const error = typeof authorization === 'boolean' ? undefined : authorization.error
+              throw error ?? new Error('session authority unavailable')
+            }
+            if (authorizationState === 'denied') {
               await closeForFailure('session_expired', checkpoint.cursor)
               return
             }
@@ -275,7 +313,13 @@ export function streamEntityChanges(
     }
 
     try {
-      if (!(await isAuthorized())) {
+      const initialAuthorization = authorizationStatus(await isAuthorized())
+      if (initialAuthorization === 'unavailable') {
+        sendSessionBackendUnavailable(res)
+        cleanup()
+        return
+      }
+      if (initialAuthorization === 'denied') {
         res.status(401).end()
         cleanup()
         return

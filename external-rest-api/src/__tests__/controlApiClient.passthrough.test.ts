@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { config } from '../config.js'
-import { controlApiPassthroughGet } from '../controlApiClient.js'
+import {
+  ControlApiError,
+  controlApiPassthroughGet,
+  controlApiRequest,
+} from '../controlApiClient.js'
 
 describe('controlApiPassthroughGet', () => {
   afterEach(() => vi.restoreAllMocks())
@@ -54,5 +58,38 @@ describe('controlApiPassthroughGet', () => {
     const headers = init.headers as Record<string, string>
     expect(headers['x-service-token']).toBe(config.controlApiServiceName)
     expect(headers['authorization']).toContain('Bearer ')
+  })
+
+  it('captures only safe rate-limit headers from a rejected Control API request', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: { code: 'rate_limited', details: { retryAfterSeconds: 17 } },
+        }),
+        {
+          status: 429,
+          headers: {
+            'content-type': 'application/json',
+            'retry-after': '17',
+            'x-ratelimit-limit': '30',
+            'x-ratelimit-remaining': '0',
+            'x-ratelimit-reset': '1900000000',
+            'x-internal-bucket': 'secret-internal-bucket',
+          },
+        }
+      )
+    )
+
+    const error = await controlApiRequest('GET', '/external/test').catch(
+      (caught: unknown) => caught
+    )
+
+    expect(error).toBeInstanceOf(ControlApiError)
+    expect((error as ControlApiError).responseHeaders).toEqual({
+      'retry-after': '17',
+      'x-ratelimit-limit': '30',
+      'x-ratelimit-remaining': '0',
+      'x-ratelimit-reset': '1900000000',
+    })
   })
 })
