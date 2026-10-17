@@ -77,6 +77,12 @@ describe('per-Host Latest sessions publication', () => {
 
     await waitFor(() => expect(controller.result.current.latestChatSessions).toHaveLength(2))
     expect(lastResolved).toBe(true)
+    // Both rows carry the same time, so the visible order is the tie-break
+    // (Host, then chat id), whichever catalog arrived first.
+    expect(controller.result.current.latestChatSessions.map(chat => chat.agentRef)).toEqual([
+      HOST_A,
+      HOST_B,
+    ])
     expect(controller.result.current.latestChatSessions.find(chat => chat.agentRef === first)).toBe(
       firstRow
     )
