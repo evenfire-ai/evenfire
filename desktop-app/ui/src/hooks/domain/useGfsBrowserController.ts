@@ -9,6 +9,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query'
 import { GFS_BREADCRUMB_MAX_DEPTH } from '@constants/gfsBrowser'
+import { applyMoveConvergence } from '@lib/gfsEntityChangeState'
 import {
   describeGfsReadError,
   isRateLimited,
@@ -17,7 +18,6 @@ import {
 } from '@lib/gfsGrantErrors'
 import type { GfsGrantListItem, GfsShareListItem } from '@/gfs/delegation.types'
 import { deriveGfsInheritedAccess } from '@/gfs/inheritedAccess'
-import { applyMoveConvergence } from '@lib/gfsEntityChangeState'
 import { desktopQueryKeys } from './queryKeys'
 
 /**
@@ -535,11 +535,11 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       DRIVE
     ),
     queryFn: () => deriveGfsInheritedAccess(current!.resourceId, DRIVE),
+    // FILES AND FOLDERS: a folder Manage dialog must show the identities its
+    // ancestors grant (the walk is kind-agnostic — it resolves the target and
+    // follows parent resource ids), so only the dialog + session gates apply.
     enabled:
-      Boolean(sessionScope) &&
-      current?.kind === 'file' &&
-      grantsListEnabled &&
-      accessState === 'active',
+      Boolean(sessionScope) && Boolean(current) && grantsListEnabled && accessState === 'active',
   })
   const refreshShares = useCallback(async () => {
     const resourceId = current?.resourceId
@@ -1396,7 +1396,13 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       newName?: string,
       oldParentId?: string | null
     ) =>
-      moveResourceMutation.mutateAsync({ resourceId, destinationId, ifMatch, newName, oldParentId }),
+      moveResourceMutation.mutateAsync({
+        resourceId,
+        destinationId,
+        ifMatch,
+        newName,
+        oldParentId,
+      }),
     deleteResource: (resourceId: string, ifMatch?: number) =>
       deleteResourceMutation.mutateAsync({ resourceId, ifMatch }),
     mutating:

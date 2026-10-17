@@ -1860,6 +1860,50 @@ describe('FilesPage', () => {
     ).toContain('Editor')
   })
 
+  it('shows inherited members in a FOLDER manage dialog too', async () => {
+    installInheritedDirectoryMocks()
+    hookMock.useGfsBrowserController.mockReturnValue(
+      inheritedFileController({
+        current: {
+          resourceId: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          name: 'Team folder',
+          kind: 'directory' as const,
+          version: 2,
+        },
+        grants: [],
+        inheritedAccess: [
+          {
+            subject: { type: 'user', id: 'user-2' },
+            permissions: ['read', 'write'],
+            inheritedFrom: ['main'],
+            sources: [
+              {
+                resourceId: 'root-1',
+                name: 'main',
+                permissions: ['read', 'write'],
+                grantId: 'root-grant-1',
+                shareIds: [],
+              },
+            ],
+          },
+        ],
+      })
+    )
+
+    renderFilesPage()
+    await openManageDialog('Team folder')
+
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share folder Team folder' })
+    // The inherited member granted by the drive root renders as a normal
+    // toggleable row — the reported "no one has access" folder bug.
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
+    expect(within(row).getByText('Test Two')).toBeTruthy()
+    expect(
+      within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
+    ).toContain('Editor')
+  })
+
   it('confirms an inherited role change against the parent folder and applies it there', async () => {
     installInheritedDirectoryMocks()
     const parentGrant = (window.clerum.gfs as unknown as { grant: ReturnType<typeof vi.fn> }).grant

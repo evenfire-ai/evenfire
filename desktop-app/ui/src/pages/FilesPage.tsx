@@ -511,9 +511,9 @@ export function FilesPage({
   const currentIsFile = current?.kind === 'file'
   // A total inherited-derivation failure becomes a quiet notice in the Share
   // dialog: an empty derived list alone would silently read as "no one else
-  // has access" (R1-M3). Per-ancestor best-effort skipping stays silent.
-  const inheritedAccessNotice =
-    currentIsFile && ctrl.inheritedAccessError ? INHERITED_DERIVATION_NOTICE : null
+  // has access" (R1-M3). Applies to FILES AND FOLDERS; per-ancestor
+  // best-effort skipping stays silent.
+  const inheritedAccessNotice = ctrl.inheritedAccessError ? INHERITED_DERIVATION_NOTICE : null
   const currentPreviewAvailable = currentIsFile && isGfsPreviewFile(current?.name ?? '')
   const droppedUploadRestriction = useMemo(() => {
     if (!current) {
@@ -2299,7 +2299,9 @@ export function FilesPage({
                     loading={
                       ctrl.loadingGrants || ctrl.loadingShares || ctrl.loadingInheritedAccess
                     }
-                    mergeInherited={currentIsFile}
+                    // FILES AND FOLDERS merge inherited rows (the reported
+                    // folder bug); the dialog itself only opens with a target.
+                    mergeInherited
                     onChangeInheritedRole={handleInheritedRoleChange}
                     onChangeRole={affordances?.canDelegate ? handleAccessRoleChange : undefined}
                     onRemoveInherited={handleInheritedRemove}
