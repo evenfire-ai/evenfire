@@ -9,7 +9,7 @@
 # multi-recipe external claim; see docs/deploy/workflow-output-pvc-upgrade.md.
 #
 # Size: 1Gi MVP — holds ~20 concurrent recipes × 50 MB quota per recipe
-# (see CLERUM_WORKFLOW_OUTPUT_QUOTA_MB in mcp-host/internalTools.ts).
+# (see CLERUM_WORKFLOW_OUTPUT_QUOTA_MB in mcp-host/src/workflow/artifactOutput.ts).
 #
 # Expandable: the chosen StorageClass MUST have allowVolumeExpansion: true
 # (default for GCE-PD, Filestore, most RWX provisioners). Expand with:

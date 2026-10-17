@@ -17,7 +17,7 @@ import {
   buildResponseFileAttachments,
 } from '@lib/chatMessageAttachments'
 import { runChatSwitchRequest } from '@lib/chatSwitchRequest'
-import type { PendingChatSwitchRequest } from '@lib/chatSwitchRequest.types'
+import type { PendingChatSwitchRequest, ProvisionalSelection } from '@lib/chatSwitchRequest.types'
 import { truncateTitle } from '@lib/chatTitle'
 import {
   clearAllComposerDrafts,
@@ -102,6 +102,7 @@ import {
   projectSessionState,
 } from './sessionFsm'
 import { mapTrackerStatusToProgress, readApprovalInputPreview } from './trackerToProgress'
+import { type TranscriptMemoEntry, createTranscriptMemo, transcriptMemoKey } from './transcriptMemo'
 import type { PushNotificationInput } from './types'
 import {
   type ChatListControllerHost,
@@ -143,6 +144,13 @@ const MAX_ACTIVITY_EVENTS_PER_MESSAGE = 100
 const MAX_MESSAGES_WITH_ACTIVITY_PER_AGENT = 50
 const LOCAL_MESSAGE_PAGE_SIZE = 80
 const SERVER_TURN_PAGE_SIZE = 40
+// #1091 A9: transcripts kept for instant reopen. The A/B harness reopens at most
+// this many chats per Host, newest first, so the LRU never thrashes there.
+const TRANSCRIPT_MEMO_LIMITS = {
+  maxChats: 8,
+  maxMessages: 3 * LOCAL_MESSAGE_PAGE_SIZE,
+  maxAttachmentBase64Chars: 8 * 1024 * 1024,
+}
 const MAX_RECONCILE_DELTA_PAGES = 5
 const FILE_REFERENCES_NOT_RECEIVED_MESSAGE =
   'The Host did not receive the selected Global Files; the message was sent without them.'
@@ -536,26 +544,6 @@ export function useAgentChatController({
     chatMessagesLoadingRef.current = loading
     setChatMessagesLoadingState(loading)
   }, [])
-  const beginSelectionIntent = useCallback(
-    (startsHistoryLoad = false) => {
-      selectionIntentRevisionRef.current += 1
-      if (!startsHistoryLoad) {
-        setChatMessagesLoading(false)
-        activeChatSwitchRequestRef.current = null
-        activeChatSwitchKeyRef.current = null
-      }
-      return selectionIntentRevisionRef.current
-    },
-    [setChatMessagesLoading]
-  )
-  const settleChatMessagesLoading = useCallback(
-    (selectionIntentRevision: number) => {
-      if (selectionIntentRevisionRef.current !== selectionIntentRevision) return false
-      setChatMessagesLoading(false)
-      return true
-    },
-    [setChatMessagesLoading]
-  )
   const [hasOlderMessages, setHasOlderMessages] = useState(false)
   const [olderMessagesLoading, setOlderMessagesLoading] = useState(false)
   const chatMessagesRef = useRef<AgentChatMessage[]>([])
@@ -567,6 +555,65 @@ export function useAgentChatController({
     olderMessagesRequestRef.current = null
     setOlderMessagesLoading(false)
   }, [])
+
+  // #1091 A17: a chat shown from memory before its last-active write and first
+  // local page settled. Without the memo this state was the blank view with the
+  // spinner, and every path below relied on that. `revision` is the selection
+  // intent that owns it. Invariant: the mark exists only at the current
+  // revision. `beginSelectionIntent` retires it on every advance, and a
+  // same-row click that finds it live passes it on to its own intent as a new
+  // object, so a superseded mark can never be revived by a later click.
+  const provisionalSelectionRef = useRef<ProvisionalSelection | null>(null)
+  const provisionalSelectionFor = useCallback((agentRef: string | null, chatId: string | null) => {
+    const selection = provisionalSelectionRef.current
+    return selection &&
+      selection.request === activeChatSwitchRequestRef.current &&
+      selection.agentRef === agentRef &&
+      selection.chatId === chatId
+      ? selection
+      : null
+  }, [])
+  /** Withdraw an unconfirmed transcript: the view returns to what the base showed, blank. */
+  const withdrawProvisionalSelection = useCallback(() => {
+    if (!provisionalSelectionRef.current) return
+    provisionalSelectionRef.current = null
+    // Retire the request so a page an older click already started cannot publish.
+    activeChatSwitchRequestRef.current = null
+    activeChatSwitchKeyRef.current = null
+    activeChatLocalPageRequestRef.current = null
+    cancelOlderMessagesLoad()
+    // Invariant: the ref is cleared with the state, not by the passive sync
+    // effect. Merges read the ref, and a merge that runs before that effect
+    // would otherwise build on the withdrawn transcript. Under `act` the effect
+    // always runs first, so no unit test can observe this line.
+    chatMessagesRef.current = []
+    setChatMessages([])
+    setHasOlderMessages(false)
+    loadedLocalMessageCountRef.current = 0
+  }, [cancelOlderMessagesLoad])
+  const beginSelectionIntent = useCallback(
+    (startsHistoryLoad = false) => {
+      // A switch that follows keeps the view; it inherits a live mark itself.
+      if (startsHistoryLoad) provisionalSelectionRef.current = null
+      else withdrawProvisionalSelection()
+      selectionIntentRevisionRef.current += 1
+      if (!startsHistoryLoad) {
+        setChatMessagesLoading(false)
+        activeChatSwitchRequestRef.current = null
+        activeChatSwitchKeyRef.current = null
+      }
+      return selectionIntentRevisionRef.current
+    },
+    [setChatMessagesLoading, withdrawProvisionalSelection]
+  )
+  const settleChatMessagesLoading = useCallback(
+    (selectionIntentRevision: number) => {
+      if (selectionIntentRevisionRef.current !== selectionIntentRevision) return false
+      setChatMessagesLoading(false)
+      return true
+    },
+    [setChatMessagesLoading]
+  )
 
   const ignoredServerGapUpperBounds = useCallback((agentRef: string, chatId: string) => {
     return unfillableServerGapUpperBoundsRef.current.get(makeTaskKey(agentRef, chatId))
@@ -625,6 +672,8 @@ export function useAgentChatController({
     if (lastRetentionScope.current === scope) return
     lastRetentionScope.current = scope
     clearAllComposerDrafts()
+    // The memo key already carries the scope; this frees the previous scope's entries.
+    transcriptMemoRef.current?.clear()
     sendScopeGeneration.current += 1
     agentSendSetupOwnerRef.current = null
     agentSendInFlightRef.current = false
@@ -653,6 +702,71 @@ export function useAgentChatController({
     navItem,
     selectedAgent,
   })
+  // #1091 A9: per-mount, like the FSM store, so test renders stay isolated.
+  const transcriptMemoRef = useRef<ReturnType<typeof createTranscriptMemo> | null>(null)
+  if (!transcriptMemoRef.current) {
+    transcriptMemoRef.current = createTranscriptMemo(TRANSCRIPT_MEMO_LIMITS)
+  }
+  const transcriptMemo = transcriptMemoRef.current
+  const chatTranscriptMemoKey = useCallback(
+    (agentRef: string, chatId: string) =>
+      transcriptMemoKey(currentAuthScopeRef.current, agentRef, chatId),
+    []
+  )
+  // Every change to the visible transcript (send, stream, hydrate, older page)
+  // goes through `chatMessages`, so recording each settled commit keeps the memo
+  // current. A commit whose state does not match the visible selection is a
+  // transition between chats and is skipped. A held Host or a deleted chat is
+  // never recorded: its entry was withdrawn and must not come back on release.
+  useEffect(() => {
+    if (chatMessagesLoading || !activeChatId || !selectedAgent) return
+    if (isHostAccessBlocked(selectedAgent) || isChatDeleted(selectedAgent, activeChatId)) return
+    const visible = activeChatVisibilityRef.current
+    if (visible.activeChatId !== activeChatId || visible.selectedAgent !== selectedAgent) return
+    transcriptMemo.set(chatTranscriptMemoKey(selectedAgent, activeChatId), {
+      messages: chatMessages,
+      hasOlderMessages,
+      loadedLocalMessageCount: loadedLocalMessageCountRef.current,
+    })
+  }, [
+    activeChatId,
+    chatMessages,
+    chatMessagesLoading,
+    chatTranscriptMemoKey,
+    hasOlderMessages,
+    isChatDeleted,
+    isHostAccessBlocked,
+    selectedAgent,
+    transcriptMemo,
+  ])
+
+  const rememberedTranscript = useCallback(
+    (agentRef: string, chatId: string): TranscriptMemoEntry | undefined => {
+      if (isHostAccessBlocked(agentRef) || isChatDeleted(agentRef, chatId)) return undefined
+      return transcriptMemo.get(chatTranscriptMemoKey(agentRef, chatId))
+    },
+    [chatTranscriptMemoKey, isChatDeleted, isHostAccessBlocked, transcriptMemo]
+  )
+
+  /** Show a newly selected chat: its remembered transcript, or a blank list with the spinner. */
+  const presentSelectedTranscript = useCallback(
+    (remembered: TranscriptMemoEntry | undefined) => {
+      cancelOlderMessagesLoad()
+      if (remembered) {
+        chatMessagesRef.current = remembered.messages
+        setChatMessages(remembered.messages)
+        setChatMessagesLoading(false)
+        setHasOlderMessages(remembered.hasOlderMessages)
+        loadedLocalMessageCountRef.current = remembered.loadedLocalMessageCount
+        return
+      }
+      setChatMessages([])
+      setChatMessagesLoading(true)
+      setHasOlderMessages(false)
+      loadedLocalMessageCountRef.current = 0
+    },
+    [cancelOlderMessagesLoad, setChatMessagesLoading]
+  )
   // Correlate the visible local page to the switch request that loaded it.
   const activeChatLocalPageRequestRef = useRef<{
     request: symbol
@@ -982,6 +1096,7 @@ export function useAgentChatController({
     // login/logout / team-switch cycles (security review, hygiene).
     resetReplyNotificationDedupe()
     chatStore.clearCachedRemoteData()
+    transcriptMemo.clear()
     setChatMessages([])
     setHasOlderMessages(false)
     cancelOlderMessagesLoad()
@@ -999,14 +1114,22 @@ export function useAgentChatController({
     resetReplyNotificationDedupe,
     chatStore.clearCachedRemoteData,
     cancelOlderMessagesLoad,
+    transcriptMemo,
   ])
 
   // Unified switch (post-D.4): cache-first render → server reconcile → tracker
   // rejoin. No `isRemote` branch — the server is the source of truth for every
   // chat, and a task in flight is rejoined via the tracker D.3 already mounts.
   const switchToChatForIntent = useCallback(
-    async (agentRef: string, chatId: string, selectionIntentRevision: number) => {
-      if (isHostAccessBlocked(agentRef) || isChatDeleted(agentRef, chatId)) {
+    async (
+      agentRef: string,
+      chatId: string,
+      selectionIntentRevision: number,
+      inherited: ProvisionalSelection | null = null
+    ) => {
+      const deleted = isChatDeleted(agentRef, chatId)
+      if (deleted) transcriptMemo.delete(chatTranscriptMemoKey(agentRef, chatId))
+      if (deleted || isHostAccessBlocked(agentRef)) {
         settleChatMessagesLoading(selectionIntentRevision)
         return
       }
@@ -1037,20 +1160,40 @@ export function useAgentChatController({
         selectedAgent: agentRef,
       }
       setActiveChatId(chatId)
+      // #1091 A9/A17: a remembered transcript is shown at once and stays
+      // provisional until the last-active write and the first local page below
+      // settle; without one the view is blank with the spinner. History is read
+      // only after the write.
+      const remembered = canReuseActiveSwitch ? undefined : rememberedTranscript(agentRef, chatId)
       if (!canReuseActiveSwitch) {
-        setChatMessages([])
-        setChatMessagesLoading(true)
-        setHasOlderMessages(false)
-        cancelOlderMessagesLoad()
-        loadedLocalMessageCountRef.current = 0
+        presentSelectedTranscript(remembered)
+        provisionalSelectionRef.current = remembered
+          ? { request: switchRequest, revision: selectionIntentRevision, agentRef, chatId }
+          : null
+      } else if (inherited?.request === switchRequest) {
+        provisionalSelectionRef.current = { ...inherited, revision: selectionIntentRevision }
       }
+      const ownsProvisionalSelection = () =>
+        provisionalSelectionRef.current?.request === switchRequest &&
+        provisionalSelectionRef.current.revision === selectionIntentRevision
       // The error/resend banner is per-chat view state, not global: clear it on
       // every chat switch (same-agent switches don't trip the selectedAgent
       // cleanup effect, so without this a stream error from chat A would bleed
       // into chat B). The Phase-2 reconcile below re-derives state for this chat.
       setAgentError(null)
       setFailedAgentSend(null)
-      await chatStore.setLastActive(agentRef, chatId)
+      try {
+        await chatStore.setLastActive(agentRef, chatId)
+      } catch (error) {
+        if (ownsProvisionalSelection()) withdrawProvisionalSelection()
+        throw error
+      }
+      if (
+        (isHostAccessBlocked(agentRef) || isChatDeleted(agentRef, chatId)) &&
+        ownsProvisionalSelection()
+      ) {
+        withdrawProvisionalSelection()
+      }
       if (selectionIntentRevisionRef.current !== selectionIntentRevision) return
       if (isHostAccessBlocked(agentRef) || isChatDeleted(agentRef, chatId)) {
         settleChatMessagesLoading(selectionIntentRevision)
@@ -1075,9 +1218,9 @@ export function useAgentChatController({
       }
 
       // PHASE 1 — render only the newest local page. The authoritative reconcile
-      // below requests a delta after the newest cached server turn.
-      // `setLastActive` above crosses the ChatStore boundary before this ref is
-      // read, allowing the rendered page's effect to synchronize chatMessagesRef.
+      // below requests a delta after the newest cached server turn. A reused
+      // switch reads the visible page only when this request rendered it; Phase 1
+      // writes chatMessagesRef together with the state it renders.
       const activeLocalPage = activeChatLocalPageRequestRef.current
       const reuseVisibleMessages =
         canReuseActiveSwitch && activeLocalPage?.request === switchRequest
@@ -1097,22 +1240,49 @@ export function useAgentChatController({
       } catch (error) {
         console.warn('[chat-history] failed to load local messages', { agentRef, chatId, error })
       }
-      const hasOlderServerMessages =
-        nextServerBackfillBeforeTurn(cached as AgentChatMessage[]) !== undefined
-      const hasOlderLocalMessages =
-        !hasOlderServerMessages &&
-        cached.length === LOCAL_MESSAGE_PAGE_SIZE &&
-        (await hasLocalMessagesBeyond(chatStore, agentRef, chatId, LOCAL_MESSAGE_PAGE_SIZE))
-      if (!isStillActive()) return
-      if (loadedLocalPage && !reuseVisibleMessages) {
-        activeChatLocalPageRequestRef.current = { request: switchRequest }
+      // #1091 A9: the remembered transcript is already on screen. Keep it only
+      // when the disk page is its newest part; otherwise the disk page wins,
+      // e.g. a reply persisted while the chat was hidden. An empty page also
+      // wins: `loadMessages` returns [] for a durably tombstoned chat, which
+      // this session may not have loaded into `deletedChatIdsByAgentRef` yet,
+      // and recording [] drops the memo entry. A rejected read is not an empty
+      // page: it says nothing about the chat, so the remembered transcript
+      // stays. The Host reconcile below runs in every case.
+      const keepRemembered =
+        remembered !== undefined &&
+        (!loadedLocalPage ||
+          (cached.length > 0 &&
+            sameMessageSequence(
+              remembered.messages.slice(-cached.length),
+              cached as AgentChatMessage[]
+            )))
+      if (keepRemembered) {
+        cached = remembered.messages as typeof cached
+        if (!isStillActive()) return
+        if (loadedLocalPage) activeChatLocalPageRequestRef.current = { request: switchRequest }
+      } else {
+        const hasOlderServerMessages =
+          nextServerBackfillBeforeTurn(cached as AgentChatMessage[]) !== undefined
+        const hasOlderLocalMessages =
+          !hasOlderServerMessages &&
+          cached.length === LOCAL_MESSAGE_PAGE_SIZE &&
+          (await hasLocalMessagesBeyond(chatStore, agentRef, chatId, LOCAL_MESSAGE_PAGE_SIZE))
+        if (!isStillActive()) return
+        if (loadedLocalPage && !reuseVisibleMessages) {
+          activeChatLocalPageRequestRef.current = { request: switchRequest }
+        }
+        loadedLocalMessageCountRef.current = cached.length
+        setHasOlderMessages(hasOlderLocalMessages || hasOlderServerMessages)
+        if (!reuseVisibleMessages) {
+          // Hydrate merges onto the ref, so a replaced memo must not linger there.
+          chatMessagesRef.current = cached as AgentChatMessage[]
+          setChatMessages(cached as AgentChatMessage[])
+        }
       }
-      loadedLocalMessageCountRef.current = cached.length
-      setHasOlderMessages(hasOlderLocalMessages || hasOlderServerMessages)
-      if (!reuseVisibleMessages) setChatMessages(cached as AgentChatMessage[])
       // Phase 1 rendered the cache → clear the blocking spinner. The reconcile
       // runs under the `syncing` indicator (RECONCILE_STARTED, dispatched by the
-      // reconcile gate) instead.
+      // reconcile gate) instead. The selection is confirmed from here on.
+      if (ownsProvisionalSelection()) provisionalSelectionRef.current = null
       settleChatMessagesLoading(selectionIntentRevision)
       // D.5: opening the chat clears its "completed_unread" badge. CHAT_OPENED
       // resets the FSM's `unreadTerminal` flag so a LATER hidden terminal re-marks
@@ -1170,7 +1340,11 @@ export function useAgentChatController({
       reconcileChat,
       scrollChatToBottom,
       clearUnreadInList,
-      cancelOlderMessagesLoad,
+      rememberedTranscript,
+      presentSelectedTranscript,
+      transcriptMemo,
+      chatTranscriptMemoKey,
+      withdrawProvisionalSelection,
       settleChatMessagesLoading,
       chatStore.setLastActive,
       chatStore.loadMessages,
@@ -1184,11 +1358,12 @@ export function useAgentChatController({
       chatId: string,
       revision: number,
       onCurrentError: (error: unknown) => void,
-      isRelevant: () => boolean = () => true
+      isRelevant: () => boolean = () => true,
+      inherited: ProvisionalSelection | null = null
     ) => {
       const scope = currentAuthScopeRef.current
       return runChatSwitchRequest(
-        () => switchToChatForIntent(agentRef, chatId, revision),
+        () => switchToChatForIntent(agentRef, chatId, revision, inherited),
         () =>
           selectionIntentRevisionRef.current === revision &&
           currentAuthScopeRef.current === scope &&
@@ -1212,11 +1387,20 @@ export function useAgentChatController({
       // these guards before advancing the history-selection revision so a
       // blocked or deleted chat cannot cancel another chat's pending load.
       if (isHostAccessBlocked(agentRef) || isChatDeleted(agentRef, chatId)) return
+      // A same-row click takes over the live mark of the click it supersedes.
+      const inherited = provisionalSelectionFor(agentRef, chatId)
       const selectionIntentRevision = beginSelectionIntent(true)
       clearPendingSelection(agentRef, chatId)
-      const promise = runSwitchForIntent(agentRef, chatId, selectionIntentRevision, error => {
-        options.onCurrentError?.(error)
-      })
+      const promise = runSwitchForIntent(
+        agentRef,
+        chatId,
+        selectionIntentRevision,
+        error => {
+          options.onCurrentError?.(error)
+        },
+        undefined,
+        inherited
+      )
       const request: PendingChatSwitchRequest = {
         agentRef,
         chatId,
@@ -1240,6 +1424,7 @@ export function useAgentChatController({
       clearPendingSelection,
       isChatDeleted,
       isHostAccessBlocked,
+      provisionalSelectionFor,
       runSwitchForIntent,
     ]
   )
@@ -1269,7 +1454,13 @@ export function useAgentChatController({
       dispatchSession,
       clearComposerDraft,
       getActiveChatId: () => activeChatVisibilityRef.current.activeChatId,
-      getChatMessagesLoading: () => chatMessagesLoadingRef.current,
+      getChatSwitchInFlight: () => {
+        const view = activeChatVisibilityRef.current
+        return (
+          chatMessagesLoadingRef.current ||
+          provisionalSelectionFor(view.selectedAgent, view.activeChatId) !== null
+        )
+      },
       getAutoSelectedChatId: () => autoSelectedChatIdRef.current,
       markAutoSelectedChat: chatId => {
         autoSelectedChatIdRef.current = chatId
@@ -1303,6 +1494,8 @@ export function useAgentChatController({
 
   const handleLoadOlderMessages = useCallback(async () => {
     if (!selectedAgent || !activeChatId || olderMessagesRequestRef.current) return
+    // An unconfirmed selection is read-only: no history is read before its write.
+    if (provisionalSelectionFor(selectedAgent, activeChatId)) return
     const requestAgent = selectedAgent
     const requestChatId = activeChatId
     const requestScope = sendScopeGeneration.current
@@ -1438,6 +1631,7 @@ export function useAgentChatController({
     markServerGapUnfillable,
     selectedAgent,
     isHostAccessBlocked,
+    provisionalSelectionFor,
     tracker,
   ])
 
@@ -1943,8 +2137,15 @@ export function useAgentChatController({
       // a client-derived title would only (a) diverge from the server's own
       // auto-title and (b) linger as a stale case-D fallback. On the next catalog
       // load the §2.2 merge shows the server title when the host reports one.
+      // The index holds the server's title when one was reported
+      // (`ChatStore.upsertServerSessions`), so the first user turn names the
+      // chat only while it has no title yet.
       let title = meta.title
-      if (localMessages.length === 0 && (resp.oldestTurnNumber ?? resp.turns[0]?.number) === 1) {
+      if (
+        title === 'New Chat' &&
+        localMessages.length === 0 &&
+        (resp.oldestTurnNumber ?? resp.turns[0]?.number) === 1
+      ) {
         const firstUserInput = resp.turns.find(t => t.user_input?.trim())?.user_input?.trim() || ''
         const hydratedTitle = truncateTitle(firstUserInput)
         if (hydratedTitle) {
@@ -2134,6 +2335,8 @@ export function useAgentChatController({
         reconcileChatRef.current?.supersede(chatKey)
         fsm.dispatch(chatKey, { type: 'RESET' })
       }
+      // A held Host's transcripts must not reappear from memory once it is released.
+      transcriptMemo.deleteAgent(agentRef)
       const stopActivity = activityUnsubByAgentRef.current[agentRef]
       if (stopActivity) {
         delete activityUnsubByAgentRef.current[agentRef]
@@ -2180,6 +2383,7 @@ export function useAgentChatController({
     [
       tracker,
       fsm,
+      transcriptMemo,
       hideAgent,
       chatStore.clearCachedRemoteData,
       clearList,
@@ -2990,6 +3194,8 @@ export function useAgentChatController({
       // switchToChat) rather than state, which may not have committed yet.
       const currentChatId = activeChatVisibilityRef.current.activeChatId
       if (currentChatId && isChatDeleted(selectedAgent, currentChatId)) return
+      // An unconfirmed selection is read-only; the draft stays in the composer.
+      if (currentChatId && provisionalSelectionFor(selectedAgent, currentChatId)) return
       if (currentChatId && tracker.get(makeTaskKey(selectedAgent, currentChatId))) return
       if (agentSendInFlightRef.current) return
       const sendAgent = selectedAgent
@@ -3722,6 +3928,7 @@ export function useAgentChatController({
       clearPendingSelection,
       isHostAccessBlocked,
       isChatDeleted,
+      provisionalSelectionFor,
       revokeHostAccess,
       holdHostAccess,
       composerImageAttachments,

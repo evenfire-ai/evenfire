@@ -11,6 +11,7 @@ MCP Host is a Kubernetes-native service that reads Host CRD configuration and pr
 - HTTP RPC server for receiving messages from channel-reader
 - Connects to MCP servers via host-context-controller service for tool capabilities
 - LLM function calling support (OpenAI tools / Claude tools)
+- Built-in document and chart tools: Markdown, PDF, DOCX, XLSX, PPTX, PNG charts and HTML dashboards (see [Document and chart tools](#document-and-chart-tools))
 - Dev mode for local development without Kubernetes
 
 ## Configuration
@@ -41,8 +42,10 @@ the value.
 
 Separately, the per-Host `host-<hostRef>-env` ConfigMap and
 `host-<hostRef>-env-secret` Secret are watched at runtime and feed tool
-subprocess env and capability checks, not the startup settings below.
-Precedence there is host Secret > host ConfigMap > LLM Secret > process env.
+subprocess env, capability checks and the LLM provider's non-secret settings
+(`VERTEX_*`, `AWS_REGION`, `AZURE_OPENAI_*`), not the other startup settings
+below. Precedence there is host Secret > host ConfigMap > LLM Secret > process
+env.
 
 #### Core runtime
 
@@ -93,9 +96,9 @@ Precedence there is host Secret > host ConfigMap > LLM Secret > process env.
 | Variable                                            | Default                                                       | Source                                             | Description                                                                                                                                                                                                                                                                                                                               |
 | --------------------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Provider credential env vars                        | -                                                             | dev                                                | In dev mode, each provider's key is read from its env var (`OPENAI_API_KEY`, `CLAUDE_API_KEY`, `ZAI_API_KEY`, `BAILIAN_API_KEY`, ...; Bedrock needs `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`). In cluster mode keys come from the Secret in `Host.spec.secretRef`. Full list: [Supported LLM Providers](#supported-llm-providers). |
-| `VERTEX_PROJECT_ID`, `VERTEX_LOCATION`              | `VERTEX_LOCATION`: `us-central1`                              | -                                                  | Non-secret Vertex AI settings, read from the mcp-host process environment. `VERTEX_PROJECT_ID` falls back to the service account's `project_id`.                                                                                                                                                                                          |
-| `AWS_REGION`                                        | -                                                             | -                                                  | Region for Amazon Bedrock (required for Bedrock), read from the process environment.                                                                                                                                                                                                                                                      |
-| `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_VERSION` | -                                                             | -                                                  | Azure OpenAI resource endpoint (required for Azure; must be `https`) and optional API version, read from the process environment.                                                                                                                                                                                                         |
+| `VERTEX_PROJECT_ID`, `VERTEX_LOCATION`              | `VERTEX_LOCATION`: `us-central1`                              | -                                                  | Non-secret Vertex AI settings. On a Host, set under Host → Environment (per-Host env first, then process env); dev mode reads the process env. `VERTEX_PROJECT_ID` falls back to the service account's `project_id`.                                                                                                                      |
+| `AWS_REGION`                                        | -                                                             | -                                                  | Region for Amazon Bedrock (required for Bedrock). On a Host, set under Host → Environment (per-Host env first, then process env); dev mode reads the process env.                                                                                                                                                                         |
+| `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_VERSION` | -                                                             | -                                                  | Azure OpenAI resource endpoint (required for Azure; must be `https`) and optional API version. On a Host, set under Host → Environment (per-Host env first, then process env); dev mode reads the process env.                                                                                                                            |
 | `CLERUM_LLM_ALLOWED_MODELS_CM`                      | `clerum-llm-allowed-models`                                   | -                                                  | Name of the LLM allowlist ConfigMap that control-api writes. A test/canary override only: pointing it at a ConfigMap control-api does not write leaves the Host with no allowed models.                                                                                                                                                   |
 | `MCP_HOST_CODEX_SUBSCRIPTION_ENABLED`               | `false`                                                       | CM `true`; WRC                                     | Allow the `codex-subscription` provider. Only the exact value `true` enables it. See [Use a ChatGPT or Grok subscription](../docs/how-to/connect-llm-subscription.md).                                                                                                                                                                    |
 | `MCP_HOST_GROK_SUBSCRIPTION_ENABLED`                | `false`                                                       | HCC (only when the Host is eligible for Grok); WRC | Allow the `grok-subscription` provider. HCC adds it only for Hosts whose Grok projection grants execution, so you do not set it in the ConfigMap.                                                                                                                                                                                         |
@@ -401,9 +404,15 @@ Semantics:
 - `false` — skip approval (override a tool whose code default is `true`).
 - absent — use the tool's hard-coded `requiresApproval()` default.
 
-Currently in scope (v1): the always-on native tools — `http_request`, `shell_exec`, `file_read`, `file_write`, `system_info`, `json_transform`, plus `clerum__generate_markdown`, `clerum__generate_pdf`, `clerum__generate_docx`, `clerum__generate_xlsx`, `clerum__list_workflows`, `clerum__read_workflow`, `clerum__trigger_workflow`, and `clerum__get_capabilities`. The exact list at any deploy is whatever appears after `Always-on tools:` in the `[approval-config]` startup warning. Conditionally-registered tools (`memory_*` when `CLERUM_MEMORY_ENABLED=true`, `cron_*` when a scheduler is wired, `desktop_*` / browser tools when `Host.spec.desktop` is set) are NOT in the startup validator's known set, so an override will trigger an "unknown tool" warning at startup — but the override is still honored at runtime once the tool registers in the per-task `TaskExecutor`. MCP tools (named `serverName__toolName`) are NOT covered by this override and continue to always require approval.
+Currently in scope (v1): the always-on native tools — `http_request`, `shell_exec`, `file_read`, `file_write`, `system_info`, `json_transform`, plus `clerum__generate_markdown`, `clerum__generate_pdf`, `clerum__generate_docx`, `clerum__generate_xlsx`, `clerum__generate_pptx`, `clerum__generate_chart`, `clerum__generate_dashboard`, and `clerum__get_capabilities`. The exact list at any deploy is whatever appears after `Always-on tools:` in the `[approval-config]` startup warning. Conditionally-registered tools (`memory_*` when `CLERUM_MEMORY_ENABLED=true`, `cron_*` when a scheduler is wired, `desktop_*` / browser tools when `Host.spec.desktop` is set) are NOT in the startup validator's known set, so an override will trigger an "unknown tool" warning at startup — but the override is still honored at runtime once the tool registers in the per-task `TaskExecutor`. MCP tools (named `serverName__toolName`) are NOT covered by this override and continue to always require approval.
 
 The schema is permissive (`additionalProperties: { type: boolean }`) so adding a new native tool does not require a CRD bump. mcp-host emits an `[approval-config]` warning at startup and on each Host reconcile when an override references an unrecognized tool name or when `http_request: false` is set without `CLERUM_HTTP_ALLOWLIST`. A positive `[approval-config] Per-tool approval overrides in effect: ...` audit log is emitted whenever any override is configured so operators can confirm the CRD took effect.
+
+### Document and chart tools
+
+The `clerum__generate_*` tools write their files to the output folder: `/output` in a workflow run, unless `CLERUM_OUTPUT_DIR` names another, and in chat each caller's own `<workspace>/users/<key>/.clerum-outputs`, which only that caller lists and downloads; `CLERUM_OUTPUT_DIR` is not used in chat. Files written to `<workspace>/outputs` before chat files became per caller stay there, are no longer listed or served, and are counted in a log line at startup. Each generator loads its library on first use.
+
+Charts, PDFs, and the measuring of DOCX tables and slide text read system fonts through `@napi-rs/canvas`, a native module. The images install them: `font-dejavu font-noto font-noto-cjk font-noto-arabic font-noto-hebrew` on Alpine (`Dockerfile`), and `fonts-dejavu-core fonts-noto-core fonts-noto-cjk` on Debian (`Dockerfile.slim`, `Dockerfile.full`, `Dockerfile.desktop`). Without them, the bundled Roboto still draws Latin, Greek and Cyrillic, but CJK, Arabic, Hebrew, arrows and check marks have no glyph to draw. A machine that runs the tests needs the same packages: CI installs the Debian ones for mcp-host, and the font tests fail in CI when they are missing.
 
 ### API Keys Secret
 
@@ -423,6 +432,7 @@ The Secret name is what you reference from `Host.spec.secretRef`.
 
 - Node.js >= 24
 - npm
+- The fonts listed in [Document and chart tools](#document-and-chart-tools), for the chart and document tools and their tests
 
 ### Local Development
 

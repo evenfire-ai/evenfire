@@ -11,18 +11,15 @@ import type {
 import { readRemoteImmutables } from './oauthRemote'
 import type { RemoteImmutableView } from './oauthRemote.types'
 
-// Public callback base URL for the exact redirect URI (D-B4). It is a control-api
-// server env (CONTROL_API_OAUTH_CALLBACK_BASE_URL) and is NOT reachable from the
-// browser, so control-ui reads a mirror. When it is unset the wizard refuses to
-// invent a URI from window.location (a control-ui origin behind the funnel would
-// guide the operator to register a broken redirect at the provider); it shows a
-// "not configured" state instead, and control-api independently rejects the
-// install with the same reason. Read lazily (not a module-load const) so the
-// value reflects the deployment env at call time — Next still inlines the
-// NEXT_PUBLIC_* reference at build for the browser bundle.
-export function oauthCallbackBaseUrl(): string {
-  return process.env.NEXT_PUBLIC_CONTROL_API_OAUTH_CALLBACK_BASE_URL?.trim() ?? ''
-}
+// The public callback base URL for the exact redirect URI (D-B4) is a control-api
+// server env (CONTROL_API_OAUTH_CALLBACK_BASE_URL). The wizard reads it at runtime
+// from control-api (GET /admin/oauth/callback) as a template over this placeholder,
+// never from a build-time NEXT_PUBLIC_* mirror. When control-api reports it unset the
+// wizard refuses to invent a URI from window.location (a control-ui origin behind the
+// funnel would guide the operator to register a broken redirect at the provider); it
+// shows a "not configured" state instead, and control-api independently rejects the
+// install with the same reason.
+const OAUTH_CLIENT_ID_PLACEHOLDER = '{oauthClientId}'
 
 const GRANT_SCOPES: ReadonlySet<string> = new Set<OAuthGrantScope>(['user', 'context'])
 
@@ -99,15 +96,19 @@ export function deriveOAuthClientIdPreview(serverName: string): string {
 }
 
 /**
- * The exact redirect URI the operator registers at the provider (D-B4):
- * `{base}/api/v1/oauth-callback/{oauth.id}`. Returns null when the base URL is
- * not configured or the id is empty — the caller shows a "not configured" notice
- * rather than a broken URI.
+ * The exact redirect URI the operator registers at the provider (D-B4), filled from
+ * control-api's `redirectUriTemplate` (GET /admin/oauth/callback), which control-api
+ * renders with the same builder its install/authorize path uses. Returns null when
+ * there is no usable template (not configured) or the id is empty — the caller shows
+ * a notice rather than a broken URI.
  */
-export function buildOAuthRedirectUri(base: string | undefined, oauthId: string): string | null {
-  const trimmedBase = (base ?? '').trim().replace(/\/+$/, '')
-  if (!trimmedBase || !oauthId) return null
-  return `${trimmedBase}/api/v1/oauth-callback/${encodeURIComponent(oauthId)}`
+export function buildOAuthRedirectUri(
+  template: string | undefined,
+  oauthId: string
+): string | null {
+  const trimmed = (template ?? '').trim()
+  if (!trimmed.includes(OAUTH_CLIENT_ID_PLACEHOLDER) || !oauthId) return null
+  return trimmed.replace(OAUTH_CLIENT_ID_PLACEHOLDER, encodeURIComponent(oauthId))
 }
 
 /**

@@ -435,6 +435,10 @@ export function SidebarNav({
                             return (
                               <div
                                 key={sessionKey}
+                                data-testid="latest-session-row"
+                                data-agent-ref={session.agentRef}
+                                data-chat-id={session.id}
+                                aria-current={isActive ? 'true' : undefined}
                                 className={`nav-latest-session${isActive ? ' active' : ''}`}
                                 title={collapsed ? session.title : undefined}
                               >
