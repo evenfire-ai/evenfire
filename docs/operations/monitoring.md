@@ -94,15 +94,15 @@ generates. On a cluster whose StorageClass matches the values files, the same
 `helm --kube-context` commands work without the `--set` overrides.
 
 The targets in `monitoring/Makefile` (`setup`, `install_*`, `upgrade_*`,
-`uninstall_*`, `dashboards`, `status`, `port_forward_grafana`) take no context:
-they run `kubectl` and `helm` against your kubeconfig's **current** context.
-Use them only after `kubectl config current-context` shows the intended
-cluster; the explicit commands above are the safer default. `install_grafana`
-and `upgrade_grafana` create or update the `grafana-dashboards` ConfigMap
-first. The `STORAGE_CLASS`, `LOKI_SIZE`, `GRAFANA_SIZE` and `GRAFANA_PORT`
-variables cover the minikube overrides, for example
-`make install_loki install_grafana STORAGE_CLASS=standard LOKI_SIZE=10Gi` and
-`make port_forward_grafana GRAFANA_PORT=3001`. See the
+`uninstall_*`, `dashboards`, `status`, `port_forward_grafana`) pass
+`KUBE_CONTEXT` to every `kubectl` (`--context`) and `helm` (`--kube-context`)
+call. Leave it unset and they use your kubeconfig's **current** context, so
+set it, for example `KUBE_CONTEXT="$KCTX"`. `install_grafana` and
+`upgrade_grafana` create or update the `grafana-dashboards` ConfigMap first.
+The `STORAGE_CLASS`, `LOKI_SIZE`, `GRAFANA_SIZE` and `GRAFANA_PORT` variables
+cover the minikube overrides, for example
+`make install_loki install_grafana KUBE_CONTEXT="$KCTX" STORAGE_CLASS=standard LOKI_SIZE=10Gi`
+and `make port_forward_grafana KUBE_CONTEXT="$KCTX" GRAFANA_PORT=3001`. See the
 [`monitoring/` README](../../monitoring/README.md#make-variables).
 
 ## Logs

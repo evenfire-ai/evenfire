@@ -92,6 +92,9 @@ else
 fi
 
 # ── Node.js (>= 24; Desktop/Electron validation wants 24.x) ───────────
+# Download the NodeSource setup script to a file the user can review before
+# running it as root, instead of piping a remote script straight into sudo.
+NODESOURCE_HINT="curl -fsSLo nodesource_setup.sh https://deb.nodesource.com/setup_24.x, review it, then: sudo -E bash nodesource_setup.sh && sudo apt-get install -y nodejs"
 # The platform itself runs in containers, so the quickstart only needs a
 # floor here. Pinning the whole install to 24.x would lock out newer runtimes
 # for a Desktop-only concern. Desktop validation is where 24.x is contractual:
@@ -107,12 +110,12 @@ if command -v node >/dev/null 2>&1; then
     fi
   else
     err "node     v${NODE_VER} (need >= 24)"
-    hint "brew install node@24" "curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash - && sudo apt-get install -y nodejs"
+    hint "brew install node@24" "$NODESOURCE_HINT"
     MISSING=$((MISSING + 1))
   fi
 else
   err "node     not found (need >= 24)"
-  hint "brew install node@24" "curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash - && sudo apt-get install -y nodejs"
+  hint "brew install node@24" "$NODESOURCE_HINT"
   MISSING=$((MISSING + 1))
 fi
 
