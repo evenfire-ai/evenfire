@@ -11,7 +11,7 @@ import {
   operationTargetIsCurrentlyValid,
 } from './accessAuthorityStore.js'
 import { configureAccessAuthorityTransaction } from './accessAuthorityTransaction.js'
-import { withAccessDatabaseTransaction } from './accessDatabaseQuery.js'
+import { runAccessDatabaseQuery, withAccessDatabaseTransaction } from './accessDatabaseQuery.js'
 import {
   AccessBudgetExceededError,
   AccessExecutionBudget,
@@ -35,6 +35,7 @@ import {
   databaseRelationshipsRevision,
   revisionOfValues,
 } from './authorizationRevision.js'
+import { compareCanonicalUtf8Text } from './canonicalText.js'
 import { type AccessCapability, isAccessCapability } from './capabilityRegistry.js'
 import { validateExactOperationalBindings } from './exactOperationalAuthorization.js'
 import {
@@ -58,6 +59,7 @@ export type LiveAuthorizationInput = Readonly<{
   session: AccessAuthoritySession
   requiredCapability: unknown
   resource: CanonicalResourceIdentity
+  operationId?: ActionOperationId
   operationTarget?: unknown
   requestedAccessPathId?: string
 }>
@@ -115,6 +117,18 @@ export type LiveAuthorizationResult =
 
 type ResolverTransaction = <T>(work: (db: DbClient) => Promise<T>) => Promise<T>
 
+const HOST_GRAPH_ACTIONS = new Set<ActionOperationId>([
+  'host.status.read',
+  'host.health.read',
+  'host.wake',
+  'host.manage',
+  'host.activity.read',
+  'host.activity.read_all',
+  'remote_desktop.status',
+  'remote_desktop.open',
+  'remote_desktop.reconnect',
+])
+
 export type LiveAuthorizationOptions = Readonly<{
   gateway?: Pick<K8sGateway, 'getResourceExact'>
   budget?: AccessExecutionBudget
@@ -166,6 +180,7 @@ export class AuthorizationRequestMemo {
       input.session,
       input.requiredCapability,
       resourceIdentityKey(input.resource),
+      input.operationId ?? null,
       targetKey,
       input.requestedAccessPathId ?? null,
     ])
@@ -178,6 +193,146 @@ export class AuthorizationRequestMemo {
     void created.catch(() => this.values.delete(key))
     return created
   }
+}
+
+export function selectActionOperationalDependencies(
+  graph: OperationalResourceGraphResult,
+  operationId: ActionOperationId | undefined,
+  operationTarget?: ReturnType<typeof validateOperationTarget>
+): OperationalResourceGraphResult {
+  if (graph.status !== 'current' || !operationId) return graph
+  const root = graph.resource
+  if (
+    root.resourceType !== 'host' ||
+    !HOST_GRAPH_ACTIONS.has(operationId) ||
+    operationTarget?.hostRef !== root.logicalId
+  ) {
+    return graph
+  }
+
+  const hostContextEdges = graph.relationships.filter(
+    relationship =>
+      relationship.sourceType === 'host' &&
+      relationship.sourceId === root.logicalId &&
+      relationship.relationshipType === 'uses_context' &&
+      relationship.targetType === 'context'
+  )
+  if (hostContextEdges.length > 1) {
+    return { status: 'unavailable', safeCode: 'operational_related_resource_incomplete' }
+  }
+  const selectedContextId = hostContextEdges[0]?.targetId
+  const relationships = graph.relationships.filter(
+    relationship =>
+      hostContextEdges.includes(relationship) ||
+      (selectedContextId !== undefined &&
+        relationship.sourceType === 'context' &&
+        relationship.sourceId === selectedContextId &&
+        relationship.relationshipType !== 'includes_mcp_server')
+  )
+
+  const selectedKeys = new Set<string>([JSON.stringify([root.resourceType, root.logicalId])])
+  for (const relationship of relationships) {
+    for (const [resourceType, logicalId] of [
+      [relationship.sourceType, relationship.sourceId],
+      [relationship.targetType, relationship.targetId],
+    ] as const) {
+      if (
+        ['host', 'context', 'mcp_server', 'workflow_recipe', 'shared_filesystem'].includes(
+          resourceType
+        )
+      ) {
+        selectedKeys.add(JSON.stringify([resourceType, logicalId]))
+      }
+    }
+  }
+  const selectedResources = graph.resources.filter(resource =>
+    selectedKeys.has(JSON.stringify([resource.resourceType, resource.logicalId]))
+  )
+  if (selectedResources.length !== selectedKeys.size) {
+    return { status: 'unavailable', safeCode: 'operational_related_resource_incomplete' }
+  }
+  const resources = graph.resources
+    .filter(resource =>
+      selectedKeys.has(JSON.stringify([resource.resourceType, resource.logicalId]))
+    )
+    .sort((left, right) =>
+      compareCanonicalUtf8Text(
+        JSON.stringify([left.resourceType, left.logicalId]),
+        JSON.stringify([right.resourceType, right.logicalId])
+      )
+    )
+  const orderedRelationships = [...relationships].sort((left, right) =>
+    compareCanonicalUtf8Text(
+      JSON.stringify([
+        left.sourceType,
+        left.sourceId,
+        left.relationshipType,
+        left.targetType,
+        left.targetId,
+        left.relationshipInstanceId,
+      ]),
+      JSON.stringify([
+        right.sourceType,
+        right.sourceId,
+        right.relationshipType,
+        right.targetType,
+        right.targetId,
+        right.relationshipInstanceId,
+      ])
+    )
+  )
+  const relationshipsRevision = revisionOfValues(
+    orderedRelationships.map(relationship => [
+      relationship.sourceType,
+      relationship.sourceId,
+      relationship.relationshipType,
+      relationship.targetType,
+      relationship.targetId,
+      relationship.relationshipInstanceId,
+      relationship.behaviorAttributes,
+      relationship.sourceProviderUid,
+      relationship.sourceResourceVersion,
+    ])
+  )
+  return Object.freeze({
+    ...graph,
+    resources: Object.freeze(resources),
+    relationships: Object.freeze(orderedRelationships),
+    relationshipsRevision,
+  })
+}
+
+async function requireSelectedSourceFamiliesCurrent(input: {
+  graph: Extract<OperationalResourceGraphResult, { status: 'current' }>
+  db: DbClient
+  budget: AccessExecutionBudget
+}): Promise<OperationalResourceGraphResult> {
+  const families = [...new Set(input.graph.resources.map(resource => resource.sourceFamily))].sort(
+    compareCanonicalUtf8Text
+  )
+  const states = await runAccessDatabaseQuery(
+    input.db,
+    input.budget,
+    `SELECT source_family, generation, status
+       FROM operational_catalog_source_state
+      WHERE environment_id = $1
+        AND source_family = ANY($2::text[])
+      ORDER BY source_family`,
+    [input.graph.resource.environmentId, families]
+  )
+  const rows = states.rows as Array<Record<string, unknown>>
+  if (
+    rows.length !== families.length ||
+    rows.some((row, index) => row.source_family !== families[index] || row.status !== 'current')
+  ) {
+    return { status: 'unavailable', safeCode: 'operational_source_not_current' }
+  }
+  return Object.freeze({
+    ...input.graph,
+    sourceStateRevision: revisionOfValues(
+      rows.map(row => [row.source_family, row.generation, row.status])
+    ),
+  })
 }
 
 async function resolveInTransaction(input: {
@@ -204,13 +359,36 @@ async function resolveInTransaction(input: {
   let graph: OperationalResourceGraphResult | null = null
   if (isOperationalAccessResourceType(input.request.resource.type)) {
     try {
+      const hostAction =
+        input.request.resource.type === 'host' &&
+        input.request.operationId !== undefined &&
+        HOST_GRAPH_ACTIONS.has(input.request.operationId) &&
+        input.operationTarget?.hostRef === input.request.resource.logicalId
       graph = await loadOperationalResourceGraph({
         db: input.db,
         budget: input.budget,
         environmentId: input.request.resource.environmentId,
         resourceType: input.request.resource.type,
         logicalId: input.request.resource.logicalId,
+        ...(hostAction
+          ? {
+              requiredSourceFamilies: ['host'],
+              allowIncompleteRelatedResources: true,
+            }
+          : {}),
       })
+      graph = selectActionOperationalDependencies(
+        graph,
+        input.request.operationId,
+        input.operationTarget
+      )
+      if (hostAction && graph.status === 'current') {
+        graph = await requireSelectedSourceFamiliesCurrent({
+          graph,
+          db: input.db,
+          budget: input.budget,
+        })
+      }
     } catch (error) {
       if (
         error instanceof AccessBudgetExceededError ||
@@ -524,6 +702,7 @@ export async function resolveLiveActionAuthorization(
     session: input.session,
     requiredCapability,
     resource: authorizationResource,
+    operationId: input.operationId,
     operationTarget,
     ...(input.requestedAccessPathId ? { requestedAccessPathId: input.requestedAccessPathId } : {}),
   }

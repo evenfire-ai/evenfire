@@ -818,10 +818,19 @@ export async function loadOperationalResourceGraph(input: {
   environmentId: string
   resourceType: AccessResourceType
   logicalId: string
+  requiredSourceFamilies?: readonly OperationalSourceFamily[]
+  allowIncompleteRelatedResources?: boolean
 }): Promise<OperationalResourceGraphResult> {
-  const requiredFamilies = SOURCE_FAMILIES_BY_TYPE[input.resourceType]
+  const defaultRequiredFamilies = SOURCE_FAMILIES_BY_TYPE[input.resourceType]
   const targetFamily = sourceFamilyForType(input.resourceType)
-  if (!requiredFamilies || !targetFamily) {
+  const requiredFamilies = input.requiredSourceFamilies ?? defaultRequiredFamilies
+  if (
+    !defaultRequiredFamilies ||
+    !requiredFamilies ||
+    !targetFamily ||
+    !requiredFamilies.includes(targetFamily) ||
+    new Set(requiredFamilies).size !== requiredFamilies.length
+  ) {
     throw new Error('operational_resource_type_unsupported')
   }
 
@@ -875,7 +884,10 @@ export async function loadOperationalResourceGraph(input: {
             relationship.source_id, relationship.relationship_type,
             relationship.target_type,
             CASE WHEN relationship.relationship_type = 'uses_context'
-              THEN ${canonicalContextLogicalIdSql('$1', 'relationship.target_id')}
+              THEN COALESCE(
+                ${canonicalContextLogicalIdSql('$1', 'relationship.target_id')},
+                relationship.target_id
+              )
               ELSE relationship.target_id
             END AS target_id,
             relationship.relationship_instance_id, relationship.behavior_attributes,
@@ -885,8 +897,6 @@ export async function loadOperationalResourceGraph(input: {
        FROM operational_resource_relationships relationship
       WHERE relationship.environment_id = $1
         AND relationship.relationship_type <> 'context_identity_alias'
-        AND (relationship.relationship_type <> 'uses_context'
-          OR ${canonicalContextLogicalIdSql('$1', 'relationship.target_id')} IS NOT NULL)
         AND (
           $2 NOT IN ('mcp_server', 'shared_filesystem')
           OR relationship.source_type <> 'context'
@@ -1052,7 +1062,7 @@ export async function loadOperationalResourceGraph(input: {
   const resources = Object.freeze(
     (relatedResult.rows as Record<string, unknown>[]).map(parseResource)
   )
-  if (resources.length !== resourceKeys.size) {
+  if (resources.length !== resourceKeys.size && !input.allowIncompleteRelatedResources) {
     return { status: 'unavailable', safeCode: 'operational_related_resource_incomplete' }
   }
   input.budget.charge({

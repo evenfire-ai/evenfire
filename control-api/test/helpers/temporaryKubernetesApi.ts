@@ -1,5 +1,6 @@
+import { randomUUID } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { type Server, type ServerResponse, createServer } from 'node:http'
+import { type IncomingMessage, type Server, type ServerResponse, createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -48,7 +49,7 @@ export class TemporaryKubernetesApi {
 
   constructor() {
     this.server = createServer((request, response) => {
-      void this.handle(request.method ?? 'GET', request.url ?? '/', response)
+      void this.handle(request, response)
     })
   }
 
@@ -157,18 +158,56 @@ current-context: temporary
     this.kubeconfigPath = null
   }
 
-  private async handle(method: string, rawUrl: string, response: ServerResponse): Promise<void> {
+  private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const method = request.method ?? 'GET'
+    const rawUrl = request.url ?? '/'
     const requestUrl = new URL(rawUrl, this.origin ?? 'http://127.0.0.1')
     const match = requestUrl.pathname.match(
       /^\/apis\/clerum\.io\/v1alpha1\/namespaces\/([^/]+)\/([^/]+)(?:\/([^/]+))?$/
     )
-    if (method !== 'GET' || !match) {
+    if (!match) {
       json(response, 404, { kind: 'Status', code: 404, reason: 'NotFound' })
       return
     }
     const namespace = decodeURIComponent(match[1])
     const plural = decodeURIComponent(match[2])
     const name = match[3] ? decodeURIComponent(match[3]) : null
+    if (method === 'POST' && !name) {
+      try {
+        const chunks: Buffer[] = []
+        for await (const chunk of request) chunks.push(Buffer.from(chunk))
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as KubernetesObject
+        const bodyMetadata = metadata(body)
+        const createdName = String(bodyMetadata.name ?? '')
+        if (!createdName || this.objects.has(`${namespace}/${plural}/${createdName}`)) {
+          json(response, 409, { kind: 'Status', code: 409, reason: 'AlreadyExists' })
+          return
+        }
+        const kind =
+          { hosts: 'Host', contexts: 'Context', mcpservers: 'McpServer' }[plural] ?? plural
+        const created = {
+          ...body,
+          apiVersion: 'clerum.io/v1alpha1',
+          kind,
+          metadata: {
+            ...bodyMetadata,
+            namespace,
+            uid: randomUUID(),
+            resourceVersion: '1',
+            generation: 1,
+          },
+        }
+        this.put(plural, namespace, created)
+        json(response, 201, created)
+      } catch {
+        json(response, 400, { kind: 'Status', code: 400, reason: 'BadRequest' })
+      }
+      return
+    }
+    if (method !== 'GET') {
+      json(response, 404, { kind: 'Status', code: 404, reason: 'NotFound' })
+      return
+    }
     const watch = requestUrl.searchParams.get('watch') === 'true'
     this.requests.push(
       Object.freeze({

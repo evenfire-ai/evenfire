@@ -126,7 +126,7 @@ function relationshipRow(relationship: (typeof contextProjection.relationships)[
 }
 
 function fakeTransaction(kind: 'host' | 'mcp_server', options: { behaviorSources?: boolean } = {}) {
-  const query = vi.fn(async (text: string) => {
+  const query = vi.fn(async (text: string, values: unknown[] = []) => {
     if (text.startsWith('SET TRANSACTION') || text.includes("set_config('statement_timeout'")) {
       return { rows: [], rowCount: 0 }
     }
@@ -146,10 +146,11 @@ function fakeTransaction(kind: 'host' | 'mcp_server', options: { behaviorSources
       }
     }
     if (text.includes('FROM operational_catalog_source_state')) {
-      const families =
+      const fallbackFamilies =
         kind === 'host'
           ? ['host', 'context', 'mcp_server', 'shared_filesystem']
           : ['mcp_server', 'context', 'host', 'shared_filesystem']
+      const families = Array.isArray(values[1]) ? (values[1] as string[]) : fallbackFamilies
       return {
         rows: families.map(source_family => ({
           source_family,
