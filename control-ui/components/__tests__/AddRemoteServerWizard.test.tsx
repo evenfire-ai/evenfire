@@ -13,6 +13,8 @@ import {
   ATLASSIAN_DISCOVER,
   ATLASSIAN_DISCOVER_UNCONFIGURED,
   CALLBACK_UNCONFIGURED_FAILURE,
+  CLIENT_ID_IN_USE_FAILURE,
+  DCR_REGISTRATION_REJECTED_FAILURE,
   LINEAR_DISCOVER,
   LINEAR_DISCOVER_UNCONFIGURED,
   LINEAR_INSTALLED,
@@ -260,6 +262,122 @@ describe('AddRemoteServerWizard', () => {
     expect(onInstalled).not.toHaveBeenCalled()
   })
 
+  it("shows the AS's own reason when it rejects client registration", async () => {
+    discoverMock.mockResolvedValue(discovered(NOTION_DISCOVER)) // dcr
+    installMock.mockRejectedValue(apiErrorFrom(DCR_REGISTRATION_REJECTED_FAILURE))
+    renderWizard()
+    await fillIdentity()
+    clickDetect()
+    await screen.findByText('https://mcp.notion.com/authorize')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Install remote server' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('rejected client registration (HTTP 400, invalid_redirect_uri)')
+    expect(alert).not.toHaveTextContent('fetch_failed')
+    // The AS's own text sits in its own attributed block, apart from the platform copy.
+    const quote = screen.getByRole('figure', { name: /message from auth\.atlassian\.com/i })
+    expect(alert).toContainElement(quote)
+    const providerText = screen.getByText(
+      'The provided redirect URIs are not approved for use by this authorization server.'
+    )
+    expect(providerText.tagName).toBe('BLOCKQUOTE')
+    expect(quote).toContainElement(providerText)
+    expect(screen.getByText(/rejected client registration/i)).not.toHaveTextContent(
+      'not approved for use'
+    )
+  })
+
+  it('shows no provider block for an install error without provider text', async () => {
+    discoverMock.mockResolvedValue(discovered(LINEAR_DISCOVER_UNCONFIGURED))
+    installMock.mockRejectedValue(apiErrorFrom(CALLBACK_UNCONFIGURED_FAILURE))
+    renderWizard()
+    await fillIdentity('https://mcp.linear.app/mcp', 'linear')
+    clickDetect()
+    await screen.findByText('https://mcp.linear.app/authorize')
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Install remote server' }))
+
+    await screen.findByText(/callback url is not configured/i)
+    expect(screen.queryByRole('figure')).not.toBeInTheDocument()
+  })
+
+  describe('a failed install does not leak into the next attempt', () => {
+    async function failInstallThenReturnToIdentity() {
+      discoverMock.mockResolvedValue(discovered(NOTION_DISCOVER))
+      installMock.mockRejectedValue(apiErrorFrom(DCR_REGISTRATION_REJECTED_FAILURE))
+      renderWizard()
+      await fillIdentity()
+      clickDetect()
+      await screen.findByText('https://mcp.notion.com/authorize')
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Install remote server' }))
+      await screen.findByText(/rejected client registration/i)
+      // Confirm → Configure → Identify.
+      fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+    }
+
+    it('clears the error when the URL is changed and re-detected', async () => {
+      await failInstallThenReturnToIdentity()
+      discoverMock.mockResolvedValue(discovered(LINEAR_DISCOVER)) // cimd
+      fireEvent.change(screen.getByPlaceholderText('https://mcp.example.com/mcp'), {
+        target: { value: 'https://mcp.linear.app/mcp' },
+      })
+      clickDetect()
+      await screen.findByText('https://mcp.linear.app/authorize')
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+      expect(await screen.findByRole('button', { name: 'Install remote server' })).toBeEnabled()
+      expect(screen.queryByText(/rejected client registration/i)).not.toBeInTheDocument()
+      expect(installMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('cannot leave the Confirm step while an install is in flight', async () => {
+      discoverMock.mockResolvedValue(discovered(NOTION_DISCOVER))
+      let rejectInstall: (error: unknown) => void = () => {}
+      installMock.mockReturnValue(
+        new Promise((_resolve, reject) => {
+          rejectInstall = reject
+        })
+      )
+      renderWizard()
+      await fillIdentity()
+      clickDetect()
+      await screen.findByText('https://mcp.notion.com/authorize')
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Install remote server' }))
+      await screen.findByRole('button', { name: 'Installing…' })
+
+      // Neither the rail nor Back can reach a step whose edits the pending install
+      // would ignore and whose result it would then overwrite.
+      expect(screen.getByRole('button', { name: /Identify/ })).toBeDisabled()
+      expect(screen.getByRole('button', { name: /Configure/ })).toBeDisabled()
+      fireEvent.click(screen.getByRole('button', { name: /Identify/ }))
+      expect(screen.getByRole('button', { name: 'Back' })).toBeDisabled()
+      expect(screen.queryByPlaceholderText('example-remote')).not.toBeInTheDocument()
+
+      rejectInstall(apiErrorFrom(DCR_REGISTRATION_REJECTED_FAILURE))
+      await screen.findByText(/rejected client registration/i)
+      // Once settled, navigation is available again.
+      expect(screen.getByRole('button', { name: /Identify/ })).toBeEnabled()
+    })
+
+    it('clears the error when only the server name is changed', async () => {
+      await failInstallThenReturnToIdentity()
+      fireEvent.change(screen.getByPlaceholderText('example-remote'), {
+        target: { value: 'notion-other' },
+      })
+      // The detection still holds for the same URL, so the wizard can move on.
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+      expect(await screen.findByRole('button', { name: 'Install remote server' })).toBeEnabled()
+      expect(screen.queryByText(/rejected client registration/i)).not.toBeInTheDocument()
+    })
+  })
+
   // ── C5 transport probe ──────────────────────────────────────────────────────
 
   it('C5 transport dead: holds on step 0, alerts, offers the suggestion, and never shows Continue', async () => {
@@ -366,6 +484,32 @@ describe('AddRemoteServerWizard', () => {
     const template = PRE_REGISTERED_PER_SERVER_DISCOVER.callback?.redirectUriTemplate ?? ''
     return template.replace('{serverName}', name)
   }
+
+  it('pre-registered: editing the credentials clears a client-ID-in-use error', async () => {
+    installMock.mockRejectedValue(apiErrorFrom(CLIENT_ID_IN_USE_FAILURE))
+    await detectPreRegisteredPerServer('hubspot')
+    fireEvent.change(screen.getByLabelText(/Client ID/), { target: { value: 'taken-id' } })
+    fireEvent.change(screen.getByLabelText(/Client secret/), { target: { value: 's3cret' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Install remote server' }))
+    await screen.findByRole('alert')
+
+    // The conflict was about that client ID; a new one makes the error stale.
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+    fireEvent.change(screen.getByLabelText(/Client ID/), { target: { value: 'fresh-id' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    expect(await screen.findByRole('button', { name: 'Install remote server' })).toBeEnabled()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+
+    // Same for the secret.
+    fireEvent.click(screen.getByRole('button', { name: 'Install remote server' }))
+    await screen.findByRole('alert')
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+    fireEvent.change(screen.getByLabelText(/Client secret/), { target: { value: 'other' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    expect(await screen.findByRole('button', { name: 'Install remote server' })).toBeEnabled()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
 
   it('pre-registered per-server: shows the redirect URI for this server name, with copy', async () => {
     await detectPreRegisteredPerServer('hubspot')

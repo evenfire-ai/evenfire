@@ -114,6 +114,11 @@ export const DROPBOX_DISCOVER_FAILURE = loadGolden('discover.dropbox')
 export const ISSUER_PUBLIC_SUFFIX_DISCOVER_FAILURE = loadGolden('discover.issuerPublicSuffix')
 export const CLIENT_ID_IN_USE_FAILURE = loadGolden('install.clientIdInUse')
 export const DCR_REDIRECT_MISMATCH_FAILURE = loadGolden('install.dcrRedirectMismatch')
+/**
+ * The AS refused DCR with an RFC 7591 error (`invalid_redirect_uri`): Vercel's
+ * rejection body, replayed against the Atlassian pilot's registration endpoint.
+ */
+export const DCR_REGISTRATION_REJECTED_FAILURE = loadGolden('install.dcrRegistrationRejected')
 export const CIMD_WITHOUT_ISS_BINDING_FAILURE = loadGolden('install.cimdWithoutIssBinding')
 export const CALLBACK_UNCONFIGURED_FAILURE = loadGolden('install.callbackUnconfigured')
 
