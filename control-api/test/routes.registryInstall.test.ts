@@ -6511,6 +6511,44 @@ describe('POST /admin/registry/upgrade-hook — gates are not bypassed', () => {
     expect(() => assertValidSecretConstraints(secretRequest, secretOptions)).not.toThrow()
   })
 
+  it('names the tool-lane points in the content_access_conflict reason', async () => {
+    const gw = new MockGateway()
+    await gw.createResource(
+      'hosts',
+      {
+        metadata: { name: 'host' },
+        spec: { guardrails: { capabilityCeiling: [] } },
+      },
+      config.hostsNamespace
+    )
+    vi.mocked(resolvePublishScope).mockResolvedValue(clusterScope)
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(
+      hookEntry({
+        trust_level: 'high',
+        hook_meta: {
+          target: { image: { ref: IMG_A, port: 8080 } },
+          lifecyclePoints: ['preToolUse'],
+          contentAccess: 'metadata',
+        },
+      }) as any
+    )
+
+    const res = await request(makeApp(gw))
+      .post('/admin/registry/install-hook')
+      .send({
+        hostRef: 'host',
+        hookName: 'tool-lane-hook',
+        registryEntryName: '@acme/hook',
+        registryEntryVersion: '2.0.0',
+      })
+      .expect(400)
+
+    expect(res.body.error).toBe('content_access_conflict')
+    expect(res.body.reason).toBe(
+      'contentAccess: metadata is not allowed for a hook using moderate/postCallSuccess/onError/preToolUse/postToolUse (§8.4)'
+    )
+  })
+
   it('preserves an ambiguous hook dependency', async () => {
     const gw = new MockGateway()
     await gw.createResource(

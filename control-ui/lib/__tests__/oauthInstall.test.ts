@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import type { RegistryEntry } from '../api'
 import {
   buildOAuthRedirectUri,
@@ -6,7 +6,6 @@ import {
   extractOAuthImmutables,
   formatScopesForInput,
   getCatalogOAuthBlock,
-  oauthCallbackBaseUrl,
   parseScopesInput,
   referenceSecretIssue,
   scopesAreSatisfied,
@@ -23,10 +22,6 @@ function entryWithOAuth(oauth: unknown): RegistryEntry {
   } as RegistryEntry
 }
 
-afterEach(() => {
-  vi.unstubAllEnvs()
-})
-
 describe('deriveOAuthClientIdPreview', () => {
   it('mirrors the control-api derivation (lowercase, hyphen-collapsed, trimmed)', () => {
     // Matches control-api deriveOAuthClientId (routes/admin/registry.ts).
@@ -41,38 +36,27 @@ describe('deriveOAuthClientIdPreview', () => {
 })
 
 describe('buildOAuthRedirectUri', () => {
-  it('joins the base and callback path with the id encoded', () => {
-    expect(buildOAuthRedirectUri('https://oauth.example.com', 'acme')).toBe(
+  // Template shape served by control-api GET /admin/oauth/callback.
+  const TEMPLATE = 'https://oauth.example.com/api/v1/oauth-callback/{oauthClientId}'
+
+  it('fills the control-api template with the encoded id', () => {
+    expect(buildOAuthRedirectUri(TEMPLATE, 'acme')).toBe(
       'https://oauth.example.com/api/v1/oauth-callback/acme'
+    )
+    expect(buildOAuthRedirectUri(TEMPLATE, 'a b')).toBe(
+      'https://oauth.example.com/api/v1/oauth-callback/a%20b'
     )
   })
 
-  it('strips a trailing slash from the base', () => {
-    expect(buildOAuthRedirectUri('https://oauth.example.com/', 'acme')).toBe(
-      'https://oauth.example.com/api/v1/oauth-callback/acme'
-    )
-  })
-
-  it('returns null when the base is missing or blank (no broken URI)', () => {
+  it('returns null when the template is missing, blank, or lacks the placeholder', () => {
     expect(buildOAuthRedirectUri('', 'acme')).toBeNull()
     expect(buildOAuthRedirectUri('   ', 'acme')).toBeNull()
     expect(buildOAuthRedirectUri(undefined, 'acme')).toBeNull()
+    expect(buildOAuthRedirectUri('https://oauth.example.com', 'acme')).toBeNull()
   })
 
   it('returns null when the id is empty', () => {
-    expect(buildOAuthRedirectUri('https://oauth.example.com', '')).toBeNull()
-  })
-})
-
-describe('oauthCallbackBaseUrl', () => {
-  it('reads the NEXT_PUBLIC env lazily and trims it', () => {
-    vi.stubEnv('NEXT_PUBLIC_CONTROL_API_OAUTH_CALLBACK_BASE_URL', '  https://oauth.example.com  ')
-    expect(oauthCallbackBaseUrl()).toBe('https://oauth.example.com')
-  })
-
-  it('is empty when the env is unset', () => {
-    vi.stubEnv('NEXT_PUBLIC_CONTROL_API_OAUTH_CALLBACK_BASE_URL', '')
-    expect(oauthCallbackBaseUrl()).toBe('')
+    expect(buildOAuthRedirectUri(TEMPLATE, '')).toBeNull()
   })
 })
 
