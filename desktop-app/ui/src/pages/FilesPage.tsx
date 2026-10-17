@@ -577,11 +577,7 @@ export function FilesPage({
    *  controller's authority classifier before toasting. Returns true when the
    *  session failed closed (caller should stop; the revoked state takes over). */
   const failClosedOnAuthorizationError = useCallback(
-    (error: unknown): boolean =>
-      ctrl.handleAuthorityFailure(
-        error instanceof Error ? error.message : String(error),
-        'operation'
-      ),
+    (error: unknown): boolean => ctrl.handleAuthorityFailure(error, 'operation'),
     [ctrl]
   )
   const canWriteCurrent = !accessRevoked && hasBit(affordances, 'write')
@@ -629,11 +625,12 @@ export function FilesPage({
   // "not previewable" so the caller downloads instead of silently doing nothing.
   const openFilePreview = (
     resource: Pick<GfsDriveResource, 'bytes' | 'gfsUri' | 'name' | 'version'>,
-    openPreview = onOpenPreview
+    openPreview = onOpenPreview,
+    originatingSessionScope: string | null = ctrl.sessionScope
   ): boolean => {
     const preview = resolveGfsPreview(resource)
     if (!preview || !openPreview) return false
-    return openPreview(preview) !== false
+    return openPreview(preview, originatingSessionScope) !== false
   }
 
   useEffect(() => {
@@ -994,8 +991,10 @@ export function FilesPage({
     isCurrent?: () => boolean,
     openPendingPreview?: (
       preview: GfsPreviewResource,
-      returnLocation: { gfsUri: string | null; name: string | null }
-    ) => boolean
+      returnLocation: { gfsUri: string | null; name: string | null },
+      originatingSessionScope: string | null
+    ) => boolean,
+    filesActionSeedRequestId?: number
   ) => {
     const returnCrumbs = [...crumbs]
     const shouldContinue = () => pageActiveRef.current && (isCurrent?.() ?? true)
@@ -1016,15 +1015,37 @@ export function FilesPage({
       // the Files-page ownership predicate.
       if (preview && openPendingPreview) {
         const returnCrumb = returnCrumbs.at(-1)
-        const previewOpened = openPendingPreview(preview, {
-          gfsUri: returnCrumb?.gfsUri ?? null,
-          name: returnCrumb?.name ?? null,
-        })
+        const previewOpened = openPendingPreview(
+          preview,
+          {
+            gfsUri: returnCrumb?.gfsUri ?? null,
+            name: returnCrumb?.name ?? null,
+          },
+          opened.originatingSessionScope
+        )
         if (!previewOpened) return false
         onOpened?.()
         return true
       }
-      const previewOpened = openFilePreview(opened)
+      const currentFilesAction = pendingResourceActionRef.current
+      const filesActionStillOwnsSeed =
+        filesActionSeedRequestId !== undefined &&
+        ((currentFilesAction?.id === filesActionSeedRequestId &&
+          currentFilesAction.actionId !== 'copy-content' &&
+          currentFilesAction.actionId !== 'preview' &&
+          currentFilesAction.actionId !== 'open-folder' &&
+          (currentFilesAction.navigationUri === undefined
+            ? currentFilesAction.targetUri
+            : currentFilesAction.navigationUri) === uri) ||
+          lastHandledResourceActionIdRef.current === filesActionSeedRequestId)
+      if (filesActionStillOwnsSeed) {
+        // The seed has already resolved the exact Files target. Keep it in this
+        // page so the pending-action consumer can run its existing descriptor;
+        // generic link handling would open Preview or start a second download.
+        onOpened?.()
+        return true
+      }
+      const previewOpened = openFilePreview(opened, onOpenPreview, opened.originatingSessionScope)
       if (!shouldContinue()) return false
       ctrl.restoreCrumbs(returnCrumbs)
       if (!previewOpened) {
@@ -1043,11 +1064,44 @@ export function FilesPage({
    */
   useEffect(() => {
     if (!pendingGfsUri || pendingGfsDeepLink) return
+    const request = pendingResourceActionRef.current
+    const navigationUri = request
+      ? request.navigationUri === undefined
+        ? request.targetUri
+        : request.navigationUri
+      : null
+    const filesActionOwnsSeed = Boolean(
+      request &&
+      request.actionId !== 'copy-content' &&
+      request.actionId !== 'preview' &&
+      request.actionId !== 'open-folder' &&
+      navigationUri === pendingGfsUri &&
+      pendingActionSeedRef.current?.id === request.id &&
+      pendingActionSeedRef.current.path === pendingGfsUri
+    )
+    const isCurrentActionSeed =
+      filesActionOwnsSeed && request
+        ? () =>
+            lastHandledResourceActionIdRef.current === request.id ||
+            (pendingResourceActionRef.current?.id === request.id &&
+              pendingActionSeedRef.current?.id === request.id &&
+              pendingActionSeedRef.current.path === pendingGfsUri &&
+              (pendingResourceActionRef.current.navigationUri === undefined
+                ? pendingResourceActionRef.current.targetUri
+                : pendingResourceActionRef.current.navigationUri) === pendingGfsUri)
+        : undefined
     // Re-arm on every non-null seed so a deep-link onto an already-mounted page
     // suppresses the pre-open location the same way the initial mount does.
     seedPendingRef.current = true
     onPendingGfsUriHandled?.()
-    void handleOpenGfsLink(pendingGfsUri)
+    void handleOpenGfsLink(
+      pendingGfsUri,
+      undefined,
+      undefined,
+      isCurrentActionSeed,
+      undefined,
+      filesActionOwnsSeed ? request?.id : undefined
+    )
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingGfsUri])
 
@@ -1123,7 +1177,8 @@ export function FilesPage({
       },
       isCurrent,
       onOpenPendingGfsPreview
-        ? (preview, returnLocation) => onOpenPendingGfsPreview(link.id, preview, returnLocation)
+        ? (preview, returnLocation, originatingSessionScope) =>
+            onOpenPendingGfsPreview(link.id, preview, returnLocation, originatingSessionScope)
         : undefined
     ).catch(error => reportFailure({ kind: 'error', error }))
 
@@ -2680,7 +2735,7 @@ export function FilesPage({
           }
           onClose={() => setMoveTarget(null)}
           onMove={handleMoveTarget}
-          onAuthorityFailure={message => ctrl.handleAuthorityFailure(message, 'operation')}
+          onAuthorityFailure={error => ctrl.handleAuthorityFailure(error, 'operation')}
           sessionScope={sessionScope}
           target={moveTarget}
         />

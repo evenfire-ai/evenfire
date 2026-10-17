@@ -383,7 +383,11 @@ describe('FilesPage', () => {
     )
 
     await waitFor(() => expect(download).toHaveBeenCalledWith(file.gfsUri))
-    expect(openUri).toHaveBeenCalledWith(file.gfsUri)
+    expect(download).toHaveBeenCalledTimes(1)
+    expect(openUri).toHaveBeenCalledWith(
+      file.gfsUri,
+      expect.objectContaining({ shouldContinue: expect.any(Function) })
+    )
     expect(onOpenPreview).not.toHaveBeenCalled()
     expect(handled).toHaveBeenCalledWith(13)
   })
@@ -445,7 +449,12 @@ describe('FilesPage', () => {
     )
     const view = render(renderRoute(file.gfsUri))
 
-    await waitFor(() => expect(openUri).toHaveBeenCalledWith(file.gfsUri))
+    await waitFor(() =>
+      expect(openUri).toHaveBeenCalledWith(
+        file.gfsUri,
+        expect.objectContaining({ shouldContinue: expect.any(Function) })
+      )
+    )
     view.rerender(renderRoute('gfs://main/0123456789abcdef0123456789abcdef'))
     await waitFor(() => expect(openUri).toHaveBeenCalledTimes(2))
     view.rerender(renderRoute(file.gfsUri))
@@ -1106,7 +1115,15 @@ describe('FilesPage', () => {
       affordances: delegationAffordances(new Set(['read', 'write']), false),
     })
 
-    const view = renderFilesPage(undefined, undefined, undefined, undefined, titlebarLeadingRoot)
+    const view = renderFilesPage(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      titlebarLeadingRoot
+    )
     try {
       expect(within(titlebarLeadingRoot).queryByRole('toolbar')).toBeNull()
       const menuTrigger = screen.getByRole('button', { name: 'Options for Product' })
@@ -4320,14 +4337,17 @@ describe('FilesPage', () => {
     renderFilesPage(undefined, onOpenPreview)
     fireEvent.click(screen.getByRole('button', { name: 'diagram.PNG' }))
 
-    expect(onOpenPreview).toHaveBeenCalledWith({
-      gfsUri: 'gfs://main/image-1',
-      kind: 'image',
-      mimeType: 'image/png',
-      name: 'diagram.PNG',
-      bytes: 3,
-      version: 1,
-    })
+    expect(onOpenPreview).toHaveBeenCalledWith(
+      {
+        gfsUri: 'gfs://main/image-1',
+        kind: 'image',
+        mimeType: 'image/png',
+        name: 'diagram.PNG',
+        bytes: 3,
+        version: 1,
+      },
+      'env-1:user-1:team-1'
+    )
     // No modal, and FilesPage itself never fetches the bytes.
     expect(screen.queryByRole('dialog', { name: 'diagram.PNG' })).toBeNull()
     expect(download).not.toHaveBeenCalled()
@@ -4363,13 +4383,16 @@ describe('FilesPage', () => {
     renderFilesPage(undefined, onOpenPreview)
     fireEvent.click(screen.getByRole('button', { name: 'README.md' }))
 
-    expect(onOpenPreview).toHaveBeenCalledWith({
-      gfsUri: 'gfs://main/markdown-1',
-      kind: 'markdown',
-      name: 'README.md',
-      bytes: 12,
-      version: 1,
-    })
+    expect(onOpenPreview).toHaveBeenCalledWith(
+      {
+        gfsUri: 'gfs://main/markdown-1',
+        kind: 'markdown',
+        name: 'README.md',
+        bytes: 12,
+        version: 1,
+      },
+      'env-1:user-1:team-1'
+    )
   })
 
   it('opens a preview tab for a video file with its detected mimeType', () => {
@@ -4382,14 +4405,17 @@ describe('FilesPage', () => {
     renderFilesPage(undefined, onOpenPreview)
     fireEvent.click(screen.getByRole('button', { name: 'demo.mp4' }))
 
-    expect(onOpenPreview).toHaveBeenCalledWith({
-      gfsUri: 'gfs://main/video-1',
-      kind: 'video',
-      mimeType: 'video/mp4',
-      name: 'demo.mp4',
-      bytes: 3,
-      version: 1,
-    })
+    expect(onOpenPreview).toHaveBeenCalledWith(
+      {
+        gfsUri: 'gfs://main/video-1',
+        kind: 'video',
+        mimeType: 'video/mp4',
+        name: 'demo.mp4',
+        bytes: 3,
+        version: 1,
+      },
+      'env-1:user-1:team-1'
+    )
   })
 
   it('downloads a previewable file when no preview surface is wired (fail-open to download)', async () => {
@@ -4455,14 +4481,17 @@ describe('FilesPage', () => {
     fireEvent.click(within(linkDialog).getByRole('button', { name: 'Open' }))
 
     await waitFor(() =>
-      expect(onOpenPreview).toHaveBeenCalledWith({
-        gfsUri: 'gfs://main/svg-1',
-        kind: 'image',
-        mimeType: 'image/svg+xml',
-        name: 'architecture.svg',
-        bytes: 4,
-        version: 1,
-      })
+      expect(onOpenPreview).toHaveBeenCalledWith(
+        {
+          gfsUri: 'gfs://main/svg-1',
+          kind: 'image',
+          mimeType: 'image/svg+xml',
+          name: 'architecture.svg',
+          bytes: 4,
+          version: 1,
+        },
+        'env-1:user-1:team-1'
+      )
     )
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open from ID' })).toBeNull())
     expect(screen.getByRole('button', { name: 'Open from ID' })).toBeTruthy()

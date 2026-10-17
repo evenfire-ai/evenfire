@@ -50,12 +50,16 @@ export interface FilesPageProps {
    * the file kind and hands the descriptor up to the tab store through this
    * callback. Absent ⇒ no preview surface is available (the file downloads).
    */
-  onOpenPreview?: (preview: GfsPreviewResource) => void | boolean
+  onOpenPreview?: (
+    preview: GfsPreviewResource,
+    originatingSessionScope?: string | null
+  ) => void | boolean
   /** Guarded preview completion for the queued resource-link request. */
   onOpenPendingGfsPreview?: (
     id: number,
     preview: GfsPreviewResource,
-    returnLocation: { gfsUri: string | null; name: string | null }
+    returnLocation: { gfsUri: string | null; name: string | null },
+    originatingSessionScope?: string | null
   ) => boolean
   /** Monotonic App request to open the existing route-entry dialog. */
   routeDialogRequestId?: number
