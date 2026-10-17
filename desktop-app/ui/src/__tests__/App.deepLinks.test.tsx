@@ -8,7 +8,12 @@ import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import type { GfsBrowserChild } from '@hooks/domain/useGfsBrowserController'
 import { useAppController } from '@hooks/useAppController'
 import { resetComposerDraftStore } from '@lib/composerDraftStore'
+import {
+  clearLatestGfsConversationContext,
+  recordLatestGfsConversationContext,
+} from '@lib/gfsConversationPrefill'
 import type { GfsResourceActionId, GfsResourceActionRequest } from '@lib/gfsResourceActions'
+import { gfsResourceLabelResolver } from '@lib/gfsResourceLabelResolver'
 import {
   type GfsResourceNavigationRequest,
   assignGfsResourceNavigationOwner,
@@ -98,6 +103,8 @@ const appHeaderHarness = vi.hoisted(() => ({
     placement?: 'default' | 'titlebar'
     searchFocusRequestId?: number
     notificationOpenRequestId?: number
+    onOpenGfsResource?: (uri: string) => void
+    onToggleChatDrawer?: () => void
   },
 }))
 
@@ -271,7 +278,7 @@ vi.mock('@pages/ChatPage', async () => {
   const { useNavigationContext } = await import('@contexts/NavigationContext')
   const { useComposerDraft } = await import('@hooks/useComposerDraft')
   return {
-    ChatPage: () => {
+    ChatPage: (props: { remoteGfsChangeEpoch?: number }) => {
       const { composerFocusRequestId } = useChatComposerStateContext()
       const { selectedAgent } = useNavigationContext()
       const [draft] = useComposerDraft(null, selectedAgent ?? undefined)
@@ -284,6 +291,7 @@ vi.mock('@pages/ChatPage', async () => {
           data-testid="chat-page-surface"
           data-composer-focus-request-id={composerFocusRequestId}
           data-composer-draft={draft}
+          data-remote-gfs-change-epoch={props.remoteGfsChangeEpoch ?? -1}
           ref={composerRef}
           value={draft}
           readOnly
@@ -492,7 +500,9 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     (
       request: GfsResourceNavigationRequest,
       preview: Parameters<AppController['completeGfsResourceNavigationPreview']>[1],
-      principalGeneration: number
+      principalGeneration: number,
+      _returnLocation?: { gfsUri: string | null; name: string | null },
+      sessionScope?: string
     ) => {
       if (!isGfsResourceNavigationCurrent(request, principalGeneration)) return false
       setWorkspaceTabs(
@@ -500,6 +510,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
           id: nextWorkspaceTabId(),
           title: preview.name,
           gfsUri: preview.gfsUri,
+          ...(sessionScope !== undefined ? { sessionScope } : {}),
           fileKind: preview.kind,
           byteLength: preview.bytes,
           ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
@@ -624,25 +635,28 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     handleSelectChatAgent,
     handleNavSelect,
     openFilesSection: vi.fn((path: string | null = null) => {
-      beginUserNavigationIntent()
-      setWorkspaceTabs((state: WorkspaceState) =>
-        openFilesTab(state, { id: nextWorkspaceTabId(), path })
-      )
+      const intentSequence = beginUserNavigationIntent()
+      const next = openFilesTab(controller.workspaceTabs, { id: nextWorkspaceTabId(), path })
+      setWorkspaceTabs(next)
+      return next.activeTabId ? { ownerTabId: next.activeTabId, intentSequence } : null
     }),
-    openPreviewSection: vi.fn((preview: Parameters<AppController['openPreviewSection']>[0]) => {
-      beginUserNavigationIntent()
-      setWorkspaceTabs((state: WorkspaceState) =>
-        openPreviewTab(state, {
-          id: nextWorkspaceTabId(),
-          title: preview.name,
-          gfsUri: preview.gfsUri,
-          fileKind: preview.kind,
-          byteLength: preview.bytes,
-          ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
-          ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
-        })
-      )
-    }),
+    openPreviewSection: vi.fn(
+      (preview: Parameters<AppController['openPreviewSection']>[0], sessionScope?: string) => {
+        beginUserNavigationIntent()
+        setWorkspaceTabs((state: WorkspaceState) =>
+          openPreviewTab(state, {
+            id: nextWorkspaceTabId(),
+            title: preview.name,
+            gfsUri: preview.gfsUri,
+            ...(sessionScope !== undefined ? { sessionScope } : {}),
+            fileKind: preview.kind,
+            byteLength: preview.bytes,
+            ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
+            ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
+          })
+        )
+      }
+    ),
     navigationIntentSequence: testNavigationIntentSequence,
     beginUserNavigationIntent,
     isNavigationIntentCurrent,
@@ -768,6 +782,7 @@ describe('App deep-link orchestration', () => {
     testNavigationIntentSequence = 0
     testUserNavigationGeneration = 0
     resetComposerDraftStore()
+    clearLatestGfsConversationContext()
     confirmDialogHarness.props = null
     confirmDialogHarness.mountedCount = 0
     appHeaderHarness.props = null
@@ -836,6 +851,7 @@ describe('App deep-link orchestration', () => {
           clearPendingDeepLinks: clearPendingGfsDeepLinks,
           listPendingDeepLinks: listPendingGfsDeepLinks,
           resolve: resolveGfsResource,
+          getUserNavigationGeneration: () => testUserNavigationGeneration,
           onDeepLink: vi.fn((callback: (link: GfsResourceDeepLinkEnvelope) => void) => {
             emitGfsDeepLink = callback
             return vi.fn()
@@ -889,6 +905,120 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
   })
 
+  it('forwards the real App GFS invalidation epoch into the ChatPage rendering boundary', async () => {
+    type TestGfsInvalidation = {
+      type: 'scope.invalidated'
+      schemaVersion: 1
+      cursor: string
+      scopes: Array<'gfs' | 'authorization'>
+    }
+    let emitEntityChange: ((event: TestGfsInvalidation) => void) | null = null
+    const currentClerum = window.clerum
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        ...currentClerum,
+        entityChanges: {
+          subscribe: vi.fn(async (onEvent: (event: TestGfsInvalidation) => void) => {
+            emitEntityChange = onEvent
+            return vi.fn(async () => undefined)
+          }),
+        },
+      } as unknown as Window['clerum'],
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      selectedAgent: 'agent-a',
+      activeChatId: 'chat-session-a',
+      workspaceTabs: openChatTab(createWorkspaceTabsState('chat-tab-1'), {
+        id: 'chat-session-tab',
+        agentRef: 'agent-a',
+        chatId: 'chat-session-a',
+      }),
+    } as Partial<AppController>)
+
+    render(<App />)
+    const chatSurface = await screen.findByTestId('chat-page-surface')
+    expect(chatSurface.getAttribute('data-remote-gfs-change-epoch')).toBe('0')
+    await waitFor(() => expect(emitEntityChange).toBeTypeOf('function'))
+
+    act(() =>
+      emitEntityChange?.({
+        type: 'scope.invalidated',
+        schemaVersion: 1,
+        cursor: 'cursor-expansion-test',
+        scopes: ['gfs'],
+      })
+    )
+
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('chat-page-surface').getAttribute('data-remote-gfs-change-epoch')
+      ).toBe('1')
+    )
+
+    act(() => currentController.handleNavSelect(DESKTOP_ROUTES.files))
+    await waitFor(() => expect(appHeaderHarness.props?.onToggleChatDrawer).toBeTypeOf('function'))
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    await waitFor(() => expect(screen.getByTestId('chat-page-surface')).toBeTruthy())
+    expect(
+      screen.getByTestId('chat-page-surface').getAttribute('data-remote-gfs-change-epoch')
+    ).toBe('1')
+
+    act(() =>
+      emitEntityChange?.({
+        type: 'scope.invalidated',
+        schemaVersion: 1,
+        cursor: 'cursor-expansion-drawer-test',
+        scopes: ['authorization'],
+      })
+    )
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('chat-page-surface').getAttribute('data-remote-gfs-change-epoch')
+      ).toBe('2')
+    )
+  })
+
+  it('advances the GFS label epoch across logout and same-principal relogin', async () => {
+    const setActivePrincipal = vi.spyOn(gfsResourceLabelResolver, 'setActivePrincipal')
+    currentController = makeController({
+      initialExperienceLoading: false,
+      selectedAgent: 'agent-a',
+      activeChatId: 'chat-session-a',
+      workspaceTabs: openChatTab(createWorkspaceTabsState('chat-tab-1'), {
+        id: 'initial-chat-tab',
+        agentRef: 'agent-a',
+        chatId: 'chat-session-a',
+      }),
+    } as Partial<AppController>)
+    render(<App />)
+
+    expect(
+      (await screen.findByTestId('chat-page-surface')).getAttribute('data-remote-gfs-change-epoch')
+    ).toBe('0')
+
+    act(() => {
+      currentController.isAuthenticated = false
+      currentController.authenticatedPrincipalIdentity = null
+      forceControllerRender()
+    })
+    await waitFor(() => expect(screen.queryByTestId('chat-page-surface')).toBeNull())
+    await waitFor(() => expect(setActivePrincipal).toHaveBeenCalledWith(null))
+
+    act(() => {
+      currentController.isAuthenticated = true
+      currentController.authenticatedPrincipalIdentity = 'user-a:user-a@example.com'
+      forceControllerRender()
+    })
+
+    expect(
+      (await screen.findByTestId('chat-page-surface')).getAttribute('data-remote-gfs-change-epoch')
+    ).toBe('2')
+    expect(setActivePrincipal).not.toHaveBeenCalledWith('user-a:user-a@example.com')
+    setActivePrincipal.mockRestore()
+  })
+
   it('opens the existing route dialog from a sidebar row without selecting that row', async () => {
     const resource = (
       await listChildrenPage([
@@ -896,10 +1026,14 @@ describe('App deep-link orchestration', () => {
       ])
     ).items[0]
     if (!resource) throw new Error('The producer fixture did not return the sidebar folder')
-    const openFilesSection = vi.fn((path: string | null) => {
-      currentController.setWorkspaceTabs(state =>
-        openFilesTab(state, { id: 'sidebar-open-route-files', ...(path ? { path } : {}) })
-      )
+    const openFilesSection = vi.fn((path: string | null = null) => {
+      const intentSequence = currentController.beginUserNavigationIntent()
+      const next = openFilesTab(currentController.workspaceTabs, {
+        id: 'sidebar-open-route-files',
+        path,
+      })
+      currentController.setWorkspaceTabs(next)
+      return next.activeTabId ? { ownerTabId: next.activeTabId, intentSequence } : null
     })
     currentController = makeController({
       initialExperienceLoading: false,
@@ -913,7 +1047,8 @@ describe('App deep-link orchestration', () => {
     expect(openFilesSection).toHaveBeenCalledOnce()
     expect(openFilesSection).toHaveBeenCalledWith(null)
     expect(openFilesSection).not.toHaveBeenCalledWith(resource.gfsUri)
-    await waitFor(() => expect(filesPageHarness.routeDialogRequestId).toBe(1))
+    await waitFor(() => expect(filesPageHarness.handledRouteRequestIds).toContain(1))
+    expect(filesPageHarness.routeDialogRequestId).toBe(0)
     expect(filesPageHarness.pendingGfsUri).toBeNull()
   })
 
@@ -930,9 +1065,13 @@ describe('App deep-link orchestration', () => {
     if (!resource) throw new Error('The producer fixture did not return the unreadable file')
     const parentUri = `gfs://main/${parentResourceId}`
     const openFilesSection = vi.fn((path: string | null) => {
-      currentController.setWorkspaceTabs(state =>
-        openFilesTab(state, { id: 'sidebar-unreadable-move-files', path })
-      )
+      const intentSequence = currentController.beginUserNavigationIntent()
+      const next = openFilesTab(currentController.workspaceTabs, {
+        id: 'sidebar-unreadable-move-files',
+        path,
+      })
+      currentController.setWorkspaceTabs(next)
+      return next.activeTabId ? { ownerTabId: next.activeTabId, intentSequence } : null
     })
     currentController = makeController({
       initialExperienceLoading: false,
@@ -993,8 +1132,9 @@ describe('App deep-link orchestration', () => {
       targetUri: target.gfsUri,
       actionId: 'replace',
     })
-    expect(filesPageHarness.pendingGfsUri).toBe(sourceUri)
+    expect(filesPageHarness.pendingGfsUri).toBe(target.gfsUri)
 
+    act(() => filesPageHarness.props?.onExplicitNavigationIntent?.())
     act(() =>
       filesPageHarness.onLocationChange?.('gfs://main/33333333333333333333333333333333', 'Other')
     )
@@ -1032,6 +1172,7 @@ describe('App deep-link orchestration', () => {
     expect(firstRequestId).toBeDefined()
 
     act(() => filesPageHarness.onLocationChange?.(first.gfsUri, first.name))
+    act(() => filesPageHarness.props?.onExplicitNavigationIntent?.())
     act(() => filesPageHarness.onLocationChange?.(sourceUri, 'Source'))
     await waitFor(() => expect(filesPageHarness.pendingResourceAction).toBeNull())
 
@@ -1066,6 +1207,38 @@ describe('App deep-link orchestration', () => {
     expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual({ id: link.id, uri: link.uri })
     act(() => filesPageHarness.props?.onPendingGfsDeepLinkOutcome?.(link.id, 'opened'))
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
+  })
+
+  it('routes in-app resource links through the authenticated navigation owner', async () => {
+    const uri = 'gfs://main/acacacacacacacacacacacacacacacac'
+    currentController = makeController({
+      initialExperienceLoading: false,
+      isAuthenticated: true,
+      authenticatedPrincipalIdentity: 'user-a:user-a@example.com',
+    } as Partial<AppController>)
+    const activateGfsResourceNavigation = vi.spyOn(
+      currentController,
+      'activateGfsResourceNavigation'
+    )
+    render(<App />)
+
+    await waitFor(() => expect(listPendingGfsDeepLinks).toHaveBeenCalled())
+    await waitFor(() => expect(appHeaderHarness.props?.onOpenGfsResource).toBeTypeOf('function'))
+    act(() => appHeaderHarness.props?.onOpenGfsResource?.(uri))
+
+    await waitFor(() => expect(activateGfsResourceNavigation).toHaveBeenCalledOnce())
+    const request = activateGfsResourceNavigation.mock.calls[0]?.[0]
+    expect(request?.uri).toBe(uri)
+    expect(currentController.beginUserNavigationIntent).toHaveBeenCalled()
+    expect(filesPageHarness.props?.pendingGfsDeepLink).toMatchObject({ uri })
+    expect(filesPageHarness.props?.pendingGfsDeepLink?.id).toBeGreaterThan(0)
+    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
+
+    const requestId = filesPageHarness.props?.pendingGfsDeepLink?.id
+    expect(requestId).toBeDefined()
+    act(() => filesPageHarness.props?.onPendingGfsDeepLinkOutcome?.(requestId!, 'opened'))
+    await waitFor(() => expect(filesPageHarness.props?.pendingGfsDeepLink).toBeNull())
+    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
   })
 
   it('does not let a link activated before a Chat selection take over an inactive Files root', async () => {
@@ -1931,11 +2104,15 @@ describe('App deep-link orchestration', () => {
       id: 'preview-route-request',
       title: 'Quarterly report.md',
       gfsUri: 'gfs://main/77777777777777777777777777777777',
+      sessionScope: ':user-a:team-a',
       fileKind: 'markdown',
       byteLength: 4,
     })
     const openFilesSection = vi.fn((path: string | null = null) => {
-      currentController.setWorkspaceTabs(state => openFilesTab(state, { id: 'files-root', path }))
+      const intentSequence = currentController.beginUserNavigationIntent()
+      const next = openFilesTab(currentController.workspaceTabs, { id: 'files-root', path })
+      currentController.setWorkspaceTabs(next)
+      return next.activeTabId ? { ownerTabId: next.activeTabId, intentSequence } : null
     })
     currentController = makeController({
       initialExperienceLoading: false,
@@ -2100,9 +2277,15 @@ describe('App deep-link orchestration', () => {
               id: 'preview-tab',
               title: resource.name,
               gfsUri: resource.gfsUri,
+              sessionScope: ':user-a:team-a',
               fileKind: 'markdown',
               byteLength: 4,
             })
+
+      const activeTab = activeWorkspaceTab(workspaceTabs)
+      if (activeTab?.kind === 'files' || activeTab?.kind === 'preview') {
+        recordLatestGfsConversationContext(activeTab)
+      }
 
       const sendMessage = vi.fn().mockResolvedValue(undefined)
       currentController = makeController({
@@ -2140,6 +2323,8 @@ describe('App deep-link orchestration', () => {
       id: 'files-tab',
       path: resource.gfsUri,
     })
+    const activeTab = activeWorkspaceTab(workspaceTabs)
+    if (activeTab?.kind === 'files') recordLatestGfsConversationContext(activeTab)
     const sendMessage = vi.fn().mockResolvedValue(undefined)
     currentController = makeController({
       initialExperienceLoading: false,
