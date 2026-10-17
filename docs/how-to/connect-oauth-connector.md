@@ -31,18 +31,15 @@ also rejects an OAuth server that pins a static `Authorization` header.
 | Setting (control-api)                                                     | Default                                                                                                                                           | What happens if it is wrong                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `MCP_OAUTH_BROKER_ENABLED`                                                | **Off** in `deploy/base`, `true` in the minikube overlay                                                                                          | The token broker answers `404`, mcp-host reads that as "no grant", and the agent asks for consent forever, even after the user authorizes. Accepts only `true` or `false`.                                                                                                                                                                                                                                                                                             |
-| `CONTROL_API_OAUTH_CALLBACK_BASE_URL`                                     | Unset in base, `http://127.0.0.1:8090` in minikube                                                                                                | Must be the bare, browser-reachable origin that routes `/api/v1/oauth-callback/` to control-api (and, for CIMD, `/api/v1/.well-known/evenfire-mcp-client`; see the gateway limitation below). When unset, control-api builds the redirect URI from the request Host, which is usually an internal hostname. Marketplace built-in and generic installs, and remote installs that use CIMD, DCR, or a per-server callback (no RFC 9207), are rejected while it is unset. |
+| `CONTROL_API_OAUTH_CALLBACK_BASE_URL`                                     | Unset in base, `http://127.0.0.1:8090` in minikube                                                                                                | Must be the bare, browser-reachable origin that routes `/api/v1/oauth-callback/` to control-api (and, for CIMD, `/api/v1/.well-known/evenfire-mcp-client`; see the gateway note below). When unset, control-api builds the redirect URI from the request Host, which is usually an internal hostname. Marketplace built-in and generic installs, and remote installs that use CIMD, DCR, or a per-server callback (no RFC 9207), are rejected while it is unset. |
 | `CONTROL_API_OAUTH_STATE_HMAC_SECRET`, `CONTROL_API_OAUTH_ENCRYPTION_KEY` | Built-in dev values only when `NODE_ENV` is not `production` (production refuses to start without them); read from the control-api Secret in base | Generate real values (`deploy/scripts/gen-jwt-keys.sh` does this). The encryption key protects stored grants.                                                                                                                                                                                                                                                                                                                                                          |
 | `OAUTH_PROACTIVE_REFRESH_CRON_ENABLED`                                    | **Off**, including in minikube                                                                                                                    | Remote-server tokens are only refreshed when someone uses them. See [Refresh and background use](#refresh-and-background-use).                                                                                                                                                                                                                                                                                                                                         |
 
 The Control UI **Marketplace** OAuth install form (built-in and generic
-providers) shows the redirect URI using
-`NEXT_PUBLIC_CONTROL_API_OAUTH_CALLBACK_BASE_URL`. Next.js compiles this value
-into the Control UI bundle at build time. The shipped Dockerfile and the
-minikube image build do not set it. Without it, the form shows "not configured"
-and keeps **Install connector** disabled. The remote-server wizard is not affected,
-because control-api computes its redirect URI. If your build does not set the
-variable, install built-in and generic connectors with YAML (below).
+providers) reads the redirect URI from control-api at runtime
+(`GET /admin/oauth/callback`), so it always matches
+`CONTROL_API_OAUTH_CALLBACK_BASE_URL`. While that setting is unset, the form
+shows "not configured" and keeps **Install connector** disabled.
 
 The desktop app opens the provider's authorize URL only if it uses `https:`.
 
@@ -96,18 +93,15 @@ Context they belong to. Otherwise the request fails with
      control-api serves, so the authorization server must be able to fetch it
      from the internet.
 
-     > **Gateway limitation.** The public gateway shipped in `deploy/base`
-     > (the nginx config in `deploy/base/profiles/configmaps.yaml`) forwards
-     > only `/api/v1/external/` and `/api/v1/oauth-callback/` to control-api
-     > and answers `403` for every other path, including the client document. Behind that gateway,
-     > CIMD authorization fails because the authorization server cannot fetch
-     > the client ID. Until the gateway ships this route (tracked as a
-     > follow-up), add a route that forwards
-     > `/api/v1/.well-known/evenfire-mcp-client` to control-api in your
-     > gateway or ingress. Minikube does not use this gateway: its callback
-     > origin is a loopback port-forward to control-api, which serves the
-     > path, but an authorization server on the internet cannot fetch a
-     > loopback URL.
+     > **Gateway route.** The public gateway shipped in `deploy/base` (the
+     > nginx config in `deploy/base/profiles/configmaps.yaml`, reached through
+     > external-rest-api) forwards `GET` and `HEAD` for exactly
+     > `/api/v1/.well-known/evenfire-mcp-client` to control-api, alongside
+     > `/api/v1/external/` and `/api/v1/oauth-callback/`. If you put your own
+     > gateway or ingress in front of control-api instead, forward that path
+     > too. Minikube does not use this gateway: its callback origin is a
+     > loopback port-forward to control-api, which serves the path, but an
+     > authorization server on the internet cannot fetch a loopback URL.
    - **Dynamic Client Registration**: control-api registers a client and stores
      its credentials encrypted. You do not supply any.
    - **Pre-registered client required**: register an OAuth app at the provider
@@ -261,9 +255,9 @@ out too, but the screen only tracks the current one.
 | Agent keeps asking to **Connect** after the user authorized                         | `MCP_OAUTH_BROKER_ENABLED` is not `true`                                                                       | Set it on control-api and restart                                                                        |
 | Provider says `redirect_uri` mismatch                                               | Callback base is unset or wrong, or the registered URI differs from the one shown                              | Set `CONTROL_API_OAUTH_CALLBACK_BASE_URL` to the public origin. Register the exact URI the wizard shows. |
 | Remote install returns `callback_base_url_unconfigured`                             | CIMD, DCR, or a server without RFC 9207 needs the public callback origin                                       | Set `CONTROL_API_OAUTH_CALLBACK_BASE_URL`                                                                |
-| CIMD authorization fails; the authorization server cannot fetch the client ID       | The gateway does not route `/api/v1/.well-known/evenfire-mcp-client` (the `deploy/base` gateway returns `403`) | Forward that path to control-api in your gateway or ingress                                              |
+| CIMD authorization fails; the authorization server cannot fetch the client ID       | The callback origin is not public, or a custom gateway does not route `/api/v1/.well-known/evenfire-mcp-client` | Point `CONTROL_API_OAUTH_CALLBACK_BASE_URL` at the public origin, or forward that path to control-api      |
 | **Detect** stops with an unreachable transport (`transport_unreachable` on install) | The URL is not the MCP endpoint                                                                                | Use the URL the wizard suggests, or the server's documented MCP path                                     |
-| Marketplace OAuth form says the callback URL is not configured                      | `NEXT_PUBLIC_CONTROL_API_OAUTH_CALLBACK_BASE_URL` was not set when Control UI was built                        | Rebuild Control UI with it, or install with YAML                                                         |
+| Marketplace OAuth form says the callback URL is not configured                      | `CONTROL_API_OAUTH_CALLBACK_BASE_URL` is unset on control-api                                                  | Set it, restart control-api, and reload the form                                                         |
 | `503 integration_not_configured`                                                    | The client ID or secret Secret, or one of its keys, is missing                                                 | Create the Secret the hint names                                                                         |
 | `403 context_membership_denied`                                                     | The user is not a member of the server's Context                                                               | Add the user to the Context                                                                              |
 | Users must authorize again after a reinstall                                        | Grants are bound to the old McpServer UID                                                                      | Expected                                                                                                 |

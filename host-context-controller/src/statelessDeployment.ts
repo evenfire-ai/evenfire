@@ -240,7 +240,7 @@ export function resolveStatelessImagePullPolicy(image: string): StatelessPullPol
 
 /**
  * Durable condition for the stateless pull-policy guard (Stage 6, W5): True
- * (MutableImageReference) while IfNotPresent is refused for a mutable image,
+ * (MutableImageReference) while IfNotPresent is used with a mutable image,
  * False (StatelessPullPolicyAccepted) otherwise. The message states the
  * enforced outcome so the operator sees what the pod actually runs with.
  */
