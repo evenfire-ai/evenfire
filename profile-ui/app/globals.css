@@ -151,10 +151,6 @@ code {
   padding: 1rem 0.75rem 3rem 1.5rem;
 }
 
-.cu-home-welcome-card .cu-card__body {
-  padding-inline-start: 0;
-}
-
 .cu-card {
   overflow: hidden;
   border: 1px solid var(--cu-border);

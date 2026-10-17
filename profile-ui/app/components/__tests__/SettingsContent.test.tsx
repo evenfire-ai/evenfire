@@ -107,10 +107,14 @@ vi.mock('@lib/approvalChannels', () => ({
   listWorkflowApprovalMediums: mocks.listWorkflowApprovalMediums,
 }))
 
-vi.mock('@lib/desktopAppLinks', () => ({
-  buildDesktopEnvironmentLink: mocks.buildDesktopEnvironmentLink,
-  navigateToDesktopApp: mocks.navigateToDesktopApp,
-}))
+vi.mock('@lib/desktopAppLinks', async importOriginal => {
+  const actual = await importOriginal<typeof import('@lib/desktopAppLinks')>()
+  return {
+    ...actual,
+    buildDesktopEnvironmentLink: mocks.buildDesktopEnvironmentLink,
+    navigateToDesktopApp: mocks.navigateToDesktopApp,
+  }
+})
 
 vi.mock('@lib/releaseIdentity', () => ({
   refreshReleaseIdentity: mocks.refreshReleaseIdentity,
@@ -118,6 +122,7 @@ vi.mock('@lib/releaseIdentity', () => ({
 
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.stubEnv('NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED', 'true')
   mocks.buildDesktopEnvironmentLink.mockReturnValue(null)
   mocks.getConfiguredExternalRestApiBaseUrl.mockReturnValue('https://api.example.com')
   mocks.getDesktopEnvironment.mockResolvedValue(desktopEnvironment)
@@ -127,7 +132,10 @@ beforeEach(() => {
   mocks.refreshApprovalTargets.mockResolvedValue([])
 })
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.unstubAllEnvs()
+})
 
 describe('Settings desktop setup handoff', () => {
   it('uses the shared desktop environment link builder', async () => {
@@ -150,5 +158,22 @@ describe('Settings desktop setup handoff', () => {
 
     expect(mocks.buildDesktopEnvironmentLink).toHaveBeenCalledWith(desktopEnvironment)
     expect(mocks.navigateToDesktopApp).toHaveBeenCalledWith(desktopHref)
+  })
+
+  it('keeps manual REST setup available while automatic handoff is disabled', async () => {
+    vi.stubEnv('NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED', 'false')
+
+    render(<SettingsContent activeSettingsTab="profile" activeSocialTab="telegram" />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Setup desktop app' }))
+
+    const dialog = await screen.findByRole('dialog', { name: 'Setup desktop app' })
+    expect(
+      within(dialog).getByText(/Automatic Desktop handoff is temporarily unavailable/)
+    ).toBeInTheDocument()
+    expect(
+      within(dialog).queryByRole('button', { name: 'Open desktop app and setup' })
+    ).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Copy External REST API URL' })).toBeEnabled()
   })
 })

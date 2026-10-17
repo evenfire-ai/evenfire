@@ -18,7 +18,24 @@ See `.env.example`.
 Important variables:
 
 - `NEXT_PUBLIC_EXTERNAL_REST_API_BASE_URL`
+- `NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED` (build-time; defaults to `false`)
 - `EXTERNAL_REST_API_INTERNAL_URL` (server-side proxy target)
+
+The Profile-to-Desktop environment handoff is disabled by default to protect older
+Desktop clients from ambiguous REST-only links. Enable it only after the updated
+Desktop consumer is released and operators have verified that older supported
+clients are no longer in use. Image builds can set the repository variable
+`PROFILE_DESKTOP_HANDOFF_ENABLED=true`; unset or `false` keeps the handoff disabled.
+Changing this repository variable alone does not rebuild the Profile UI image.
+The normal **Build & Publish** workflow builds Profile UI only when its source
+paths change; dispatch that workflow with `build_all=true` to rebuild every
+image when the variable was the only change. Production promotion reuses the
+dev-built digest and does not rebuild, so create the desired digest before
+promoting it.
+
+Before enabling handoff, ensure Profile UI and Desktop use the same External
+REST API endpoint, including the API path. Desktop rejects a link when the same
+origin is already saved with a different API path.
 
 ## Local
 

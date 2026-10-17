@@ -1,5 +1,6 @@
 import * as fs from 'fs'
 import * as path from 'path'
+import { isPartialArtifactName } from './artifactOutput'
 
 // Keep this aligned with control-api/src/k8s.ts until the artifact policy is
 // promoted to a shared runtime dependency consumed by both services.
@@ -8,7 +9,9 @@ export const MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
 export class ArtifactPathError extends Error {
   constructor(
     readonly status: 400 | 403 | 404 | 413 | 500,
-    message: string
+    message: string,
+    /** The filesystem error code behind it, for logs; never sent to a caller. */
+    readonly code?: string
   ) {
     super(message)
     this.name = 'ArtifactPathError'
@@ -42,12 +45,16 @@ function artifactFsError(err: unknown): ArtifactPathError {
   if (code === 'ELOOP') {
     return new ArtifactPathError(403, 'Symlink artifacts are not allowed')
   }
-  return new ArtifactPathError(500, 'Failed to read artifact')
+  return new ArtifactPathError(500, 'Failed to read artifact', code)
 }
 
 function resolveArtifactCandidate(outputDir: string, filename: string): ArtifactCandidate {
   if (!isSafeArtifactFilename(filename)) {
     throw new ArtifactPathError(400, 'Invalid filename')
+  }
+  // A file still being written is not an artifact yet.
+  if (isPartialArtifactName(filename)) {
+    throw new ArtifactPathError(404, 'Artifact not found')
   }
 
   const root = path.resolve(outputDir)

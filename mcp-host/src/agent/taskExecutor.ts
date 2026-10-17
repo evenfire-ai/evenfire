@@ -189,6 +189,20 @@ export function executionModeForSource(source: TaskSource): 'interactive' | 'una
   return source === 'channel' ? 'interactive' : 'unattended'
 }
 
+/**
+ * The caller root generated files go under. A message with no sender would
+ * share one folder with every other sender-less message on its channel, so it
+ * gets none and the generators refuse to write. A task with no message at all
+ * (cron, system) keeps the reserved system folder.
+ */
+export function generatedOutputsRoot(
+  sourceMessage: Task['sourceMessage'],
+  callerRoot: string | undefined
+): string | undefined {
+  if (sourceMessage && !(sourceMessage.sender ?? '').trim()) return undefined
+  return callerRoot
+}
+
 export interface TaskExecutorDeps {
   conversationManager: ConversationManager
   llmProvider: SingleTurnProvider
@@ -2285,7 +2299,8 @@ export class TaskExecutor {
       // §13 (stateless agents): the active provider's credential slot is the
       // only one that survives into shell_exec's child env.
       this.deps.llmProvider.getProviderType(),
-      gfsWorkspace ? { ...gfsWorkspace, deliveryAvailable: gfsDeliveryEligible } : undefined
+      gfsWorkspace ? { ...gfsWorkspace, deliveryAvailable: gfsDeliveryEligible } : undefined,
+      generatedOutputsRoot(this.task.sourceMessage, this.deps.gfsCallerWorkspacePath)
     )
     await registerDesktopTools(nativeRegistry)
     // Eagerly open this caller's remote OAuth partitions before the catalog is

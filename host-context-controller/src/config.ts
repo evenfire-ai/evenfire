@@ -93,11 +93,11 @@ export interface Config {
   hostImage: string
   hostImagePullPolicy: 'Always' | 'IfNotPresent' | 'Never'
   // Pull policy override for STATELESS host pods (Stage 6, W5). Empty =
-  // inherit hostImagePullPolicy. IfNotPresent is honored only for immutable
-  // image references (@sha256: digest or a sha-<gitsha> tag); a mutable
-  // reference is refused loudly (error log + StatelessPullPolicyRejected
-  // condition) and the pod keeps Always — see hostReconciler's
-  // resolveStatelessImagePullPolicy.
+  // inherit hostImagePullPolicy. The configured policy is always applied;
+  // IfNotPresent with a mutable image reference (no @sha256: digest, tag not
+  // sha-<gitsha>) is advisory only — a once-per-(host,image) warning plus a
+  // StatelessPullPolicyRejected=True condition — never overridden to Always.
+  // See statelessDeployment's resolveStatelessImagePullPolicy.
   statelessImagePullPolicy: '' | 'Always' | 'IfNotPresent' | 'Never'
   mcpServerImagePullPolicy: 'Always' | 'IfNotPresent' | 'Never'
   hostImagePullSecretName: string
