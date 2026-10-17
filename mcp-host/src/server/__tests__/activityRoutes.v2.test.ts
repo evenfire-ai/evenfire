@@ -440,7 +440,10 @@ describe('v2 activity visibility', () => {
     subscriber?.(event('evt_0000000003', '99999999-9999-4999-8999-999999999999', accessPathId))
 
     await vi.waitFor(() => expect(checkpoint).toHaveBeenCalledTimes(1))
-    const activityWrites = writes.filter(value => value.startsWith('data: {"version"'))
+    const activityWrites = writes
+      .join('')
+      .split('\n\n')
+      .filter(frame => frame.startsWith('event: activity\n'))
     expect(activityWrites).toHaveLength(1)
     expect(activityWrites[0]).toContain('evt_0000000001')
     expect(activityWrites[0]).not.toContain('authorityV2')

@@ -575,6 +575,18 @@ function writeSseEvent(res: Response, eventName: string, data: unknown): void {
   res.write(`data: ${JSON.stringify(data)}\n\n`)
 }
 
+function writeActivitySsePayload(
+  res: Response,
+  eventName: string,
+  serializedData: string
+): boolean {
+  return res.write(`event: ${eventName}\ndata: ${serializedData}\n\n`)
+}
+
+function writeActivitySseEvent(res: Response, eventName: string, data: unknown): boolean {
+  return writeActivitySsePayload(res, eventName, JSON.stringify(data))
+}
+
 function publicActivityEvent(event: HostActivityEvent): Omit<HostActivityEvent, 'authorityV2'> {
   const { authorityV2: _internalVisibilityBinding, ...publicEvent } = event
   return publicEvent
@@ -625,13 +637,18 @@ export async function handleActivityStreamRoute(
   res.setHeader('Connection', 'keep-alive')
   res.flushHeaders()
 
-  const pendingEvents: HostActivityEvent[] = []
+  const pendingEvents: string[] = []
+  const configuredEventLimit = config.activityMaxEventBytes
+  const maximumEventBytes =
+    Number.isSafeInteger(configuredEventLimit) && configuredEventLimit > 0
+      ? configuredEventLimit
+      : 2_048
   let unsubscribe: (() => void) | null = null
   let closed = false
   let draining = false
   let keepalive: ReturnType<typeof setInterval> | null = null
   let expiryTimer: ReturnType<typeof setTimeout> | null = null
-  const cleanup = (reason?: string, endResponse = true) => {
+  const cleanup = (reason?: string, endResponse = true, emitCloseEvent = true) => {
     if (closed) return
     closed = true
     pendingEvents.length = 0
@@ -652,8 +669,8 @@ export async function handleActivityStreamRoute(
         // A failed unsubscribe must not prevent transport cleanup.
       }
     }
-    if (reason && !res.writableEnded) {
-      writeSseEvent(res, 'closed', { reason })
+    if (reason && emitCloseEvent && !res.writableEnded) {
+      writeActivitySseEvent(res, 'closed', { reason })
     }
     if (endResponse && !res.writableEnded) {
       res.end()
@@ -674,8 +691,8 @@ export async function handleActivityStreamRoute(
     try {
       const binding = authorityBindingFromTrustedEdge(actionContext)
       while (!closed && pendingEvents.length > 0) {
-        const event = pendingEvents.shift()
-        if (!event) continue
+        const serializedEvent = pendingEvents.shift()
+        if (!serializedEvent) continue
         try {
           assertRuntimeActionCurrent(actionContext, operationId)
           const decision = await checkpoint(binding)
@@ -685,7 +702,10 @@ export async function handleActivityStreamRoute(
             cleanup(decision === 'denied' ? 'authority_denied' : 'authority_unavailable')
             return
           }
-          writeSseEvent(res, 'activity', publicActivityEvent(event))
+          if (!writeActivitySsePayload(res, 'activity', serializedEvent)) {
+            cleanup('client_backpressure', true, false)
+            return
+          }
         } catch (error) {
           if (closed) return
           closeForCheckpointError(error)
@@ -707,15 +727,28 @@ export async function handleActivityStreamRoute(
     ) {
       return
     }
+    let serializedEvent: string
+    try {
+      serializedEvent = JSON.stringify(publicActivityEvent(event))
+    } catch {
+      cleanup('stream_overloaded')
+      return
+    }
+    if (Buffer.byteLength(serializedEvent, 'utf8') > maximumEventBytes) {
+      cleanup('stream_overloaded')
+      return
+    }
     if (!operationId) {
-      writeSseEvent(res, 'activity', publicActivityEvent(event))
+      if (!writeActivitySsePayload(res, 'activity', serializedEvent)) {
+        cleanup('client_backpressure', true, false)
+      }
       return
     }
     if (pendingEvents.length >= MAX_PENDING_ACTIVITY_STREAM_EVENTS) {
       cleanup('stream_overloaded')
       return
     }
-    pendingEvents.push(event)
+    pendingEvents.push(serializedEvent)
     void drainPendingEvents()
   }
 
@@ -742,19 +775,30 @@ export async function handleActivityStreamRoute(
       unsubscribe = null
       return
     }
-    writeSseEvent(res, 'open', { hostRef: registration.hostRef, ts: new Date().toISOString() })
+    if (
+      !writeActivitySseEvent(res, 'open', {
+        hostRef: registration.hostRef,
+        ts: new Date().toISOString(),
+      })
+    ) {
+      cleanup('client_backpressure', true, false)
+      return
+    }
 
     keepalive = setInterval(() => {
       if (operationId && actionContext && Date.parse(actionContext.expiresAt) <= Date.now()) {
         cleanup('authority_expired')
         return
       }
-      res.write(': keepalive\n\n')
+      if (!res.write(': keepalive\n\n')) cleanup('client_backpressure', true, false)
     }, 15000)
 
     res.on('close', () => cleanup(undefined, false))
   } catch {
-    writeSseEvent(res, 'error', { message: 'Activity stream unavailable' })
+    if (!writeActivitySseEvent(res, 'error', { message: 'Activity stream unavailable' })) {
+      cleanup('client_backpressure', true, false)
+      return
+    }
     cleanup('upstream_unavailable')
   }
 }
