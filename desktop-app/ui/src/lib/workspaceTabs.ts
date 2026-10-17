@@ -246,6 +246,16 @@ export function openFilesTab(
       activeTabId: existing.id,
     }
   }
+  return createFilesTab(state, { ...input, path, ...(title ? { title } : {}) })
+}
+
+/** Create a distinct Files owner even when another tab already has this path. */
+export function createFilesTab(
+  state: WorkspaceTabsState,
+  input: OpenFilesTabInput
+): WorkspaceTabsState {
+  const path = input.path ?? null
+  const title = input.title?.trim()
   const tab: WorkspaceTab = {
     id: input.id,
     kind: 'files',

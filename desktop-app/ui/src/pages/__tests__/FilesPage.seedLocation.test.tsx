@@ -5,9 +5,15 @@ import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { createEmptyWorkspaceTabsState, openFilesTab, setFilesTabPath } from '@lib/workspaceTabs'
 import type { WorkspaceTabsState } from '@lib/workspaceTabs.types'
-import { resolveDeniedMessage } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import {
+  resolveDeniedMessage,
+  resolveResource,
+  resolvedDirectory,
+  resolvedFile,
+} from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { FilesPage } from '../FilesPage'
 
 // This suite mounts the REAL FilesPage on the REAL useGfsBrowserController (T1:
@@ -81,9 +87,35 @@ function authValue(): AuthContextValue {
 }
 
 const SEED_URI = 'gfs://main/aaa'
+const DEEP_LINK_URI = 'gfs://main/0123456789abcdef0123456789abcdef'
 
 /** App's files render seam, reduced to the tab-persistence contract under test. */
-function FilesTabHarness({ remoteGfsChangeEpoch = 0 }: { remoteGfsChangeEpoch?: number }) {
+function FilesTabHarness({
+  remoteGfsChangeEpoch = 0,
+  pendingGfsDeepLink,
+  pendingGfsUri,
+  isPendingGfsDeepLinkCurrent,
+  onExplicitNavigationIntent,
+  onPendingGfsDeepLinkOutcome,
+  onOpenPreview,
+  onOpenPendingGfsPreview,
+}: {
+  remoteGfsChangeEpoch?: number
+  pendingGfsDeepLink?: { id: number; uri: string } | null
+  pendingGfsUri?: string | null
+  isPendingGfsDeepLinkCurrent?: () => boolean
+  onExplicitNavigationIntent?: () => void
+  onPendingGfsDeepLinkOutcome?: (
+    id: number,
+    outcome: 'opened' | 'terminal' | 'retryable' | 'superseded'
+  ) => void
+  onOpenPreview?: (preview: GfsPreviewResource) => void
+  onOpenPendingGfsPreview?: (
+    id: number,
+    preview: GfsPreviewResource,
+    returnLocation: { gfsUri: string | null; name: string | null }
+  ) => boolean
+}) {
   const queryClient = useQueryClient()
   const [state, setState] = useState<WorkspaceTabsState>(() => {
     let next = createEmptyWorkspaceTabsState()
@@ -125,7 +157,15 @@ function FilesTabHarness({ remoteGfsChangeEpoch = 0 }: { remoteGfsChangeEpoch?: 
       {activeFilesTab && (
         <FilesPage
           key={activeFilesTab.id}
-          pendingGfsUri={seedPath}
+          workspaceTabId={activeFilesTab.id}
+          pendingGfsUri={pendingGfsUri !== undefined ? pendingGfsUri : seedPath}
+          pendingGfsDeepLink={pendingGfsDeepLink}
+          pendingGfsDeepLinkOwnerTabId={pendingGfsDeepLink ? activeFilesTab.id : undefined}
+          isPendingGfsDeepLinkCurrent={isPendingGfsDeepLinkCurrent}
+          onExplicitNavigationIntent={onExplicitNavigationIntent}
+          onPendingGfsDeepLinkOutcome={onPendingGfsDeepLinkOutcome}
+          onOpenPreview={onOpenPreview}
+          onOpenPendingGfsPreview={onOpenPendingGfsPreview}
           onLocationChange={handleLocationChange}
           {...({ remoteGfsChangeEpoch } as Record<string, number>)}
         />
@@ -134,14 +174,31 @@ function FilesTabHarness({ remoteGfsChangeEpoch = 0 }: { remoteGfsChangeEpoch?: 
   )
 }
 
-function renderHarness() {
+function renderHarness(
+  props: {
+    pendingGfsDeepLink?: { id: number; uri: string } | null
+    pendingGfsUri?: string | null
+    isPendingGfsDeepLinkCurrent?: () => boolean
+    onExplicitNavigationIntent?: () => void
+    onPendingGfsDeepLinkOutcome?: (
+      id: number,
+      outcome: 'opened' | 'terminal' | 'retryable' | 'superseded'
+    ) => void
+    onOpenPreview?: (preview: GfsPreviewResource) => void
+    onOpenPendingGfsPreview?: (
+      id: number,
+      preview: GfsPreviewResource,
+      returnLocation: { gfsUri: string | null; name: string | null }
+    ) => boolean
+  } = {}
+) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return {
     client,
     ...render(
       <AuthContext.Provider value={authValue()}>
         <QueryClientProvider client={client}>
-          <FilesTabHarness />
+          <FilesTabHarness {...props} />
         </QueryClientProvider>
       </AuthContext.Provider>
     ),
@@ -207,6 +264,373 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     })
 
     await waitFor(() => expect(tab()).toBe(`${SEED_URI}|Q4 Reports`))
+  })
+
+  it('reports a producer-resolved deep link opened after previewing its exact resource', async () => {
+    const seedFolder = await resolveResource(
+      resolvedDirectory('folder-0123', 'Reports', { gfsUri: SEED_URI })
+    )
+    const producerResource = await resolveResource(
+      resolvedFile('0123456789abcdef0123456789abcdef', 'linked-note.md')
+    )
+    let resolveRequest!: (resource: unknown) => void
+    const pendingResolve = new Promise<unknown>(resolve => {
+      resolveRequest = resolve
+    })
+    const resolve = vi.fn((uri: string) =>
+      uri === SEED_URI ? Promise.resolve(seedFolder) : pendingResolve
+    )
+    const outcomeOrder: string[] = []
+    let previewHandoffCompleted = false
+    const reportOutcome = vi.fn((_id: number, outcome: string) => outcomeOrder.push(outcome))
+    const onOpenPendingGfsPreview = vi.fn(
+      (
+        id: number,
+        preview: GfsPreviewResource,
+        returnLocation: { gfsUri: string | null; name: string | null }
+      ) => {
+        outcomeOrder.push(`preview:${preview.gfsUri}`)
+        previewHandoffCompleted = true
+        expect(returnLocation).toEqual({ gfsUri: SEED_URI, name: 'Reports' })
+        return id === 1084
+      }
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve,
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    const { client, rerender } = renderHarness({
+      pendingGfsDeepLink: null,
+      onPendingGfsDeepLinkOutcome: reportOutcome,
+      onOpenPendingGfsPreview,
+    })
+    await waitFor(() => expect(resolve).toHaveBeenCalledWith(SEED_URI))
+    await waitFor(() =>
+      expect(screen.getByTestId('tab-files-1').textContent).toBe(`${SEED_URI}|Reports`)
+    )
+
+    await act(async () => {
+      rerender(
+        <AuthContext.Provider value={authValue()}>
+          <QueryClientProvider client={client}>
+            <FilesTabHarness
+              pendingGfsDeepLink={{ id: 1084, uri: DEEP_LINK_URI }}
+              isPendingGfsDeepLinkCurrent={() => !previewHandoffCompleted}
+              onPendingGfsDeepLinkOutcome={reportOutcome}
+              onOpenPendingGfsPreview={onOpenPendingGfsPreview}
+            />
+          </QueryClientProvider>
+        </AuthContext.Provider>
+      )
+    })
+
+    await waitFor(() => expect(resolve).toHaveBeenCalledWith(DEEP_LINK_URI))
+    expect(reportOutcome).not.toHaveBeenCalled()
+    await act(async () => {
+      resolveRequest(producerResource)
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(reportOutcome).toHaveBeenCalledWith(1084, 'opened'))
+    expect(onOpenPendingGfsPreview).toHaveBeenCalledTimes(1)
+    expect(onOpenPendingGfsPreview).toHaveBeenCalledWith(
+      1084,
+      expect.objectContaining({ kind: 'markdown', gfsUri: DEEP_LINK_URI }),
+      { gfsUri: SEED_URI, name: 'Reports' }
+    )
+    expect(outcomeOrder).toEqual([`preview:${DEEP_LINK_URI}`, 'opened'])
+  })
+
+  it('keeps an explicit root navigation after it supersedes a pending resource link', async () => {
+    const seedFolder = await resolveResource(
+      resolvedDirectory('folder-0123', 'Reports', { gfsUri: SEED_URI })
+    )
+    const pendingFile = await resolveResource(
+      resolvedFile('0123456789abcdef0123456789abcdef', 'linked-note.md')
+    )
+    let resolvePending!: (resource: unknown) => void
+    const pendingResolve = new Promise<unknown>(resolve => {
+      resolvePending = resolve
+    })
+    const resolve = vi.fn((uri: string) =>
+      uri === SEED_URI ? Promise.resolve(seedFolder) : pendingResolve
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve,
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+    const reportOutcome = vi.fn()
+    let navigationCurrent = true
+    const reportExplicitIntent = vi.fn(() => {
+      navigationCurrent = false
+      reportOutcome(1090, 'superseded')
+    })
+    const { client, rerender } = renderHarness({
+      pendingGfsDeepLink: null,
+      onExplicitNavigationIntent: reportExplicitIntent,
+      onPendingGfsDeepLinkOutcome: reportOutcome,
+    })
+    await waitFor(() => expect(resolve).toHaveBeenCalledWith(SEED_URI))
+    const tab = () => screen.getByTestId('tab-files-1').textContent
+    await waitFor(() => expect(tab()).toBe(`${SEED_URI}|Reports`))
+
+    await act(async () => {
+      rerender(
+        <AuthContext.Provider value={authValue()}>
+          <QueryClientProvider client={client}>
+            <FilesTabHarness
+              pendingGfsDeepLink={{ id: 1090, uri: DEEP_LINK_URI }}
+              pendingGfsUri={SEED_URI}
+              isPendingGfsDeepLinkCurrent={() => navigationCurrent}
+              onExplicitNavigationIntent={reportExplicitIntent}
+              onPendingGfsDeepLinkOutcome={reportOutcome}
+            />
+          </QueryClientProvider>
+        </AuthContext.Provider>
+      )
+    })
+    await waitFor(() => expect(resolve).toHaveBeenCalledWith(DEEP_LINK_URI))
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'Shared with me' }).click()
+    })
+    expect(await screen.findByText('No shared files yet')).toBeTruthy()
+    expect(tab()).toBe('null|Files')
+    await waitFor(() => expect(reportOutcome).toHaveBeenCalledWith(1090, 'superseded'))
+
+    await act(async () => {
+      rerender(
+        <AuthContext.Provider value={authValue()}>
+          <QueryClientProvider client={client}>
+            <FilesTabHarness
+              pendingGfsDeepLink={null}
+              pendingGfsUri={SEED_URI}
+              onExplicitNavigationIntent={reportExplicitIntent}
+              onPendingGfsDeepLinkOutcome={reportOutcome}
+            />
+          </QueryClientProvider>
+        </AuthContext.Provider>
+      )
+    })
+    expect(resolve).toHaveBeenCalledTimes(2)
+    expect(resolve).toHaveBeenNthCalledWith(1, SEED_URI)
+    expect(resolve).toHaveBeenNthCalledWith(2, DEEP_LINK_URI)
+
+    await act(async () => {
+      resolvePending(pendingFile)
+      await Promise.resolve()
+    })
+    expect(tab()).toBe('null|Files')
+    expect(reportExplicitIntent).toHaveBeenCalledOnce()
+    expect(reportOutcome).toHaveBeenCalledTimes(1)
+    expect(reportOutcome).toHaveBeenCalledWith(1090, 'superseded')
+    expect(screen.queryByText('This resource was deleted.')).toBeNull()
+  })
+
+  it('does not open a late resolve after its pending deep link is cleared', async () => {
+    const producerResource = await resolveResource(
+      resolvedFile('0123456789abcdef0123456789abcdef', 'linked-note.md')
+    )
+    const resolveRequests: Array<(resource: unknown) => void> = []
+    const resolve = vi.fn(
+      () =>
+        new Promise<unknown>(resolveResource => {
+          resolveRequests.push(resolveResource)
+        })
+    )
+    const reportOutcome = vi.fn()
+    const onOpenPreview = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve,
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    const { client, rerender } = renderHarness({
+      pendingGfsDeepLink: { id: 1087, uri: DEEP_LINK_URI },
+      onPendingGfsDeepLinkOutcome: reportOutcome,
+      onOpenPreview,
+    })
+    const tab = () => screen.getByTestId('tab-files-1').textContent
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1))
+
+    await act(async () => {
+      rerender(
+        <AuthContext.Provider value={authValue()}>
+          <QueryClientProvider client={client}>
+            <FilesTabHarness
+              pendingGfsDeepLink={null}
+              pendingGfsUri={null}
+              onPendingGfsDeepLinkOutcome={reportOutcome}
+              onOpenPreview={onOpenPreview}
+            />
+          </QueryClientProvider>
+        </AuthContext.Provider>
+      )
+    })
+    expect(resolve).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      resolveRequests[0]?.(producerResource)
+      await Promise.resolve()
+    })
+    expect(onOpenPreview).not.toHaveBeenCalled()
+    expect(reportOutcome).not.toHaveBeenCalled()
+    expect(tab()).toBe(`${SEED_URI}|Reports`)
+  })
+
+  it.each([
+    [403, 'You do not have permission to open this resource.'],
+    [404, 'This resource could not be found.'],
+    [410, 'This resource was deleted.'],
+  ])(
+    'shows an accurate terminal deep-link outcome for HTTP %i',
+    async (status, expectedMessage) => {
+      const errorMessage = await resolveDeniedMessage(
+        DEEP_LINK_URI,
+        { code: 'resource_unavailable', message: 'resource is unavailable' },
+        status
+      )
+      expect(errorMessage).toContain(`httpStatus=${status}`)
+      Object.defineProperty(window, 'clerum', {
+        configurable: true,
+        value: {
+          gfs: {
+            listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+            resolve: vi.fn(async () => {
+              throw new Error(errorMessage)
+            }),
+            listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+            affordances: vi.fn(async () => ({
+              held: [],
+              canDelegate: false,
+              grantableBits: [],
+              canCreateShare: false,
+            })),
+          },
+        },
+      })
+      const reportOutcome = vi.fn()
+
+      renderHarness({
+        pendingGfsDeepLink: { id: 1084, uri: DEEP_LINK_URI },
+        onPendingGfsDeepLinkOutcome: reportOutcome,
+      })
+
+      expect(await screen.findByText(expectedMessage)).toBeTruthy()
+      expect(screen.queryByText('No shared files yet')).toBeNull()
+      expect(reportOutcome).toHaveBeenCalledWith(1084, 'terminal')
+    }
+  )
+
+  it('keeps a transient deep-link failure pending and retries only after an explicit action', async () => {
+    const errorMessage = await resolveDeniedMessage(
+      DEEP_LINK_URI,
+      { code: 'upstream_unavailable', message: 'try again later' },
+      503
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => {
+            throw new Error(errorMessage)
+          }),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+    const resolve = window.clerum.gfs.resolve as ReturnType<typeof vi.fn>
+    const reportOutcome = vi.fn()
+
+    renderHarness({
+      pendingGfsDeepLink: { id: 1085, uri: DEEP_LINK_URI },
+      onPendingGfsDeepLinkOutcome: reportOutcome,
+    })
+
+    const retry = await screen.findByRole('button', { name: 'Retry opening link' })
+    expect(reportOutcome).toHaveBeenCalledWith(1085, 'retryable')
+    expect(resolve).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      retry.click()
+    })
+    await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
+  })
+
+  it('terminally reports a malformed deep-link URI without calling the resolver', async () => {
+    const resolve = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve,
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+    const reportOutcome = vi.fn()
+
+    renderHarness({
+      pendingGfsDeepLink: { id: 1086, uri: 'https://files.example.test/resource' },
+      onPendingGfsDeepLinkOutcome: reportOutcome,
+    })
+
+    expect(
+      await screen.findByText('This EvenDrive link is invalid or cannot be resolved.')
+    ).toBeTruthy()
+    expect(resolve).not.toHaveBeenCalled()
+    expect(reportOutcome).toHaveBeenCalledWith(1086, 'terminal')
+    expect(screen.queryByText('No shared files yet')).toBeNull()
   })
 
   it('refreshes an open folder path and its child list after a remote move and create', async () => {

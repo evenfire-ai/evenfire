@@ -122,6 +122,25 @@ declare global {
         switch: (teamId: string) => Promise<SessionState>
       }
       gfs: {
+        getUserNavigationGeneration?: () => number
+        advanceUserNavigationGeneration?: () => number
+        copyDeepLink?: (uri: string) => Promise<{ url: string }>
+        listPendingDeepLinks?: () => Promise<{
+          links: Array<{
+            id: number
+            uri: string
+            userNavigationGenerationAtActivation: number
+          }>
+        }>
+        clearPendingDeepLinks?: () => Promise<number>
+        acknowledgeDeepLink?: (id: number) => Promise<void>
+        onDeepLink?: (
+          callback: (link: {
+            id: number
+            uri: string
+            userNavigationGenerationAtActivation: number
+          }) => void
+        ) => () => void
         resolve: (uri: string) => Promise<{
           drive: string
           resourceId: string

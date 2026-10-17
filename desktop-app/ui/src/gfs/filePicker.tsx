@@ -3,8 +3,8 @@ import { Button, Field, StatusBanner, TextInput } from '@components/Common'
 import type { GfsFilePickerProps } from './filePicker.types'
 
 /**
- * P2-S06 / P4-S07 — Desktop gfs:// open bar (renderer). Drives the GFS browser:
- * the user pastes a gfs:// link and the page resolves it THROUGH the API (no
+ * P2-S06 / P4-S07 — Desktop GFS ID entry (renderer). Drives the GFS browser:
+ * the user pastes a canonical gfs:// resource ID and the page resolves it THROUGH the API (no
  * local mirror), starting navigation at that resource. A revoked grant surfaces
  * as the API error on open. Composes the shared Common primitives per the
  * desktop-app/ui frontend rules.
@@ -33,17 +33,17 @@ export function GfsFilePicker({
         void submit()
       }}
     >
-      <Field label="EvenDrive link" htmlFor="gfs-uri-input">
+      <Field label="File or folder ID" htmlFor="gfs-uri-input">
         <div className="da-gfs-file-picker__row">
           <div className="da-gfs-file-picker__input">
             <span className="da-gfs-file-picker__scheme" aria-hidden="true">
-              URI
+              ID
             </span>
             <TextInput
               autoFocus
               id="gfs-uri-input"
-              aria-label="EvenDrive link"
-              placeholder="gfs://main/<rid>"
+              aria-label="File or folder ID"
+              placeholder="gfs://<drive>/<resource-id>"
               value={uri}
               onChange={e => setUri(e.target.value)}
             />

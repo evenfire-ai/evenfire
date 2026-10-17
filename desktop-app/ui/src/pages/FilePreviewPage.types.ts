@@ -1,3 +1,5 @@
+import type { Tone } from '@/uiTypes'
+
 export interface FilePreviewPageProps {
   /** The previewed file's gfsUri — the byte source and the tab's identity. */
   gfsUri: string
@@ -11,4 +13,8 @@ export interface FilePreviewPageProps {
   reloadVersion?: number
   /** Set when an authoritative re-resolve denies access or the file is no longer previewable. */
   unavailable?: boolean
+  pushToast?: (message: string, tone: Tone) => void
+  onOpenRoute?: () => void
+  /** @deprecated Kept for App compatibility; GFS actions now use resource-local menus. */
+  titlebarLeadingTarget?: HTMLElement | null
 }

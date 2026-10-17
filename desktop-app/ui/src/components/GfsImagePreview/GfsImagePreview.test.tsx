@@ -73,18 +73,14 @@ describe('GfsImagePreview layout', () => {
     )
 
     const modal = screen.getByRole('presentation')
-    const copyButton = screen.getByRole('button', { name: 'Copy image to clipboard' })
-    expect(copyButton.classList.contains('ui-button')).toBe(true)
-    expect(copyButton.classList.contains('da-gfs-image-preview-dialog__copy')).toBe(true)
-    expect(copyButton.textContent).toContain('Copy')
+    expect(await screen.findByRole('button', { name: 'Copy image to clipboard' })).toBeTruthy()
     const closeButton = screen.getByRole('button', { name: 'Close image preview' })
     expect(closeButton.classList.contains('ui-button')).toBe(true)
     expect(closeButton.classList.contains('da-gfs-image-preview-dialog__close')).toBe(true)
     const headerMain = screen
       .getByRole('dialog', { name: 'diagram.png' })
       .querySelector('.da-gfs-image-preview-dialog__header-main')
-    expect(headerMain?.contains(copyButton)).toBe(true)
-    expect(headerMain?.firstElementChild).toBe(copyButton)
+    expect(headerMain?.firstElementChild?.tagName).toBe('H3')
     expect(headerMain?.contains(closeButton)).toBe(false)
     expect((modal as HTMLElement).style.left).toBe('74px')
     expect((modal as HTMLElement).style.right).toBe('0px')
@@ -97,6 +93,54 @@ describe('GfsImagePreview layout', () => {
       expect((modal as HTMLElement).style.left).toBe('328px')
       expect((modal as HTMLElement).style.right).toBe('0px')
     })
+  })
+
+  it('keeps copying available for inline chat image attachments', async () => {
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    render(
+      <GfsImagePreview
+        byteLength={3}
+        fileName="chat-image.png"
+        dataBase64="AQID"
+        mimeType="image/png"
+        onClose={vi.fn()}
+      />
+    )
+
+    const copyButton = await screen.findByRole('button', { name: 'Copy image to clipboard' })
+    expect(copyButton.classList.contains('da-gfs-image-preview-dialog__copy')).toBe(true)
+    fireEvent.click(copyButton)
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('data:image/png;base64,AQID'))
+    expect(await screen.findByRole('button', { name: 'Copied image to clipboard' })).toBeTruthy()
+  })
+
+  it('keeps copying available for GFS-backed image previews', async () => {
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    render(
+      <GfsImagePreview
+        byteLength={3}
+        fileName="drive-image.png"
+        gfsUri="gfs://main/image-1"
+        mimeType="image/png"
+        onClose={vi.fn()}
+      />
+    )
+
+    expect(await screen.findByAltText('Preview of drive-image.png')).toBeTruthy()
+    const copyButton = screen.getByRole('button', { name: 'Copy image to clipboard' })
+    await waitFor(() => expect((copyButton as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(copyButton)
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('data:image/png;base64,AQID'))
+    expect(await screen.findByRole('button', { name: 'Copied image to clipboard' })).toBeTruthy()
   })
 
   it('keeps the unavailable image dialog named and closable', async () => {

@@ -6087,6 +6087,16 @@ export class AppService {
     }
   }
 
+  async createGfsResourceDeepLink(uri: string): Promise<{ url: string }> {
+    const { buildGfsResourceWebLink, normalizeGfsResourceUri } = await import('./gfsDeepLinks.js')
+    const canonicalUri = normalizeGfsResourceUri(uri)
+    if (!canonicalUri) throw new Error('Cannot create a deep link for this resource')
+    const profileUiBaseUrl = await this.resolveProfileUiBaseUrl(undefined, {
+      fallbackOnLookupError: false,
+    })
+    return { url: buildGfsResourceWebLink(profileUiBaseUrl, canonicalUri) }
+  }
+
   // In-place hard-reload of the active embed (user-initiated "Refresh"). The
   // session cookie is still valid, so this only reloads page content — it does
   // NOT re-mint the session or cancel the refresh timer. No-op when nothing is

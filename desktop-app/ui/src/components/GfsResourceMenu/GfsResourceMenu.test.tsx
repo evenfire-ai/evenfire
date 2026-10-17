@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { buildGfsResourceActions } from '@lib/gfsResourceActions'
 import { GfsResourceMenu } from './index'
 
 function rect(left: number, top: number, width: number, height: number): DOMRect {
@@ -81,6 +82,62 @@ describe('GfsResourceMenu', () => {
     fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Share' }))
     expect(onManage).toHaveBeenCalledOnce()
     expect(screen.queryByRole('menu', { name: 'Actions for report.txt' })).toBeNull()
+  })
+
+  it('renders shared action descriptors in order with Share as a direct action', () => {
+    const refresh = vi.fn()
+    const share = vi.fn()
+    const copyLink = vi.fn()
+    const actions = buildGfsResourceActions({
+      kind: 'directory',
+      uri: 'gfs://main/0123456789abcdef0123456789abcdef',
+      handlers: { refresh, share, 'copy-link': copyLink },
+      canShare: true,
+    })
+    render(<GfsResourceMenu actions={actions} resourceName="Reports" />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Options for Reports' }))
+
+    const menu = screen.getByRole('menu', { name: 'Actions for Reports' })
+    expect(
+      within(menu)
+        .getAllByRole('menuitem')
+        .map(item => item.textContent)
+    ).toEqual(['Refresh', 'Share', 'Copy link'])
+    expect(within(menu).getByRole('menuitem', { name: 'Copy link' })).toBeTruthy()
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+
+    expect(share).toHaveBeenCalledOnce()
+    expect(screen.queryByRole('menu', { name: 'Share options for Reports' })).toBeNull()
+  })
+
+  it('dispatches replacement selection and the selected file through the shared action', () => {
+    const replace = vi.fn((file?: File, context?: { requestFileSelection?: () => void }) => {
+      if (!file) context?.requestFileSelection?.()
+    })
+    const actions = buildGfsResourceActions({
+      kind: 'file',
+      uri: 'gfs://main/0123456789abcdef0123456789abcdef',
+      handlers: { replace },
+      canReplace: true,
+    })
+    const inputClick = vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(() => {})
+    render(<GfsResourceMenu actions={actions} resourceName="report.txt" />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Replace file' }))
+
+    expect(replace).toHaveBeenCalledWith(
+      undefined,
+      expect.objectContaining({ requestFileSelection: expect.any(Function) })
+    )
+    expect(inputClick).toHaveBeenCalledOnce()
+
+    const selectedFile = new File(['replacement'], 'replacement.txt')
+    fireEvent.change(screen.getByLabelText('Replace report.txt'), {
+      target: { files: [selectedFile] },
+    })
+    expect(replace).toHaveBeenLastCalledWith(selectedFile)
   })
 
   it.each(['Shared with me', 'Marketing'])(

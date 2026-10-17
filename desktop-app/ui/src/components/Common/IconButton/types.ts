@@ -6,5 +6,7 @@ export type IconButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   label: string
   loading?: boolean
   size?: ControlSize
+  /** Set false when a custom visible tooltip is rendered by the caller. */
+  tooltip?: boolean
   variant?: ControlVariant
 }

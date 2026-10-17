@@ -9,6 +9,7 @@ import {
   NotificationsContext,
   WorkspaceActionsProvider,
 } from '@contexts/index'
+import { normalizeGfsResourceUri } from '@clerum/desktop-app-links'
 import { AppHeader } from '@components/AppHeader'
 import { BootSplash } from '@components/BootSplash'
 import { ChatDrawer } from '@components/ChatDrawer'
@@ -40,6 +41,7 @@ import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
 import type { ChatLocalMatch } from '@lib/chatLocalSearch'
 import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
 import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
+import { prefillNewConversationWithGfsResource } from '@lib/gfsConversationPrefill'
 import {
   authoritativeGfsStatus,
   expireGfsPreviewTabs,
@@ -47,7 +49,9 @@ import {
   shouldRevalidateGfsQuery,
 } from '@lib/gfsEntityChangeState'
 import { resolveGfsPreview } from '@lib/gfsPreview'
+import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { retireClosedGfsPreviewOwners } from '@lib/gfsPreviewRetryOwnership'
+import type { GfsResourceNavigationRequest } from '@lib/gfsResourceNavigationIntent'
 import { desktopQueryClient } from '@lib/queryClient'
 import {
   canProcessSandboxUiDeepLinks,
@@ -105,7 +109,11 @@ import type {
 import { SettingsPage } from '@pages/SettingsPage'
 import { UnavailablePage } from '@pages/UnavailablePage'
 import { WorkflowsPage } from '@pages/WorkflowsPage'
-import type { PendingSandboxUiDeepLink, SandboxUiDeepLinkEnvelope } from '@/App.types'
+import type {
+  GfsResourceDeepLinkEnvelope,
+  PendingSandboxUiDeepLink,
+  SandboxUiDeepLinkEnvelope,
+} from '@/App.types'
 import type { ActiveSandboxUiApp, NavItem, ThemeMode } from '@/uiTypes'
 import {
   type DesktopCommandId,
@@ -336,6 +344,12 @@ export function App() {
   const [pendingSandboxUiDeepLinks, setPendingSandboxUiDeepLinks] = React.useState<
     PendingSandboxUiDeepLink[]
   >([])
+  const [pendingGfsDeepLinks, setPendingGfsDeepLinks] = React.useState<
+    GfsResourceNavigationRequest[]
+  >([])
+  const [activeGfsDeepLink, setActiveGfsDeepLink] =
+    React.useState<GfsResourceNavigationRequest | null>(null)
+  const [gfsRouteDialogRequestId, setGfsRouteDialogRequestId] = React.useState(0)
   const [sandboxUiDeepLinkRetryTick, setSandboxUiDeepLinkRetryTick] = React.useState(0)
   // The universal tab store lives in the controller (single writer; `vm.navItem`
   // is its projection). App composes the strip/reveal/reconcile over it.
@@ -350,6 +364,8 @@ export function App() {
     [workspaceTabs.tabs, vm.hostAuthorityRevision, vm.isHostAccessBlocked]
   )
   const setWorkspaceTabs = vm.setWorkspaceTabs
+  const navigationIntentSequenceRef = React.useRef(vm.navigationIntentSequence)
+  navigationIntentSequenceRef.current = vm.navigationIntentSequence
   const nextChatTabId = vm.nextWorkspaceTabId
   const workspaceTabsRef = React.useRef(workspaceTabs)
   const chatDrawerRef = React.useRef<HTMLElement | null>(null)
@@ -397,6 +413,16 @@ export function App() {
   const processingSandboxUiDeepLinkIdRef = React.useRef<number | null>(null)
   const launchingSandboxUiDeepLinkRef = React.useRef<PendingSandboxUiDeepLinkLaunch | null>(null)
   const pendingSandboxUiDeepLinksRef = React.useRef<PendingSandboxUiDeepLink[]>([])
+  const pendingGfsDeepLinksRef = React.useRef<GfsResourceNavigationRequest[]>([])
+  const processingGfsDeepLinkIdRef = React.useRef<number | null>(null)
+  const activeGfsDeepLinkRef = React.useRef<GfsResourceNavigationRequest | null>(null)
+  activeGfsDeepLinkRef.current = activeGfsDeepLink
+  const acknowledgedGfsDeepLinkIdsRef = React.useRef(new Set<number>())
+  const gfsDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
+  const gfsDeepLinkGenerationRef = React.useRef(0)
+  const gfsDeepLinkMinimumIdRef = React.useRef(0)
+  const gfsDeepLinkAcceptingRef = React.useRef(true)
+  const gfsRouteDialogRequestSequenceRef = React.useRef(0)
   const sandboxUiDeepLinkRestoreTeamByIdRef = React.useRef(new Map<number, string>())
   const sandboxUiDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
   const sandboxUiDeepLinkGenerationRef = React.useRef(0)
@@ -517,11 +543,10 @@ export function App() {
     (id: string) => {
       const tab = workspaceTabsRef.current.tabs.find(candidate => candidate.id === id)
       if (!tab) return
-      vm.clearAppsPicker()
-      setWorkspaceTabs(state => selectWorkspaceTab(state, id))
+      if (!vm.selectWorkspaceTabById(id)) return
       revealWorkspaceTab(tab, false)
     },
-    [revealWorkspaceTab, setWorkspaceTabs, vm.clearAppsPicker]
+    [revealWorkspaceTab, vm.selectWorkspaceTabById]
   )
 
   // Drawer switcher selection: reveal the chat IN the drawer (keepNavItem), never
@@ -531,9 +556,12 @@ export function App() {
       const tab = workspaceTabsRef.current.tabs.find(
         candidate => candidate.id === id && candidate.kind === 'chat'
       )
-      if (tab) revealWorkspaceTab(tab, true)
+      if (tab) {
+        vm.beginUserNavigationIntent()
+        revealWorkspaceTab(tab, true)
+      }
     },
-    [revealWorkspaceTab]
+    [revealWorkspaceTab, vm.beginUserNavigationIntent]
   )
 
   const handleCloseWorkspaceTab = React.useCallback(
@@ -542,13 +570,16 @@ export function App() {
       const wasActive = current.activeTabId === id
       const next = closeWorkspaceTab(current, id)
       if (next === current) return
+      if (wasActive || activeGfsDeepLinkRef.current?.ownerTabId === id) {
+        vm.beginUserNavigationIntent()
+      }
       vm.clearAppsPicker()
       setWorkspaceTabs(next)
       // Closing the active tab activates a neighbor (or empties the workspace,
       // §5). Reveal it so its content follows the strip.
       if (wasActive) revealWorkspaceTab(activeWorkspaceTab(next), false)
     },
-    [revealWorkspaceTab, setWorkspaceTabs, vm.clearAppsPicker]
+    [revealWorkspaceTab, setWorkspaceTabs, vm.beginUserNavigationIntent, vm.clearAppsPicker]
   )
 
   // Session-only strip reorder (drag & drop / keyboard). It never changes the
@@ -561,8 +592,10 @@ export function App() {
   )
 
   const handleNewWorkspaceChatTab = React.useCallback(() => {
+    vm.beginUserNavigationIntent()
     vm.clearAppsPicker()
     const agentRef = vm.selectedAgent
+    prefillNewConversationWithGfsResource(vm.activeWorkspaceTab, agentRef)
     if (chatDrawerDivertableRef.current) {
       // Drawer is a valid surface (app live, panel wide enough): open the blank
       // chat in the drawer without tearing the live embed down.
@@ -570,9 +603,8 @@ export function App() {
       if (agentRef) {
         vm.handleSelectChatAgent(agentRef, { selectLatest: false, keepNavItem: true })
       }
-      // With no agent yet there is nothing to seed, so this INTENTIONALLY writes
-      // nothing to the store — opening/focusing the drawer is the whole action
-      // (equivalent to the old blank-seed). Do not "fix" this to always append.
+      // A resource route stays in the pending new-chat draft bucket until the
+      // composer selects an agent; a non-resource route leaves that bucket alone.
     } else {
       // No divertable drawer: full-screen chat route so the new chat is reachable.
       leaveSandboxForChat()
@@ -590,8 +622,20 @@ export function App() {
     setWorkspaceTabs,
     vm.clearAppsPicker,
     vm.handleSelectChatAgent,
+    vm.activeWorkspaceTab,
+    vm.beginUserNavigationIntent,
     vm.selectedAgent,
   ])
+
+  const handleOpenGfsRoute = React.useCallback(() => {
+    const requestId = ++gfsRouteDialogRequestSequenceRef.current
+    setGfsRouteDialogRequestId(requestId)
+    vm.openFilesSection(null)
+  }, [vm.openFilesSection])
+
+  const handleGfsRouteDialogRequestHandled = React.useCallback((requestId: number) => {
+    setGfsRouteDialogRequestId(current => (current === requestId ? 0 : current))
+  }, [])
 
   const openChatDrawer = React.useCallback(() => {
     setChatDrawerOpen(true)
@@ -960,8 +1004,11 @@ export function App() {
   // page reports back don't re-arm FilesPage's open-once seed effect.
   const activeFilesTab = vm.activeWorkspaceTab?.kind === 'files' ? vm.activeWorkspaceTab : undefined
   const activeFilesTabId = activeFilesTab?.id ?? null
-  const activeFilesTabIdRef = React.useRef<string | null>(null)
-  activeFilesTabIdRef.current = activeFilesTabId
+  const activeGfsDeepLinkForFiles =
+    activeGfsDeepLink?.ownerTabId === activeFilesTabId &&
+    vm.isGfsResourceNavigationCurrent(activeGfsDeepLink, gfsDeepLinkGenerationRef.current)
+      ? activeGfsDeepLink
+      : null
   const filesSeedRef = React.useRef<{ id: string | null; path: string | null }>({
     id: null,
     path: null,
@@ -970,16 +1017,62 @@ export function App() {
     filesSeedRef.current = { id: activeFilesTabId, path: activeFilesTab?.files?.path ?? null }
   }
   const filesSeedPath = filesSeedRef.current.path
-  // Persist the browser's live location onto the active files tab. Stable
-  // (reads the active id from a ref), so FilesPage's effect fires only when the
-  // location actually changes; `setFilesTabPath` no-ops when nothing moved.
+  // The route writer receives the stable tab and intent from this render. A
+  // callback retained by an unmounted FilesPage cannot retarget the current tab.
   const handleFilesLocationChange = React.useCallback(
-    (gfsUri: string | null, name: string | null) => {
-      const id = activeFilesTabIdRef.current
-      if (!id) return
-      setWorkspaceTabs(state => setFilesTabPath(state, id, gfsUri, name ?? undefined))
+    (ownerTabId: string, intentSequence: number, gfsUri: string | null, name: string | null) => {
+      if (!vm.isNavigationIntentCurrent(intentSequence)) return
+      if (workspaceTabsRef.current.activeTabId !== ownerTabId) return
+      setWorkspaceTabs(state => {
+        if (!vm.isNavigationIntentCurrent(intentSequence) || state.activeTabId !== ownerTabId) {
+          return state
+        }
+        return setFilesTabPath(state, ownerTabId, gfsUri, name ?? undefined)
+      })
     },
-    [setWorkspaceTabs]
+    [setWorkspaceTabs, vm.isNavigationIntentCurrent]
+  )
+  const handleActiveFilesLocationChange = React.useCallback(
+    (gfsUri: string | null, name: string | null) => {
+      if (!activeFilesTabId) return
+      handleFilesLocationChange(
+        activeFilesTabId,
+        activeGfsDeepLinkForFiles?.intentSequence ?? vm.navigationIntentSequence,
+        gfsUri,
+        name
+      )
+    },
+    [
+      activeFilesTabId,
+      activeGfsDeepLinkForFiles?.intentSequence,
+      handleFilesLocationChange,
+      vm.navigationIntentSequence,
+    ]
+  )
+  const isActiveGfsDeepLinkCurrent = React.useCallback(() => {
+    const request = activeGfsDeepLinkRef.current
+    return Boolean(
+      activeFilesTabId &&
+      request?.ownerTabId === activeFilesTabId &&
+      vm.isGfsResourceNavigationCurrent(request, gfsDeepLinkGenerationRef.current)
+    )
+  }, [activeFilesTabId, vm.isGfsResourceNavigationCurrent])
+  const openActiveGfsDeepLinkPreview = React.useCallback(
+    (
+      id: number,
+      preview: GfsPreviewResource,
+      returnLocation: { gfsUri: string | null; name: string | null }
+    ) => {
+      const request = activeGfsDeepLinkRef.current
+      if (!request || request.id !== id) return false
+      return vm.completeGfsResourceNavigationPreview(
+        request,
+        preview,
+        gfsDeepLinkGenerationRef.current,
+        returnLocation
+      )
+    },
+    [vm.completeGfsResourceNavigationPreview]
   )
 
   const refreshOpenPreview = React.useCallback(
@@ -1426,6 +1519,7 @@ export function App() {
       // Store→embed: activate the app tab (a new one, or the backgrounded one on
       // relaunch). Its `kind:'app'` derives `navItem` to the Apps route this
       // commit and clears the instance-less picker residual.
+      vm.beginUserNavigationIntent()
       vm.clearAppsPicker()
       // Compute the id only on the open-new branch so the sequence counter
       // advances exactly as before: relaunch of an existing tab must not burn one.
@@ -1453,7 +1547,13 @@ export function App() {
       }
       return requestId
     },
-    [nextChatTabId, setWorkspaceTabs, vm.clearAppsPicker, vm.handleSelectChatAgent]
+    [
+      nextChatTabId,
+      setWorkspaceTabs,
+      vm.beginUserNavigationIntent,
+      vm.clearAppsPicker,
+      vm.handleSelectChatAgent,
+    ]
   )
   relaunchSandboxUiAppRef.current = (app, tabId) => {
     launchSandboxUiApp(app, null, tabId)
@@ -1579,6 +1679,81 @@ export function App() {
     pendingSandboxUiDeepLinksRef.current = next
     setPendingSandboxUiDeepLinks(next)
   }, [])
+
+  const setPendingGfsDeepLinkState = React.useCallback((next: GfsResourceNavigationRequest[]) => {
+    const ordered = [...next].sort((left, right) => left.id - right.id)
+    pendingGfsDeepLinksRef.current = ordered
+    setPendingGfsDeepLinks(ordered)
+  }, [])
+
+  const acknowledgeGfsDeepLink = React.useCallback(
+    async (id: number) => {
+      if (acknowledgedGfsDeepLinkIdsRef.current.has(id)) return
+      acknowledgedGfsDeepLinkIdsRef.current.add(id)
+      setPendingGfsDeepLinkState(pendingGfsDeepLinksRef.current.filter(item => item.id !== id))
+      if (activeGfsDeepLinkRef.current?.id === id) {
+        activeGfsDeepLinkRef.current = null
+        setActiveGfsDeepLink(null)
+      }
+      if (processingGfsDeepLinkIdRef.current === id) processingGfsDeepLinkIdRef.current = null
+      try {
+        await window.clerum.gfs?.acknowledgeDeepLink?.(id)
+      } catch {
+        // Main can replay an unacknowledged entry after renderer restart.
+      }
+    },
+    [setPendingGfsDeepLinkState]
+  )
+
+  const enqueueGfsDeepLink = React.useCallback(
+    (value: GfsResourceDeepLinkEnvelope) => {
+      if (!Number.isSafeInteger(value?.id) || value.id <= 0) return
+      if (!gfsDeepLinkAcceptingRef.current || value.id < gfsDeepLinkMinimumIdRef.current) return
+      if (acknowledgedGfsDeepLinkIdsRef.current.has(value.id)) return
+      if (pendingGfsDeepLinksRef.current.some(item => item.id === value.id)) return
+      const uri = normalizeGfsResourceUri(value?.uri)
+      if (!uri) {
+        vm.pushToast('Could not open EvenDrive link: the resource route is malformed.', 'error')
+        void acknowledgeGfsDeepLink(value.id)
+        return
+      }
+      const request = vm.beginGfsResourceNavigation(
+        value.id,
+        uri,
+        gfsDeepLinkGenerationRef.current,
+        value.userNavigationGenerationAtActivation
+      )
+      if (!request) {
+        void acknowledgeGfsDeepLink(value.id)
+        return
+      }
+      setPendingGfsDeepLinkState([...pendingGfsDeepLinksRef.current, request])
+    },
+    [
+      acknowledgeGfsDeepLink,
+      setPendingGfsDeepLinkState,
+      vm.beginGfsResourceNavigation,
+      vm.pushToast,
+    ]
+  )
+
+  const handleGfsDeepLinkOutcome = React.useCallback(
+    (id: number, outcome: 'opened' | 'terminal' | 'retryable' | 'superseded') => {
+      if (processingGfsDeepLinkIdRef.current !== id) return
+      const request = activeGfsDeepLinkRef.current
+      if (!request || request.id !== id) return
+      if (
+        request.principalGeneration !== gfsDeepLinkGenerationRef.current ||
+        !vm.isNavigationIntentCurrent(request.intentSequence)
+      ) {
+        void acknowledgeGfsDeepLink(id)
+        return
+      }
+      if (outcome === 'retryable') return
+      void acknowledgeGfsDeepLink(id)
+    },
+    [acknowledgeGfsDeepLink, vm.isNavigationIntentCurrent]
+  )
 
   const clearSandboxUiDeepLinkProcessing = React.useCallback((linkId?: number) => {
     if (linkId === undefined || processingSandboxUiDeepLinkIdRef.current === linkId) {
@@ -1735,6 +1910,159 @@ export function App() {
       .catch(() => undefined)
     return unsubscribe
   }, [setPendingSandboxUiDeepLinkState])
+
+  React.useEffect(() => {
+    const identity = vm.authenticatedPrincipalIdentity
+    const previousIdentity = gfsDeepLinkIdentityRef.current
+    gfsDeepLinkIdentityRef.current = identity
+    if (!shouldPurgeSandboxUiDeepLinks(previousIdentity, identity)) return
+
+    const generation = ++gfsDeepLinkGenerationRef.current
+    gfsDeepLinkAcceptingRef.current = false
+    setPendingGfsDeepLinkState([])
+    processingGfsDeepLinkIdRef.current = null
+    activeGfsDeepLinkRef.current = null
+    setActiveGfsDeepLink(null)
+    const listIntentSequence = navigationIntentSequenceRef.current
+
+    void (async () => {
+      try {
+        const minimumId = await window.clerum.gfs?.clearPendingDeepLinks?.()
+        if (generation !== gfsDeepLinkGenerationRef.current) return
+        if (!Number.isSafeInteger(minimumId) || minimumId === undefined || minimumId < 1) {
+          throw new Error('The EvenDrive deep-link queue did not return a valid reset boundary')
+        }
+        gfsDeepLinkMinimumIdRef.current = Math.max(gfsDeepLinkMinimumIdRef.current, minimumId)
+        gfsDeepLinkAcceptingRef.current = true
+
+        const pending = await window.clerum.gfs?.listPendingDeepLinks?.()
+        if (generation !== gfsDeepLinkGenerationRef.current) return
+        const currentLinks = pending?.links.filter(
+          link => link.id >= gfsDeepLinkMinimumIdRef.current
+        )
+        if (!vm.isNavigationIntentCurrent(listIntentSequence)) {
+          currentLinks
+            ?.filter(link => !pendingGfsDeepLinksRef.current.some(item => item.id === link.id))
+            .forEach(link => void acknowledgeGfsDeepLink(link.id))
+          return
+        }
+        currentLinks?.forEach(enqueueGfsDeepLink)
+      } catch {
+        if (generation === gfsDeepLinkGenerationRef.current) {
+          vm.pushToast(
+            'Could not safely refresh pending EvenDrive links after the account changed.',
+            'error'
+          )
+        }
+      }
+    })()
+  }, [
+    enqueueGfsDeepLink,
+    acknowledgeGfsDeepLink,
+    setPendingGfsDeepLinkState,
+    vm.isNavigationIntentCurrent,
+    vm.authenticatedPrincipalIdentity,
+    vm.pushToast,
+  ])
+
+  React.useEffect(() => {
+    let cancelled = false
+    const unsubscribe = window.clerum.gfs?.onDeepLink?.(enqueueGfsDeepLink)
+    const listGeneration = gfsDeepLinkGenerationRef.current
+    const listIntentSequence = navigationIntentSequenceRef.current
+    const pendingLinks = gfsDeepLinkAcceptingRef.current
+      ? window.clerum.gfs?.listPendingDeepLinks?.()
+      : undefined
+    void pendingLinks
+      ?.then(result => {
+        if (
+          cancelled ||
+          listGeneration !== gfsDeepLinkGenerationRef.current ||
+          !gfsDeepLinkAcceptingRef.current
+        )
+          return
+        const currentLinks = result?.links.filter(
+          link => link.id >= gfsDeepLinkMinimumIdRef.current
+        )
+        if (!vm.isNavigationIntentCurrent(listIntentSequence)) {
+          currentLinks
+            ?.filter(link => !pendingGfsDeepLinksRef.current.some(item => item.id === link.id))
+            .forEach(link => void acknowledgeGfsDeepLink(link.id))
+          return
+        }
+        currentLinks?.forEach(enqueueGfsDeepLink)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+      unsubscribe?.()
+    }
+  }, [acknowledgeGfsDeepLink, enqueueGfsDeepLink, vm.isNavigationIntentCurrent])
+
+  React.useEffect(() => {
+    const active = activeGfsDeepLinkRef.current
+    if (
+      active &&
+      (active.principalGeneration !== gfsDeepLinkGenerationRef.current ||
+        !vm.isNavigationIntentCurrent(active.intentSequence))
+    ) {
+      void acknowledgeGfsDeepLink(active.id)
+      return
+    }
+
+    const pending = pendingGfsDeepLinksRef.current[0]
+    if (
+      pending &&
+      (pending.principalGeneration !== gfsDeepLinkGenerationRef.current ||
+        !vm.isNavigationIntentCurrent(pending.intentSequence))
+    ) {
+      void acknowledgeGfsDeepLink(pending.id)
+      return
+    }
+
+    if (
+      bootSplashLoading ||
+      !vm.isAuthenticated ||
+      !vm.authenticatedPrincipalIdentity ||
+      processingGfsDeepLinkIdRef.current !== null
+    ) {
+      return
+    }
+    if (!pending) return
+    const uri = normalizeGfsResourceUri(pending.uri)
+    if (!uri) {
+      void acknowledgeGfsDeepLink(pending.id)
+      vm.pushToast('Could not open EvenDrive link: the resource route is malformed.', 'error')
+      return
+    }
+    processingGfsDeepLinkIdRef.current = pending.id
+    activeGfsDeepLinkRef.current = pending
+    setActiveGfsDeepLink(pending)
+    try {
+      if (!vm.activateGfsResourceNavigation(pending, gfsDeepLinkGenerationRef.current)) {
+        void acknowledgeGfsDeepLink(pending.id)
+      }
+    } catch (error) {
+      processingGfsDeepLinkIdRef.current = null
+      activeGfsDeepLinkRef.current = null
+      setActiveGfsDeepLink(null)
+      void acknowledgeGfsDeepLink(pending.id)
+      vm.pushToast(
+        `Could not open EvenDrive link: ${error instanceof Error ? error.message : String(error)}`,
+        'error'
+      )
+    }
+  }, [
+    acknowledgeGfsDeepLink,
+    bootSplashLoading,
+    pendingGfsDeepLinks,
+    vm.activateGfsResourceNavigation,
+    vm.authenticatedPrincipalIdentity,
+    vm.isNavigationIntentCurrent,
+    vm.isAuthenticated,
+    vm.navigationIntentSequence,
+    vm.pushToast,
+  ])
 
   // Name the live app tab after the embed's `document.title` (mini-spec 06 §2).
   // Only the tab whose embed is live (`liveSandboxUiTabIdRef`) is renamed, and
@@ -2145,6 +2473,7 @@ export function App() {
       // chat-specific.
       const selectAndReveal = (next: typeof state) => {
         if (next === state) return
+        vm.beginUserNavigationIntent()
         vm.clearAppsPicker()
         setWorkspaceTabs(next)
         revealWorkspaceTab(activeWorkspaceTab(next), false)
@@ -2304,6 +2633,7 @@ export function App() {
       setWorkspaceTabs,
       vm.activeChatId,
       vm.clearAppsPicker,
+      vm.beginUserNavigationIntent,
       vm.handleNavSelect,
       vm.handleLogout,
       vm.handleSelectChatAgent,
@@ -2998,10 +3328,29 @@ export function App() {
                                   <FilesPage
                                     key={activeFilesTabId ?? 'files'}
                                     pushToast={vm.pushToast}
+                                    titlebarLeadingTarget={titlebarLeadingRoot}
+                                    workspaceTabId={activeFilesTabId ?? undefined}
                                     pendingGfsUri={filesSeedPath}
+                                    pendingGfsDeepLink={
+                                      activeGfsDeepLinkForFiles
+                                        ? {
+                                            id: activeGfsDeepLinkForFiles.id,
+                                            uri: activeGfsDeepLinkForFiles.uri,
+                                          }
+                                        : null
+                                    }
+                                    pendingGfsDeepLinkOwnerTabId={
+                                      activeGfsDeepLinkForFiles?.ownerTabId
+                                    }
+                                    isPendingGfsDeepLinkCurrent={isActiveGfsDeepLinkCurrent}
+                                    onExplicitNavigationIntent={vm.beginUserNavigationIntent}
+                                    onPendingGfsDeepLinkOutcome={handleGfsDeepLinkOutcome}
                                     remoteGfsChangeEpoch={remoteGfsChangeEpoch}
-                                    onLocationChange={handleFilesLocationChange}
+                                    onLocationChange={handleActiveFilesLocationChange}
                                     onOpenPreview={vm.openPreviewSection}
+                                    onOpenPendingGfsPreview={openActiveGfsDeepLinkPreview}
+                                    routeDialogRequestId={gfsRouteDialogRequestId}
+                                    onRouteDialogRequestHandled={handleGfsRouteDialogRequestHandled}
                                   />
                                 )}
                                 {vm.navItem === DESKTOP_ROUTES.preview && activePreviewPayload && (
@@ -3014,6 +3363,9 @@ export function App() {
                                     byteLength={activePreviewPayload.byteLength}
                                     reloadVersion={activePreviewPayload.reloadVersion}
                                     unavailable={activePreviewPayload.unavailable}
+                                    pushToast={vm.pushToast}
+                                    onOpenRoute={handleOpenGfsRoute}
+                                    titlebarLeadingTarget={titlebarLeadingRoot}
                                   />
                                 )}
                                 {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}

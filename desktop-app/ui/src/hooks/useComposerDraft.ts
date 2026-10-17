@@ -1,5 +1,6 @@
-import { useCallback, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useSyncExternalStore } from 'react'
 import {
+  claimPendingNewChatDraft,
   getComposerDraft,
   setComposerDraft,
   subscribeComposerDraft,
@@ -14,6 +15,10 @@ export function useComposerDraft(
   chatId: string | null,
   agentRef?: string
 ): readonly [string, (value: string) => void] {
+  useEffect(() => {
+    if (chatId || !agentRef) return
+    claimPendingNewChatDraft(agentRef)
+  }, [agentRef, chatId])
   const subscribe = useCallback(
     (listener: () => void) => subscribeComposerDraft(chatId, listener, agentRef),
     [agentRef, chatId]

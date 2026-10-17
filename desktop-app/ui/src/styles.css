@@ -15239,13 +15239,8 @@ pre {
   opacity: 1;
 }
 
-.da-gfs-drive__header-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: var(--space-1);
-  flex: 0 0 auto;
+.da-gfs-drive__upload-input {
+  display: none;
 }
 
 .da-gfs-upload-status {
@@ -15734,6 +15729,22 @@ pre {
   gap: var(--space-2);
 }
 
+.da-gfs-preview-title-row {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.da-gfs-preview-title-row > .da-gfs-preview-title {
+  flex: 0 1 auto;
+}
+
+.da-gfs-preview-title-row > .da-gfs-resource-menu {
+  flex: 0 0 auto;
+}
+
 .da-gfs-image-preview-dialog__header-main {
   display: flex;
   align-items: center;
@@ -15814,19 +15825,26 @@ pre {
   white-space: nowrap;
 }
 
-/* File preview in a workspace tab (spec 18 §3.B.3). Reuses the shared
- * Gfs*PreviewBody inner classes; this container gives the header + body the same
- * two-row layout the dialog frame provided, without any modal chrome. */
+/* File preview in a workspace tab (spec 18 §3.B.3). Its actions live in the
+ * title bar; this frame contains only the preview body, without modal chrome. */
 .da-gfs-preview-page {
   flex: 1 1 0;
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
   border: 1px solid var(--table-frame-border);
   border-radius: var(--table-radius);
   background: var(--table-frame-bg);
+}
+
+.da-gfs-preview-content {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
 }
 
 .da-gfs-image-preview-dialog__body,
@@ -16873,10 +16891,6 @@ pre {
   .da-gfs-drive__header.page-card__header {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .da-gfs-drive__header-actions {
-    justify-content: flex-end;
   }
 
   .da-gfs-drive__grid {

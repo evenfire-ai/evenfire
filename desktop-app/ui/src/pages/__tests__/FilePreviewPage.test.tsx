@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { useEffect, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
 import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
 import { resolveDeniedMessage } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { FilePreviewPage } from '../FilePreviewPage'
@@ -48,6 +49,21 @@ function stubGfs(opts: {
   return { downloadPreview, resolve }
 }
 
+function openPreviewActions(fileName: string) {
+  const heading = screen.getByRole('heading', { name: fileName, level: 2 })
+  const titleRow = heading.closest('.da-gfs-preview-title-row')
+  if (!titleRow) throw new Error(`Preview title actions are unavailable for ${fileName}`)
+  fireEvent.click(
+    within(titleRow as HTMLElement).getByRole('button', { name: `Options for ${fileName}` })
+  )
+  return screen.getByRole('menu', { name: `Actions for ${fileName}` })
+}
+
+function clickPreviewAction(fileName: string, actionName: string) {
+  const menu = openPreviewActions(fileName)
+  fireEvent.click(within(menu).getByRole('menuitem', { name: actionName }))
+}
+
 describe('FilePreviewPage', () => {
   beforeEach(() => {
     Object.defineProperty(URL, 'createObjectURL', {
@@ -73,13 +89,60 @@ describe('FilePreviewPage', () => {
         fileKind="image"
         mimeType="image/png"
         byteLength={3}
+        onOpenRoute={() => undefined}
       />
     )
 
     expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
     // The preview page title is a page-level h2 (not a dialog h3).
-    expect(screen.getByRole('heading', { name: 'diagram.png', level: 2 })).toBeTruthy()
+    const title = screen.getByRole('heading', { name: 'diagram.png', level: 2 })
+    expect(title).toBeTruthy()
+    const titleRow = title.closest('.da-gfs-preview-title-row')
+    expect(titleRow).toBeTruthy()
+    fireEvent.click(
+      within(titleRow as HTMLElement).getByRole('button', { name: 'Options for diagram.png' })
+    )
+    expect(screen.getAllByRole('menuitem').map(item => item.textContent)).toEqual([
+      'Refresh',
+      'Copy link',
+      'Copy file ID',
+      'Open file from ID',
+      'Copy content',
+    ])
     expect(screen.queryByRole('dialog')).toBeNull()
+    const menu = screen.getByRole('menu', { name: 'Actions for diagram.png' })
+    expect(within(menu).getByRole('menuitem', { name: 'Refresh' })).toBeTruthy()
+    expect(within(menu).getByRole('menuitem', { name: 'Copy link' })).toBeTruthy()
+    expect(within(menu).getByRole('menuitem', { name: 'Copy file ID' })).toBeTruthy()
+    expect(within(menu).getByRole('menuitem', { name: 'Open file from ID' })).toBeTruthy()
+    expect(within(menu).getByRole('menuitem', { name: 'Copy content' })).toBeTruthy()
+  })
+
+  it('keeps preview actions beside the filename without populating the navbar slot', async () => {
+    hookMock.useGfsBrowserController.mockReturnValue(controller())
+    stubDownload(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
+    const titlebarLeadingRoot = document.createElement('div')
+    document.body.appendChild(titlebarLeadingRoot)
+
+    const view = render(
+      <FilePreviewPage
+        gfsUri="gfs://main/image-1"
+        fileName="diagram.png"
+        fileKind="image"
+        byteLength={3}
+        titlebarLeadingTarget={titlebarLeadingRoot}
+      />
+    )
+
+    try {
+      expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
+      expect(within(titlebarLeadingRoot).queryByRole('toolbar')).toBeNull()
+      const menu = openPreviewActions('diagram.png')
+      expect(within(menu).getByRole('menuitem', { name: 'Copy link' })).toBeTruthy()
+    } finally {
+      view.unmount()
+      titlebarLeadingRoot.remove()
+    }
   })
 
   it('mounts the markdown body for a markdown preview tab', async () => {
@@ -109,10 +172,133 @@ describe('FilePreviewPage', () => {
         fileKind="video"
         mimeType="video/mp4"
         byteLength={3}
+        onOpenRoute={() => undefined}
       />
     )
 
     expect(await screen.findByLabelText('Video preview of demo.mp4')).toBeTruthy()
+    const menu = openPreviewActions('demo.mp4')
+    expect(within(menu).queryByRole('menuitem', { name: 'Copy content' })).toBeNull()
+    expect(
+      within(menu)
+        .getAllByRole('menuitem')
+        .map(item => item.textContent)
+    ).toEqual(['Refresh', 'Copy link', 'Copy file ID', 'Open file from ID'])
+  })
+
+  it('uses the shareable link, canonical ID, and preview copy semantics from the filename menu', async () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const markdown = '# Hello\n\nText to copy.'
+    const copyDeepLink = vi.fn(async () => ({
+      url: buildGfsResourceWebLink('https://profile.example', uri),
+    }))
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          copyDeepLink,
+          downloadPreview: vi.fn(async () => ({
+            bytes: new TextEncoder().encode(markdown).buffer,
+          })),
+          resolve: vi.fn(async () => ({ kind: 'file' })),
+        },
+      },
+    })
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue(controller())
+
+    render(
+      <FilePreviewPage
+        gfsUri={uri}
+        fileName="Résumé # ? %.md"
+        fileKind="markdown"
+        byteLength={markdown.length}
+      />
+    )
+
+    await screen.findByRole('heading', { name: 'Hello' })
+    clickPreviewAction('Résumé # ? %.md', 'Copy link')
+    clickPreviewAction('Résumé # ? %.md', 'Copy file ID')
+    const menu = openPreviewActions('Résumé # ? %.md')
+    const copyContent = within(menu).getByRole('menuitem', { name: 'Copy content' })
+    await waitFor(() => expect((copyContent as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(copyContent)
+
+    await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(uri))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(uri))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(markdown))
+  })
+
+  it('copies the loaded image bytes through the filename menu', async () => {
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue(controller())
+    stubGfs({
+      downloadPreview: async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }),
+      resolve: async () => ({ kind: 'file' }),
+    })
+
+    render(
+      <FilePreviewPage
+        gfsUri="gfs://main/image-1"
+        fileName="diagram.png"
+        fileKind="image"
+        mimeType="image/png"
+        byteLength={3}
+      />
+    )
+
+    expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
+    const menu = openPreviewActions('diagram.png')
+    const copyContent = within(menu).getByRole('menuitem', { name: 'Copy content' })
+    await waitFor(() => expect((copyContent as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(copyContent)
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('data:image/png;base64,AQID'))
+  })
+
+  it('refreshes by revalidating and reloading the exact preview resource', async () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    let downloadNumber = 0
+    const { downloadPreview, resolve } = stubGfs({
+      downloadPreview: async () => ({
+        bytes: new TextEncoder().encode(`# Load ${++downloadNumber}`).buffer,
+      }),
+      resolve: async () => ({ kind: 'file' }),
+    })
+    hookMock.useGfsBrowserController.mockReturnValue(controller())
+
+    render(<FilePreviewPage gfsUri={uri} fileName="report.md" fileKind="markdown" byteLength={7} />)
+
+    expect(await screen.findByRole('heading', { name: 'Load 1' })).toBeTruthy()
+    clickPreviewAction('report.md', 'Refresh')
+
+    await waitFor(() => expect(resolve).toHaveBeenCalledWith(uri))
+    expect(await screen.findByRole('heading', { name: 'Load 2' })).toBeTruthy()
+    expect(downloadPreview).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('heading', { name: 'report.md', level: 2 })).toBeTruthy()
+  })
+
+  it('omits Refresh while the preview is unavailable', () => {
+    hookMock.useGfsBrowserController.mockReturnValue(controller())
+    render(
+      <FilePreviewPage
+        gfsUri="gfs://main/secret"
+        fileName="secret.png"
+        fileKind="image"
+        byteLength={3}
+        unavailable
+      />
+    )
+
+    expect(screen.queryByRole('button', { name: 'Refresh' })).toBeNull()
   })
 
   // R-4 (spec 18 §3.B.5): the preview tab must NOT close when access is revoked;
@@ -219,8 +405,9 @@ describe('FilePreviewPage', () => {
 
     // The bytes load and Copy is enabled.
     expect(await screen.findByAltText('Preview of secret.png')).toBeTruthy()
-    const copyBefore = screen.getByRole('button', { name: 'Copy image to clipboard' })
-    expect((copyBefore as HTMLButtonElement).disabled).toBe(false)
+    const menuBefore = openPreviewActions('secret.png')
+    const copyBefore = within(menuBefore).getByRole('menuitem', { name: 'Copy content' })
+    await waitFor(() => expect((copyBefore as HTMLButtonElement).disabled).toBe(false))
 
     // The file is unshared out-of-band → the next focus re-check 403s.
     fireEvent.focus(window)
@@ -228,7 +415,8 @@ describe('FilePreviewPage', () => {
     // The image, Copy affordance, filename, and denial details are gone; the
     // tab remains mounted behind a generic unavailable shell.
     await waitFor(() => expect(screen.queryByAltText('Preview of secret.png')).toBeNull())
-    expect(screen.queryByRole('button', { name: 'Copy image to clipboard' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Options for secret.png' })).toBeNull()
+    expect(screen.queryByRole('menuitem', { name: 'Copy content' })).toBeNull()
     expect(screen.getByRole('heading', { name: 'File unavailable', level: 3 })).toBeTruthy()
     expect(screen.queryByText(deniedMessage)).toBeNull()
     expect(screen.queryByText('secret.png')).toBeNull()
