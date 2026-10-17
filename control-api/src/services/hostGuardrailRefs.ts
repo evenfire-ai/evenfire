@@ -127,10 +127,26 @@ export async function stripHookRefFromHosts(
   return touched
 }
 
+/** Phases (Host keys) under which `hooks` currently references `hookId`. */
+function phasesReferencing(hooks: Record<string, HookRef[]>, hookId: string): string[] {
+  return Object.keys(hooks).filter(
+    phase => Array.isArray(hooks[phase]) && hooks[phase].some(r => r?.id === hookId)
+  )
+}
+
 /**
- * Coordinated upgrade: set the hook's reference on every referencing Host to
- * EXACTLY `lifecyclePoints` with the new `digest`, so the CR image bump and the
- * admin-pinned Host-ref digests move together. Returns the Host names touched.
+ * Coordinated upgrade: move the admin-pinned Host-ref digests together with the
+ * CR image bump, PRESERVING each Host's per-phase placement. mcp-host runs a
+ * hook only at the Host phases it is referenced under, so an admin's "Remove
+ * from <phase>" must survive an upgrade:
+ *   - phases the Host references the hook under AND the upgraded hook still
+ *     declares are kept, with the new `digest`;
+ *   - phases the upgraded hook no longer declares are dropped;
+ *   - phases the Host does not reference (e.g. removed by the admin, or newly
+ *     declared by the upgrade) are NOT added.
+ * If none of the Host's phases survive the upgrade, the hook is re-referenced at
+ * the upgraded `lifecyclePoints` rather than silently left unreferenced (an
+ * installed guardrail that never runs). Returns the Host names touched.
  */
 export async function syncHookRefsInHosts(
   gateway: K8sGateway,
@@ -145,8 +161,11 @@ export async function syncHookRefsInHosts(
     const name = host.metadata?.name
     if (!name) continue
     await mutateHostHooks(gateway, name, hostsNamespace, current => {
+      const declared = new Set(lifecyclePoints)
+      const kept = phasesReferencing(current, hookId).filter(phase => declared.has(phase))
+      const phases = kept.length > 0 ? kept : lifecyclePoints
       const hooks = withoutHook(current, hookId)
-      for (const phase of lifecyclePoints) {
+      for (const phase of phases) {
         const arr = hooks[phase] ? [...hooks[phase]] : []
         arr.push({ id: hookId, ...(digest ? { digest } : {}) })
         hooks[phase] = arr
