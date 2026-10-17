@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { testLoginResult } from '../../testSupport/authTestFixtures.js'
+import { testLoginResult, testSessionTokenWithExpiry } from '../../testSupport/authTestFixtures.js'
 
 const originalConfigPath = process.env.CLERUM_DESKTOP_CONFIG_PATH
 const originalPreview = process.env.EVENFIRE_ONBOARDING_PREVIEW
@@ -64,13 +64,14 @@ async function selectSiblingAfterIndexFailure() {
   await config.selectDesktopRuntimeConfigOption(a)
   chat.__setChatStoreBaseDirForTests(path.join(directory, 'chats'))
   closeStore = chat.unbindChatStore
-  const store = new TokenStore({ isolatedUserDataPath: directory })
+  const store = new TokenStore()
   const service = new AppService()
   ;(service as unknown as { tokenStore: InstanceType<typeof TokenStore> }).tokenStore = store
   const discovery = vi.spyOn(AuthClient.prototype, 'getDesktopEnvironment')
   discovery.mockRejectedValueOnce(new Error('initial optional discovery unavailable'))
   discovery.mockResolvedValue({ externalRestApiBaseUrl: rest, rpcProxyBaseUrl: rpc, appName: 'A' })
-  vi.spyOn(AuthClient.prototype, 'googleLogin').mockResolvedValue(testLoginResult())
+  const sessionToken = testSessionTokenWithExpiry()
+  vi.spyOn(AuthClient.prototype, 'googleLogin').mockResolvedValue(testLoginResult(sessionToken))
   vi.spyOn(AuthClient.prototype, 'health').mockResolvedValue({ status: 'ok' })
   const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
     // Native fetch rejects the relative /health URL when no transport is configured.
@@ -96,17 +97,28 @@ async function selectSiblingAfterIndexFailure() {
   expect(config.getActiveEnvKey()).toBe(key)
   expect(service.getSessionGeneration()).toBeGreaterThan(generation)
   expect(service.getCachedUserId()).toBe('user-a')
-  expect(await store.getSessionToken(key)).toBe('synthetic-session-a')
+  expect(await store.getSessionToken(key)).toBeNull()
+  await expect(service.getSessionState()).resolves.toMatchObject({
+    authenticated: true,
+    me: { id: 'user-a' },
+    sessionMode: 'temporary',
+  })
   expect(chat.getChatStoreBindingGeneration()).toBe(chatGeneration)
   return { service, config, store, b, key, rpc, fetch, index }
 }
 
 it('does not route a surviving session through another profile after an index write rejection', async () => {
-  const { service, config, fetch, b, rpc } = await selectSiblingAfterIndexFailure()
+  const { service, config, store, fetch, b, rpc } = await selectSiblingAfterIndexFailure()
   fetch.mockClear()
   const health = await service.getDependenciesHealth()
   expect(health.rpcProxy.ok).toBe(false)
   expect(fetch).not.toHaveBeenCalledWith(`${rpc}/health`, expect.any(Object))
+  await expect(service.getSessionState()).resolves.toMatchObject({
+    authenticated: true,
+    me: { id: 'user-a' },
+    sessionMode: 'temporary',
+  })
+  expect(await store.getSessionToken(config.getActiveEnvKey())).toBeNull()
   expect(config.getDesktopRuntimeConfigState().activeOptionId).toBe(b.id)
   expect(config.config.rpcProxyBaseUrl).toBe('')
 })
@@ -116,6 +128,10 @@ it('does not persist another directory profile discovery on logout after an inde
   await service.logout()
   expect(service.getCachedUserId()).toBeNull()
   expect(await store.getSessionToken(key)).toBeNull()
+  await expect(service.getSessionState()).resolves.toMatchObject({
+    authenticated: false,
+    me: null,
+  })
   expect(config.getDesktopRuntimeConfigState().activeOptionId).toBe(b.id)
   expect(config.config.rpcProxyBaseUrl).toBe('')
   // A later successful native save persists B, never A's stale discovery.

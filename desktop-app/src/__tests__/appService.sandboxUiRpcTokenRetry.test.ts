@@ -17,6 +17,7 @@ vi.mock('electron', () => ({
   app: { getPath: vi.fn(() => '/tmp/clerum-desktop-test') },
   safeStorage: {
     isEncryptionAvailable: vi.fn(() => false),
+    getSelectedStorageBackend: () => 'gnome_libsecret',
     encryptString: vi.fn(),
     decryptString: vi.fn(),
   },
@@ -25,7 +26,7 @@ vi.mock('electron', () => ({
 
 vi.mock('../config.js', () => ({
   getActiveRuntimeConfigOptionId: () => null,
-  getActiveEnvKey: () => 'test-env',
+  getActiveEnvKey: () => 'test_env-000000000000',
   config: {
     rpcProxyBaseUrl: 'https://rpc.example',
     externalRestApiBaseUrl: 'http://rest',
@@ -49,14 +50,6 @@ vi.mock('../authClient.js', () => ({
   AuthClient: class {
     health = vi.fn().mockResolvedValue({ status: 'ok' })
     getMe = vi.fn()
-  },
-}))
-
-vi.mock('../tokenStore.js', () => ({
-  TokenStore: class {
-    getSessionToken = vi.fn().mockResolvedValue(null)
-    setSessionToken = vi.fn()
-    clearSessionToken = vi.fn()
   },
 }))
 

@@ -15,6 +15,7 @@ export interface AuthContextValue {
   statusTone: Tone
   isAuthenticated: boolean
   me: SessionMe | null
+  temporarySessionExpiresAt: number | null
   email: string
   password: string
   desktopSetupAuthorizationToken: string

@@ -7,7 +7,9 @@ import { ApiError } from '../httpClient.js'
 // ── mock dependencies before AppService is imported ──────────────────────────
 
 vi.mock('../config.js', () => ({
+  getActiveEnvKey: () => 'test_env-000000000000',
   getActiveRuntimeConfigOptionId: () => null,
+  getActiveLegacyEnvKeys: () => [],
   config: {
     rpcProxyBaseUrl: 'http://proxy',
     externalRestApiBaseUrl: 'http://rest',
@@ -47,14 +49,6 @@ vi.mock('../authClient.js', () => ({
   AuthClient: class {
     health = vi.fn().mockResolvedValue({ status: 'ok' })
     getMe = vi.fn()
-  },
-}))
-
-vi.mock('../tokenStore.js', () => ({
-  TokenStore: class {
-    getSessionToken = vi.fn().mockResolvedValue(null)
-    setSessionToken = vi.fn()
-    clearSessionToken = vi.fn()
   },
 }))
 

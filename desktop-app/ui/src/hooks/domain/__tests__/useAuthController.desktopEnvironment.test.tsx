@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { AppService } from '../../../../../src/appService'
 import type { DesktopRuntimeConfigState } from '../../../../../src/types'
+import { testSessionTokenWithExpiry } from '../../../../../testSupport/authTestFixtures'
 import { useAuthController } from '../useAuthController'
 import { wrapLikeElectronIpc } from './__fixtures__/ipcErrors'
 
@@ -19,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   onDesktopEnvironmentSetup: vi.fn(),
   onDesktopSetupToken: vi.fn(),
   onExternalLogout: vi.fn(),
+  onSessionExpired: vi.fn(),
   saveRuntimeConfig: vi.fn(),
   selectRuntimeConfig: vi.fn(),
   selectRuntimeConfigForHandoff: vi.fn(),
@@ -54,6 +56,7 @@ let desktopEnvironmentSetupListener:
 let desktopSetupTokenListener:
   | ((payload: DesktopSetupTokenPayload) => void | Promise<void>)
   | null = null
+let sessionExpiredListener: (() => void) | null = null
 let confirmDesktopEnvironmentSetupForTest: (() => Promise<void>) | null = null
 let confirmDesktopEnvironmentSwitchForTest: (() => void) | null = null
 let cancelDesktopEnvironmentSwitchForTest: (() => void) | null = null
@@ -61,6 +64,7 @@ let selectRuntimeConfigForTest: ((id: string) => Promise<DesktopRuntimeConfigSta
   null
 let setBootingForTest: ((value: boolean) => void) | null = null
 let setAuthenticatedForTest: ((value: boolean) => void) | null = null
+let setTemporarySessionExpiryForTest: ((value: number | null) => void) | null = null
 let runtimeConfigModule: typeof import('../../../../../src/config') | null = null
 let nativeAppService: AppService | null = null
 let mismatchLogoutGeneration: number | null = null
@@ -76,6 +80,7 @@ function Probe() {
   })
   setBootingForTest = auth.setBooting
   setAuthenticatedForTest = auth.setIsAuthenticated
+  setTemporarySessionExpiryForTest = auth.setTemporarySessionExpiresAt
   confirmDesktopEnvironmentSetupForTest = auth.handleConfirmDesktopEnvironmentSetup
   confirmDesktopEnvironmentSwitchForTest = auth.handleConfirmDesktopEnvironmentSwitchConfirmation
   cancelDesktopEnvironmentSwitchForTest = auth.handleCancelDesktopEnvironmentSwitchConfirmation
@@ -95,6 +100,7 @@ function Probe() {
         {auth.pendingDesktopEnvironmentSetup?.rpcProxyBaseUrl || 'none'}
       </div>
       <div data-testid="setup-complete">{auth.desktopEnvironmentSetupComplete ? 'yes' : 'no'}</div>
+      <div data-testid="temporary-expiry">{auth.temporarySessionExpiresAt ?? 'none'}</div>
       <div data-testid="active-environment">
         {auth.runtimeConfigState?.activeOptionId || 'none'}
       </div>
@@ -132,6 +138,7 @@ beforeEach(async () => {
   vi.spyOn(Date, 'now').mockReturnValue(frozenProfileIdMilliseconds)
   desktopEnvironmentSetupListener = null
   desktopSetupTokenListener = null
+  sessionExpiredListener = null
   confirmDesktopEnvironmentSetupForTest = null
   confirmDesktopEnvironmentSwitchForTest = null
   cancelDesktopEnvironmentSwitchForTest = null
@@ -145,6 +152,7 @@ beforeEach(async () => {
   runtimeConfigDirectory = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-desktop-env-test-'))
   vi.doUnmock('electron')
   vi.resetModules()
+  vi.doMock('keytar', () => ({}))
   vi.doMock('electron', () => ({
     safeStorage: { isEncryptionAvailable: () => false },
     app: {
@@ -205,6 +213,10 @@ beforeEach(async () => {
     return () => undefined
   })
   mocks.onExternalLogout.mockReturnValue(() => undefined)
+  mocks.onSessionExpired.mockImplementation((listener: () => void) => {
+    sessionExpiredListener = listener
+    return () => undefined
+  })
   mocks.onDesktopEnvironmentSetup.mockImplementation(
     (listener: (payload: DesktopEnvironmentSetupPayload) => void | Promise<void>) => {
       desktopEnvironmentSetupListener = listener
@@ -224,6 +236,7 @@ beforeEach(async () => {
       onDesktopSetupToken: mocks.onDesktopSetupToken,
       completeDesktopSetup: mocks.completeDesktopSetup,
       onExternalLogout: mocks.onExternalLogout,
+      onSessionExpired: mocks.onSessionExpired,
     },
   }
 })
@@ -239,6 +252,28 @@ afterEach(async () => {
 })
 
 describe('Desktop environment handoff', () => {
+  it('clears the temporary-session disclosure and reloads auth on main-process expiry', async () => {
+    render(<Probe />)
+    await waitFor(() => expect(mocks.onSessionExpired).toHaveBeenCalledOnce())
+    const expiresAt = Date.now() + 60_000
+    act(() => setTemporarySessionExpiryForTest?.(expiresAt))
+    expect(screen.getByTestId('temporary-expiry')).toHaveTextContent(String(expiresAt))
+
+    await act(async () => {
+      sessionExpiredListener?.()
+      await Promise.resolve()
+    })
+
+    await waitFor(() =>
+      expect(mocks.setStatus).toHaveBeenCalledWith(
+        'Your temporary session ended. Please sign in again.',
+        'info'
+      )
+    )
+    expect(mocks.loadSession).toHaveBeenCalledWith({ preserveNav: true })
+    expect(screen.getByTestId('temporary-expiry')).toHaveTextContent('none')
+  })
+
   it.each(['generation failure', 'authentication starts', 'invalid REST endpoint'])(
     'clears the first dialog when a second link meets %s',
     async failure => {
@@ -294,7 +329,7 @@ describe('Desktop environment handoff', () => {
     await runtimeConfigModule!.selectDesktopRuntimeConfigOption(other.id)
     const { AuthClient } = await import('../../../../../src/authClient')
     vi.spyOn(AuthClient.prototype, 'googleLogin').mockResolvedValue({
-      token: 'synthetic-new-session',
+      token: testSessionTokenWithExpiry(),
       me: {
         id: 'new-user',
         email: 'new@example.test',
@@ -307,7 +342,7 @@ describe('Desktop environment handoff', () => {
     })
     const { TokenStore } = await import('../../../../../src/tokenStore')
     ;(nativeAppService as unknown as { tokenStore: InstanceType<typeof TokenStore> }).tokenStore =
-      new TokenStore({ isolatedUserDataPath: runtimeConfigDirectory })
+      new TokenStore()
     mocks.selectRuntimeConfigForHandoff.mockImplementationOnce(async (id, generation) => {
       const selection = await nativeAppService!.selectRuntimeConfigForHandoff(id, generation)
       await nativeAppService!.googleLogin('synthetic-google')
@@ -579,7 +614,7 @@ describe('Desktop environment handoff', () => {
     await act(async () => confirmation)
 
     finishLogin({
-      token: 'synthetic-session-during-refresh',
+      token: testSessionTokenWithExpiry(),
       me: {
         id: 'refresh-race-user',
         email: 'refresh-race@example.test',
@@ -1456,7 +1491,7 @@ describe('Desktop environment handoff', () => {
     }
     app.authClient = {
       googleLogin: vi.fn().mockResolvedValue({
-        token: 'synthetic-session-user-a',
+        token: testSessionTokenWithExpiry(),
         me: {
           id: 'user-a',
           email: 'user-a@example.test',

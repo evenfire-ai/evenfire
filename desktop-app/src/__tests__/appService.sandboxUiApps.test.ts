@@ -27,6 +27,7 @@ vi.mock('electron', () => ({
   },
   safeStorage: {
     isEncryptionAvailable: vi.fn(() => false),
+    getSelectedStorageBackend: () => 'gnome_libsecret',
     encryptString: vi.fn(),
     decryptString: vi.fn(),
   },
@@ -50,7 +51,7 @@ vi.mock('../sandboxUiSessionRefresh.js', () => ({
 
 vi.mock('../config.js', () => ({
   getActiveRuntimeConfigOptionId: () => null,
-  getActiveEnvKey: () => 'test-env',
+  getActiveEnvKey: () => 'test_env-000000000000',
   config: {
     rpcProxyBaseUrl: 'http://proxy',
     externalRestApiBaseUrl: 'http://rest',
@@ -92,14 +93,6 @@ vi.mock('../authClient.js', () => ({
   AuthClient: class {
     health = vi.fn().mockResolvedValue({ status: 'ok' })
     getMe = vi.fn()
-  },
-}))
-
-vi.mock('../tokenStore.js', () => ({
-  TokenStore: class {
-    getSessionToken = vi.fn().mockResolvedValue(null)
-    setSessionToken = vi.fn()
-    clearSessionToken = vi.fn()
   },
 }))
 

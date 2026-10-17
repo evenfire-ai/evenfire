@@ -15,12 +15,22 @@ import {
   requireChatStore,
   unbindChatStore,
 } from '../chatStoreBinding.js'
+import { TokenStore } from '../tokenStore.js'
 import type { ChatMessage } from '../types.js'
 
 let base: string
+const storageFixture = vi.hoisted(() => ({
+  directory: `${process.cwd()}/.uninitialized-chat-fixture`,
+}))
+
+vi.mock('electron', () => ({
+  app: { getPath: () => storageFixture.directory, isReady: () => true },
+  safeStorage: { isEncryptionAvailable: () => false },
+}))
 
 beforeEach(async () => {
   base = await fs.mkdtemp(path.join(os.tmpdir(), 'chat-store-team-hop-'))
+  storageFixture.directory = base
   __setChatStoreBaseDirForTests(base)
 })
 
@@ -42,7 +52,10 @@ const member = (teamId: string) => ({
 
 /** An AppService signed in on team-a whose auth client answers team switches. */
 function signedInService(getMeAnswers: string[]): AppService {
-  const service = new AppService() as unknown as Record<string, unknown>
+  const service = new AppService({ getUserDataDirectory: () => base }) as unknown as Record<
+    string,
+    unknown
+  >
   service.sessionToken = 'team-a-token'
   service.me = member('team-a')
   const getMe = vi.fn()
@@ -54,7 +67,7 @@ function signedInService(getMeAnswers: string[]): AppService {
       team: { id: teamId, name: teamId, role: 'member' },
     })),
   }
-  service.tokenStore = { setSessionToken: vi.fn() }
+  service.tokenStore = new TokenStore({ isolatedUserDataPath: base })
   return service as unknown as AppService
 }
 
@@ -209,10 +222,16 @@ describe('chat store scope across a transient team hop', () => {
 
         // Liveness witness: the rebind ran and failed, and it was reported.
         expect(rebindAttempts).toEqual(['user-1'])
-        expect(errorLog).toHaveBeenCalledWith(
-          expect.stringContaining('Failed to rebind the chat store'),
-          expect.objectContaining({ message: 'rebind exploded' })
+        const logged = errorLog.mock.calls.map(([record]) => JSON.parse(String(record)))
+        expect(logged).toContainEqual(
+          expect.objectContaining({
+            level: 'error',
+            service: 'desktop-app',
+            message: expect.stringContaining('Failed to rebind the chat store'),
+            err: { name: 'Error' },
+          })
         )
+        expect(JSON.stringify(logged)).not.toContain('rebind exploded')
       } finally {
         errorLog.mockRestore()
       }

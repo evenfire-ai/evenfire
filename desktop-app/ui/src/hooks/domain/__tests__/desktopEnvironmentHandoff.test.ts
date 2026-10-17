@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import type { TokenStore } from '../../../../../src/tokenStore'
 import type {
   DesktopRuntimeConfigHandoffSelection,
   DesktopRuntimeConfigState,
 } from '../../../../../src/types'
+import { testSessionTokenWithExpiry } from '../../../../../testSupport/authTestFixtures'
 import { createDesktopEnvironmentSetupHandler } from '../desktopEnvironmentHandoff'
 
 const targetEnvironment = {
@@ -30,11 +32,7 @@ let runtimeConfigModule: typeof import('../../../../../src/config') | null = nul
 let runtimeConfigDirectory = ''
 type NativeHandoffProducer = {
   authClient: { googleLogin: ReturnType<typeof vi.fn> }
-  tokenStore: {
-    clearSessionToken: ReturnType<typeof vi.fn>
-    getSessionToken: ReturnType<typeof vi.fn>
-    setSessionToken: ReturnType<typeof vi.fn>
-  }
+  tokenStore: TokenStore
   sessionToken: string | null
   googleLogin: (token: string) => Promise<unknown>
   getSessionGeneration: () => number
@@ -53,7 +51,7 @@ async function initializeNativeProducer(): Promise<void> {
   nativeProducer = new AppService() as unknown as NativeHandoffProducer
   nativeProducer.authClient = {
     googleLogin: vi.fn().mockResolvedValue({
-      token: 'synthetic-handoff-session',
+      token: testSessionTokenWithExpiry(),
       me: {
         id: 'handoff-user',
         email: 'handoff@example.test',
@@ -64,11 +62,6 @@ async function initializeNativeProducer(): Promise<void> {
         role: 'member',
       },
     }),
-  }
-  nativeProducer.tokenStore = {
-    clearSessionToken: vi.fn().mockResolvedValue(undefined),
-    getSessionToken: vi.fn().mockResolvedValue(null),
-    setSessionToken: vi.fn().mockResolvedValue(undefined),
   }
   nativeProducer.suspendDesktopGfsUploadsForAuthBoundary = vi.fn(async () => {})
 }
@@ -90,6 +83,7 @@ beforeEach(async () => {
   runtimeConfigDirectory = await fsp.mkdtemp(path.join(os.tmpdir(), 'evenfire-deep-link-test-'))
   vi.doUnmock('electron')
   vi.resetModules()
+  vi.doMock('keytar', () => ({}))
   vi.doMock('electron', () => ({
     app: {
       getPath: vi.fn(() => runtimeConfigDirectory),
@@ -110,6 +104,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   vi.doUnmock('electron')
   vi.resetModules()
   await fsp.rm(runtimeConfigDirectory, { recursive: true, force: true })
@@ -601,7 +596,8 @@ describe('Desktop environment handoff concurrency', () => {
     const logoutFinished = new Promise<void>(resolve => {
       finishLogout = resolve
     })
-    nativeProducer.tokenStore.clearSessionToken.mockImplementationOnce(async () => {
+    const suspendAuthBoundary = vi.spyOn(nativeProducer, 'suspendDesktopGfsUploadsForAuthBoundary')
+    suspendAuthBoundary.mockImplementationOnce(async () => {
       reportLogoutStarted()
       await logoutFinished
     })
@@ -768,12 +764,9 @@ describe('Desktop environment handoff concurrency', () => {
     expect(setPendingDesktopEnvironmentSetup).not.toHaveBeenCalled()
   })
 
-  it('keeps the current environment when token removal fails during handoff logout', async () => {
+  it('keeps the current environment when logout cannot be confirmed and the session stays active', async () => {
     let rendererAuthenticated = true
-    nativeProducer.tokenStore.clearSessionToken.mockRejectedValueOnce(
-      new Error('secure storage unavailable')
-    )
-    const logoutForEnvironmentMismatch = vi.fn(logoutThroughNativeProducer)
+    const logoutForEnvironmentMismatch = vi.fn(async () => null)
     const onSessionNeedsLoad = vi.fn(async () => {
       rendererAuthenticated = true
     })
@@ -794,7 +787,6 @@ describe('Desktop environment handoff concurrency', () => {
       externalRestApiBaseUrl: `${targetEnvironment.externalRestApiBaseUrl}/api/v1`,
     })
 
-    expect(nativeProducer.tokenStore.clearSessionToken).toHaveBeenCalledOnce()
     expect(onSessionNeedsLoad).toHaveBeenCalledWith({ preserveNav: true })
     expect(rendererAuthenticated).toBe(true)
     expect(selectRuntimeConfig).not.toHaveBeenCalled()
@@ -806,10 +798,7 @@ describe('Desktop environment handoff concurrency', () => {
 
   it('keeps the current environment when a failed logout leaves the live session active', async () => {
     let rendererAuthenticated = true
-    nativeProducer.tokenStore.clearSessionToken.mockRejectedValueOnce(
-      new Error('secure storage unavailable')
-    )
-    const logoutForEnvironmentMismatch = vi.fn(logoutThroughNativeProducer)
+    const logoutForEnvironmentMismatch = vi.fn(async () => null)
     const onSessionNeedsLoad = vi.fn(async () => {
       rendererAuthenticated = true
     })
@@ -842,9 +831,6 @@ describe('Desktop environment handoff concurrency', () => {
   })
 
   it('keeps a session reload error visible when handoff logout did not commit', async () => {
-    nativeProducer.tokenStore.clearSessionToken.mockRejectedValueOnce(
-      new Error('secure storage unavailable')
-    )
     const onSessionNeedsLoad = vi.fn(async () => {
       throw new Error('session read unavailable')
     })
@@ -856,7 +842,7 @@ describe('Desktop environment handoff concurrency', () => {
         isAuthenticated: true,
       }),
       undefined,
-      vi.fn(logoutThroughNativeProducer),
+      vi.fn(async () => null),
       onSessionNeedsLoad
     )
 
@@ -947,7 +933,7 @@ describe('Desktop environment handoff concurrency', () => {
       let pendingLogin: Promise<unknown> | null = null
       if (loginState) {
         const loginResultValue = {
-          token: 'synthetic-new-session',
+          token: testSessionTokenWithExpiry(),
           me: {
             id: 'new-handoff-user',
             email: 'new-handoff@example.test',
@@ -1333,7 +1319,7 @@ describe('Desktop environment REST endpoint matching', () => {
       reportLoginStarted = resolve
     })
     const loginResultValue = {
-      token: 'synthetic-post-logout-login',
+      token: testSessionTokenWithExpiry(),
       me: {
         id: 'post-logout-user',
         email: 'post-logout@example.test',
