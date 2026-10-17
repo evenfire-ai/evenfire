@@ -6,12 +6,12 @@ import { E2E_TEST_EMAIL } from '../../../tests/e2e/testUser'
 const configuredAllowedContexts = process.env.E2E_ALLOWED_CONTEXTS?.split(',')
   .map(context => context.trim())
   .filter(Boolean)
-const ALLOWED_CONTEXTS = new Set(
+export const ALLOWED_CONTEXTS: ReadonlySet<string> = new Set(
   configuredAllowedContexts?.length ? configuredAllowedContexts : ['clerum-test']
 )
 const PROD_CONTEXT = process.env.E2E_PROD_CONTEXT?.trim() || ''
 
-function isProductionContext(context: string): boolean {
+export function isProductionContext(context: string): boolean {
   return (
     (PROD_CONTEXT !== '' && context === PROD_CONTEXT) ||
     /(^|[-_])(prod|production)([-_]|$)/i.test(context)
@@ -27,12 +27,27 @@ function isBranchProfileContext(context: string): boolean {
   return /^clerum-.+-[0-9a-f]{7,8}$/.test(context)
 }
 
-function isLocalPortForwardContext(context: string): boolean {
+export function isLocalPortForwardContext(context: string): boolean {
   return (
     context === 'clerum-test' ||
     /^clerum-(codex|detached)-.+-[0-9a-f]{8}$/.test(context) ||
     isBranchProfileContext(context)
   )
+}
+
+/** Refuses production and any context that is neither a local port-forward profile nor allow-listed. */
+export function assertAllowedKubeContext(context: string, source: string): void {
+  if (isProductionContext(context)) {
+    throw new Error(
+      `[E2E-GUARD] Production context "${context}" is hard-blocked. E2E against prod is never allowed.`
+    )
+  }
+  if (!isLocalPortForwardContext(context) && !ALLOWED_CONTEXTS.has(context)) {
+    throw new Error(
+      `[E2E-GUARD] ${source}="${context}" is not in the allow-list. ` +
+        `Allowed: ${[...ALLOWED_CONTEXTS].join(', ')}.`
+    )
+  }
 }
 
 function parseBooleanEnv(value: string | undefined): boolean {
@@ -174,17 +189,7 @@ async function globalSetup(): Promise<void> {
     process.env.K8S_CONTEXT ||
     'clerum-test'
 
-  if (isProductionContext(expected)) {
-    throw new Error(
-      `[E2E-GUARD] Production context "${expected}" is hard-blocked. E2E against prod is never allowed.`
-    )
-  }
-  if (!isLocalPortForwardContext(expected) && !ALLOWED_CONTEXTS.has(expected)) {
-    throw new Error(
-      `[E2E-GUARD] E2E_K8S_CONTEXT="${expected}" is not in the allow-list. ` +
-        `Allowed: ${[...ALLOWED_CONTEXTS].join(', ')}.`
-    )
-  }
+  assertAllowedKubeContext(expected, 'E2E_K8S_CONTEXT')
 
   let current: string
   try {

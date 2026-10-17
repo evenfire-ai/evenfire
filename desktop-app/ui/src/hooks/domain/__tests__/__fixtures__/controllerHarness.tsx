@@ -39,6 +39,8 @@ export interface RenderControllerResult {
 export interface RenderControllerOptions {
   /** Observe committed controller state before its passive effects synchronize refs. */
   onLayoutCommit?: (controller: ReturnType<typeof useAgentChatController>) => void
+  /** Called with the controller's return value on every render, for frame-level assertions. */
+  onRender?: (controller: ReturnType<typeof useAgentChatController>) => void
 }
 
 /**
@@ -108,6 +110,7 @@ export function renderController(
         hostAuthorityRevision: hostAuthority.revision,
         ...p,
       } as ControllerParams)
+      options.onRender?.(controller)
       useLayoutEffect(() => {
         options.onLayoutCommit?.(controller)
       }, [
