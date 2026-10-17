@@ -10,7 +10,7 @@ import type {
 } from '../../../src/types'
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '../constants/navigation'
 import { pickLatestAgent } from '../lib/agents'
-import { toPrettyJson } from '../lib/format'
+import { httpErrorStatus, toPrettyJson } from '../lib/format'
 import {
   type HostAuthorityHoldKind,
   type HostAuthorityStore,
@@ -338,6 +338,10 @@ export function useAppController() {
     (agentRef: string) => hostAuthority.isBlocked(agentRef),
     [hostAuthority]
   )
+  const heldAgentRefs = useMemo(
+    () => agentsData.agentNames.filter(agentRef => hostAuthority.isBlocked(agentRef)),
+    [agentsData.agentNames, hostAuthority, hostAuthorityRevision]
+  )
   const getHostAuthorityEpoch = useCallback(
     (agentRef: string) => hostAuthority.getEpoch(agentRef),
     [hostAuthority]
@@ -354,10 +358,26 @@ export function useAppController() {
       invalidateSessionCatalog(agentRef)
       if (!hostAuthority.hold(agentRef, kind)) return
       setHostAuthorityRevision(revision => revision + 1)
-      if (selectedAgentRef.current === agentRef) nav.setSelectedAgent(null)
+      if (selectedAgentRef.current === agentRef) {
+        nav.setSelectedAgent(null)
+        const name = agentDisplayName(agentRef)
+        pushToast(
+          kind === 'revoked'
+            ? `Access to ${name} was revoked.`
+            : `Could not verify access to ${name}. Use Retry in Latest sessions.`,
+          'error'
+        )
+      }
       void agentsData.refresh()
     },
-    [agentsData.refresh, hostAuthority, invalidateSessionCatalog, nav.setSelectedAgent]
+    [
+      agentDisplayName,
+      agentsData.refresh,
+      hostAuthority,
+      invalidateSessionCatalog,
+      nav.setSelectedAgent,
+      pushToast,
+    ]
   )
   const onHostAccessRevoked = useCallback(
     (agentRef: string) => blockHostAccess(agentRef, 'revoked'),
@@ -374,15 +394,25 @@ export function useAppController() {
       const scope = authorityScopeRef.current
       try {
         await window.clerum.rpc.listSessions(agentRef, undefined, { agent: agentRef, limit: 1 })
-      } catch {
+      } catch (error) {
+        console.warn('[host-authority] access verification failed', {
+          agentRef,
+          status: httpErrorStatus(error) ?? null,
+        })
+        if (authorityScopeRef.current === scope) {
+          pushToast(`Could not verify access to ${agentDisplayName(agentRef)}.`, 'error')
+        }
         return false
       }
       if (authorityScopeRef.current !== scope || !hostAuthority.release(agentRef, heldAtEpoch))
         return false
+      // #1130: a catalog request made while the Host was held must not be
+      // shared with a reader that starts after the release.
+      invalidateSessionCatalog(agentRef)
       setHostAuthorityRevision(revision => revision + 1)
       return true
     },
-    [hostAuthority]
+    [agentDisplayName, hostAuthority, invalidateSessionCatalog, pushToast]
   )
   const chat = useAgentChatController({
     selectedAgent: nav.selectedAgent,
@@ -1079,6 +1109,11 @@ export function useAppController() {
             },
           })
           .catch(() => undefined)
+        // On the Chat nav click this runs in the same batch as
+        // `nav.handleNavSelect`'s `setSelectedAgent(null)`, so no commit shows
+        // an empty selection. For the other fast-path callers the agent is
+        // already selected and this is a no-op.
+        nav.setSelectedAgent(agentName)
         nav.setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
         // Activate the chat tab (dedupes/focuses by chatId). We are already on
         // the chat route, so `navItem` stays `chat` — same-commit derivation, no
@@ -1187,7 +1222,10 @@ export function useAppController() {
           })
           return
         }
-        const latestAgent = pickLatestAgent(agentsData.agentNames, activity.agentLastActiveByAgent)
+        const latestAgent = pickLatestAgent(
+          agentsData.agentNames.filter(agentRef => !isHostAccessBlocked(agentRef)),
+          activity.agentLastActiveByAgent
+        )
         if (latestAgent) {
           handleSelectChatAgent(latestAgent, { selectLatest: false })
         }
@@ -1197,6 +1235,7 @@ export function useAppController() {
       activity.agentLastActiveByAgent,
       agentsData.agentNames,
       handleSelectChatAgent,
+      isHostAccessBlocked,
       nav.handleNavSelect,
     ]
   )
@@ -1539,6 +1578,9 @@ export function useAppController() {
     navItem: nav.navItem,
     selectedAgent: nav.selectedAgent,
     isHostAccessBlocked,
+    heldAgentRefs,
+    focusedChatAgentRef:
+      nav.activeTab?.kind === 'chat' ? (nav.activeTab.chat?.agentRef ?? null) : null,
     hostAuthorityRevision,
     selectedAgentRoute: nav.selectedAgentRoute,
     setSelectedAgent: nav.setSelectedAgent,

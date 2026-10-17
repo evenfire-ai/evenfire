@@ -452,12 +452,21 @@ export function useChatListController({
     () => {}
   )
 
+  // Remote rows of the previous scope must not be carried into the first
+  // publication of the next one, where a Host can have the same name.
+  const hideAllRemoteRows = useCallback(() => {
+    setLatestChatSessions(previous =>
+      previous.some(row => row.remote) ? previous.filter(row => !row.remote) : previous
+    )
+  }, [])
+
   useEffect(() => {
     requestGenerationRef.current += 1
     authorityScopeGenerationRef.current += 1
     deletedChatIdsByAgentRef.current.clear()
     catalogOfflineByAgentRef.current.clear()
     catalogOfflineToastShownRef.current = false
+    hideAllRemoteRows()
     // A toast queued for this scope must never flush into the next scope or
     // after unmount: the cleanup runs on both.
     return () => {
@@ -467,7 +476,7 @@ export function useChatListController({
       }
       catalogOfflineToastQueuedRef.current = false
     }
-  }, [isAuthenticated, scopeKey])
+  }, [hideAllRemoteRows, isAuthenticated, scopeKey])
 
   // R1-H1 — the pending-rename queue is per-USER identity. mcp-host keys a chat
   // session by userId (`${userSub}:rpc:${agent}:${chatId}`) and filters by
@@ -558,6 +567,16 @@ export function useChatListController({
 
   const hideAgent = useCallback((agentRef: string) => {
     setLatestChatSessions(previous => previous.filter(chat => chat.agentRef !== agentRef))
+  }, [])
+
+  // An uncertain hold keeps the Host's local rows but drops its remote ones, so
+  // no stale remote row of that Host can be carried into the next publication.
+  const hideRemoteRowsOf = useCallback((agentRef: string) => {
+    setLatestChatSessions(previous =>
+      previous.some(row => row.remote && row.agentRef === agentRef)
+        ? previous.filter(row => !(row.remote && row.agentRef === agentRef))
+        : previous
+    )
   }, [])
 
   const removeLatestChatSession = useCallback((agentRef: string, chatId: string) => {
@@ -1613,9 +1632,11 @@ export function useChatListController({
 
   // A hold is enforced synchronously (the published list below filters held
   // Hosts, and every in-flight read compares its Host's epoch), so holding a
-  // Host needs no reload. The stored list may still hold that Host's rows, but
-  // its reads were discarded while it was held and those rows can be stale, so
-  // the cross-agent list reloads when a held Host comes back.
+  // Host needs no reload. A revocation dropped every row of that Host
+  // (`hideAgent`); an uncertain hold dropped only its remote rows
+  // (`hideRemoteRowsOf`). Its reads were discarded while it was held, so the
+  // cross-agent list reloads when a held Host comes back and its remote rows
+  // return with its next catalog.
   const [latestReloadRevision, setLatestReloadRevision] = useState(0)
   const heldAgentsRef = useRef(new Set<string>())
   useEffect(() => {
@@ -1642,6 +1663,9 @@ export function useChatListController({
     const authorityScopeAtRequest = currentAuthorityScopeRef.current
     const hostAuthorityEpochByAgent = new Map(
       requestedAgentNames.map(agentRef => [agentRef, getHostAuthorityEpoch(agentRef)])
+    )
+    const carryableAgents = new Set(
+      requestedAgentNames.filter(agentRef => !isHostAccessBlocked(agentRef))
     )
     setLatestChatSessionsLoading(true)
     ;(async () => {
@@ -1691,16 +1715,27 @@ export function useChatListController({
           for (const chatId of group.deletedChatIds) deleted.add(chatId)
           deletedChatIdsByAgentRef.current.set(group.agentRef, deleted)
         }
-        setLatestChatSessions(
-          localGroups
-            .flatMap(group => group.entries)
-            .filter(
-              chat =>
-                !isHostAccessBlocked(chat.agentRef) &&
-                !deletedChatIdsByAgentRef.current.get(chat.agentRef)?.has(chat.id)
-            )
-            .sort(byUpdatedDesc)
-        )
+        const localRows = localGroups
+          .flatMap(group => group.entries)
+          .filter(
+            chat =>
+              !isHostAccessBlocked(chat.agentRef) &&
+              !deletedChatIdsByAgentRef.current.get(chat.agentRef)?.has(chat.id)
+          )
+          .sort(byUpdatedDesc)
+        // Remote rows already published stay until their Host's catalog below
+        // resolves them; every carried Host is in `requestedAgentNames`.
+        setLatestChatSessions(previous => {
+          const localKeys = new Set(localRows.map(row => `${row.agentRef}:${row.id}`))
+          const carried = previous.filter(
+            row =>
+              row.remote &&
+              carryableAgents.has(row.agentRef) &&
+              !deletedChatIdsByAgentRef.current.get(row.agentRef)?.has(row.id) &&
+              !localKeys.has(`${row.agentRef}:${row.id}`)
+          )
+          return carried.length ? [...localRows, ...carried].sort(byUpdatedDesc) : localRows
+        })
         setLatestChatSessionsLoading(false)
 
         await Promise.all(
@@ -1754,8 +1789,10 @@ export function useChatListController({
             setLatestChatSessions(previous => {
               if (!requestStillCurrent()) return previous
               const deleted = deletedChatIdsByAgentRef.current.get(agentRef)
+              // Remote rows are rebuilt from this page; carried rows missing
+              // from it are dropped.
               const cached = previous.filter(
-                item => item.agentRef === agentRef && !deleted?.has(item.id)
+                item => item.agentRef === agentRef && !deleted?.has(item.id) && !item.remote
               )
               // §2.2 precedence (cases A-F) lives in `mergeCatalogPage`; merge
               // only this Host's entries so another Host's arrival preserves them.
@@ -1850,6 +1887,8 @@ export function useChatListController({
     latestChatSessions: visibleLatestChatSessions,
     latestChatSessionsLoading,
     hideAgent,
+    hideRemoteRowsOf,
+    hideAllRemoteRows,
     // CRUD (public contract).
     handleCreateChat,
     handleRenameChat,

@@ -60,7 +60,11 @@ export function SidebarNav({
     handleRenameChatForAgent: onRenameChatForAgent,
     handleDeleteChatForAgent: onDeleteChatForAgent,
   } = useAgentChatActionsContext()
-  const { selectedAgent, handleSelectChatAgent: onSelectChatAgent } = useNavigationContext()
+  const {
+    selectedAgent,
+    heldAgentRefs,
+    handleSelectChatAgent: onSelectChatAgent,
+  } = useNavigationContext()
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [chatSessionsOpen, setChatSessionsOpen] = useState(true)
@@ -85,6 +89,9 @@ export function SidebarNav({
   const settingsTriggerRef = useRef<HTMLButtonElement | null>(null)
   const sessionsRef = useRef<HTMLDivElement | null>(null)
   const renameInputRef = useRef<HTMLInputElement | null>(null)
+  const logoTriggerRef = useRef<HTMLButtonElement | null>(null)
+  const chatNavItemRef = useRef<HTMLButtonElement | null>(null)
+  const retriedAgentRefRef = useRef<string | null>(null)
   const updateSettingsMenuOpen = React.useCallback(
     (open: boolean) => {
       setSettingsMenuOpen(open)
@@ -214,12 +221,29 @@ export function SidebarNav({
   )
   const latestSessionsToggleVisible = latestChatSessions.length > SIDEBAR_SESSION_PREVIEW_LIMIT
 
-  const handleSelect = (item: NavItem) => {
-    onSelect(item)
+  // Every navigation from the sidebar, and the mobile backdrop, closes its
+  // menus. Closing the mobile menu hides the surface that holds the focused
+  // control, so focus moves to the logo button that reopens it.
+  const closeSidebarMenus = () => {
+    if (mobileMenuOpen) logoTriggerRef.current?.focus()
     setMobileMenuOpen(false)
     updateSettingsMenuOpen(false)
     setSessionMenuId(null)
   }
+
+  const handleSelect = (item: NavItem) => {
+    onSelect(item)
+    closeSidebarMenus()
+  }
+
+  // A successful Retry unmounts its row together with the focused button.
+  // Keep keyboard focus in the sidebar instead of letting it fall to the body.
+  useEffect(() => {
+    const agentRef = retriedAgentRefRef.current
+    if (!agentRef || heldAgentRefs.includes(agentRef)) return
+    retriedAgentRefRef.current = null
+    if (document.activeElement === document.body) chatNavItemRef.current?.focus()
+  }, [heldAgentRefs])
 
   const handleFilesNavSelect = () => {
     handleSelect(DESKTOP_ROUTES.files)
@@ -294,13 +318,11 @@ export function SidebarNav({
           type="button"
           className="sidebar-mobile-backdrop"
           aria-label="Close navigation menu"
-          onClick={() => {
-            setMobileMenuOpen(false)
-            updateSettingsMenuOpen(false)
-          }}
+          onClick={closeSidebarMenus}
         />
         <div className="sidebar-logo">
           <button
+            ref={logoTriggerRef}
             type="button"
             className="sidebar-logo-link"
             onClick={handleLogoClick}
@@ -356,6 +378,7 @@ export function SidebarNav({
                   data-tooltip={item.label}
                 >
                   <NavItemControl
+                    ref={item.id === DESKTOP_ROUTES.chat ? chatNavItemRef : undefined}
                     data-testid={item.testId}
                     className="nav-link-main"
                     onClick={() => handleSelect(item.id)}
@@ -419,6 +442,24 @@ export function SidebarNav({
 
                 {item.id === DESKTOP_ROUTES.chat && chatSessionsOpen && (
                   <div className="nav-latest-sessions" ref={sessionsRef}>
+                    {heldAgentRefs.map(agentRef => (
+                      <div key={agentRef} className="nav-latest-session nav-latest-session--held">
+                        <span>Couldn't verify access to {agentRef}</span>
+                        <Button
+                          aria-label={`Retry access to ${agentRef}`}
+                          onClick={() => {
+                            retriedAgentRefRef.current = agentRef
+                            onSelectChatAgent(agentRef, { selectLatest: false })
+                            closeSidebarMenus()
+                          }}
+                          color="neutral"
+                          size="xs"
+                          variant="text"
+                        >
+                          Retry
+                        </Button>
+                      </div>
+                    ))}
                     {latestChatSessionsLoading && !latestChatSessions.length ? (
                       <span className="nav-latest-sessions__empty">Loading sessions...</span>
                     ) : latestChatSessions.length ? (
@@ -478,8 +519,7 @@ export function SidebarNav({
                                         isRemote: session.remote === true,
                                         title: session.title,
                                       })
-                                      setMobileMenuOpen(false)
-                                      setSessionMenuId(null)
+                                      closeSidebarMenus()
                                     }}
                                   >
                                     <span className="nav-latest-session__copy">
@@ -571,7 +611,7 @@ export function SidebarNav({
                             aria-label={`Open ${app.label}`}
                             onClick={() => {
                               onOpenSandboxUiApp(app)
-                              setMobileMenuOpen(false)
+                              closeSidebarMenus()
                             }}
                           >
                             <span className="nav-available-app__label">{app.label}</span>
@@ -709,8 +749,7 @@ export function SidebarNav({
                     className="sidebar-settings-menu-item sidebar-settings-route logout-link"
                     color="danger"
                     onClick={() => {
-                      updateSettingsMenuOpen(false)
-                      setMobileMenuOpen(false)
+                      closeSidebarMenus()
                       onLogout()
                     }}
                     disabled={busy}

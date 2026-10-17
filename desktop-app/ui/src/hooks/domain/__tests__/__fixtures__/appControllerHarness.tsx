@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { type ReactNode, useLayoutEffect } from 'react'
 import { vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -60,7 +60,7 @@ function createSessionState(authenticated: boolean, me = HARNESS_ME) {
   return authenticated ? { authenticated: true, me } : { authenticated: false, me: null }
 }
 
-function createCatalog(agentNames: string[]) {
+function createCatalog(agentNames: string[], agentDisplayByName?: Record<string, string>) {
   return {
     userId: HARNESS_ME.id,
     teamId: HARNESS_ME.teamId,
@@ -70,6 +70,7 @@ function createCatalog(agentNames: string[]) {
     mcpServersByAgent: {},
     agentContextByName: {},
     agentProviderByName: {},
+    ...(agentDisplayByName ? { agentDisplayByName } : {}),
     contextIds: [],
     userContextIds: [],
     teamContextIds: [],
@@ -95,6 +96,8 @@ const DEFAULT_DESKTOP_RELEASE_STATUS = {
 export interface AppControllerClerumOptions {
   /** Access-catalog agents. Empty means "authenticated user with no agents". */
   agentNames?: string[]
+  /** Catalog `agentDisplayByName` (agent ref → visible name). Omitted by default. */
+  agentDisplayByName?: Record<string, string>
   /** Boot already signed in (default). `false` boots at the login screen. */
   startAuthenticated?: boolean
   /**
@@ -273,7 +276,7 @@ export function extendMockClerumForAppController(
     return createSessionState(true, sessionMe)
   })
   const refreshCatalog = vi.fn(async () =>
-    held() ? catalogDeferred.promise : createCatalog(agentNames)
+    held() ? catalogDeferred.promise : createCatalog(agentNames, options.agentDisplayByName)
   )
   const listPending = vi.fn(async () => (held() ? approvalsDeferred.promise : []))
 
@@ -424,7 +427,7 @@ export function extendMockClerumForAppController(
     },
     resolveAuthenticatedLoad() {
       teamDirectoryDeferred.resolve(teamDirectoryPayload)
-      catalogDeferred.resolve(createCatalog(agentNames))
+      catalogDeferred.resolve(createCatalog(agentNames, options.agentDisplayByName))
       approvalsDeferred.resolve([])
     },
     setSessionStateError(error) {
@@ -448,14 +451,33 @@ export interface RenderAppControllerResult {
   queryClient: QueryClient
 }
 
-export function renderAppController(): RenderAppControllerResult {
+export interface RenderAppControllerOptions {
+  /**
+   * Called in a layout effect after every commit with the committed view model.
+   * Unlike a render callback it never sees a render attempt React discarded.
+   */
+  onCommit?: (vm: ReturnType<typeof useAppController>) => void
+}
+
+export function renderAppController(
+  options: RenderAppControllerOptions = {}
+): RenderAppControllerResult {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  const utils = renderHook(() => useAppController(), {
-    wrapper: ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={queryClient}>
-        <AgentTaskTrackerProvider>{children}</AgentTaskTrackerProvider>
-      </QueryClientProvider>
-    ),
-  })
+  const utils = renderHook(
+    () => {
+      const vm = useAppController()
+      useLayoutEffect(() => {
+        options.onCommit?.(vm)
+      })
+      return vm
+    },
+    {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={queryClient}>
+          <AgentTaskTrackerProvider>{children}</AgentTaskTrackerProvider>
+        </QueryClientProvider>
+      ),
+    }
+  )
   return { result: utils.result, unmount: utils.unmount, queryClient }
 }

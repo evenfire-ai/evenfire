@@ -105,6 +105,53 @@ describe('useAppController — universal tab store ports', () => {
     expect(chatTabsAfter).toBe(chatTabsBefore)
   })
 
+  // T-H16-1: on the chat route, clicking "chats" again takes the fast path. It
+  // must re-select the focused chat's agent in the same batch as the nav's own
+  // `setSelectedAgent(null)`; one committed frame with no selection is enough
+  // for ChatPage's auto-select to open a New chat of the most recent agent.
+  it('T-H16-1: clicking chats on the chat route keeps the focused agent selected in every commit', async () => {
+    const { clerum } = installAppControllerClerum({ agentNames: ['agent-a', 'agent-b'] })
+    const commits: Array<ReturnType<typeof renderAppController>['result']['current']> = []
+    const app = renderAppController({ onCommit: vm => commits.push(vm) })
+    unmount = app.unmount
+
+    await waitFor(() => expect(app.result.current.isAuthenticated).toBe(true))
+    await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
+    act(() => {
+      app.result.current.handleSelectChatAgent('agent-a', { chatId: 'chat-1', selectLatest: false })
+    })
+    await waitFor(() => expect(app.result.current.activeChatId).toBe('chat-1'))
+    await waitFor(() => expect(app.result.current.chatMessagesLoading).toBe(false))
+    expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.chat)
+    const lastActiveWrites = () =>
+      clerum.chat.setLastActive.mock.calls.filter(
+        ([agentRef, chatId]) => agentRef === 'agent-a' && chatId === 'chat-1'
+      ).length
+    const lastActiveBaseline = lastActiveWrites()
+    const chatTabsBefore = app.result.current.workspaceTabs.tabs.filter(
+      tab => tab.kind === 'chat'
+    ).length
+    expect(chatTabsBefore).toBeGreaterThan(0)
+    const firstCommitAfterClick = commits.length
+
+    act(() => {
+      app.result.current.handleNavSelect(DESKTOP_ROUTES.chat)
+    })
+    // Liveness witness: the fast path ran and reopened chat-1.
+    await waitFor(() => expect(lastActiveWrites()).toBe(lastActiveBaseline + 1))
+    await waitFor(() => expect(app.result.current.chatMessagesLoading).toBe(false))
+
+    const commitsAfterClick = commits.slice(firstCommitAfterClick)
+    expect(commitsAfterClick.length).toBeGreaterThan(0)
+    expect(commitsAfterClick.map(vm => vm.selectedAgent)).toEqual(
+      commitsAfterClick.map(() => 'agent-a')
+    )
+    expect(app.result.current.activeChatId).toBe('chat-1')
+    expect(app.result.current.workspaceTabs.tabs.filter(tab => tab.kind === 'chat').length).toBe(
+      chatTabsBefore
+    )
+  })
+
   // (b) A pending chat selection survives a tab/route change: selecting a chat
   // with keepNavItem while on the apps route records the pending selection, and
   // the agent-selection effect replays it (the chat actually loads) without

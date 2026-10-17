@@ -13,7 +13,12 @@ type ChatPageProps = {
 
 export function ChatPage({ scrollContainerRef }: ChatPageProps) {
   const { agentNames, loading, error } = useAgentsDataController()
-  const { selectedAgent, handleSelectChatAgent: onSelectAgent } = useNavigationContext()
+  const {
+    selectedAgent,
+    heldAgentRefs,
+    focusedChatAgentRef,
+    handleSelectChatAgent: onSelectAgent,
+  } = useNavigationContext()
   const { agentLastActiveByAgent } = useAgentActivityContext()
   const didAutoSelect = useRef(false)
 
@@ -22,10 +27,24 @@ export function ChatPage({ scrollContainerRef }: ChatPageProps) {
       didAutoSelect.current = false
     }
     if (didAutoSelect.current || selectedAgent || !agentNames.length) return
+    // The chat on screen belongs to a held Host: stay on it. Its Retry row, or
+    // the verification a Chat click started, selects it again; picking another
+    // Host would send the user's next message to that Host instead.
+    if (focusedChatAgentRef && heldAgentRefs.includes(focusedChatAgentRef)) return
     didAutoSelect.current = true
-    const best = pickLatestAgent(agentNames, agentLastActiveByAgent)
+    const best = pickLatestAgent(
+      agentNames.filter(agentRef => !heldAgentRefs.includes(agentRef)),
+      agentLastActiveByAgent
+    )
     if (best) onSelectAgent(best, { selectLatest: false })
-  }, [agentNames, agentLastActiveByAgent, selectedAgent, onSelectAgent])
+  }, [
+    agentNames,
+    agentLastActiveByAgent,
+    selectedAgent,
+    onSelectAgent,
+    heldAgentRefs,
+    focusedChatAgentRef,
+  ])
 
   if (loading && !agentNames.length) {
     return <ChatPageSkeleton />

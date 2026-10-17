@@ -312,6 +312,15 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
 
   const [copiedMessageKey, setCopiedMessageKey] = useState<string | null>(null)
   const [showAllSessions, setShowAllSessions] = useState(false)
+  // The card stays expanded until another agent is selected. A held Host
+  // clears the selection to null, which is not a change of agent.
+  const [sessionsExpandedForAgent, setSessionsExpandedForAgent] = useState<string | null>(
+    selectedAgent
+  )
+  if (selectedAgent && sessionsExpandedForAgent !== selectedAgent) {
+    setSessionsExpandedForAgent(selectedAgent)
+    setShowAllSessions(false)
+  }
   const [sessionMenuChatId, setSessionMenuChatId] = useState<string | null>(null)
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null)
   const [sessionRenameValue, setSessionRenameValue] = useState('')
@@ -407,13 +416,6 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
   }, [])
 
   useEffect(() => {
-    if (
-      chatList.length <= SESSION_PREVIEW_LIMIT &&
-      !chatListHasMoreRemoteSessions &&
-      showAllSessions
-    ) {
-      setShowAllSessions(false)
-    }
     if (sessionMenuChatId && !chatList.some(chat => chat.id === sessionMenuChatId)) {
       setSessionMenuChatId(null)
     }
@@ -421,13 +423,7 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
       setRenamingSessionId(null)
       setSessionRenameValue('')
     }
-  }, [
-    chatList,
-    chatListHasMoreRemoteSessions,
-    renamingSessionId,
-    sessionMenuChatId,
-    showAllSessions,
-  ])
+  }, [chatList, renamingSessionId, sessionMenuChatId])
 
   useEffect(() => {
     if (!sessionMenuChatId) return

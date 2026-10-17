@@ -238,7 +238,15 @@ async function hasLocalMessagesBeyond(
   return chatStore
     .loadMessages(agentRef, chatId, 1, offset)
     .then(messages => messages.length > 0)
-    .catch(() => false)
+    .catch(error => {
+      console.warn('[chat-history] failed to probe older local messages', {
+        agentRef,
+        chatId,
+        offset,
+        error,
+      })
+      return true
+    })
 }
 
 function mergeUniqueMessages(
@@ -519,6 +527,8 @@ export function useAgentChatController({
     latestChatSessions,
     latestChatSessionsLoading,
     hideAgent,
+    hideRemoteRowsOf,
+    hideAllRemoteRows,
     loadChatList,
     loadMoreChatSessions,
     setChatListLoading,
@@ -1077,6 +1087,10 @@ export function useAgentChatController({
     autoSelectedChatIdRef.current = null
     setActiveChatId(null)
     clearList()
+    // A confirmed team switch changes the scope in this same batch. The chat
+    // list's scope effect also drops remote rows, but only after that commit,
+    // so it alone would leave the previous team's rows visible for one commit.
+    hideAllRemoteRows()
     // R-F13 renderer half (spec §4.5-3): tear down EVERY tracked task so a late
     // terminal (a stream that reconnects post-logout and 401s) can't run side
     // effects — append a message, push a toast — after the session is gone. The
@@ -1109,6 +1123,7 @@ export function useAgentChatController({
     resetComposerAttachments,
     beginSelectionIntent,
     clearList,
+    hideAllRemoteRows,
     tracker,
     fsm,
     resetReplyNotificationDedupe,
@@ -1513,14 +1528,12 @@ export function useAgentChatController({
     setOlderMessagesLoading(true)
     try {
       const visibleIds = new Set(chatMessages.map(message => message.id))
-      const localPage = (await chatStore
-        .loadMessages(
-          requestAgent,
-          requestChatId,
-          LOCAL_MESSAGE_PAGE_SIZE,
-          loadedLocalMessageCountRef.current
-        )
-        .catch(() => [])) as AgentChatMessage[]
+      const localPage = (await chatStore.loadMessages(
+        requestAgent,
+        requestChatId,
+        LOCAL_MESSAGE_PAGE_SIZE,
+        loadedLocalMessageCountRef.current
+      )) as AgentChatMessage[]
       if (!isStillRelevant()) return
       const unseenLocal = localPage.filter(message => !visibleIds.has(message.id))
       if (unseenLocal.length) {
@@ -1615,6 +1628,9 @@ export function useAgentChatController({
         chatId: requestChatId,
         error,
       })
+      if (isStillRelevant()) {
+        pushToast('Could not load older messages.', 'error')
+      }
     } finally {
       if (olderMessagesRequestRef.current === requestToken) {
         olderMessagesRequestRef.current = null
@@ -1632,6 +1648,7 @@ export function useAgentChatController({
     selectedAgent,
     isHostAccessBlocked,
     provisionalSelectionFor,
+    pushToast,
     tracker,
   ])
 
@@ -2354,6 +2371,8 @@ export function useAgentChatController({
       })
       if (kind === 'revoked') {
         hideAgent(agentRef)
+      } else {
+        hideRemoteRowsOf(agentRef)
       }
       const view = activeChatVisibilityRef.current
       if (view.selectedAgent === agentRef) {
@@ -2385,6 +2404,7 @@ export function useAgentChatController({
       fsm,
       transcriptMemo,
       hideAgent,
+      hideRemoteRowsOf,
       chatStore.clearCachedRemoteData,
       clearList,
       resetComposerAttachments,
