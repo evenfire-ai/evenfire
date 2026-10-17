@@ -152,7 +152,6 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
     | null
   >(null)
   const canIncludeDescendants = resource.kind === 'directory'
-  const resourceIsFile = resource.kind === 'file'
 
   const loadExistingAccess = useCallback(async () => {
     existingAccessController.current?.abort()
@@ -220,17 +219,18 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
     inheritedAccessController.current?.abort()
     const requestId = ++inheritedAccessRequest.current
     setInheritedAccessFailed(false)
-    if (!resourceIsFile || !resource.path) {
-      inheritedAccessController.current = null
-      setInheritedAccess([])
-      setInheritedAccessLoading(false)
-      return
-    }
+    // Inherited access is derived for FILES AND FOLDERS: a folder dialog must
+    // show the identities its ancestors grant, not an empty list. The walk
+    // resolves the canonical path itself when the target carries none.
     const controller = new AbortController()
     inheritedAccessController.current = controller
     setInheritedAccessLoading(true)
     try {
-      const items = await loadGfsInheritedAccess(resource.path, DRIVE, controller.signal)
+      const items = await loadGfsInheritedAccess(
+        { path: resource.path, gfsUri: resource.gfsUri },
+        DRIVE,
+        controller.signal
+      )
       if (requestId !== inheritedAccessRequest.current) return
       setInheritedAccess(items)
     } catch {
@@ -247,7 +247,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
         setInheritedAccessLoading(false)
       }
     }
-  }, [resource.path, resourceIsFile])
+  }, [resource.gfsUri, resource.path, resource.resourceId])
 
   useEffect(() => {
     void loadInheritedAccess()
@@ -443,15 +443,11 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
     [subjectLabel]
   )
 
-  const sortedExistingAccess = useMemo(
-    () => [...existingAccess].sort(bySubjectLabel),
-    [bySubjectLabel, existingAccess]
-  )
-
-  // File dialogs dedupe to exactly one row per member across direct grants
-  // and inherited ancestor grants; the effective role is the strongest.
-  const sortedFileAccessRows = useMemo<GfsFileAccessRow[]>(() => {
-    if (!resourceIsFile) return []
+  // Every dialog — file AND folder — dedupes to exactly one row per member
+  // across direct grants/shares and inherited ancestor rows; the effective
+  // role is the strongest. Folders previously rendered direct-only, which hid
+  // the identities their ancestors grant.
+  const sortedAccessRows = useMemo<GfsFileAccessRow[]>(() => {
     const bySubjectRow = new Map<string, GfsFileAccessRow>()
     for (const direct of existingAccess) {
       bySubjectRow.set(subjectKey(direct.subject), {
@@ -479,7 +475,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       }
     }
     return [...bySubjectRow.values()].sort(bySubjectLabel)
-  }, [bySubjectLabel, existingAccess, inheritedAccess, resourceIsFile])
+  }, [bySubjectLabel, existingAccess, inheritedAccess])
 
   async function revokeAccess(item: GfsExistingAccessItem) {
     const label = subjectLabel(item)
@@ -812,126 +808,72 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
             <p className="cu-gfs-existing-access__empty">No one has access yet.</p>
           ) : (
             <RecordList className="cu-gfs-existing-access__list" aria-label="Resource access">
-              {resourceIsFile
-                ? sortedFileAccessRows.map(row => {
-                    const label = subjectLabel(row)
-                    const kind = subjectKind(row)
-                    const inherited = row.inherited !== null
-                    return (
-                      <RecordListRow
-                        className="cu-gfs-existing-access__item"
-                        data-testid={`gfs-access-row-${subjectKey(row.subject)}`}
-                        data-access-id={row.direct?.grantId ?? row.direct?.shareIds[0]}
-                        data-inherited={inherited ? 'true' : undefined}
-                        key={`file:${subjectKey(row.subject)}`}
-                      >
-                        <span
-                          aria-hidden="true"
-                          className={`cu-gfs-existing-access__avatar cu-gfs-existing-access__avatar--${kind}`}
-                          data-subject-kind={kind}
-                        >
-                          <AccessSubjectIcon kind={kind} />
-                        </span>
-                        <span className="cu-gfs-existing-access__identity">
-                          <span className="cu-gfs-existing-access__subject">{label}</span>
-                        </span>
-                        <span className="cu-gfs-existing-access__meta">
-                          <SelectionDropdown
-                            ariaLabel={`Access role for ${label}`}
-                            className="cu-gfs-existing-access__role"
-                            disabled={actionPending}
-                            multiple={false}
-                            onChange={next => {
-                              if (!inherited) {
-                                void updateAccessRole(
-                                  row.direct as GfsExistingAccessItem,
-                                  (next[0] ?? 'read') as AccessRole
-                                )
-                                return
-                              }
-                              const nextRole = (next[0] ?? 'read') as AccessRole
-                              void prepareParentRoleChange(row, nextRole)
-                            }}
-                            menuClassName="cu-gfs-existing-access__role-menu"
-                            options={ROLE_OPTIONS}
-                            placeholder="Role"
-                            portal
-                            searchable={false}
-                            showSelectedChips={false}
-                            value={[roleForPermissions(row.permissions)]}
-                          />
-                        </span>
-                        <RowActionMenu
-                          actions={[
-                            {
-                              key: 'remove',
-                              label: 'Remove access',
-                              danger: true,
-                              disabled: actionPending,
-                              onSelect: () =>
-                                inherited
-                                  ? setParentUpdate({ row, mode: 'remove' })
-                                  : void revokeAccess(row.direct as GfsExistingAccessItem),
-                            },
-                          ]}
-                          ariaLabel={`Actions for ${label}`}
-                        />
-                      </RecordListRow>
-                    )
-                  })
-                : sortedExistingAccess.map(item => {
-                    const label = subjectLabel(item)
-                    const kind = subjectKind(item)
-                    return (
-                      <RecordListRow
-                        className="cu-gfs-existing-access__item"
-                        data-testid={`gfs-access-row-${subjectKey(item.subject)}`}
-                        data-access-id={item.grantId ?? item.shareIds[0]}
-                        key={`direct:${subjectKey(item.subject)}`}
-                      >
-                        <span
-                          aria-hidden="true"
-                          className={`cu-gfs-existing-access__avatar cu-gfs-existing-access__avatar--${kind}`}
-                          data-subject-kind={kind}
-                        >
-                          <AccessSubjectIcon kind={kind} />
-                        </span>
-                        <span className="cu-gfs-existing-access__identity">
-                          <span className="cu-gfs-existing-access__subject">{label}</span>
-                        </span>
-                        <span className="cu-gfs-existing-access__meta">
-                          <SelectionDropdown
-                            ariaLabel={`Access role for ${label}`}
-                            className="cu-gfs-existing-access__role"
-                            disabled={actionPending}
-                            multiple={false}
-                            onChange={next =>
-                              void updateAccessRole(item, (next[0] ?? 'read') as AccessRole)
-                            }
-                            menuClassName="cu-gfs-existing-access__role-menu"
-                            options={ROLE_OPTIONS}
-                            placeholder="Role"
-                            portal
-                            searchable={false}
-                            showSelectedChips={false}
-                            value={[roleForPermissions(item.permissions)]}
-                          />
-                        </span>
-                        <RowActionMenu
-                          actions={[
-                            {
-                              key: 'remove',
-                              label: 'Remove access',
-                              danger: true,
-                              disabled: actionPending,
-                              onSelect: () => void revokeAccess(item),
-                            },
-                          ]}
-                          ariaLabel={`Actions for ${label}`}
-                        />
-                      </RecordListRow>
-                    )
-                  })}
+              {sortedAccessRows.map(row => {
+                const label = subjectLabel(row)
+                const kind = subjectKind(row)
+                const inherited = row.inherited !== null
+                return (
+                  <RecordListRow
+                    className="cu-gfs-existing-access__item"
+                    data-testid={`gfs-access-row-${subjectKey(row.subject)}`}
+                    data-access-id={row.direct?.grantId ?? row.direct?.shareIds[0]}
+                    data-inherited={inherited ? 'true' : undefined}
+                    key={`access:${subjectKey(row.subject)}`}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={`cu-gfs-existing-access__avatar cu-gfs-existing-access__avatar--${kind}`}
+                      data-subject-kind={kind}
+                    >
+                      <AccessSubjectIcon kind={kind} />
+                    </span>
+                    <span className="cu-gfs-existing-access__identity">
+                      <span className="cu-gfs-existing-access__subject">{label}</span>
+                    </span>
+                    <span className="cu-gfs-existing-access__meta">
+                      <SelectionDropdown
+                        ariaLabel={`Access role for ${label}`}
+                        className="cu-gfs-existing-access__role"
+                        disabled={actionPending}
+                        multiple={false}
+                        onChange={next => {
+                          if (!inherited) {
+                            void updateAccessRole(
+                              row.direct as GfsExistingAccessItem,
+                              (next[0] ?? 'read') as AccessRole
+                            )
+                            return
+                          }
+                          const nextRole = (next[0] ?? 'read') as AccessRole
+                          void prepareParentRoleChange(row, nextRole)
+                        }}
+                        menuClassName="cu-gfs-existing-access__role-menu"
+                        options={ROLE_OPTIONS}
+                        placeholder="Role"
+                        portal
+                        searchable={false}
+                        showSelectedChips={false}
+                        value={[roleForPermissions(row.permissions)]}
+                      />
+                    </span>
+                    <RowActionMenu
+                      actions={[
+                        {
+                          key: 'remove',
+                          label: 'Remove access',
+                          danger: true,
+                          disabled: actionPending,
+                          onSelect: () =>
+                            inherited
+                              ? setParentUpdate({ row, mode: 'remove' })
+                              : void revokeAccess(row.direct as GfsExistingAccessItem),
+                        },
+                      ]}
+                      ariaLabel={`Actions for ${label}`}
+                    />
+                  </RecordListRow>
+                )
+              })}
             </RecordList>
           )}
         </section>

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import {
+  apiGet,
   deleteGfsGrant,
   deleteGfsShare,
   getAdminTeams,
@@ -17,6 +18,7 @@ import { ToastProvider } from '../Toast'
 import { gfsAncestorPaths } from '../gfsInheritedAccess'
 
 vi.mock('@lib/api', () => ({
+  apiGet: vi.fn(),
   getAdminTeams: vi.fn(),
   getAdminUsers: vi.fn(),
   getHosts: vi.fn(),
@@ -29,6 +31,7 @@ vi.mock('@lib/api', () => ({
   putGfsGrant: vi.fn(),
 }))
 
+const mockApiGet = vi.mocked(apiGet)
 const mockGetAdminUsers = vi.mocked(getAdminUsers)
 const mockGetAdminTeams = vi.mocked(getAdminTeams)
 const mockGetHosts = vi.mocked(getHosts)
@@ -450,7 +453,7 @@ describe('GfsGrantPanel inherited access', () => {
     )
   })
 
-  it('keeps folder dialogs unchanged: direct rows only, no derived ancestor rows', async () => {
+  it('derives inherited ancestor rows for FOLDER dialogs too', async () => {
     renderPanel(folderResource)
 
     const existing = await screen.findByRole('region', { name: 'People with access' })
@@ -464,17 +467,32 @@ describe('GfsGrantPanel inherited access', () => {
         .textContent
     ).toContain('Editor')
     expect(within(miguelRow as HTMLElement).queryByText(/Inherited from/)).toBeNull()
-    // Ancestor derivation never runs for folders.
-    await waitFor(() => expect(mockGetGfsResourceByPath).not.toHaveBeenCalled())
-    expect(within(existing).queryByText('Research')).toBeNull()
+    // The folder's only ancestor is the drive root; its descendant-covering
+    // share now shows as a normal inherited row — the reported folder bug.
+    const teamRow = await within(existing).findByTestId(researchTeamRowTestId)
+    expect(
+      within(teamRow).getByRole('button', { name: 'Access role for Research' }).textContent
+    ).toContain('Read')
+    expect(within(teamRow).queryByText(/Inherited from/)).toBeNull()
+    expect(mockGetGfsResourceByPath).toHaveBeenCalledWith('main', '/', expect.anything())
   })
 
-  it('skips derivation when the resource has no path and hides no direct rows', async () => {
+  it('resolves the target once when the dialog resource carries no path', async () => {
+    mockApiGet.mockResolvedValue({
+      resourceId: FILE_ID,
+      path: '/team-docs/report.md',
+      kind: 'file',
+    })
     renderPanel({ ...fileResource, path: null })
 
     const existing = await screen.findByRole('region', { name: 'People with access' })
-    await waitFor(() => expect(within(existing).getByText('No one has access yet.')).toBeTruthy())
-    expect(mockGetGfsResourceByPath).not.toHaveBeenCalled()
+    await within(existing).findByTestId(miguelRowTestId)
+    expect(mockApiGet).toHaveBeenCalledWith(
+      '/api/v1/gfs/resolve',
+      { uri: fileResource.gfsUri },
+      expect.anything()
+    )
+    expect(mockGetGfsResourceByPath).toHaveBeenCalledWith('main', '/team-docs', expect.anything())
   })
 
   // R1-M3 — a total derivation failure is a quiet inline notice, never a

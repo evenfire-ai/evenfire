@@ -1,6 +1,7 @@
 import { gfsAncestorPathsOf } from '@clerum/gfs-interaction-policy'
 import {
   type GfsResourceByPathView,
+  apiGet,
   getGfsGrants,
   getGfsResourceByPath,
   getGfsShares,
@@ -82,19 +83,47 @@ async function listInheritingRows(
 }
 
 /**
- * Derives inherited access only when every ancestor and ACL list is available.
- * Any incomplete walk throws `inherited_access_derivation_failed`, so the
- * caller can distinguish a read failure from a complete empty result. The
- * drive root carries an empty name, so its label falls back to the drive name,
- * matching the browser breadcrumb.
+ * Derives inherited access for FILES AND FOLDERS only when every ancestor and
+ * ACL list is available. Any incomplete walk throws
+ * `inherited_access_derivation_failed`, so the caller can distinguish a read
+ * failure from a complete empty result. The drive root carries an empty name,
+ * so its label falls back to the drive name, matching the browser breadcrumb.
+ *
+ * When the target's canonical path is unknown (for example a Share dialog
+ * opened on the breadcrumb's current folder, whose crumb carries no path),
+ * the target is resolved once through `/api/v1/gfs/resolve` to obtain it; a
+ * target with neither a path nor a resolvable gfs URI fails the derivation so
+ * the dialog never presents "no ancestors" as fact.
  */
 export async function loadGfsInheritedAccess(
-  path: string,
+  target: { path: string | null; gfsUri?: string | null },
   drive: string,
   signal?: AbortSignal
 ): Promise<GfsInheritedAccessItem[]> {
+  let canonicalPath = target.path
+  if (!canonicalPath) {
+    if (!target.gfsUri) throw new Error('inherited_access_derivation_failed')
+    try {
+      const resolved = (await apiGet(
+        '/api/v1/gfs/resolve',
+        { uri: target.gfsUri },
+        { signal }
+      )) as {
+        path?: string | null
+        kind?: string
+      }
+      if (resolved.kind && resolved.kind !== 'directory' && resolved.kind !== 'file') {
+        throw new Error('unexpected kind')
+      }
+      canonicalPath = resolved.path ?? null
+    } catch (error) {
+      if (signal?.aborted) throw error
+      throw new Error('inherited_access_derivation_failed')
+    }
+    if (!canonicalPath) throw new Error('inherited_access_derivation_failed')
+  }
   const bySubject = new Map<string, GfsInheritedAccessItem>()
-  const ancestorPaths = gfsAncestorPaths(path)
+  const ancestorPaths = gfsAncestorPaths(canonicalPath)
   for (const ancestorPath of ancestorPaths) {
     let folder: GfsResourceByPathView
     try {

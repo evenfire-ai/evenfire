@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import {
   type GfsMutationResponse,
   type GfsSubjectInput,
+  apiGet,
   deleteGfsGrant,
   deleteGfsShare,
   getAdminTeams,
@@ -17,6 +18,7 @@ import { GfsGrantPanel } from '../GfsGrantPanel'
 import { ToastProvider } from '../Toast'
 
 vi.mock('@lib/api', () => ({
+  apiGet: vi.fn(),
   getAdminTeams: vi.fn(),
   getAdminUsers: vi.fn(),
   getHosts: vi.fn(),
@@ -28,6 +30,7 @@ vi.mock('@lib/api', () => ({
   putGfsGrant: vi.fn(),
 }))
 
+const mockApiGet = vi.mocked(apiGet)
 const mockGetAdminUsers = vi.mocked(getAdminUsers)
 const mockGetAdminTeams = vi.mocked(getAdminTeams)
 const mockGetHosts = vi.mocked(getHosts)
@@ -94,6 +97,9 @@ async function submit(action: 'Share') {
 describe('GfsGrantPanel bulk access', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    // The bulk suite exercises direct rows; resolve any path-less target to a
+    // root-level resource so the inherited walk has zero ancestors to derive.
+    mockApiGet.mockResolvedValue({ resourceId: resource.resourceId, path: '/', kind: 'file' })
     mockGetAdminUsers.mockResolvedValue({
       items: [
         {
