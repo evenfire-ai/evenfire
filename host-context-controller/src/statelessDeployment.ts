@@ -38,6 +38,14 @@ function shellSingleQuote(value: string): string {
  * symlink or not a directory (an agent can create those on a stateful Host,
  * so they must not stop it).
  *
+ * A tree with a root `state.db` main file, a database under `state/` and
+ * none under `workspace/` belongs to a Host that went back to stateful after
+ * its last stateless run (T5). The root database is the current one; the
+ * whole `state/` directory is renamed to `state.db.superseded-<UTC ts>` in
+ * one step, `workspace/` stays where it is, and the script exits 0. The
+ * renamed directory starts with `state.db`, so the workspace file guards
+ * deny it to agent tools.
+ *
  * Every refusal prints one line and exits 1 before the first move:
  *   F1 `state/` or `workspace/` cannot be listed and searched, or a database
  *      entry is a symlink or not a regular file;
@@ -126,6 +134,20 @@ for dir in "$root" "$root/state" "$root/workspace"; do
     [ -f "$entry" ] || fail_merge "SQLite file is not a regular file: $entry"
   done
 done
+
+# Superseded split (T5): a stateless start moves the root database into
+# state/, so a root state.db comes from a stateful run after the last
+# stateless run and state/ holds the older history. Renaming state/ removes
+# the signature, so later starts exit 0.
+if has_main "$root" && { has_main "$root/state" || has_journal "$root/state"; } &&
+  ! has_main "$root/workspace" && ! has_journal "$root/workspace"; then
+  [ -w "$root" ] || fail_merge "not writable by uid $(id -u): $root"
+  superseded="$root/state.db.superseded-$(date -u +%Y%m%dT%H%M%SZ)"
+  ! present "$superseded" || fail_merge "destination exists: $superseded"
+  mv "$root/state" "$superseded"
+  sync
+  exit 0
+fi
 
 # F2
 live=0

@@ -61,6 +61,7 @@ usage_error() {
 #     the section is the "# F<n>" block it ran in (F1 before the first);
 #   - each "no signature" exit printed as NO_SPLIT_SIGNATURE;
 #   - `[ -w ]` replaced by a mode-bit test, since the check mount is read-only;
+#   - the T5 rename of state/ replaced by WILL_SUPERSEDE;
 #   - everything from the move function on replaced by WILL_MERGE.
 # Each rewrite must match the expected number of lines, so a changed merge
 # script stops here instead of producing a check that no longer matches it.
@@ -68,7 +69,7 @@ usage_error() {
 # they are single-quoted on purpose.
 # shellcheck disable=SC2016
 print_check_script() {
-  local root=$1 line roots=0 sets=0 echoes=0 exits=0 sections=0 noops=0 writes=0 cut=0
+  local root=$1 line roots=0 sets=0 echoes=0 exits=0 sections=0 noops=0 writes=0 supersedes=0 cut=0
   case "$root" in *"'"*) usage_error "--root must not contain a single quote" ;; esac
   [ -f "$MERGE_SCRIPT" ] || die "missing $MERGE_SCRIPT"
   while IFS= read -r line || [ -n "$line" ]; do
@@ -134,6 +135,14 @@ EOF
         printf '%s\n' '  writable "$entry" || fail_merge "not writable by uid $(id -u): $entry"'
         writes=$((writes + 1))
         ;;
+      '  [ -w "$root" ] || fail_merge "not writable by uid $(id -u): $root"')
+        printf '%s\n' '  phase=F4' '  writable "$root" || fail_merge "not writable by uid $(id -u): $root"' '  phase=F3'
+        writes=$((writes + 1))
+        ;;
+      '  mv "$root/state" "$superseded"')
+        printf '%s\n' '  echo WILL_SUPERSEDE'
+        supersedes=$((supersedes + 1))
+        ;;
       'move_to_root() {')
         printf '%s\n' 'echo WILL_MERGE'
         cut=1
@@ -144,8 +153,8 @@ EOF
         ;;
     esac
   done <"$MERGE_SCRIPT"
-  local shape="root=$roots set=$sets echo=$echoes exit=$exits sections=$sections noops=$noops writes=$writes cut=$cut"
-  [ "$shape" = "root=1 set=1 echo=1 exit=1 sections=4 noops=3 writes=2 cut=1" ] ||
+  local shape="root=$roots set=$sets echo=$echoes exit=$exits sections=$sections noops=$noops writes=$writes supersedes=$supersedes cut=$cut"
+  [ "$shape" = "root=1 set=1 echo=1 exit=1 sections=4 noops=3 writes=3 supersedes=1 cut=1" ] ||
     die "$MERGE_SCRIPT has an unexpected shape ($shape); update print_check_script with it"
 }
 
@@ -429,7 +438,7 @@ run_check() {
   first="$(head -n 1 "$WORK/check.log")"
   lines="$(wc -l <"$WORK/check.log" | tr -d ' ')"
   case "$first" in
-    WILL_MERGE | NO_SPLIT_SIGNATURE)
+    WILL_MERGE | WILL_SUPERSEDE | NO_SPLIT_SIGNATURE)
       if [ "$lines" = 1 ]; then echo "$first"; else echo "UNREADABLE unexpected output: $(tr '\n' ' ' <"$WORK/check.log")"; fi
       ;;
     'WILL_REFUSE_F'[1-4]' workspace layout merge refused: '*) tr '\n' ' ' <"$WORK/check.log" | sed 's/ $//'; echo ;;
@@ -495,7 +504,7 @@ while IFS=$'\t' read -r type pvc host kind state detail _subpath pods nodes merg
       fi
       result="$(run_check "$pvc" "$node" "$image" "$policy" "$secrets" </dev/null)"
       # verify names a tree the merge will still change SPLIT.
-      [ "$COMMAND" = inventory ] || [ "$result" != WILL_MERGE ] || result=SPLIT
+      case "$COMMAND:$result" in verify:WILL_MERGE | verify:WILL_SUPERSEDE) result=SPLIT ;; esac
       [ "$merge_ok" -eq 0 ] || [ "$result" != NO_SPLIT_SIGNATURE ] || result=POD_OK
     fi
   fi
@@ -504,7 +513,7 @@ while IFS=$'\t' read -r type pvc host kind state detail _subpath pods nodes merg
     echo "PVC $HOST_NS/$pvc host=$host kind=ORPHAN state=$state result=$result"
     ORPHANS=$((ORPHANS + 1))
     case "$result" in
-      WILL_MERGE | SPLIT | WILL_REFUSE_*) ORPHAN_SPLIT=$((ORPHAN_SPLIT + 1)) ;;
+      WILL_MERGE | WILL_SUPERSEDE | SPLIT | WILL_REFUSE_*) ORPHAN_SPLIT=$((ORPHAN_SPLIT + 1)) ;;
       NO_SPLIT_SIGNATURE) ;;
       UNREADABLE*) ORPHAN_UNREADABLE=$((ORPHAN_UNREADABLE + 1)) ;;
       UNVERIFIED) ORPHAN_UNVERIFIED=$((ORPHAN_UNVERIFIED + 1)) ;;
@@ -517,7 +526,7 @@ while IFS=$'\t' read -r type pvc host kind state detail _subpath pods nodes merg
   case "$result" in
     POD_OK) POD_OK=$((POD_OK + 1)) ;;
     NO_SPLIT_SIGNATURE) NO_SPLIT=$((NO_SPLIT + 1)) ;;
-    WILL_MERGE | SPLIT) SPLIT=$((SPLIT + 1)); SPLIT_TREES=$((SPLIT_TREES + 1)) ;;
+    WILL_MERGE | WILL_SUPERSEDE | SPLIT) SPLIT=$((SPLIT + 1)); SPLIT_TREES=$((SPLIT_TREES + 1)) ;;
     WILL_REFUSE_*) REFUSED=$((REFUSED + 1)); SPLIT_TREES=$((SPLIT_TREES + 1)); UPGRADE_BLOCKERS=$((UPGRADE_BLOCKERS + 1)) ;;
     MERGE_REFUSED*) REFUSED=$((REFUSED + 1)) ;;
     MERGE_RUNNING) RUNNING=$((RUNNING + 1)) ;;

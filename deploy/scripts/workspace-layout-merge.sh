@@ -70,6 +70,20 @@ for dir in "$root" "$root/state" "$root/workspace"; do
   done
 done
 
+# Superseded split (T5): a stateless start moves the root database into
+# state/, so a root state.db comes from a stateful run after the last
+# stateless run and state/ holds the older history. Renaming state/ removes
+# the signature, so later starts exit 0.
+if has_main "$root" && { has_main "$root/state" || has_journal "$root/state"; } &&
+  ! has_main "$root/workspace" && ! has_journal "$root/workspace"; then
+  [ -w "$root" ] || fail_merge "not writable by uid $(id -u): $root"
+  superseded="$root/state.db.superseded-$(date -u +%Y%m%dT%H%M%SZ)"
+  ! present "$superseded" || fail_merge "destination exists: $superseded"
+  mv "$root/state" "$superseded"
+  sync
+  exit 0
+fi
+
 # F2
 live=0
 root_live=0

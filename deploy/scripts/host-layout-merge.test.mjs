@@ -270,7 +270,23 @@ test('inventory reads every PVC, pinning running Hosts to their node', () => {
   assert.deepEqual(nodes, { 'alpha-workspace': 'node-a', 'beta-workspace': undefined, 'gamma-workspace': 'node-b' })
 })
 
-test('inventory reports a Host switched to stateful before the upgrade as a blocker (T5)', () => {
+test('inventory reports a Host switched to stateful before the upgrade as split, not a blocker (T5)', () => {
+  const f = fleet()
+  f.checks['alpha-workspace'].output = 'WILL_SUPERSEDE\n'
+  const r = inventory(f)
+  assert.equal(r.status, 0, r.stdout + r.stderr)
+  assert.match(r.stdout, /^UPGRADE_BLOCKERS=0$/m)
+  assert.match(r.stdout, / split=1 /)
+  assert.match(r.stdout, /^HOST_LAYOUT_INVENTORY=OK$/m)
+  assert.match(row(r.stdout, 'alpha-workspace'), /result=WILL_SUPERSEDE$/)
+  // The same fleet with the flag off is a split tree the init would not reach.
+  const off = fleet()
+  off.checks['alpha-workspace'].output = 'WILL_SUPERSEDE\n'
+  off.hcc = hcc([{ name: 'CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE', value: 'false' }])
+  assert.match(inventory(off).stdout, /^FLAG_FALSE_WITH_SPLIT_TREES=1$/m)
+})
+
+test('inventory still reports a refused tree as a blocker', () => {
   const f = fleet()
   f.checks['alpha-workspace'].output = `WILL_REFUSE_F2 ${F2_LINE}\n`
   const r = inventory(f)
@@ -393,6 +409,7 @@ test('verify reads the merge init status of running Pods', () => {
 test('verify fails a suspended Host whose PVC is still split or unreadable', () => {
   const cases = [
     [{ output: 'WILL_MERGE\n' }, 'SPLIT', / split=1 /],
+    [{ output: 'WILL_SUPERSEDE\n' }, 'SPLIT', / split=1 /],
     [{ output: `WILL_REFUSE_F2 ${F2_LINE}\n` }, `WILL_REFUSE_F2 ${F2_LINE}`, / refused=1 /],
     [{ output: '' }, 'UNREADABLE', / unreadable=1 /],
     [{ output: 'WILL_MERGE\nNO_SPLIT_SIGNATURE\n' }, 'UNREADABLE', / unreadable=1 /],
@@ -616,7 +633,8 @@ test('check-script classifies split, foreign and refused trees', () => {
     ['symlinked state', r => { mkdirSync(`${r}/elsewhere`); file(`${r}/elsewhere/state.db`); symlinkSync('elsewhere', `${r}/state`); mkdirSync(`${r}/workspace`) }, ['elsewhere', 'state', 'workspace'], 'NO_SPLIT_SIGNATURE\n'],
     ['workspace missing', r => { mkdirSync(`${r}/state`); file(`${r}/state/state.db`) }, ['state'], 'NO_SPLIT_SIGNATURE\n'],
     ['stateful root', r => { file(`${r}/state.db`); file(`${r}/SOUL.md`) }, ['SOUL.md', 'state.db'], 'NO_SPLIT_SIGNATURE\n'],
-    ['T5', r => { file(`${r}/state.db`); mkdirSync(`${r}/state`); mkdirSync(`${r}/workspace`); file(`${r}/state/state.db`) }, ['state', 'state.db', 'workspace'], `WILL_REFUSE_F2 workspace layout merge refused: more than one live SQLite database across ROOT, ROOT/state and ROOT/workspace\n`],
+    ['T5', r => { file(`${r}/state.db`); mkdirSync(`${r}/state`); mkdirSync(`${r}/workspace`); file(`${r}/state/state.db`); file(`${r}/workspace/SOUL.md`); file(`${r}/SOUL.md`) }, ['SOUL.md', 'state', 'state.db', 'workspace'], 'WILL_SUPERSEDE\n'],
+    ['root and workspace databases', r => { file(`${r}/state.db`); mkdirSync(`${r}/state`); mkdirSync(`${r}/workspace`); file(`${r}/state/state.db`); file(`${r}/workspace/state.db`) }, ['state', 'state.db', 'workspace'], `WILL_REFUSE_F2 workspace layout merge refused: more than one live SQLite database across ROOT, ROOT/state and ROOT/workspace\n`],
     ['read-only directory to move', r => { mkdirSync(`${r}/state`); mkdirSync(`${r}/workspace`); file(`${r}/state/state.db`); mkdirSync(`${r}/workspace/users`); chmodSync(`${r}/workspace/users`, 0o555) }, ['state', 'workspace'], 'WILL_REFUSE_F4 workspace layout merge refused: not writable by uid UID: ROOT/workspace/users\n'],
   ]
   const uid = String(process.getuid())

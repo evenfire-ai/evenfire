@@ -104,7 +104,14 @@ function merge(root: string, env?: NodeJS.ProcessEnv): RunResult {
   } else {
     expect(res.status, res.stderr).toBe(0)
     expect(before, `${root} merged without being a directory`).not.toBeNull()
-    const expected = rootListing(root) === before ? 'NO_SPLIT_SIGNATURE' : 'WILL_MERGE'
+    const after = rootListing(root)
+    // A merge removes workspace/; superseding state/ leaves workspace/ in place.
+    const superseded =
+      before!.split('\0').includes('state') &&
+      !after.split('\0').includes('state') &&
+      after.split('\0').includes('workspace')
+    const expected =
+      after === before ? 'NO_SPLIT_SIGNATURE' : superseded ? 'WILL_SUPERSEDE' : 'WILL_MERGE'
     expect(predicted).toBe(`${expected}\n`)
   }
   return res
@@ -119,6 +126,7 @@ afterAll(() => {
     'WILL_REFUSE_F2',
     'WILL_REFUSE_F3',
     'WILL_REFUSE_F4',
+    'WILL_SUPERSEDE',
   ])
 })
 
@@ -160,6 +168,47 @@ function splitRoot(): string {
   const root = statefulRoot()
   baseInit(root)
   return root
+}
+
+/** A committed SQLite database with `rows` messages, closed cleanly. */
+function writeDb(dbPath: string, rows: number): void {
+  const writer = `
+    const { DatabaseSync } = require('node:sqlite')
+    const db = new DatabaseSync(${JSON.stringify(dbPath)})
+    db.exec('CREATE TABLE messages (id INTEGER PRIMARY KEY, body TEXT NOT NULL)')
+    const insert = db.prepare('INSERT INTO messages (body) VALUES (?)')
+    for (let i = 0; i < ${rows}; i++) insert.run('stateful ' + i)
+    db.close()
+  `
+  const res = spawnSync(process.execPath, ['-e', writer], { encoding: 'utf8' })
+  expect(res.status, res.stderr).toBe(0)
+}
+
+const STATEFUL_ROWS = 7
+
+/**
+ * A stateless Host switched back to stateful before the upgrade (T5): the
+ * stateful Pod serves a new root state.db while the older history stays under
+ * state/ next to workspace/. The two state/ shapes are the ones read on the
+ * clerum PVCs on 2026-10-17.
+ */
+function supersededSplitRoot(stateShape: 'main only' | 'empty WAL and SHM'): string {
+  const root = splitRoot()
+  if (stateShape === 'main only') {
+    rmSync(join(root, 'state', 'state.db-wal'))
+    rmSync(join(root, 'state', 'state.db-shm'))
+  } else {
+    writeFileSync(join(root, 'state', 'state.db-wal'), '')
+  }
+  writeDb(join(root, 'state.db'), STATEFUL_ROWS)
+  return root
+}
+
+function supersededName(root: string): string {
+  const names = readdirSync(root).filter(n => n.startsWith('state.db.superseded-'))
+  expect(names).toHaveLength(1)
+  expect(names[0]).toMatch(/^state\.db\.superseded-\d{8}T\d{6}Z$/)
+  return names[0]
 }
 
 function copyTree(root: string): string {
@@ -238,16 +287,95 @@ describe('workspace layout merge', () => {
     ).toBe(`# shellcheck shell=sh\n${buildWorkspaceLayoutMergeScript()}`)
   })
 
-  it('predicts a refusal for a Host switched to stateful before the upgrade (T5)', () => {
-    // A v0.10/v0.11 stateless Host switched to stateful: new chats in the
-    // root database, the older history still under state/.
-    const root = splitRoot()
-    cpSync(join(root, 'state', 'state.db'), join(root, 'state.db'))
-    expect(predictMerge(root)).toBe(
-      `WILL_REFUSE_F2 workspace layout merge refused: more than one live SQLite database across ${root}, ${root}/state and ${root}/workspace\n`
-    )
-    expect(merge(root).status).toBe(1)
-  })
+  // A root state.db exists only after a stateful run that followed the last
+  // stateless run (the base init moves it into state/ on every stateless
+  // start), so state/ holds the older history. The base init kept the root
+  // database and backed the state/ one up; the merge keeps the root one and
+  // renames state/ whole, so no signature is left for a later start.
+  it.each([
+    { name: 'state/state.db only', shape: 'main only' as const, backup: false },
+    {
+      name: 'state/state.db with an empty WAL and SHM',
+      shape: 'empty WAL and SHM' as const,
+      backup: false,
+    },
+    { name: 'state/ with a .pre-*.bak copy', shape: 'main only' as const, backup: true },
+  ])(
+    'supersedes the stale state/ of a Host that went back to stateful (T5, $name)',
+    ({ shape, backup }) => {
+      const root = supersededSplitRoot(shape)
+      if (backup) writeFileSync(join(root, 'state', 'state.db.pre-1.bak'), 'older backup')
+      // The stateful run rewrote personalization files at the root too, so
+      // the same names exist under workspace/.
+      writeFileSync(join(root, 'SOUL.md'), 'stateful copy')
+      const before = snapshot(root)
+      expect(before['workspace/SOUL.md']).toBeDefined()
+      expect(before['SOUL.md']).not.toBe(before['workspace/SOUL.md'])
+      expect(before['state/state.db']).toBeDefined()
+
+      expect(merge(root)).toEqual({ status: 0, stderr: '' })
+
+      const after = snapshot(root)
+      const superseded = supersededName(root)
+      const expected: Record<string, string> = {}
+      for (const [key, value] of Object.entries(before)) {
+        const moved = key === 'state' || key.startsWith('state/')
+        expected[moved ? `${superseded}${key.slice('state'.length)}` : key] = value
+      }
+      expect(after).toEqual(expected)
+      if (backup) expect(after[`${superseded}/state.db.pre-1.bak`]).toBeDefined()
+
+      // A second start finds no signature and changes nothing.
+      expect(merge(root)).toEqual({ status: 0, stderr: '' })
+      expect(snapshot(root)).toEqual(after)
+      expect(messageCount(join(root, 'state.db'))).toEqual({ rows: STATEFUL_ROWS, check: 'ok' })
+    },
+    15_000
+  )
+
+  it('refuses to supersede state/ when the PVC root is not writable (F4)', () => {
+    const root = supersededSplitRoot('main only')
+    chmodSync(root, 0o555)
+    const before = snapshot(root)
+
+    const refused = merge(root)
+
+    chmodSync(root, 0o755)
+    expect(refused).toEqual({
+      status: 1,
+      stderr: `workspace layout merge refused: not writable by uid ${process.getuid!()}: ${root}\n`,
+    })
+    expect(snapshot(root)).toEqual(before)
+    // Witness: once the root is writable the same tree is superseded.
+    expect(merge(root)).toEqual({ status: 0, stderr: '' })
+    expect(readdirSync(join(root, supersededName(root)))).toContain('state.db')
+  }, 15_000)
+
+  it('merges a superseded tree back after a rollback re-splits it with the base init', () => {
+    // No root personalization file here: the base init refuses a name present
+    // at the root and under workspace/, before and after this PR.
+    const root = supersededSplitRoot('main only')
+    expect(merge(root).status).toBe(0)
+    const superseded = supersededName(root)
+    const supersededTree = snapshot(root)
+
+    baseInit(root)
+    // Witness: the base init really split the tree again.
+    expect(snapshot(root)['state/state.db']).toBe(supersededTree['state.db'])
+    expect(merge(root)).toEqual({ status: 0, stderr: '' })
+
+    // Roll-forward: the stale history and the served database are back at the
+    // root, and the files the stateless run left under workspace/ are merged.
+    const after = snapshot(root)
+    const expected: Record<string, string> = {}
+    for (const [key, value] of Object.entries(supersededTree)) {
+      if (key === 'workspace') continue
+      expected[key.startsWith('workspace/') ? key.slice('workspace/'.length) : key] = value
+    }
+    expect(after).toEqual(expected)
+    expect(after[`${superseded}/state.db`]).toBe(supersededTree[`${superseded}/state.db`])
+    expect(messageCount(join(root, 'state.db'))).toEqual({ rows: STATEFUL_ROWS, check: 'ok' })
+  }, 15_000)
 
   it('merges a split tree with an uncheckpointed WAL back to the PVC root', () => {
     const root = splitRoot()
@@ -317,9 +445,16 @@ describe('workspace layout merge', () => {
       message: 'SQLite file is not a regular file',
     },
     {
-      name: 'a second live database at the root (F2)',
-      prepare: (root: string) => writeFileSync(join(root, 'state.db'), 'second database'),
-      undo: (root: string) => rmSync(join(root, 'state.db')),
+      // A root database is superseded over state/ only while workspace/ has none.
+      name: 'live databases at the root and under workspace (F2)',
+      prepare: (root: string) => {
+        writeFileSync(join(root, 'state.db'), 'second database')
+        writeFileSync(join(root, 'workspace', 'state.db'), 'third database')
+      },
+      undo: (root: string) => {
+        rmSync(join(root, 'state.db'))
+        rmSync(join(root, 'workspace', 'state.db'))
+      },
       message: 'more than one live SQLite database',
     },
     {
