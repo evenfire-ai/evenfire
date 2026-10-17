@@ -23,6 +23,12 @@ Modes (required; there is no default):
   stage-reader   Reconcile reader; rollout only to recover a stale deployed reader
   rotate-reader  Rotate only the reader credential and restart only gfsc-reader
   rotate-writer  Rotate only the writer credential and restart only gfsc-writer
+
+Context guard:
+  Local Minikube contexts (minikube, clerum-test, clerum-<profile>) run as-is.
+  Any other context, including production, must be named exactly in
+  ALLOWED_CONTEXTS (comma-separated), e.g.
+    ALLOWED_CONTEXTS=<kube-context> CONTEXT=<kube-context> deploy/scripts/provision-gfs-db.sh rotate-reader
 EOF
 }
 
@@ -33,6 +39,45 @@ case "$MODE" in
   stage-writer|stage-reader|rotate-reader|rotate-writer) ;;
   *) usage >&2; exit 2 ;;
 esac
+
+# Refuse a non-local context unless the caller names it exactly in
+# ALLOWED_CONTEXTS, the same opt-in idiom as provision-gfs-runtime.sh and
+# reconcile-gfs-deploy-credentials.sh (whose authorized remote path exports
+# ALLOWED_CONTEXTS="$CONTEXT" to this script). Local names follow the Minikube
+# branch-profile namespace in scripts/minikube-profiles/branch-profile.sh;
+# shared or remote-looking names are refused there and here.
+context_explicitly_allowed() {
+  local allowed
+  local -a allowed_contexts=()
+  [ -n "${ALLOWED_CONTEXTS:-}" ] || return 1
+  IFS=',' read -r -a allowed_contexts <<<"${ALLOWED_CONTEXTS}"
+  for allowed in "${allowed_contexts[@]}"; do
+    [ -n "$allowed" ] && [ "$allowed" = "$CONTEXT" ] && return 0
+  done
+  return 1
+}
+
+if ! context_explicitly_allowed; then
+  normalized_context="$(printf '%s' "$CONTEXT" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  case "$normalized_context" in
+    clerum | clerum-dev | docker-desktop | default | *gke* | *prod* | *staging*)
+      context_is_local=false ;;
+    minikube | clerum-test)
+      context_is_local=true ;;
+    *)
+      if [[ "$CONTEXT" =~ ^clerum-[a-z0-9][a-z0-9._-]*$ ]]; then
+        context_is_local=true
+      else
+        context_is_local=false
+      fi
+      ;;
+  esac
+  if [ "$context_is_local" != true ]; then
+    printf '[provision-gfs-db] ERROR: refusing non-local context %s; name it in ALLOWED_CONTEXTS to run against it\n' \
+      "$CONTEXT" >&2
+    exit 1
+  fi
+fi
 
 PG_NS="${PG_NS:-control-plane}"
 PG_DEPLOY="${PG_DEPLOY:-deploy/control-postgres}"

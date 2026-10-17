@@ -83,7 +83,10 @@ safe_source_paths = {
     "deploy/scripts/lib/gfs-credential-secret.sh",
     "deploy/scripts/reconcile-gfs-deploy-credentials.sh",
 }
-for line in diff.splitlines():
+# Split on newlines only. str.splitlines() also breaks on form feed, vertical
+# tab, \x1c-\x1e and U+2028/2029, which would let a value straddle two
+# "lines" and dodge every pattern below.
+for line in re.split(r"\r?\n", diff):
     changed_path = None
     if line.startswith("diff --git "):
         try:
@@ -101,9 +104,10 @@ for line in diff.splitlines():
         current = changed_path
         path = current.lower()
         path_parts = path.split("/")
+        basename = path_parts[-1]
         if (
-            path == ".env"
-            or path.startswith(".env.")
+            basename == ".env"
+            or basename.startswith(".env.")
             or path.endswith((".pem", ".key", ".p12", ".pfx", ".log"))
             or path.endswith(("/kubeconfig", "/config"))
             or (

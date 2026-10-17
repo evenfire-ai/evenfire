@@ -223,6 +223,11 @@ CONTEXT=<kube-context> deploy/scripts/provision-gfs-db.sh rotate-reader
 MINIKUBE_PROFILE=<profile> make minikube-verify-gfs
 ```
 
+The script runs as-is only against a local Minikube context (`minikube`,
+`clerum-test` or a `clerum-<profile>` branch profile). For any other
+context, including production, name it exactly in `ALLOWED_CONTEXTS`:
+`ALLOWED_CONTEXTS=<kube-context> CONTEXT=<kube-context> deploy/scripts/provision-gfs-db.sh rotate-reader`.
+
 The script verifies the role exists (writer migration 0048_gfs_permission_store; reader migration
 0072_gfs_reader_database_role),
 rotates the password, patches the Secret, stamps the rotation annotation, and
