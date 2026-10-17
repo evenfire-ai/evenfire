@@ -101,8 +101,7 @@ function FileExplorerNode({
     affordancesQuery.isFetching || affordancesQuery.error ? undefined : affordancesQuery.data
   useEffect(() => {
     if (!affordancesQuery.error) return
-    const message = errorMessage(affordancesQuery.error)
-    if (message) onAuthorityFailure(message)
+    onAuthorityFailure(affordancesQuery.error)
   }, [affordancesQuery.error, onAuthorityFailure])
   const preview = useMemo(() => resolveGfsPreview(node), [node])
   const canPreview = Boolean(preview && !isUnreadable)
@@ -204,7 +203,7 @@ function FileExplorerNode({
   useEffect(() => {
     if (!childQuery.error) return
     purgeDeniedGfsChildren(queryClient, childQueryKey, childQuery.error)
-    if (childError) onAuthorityFailure(childError)
+    onAuthorityFailure(childQuery.error)
   }, [childError, childQuery.error, childQueryKey, onAuthorityFailure, queryClient])
 
   // Deferred folder toggle: cancelled by a double-click within the window.
@@ -407,8 +406,8 @@ export function FileExplorerTree({
 
   const authorityFailure = ctrl.handleAuthorityFailure
   const handleAuthorityFailure = useCallback(
-    (message: string) => {
-      authorityFailure(message, 'operation')
+    (error: unknown) => {
+      authorityFailure(error, 'operation')
     },
     [authorityFailure]
   )
@@ -445,7 +444,7 @@ export function FileExplorerTree({
           pushToast(`Downloaded ${displayName(node.name)}`, 'success')
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
-          if (authorityFailure(message, 'operation')) return
+          if (authorityFailure(error, 'operation')) return
           pushToast(message, 'error')
         } finally {
           downloadsInFlight.current.delete(node.gfsUri)

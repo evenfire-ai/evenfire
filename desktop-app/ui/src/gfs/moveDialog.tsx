@@ -40,7 +40,7 @@ type GfsMoveTreeFolderProps = {
   selectedDestination: SelectedDestination | null
   onToggle: (resourceId: string) => void
   onSelect: (folder: GfsBrowserChild) => void
-  onAuthorityFailure?: (message: string) => boolean
+  onAuthorityFailure?: (error: unknown) => boolean
 }
 
 function GfsMoveTreeFolder({
@@ -83,8 +83,8 @@ function GfsMoveTreeFolder({
 
   useEffect(() => {
     if (childQuery.error) purgeDeniedGfsChildren(queryClient, childQueryKey, childQuery.error)
-    if (childError) onAuthorityFailure?.(childError)
-  }, [childError, childQuery.error, childQueryKey, onAuthorityFailure, queryClient])
+    if (childQuery.error) onAuthorityFailure?.(childQuery.error)
+  }, [childQuery.error, childQueryKey, onAuthorityFailure, queryClient])
 
   const loadingChildren = Boolean(isExpanded && childQuery.isFetching && !childQuery.data)
   const hasMoreChildren = Boolean(childQuery.hasNextPage)
@@ -287,8 +287,8 @@ export function GfsMoveDialog({
   // page then closes this dialog via its revocation effect). Policy errors
   // return false and render as the dialog's in-place banner below.
   useEffect(() => {
-    if (listError) onAuthorityFailure?.(listError)
-  }, [listError, onAuthorityFailure])
+    if (accessibleQuery.error) onAuthorityFailure?.(accessibleQuery.error)
+  }, [accessibleQuery.error, onAuthorityFailure])
 
   const toggleFolder = (resourceId: string) => {
     setError(null)

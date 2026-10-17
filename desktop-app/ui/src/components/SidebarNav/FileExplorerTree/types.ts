@@ -35,5 +35,5 @@ export interface FileExplorerNodeProps {
   onActivateFile: (node: GfsBrowserChild) => void
   onResourceAction: (resource: GfsBrowserChild, actionId: GfsResourceActionId, file?: File) => void
   /** Fail-closed hook: a listing authority error revokes the session. */
-  onAuthorityFailure: (message: string) => void
+  onAuthorityFailure: (error: unknown) => void
 }
