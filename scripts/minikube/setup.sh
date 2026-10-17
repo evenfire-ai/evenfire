@@ -115,9 +115,9 @@ ok "LLM API keys"
 # Channel credentials — retired in #273. The legacy static
 # `clerum-channel-reader-credentials` Secret used to be minted here for the
 # static channel-reader Deployment. With per-Host pods now owning the
-# channel-reader role, credentials are written via control-api's
-# /admin/channel-secrets endpoint (Control UI) per Host. No bootstrap-time
-# Secret needed.
+# channel-reader role, credentials are written per CommunicationChannel via
+# control-api's /admin/communication-channels/<name>/credentials endpoint
+# (Control UI). No bootstrap-time Secret needed.
 $KC apply -f "${DEPLOY_DIR}/secrets/inter-service-tokens.yaml"
 ok "Inter-service tokens + postgres secret"
 

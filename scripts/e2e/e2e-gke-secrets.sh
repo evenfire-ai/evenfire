@@ -127,16 +127,16 @@ if check_secret_exists profiles external-rest-api-secrets; then
   check_secret_key profiles external-rest-api-secrets EXTERNAL_REST_API_JWT_PUBLIC_KEY
 fi
 
-# ── per-Host channel-reader credentials (channels ns) ─────────────────
+# ── CommunicationChannel credentials (channels ns) ────────────────────
 # (#273) The legacy `clerum-channel-reader-credentials` Secret has been
-# retired. Per-Host credentials are `channel-reader-<host>-credentials`,
-# written via control-api's `/admin/channel-secrets` endpoint (Control UI),
-# not at bootstrap. They're optional — a Host with no Telegram/Slack/email
-# wired has no Secret. We log how many exist; absence is not a failure.
-channel_secret_count=$(kubectl get secret -n channels \
-  -l clerum.io/component=channel-reader \
-  -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -c . || true)
-log "  per-Host channel-reader credentials: ${channel_secret_count} Secret(s)"
+# retired. Credentials are per CommunicationChannel (the Secret named by
+# spec.credentialsSecretRef, `cc-<name>-credentials` by default), written via
+# control-api's `PUT /admin/communication-channels/<name>/credentials`
+# (Control UI), not at bootstrap. They're optional — a channel with no
+# credentials has no Secret. We log how many exist; absence is not a failure.
+channel_secret_count=$(kubectl get communicationchannels -n channels \
+  -o jsonpath='{range .items[*]}{.spec.credentialsSecretRef.name}{"\n"}{end}' 2>/dev/null | grep -c . || true)
+log "  CommunicationChannel credentials: ${channel_secret_count} Secret(s)"
 
 # ── clerum-wrc-signing-key (control-plane) ────────────────────────────
 log "  clerum-wrc-signing-key (control-plane)"
@@ -212,8 +212,9 @@ SECRETS_TO_CHECK=(
   "rpc-proxy/rpc-proxy-secrets"
   "profiles/external-rest-api-secrets"
   "control-plane/clerum-wrc-signing-key"
-  # (#273) clerum-channel-reader-credentials retired — per-Host Secrets
-  # are written via control-api's /admin/channel-secrets and never contain
+  # (#273) clerum-channel-reader-credentials retired — channel Secrets are
+  # written via control-api's /admin/communication-channels/<name>/credentials
+  # and never contain
   # placeholder values (operators paste real bot tokens via Control UI).
 )
 
