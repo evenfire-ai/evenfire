@@ -6,6 +6,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import userEvent from '@testing-library/user-event'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
+import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import { activeWorkspaceTab, openFilesTab } from '@lib/workspaceTabs'
 import type { WorkspaceTabsState } from '@lib/workspaceTabs.types'
@@ -149,6 +150,72 @@ describe('FileExplorerTree — sort ordering', () => {
 })
 
 describe('FileExplorerTree — resource action menus', () => {
+  it.each([
+    ['folder', 'directory', 'Reports'],
+    ['file', 'file', 'report.md'],
+  ] as const)(
+    'renders %s menu IDs and labels in the shared producer order',
+    async (_label, kind, name) => {
+      const resource = accessibleResource('0123456789abcdef0123456789abcdef', name, kind)
+      installClerum({
+        listAccessible: vi.fn(async () => listAccessiblePage([resource])),
+        affordances: vi.fn(async () =>
+          resourceAffordances(['read', 'write', 'delete', 'manage_acl', 'share'])
+        ),
+      })
+      renderTree()
+
+      const rowButton = await screen.findByRole('button', { name })
+      const row = rowButton.closest('[role="treeitem"]') as HTMLElement
+      fireEvent.click(within(row).getByRole('button', { name: `Options for ${name}` }))
+      const menu = await screen.findByRole('menu', { name: `Actions for ${name}` })
+      await waitFor(() => expect(menu.querySelector('[data-gfs-action="share"]')).not.toBeNull())
+      const renderedActions = Array.from(menu.querySelectorAll<HTMLElement>('[data-gfs-action]'))
+      const handler = vi.fn()
+      const expectedActions = getGfsMenuActions(
+        buildGfsResourceActions({
+          kind,
+          uri: resource.gfsUri,
+          handlers: {
+            refresh: handler,
+            share: handler,
+            'copy-link': handler,
+            'copy-route': handler,
+            'open-route': handler,
+            'open-folder': handler,
+            rename: handler,
+            move: handler,
+            'new-folder': handler,
+            'upload-file': handler,
+            'copy-content': handler,
+            preview: handler,
+            download: handler,
+            replace: handler,
+            delete: handler,
+          },
+          canRename: true,
+          canMove: true,
+          canCreateFolder: true,
+          canUpload: true,
+          canShare: true,
+          canCopyContent: true,
+          canPreview: true,
+          canDownload: true,
+          canReplace: true,
+          canOpenFolder: true,
+          canDelete: true,
+        })
+      )
+
+      expect(renderedActions.map(action => action.dataset.gfsAction)).toEqual(
+        expectedActions.map(action => action.id)
+      )
+      expect(renderedActions.map(action => action.textContent?.trim())).toEqual(
+        expectedActions.map(action => action.label)
+      )
+    }
+  )
+
   it('keeps a visible, labeled menu on a long row and dispatches its exact resource without toggling', async () => {
     const resource = accessibleResource(
       'folder-1',
@@ -209,7 +276,7 @@ describe('FileExplorerTree — resource action menus', () => {
 
     fireEvent.click(within(secondRow).getByRole('button', { name: `Options for ${second.name}` }))
     const menu = await screen.findByRole('menu', { name: `Actions for ${second.name}` })
-    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Copy route' }))
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Copy file ID' }))
 
     expect(onResourceAction).toHaveBeenCalledWith(
       expect.objectContaining({ resourceId: 'second', gfsUri: second.gfsUri }),
@@ -220,7 +287,7 @@ describe('FileExplorerTree — resource action menus', () => {
     expect(onOpenPreview).toHaveBeenCalledTimes(1)
   })
 
-  it.each(['Copy route', 'Copy link'])(
+  it.each(['Copy file ID', 'Copy link'])(
     'returns keyboard focus to the same persistent row trigger after %s',
     async actionName => {
       const resource = accessibleResource(
@@ -259,7 +326,7 @@ describe('FileExplorerTree — resource action menus', () => {
       expect(trigger.isConnected).toBe(true)
       expect(onResourceAction).toHaveBeenCalledWith(
         expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
-        actionName === 'Copy route' ? 'copy-route' : 'copy-link'
+        actionName === 'Copy file ID' ? 'copy-route' : 'copy-link'
       )
     }
   )
@@ -311,7 +378,7 @@ describe('FileExplorerTree — resource action menus', () => {
     const menu = await screen.findByRole('menu', { name: 'Actions for removed-target.md' })
     focusTrigger.mockClear()
     const menuItems = within(menu).getAllByRole('menuitem')
-    const copyRouteIndex = menuItems.findIndex(item => item.textContent?.trim() === 'Copy route')
+    const copyRouteIndex = menuItems.findIndex(item => item.textContent?.trim() === 'Copy file ID')
     await user.keyboard('{Home}')
     for (let index = 0; index < copyRouteIndex; index += 1) {
       await user.keyboard('{ArrowDown}')
@@ -345,7 +412,7 @@ describe('FileExplorerTree — resource action menus', () => {
     const trigger = within(row).getByRole('button', { name: 'Options for pointer-target.md' })
     await user.click(trigger)
     const menu = await screen.findByRole('menu', { name: 'Actions for pointer-target.md' })
-    await user.click(within(menu).getByRole('menuitem', { name: 'Copy route' }))
+    await user.click(within(menu).getByRole('menuitem', { name: 'Copy file ID' }))
 
     expect(onResourceAction).toHaveBeenCalledWith(
       expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
@@ -353,6 +420,104 @@ describe('FileExplorerTree — resource action menus', () => {
     )
     expect(document.activeElement).not.toBe(trigger)
   })
+
+  it('restores focus to the Sidebar row after Copy content hands off to Preview', async () => {
+    const resource = accessibleResource(
+      'ffffffffffffffffffffffffffffffff',
+      'preview-target.md',
+      'file'
+    )
+    installClerum({
+      listAccessible: vi.fn(async () => listAccessiblePage([resource])),
+      affordances: vi.fn(async () => resourceAffordances(['read'])),
+    })
+    const user = userEvent.setup()
+    const { onResourceAction } = renderTree()
+
+    const row = await screen.findByRole('treeitem', { name: /preview-target\.md/ })
+    const trigger = within(row).getByRole('button', { name: 'Options for preview-target.md' })
+    for (let attempt = 0; document.activeElement !== trigger && attempt < 10; attempt += 1) {
+      await user.tab()
+    }
+    expect(document.activeElement).toBe(trigger)
+    await user.keyboard('{Enter}')
+    const menu = await screen.findByRole('menu', { name: 'Actions for preview-target.md' })
+    const menuItems = within(menu).getAllByRole('menuitem')
+    const copyContentIndex = menuItems.findIndex(
+      item => item.textContent?.trim() === 'Copy content'
+    )
+    expect(copyContentIndex).toBeGreaterThanOrEqual(0)
+    await user.keyboard('{Home}')
+    for (let index = 0; index < copyContentIndex; index += 1) {
+      await user.keyboard('{ArrowDown}')
+    }
+    expect(document.activeElement).toBe(menuItems[copyContentIndex])
+    await user.keyboard('{Enter}')
+
+    await waitFor(() =>
+      expect(onResourceAction).toHaveBeenCalledWith(
+        expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
+        'copy-content'
+      )
+    )
+    await new Promise(resolve => window.setTimeout(resolve, 10))
+    expect(screen.queryByRole('menu', { name: 'Actions for preview-target.md' })).toBeNull()
+    expect(document.activeElement).toBe(trigger)
+  })
+
+  it.each([
+    ['Preview', 'preview-focus.md', 'file', 'preview'],
+    ['Download', 'download-focus.zip', 'file', 'download'],
+    ['Open folder', 'Open folder focus', 'directory', 'open-folder'],
+  ] as const)(
+    'restores keyboard focus to the persistent row after %s',
+    async (actionName, name, kind, actionId) => {
+      const resource = accessibleResource('abababababababababababababababab', name, kind)
+      installClerum({
+        listAccessible: vi.fn(async () => listAccessiblePage([resource])),
+        affordances: vi.fn(async () => resourceAffordances(['read'])),
+      })
+      const user = userEvent.setup()
+      const callbacks = renderTree()
+
+      const row = await screen.findByRole('treeitem', { name: new RegExp(name) })
+      const trigger = within(row).getByRole('button', { name: `Options for ${name}` })
+      for (let attempt = 0; document.activeElement !== trigger && attempt < 10; attempt += 1) {
+        await user.tab()
+      }
+      expect(document.activeElement).toBe(trigger)
+      await user.keyboard('{Enter}')
+
+      const menu = await screen.findByRole('menu', { name: `Actions for ${name}` })
+      const menuItems = within(menu).getAllByRole('menuitem')
+      const actionIndex = menuItems.findIndex(item => item.textContent?.trim() === actionName)
+      expect(actionIndex).toBeGreaterThanOrEqual(0)
+      await user.keyboard('{Home}')
+      for (let index = 0; index < actionIndex; index += 1) await user.keyboard('{ArrowDown}')
+      expect(document.activeElement).toBe(menuItems[actionIndex])
+      await user.keyboard('{Enter}')
+
+      if (actionId === 'preview') {
+        await waitFor(() =>
+          expect(callbacks.onOpenPreview).toHaveBeenCalledWith(
+            expect.objectContaining({ gfsUri: resource.gfsUri })
+          )
+        )
+      } else if (actionId === 'open-folder') {
+        await waitFor(() => expect(callbacks.onOpenFolder).toHaveBeenCalledWith(resource.gfsUri))
+      } else {
+        await waitFor(() =>
+          expect(callbacks.onResourceAction).toHaveBeenCalledWith(
+            expect.objectContaining({ resourceId: resource.resourceId, gfsUri: resource.gfsUri }),
+            'download'
+          )
+        )
+      }
+
+      await waitFor(() => expect(document.activeElement).toBe(trigger))
+      expect(screen.queryByRole('menu', { name: `Actions for ${name}` })).toBeNull()
+    }
+  )
 
   it('keeps focus in a dialog opened by a keyboard row action', async () => {
     const resource = accessibleResource(
@@ -461,7 +626,7 @@ describe('FileExplorerTree — resource action menus', () => {
     ) as HTMLElement
     fireEvent.click(within(nestedRow).getByRole('button', { name: 'Options for Nested folder' }))
     const menu = await screen.findByRole('menu', { name: 'Actions for Nested folder' })
-    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Copy route' }))
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Copy folder ID' }))
 
     expect(onResourceAction).toHaveBeenCalledWith(
       expect.objectContaining({ resourceId: 'nested', gfsUri: nested.gfsUri }),
@@ -500,7 +665,7 @@ describe('FileExplorerTree — resource action menus', () => {
     ) as HTMLElement
     fireEvent.click(within(fileRow).getByRole('button', { name: 'Options for report.pdf' }))
     const fileMenu = await screen.findByRole('menu', { name: 'Actions for report.pdf' })
-    expect(await within(fileMenu).findByRole('menuitem', { name: 'Copy route' })).toBeTruthy()
+    expect(await within(fileMenu).findByRole('menuitem', { name: 'Copy file ID' })).toBeTruthy()
     expect(within(fileMenu).getByRole('menuitem', { name: 'Download' })).toBeTruthy()
     expect(within(fileMenu).queryByRole('menuitem', { name: 'Rename' })).toBeNull()
     expect(within(fileMenu).queryByRole('menuitem', { name: 'Share' })).toBeNull()

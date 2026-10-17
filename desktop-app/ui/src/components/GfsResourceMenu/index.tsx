@@ -42,17 +42,14 @@ function isMenuAction(action: GfsResourceMenuAction | null): action is GfsResour
   return action !== null
 }
 
-// These selections open dialogs/choosers or move to another destination. The
-// resulting surface owns focus; clipboard and refresh actions can return it.
+// These selections open a dialog or chooser that takes focus. Navigation and
+// downloads do not focus another DOM surface, so keyboard actions can return
+// focus to the persistent menu trigger.
 const ACTIONS_WITH_FOCUS_DESTINATION = new Set([
-  'copy-content',
   'delete',
-  'download',
   'move',
   'new-folder',
-  'open-folder',
   'open-route',
-  'preview',
   'replace',
   'rename',
   'share',
