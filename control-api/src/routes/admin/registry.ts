@@ -2050,12 +2050,14 @@ export function createAdminRegistryRouter(
 
         // ── Step 1b: Verify bundle digest (spec §9.2.1 step 6) ───────────
         if (entry.server_mode === 'local') {
+          let digestStage: 'digest-lookup' | 'bundle-download' = 'digest-lookup'
           try {
             const digestResult = (await getDigest(
               body.registryEntryName,
               body.registryEntryVersion
             )) as { digest?: string }
             if (digestResult?.digest) {
+              digestStage = 'bundle-download'
               const bundleBuffer = await downloadBundle(
                 body.registryEntryName,
                 body.registryEntryVersion
@@ -2069,8 +2071,21 @@ export function createAdminRegistryRouter(
                 return
               }
             }
-          } catch {
-            // Digest verification is best-effort; proceed if registry doesn't have a digest
+          } catch (err) {
+            // Digest verification is best-effort: a registry without a stored digest
+            // returns `digest: null` (no throw) and skips the check above. Reaching
+            // here means the digest lookup or the bundle download failed, so the
+            // install proceeds UNVERIFIED — log it so that is visible. Only bounded
+            // identity fields are logged, never the error message or a response body.
+            log.warn(
+              {
+                registryEntryName: body.registryEntryName,
+                registryEntryVersion: body.registryEntryVersion,
+                stage: digestStage,
+                error: registryErrorLogFields(err),
+              },
+              'Registry bundle digest verification failed; installing without verification'
+            )
           }
         }
 
