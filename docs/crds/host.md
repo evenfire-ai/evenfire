@@ -44,7 +44,7 @@ represents a single LLM agent instance (an "agent" in Control UI and the Desktop
 | `spec.desktop.x11` | boolean | no | Enable X11 desktop tools (`desktop_screenshot`, `desktop_click`, `desktop_type`, etc.). |
 | `spec.lifecycle.stateless` | boolean | no | Default `false`. Enables the stateless lifecycle: session state is persisted to the workspace volume and the controller may scale the agent to zero while idle (`status.lifecycle.state: suspended`). Rejected at reconcile (condition `StatelessEnableRejected`) for Hosts with channels or a desktop. |
 | `spec.personalization` | object | no | Identity files (admin-managed, read-only to the agent). |
-| `spec.personalization.enabled` | boolean | no | Whether mcp-host should reconcile identity files from this block. |
+| `spec.personalization.enabled` | boolean | no | Whether mcp-host should reconcile identity files from this block. mcp-host writes them at startup and again on every Host update, without a pod restart. Requires workspace memory. |
 | `spec.personalization.identity` | string | no | Content of `IDENTITY.md` (system-prompt section "## Identity"). |
 | `spec.personalization.soul` | string | no | Content of `SOUL.md` (system-prompt section "## Core Values"). |
 | `spec.personalization.agents` | string | no | Content of `AGENTS.md` (system-prompt section "## Agent Instructions"). |
@@ -60,7 +60,7 @@ represents a single LLM agent instance (an "agent" in Control UI and the Desktop
 | `guardrails.builtins[]` | First-party hooks compiled into mcp-host (e.g. `prompt-shaping`, `token-trim`). |
 | `guardrails.minInstalledHookTrustLevel` | `low` \| `mid` \| `high`: minimum trust level for hooks installed onto this Host. Checked by control-api when a hook is installed or upgraded, not at runtime. |
 | `guardrails.capabilityCeiling[]` | Upper bound on the capabilities an install may grant: `may_deny`, `may_rewrite`, `may_substitute_result`, `may_add_context`. Checked at install/upgrade, not at runtime, so a hand-edited LlmHook is not re-validated against it. |
-| `guardrails.approvalPolicies[]` | Accepted by the schema (`cli_only`, `channel_users`, `designated_approvers`) but not read by mcp-host today; `ask` decisions use `spec.approval`, or mcp-host's `CLERUM_APPROVAL_CONFIG` when `spec.approval` is unset. |
+| `guardrails.approvalPolicies[]` | Accepted by the schema (`cli_only`, `channel_users`, `designated_approvers`) but not read by mcp-host today; `ask` decisions use `spec.approval`, or mcp-host's `CLERUM_APPROVAL_CONFIG` environment variable when `spec.approval` is unset (the minikube overlay sets it in `mcp-host-config`; `deploy/base` does not). |
 | `guardrails.limits` | `maxRules` (100) and `maxHookTimeoutMs` (5000, the transport timeout for each hook call on both lanes) are enforced; every hook call also has a fixed 15000 ms hard deadline, so a larger value has no effect. `maxHookOutputBytes` (65536 when a `limits` object is present; otherwise 1 MiB) caps `moderate`, `postCallSuccess` and `onError` hook responses. It does not apply to `preCall` (always 5 MiB) or to tool-lane hooks (1 MiB). `maxHooksPerPhase` is accepted but not enforced. |
 
 Apply the CRD before any component writes `spec.guardrails`: the API server
@@ -108,7 +108,7 @@ spec:
         approvers:
           - "123456789"
     tools:
-      http_request: false   # skip approval — relies on CLERUM_HTTP_ALLOWLIST as the gate
+      http_request: false   # skip approval — only safe with a non-empty CLERUM_HTTP_ALLOWLIST
       shell_exec: true      # explicit (matches code default; documents intent)
 ```
 
