@@ -415,17 +415,14 @@ test('the upgrade lane installs the release deploy tree and checks the CRDs', ()
   assert.doesNotMatch(SOURCE, /this tree no longer installs the release/)
 })
 
-// A7.44: make minikube-setup waits for every Host rollout, so a Host left in
-// Init:Error by the upgrade fails it. The lane repairs T5 on the release.
-test('the upgrade lane repairs blockers before it upgrades', () => {
+// A7.46: the merge init supersedes the T5 split database, so the lane runs no
+// repair step between the inventory and the upgrade.
+test('the upgrade lane upgrades without a repair step', () => {
   const main = helper('run_main')
-  const repair = main.indexOf('repair_blockers')
-  const upgrade = main.indexOf('upgrade_to_head')
-  assert.notEqual(repair, -1, 'run_main does not call repair_blockers')
-  assert.notEqual(upgrade, -1, 'run_main does not call upgrade_to_head')
-  assert.ok(repair < upgrade, 'repair_blockers runs after upgrade_to_head')
-  assert.match(helper('repair_blockers'), /grep -qx 'UPGRADE_BLOCKERS=0'/)
-  assert.doesNotMatch(helper('check_upgraded'), /wait_refused_pod|REPAIR_STATE_FAMILY_SCRIPT/)
+  // Witness: run_main is the lane's sequence and reaches the upgrade.
+  assert.notEqual(main.indexOf('upgrade_to_head'), -1, 'run_main does not call upgrade_to_head')
+  assert.doesNotMatch(SOURCE, /repair_blockers|REPAIR_STATE_FAMILY_SCRIPT/)
+  assert.doesNotMatch(helper('check_upgraded'), /wait_refused_pod/)
 })
 
 // A7.45: the head setup's seed (seed-e2e-data.sh put_agents) resets the user's
@@ -455,9 +452,7 @@ test('login_all regrant grants every created Host before it mints', () => {
   assert.equal(plain.stdout.trim(), 'admin_login\nuser_login\nmint\nRC=0')
 })
 
-test('the lane T5 repair leaves a tree the merge does not touch', () => {
-  const repairScript = SOURCE.match(/^REPAIR_STATE_FAMILY_SCRIPT='([^']*)'/m)
-  assert.ok(repairScript, 'REPAIR_STATE_FAMILY_SCRIPT not found')
+test('the lane T5 tree is classified as superseded, not refused', () => {
   const layoutScript = fileURLToPath(new URL('../../deploy/scripts/host-layout-merge.sh', import.meta.url))
   const root = mkdtempSync(path.join(tmpdir(), 'e2e-825-t5-repair-'))
   try {
@@ -468,12 +463,11 @@ test('the lane T5 repair leaves a tree the merge does not touch', () => {
       assert.equal(printed.status, 0, printed.stderr)
       return spawnSync('/bin/sh', ['-c', printed.stdout], { encoding: 'utf8' }).stdout
     }
-    // Witness: the seeded tree is the T5 blocker.
-    assert.match(classify(), /^WILL_REFUSE_F2 /)
-    const repaired = spawnSync('/bin/sh', ['-c', repairScript[1], 'repair', root], { encoding: 'utf8' })
-    assert.equal(repaired.status, 0, repaired.stderr)
-    assert.equal(classify(), 'NO_SPLIT_SIGNATURE\n')
-    assert.deepEqual(readdirSync(path.join(root, 'state')).sort(), ['state.db.upgrade-lane.bak', 'state.db.upgrade-lane.bak-wal'])
+    // Witness: the tree carries the signature and both database families.
+    assert.deepEqual(readdirSync(path.join(root, 'state')).sort(), ['state.db', 'state.db-wal'])
+    assert.equal(classify(), 'WILL_SUPERSEDE\n')
+    // The check is read-only: the tree is unchanged.
+    assert.deepEqual(readdirSync(root).sort(), ['state', 'state.db', 'workspace'])
     assert.equal(readFileSync(path.join(root, 'state.db'), 'utf8'), 'state.db')
   } finally {
     rmSync(root, { recursive: true, force: true })

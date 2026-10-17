@@ -126,7 +126,8 @@ ls -la state workspace'
 # with workspace/ present so the tree carries the split-layout signature and
 # a file under each directory the merge would move.
 # shellcheck disable=SC2016
-SEED_TWO_DB_SCRIPT='set -eu; cd "$1"; mkdir state workspace; cp state.db state/state.db
+SEED_TWO_DB_SCRIPT='set -eu; cd "$1"; mkdir state workspace; [ -f state.db ]
+for s in "" -wal -shm; do [ -e "state.db$s" ] || continue; cp "state.db$s" "workspace/state.db$s"; mv "state.db$s" "state/state.db$s"; done
 printf "notes\n" > state/notes.txt; printf "x\n" > workspace/x; ls -la . state workspace'
 
 # A new stateless Host with history, a seeded file, then suspended.
@@ -305,8 +306,9 @@ scenario_S5() {
   read_seed_file "$name" seed.txt "seed ${RUN}"
 }
 
-# S6: two live database families: the merge refuses, the Pod stays in
-# Init:Error and the tree is unchanged.
+# S6: two live database families, under state/ and workspace/ with none at
+# the root (a T5 tree with a root database is superseded, not refused): the
+# merge refuses, the Pod stays in Init:Error and the tree is unchanged.
 scenario_S6() {
   local name before after list_before list_after elapsed=0 pod logs row
   local f2='workspace layout merge refused: more than one live SQLite database across'
@@ -316,12 +318,14 @@ scenario_S6() {
   before="$(pvc_fixture "$name" ro hash-before "$HASH_SCRIPT")" || return 1
   list_before="$(pvc_fixture "$name" ro list-before "$LIST_SCRIPT")" || return 1
   grep -q ' ./state/state.db$' <<<"$before" || { fail "S6 witness: state/state.db not seeded: ${before}"; return 1; }
+  grep -q ' ./workspace/state.db$' <<<"$before" || { fail "S6 witness: workspace/state.db not seeded: ${before}"; return 1; }
+  ! grep -qx 'f ./state.db' <<<"$list_before" || { fail "S6 witness: a root state.db remains: ${list_before}"; return 1; }
   if ! grep -qx 'f ./state/notes.txt' <<<"$list_before" || ! grep -qx 'f ./workspace/x' <<<"$list_before"; then
     fail "S6 witness: state/notes.txt or workspace/x not seeded: ${list_before}"
     return 1
   fi
-  # The seeded tree is the T5 shape (root DB, state/state.db, workspace/):
-  # inventory must name it as an upgrade blocker before the merge runs. Its
+  # inventory must name the seeded tree as an upgrade blocker before the merge
+  # runs. Its
   # check Pod runs between the two hashes, so the comparison below also
   # proves it changed nothing.
   row="$(layout_row inventory "$name" 1)" || return 1

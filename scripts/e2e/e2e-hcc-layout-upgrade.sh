@@ -7,15 +7,17 @@
 # the profile between the two modes.
 #
 #   main     installs v0.11.0 (published images), seeds one Host per row, runs
-#            deploy/scripts/host-layout-merge.sh inventory, repairs T5 with the
-#            upgrade-note procedure (plan A7.44), upgrades to this head (images
+#            deploy/scripts/host-layout-merge.sh inventory, upgrades to this
+#            head with no manual step (the merge init supersedes the T5 split
+#            database, plan A7.46; images
 #            built from this tree, database kept), then checks verify and the
 #            history of every row. Rows:
 #              T1 stateful;
 #              T2 stateless, active at the upgrade;
 #              T3 stateless, suspended at the upgrade (woken afterwards);
 #              T5 created stateless, used, switched to stateful by a
-#                 CommunicationChannel and used again (two live databases);
+#                 CommunicationChannel and used again (root database plus the
+#                 older state/ one, renamed by the merge init);
 #              T6 stateless -> stateful -> stateless.
 #            Prints E2E_UPGRADE_MAIN=PASS|FAIL and E2E_UPGRADE_HEAD=<sha>.
 #   control  the negative control: CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE=false
@@ -35,8 +37,7 @@
 #
 # Cluster writes besides the setups and the admin API: the named fixtures of
 # e2e-hcc-storage-layout-switch.sh (hcc-cadence, pvc-fixture, channel,
-# host-layout-merge), the T5 repair (a pvc-fixture rename on the release, as the
-# upgrade note says) and, in control mode,
+# host-layout-merge) and, in control mode,
 # FAULT:flag-false (kubectl set env on the HCC Deployment, undone in the
 # trap). No kubectl exec into Host Pods, no SQLite reads or writes.
 set -euo pipefail
@@ -166,12 +167,6 @@ HTTP_CODE='' HTTP_BODY='' HTTP_HEADERS=()
 # shellcheck source=scripts/e2e/e2e-825-lib.sh
 source "${SCRIPT_DIR}/e2e-825-lib.sh"
 
-F2='workspace layout merge refused: more than one live SQLite database across'
-# The upgrade note's repair for a T5 tree, keeping the chats since the switch:
-# the database family under state/ is renamed, never deleted.
-# shellcheck disable=SC2016 # expanded inside the fixture Pod
-REPAIR_STATE_FAMILY_SCRIPT='set -eu; cd "$1/state"; [ -f state.db ]
-for s in "" -wal -shm; do [ -e "state.db$s" ] || continue; mv "state.db$s" "state.db.upgrade-lane.bak$s"; done; ls -la'
 # Seed files sit where the agent sees /workspace: the PVC root for a stateful
 # Host, PVC/workspace for a stateless one on the old release.
 # shellcheck disable=SC2016
@@ -404,29 +399,13 @@ seed_rows() {
 
 predict_rows() {
   run_layout inventory
-  [ "$LAYOUT_RC" = 1 ] || { fail "inventory exited ${LAYOUT_RC}, expected 1 (T5 blocks): $(tail -n 3 "$LAYOUT_OUT" | tr '\n' ' ')"; return 1; }
-  grep -qx 'UPGRADE_BLOCKERS=1' "$LAYOUT_OUT" || { fail "inventory: $(grep UPGRADE_BLOCKERS "$LAYOUT_OUT"), expected UPGRADE_BLOCKERS=1"; return 1; }
-  expect_row "$HOST_T5" "WILL_REFUSE_F2 ${F2}*" 'inventory T5' &&
+  [ "$LAYOUT_RC" = 0 ] || { fail "inventory exited ${LAYOUT_RC}, expected 0: $(tail -n 3 "$LAYOUT_OUT" | tr '\n' ' ')"; return 1; }
+  grep -qx 'UPGRADE_BLOCKERS=0' "$LAYOUT_OUT" || { fail "inventory: $(grep UPGRADE_BLOCKERS "$LAYOUT_OUT"), expected UPGRADE_BLOCKERS=0"; return 1; }
+  expect_row "$HOST_T5" WILL_SUPERSEDE 'inventory T5' &&
     expect_row "$HOST_T2" WILL_MERGE 'inventory T2' &&
     expect_row "$HOST_T3" WILL_MERGE 'inventory T3' &&
     expect_row "$HOST_T6" WILL_MERGE 'inventory T6' &&
     expect_row "$HOST_T1" NO_SPLIT_SIGNATURE 'inventory T1'
-}
-
-# The upgrade note's T5 repair, keeping the chats since the switch, on the
-# release: the running stateful Pod opens only the root database, so the
-# state/ family is renamed while it serves. Repaired before the upgrade
-# because make minikube-setup waits for every Host rollout, and a Host left in
-# Init:Error by the merge fails it (sync-auth-key.sh).
-repair_blockers() {
-  log "REPAIR:${HOST_T5} rename the state/ database family (upgrade note)"
-  pvc_fixture "$HOST_T5" rw repair "$REPAIR_STATE_FAMILY_SCRIPT" >/dev/null || return 1
-  run_layout inventory
-  if [ "$LAYOUT_RC" != 0 ] || ! grep -qx 'UPGRADE_BLOCKERS=0' "$LAYOUT_OUT"; then
-    fail "inventory after the repair exited ${LAYOUT_RC}: $(grep UPGRADE_BLOCKERS "$LAYOUT_OUT")"
-    return 1
-  fi
-  expect_row "$HOST_T5" NO_SPLIT_SIGNATURE 'inventory after repair T5'
 }
 
 check_upgraded() {
@@ -462,15 +441,17 @@ check_history() {
   ROWS_DONE=$((ROWS_DONE + 1))
   assert_history "$HOST_T3" "upgrade(stateless-suspended)->wake" && read_seed_file "$HOST_T3" seed.txt "upgrade ${RUN} ${HOST_T3}" || return 1
   ROWS_DONE=$((ROWS_DONE + 1))
-  # T5 serves the root family it served before the upgrade; the old family is
-  # kept as a backup, and its old files stay under workspace/ (no signature).
-  assert_history "$HOST_T5" "repair(two-databases)->upgrade" || return 1
-  listing="$(pvc_fixture "$HOST_T5" ro list-repaired "$LIST_SCRIPT")" || return 1
-  grep -qx 'f ./state/state.db.upgrade-lane.bak' <<<"$listing" ||
-    { fail "T5: the renamed family is missing: ${listing}"; return 1; }
+  # T5 serves the root family it served before the upgrade; the merge init
+  # renamed the older state/ to state.db.superseded-<ts>, and the old files
+  # stay under workspace/.
+  assert_history "$HOST_T5" "two-databases->upgrade(superseded)" || return 1
+  listing="$(pvc_fixture "$HOST_T5" ro list-superseded "$LIST_SCRIPT")" || return 1
+  grep -Eq '^f \./state\.db\.superseded-[0-9]{8}T[0-9]{6}Z/state\.db$' <<<"$listing" ||
+    { fail "T5: no state.db.superseded-*/state.db: ${listing}"; return 1; }
+  ! grep -Eq '^d \./state$' <<<"$listing" || { fail "T5: state/ still present: ${listing}"; return 1; }
   [ "$(pvc_fixture "$HOST_T5" ro read-file "$READ_AT_SCRIPT" workspace seed.txt)" = "upgrade ${RUN} ${HOST_T5}" ] ||
     { fail 'T5: the old seed file is not under workspace/'; return 1; }
-  ok 'T5: old family kept as state/state.db.upgrade-lane.bak, old files under workspace/'
+  ok 'T5: old database kept as state.db.superseded-*/state.db, old files under workspace/'
   ROWS_DONE=$((ROWS_DONE + 1))
   assert_history "$HOST_T6" "upgrade(stateless-stateful-stateless)" && read_seed_file "$HOST_T6" seed.txt "upgrade ${RUN} ${HOST_T6}" || return 1
   ROWS_DONE=$((ROWS_DONE + 1))
@@ -480,7 +461,6 @@ run_main() {
   header "Install ${RELEASE}" && install_release &&
     header 'Seed rows on the release' && seed_rows &&
     header 'Predict with inventory' && predict_rows &&
-    header 'Repair blockers on the release' && repair_blockers &&
     header 'Upgrade to this head' && upgrade_to_head &&
     header 'Verify and wake' && check_upgraded &&
     header 'History of every row' && check_history
