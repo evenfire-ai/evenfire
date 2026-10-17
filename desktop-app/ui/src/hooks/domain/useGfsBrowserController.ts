@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { Dispatch, SetStateAction } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
 import {
+  QueryClientContext,
   useInfiniteQuery,
   useMutation,
   useQueries,
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query'
+import type { QueryClient } from '@tanstack/react-query'
 import { GFS_BREADCRUMB_MAX_DEPTH } from '@constants/gfsBrowser'
 import {
   describeGfsReadError,
@@ -17,6 +19,9 @@ import {
 } from '@lib/gfsGrantErrors'
 import type { GfsGrantListItem, GfsShareListItem } from '@/gfs/delegation.types'
 import { deriveGfsInheritedAccess } from '@/gfs/inheritedAccess'
+import { GFS_SESSION_AUTHORITY_ERROR_CODES } from '../../../../src/gfs/sessionAuthority.js'
+import { gfsResourceLabelResolver } from '../../lib/gfsResourceLabelResolver'
+import { desktopQueryClient } from '../../lib/queryClient'
 import { desktopQueryKeys } from './queryKeys'
 
 /**
@@ -41,6 +46,40 @@ export const GFS_UNAVAILABLE_LOCATION_MESSAGE = 'This folder or file is no longe
 export type GfsUriOpenFailure = { kind: 'superseded' } | { kind: 'error'; error: unknown }
 
 type GfsAccessState = 'active' | 'revoked'
+
+export function buildGfsSessionScope(
+  envKey: string | null | undefined,
+  isAuthenticated: boolean,
+  me: { id: string; teamId?: string | null } | null | undefined
+): string | null {
+  return isAuthenticated && me ? `${envKey ?? ''}:${me.id}:${me.teamId ?? ''}` : null
+}
+
+export function useGfsSessionAccessState(
+  sessionScope: string | null,
+  queryClientOverride?: QueryClient
+): GfsAccessState {
+  const contextQueryClient = useContext(QueryClientContext)
+  const queryClient = queryClientOverride ?? contextQueryClient ?? desktopQueryClient
+  const queryKey = useMemo(
+    () => desktopQueryKeys.gfsAccessState(sessionScope ?? 'anonymous'),
+    [sessionScope]
+  )
+  const accessState = useQuery<GfsAccessState>(
+    {
+      queryKey,
+      // This key is local coordination state, not server data. The disabled
+      // observer keeps the shared decision alive across temporary unmounts;
+      // explicit session-cache clearing still removes it on logout.
+      queryFn: async () => queryClient.getQueryData<GfsAccessState>(queryKey) ?? 'active',
+      initialData: 'active',
+      enabled: false,
+      gcTime: Infinity,
+    },
+    queryClient
+  )
+  return accessState.data ?? 'active'
+}
 
 export interface GfsBrowserChild {
   resourceId: string
@@ -130,6 +169,11 @@ export interface GfsCrumb {
   kind: 'file' | 'directory'
   version: number
   bytes: number
+}
+
+export type GfsUriOpenResult = GfsCrumb & {
+  /** Session scope that owned the resolve when it was dispatched. */
+  originatingSessionScope: string | null
 }
 
 export interface GfsBrowserAffordances {
@@ -259,13 +303,6 @@ function classifyDiscoveryFailure(message: string): GfsDiscoveryFailureKind {
  */
 const UNKNOWN_RATE_LIMIT_PAUSE_MS = 60_000
 
-const SESSION_AUTHORITY_ERROR_CODES = [
-  'desktop_user_retired',
-  'operator_link_inactive',
-  'operator_link_invalid',
-  'gfs_operator_link_invalid',
-] as const
-
 /**
  * Only a session/authorization failure may invalidate the browser's
  * session-local access state. Per-resource policy verdicts such as
@@ -280,11 +317,18 @@ const SESSION_AUTHORITY_ERROR_CODES = [
  *   a bare 401 or a typed lifecycle code does.
  */
 export function isGfsSessionAuthorityFailure(
-  message: string,
+  error: unknown,
   surface: 'discovery' | 'operation' = 'operation'
 ): boolean {
+  if (isGfsStaleSessionAuthorityFailure(error)) return false
+  const message =
+    typeof error === 'string'
+      ? error
+      : error && typeof error === 'object' && 'message' in error
+        ? String((error as { message?: unknown }).message ?? '')
+        : String(error ?? '')
   const normalized = message.toLowerCase()
-  if (SESSION_AUTHORITY_ERROR_CODES.some(code => normalized.includes(code))) return true
+  if (GFS_SESSION_AUTHORITY_ERROR_CODES.some(code => normalized.includes(code))) return true
   if (surface !== 'discovery') {
     return (
       /(^|\D)401(\D|$)/.test(normalized) ||
@@ -297,6 +341,31 @@ export function isGfsSessionAuthorityFailure(
     normalized.includes('unauthorized') ||
     normalized.includes('forbidden')
   )
+}
+
+export function isGfsStaleSessionAuthorityFailure(error: unknown): boolean {
+  return Boolean(
+    error &&
+    typeof error === 'object' &&
+    (('name' in error && (error as { name?: unknown }).name === 'GfsStaleSessionAuthorityError') ||
+      ('code' in error && (error as { code?: unknown }).code === 'GFS_STALE_SESSION_AUTHORITY'))
+  )
+}
+
+/**
+ * Revoke shared GFS session state after an authority failure outside a mounted
+ * browser controller, such as a link-label lookup. The access flag is outside
+ * `gfsRoot`, so it survives the metadata purge and gates every mounted surface.
+ */
+export function revokeGfsSessionAccess(queryClient: QueryClient, sessionScope: string): void {
+  const accessStateKey = desktopQueryKeys.gfsAccessState(sessionScope)
+  // A cleared or superseded cache has no live authority owner. In particular,
+  // a late request must not recreate an infinite-lived revoked flag after
+  // logout has cleared the query client.
+  if (queryClient.getQueryData<GfsAccessState>(accessStateKey) !== 'active') return
+  queryClient.setQueryData(accessStateKey, 'revoked' as GfsAccessState)
+  gfsResourceLabelResolver.invalidatePrincipal(sessionScope)
+  queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
 }
 
 export function useGfsBrowserController(options: GfsBrowserControllerOptions = {}) {
@@ -340,10 +409,13 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // reset the browser + drop the gfs query subtree.
   const envKey = runtimeConfigState?.envKey ?? ''
   const sessionScope = useMemo(
-    () => (isAuthenticated && me ? `${envKey}:${me.id}:${me.teamId ?? ''}` : null),
+    () => buildGfsSessionScope(envKey, isAuthenticated, me),
     [envKey, isAuthenticated, me]
   )
+  const sessionScopeRef = useRef(sessionScope)
+  sessionScopeRef.current = sessionScope
   const canListAccessibleResources = typeof window.clerum?.gfs?.listAccessible === 'function'
+  const accessState = useGfsSessionAccessState(sessionScope)
 
   // Session-authority access state, SHARED across every controller mount (the
   // sidebar tree, FilesPage, FilePreviewPage each mount their own controller).
@@ -352,27 +424,24 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // only safe response is to drop it all and gate the queries off. That decision
   // has to be observed by EVERY mount: a 401 in one surface must revoke the
   // others, and a retry in one must re-enable them. It therefore lives in the
-  // query cache (a pure subscription here; never fetches — writes go through
-  // `setAccessState`), keyed by sessionScope and OUTSIDE `gfsRoot` so the
+  // query cache (a disabled observer; it never fetches server data — writes go
+  // through `setAccessState`), keyed by sessionScope and OUTSIDE `gfsRoot` so the
   // fail-closed purge below does not clear the flag it just set. `gcTime:
   // Infinity` keeps the revoked decision alive across a gap with no mounts, so a
   // later mount still fails closed; only retryAccess (a server round-trip) or a
   // session-scope change returns to 'active'.
-  const accessStateQuery = useQuery({
-    queryKey: desktopQueryKeys.gfsAccessState(sessionScope ?? 'anonymous'),
-    queryFn: () => 'active' as GfsAccessState,
-    enabled: false,
-    initialData: 'active' as GfsAccessState,
-    gcTime: Infinity,
-    staleTime: Infinity,
-  })
-  const accessState: GfsAccessState = accessStateQuery.data ?? 'active'
   const setAccessState = useCallback(
     (next: GfsAccessState) => {
       queryClient.setQueryData(desktopQueryKeys.gfsAccessState(sessionScope ?? 'anonymous'), next)
     },
     [queryClient, sessionScope]
   )
+
+  useEffect(() => {
+    if (accessState !== 'revoked') return
+    if (crumbs.length) setCrumbs([])
+    setOpenError(null)
+  }, [accessState, crumbs.length, setCrumbs])
 
   useEffect(() => {
     const previous = previousSessionScopeRef.current
@@ -584,11 +653,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
    * affordances, grants, shares). The `accessState` gate disables the query
    * observers until an explicit retry re-enters through the server.
    */
-  const clearGfsState = useCallback(() => {
-    setCrumbs([])
-    setOpenError(null)
-    queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
-  }, [queryClient])
   const clearInaccessibleGfsLocation = useCallback(() => {
     const resourceId = currentCrumbRef.current?.resourceId
     pendingDeniedResourceIdRef.current = resourceId ?? null
@@ -611,9 +675,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     })
   }, [current?.resourceId, queryClient, sessionScope])
   const revokeAccess = useCallback(() => {
-    setAccessState('revoked')
-    clearGfsState()
-  }, [clearGfsState, setAccessState])
+    revokeGfsSessionAccess(queryClient, sessionScope ?? 'anonymous')
+    setCrumbs([])
+    setOpenError(null)
+  }, [queryClient, sessionScope, setCrumbs])
   const retryAccess = useCallback(() => {
     // This restores no local capability; it only re-enables the queries so a
     // server-side re-grant (or a fresh sign-in) is the sole way back in. Because
@@ -623,8 +688,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   /** For imperative flows (openUri, revoke mutations): fail closed on a
    * session-authority rejection; returns true when it did. */
   const handleAuthorityFailure = useCallback(
-    (message: string, surface: 'discovery' | 'operation' = 'operation'): boolean => {
-      if (!isGfsSessionAuthorityFailure(message, surface)) return false
+    (error: unknown, surface: 'discovery' | 'operation' = 'operation'): boolean => {
+      if (!isGfsSessionAuthorityFailure(error, surface)) return false
       revokeAccess()
       return true
     },
@@ -651,7 +716,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // caller would only have toasted. Policy verdicts (403/412) stay local.
   const failClosedOnMutationError = useCallback(
     (error: unknown) => {
-      handleAuthorityFailure(toMessage(error), 'operation')
+      handleAuthorityFailure(error, 'operation')
     },
     [handleAuthorityFailure]
   )
@@ -762,10 +827,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const childrenFetchedThisEpoch = childrenQuery.dataUpdatedAt >= authorityEpochRef.current
   const items = useMemo<GfsBrowserChild[]>(
     () =>
-      authorityPending && !childrenFetchedThisEpoch
+      accessState === 'revoked' || (authorityPending && !childrenFetchedThisEpoch)
         ? []
         : (childrenQuery.data?.pages ?? []).flatMap(page => page.items),
-    [authorityPending, childrenFetchedThisEpoch, childrenQuery.data]
+    [accessState, authorityPending, childrenFetchedThisEpoch, childrenQuery.data]
   )
   /**
    * Children listings deliberately contain no permission bits. Resolve the
@@ -821,33 +886,28 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // Query-surfaced authorization failures (a refetch after revocation is the
   // normal way the loss is discovered under Infinity staleTime). Discovery is
   // the session/authority boundary; per-resource verdicts stay local.
-  const queryAuthorizationError = [
-    accessibleQuery.error
-      ? { message: toMessage(accessibleQuery.error), surface: 'discovery' as const }
-      : null,
-    childrenQuery.error
-      ? { message: toMessage(childrenQuery.error), surface: 'operation' as const }
-      : null,
-    affordancesQuery.error
-      ? { message: toMessage(affordancesQuery.error), surface: 'operation' as const }
-      : null,
-    rowAffordancesQuery.error
-      ? { message: toMessage(rowAffordancesQuery.error), surface: 'operation' as const }
-      : null,
-    ...rowAffordancesQueries.map(query =>
-      query.error ? { message: toMessage(query.error), surface: 'operation' as const } : null
-    ),
-    grantsQuery.error
-      ? { message: toMessage(grantsQuery.error), surface: 'operation' as const }
-      : null,
-    sharesQuery.error
-      ? { message: toMessage(sharesQuery.error), surface: 'operation' as const }
-      : null,
-  ]
-    .filter(
-      (entry): entry is { message: string; surface: 'discovery' | 'operation' } => entry !== null
-    )
-    .find(entry => isGfsSessionAuthorityFailure(entry.message, entry.surface))
+  const queryAuthorizationError = (
+    [
+      accessibleQuery.error
+        ? { error: accessibleQuery.error, surface: 'discovery' as const }
+        : null,
+      childrenQuery.error ? { error: childrenQuery.error, surface: 'operation' as const } : null,
+      affordancesQuery.error
+        ? { error: affordancesQuery.error, surface: 'operation' as const }
+        : null,
+      rowAffordancesQuery.error
+        ? { error: rowAffordancesQuery.error, surface: 'operation' as const }
+        : null,
+      ...rowAffordancesQueries.map(query =>
+        query.error ? { error: query.error, surface: 'operation' as const } : null
+      ),
+      grantsQuery.error ? { error: grantsQuery.error, surface: 'operation' as const } : null,
+      sharesQuery.error ? { error: sharesQuery.error, surface: 'operation' as const } : null,
+    ] as Array<{ error: unknown; surface: 'discovery' | 'operation' } | null>
+  ).find(
+    (entry): entry is { error: unknown; surface: 'discovery' | 'operation' } =>
+      entry !== null && isGfsSessionAuthorityFailure(entry.error, entry.surface)
+  )
   useEffect(() => {
     if (!queryAuthorizationError || accessState === 'revoked') return
     revokeAccess()
@@ -865,22 +925,22 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   }, [clearInaccessibleGfsLocation, currentFolderUnavailable])
   const accessibleResources = useMemo<GfsAccessibleResource[]>(
     () =>
-      authorityPending
+      authorityPending || accessState === 'revoked'
         ? []
         : suppressNavigableShares(
             (accessibleQuery.data?.pages ?? []).flatMap(page =>
               page.items.map(normalizeAccessibleResource)
             )
           ),
-    [accessibleQuery.data, authorityPending]
+    [accessibleQuery.data, accessState, authorityPending]
   )
   const grants = useMemo<GfsGrantListItem[]>(
-    () => (authorityPending ? [] : (grantsQuery.data ?? [])),
-    [authorityPending, grantsQuery.data]
+    () => (authorityPending || accessState === 'revoked' ? [] : (grantsQuery.data ?? [])),
+    [accessState, authorityPending, grantsQuery.data]
   )
   const shares = useMemo<GfsShareListItem[]>(
-    () => (authorityPending ? [] : (sharesQuery.data ?? [])),
-    [authorityPending, sharesQuery.data]
+    () => (authorityPending || accessState === 'revoked' ? [] : (sharesQuery.data ?? [])),
+    [accessState, authorityPending, sharesQuery.data]
   )
   const inheritedAccess = useMemo(
     () => (authorityPending || accessState === 'revoked' ? [] : (inheritedAccessQuery.data ?? [])),
@@ -919,6 +979,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       ? childrenErrorUpdatedAt + retryAfterSeconds * 1000
       : Date.now() + UNKNOWN_RATE_LIMIT_PAUSE_MS
   }, [childrenErrorMessage, childrenErrorUpdatedAt])
+
+  const visibleCrumbs = accessState === 'revoked' ? [] : crumbs
+  const visibleCurrent = accessState === 'revoked' ? null : current
   useEffect(() => {
     // A rate limit with no parseable window is still a rate limit. Leaving the
     // pause open here would let every window focus spend another request
@@ -970,6 +1033,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       }
     ) => {
       const background = options?.background === true
+      const originatingSessionScope = sessionScope
       // User navigation owns the location until its authoritative resolution
       // settles. A background refresh that starts before React commits that
       // navigation must not read/commit the old location in the meantime.
@@ -978,6 +1042,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       const backgroundGeneration = background ? ++backgroundOpenUriGenerationRef.current : undefined
       const isCurrent = () =>
         options?.shouldContinue?.() !== false &&
+        sessionScopeRef.current === originatingSessionScope &&
         openUriGenerationRef.current === generation &&
         (!background ||
           (backgroundOpenUriGenerationRef.current === backgroundGeneration &&
@@ -1075,7 +1140,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           backgroundLocationRetryAttemptRef.current = 0
         }
         setCrumbsState([...ancestors.reverse(), crumb])
-        return crumb
+        return { ...crumb, originatingSessionScope }
       } catch (error) {
         if (!isCurrent()) {
           if (!background) options?.onFailure?.({ kind: 'superseded' })
@@ -1088,7 +1153,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         //
         // The authority check reads the RAW message — it matches status codes
         // and lifecycle tokens — while the banner shows the presented verdict.
-        if (!handleAuthorityFailure(message, 'operation')) {
+        if (!handleAuthorityFailure(error, 'operation')) {
           const status = parseHttpStatus(message)
           if (options?.clearIfUnavailable && (status === 403 || status === 404)) {
             clearInaccessibleGfsLocation()
@@ -1107,7 +1172,12 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         }
       }
     },
-    [clearInaccessibleGfsLocation, handleAuthorityFailure, scheduleBackgroundLocationRetry]
+    [
+      clearInaccessibleGfsLocation,
+      handleAuthorityFailure,
+      scheduleBackgroundLocationRetry,
+      sessionScope,
+    ]
   )
   useEffect(() => {
     backgroundLocationRetryRef.current = uri => {
@@ -1258,8 +1328,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   )
 
   return {
-    crumbs,
-    current,
+    crumbs: visibleCrumbs,
+    current: visibleCurrent,
     /** Cache-scope key (env + user + team) so the move dialog's queries share
      *  the controller's cache and are dropped together on scope change. */
     sessionScope: sessionScope ?? 'anonymous',

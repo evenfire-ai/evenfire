@@ -60,6 +60,8 @@ export function FilePreviewPage({
   byteLength,
   reloadVersion,
   unavailable = false,
+  sessionScope,
+  isGfsPreviewSessionScopeCurrent,
   pushToast,
   onOpenRoute,
   pendingResourceAction,
@@ -72,6 +74,15 @@ export function FilePreviewPage({
   const [copyContentReadyUri, setCopyContentReadyUri] = useState<string | null>(null)
   const copyContentRef = useRef<{ gfsUri: string; run: () => Promise<boolean> } | null>(null)
   const lastHandledResourceActionIdRef = useRef<number | null>(null)
+  const accessRevoked = ctrl.accessState === 'revoked'
+  const isCurrentGfsPreviewScope = useCallback(
+    () =>
+      !accessRevoked &&
+      (sessionScope === undefined ||
+        isGfsPreviewSessionScopeCurrent === undefined ||
+        isGfsPreviewSessionScopeCurrent(sessionScope)),
+    [accessRevoked, isGfsPreviewSessionScopeCurrent, sessionScope]
+  )
   const pendingResourceActionRef = useRef(pendingResourceAction)
   pendingResourceActionRef.current =
     pendingResourceAction?.id === lastHandledResourceActionIdRef.current
@@ -93,8 +104,6 @@ export function FilePreviewPage({
     },
     [gfsUri, onPendingResourceActionHandled]
   )
-  const accessRevoked = ctrl.accessState === 'revoked'
-
   // Each previewed resource starts from a clean per-resource verdict.
   useEffect(() => {
     setDenied(null)
@@ -113,7 +122,7 @@ export function FilePreviewPage({
 
   const handleDownloadError = useCallback(
     (error: unknown) => {
-      ctrl.handleAuthorityFailure(toMessage(error), 'operation')
+      ctrl.handleAuthorityFailure(error, 'operation')
     },
     [ctrl]
   )
@@ -128,10 +137,7 @@ export function FilePreviewPage({
       pushToast?.('EvenDrive refreshed', 'success')
     } catch (error) {
       const message = toMessage(error)
-      if (
-        !ctrl.handleAuthorityFailure(message, 'operation') &&
-        isPerResourceAccessDenial(message)
-      ) {
+      if (!ctrl.handleAuthorityFailure(error, 'operation') && isPerResourceAccessDenial(message)) {
         setDenied(message)
       }
       pushToast?.(`Could not refresh EvenDrive: ${message}`, 'error')
@@ -160,17 +166,24 @@ export function FilePreviewPage({
   }, [gfsUri, pushToast])
 
   const handleCopyContent = useCallback(async () => {
+    if (!isCurrentGfsPreviewScope()) return
     const copy = copyContentRef.current
     if (!copy || copy.gfsUri !== gfsUri) return
     const copied = await copy.run()
+    if (!isCurrentGfsPreviewScope()) return
     pushToast?.(
       copied ? 'EvenDrive content copied' : 'Could not copy the EvenDrive content',
       copied ? 'success' : 'error'
     )
-  }, [gfsUri, pushToast])
+  }, [gfsUri, isCurrentGfsPreviewScope, pushToast])
 
   const handleCopyContentReady = useCallback(
     (copy: (() => Promise<boolean>) | null) => {
+      if (!isCurrentGfsPreviewScope()) {
+        copyContentRef.current = null
+        setCopyContentReadyUri(null)
+        return
+      }
       if (copy) {
         copyContentRef.current = { gfsUri, run: copy }
         setCopyContentReadyUri(gfsUri)
@@ -179,10 +192,10 @@ export function FilePreviewPage({
       if (copyContentRef.current?.gfsUri === gfsUri) copyContentRef.current = null
       setCopyContentReadyUri(current => (current === gfsUri ? null : current))
     },
-    [gfsUri]
+    [gfsUri, isCurrentGfsPreviewScope]
   )
 
-  const copyContentReady = copyContentReadyUri === gfsUri
+  const copyContentReady = copyContentReadyUri === gfsUri && isCurrentGfsPreviewScope()
 
   const resourceActions = buildGfsResourceActions({
     kind: 'file',
@@ -196,6 +209,7 @@ export function FilePreviewPage({
         !denied &&
         !unavailable &&
         !accessRevoked &&
+        copyContentReady &&
         (fileKind === 'image' || fileKind === 'markdown')
           ? () => void handleCopyContent()
           : undefined,
@@ -224,7 +238,7 @@ export function FilePreviewPage({
       pushToast?.('This file is no longer available for copying.', 'error')
       return
     }
-    if (!copyContentReady) return
+    if (!copyContentReady || !isCurrentGfsPreviewScope()) return
     const action = resourceActions.find(candidate => candidate.id === request.actionId)
     if (!action || action.disabled) return
     lastHandledResourceActionIdRef.current = request.id
@@ -236,6 +250,7 @@ export function FilePreviewPage({
     copyContentReady,
     denied,
     gfsUri,
+    isCurrentGfsPreviewScope,
     onPendingResourceActionHandled,
     pendingResourceAction,
     pushToast,
@@ -244,7 +259,7 @@ export function FilePreviewPage({
   ])
 
   const revalidateAccess = useCallback(async () => {
-    if (denied || accessRevoked) return
+    if (denied || accessRevoked || !isCurrentGfsPreviewScope()) return
     try {
       await window.clerum.gfs.resolve(gfsUri)
     } catch (error) {
@@ -252,10 +267,10 @@ export function FilePreviewPage({
       // A session-authority failure revokes the shared session (H2 path); the
       // body then remounts and fails closed. A per-resource 403 is local to this
       // preview — drop its bytes here without touching the session.
-      if (ctrl.handleAuthorityFailure(message, 'operation')) return
+      if (ctrl.handleAuthorityFailure(error, 'operation')) return
       if (isPerResourceAccessDenial(message)) setDenied(message)
     }
-  }, [accessRevoked, ctrl, denied, gfsUri])
+  }, [accessRevoked, ctrl, denied, gfsUri, isCurrentGfsPreviewScope])
 
   useEffect(() => {
     const onFocus = () => {
@@ -286,6 +301,7 @@ export function FilePreviewPage({
                   mimeType={mimeType ?? ''}
                   onDownloadError={handleDownloadError}
                   onCopyContentReady={handleCopyContentReady}
+                  isScopeCurrent={isCurrentGfsPreviewScope}
                   titleActions={fileActionsMenu}
                   headingLevel={2}
                 />
@@ -298,6 +314,7 @@ export function FilePreviewPage({
                   gfsUri={gfsUri}
                   onDownloadError={handleDownloadError}
                   onCopyContentReady={handleCopyContentReady}
+                  isScopeCurrent={isCurrentGfsPreviewScope}
                   titleActions={fileActionsMenu}
                   headingLevel={2}
                 />

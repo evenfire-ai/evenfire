@@ -14,6 +14,10 @@ export interface FilePreviewPageProps {
   reloadVersion?: number
   /** Set when an authoritative re-resolve denies access or the file is no longer previewable. */
   unavailable?: boolean
+  /** Exact GFS scope captured when this workspace Preview opened. */
+  sessionScope?: string
+  /** Reads App's current scope so retained actions cannot cross a scope change. */
+  isGfsPreviewSessionScopeCurrent?: (sessionScope: string) => boolean
   pushToast?: (message: string, tone: Tone) => void
   onOpenRoute?: () => void
   /** One-shot Copy content action requested by a sidebar resource row. */

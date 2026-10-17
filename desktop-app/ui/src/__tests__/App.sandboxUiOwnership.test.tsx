@@ -129,7 +129,7 @@ function makeController(): AppController {
     )
     forceControllerRender()
   })
-  const openPreviewSection = vi.fn((preview: GfsPreviewResource) => {
+  const openPreviewSection = vi.fn((preview: GfsPreviewResource, sessionScope?: string) => {
     beginUserNavigationIntent()
     clearAppsPicker()
     setWorkspaceTabs((state: WorkspaceState) =>
@@ -137,6 +137,7 @@ function makeController(): AppController {
         id: nextWorkspaceTabId(),
         title: preview.name,
         gfsUri: preview.gfsUri,
+        ...(sessionScope !== undefined ? { sessionScope } : {}),
         fileKind: preview.kind,
         byteLength: preview.bytes,
         ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
