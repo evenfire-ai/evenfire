@@ -48,6 +48,7 @@ export const PR2_MIGRATION_VERSIONS = Object.freeze([
   '0141_workflow_recipe_authority_entity',
   '0142_workflow_run_failure_reason',
   '0143_r31_runtime_behavior_sources',
+  '0145_workflow_authorization_pause',
 ])
 
 const AUTHORIZATION_REVISION_COMPATIBILITY_PREREQUISITE = '0130_user_access_foundation'

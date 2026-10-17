@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { ACTION_CONTEXT_VERSION } from '@clerum/action-context-contracts'
+import { pool } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
 import { requireActionCheckpointCaller } from '../../middleware/actionCheckpointCaller.js'
 import { AccessExecutionBudget } from '../../services/access/accessExecutionBudget.js'
@@ -16,6 +17,7 @@ import {
   requiresHostRpcAdmission,
   respondHostRpcAdmissionFailure,
 } from '../../services/hostRpcAdmission.js'
+import { revalidateWorkflowTriggerCheckpoint } from '../../services/workflows/workflowTriggerCheckpointRevalidation.js'
 import {
   issueHostMessageAdmissionReceipt,
   verifyHostMessageAdmissionReceipt,
@@ -95,6 +97,32 @@ export function createInternalActionAuthorityCheckpointRouter(gateway: K8sGatewa
       }
       const budget = AccessExecutionBudget.create('action')
       try {
+        if (
+          caller.service === 'workflow-recipes' &&
+          (parsed.operationId === 'workflow.trigger' ||
+            parsed.operationId === 'workflow.run.manage')
+        ) {
+          let revalidated
+          try {
+            revalidated = await revalidateWorkflowTriggerCheckpoint({
+              request: parsed,
+              caller,
+              gateway,
+              budget,
+              db: pool,
+              correlationId: req.correlationId,
+            })
+          } catch {
+            revalidated = {
+              version: ACTION_CONTEXT_VERSION,
+              status: 'authority_unavailable' as const,
+              code: 'authority_unavailable' as const,
+              retryable: true as const,
+            }
+          }
+          res.status(STATUS_BY_OUTCOME[revalidated.status]).json(revalidated)
+          return
+        }
         const result = await checkpointActionAuthority({
           request: parsed,
           gateway,

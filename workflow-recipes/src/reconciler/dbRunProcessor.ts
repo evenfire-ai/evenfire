@@ -28,6 +28,7 @@ const AUTHORITY_FAILURE_REASON = Object.freeze({
   not_found: 'workflow_authority_not_found',
   access_path_stale: 'workflow_authority_access_path_stale',
   invalid_binding: 'workflow_authority_invalid_binding',
+  unavailable: 'workflow_authority_unavailable',
 } as const)
 
 function terminalAuthorityFailureReason(
@@ -40,9 +41,22 @@ function terminalAuthorityFailureReason(
   return null
 }
 
+function runningAuthorityFailureReason(error: unknown): string {
+  if (!(error instanceof WorkflowAuthorityCheckpointError)) {
+    return AUTHORITY_FAILURE_REASON.unavailable
+  }
+  return terminalAuthorityFailureReason(error.failure) ?? AUTHORITY_FAILURE_REASON.unavailable
+}
+
 // ─── Types ─────────────────────────────────────────────────────────────
 
-export type WorkflowRunPhase = 'Pending' | 'Running' | 'Succeeded' | 'Failed' | 'Canceled'
+export type WorkflowRunPhase =
+  | 'Pending'
+  | 'Running'
+  | 'AuthorizationPaused'
+  | 'Succeeded'
+  | 'Failed'
+  | 'Canceled'
 
 /** Subset of workflow_runs we load when processing a notification. */
 export interface DbRunRow {
@@ -63,6 +77,7 @@ export interface DbRunRow {
   started_at: string | null
   child_recipe_name: string | null
   child_recipe_namespace: string | null
+  failure_reason?: string | null
   authority_binding?: WorkflowRunAuthorityBinding | null
 }
 
@@ -126,6 +141,16 @@ export interface DbRunProcessor {
   processPending(runId: string): Promise<void>
   syncFromRecipeExecution(recipe: WorkflowRecipeCRD): Promise<void>
   checkStuckRuns(): Promise<number>
+  checkpointRunningBoundary(runId: string): Promise<'allowed' | 'paused' | 'not_running'>
+  getRunStatus(
+    runId: string,
+    recipeNamespace: string,
+    recipeName: string
+  ): Promise<{
+    phase: WorkflowRunPhase
+    failureReason: string | null
+    hasAuthority: boolean
+  } | null>
 }
 
 // ─── SQL literal helpers ───────────────────────────────────────────────
@@ -136,6 +161,7 @@ const SELECT_RUN_FOR_UPDATE = `
          run.inputs, run.intermediate_parameters, run.output_overrides,
          run.trigger_source, run.owner_instance_id, run.max_duration_seconds,
          run.started_at, run.child_recipe_name, run.child_recipe_namespace,
+         run.failure_reason,
          CASE WHEN binding.id IS NULL THEN NULL ELSE jsonb_build_object(
            'version', binding.binding_version,
            'userId', binding.user_id,
@@ -153,8 +179,21 @@ const SELECT_RUN_FOR_UPDATE = `
            'behaviorBindingHash', binding.behavior_binding_hash
          ) END AS authority_binding
     FROM workflow_runs run
+    LEFT JOIN workflow_authority_bindings initiating_binding
+      ON initiating_binding.id = run.initiating_authority_binding_id
+    LEFT JOIN LATERAL (
+      SELECT candidate.id
+        FROM workflow_authority_bindings candidate
+       WHERE candidate.binding_kind = 'run_management'
+         AND candidate.entity_type = 'workflow_run'
+         AND candidate.entity_id = run.run_id::text
+         AND candidate.operation_id = 'workflow.run.manage'
+         AND candidate.target = jsonb_build_object('runId', run.run_id::text, 'action', 'resume')
+       ORDER BY candidate.created_at DESC, candidate.id DESC
+       LIMIT 1
+    ) continuation_binding ON TRUE
     LEFT JOIN workflow_authority_bindings binding
-      ON binding.id = run.initiating_authority_binding_id
+      ON binding.id = COALESCE(continuation_binding.id, initiating_binding.id)
    WHERE run.run_id = $1
    FOR UPDATE OF run`
 
@@ -171,11 +210,11 @@ const CLAIM_PENDING = `
      AND phase = 'Pending'
      AND (owner_instance_id IS NULL OR owner_instance_id = $1)`
 
-const FAIL_PENDING_AUTHORITY = `
+const PAUSE_PENDING_FOR_AUTHORITY = `
   UPDATE workflow_runs
-     SET phase = 'Failed',
+     SET phase = 'AuthorizationPaused',
          failure_reason = $2,
-         completed_at = now(),
+         owner_instance_id = NULL,
          last_reconciled_at = now(),
          updated_at = now()
    WHERE run_id = $1
@@ -190,6 +229,7 @@ const UPDATE_RUN_TERMINAL = `
    WHERE run_id = $3
      AND (
        phase IN ('Pending', 'Running')
+       OR (phase = 'AuthorizationPaused' AND $1 IN ('Failed', 'Canceled'))
        OR (phase = 'Failed' AND $1 = 'Succeeded')
      )`
 
@@ -199,6 +239,25 @@ const UPDATE_RUN_PROGRESS = `
          updated_at = now()
    WHERE run_id = $1
      AND phase IN ('Pending', 'Running')`
+
+const PAUSE_RUNNING_FOR_AUTHORITY = `
+  UPDATE workflow_runs
+     SET phase = 'AuthorizationPaused',
+         failure_reason = $2,
+         last_reconciled_at = now(),
+         updated_at = now()
+   WHERE run_id = $1
+     AND phase = 'Running'`
+
+const SELECT_RUN_STATUS = `
+  SELECT phase, failure_reason,
+         initiating_authority_binding_id IS NOT NULL AS has_authority
+    FROM workflow_runs
+   WHERE run_id = $1
+     AND (
+       (recipe_namespace = $2 AND recipe_name = $3)
+       OR (child_recipe_namespace = $2 AND child_recipe_name = $3)
+     )`
 
 const UPSERT_STEP = `
   INSERT INTO workflow_run_steps
@@ -219,7 +278,7 @@ const UPSERT_STEP = `
 const FIND_STUCK_RUNS = `
   SELECT run_id, started_at, max_duration_seconds
     FROM workflow_runs
-   WHERE phase = 'Running'
+   WHERE phase IN ('Running', 'AuthorizationPaused')
      AND owner_instance_id = $1
      AND max_duration_seconds IS NOT NULL
      AND started_at IS NOT NULL
@@ -234,7 +293,7 @@ const FAIL_STUCK_RUN = `
          last_reconciled_at = now(),
          updated_at = now()
    WHERE run_id = $1
-     AND phase = 'Running'
+     AND phase IN ('Running', 'AuthorizationPaused')
      AND owner_instance_id = $2`
 
 const FIND_ORPHAN_RUNS = `
@@ -508,26 +567,22 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
       }
 
       if (run.authority_binding) {
-        if (!opts.checkpointAuthority) {
-          throw new Error('workflow_authority_checkpointer_unavailable')
-        }
         try {
+          if (!opts.checkpointAuthority) {
+            throw new WorkflowAuthorityCheckpointError('authority_unavailable', true)
+          }
           await opts.checkpointAuthority(run)
         } catch (error) {
-          if (error instanceof WorkflowAuthorityCheckpointError && !error.retryable) {
-            const failureReason = terminalAuthorityFailureReason(error.failure)
-            if (!failureReason) throw error
-            await client.query(FAIL_PENDING_AUTHORITY, [run.run_id, failureReason])
-            await client.query('COMMIT')
-            committed = true
-            log.warn('pending run failed after permanent authority rejection', {
-              run_id: run.run_id,
-              authority_failure: error.failure,
-            })
-            notifyRunTerminal(run.run_id, 'Failed')
-            return
-          }
-          throw error
+          const failureReason = runningAuthorityFailureReason(error)
+          await client.query(PAUSE_PENDING_FOR_AUTHORITY, [run.run_id, failureReason])
+          await client.query('COMMIT')
+          committed = true
+          log.warn('pending run paused after authority checkpoint rejection', {
+            run_id: run.run_id,
+            authority_failure:
+              error instanceof WorkflowAuthorityCheckpointError ? error.failure : 'unavailable',
+          })
+          return
         }
       }
       const child = await opts.createChildRecipe(run)
@@ -686,6 +741,100 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
     return failed
   }
 
+  async function checkpointRunningBoundary(
+    runId: string
+  ): Promise<'allowed' | 'paused' | 'not_running'> {
+    const client = await connect()
+    let committed = false
+    try {
+      await client.query('BEGIN')
+      const selected = await client.query<DbRunRow>(SELECT_RUN_FOR_UPDATE, [runId])
+      const run = selected.rows[0]
+      if (!run) {
+        await client.query('COMMIT')
+        committed = true
+        return 'not_running'
+      }
+      if (run.phase === 'AuthorizationPaused') {
+        await client.query('COMMIT')
+        committed = true
+        return 'paused'
+      }
+      if (run.phase !== 'Running') {
+        await client.query('COMMIT')
+        committed = true
+        return 'not_running'
+      }
+      // Legacy V1 runs have no initiating authority binding and retain their
+      // existing lifecycle without the V2 continuation checkpoint.
+      if (!run.authority_binding) {
+        await client.query('COMMIT')
+        committed = true
+        return 'allowed'
+      }
+
+      let failureReason: string | null = null
+      try {
+        if (!opts.checkpointAuthority) {
+          throw new WorkflowAuthorityCheckpointError('authority_unavailable', true)
+        }
+        await opts.checkpointAuthority(run)
+      } catch (error) {
+        failureReason = runningAuthorityFailureReason(error)
+      }
+
+      if (!failureReason) {
+        await client.query('COMMIT')
+        committed = true
+        return 'allowed'
+      }
+
+      await client.query(PAUSE_RUNNING_FOR_AUTHORITY, [run.run_id, failureReason])
+      await client.query('COMMIT')
+      committed = true
+      log.warn('running workflow paused at a protected boundary', {
+        run_id: run.run_id,
+        authority_failure: failureReason,
+      })
+      return 'paused'
+    } catch (err) {
+      if (!committed) {
+        try {
+          await client.query('ROLLBACK')
+        } catch {
+          /* swallow */
+        }
+      }
+      throw err
+    } finally {
+      client.release()
+    }
+  }
+
+  async function getRunStatus(
+    runId: string,
+    recipeNamespace: string,
+    recipeName: string
+  ): Promise<{
+    phase: WorkflowRunPhase
+    failureReason: string | null
+    hasAuthority: boolean
+  } | null> {
+    const result = await opts.pool.query<{
+      phase: WorkflowRunPhase
+      failure_reason: string | null
+      has_authority: boolean
+    }>(SELECT_RUN_STATUS, [runId, recipeNamespace, recipeName])
+    const row = result.rows[0]
+    return row
+      ? {
+          phase: row.phase,
+          failureReason: row.failure_reason,
+          hasAuthority: row.has_authority === true,
+        }
+      : null
+  }
+
   return {
     async start() {
       if (!stopped) return
@@ -724,6 +873,8 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
     processPending,
     syncFromRecipeExecution,
     checkStuckRuns,
+    checkpointRunningBoundary,
+    getRunStatus,
   }
 }
 

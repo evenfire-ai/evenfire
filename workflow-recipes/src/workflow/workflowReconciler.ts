@@ -3118,6 +3118,7 @@ export class WorkflowReconciler {
         'pending',
         'initializing',
         'running',
+        'authorization_paused',
         'completed',
         'failed',
         'recovering',
@@ -3131,8 +3132,13 @@ export class WorkflowReconciler {
       // "completed" → "active" (infrastructure still exists, execution done)
       // "failed"    → "failed" (surfaces failure in CRD status)
       let recipePhase = 'deploying'
-      if (workflowPhase === 'running' || workflowPhase === 'completed') recipePhase = 'active'
-      else if (workflowPhase === 'failed' || workflowPhase === 'cancelled') recipePhase = 'failed'
+      if (
+        workflowPhase === 'running' ||
+        workflowPhase === 'authorization_paused' ||
+        workflowPhase === 'completed'
+      ) {
+        recipePhase = 'active'
+      } else if (workflowPhase === 'failed' || workflowPhase === 'cancelled') recipePhase = 'failed'
 
       return withWorkflowConditions({
         phase: recipePhase,

@@ -80,6 +80,7 @@ describe('D34 migration execution policy', () => {
       '0141_workflow_recipe_authority_entity',
       '0142_workflow_run_failure_reason',
       '0143_r31_runtime_behavior_sources',
+      '0145_workflow_authorization_pause',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')

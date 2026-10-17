@@ -24,7 +24,10 @@ import type {
   OperationalIndexedResource,
   OperationalResourceGraphResult,
 } from './operationalAccessReader.js'
-import { selectOperationalPathGraph } from './operationalAccessReader.js'
+import {
+  loadOperationalResourceGraph,
+  selectOperationalPathGraph,
+} from './operationalAccessReader.js'
 import type { CanonicalResourceIdentity } from './resourceIdentity.js'
 import {
   assembleOperationalBehaviorDimensions,
@@ -375,6 +378,17 @@ function operationalBindingsForGraph(
           behaviorAttributes: relationship.behaviorAttributes,
         })),
     }))
+}
+
+function workflowRunResumeBindings(
+  graph: Extract<OperationalResourceGraphResult, { status: 'current' }>
+): OperationalPathBinding[] {
+  // Resume changes the exact durable run row. Its current recipe and Context are
+  // exact-validated here; later MCP/provider/filesystem effects validate their
+  // own selected targets at their existing protected-effect boundaries.
+  return operationalBindingsForGraph(graph).filter(
+    binding => binding.resourceType === 'workflow_recipe' || binding.resourceType === 'context'
+  )
 }
 
 function publicRelationships(graph: OperationalResourceGraphResult | null) {
@@ -729,6 +743,7 @@ async function loadDatabaseCandidates(input: {
   budget: AccessExecutionBudget
   snapshot: PrincipalAuthoritySnapshot
   resource: CanonicalResourceIdentity
+  operationTarget?: ValidatedOperationTarget
 }): Promise<ResourceAuthorityResult> {
   const { resource, snapshot } = input
   if (resource.type === 'user') {
@@ -912,11 +927,59 @@ async function loadDatabaseCandidates(input: {
     [snapshot.userId, resource.type, resource.logicalId, input.budget.limits.accessPaths + 1]
   )
   const rows = result.rows as Record<string, unknown>[]
+  let workflowRunSource:
+    | Readonly<{
+        graph: Extract<OperationalResourceGraphResult, { status: 'current' }>
+        policySnapshot: Awaited<ReturnType<typeof loadRuntimeBehaviorPolicySnapshot>>
+        runtimeRef: string
+      }>
+    | undefined
+  if (
+    resource.type === 'workflow_run' &&
+    snapshot.sessionContract === 'v2' &&
+    input.operationTarget?.runId === resource.logicalId &&
+    input.operationTarget.action === 'resume'
+  ) {
+    const firstRun = rows[0]
+    if (firstRun) {
+      const recipeGraph = await loadOperationalResourceGraph({
+        db: input.db,
+        budget: input.budget,
+        environmentId: resource.environmentId,
+        resourceType: 'workflow_recipe',
+        logicalId: `${String(firstRun.recipe_namespace)}/${String(firstRun.recipe_name)}`,
+      })
+      if (recipeGraph.status !== 'current') {
+        throw new Error('workflow_resume_operational_graph_unavailable')
+      }
+      const selectedGraph = selectOperationalPathGraph({ graph: recipeGraph })
+      if (!selectedGraph) throw new Error('workflow_resume_operational_graph_incomplete')
+      const policySnapshot = await loadRuntimeBehaviorPolicySnapshot({
+        db: input.db,
+        budget: input.budget,
+        contextRefs: budgetContextRefsForGraph(selectedGraph),
+      })
+      workflowRunSource = {
+        graph: selectedGraph,
+        policySnapshot,
+        runtimeRef: JSON.stringify(
+          selectedGraph.relationships
+            .map(relationship => relationship.relationshipInstanceId)
+            .sort(compareCanonicalUtf8Text)
+        ),
+      }
+    }
+  }
   const candidates = rows.flatMap(row => {
     const type = resource.type
     const capabilities: AccessCapability[] =
       type === 'workflow_run'
-        ? ['workflow.read', 'workflow.artifact.read', 'workflow.artifact.delete']
+        ? [
+            'workflow.read',
+            'workflow.run.manage',
+            'workflow.artifact.read',
+            'workflow.artifact.delete',
+          ]
         : type === 'workflow_artifact'
           ? ['workflow.artifact.read', 'workflow.artifact.delete']
           : type === 'workflow_approval'
@@ -934,6 +997,19 @@ async function loadDatabaseCandidates(input: {
         type === 'gfs_resource'
           ? JSON.stringify({ drive: row.drive, resourceId: resource.logicalId })
           : undefined,
+      ...(type === 'workflow_run' && workflowRunSource
+        ? {
+            runtimeRef: workflowRunSource.runtimeRef,
+            behaviorDimensions: assembleOperationalBehaviorDimensions({
+              userId: snapshot.userId,
+              ...(row.team_id ? { teamId: String(row.team_id) } : {}),
+              graph: workflowRunSource.graph,
+              policySnapshot: workflowRunSource.policySnapshot,
+              runtimeRef: workflowRunSource.runtimeRef,
+            }),
+            operationalBindings: workflowRunResumeBindings(workflowRunSource.graph),
+          }
+        : {}),
     })
     return value ? [value] : []
   })

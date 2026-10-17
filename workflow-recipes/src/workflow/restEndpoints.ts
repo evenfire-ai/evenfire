@@ -10,6 +10,7 @@ import type {
 } from '../governedTraceReporter'
 import { createLogger } from '../observability/logger'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from '../reconciler/crdConstants'
+import type { DbRunProcessor, WorkflowRunPhase } from '../reconciler/dbRunProcessor'
 import { getErrorCode } from '../reconciler/k8sErrors'
 import { JwtTokenFactory } from './jwtTokenFactory'
 import {
@@ -43,6 +44,7 @@ const WORKFLOW_RUN_ID_LABEL = 'clerum.io/workflow-run-id'
 
 type WorkflowEndpointHandlerOptions = {
   traceReporter?: GovernedTraceReporter | null
+  dbRunProcessor?: DbRunProcessor | null
 }
 
 type JsonPatchOperation = {
@@ -99,7 +101,9 @@ function recipePhaseForWorkflowPhase(
   phase: WorkflowPhase,
   currentPhase?: unknown
 ): 'active' | 'deploying' | 'failed' {
-  if (phase === 'running' || phase === 'completed') return 'active'
+  if (phase === 'running' || phase === 'authorization_paused' || phase === 'completed') {
+    return 'active'
+  }
   // WorkflowRecipe has no cancelled phase yet; expose cancelled runs as terminal.
   if (phase === 'failed' || phase === 'cancelled') return 'failed'
   // A new run may briefly report pending/initializing/recovering; keep already-active
@@ -631,6 +635,7 @@ export function createWorkflowEndpointHandlers(
 ) {
   const statusOutputPreviewMaxChars = loadConfig().workflowStepOutputPreviewMaxChars
   const traceReporter = options.traceReporter ?? null
+  const dbRunProcessor = options.dbRunProcessor ?? null
 
   async function readRecipe(recipeName: string, namespace: string): Promise<unknown | null> {
     try {
@@ -645,6 +650,59 @@ export function createWorkflowEndpointHandlers(
       if (getErrorCode(err) === 404) return null
       throw err
     }
+  }
+
+  async function checkpointWorkflowRunBoundary(
+    recipeName: string,
+    claims: AuthenticatedRequest['tokenClaims'],
+    recipe: Record<string, unknown>,
+    status: Record<string, unknown> | undefined
+  ): Promise<{ status: number; body: Record<string, unknown> } | null> {
+    if (!dbRunProcessor) return null
+    const runId = workflowRunIdFromRecipe(recipe)
+    if (!runId) return null
+    const boundary = await dbRunProcessor.checkpointRunningBoundary(runId)
+    if (boundary === 'not_running') {
+      return { status: 409, body: { code: 'workflow_run_not_running' } }
+    }
+    if (boundary !== 'paused') return null
+
+    const runStatus = await dbRunProcessor.getRunStatus(runId, claims.recipeNamespace, recipeName)
+    const statusPatch = {
+      status: {
+        phase: recipePhaseForWorkflowPhase('authorization_paused', status?.phase),
+        workflowExecution: {
+          ...((status?.workflowExecution as Record<string, unknown> | undefined) ?? {}),
+          phase: 'authorization_paused',
+          message: workflowStatusMessage(
+            'authorization_paused',
+            runStatus?.failureReason ?? 'workflow_authority_unavailable'
+          ),
+        },
+      },
+    }
+    try {
+      await customApi.patchNamespacedCustomObjectStatus(
+        {
+          group: CRD_GROUP,
+          version: CRD_VERSION,
+          namespace: claims.recipeNamespace,
+          plural: WORKFLOWRECIPE_PLURAL,
+          name: recipeName,
+          body: statusPatch,
+        },
+        {
+          middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')],
+        }
+      )
+    } catch (error) {
+      log.warn('Failed to publish durable workflow authorization pause to recipe status', {
+        recipeName,
+        runId,
+        error,
+      })
+    }
+    return { status: 423, body: { code: 'workflow_authorization_paused' } }
   }
 
   function validateWorkflowClaimBinding(
@@ -764,6 +822,15 @@ export function createWorkflowEndpointHandlers(
           | undefined
         const existingPhase = existingExecution?.phase
         const requestedPhase = wfBody.workflowPhase as WorkflowPhase
+        if (requestedPhase === 'running') {
+          const boundary = await checkpointWorkflowRunBoundary(
+            recipeName,
+            claims,
+            recipe as Record<string, unknown>,
+            existingStatus
+          )
+          if (boundary) return boundary
+        }
         const startsFreshExecution =
           requestedPhase === 'pending' ||
           requestedPhase === 'initializing' ||
@@ -882,6 +949,16 @@ export function createWorkflowEndpointHandlers(
             status: 422,
             body: { error: `Step '${body.stepId}' is not declared in spec.steps` },
           }
+        }
+
+        if (body.phase === 'running') {
+          const boundary = await checkpointWorkflowRunBoundary(
+            recipeName,
+            claims,
+            recipe as Record<string, unknown>,
+            status
+          )
+          if (boundary) return boundary
         }
 
         // Normalize failureReason → error (statusReporter.ts sends failureReason)
@@ -1103,11 +1180,29 @@ export function createWorkflowEndpointHandlers(
         | undefined
       const execution = status?.workflowExecution as Record<string, unknown> | undefined
       const steps = (status?.steps ?? []) as Array<Record<string, unknown>>
+      const runId = workflowRunIdFromRecipe(recipe) ?? claims.runId?.trim()
+      let workflowPhase = execution?.phase ?? 'pending'
+      if (dbRunProcessor && runId) {
+        try {
+          const durable = await dbRunProcessor.getRunStatus(
+            runId,
+            claims.recipeNamespace,
+            recipeName
+          )
+          if (durable?.hasAuthority) workflowPhase = workflowPhaseFromRunPhase(durable.phase)
+        } catch (error) {
+          log.warn('Failed to read durable workflow phase; using recipe status projection', {
+            recipeName,
+            runId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+      }
 
       return {
         status: 200,
         body: {
-          workflowPhase: execution?.phase ?? 'pending',
+          workflowPhase,
           steps,
           attempt: execution?.attempt ?? 0,
           startedAt: execution?.startedAt,
@@ -1615,5 +1710,22 @@ export function createWorkflowEndpointHandlers(
     async getRecipe(recipeName: string, namespace: string): Promise<unknown | null> {
       return readRecipe(recipeName, namespace)
     },
+  }
+}
+
+function workflowPhaseFromRunPhase(phase: WorkflowRunPhase): WorkflowPhase {
+  switch (phase) {
+    case 'Pending':
+      return 'pending'
+    case 'Running':
+      return 'running'
+    case 'AuthorizationPaused':
+      return 'authorization_paused'
+    case 'Succeeded':
+      return 'completed'
+    case 'Failed':
+      return 'failed'
+    case 'Canceled':
+      return 'cancelled'
   }
 }

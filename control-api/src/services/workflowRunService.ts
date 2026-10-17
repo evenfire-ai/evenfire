@@ -7,7 +7,13 @@ import {
   persistWorkflowAuthorityBinding,
 } from './workflows/workflowAuthorityBindingService.js'
 
-export type WorkflowRunPhase = 'Pending' | 'Running' | 'Succeeded' | 'Failed' | 'Canceled'
+export type WorkflowRunPhase =
+  | 'Pending'
+  | 'Running'
+  | 'AuthorizationPaused'
+  | 'Succeeded'
+  | 'Failed'
+  | 'Canceled'
 
 export type WorkflowRunActorType = 'user' | 'admin' | 'autonomous' | 'scheduled'
 
@@ -16,6 +22,7 @@ export type WorkflowRunFailureReason =
   | 'workflow_authority_not_found'
   | 'workflow_authority_access_path_stale'
   | 'workflow_authority_invalid_binding'
+  | 'workflow_authority_unavailable'
 
 export interface WorkflowRunRow {
   run_id: string

@@ -473,7 +473,7 @@ export async function getWorkflowHealth(
       run => !liveRunIds.has(run.id)
     ) ?? null
   const activeRuns = liveRows.filter(
-    row => row.phase === 'Pending' || row.phase === 'Running'
+    row => row.phase === 'Pending' || row.phase === 'Running' || row.phase === 'AuthorizationPaused'
   ).length
   const lastRun =
     [liveRuns[0], latestAuditRun]

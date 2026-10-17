@@ -27,3 +27,11 @@ export class McpHostNotConfiguredError extends Error {
     this.name = 'McpHostNotConfiguredError'
   }
 }
+
+/** A protected workflow boundary is waiting for an explicit authority resume. */
+export class WorkflowAuthorizationPausedError extends Error {
+  constructor() {
+    super('workflow_authorization_paused')
+    this.name = 'WorkflowAuthorizationPausedError'
+  }
+}

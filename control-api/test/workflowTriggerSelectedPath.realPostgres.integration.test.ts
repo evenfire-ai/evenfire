@@ -1,10 +1,20 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import express from 'express'
 import { randomBytes, randomUUID } from 'node:crypto'
+import { once } from 'node:events'
+import type { Server } from 'node:http'
 import { Pool, type PoolClient } from 'pg'
+import type { ActionAuthorityCheckpointRequestV2 } from '@clerum/action-context-contracts'
+import { StepCoordinator, WorkflowAuthorizationPausedError } from '@clerum/workflow-runtime-core'
+import { createDbRunProcessor } from '../../workflow-recipes/src/reconciler/dbRunProcessor.js'
+import { createWorkflowRunAuthorityCheckpointer } from '../../workflow-recipes/src/reconciler/workflowActionCheckpointClient.js'
+import { createWorkflowEndpointHandlers } from '../../workflow-recipes/src/workflow/restEndpoints.js'
+import { runWorkflowRuntime } from '../../workflow-recipes/src/workflow/sdkRuntime.js'
 import { config } from '../src/config.js'
 import { type DbClient, initDb, pool } from '../src/db.js'
 import { K8sGateway } from '../src/k8s.js'
 import type { ExternalAuthedRequest } from '../src/middleware/externalSessionAuth.js'
+import { createInternalActionAuthorityCheckpointRouter } from '../src/routes/internal/actionAuthorityCheckpoint.js'
 import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 import { authorizeActionV2 } from '../src/services/access/actionAuthorizer.js'
 import { prepareActionOperationTarget } from '../src/services/access/actionMessageId.js'
@@ -14,6 +24,10 @@ import {
   operationalSourceSpecs,
 } from '../src/services/access/operationalAccessIndexer.js'
 import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
+import {
+  loadOperationalResourceGraph,
+  selectOperationalPathGraph,
+} from '../src/services/access/operationalAccessReader.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
 import {
   type ExternalSessionAuthorityContext,
@@ -28,6 +42,7 @@ import {
 } from '../src/services/workflows/workflowAuthorityBindingService.js'
 import { type WorkflowAuthorityBinding } from '../src/services/workflows/workflowAuthorityBindingService.js'
 import { WORKFLOW_ACTION_DELEGATION_HEADER } from '../src/services/workflows/workflowAuthorityBindingService.js'
+import { resumeWorkflowRun } from '../src/services/workflows/workflowRunResumeService.js'
 import { triggerWorkflow } from '../src/services/workflows/workflowTriggerService.js'
 import {
   issueUserDelegationV2,
@@ -87,8 +102,10 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
   let adminPool: Pool
   let databasePool: Pool
   let gateway: K8sGateway
+  let accessIndexer: OperationalAccessIndexer
   let corePoolConnectSpy: ReturnType<typeof vi.spyOn>
   let corePoolQuerySpy: ReturnType<typeof vi.spyOn>
+  let checkpointServer: Server | null = null
 
   beforeAll(async () => {
     adminPool = new Pool({ connectionString: adminUrl })
@@ -195,11 +212,11 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
     }
 
     const index = new OperationalAccessIndex(databasePool, transaction(databasePool))
-    const indexer = new OperationalAccessIndexer(gateway, index, {
+    accessIndexer = new OperationalAccessIndexer(gateway, index, {
       environmentId: canonicalEnvironmentId(),
       behaviorFingerprintKey: config.sessionJwtPrivateKey,
     })
-    for (const source of operationalSourceSpecs) await indexer.reconcileSource(source)
+    for (const source of operationalSourceSpecs) await accessIndexer.reconcileSource(source)
   })
 
   afterAll(async () => {
@@ -232,6 +249,25 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
     }
     expect(waitingCount).toBe(0)
     expect(idleCount).toBe(totalCount)
+  })
+
+  afterEach(async () => {
+    if (checkpointServer) {
+      const current = checkpointServer
+      checkpointServer = null
+      await new Promise<void>((resolve, reject) => {
+        current.close(error => (error ? reject(error) : resolve()))
+      })
+    }
+    vi.unstubAllEnvs()
+    if (!databasePool || !accessIndexer) return
+    await databasePool.query(
+      `INSERT INTO team_workflow_triggers(team_id, recipe_namespace, recipe_name)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (team_id, recipe_namespace, recipe_name) DO NOTHING`,
+      [teamId, config.sandboxNamespace, teamOnlyRecipe]
+    )
+    for (const source of operationalSourceSpecs) await accessIndexer.reconcileSource(source)
   })
 
   async function produceSelectedAuthority(recipeName: string, pathKind: 'direct' | 'team') {
@@ -382,8 +418,892 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
         })
       },
     })
-    return { result, authority: produced.authority }
+    return { result, ...produced }
   }
+
+  async function produceRunResumeAuthority(input: {
+    caller: Awaited<ReturnType<typeof produceSelectedAuthority>>['caller']
+    runId: string
+    pathKind: 'direct' | 'team'
+  }): Promise<WorkflowAuthorityBinding> {
+    const resource = canonicalResourceIdentity({
+      environmentId: canonicalEnvironmentId(),
+      type: 'workflow_run',
+      logicalId: input.runId,
+    })
+    const target = Object.freeze({ runId: input.runId, action: 'resume' as const })
+    const resolved = await authorizeActionV2(
+      {
+        session: input.caller.session as ExternalSessionAuthorityContext,
+        requested: { version: 2 },
+        operationId: 'workflow.run.manage',
+        resource,
+        operationTarget: target,
+        allocateChatMessageId: false,
+        gateway,
+      },
+      { authorizationOptions: { transaction: transaction(databasePool) } }
+    )
+    let selected = resolved.status === 'allowed' ? resolved.context : null
+    if (resolved.status === 'access_path_required') {
+      const candidate = resolved.paths.find(path => path.kind === input.pathKind)
+      if (!candidate) throw new Error(`run action producer did not produce ${input.pathKind} path`)
+      const explicit = await authorizeActionV2(
+        {
+          session: input.caller.session as ExternalSessionAuthorityContext,
+          requested: {
+            version: 2,
+            requestedAccessPathId: candidate.id,
+            expectedAuthorizationRevision: candidate.authorizationRevision,
+          },
+          operationId: 'workflow.run.manage',
+          resource,
+          operationTarget: target,
+          allocateChatMessageId: false,
+          gateway,
+        },
+        { authorizationOptions: { transaction: transaction(databasePool) } }
+      )
+      if (explicit.status !== 'allowed') {
+        throw new Error(`selected run action authority returned ${explicit.status}`)
+      }
+      selected = explicit.context
+    }
+    if (!selected || selected.pathKind !== input.pathKind) {
+      throw new Error(`run action producer returned ${resolved.status}`)
+    }
+
+    const prepared = prepareActionOperationTarget({
+      operationId: 'workflow.run.manage',
+      resource,
+      operationTarget: target,
+    })
+    const token = issueUserDelegationV2({
+      principal: {
+        userId,
+        sid: selected.principal.sid,
+        sessionVersion: selected.principal.sessionVersion,
+      },
+      operationIds: ['workflow.run.manage'],
+      resource,
+      preparedTargets: { 'workflow.run.manage': prepared },
+      accessPathId: selected.accessPathId,
+      authorizationRevision: selected.authorizationRevision,
+      behaviorBindingHash: selected.behaviorBindingHash,
+      pathKind: selected.pathKind,
+      effectiveTeamId: selected.effectiveTeamId,
+    })
+    const authority = await requireWorkflowActionAuthority({
+      req: {
+        rawHeaders: [WORKFLOW_ACTION_DELEGATION_HEADER, token],
+        accessExecutionBudget: AccessExecutionBudget.create('action'),
+        correlationId: randomUUID(),
+      } as unknown as ExternalAuthedRequest,
+      caller: input.caller,
+      operationId: 'workflow.run.manage',
+      resourceType: 'workflow_run',
+      resourceLogicalId: input.runId,
+      target,
+      gateway,
+    })
+    if (!authority) throw new Error('run action producer did not require its signed authority')
+    return authority
+  }
+
+  it('blocks the second workflow effect after revocation between real V2 run effects', async () => {
+    vi.stubEnv('INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET', config.internalControlJwtWrcHmacSecret)
+    const { result, ...produced } = await runSelectedTrigger(bothGrantRecipe, 'team')
+    expect(result.kind).toBe('run')
+    if (result.kind !== 'run') throw new Error('actual V2 producer did not create a workflow run')
+
+    const childName = `r68-h1-${result.row.run_id.slice(0, 12)}`
+    let recipe: Record<string, any> = {
+      apiVersion: 'clerum.io/v1alpha1',
+      kind: 'WorkflowRecipe',
+      metadata: {
+        name: childName,
+        namespace: config.sandboxNamespace,
+        labels: { 'clerum.io/workflow-run-id': result.row.run_id },
+      },
+      spec: {
+        steps: [
+          { id: 'effect-one', run: { type: 'snippet', language: 'typescript', code: 'return 1' } },
+          { id: 'effect-two', run: { type: 'snippet', language: 'typescript', code: 'return 2' } },
+        ],
+      },
+      status: { phase: 'active', steps: [], workflowExecution: { phase: 'pending' } },
+    }
+    let syncStatus = async (): Promise<void> => undefined
+    const applyPatch = (patch: unknown): void => {
+      if (!Array.isArray(patch)) {
+        const statusPatch = (patch as { status?: Record<string, unknown> })?.status ?? {}
+        recipe = {
+          ...recipe,
+          status: { ...(recipe.status ?? {}), ...statusPatch },
+        }
+        return
+      }
+      for (const operation of patch as Array<{ op: string; path: string; value?: unknown }>) {
+        if (operation.op === 'test') continue
+        if (operation.path === '/status/phase') recipe.status.phase = operation.value
+        else if (operation.path === '/status/workflowExecution') {
+          recipe.status.workflowExecution = operation.value
+        } else if (operation.path === '/status/steps') recipe.status.steps = operation.value
+        else if (operation.path === '/status/steps/-') recipe.status.steps.push(operation.value)
+        else if (/^\/status\/steps\/\d+$/.test(operation.path)) {
+          recipe.status.steps[Number(operation.path.split('/').at(-1))] = operation.value
+        }
+      }
+    }
+    const customApi = {
+      getNamespacedCustomObject: vi.fn(async () => recipe),
+      patchNamespacedCustomObjectStatus: vi.fn(async ({ body }: { body: unknown }) => {
+        applyPatch(body)
+        await syncStatus()
+        return { body: recipe }
+      }),
+    }
+
+    const checkpointApp = express()
+    checkpointApp.use(express.json())
+    checkpointApp.use('/api/v1', createInternalActionAuthorityCheckpointRouter(gateway))
+    checkpointServer = checkpointApp.listen(0, '127.0.0.1')
+    await once(checkpointServer, 'listening')
+    const checkpointAddress = checkpointServer.address()
+    if (!checkpointAddress || typeof checkpointAddress === 'string') {
+      throw new Error('workflow checkpoint test server did not bind a TCP port')
+    }
+    const checkpointResponses: string[] = []
+    const checkpoint = createWorkflowRunAuthorityCheckpointer({
+      baseUrl: `http://127.0.0.1:${checkpointAddress.port}`,
+      fetchImpl: async (url, init) => {
+        const request = JSON.parse(
+          String(init?.body ?? 'null')
+        ) as ActionAuthorityCheckpointRequestV2
+        const response = await fetch(url, init)
+        checkpointResponses.push(
+          `${request.operationId}:${JSON.stringify(await response.clone().json())}`
+        )
+        return response
+      },
+    })
+    const processor = createDbRunProcessor({
+      instanceId: `r68-h1-${randomUUID()}`,
+      pool: databasePool,
+      runPollMs: 60_000,
+      createChildRecipe: async () => ({ name: childName, namespace: config.sandboxNamespace }),
+      checkpointAuthority: checkpoint,
+    })
+    syncStatus = async () => processor.syncFromRecipeExecution(recipe as never)
+    const claims = {
+      recipeName: childName,
+      recipeNamespace: config.sandboxNamespace,
+      runId: result.row.run_id,
+      scopes: ['status_read', 'status_write'],
+    } as never
+    const handlers = createWorkflowEndpointHandlers(
+      customApi as never,
+      config.sandboxNamespace,
+      undefined,
+      { dbRunProcessor: processor }
+    )
+    const currentAction = await authorizeActionV2(
+      {
+        session: {
+          contract: 'v2',
+          authorityMode: 'logical_session_checkpoint',
+          userId,
+          sid: produced.authority.binding.sid,
+          sessionVersion: produced.authority.binding.sessionVersion,
+        },
+        requested: { version: 2 },
+        operationId: 'workflow.trigger',
+        resource: produced.authority.binding.resource as never,
+        operationTarget: produced.authority.binding.target,
+        allocateChatMessageId: false,
+        gateway,
+      },
+      { authorizationOptions: { transaction: transaction(databasePool) } }
+    )
+    const currentActionSummary =
+      currentAction.status === 'allowed'
+        ? {
+            status: currentAction.status,
+            accessPathId: currentAction.context.accessPathId,
+            authorizationRevision: currentAction.context.authorizationRevision,
+          }
+        : currentAction
+    await processor.processPending(result.row.run_id)
+
+    const effects = { first: 0, second: 0 }
+    const status = {
+      getWorkflowStatus: async () => {
+        const current = await handlers.getWorkflowStatus(childName, claims)
+        if (current.status >= 400) throw new Error(`WRC status read failed: ${current.status}`)
+        return current.body
+      },
+      reportWorkflowStatus: async (workflowPhase: string, details?: Record<string, unknown>) => {
+        const current = await handlers.postStepStatus(childName, claims, {
+          workflowPhase,
+          ...details,
+        } as never)
+        if (current.status === 423 && current.body.code === 'workflow_authorization_paused') {
+          throw new WorkflowAuthorizationPausedError()
+        }
+        if (current.status >= 400) throw new Error(`WRC status write failed: ${current.status}`)
+      },
+      reportStepStatus: async (
+        stepId: string,
+        phase: string,
+        details?: Record<string, unknown>
+      ) => {
+        const current = await handlers.postStepStatus(childName, claims, {
+          stepId,
+          phase,
+          ...details,
+        } as never)
+        if (current.status === 423 && current.body.code === 'workflow_authorization_paused') {
+          throw new WorkflowAuthorizationPausedError()
+        }
+        if (current.status >= 400)
+          throw new Error(`WRC step status write failed: ${current.status}`)
+      },
+    }
+    let simulateCoordinatorExit = false
+    const runtimeStatus = {
+      ...status,
+      getWorkflowStatus: async () => {
+        const current = await status.getWorkflowStatus()
+        return simulateCoordinatorExit ? { ...current, workflowPhase: 'failed' } : current
+      },
+    }
+    let cancelRequested = false
+    const signals = {
+      pollSignals: () => () => undefined,
+      hasSignal: (signal: string) => signal === 'cancel' && cancelRequested,
+    }
+    const snippetRunner = {
+      execute: async ({ stepId }: { stepId: string }) => {
+        if (stepId === 'effect-one') {
+          effects.first += 1
+          await databasePool.query(
+            `DELETE FROM team_workflow_triggers
+              WHERE team_id = $1 AND recipe_namespace = $2 AND recipe_name = $3`,
+            [teamId, config.sandboxNamespace, bothGrantRecipe]
+          )
+          for (const source of operationalSourceSpecs) await accessIndexer.reconcileSource(source)
+          return { stepId, status: 'completed', output: 'first-effect' }
+        }
+        effects.second += 1
+        return { stepId, status: 'completed', output: 'second-effect' }
+      },
+    }
+    const runRuntime = () =>
+      runWorkflowRuntime({
+        config: {
+          workflowName: childName,
+          wrcUrl: 'http://wrc.invalid',
+          tokenProvider: {},
+          signalPollIntervalMs: 250,
+        } as never,
+        spec: recipe.spec as never,
+        coordinator: new StepCoordinator(),
+        status: runtimeStatus as never,
+        signals: signals as never,
+        snippetRunner: snippetRunner as never,
+      } as never)
+
+    await processor.processPending(result.row.run_id)
+    const runtime = runRuntime()
+    const waitForPaused = async () => {
+      const deadline = Date.now() + 15_000
+      while (Date.now() < deadline) {
+        const state = await databasePool.query(
+          `SELECT phase, failure_reason FROM workflow_runs WHERE run_id = $1`,
+          [result.row.run_id]
+        )
+        if (
+          state.rows[0]?.phase === 'AuthorizationPaused' ||
+          state.rows[0]?.phase === 'Failed' ||
+          state.rows[0]?.phase === 'Succeeded' ||
+          state.rows[0]?.phase === 'Canceled'
+        ) {
+          if (state.rows[0]?.phase === 'AuthorizationPaused') return state.rows[0]
+          break
+        }
+        await new Promise(resolve => setTimeout(resolve, 25))
+      }
+      const state = await databasePool.query(
+        `SELECT phase, failure_reason FROM workflow_runs WHERE run_id = $1`,
+        [result.row.run_id]
+      )
+      const steps = await databasePool.query(
+        `SELECT step_id, phase, output FROM workflow_run_steps
+          WHERE run_id = $1 ORDER BY step_id`,
+        [result.row.run_id]
+      )
+      throw new Error(
+        `workflow did not durably pause; state=${JSON.stringify(state.rows)} ` +
+          `steps=${JSON.stringify(steps.rows)} effects=${JSON.stringify(effects)} ` +
+          `checkpoints=${JSON.stringify(checkpointResponses)} ` +
+          `boundRevision=${produced.authority.binding.authorizationRevision} ` +
+          `currentAction=${JSON.stringify(currentActionSummary)} ` +
+          `workflowExecution=${JSON.stringify(recipe.status.workflowExecution)}`
+      )
+    }
+    let resumed = false
+    try {
+      const paused = await waitForPaused()
+      expect(paused).toEqual({
+        phase: 'AuthorizationPaused',
+        failure_reason: 'workflow_authority_access_path_stale',
+      })
+      expect(effects).toEqual({ first: 1, second: 0 })
+      expect(recipe.status.workflowExecution.phase).toBe('authorization_paused')
+
+      const completedFirstEffect = await databasePool.query(
+        `SELECT phase, output FROM workflow_run_steps
+          WHERE run_id = $1 AND step_id = 'effect-one'`,
+        [result.row.run_id]
+      )
+      expect(completedFirstEffect.rows).toEqual([{ phase: 'Succeeded', output: 'first-effect' }])
+
+      // The original coordinator process exits while the durable run remains
+      // paused. Its replacement must read the persisted step result and avoid
+      // replaying the first protected effect.
+      simulateCoordinatorExit = true
+      const exitedRuntime = await runtime
+      expect(exitedRuntime.workflowPhase).toBe('failed')
+      expect(effects).toEqual({ first: 1, second: 0 })
+
+      await databasePool.query(
+        `INSERT INTO team_workflow_triggers(team_id, recipe_namespace, recipe_name)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (team_id, recipe_namespace, recipe_name) DO NOTHING`,
+        [teamId, config.sandboxNamespace, bothGrantRecipe]
+      )
+      for (const source of operationalSourceSpecs) await accessIndexer.reconcileSource(source)
+
+      const otherSession = await produceSelectedAuthority(bothGrantRecipe, 'team')
+      const wrongSessionAuthority = await produceRunResumeAuthority({
+        caller: otherSession.caller,
+        runId: result.row.run_id,
+        pathKind: 'team',
+      })
+      await expect(
+        resumeWorkflowRun({
+          runId: result.row.run_id,
+          recipeNamespace: config.sandboxNamespace,
+          recipeName: bothGrantRecipe,
+          authority: wrongSessionAuthority,
+          gateway,
+          db: databasePool,
+        })
+      ).rejects.toMatchObject({ code: 'workflow_run_path_mismatch' })
+
+      const resumeAuthority = await produceRunResumeAuthority({
+        caller: produced.caller,
+        runId: result.row.run_id,
+        pathKind: 'team',
+      })
+      expect(resumeAuthority.binding.sid).toBe(produced.authority.binding.sid)
+      expect(resumeAuthority.binding.pathKind).toBe(produced.authority.binding.pathKind)
+      expect(resumeAuthority.binding.effectiveTeamId).toBe(teamId)
+      expect(resumeAuthority.binding.accessPathId).not.toBe(produced.authority.binding.accessPathId)
+      await resumeWorkflowRun({
+        runId: result.row.run_id,
+        recipeNamespace: config.sandboxNamespace,
+        recipeName: bothGrantRecipe,
+        authority: resumeAuthority,
+        gateway,
+        db: databasePool,
+      })
+      resumed = true
+
+      const firstContinuation = await databasePool.query(
+        `SELECT continuation.source_expires_at::text AS continuation_exp,
+                initiating.source_expires_at::text AS initiating_exp
+           FROM workflow_runs run
+           JOIN workflow_authority_bindings initiating
+             ON initiating.id = run.initiating_authority_binding_id
+           JOIN workflow_authority_bindings continuation
+             ON continuation.entity_id = run.run_id::text
+            AND continuation.entity_type = 'workflow_run'
+            AND continuation.binding_kind = 'run_management'
+            AND continuation.delegation_jti = $2
+          WHERE run.run_id = $1`,
+        [result.row.run_id, resumeAuthority.binding.delegationJti]
+      )
+      expect(firstContinuation.rows).toEqual([
+        {
+          continuation_exp: expect.any(String),
+          initiating_exp: expect.any(String),
+        },
+      ])
+      expect(firstContinuation.rows[0]?.continuation_exp).toBe(
+        firstContinuation.rows[0]?.initiating_exp
+      )
+
+      const processorStatusImmediatelyAfterResume = await processor.getRunStatus(
+        result.row.run_id,
+        config.sandboxNamespace,
+        childName
+      )
+      const databaseStatusImmediatelyAfterResume = await databasePool.query(
+        `SELECT phase, recipe_namespace, recipe_name, child_recipe_namespace,
+                child_recipe_name,
+                initiating_authority_binding_id IS NOT NULL AS has_authority
+           FROM workflow_runs WHERE run_id = $1`,
+        [result.row.run_id]
+      )
+      const statusImmediatelyAfterResume = await handlers.getWorkflowStatus(childName, claims)
+      if (!processorStatusImmediatelyAfterResume) {
+        throw new Error(
+          `processor status missing; DB=${JSON.stringify(databaseStatusImmediatelyAfterResume.rows)} ` +
+            `child=${childName}/${config.sandboxNamespace}`
+        )
+      }
+      expect(processorStatusImmediatelyAfterResume?.phase).toBe('Running')
+      expect(databaseStatusImmediatelyAfterResume.rows).toMatchObject([
+        { phase: 'Running', has_authority: true },
+      ])
+      expect(statusImmediatelyAfterResume).toMatchObject({
+        status: 200,
+        body: { workflowPhase: 'running' },
+      })
+
+      const continuation = await databasePool.query(
+        `SELECT child.parent_binding_id::text AS "parentBindingId",
+                run.initiating_authority_binding_id::text AS "initiatingBindingId",
+                child.access_path_id AS "accessPathId",
+                child.source_expires_at::text AS "continuationExpiry",
+                initiating.source_expires_at::text AS "initiatingExpiry"
+           FROM workflow_runs run
+           JOIN workflow_authority_bindings child
+             ON child.entity_id = run.run_id::text
+            AND child.entity_type = 'workflow_run'
+            AND child.binding_kind = 'run_management'
+            AND child.delegation_jti = $2
+           JOIN workflow_authority_bindings initiating
+             ON initiating.id = run.initiating_authority_binding_id
+          WHERE run.run_id = $1`,
+        [result.row.run_id, resumeAuthority.binding.delegationJti]
+      )
+      expect(continuation.rows).toEqual([
+        {
+          parentBindingId: null,
+          initiatingBindingId: result.row.initiating_authority_binding_id,
+          accessPathId: resumeAuthority.binding.accessPathId,
+          continuationExpiry: expect.any(String),
+          initiatingExpiry: expect.any(String),
+        },
+      ])
+      expect(continuation.rows[0]?.continuationExpiry).toBe(continuation.rows[0]?.initiatingExpiry)
+
+      simulateCoordinatorExit = false
+      const restartedRuntime = runRuntime()
+      const runtimeResult = await new Promise<Awaited<typeof restartedRuntime>>(
+        (resolve, reject) => {
+          const timeout = setTimeout(async () => {
+            const durable = await databasePool.query(
+              `SELECT phase, failure_reason FROM workflow_runs WHERE run_id = $1`,
+              [result.row.run_id]
+            )
+            const observedStatus = await status.getWorkflowStatus()
+            const processorStatus = await processor.getRunStatus(
+              result.row.run_id,
+              config.sandboxNamespace,
+              childName
+            )
+            cancelRequested = true
+            reject(
+              new Error(
+                `workflow did not finish after authorized resume; ` +
+                  `durable=${JSON.stringify(durable.rows)} ` +
+                  `status=${JSON.stringify(observedStatus)} effects=${JSON.stringify(effects)} ` +
+                  `processorStatus=${JSON.stringify(processorStatus)} ` +
+                  `checkpoints=${JSON.stringify(checkpointResponses)} ` +
+                  `recipeStatus=${JSON.stringify(recipe.status.workflowExecution)}`
+              )
+            )
+          }, 15_000)
+          restartedRuntime.then(
+            value => {
+              clearTimeout(timeout)
+              resolve(value)
+            },
+            error => {
+              clearTimeout(timeout)
+              reject(error)
+            }
+          )
+        }
+      )
+      if (runtimeResult.workflowPhase !== 'completed') {
+        const durable = await databasePool.query(
+          `SELECT phase, failure_reason FROM workflow_runs WHERE run_id = $1`,
+          [result.row.run_id]
+        )
+        const bindings = await databasePool.query(
+          `SELECT delegation_jti, operation_id, resource, target, target_hash,
+                  access_path_id, authorization_revision, behavior_binding_hash,
+                  path_kind, effective_team_id, source_issued_at, source_expires_at,
+                  source_expires_at > clock_timestamp() AS current
+             FROM workflow_authority_bindings
+            WHERE entity_type = 'workflow_run' AND entity_id = $1
+            ORDER BY created_at, id`,
+          [result.row.run_id]
+        )
+        throw new Error(
+          `restarted runtime failed: result=${JSON.stringify(runtimeResult)} ` +
+            `durable=${JSON.stringify(durable.rows)} effects=${JSON.stringify(effects)} ` +
+            `checkpoints=${JSON.stringify(checkpointResponses)} ` +
+            `workflowExecution=${JSON.stringify(recipe.status.workflowExecution)} ` +
+            `bindings=${JSON.stringify(bindings.rows)}`
+        )
+      }
+      expect(runtimeResult.workflowPhase).toBe('completed')
+      expect(effects).toEqual({ first: 1, second: 1 })
+      const succeeded = await databasePool.query(
+        `SELECT phase, failure_reason FROM workflow_runs WHERE run_id = $1`,
+        [result.row.run_id]
+      )
+      expect(succeeded.rows).toEqual([{ phase: 'Succeeded', failure_reason: null }])
+    } finally {
+      if (!resumed) {
+        await databasePool.query(
+          `INSERT INTO team_workflow_triggers(team_id, recipe_namespace, recipe_name)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (team_id, recipe_namespace, recipe_name) DO NOTHING`,
+          [teamId, config.sandboxNamespace, bothGrantRecipe]
+        )
+        for (const source of operationalSourceSpecs) await accessIndexer.reconcileSource(source)
+        try {
+          const current = await databasePool.query(
+            `SELECT phase FROM workflow_runs WHERE run_id = $1`,
+            [result.row.run_id]
+          )
+          if (current.rows[0]?.phase === 'AuthorizationPaused') {
+            const cleanupAuthority = await produceRunResumeAuthority({
+              caller: produced.caller,
+              runId: result.row.run_id,
+              pathKind: 'team',
+            })
+            await resumeWorkflowRun({
+              runId: result.row.run_id,
+              recipeNamespace: config.sandboxNamespace,
+              recipeName: bothGrantRecipe,
+              authority: cleanupAuthority,
+              gateway,
+              db: databasePool,
+            })
+          }
+        } catch {
+          cancelRequested = true
+        }
+      }
+      const settled = await new Promise<boolean>(resolve => {
+        const timeout = setTimeout(() => resolve(false), 5_000)
+        runtime.then(
+          () => {
+            clearTimeout(timeout)
+            resolve(true)
+          },
+          () => {
+            clearTimeout(timeout)
+            resolve(true)
+          }
+        )
+      })
+      if (!settled) {
+        cancelRequested = true
+        await runtime.catch(() => undefined)
+      }
+    }
+  })
+
+  it('does not resume a run after its initiating delegation expires', async () => {
+    const { result, caller } = await runSelectedTrigger(teamOnlyRecipe, 'team')
+    expect(result.kind).toBe('run')
+    if (result.kind !== 'run') throw new Error('actual V2 producer did not create a workflow run')
+
+    const resumeAuthority = await produceRunResumeAuthority({
+      caller,
+      runId: result.row.run_id,
+      pathKind: 'team',
+    })
+    await databasePool.query(
+      `UPDATE workflow_runs
+          SET phase = 'AuthorizationPaused',
+              failure_reason = 'workflow_authority_unavailable',
+              started_at = now(),
+              child_recipe_name = 'expired-authority-child',
+              child_recipe_namespace = 'sandbox-recipes'
+        WHERE run_id = $1`,
+      [result.row.run_id]
+    )
+    await databasePool.query(
+      `UPDATE workflow_authority_bindings
+          SET source_issued_at = clock_timestamp() - interval '20 seconds',
+              source_expires_at = clock_timestamp() - interval '10 seconds'
+        WHERE id = $1`,
+      [result.row.initiating_authority_binding_id]
+    )
+
+    await expect(
+      resumeWorkflowRun({
+        runId: result.row.run_id,
+        recipeNamespace: config.sandboxNamespace,
+        recipeName: teamOnlyRecipe,
+        authority: resumeAuthority,
+        gateway,
+        db: databasePool,
+      })
+    ).rejects.toMatchObject({ code: 'workflow_run_path_mismatch' })
+
+    const state = await databasePool.query(
+      `SELECT phase, failure_reason,
+              (SELECT COUNT(*)::int FROM workflow_authority_bindings
+                WHERE binding_kind = 'run_management'
+                  AND entity_type = 'workflow_run'
+                  AND entity_id = run_id::text) AS continuation_count
+         FROM workflow_runs WHERE run_id = $1`,
+      [result.row.run_id]
+    )
+    expect(state.rows).toEqual([
+      {
+        phase: 'AuthorizationPaused',
+        failure_reason: 'workflow_authority_unavailable',
+        continuation_count: 0,
+      },
+    ])
+  })
+
+  it('serializes concurrent grant revocation against the durable resume write', async () => {
+    const { result, caller } = await runSelectedTrigger(teamOnlyRecipe, 'team')
+    expect(result.kind).toBe('run')
+    if (result.kind !== 'run') throw new Error('actual V2 producer did not create a workflow run')
+    await databasePool.query(
+      `UPDATE workflow_runs
+          SET phase = 'AuthorizationPaused',
+              failure_reason = 'workflow_authority_unavailable',
+              started_at = now(),
+              child_recipe_name = 'revoked-resume-child',
+              child_recipe_namespace = 'sandbox-recipes'
+        WHERE run_id = $1`,
+      [result.row.run_id]
+    )
+    const resumeAuthority = await produceRunResumeAuthority({
+      caller,
+      runId: result.row.run_id,
+      pathKind: 'team',
+    })
+    const revocationClient = await databasePool.connect()
+    let revocationTransactionOpen = false
+    let resume: Promise<unknown> | undefined
+    try {
+      await revocationClient.query('BEGIN')
+      revocationTransactionOpen = true
+      await revocationClient.query('LOCK TABLE team_workflow_triggers IN EXCLUSIVE MODE')
+      resume = resumeWorkflowRun({
+        runId: result.row.run_id,
+        recipeNamespace: config.sandboxNamespace,
+        recipeName: teamOnlyRecipe,
+        authority: resumeAuthority,
+        gateway,
+        db: databasePool,
+      })
+      void resume.catch(() => undefined)
+      let waitingForLineageLock = false
+      const deadline = Date.now() + 10_000
+      while (Date.now() < deadline) {
+        const activity = await adminPool.query<{ waiting: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1 FROM pg_stat_activity
+              WHERE datname = $1
+                AND wait_event_type = 'Lock'
+                AND position('FOR SHARE OF twt, member' in query) > 0
+           ) AS waiting`,
+          [database]
+        )
+        if (activity.rows[0]?.waiting) {
+          waitingForLineageLock = true
+          break
+        }
+        await new Promise(resolve => setTimeout(resolve, 20))
+      }
+      expect(waitingForLineageLock).toBe(true)
+      await revocationClient.query(
+        `DELETE FROM team_workflow_triggers
+          WHERE team_id = $1 AND recipe_namespace = $2 AND recipe_name = $3`,
+        [teamId, config.sandboxNamespace, teamOnlyRecipe]
+      )
+      await revocationClient.query('COMMIT')
+      revocationTransactionOpen = false
+      await expect(resume).rejects.toMatchObject({ code: 'workflow_run_path_mismatch' })
+    } finally {
+      if (revocationTransactionOpen) await revocationClient.query('ROLLBACK')
+      revocationClient.release()
+      if (resume) await resume.catch(() => undefined)
+    }
+
+    const state = await databasePool.query(
+      `SELECT phase, failure_reason,
+              (SELECT COUNT(*)::int FROM workflow_authority_bindings
+                WHERE binding_kind = 'run_management'
+                  AND entity_type = 'workflow_run'
+                  AND entity_id = run_id::text) AS continuation_count
+         FROM workflow_runs WHERE run_id = $1`,
+      [result.row.run_id]
+    )
+    expect(state.rows).toEqual([
+      {
+        phase: 'AuthorizationPaused',
+        failure_reason: 'workflow_authority_unavailable',
+        continuation_count: 0,
+      },
+    ])
+  })
+
+  it('keeps full workflow behavior while exact-validating only the resume dependency closure', async () => {
+    if (!databasePool) throw new Error('realpg_database_not_ready')
+    const { result, caller } = await runSelectedTrigger(teamOnlyRecipe, 'team')
+    expect(result.kind).toBe('run')
+    if (result.kind !== 'run') throw new Error('actual V2 producer did not create a workflow run')
+
+    const serverNames = [0, 1, 2].map(
+      index => `r68-run-mcp-${index}-${randomBytes(3).toString('hex')}`
+    )
+    const existingContext = (await gateway.getResource(
+      'contexts',
+      contextName,
+      config.contextsNamespace
+    )) as { metadata: Record<string, unknown>; spec: Record<string, unknown> }
+    const originalContext = structuredClone(existingContext)
+    try {
+      for (const name of serverNames) {
+        kubernetesApi.put('mcpservers', config.mcpServersNamespace, {
+          apiVersion: 'clerum.io/v1alpha1',
+          kind: 'McpServer',
+          metadata: {
+            name,
+            namespace: config.mcpServersNamespace,
+            uid: randomUUID(),
+            resourceVersion: '1',
+            generation: 1,
+          },
+          spec: {
+            enabled: true,
+            auth: { type: 'none' },
+            transport: {
+              type: 'streamable-http',
+              url: `http://${name}.${config.mcpServersNamespace}:3000/mcp`,
+            },
+          },
+        })
+      }
+      kubernetesApi.put('contexts', config.contextsNamespace, {
+        ...existingContext,
+        spec: { ...existingContext.spec, mcpServers: serverNames },
+      })
+      for (const source of operationalSourceSpecs) await accessIndexer.reconcileSource(source)
+
+      const recipeLogicalId = `${config.sandboxNamespace}/${teamOnlyRecipe}`
+      const graphBudget = AccessExecutionBudget.create('action')
+      const producerGraph = await loadOperationalResourceGraph({
+        db: databasePool,
+        budget: graphBudget,
+        environmentId: canonicalEnvironmentId(),
+        resourceType: 'workflow_recipe',
+        logicalId: recipeLogicalId,
+      })
+      graphBudget.close()
+      expect(producerGraph.status).toBe('current')
+      if (producerGraph.status !== 'current') return
+      const selectedGraph = selectOperationalPathGraph({ graph: producerGraph })
+      expect(selectedGraph?.resources.map(resource => resource.resourceType).sort()).toEqual([
+        'context',
+        'mcp_server',
+        'mcp_server',
+        'mcp_server',
+        'workflow_recipe',
+      ])
+
+      const runResource = canonicalResourceIdentity({
+        environmentId: canonicalEnvironmentId(),
+        type: 'workflow_run',
+        logicalId: result.row.run_id,
+      })
+      const beforeGets = kubernetesApi.requests.length
+      const runAuthority = await authorizeActionV2(
+        {
+          session: caller.session as ExternalSessionAuthorityContext,
+          requested: { version: 2 },
+          operationId: 'workflow.run.manage',
+          resource: runResource,
+          operationTarget: { runId: result.row.run_id, action: 'resume' },
+          allocateChatMessageId: false,
+          gateway,
+        },
+        { authorizationOptions: { transaction: transaction(databasePool) } }
+      )
+      expect(runAuthority.status, JSON.stringify(runAuthority)).toBe('allowed')
+      if (runAuthority.status !== 'allowed') return
+      expect(
+        [
+          runAuthority.context.behavior.budget,
+          runAuthority.context.behavior.credentialPolicy,
+          runAuthority.context.behavior.approvalPolicy,
+          runAuthority.context.behavior.filesystemScope,
+          runAuthority.context.behavior.runtime,
+          runAuthority.context.behavior.providerModelPolicy,
+          runAuthority.context.behavior.audit,
+        ].every(dimension => dimension.state === 'known')
+      ).toBe(true)
+      const exactGets = kubernetesApi.requests
+        .slice(beforeGets)
+        .filter(item => item.method === 'GET' && item.name !== null)
+      expect(exactGets).toHaveLength(2)
+      expect(new Set(exactGets.map(item => item.plural))).toEqual(
+        new Set(['workflowrecipes', 'contexts'])
+      )
+      expect(new Set(exactGets.map(item => item.name))).toEqual(
+        new Set([teamOnlyRecipe, contextName])
+      )
+
+      await databasePool.query(
+        `UPDATE operational_catalog_source_state
+            SET status = 'unavailable', safe_error_code = 'r68_test_fixture'
+          WHERE environment_id = $1 AND source_family = 'workflow_recipe'`,
+        [canonicalEnvironmentId()]
+      )
+      const beforeUnavailableResumeGets = kubernetesApi.requests.length
+      const unavailableResume = await authorizeActionV2(
+        {
+          session: caller.session as ExternalSessionAuthorityContext,
+          requested: { version: 2 },
+          operationId: 'workflow.run.manage',
+          resource: runResource,
+          operationTarget: { runId: result.row.run_id, action: 'resume' },
+          allocateChatMessageId: false,
+          gateway,
+        },
+        { authorizationOptions: { transaction: transaction(databasePool) } }
+      )
+      expect(unavailableResume.status).toBe('authority_unavailable')
+      expect(
+        kubernetesApi.requests
+          .slice(beforeUnavailableResumeGets)
+          .filter(item => item.method === 'GET' && item.name !== null)
+      ).toHaveLength(0)
+    } finally {
+      kubernetesApi.put('contexts', config.contextsNamespace, originalContext)
+      for (const name of serverNames) {
+        kubernetesApi.delete('mcpservers', config.mcpServersNamespace, name)
+      }
+      for (const source of operationalSourceSpecs) await accessIndexer.reconcileSource(source)
+    }
+  })
 
   it('persists the selected team attribution when both direct and team grants exist', async () => {
     const { result, authority } = await runSelectedTrigger(bothGrantRecipe, 'team')

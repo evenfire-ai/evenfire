@@ -360,9 +360,7 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
 
     expect(predecessorIndex).toBeGreaterThanOrEqual(0)
     expect(migration).toBeDefined()
-    expect(CONTROL_API_MIGRATIONS.at(-1)?.version).toBe(
-      '0144_authorization_revision_delete_compatibility'
-    )
+    expect(CONTROL_API_MIGRATIONS.at(-1)?.version).toBe('0145_workflow_authorization_pause')
     expect(migration?.legacyVersions).toEqual([
       '0143_authorization_revision_delete_compatibility',
       '0138_authorization_revision_delete_compatibility',

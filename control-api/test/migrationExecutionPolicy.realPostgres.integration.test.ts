@@ -53,6 +53,24 @@ const LATEST_DEV_DB_SOURCE_SHA256 =
 const LATEST_DEV_MIGRATION_ENTRY_SOURCE_SHA256 =
   '2b582252753c6455fc85d7cb4563313e3b63ecf7c7630aa6252f70f0bb286a81'
 const LATEST_DEV_RECEIPT_COUNT = 134
+const R68_AUTHORIZATION_PAUSE_MIGRATION = '0145_workflow_authorization_pause'
+
+function expectLegacyReceiptContract(
+  version: string,
+  migration: (typeof CONTROL_API_MIGRATIONS)[number] | undefined,
+  receipts: readonly string[]
+): void {
+  if (version === R68_AUTHORIZATION_PAUSE_MIGRATION) {
+    expect(migration?.preserveLegacyReceipts, `${version} has no displaced receipt`).toBeUndefined()
+    expect(migration?.legacyVersions, `${version} has no legacy aliases`).toBeUndefined()
+    expect(receipts, `${version} canonical receipt`).toContain(version)
+    return
+  }
+  expect(migration?.preserveLegacyReceipts, `${version} preserves old-reader receipts`).toBe(true)
+  for (const alias of migration?.legacyVersions ?? []) {
+    expect(receipts, `${version} alias ${alias}`).toContain(alias)
+  }
+}
 
 const DISPLACED_TASK106_RECEIPTS = Object.freeze([
   ['0126_user_access_foundation', '0130_user_access_foundation'],
@@ -1123,22 +1141,12 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       }
       for (const version of PR1_MIGRATION_VERSIONS) {
         const migration = CONTROL_API_MIGRATIONS.find(candidate => candidate.version === version)
-        expect(migration?.preserveLegacyReceipts, `${version} preserves rollback aliases`).toBe(
-          true
-        )
-        for (const alias of migration?.legacyVersions ?? []) {
-          expect(reconciledReceipts, `${version} rollback alias ${alias}`).toContain(alias)
-        }
+        expectLegacyReceiptContract(version, migration, reconciledReceipts)
       }
       for (const version of PR2_MIGRATION_VERSIONS) {
         expect(currentRun.applyCounts.get(version), `${version} PR2 body`).toBe(1)
         const migration = CONTROL_API_MIGRATIONS.find(candidate => candidate.version === version)
-        expect(migration?.preserveLegacyReceipts, `${version} preserves rollback aliases`).toBe(
-          true
-        )
-        for (const alias of migration?.legacyVersions ?? []) {
-          expect(reconciledReceipts, `${version} rollback alias ${alias}`).toContain(alias)
-        }
+        expectLegacyReceiptContract(version, migration, reconciledReceipts)
       }
       for (const version of [
         '0126_bug192_password_admission',
@@ -1223,12 +1231,10 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       }
       for (const version of [...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS]) {
         const migration = CONTROL_API_MIGRATIONS.find(candidate => candidate.version === version)
-        expect(migration?.preserveLegacyReceipts, `${version} preserves old-reader receipts`).toBe(
-          true
-        )
-        for (const alias of migration?.legacyVersions ?? []) {
-          expect(reconciledReceipts, `${version} alias ${alias}`).toContain(alias)
+        if (version === R68_AUTHORIZATION_PAUSE_MIGRATION) {
+          expect(currentRun.applyCounts.get(version), `${version} applies to published PR2`).toBe(1)
         }
+        expectLegacyReceiptContract(version, migration, reconciledReceipts)
       }
       for (const version of [
         '0126_bug192_password_admission',
@@ -1327,12 +1333,10 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
       }
       for (const version of [...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS]) {
         const migration = CONTROL_API_MIGRATIONS.find(candidate => candidate.version === version)
-        expect(migration?.preserveLegacyReceipts, `${version} preserves old-reader receipts`).toBe(
-          true
-        )
-        for (const alias of migration?.legacyVersions ?? []) {
-          expect(reconciledReceipts, `${version} alias ${alias}`).toContain(alias)
+        if (version === R68_AUTHORIZATION_PAUSE_MIGRATION) {
+          expect(currentRun.applyCounts.get(version), `${version} applies to earlier PR2`).toBe(1)
         }
+        expectLegacyReceiptContract(version, migration, reconciledReceipts)
       }
       for (const version of [
         '0126_bug192_password_admission',

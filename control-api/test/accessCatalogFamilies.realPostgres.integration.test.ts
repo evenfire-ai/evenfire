@@ -786,7 +786,7 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
           catalog.items
             .flatMap(item => item.accessPaths)
             .some(path => path.capabilities.includes('workflow.run.manage'))
-        ).toBe(false)
+        ).toBe(true)
       }
       expect(
         [...new Set(catalog.items.flatMap(item => item.accessPaths.map(path => path.kind)))].sort()

@@ -250,7 +250,7 @@ describe('createDbRunProcessor', () => {
     expect(order).toEqual(['checkpoint', 'child'])
   })
 
-  it('fails a bound run closed when no authority checkpointer is mounted', async () => {
+  it('pauses a bound run when no authority checkpointer is mounted', async () => {
     const run = baseRun({
       authority_binding: {
         userId: '11111111-1111-4111-8111-111111111111',
@@ -280,11 +280,11 @@ describe('createDbRunProcessor', () => {
       logger: silentLogger(),
     })
 
-    await expect(proc.processPending(run.run_id)).rejects.toThrow(
-      'workflow_authority_checkpointer_unavailable'
-    )
+    await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
     expect(createChildRecipe).not.toHaveBeenCalled()
-    expect(client.calls.some(call => /^ROLLBACK$/i.test(call.sql))).toBe(true)
+    const pause = client.calls.find(call => /SET phase = 'AuthorizationPaused'/.test(call.sql))
+    expect(pause?.params).toEqual([run.run_id, 'workflow_authority_unavailable'])
+    expect(client.calls.some(call => /^COMMIT$/i.test(call.sql))).toBe(true)
     expect(client.calls.some(call => /SET phase = 'Running'/.test(call.sql))).toBe(false)
   })
 
@@ -294,7 +294,7 @@ describe('createDbRunProcessor', () => {
     ['access_path_stale', 'workflow_authority_access_path_stale'],
     ['invalid_binding', 'workflow_authority_invalid_binding'],
   ] as const)(
-    'terminalizes permanent authority %s with the typed reason',
+    'pauses before creating a child when authority is %s',
     async (failure, failureReason) => {
       const run = baseRun({
         authority_binding: {
@@ -311,12 +311,12 @@ describe('createDbRunProcessor', () => {
           behaviorBindingHash: 'bh2_test',
         },
       })
-      let phase: 'Pending' | 'Failed' = 'Pending'
+      let phase: 'Pending' | 'AuthorizationPaused' = 'Pending'
       const client = makeClient(async sql => {
         if (/FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)) {
           return phase === 'Pending' ? { rows: [run], rowCount: 1 } : { rows: [], rowCount: 0 }
         }
-        if (/SET phase = 'Failed'/.test(sql)) phase = 'Failed'
+        if (/SET phase = 'AuthorizationPaused'/.test(sql)) phase = 'AuthorizationPaused'
         return { rows: [], rowCount: 0 }
       })
       const createChildRecipe = vi.fn()
@@ -334,18 +334,18 @@ describe('createDbRunProcessor', () => {
 
       await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
       expect(createChildRecipe).not.toHaveBeenCalled()
-      const terminal = client.calls.find(call => /SET phase = 'Failed'/.test(call.sql))
-      expect(terminal?.sql).toContain('failure_reason = $2')
-      expect(terminal?.params).toEqual([run.run_id, failureReason])
+      const pause = client.calls.find(call => /SET phase = 'AuthorizationPaused'/.test(call.sql))
+      expect(pause?.sql).toContain('failure_reason = $2')
+      expect(pause?.params).toEqual([run.run_id, failureReason])
       expect(client.calls.some(call => /^COMMIT$/i.test(call.sql))).toBe(true)
       await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
       expect(checkpointAuthority).toHaveBeenCalledOnce()
-      expect(phase).toBe('Failed')
+      expect(phase).toBe('AuthorizationPaused')
     }
   )
 
   it.each(['authority_unavailable', 'invalid_response', 'timeout'] as const)(
-    'rolls back retryable authority %s without persisting a failure reason',
+    'durably pauses on retryable authority %s before child creation',
     async failure => {
       const run = baseRun({
         authority_binding: {
@@ -370,6 +370,7 @@ describe('createDbRunProcessor', () => {
           ? { rows: [run], rowCount: 1 }
           : { rows: [], rowCount: 0 }
       )
+      const createChildRecipe = vi.fn()
       const proc = spawn({
         instanceId: 'wrc-1',
         pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
@@ -377,17 +378,19 @@ describe('createDbRunProcessor', () => {
         checkpointAuthority: vi.fn(async () => {
           throw new WorkflowAuthorityCheckpointError(failure, true)
         }),
-        createChildRecipe: vi.fn(),
+        createChildRecipe,
         logger: silentLogger(),
       })
 
-      await expect(proc.processPending(run.run_id)).rejects.toThrow()
-      expect(client.calls.some(call => /^ROLLBACK$/i.test(call.sql))).toBe(true)
-      expect(client.calls.some(call => /failure_reason\s*=/.test(call.sql))).toBe(false)
+      await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
+      const pause = client.calls.find(call => /SET phase = 'AuthorizationPaused'/.test(call.sql))
+      expect(pause?.params).toEqual([run.run_id, 'workflow_authority_unavailable'])
+      expect(client.calls.some(call => /^COMMIT$/i.test(call.sql))).toBe(true)
+      expect(createChildRecipe).not.toHaveBeenCalled()
     }
   )
 
-  it('mounts the real checkpoint client and retries authority outages before child creation', async () => {
+  it('mounts the real checkpoint client and pauses on authority outages before child creation', async () => {
     vi.stubEnv('INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET', 'round-five-workflow-checkpoint-test-secret')
     const run = baseRun({
       actor_id: '11111111-1111-4111-8111-111111111111',
@@ -437,13 +440,13 @@ describe('createDbRunProcessor', () => {
       logger: silentLogger(),
     })
 
-    await expect(proc.processPending(run.run_id)).rejects.toThrow('workflow_authority_unavailable')
+    await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
     expect(createChildRecipe).not.toHaveBeenCalled()
-    expect(client.calls.some(call => /^ROLLBACK$/i.test(call.sql))).toBe(true)
-    expect(client.calls.some(call => /SET phase = 'Failed'/.test(call.sql))).toBe(false)
+    expect(client.calls.some(call => /SET phase = 'AuthorizationPaused'/.test(call.sql))).toBe(true)
+    expect(client.calls.some(call => /^COMMIT$/i.test(call.sql))).toBe(true)
   })
 
-  it('terminally rejects a persisted binding for another run actor before child creation', async () => {
+  it('pauses a persisted binding for another run actor before child creation', async () => {
     vi.stubEnv('INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET', 'round-five-workflow-checkpoint-test-secret')
     const run = baseRun({
       actor_type: 'user',
@@ -486,10 +489,10 @@ describe('createDbRunProcessor', () => {
     await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
     expect(fetchImpl).not.toHaveBeenCalled()
     expect(createChildRecipe).not.toHaveBeenCalled()
-    expect(client.calls.some(call => /SET phase = 'Failed'/.test(call.sql))).toBe(true)
+    expect(client.calls.some(call => /SET phase = 'AuthorizationPaused'/.test(call.sql))).toBe(true)
   })
 
-  it('retries an unavailable checkpoint without duplicating the protected effect', async () => {
+  it('requires explicit resume after a checkpoint outage before creating the child', async () => {
     const run = baseRun({
       authority_binding: {
         userId: '11111111-1111-4111-8111-111111111111',
@@ -505,10 +508,14 @@ describe('createDbRunProcessor', () => {
         behaviorBindingHash: 'bh2_test',
       },
     })
+    let phase: 'Pending' | 'AuthorizationPaused' = 'Pending'
     const client = makeClient(async sql => {
       if (/FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)) {
-        return { rows: [run], rowCount: 1 }
+        return phase === 'Pending'
+          ? { rows: [{ ...run, phase }], rowCount: 1 }
+          : { rows: [], rowCount: 0 }
       }
+      if (/SET phase = 'AuthorizationPaused'/.test(sql)) phase = 'AuthorizationPaused'
       if (/SET phase = 'Running'/.test(sql)) return { rows: [], rowCount: 1 }
       return { rows: [], rowCount: 0 }
     })
@@ -526,7 +533,14 @@ describe('createDbRunProcessor', () => {
       logger: silentLogger(),
     })
 
-    await expect(proc.processPending(run.run_id)).rejects.toThrow('workflow_authority_unavailable')
+    await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
+    expect(phase).toBe('AuthorizationPaused')
+    expect(createChildRecipe).not.toHaveBeenCalled()
+    await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
+    expect(checkpointAuthority).toHaveBeenCalledOnce()
+
+    // Model the resume route's committed AuthorizationPaused -> Pending write.
+    phase = 'Pending'
     await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
 
     expect(checkpointAuthority).toHaveBeenCalledTimes(2)
@@ -1331,6 +1345,80 @@ describe('createDbRunProcessor', () => {
     )
     expect(failUpdate).toBeDefined()
     expect(onRunTerminal).toHaveBeenCalledWith('run-orphan-running-3', 'Failed')
+  })
+
+  it('durably pauses a Running V2 run on checkpoint outage before the next boundary', async () => {
+    let phase: DbRunRow['phase'] = 'Running'
+    const run = baseRun({
+      phase,
+      started_at: new Date(),
+      actor_id: '11111111-1111-4111-8111-111111111111',
+      authority_binding: {
+        userId: '11111111-1111-4111-8111-111111111111',
+        sid: '22222222-2222-4222-8222-222222222222',
+        sessionVersion: 1,
+        delegationJti: '33333333-3333-4333-8333-333333333333',
+        operationId: 'workflow.trigger',
+        resource: { type: 'workflow_recipe', logicalId: 'demo/echo' },
+        target: { recipeNamespace: 'demo', recipeName: 'echo' },
+        targetHash: 'ath2_test',
+        accessPathId: 'ap1_test',
+        authorizationRevision: 'ar1_test',
+        behaviorBindingHash: 'bh2_test',
+      },
+    })
+    const client = makeClient(async (sql, params) => {
+      if (/FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)) {
+        return { rows: [{ ...run, phase }], rowCount: 1 }
+      }
+      if (/SET phase = 'AuthorizationPaused'/.test(sql)) {
+        phase = 'AuthorizationPaused'
+        expect(params).toEqual([run.run_id, 'workflow_authority_unavailable'])
+      }
+      return { rows: [], rowCount: 1 }
+    })
+    const checkpointAuthority = vi.fn(async () => {
+      throw new WorkflowAuthorityCheckpointError('authority_unavailable', true)
+    })
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
+      runPollMs: 30_000,
+      checkpointAuthority,
+      createChildRecipe: vi.fn(),
+      logger: silentLogger(),
+    })
+
+    await expect(proc.checkpointRunningBoundary(run.run_id)).resolves.toBe('paused')
+    expect(phase).toBe('AuthorizationPaused')
+    expect(checkpointAuthority).toHaveBeenCalledOnce()
+    expect(client.calls.some(call => /^COMMIT$/i.test(call.sql))).toBe(true)
+    await expect(proc.checkpointRunningBoundary(run.run_id)).resolves.toBe('paused')
+    expect(checkpointAuthority).toHaveBeenCalledOnce()
+  })
+
+  it('keeps a legacy Running run outside V2 checkpoints', async () => {
+    const run = baseRun({ phase: 'Running', started_at: new Date() })
+    const client = makeClient(async sql =>
+      /FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)
+        ? { rows: [run], rowCount: 1 }
+        : { rows: [], rowCount: 1 }
+    )
+    const checkpointAuthority = vi.fn()
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
+      runPollMs: 30_000,
+      checkpointAuthority,
+      createChildRecipe: vi.fn(),
+      logger: silentLogger(),
+    })
+
+    await expect(proc.checkpointRunningBoundary(run.run_id)).resolves.toBe('allowed')
+    expect(checkpointAuthority).not.toHaveBeenCalled()
+    expect(client.calls.some(call => /SET phase = 'AuthorizationPaused'/.test(call.sql))).toBe(
+      false
+    )
   })
 })
 

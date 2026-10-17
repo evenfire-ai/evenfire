@@ -3312,6 +3312,35 @@ async function applyWorkflowRunFailureReasonSchema(db: DbClient): Promise<void> 
   `)
 }
 
+async function applyWorkflowRunAuthorizationPauseSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE workflow_runs
+      DROP CONSTRAINT IF EXISTS workflow_runs_phase_check;
+    ALTER TABLE workflow_runs
+      ADD CONSTRAINT workflow_runs_phase_check CHECK (
+        phase IN ('Pending', 'Running', 'AuthorizationPaused', 'Succeeded', 'Failed', 'Canceled')
+      );
+    ALTER TABLE workflow_runs
+      DROP CONSTRAINT IF EXISTS workflow_runs_failure_reason_check;
+    ALTER TABLE workflow_runs
+      ADD CONSTRAINT workflow_runs_failure_reason_check CHECK (
+        failure_reason IS NULL OR failure_reason IN (
+          'workflow_authority_denied',
+          'workflow_authority_not_found',
+          'workflow_authority_access_path_stale',
+          'workflow_authority_invalid_binding',
+          'workflow_authority_unavailable'
+        )
+      );
+    DROP INDEX IF EXISTS idx_wr_phase;
+    CREATE INDEX idx_wr_phase
+      ON workflow_runs(phase) WHERE phase IN ('Pending', 'Running', 'AuthorizationPaused');
+    DROP INDEX IF EXISTS idx_wr_owner;
+    CREATE INDEX idx_wr_owner
+      ON workflow_runs(owner_instance_id) WHERE phase IN ('Running', 'AuthorizationPaused');
+  `)
+}
+
 async function applyR31RuntimeBehaviorSourcesSchema(db: DbClient): Promise<void> {
   for (const table of ['operational_resource_index', 'operational_resource_index_staging']) {
     await db.query(
@@ -6718,6 +6747,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     ],
     preserveLegacyReceipts: true,
     apply: applyAuthorizationRevisionDeleteCompatibility,
+  },
+  {
+    version: '0145_workflow_authorization_pause',
+    apply: applyWorkflowRunAuthorizationPauseSchema,
   },
 ]
 

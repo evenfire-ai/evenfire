@@ -168,7 +168,8 @@ describeRealPostgres('workflow run failure reasons on PostgreSQL 16', () => {
          '0136_workflow_run_failure_reason',
          '011c_workflow_run_failure_reason',
          '011a_workflow_run_failure_reason',
-         '0114_workflow_run_failure_reason'
+         '0114_workflow_run_failure_reason',
+         '0145_workflow_authorization_pause'
        );
     `)
     const { initDb } = await import('../src/db.js')
@@ -179,6 +180,11 @@ describeRealPostgres('workflow run failure reasons on PostgreSQL 16', () => {
          WHERE version = '0142_workflow_run_failure_reason'`
     )
     expect(upgraded.rows).toEqual([{ version: '0142_workflow_run_failure_reason' }])
+    const pauseSchema = await databasePool.query<{ version: string }>(
+      `SELECT version FROM schema_migrations
+         WHERE version = '0145_workflow_authorization_pause'`
+    )
+    expect(pauseSchema.rows).toEqual([{ version: '0145_workflow_authorization_pause' }])
 
     const runId = await insertPendingRun()
     await expect(
@@ -191,7 +197,7 @@ describeRealPostgres('workflow run failure reasons on PostgreSQL 16', () => {
   })
 
   it.each(permanentFailures)(
-    'persists and reads permanent %s as %s through the runtime role',
+    'pauses the run and reads permanent %s as %s through the runtime role',
     async (failure, expectedReason) => {
       const runId = await insertPendingRun()
       const runProcessor = processor(failure)
@@ -201,7 +207,9 @@ describeRealPostgres('workflow run failure reasons on PostgreSQL 16', () => {
         phase: string
         failure_reason: string | null
       }>('SELECT phase, failure_reason FROM workflow_runs WHERE run_id = $1', [runId])
-      expect(result.rows).toEqual([{ phase: 'Failed', failure_reason: expectedReason }])
+      expect(result.rows).toEqual([
+        { phase: 'AuthorizationPaused', failure_reason: expectedReason },
+      ])
 
       const exactRun = (await listRunsByRecipe('demo', 'echo', 100, databasePool)).find(
         candidate => candidate.run_id === runId
@@ -212,23 +220,31 @@ describeRealPostgres('workflow run failure reasons on PostgreSQL 16', () => {
   )
 
   it.each(transientFailures)(
-    'rolls back transient %s and leaves the run retryable',
+    'pauses the run after transient %s until authority is explicitly resumed',
     async failure => {
       const runId = await insertPendingRun()
       const runProcessor = processor(failure)
 
-      await expect(runProcessor.processPending(runId)).rejects.toThrow()
+      await expect(runProcessor.processPending(runId)).resolves.toBeUndefined()
       const result = await databasePool.query<{
         phase: string
         failure_reason: string | null
       }>('SELECT phase, failure_reason FROM workflow_runs WHERE run_id = $1', [runId])
-      expect(result.rows).toEqual([{ phase: 'Pending', failure_reason: null }])
+      expect(result.rows).toEqual([
+        { phase: 'AuthorizationPaused', failure_reason: 'workflow_authority_unavailable' },
+      ])
     }
   )
 
-  it('archives the same safe reason into the audit error field', async () => {
+  it('archives a terminal run safe reason into the audit error field', async () => {
     const runId = await insertPendingRun()
-    await processor('invalid_binding').processPending(runId)
+    await databasePool.query(
+      `UPDATE workflow_runs
+          SET phase = 'Failed', completed_at = now(),
+              failure_reason = 'workflow_authority_invalid_binding'
+        WHERE run_id = $1`,
+      [runId]
+    )
     const gateway = {} as K8sGateway
 
     await expect(

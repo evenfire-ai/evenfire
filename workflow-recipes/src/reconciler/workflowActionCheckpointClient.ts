@@ -35,18 +35,25 @@ function checkpointRequest(binding: WorkflowRunAuthorityBinding) {
 }
 
 function persistedBindingMatchesRun(run: DbRunRow, binding: WorkflowRunAuthorityBinding): boolean {
-  if (
-    run.actor_type !== 'user' ||
-    run.actor_id !== binding.userId ||
-    binding.resource.type !== 'workflow_recipe' ||
-    binding.resource.logicalId !== `${run.recipe_namespace}/${run.recipe_name}`
-  ) {
-    return false
-  }
+  if (run.actor_type !== 'user' || run.actor_id !== binding.userId) return false
   try {
     const target = canonicalActionTarget(binding.target)
     if (!target) return false
-    return target.recipeNamespace === run.recipe_namespace && target.recipeName === run.recipe_name
+    if (binding.operationId === 'workflow.trigger') {
+      return (
+        binding.resource.type === 'workflow_recipe' &&
+        binding.resource.logicalId === `${run.recipe_namespace}/${run.recipe_name}` &&
+        target.recipeNamespace === run.recipe_namespace &&
+        target.recipeName === run.recipe_name
+      )
+    }
+    return (
+      binding.operationId === 'workflow.run.manage' &&
+      binding.resource.type === 'workflow_run' &&
+      binding.resource.logicalId === run.run_id &&
+      target.runId === run.run_id &&
+      target.action === 'resume'
+    )
   } catch {
     return false
   }
@@ -95,7 +102,10 @@ export function createWorkflowRunAuthorityCheckpointer(
   return async run => {
     const binding = run.authority_binding
     if (!binding) return
-    if (binding.operationId !== 'workflow.trigger') {
+    if (
+      binding.operationId !== 'workflow.trigger' &&
+      binding.operationId !== 'workflow.run.manage'
+    ) {
       throw new WorkflowAuthorityCheckpointError('invalid_binding', false)
     }
     if (!persistedBindingMatchesRun(run, binding)) {

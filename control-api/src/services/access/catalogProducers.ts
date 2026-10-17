@@ -233,7 +233,12 @@ function capabilitiesForFamily(family: CatalogFamily): readonly AccessCapability
     case 'workflow_recipe':
       return ['workflow.read', 'workflow.trigger']
     case 'workflow_run':
-      return ['workflow.read', 'workflow.artifact.read', 'workflow.artifact.delete']
+      return [
+        'workflow.read',
+        'workflow.run.manage',
+        'workflow.artifact.read',
+        'workflow.artifact.delete',
+      ]
     case 'workflow_approval':
       return ['workflow.approval.decide']
     case 'notification':

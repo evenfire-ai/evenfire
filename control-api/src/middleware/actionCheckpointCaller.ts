@@ -18,12 +18,13 @@ export type ActionCheckpointCallerIdentity = Readonly<{
   service: ActionCheckpointCallerService
   trustPlane: 'internal_service_token' | 'internal_control_jwt' | 'mcp_host_runtime_jwt'
   permittedResource?: Readonly<{
-    type: 'host' | 'workflow_recipe' | 'gfs_resource' | 'shared_filesystem'
+    type: 'host' | 'workflow_recipe' | 'workflow_run' | 'gfs_resource' | 'shared_filesystem'
     logicalId: string
   }>
   permittedResourceTypes?: readonly (
     | 'host'
     | 'workflow_recipe'
+    | 'workflow_run'
     | 'gfs_resource'
     | 'shared_filesystem'
   )[]
@@ -119,8 +120,11 @@ function workflowRecipesAuthenticator(): CallerAuthenticator {
         ? Object.freeze({
             service: 'workflow-recipes',
             trustPlane: 'internal_control_jwt' as const,
-            permittedResourceTypes: Object.freeze(['workflow_recipe'] as const),
-            permittedOperations: Object.freeze(['workflow.trigger'] as const),
+            permittedResourceTypes: Object.freeze(['workflow_recipe', 'workflow_run'] as const),
+            permittedOperations: Object.freeze([
+              'workflow.trigger',
+              'workflow.run.manage',
+            ] as const),
           })
         : null,
   })

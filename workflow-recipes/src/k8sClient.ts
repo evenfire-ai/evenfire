@@ -437,7 +437,8 @@ export function workflowNeedsRuntimeCredentialRefresh(recipe: WorkflowRecipeCRD)
   return (
     workflowPhase === 'initializing' ||
     workflowPhase === 'running' ||
-    workflowPhase === 'recovering'
+    workflowPhase === 'recovering' ||
+    workflowPhase === 'authorization_paused'
   )
 }
 
