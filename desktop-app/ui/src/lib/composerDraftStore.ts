@@ -16,6 +16,7 @@ const drafts = new Map<string, string>()
 let revision = 0
 const revisions = new Map<string, number>()
 const listenersByKey = new Map<string, Set<Listener>>()
+const automaticResourcePrefills = new Set<string>()
 
 function keyFor(chatId: string | null, agentRef?: string): string {
   if (chatId) return chatId
@@ -75,11 +76,19 @@ export function clearComposerDraft(chatId: string | null, agentRef?: string): vo
 
 /** Drop drafts on logout or principal/team change and notify mounted composers. */
 export function clearAllComposerDrafts(): void {
+  automaticResourcePrefills.clear()
   for (const key of [...drafts.keys()]) {
     drafts.delete(key)
     revisions.set(key, ++revision)
     emit(key)
   }
+}
+
+/** Claim one automatic resource prefill for a chat and exact context key. */
+export function claimAutomaticResourcePrefill(key: string): boolean {
+  if (automaticResourcePrefills.has(key)) return false
+  automaticResourcePrefills.add(key)
+  return true
 }
 
 export function subscribeComposerDraft(
@@ -105,4 +114,5 @@ export function resetComposerDraftStore(): void {
   drafts.clear()
   revisions.clear()
   listenersByKey.clear()
+  automaticResourcePrefills.clear()
 }

@@ -2,6 +2,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { act, renderHook } from '@testing-library/react'
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '../../../constants/navigation'
+import {
+  clearLatestGfsConversationContext,
+  getLatestGfsConversationContext,
+} from '../../../lib/gfsConversationPrefill'
 import { resolveGfsPreview } from '../../../lib/gfsPreview'
 import {
   closeWorkspaceTab,
@@ -29,12 +33,86 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  clearLatestGfsConversationContext()
   if (originalClerum) Object.defineProperty(window, 'clerum', originalClerum)
   else Reflect.deleteProperty(window, 'clerum')
   originalClerum = undefined
 })
 
 describe('useNavigationController — agent-centric navigation (Fase 2)', () => {
+  it('retains the last exact Files context when focusing Chat and clears it at Files root', () => {
+    const { result } = renderHook(() => useNavigationController())
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openFilesTab(state, { id: 'files-context', path: uri, title: 'Reports' })
+      )
+    )
+    expect(getLatestGfsConversationContext()).toEqual({ uri, sourceTabId: 'files-context' })
+
+    act(() => result.current.selectWorkspaceTabById('chat-tab-1'))
+    expect(getLatestGfsConversationContext()).toEqual({ uri, sourceTabId: 'files-context' })
+
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openFilesTab(state, { id: 'files-root-context', path: null, title: 'Files' })
+      )
+    )
+    expect(getLatestGfsConversationContext()).toBeNull()
+  })
+
+  it('clears retained GFS context when the user switches from one chat to another', () => {
+    const { result } = renderHook(() => useNavigationController())
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openFilesTab(state, { id: 'files-context', path: uri })
+      )
+    )
+    act(() => result.current.selectWorkspaceTabById('chat-tab-1'))
+    expect(getLatestGfsConversationContext()).toEqual({ uri, sourceTabId: 'files-context' })
+
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openChatTab(state, { id: 'chat-other', agentRef: 'agent-2', chatId: 'chat-2' })
+      )
+    )
+    expect(getLatestGfsConversationContext()).toBeNull()
+  })
+
+  it('clears retained GFS context when the user navigates from Files to Settings', () => {
+    const { result } = renderHook(() => useNavigationController())
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openFilesTab(state, { id: 'files-context', path: uri })
+      )
+    )
+    expect(getLatestGfsConversationContext()).toEqual({ uri, sourceTabId: 'files-context' })
+
+    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.settings))
+    expect(result.current.activeTab?.kind).toBe('settings')
+    expect(getLatestGfsConversationContext()).toBeNull()
+  })
+
+  it('clears retained GFS context when the Apps picker is shown over a Files tab', () => {
+    const { result } = renderHook(() => useNavigationController())
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openFilesTab(state, { id: 'files-context', path: uri })
+      )
+    )
+    expect(getLatestGfsConversationContext()).toEqual({ uri, sourceTabId: 'files-context' })
+
+    act(() => result.current.showAppsPicker())
+    expect(getLatestGfsConversationContext()).toBeNull()
+  })
+
   it('defaults selectedAgentRoute to Connectors (mcp-servers), not details', () => {
     const { result } = renderHook(() => useNavigationController())
     expect(result.current.selectedAgentRoute).toBe(AGENT_WORKSPACE_ROUTES.connectors)

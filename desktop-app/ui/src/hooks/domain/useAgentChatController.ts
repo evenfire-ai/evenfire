@@ -38,6 +38,7 @@ import {
   mapComposerAttachmentsToHostRequest,
 } from '@lib/composerHostRequest'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
+import { clearLatestGfsConversationContext } from '@lib/gfsConversationPrefill'
 import {
   confirmHostModelSelectionFromSend,
   dropIgnoredHostModelIntent,
@@ -625,6 +626,7 @@ export function useAgentChatController({
     if (lastRetentionScope.current === scope) return
     lastRetentionScope.current = scope
     clearAllComposerDrafts()
+    clearLatestGfsConversationContext()
     sendScopeGeneration.current += 1
     agentSendSetupOwnerRef.current = null
     agentSendInFlightRef.current = false
@@ -951,6 +953,7 @@ export function useAgentChatController({
   const resetChat = useCallback(() => {
     beginSelectionIntent()
     clearAllComposerDrafts()
+    clearLatestGfsConversationContext()
     setActivityByAgentMessage({})
     setProgressByAgentMessage({})
     resetComposerAttachments()
