@@ -1,6 +1,7 @@
 /**
  * Configuration settings loaded from environment variables.
  */
+import { isIP } from 'node:net'
 import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
 import type { ApprovalConfig } from './core/extensions/approvalTypes'
 import type { GuardrailsConfig } from './core/guardrails/config'
@@ -96,6 +97,9 @@ export interface Config {
 
   // RPC Server port
   serverPort: number
+
+  // RPC Server bind address (undefined: all interfaces, the Node.js default)
+  serverHost?: string
 
   // Context Mapper URL (for fetching McpServers)
   contextMapperUrl: string
@@ -495,6 +499,22 @@ export function parseMcpStatusHeartbeatDuration(
 }
 
 /**
+ * Parse `CLERUM_SERVER_HOST`, the address the runtime API binds to. Unset or
+ * blank keeps the Node.js default (all interfaces), so existing deployments are
+ * unchanged. Any other value must be an IPv4/IPv6 literal or `localhost`; a typo
+ * fails at boot rather than silently binding somewhere unexpected.
+ */
+export function parseServerHost(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined
+  const value = raw.trim()
+  if (value === '') return undefined
+  if (value === 'localhost' || isIP(value) !== 0) return value
+  throw new Error(
+    `[Config] CLERUM_SERVER_HOST='${raw}' must be an IPv4/IPv6 address or 'localhost'`
+  )
+}
+
+/**
  * Parse CLERUM_HOST_CONFIG JSON for dev mode.
  */
 function parseDevHostConfig(): HostSpec | undefined {
@@ -859,6 +879,9 @@ export const config: Config = {
 
   // RPC Server port
   serverPort: parseInt(getEnv('CLERUM_SERVER_PORT', '8080')!, 10),
+
+  // RPC Server bind address (unset: all interfaces)
+  serverHost: parseServerHost(getEnv('CLERUM_SERVER_HOST')),
 
   // Host Context Controller URL (defaults based on mode)
   contextMapperUrl: getEnv(

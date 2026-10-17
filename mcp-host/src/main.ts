@@ -2709,7 +2709,7 @@ function logSharedOutputs(): void {
 
 async function startRPCServer(): Promise<void> {
   const port = config.serverPort
-  rpcServer = new RPCServer(port)
+  rpcServer = new RPCServer(port, config.serverHost)
   // agent is guaranteed non-null here: initializeAgent() runs before startRPCServer()
   // in both startDevMode and startProductionMode.
   // Use the durable (async) variants so sessions evicted from the in-memory
@@ -3582,7 +3582,7 @@ async function main(): Promise<void> {
       const { WorkflowService } = await import('./workflow/workflowService')
       const { McpClient, staticTokenProvider } = await import('./mcp/client')
 
-      rpcServer = new RPCServer(config.serverPort)
+      rpcServer = new RPCServer(config.serverPort, config.serverHost)
 
       // Inject a real HTTP MCP client factory so steps that declare mcpServers can
       // actually connect to them. Without this, WorkflowService uses a default factory
