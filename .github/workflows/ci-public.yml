@@ -756,6 +756,14 @@ jobs:
       - name: Test minikube Makefile targets
         run: bash scripts/tests/test-minikube-makefile.sh
 
+      - name: Test the #825 gate context guards, report verdict, E2E helpers and layout merge check
+        run: >-
+          node scripts/tests/run-node-test-files.mjs
+          scripts/e2e/playwright-report-gate.test.mjs
+          scripts/e2e/e2e-hcc-storage-layout-switch.test.mjs
+          scripts/e2e/e2e-stateless-suspend-wake.test.mjs
+          deploy/scripts/host-layout-merge.test.mjs
+
       # make test-service-matrix fails when Makefile TEST_SERVICES and the
       # `test` job's service matrix above drift apart.
       - name: Test local measurement gate and test-service parity
@@ -911,6 +919,16 @@ jobs:
             > deploy/overlays/minikube/patches/k8s-api-ip.yaml
           kubectl kustomize deploy/overlays/minikube > /tmp/clerum-minikube.yaml
           kubectl kustomize deploy/overlays/minikube-no-uis > /tmp/clerum-minikube-no-uis.yaml
+          kubectl kustomize deploy/overlays/minikube-ghcr > /tmp/clerum-minikube-ghcr.yaml
+          kubectl kustomize deploy/overlays/minikube-no-uis-ghcr > /tmp/clerum-minikube-no-uis-ghcr.yaml
+
+      - name: Shipped overlays keep the HCC workspace layout merge on (#825)
+        run: |
+          bash scripts/tests/test-hcc-layout-merge-flag-render.sh \
+            minikube=/tmp/clerum-minikube.yaml \
+            minikube-no-uis=/tmp/clerum-minikube-no-uis.yaml \
+            minikube-ghcr=/tmp/clerum-minikube-ghcr.yaml \
+            minikube-no-uis-ghcr=/tmp/clerum-minikube-no-uis-ghcr.yaml
 
       - name: Validate NP-08 caller-bound HCC contract
         run: |

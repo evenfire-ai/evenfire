@@ -45,6 +45,10 @@ import {
   SqliteColdStartLoader,
   createConversationStore,
 } from './core/conversation/persistence'
+import {
+  exitOnPersistFailure,
+  storeShutdownExitCode,
+} from './core/conversation/persistence/persistFailureExit'
 import { validateApprovalConfig } from './core/extensions'
 import type { ApprovalDecision } from './core/extensions/approvalTypes'
 import { BasicSafety } from './core/safety/safety'
@@ -256,6 +260,8 @@ let agent: AgentStateMachine | null = null
 let cronScheduler: CronScheduler | null = null
 let sessionProcessor: SessionProcessor | null = null
 let isShuttingDown = false
+/** Bound on the reporter flush that precedes a persist-failure exit 1. */
+const PERSIST_FAILURE_FLUSH_TIMEOUT_MS = 5_000
 let mcpInitializationGeneration = 0
 // Stage 3 (stateless-agents) — heartbeat emitter + DRAINING fence holder.
 let statelessHeartbeat: StatelessHeartbeat | null = null
@@ -1621,7 +1627,7 @@ function setupUsageReporting(): void {
 
 /**
  * Resolve the absolute path where `state.db` should live. D3 §1.2 precedence:
- * `CLERUM_SESSION_DB_DIR` (dedicated PVC mount injected by HCC) → explicit
+ * `CLERUM_SESSION_DB_DIR` (the workspace PVC root, injected by HCC) → explicit
  * `CLERUM_SESSION_DB_PATH` → the workspace PVC → tmpdir fallback (dev/test
  * only; forbidden — throws — under the stateless lifecycle).
  */
@@ -1669,10 +1675,24 @@ async function initializeConversationStore(): Promise<ConversationStoreHandle | 
     cacheSize: config.conversationCacheSize,
     syncTimeoutMs: config.dbPersistSyncTimeoutMs,
     asyncTimeoutMs: config.dbPersistAsyncTimeoutMs,
+    stallTimeoutMs: config.dbWorkerStallTimeoutMs,
     checkpointEveryWrites: config.dbCheckpointEveryWrites,
     heartbeatMs: config.dbWorkerHeartbeatMs,
     pendingApprovalTtlMs: config.pendingApprovalTtlMs,
     barrierMode,
+    onPersistFailure: exitOnPersistFailure(() => isShuttingDown, {
+      // Flush buffered usage and governed-run events before the exit 1.
+      // Marking the Host as shutting down keeps a SIGTERM during the flush
+      // from starting the graceful shutdown path as a second, concurrent
+      // shutdown.
+      beforeExit: async () => {
+        isShuttingDown = true
+        usageReporter?.stop()
+        governedRunReporter?.stop()
+        await Promise.all([usageReporter?.drain(), governedRunReporter?.drain()])
+      },
+      beforeExitTimeoutMs: PERSIST_FAILURE_FLUSH_TIMEOUT_MS,
+    }),
   })
 
   agent.setConversationStore(handle.store)
@@ -1921,21 +1941,22 @@ async function initializeAgent(): Promise<void> {
 
     // Boot-only retention sweep (T3.1 §8). Failures are non-fatal so a
     // corrupt DB does not block traffic — the metric / log surfaces the issue.
-    sessionSearchService.sweepRetention(config.searchRetentionDays).then(
-      deleted => {
-        logger.info(
-          {
-            event: 'search_retention_sweep',
-            deleted_sessions: deleted,
-            retention_days: config.searchRetentionDays,
-          },
-          'Host runtime event'
-        )
-      },
-      err => {
-        logger.error({ err: err }, '[Main] Session search retention sweep failed (non-fatal):')
-      }
-    )
+    // Awaited before bootstrap: the sweep runs in batches that delete an
+    // expired session's messages before the session row, so no load may run
+    // between them. It therefore counts against the Host startup window.
+    try {
+      const deleted = await sessionSearchService.sweepRetention(config.searchRetentionDays)
+      logger.info(
+        {
+          event: 'search_retention_sweep',
+          deleted_sessions: deleted,
+          retention_days: config.searchRetentionDays,
+        },
+        'Host runtime event'
+      )
+    } catch (err) {
+      logger.error({ err: err }, '[Main] Session search retention sweep failed (non-fatal):')
+    }
     logger.info(
       { searchRetentionDays: config.searchRetentionDays },
       '[Main] Session search enabled (retentionDays=)'
@@ -3175,13 +3196,12 @@ async function shutdown(signal: string): Promise<void> {
   await pluginWorkloadSdkServer?.stop()
   await rpcServer?.stop()
 
-  // T2.1 — drain pending DB writes, then terminate the SQLite worker.
+  // T2.1 — drain pending DB writes, then terminate the SQLite worker. A
+  // write that could not be persisted makes the process exit 1.
+  let exitCode = 0
   if (conversationStoreHandle) {
-    try {
-      await conversationStoreHandle.shutdown()
-    } catch (err) {
-      logger.warn({ err: err }, '[Main] ConversationStore shutdown raised:')
-    }
+    const handle = conversationStoreHandle
+    exitCode = await storeShutdownExitCode(() => handle.shutdown())
   }
 
   if (gfsRuntimeStop) {
@@ -3194,7 +3214,7 @@ async function shutdown(signal: string): Promise<void> {
     }
   }
 
-  process.exit(0)
+  process.exit(exitCode)
 }
 
 /**
