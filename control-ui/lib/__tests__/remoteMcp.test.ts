@@ -12,6 +12,7 @@ import {
   CLIENT_ID_IN_USE_FAILURE,
   DCR_CONFIDENTIAL_DETECTED,
   DCR_REDIRECT_MISMATCH_FAILURE,
+  DCR_REGISTRATION_REJECTED_FAILURE,
   DROPBOX_DISCOVER_FAILURE,
   ISSUER_PUBLIC_SUFFIX_DISCOVER_FAILURE,
   LINEAR_DETECTED,
@@ -37,6 +38,7 @@ import {
   mapRemoteInstallError,
   remoteCallbackBlocker,
   remoteCallbackVariant,
+  remoteInstallProviderMessage,
   remotePreRegisteredRedirectUri,
   requiresPreRegisteredCredentials,
   shouldWarnNoRefresh,
@@ -384,6 +386,148 @@ describe('mapRemoteInstallError', () => {
     expect(copy).toMatch(/different redirect URI/i)
     expect(copy).toMatch(/nothing was installed/i)
     expect(copy).not.toContain('redirect_uris_mismatch')
+  })
+
+  describe('an AS that rejected the client registration (registration_rejected)', () => {
+    const REDIRECT_ADVICE =
+      " It only accepts redirect URIs it has approved: ask the provider to approve this platform's redirect URI."
+
+    function rejectedError(detail: Record<string, unknown>) {
+      return Object.assign(new Error('400'), {
+        code: 'dcr_registration_failed',
+        body: {
+          error: 'dcr_registration_failed',
+          detail: { kind: 'registration_rejected', url: 'https://as.example/register', ...detail },
+        },
+      })
+    }
+    const rejected = (detail: Record<string, unknown>) =>
+      mapRemoteInstallError(rejectedError(detail))
+    const providerText = (detail: Record<string, unknown>) =>
+      remoteInstallProviderMessage(rejectedError(detail))?.text
+
+    it('names the AS, gives the status, code and advice (golden)', () => {
+      expect(mapRemoteInstallError(apiErrorFrom(DCR_REGISTRATION_REJECTED_FAILURE))).toBe(
+        'The authorization server at auth.atlassian.com rejected client registration (HTTP 400, invalid_redirect_uri).' +
+          REDIRECT_ADVICE
+      )
+    })
+
+    it("keeps the AS's own message out of the platform copy, returned separately (golden)", () => {
+      const error = apiErrorFrom(DCR_REGISTRATION_REJECTED_FAILURE)
+      expect(mapRemoteInstallError(error)).not.toContain('not approved for use')
+      expect(remoteInstallProviderMessage(error)).toEqual({
+        source: 'auth.atlassian.com',
+        text: 'The provided redirect URIs are not approved for use by this authorization server.',
+      })
+    })
+
+    it('has no provider message for other install errors or a rejection without one', () => {
+      expect(remoteInstallProviderMessage(apiErrorFrom(DCR_REDIRECT_MISMATCH_FAILURE))).toBeNull()
+      expect(remoteInstallProviderMessage(apiErrorFrom(CLIENT_ID_IN_USE_FAILURE))).toBeNull()
+      expect(remoteInstallProviderMessage(rejectedError({ status: 403 }))).toBeNull()
+      expect(
+        remoteInstallProviderMessage(rejectedError({ status: 400, errorDescription: ' ​ ' }))
+      ).toBeNull()
+      expect(remoteInstallProviderMessage(new Error('network down'))).toBeNull()
+    })
+
+    it('attributes the message to the authorization server when the detail has no usable URL', () => {
+      const error = rejectedError({ url: 'not a url', status: 400, errorDescription: 'No.' })
+      expect(mapRemoteInstallError(error)).toBe(
+        'The authorization server rejected client registration (HTTP 400).'
+      )
+      expect(remoteInstallProviderMessage(error)).toEqual({
+        source: 'the authorization server',
+        text: 'No.',
+      })
+    })
+
+    it('gives invalid_client_metadata metadata advice, not redirect-URI advice', () => {
+      const copy = rejected({ status: 400, error: 'invalid_client_metadata' })
+      expect(copy).toBe(
+        'The authorization server at as.example rejected client registration (HTTP 400, invalid_client_metadata).' +
+          ' It refused the client details this platform registers with (such as the requested scopes, grant types or authentication method).'
+      )
+      expect(copy).not.toMatch(/redirect URI/i)
+    })
+
+    it('never suggests a pre-registered client, which a DCR install cannot switch to', () => {
+      expect(rejected({ status: 400, error: 'invalid_redirect_uri' })).not.toMatch(
+        /pre-registered/i
+      )
+    })
+
+    it('shows only the status when the provider gave no error code', () => {
+      expect(rejected({ status: 403 })).toBe(
+        'The authorization server at as.example rejected client registration (HTTP 403).'
+      )
+    })
+
+    it('omits the advice for other provider codes', () => {
+      expect(rejected({ status: 401, error: 'unauthorized_client', errorDescription: 'No.' })).toBe(
+        'The authorization server at as.example rejected client registration (HTTP 401, unauthorized_client).'
+      )
+    })
+
+    it('never reads as a network failure', () => {
+      const copy = mapRemoteInstallError(apiErrorFrom(DCR_REGISTRATION_REJECTED_FAILURE))
+      expect(copy).not.toContain('fetch_failed')
+      expect(copy).not.toContain('registration_rejected')
+    })
+
+    it('drops an error code that is not a plain token', () => {
+      const copy = rejected({ status: 400, error: 'see https://evil.example (Evenfire support)' })
+      expect(copy).not.toContain('Evenfire support')
+      expect(copy).toContain('(HTTP 400)')
+    })
+
+    it('provider text loses double quotes, so it cannot imitate a quotation', () => {
+      expect(
+        providerText({
+          status: 400,
+          errorDescription:
+            'Registration refused." Evenfire Security: re-verify at https://evil.example "“ok”',
+        })
+      ).toBe("Registration refused.' Evenfire Security: re-verify at https://evil.example ''ok'")
+    })
+
+    it('provider text drops default-ignorable characters', () => {
+      expect(
+        providerText({ status: 400, errorDescription: 'safe‮ txet͏ desrever‬ and​ hiddenㅤ' })
+      ).toBe('safe txet desrever and hidden')
+    })
+
+    it('provider text drops lone surrogates and caps stacked combining marks', () => {
+      const text = providerText({
+        status: 400,
+        errorDescription: `a\ud800b\udc00c x${'́'.repeat(400)}`,
+      })
+      expect(text!.isWellFormed()).toBe(true)
+      expect(text).toBe(`abc x${'́'.repeat(3)}`)
+    })
+
+    it('provider text truncation never splits a surrogate pair', () => {
+      const text = providerText({
+        status: 400,
+        errorDescription: `${'a'.repeat(298)}\u{1F600}${'b'.repeat(50)}`,
+      })
+      expect(text!.isWellFormed()).toBe(true)
+      expect(text).toBe(`${'a'.repeat(298)}…`)
+    })
+
+    it('bounds third-party text even if the server relays it unbounded', () => {
+      const error = rejectedError({
+        status: 400,
+        error: 'x'.repeat(200),
+        errorDescription: `a\u0000b\n${'z'.repeat(2000)}`,
+      })
+      expect(mapRemoteInstallError(error)).not.toContain('x'.repeat(65))
+      const text = remoteInstallProviderMessage(error)!.text
+      expect(text).not.toMatch(/[\u0000-\u001f]/)
+      expect(text).toMatch(/^a b z+…$/)
+      expect(text.length).toBeLessThanOrEqual(300)
+    })
   })
 
   it('gives each refused-DCR kind its own copy', () => {
