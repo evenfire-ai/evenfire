@@ -101,6 +101,19 @@ the registry's published digest and stops on a mismatch; when the registry
 returns no digest, or the lookup fails, the install continues without that
 check. Afterwards, grant it to agents from **Installed Connectors**.
 
+If the rollback itself cannot finish, the install fails with HTTP 500
+`registry_install_rollback_incomplete` (`outcome: compensation_failed`). The
+rollback deletes only objects it can prove are still the ones it created, and it
+keeps a Secret that something still references, so some of `McpServer/<name>`,
+`<name>-credentials` and `<name>-oauth-client` can remain in the target
+namespace (`mcp-server` by default). A 503 with `outcome: repair_required`
+means the result of a create is unknown. In both cases, list what is there,
+delete the leftovers for that server name, then install again:
+
+```bash
+kubectl -n mcp-server get mcpservers,secrets -l clerum.io/managed-by=control-api
+```
+
 Verify it landed:
 
 ```bash
