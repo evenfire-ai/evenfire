@@ -219,7 +219,12 @@ login_all() {
   TEAM_ID="$(jq -r '.items[0].id // empty' <<<"$HTTP_BODY")"
   user_login || return 1
   # bash 3.2 treats "${empty[@]}" as unbound under set -u.
-  [ "${#CREATED_HOSTS[@]}" -eq 0 ] || mint_rpc_token
+  [ "${#CREATED_HOSTS[@]}" -eq 0 ] && return 0
+  if [ "${1:-}" = regrant ]; then
+    local host
+    for host in "${CREATED_HOSTS[@]}"; do grant_host "$host" || return 1; done
+  fi
+  mint_rpc_token
 }
 
 hcc_image() {
@@ -274,7 +279,9 @@ upgrade_to_head() {
     *) ok "HCC runs $(hcc_image)" ;;
   esac
   hold_forwards head || return 1
-  login_all || return 1
+  # The setup's seed (seed-e2e-data.sh put_agents) sets the user's and team's
+  # agents to the source Host only, revoking the rows' grants.
+  login_all regrant || return 1
   read_fixture_image
 }
 

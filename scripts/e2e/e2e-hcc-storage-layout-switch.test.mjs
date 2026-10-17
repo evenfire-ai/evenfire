@@ -428,6 +428,33 @@ test('the upgrade lane repairs blockers before it upgrades', () => {
   assert.doesNotMatch(helper('check_upgraded'), /wait_refused_pod|REPAIR_STATE_FAMILY_SCRIPT/)
 })
 
+// A7.45: the head setup's seed (seed-e2e-data.sh put_agents) resets the user's
+// and team's agents, so the lane grants its rows' Hosts again before the mint.
+test('login_all regrant grants every created Host before it mints', () => {
+  assert.match(helper('upgrade_to_head'), /login_all regrant \|\| return 1/)
+  const run = arg => bash(`
+    set -u
+    calls=()
+    admin_login() { calls+=(admin_login); }
+    admin() { HTTP_CODE=200; HTTP_BODY='{"items":[{"id":"t1","email":"u@x"}]}'; }
+    user_login() { calls+=(user_login); }
+    grant_host() { calls+=("grant:$1"); }
+    mint_rpc_token() { calls+=(mint); }
+    fail() { echo "FAIL $*"; }
+    CAPI=http://capi DEV_EMAIL=u@x
+    CREATED_HOSTS=(host-a host-b)
+    ${helper('login_all')}
+    login_all ${arg}; rc=$?
+    printf '%s\\n' "\${calls[@]}"; echo "RC=$rc"
+  `)
+  const regrant = run('regrant')
+  assert.equal(regrant.status, 0, regrant.stderr)
+  assert.equal(regrant.stdout.trim(), 'admin_login\nuser_login\ngrant:host-a\ngrant:host-b\nmint\nRC=0')
+  // Witness: the plain call reaches the mint and grants nothing.
+  const plain = run('')
+  assert.equal(plain.stdout.trim(), 'admin_login\nuser_login\nmint\nRC=0')
+})
+
 test('the lane T5 repair leaves a tree the merge does not touch', () => {
   const repairScript = SOURCE.match(/^REPAIR_STATE_FAMILY_SCRIPT='([^']*)'/m)
   assert.ok(repairScript, 'REPAIR_STATE_FAMILY_SCRIPT not found')
