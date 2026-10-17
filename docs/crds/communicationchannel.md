@@ -9,7 +9,7 @@
 ## Purpose
 
 CommunicationChannel defines one or more communication channel groups (Telegram,
-Email, Slack) with their allowed user identifiers. The channel-reader service
+Email, Slack, Microsoft Teams) with their allowed user identifiers. The channel-reader service
 watches these CRDs, polls each configured channel for new messages from
 authorized senders, and forwards them to the mcp-host.
 Telegram personal approval accounts are verified separately from Profile UI.
@@ -21,7 +21,7 @@ Telegram personal approval accounts are verified separately from Profile UI.
 | Field                          | Type     | Required | Description                                                                                                                                                                                                                                                            |
 | ------------------------------ | -------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `spec.hostRef`                 | string   | yes      | Reference to the Host this channel configuration belongs to. The channel-reader uses this to filter which channels it processes.                                                                                                                                       |
-| `spec.credentialsSecretRef`    | object   | no       | Reference (`{ name }`) to a Secret in the `channels` namespace holding provider credentials for this channel — keyed by type: `telegram-bot-token`, `slack-bot-token`, `slack-signing-secret`, `email-username`, `email-password`. Auto-created as `cc-<ccname>-credentials` when set via the Control UI; raw YAML may point at a shared Secret. |
+| `spec.credentialsSecretRef`    | object   | no       | Reference (`{ name }`) to a Secret in the `channels` namespace holding provider credentials for this channel — keyed by type: `telegram-bot-token`, `slack-bot-token`, `slack-signing-secret`, `teams-app-password`, `email-username`, `email-password`. Auto-created as `cc-<ccname>-credentials` when set via the Control UI; raw YAML may point at a shared Secret. |
 | `spec.access`                  | object   | no       | Users and teams allowed to connect conversations to this channel: `access.users[]` and `access.teams[]` (string lists). The Control UI restricts these to principals that already have access to `hostRef`.                                                            |
 
 ### Telegram
@@ -61,6 +61,8 @@ Telegram personal approval accounts are verified separately from Profile UI.
 | `spec.slack`                          | object[] | no                         | List of Slack channel groups.                                                                                                                                                                                                                         |
 | `spec.slack[].channelId`              | string   | yes                        | Slack channel identifier. When `userIds` are configured, must be a stable Slack channel ID, not a display name (e.g. `C0123456789`, `D0123456789`, or `G0123456789`). Legacy `userNames`-only groups may retain an existing channel display name.     |
 | `spec.slack[].workspaceId`            | string   | with userIds               | Slack workspace/team ID (e.g. `T0123456789`). Required when `userIds` are configured so provider-originated workflow approval decisions bind to stable workspace identity; not required for legacy `userNames`-only groups.                           |
+| `spec.slack[].conversationType`       | string   | no                         | Slack conversation type captured at setup.                                                                                                                                                                                                            |
+| `spec.slack[].title`                  | string   | no                         | Slack conversation title captured at setup.                                                                                                                                                                                                           |
 | `spec.slack[].userIds`                | string[] | yes for workflow approvals | Allowed Slack user IDs for this group (e.g. `U0123456789`). Workflow approval decisions use this stable identity.                                                                                                                                     |
 | `spec.slack[].userNames`              | string[] | legacy                     | Legacy allowed Slack usernames for non-workflow chat filtering. Usernames are not accepted as workflow approval identity.                                                                                                                             |
 | `spec.slack[].replyOnlyWhenMentioned` | boolean  | no                         | If `true`, only process messages that include an app mention of this bot (`<@USER_ID>`). Non-approval messages are dropped until Slack `auth.test` returns a bot `user_id`. `/approve` and `/deny` commands are always accepted from allowed senders. |
@@ -81,7 +83,35 @@ Telegram personal approval accounts are verified separately from Profile UI.
 | `spec.slackSettings.replyOnlyWhenMentioned` | boolean | no       | If `true`, process Slack messages only when the app is mentioned.                                                 |
 | `spec.slackSettings.replyInThreads`         | boolean | no       | If `true`, app responses are posted in a thread for the triggering message and follow-ups in that thread continue there. |
 
-At least one channel group (`telegram`, `email`, or `slack`) should be defined for the
+### Microsoft Teams
+
+Teams messages arrive through the Bot Framework webhook (see
+[Connect Microsoft Teams](../how-to/connect-teams.md)). Conversations are
+recorded here as users confirm them.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `spec.teams` | object[] | no | List of confirmed Teams conversations. |
+| `spec.teams[].channelId` | string | yes | Teams conversation ID from the Bot Framework activity. |
+| `spec.teams[].tenantId` | string | yes | Microsoft Entra tenant ID for the conversation. |
+| `spec.teams[].serviceUrl` | string | no | Bot Framework service URL captured from the activity. |
+| `spec.teams[].conversationType` | string | no | `personal`, `groupChat`, or `channel`. |
+| `spec.teams[].teamId` / `teamsChannelId` | string | no | Team and channel IDs when the conversation is a team channel. |
+| `spec.teams[].userIds` | string[] | no | Allowed Teams user IDs for this conversation. |
+| `spec.teams[].title` | string | no | Conversation title captured at setup. |
+| `spec.teams[].confirmedByUserId` / `confirmedAt` | string | no | evenfire user who confirmed the conversation, and when. |
+| `spec.teams[].replyInThreads` | boolean | no | `false` posts replies at the conversation root; missing means reply in the source thread. |
+
+#### Teams global settings
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `spec.teamsSettings.appName` | string | no | Teams app or bot name shown during user setup. |
+| `spec.teamsSettings.tenantId` | string (UUID) | no | Microsoft Entra tenant ID for the bot. |
+| `spec.teamsSettings.appId` | string (UUID) | no | Microsoft app (client) ID for the bot. The client secret stays in `credentialsSecretRef` as `teams-app-password`. |
+| `spec.teamsSettings.replyOnlyWhenMentioned` | boolean | no | If `true`, process Teams messages only when the bot is mentioned. |
+
+At least one channel group (`telegram`, `email`, `slack`, or `teams`) should be defined for the
 CRD to be useful, though the schema does not enforce this.
 
 ### Telegram Upgrade Note
@@ -101,7 +131,7 @@ entry for that user.
 
 ## Additional Printer Columns
 
-`kubectl get channels` displays: Host, Telegram Groups, Email Groups, Slack Groups.
+`kubectl get channels` displays: Host, Telegram Groups, Email Groups, Slack Groups, Teams Groups.
 
 ## Example
 
