@@ -170,8 +170,8 @@ describe('requireActionCheckpointCaller', () => {
     expect(response.body).toEqual({
       service: 'workflow-recipes',
       trustPlane: 'internal_control_jwt',
-      permittedResourceTypes: ['workflow_recipe'],
-      permittedOperations: ['workflow.trigger'],
+      permittedResourceTypes: ['workflow_recipe', 'workflow_run'],
+      permittedOperations: ['workflow.trigger', 'workflow.run.manage'],
     })
   })
 
