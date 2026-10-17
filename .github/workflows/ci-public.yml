@@ -155,6 +155,14 @@ jobs:
         working-directory: rpc-proxy
         run: npm ci
 
+      # The mcp-host images ship these faces, and the tests that set Arabic,
+      # Hebrew and Han text in a PDF fail in CI instead of skipping without them.
+      - name: Install the mcp-host image fonts
+        if: matrix.service == 'mcp-host'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fonts-dejavu-core fonts-noto-core fonts-noto-cjk
+
       - name: Install External REST contract-test dependencies
         if: matrix.service == 'control-api'
         working-directory: external-rest-api
@@ -205,6 +213,11 @@ jobs:
       - name: Test subscription login privacy
         if: matrix.service == 'desktop-app'
         run: node --test scripts/tests/subscription-private-ui-input.test.mjs
+
+      # Hermetic node:test suite of the chat-open benchmark harness (#1091).
+      - name: Test the chat-open benchmark harness
+        if: matrix.service == 'desktop-app'
+        run: node scripts/tests/run-node-test-files.mjs desktop-app/scripts/bench-chat-open/benchmark.test.mjs
 
       # Hermetic subscription-image and Control API memory-calibration node:test
       # suites. Their only installed dependency is mcp-host's @napi-rs/canvas,
@@ -1085,6 +1098,20 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Every image shipping a TLS tool installs ca-certificates
         run: bash scripts/check-dockerfile-ca-certificates.sh
+
+  # ─── Dockerfile font guard ────────────────────────────────────────────────
+  # The renderers find their faces by file name and the packages that ship
+  # them are listed in each Dockerfile; an image missing one builds and runs,
+  # and its Arabic, Hebrew or Han text silently loses its face.
+  dockerfile-font-guard:
+    name: Validate mcp-host font packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Every mcp-host image and CI job installs the renderers' fonts
+        run: bash scripts/check-dockerfile-fonts.sh
+      - name: The font check passes complete lists and names what one misses
+        run: bash scripts/tests/test-check-dockerfile-fonts.sh
 
   # ─── Deploy manifest check (public overlays) ──────────────────────────────
   # The public repo carries base + minikube overlays only; the gcp-dev/gcp-prod

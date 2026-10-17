@@ -82,6 +82,11 @@ import { hostPrimaryLlmBindingChanged } from './llm/hostLlmBinding'
 import { type ImageInputResolver } from './llm/imageInput'
 import { PromptCache } from './llm/promptCache'
 import { clerumPromptCacheInvalidationsTotal } from './llm/promptCacheMetrics'
+import {
+  type ProviderEnvLookup,
+  createProviderEnvChangeDetector,
+  providerEnvLookup,
+} from './llm/providerEnv'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
 import { logger } from './logger'
 import {
@@ -176,7 +181,7 @@ import {
   createGovernedRunReporter,
 } from './usage/usageReporter'
 import { VISUAL_INPUT_LIMITS } from './visualInput/policy'
-import { setOutputDirHostAccessor } from './workflow/internalTools'
+import { getOutputDir, setOutputDirHostAccessor } from './workflow/internalTools'
 import { loadPersistedWorkflowControlToken } from './workflow/mcpHostJwtState'
 import { submitProviderWorkflowApprovalDecision } from './workflow/providerWorkflowApprovalDecisionClient'
 import { confirmProviderWorkflowApprovalMediumEnrollment } from './workflow/providerWorkflowApprovalMediumEnrollmentClient'
@@ -197,6 +202,7 @@ import {
   stopRuntimeAuthProactiveRefresh,
 } from './workflow/runtimeAuthRefreshScheduler'
 import { type McpHostRuntimeAuth, refreshWithRecovery } from './workflow/userApprovalRequester'
+import { countSharedOutputs, resolveRpcCallerOutputDir } from './workspace/callerOutputs'
 import { resolveCallerRootBinding } from './workspace/callerRootBinding'
 import { ScopedWorkspaceProvider } from './workspace/scopedWorkspace'
 
@@ -431,6 +437,20 @@ function apiKeysFromConfigStore(store: ConfigStore): ApiKeys {
   return { [llm.provider]: llm.credentials }
 }
 
+/**
+ * The non-secret provider env for `provider` (AWS_REGION, Vertex project/
+ * location, Azure endpoint/api-version), resolved from the live ConfigStore —
+ * per-Host `host-<ref>-env` / `-env-secret` first, then process.env. Restricted
+ * to the provider's declared non-secret names and kept in-process (never
+ * written to process.env, so it cannot reach a tool subprocess). Undefined
+ * without a ConfigStore (dev mode) → drivers read process.env.
+ */
+function hostProviderEnv(provider: string | undefined): ProviderEnvLookup | undefined {
+  const store = configStore
+  if (!store || !provider || !isLlmProvider(provider)) return undefined
+  return providerEnvLookup(provider, name => store.get(name))
+}
+
 // ─── R5 — provider fallback ────────────────────────────────────────────────
 
 /** Structured WARN on every failover switch (no secrets). */
@@ -527,7 +547,8 @@ function buildFallbackProvider(entry: FallbackEntry): SingleTurnProvider | null 
   if (!creds) return null
   return createLLMProvider(
     { [entry.provider]: creds },
-    { provider: entry.provider as LlmProvider, name: entry.model }
+    { provider: entry.provider as LlmProvider, name: entry.model },
+    { env: hostProviderEnv(entry.provider) }
   )
 }
 
@@ -614,7 +635,11 @@ function buildProviderForModel(model: string): SingleTurnProvider | null {
   const modelCfg = currentHost?.spec.model
   if (!modelCfg?.provider) return null
   const keys = configStore ? apiKeysFromConfigStore(configStore) : currentKeys
-  return createLLMProvider(keys, { provider: modelCfg.provider, name: model })
+  return createLLMProvider(
+    keys,
+    { provider: modelCfg.provider, name: model },
+    { env: hostProviderEnv(modelCfg.provider) }
+  )
 }
 
 /**
@@ -687,20 +712,35 @@ async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
   // lives in control-api/WRC. Re-checked on every allowlist reload below.
   signalHostModelAllowlist(store, host.spec.model)
 
+  // Host → Environment edits (host-<ref>-env CM / -env-secret) fire only
+  // `envChanged`. Rebuild the provider when one of ITS declared non-secret env
+  // values (AWS_REGION, VERTEX_*, AZURE_OPENAI_*) actually changed; unrelated
+  // env edits keep the live provider. The store is rebuilt on a provider change,
+  // so the detector is per (store, provider).
+  const providerEnvChanged =
+    provider && isLlmProvider(provider)
+      ? createProviderEnvChangeDetector(provider, name => store.get(name))
+      : () => false
+
   // Hot reload: rebuild the LLM provider on key rotation. The agent receives
   // a swapped provider via setLLMProvider; in-flight requests finish on the
   // old client (already dispatched), the next task uses the new one.
-  store.onChange(({ llmKeyChanged, allowlistChanged }) => {
+  store.onChange(({ llmKeyChanged, envChanged, allowlistChanged }) => {
     // R3.7 — re-evaluate the Host model against the freshly-loaded allowlist.
     if (allowlistChanged && currentHost) signalHostModelAllowlist(store, currentHost.spec.model)
-    if (!llmKeyChanged || !currentHost) return
+    // Always consult the detector on envChanged so its baseline tracks the
+    // latest values even when a key rotation triggers the rebuild instead.
+    const providerConfigChanged = envChanged && providerEnvChanged()
+    if ((!llmKeyChanged && !providerConfigChanged) || !currentHost) return
     const keys = apiKeysFromConfigStore(store)
     currentKeys = keys
-    const next = createLLMProvider(keys, currentHost.spec.model)
+    const next = createLLMProvider(keys, currentHost.spec.model, {
+      env: hostProviderEnv(currentHost.spec.model?.provider),
+    })
     if (!next) {
       logger.error(
         {},
-        '[Main] LLM provider rebuild failed after key rotation — Host may be degraded'
+        '[Main] LLM provider rebuild failed after LLM config change — Host may be degraded'
       )
       return
     }
@@ -714,7 +754,10 @@ async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
     failoverEngine?.clearCooldown()
     if (agent) {
       agent.setLLMProvider(next, currentHost.spec.model?.name)
-      logger.info({}, '[Main] LLM provider rebuilt and re-attached to agent (key rotated)')
+      logger.info(
+        { llmKeyChanged, providerConfigChanged },
+        '[Main] LLM provider rebuilt and re-attached to agent (LLM config changed)'
+      )
     } else {
       logger.info({}, '[Main] LLM provider rebuilt (agent not ready yet, will use on init)')
     }
@@ -746,7 +789,9 @@ async function initializeProvider(
   logger.info({ model: host.spec.model }, '[Main] Model config:')
   logger.info({ contextRef: host.spec.contextRef }, '[Main] Context ref:')
 
-  currentProvider = createLLMProvider(keys, host.spec.model)
+  currentProvider = createLLMProvider(keys, host.spec.model, {
+    env: hostProviderEnv(host.spec.model?.provider),
+  })
   bootFallbackEntry = null
 
   // R5.10 — boot with fallback (Q8 ratified): if the PRIMARY is inconstructible
@@ -2650,6 +2695,34 @@ function subscribeActivity(onEvent: (event: HostActivityEvent) => void): {
 /**
  * Start the RPC server.
  */
+/**
+ * Chat files generated before they became per user stay where they were,
+ * unserved and untouched; one line says how many there are.
+ */
+function logSharedOutputs(): void {
+  if (process.env.CLERUM_OUTPUT_DIR) {
+    logger.warn(
+      { component: 'GeneratedOutputs' },
+      'CLERUM_OUTPUT_DIR is not used in chat; generated files go to each caller folder'
+    )
+  }
+  countSharedOutputs(getOutputDir()).then(
+    found => {
+      if (found?.files) {
+        logger.info(
+          { component: 'GeneratedOutputs', files: found.files, bytes: found.bytes },
+          'Files from the former shared output folder are no longer listed or served'
+        )
+      }
+    },
+    (err: unknown) =>
+      logger.warn(
+        { component: 'GeneratedOutputs', code: (err as NodeJS.ErrnoException)?.code },
+        'Could not count the former shared output folder'
+      )
+  )
+}
+
 async function startRPCServer(): Promise<void> {
   const port = config.serverPort
   rpcServer = new RPCServer(port)
@@ -2778,6 +2851,14 @@ async function startRPCServer(): Promise<void> {
 
   rpcServer.onMessage(handleIncomingMessage)
   rpcServer.setArtifactSecretEntriesProvider(() => configStore?.listSecretEntries() ?? [])
+  // Generated files are per user: each Desktop user lists and downloads only
+  // their own folder under the Host's caller roots.
+  rpcServer.setChatArtifactDirResolver(userId =>
+    gfsWorkspaceProvider
+      ? resolveRpcCallerOutputDir(gfsWorkspaceProvider.baseRootPath, userId)
+      : { failureCode: 'ENOENT' }
+  )
+  if (process.env.CLERUM_WORKFLOW_ENABLED !== 'true') logSharedOutputs()
   rpcServer.onStatus(getStatus)
   rpcServer.onActivitySnapshot(getActivitySnapshot)
   rpcServer.onActivityStream(subscribeActivity)

@@ -42,6 +42,11 @@ ENV NODE_ENV=production
 
 WORKDIR /app
 
+# The chart and PDF renderers carry a face for Latin, Greek and Cyrillic; these
+# fonts add the arrows, check marks, CJK, Arabic and Hebrew it lacks. Alpine
+# packages Arabic and Hebrew apart from font-noto.
+RUN apk add --no-cache font-dejavu font-noto font-noto-cjk font-noto-arabic font-noto-hebrew
+
 # Copy the shared package + package files + the already-pruned install
 COPY packages/llm-providers ./packages/llm-providers
 COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
