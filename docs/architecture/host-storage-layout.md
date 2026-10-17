@@ -87,21 +87,27 @@ stateful or desktop tree changes only if it carries the signature, which only
 the earlier init or agent-created `state/` and `workspace/` folders with one
 of those exact names produce.
 
-Two agent-made folder pairs on a stateful Host do stop it from starting:
+A `state/` holding `state.db` or one of its journals beside the root
+database, next to a `workspace/` folder without a database, is superseded
+(T5). The earlier release produces this tree without any agent: a Host
+created stateless and switched to stateful on v0.10 or v0.11 keeps its old
+history in `state/state.db` and writes new chats to a root `state.db`. Every
+stateless start moves the root database into `state/` (the earlier init
+relied on the same rule), so the root database is the newer one. The merge
+keeps it, renames `state/` in one step to `state.db.superseded-<UTC ts>`,
+leaves `workspace/` in place, and exits 0. No `state/` remains, so later
+starts carry no signature. Nothing is deleted, and the new name starts with
+`state.db`, so agent file tools cannot read it or anything under it. An
+agent-made `state/` folder in that position gets the same rename.
+`host-layout-merge.sh inventory` reports the tree as `WILL_SUPERSEDE`, which
+is not an upgrade blocker. A destination that already exists, or a PVC root
+the container uid cannot write, refuses before the rename.
 
-- a `state/` holding `state.db` or one of its journals beside the root
-  database, next to a `workspace/` folder. The signature holds and F2
-  refuses, because the merge cannot tell the agent's file from a second
-  database. The earlier release produces the same tree without any agent: a
-  Host created stateless and switched to stateful on v0.10 or v0.11 keeps its
-  old history in `state/state.db` and writes new chats to a root `state.db`.
-  `host-layout-merge.sh inventory` reports it as `WILL_REFUSE_F2` before the
-  upgrade, and the upgrade note describes the repair;
-- a `state/` the container uid cannot list and search, next to a
-  `workspace/` folder. F1 refuses before the database check, because the
-  merge cannot tell whether it holds a database.
-
-In both cases the operator renames the folder from a helper Pod.
+One agent-made folder pair on a stateful Host does stop it from starting: a
+`state/` the container uid cannot list and search, next to a `workspace/`
+folder. F1 refuses before the database check, because the merge cannot tell
+whether it holds a database. The operator renames the folder from a helper
+Pod.
 
 A split tree whose `workspace` is missing, a symlink or a regular file also
 carries no signature, because the earlier init always leaves a real
@@ -115,7 +121,8 @@ Host). Recovery, with the Host stopped and the PVC mounted in a helper Pod:
    file aside and `mkdir workspace`);
 2. if mcp-host already created a root `state.db`, rename the root
    `state.db`, `state.db-wal` and `state.db-shm` to `state.db.<label>.bak`
-   names, or the next start refuses with F2 (two live databases). Chats
+   names; otherwise the next start keeps that root database and renames
+   `state/`, which holds the history, to `state.db.superseded-<ts>`. Chats
    written to that database stay in the backup;
 3. start the Host: the signature holds and the merge moves the history to
    the root.
@@ -141,7 +148,7 @@ stays in `Init:Error`.
 | Case                                                                                                                                                                                                                                           | Line contains                                                                                                                                                                                                                                             |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | F1: the PVC root is a symlink, not a directory, or resolves to `/`; `state/` or `workspace/` escapes the root or cannot be listed and searched; a database entry (`state.db`, `-wal`, `-shm`, `.pre-*.bak`) is a symlink or not a regular file | `directory is a symlink`, `is not a directory`, `escapes the workspace PVC root`, `state directory is not readable and searchable`, `workspace directory is not readable and searchable`, `SQLite file is a symlink`, `SQLite file is not a regular file` |
-| F2: more than one live database family across the root, `state/` and `workspace/`                                                                                                                                                              | `more than one live SQLite database`                                                                                                                                                                                                                      |
+| F2: more than one live database family across the root, `state/` and `workspace/`, except the superseded tree (root main, `state/` family, no `workspace/` family)                                                                             | `more than one live SQLite database`                                                                                                                                                                                                                      |
 | F3: a name to move already exists at the root, or under both `state/` and `workspace/`; a directory that decides such a collision cannot be listed; `workspace/lost+found` exists                                                              | `destination exists`, `exists under both state/ and workspace/`, `lost+found would remain`, `cannot list directory`                                                                                                                                       |
 | F4: the PVC root, `state/`, `workspace/`, or a directory to be moved out of them is not writable by the container uid                                                                                                                          | `not writable by uid`                                                                                                                                                                                                                                     |
 
@@ -168,9 +175,10 @@ stateful Host the PVC root is the agent workspace, so an agent can create a
 `state/state.db*` entry and trigger the merge; the merge is needed once per
 Host, and the flag closes that window once every Host is merged. While the
 flag is on, the init runs on every Host at every start, so such an entry can
-also make it refuse (F2 next to a root `state.db`, F1 for a symlinked
-`state.db*` entry) and leave a stateful Host in `Init:Error` until an operator
-renames the entry.
+also make it act: next to a root `state.db` and a `workspace/` folder it
+renames `state/` to `state.db.superseded-<ts>`, and a symlinked `state.db*`
+entry refuses with F1 and leaves a stateful Host in `Init:Error` until an
+operator renames the entry.
 
 - Unset or empty means `true`. Only the exact strings `true` and `false` are
   accepted; any other value fails HCC config load with
@@ -286,6 +294,11 @@ forced by a deploy.
   Host, where the previous mcp-host (which protects only those three exact
   names) lets agent file tools read them. Move them into `state/` from a helper
   Pod after the rollback, or roll forward.
+- A `state.db.superseded-<ts>` directory is a root entry like any other: the
+  previous init moves it into `workspace/` on a stateless Host, and the merge
+  moves it back to the root on roll-forward. While rolled back, the previous
+  mcp-host protects only the three exact names, so agent file tools can read
+  the directory's other files.
 - A merged root that holds a symlink (for example one an agent created under
   `workspace/`, which the merge moved to the root) blocks the previous init:
   it creates empty `state/` and `workspace/`, then exits 1 with

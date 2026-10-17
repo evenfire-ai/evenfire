@@ -61,6 +61,7 @@ result:
 | ------------------------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
 | `NO_SPLIT_SIGNATURE`      | The tree does not carry the split-layout signature; the merge exits 0 and changes nothing     | None                                                     |
 | `WILL_MERGE`              | The merge moves the tree to the PVC root on the Host's next start                             | None                                                     |
+| `WILL_SUPERSEDE`          | A Host switched back to stateful: the merge renames `state/` to `state.db.superseded-<ts>`    | None; see [Repairs](#repairs) for where the history goes |
 | `WILL_REFUSE_F<n> <line>` | The merge will refuse with that line and the Host will stay in `Init:Error` after the upgrade | See [Repairs](#repairs); counted in `UPGRADE_BLOCKERS`   |
 | `UNREADABLE <reason>`     | The check Pod could not read the PVC (pull error, timeout, unexpected output)                 | Fix the reason and run the command again                 |
 | `UNKNOWN <reason>`        | A Host's claim is missing from the PVC list, or a PVC labelled for a Host has another name    | Find the claim the Host mounts and run the command again |
@@ -68,6 +69,9 @@ result:
 The command exits 1 while `UPGRADE_BLOCKERS` is above 0, while a PVC is
 `UNREADABLE` or `UNKNOWN`, when Hosts exist but no PVC was inspected, or when the flag is set to an invalid value or to `false` with a
 split tree present. `DESKTOP_HOSTS` repeats the export warning above.
+
+`WILL_SUPERSEDE` is not a blocker: the merge handles that tree on the Host's
+next start with no operator step.
 
 Repair every `WILL_REFUSE_*` before the upgrade and run `inventory` again
 until `UPGRADE_BLOCKERS=0`. A refused Host stays in `Init:Error` after the
@@ -87,10 +91,12 @@ empty database at the PVC root and reports no error. `inventory` and `verify`
 print `FLAG_FALSE_WITH_SPLIT_TREES=<n>` and exit 1 in that state. Set the
 flag back to `"true"` before the split Host starts: the next start then
 merges the tree. If the Host already started with the flag off, it created a
-root `state.db` next to `state/state.db`; with the flag back on, that start
-refuses with F2 (`more than one live SQLite database`). Repair it as a Host
-switched from stateless to stateful (see [Repairs](#repairs)): the root
-family holds only the chats since the flag-off start.
+root `state.db` next to `state/state.db`. With the flag back on, the next
+start treats that tree like a Host switched from stateless to stateful: it
+keeps the root database, which holds only the chats since the flag-off
+start, and renames `state/` with the older history to
+`state.db.superseded-<ts>`. To serve the older history instead, follow
+[Repairs](#repairs).
 
 Running Hosts restart with the new template and merge on that start.
 Suspended Hosts merge on their next wake; the upgrade does not wake them.
@@ -172,28 +178,33 @@ are part of the split-layout signature. Delete the helper Pod when done; the
 Host Pod retries the init on its own, or delete the Host Pod to retry at once.
 
 **A Host switched from stateless to stateful on v0.10 or v0.11
-(`WILL_REFUSE_F2`).** A Host created stateless and later switched to stateful
-(through the admin API, or by HCC when a CommunicationChannel, a desktop or a
-SharedFileSystem co-location rejected stateless) keeps its old history in
-`state/state.db` and writes new chats to a root `state.db`. The merge cannot
-choose between two live databases. Decide which history the Host serves and
-rename the other family:
+(`WILL_SUPERSEDE`, no operator step).** A Host created stateless and later
+switched to stateful (through the admin API, or by HCC when a
+CommunicationChannel, a desktop or a SharedFileSystem co-location rejected
+stateless) keeps its old history in `state/state.db` and writes new chats to
+a root `state.db`. Every stateless start moves the root database into
+`state/`, so the root database is the newer one, and it is the one the Host
+serves today. On the first start after the upgrade the merge keeps it,
+renames `state/` in one step to `state.db.superseded-<UTC ts>`, leaves
+`workspace/` where it is, and exits 0:
 
-- keep the old history: rename the root family. On the old release the Host
-  runs stateful on that family, so do this after the upgrade, on the
-  `Init:Error` Pod. The signature still holds and
-  the merge moves `state/` and `workspace/` to the root on the next start. A
-  file written at the root after the switch with the same name as one under
-  `workspace/` (for example `IDENTITY.md`) then refuses with F3; rename one of
-  the two;
-- keep the chats since the switch: rename the family under `state/`. The
-  running Host does not open it, so do this before the upgrade. Unless
-  `state/` also holds a `state.db*.pre-<ts>.bak` file, the tree no longer
-  carries the signature: the merge exits 0 and `state/` and `workspace/`
-  stay as folders in the agent's workspace, with the old files under
-  `workspace/`. Move them to the root yourself if the Host needs them.
+- the old history is in `state.db.superseded-<ts>/state.db` (with its
+  journals and any `.pre-<ts>.bak` backups); nothing is deleted;
+- the old files stay under `workspace/`, which the Host sees as
+  `<workspace>/workspace/`. Move them to the root from a helper Pod if the
+  Host needs them at their old paths;
+- agent file tools cannot read `state.db.superseded-*` or anything under it,
+  because the name starts with `state.db`.
 
-The renamed family stays on the PVC; agent file tools cannot read any
+To serve the old history instead, swap the two families from a helper Pod
+while no Host Pod has the PVC mounted: rename the root family to
+`state.db.<label>.bak` names and move the files of
+`state.db.superseded-<ts>/` that start with `state.db` to the root.
+
+The same tree is refused (`WILL_REFUSE_F2`) when `workspace/` also holds a
+database, or when `state/` and `workspace/` both hold one and the root has
+none. Decide which history the Host serves and rename the other families.
+The renamed families stay on the PVC; agent file tools cannot read any
 `state.db*` name.
 
 **A name in `workspace/` that already exists at the root (`WILL_REFUSE_F3`).**
