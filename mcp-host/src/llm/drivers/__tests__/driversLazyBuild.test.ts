@@ -12,7 +12,8 @@
  *   - vertex/bedrock descriptors carry NO baseURL, so makeProvider can never
  *     route them through the OpenAI-compatible arm.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { logger } from '../../../logger'
 import { descriptorFor } from '../../registryCore'
 import { buildBedrockClientConfig } from '../bedrockConverse'
 import { buildVertexClientOptions } from '../googleGenerative'
@@ -48,10 +49,43 @@ describe('buildVertexClientOptions — in-memory credentials, no file', () => {
     expect(process.env.GOOGLE_APPLICATION_CREDENTIALS).toBeUndefined()
   })
 
-  it('falls back to the JSON project_id when VERTEX_PROJECT_ID is unset', () => {
+  it('falls back to the JSON project_id when VERTEX_PROJECT_ID is unset, with a warning', () => {
     delete process.env.VERTEX_PROJECT_ID
-    const opts = buildVertexClientOptions({ 'vertex-service-account-json': VALID_SA })
-    expect(opts.project).toBe('proj-from-json')
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    try {
+      const opts = buildVertexClientOptions({ 'vertex-service-account-json': VALID_SA })
+      expect(opts.project).toBe('proj-from-json')
+      expect(warn).toHaveBeenCalledTimes(1)
+      const [fields, msg] = warn.mock.calls[0]!
+      expect(msg).toBe('VERTEX_PROJECT_ID is unset; using the service-account JSON project_id')
+      expect(fields).toMatchObject({ provider: 'vertex', projectIdSource: 'service-account-json' })
+      // The resolved project id is not logged.
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('proj-from-json')
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('treats a blank VERTEX_PROJECT_ID as unset and warns', () => {
+    process.env.VERTEX_PROJECT_ID = '   '
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    try {
+      const opts = buildVertexClientOptions({ 'vertex-service-account-json': VALID_SA })
+      expect(opts.project).toBe('proj-from-json')
+      expect(warn).toHaveBeenCalledTimes(1)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('does not warn when VERTEX_PROJECT_ID is set', () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    try {
+      buildVertexClientOptions({ 'vertex-service-account-json': VALID_SA })
+      expect(warn).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('defaults location to us-central1', () => {

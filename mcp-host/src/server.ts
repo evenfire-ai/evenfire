@@ -332,6 +332,7 @@ export class RPCServer {
   private server: http.Server | null = null
   private app = express()
   private readonly port: number
+  private readonly host: string | undefined
   private messageHandler: MessageHandler | null = null
   private statusHandler: StatusHandler | null = null
   private approvalHandler: ApprovalHandler | null = null
@@ -369,8 +370,13 @@ export class RPCServer {
   private chatArtifactDirResolver: ((userId: string) => CallerOutputLookup) | null = null
   private lifecycleGate: RuntimeLifecycleGate | null = null
 
-  constructor(port: number = 8080) {
+  /**
+   * @param host Bind address. Undefined keeps the Node.js default (all
+   *   interfaces); see `CLERUM_SERVER_HOST`.
+   */
+  constructor(port: number = 8080, host?: string) {
     this.port = port
+    this.host = host
     this.configureExpress()
   }
 
@@ -1029,7 +1035,8 @@ export class RPCServer {
 
   start(): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.server = this.app.listen(this.port)
+      this.server =
+        this.host === undefined ? this.app.listen(this.port) : this.app.listen(this.port, this.host)
 
       this.server.on('error', err => {
         logger.error({ component: 'Server', err }, 'RPC server error')
@@ -1037,7 +1044,14 @@ export class RPCServer {
       })
 
       this.server.on('listening', () => {
-        logger.info({ component: 'Server', port: this.port }, 'RPC server listening')
+        logger.info(
+          {
+            component: 'Server',
+            port: this.port,
+            ...(this.host === undefined ? {} : { host: this.host }),
+          },
+          'RPC server listening'
+        )
         resolve()
       })
     })

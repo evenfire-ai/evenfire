@@ -24,6 +24,7 @@ import {
   ToolCompletionResponse,
   ToolDefinition,
 } from '../../core/types'
+import { logger } from '../../logger'
 import type { ProviderCredentials } from '../../types'
 import { classifyUnknown } from '../errorClassification'
 import { type ProviderEnvLookup, processEnvLookup } from '../providerEnv'
@@ -362,12 +363,13 @@ export interface VertexClientOptions {
 }
 
 /**
- * Pure: derive the Vertex client options from the credential bag + the
+ * Derive the Vertex client options from the credential bag + the
  * non-secret provider env (`env`: per-Host `host-<ref>-env` via ConfigStore in a
  * Host pod, `process.env` by default),
  * constructing the auth credentials IN MEMORY from the service-account JSON —
  * never via a `GOOGLE_APPLICATION_CREDENTIALS` file. `VERTEX_PROJECT_ID`
- * (falling back to the JSON's `project_id`) is required; `VERTEX_LOCATION`
+ * (falling back to the JSON's `project_id`, with a warning so the fallback is
+ * visible) is required; `VERTEX_LOCATION`
  * defaults to us-central1. Throws (never echoing the secret) on a missing/
  * malformed JSON or an unresolvable project id. Separated from
  * {@link buildGoogleGenerativeDriver} so all the wiring is testable without the
@@ -391,8 +393,19 @@ export function buildVertexClientOptions(
     throw new Error('vertex: service-account JSON missing client_email/private_key')
   }
 
-  const projectId = env('VERTEX_PROJECT_ID')?.trim() || sa.project_id
+  const configuredProjectId = env('VERTEX_PROJECT_ID')?.trim()
+  const projectId = configuredProjectId || sa.project_id
   if (!projectId) throw new Error('vertex: VERTEX_PROJECT_ID is required')
+  if (!configuredProjectId) {
+    // Not an error: the service account's own project is a valid default. Warn
+    // so an unset or blank VERTEX_PROJECT_ID is visible instead of silently
+    // calling Vertex in the project the key belongs to. The project id itself
+    // is not logged.
+    logger.warn(
+      { component: 'LLM', provider: 'vertex', projectIdSource: 'service-account-json' },
+      'VERTEX_PROJECT_ID is unset; using the service-account JSON project_id'
+    )
+  }
   const location = env('VERTEX_LOCATION')?.trim() || 'us-central1'
 
   return {
