@@ -2082,9 +2082,12 @@ export class WorkflowRecipeReconciler {
     // `status.message` ("Policy violation: …") embeds operator-controlled
     // workload fields verbatim; combined with the `alreadyPolicyFailed`
     // idempotency guard above, self-healing one would deploy a policy-rejected
-    // workload. Policy failures stay terminal until the spec is fixed (which
-    // re-arms enforcement). The classifier is also anchored to transport-error
-    // shapes (see isRetryableInfraError) so an embedded token can't match.
+    // workload. Policy failures stay terminal: editing the spec does NOT clear
+    // the failure or re-arm enforcement (alreadyPolicyFailed keys only on phase
+    // + message). Recovery is the admin retry route (failed → candidate, which
+    // re-runs enforcement) or deleting and re-creating the recipe. The
+    // classifier is also anchored to transport-error shapes (see
+    // isRetryableInfraError) so an embedded token can't match.
     const latchedByTransientError =
       currentPhase === 'failed' &&
       !recipe.status?.message?.startsWith('Policy violation:') &&

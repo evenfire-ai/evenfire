@@ -180,8 +180,9 @@ spec:
                       type: object
                       required: [name, key]
                       description: >-
-                        Reference to a Secret in the mcp-servers namespace holding
-                        the OAuth client_id.
+                        Reference to a Secret in this McpServer's namespace
+                        (control-api's MCP servers namespace, `mcp-server` by
+                        default) holding the OAuth client_id.
                       properties:
                         name:
                           type: string
@@ -193,8 +194,9 @@ spec:
                       type: object
                       required: [name, key]
                       description: >-
-                        Reference to a Secret in the mcp-servers namespace holding
-                        the OAuth client_secret.
+                        Reference to a Secret in this McpServer's namespace
+                        (control-api's MCP servers namespace, `mcp-server` by
+                        default) holding the OAuth client_secret.
                       properties:
                         name:
                           type: string

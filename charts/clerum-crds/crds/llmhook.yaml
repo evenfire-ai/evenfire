@@ -257,9 +257,12 @@ spec:
                 capabilities:
                   type: array
                   description: >-
-                    Admin-granted capabilities (§4.3). Enforced to be within
-                    Host.spec.guardrails.capabilityCeiling (§5) and re-checked on
-                    every hook response (§8.1).
+                    Admin-granted capabilities (§4.3). control-api requires them
+                    to be within Host.spec.guardrails.capabilityCeiling (§5) of
+                    the target Host at registry install and of every referencing
+                    Host at upgrade; the ceiling is not re-checked at runtime.
+                    mcp-host honors only the actions these granted capabilities
+                    allow on each hook response (§8.1).
                   items:
                     type: string
                     enum:
