@@ -180,8 +180,9 @@ There is no "deactivate" for members. The options are:
   accounts are disabled either way.
 - **Delete a team** (Teams tab → **Delete**). The API only deletes a team with
   no active members, and returns `team_not_empty` otherwise. Remove or delete
-  its members first. Deleting the team also removes its pending invitations
-  and its agent and Context grants.
+  its members first. A team referenced by workflow audit history is kept, and
+  the API returns `team_has_audit_history`. Deleting the team also removes its
+  pending invitations and its agent and Context grants.
 - **Delete admin** (Admins tab). This removes the admin's Control UI access
   immediately: their sessions end and their EvenDrive operator link is
   revoked. The record is kept as `disabled` for audit and is hidden from the
