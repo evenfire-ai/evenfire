@@ -69,6 +69,12 @@ The command exits 1 while `UPGRADE_BLOCKERS` is above 0, while a PVC is
 `UNREADABLE` or `UNKNOWN`, when Hosts exist but no PVC was inspected, or when the flag is set to an invalid value or to `false` with a
 split tree present. `DESKTOP_HOSTS` repeats the export warning above.
 
+Repair every `WILL_REFUSE_*` before the upgrade and run `inventory` again
+until `UPGRADE_BLOCKERS=0`. A refused Host stays in `Init:Error` after the
+upgrade, and a deploy that waits for Host rollouts fails on it (the minikube
+setup does: `scripts/minikube/sync-auth-key.sh` waits for every Host
+Deployment that is not suspended).
+
 A `NO_SPLIT_SIGNATURE` result says only that the merge will not touch the
 tree. It does not prove where the history is; see the trees without a
 signature in [Host Storage Layout](../architecture/host-storage-layout.md).
@@ -129,8 +135,10 @@ Delete the orphan PVC, or recreate its Host before turning the flag off.
 ## Repairs
 
 Every refusal exits before the first move, so the tree is as the old release
-left it. The Host Pod in `Init:Error` runs no `mcp-host`, so nothing writes to
-the PVC while you repair it. Work from a helper Pod on the Host Pod's node
+left it. Repair before the upgrade when the files you rename are not the
+database the running Host opens; otherwise repair after the upgrade, when the
+Host Pod is in `Init:Error` and runs no `mcp-host`, so nothing writes to the
+PVC. Work from a helper Pod on the Host Pod's node
 (the claim is ReadWriteOnce), with the Host image and the PVC mounted
 read-write:
 
@@ -171,12 +179,15 @@ SharedFileSystem co-location rejected stateless) keeps its old history in
 choose between two live databases. Decide which history the Host serves and
 rename the other family:
 
-- keep the old history: rename the root family. The signature still holds and
+- keep the old history: rename the root family. On the old release the Host
+  runs stateful on that family, so do this after the upgrade, on the
+  `Init:Error` Pod. The signature still holds and
   the merge moves `state/` and `workspace/` to the root on the next start. A
   file written at the root after the switch with the same name as one under
   `workspace/` (for example `IDENTITY.md`) then refuses with F3; rename one of
   the two;
-- keep the chats since the switch: rename the family under `state/`. Unless
+- keep the chats since the switch: rename the family under `state/`. The
+  running Host does not open it, so do this before the upgrade. Unless
   `state/` also holds a `state.db*.pre-<ts>.bak` file, the tree no longer
   carries the signature: the merge exits 0 and `state/` and `workspace/`
   stay as folders in the agent's workspace, with the old files under

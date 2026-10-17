@@ -7,9 +7,9 @@
 # the profile between the two modes.
 #
 #   main     installs v0.11.0 (published images), seeds one Host per row, runs
-#            deploy/scripts/host-layout-merge.sh inventory, upgrades to this
-#            head (images built from this tree, database kept), then checks
-#            verify, repairs T5 with the upgrade-note procedure and checks the
+#            deploy/scripts/host-layout-merge.sh inventory, repairs T5 with the
+#            upgrade-note procedure (plan A7.44), upgrades to this head (images
+#            built from this tree, database kept), then checks verify and the
 #            history of every row. Rows:
 #              T1 stateful;
 #              T2 stateless, active at the upgrade;
@@ -35,8 +35,8 @@
 #
 # Cluster writes besides the setups and the admin API: the named fixtures of
 # e2e-hcc-storage-layout-switch.sh (hcc-cadence, pvc-fixture, channel,
-# host-layout-merge), the T5 repair (a pvc-fixture rename plus the deletion of
-# the refused Host Pod, as the upgrade note says) and, in control mode,
+# host-layout-merge), the T5 repair (a pvc-fixture rename on the release, as the
+# upgrade note says) and, in control mode,
 # FAULT:flag-false (kubectl set env on the HCC Deployment, undone in the
 # trap). No kubectl exec into Host Pods, no SQLite reads or writes.
 set -euo pipefail
@@ -341,20 +341,6 @@ wait_merge_templates() {
   return 1
 }
 
-# wait_refused_pod HOST → prints the Pod whose merge init exited 1.
-wait_refused_pod() {
-  local host=$1 elapsed=0 pod
-  while [ "$elapsed" -lt "$POD_READY_TIMEOUT" ]; do
-    pod="$(host_pods "$host" | jq -r '[.items[] | select(any(.status.initContainerStatuses[]?;
-      .name == "workspace-layout-merge" and ((.state.terminated.exitCode // 0) == 1 or (.lastState.terminated.exitCode // 0) == 1)))][0].metadata.name // ""')"
-    [ -z "$pod" ] || { printf '%s' "$pod"; return 0; }
-    sleep 3
-    elapsed=$((elapsed + 3))
-  done
-  echo "${host}: no Pod with workspace-layout-merge exit 1 within ${POD_READY_TIMEOUT}s" >&2
-  return 1
-}
-
 # run_layout CMD: one run of the operator script; output in LAYOUT_OUT, exit in LAYOUT_RC.
 run_layout() {
   LAYOUT_OUT="${SCRATCH}/layout-$1-${SECONDS}.out"
@@ -420,39 +406,45 @@ predict_rows() {
     expect_row "$HOST_T1" NO_SPLIT_SIGNATURE 'inventory T1'
 }
 
+# The upgrade note's T5 repair, keeping the chats since the switch, on the
+# release: the running stateful Pod opens only the root database, so the
+# state/ family is renamed while it serves. Repaired before the upgrade
+# because make minikube-setup waits for every Host rollout, and a Host left in
+# Init:Error by the merge fails it (sync-auth-key.sh).
+repair_blockers() {
+  log "REPAIR:${HOST_T5} rename the state/ database family (upgrade note)"
+  pvc_fixture "$HOST_T5" rw repair "$REPAIR_STATE_FAMILY_SCRIPT" >/dev/null || return 1
+  run_layout inventory
+  if [ "$LAYOUT_RC" != 0 ] || ! grep -qx 'UPGRADE_BLOCKERS=0' "$LAYOUT_OUT"; then
+    fail "inventory after the repair exited ${LAYOUT_RC}: $(grep UPGRADE_BLOCKERS "$LAYOUT_OUT")"
+    return 1
+  fi
+  expect_row "$HOST_T5" NO_SPLIT_SIGNATURE 'inventory after repair T5'
+}
+
 check_upgraded() {
-  local pod logs host refused_uid
+  local host
   wait_merge_templates "$HOST_T1" "$HOST_T2" "$HOST_T3" "$HOST_T5" "$HOST_T6" || return 1
   wait_upgraded_pod "$HOST_T1" && assert_pod "$HOST_T1" false /workspace || return 1
   wait_upgraded_pod "$HOST_T2" && assert_pod "$HOST_T2" true /workspace || return 1
+  wait_upgraded_pod "$HOST_T5" && assert_pod "$HOST_T5" false /workspace || return 1
   wait_upgraded_pod "$HOST_T6" && assert_pod "$HOST_T6" true /workspace || return 1
-  pod="$(wait_refused_pod "$HOST_T5")" || { fail 'T5: the merge did not refuse'; return 1; }
-  logs="$(kctl logs "$pod" -n "$HOST_NS" -c workspace-layout-merge --previous 2>/dev/null ||
-    kctl logs "$pod" -n "$HOST_NS" -c workspace-layout-merge)"
-  grep -q "$F2" <<<"$logs" || { fail "T5: merge refused without the F2 line: ${logs}"; return 1; }
   [ "$(kctl get host "$HOST_T3" -n "$HOST_NS" -o jsonpath='{.status.lifecycle.state}')" = suspended ] ||
     { fail 'T3: no longer suspended before verify'; return 1; }
   run_layout verify
-  [ "$LAYOUT_RC" = 1 ] || { fail "verify exited ${LAYOUT_RC}, expected 1 (T3 split, T5 refused)"; return 1; }
-  for host in "$HOST_T1" "$HOST_T2" "$HOST_T6"; do expect_row "$host" POD_OK 'verify' || return 1; done
-  expect_row "$HOST_T3" SPLIT 'verify T3' && expect_row "$HOST_T5" "MERGE_REFUSED ${F2}*" 'verify T5' || return 1
+  [ "$LAYOUT_RC" = 1 ] || { fail "verify exited ${LAYOUT_RC}, expected 1 (T3 split)"; return 1; }
+  for host in "$HOST_T1" "$HOST_T2" "$HOST_T5" "$HOST_T6"; do expect_row "$host" POD_OK 'verify' || return 1; done
+  expect_row "$HOST_T3" SPLIT 'verify T3' || return 1
 
   # T3 merges on its natural wake.
   post_wake "$HOST_T3" && wait_new_ready_pod "$HOST_T3" '' "$POD_READY_TIMEOUT" && assert_pod "$HOST_T3" true /workspace || return 1
-  # T5: the upgrade note's repair, keeping the chats since the switch.
-  log "REPAIR:${HOST_T5} rename the state/ database family (upgrade note)"
-  pvc_fixture "$HOST_T5" rw repair "$REPAIR_STATE_FAMILY_SCRIPT" >/dev/null || return 1
-  refused_uid="$(kctl get pod "$pod" -n "$HOST_NS" -o jsonpath='{.metadata.uid}')" || { fail "T5: could not read refused Pod ${pod}"; return 1; }
-  kctl delete pod "$pod" -n "$HOST_NS" --wait=true --timeout=60s >/dev/null || { fail "T5: delete of refused Pod ${pod} failed"; return 1; }
-  wait_new_ready_pod "$HOST_T5" "$refused_uid" "$POD_READY_TIMEOUT" &&
-    assert_pod "$HOST_T5" false /workspace || return 1
 
   run_layout verify
   if [ "$LAYOUT_RC" != 0 ] || ! grep -qx 'HOST_LAYOUT_VERIFY=PASS' "$LAYOUT_OUT"; then
-    fail "verify after the repairs exited ${LAYOUT_RC}: $(tail -n 3 "$LAYOUT_OUT" | tr '\n' ' ')"
+    fail "verify after the T3 wake exited ${LAYOUT_RC}: $(tail -n 3 "$LAYOUT_OUT" | tr '\n' ' ')"
     return 1
   fi
-  for host in "$HOST_T1" "$HOST_T2" "$HOST_T3" "$HOST_T5" "$HOST_T6"; do expect_row "$host" POD_OK 'verify after repair' || return 1; done
+  for host in "$HOST_T1" "$HOST_T2" "$HOST_T3" "$HOST_T5" "$HOST_T6"; do expect_row "$host" POD_OK 'verify after wake' || return 1; done
 }
 
 check_history() {
@@ -465,7 +457,7 @@ check_history() {
   ROWS_DONE=$((ROWS_DONE + 1))
   # T5 serves the root family it served before the upgrade; the old family is
   # kept as a backup, and its old files stay under workspace/ (no signature).
-  assert_history "$HOST_T5" "upgrade(two-databases)->repair" || return 1
+  assert_history "$HOST_T5" "repair(two-databases)->upgrade" || return 1
   listing="$(pvc_fixture "$HOST_T5" ro list-repaired "$LIST_SCRIPT")" || return 1
   grep -qx 'f ./state/state.db.upgrade-lane.bak' <<<"$listing" ||
     { fail "T5: the renamed family is missing: ${listing}"; return 1; }
@@ -481,8 +473,9 @@ run_main() {
   header "Install ${RELEASE}" && install_release &&
     header 'Seed rows on the release' && seed_rows &&
     header 'Predict with inventory' && predict_rows &&
+    header 'Repair blockers on the release' && repair_blockers &&
     header 'Upgrade to this head' && upgrade_to_head &&
-    header 'Verify and repair' && check_upgraded &&
+    header 'Verify and wake' && check_upgraded &&
     header 'History of every row' && check_history
 }
 

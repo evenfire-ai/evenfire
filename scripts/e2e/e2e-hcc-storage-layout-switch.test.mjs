@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -413,4 +413,42 @@ test('the upgrade lane installs the release deploy tree and checks the CRDs', ()
   assert.match(SOURCE, /release_crds_match "\$REPO_ROOT" "\$RELEASE" \|\|/)
   // The manifest-diff refusal is gone (A7.43).
   assert.doesNotMatch(SOURCE, /this tree no longer installs the release/)
+})
+
+// A7.44: make minikube-setup waits for every Host rollout, so a Host left in
+// Init:Error by the upgrade fails it. The lane repairs T5 on the release.
+test('the upgrade lane repairs blockers before it upgrades', () => {
+  const main = helper('run_main')
+  const repair = main.indexOf('repair_blockers')
+  const upgrade = main.indexOf('upgrade_to_head')
+  assert.notEqual(repair, -1, 'run_main does not call repair_blockers')
+  assert.notEqual(upgrade, -1, 'run_main does not call upgrade_to_head')
+  assert.ok(repair < upgrade, 'repair_blockers runs after upgrade_to_head')
+  assert.match(helper('repair_blockers'), /grep -qx 'UPGRADE_BLOCKERS=0'/)
+  assert.doesNotMatch(helper('check_upgraded'), /wait_refused_pod|REPAIR_STATE_FAMILY_SCRIPT/)
+})
+
+test('the lane T5 repair leaves a tree the merge does not touch', () => {
+  const repairScript = SOURCE.match(/^REPAIR_STATE_FAMILY_SCRIPT='([^']*)'/m)
+  assert.ok(repairScript, 'REPAIR_STATE_FAMILY_SCRIPT not found')
+  const layoutScript = fileURLToPath(new URL('../../deploy/scripts/host-layout-merge.sh', import.meta.url))
+  const root = mkdtempSync(path.join(tmpdir(), 'e2e-825-t5-repair-'))
+  try {
+    for (const p of ['state', 'workspace']) mkdirSync(path.join(root, p))
+    for (const p of ['state.db', 'state/state.db', 'state/state.db-wal', 'workspace/seed.txt']) writeFileSync(path.join(root, p), p)
+    const classify = () => {
+      const printed = spawnSync('bash', [layoutScript, 'check-script', '--root', root], { encoding: 'utf8' })
+      assert.equal(printed.status, 0, printed.stderr)
+      return spawnSync('/bin/sh', ['-c', printed.stdout], { encoding: 'utf8' }).stdout
+    }
+    // Witness: the seeded tree is the T5 blocker.
+    assert.match(classify(), /^WILL_REFUSE_F2 /)
+    const repaired = spawnSync('/bin/sh', ['-c', repairScript[1], 'repair', root], { encoding: 'utf8' })
+    assert.equal(repaired.status, 0, repaired.stderr)
+    assert.equal(classify(), 'NO_SPLIT_SIGNATURE\n')
+    assert.deepEqual(readdirSync(path.join(root, 'state')).sort(), ['state.db.upgrade-lane.bak', 'state.db.upgrade-lane.bak-wal'])
+    assert.equal(readFileSync(path.join(root, 'state.db'), 'utf8'), 'state.db')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })
