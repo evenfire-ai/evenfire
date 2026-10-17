@@ -292,3 +292,125 @@ test('layout_row callers pass exit codes as a space-separated list', () => {
   assert.equal(calls.length, 5, calls.join('\n'))
   for (const call of calls) assert.doesNotMatch(call, /\|/, call)
 })
+
+// A temp Git repo with one CRD and one deploy file at the tag, then HEAD.
+function releaseRepo(headCrd, { extraHeadCrd = false, dropTagCrd = false } = {}) {
+  const dir = mkdtempSync(path.join(tmpdir(), 'e2e-825-release-'))
+  const git = (...args) => {
+    const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8' })
+    assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`)
+  }
+  const write = (rel, body) => {
+    const file = path.join(dir, rel)
+    spawnSync('mkdir', ['-p', path.dirname(file)])
+    writeFileSync(file, body)
+  }
+  git('init', '-q')
+  git('config', 'user.email', 'e2e@example.invalid')
+  git('config', 'user.name', 'e2e fixture')
+  write('charts/clerum-crds/crds/host.yaml', TAG_CRD)
+  write('charts/clerum-crds/crds/llmhook.yaml', TAG_CRD)
+  write('deploy/base/hcc.yaml', 'release: v0.11.0\n')
+  write('deploy/overlays/minikube-ghcr/kustomization.yaml', 'resources: [../minikube]\n')
+  git('add', '-A')
+  git('commit', '-q', '-m', 'release')
+  git('tag', 'v0.11.0')
+  write('charts/clerum-crds/crds/host.yaml', headCrd)
+  if (extraHeadCrd) write('charts/clerum-crds/crds/extra.yaml', TAG_CRD)
+  if (dropTagCrd) rmSync(path.join(dir, 'charts/clerum-crds/crds/llmhook.yaml'))
+  write('deploy/base/hcc.yaml', 'release: head\n')
+  git('add', '-A')
+  git('commit', '-q', '-m', 'head')
+  return dir
+}
+
+const TAG_CRD = `spec:
+  versions:
+    - schema:
+        openAPIV3Schema:
+          description: Host is the agent runtime.
+          properties:
+            description:
+              type: string
+            replicas:
+              description: Old wording.
+              type: integer
+`
+
+function runCrdCheck(dir) {
+  return bash(`fail() { echo "FAIL: $*" >&2; }
+${helper('crd_schema')}
+${helper('release_crds_match')}
+release_crds_match ${JSON.stringify(dir)} v0.11.0`)
+}
+
+test('release_crds_match accepts CRDs that differ only in descriptions', () => {
+  const dir = releaseRepo(TAG_CRD.replace('Host is the agent runtime.', 'New wording.').replace('Old wording.', 'Newer.'))
+  try {
+    const run = runCrdCheck(dir)
+    assert.equal(run.status, 0, run.stdout + run.stderr)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('release_crds_match refuses a schema change, naming the file', () => {
+  for (const [label, crd] of [
+    ['type change', TAG_CRD.replace('type: integer', 'type: string')],
+    // A property named description is schema, not documentation.
+    ['description property removed', TAG_CRD.replace('            description:\n              type: string\n', '')],
+  ]) {
+    const dir = releaseRepo(crd)
+    try {
+      const run = runCrdCheck(dir)
+      assert.equal(run.status, 1, `${label}: ${run.stdout}${run.stderr}`)
+      assert.match(run.stderr, /charts\/clerum-crds\/crds\/host\.yaml/, label)
+      assert.doesNotMatch(run.stderr, /llmhook\.yaml/, label)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('release_crds_match refuses an added or removed CRD file', () => {
+  for (const [label, opts, name] of [
+    ['added', { extraHeadCrd: true }, /extra\.yaml/],
+    ['removed', { dropTagCrd: true }, /llmhook\.yaml/],
+  ]) {
+    const dir = releaseRepo(TAG_CRD, opts)
+    try {
+      const run = runCrdCheck(dir)
+      assert.equal(run.status, 1, `${label}: ${run.stdout}${run.stderr}`)
+      assert.match(run.stderr, name, label)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('extract_release_deploy writes the tag deploy tree, not HEAD', () => {
+  const dir = releaseRepo(TAG_CRD)
+  const out = mkdtempSync(path.join(tmpdir(), 'e2e-825-release-tree-'))
+  try {
+    const run = bash(`fail() { echo "FAIL: $*" >&2; }
+${helper('extract_release_deploy')}
+extract_release_deploy ${JSON.stringify(dir)} v0.11.0 ${JSON.stringify(out)}`)
+    assert.equal(run.status, 0, run.stdout + run.stderr)
+    assert.equal(readFileSync(path.join(out, 'deploy/base/hcc.yaml'), 'utf8'), 'release: v0.11.0\n')
+    // Only deploy/ is extracted: the setup applies this tree's CRDs.
+    assert.throws(() => statSync(path.join(out, 'charts')))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+    rmSync(out, { recursive: true, force: true })
+  }
+})
+
+test('the upgrade lane installs the release deploy tree and checks the CRDs', () => {
+  const install = helper('install_release')
+  assert.match(install, /BRANCH_PROFILE_DEPLOY_DIR="\$RELEASE_TREE\/deploy"/)
+  assert.match(install, /IMAGE_SOURCE=ghcr MINIKUBE_IMAGE_TAG="\$RELEASE"/)
+  assert.match(install, /STDIO_BRIDGE_IMAGE/)
+  assert.match(SOURCE, /release_crds_match "\$REPO_ROOT" "\$RELEASE" \|\|/)
+  // The manifest-diff refusal is gone (A7.43).
+  assert.doesNotMatch(SOURCE, /this tree no longer installs the release/)
+})

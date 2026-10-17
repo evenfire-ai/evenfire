@@ -25,10 +25,13 @@
 #            the same HEAD). Prints E2E_UPGRADE_RESULT=PASS only when main
 #            passed and the control failed as expected.
 #
-# Install path: `make minikube-setup IMAGE_SOURCE=ghcr MINIKUBE_IMAGE_TAG=v0.11.0`
-# from this tree. That is the release's install only while this tree's
-# deploy/base, deploy/components, deploy/overlays and CRDs equal v0.11.0's;
-# the lane checks that and refuses otherwise.
+# Install path (plan A7.43): `git archive v0.11.0 deploy` into a scratch
+# directory, then this head's `make minikube-setup IMAGE_SOURCE=ghcr
+# MINIKUBE_IMAGE_TAG=v0.11.0` with BRANCH_PROFILE_DEPLOY_DIR pointing at it, so
+# the manifests and images are the release's. v0.11.0's own full-setup.sh cannot
+# run here: it requires a branch checkout with origin/dev as an ancestor. The
+# setup applies this tree's CRDs, so the lane refuses unless they equal
+# v0.11.0's apart from descriptions.
 #
 # Cluster writes besides the setups and the admin API: the named fixtures of
 # e2e-hcc-storage-layout-switch.sh (hcc-cadence, pvc-fixture, channel,
@@ -60,6 +63,38 @@ main_evidence_ok() {
   [ -r "$1" ] && grep -qx 'E2E_UPGRADE_MAIN=PASS' "$1" && grep -qx "E2E_UPGRADE_HEAD=$2" "$1"
 }
 
+# crd_schema REPO REF FILE: the CRD without its string-valued descriptions (a
+# property named description is a map and stays).
+crd_schema() {
+  git -C "$1" show "$2:$3" |
+    yq -o=json -I=0 'del(.. | select(tag == "!!map") | select(.description | tag == "!!str") | .description)'
+}
+# release_crds_match REPO RELEASE: HEAD has the release's CRD files, each equal
+# to the release's apart from descriptions.
+release_crds_match() {
+  local repo=$1 release=$2 dir=charts/clerum-crds/crds file a b mismatched=''
+  a="$(git -C "$repo" ls-tree --name-only "$release" "$dir/")" || { fail "cannot list ${dir} at ${release}"; return 1; }
+  b="$(git -C "$repo" ls-tree --name-only HEAD "$dir/")" || { fail "cannot list ${dir} at HEAD"; return 1; }
+  [ -n "$a" ] || { fail "no CRDs under ${dir} at ${release}"; return 1; }
+  if [ "$a" != "$b" ]; then
+    fail "CRD files differ from ${release}: $(diff <(echo "$a") <(echo "$b") | grep '^[<>]' | tr '\n' ' ')"
+    return 1
+  fi
+  while IFS= read -r file; do
+    [ "$(crd_schema "$repo" "$release" "$file")" = "$(crd_schema "$repo" HEAD "$file")" ] || mismatched="${mismatched} ${file}"
+  done <<<"$a"
+  [ -z "$mismatched" ] || { fail "CRD schema differs from ${release}:${mismatched}"; return 1; }
+}
+# extract_release_deploy REPO RELEASE DIR: the release's deploy/ tree in DIR.
+extract_release_deploy() {
+  # Through a file, so a failed archive is not hidden behind tar's exit code.
+  mkdir -p "$3" || { fail "cannot create $3"; return 1; }
+  git -C "$1" archive -o "$3/deploy.tar" "$2" deploy || { fail "git archive of deploy/ at $2 failed"; return 1; }
+  tar -x -f "$3/deploy.tar" -C "$3" || { fail "could not extract deploy/ at $2"; return 1; }
+  rm -f "$3/deploy.tar"
+  [ -d "$3/deploy/overlays/minikube-ghcr" ] || { fail "$2 deploy tree has no minikube-ghcr overlay"; return 1; }
+}
+
 # ─── Preconditions ────────────────────────────────────────────────────
 if [ -z "$E2E_KUBECONTEXT" ] || ! is_branch_scoped_e2e_context "$E2E_KUBECONTEXT"; then
   die 'select an explicit branch-scoped Minikube context (KUBECONTEXT=<profile>)'
@@ -80,9 +115,9 @@ if [ "$MODE" = control ]; then
     die "E2E_UPGRADE_MAIN_EVIDENCE must be a main log with E2E_UPGRADE_MAIN=PASS and E2E_UPGRADE_HEAD=${HEAD_SHA}"
 fi
 git -C "$REPO_ROOT" rev-parse -q --verify "refs/tags/${RELEASE}" >/dev/null || die "tag ${RELEASE} is not in this clone"
-if ! git -C "$REPO_ROOT" diff --quiet "$RELEASE" HEAD -- deploy/base deploy/components deploy/overlays charts/clerum-crds; then
-  die "manifests or CRDs differ from ${RELEASE}; this tree no longer installs the release: $(git -C "$REPO_ROOT" diff --name-only "$RELEASE" HEAD -- deploy/base deploy/components deploy/overlays charts/clerum-crds | tr '\n' ' ')"
-fi
+command -v yq >/dev/null || die 'yq is required to compare the CRDs with the release'
+release_crds_match "$REPO_ROOT" "$RELEASE" ||
+  die "this tree's CRDs differ from ${RELEASE} beyond descriptions; the setup would not install the release's CRDs"
 profile_port_value() {
   awk -F= -v key="$1" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$E2E_PROFILE_PORTS_ENV"
 }
@@ -122,6 +157,7 @@ ROWS_DONE=0 LANE_OK=0
 CREATED_HOSTS=() CREATED_CHANNELS=()
 HCC_ENV_SAVED='' HCC_ENV_CHANGED=0 FLAG_FALSE_SET=0
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/e2e-825-upgrade.XXXXXX")"
+RELEASE_TREE="${SCRATCH}/release-${RELEASE}"
 FIXTURE_POD_REGISTRY="${SCRATCH}/fixture-pods"
 : >"$FIXTURE_POD_REGISTRY"
 ADMIN_COOKIE='' SESSION_TOKEN='' RPC_TOKEN='' USER_ID='' TEAM_ID='' FIXTURE_IMAGE='' POD_UID=''
@@ -199,12 +235,20 @@ read_fixture_image() {
 install_release() {
   [ -z "$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" --ignore-not-found -o name)" ] ||
     { fail "deployment/${HCC_DEPLOY} already exists; the lane needs a fresh profile"; return 1; }
-  run_logged "install-${RELEASE}" make minikube-setup MINIKUBE_PROFILE="$E2E_KUBECONTEXT" \
+  extract_release_deploy "$REPO_ROOT" "$RELEASE" "$RELEASE_TREE" || return 1
+  run_logged "install-${RELEASE}" env BRANCH_PROFILE_DEPLOY_DIR="$RELEASE_TREE/deploy" \
+    make minikube-setup MINIKUBE_PROFILE="$E2E_KUBECONTEXT" \
     IMAGE_SOURCE=ghcr MINIKUBE_IMAGE_TAG="$RELEASE" || return 1
   case "$(hcc_image)" in
     *":${RELEASE}") ok "HCC runs $(hcc_image)" ;;
     *) fail "HCC runs '$(hcc_image)', expected the ${RELEASE} image"; return 1 ;;
   esac
+  # Witness that the release's manifests were applied: v0.11.0's HCC Deployment
+  # sets STDIO_BRIDGE_IMAGE, this head's does not.
+  kctl get "deployment/${HCC_DEPLOY}" -n "$HCC_NS" -o json | jq -e \
+    '[.spec.template.spec.containers[] | select(.name=="host-context-controller") | .env[]? | select(.name=="STDIO_BRIDGE_IMAGE")] | length == 1' >/dev/null ||
+    { fail "HCC Deployment lacks STDIO_BRIDGE_IMAGE; the ${RELEASE} manifests were not applied"; return 1; }
+  ok "HCC Deployment carries the ${RELEASE} manifest (STDIO_BRIDGE_IMAGE set)"
   # Built now and loaded next to the release images, so the upgrade below is a
   # deploy of minutes and the active Hosts stay active through it.
   run_logged build-head-images make minikube-build-images MINIKUBE_PROFILE="$E2E_KUBECONTEXT" || return 1
