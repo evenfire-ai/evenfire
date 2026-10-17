@@ -11,7 +11,7 @@ describe('loadConfig legacy startup compatibility', () => {
     vi.stubEnv('GFS_DEV_MODE', 'false')
     vi.stubEnv('GFS_STORAGE_PATH', '/data/gfs')
     vi.stubEnv('GFS_STORAGE_ROLE', 'writer')
-    vi.stubEnv('GFS_PG_CONNECTION_STRING', 'postgres://user:password@db.test/gfs')
+    vi.stubEnv('GFS_PG_CONNECTION_STRING', 'postgresql://postgres@127.0.0.1/postgres')
     vi.stubEnv('GFS_CONTROL_API_BASE_URL', '')
     vi.stubEnv('GFS_CONTROL_API_SERVICE_TOKEN', '')
 
@@ -25,7 +25,7 @@ describe('loadConfig legacy startup compatibility', () => {
     vi.stubEnv('GFS_DEV_MODE', 'true')
     vi.stubEnv('GFS_STORAGE_PATH', '/data/gfs')
     vi.stubEnv('GFS_STORAGE_ROLE', 'writer')
-    vi.stubEnv('GFS_PG_CONNECTION_STRING', 'postgres://user:password@db.test/gfs')
+    vi.stubEnv('GFS_PG_CONNECTION_STRING', 'postgresql://postgres@127.0.0.1/postgres')
     vi.stubEnv('GFS_CONTROL_API_BASE_URL', 'http://control-api.test')
     vi.stubEnv('GFS_CONTROL_API_SERVICE_TOKEN', 'test-gfs-controller-token')
 
