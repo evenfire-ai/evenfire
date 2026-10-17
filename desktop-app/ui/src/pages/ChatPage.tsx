@@ -27,10 +27,16 @@ export function ChatPage({ scrollContainerRef }: ChatPageProps) {
       didAutoSelect.current = false
     }
     if (didAutoSelect.current || selectedAgent || !agentNames.length) return
-    // The chat on screen belongs to a held Host: stay on it. Its Retry row, or
-    // the verification a Chat click started, selects it again; picking another
-    // Host would send the user's next message to that Host instead.
-    if (focusedChatAgentRef && heldAgentRefs.includes(focusedChatAgentRef)) return
+    // The chat on screen belongs to a held Host, or to one the catalog no longer
+    // lists (a hold usually drops the Host from the catalog, and `heldAgentRefs`
+    // only covers listed Hosts): stay on it. A listed Host is selected again by its
+    // Retry row or the verification a Chat click started; picking another Host
+    // here would send the user's next message to that Host instead.
+    if (
+      focusedChatAgentRef &&
+      (heldAgentRefs.includes(focusedChatAgentRef) || !agentNames.includes(focusedChatAgentRef))
+    )
+      return
     didAutoSelect.current = true
     const best = pickLatestAgent(
       agentNames.filter(agentRef => !heldAgentRefs.includes(agentRef)),

@@ -38,7 +38,11 @@ export function useAgentsDataController() {
     [queryClient]
   )
 
-  const refresh = useCallback(async () => {
+  /**
+   * Resolves with the catalog consumers render once the fetch settles. A failed
+   * fetch keeps the previous catalog on screen, so that is what it returns.
+   */
+  const refresh = useCallback(async (): Promise<AccessCatalog | undefined> => {
     try {
       await queryClient.fetchQuery({
         queryKey: desktopQueryKeys.accessCatalog,
@@ -48,6 +52,7 @@ export function useAgentsDataController() {
     } catch {
       // Query state already records the error for consumers.
     }
+    return queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)
   }, [queryClient])
 
   const reset = useCallback(() => {

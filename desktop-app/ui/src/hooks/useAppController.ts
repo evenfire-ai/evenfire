@@ -358,17 +358,32 @@ export function useAppController() {
       invalidateSessionCatalog(agentRef)
       if (!hostAuthority.hold(agentRef, kind)) return
       setHostAuthorityRevision(revision => revision + 1)
-      if (selectedAgentRef.current === agentRef) {
+      const wasSelected = selectedAgentRef.current === agentRef
+      // Read before the refresh: a Host that left the catalog loses its display name.
+      const name = agentDisplayName(agentRef)
+      if (wasSelected) {
         nav.setSelectedAgent(null)
-        const name = agentDisplayName(agentRef)
+        if (kind === 'revoked') pushToast(`Access to ${name} was revoked.`, 'error')
+      }
+      const refreshed = agentsData.refresh()
+      if (!wasSelected || kind === 'revoked') return
+      // The Retry row exists only while the catalog lists the Host, so the
+      // toast waits for this refresh to say which one the user can act on.
+      const scope = authorityScopeRef.current
+      const heldAtEpoch = hostAuthority.heldAtEpoch(agentRef)
+      void refreshed.then(catalog => {
+        if (
+          authorityScopeRef.current !== scope ||
+          hostAuthority.heldAtEpoch(agentRef) !== heldAtEpoch
+        )
+          return
         pushToast(
-          kind === 'revoked'
-            ? `Access to ${name} was revoked.`
-            : `Could not verify access to ${name}. Use Retry in Latest sessions.`,
+          catalog?.agentNames.includes(agentRef)
+            ? `Could not verify access to ${name}. Use Retry in Latest sessions.`
+            : `${name} is no longer available.`,
           'error'
         )
-      }
-      void agentsData.refresh()
+      })
     },
     [
       agentDisplayName,
@@ -709,23 +724,34 @@ export function useAppController() {
     ]
   )
 
+  const previousAccessCatalogRef = useRef<AccessCatalog | null>(null)
   useEffect(() => {
-    if (!auth.isAuthenticated) return
-    if (agentsData.accessCatalog && nav.selectedAgent) {
-      if (
-        !agentsData.agentNames.includes(nav.selectedAgent) ||
-        isHostAccessBlocked(nav.selectedAgent)
-      ) {
-        nav.setSelectedAgent(null)
-      }
+    const previousCatalog = previousAccessCatalogRef.current
+    const catalog = agentsData.accessCatalog
+    previousAccessCatalogRef.current = catalog
+    const selected = nav.selectedAgent
+    if (!auth.isAuthenticated || !catalog || !selected) return
+    const held = isHostAccessBlocked(selected)
+    if (!held && catalog.agentNames.includes(selected)) return
+    nav.setSelectedAgent(null)
+    // A held Host was already announced by `blockHostAccess`; a new user or team
+    // explains the change by itself.
+    if (
+      !held &&
+      previousCatalog?.userId === catalog.userId &&
+      previousCatalog.teamId === catalog.teamId &&
+      previousCatalog.agentNames.includes(selected)
+    ) {
+      const name = previousCatalog.agentDisplayByName?.[selected] ?? selected
+      pushToast(`${name} is no longer available.`, 'error')
     }
   }, [
     agentsData.accessCatalog,
-    agentsData.agentNames,
     auth.isAuthenticated,
     nav.selectedAgent,
     nav.setSelectedAgent,
     isHostAccessBlocked,
+    pushToast,
   ])
 
   const switchTeamForWorkspace = useCallback(

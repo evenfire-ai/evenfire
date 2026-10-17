@@ -60,10 +60,14 @@ function createSessionState(authenticated: boolean, me = HARNESS_ME) {
   return authenticated ? { authenticated: true, me } : { authenticated: false, me: null }
 }
 
-function createCatalog(agentNames: string[], agentDisplayByName?: Record<string, string>) {
+export function createCatalog(
+  agentNames: string[],
+  agentDisplayByName?: Record<string, string>,
+  teamId: string = HARNESS_ME.teamId
+) {
   return {
     userId: HARNESS_ME.id,
-    teamId: HARNESS_ME.teamId,
+    teamId,
     agentNames,
     userAgentNames: agentNames,
     teamAgentNames: [],
