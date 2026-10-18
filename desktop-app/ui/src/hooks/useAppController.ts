@@ -368,15 +368,11 @@ export function useAppController() {
       const refreshed = agentsData.refresh()
       if (!wasSelected || kind === 'revoked') return
       // The Retry row exists only while the catalog lists the Host, so the
-      // toast waits for this refresh to say which one the user can act on.
+      // toast waits for this refresh to say which one the user can act on. A
+      // repeated denial keeps the hold and returns above, so this is the only toast.
       const scope = authorityScopeRef.current
-      const heldAtEpoch = hostAuthority.heldAtEpoch(agentRef)
       void refreshed.then(catalog => {
-        if (
-          authorityScopeRef.current !== scope ||
-          hostAuthority.heldAtEpoch(agentRef) !== heldAtEpoch
-        )
-          return
+        if (authorityScopeRef.current !== scope || !hostAuthority.isBlocked(agentRef)) return
         pushToast(
           catalog?.agentNames.includes(agentRef)
             ? `Could not verify access to ${name}. Use Retry in Latest sessions.`
