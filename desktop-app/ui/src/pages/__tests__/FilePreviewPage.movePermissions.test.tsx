@@ -7,6 +7,7 @@ import {
   listAccessiblePage,
   resolveResource,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import type { Tone } from '@/uiTypes'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
 import { FilePreviewPage } from '../FilePreviewPage'
 
@@ -64,7 +65,7 @@ function installGfs(options: {
   return { affordances, moveResource }
 }
 
-function renderPreview(pushToast?: (message: string, tone: 'success' | 'error') => void) {
+function renderPreview(pushToast?: (message: string, tone: Tone) => void) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   })
