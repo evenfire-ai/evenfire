@@ -51,7 +51,6 @@ function relationship(
 function threeMcpGraph(siblings: readonly string[]): CurrentGraph {
   const hostId = 'mcp-server/agent'
   const contextId = 'mcp-server/workspace'
-  const targetId = 'mcp-server/target'
   const mcpNames = [...siblings, 'target']
   const resources = [
     resource('host', hostId),
