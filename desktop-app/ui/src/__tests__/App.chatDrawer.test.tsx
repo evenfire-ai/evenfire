@@ -136,21 +136,23 @@ vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
 // the composer-focus pulse — through the real composer-state context. That lets
 // the eject test assert the RENDERED conversation (and its focus request) rather
 // than hand-written controller state.
-// It also surfaces the held-Host inputs ChatPage's auto-selection reads from
-// NavigationContext, so a test can check App's wiring of them.
+// It also surfaces the held-Host inputs that ChatPage's auto-selection and the
+// sidebar's Retry rows read from NavigationContext, so a test can check App's
+// wiring of them.
 vi.mock('@pages/ChatPage', async () => {
   const { useChatComposerStateContext } = await import('@contexts/ChatComposerStateContext')
   const { useNavigationContext } = await import('@contexts/NavigationContext')
   return {
     ChatPage: () => {
       const { activeChatId, composerFocusRequestId } = useChatComposerStateContext()
-      const { heldAgentRefs, keepFocusedChat } = useNavigationContext()
+      const { heldAgentRefs, heldHosts, keepFocusedChat } = useNavigationContext()
       return (
         <div
           data-testid="chat-page-surface"
           data-active-chat-id={activeChatId ?? ''}
           data-composer-focus-request-id={composerFocusRequestId}
           data-held-agent-refs={JSON.stringify(heldAgentRefs ?? null)}
+          data-held-hosts={JSON.stringify(heldHosts ?? null)}
           data-keep-focused-chat={String(keepFocusedChat)}
         />
       )
@@ -539,11 +541,13 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
   it('passes the held Hosts and the keep-focused-chat flag from the controller to NavigationContext', () => {
     currentController = makeController({
       heldAgentRefs: [],
+      heldHosts: [],
       keepFocusedChat: false,
     } as Partial<AppController>)
     const { rerender } = render(<App />)
     const surface = () => screen.getByTestId('chat-page-surface')
     expect(surface().dataset.heldAgentRefs).toBe('[]')
+    expect(surface().dataset.heldHosts).toBe('[]')
     expect(surface().dataset.keepFocusedChat).toBe('false')
 
     // One field per step, so neither update rides on the other's dependency.
@@ -552,6 +556,14 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       rerender(<App />)
     })
     expect(surface().dataset.heldAgentRefs).toBe('["alpha"]')
+    expect(surface().dataset.heldHosts).toBe('[]')
+    expect(surface().dataset.keepFocusedChat).toBe('false')
+
+    act(() => {
+      currentController.heldHosts = [{ agentRef: 'alpha', label: 'Alpha Host' }]
+      rerender(<App />)
+    })
+    expect(surface().dataset.heldHosts).toBe('[{"agentRef":"alpha","label":"Alpha Host"}]')
     expect(surface().dataset.keepFocusedChat).toBe('false')
 
     act(() => {
