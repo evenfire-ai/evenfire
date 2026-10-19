@@ -44,6 +44,7 @@ function snapshot(overrides: Partial<ModelStepCheckpointRow>): ModelStepCheckpoi
       ...overrides,
     },
     tools: { confirmed: 21, unknown: 0, notDispatched: 0 },
+    approvalExpiresAt: null,
   }
 }
 

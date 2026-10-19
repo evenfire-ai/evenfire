@@ -13,8 +13,10 @@ import type {
 } from '../../../../db/worker/modelStepCheckpointOps'
 import type { MessageRow } from '../../../../db/worker/protocol'
 import { ConversationManager } from '../../conversation'
+import { toModelStepCheckpointView } from '../../modelStepCheckpointView'
 import { ModelStepCheckpointStore } from '../modelStepCheckpointStore'
 import { PersistQueue } from '../persistQueue'
+import { SqliteConversationStore } from '../sqliteConversationStore'
 import { type InProcessWorkerHandle, createInProcessWorker, makeSqliteStore } from './testHelpers'
 
 const SESSION_KEY = 'user-1043:rpc:agent:default'
@@ -132,6 +134,131 @@ function statusOf(worker: InProcessWorkerHandle, checkpointId: string): string |
 }
 
 describe('ModelStepCheckpointStore (#1043)', () => {
+  it.each([false, true])(
+    'E3 R1-M2: lapsed lease agrees with claim when approval=%s',
+    async approval => {
+      const worker = createInProcessWorker(tempDbPath())
+      const { checkpoints, queue } = storeOver(worker)
+      const manager = new ConversationManager(new SqliteConversationStore(queue, { cacheSize: 8 }))
+      const conv = await manager.getOrCreate(SESSION_KEY)
+      await manager.startTurn(conv, 'origin question', ORIGIN_TASK)
+      const { version } = await openResumable(checkpoints)
+      const first = await checkpoints.claim({
+        sessionKey: SESSION_KEY,
+        checkpointId: 'cp-1',
+        version,
+        hostInstanceId: 'host-a',
+        newTaskId: 'task-cont',
+        leaseMs: 100,
+      })
+      expect(first.outcome).toBe('claimed')
+      if (approval) {
+        worker.db
+          .prepare(
+            "UPDATE sessions SET state = 'awaiting_approval', active_task_id = 'task-cont' WHERE id = ?"
+          )
+          .run(conv.id)
+        await queue.enqueueSync(
+          {
+            kind: 'insert_pending_approval',
+            payload: {
+              request_id: 'approval-cont',
+              session_id: conv.id,
+              task_id: 'task-cont',
+              tool_name: 'shell_exec',
+              tool_call_id: 'tc-approval',
+              parameters: '{}',
+              description: 'approval',
+              context_snapshot: '[]',
+              completed_results: null,
+              intent_summary: null,
+              source_message: null,
+              registered_at: clock / 1000,
+              expires_at: (clock + 1000) / 1000,
+              trace_context: null,
+              reason: null,
+              mcp_server_name: null,
+            },
+          },
+          SESSION_KEY
+        )
+      }
+      clock += 101
+      const live = await checkpoints.loadLive(SESSION_KEY)
+      expect(live?.header.claim_expires_at).toBe(clock - 1)
+      if (!live) throw new Error('missing checkpoint')
+      const view = toModelStepCheckpointView(live, clock)
+      expect(view).toMatchObject({
+        status: approval ? 'claimed' : 'resumable',
+        retryAvailable: !approval,
+      })
+      const next = await checkpoints.claim({
+        sessionKey: SESSION_KEY,
+        checkpointId: 'cp-1',
+        version: view!.version,
+        hostInstanceId: 'host-b',
+        newTaskId: 'task-next',
+        leaseMs: 100,
+      })
+      expect(next).toMatchObject(
+        approval
+          ? { outcome: 'replayed', taskId: 'task-cont' }
+          : { outcome: 'claimed', taskId: 'task-next', reclaimed: true }
+      )
+      if (approval) {
+        // The approval alone also holds a claim beyond the header deadline.
+        worker.db
+          .prepare('UPDATE model_step_checkpoints SET expires_at = ? WHERE checkpoint_id = ?')
+          .run(clock, 'cp-1')
+        const expired = await checkpoints.loadLive(SESSION_KEY)
+        expect(toModelStepCheckpointView(expired!, clock)).toMatchObject({
+          status: 'claimed',
+          retryAvailable: false,
+        })
+      } else {
+        expect(view).not.toHaveProperty('continuationTaskId')
+      }
+    }
+  )
+
+  it('E3 retention: default sweep promptly purges terminals and preserves resumable and blocked rows', async () => {
+    const worker = createInProcessWorker(tempDbPath())
+    const { checkpoints } = storeOver(worker)
+    for (const id of ['completed', 'abandoned', 'resumable', 'blocked'] as const) {
+      const { fence, version } = await openResumable(checkpoints, id, id)
+      if (id === 'completed') {
+        const claim = await checkpoints.claim({
+          sessionKey: id,
+          checkpointId: id,
+          version,
+          hostInstanceId: 'host-a',
+          newTaskId: 'task-completed',
+          leaseMs: LEASE_MS,
+        })
+        if (claim.outcome !== 'claimed') throw new Error(claim.outcome)
+        expect(
+          await checkpoints.transition(id, claim.fence, { from: ['claimed'], to: 'completed' })
+        ).toBe(4)
+      } else if (id !== 'resumable') {
+        expect(
+          await checkpoints.transition(id, fence, {
+            from: ['resumable'],
+            to: id,
+            ...(id === 'blocked' ? { blockedReason: 'model_unavailable' } : {}),
+          })
+        ).toBe(3)
+      }
+    }
+    expect(await checkpoints.loadEntries('completed', 'completed')).toHaveLength(3)
+    expect(await checkpoints.sweep()).toMatchObject({ expired: 0, purgedCheckpoints: 2 })
+    expect(statusOf(worker, 'completed')).toBeUndefined()
+    expect(statusOf(worker, 'abandoned')).toBeUndefined()
+    expect(await checkpoints.loadEntries('completed', 'completed')).toEqual([])
+    expect((await checkpoints.loadLive('resumable'))?.header.status).toBe('resumable')
+    expect((await checkpoints.loadLive('blocked'))?.header.status).toBe('blocked')
+    expect(await checkpoints.loadEntries('resumable', 'resumable')).toHaveLength(3)
+  })
+
   it('D1 H1: abandoning an open checkpoint deletes its header and entries immediately', async () => {
     const worker = createInProcessWorker(tempDbPath())
     const { checkpoints } = storeOver(worker)

@@ -5,6 +5,7 @@ import { runMigrations } from '../../migrate'
 import { applyPragmas } from '../../pragmas'
 import { prepareStatements } from '../../statements'
 import { createDispatcher, dispatch } from '../dispatcher'
+import type { ModelStepClaimOutcome } from '../modelStepCheckpointOps'
 import type {
   MessageRow,
   PendingApprovalRow,
@@ -12,6 +13,92 @@ import type {
   ReapedSession,
   SessionRow,
 } from '../protocol'
+
+async function seedClaimedCheckpoint(
+  deps: ReturnType<typeof createDispatcher>,
+  session: SessionRow,
+  checkpointId: string,
+  originTaskId: string,
+  continuationTaskId: string
+) {
+  const now = 20
+  await dispatch(
+    {
+      kind: 'model_step_checkpoint_open',
+      now,
+      header: {
+        checkpointId,
+        sessionKey: session.session_key,
+        originTurnNumber: 1,
+        originTaskId,
+        provider: 'openai',
+        model: 'checkpoint-model',
+        hostId: 'host-a',
+        principal: session.user_id!,
+        loopState: JSON.stringify({ nextIteration: 1 }),
+        taskBudget: null,
+        sourceMessage: null,
+      },
+      entries: [
+        {
+          kind: 'message',
+          toolCallId: null,
+          payload: JSON.stringify({ role: 'user', content: 'origin request' }),
+        },
+        {
+          kind: 'tool_dispatch',
+          toolCallId: 'tc-seed',
+          payload: JSON.stringify({ name: 'list_files' }),
+        },
+        {
+          kind: 'tool_result',
+          toolCallId: 'tc-seed',
+          payload: JSON.stringify({ name: 'list_files', isError: false }),
+        },
+      ],
+    },
+    deps
+  )
+  const transition = (await dispatch(
+    {
+      kind: 'model_step_checkpoint_transition',
+      fence: { checkpointId, owner: originTaskId, generation: 0 },
+      from: ['open'],
+      to: 'resumable',
+      now,
+      failedAt: now,
+      expiresAt: now + 604_800_000,
+      blockedTtlMs: 604_800_000,
+    },
+    deps
+  )) as { applied: boolean; version: number }
+  expect(transition).toEqual({ applied: true, version: 2 })
+  const claim = (await dispatch(
+    {
+      kind: 'model_step_checkpoint_claim',
+      sessionKey: session.session_key,
+      checkpointId,
+      version: transition.version,
+      hostInstanceId: 'host-instance-old',
+      newTaskId: continuationTaskId,
+      leaseMs: 300_000,
+      now,
+    },
+    deps
+  )) as ModelStepClaimOutcome
+  if (claim.outcome !== 'claimed') throw new Error(claim.outcome)
+  expect(claim.snapshot.header).toMatchObject({
+    status: 'claimed',
+    version: 3,
+    continuation_task_id: continuationTaskId,
+    claim_owner: 'host-instance-old',
+    claim_generation: 1,
+    claim_expires_at: 300_020,
+    failed_at: 20,
+    expires_at: 604_800_020,
+  })
+  return claim.fence
+}
 
 describe('dbWorker dispatcher', () => {
   let db: Database.Database
@@ -1101,15 +1188,13 @@ describe('dbWorker dispatcher', () => {
         deps
       )
     }
-    db.prepare(
-      `INSERT INTO model_step_checkpoints (
-         checkpoint_id, session_key, origin_turn_number, origin_task_id, continuation_task_id,
-         version, status, provider, model, host_id, principal, claim_owner, claim_generation,
-         created_at, updated_at
-       ) VALUES (?, ?, 1, 'task-live-origin', 'task-live-continuation',
-         3, 'claimed', 'openai', 'checkpoint-model', 'host-a', 'u-live',
-         'task-live-continuation', 1, 20, 20)`
-    ).run('checkpoint-reap-live', continuation.session_key)
+    await seedClaimedCheckpoint(
+      deps,
+      continuation,
+      'checkpoint-reap-live',
+      'task-live-origin',
+      'task-live-continuation'
+    )
 
     await dispatch(
       { kind: 'model_step_checkpoint_boot_reap', hostInstanceId: 'host-instance-new', now: 25 },
@@ -1224,15 +1309,13 @@ describe('dbWorker dispatcher', () => {
       },
       deps
     )
-    db.prepare(
-      `INSERT INTO model_step_checkpoints (
-         checkpoint_id, session_key, origin_turn_number, origin_task_id, continuation_task_id,
-         version, status, provider, model, host_id, principal, claim_owner, claim_generation,
-         created_at, updated_at
-       ) VALUES (?, ?, 1, 'task-origin', 'task-a',
-         2, 'claimed', 'openai', 'checkpoint-model', 'host-a', 'u-fence',
-         'host-a', 2, 20, 20)`
-    ).run('cp-fence', session.session_key)
+    const claimedFence = await seedClaimedCheckpoint(
+      deps,
+      session,
+      'cp-fence',
+      'task-origin',
+      'task-a'
+    )
     const boundary = {
       session_id: session.id,
       ordinal: 1,
@@ -1254,7 +1337,7 @@ describe('dbWorker dispatcher', () => {
       cache_write_tokens: null,
     }
     const owned = {
-      fence: { checkpointId: 'cp-fence', owner: 'host-a', generation: 2 },
+      fence: claimedFence,
       activeTaskId: 'task-a',
       originTurnNumber: 1,
     }

@@ -6,6 +6,7 @@ import {
   type ModelStepCheckpointView,
   type ModelStepCheckpointVisibleStatus,
 } from './modelStepCheckpointContract'
+import { isModelStepCheckpointLeaseAlive } from './modelStepCheckpointLease'
 
 function isVisibleStatus(status: string): status is ModelStepCheckpointVisibleStatus {
   return (MODEL_STEP_CHECKPOINT_VISIBLE_STATUSES as readonly string[]).includes(status)
@@ -27,8 +28,7 @@ export function toModelStepCheckpointView(
   const { header, tools } = snapshot
   if (!isVisibleStatus(header.status)) return undefined
   if (header.failed_at === null || header.expires_at === null) return undefined
-  const leaseAlive =
-    header.status === 'claimed' && header.claim_expires_at !== null && header.claim_expires_at > now
+  const leaseAlive = isModelStepCheckpointLeaseAlive(header, snapshot.approvalExpiresAt, now)
   if (header.expires_at <= now && !leaseAlive) return undefined
   let blockedReason: ModelStepBlockedReason | undefined
   if (header.status === 'blocked') {
@@ -36,13 +36,14 @@ export function toModelStepCheckpointView(
     if (!isBlockedReason(reason)) return undefined
     blockedReason = reason
   }
+  const status = header.status === 'claimed' && !leaseAlive ? 'resumable' : header.status
   return {
     checkpointId: header.checkpoint_id,
     version: header.version,
-    status: header.status,
-    retryAvailable: header.status === 'resumable',
+    status,
+    retryAvailable: status === 'resumable',
     originTaskId: header.origin_task_id,
-    ...(header.status === 'claimed' && header.continuation_task_id
+    ...(status === 'claimed' && header.continuation_task_id
       ? { continuationTaskId: header.continuation_task_id }
       : {}),
     provider: header.provider,
