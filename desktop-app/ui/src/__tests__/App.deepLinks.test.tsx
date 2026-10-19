@@ -2101,6 +2101,8 @@ describe('App deep-link orchestration', () => {
     listApps.mockResolvedValue({ apps: [READY_APP, READY_APP_B] })
     render(<App />)
     await launchAppFromSidebar('ns/app') // tabs: [chat, A]; A is live
+    const tabAllocationsAfterA = currentController.nextWorkspaceTabId.mock.calls.length
+    expect(appTabs().map(tab => tab.app?.appRef)).toEqual(['ns/app'])
 
     closeSandboxUi.mockClear()
     getSandboxUiLocation.mockClear()
@@ -2110,8 +2112,12 @@ describe('App deep-link orchestration', () => {
 
     // Deactivate A → seeded chat tab (A's read in flight).
     await selectTab(0)
+    expect(appTabs().map(tab => tab.app?.appRef)).toEqual(['ns/app'])
+    expect(currentController.nextWorkspaceTabId).toHaveBeenCalledTimes(tabAllocationsAfterA)
+
     // Open a DIFFERENT app (B, distinct appRef) before A's read resolves; B is live.
     await launchAppFromSidebar('ns/app-b')
+    expect(currentController.nextWorkspaceTabId).toHaveBeenCalledTimes(tabAllocationsAfterA + 1)
     await waitFor(() =>
       expect(appTabs().map(tab => tab.app?.appRef)).toEqual(['ns/app', 'ns/app-b'])
     )
