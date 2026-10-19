@@ -5,7 +5,7 @@
  * directly with an in-memory Database and stubbed statements, without the
  * worker_threads boilerplate.
  */
-import type { Database } from 'better-sqlite3'
+import type { Database, Statement } from 'better-sqlite3'
 import { PreparedStatements, prepareStatements } from '../statements'
 import { withBusyRetry } from './busyRetry'
 import {
@@ -29,13 +29,89 @@ import type {
   WorkerOp,
 } from './protocol'
 
+/**
+ * Statements the dispatcher owns. They are prepared once per worker so a boot
+ * reap over a long session list and every fenced write reuse one compiled plan
+ * instead of re-compiling SQL per row.
+ */
+interface DispatcherStatements {
+  /** A live checkpoint still owns this origin turn (reap keeps its transcript intact). */
+  selectRecoverableCheckpointForTurn: Statement
+  /** The exact claim that may write the continuation's boundary. */
+  selectModelStepTurnFence: Statement
+  /** The stamps a `replace_messages` rewrite must carry over. */
+  selectStampedMessages: Statement
+  /** Re-applies one carried-over checkpoint stamp. */
+  stampMessage: Statement
+  /** Abandons the checkpoint a reaped approval session suspended. */
+  abandonSuspendedCheckpointByTask: Statement
+}
+
 export interface DispatcherDeps {
   db: Database
   statements: PreparedStatements
+  dispatcherStatements: DispatcherStatements
 }
 
 export function createDispatcher(db: Database): DispatcherDeps {
-  return { db, statements: prepareStatements(db) }
+  return {
+    db,
+    statements: prepareStatements(db),
+    dispatcherStatements: prepareDispatcherStatements(db),
+  }
+}
+
+function prepareDispatcherStatements(db: Database): DispatcherStatements {
+  return {
+    selectRecoverableCheckpointForTurn: db.prepare(
+      `SELECT 1
+         FROM model_step_checkpoints
+        WHERE session_key = ?
+          AND origin_turn_number = ?
+          AND status IN ('resumable', 'claimed')
+        LIMIT 1`
+    ),
+    selectModelStepTurnFence: db.prepare(
+      `SELECT 1 AS ok
+         FROM model_step_checkpoints c
+         JOIN sessions s ON s.session_key = c.session_key
+        WHERE s.id = ?
+          AND s.active_task_id = ?
+          AND c.checkpoint_id = ?
+          AND c.claim_owner = ?
+          AND c.claim_generation = ?
+          AND c.origin_turn_number = ?
+          AND c.status IN ('claimed', 'resumable', 'abandoned')`
+    ),
+    selectStampedMessages: db.prepare(
+      `SELECT role, content, timestamp, model_step_checkpoint_id
+         FROM messages
+        WHERE session_id = ? AND model_step_checkpoint_id IS NOT NULL`
+    ),
+    stampMessage: db.prepare(
+      'UPDATE messages SET model_step_checkpoint_id = @checkpoint_id WHERE session_id = @session_id AND ordinal = @ordinal'
+    ),
+    abandonSuspendedCheckpointByTask: db.prepare(
+      `UPDATE model_step_checkpoints
+          SET status = 'abandoned', version = version + 1,
+              claim_expires_at = NULL, updated_at = @now
+        WHERE session_key = @session_key AND continuation_task_id = @task_id
+          AND status IN ('claimed', 'resumable', 'blocked')`
+    ),
+  }
+}
+
+/**
+ * Identity of a message across a retention rewrite (#1043): the checkpoint
+ * stamp marks the continuation's final message, so it follows that message and
+ * never a position in the transcript.
+ */
+function messageStampIdentity(message: {
+  role: string
+  content: string | null
+  timestamp: number
+}): string {
+  return JSON.stringify([message.role, message.content, message.timestamp])
 }
 
 function updateSessionSummaryAfterInsert(
@@ -60,50 +136,31 @@ function updateSessionSummaryAfterInsert(
 }
 
 function hasRecoverableModelStepCheckpointForTurn(
-  db: Database,
+  deps: DispatcherDeps,
   sessionKey: string,
   turnNumber: number | null
 ): boolean {
   if (turnNumber === null) return false
-  const row = db
-    .prepare(
-      `SELECT 1
-         FROM model_step_checkpoints
-        WHERE session_key = ?
-          AND origin_turn_number = ?
-          AND status IN ('resumable', 'claimed')
-        LIMIT 1`
-    )
-    .get(sessionKey, turnNumber)
+  const row = deps.dispatcherStatements.selectRecoverableCheckpointForTurn.get(
+    sessionKey,
+    turnNumber
+  )
   return row !== undefined
 }
 
 function assertModelStepTurnFence(
-  db: Database,
+  deps: DispatcherDeps,
   sessionId: string,
   fence: ModelStepTurnFence
 ): void {
-  const row = db
-    .prepare(
-      `SELECT 1 AS ok
-         FROM model_step_checkpoints c
-         JOIN sessions s ON s.session_key = c.session_key
-        WHERE s.id = ?
-          AND s.active_task_id = ?
-          AND c.checkpoint_id = ?
-          AND c.claim_owner = ?
-          AND c.claim_generation = ?
-          AND c.origin_turn_number = ?
-          AND c.status IN ('claimed', 'resumable', 'abandoned')`
-    )
-    .get(
-      sessionId,
-      fence.activeTaskId,
-      fence.fence.checkpointId,
-      fence.fence.owner,
-      fence.fence.generation,
-      fence.originTurnNumber
-    )
+  const row = deps.dispatcherStatements.selectModelStepTurnFence.get(
+    sessionId,
+    fence.activeTaskId,
+    fence.fence.checkpointId,
+    fence.fence.owner,
+    fence.fence.generation,
+    fence.originTurnNumber
+  )
   if (row === undefined) {
     throw new Error('model-step continuation fence mismatch')
   }
@@ -152,7 +209,7 @@ export function parseIsoSinceOrThrow(raw: unknown): number | null {
  * `PersistQueue.enqueueAsync` keeps ordering correct cross-message.
  */
 export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unknown> {
-  const { db, statements: s } = deps
+  const { db, statements: s, dispatcherStatements: ds } = deps
   if (isModelStepCheckpointOp(op)) {
     return isModelStepCheckpointWriteOp(op)
       ? withBusyRetry(() => dispatchModelStepCheckpointOp(op, db))
@@ -204,7 +261,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       return withBusyRetry(() => {
         const tx = db.transaction(() => {
           if (op.modelStepTurnFence) {
-            assertModelStepTurnFence(db, op.sessionId, op.modelStepTurnFence)
+            assertModelStepTurnFence(deps, op.sessionId, op.modelStepTurnFence)
           }
           // active_task_id: a string sets it; null/undefined pass NULL to the
           // COALESCE (keeps current). The explicit clear below handles null.
@@ -260,7 +317,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
                 max_turn: number | null
               }
               const preserveForContinuation = hasRecoverableModelStepCheckpointForTurn(
-                db,
+                deps,
                 sess.session_key,
                 agg.max_turn
               )
@@ -360,13 +417,6 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       const syntheticErrorCode = includeLive
         ? 'APPROVAL_INTERRUPTED_BY_RESTART'
         : 'APPROVAL_EXPIRED_DURING_DOWNTIME'
-      const abandonSuspendedCheckpoint = db.prepare(`
-        UPDATE model_step_checkpoints
-        SET status = 'abandoned', version = version + 1,
-            claim_expires_at = NULL, updated_at = @now
-        WHERE session_key = @session_key AND continuation_task_id = @task_id
-          AND status IN ('claimed', 'resumable', 'blocked')
-      `)
       const reaped: ReapedSession[] = []
       for (;;) {
         const chunkReaped = await withBusyRetry(() => {
@@ -396,7 +446,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             const out: ReapedSession[] = []
             for (const sess of sessions) {
               if (sess.active_task_id) {
-                abandonSuspendedCheckpoint.run({
+                ds.abandonSuspendedCheckpointByTask.run({
                   session_key: sess.session_key,
                   task_id: sess.active_task_id,
                   now: nowMs,
@@ -632,7 +682,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             if (op.message.turn_number !== op.modelStepTurnFence.originTurnNumber) {
               throw new Error('model-step continuation fence mismatch')
             }
-            assertModelStepTurnFence(db, op.sessionId, op.modelStepTurnFence)
+            assertModelStepTurnFence(deps, op.sessionId, op.modelStepTurnFence)
           }
           s.insertMessage.run({
             session_id: op.message.session_id,
@@ -708,6 +758,22 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
     case 'replace_messages':
       return withBusyRetry(() => {
         const tx = db.transaction(() => {
+          // #1043 — a continuation's final message carries its checkpoint stamp
+          // (written by `completeModelStepCheckpointWithMessage`). A retention
+          // rewrite must not erase it: every replacement row that is the same
+          // message (role + content + timestamp) as a stamped row this rewrite
+          // removes gets that stamp back. A rewritten message — a summary in the
+          // stamped message's place — is a different message and stays
+          // unstamped.
+          const stampedBefore = ds.selectStampedMessages.all(op.sessionId) as Array<{
+            role: string
+            content: string | null
+            timestamp: number
+            model_step_checkpoint_id: string
+          }>
+          const stamps = new Map(
+            stampedBefore.map(row => [messageStampIdentity(row), row.model_step_checkpoint_id])
+          )
           s.deleteMessagesBySession.run(op.sessionId)
           for (const m of op.messages) {
             s.insertMessage.run({
@@ -730,6 +796,14 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
               cache_read_tokens: m.cache_read_tokens ?? null,
               cache_write_tokens: m.cache_write_tokens ?? null,
             })
+            const carriedStamp = stamps.get(messageStampIdentity(m))
+            if (carriedStamp !== undefined) {
+              ds.stampMessage.run({
+                checkpoint_id: carriedStamp,
+                session_id: m.session_id,
+                ordinal: m.ordinal,
+              })
+            }
           }
           s.recomputeSessionMessageSummary.run({ id: op.sessionId })
         })

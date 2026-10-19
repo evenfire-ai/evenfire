@@ -35,7 +35,7 @@ export class ModelStepCheckpointStore {
     private readonly opts: ModelStepCheckpointStoreOptions
   ) {}
 
-  /** Creates the `open` header owned by the origin task (generation 0). */
+  /** Creates the header, buffered history and first dispatch in one transaction. */
   async open(
     header: ModelStepCheckpointOpenHeader,
     entries: ModelStepCheckpointEntryInput[]
@@ -167,7 +167,7 @@ export class ModelStepCheckpointStore {
     )
   }
 
-  /** The single non-terminal checkpoint of a session, or `null`. */
+  /** The session's resumable, claimed or blocked checkpoint; never reads an open ledger. */
   loadLive(sessionKey: string): Promise<ModelStepCheckpointSnapshot | null> {
     return this.queue.enqueueSync<ModelStepCheckpointSnapshot | null>(
       { kind: 'model_step_checkpoint_load_live', sessionKey },

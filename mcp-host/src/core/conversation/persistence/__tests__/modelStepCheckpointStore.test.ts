@@ -118,6 +118,77 @@ function statusOf(worker: InProcessWorkerHandle, checkpointId: string): string |
 }
 
 describe('ModelStepCheckpointStore (#1043)', () => {
+  it('D1 H1: abandoning an open checkpoint deletes its header and entries immediately', async () => {
+    const worker = createInProcessWorker(tempDbPath())
+    const { checkpoints } = storeOver(worker)
+    await openResumable(checkpoints, 'cp-live', 'other-session')
+    const fence = await checkpoints.open(header(), [userEntry, dispatch('tc-a')])
+    expect(await checkpoints.loadEntries(SESSION_KEY, 'cp-1')).toHaveLength(2)
+    expect(
+      await checkpoints.transition(SESSION_KEY, fence, { from: ['open'], to: 'abandoned' })
+    ).toBe(2)
+    expect(statusOf(worker, 'cp-1')).toBeUndefined()
+    expect(await checkpoints.loadEntries(SESSION_KEY, 'cp-1')).toEqual([])
+    expect((await checkpoints.loadLive('other-session'))?.header.status).toBe('resumable')
+    expect(await checkpoints.loadEntries('other-session', 'cp-live')).toHaveLength(3)
+  })
+
+  it('D1 M2: session read skips an open ledger while serving a resumable checkpoint', async () => {
+    const worker = createInProcessWorker(tempDbPath())
+    const { checkpoints } = storeOver(worker)
+    await openResumable(checkpoints, 'cp-live', 'other-session')
+    await checkpoints.open(header(), [{ ...userEntry, payload: 'invalid JSON in open ledger' }])
+    expect((await checkpoints.loadLive('other-session'))?.tools).toEqual({
+      confirmed: 1,
+      unknown: 0,
+      notDispatched: 0,
+    })
+    await expect(checkpoints.loadLive(SESSION_KEY)).resolves.toBeNull()
+    expect(statusOf(worker, 'cp-1')).toBe('open')
+  })
+
+  it('D1 L6: task lookup, claim and admission reuse prepared operations', async () => {
+    const worker = createInProcessWorker(tempDbPath())
+    const { checkpoints } = storeOver(worker)
+    const { version } = await openResumable(checkpoints)
+    const prepare = vi.spyOn(worker.db, 'prepare')
+    try {
+      const claim = await checkpoints.claim({
+        sessionKey: SESSION_KEY,
+        checkpointId: 'cp-1',
+        version,
+        hostInstanceId: 'host-a',
+        newTaskId: 'task-cont',
+        leaseMs: LEASE_MS,
+      })
+      if (claim.outcome !== 'claimed') throw new Error(claim.outcome)
+      expect((await checkpoints.loadForTask(SESSION_KEY, 'task-cont'))?.header.status).toBe(
+        'claimed'
+      )
+      expect(
+        (
+          await checkpoints.claim({
+            sessionKey: SESSION_KEY,
+            checkpointId: 'cp-1',
+            version,
+            hostInstanceId: 'host-a',
+            newTaskId: 'task-other',
+            leaseMs: LEASE_MS,
+          })
+        ).outcome
+      ).toBe('replayed')
+      expect(
+        await checkpoints.abandonAdmission(SESSION_KEY, 'task-cont', claim.fence)
+      ).toMatchObject({ applied: true })
+      expect((await checkpoints.loadForTask(SESSION_KEY, 'task-cont'))?.header.status).toBe(
+        'abandoned'
+      )
+      expect(prepare).not.toHaveBeenCalled()
+    } finally {
+      prepare.mockRestore()
+    }
+  })
+
   it('1. entries round-trip and a cold reopen reads the same view', async () => {
     const dbPath = tempDbPath()
     const first = createInProcessWorker(dbPath)
@@ -163,7 +234,7 @@ describe('ModelStepCheckpointStore (#1043)', () => {
     const { checkpoints } = storeOver(worker)
     await checkpoints.open(header('cp-1'), [userEntry])
     await expect(checkpoints.open(header('cp-2'), [userEntry])).rejects.toThrow(/UNIQUE/)
-    expect((await checkpoints.loadLive(SESSION_KEY))?.header.checkpoint_id).toBe('cp-1')
+    expect(statusOf(worker, 'cp-1')).toBe('open')
     expect(statusOf(worker, 'cp-2')).toBeUndefined()
     // Another session is unaffected by the index.
     await checkpoints.open(header('cp-3', 'user-1043:rpc:agent:other'), [userEntry])
@@ -385,7 +456,7 @@ describe('ModelStepCheckpointStore (#1043)', () => {
       version: version + 2,
       claim_expires_at: null,
     })
-    expect(statusOf(worker, 'cp-open')).toBe('abandoned')
+    expect(statusOf(worker, 'cp-open')).toBeUndefined()
     expect(statusOf(worker, 'cp-own')).toBe('claimed')
   })
 
@@ -543,6 +614,33 @@ describe('ModelStepCheckpointStore (#1043)', () => {
         })
       ).toEqual({ outcome: 'completed', taskId: 'task-cont-2' })
     })
+
+    it('D1 L5: a zero-row message stamp rolls back the complete turn boundary', async () => {
+      const { handle, checkpoints, conv, freshFence } = await reclaimed()
+      const db = handle.worker.db
+      const before = await checkpoints.loadForTask(SESSION_KEY, 'task-cont-2')
+      db.exec(`CREATE TRIGGER reject_checkpoint_stamp BEFORE UPDATE OF model_step_checkpoint_id
+        ON messages BEGIN SELECT RAISE(IGNORE); END`)
+      const boundary = {
+        kind: 'persist_turn_boundary' as const,
+        message: finalMessage(conv.id, 901),
+        sessionId: conv.id,
+        state: 'idle' as const,
+        activeTaskId: null,
+        completeModelStepCheckpoint: freshFence,
+      }
+      await expect(handle.persistQueue.enqueueSync(boundary, SESSION_KEY)).rejects.toThrow(
+        /message stamp/
+      )
+      expect(await checkpoints.loadForTask(SESSION_KEY, 'task-cont-2')).toEqual(before)
+      expect(db.prepare('SELECT ordinal FROM messages WHERE ordinal = 901').all()).toEqual([])
+      db.exec('DROP TRIGGER reject_checkpoint_stamp')
+      await handle.persistQueue.enqueueSync(boundary, SESSION_KEY)
+      expect(statusOf(handle.worker, 'cp-1')).toBe('completed')
+      expect(
+        db.prepare('SELECT model_step_checkpoint_id FROM messages WHERE ordinal = 901').get()
+      ).toEqual({ model_step_checkpoint_id: 'cp-1' })
+    })
   })
 
   describe('5. crash at three points, then reopen and boot reap', () => {
@@ -557,34 +655,45 @@ describe('ModelStepCheckpointStore (#1043)', () => {
       const reopened = createInProcessWorker(dbPath)
       const cold = storeOver(reopened).checkpoints
       const live = await cold.loadLive(SESSION_KEY)
+      const durableEntries = await cold.loadEntries(SESSION_KEY, 'cp-1')
       const reaped = await cold.bootReap('host-instance-after-crash')
-      return { live, reaped, status: statusOf(reopened, 'cp-1'), reopened }
+      expect(await cold.loadEntries(SESSION_KEY, 'cp-1')).toEqual([])
+      return { live, durableEntries, reaped, status: statusOf(reopened, 'cp-1'), reopened }
     }
 
     it('before tool_dispatch: open is abandoned, no tool recorded', async () => {
-      const { live, reaped, status, reopened } = await crashAfter([])
-      expect(live?.tools).toEqual({ confirmed: 0, unknown: 0, notDispatched: 0 })
+      const { live, durableEntries, reaped, status, reopened } = await crashAfter([])
+      expect(durableEntries.map(entry => entry.kind)).toEqual(['message'])
+      expect(live).toBeNull()
       expect(reaped).toEqual({ abandoned: 1, reopened: 0 })
-      expect(status).toBe('abandoned')
+      expect(status).toBeUndefined()
       reopened.terminate()
     })
 
     it('after tool_result: the tool reads confirmed, open is abandoned', async () => {
-      const { live, reaped, status, reopened } = await crashAfter([
+      const { live, durableEntries, reaped, status, reopened } = await crashAfter([
         dispatch('tc-1'),
         result('tc-1'),
       ])
-      expect(live?.tools).toEqual({ confirmed: 1, unknown: 0, notDispatched: 0 })
+      expect(durableEntries.map(entry => entry.kind)).toEqual([
+        'message',
+        'tool_dispatch',
+        'tool_result',
+      ])
+      expect(live).toBeNull()
       expect(reaped).toEqual({ abandoned: 1, reopened: 0 })
-      expect(status).toBe('abandoned')
+      expect(status).toBeUndefined()
       reopened.terminate()
     })
 
     it('between the effect and tool_result: the tool reads unknown', async () => {
-      const { live, reaped, status, reopened } = await crashAfter([dispatch('tc-1')])
-      expect(live?.tools).toEqual({ confirmed: 0, unknown: 1, notDispatched: 0 })
+      const { live, durableEntries, reaped, status, reopened } = await crashAfter([
+        dispatch('tc-1'),
+      ])
+      expect(durableEntries.map(entry => entry.kind)).toEqual(['message', 'tool_dispatch'])
+      expect(live).toBeNull()
       expect(reaped).toEqual({ abandoned: 1, reopened: 0 })
-      expect(status).toBe('abandoned')
+      expect(status).toBeUndefined()
       reopened.terminate()
     })
   })

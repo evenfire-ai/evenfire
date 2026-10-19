@@ -396,6 +396,137 @@ describe('dbWorker dispatcher', () => {
     ).toEqual({ last_activity_at: 200 })
   })
 
+  it('keeps a completed continuation stamp on a message a retention rewrite retains', async () => {
+    const deps = createDispatcher(db)
+    const session = makeSession('conv-stamp', 'u-stamp:rpc:agent:default')
+    await dispatch({ kind: 'insert_session', payload: session }, deps)
+
+    // A live claim owned by the continuation that is about to write the final
+    // answer: `persist_turn_boundary` completes the checkpoint and stamps that
+    // message in the same transaction (#1043).
+    db.prepare(
+      `INSERT INTO model_step_checkpoints (
+         checkpoint_id, session_key, origin_turn_number, origin_task_id,
+         version, status, provider, model, host_id, principal,
+         claim_owner, claim_generation, created_at, updated_at
+       ) VALUES (
+         'cp-stamp', @session_key, 1, 'task-origin',
+         2, 'claimed', 'codex-subscription', 'gpt-6.1-sol', 'host-a', 'u-stamp',
+         'owner-1', 1, @now, @now
+       )`
+    ).run({ session_key: session.session_key, now: Date.now() })
+
+    const question: MessageRow = {
+      session_id: session.id,
+      ordinal: 0,
+      role: 'user',
+      content: 'recoverable question',
+      content_parts: null,
+      tool_call_id: null,
+      tool_calls: null,
+      tool_name: null,
+      timestamp: 10,
+      token_count: null,
+      finish_reason: null,
+      spillover_ref: null,
+      is_error: 0,
+      turn_number: 1,
+    }
+    const finalAnswer: MessageRow = {
+      session_id: session.id,
+      ordinal: 1,
+      role: 'assistant',
+      content: 'continued answer',
+      content_parts: null,
+      tool_call_id: null,
+      tool_calls: null,
+      tool_name: null,
+      timestamp: 20,
+      token_count: null,
+      finish_reason: 'stop',
+      spillover_ref: null,
+      is_error: 0,
+      turn_number: 1,
+    }
+    await dispatch({ kind: 'insert_message', payload: question }, deps)
+    await dispatch(
+      {
+        kind: 'persist_turn_boundary',
+        sessionId: session.id,
+        state: 'idle',
+        activeTaskId: null,
+        message: finalAnswer,
+        completeModelStepCheckpoint: { checkpointId: 'cp-stamp', owner: 'owner-1', generation: 1 },
+      },
+      deps
+    )
+
+    const stampAt = (ordinal: number): string | null | undefined =>
+      (
+        db
+          .prepare(
+            'SELECT model_step_checkpoint_id FROM messages WHERE session_id = ? AND ordinal = ?'
+          )
+          .get(session.id, ordinal) as { model_step_checkpoint_id: string | null } | undefined
+      )?.model_step_checkpoint_id
+
+    // Witness: completion stamped the continuation's final message while the
+    // ordinary user message stayed unstamped.
+    expect(stampAt(1)).toBe('cp-stamp')
+    expect(stampAt(0)).toBeNull()
+
+    await dispatch(
+      { kind: 'replace_messages', sessionId: session.id, messages: [question, finalAnswer] },
+      deps
+    )
+
+    // The retained message is the same message, so the rewrite must not erase
+    // its stamp.
+    expect(stampAt(1)).toBe('cp-stamp')
+    expect(stampAt(0)).toBeNull()
+
+    // The marker follows the message, not the ordinal: a rewrite that renumbers
+    // the retained set keeps it on the answer.
+    await dispatch(
+      {
+        kind: 'replace_messages',
+        sessionId: session.id,
+        messages: [
+          { ...question, ordinal: 5 },
+          { ...finalAnswer, ordinal: 6 },
+        ],
+      },
+      deps
+    )
+    expect(stampAt(6)).toBe('cp-stamp')
+    expect(stampAt(5)).toBeNull()
+
+    // A rewrite that replaces the answer with a summary at the same ordinal is
+    // a different message and must not inherit the stamp.
+    const summary: MessageRow = {
+      ...finalAnswer,
+      ordinal: 6,
+      content: 'summary of the continuation',
+    }
+    await dispatch(
+      {
+        kind: 'replace_messages',
+        sessionId: session.id,
+        messages: [{ ...question, ordinal: 5 }, summary],
+      },
+      deps
+    )
+    expect(
+      (
+        db
+          .prepare('SELECT content FROM messages WHERE session_id = ? AND ordinal = 6')
+          .get(session.id) as { content: string }
+      ).content
+    ).toBe('summary of the continuation')
+    expect(stampAt(6)).toBeNull()
+    expect(stampAt(5)).toBeNull()
+  })
+
   it('separates tool-call storage rows from visible messages and token counters', async () => {
     const deps = createDispatcher(db)
     await dispatch(
