@@ -67,7 +67,9 @@ case "${args[0]:-}" in
     case "${args[1]:-}" in
       ns) exit 0 ;;
       pods)
-        if [[ "${args[*]}" == *"-n rpc-proxy"* ]]; then
+        if [[ "${KUBE_DEPLOY_EXISTS:-}" != "1" ]]; then
+          printf '%s\n' '{"items":[]}'
+        elif [[ "${args[*]}" == *"-n rpc-proxy"* ]]; then
           printf '%s\n' '{"items":[{"metadata":{"labels":{"clerum.io/rpc-proxy-edge-protocol":"dedicated-header-v1"}},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}'
         else
           printf '%s\n' '{"items":[]}'
@@ -86,7 +88,17 @@ case "${args[0]:-}" in
           fi
         done
         if [[ "$jsonpath" == "json" ]]; then
-          printf '%s\n' '{"data":{}}'
+          if [[ "$ns" == "rpc-proxy" && "${args[2]:-}" == "rpc-proxy-secrets" && \
+                -n "${KUBE_SECRET_RPC_EDGE:-}" ]]; then
+            rpc_edge_encoded="$(printf '%s' "$KUBE_SECRET_RPC_EDGE" | base64 | tr -d '\n')"
+            printf '{"data":{"RPC_PROXY_MCP_HOST_EDGE_TOKEN":"%s"}}\n' "$rpc_edge_encoded"
+          elif [[ "$ns" == "mcp-host" && "${args[2]:-}" == "rpc-proxy-edge-credentials" && \
+                  -n "${KUBE_SECRET_MCP_EDGE:-}" ]]; then
+            host_edge_encoded="$(printf '%s' "$KUBE_SECRET_MCP_EDGE" | base64 | tr -d '\n')"
+            printf '{"data":{"RPC_PROXY_MCP_HOST_EDGE_TOKEN":"%s"}}\n' "$host_edge_encoded"
+          else
+            printf '%s\n' '{"data":{}}'
+          fi
           exit 0
         fi
         if [[ "$ns" == "control-plane" && "${args[2]:-}" == "internal-control-jwt-secrets" ]]; then
@@ -122,6 +134,10 @@ case "${args[0]:-}" in
         fi
         if [[ "${args[1]:-}" == "deployment" && "${args[2]:-}" == "host-context-controller" && \
               "${args[*]}" == *"-o json"* ]]; then
+          if [[ "${KUBE_DEPLOY_EXISTS:-}" != "1" ]]; then
+            printf '%s\n' 'Error from server (NotFound): deployments.apps "host-context-controller" not found' >&2
+            exit 1
+          fi
           printf '%s\n' '{"metadata":{"generation":1},"spec":{"replicas":1,"template":{"metadata":{"labels":{}},"spec":{"containers":[{"env":[{"name":"CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL","value":"dedicated-header-v1"}]}]}}},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1}}'
           exit 0
         fi
@@ -150,6 +166,11 @@ case "${args[0]:-}" in
           [[ -n "${ROLLOUT_LOG:-}" ]] && printf '%s %s\n' \
             "$ns" "${args[*]}" >> "$ROLLOUT_LOG"
           printf '%s\n' 'deployment.apps/wfc-8875e305b4' 'deployment.apps/wfc-a27f869132'
+          exit 0
+        fi
+        if [[ "${args[1]:-}" == "deployments" && "${args[*]}" == *"-o json"* && \
+              "${KUBE_DEPLOY_EXISTS:-}" != "1" ]]; then
+          printf '%s\n' '{"items":[]}'
           exit 0
         fi
         if [[ "${KUBE_DEPLOY_EXISTS:-}" == "1" ]]; then
@@ -506,6 +527,7 @@ assert_other_consumers_restarted "$wrc_only_rollout"
 assert_no_secret_material
 
 empty_before_rollout="$TMP/rollout-empty-before.log"
+KUBE_SECRET_RPC_EDGE="$EDGE_OLD" KUBE_SECRET_MCP_EDGE="$EDGE_OLD" \
 run_hcc_apply "$empty_before_rollout" env \
   CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET=test-member-registration-hmac \
   INTERNAL_CONTROL_JWT_HCC_HMAC_SECRET="$HCC_NEW"

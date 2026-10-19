@@ -29,7 +29,7 @@ set -euo pipefail
 # fails closed unless the env var or existing Secret value is present.
 #
 # Env vars consumed:
-#   CONTEXT                              kubectl context (unset = current)
+#   CONTEXT                              kubectl context (required)
 #   CONTROL_API_INTERNAL_TOKEN_EXT_REST  override token X (default: preserve-or-generate)
 #   CONTROL_API_INTERNAL_TOKEN_RPC       override token Y (default: preserve-or-generate)
 #   RPC_PROXY_MCP_HOST_EDGE_TOKEN         dedicated rpc-proxy → mcp-host identity
@@ -169,6 +169,19 @@ log "Resolving inter-service tokens (context: ${CONTEXT:-<current>})"
 # jq is expected on GitHub runners and operator workstations. JSON patches
 # avoid YAML quoting surprises with commas/equals in the token strings.
 command -v jq >/dev/null 2>&1 || die "jq is required (apt-get install jq)"
+[[ -n "${CONTEXT:-}" ]] || die "CONTEXT is required for credential preparation"
+EDGE_PREFLIGHT_TIMEOUT_SECONDS="${EDGE_PREFLIGHT_TIMEOUT_SECONDS:-120}"
+if ! [[ "$EDGE_PREFLIGHT_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
+   (( EDGE_PREFLIGHT_TIMEOUT_SECONDS > 900 )); then
+  die "EDGE_PREFLIGHT_TIMEOUT_SECONDS must be an integer between 1 and 900"
+fi
+
+# Classify the live HCC/Proxy/Host edge cohort before creating namespaces,
+# resolving credentials, patching Secrets, or restarting any workload. In
+# particular, a missing selector is accepted only when the existing rollout
+# gates attest the complete supported legacy cohort.
+bash "${REPO_ROOT}/scripts/minikube/rollout-rpc-proxy-edge-protocol.sh" \
+  preflight --context "$CONTEXT" --timeout-seconds "$EDGE_PREFLIGHT_TIMEOUT_SECONDS"
 
 for ns in control-plane profiles rpc-proxy channels webhook-ingress gfs mcp-host; do
   ensure_namespace "$ns"
@@ -461,9 +474,7 @@ fi
 
 if [ "$EDGE_PROXY_RESTART" = "true" ] || [ "$EDGE_HCC_RESTART" = "true" ] || \
    [ "$EDGE_HOSTS_RESTART" = "true" ]; then
-  EDGE_ROLLOUT_CONTEXT="${CONTEXT:-$(kubectl config current-context)}"
-  [ -n "$EDGE_ROLLOUT_CONTEXT" ] || die "cannot resolve Kubernetes context for edge rollout"
-  EDGE_RESTART_ARGS=(restart-targets --context "$EDGE_ROLLOUT_CONTEXT")
+  EDGE_RESTART_ARGS=(restart-targets --context "$CONTEXT")
   [ "$EDGE_PROXY_RESTART" != "true" ] || EDGE_RESTART_ARGS+=(--restart-proxy)
   [ "$EDGE_HCC_RESTART" != "true" ] || EDGE_RESTART_ARGS+=(--restart-hcc)
   [ "$EDGE_HOSTS_RESTART" != "true" ] || EDGE_RESTART_ARGS+=(--restart-all-hosts)
