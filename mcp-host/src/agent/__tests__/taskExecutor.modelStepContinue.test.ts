@@ -1358,7 +1358,7 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     ])
   })
 
-  it('9a. a stale cancelled continuation leaves the turn for its replacement', async () => {
+  it('9a. a stale cancelled continuation closes its own turn and preserves the replacement claim', async () => {
     const fixture = await claimedCheckpoint({})
     const stale = provider(undefined, () => new Promise(() => {}))
     const staleRun = await runContinuation(fixture, stale)
@@ -1391,12 +1391,12 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
         )
         .all(SESSION_KEY, 'checkpoint-b2')
     ).toEqual([
-      { state: 'processing', active_task_id: 'task-continuation-b2' },
+      { state: 'idle', active_task_id: null },
       { state: 'claimed', active_task_id: 'task-continuation-replacement' },
     ])
     expect(fixture.manager.getSessionByKey(SESSION_KEY)).toMatchObject({
-      state: 'processing',
-      activeTaskId: 'task-continuation-b2',
+      state: 'idle',
+      activeTaskId: undefined,
     })
 
     await replacementRun.executor.run()
@@ -1918,6 +1918,107 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     expect(retry.onFail).not.toHaveBeenCalled()
     releaseDispatch()
     await unfinished
+  })
+
+  it.each(['transient', 'false', 'expired'] as const)(
+    'handles a %s renewal without stranding the active continuation turn',
+    async failure => {
+      const fixture = await claimedCheckpoint({})
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+      let reachedProvider!: () => void
+      const entered = new Promise<void>(resolve => {
+        reachedProvider = resolve
+      })
+      let releaseProvider!: () => void
+      const pending = new Promise<void>(resolve => {
+        releaseProvider = resolve
+      })
+      const llm = provider(undefined, async () => {
+        reachedProvider()
+        await pending
+        return { content: 'renewal survived' }
+      })
+      const renew = vi.spyOn(fixture.checkpoints, 'renewLease')
+      const run = await runContinuation(fixture, llm)
+      const running = run.executor.run()
+      await entered
+      expect(llm.calls()).toBe(1)
+      expect(renew).toHaveBeenCalledTimes(2)
+      if (failure === 'false') {
+        expect(
+          await fixture.checkpoints.transition(SESSION_KEY, fixture.fence, {
+            from: ['claimed'],
+            to: 'abandoned',
+          })
+        ).not.toBeNull()
+        renew.mockResolvedValueOnce(false)
+      } else {
+        renew.mockRejectedValueOnce(new Error('temporary SQLite worker failure'))
+        if (failure === 'expired') clock += LEASE_MS + 1
+      }
+      await vi.advanceTimersByTimeAsync(LEASE_MS / 3)
+      expect(renew).toHaveBeenCalledTimes(3)
+      if (failure === 'transient') {
+        expect(run.executor.signal.aborted).toBe(false)
+        expect(header(fixture.handle).status).toBe('claimed')
+        await vi.advanceTimersByTimeAsync(LEASE_MS / 3)
+        expect(renew).toHaveBeenCalledTimes(4)
+      } else {
+        expect(run.executor.signal.aborted).toBe(true)
+      }
+      releaseProvider()
+      await running
+      await fixture.handle.persistQueue.drain()
+      if (failure === 'transient') {
+        expect(run.onComplete).toHaveBeenCalledTimes(1)
+        expect(header(fixture.handle).status).toBe('completed')
+      }
+      const conversation = fixture.manager.getSessionByKey(SESSION_KEY)!
+      expect(conversation.state).toBe('idle')
+      await fixture.manager.startTurn(conversation, 'Next request', 'task-after-renewal')
+      expect(conversation.activeTaskId).toBe('task-after-renewal')
+    }
+  )
+
+  it('does not renew while a live approval holds the continuation claim', async () => {
+    Object.assign(appConfig, { enableApproval: true })
+    const fixture = await claimedCheckpoint({})
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    const renew = vi.spyOn(fixture.checkpoints, 'renewLease')
+    const llm = provider(undefined, () => ({
+      calls: [
+        { id: 'approval-no-renew', name: 'shell_exec', arguments: { command: 'printf held' } },
+      ],
+    }))
+    const run = await runContinuation(fixture, llm, {
+      deps: {
+        approvalConfig: {
+          defaultPolicy: 'channel_users',
+          channels: {},
+          tools: { shell_exec: true },
+        },
+      },
+    })
+    await run.executor.run()
+    expect(run.executor.executorState).toBe('waiting_approval')
+    expect(run.onApprovalNeeded).toHaveBeenCalledTimes(1)
+    const renewals = renew.mock.calls.length
+    expect(renewals).toBeGreaterThan(0)
+    clock += LEASE_MS * 2
+    await vi.advanceTimersByTimeAsync(LEASE_MS * 2)
+    expect(renew).toHaveBeenCalledTimes(renewals)
+    expect(
+      await fixture.checkpoints.claim({
+        sessionKey: SESSION_KEY,
+        checkpointId: 'checkpoint-b2',
+        version: header(fixture.handle).version,
+        hostInstanceId: 'competing-host',
+        newTaskId: 'competing-task',
+        leaseMs: LEASE_MS,
+      })
+    ).toEqual({ outcome: 'replayed', taskId: 'task-continuation-b2' })
+    await run.executor.deny()
+    expect(fixture.manager.getSessionByKey(SESSION_KEY)!.state).toBe('idle')
   })
 
   it('11c. an approval holds the claim past its short lease until denial releases the session', async () => {

@@ -905,7 +905,26 @@ export class AgentStateMachine extends EventEmitter {
         }
       }
       const executor = this.createTaskExecutor(task, pinnedModel)
-      await executor.rehydrateWaitingApproval(entry.session_key, entry.approval)
+      let recovery = await executor.rehydrateWaitingApproval(entry.session_key, entry.approval)
+      if (recovery) {
+        const continuation = task.modelStepContinuation!
+        if (recovery === 'attachment_expired') {
+          const blocked = await this.modelStepCheckpoints!.store.transition(
+            entry.session_key,
+            continuation.fence,
+            { from: ['claimed'], to: 'blocked', blockedReason: 'attachment_expired' }
+          )
+          if (blocked === null) recovery = 'claim_lost'
+        }
+        // A lost claim has already changed state or owner. Its old fence must
+        // never terminalize the replacement; only retire this stale approval.
+        logger.warn(
+          { taskId: task.id, checkpointId: continuation.checkpointId, reason: recovery },
+          'Pending approval checkpoint cannot be rehydrated'
+        )
+        await this.conversationManager.clearPendingApproval(entry.session_key, entry.request_id)
+        continue
+      }
       this.activeExecutors.set(task.id, executor)
       this.approvalMap.set(entry.request_id, {
         taskId: task.id,

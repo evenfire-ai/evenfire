@@ -51,6 +51,8 @@ export interface ModelStepCheckpointRecorder {
   /** Writer identity; `null` until the origin header is open. */
   readonly fence: ModelStepCheckpointFence | null
   readonly poisoned: boolean
+  /** Whether settle applied a transition out of the continuation claim. */
+  readonly claimReleased: boolean
   begin(initialMessages: ChatMessage[]): Promise<void>
   syncMessages(messages: ChatMessage[]): Promise<void>
   /** Context management replaced the array; later pushes start at `length`. */
@@ -58,7 +60,11 @@ export interface ModelStepCheckpointRecorder {
   recordDispatch(call: ToolCall): Promise<void>
   recordResult(call: ToolCall, result: ToolResult): Promise<void>
   updateState(nextIteration: number): Promise<void>
-  /** Returns the checkpoint id when the turn left a resumable checkpoint. */
+  /**
+   * Returns the checkpoint id when resumable and updates claimReleased only
+   * after an applied transition. A failed continuation abandon throws so the
+   * executor can clean up the still-owned claim.
+   */
   settle(result: LoopResult | undefined): Promise<string | undefined>
 }
 
@@ -127,6 +133,7 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
   private confirmedResults: number
   private isPoisoned = false
   private settled = false
+  private hasReleasedClaim = false
   private readonly imageCapture: CheckpointImageCapture
   private pendingMessages: ChatMessage[] = []
   private readonly restoredBindings: CheckpointAttachmentBinding[]
@@ -172,6 +179,10 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
     return this.isPoisoned
   }
 
+  get claimReleased(): boolean {
+    return this.hasReleasedClaim
+  }
+
   async begin(initialMessages: ChatMessage[]): Promise<void> {
     this.recordedUpTo = initialMessages.length
     const { mode } = this.opts
@@ -208,10 +219,16 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
     if (pending.length === 0) return
     await this.append(() =>
       pending
-        .filter(
-          message =>
+        .filter(message => {
+          // Providers may restart call ids on each assistant response. Only
+          // recordResult's messages from this batch have already been appended.
+          if (message.role === 'assistant' && message.tool_calls) {
+            this.recordedToolMessages.clear()
+          }
+          return (
             message.role !== 'tool' || !this.recordedToolMessages.has(message.tool_call_id ?? '')
-        )
+          )
+        })
         .map(message => this.messageEntry(message))
     )
   }
@@ -322,6 +339,7 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
       })
       this.imageCapture.clear()
       if (resumable) {
+        this.hasReleasedClaim = source === 'claimed'
         logger.info(
           {
             component: 'ModelStepCheckpoint',
@@ -342,14 +360,20 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
       return undefined
     }
 
-    await this.write('transition', async () => {
-      await this.opts.store.transition(this.opts.sessionKey, fence, {
+    const abandoned = await this.write('transition', async () => {
+      const version = await this.opts.store.transition(this.opts.sessionKey, fence, {
         from: [source],
         to: 'abandoned',
       })
-      return true
+      return version !== null
     })
+    this.hasReleasedClaim = source === 'claimed' && abandoned
     this.imageCapture.clear()
+    // A continuation must enter the executor's cleanup if settlement failed;
+    // otherwise an answered turn can retain a claim until checkpoint expiry.
+    if (source === 'claimed' && !abandoned) {
+      throw new Error('Model-step checkpoint abandonment did not release its claim')
+    }
     return undefined
   }
 
