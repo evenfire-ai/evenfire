@@ -11,9 +11,6 @@ import {
 } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '@components/AuthContext'
-import { Button } from '@components/Button'
-import { FormField } from '@components/FormField'
-import { TextInput } from '@components/TextInput'
 import { PROFILE_ROUTES } from '@constants/routes'
 import {
   ProfileApiError,
@@ -29,6 +26,7 @@ import {
 } from '@lib/invitations'
 import { formatTeamRole } from '@lib/teamRoles'
 import type { InvitationPreview } from '@/app/types/api'
+import { InvitationActionPanel } from './InvitationActionPanel'
 import type { InvitationClientProps } from './types'
 
 type RecoveryPhase =
@@ -387,16 +385,6 @@ export function InvitationClient({
     void handlePasswordSubmit()
   }
 
-  function buttonLabel(kind: 'accept' | 'password', label: string) {
-    if (submitting !== kind) return label
-    return (
-      <span className="cu-btn__content">
-        <span className="cu-btn__spinner" aria-hidden="true" />
-        <span>{kind === 'accept' ? 'Accepting...' : 'Saving...'}</span>
-      </span>
-    )
-  }
-
   return (
     <main className="center-page">
       <section className="page-card">
@@ -452,103 +440,48 @@ export function InvitationClient({
         ) : null}
 
         {!invitation ? null : recoveryNeedsSessionCheck ? (
-          <div className="stack">
-            <Button
-              type="button"
-              disabled={busy || recoveryPhase.state === 'checking_session' || !invitation.userId}
-              onClick={() => void retryRecoveredSession()}
-            >
-              {recoveryPhase.state === 'checking_session'
-                ? 'Checking account session...'
-                : 'Retry account session check'}
-            </Button>
-            <a className="cu-btn" href={profileLoginHref}>
-              Sign in instead
-            </a>
-          </div>
+          <InvitationActionPanel
+            mode="session-check"
+            disabled={busy || recoveryPhase.state === 'checking_session' || !invitation.userId}
+            checking={recoveryPhase.state === 'checking_session'}
+            onRetrySession={() => void retryRecoveredSession()}
+            loginHref={profileLoginHref}
+          />
         ) : isPasswordReset && recoveryOutcomeUnknown ? (
-          <div className="stack">
-            <a className="cu-btn cu-btn--primary" href={profileLoginHref}>
-              Try signing in
-            </a>
-            <a className="cu-btn" href={forgotPasswordHref}>
-              Request a new recovery link
-            </a>
-          </div>
+          <InvitationActionPanel
+            mode="outcome-unknown"
+            loginHref={profileLoginHref}
+            forgotPasswordHref={forgotPasswordHref}
+          />
         ) : (isPasswordReset && invitation.status === 'pending') ||
           (invitation.status === 'accepted' && invitation.passwordPending) ? (
-          <div className="stack">
-            <div className="form-card">
-              <strong>{isPasswordReset ? 'Set a new password' : 'Set your password'}</strong>
-              <div className="muted">
-                Use at least 8 characters. This password stays with your Evenfire account.
-              </div>
-              <FormField label="Password">
-                <TextInput
-                  name="password"
-                  type="password"
-                  placeholder="At least 8 characters"
-                  value={password}
-                  onChange={event => setPassword(event.currentTarget.value)}
-                  onKeyDown={handlePasswordKeyDown}
-                  disabled={busy}
-                  minLength={8}
-                  required
-                />
-              </FormField>
-              <FormField label="Confirm password">
-                <TextInput
-                  name="confirmPassword"
-                  type="password"
-                  placeholder="Repeat your password"
-                  value={confirmPassword}
-                  onChange={event => setConfirmPassword(event.currentTarget.value)}
-                  onKeyDown={handlePasswordKeyDown}
-                  disabled={busy}
-                  minLength={8}
-                  required
-                />
-              </FormField>
-            </div>
-            <Button
-              type="button"
-              disabled={busy}
-              onClick={handlePasswordAction}
-              onPointerDown={handlePasswordAction}
-            >
-              {buttonLabel(
-                'password',
-                isPasswordReset ? 'Reset password' : 'Set password and continue'
-              )}
-            </Button>
-          </div>
+          <InvitationActionPanel
+            mode="password-setup"
+            isPasswordReset={isPasswordReset}
+            busy={busy}
+            submitting={submitting}
+            password={password}
+            confirmPassword={confirmPassword}
+            onPasswordChange={setPassword}
+            onConfirmPasswordChange={setConfirmPassword}
+            onPasswordKeyDown={handlePasswordKeyDown}
+            onPasswordAction={handlePasswordAction}
+          />
         ) : invitation.status === 'accepted' ? (
-          <div className="stack">
-            <a
-              className="cu-btn cu-btn--primary"
-              href={downloadUrl}
-              target="_blank"
-              rel="noreferrer"
-            >
-              Download Evenfire
-            </a>
-            <a className="cu-btn" href={profileLoginHref}>
-              Manage Profile
-            </a>
-          </div>
+          <InvitationActionPanel
+            mode="accepted"
+            downloadUrl={downloadUrl}
+            loginHref={profileLoginHref}
+          />
         ) : invitationExpired ? (
-          <div className="message message--error-plain">This invitation has expired.</div>
+          <InvitationActionPanel mode="expired" />
         ) : (
-          <div>
-            <Button
-              type="button"
-              disabled={busy}
-              onClick={handleAcceptAction}
-              onPointerDown={handleAcceptAction}
-            >
-              {buttonLabel('accept', 'Accept invitation')}
-            </Button>
-          </div>
+          <InvitationActionPanel
+            mode="accept"
+            busy={busy}
+            submitting={submitting}
+            onAcceptAction={handleAcceptAction}
+          />
         )}
       </section>
     </main>
