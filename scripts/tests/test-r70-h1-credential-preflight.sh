@@ -81,6 +81,10 @@ case "$verb:$resource" in
       elif [[ "${FAKE_HCC_MODE:-preselector}" == empty-containers ]]; then
         jq '.spec.template.spec.containers = []' \
           "$ROOT/scripts/tests/fixtures/rpc-proxy-edge-hcc-legacy-preselector.json"
+      elif [[ "${FAKE_HCC_MODE:-preselector}" == unknown-marker ]]; then
+        jq '.spec.template.metadata.labels["clerum.io/host-runtime-edge-protocol"] =
+          "future-edge-protocol"' \
+          "$ROOT/scripts/tests/fixtures/rpc-proxy-edge-hcc-legacy-preselector.json"
       elif [[ "${FAKE_HCC_MODE:-preselector}" == multiple ]]; then
         jq '.spec.template.spec.containers[0].env += [
           {"name":"CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL","value":"legacy-headers"},
@@ -122,6 +126,8 @@ case "$verb:$resource" in
       protocol="${FAKE_PROXY_MODE:-legacy}"
       if [[ "$protocol" == strict || "$protocol" == mixed ]]; then
         label='"clerum.io/rpc-proxy-edge-protocol":"dedicated-header-v1"'
+      elif [[ "$protocol" == unsupported ]]; then
+        label='"clerum.io/rpc-proxy-edge-protocol":"future-edge-protocol"'
       else
         label='"app":"rpc-proxy"'
       fi
@@ -148,6 +154,8 @@ case "$verb:$resource" in
       if [[ "${FAKE_HCC_ABSENT:-false}" == true &&
             "${FAKE_HOST_DEPLOY_EXISTS:-false}" != true ]]; then
         echo '{"items":[]}'
+      elif [[ "${FAKE_HOSTS_MODE:-legacy}" == unsupported ]]; then
+        echo '{"items":[{"metadata":{"generation":1},"spec":{"replicas":1,"template":{"metadata":{"labels":{"app":"managed-host","clerum.io/rpc-proxy-edge-protocol":"future-edge-protocol"}}}},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1}}]}'
       else
         echo '{"items":[{"metadata":{"generation":1},"spec":{"replicas":1,"template":{"metadata":{"labels":{"app":"managed-host"}}}},"status":{"observedGeneration":1,"updatedReplicas":1,"readyReplicas":1,"availableReplicas":1}}]}'
       fi
@@ -166,8 +174,20 @@ case "$verb:$resource" in
           echo '{"items":[]}'
         elif [[ "${FAKE_PROXY_MODE:-legacy}" == strict || "${FAKE_PROXY_MODE:-legacy}" == mixed ]]; then
           echo '{"items":[{"metadata":{"labels":{"clerum.io/rpc-proxy-edge-protocol":"dedicated-header-v1"}},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}'
+        elif [[ "${FAKE_PROXY_MODE:-legacy}" == unsupported ]]; then
+          echo '{"items":[{"metadata":{"labels":{"clerum.io/rpc-proxy-edge-protocol":"future-edge-protocol"}},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}'
         else
           echo '{"items":[{"metadata":{"labels":{"app":"rpc-proxy"}},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}'
+        fi
+        ;;
+      mcp-host:*clerum.io/managed-by=host-context-controller*)
+        if [[ "${FAKE_HCC_ABSENT:-false}" == true &&
+              "${FAKE_HOST_DEPLOY_EXISTS:-false}" != true ]]; then
+          echo '{"items":[]}'
+        elif [[ "${FAKE_HOSTS_MODE:-legacy}" == unsupported-pod ]]; then
+          echo '{"items":[{"metadata":{"labels":{"clerum.io/managed-by":"host-context-controller","clerum.io/rpc-proxy-edge-protocol":"future-edge-protocol"}},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}'
+        else
+          echo '{"items":[{"metadata":{"labels":{"clerum.io/managed-by":"host-context-controller"}},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}'
         fi
         ;;
       control-plane:*)
@@ -331,6 +351,34 @@ if FAKE_HCC_MODE=preselector FAKE_PROXY_MODE=mixed \
 fi
 assert_no_mutations 'mixed legacy and strict cohorts'
 pass 'mixed legacy and strict cohorts fail without mutations'
+
+reset_log
+if FAKE_HCC_MODE=preselector FAKE_PROXY_MODE=unsupported \
+  bash "$ROOT/scripts/minikube/rollout-rpc-proxy-edge-protocol.sh" \
+    preflight --context fixture-context --timeout-seconds 5 >"$TMP/unsupported-proxy.out" 2>&1; then
+  fail 'pre-selector HCC with an unsupported Proxy edge label was accepted'
+fi
+assert_no_mutations 'unsupported Proxy edge label'
+pass 'unsupported Proxy edge labels fail before credential or workload mutations'
+
+for unsupported_host_state in hcc-marker deployment pod; do
+  reset_log
+  if [[ "$unsupported_host_state" == hcc-marker ]]; then
+    if run_preflight unknown-marker >"$TMP/unsupported-host.out" 2>&1; then
+      fail 'pre-selector HCC with an unsupported runtime marker was accepted'
+    fi
+  elif [[ "$unsupported_host_state" == deployment ]]; then
+    if run_preflight preselector legacy unsupported >"$TMP/unsupported-host.out" 2>&1; then
+      fail 'pre-selector HCC with an unsupported Host Deployment label was accepted'
+    fi
+  else
+    if run_preflight preselector legacy unsupported-pod >"$TMP/unsupported-host.out" 2>&1; then
+      fail 'pre-selector HCC with an unsupported managed Host Pod label was accepted'
+    fi
+  fi
+  assert_no_mutations "unsupported Host $unsupported_host_state label"
+done
+pass 'unsupported HCC, managed Host Deployment, and Host Pod labels fail before mutation'
 
 for credential_case in missing mismatched malformed placeholder too-short; do
   reset_log

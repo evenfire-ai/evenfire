@@ -95,7 +95,8 @@ proxy_cohort_legacy() {
     -n "$RPC_PROXY_NAMESPACE" -o json 2>/dev/null)" || return 1
   pods="$(bounded_kubectl_get proxy-legacy-pods pods -n "$RPC_PROXY_NAMESPACE" \
     -l app=rpc-proxy -o json 2>/dev/null)" || return 1
-  jq -e --arg label "$PROTOCOL_LABEL" --arg protocol "$STRICT_PROTOCOL" '
+  jq -e --arg label "$PROTOCOL_LABEL" '
+    (.spec.template.metadata.labels // {}) as $templateLabels |
     (.spec.replicas // 1) as $desired |
     (.metadata.generation // 0) as $generation |
     ($desired > 0) and
@@ -103,14 +104,15 @@ proxy_cohort_legacy() {
     ((.status.updatedReplicas // 0) == $desired) and
     ((.status.readyReplicas // 0) == $desired) and
     ((.status.availableReplicas // 0) == $desired) and
-    (.spec.template.metadata.labels[$label] != $protocol)
+    ((($templateLabels | has($label)) | not) or $templateLabels[$label] == "legacy-headers")
   ' <<<"$deployment" >/dev/null || return 1
-  jq -e --arg label "$PROTOCOL_LABEL" --arg protocol "$STRICT_PROTOCOL" \
+  jq -e --arg label "$PROTOCOL_LABEL" \
     --argjson desired "$(jq -r '.spec.replicas // 1' <<<"$deployment")" '
       (.items | length) == $desired and
       all(.items[];
         .metadata.deletionTimestamp == null and
-        .metadata.labels[$label] != $protocol and
+        (((.metadata.labels // {}) as $labels |
+          ((($labels | has($label)) | not) or $labels[$label] == "legacy-headers"))) and
         .status.phase == "Running" and
         any(.status.conditions[]?; .type == "Ready" and .status == "True")
       )
@@ -118,7 +120,7 @@ proxy_cohort_legacy() {
 }
 
 host_cohort_legacy() {
-  local hcc hcc_pods deployments strict_pods
+  local hcc hcc_pods deployments managed_pods strict_pods
   hcc="$(bounded_kubectl_get host-hcc-deployment deployment host-context-controller \
     -n "$CONTROL_PLANE_NAMESPACE" -o json 2>/dev/null)" || return 1
   hcc_pods="$(bounded_kubectl_get host-hcc-pods pods \
@@ -126,11 +128,13 @@ host_cohort_legacy() {
   deployments="$(bounded_kubectl_get host-deployments deployments \
     -n "$HOST_NAMESPACE" -l clerum.io/managed-by=host-context-controller \
     -o json 2>/dev/null)" || return 1
+  managed_pods="$(bounded_kubectl_get host-managed-pods pods \
+    -n "$HOST_NAMESPACE" -l clerum.io/managed-by=host-context-controller \
+    -o json 2>/dev/null)" || return 1
   strict_pods="$(bounded_kubectl_get host-strict-pods pods -n "$HOST_NAMESPACE" \
     -l "$PROTOCOL_LABEL=$STRICT_PROTOCOL" -o json 2>/dev/null)" || return 1
   jq -e --arg protocolKey 'CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL' \
-    --arg markerKey 'clerum.io/host-runtime-edge-protocol' \
-    --arg strict "$STRICT_PROTOCOL" '
+    --arg markerKey 'clerum.io/host-runtime-edge-protocol' '
     (.spec.replicas // 1) as $desired |
     (.metadata.generation // 0) as $generation |
     ($desired > 0) and
@@ -138,21 +142,25 @@ host_cohort_legacy() {
     ((.status.updatedReplicas // 0) == $desired) and
     ((.status.readyReplicas // 0) == $desired) and
     ((.status.availableReplicas // 0) == $desired) and
-    (.spec.template.metadata.labels[$markerKey] != $strict) and
+    (((.spec.template.metadata.labels // {}) as $labels |
+      ((($labels | has($markerKey)) | not) or $labels[$markerKey] == "legacy-headers"))) and
     ([.spec.template.spec.containers[]?.env[]?
       | select(.name == $protocolKey)
       | .value] |
       (length <= 1) and (length == 0 or .[0] == "legacy-headers"))
   ' <<<"$hcc" >/dev/null || return 1
-  jq -e --argjson desired "$(jq -r '.spec.replicas // 1' <<<"$hcc")" '
+  jq -e --arg markerKey 'clerum.io/host-runtime-edge-protocol' \
+    --argjson desired "$(jq -r '.spec.replicas // 1' <<<"$hcc")" '
     (.items | length) == $desired and
     all(.items[];
       .metadata.deletionTimestamp == null and
       .status.phase == "Running" and
-      any(.status.conditions[]?; .type == "Ready" and .status == "True")
+      any(.status.conditions[]?; .type == "Ready" and .status == "True") and
+      (((.metadata.labels // {}) as $labels |
+        ((($labels | has($markerKey)) | not) or $labels[$markerKey] == "legacy-headers")))
     )
   ' <<<"$hcc_pods" >/dev/null || return 1
-  jq -e --arg label "$PROTOCOL_LABEL" --arg protocol "$STRICT_PROTOCOL" '
+  jq -e --arg label "$PROTOCOL_LABEL" '
     all(.items[];
       (.spec.replicas // 1) as $desired |
       (.metadata.generation // 0) as $generation |
@@ -160,9 +168,19 @@ host_cohort_legacy() {
       ((.status.updatedReplicas // 0) == $desired) and
       ((.status.readyReplicas // 0) == $desired) and
       ((.status.availableReplicas // 0) == $desired) and
-      (.spec.template.metadata.labels[$label] != $protocol)
+      (((.spec.template.metadata.labels // {}) as $labels |
+        ((($labels | has($label)) | not) or $labels[$label] == "legacy-headers")))
     )
   ' <<<"$deployments" >/dev/null || return 1
+  jq -e --arg label "$PROTOCOL_LABEL" '
+    all(.items[];
+      .metadata.deletionTimestamp == null and
+      .status.phase == "Running" and
+      any(.status.conditions[]?; .type == "Ready" and .status == "True") and
+      (((.metadata.labels // {}) as $labels |
+        ((($labels | has($label)) | not) or $labels[$label] == "legacy-headers")))
+    )
+  ' <<<"$managed_pods" >/dev/null || return 1
   jq -e '.items | length == 0' <<<"$strict_pods" >/dev/null
 }
 
