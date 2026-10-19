@@ -386,15 +386,22 @@ describe('routes/members', () => {
         { error: ['reason_required'] }
       )
     )
-    await request(createApp())
+    const response = await request(createApp())
       .delete(`/api/v1/members/${TARGET_USER_ID}`)
       .set('authorization', 'Bearer good-token')
       .set('Idempotency-Key', 'retire-user-2-v1')
       .send({ reason: 'team access no longer required' })
-      .expect(500, {
-        error: 'Internal Server Error',
-        message: 'Control API returned an unsupported response',
-      })
+
+    expect(response.status).toBe(500)
+    expect(response.body).toEqual({
+      error: {
+        code: 'internal_error',
+        message: 'The request could not be completed.',
+        correlationId: expect.any(String),
+        retryable: false,
+      },
+    })
+    expect(JSON.stringify(response.body)).not.toMatch(/reason_required|Control API|unsupported/)
   })
 
   it.each([
