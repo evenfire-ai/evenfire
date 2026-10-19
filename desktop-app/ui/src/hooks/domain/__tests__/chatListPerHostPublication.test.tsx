@@ -784,4 +784,58 @@ describe('Latest sessions reload keeps published remote rows (H5)', () => {
       .find(rows => ids(rows).includes('local-new-scope'))
     expect(ids(firstPublication!)).toEqual(['local-new-scope'])
   })
+
+  it('T-R1M3-1: a reload drops the published remote rows of a Host that left agentNames and carries the rest', async () => {
+    let indexA = localIndex([])
+    let pageA: Promise<SessionsListResult> = Promise.resolve(
+      serverSessions([{ agent: HOST_A, chatId: 'remote-a', title: 'Remote A' }])
+    )
+    let aReads = 0
+    clerum.chat.getIndex.mockImplementation(async (agentRef: string) =>
+      agentRef === HOST_A ? indexA : localIndex([])
+    )
+    clerum.rpc.listSessions.mockImplementation((agentRef: string) => {
+      if (agentRef === HOST_B) {
+        return Promise.resolve(
+          serverSessions([{ agent: HOST_B, chatId: 'remote-b', title: 'Remote B' }])
+        )
+      }
+      aReads += 1
+      return pageA
+    })
+    const { controller, commits } = renderObserved({ selectedAgent: null, agentNames: HOSTS })
+    await waitFor(() =>
+      expect(ids(controller.result.current.latestChatSessions).sort()).toEqual([
+        'remote-a',
+        'remote-b',
+      ])
+    )
+
+    const nextPageA = deferred<SessionsListResult>()
+    let nextPageAResolved = false
+    pageA = nextPageA.promise.then(page => {
+      nextPageAResolved = true
+      return page
+    })
+    indexA = localIndex([{ id: 'local-a', title: 'Local A' }])
+    const readsBeforeReload = aReads
+    expireCatalogCache()
+    const firstCommitOfReload = commits.length
+    controller.rerender({ selectedAgent: null, agentNames: [HOST_A] })
+
+    // Liveness witness: the reload published A's new local row and A's next
+    // catalog is pending, so A's remote row can only be there by the carry.
+    await waitFor(() =>
+      expect(ids(controller.result.current.latestChatSessions)).toContain('local-a')
+    )
+    expect(aReads).toBeGreaterThan(readsBeforeReload)
+    expect(nextPageAResolved).toBe(false)
+    const afterReload = commits.slice(firstCommitOfReload)
+    const localPublication = afterReload.findIndex(rows => ids(rows).includes('local-a'))
+    expect(localPublication).toBeGreaterThanOrEqual(0)
+    expect(ids(afterReload[localPublication]!).sort()).toEqual(['local-a', 'remote-a'])
+    expect(
+      afterReload.slice(localPublication).filter(rows => ids(rows).includes('remote-b'))
+    ).toEqual([])
+  })
 })

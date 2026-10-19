@@ -16,13 +16,19 @@ vi.mock('@contexts/AuthContext', () => ({
   }),
 }))
 // Mutable so the held-host tests can drive the "Latest sessions" block; every
-// other test reads the defaults restored in `beforeEach`.
+// other test reads the defaults restored by the file-level `beforeEach` below.
 const sidebarContext = vi.hoisted(() => ({
   latestChatSessions: [] as Array<{ id: string; agentRef: string; title: string }>,
   latestChatSessionsLoading: false,
   heldAgentRefs: [] as string[],
   handleSelectChatAgent: (() => undefined) as (...args: unknown[]) => void,
 }))
+beforeEach(() => {
+  sidebarContext.latestChatSessions = []
+  sidebarContext.latestChatSessionsLoading = false
+  sidebarContext.heldAgentRefs = []
+  sidebarContext.handleSelectChatAgent = vi.fn()
+})
 vi.mock('@contexts/ChatListContext', () => ({
   useChatListContext: () => ({
     activeChatId: null,
@@ -96,10 +102,6 @@ function stubNarrowViewport() {
 describe('SidebarNav logo', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    sidebarContext.latestChatSessions = []
-    sidebarContext.latestChatSessionsLoading = false
-    sidebarContext.heldAgentRefs = []
-    sidebarContext.handleSelectChatAgent = vi.fn()
     // jsdom does not implement matchMedia; SidebarNav reads it to detect the
     // mobile viewport. Stub it as a non-matching desktop viewport.
     if (!window.matchMedia) {
@@ -340,10 +342,6 @@ describe('SidebarNav flattened resources menu', () => {
 describe('SidebarNav Files label engages the file explorer', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    sidebarContext.latestChatSessions = []
-    sidebarContext.latestChatSessionsLoading = false
-    sidebarContext.heldAgentRefs = []
-    sidebarContext.handleSelectChatAgent = vi.fn()
     if (!window.matchMedia) {
       Object.defineProperty(window, 'matchMedia', {
         writable: true,
