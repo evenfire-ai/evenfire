@@ -99,7 +99,7 @@ describe('provisionAdminDesktopWorkspace', () => {
       .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // SELECT users by email → none
       .mockResolvedValueOnce({ rows: [{ id: 'user-1' }], rowCount: 1 }) // INSERT users
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // INSERT profiles
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // UPDATE users password
+      .mockResolvedValueOnce({ rows: [{ lifecycle_version: '1' }], rowCount: 1 }) // UPDATE users password
       .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // SELECT admin team → none
       .mockResolvedValueOnce({ rows: [{ id: 'team-1' }], rowCount: 1 }) // INSERT teams
       .mockResolvedValue({ rows: [], rowCount: 1 }) // membership + grants
@@ -122,6 +122,7 @@ describe('provisionAdminDesktopWorkspace', () => {
     expect(dbMocks.txQuery).toHaveBeenCalledWith(expect.stringContaining('UPDATE users'), [
       'user-1',
       'HASH',
+      false,
     ])
     expect(dbMocks.txQuery).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO team_agents'),
@@ -134,7 +135,7 @@ describe('provisionAdminDesktopWorkspace', () => {
     dbMocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: 'user-9' }], rowCount: 1 }) // SELECT users by email → found
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // INSERT profiles
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // UPDATE password
+      .mockResolvedValueOnce({ rows: [{ lifecycle_version: '8' }], rowCount: 1 }) // UPDATE password
       .mockResolvedValueOnce({ rows: [{ id: 'team-x' }], rowCount: 1 }) // SELECT admin team → found
       .mockResolvedValue({ rows: [], rowCount: 1 })
 
@@ -156,11 +157,14 @@ describe('provisionAdminDesktopWorkspace', () => {
     expect(dbMocks.txQuery).toHaveBeenCalledWith(expect.stringContaining('UPDATE users'), [
       'user-9',
       'H',
+      true,
     ])
     expect(userSessionMocks.revokeAll).toHaveBeenCalledWith(
       'user-9',
       'password_changed',
-      expect.objectContaining({ query: dbMocks.txQuery })
+      expect.objectContaining({ query: dbMocks.txQuery }),
+      undefined,
+      '8'
     )
   })
 
@@ -224,7 +228,7 @@ describe('provisionAdminDesktopWorkspace', () => {
     dbMocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: 'user-1' }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ lifecycle_version: '8' }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ id: 'team-1' }], rowCount: 1 })
 
     const mod = await import('../src/services/directory/adminProvisioning.js')
@@ -254,7 +258,7 @@ describe('provisionAdminDesktopWorkspace', () => {
     dbMocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: 'user-1' }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ lifecycle_version: '8' }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ id: 'team-1' }], rowCount: 1 })
     operatorLinkMocks.linkInTransaction.mockRejectedValueOnce(new Error('link conflict'))
 
@@ -301,7 +305,7 @@ describe('provisionMemberFromAdmin', () => {
         rowCount: 1,
       }) // INSERT users
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // INSERT profiles
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // UPDATE users password
+      .mockResolvedValueOnce({ rows: [{ lifecycle_version: '1' }], rowCount: 1 }) // UPDATE users password
 
     const mod = await import('../src/services/directory/adminProvisioning.js')
     const result = await mod.provisionMemberFromAdmin({
@@ -357,7 +361,8 @@ describe('provisionMemberFromAdmin', () => {
         rows: [{ id: 'user-1', email: 'ada@example.com', name: 'ada' }],
         rowCount: 1,
       })
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // INSERT profiles
+      .mockResolvedValueOnce({ rows: [{ lifecycle_version: '8' }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
 
     const mod = await import('../src/services/directory/adminProvisioning.js')
@@ -371,7 +376,9 @@ describe('provisionMemberFromAdmin', () => {
     expect(userSessionMocks.revokeAll).toHaveBeenCalledWith(
       'user-1',
       'password_changed',
-      expect.objectContaining({ query: dbMocks.txQuery })
+      expect.objectContaining({ query: dbMocks.txQuery }),
+      undefined,
+      '8'
     )
   })
 

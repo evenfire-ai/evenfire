@@ -54,8 +54,11 @@ function legacyAuthorityDatabase() {
         state.revokedFingerprints.add(values[0] as string)
         return { rows: [{ token_hash: values[0] }], rowCount: 1 }
       }
-      if (sql.includes('SELECT id FROM users WHERE id = $1 FOR UPDATE')) {
-        return { rows: [{ id: state.userId }], rowCount: 1 }
+      if (sql.includes('FROM users') && sql.includes('FOR UPDATE')) {
+        return {
+          rows: [{ id: state.userId, lifecycle_version: state.lifecycleVersion }],
+          rowCount: 1,
+        }
       }
       if (sql.includes('SELECT u.id, u.lifecycle_state, u.lifecycle_version')) {
         return {

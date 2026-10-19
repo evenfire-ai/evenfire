@@ -454,30 +454,54 @@ export async function revokeAllUserSessions(
   userId: string,
   reason: string,
   db?: SessionDatabase,
-  actorContext?: ExternalSessionAuthorityContext
+  actorContext?: ExternalSessionAuthorityContext,
+  expectedLifecycleVersion?: string | number
 ): Promise<number> {
   const work = async (transaction: SessionDatabase) => {
-    const user = await transaction.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [userId])
-    if ((user.rowCount ?? 0) === 0) return 0
+    const userLock = expectedLifecycleVersion === undefined ? 'FOR UPDATE' : 'FOR NO KEY UPDATE'
+    const user = await transaction.query(
+      `SELECT id, lifecycle_version
+         FROM users
+        WHERE id = $1
+        ${userLock}`,
+      [userId]
+    )
+    if ((user.rowCount ?? 0) === 0) {
+      if (expectedLifecycleVersion !== undefined) {
+        throw new Error('password transition user disappeared before session revocation')
+      }
+      return 0
+    }
     if (actorContext && !(await isCurrentRevocationActor(transaction, userId, actorContext))) {
       return 0
     }
     const revokedAt = await loadSessionDatabaseNow(transaction)
     const compatibilityValidAfter = new Date(revokedAt.getTime() - 1000)
 
-    const advanced = await transaction.query(
-      `UPDATE users
-          SET lifecycle_version = lifecycle_version + 1,
-              updated_at = NOW()
-        WHERE id = $1
-      RETURNING lifecycle_version`,
-      [userId]
-    )
-    const lifecycleVersion = Number(
-      (advanced.rows[0] as { lifecycle_version?: unknown } | undefined)?.lifecycle_version
-    )
-    if (!Number.isSafeInteger(lifecycleVersion) || lifecycleVersion < 1) {
-      throw new Error('security event did not advance lifecycle generation')
+    if (expectedLifecycleVersion !== undefined) {
+      const lockedVersion = String(
+        (user.rows[0] as { lifecycle_version?: unknown } | undefined)?.lifecycle_version ?? ''
+      )
+      if (!/^[1-9]\d*$/.test(lockedVersion) || lockedVersion !== String(expectedLifecycleVersion)) {
+        throw new Error(
+          'password transition lifecycle generation changed before session revocation'
+        )
+      }
+    } else {
+      const advanced = await transaction.query(
+        `UPDATE users
+            SET lifecycle_version = lifecycle_version + 1,
+                updated_at = NOW()
+          WHERE id = $1
+        RETURNING lifecycle_version`,
+        [userId]
+      )
+      const lifecycleVersion = Number(
+        (advanced.rows[0] as { lifecycle_version?: unknown } | undefined)?.lifecycle_version
+      )
+      if (!Number.isSafeInteger(lifecycleVersion) || lifecycleVersion < 1) {
+        throw new Error('security event did not advance lifecycle generation')
+      }
     }
 
     await transaction.query(

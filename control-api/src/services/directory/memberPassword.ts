@@ -17,18 +17,25 @@ async function updateActivePasswordHash(
   db: Pick<DbClient, 'query'>,
   userId: string,
   passwordHash: string
-): Promise<boolean> {
+): Promise<string | number | null> {
   const update = await db.query(
     `UPDATE users
         SET password_hash = $2,
+            lifecycle_version = lifecycle_version + 1,
             password_set_at = NOW(),
             updated_at = NOW()
       WHERE id = $1
         AND lifecycle_state = 'active'
-      RETURNING id`,
+      RETURNING lifecycle_version`,
     [userId, passwordHash]
   )
-  return update.rows.length === 1
+  if (update.rows.length !== 1) return null
+  const lifecycleVersion = (update.rows[0] as { lifecycle_version?: string | number })
+    .lifecycle_version
+  if (lifecycleVersion === undefined) {
+    throw new Error('password setup did not return its lifecycle generation')
+  }
+  return lifecycleVersion
 }
 
 async function loadInvitationPasswordResponse(
@@ -119,10 +126,11 @@ export async function setInvitationPasswordForUser(
       if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
       if (user.id !== trimmedUserId) return { error: 'forbidden' as const }
       const passwordHash = await bcrypt.hash(trimmedPassword, 12)
-      if (!(await updateActivePasswordHash(db, user.id, passwordHash))) {
+      const lifecycleVersion = await updateActivePasswordHash(db, user.id, passwordHash)
+      if (lifecycleVersion === null) {
         return { error: 'user_retired' as const }
       }
-      await revokeAllUserSessions(user.id, 'password_changed', db)
+      await revokeAllUserSessions(user.id, 'password_changed', db, undefined, lifecycleVersion)
 
       if (!invitation.accepted_user_id) {
         await db.query(`UPDATE invitations SET accepted_user_id = $2 WHERE id = $1`, [
@@ -191,10 +199,11 @@ export async function setInvitationPasswordForEmail(
       }
 
       const passwordHash = await bcrypt.hash(trimmedPassword, 12)
-      if (!(await updateActivePasswordHash(db, user.id, passwordHash))) {
+      const lifecycleVersion = await updateActivePasswordHash(db, user.id, passwordHash)
+      if (lifecycleVersion === null) {
         return { error: 'user_retired' as const }
       }
-      await revokeAllUserSessions(user.id, 'password_changed', db)
+      await revokeAllUserSessions(user.id, 'password_changed', db, undefined, lifecycleVersion)
 
       const redeemed = await db.query(
         `UPDATE invitations
@@ -267,12 +276,13 @@ export async function updateUserPassword(
       const update = await db.query(
         `UPDATE users
             SET password_hash = $3,
+                lifecycle_version = lifecycle_version + 1,
                 password_set_at = NOW(),
                 updated_at = NOW()
           WHERE id = $1
             AND password_auth_generation = $2
             AND password_hash = $4
-          RETURNING id`,
+          RETURNING lifecycle_version`,
         [
           normalizedUserId,
           user.password_auth_generation,
@@ -281,7 +291,18 @@ export async function updateUserPassword(
         ]
       )
       if (update.rows.length !== 1) return { error: 'credential_changed' as const }
-      await revokeAllUserSessions(normalizedUserId, 'password_changed', db)
+      const lifecycleVersion = (update.rows[0] as { lifecycle_version?: string | number })
+        .lifecycle_version
+      if (lifecycleVersion === undefined) {
+        throw new Error('password update did not return its lifecycle generation')
+      }
+      await revokeAllUserSessions(
+        normalizedUserId,
+        'password_changed',
+        db,
+        undefined,
+        lifecycleVersion
+      )
       return { updated: true as const }
     },
     { mode: 'standard' }

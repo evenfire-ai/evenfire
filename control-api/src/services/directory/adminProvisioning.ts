@@ -11,6 +11,30 @@ import { type TeamRole, normalizeTeamRoleInput } from './types.js'
 
 const logger = rootLogger.child({ module: 'admin-provisioning' })
 
+async function setProvisionedUserPassword(
+  db: Pick<DbClient, 'query'>,
+  userId: string,
+  passwordHash: string,
+  advanceLifecycle: boolean
+): Promise<string | number> {
+  const update = await db.query(
+    `UPDATE users
+        SET password_hash = $2,
+            lifecycle_version = lifecycle_version + CASE WHEN $3::boolean THEN 1 ELSE 0 END,
+            password_set_at = NOW(),
+            updated_at = NOW()
+      WHERE id = $1
+      RETURNING lifecycle_version`,
+    [userId, passwordHash, advanceLifecycle]
+  )
+  const lifecycleVersion = (update.rows[0] as { lifecycle_version?: string | number } | undefined)
+    ?.lifecycle_version
+  if (lifecycleVersion === undefined) {
+    throw new Error('provisioned password update did not return its lifecycle generation')
+  }
+  return lifecycleVersion
+}
+
 /**
  * Ensure the user administers a team and that the default agent/context grants exist at
  * both team and user level. Idempotent: reuses an existing owned team and uses
@@ -132,13 +156,14 @@ export async function provisionAdminDesktopWorkspace(
     )
 
     if (input.seedPassword !== false) {
-      await db.query(
-        `UPDATE users SET password_hash = $2, password_set_at = NOW(), updated_at = NOW()
-          WHERE id = $1`,
-        [userId, input.passwordHash]
+      const lifecycleVersion = await setProvisionedUserPassword(
+        db,
+        userId,
+        input.passwordHash,
+        existingUser
       )
       if (existingUser) {
-        await revokeAllUserSessions(userId, 'password_changed', db)
+        await revokeAllUserSessions(userId, 'password_changed', db, undefined, lifecycleVersion)
       }
     }
 
@@ -249,16 +274,14 @@ export async function provisionMemberFromAdmin(input: {
     )
 
     if (input.seedPassword) {
-      await db.query(
-        `UPDATE users
-            SET password_hash = $2,
-                password_set_at = NOW(),
-                updated_at = NOW()
-          WHERE id = $1`,
-        [user.id, admin.password_hash]
+      const lifecycleVersion = await setProvisionedUserPassword(
+        db,
+        user.id,
+        admin.password_hash,
+        !created
       )
       if (!created) {
-        await revokeAllUserSessions(user.id, 'password_changed', db)
+        await revokeAllUserSessions(user.id, 'password_changed', db, undefined, lifecycleVersion)
       }
     }
 
