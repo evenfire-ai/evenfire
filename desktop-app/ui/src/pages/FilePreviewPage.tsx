@@ -3,6 +3,7 @@ import { EmptyState } from '@components/Common'
 import { GfsImagePreviewBody } from '@components/GfsImagePreview'
 import { GfsMarkdownPreviewBody } from '@components/GfsMarkdownPreview'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
+import { GfsResourceTitlebarActions } from '@components/GfsResourceTitlebarActions'
 import { GfsVideoPreviewBody } from '@components/GfsVideoPreview'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
@@ -62,6 +63,7 @@ export function FilePreviewPage({
   unavailable = false,
   pushToast,
   onOpenRoute,
+  titlebarLeadingTarget,
 }: FilePreviewPageProps) {
   const ctrl = useGfsBrowserController()
   const [reloadToken, setReloadToken] = useState(0)
@@ -201,6 +203,15 @@ export function FilePreviewPage({
 
   return (
     <section className="page">
+      <GfsResourceTitlebarActions
+        target={titlebarLeadingTarget}
+        onRefresh={
+          !denied && !unavailable && !accessRevoked ? () => void handleRefresh() : undefined
+        }
+        refreshing={refreshing}
+        onCopyLink={() => void handleCopyLink()}
+        onOpenLink={onOpenRoute}
+      />
       <div className="da-gfs-preview-page">
         <div className="da-gfs-preview-content">
           {denied || unavailable || accessRevoked ? (

@@ -61,6 +61,12 @@ function openPreviewActions(fileName: string) {
 
 function clickPreviewAction(fileName: string, actionName: string) {
   const menu = openPreviewActions(fileName)
+  if (actionName === 'Copy link' || actionName === 'Copy file ID') {
+    fireEvent.click(within(menu).getByRole('menuitem', { name: /^Share$/ }))
+    const shareMenu = screen.getByRole('menu', { name: `Share options for ${fileName}` })
+    fireEvent.click(within(shareMenu).getByRole('menuitem', { name: actionName }))
+    return
+  }
   fireEvent.click(within(menu).getByRole('menuitem', { name: actionName }))
 }
 
@@ -103,22 +109,21 @@ describe('FilePreviewPage', () => {
       within(titleRow as HTMLElement).getByRole('button', { name: 'Options for diagram.png' })
     )
     expect(screen.getAllByRole('menuitem').map(item => item.textContent)).toEqual([
-      'Refresh',
-      'Copy link',
-      'Copy file ID',
-      'Open file from ID',
+      'Share',
       'Copy content',
     ])
     expect(screen.queryByRole('dialog')).toBeNull()
     const menu = screen.getByRole('menu', { name: 'Actions for diagram.png' })
-    expect(within(menu).getByRole('menuitem', { name: 'Refresh' })).toBeTruthy()
-    expect(within(menu).getByRole('menuitem', { name: 'Copy link' })).toBeTruthy()
-    expect(within(menu).getByRole('menuitem', { name: 'Copy file ID' })).toBeTruthy()
-    expect(within(menu).getByRole('menuitem', { name: 'Open file from ID' })).toBeTruthy()
+    expect(within(menu).queryByRole('menuitem', { name: 'Refresh' })).toBeNull()
+    expect(within(menu).queryByRole('menuitem', { name: 'Open file from ID' })).toBeNull()
     expect(within(menu).getByRole('menuitem', { name: 'Copy content' })).toBeTruthy()
+    fireEvent.click(within(menu).getByRole('menuitem', { name: /^Share$/ }))
+    const shareMenu = screen.getByRole('menu', { name: 'Share options for diagram.png' })
+    expect(within(shareMenu).getByRole('menuitem', { name: 'Copy link' })).toBeTruthy()
+    expect(within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' })).toBeTruthy()
   })
 
-  it('keeps preview actions beside the filename without populating the navbar slot', async () => {
+  it('keeps file actions beside the filename and restores the navbar controls', async () => {
     hookMock.useGfsBrowserController.mockReturnValue(controller())
     stubDownload(async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }))
     const titlebarLeadingRoot = document.createElement('div')
@@ -131,14 +136,26 @@ describe('FilePreviewPage', () => {
         fileKind="image"
         byteLength={3}
         titlebarLeadingTarget={titlebarLeadingRoot}
+        onOpenRoute={() => undefined}
       />
     )
 
     try {
       expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
-      expect(within(titlebarLeadingRoot).queryByRole('toolbar')).toBeNull()
+      const toolbar = within(titlebarLeadingRoot).getByRole('toolbar', {
+        name: 'EvenDrive actions',
+      })
+      expect(within(toolbar).getByRole('button', { name: 'Refresh' })).toBeTruthy()
+      expect(within(toolbar).getByRole('button', { name: 'Copy link' })).toBeTruthy()
+      expect(within(toolbar).getByRole('button', { name: 'Open link' })).toBeTruthy()
       const menu = openPreviewActions('diagram.png')
-      expect(within(menu).getByRole('menuitem', { name: 'Copy link' })).toBeTruthy()
+      fireEvent.click(within(menu).getByRole('menuitem', { name: /^Share$/ }))
+      expect(
+        within(screen.getByRole('menu', { name: 'Share options for diagram.png' })).getByRole(
+          'menuitem',
+          { name: 'Copy link' }
+        )
+      ).toBeTruthy()
     } finally {
       view.unmount()
       titlebarLeadingRoot.remove()
@@ -183,7 +200,7 @@ describe('FilePreviewPage', () => {
       within(menu)
         .getAllByRole('menuitem')
         .map(item => item.textContent)
-    ).toEqual(['Refresh', 'Copy link', 'Copy file ID', 'Open file from ID'])
+    ).toEqual(['Share'])
   })
 
   it('uses the shareable link, canonical ID, and preview copy semantics from the filename menu', async () => {
@@ -275,30 +292,47 @@ describe('FilePreviewPage', () => {
     })
     hookMock.useGfsBrowserController.mockReturnValue(controller())
 
-    render(<FilePreviewPage gfsUri={uri} fileName="report.md" fileKind="markdown" byteLength={7} />)
+    const titlebarLeadingRoot = document.createElement('div')
+    document.body.appendChild(titlebarLeadingRoot)
+    const view = render(
+      <FilePreviewPage
+        gfsUri={uri}
+        fileName="report.md"
+        fileKind="markdown"
+        byteLength={7}
+        titlebarLeadingTarget={titlebarLeadingRoot}
+      />
+    )
 
     expect(await screen.findByRole('heading', { name: 'Load 1' })).toBeTruthy()
-    clickPreviewAction('report.md', 'Refresh')
+    fireEvent.click(within(titlebarLeadingRoot).getByRole('button', { name: 'Refresh' }))
 
     await waitFor(() => expect(resolve).toHaveBeenCalledWith(uri))
     expect(await screen.findByRole('heading', { name: 'Load 2' })).toBeTruthy()
     expect(downloadPreview).toHaveBeenCalledTimes(2)
     expect(screen.getByRole('heading', { name: 'report.md', level: 2 })).toBeTruthy()
+    view.unmount()
+    titlebarLeadingRoot.remove()
   })
 
   it('omits Refresh while the preview is unavailable', () => {
     hookMock.useGfsBrowserController.mockReturnValue(controller())
-    render(
+    const titlebarLeadingRoot = document.createElement('div')
+    document.body.appendChild(titlebarLeadingRoot)
+    const view = render(
       <FilePreviewPage
         gfsUri="gfs://main/secret"
         fileName="secret.png"
         fileKind="image"
         byteLength={3}
         unavailable
+        titlebarLeadingTarget={titlebarLeadingRoot}
       />
     )
 
-    expect(screen.queryByRole('button', { name: 'Refresh' })).toBeNull()
+    expect(within(titlebarLeadingRoot).queryByRole('button', { name: 'Refresh' })).toBeNull()
+    view.unmount()
+    titlebarLeadingRoot.remove()
   })
 
   // R-4 (spec 18 §3.B.5): the preview tab must NOT close when access is revoked;

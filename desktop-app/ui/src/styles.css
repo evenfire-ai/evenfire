@@ -448,6 +448,14 @@ h3 {
   display: inline-flex;
 }
 
+.window-titlebar__leading .titlebar-leading-action--disabled {
+  cursor: not-allowed;
+}
+
+.window-titlebar__leading .titlebar-leading-action--disabled .titlebar-leading-action__btn {
+  pointer-events: none;
+}
+
 /* Ghost affordance matching the title-bar bell / chat-drawer IconButtons:
    no border or fill at rest, accent border + neutral fill on hover or when
    the toggle is pressed. */

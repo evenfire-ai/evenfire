@@ -21,6 +21,7 @@ import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsReadFailureCard } from '@components/GfsReadFailureCard'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
+import { GfsResourceTitlebarActions } from '@components/GfsResourceTitlebarActions'
 import {
   IconAttachFile,
   IconCheck,
@@ -243,6 +244,7 @@ const PREFETCH_FOLDER_LIMIT = 10
 
 export function FilesPage({
   pushToast,
+  titlebarLeadingTarget,
   pendingGfsUri,
   onPendingGfsUriHandled,
   pendingGfsDeepLink,
@@ -280,7 +282,6 @@ export function FilesPage({
     null
   )
   const [refreshingCurrent, setRefreshingCurrent] = useState(false)
-  const [refreshingResourceIds, setRefreshingResourceIds] = useState<Set<string>>(() => new Set())
   const [manageOpen, setManageOpen] = useState(false)
   const [shareDetailsOpen, setShareDetailsOpen] = useState(false)
   const [updatingAccessRole, setUpdatingAccessRole] = useState(false)
@@ -906,37 +907,6 @@ export function FilesPage({
       )
     } finally {
       setRefreshingCurrent(false)
-    }
-  }
-
-  const handleRefreshFolderResource = async (resource: GfsDriveResource) => {
-    if (refreshingResourceIds.has(resource.resourceId)) return
-    setRefreshingResourceIds(current => new Set(current).add(resource.resourceId))
-    try {
-      await queryClient.fetchInfiniteQuery({
-        queryKey: desktopQueryKeys.gfsChildren(
-          ctrl.sessionScope,
-          resource.resourceId,
-          GFS_DRIVE_MAIN
-        ),
-        queryFn: ({ pageParam }) =>
-          window.clerum.gfs.listChildren(resource.resourceId, GFS_DRIVE_MAIN, pageParam),
-        initialPageParam: undefined as string | undefined,
-        staleTime: 0,
-      })
-      pushToast?.('EvenDrive refreshed', 'success')
-    } catch (refreshError) {
-      if (failClosedOnAuthorizationError(refreshError)) return
-      pushToast?.(
-        refreshError instanceof Error ? refreshError.message : 'Could not refresh EvenDrive',
-        'error'
-      )
-    } finally {
-      setRefreshingResourceIds(current => {
-        const next = new Set(current)
-        next.delete(resource.resourceId)
-        return next
-      })
     }
   }
 
@@ -1708,10 +1678,6 @@ export function FilesPage({
         kind: resource.kind,
         uri: resource.gfsUri,
         handlers: {
-          refresh:
-            isDirectory && resource.readable !== false
-              ? () => void handleRefreshFolderResource(resource)
-              : undefined,
           'copy-link': () => void handleCopyLink(resource.gfsUri),
           'copy-route': () => void handleCopyRoute(resource.gfsUri, resource.kind),
           'open-route': () => setOpenLinkOpen(true),
@@ -1741,7 +1707,6 @@ export function FilesPage({
         canPreview,
         canDownload,
         mutating: ctrl.mutating,
-        refreshing: refreshingResourceIds.has(resource.resourceId),
       })
     )
   }
@@ -1753,6 +1718,13 @@ export function FilesPage({
 
   return (
     <section className="page da-gfs-page">
+      <GfsResourceTitlebarActions
+        target={titlebarLeadingTarget}
+        onRefresh={current ? () => void handleRefreshCurrent() : () => void ctrl.retryDiscovery()}
+        refreshing={current ? refreshingCurrent : visibleLoading}
+        onCopyLink={current ? () => void handleCopyLink(current.gfsUri) : undefined}
+        onOpenLink={() => setOpenLinkOpen(true)}
+      />
       <div className="page-header">
         <h2>Files</h2>
         <p className="muted">Browse and manage everything shared with you in one place.</p>
@@ -1814,16 +1786,6 @@ export function FilesPage({
                   </span>
                 ))}
               </nav>
-              {!current ? (
-                <IconButton
-                  label="Open from ID"
-                  onClick={() => setOpenLinkOpen(true)}
-                  size="sm"
-                  variant="ghost"
-                >
-                  <IconOpenRoute />
-                </IconButton>
-              ) : null}
               {current && !currentIsFile && currentIsBeingRenamed && !currentIsInBreadcrumbs ? (
                 <GfsInlineRename
                   className="da-gfs-drive__inline-rename"
@@ -2204,13 +2166,10 @@ export function FilesPage({
               </span>
               <span className="da-gfs-link-dialog__heading">
                 <span className="da-gfs-eyebrow">Direct access</span>
-                <h3 id="gfs-link-dialog-title">Open from ID</h3>
-                <span className="muted">
-                  Paste a canonical file or folder ID to open the shared resource.
-                </span>
+                <h3 id="gfs-link-dialog-title">Open from link</h3>
               </span>
               <IconButton
-                label="Close EvenDrive ID dialog"
+                label="Close EvenDrive link dialog"
                 onClick={() => setOpenLinkOpen(false)}
                 size="sm"
                 variant="ghost"

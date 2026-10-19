@@ -132,7 +132,7 @@ async function openManageDialog(resourceName: string) {
     fireEvent.click(screen.getByRole('button', { name: `Options for ${resourceName}` }))
   })
   await act(async () => {
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /^Share$/ }))
   })
   const shareMenu = screen.queryByRole('menu', { name: `Share options for ${resourceName}` })
   if (shareMenu) {
@@ -146,6 +146,16 @@ async function chooseResourceAction(resourceName: string, actionName: string) {
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name: `Options for ${resourceName}` }))
   })
+  if (['Copy link', 'Copy file ID', 'Copy folder ID'].includes(actionName)) {
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: /^Share$/ }))
+    })
+    const shareMenu = screen.getByRole('menu', { name: `Share options for ${resourceName}` })
+    await act(async () => {
+      fireEvent.click(within(shareMenu).getByRole('menuitem', { name: actionName }))
+    })
+    return
+  }
   await act(async () => {
     fireEvent.click(
       screen.getByRole('menuitem', { name: actionName === 'Move to…' ? 'Move to' : actionName })
@@ -808,7 +818,7 @@ describe('FilesPage', () => {
     expect(deleteResource).toHaveBeenCalledWith('folder-1', 7)
   })
 
-  it('keeps open-folder actions in its breadcrumb menu', async () => {
+  it('keeps resource sharing in the breadcrumb menu and link controls in the navbar', async () => {
     const gfsUri = 'gfs://main/0123456789abcdef0123456789abcdef'
     const folderName = 'Résumé # ? % folder'
     const current = await resolveResource(
@@ -836,21 +846,23 @@ describe('FilesPage', () => {
       createFileFromPath,
     })
 
-    renderFilesPage()
+    const titlebarLeadingRoot = document.createElement('div')
+    document.body.appendChild(titlebarLeadingRoot)
+    const view = renderFilesPage(undefined, undefined, undefined, undefined, titlebarLeadingRoot)
 
-    expect(screen.queryByRole('toolbar', { name: 'EvenDrive actions' })).toBeNull()
+    const toolbar = within(titlebarLeadingRoot).getByRole('toolbar', { name: 'EvenDrive actions' })
+    fireEvent.click(within(toolbar).getByRole('button', { name: 'Refresh' }))
+    await waitFor(() => expect(refreshCurrentLocation).toHaveBeenCalledOnce())
     expect(screen.getByRole('button', { name: `Options for ${folderName}` })).toBeTruthy()
 
-    await chooseResourceAction(folderName, 'Refresh')
-    await waitFor(() => expect(refreshCurrentLocation).toHaveBeenCalledOnce())
     await chooseResourceAction(folderName, 'Copy link')
     await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(gfsUri))
     await chooseResourceAction(folderName, 'Copy folder ID')
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(gfsUri))
 
-    await chooseResourceAction(folderName, 'Open folder from ID')
-    expect(screen.getByRole('dialog', { name: 'Open from ID' })).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Close EvenDrive ID dialog' }))
+    fireEvent.click(within(toolbar).getByRole('button', { name: 'Open link' }))
+    expect(await screen.findByRole('dialog', { name: 'Open from link' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Close EvenDrive link dialog' }))
 
     await chooseResourceAction(folderName, 'New folder')
     const newFolderDialog = screen.getByRole('dialog', { name: 'New folder' })
@@ -869,9 +881,11 @@ describe('FilesPage', () => {
     })
 
     expect(createFileFromPath).toHaveBeenCalledWith(current.resourceId, 'notes.md', '/tmp/notes.md')
+    view.unmount()
+    titlebarLeadingRoot.remove()
   })
 
-  it('keeps folder actions in the breadcrumb menu without populating the navbar slot', () => {
+  it('keeps folder actions in the breadcrumb menu and restores shared navbar controls', () => {
     const titlebarLeadingRoot = document.createElement('div')
     document.body.appendChild(titlebarLeadingRoot)
     hookMock.useGfsBrowserController.mockReturnValue({
@@ -888,10 +902,17 @@ describe('FilesPage', () => {
 
     const view = renderFilesPage(undefined, undefined, undefined, undefined, titlebarLeadingRoot)
     try {
-      expect(within(titlebarLeadingRoot).queryByRole('toolbar')).toBeNull()
+      const toolbar = within(titlebarLeadingRoot).getByRole('toolbar', {
+        name: 'EvenDrive actions',
+      })
+      expect(within(toolbar).getByRole('button', { name: 'Refresh' })).toBeTruthy()
+      expect(within(toolbar).getByRole('button', { name: 'Copy link' })).toBeTruthy()
+      expect(within(toolbar).getByRole('button', { name: 'Open link' })).toBeTruthy()
       const menuTrigger = screen.getByRole('button', { name: 'Options for Product' })
       fireEvent.click(menuTrigger)
-      expect(screen.getByRole('menuitem', { name: 'Refresh' })).toBeTruthy()
+      const menu = screen.getByRole('menu', { name: 'Actions for Product' })
+      expect(within(menu).queryByRole('menuitem', { name: 'Refresh' })).toBeNull()
+      expect(within(menu).queryByRole('menuitem', { name: 'Open folder from ID' })).toBeNull()
     } finally {
       view.unmount()
       titlebarLeadingRoot.remove()
@@ -1531,7 +1552,13 @@ describe('FilesPage', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
     })
-    expect(screen.queryByRole('menuitem', { name: 'Share' })).toBeNull()
+    fireEvent.click(screen.getByRole('menuitem', { name: /^Share$/ }))
+    const readOnlyShareMenu = screen.getByRole('menu', {
+      name: 'Share options for notes.txt',
+    })
+    expect(within(readOnlyShareMenu).queryByRole('menuitem', { name: 'Share' })).toBeNull()
+    expect(within(readOnlyShareMenu).getByRole('menuitem', { name: 'Copy link' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
 
     // Same row with manage_acl held: the entry appears and opens the modal.
     hookMock.useGfsBrowserController.mockReturnValue({
@@ -1554,7 +1581,14 @@ describe('FilesPage', () => {
       )
     })
     await act(async () => {
-      fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
+      fireEvent.click(screen.getByRole('menuitem', { name: /^Share$/ }))
+      fireEvent.click(
+        within(screen.getByRole('menu', { name: 'Share options for notes.txt' })).getByRole(
+          'menuitem',
+          { name: 'Share' }
+        )
+      )
     })
     expect(screen.queryByRole('menu', { name: 'Share options for notes.txt' })).toBeNull()
     // The manage modal opens (titled for the current selection — the mocked
@@ -1623,7 +1657,6 @@ describe('FilesPage', () => {
     await waitFor(() => expect(restoreCrumbs).toHaveBeenCalledWith([]))
     expect(screen.getByRole('button', { name: 'report.txt' })).toBeTruthy()
     expect(screen.queryByText(/Preview this file again/)).toBeNull()
-    expect(screen.getByRole('button', { name: 'Open from ID' })).toBeTruthy()
   })
 
   it('renames the current file inline from its title menu', async () => {
@@ -4113,25 +4146,37 @@ describe('FilesPage', () => {
     expect(download).not.toHaveBeenCalled()
   })
 
-  it('opens a GFS URI from the modal and closes after a successful resolve', async () => {
+  it('opens a Profile file link from the navbar dialog and closes after a successful resolve', async () => {
     const openUri = vi.fn(async () => true)
     hookMock.useGfsBrowserController.mockReturnValue({ ...baseController(), openUri })
-    renderFilesPage()
+    const titlebarLeadingRoot = document.createElement('div')
+    document.body.appendChild(titlebarLeadingRoot)
+    const view = renderFilesPage(undefined, undefined, undefined, undefined, titlebarLeadingRoot)
+    const uri = 'gfs://main/11111111111111111111111111111111'
+    const toolbar = within(titlebarLeadingRoot).getByRole('toolbar', { name: 'EvenDrive actions' })
+    const copyButton = within(toolbar).getByRole('button', { name: 'Copy link' })
+    expect((copyButton as HTMLButtonElement).disabled).toBe(true)
+    expect(copyButton.parentElement?.classList.contains('titlebar-leading-action--disabled')).toBe(
+      true
+    )
 
-    fireEvent.click(screen.getByRole('button', { name: 'Open from ID' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Open from ID' })
-    fireEvent.change(within(dialog).getByLabelText('File or folder ID'), {
-      target: { value: 'gfs://main/resource-1' },
+    fireEvent.click(within(toolbar).getByRole('button', { name: 'Open link' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Open from link' })
+    expect(within(dialog).queryByText(/Paste a canonical/)).toBeNull()
+    fireEvent.change(within(dialog).getByLabelText('URL'), {
+      target: { value: buildGfsResourceWebLink('https://profile.example', uri) },
     })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Open' }))
 
     await waitFor(() =>
       expect(openUri).toHaveBeenCalledWith(
-        'gfs://main/resource-1',
+        uri,
         expect.objectContaining({ shouldContinue: expect.any(Function) })
       )
     )
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open from ID' })).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open from link' })).toBeNull())
+    view.unmount()
+    titlebarLeadingRoot.remove()
   })
 
   it('opens a preview tab for a markdown file (no mimeType in the descriptor)', () => {
@@ -4226,11 +4271,19 @@ describe('FilesPage', () => {
     }
     hookMock.useGfsBrowserController.mockImplementation(useResolvedFileController)
 
-    renderFilesPage(undefined, onOpenPreview)
-    fireEvent.click(screen.getByRole('button', { name: 'Open from ID' }))
-    const linkDialog = await screen.findByRole('dialog', { name: 'Open from ID' })
-    fireEvent.change(within(linkDialog).getByLabelText('File or folder ID'), {
-      target: { value: 'gfs://main/svg-1' },
+    const titlebarLeadingRoot = document.createElement('div')
+    document.body.appendChild(titlebarLeadingRoot)
+    const view = renderFilesPage(
+      undefined,
+      onOpenPreview,
+      undefined,
+      undefined,
+      titlebarLeadingRoot
+    )
+    fireEvent.click(within(titlebarLeadingRoot).getByRole('button', { name: 'Open link' }))
+    const linkDialog = await screen.findByRole('dialog', { name: 'Open from link' })
+    fireEvent.change(within(linkDialog).getByLabelText('URL'), {
+      target: { value: 'gfs://main/22222222222222222222222222222222' },
     })
     fireEvent.click(within(linkDialog).getByRole('button', { name: 'Open' }))
 
@@ -4244,8 +4297,10 @@ describe('FilesPage', () => {
         version: 1,
       })
     )
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open from ID' })).toBeNull())
-    expect(screen.getByRole('button', { name: 'Open from ID' })).toBeTruthy()
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open from link' })).toBeNull())
+    expect(within(titlebarLeadingRoot).getByRole('button', { name: 'Open link' })).toBeTruthy()
+    view.unmount()
+    titlebarLeadingRoot.remove()
   })
 
   it('navigates through breadcrumbs and resets to Shared with me', async () => {
@@ -4296,11 +4351,7 @@ describe('FilesPage', () => {
       canCreateShare: false,
     }
     const parentViewRowOptions = [
-      'Refresh',
       'Share',
-      'Copy link',
-      'Copy folder ID',
-      'Open folder from ID',
       'Open folder',
       'Rename',
       'Move to',
@@ -4310,11 +4361,7 @@ describe('FilesPage', () => {
     ]
     // The active folder menu retains the shared action descriptors and canonical order.
     const activeFolderOptions = [
-      'Refresh',
       'Share',
-      'Copy link',
-      'Copy folder ID',
-      'Open folder from ID',
       'Rename',
       'Move to',
       'New folder',
@@ -4394,7 +4441,9 @@ describe('FilesPage', () => {
         },
       ],
     })
-    renderFilesPage()
+    const titlebarLeadingRoot = document.createElement('div')
+    document.body.appendChild(titlebarLeadingRoot)
+    renderFilesPage(undefined, undefined, undefined, undefined, titlebarLeadingRoot)
 
     let breadcrumbs = screen.getByRole('navigation', { name: 'File location' })
     let titleRow = document.querySelector<HTMLElement>('.da-gfs-drive__title-row')
@@ -4433,7 +4482,13 @@ describe('FilesPage', () => {
       ],
       affordances: fullBits,
     })
-    renderFilesPage()
+    const phaseThreeView = renderFilesPage(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      titlebarLeadingRoot
+    )
 
     breadcrumbs = screen.getByRole('navigation', { name: 'File location' })
     titleRow = document.querySelector<HTMLElement>('.da-gfs-drive__title-row')
@@ -4451,13 +4506,15 @@ describe('FilesPage', () => {
       activeFolderOptions
     )
 
-    // The active folder menu retains the established Open from ID dialog action.
-    fireEvent.click(
-      within(screen.getByRole('menu', { name: 'Actions for Nested' })).getByRole('menuitem', {
+    expect(
+      within(screen.getByRole('menu', { name: 'Actions for Nested' })).queryByRole('menuitem', {
         name: 'Open folder from ID',
       })
-    )
-    expect(screen.getByRole('dialog', { name: 'Open from ID' })).toBeTruthy()
+    ).toBeNull()
+    fireEvent.click(within(titlebarLeadingRoot).getByRole('button', { name: 'Open link' }))
+    expect(screen.getByRole('dialog', { name: 'Open from link' })).toBeTruthy()
+    phaseThreeView.unmount()
+    titlebarLeadingRoot.remove()
   })
 
   it('opens nested folders and exposes open and copy actions in the resource menu', async () => {
@@ -4502,22 +4559,27 @@ describe('FilesPage', () => {
     const firstItem = screen.getAllByRole('menuitem')[0]!
     await waitFor(() => expect(document.activeElement).toBe(firstItem))
     fireEvent.keyDown(firstItem, { key: 'ArrowDown' })
-    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Share' }))
-    fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' })
-    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Copy link' }))
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Open folder' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Open folder' }))
     expect(openChild).toHaveBeenCalledTimes(2)
 
     fireEvent.click(screen.getByRole('button', { name: 'Options for Nested' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy link' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /^Share$/ }))
+    const shareMenu = screen.getByRole('menu', { name: 'Share options for Nested' })
+    fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Copy link' }))
     await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(nestedFolder.gfsUri))
 
     fireEvent.click(screen.getByRole('button', { name: 'Options for Nested' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /^Share$/ }))
+    fireEvent.click(
+      within(screen.getByRole('menu', { name: 'Share options for Nested' })).getByRole('menuitem', {
+        name: 'Share',
+      })
+    )
     expect(openResource).toHaveBeenCalledWith(nestedFolder)
   })
 
-  it('targets folder row refresh, create, and upload actions at that exact folder', async () => {
+  it('keeps row folder menus limited to actions available on that folder', async () => {
     const parent = await resolveResource(
       resolvedDirectory('22222222222222222222222222222222', 'Product')
     )
@@ -4563,12 +4625,8 @@ describe('FilesPage', () => {
     await waitFor(() =>
       expect(listChildren).toHaveBeenCalledWith(targetFolder.resourceId, 'main', undefined)
     )
-    listChildren.mockClear()
     fireEvent.click(screen.getByRole('button', { name: 'Options for Nested' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Refresh' }))
-    await waitFor(() =>
-      expect(listChildren).toHaveBeenCalledWith(targetFolder.resourceId, 'main', undefined)
-    )
+    expect(screen.queryByRole('menuitem', { name: 'Refresh' })).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'Options for Nested' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'New folder' }))

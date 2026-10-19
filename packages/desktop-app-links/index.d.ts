@@ -48,3 +48,5 @@ export function normalizeGfsResourceUri(uri: string): string | null
 export function buildGfsResourceDeepLink(uri: string): string
 export function buildGfsResourceWebLink(profileUiBaseUrl: string, uri: string): string
 export function parseGfsResourceDeepLink(rawUrl: string): GfsResourceDeepLinkTarget | null
+/** Accepts canonical GFS URIs, evenfire://files links, and Profile /open/files URLs. */
+export function parseGfsResourceLink(rawLink: string): GfsResourceDeepLinkTarget | null
