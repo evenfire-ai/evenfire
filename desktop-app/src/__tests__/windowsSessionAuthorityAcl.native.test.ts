@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { execFileSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -13,7 +13,6 @@ if (process.env.EVENFIRE_REQUIRE_WINDOWS_ACL_TEST === '1' && process.platform !=
 }
 
 const windowsDescribe = process.platform === 'win32' ? describe : describe.skip
-const encoded = (script: string) => Buffer.from(script, 'utf16le').toString('base64')
 const powershell = path.join(
   process.env.SystemRoot ?? 'C:\\Windows',
   'System32',
@@ -21,6 +20,8 @@ const powershell = path.join(
   'v1.0',
   'powershell.exe'
 )
+const powershellLauncher =
+  '$sourceText = [Console]::In.ReadToEnd(); & ([scriptblock]::Create($sourceText))'
 const ACL_API_HELPERS = String.raw`
 function Get-TestAcl([string]$target) {
   if ([IO.Directory]::Exists($target)) { return [IO.Directory]::GetAccessControl($target) }
@@ -39,26 +40,64 @@ let temporaryRoot = ''
 let userDataPath = ''
 let authorityPath = ''
 
-function runPowerShell(script: string, variables: Record<string, string> = {}): void {
-  execFileSync(
+function powershellFailureCategory(stderr: string): string {
+  if (stderr.includes('fixture-inherit-only-ace-not-persisted'))
+    return 'fixture-ace-readback-mismatch'
+  if (stderr.includes('InvalidCastException')) return 'invalid-cast'
+  if (/UnauthorizedAccessException|Access is denied/i.test(stderr)) return 'access-denied'
+  if (stderr.includes('ArgumentException')) return 'argument-rejected'
+  if (stderr.includes('MethodInvocationException')) return 'method-invocation-failed'
+  if (/ParserError|parse error/i.test(stderr)) return 'script-parse-failed'
+  if (/Cannot find an overload/i.test(stderr)) return 'overload-resolution-failed'
+  return 'unclassified-powershell-failure'
+}
+
+function powershellProcessErrorCode(error: Error | undefined): string | undefined {
+  if (!error || !('code' in error) || typeof error.code !== 'string') return undefined
+  const allowed = new Set(['E2BIG', 'EACCES', 'EINVAL', 'ENOENT', 'EPERM', 'ETIMEDOUT'])
+  return allowed.has(error.code) ? error.code : 'OTHER'
+}
+
+function runPowerShell(
+  operation:
+    | 'add-everyone-modify'
+    | 'add-trusted-installer-modify'
+    | 'add-authenticated-users-create-directory'
+    | 'add-current-user-inherit-only-ace',
+  script: string,
+  variables: Record<string, string> = {}
+): void {
+  const result = spawnSync(
     powershell,
-    [
-      '-NoLogo',
-      '-NoProfile',
-      '-NonInteractive',
-      '-EncodedCommand',
-      encoded(`${ACL_API_HELPERS}\n${script}`),
-    ],
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', powershellLauncher],
     {
       env: { ...process.env, ...variables },
-      stdio: 'pipe',
+      encoding: 'utf8',
+      input: `${ACL_API_HELPERS}\n${script}`,
+      maxBuffer: 1024 * 1024,
+      timeout: 15_000,
       windowsHide: true,
     }
   )
+  if (result.error || result.status !== 0 || result.signal) {
+    throw new Error(
+      `Native Windows ACL fixture failed: ${JSON.stringify({
+        operation,
+        processStarted: typeof result.pid === 'number' && result.pid > 0,
+        processErrorCode: powershellProcessErrorCode(result.error),
+        exitStatus: result.status,
+        processSignaled: Boolean(result.signal),
+        stdoutPresent: Boolean(result.stdout),
+        stderrPresent: Boolean(result.stderr),
+        powershellFailureCategory: powershellFailureCategory(result.stderr ?? ''),
+      })}`
+    )
+  }
 }
 
 function addEveryoneModify(target: string): void {
   runPowerShell(
+    'add-everyone-modify',
     String.raw`
 $ErrorActionPreference = 'Stop'
 $target = [Environment]::GetEnvironmentVariable('EVENFIRE_ACL_TEST_TARGET')
@@ -78,6 +117,7 @@ Set-TestAcl $target $acl
 
 function addTrustedInstallerModify(target: string): void {
   runPowerShell(
+    'add-trusted-installer-modify',
     String.raw`
 $ErrorActionPreference = 'Stop'
 $target = [Environment]::GetEnvironmentVariable('EVENFIRE_ACL_TEST_TARGET')
@@ -99,6 +139,7 @@ Set-TestAcl $target $acl
 
 function addAuthenticatedUsersCreateDirectory(target: string): void {
   runPowerShell(
+    'add-authenticated-users-create-directory',
     String.raw`
 $ErrorActionPreference = 'Stop'
 $target = [Environment]::GetEnvironmentVariable('EVENFIRE_ACL_TEST_TARGET')
@@ -118,6 +159,7 @@ Set-TestAcl $target $acl
 
 function addCurrentUserInheritOnlyFullControl(target: string): void {
   runPowerShell(
+    'add-current-user-inherit-only-ace',
     String.raw`
 $ErrorActionPreference = 'Stop'
 $target = [Environment]::GetEnvironmentVariable('EVENFIRE_ACL_TEST_TARGET')
