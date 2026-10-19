@@ -402,9 +402,9 @@ computed before anything is deleted: when no plan fits, nothing is deleted and
 the admission is refused. Eviction candidates are not hashed.
 
 Shell writes do not trigger eviction. Files a command writes elsewhere in a
-workspace share the volume with the cache but are not charged to the budget. On
-stateless Hosts `state.db` shares it too: the Host's `state/` directory is a
-subPath of the same PVC. The store therefore keeps a free-space floor of
+workspace share the volume with the cache but are not charged to the budget.
+`state.db` and its journals share it too: every Host keeps them at the root of
+the same workspace PVC (`docs/architecture/host-storage-layout.md`). The store therefore keeps a free-space floor of
 `max(15% of the volume, 16 MiB)`. When the store initializes, after the startup
 sweep, and on every 5-minute cycle, a volume below the floor is restored by
 evicting unpinned copies (pinned ones already expired included) in the

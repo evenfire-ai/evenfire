@@ -13,15 +13,16 @@ import {
   SHELL_TIMEOUT_CLEANUP_MS,
 } from './shellTimeouts'
 
-// D3 (stateless-agents) §1.2 — lexical defense-in-depth: reject commands that
-// reference the session state database (state.db + WAL laterals) or the
-// reserved `.clerum-state/` runtime directory BEFORE spawning. Word-boundary
-// on the left so "mystate.db" doesn't trip; the right side is anchored by the
-// literal suffixes. Case-sensitive, matching the exact on-disk names (same
-// stance as the identity-file guard). This is a loud tool-level gate, not a
-// sandbox: POSIX permissions / a read-only mount remain the OS backstop.
-const STATE_DB_COMMAND_PATTERN =
-  /(^|[^A-Za-z0-9_.-])state\.db(-wal|-shm)?([^A-Za-z0-9_]|$)|\.clerum-state(\/|[^A-Za-z0-9_.-]|$)/
+// Reject commands that name a conversation-store file or the reserved
+// `.clerum-state/` runtime directory before spawning. Every name starting
+// with `state.db` is store data: the database, its journals and the
+// `state.db*.pre-<ts>.bak` copies an older layout left at the workspace root.
+// The left boundary keeps "mystate.db" usable. Case-sensitive, matching the
+// on-disk names.
+// This is a lexical name check only, not a security boundary: the shell runs
+// with the database's UID, so a glob, a variable or a symlink reaches the same
+// files. The workspace API checks resolved paths; the shell does not.
+const STATE_DB_COMMAND_PATTERN = /(^|[^A-Za-z0-9_.-])state\.db|\.clerum-state(\/|[^A-Za-z0-9_.-]|$)/
 
 // Node/libuv error codes (E2BIG, ENOMEM, ERR_INVALID_ARG_VALUE) are fixed
 // identifiers; anything else is not echoed to the model.
@@ -214,7 +215,7 @@ export class ShellTool implements Tool {
       return {
         content:
           'Command rejected: it references the session state database ' +
-          '(state.db / state.db-wal / state.db-shm / .clerum-state), which is ' +
+          '(state.db* / .clerum-state), which is ' +
           'platform-managed state the agent cannot access.',
         duration_ms: Date.now() - startTime,
         is_error: true,
