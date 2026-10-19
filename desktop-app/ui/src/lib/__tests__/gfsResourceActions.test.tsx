@@ -24,7 +24,7 @@ const allHandlers = () => ({
 const resourceUri = 'gfs://main/0123456789abcdef0123456789abcdef'
 
 describe('GFS resource action model', () => {
-  it('keeps the canonical folder and file menu order with unique icons', () => {
+  it('keeps the canonical folder and file menu order with valid historical icons', () => {
     const folderActions = getGfsMenuActions(
       buildGfsResourceActions({
         kind: 'directory',
@@ -56,11 +56,9 @@ describe('GFS resource action model', () => {
     )
 
     expect(folderActions.map(action => action.id)).toEqual([
-      'refresh',
       'share',
       'copy-link',
       'copy-route',
-      'open-route',
       'open-folder',
       'rename',
       'move',
@@ -69,11 +67,9 @@ describe('GFS resource action model', () => {
       'delete',
     ])
     expect(fileActions.map(action => action.id)).toEqual([
-      'refresh',
       'share',
       'copy-link',
       'copy-route',
-      'open-route',
       'rename',
       'move',
       'copy-content',
@@ -83,12 +79,17 @@ describe('GFS resource action model', () => {
       'delete',
     ])
     for (const actions of [folderActions, fileActions]) {
-      const iconTypes = actions.map(action => {
+      for (const action of actions) {
         expect(isValidElement(action.icon)).toBe(true)
-        return isValidElement(action.icon) ? action.icon.type : null
-      })
-      expect(new Set(iconTypes).size).toBe(actions.length)
+      }
       expect(actions.every(action => action.targetUri === resourceUri)).toBe(true)
+    }
+    const moveIcon = folderActions.find(action => action.id === 'move')?.icon
+    const openFolderIcon = folderActions.find(action => action.id === 'open-folder')?.icon
+    expect(isValidElement(moveIcon)).toBe(true)
+    expect(isValidElement(openFolderIcon)).toBe(true)
+    if (isValidElement(moveIcon) && isValidElement(openFolderIcon)) {
+      expect(moveIcon.type).toBe(openFolderIcon.type)
     }
   })
 
@@ -123,10 +124,8 @@ describe('GFS resource action model', () => {
     )
 
     expect(actions.map(action => action.id)).toEqual([
-      'refresh',
       'copy-link',
       'copy-route',
-      'open-route',
       'move',
       'copy-content',
     ])

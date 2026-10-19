@@ -10,7 +10,6 @@ import {
   IconEdit,
   IconEye,
   IconMoreVertical,
-  IconOpenRoute,
   IconPlus,
   IconShare,
   IconTrash,
@@ -70,7 +69,6 @@ export function GfsResourceMenu({
   onCreateFolder,
   onDelete,
   onOpen,
-  onOpenGfsLink,
   onOpenChange,
   onPreview,
   onDownload,
@@ -289,18 +287,21 @@ export function GfsResourceMenu({
     action()
   }
 
+  const fallbackShareChildren = [
+    menuAction('share-access', 'Share', <IconShare />, onManage),
+    menuAction('copy-link', 'Copy link', <IconCopy />, onCopyLink),
+  ].filter(isMenuAction)
+  const fallbackShareGroup = fallbackShareChildren.length
+    ? [
+        menuAction('share', 'Share', <IconShare />, () => setShareOpen(true), {
+          submenu: true,
+        }),
+      ].filter(isMenuAction)
+    : []
   const fallbackActionGroups = [
     [
-      menuAction(
-        'share',
-        'Share',
-        <IconShare />,
-        onManage ? () => setShareOpen(value => !value) : undefined,
-        { submenu: true }
-      ),
-      onManage ? null : menuAction('copy-link', 'Copy link', <IconCopy />, onCopyLink),
+      ...fallbackShareGroup,
       menuAction('open-folder', 'Open folder', <IconContexts />, onOpen),
-      menuAction('open-route', 'Open from ID', <IconOpenRoute />, onOpenGfsLink),
       menuAction('preview', 'Preview', <IconEye />, onPreview),
     ].filter(isMenuAction),
     [
@@ -321,9 +322,8 @@ export function GfsResourceMenu({
       isMenuAction
     ),
   ].filter(group => group.length > 0)
-  const shareAction = actions?.find(action => action.id === 'share')
-  const copyLinkAction = actions?.find(action => action.id === 'copy-link')
-  const sharedActions: GfsResourceMenuAction[] | undefined = actions?.map(action => ({
+  const menuActions = actions?.filter(action => action.menu)
+  const sharedActions: GfsResourceMenuAction[] | undefined = menuActions?.map(action => ({
     color: action.id === 'delete' ? 'danger' : undefined,
     disabled: action.disabled,
     icon: action.icon,
@@ -337,15 +337,35 @@ export function GfsResourceMenu({
             })
         : () => action.run(),
   }))
-  const visibleSharedActions = sharedActions?.filter(action => action.key !== 'delete')
-  const actionGroups = actions
+  const shareMenuChildren =
+    actions !== undefined
+      ? (sharedActions ?? [])
+          .filter(action => ['share', 'copy-link', 'copy-route'].includes(action.key))
+          .map(action =>
+            action.key === 'share' ? { ...action, key: 'share-access', label: 'Share' } : action
+          )
+      : fallbackShareChildren
+  const hasShareSubmenu = shareMenuChildren.length > 0
+  const shareGroup = hasShareSubmenu
     ? [
-        ...(visibleSharedActions?.length ? [visibleSharedActions] : []),
-        ...(sharedActions?.some(action => action.key === 'delete')
-          ? [sharedActions.filter(action => action.key === 'delete')]
-          : []),
-      ].filter(group => group.length > 0)
-    : fallbackActionGroups
+        menuAction('share', 'Share', <IconShare />, () => setShareOpen(true), {
+          submenu: true,
+        }),
+      ].filter(isMenuAction)
+    : []
+  const visibleSharedActions = sharedActions?.filter(
+    action => !['share', 'copy-link', 'copy-route', 'delete'].includes(action.key)
+  )
+  const actionGroups =
+    actions !== undefined
+      ? [
+          ...(shareGroup.length ? [shareGroup] : []),
+          ...(visibleSharedActions?.length ? [visibleSharedActions] : []),
+          ...(sharedActions?.some(action => action.key === 'delete')
+            ? [sharedActions.filter(action => action.key === 'delete')]
+            : []),
+        ].filter(group => group.length > 0)
+      : fallbackActionGroups
 
   return (
     <span
@@ -420,7 +440,7 @@ export function GfsResourceMenu({
                   </Fragment>
                 ))}
               </div>
-              {shareOpen && (shareAction || onManage) ? (
+              {shareOpen && hasShareSubmenu ? (
                 <div
                   aria-label={`Share options for ${resourceName}`}
                   className="da-gfs-resource-menu__submenu"
@@ -433,45 +453,26 @@ export function GfsResourceMenu({
                   }
                   onKeyDown={handleMenuKeyDown}
                 >
-                  <MenuItem
-                    data-gfs-action="share-access"
-                    disabled={shareAction?.disabled}
-                    leadingIcon={<IconShare />}
-                    role="menuitem"
-                    onClick={() => {
-                      if (shareAction) runAction(shareAction.run)
-                      else if (onManage) runAction(onManage)
-                    }}
-                  >
-                    Share
-                  </MenuItem>
-                  {copyLinkAction ? (
+                  {shareMenuChildren.map(action => (
                     <MenuItem
-                      data-gfs-action={copyLinkAction.id}
-                      disabled={copyLinkAction.disabled}
-                      leadingIcon={copyLinkAction.icon}
+                      data-gfs-action={action.key}
+                      disabled={action.disabled}
+                      key={action.key}
+                      leadingIcon={action.icon}
                       role="menuitem"
-                      onClick={() => runAction(copyLinkAction.run)}
+                      onClick={() => runAction(action.onClick)}
                     >
-                      {copyLinkAction.label}
+                      {action.label}
                     </MenuItem>
-                  ) : !actions && onCopyLink ? (
-                    <MenuItem
-                      data-gfs-action="copy-link"
-                      leadingIcon={<IconCopy />}
-                      role="menuitem"
-                      onClick={() => runAction(onCopyLink)}
-                    >
-                      Copy link
-                    </MenuItem>
-                  ) : null}
+                  ))}
                 </div>
               ) : null}
             </Fragment>,
             document.body
           )
         : null}
-      {actions?.some(action => action.id === 'replace') || (!actions && onReplace) ? (
+      {menuActions?.some(action => action.id === 'replace') ||
+      (actions === undefined && onReplace) ? (
         <input
           aria-label={`Replace ${resourceName}`}
           className="visually-hidden"
@@ -482,7 +483,7 @@ export function GfsResourceMenu({
             event.currentTarget.value = ''
             if (!file) return
             closeMenu()
-            const replaceAction = actions?.find(action => action.id === 'replace')
+            const replaceAction = menuActions?.find(action => action.id === 'replace')
             if (replaceAction) replaceAction.run(file)
             else onReplace?.(file)
           }}

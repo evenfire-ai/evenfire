@@ -84,14 +84,15 @@ describe('GfsResourceMenu', () => {
     expect(screen.queryByRole('menu', { name: 'Actions for report.txt' })).toBeNull()
   })
 
-  it('renders shared action descriptors in order with Share as a direct action', () => {
+  it('groups shared action descriptors under the Share submenu', () => {
     const refresh = vi.fn()
     const share = vi.fn()
     const copyLink = vi.fn()
+    const copyRoute = vi.fn()
     const actions = buildGfsResourceActions({
       kind: 'directory',
       uri: 'gfs://main/0123456789abcdef0123456789abcdef',
-      handlers: { refresh, share, 'copy-link': copyLink },
+      handlers: { refresh, share, 'copy-link': copyLink, 'copy-route': copyRoute },
       canShare: true,
     })
     render(<GfsResourceMenu actions={actions} resourceName="Reports" />)
@@ -103,12 +104,21 @@ describe('GfsResourceMenu', () => {
       within(menu)
         .getAllByRole('menuitem')
         .map(item => item.textContent)
-    ).toEqual(['Refresh', 'Share', 'Copy link'])
-    expect(within(menu).getByRole('menuitem', { name: 'Copy link' })).toBeTruthy()
+    ).toEqual(['Share'])
     fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
 
+    const shareMenu = screen.getByRole('menu', { name: 'Share options for Reports' })
+    expect(
+      within(shareMenu)
+        .getAllByRole('menuitem')
+        .map(item => item.textContent)
+    ).toEqual(['Share', 'Copy link', 'Copy folder ID'])
+    fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Share' }))
     expect(share).toHaveBeenCalledOnce()
     expect(screen.queryByRole('menu', { name: 'Share options for Reports' })).toBeNull()
+    expect(refresh).not.toHaveBeenCalled()
+    expect(copyLink).not.toHaveBeenCalled()
+    expect(copyRoute).not.toHaveBeenCalled()
   })
 
   it('dispatches replacement selection and the selected file through the shared action', () => {
@@ -178,7 +188,7 @@ describe('GfsResourceMenu', () => {
 
       render(
         <section className="da-gfs-drive">
-          <GfsResourceMenu resourceName={resourceName} onOpenGfsLink={vi.fn()} />
+          <GfsResourceMenu resourceName={resourceName} />
         </section>
       )
 

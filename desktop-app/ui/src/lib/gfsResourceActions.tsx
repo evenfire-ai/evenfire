@@ -1,14 +1,13 @@
 import type { ReactNode } from 'react'
 import {
   IconContexts,
+  IconCopy,
   IconCopyContent,
   IconDownload,
   IconEdit,
   IconEye,
-  IconFolderPlus,
-  IconLink,
-  IconMove,
   IconOpenRoute,
+  IconPlus,
   IconRefresh,
   IconRoute,
   IconShare,
@@ -91,7 +90,7 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       id: 'refresh',
       label: 'Refresh',
       icon: <IconRefresh />,
-      menu: true,
+      menu: false,
       eligible: Boolean(options.handlers.refresh),
       disabled: mutating || (options.refreshing ?? false),
       loading: options.refreshing ?? false,
@@ -107,7 +106,7 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
     {
       id: 'copy-link',
       label: 'Copy link',
-      icon: <IconLink />,
+      icon: <IconCopy />,
       menu: true,
       eligible: Boolean(options.handlers['copy-link']),
     },
@@ -120,9 +119,9 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
     },
     {
       id: 'open-route',
-      label: options.kind === 'directory' ? 'Open folder from ID' : 'Open file from ID',
+      label: 'Open link',
       icon: <IconOpenRoute />,
-      menu: true,
+      menu: false,
       eligible: Boolean(options.handlers['open-route']),
     },
     {
@@ -145,7 +144,7 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
     {
       id: 'move',
       label: 'Move to',
-      icon: <IconMove />,
+      icon: <IconContexts />,
       menu: true,
       eligible: Boolean(options.canMove && options.handlers.move),
       disabled: mutating,
@@ -153,7 +152,7 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
     {
       id: 'new-folder',
       label: 'New folder',
-      icon: <IconFolderPlus />,
+      icon: <IconPlus />,
       menu: true,
       eligible: Boolean(
         options.kind === 'directory' && options.canCreateFolder && options.handlers['new-folder']
