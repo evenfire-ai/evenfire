@@ -214,6 +214,7 @@ export function createExternalInvitationsRouter(): Router {
         }
         return res.status(200).json(result.data)
       } catch (error) {
+        if (sendPasswordAdmissionError(error, res)) return
         return next(error)
       }
     }
