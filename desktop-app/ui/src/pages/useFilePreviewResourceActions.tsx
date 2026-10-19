@@ -110,6 +110,7 @@ export function useFilePreviewResourceActions({
   const [revokingGrantId, setRevokingGrantId] = useState<string | null>(null)
   const [revokingShareId, setRevokingShareId] = useState<string | null>(null)
   const deletePendingRef = useRef(false)
+  const renamePendingRef = useRef(false)
 
   const resourceQuery = useQuery({
     queryKey: [...desktopQueryKeys.gfsRoot, sessionScope, 'preview-resource', gfsUri],
@@ -265,7 +266,9 @@ export function useFilePreviewResourceActions({
   )
 
   const handleRename = async () => {
-    if (!resource) return
+    if (!resource || renamePendingRef.current) return
+    renamePendingRef.current = true
+    setMutationPending(true)
     try {
       const name = await normalizeGfsResourceName(renameName.trim())
       if (name === resource.name) {
@@ -285,6 +288,9 @@ export function useFilePreviewResourceActions({
       if (!onAuthorityFailure(errorMessage(error))) {
         pushToast?.(`Could not rename the file: ${describeGfsReadError(error).message}`, 'error')
       }
+    } finally {
+      renamePendingRef.current = false
+      setMutationPending(false)
     }
   }
 

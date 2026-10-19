@@ -227,6 +227,82 @@ describe('FilePreviewPage', () => {
     }
   })
 
+  it('dispatches only one preview rename for repeated Save submission', async () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const renameResource = vi
+      .fn<(...args: unknown[]) => Promise<void>>()
+      .mockRejectedValueOnce(new Error('409 stale resource version'))
+      .mockResolvedValue(undefined)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+          resolve: vi.fn(async () =>
+            resolveResource({
+              resourceId: '0123456789abcdef0123456789abcdef',
+              rid: '0123456789abcdef0123456789abcdef',
+              gfsUri: uri,
+              drive: 'main',
+              parentResourceId: 'preview-parent',
+              name: 'diagram.png',
+              kind: 'file',
+              version: 7,
+              bytes: 1,
+            })
+          ),
+          affordances: vi.fn(async () => activeAffordances),
+          renameResource,
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue(controller())
+
+    render(
+      <FilePreviewPage
+        gfsUri={uri}
+        fileName="diagram.png"
+        fileKind="image"
+        mimeType="image/png"
+        byteLength={1}
+      />
+    )
+
+    expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
+    await waitFor(() => expect(window.clerum.gfs.affordances).toHaveBeenCalled())
+    clickPreviewAction('diagram.png', 'Rename')
+    const dialog = await screen.findByRole('dialog', { name: 'Rename file' })
+    fireEvent.change(within(dialog).getByLabelText('New name'), {
+      target: { value: 'renamed.png' },
+    })
+
+    act(() => {
+      fireEvent.submit(dialog)
+      fireEvent.submit(dialog)
+    })
+
+    await waitFor(() => expect(renameResource).toHaveBeenCalled())
+    expect(renameResource).toHaveBeenCalledTimes(1)
+    expect(renameResource).toHaveBeenCalledWith(
+      '0123456789abcdef0123456789abcdef',
+      'renamed.png',
+      'main',
+      7
+    )
+    expect(screen.getByRole('dialog', { name: 'Rename file' })).toBeTruthy()
+    fireEvent.change(within(dialog).getByLabelText('New name'), {
+      target: { value: 'renamed-again.png' },
+    })
+    fireEvent.submit(dialog)
+    await waitFor(() => expect(renameResource).toHaveBeenCalledTimes(2))
+    expect(renameResource).toHaveBeenLastCalledWith(
+      '0123456789abcdef0123456789abcdef',
+      'renamed-again.png',
+      'main',
+      7
+    )
+  })
+
   it('mounts the markdown body for a markdown preview tab', async () => {
     hookMock.useGfsBrowserController.mockReturnValue(controller())
     stubDownload(async () => ({ bytes: new TextEncoder().encode('# Hi').buffer }))
