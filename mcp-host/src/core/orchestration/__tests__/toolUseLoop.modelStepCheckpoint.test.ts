@@ -4,6 +4,7 @@
  * resumable. Runs against the real dispatcher and SQLite schema.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import fc from 'fast-check'
 import { createHash } from 'node:crypto'
 import {
   type RecordedCheckpointImagePart,
@@ -11,6 +12,8 @@ import {
   restoreCheckpointMessages,
 } from '../../../agent/modelStepCheckpointAttachments'
 import { TaskExecutionBudget } from '../../../agent/taskExecutionBudget'
+import { TaskExecutor } from '../../../agent/taskExecutor'
+import type { ModelStepCheckpointEntryRow } from '../../../db/worker/modelStepCheckpointOps'
 import type { ModelStepCheckpointAttachmentRow } from '../../../db/worker/modelStepCheckpointOps'
 import type { ModelStepCheckpointAttachmentInput } from '../../../db/worker/modelStepCheckpointOps'
 import type { ModelStepCheckpointFence } from '../../../db/worker/modelStepCheckpointOps'
@@ -395,6 +398,141 @@ function twoIterationsThenOutage(error: Error): RespondResult[] {
 }
 
 describe('runToolUseLoop model-step checkpoint (#1043)', () => {
+  const rejectedTool: Tool = {
+    ...createMockTool('rejected_tool'),
+    validateParams: () => ({ is_valid: false, errors: ['Input rejected'] }),
+  }
+
+  function assertCompleteBatches(worker: InProcessWorkerHandle, expectedBatches: number) {
+    const rows = entries(worker)
+    const messages = rows
+      .filter(row => row.kind === 'message')
+      .map(row => JSON.parse(row.payload) as ChatMessage)
+    const batches: Array<{
+      calls: NonNullable<ChatMessage['tool_calls']>
+      results: ChatMessage[]
+    }> = []
+    for (const message of messages) {
+      if (message.role === 'assistant' && message.tool_calls) {
+        batches.push({ calls: message.tool_calls, results: [] })
+      } else if (message.role === 'tool') {
+        batches[batches.length - 1]!.results.push(message)
+      }
+    }
+    expect(batches).toHaveLength(expectedBatches)
+    for (const batch of batches) {
+      expect(batch.results.map(message => message.tool_call_id).sort()).toEqual(
+        batch.calls.map(call => call.id).sort()
+      )
+    }
+    const rebuilder = TaskExecutor.prototype as unknown as {
+      rebuildCheckpointMessages(
+        messages: ChatMessage[],
+        entries: ModelStepCheckpointEntryRow[]
+      ): ChatMessage[]
+    }
+    expect(
+      rebuilder.rebuildCheckpointMessages(messages, rows as ModelStepCheckpointEntryRow[])
+    ).toEqual(messages)
+  }
+
+  it('E2 R1-M4: reused call_0 retains executed and rejected messages across batches', async () => {
+    const { worker, recorder } = harness()
+    const tool = createMockTool('read_file')
+    const reasoning = createMockReasoning([
+      { type: 'tool_calls', calls: [{ id: 'call_0', name: 'read_file', arguments: {} }] },
+      { type: 'tool_calls', calls: [{ id: 'call_0', name: 'rejected_tool', arguments: {} }] },
+      { type: 'error', error: outage() },
+    ])
+    const result = await runToolUseLoop(withRecorder(reasoning, [tool, rejectedTool], recorder), [
+      user,
+    ])
+    expect(result).toMatchObject({ type: 'error', checkpointId: 'cp-loop' })
+    expect(tool.execute).toHaveBeenCalledTimes(1)
+    expect(reasoning.continueWithToolResults).toHaveBeenCalledTimes(2)
+    expect(header(worker)?.status).toBe('resumable')
+    assertCompleteBatches(worker, 2)
+  })
+
+  it('E2 R1-M4: random reused ids preserve one message per executed or rejected call', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fc.array(fc.boolean(), { minLength: 1, maxLength: 3 }), {
+          minLength: 1,
+          maxLength: 4,
+        }),
+        async randomBatches => {
+          const { worker, recorder } = harness()
+          const batches = [[true], ...randomBatches]
+          const reasoning = createMockReasoning([
+            ...batches.map(batch => ({
+              type: 'tool_calls' as const,
+              calls: batch.map((execute, index) => ({
+                id: `call_${index}`,
+                name: execute ? 'read_file' : 'rejected_tool',
+                arguments: {},
+              })),
+            })),
+            { type: 'error', error: outage() },
+          ])
+          const tool = createMockTool('read_file')
+          const result = await runToolUseLoop(
+            withRecorder(reasoning, [tool, rejectedTool], recorder, batches.length + 1),
+            [user]
+          )
+          expect(result).toMatchObject({ type: 'error', checkpointId: 'cp-loop' })
+          expect(tool.execute).toHaveBeenCalled()
+          expect(reasoning.continueWithToolResults).toHaveBeenCalledTimes(batches.length)
+          assertCompleteBatches(worker, batches.length)
+        }
+      ),
+      { seed: 1043, numRuns: 20 }
+    )
+  })
+
+  it.each(['applied', 'thrown', 'lost'] as const)(
+    'E2 M4: settlement reports claim release only when abandonment is %s',
+    async outcome => {
+      const { worker, store, clock } = storeHarness()
+      const fence = await openClaimedCheckpoint(store, clock, [])
+      const recorder = continuationRecorder({
+        store,
+        fence,
+        clock,
+        sourceAttachments: [],
+        restoredAttachments: [],
+      })
+      await recorder.begin([user])
+      const append = vi.spyOn(store, 'append').mockRejectedValueOnce(new Error('SQLITE_IOERR'))
+      await recorder.syncMessages([user, { role: 'assistant', content: 'unrecorded' }])
+      expect(append).toHaveBeenCalledTimes(1)
+      expect(recorder.poisoned).toBe(true)
+      const transition = vi.spyOn(store, 'transition')
+      if (outcome === 'thrown') transition.mockRejectedValueOnce(new Error('SQLITE_IOERR abandon'))
+      if (outcome === 'lost') transition.mockResolvedValueOnce(null)
+      const settlement = recorder.settle({
+        type: 'response',
+        content: 'Done.',
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      })
+      if (outcome === 'applied') {
+        expect(await settlement).toBeUndefined()
+        expect(recorder.claimReleased).toBe(true)
+        expect(header(worker)?.status).toBe('abandoned')
+      } else {
+        await expect(settlement).rejects.toThrow(
+          'Model-step checkpoint abandonment did not release its claim'
+        )
+        expect(recorder.claimReleased).toBe(false)
+        expect(header(worker)?.status).toBe('claimed')
+      }
+      expect(transition).toHaveBeenCalledWith(SESSION_KEY, fence, {
+        from: ['claimed'],
+        to: 'abandoned',
+      })
+    }
+  )
+
   it('D1 H1: a text-only turn writes no checkpoint rows or operations', async () => {
     const { worker, store, recorder } = harness()
     const open = vi.spyOn(store, 'open')

@@ -401,6 +401,7 @@ export class TaskExecutor {
   private continuationClaimReleased = false
   private continuationRecorder: ModelStepCheckpointRecorder | undefined
   private continuationLeaseStop: (() => Promise<void>) | undefined
+  private continuationLeaseExpiresAt: number | null = null
   private suspendedCancellation: Promise<void> | undefined
   /**
    * P2 token budgets (§5.2) — snapshot of the conversation's lifetime token
@@ -484,7 +485,10 @@ export class TaskExecutor {
     return this.abortController.signal
   }
 
-  async rehydrateWaitingApproval(sessionKey: string, approval: PendingApproval): Promise<void> {
+  async rehydrateWaitingApproval(
+    sessionKey: string,
+    approval: PendingApproval
+  ): Promise<'claim_lost' | 'attachment_expired' | undefined> {
     const message = this.task.sourceMessage
     this.conversation = await this.deps.conversationManager.getOrCreate(sessionKey, {
       userId: message?.sender,
@@ -518,11 +522,11 @@ export class TaskExecutor {
         checkpoint.header.claim_owner !== continuation.fence.owner ||
         checkpoint.header.claim_generation !== continuation.fence.generation
       ) {
-        throw new Error('Pending approval checkpoint claim is no longer owned by this task')
+        return 'claim_lost'
       }
       const attachments = await support.store.loadAttachments(sessionKey, continuation.checkpointId)
       if (!this.restoreCheckpointAttachments(attachments)) {
-        throw new Error('Pending approval checkpoint attachments expired')
+        return 'attachment_expired'
       }
       this.createContinuationRecorder(
         sessionKey,
@@ -531,7 +535,7 @@ export class TaskExecutor {
         checkpoint.tools.confirmed,
         attachments
       )
-      this.startContinuationLease(sessionKey, continuation)
+      this.startContinuationLease(sessionKey, continuation, checkpoint.header.claim_expires_at)
     }
     this.state = 'waiting_approval'
   }
@@ -684,12 +688,11 @@ export class TaskExecutor {
       this.finishRun()
     } catch (error) {
       let canEndTurn =
-        !this.task.modelStepContinuation ||
-        (!this.continuationFenceLost && this.conversation?.activeTaskId === this.taskId)
+        !this.task.modelStepContinuation || this.conversation?.activeTaskId === this.taskId
       if (this.task.modelStepContinuation) {
         await this.abandonModelStepContinuation()
         this.emitContinuationVerdict({ kind: 'lost' })
-        canEndTurn = !this.continuationFenceLost && this.conversation?.activeTaskId === this.taskId
+        canEndTurn = this.conversation?.activeTaskId === this.taskId
       }
       if (
         this.abortController.signal.aborted &&
@@ -713,7 +716,7 @@ export class TaskExecutor {
               fence ? { modelStepTurnFence: fence } : undefined
             )
           } else if (this.task.modelStepContinuation) {
-            await this.failContinuationTurnIfFenced()
+            await this.failContinuationTurn()
           } else {
             await this.deps.conversationManager.failTurn(this.conversation)
           }
@@ -726,7 +729,7 @@ export class TaskExecutor {
           )
         }
       } else if (this.task.modelStepContinuation && this.conversation && canEndTurn) {
-        await this.failContinuationTurnIfFenced()
+        await this.failContinuationTurn()
       }
       const taskError = this.toTaskError(error)
       logger.error(
@@ -831,11 +834,18 @@ export class TaskExecutor {
     await stop?.()
   }
 
-  private startContinuationLease(sessionKey: string, continuation: ModelStepContinuationRef): void {
+  private startContinuationLease(
+    sessionKey: string,
+    continuation: ModelStepContinuationRef,
+    leaseExpiresAt: number | null
+  ): void {
     const support = this.deps.modelStepCheckpoints!
     let renewal: Promise<void> | undefined
+    this.continuationLeaseExpiresAt = leaseExpiresAt
     const timer = setInterval(() => {
-      if (renewal) return
+      // A live durable approval holds the claim independently of its short lease.
+      if (renewal || this.state === 'waiting_approval') return
+      const renewedAt = Date.now()
       renewal = support.store
         .renewLease(sessionKey, continuation.fence, support.claimLeaseMs)
         .then(
@@ -843,6 +853,8 @@ export class TaskExecutor {
             if (!applied) {
               this.continuationFenceLost = true
               this.abort()
+            } else {
+              this.continuationLeaseExpiresAt = renewedAt + support.claimLeaseMs
             }
           },
           err => {
@@ -850,8 +862,15 @@ export class TaskExecutor {
               { taskId: this.taskId, checkpointId: continuation.checkpointId, err },
               'Model-step continuation lease renewal failed'
             )
-            this.continuationFenceLost = true
-            this.abort()
+            // A worker failure says nothing about ownership. Retry next tick
+            // while the last acknowledged lease still authorizes this task.
+            if (
+              this.continuationLeaseExpiresAt === null ||
+              Date.now() >= this.continuationLeaseExpiresAt
+            ) {
+              this.continuationFenceLost = true
+              this.abort()
+            }
           }
         )
         .finally(() => {
@@ -872,6 +891,7 @@ export class TaskExecutor {
     if (!continuation || !support || !recorder || recorder.poisoned) {
       throw new Error('Model-step continuation approval has no live recorder')
     }
+    const renewedAt = Date.now()
     if (
       !(await support.store.renewLease(
         resolveTaskSessionKey(this.task),
@@ -882,6 +902,7 @@ export class TaskExecutor {
       this.continuationFenceLost = true
       throw new Error('Model-step continuation claim was lost during approval')
     }
+    this.continuationLeaseExpiresAt = renewedAt + support.claimLeaseMs
     return recorder
   }
 
@@ -944,9 +965,20 @@ export class TaskExecutor {
     return err instanceof Error && err.message === 'model-step continuation fence mismatch'
   }
 
-  private async failContinuationTurnIfFenced(): Promise<void> {
+  private async failContinuationTurn(): Promise<void> {
     const fence = this.continuationTurnFence()
-    if (!fence || !this.conversation) return
+    if (!this.conversation || this.conversation.activeTaskId !== this.taskId) return
+    if (!fence) {
+      if (!this.continuationFenceLost) return
+      // The checkpoint is no longer ours, but this task still owns the local
+      // conversation turn. Release only that turn, never the replacement claim.
+      if (this.conversation.state === 'awaiting_approval') {
+        await this.deps.conversationManager.deny(this.conversation)
+      } else if (this.conversation.state === 'processing') {
+        await this.deps.conversationManager.failTurn(this.conversation)
+      }
+      return
+    }
     try {
       await this.deps.conversationManager.failTurn(this.conversation, fence)
     } catch (err) {
@@ -1114,7 +1146,7 @@ export class TaskExecutor {
     this.captureTaskTokenBaseline()
     this.enqueueGovernedRunEvent('run_start', `task:${this.taskId}:start`)
 
-    this.startContinuationLease(sessionKey, continuation)
+    this.startContinuationLease(sessionKey, continuation, liveHeader.claim_expires_at)
     let waitingForApproval = false
     try {
       const references = message.fileReferenceResolutions
@@ -1162,9 +1194,9 @@ export class TaskExecutor {
         result = await runToolUseLoop(loopConfig, messages)
         waitingForApproval = result.type === 'need_approval'
       } catch (err) {
-        // The loop settles before an exception leaves it. That settle already
-        // released this claim, so the outer catch must not abandon again.
-        this.continuationClaimReleased = true
+        // The loop settles before an exception leaves it. Only an applied
+        // settle released this claim; otherwise the outer catch abandons it.
+        this.continuationClaimReleased = recorder.claimReleased
         throw err
       }
       if (waitingForApproval && recorder.poisoned) {
@@ -1173,10 +1205,9 @@ export class TaskExecutor {
         waitingForApproval = false
         throw new Error('Model-step continuation approval lost its checkpoint recorder')
       }
-      // A clean response keeps the claim for the final turn boundary. Every
-      // other settled result has already left `claimed`.
-      this.continuationClaimReleased =
-        (result.type !== 'response' && result.type !== 'need_approval') || recorder.poisoned
+      // A clean response keeps the claim for the final turn boundary. Any
+      // other result released it only if its settle transition applied.
+      this.continuationClaimReleased = recorder.claimReleased
       this.continuationCompletionFence =
         result.type === 'response' && !recorder.poisoned ? continuation.fence : undefined
       return result
@@ -1570,13 +1601,11 @@ export class TaskExecutor {
       if (continuationRecorder) {
         if (toolResult.stopTurn) await continuationRecorder.settle(result)
         if (result.type === 'need_approval' && continuationRecorder.poisoned) {
-          this.continuationClaimReleased = true
-          await this.failContinuationTurnIfFenced()
+          this.continuationClaimReleased = continuationRecorder.claimReleased
+          await this.failContinuationTurn()
           throw new Error('Model-step continuation approval lost its checkpoint recorder')
         }
-        this.continuationClaimReleased =
-          (result.type !== 'response' && result.type !== 'need_approval') ||
-          continuationRecorder.poisoned
+        this.continuationClaimReleased = continuationRecorder.claimReleased
         this.continuationCompletionFence =
           result.type === 'response' && !continuationRecorder.poisoned
             ? this.task.modelStepContinuation!.fence
@@ -1614,18 +1643,10 @@ export class TaskExecutor {
     } catch (error) {
       if (this.task.modelStepContinuation && !this.continuationClaimReleased) {
         await this.abandonModelStepContinuation()
-        await this.failContinuationTurnIfFenced()
+        await this.failContinuationTurn()
       }
-      if (
-        this.task.modelStepContinuation &&
-        this.continuationFenceLost &&
-        this.conversation?.activeTaskId === this.taskId
-      ) {
-        if (this.conversation.state === 'awaiting_approval') {
-          await this.deps.conversationManager.deny(this.conversation)
-        } else if (this.conversation.state === 'processing') {
-          await this.deps.conversationManager.failTurn(this.conversation)
-        }
+      if (this.task.modelStepContinuation && this.continuationFenceLost) {
+        await this.failContinuationTurn()
       }
       if (
         this.legacyApprovalBudget &&
@@ -1995,12 +2016,14 @@ export class TaskExecutor {
   /**
    * #1043 — the recorder of a fresh turn. A turn resumed after an approval
    * runs without one, and so does a turn without a sender: the continuation
-   * route authorizes against the recorded principal.
+   * route authorizes against the recorded principal. Only RPC channels expose
+   * that route; other channels cannot use a model-step checkpoint.
    */
   private createOriginCheckpointRecorder(
     messages: ChatMessage[]
   ): ModelStepCheckpointRecorder | undefined {
-    if (this.task.modelStepContinuation) return undefined
+    if (this.task.modelStepContinuation || this.task.sourceMessage?.channelType !== 'rpc')
+      return undefined
     const support = this.deps.modelStepCheckpoints
     if (!support) return undefined
     const conversation = this.conversation!
@@ -2241,7 +2264,7 @@ export class TaskExecutor {
             this.continuationFenceLost = true
             throw err
           }
-          if (this.task.modelStepContinuation) await this.failContinuationTurnIfFenced()
+          if (this.task.modelStepContinuation) await this.failContinuationTurn()
           else await this.deps.conversationManager.failTurn(this.conversation!)
           throw err
         }
@@ -2315,7 +2338,10 @@ export class TaskExecutor {
         // buildMessageHistory emits a clean user↔assistant alternation.
         if (this.task.modelStepContinuation) {
           const fence = this.continuationTurnFence()
-          if (!fence) break
+          if (!fence) {
+            await this.failContinuationTurn()
+            break
+          }
           try {
             await this.deps.conversationManager.cancelTurn(this.conversation!, fence)
           } catch (err) {
@@ -2339,7 +2365,7 @@ export class TaskExecutor {
 
       case 'error': {
         this.modelStepCheckpointId = result.checkpointId
-        if (this.task.modelStepContinuation) await this.failContinuationTurnIfFenced()
+        if (this.task.modelStepContinuation) await this.failContinuationTurn()
         else await this.deps.conversationManager.failTurn(this.conversation!)
         throw result.error
       }

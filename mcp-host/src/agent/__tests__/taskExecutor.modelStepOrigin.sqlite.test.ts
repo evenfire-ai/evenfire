@@ -23,6 +23,7 @@ import type { SingleTurnProvider } from '../../llm/types'
 import { McpManager } from '../../mcp/manager'
 import type { Task, TaskError } from '../../queue/types'
 import { createSessionRouteHandlers } from '../../server/sessionRouteHandlers'
+import type { IncomingMessage } from '../../server/types'
 import { validateIncomingAttachments } from '../incomingAttachments'
 import { TaskExecutor, type TaskExecutorDeps } from '../taskExecutor'
 
@@ -85,7 +86,11 @@ function outageProvider(toolCallsBeforeOutage: number) {
   return { provider, calls: () => calls }
 }
 
-async function runOutageTask(toolCallsBeforeOutage: number, withCheckpoints = true) {
+async function runOutageTask(
+  toolCallsBeforeOutage: number,
+  withCheckpoints = true,
+  channelType: IncomingMessage['channelType'] = 'rpc'
+) {
   const attachment = admittedFile(UPLOAD)
   const handle = makeSqliteStore()
   const { provider, calls } = outageProvider(toolCallsBeforeOutage)
@@ -98,7 +103,7 @@ async function runOutageTask(toolCallsBeforeOutage: number, withCheckpoints = tr
     sourceMessage: {
       sender: 'authenticated-user',
       content: 'Analyze the attached file',
-      channelType: 'rpc',
+      channelType,
       channelId: 'isolated-channel',
       messageId: 'message-1',
       timestamp: new Date().toISOString(),
@@ -307,6 +312,30 @@ describe('TaskExecutor origin model-step checkpoint (#1043)', () => {
       expect(db.prepare('SELECT * FROM model_step_checkpoint_attachments').all()).toEqual([])
     } finally {
       await handle.shutdown()
+    }
+  })
+
+  it('records a dispatched RPC turn but writes no checkpoint for the same non-RPC turn', async () => {
+    Object.assign(appConfig, { enableApproval: false, dynamicToolsEnabled: false })
+    for (const channel of ['rpc', 'slack'] as const) {
+      const { handle, onFail, providerCalls } = await runOutageTask(1, true, channel)
+      try {
+        expect(providerCalls).toBe(2)
+        expect(onFail).toHaveBeenCalledTimes(1)
+        const rows = handle.worker.db.prepare('SELECT status FROM model_step_checkpoints').all()
+        if (channel === 'rpc') {
+          expect(rows).toEqual([{ status: 'resumable' }])
+          expect(
+            handle.worker.db
+              .prepare("SELECT kind FROM model_step_checkpoint_entries WHERE kind = 'tool_result'")
+              .all()
+          ).toEqual([{ kind: 'tool_result' }])
+        } else {
+          expect(rows).toEqual([])
+        }
+      } finally {
+        await handle.shutdown()
+      }
     }
   })
 

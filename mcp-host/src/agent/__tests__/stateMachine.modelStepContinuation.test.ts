@@ -5,6 +5,7 @@
  * selection and that unsupported Hosts fail without running a model.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { config as appConfig } from '../../config'
 import { ConversationManager } from '../../core/conversation/conversation'
 import {
@@ -114,9 +115,31 @@ function task(
   }
 }
 
-async function claimedCheckpoint(handle: StoreHandle, manager?: ConversationManager) {
+async function claimedCheckpoint(
+  handle: StoreHandle,
+  manager?: ConversationManager,
+  withAttachment = false
+) {
+  const bytes = Buffer.from('Retained approval attachment')
+  const digestHex = createHash('sha256').update(bytes).digest('hex')
+  const originMessage = message()
+  if (withAttachment) {
+    originMessage.attachments = [
+      {
+        id: 'boot-file',
+        kind: 'file',
+        mimeType: 'text/plain',
+        encoding: 'base64',
+        dataBase64: bytes.toString('base64'),
+        filename: 'boot.txt',
+        sizeBytes: bytes.length,
+        digest: { algorithm: 'sha256', hex: digestHex },
+      },
+    ]
+  }
+
   const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
-    now: () => NOW,
+    now: () => Date.now(),
     blockedTtlMs: RESUMABLE_TTL_MS,
   })
   const conversationManager = manager ?? new ConversationManager(handle.store)
@@ -147,7 +170,7 @@ async function claimedCheckpoint(handle: StoreHandle, manager?: ConversationMana
         maxIterations: 20,
         attachmentReadLedger: { reads: 0, spentTokens: 0, bytesRead: 0 },
       }),
-      sourceMessage: JSON.stringify(message()),
+      sourceMessage: JSON.stringify(sourceMessageForResume(originMessage)),
     },
     [
       {
@@ -162,6 +185,13 @@ async function claimedCheckpoint(handle: StoreHandle, manager?: ConversationMana
     to: 'resumable',
     failedAt: NOW,
     expiresAt: NOW + RESUMABLE_TTL_MS,
+    ...(withAttachment
+      ? {
+          attachments: [
+            { attachmentId: 'boot-file', digestHex, bytes, expiresAt: NOW + 3_600_000 },
+          ],
+        }
+      : {}),
   })
   if (resumable === null) throw new Error('checkpoint fixture could not become resumable')
   const claim = await checkpoints.claim({
@@ -174,7 +204,12 @@ async function claimedCheckpoint(handle: StoreHandle, manager?: ConversationMana
   })
   if (claim.outcome !== 'claimed')
     throw new Error(`checkpoint fixture claim failed: ${claim.outcome}`)
-  return { checkpoints, fence: claim.fence, taskBudget: claim.snapshot.header.task_budget }
+  return {
+    checkpoints,
+    fence: claim.fence,
+    taskBudget: claim.snapshot.header.task_budget,
+    originMessage,
+  }
 }
 
 function support(
@@ -287,6 +322,129 @@ describe('AgentStateMachine model-step continuation model pinning (#1043)', () =
     ])
     expect(healthyConversation.pending_approval?.request_id).toBe('approval-healthy')
   })
+
+  it.each(['attachment_expired', 'lost_claim'] as const)(
+    'recovers %s per entry and rehydrates the healthy approval',
+    async failure => {
+      Object.assign(appConfig, { enableApproval: true })
+      const handle = makeSqliteStore()
+      handles.push(handle)
+      const manager = new ConversationManager(handle.store)
+      const { checkpoints, fence, taskBudget, originMessage } = await claimedCheckpoint(
+        handle,
+        manager,
+        failure === 'attachment_expired'
+      )
+      const badConversation = manager.getSessionByKey(SESSION_KEY)!
+      await manager.resumeTurnForContinuation(
+        badConversation,
+        'task-continuation-state-b2',
+        1,
+        null
+      )
+      await manager.suspendForApproval(badConversation, {
+        request_id: 'approval-recovery',
+        tool_name: 'shell_exec',
+        tool_call_id: 'tc-recovery',
+        parameters: {},
+        description: 'Checkpoint recovery approval',
+        context_snapshot: [{ role: 'user', content: message().content }],
+        task_budget: JSON.parse(taskBudget!),
+        sourceMessage: sourceMessageForResume(originMessage),
+      })
+
+      const healthyMessage = {
+        ...message(),
+        threadId: 'healthy-chat',
+        messageId: 'healthy-message',
+      }
+      const healthySessionKey = `${USER}:rpc:${AGENT}:healthy-chat`
+      const healthyConversation = await manager.getOrCreate(healthySessionKey, {
+        userId: USER,
+        channelType: 'rpc',
+        channelId: AGENT,
+        threadId: 'healthy-chat',
+        source: 'rpc',
+      })
+      await manager.startTurn(healthyConversation, healthyMessage.content, 'healthy-task')
+      await manager.suspendForApproval(healthyConversation, {
+        request_id: 'approval-healthy',
+        tool_name: 'shell_exec',
+        tool_call_id: 'tc-healthy',
+        parameters: {},
+        description: 'Healthy session approval',
+        context_snapshot: [{ role: 'user', content: healthyMessage.content }],
+        task_budget: JSON.parse(taskBudget!),
+        sourceMessage: sourceMessageForResume(healthyMessage),
+      })
+
+      const { stateMachine } = agent(handle)
+      stateMachine.setLLMProvider(provider('openai') as never, 'host-default-model')
+      stateMachine.setTaskModelResolver(() => ({
+        provider: provider(PIN.provider),
+        model: PIN.model,
+        contextWindowTokens: 100_000,
+      }))
+      if (failure === 'attachment_expired') {
+        expect(
+          handle.worker.db
+            .prepare('SELECT attachment_id FROM model_step_checkpoint_attachments')
+            .all()
+        ).toEqual([{ attachment_id: 'boot-file' }])
+      }
+      vi.spyOn(Date, 'now').mockReturnValue(NOW + 2 * 3_600_000)
+      await checkpoints.bootReap('host-instance-boot-recovery')
+      expect((await checkpoints.loadLive(SESSION_KEY))?.header.claim_owner).toBe(
+        'host-instance-boot-recovery'
+      )
+      if (failure === 'lost_claim') {
+        const loadLive = checkpoints.loadLive.bind(checkpoints)
+        vi.spyOn(checkpoints, 'loadLive').mockImplementationOnce(async sessionKey => {
+          const adopted = (await loadLive(sessionKey))!.header
+          await checkpoints.transition(
+            sessionKey,
+            {
+              checkpointId: fence.checkpointId,
+              owner: adopted.claim_owner,
+              generation: adopted.claim_generation,
+            },
+            { from: ['claimed'], to: 'abandoned' }
+          )
+          return loadLive(sessionKey)
+        })
+      }
+      stateMachine.setModelStepCheckpoints({
+        ...support(handle, checkpoints),
+        hostInstanceId: 'host-instance-boot-recovery',
+      })
+      stateMachine.setColdStartLoader(new SqliteColdStartLoader(handle.store))
+
+      await stateMachine.bootstrap()
+      await handle.persistQueue.drain()
+
+      expect(
+        handle.worker.db
+          .prepare(
+            'SELECT status, blocked_reason FROM model_step_checkpoints WHERE checkpoint_id = ?'
+          )
+          .get(fence.checkpointId)
+      ).toEqual(
+        failure === 'attachment_expired'
+          ? { status: 'blocked', blocked_reason: 'attachment_expired' }
+          : { status: 'abandoned', blocked_reason: null }
+      )
+      expect(stateMachine.getPendingApprovals().map(approval => approval.requestId)).toEqual([
+        'approval-healthy',
+      ])
+      expect(
+        handle.worker.db
+          .prepare('SELECT request_id FROM pending_approvals ORDER BY request_id')
+          .all()
+      ).toEqual([{ request_id: 'approval-healthy' }])
+      expect(badConversation.pending_approval).toBeUndefined()
+      expect(healthyConversation.pending_approval?.request_id).toBe('approval-healthy')
+    }
+  )
 
   it('blocks an unavailable pinned approval checkpoint and rehydrates the next session', async () => {
     Object.assign(appConfig, { enableApproval: true })
