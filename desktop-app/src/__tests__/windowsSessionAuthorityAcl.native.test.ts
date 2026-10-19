@@ -21,6 +21,19 @@ const powershell = path.join(
   'v1.0',
   'powershell.exe'
 )
+const ACL_API_HELPERS = String.raw`
+function Get-TestAcl([string]$target) {
+  if ([IO.Directory]::Exists($target)) { return [IO.Directory]::GetAccessControl($target) }
+  return [IO.File]::GetAccessControl($target)
+}
+function Set-TestAcl([string]$target, $acl) {
+  if ([IO.Directory]::Exists($target)) {
+    [IO.Directory]::SetAccessControl($target, $acl)
+  } else {
+    [IO.File]::SetAccessControl($target, $acl)
+  }
+}
+`
 
 let temporaryRoot = ''
 let userDataPath = ''
@@ -29,7 +42,13 @@ let authorityPath = ''
 function runPowerShell(script: string, variables: Record<string, string> = {}): void {
   execFileSync(
     powershell,
-    ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded(script)],
+    [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-EncodedCommand',
+      encoded(`${ACL_API_HELPERS}\n${script}`),
+    ],
     {
       env: { ...process.env, ...variables },
       stdio: 'pipe',
@@ -43,7 +62,7 @@ function addEveryoneModify(target: string): void {
     String.raw`
 $ErrorActionPreference = 'Stop'
 $target = [Environment]::GetEnvironmentVariable('EVENFIRE_ACL_TEST_TARGET')
-$acl = Get-Acl -LiteralPath $target
+$acl = Get-TestAcl $target
 $everyone = [System.Security.Principal.SecurityIdentifier]::new('S-1-1-0')
 $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
   $everyone,
@@ -51,7 +70,7 @@ $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
   [System.Security.AccessControl.AccessControlType]::Allow
 )
 $acl.AddAccessRule($rule)
-Set-Acl -LiteralPath $target -AclObject $acl
+Set-TestAcl $target $acl
 `,
     { EVENFIRE_ACL_TEST_TARGET: target }
   )
@@ -62,7 +81,7 @@ function addTrustedInstallerModify(target: string): void {
     String.raw`
 $ErrorActionPreference = 'Stop'
 $target = [Environment]::GetEnvironmentVariable('EVENFIRE_ACL_TEST_TARGET')
-$acl = Get-Acl -LiteralPath $target
+$acl = Get-TestAcl $target
 $trustedInstaller = [System.Security.Principal.SecurityIdentifier]::new(
   'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
 )
@@ -72,7 +91,7 @@ $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
   [System.Security.AccessControl.AccessControlType]::Allow
 )
 $acl.AddAccessRule($rule)
-Set-Acl -LiteralPath $target -AclObject $acl
+Set-TestAcl $target $acl
 `,
     { EVENFIRE_ACL_TEST_TARGET: target }
   )
@@ -83,7 +102,7 @@ function addAuthenticatedUsersCreateDirectory(target: string): void {
     String.raw`
 $ErrorActionPreference = 'Stop'
 $target = [Environment]::GetEnvironmentVariable('EVENFIRE_ACL_TEST_TARGET')
-$acl = Get-Acl -LiteralPath $target
+$acl = Get-TestAcl $target
 $authenticatedUsers = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-11')
 $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
   $authenticatedUsers,
@@ -91,7 +110,7 @@ $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
   [System.Security.AccessControl.AccessControlType]::Allow
 )
 $acl.AddAccessRule($rule)
-Set-Acl -LiteralPath $target -AclObject $acl
+Set-TestAcl $target $acl
 `,
     { EVENFIRE_ACL_TEST_TARGET: target }
   )
@@ -102,7 +121,7 @@ function addCurrentUserInheritOnlyFullControl(target: string): void {
     String.raw`
 $ErrorActionPreference = 'Stop'
 $target = [Environment]::GetEnvironmentVariable('EVENFIRE_ACL_TEST_TARGET')
-$acl = Get-Acl -LiteralPath $target
+$acl = Get-TestAcl $target
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
   [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
@@ -114,7 +133,7 @@ $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
   [System.Security.AccessControl.AccessControlType]::Allow
 )
 $acl.AddAccessRule($rule)
-Set-Acl -LiteralPath $target -AclObject $acl
+Set-TestAcl $target $acl
 `,
     { EVENFIRE_ACL_TEST_TARGET: target }
   )

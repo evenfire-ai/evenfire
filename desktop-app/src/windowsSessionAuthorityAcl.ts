@@ -44,6 +44,7 @@ public sealed class SessionAuthorityObject {
 
 public static class SessionAuthorityNative {
   const uint ReadControl = 0x00020000;
+  const uint WriteOwner = 0x00080000;
   const uint FileReadAttributes = 0x00000080;
   const uint ShareAll = 0x00000001 | 0x00000002 | 0x00000004;
   const uint OpenExisting = 3;
@@ -117,6 +118,9 @@ public static class SessionAuthorityNative {
   static extern uint GetSecurityInfo(IntPtr handle, int objectType, uint securityInfo,
     out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl,
     out IntPtr securityDescriptor);
+  [DllImport("advapi32.dll")]
+  static extern uint SetSecurityInfo(IntPtr handle, int objectType, uint securityInfo,
+    IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
   [DllImport("advapi32.dll", SetLastError = true)]
   static extern bool GetSecurityDescriptorControl(IntPtr descriptor, out ushort control,
     out uint revision);
@@ -262,6 +266,28 @@ public static class SessionAuthorityNative {
       };
     } finally {
       if (descriptor != IntPtr.Zero) LocalFree(descriptor);
+      if (handle != IntPtr.Zero && handle != new IntPtr(-1)) CloseHandle(handle);
+    }
+  }
+
+  public static void SetOwner(string path, string ownerSid) {
+    IntPtr handle = IntPtr.Zero;
+    IntPtr owner = IntPtr.Zero;
+    try {
+      handle = CreateFileW(path, ReadControl | WriteOwner | FileReadAttributes, ShareAll,
+        IntPtr.Zero, OpenExisting, BackupSemantics | OpenReparsePoint, IntPtr.Zero);
+      if (handle == new IntPtr(-1))
+        throw NativeError("open-object-for-owner");
+      var sid = new SecurityIdentifier(ownerSid);
+      byte[] bytes = new byte[sid.BinaryLength];
+      sid.GetBinaryForm(bytes, 0);
+      owner = Marshal.AllocHGlobal(bytes.Length);
+      Marshal.Copy(bytes, 0, owner, bytes.Length);
+      uint error = SetSecurityInfo(handle, SeFileObject, OwnerSecurityInformation, owner,
+        IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+      if (error != 0) throw NativeError("set-owner", (int)error);
+    } finally {
+      if (owner != IntPtr.Zero) Marshal.FreeHGlobal(owner);
       if (handle != IntPtr.Zero && handle != new IntPtr(-1)) CloseHandle(handle);
     }
   }
@@ -452,6 +478,7 @@ try {
     if ($request.mode -ne 'provision') { throw 'authority-directory-absent' }
     $directoryInfo = [IO.DirectoryInfo]::new($authority)
     $directoryInfo.Create((New-PrivateAcl $true))
+    [SessionAuthorityNative]::SetOwner($authority, $currentSid)
   }
   $authoritySnapshot = Inspect-Object $authority $true
   $script:phase = 'validate-authority-directory'

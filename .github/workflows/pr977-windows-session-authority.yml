@@ -53,7 +53,9 @@ jobs:
         working-directory: desktop-app
         env:
           EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
-        run: npm test -- src/__tests__/windowsSessionAuthorityAcl.native.test.ts
+        run: >-
+          npm test -- src/__tests__/windowsSessionAuthorityAcl.native.test.ts
+          src/__tests__/windowsSessionAuthorityAcl.launch.test.ts
 
       - name: Build Desktop main and renderer
         working-directory: desktop-app
