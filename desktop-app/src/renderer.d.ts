@@ -769,7 +769,7 @@ declare global {
         getIndex: (agentRef: string) => Promise<ChatIndex>
         reconcileServerSessions: (
           agentRef: string,
-          sessions: Array<{ chatId: string; lastActivityAt?: string }>
+          sessions: Array<{ chatId: string; lastActivityAt?: string; title?: string }>
         ) => Promise<number>
         dismissOnboarding: (agentRef: string) => Promise<void>
         markUnreadTerminal: (agentRef: string, chatId: string) => Promise<void>

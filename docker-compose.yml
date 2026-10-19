@@ -1,20 +1,26 @@
 services:
   mcp-host:
+    # Build context is the repo root: mcp-host/Dockerfile COPYs the shared
+    # packages/ it links via file: dependencies.
     build:
-      context: ./mcp-host
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: mcp-host/Dockerfile
     environment:
-      CLERUM_DEV_MODE: "true"
-      CLERUM_ENABLE_AUTH: "false"
+      CLERUM_DEV_MODE: 'true'
+      CLERUM_ENABLE_AUTH: 'false'
       CLERUM_MODEL_PROVIDER: ${CLERUM_MODEL_PROVIDER:-openai}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       CLAUDE_API_KEY: ${CLAUDE_API_KEY:-}
       ZAI_API_KEY: ${ZAI_API_KEY:-}
       BAILIAN_API_KEY: ${BAILIAN_API_KEY:-}
+    # Dev mode runs with auth off and trusts the edge headers, so publish the
+    # port on loopback only. Never expose it on a reachable interface.
     ports:
-      - "8080:8080"
+      - '127.0.0.1:8080:8080'
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/v1/runtime/health"]
+      # Follows CLERUM_SERVER_PORT if it is overridden inside the container.
+      test:
+        ['CMD-SHELL', 'wget -qO- "http://localhost:$${CLERUM_SERVER_PORT:-8080}/v1/runtime/health"']
       interval: 10s
       timeout: 5s
       retries: 5
@@ -31,7 +37,7 @@ services:
       mcp-host:
         condition: service_healthy
     environment:
-      CLERUM_DEV_MODE: "true"
+      CLERUM_DEV_MODE: 'true'
       CLERUM_HOST_REF: dev-host
       CLERUM_MCP_HOST_URL: http://mcp-host:8080
       # Replace telegram channel/user IDs to match your bot setup.

@@ -70,7 +70,9 @@ spec:
       ports:
         - { port: 8095, protocol: TCP }
 ---
-# Prometheus scrape on the metrics port (Q6 same scrape config as rpc-proxy).
+# Monitoring-namespace access to port 9090. webhook-proxy currently serves only
+# /healthz and /readyz there (no /metrics endpoint yet); kept so a future
+# Prometheus scrape works without a policy change (same shape as rpc-proxy).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

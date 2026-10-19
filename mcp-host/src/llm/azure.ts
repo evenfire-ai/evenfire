@@ -18,11 +18,14 @@
  */
 import OpenAI from 'openai'
 import { OpenAIProvider } from './openai'
+import { type ProviderEnvLookup, processEnvLookup } from './providerEnv'
 import type { LlmProvider } from './registryCore'
 
 export class AzureOpenAIProvider extends OpenAIProvider {
-  constructor(apiKey: string, model: string) {
-    const endpoint = process.env.AZURE_OPENAI_ENDPOINT?.trim()
+  constructor(apiKey: string, model: string, env: ProviderEnvLookup = processEnvLookup) {
+    // Non-secret per-Host env (`host-<ref>-env` via ConfigStore in a Host pod;
+    // process.env by default) — see ./providerEnv.
+    const endpoint = env('AZURE_OPENAI_ENDPOINT')?.trim()
     if (!endpoint) {
       // Fail-closed: without the per-resource endpoint there is no correct host
       // to reach. Throwing lets createLLMProvider return null so the R5 failover
@@ -53,7 +56,7 @@ export class AzureOpenAIProvider extends OpenAIProvider {
     // Optional; only the classic (non-v1) path needs `api-version` (a query
     // param there). Read for forward-compat and thread it as a default query so
     // a switch back to the classic surface keeps working; harmless on v1.
-    const apiVersion = process.env.AZURE_OPENAI_API_VERSION?.trim()
+    const apiVersion = env('AZURE_OPENAI_API_VERSION')?.trim()
     const client = new OpenAI({
       apiKey,
       baseURL,
