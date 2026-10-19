@@ -96,6 +96,29 @@ describe('Windows session authority PowerShell launcher', () => {
     expect(message).not.toContain('C:\\private')
   })
 
+  it('reports only an allowlisted verifier phase when a started process times out', () => {
+    const failure = Object.assign(new Error('private path and command contents'), {
+      code: 'ETIMEDOUT',
+    })
+    spawnSyncMock.mockReturnValue(
+      processResult({
+        status: null,
+        signal: 'SIGTERM',
+        error: failure,
+        stderr:
+          'EVENFIRE_ACL_PHASE=validate-user-data-root\n' +
+          'EVENFIRE_ACL_PHASE=untrusted-value\nprivate path',
+      })
+    )
+
+    const message = captureError(runVerifier)
+    expect(message).toMatch(
+      /"processErrorCode":"ETIMEDOUT".*"verifierExecutionPhase":"validate-user-data-root"/
+    )
+    expect(message).not.toContain('private path')
+    expect(message).not.toContain('command contents')
+  })
+
   it('distinguishes script compilation errors from verifier ACL rejection', () => {
     spawnSyncMock.mockReturnValue(
       processResult({

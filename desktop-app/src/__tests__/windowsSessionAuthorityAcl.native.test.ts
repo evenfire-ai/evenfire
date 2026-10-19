@@ -153,7 +153,7 @@ $found = $false
 foreach ($entry in $readBack.DiscretionaryAcl) {
   if ($entry -is [System.Security.AccessControl.CommonAce] -and
     $entry.SecurityIdentifier.Value -eq $sid.Value -and
-    ($entry.AceFlags -band [System.Security.AccessControl.AceFlags]::InheritOnly) -ne 0) {
+    ([int]$entry.AceFlags -band [int][System.Security.AccessControl.AceFlags]::InheritOnly) -ne 0) {
     $found = $true
   }
 }

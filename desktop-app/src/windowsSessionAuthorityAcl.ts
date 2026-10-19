@@ -306,12 +306,16 @@ public static class SessionAuthorityNative {
 '@
 try {
   $script:phase = 'compile-script'
+  [Console]::Error.WriteLine('EVENFIRE_ACL_PHASE=compile-script')
+  [Console]::Error.Flush()
   $script:ownerClass = $null
   $script:aceClass = $null
   $script:aceMask = $null
   $script:aceInherited = $null
   Add-Type -TypeDefinition $code -Language CSharp
   $script:phase = 'validate-request'
+  [Console]::Error.WriteLine('EVENFIRE_ACL_PHASE=validate-request')
+  [Console]::Error.Flush()
   $requestPayload = [Environment]::GetEnvironmentVariable('EVENFIRE_SESSION_AUTHORITY_ACL_REQUEST')
   if (-not $requestPayload) { throw 'request-missing' }
   $requestJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($requestPayload))
@@ -468,25 +472,39 @@ try {
     return $count
   }
   $script:phase = 'validate-user-data-ancestry'
+  [Console]::Error.WriteLine('EVENFIRE_ACL_PHASE=validate-user-data-ancestry')
+  [Console]::Error.Flush()
   Test-Ancestry $root $true
   $script:phase = 'validate-user-data-root'
+  [Console]::Error.WriteLine('EVENFIRE_ACL_PHASE=validate-user-data-root')
+  [Console]::Error.Flush()
   $rootBefore = Inspect-Object $root $true
   Test-PrincipalRules $rootBefore $false 'validate-user-data-root-acl'
   Test-CurrentEffectiveAccess $rootBefore $createChildMask
   if (-not [SessionAuthorityNative]::EntryExists($authority)) {
     $script:phase = 'provision-authority-directory'
+    [Console]::Error.WriteLine('EVENFIRE_ACL_PHASE=provision-authority-directory')
+    [Console]::Error.Flush()
     if ($request.mode -ne 'provision') { throw 'authority-directory-absent' }
     $directoryInfo = [IO.DirectoryInfo]::new($authority)
     $directoryInfo.Create((New-PrivateAcl $true))
+    [Console]::Error.WriteLine('EVENFIRE_ACL_PHASE=set-authority-owner')
+    [Console]::Error.Flush()
     [SessionAuthorityNative]::SetOwner($authority, $currentSid)
   }
-  $authoritySnapshot = Inspect-Object $authority $true
   $script:phase = 'validate-authority-directory'
+  [Console]::Error.WriteLine('EVENFIRE_ACL_PHASE=validate-authority-directory')
+  [Console]::Error.Flush()
+  $authoritySnapshot = Inspect-Object $authority $true
   if (-not $authoritySnapshot.DaclProtected) { throw 'authority-dacl-inherited' }
   Test-PrincipalRules $authoritySnapshot $true 'validate-authority-directory-acl'
   Test-CurrentEffectiveAccess $authoritySnapshot $privateMask
+  [Console]::Error.WriteLine('EVENFIRE_ACL_PHASE=validate-authority-tree')
+  [Console]::Error.Flush()
   $objectCount = Test-PrivateTree $authority
   $script:phase = 'revalidate-user-data-root'
+  [Console]::Error.WriteLine('EVENFIRE_ACL_PHASE=revalidate-user-data-root')
+  [Console]::Error.Flush()
   $rootSnapshot = Inspect-Object $root $true
   if ($rootSnapshot.Identity -ne $rootBefore.Identity -or
     [string]::Compare($rootSnapshot.FinalPath, $rootBefore.FinalPath, $true) -ne 0) {
@@ -619,11 +637,33 @@ function sanitizedWindowsAclFailure(stdout: string): {
   }
 }
 
+function sanitizedVerifierExecutionPhase(stderr: string): string | undefined {
+  const allowed = new Set([
+    'compile-script',
+    'validate-request',
+    'validate-user-data-ancestry',
+    'validate-user-data-root',
+    'provision-authority-directory',
+    'set-authority-owner',
+    'validate-authority-directory',
+    'validate-authority-tree',
+    'revalidate-user-data-root',
+  ])
+  const matches = stderr.matchAll(/(?:^|\r?\n)EVENFIRE_ACL_PHASE=([A-Za-z0-9-]{1,80})(?=\r?\n|$)/g)
+  let phase: string | undefined
+  for (const match of matches) {
+    if (allowed.has(match[1]!)) phase = match[1]
+  }
+  return phase
+}
+
 function safePowerShellFailure(result: SpawnSyncReturns<string>, fallbackPhase: string): string {
   const stdout = typeof result.stdout === 'string' ? result.stdout : ''
-  const stderrPresent = typeof result.stderr === 'string' && result.stderr.length > 0
+  const stderr = typeof result.stderr === 'string' ? result.stderr : ''
+  const stderrPresent = stderr.length > 0
   const stdoutPresent = stdout.length > 0
   const verifierFailure = sanitizedWindowsAclFailure(stdout)
+  const executionPhase = sanitizedVerifierExecutionPhase(stderr)
   const processStarted = typeof result.pid === 'number' && result.pid > 0
   const processError = result.error as NodeJS.ErrnoException | undefined
   const errorCode = processError?.code
@@ -655,6 +695,7 @@ function safePowerShellFailure(result: SpawnSyncReturns<string>, fallbackPhase: 
   if (typeof errorCode === 'string' && /^[A-Z0-9_]{1,32}$/.test(errorCode)) {
     diagnostic.processErrorCode = errorCode
   }
+  if (executionPhase) diagnostic.verifierExecutionPhase = executionPhase
   if (
     typeof signal === 'string' &&
     ['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGABRT', 'SIGBREAK'].includes(signal)
