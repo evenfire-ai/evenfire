@@ -81,7 +81,7 @@ test.describe('Codex subscription workflow recipe authoring', () => {
     await createPlaceholderRecipe(recipeName)
 
     try {
-      // E2E_GUARDIAN_ENTRY_POINT
+      // E2E_GUARDIAN_NAVIGATION: root-entry — public application root before login
       await page.goto('/')
       await loginControlUiVisible(page)
 
