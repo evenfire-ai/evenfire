@@ -1,11 +1,15 @@
 // E2E_GUARDIAN_IPC_FLOW: this test-only controller observes the owned Desktop
 // DOM and clicks its visible per-request button. It never calls product APIs.
 import type { ElectronApplication, ElementHandle, Page } from '@playwright/test'
-import { randomUUID } from 'node:crypto'
-import { chmod, mkdtemp, rm } from 'node:fs/promises'
-import { type Socket, createServer } from 'node:net'
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { type Socket, connect, createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import {
+  provisionWindowsSessionAuthorityDirectory,
+  verifyWindowsSessionAuthorityDirectory,
+} from '../../../src/windowsSessionAuthorityAcl.js'
 
 type Button = ElementHandle<HTMLElement | SVGElement>
 type Pending = {
@@ -43,9 +47,37 @@ export async function createGfsApprovalReview(
       throw new Error('Owned compiled Desktop page changed')
   }
   verifyOwnedPage()
-  const directory = await mkdtemp(join(tmpdir(), 'gfs-review-'))
-  await chmod(directory, 0o700)
-  const socketPath = join(directory, 'review.sock')
+  const reviewId = randomUUID()
+  const directory =
+    process.platform === 'win32'
+      ? join(tmpdir(), `gfs-review-${reviewId}`)
+      : await mkdtemp(join(tmpdir(), 'gfs-review-'))
+  const controlDirectory = join(directory, 'sessions')
+  const accessTokenPath = join(controlDirectory, 'review-token')
+  if (process.platform === 'win32') await mkdir(directory, { mode: 0o700 })
+  const accessToken = randomBytes(32)
+  try {
+    if (process.platform === 'win32') {
+      provisionWindowsSessionAuthorityDirectory(directory, controlDirectory)
+    } else {
+      await chmod(directory, 0o700)
+      await mkdir(controlDirectory, { mode: 0o700 })
+      await chmod(controlDirectory, 0o700)
+    }
+    await writeFile(accessTokenPath, accessToken.toString('hex'), { flag: 'wx', mode: 0o600 })
+    if (process.platform === 'win32') {
+      verifyWindowsSessionAuthorityDirectory(directory, controlDirectory)
+    } else {
+      await chmod(accessTokenPath, 0o600)
+    }
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true })
+    throw error
+  }
+  const socketPath =
+    process.platform === 'win32'
+      ? `\\\\.\\pipe\\evenfire-gfs-review-${reviewId}`
+      : join(directory, 'review.sock')
   const sockets = new Set<Socket>()
   let pending: Pending | undefined
   let deciding = false
@@ -192,8 +224,20 @@ export async function createGfsApprovalReview(
     }
     if (!request || typeof request !== 'object' || Array.isArray(request))
       throw new Error('Invalid review request')
-    const { action, nonce } = request as Record<string, unknown>
-    if (Object.keys(request).some(key => key !== 'action' && key !== 'nonce'))
+    const { action, nonce, accessToken: submittedToken } = request as Record<string, unknown>
+    const tokenBytes =
+      typeof submittedToken === 'string' ? Buffer.from(submittedToken, 'hex') : null
+    if (
+      typeof submittedToken !== 'string' ||
+      !/^[0-9a-f]{64}$/i.test(submittedToken) ||
+      !tokenBytes ||
+      tokenBytes.length !== accessToken.length ||
+      !timingSafeEqual(tokenBytes, accessToken)
+    )
+      throw new Error('Unauthorized review request')
+    if (
+      Object.keys(request).some(key => key !== 'action' && key !== 'nonce' && key !== 'accessToken')
+    )
       throw new Error('Unknown review request field')
     // Each fixed route owns its checks. Selecting an observation route cannot
     // skip the nonce, deadline, binding or DOM checks in the decision route.
@@ -251,7 +295,7 @@ export async function createGfsApprovalReview(
         resolve()
       })
     })
-    await chmod(socketPath, 0o600)
+    if (process.platform !== 'win32') await chmod(socketPath, 0o600)
   } catch (error) {
     server.close()
     await rm(directory, { recursive: true, force: true })
@@ -259,6 +303,29 @@ export async function createGfsApprovalReview(
   }
   return {
     socketPath,
+    async request(value: unknown, raw = false): Promise<unknown> {
+      return new Promise((resolve, reject) => {
+        const socket = connect(socketPath)
+        socket.setTimeout(2_000, () => socket.destroy(new Error('Fixture transport timeout')))
+        const chunks: Buffer[] = []
+        socket.once('error', reject)
+        socket.once('connect', () => {
+          const request = raw
+            ? String(value)
+            : `${JSON.stringify({ ...(value as Record<string, unknown>), accessToken: accessToken.toString('hex') })}\n`
+          socket.write(request)
+        })
+        socket.on('data', chunk => chunks.push(chunk))
+        socket.once('end', () => {
+          try {
+            resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')))
+          } catch (error) {
+            reject(error)
+          }
+        })
+      })
+    },
+    directory,
     activate() {
       active = true
     },

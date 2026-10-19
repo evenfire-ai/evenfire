@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ElectronApplication, Page } from '@playwright/test'
 import { existsSync, statSync } from 'node:fs'
-import { connect } from 'node:net'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { createGfsApprovalReview } from './e2e-playwright/helpers/gfsApprovalReview'
 
 type Review = Awaited<ReturnType<typeof createGfsApprovalReview>>
@@ -106,28 +105,27 @@ async function fixture(options?: Parameters<typeof createGfsApprovalReview>[3]) 
 }
 
 async function request(review: Review, value: unknown, raw = false): Promise<any> {
-  return new Promise((resolve, reject) => {
-    const socket = connect(review.socketPath)
-    socket.setTimeout(2_000, () => socket.destroy(new Error('Fixture transport timeout')))
-    const chunks: Buffer[] = []
-    socket.once('error', reject)
-    socket.once('connect', () => socket.write(raw ? String(value) : `${JSON.stringify(value)}\n`))
-    socket.on('data', chunk => chunks.push(chunk))
-    socket.once('end', () => {
-      try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')))
-      } catch (error) {
-        reject(error)
-      }
-    })
-  })
+  return review.request(value, raw)
 }
 
 describe('attended GFS approval reviewer', () => {
-  it('creates a private bounded socket and never approves during viewing/preparation', async () => {
+  it('creates a private bounded reviewer transport and never approves during preparation', async () => {
     const f = await fixture()
-    expect(statSync(dirname(f.review.socketPath)).mode & 0o777).toBe(0o700)
-    expect(statSync(f.review.socketPath).mode & 0o777).toBe(0o600)
+    const controlDirectory = join(f.review.directory, 'sessions')
+    const accessToken = join(controlDirectory, 'review-token')
+    if (process.platform === 'win32') {
+      expect(f.review.socketPath).toMatch(/^\\\\\.\\pipe\\evenfire-gfs-review-[0-9a-f-]{36}$/i)
+      expect(existsSync(f.review.directory)).toBe(true)
+      expect(existsSync(accessToken)).toBe(true)
+    } else {
+      expect(statSync(dirname(f.review.socketPath)).mode & 0o777).toBe(0o700)
+      expect(statSync(f.review.socketPath).mode & 0o777).toBe(0o600)
+      expect(statSync(controlDirectory).mode & 0o777).toBe(0o700)
+      expect(statSync(accessToken).mode & 0o777).toBe(0o600)
+    }
+    expect(await request(f.review, '{"action":"view"}\n', true)).toEqual({
+      error: 'Unauthorized review request',
+    })
     expect(await request(f.review, { action: 'view' })).toMatchObject({ state: 'preparing' })
     expect(await request(f.review, { action: 'approve', nonce: 'unknown' })).toHaveProperty('error')
     f.review.activate()
@@ -352,7 +350,7 @@ describe('attended GFS approval reviewer', () => {
     expect(f.approveClick).not.toHaveBeenCalled()
     await f.review.close()
     reviews.splice(reviews.indexOf(f.review), 1)
-    expect(existsSync(dirname(f.review.socketPath))).toBe(false)
+    expect(existsSync(f.review.directory)).toBe(false)
   })
 
   it('ends result observation at a bounded deadline', async () => {
@@ -372,6 +370,6 @@ describe('attended GFS approval reviewer', () => {
     f.state.disposeThrows = true
     await expect(f.review.close()).rejects.toThrow('Renderer closed')
     reviews.splice(reviews.indexOf(f.review), 1)
-    expect(existsSync(dirname(f.review.socketPath))).toBe(false)
+    expect(existsSync(f.review.directory)).toBe(false)
   })
 })
