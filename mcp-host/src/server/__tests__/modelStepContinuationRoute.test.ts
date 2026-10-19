@@ -70,6 +70,13 @@ function makeRes(): CapturedRes {
   }
 }
 
+const RPC_TRACE = {
+  version: 1,
+  runId: 'edge-run',
+  sessionId: 'chat-1',
+  origin: 'direct_chat',
+  correlationRefs: [],
+}
 const RPC_CALLER = { caller: 'rpc-proxy', hostRef: 'chatllm', userId: 'edge-user' }
 
 function makeReq(
@@ -78,6 +85,7 @@ function makeReq(
     body?: unknown
     /** `null` omits the edge caller context entirely. */
     caller?: unknown
+    headers?: Record<string, string>
   } = {}
 ): Request {
   const req: Record<string, unknown> = {
@@ -88,6 +96,9 @@ function makeReq(
       ...overrides.params,
     },
     body: overrides.body ?? { version: 3 },
+    headers: overrides.headers ?? {
+      'x-clerum-edge-trace-context': encodeURIComponent(JSON.stringify(RPC_TRACE)),
+    },
   }
   if (overrides.caller !== null) req.runtimeCaller = overrides.caller ?? RPC_CALLER
   return req as unknown as Request
@@ -239,6 +250,66 @@ describe('handleModelStepContinuationRoute — identity and relay (#1043)', () =
     expect(captured.statusCode).toBe(readVector('continue-response.blocked.json').httpStatus)
   })
 
+  it('takes the trace from the trusted edge header and drops a body trace', async () => {
+    const trace = {
+      version: 1,
+      runId: 'trusted-run',
+      sessionId: 'chat-1',
+      origin: 'direct_chat',
+      correlationRefs: [],
+    }
+    const handler = vi.fn<ModelStepContinuationHandler>(async () => ({
+      status: 202,
+      body: CLAIMED_BODY,
+    }))
+    const captured = makeRes()
+    await handleModelStepContinuationRoute(
+      makeReq({
+        body: { version: 7, traceContext: { ...trace, runId: 'body-run' } },
+        headers: { 'x-clerum-edge-trace-context': encodeURIComponent(JSON.stringify(trace)) },
+      }),
+      captured.res,
+      makeHandlers({ modelStepContinuationHandler: handler })
+    )
+    expect(captured.statusCode).toBe(202)
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ traceContext: trace }))
+  })
+
+  it.each([
+    undefined,
+    'invalid JSON',
+    '{}',
+    JSON.stringify({
+      version: 1,
+      runId: 'run',
+      sessionId: 'other-chat',
+      origin: 'direct_chat',
+      correlationRefs: [],
+    }),
+  ])('rejects an invalid or misbound edge trace: %s', async value => {
+    const handler = vi.fn<ModelStepContinuationHandler>(async () => ({
+      status: 202,
+      body: CLAIMED_BODY,
+    }))
+    const rejected = makeRes()
+    await handleModelStepContinuationRoute(
+      makeReq({ headers: value === undefined ? {} : { 'x-clerum-edge-trace-context': value } }),
+      rejected.res,
+      makeHandlers({ modelStepContinuationHandler: handler })
+    )
+    expect(rejected.statusCode).toBe(400)
+    expect(rejected.jsonBody).toEqual({ error: 'Invalid continuation traceContext' })
+    expect(handler).not.toHaveBeenCalled()
+    const accepted = makeRes()
+    await handleModelStepContinuationRoute(
+      makeReq(),
+      accepted.res,
+      makeHandlers({ modelStepContinuationHandler: handler })
+    )
+    expect(accepted.statusCode).toBe(202)
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
   it('takes the userId from the edge caller context, never from the body', async () => {
     const handler = vi.fn<ModelStepContinuationHandler>(async () => ({
       status: 202,
@@ -259,6 +330,7 @@ describe('handleModelStepContinuationRoute — identity and relay (#1043)', () =
       chatId: 'chat-1',
       checkpointId: CHECKPOINT_ID,
       version: 7,
+      traceContext: RPC_TRACE,
     })
   })
 })
@@ -299,6 +371,7 @@ function continueUrl(baseUrl: string): string {
 function rpcEdgeHeaders(): Record<string, string> {
   return {
     'Content-Type': 'application/json',
+    'x-clerum-edge-trace-context': encodeURIComponent(JSON.stringify(RPC_TRACE)),
     'x-clerum-edge-caller': 'rpc-proxy',
     'x-clerum-edge-host-ref': 'chatllm',
     'x-clerum-edge-user-id': 'user-1',
@@ -344,6 +417,7 @@ describe('POST /v1/runtime/sessions/.../continue — DRAINING fence (#1043)', ()
         chatId: 'chat-1',
         checkpointId: CHECKPOINT_ID,
         version: 3,
+        traceContext: RPC_TRACE,
       })
       // The accepted intake is the liveness witness for the fenced branch:
       // only the fenced call skipped it.

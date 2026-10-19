@@ -1040,9 +1040,28 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'Invalid hostRef, agent, chatId, or checkpointId' })
           return
         }
+        const deliveryId =
+          (typeof req.headers['idempotency-key'] === 'string'
+            ? req.headers['idempotency-key'].trim()
+            : '') || randomUUID()
+        const traceContext = mintOrReuseDirectTraceContext({
+          authorityScope: `${auth.sub}:${hostRef}`,
+          deliveryId,
+          sessionId: chatId,
+          requestId:
+            typeof req.headers['x-request-id'] === 'string'
+              ? req.headers['x-request-id'].trim()
+              : undefined,
+          origin: 'direct_chat',
+        })
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
+          directRunBinding: {
+            runId: traceContext.runId,
+            sessionId: chatId,
+            origin: traceContext.origin,
+          },
         })
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
@@ -1069,7 +1088,11 @@ export function createRpcRouter(): Router {
         const forwardContinuation = async (timeoutMs?: number) => {
           const response = await fetch(upstreamUrl, {
             method: 'POST',
-            headers: { 'content-type': 'application/json', ...host.headers },
+            headers: {
+              'content-type': 'application/json',
+              ...host.headers,
+              'x-clerum-edge-trace-context': encodeURIComponent(JSON.stringify(traceContext)),
+            },
             body: forwardedBody,
             // No client-side deadline on the first attempt, like the message
             // write path: mcp-host may already have claimed the checkpoint,
@@ -1108,8 +1131,13 @@ export function createRpcRouter(): Router {
               // A live claim or completed result replays. After the claim lease
               // lapses, a new task may claim it; the old task loses its write fence.
               retryUntilDeadline: true,
-              attemptUpstream: async timeoutMs => {
-                const { response, body } = await forwardContinuation(timeoutMs)
+              attemptUpstream: async (_timeoutMs, deadlineMs) => {
+                // The Host waits up to 10 s for its admission verdict. The
+                // generic wake attempt is capped by upstreamTimeoutMs (8 s
+                // by default), so use the remaining hold budget for this write.
+                const { response, body } = await forwardContinuation(
+                  Math.max(1, deadlineMs - Date.now())
+                )
                 sendUpstreamBody(
                   res,
                   response.status,

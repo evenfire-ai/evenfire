@@ -879,7 +879,7 @@ describe('ModelStepContinuationService — admission failures (#1043)', () => {
   })
 
   it('logs a fixed code for a corrupt source message and still admits a fresh checkpoint', async () => {
-    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => undefined)
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
     const { handle, checkpoints, service, enqueue, captured } = createHarness({
       verdict: { kind: 'started' },
     })
@@ -889,38 +889,36 @@ describe('ModelStepContinuationService — admission failures (#1043)', () => {
     const corruptSource = `{"content":"${userFragment}"`
     const { version } = await openResumable(checkpoints, { sourceMessage: corruptSource })
 
+    const before = checkpointRow(handle, CHECKPOINT_ID)
     await expect(service.continue(continuationRequest(version))).rejects.toThrow(
-      'Model-step checkpoint source message is not valid JSON'
+      'Invalid model-step checkpoint row'
     )
-    // The cleanup contract is unchanged: the claim is abandoned and nothing is
-    // admitted.
-    expect(checkpointRow(handle, CHECKPOINT_ID)).toMatchObject({
-      status: 'abandoned',
-      claim_generation: 1,
-      version: version + 2,
-    })
+    // The store validates the source before committing its claim, so a corrupt
+    // row never reaches admission or acquires a continuation generation.
+    expect(checkpointRow(handle, CHECKPOINT_ID)).toEqual(before)
     expect(enqueue).not.toHaveBeenCalled()
-    // Only the fixed classification is logged: no `err` field exists, so the
-    // SyntaxError message cannot travel through the log fields. The exact shape
-    // is the falsifier — the structured logger already strips an Error's
-    // message, so a spy on the raw fields is what proves the producer never
-    // passes it on.
-    expect(errorSpy.mock.calls.at(-1)).toEqual([
-      {
-        checkpointId: CHECKPOINT_ID,
-        taskId: expect.any(String),
-        code: 'source_message_invalid_json',
-        errorName: 'SourceMessageParseError',
-      },
-      'Model-step continuation admission failed',
+    expect(warnSpy.mock.calls.at(-1)).toEqual([
+      { checkpointId: CHECKPOINT_ID, seq: null, code: 'MODEL_STEP_CHECKPOINT_CORRUPT' },
+      'Invalid model-step checkpoint row',
     ])
-    const loggedWithMessages = JSON.stringify(errorSpy.mock.calls, (_key, value) =>
+    const loggedWithMessages = JSON.stringify(warnSpy.mock.calls, (_key, value) =>
       value instanceof Error ? { message: value.message } : value
     )
     expect(loggedWithMessages).not.toContain(userFragment)
 
-    // Positive liveness witness: after the corrupt checkpoint was abandoned, the
-    // same store and service admit a valid one through the ordinary path.
+    // Positive liveness witness: a real new user turn retires the corrupt
+    // checkpoint, then the same store and service admit a valid continuation.
+    const manager = new ConversationManager(handle.store)
+    const session = await manager.getOrCreate(SESSION_KEY, {
+      userId: USER_ID,
+      channelType: 'rpc',
+      channelId: AGENT,
+      threadId: CHAT_ID,
+      source: 'rpc',
+    })
+    await manager.startTurn(session, 'A fresh user turn', 'fresh-origin-task')
+    await manager.failTurn(session)
+    expect(checkpointRow(handle, CHECKPOINT_ID).status).toBe('abandoned')
     const validCheckpointId = 'cp-valid-1043'
     const { version: validVersion } = await openResumable(checkpoints, {
       checkpointId: validCheckpointId,
