@@ -44,6 +44,17 @@ export class AuthExpiredError extends Error {
   }
 }
 
+export class ProfileApiError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string | null,
+    message: string
+  ) {
+    super(message)
+    this.name = 'ProfileApiError'
+  }
+}
+
 export function setGlobalAuthErrorHandler(handler: () => void): void {
   globalHandleAuthError = handler
 }
@@ -126,9 +137,16 @@ export async function apiSend(
     const text = await res.text()
     if (res.status === 401) handleUnauthorized()
     let detail: string
+    let code: string | null = null
     try {
-      const parsed = JSON.parse(text) as { error?: unknown; message?: unknown }
-      detail = String(parsed.message || parsed.error || text)
+      const parsed = JSON.parse(text) as unknown
+      if (parsed && typeof parsed === 'object') {
+        const body = parsed as { error?: unknown; message?: unknown }
+        code = typeof body.error === 'string' ? body.error : null
+        detail = String(body.message || body.error || text)
+      } else {
+        detail = text
+      }
     } catch {
       detail = text
     }
@@ -146,7 +164,7 @@ export async function apiSend(
         'Invitations are unavailable — member registration is misconfigured. Check the server logs for details.'
       )
     }
-    throw new Error(`${res.status} ${res.statusText} - ${detail}`)
+    throw new ProfileApiError(res.status, code, `${res.status} ${res.statusText} - ${detail}`)
   }
   if (res.status === 204) {
     return null
@@ -230,6 +248,22 @@ export async function setupInvitationPassword(
 }
 
 export async function setupInvitationPasswordWithToken(
+  invitationUrlId: string,
+  email: string,
+  invitationId: string,
+  password: string
+): Promise<InvitationPreview & { passwordUpdated: boolean }> {
+  const response = (await apiSend('POST', '/api/v1/invitations/password-reset', {
+    token: invitationUrlId,
+    email,
+    invitationId,
+    password,
+  })) as InvitationPreview & { passwordUpdated: boolean }
+  clearToken()
+  return response
+}
+
+export async function setupAcceptedInvitationPasswordWithToken(
   invitationUrlId: string,
   email: string,
   invitationId: string,

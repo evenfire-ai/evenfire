@@ -1043,6 +1043,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       'idx_agent_run_events_approval_session_filter',
       'idx_administrative_events_list_filter',
       'idx_infrastructure_telemetry_list_filter',
+      'idx_governed_event_stream_family_time',
     ]
     const filterIndexes = await dbPool.query<{ indexname: string }>(
       `SELECT indexname FROM pg_indexes
@@ -1051,6 +1052,58 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       [requiredFilterIndexes]
     )
     expect(filterIndexes.rows.map(row => row.indexname)).toEqual([...requiredFilterIndexes].sort())
+
+    const governedStreamFamilyTimeIndex = await dbPool.query<{
+      table_name: string
+      access_method: string
+      definition: string
+      is_valid: boolean
+      is_ready: boolean
+      is_unique: boolean
+      key_columns: string[]
+      has_no_predicate: boolean
+      has_no_expressions: boolean
+    }>(`
+      SELECT table_relation.relname AS table_name,
+             access_method.amname AS access_method,
+             pg_get_indexdef(index_metadata.indexrelid) AS definition,
+             index_metadata.indisvalid AS is_valid,
+             index_metadata.indisready AS is_ready,
+             index_metadata.indisunique AS is_unique,
+             array_agg(attribute.attname::text ORDER BY index_key.ordinality) AS key_columns,
+             index_metadata.indpred IS NULL AS has_no_predicate,
+             index_metadata.indexprs IS NULL AS has_no_expressions
+        FROM pg_index AS index_metadata
+        JOIN pg_class AS index_relation ON index_relation.oid = index_metadata.indexrelid
+        JOIN pg_namespace AS index_namespace ON index_namespace.oid = index_relation.relnamespace
+        JOIN pg_class AS table_relation ON table_relation.oid = index_metadata.indrelid
+        JOIN pg_am AS access_method ON access_method.oid = index_relation.relam
+        CROSS JOIN LATERAL unnest(index_metadata.indkey) WITH ORDINALITY
+          AS index_key(attnum, ordinality)
+        JOIN pg_attribute AS attribute
+          ON attribute.attrelid = index_metadata.indrelid
+         AND attribute.attnum = index_key.attnum
+       WHERE index_namespace.nspname = 'public'
+         AND index_relation.relname = 'idx_governed_event_stream_family_time'
+         AND index_key.ordinality <= index_metadata.indnkeyatts
+       GROUP BY table_relation.relname, access_method.amname, index_metadata.indexrelid,
+                index_metadata.indisvalid, index_metadata.indisready, index_metadata.indisunique,
+                index_metadata.indpred IS NULL, index_metadata.indexprs IS NULL
+    `)
+    expect(governedStreamFamilyTimeIndex.rows).toEqual([
+      {
+        table_name: 'governed_event_stream',
+        access_method: 'btree',
+        definition:
+          'CREATE INDEX idx_governed_event_stream_family_time ON public.governed_event_stream USING btree (event_family, occurred_at, stream_sequence)',
+        is_valid: true,
+        is_ready: true,
+        is_unique: false,
+        key_columns: ['event_family', 'occurred_at', 'stream_sequence'],
+        has_no_predicate: true,
+        has_no_expressions: true,
+      },
+    ])
 
     // These perf fixtures stay in the database when the retention wake below
     // runs, and governed_trace_prune_expired_events prunes relative to
@@ -1291,18 +1344,29 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         name.startsWith('idx_agent_run_events_')
       )
     ).toBe(true)
+    // The family/time index is required and checked in pg_catalog above. The
+    // planner may instead start from a filtered source table and join through
+    // the unique (event_family, event_id) index. Keep that valid access path
+    // while rejecting scans and plans with no governed-stream index at all.
+    const governedStreamAccessIndexes = [
+      'idx_governed_event_stream_family_time',
+      'governed_event_stream_event_family_event_id_key',
+    ]
+    for (const label of ['administrative_list', 'infrastructure_list'] as const) {
+      expect(
+        planByLabel[label]?.forcedIndexNames.some(indexName =>
+          governedStreamAccessIndexes.includes(indexName)
+        )
+      ).toBe(true)
+    }
     expect(planByLabel.administrative_list?.forcedIndexNames).toEqual(
       expect.arrayContaining([
-        'idx_governed_event_stream_family_time',
         'idx_administrative_events_list_filter',
         'administrative_events_pkey',
       ])
     )
     expect(planByLabel.infrastructure_list?.forcedIndexNames).toEqual(
-      expect.arrayContaining([
-        'idx_governed_event_stream_family_time',
-        'infrastructure_telemetry_events_pkey',
-      ])
+      expect.arrayContaining(['infrastructure_telemetry_events_pkey'])
     )
 
     const priceEvidence = [

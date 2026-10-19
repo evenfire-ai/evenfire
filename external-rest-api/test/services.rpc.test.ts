@@ -27,6 +27,22 @@ describe('rpcService.issueRpcAccessToken', () => {
     expect(result).toEqual({ error: 'desktop_requires_team' })
   })
 
+  it('uses the generic forbidden reason when a 403 error code is not a string', async () => {
+    for (const body of [{ error: ['desktop_requires_team'] }, { error: 42 }]) {
+      clientMock.controlApiRequest.mockRejectedValueOnce(
+        new ControlApiError(
+          `Control API POST /external/rpc/token failed (403): ${String(body.error)}`,
+          403,
+          body
+        )
+      )
+
+      await expect(
+        issueRpcAccessToken('session', ['desktop:view'], ['pro-agent'])
+      ).resolves.toEqual({ error: 'forbidden' })
+    }
+  })
+
   it('returns the issued token unchanged on success', async () => {
     const token = {
       token: 't',
@@ -50,6 +66,8 @@ describe('rpcService.issueRpcAccessToken', () => {
       })
     )
 
-    await expect(issueRpcAccessToken('session', ['host:message:invoke'], ['pro-agent'])).rejects.toThrow()
+    await expect(
+      issueRpcAccessToken('session', ['host:message:invoke'], ['pro-agent'])
+    ).rejects.toThrow()
   })
 })

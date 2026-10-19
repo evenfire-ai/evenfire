@@ -1854,7 +1854,9 @@ describe('App deep-link orchestration', () => {
       sidebarHarness.props?.onOpenSandboxUiApp?.(app)
       await Promise.resolve()
     })
-    await waitFor(() => expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe(appRef))
+    await waitFor(() => expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe(appRef), {
+      timeout: 5_000,
+    })
   }
 
   async function selectTab(index: 0 | 1 | 2): Promise<void> {

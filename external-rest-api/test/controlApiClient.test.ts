@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ControlApiError,
+  ControlApiTransportError,
   controlApiBinaryRequestWithStatus,
   controlApiRequest,
   controlApiRequestWithStatus,
@@ -38,6 +39,18 @@ async function captureError(work: () => Promise<unknown>): Promise<ControlApiErr
   throw new Error('expected control-api request to reject')
 }
 
+async function captureTransportError(
+  work: () => Promise<unknown>
+): Promise<ControlApiTransportError> {
+  try {
+    await work()
+  } catch (error) {
+    expect(error).toBeInstanceOf(ControlApiTransportError)
+    return error as ControlApiTransportError
+  }
+  throw new Error('expected control-api transport request to reject')
+}
+
 describe('controlApiClient error headers', () => {
   afterEach(() => vi.unstubAllGlobals())
 
@@ -58,6 +71,57 @@ describe('controlApiClient error headers', () => {
     expect(error.headers).not.toHaveProperty('set-cookie')
     expect(error.headers).not.toHaveProperty('server')
     expect(error.headers).not.toHaveProperty('x-internal-debug')
+  })
+})
+
+describe('ControlApiError.code', () => {
+  it.each([
+    [{ error: 'invalid_password' }, 'invalid_password'],
+    [null, null],
+    [undefined, null],
+    [{ error: 400 }, null],
+    [{ message: 'invalid_password' }, null],
+    [['invalid_password'], null],
+  ])('exposes only a string structured error code from %j', (body, code) => {
+    expect(new ControlApiError('private', 400, body).code).toBe(code)
+  })
+})
+
+describe('controlApiClient transport classification', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('classifies rejected GET dispatch as a read without exposing the transport error', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('private URL and token')))
+
+    const error = await captureTransportError(() =>
+      controlApiRequestWithStatus('GET', '/external/invitations/token/proof')
+    )
+
+    expect(error.operation).toBe('read')
+    expect(error.phase).toBe('dispatch')
+    expect(error.message).not.toContain('private URL')
+    expect(error.message).not.toContain('token')
+  })
+
+  it('classifies a rejected mutation response read without exposing its body error', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: vi.fn().mockRejectedValue(new Error('private proof body')),
+      })
+    )
+
+    const error = await captureTransportError(() =>
+      controlApiRequestWithStatus('POST', '/external/invitations/password-token', {
+        body: { token: 'synthetic-proof' },
+      })
+    )
+
+    expect(error.operation).toBe('mutation')
+    expect(error.phase).toBe('response')
+    expect(error.message).not.toContain('private proof')
   })
 })
 

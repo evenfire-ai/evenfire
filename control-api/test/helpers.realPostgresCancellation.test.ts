@@ -49,9 +49,10 @@ it('forwards fragmented COMMIT bytes, discards the reply and recovers later repl
   const address = backend.address()
   if (!address || typeof address === 'string') throw new Error('missing fixture backend address')
   const proxy = await createPostgresCommitReplyBlackhole(
-    ['postgresql:', `//fixture@127.0.0.1:${address.port}/fixture`].join('')
+    ['postgresql:', `//fixture@ignored/fixture?host=127.0.0.1&port=${address.port}`].join('')
   )
   const target = new URL(proxy.connectionString)
+  expect(target.searchParams.has('port')).toBe(false)
   const client = createConnection({ host: target.hostname, port: Number(target.port) })
   const replies: Buffer[] = []
   client.on('data', chunk => replies.push(chunk))
