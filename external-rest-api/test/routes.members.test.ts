@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import { once } from 'node:events'
 import request from 'supertest'
+import { createApp } from '../src/app.js'
 import { ControlApiError } from '../src/controlApiClient.js'
 import { createMembersRouter } from '../src/routes/members.js'
 
@@ -131,21 +132,21 @@ describe('routes/members', () => {
   it('does not treat a non-string Control API error as a stable retirement code', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
     memberManagementMock.deleteManagedUser.mockRejectedValueOnce(
-      new ControlApiError('Control API rejected retirement', 400, {
-        error: ['reason_required'],
-      })
+      new ControlApiError(
+        `Control API DELETE /external/members/${TARGET_USER_ID} failed (400): reason_required`,
+        400,
+        { error: ['reason_required'] }
+      )
     )
-    const app = makeApp()
-    app.use((_error, _req, res, _next) => {
-      res.status(500).json({ error: 'internal_error' })
-    })
-
-    await request(app)
-      .delete(`/members/${TARGET_USER_ID}`)
+    await request(createApp())
+      .delete(`/api/v1/members/${TARGET_USER_ID}`)
       .set('authorization', 'Bearer good-token')
       .set('Idempotency-Key', 'retire-user-2-v1')
       .send({ reason: 'team access no longer required' })
-      .expect(500, { error: 'internal_error' })
+      .expect(500, {
+        error: 'Internal Server Error',
+        message: 'Control API returned an unsupported response',
+      })
   })
 
   it.each([
