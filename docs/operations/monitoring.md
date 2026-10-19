@@ -20,13 +20,13 @@ Short version:
 the kustomize tree installs it. It holds Helm values for the official Grafana
 charts:
 
-| Path                                     | What it does                                                                                   |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `namespace.yaml`                         | Creates the `monitoring` namespace                                                             |
-| `loki/values.yaml`                       | `grafana/loki-stack` chart `2.9.10`: Loki (100 Gi PVC) plus Promtail                           |
-| `grafana/values.yaml`                    | `grafana/grafana` chart: Loki datasource at `http://loki.monitoring:3100`, 10 Gi PVC, non-root |
-| `dashboards/loki-grafana-dashboard.json` | One Grafana dashboard for Kubernetes logs                                                      |
-| `Makefile`                               | `setup`, `install_*`, `upgrade_*`, `uninstall_*`, `port_forward_grafana`, `status`             |
+| Path                                     | What it does                                                                                     |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `namespace.yaml`                         | Creates the `monitoring` namespace                                                               |
+| `loki/values.yaml`                       | `grafana/loki-stack` chart `2.9.10`: Loki (100 Gi PVC) plus Promtail                             |
+| `grafana/values.yaml`                    | `grafana/grafana` chart: Loki datasource at `http://loki.monitoring:3100`, 10 Gi PVC, non-root   |
+| `dashboards/loki-grafana-dashboard.json` | One Grafana dashboard for Kubernetes logs                                                        |
+| `Makefile`                               | `setup`, `install_*`, `upgrade_*`, `uninstall_*`, `dashboards`, `port_forward_grafana`, `status` |
 
 Loki is the only datasource. The starter does not install Prometheus or any
 metrics dashboard.
@@ -40,9 +40,9 @@ There is one dashboard, **Loki Kubernetes Logs** (Grafana community dashboard
 - a log panel with the matching lines.
 
 You filter by `namespace`, `stream` and `container`, plus a free-text search.
-The panels reference a fixed datasource UID that the provisioned Loki
-datasource does not set. If the panels show "datasource not found", open each
-panel and select the **Loki** datasource.
+The panels reference the Loki datasource by the fixed UID
+`P8E80F9AEF21F6940`, which `grafana/values.yaml` sets on the provisioned Loki
+datasource. If you change one, change the other.
 
 ### Install on minikube
 
@@ -94,10 +94,16 @@ generates. On a cluster whose StorageClass matches the values files, the same
 `helm --kube-context` commands work without the `--set` overrides.
 
 The targets in `monitoring/Makefile` (`setup`, `install_*`, `upgrade_*`,
-`uninstall_*`, `status`, `port_forward_grafana`) take no context: they run
-`kubectl` and `helm` against your kubeconfig's **current** context. Use them
-only after `kubectl config current-context` shows the intended cluster; the
-explicit commands above are the safer default.
+`uninstall_*`, `dashboards`, `status`, `port_forward_grafana`) take no context:
+they run `kubectl` and `helm` against your kubeconfig's **current** context.
+Use them only after `kubectl config current-context` shows the intended
+cluster; the explicit commands above are the safer default. `install_grafana`
+and `upgrade_grafana` create or update the `grafana-dashboards` ConfigMap
+first. The `STORAGE_CLASS`, `LOKI_SIZE`, `GRAFANA_SIZE` and `GRAFANA_PORT`
+variables cover the minikube overrides, for example
+`make install_loki install_grafana STORAGE_CLASS=standard LOKI_SIZE=10Gi` and
+`make port_forward_grafana GRAFANA_PORT=3001`. See the
+[`monitoring/` README](../../monitoring/README.md#make-variables).
 
 ## Logs
 
@@ -135,8 +141,8 @@ None of them is wired to a scraper by default.
 | mcp-proxy                     | `deploy/base` Deployment                         | `8083`                              |                                                                                                                   |
 | gfs-controller                | Stamped by HCC in the `gfs` namespace            | `8087` (`GFS_PORT`)                 | SLI counters                                                                                                      |
 
-webhook-proxy has a port named `metrics` on `9090`, but it only answers
-`/healthz` and `/readyz`. It serves no `/metrics`.
+webhook-proxy's port `9090` is named `health`. It only answers `/healthz` and
+`/readyz`. It serves no `/metrics`.
 
 control-api's `/metrics` is not forwarded by the nginx gateway in front of it.
 Scrape the control-api pod or Service directly.
