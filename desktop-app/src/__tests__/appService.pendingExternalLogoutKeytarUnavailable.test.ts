@@ -24,11 +24,10 @@ vi.mock('electron', () => ({
     decryptString: vi.fn((value: Buffer) => value.toString('utf8')),
   },
 }))
-vi.mock('../chatStoreBinding.js', () => ({
-  bindChatStoreForUser: vi.fn(),
-  unbindChatStore: vi.fn(),
-  __setChatStoreBaseDirForTests: vi.fn(),
-}))
+vi.mock('../chatStoreBinding.js', async () => {
+  const { createChatStoreBindingMock } = await import('../../testSupport/chatStoreBindingMock.js')
+  return createChatStoreBindingMock()
+})
 vi.mock('../pluginSdkRuntime.js', () => ({
   tryGetPluginSdkRuntime: () => ({ notifySessionChanged, unpinAllSandboxUiSurfaces: vi.fn() }),
 }))
@@ -250,11 +249,15 @@ describe('AppService pending logout when Keytar is unavailable', () => {
     const hostPlatform = process.platform
     Object.defineProperty(process, 'platform', { value: 'linux', configurable: true })
     const sync = fsSync.fsyncSync.bind(fsSync)
+    let directorySyncCompleted = false
     const syncSpy = vi.spyOn(fsSync, 'fsyncSync').mockImplementation(descriptor => {
-      // This test simulates Linux's directory-fsync capability on a Windows host.
-      // The native Windows durability contract is covered by its own platform gate.
-      if (fsSync.fstatSync(descriptor).isDirectory()) return
-      return sync(descriptor)
+      const isDirectory = fsSync.fstatSync(descriptor).isDirectory()
+      // Only emulate Linux's unsupported directory fsync when the actual host is Windows.
+      // POSIX hosts must execute the real sync while this test spoofs Linux platform detection.
+      if (hostPlatform === 'win32' && isDirectory) return
+      const result = sync(descriptor)
+      if (isDirectory) directorySyncCompleted = true
+      return result
     })
     try {
       testRuntime.safeStorageBackend = 'basic_text'
@@ -286,6 +289,7 @@ describe('AppService pending logout when Keytar is unavailable', () => {
           (await readFile(path.join(userDataDirectory, file))).includes(Buffer.from(token))
         ).toBe(false)
       }
+      if (hostPlatform !== 'win32') expect(directorySyncCompleted).toBe(true)
     } finally {
       syncSpy.mockRestore()
       Object.defineProperty(process, 'platform', { value: hostPlatform, configurable: true })
