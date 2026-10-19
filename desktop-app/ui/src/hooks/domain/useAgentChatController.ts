@@ -529,6 +529,7 @@ export function useAgentChatController({
     hideAgent,
     hideRemoteRowsOf,
     hideAllRemoteRows,
+    invalidateAuthorityScope,
     loadChatList,
     loadMoreChatSessions,
     setChatListLoading,
@@ -1089,7 +1090,10 @@ export function useAgentChatController({
     clearList()
     // A confirmed team switch changes the scope in this same batch. The chat
     // list's scope effect also drops remote rows, but only after that commit,
-    // so it alone would leave the previous team's rows visible for one commit.
+    // so it alone would leave the previous team's rows visible for one commit,
+    // and an old-scope read that settles before that commit would publish again.
+    // Every caller of `resetChat` changes the scope.
+    invalidateAuthorityScope()
     hideAllRemoteRows()
     // R-F13 renderer half (spec §4.5-3): tear down EVERY tracked task so a late
     // terminal (a stream that reconnects post-logout and 401s) can't run side
@@ -1124,6 +1128,7 @@ export function useAgentChatController({
     beginSelectionIntent,
     clearList,
     hideAllRemoteRows,
+    invalidateAuthorityScope,
     tracker,
     fsm,
     resetReplyNotificationDedupe,

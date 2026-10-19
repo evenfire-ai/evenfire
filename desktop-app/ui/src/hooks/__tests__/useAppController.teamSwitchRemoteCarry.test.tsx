@@ -41,13 +41,21 @@ const staleCommits = (commits: Commit[]) => commits.filter(c => c.rows.some(isTe
  * read issued after the main process confirmed the switch is a team-2 read.
  * Team-2's local index and catalog page are held until the test releases them.
  */
-function installTeamAwareChat(clerum: MockClerum, handle: AppControllerClerumHandle) {
+function installTeamAwareChat(
+  clerum: MockClerum,
+  handle: AppControllerClerumHandle,
+  options: { holdTeam1Page?: boolean } = {}
+) {
   let team: 'team-1' | 'team-2' = 'team-1'
+  const team1Page = deferred<SessionsListResult>()
   const team2Index = deferred<ChatIndex>()
   const team2Page = deferred<SessionsListResult>()
+  let team1PageResolved = false
   let team2IndexResolved = false
   let team2PageResolved = false
   const reads = { team1Page: 0, team2Index: 0, team2Page: 0 }
+  const team1Rows = () =>
+    serverSessions([{ agent: HOST_A, chatId: SHARED_CHAT, title: TEAM_1_TITLE }])
 
   clerum.chat.getIndex.mockImplementation(async () => {
     if (team === 'team-1') return localIndex([])
@@ -59,7 +67,7 @@ function installTeamAwareChat(clerum: MockClerum, handle: AppControllerClerumHan
       if (hostRef !== HOST_A || query?.limit === 1) return serverSessions([])
       if (team === 'team-1') {
         reads.team1Page += 1
-        return serverSessions([{ agent: HOST_A, chatId: SHARED_CHAT, title: TEAM_1_TITLE }])
+        return options.holdTeam1Page ? team1Page.promise : team1Rows()
       }
       reads.team2Page += 1
       return team2Page.promise
@@ -75,6 +83,11 @@ function installTeamAwareChat(clerum: MockClerum, handle: AppControllerClerumHan
 
   return {
     reads,
+    resolveTeam1Page: () => {
+      team1PageResolved = true
+      team1Page.resolve(team1Rows())
+    },
+    team1PageResolved: () => team1PageResolved,
     resolveTeam2Index: () => {
       team2IndexResolved = true
       team2Index.resolve(localIndex([]))
@@ -230,5 +243,62 @@ describe('useAppController — remote rows across a team switch', () => {
     )
     expect(chat.reads.team1Page).toBe(0)
     expect(staleCommits(commits)).toEqual([])
+  })
+
+  it('T-R1M2-1: a team-1 page that lands between the confirmed switch and its commit never reaches a team-2 commit', async () => {
+    const { clerum, handle } = installAppControllerClerum({ agentNames: [HOST_A] })
+    const chat = installTeamAwareChat(clerum, handle, { holdTeam1Page: true })
+    // The switch's own catalog refresh lands the held team-1 page and lets its
+    // read finish before the switch commits: `resetChat` has already run, React
+    // has not rendered team-2 yet.
+    let switched = false
+    const originalSwitch = handle.switchTeam.getMockImplementation() as (
+      teamId: string
+    ) => Promise<unknown>
+    handle.switchTeam.mockImplementation(async (teamId: string) => {
+      const result = await originalSwitch(teamId)
+      switched = true
+      return result
+    })
+    const originalRefresh = handle.refreshCatalog.getMockImplementation() as () => Promise<unknown>
+    handle.refreshCatalog.mockImplementation(async () => {
+      if (switched && !chat.team1PageResolved()) {
+        chat.resolveTeam1Page()
+        await new Promise(resolve => setTimeout(resolve, 0))
+      }
+      return originalRefresh()
+    })
+    const { app, commits } = observe()
+    unmount = app.unmount
+
+    await waitFor(() => expect(app.result.current.isAuthenticated).toBe(true))
+    await waitFor(() => expect(chat.reads.team1Page).toBeGreaterThan(0))
+    expect(chat.team1PageResolved()).toBe(false)
+    expect(app.result.current.currentTeamId).toBe('team-1')
+
+    await act(async () => {
+      await app.result.current.handleEnsureTeamContext({ teamId: 'team-2' })
+    })
+
+    // Liveness witness: the switch was confirmed and the held team-1 read
+    // settled inside it, before its commit.
+    expect(handle.switchTeam).toHaveBeenCalledWith('team-2')
+    expect(chat.team1PageResolved()).toBe(true)
+    await waitFor(() => expect(app.result.current.currentTeamId).toBe('team-2'))
+    await waitFor(() => expect(chat.reads.team2Index).toBeGreaterThan(0))
+    await act(async () => {
+      chat.resolveTeam2Index()
+    })
+    await waitFor(() => expect(chat.reads.team2Page).toBeGreaterThan(0))
+    await act(async () => {
+      chat.resolveTeam2Page()
+    })
+    // Liveness witness: team-2's own page publishes afterwards.
+    await waitFor(() =>
+      expect(app.result.current.latestChatSessions.map(r => [r.id, r.title, r.remote])).toEqual([
+        [SHARED_CHAT, TEAM_2_TITLE, true],
+      ])
+    )
+    expect(staleCommits(commits.filter(c => c.teamId === 'team-2'))).toEqual([])
   })
 })

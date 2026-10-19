@@ -460,6 +460,15 @@ export function useChatListController({
     )
   }, [])
 
+  // Discards every in-flight list read of the current scope at once. The scope
+  // effect below does the same, but only after the commit that changes the
+  // scope, so a read that settles before that commit would still pass its
+  // checks and publish into the next scope's first commit.
+  const invalidateAuthorityScope = useCallback(() => {
+    requestGenerationRef.current += 1
+    authorityScopeGenerationRef.current += 1
+  }, [])
+
   useEffect(() => {
     requestGenerationRef.current += 1
     authorityScopeGenerationRef.current += 1
@@ -1889,6 +1898,7 @@ export function useChatListController({
     hideAgent,
     hideRemoteRowsOf,
     hideAllRemoteRows,
+    invalidateAuthorityScope,
     // CRUD (public contract).
     handleCreateChat,
     handleRenameChat,
