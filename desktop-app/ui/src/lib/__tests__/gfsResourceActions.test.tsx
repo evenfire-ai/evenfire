@@ -1,5 +1,8 @@
+// @vitest-environment jsdom
 import { isValidElement } from 'react'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, render, screen, within } from '@testing-library/react'
+import { GfsResourceTitlebarActions } from '@components/GfsResourceTitlebarActions'
 import { buildGfsResourceActions, getGfsMenuActions } from '../gfsResourceActions'
 
 const handler = () => vi.fn()
@@ -22,6 +25,8 @@ const allHandlers = () => ({
 })
 
 const resourceUri = 'gfs://main/0123456789abcdef0123456789abcdef'
+
+afterEach(cleanup)
 
 describe('GFS resource action model', () => {
   it('keeps the canonical folder and file menu order with valid historical icons', () => {
@@ -93,35 +98,34 @@ describe('GFS resource action model', () => {
     }
   })
 
-  it('omits unsupported or unauthorized operations and retains busy feedback in menus', () => {
-    const actions = getGfsMenuActions(
-      buildGfsResourceActions({
-        kind: 'file',
-        uri: resourceUri,
-        handlers: {
-          refresh: handler(),
-          'copy-link': handler(),
-          'copy-route': handler(),
-          'open-route': handler(),
-          rename: handler(),
-          move: handler(),
-          'new-folder': handler(),
-          'upload-file': handler(),
-          share: handler(),
-          'copy-content': handler(),
-          delete: handler(),
-        },
-        canRename: false,
-        canMove: true,
-        canCreateFolder: true,
-        canUpload: true,
-        canShare: false,
-        canCopyContent: false,
-        canDelete: false,
-        mutating: true,
-        refreshing: true,
-      })
-    )
+  it('keeps busy Refresh on the titlebar and excludes it from resource menus', () => {
+    const descriptors = buildGfsResourceActions({
+      kind: 'file',
+      uri: resourceUri,
+      handlers: {
+        refresh: handler(),
+        'copy-link': handler(),
+        'copy-route': handler(),
+        'open-route': handler(),
+        rename: handler(),
+        move: handler(),
+        'new-folder': handler(),
+        'upload-file': handler(),
+        share: handler(),
+        'copy-content': handler(),
+        delete: handler(),
+      },
+      canRename: false,
+      canMove: true,
+      canCreateFolder: true,
+      canUpload: true,
+      canShare: false,
+      canCopyContent: false,
+      canDelete: false,
+      mutating: true,
+      refreshing: true,
+    })
+    const actions = getGfsMenuActions(descriptors)
 
     expect(actions.map(action => action.id)).toEqual([
       'copy-link',
@@ -129,11 +133,36 @@ describe('GFS resource action model', () => {
       'move',
       'copy-content',
     ])
-    expect(actions[0]).toMatchObject({ disabled: true, loading: true })
+    expect(descriptors.find(action => action.id === 'refresh')).toMatchObject({
+      menu: false,
+      disabled: true,
+      loading: true,
+    })
+    expect(actions.some(action => ['refresh', 'open-route'].includes(action.id))).toBe(false)
     expect(actions.find(action => action.id === 'copy-content')).toMatchObject({
       disabled: true,
     })
     expect(actions.some(action => action.id === 'delete')).toBe(false)
+
+    const target = document.createElement('div')
+    document.body.appendChild(target)
+    const onRefresh = handler()
+    render(
+      <GfsResourceTitlebarActions
+        target={target}
+        onRefresh={onRefresh}
+        refreshing
+        onCopyLink={handler()}
+        onOpenLink={handler()}
+      />
+    )
+    const toolbar = within(target).getByRole('toolbar', { name: 'EvenDrive actions' })
+    const refreshButton = within(toolbar).getByRole('button', { name: 'Refresh' })
+    expect((refreshButton as HTMLButtonElement).disabled).toBe(true)
+    expect(refreshButton.parentElement?.getAttribute('title')).toBe('Refreshing EvenDrive')
+    expect(within(toolbar).getByRole('button', { name: 'Copy link' })).toBeTruthy()
+    expect(within(toolbar).getByRole('button', { name: 'Open link' })).toBeTruthy()
+    target.remove()
   })
 
   it('keeps replacement execution in the shared menu descriptor', () => {
