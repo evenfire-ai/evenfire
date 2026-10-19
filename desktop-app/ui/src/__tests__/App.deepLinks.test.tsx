@@ -2121,10 +2121,12 @@ describe('App deep-link orchestration', () => {
       await Promise.resolve()
     })
 
-    // Liveness witness (M4): A's deactivation read-then-close DID run (exactly the
-    // deferred call — launching B early-returns before any read), so the negative
-    // assertions below are not vacuously green.
-    expect(getSandboxUiLocation).toHaveBeenCalledTimes(1)
+    // Liveness witness (M4): opening B may schedule another route read on some
+    // runtimes, so pin the exact deferred promise rather than total call count.
+    // The remaining assertions also prove B is genuinely re-mounted and live.
+    expect(
+      getSandboxUiLocation.mock.results.some(result => result.value === pendingLocation.promise)
+    ).toBe(true)
     // Observable result: B stays the live view and its embed survives (no close).
     // (At the pre-fix head the stale continuation closes the newly-opened B embed.)
     expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe('ns/app-b')

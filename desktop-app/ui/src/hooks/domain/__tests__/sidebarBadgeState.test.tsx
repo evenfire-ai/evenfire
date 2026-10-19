@@ -39,11 +39,10 @@ describe('sidebar session-state bridge (D.5 review #1)', () => {
     const { result } = renderController()
     await settleMount()
 
-    const sendPromise = act(async () => {
+    await act(async () => {
       await result.current.handleSendAgentMessage('hi')
     })
     await waitFor(() => expect(clerum.hasProgressHandler('task-live')).toBe(true))
-    await sendPromise
 
     const chatId = result.current.activeChatId!
     expect(chatId).toBeTruthy()
