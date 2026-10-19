@@ -232,7 +232,18 @@ describe('inlineFileAttachmentBytes (#1043 C3/C8)', () => {
 })
 
 describe('createCheckpointImageCapture (#1043 C3/C8)', () => {
-  it('mints one durable reference per byte set and holds the bytes for the transition', () => {
+  it('D1 M3: decodes fresh bytes only when persisting instead of retaining a buffer', () => {
+    const { capture, reference } = captureOne('frame bytes')
+    const first = capture.pendingAttachments()
+    expect(first).toHaveLength(1)
+    expect(first[0]!.digestHex).toBe(reference.checkpointAttachmentDigestHex)
+    first[0]!.bytes.fill(0)
+    const second = capture.pendingAttachments()
+    expect(Buffer.from(second[0]!.bytes).toString()).toBe('frame bytes')
+    expect(second[0]!.expiresAt).toBe(reference.checkpointAttachmentExpiresAt)
+  })
+
+  it('mints one durable reference per byte set and reads its bytes for the transition', () => {
     const capture = createCheckpointImageCapture([], { now: () => NOW, ttlMs: TTL_MS })
     const message = runtimeImageMessage('same frame')
     const first = capture.capture(imagePartOf(message))

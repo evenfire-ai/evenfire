@@ -68,6 +68,7 @@ function harness(
     taskBudget?: () => string | null
     resumableTtlMs?: number
     servedBy?: () => { provider: string; model: string } | undefined
+    redact?: (text: string) => string
   } = {}
 ) {
   const worker = createInProcessWorker(':memory:')
@@ -96,8 +97,10 @@ function harness(
       },
       originUserMessageIndex: overrides.originUserMessageIndex ?? 0,
     },
-    redact: text =>
-      safety.sanitizeFreeformContent(text, { secretWarning: 'secret in checkpoint' }).content,
+    redact:
+      overrides.redact ??
+      (text =>
+        safety.sanitizeFreeformContent(text, { secretWarning: 'secret in checkpoint' }).content),
     taskBudget: overrides.taskBudget ?? (() => JSON.stringify({ iterationsUsed: 1 })),
     servedBy: overrides.servedBy,
     resumableTtlMs: overrides.resumableTtlMs ?? 60_000,
@@ -354,6 +357,17 @@ function entries(worker: InProcessWorkerHandle) {
     .all() as Array<{ seq: number; kind: string; tool_call_id: string | null; payload: string }>
 }
 
+/** Observe the durable ledger before a never-resumable origin is removed. */
+function observeSettlement(worker: InProcessWorkerHandle, recorder: ModelStepCheckpointRecorder) {
+  const observed = { entries: [] as ReturnType<typeof entries> }
+  const settle = recorder.settle.bind(recorder)
+  vi.spyOn(recorder, 'settle').mockImplementation(async result => {
+    observed.entries = entries(worker)
+    return settle(result)
+  })
+  return observed
+}
+
 function twoIterationsThenOutage(error: Error): RespondResult[] {
   return [
     {
@@ -373,8 +387,153 @@ function twoIterationsThenOutage(error: Error): RespondResult[] {
 }
 
 describe('runToolUseLoop model-step checkpoint (#1043)', () => {
+  it('D1 H1: a text-only turn writes no checkpoint rows or operations', async () => {
+    const { worker, store, recorder } = harness()
+    const open = vi.spyOn(store, 'open')
+    const append = vi.spyOn(store, 'append')
+    const update = vi.spyOn(store, 'updateState')
+    const transition = vi.spyOn(store, 'transition')
+    const reasoning = createMockReasoning([{ type: 'text', content: 'Finished without tools.' }])
+    const result = await runToolUseLoop(withRecorder(reasoning, [], recorder), [user])
+    expect(result).toMatchObject({ type: 'response', content: 'Finished without tools.' })
+    expect(reasoning.respondWithTools).toHaveBeenCalledTimes(1)
+    expect(open).not.toHaveBeenCalled()
+    expect(append).not.toHaveBeenCalled()
+    expect(update).not.toHaveBeenCalled()
+    expect(transition).not.toHaveBeenCalled()
+    expect(header(worker)).toBeUndefined()
+    expect(entries(worker)).toEqual([])
+    expect(attachmentRows(worker)).toEqual([])
+  })
+
+  it('D1 H1: first dispatch atomically writes the header, buffered history and dispatch', async () => {
+    const { worker, store, recorder } = harness()
+    const open = vi.spyOn(store, 'open')
+    const call = { id: 'tc-first', name: 'read_file', arguments: { path: 'README.md' } }
+    await recorder.begin([user])
+    await recorder.syncMessages([user, { role: 'assistant', content: '', tool_calls: [call] }])
+    expect(open).not.toHaveBeenCalled()
+    expect(header(worker)).toBeUndefined()
+    await recorder.recordDispatch(call)
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(open.mock.calls[0]![1].map(entry => entry.kind)).toEqual([
+      'message',
+      'message',
+      'tool_dispatch',
+    ])
+    expect(header(worker)?.status).toBe('open')
+    expect(entries(worker).map(entry => entry.kind)).toEqual([
+      'message',
+      'message',
+      'tool_dispatch',
+    ])
+    await recorder.recordResult(call, {
+      tool_call_id: call.id,
+      name: call.name,
+      content: 'read',
+      is_error: false,
+    })
+    expect(await recorder.settle({ type: 'error', error: outage() })).toBe('cp-loop')
+    expect((await store.loadLive(SESSION_KEY))?.tools.confirmed).toBe(1)
+  })
+
+  it('D1 M3: poisoned and deferred recorders do not decode or retain image bytes', async () => {
+    const { worker, store, recorder } = harness()
+    const part: Extract<MessageContentPart, { type: 'image' }> = {
+      type: 'image',
+      mimeType: 'image/png',
+      data: Buffer.from('frame').toString('base64'),
+    }
+    const imageUser: ChatMessage = { ...user, contentParts: [part] }
+    const decode = vi.spyOn(Buffer, 'from')
+    try {
+      await recorder.begin([imageUser])
+      await recorder.syncMessages([imageUser])
+      expect(decode).not.toHaveBeenCalled()
+      const call = { id: 'tc-image', name: 'read_file', arguments: {} }
+      await recorder.recordDispatch(call)
+      expect(header(worker)?.status).toBe('open')
+      const capture = (
+        recorder as unknown as {
+          imageCapture: { pendingAttachments(): ModelStepCheckpointAttachmentInput[] }
+        }
+      ).imageCapture
+      expect(capture.pendingAttachments()).toHaveLength(1)
+      vi.spyOn(store, 'append').mockRejectedValueOnce(new Error('SQLITE_IOERR'))
+      await recorder.recordResult(call, {
+        tool_call_id: call.id,
+        name: call.name,
+        content: 'read',
+        is_error: false,
+      })
+      expect(recorder.poisoned).toBe(true)
+      expect(capture.pendingAttachments()).toEqual([])
+      decode.mockClear()
+      await recorder.syncMessages([imageUser, imageUser])
+      expect(decode).not.toHaveBeenCalled()
+    } finally {
+      decode.mockRestore()
+    }
+  })
+
+  it('D1 L1: an entry-building error poisons the recorder while the turn succeeds', async () => {
+    const { worker, recorder } = harness({
+      redact: text => {
+        if (text === 'invalid checkpoint text') throw new Error('redaction failed')
+        return text
+      },
+    })
+    const tool = createMockTool('read_file')
+    const reasoning = createMockReasoning([
+      {
+        type: 'tool_calls',
+        content: 'invalid checkpoint text',
+        calls: [{ id: 'tc-a', name: 'read_file', arguments: {} }],
+      },
+      { type: 'text', content: 'Turn succeeded.' },
+    ])
+    const result = await runToolUseLoop(withRecorder(reasoning, [tool], recorder), [user])
+    expect(result).toMatchObject({ type: 'response', content: 'Turn succeeded.' })
+    expect(tool.execute).toHaveBeenCalledTimes(1)
+    expect(recorder.poisoned).toBe(true)
+    expect(header(worker)).toBeUndefined()
+  })
+
+  it.each(['capture', 'serialize'] as const)(
+    'D1 L1: %s errors inside a fenced append poison without escaping',
+    async kind => {
+      const { recorder, store } = harness()
+      const call = { id: 'tc-live', name: 'read_file', arguments: {} }
+      await recorder.begin([user])
+      await recorder.recordDispatch(call)
+      await recorder.recordResult(call, {
+        tool_call_id: call.id,
+        name: call.name,
+        content: 'live',
+        is_error: false,
+      })
+      expect(await store.loadEntries(SESSION_KEY, 'cp-loop')).toHaveLength(4)
+      const bad: ChatMessage =
+        kind === 'capture'
+          ? {
+              role: 'user',
+              content: '',
+              contentParts: [{ type: 'image', mimeType: 'image/png', data: '' }],
+            }
+          : {
+              role: 'tool',
+              content: 'bad',
+              tool_calls: [{ id: 'tc-bad', name: 'read_file', arguments: { value: 1n } }],
+            }
+      await expect(recorder.syncMessages([user, bad])).resolves.toBeUndefined()
+      expect(recorder.poisoned).toBe(true)
+      expect(await recorder.settle({ type: 'error', error: outage() })).toBeUndefined()
+    }
+  )
+
   it('does not confirm an inline connect result that the approval path discards', async () => {
     const { worker, recorder } = harness()
+    const settlement = observeSettlement(worker, recorder)
     const connectTool = createMockTool('monday__list_boards')
     connectTool.execute = vi.fn(async () => ({
       content: 'MCP authorization required',
@@ -400,12 +559,11 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
     })
     expect(connectTool.execute).toHaveBeenCalledTimes(1)
     expect(
-      entries(worker)
-        .filter(row => row.tool_call_id === 'connect-call')
-        .map(row => row.kind)
+      settlement.entries.filter(row => row.tool_call_id === 'connect-call').map(row => row.kind)
     ).toEqual(['tool_dispatch'])
-    expect(entries(worker).some(row => row.tool_call_id === 'unstarted-call')).toBe(false)
-    expect(header(worker)).toMatchObject({ status: 'abandoned' })
+    expect(settlement.entries.some(row => row.tool_call_id === 'unstarted-call')).toBe(false)
+    expect(header(worker)).toBeUndefined()
+    expect(entries(worker)).toEqual([])
   })
 
   it('1. a 503 provider_unavailable after confirmed tools leaves a resumable checkpoint', async () => {
@@ -419,7 +577,15 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
     expect(result).toMatchObject({ type: 'error', checkpointId: 'cp-loop' })
     expect(reasoning.continueWithToolResults).toHaveBeenCalledTimes(2)
     // Each result shares its own fenced append with its tool message.
-    expect(appendSpy).toHaveBeenCalledTimes(8)
+    expect(appendSpy).toHaveBeenCalledTimes(6)
+    const resultBatches = appendSpy.mock.calls
+      .map(([, , batch]) => batch)
+      .filter(batch => batch[0]?.kind === 'tool_result')
+    expect(resultBatches).toHaveLength(3)
+    for (const batch of resultBatches) {
+      expect(batch.map(entry => entry.kind)).toEqual(['tool_result', 'message'])
+      expect(batch[1]!.toolCallId).toBe(batch[0]!.toolCallId)
+    }
     expect(header(worker)).toMatchObject({
       status: 'resumable',
       version: 2,
@@ -495,6 +661,7 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
 
   it('1b. a workflow tool in the last batch keeps the workflow fallback and abandons the checkpoint', async () => {
     const { worker, recorder } = harness()
+    const settlement = observeSettlement(worker, recorder)
     const reasoning = createMockReasoning([
       {
         type: 'tool_calls',
@@ -519,10 +686,10 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
     expect(result.type).toBe('response')
     if (result.type !== 'response') throw new Error(`expected a response, got ${result.type}`)
     expect(result.content).toContain('artifact-output-1043')
-    expect(header(worker)?.status).toBe('abandoned')
-    expect(entries(worker).some(r => r.kind === 'tool_result' && r.tool_call_id === 'tc_w')).toBe(
-      true
-    )
+    expect(header(worker)).toBeUndefined()
+    expect(
+      settlement.entries.some(r => r.kind === 'tool_result' && r.tool_call_id === 'tc_w')
+    ).toBe(true)
   })
 
   it('1c. a secret in tool-call arguments and reasoning never reaches a row', async () => {
@@ -841,6 +1008,7 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
     const { worker, recorder } = harness({ originUserMessageIndex: 2 })
 
     await recorder.begin([historical, assistant, origin])
+    await recorder.recordDispatch({ id: 'tc-origin', name: 'read_file', arguments: {} })
     await recorder.updateState(1)
     expect(JSON.parse(header(worker)!.loop_state)).toEqual({
       nextIteration: 1,
@@ -1125,6 +1293,7 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
 
     it.each(cases)('%s', async (_code, error) => {
       const { worker, recorder } = harness()
+      const settlement = observeSettlement(worker, recorder)
       const reasoning = createMockReasoning(twoIterationsThenOutage(error))
       const tools = [createMockTool('read_file'), createMockTool('list_dir')]
 
@@ -1133,14 +1302,16 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
       expect(result.type).toBe('error')
       expect(result).not.toHaveProperty('checkpointId')
       // Witness: the checkpoint existed and recorded the confirmed tools.
-      expect(entries(worker).filter(r => r.kind === 'tool_result')).toHaveLength(3)
-      expect(header(worker)?.status).toBe('abandoned')
+      expect(settlement.entries.filter(r => r.kind === 'tool_result')).toHaveLength(3)
+      expect(header(worker)).toBeUndefined()
+      expect(entries(worker)).toEqual([])
       // A checkpoint that cannot continue never writes inline file bytes.
       expect(attachmentRows(worker)).toEqual([])
     })
 
     it('cancellation', async () => {
       const { worker, recorder } = harness()
+      const settlement = observeSettlement(worker, recorder)
       const controller = new AbortController()
       const reasoning = createMockReasoning(twoIterationsThenOutage(outage()))
       const cancelling = createMockTool('list_dir')
@@ -1156,14 +1327,14 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
       const result = await runToolUseLoop(config, [user])
 
       expect(result).toEqual({ type: 'cancelled', reason: 'signal_aborted' })
-      expect(entries(worker).some(r => r.kind === 'tool_result' && r.tool_call_id === 'tc_c')).toBe(
-        true
-      )
-      expect(header(worker)?.status).toBe('abandoned')
+      expect(
+        settlement.entries.some(r => r.kind === 'tool_result' && r.tool_call_id === 'tc_c')
+      ).toBe(true)
+      expect(header(worker)).toBeUndefined()
     })
   })
 
-  it('3. a 503 on the first completion, before any confirmed tool, abandons', async () => {
+  it('3. a 503 on the first completion, before any dispatch, writes no checkpoint', async () => {
     const { worker, recorder } = harness()
     const reasoning = createMockReasoning([{ type: 'error', error: outage() }])
 
@@ -1175,8 +1346,8 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
     expect(result.type).toBe('error')
     expect(result).not.toHaveProperty('checkpointId')
     expect(reasoning.respondWithTools).toHaveBeenCalledTimes(1)
-    expect(entries(worker).map(r => r.kind)).toEqual(['message'])
-    expect(header(worker)?.status).toBe('abandoned')
+    expect(entries(worker)).toEqual([])
+    expect(header(worker)).toBeUndefined()
   })
 
   it('4. a failed write in iteration 2 keeps the loop running and never leaves it resumable', async () => {
@@ -1200,11 +1371,12 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
     expect(reasoning.continueWithToolResults).toHaveBeenCalledTimes(2)
     expect(recorder.poisoned).toBe(true)
     expect(onFenceLost).not.toHaveBeenCalled()
-    expect(header(worker)?.status).toBe('abandoned')
+    expect(header(worker)).toBeUndefined()
   })
 
   it('5. a tool that throws mid-batch reads unknown; the next one is never dispatched', async () => {
     const { worker, recorder } = harness()
+    const settlement = observeSettlement(worker, recorder)
     const reasoning = createMockReasoning([
       {
         type: 'tool_calls',
@@ -1229,7 +1401,7 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
     ).rejects.toThrow('result policy rejected the output')
 
     expect(publish.execute).toHaveBeenCalledTimes(1)
-    const ledger = entries(worker)
+    const ledger = settlement.entries
       .filter(r => r.kind !== 'message')
       .map(r => [r.kind, r.tool_call_id])
     expect(ledger).toEqual([
@@ -1237,7 +1409,8 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
       ['tool_result', 'tc_1'],
       ['tool_dispatch', 'tc_2'],
     ])
-    expect(header(worker)?.status).toBe('abandoned')
+    expect(header(worker)).toBeUndefined()
+    expect(entries(worker)).toEqual([])
   })
 
   it('6. volume: 1000 tool calls are recorded; recorder overhead is measured', async () => {

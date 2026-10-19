@@ -378,7 +378,7 @@ export class ConversationManager {
     try {
       await Promise.resolve(this.store.persistTurnComplete(conversation, response, opts))
     } catch (err) {
-      if (currentTurn) {
+      if (opts?.completeModelStepCheckpoint && currentTurn) {
         this.restoreTurnResponse(
           currentTurn,
           completionOwner,
@@ -390,13 +390,21 @@ export class ConversationManager {
           currentTurn.completed_at = previousCompletedAt
         }
       }
-      if (this.turnCompletionOwners.get(conversation) === completionOwner) {
+      if (
+        opts?.completeModelStepCheckpoint &&
+        this.turnCompletionOwners.get(conversation) === completionOwner
+      ) {
         conversation.state = ConversationState.Processing
         conversation.pending_approval = previousPendingApproval
         conversation.activeTaskId = previousActiveTaskId
         conversation.traceContext = previousTraceContext
         conversation.updated_at = previousUpdatedAt
+      }
+      if (this.turnCompletionOwners.get(conversation) === completionOwner) {
         this.turnCompletionOwners.delete(conversation)
+      }
+      if (currentTurn && this.turnResponseOwners.get(currentTurn) === completionOwner) {
+        this.turnResponseOwners.delete(currentTurn)
       }
       throw err
     }
@@ -609,15 +617,17 @@ export class ConversationManager {
     try {
       await Promise.resolve(this.store.persistTurnFail(conversation, fence))
     } catch (err) {
-      if (currentTurn?.completed_at === writtenCompletedAt) {
+      if (fence && currentTurn?.completed_at === writtenCompletedAt) {
         currentTurn.completed_at = previousCompletedAt
       }
-      if (this.turnCompletionOwners.get(conversation) === failOwner) {
+      if (fence && this.turnCompletionOwners.get(conversation) === failOwner) {
         conversation.state = previousState
         conversation.pending_approval = previousPendingApproval
         conversation.activeTaskId = previousActiveTaskId
         conversation.traceContext = previousTraceContext
         conversation.updated_at = previousUpdatedAt
+      }
+      if (this.turnCompletionOwners.get(conversation) === failOwner) {
         this.turnCompletionOwners.delete(conversation)
       }
       throw err

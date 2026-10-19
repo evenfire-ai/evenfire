@@ -24,7 +24,7 @@ function snapshot(overrides: Partial<ModelStepCheckpointRow>): ModelStepCheckpoi
       origin_turn_number: 4,
       origin_task_id: '8d6f3a2e-4b1c-4e7a-9f0d-2c5b6a7e8f90',
       continuation_task_id: null,
-      version: 1,
+      version: 2,
       status: 'resumable',
       provider: 'codex-subscription',
       model: 'gpt-6.1-sol',

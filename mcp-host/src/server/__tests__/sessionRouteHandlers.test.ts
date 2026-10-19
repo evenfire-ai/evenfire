@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { ConversationManager } from '../../core/conversation/conversation'
+import { toModelStepCheckpointView } from '../../core/conversation/modelStepCheckpointView'
+import { makeSqliteStore } from '../../core/conversation/persistence/__tests__/testHelpers'
+import { ModelStepCheckpointStore } from '../../core/conversation/persistence/modelStepCheckpointStore'
 import { buildConnectRequiredApproval } from '../../core/extensions/mcpApprovalGateController'
 import { BasicSafety } from '../../core/safety/safety'
 import { createSessionRouteHandlers } from '../sessionRouteHandlers'
@@ -19,6 +22,81 @@ async function seed(convManager: ConversationManager, key: string): Promise<void
   await convManager.startTurn(conv, 'q', 'task')
   await convManager.completeTurn(conv, 'a')
 }
+
+describe('session read model-step recording cost', () => {
+  it('D1 M2: serves a resumable checkpoint while a running session has an unreadable open ledger', async () => {
+    const handle = makeSqliteStore()
+    const manager = new ConversationManager(handle.store)
+    const now = Date.now()
+    const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
+      now: () => now,
+      blockedTtlMs: 3_600_000,
+    })
+    const { handleSessionMessages } = createSessionRouteHandlers({
+      getConversationManager: () => manager,
+      redactToolError: (_name, text) => text,
+      redactTitle: text => text,
+      loadModelStepCheckpoint: async key => {
+        const snapshot = await checkpoints.loadLive(key)
+        return snapshot ? toModelStepCheckpointView(snapshot, now) : undefined
+      },
+    })
+    try {
+      for (const chat of ['running', 'resumable']) {
+        const key = `user-A:rpc:agent-x:${chat}`
+        const conv = await manager.getOrCreate(key)
+        await manager.startTurn(conv, `question ${chat}`, `task-${chat}`)
+        const fence = await checkpoints.open(
+          {
+            checkpointId: `cp-${chat}`,
+            sessionKey: key,
+            originTurnNumber: 1,
+            originTaskId: `task-${chat}`,
+            provider: 'openai',
+            model: 'test-model',
+            hostId: 'host-a',
+            principal: 'user-A',
+            loopState: null,
+            taskBudget: null,
+            sourceMessage: null,
+          },
+          [
+            {
+              kind: 'message',
+              toolCallId: null,
+              payload:
+                chat === 'running'
+                  ? 'unreadable open ledger'
+                  : JSON.stringify({ role: 'user', content: 'question resumable' }),
+            },
+          ]
+        )
+        if (chat === 'resumable') {
+          await checkpoints.transition(key, fence, {
+            from: ['open'],
+            to: 'resumable',
+            failedAt: now,
+            expiresAt: now + 3_600_000,
+          })
+          await manager.failTurn(conv)
+        }
+      }
+      const live = await handleSessionMessages('user-A', 'agent-x', 'resumable', {})
+      expect(live?.modelStepCheckpoint).toMatchObject({
+        checkpointId: 'cp-resumable',
+        status: 'resumable',
+        retryAvailable: true,
+      })
+      expect(live?.turns[0]?.user_input).toBe('question resumable')
+      const running = await handleSessionMessages('user-A', 'agent-x', 'running', {})
+      expect(running).toMatchObject({ state: 'processing', activeTaskId: 'task-running' })
+      expect(running?.turns[0]?.user_input).toBe('question running')
+      expect(running).not.toHaveProperty('modelStepCheckpoint')
+    } finally {
+      await handle.shutdown()
+    }
+  })
+})
 
 /**
  * Suspend a seeded conversation with a connect_required PendingApproval built by

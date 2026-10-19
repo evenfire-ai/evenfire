@@ -258,6 +258,7 @@ interface Statements {
   insertHeader: Statement
   selectHeader: Statement
   selectLiveBySession: Statement
+  selectForTask: Statement
   selectMaxSeq: Statement
   insertEntry: Statement
   selectEntries: Statement
@@ -267,6 +268,9 @@ interface Statements {
   renewLease: Statement
   claim: Statement
   retireLiveBySession: Statement
+  deleteOpenBySession: Statement
+  deleteOpenById: Statement
+  deleteNeverResumableById: Statement
   stampMessage: Statement
   selectOpen: Statement
   adoptApprovalClaims: Statement
@@ -283,6 +287,10 @@ interface Statements {
   deleteDeadAttachments: Statement
   deleteOfEndedSessions: Statement
   deleteOfClosedSessions: Statement
+  abandonAdmission: Statement
+  resetAdmissionSession: Statement
+  deleteAdmissionApproval: Statement
+  selectLiveApproval: Statement
 }
 
 const statementCache = new WeakMap<Database, Statements>()
@@ -308,8 +316,13 @@ function statements(db: Database): Statements {
     `),
     selectHeader: db.prepare('SELECT * FROM model_step_checkpoints WHERE checkpoint_id = ?'),
     selectLiveBySession: db.prepare(
-      `SELECT * FROM model_step_checkpoints WHERE session_key = ? AND status IN ${LIVE_STATUS_SQL}`
+      "SELECT * FROM model_step_checkpoints WHERE session_key = ? AND status IN ('resumable','claimed','blocked')"
     ),
+    selectForTask: db.prepare(`
+      SELECT * FROM model_step_checkpoints
+      WHERE session_key = ? AND continuation_task_id = ?
+      ORDER BY updated_at DESC LIMIT 1
+    `),
     selectMaxSeq: db.prepare(
       'SELECT COALESCE(MAX(seq), 0) AS max_seq FROM model_step_checkpoint_entries WHERE checkpoint_id = ?'
     ),
@@ -367,6 +380,17 @@ function statements(db: Database): Statements {
       SET status = 'abandoned', version = version + 1, claim_expires_at = NULL, updated_at = @now
       WHERE session_key = @session_key AND status IN ${LIVE_STATUS_SQL}
     `),
+    // Never-resumable origin checkpoints have no retention window. Cascades
+    // delete their entries and attachments in the admitting/reaping transaction.
+    deleteOpenBySession: db.prepare(
+      "DELETE FROM model_step_checkpoints WHERE session_key = ? AND status = 'open' AND failed_at IS NULL"
+    ),
+    deleteOpenById: db.prepare(
+      "DELETE FROM model_step_checkpoints WHERE checkpoint_id = ? AND status = 'open' AND failed_at IS NULL"
+    ),
+    deleteNeverResumableById: db.prepare(
+      "DELETE FROM model_step_checkpoints WHERE checkpoint_id = ? AND status = 'abandoned' AND failed_at IS NULL"
+    ),
     stampMessage: db.prepare(
       'UPDATE messages SET model_step_checkpoint_id = @checkpoint_id WHERE session_id = @session_id AND ordinal = @ordinal'
     ),
@@ -473,6 +497,28 @@ function statements(db: Database): Statements {
         WHERE end_reason IS NOT NULL AND ended_at IS NOT NULL AND ended_at < ?
       )
     `),
+    abandonAdmission: db.prepare(`
+      UPDATE model_step_checkpoints
+      SET status = 'abandoned', version = version + 1, claim_expires_at = NULL, updated_at = @now
+      WHERE checkpoint_id = @checkpoint_id AND session_key = @session_key
+        AND continuation_task_id = @task_id AND status = 'claimed'
+        AND claim_owner = @owner AND claim_generation = @generation
+    `),
+    resetAdmissionSession: db.prepare(`
+      UPDATE sessions SET state = 'idle', active_task_id = NULL, active_trace_context = NULL
+      WHERE session_key = ? AND active_task_id = ? AND state IN ('processing', 'awaiting_approval')
+    `),
+    deleteAdmissionApproval: db.prepare(`
+      DELETE FROM pending_approvals
+      WHERE task_id = ? AND session_id = (SELECT id FROM sessions WHERE session_key = ?)
+    `),
+    selectLiveApproval: db.prepare(`
+      SELECT 1 FROM pending_approvals p JOIN sessions sess ON sess.id = p.session_id
+      WHERE sess.session_key = ? AND p.task_id = ?
+        AND sess.active_task_id = p.task_id
+        AND sess.state = 'awaiting_approval' AND p.expires_at > ? / 1000
+      LIMIT 1
+    `),
   }
   statementCache.set(db, prepared)
   return prepared
@@ -559,6 +605,7 @@ export function retireLiveModelStepCheckpoints(
   now: number
 ): void {
   const s = statements(db)
+  s.deleteOpenBySession.run(sessionKey)
   s.retireLiveBySession.run({ session_key: sessionKey, now })
   s.deleteDeadAttachments.run({ now })
 }
@@ -607,11 +654,14 @@ export function completeModelStepCheckpointWithMessage(
     throw new Error('model-step checkpoint fence mismatch on completion')
   }
   s.deleteAttachmentsOf.run(fence.checkpointId)
-  s.stampMessage.run({
+  const stamped = s.stampMessage.run({
     checkpoint_id: fence.checkpointId,
     session_id: message.session_id,
     ordinal: message.ordinal,
   })
+  if (stamped.changes !== 1) {
+    throw new Error('model-step checkpoint message stamp mismatch on completion')
+  }
 }
 
 /** Executes one checkpoint op inside an IMMEDIATE transaction where it writes. */
@@ -732,6 +782,9 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
               s.deleteAttachmentsOf.run(op.fence.checkpointId)
             }
             const header = s.selectHeader.get(op.fence.checkpointId) as ModelStepCheckpointRow
+            if (from === 'open' && op.to === 'abandoned') {
+              s.deleteNeverResumableById.run(op.fence.checkpointId)
+            }
             return { applied: true, version: header.version }
           }
         }
@@ -754,39 +807,18 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
 
     case 'model_step_checkpoint_abandon_admission': {
       const tx = db.transaction(() => {
-        const changed = db
-          .prepare(
-            `UPDATE model_step_checkpoints
-                SET status = 'abandoned', version = version + 1,
-                    claim_expires_at = NULL, updated_at = @now
-              WHERE checkpoint_id = @checkpoint_id AND session_key = @session_key
-                AND continuation_task_id = @task_id AND status = 'claimed'
-                AND claim_owner = @owner AND claim_generation = @generation`
-          )
-          .run({
-            checkpoint_id: op.fence.checkpointId,
-            session_key: op.sessionKey,
-            task_id: op.taskId,
-            owner: op.fence.owner,
-            generation: op.fence.generation,
-            now: op.now,
-          }).changes
+        const changed = s.abandonAdmission.run({
+          checkpoint_id: op.fence.checkpointId,
+          session_key: op.sessionKey,
+          task_id: op.taskId,
+          owner: op.fence.owner,
+          generation: op.fence.generation,
+          now: op.now,
+        }).changes
         if (changed !== 1) return { applied: false, resetSession: false }
-        const resetSession =
-          db
-            .prepare(
-              `UPDATE sessions
-                SET state = 'idle', active_task_id = NULL, active_trace_context = NULL
-              WHERE session_key = ? AND active_task_id = ?
-                AND state IN ('processing', 'awaiting_approval')`
-            )
-            .run(op.sessionKey, op.taskId).changes === 1
+        const resetSession = s.resetAdmissionSession.run(op.sessionKey, op.taskId).changes === 1
         if (resetSession) {
-          db.prepare(
-            `DELETE FROM pending_approvals
-              WHERE task_id = ? AND session_id =
-                (SELECT id FROM sessions WHERE session_key = ?)`
-          ).run(op.taskId, op.sessionKey)
+          s.deleteAdmissionApproval.run(op.taskId, op.sessionKey)
         }
         return { applied: true, resetSession }
       })
@@ -816,16 +848,8 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
           header.status === 'blocked'
         const approvalAlive =
           header.status === 'claimed' &&
-          db
-            .prepare(
-              `SELECT 1 FROM pending_approvals p
-               JOIN sessions sess ON sess.id = p.session_id
-               WHERE sess.session_key = ? AND p.task_id = ?
-                 AND sess.active_task_id = p.task_id
-                 AND sess.state = 'awaiting_approval' AND p.expires_at > ? / 1000
-               LIMIT 1`
-            )
-            .get(header.session_key, header.continuation_task_id, op.now) !== undefined
+          s.selectLiveApproval.get(header.session_key, header.continuation_task_id, op.now) !==
+            undefined
         const leaseAlive =
           header.status === 'claimed' &&
           ((header.claim_expires_at !== null && header.claim_expires_at > op.now) || approvalAlive)
@@ -885,13 +909,9 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
     }
 
     case 'model_step_checkpoint_load_for_task': {
-      const header = db
-        .prepare(
-          `SELECT * FROM model_step_checkpoints
-           WHERE session_key = ? AND continuation_task_id = ?
-           ORDER BY updated_at DESC LIMIT 1`
-        )
-        .get(op.sessionKey, op.taskId) as ModelStepCheckpointRow | undefined
+      const header = s.selectForTask.get(op.sessionKey, op.taskId) as
+        | ModelStepCheckpointRow
+        | undefined
       return header ? snapshot(s, header) : null
     }
 
@@ -907,7 +927,11 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
     case 'model_step_checkpoint_boot_reap': {
       const tx = db.transaction(() => {
         const open = s.selectOpen.all() as Array<{ checkpoint_id: string }>
-        for (const row of open) s.abandonById.run({ checkpoint_id: row.checkpoint_id, now: op.now })
+        for (const row of open) {
+          if (s.deleteOpenById.run(row.checkpoint_id).changes === 0) {
+            s.abandonById.run({ checkpoint_id: row.checkpoint_id, now: op.now })
+          }
+        }
         s.adoptApprovalClaims.run({ owner: op.hostInstanceId, now: op.now })
         const foreign = s.selectForeignClaims.all(op.hostInstanceId) as Array<{
           checkpoint_id: string

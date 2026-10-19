@@ -291,7 +291,7 @@ describe('TaskExecutor origin model-step checkpoint (#1043)', () => {
     }
   })
 
-  it('a 503 before any tool abandons the checkpoint and the TaskError names none', async () => {
+  it('a 503 before any tool writes no checkpoint and the TaskError names none', async () => {
     Object.assign(appConfig, { enableApproval: false, dynamicToolsEnabled: false })
     const { handle, onFail, providerCalls } = await runOutageTask(0)
     try {
@@ -301,10 +301,9 @@ describe('TaskExecutor origin model-step checkpoint (#1043)', () => {
       expect(taskError.providerCode).toBe('provider_unavailable')
       expect(taskError).not.toHaveProperty('modelStepCheckpointId')
       const db = handle.worker.db
-      // Liveness witness: the recorder opened the header, then abandoned it.
-      expect(db.prepare('SELECT status FROM model_step_checkpoints').all()).toEqual([
-        { status: 'abandoned' },
-      ])
+      // The model call reached onFail, but no tool dispatch needed a checkpoint.
+      expect(db.prepare('SELECT status FROM model_step_checkpoints').all()).toEqual([])
+      expect(db.prepare('SELECT * FROM model_step_checkpoint_entries').all()).toEqual([])
       expect(db.prepare('SELECT * FROM model_step_checkpoint_attachments').all()).toEqual([])
     } finally {
       await handle.shutdown()

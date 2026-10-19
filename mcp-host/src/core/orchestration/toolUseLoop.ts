@@ -387,7 +387,8 @@ async function runLoopIterations(
             tool_calls: result.calls,
             reasoning_content: result.reasoning_content,
           })
-          // #1043 — the tool-call message is durable before any tool runs.
+          // #1043 — buffer the tool-call message; the first dispatch persists
+          // it with the header and history before the tool's effect.
           await config.modelStepCheckpointRecorder?.syncMessages(messages)
 
           for (const message of messages) {

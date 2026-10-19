@@ -981,7 +981,6 @@ export class SqliteConversationStore implements ConversationStore {
       )
     } catch (err) {
       if (this.reopenedTurnCompletionOwners.get(state) === marker.owner) {
-        if (countedNewTurn) state.nextTurnNumber -= 1
         state.reopenedTurnNumber = marker.previousReopenedTurnNumber
         this.restoreReopenedTurnMarker(state, marker)
       }
@@ -1024,7 +1023,9 @@ export class SqliteConversationStore implements ConversationStore {
       )
     } catch (err) {
       if (this.reopenedTurnCompletionOwners.get(state) === marker.owner) {
-        state.nextTurnNumber = previousNextTurnNumber
+        if (marker.previousReopenedTurnNumber !== undefined) {
+          state.nextTurnNumber = previousNextTurnNumber
+        }
         state.reopenedTurnNumber = marker.previousReopenedTurnNumber
         this.restoreReopenedTurnMarker(state, marker)
       }

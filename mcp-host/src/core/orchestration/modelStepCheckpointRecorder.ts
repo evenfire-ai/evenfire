@@ -1,4 +1,5 @@
 import {
+  type CheckpointAttachmentBinding,
   type CheckpointImageCapture,
   type RecordedCheckpointContentPart,
   type RecordedCheckpointMessage,
@@ -29,14 +30,15 @@ import {
 import { isModelStepCheckpointEligibleError } from './modelStepCheckpointEligibility'
 
 /**
- * Records one tool-use turn into a durable model-step checkpoint (#1043).
+ * Records a turn only once it dispatches a tool into a durable checkpoint (#1043).
  *
- * The loop calls it at fixed points: `begin` before the first completion,
+ * The loop calls it at fixed points: `begin` buffers history before the first completion,
  * `syncMessages` before every context-management pass and before a tool batch
  * is dispatched, `recordDispatch`/`recordResult` around each tool execution,
  * `updateState` once the tool results are in, and `settle` once per loop
  * exit. A continuation paused for approval may enter another loop with this
- * recorder. A `tool_dispatch` is written before the tool's effect, so a dispatch
+ * recorder. The first dispatch writes its header and buffered history together.
+ * A `tool_dispatch` is written before the tool's effect, so a dispatch
  * without a result reads `unknown` and is never re-executed. A confirmed
  * result and its tool message share one fenced append.
  *
@@ -126,14 +128,25 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
   private isPoisoned = false
   private settled = false
   private readonly imageCapture: CheckpointImageCapture
+  private pendingMessages: ChatMessage[] = []
+  private readonly restoredBindings: CheckpointAttachmentBinding[]
+  private readonly opts: Omit<ModelStepCheckpointRecorderOptions, 'restoredAttachments'>
   /**
    * 0-based index of the origin user message among the recorded message
    * entries (C7). Frozen at the first recording of that message.
    */
   private originUserMessageIndex: number | undefined
 
-  constructor(private readonly opts: ModelStepCheckpointRecorderOptions) {
-    this.imageCapture = createCheckpointImageCapture(opts.restoredAttachments ?? [], {
+  constructor(opts: ModelStepCheckpointRecorderOptions) {
+    const { restoredAttachments = [], ...recordingOptions } = opts
+    this.opts = recordingOptions
+    this.restoredBindings = restoredAttachments.map(row => ({
+      attachment_id: row.attachment_id,
+      digest_hex: row.digest_hex,
+      size_bytes: row.size_bytes,
+      expires_at: row.expires_at,
+    }))
+    this.imageCapture = createCheckpointImageCapture(restoredAttachments, {
       now: opts.now,
       ttlMs: opts.attachmentTtlMs,
     })
@@ -181,29 +194,26 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
       )
     }
     this.originUserMessageIndex = originIndex
-    await this.write('open', async () => {
-      this.currentFence = await this.opts.store.open(
-        {
-          ...mode.header,
-          loopState: this.loopState(0),
-          taskBudget: this.opts.taskBudget(),
-        },
-        initialMessages.map(message => this.messageEntry(message))
-      )
-      return true
-    })
+    this.pendingMessages = initialMessages.slice()
   }
 
   async syncMessages(messages: ChatMessage[]): Promise<void> {
+    if (this.isPoisoned) return
     const pending = messages.slice(this.recordedUpTo)
     this.recordedUpTo = messages.length
-    const entries = pending
-      .filter(
-        message =>
-          message.role !== 'tool' || !this.recordedToolMessages.has(message.tool_call_id ?? '')
-      )
-      .map(message => this.messageEntry(message))
-    if (entries.length > 0) await this.append(entries)
+    if (!this.currentFence) {
+      this.pendingMessages.push(...pending)
+      return
+    }
+    if (pending.length === 0) return
+    await this.append(() =>
+      pending
+        .filter(
+          message =>
+            message.role !== 'tool' || !this.recordedToolMessages.has(message.tool_call_id ?? '')
+        )
+        .map(message => this.messageEntry(message))
+    )
   }
 
   rebase(length: number): void {
@@ -211,15 +221,31 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
   }
 
   async recordDispatch(call: ToolCall): Promise<void> {
-    await this.append([
-      { kind: 'tool_dispatch', toolCallId: call.id, payload: JSON.stringify({ name: call.name }) },
-    ])
+    if (this.isPoisoned) return
+    const dispatch = (): ModelStepCheckpointEntryInput => ({
+      kind: 'tool_dispatch',
+      toolCallId: call.id,
+      payload: JSON.stringify({ name: call.name }),
+    })
+    if (!this.currentFence && this.opts.mode.kind === 'origin') {
+      const { header } = this.opts.mode
+      await this.write('open', async () => {
+        this.currentFence = await this.opts.store.open(
+          { ...header, loopState: this.loopState(0), taskBudget: this.opts.taskBudget() },
+          [...this.pendingMessages.map(message => this.messageEntry(message)), dispatch()]
+        )
+        this.pendingMessages = []
+        return true
+      })
+      return
+    }
+    await this.append(() => [dispatch()])
   }
 
   /** Confirm the result only with the message Retry needs to reconstruct it. */
   async recordResult(call: ToolCall, result: ToolResult): Promise<void> {
     if (this.isPoisoned || !this.currentFence) return
-    const written = await this.append([
+    const written = await this.append(() => [
       {
         kind: 'tool_result',
         toolCallId: call.id,
@@ -255,7 +281,12 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
   async settle(result: LoopResult | undefined): Promise<string | undefined> {
     if (this.settled) throw new Error('model-step checkpoint recorder settled twice')
     const fence = this.currentFence
-    if (!fence) return undefined
+    if (!fence) {
+      this.settled = true
+      this.pendingMessages = []
+      this.imageCapture.clear()
+      return undefined
+    }
     const source = this.opts.mode.kind === 'origin' ? 'open' : 'claimed'
 
     // The approval gate has not executed the announced call yet. A continuation
@@ -289,6 +320,7 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
         })
         return version !== null
       })
+      this.imageCapture.clear()
       if (resumable) {
         logger.info(
           {
@@ -305,7 +337,10 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
 
     // A continuation's final response completes the checkpoint in the same
     // transaction as the response message (`persist_turn_boundary`).
-    if (result?.type === 'response' && source === 'claimed' && !this.isPoisoned) return undefined
+    if (result?.type === 'response' && source === 'claimed' && !this.isPoisoned) {
+      this.imageCapture.clear()
+      return undefined
+    }
 
     await this.write('transition', async () => {
       await this.opts.store.transition(this.opts.sessionKey, fence, {
@@ -314,13 +349,18 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
       })
       return true
     })
+    this.imageCapture.clear()
     return undefined
   }
 
-  private async append(entries: ModelStepCheckpointEntryInput[]): Promise<boolean> {
+  private async append(buildEntries: () => ModelStepCheckpointEntryInput[]): Promise<boolean> {
     const fence = this.currentFence
     if (this.isPoisoned || !fence) return false
-    return this.write('append', () => this.opts.store.append(this.opts.sessionKey, fence, entries))
+    return this.write('append', async () => {
+      const entries = buildEntries()
+      if (entries.length === 0) return true
+      return this.opts.store.append(this.opts.sessionKey, fence, entries)
+    })
   }
 
   /**
@@ -332,6 +372,8 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
     try {
       if (await op()) return true
       this.isPoisoned = true
+      this.pendingMessages = []
+      this.imageCapture.clear()
       logger.warn(
         { component: 'ModelStepCheckpoint', checkpointId: this.checkpointId, op: kind },
         'model-step checkpoint fence lost; cancelling the task'
@@ -340,6 +382,8 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
       return false
     } catch (err) {
       this.isPoisoned = true
+      this.pendingMessages = []
+      this.imageCapture.clear()
       logger.warn(
         {
           component: 'ModelStepCheckpoint',
@@ -384,7 +428,7 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
       ...inlineFileAttachmentBytes(
         this.opts.sourceAttachments,
         { now: this.opts.now, ttlMs: this.opts.attachmentTtlMs },
-        this.opts.restoredAttachments ?? []
+        this.restoredBindings
       ),
       ...this.imageCapture.pendingAttachments(),
     ]

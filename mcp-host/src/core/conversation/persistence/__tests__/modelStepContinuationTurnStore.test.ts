@@ -138,6 +138,35 @@ async function claimedCheckpoint(
 }
 
 describe('SqliteConversationStore — reopened continuation turns (#1043)', () => {
+  it.each(['cancel', 'fail'] as const)(
+    'keeps a non-reopened turn reservation when %s persistence rejects',
+    async boundary => {
+      const handle = freshStore()
+      const manager = new ConversationManager(handle.store)
+      const conv = await manager.getOrCreate(SESSION_KEY)
+      await manager.startTurn(conv, 'origin input', 'task-origin')
+      handle.worker.db.exec(`
+        CREATE TRIGGER reject_turn_boundary BEFORE UPDATE OF state ON sessions
+        WHEN NEW.state = 'idle'
+        BEGIN SELECT RAISE(ABORT, 'turn boundary rejected'); END
+      `)
+
+      if (boundary === 'cancel') {
+        await expect(handle.store.persistTurnCancel(conv)).rejects.toThrow('turn boundary rejected')
+      } else {
+        await expect(handle.store.persistTurnFail(conv)).rejects.toThrow('turn boundary rejected')
+      }
+      expect(handle.store.activeTurnNumber(conv)).toBe(2)
+      handle.worker.db.exec('DROP TRIGGER reject_turn_boundary')
+
+      await manager.failTurn(conv)
+      await manager.startTurn(conv, 'message after rejected boundary', 'task-after')
+      expect(turnRows(handle, conv.id, 2).map(row => [row.role, row.content])).toEqual([
+        ['user', 'message after rejected boundary'],
+      ])
+    }
+  )
+
   it('continues and completes the same origin after boot recovery while an ordinary restart is answered', async () => {
     const handle = freshStore()
     const manager = new ConversationManager(handle.store)

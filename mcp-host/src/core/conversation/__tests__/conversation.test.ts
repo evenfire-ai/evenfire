@@ -128,6 +128,78 @@ describe('ConversationManager — state machine', () => {
     expect(conv.turns[0]?.completed_at).toBeDefined()
   })
 
+  it('keeps an unfenced completion terminal after persistence rejects and admits the next turn', async () => {
+    class FailingCompleteStore extends InMemoryConversationStore {
+      override async persistTurnComplete(): Promise<void> {
+        throw new Error('completion write rejected')
+      }
+    }
+
+    const failingManager = new ConversationManager(new FailingCompleteStore())
+    const conv = await failingManager.getOrCreate('user-unfenced-complete')
+    await failingManager.startTurn(conv, 'first message', 'first-task')
+
+    await expect(failingManager.completeTurn(conv, 'first answer')).rejects.toThrow(
+      'completion write rejected'
+    )
+    expect(conv.state).toBe(ConversationState.Idle)
+    expect(conv.turns[0]?.response).toBe('first answer')
+    expect(conv.turns[0]?.completed_at).toBeDefined()
+    await failingManager.startTurn(conv, 'next message', 'next-task')
+    expect(conv.turns[1]?.user_input).toBe('next message')
+  })
+
+  it('keeps an unfenced failure terminal after persistence rejects and admits the next turn', async () => {
+    class FailingFailStore extends InMemoryConversationStore {
+      override async persistTurnFail(): Promise<void> {
+        throw new Error('failure write rejected')
+      }
+    }
+
+    const failingManager = new ConversationManager(new FailingFailStore())
+    const conv = await failingManager.getOrCreate('user-unfenced-fail')
+    await failingManager.startTurn(conv, 'first message', 'first-task')
+
+    await expect(failingManager.failTurn(conv)).rejects.toThrow('failure write rejected')
+    expect(conv.state).toBe(ConversationState.Idle)
+    expect(conv.activeTaskId).toBeUndefined()
+    expect(conv.turns[0]?.completed_at).toBeDefined()
+    await failingManager.startTurn(conv, 'next message', 'next-task')
+    expect(conv.turns[1]?.user_input).toBe('next message')
+  })
+
+  it('restores a fenced failure after persistence rejects, then accepts a durable retry', async () => {
+    class FailingFailStore extends InMemoryConversationStore {
+      fail = true
+
+      override async persistTurnFail(): Promise<void> {
+        if (this.fail) throw new Error('stale model-step checkpoint fence')
+      }
+    }
+
+    const store = new FailingFailStore()
+    const failingManager = new ConversationManager(store)
+    const conv = await failingManager.getOrCreate('user-fenced-fail')
+    await failingManager.startTurn(conv, 'continued message', 'continued-task')
+    const fence = {
+      fence: { checkpointId: 'checkpoint-fail', owner: 'continued-task', generation: 1 },
+      activeTaskId: 'continued-task',
+      originTurnNumber: 1,
+    }
+
+    await expect(failingManager.failTurn(conv, fence)).rejects.toThrow(
+      'stale model-step checkpoint fence'
+    )
+    expect(conv.state).toBe(ConversationState.Processing)
+    expect(conv.activeTaskId).toBe('continued-task')
+    expect(conv.turns[0]?.completed_at).toBeUndefined()
+    store.fail = false
+    await failingManager.failTurn(conv, fence)
+    expect(conv.state).toBe(ConversationState.Idle)
+    await failingManager.startTurn(conv, 'next message', 'next-task')
+    expect(conv.turns[1]?.user_input).toBe('next message')
+  })
+
   it.each(['complete', 'cancel'] as const)(
     'keeps a winner with identical response text after a stale %s rejects',
     async ending => {

@@ -830,14 +830,46 @@ export class AgentStateMachine extends EventEmitter {
                 { from: [header.status], to: 'abandoned' }
               )
               if (settled === null) {
-                throw new Error('Pending approval checkpoint changed during boot recovery')
+                logger.warn(
+                  {
+                    sessionKey: entry.session_key,
+                    checkpointId: header.checkpoint_id,
+                    taskId: task.id,
+                  },
+                  'Pending approval checkpoint changed during boot recovery'
+                )
+                continue
               }
             }
             await this.conversationManager.clearPendingApproval(entry.session_key, entry.request_id)
             continue
           }
           if (header.claim_owner !== this.modelStepCheckpoints.hostInstanceId) {
-            throw new Error('Pending approval checkpoint was not adopted by this Host')
+            const blocked = await this.modelStepCheckpoints.store.transition(
+              entry.session_key,
+              {
+                checkpointId: header.checkpoint_id,
+                owner: header.claim_owner,
+                generation: header.claim_generation,
+              },
+              { from: ['claimed'], to: 'blocked', blockedReason: 'host_mismatch' }
+            )
+            logger.warn(
+              {
+                sessionKey: entry.session_key,
+                checkpointId: header.checkpoint_id,
+                taskId: task.id,
+                blocked: blocked !== null,
+              },
+              'Pending approval checkpoint was not adopted by this Host'
+            )
+            if (blocked !== null) {
+              await this.conversationManager.clearPendingApproval(
+                entry.session_key,
+                entry.request_id
+              )
+            }
+            continue
           }
           task.modelStepContinuation = {
             checkpointId: header.checkpoint_id,

@@ -56,6 +56,8 @@ export interface CheckpointByteRetention {
   ttlMs: number
 }
 
+export type CheckpointAttachmentBinding = Omit<ModelStepCheckpointAttachmentRow, 'bytes'>
+
 /**
  * Raw bytes of the turn's inline uploaded files. A continuation passes the rows
  * it restored so the first capture's deadline is reused: a late retry repeats
@@ -65,7 +67,7 @@ export interface CheckpointByteRetention {
 export function inlineFileAttachmentBytes(
   attachments: readonly Attachment[] | undefined,
   retention: CheckpointByteRetention,
-  restored: readonly ModelStepCheckpointAttachmentRow[]
+  restored: readonly CheckpointAttachmentBinding[]
 ): ModelStepCheckpointAttachmentInput[] {
   const restoredById = new Map(restored.map(row => [row.attachment_id, row]))
   const result: ModelStepCheckpointAttachmentInput[] = []
@@ -105,10 +107,12 @@ export interface CheckpointImageCapture {
   capture(part: RuntimeImagePart): RecordedCheckpointImagePart
   /** Bytes to write with the checkpoint's next `resumable` transition. */
   pendingAttachments(): ModelStepCheckpointAttachmentInput[]
+  /** Releases the source data when recording is poisoned or settled. */
+  clear(): void
 }
 
 /**
- * Captures the inline image bytes of one recording session. The durable id and
+ * Captures image identities without retaining decoded buffers. The durable id and
  * the first-capture deadline are decided once per byte set, keyed by sha256: a
  * retry that re-captures the same bytes reuses the row's identity and deadline,
  * even after the sweep deleted that row.
@@ -118,7 +122,10 @@ export function createCheckpointImageCapture(
   retention: CheckpointByteRetention
 ): CheckpointImageCapture {
   const bindings = new Map<string, CapturedImageBinding>()
-  const pending = new Map<string, ModelStepCheckpointAttachmentInput>()
+  const pending = new Map<
+    string,
+    CapturedImageBinding & { digestHex: string; dataBase64: string }
+  >()
   for (const row of restored) {
     const digestHex = createHash('sha256').update(row.bytes).digest('hex')
     if (digestHex !== row.digest_hex) {
@@ -158,7 +165,7 @@ export function createCheckpointImageCapture(
         pending.set(binding.attachmentId, {
           attachmentId: binding.attachmentId,
           digestHex,
-          bytes,
+          dataBase64: part.data,
           expiresAt: binding.expiresAt,
         })
       }
@@ -175,7 +182,14 @@ export function createCheckpointImageCapture(
       }
     },
     pendingAttachments(): ModelStepCheckpointAttachmentInput[] {
-      return [...pending.values()]
+      return [...pending.values()].map(({ dataBase64, ...binding }) => ({
+        ...binding,
+        bytes: Buffer.from(dataBase64, 'base64'),
+      }))
+    },
+    clear(): void {
+      pending.clear()
+      bindings.clear()
     },
   }
 }
