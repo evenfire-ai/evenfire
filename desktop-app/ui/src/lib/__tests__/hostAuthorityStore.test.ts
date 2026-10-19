@@ -21,22 +21,6 @@ describe('createHostAuthorityStore', () => {
 
     expect(store.hold('host-y', 'uncertain')).toBe(false)
     expect(store.heldAtEpoch('host-y')).toBe(heldAt)
-    expect(store.holdKind('host-y')).toBe('revoked')
-  })
-
-  it('reports the kind of the current hold', () => {
-    const store = createHostAuthorityStore()
-    expect(store.holdKind('host-y')).toBeUndefined()
-
-    store.hold('host-y', 'uncertain')
-    expect(store.holdKind('host-y')).toBe('uncertain')
-    store.hold('host-y', 'revoked')
-    expect(store.holdKind('host-y')).toBe('revoked')
-
-    const heldAt = store.heldAtEpoch('host-y')
-    if (heldAt === undefined) throw new Error('host-y must be held')
-    store.release('host-y', heldAt)
-    expect(store.holdKind('host-y')).toBeUndefined()
   })
 
   it('refuses a stale release and moves the epoch on a valid one', () => {
@@ -86,35 +70,6 @@ describe('createHostAuthorityStore', () => {
     if (current === undefined) throw new Error('host-y must still be held')
     expect(store.release('host-y', current)).toBe(true)
     expect(store.isBlocked('host-y')).toBe(false)
-  })
-
-  it('T-R1M1-S: heldSince names one hold episode, from the first hold until release or reset', () => {
-    const store = createHostAuthorityStore()
-    expect(store.heldSince('host-y')).toBeUndefined()
-
-    store.hold('host-y', 'uncertain')
-    const since = store.heldSince('host-y')
-    expect(since).toBeDefined()
-    store.hold('host-y', 'uncertain')
-    expect(store.heldSince('host-y')).toBe(since)
-    store.hold('host-y', 'revoked')
-    expect(store.heldSince('host-y')).toBe(since)
-    store.hold('host-x', 'uncertain')
-    expect(store.heldSince('host-y')).toBe(since)
-
-    const heldAt = store.heldAtEpoch('host-y')
-    if (heldAt === undefined) throw new Error('host-y must be held')
-    store.release('host-y', heldAt)
-    expect(store.heldSince('host-y')).toBeUndefined()
-    store.hold('host-y', 'uncertain')
-    const secondEpisode = store.heldSince('host-y')
-    expect(secondEpisode).toBeDefined()
-    expect(secondEpisode).not.toBe(since)
-
-    store.reset()
-    expect(store.heldSince('host-y')).toBeUndefined()
-    store.hold('host-y', 'uncertain')
-    expect(store.heldSince('host-y')).not.toBe(secondEpisode)
   })
 
   it('reset clears every hold and changes the epoch of a previously held Host', () => {

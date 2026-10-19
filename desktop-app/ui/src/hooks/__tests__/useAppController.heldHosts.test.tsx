@@ -48,9 +48,8 @@ const DISPLAY_B = 'Billing Host'
 const DISPLAY_BY_NAME = { [HOST_A]: DISPLAY_A, [HOST_B]: DISPLAY_B }
 // A catalog that dropped A also drops its name, so a toast can only take it from the previous one.
 const DISPLAY_B_ONLY = { [HOST_B]: DISPLAY_B }
-const RETRY_A = `Could not verify access to ${DISPLAY_A}. Use Retry in Latest sessions.`
+const VERIFY_A = `Could not verify access to ${DISPLAY_A}.`
 const GONE_A = `${DISPLAY_A} is no longer available.`
-const REVOKED_A = `Access to ${DISPLAY_A} was revoked.`
 
 /**
  * A `listSessions` double. Page reads (`limit: 50`) of a denied Host reject
@@ -194,6 +193,27 @@ describe('useAppController held Hosts', () => {
     expect(app.result.current.heldAgentRefs).toEqual([])
   })
 
+  it('T-R1L3-1: labels each held Host with its display name', async () => {
+    const { clerum, handle } = installAppControllerClerum({
+      agentNames: [HOST_A, HOST_B],
+      agentDisplayByName: DISPLAY_BY_NAME,
+    })
+    const catalog = installCatalog(clerum)
+    catalog.deny(HOST_A, await ipcGenericForbidden('rpc:listSessions'))
+    catalog.deny(HOST_B, await ipcGenericForbidden('rpc:listSessions'))
+    const { app } = await mount(clerum, handle)
+
+    await act(async () => {
+      catalog.openGate()
+    })
+    // Liveness witness: both Hosts are held and listed.
+    await waitFor(() => expect(app.result.current.heldAgentRefs).toEqual([HOST_A, HOST_B]))
+    expect(app.result.current.heldHosts).toEqual([
+      { agentRef: HOST_A, label: DISPLAY_A },
+      { agentRef: HOST_B, label: DISPLAY_B },
+    ])
+  })
+
   it('T-H1-4: Chat with no focused chat skips the held most recent Host', async () => {
     const { clerum, handle } = installAppControllerClerum({ agentNames: [HOST_A, HOST_B] })
     const catalog = installCatalog(clerum)
@@ -288,11 +308,7 @@ describe('useAppController held Hosts', () => {
   })
 
   it.each([
-    [
-      'a generic 403',
-      () => ipcGenericForbidden('rpc:loadSessionMessages'),
-      `Could not verify access to ${DISPLAY_A}. Use Retry in Latest sessions.`,
-    ],
+    ['a generic 403', () => ipcGenericForbidden('rpc:loadSessionMessages'), VERIFY_A],
     [
       'host_access_revoked',
       () => ipcHostAccessRevoked('rpc:loadSessionMessages'),
@@ -325,9 +341,8 @@ describe('useAppController held Hosts', () => {
         )
       ).toBe(true)
 
-      // An uncertain hold names the Retry row only after its own catalog
-      // refresh shows the Host is still listed, so the toast can come later.
-      await waitFor(() => expect(toastTexts(app.result.current)).toContain(expectedToast))
+      // The toast comes with the deselection, before the hold's catalog refresh.
+      expect(toastTexts(app.result.current)).toContain(expectedToast)
     }
   )
 
@@ -354,341 +369,6 @@ describe('useAppController held Hosts', () => {
         text => text.includes(HOST_B) || text.includes('access')
       )
     ).toEqual([])
-  })
-
-  /** Make every transcript read of `HOST_A` reject with a generic 403. */
-  async function denyTranscriptOfA(clerum: MockClerum) {
-    const transcriptError = await ipcGenericForbidden('rpc:loadSessionMessages')
-    clerum.rpc.loadSessionMessages.mockImplementation(async (hostRef: string) => {
-      if (hostRef === HOST_A) throw transcriptError
-      return { agent: hostRef, chatId: '', turns: [] }
-    })
-  }
-
-  /** Open a chat of the selected `HOST_A`; its transcript 403 holds A as uncertain. */
-  async function holdSelectedAThroughTranscript(app: ReturnType<typeof renderAppController>) {
-    act(() => {
-      app.result.current.handleSelectChatAgent(HOST_A, { chatId: 'chat-1', selectLatest: false })
-    })
-    await waitFor(() => expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true))
-    await waitFor(() => expect(app.result.current.selectedAgent).toBe(null))
-  }
-
-  it('T-A9-P1-1: an uncertain hold whose refresh drops the selected Host says it is no longer available', async () => {
-    const { clerum, handle } = installAppControllerClerum({
-      agentNames: [HOST_A, HOST_B],
-      agentDisplayByName: DISPLAY_BY_NAME,
-    })
-    installCatalog(clerum)
-    await denyTranscriptOfA(clerum)
-    const { app, commits } = await mount(clerum, handle)
-    const refreshesBeforeHold = handle.refreshCatalog.mock.calls.length
-    handle.refreshCatalog.mockImplementation(async () => createCatalog([HOST_B], DISPLAY_B_ONLY))
-
-    await holdSelectedAThroughTranscript(app)
-    await waitFor(() => expect(toastsSeen(commits)).toContain(GONE_A))
-    await settle()
-
-    // Liveness witness: the hold's own refresh ran and its catalog no longer lists A.
-    expect(handle.refreshCatalog.mock.calls.length).toBe(refreshesBeforeHold + 1)
-    expect(cachedCatalog(app.queryClient)?.agentNames).toEqual([HOST_B])
-    expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true)
-    // No Retry row exists, so the toast must not point at one.
-    expect(app.result.current.heldAgentRefs).toEqual([])
-    expect(toastsSeen(commits)).toEqual([GONE_A])
-  })
-
-  it('T-A9-P1-2: an uncertain hold of a Host that stays listed points at Retry once its refresh settles', async () => {
-    const { clerum, handle } = installAppControllerClerum({
-      agentNames: [HOST_A, HOST_B],
-      agentDisplayByName: DISPLAY_BY_NAME,
-    })
-    installCatalog(clerum)
-    await denyTranscriptOfA(clerum)
-    const { app, commits } = await mount(clerum, handle)
-    const refreshesBeforeHold = handle.refreshCatalog.mock.calls.length
-    const pendingCatalog = deferred<ReturnType<typeof createCatalog>>()
-    handle.refreshCatalog.mockImplementation(() => pendingCatalog.promise)
-
-    await holdSelectedAThroughTranscript(app)
-    await waitFor(() =>
-      expect(handle.refreshCatalog.mock.calls.length).toBe(refreshesBeforeHold + 1)
-    )
-    await settle()
-    // Liveness witness above: A is held, deselected and its refresh is in flight.
-    // Until that refresh settles there is no catalog to say whether Retry exists.
-    expect(toastsSeen(commits)).toEqual([])
-
-    await act(async () => {
-      pendingCatalog.resolve(createCatalog([HOST_A, HOST_B], DISPLAY_BY_NAME))
-      await pendingCatalog.promise
-    })
-    await waitFor(() => expect(toastsSeen(commits)).toEqual([RETRY_A]))
-    await settle()
-    expect(app.result.current.heldAgentRefs).toEqual([HOST_A])
-    expect(toastsSeen(commits)).toEqual([RETRY_A])
-  })
-
-  it('T-A9-P1-4: a failed refresh keeps the listed Host and its Retry row, so the toast points at Retry', async () => {
-    const { clerum, handle } = installAppControllerClerum({
-      agentNames: [HOST_A, HOST_B],
-      agentDisplayByName: DISPLAY_BY_NAME,
-    })
-    installCatalog(clerum)
-    await denyTranscriptOfA(clerum)
-    const { app, commits } = await mount(clerum, handle)
-    const refreshesBeforeHold = handle.refreshCatalog.mock.calls.length
-    handle.refreshCatalog.mockImplementation(async () => {
-      throw new Error('catalog unavailable')
-    })
-
-    await holdSelectedAThroughTranscript(app)
-    await waitFor(() => expect(toastsSeen(commits)).toContain(RETRY_A))
-    await settle()
-
-    // Liveness witness: the hold's refresh ran and failed, and the catalog on
-    // screen is still the previous one, which lists A with its Retry row.
-    expect(handle.refreshCatalog.mock.calls.length).toBe(refreshesBeforeHold + 1)
-    expect(app.queryClient.getQueryState(desktopQueryKeys.accessCatalog)?.error?.message).toBe(
-      'catalog unavailable'
-    )
-    expect(cachedCatalog(app.queryClient)?.agentNames).toEqual([HOST_A, HOST_B])
-    expect(app.result.current.heldAgentRefs).toEqual([HOST_A])
-    expect(toastsSeen(commits)).toEqual([RETRY_A])
-  })
-
-  it('T-A9-P1-3: a hold released by Retry before its refresh settles gets no stale toast', async () => {
-    const { clerum, handle } = installAppControllerClerum({
-      agentNames: [HOST_A, HOST_B],
-      agentDisplayByName: DISPLAY_BY_NAME,
-    })
-    const catalog = installCatalog(clerum)
-    await denyTranscriptOfA(clerum)
-    const { app, commits } = await mount(clerum, handle)
-    const refreshesBeforeHold = handle.refreshCatalog.mock.calls.length
-    const pendingCatalog = deferred<ReturnType<typeof createCatalog>>()
-    handle.refreshCatalog.mockImplementation(() => pendingCatalog.promise)
-
-    await holdSelectedAThroughTranscript(app)
-    await waitFor(() =>
-      expect(handle.refreshCatalog.mock.calls.length).toBe(refreshesBeforeHold + 1)
-    )
-    clerum.rpc.loadSessionMessages.mockImplementation(async (hostRef: string) => ({
-      agent: hostRef,
-      chatId: '',
-      turns: [],
-    }))
-    act(() => {
-      app.result.current.handleSelectChatAgent(HOST_A, { selectLatest: false })
-    })
-    await waitFor(() => expect(app.result.current.selectedAgent).toBe(HOST_A))
-
-    await act(async () => {
-      pendingCatalog.resolve(createCatalog([HOST_A, HOST_B], DISPLAY_BY_NAME))
-      await pendingCatalog.promise
-    })
-    await settle()
-
-    // Liveness witness: the Retry verification released A and the refresh settled.
-    expect(catalog.verifyReads(HOST_A)).toBe(1)
-    expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(false)
-    expect(cachedCatalog(app.queryClient)?.agentNames).toEqual([HOST_A, HOST_B])
-    expect(app.result.current.selectedAgent).toBe(HOST_A)
-    expect(toastsSeen(commits)).toEqual([])
-  })
-
-  it.each([
-    {
-      id: 'T-A9-F1',
-      second: 'generic 403',
-      secondError: () => ipcGenericForbidden('rpc:loadSessionMessages'),
-      catalogAfter: [HOST_A, HOST_B],
-      toast: RETRY_A,
-      held: [HOST_A],
-    },
-    {
-      id: 'T-A9-F1b',
-      second: 'revocation',
-      secondError: () => ipcHostAccessRevoked('rpc:loadSessionMessages'),
-      catalogAfter: [HOST_B],
-      // The hold is now a confirmed revocation, so the one toast says so.
-      toast: REVOKED_A,
-      held: [],
-    },
-  ])(
-    '$id: a $second of the held Host before its refresh settles keeps the one toast',
-    async ({ secondError, catalogAfter, toast, held }) => {
-      const { clerum, handle } = installAppControllerClerum({
-        agentNames: [HOST_A, HOST_B],
-        agentDisplayByName: DISPLAY_BY_NAME,
-      })
-      installCatalog(clerum)
-      const errorByChat = new Map([
-        ['chat-1', await ipcGenericForbidden('rpc:loadSessionMessages')],
-        ['chat-2', await secondError()],
-      ])
-      const transcripts = new Map<string, ReturnType<typeof deferred<void>>>()
-      clerum.rpc.loadSessionMessages.mockImplementation(
-        async (hostRef: string, _agent: string, chatId: string) => {
-          if (hostRef !== HOST_A) return { agent: hostRef, chatId: '', turns: [] }
-          const pending = deferred<void>()
-          transcripts.set(chatId, pending)
-          await pending.promise
-          throw errorByChat.get(chatId)
-        }
-      )
-      const { app, commits } = await mount(clerum, handle)
-      const refreshesBeforeHold = handle.refreshCatalog.mock.calls.length
-      const pendingCatalog = deferred<ReturnType<typeof createCatalog>>()
-      handle.refreshCatalog.mockImplementation(() => pendingCatalog.promise)
-
-      // Two transcript reads of A in flight at once (different chats).
-      act(() => {
-        app.result.current.handleSelectChatAgent(HOST_A, { chatId: 'chat-1', selectLatest: false })
-      })
-      await waitFor(() => expect(transcripts.has('chat-1')).toBe(true))
-      act(() => {
-        app.result.current.handleSelectChatAgent(HOST_A, { chatId: 'chat-2', selectLatest: false })
-      })
-      await waitFor(() => expect(transcripts.has('chat-2')).toBe(true))
-
-      await act(async () => {
-        transcripts.get('chat-1')?.resolve()
-      })
-      await waitFor(() => expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true))
-      await waitFor(() => expect(app.result.current.selectedAgent).toBe(null))
-      await waitFor(() =>
-        expect(handle.refreshCatalog.mock.calls.length).toBe(refreshesBeforeHold + 1)
-      )
-      await act(async () => {
-        transcripts.get('chat-2')?.resolve()
-      })
-      await settle()
-      expect(toastsSeen(commits)).toEqual([])
-
-      await act(async () => {
-        pendingCatalog.resolve(
-          createCatalog(
-            catalogAfter,
-            catalogAfter.includes(HOST_A) ? DISPLAY_BY_NAME : DISPLAY_B_ONLY
-          )
-        )
-        await pendingCatalog.promise
-      })
-      await waitFor(() => expect(toastsSeen(commits)).toEqual([toast]))
-      await settle()
-
-      // Liveness witness: both transcript reads of A ran and failed, A stays held,
-      // and the second denial joined the refresh already in flight.
-      expect(
-        clerum.rpc.loadSessionMessages.mock.calls.filter(([ref]) => ref === HOST_A)
-      ).toHaveLength(2)
-      expect(handle.refreshCatalog.mock.calls.length).toBe(refreshesBeforeHold + 1)
-      expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true)
-      expect(app.result.current.heldAgentRefs).toEqual(held)
-      expect(toastsSeen(commits)).toEqual([toast])
-    }
-  )
-
-  /**
-   * Hold the selected A through a transcript 403 with its refresh left pending,
-   * then Retry: the verification releases A and selects it again.
-   */
-  async function holdAThenRetry(
-    clerum: MockClerum,
-    handle: AppControllerClerumHandle,
-    app: ReturnType<typeof renderAppController>
-  ) {
-    const refreshesBeforeHold = handle.refreshCatalog.mock.calls.length
-    const pendingCatalog = deferred<ReturnType<typeof createCatalog>>()
-    handle.refreshCatalog.mockImplementation(() => pendingCatalog.promise)
-    await holdSelectedAThroughTranscript(app)
-    await waitFor(() =>
-      expect(handle.refreshCatalog.mock.calls.length).toBe(refreshesBeforeHold + 1)
-    )
-    clerum.rpc.loadSessionMessages.mockImplementation(async (hostRef: string) => ({
-      agent: hostRef,
-      chatId: '',
-      turns: [],
-    }))
-    act(() => {
-      app.result.current.handleSelectChatAgent(HOST_A, { selectLatest: false })
-    })
-    await waitFor(() => expect(app.result.current.selectedAgent).toBe(HOST_A))
-    expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(false)
-    return pendingCatalog
-  }
-
-  it('T-R1M1-1: a hold after Retry, while the first refresh is pending, gives one toast', async () => {
-    const { clerum, handle } = installAppControllerClerum({
-      agentNames: [HOST_A, HOST_B],
-      agentDisplayByName: DISPLAY_BY_NAME,
-    })
-    const catalog = installCatalog(clerum)
-    await denyTranscriptOfA(clerum)
-    const { app, commits } = await mount(clerum, handle)
-    const pendingCatalog = await holdAThenRetry(clerum, handle, app)
-
-    // A second episode: a new 403 on a chat of the selected A.
-    await denyTranscriptOfA(clerum)
-    act(() => {
-      app.result.current.handleSelectChatAgent(HOST_A, { chatId: 'chat-2', selectLatest: false })
-    })
-    await waitFor(() => expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true))
-    await waitFor(() => expect(app.result.current.selectedAgent).toBe(null))
-
-    await act(async () => {
-      pendingCatalog.resolve(createCatalog([HOST_A, HOST_B], DISPLAY_BY_NAME))
-      await pendingCatalog.promise
-    })
-    await waitFor(() => expect(toastsSeen(commits)).toContain(RETRY_A))
-    await settle()
-
-    // Liveness witness: Retry verified once, both holds ran, the refresh settled.
-    expect(catalog.verifyReads(HOST_A)).toBe(1)
-    expect(
-      clerum.rpc.loadSessionMessages.mock.calls.filter(([ref]) => ref === HOST_A).length
-    ).toBeGreaterThanOrEqual(2)
-    expect(cachedCatalog(app.queryClient)?.agentNames).toEqual([HOST_A, HOST_B])
-    expect(toastsSeen(commits)).toEqual([RETRY_A])
-  })
-
-  it('T-R1M1-2: a hold after Retry while another Host is selected shows no toast about it', async () => {
-    const { clerum, handle } = installAppControllerClerum({
-      agentNames: [HOST_A, HOST_B],
-      agentDisplayByName: DISPLAY_BY_NAME,
-    })
-    const catalog = installCatalog(clerum)
-    // A's catalog pages wait for the gate, then get a generic 403.
-    catalog.deny(HOST_A, await ipcGenericForbidden('rpc:listSessions'))
-    await denyTranscriptOfA(clerum)
-    const { app, commits } = await mount(clerum, handle)
-    const pageReadsBeforeRetry = catalog.pageReads(HOST_A)
-    const pendingCatalog = await holdAThenRetry(clerum, handle, app)
-    // The release reloads Latest sessions, so a new page read of A waits at the gate.
-    await waitFor(() => expect(catalog.pageReads(HOST_A)).toBeGreaterThan(pageReadsBeforeRetry))
-
-    act(() => {
-      app.result.current.handleSelectChatAgent(HOST_B, { selectLatest: false })
-    })
-    await waitFor(() => expect(app.result.current.selectedAgent).toBe(HOST_B))
-    await act(async () => {
-      catalog.openGate()
-    })
-    await waitFor(() => expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true))
-
-    await act(async () => {
-      pendingCatalog.resolve(createCatalog([HOST_A, HOST_B], DISPLAY_BY_NAME))
-      await pendingCatalog.promise
-    })
-    await settle()
-
-    // Liveness witness: Retry verified once, the catalog read held A again while B
-    // stayed selected, and the first hold's refresh settled.
-    expect(catalog.verifyReads(HOST_A)).toBe(1)
-    expect(app.result.current.selectedAgent).toBe(HOST_B)
-    expect(cachedCatalog(app.queryClient)?.agentNames).toEqual([HOST_A, HOST_B])
-    expect(toastsSeen(commits).filter(text => text.includes(DISPLAY_A))).toEqual([])
   })
 
   it('T-A9-O2: a hold of another Host whose refresh drops the selected Host says so once', async () => {
@@ -780,46 +460,6 @@ describe('useAppController held Hosts', () => {
     })
     expect(toastsSeen(commits).filter(text => text.includes(DISPLAY_A))).toEqual([])
   })
-
-  it('T-A9-T2: an uncertain hold whose refresh settles after a team switch shows no toast', async () => {
-    const { clerum, handle } = installAppControllerClerum({
-      agentNames: [HOST_A, HOST_B],
-      agentDisplayByName: DISPLAY_BY_NAME,
-    })
-    installCatalog(clerum)
-    await denyTranscriptOfA(clerum)
-    const { app, commits } = await mount(clerum, handle)
-    const refreshesBeforeHold = handle.refreshCatalog.mock.calls.length
-    const oldTeamCatalog = deferred<ReturnType<typeof createCatalog>>()
-    handle.refreshCatalog.mockImplementationOnce(() => oldTeamCatalog.promise)
-    handle.refreshCatalog.mockImplementation(async () =>
-      createCatalog([HOST_B], DISPLAY_BY_NAME, 'team-2')
-    )
-
-    await holdSelectedAThroughTranscript(app)
-    await waitFor(() =>
-      expect(handle.refreshCatalog.mock.calls.length).toBe(refreshesBeforeHold + 1)
-    )
-    let switching: Promise<boolean> | undefined
-    act(() => {
-      switching = app.result.current.handleEnsureTeamContext({ teamId: 'team-2' })
-    })
-    await waitFor(() => expect(app.result.current.currentTeamId).toBe('team-2'))
-
-    await act(async () => {
-      oldTeamCatalog.resolve(createCatalog([HOST_B], DISPLAY_BY_NAME))
-      await oldTeamCatalog.promise
-      await switching
-    })
-    await settle()
-
-    // Liveness witness: the hold happened, the switch completed and the old
-    // team's refresh settled into the cache.
-    expect(handle.switchTeam).toHaveBeenCalledWith('team-2')
-    expect(cachedCatalog(app.queryClient)?.agentNames).toEqual([HOST_B])
-    expect(app.result.current.selectedAgent).toBe(null)
-    expect(toastsSeen(commits).filter(text => text.includes(DISPLAY_A))).toEqual([])
-  })
 })
 
 /**
@@ -902,7 +542,7 @@ describe('ChatPage with a held Host on the chat tab', () => {
 
     // Liveness witness: the hold cleared the selection and said so.
     expect(trail.slice(trailBeforeHold)).toContain(null)
-    await waitFor(() => expect(toastTexts(getVm())).toContain(RETRY_A))
+    expect(toastTexts(getVm())).toContain(VERIFY_A)
     expect(getVm().heldAgentRefs).toEqual([HOST_A])
     // The page stays on A's chat with nothing selected; B is never opened.
     expect(getVm().selectedAgent).toBe(null)
@@ -953,7 +593,8 @@ describe('ChatPage with a held Host on the chat tab', () => {
     expect(hasTabFor(getVm(), HOST_B)).toBe(false)
     expect(getVm().focusedChatAgentRef).toBe(HOST_A)
     expect(getVm().activeWorkspaceTab?.chat?.chatId).toBe('chat-1')
-    expect(toastTexts(getVm())).toEqual([GONE_A])
+    // One message: A was deselected by its hold, so the catalog drop adds none.
+    expect(toastTexts(getVm())).toEqual([VERIFY_A])
   })
 
   it('T-J1-2: a Chat click on a held Host chat opens that chat once access is verified', async () => {
@@ -1031,7 +672,7 @@ describe('ChatPage with a held Host on the chat tab', () => {
     expect(getVm().isHostAccessBlocked(HOST_A)).toBe(false)
   })
 
-  it('T-R1H1-O: the selected Host leaving the catalog of the same team keeps its chat and selects no other Host', async () => {
+  it('T-R1H1-O: the selected, not held Host leaving the catalog says so and selects another Host', async () => {
     const { clerum, handle } = installAppControllerClerum({
       agentNames: [HOST_A, HOST_B],
       agentDisplayByName: DISPLAY_BY_NAME,
@@ -1046,14 +687,13 @@ describe('ChatPage with a held Host on the chat tab', () => {
     await act(async () => {
       await getVm().handleRefreshWorkspaceData(DESKTOP_ROUTES.agents)
     })
-    await waitFor(() => expect(toastTexts(getVm())).toContain(GONE_A))
+    await waitFor(() => expect(getVm().selectedAgent).toBe(HOST_B))
     await settle()
 
     // Liveness witness: the refresh dropped A and the deselect effect ran.
     expect(trail.slice(trailBefore)).toContain(null)
+    // Nothing holds A, so ChatPage picks the remaining Host.
     expect(getVm().isHostAccessBlocked(HOST_A)).toBe(false)
-    expect(trail.slice(trailBefore)).not.toContain(HOST_B)
-    expect(getVm().selectedAgent).toBe(null)
-    expect(getVm().focusedChatAgentRef).toBe(HOST_A)
+    expect(toastTexts(getVm())).toEqual([GONE_A])
   })
 })

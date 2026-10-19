@@ -62,7 +62,7 @@ export function SidebarNav({
   } = useAgentChatActionsContext()
   const {
     selectedAgent,
-    heldAgentRefs,
+    heldHosts,
     handleSelectChatAgent: onSelectChatAgent,
   } = useNavigationContext()
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false)
@@ -240,10 +240,10 @@ export function SidebarNav({
   // Keep keyboard focus in the sidebar instead of letting it fall to the body.
   useEffect(() => {
     const agentRef = retriedAgentRefRef.current
-    if (!agentRef || heldAgentRefs.includes(agentRef)) return
+    if (!agentRef || heldHosts.some(host => host.agentRef === agentRef)) return
     retriedAgentRefRef.current = null
     if (document.activeElement === document.body) chatNavItemRef.current?.focus()
-  }, [heldAgentRefs])
+  }, [heldHosts])
 
   const handleFilesNavSelect = () => {
     handleSelect(DESKTOP_ROUTES.files)
@@ -442,11 +442,11 @@ export function SidebarNav({
 
                 {item.id === DESKTOP_ROUTES.chat && chatSessionsOpen && (
                   <div className="nav-latest-sessions" ref={sessionsRef}>
-                    {heldAgentRefs.map(agentRef => (
+                    {heldHosts.map(({ agentRef, label }) => (
                       <div key={agentRef} className="nav-latest-session nav-latest-session--held">
-                        <span>Couldn't verify access to {agentRef}</span>
+                        <span>Couldn't verify access to {label}</span>
                         <Button
-                          aria-label={`Retry access to ${agentRef}`}
+                          aria-label={`Retry access to ${label}`}
                           onClick={() => {
                             retriedAgentRefRef.current = agentRef
                             onSelectChatAgent(agentRef, { selectLatest: false })

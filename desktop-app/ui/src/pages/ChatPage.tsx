@@ -27,11 +27,9 @@ export function ChatPage({ scrollContainerRef }: ChatPageProps) {
       didAutoSelect.current = false
     }
     if (didAutoSelect.current || selectedAgent || !agentNames.length) return
-    // The chat on screen belongs to a held Host, or to one this team listed and the
-    // catalog dropped: stay on it. A listed Host is selected again by its Retry row
-    // or the verification a Chat click started; picking another Host here would
-    // send the user's next message to that Host instead. A tab whose Host the
-    // current team never listed (it survived a team switch) does not block this.
+    // The chat on screen belongs to a held Host: stay on it. Its Retry row, or
+    // the verification a Chat click started, selects it again; picking another
+    // Host would send the user's next message to that Host instead.
     if (keepFocusedChat) return
     didAutoSelect.current = true
     const best = pickLatestAgent(

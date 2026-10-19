@@ -27,6 +27,12 @@ export type ChatNotificationPreference =
   | 'when_app_focused_away_from_chat'
   | 'when_app_unfocused'
 export type DesktopNotificationPermission = NotificationPermission | 'unsupported'
+/** A held Host listed in the catalog, named the way its toasts name it. */
+export type HeldHost = {
+  agentRef: string
+  /** Display name. */
+  label: string
+}
 
 export type NotificationSettings = {
   inApp: ChatNotificationPreference

@@ -1,13 +1,15 @@
 import { createContext, useContext } from 'react'
-import type { AgentWorkspaceRoute, NavItem } from '../uiTypes'
+import type { AgentWorkspaceRoute, HeldHost, NavItem } from '../uiTypes'
 
 export interface NavigationContextValue {
   navItem: NavItem
   selectedAgent: string | null
   heldAgentRefs: string[]
+  /** `heldAgentRefs` with the names the Retry rows show. */
+  heldHosts: HeldHost[]
   /**
-   * True when the active chat tab's Host is held, or was listed in this team and
-   * the catalog dropped it: ChatPage must not select another Host.
+   * True when the active chat tab's Host is held, even after the catalog dropped
+   * it: ChatPage must not select another Host.
    */
   keepFocusedChat: boolean
   selectedAgentRoute: AgentWorkspaceRoute

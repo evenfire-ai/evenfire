@@ -23,6 +23,7 @@ import type {
   AgentConversationNotificationTarget,
   AgentWorkspaceRoute,
   AppNotification,
+  HeldHost,
   NavItem,
   Tone,
   WorkflowCompletionNotificationTarget,
@@ -342,6 +343,10 @@ export function useAppController() {
     () => agentsData.agentNames.filter(agentRef => hostAuthority.isBlocked(agentRef)),
     [agentsData.agentNames, hostAuthority, hostAuthorityRevision]
   )
+  const heldHosts = useMemo<HeldHost[]>(
+    () => heldAgentRefs.map(agentRef => ({ agentRef, label: agentDisplayName(agentRef) })),
+    [agentDisplayName, heldAgentRefs]
+  )
   const getHostAuthorityEpoch = useCallback(
     (agentRef: string) => hostAuthority.getEpoch(agentRef),
     [hostAuthority]
@@ -358,40 +363,19 @@ export function useAppController() {
       invalidateSessionCatalog(agentRef)
       if (!hostAuthority.hold(agentRef, kind)) return
       setHostAuthorityRevision(revision => revision + 1)
-      const wasSelected = selectedAgentRef.current === agentRef
-      // Read before the refresh: a Host that left the catalog loses its display name.
-      const name = agentDisplayName(agentRef)
-      if (wasSelected) {
+      if (selectedAgentRef.current === agentRef) {
         nav.setSelectedAgent(null)
-        if (kind === 'revoked') pushToast(`Access to ${name} was revoked.`, 'error')
-      }
-      const refreshed = agentsData.refresh()
-      if (!wasSelected || kind === 'revoked') return
-      // The Retry row exists only while the catalog lists the Host, so the
-      // toast waits for this refresh to say which one the user can act on. A
-      // repeated denial keeps the hold and returns above, so this is the only toast.
-      // A revocation that arrives meanwhile finds the Host deselected and shows
-      // nothing, so the kind is read here, when the toast is shown. A release
-      // ends this hold episode; a later hold is another episode with its own toast.
-      const scope = authorityScopeRef.current
-      const since = hostAuthority.heldSince(agentRef)
-      void refreshed.then(catalog => {
-        const heldKind = hostAuthority.holdKind(agentRef)
-        if (
-          authorityScopeRef.current !== scope ||
-          !heldKind ||
-          hostAuthority.heldSince(agentRef) !== since
-        )
-          return
+        const name = agentDisplayName(agentRef)
+        // No Retry promise: the refresh below can drop the Host from the catalog,
+        // and the Retry row lists only Hosts the catalog still has.
         pushToast(
-          heldKind === 'revoked'
+          kind === 'revoked'
             ? `Access to ${name} was revoked.`
-            : catalog?.agentNames.includes(agentRef)
-              ? `Could not verify access to ${name}. Use Retry in Latest sessions.`
-              : `${name} is no longer available.`,
+            : `Could not verify access to ${name}.`,
           'error'
         )
-      })
+      }
+      void agentsData.refresh()
     },
     [
       agentDisplayName,
@@ -762,34 +746,13 @@ export function useAppController() {
     pushToast,
   ])
 
-  // Hosts listed by any catalog of the current user and team. It exists only for
-  // the Desktop team switch: chat tabs survive a switch, and a tab whose Host the
-  // new team never listed must not stop ChatPage from selecting a Host of that
-  // team. Remove it with the Desktop team switch; `keepFocusedChat` then goes back
-  // to "held or absent from the catalog".
-  const listedInTeamRef = useRef<{ key: string; agentRefs: Set<string> }>({
-    key: '',
-    agentRefs: new Set(),
-  })
-  const listingCatalog = agentsData.accessCatalog
-  if (listingCatalog) {
-    const key = `${listingCatalog.userId}:${listingCatalog.teamId}`
-    if (listedInTeamRef.current.key !== key) {
-      listedInTeamRef.current = { key, agentRefs: new Set() }
-    }
-    for (const agentRef of listingCatalog.agentNames)
-      listedInTeamRef.current.agentRefs.add(agentRef)
-  }
   const focusedChatAgentRef =
     nav.activeTab?.kind === 'chat' ? (nav.activeTab.chat?.agentRef ?? null) : null
-  // ChatPage stays on the focused chat when its Host is held, or when the catalog
-  // dropped a Host it listed in this team (the Host can leave the catalog before
-  // its own 403 places the hold).
+  // ChatPage stays on the focused chat while its Host is held, also after the
+  // catalog dropped that Host. Holds reset with the authority scope, so a team
+  // switch never keeps a tab of the previous team.
   const keepFocusedChat =
-    focusedChatAgentRef !== null &&
-    (hostAuthority.isBlocked(focusedChatAgentRef) ||
-      (!agentsData.agentNames.includes(focusedChatAgentRef) &&
-        listedInTeamRef.current.agentRefs.has(focusedChatAgentRef)))
+    focusedChatAgentRef !== null && hostAuthority.isBlocked(focusedChatAgentRef)
 
   const switchTeamForWorkspace = useCallback(
     async (teamId: string, options: { announce?: boolean } = {}) => {
@@ -1642,6 +1605,7 @@ export function useAppController() {
     selectedAgent: nav.selectedAgent,
     isHostAccessBlocked,
     heldAgentRefs,
+    heldHosts,
     focusedChatAgentRef,
     keepFocusedChat,
     hostAuthorityRevision,

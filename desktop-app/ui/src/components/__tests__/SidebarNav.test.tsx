@@ -2,8 +2,14 @@
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import type { HeldHost } from '../../uiTypes'
 import { SidebarNav } from '../SidebarNav'
 import type { SidebarNavProps } from '../SidebarNav/types'
+
+/** Held Hosts whose display name is their ref. */
+function heldAsRefs(...agentRefs: string[]): HeldHost[] {
+  return agentRefs.map(agentRef => ({ agentRef, label: agentRef }))
+}
 
 // SidebarNav pulls from four contexts. Mock each module so we only render
 // the logo block without standing up real providers, and so we never hit the
@@ -20,13 +26,13 @@ vi.mock('@contexts/AuthContext', () => ({
 const sidebarContext = vi.hoisted(() => ({
   latestChatSessions: [] as Array<{ id: string; agentRef: string; title: string }>,
   latestChatSessionsLoading: false,
-  heldAgentRefs: [] as string[],
+  heldHosts: [] as HeldHost[],
   handleSelectChatAgent: (() => undefined) as (...args: unknown[]) => void,
 }))
 beforeEach(() => {
   sidebarContext.latestChatSessions = []
   sidebarContext.latestChatSessionsLoading = false
-  sidebarContext.heldAgentRefs = []
+  sidebarContext.heldHosts = []
   sidebarContext.handleSelectChatAgent = vi.fn()
 })
 vi.mock('@contexts/ChatListContext', () => ({
@@ -49,7 +55,7 @@ vi.mock('@contexts/AgentChatActionsContext', () => ({
 vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => ({
     selectedAgent: null,
-    heldAgentRefs: sidebarContext.heldAgentRefs,
+    heldHosts: sidebarContext.heldHosts,
     handleSelectChatAgent: sidebarContext.handleSelectChatAgent,
   }),
 }))
@@ -441,7 +447,7 @@ describe('SidebarNav Files label engages the file explorer', () => {
   ])('T-F1-1: shows a Retry row for a held host $state', ({ sessions, loading }) => {
     sidebarContext.latestChatSessions = sessions
     sidebarContext.latestChatSessionsLoading = loading
-    sidebarContext.heldAgentRefs = ['host-b']
+    sidebarContext.heldHosts = heldAsRefs('host-b')
     const { container } = render(<SidebarNav {...baseProps()} />)
 
     // Liveness witness: the "Latest sessions" block rendered in this state.
@@ -464,7 +470,7 @@ describe('SidebarNav Files label engages the file explorer', () => {
   })
 
   it('T-D13-1: names each held host Retry button after its host', () => {
-    sidebarContext.heldAgentRefs = ['host-b', 'host-c']
+    sidebarContext.heldHosts = heldAsRefs('host-b', 'host-c')
     render(<SidebarNav {...baseProps()} />)
 
     expect(screen.getAllByRole('button', { name: /^Retry access to / })).toHaveLength(2)
@@ -478,9 +484,39 @@ describe('SidebarNav Files label engages the file explorer', () => {
     ])
   })
 
+  it('T-R1L3-2: names the held Host by its label in the row and in the Retry button', () => {
+    sidebarContext.heldHosts = [
+      { agentRef: 'alfredo-dev', label: 'Alfredo Dev' },
+      { agentRef: 'host-c', label: 'Billing Host' },
+      { agentRef: 'host-d', label: 'Research Host' },
+    ]
+    const { container } = render(<SidebarNav {...baseProps()} />)
+
+    const rows = [...container.querySelectorAll('.nav-latest-session--held')]
+    expect(rows.map(row => row.querySelector('span')?.textContent)).toEqual([
+      "Couldn't verify access to Alfredo Dev",
+      "Couldn't verify access to Billing Host",
+      "Couldn't verify access to Research Host",
+    ])
+    expect(
+      screen
+        .getAllByRole('button', { name: /^Retry access to / })
+        .map(button => button.getAttribute('aria-label'))
+    ).toEqual([
+      'Retry access to Alfredo Dev',
+      'Retry access to Billing Host',
+      'Retry access to Research Host',
+    ])
+    // The click still selects the Host by its ref.
+    fireEvent.click(screen.getByRole('button', { name: 'Retry access to Research Host' }))
+    expect(vi.mocked(sidebarContext.handleSelectChatAgent).mock.calls).toEqual([
+      ['host-d', { selectLatest: false }],
+    ])
+  })
+
   it('T-D13-2: closes the mobile menu when Retry is clicked', () => {
     stubNarrowViewport()
-    sidebarContext.heldAgentRefs = ['host-b']
+    sidebarContext.heldHosts = heldAsRefs('host-b')
     const { container, rerender } = render(<SidebarNav {...baseProps({ toggleRequestId: 0 })} />)
     rerender(<SidebarNav {...baseProps({ toggleRequestId: 1 })} />)
 
@@ -503,7 +539,7 @@ describe('SidebarNav Files label engages the file explorer', () => {
 
   it('T-D15-1: moves focus to the menu button when Retry closes the narrow-window menu', () => {
     stubNarrowViewport()
-    sidebarContext.heldAgentRefs = ['host-b']
+    sidebarContext.heldHosts = heldAsRefs('host-b')
     const { container, rerender } = render(<SidebarNav {...baseProps({ toggleRequestId: 0 })} />)
     rerender(<SidebarNav {...baseProps({ toggleRequestId: 1 })} />)
     expect(container.querySelector('.left-nav')?.classList.contains('mobile-open')).toBe(true)
@@ -542,7 +578,7 @@ describe('SidebarNav Files label engages the file explorer', () => {
 
   it('T-D15-2: closes an open session options menu when Retry is clicked', () => {
     sidebarContext.latestChatSessions = [{ id: 'chat-a1', agentRef: 'host-a', title: 'Session A1' }]
-    sidebarContext.heldAgentRefs = ['host-b']
+    sidebarContext.heldHosts = heldAsRefs('host-b')
     const { container } = render(<SidebarNav {...baseProps()} />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Session options for Session A1' }))
@@ -557,32 +593,32 @@ describe('SidebarNav Files label engages the file explorer', () => {
   })
 
   it('T-D15-3: moves focus to the Chat item when the verified Host leaves the held rows', () => {
-    sidebarContext.heldAgentRefs = ['host-b', 'host-c']
+    sidebarContext.heldHosts = heldAsRefs('host-b', 'host-c')
     const { rerender } = render(<SidebarNav {...baseProps()} />)
     const retry = screen.getByRole('button', { name: 'Retry access to host-b' })
     retry.focus()
     fireEvent.click(retry)
 
     // A failed verification keeps host-b held: its row and focus stay.
-    sidebarContext.heldAgentRefs = ['host-b', 'host-c']
+    sidebarContext.heldHosts = heldAsRefs('host-b', 'host-c')
     rerender(<SidebarNav {...baseProps()} />)
     expect(document.activeElement).toBe(retry)
     // Another Host is released: host-b's row and focus stay.
-    sidebarContext.heldAgentRefs = ['host-b']
+    sidebarContext.heldHosts = heldAsRefs('host-b')
     rerender(<SidebarNav {...baseProps()} />)
     expect(document.activeElement).toBe(retry)
 
-    sidebarContext.heldAgentRefs = []
+    sidebarContext.heldHosts = []
     rerender(<SidebarNav {...baseProps()} />)
     expect(screen.queryByRole('button', { name: /^Retry access to / })).toBeNull()
     expect(document.activeElement).toBe(screen.getByTestId('nav-chat'))
   })
 
   it('T-D15-4: leaves focus where the user moved it before the Host verified', () => {
-    sidebarContext.heldAgentRefs = ['host-b', 'host-c']
+    sidebarContext.heldHosts = heldAsRefs('host-b', 'host-c')
     const { rerender } = render(<SidebarNav {...baseProps()} />)
     fireEvent.click(screen.getByRole('button', { name: 'Retry access to host-c' }))
-    sidebarContext.heldAgentRefs = ['host-b']
+    sidebarContext.heldHosts = heldAsRefs('host-b')
     rerender(<SidebarNav {...baseProps()} />)
     // Liveness witness: the focus effect runs in this test and moves body focus.
     expect(document.activeElement).toBe(screen.getByTestId('nav-chat'))
@@ -590,7 +626,7 @@ describe('SidebarNav Files label engages the file explorer', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry access to host-b' }))
     const files = screen.getByTestId('nav-files')
     files.focus()
-    sidebarContext.heldAgentRefs = []
+    sidebarContext.heldHosts = []
     rerender(<SidebarNav {...baseProps()} />)
     expect(screen.queryByRole('button', { name: /^Retry access to / })).toBeNull()
     expect(document.activeElement).toBe(files)
