@@ -51,7 +51,7 @@ describe('LocalConsentStore', () => {
   it('writes the file 0600 so other local accounts cannot read it', async () => {
     await store.put(grant())
     const stat = await fs.stat(path.join(tmpDir, `${ENV_A}.json`))
-    expect(stat.mode & 0o777).toBe(0o600)
+    if (process.platform !== 'win32') expect(stat.mode & 0o777).toBe(0o600)
   })
 
   it('keeps environments apart', async () => {

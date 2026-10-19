@@ -56,7 +56,7 @@ describe('PluginAuditLog', () => {
   it('writes the file 0600', async () => {
     await log.append(ENV_KEY, entry())
     const stat = await fs.stat(path.join(tmpDir, `${ENV_KEY}.jsonl`))
-    expect(stat.mode & 0o777).toBe(0o600)
+    if (process.platform !== 'win32') expect(stat.mode & 0o777).toBe(0o600)
   })
 
   it('filters to one user', async () => {

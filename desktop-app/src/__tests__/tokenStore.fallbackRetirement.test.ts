@@ -321,8 +321,11 @@ describe('observed fallback file retirement', () => {
       if (String(args[0]) === fixture.directory && args[1] === 'r') {
         const sync = handle.sync.bind(handle)
         vi.spyOn(handle, 'sync').mockImplementationOnce(async () => {
-          await sync()
-          fixture.encryptionAvailable = false
+          try {
+            await sync()
+          } finally {
+            fixture.encryptionAvailable = false
+          }
         })
       }
       return handle

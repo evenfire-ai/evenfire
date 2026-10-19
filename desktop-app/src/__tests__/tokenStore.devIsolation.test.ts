@@ -122,7 +122,8 @@ describe('TokenStore dev isolation', () => {
 
     await store.setSessionToken(isolatedValue, ENV)
     expect(await store.getSessionToken(ENV)).toBe(isolatedValue)
-    expect((await fs.stat(encryptedFile)).mode & 0o777).toBe(0o600)
+    if (process.platform !== 'win32')
+      expect((await fs.stat(encryptedFile)).mode & 0o777).toBe(0o600)
     expect(await fs.readdir(isolatedDir)).toEqual([path.basename(encryptedFile)])
 
     await store.clearSessionToken(ENV)

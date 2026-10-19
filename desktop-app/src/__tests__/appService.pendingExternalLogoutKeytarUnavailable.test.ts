@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
+import fsSync from 'node:fs'
 import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -248,6 +249,13 @@ describe('AppService pending logout when Keytar is unavailable', () => {
   it('uses memory-only mode when Linux safeStorage selects the basic_text backend', async () => {
     const hostPlatform = process.platform
     Object.defineProperty(process, 'platform', { value: 'linux', configurable: true })
+    const sync = fsSync.fsyncSync.bind(fsSync)
+    const syncSpy = vi.spyOn(fsSync, 'fsyncSync').mockImplementation(descriptor => {
+      // This test simulates Linux's directory-fsync capability on a Windows host.
+      // The native Windows durability contract is covered by its own platform gate.
+      if (fsSync.fstatSync(descriptor).isDirectory()) return
+      return sync(descriptor)
+    })
     try {
       testRuntime.safeStorageBackend = 'basic_text'
       const { safeStorage } = await import('electron')
@@ -279,6 +287,7 @@ describe('AppService pending logout when Keytar is unavailable', () => {
         ).toBe(false)
       }
     } finally {
+      syncSpy.mockRestore()
       Object.defineProperty(process, 'platform', { value: hostPlatform, configurable: true })
     }
   })

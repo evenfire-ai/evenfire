@@ -2160,6 +2160,7 @@ describe('App deep-link orchestration', () => {
     listApps.mockResolvedValue({ apps: [READY_APP] })
     render(<App />)
     await launchAppFromSidebar('ns/app') // tabs: [chat, A]; A live, liveRef = A
+    await reportShortcutOpenResult()
     const outgoingId = appTabs()[0]?.id
 
     closeSandboxUi.mockClear()

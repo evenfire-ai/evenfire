@@ -248,7 +248,8 @@ describe('chatStoreBinding', () => {
     await bindChatStoreForUser('user-permissions', ENV_A)
 
     for (const directory of [tmpBase, envDir, userDir]) {
-      expect((await fs.stat(directory)).mode & 0o777).toBe(0o700)
+      const stat = await fs.stat(directory)
+      if (process.platform !== 'win32') expect(stat.mode & 0o777).toBe(0o700)
     }
   })
 

@@ -44,7 +44,8 @@ describe('pending external logout intent', () => {
       revision: expect.any(String),
       intent: 'logout-pending',
     })
-    expect((await fs.stat(markerPath(ENV_A))).mode & 0o777).toBe(0o600)
+    if (process.platform !== 'win32')
+      expect((await fs.stat(markerPath(ENV_A))).mode & 0o777).toBe(0o600)
     expect(await fs.readdir(userDataDirectory)).toEqual([
       `pending-external-logout-${createHash('sha256').update(ENV_A).digest('hex')}`,
     ])
@@ -102,7 +103,8 @@ describe('pending external logout intent', () => {
     const contents = await fs.readFile(markerPath(ENV_A), 'utf8')
     expect(contents).not.toContain(token)
     expect(readPendingExternalLogoutMarker(userDataDirectory, ENV_A)).toEqual(first)
-    expect((await fs.stat(markerPath(ENV_A))).mode & 0o777).toBe(0o600)
+    if (process.platform !== 'win32')
+      expect((await fs.stat(markerPath(ENV_A))).mode & 0o777).toBe(0o600)
 
     const next = recordMemoryOnlySessionIfUnchanged(
       userDataDirectory,
@@ -146,6 +148,7 @@ describe('pending external logout intent', () => {
     const filePath = markerPath(ENV_A)
     const replacementDirectory = path.join(userDataDirectory, 'replacement')
     const replacementPath = path.join(replacementDirectory, path.basename(filePath))
+    const displacedPath = path.join(replacementDirectory, 'displaced-marker')
     await fs.mkdir(replacementDirectory)
     recordPendingExternalLogout(userDataDirectory, ENV_A)
     recordPendingKeytarCleanup(replacementDirectory, ENV_A, 'safe-storage')
@@ -155,6 +158,7 @@ describe('pending external logout intent', () => {
 
     const replaceMarkerPath = () => {
       if (replaced) return
+      fsSync.renameSync(filePath, displacedPath)
       fsSync.renameSync(replacementPath, filePath)
       replaced = true
     }

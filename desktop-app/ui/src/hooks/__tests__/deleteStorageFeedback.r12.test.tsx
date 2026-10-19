@@ -4,6 +4,7 @@ import { useNavigationContext } from '@contexts/NavigationContext'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { promises as fs } from 'node:fs'
+import nodePath from 'node:path'
 import { SidebarNav } from '@components/SidebarNav'
 import { ChatThread } from '@components/agents/ChatThread'
 import { installAppControllerClerum } from '../domain/__tests__/__fixtures__/appControllerHarness'
@@ -318,7 +319,7 @@ it.each([false, true])(
     const { app, clerum } = await mountStorageDelete()
     const actualRm = fs.rm
     vi.spyOn(fs, 'rm').mockImplementation((path, options) => {
-      if (String(path).endsWith('/agent-x/chat-2.json')) {
+      if (nodePath.normalize(String(path)).endsWith(nodePath.join('agent-x', 'chat-2.json'))) {
         return Promise.reject(Object.assign(new Error('cleanup denied'), { code: 'EACCES' }))
       }
       return actualRm(path, options)

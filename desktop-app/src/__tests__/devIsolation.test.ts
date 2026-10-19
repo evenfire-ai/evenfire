@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import os from 'node:os'
+import path from 'node:path'
 import {
   admitIsolationBaseDir,
   devIsolationRuntimePolicy,
@@ -7,22 +9,24 @@ import {
   verifyDevIsolationRuntime,
 } from '../devIsolation'
 
+const isolatedRunDir = path.resolve(os.tmpdir(), 'isolated-run')
+const repoRoot = path.resolve(os.tmpdir(), 'repo')
 const env = {
   EVENFIRE_DEV_ISOLATION: '1',
-  EVENFIRE_DEV_ISOLATION_RUN_DIR: '/tmp/isolated-run',
+  EVENFIRE_DEV_ISOLATION_RUN_DIR: isolatedRunDir,
   EVENFIRE_DEV_ISOLATION_TARGET: 'minikube-30488',
   EVENFIRE_DEV_ISOLATION_PR: '660',
   EVENFIRE_DEV_ISOLATION_REST_URL: 'http://127.0.0.1:30579',
   EVENFIRE_DEV_ISOLATION_RPC_URL: 'http://127.0.0.1:30582',
-  EVENFIRE_DEV_ISOLATION_APP_PATH: '/repo/desktop-app/dist',
+  EVENFIRE_DEV_ISOLATION_APP_PATH: path.join(repoRoot, 'desktop-app', 'dist'),
   EXTERNAL_REST_API_BASE_URL: 'http://127.0.0.1:30579',
   RPC_PROXY_BASE_URL: 'http://127.0.0.1:30582',
-  CLERUM_DESKTOP_CONFIG_PATH: '/tmp/isolated-run/runtime-config.json',
+  CLERUM_DESKTOP_CONFIG_PATH: path.join(isolatedRunDir, 'runtime-config.json'),
 }
 const argv = [
   'electron',
-  '--user-data-dir=/tmp/isolated-run/user-data',
-  '/repo/desktop-app/dist/main.js',
+  `--user-data-dir=${path.join(isolatedRunDir, 'user-data')}`,
+  path.join(repoRoot, 'desktop-app', 'dist', 'main.js'),
 ]
 
 describe('explicit development instance isolation', () => {
@@ -43,7 +47,9 @@ describe('explicit development instance isolation', () => {
   })
   it('requires the explicit directory before single-instance/protocol setup', () => {
     expect(resolveDevIsolation(env, [])).toMatchObject({ mode: 'refused' })
-    expect(resolveDevIsolation(env, ['--user-data-dir=/tmp/another-run'])).toMatchObject({
+    expect(
+      resolveDevIsolation(env, [`--user-data-dir=${path.join(os.tmpdir(), 'another-run')}`])
+    ).toMatchObject({
       mode: 'refused',
     })
   })
@@ -70,7 +76,7 @@ describe('explicit development instance isolation', () => {
   })
   it('isolates OS routing and verifies effective identity before exposing metadata', () => {
     const result = resolveDevIsolation(env, argv)
-    expect(result.mode).toBe('isolated')
+    expect(result, JSON.stringify(result)).toMatchObject({ mode: 'isolated' })
     if (result.mode !== 'isolated') throw new Error('expected isolated plan')
     const { plan } = result
     expect(devIsolationRuntimePolicy(plan)).toMatchObject({

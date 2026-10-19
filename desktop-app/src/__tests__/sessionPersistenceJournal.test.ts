@@ -45,7 +45,7 @@ describe('write-ahead denial journal', () => {
     expect(journal.pending).toHaveLength(1)
     expect(journal.pending[0].sources).toEqual(['keytar', 'safe-storage'])
     expect(fs.readFileSync(journalPath(), 'utf8')).not.toContain(secret)
-    expect(fs.statSync(journalPath()).mode & 0o077).toBe(0)
+    if (process.platform !== 'win32') expect(fs.statSync(journalPath()).mode & 0o077).toBe(0)
     expect(isSessionPersistenceCandidateDenied(journal, secret)).toBe(true)
   })
 

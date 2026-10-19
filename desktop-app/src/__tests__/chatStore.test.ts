@@ -2366,7 +2366,8 @@ describe('messages', () => {
       chatCacheDir('private-chat'),
       chatPagesDir('private-chat'),
     ]) {
-      expect((await fs.stat(dir)).mode & 0o777).toBe(0o700)
+      const stat = await fs.stat(dir)
+      if (process.platform !== 'win32') expect(stat.mode & 0o777).toBe(0o700)
     }
   })
 

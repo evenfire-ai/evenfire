@@ -127,9 +127,11 @@ describe('owner-approved secure authority for new production writes', () => {
     expect(
       await new TokenStore({ isolatedUserDataPath: fixture.directory }).getSessionToken(ENV)
     ).toBe('fixture-isolated')
-    expect(
-      (await fs.stat(path.join(fixture.directory, `session-token-${ENV}.json`))).mode & 0o777
-    ).toBe(0o600)
+    if (process.platform !== 'win32') {
+      expect(
+        (await fs.stat(path.join(fixture.directory, `session-token-${ENV}.json`))).mode & 0o777
+      ).toBe(0o600)
+    }
     expect(fixture.getPassword).not.toHaveBeenCalled()
     expect(fixture.setPassword).not.toHaveBeenCalled()
   })
