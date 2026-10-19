@@ -295,6 +295,21 @@ function parseSessionMessagesResult(
   }
   if (!Array.isArray(record.turns)) throw new Error('Invalid session messages response.turns')
   const state = parseSessionState(record.state, 'session messages response.state')
+  let modelStepCheckpoint: SessionMessagesResult['modelStepCheckpoint']
+  if (record.modelStepCheckpoint != null) {
+    try {
+      modelStepCheckpoint = parseModelStepCheckpointView(
+        record.modelStepCheckpoint,
+        'session messages response.modelStepCheckpoint'
+      )
+    } catch {
+      // A malformed optional checkpoint must not hide the transcript. Never log
+      // the wire value or parser error: both can contain upstream content.
+      console.warn(
+        '[RpcProxyClient] Ignored malformed model-step checkpoint in session messages response'
+      )
+    }
+  }
   return {
     agent,
     chatId,
@@ -361,14 +376,7 @@ function parseSessionMessagesResult(
     ...(record.tokens != null
       ? { tokens: parseTokens(record.tokens, 'session messages response.tokens') }
       : {}),
-    ...(record.modelStepCheckpoint != null
-      ? {
-          modelStepCheckpoint: parseModelStepCheckpointView(
-            record.modelStepCheckpoint,
-            'session messages response.modelStepCheckpoint'
-          ),
-        }
-      : {}),
+    ...(modelStepCheckpoint !== undefined ? { modelStepCheckpoint } : {}),
     turns: record.turns.map((turn, index) => {
       const entry = wireObject(turn, `session messages response.turns[${index}]`)
       return {
@@ -1170,8 +1178,8 @@ export class RpcProxyClient {
     assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
     assertSafeRouteSegment('chatId', chatId)
     assertSafeRouteSegment('checkpointId', checkpointId)
-    if (!Number.isSafeInteger(version) || version < 0) {
-      throw new Error('version must be a non-negative integer')
+    if (!Number.isSafeInteger(version) || version < 1) {
+      throw new Error('version must be a non-negative integer greater than zero')
     }
     const response = await fetch(
       url(

@@ -29,6 +29,27 @@ const BLOCKED_REASONS: readonly ModelStepBlockedReason[] = [
   'attachment_expired',
 ]
 
+const VIEW_FIELDS = [
+  'checkpointId',
+  'version',
+  'status',
+  'retryAvailable',
+  'originTaskId',
+  'continuationTaskId',
+  'provider',
+  'model',
+  'blockedReason',
+  'tools',
+  'failedAt',
+  'expiresAt',
+]
+const TOOL_FIELDS = ['confirmed', 'unknown', 'notDispatched']
+const TASK_RESPONSE_FIELDS = ['taskId', 'checkpointId', 'status', 'replayed']
+const NOT_FOUND_RESPONSE_FIELDS = ['code']
+const BLOCKED_RESPONSE_FIELDS = ['code', 'blockedReason']
+const VERSION_MISMATCH_RESPONSE_FIELDS = ['code', 'current']
+const ISO_TIMESTAMP = /^(?:\d{4}|[+-]\d{6})-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+
 export const MODEL_STEP_CONTINUE_ERROR_CODES = {
   notFound: 'model_step_checkpoint_not_found',
   versionMismatch: 'model_step_checkpoint_version_mismatch',
@@ -40,6 +61,16 @@ function record(value: unknown, label: string): Record<string, unknown> {
     throw new Error(`Invalid ${label}`)
   }
   return value as Record<string, unknown>
+}
+
+function onlyFields(
+  value: Record<string, unknown>,
+  fields: readonly string[],
+  label: string
+): void {
+  for (const key of Object.keys(value)) {
+    if (!fields.includes(key)) throw new Error(`Invalid ${label}.${key}`)
+  }
 }
 
 function nonEmptyString(value: unknown, label: string): string {
@@ -56,7 +87,10 @@ function count(value: unknown, label: string): number {
 
 function isoTimestamp(value: unknown, label: string): string {
   const text = nonEmptyString(value, label)
-  if (Number.isNaN(Date.parse(text))) throw new Error(`Invalid ${label}`)
+  const date = new Date(text)
+  if (!ISO_TIMESTAMP.test(text) || Number.isNaN(date.getTime()) || date.toISOString() !== text) {
+    throw new Error(`Invalid ${label}`)
+  }
   return text
 }
 
@@ -72,6 +106,7 @@ export function parseModelStepCheckpointView(
   label = 'model step checkpoint'
 ): ModelStepCheckpointView {
   const view = record(value, label)
+  onlyFields(view, VIEW_FIELDS, label)
   const status = view.status
   if (
     typeof status !== 'string' ||
@@ -87,24 +122,25 @@ export function parseModelStepCheckpointView(
     throw new Error(`Invalid ${label}.retryAvailable`)
   }
   const version = view.version
-  if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 0) {
+  if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1) {
     throw new Error(`Invalid ${label}.version`)
   }
   const tools = record(view.tools, `${label}.tools`)
-  const continuationTaskId =
-    view.continuationTaskId === undefined || view.continuationTaskId === null
-      ? undefined
-      : nonEmptyString(view.continuationTaskId, `${label}.continuationTaskId`)
-  if (visibleStatus === 'claimed' && continuationTaskId === undefined) {
+  onlyFields(tools, TOOL_FIELDS, `${label}.tools`)
+  if (visibleStatus !== 'claimed' && Object.hasOwn(view, 'continuationTaskId')) {
     throw new Error(`Invalid ${label}.continuationTaskId`)
   }
-  const reason =
-    view.blockedReason === undefined || view.blockedReason === null
-      ? undefined
-      : blockedReason(view.blockedReason, `${label}.blockedReason`)
-  if (visibleStatus === 'blocked' && reason === undefined) {
+  const continuationTaskId =
+    visibleStatus === 'claimed'
+      ? nonEmptyString(view.continuationTaskId, `${label}.continuationTaskId`)
+      : undefined
+  if (visibleStatus !== 'blocked' && Object.hasOwn(view, 'blockedReason')) {
     throw new Error(`Invalid ${label}.blockedReason`)
   }
+  const reason =
+    visibleStatus === 'blocked'
+      ? blockedReason(view.blockedReason, `${label}.blockedReason`)
+      : undefined
   return {
     checkpointId: nonEmptyString(view.checkpointId, `${label}.checkpointId`),
     version,
@@ -140,6 +176,7 @@ export function parseModelStepContinueResponse(
   const payload = body as Record<string, unknown>
   const label = 'model step continue response'
   if (httpStatus === 202 || httpStatus === 200) {
+    onlyFields(payload, TASK_RESPONSE_FIELDS, label)
     const taskId = nonEmptyString(payload.taskId, `${label}.taskId`)
     const checkpointId = nonEmptyString(payload.checkpointId, `${label}.checkpointId`)
     if (checkpointId !== expectedCheckpointId) throw new Error(`Invalid ${label}.checkpointId`)
@@ -152,9 +189,8 @@ export function parseModelStepContinueResponse(
         body: { taskId, checkpointId, status: 'claimed', replayed: payload.replayed },
       }
     }
-    if (payload.status !== 'completed' || payload.replayed !== true) {
-      throw new Error(`Invalid ${label}.status`)
-    }
+    if (payload.status !== 'completed') throw new Error(`Invalid ${label}.status`)
+    if (payload.replayed !== true) throw new Error(`Invalid ${label}.replayed`)
     return {
       outcome: 'completed',
       httpStatus,
@@ -162,9 +198,11 @@ export function parseModelStepContinueResponse(
     }
   }
   if (httpStatus === 404 && payload.code === MODEL_STEP_CONTINUE_ERROR_CODES.notFound) {
+    onlyFields(payload, NOT_FOUND_RESPONSE_FIELDS, label)
     return { outcome: 'not_found', httpStatus, body: { code: payload.code } }
   }
   if (httpStatus === 409 && payload.code === MODEL_STEP_CONTINUE_ERROR_CODES.versionMismatch) {
+    onlyFields(payload, VERSION_MISMATCH_RESPONSE_FIELDS, label)
     const current = parseModelStepCheckpointView(payload.current, `${label}.current`)
     if (current.checkpointId !== expectedCheckpointId) {
       throw new Error(`Invalid ${label}.current.checkpointId`)
@@ -172,6 +210,7 @@ export function parseModelStepContinueResponse(
     return { outcome: 'version_mismatch', httpStatus, body: { code: payload.code, current } }
   }
   if (httpStatus === 409 && payload.code === MODEL_STEP_CONTINUE_ERROR_CODES.blocked) {
+    onlyFields(payload, BLOCKED_RESPONSE_FIELDS, label)
     return {
       outcome: 'blocked',
       httpStatus,

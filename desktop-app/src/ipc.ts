@@ -1802,8 +1802,8 @@ export function registerIpcHandlers(service: AppService): void {
         throw new Error('hostRef, agent, chatId, and checkpointId are required')
       }
       const version = payload?.version
-      if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 0) {
-        throw new Error('version must be a non-negative integer')
+      if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1) {
+        throw new Error('version must be a non-negative integer greater than zero')
       }
       assertSafeRouteSegment('hostRef', hostRef)
       assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })

@@ -48,6 +48,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
 function continueStep(version = 1) {
@@ -179,8 +180,41 @@ describe('RpcProxyClient — continueModelStep() (#1044)', () => {
     await expect(continueStep(-1)).rejects.toThrow('version must be a non-negative integer')
     // Witness: the same client issues the request for a valid version.
     fetchSpy.mockResolvedValueOnce(continueFixtureResponse('continue-response.claimed.json'))
-    await continueStep(0)
+    await continueStep(1)
     expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects version zero before any request', async () => {
+    await expect(continueStep(0)).rejects.toThrow(
+      'version must be a non-negative integer greater than zero'
+    )
+    expect(fetchSpy).not.toHaveBeenCalled()
+    fetchSpy.mockResolvedValueOnce(continueFixtureResponse('continue-response.claimed.json'))
+    await expect(continueStep(1)).resolves.toMatchObject({ outcome: 'claimed' })
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['unknown status', { status: 'private-status-marker' }],
+    ['unknown key', { unexpected: 'private-body-marker' }],
+    ['bad timestamp', { failedAt: 'October 9, 2026' }],
+  ])('rejects a malformed %s in a continue response', async (_label, change) => {
+    const valid = fixture('continue-response.version-mismatch.json') as {
+      httpStatus: number
+      body: { current: Record<string, unknown> }
+    }
+    fetchSpy.mockResolvedValueOnce(
+      jsonResponse(valid.httpStatus, {
+        ...valid.body,
+        current: { ...valid.body.current, ...change },
+      })
+    )
+    await expect(continueStep()).rejects.toThrow('Invalid model step continue response.current')
+
+    fetchSpy.mockResolvedValueOnce(
+      continueFixtureResponse('continue-response.version-mismatch.json')
+    )
+    await expect(continueStep()).resolves.toMatchObject({ outcome: 'version_mismatch' })
   })
 })
 
@@ -188,7 +222,9 @@ describe('RpcProxyClient — loadSessionMessages() modelStepCheckpoint (#1044)',
   const session = (checkpoint?: unknown) => ({
     agent: 'chatllm',
     chatId: 'c1',
-    turns: [],
+    turns: [
+      { number: 1, user_input: 'Hello', response: 'World', started_at: '2026-10-09T10:00:00.000Z' },
+    ],
     ...(checkpoint !== undefined ? { modelStepCheckpoint: checkpoint } : {}),
   })
 
@@ -216,23 +252,26 @@ describe('RpcProxyClient — loadSessionMessages() modelStepCheckpoint (#1044)',
     expect('modelStepCheckpoint' in result).toBe(false)
   })
 
-  it('rejects a view whose retryAvailable disagrees with its status', async () => {
-    const view = { ...(fixture('session-view.blocked.json') as object), retryAvailable: true }
-    fetchSpy.mockResolvedValueOnce(jsonResponse(200, session(view)))
+  it.each([
+    ['unknown status', 'session-view.resumable.json', { status: 'private-status-marker' }],
+    ['unknown key', 'session-view.resumable.json', { unexpected: 'private-body-marker' }],
+    ['bad timestamp', 'session-view.resumable.json', { failedAt: 'October 9, 2026' }],
+    ['inconsistent retry flag', 'session-view.blocked.json', { retryAvailable: true }],
+    ['missing continuation task', 'session-view.claimed.json', { continuationTaskId: undefined }],
+  ])(
+    'omits a malformed checkpoint with %s but loads the transcript',
+    async (_label, name, change) => {
+      const view = { ...(fixture(name) as object), ...change }
+      fetchSpy.mockResolvedValueOnce(jsonResponse(200, session(view)))
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
-    await expect(
-      client.loadSessionMessages('rpc-token', 'chatllm', 'chatllm', 'c1')
-    ).rejects.toThrow('Invalid session messages response.modelStepCheckpoint.retryAvailable')
-  })
+      const result = await client.loadSessionMessages('rpc-token', 'chatllm', 'chatllm', 'c1')
 
-  it('rejects a claimed view without its continuation task', async () => {
-    const { continuationTaskId: _dropped, ...view } = fixture('session-view.claimed.json') as {
-      continuationTaskId: string
+      expect(result.turns).toEqual(session().turns)
+      expect('modelStepCheckpoint' in result).toBe(false)
+      expect(warnSpy).toHaveBeenCalledExactlyOnceWith(
+        '[RpcProxyClient] Ignored malformed model-step checkpoint in session messages response'
+      )
     }
-    fetchSpy.mockResolvedValueOnce(jsonResponse(200, session(view)))
-
-    await expect(
-      client.loadSessionMessages('rpc-token', 'chatllm', 'chatllm', 'c1')
-    ).rejects.toThrow('Invalid session messages response.modelStepCheckpoint.continuationTaskId')
-  })
+  )
 })
