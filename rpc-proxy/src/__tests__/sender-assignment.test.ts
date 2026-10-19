@@ -79,6 +79,13 @@ describe('POST /rpc/hosts/:hostRef/messages — sender assignment invariant', ()
         },
         targetUserId: 'attacker-target',
         outputOverrides: { path: '/tmp/untrusted' },
+        profileLinkContext: {
+          version: 1,
+          userId: 'attacker',
+          teamId: 'attacker-team',
+          hostRef: 'attacker-host',
+          profileUiBaseUrl: 'https://attacker.example',
+        },
       })
       .expect(200)
 
@@ -93,6 +100,7 @@ describe('POST /rpc/hosts/:hostRef/messages — sender assignment invariant', ()
     // envelope field is still server-derived and overrides client input.
     expect(typeof forwardedBody.messageId).toBe('string')
     expect(forwardedBody).not.toHaveProperty('imageModel')
+    expect(forwardedBody).not.toHaveProperty('profileLinkContext')
     expect((forwardedBody.messageId as string).length).toBeGreaterThan(0)
     expect(forwardedBody).toMatchObject({
       content: 'hi',
@@ -110,6 +118,10 @@ describe('POST /rpc/hosts/:hostRef/messages — sender assignment invariant', ()
       version: 1,
       origin: 'direct_chat',
       sessionId: 'chat-1',
+    })
+    expect(serviceMock.resolveHostConnectionForUser.mock.calls[0]?.[3]).toMatchObject({
+      teamId: 'team-1',
+      includeProfileLinkContext: true,
     })
   })
 
@@ -145,7 +157,7 @@ describe('POST /rpc/hosts/:hostRef/messages — sender assignment invariant', ()
       'user-uuid-abc',
       'chatllm',
       'token',
-      { teamId: null }
+      { teamId: null, includeProfileLinkContext: true }
     )
     const forwardedBody = serviceMock.forwardHostMessageToHost.mock.calls[0][1]
     expect(forwardedBody.metadata).toEqual({ accessScope: 'user' })

@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest'
 import { ToolDefinition } from '../../types'
 import {
   DefaultPromptBuilder,
+  GFS_PROFILE_LINK_GUIDANCE_TEXT,
   GFS_WORKSPACE_FILE_GUIDANCE_TEXT,
   MEMORY_GUIDANCE_TEXT,
+  URL_REFERENCE_GUIDANCE_TEXT,
 } from '../promptBuilder'
 
 function tool(name: string): ToolDefinition {
@@ -55,5 +57,34 @@ describe('DefaultPromptBuilder — governed GFS workspace files', () => {
     const builder = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
     const msg = builder.buildSystemPrompt([tool('clerum__gfs_read')])
     expect(msg.content).not.toContain(GFS_WORKSPACE_FILE_GUIDANCE_TEXT)
+  })
+})
+
+describe('DefaultPromptBuilder — URL and resource identity guidance', () => {
+  it('includes the general URL contract for all agents', () => {
+    const builder = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
+    const msg = builder.buildSystemPrompt([tool('shell_exec')])
+    expect(msg.content).toContain(URL_REFERENCE_GUIDANCE_TEXT)
+    expect(msg.content).toContain(
+      'Profile app/plugin links use the existing `/open/apps/<namespace>/<app>`'
+    )
+    expect(msg.content).toContain('HTTP and HTTPS URLs are external web destinations')
+    expect(msg.content).toContain('Canonical `gfs://` references are legacy resource identities')
+    expect(msg.content).toContain('Profile `/open/files?uri=...` URLs are EvenDrive resource links')
+    expect(msg.content).not.toContain(GFS_PROFILE_LINK_GUIDANCE_TEXT)
+  })
+
+  it('includes Profile file resolution guidance only when GFS resolution is registered', () => {
+    const builder = new DefaultPromptBuilder({ nativeToolPresentation: 'direct' })
+    const withResolver = builder.buildSystemPrompt([tool('clerum__gfs_resolve')])
+    expect(withResolver.content).toContain(URL_REFERENCE_GUIDANCE_TEXT)
+    expect(withResolver.content).toContain(GFS_PROFILE_LINK_GUIDANCE_TEXT)
+    expect(withResolver.content).toContain(
+      'A Profile `/open/files?uri=...` URL locates a GFS resource'
+    )
+
+    const withoutResolver = builder.buildSystemPrompt([tool('clerum__gfs_read')])
+    expect(withoutResolver.content).toContain(URL_REFERENCE_GUIDANCE_TEXT)
+    expect(withoutResolver.content).not.toContain(GFS_PROFILE_LINK_GUIDANCE_TEXT)
   })
 })

@@ -72,6 +72,14 @@ export const GFS_WORKSPACE_FILE_GUIDANCE_TEXT =
   ' ' +
   'Ask for shell approval with the exact command/script to execute. Do not treat expiry, checksum, version, transfer, or destination selection as model-controlled choices.'
 
+/** General URL contract shared by agents whether or not GFS tools are available. */
+export const URL_REFERENCE_GUIDANCE_TEXT =
+  'URL REFERENCES: Preserve the original URL and any authored Markdown label as message data; a friendly display label never replaces the actual link target. HTTP and HTTPS URLs are external web destinations; do not fetch linked pages or remote images just to construct labels. Profile app/plugin links use the existing `/open/apps/<namespace>/<app>` producer contract: carry a supplied link forward exactly, and never infer app identity from a similar hostname or arbitrary path. Profile `/open/files?uri=...` URLs are EvenDrive resource links; preserve the supplied target and do not expose its embedded raw GFS identity separately. Canonical `gfs://` references are legacy resource identities; keep them intact when handling existing content. Keep structured `fileReferences` in their existing representation; do not recover identity from labels, HTML, or rendered editor content.'
+
+/** GFS-specific link guidance is emitted only when the current caller can resolve resources. */
+export const GFS_PROFILE_LINK_GUIDANCE_TEXT =
+  'EVENDRIVE LINKS: A Profile `/open/files?uri=...` URL locates a GFS resource but does not grant access. Resolve it only with `clerum__gfs_resolve` under the current caller authority. When a user-facing EvenDrive link is needed and a GFS result has no Profile URL, call `clerum__gfs_resolve` with its exact canonical GFS URI. Use the returned `profileUrl` unchanged; do not invent a Profile origin or expose a raw GFS identifier in chat. If no Profile URL is available, say a share link could not be created.'
+
 /**
  * Workflow-recipe behavioral contract. Emitted whenever any `workflow_*` tool
  * is registered. Governs the `workflow_trigger`/`workflow_status`/`workflow_result`
@@ -229,6 +237,11 @@ export class DefaultPromptBuilder implements PromptBuilder {
       sections.push(GFS_WORKSPACE_FILE_GUIDANCE_TEXT)
     }
 
+    sections.push(URL_REFERENCE_GUIDANCE_TEXT)
+    if (tools.some(t => t.name === 'clerum__gfs_resolve')) {
+      sections.push(GFS_PROFILE_LINK_GUIDANCE_TEXT)
+    }
+
     // NOTE: this is intentionally still true when the bridge is active — the
     // `clerum__tool_search/describe/call` native/bridge tools also contain `__`,
     // so `MCP_SERVER_SELECTION_TEXT` still emits. That is fine: `TOOL_DISCOVERY_TEXT`
@@ -356,6 +369,8 @@ export class DefaultPromptBuilder implements PromptBuilder {
     if (input.mcpServerGuidance.trim()) parts.push(input.mcpServerGuidance.trim())
     if (input.toolDiscoveryGuidance.trim()) parts.push(input.toolDiscoveryGuidance.trim())
     if (input.gfsWorkspaceGuidance?.trim()) parts.push(input.gfsWorkspaceGuidance.trim())
+    if (input.urlReferenceGuidance?.trim()) parts.push(input.urlReferenceGuidance.trim())
+    if (input.gfsProfileLinkGuidance?.trim()) parts.push(input.gfsProfileLinkGuidance.trim())
     if (input.memoryGuidance.trim()) parts.push(input.memoryGuidance.trim())
     return parts.join('\n\n')
   }

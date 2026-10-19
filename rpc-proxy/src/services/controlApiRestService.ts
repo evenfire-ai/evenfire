@@ -1,3 +1,4 @@
+import { type ProfileLinkContextV1, normalizeProfileUiBaseUrl } from '@clerum/desktop-app-links'
 import { config } from '../config.js'
 import { ResolvedServerConnection } from '../types.js'
 import {
@@ -18,6 +19,29 @@ type UserAllowedHost = {
   hostRef: string
   url: string
   bindingStatus?: 'recorded' | 'unavailable'
+  profileLinkContext?: unknown
+}
+
+function parseProfileLinkContext(
+  raw: unknown,
+  expected: { userId: string; hostRef: string; teamId: string | null }
+): ProfileLinkContextV1 | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const value = raw as Record<string, unknown>
+  if (
+    value.version !== 1 ||
+    value.userId !== expected.userId ||
+    value.hostRef !== expected.hostRef ||
+    value.teamId !== expected.teamId
+  ) {
+    return undefined
+  }
+  const profileUiBaseUrl =
+    typeof value.profileUiBaseUrl === 'string'
+      ? normalizeProfileUiBaseUrl(value.profileUiBaseUrl)
+      : null
+  if (!profileUiBaseUrl) return undefined
+  return { version: 1, ...expected, profileUiBaseUrl }
 }
 
 function controlApiHeaders(rpcAccessToken: string): Record<string, string> {
@@ -32,13 +56,13 @@ function controlApiBaseUrl(): string {
   return config.controlApiBaseUrl.replace(/\/+$/, '')
 }
 
-// Shared upstream deadline for every control-api call in this file. Without it a
-// hung control-api pins the proxy socket indefinitely (the sibling host rail in
-// mcpHostRestService.ts already bounds its fetches at the same budget).
+// The default upstream deadline bounds every control-api call in this file.
+// The optional Profile-context lookup uses a longer, still bounded deadline so
+// it can cover the Control API's cold hosted-enrollment path.
 // AbortSignal.timeout throws a TimeoutError, which the app error handler maps to
 // a 504 via isUpstreamTimeoutError — never a silent 500 or an unbounded wait.
-function upstreamAbortSignal(): AbortSignal {
-  return AbortSignal.timeout(config.upstreamTimeoutMs)
+function upstreamAbortSignal(timeoutMs = config.upstreamTimeoutMs): AbortSignal {
+  return AbortSignal.timeout(timeoutMs)
 }
 
 export type DirectRunBindingRequest = {
@@ -46,6 +70,11 @@ export type DirectRunBindingRequest = {
   sessionId: string
   origin: 'direct_chat' | 'channel_event' | 'api'
 }
+
+// Control API bounds opt-in Host authorization at 20 seconds, direct-run
+// binding at 750 ms, and Profile context resolution at 12 seconds. Keep more
+// than seven seconds for transport and response handling across those stages.
+const PROFILE_LINK_CONTEXT_UPSTREAM_TIMEOUT_MS = 40_000
 
 export class ControlApiHostAccessRejectedError extends Error {
   /**
@@ -221,12 +250,18 @@ export async function fetchHostConnectionFromControlApi(
   rpcAccessToken: string,
   options: {
     directRunBinding?: DirectRunBindingRequest
+    profileLinkContext?: { teamId: string | null }
     fetchImpl?: typeof fetch
   } = {}
 ): Promise<ResolvedServerConnection | HostAccessDenial> {
   const directRunBinding = options.directRunBinding
+  const profileLinkContextRequested = options.profileLinkContext !== undefined
+  const profileLinkContextQuery = profileLinkContextRequested ? '?profileLinkContext=1' : ''
+  const timeoutMs = profileLinkContextRequested
+    ? Math.max(config.upstreamTimeoutMs, PROFILE_LINK_CONTEXT_UPSTREAM_TIMEOUT_MS)
+    : config.upstreamTimeoutMs
   const response = await (options.fetchImpl ?? fetch)(
-    `${controlApiBaseUrl()}/rpc/access/users/${encodeURIComponent(userId)}/mcp-hosts/${encodeURIComponent(hostRef)}`,
+    `${controlApiBaseUrl()}/rpc/access/users/${encodeURIComponent(userId)}/mcp-hosts/${encodeURIComponent(hostRef)}${profileLinkContextQuery}`,
     {
       method: directRunBinding ? 'POST' : 'GET',
       headers: {
@@ -234,7 +269,7 @@ export async function fetchHostConnectionFromControlApi(
         ...(directRunBinding ? { 'content-type': 'application/json' } : {}),
       },
       ...(directRunBinding ? { body: JSON.stringify(directRunBinding) } : {}),
-      signal: upstreamAbortSignal(),
+      signal: upstreamAbortSignal(timeoutMs),
     }
   )
 
@@ -251,6 +286,12 @@ export async function fetchHostConnectionFromControlApi(
   if (response.status === 401 || response.status === 409) {
     await drainBody(response)
     throw new ControlApiHostAccessRejectedError(response.status)
+  }
+  if (response.status === 504) {
+    await drainBody(response)
+    throw Object.assign(new Error('Control API Host authorization timed out'), {
+      name: 'TimeoutError',
+    })
   }
   if (!response.ok) {
     await drainBody(response)
@@ -275,11 +316,20 @@ export async function fetchHostConnectionFromControlApi(
     throw new Error('Control API MCP host binding response was invalid')
   }
 
+  const profileLinkContext = profileLinkContextRequested
+    ? parseProfileLinkContext(parsed.profileLinkContext, {
+        userId,
+        hostRef,
+        teamId: options.profileLinkContext!.teamId,
+      })
+    : undefined
+
   return {
     name: resolvedHostRef,
     url,
     headers: {},
     ...(attributionBindingStatus ? { attributionBindingStatus } : {}),
+    ...(profileLinkContext ? { profileLinkContext } : {}),
   }
 }
 

@@ -481,6 +481,7 @@ export function createRpcRouter(): Router {
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
         const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
           teamId: auth.teamId,
+          includeProfileLinkContext: true,
           ...(traceContext.sessionId
             ? {
                 directRunBinding: {

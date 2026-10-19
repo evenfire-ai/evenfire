@@ -227,8 +227,12 @@ export class K8sGateway {
     return this.namespace
   }
 
-  async listResource(plural: ClerumResourceType, namespace = '*'): Promise<unknown[]> {
-    return this.resources.listResource(plural, namespace)
+  async listResource(
+    plural: ClerumResourceType,
+    namespace = '*',
+    signal?: AbortSignal
+  ): Promise<unknown[]> {
+    return this.resources.listResource(plural, namespace, signal)
   }
 
   async getResource(

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { memberRegistrationServiceRequest } from '../src/memberRegistrationServiceClient.js'
 import { registerAndSendInvitation } from '../src/services/invitationFlowRegistrationService.js'
 import { MemberRegistrationUnavailableError } from '../src/services/memberRegistrationErrors.js'
 
@@ -72,6 +73,69 @@ describe('member-registration client failure classification', () => {
     await send()
     const [, init] = fetchMock.mock.calls[0]
     expect(init.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('preserves default and explicit request timeouts after cold hosted enrollment', async () => {
+    vi.useFakeTimers()
+    let restoreTimeoutSpy: (() => void) | undefined
+    try {
+      cfg.memberRegistrationMode = 'hosted'
+      const credential = { secret: 'secret', kid: 'kid', tenantId: 'tenant' }
+      let enrollmentComplete = false
+      enrollment.ensureEnrollment.mockImplementation(async () => {
+        vi.setSystemTime(Date.now() + 9_000)
+        enrollmentComplete = true
+        return credential
+      })
+      const timeoutSignals = [new AbortController().signal, new AbortController().signal]
+      let timeoutCallCount = 0
+      const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockImplementation(milliseconds => {
+        expect(enrollmentComplete).toBe(true)
+        expect(milliseconds).toBe(timeoutCallCount === 0 ? 20_000 : 1_000)
+        return timeoutSignals[timeoutCallCount++]!
+      })
+      restoreTimeoutSpy = () => timeoutSpy.mockRestore()
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(new Response('{"sent":true}', { status: 200 }))
+        .mockResolvedValueOnce(new Response('{"valid":true}', { status: 200 }))
+      vi.stubGlobal('fetch', fetchMock)
+
+      await memberRegistrationServiceRequest('POST', '/send', {
+        destinationBaseUrl: 'https://profile.acme.com',
+      })
+      await memberRegistrationServiceRequest('POST', '/profile', {
+        destinationBaseUrl: 'https://profile.acme.com',
+        timeoutMs: 1_000,
+      })
+
+      expect(timeoutSpy).toHaveBeenNthCalledWith(1, 20_000)
+      expect(timeoutSpy).toHaveBeenNthCalledWith(2, 1_000)
+      expect(fetchMock.mock.calls[0]?.[1]?.signal).toBe(timeoutSignals[0])
+      expect(fetchMock.mock.calls[1]?.[1]?.signal).toBe(timeoutSignals[1])
+    } finally {
+      restoreTimeoutSpy?.()
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not put private service URLs or transport error messages in audit logs', async () => {
+    const privateUrl = 'http://member-registration-service.local:8092/api/v1'
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockRejectedValue(new TypeError(`fetch failed for ${privateUrl}`))
+    )
+
+    await expect(
+      memberRegistrationServiceRequest('POST', '/invitations-flow/profile', {
+        destinationBaseUrl: 'https://profile.tenant.example',
+      })
+    ).rejects.toBeInstanceOf(MemberRegistrationUnavailableError)
+
+    const [loggedFields] = logger.rootLogger.error.mock.calls[0] ?? []
+    expect(JSON.stringify(loggedFields)).not.toContain(privateUrl)
+    expect(loggedFields).not.toHaveProperty('baseUrl')
+    expect(loggedFields.cause).toBe('TypeError')
   })
 
   it('a non-JSON 2xx body becomes Unavailable, not a raw SyntaxError', async () => {

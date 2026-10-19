@@ -25,8 +25,10 @@ import { CALLER_OUTPUTS_DIR } from '../../../workspace/callerOutputs'
 import { ConversationManager } from '../../conversation/conversation'
 import {
   CAPABILITY_CONTRACT_TEXT,
+  GFS_PROFILE_LINK_GUIDANCE_TEXT,
   NATIVE_TOOL_DISCOVERY_TEXT,
   TOOL_DISCOVERY_TEXT,
+  URL_REFERENCE_GUIDANCE_TEXT,
 } from '../../reasoning/promptBuilder'
 import { type ChatMessage, FinishReason, type ToolCall, type ToolDefinition } from '../../types'
 import { SimpleEventEmitter } from '../eventEmitter'
@@ -145,12 +147,23 @@ const bridged = (id: string, name: string, args: Record<string, unknown>): ToolC
   arguments: { name, arguments: args },
 })
 const names = (tools: ToolDefinition[]) => tools.map(tool => tool.name)
+const encodedClaims = (scopes: unknown) => {
+  const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url')
+  const payload = Buffer.from(JSON.stringify({ scopes })).toString('base64url')
+  return `${header}.${payload}.sig`
+}
 const isMcp = (name: string) => name.startsWith('alpha__') || name.startsWith('beta__')
 const systemText = (messages: ChatMessage[]) =>
   messages
     .filter(message => message.role === 'system')
     .map(message => String(message.content))
     .join('\n')
+const withoutUniversalUrlGuidance = (text: string) => {
+  const sections = text.split('\n\n')
+  const guidanceSections = sections.filter(section => section === URL_REFERENCE_GUIDANCE_TEXT)
+  expect(guidanceSections).toHaveLength(1)
+  return sections.filter(section => section !== URL_REFERENCE_GUIDANCE_TEXT).join('\n\n')
+}
 const toolResult = (messages: ChatMessage[], id: string) => {
   const result = messages.find(message => message.role === 'tool' && message.tool_call_id === id)
   if (!result) throw new Error(`no tool result for ${id}`)
@@ -160,6 +173,7 @@ const toolResult = (messages: ChatMessage[], id: string) => {
 let outputDir: string
 let callerRoot: string
 let logEvents: Array<Record<string, unknown>>
+let previousGfsToken: string | undefined
 const savedConfig = {
   enableApproval: appConfig.enableApproval,
   codexToolPresentation: appConfig.codexToolPresentation,
@@ -172,6 +186,8 @@ const savedConfig = {
 const savedOutputDir = process.env.CLERUM_OUTPUT_DIR
 
 beforeEach(() => {
+  previousGfsToken = process.env.MCP_HOST_GFS_TOKEN
+  delete process.env.MCP_HOST_GFS_TOKEN
   outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'native-presentation-'))
   // The task's managed caller root; its generated decks go to its own folder.
   callerRoot = path.join(outputDir, 'users', 'authenticated-user')
@@ -192,6 +208,8 @@ afterEach(async () => {
   Object.assign(appConfig, savedConfig)
   if (savedOutputDir === undefined) delete process.env.CLERUM_OUTPUT_DIR
   else process.env.CLERUM_OUTPUT_DIR = savedOutputDir
+  if (previousGfsToken === undefined) delete process.env.MCP_HOST_GFS_TOKEN
+  else process.env.MCP_HOST_GFS_TOKEN = previousGfsToken
   fs.rmSync(outputDir, { recursive: true, force: true })
 })
 
@@ -203,7 +221,7 @@ const pptxFiles = () => {
     : []
 }
 
-async function runScenario(scenario: Scenario, turns: Turn[]) {
+async function runScenario(scenario: Scenario, turns: Turn[], sharedPromptCache?: PromptCache) {
   Object.assign(appConfig, {
     enableApproval: scenario.approval === true,
     codexToolPresentation: scenario.codexMode ?? 'direct',
@@ -300,7 +318,7 @@ async function runScenario(scenario: Scenario, turns: Turn[]) {
     llmProvider: provider,
     mcpManager: manager,
     workspaceService: workspaceService as unknown as TaskExecutorDeps['workspaceService'],
-    promptCache: scenario.promptCache ? new PromptCache() : undefined,
+    promptCache: scenario.promptCache ? (sharedPromptCache ?? new PromptCache()) : undefined,
     modelName: 'gpt-5.6-luna',
     approvalConfig: undefined,
     config: {
@@ -727,7 +745,7 @@ describe('I4 — native direct sends exactly what origin/dev sends', () => {
   })
 
   it.each(Object.keys(NATIVE_DIRECT_DEV_BASELINE))(
-    '%s: tools[] and system prompt are byte-identical to the dev baseline',
+    '%s: tools[] and system prompt match the dev baseline plus universal URL guidance',
     async key => {
       // The baseline was captured with a fixed clock and workspace path.
       vi.useFakeTimers({ toFake: ['Date'] })
@@ -749,11 +767,57 @@ describe('I4 — native direct sends exactly what origin/dev sends', () => {
       expect(run.providerCalls).toHaveLength(1)
       const { tools, messages } = run.providerCalls[0]
       const expected = NATIVE_DIRECT_DEV_BASELINE[key]
+      const system = systemText(messages)
       expect(names(tools)).toEqual(expected.toolNames)
       expect(sha256(withoutMachinePaths(JSON.stringify(tools)))).toBe(expected.toolsSha256)
-      expect(sha256(withoutMachinePaths(systemText(messages)))).toBe(expected.systemSha256)
+      expect(system).toContain(URL_REFERENCE_GUIDANCE_TEXT)
+      expect(sha256(withoutMachinePaths(withoutUniversalUrlGuidance(system)))).toBe(
+        expected.systemSha256
+      )
     }
   )
+})
+
+describe('Profile link guidance follows the production resolver tool set', () => {
+  it('rebuilds a cached provider prompt when GFS resolver availability changes', async () => {
+    const cache = new PromptCache()
+    const scenario: Scenario = {
+      provider: 'openai',
+      native: 'direct',
+      mcp: null,
+      promptCache: true,
+    }
+
+    await runScenario(
+      scenario,
+      [
+        ({ messages, tools }) => {
+          expect(names(tools)).not.toContain('clerum__gfs_resolve')
+          expect(systemText(messages)).toContain(URL_REFERENCE_GUIDANCE_TEXT)
+          expect(systemText(messages)).not.toContain(GFS_PROFILE_LINK_GUIDANCE_TEXT)
+          return { content: 'No GFS resolver is available.' }
+        },
+      ],
+      cache
+    )
+
+    process.env.MCP_HOST_GFS_TOKEN = encodedClaims(['gfs.read'])
+    const withResolver = await runScenario(
+      scenario,
+      [
+        ({ messages, tools }) => {
+          expect(names(tools)).toContain('clerum__gfs_resolve')
+          expect(systemText(messages)).toContain(URL_REFERENCE_GUIDANCE_TEXT)
+          expect(systemText(messages)).toContain(GFS_PROFILE_LINK_GUIDANCE_TEXT)
+          return { content: 'The GFS resolver is available.' }
+        },
+      ],
+      cache
+    )
+
+    expect(withResolver.providerCalls).toHaveLength(1)
+    expect(withResolver.executor.executorState).toBe('completed')
+  })
 })
 
 describe('T3 — negative guards with liveness witnesses (through TaskExecutor.run())', () => {

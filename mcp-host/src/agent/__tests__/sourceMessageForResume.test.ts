@@ -100,6 +100,13 @@ describe('sourceMessageForResume (#666 R4-M2)', () => {
       model: { provider: 'SENTINEL-666-model', model: 'm' },
       modelSelectionRevision: 7,
       fileReferences: [{ id: 'SENTINEL-666-reference' }],
+      profileLinkContext: {
+        version: 1,
+        userId: 'user-1',
+        teamId: 'team-1',
+        hostRef: 'chatllm',
+        profileUiBaseUrl: 'https://profile.tenant.example',
+      },
     } as unknown as IncomingMessage
     const resumed = sourceMessageForResume(message)
     // Liveness witness: what a restart reads is still there.
@@ -129,6 +136,7 @@ describe('sourceMessageForResume (#666 R4-M2)', () => {
       'timestamp',
     ])
     expect(JSON.stringify(resumed)).not.toContain('SENTINEL-666')
+    expect(resumed).not.toHaveProperty('profileLinkContext')
   })
 
   it('drops metadata that carries no team scope', () => {

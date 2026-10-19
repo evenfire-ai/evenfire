@@ -16,9 +16,9 @@ import type { IncomingMessage } from '../server'
  *   the frozen snapshot) and inline bytes (dataBase64) never persist.
  *
  * Everything else the channel delivered (the raw Slack, email or Telegram
- * payload in `metadata`, `providerIdentity`, `traceContext`, the model piggyback)
- * is not persisted: an allowlist keeps a field added to the message later out of
- * the durable row until a restart actually needs it.
+ * payload in `metadata`, `providerIdentity`, `traceContext`, model piggyback,
+ * and request-local Profile-link origin) is not persisted: an allowlist keeps a
+ * field added to the message later out of the durable row until a restart needs it.
  */
 export function sourceMessageForResume(
   message: IncomingMessage | undefined

@@ -1,3 +1,10 @@
+import {
+  type ProfileLinkContextV1,
+  buildGfsResourceWebLink,
+  normalizeGfsResourceUri,
+  normalizeProfileUiBaseUrl,
+  parseGfsResourceWebLink,
+} from '@clerum/desktop-app-links'
 import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import type { FileReferenceResolution } from '../agent/fileReferenceResolver'
 import { logger } from '../logger'
@@ -86,6 +93,10 @@ function callOptions(context?: InternalToolCallContext): GfscCallOptions {
 
 function ok(content: unknown): InternalToolResult {
   return { success: true, content: typeof content === 'string' ? content : JSON.stringify(content) }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 // Read failures get the same redaction floor as mutations (see mutationFail):
 // only gfsc's HTTP status and a coarse public category may reach the model —
@@ -361,6 +372,8 @@ export interface GfsReadToolOptions {
   callerWorkspacePath?: string
   /** Trusted task lifetime identity; never accepted from model arguments. */
   retentionOwnerId?: string
+  /** Authenticated activation origin for this message; omitted on cold resume. */
+  profileLinkContext?: ProfileLinkContextV1
 }
 
 /** The five read tools, bound to a gfsc client. */
@@ -372,6 +385,7 @@ export function buildGfsReadTools(
     callerIdentity,
     callerWorkspacePath,
     retentionOwnerId,
+    profileLinkContext,
   }: GfsReadToolOptions
 ): InternalToolDefinition[] {
   const canDownload = Boolean(
@@ -681,11 +695,17 @@ export function buildGfsReadTools(
     },
     {
       name: 'clerum__gfs_resolve',
-      description: `Resolve a gfs:// URI to its current resource + canonical path. ${LIVE_RESOURCE_NOTE}`,
+      description: `Resolve a canonical gfs:// URI or a Profile /open/files URL from the current activation to its current resource + canonical path. The returned profileUrl is safe to share when present. ${LIVE_RESOURCE_NOTE}`,
       parameters: {
         type: 'object',
         required: ['uri'],
-        properties: { uri: { type: 'string', description: 'A gfs:// URI.' } },
+        properties: {
+          uri: {
+            type: 'string',
+            description:
+              'A canonical gfs:// URI, or a Profile /open/files URL from this authenticated environment.',
+          },
+        },
       },
       execute: async (
         args: Record<string, unknown>,
@@ -693,7 +713,39 @@ export function buildGfsReadTools(
         context?: InternalToolCallContext
       ): Promise<InternalToolResult> => {
         try {
-          return ok(await client.resolve(args as { uri: string }, callOptions(context)))
+          const inputUri = typeof args.uri === 'string' ? args.uri : ''
+          const trustedOrigin = profileLinkContext
+            ? normalizeProfileUiBaseUrl(profileLinkContext.profileUiBaseUrl)
+            : null
+          const canonicalUri =
+            normalizeGfsResourceUri(inputUri) ??
+            (trustedOrigin ? parseGfsResourceWebLink(inputUri, trustedOrigin)?.uri : null)
+          if (!canonicalUri) {
+            return invalidArgs(
+              'uri must be a canonical gfs:// URI or a Profile /open/files URL from this environment.'
+            )
+          }
+
+          const resolved = await client.resolve({ uri: canonicalUri }, callOptions(context))
+          if (
+            !trustedOrigin ||
+            !isRecord(resolved) ||
+            resolved.ok !== true ||
+            !isRecord(resolved.data)
+          ) {
+            return ok(resolved)
+          }
+          const resolvedUri = normalizeGfsResourceUri(resolved.data.gfsUri as string)
+          if (resolvedUri !== canonicalUri) {
+            return { success: false, error: 'GFS resolver returned a mismatched resource.' }
+          }
+          return ok({
+            ...resolved,
+            data: {
+              ...resolved.data,
+              profileUrl: buildGfsResourceWebLink(trustedOrigin, canonicalUri),
+            },
+          })
         } catch (err) {
           return fail(err)
         }

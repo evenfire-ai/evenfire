@@ -80,6 +80,10 @@ export interface BuilderInput {
    * is not registered. The per-tool `usage` receipt remains authoritative.
    */
   gfsWorkspaceGuidance?: string
+  /** General HTTP(S), app/plugin, and canonical URL contract. */
+  urlReferenceGuidance?: string
+  /** Profile file-link resolution contract, empty without `clerum__gfs_resolve`. */
+  gfsProfileLinkGuidance?: string
   /**
    * Memory guidance (P.4). Empty string when the session does not have
    * `memory_*` tools registered (P1-009): if memory tools light up

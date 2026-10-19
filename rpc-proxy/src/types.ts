@@ -1,3 +1,5 @@
+import type { ProfileLinkContextV1 } from '@clerum/desktop-app-links'
+
 export type RpcScope =
   | 'mcp:servers:list'
   | 'mcp:server:invoke'
@@ -92,4 +94,5 @@ export type ResolvedServerConnection = {
   url: string
   headers: Record<string, string>
   attributionBindingStatus?: 'recorded' | 'unavailable'
+  profileLinkContext?: ProfileLinkContextV1
 }

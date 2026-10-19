@@ -57,6 +57,72 @@ test('GFS resource links preserve canonical identity in web and desktop handoffs
   })
 })
 
+test('Profile file parser accepts producer URLs only at the trusted root origin', () => {
+  const origin = 'https://profile.example.com/'
+  const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+  const produced = links.buildGfsResourceWebLink(origin, uri)
+
+  assert.equal(
+    produced,
+    'https://profile.example.com/open/files?uri=gfs%3A%2F%2Fmain%2F0123456789abcdef0123456789abcdef'
+  )
+  assert.deepEqual(links.parseGfsResourceWebLink(produced, origin), { uri })
+
+  for (const rawUrl of [
+    produced.replace('profile.example.com', 'profile.example.com.attacker.test'),
+    produced.replace('https://', 'http://'),
+    produced.replace('https://', 'https://\n'),
+    produced.replace('/open/files?', '/open/apps?'),
+    produced.replace('/open/files?', '/open/files/../open/files?'),
+    produced.replace('?uri=', '?%75ri='),
+    `${produced}&return=https%3A%2F%2Fevil.example`,
+    `${produced}&uri=${encodeURIComponent(uri)}`,
+  ]) {
+    assert.equal(links.parseGfsResourceWebLink(rawUrl, origin), null)
+  }
+
+  const otherUri = 'gfs://other/0123456789abcdef0123456789abcdef'
+  assert.deepEqual(
+    links.parseGfsResourceWebLink(
+      produced.replace(encodeURIComponent(uri), encodeURIComponent(otherUri)),
+      origin
+    ),
+    { uri: otherUri }
+  )
+
+  for (const profileOrigin of [
+    'https://profile.example.com/settings',
+    'https://user:pass@profile.example.com/',
+    'javascript:alert(1)',
+    'https://profile.example.com/?tenant=other',
+  ]) {
+    assert.equal(links.parseGfsResourceWebLink(produced, profileOrigin), null)
+    assert.equal(links.normalizeProfileUiBaseUrl(profileOrigin), null)
+  }
+})
+
+test('Profile origin normalization accepts only an HTTP(S) origin', () => {
+  assert.equal(
+    links.normalizeProfileUiBaseUrl(' HTTPS://PROFILE.EXAMPLE.COM:443/ '),
+    'https://profile.example.com'
+  )
+  assert.equal(links.normalizeProfileUiBaseUrl('http://localhost:4312'), 'http://localhost:4312')
+  for (const input of [
+    '',
+    'https://profile.example.com/path',
+    'https://profile.example.com/path/..',
+    'https://profile.example.com/?x=1',
+    'https://profile.\nexample.com/',
+    'https://profile.example.com/#fragment',
+    'https://user:pass@profile.example.com/',
+    'file:///etc/passwd',
+    'https://profile.example.com:bad/',
+    'https://profile.example.com/'.padEnd(2049, 'x'),
+  ]) {
+    assert.equal(links.normalizeProfileUiBaseUrl(input), null)
+  }
+})
+
 test('GFS resource-link parsing rejects malformed identities and untrusted URL components', () => {
   for (const uri of [
     'gfs://main/name-0123456789abcdef0123456789abcdef',

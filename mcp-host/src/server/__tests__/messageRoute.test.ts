@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Request, Response } from 'express'
 import { createHash } from 'node:crypto'
+import { buildGfsResourceWebLink, buildSandboxUiWebLink } from '@clerum/desktop-app-links'
 import {
   FILE_REFERENCE_MAX_COUNT,
   buildGfsFileReference,
@@ -89,6 +90,76 @@ describe('handleMessageRoute — rpc sender identity invariant', () => {
     expect(messageHandler).toHaveBeenCalledTimes(1)
     const forwarded = messageHandler.mock.calls[0][0]
     expect(forwarded.sender).toBe('legit-user')
+  })
+
+  it('replaces body-supplied link context with the caller-bound edge context', async () => {
+    const profileLinkContext = {
+      version: 1 as const,
+      userId: 'legit-user',
+      teamId: 'team-1',
+      hostRef: 'chatllm',
+      profileUiBaseUrl: 'https://profile.tenant.example',
+    }
+    const fileReference = buildGfsFileReference({
+      drive: 'main',
+      resourceId: 'a'.repeat(32),
+      gfsUri: `gfs://main/${'a'.repeat(32)}`,
+      version: 3,
+      name: 'notes.md',
+      declaredMediaType: 'text/markdown',
+      byteLength: 4,
+      classification: classifyBytes({
+        bytes: new Uint8Array(Buffer.from('note')),
+        totalByteLength: 4,
+        declaredMediaType: 'text/markdown',
+        filename: 'notes.md',
+      }),
+    })
+    if (!fileReference.ok) throw new Error(fileReference.message)
+    const messageHandler = vi.fn().mockResolvedValue({ success: true, status: 'completed' })
+    const profileOrigin = 'https://profile.tenant.example'
+    const appUrl = buildSandboxUiWebLink(profileOrigin, {
+      recipeNs: 'sandbox-recipes',
+      recipeName: 'task-board',
+      path: '/tasks/42',
+      teamId: 'team-1',
+    })
+    const fileUrl = buildGfsResourceWebLink(profileOrigin, `gfs://main/${'a'.repeat(32)}`)
+    const content = `Open [task board](${appUrl}) and [Plan](${fileUrl}), plus https://example.test/a.`
+    const req = {
+      runtimeCaller: {
+        caller: 'rpc-proxy',
+        hostRef: 'chatllm',
+        userId: 'legit-user',
+        teamId: 'team-1',
+        profileLinkContext,
+      },
+      body: {
+        channelType: 'rpc',
+        sender: 'attacker',
+        content,
+        timestamp: 'now',
+        messageId: 'm-profile-link',
+        hostRef: 'chatllm',
+        fileReferences: [fileReference.value],
+        profileLinkContext: {
+          version: 1,
+          userId: 'attacker',
+          teamId: 'attacker-team',
+          hostRef: 'other-host',
+          profileUiBaseUrl: 'https://attacker.example',
+        },
+      },
+      query: {},
+    } as unknown as Request
+    const captured = makeRes()
+
+    await handleMessageRoute(req, captured.res, makeHandlers({ messageHandler }))
+
+    const forwarded = messageHandler.mock.calls[0]?.[0]
+    expect(forwarded?.content).toBe(content)
+    expect(forwarded?.profileLinkContext).toEqual(profileLinkContext)
+    expect(forwarded?.fileReferences).toEqual([fileReference.value])
   })
 
   it('returns 401 for channelType=rpc when edge user context is missing', async () => {

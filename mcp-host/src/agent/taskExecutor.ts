@@ -73,9 +73,11 @@ import {
   CAPABILITY_CONTRACT_TEXT,
   DESKTOP_ENVIRONMENT_HINT,
   DefaultPromptBuilder,
+  GFS_PROFILE_LINK_GUIDANCE_TEXT,
   GFS_WORKSPACE_FILE_GUIDANCE_TEXT,
   MCP_SERVER_SELECTION_TEXT,
   MEMORY_GUIDANCE_TEXT,
+  URL_REFERENCE_GUIDANCE_TEXT,
   WORKFLOW_RECIPES_TEXT,
   toolDiscoveryText,
 } from '../core/reasoning/promptBuilder'
@@ -2090,6 +2092,7 @@ export class TaskExecutor {
       tools.some(t => t.name.startsWith('desktop_') || t.name.startsWith('browser_')),
       tools.some(t => t.name.startsWith('workflow_')),
       tools.some(t => t.name === 'clerum__gfs_download'),
+      tools.some(t => t.name === 'clerum__gfs_resolve'),
       tools.some(t => t.name.includes('__')),
       tools.some(t => t.name === 'clerum__tool_search'),
       // #1003 — the discovery guidance text depends on the native presentation.
@@ -2123,6 +2126,7 @@ export class TaskExecutor {
     // which also fires for `clerum__get_capabilities`.
     const hasWorkflowTools = tools.some(t => t.name.startsWith('workflow_'))
     const hasGfsDownloadTool = tools.some(t => t.name === 'clerum__gfs_download')
+    const hasGfsResolveTool = tools.some(t => t.name === 'clerum__gfs_resolve')
     // NOTE: this is intentionally still true when the bridge is active — the
     // `clerum__tool_search/describe/call` native/bridge tools also contain `__`,
     // so `MCP_SERVER_SELECTION_TEXT` still emits. That is fine: `TOOL_DISCOVERY_TEXT`
@@ -2148,6 +2152,8 @@ export class TaskExecutor {
       capabilities,
       workflowGuidance: hasWorkflowTools ? WORKFLOW_RECIPES_TEXT : '',
       gfsWorkspaceGuidance: hasGfsDownloadTool ? GFS_WORKSPACE_FILE_GUIDANCE_TEXT : '',
+      urlReferenceGuidance: URL_REFERENCE_GUIDANCE_TEXT,
+      gfsProfileLinkGuidance: hasGfsResolveTool ? GFS_PROFILE_LINK_GUIDANCE_TEXT : '',
       mcpServerGuidance: hasMcpTools ? MCP_SERVER_SELECTION_TEXT : '',
       toolDiscoveryGuidance: hasToolDiscovery
         ? toolDiscoveryText(appConfig.nativeToolPresentation)

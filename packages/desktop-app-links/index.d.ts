@@ -25,6 +25,14 @@ export type GfsResourceDeepLinkEnvelope = GfsResourceDeepLinkTarget & {
   userNavigationGenerationAtActivation: number
 }
 
+export type ProfileLinkContextV1 = {
+  version: 1
+  userId: string
+  teamId: string | null
+  hostRef: string
+  profileUiBaseUrl: string
+}
+
 export type SandboxUiDeepLinkParts = {
   recipeNs: string
   recipeName: string
@@ -45,6 +53,11 @@ export function sandboxUiDeepLinkTargetsEqual(
   right: SandboxUiDeepLinkTarget
 ): boolean
 export function normalizeGfsResourceUri(uri: string): string | null
+export function normalizeProfileUiBaseUrl(url: string): string | null
 export function buildGfsResourceDeepLink(uri: string): string
 export function buildGfsResourceWebLink(profileUiBaseUrl: string, uri: string): string
 export function parseGfsResourceDeepLink(rawUrl: string): GfsResourceDeepLinkTarget | null
+export function parseGfsResourceWebLink(
+  rawUrl: string,
+  profileUiBaseUrl: string
+): GfsResourceDeepLinkTarget | null
