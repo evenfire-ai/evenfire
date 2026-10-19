@@ -8,6 +8,7 @@ import { GfsVideoPreviewBody } from '@components/GfsVideoPreview'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
 import type { FilePreviewPageProps } from './FilePreviewPage.types'
+import { useFilePreviewResourceActions } from './useFilePreviewResourceActions'
 
 function toMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -72,6 +73,20 @@ export function FilePreviewPage({
   const [copyContentReady, setCopyContentReady] = useState(false)
   const copyContentRef = useRef<(() => Promise<boolean>) | null>(null)
   const accessRevoked = ctrl.accessState === 'revoked'
+  const handlePreviewAuthorityFailure = useCallback(
+    (message: string) => ctrl.handleAuthorityFailure(message, 'operation'),
+    [ctrl.handleAuthorityFailure]
+  )
+
+  const previewResourceActions = useFilePreviewResourceActions({
+    gfsUri,
+    fileName,
+    sessionScope: ctrl.sessionScope,
+    canResolve: !denied && !unavailable && !accessRevoked && !ctrl.authorityPending,
+    onAuthorityFailure: handlePreviewAuthorityFailure,
+    onDeleted: () => setDenied('The file was deleted.'),
+    pushToast,
+  })
 
   // Each previewed resource starts from a clean per-resource verdict.
   useEffect(() => {
@@ -167,7 +182,14 @@ export function FilePreviewPage({
         (fileKind === 'image' || fileKind === 'markdown')
           ? () => void handleCopyContent()
           : undefined,
+      ...previewResourceActions.handlers,
     },
+    canShare: previewResourceActions.canShare,
+    canRename: previewResourceActions.canRename,
+    canMove: previewResourceActions.canMove,
+    canDownload: previewResourceActions.canDownload,
+    canDelete: previewResourceActions.canDelete,
+    mutating: previewResourceActions.mutating,
     canCopyContent: copyContentReady,
     refreshing,
   })
@@ -213,6 +235,7 @@ export function FilePreviewPage({
         onOpenLink={onOpenRoute}
       />
       <div className="da-gfs-preview-page">
+        {previewResourceActions.dialogs}
         <div className="da-gfs-preview-content">
           {denied || unavailable || accessRevoked ? (
             <EmptyState title="File unavailable" body="This item is no longer available." />
