@@ -48,7 +48,7 @@ describe('ModelStepRetryNotice (#1044)', () => {
     expect(onRetry).toHaveBeenCalledTimes(1)
   })
 
-  it('shows the request error beside the button', () => {
+  it('shows fixed retry-failure copy beside the button, never the raw request error', () => {
     render(
       <ModelStepRetryNotice
         checkpoint={checkpointView('session-view.resumable.json')}
@@ -57,7 +57,10 @@ describe('ModelStepRetryNotice (#1044)', () => {
       />
     )
 
-    expect(screen.getByRole('alert').textContent).toBe('Host is draining (503)')
+    expect(screen.getByRole('alert').textContent).toBe(
+      'The model step could not be retried. Try again.'
+    )
+    expect(document.body.textContent).not.toContain('Host is draining (503)')
     expect(screen.getByTestId('model-step-retry-btn')).toBeTruthy()
   })
 

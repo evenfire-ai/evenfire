@@ -369,7 +369,7 @@ describe('model-step checkpoint in the controller (#1044)', () => {
     expect(clerum.rpc.continueModelStep).toHaveBeenCalledTimes(1)
     expect(result.current.modelStepRetry).toEqual({
       pending: false,
-      error: 'Host is draining (503)',
+      error: 'The model step could not be retried. Try again.',
     })
     expect(result.current.modelStepCheckpoint?.status).toBe('resumable')
     expect(result.current.failedAgentSend).toBeNull()

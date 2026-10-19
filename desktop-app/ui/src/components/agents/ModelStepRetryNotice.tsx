@@ -71,7 +71,9 @@ export function ModelStepRetryNotice({ checkpoint, retry, onRetry }: ModelStepRe
     >
       <StatusBanner tone="warn" compact>
         <span>
-          The provider was unavailable before this turn finished.{' '}
+          {retry?.lastFailure === 'reference_check_failed'
+            ? 'A file reference could not be verified. Check that the referenced file is available before retrying.'
+            : 'The provider was unavailable before this turn finished.'}{' '}
           {confirmed > 0
             ? `${toolCallCount(confirmed)} already completed and will not run again.`
             : 'No tool call will run again.'}
@@ -82,7 +84,7 @@ export function ModelStepRetryNotice({ checkpoint, retry, onRetry }: ModelStepRe
       </StatusBanner>
       {retry?.error ? (
         <p className="model-step-retry-notice__error" role="alert">
-          {retry.error}
+          The model step could not be retried. Try again.
         </p>
       ) : null}
       <div className="model-step-retry-notice__footer">

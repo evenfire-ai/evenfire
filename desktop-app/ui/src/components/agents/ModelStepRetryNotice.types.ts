@@ -1,5 +1,9 @@
 import type { ModelStepCheckpointView } from '../../../../src/types'
-import type { ModelStepRetryState } from '../../uiTypes'
+import type { ModelStepRetryState as RetryRequestState } from '../../uiTypes'
+
+export interface ModelStepRetryState extends RetryRequestState {
+  lastFailure?: 'reference_check_failed' | 'provider_unavailable'
+}
 
 export interface ModelStepRetryNoticeProps {
   /**
