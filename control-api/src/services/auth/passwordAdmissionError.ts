@@ -17,9 +17,27 @@ export class PasswordAdmissionError extends Error {
 /** Safe, non-retryable result for an unexpected password mutation callback failure. */
 export class PasswordMutationInternalError extends Error {
   readonly code = 'internal_error'
+  readonly cause: unknown
 
-  constructor() {
+  constructor(cause?: unknown) {
     super('internal_error')
     this.name = 'PasswordMutationInternalError'
+    Object.defineProperty(this, 'cause', { value: cause, enumerable: false })
   }
+}
+
+export type PasswordMutationCauseKind =
+  'type_error' | 'reference_error' | 'range_error' | 'syntax_error' | 'error' | 'non_error'
+
+export function passwordMutationCauseKind(cause: unknown): PasswordMutationCauseKind {
+  try {
+    if (cause instanceof TypeError) return 'type_error'
+    if (cause instanceof ReferenceError) return 'reference_error'
+    if (cause instanceof RangeError) return 'range_error'
+    if (cause instanceof SyntaxError) return 'syntax_error'
+    if (cause instanceof Error) return 'error'
+  } catch {
+    // A hostile thrown value must not prevent the sanitized response path.
+  }
+  return 'non_error'
 }

@@ -106,11 +106,7 @@ async function reservePasswordWork() {
                 if (error instanceof PasswordAdmissionError || queryFailures.has(error)) {
                   throw error
                 }
-                logger.error(
-                  { event: 'password_mutation_callback_failed' },
-                  'password mutation callback failed'
-                )
-                throw new PasswordMutationInternalError()
+                throw new PasswordMutationInternalError(error)
               }
               await releaseOwned(db)
               return outcome

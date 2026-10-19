@@ -76,23 +76,29 @@ describe('password-work reservation preservation', () => {
   it.each([
     ['TypeError', () => new TypeError('private callback details')],
     ['Error', () => new Error('private callback details')],
+    ['non-Error', () => 'private callback details'],
   ])(
-    'classifies an unexpected %s from commitWith as a non-retryable internal error',
+    'retains an unexpected %s callback failure as a non-enumerable cause',
     async (_name, makeError) => {
-      await expect(
-        withPasswordWorkLease(lease =>
-          lease.commitWith(
-            async () => {
-              throw makeError()
-            },
-            { mode: 'one_use_recovery' }
-          )
+      const cause = makeError()
+      const error = await withPasswordWorkLease(lease =>
+        lease.commitWith(
+          async () => {
+            throw cause
+          },
+          { mode: 'one_use_recovery' }
         )
-      ).rejects.toMatchObject({
+      ).catch(failure => failure)
+
+      expect(error).toMatchObject({
         name: 'PasswordMutationInternalError',
         code: 'internal_error',
         message: 'internal_error',
       })
+      const causeDescriptor = Object.getOwnPropertyDescriptor(error, 'cause')
+      expect(causeDescriptor?.value).toBe(cause)
+      expect(causeDescriptor?.enumerable).toBe(false)
+      expect(JSON.stringify(error)).not.toContain('private callback details')
       expect(query.mock.calls.filter(([sql]) => sql.includes('DELETE FROM'))).toHaveLength(1)
     }
   )

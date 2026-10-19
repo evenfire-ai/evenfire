@@ -3,7 +3,10 @@ import { ApiException } from '@kubernetes/client-node'
 import { STATUS_CODES } from 'node:http'
 import { clearRateLimitHeaders } from '../middleware/rateLimitMiddleware.js'
 import { rootLogger } from '../observability/logger.js'
-import { PasswordMutationInternalError } from '../services/auth/passwordAdmissionError.js'
+import {
+  PasswordMutationInternalError,
+  passwordMutationCauseKind,
+} from '../services/auth/passwordAdmissionError.js'
 import { memberRegistrationErrorResponse } from '../services/memberRegistrationErrors.js'
 
 // Only errors we construct with these codes are ever forwarded verbatim by the
@@ -161,6 +164,15 @@ export function clerumErrorHandler(
   const log = req.log ?? rootLogger
 
   if (err instanceof PasswordMutationInternalError) {
+    log.error(
+      {
+        event: 'password_mutation_callback_failed',
+        stage: 'mutation_callback',
+        causeKind: passwordMutationCauseKind(err.cause),
+        correlationId,
+      },
+      'password mutation callback failed'
+    )
     clearRateLimitHeaders(res)
     res.removeHeader('Retry-After')
     res.setHeader('Cache-Control', 'no-store')
