@@ -4,6 +4,7 @@ import { Pool } from 'pg'
 import { initDb } from '../src/db.js'
 import {
   acceptInvitation,
+  createManagedInvitationForUser,
   createPasswordSetupInvitationForUser,
   findMemberRole,
   googleLoginData,
@@ -72,6 +73,7 @@ realPg('team role authority on real PostgreSQL', () => {
     await holder.pool.query('DELETE FROM team_members')
     await holder.pool.query('DELETE FROM invitations')
     await holder.pool.query('DELETE FROM teams')
+    await holder.pool.query('DELETE FROM profiles')
     await holder.pool.query('DELETE FROM users')
     userId = (await holder.pool.query('INSERT INTO users(email) VALUES ($1) RETURNING id', [email]))
       .rows[0].id
@@ -183,6 +185,100 @@ realPg('team role authority on real PostgreSQL', () => {
       await acceptPasswordSetup()
 
       expect(await memberRole(teamId)).toEqual({ role: 'admin', status: 'deleted' })
+    })
+  })
+
+  describe('managed invitation name', () => {
+    const inviteeEmail = 'invitee@example.invalid'
+
+    async function seedInvitee(name: string | null) {
+      const inviteeId = (
+        await holder.pool.query('INSERT INTO users(email, name) VALUES ($1, $2) RETURNING id', [
+          inviteeEmail,
+          name,
+        ])
+      ).rows[0].id as string
+      await holder.pool.query('INSERT INTO profiles(user_id, display_name) VALUES ($1, $2)', [
+        inviteeId,
+        name,
+      ])
+      return inviteeId
+    }
+
+    async function inviteeName() {
+      const result = await holder.pool.query(
+        `SELECT u.name, p.display_name
+           FROM users u
+      LEFT JOIN profiles p ON p.user_id = u.id
+          WHERE u.email = $1`,
+        [inviteeEmail]
+      )
+      return result.rows[0] as { name: string | null; display_name: string | null } | undefined
+    }
+
+    async function invite(name: string) {
+      await holder.pool.query(
+        `INSERT INTO team_members(team_id, user_id, role, status) VALUES ($1, $2, 'inviter', 'active')`,
+        [teamId, userId]
+      )
+      const created = await createManagedInvitationForUser(
+        userId,
+        inviteeEmail,
+        [{ teamId, role: 'member' }],
+        name
+      )
+      if (!('invitation' in created)) throw new Error(`invitation failed: ${created.error}`)
+      return created.invitation
+    }
+
+    it('does not change an existing account name when the invitation is created', async () => {
+      await seedInvitee('Original Name')
+
+      await invite('Chosen By Inviter')
+
+      expect(await inviteeName()).toEqual({
+        name: 'Original Name',
+        display_name: 'Original Name',
+      })
+    })
+
+    it('does not change an existing account name when the invitation is accepted', async () => {
+      const inviteeId = await seedInvitee('Original Name')
+      const invitation = await invite('Chosen By Inviter')
+
+      const accepted = await acceptInvitation(inviteeId, inviteeEmail, '', invitation.id)
+
+      expect(accepted).not.toHaveProperty('error')
+      expect(await inviteeName()).toEqual({
+        name: 'Original Name',
+        display_name: 'Original Name',
+      })
+    })
+
+    it('fills in a missing account name when the invitation is accepted', async () => {
+      const inviteeId = await seedInvitee(null)
+      const invitation = await invite('Chosen By Inviter')
+
+      await acceptInvitation(inviteeId, inviteeEmail, '', invitation.id)
+
+      expect(await inviteeName()).toEqual({
+        name: 'Chosen By Inviter',
+        display_name: 'Chosen By Inviter',
+      })
+    })
+
+    it('names a new account from the invitation', async () => {
+      const invitation = await invite('Chosen By Inviter')
+      const inviteeId = (
+        await holder.pool.query('INSERT INTO users(email) VALUES ($1) RETURNING id', [inviteeEmail])
+      ).rows[0].id as string
+
+      await acceptInvitation(inviteeId, inviteeEmail, '', invitation.id)
+
+      expect(await inviteeName()).toEqual({
+        name: 'Chosen By Inviter',
+        display_name: 'Chosen By Inviter',
+      })
     })
   })
 })

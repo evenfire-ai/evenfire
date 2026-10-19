@@ -1183,27 +1183,6 @@ export async function createManagedInvitationForUser(
   }
 
   const fallbackName = normalizedEmail.split('@')[0] || normalizedEmail
-  if (normalizedInviteeName) {
-    const updatedUser = await pool.query(
-      `UPDATE users
-          SET name = $2,
-              updated_at = NOW()
-        WHERE email = $1
-    RETURNING id`,
-      [normalizedEmail, normalizedInviteeName]
-    )
-    const userId = String((updatedUser.rows[0] as { id?: string } | undefined)?.id || '')
-    if (userId) {
-      await pool.query(
-        `INSERT INTO profiles(user_id, display_name)
-         VALUES($1, $2)
-         ON CONFLICT (user_id)
-         DO UPDATE SET display_name = EXCLUDED.display_name,
-                       updated_at = NOW()`,
-        [userId, normalizedInviteeName]
-      )
-    }
-  }
 
   return {
     invitation: await createInvitationForTeams({
