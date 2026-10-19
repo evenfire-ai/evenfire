@@ -75,7 +75,8 @@ export interface DcrRegistrationResponse {
  * unusable to us. It lets the caller run the best-effort RFC 7592 cleanup DELETE so
  * the orphaned client does not linger (DEC-18). Present ONLY on those variants and
  * ONLY when the AS returned a management endpoint + token; never on non-2xx errors
- * (`fetch_failed`/`redirect_blocked`/`kernel_rejected`) where nothing was minted.
+ * (`fetch_failed`/`registration_rejected`/`redirect_blocked`/`kernel_rejected`) where
+ * nothing was minted.
  * In-memory only — used solely for the cleanup DELETE, never persisted or logged.
  */
 export interface DcrMintHandle {
@@ -90,7 +91,21 @@ export interface DcrMintHandle {
 
 export type DcrError =
   | { kind: 'kernel_rejected'; field: string; errors: ValidationError[] }
-  | { kind: 'fetch_failed'; url: string; status?: number; detail: string }
+  /** Transport failure: the registration POST got no HTTP response we could read. */
+  | { kind: 'fetch_failed'; url: string; detail: string }
+  /**
+   * The AS answered the registration POST with a non-2xx status other than a followed
+   * redirect (301/302/303/307/308 are `redirect_blocked`). `error` and
+   * `errorDescription` are the RFC 7591 §3.2.2 fields from its body, when present and
+   * well-formed; both are third-party text, bounded by {@link boundedRegistrationError}.
+   */
+  | {
+      kind: 'registration_rejected'
+      url: string
+      status: number
+      error?: string
+      errorDescription?: string
+    }
   /** A 3xx from the registration POST — never re-POSTed to `Location` (SSRF fail-closed). */
   | { kind: 'redirect_blocked'; url: string; detail: string }
   /**
@@ -173,19 +188,73 @@ function mapPinnedError(error: PinnedFetchError, url: string): DcrError {
   }
 }
 
-/** Compose a human-readable detail from an RFC 6749-style error body, if present. */
-function errorBodyDetail(status: number, bodyText: string): string {
+/**
+ * Upper bound (in UTF-16 code units, ellipsis included) on a relayed
+ * `error_description`. control-ui re-applies the same bound (`lib/remoteMcp.ts`).
+ */
+export const DCR_ERROR_DESCRIPTION_MAX = 300
+
+// RFC 7591 §3.2.2 error codes are snake_case tokens (`invalid_redirect_uri`, …). The
+// RFC 6749 charset would also admit spaces, URLs and parentheses, which can read as
+// platform copy once rendered, so only a plain token is kept as a code.
+const PROVIDER_ERROR_CODE_RE = /^[A-Za-z0-9_.-]{1,64}$/
+
+// A surrogate half without its partner (possible through JSON `\u` escapes).
+const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g
+// Double quotation marks, ASCII and typographic: provider text must not be able to
+// close the quotation the operator sees it in.
+const DOUBLE_QUOTES_RE = /["“”„‟«»]/g
+// A combining mark run beyond the third, which only stacks glyphs on one character.
+const STACKED_MARKS_RE = /(\p{M}{3})\p{M}+/gu
+
+/**
+ * Third-party text bounded for display: lone surrogates and default-ignorable
+ * characters (bidi overrides, zero-width, fillers, variation selectors) are dropped,
+ * control characters become spaces so line breaks still separate words, double
+ * quotes become single quotes, combining mark runs are capped, whitespace collapses,
+ * and the result is cut to `max` code units without splitting a surrogate pair.
+ */
+function boundedProviderText(value: string, max: number): string {
+  const text = value
+    .replace(LONE_SURROGATE_RE, '')
+    .replace(/\p{Default_Ignorable_Code_Point}/gu, '')
+    .replace(/\p{Cc}/gu, ' ')
+    .replace(DOUBLE_QUOTES_RE, "'")
+    .replace(STACKED_MARKS_RE, '$1')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (text.length <= max) return text
+  let cut = text.slice(0, max - 1)
+  if (/[\uD800-\uDBFF]$/.test(cut)) cut = cut.slice(0, -1)
+  return `${cut.trimEnd()}…`
+}
+
+/**
+ * The RFC 7591 §3.2.2 `error` / `error_description` of a rejected registration,
+ * bounded for relay to the operator: the body is third-party content, so the code
+ * must be a plain token and the description goes through
+ * {@link boundedProviderText}. Missing, malformed or blank fields are omitted.
+ */
+function boundedRegistrationError(bodyText: string): {
+  error?: string
+  errorDescription?: string
+} {
+  let parsed: unknown
   try {
-    const parsed = JSON.parse(bodyText)
-    if (isRecord(parsed) && typeof parsed.error === 'string') {
-      const description =
-        typeof parsed.error_description === 'string' ? `: ${parsed.error_description}` : ''
-      return `${parsed.error}${description}`
-    }
+    parsed = JSON.parse(bodyText)
   } catch {
-    // Non-JSON error body — fall through to the bare status.
+    return {}
   }
-  return `HTTP ${status}`
+  if (!isRecord(parsed)) return {}
+  const result: { error?: string; errorDescription?: string } = {}
+  if (typeof parsed.error === 'string' && PROVIDER_ERROR_CODE_RE.test(parsed.error)) {
+    result.error = parsed.error
+  }
+  if (typeof parsed.error_description === 'string') {
+    const description = boundedProviderText(parsed.error_description, DCR_ERROR_DESCRIPTION_MAX)
+    if (description.length > 0) result.errorDescription = description
+  }
+  return result
 }
 
 /**
@@ -237,11 +306,20 @@ export async function registerDynamicClient(
 
   const isSuccess = response.status >= 200 && response.status < 300
   if (!isSuccess) {
-    const detail = errorBodyDetail(response.status, response.bodyText)
-    log.warn({ dcr: 'fetch_failed', status: response.status }, 'dcr registration rejected')
+    const providerError = boundedRegistrationError(response.bodyText)
+    // The code only: the description is free third-party text and stays out of logs.
+    log.warn(
+      { dcr: 'registration_rejected', status: response.status, error: providerError.error },
+      'dcr registration rejected'
+    )
     return {
       ok: false,
-      error: { kind: 'fetch_failed', url: endpoint, status: response.status, detail },
+      error: {
+        kind: 'registration_rejected',
+        url: endpoint,
+        status: response.status,
+        ...providerError,
+      },
     }
   }
 

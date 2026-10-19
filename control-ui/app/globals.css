@@ -4735,6 +4735,29 @@ td.cu-registry-description {
   color: var(--cu-text-soft);
 }
 
+.cu-banner__text {
+  margin: 0;
+}
+
+/* Third-party text inside a banner (e.g. an authorization server's error message):
+   attributed and set apart from the platform's own copy, in neutral text color. */
+.cu-provider-message {
+  margin: var(--cu-space-2) 0 0;
+  padding-left: var(--cu-space-3);
+  border-left: 2px solid var(--cu-border);
+  color: var(--cu-text);
+}
+
+.cu-provider-message__source {
+  font-size: var(--cu-font-size-xs);
+  color: var(--cu-text-soft);
+}
+
+.cu-provider-message__text {
+  margin: var(--cu-space-0) 0 0;
+  overflow-wrap: anywhere;
+}
+
 /* Canonical-URL suggestion action inside the dead-transport banner. */
 .cu-transport-suggestion {
   margin-top: var(--cu-space-1);

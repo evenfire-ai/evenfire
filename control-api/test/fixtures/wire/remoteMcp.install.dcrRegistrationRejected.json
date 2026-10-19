@@ -1,0 +1,13 @@
+{
+  "status": 400,
+  "body": {
+    "error": "dcr_registration_failed",
+    "detail": {
+      "kind": "registration_rejected",
+      "url": "https://auth.atlassian.com/VCeDsk8ZHncYF1g234fKtc4lNipbBhu3/dcr/register",
+      "status": 400,
+      "error": "invalid_redirect_uri",
+      "errorDescription": "The provided redirect URIs are not approved for use by this authorization server."
+    }
+  }
+}
