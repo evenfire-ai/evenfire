@@ -86,7 +86,8 @@ ok "Cluster '${PROFILE}' reachable"
 # ---- Step 2: Create namespaces --------------------------------------
 echo -e "\n${BOLD}=== Step 2/12: Create Namespaces ===${NC}"
 $KC apply -f "${DEPLOY_DIR}/namespaces.yaml"
-ok "7 namespaces created"
+ns_count=$(grep -c '^kind: Namespace' "${DEPLOY_DIR}/namespaces.yaml" || true)
+ok "${ns_count} namespaces created"
 
 # ---- Step 3: Install CRDs -------------------------------------------
 echo -e "\n${BOLD}=== Step 3/12: Install CRDs ===${NC}"

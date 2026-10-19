@@ -1,0 +1,307 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "name": "upgrade-suspended",
+    "namespace": "mcp-host",
+    "labels": {
+      "app": "upgrade-suspended",
+      "clerum.io/managed-by": "host-context-controller",
+      "clerum.io/host": "upgrade-suspended",
+      "clerum.io/context": "context-a"
+    },
+    "annotations": {
+      "clerum.io/host-uid": "upgrade-suspended-uid"
+    },
+    "resourceVersion": "1"
+  },
+  "spec": {
+    "replicas": 0,
+    "strategy": {
+      "type": "RollingUpdate",
+      "rollingUpdate": {
+        "maxSurge": 0,
+        "maxUnavailable": 1
+      }
+    },
+    "selector": {
+      "matchLabels": {
+        "app": "upgrade-suspended"
+      }
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app": "upgrade-suspended",
+          "clerum.io/managed-by": "host-context-controller",
+          "clerum.io/host": "upgrade-suspended",
+          "clerum.io/context": "context-a"
+        },
+        "annotations": {
+          "clerum.io/runtime-token-revision": "a4cb61a7d18c5a4e299eb0e2b03595f580521db87057cc6a2e5c428d2f4a12c7"
+        }
+      },
+      "spec": {
+        "serviceAccountName": "host-upgrade-suspended-sa",
+        "priorityClassName": "clerum-interactive-host",
+        "imagePullSecrets": [
+          {
+            "name": "clerum"
+          }
+        ],
+        "initContainers": [
+          {
+            "name": "workspace-layout-init",
+            "image": "clerum/mcp-host:0.6.0",
+            "imagePullPolicy": "Always",
+            "command": [
+              "/bin/sh",
+              "-c",
+              "set -eu\nroot='/mnt/workspace-root'\nfail_layout() {\n  echo \"workspace layout migration unsafe: $1\" >&2\n  exit 1\n}\ncanonical_dir() {\n  (CDPATH= cd -P \"$1\" 2>/dev/null && pwd -P)\n}\nassert_managed_dir() {\n  path=\"$1\"\n  label=\"$2\"\n  [ ! -L \"$path\" ] || fail_layout \"$label directory is a symlink: $path\"\n  [ -d \"$path\" ] || fail_layout \"$label path is not a directory: $path\"\n  resolved=\"$(canonical_dir \"$path\")\" || fail_layout \"cannot resolve $label directory: $path\"\n  case \"$resolved\" in\n    \"$root_real\"/*) ;;\n    *) fail_layout \"$label directory escapes the workspace PVC root: $path\" ;;\n  esac\n}\n\n[ ! -L \"$root\" ] || fail_layout \"workspace PVC root is a symlink: $root\"\n[ -d \"$root\" ] || fail_layout \"workspace PVC root is not a directory: $root\"\nroot_real=\"$(canonical_dir \"$root\")\" || fail_layout \"cannot resolve workspace PVC root: $root\"\n[ \"$root_real\" != \"/\" ] || fail_layout \"workspace PVC root resolves to /\"\n\n# Validate both managed paths before creating either one. A symlink or regular\n# file must never redirect a migration outside the mounted PVC.\nfor dir in workspace state; do\n  path=\"$root/$dir\"\n  [ ! -L \"$path\" ] || fail_layout \"$dir directory is a symlink: $path\"\n  if [ -e \"$path\" ] && [ ! -d \"$path\" ]; then\n    fail_layout \"$dir path is not a directory: $path\"\n  fi\ndone\nfor dir in workspace state; do\n  path=\"$root/$dir\"\n  [ -d \"$path\" ] || mkdir \"$path\"\n  assert_managed_dir \"$path\" \"$dir\"\ndone\n# Validate every destination before the first rename: a later SQLite collision\n# must not leave earlier root entries moved into a partial layout.\nfor entry in \"$root\"/* \"$root\"/.[!.]* \"$root\"/..?*; do\n  [ -e \"$entry\" ] || [ -L \"$entry\" ] || continue\n  base=\"$(basename \"$entry\")\"\n  case \"$base\" in\n    workspace|state|lost+found) continue ;;\n  esac\n  [ ! -L \"$entry\" ] || fail_layout \"legacy source is a symlink: $entry\"\n  case \"$base\" in\n    state.db|state.db-wal|state.db-shm) continue ;;\n  esac\n  if [ -e \"$root/workspace/$base\" ] || [ -L \"$root/workspace/$base\" ]; then\n    echo \"workspace layout migration collision: destination exists: $root/workspace/$base\" >&2\n    exit 1\n  fi\ndone\nroot_sqlite_source=0\nworkspace_sqlite_source=0\nfor db in state.db state.db-wal state.db-shm; do\n  [ ! -L \"$root/$db\" ] || fail_layout \"legacy SQLite source is a symlink: $root/$db\"\n  [ ! -L \"$root/workspace/$db\" ] || fail_layout \"workspace SQLite source is a symlink: $root/workspace/$db\"\n  [ ! -L \"$root/state/$db\" ] || fail_layout \"durable SQLite destination is a symlink: $root/state/$db\"\n  if [ -e \"$root/$db\" ] || [ -L \"$root/$db\" ]; then root_sqlite_source=1; fi\n  if [ -e \"$root/workspace/$db\" ] || [ -L \"$root/workspace/$db\" ]; then workspace_sqlite_source=1; fi\ndone\nif [ \"$root_sqlite_source\" -eq 1 ] && [ \"$workspace_sqlite_source\" -eq 1 ]; then\n  echo \"workspace layout migration collision: SQLite artifacts are split across root and workspace\" >&2\n  exit 1\nfi\n# Newest-source-wins round-trip resolution (Addendum 6 item 6). A confirmed ROOT\n# SQLite source colliding with an existing durable state/ destination is a\n# stateful<->stateless round-trip: the operator just left the stateful life\n# (root state.db is the freshest data) over an earlier stateless life's\n# state/state.db. Preserve the older destination as state/<db>.pre-<ts>.bak\n# (NOTHING is ever deleted), then let the fresher root source migrate in via the\n# normal path below. The destination is proven non-symlink above.\n# WHY positional implies temporal: every stateless boot MOVES the SQLite set out\n# of root into state/ (the mv loops below), so root is left with no state.db. A\n# root state.db can therefore only have been (re)created by a STATEFUL life that\n# ran strictly AFTER the last stateless life — which is what makes \"root source\"\n# equivalent to \"newer source\" here, with no timestamp read required.\nroot_dest_collision=0\nif [ \"$root_sqlite_source\" -eq 1 ]; then\n  for db in state.db state.db-wal state.db-shm; do\n    if [ -e \"$root/state/$db\" ] || [ -L \"$root/state/$db\" ]; then root_dest_collision=1; fi\n  done\nfi\nif [ \"$root_dest_collision\" -eq 1 ]; then\n  # One timestamped backup namespace per collision; guard uniqueness so two\n  # round-trips within the same second (or a re-collision) never overwrite an\n  # existing backup.\n  bak_ts=\"$(date -u +%Y%m%d%H%M%S)\"\n  bak_suffix=\"$bak_ts\"\n  bak_seq=0\n  while [ -e \"$root/state/state.db.pre-$bak_suffix.bak\" ]     || [ -e \"$root/state/state.db-wal.pre-$bak_suffix.bak\" ]     || [ -e \"$root/state/state.db-shm.pre-$bak_suffix.bak\" ]; do\n    bak_seq=$((bak_seq + 1))\n    bak_suffix=\"$bak_ts-$bak_seq\"\n  done\n  backed_up=\"\"\n  for db in state.db state.db-wal state.db-shm; do\n    if [ -e \"$root/state/$db\" ]; then\n      mv \"$root/state/$db\" \"$root/state/$db.pre-$bak_suffix.bak\"\n      backed_up=\"$backed_up $db\"\n    fi\n  done\n  echo \"workspace layout migration: newest-source-wins round-trip resolution -- backed up prior destination(s)$backed_up under state/*.pre-$bak_suffix.bak; migrating the fresher root SQLite source into state/\" >&2\nfi\n# A WORKSPACE SQLite source colliding with the durable destination is a genuinely\n# ambiguous partial-migration state (not a clean round-trip): fail loud,\n# preserving every source for operator recovery.\nfor db in state.db state.db-wal state.db-shm; do\n  if [ -e \"$root/workspace/$db\" ] || [ -L \"$root/workspace/$db\" ]; then\n    if [ -e \"$root/state/$db\" ] || [ -L \"$root/state/$db\" ]; then\n      echo \"workspace layout migration collision: destination exists: $root/state/$db\" >&2\n      exit 1\n    fi\n  fi\ndone\nfor entry in \"$root\"/* \"$root\"/.[!.]* \"$root\"/..?*; do\n  [ -e \"$entry\" ] || [ -L \"$entry\" ] || continue\n  base=\"$(basename \"$entry\")\"\n  case \"$base\" in\n    workspace|state|lost+found) continue ;;\n  esac\n  assert_managed_dir \"$root/workspace\" workspace\n  [ ! -L \"$entry\" ] || fail_layout \"legacy source became a symlink: $entry\"\n  mv \"$entry\" \"$root/workspace/$base\"\ndone\nfor db in state.db state.db-wal state.db-shm; do\n  if [ -e \"$root/workspace/$db\" ]; then\n    assert_managed_dir \"$root/workspace\" workspace\n    assert_managed_dir \"$root/state\" state\n    [ ! -L \"$root/workspace/$db\" ] || fail_layout \"workspace SQLite source became a symlink: $root/workspace/$db\"\n    mv \"$root/workspace/$db\" \"$root/state/$db\"\n  fi\ndone\nsync\n"
+            ],
+            "volumeMounts": [
+              {
+                "name": "workspace",
+                "mountPath": "/mnt/workspace-root"
+              }
+            ],
+            "resources": {
+              "requests": {
+                "memory": "32Mi",
+                "cpu": "10m"
+              },
+              "limits": {
+                "memory": "64Mi",
+                "cpu": "200m"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "runAsNonRoot": true,
+              "runAsUser": 1001,
+              "runAsGroup": 1001,
+              "capabilities": {
+                "drop": ["ALL"]
+              },
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            }
+          }
+        ],
+        "containers": [
+          {
+            "name": "mcp-host",
+            "image": "clerum/mcp-host:0.6.0",
+            "imagePullPolicy": "Always",
+            "ports": [
+              {
+                "name": "http",
+                "containerPort": 8080,
+                "protocol": "TCP"
+              }
+            ],
+            "envFrom": [
+              {
+                "configMapRef": {
+                  "name": "mcp-host-config"
+                }
+              }
+            ],
+            "env": [
+              {
+                "name": "CLERUM_HOST_NAME",
+                "value": "upgrade-suspended"
+              },
+              {
+                "name": "CLERUM_NAMESPACE",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "metadata.namespace"
+                  }
+                }
+              },
+              {
+                "name": "CLERUM_WORKSPACE_PATH",
+                "value": "/workspace"
+              },
+              {
+                "name": "CLERUM_LLM_SECRET_REF",
+                "value": "host-secret"
+              },
+              {
+                "name": "MCP_HOST_RUNTIME_ACCESS_TOKEN",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "name": "host-upgrade-suspended-mcp-host-runtime-tokens",
+                    "key": "mcp-host-runtime-access-token"
+                  }
+                }
+              },
+              {
+                "name": "MCP_HOST_RUNTIME_REFRESH_TOKEN",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "name": "host-upgrade-suspended-mcp-host-runtime-tokens",
+                    "key": "mcp-host-runtime-refresh-token"
+                  }
+                }
+              },
+              {
+                "name": "MCP_HOST_WORKFLOW_CONTROL_TOKEN",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "name": "host-upgrade-suspended-mcp-host-runtime-tokens",
+                    "key": "mcp-host-workflow-control-token"
+                  }
+                }
+              },
+              {
+                "name": "MCP_HOST_WORKFLOW_CONTROL_TOKEN_FILE",
+                "value": "/var/run/clerum/workflow-tokens/mcp-host-workflow-control-token"
+              },
+              {
+                "name": "MCP_HOST_RUNTIME_AUTH_STATE_DIR",
+                "value": "/var/run/clerum/workflow-auth"
+              },
+              {
+                "name": "MCP_HOST_GATEWAY_URL",
+                "value": "http://nginx-workflow-approval-gateway.control-plane.svc.cluster.local:8092"
+              },
+              {
+                "name": "CLERUM_STATELESS_LIFECYCLE",
+                "value": "true"
+              },
+              {
+                "name": "CLERUM_SESSION_STORE",
+                "value": "sqlite"
+              },
+              {
+                "name": "CLERUM_SESSION_DB_DIR",
+                "value": "/var/lib/clerum/state"
+              },
+              {
+                "name": "CLERUM_POD_UID",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "metadata.uid"
+                  }
+                }
+              }
+            ],
+            "volumeMounts": [
+              {
+                "name": "workspace",
+                "mountPath": "/workspace",
+                "subPath": "workspace"
+              },
+              {
+                "name": "workspace",
+                "mountPath": "/var/lib/clerum/state",
+                "subPath": "state"
+              },
+              {
+                "name": "mcp-host-runtime-tokens",
+                "mountPath": "/var/run/clerum/workflow-tokens",
+                "readOnly": true
+              },
+              {
+                "name": "workflow-auth-state",
+                "mountPath": "/var/run/clerum/workflow-auth"
+              },
+              {
+                "name": "tmp",
+                "mountPath": "/tmp"
+              }
+            ],
+            "startupProbe": {
+              "httpGet": {
+                "path": "/v1/runtime/live",
+                "port": "http"
+              },
+              "initialDelaySeconds": 0,
+              "periodSeconds": 2,
+              "timeoutSeconds": 2,
+              "failureThreshold": 155
+            },
+            "livenessProbe": {
+              "httpGet": {
+                "path": "/v1/runtime/live",
+                "port": "http"
+              },
+              "initialDelaySeconds": 45,
+              "periodSeconds": 30,
+              "timeoutSeconds": 2,
+              "failureThreshold": 3
+            },
+            "readinessProbe": {
+              "httpGet": {
+                "path": "/v1/runtime/health",
+                "port": "http"
+              },
+              "initialDelaySeconds": 0,
+              "periodSeconds": 10,
+              "timeoutSeconds": 2,
+              "failureThreshold": 6
+            },
+            "resources": {
+              "requests": {
+                "memory": "128Mi",
+                "cpu": "100m"
+              },
+              "limits": {
+                "memory": "512Mi",
+                "cpu": "500m"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "runAsNonRoot": true,
+              "runAsUser": 1001,
+              "runAsGroup": 1001,
+              "capabilities": {
+                "drop": ["ALL"]
+              },
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            }
+          }
+        ],
+        "securityContext": {
+          "runAsNonRoot": true,
+          "runAsUser": 1001,
+          "runAsGroup": 1001,
+          "fsGroup": 1001,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        },
+        "volumes": [
+          {
+            "name": "workspace",
+            "persistentVolumeClaim": {
+              "claimName": "upgrade-suspended-workspace"
+            }
+          },
+          {
+            "name": "mcp-host-runtime-tokens",
+            "secret": {
+              "secretName": "host-upgrade-suspended-mcp-host-runtime-tokens"
+            }
+          },
+          {
+            "name": "workflow-auth-state",
+            "emptyDir": {
+              "sizeLimit": "16Mi"
+            }
+          },
+          {
+            "name": "tmp",
+            "emptyDir": {}
+          }
+        ]
+      }
+    }
+  }
+}
