@@ -55,6 +55,9 @@ vi.mock('@contexts/AgentChatActionsContext', () => ({
 vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => ({
     selectedAgent: null,
+    // The real context carries both fields; keeping the refs lets a sidebar that
+    // still renders them fail on its label assertions instead of crashing.
+    heldAgentRefs: sidebarContext.heldHosts.map(host => host.agentRef),
     heldHosts: sidebarContext.heldHosts,
     handleSelectChatAgent: sidebarContext.handleSelectChatAgent,
   }),
