@@ -27,7 +27,7 @@ describe('rpcService.issueRpcAccessToken', () => {
     ).rejects.toBeInstanceOf(ControlApiError)
   })
 
-  it('uses the generic forbidden reason when a 403 error code is not a string', async () => {
+  it('propagates malformed 403 bodies for the route sanitizer to reject safely', async () => {
     for (const body of [{ error: ['desktop_requires_team'] }, { error: 42 }]) {
       clientMock.controlApiRequest.mockRejectedValueOnce(
         new ControlApiError(
@@ -39,7 +39,7 @@ describe('rpcService.issueRpcAccessToken', () => {
 
       await expect(
         issueRpcAccessToken('session', ['desktop:view'], ['pro-agent'])
-      ).resolves.toEqual({ error: 'forbidden' })
+      ).rejects.toBeInstanceOf(ControlApiError)
     }
   })
 

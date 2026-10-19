@@ -1,4 +1,4 @@
-import { ControlApiError, controlApiRequest } from '../controlApiClient.js'
+import { controlApiRequest } from '../controlApiClient.js'
 import { RpcAccessScope, RpcScope } from '../types.js'
 
 type IssuedRpcToken = {
@@ -11,7 +11,7 @@ type IssuedRpcToken = {
   droppedScopes?: RpcScope[]
 }
 
-export type RpcAccessTokenResult = IssuedRpcToken | { error: string }
+export type RpcAccessTokenResult = IssuedRpcToken
 
 export async function issueRpcAccessToken(
   sessionToken: string,
@@ -19,20 +19,12 @@ export async function issueRpcAccessToken(
   requestedHostRefsInput: unknown,
   clientIp?: string
 ): Promise<RpcAccessTokenResult> {
-  try {
-    return await controlApiRequest<IssuedRpcToken>('POST', '/external/rpc/token', {
-      body: {
-        sessionToken,
-        scopes: requestedScopesInput,
-        hostRefs: requestedHostRefsInput,
-      },
-      ...(clientIp ? { extraHeaders: { 'x-evenfire-client-ip': clientIp } } : {}),
-    })
-  } catch (error) {
-    // Preserve the target service's public denial reason while keeping its HTTP contract.
-    if (error instanceof ControlApiError && error.status === 403) {
-      return { error: error.code ?? 'forbidden' }
-    }
-    throw error
-  }
+  return controlApiRequest<IssuedRpcToken>('POST', '/external/rpc/token', {
+    body: {
+      sessionToken,
+      scopes: requestedScopesInput,
+      hostRefs: requestedHostRefsInput,
+    },
+    ...(clientIp ? { extraHeaders: { 'x-evenfire-client-ip': clientIp } } : {}),
+  })
 }
