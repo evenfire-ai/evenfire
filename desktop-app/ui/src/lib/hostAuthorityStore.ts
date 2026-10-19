@@ -21,6 +21,8 @@ export interface HostAuthorityStore {
   getEpoch: (agentRef: string) => number
   /** The epoch at which the Host was held, or undefined when it is not held. */
   heldAtEpoch: (agentRef: string) => number | undefined
+  /** The kind of the current hold, or undefined when the Host is not held. */
+  holdKind: (agentRef: string) => HostAuthorityHoldKind | undefined
   /**
    * Returns true only when the hold state changed (unheld→held or
    * uncertain→revoked). A repeated hold of the same kind still advances the
@@ -45,6 +47,7 @@ export function createHostAuthorityStore(): HostAuthorityStore {
     isBlocked: agentRef => holds.has(agentRef),
     getEpoch: agentRef => epochByAgent.get(agentRef) ?? 0,
     heldAtEpoch: agentRef => holds.get(agentRef)?.epoch,
+    holdKind: agentRef => holds.get(agentRef)?.kind,
     hold: (agentRef, kind) => {
       const current = holds.get(agentRef)
       if (current?.kind === 'revoked' && kind === 'uncertain') return false

@@ -21,6 +21,22 @@ describe('createHostAuthorityStore', () => {
 
     expect(store.hold('host-y', 'uncertain')).toBe(false)
     expect(store.heldAtEpoch('host-y')).toBe(heldAt)
+    expect(store.holdKind('host-y')).toBe('revoked')
+  })
+
+  it('reports the kind of the current hold', () => {
+    const store = createHostAuthorityStore()
+    expect(store.holdKind('host-y')).toBeUndefined()
+
+    store.hold('host-y', 'uncertain')
+    expect(store.holdKind('host-y')).toBe('uncertain')
+    store.hold('host-y', 'revoked')
+    expect(store.holdKind('host-y')).toBe('revoked')
+
+    const heldAt = store.heldAtEpoch('host-y')
+    if (heldAt === undefined) throw new Error('host-y must be held')
+    store.release('host-y', heldAt)
+    expect(store.holdKind('host-y')).toBeUndefined()
   })
 
   it('refuses a stale release and moves the epoch on a valid one', () => {

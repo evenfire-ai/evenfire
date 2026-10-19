@@ -370,13 +370,18 @@ export function useAppController() {
       // The Retry row exists only while the catalog lists the Host, so the
       // toast waits for this refresh to say which one the user can act on. A
       // repeated denial keeps the hold and returns above, so this is the only toast.
+      // A revocation that arrives meanwhile finds the Host deselected and shows
+      // nothing, so the kind is read here, when the toast is shown.
       const scope = authorityScopeRef.current
       void refreshed.then(catalog => {
-        if (authorityScopeRef.current !== scope || !hostAuthority.isBlocked(agentRef)) return
+        const heldKind = hostAuthority.holdKind(agentRef)
+        if (authorityScopeRef.current !== scope || !heldKind) return
         pushToast(
-          catalog?.agentNames.includes(agentRef)
-            ? `Could not verify access to ${name}. Use Retry in Latest sessions.`
-            : `${name} is no longer available.`,
+          heldKind === 'revoked'
+            ? `Access to ${name} was revoked.`
+            : catalog?.agentNames.includes(agentRef)
+              ? `Could not verify access to ${name}. Use Retry in Latest sessions.`
+              : `${name} is no longer available.`,
           'error'
         )
       })

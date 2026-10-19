@@ -50,6 +50,7 @@ const DISPLAY_BY_NAME = { [HOST_A]: DISPLAY_A, [HOST_B]: DISPLAY_B }
 const DISPLAY_B_ONLY = { [HOST_B]: DISPLAY_B }
 const RETRY_A = `Could not verify access to ${DISPLAY_A}. Use Retry in Latest sessions.`
 const GONE_A = `${DISPLAY_A} is no longer available.`
+const REVOKED_A = `Access to ${DISPLAY_A} was revoked.`
 
 /**
  * A `listSessions` double. Page reads (`limit: 50`) of a denied Host reject
@@ -510,7 +511,8 @@ describe('useAppController held Hosts', () => {
       second: 'revocation',
       secondError: () => ipcHostAccessRevoked('rpc:loadSessionMessages'),
       catalogAfter: [HOST_B],
-      toast: GONE_A,
+      // The hold is now a confirmed revocation, so the one toast says so.
+      toast: REVOKED_A,
       held: [],
     },
   ])(
