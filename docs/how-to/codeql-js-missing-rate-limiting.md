@@ -79,7 +79,7 @@ Follow-up implementation tracked separately (`fix/codeql-control-api-rate-limit-
 | [#826](https://github.com/evenfire-ai/evenfire/security/code-scanning/826)   | `registryConnect.ts:321`                                             | `rateLimitMiddleware` 3/min at `:329-336`                                 |
 | [#803](https://github.com/evenfire-ai/evenfire/security/code-scanning/803)   | `gfs/grants.ts:849`                                                  | Internal DB helper, not an HTTP route handler                             |
 | [#1767](https://github.com/evenfire-ai/evenfire/security/code-scanning/1767) | `app.ts:73`                                                          | False positive — invitation error-response middleware; evidence below     |
-| [#1769](https://github.com/evenfire-ai/evenfire/security/code-scanning/1769) | `passwordResetPayload.externalRest.realPostgres.integration.test.ts` | False positive — test-only loopback services; no deployed public listener |
+| [#1769](https://github.com/evenfire-ai/evenfire/security/code-scanning/1769) | `passwordResetPayload.externalRest.realPostgres.integration.test.ts` | Test-only composition: Control API and External REST bind loopback; producer is task-local on an ephemeral port |
 
 Alert #1767 is attached to the invitation error-response middleware mount, which maps upstream
 failures to bounded public responses. External REST token lookup is limited to 30 requests/minute
