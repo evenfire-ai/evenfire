@@ -303,6 +303,144 @@ describe('FilePreviewPage', () => {
     )
   })
 
+  it('keeps the preview delete confirmation busy and non-dismissible until settlement', async () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    let resolveDelete!: () => void
+    const deletePromise = new Promise<void>(resolve => {
+      resolveDelete = resolve
+    })
+    const deleteResource = vi.fn(() => deletePromise)
+    const pushToast = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+          resolve: vi.fn(async () =>
+            resolveResource({
+              resourceId: '0123456789abcdef0123456789abcdef',
+              rid: '0123456789abcdef0123456789abcdef',
+              gfsUri: uri,
+              drive: 'main',
+              parentResourceId: 'preview-parent',
+              name: 'diagram.png',
+              kind: 'file',
+              version: 7,
+              bytes: 1,
+            })
+          ),
+          affordances: vi.fn(async () => activeAffordances),
+          deleteResource,
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue(controller())
+
+    render(
+      <FilePreviewPage
+        gfsUri={uri}
+        fileName="diagram.png"
+        fileKind="image"
+        mimeType="image/png"
+        byteLength={1}
+        pushToast={pushToast}
+      />
+    )
+
+    expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
+    await waitFor(() => expect(window.clerum.gfs.affordances).toHaveBeenCalled())
+    clickPreviewAction('diagram.png', 'Delete')
+    const dialog = await screen.findByRole('dialog', { name: 'Delete diagram.png?' })
+    const cancel = within(dialog).getByRole('button', { name: 'Cancel' }) as HTMLButtonElement
+    const confirm = within(dialog).getByRole('button', { name: 'Delete' }) as HTMLButtonElement
+    const cancelFocus = vi.spyOn(cancel, 'focus')
+    expect(document.activeElement).toBe(cancel)
+
+    fireEvent.click(confirm)
+
+    await waitFor(() => expect(confirm.getAttribute('aria-busy')).toBe('true'))
+    expect(cancelFocus).not.toHaveBeenCalled()
+    expect(cancel.disabled).toBe(true)
+    expect(confirm.disabled).toBe(true)
+    expect(deleteResource).toHaveBeenCalledTimes(1)
+    expect(deleteResource).toHaveBeenCalledWith('0123456789abcdef0123456789abcdef', 'main', 7)
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    const backdrop = dialog.parentElement
+    expect(backdrop).toBeTruthy()
+    fireEvent.mouseDown(backdrop as HTMLElement)
+    fireEvent.click(cancel)
+    expect(screen.getByRole('dialog', { name: 'Delete diagram.png?' })).toBeTruthy()
+    expect(deleteResource).toHaveBeenCalledTimes(1)
+
+    await act(async () => resolveDelete())
+    expect(await screen.findByRole('heading', { name: 'File unavailable', level: 3 })).toBeTruthy()
+    expect(screen.queryByRole('dialog', { name: 'Delete diagram.png?' })).toBeNull()
+    expect(pushToast).toHaveBeenCalledWith('Deleted diagram.png', 'success')
+  })
+
+  it('re-enables preview delete confirmation after a failed request', async () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    let rejectDelete!: (error: Error) => void
+    const deletePromise = new Promise<void>((_resolve, reject) => {
+      rejectDelete = reject
+    })
+    const deleteResource = vi.fn(() => deletePromise)
+    const pushToast = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+          resolve: vi.fn(async () =>
+            resolveResource({
+              resourceId: '0123456789abcdef0123456789abcdef',
+              rid: '0123456789abcdef0123456789abcdef',
+              gfsUri: uri,
+              drive: 'main',
+              parentResourceId: 'preview-parent',
+              name: 'diagram.png',
+              kind: 'file',
+              version: 7,
+              bytes: 1,
+            })
+          ),
+          affordances: vi.fn(async () => activeAffordances),
+          deleteResource,
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue(controller())
+
+    render(
+      <FilePreviewPage
+        gfsUri={uri}
+        fileName="diagram.png"
+        fileKind="image"
+        mimeType="image/png"
+        byteLength={1}
+        pushToast={pushToast}
+      />
+    )
+
+    expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
+    await waitFor(() => expect(window.clerum.gfs.affordances).toHaveBeenCalled())
+    clickPreviewAction('diagram.png', 'Delete')
+    const dialog = await screen.findByRole('dialog', { name: 'Delete diagram.png?' })
+    const confirm = within(dialog).getByRole('button', { name: 'Delete' }) as HTMLButtonElement
+
+    fireEvent.click(confirm)
+    await waitFor(() => expect(confirm.getAttribute('aria-busy')).toBe('true'))
+    await act(async () => rejectDelete(new Error('409 conflict')))
+
+    await waitFor(() => expect(confirm.disabled).toBe(false))
+    expect(screen.getByRole('dialog', { name: 'Delete diagram.png?' })).toBeTruthy()
+    expect(pushToast).toHaveBeenCalledWith(
+      expect.stringContaining('Could not delete the file:'),
+      'error'
+    )
+  })
+
   it('mounts the markdown body for a markdown preview tab', async () => {
     hookMock.useGfsBrowserController.mockReturnValue(controller())
     stubDownload(async () => ({ bytes: new TextEncoder().encode('# Hi').buffer }))

@@ -626,7 +626,7 @@ export function useFilePreviewResourceActions({
           body="The file will be deleted for everyone with access."
           confirmLabel="Delete"
           onCancel={() => setDeleteOpen(false)}
-          onConfirm={() => void handleDelete()}
+          onConfirm={() => handleDelete()}
           title={`Delete ${resource.name}?`}
           tone="danger"
         />
