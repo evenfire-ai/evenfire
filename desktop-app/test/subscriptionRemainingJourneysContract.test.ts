@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import os from 'node:os'
+import path from 'node:path'
 import type { SubscriptionImageRun } from './e2e-playwright/subscriptionImageRunContract.js'
 import {
   requireRemainingJourney,
@@ -8,11 +10,12 @@ import {
 // These are shape-only identities. No runtime/session or provider is fabricated
 // by the unit fixture; physical ownership remains the independent runner gate.
 const digest = 'a'.repeat(64)
+const runRoot = path.resolve(os.tmpdir(), 'evenfire-subscription-unit-run')
 const run: SubscriptionImageRun = {
   mode: 'fixture',
   runId: 'subscription-image-123456789abc',
-  runnerReceipt: '/private/tmp/unit-run/runner.json',
-  runRoot: '/private/tmp/unit-run',
+  runnerReceipt: path.join(runRoot, 'runner.json'),
+  runRoot,
   profile: 'clerum-owned-unit-lane',
   context: 'clerum-owned-unit-lane',
   restUrl: 'http://127.0.0.1:43001',
@@ -29,7 +32,7 @@ const run: SubscriptionImageRun = {
 }
 const input = {
   suite: 'tool-screenshot' as const,
-  fixtureReceiptPath: `${run.runRoot}/screens.json`,
+  fixtureReceiptPath: path.join(run.runRoot, 'screens.json'),
 }
 const env = {
   E2E_SUBSCRIPTION_TOOL_SCREENSHOT: '1',
@@ -52,7 +55,7 @@ function receipt() {
           podUid: '12345678-1234-4234-8234-123456789abc',
           imageId: `sha256:${digest}`,
           hostImagePath: '/tmp/evenfire-qa-screen-12345678-1234-4234-8234-123456789abc.png',
-          fixtureImagePath: `${run.runRoot}/${binding.provider}.png`,
+          fixtureImagePath: path.join(run.runRoot, `${binding.provider}.png`),
           imageSha256: digest,
           region: { x: 0, y: 0, w: 512, h: 512 },
         },
@@ -81,7 +84,7 @@ function gfsReceipt() {
             gfsUri: `gfs://main/${(index ? 'b' : 'c').repeat(32)}`,
             sizeBytes: 2048,
             mimeType: `image/${format}`,
-            fixtureImagePath: `${run.runRoot}/qa-${binding.provider}-${index}.${format}`,
+            fixtureImagePath: path.join(run.runRoot, `qa-${binding.provider}-${index}.${format}`),
             imageSha256: (index ? 'b' : 'c').repeat(64),
             width: 512,
             height: 512,
@@ -109,7 +112,11 @@ function admissionReceipt() {
           // This suite tests only outer metadata admission. The physical pressure
           // client must reject this unit-only record; it is never used to hold work.
           pressure: {
-            receiptFile: '/runner-admission/unit-pressure-metadata.json',
+            receiptFile: path.join(
+              path.parse(path.resolve('/')).root,
+              'runner-admission',
+              'unit-pressure-metadata.json'
+            ),
             workDeadlineMs: 30000,
             closeGraceMs: 250,
             commandDeadlineMs: 40250,
@@ -143,8 +150,8 @@ describe('remaining subscription journeys collection and data-preparation gates'
     ).toThrow('fixture-only')
   })
   it.each([
-    '/private/tmp/elsewhere/screens.json',
-    '/private/tmp/unit-run/../foreign.json',
+    path.resolve(run.runRoot, '..', 'elsewhere', 'screens.json'),
+    path.resolve(run.runRoot, '..', 'foreign.json'),
     'screens.json',
   ])('refuses a fixture outside its physical run root: %s', fixtureReceiptPath => {
     expect(() =>

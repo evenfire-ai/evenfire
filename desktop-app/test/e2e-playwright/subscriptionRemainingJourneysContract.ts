@@ -228,11 +228,12 @@ export function validateRemainingFixture(
         fixture.pressure,
         'Admission pressure requires sealed private relay metadata'
       )
+      const pressureDirectory = path.join(path.parse(path.resolve('/')).root, 'runner-admission')
       if (
         typeof pressure.receiptFile !== 'string' ||
         !path.isAbsolute(pressure.receiptFile) ||
         path.resolve(pressure.receiptFile) !== pressure.receiptFile ||
-        path.dirname(pressure.receiptFile) !== '/runner-admission' ||
+        path.dirname(pressure.receiptFile) !== pressureDirectory ||
         !/\.json$/.test(pressure.receiptFile) ||
         /(?:^|[-_.])(?:env|token|secret|credential|wallet|cookie|password|private[-_]?key)(?:[-_.]|$)/i.test(
           path.basename(pressure.receiptFile)
