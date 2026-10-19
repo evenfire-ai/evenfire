@@ -24,6 +24,12 @@ export interface HostAuthorityStore {
   /** The kind of the current hold, or undefined when the Host is not held. */
   holdKind: (agentRef: string) => HostAuthorityHoldKind | undefined
   /**
+   * The epoch at which the current hold episode began, or undefined when the
+   * Host is not held. A repeated hold and an upgrade keep it; only a release
+   * or reset ends the episode, so the next hold starts a new one.
+   */
+  heldSince: (agentRef: string) => number | undefined
+  /**
    * Returns true only when the hold state changed (unheld→held or
    * uncertain→revoked). A repeated hold of the same kind still advances the
    * epoch so an in-flight verification is invalidated, but returns false.
@@ -41,18 +47,19 @@ export interface HostAuthorityStore {
 export function createHostAuthorityStore(): HostAuthorityStore {
   let epoch = 0
   const epochByAgent = new Map<string, number>()
-  const holds = new Map<string, { kind: HostAuthorityHoldKind; epoch: number }>()
+  const holds = new Map<string, { kind: HostAuthorityHoldKind; epoch: number; since: number }>()
 
   return {
     isBlocked: agentRef => holds.has(agentRef),
     getEpoch: agentRef => epochByAgent.get(agentRef) ?? 0,
     heldAtEpoch: agentRef => holds.get(agentRef)?.epoch,
     holdKind: agentRef => holds.get(agentRef)?.kind,
+    heldSince: agentRef => holds.get(agentRef)?.since,
     hold: (agentRef, kind) => {
       const current = holds.get(agentRef)
       if (current?.kind === 'revoked' && kind === 'uncertain') return false
       epoch += 1
-      holds.set(agentRef, { kind, epoch })
+      holds.set(agentRef, { kind, epoch, since: current?.since ?? epoch })
       epochByAgent.set(agentRef, epoch)
       return current?.kind !== kind
     },

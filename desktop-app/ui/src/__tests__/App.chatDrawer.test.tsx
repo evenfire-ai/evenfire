@@ -144,14 +144,14 @@ vi.mock('@pages/ChatPage', async () => {
   return {
     ChatPage: () => {
       const { activeChatId, composerFocusRequestId } = useChatComposerStateContext()
-      const { heldAgentRefs, focusedChatAgentRef } = useNavigationContext()
+      const { heldAgentRefs, keepFocusedChat } = useNavigationContext()
       return (
         <div
           data-testid="chat-page-surface"
           data-active-chat-id={activeChatId ?? ''}
           data-composer-focus-request-id={composerFocusRequestId}
           data-held-agent-refs={JSON.stringify(heldAgentRefs ?? null)}
-          data-focused-chat-agent-ref={focusedChatAgentRef ?? ''}
+          data-keep-focused-chat={String(keepFocusedChat)}
         />
       )
     },
@@ -536,15 +536,15 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
 
   // The controller tests stop at `vm.heldAgentRefs`, and the ChatPage and
   // SidebarNav tests mock NavigationContext; this pins the App step between them.
-  it('passes the held Hosts and the focused chat Host from the controller to NavigationContext', () => {
+  it('passes the held Hosts and the keep-focused-chat flag from the controller to NavigationContext', () => {
     currentController = makeController({
       heldAgentRefs: [],
-      focusedChatAgentRef: null,
+      keepFocusedChat: false,
     } as Partial<AppController>)
     const { rerender } = render(<App />)
     const surface = () => screen.getByTestId('chat-page-surface')
     expect(surface().dataset.heldAgentRefs).toBe('[]')
-    expect(surface().dataset.focusedChatAgentRef).toBe('')
+    expect(surface().dataset.keepFocusedChat).toBe('false')
 
     // One field per step, so neither update rides on the other's dependency.
     act(() => {
@@ -552,13 +552,13 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       rerender(<App />)
     })
     expect(surface().dataset.heldAgentRefs).toBe('["alpha"]')
-    expect(surface().dataset.focusedChatAgentRef).toBe('')
+    expect(surface().dataset.keepFocusedChat).toBe('false')
 
     act(() => {
-      currentController.focusedChatAgentRef = 'alpha'
+      currentController.keepFocusedChat = true
       rerender(<App />)
     })
-    expect(surface().dataset.focusedChatAgentRef).toBe('alpha')
+    expect(surface().dataset.keepFocusedChat).toBe('true')
   })
 
   // The header's "Open chat in full screen" CTA must EJECT the drawer's ACTIVE

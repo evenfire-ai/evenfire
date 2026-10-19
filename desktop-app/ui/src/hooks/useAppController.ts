@@ -371,11 +371,18 @@ export function useAppController() {
       // toast waits for this refresh to say which one the user can act on. A
       // repeated denial keeps the hold and returns above, so this is the only toast.
       // A revocation that arrives meanwhile finds the Host deselected and shows
-      // nothing, so the kind is read here, when the toast is shown.
+      // nothing, so the kind is read here, when the toast is shown. A release
+      // ends this hold episode; a later hold is another episode with its own toast.
       const scope = authorityScopeRef.current
+      const since = hostAuthority.heldSince(agentRef)
       void refreshed.then(catalog => {
         const heldKind = hostAuthority.holdKind(agentRef)
-        if (authorityScopeRef.current !== scope || !heldKind) return
+        if (
+          authorityScopeRef.current !== scope ||
+          !heldKind ||
+          hostAuthority.heldSince(agentRef) !== since
+        )
+          return
         pushToast(
           heldKind === 'revoked'
             ? `Access to ${name} was revoked.`
@@ -754,6 +761,35 @@ export function useAppController() {
     isHostAccessBlocked,
     pushToast,
   ])
+
+  // Hosts listed by any catalog of the current user and team. It exists only for
+  // the Desktop team switch: chat tabs survive a switch, and a tab whose Host the
+  // new team never listed must not stop ChatPage from selecting a Host of that
+  // team. Remove it with the Desktop team switch; `keepFocusedChat` then goes back
+  // to "held or absent from the catalog".
+  const listedInTeamRef = useRef<{ key: string; agentRefs: Set<string> }>({
+    key: '',
+    agentRefs: new Set(),
+  })
+  const listingCatalog = agentsData.accessCatalog
+  if (listingCatalog) {
+    const key = `${listingCatalog.userId}:${listingCatalog.teamId}`
+    if (listedInTeamRef.current.key !== key) {
+      listedInTeamRef.current = { key, agentRefs: new Set() }
+    }
+    for (const agentRef of listingCatalog.agentNames)
+      listedInTeamRef.current.agentRefs.add(agentRef)
+  }
+  const focusedChatAgentRef =
+    nav.activeTab?.kind === 'chat' ? (nav.activeTab.chat?.agentRef ?? null) : null
+  // ChatPage stays on the focused chat when its Host is held, or when the catalog
+  // dropped a Host it listed in this team (the Host can leave the catalog before
+  // its own 403 places the hold).
+  const keepFocusedChat =
+    focusedChatAgentRef !== null &&
+    (hostAuthority.isBlocked(focusedChatAgentRef) ||
+      (!agentsData.agentNames.includes(focusedChatAgentRef) &&
+        listedInTeamRef.current.agentRefs.has(focusedChatAgentRef)))
 
   const switchTeamForWorkspace = useCallback(
     async (teamId: string, options: { announce?: boolean } = {}) => {
@@ -1606,8 +1642,8 @@ export function useAppController() {
     selectedAgent: nav.selectedAgent,
     isHostAccessBlocked,
     heldAgentRefs,
-    focusedChatAgentRef:
-      nav.activeTab?.kind === 'chat' ? (nav.activeTab.chat?.agentRef ?? null) : null,
+    focusedChatAgentRef,
+    keepFocusedChat,
     hostAuthorityRevision,
     selectedAgentRoute: nav.selectedAgentRoute,
     setSelectedAgent: nav.setSelectedAgent,

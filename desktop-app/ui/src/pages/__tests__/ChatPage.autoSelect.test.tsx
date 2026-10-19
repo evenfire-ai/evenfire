@@ -7,6 +7,7 @@ const onSelectAgent = vi.fn()
 let agentNames: string[] = []
 let selectedAgent: string | null = null
 let heldAgentRefs: string[] = []
+let keepFocusedChat = false
 const agentLastActiveByAgent: Record<string, string | null> = {
   'host-a': '2026-10-15T12:00:00.000Z',
   'host-b': '2026-10-15T11:00:00.000Z',
@@ -20,7 +21,7 @@ vi.mock('@hooks/domain/useAgentsDataController', () => ({
 vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => {
     navigationReads.push({ selectedAgent, heldAgentRefs })
-    return { selectedAgent, heldAgentRefs, handleSelectChatAgent: onSelectAgent }
+    return { selectedAgent, heldAgentRefs, keepFocusedChat, handleSelectChatAgent: onSelectAgent }
   },
 }))
 vi.mock('@contexts/AgentActivityContext', () => ({
@@ -35,6 +36,7 @@ afterEach(() => {
   agentNames = []
   selectedAgent = null
   heldAgentRefs = []
+  keepFocusedChat = false
   navigationReads.length = 0
   vi.clearAllMocks()
 })
@@ -69,5 +71,19 @@ describe('ChatPage auto-select skips held Hosts', () => {
       heldAgentRefs: ['host-a', 'host-b'],
     })
     expect(onSelectAgent).toHaveBeenCalledTimes(1)
+  })
+
+  it('T-R1H1-3: selects no Host while the focused chat is kept, and selects one once it is not', () => {
+    agentNames = ['host-a', 'host-b']
+    keepFocusedChat = true
+    const { rerender } = render(<ChatPage scrollContainerRef={scrollContainerRef} />)
+    expect(onSelectAgent).not.toHaveBeenCalled()
+
+    keepFocusedChat = false
+    rerender(<ChatPage scrollContainerRef={scrollContainerRef} />)
+
+    // Liveness witness: the same effect selects as soon as the flag clears.
+    expect(onSelectAgent).toHaveBeenCalledTimes(1)
+    expect(onSelectAgent).toHaveBeenCalledWith('host-a', { selectLatest: false })
   })
 })

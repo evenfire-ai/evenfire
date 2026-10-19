@@ -5,8 +5,11 @@ export interface NavigationContextValue {
   navItem: NavItem
   selectedAgent: string | null
   heldAgentRefs: string[]
-  /** The Host of the active chat tab, or null when no chat tab is active or it has no Host. */
-  focusedChatAgentRef: string | null
+  /**
+   * True when the active chat tab's Host is held, or was listed in this team and
+   * the catalog dropped it: ChatPage must not select another Host.
+   */
+  keepFocusedChat: boolean
   selectedAgentRoute: AgentWorkspaceRoute
   handleNavSelect: (item: NavItem) => void
   handleOpenAgentWorkspace: (agentName: string, route?: AgentWorkspaceRoute) => void
