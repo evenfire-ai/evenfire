@@ -58,7 +58,10 @@ afterEach(async () => {
     .mocked(spawn)
     .mock.results.filter(result => result.type === 'return')
     .map(result => result.value as ChildProcess)
-    .filter(child => child.exitCode === null && child.signalCode === null)
+    // A failed spawn has no process and never emits exit.
+    .filter(
+      child => child.pid !== undefined && child.exitCode === null && child.signalCode === null
+    )
   await Promise.all(
     children.map(async child => {
       const exited = once(child, 'exit')
@@ -90,6 +93,34 @@ describe('document reader Host memory admission and queue', () => {
     await vi.waitFor(() => expect(secondChild.send).toHaveBeenCalledTimes(1))
     finish(secondChild)
     expect((await second).ok).toBe(true)
+  })
+
+  it('releases the reader slot when spawn creates no process, then runs the next job', async () => {
+    samplers(vi.fn(async () => null))
+    const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process')
+    let failedChild: ChildProcess | undefined
+    const events: string[] = []
+    vi.mocked(spawn).mockImplementationOnce((_command, args, options) => {
+      // A real OS spawn failure: ENOENT, an `error` and a `close`, never an `exit`.
+      failedChild = actual.spawn('/nonexistent/evenfire-document-reader', args, options)
+      failedChild.on('error', error =>
+        events.push(`error:${(error as NodeJS.ErrnoException).code}`)
+      )
+      failedChild.on('exit', () => events.push('exit'))
+      failedChild.on('close', () => events.push('close'))
+      return failedChild
+    })
+    const nextChild = childFixture()
+    vi.mocked(spawn).mockReturnValueOnce(nextChild)
+    await expect(runDocumentJob(job)).rejects.toThrow('Document reader worker failed')
+    await vi.waitFor(() => expect(events).toContain('close'))
+    expect(failedChild?.pid).toBeUndefined()
+    expect(events).toEqual(['error:ENOENT', 'close'])
+    const next = runDocumentJob(job)
+    await vi.waitFor(() => expect(nextChild.send).toHaveBeenCalledTimes(1))
+    finish(nextChild)
+    expect((await next).ok).toBe(true)
+    expect(spawn).toHaveBeenCalledTimes(2)
   })
 
   it('reads headroom and refuses the floor without spawning, then admits a live reader', async () => {

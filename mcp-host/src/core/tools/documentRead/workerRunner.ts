@@ -287,6 +287,9 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
           exited = true
           cleanup()
           reject(aborted ? abortReason : workerFailed())
+          // A spawn that never created a process emits no exit and holds no
+          // memory. A live child keeps the slot until its exit is observed.
+          if (child?.pid === undefined) release()
         }
       }
       const onAbort = () => {
