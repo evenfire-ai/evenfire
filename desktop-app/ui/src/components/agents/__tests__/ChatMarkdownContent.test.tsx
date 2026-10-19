@@ -66,4 +66,17 @@ describe('ChatMarkdownContent ordinary Markdown', () => {
     expect(container.querySelector('img')).toBeNull()
     expect(container.textContent).toContain('<img')
   })
+
+  it('keeps remote Markdown images inert while preserving their alt text', () => {
+    const { container } = renderMarkdown('![Remote](https://example.test/private.png)')
+
+    expect(container.querySelector('img')).toBeNull()
+    expect(screen.getByText('Remote')).toBeTruthy()
+  })
+
+  it('allows only inline data images through the chat Markdown renderer', () => {
+    const { container } = renderMarkdown('![Embedded](data:image/png;base64,AAAA)')
+
+    expect(container.querySelector('img')?.getAttribute('src')).toBe('data:image/png;base64,AAAA')
+  })
 })

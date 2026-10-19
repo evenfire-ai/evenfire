@@ -51,6 +51,12 @@ const FLOW_BOUNDARIES = new Set([
 ])
 const URL_PROPERTIES = new Set(['href', 'src'])
 
+export function safeChatMarkdownImageSource(raw: unknown): string | null {
+  return typeof raw === 'string' && /^data:image\/(?:png|gif|jpe?g|webp);base64,/i.test(raw)
+    ? raw
+    : null
+}
+
 function normalizeTree(node: RootContent | Root): void {
   if ('children' in node) {
     node.children = node.children.flatMap(child => {
@@ -68,7 +74,11 @@ function normalizeTree(node: RootContent | Root): void {
     }) as typeof node.children
   }
   if (node.type === 'element') {
+    if (node.tagName === 'img') {
+      node.properties.src = safeChatMarkdownImageSource(node.properties.src) ?? ''
+    }
     for (const property of URL_PROPERTIES) {
+      if (node.tagName === 'img' && property === 'src') continue
       if (Object.hasOwn(node.properties, property)) {
         node.properties[property] = defaultUrlTransform(String(node.properties[property] || ''))
       }
