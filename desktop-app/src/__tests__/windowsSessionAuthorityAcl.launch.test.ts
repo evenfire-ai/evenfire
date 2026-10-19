@@ -126,11 +126,13 @@ describe('Windows session authority PowerShell launcher', () => {
           errorType: 'UnauthorizedAccessException',
           hresult: '0x80070005',
           detail: 'dacl-invalid',
+          innerErrorType: 'Win32Exception',
+          innerHresult: '0x80070005',
         }),
       })
     )
     expect(captureError(runVerifier)).toMatch(
-      /"phase":"acl-verifier-rejected".*"verifierDetail":"dacl-invalid"/
+      /"phase":"acl-verifier-rejected".*"verifierDetail":"dacl-invalid".*"verifierInnerErrorType":"Win32Exception".*"verifierInnerHresult":"0x80070005"/
     )
   })
 

@@ -420,6 +420,10 @@ try {
 } catch {
   $message = [string]$_.Exception.Message
   $detail = if ($message -match '^[A-Za-z0-9-]{1,80}$') { $message } else { $null }
+  $innerException = $_.Exception.InnerException
+  while ($innerException -and $innerException.InnerException) {
+    $innerException = $innerException.InnerException
+  }
   [ordered]@{
     ok = $false
     code = 'windows-acl-verification-failed'
@@ -427,6 +431,8 @@ try {
     errorType = $_.Exception.GetType().Name
     hresult = ('0x{0:X8}' -f $_.Exception.HResult)
     detail = $detail
+    innerErrorType = if ($innerException) { $innerException.GetType().Name } else { $null }
+    innerHresult = if ($innerException) { '0x{0:X8}' -f $innerException.HResult } else { $null }
   } | ConvertTo-Json -Compress
   exit 2
 }
@@ -452,10 +458,17 @@ function sanitizedWindowsAclFailure(stdout: string): {
     if (typeof value !== 'object' || value === null) return { rejected: false, fields: {} }
     const fields = value as Record<string, unknown>
     const safe: Record<string, string> = {}
-    for (const field of ['phase', 'errorType', 'hresult', 'detail'] as const) {
+    for (const field of [
+      'phase',
+      'errorType',
+      'hresult',
+      'detail',
+      'innerErrorType',
+      'innerHresult',
+    ] as const) {
       const item = fields[field]
       if (typeof item !== 'string') continue
-      const pattern = field === 'hresult' ? /^0x[0-9A-F]{8}$/i : /^[A-Za-z0-9-]{1,80}$/
+      const pattern = /hresult$/i.test(field) ? /^0x[0-9A-F]{8}$/i : /^[A-Za-z0-9-]{1,80}$/
       if (pattern.test(item)) safe[field] = item
     }
     return { rejected: fields.ok === false, fields: safe }
@@ -506,7 +519,14 @@ function safePowerShellFailure(result: SpawnSyncReturns<string>, fallbackPhase: 
   ) {
     diagnostic.signal = signal
   }
-  for (const field of ['phase', 'errorType', 'hresult', 'detail'] as const) {
+  for (const field of [
+    'phase',
+    'errorType',
+    'hresult',
+    'detail',
+    'innerErrorType',
+    'innerHresult',
+  ] as const) {
     const value = verifierFailure.fields[field]
     if (value) diagnostic[`verifier${field[0]!.toUpperCase()}${field.slice(1)}`] = value
   }
