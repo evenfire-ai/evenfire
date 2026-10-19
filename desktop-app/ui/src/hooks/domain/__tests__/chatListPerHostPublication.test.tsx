@@ -528,7 +528,7 @@ describe('per-Host Latest sessions publication', () => {
   })
 })
 
-// §6 (H5): a cross-agent reload keeps the remote rows it already published
+// H5: a cross-agent reload keeps the remote rows it already published
 // until that Host's new catalog arrives. Each test observes every committed
 // list, because the defect is a single frame without the row.
 describe('Latest sessions reload keeps published remote rows (H5)', () => {
@@ -713,7 +713,8 @@ describe('Latest sessions reload keeps published remote rows (H5)', () => {
       await controller.result.current.switchToChat(HOST_B, 'local-b')
     })
     expect(controller.hostAuthority.isBlocked(HOST_B)).toBe(true)
-    // One settled commit between the hold and the release (§6.5).
+    // Commit the held state before the release, so the release starts from a
+    // list without B's rows instead of being batched with the hold.
     await act(async () => undefined)
     expect(ids(controller.result.current.latestChatSessions)).toEqual([])
 
