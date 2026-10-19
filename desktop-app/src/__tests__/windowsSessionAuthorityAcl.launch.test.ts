@@ -59,7 +59,13 @@ describe('Windows session authority PowerShell launcher', () => {
 
     const [executable, args, options] = spawnSyncMock.mock.calls[0]!
     expect(args.slice(0, 3)).toEqual(['-NoLogo', '-NoProfile', '-NonInteractive'])
-    expect(args[3] === '-Command' && args[4] === '-').toBe(true)
+    expect(
+      args[3] === '-Command' &&
+        typeof args[4] === 'string' &&
+        args[4].length < 256 &&
+        args[4].includes('[Console]::In.ReadToEnd()') &&
+        args[4].includes('[scriptblock]::Create($sourceText)')
+    ).toBe(true)
     expect(typeof options.input).toBe('string')
     expect(options.input.length).toBeGreaterThan(16_384)
 
@@ -125,6 +131,14 @@ describe('Windows session authority PowerShell launcher', () => {
     )
     expect(captureError(runVerifier)).toMatch(
       /"phase":"acl-verifier-rejected".*"verifierDetail":"dacl-invalid"/
+    )
+  })
+
+  it('reports a started PowerShell process that returns no structured output', () => {
+    spawnSyncMock.mockReturnValue(processResult({ stdout: '', stderr: '' }))
+
+    expect(captureError(runVerifier)).toMatch(
+      /"phase":"structured-output-missing".*"processStarted":true.*"exitStatus":0.*"stdoutPresent":false/
     )
   })
 

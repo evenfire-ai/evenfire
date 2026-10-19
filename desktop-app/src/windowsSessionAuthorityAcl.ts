@@ -433,7 +433,15 @@ try {
 `
 
 const POWERSHELL_REQUEST = 'EVENFIRE_SESSION_AUTHORITY_ACL_REQUEST'
-const POWERSHELL_ARGS = ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '-'] as const
+const POWERSHELL_LAUNCHER =
+  '$sourceText = [Console]::In.ReadToEnd(); & ([scriptblock]::Create($sourceText))'
+const POWERSHELL_ARGS = [
+  '-NoLogo',
+  '-NoProfile',
+  '-NonInteractive',
+  '-Command',
+  POWERSHELL_LAUNCHER,
+] as const
 
 function sanitizedWindowsAclFailure(stdout: string): {
   rejected: boolean
