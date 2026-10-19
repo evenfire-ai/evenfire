@@ -6,9 +6,15 @@ The slot has no expiry. Database connection loss, a missed heartbeat, capture ex
 or a process restart does not prove that the old computation stopped.
 
 A crashed owner or an ambiguous acquisition/release can therefore leave password
-verification unavailable. Other authentication methods and credential recovery keep
-their existing policies. Never clear this record from a request, cleanup job, startup
-hook, or automated timeout. Do not reset the pace or identifier history to recover it.
+verification unavailable. Other authentication methods keep their existing policies.
+Verified password-reset recovery also uses this singleton to bound password hashing,
+but does not reserve the anonymous login pace. If the owner is busy or unavailable,
+recovery fails closed and can be retried after the sanitized `Retry-After` interval.
+Never clear this record from a request, cleanup job, startup hook, or automated
+timeout. Do not reset the pace or identifier history to recover it.
+
+See [password admission availability and monitoring](../operations/password-admission.md)
+for the intentionally retained anonymous-login starvation tradeoff and its signals.
 
 ## Roll out the first ownership-aware version
 

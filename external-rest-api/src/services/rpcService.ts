@@ -31,10 +31,7 @@ export async function issueRpcAccessToken(
     // instead of collapsing every 403 to a generic message. The desktop app and
     // logs can then distinguish "needs a team" from a genuine auth failure.
     if (error instanceof ControlApiError && error.status === 403) {
-      const reason =
-        error.body && typeof error.body === 'object' && 'error' in error.body
-          ? String((error.body as { error: unknown }).error)
-          : 'forbidden'
+      const reason = error.code ?? 'forbidden'
       return { error: reason }
     }
     throw error

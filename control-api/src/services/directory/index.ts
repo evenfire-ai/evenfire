@@ -52,15 +52,12 @@ export {
   listManagedPendingInvitationsForUser,
   resendInvitation,
   resendManagedInvitationForUser,
-  requestProfilePasswordReset,
   revokeManagedInvitationForUser,
   revokePendingInvitation,
   findMembership,
   getMe,
   listMembers,
   listPendingInvitations,
-  setInvitationPasswordForUser,
-  setInvitationPasswordForEmail,
   searchDirectory,
   softDeleteMember,
   startDraftInvitationCleanup,
@@ -68,9 +65,12 @@ export {
   updateManagedMemberRoleForUser,
   updateMemberRole,
   updateProfile,
-  updateUserPassword,
 } from './membership.js'
-
+export {
+  setInvitationPasswordForUser,
+  setInvitationPasswordForEmail,
+  updateUserPassword,
+} from './memberPassword.js'
 export {
   getTeamContexts,
   getUserContexts,
@@ -103,3 +103,9 @@ export {
 export type { WorkflowGrantTeam, WorkflowGrantUser } from './workflowGrants.js'
 
 export * from './adminProvisioning.js'
+
+export {
+  requestProfilePasswordReset,
+  createPasswordResetInvitation,
+  createSilentPasswordResetInvitation,
+} from './passwordResetInvitations.js'
