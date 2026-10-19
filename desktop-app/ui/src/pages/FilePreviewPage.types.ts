@@ -15,6 +15,8 @@ export interface FilePreviewPageProps {
   unavailable?: boolean
   pushToast?: (message: string, tone: Tone) => void
   onOpenRoute?: () => void
+  /** Refresh the app-owned preview tab from the server after a successful rename. */
+  onRenameCommitted?: (gfsUri: string) => void
   /** Native titlebar action slot supplied by the app shell. */
   titlebarLeadingTarget?: HTMLElement | null
 }

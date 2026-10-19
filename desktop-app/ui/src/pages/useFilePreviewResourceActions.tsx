@@ -29,6 +29,7 @@ type FilePreviewResourceActionsProps = {
   canResolve: boolean
   onAuthorityFailure: (message: string) => boolean
   onDeleted: () => void
+  onRenameCommitted?: (gfsUri: string) => void
   pushToast?: (message: string, tone: 'success' | 'error') => void
 }
 
@@ -98,6 +99,7 @@ export function useFilePreviewResourceActions({
   canResolve,
   onAuthorityFailure,
   onDeleted,
+  onRenameCommitted,
   pushToast,
 }: FilePreviewResourceActionsProps) {
   const queryClient = useQueryClient()
@@ -315,7 +317,10 @@ export function useFilePreviewResourceActions({
         `Renamed to ${name}`,
         'Could not rename the file'
       )
-      if (renamed) setRenameOpen(false)
+      if (renamed) {
+        setRenameOpen(false)
+        onRenameCommitted?.(gfsUri)
+      }
     } catch (error) {
       if (!onAuthorityFailure(errorMessage(error))) {
         pushToast?.(`Could not rename the file: ${describeGfsReadError(error).message}`, 'error')

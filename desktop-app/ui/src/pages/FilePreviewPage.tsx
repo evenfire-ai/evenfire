@@ -64,6 +64,7 @@ export function FilePreviewPage({
   unavailable = false,
   pushToast,
   onOpenRoute,
+  onRenameCommitted,
   titlebarLeadingTarget,
 }: FilePreviewPageProps) {
   const ctrl = useGfsBrowserController()
@@ -85,6 +86,7 @@ export function FilePreviewPage({
     canResolve: !denied && !unavailable && !accessRevoked && !ctrl.authorityPending,
     onAuthorityFailure: handlePreviewAuthorityFailure,
     onDeleted: () => setDenied('The file was deleted.'),
+    onRenameCommitted,
     pushToast,
   })
 

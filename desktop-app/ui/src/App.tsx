@@ -3365,6 +3365,9 @@ export function App() {
                                     unavailable={activePreviewPayload.unavailable}
                                     pushToast={vm.pushToast}
                                     onOpenRoute={handleOpenGfsRoute}
+                                    onRenameCommitted={renamedUri => {
+                                      void refreshOpenPreview(renamedUri)
+                                    }}
                                     titlebarLeadingTarget={titlebarLeadingRoot}
                                   />
                                 )}
