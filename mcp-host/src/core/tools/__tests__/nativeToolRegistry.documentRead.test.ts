@@ -7,6 +7,8 @@
 import { describe, expect, it } from 'vitest'
 import { Workbook } from 'exceljs'
 import { createHash, randomBytes } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { PDFDocument, StandardFonts } from 'pdf-lib'
 import { validateIncomingAttachments } from '../../../agent/incomingAttachments'
 import type { IncomingMessage } from '../../../server'
@@ -230,5 +232,36 @@ describe('NativeToolRegistry — clerum__document_read (#656)', () => {
     ).toBe(true)
     expect(result.sheets[0]?.rows[2]).toEqual([])
     expect(output.is_error).toBe(false)
+  })
+
+  it('reports a password-protected XLSX as encrypted through the real reader', async () => {
+    // A real msoffcrypto-tool output: a CFB container, not a zip.
+    const bytes = readFileSync(
+      join(
+        __dirname,
+        '../../../../../packages/gfs-interaction-policy/fixtures/encrypted-workbook.xlsx'
+      )
+    )
+    const attachment = await fileAttachment(
+      'locked-sheet',
+      'locked.xlsx',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      bytes
+    )
+    expect(attachment.fileReference).toMatchObject({ reader: 'xlsx', mismatch: false })
+    const tool = registryFor(attachment).get('clerum__document_read')
+    expect(tool).not.toBeNull()
+
+    const output = await tool!.execute(
+      { attachmentId: attachment.id },
+      executionContext('clerum__document_read')
+    )
+    expect(JSON.parse(output.content)).toMatchObject({
+      status: 'error',
+      attachmentId: attachment.id,
+      reason: 'document_encrypted',
+      message: 'The document is password-protected and cannot be read.',
+    })
+    expect(output.is_error).toBe(true)
   })
 })

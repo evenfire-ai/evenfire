@@ -88,6 +88,12 @@ const PNG = b(
   [0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89]
 )
 const PDF = b('%PDF-1.7\n1 0 obj << /Type /Catalog >> endobj\n%%EOF\n')
+// CFB signature followed by directory entry names in UTF-16LE. A password-
+// protected OOXML file holds both encryption streams; a legacy .xls does not.
+const CFB = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0x00, 0x00]
+const utf16 = text => Buffer.from(text, 'utf16le')
+const ENCRYPTED_OOXML = b(CFB, utf16('EncryptionInfo'), [0x00, 0x00], utf16('EncryptedPackage'))
+const LEGACY_XLS = b(CFB, utf16('Workbook'), [0x00, 0x00], utf16('SummaryInformation'))
 
 const READER_BY_CLASS = Object.freeze({
   text: 'text',
@@ -386,6 +392,34 @@ const classifier = [
     'text/plain',
     T('text', 'text_utf8', false),
     70000
+  ),
+  v(
+    'encrypted ooxml declared xlsx',
+    ENCRYPTED_OOXML,
+    'locked.xlsx',
+    XLSX_MIME,
+    T('xlsx', 'magic', false)
+  ),
+  v(
+    'encrypted ooxml declared docx',
+    ENCRYPTED_OOXML,
+    'locked.docx',
+    DOCX_MIME,
+    T('docx', 'magic', false)
+  ),
+  v(
+    'encrypted ooxml without a declaration',
+    ENCRYPTED_OOXML,
+    'locked',
+    null,
+    T('binary_unsupported', 'magic', false)
+  ),
+  v(
+    'legacy cfb workbook named .xlsx',
+    LEGACY_XLS,
+    'old.xlsx',
+    XLSX_MIME,
+    T('binary_unsupported', 'magic', true)
   ),
 ]
 

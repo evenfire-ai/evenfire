@@ -792,6 +792,78 @@
         "modelImageInput": "unsupported",
         "mismatch": false
       }
+    },
+    {
+      "name": "encrypted ooxml declared xlsx",
+      "input": {
+        "bytesBase64": "0M8R4KGxGuEAAEUAbgBjAHIAeQBwAHQAaQBvAG4ASQBuAGYAbwAAAEUAbgBjAHIAeQBwAHQAZQBkAFAAYQBjAGsAYQBnAGUA",
+        "totalByteLength": 72,
+        "declaredMediaType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "filename": "locked.xlsx"
+      },
+      "expected": {
+        "class": "xlsx",
+        "detectedMediaType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "detection": "magic",
+        "textReadable": false,
+        "reader": "xlsx",
+        "modelImageInput": "unsupported",
+        "mismatch": false
+      }
+    },
+    {
+      "name": "encrypted ooxml declared docx",
+      "input": {
+        "bytesBase64": "0M8R4KGxGuEAAEUAbgBjAHIAeQBwAHQAaQBvAG4ASQBuAGYAbwAAAEUAbgBjAHIAeQBwAHQAZQBkAFAAYQBjAGsAYQBnAGUA",
+        "totalByteLength": 72,
+        "declaredMediaType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "filename": "locked.docx"
+      },
+      "expected": {
+        "class": "docx",
+        "detectedMediaType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "detection": "magic",
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported",
+        "mismatch": false
+      }
+    },
+    {
+      "name": "encrypted ooxml without a declaration",
+      "input": {
+        "bytesBase64": "0M8R4KGxGuEAAEUAbgBjAHIAeQBwAHQAaQBvAG4ASQBuAGYAbwAAAEUAbgBjAHIAeQBwAHQAZQBkAFAAYQBjAGsAYQBnAGUA",
+        "totalByteLength": 72,
+        "declaredMediaType": null,
+        "filename": "locked"
+      },
+      "expected": {
+        "class": "binary_unsupported",
+        "detectedMediaType": "application/octet-stream",
+        "detection": "magic",
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported",
+        "mismatch": false
+      }
+    },
+    {
+      "name": "legacy cfb workbook named .xlsx",
+      "input": {
+        "bytesBase64": "0M8R4KGxGuEAAFcAbwByAGsAYgBvAG8AawAAAFMAdQBtAG0AYQByAHkASQBuAGYAbwByAG0AYQB0AGkAbwBuAA==",
+        "totalByteLength": 64,
+        "declaredMediaType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "filename": "old.xlsx"
+      },
+      "expected": {
+        "class": "binary_unsupported",
+        "detectedMediaType": "application/octet-stream",
+        "detection": "magic",
+        "textReadable": false,
+        "reader": "none",
+        "modelImageInput": "unsupported",
+        "mismatch": true
+      }
     }
   ]
 }

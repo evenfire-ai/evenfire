@@ -6,6 +6,8 @@
  * made in a browser and in Node. The bytes decide the class; the declared media
  * type and the filename extension only break ties inside the same family, or
  * stand in for missing bytes when a short prefix carries no contrary evidence.
+ * A password-protected DOCX or XLSX is one CFB container for both, so there the
+ * declared class picks between them.
  *
  * Classification never rejects: an unknown or misleading file is reported as
  * `binary_unsupported` and/or `mismatch: true`, and callers decide what to do.
@@ -212,6 +214,43 @@ const JPEG_SIGNATURE = [0xff, 0xd8, 0xff]
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
 const ZIP_LOCAL_HEADER_SIGNATURE = [0x50, 0x4b, 0x03, 0x04]
 const PDF_SIGNATURE = [0x25, 0x50, 0x44, 0x46, 0x2d] // %PDF-
+// Compound File Binary: legacy Office files and password-protected OOXML.
+const CFB_SIGNATURE = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]
+
+function utf16le(text) {
+  const bytes = new Uint8Array(text.length * 2)
+  for (let index = 0; index < text.length; index += 1) bytes[index * 2] = text.charCodeAt(index)
+  return bytes
+}
+
+const ENCRYPTED_OOXML_STREAMS = [utf16le('EncryptionInfo'), utf16le('EncryptedPackage')]
+
+function includesBytes(bytes, pattern) {
+  const last = bytes.length - pattern.length
+  for (let offset = 0; offset <= last; offset += 1) {
+    if (bytes[offset] !== pattern[0]) continue
+    let matched = true
+    for (let index = 1; index < pattern.length; index += 1) {
+      if (bytes[offset + index] !== pattern[index]) {
+        matched = false
+        break
+      }
+    }
+    if (matched) return true
+  }
+  return false
+}
+
+/**
+ * A password-protected OOXML file is a CFB container holding these two streams;
+ * the encrypted package hides whether it is a workbook or a document.
+ */
+function isEncryptedOoxml(bytes) {
+  return (
+    startsWith(bytes, CFB_SIGNATURE) &&
+    ENCRYPTED_OOXML_STREAMS.every(stream => includesBytes(bytes, stream))
+  )
+}
 
 function hasPdfSignature(bytes) {
   const limit = Math.min(bytes.length, PDF_SIGNATURE_WINDOW_BYTES) - PDF_SIGNATURE.length
@@ -437,6 +476,11 @@ function classifyFromEvidence(bytes, partial, expectedClass) {
     return { fileClass: 'binary_unsupported', detection: 'magic', zip: true }
   }
   if (startsWith(bytes, PDF_SIGNATURE)) return { fileClass: 'pdf', detection: 'magic' }
+  // Only the declaration can tell an encrypted workbook from an encrypted
+  // document; without one it stays unsupported, and so does every other CFB.
+  if ((expectedClass === 'xlsx' || expectedClass === 'docx') && isEncryptedOoxml(bytes)) {
+    return { fileClass: expectedClass, detection: 'magic' }
+  }
   const text = decodeStrictText(bytes, partial)
   if (text !== null) {
     return { fileClass: textClassFor(text, expectedClass), detection: 'text_utf8', text: true }
