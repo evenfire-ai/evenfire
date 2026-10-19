@@ -52,6 +52,7 @@ public static class SessionAuthorityNative {
   const uint MaxAllowed = 0x02000000;
   const int SeFileObject = 1;
   const uint OwnerSecurityInformation = 0x00000001;
+  const uint GroupSecurityInformation = 0x00000002;
   const uint DaclSecurityInformation = 0x00000004;
   const uint FileGenericRead = 0x00120089;
   const uint FileGenericWrite = 0x00120116;
@@ -207,7 +208,8 @@ public static class SessionAuthorityNative {
         throw new InvalidOperationException("Session authority files must not have hard links");
       IntPtr owner, group, dacl, sacl;
       uint error = GetSecurityInfo(handle, SeFileObject,
-        OwnerSecurityInformation | DaclSecurityInformation, out owner, out group,
+        OwnerSecurityInformation | GroupSecurityInformation | DaclSecurityInformation,
+        out owner, out group,
         out dacl, out sacl, out descriptor);
       if (error != 0) throw NativeError("get-security-info", (int)error);
       ushort control;
@@ -220,6 +222,8 @@ public static class SessionAuthorityNative {
       var bytes = new byte[(int)actualLength];
       Marshal.Copy(descriptor, bytes, 0, bytes.Length);
       var raw = new RawSecurityDescriptor(bytes, 0);
+      if (raw.Owner == null || raw.Group == null)
+        throw new InvalidOperationException("security-descriptor-owner-group-missing");
       var aces = new List<SessionAuthorityAce>();
       if (raw.DiscretionaryAcl != null) {
         foreach (GenericAce ace in raw.DiscretionaryAcl) {
