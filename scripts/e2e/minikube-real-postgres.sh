@@ -339,6 +339,46 @@ is_isolated_control_api_file() {
   esac
 }
 
+# The two cross-service password-recovery suites need the private Member
+# Registration producer, which T1 does not provide. Without it they skip, and a
+# skipped test fails T1. Exclude exactly the files the suite contract names, as
+# the public CI lane does (.github/workflows/ci-public.yml).
+PRIVATE_PRODUCER_FILES=()
+
+load_private_producer_files() {
+  local selection suite
+  PRIVATE_PRODUCER_FILES=()
+  if ! selection="$(cd "$PROJECT_DIR/control-api" &&
+    node ../scripts/ci/password-recovery-suite-contract.mjs verify >/dev/null &&
+    node ../scripts/ci/password-recovery-suite-contract.mjs private all)"; then
+    T1_NEXT_COMMAND='repair scripts/ci/password-recovery-suite-contract.mjs, then re-run T1'
+    die_t1 ZERO_TESTS_EXECUTED 'the password-recovery suite contract did not name its private producer suites'
+    return 1
+  fi
+  while IFS= read -r suite; do
+    [ -n "$suite" ] || continue
+    if [ ! -s "$PROJECT_DIR/control-api/$suite" ]; then
+      T1_NEXT_COMMAND='restore the private password-recovery suite files, then re-run T1'
+      die_t1 ZERO_TESTS_EXECUTED "private producer suite named by the contract is missing: control-api/$suite"
+      return 1
+    fi
+    PRIVATE_PRODUCER_FILES+=("$PROJECT_DIR/control-api/$suite")
+  done <<< "$selection"
+  if [ "${#PRIVATE_PRODUCER_FILES[@]}" -ne 2 ]; then
+    T1_NEXT_COMMAND='repair scripts/ci/password-recovery-suite-contract.mjs, then re-run T1'
+    die_t1 ZERO_TESTS_EXECUTED "expected 2 private producer suites, the contract named ${#PRIVATE_PRODUCER_FILES[@]}"
+    return 1
+  fi
+}
+
+is_private_producer_file() {
+  local path="$1" private_file
+  for private_file in "${PRIVATE_PRODUCER_FILES[@]}"; do
+    [ "$path" = "$private_file" ] && return 0
+  done
+  return 1
+}
+
 require_isolated_control_api_files() {
   local path
   for path in \
@@ -447,9 +487,13 @@ run_suite() {
   local suite_started_seconds="$SECONDS" suite_duration_seconds=0
   local -a files=() vitest_filters=()
 
+  if [ "$package" = control-api ]; then
+    load_private_producer_files || return 1
+  fi
   while IFS= read -r file; do
     [ -z "$file" ] && continue
     if [ "$package" = control-api ]; then
+      is_private_producer_file "$file" && continue
       if [ "$lane" = isolated ]; then
         is_isolated_control_api_file "$file" || continue
       else
