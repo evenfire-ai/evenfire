@@ -35,7 +35,10 @@ export class ModelStepCheckpointStore {
     private readonly opts: ModelStepCheckpointStoreOptions
   ) {}
 
-  /** Creates the header, buffered history and first dispatch in one transaction. */
+  /**
+   * Creates the header, buffered history and first dispatch in one transaction.
+   * The header records the turn-start pair, preserved by every transition.
+   */
   async open(
     header: ModelStepCheckpointOpenHeader,
     entries: ModelStepCheckpointEntryInput[]
@@ -91,9 +94,6 @@ export class ModelStepCheckpointStore {
       failedAt?: number
       expiresAt?: number
       blockedReason?: string
-      /** Effective pair of the task's last successful model completion. */
-      provider?: string
-      model?: string
       /**
        * Serialized `TaskExecutionBudget` snapshot taken with this transition
        * (C6): a failed call's iterations and active time stay spent.

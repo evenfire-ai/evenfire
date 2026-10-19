@@ -36,7 +36,7 @@ import { isModelStepCheckpointEligibleError } from './modelStepCheckpointEligibi
  * `syncMessages` before every context-management pass and before a tool batch
  * is dispatched, `recordDispatch`/`recordResult` around each tool execution,
  * `updateState` once the tool results are in, and `settle` once per loop
- * exit. A continuation paused for approval may enter another loop with this
+ * exit. A turn paused for approval may enter another loop with this
  * recorder. The first dispatch writes its header and buffered history together.
  * A `tool_dispatch` is written before the tool's effect, so a dispatch
  * without a result reads `unknown` and is never re-executed. A confirmed
@@ -101,8 +101,6 @@ export interface ModelStepCheckpointRecorderOptions {
   redact: (text: string) => string
   /** Serialized `TaskExecutionBudget` snapshot, read at each state update. */
   taskBudget: () => string | null
-  /** Last successful model call in this task, captured by its own port wrapper. */
-  servedBy?: () => { provider: string; model: string } | undefined
   /** Lifetime of a `resumable` checkpoint from the failure. */
   resumableTtlMs: number
   /**
@@ -186,8 +184,8 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
   async begin(initialMessages: ChatMessage[]): Promise<void> {
     this.recordedUpTo = initialMessages.length
     const { mode } = this.opts
-    // A continuation's initial messages are rebuilt from its own entries.
-    if (mode.kind === 'continuation') return
+    // Continuations rebuild their own entries; warm approvals reuse the origin prefix.
+    if (mode.kind === 'continuation' || this.originUserMessageIndex !== undefined) return
     // The origin identity comes from the executor's capture boundary, never
     // from scanning for a user message: history already contains earlier turns'
     // user messages, and the loop appends synthetic ones later (C7).
@@ -297,6 +295,8 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
 
   async settle(result: LoopResult | undefined): Promise<string | undefined> {
     if (this.settled) throw new Error('model-step checkpoint recorder settled twice')
+    // Warm approvals retain even an origin that has not dispatched its first tool.
+    if (result?.type === 'need_approval' && !this.isPoisoned) return undefined
     const fence = this.currentFence
     if (!fence) {
       this.settled = true
@@ -306,12 +306,6 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
     }
     const source = this.opts.mode.kind === 'origin' ? 'open' : 'claimed'
 
-    // The approval gate has not executed the announced call yet. A continuation
-    // keeps its claim and recorder so the approved result joins the same ledger
-    // before the next model request. A later loop invocation may settle again.
-    if (result?.type === 'need_approval' && source === 'claimed' && !this.isPoisoned) {
-      return undefined
-    }
     this.settled = true
 
     if (
@@ -321,17 +315,17 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
       isModelStepCheckpointEligibleError(result.error)
     ) {
       const now = this.opts.now()
+      let version: number | null | undefined
       const resumable = await this.write('transition', async () => {
         const bytes = this.pendingByteAttachments(now)
         // The failed call's iterations and active time stay spent (C6). A null
         // snapshot keeps the stored one instead of clearing it.
         const taskBudget = this.opts.taskBudget()
-        const version = await this.opts.store.transition(this.opts.sessionKey, fence, {
+        version = await this.opts.store.transition(this.opts.sessionKey, fence, {
           from: [source],
           to: 'resumable',
           failedAt: now,
           expiresAt: now + this.opts.resumableTtlMs,
-          ...(this.opts.servedBy?.() ?? {}),
           ...(taskBudget === null ? {} : { taskBudget }),
           ...(bytes.length > 0 ? { attachments: bytes } : {}),
         })
@@ -349,6 +343,26 @@ class StoreBackedRecorder implements ModelStepCheckpointRecorder {
           'model-step checkpoint left resumable'
         )
         return this.checkpointId
+      }
+      if (source === 'open' && version === undefined) {
+        // The failed write left no expiry on this origin. Cleanup must never
+        // replace the model failure, even when storage rejects this write too.
+        try {
+          const abandoned = await this.opts.store.transition(this.opts.sessionKey, fence, {
+            from: ['open'],
+            to: 'abandoned',
+          })
+          if (abandoned === null) throw new Error('Checkpoint cleanup fence lost')
+        } catch (err) {
+          logger.warn(
+            {
+              checkpointId: this.checkpointId,
+              op: 'abandon',
+              errorName: err instanceof Error ? err.name : typeof err,
+            },
+            'model-step checkpoint cleanup failed after resumable settlement failure'
+          )
+        }
       }
       return undefined
     }

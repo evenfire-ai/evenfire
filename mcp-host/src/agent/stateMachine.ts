@@ -37,6 +37,7 @@ import type {
   AgentEventType as CoreAgentEventType,
   PendingApproval,
 } from '../core/types'
+import { MODEL_STEP_CHECKPOINT_CORRUPT } from '../db/worker/modelStepCheckpointOps'
 import type { ReapedSession } from '../db/worker/protocol'
 import type { GfsDownloadStore } from '../internalTools/gfsDownloadStore'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
@@ -797,142 +798,157 @@ export class AgentStateMachine extends EventEmitter {
     const rehydrated = await this.coldStartLoader.loadPendingApprovals(now)
     for (const entry of rehydrated) {
       if (!entry.session_key) throw new Error('rehydrated approval is missing its session key')
-      // The persisted message has no inline file bytes (ResumeSourceMessage).
-      // Task carries the wider incoming type; the readers of file attachments
-      // check `dataBase64` at runtime (attachmentRead.ts) instead of assuming it.
-      const sourceMessage = entry.source_message as Task['sourceMessage']
-      const task: Task = {
-        id: entry.task_id,
-        source: 'channel',
-        sourceMessage,
-        traceContext: entry.approval.traceContext ?? null,
-        priority: 'normal',
-        status: 'waiting_approval',
-        conversationHistory: [],
-        createdAt: new Date(now),
-      }
-      if (this.modelStepCheckpoints) {
-        const checkpoint = await this.modelStepCheckpoints.store.loadForTask(
-          entry.session_key,
-          task.id
-        )
-        const header = checkpoint?.header
-        if (checkpoint && header) {
-          if (header.status !== 'claimed') {
-            if (header.status === 'resumable' || header.status === 'blocked') {
-              const settled = await this.modelStepCheckpoints.store.transition(
+      try {
+        // The persisted message has no inline file bytes (ResumeSourceMessage).
+        // Task carries the wider incoming type; the readers of file attachments
+        // check `dataBase64` at runtime (attachmentRead.ts) instead of assuming it.
+        const sourceMessage = entry.source_message as Task['sourceMessage']
+        const task: Task = {
+          id: entry.task_id,
+          source: 'channel',
+          sourceMessage,
+          traceContext: entry.approval.traceContext ?? null,
+          priority: 'normal',
+          status: 'waiting_approval',
+          conversationHistory: [],
+          createdAt: new Date(now),
+        }
+        if (this.modelStepCheckpoints) {
+          const checkpoint = await this.modelStepCheckpoints.store.loadForTask(
+            entry.session_key,
+            task.id
+          )
+          const header = checkpoint?.header
+          if (checkpoint && header) {
+            if (header.status !== 'claimed') {
+              if (header.status === 'resumable' || header.status === 'blocked') {
+                const settled = await this.modelStepCheckpoints.store.transition(
+                  entry.session_key,
+                  {
+                    checkpointId: header.checkpoint_id,
+                    owner: header.claim_owner,
+                    generation: header.claim_generation,
+                  },
+                  { from: [header.status], to: 'abandoned' }
+                )
+                if (settled === null) {
+                  logger.warn(
+                    {
+                      sessionKey: entry.session_key,
+                      checkpointId: header.checkpoint_id,
+                      taskId: task.id,
+                    },
+                    'Pending approval checkpoint changed during boot recovery'
+                  )
+                  continue
+                }
+              }
+              await this.conversationManager.clearPendingApproval(
+                entry.session_key,
+                entry.request_id
+              )
+              continue
+            }
+            if (header.claim_owner !== this.modelStepCheckpoints.hostInstanceId) {
+              const blocked = await this.modelStepCheckpoints.store.transition(
                 entry.session_key,
                 {
                   checkpointId: header.checkpoint_id,
                   owner: header.claim_owner,
                   generation: header.claim_generation,
                 },
-                { from: [header.status], to: 'abandoned' }
+                { from: ['claimed'], to: 'blocked', blockedReason: 'host_mismatch' }
               )
-              if (settled === null) {
-                logger.warn(
-                  {
-                    sessionKey: entry.session_key,
-                    checkpointId: header.checkpoint_id,
-                    taskId: task.id,
-                  },
-                  'Pending approval checkpoint changed during boot recovery'
+              logger.warn(
+                {
+                  sessionKey: entry.session_key,
+                  checkpointId: header.checkpoint_id,
+                  taskId: task.id,
+                  blocked: blocked !== null,
+                },
+                'Pending approval checkpoint was not adopted by this Host'
+              )
+              if (blocked !== null) {
+                await this.conversationManager.clearPendingApproval(
+                  entry.session_key,
+                  entry.request_id
                 )
-                continue
               }
+              continue
             }
-            await this.conversationManager.clearPendingApproval(entry.session_key, entry.request_id)
-            continue
-          }
-          if (header.claim_owner !== this.modelStepCheckpoints.hostInstanceId) {
-            const blocked = await this.modelStepCheckpoints.store.transition(
-              entry.session_key,
-              {
+            task.modelStepContinuation = {
+              checkpointId: header.checkpoint_id,
+              originTaskId: header.origin_task_id,
+              originTurnNumber: header.origin_turn_number,
+              provider: header.provider,
+              model: header.model,
+              fence: {
                 checkpointId: header.checkpoint_id,
                 owner: header.claim_owner,
                 generation: header.claim_generation,
               },
-              { from: ['claimed'], to: 'blocked', blockedReason: 'host_mismatch' }
-            )
-            logger.warn(
-              {
-                sessionKey: entry.session_key,
-                checkpointId: header.checkpoint_id,
-                taskId: task.id,
-                blocked: blocked !== null,
+              confirmedResults: checkpoint.tools.confirmed,
+              taskBudget: header.task_budget,
+              onVerdict: () => {
+                throw new Error('Rehydrated approval cannot emit a new admission verdict')
               },
-              'Pending approval checkpoint was not adopted by this Host'
-            )
-            if (blocked !== null) {
-              await this.conversationManager.clearPendingApproval(
-                entry.session_key,
-                entry.request_id
-              )
             }
-            continue
-          }
-          task.modelStepContinuation = {
-            checkpointId: header.checkpoint_id,
-            originTaskId: header.origin_task_id,
-            originTurnNumber: header.origin_turn_number,
-            provider: header.provider,
-            model: header.model,
-            fence: {
-              checkpointId: header.checkpoint_id,
-              owner: header.claim_owner,
-              generation: header.claim_generation,
-            },
-            confirmedResults: checkpoint.tools.confirmed,
-            taskBudget: header.task_budget,
-            onVerdict: () => {
-              throw new Error('Rehydrated approval cannot emit a new admission verdict')
-            },
           }
         }
-      }
-      let pinnedModel: ResolvedTaskModel | undefined
-      if (task.modelStepContinuation) {
-        const continuation = task.modelStepContinuation
-        pinnedModel = this.resolveContinuationModel(task) ?? undefined
-        if (!pinnedModel) {
-          const blocked = await this.blockUnavailableContinuation(continuation, entry.session_key)
+        let pinnedModel: ResolvedTaskModel | undefined
+        if (task.modelStepContinuation) {
+          const continuation = task.modelStepContinuation
+          pinnedModel = this.resolveContinuationModel(task) ?? undefined
+          if (!pinnedModel) {
+            const blocked = await this.blockUnavailableContinuation(continuation, entry.session_key)
+            logger.warn(
+              { taskId: task.id, checkpointId: continuation.checkpointId, blocked },
+              'Pending approval checkpoint model is unavailable on this Host'
+            )
+            await this.conversationManager.clearPendingApproval(entry.session_key, entry.request_id)
+            continue
+          }
+        }
+        const executor = this.createTaskExecutor(task, pinnedModel)
+        let recovery = await executor.rehydrateWaitingApproval(entry.session_key, entry.approval)
+        if (recovery) {
+          const continuation = task.modelStepContinuation!
+          if (recovery === 'attachment_expired') {
+            const blocked = await this.modelStepCheckpoints!.store.transition(
+              entry.session_key,
+              continuation.fence,
+              { from: ['claimed'], to: 'blocked', blockedReason: 'attachment_expired' }
+            )
+            if (blocked === null) recovery = 'claim_lost'
+          }
+          // A lost claim has already changed state or owner. Its old fence must
+          // never terminalize the replacement; only retire this stale approval.
           logger.warn(
-            { taskId: task.id, checkpointId: continuation.checkpointId, blocked },
-            'Pending approval checkpoint model is unavailable on this Host'
+            { taskId: task.id, checkpointId: continuation.checkpointId, reason: recovery },
+            'Pending approval checkpoint cannot be rehydrated'
           )
           await this.conversationManager.clearPendingApproval(entry.session_key, entry.request_id)
           continue
         }
-      }
-      const executor = this.createTaskExecutor(task, pinnedModel)
-      let recovery = await executor.rehydrateWaitingApproval(entry.session_key, entry.approval)
-      if (recovery) {
-        const continuation = task.modelStepContinuation!
-        if (recovery === 'attachment_expired') {
-          const blocked = await this.modelStepCheckpoints!.store.transition(
-            entry.session_key,
-            continuation.fence,
-            { from: ['claimed'], to: 'blocked', blockedReason: 'attachment_expired' }
-          )
-          if (blocked === null) recovery = 'claim_lost'
-        }
-        // A lost claim has already changed state or owner. Its old fence must
-        // never terminalize the replacement; only retire this stale approval.
+        this.activeExecutors.set(task.id, executor)
+        this.approvalMap.set(entry.request_id, {
+          taskId: task.id,
+          registeredAt: new Date(now),
+          expiresAt: entry.expiresAt,
+          timerId: this.makeApprovalTimeout(entry.request_id, entry.expiresAt, now),
+          binding: this.buildApprovalBinding(sourceMessage, entry.session_key),
+        })
+      } catch (error) {
+        const code = (error as { code?: string } | null)?.code
+        if (code !== MODEL_STEP_CHECKPOINT_CORRUPT) throw error
+        // The worker logs checkpointId/seq without the corrupt body. Retire
+        // only this approval; TTL/sweep or the next turn retires its checkpoint.
         logger.warn(
-          { taskId: task.id, checkpointId: continuation.checkpointId, reason: recovery },
-          'Pending approval checkpoint cannot be rehydrated'
+          { sessionKey: entry.session_key, taskId: entry.task_id, code },
+          'Pending approval checkpoint is corrupt; retiring approval'
         )
         await this.conversationManager.clearPendingApproval(entry.session_key, entry.request_id)
-        continue
       }
-      this.activeExecutors.set(task.id, executor)
-      this.approvalMap.set(entry.request_id, {
-        taskId: task.id,
-        registeredAt: new Date(now),
-        expiresAt: entry.expiresAt,
-        timerId: this.makeApprovalTimeout(entry.request_id, entry.expiresAt, now),
-        binding: this.buildApprovalBinding(sourceMessage, entry.session_key),
-      })
     }
     if (rehydrated.length > 0)
       logger.info({ count: rehydrated.length }, 'Pending approval executors rehydrated')

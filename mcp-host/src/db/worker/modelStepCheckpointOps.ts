@@ -1,6 +1,6 @@
 /**
  * Worker-side operations for durable model-step checkpoints (#1043,
- * migration 017). Every write is one SQLite transaction. Writes made by a
+ * migration 018). Every write is one SQLite transaction. Writes made by a
  * running task carry a fence (`claim_owner` + `claim_generation`); a write
  * whose fence no longer matches affects zero rows and reports
  * `applied: false`, so a superseded writer can never touch a re-claimed
@@ -70,7 +70,7 @@ export interface ModelStepCheckpointEntryInput {
 
 /**
  * Raw bytes of one inline uploaded file, held for a continuation (migration
- * 018). Crosses the worker boundary as a Uint8Array, never base64.
+ * 019). Crosses the worker boundary as a Uint8Array, never base64.
  */
 export interface ModelStepCheckpointAttachmentInput {
   attachmentId: string
@@ -172,8 +172,6 @@ export type ModelStepCheckpointOp =
       failedAt?: number
       expiresAt?: number
       blockedReason?: string
-      provider?: string
-      model?: string
       /**
        * Bytes of inline uploaded files and transcript images, written in the
        * same transaction and only with `to: 'resumable'`. Each byte carries
@@ -359,7 +357,6 @@ function statements(db: Database): Statements {
             THEN @now + COALESCE(expires_at - failed_at, @blocked_ttl_ms)
             ELSE COALESCE(@expires_at, expires_at) END,
           blocked_reason = CASE WHEN @to = 'blocked' THEN @blocked_reason ELSE NULL END,
-          provider = COALESCE(@provider, provider), model = COALESCE(@model, model),
           task_budget = COALESCE(@task_budget, task_budget),
           claim_expires_at = CASE WHEN @to = 'claimed' THEN claim_expires_at ELSE NULL END
       WHERE checkpoint_id = @checkpoint_id AND claim_owner = @owner AND claim_generation = @generation
@@ -457,6 +454,7 @@ function statements(db: Database): Statements {
     ledgerKinds: db.prepare(`
       SELECT seq, kind, tool_call_id, payload FROM model_step_checkpoint_entries
       WHERE checkpoint_id = ? AND kind IN ('message','tool_dispatch','tool_result')
+      ORDER BY seq
     `),
     insertAttachment: db.prepare(`
       INSERT INTO model_step_checkpoint_attachments
@@ -581,7 +579,8 @@ function approvalDeadline(s: Statements, header: ModelStepCheckpointRow): number
  * Tool ledger of a checkpoint. A dispatch with a recorded result is
  * `confirmed`; a dispatch without one is `unknown` (its effect may have
  * happened). Assistant messages also record the calls the model announced;
- * any such call without a dispatch is `notDispatched`.
+ * any such call without a dispatch is `notDispatched`. Call IDs are scoped to
+ * the assistant batch that announced them, since providers may reuse IDs.
  */
 function ledger(s: Statements, checkpointId: string): ModelStepCheckpointToolLedger {
   const rows = s.ledgerKinds.all(checkpointId) as Array<{
@@ -593,10 +592,20 @@ function ledger(s: Statements, checkpointId: string): ModelStepCheckpointToolLed
   const announced = new Set<string>()
   const dispatched = new Set<string>()
   const resulted = new Set<string>()
+  const tools = { confirmed: 0, unknown: 0, notDispatched: 0 }
+  const finishBatch = (): void => {
+    tools.confirmed += resulted.size
+    for (const id of dispatched) if (!resulted.has(id)) tools.unknown += 1
+    for (const id of announced) if (!dispatched.has(id)) tools.notDispatched += 1
+    announced.clear()
+    dispatched.clear()
+    resulted.clear()
+  }
   for (const row of rows) {
     const message = parseStoredObject(row.payload, checkpointId, row.seq)
     if (row.kind === 'message') {
       if (message.role === 'assistant' && Array.isArray(message.tool_calls)) {
+        finishBatch()
         for (const call of message.tool_calls) {
           if (call === null || typeof call !== 'object' || typeof call.id !== 'string') {
             throw new ModelStepCheckpointCorruptError(checkpointId, row.seq)
@@ -610,11 +619,8 @@ function ledger(s: Statements, checkpointId: string): ModelStepCheckpointToolLed
     if (row.kind === 'tool_dispatch') dispatched.add(row.tool_call_id)
     else resulted.add(row.tool_call_id)
   }
-  let unknown = 0
-  for (const id of dispatched) if (!resulted.has(id)) unknown += 1
-  let notDispatched = 0
-  for (const id of announced) if (!dispatched.has(id)) notDispatched += 1
-  return { confirmed: resulted.size, unknown, notDispatched }
+  finishBatch()
+  return tools
 }
 
 function snapshot(s: Statements, header: ModelStepCheckpointRow): ModelStepCheckpointSnapshot {
@@ -704,8 +710,6 @@ export function completeModelStepCheckpointWithMessage(
     failed_at: null,
     expires_at: null,
     blocked_reason: null,
-    provider: null,
-    model: null,
     // Completion keeps the budget the checkpoint already holds.
     task_budget: null,
   })
@@ -772,14 +776,6 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
     }
 
     case 'model_step_checkpoint_transition': {
-      if (
-        (op.provider === undefined) !== (op.model === undefined) ||
-        (op.provider !== undefined && (op.to !== 'resumable' || !op.provider || !op.model))
-      ) {
-        throw new Error(
-          'model-step checkpoint served pair requires a complete resumable transition'
-        )
-      }
       if (op.attachments !== undefined && op.to !== 'resumable') {
         throw new Error('model-step checkpoint attachments are written only with resumable')
       }
@@ -794,8 +790,6 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
             failed_at: op.failedAt ?? null,
             expires_at: op.expiresAt ?? null,
             blocked_reason: op.blockedReason ?? null,
-            provider: op.provider ?? null,
-            model: op.model ?? null,
             task_budget: op.taskBudget ?? null,
           }).changes
           if (changed === 1) {

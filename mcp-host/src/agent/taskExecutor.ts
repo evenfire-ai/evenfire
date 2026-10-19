@@ -393,8 +393,8 @@ export class TaskExecutor {
   private readonly attachmentReadLedger = new AttachmentReadLedger()
   /** #1043 — resumable checkpoint left by this turn's failed loop, if any. */
   private modelStepCheckpointId: string | undefined
-  /** Last successful physical model completion for this task's transcript. */
-  private checkpointServedBy: { provider: string; model: string } | undefined
+  /** Fresh-turn recorder retained only across a same-process approval. */
+  private originRecorder: ModelStepCheckpointRecorder | undefined
   private continuationVerdictEmitted = false
   private continuationCompletionFence: ModelStepCheckpointFence | undefined
   private continuationFenceLost = false
@@ -515,7 +515,18 @@ export class TaskExecutor {
     if (this.task.modelStepContinuation) {
       const continuation = this.task.modelStepContinuation
       const support = this.deps.modelStepCheckpoints!
-      const checkpoint = await support.store.loadLive(sessionKey)
+      let checkpoint
+      try {
+        checkpoint = await support.store.loadLive(sessionKey)
+      } catch (error) {
+        const code = (error as { code?: unknown } | null)?.code
+        if (code !== 'MODEL_STEP_CHECKPOINT_CORRUPT') throw error
+        logger.warn(
+          { sessionKey, taskId: this.taskId, code },
+          'Pending approval checkpoint is corrupt; retiring the approval'
+        )
+        return 'claim_lost'
+      }
       if (
         checkpoint?.header.checkpoint_id !== continuation.checkpointId ||
         checkpoint.header.status !== 'claimed' ||
@@ -743,7 +754,10 @@ export class TaskExecutor {
         this.deps.onFail(this.task, taskError)
       }
     } finally {
-      if (this.state !== 'waiting_approval') await this.stopContinuationLease()
+      if (this.state !== 'waiting_approval') {
+        await this.stopContinuationLease()
+        await this.abandonOriginCheckpoint()
+      }
       await this.settleGfsRetentionOwner()
       this.executionBudget.pause()
       if (this.state !== 'waiting_approval' || this.abortController.signal.aborted)
@@ -826,6 +840,12 @@ export class TaskExecutor {
     if (version === null) this.continuationFenceLost = true
     else this.continuationClaimReleased = true
     this.continuationCompletionFence = undefined
+  }
+
+  private async abandonOriginCheckpoint(): Promise<void> {
+    const recorder = this.originRecorder
+    this.originRecorder = undefined
+    await recorder?.settle(undefined)
   }
 
   private async stopContinuationLease(): Promise<void> {
@@ -1295,12 +1315,8 @@ export class TaskExecutor {
     recordedMessages: ChatMessage[],
     entries: ModelStepCheckpointEntryRow[]
   ): ChatMessage[] {
-    const dispatched = new Set(
-      entries.filter(entry => entry.kind === 'tool_dispatch').map(entry => entry.tool_call_id)
-    )
-    const confirmed = new Set(
-      entries.filter(entry => entry.kind === 'tool_result').map(entry => entry.tool_call_id)
-    )
+    const dispatched = new Set<string>()
+    const confirmed = new Set<string>()
     const messages: ChatMessage[] = []
     let pending: NonNullable<ChatMessage['tool_calls']> = []
     const finishBatch = (): void => {
@@ -1317,8 +1333,21 @@ export class TaskExecutor {
         })
       }
       pending = []
+      dispatched.clear()
+      confirmed.clear()
     }
-    for (const message of recordedMessages) {
+    let messageIndex = 0
+    // Match each dispatch/result to its own assistant batch, even when a
+    // provider restarts call IDs in the next model response.
+    for (const entry of entries) {
+      if (entry.kind !== 'message') {
+        if (entry.tool_call_id !== null) {
+          if (entry.kind === 'tool_dispatch') dispatched.add(entry.tool_call_id)
+          else confirmed.add(entry.tool_call_id)
+        }
+        continue
+      }
+      const message = recordedMessages[messageIndex++]
       if (message.role !== 'tool') finishBatch()
       messages.push(message)
       if (message.tool_calls) pending = [...message.tool_calls]
@@ -1498,7 +1527,7 @@ export class TaskExecutor {
       this.executionBudget.assertTime()
       const continuationRecorder = this.task.modelStepContinuation
         ? await this.requireContinuationClaim()
-        : undefined
+        : this.originRecorder
       if (continuationRecorder) await continuationRecorder.begin(approval.context_snapshot)
       await continuationRecorder?.recordDispatch(suspendedCall)
       if (continuationRecorder?.poisoned) {
@@ -1595,9 +1624,16 @@ export class TaskExecutor {
         ...this.collectAttachments([...(approval.completed_results || []), toolResult]),
       ]
       // A15 U1 — the approved tool ended the turn: no further model call.
+      this.originRecorder = undefined
       const result: LoopResult = toolResult.stopTurn
         ? turnStopResult(loopConfig, 0, toolResult.stopTurn.message, [])
         : await runToolUseLoop(loopConfig, messages)
+      if (
+        !this.task.modelStepContinuation &&
+        result.type === 'need_approval' &&
+        !continuationRecorder?.poisoned
+      )
+        this.originRecorder = continuationRecorder
       if (continuationRecorder) {
         if (toolResult.stopTurn) await continuationRecorder.settle(result)
         if (result.type === 'need_approval' && continuationRecorder.poisoned) {
@@ -1608,7 +1644,7 @@ export class TaskExecutor {
         this.continuationClaimReleased = continuationRecorder.claimReleased
         this.continuationCompletionFence =
           result.type === 'response' && !continuationRecorder.poisoned
-            ? this.task.modelStepContinuation!.fence
+            ? this.task.modelStepContinuation?.fence
             : undefined
       }
 
@@ -1699,7 +1735,10 @@ export class TaskExecutor {
         this.deps.onFail(this.task, taskError)
       }
     } finally {
-      if (this.state !== 'waiting_approval') await this.stopContinuationLease()
+      if (this.state !== 'waiting_approval') {
+        await this.stopContinuationLease()
+        await this.abandonOriginCheckpoint()
+      }
       await this.settleGfsRetentionOwner()
       this.executionBudget.pause()
       if (this.state !== 'waiting_approval' || this.abortController.signal.aborted)
@@ -1758,6 +1797,7 @@ export class TaskExecutor {
       await this.stopContinuationLease()
       await this.abandonModelStepContinuation()
     }
+    await this.abandonOriginCheckpoint()
 
     // Terminal SSE event emitted automatically when onComplete → queue.completeTask
     // → lifecycle.transition('completed') fires (SseProgressReporter subscription).
@@ -1799,6 +1839,7 @@ export class TaskExecutor {
       this.suspendedCancellation = (async () => {
         await this.stopContinuationLease()
         if (this.task.modelStepContinuation) await this.abandonModelStepContinuation()
+        await this.abandonOriginCheckpoint()
         await this.settleGfsRetentionOwner()
       })()
         .then(() => this.resolveCompletion?.())
@@ -2010,14 +2051,15 @@ export class TaskExecutor {
     }
     const recorder = this.createOriginCheckpointRecorder(messages)
     if (recorder) loopConfig.modelStepCheckpointRecorder = recorder
-    return runToolUseLoop(loopConfig, messages)
+    const result = await runToolUseLoop(loopConfig, messages)
+    if (result.type === 'need_approval' && !recorder?.poisoned) this.originRecorder = recorder
+    return result
   }
 
   /**
-   * #1043 — the recorder of a fresh turn. A turn resumed after an approval
-   * runs without one, and so does a turn without a sender: the continuation
-   * route authorizes against the recorded principal. Only RPC channels expose
-   * that route; other channels cannot use a model-step checkpoint.
+   * #1043 — a fresh RPC turn retains its recorder across warm approvals.
+   * A Host restart abandons open checkpoints; cold approval resumes have no
+   * recorder. A sender is required because Retry authorizes that principal.
    */
   private createOriginCheckpointRecorder(
     messages: ChatMessage[]
@@ -2064,7 +2106,6 @@ export class TaskExecutor {
           ...this.executionBudget.snapshot(),
           attachmentReadLedger: this.attachmentReadLedger.snapshot(),
         }),
-      servedBy: () => this.checkpointServedBy,
       resumableTtlMs: support.resumableTtlMs,
       sourceAttachments: this.task.sourceMessage?.attachments,
       attachmentTtlMs: support.attachmentTtlMs,
@@ -2447,9 +2488,6 @@ export class TaskExecutor {
       primaryPair: { provider: primaryProvider, model: primaryModel },
       engine: support.engine,
       policy: support.policy,
-      onServed: pair => {
-        this.checkpointServedBy = pair
-      },
       buildFallbackPort: index => {
         const entry = support.policy.fallbacks[index]
         // R5.7 — a SAME-provider fallback (other key) respects the session's

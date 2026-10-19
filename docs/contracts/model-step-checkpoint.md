@@ -10,6 +10,16 @@ Desktop then offers **Retry model step**: a continuation of the same logical tur
 replays the confirmed tool results to the model and never re-executes those tools.
 It is distinct from Resend, which re-sends the user's original message.
 
+Codex/Grok subscription providers retry a transient `provider_unavailable` before
+failover, for at most 3 attempts total (backoffs of about 1 s and 3 s, with jitter).
+Each attempt uses fresh authorization and a fresh attempt index. Automatic retry
+is allowed only before any output has streamed; only after these attempts are
+exhausted can that failure leave a resumable checkpoint.
+
+Retry remains available after an approval resume while the Host stays up. If the
+Host restarts while a turn waits for approval, that turn's checkpoint is abandoned
+and Retry is not offered.
+
 This document is the only coupling between the Host change and the Desktop change.
 The TypeScript source of truth is
 [`mcp-host/src/core/conversation/modelStepCheckpointContract.ts`](../../mcp-host/src/core/conversation/modelStepCheckpointContract.ts).
@@ -33,7 +43,7 @@ optional `modelStepCheckpoint` next to `state`, `activeTaskId`, `pendingApproval
 | `retryAvailable` | boolean | `true` only when `status` is `resumable`. |
 | `originTaskId` | string | The failed task. It stays terminal. |
 | `continuationTaskId` | string, optional | Present when `status` is `claimed`. |
-| `provider`, `model` | string | The effective selection when the checkpoint was created. A continuation always uses these. |
+| `provider`, `model` | string | The turn's configured pair: Host provider + session model resolved when the turn started. A continuation always uses this pair and never fails over, even when a fallback served earlier steps of the turn. |
 | `blockedReason` | enum, optional | Present when `status` is `blocked`: `principal_mismatch`, `host_mismatch`, `grant_revoked`, `model_unavailable`, `budget_exhausted`, `reference_unavailable`, `attachment_expired` (the retained bytes of an inline uploaded file expired after their 1 h TTL or are missing; Resend still works). |
 | `tools` | `{ confirmed, unknown, notDispatched }` | Counts only. `unknown` means a dispatch was recorded without a recorded result; such a tool is never re-executed. |
 | `failedAt`, `expiresAt` | ISO-8601 string | |
@@ -52,6 +62,15 @@ body `{ "version": number }`. Same edge guard as `POST /v1/runtime/messages`: ca
 `rpc-proxy`, with a `userId` equal to the session owner; the lifecycle drain gate
 answers `503 host_draining`.
 
+The Host also requires the proxy-authored `x-clerum-edge-trace-context` header:
+percent-encoded JSON satisfying `TraceContextV1`, with `origin: "direct_chat"` and
+`sessionId` equal to `:chatId`. A missing or invalid header returns
+`400 { error: "Invalid continuation traceContext" }` before admission, leaving the
+checkpoint untouched. Clients send `{version}` to the proxy; the proxy constructs
+the trusted header and forwards only `version` in the body.
+Sources: [Host validation](../../mcp-host/src/server/routes.ts#L304),
+[proxy trace and forwarding](../../rpc-proxy/src/routes/rpc.ts#L1042).
+
 The status is checked first. The version is compared only when the status is `resumable`.
 
 | Order | Checkpoint state | Response | Example |
@@ -64,11 +83,48 @@ The status is checked first. The version is compared only when the status is `re
 | 5 | `resumable`, other version | `409 { code: "model_step_checkpoint_version_mismatch", current: <view> }` | `continue-response.version-mismatch.json` |
 | 6 | `resumable`, same version, revalidation fails | `409 { code: "model_step_checkpoint_blocked", blockedReason }`; the checkpoint becomes `blocked` | `continue-response.blocked.json` |
 | 7 | `resumable`, same version, claim won | `202 { taskId, checkpointId, status: "claimed", replayed: false }` | `continue-response.claimed.json` |
+| 7b | Claim won, then `reference_check_failed` | Same `202` as row 7; the ordinary async task result carries the file-reference error. The checkpoint is already `resumable` with a new version. | See below. |
 
 Every claim creates a new task id: the task lifecycle refuses a terminal id. "The same
 continuation" means the same `checkpointId` and the same recorded entries.
 
 After a `202`, Desktop attaches to `taskId` with the existing task-progress path.
+A `202` acknowledges the task, not successful preparation. After
+`reference_check_failed`, refresh the session checkpoint before retrying: sending
+the old version gets row 5 rather than replaying the failed task.
+Sources: [admission verdict response](../../mcp-host/src/agent/modelStepContinuation.ts#L262),
+[reference failure releases the claim](../../mcp-host/src/agent/taskExecutor.ts#L1286).
+
+Other responses are outside the checkpoint-state table:
+
+- Host `400 { error }`: invalid route segments, a version that is not a positive
+  safe integer, or invalid trace context; `401 { error: "Missing rpc edge caller context" }`;
+  `501 { error: "Model-step continuation handler not configured" }`;
+  `500 { error: "Model-step continuation failed" }`.
+  [Host route](../../mcp-host/src/server/routes.ts#L304).
+- Host `503 { code: "host_draining" }` enters the proxy's wake-and-hold path.
+  If the Host is still waking when the hold ends, the proxy may return
+  `503 { code: "host_waking", hostRef, retryAfterMs, message, lastKnownState }`
+  with `Retry-After` in seconds.
+  [Host lifecycle gate](../../mcp-host/src/server.ts#L493),
+  [proxy wake handling](../../rpc-proxy/src/routes/rpc.ts#L1123),
+  [wake response](../../rpc-proxy/src/services/wakeAndHold.ts#L621).
+- An async `TaskError` may contain `modelStepCheckpointId` when the failed model
+  step leaves a checkpoint. Continuation preparation can also report
+  `model_step_checkpoint_blocked` or `model_step_checkpoint_not_found` through
+  the task-result path, including after the admission response's verdict wait ends.
+  [Task error field](../../mcp-host/src/queue/types.ts#L40),
+  [emission](../../mcp-host/src/agent/taskExecutor.ts#L1754),
+  [preparation errors](../../mcp-host/src/agent/taskExecutor.ts#L783).
+
+## Deploy order
+
+Roll out **rpc-proxy before mcp-host**. The Host continuation route requires the
+proxy-authored trace header above; a request without it gets `400` without
+consuming the checkpoint. Deploying the proxy first makes its public continuation
+route available before the Host can advertise Retry.
+Sources: [Host header guard](../../mcp-host/src/server/routes.ts#L330),
+[proxy continuation route](../../rpc-proxy/src/routes/rpc.ts#L1021).
 
 ## Example files
 
