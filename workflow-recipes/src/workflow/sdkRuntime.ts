@@ -33,7 +33,6 @@ import type { SnippetExecuteResponse } from './snippetTypes'
 // key pair (mirror of the enum comment in charts/.../workflowrecipe.yaml).
 type AgentProvider = LlmProviderId
 
-const DEFAULT_STEP_TIMEOUT_SECONDS = 300
 const PROVIDER_OUTPUT_LENGTH_EXCEEDED = 'provider_output_length_exceeded'
 const MCP_HOST_NOT_READY = 'mcp_host not ready'
 
@@ -503,11 +502,6 @@ function mergeSnippetArtifactsIntoOutput(response: SnippetExecuteResponse): unkn
     return { ...output, artifacts: [...existing, ...artifacts] }
   }
   return { value: response.output, artifacts }
-}
-
-function resolveStepTimeoutSeconds(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_STEP_TIMEOUT_SECONDS
-  return Math.max(1, Math.floor(value))
 }
 
 function resolveStepAgent(
