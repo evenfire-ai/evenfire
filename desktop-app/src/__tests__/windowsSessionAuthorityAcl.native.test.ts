@@ -193,11 +193,16 @@ $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
 $acl = [IO.Directory]::GetAccessControl($target)
 $acl.AddAccessRule($rule)
 [IO.Directory]::SetAccessControl($target, $acl)
-$readBack = [IO.Directory]::GetAccessControl($target)
+$readBack = [System.Security.AccessControl.RawSecurityDescriptor]::new(
+  ([IO.Directory]::GetAccessControl($target)).GetSecurityDescriptorBinaryForm(),
+  0
+)
 $found = $false
-foreach ($entry in $readBack.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
-  if ($entry.IdentityReference.Value -eq $sid.Value -and
-    ([int]$entry.PropagationFlags -band [int][System.Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) {
+foreach ($entry in $readBack.DiscretionaryAcl) {
+  if ($entry -is [System.Security.AccessControl.CommonAce] -and
+    $entry.SecurityIdentifier.Value -eq $sid.Value -and
+    ([int]$entry.AceFlags -band [int][System.Security.AccessControl.AceFlags]::InheritOnly) -ne 0 -and
+    ([int]$entry.AceFlags -band [int][System.Security.AccessControl.AceFlags]::Inherited) -eq 0) {
     $found = $true
   }
 }
@@ -258,9 +263,11 @@ windowsDescribe('Windows session authority ACL native contract', () => {
     )
   })
 
-  it('rejects inherit-only ACEs that do not grant rights on the authority object itself', () => {
+  it('rejects an inherit-only ACE that grants no direct rights on a private child', async () => {
     provisionWindowsSessionAuthorityDirectory(userDataPath, authorityPath)
-    addCurrentUserInheritOnlyFullControl(authorityPath)
+    const childDirectory = path.join(authorityPath, 'inherit-only-child')
+    await fs.mkdir(childDirectory)
+    addCurrentUserInheritOnlyFullControl(childDirectory)
 
     expect(() => verifyWindowsSessionAuthorityDirectory(userDataPath, authorityPath)).toThrow(
       'Windows session authority ACL verification failed'
