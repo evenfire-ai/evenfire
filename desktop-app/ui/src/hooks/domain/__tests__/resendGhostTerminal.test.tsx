@@ -49,11 +49,10 @@ describe('ghost-terminal Resend (D.4 AC11)', () => {
     const { result } = renderController()
     await settleMount()
 
-    const sendPromise = act(async () => {
+    await act(async () => {
       await result.current.handleSendAgentMessage('please summarize the doc')
     })
     await waitFor(() => expect(clerum.hasProgressHandler('task-ghost')).toBe(true))
-    await sendPromise
 
     // Stream closes with no terminal event → tracker fires a 'stream' terminal.
     await act(async () => {
@@ -72,11 +71,10 @@ describe('ghost-terminal Resend (D.4 AC11)', () => {
     const { result } = renderController()
     await settleMount()
 
-    const sendPromise = act(async () => {
+    await act(async () => {
       await result.current.handleSendAgentMessage('hello')
     })
     await waitFor(() => expect(clerum.hasProgressHandler('task-ghost-2')).toBe(true))
-    await sendPromise
 
     const appendCallsBefore = clerum.chat.appendMessages.mock.calls.length
     await act(async () => {

@@ -41,11 +41,10 @@ async function sendLiveTask(
   taskId: string
 ): Promise<string> {
   clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId })
-  const sendPromise = act(async () => {
+  await act(async () => {
     await result.current.handleSendAgentMessage('long running')
   })
   await waitFor(() => expect(clerum.hasProgressHandler(taskId)).toBe(true))
-  await sendPromise
   return result.current.activeChatId!
 }
 

@@ -209,7 +209,7 @@ describe('sendAgentMessage — auto-title on send (B10)', () => {
     await settleMount()
     expect(result.current.activeChatId).toBeNull()
 
-    const sendPromise = act(async () => {
+    await act(async () => {
       await result.current.handleSendAgentMessage('summarize the quarterly report')
     })
     await waitFor(() => expect(clerum.hasProgressHandler('task-title')).toBe(true))
@@ -219,8 +219,6 @@ describe('sendAgentMessage — auto-title on send (B10)', () => {
         data: { taskId: 'task-title', status: 'cancelled', reason: 'cleanup' },
       })
     })
-    await sendPromise
-
     const createdChatId = result.current.activeChatId!
     await waitFor(() =>
       expect(clerum.chat.rename).toHaveBeenCalledWith(

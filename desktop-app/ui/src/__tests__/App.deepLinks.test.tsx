@@ -2112,7 +2112,9 @@ describe('App deep-link orchestration', () => {
     await selectTab(0)
     // Open a DIFFERENT app (B, distinct appRef) before A's read resolves; B is live.
     await launchAppFromSidebar('ns/app-b')
-    await waitFor(() => expect(appTabs()).toHaveLength(2))
+    await waitFor(() =>
+      expect(appTabs().map(tab => tab.app?.appRef)).toEqual(['ns/app', 'ns/app-b'])
+    )
 
     // The stale read resolves with A's route, while B owns the active view.
     await act(async () => {
@@ -2131,11 +2133,10 @@ describe('App deep-link orchestration', () => {
     // (At the pre-fix head the stale continuation closes the newly-opened B embed.)
     expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe('ns/app-b')
     expect(closeSandboxUi).not.toHaveBeenCalled()
-    expect(appTabs()[1]?.app?.appRef).toBe('ns/app-b')
+    expect(appTabs().map(tab => tab.app?.appRef)).toEqual(['ns/app', 'ns/app-b'])
     // Cross-app persist isolation: the stale read carried A's appRef, so the pre-fix
     // continuation would clobber A's own route with '/stale/route'. The gate aborts
     // that persist once B owns the active view, so A's route stays untouched.
-    expect(appTabs()[0]?.app?.appRef).toBe('ns/app')
     expect(appTabs()[0]?.app?.savedRoutePath).not.toBe('/stale/route')
     expect(appTabs()[1]?.app?.savedRoutePath).toBeUndefined()
   })
