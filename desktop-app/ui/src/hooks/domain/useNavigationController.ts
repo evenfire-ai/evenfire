@@ -55,7 +55,9 @@ export function useNavigationController() {
   const [navigationIntentSequence, setNavigationIntentSequence] = useState(0)
   const navigationIntentSequenceRef = useRef(0)
   const userNavigationGenerationRef = useRef<number | null>(null)
+  const userNavigationGenerationUnavailableRef = useRef(false)
   const currentUserNavigationGeneration = useCallback((): number | null => {
+    if (userNavigationGenerationUnavailableRef.current) return null
     if (userNavigationGenerationRef.current !== null) return userNavigationGenerationRef.current
     try {
       const generation =
@@ -81,7 +83,8 @@ export function useNavigationController() {
       typeof window === 'undefined'
         ? undefined
         : window.clerum?.gfs?.advanceUserNavigationGeneration
-    if (advance) {
+    try {
+      if (!advance) throw new Error('The main process GFS navigation generation is unavailable')
       const nextGeneration = advance()
       if (
         typeof nextGeneration !== 'number' ||
@@ -91,10 +94,12 @@ export function useNavigationController() {
         throw new Error('The main process returned an invalid GFS navigation generation')
       }
       userNavigationGenerationRef.current = nextGeneration
-    } else {
-      // User navigation still proceeds, but deep links fail closed until main
-      // can provide the authoritative cross-process ordering generation.
+      userNavigationGenerationUnavailableRef.current = false
+    } catch {
+      // Keep local navigation responsive, but do not let an old main value
+      // make links eligible after an explicit action we could not order.
       userNavigationGenerationRef.current = null
+      userNavigationGenerationUnavailableRef.current = true
     }
     return beginNavigationIntent()
   }, [beginNavigationIntent])
