@@ -2117,7 +2117,8 @@ describe('App deep-link orchestration', () => {
 
     // Open a DIFFERENT app (B, distinct appRef) before A's read resolves; B is live.
     await launchAppFromSidebar('ns/app-b')
-    expect(currentController.nextWorkspaceTabId).toHaveBeenCalledTimes(tabAllocationsAfterA + 1)
+    // Wait for the observable app-tab state, not an internal ID-allocation count:
+    // unrelated UI work may allocate an ID without creating an app tab.
     await waitFor(() =>
       expect(appTabs().map(tab => tab.app?.appRef)).toEqual(['ns/app', 'ns/app-b'])
     )
