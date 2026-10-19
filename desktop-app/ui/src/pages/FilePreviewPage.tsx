@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { EmptyState } from '@components/Common'
 import { GfsImagePreviewBody } from '@components/GfsImagePreview'
 import { GfsMarkdownPreviewBody } from '@components/GfsMarkdownPreview'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
 import { GfsResourceTitlebarActions } from '@components/GfsResourceTitlebarActions'
 import { GfsVideoPreviewBody } from '@components/GfsVideoPreview'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
 import type { FilePreviewPageProps } from './FilePreviewPage.types'
@@ -67,6 +69,7 @@ export function FilePreviewPage({
   onRenameCommitted,
   titlebarLeadingTarget,
 }: FilePreviewPageProps) {
+  const queryClient = useQueryClient()
   const ctrl = useGfsBrowserController()
   const [reloadToken, setReloadToken] = useState(0)
   const [denied, setDenied] = useState<string | null>(null)
@@ -202,8 +205,19 @@ export function FilePreviewPage({
 
   const revalidateAccess = useCallback(async () => {
     if (denied || accessRevoked) return
+    const resourceQueryKey = [
+      ...desktopQueryKeys.gfsRoot,
+      ctrl.sessionScope,
+      'preview-resource',
+      gfsUri,
+    ] as const
     try {
-      await window.clerum.gfs.resolve(gfsUri)
+      // Use the mounted resource query so React Query's own focus refetch and
+      // this access check share one in-flight resolver request.
+      await queryClient.refetchQueries(
+        { queryKey: resourceQueryKey, exact: true },
+        { throwOnError: true }
+      )
     } catch (error) {
       const message = toMessage(error)
       // A session-authority failure revokes the shared session (H2 path); the
@@ -212,7 +226,7 @@ export function FilePreviewPage({
       if (ctrl.handleAuthorityFailure(message, 'operation')) return
       if (isPerResourceAccessDenial(message)) setDenied(message)
     }
-  }, [accessRevoked, ctrl, denied, gfsUri])
+  }, [accessRevoked, ctrl, denied, gfsUri, queryClient])
 
   useEffect(() => {
     const onFocus = () => {
