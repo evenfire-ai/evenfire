@@ -2,6 +2,7 @@
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { verifyWindowsSessionAuthorityDirectory } from '../../src/windowsSessionAuthorityAcl.js'
 import { decodeTileChallenge, requirePixelRenderer } from './subscriptionImageChallenge.js'
 import type { SubscriptionImageRun } from './subscriptionImageRunContract.js'
 import {
@@ -13,7 +14,13 @@ import {
 const digest = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex')
 
 function privateBytes(filename: string, maxBytes: number): Buffer {
-  if (fs.realpathSync(path.dirname(filename)) !== path.dirname(filename))
+  const parent = path.dirname(filename)
+  const canonicalParent = fs.realpathSync(parent)
+  if (
+    process.platform === 'win32'
+      ? canonicalParent.toLowerCase() !== parent.toLowerCase()
+      : canonicalParent !== parent
+  )
     throw new Error('Fixture parent must not be a symlink')
   const fd = fs.openSync(filename, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
   try {
@@ -21,12 +28,17 @@ function privateBytes(filename: string, maxBytes: number): Buffer {
     if (
       !stat.isFile() ||
       stat.nlink !== 1 ||
-      stat.uid !== process.getuid?.() ||
-      (stat.mode & 0o777) !== 0o600 ||
+      (process.platform !== 'win32' &&
+        (stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o600)) ||
       stat.size < 1 ||
       stat.size > maxBytes
     ) {
       throw new Error('Fixture data must be bounded, private and physically owned')
+    }
+    if (process.platform === 'win32') {
+      if (path.basename(parent).toLowerCase() !== 'sessions')
+        throw new Error('Fixture data must use a protected Windows session-authority directory')
+      verifyWindowsSessionAuthorityDirectory(path.dirname(parent), parent)
     }
     return fs.readFileSync(fd)
   } finally {

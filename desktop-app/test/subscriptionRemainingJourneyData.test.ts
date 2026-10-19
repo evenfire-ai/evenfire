@@ -3,21 +3,33 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { provisionWindowsSessionAuthorityDirectory } from '../src/windowsSessionAuthorityAcl.js'
 import { tileChallengeImage } from './e2e-playwright/subscriptionImageChallenge.js'
 import type { SubscriptionImageRun } from './e2e-playwright/subscriptionImageRunContract.js'
 import { preparedPixelCode } from './e2e-playwright/subscriptionRemainingJourneyData.js'
 
 const digest = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex')
 let root: string
+let temporaryRoot: string
 beforeAll(() => {
-  root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'evenfire-remaining-pixels-unit-')))
-  fs.chmodSync(root, 0o700)
+  temporaryRoot = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'evenfire-remaining-pixels-unit-'))
+  )
+  if (process.platform === 'win32') {
+    const userDataDirectory = path.join(temporaryRoot, 'user-data')
+    fs.mkdirSync(userDataDirectory)
+    root = path.join(userDataDirectory, 'sessions')
+    provisionWindowsSessionAuthorityDirectory(userDataDirectory, root)
+  } else {
+    root = temporaryRoot
+    fs.chmodSync(root, 0o700)
+  }
 })
 afterEach(() => {
   for (const name of fs.readdirSync(root)) fs.unlinkSync(path.join(root, name))
 })
 afterAll(() => {
-  fs.rmdirSync(root)
+  fs.rmSync(temporaryRoot, { recursive: true, force: true })
 })
 // Only the codec/file-admission boundary is exercised here. No Host, account,
 // provider or E2E runtime is fabricated by these unit-only run coordinates.
@@ -56,10 +68,15 @@ describe('remaining-journey prepared native pixel data', () => {
       preparedPixelCode(run, { ...fixture, sizeBytes: fixture.sizeBytes + 1 })
     ).rejects.toThrow('changed')
   })
-  it('refuses non-private source files before interpreting their pixels', async () => {
-    const { fixture } = image()
+  it('enforces platform-native private source boundaries before interpreting pixels', async () => {
+    const { visual, fixture } = image()
     fs.chmodSync(fixture.fixtureImagePath, 0o644)
-    await expect(preparedPixelCode(run, fixture)).rejects.toThrow('private')
+    if (process.platform === 'win32') {
+      // POSIX mode bits do not establish Windows privacy; the helper verifies the real DACL.
+      await expect(preparedPixelCode(run, fixture)).resolves.toBe(visual.code)
+    } else {
+      await expect(preparedPixelCode(run, fixture)).rejects.toThrow('private')
+    }
   })
   it('refuses a symlink source instead of following it', async () => {
     const { fixture } = image()
