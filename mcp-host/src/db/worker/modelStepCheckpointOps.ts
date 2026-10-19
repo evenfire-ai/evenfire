@@ -7,6 +7,8 @@
  * checkpoint.
  */
 import type { Database, Statement } from 'better-sqlite3'
+import { isModelStepCheckpointLeaseAlive } from '../../core/conversation/modelStepCheckpointLease'
+import { logger } from '../../logger'
 
 export type ModelStepCheckpointRowStatus =
   | 'open'
@@ -103,6 +105,8 @@ export interface ModelStepCheckpointToolLedger {
 export interface ModelStepCheckpointSnapshot {
   header: ModelStepCheckpointRow
   tools: ModelStepCheckpointToolLedger
+  /** Deadline in epoch ms of an approval bound to the same active continuation. */
+  approvalExpiresAt: number | null
 }
 
 export type ModelStepClaimOutcome =
@@ -290,7 +294,7 @@ interface Statements {
   abandonAdmission: Statement
   resetAdmissionSession: Statement
   deleteAdmissionApproval: Statement
-  selectLiveApproval: Statement
+  selectApprovalDeadline: Statement
 }
 
 const statementCache = new WeakMap<Database, Statements>()
@@ -316,7 +320,7 @@ function statements(db: Database): Statements {
     `),
     selectHeader: db.prepare('SELECT * FROM model_step_checkpoints WHERE checkpoint_id = ?'),
     selectLiveBySession: db.prepare(
-      "SELECT * FROM model_step_checkpoints WHERE session_key = ? AND status IN ('resumable','claimed','blocked')"
+      "SELECT * FROM model_step_checkpoints WHERE session_key = ? AND status NOT IN ('open','completed','abandoned')"
     ),
     selectForTask: db.prepare(`
       SELECT * FROM model_step_checkpoints
@@ -451,7 +455,7 @@ function statements(db: Database): Statements {
       WHERE status IN ('completed','abandoned') AND updated_at <= @cutoff
     `),
     ledgerKinds: db.prepare(`
-      SELECT kind, tool_call_id, payload FROM model_step_checkpoint_entries
+      SELECT seq, kind, tool_call_id, payload FROM model_step_checkpoint_entries
       WHERE checkpoint_id = ? AND kind IN ('message','tool_dispatch','tool_result')
     `),
     insertAttachment: db.prepare(`
@@ -512,16 +516,65 @@ function statements(db: Database): Statements {
       DELETE FROM pending_approvals
       WHERE task_id = ? AND session_id = (SELECT id FROM sessions WHERE session_key = ?)
     `),
-    selectLiveApproval: db.prepare(`
-      SELECT 1 FROM pending_approvals p JOIN sessions sess ON sess.id = p.session_id
+    selectApprovalDeadline: db.prepare(`
+      SELECT MAX(p.expires_at * 1000) AS expires_at
+      FROM pending_approvals p JOIN sessions sess ON sess.id = p.session_id
       WHERE sess.session_key = ? AND p.task_id = ?
-        AND sess.active_task_id = p.task_id
-        AND sess.state = 'awaiting_approval' AND p.expires_at > ? / 1000
-      LIMIT 1
+        AND sess.active_task_id = p.task_id AND sess.state = 'awaiting_approval'
     `),
   }
   statementCache.set(db, prepared)
   return prepared
+}
+
+export const MODEL_STEP_CHECKPOINT_CORRUPT = 'MODEL_STEP_CHECKPOINT_CORRUPT'
+
+/** Sanitized before crossing the worker boundary; never retains the parser error or payload. */
+export class ModelStepCheckpointCorruptError extends Error {
+  readonly code = MODEL_STEP_CHECKPOINT_CORRUPT
+
+  constructor(checkpointId: string, seq: number | null) {
+    super('Invalid model-step checkpoint row')
+    this.name = 'ModelStepCheckpointCorruptError'
+    logger.warn({ checkpointId, seq, code: this.code }, this.message)
+  }
+}
+
+function parseStoredObject(
+  raw: string,
+  checkpointId: string,
+  seq: number | null
+): Record<string, unknown> {
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch {
+    throw new ModelStepCheckpointCorruptError(checkpointId, seq)
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ModelStepCheckpointCorruptError(checkpointId, seq)
+  }
+  return value as Record<string, unknown>
+}
+
+function validateHeader(header: ModelStepCheckpointRow): void {
+  if (
+    !['open', 'resumable', 'claimed', 'blocked', 'completed', 'abandoned'].includes(header.status)
+  ) {
+    throw new ModelStepCheckpointCorruptError(header.checkpoint_id, null)
+  }
+  for (const raw of [header.loop_state, header.task_budget, header.source_message]) {
+    if (raw !== null) parseStoredObject(raw, header.checkpoint_id, null)
+  }
+}
+
+function approvalDeadline(s: Statements, header: ModelStepCheckpointRow): number | null {
+  if (header.status !== 'claimed') return null
+  const approval = s.selectApprovalDeadline.get(
+    header.session_key,
+    header.continuation_task_id
+  ) as { expires_at: number | null }
+  return approval.expires_at
 }
 
 /**
@@ -532,6 +585,7 @@ function statements(db: Database): Statements {
  */
 function ledger(s: Statements, checkpointId: string): ModelStepCheckpointToolLedger {
   const rows = s.ledgerKinds.all(checkpointId) as Array<{
+    seq: number
     kind: ModelStepCheckpointEntryKind
     tool_call_id: string | null
     payload: string
@@ -540,14 +594,14 @@ function ledger(s: Statements, checkpointId: string): ModelStepCheckpointToolLed
   const dispatched = new Set<string>()
   const resulted = new Set<string>()
   for (const row of rows) {
+    const message = parseStoredObject(row.payload, checkpointId, row.seq)
     if (row.kind === 'message') {
-      const message = JSON.parse(row.payload) as {
-        role?: string
-        tool_calls?: Array<{ id?: string }> | null
-      }
       if (message.role === 'assistant' && Array.isArray(message.tool_calls)) {
         for (const call of message.tool_calls) {
-          if (typeof call.id === 'string') announced.add(call.id)
+          if (call === null || typeof call !== 'object' || typeof call.id !== 'string') {
+            throw new ModelStepCheckpointCorruptError(checkpointId, row.seq)
+          }
+          announced.add(call.id)
         }
       }
       continue
@@ -564,7 +618,12 @@ function ledger(s: Statements, checkpointId: string): ModelStepCheckpointToolLed
 }
 
 function snapshot(s: Statements, header: ModelStepCheckpointRow): ModelStepCheckpointSnapshot {
-  return { header, tools: ledger(s, header.checkpoint_id) }
+  validateHeader(header)
+  return {
+    header,
+    tools: ledger(s, header.checkpoint_id),
+    approvalExpiresAt: approvalDeadline(s, header),
+  }
 }
 
 function appendEntries(
@@ -846,13 +905,12 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
           header.status === 'resumable' ||
           header.status === 'claimed' ||
           header.status === 'blocked'
-        const approvalAlive =
-          header.status === 'claimed' &&
-          s.selectLiveApproval.get(header.session_key, header.continuation_task_id, op.now) !==
-            undefined
-        const leaseAlive =
-          header.status === 'claimed' &&
-          ((header.claim_expires_at !== null && header.claim_expires_at > op.now) || approvalAlive)
+        const current = snapshot(s, header)
+        const leaseAlive = isModelStepCheckpointLeaseAlive(
+          header,
+          current.approvalExpiresAt,
+          op.now
+        )
         if (
           nonTerminal &&
           header.expires_at !== null &&
@@ -874,7 +932,7 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
           }
           reclaimed = true
         } else if (header.version !== op.version) {
-          return { outcome: 'version_mismatch', current: snapshot(s, header) }
+          return { outcome: 'version_mismatch', current }
         }
         const changed = s.claim.run({
           checkpoint_id: header.checkpoint_id,

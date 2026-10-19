@@ -29,7 +29,7 @@ optional `modelStepCheckpoint` next to `state`, `activeTaskId`, `pendingApproval
 |---|---|---|
 | `checkpointId` | string | Stable for the life of the checkpoint, across re-claims. |
 | `version` | number | Increases on every transition. The continuation POST echoes it. |
-| `status` | `resumable` \| `claimed` \| `blocked` | `completed` and `abandoned` checkpoints are never served: the field is absent. |
+| `status` | `resumable` \| `claimed` \| `blocked` | `completed` and `abandoned` checkpoints are never served and are purged on the next five-minute sweep. A claimed row with a lapsed lease and no live approval is projected as `resumable` at its stored version. Blocked rows retain their configured TTL. |
 | `retryAvailable` | boolean | `true` only when `status` is `resumable`. |
 | `originTaskId` | string | The failed task. It stays terminal. |
 | `continuationTaskId` | string, optional | Present when `status` is `claimed`. |
@@ -38,7 +38,7 @@ optional `modelStepCheckpoint` next to `state`, `activeTaskId`, `pendingApproval
 | `tools` | `{ confirmed, unknown, notDispatched }` | Counts only. `unknown` means a dispatch was recorded without a recorded result; such a tool is never re-executed. |
 | `failedAt`, `expiresAt` | ISO-8601 string | |
 
-The field never carries the transcript, tool arguments or tool results.
+The field never carries the transcript, tool arguments or tool results. If stored checkpoint data fails validation, the session GET omits the field and logs only the checkpoint id and entry sequence; worker timeouts and IO errors still fail the read. The continuation POST remains strict.
 
 A new user message (or a Resend) in the session retires the previous checkpoint when
 that message is admitted, so the field disappears before the new turn runs.
@@ -57,9 +57,9 @@ The status is checked first. The version is compared only when the status is `re
 | Order | Checkpoint state | Response | Example |
 |---|---|---|---|
 | 1 | `abandoned`, missing, or another session | `404 { code: "model_step_checkpoint_not_found" }` | `continue-response.not-found.json` |
-| 2 | `completed` | `200 { taskId, checkpointId, status: "completed", replayed: true }` | `continue-response.completed.json` |
-| 3 | `claimed`, lease live (any version) | `202 { taskId: continuationTaskId, checkpointId, status: "claimed", replayed: true }` | `continue-response.replayed.json` |
-| 3b | `claimed`, lease expired (any version) | Re-claim: revalidate (row 6); on success `202 { taskId: <new>, checkpointId, status: "claimed", replayed: false }` | `continue-response.reclaimed.json` |
+| 2 | `completed` (before the next terminal sweep; then row 1) | `200 { taskId, checkpointId, status: "completed", replayed: true }` | `continue-response.completed.json` |
+| 3 | `claimed`, lease or same-task approval live (any version) | `202 { taskId: continuationTaskId, checkpointId, status: "claimed", replayed: true }` | `continue-response.replayed.json` |
+| 3b | `claimed`, lease expired and no live same-task approval (any version) | Re-claim: revalidate (row 6); on success `202 { taskId: <new>, checkpointId, status: "claimed", replayed: false }` | `continue-response.reclaimed.json` |
 | 4 | `blocked` | `409 { code: "model_step_checkpoint_blocked", blockedReason }` | `continue-response.blocked.json` |
 | 5 | `resumable`, other version | `409 { code: "model_step_checkpoint_version_mismatch", current: <view> }` | `continue-response.version-mismatch.json` |
 | 6 | `resumable`, same version, revalidation fails | `409 { code: "model_step_checkpoint_blocked", blockedReason }`; the checkpoint becomes `blocked` | `continue-response.blocked.json` |

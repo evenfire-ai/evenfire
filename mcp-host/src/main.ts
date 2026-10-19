@@ -44,7 +44,6 @@ import {
   resolveSessionModel,
 } from './config/modelResolution'
 import { ContextMapperClient, getContextMapperClient } from './contextMapperClient'
-import { toModelStepCheckpointView } from './core/conversation/modelStepCheckpointView'
 import {
   type ConversationStoreHandle,
   SqliteColdStartLoader,
@@ -165,7 +164,10 @@ import {
   WorkflowApprovalNotificationClaim,
   WorkflowApprovalNotificationTerminal,
 } from './server'
-import { createSessionRouteHandlers } from './server/sessionRouteHandlers'
+import {
+  createSessionRouteHandlers,
+  loadSessionModelStepCheckpoint,
+} from './server/sessionRouteHandlers'
 import { projectContextBreakdown } from './server/wireProjections'
 import { SessionProcessor } from './session'
 import { serializeSessionKey } from './session/types.js'
@@ -1787,7 +1789,7 @@ async function initializeModelStepCheckpoints(handle: ConversationStoreHandle): 
     },
   })
   modelStepCheckpointSweepTimer = setInterval(() => {
-    store.sweep(config.modelStepCheckpointTtlMs).then(
+    store.sweep().then(
       swept => {
         if (swept.expired + swept.purgedCheckpoints + swept.purgedAttachments > 0) {
           logger.info({ component: 'ModelStepCheckpoint', ...swept }, 'model-step checkpoint sweep')
@@ -2852,8 +2854,7 @@ async function startRPCServer(): Promise<void> {
     loadModelStepCheckpoint: async sessionKey => {
       const support = agent!.getModelStepCheckpoints()
       if (!support) return undefined
-      const snapshot = await support.store.loadLive(sessionKey)
-      return snapshot ? toModelStepCheckpointView(snapshot) : undefined
+      return loadSessionModelStepCheckpoint(support.store, sessionKey)
     },
     redactToolError,
     redactTitle,

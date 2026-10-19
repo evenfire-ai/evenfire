@@ -210,7 +210,8 @@ export class ModelStepCheckpointStore {
     })
   }
 
-  sweep(terminalRetentionMs: number): Promise<{
+  /** Terminal ledgers have no retry action; purge them on the next five-minute sweep. */
+  sweep(terminalRetentionMs = 0): Promise<{
     expired: number
     purgedCheckpoints: number
     purgedAttachments: number

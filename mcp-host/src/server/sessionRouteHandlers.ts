@@ -4,7 +4,10 @@ import type {
   ConversationSessionSummary,
 } from '../core/conversation/conversationStore'
 import type { ModelStepCheckpointView } from '../core/conversation/modelStepCheckpointContract'
+import { toModelStepCheckpointView } from '../core/conversation/modelStepCheckpointView'
+import type { ModelStepCheckpointStore } from '../core/conversation/persistence/modelStepCheckpointStore'
 import { type Conversation, ConversationState } from '../core/types'
+import { MODEL_STEP_CHECKPOINT_CORRUPT } from '../db/worker/modelStepCheckpointOps'
 import { projectApprovalInputPreview } from '../progress/approvalInputPreview'
 import { getDisplayName } from '../progress/intentExtraction'
 import {
@@ -16,6 +19,25 @@ import {
   projectTurnToolSteps,
   sessionsCursorScope,
 } from './wireProjections'
+
+/**
+ * Session GET may omit a permanently invalid checkpoint (option C, #1043).
+ * Transient worker/IO failures still reject; continuation POST uses the strict store.
+ */
+export async function loadSessionModelStepCheckpoint(
+  store: Pick<ModelStepCheckpointStore, 'loadLive'>,
+  sessionKey: string,
+  now = Date.now()
+): Promise<ModelStepCheckpointView | undefined> {
+  try {
+    const snapshot = await store.loadLive(sessionKey)
+    return snapshot ? toModelStepCheckpointView(snapshot, now) : undefined
+  } catch (error) {
+    if ((error as { code?: string } | null)?.code === MODEL_STEP_CHECKPOINT_CORRUPT)
+      return undefined
+    throw error
+  }
+}
 
 /**
  * Dependencies for the session-read RPC handlers, injected so the handlers can

@@ -515,7 +515,7 @@ describe('handleSessionMessagesRoute', () => {
     const sessionMessagesHandler: SessionMessagesHandler = vi
       .fn()
       .mockRejectedValueOnce(
-        new Error('Model-step checkpoint cp-private is blocked without expiry')
+        new Error('db worker timeout (2000ms) for op=model_step_checkpoint_load_live')
       )
       .mockResolvedValueOnce({ turns: [] })
     const req = makeReqWithParams('user-1', 'chatllm', 'c1')
