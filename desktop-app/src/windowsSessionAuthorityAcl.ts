@@ -351,7 +351,7 @@ try {
     return $snapshot
   }
   function Test-Owner([string]$sid, [bool]$privateObject, [bool]$isVolumeRoot) {
-    if ($privateObject) { return $sid -eq $currentSid }
+    if ($privateObject) { return $allowed -contains $sid }
     return ($allowed -contains $sid) -or ($isVolumeRoot -and $sid -eq $trustedInstallerSid)
   }
   function Get-OwnerClass([string]$sid) {

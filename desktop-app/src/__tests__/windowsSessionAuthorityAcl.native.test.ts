@@ -121,19 +121,41 @@ function addCurrentUserInheritOnlyFullControl(target: string): void {
     String.raw`
 $ErrorActionPreference = 'Stop'
 $target = [Environment]::GetEnvironmentVariable('EVENFIRE_ACL_TEST_TARGET')
-$acl = Get-TestAcl $target
-$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
-  [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
-$rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
-  $sid,
-  [System.Security.AccessControl.FileSystemRights]::FullControl,
-  $inheritance,
-  [System.Security.AccessControl.PropagationFlags]::InheritOnly,
-  [System.Security.AccessControl.AccessControlType]::Allow
+$acl = [IO.Directory]::GetAccessControl($target)
+$descriptor = [System.Security.AccessControl.RawSecurityDescriptor]::new(
+  $acl.GetSecurityDescriptorBinaryForm(),
+  0
 )
-$acl.AddAccessRule($rule)
-Set-TestAcl $target $acl
+$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$flags = [System.Security.AccessControl.AceFlags]::ContainerInherit -bor
+  [System.Security.AccessControl.AceFlags]::ObjectInherit -bor
+  [System.Security.AccessControl.AceFlags]::InheritOnly
+$ace = [System.Security.AccessControl.CommonAce]::new(
+  $flags,
+  [System.Security.AccessControl.AceQualifier]::AccessAllowed,
+  [int][System.Security.AccessControl.FileSystemRights]::FullControl,
+  $sid,
+  $false,
+  $null
+)
+$descriptor.DiscretionaryAcl.InsertAce($descriptor.DiscretionaryAcl.Count, $ace)
+$updatedBytes = [byte[]]::new($descriptor.BinaryLength)
+$descriptor.GetBinaryForm($updatedBytes, 0)
+$acl.SetSecurityDescriptorBinaryForm($updatedBytes)
+[IO.Directory]::SetAccessControl($target, $acl)
+$readBack = [System.Security.AccessControl.RawSecurityDescriptor]::new(
+  ([IO.Directory]::GetAccessControl($target)).GetSecurityDescriptorBinaryForm(),
+  0
+)
+$found = $false
+foreach ($entry in $readBack.DiscretionaryAcl) {
+  if ($entry -is [System.Security.AccessControl.CommonAce] -and
+    $entry.SecurityIdentifier.Value -eq $sid.Value -and
+    ($entry.AceFlags -band [System.Security.AccessControl.AceFlags]::InheritOnly) -ne 0) {
+    $found = $true
+  }
+}
+if (-not $found) { throw 'fixture-inherit-only-ace-not-persisted' }
 `,
     { EVENFIRE_ACL_TEST_TARGET: target }
   )
