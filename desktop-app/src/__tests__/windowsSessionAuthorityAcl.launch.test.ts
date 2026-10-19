@@ -122,19 +122,20 @@ describe('Windows session authority PowerShell launcher', () => {
         status: 2,
         stdout: JSON.stringify({
           ok: false,
-          phase: 'validate-authority-directory',
+          phase: 'validate-ancestor-owner-depth-7',
           errorType: 'UnauthorizedAccessException',
           hresult: '0x80070005',
-          detail: 'dacl-invalid',
+          detail: 'owner-invalid',
           innerErrorType: 'Win32Exception',
           innerHresult: '0x80070005',
           innerNativeOperation: 'access-check',
           innerNativeErrorCode: 5,
+          ownerClass: 'other',
         }),
       })
     )
     expect(captureError(runVerifier)).toMatch(
-      /"phase":"acl-verifier-rejected".*"verifierDetail":"dacl-invalid".*"verifierInnerErrorType":"Win32Exception".*"verifierInnerHresult":"0x80070005".*"verifierInnerNativeOperation":"access-check".*"verifierInnerNativeErrorCode":5/
+      /"phase":"acl-verifier-rejected".*"verifierPhase":"validate-ancestor-owner-depth-7".*"verifierDetail":"owner-invalid".*"verifierInnerErrorType":"Win32Exception".*"verifierInnerHresult":"0x80070005".*"verifierInnerNativeOperation":"access-check".*"verifierInnerNativeErrorCode":5.*"verifierOwnerClass":"other"/
     )
   })
 

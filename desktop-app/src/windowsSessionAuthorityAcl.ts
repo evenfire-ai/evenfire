@@ -280,6 +280,7 @@ public static class SessionAuthorityNative {
 '@
 try {
   $script:phase = 'compile-script'
+  $script:ownerClass = $null
   Add-Type -TypeDefinition $code -Language CSharp
   $script:phase = 'validate-request'
   $requestPayload = [Environment]::GetEnvironmentVariable('EVENFIRE_SESSION_AUTHORITY_ACL_REQUEST')
@@ -320,9 +321,18 @@ try {
     if ($privateObject) { return $sid -eq $currentSid }
     return $allowed -contains $sid
   }
+  function Get-OwnerClass([string]$sid) {
+    if ($sid -eq $currentSid) { return 'current-user' }
+    if ($sid -eq $systemSid) { return 'system' }
+    if ($sid -eq $administratorsSid) { return 'administrators' }
+    return 'other'
+  }
   function Test-PrincipalRules($snapshot, [bool]$privateObject, [string]$policyPhase) {
     $script:phase = $policyPhase
-    if (-not (Test-Owner $snapshot.OwnerSid $privateObject)) { throw 'owner-invalid' }
+    if (-not (Test-Owner $snapshot.OwnerSid $privateObject)) {
+      $script:ownerClass = Get-OwnerClass $snapshot.OwnerSid
+      throw 'owner-invalid'
+    }
     $present = @{}
     foreach ($ace in $snapshot.Aces) {
       if ($ace.Qualifier -notin @('AccessAllowed', 'AccessDenied')) { throw 'ace-invalid' }
@@ -451,6 +461,7 @@ try {
     innerHresult = if ($innerException) { '0x{0:X8}' -f $innerException.HResult } else { $null }
     innerNativeOperation = if ($innerException) { $innerException.Data['sessionAuthorityOperation'] } else { $null }
     innerNativeErrorCode = if ($innerException -is [ComponentModel.Win32Exception]) { $innerException.NativeErrorCode } else { $null }
+    ownerClass = $script:ownerClass
   } | ConvertTo-Json -Compress
   exit 2
 }
@@ -485,11 +496,18 @@ function sanitizedWindowsAclFailure(stdout: string): {
       'innerHresult',
       'innerNativeOperation',
       'innerNativeErrorCode',
+      'ownerClass',
     ] as const) {
       const item = fields[field]
       if (field === 'innerNativeErrorCode') {
         if (typeof item === 'number' && Number.isSafeInteger(item) && item >= 0 && item <= 0xffff) {
           safe[field] = item
+        }
+        continue
+      }
+      if (field === 'ownerClass') {
+        if (['current-user', 'system', 'administrators', 'other'].includes(item as string)) {
+          safe[field] = item as string
         }
         continue
       }
@@ -554,6 +572,7 @@ function safePowerShellFailure(result: SpawnSyncReturns<string>, fallbackPhase: 
     'innerHresult',
     'innerNativeOperation',
     'innerNativeErrorCode',
+    'ownerClass',
   ] as const) {
     const value = verifierFailure.fields[field]
     if (value) diagnostic[`verifier${field[0]!.toUpperCase()}${field.slice(1)}`] = value
