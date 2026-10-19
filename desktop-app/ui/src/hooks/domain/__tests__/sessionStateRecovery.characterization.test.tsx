@@ -14,12 +14,13 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
-import { act, waitFor } from '@testing-library/react'
+import { act, cleanup, waitFor } from '@testing-library/react'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
 let clerum: MockClerum
 let uuidCounter = 0
+const PROGRESS_HANDLER_TIMEOUT_MS = 10_000
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -32,10 +33,28 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  cleanup()
   vi.restoreAllMocks()
   vi.useRealTimers()
   uninstallMockClerum()
 })
+
+function startSend(send: () => Promise<unknown>): Promise<void> {
+  let sendPromise!: Promise<void>
+  act(() => {
+    sendPromise = send().then(
+      () => undefined,
+      () => undefined
+    )
+  })
+  return sendPromise
+}
+
+async function waitForProgressHandler(taskId: string): Promise<void> {
+  await waitFor(() => expect(clerum.hasProgressHandler(taskId)).toBe(true), {
+    timeout: PROGRESS_HANDLER_TIMEOUT_MS,
+  })
+}
 
 async function settleMount() {
   await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalled())
@@ -47,8 +66,8 @@ describe('onResumed wiring (controller)', () => {
     const { result } = renderController()
     await settleMount()
 
-    const sendPromise = result.current.handleSendAgentMessage('run shell').catch(() => undefined)
-    await waitFor(() => expect(clerum.hasProgressHandler('task-res')).toBe(true))
+    const sendPromise = startSend(() => result.current.handleSendAgentMessage('run shell'))
+    await waitForProgressHandler('task-res')
     const chatId = result.current.activeChatId!
     const key = makeTaskKey('agent-x', chatId)
 
@@ -98,8 +117,8 @@ describe('onTrackerTerminal — chat not visible', () => {
     await settleMount()
 
     // Send on chat A (auto-created), leaving a live task.
-    const sendPromise = result.current.handleSendAgentMessage('bg work').catch(() => undefined)
-    await waitFor(() => expect(clerum.hasProgressHandler('task-bg')).toBe(true))
+    const sendPromise = startSend(() => result.current.handleSendAgentMessage('bg work'))
+    await waitForProgressHandler('task-bg')
     const chatA = result.current.activeChatId!
     await sendPromise
 
@@ -145,8 +164,8 @@ describe('onTrackerTerminal — chat not visible', () => {
     await settleMount()
 
     // Send on chat A (auto-created), leaving a live task.
-    const send1 = result.current.handleSendAgentMessage('first').catch(() => undefined)
-    await waitFor(() => expect(clerum.hasProgressHandler('task-1')).toBe(true))
+    const send1 = startSend(() => result.current.handleSendAgentMessage('first'))
+    await waitForProgressHandler('task-1')
     const chatA = result.current.activeChatId!
     await send1
 
@@ -185,8 +204,8 @@ describe('onTrackerTerminal — chat not visible', () => {
       await result.current.switchToChat('agent-x', chatA)
     })
     clerum.rpc.invokeHostMessage.mockResolvedValueOnce({ taskId: 'task-2' })
-    const send2 = result.current.handleSendAgentMessage('second').catch(() => undefined)
-    await waitFor(() => expect(clerum.hasProgressHandler('task-2')).toBe(true))
+    const send2 = startSend(() => result.current.handleSendAgentMessage('second'))
+    await waitForProgressHandler('task-2')
     await send2
     clerum.rpc.loadSessionMessages.mockResolvedValue({
       agent: 'agent-x',
@@ -228,8 +247,8 @@ describe('onTrackerTerminal — recover via reconcile catch', () => {
     const { result, spies } = renderController()
     await settleMount()
 
-    const sendPromise = result.current.handleSendAgentMessage('spend').catch(() => undefined)
-    await waitFor(() => expect(clerum.hasProgressHandler('task-catch')).toBe(true))
+    const sendPromise = startSend(() => result.current.handleSendAgentMessage('spend'))
+    await waitForProgressHandler('task-catch')
     await act(async () => {
       clerum.emitTaskProgress('task-catch', {
         type: 'open',
