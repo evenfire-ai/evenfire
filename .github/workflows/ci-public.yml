@@ -84,8 +84,10 @@ jobs:
             pinned_suites: gfsClient.retry429.test.ts logPayloadKeys.test.ts taskExecutor.test.ts
             pinned_cases: ../scripts/ci/pinned-vitest-cases/mcp-host.json
           - service: control-api
-            pinned_suites: helpers.realPostgresTeardown.test.ts routes.mcp-host.llmProviderAttempts.test.ts
+            pinned_suites: helpers.realPostgresTeardown.test.ts routes.mcp-host.llmProviderAttempts.test.ts passwordRecovery.http.contract.test.ts
             pinned_cases: ../scripts/ci/pinned-vitest-cases/control-api.json
+          - service: external-rest-api
+            pinned_suites: invitations.passwordRecovery.public.test.ts
           - service: codex-llm-proxy
             pinned_suites: originPolicy.test.ts server.security.test.ts
             pinned_cases: ../scripts/ci/pinned-vitest-cases/codex-llm-proxy.json
@@ -166,6 +168,18 @@ jobs:
       - name: Install External REST contract-test dependencies
         if: matrix.service == 'control-api'
         working-directory: external-rest-api
+        run: npm ci
+
+      - name: Build External REST composed HTTP child
+        if: matrix.service == 'control-api'
+        working-directory: external-rest-api
+        run: npm run build
+
+      # Inherited entity-change contracts still import Control API sources.
+      # directly, so install the producer's dependencies in this isolated job.
+      - name: Install Control API producer dependencies
+        if: matrix.service == 'external-rest-api'
+        working-directory: control-api
         run: npm ci
 
       # Desktop strict-pixel fixture checks consume the Host's locked native
@@ -264,6 +278,35 @@ jobs:
             node ../scripts/ci/assert-pinned-vitest-suites.mjs --cases "$report" "$PINNED_CASES"
           fi
 
+      # This browser journey is part of the branch-protection-required External
+      # REST matrix context. Keep it here so its failure blocks the existing
+      # required check instead of creating an optional standalone CI job.
+      - name: Install frontend components for Profile UI recovery browser tests
+        if: matrix.service == 'external-rest-api'
+        working-directory: packages/frontend-components
+        run: npm ci
+
+      - name: Install Profile UI dependencies for recovery browser tests
+        if: matrix.service == 'external-rest-api'
+        working-directory: profile-ui
+        run: npm ci
+
+      - name: Install Profile UI recovery Playwright dependencies
+        if: matrix.service == 'external-rest-api'
+        working-directory: tests/e2e/playwright
+        run: npm ci
+
+      - name: Install Profile UI recovery Chromium
+        if: matrix.service == 'external-rest-api'
+        working-directory: tests/e2e/playwright
+        timeout-minutes: 15
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Profile UI recovery browser journeys
+        if: matrix.service == 'external-rest-api'
+        timeout-minutes: 25
+        run: make test-playwright-profile-ui-recovery
+
       - name: Test web-search image with isolated DNS TLS and MCP
         if: matrix.service == 'mcp-servers/web-search'
         working-directory: mcp-servers/web-search
@@ -336,16 +379,18 @@ jobs:
         run: npx tsc --noEmit
 
   # ─── real-Postgres integration suites ─────────────────────────────────────
-  # Runs EVERY *.realPostgres.integration suite against a real Postgres 16: the
-  # DB migration plus the GFS reader-role / blob-migration / blob-reconciler /
+  # Runs repository-local *.realPostgres.integration suites against real
+  # Postgres 16: the DB migration plus the GFS reader-role / blob-migration / blob-reconciler /
   # audit-evidence / copy / readiness / structural-integrity suites in
   # control-api, and the rename-publication concurrency suite in gfs-controller.
-  # All of them are gated on CONTROL_API_REAL_PG_ADMIN_URL and SKIP when it is
-  # unset, so the matrix `npm test` never exercises them — this job is the only
-  # place they actually run. Catches the exact class of failure (a config/env or
-  # role/credential gap surfacing at migration or query time) that otherwise
-  # only appears at deploy. Runs unconditionally in the public repo (no
-  # paths-filter): correctness over CI minutes on a low-volume repo.
+  # Repository-local suites are gated on CONTROL_API_REAL_PG_ADMIN_URL and skip
+  # when it is unset, so this job runs them against real PostgreSQL 16. The
+  # cross-service password-recovery suite using the private Member Registration
+  # producer is excluded below and runs in the owner-controlled integration
+  # environment with that producer and its database. Catches the exact class of
+  # failure (a config/env or role/credential gap surfacing at migration or query
+  # time) that otherwise only appears at deploy. Runs unconditionally in the
+  # public repo (no paths-filter): correctness over CI minutes on a low-volume repo.
   control-api-migration:
     name: Real Postgres integration (Postgres 16)
     runs-on: ubuntu-latest
@@ -530,6 +575,15 @@ jobs:
         working-directory: external-rest-api
         run: npm ci
 
+      - name: Build External REST composed HTTP child
+        working-directory: external-rest-api
+        run: npm run build
+
+      - name: Validate recovery suite selection contract
+        env:
+          CODEX_SCRATCH_ROOT: ${{ runner.temp }}
+        run: node --test scripts/tests/password-recovery-suite-contract.test.mjs
+
       - name: Run control-api real Postgres suites (migration + GFS)
         working-directory: control-api
         env:
@@ -554,8 +608,23 @@ jobs:
           report="$(mktemp)"
           trap 'rm -f "$log_file" "$normalized_log" "$report"' EXIT
           test -n "${CONTROL_API_REAL_PG_ADMIN_URL}"
+          # These cross-service recovery suites use the private Member Registration
+          # producer and its database, neither of which is available to public CI.
+          # They run with the real producer and PostgreSQL in the dedicated local
+          # integration lane; do not replace them with a test-only token producer.
+          node ../scripts/ci/password-recovery-suite-contract.mjs verify
+          private_selection="$(node ../scripts/ci/password-recovery-suite-contract.mjs private all)"
+          mapfile -t private_suites <<< "$private_selection"
+          test "${#private_suites[@]}" -eq 2
+          exclude_args=()
+          for suite in "${private_suites[@]}"; do
+            test -s "$suite"
+            exclude_args+=(--exclude "$suite")
+          done
           FORCE_COLOR=0 NO_COLOR=1 npm test -- --run realPostgres \
+            "${exclude_args[@]}" \
             --reporter=default --reporter=json --outputFile="$report" 2>&1 | tee "$log_file"
+          node ../scripts/ci/password-recovery-suite-contract.mjs report publicPostgres "$report"
           sed $'s/\033\\[[0-9;]*m//g' "$log_file" > "$normalized_log"
           grep -Eq 'Test Files[[:space:]]+[1-9][0-9]* passed' "$normalized_log" || {
             echo 'real-Postgres control-api lane executed zero passing test files' >&2
@@ -726,6 +795,13 @@ jobs:
           cache-dependency-path: tests/e2e/package-lock.json
       - name: Run descriptor-bound fixture unit suites
         run: E2E_VITEST_SUITE_GROUP=node-unit bash scripts/e2e/run-vitest-e2e.sh
+      - name: Run E2E static-audit regression matrix
+        run: python3 -m tools.test_e2e_static_audit_scope
+      - name: Audit live Profile UI recovery Playwright spec
+        run: >-
+          python3 tools/e2e_static_audit.py
+          tests/e2e/playwright/profile-ui-recovery/reset-session-hydration.spec.ts
+          tests/e2e/playwright/profile-ui-recovery/ordinary-invitation-onboarding.spec.ts
 
   # ─── Registry contract — boot evenfire-registry and drive the real client ──
   # Catches wire-format drift in clerumRegistryClient.ts before merge. Requires

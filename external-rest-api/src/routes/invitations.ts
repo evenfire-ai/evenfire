@@ -1,15 +1,18 @@
 import { NextFunction, Request, Response, Router } from 'express'
 import { verifyToken } from '../authToken.js'
+import { ControlApiError } from '../controlApiClient.js'
 import { sendPasswordAuthorityError } from '../http/passwordAdmissionError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 import { createRateLimiter } from '../middleware/rateLimit.js'
+import {
+  setupInvitationPassword,
+  setupInvitationPasswordWithToken,
+} from '../services/invitationPasswordService.js'
 import {
   acceptInvitation,
   createDesktopAuthorization,
   getInvitationByToken,
   listPendingInvitations,
-  setupInvitationPassword,
-  setupInvitationPasswordWithToken,
 } from '../services/invitationsService.js'
 import { clearProfileSessionCookie, setProfileSessionCookie } from '../sessionCookie.js'
 
@@ -18,6 +21,12 @@ const acceptRateLimit = createRateLimiter({ windowMs: 60_000, maxRequests: 10 })
 
 function requestedSessionContract(req: Request): 'v2' | undefined {
   return req.header('x-evenfire-session-contract') === 'v2' ? 'v2' : undefined
+}
+
+type InvitationPasswordAuth = {
+  userId: string
+  email: string
+  sessionToken: string
 }
 
 function sendAcceptInvitationError(
@@ -45,14 +54,25 @@ function sendAcceptInvitationError(
 
 function sendInvitationPasswordError(
   res: Response,
-  error: 'not_found' | 'forbidden' | 'not_accepted' | 'not_pending' | 'expired' | 'invalid_password'
+  error:
+    | 'not_found'
+    | 'forbidden'
+    | 'not_accepted'
+    | 'not_pending'
+    | 'expired'
+    | 'invalid_invitation'
+    | 'invalid_password'
 ): void {
+  if (error === 'invalid_invitation') {
+    res.status(400).json({ error: 'invalid_invitation' })
+    return
+  }
   if (error === 'not_found') {
     res.status(404).json({ error: 'Invitation not found' })
     return
   }
   if (error === 'forbidden') {
-    res.status(403).json({ error: 'Invitation email does not match authenticated user' })
+    res.status(403).json({ error: 'Invitation is invalid or unavailable' })
     return
   }
   if (error === 'not_accepted') {
@@ -70,6 +90,127 @@ function sendInvitationPasswordError(
   res.status(400).json({ error: 'Password must be between 8 and 256 characters' })
 }
 
+function sendPasswordResetError(
+  res: Response,
+  error:
+    | 'not_found'
+    | 'forbidden'
+    | 'not_accepted'
+    | 'not_pending'
+    | 'expired'
+    | 'invalid_invitation'
+    | 'invalid_password'
+): void {
+  const response = {
+    not_found: { status: 404, code: 'not_found', message: 'Invitation not found' },
+    forbidden: {
+      status: 403,
+      code: 'forbidden',
+      message: 'Invitation is invalid or unavailable',
+    },
+    not_accepted: {
+      status: 409,
+      code: 'invitation_not_accepted',
+      message: 'Invitation must be accepted before setting a password',
+    },
+    not_pending: {
+      status: 409,
+      code: 'invitation_not_pending',
+      message: 'Invitation has already been used',
+    },
+    expired: { status: 410, code: 'expired', message: 'Invitation has expired' },
+    invalid_invitation: {
+      status: 400,
+      code: 'invalid_invitation',
+      message: 'This recovery link is invalid or expired',
+    },
+    invalid_password: {
+      status: 400,
+      code: 'invalid_password',
+      message: 'Password must be between 8 and 256 characters',
+    },
+  }[error]
+  res.status(response.status).json({ error: response.code, message: response.message })
+}
+
+async function invitationPasswordAuthFromRequest(req: Request): Promise<
+  | { auth: InvitationPasswordAuth }
+  | {
+      status: number
+      body: Record<string, string>
+    }
+> {
+  const sessionToken = extractAuthToken(req)
+  if (sessionToken) {
+    const claims = verifyToken(sessionToken)
+    if (claims) {
+      return { auth: { userId: claims.userId, email: claims.email, sessionToken } }
+    }
+  }
+
+  const token = String(req.body?.token || '').trim()
+  const email = String(req.body?.email || '')
+    .trim()
+    .toLowerCase()
+  if (!token || !email) {
+    return { status: 401, body: { error: 'Unauthorized' } }
+  }
+
+  const accepted = await acceptInvitation(token, email, requestedSessionContract(req))
+  if (accepted.error) {
+    const response = {
+      invalid: { status: 400, body: { error: 'Invalid invitation' } },
+      not_found: { status: 404, body: { error: 'Invitation not found' } },
+      forbidden: {
+        status: 403,
+        body: { error: 'Invitation email does not match authenticated user' },
+      },
+      expired: { status: 410, body: { error: 'Invitation has expired' } },
+      not_pending: { status: 400, body: { error: 'Invitation is not pending' } },
+    }[accepted.error]
+    return response ?? { status: 502, body: { error: 'Failed to start invited session' } }
+  }
+  if (!accepted.data?.token || !accepted.data.userId) {
+    return { status: 502, body: { error: 'Failed to start invited session' } }
+  }
+
+  return {
+    auth: {
+      userId: accepted.data.userId,
+      email: accepted.data.email,
+      sessionToken: accepted.data.token,
+    },
+  }
+}
+
+function isInvalidInvitationProof(error: unknown): boolean {
+  return (
+    error instanceof ControlApiError && error.status === 400 && error.code === 'invalid_invitation'
+  )
+}
+
+async function completePasswordReset(
+  req: Request,
+  res: Response,
+  token: string,
+  email: string,
+  invitationId: string,
+  password: string,
+  sendError: typeof sendInvitationPasswordError = sendInvitationPasswordError
+): Promise<void> {
+  const result = await setupInvitationPasswordWithToken(token, email, invitationId, password)
+  if (result.error) {
+    sendError(res, result.error)
+    return
+  }
+  if (!result.data) {
+    res.status(502).json({ error: 'Password recovery service returned an invalid response' })
+    return
+  }
+  clearProfileSessionCookie(req, res)
+  res.status(200).json({ ...result.data, reauthenticationRequired: true })
+}
+
 export function createInvitationsRouter(): Router {
   const router = Router()
 
@@ -81,7 +222,16 @@ export function createInvitationsRouter(): Router {
         return
       }
 
-      const invitation = await getInvitationByToken(token)
+      let invitation: Awaited<ReturnType<typeof getInvitationByToken>>
+      try {
+        invitation = await getInvitationByToken(token)
+      } catch (error) {
+        if (isInvalidInvitationProof(error)) {
+          res.status(400).json({ error: 'invalid_invitation' })
+          return
+        }
+        throw error
+      }
       if (!invitation) {
         res.status(404).json({ error: 'Invitation not found' })
         return
@@ -101,29 +251,34 @@ export function createInvitationsRouter(): Router {
         return
       }
 
-      const sessionToken = extractAuthToken(req)
-      const claims = sessionToken ? verifyToken(sessionToken) : null
-      const invitationToken = String(req.body?.token || '').trim()
-      const invitationEmail = String(req.body?.email || '')
+      const token = String(req.body?.token || '').trim()
+      const email = String(req.body?.email || '')
         .trim()
         .toLowerCase()
-      if (!claims && (!invitationToken || !invitationEmail)) {
-        res.status(401).json({ error: 'Unauthorized' })
+      if (token && email) {
+        let preview: Awaited<ReturnType<typeof getInvitationByToken>>
+        try {
+          preview = await getInvitationByToken(token)
+        } catch (error) {
+          if (isInvalidInvitationProof(error)) {
+            res.status(400).json({ error: 'invalid_invitation' })
+            return
+          }
+          throw error
+        }
+        if (preview?.purpose === 'password_reset') {
+          await completePasswordReset(req, res, token, email, invitationId, password)
+          return
+        }
+      }
+
+      const authResult = await invitationPasswordAuthFromRequest(req)
+      if ('status' in authResult) {
+        res.status(authResult.status).json(authResult.body)
         return
       }
-      const result = claims
-        ? await setupInvitationPassword(
-            { userId: claims.userId, email: claims.email, sessionToken },
-            invitationId,
-            password
-          )
-        : await setupInvitationPasswordWithToken({
-            token: invitationToken,
-            email: invitationEmail,
-            invitationId,
-            password,
-            sessionContract: requestedSessionContract(req),
-          })
+
+      const result = await setupInvitationPassword(authResult.auth, invitationId, password)
       if (result.error) {
         sendInvitationPasswordError(res, result.error)
         return
@@ -131,6 +286,38 @@ export function createInvitationsRouter(): Router {
       clearProfileSessionCookie(req, res)
       res.status(200).json({ ...result.data, reauthenticationRequired: true })
     } catch (error) {
+      if (sendPasswordAuthorityError(error, res)) return
+      next(error)
+    }
+  })
+
+  router.post('/invitations/password-reset', acceptRateLimit, async (req: Request, res, next) => {
+    try {
+      const invitationId = String(req.body?.invitationId || '').trim()
+      if (!invitationId) {
+        res.status(400).json({ error: 'invitationId is required' })
+        return
+      }
+      const token = String(req.body?.token || '').trim()
+      const email = String(req.body?.email || '')
+        .trim()
+        .toLowerCase()
+      if (!token || !email) {
+        res.status(401).json({ error: 'Unauthorized' })
+        return
+      }
+      const password = String(req.body?.password || '')
+      await completePasswordReset(
+        req,
+        res,
+        token,
+        email,
+        invitationId,
+        password,
+        sendPasswordResetError
+      )
+    } catch (error) {
+      if (sendPasswordAuthorityError(error, res)) return
       next(error)
     }
   })

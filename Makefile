@@ -1576,6 +1576,12 @@ test-playwright-desktop: ## Run Playwright tests for Desktop App only (requires:
 	@echo "Running Playwright Desktop App tests..."
 	cd tests/e2e/playwright && npx playwright test --project=desktop
 
+.PHONY: test-playwright-profile-ui-recovery
+test-playwright-profile-ui-recovery: ## Audit and run the Profile UI password-recovery browser journey
+	@python3 tools/e2e_static_audit.py tests/e2e/playwright/profile-ui-recovery/reset-session-hydration.spec.ts
+	@python3 tools/e2e_static_audit.py tests/e2e/playwright/profile-ui-recovery/ordinary-invitation-onboarding.spec.ts
+	@cd tests/e2e/playwright && node run-profile-ui-recovery.mjs
+
 .PHONY: test-playwright-headed
 test-playwright-headed: ## Run Control UI Playwright tests in headed mode (visible browser)
 	cd tests/e2e/playwright && npx playwright test --project=control-ui --headed

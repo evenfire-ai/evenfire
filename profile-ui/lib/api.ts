@@ -77,6 +77,17 @@ export class AuthExpiredError extends Error {
   }
 }
 
+export class ProfileApiError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string | null,
+    message: string
+  ) {
+    super(message)
+    this.name = 'ProfileApiError'
+  }
+}
+
 export function setGlobalAuthErrorHandler(handler: () => void): void {
   globalHandleAuthError = handler
 }
@@ -203,17 +214,31 @@ export async function apiSend(
     if (res.status === 401) handleUnauthorized()
     const publicError = publicErrorFields(text)
     const detail = publicError.detail || res.statusText
-    if (publicError.code === 'member_registration_unavailable') {
+    // Substring match is REQUIRED here (not === like control-ui): profile-ui reaches
+    // control-api through external-rest-api, whose error middleware collapses any 5xx
+    // into { message: "Control API ... failed (503): <code>" }, so the code arrives
+    // embedded in a wrapper string rather than as the bare { error: '<code>' } body.
+    if (
+      publicError.code === 'member_registration_unavailable' ||
+      detail.includes('member_registration_unavailable')
+    ) {
       throw new Error(
         "Invitations are unavailable — the member-registration service isn't configured or can't be reached. Check the server logs for details."
       )
     }
-    if (publicError.code === 'member_registration_misconfigured') {
+    if (
+      publicError.code === 'member_registration_misconfigured' ||
+      detail.includes('member_registration_misconfigured')
+    ) {
       throw new Error(
         'Invitations are unavailable — member registration is misconfigured. Check the server logs for details.'
       )
     }
-    throw new Error(`${res.status} ${res.statusText} - ${detail}`)
+    throw new ProfileApiError(
+      res.status,
+      publicError.code ?? null,
+      `${res.status} ${res.statusText} - ${detail}`
+    )
   }
   if (res.status === 204) {
     return null
@@ -300,6 +325,22 @@ export async function setupInvitationPassword(
 }
 
 export async function setupInvitationPasswordWithToken(
+  invitationUrlId: string,
+  email: string,
+  invitationId: string,
+  password: string
+): Promise<InvitationPreview & { passwordUpdated: boolean }> {
+  const response = (await apiSend('POST', '/api/v1/invitations/password-reset', {
+    token: invitationUrlId,
+    email,
+    invitationId,
+    password,
+  })) as InvitationPreview & { passwordUpdated: boolean }
+  clearToken()
+  return response
+}
+
+export async function setupAcceptedInvitationPasswordWithToken(
   invitationUrlId: string,
   email: string,
   invitationId: string,

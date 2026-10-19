@@ -102,6 +102,24 @@ export type DbTransactionClient = DbClient & {
 export type DbTransactionOptions = {
   signal?: AbortSignal
   onDatabaseFailure?: (error: unknown) => unknown
+  /** Called only after PostgreSQL acknowledges COMMIT. Must be synchronous and non-throwing. */
+  onCommitAcknowledged?: () => void
+  /** Called when COMMIT was sent but PostgreSQL did not acknowledge its outcome. */
+  onCommitOutcomeUnknown?: () => void
+}
+
+const UNKNOWN_COMMIT_OUTCOME_SQLSTATES = new Set(['08007', '40003'])
+
+function isDefinitivePostgresCommitErrorResponse(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const response = error as { name?: unknown; code?: unknown; severity?: unknown }
+  return (
+    response.name === 'error' &&
+    typeof response.code === 'string' &&
+    /^[0-9A-Z]{5}$/.test(response.code) &&
+    response.severity === 'ERROR' &&
+    !UNKNOWN_COMMIT_OUTCOME_SQLSTATES.has(response.code)
+  )
 }
 
 type DbSessionClient = DbClient & {
@@ -7212,6 +7230,14 @@ export async function withTransaction<T>(
       if (checkSignalAfter) signal?.throwIfAborted()
       return result
     } catch (error) {
+      if (
+        text === 'COMMIT' &&
+        commitSent &&
+        !transactionFinished &&
+        !isDefinitivePostgresCommitErrorResponse(error)
+      ) {
+        options.onCommitOutcomeUnknown?.()
+      }
       signal?.throwIfAborted()
       throw mapDatabaseFailure(error)
     }
@@ -7274,6 +7300,7 @@ export async function withTransaction<T>(
     commitSent = true
     await executeQuery('COMMIT', undefined, false)
     transactionFinished = true
+    options.onCommitAcknowledged?.()
     return result
   } catch (error) {
     if (commitSent || !transactionStarted) {

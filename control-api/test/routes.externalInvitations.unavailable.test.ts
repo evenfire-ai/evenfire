@@ -168,6 +168,12 @@ describe('external invitation routes when the hub is unavailable', () => {
       email: 'a@b.c',
       invitationUuid: 'database-secret-capability',
     })
+    directory.getInvitationByToken.mockResolvedValue({
+      id: '00000000-0000-4000-8000-000000000200',
+      email: 'a@b.c',
+      purpose: 'password_reset',
+      status: 'pending',
+    })
     directory.setInvitationPasswordForEmail.mockResolvedValue({
       data: {
         id: '00000000-0000-4000-8000-000000000200',
@@ -175,6 +181,13 @@ describe('external invitation routes when the hub is unavailable', () => {
         passwordUpdated: true,
         authGeneration: 1,
         lifecycleState: 'active',
+        sessionContext: {
+          userId: '00000000-0000-4000-8000-000000000001',
+          email: 'a@b.c',
+          teamId: null,
+          role: 'member',
+          authGeneration: 1,
+        },
       },
     })
 
@@ -188,12 +201,36 @@ describe('external invitation routes when the hub is unavailable', () => {
     expect(response.status).toBe(200)
     expect(response.body.reauthenticationRequired).toBe(true)
     expect(response.body).not.toHaveProperty('token')
+    expect(directory.getInvitationByToken).toHaveBeenCalledWith('database-secret-capability')
     expect(directory.setInvitationPasswordForEmail).toHaveBeenCalledWith(
       'a@b.c',
-      'database-secret-capability',
       '00000000-0000-4000-8000-000000000200',
       'valid-password'
     )
+    expect(tokenSigner.sign).not.toHaveBeenCalled()
+  })
+
+  it('rejects a recovery row id that does not match the trusted token capability', async () => {
+    flow.validateInvitationFlowToken.mockResolvedValue({
+      email: 'a@b.c',
+      invitationUuid: 'database-secret-capability',
+    })
+    directory.getInvitationByToken.mockResolvedValue({
+      id: '00000000-0000-4000-8000-000000000201',
+      email: 'a@b.c',
+      purpose: 'password_reset',
+      status: 'pending',
+    })
+
+    const response = await request(app()).post('/external/invitations/password-token').send({
+      email: 'a@b.c',
+      token: 'member-registration-flow-token',
+      invitationId: '00000000-0000-4000-8000-000000000200',
+      password: 'valid-password',
+    })
+
+    expect(response.status).toBe(403)
+    expect(directory.setInvitationPasswordForEmail).not.toHaveBeenCalled()
     expect(tokenSigner.sign).not.toHaveBeenCalled()
   })
 

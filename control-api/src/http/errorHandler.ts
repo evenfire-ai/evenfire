@@ -1,8 +1,13 @@
 import type { NextFunction, Request, Response } from 'express'
 import { ApiException } from '@kubernetes/client-node'
 import { STATUS_CODES } from 'node:http'
+import { clearRateLimitHeaders } from '../middleware/rateLimitMiddleware.js'
 import { rootLogger } from '../observability/logger.js'
 import { ExternalSessionIssuanceUnavailableError } from '../services/auth/externalSessionIssuanceError.js'
+import {
+  PasswordMutationInternalError,
+  passwordMutationCauseKind,
+} from '../services/auth/passwordAdmissionError.js'
 import { memberRegistrationErrorResponse } from '../services/memberRegistrationErrors.js'
 import { sendPublicApiError } from './publicApiError.js'
 
@@ -159,6 +164,23 @@ export function clerumErrorHandler(
   // synthesize a short tag for legacy paths.
   const correlationId = req.correlationId ?? Math.random().toString(36).slice(2, 10)
   const log = req.log ?? rootLogger
+
+  if (err instanceof PasswordMutationInternalError) {
+    log.error(
+      {
+        event: 'password_mutation_callback_failed',
+        stage: 'mutation_callback',
+        causeKind: passwordMutationCauseKind(err.cause),
+        correlationId,
+      },
+      'password mutation callback failed'
+    )
+    clearRateLimitHeaders(res)
+    res.removeHeader('Retry-After')
+    res.setHeader('Cache-Control', 'no-store')
+    res.status(500).json({ error: err.code, correlationId })
+    return
+  }
 
   if (err instanceof ExternalSessionIssuanceUnavailableError) {
     log.warn(

@@ -1,12 +1,8 @@
-import bcrypt from 'bcryptjs'
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import { config } from '../../config.js'
 import { type DbClient, pool, withTransaction } from '../../db.js'
 import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAuthentication.js'
-import {
-  revokeAllUserSessions,
-  validateExternalSessionAuthorityContext,
-} from '../auth/userSessionService.js'
+import { validateExternalSessionAuthorityContext } from '../auth/userSessionService.js'
 import { registerAndSendInvitation } from '../invitationFlowRegistrationService.js'
 import { appendControlApiPermissionEventsInTransaction } from '../tracing/controlApiPermissionEvents.js'
 import type { InviteRole, TeamRole } from './types.js'
@@ -17,6 +13,15 @@ import {
   roleCanInviteMembers,
 } from './types.js'
 import { DesktopUserRetirementError, retireDesktopUser } from './users.js'
+
+export {
+  setInvitationPasswordForEmail,
+  setInvitationPasswordForUser,
+  updateUserPassword,
+} from './memberPassword.js'
+export { withPasswordWorkLease as withMemberPasswordWorkLease } from '../auth/passwordWorkOwnership.js'
+export type { MemberPasswordWorkLease } from '../auth/passwordWorkOwnership.js'
+export { requestProfilePasswordReset } from './passwordResetInvitations.js'
 
 export const INVITATION_TTL_HOURS = 48
 const DRAFT_INVITATION_CLEANUP_HOURS = 24
@@ -1029,34 +1034,6 @@ export async function createPasswordSetupInvitationForUser(userId: string) {
   }
 }
 
-export async function requestProfilePasswordReset(email: string): Promise<{ requested: true }> {
-  const normalizedEmail = email.trim().toLowerCase()
-  if (!normalizedEmail) return { requested: true }
-
-  const userResult = await pool.query(
-    `SELECT id, email, name
-       FROM users
-      WHERE email = $1
-        AND lifecycle_state = 'active'
-      LIMIT 1`,
-    [normalizedEmail]
-  )
-  const user =
-    (userResult.rows[0] as { id: string; email: string; name: string | null } | undefined) || null
-  if (!user) {
-    return { requested: true }
-  }
-
-  await createInvitationForTeams({
-    inviteeName: user.name || user.email.split('@')[0] || user.email,
-    email: user.email,
-    purpose: 'password_reset',
-    teamAssignments: [],
-    fallbackRole: 'member',
-  })
-  return { requested: true }
-}
-
 export async function softDeleteMember(teamId: string, userId: string, operatorSub: string) {
   return withTransaction(async db => {
     const result = await db.query(
@@ -1241,210 +1218,6 @@ export async function getInvitationByToken(token: string) {
       ).rows[0] as InvitationUserRow | undefined) || null
   const teams = await loadInvitationTeams(pool, invitation.id, invitation)
   return invitationResponse(invitation, user, teams)
-}
-
-export async function setInvitationPasswordForUser(
-  userId: string,
-  email: string,
-  invitationId: string,
-  password: string
-) {
-  const trimmedUserId = userId.trim()
-  const normalizedEmail = email.trim().toLowerCase()
-  const trimmedInvitationId = invitationId.trim()
-  const trimmedPassword = password.trim()
-  if (!trimmedUserId || !normalizedEmail || !trimmedInvitationId) {
-    return { error: 'not_found' as const }
-  }
-  if (trimmedPassword.length < 8 || trimmedPassword.length > 256) {
-    return { error: 'invalid_password' as const }
-  }
-
-  return withTransaction(async db => {
-    const invitation = await getInvitationRecordById(db, trimmedInvitationId, { lock: true })
-    if (!invitation) {
-      return { error: 'not_found' as const }
-    }
-    if (invitation.email.toLowerCase() !== normalizedEmail) {
-      return { error: 'forbidden' as const }
-    }
-    if (invitation.purpose === 'password_reset') {
-      if (invitation.expires_at.getTime() <= Date.now()) {
-        return { error: 'expired' as const }
-      }
-      if (invitation.status !== 'pending') {
-        return { error: 'not_pending' as const }
-      }
-    } else if (
-      invitation.purpose === 'member_invitation' ||
-      invitation.purpose === 'admin_desktop_access'
-    ) {
-      if (invitation.status !== 'accepted') {
-        return { error: 'not_accepted' as const }
-      }
-      if (
-        !invitation.accepted_at ||
-        invitation.accepted_at.getTime() > invitation.expires_at.getTime()
-      ) {
-        return { error: 'expired' as const }
-      }
-    } else {
-      return { error: 'not_found' as const }
-    }
-
-    const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
-    if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
-    if (user.id !== trimmedUserId) {
-      return { error: 'forbidden' as const }
-    }
-    if (invitation.purpose !== 'password_reset' && invitation.accepted_user_id !== trimmedUserId) {
-      return { error: 'forbidden' as const }
-    }
-    if (invitation.purpose !== 'password_reset' && user.password_hash) {
-      return { error: 'password_already_set' as const }
-    }
-    if (invitation.purpose === 'password_reset') {
-      const consumed = await db.query(
-        `UPDATE invitations
-            SET status = 'accepted',
-                accepted_at = NOW(),
-                accepted_user_id = $2
-          WHERE id = $1
-            AND status = 'pending'
-      RETURNING id`,
-        [invitation.id, user.id]
-      )
-      if ((consumed.rowCount ?? 0) === 0) return { error: 'not_pending' as const }
-    }
-    const passwordHash = await bcrypt.hash(trimmedPassword, 12)
-    await db.query(
-      `UPDATE users
-          SET password_hash = $2,
-              password_set_at = NOW(),
-              updated_at = NOW()
-        WHERE id = $1
-          AND lifecycle_state = 'active'`,
-      [user.id, passwordHash]
-    )
-    await revokeAllUserSessions(user.id, 'password_changed', db)
-    if (invitation.purpose !== 'password_reset' && !invitation.accepted_user_id) {
-      await db.query(
-        `UPDATE invitations SET accepted_user_id = $2
-          WHERE id = $1 AND accepted_user_id IS NULL`,
-        [invitation.id, user.id]
-      )
-    }
-
-    const refreshed = await getInvitationRecordById(db, invitation.id)
-    if (!refreshed) {
-      return { error: 'not_found' as const }
-    }
-
-    const teams = await loadInvitationTeams(db, refreshed.id, refreshed)
-    return {
-      data: {
-        passwordUpdated: true,
-        ...invitationResponse(refreshed, { ...user, password_hash: passwordHash }, teams),
-      },
-    }
-  })
-}
-
-export async function setInvitationPasswordForEmail(
-  email: string,
-  invitationToken: string,
-  invitationId: string,
-  password: string
-) {
-  const normalizedEmail = email.trim().toLowerCase()
-  const trimmedInvitationToken = invitationToken.trim()
-  const trimmedInvitationId = invitationId.trim()
-  const trimmedPassword = password.trim()
-  if (!normalizedEmail || !trimmedInvitationToken || !trimmedInvitationId) {
-    return { error: 'not_found' as const }
-  }
-  if (trimmedPassword.length < 8 || trimmedPassword.length > 256) {
-    return { error: 'invalid_password' as const }
-  }
-
-  return withTransaction(async db => {
-    const invitation = await getInvitationRecordByToken(db, trimmedInvitationToken, { lock: true })
-    if (!invitation) {
-      return { error: 'not_found' as const }
-    }
-    if (invitation.id !== trimmedInvitationId) {
-      return { error: 'forbidden' as const }
-    }
-    if (invitation.email.toLowerCase() !== normalizedEmail) {
-      return { error: 'forbidden' as const }
-    }
-    const pendingMembershipSetup =
-      invitation.status === 'pending' &&
-      (invitation.purpose === 'member_invitation' || invitation.purpose === 'admin_desktop_access')
-    if (invitation.expires_at.getTime() <= Date.now()) {
-      return { error: 'expired' as const }
-    }
-    if (invitation.purpose === 'password_reset') {
-      if (invitation.status !== 'pending') {
-        return { error: 'not_pending' as const }
-      }
-    } else if (
-      invitation.purpose === 'member_invitation' ||
-      invitation.purpose === 'admin_desktop_access'
-    ) {
-      if (!pendingMembershipSetup) {
-        return { error: 'not_pending' as const }
-      }
-    } else {
-      return { error: 'not_found' as const }
-    }
-
-    const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
-    if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
-    if (invitation.purpose !== 'password_reset' && user.password_hash) {
-      return { error: 'password_already_set' as const }
-    }
-    if (pendingMembershipSetup) {
-      if (!(await acceptPendingMembershipInvitation(db, invitation, user.id))) {
-        return { error: 'not_pending' as const }
-      }
-    } else if (invitation.purpose === 'password_reset') {
-      const consumed = await db.query(
-        `UPDATE invitations
-            SET status = 'accepted',
-                accepted_at = NOW(),
-                accepted_user_id = $2
-          WHERE id = $1
-            AND status = 'pending'
-      RETURNING id`,
-        [invitation.id, user.id]
-      )
-      if ((consumed.rowCount ?? 0) === 0) return { error: 'not_pending' as const }
-    }
-    const passwordHash = await bcrypt.hash(trimmedPassword, 12)
-    await db.query(
-      `UPDATE users
-          SET password_hash = $2,
-              password_set_at = NOW(),
-              updated_at = NOW()
-        WHERE id = $1
-          AND lifecycle_state = 'active'`,
-      [user.id, passwordHash]
-    )
-    await revokeAllUserSessions(user.id, 'password_changed', db)
-    const refreshed = await getInvitationRecordById(db, invitation.id)
-    if (!refreshed) {
-      return { error: 'not_found' as const }
-    }
-
-    const teams = await loadInvitationTeams(db, refreshed.id, refreshed)
-    return {
-      data: {
-        passwordUpdated: true,
-        ...invitationResponse(refreshed, { ...user, password_hash: passwordHash }, teams),
-      },
-    }
-  })
 }
 
 export async function acceptInvitation(
@@ -2396,62 +2169,5 @@ export async function revokeManagedInvitationForUser(
       [invitation.id]
     )
     return { revoked: true as const, id: invitation.id, email: invitation.email }
-  })
-}
-
-export async function updateUserPassword(
-  userId: string,
-  email: string,
-  currentPassword: string,
-  newPassword: string
-) {
-  const normalizedUserId = userId.trim()
-  const normalizedEmail = email.trim().toLowerCase()
-  const nextPassword = newPassword.trim()
-  if (!normalizedUserId || !normalizedEmail) {
-    return { error: 'not_found' as const }
-  }
-  if (nextPassword.length < 8 || nextPassword.length > 256) {
-    return { error: 'invalid_password' as const }
-  }
-
-  const result = await pool.query(
-    `SELECT password_hash
-       FROM users
-      WHERE id = $1
-        AND email = $2
-      LIMIT 1`,
-    [normalizedUserId, normalizedEmail]
-  )
-  const user = (result.rows[0] as { password_hash: string | null } | undefined) || null
-  if (!user) {
-    return { error: 'not_found' as const }
-  }
-  if (!user.password_hash) {
-    return { error: 'password_not_set' as const }
-  }
-  const currentOk = await bcrypt.compare(currentPassword, user.password_hash)
-  if (!currentOk) {
-    return { error: 'invalid_current_password' as const }
-  }
-
-  const nextPasswordHash = await bcrypt.hash(nextPassword, 12)
-  return withTransaction(async db => {
-    const updated = await db.query(
-      `UPDATE users
-          SET password_hash = $3,
-              password_set_at = NOW(),
-              updated_at = NOW()
-        WHERE id = $1
-          AND email = $2
-          AND password_hash = $4
-      RETURNING id`,
-      [normalizedUserId, normalizedEmail, nextPasswordHash, user.password_hash]
-    )
-    if ((updated.rowCount ?? 0) === 0) {
-      return { error: 'invalid_current_password' as const }
-    }
-    await revokeAllUserSessions(normalizedUserId, 'password_changed', db)
-    return { updated: true as const }
   })
 }
