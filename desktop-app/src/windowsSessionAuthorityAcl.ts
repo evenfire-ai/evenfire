@@ -281,6 +281,7 @@ public static class SessionAuthorityNative {
 try {
   $script:phase = 'compile-script'
   $script:ownerClass = $null
+  $script:aceClass = $null
   Add-Type -TypeDefinition $code -Language CSharp
   $script:phase = 'validate-request'
   $requestPayload = [Environment]::GetEnvironmentVariable('EVENFIRE_SESSION_AUTHORITY_ACL_REQUEST')
@@ -327,6 +328,11 @@ try {
     if ($sid -eq $systemSid) { return 'system' }
     if ($sid -eq $administratorsSid) { return 'administrators' }
     if ($sid -eq $trustedInstallerSid) { return 'trusted-installer' }
+    if ($sid -eq 'S-1-1-0') { return 'everyone' }
+    if ($sid -eq 'S-1-5-11') { return 'authenticated-users' }
+    if ($sid -eq 'S-1-5-32-545') { return 'builtin-users' }
+    if ($sid -eq 'S-1-5-4') { return 'interactive' }
+    if ($sid -eq 'S-1-3-0') { return 'creator-owner' }
     return 'other'
   }
   function Test-PrincipalRules(
@@ -351,6 +357,7 @@ try {
         $trustedAncestorAce = $ace.Sid -eq $trustedInstallerSid -and
           ($isVolumeRoot -or $ace.Inherited)
         if (($allowed -notcontains $ace.Sid) -and -not $trustedAncestorAce) {
+          $script:aceClass = Get-OwnerClass $ace.Sid
           throw 'ancestor-writable-by-other-principal'
         }
       }
@@ -473,6 +480,7 @@ try {
     innerNativeOperation = if ($innerException) { $innerException.Data['sessionAuthorityOperation'] } else { $null }
     innerNativeErrorCode = if ($innerException -is [ComponentModel.Win32Exception]) { $innerException.NativeErrorCode } else { $null }
     ownerClass = $script:ownerClass
+    aceClass = $script:aceClass
   } | ConvertTo-Json -Compress
   exit 2
 }
@@ -508,6 +516,7 @@ function sanitizedWindowsAclFailure(stdout: string): {
       'innerNativeOperation',
       'innerNativeErrorCode',
       'ownerClass',
+      'aceClass',
     ] as const) {
       const item = fields[field]
       if (field === 'innerNativeErrorCode') {
@@ -516,11 +525,20 @@ function sanitizedWindowsAclFailure(stdout: string): {
         }
         continue
       }
-      if (field === 'ownerClass') {
+      if (field === 'ownerClass' || field === 'aceClass') {
         if (
-          ['current-user', 'system', 'administrators', 'trusted-installer', 'other'].includes(
-            item as string
-          )
+          [
+            'current-user',
+            'system',
+            'administrators',
+            'trusted-installer',
+            'everyone',
+            'authenticated-users',
+            'builtin-users',
+            'interactive',
+            'creator-owner',
+            'other',
+          ].includes(item as string)
         ) {
           safe[field] = item as string
         }
@@ -588,6 +606,7 @@ function safePowerShellFailure(result: SpawnSyncReturns<string>, fallbackPhase: 
     'innerNativeOperation',
     'innerNativeErrorCode',
     'ownerClass',
+    'aceClass',
   ] as const) {
     const value = verifierFailure.fields[field]
     if (value) diagnostic[`verifier${field[0]!.toUpperCase()}${field.slice(1)}`] = value
