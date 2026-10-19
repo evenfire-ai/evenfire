@@ -22,6 +22,14 @@ const powershell = path.join(
 )
 const powershellLauncher =
   '$sourceText = [Console]::In.ReadToEnd(); & ([scriptblock]::Create($sourceText))'
+const powershellOperations = new Set([
+  'add-everyone-modify',
+  'add-trusted-installer-modify',
+  'add-authenticated-users-create-directory',
+  'add-current-user-inherit-only-ace',
+  'create-authority-child-junction',
+  'create-user-data-parent-junction',
+])
 const ACL_API_HELPERS = String.raw`
 function Get-TestAcl([string]$target) {
   if ([IO.Directory]::Exists($target)) { return [IO.Directory]::GetAccessControl($target) }
@@ -58,15 +66,22 @@ function powershellProcessErrorCode(error: Error | undefined): string | undefine
   return allowed.has(error.code) ? error.code : 'OTHER'
 }
 
+type PowerShellOperation =
+  | 'add-everyone-modify'
+  | 'add-trusted-installer-modify'
+  | 'add-authenticated-users-create-directory'
+  | 'add-current-user-inherit-only-ace'
+  | 'create-authority-child-junction'
+  | 'create-user-data-parent-junction'
+
 function runPowerShell(
-  operation:
-    | 'add-everyone-modify'
-    | 'add-trusted-installer-modify'
-    | 'add-authenticated-users-create-directory'
-    | 'add-current-user-inherit-only-ace',
+  operation: PowerShellOperation,
   script: string,
   variables: Record<string, string> = {}
 ): void {
+  if (!powershellOperations.has(operation) || typeof script !== 'string')
+    throw new Error('Native Windows ACL fixture received an invalid operation contract')
+
   const result = spawnSync(
     powershell,
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', powershellLauncher],
@@ -163,39 +178,26 @@ function addCurrentUserInheritOnlyFullControl(target: string): void {
     String.raw`
 $ErrorActionPreference = 'Stop'
 $target = [Environment]::GetEnvironmentVariable('EVENFIRE_ACL_TEST_TARGET')
-$acl = [IO.Directory]::GetAccessControl($target)
-$descriptor = [System.Security.AccessControl.RawSecurityDescriptor]::new(
-  $acl.GetSecurityDescriptorBinaryForm(),
-  0
-)
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$flags = [System.Security.AccessControl.AceFlags](
-  [int][System.Security.AccessControl.AceFlags]::ContainerInherit -bor
-  [int][System.Security.AccessControl.AceFlags]::ObjectInherit -bor
-  [int][System.Security.AccessControl.AceFlags]::InheritOnly
+$inheritance = [System.Security.AccessControl.InheritanceFlags](
+  [int][System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+  [int][System.Security.AccessControl.InheritanceFlags]::ObjectInherit
 )
-$ace = [System.Security.AccessControl.CommonAce]::new(
-  $flags,
-  [System.Security.AccessControl.AceQualifier]::AccessAllowed,
-  [int][System.Security.AccessControl.FileSystemRights]::FullControl,
+$rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
   $sid,
-  $false,
-  $null
+  [System.Security.AccessControl.FileSystemRights]::FullControl,
+  $inheritance,
+  [System.Security.AccessControl.PropagationFlags]::InheritOnly,
+  [System.Security.AccessControl.AccessControlType]::Allow
 )
-$descriptor.DiscretionaryAcl.InsertAce($descriptor.DiscretionaryAcl.Count, $ace)
-$updatedBytes = [byte[]]::new($descriptor.BinaryLength)
-$descriptor.GetBinaryForm($updatedBytes, 0)
-$acl.SetSecurityDescriptorBinaryForm($updatedBytes)
+$acl = [IO.Directory]::GetAccessControl($target)
+$acl.AddAccessRule($rule)
 [IO.Directory]::SetAccessControl($target, $acl)
-$readBack = [System.Security.AccessControl.RawSecurityDescriptor]::new(
-  ([IO.Directory]::GetAccessControl($target)).GetSecurityDescriptorBinaryForm(),
-  0
-)
+$readBack = [IO.Directory]::GetAccessControl($target)
 $found = $false
-foreach ($entry in $readBack.DiscretionaryAcl) {
-  if ($entry -is [System.Security.AccessControl.CommonAce] -and
-    $entry.SecurityIdentifier.Value -eq $sid.Value -and
-    ([int]$entry.AceFlags -band [int][System.Security.AccessControl.AceFlags]::InheritOnly) -ne 0) {
+foreach ($entry in $readBack.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+  if ($entry.IdentityReference.Value -eq $sid.Value -and
+    ([int]$entry.PropagationFlags -band [int][System.Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) {
     $found = $true
   }
 }
@@ -288,6 +290,7 @@ windowsDescribe('Windows session authority ACL native contract', () => {
     const junction = path.join(authorityPath, 'redirect')
     await fs.mkdir(target)
     runPowerShell(
+      'create-authority-child-junction',
       String.raw`
 $ErrorActionPreference = 'Stop'
 $junction = [Environment]::GetEnvironmentVariable('EVENFIRE_ACL_TEST_JUNCTION')
@@ -305,6 +308,7 @@ New-Item -ItemType Junction -Path $junction -Target $target | Out-Null
   it('rejects a reparse-point user-data parent', async () => {
     const alias = path.join(temporaryRoot, 'user-data-alias')
     runPowerShell(
+      'create-user-data-parent-junction',
       String.raw`
 $ErrorActionPreference = 'Stop'
 $junction = [Environment]::GetEnvironmentVariable('EVENFIRE_ACL_TEST_JUNCTION')
