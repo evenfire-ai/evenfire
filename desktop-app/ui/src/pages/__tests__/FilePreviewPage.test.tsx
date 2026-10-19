@@ -1,10 +1,20 @@
 // @vitest-environment jsdom
-import { useEffect, useState } from 'react'
+import { type ReactNode, useEffect, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render as renderWithTestingLibrary,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
 import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
-import { resolveDeniedMessage } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { resolveDeniedMessage, resolveResource } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { delegationAffordances } from '../../../../src/gfs/delegation.js'
 import { FilePreviewPage } from '../FilePreviewPage'
 
 const hookMock = vi.hoisted(() => ({
@@ -20,8 +30,44 @@ function controller(
 ) {
   return {
     accessState,
+    sessionScope: 'preview-test-user:main',
+    authorityPending: false,
     handleAuthorityFailure: vi.fn(handleAuthorityFailure),
   }
+}
+
+const activeAffordances = delegationAffordances(
+  new Set(['read', 'write', 'delete', 'manage_acl', 'share']),
+  false
+)
+
+async function resolvePreviewResource(gfsUri: string) {
+  const resourceId = gfsUri.slice(gfsUri.lastIndexOf('/') + 1)
+  return resolveResource({
+    resourceId,
+    rid: resourceId,
+    gfsUri,
+    drive: 'main',
+    parentResourceId: 'preview-parent',
+    name: 'preview resource',
+    kind: 'file',
+    version: 1,
+    bytes: 3,
+  })
+}
+
+const queryClients: QueryClient[] = []
+
+function render(ui: ReactNode) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } },
+  })
+  queryClients.push(queryClient)
+  return renderWithTestingLibrary(ui, {
+    wrapper: ({ children }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    ),
+  })
 }
 
 // The producer (`window.clerum.gfs.downloadPreview`) returns `{ bytes: ArrayBuffer }`.
@@ -29,7 +75,13 @@ function stubDownload(impl: () => Promise<{ bytes: ArrayBuffer }>) {
   const downloadPreview = vi.fn(impl)
   Object.defineProperty(window, 'clerum', {
     configurable: true,
-    value: { gfs: { downloadPreview } },
+    value: {
+      gfs: {
+        downloadPreview,
+        resolve: vi.fn(resolvePreviewResource),
+        affordances: vi.fn(async () => activeAffordances),
+      },
+    },
   })
   return downloadPreview
 }
@@ -38,13 +90,19 @@ function stubDownload(impl: () => Promise<{ bytes: ArrayBuffer }>) {
 // revalidation calls. `resolve` rejects to model an unshared resource.
 function stubGfs(opts: {
   downloadPreview: () => Promise<{ bytes: ArrayBuffer }>
-  resolve: () => Promise<unknown>
+  resolve: (uri: string) => Promise<unknown>
 }) {
   const downloadPreview = vi.fn(opts.downloadPreview)
   const resolve = vi.fn(opts.resolve)
   Object.defineProperty(window, 'clerum', {
     configurable: true,
-    value: { gfs: { downloadPreview, resolve } },
+    value: {
+      gfs: {
+        downloadPreview,
+        resolve,
+        affordances: vi.fn(async () => activeAffordances),
+      },
+    },
   })
   return { downloadPreview, resolve }
 }
@@ -81,6 +139,7 @@ describe('FilePreviewPage', () => {
 
   afterEach(() => {
     cleanup()
+    for (const queryClient of queryClients.splice(0)) queryClient.clear()
     vi.restoreAllMocks()
   })
 
@@ -100,6 +159,7 @@ describe('FilePreviewPage', () => {
     )
 
     expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
+    await waitFor(() => expect(window.clerum.gfs.affordances).toHaveBeenCalled())
     // The preview page title is a page-level h2 (not a dialog h3).
     const title = screen.getByRole('heading', { name: 'diagram.png', level: 2 })
     expect(title).toBeTruthy()
@@ -110,7 +170,11 @@ describe('FilePreviewPage', () => {
     )
     expect(screen.getAllByRole('menuitem').map(item => item.textContent)).toEqual([
       'Share',
+      'Rename',
+      'Move to',
       'Copy content',
+      'Download',
+      'Delete',
     ])
     expect(screen.queryByRole('dialog')).toBeNull()
     const menu = screen.getByRole('menu', { name: 'Actions for diagram.png' })
@@ -142,6 +206,7 @@ describe('FilePreviewPage', () => {
 
     try {
       expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
+      await waitFor(() => expect(window.clerum.gfs.affordances).toHaveBeenCalled())
       const toolbar = within(titlebarLeadingRoot).getByRole('toolbar', {
         name: 'EvenDrive actions',
       })
@@ -194,13 +259,14 @@ describe('FilePreviewPage', () => {
     )
 
     expect(await screen.findByLabelText('Video preview of demo.mp4')).toBeTruthy()
+    await waitFor(() => expect(window.clerum.gfs.affordances).toHaveBeenCalled())
     const menu = openPreviewActions('demo.mp4')
     expect(within(menu).queryByRole('menuitem', { name: 'Copy content' })).toBeNull()
     expect(
       within(menu)
         .getAllByRole('menuitem')
         .map(item => item.textContent)
-    ).toEqual(['Share'])
+    ).toEqual(['Share', 'Rename', 'Move to', 'Download', 'Delete'])
   })
 
   it('uses the shareable link, canonical ID, and preview copy semantics from the filename menu', async () => {
@@ -218,7 +284,8 @@ describe('FilePreviewPage', () => {
           downloadPreview: vi.fn(async () => ({
             bytes: new TextEncoder().encode(markdown).buffer,
           })),
-          resolve: vi.fn(async () => ({ kind: 'file' })),
+          resolve: vi.fn(resolvePreviewResource),
+          affordances: vi.fn(async () => activeAffordances),
         },
       },
     })
@@ -420,9 +487,12 @@ describe('FilePreviewPage', () => {
 
     const controllerState = controller('active')
     hookMock.useGfsBrowserController.mockReturnValue(controllerState)
+    let resolveCount = 0
     const { resolve } = stubGfs({
       downloadPreview: async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }),
       resolve: async () => {
+        resolveCount += 1
+        if (resolveCount === 1) return await resolvePreviewResource('gfs://main/secret')
         throw new Error(deniedMessage)
       },
     })
@@ -473,9 +543,12 @@ describe('FilePreviewPage', () => {
     // The controller classifies this as a session-authority failure (revokes).
     const controllerState = controller('active', () => true)
     hookMock.useGfsBrowserController.mockReturnValue(controllerState)
+    let resolveCount = 0
     stubGfs({
       downloadPreview: async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer }),
       resolve: async () => {
+        resolveCount += 1
+        if (resolveCount === 1) return await resolvePreviewResource('gfs://main/secret')
         throw new Error(sessionMessage)
       },
     })
