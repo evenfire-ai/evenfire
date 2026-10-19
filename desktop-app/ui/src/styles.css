@@ -7721,6 +7721,68 @@ h3 {
   border-radius: calc(var(--radius-md) - 1px);
 }
 
+.composer-markdown-editor.w-md-editor {
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text);
+}
+
+.composer-markdown-editor .w-md-editor-content,
+.composer-markdown-editor .w-md-editor-input,
+.composer-markdown-editor .w-md-editor-text {
+  min-height: 100%;
+}
+
+.composer-markdown-editor .w-md-editor-text {
+  padding: var(--space-2-5);
+  font-size: var(--font-size-lg) !important;
+  line-height: 20px !important;
+}
+
+.composer-markdown-editor .w-md-editor-text-input {
+  width: 100%;
+  color: var(--text);
+  font-size: var(--font-size-lg) !important;
+  line-height: 20px !important;
+}
+
+.composer-markdown-editor--hidden {
+  display: none !important;
+}
+
+.composer-markdown-preview {
+  box-sizing: border-box;
+  min-height: 56px;
+  max-height: 240px;
+  overflow: auto;
+  padding: var(--space-2-5);
+  color: var(--text);
+  font-size: var(--font-size-lg);
+  line-height: 20px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  outline: none;
+  cursor: text;
+}
+
+.composer-markdown-preview > :first-child {
+  margin-top: 0;
+}
+
+.composer-markdown-preview > :last-child {
+  margin-bottom: 0;
+}
+
+.composer-markdown-preview a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: text;
+}
+
 .composer-input-shell:focus-within {
   border-color: rgba(var(--focus-rgb), 0.76);
   box-shadow: 0 0 0 1px rgba(var(--focus-rgb), 0.56);
