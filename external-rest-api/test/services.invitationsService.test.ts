@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ControlApiError } from '../src/controlApiClient.js'
 import {
-  acceptInvitation,
   setupInvitationPassword,
   setupInvitationPasswordWithToken,
-} from '../src/services/invitationsService.js'
+} from '../src/services/invitationPasswordService.js'
+import { acceptInvitation } from '../src/services/invitationsService.js'
 
 const client = vi.hoisted(() => ({ request: vi.fn() }))
 vi.mock('../src/controlApiClient.js', async importOriginal => ({
@@ -17,7 +17,7 @@ describe('invitation service error and token boundaries', () => {
 
   it('never converts Control API unavailability into not-pending or invalid-password', async () => {
     const unavailable = new ControlApiError('unavailable', 503, {
-      error: { code: 'authority_unavailable' },
+      error: 'authority_unavailable',
     })
 
     for (const operation of [
@@ -29,13 +29,12 @@ describe('invitation service error and token boundaries', () => {
           'valid-password'
         ),
       () =>
-        setupInvitationPasswordWithToken({
-          token: 'flow-token',
-          email: 'user@example.com',
-          invitationId: 'inv-1',
-          password: 'valid-password',
-          sessionContract: 'v2',
-        }),
+        setupInvitationPasswordWithToken(
+          'flow-token',
+          'user@example.com',
+          'inv-1',
+          'valid-password'
+        ),
     ]) {
       client.request.mockRejectedValueOnce(unavailable)
       await expect(operation()).rejects.toBe(unavailable)
@@ -50,13 +49,12 @@ describe('invitation service error and token boundaries', () => {
       token: 'must-never-reach-browser-route',
     })
 
-    const result = await setupInvitationPasswordWithToken({
-      token: 'flow-token',
-      email: 'user@example.com',
-      invitationId: 'inv-1',
-      password: 'valid-password',
-      sessionContract: 'v2',
-    })
+    const result = await setupInvitationPasswordWithToken(
+      'flow-token',
+      'user@example.com',
+      'inv-1',
+      'valid-password'
+    )
 
     expect(result.data).toMatchObject({ id: 'inv-1', passwordUpdated: true })
     expect(result.data).not.toHaveProperty('token')

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { externalRestPublicErrorHandler } from '../src/app.js'
 import { ControlApiError } from '../src/controlApiClient.js'
 import { createMeRouter } from '../src/routes/me.js'
 
@@ -29,7 +30,7 @@ describe('External REST /me unavailable producer contract', () => {
 
   afterEach(() => vi.restoreAllMocks())
 
-  it('maps a Control API outage to the route 404 consumed by the recovery UI', async () => {
+  it('preserves a Control API outage through the sanitized public error handler', async () => {
     mocks.controlApiRequest.mockRejectedValue(
       new ControlApiError(
         'private Control API failure',
@@ -42,15 +43,18 @@ describe('External REST /me unavailable producer contract', () => {
     )
     const app = express()
     app.use(createMeRouter())
+    app.use(externalRestPublicErrorHandler)
 
     const response = await request(app)
       .get('/me')
       .set('authorization', 'Bearer synthetic-session-token')
 
-    expect(response.status).toBe(404)
-    expect(response.body).toEqual({ error: 'User not found' })
-    expect(response.headers['retry-after']).toBeUndefined()
-    expect(JSON.stringify(response.body)).not.toMatch(/private|authority|synthetic/)
+    expect(response.status).toBe(503)
+    expect(response.body.error).toMatchObject({ code: 'authority_unavailable', retryable: true })
+    expect(response.headers['retry-after']).toBe('60')
+    expect(JSON.stringify(response.body)).not.toMatch(
+      /private Control API failure|authority_failure|synthetic-member-id|synthetic-session-token/
+    )
     expect(mocks.controlApiRequest).toHaveBeenCalledWith(
       'GET',
       '/external/users/synthetic-member-id/me',

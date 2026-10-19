@@ -102,7 +102,9 @@ describe('legacy authority adapters', () => {
   })
 
   it('does not convert desktop-authorization authority outages into bad passwords', async () => {
-    clientMock.controlApiRequest.mockRejectedValueOnce(upstream(403))
+    clientMock.controlApiRequest.mockRejectedValueOnce(
+      new ControlApiError('Control API rejected the password', 401, { error: 'invalid_password' })
+    )
     await expect(createDesktopAuthorization(auth, 'wrong-password')).resolves.toEqual({
       error: 'invalid_password',
     })
