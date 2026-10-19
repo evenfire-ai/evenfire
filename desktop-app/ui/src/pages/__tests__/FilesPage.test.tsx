@@ -4201,6 +4201,9 @@ describe('FilesPage', () => {
     expect(copyButton.parentElement?.classList.contains('titlebar-leading-action--disabled')).toBe(
       true
     )
+    expect(copyButton.parentElement?.getAttribute('title')).toBe(
+      'No link is available on Shared with me'
+    )
 
     fireEvent.click(within(toolbar).getByRole('button', { name: 'Open link' }))
     const dialog = await screen.findByRole('dialog', { name: 'Open from link' })
