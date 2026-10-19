@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   GROK_VISUAL_LIMITS,
   LIMITS,
@@ -60,6 +60,8 @@ function deps(overrides?: {
 }
 
 describe('GrokSubscriptionProvider', () => {
+  afterEach(() => vi.useRealTimers())
+
   it.each(['visual_host_share', 'visual_gate', 'proxy_capacity_exceeded'] as const)(
     'keeps the provider usable after a local %s admission refusal',
     async code => {
@@ -94,6 +96,7 @@ describe('GrokSubscriptionProvider', () => {
   it.each(['unknown', 'canceled', 'error'])(
     'never returns executable calls from a %s batch',
     async outcome => {
+      vi.useFakeTimers()
       const wired = deps({
         stream: vi.fn().mockResolvedValue({
           text: 'partial',
@@ -102,12 +105,15 @@ describe('GrokSubscriptionProvider', () => {
         }),
       })
       const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
-      await expect(
+      const settled = expect(
         provider.completeSingleTurnWithTools(
           [{ role: 'user', content: 'hi' }],
           [{ name: 'echo', description: 'echo', parameters: {} }]
         )
       ).rejects.toThrow(/successful terminal outcome/)
+      await vi.runAllTimersAsync()
+      await settled
+      expect(wired.stream).toHaveBeenCalledTimes(3)
     }
   )
 
@@ -843,15 +849,18 @@ describe('GrokSubscriptionProvider', () => {
   })
 
   it('does not treat an unknown empty stream as a successful stop', async () => {
+    vi.useFakeTimers()
     const provider = new GrokSubscriptionProvider(
       'grok-4.6',
       deps({
         stream: vi.fn().mockResolvedValue({ text: '', toolCalls: [], outcome: 'unknown' }),
       }) as never
     )
-    await expect(
+    const settled = expect(
       provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
     ).rejects.toMatchObject({ code: 'provider_unavailable' })
+    await vi.runAllTimersAsync()
+    await settled
   })
 
   // xAI refuses subscription inference when the client version it sees is below
@@ -1716,20 +1725,28 @@ describe('GrokSubscriptionProvider Retry-After retry (G1-9, #720)', () => {
     expect(wired.proxy.stream).toHaveBeenCalledTimes(1)
   })
 
-  it('G1-9h: a retry whose stream fails with provider_unavailable surfaces that error (review round 2 M5)', async () => {
+  it('G1-9h: a 429 followed by provider_unavailable respects the three-attempt cap (F4)', async () => {
     vi.useFakeTimers()
     const outage = new GrokProxyError('provider_unavailable', 'proxy stream failed with 503')
-    const stream = vi.fn().mockRejectedValueOnce(limited(1000)).mockRejectedValueOnce(outage)
-    const wired = deps({ authorize: authorizeTwice(), stream })
+    const stream = vi.fn().mockRejectedValueOnce(limited(1000)).mockRejectedValue(outage)
+    const wired = deps({
+      authorize: vi.fn(async ({ providerAttemptIndex }) => ({
+        providerAttemptId: `attempt-${providerAttemptIndex}`,
+        requestHash,
+        executionTicket: `ticket-${providerAttemptIndex}`,
+        expiresAt: '2026-08-20T10:00:00.000Z',
+      })),
+      stream,
+    })
     const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
 
     const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
     const settled = expect(turn).rejects.toBe(outage)
     await vi.advanceTimersByTimeAsync(60_000)
     await settled
-    // Witness: the retry ran; the negative is that nothing ran after it.
-    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(2)
-    expect(wired.proxy.stream).toHaveBeenCalledTimes(2)
+    // Witness: both retries ran, then the three-attempt cap stopped the request.
+    expect(wired.authorizer.authorize).toHaveBeenCalledTimes(3)
+    expect(wired.proxy.stream).toHaveBeenCalledTimes(3)
     expect(provider.classifyError(outage).code).toBe(LlmErrorCode.ModelOverloaded)
   })
 
@@ -2100,17 +2117,22 @@ describe('GrokSubscriptionProvider Retry-After retry (G1-9, #720)', () => {
 })
 
 describe('model-step checkpoint eligibility on the LlmError boundary (#1043)', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
   const heldToolCall = { id: 'call-1', name: 'echo', arguments: { text: 'held' } }
 
   async function failThroughAdapter(wired: ReturnType<typeof deps>): Promise<LlmError> {
     const provider = new GrokSubscriptionProvider('grok-4.6', wired as never)
     const adapter = new LlmPortAdapter(provider, 'grok-4.6', 'grok-subscription')
-    const outcome = await adapter
+    const pending = adapter
       .completeWithTools({ messages: [{ role: 'user', content: 'go' }], tools: [] })
       .then(
         response => ({ response }),
         (error: unknown) => ({ error })
       )
+    await vi.runAllTimersAsync()
+    const outcome = await pending
     if (!('error' in outcome)) throw new Error('expected the adapter to reject')
     expect(outcome.error).toBeInstanceOf(LlmError)
     return outcome.error as LlmError
