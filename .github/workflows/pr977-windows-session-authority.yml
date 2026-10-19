@@ -49,6 +49,10 @@ jobs:
         working-directory: desktop-app
         run: npm ci
 
+      - name: Install Playwright Chromium
+        working-directory: desktop-app
+        run: npx playwright install chromium
+
       - name: Require native Windows ACL evidence
         working-directory: desktop-app
         env:
