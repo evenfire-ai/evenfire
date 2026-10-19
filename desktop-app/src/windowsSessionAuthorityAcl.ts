@@ -265,8 +265,9 @@ public static class SessionAuthorityNative {
 '@
 try {
   Add-Type -TypeDefinition $code -Language CSharp
-  $requestJson = [Environment]::GetEnvironmentVariable('EVENFIRE_SESSION_AUTHORITY_ACL_REQUEST')
-  if (-not $requestJson) { throw 'request-missing' }
+  $requestPayload = [Environment]::GetEnvironmentVariable('EVENFIRE_SESSION_AUTHORITY_ACL_REQUEST')
+  if (-not $requestPayload) { throw 'request-missing' }
+  $requestJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($requestPayload))
   $request = $requestJson | ConvertFrom-Json
   function Normalize-Path([string]$value) {
     $full = [IO.Path]::GetFullPath($value)
