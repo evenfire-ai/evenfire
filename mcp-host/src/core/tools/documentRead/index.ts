@@ -96,6 +96,19 @@ const REASON_MESSAGES: Record<DocumentReadReason, string> = {
     'The Host has too little free memory to start the document reader right now. The document is not the cause; try again later.',
 }
 
+/**
+ * The document format a file name extension or declared media type names. The
+ * classifier's mismatch compares families only, and XLSX and DOCX share one.
+ */
+const DECLARED_DOCUMENT_FORMAT = new Map<string, 'pdf' | 'xlsx' | 'docx'>([
+  ['.pdf', 'pdf'],
+  ['.xlsx', 'xlsx'],
+  ['.docx', 'docx'],
+  ['application/pdf', 'pdf'],
+  ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'xlsx'],
+  ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'docx'],
+])
+
 const EXHAUSTED_MESSAGE =
   'The current-turn attachment read budget is exhausted. Reattach the file in a new message and pass resumeCursor as cursor to continue; earlier pages are not stored for re-reading.'
 
@@ -301,14 +314,14 @@ export class DocumentReadTool implements Tool {
     if (!format) return this.accessError('not_a_document', start, identity)
     const extension = extname(reference.name).toLowerCase()
     const declared = reference.declaredMediaType?.split(';')[0].trim().toLowerCase()
-    // The classifier's family-level mismatch can treat PDF/XLSX as equivalent;
-    // report their specific declared-format mismatch too, without echoing names.
+    // Report a declared document format that differs from the detected one,
+    // without echoing names.
     const contentMismatch =
       reference.mismatch ||
-      ((extension === '.pdf' || extension === '.xlsx') && extension !== '.' + format) ||
-      (declared === 'application/pdf' && format !== 'pdf') ||
-      (declared === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' &&
-        format !== 'xlsx')
+      [extension, declared].some(value => {
+        const named = value === undefined ? undefined : DECLARED_DOCUMENT_FORMAT.get(value)
+        return named !== undefined && named !== format
+      })
     if (typeof attachment.dataBase64 !== 'string')
       return this.accessError('bytes_unavailable_after_restart', start, identity)
 

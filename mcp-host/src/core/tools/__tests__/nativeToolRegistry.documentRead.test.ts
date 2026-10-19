@@ -263,5 +263,23 @@ describe('NativeToolRegistry — clerum__document_read (#656)', () => {
       message: 'The document is password-protected and cannot be read.',
     })
     expect(output.is_error).toBe(true)
+
+    // The same workbook named as a Word document: the media type picks the
+    // reader, and the .docx name is reported as a mismatch.
+    const named = await fileAttachment(
+      'locked-sheet-named-docx',
+      'locked.docx',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      bytes
+    )
+    expect(named.fileReference).toMatchObject({ reader: 'xlsx', mismatch: false })
+    const namedOutput = await registryFor(named)
+      .get('clerum__document_read')!
+      .execute({ attachmentId: named.id }, executionContext('clerum__document_read'))
+    expect(JSON.parse(namedOutput.content)).toMatchObject({
+      reason: 'document_encrypted',
+      message:
+        'The document is password-protected and cannot be read. The file name or declared media type does not match its detected content.',
+    })
   })
 })

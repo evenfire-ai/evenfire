@@ -23,6 +23,7 @@ import {
 import { inflatedImagePdf } from './memoryFixtures'
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 const profile: VisualDeliveryLimits = {
   maxImages: 4,
   maxVisualRequestBytes: 32_000_000,
@@ -249,6 +250,26 @@ describe('document reader Tool outcomes through real child readers', () => {
     )
     expect(JSON.parse(control.content).status).toBe('ok')
     expect(JSON.parse(control.content).sheets[0].rows.length).toBeGreaterThan(0)
+  })
+
+  it('reports a workbook declared as a Word document as a mismatch, unlike a declared workbook', async () => {
+    const bytes = await emptySelectionWorkbook(witnessCode())
+    const asDocx = admittedFile('declared-docx', bytes, DOCX_MIME)
+    // XLSX and DOCX share a family, so the classifier itself reports no mismatch.
+    expect(asDocx.fileReference).toMatchObject({ reader: 'xlsx', mismatch: false })
+    const docxBody = JSON.parse(
+      (await tool(asDocx).execute({ attachmentId: asDocx.id, sheet: 'Empty' }, context())).content
+    )
+    expect(docxBody.reason).toBe('document_empty')
+    expect(docxBody.message).toContain('file name or declared media type does not match')
+
+    const asXlsx = admittedFile('declared-xlsx', bytes, XLSX_MIME)
+    const xlsxBody = JSON.parse(
+      (await tool(asXlsx).execute({ attachmentId: asXlsx.id, sheet: 'Empty' }, context())).content
+    )
+    expect(xlsxBody.reason).toBe('document_empty')
+    expect(xlsxBody.message).toContain('holds no content')
+    expect(xlsxBody.message).not.toContain('does not match')
   })
 
   it('applies the delivery dimension threshold to the actual rendered image count', async () => {
