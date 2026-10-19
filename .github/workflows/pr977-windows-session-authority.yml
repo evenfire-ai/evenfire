@@ -32,6 +32,15 @@ jobs:
             desktop-app/package-lock.json
             mcp-host/package-lock.json
 
+      - name: Record hosted Windows validation environment
+        shell: pwsh
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          Write-Output "Runner image: $env:ImageOS $env:ImageVersion ($env:RUNNER_ARCH)"
+          Write-Output "Windows: $($os.Caption) $($os.Version)"
+          Write-Output "Node: $(node --version)"
+          Write-Output "npm: $(npm --version)"
+
       - name: Install Host fixture dependencies
         working-directory: mcp-host
         run: npm ci
