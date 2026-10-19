@@ -1060,7 +1060,12 @@ export function createRpcRouter(): Router {
           `[RPC_PROXY] user=${auth.sub} host=${sanitizeHostRefForLog(hostRef)} method=continue-model-step agent=${logAgent} chatId=${logChatId} checkpointId=${logCheckpointId}`
         )
         const upstreamUrl = `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/model-step-checkpoints/${encodeURIComponent(checkpointId)}/continue`
-        const forwardedBody = JSON.stringify(req.body)
+        // Allow-list the forwarded body: `version` is the only field the
+        // contract defines, and mcp-host answers its own 400 for a malformed
+        // value. Caller identity and task ids stay in the edge headers, so a
+        // client body cannot inject them.
+        const parsed = req.body as Record<string, unknown>
+        const forwardedBody = JSON.stringify({ version: parsed.version })
         const forwardContinuation = async (timeoutMs?: number) => {
           const response = await fetch(upstreamUrl, {
             method: 'POST',

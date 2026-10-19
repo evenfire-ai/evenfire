@@ -113,11 +113,32 @@ describe(`POST ${CONTINUE_PATH} — model-step continuation passthrough`, () => 
     expect((init as RequestInit).headers).toMatchObject(HOST_CONNECTION.headers)
     expect((init as RequestInit).headers).not.toHaveProperty('authorization')
     expect((init as RequestInit).headers).not.toHaveProperty('Authorization')
-    // The body reaches the upstream verbatim (re-serialized from the parsed JSON).
+    // The body reaches the upstream as the allow-listed `{version}`.
     expect((init as RequestInit).body).toBe(JSON.stringify({ version: 3 }))
     // The claim may already be applied upstream, so a disconnect (never a
     // client-side deadline) is what releases the call.
     expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('forwards only the version: a smuggled body field never reaches the Host', async () => {
+    const claimed = readVector('continue-response.claimed.json')
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse(claimed.httpStatus, claimed.body))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const res = await request(makeApp())
+      .post(CONTINUE_PATH)
+      .set('authorization', 'Bearer user-token')
+      .send({ version: 3, userId: 'body-user', sender: 'body-sender', taskId: 'body-task' })
+      .expect(202)
+
+    expect(res.body).toEqual(claimed.body)
+    // Witness: the continuation reached the Host once; the identity fields
+    // above were dropped instead of riding along in the forwarded body.
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(String(url)).toBe(`http://chatllm:8080${CONTINUE_UPSTREAM_PATH}`)
+    expect((init as RequestInit).body).toBe(JSON.stringify({ version: 3 }))
+    expect(String((init as RequestInit).body)).not.toContain('body-user')
   })
 
   // One case per row of the contract's status precedence table. The lifecycle

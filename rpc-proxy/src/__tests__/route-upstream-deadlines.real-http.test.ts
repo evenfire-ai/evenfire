@@ -727,6 +727,13 @@ const HELD_ROUTES = [
     upstreamPath: '/v1/runtime/tasks/task-1/cancel',
   },
   {
+    label: 'continue model step',
+    method: 'post',
+    path: '/rpc/hosts/chatllm/sessions/agent-1/chat-1/model-step-checkpoints/msc-1/continue',
+    body: { version: 1 },
+    upstreamPath: '/v1/runtime/sessions/agent-1/chat-1/model-step-checkpoints/msc-1/continue',
+  },
+  {
     label: 'list sessions',
     method: 'get',
     path: '/rpc/hosts/chatllm/sessions',
@@ -835,6 +842,13 @@ const DISCONNECT_ROUTES = [
     path: '/rpc/hosts/chatllm/sessions/chatllm/chat-1/name',
     body: { title: 'Renamed chat' },
     upstreamPath: '/v1/runtime/sessions/chatllm/chat-1/name',
+  },
+  {
+    label: 'continue model step',
+    method: 'POST',
+    path: '/rpc/hosts/chatllm/sessions/agent-1/chat-1/model-step-checkpoints/msc-1/continue',
+    body: { version: 1 },
+    upstreamPath: '/v1/runtime/sessions/agent-1/chat-1/model-step-checkpoints/msc-1/continue',
   },
 ] as const
 
