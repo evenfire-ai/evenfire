@@ -39,6 +39,7 @@ PG_USER=""
 PG_PASSWORD=""
 PG_DATABASE=""
 T1_REDACT_PASSWORD=""
+T1_PRIVATE_RECOVERY_SUITES=()
 T1_STATUS=NOT_RUN
 T1_NEXT_COMMAND='repair the first reported Real PostgreSQL precondition, then re-run T1'
 T1_TOTAL_TESTS=0
@@ -339,6 +340,40 @@ is_isolated_control_api_file() {
   esac
 }
 
+# The two cross-service password-recovery suites need the private Member
+# Registration producer, which this lane does not deploy; without it they are
+# collected as skipped and T1 refuses the pending tests. Public CI excludes the
+# same files, so read them from the shared contract instead of a second list.
+load_private_recovery_suites() {
+  local selection entry
+  T1_PRIVATE_RECOVERY_SUITES=()
+  selection="$(node "$PROJECT_DIR/scripts/ci/password-recovery-suite-contract.mjs" private all)" || {
+    T1_NEXT_COMMAND='repair tests/contracts/password-recovery-suites.json, then re-run T1'
+    die_t1 ZERO_TESTS_EXECUTED 'password-recovery suite contract could not be verified'
+  }
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    [ -s "$PROJECT_DIR/control-api/$entry" ] || {
+      T1_NEXT_COMMAND='repair tests/contracts/password-recovery-suites.json, then re-run T1'
+      die_t1 ZERO_TESTS_EXECUTED "private password-recovery suite is missing: control-api/$entry"
+    }
+    T1_PRIVATE_RECOVERY_SUITES+=("$PROJECT_DIR/control-api/$entry")
+  done <<<"$selection"
+  [ "${#T1_PRIVATE_RECOVERY_SUITES[@]}" -eq 2 ] || {
+    T1_NEXT_COMMAND='repair tests/contracts/password-recovery-suites.json, then re-run T1'
+    die_t1 ZERO_TESTS_EXECUTED \
+      "password-recovery contract listed ${#T1_PRIVATE_RECOVERY_SUITES[@]} private suites, expected 2"
+  }
+}
+
+is_private_recovery_suite() {
+  local path="$1" private
+  for private in "${T1_PRIVATE_RECOVERY_SUITES[@]}"; do
+    [ "$path" = "$private" ] && return 0
+  done
+  return 1
+}
+
 require_isolated_control_api_files() {
   local path
   for path in \
@@ -447,9 +482,14 @@ run_suite() {
   local suite_started_seconds="$SECONDS" suite_duration_seconds=0
   local -a files=() vitest_filters=()
 
+  if [ "$package" = control-api ] && [ "${#T1_PRIVATE_RECOVERY_SUITES[@]}" -ne 2 ]; then
+    T1_NEXT_COMMAND='load the password-recovery suite contract before selecting control-api suites'
+    die_t1 ZERO_TESTS_EXECUTED 'private password-recovery exclusions were not loaded'
+  fi
   while IFS= read -r file; do
     [ -z "$file" ] && continue
     if [ "$package" = control-api ]; then
+      is_private_recovery_suite "$file" && continue
       if [ "$lane" = isolated ]; then
         is_isolated_control_api_file "$file" || continue
       else
@@ -667,6 +707,7 @@ user, password, port = sys.stdin.buffer.read().split(b"\0")[:3]
 print("postgresql://" + quote(user.decode(), safe="") + ":" + quote(password.decode(), safe="") + "@127.0.0.1:" + port.decode() + "/postgres", end="")
 ')"
   require_isolated_control_api_files
+  load_private_recovery_suites
   start_isolated_postgres
   T1_GFS_RESTORE_REQUIRED=true
   run_suite control-api isolated "$ISOLATED_DSN"
