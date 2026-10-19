@@ -49,6 +49,9 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null
 const isArrayOf = (value: unknown, item: (entry: unknown) => boolean): boolean =>
   Array.isArray(value) && value.every(item)
+/** A success always delivers content: the producers never emit an empty one. */
+const isNonEmptyArrayOf = (value: unknown, item: (entry: unknown) => boolean): boolean =>
+  isArrayOf(value, item) && (value as unknown[]).length > 0
 
 /** `next` is set exactly when a per-call limit stopped the read, and names it. */
 const hasStopReason = (message: Record<string, unknown>, stops: readonly string[]): boolean =>
@@ -75,7 +78,7 @@ function isJobOutcome(kind: DocumentJob['kind'], message: unknown): boolean {
     case 'pdf_text':
       return (
         isCount(message.pageCount, 1) &&
-        isArrayOf(
+        isNonEmptyArrayOf(
           message.pages,
           page =>
             isRecord(page) &&
@@ -98,7 +101,7 @@ function isJobOutcome(kind: DocumentJob['kind'], message: unknown): boolean {
     case 'pdf_visual':
       return (
         isCount(message.pageCount, 1) &&
-        isArrayOf(
+        isNonEmptyArrayOf(
           message.images,
           image =>
             isRecord(image) &&
@@ -133,6 +136,7 @@ function isJobOutcome(kind: DocumentJob['kind'], message: unknown): boolean {
               )
             )
         ) &&
+        (message.sheets as Array<{ rows: unknown[] }>).some(sheet => sheet.rows.length > 0) &&
         (message.next === undefined ||
           (isRecord(message.next) &&
             isCount(message.next.sheetIndex) &&

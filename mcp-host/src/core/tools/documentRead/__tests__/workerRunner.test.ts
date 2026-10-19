@@ -52,6 +52,10 @@ async function liveChild(): Promise<ChildProcess> {
   return child
 }
 
+// Valid content, so each malformed case below fails only on the property it names.
+const VALID_SHEET = { name: 'Sheet1', startRow: 1, truncated: false, rows: [['value']] }
+const PAGE = { page: 1, text: 'x', from: 0, to: 1, lowText: false }
+
 async function control(): Promise<void> {
   expect((await runDocumentJob(job(await valuesWorkbook(witnessCode())))).ok).toBe(true)
 }
@@ -260,7 +264,7 @@ describe('document reader child runner', () => {
       {
         ok: true,
         sheetNames: ['Sheet1'],
-        sheets: [],
+        sheets: [VALID_SHEET],
         next: { sheetIndex: 0, row: 8 },
       },
     ],
@@ -269,7 +273,7 @@ describe('document reader child runner', () => {
       {
         ok: true,
         sheetNames: ['Sheet1'],
-        sheets: [],
+        sheets: [VALID_SHEET],
         stoppedBy: 'max_rows',
       },
     ],
@@ -286,7 +290,7 @@ describe('document reader child runner', () => {
       {
         ok: true,
         sheetNames: ['Sheet1'],
-        sheets: [],
+        sheets: [VALID_SHEET],
         next: { sheetIndex: 0, row: 0 },
         stoppedBy: 'max_rows',
       },
@@ -296,7 +300,7 @@ describe('document reader child runner', () => {
       {
         ok: true,
         sheetNames: ['Sheet1'],
-        sheets: [],
+        sheets: [VALID_SHEET],
         next: { sheetIndex: 1, row: 2 },
         stoppedBy: 'max_rows',
       },
@@ -323,8 +327,20 @@ describe('document reader child runner', () => {
   it.each([
     { ok: true, pageCount: 1, pages: [{ page: 0, text: 'x', from: 0, to: 1, lowText: false }] },
     { ok: true, pageCount: 0, pages: [] },
-    { ok: true, pageCount: 1, pages: [], next: { page: 0, charOffset: 0 }, stoppedBy: 'max_pages' },
-    { ok: true, pageCount: 1, pages: [], next: { page: 2, charOffset: 0 }, stoppedBy: 'max_pages' },
+    {
+      ok: true,
+      pageCount: 1,
+      pages: [PAGE],
+      next: { page: 0, charOffset: 0 },
+      stoppedBy: 'max_pages',
+    },
+    {
+      ok: true,
+      pageCount: 1,
+      pages: [PAGE],
+      next: { page: 2, charOffset: 0 },
+      stoppedBy: 'max_pages',
+    },
   ])('rejects a non-producer PDF text position %j with a real PDF control', async message => {
     const bytes = await textPdf([witnessCode()])
     const pdfJob = job(bytes, { kind: 'pdf_text', pages: null, start: { page: 1, charOffset: 0 } })
@@ -334,6 +350,40 @@ describe('document reader child runner', () => {
     await expect(pending).rejects.toThrow('Document reader worker failed')
     expect((await runDocumentJob(pdfJob)).ok).toBe(true)
   })
+
+  it.each([
+    ['XLSX with no sheets', 'xlsx', { ok: true, sheetNames: ['Sheet1'], sheets: [] }],
+    [
+      'XLSX whose sheets hold no rows',
+      'xlsx',
+      { ok: true, sheetNames: ['Sheet1'], sheets: [{ ...VALID_SHEET, rows: [] }] },
+    ],
+    ['PDF text with no pages', 'pdf_text', { ok: true, pageCount: 1, pages: [] }],
+    ['PDF visual with no images', 'pdf_visual', { ok: true, pageCount: 1, images: [] }],
+  ] as const)(
+    'rejects an empty success (%s) as a defect with a real-child control',
+    async (_name, kind, message) => {
+      const pdf = await textPdf([witnessCode()])
+      const jobs = {
+        xlsx: job(await valuesWorkbook(witnessCode())),
+        pdf_text: job(pdf, { kind: 'pdf_text', pages: null, start: { page: 1, charOffset: 0 } }),
+        pdf_visual: job(pdf, {
+          kind: 'pdf_visual',
+          pages: null,
+          maxDimension: 128,
+          maxPixelsPerCall: 128 * 128,
+          maxImageBytes: 1_048_576,
+          maxTotalImageBytes: 1_048_576,
+        }),
+      }
+      const pending = runDocumentJob(jobs[kind])
+      const child = await liveChild()
+      child.emit('message', message)
+      await expect(pending).rejects.toThrow('Document reader worker failed')
+      // Control: the same job's real child delivers non-empty content.
+      expect((await runDocumentJob(jobs[kind])).ok).toBe(true)
+    }
+  )
 
   it('propagates a typed success from a real PDF child', async () => {
     const outcome = (await runDocumentJob(
