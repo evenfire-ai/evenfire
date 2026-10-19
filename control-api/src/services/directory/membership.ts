@@ -488,13 +488,14 @@ export async function createPasswordSetupInvitationForUser(userId: string) {
     return { error: 'no_accepted_invitation' as const }
   }
 
-  const teams = await loadInvitationTeams(pool, acceptedInvitation.id, acceptedInvitation)
   const fallbackName = acceptedInvitation.email.split('@')[0] || acceptedInvitation.email
+  // Password setup leaves memberships as they are now; the accepted invitation
+  // only proves the user was invited.
   const created = await createInvitationForTeams({
     inviteeName: acceptedInvitation.invitee_name || fallbackName,
     email: acceptedInvitation.email,
-    teamAssignments: teams.map(team => ({ teamId: team.team_id, role: team.role })),
-    fallbackRole: acceptedInvitation.role,
+    teamAssignments: [],
+    fallbackRole: 'member',
   })
   return {
     sent: true as const,

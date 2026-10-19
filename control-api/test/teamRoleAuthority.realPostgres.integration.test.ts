@@ -2,7 +2,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { randomBytes } from 'node:crypto'
 import { Pool } from 'pg'
 import { initDb } from '../src/db.js'
-import { findMemberRole, googleLoginData } from '../src/services/directory/index.js'
+import {
+  acceptInvitation,
+  createPasswordSetupInvitationForUser,
+  findMemberRole,
+  googleLoginData,
+} from '../src/services/directory/index.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 
 const holder = vi.hoisted(() => ({
@@ -22,6 +27,10 @@ vi.mock('../src/db.js', async importOriginal => {
       real.withTransaction(fn, holder.pool),
   }
 })
+
+vi.mock('../src/services/invitationFlowRegistrationService.js', () => ({
+  registerAndSendInvitation: vi.fn(async () => undefined),
+}))
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const realPg = adminUrl ? describe : describe.skip
@@ -141,6 +150,39 @@ realPg('team role authority on real PostgreSQL', () => {
       )
 
       await expect(findMemberRole(teamId, userId)).resolves.toBeNull()
+    })
+  })
+
+  describe('password setup invitation', () => {
+    async function acceptPasswordSetup() {
+      const created = await createPasswordSetupInvitationForUser(userId)
+      if (!('id' in created)) throw new Error(`password setup failed: ${created.error}`)
+      const accepted = await acceptInvitation(userId, email, '', created.id)
+      expect(accepted).not.toHaveProperty('error')
+    }
+
+    it('keeps a role changed after the original invitation was accepted', async () => {
+      await acceptedInvitation(teamId, 'admin')
+      await holder.pool.query(
+        `INSERT INTO team_members(team_id, user_id, role, status) VALUES ($1, $2, 'inviter', 'active')`,
+        [teamId, userId]
+      )
+
+      await acceptPasswordSetup()
+
+      expect(await memberRole(teamId)).toEqual({ role: 'inviter', status: 'active' })
+    })
+
+    it('does not restore a removed membership', async () => {
+      await acceptedInvitation(teamId, 'admin')
+      await holder.pool.query(
+        `INSERT INTO team_members(team_id, user_id, role, status) VALUES ($1, $2, 'admin', 'deleted')`,
+        [teamId, userId]
+      )
+
+      await acceptPasswordSetup()
+
+      expect(await memberRole(teamId)).toEqual({ role: 'admin', status: 'deleted' })
     })
   })
 })
