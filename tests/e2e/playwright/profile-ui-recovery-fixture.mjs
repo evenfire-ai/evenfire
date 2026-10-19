@@ -11,9 +11,7 @@ const externalRestRoot = path.join(repositoryRoot, 'external-rest-api')
 const port = Number(process.env.PROFILE_UI_RECOVERY_PORT || 31873)
 const profileOrigin = `http://127.0.0.1:${port}`
 const invitationToken = 'synthetic-reset-proof'
-const syntheticServiceAuthorization = ['Bearer', 'synthetic-profile-recovery-service-token'].join(
-  ' '
-)
+const syntheticBearer = 'Bearer synthetic-profile-recovery-token' // PUBLIC_SYNTHETIC_BEARER_FIXTURE
 const contractPasswordPrefix = 'Synthetic-Recovery-Contract-'
 const invitation = {
   id: 'synthetic-reset-row',
@@ -380,7 +378,7 @@ const apiServer = createServer(async (request, response) => {
     /^\/api\/v1\/external\/invitations\/token\/([^/]+)$/
   )
   if (request.method === 'GET' && invitationTokenMatch) {
-    if (request.headers.authorization !== syntheticServiceAuthorization) {
+    if (request.headers.authorization !== syntheticBearer) {
       sendJson(response, 401, { error: 'Unauthorized' })
       return
     }
@@ -403,7 +401,7 @@ const apiServer = createServer(async (request, response) => {
       return
     }
     const invited = invitationForToken(String(body.token || ''))
-    if (request.headers.authorization !== syntheticServiceAuthorization) {
+    if (request.headers.authorization !== syntheticBearer) {
       sendJson(response, 401, { error: 'Unauthorized' })
       return
     }
@@ -439,7 +437,7 @@ const apiServer = createServer(async (request, response) => {
       sendJson(response, 400, { error: 'invalid_payload' })
       return
     }
-    if (request.headers.authorization !== syntheticServiceAuthorization) {
+    if (request.headers.authorization !== syntheticBearer) {
       sendJson(response, 401, { error: 'Unauthorized' })
       return
     }
@@ -485,7 +483,7 @@ const apiServer = createServer(async (request, response) => {
 
   const meMatch = url.pathname.match(/^\/api\/v1\/external\/users\/([^/]+)\/me$/)
   if (request.method === 'GET' && meMatch) {
-    if (request.headers.authorization !== syntheticServiceAuthorization) {
+    if (request.headers.authorization !== syntheticBearer) {
       sendJson(response, 401, { error: 'Unauthorized' })
       return
     }
@@ -528,7 +526,7 @@ const apiServer = createServer(async (request, response) => {
       return
     }
     if (
-      request.headers.authorization !== syntheticServiceAuthorization ||
+      request.headers.authorization !== syntheticBearer ||
       body.token !== invitationToken ||
       body.email !== invitation.email ||
       body.invitationId !== invitation.id ||
@@ -585,7 +583,7 @@ const externalRestProcess = spawn(
     env: {
       NODE_ENV: 'development',
       EXTERNAL_REST_API_CONTROL_API_BASE_URL: `http://127.0.0.1:${apiAddress.port}/api/v1`,
-      EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN: 'synthetic-profile-recovery-service-token',
+      EXTERNAL_REST_API_CONTROL_API_SERVICE_TOKEN: 'synthetic-profile-recovery-token',
       EXTERNAL_REST_API_JWT_PUBLIC_KEY: publicKey
         .export({ type: 'spki', format: 'pem' })
         .toString(),
