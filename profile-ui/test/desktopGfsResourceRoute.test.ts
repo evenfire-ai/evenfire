@@ -52,3 +52,21 @@ test('EvenDrive handoff rejects malformed identities and extra query data', asyn
     assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
   }
 })
+
+test('EvenDrive handoff rejects missing, empty, and double-encoded resource identities', async () => {
+  const canonicalUri = 'gfs://main/0123456789abcdef0123456789abcdef'
+  const base = 'https://profile.example/open/files'
+  const invalidUrls = [
+    base,
+    `${base}?uri=`,
+    `${base}?uri=${encodeURIComponent(encodeURIComponent(canonicalUri))}`,
+  ]
+
+  for (const url of invalidUrls) {
+    const response = await GET(new Request(url))
+    assert.equal(response.status, 400, url)
+    assert.equal(response.headers.get('cache-control'), 'no-store')
+    assert.equal(response.headers.get('referrer-policy'), 'no-referrer')
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
+  }
+})
