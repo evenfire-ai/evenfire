@@ -318,9 +318,9 @@ try {
     if (-not $snapshot.DaclPresent -or $snapshot.Aces.Count -eq 0) { throw 'dacl-invalid' }
     return $snapshot
   }
-  function Test-Owner([string]$sid, [bool]$privateObject) {
+  function Test-Owner([string]$sid, [bool]$privateObject, [bool]$isVolumeRoot) {
     if ($privateObject) { return $sid -eq $currentSid }
-    return $allowed -contains $sid
+    return ($allowed -contains $sid) -or ($isVolumeRoot -and $sid -eq $trustedInstallerSid)
   }
   function Get-OwnerClass([string]$sid) {
     if ($sid -eq $currentSid) { return 'current-user' }
@@ -329,9 +329,14 @@ try {
     if ($sid -eq $trustedInstallerSid) { return 'trusted-installer' }
     return 'other'
   }
-  function Test-PrincipalRules($snapshot, [bool]$privateObject, [string]$policyPhase) {
+  function Test-PrincipalRules(
+    $snapshot,
+    [bool]$privateObject,
+    [string]$policyPhase,
+    [bool]$isVolumeRoot = $false
+  ) {
     $script:phase = $policyPhase
-    if (-not (Test-Owner $snapshot.OwnerSid $privateObject)) {
+    if (-not (Test-Owner $snapshot.OwnerSid $privateObject $isVolumeRoot)) {
       $script:ownerClass = Get-OwnerClass $snapshot.OwnerSid
       throw 'owner-invalid'
     }
@@ -342,9 +347,12 @@ try {
         ($ace.Qualifier -ne 'AccessAllowed' -or $ace.InheritOnly)) { throw 'ace-invalid' }
       if ($privateObject -and ($allowed -notcontains $ace.Sid)) { throw 'principal-invalid' }
       if (-not $privateObject -and $ace.Qualifier -eq 'AccessAllowed' -and
-        -not $ace.InheritOnly -and
-        ($allowed -notcontains $ace.Sid) -and (($ace.Mask -band $mutatingMask) -ne 0)) {
-        throw 'ancestor-writable-by-other-principal'
+        -not $ace.InheritOnly -and (($ace.Mask -band $mutatingMask) -ne 0)) {
+        $trustedAncestorAce = $ace.Sid -eq $trustedInstallerSid -and
+          ($isVolumeRoot -or $ace.Inherited)
+        if (($allowed -notcontains $ace.Sid) -and -not $trustedAncestorAce) {
+          throw 'ancestor-writable-by-other-principal'
+        }
       }
       if ($privateObject -and $ace.Qualifier -eq 'AccessAllowed') {
         if (($ace.Mask -band $privateMask) -ne $privateMask) { throw 'private-rights-incomplete' }
@@ -385,7 +393,8 @@ try {
     $depth = 0
     while ($null -ne $current) {
       $snapshot = Inspect-Object $current.FullName $true
-      Test-PrincipalRules $snapshot $false ("validate-ancestor-owner-depth-" + $depth)
+      $isVolumeRoot = $current.Parent -eq $null
+      Test-PrincipalRules $snapshot $false ("validate-ancestor-owner-depth-" + $depth) $isVolumeRoot
       $required = $traverseMask
       if ($isUserData -and [string]::Compare($current.FullName, $root, $true) -eq 0) { $required = $createChildMask }
       Test-CurrentEffectiveAccess $snapshot $required

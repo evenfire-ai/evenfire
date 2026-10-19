@@ -57,6 +57,27 @@ Set-Acl -LiteralPath $target -AclObject $acl
   )
 }
 
+function addTrustedInstallerModify(target: string): void {
+  runPowerShell(
+    String.raw`
+$ErrorActionPreference = 'Stop'
+$target = [Environment]::GetEnvironmentVariable('EVENFIRE_ACL_TEST_TARGET')
+$acl = Get-Acl -LiteralPath $target
+$trustedInstaller = [System.Security.Principal.SecurityIdentifier]::new(
+  'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+)
+$rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+  $trustedInstaller,
+  [System.Security.AccessControl.FileSystemRights]::Modify,
+  [System.Security.AccessControl.AccessControlType]::Allow
+)
+$acl.AddAccessRule($rule)
+Set-Acl -LiteralPath $target -AclObject $acl
+`,
+    { EVENFIRE_ACL_TEST_TARGET: target }
+  )
+}
+
 function addCurrentUserInheritOnlyFullControl(target: string): void {
   runPowerShell(
     String.raw`
@@ -118,6 +139,15 @@ windowsDescribe('Windows session authority ACL native contract', () => {
       'Windows session authority ACL verification failed'
     )
     expect(() => provisionWindowsSessionAuthorityDirectory(userDataPath, authorityPath)).toThrow(
+      'Windows session authority ACL verification failed'
+    )
+  })
+
+  it('does not extend the ancestor TrustedInstaller exception into the private authority tree', () => {
+    provisionWindowsSessionAuthorityDirectory(userDataPath, authorityPath)
+    addTrustedInstallerModify(authorityPath)
+
+    expect(() => verifyWindowsSessionAuthorityDirectory(userDataPath, authorityPath)).toThrow(
       'Windows session authority ACL verification failed'
     )
   })
