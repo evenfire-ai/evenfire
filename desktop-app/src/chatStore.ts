@@ -617,7 +617,8 @@ export class ChatStore {
   }
 
   private async syncFile(filePath: string): Promise<void> {
-    const handle = await fs.open(filePath, 'r')
+    // Windows FlushFileBuffers requires a handle opened with write access.
+    const handle = await fs.open(filePath, 'r+')
     try {
       await handle.sync()
     } finally {

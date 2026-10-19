@@ -136,8 +136,10 @@ describe('createChat', () => {
   it('flushes the atomic index temp file and containing directory', async () => {
     const originalOpen = fs.open.bind(fs)
     const syncedPaths: string[] = []
+    const openFlags: Array<{ filePath: string; flags: string }> = []
     vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
       const filePath = String(args[0])
+      openFlags.push({ filePath, flags: String(args[1] ?? '') })
       const handle = await originalOpen(...(args as Parameters<typeof fs.open>))
       return {
         sync: async () => {
@@ -152,6 +154,7 @@ describe('createChat', () => {
 
     expect(syncedPaths).toContain(agentPath('index.json.tmp'))
     expect(syncedPaths).toContain(agentPath())
+    expect(openFlags).toContainEqual({ filePath: agentPath('index.json.tmp'), flags: 'r+' })
   })
 })
 
