@@ -346,6 +346,43 @@ describe('useAppController held Hosts', () => {
     }
   )
 
+  it('T-A9-P1-4: a failed refresh keeps the listed Host and its Retry row', async () => {
+    const { clerum, handle } = installAppControllerClerum({
+      agentNames: [HOST_A, HOST_B],
+      agentDisplayByName: DISPLAY_BY_NAME,
+    })
+    installCatalog(clerum)
+    const transcriptError = await ipcGenericForbidden('rpc:loadSessionMessages')
+    clerum.rpc.loadSessionMessages.mockImplementation(async (hostRef: string) => {
+      if (hostRef === HOST_A) throw transcriptError
+      return { agent: hostRef, chatId: '', turns: [] }
+    })
+    const { app, commits } = await mount(clerum, handle)
+    const refreshesBeforeHold = handle.refreshCatalog.mock.calls.length
+    handle.refreshCatalog.mockImplementation(async () => {
+      throw new Error('catalog unavailable')
+    })
+
+    act(() => {
+      app.result.current.handleSelectChatAgent(HOST_A, { chatId: 'chat-1', selectLatest: false })
+    })
+    await waitFor(() => expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true))
+    await waitFor(() => expect(app.result.current.selectedAgent).toBe(null))
+    await waitFor(() =>
+      expect(handle.refreshCatalog.mock.calls.length).toBe(refreshesBeforeHold + 1)
+    )
+    await settle()
+
+    // Liveness witness: the hold's refresh ran and failed.
+    expect(app.queryClient.getQueryState(desktopQueryKeys.accessCatalog)?.error?.message).toBe(
+      'catalog unavailable'
+    )
+    // The catalog on screen is still the previous one, so A keeps its Retry row.
+    expect(cachedCatalog(app.queryClient)?.agentNames).toEqual([HOST_A, HOST_B])
+    expect(app.result.current.heldHosts).toEqual([{ agentRef: HOST_A, label: DISPLAY_A }])
+    expect(toastsSeen(commits)).toEqual([VERIFY_A])
+  })
+
   it('T-F3-2: losing a Host that is not selected shows no toast', async () => {
     const { clerum, handle } = installAppControllerClerum({ agentNames: [HOST_A, HOST_B] })
     const catalog = installCatalog(clerum)
@@ -544,7 +581,7 @@ describe('ChatPage with a held Host on the chat tab', () => {
     expect(trail.slice(trailBeforeHold)).toContain(null)
     expect(toastTexts(getVm())).toContain(VERIFY_A)
     expect(getVm().heldAgentRefs).toEqual([HOST_A])
-    // The page stays on A's chat with nothing selected; B is never opened.
+    // A's chat tab stays focused with nothing selected; B is never opened.
     expect(getVm().selectedAgent).toBe(null)
     expect(trail.slice(trailBeforeHold)).not.toContain(HOST_B)
     expect(hasTabFor(getVm(), HOST_B)).toBe(false)
@@ -587,7 +624,7 @@ describe('ChatPage with a held Host on the chat tab', () => {
     // so ChatPage re-ran its auto-selection with only B as a candidate.
     expect(trail.slice(trailBeforeHold)).toContain(null)
     expect(getVm().heldAgentRefs).toEqual([])
-    // The page stays on A's chat with nothing selected; B is never opened.
+    // A's chat tab stays focused with nothing selected; B is never opened.
     expect(trail.slice(trailBeforeHold)).not.toContain(HOST_B)
     expect(getVm().selectedAgent).toBe(null)
     expect(hasTabFor(getVm(), HOST_B)).toBe(false)

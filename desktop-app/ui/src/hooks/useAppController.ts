@@ -748,7 +748,7 @@ export function useAppController() {
 
   const focusedChatAgentRef =
     nav.activeTab?.kind === 'chat' ? (nav.activeTab.chat?.agentRef ?? null) : null
-  // ChatPage stays on the focused chat while its Host is held, also after the
+  // ChatPage keeps the focused chat tab while its Host is held, also after the
   // catalog dropped that Host. Holds reset with the authority scope, so a team
   // switch never keeps a tab of the previous team.
   const keepFocusedChat =
