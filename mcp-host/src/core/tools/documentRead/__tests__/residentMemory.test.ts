@@ -10,7 +10,8 @@ afterEach(() => vi.clearAllMocks())
 
 describe('Linux resident-memory sampler', () => {
   it.each([
-    'Name:\treader\nState:\tR (running)\n',
+    'Name:\treader\nState:\tR (running)\nVmSize:\t4096 kB\n',
+    '',
     'VmRSS:\t-1 kB\n',
     'VmRSS:\t999999999999999999999 kB\n',
   ])('rejects unavailable or invalid RSS %j and reads valid kernel data', async status => {
@@ -36,6 +37,15 @@ describe('Linux resident-memory sampler', () => {
     vi.mocked(readFile).mockResolvedValueOnce('State:\tZ (zombie)\n')
     expect(await sample(123)).toBe(0)
     vi.mocked(readFile).mockResolvedValueOnce('State:\tR (running)\nVmRSS:\t1024 kB\n')
+    expect(await sample(123)).toBe(1_048_576)
+  })
+
+  it('recognizes an exiting process that has released its address space', async () => {
+    const sample = residentMemorySampler('linux')
+    // Observed on Linux between address-space release and the zombie state.
+    vi.mocked(readFile).mockResolvedValueOnce('Name:\tnode\nState:\tR (running)\nThreads:\t1\n')
+    expect(await sample(123)).toBe(0)
+    vi.mocked(readFile).mockResolvedValueOnce('Name:\tnode\nState:\tR (running)\nVmRSS:\t1024 kB\n')
     expect(await sample(123)).toBe(1_048_576)
   })
 })

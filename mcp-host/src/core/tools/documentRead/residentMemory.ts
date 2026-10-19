@@ -13,6 +13,9 @@ export function residentMemorySampler(platform: NodeJS.Platform): (pid: number) 
         // A zombie has already released its resident pages; exit delivery can
         // race the sample while the parent still has the child's PID.
         if (/^State:\s+Z\b/m.test(status)) return 0
+        // An exiting process releases its address space before it becomes a
+        // zombie; in that window the kernel prints no Vm* lines at all.
+        if (/^Name:/m.test(status) && /^State:/m.test(status) && !/^Vm/m.test(status)) return 0
         const rss = /^VmRSS:\s+(\d+)\s+kB$/m.exec(status)
         if (!rss) throw new Error('Document reader resident memory unavailable')
         return kilobytesToBytes(rss[1])
