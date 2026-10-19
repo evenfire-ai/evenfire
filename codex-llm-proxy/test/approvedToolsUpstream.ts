@@ -23,6 +23,7 @@ const LIMIT_BOUNDARY_CALLS = 256
 // - `twice`: like `probe`, but the first continuation also gets a 503; the
 //   second continuation gets the final answer.
 // - `zero`: a 503 for the first model step, before any tool runs.
+// - `receipt`: like `probe`, with a real fixture receipt before the 503.
 // - `approval`: after the kept search and 503, discovery leads to a real
 //   fixture receipt call that requires the user's decision.
 // A turn left on its 503 can be sent again by the user (Resend): the history
@@ -30,7 +31,7 @@ const LIMIT_BOUNDARY_CALLS = 256
 // plain answer. A turn containing `model step retry followup <marker>` is a new
 // message sent instead of the retry; it gets a plain answer.
 const MODEL_STEP_TURN =
-  /\bmodel step retry (probe|twice|zero|approval) ([a-z0-9][a-z0-9-]{7,63})(?![a-z0-9-])/
+  /\bmodel step retry (probe|twice|zero|approval|receipt) ([a-z0-9][a-z0-9-]{7,63})(?![a-z0-9-])/
 const MODEL_STEP_FOLLOWUP = /\bmodel step retry followup ([a-z0-9][a-z0-9-]{7,63})(?![a-z0-9-])/
 const MODEL_STEP_PREFIX = 'model step retry '
 const MODEL_STEP_MAX_TURNS = 64
@@ -410,9 +411,16 @@ export function createApprovedToolsUpstream() {
   const modelStepTurns = new Map<
     string,
     {
-      kind: 'probe' | 'twice' | 'zero' | 'approval'
+      kind: 'probe' | 'twice' | 'zero' | 'approval' | 'receipt'
       callId: string | null
-      stage: 'searched' | 'unavailable' | 'approving' | 'continued' | 'resent' | 'followed_up'
+      stage:
+        | 'searched'
+        | 'reading'
+        | 'unavailable'
+        | 'approving'
+        | 'continued'
+        | 'resent'
+        | 'followed_up'
       unavailable: number
     }
   >()
@@ -573,7 +581,7 @@ export function createApprovedToolsUpstream() {
         }
         const opened = MODEL_STEP_TURN.exec(text)
         if (!opened) throw new Error('invalid_model_step_marker')
-        const kind = opened[1] as 'probe' | 'twice' | 'zero' | 'approval'
+        const kind = opened[1] as 'probe' | 'twice' | 'zero' | 'approval' | 'receipt'
         const marker = opened[2]!
         const turn = modelStepTurns.get(marker)
         // How many user messages of the history open this same turn: one for
@@ -640,13 +648,47 @@ export function createApprovedToolsUpstream() {
         if (
           turn.callId === null ||
           openings !== 1 ||
-          (turn.stage !== 'searched' && turn.stage !== 'unavailable' && turn.stage !== 'approving')
+          (turn.stage !== 'searched' &&
+            turn.stage !== 'reading' &&
+            turn.stage !== 'unavailable' &&
+            turn.stage !== 'approving')
         ) {
           evidence.modelStepRetry.unexpectedRetries++
           throw new Error('unexpected_retry')
         }
-        const originalRows = turn.stage === 'approving' ? rows.slice(0, 2) : rows
+        const originalRows =
+          turn.stage === 'approving' || turn.kind === 'receipt' ? rows.slice(0, 2) : rows
         const received = modelStepToolResults(originalRows, turn.callId, marker)
+        if (turn.kind === 'receipt') {
+          // C1 keeps the search protocol probe and also executes an observable
+          // receipt before the outage; its fixture counter witnesses Retry.
+          if (received !== 1) throw new Error('incomplete_model_step_batch')
+          const decision = receiptDecision(exchanges(rows.slice(2)))
+          if (decision.stage === 'denied') throw new Error('model_step_receipt_failed')
+          if (turn.stage === 'unavailable' && decision.stage !== 'final')
+            throw new Error('model_step_receipt_not_replayed')
+          if (decision.stage !== 'final') {
+            if (!names.has(decision.stage)) throw new Error('unadvertised_function')
+            turn.stage = 'reading'
+            evidence.completions++
+            evidence.requests.push(measured('model_step_receipt_tool'))
+            return stream({
+              type: 'response.output_item.done',
+              item: {
+                type: 'function_call',
+                id: randomUUID(),
+                call_id: randomUUID(),
+                name: decision.stage,
+                arguments: JSON.stringify(decision.args),
+              },
+            })
+          }
+          if (turn.stage !== 'unavailable') {
+            turn.stage = 'unavailable'
+            turn.unavailable++
+            return unavailable('model_step_unavailable')
+          }
+        }
         if (turn.stage === 'searched') {
           // The model step after the confirmed search result: the provider is
           // unavailable, so the Host keeps the turn as a resumable checkpoint.

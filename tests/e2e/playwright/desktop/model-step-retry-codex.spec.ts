@@ -3,7 +3,7 @@
  * after a confirmed tool is kept by the Host as a resumable checkpoint, and the
  * Desktop offers **Retry model step** for it instead of Resend. Every case here
  * checks both sides: the deterministic upstream's evidence (what the Host sent
- * to the model, and that the confirmed search never ran twice) and what the user
+ * to the model, plus C1’s physical receipt execution counter) and what the user
  * sees and can do next (the message, which recovery button is offered, and that
  * the chat never ends in a dead end).
  *
@@ -25,6 +25,10 @@ import {
   waitForAgentRollout,
 } from '../helpers/agent-rollout'
 import { newAgentResponses, openAgentChat, send } from '../helpers/approved-tools-chat'
+import {
+  assertConfirmedToolNotReexecuted,
+  toolExecutions,
+} from '../helpers/approved-tools-execution'
 import {
   type ModelStepRetryEvidence,
   type Scenario,
@@ -159,11 +163,15 @@ async function sendUntilUnavailable(desktop: Page, prompt: string) {
 }
 
 /** The resumable notice, with Retry model step offered and Resend not. */
-async function expectResumable(desktop: Page): Promise<Locator> {
+async function expectResumable(desktop: Page, confirmed = 1): Promise<Locator> {
   await expect(notice(desktop)).toHaveAttribute('data-status', 'resumable', {
     timeout: TURN_TIMEOUT,
   })
-  await expect(notice(desktop)).toContainText(KEPT_TOOL_NOTICE)
+  await expect(notice(desktop)).toContainText(
+    confirmed === 1
+      ? KEPT_TOOL_NOTICE
+      : `${confirmed} tool calls already completed and will not run again.`
+  )
   const retry = notice(desktop).getByTestId('model-step-retry-btn')
   await expect(retry).toBeEnabled()
   // Witness for the absence below: the notice above is on screen.
@@ -247,27 +255,59 @@ async function restoreReceiptConnector(page: Page) {
   await waitForAgentRollout(active.agentName, generation)
 }
 
-test('model step retry C1: a 503 after a confirmed tool continues once without re-running the tool', async () => {
+test('model step retry C1: a 503 after a confirmed tool continues once without re-running the tool', async ({
+  page,
+}) => {
+  await restoreReceiptConnector(page)
   await withDesktopChat(async desktop => {
     const value = marker('c1')
-    const prompt = `model step retry probe ${value}`
+    const prompt = `model step retry receipt ${value}`
     const start = await snapshot()
-    await test.step('The model step after the confirmed search meets a 503', async () => {
-      await sendUntilUnavailable(desktop, prompt)
-      await expectResumable(desktop)
+    const physicalBefore = await readEvidence(scenario())
+    await test.step('The receipt physically executes before the model step meets a 503', async () => {
+      const responses = await newAgentResponses(desktop)
+      await send(desktop, prompt)
+      const pending = desktop.getByTestId('progress-stepper').filter({
+        has: desktop.getByTestId('approval-approve-btn'),
+      })
+      await expect(pending).toContainText('workitem_read_receipt', { timeout: TURN_TIMEOUT })
+      await expect(pending).toContainText('requires approval')
+      expect(toolExecutions(await readEvidence(scenario()), 'workitem_read_receipt')).toBe(
+        toolExecutions(physicalBefore, 'workitem_read_receipt')
+      )
+      await pending.getByTestId('approval-approve-btn').click()
+      await expect(responses.filter({ hasText: FAILURE_LABEL })).toHaveCount(1, {
+        timeout: TURN_TIMEOUT,
+      })
+      await expectResumable(desktop, 4)
+    })
+    const physicalKept = await readEvidence(scenario())
+    expect(toolExecutions(physicalKept, 'workitem_read_receipt')).toBe(
+      toolExecutions(physicalBefore, 'workitem_read_receipt') + 1
+    )
+    expect(physicalKept.calls.at(-1)).toMatchObject({
+      runId: scenario().runId,
+      tool: 'workitem_read_receipt',
+      businessId: expect.any(String),
     })
     const kept = await readCurrentSession(desktop, prompt)
     expect(kept.modelStepCheckpoint).toMatchObject({
       status: 'resumable',
       retryAvailable: true,
-      tools: { confirmed: 1 },
+      tools: { confirmed: 4 },
     })
     expect(kept.modelStepCheckpoint?.checkpointId).toBeTruthy()
     expect(kept.modelStepCheckpoint?.version).toBeGreaterThan(0)
     const failed = await expectDelta(
       start,
       { turns: 1, markerSearches: 1, unavailableResponses: 1 },
-      ['model_step_search', 'model_step_unavailable']
+      [
+        'model_step_search',
+        'model_step_receipt_tool',
+        'model_step_receipt_tool',
+        'model_step_receipt_tool',
+        'model_step_unavailable',
+      ]
     )
     await test.step('Retry model step continues from the kept tool result', async () => {
       const responses = await newAgentResponses(desktop)
@@ -278,7 +318,13 @@ test('model step retry C1: a 503 after a confirmed tool continues once without r
     expect(completed.chatId).toBe(kept.chatId)
     expect(completed.modelStepCheckpoint).toBeUndefined()
     expect(completed.turns.some(turn => turn.response?.includes(`continued ${value}`))).toBe(true)
-    // The search is not repeated, and the continuation carried its one result.
+    assertConfirmedToolNotReexecuted(
+      physicalBefore,
+      physicalKept,
+      await readEvidence(scenario()),
+      'workitem_read_receipt'
+    )
+    // The continuation also carried the original marker search's one result.
     await expectDelta(failed, { continuations: 1, toolResults: 1 }, ['model_step_continued'])
   })
 })
@@ -360,6 +406,8 @@ test('model step retry C4: a double click on Retry model step runs one continuat
       await expect(responses).toHaveCount(1)
       await expect(notice(desktop).getByRole('alert')).toHaveCount(0)
     })
+    // Duplicate POST suppression is covered by useAgentChatController.modelStep.test.tsx.
+    // The Host answers duplicates with contract row 3, so C4 cannot count POSTs.
     // A second continuation would be an unexpected retry in the upstream.
     await expectDelta(failed, { continuations: 1, toolResults: 1 }, ['model_step_continued'])
   })
@@ -438,10 +486,7 @@ test('model step retry C6: sending the same prompt starts a new turn instead of 
   })
 })
 
-test('model step retry C7: approval inside a continuation executes the receipt once', async ({
-  page,
-}) => {
-  await restoreReceiptConnector(page)
+test('model step retry C7: approval inside a continuation executes the receipt once', async () => {
   await withDesktopChat(async desktop => {
     const value = marker('c7')
     const prompt = `model step retry approval ${value}`

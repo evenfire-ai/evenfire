@@ -4,8 +4,22 @@ import { createRealHybridUpstream } from './realHybridUpstream'
 const url = 'https://chatgpt.com/backend-api/codex/responses'
 const prompt = 'model step retry hybrid r1 unique-marker-1234'
 const user = { role: 'user', content: prompt }
-const call = { type: 'function_call', call_id: 'search-1', name: 'clerum__tool_search' }
-const output = { type: 'function_call_output', call_id: 'search-1', output: '{}' }
+const call = {
+  type: 'function_call',
+  call_id: 'physical-1',
+  name: 'clerum__tool_call',
+  arguments: JSON.stringify({ name: 'fixture__workitem_read_000', arguments: {} }),
+}
+const output = {
+  type: 'function_call_output',
+  call_id: 'physical-1',
+  output: JSON.stringify({
+    runId: 'fixture-run',
+    tool: 'workitem_read_000',
+    callId: 'mcp-1',
+    businessId: 'receipt-1',
+  }),
+}
 
 function completion(input: unknown[]) {
   return { method: 'POST', body: JSON.stringify({ input }) }
@@ -67,7 +81,11 @@ describe('real Codex hybrid upstream', () => {
     expect((await hybrid.fetchFn(url, completion([second, call, output]))).status).toBe(503)
     expect((await hybrid.fetchFn(url, completion([second, call, output]))).status).toBe(200)
     expect(hybrid.evidence()).toMatchObject({
-      forwarded: 2, injected503: 1, r1: 0, r2: 1, r2DistinctToolResults: 1,
+      forwarded: 2,
+      injected503: 1,
+      r1: 0,
+      r2: 1,
+      r2DistinctToolResults: 1,
     })
   })
 
@@ -81,4 +99,51 @@ describe('real Codex hybrid upstream', () => {
     expect(injected.status).toBe(503)
     expect(hybrid.evidence().injected503).toBe(1)
   })
+})
+
+it('forwards discovery until the physical fixture read is confirmed before the 503', async () => {
+  const realFetch = vi.fn<typeof fetch>(async () => Response.json({ real: true }))
+  const hybrid = createRealHybridUpstream(realFetch)
+  const history = [
+    user,
+    { type: 'function_call', call_id: 'search-1', name: 'clerum__tool_search' },
+    { type: 'function_call_output', call_id: 'search-1', output: '{}' },
+  ]
+  expect((await hybrid.fetchFn(url, completion(history))).status).toBe(200)
+  const physical = {
+    type: 'function_call',
+    call_id: 'physical-1',
+    name: 'clerum__tool_call',
+    arguments: JSON.stringify({ name: 'fixture__workitem_read_000', arguments: {} }),
+  }
+  const result = {
+    type: 'function_call_output',
+    call_id: 'physical-1',
+    output: JSON.stringify({
+      runId: 'fixture-run',
+      tool: 'workitem_read_000',
+      callId: 'mcp-1',
+      businessId: 'receipt-1',
+    }),
+  }
+  expect((await hybrid.fetchFn(url, completion([...history, physical]))).status).toBe(200)
+  const confirmed = completion([...history, physical, result])
+  expect((await hybrid.fetchFn(url, confirmed)).status).toBe(503)
+  expect((await hybrid.fetchFn(url, confirmed)).status).toBe(200)
+  expect(realFetch).toHaveBeenCalledTimes(3)
+})
+
+it('requires a successful fixture result and accepts its BasicSafety envelope', async () => {
+  const realFetch = vi.fn<typeof fetch>(async () => Response.json({ real: true }))
+  const hybrid = createRealHybridUpstream(realFetch)
+  for (const text of ['{}', 'not json', JSON.stringify({ isError: true, content: [] })]) {
+    expect(
+      (await hybrid.fetchFn(url, completion([user, call, { ...output, output: text }]))).status
+    ).toBe(200)
+  }
+  const wrapped = `<tool_output name="fixture__workitem_read_000" sanitized="false">\n${JSON.stringify({ content: [{ type: 'text', text: output.output }] })}\n</tool_output>`
+  expect(
+    (await hybrid.fetchFn(url, completion([user, call, { ...output, output: wrapped }]))).status
+  ).toBe(503)
+  expect(realFetch).toHaveBeenCalledTimes(3)
 })

@@ -1055,3 +1055,50 @@ describe('approved-tools model-step retry probe (#1044)', () => {
     })
   })
 })
+
+describe('physical receipt before the model-step outage', () => {
+  it('runs receipt discovery before injecting the 503 and reuses its confirmed result', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const marker = 'receipt-marker-1234'
+    const history: Entry[] = [{ role: 'user', content: `model step retry receipt ${marker}` }]
+    const first = await request(simulator, history)
+    expect(first.response.status).toBe(200)
+    expect(first.event.item.name).toBe(bridges[0])
+    history.push(first.event.item, {
+      type: 'function_call_output',
+      call_id: first.event.item.call_id,
+      output: JSON.stringify({ found: 0, returned: 0, results: [] }),
+    })
+    const receipt = {
+      runId: 'fixture-run',
+      tool: 'workitem_read_receipt',
+      callId: 'physical-1',
+      businessId: 'receipt-1',
+    }
+    const outputs = [
+      { found: 1, returned: 1, results: [{ name: target, server: 'fixture' }] },
+      { found: true, name: target, parameters: { type: 'object', properties: {} } },
+      { content: [{ type: 'text', text: JSON.stringify(receipt) }] },
+    ]
+    for (let index = 0; index < outputs.length; index++) {
+      const step = await request(simulator, history)
+      expect(step.response.status).toBe(200)
+      expect(step.event.item.name).toBe(bridges[index])
+      history.push(step.event.item, {
+        type: 'function_call_output',
+        call_id: step.event.item.call_id,
+        output: JSON.stringify(outputs[index]),
+      })
+    }
+    expect((await request(simulator, history)).response.status).toBe(503)
+    const continued = await request(simulator, history)
+    expect(continued.response.status).toBe(200)
+    expect(continued.event.delta).toBe(`continued ${marker} toolResults=1`)
+    expect(simulator.evidence().modelStepRetry).toMatchObject({
+      markerSearches: 1,
+      continuations: 1,
+      toolResults: 1,
+      unexpectedRetries: 0,
+    })
+  })
+})

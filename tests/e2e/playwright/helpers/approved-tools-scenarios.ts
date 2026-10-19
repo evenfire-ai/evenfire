@@ -40,6 +40,7 @@ export type Scenario = {
 export type Evidence = {
   runId: string
   catalogSize: number
+  executions: Record<string, number>
   calls: Array<{ runId: string; tool: string; callId: string | number; businessId: string }>
 }
 export type UpstreamEvidence = {
@@ -159,6 +160,10 @@ export async function readEvidence(scenario: Scenario): Promise<Evidence> {
     !Array.isArray(evidence.calls)
   )
     throw new Error('Evidence scenario mismatch')
+  for (const call of evidence.calls) {
+    if (call.runId !== scenario.runId || !Number.isSafeInteger(evidence.executions?.[call.tool]))
+      throw new Error('Missing physical execution evidence')
+  }
   return evidence
 }
 

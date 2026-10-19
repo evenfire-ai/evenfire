@@ -8,6 +8,10 @@ import { type Page, expect, test } from '@playwright/test'
 import { randomUUID } from 'node:crypto'
 import { newAgentResponses, openAgentChat, send } from '../helpers/approved-tools-chat'
 import {
+  assertConfirmedToolNotReexecuted,
+  toolExecutions,
+} from '../helpers/approved-tools-execution'
+import {
   type Scenario,
   localUrl,
   readEvidence,
@@ -123,6 +127,12 @@ async function withDesktopChat(run: (desktop: Page) => Promise<void>): Promise<v
 async function unavailable(desktop: Page, prompt: string) {
   const responses = await newAgentResponses(desktop)
   await send(desktop, prompt)
+  const pending = desktop.getByTestId('progress-stepper').filter({
+    has: desktop.getByTestId('approval-approve-btn'),
+  })
+  await expect(pending).toContainText('workitem_read_000', { timeout: TIMEOUT })
+  await expect(pending).toContainText('requires approval')
+  await pending.getByTestId('approval-approve-btn').click()
   await expect(responses.filter({ hasText: /Model Overloaded/ })).toHaveCount(1, {
     timeout: TIMEOUT,
   })
@@ -133,19 +143,27 @@ async function unavailable(desktop: Page, prompt: string) {
   return notice
 }
 
-test('real hybrid R1: a confirmed search survives one injected 503 and Retry completes', async () => {
+test('real hybrid R1: a confirmed fixture read survives one injected 503 and Retry completes', async () => {
   await withDesktopChat(async desktop => {
-    const prompt = `model step retry hybrid r1 r1-${randomUUID()}. Use tool search once to find workitem_read_receipt, then answer without calling another tool.`
+    const prompt = `model step retry hybrid r1 r1-${randomUUID()}. Use clerum__tool_search once to find workitem_read_000, clerum__tool_describe once for its schema, then clerum__tool_call once with empty arguments. Wait for my approval. After that read completes, answer without calling another tool.`
     const before = await evidence()
-    const businessBefore = (await readEvidence(scenario())).calls.length
-    await test.step('The confirmed search is checkpointed after the injected 503', async () => {
+    const physicalBefore = await readEvidence(scenario())
+    await test.step('The confirmed fixture read is checkpointed after the injected 503', async () => {
       await unavailable(desktop, prompt)
+    })
+    const physicalKept = await readEvidence(scenario())
+    expect(toolExecutions(physicalKept, 'workitem_read_000')).toBe(
+      toolExecutions(physicalBefore, 'workitem_read_000') + 1
+    )
+    expect(physicalKept.calls.at(-1)).toMatchObject({
+      runId: scenario().runId,
+      tool: 'workitem_read_000',
     })
     const kept = await session(desktop, prompt)
     expect(kept.modelStepCheckpoint).toMatchObject({
       status: 'resumable',
       retryAvailable: true,
-      tools: { confirmed: 1 },
+      tools: { confirmed: 3 },
     })
     expect(kept.modelStepCheckpoint?.checkpointId).toBeTruthy()
     expect(kept.modelStepCheckpoint?.version).toBeGreaterThan(0)
@@ -174,6 +192,8 @@ test('real hybrid R1: a confirmed search survives one injected 503 and Retry com
     const completedTurn = done.turns.find(turn => turn.user_input === prompt)
     expect(completedTurn?.tool_steps).toEqual([
       expect.objectContaining({ toolName: 'clerum__tool_search', state: 'completed' }),
+      expect.objectContaining({ toolName: 'clerum__tool_describe', state: 'completed' }),
+      expect.objectContaining({ toolName: 'clerum__tool_call', state: 'completed' }),
     ])
     expect(
       done.turns.some(
@@ -186,18 +206,31 @@ test('real hybrid R1: a confirmed search survives one injected 503 and Retry com
     const after = await evidence()
     expect(after.r1).toBe(before.r1 + 1)
     expect(after.injected503).toBe(before.injected503 + 1)
-    expect(after.r1DistinctToolResults).toBe(before.r1DistinctToolResults + 1)
+    expect(after.r1DistinctToolResults).toBe(before.r1DistinctToolResults + 3)
     expect(after.forwarded).toBeGreaterThan(before.forwarded)
-    expect((await readEvidence(scenario())).calls).toHaveLength(businessBefore)
+    assertConfirmedToolNotReexecuted(
+      physicalBefore,
+      physicalKept,
+      await readEvidence(scenario()),
+      'workitem_read_000'
+    )
   })
 })
 
 test('real hybrid R2: approval inside the continuation executes the receipt once', async () => {
   await withDesktopChat(async desktop => {
-    const prompt = `model step retry hybrid r2 r2-${randomUUID()}. Search for workitem_read_receipt first. Then call that receipt tool once with empty arguments, wait for my approval, and explain the result.`
+    const prompt = `model step retry hybrid r2 r2-${randomUUID()}. First use clerum__tool_search once to find workitem_read_000, clerum__tool_describe once for its schema, then clerum__tool_call once with empty arguments and wait for my approval. After that read completes, separately use clerum__tool_search once to find workitem_read_receipt, clerum__tool_describe once for its schema, then clerum__tool_call once with empty arguments, wait for my approval, and explain the receipt result.`
     const before = await evidence()
-    const callsBefore = (await readEvidence(scenario())).calls
+    const physicalBefore = await readEvidence(scenario())
     await unavailable(desktop, prompt)
+    const physicalKept = await readEvidence(scenario())
+    expect(toolExecutions(physicalKept, 'workitem_read_000')).toBe(
+      toolExecutions(physicalBefore, 'workitem_read_000') + 1
+    )
+    expect(physicalKept.calls.at(-1)).toMatchObject({
+      runId: scenario().runId,
+      tool: 'workitem_read_000',
+    })
     const kept = await session(desktop, prompt)
     expect(kept.modelStepCheckpoint).toMatchObject({ status: 'resumable', retryAvailable: true })
     const responses = await newAgentResponses(desktop)
@@ -216,7 +249,7 @@ test('real hybrid R2: approval inside the continuation executes the receipt once
       expect(waiting.modelStepCheckpoint?.version).toBeGreaterThan(
         kept.modelStepCheckpoint!.version
       )
-      expect((await readEvidence(scenario())).calls).toEqual(callsBefore)
+      expect((await readEvidence(scenario())).calls).toEqual(physicalKept.calls)
       await pending.getByTestId('approval-approve-btn').click()
       await expect(pending).toHaveCount(0)
     })
@@ -224,7 +257,7 @@ test('real hybrid R2: approval inside the continuation executes the receipt once
       .poll(async () => (await readEvidence(scenario())).calls.length, {
         timeout: TIMEOUT,
       })
-      .toBe(callsBefore.length + 1)
+      .toBe(physicalKept.calls.length + 1)
     const call = (await readEvidence(scenario())).calls.at(-1)!
     expect(call).toMatchObject({ runId: scenario().runId, tool: 'workitem_read_receipt' })
     const done = await settled(desktop, prompt)
@@ -242,8 +275,15 @@ test('real hybrid R2: approval inside the continuation executes the receipt once
     await expect(responses).toContainText(/\S/)
     await expect(responses).not.toContainText(/Model Overloaded/)
     await expect(desktop.getByTestId('model-step-retry-notice')).toHaveCount(0)
-    expect((await readEvidence(scenario())).calls).toHaveLength(callsBefore.length + 1)
+    expect((await readEvidence(scenario())).calls).toHaveLength(physicalKept.calls.length + 1)
     const after = await evidence()
+    assertConfirmedToolNotReexecuted(
+      physicalBefore,
+      physicalKept,
+      await readEvidence(scenario()),
+      'workitem_read_000'
+    )
+    expect(after.r2DistinctToolResults).toBe(before.r2DistinctToolResults + 6)
     expect(after.r2).toBe(before.r2 + 1)
     expect(after.injected503).toBe(before.injected503 + 1)
     expect(after.forwarded).toBeGreaterThan(before.forwarded)

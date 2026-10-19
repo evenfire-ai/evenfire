@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { once } from 'node:events'
 import { createRequire } from 'node:module'
 import { test } from 'node:test'
+import { assertConfirmedToolNotReexecuted } from '../../../playwright/helpers/approved-tools-execution.ts'
 import { RECEIPT_TOOL, createApprovedToolsFixture } from './server.mjs'
 
 // Exercise interoperability with the same installed SDK as MCP Host.
@@ -31,7 +32,12 @@ for (const count of [83, 150, 250]) {
     const { base, runId } = await start(t, count)
     const evidence = () =>
       fetch(`${base}/evidence?runId=${runId}`).then(response => response.json())
-    assert.deepEqual(await evidence(), { runId, catalogSize: count, calls: [] })
+    const empty = await evidence()
+    assert.deepEqual(empty.calls, [])
+    assert.equal(empty.runId, runId)
+    assert.equal(empty.catalogSize, count)
+    assert.equal(Object.keys(empty.executions).length, count)
+    assert.ok(Object.values(empty.executions).every(value => value === 0))
     const client = new Client({ name: 'fixture-contract', version: '1.0.0' })
     const transport = new StreamableHTTPClientTransport(new URL(`${base}/mcp`))
     t.after(() => client.close())
@@ -105,4 +111,49 @@ test('invalid fixture configuration fails before listening', () => {
     assert.throws(() => createApprovedToolsFixture({ catalogSize }), /catalogSize/)
   }
   assert.throws(() => createApprovedToolsFixture({ runId: '../foreign' }), /runId/)
+})
+
+test('physical execution counters increase even when the same MCP call id is reused', async t => {
+  const { base, runId } = await start(t, 83)
+  const read = async () => (await fetch(`${base}/evidence?runId=${runId}`)).json()
+  const execute = async () => {
+    const response = await fetch(`${base}/mcp`, {
+      method: 'POST',
+      headers: {
+        accept: 'application/json, text/event-stream',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'same-call-id',
+        method: 'tools/call',
+        params: { name: RECEIPT_TOOL, arguments: {} },
+      }),
+    })
+    const value = await response.json()
+    assert.equal(value.result.isError, false)
+    return JSON.parse(value.result.content[0].text)
+  }
+  const before = await read()
+  const first = await execute()
+  const kept = await read()
+  assert.equal(kept.calls.length, 1, 'The first physical execution is live')
+  assert.equal(kept.executions?.[RECEIPT_TOOL], 1)
+  assert.doesNotThrow(() => assertConfirmedToolNotReexecuted(before, kept, kept, RECEIPT_TOOL))
+  const replaced = {
+    ...kept,
+    calls: [{ ...kept.calls[0], businessId: 'another-physical-receipt' }],
+  }
+  assert.throws(
+    () => assertConfirmedToolNotReexecuted(before, kept, replaced, RECEIPT_TOOL),
+    /Confirmed physical execution records changed after Retry/
+  )
+  const second = await execute()
+  const replayed = await read()
+  assert.deepEqual(second, first, 'A second physical execution can return an identical receipt')
+  assert.equal(replayed.executions[RECEIPT_TOOL], 2)
+  assert.throws(
+    () => assertConfirmedToolNotReexecuted(before, kept, replayed, RECEIPT_TOOL),
+    /Confirmed tool physically re-executed after Retry/
+  )
 })

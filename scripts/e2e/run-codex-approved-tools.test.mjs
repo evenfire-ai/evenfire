@@ -68,10 +68,10 @@ test('the tool-call limit and model-step retry cases are mandatory only in deter
 })
 test('real-hybrid evidence requires exactly one R1 and R2 injection plus real forwarding', () => {
   const before = {
-    forwarded: 10, injected503: 0, r1: 0, r2: 0, r1DistinctToolResults: 0,
+    forwarded: 10, injected503: 0, r1: 0, r2: 0, r1DistinctToolResults: 0, r2DistinctToolResults: 0,
   }
   const after = {
-    forwarded: 14, injected503: 2, r1: 1, r2: 1, r1DistinctToolResults: 1,
+    forwarded: 14, injected503: 2, r1: 1, r2: 1, r1DistinctToolResults: 3, r2DistinctToolResults: 6,
   }
   assert.deepEqual(validateHybridEvidence(before, after), { forwarded: 4, injected503: 2 })
   assert.throws(
@@ -267,4 +267,30 @@ test('every deterministic spec case is registered, and every registered case exi
   }
   assert.equal(declared.length, new Set(declared).size, 'the spec declares a duplicate title')
   assert.deepEqual([...declared].sort(), [...expectedTitles('deterministic')].sort())
+})
+
+test('R2 evidence rejects missing, reset and unexpected distinct tool result deltas', () => {
+  const before = {
+    forwarded: 10,
+    injected503: 0,
+    r1: 0,
+    r2: 0,
+    r1DistinctToolResults: 1,
+    r2DistinctToolResults: 2,
+  }
+  const after = {
+    forwarded: 14,
+    injected503: 2,
+    r1: 1,
+    r2: 1,
+    r1DistinctToolResults: 4,
+    r2DistinctToolResults: 8,
+  }
+  assert.deepEqual(validateHybridEvidence(before, after), { forwarded: 4, injected503: 2 })
+  for (const value of [undefined, 1, 2, 7, 9]) {
+    assert.throws(
+      () => validateHybridEvidence(before, { ...after, r2DistinctToolResults: value }),
+      /r2DistinctToolResults/
+    )
+  }
 })

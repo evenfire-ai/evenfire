@@ -21,11 +21,74 @@ function completedToolResults(input: Row[]): string[] {
   return input
     .filter(
       row =>
-      row.type === 'function_call_output' &&
-      typeof row.call_id === 'string' &&
-      calls.has(row.call_id)
+        row.type === 'function_call_output' &&
+        typeof row.call_id === 'string' &&
+        calls.has(row.call_id)
     )
     .map(row => row.call_id as string)
+}
+
+// Both hybrid journeys read this fixture tool before the outage. The MCP
+// service records its physical executions; discovery alone is not a witness.
+function confirmedFixtureRead(rows: Row[]): boolean {
+  return rows.some(call => {
+    if (
+      call.type !== 'function_call' ||
+      call.name !== 'clerum__tool_call' ||
+      typeof call.call_id !== 'string' ||
+      typeof call.arguments !== 'string'
+    )
+      return false
+    const outputs = rows.filter(
+      row => row.type === 'function_call_output' && row.call_id === call.call_id
+    )
+    if (outputs.length !== 1 || rows.indexOf(outputs[0]!) < rows.indexOf(call)) return false
+    try {
+      const args: unknown = JSON.parse(call.arguments)
+      if (
+        !object(args) ||
+        typeof args.name !== 'string' ||
+        !args.name.endsWith('__workitem_read_000')
+      )
+        return false
+      const raw = outputs[0]!.output
+      if (typeof raw !== 'string') return false
+      let text = raw
+      if (text.startsWith('<tool_output')) {
+        const wrapped =
+          /^<tool_output name="([^"]+)" sanitized="(?:true|false)">\n([\s\S]*)\n<\/tool_output>$/.exec(
+            text
+          )
+        if (!wrapped || wrapped[1] !== args.name) return false
+        text = wrapped[2]!
+      }
+      let value: unknown = JSON.parse(text)
+      if (!object(value) || value.isError === true || value.is_error === true) return false
+      if (Array.isArray(value.content)) {
+        const block = value.content[0]
+        if (
+          value.content.length !== 1 ||
+          !object(block) ||
+          block.type !== 'text' ||
+          typeof block.text !== 'string'
+        )
+          return false
+        value = JSON.parse(block.text)
+      }
+      return (
+        object(value) &&
+        value.tool === 'workitem_read_000' &&
+        typeof value.runId === 'string' &&
+        Boolean(value.runId) &&
+        (typeof value.callId === 'string' || typeof value.callId === 'number') &&
+        typeof value.businessId === 'string' &&
+        Boolean(value.businessId)
+      )
+    } catch {
+      // An unconfirmed or malformed result must reach the real provider unchanged.
+      return false
+    }
+  })
 }
 
 export function createRealHybridUpstream(forward: typeof fetch) {
@@ -40,7 +103,11 @@ export function createRealHybridUpstream(forward: typeof fetch) {
     r2DistinctToolResults: 0,
   }
   const fetchFn: typeof fetch = async (input, init) => {
-    if (requestUrl(input) === COMPLETIONS && init?.method === 'POST' && typeof init.body === 'string') {
+    if (
+      requestUrl(input) === COMPLETIONS &&
+      init?.method === 'POST' &&
+      typeof init.body === 'string'
+    ) {
       let payload: unknown
       try {
         payload = JSON.parse(init.body)
@@ -57,12 +124,14 @@ export function createRealHybridUpstream(forward: typeof fetch) {
           const ids = observedTools.get(key) ?? new Set<string>()
           for (const id of completedToolResults(history.slice(lastUser + 1))) ids.add(id)
           observedTools.set(key, ids)
-          counts[`${match[1]!.toLowerCase()}DistinctToolResults` as
-            | 'r1DistinctToolResults'
-            | 'r2DistinctToolResults'] = [...observedTools]
+          counts[
+            `${match[1]!.toLowerCase()}DistinctToolResults` as
+              | 'r1DistinctToolResults'
+              | 'r2DistinctToolResults'
+          ] = [...observedTools]
             .filter(([name]) => name.startsWith(`${match[1]!.toLowerCase()}:`))
             .reduce((total, [, results]) => total + results.size, 0)
-          if (ids.size > 0 && !injected.has(key)) {
+          if (confirmedFixtureRead(history.slice(lastUser + 1)) && !injected.has(key)) {
             injected.add(key)
             counts.injected503++
             counts[match[1]!.toLowerCase() as 'r1' | 'r2']++

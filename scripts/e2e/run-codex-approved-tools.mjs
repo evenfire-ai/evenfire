@@ -19,7 +19,7 @@ const specFile = 'codex-subscription-approved-tools.spec.ts'
 const modelStepSpecFile = 'model-step-retry-codex.spec.ts'
 const hybridSpecFile = 'model-step-retry-codex-hybrid.spec.ts'
 export const hybridRetryTitles = [
-  'real hybrid R1: a confirmed search survives one injected 503 and Retry completes',
+  'real hybrid R1: a confirmed fixture read survives one injected 503 and Retry completes',
   'real hybrid R2: approval inside the continuation executes the receipt once',
 ]
 export const toolCallLimitTitle =
@@ -85,7 +85,14 @@ export function specFileFor(title) {
 }
 
 export function validateHybridEvidence(before, after) {
-  for (const field of ['forwarded', 'injected503', 'r1', 'r2', 'r1DistinctToolResults']) {
+  for (const field of [
+    'forwarded',
+    'injected503',
+    'r1',
+    'r2',
+    'r1DistinctToolResults',
+    'r2DistinctToolResults',
+  ]) {
     if (
       !Number.isSafeInteger(before?.[field]) ||
       !Number.isSafeInteger(after?.[field]) ||
@@ -98,7 +105,9 @@ export function validateHybridEvidence(before, after) {
     injected503: 2,
     r1: 1,
     r2: 1,
-    r1DistinctToolResults: 1,
+    // R1: search, describe, physical read. R2 also discovers and calls a new receipt.
+    r1DistinctToolResults: 3,
+    r2DistinctToolResults: 6,
   })) {
     if (after[field] - before[field] !== expected)
       throw new Error(`Real-hybrid evidence ${field} did not move by ${expected}`)

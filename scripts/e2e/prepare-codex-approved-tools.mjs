@@ -651,7 +651,7 @@ export function validateKubectlArgs(args, profile, { input, resourceCleanup } = 
 function command(
   operation,
   args,
-  { input, timeout = 60_000, inherit = false, resourceCleanup } = {}
+  { input, timeout = 60_000, inherit = false, resourceCleanup, onRunnerStart } = {}
 ) {
   const env = { ...process.env }
   for (const key of Object.keys(env))
@@ -721,8 +721,8 @@ function command(
         options
       )
       break
-    case 'runner':
-      result = spawnSync(
+    case 'runner': {
+      const child = spawn(
         process.execPath,
         [
           'scripts/minikube/run-with-deadline.mjs',
@@ -736,9 +736,22 @@ function command(
           process.execPath,
           'scripts/e2e/run-codex-approved-tools.mjs',
         ],
-        { ...options, timeout: APPROVED_TOOLS_RUNNER_OUTER_SPAWN_TIMEOUT_MS }
+        {
+          cwd: repo,
+          env,
+          stdio: 'inherit',
+          timeout: APPROVED_TOOLS_RUNNER_OUTER_SPAWN_TIMEOUT_MS,
+        }
       )
-      break
+      onRunnerStart?.(child)
+      return new Promise((resolve, reject) => {
+        child.once('error', () => reject(new Error('Bounded fixture operation failed')))
+        child.once('close', (code, signal) => {
+          if (signal || code !== 0) reject(new Error('Bounded fixture operation failed'))
+          else resolve('')
+        })
+      })
+    }
     default:
       throw new Error('Unsupported fixture process')
   }
@@ -1231,6 +1244,42 @@ async function main() {
       throw error
     }
   }
+  let restorePromise
+  let interruptedSignal
+  let activeRunner
+  const pendingForwardChildren = new Set()
+  const restoreOnce = () => (restorePromise ??= restore())
+  const assertActive = () => {
+    if (interruptedSignal) throw new Error(`Preparation interrupted by ${interruptedSignal}`)
+  }
+  const installSignalRestore = () => {
+    const onSignal = signal => {
+      if (interruptedSignal) return
+      interruptedSignal = signal
+      process.stderr.write(`Approved tools preparation interrupted by ${signal}; restoring the owned fixture\n`)
+      for (const child of pendingForwardChildren) child.kill('SIGTERM')
+      const runner = activeRunner
+      if (runner) runner.kill(signal)
+      const runnerClosed = runner && runner.exitCode === null && runner.signalCode === null
+        ? new Promise(resolve => runner.once('close', resolve))
+        : Promise.resolve()
+      void runnerClosed.then(restoreOnce).then(
+        () => process.exit(signal === 'SIGINT' ? 130 : 143),
+        () => {
+          process.stderr.write(
+            'Approved tools signal restore failed; recovery required. Durable fixture state remains for the explicit restore target\n'
+          )
+          process.exit(1)
+        }
+      )
+    }
+    process.on('SIGINT', onSignal)
+    process.on('SIGTERM', onSignal)
+    return () => {
+      process.off('SIGINT', onSignal)
+      process.off('SIGTERM', onSignal)
+    }
+  }
   if (action === 'restore') {
     stateFile = openOwnedFile(evidence, 'fixture-state.json', { writable: true })
     try {
@@ -1307,6 +1356,7 @@ async function main() {
     }
     stateFile = openOwnedFile(evidence, 'fixture-state.json', { create: true })
     save()
+    const removeSignals = installSignalRestore()
     try {
       kubectl([
         '-n', 'control-plane', 'patch', 'deployment/codex-llm-proxy', '--type=strategic', '-p',
@@ -1343,6 +1393,7 @@ async function main() {
           'svc/codex-llm-proxy', `${port}:9090`],
         { cwd: repo, detached: true, stdio: ['ignore', log, log] }
       )
+      pendingForwardChildren.add(child)
       try {
         await new Promise((resolve, reject) => {
           child.once('spawn', resolve)
@@ -1351,6 +1402,7 @@ async function main() {
       } finally {
         fs.closeSync(log)
       }
+      assertActive()
       child.unref()
       try {
         owner('pf_owner_record_process', [record, String(child.pid), profile, profile, repo,
@@ -1362,22 +1414,34 @@ async function main() {
       state.forwards.push({ record, namespace: 'control-plane', service: 'codex-llm-proxy',
         localPort: port, remotePort: 9090 })
       save()
+      pendingForwardChildren.delete(child)
       await waitHttp(`${upstreamEvidenceUrl}/approved-tools/evidence`, value =>
         value.injected503 === 0 && Number.isSafeInteger(value.forwarded))
+      assertActive()
       owner('pf_owner_record_process_matches', [record, profile, profile, repo,
         'control-plane', 'codex-llm-proxy', String(port), '9090'])
       process.env.APPROVED_TOOLS_SCENARIOS = JSON.stringify(hybridScenarios)
-      command('runner', [], { timeout: APPROVED_TOOLS_RUNNER_OUTER_SPAWN_TIMEOUT_MS, inherit: true })
-      await restore()
+      try {
+        await command('runner', [], {
+          timeout: APPROVED_TOOLS_RUNNER_OUTER_SPAWN_TIMEOUT_MS,
+          inherit: true,
+          onRunnerStart: child => { activeRunner = child },
+        })
+      } finally {
+        activeRunner = undefined
+      }
+      assertActive()
+      await restoreOnce()
       process.stdout.write(`${JSON.stringify({ fixture: 'real-hybrid', restored: state.restored })}\n`)
     } catch (error) {
       try {
-        await restore()
+        await restoreOnce()
       } catch {
         process.stderr.write('Hybrid proxy restore failed; use the explicit restore target before another gate\n')
       }
       throw error
     } finally {
+      removeSignals()
       fs.closeSync(stateFile.fd)
     }
     return
@@ -1546,6 +1610,7 @@ async function main() {
   }
   stateFile = openOwnedFile(evidence, 'fixture-state.json', { create: true })
   save()
+  const removeSignals = installSignalRestore()
   async function startForward(namespace, service, localPort, remotePort, health, accept) {
     const record = path.join(profilePidDirectory, `${run}-${service}.pid`)
     validateOwnerArgs(
@@ -1568,12 +1633,17 @@ async function main() {
       ],
       { cwd: repo, detached: true, stdio: ['ignore', log, log] }
     )
-    await new Promise((resolve, reject) => {
-      child.once('spawn', resolve)
-      child.once('error', reject)
-    })
+    pendingForwardChildren.add(child)
+    try {
+      await new Promise((resolve, reject) => {
+        child.once('spawn', resolve)
+        child.once('error', reject)
+      })
+    } finally {
+      fs.closeSync(log)
+    }
+    assertActive()
     child.unref()
-    fs.closeSync(log)
     const binding = { record, namespace, service, localPort, remotePort }
     try {
       owner('pf_owner_record_process', [
@@ -1593,7 +1663,9 @@ async function main() {
     }
     state.forwards.push(binding)
     save()
+    pendingForwardChildren.delete(child)
     await waitHttp(health, accept)
+    assertActive()
     validateForward(binding)
   }
   try {
@@ -1621,6 +1693,7 @@ async function main() {
         ),
       validateCreated: assertResourceRoundTrip,
     })
+    assertActive()
     kubectl([
       '-n',
       'control-plane',
@@ -1700,6 +1773,7 @@ async function main() {
           value.catalogSize === scenario.catalogSize &&
           value.runId === scenario.runId
       )
+      assertActive()
     }
     const seedInput = {
       action: 'create',
@@ -1736,18 +1810,24 @@ async function main() {
       process.env.APPROVED_TOOLS_FIXTURE_USER_ID = state.identityJournal.users[0].id
       process.env.APPROVED_TOOLS_SCENARIOS = JSON.stringify(scenarios)
       process.env.APPROVED_TOOLS_WORKFLOW_SCENARIO = JSON.stringify(workflowScenario)
-      command('runner', [], {
-        timeout: APPROVED_TOOLS_RUNNER_OUTER_SPAWN_TIMEOUT_MS,
-        inherit: true,
-      })
-      await restore()
+      try {
+        await command('runner', [], {
+          timeout: APPROVED_TOOLS_RUNNER_OUTER_SPAWN_TIMEOUT_MS,
+          inherit: true,
+          onRunnerStart: child => { activeRunner = child },
+        })
+      } finally {
+        activeRunner = undefined
+      }
+      assertActive()
+      await restoreOnce()
     }
     process.stdout.write(
       `${JSON.stringify({ fixture: 'ready', mode: 'deterministic', scenariosFile: path.join(evidence, 'scenarios.json'), workflowScenarioFile: path.join(evidence, 'workflow-scenario.json'), restored: state.restored })}\n`
     )
   } catch (error) {
     try {
-      await restore()
+      await restoreOnce()
     } catch {
       process.stderr.write(
         'Fixture restore failed; use the explicit restore target before another gate\n'
@@ -1755,6 +1835,7 @@ async function main() {
     }
     throw error
   } finally {
+    removeSignals()
     fs.closeSync(stateFile.fd)
   }
 }
