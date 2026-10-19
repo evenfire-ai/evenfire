@@ -66,6 +66,16 @@ public static class SessionAuthorityNative {
   const uint TokenQuery = 0x0008;
   const uint TokenDuplicate = 0x0002;
 
+  static System.ComponentModel.Win32Exception NativeError(string operation, int errorCode) {
+    var exception = new System.ComponentModel.Win32Exception(errorCode);
+    exception.Data["sessionAuthorityOperation"] = operation;
+    return exception;
+  }
+
+  static System.ComponentModel.Win32Exception NativeError(string operation) {
+    return NativeError(operation, Marshal.GetLastWin32Error());
+  }
+
   [StructLayout(LayoutKind.Sequential)]
   struct ByHandleFileInformation {
     public uint FileAttributes;
@@ -146,7 +156,7 @@ public static class SessionAuthorityNative {
     var buffer = new StringBuilder(32768);
     uint length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Capacity, 0);
     if (length == 0 || length >= buffer.Capacity)
-      throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+      throw NativeError("final-path");
     return NormalizeFinalPath(buffer.ToString());
   }
 
@@ -156,9 +166,9 @@ public static class SessionAuthorityNative {
     IntPtr privileges = IntPtr.Zero;
     try {
       if (!OpenProcessToken(GetCurrentProcess(), TokenQuery | TokenDuplicate, out processToken))
-        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        throw NativeError("open-process-token");
       if (!DuplicateToken(processToken, 2, out impersonationToken))
-        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        throw NativeError("duplicate-token");
       privileges = Marshal.AllocHGlobal(4096);
       uint privilegeLength = 4096;
       uint granted;
@@ -171,7 +181,7 @@ public static class SessionAuthorityNative {
       };
       if (!AccessCheck(descriptor, impersonationToken, MaxAllowed, ref mapping, privileges,
         ref privilegeLength, out granted, out status))
-        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        throw NativeError("access-check");
       if (!status) throw new UnauthorizedAccessException();
       return granted;
     } finally {
@@ -188,10 +198,10 @@ public static class SessionAuthorityNative {
       handle = CreateFileW(path, ReadControl | FileReadAttributes, ShareAll, IntPtr.Zero,
         OpenExisting, BackupSemantics | OpenReparsePoint, IntPtr.Zero);
       if (handle == new IntPtr(-1))
-        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        throw NativeError("open-object");
       ByHandleFileInformation info;
       if (!GetFileInformationByHandle(handle, out info))
-        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        throw NativeError("file-information");
       bool isDirectory = (info.FileAttributes & FileAttributeDirectory) != 0;
       if (!isDirectory && info.NumberOfLinks != 1)
         throw new InvalidOperationException("Session authority files must not have hard links");
@@ -199,11 +209,11 @@ public static class SessionAuthorityNative {
       uint error = GetSecurityInfo(handle, SeFileObject,
         OwnerSecurityInformation | DaclSecurityInformation, out owner, out group,
         out dacl, out sacl, out descriptor);
-      if (error != 0) throw new System.ComponentModel.Win32Exception((int)error);
+      if (error != 0) throw NativeError("get-security-info", (int)error);
       ushort control;
       uint revision;
       if (!GetSecurityDescriptorControl(descriptor, out control, out revision))
-        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        throw NativeError("security-descriptor-control");
       uint actualLength = GetSecurityDescriptorLength(descriptor);
       if (actualLength == 0 || actualLength > 1024 * 1024)
         throw new InvalidOperationException();
@@ -260,7 +270,7 @@ public static class SessionAuthorityNative {
     if (attributes != InvalidFileAttributes) return true;
     int error = Marshal.GetLastWin32Error();
     if (error == 2 || error == 3) return false;
-    throw new System.ComponentModel.Win32Exception(error);
+    throw NativeError("entry-exists", error);
   }
 }
 '@
@@ -433,6 +443,8 @@ try {
     detail = $detail
     innerErrorType = if ($innerException) { $innerException.GetType().Name } else { $null }
     innerHresult = if ($innerException) { '0x{0:X8}' -f $innerException.HResult } else { $null }
+    innerNativeOperation = if ($innerException) { $innerException.Data['sessionAuthorityOperation'] } else { $null }
+    innerNativeErrorCode = if ($innerException -is [ComponentModel.Win32Exception]) { $innerException.NativeErrorCode } else { $null }
   } | ConvertTo-Json -Compress
   exit 2
 }
@@ -451,13 +463,13 @@ const POWERSHELL_ARGS = [
 
 function sanitizedWindowsAclFailure(stdout: string): {
   rejected: boolean
-  fields: Record<string, string>
+  fields: Record<string, string | number>
 } {
   try {
     const value: unknown = JSON.parse(stdout.trim())
     if (typeof value !== 'object' || value === null) return { rejected: false, fields: {} }
     const fields = value as Record<string, unknown>
-    const safe: Record<string, string> = {}
+    const safe: Record<string, string | number> = {}
     for (const field of [
       'phase',
       'errorType',
@@ -465,8 +477,16 @@ function sanitizedWindowsAclFailure(stdout: string): {
       'detail',
       'innerErrorType',
       'innerHresult',
+      'innerNativeOperation',
+      'innerNativeErrorCode',
     ] as const) {
       const item = fields[field]
+      if (field === 'innerNativeErrorCode') {
+        if (typeof item === 'number' && Number.isSafeInteger(item) && item >= 0 && item <= 0xffff) {
+          safe[field] = item
+        }
+        continue
+      }
       if (typeof item !== 'string') continue
       const pattern = /hresult$/i.test(field) ? /^0x[0-9A-F]{8}$/i : /^[A-Za-z0-9-]{1,80}$/
       if (pattern.test(item)) safe[field] = item
@@ -526,6 +546,8 @@ function safePowerShellFailure(result: SpawnSyncReturns<string>, fallbackPhase: 
     'detail',
     'innerErrorType',
     'innerHresult',
+    'innerNativeOperation',
+    'innerNativeErrorCode',
   ] as const) {
     const value = verifierFailure.fields[field]
     if (value) diagnostic[`verifier${field[0]!.toUpperCase()}${field.slice(1)}`] = value
