@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { isValidElement } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, within } from '@testing-library/react'
+import { cleanup, render, within } from '@testing-library/react'
 import { GfsResourceTitlebarActions } from '@components/GfsResourceTitlebarActions'
 import { buildGfsResourceActions, getGfsMenuActions } from '../gfsResourceActions'
 
