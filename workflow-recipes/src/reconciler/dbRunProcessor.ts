@@ -562,7 +562,6 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
         // Someone else already transitioned us past Pending — nothing to do
         // here. `syncFromRecipeExecution` drives Running→terminal.
         await client.query('ROLLBACK')
-        committed = true
         return
       }
 
@@ -752,24 +751,20 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
       const run = selected.rows[0]
       if (!run) {
         await client.query('COMMIT')
-        committed = true
         return 'not_running'
       }
       if (run.phase === 'AuthorizationPaused') {
         await client.query('COMMIT')
-        committed = true
         return 'paused'
       }
       if (run.phase !== 'Running') {
         await client.query('COMMIT')
-        committed = true
         return 'not_running'
       }
       // Legacy V1 runs have no initiating authority binding and retain their
       // existing lifecycle without the V2 continuation checkpoint.
       if (!run.authority_binding) {
         await client.query('COMMIT')
-        committed = true
         return 'allowed'
       }
 
@@ -785,7 +780,6 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
 
       if (!failureReason) {
         await client.query('COMMIT')
-        committed = true
         return 'allowed'
       }
 
