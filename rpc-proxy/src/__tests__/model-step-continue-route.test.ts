@@ -5,6 +5,7 @@ import path from 'node:path'
 import request from 'supertest'
 import { createApp } from '../app.js'
 import { createRpcRouter } from '../routes/rpc.js'
+import { mintOrReuseDirectTraceContext } from '../traceContext.js'
 
 // Issue #1043 — the model-step continuation write path and the session-read
 // field it pairs with. rpc-proxy adds no protocol state: it forwards the
@@ -119,6 +120,49 @@ describe(`POST ${CONTINUE_PATH} — model-step continuation passthrough`, () => 
     // client-side deadline) is what releases the call.
     expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal)
   })
+
+  it.each(['c1', 'chat-東京'])(
+    'mints and binds a trusted continuation trace for %s while dropping client trace data',
+    async chatId => {
+      const claimed = readVector('continue-response.claimed.json')
+      const fetchMock = vi.fn().mockResolvedValue(mockResponse(claimed.httpStatus, claimed.body))
+      globalThis.fetch = fetchMock as unknown as typeof fetch
+      const deliveryId = `continuation-trace-regression-${encodeURIComponent(chatId)}`
+      const res = await request(makeApp())
+        .post(CONTINUE_PATH.replace('/c1/', `/${encodeURIComponent(chatId)}/`))
+        .set('authorization', 'Bearer user-token')
+        .set('idempotency-key', deliveryId)
+        .set('x-request-id', 'request-continue')
+        .set('x-clerum-edge-trace-context', JSON.stringify({ runId: 'spoofed-header' }))
+        .send({ version: 3, traceContext: { runId: 'spoofed-body' } })
+        .expect(202)
+
+      expect(res.body).toEqual(claimed.body)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      const trace = mintOrReuseDirectTraceContext({
+        authorityScope: `${VALID_CLAIMS.sub}:chatllm`,
+        deliveryId,
+        sessionId: chatId,
+        requestId: 'request-continue',
+        origin: 'direct_chat',
+      })
+      expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledWith(
+        VALID_CLAIMS.sub,
+        'chatllm',
+        'user-token',
+        {
+          teamId: 'team-1',
+          directRunBinding: { runId: trace.runId, sessionId: chatId, origin: 'direct_chat' },
+        }
+      )
+      const init = fetchMock.mock.calls[0][1] as RequestInit
+      expect(new Headers(init.headers).get('x-clerum-edge-trace-context')).toBe(
+        encodeURIComponent(JSON.stringify(trace))
+      )
+      expect(init.body).toBe(JSON.stringify({ version: 3 }))
+      expect(trace.correlationRefs).toContain('edge-request:request-continue')
+    }
+  )
 
   it('forwards only the version: a smuggled body field never reaches the Host', async () => {
     const claimed = readVector('continue-response.claimed.json')
@@ -244,7 +288,7 @@ describe(`POST ${CONTINUE_PATH} — model-step continuation passthrough`, () => 
       'user-uuid-123',
       'chatllm',
       'user-token',
-      { teamId: 'team-1' }
+      expect.objectContaining({ teamId: 'team-1' })
     )
     expect(fetchMock).not.toHaveBeenCalled()
   })

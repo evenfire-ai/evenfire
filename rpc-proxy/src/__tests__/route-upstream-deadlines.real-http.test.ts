@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { readFileSync } from 'node:fs'
 import {
   type IncomingMessage,
   type Server,
@@ -1011,4 +1012,51 @@ describe('R3-L4 task cancel first attempt has no client-side timeout', () => {
     ])
     expect(controlApiMock.requestHostWakeFromControlApi).not.toHaveBeenCalled()
   })
+})
+
+// The Host verdict bound is intentionally tested in wall time over real HTTP.
+// Keep this tied to the production Host constant, rather than a shorter test timer.
+describe('R1-M3 continuation verdict after wake at production defaults', () => {
+  it('relays 202 just below the Host verdict bound after the first connection drops', async () => {
+    const hostSource = readFileSync(
+      new URL('../../../mcp-host/src/agent/modelStepContinuation.ts', import.meta.url),
+      'utf8'
+    )
+    const bound = hostSource.match(/MODEL_STEP_CONTINUATION_VERDICT_TIMEOUT_MS = ([\d_]+)/)
+    expect(bound).toBeTruthy()
+    const hostVerdictTimeoutMs = Number(bound![1]!.replaceAll('_', ''))
+    config.upstreamTimeoutMs = 8_000
+    config.wakeMaxHoldMs = 48_000
+    const upstreamPath = '/v1/runtime/sessions/agent-1/chat-1/model-step-checkpoints/msc-1/continue'
+    const claimed = {
+      taskId: 'continued-task',
+      checkpointId: 'msc-1',
+      status: 'claimed',
+      replayed: false,
+    }
+    let replied = false
+    await startUpstream((req, res, index) => {
+      if (index === 0) {
+        dropConnection(req)
+        return
+      }
+      setTimeout(() => {
+        replied = true
+        res.writeHead(202, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(claimed))
+      }, hostVerdictTimeoutMs - 100)
+    })
+
+    const result = await request(makeApp())
+      .post('/rpc/hosts/chatllm/sessions/agent-1/chat-1/model-step-checkpoints/msc-1/continue')
+      .set('authorization', 'Bearer tok')
+      .send({ version: 1 })
+
+    expect(controlApiMock.requestHostWakeFromControlApi).toHaveBeenCalledTimes(1)
+    expect(seen.map(entry => entry.url)).toEqual([upstreamPath, upstreamPath])
+    expect(result.status).toBe(202)
+    expect(result.body).toEqual(claimed)
+    expect(replied).toBe(true)
+    expect(seen[1]!.closedEarly).toBe(false)
+  }, 20_000)
 })

@@ -7,6 +7,7 @@ import {
   type ModelStepContinueResponse,
 } from '../core/conversation/modelStepCheckpointContract'
 import { toModelStepCheckpointView } from '../core/conversation/modelStepCheckpointView'
+import type { TraceContextV1 } from '../core/types'
 import { logger } from '../logger'
 import type { ModelStepContinuationRef, ModelStepContinuationVerdict } from '../queue/types'
 import type { IncomingMessage } from '../server/types'
@@ -39,6 +40,7 @@ export interface ModelStepContinuationRequest {
   chatId: string
   checkpointId: string
   version: number
+  traceContext?: TraceContextV1
 }
 
 export interface ModelStepContinuationResult {
@@ -199,7 +201,13 @@ export class ModelStepContinuationService {
       ) {
         throw new Error('Model-step checkpoint source message does not match its session')
       }
-      const sourceMessage = { ...source, messageId: randomUUID() }
+      // The current proxy admission owns the continuation's run, rather than
+      // the origin checkpoint (whose durable source omits trace context).
+      const sourceMessage = {
+        ...source,
+        messageId: randomUUID(),
+        traceContext: request.traceContext,
+      }
       const continuation: ModelStepContinuationRef = {
         checkpointId: header.checkpoint_id,
         originTaskId: header.origin_task_id,

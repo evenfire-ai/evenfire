@@ -327,6 +327,25 @@ export async function handleModelStepContinuationRoute(
       badRequest(res, 'version must be a positive integer')
       return
     }
+    // This route is behind runtimeEdgeGuard(['rpc-proxy']). Only the proxy's
+    // percent-encoded JSON header can supply a trace; the body stays version-only.
+    const traceHeader = req.headers?.['x-clerum-edge-trace-context']
+    let traceContext: unknown
+    try {
+      traceContext =
+        typeof traceHeader === 'string' ? JSON.parse(decodeURIComponent(traceHeader)) : undefined
+    } catch {
+      badRequest(res, 'Invalid continuation traceContext')
+      return
+    }
+    if (
+      !isTraceContextV1(traceContext) ||
+      traceContext.sessionId !== chatId ||
+      traceContext.origin !== 'direct_chat'
+    ) {
+      badRequest(res, 'Invalid continuation traceContext')
+      return
+    }
     if (!handlers.modelStepContinuationHandler) {
       json(res, 501, { error: 'Model-step continuation handler not configured' })
       return
@@ -337,6 +356,7 @@ export async function handleModelStepContinuationRoute(
       chatId,
       checkpointId,
       version,
+      traceContext,
     })
     json(res, result.status, result.body)
   } catch (err) {
