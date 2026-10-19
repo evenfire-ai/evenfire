@@ -320,8 +320,8 @@ try {
     if ($privateObject) { return $sid -eq $currentSid }
     return $allowed -contains $sid
   }
-  function Test-PrincipalRules($snapshot, [bool]$privateObject) {
-    $script:phase = 'validate-owner-and-acl-principals'
+  function Test-PrincipalRules($snapshot, [bool]$privateObject, [string]$policyPhase) {
+    $script:phase = $policyPhase
     if (-not (Test-Owner $snapshot.OwnerSid $privateObject)) { throw 'owner-invalid' }
     $present = @{}
     foreach ($ace in $snapshot.Aces) {
@@ -370,14 +370,16 @@ try {
   function Test-Ancestry([string]$start, [bool]$isUserData) {
     $script:phase = 'validate-user-data-ancestry'
     $current = [IO.DirectoryInfo]::new($start)
+    $depth = 0
     while ($null -ne $current) {
       $snapshot = Inspect-Object $current.FullName $true
-      Test-PrincipalRules $snapshot $false
+      Test-PrincipalRules $snapshot $false ("validate-ancestor-owner-depth-" + $depth)
       $required = $traverseMask
       if ($isUserData -and [string]::Compare($current.FullName, $root, $true) -eq 0) { $required = $createChildMask }
       Test-CurrentEffectiveAccess $snapshot $required
       if ($current.Parent -eq $null) { break }
       $current = $current.Parent
+      $depth += 1
     }
   }
   function Test-PrivateTree([string]$directoryPath) {
@@ -389,7 +391,7 @@ try {
       $currentPath = $pending.Pop()
       $isDirectory = [IO.Directory]::Exists($currentPath)
       $snapshot = Inspect-Object $currentPath $isDirectory
-      Test-PrincipalRules $snapshot $true
+      Test-PrincipalRules $snapshot $true 'validate-authority-tree-object-acl'
       Test-CurrentEffectiveAccess $snapshot $privateMask
       $count += 1
       if ($count -gt 4096) { throw 'authority-tree-over-capacity' }
@@ -403,7 +405,7 @@ try {
   Test-Ancestry $root $true
   $script:phase = 'validate-user-data-root'
   $rootBefore = Inspect-Object $root $true
-  Test-PrincipalRules $rootBefore $false
+  Test-PrincipalRules $rootBefore $false 'validate-user-data-root-acl'
   Test-CurrentEffectiveAccess $rootBefore $createChildMask
   if (-not [SessionAuthorityNative]::EntryExists($authority)) {
     $script:phase = 'provision-authority-directory'
@@ -414,7 +416,7 @@ try {
   $authoritySnapshot = Inspect-Object $authority $true
   $script:phase = 'validate-authority-directory'
   if (-not $authoritySnapshot.DaclProtected) { throw 'authority-dacl-inherited' }
-  Test-PrincipalRules $authoritySnapshot $true
+  Test-PrincipalRules $authoritySnapshot $true 'validate-authority-directory-acl'
   Test-CurrentEffectiveAccess $authoritySnapshot $privateMask
   $objectCount = Test-PrivateTree $authority
   $script:phase = 'revalidate-user-data-root'
