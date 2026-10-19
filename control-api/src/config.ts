@@ -92,8 +92,8 @@ type Config = {
   // Publisher UI surface (Sidebar entry + /publisher route) toggle, surfaced
   // to control-ui on the publish-scope response. Static config value — not
   // part of resolvePublishScope()'s cached registry-derived fields. Default
-  // OFF for self-hosted deploys, ON for managed; CONTROL_API_PUBLISHER_UI_ENABLED
-  // overrides the default either way.
+  // ON for every deploy (managed and self-hosted);
+  // CONTROL_API_PUBLISHER_UI_ENABLED='false' disables it.
   publisherUiEnabled: boolean
   adminAuthMaxFailures: number
   adminAuthLockMinutes: number
@@ -717,9 +717,8 @@ if (memberRegistrationMode === 'hosted') {
   }
 }
 
-// Computed once so registryConnectionMode and publisherUiEnabled's mode-based
-// default read the exact same resolved value below (rather than re-parsing
-// REGISTRY_CONNECTION_MODE a second time).
+// Computed once so every consumer below reads the exact same resolved value
+// (rather than re-parsing REGISTRY_CONNECTION_MODE a second time).
 const registryConnectionMode: 'managed' | 'self-hosted' = parseRegistryConnectionMode()
 
 // Computed as locals because the two values are coupled: image-input evidence

@@ -42,11 +42,6 @@ type PrivilegeExpectation = Record<string, Set<string>>
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
-const runtimeRoles = [
-  'control_api_runtime',
-  'trace_maintenance_runtime',
-  'workflow_recipes_runtime',
-] as const
 const accessFoundationDefinerSignatures = [
   'authorization_bump_user_revision(pg_catalog.uuid)',
   'authorization_bump_team_revision(pg_catalog.uuid)',
