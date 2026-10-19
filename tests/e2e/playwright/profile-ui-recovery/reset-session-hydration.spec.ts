@@ -30,6 +30,21 @@ const resetErrorCases = [
     message:
       'We could not confirm whether your password change completed. Try signing in with the new password. If that does not work, request a new reset link.',
   },
+  {
+    errorCode: 'internal_error',
+    status: 500,
+    publicError: 'internal_error',
+    state: 'editable',
+    message: 'We could not update your password. Please try again.',
+  },
+  {
+    errorCode: 'unknown_500',
+    status: 503,
+    publicError: 'recovery_outcome_unknown',
+    state: 'ambiguous',
+    message:
+      'We could not confirm whether your password change completed. Try signing in with the new password. If that does not work, request a new reset link.',
+  },
 ] as const
 
 async function openRecovery(page: import('@playwright/test').Page) {
@@ -156,6 +171,9 @@ for (const failure of resetErrorCases) {
 
     expect(resetResponse.status()).toBe(failure.status)
     expect(resetResponse.headers()['set-cookie']).toBeUndefined()
+    if ('publicError' in failure) {
+      expect(await resetResponse.json()).toMatchObject({ error: failure.publicError })
+    }
     await expect(page.getByText(failure.message, { exact: true })).toBeVisible()
     await expect(
       page.getByText('This recovery link is invalid or expired.', { exact: true })
@@ -169,5 +187,16 @@ for (const failure of resetErrorCases) {
     expect((await page.context().cookies()).some(cookie => cookie.name === 'profile_session')).toBe(
       false
     )
+    if ('state' in failure && failure.state === 'editable') {
+      await expect(page.getByLabel('Password', { exact: true })).toBeVisible()
+      await expect(page.getByLabel('Confirm password')).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Reset password' })).toBeEnabled()
+    }
+    if ('state' in failure && failure.state === 'ambiguous') {
+      await expect(page.getByLabel('Password', { exact: true })).toHaveCount(0)
+      await expect(page.getByRole('link', { name: 'Try signing in' })).toBeVisible()
+      await expect(page.getByRole('link', { name: 'Request a new recovery link' })).toBeVisible()
+    }
+    await expect(page.getByText(/unclassified_failure|private detail/)).toHaveCount(0)
   })
 }

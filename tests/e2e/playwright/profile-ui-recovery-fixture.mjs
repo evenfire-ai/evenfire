@@ -9,6 +9,7 @@ const repositoryRoot = path.resolve(fixtureDirectory, '../../..')
 const profileUiRoot = path.join(repositoryRoot, 'profile-ui')
 const externalRestRoot = path.join(repositoryRoot, 'external-rest-api')
 const port = Number(process.env.PROFILE_UI_RECOVERY_PORT || 31873)
+const profileOrigin = `http://127.0.0.1:${port}`
 const invitationToken = 'synthetic-reset-proof'
 const syntheticServiceAuthorization = ['Bearer', 'synthetic-profile-recovery-service-token'].join(
   ' '
@@ -547,6 +548,8 @@ const apiServer = createServer(async (request, response) => {
       rate_limited: [429, 'rate_limited'],
       authority_unavailable: [503, 'authority_unavailable'],
       recovery_outcome_unknown: [503, 'recovery_outcome_unknown'],
+      internal_error: [500, 'internal_error'],
+      unknown_500: [500, 'unclassified_failure'],
     }
     const scenario = body.password
       .slice(contractPasswordPrefix.length)
@@ -586,7 +589,7 @@ const externalRestProcess = spawn(
       EXTERNAL_REST_API_JWT_PUBLIC_KEY: publicKey
         .export({ type: 'spki', format: 'pem' })
         .toString(),
-      EXTERNAL_REST_API_CORS_ORIGIN: 'http://127.0.0.1:31873',
+      EXTERNAL_REST_API_CORS_ORIGIN: profileOrigin,
     },
     stdio: ['pipe', 'pipe', 'inherit'],
   }

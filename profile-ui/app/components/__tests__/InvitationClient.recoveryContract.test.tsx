@@ -85,6 +85,7 @@ describe('R6 recovery outcome and identity fences', () => {
       'unknown post-dispatch outcome',
       new ProfileApiError(503, 'recovery_outcome_unknown', 'temporary service message'),
     ],
+    ['unclassified 500 failure', new ProfileApiError(500, 'upstream_failure', 'private detail')],
   ])('does not replay a reset after %s', async (_label, error) => {
     mocks.setupInvitationPasswordWithToken.mockRejectedValueOnce(error)
     renderReset()
@@ -109,6 +110,7 @@ describe('R6 recovery outcome and identity fences', () => {
       'definite authority rejection',
       new ProfileApiError(503, 'authority_unavailable', 'temporary authority message'),
     ],
+    ['definite internal failure', new ProfileApiError(500, 'internal_error', 'private detail')],
   ])('keeps a definite %s retryable rather than ambiguous', async (_label, error) => {
     mocks.setupInvitationPasswordWithToken.mockRejectedValueOnce(error).mockResolvedValueOnce({
       ...passwordReset,

@@ -86,6 +86,7 @@ function isAmbiguousRecoveryOutcome(value: unknown): boolean {
   if (value instanceof TypeError || value.name === 'SyntaxError') return true
   if (!(value instanceof ProfileApiError)) return false
   if (value.code === 'recovery_outcome_unknown') return true
+  if (value.status === 500 && value.code === 'internal_error') return false
   if (value.code === 'authority_unavailable' || value.code === 'rate_limited') return false
   if (value.status === 429) return false
   return value.status >= 500
