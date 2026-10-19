@@ -221,7 +221,6 @@ describe('activity stream writable backpressure', () => {
       const checkpoint = vi.fn().mockResolvedValue('allowed')
       const unsubscribe = vi.fn()
       const captured = slowWritable()
-      let sequence = 0
 
       await handleActivityStreamRoute(
         streamRequest(context),
