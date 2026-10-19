@@ -832,6 +832,29 @@ reject_bearer_fixture "$bearer_fixture_path" "$altered_bearer_line"
 extra_bearer_value='synthetic-added-token-value'
 extra_bearer_line="const extraBearer = '${bearer_prefix}${extra_bearer_value}'"
 reject_bearer_fixture "$bearer_fixture_path" "$exact_bearer_line" "$extra_bearer_line"
+case_variant_repo="$tmp/public-bearer-case-variant-repo"
+mkdir -p "$case_variant_repo"
+git init -q -b dev "$case_variant_repo"
+git -C "$case_variant_repo" config user.email test@example.invalid
+git -C "$case_variant_repo" config user.name boundary-test
+printf 'base\n' >"$case_variant_repo/README.md"
+git -C "$case_variant_repo" add README.md
+git -C "$case_variant_repo" commit -q -m base
+case_variant_base="$(git -C "$case_variant_repo" rev-parse HEAD)"
+case_variant_path='Tests/E2E/Playwright/profile-ui-recovery-fixture.mjs'
+mkdir -p "$(dirname "$case_variant_repo/$case_variant_path")"
+printf '%s\n' "$exact_bearer_line" >"$case_variant_repo/$case_variant_path"
+if T2_PUBLIC_ROOT="$case_variant_repo" T2_PUBLIC_BASE_REF="$case_variant_base" \
+  bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
+    >"$tmp/bearer-case-variant-boundary.out" 2>"$tmp/bearer-case-variant-boundary.err"; then
+  echo 'FAIL: public boundary accepted the case-variant synthetic bearer fixture path' >&2
+  exit 1
+fi
+if ! grep -Fq -- "- $case_variant_path: bearer token" "$tmp/bearer-case-variant-boundary.err"; then
+  echo 'FAIL: case-variant fixture was rejected for another reason' >&2
+  cat "$tmp/bearer-case-variant-boundary.err" >&2
+  exit 1
+fi
 echo 'PASS: public boundary accepts only the exact marked synthetic bearer fixture'
 echo 'PASS: public boundary reads a string-literal key as data and still rejects real assignments'
 bash "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh"

@@ -126,7 +126,7 @@ for line in diff.splitlines():
     value = line[1:]
     # Only this fully matched fixture line may contain a bearer-looking value.
     synthetic_bearer_fixture_line = (
-        current.lower() == "tests/e2e/playwright/profile-ui-recovery-fixture.mjs"
+        current == "tests/e2e/playwright/profile-ui-recovery-fixture.mjs"
         and value
         == "const syntheticBearer = 'Bearer "
         "synthetic-profile-recovery-token' // PUBLIC_SYNTHETIC_BEARER_FIXTURE"
