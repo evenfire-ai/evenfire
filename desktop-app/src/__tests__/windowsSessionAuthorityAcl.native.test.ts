@@ -127,9 +127,11 @@ $descriptor = [System.Security.AccessControl.RawSecurityDescriptor]::new(
   0
 )
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$flags = [System.Security.AccessControl.AceFlags]::ContainerInherit -bor
-  [System.Security.AccessControl.AceFlags]::ObjectInherit -bor
-  [System.Security.AccessControl.AceFlags]::InheritOnly
+$flags = [System.Security.AccessControl.AceFlags](
+  [int][System.Security.AccessControl.AceFlags]::ContainerInherit -bor
+  [int][System.Security.AccessControl.AceFlags]::ObjectInherit -bor
+  [int][System.Security.AccessControl.AceFlags]::InheritOnly
+)
 $ace = [System.Security.AccessControl.CommonAce]::new(
   $flags,
   [System.Security.AccessControl.AceQualifier]::AccessAllowed,
