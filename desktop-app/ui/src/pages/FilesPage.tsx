@@ -1803,24 +1803,21 @@ export function FilesPage({
                 />
               ) : null}
             </div>
-            {(currentIsFolder && canWriteCurrent) ||
-            items.some(item => item.kind === 'directory' && rowCanWrite(item)) ? (
-              <div className="da-gfs-drive__upload-input">
-                <input
-                  aria-label="Upload file"
-                  className="visually-hidden"
-                  ref={uploadInputRef}
-                  type="file"
-                  onChange={event => {
-                    const file = event.currentTarget.files?.[0]
-                    const target = uploadTargetRef.current
-                    uploadTargetRef.current = null
-                    event.currentTarget.value = ''
-                    void handleUploadFile(file, target?.parentResourceId, target?.occupiedNames)
-                  }}
-                />
-              </div>
-            ) : null}
+            <div className="da-gfs-drive__upload-input">
+              <input
+                aria-label="Upload file"
+                className="visually-hidden"
+                ref={uploadInputRef}
+                type="file"
+                onChange={event => {
+                  const file = event.currentTarget.files?.[0]
+                  const target = uploadTargetRef.current
+                  uploadTargetRef.current = null
+                  event.currentTarget.value = ''
+                  void handleUploadFile(file, target?.parentResourceId, target?.occupiedNames)
+                }}
+              />
+            </div>
           </div>
 
           {dragActive || droppedUploadCount > 0 ? (

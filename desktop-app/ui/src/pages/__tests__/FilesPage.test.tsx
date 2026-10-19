@@ -8,7 +8,9 @@ import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsCrumb } from '@hooks/domain/useGfsBrowserController'
 import {
+  accessibleResource,
   childView,
+  listAccessiblePage,
   listChildrenPage,
   resolveResource,
   resolvedDirectory,
@@ -919,7 +921,7 @@ describe('FilesPage', () => {
     }
   })
 
-  it('hides create and upload menu actions without write access to the open folder', () => {
+  it('hides upload actions without write access but keeps the shared chooser mounted', () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
       current: {
@@ -942,7 +944,41 @@ describe('FilesPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Options for Restricted folder' }))
     expect(screen.queryByRole('menuitem', { name: 'New folder' })).toBeNull()
     expect(screen.queryByRole('menuitem', { name: 'Upload file' })).toBeNull()
-    expect(screen.queryByLabelText('Upload file')).toBeNull()
+    expect(screen.getByLabelText('Upload file')).toBeTruthy()
+  })
+
+  it('uploads a writable Shared with me folder row without changing the current location', async () => {
+    const folder = accessibleResource('shared-folder-1', 'Shared project', 'directory', {
+      permissions: ['read', 'write'],
+    })
+    const accessibleResources = (await listAccessiblePage([folder])).items
+    const createFileFromPath = vi.fn(async () => undefined)
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources,
+      createFileFromPath,
+    })
+    window.clerum.gfs.getPathForFile = vi.fn((file: File) => `/tmp/${file.name}`)
+
+    renderFilesPage()
+
+    expect(screen.getByRole('button', { name: 'Open Shared project' })).toBeTruthy()
+    await chooseResourceAction('Shared project', 'Upload file')
+    const upload = new File(['project notes'], 'notes.md', { type: 'text/markdown' })
+    await act(async () => {
+      fireEvent.change(uploadInput(), { target: { files: [upload] } })
+      await Promise.resolve()
+    })
+
+    await waitFor(() =>
+      expect(createFileFromPath).toHaveBeenCalledWith(
+        'shared-folder-1',
+        'notes.md',
+        '/tmp/notes.md'
+      )
+    )
+    expect(screen.getByText('Shared with me')).toBeTruthy()
+    expect(hookMock.useGfsBrowserController.mock.results.at(-1)?.value.current).toBeNull()
   })
 
   it('does not render a folder upload control inside the manage dialog', async () => {
