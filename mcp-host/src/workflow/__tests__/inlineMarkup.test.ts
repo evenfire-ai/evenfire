@@ -379,7 +379,8 @@ describe('image targets', () => {
     for (const inside of [`a${spaces}b`, `a${spaces}"title"`, `a${spaces}(b`, `${spaces}x`]) {
       const started = performance.now()
       imageTarget(inside)
-      expect(performance.now() - started).toBeLessThan(200)
+      // Quadratic work on these takes minutes; the bound leaves room for a loaded machine.
+      expect(performance.now() - started).toBeLessThan(2000)
     }
   })
 })

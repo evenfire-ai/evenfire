@@ -889,7 +889,8 @@ step_header 3 $TOTAL_STEPS "Namespaces + CRDs"
 
 log "Creating namespaces..."
 $KC apply -f "${PROJECT_DIR}/deploy/base/namespaces.yaml"
-ok "7 namespaces created/verified"
+ns_count=$(grep -c '^kind: Namespace' "${PROJECT_DIR}/deploy/base/namespaces.yaml" || true)
+ok "${ns_count} namespaces created/verified"
 
 log "Installing CRDs..."
 $KC apply -f "${PROJECT_DIR}/charts/clerum-crds/crds/"

@@ -392,6 +392,8 @@ jobs:
           MATRIX_PATH: ${{ matrix.path }}
           MATRIX_DOCKERFILE: ${{ matrix.dockerfile }}
           MATRIX_ROOTED: ${{ matrix.rooted }}
+          MATRIX_IMAGE: ${{ matrix.image }}
+          PROFILE_DESKTOP_HANDOFF_ENABLED: ${{ vars.PROFILE_DESKTOP_HANDOFF_ENABLED }}
         run: |
           # Rooted services COPY from sibling directories (packages/*) so their
           # Docker build context must be the repo root and the Dockerfile path
@@ -404,6 +406,15 @@ jobs:
             echo "file=$MATRIX_PATH/${MATRIX_DOCKERFILE:-Dockerfile}" >> "$GITHUB_OUTPUT"
           fi
 
+          if [ "$MATRIX_IMAGE" = "profile-ui" ]; then
+            handoff_enabled="${PROFILE_DESKTOP_HANDOFF_ENABLED:-false}"
+            case "$handoff_enabled" in
+              true|false) ;;
+              *) echo "PROFILE_DESKTOP_HANDOFF_ENABLED must be true or false" >&2; exit 1 ;;
+            esac
+            echo "build_args=PROFILE_DESKTOP_HANDOFF_ENABLED=$handoff_enabled" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push by digest
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
         id: build
@@ -411,6 +422,7 @@ jobs:
         with:
           context: ${{ steps.buildargs.outputs.context }}
           file: ${{ steps.buildargs.outputs.file }}
+          build-args: ${{ steps.buildargs.outputs.build_args }}
           platforms: linux/${{ matrix.arch }}
           # Attestations are disabled per-leg. Provenance attestations don't
           # push cleanly in push-by-digest mode (they need a repo:tag target,

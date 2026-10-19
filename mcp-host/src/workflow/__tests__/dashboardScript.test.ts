@@ -27,6 +27,8 @@ interface Page {
   charts: Map<string, FakeChart>
   /** Text of each note that replaced a chart's container. */
   notes: string[]
+  /** Class of each of those notes. */
+  noteClasses: string[]
   /** Ids of the canvases whose container was removed. */
   removed: string[]
   setVars(vars: Record<string, string>): void
@@ -66,6 +68,7 @@ function runScript(
   const charts = new Map<string, FakeChart>()
   const byCanvas = new Map<string, FakeChart>()
   const notes: string[] = []
+  const noteClasses: string[] = []
   const removed: string[] = []
   const listeners: Record<string, Array<() => void>> = {}
   const listen = (name: string, fn: () => void) => (listeners[name] ??= []).push(fn)
@@ -73,7 +76,10 @@ function runScript(
     id,
     getAttribute: () => '[1,3,2]',
     parentNode: {
-      replaceWith: (note: { textContent: string }) => notes.push(note.textContent),
+      replaceWith: (note: { className: string; textContent: string }) => {
+        notes.push(note.textContent)
+        noteClasses.push(note.className)
+      },
       remove: () => removed.push(id),
     },
   })
@@ -127,6 +133,7 @@ function runScript(
   return {
     charts,
     notes,
+    noteClasses,
     removed,
     setVars: next => {
       vars = next
@@ -196,7 +203,7 @@ describe('dashboardScript', () => {
     expect(page.notes).toEqual([])
   })
 
-  it('replaces each chart with a note and drops the sparklines when Chart.js is missing', () => {
+  it('replaces each chart and each sparkline with a note when Chart.js is missing', () => {
     const page = runScript([spec('c0'), spec('c1')], {
       chartLibrary: false,
       sparklines: ['sparkline-0'],
@@ -204,8 +211,9 @@ describe('dashboardScript', () => {
     expect(page.notes).toEqual([
       'This chart could not be drawn: the chart library did not load',
       'This chart could not be drawn: the chart library did not load',
+      'Trend could not be drawn',
     ])
-    expect(page.removed).toEqual(['sparkline-0'])
+    expect(page.removed).toEqual([])
   })
 
   it('destroys a chart Chart.js registered before it threw, and draws the others', () => {
@@ -215,10 +223,26 @@ describe('dashboardScript', () => {
     })
     expect(page.notes).toEqual([
       'This chart could not be drawn: "x" is not a registered controller.',
+      'Trend could not be drawn',
     ])
     expect(page.destroyed).toEqual(['c0', 'sparkline-0'])
-    expect(page.removed).toEqual(['sparkline-0'])
+    expect(page.removed).toEqual([])
     expect([...page.charts.keys()]).toEqual(['c1', 'sparkline-1'])
+  })
+
+  it('leaves a short fixed note where a sparkline failed, and draws a normal one as before', () => {
+    const page = runScript([], {
+      throwOn: ['sparkline-0'],
+      sparklines: ['sparkline-0', 'sparkline-1'],
+    })
+    // The note neither carries the error's text nor removes the KPI's trend area unseen.
+    expect(page.notes).toEqual(['Trend could not be drawn'])
+    expect(page.noteClasses).toEqual(['kpi-card__sparkline-note'])
+    expect(page.notes.join(' ')).not.toContain('registered controller')
+    expect(page.removed).toEqual([])
+    const drawn = page.charts.get('sparkline-1')!
+    expect(drawn.config.type).toBe('line')
+    expect(drawn.data.datasets[0]).toMatchObject({ data: [1, 3, 2], pointRadius: 0 })
   })
 
   it('draws a gauge as a half dial with its reading and maximum printed inside', () => {

@@ -333,6 +333,35 @@ describe('clerum__generate_pptx — execute() answers malformed input by field',
     expect(result.error).toMatch(/slides\[0\]\.kpis\[0\]\.value/)
   })
 
+  it('reads palette and aspectRatio without regard to case, as the other generators do', async () => {
+    const result = await generatePptx(
+      {
+        filename: 'c.pptx',
+        palette: 'Corporate',
+        aspectRatio: '16X9',
+        slides: [{ layout: 'section', title: 'x' }],
+      },
+      outputDir
+    )
+    expect(result.success, result.error).toBe(true)
+    expect(result.content).not.toContain('is not one of')
+    const file = path.join(outputDir, 'c.pptx')
+    expect(zipEntryText(file, 'ppt/presentation.xml')).toContain('cx="9144000" cy="5143500"')
+    // The corporate palette's primary color, not the default's.
+    expect(slideXml(file, 1).toUpperCase()).toContain('1E3A8A')
+  })
+
+  it('names an unknown palette and uses the default', async () => {
+    const result = await generatePptx(
+      { filename: 'n.pptx', palette: 'neon', slides: [{ layout: 'section', title: 'x' }] },
+      outputDir
+    )
+    expect(result.success, result.error).toBe(true)
+    expect(result.content).toContain(
+      'palette "neon" is not one of default, corporate, warm, alert; "default" was used.'
+    )
+  })
+
   it('refuses an unknown layout with the list of layouts instead of printing it on a slide', async () => {
     const result = await generatePptx(
       { filename: 'u.pptx', slides: [{ layout: 'bullets', title: 'x', bullets: ['a'] }] },

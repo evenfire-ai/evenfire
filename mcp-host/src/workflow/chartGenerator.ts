@@ -1,14 +1,6 @@
 /** The PNG chart generator (clerum__generate_chart): Chart.js drawn on a Skia canvas. */
 import { type SKRSContext2D, createCanvas } from '@napi-rs/canvas'
-import {
-  Chart,
-  type ChartConfiguration,
-  type ChartType,
-  type Plugin,
-  type Scale,
-  registerables,
-} from 'chart.js'
-import * as fs from 'fs'
+import { Chart, type ChartConfiguration, type Plugin, type Scale, registerables } from 'chart.js'
 import {
   artifactResult,
   claimOutputFile,
@@ -16,8 +8,10 @@ import {
   ensureDir,
   outputFilename,
   replacedBytes,
+  writeArtifact,
 } from './artifactOutput'
-import { ChartDataError, type NormalizedPoint, normalizeChartData } from './chartData'
+import { ChartDataError, normalizeChartData } from './chartData'
+import { type ChartDataset, paintedDatasets, positiveNumber } from './chartDatasets'
 import {
   type ValueFormat,
   type ValueLabelOptions,
@@ -25,17 +19,16 @@ import {
   emptyStatePlugin,
   formatValue,
   gaugeCenterPlugin,
-  sliceColors,
   valueLabelsPlugin,
 } from './chartPlugins'
 import {
   CHART_THEMES,
-  type ChartTheme,
   DEFAULT_CHART_HEIGHT,
   DEFAULT_CHART_WIDTH,
   MAX_CHART_DIMENSION,
   MIN_CHART_DIMENSION,
 } from './chartThemes'
+import { drawnTexts, recordDrawnText } from './drawnText'
 import { PNG_BASE_PPM } from './embeddedImages'
 import { CHART_FONT_STACK, ensureFontsReady, sanitizeForFont } from './fonts'
 import { choose } from './ownEntry'
@@ -56,9 +49,6 @@ function prepareChartFonts(): void {
   Chart.defaults.font.family = CHART_FONT_STACK
   Chart.defaults.color = '#0f172a'
 }
-
-/** Types whose series overlap, so their fill has to let the one below show. */
-const TRANSLUCENT_FILL_TYPES = new Set(['line', 'area', 'radar'])
 
 /** Widest a single bar may be drawn, in nominal pixels. */
 const MAX_BAR_THICKNESS = 120
@@ -86,18 +76,6 @@ const SUPPORTED_CHART_TYPES = new Set([
   'waterfall', // bar with floating tuples to show step-by-step deltas
   'funnel', // horizontal bar sorted descending — conversion / pipeline
 ])
-
-interface ChartDataset {
-  label?: string
-  /**
-   * Numbers for category charts, {x,y[,r]} for scatter/bubble, and [from,to]
-   * tuples once a waterfall has been expanded into floating bars.
-   */
-  data: Array<number | null> | NormalizedPoint[] | number[][]
-  backgroundColor?: string | string[]
-  borderColor?: string | string[]
-  fill?: boolean
-}
 
 /**
  * A mark that reaches the end of the plot has nowhere to put its value label
@@ -193,293 +171,6 @@ function largestMark(chartType: string, datasets: ChartDataset[]): number {
   return largest
 }
 
-/**
- * Default radius of a series' points: `full` up to `crowd` points, and smaller
- * past that so a dense series keeps the ink of `crowd` points instead of
- * merging into one blot. Never under 1.5 px, so a lone point still shows.
- */
-function pointRadius(full: number, crowd: number, points: number): number {
-  return points <= crowd ? full : Math.max(1.5, full * Math.sqrt(crowd / points))
-}
-
-/**
- * Apply theme colors to datasets that don't specify their own. Each dataset gets
- * a different color from the palette by index. For pie/doughnut/polarArea where
- * each slice is a separate color, every slice gets its own color: a caller's
- * short list is completed from the theme, and slices past the palette get
- * shades of it.
- *
- * Palettes have 7 colors; with more datasets the palette wraps via
- * `idx % palette.length`, so series i and i+7 share a color. Callers who need
- * more distinct series pass `borderColor` / `backgroundColor` per dataset.
- */
-function applyThemePalette(
-  datasets: ChartDataset[],
-  theme: ChartTheme,
-  chartType: string,
-  warnings: string[]
-): ChartDataset[] {
-  const sliceTypes = new Set(['pie', 'doughnut', 'polarArea'])
-  const isSliceType = sliceTypes.has(chartType)
-
-  return datasets.map((ds, idx) => {
-    const out: ChartDataset = { ...ds }
-    if (isSliceType) {
-      if (typeof out.backgroundColor !== 'string') {
-        const requested = out.backgroundColor
-        const { colors, padded, repeated } = sliceColors(
-          ds.data.length,
-          requested,
-          theme.palette,
-          theme.backgroundColor
-        )
-        out.backgroundColor = colors
-        const where = `data.datasets[${idx}]`
-        if (padded) {
-          warnings.push(
-            `${where}.backgroundColor had ${requested!.length} color(s) for ${ds.data.length} ` +
-              'slices; the rest were taken from the theme. Send one color per slice.'
-          )
-        }
-        if (repeated) {
-          warnings.push(
-            `${where} has ${ds.data.length} slices, more than there are distinct colors, so ` +
-              'some colors repeat. Group the smallest slices into "Other".'
-          )
-        }
-      }
-    } else {
-      const color = theme.palette[idx % theme.palette.length]
-      if (!out.borderColor) out.borderColor = color
-      if (!out.backgroundColor) {
-        // Translucent wherever series are drawn over one another — a solid
-        // radar fill hides every series behind the first.
-        out.backgroundColor = TRANSLUCENT_FILL_TYPES.has(chartType) ? `${color}33` : color
-      }
-      if (chartType === 'area' && out.fill === undefined) {
-        out.fill = true
-      }
-      const point = out as unknown as Record<string, unknown>
-      const points = Array.isArray(ds.data) ? ds.data.length : 0
-      if (chartType === 'scatter') {
-        if (point.pointRadius === undefined) point.pointRadius = pointRadius(6, 100, points)
-      } else if (chartType === 'line' || chartType === 'area' || chartType === 'stackedArea') {
-        // A value with a gap on both sides gets no segment, so its point is
-        // its only mark.
-        if (point.pointRadius === undefined) point.pointRadius = pointRadius(4, 60, points)
-        if (point.pointBackgroundColor === undefined) point.pointBackgroundColor = color
-      }
-    }
-    return out
-  })
-}
-
-interface ResolvedChartType {
-  chartType: ChartType
-  // Loosely typed because Chart.js options that are valid only for specific
-  // chart kinds (rotation/circumference/cutout for doughnut, indexAxis for
-  // bar, etc.) don't satisfy the general ChartConfiguration['options'] union.
-  // The cast happens once at config-merge time.
-  optionsOverrides: Record<string, unknown> & {
-    scales?: {
-      x?: Record<string, unknown>
-      y?: Record<string, unknown>
-      y1?: Record<string, unknown>
-    }
-    plugins?: { legend?: { display?: boolean } }
-    indexAxis?: 'x' | 'y'
-  }
-  /** When set, the caller should replace the labels array with this value. */
-  labels?: string[]
-  /** Gauge only: the reading as sent and the dial's ceiling, for the centre readout. */
-  gaugeValue?: number
-  gaugeMax?: number
-  /** What the type changed about the data, for the caller. */
-  notes: string[]
-}
-
-/**
- * Resolve our user-facing chart-type string to the underlying Chart.js
- * type AND compute per-type option overrides + dataset mutations.
- *
- * For composed types (gauge / waterfall / funnel / mixedBarLine / stacked*)
- * this function MUTATES `datasets` (and sometimes `labels`) in-place so
- * the caller can pass the result straight into the Chart.js config.
- */
-function resolveChartType(
-  raw: string,
-  datasets: ChartDataset[],
-  labels: string[] | undefined,
-  theme: ChartTheme,
-  args: Record<string, unknown>
-): ResolvedChartType {
-  const o: ResolvedChartType = { chartType: 'bar', optionsOverrides: {}, notes: [] }
-  switch (raw) {
-    case 'horizontalBar':
-      o.chartType = 'bar'
-      o.optionsOverrides.indexAxis = 'y'
-      return o
-    case 'area':
-      o.chartType = 'line'
-      // applyThemePalette already set fill=true for area datasets.
-      return o
-    case 'stackedBar':
-      o.chartType = 'bar'
-      o.optionsOverrides.scales = {
-        x: { stacked: true },
-        y: { stacked: true },
-      }
-      return o
-    case 'stackedArea':
-      o.chartType = 'line'
-      o.optionsOverrides.scales = { y: { stacked: true } }
-      datasets.forEach((d, i) => {
-        if (d.fill === undefined) d.fill = (i === 0 ? 'origin' : '-1') as unknown as boolean
-      })
-      return o
-    case 'mixedBarLine': {
-      o.chartType = 'bar'
-      // First dataset stays as bar (default for mixed); subsequent
-      // datasets render as line overlays via Chart.js per-dataset `type`.
-      const dual = args.dualAxis === true
-      datasets.forEach((d, i) => {
-        if (i > 0) {
-          ;(d as any).type = 'line'
-          ;(d as any).fill = false
-          if (dual) (d as unknown as Record<string, unknown>).yAxisID = 'y1'
-        }
-      })
-      if (dual) {
-        o.optionsOverrides.scales = {
-          y1: { position: 'right', grid: { drawOnChartArea: false } },
-        }
-      }
-      return o
-    }
-    case 'bubble':
-      o.chartType = 'bubble'
-      return o
-    case 'gauge': {
-      o.chartType = 'doughnut'
-      // Single-value 0..max. Take datasets[0].data[0] as the value;
-      // build a 2-segment doughnut [value, max-value] and rotate it
-      // 180° so the cut shows as a half-circle dial at the bottom.
-      const ds = datasets[0]
-      if (!ds) return o
-      const values = (ds.data as unknown[]).filter((v): v is number => typeof v === 'number')
-      const reading = values[0] ?? 0
-      // The dial and its notes use this one validated ceiling.
-      const max = positiveNumber('gaugeMax', args.gaugeMax, 100, o.notes)
-      // Only the arc is bounded by the dial; the readout prints the reading.
-      const arc = Math.min(Math.max(reading, 0), max)
-      if (reading > max) {
-        o.notes.push(
-          `the gauge value ${reading} exceeds gaugeMax ${max}, so the dial is shown full; ` +
-            'the readout prints the value. Raise gaugeMax to show it on the scale.'
-        )
-      } else if (reading < 0) {
-        o.notes.push(`the gauge value ${reading} is below 0, so the dial is shown empty.`)
-      }
-      if (values.length > 1) {
-        o.notes.push(
-          `the gauge shows one value, so ${values.length - 1} more in data.datasets[0].data ` +
-            `${values.length > 2 ? 'were' : 'was'} left out.`
-        )
-      }
-      const fill = theme.palette[0]
-      const remainder = theme.gridColor
-      ds.data = [arc, max - arc]
-      ds.backgroundColor = [fill, remainder]
-      ds.borderColor = [fill, remainder]
-      // Drop any extra datasets — gauge is single-value.
-      datasets.length = 1
-      o.gaugeValue = reading
-      o.gaugeMax = max
-      o.labels = ['Value', 'Remainder']
-      o.optionsOverrides = {
-        rotation: -90,
-        circumference: 180,
-        cutout: '70%',
-        // The bottom padding leaves room under the dial's flat edge for the
-        // "/ max" line the readout prints below it.
-        radius: '88%',
-        layout: { padding: { top: 12, right: 16, bottom: 90, left: 16 } },
-        plugins: { legend: { display: false } },
-      }
-      return o
-    }
-    case 'waterfall': {
-      o.chartType = 'bar'
-      const ds = datasets[0]
-      if (!ds || !Array.isArray(ds.data)) return o
-      const deltas = ds.data as number[]
-      const floats: number[][] = []
-      const colors: string[] = []
-      let cumulative = 0
-      for (const delta of deltas) {
-        const start = cumulative
-        cumulative += Number(delta) || 0
-        floats.push([start, cumulative])
-        colors.push((Number(delta) || 0) >= 0 ? theme.positive : theme.negative)
-      }
-      // Final cumulative-total bar in primary color.
-      floats.push([0, cumulative])
-      colors.push(theme.palette[0])
-      ds.data = floats as any
-      ds.backgroundColor = colors
-      ds.borderColor = colors
-      // Append "Total" to labels (or synthesize labels if absent).
-      const newLabels = labels ? [...labels] : deltas.map((_, i) => `Step ${i + 1}`)
-      newLabels.push('Total')
-      o.labels = newLabels
-      // Drop extra datasets — waterfall is single-series.
-      datasets.length = 1
-      o.optionsOverrides = { plugins: { legend: { display: false } } }
-      return o
-    }
-    case 'funnel': {
-      o.chartType = 'bar'
-      const ds = datasets[0]
-      if (!ds || !Array.isArray(ds.data)) return o
-      // Sort descending while keeping label/data alignment.
-      const lbls = labels ?? (ds.data as number[]).map((_, i) => `Stage ${i + 1}`)
-      const paired = (ds.data as number[]).map((v, i) => ({
-        v: Number(v) || 0,
-        l: lbls[i] ?? '',
-        i,
-      }))
-      paired.sort((a, b) => b.v - a.v)
-      ds.data = paired.map(p => p.v)
-      o.labels = paired.map(p => p.l)
-      // Per-stage colors follow their stage through the sort.
-      const follow = (colors: string | string[] | undefined) =>
-        Array.isArray(colors) ? paired.map(p => colors[p.i % colors.length]) : colors
-      ds.backgroundColor = follow(ds.backgroundColor)
-      ds.borderColor = follow(ds.borderColor)
-      // Drop extra datasets — funnel is single-series.
-      datasets.length = 1
-      o.optionsOverrides = {
-        indexAxis: 'y',
-        plugins: { legend: { display: false } },
-      }
-      return o
-    }
-    default:
-      o.chartType = raw as ChartType
-      return o
-  }
-}
-
-// ─── Portable schema fragments ───────────────────────────────────────
-//
-// A tool schema does two jobs. The workflow path (stepRouter) compiles it with
-// AJV and REJECTS arguments that do not match before execute() runs, so it must
-// accept everything the runtime handles. And it reaches every provider
-// verbatim, so it must survive each SDK's translation. Unions are therefore
-// written as scalar type lists or `anyOf` branches — @google/genai turns both
-// into its own schema — and never as `oneOf`, which it passes through
-// untranslated for the Gemini API to reject. Every array declares `items`.
-
 /** Nominal pixels are multiplied by this to keep charts sharp when scaled down. */
 const CHART_PIXEL_RATIO = 2
 
@@ -521,8 +212,22 @@ function resolveValueFormat(raw: unknown): ValueFormat {
   return allowed.includes(v) ? v : 'auto'
 }
 
-/** True when every plotted number is absent or zero, so nothing would be drawn. */
-function isVisuallyEmpty(datasets: ChartDataset[]): boolean {
+/**
+ * True when nothing would be drawn: every plotted number is absent or zero,
+ * or, on a scatter or bubble chart (`xy`), no point has both coordinates. A
+ * point is drawn wherever it sits, at zero too.
+ */
+function isVisuallyEmpty(datasets: ChartDataset[], xy: boolean): boolean {
+  if (xy) {
+    return !datasets.some(ds =>
+      (ds.data as unknown[]).some(point => {
+        const at = point as { x?: unknown; y?: unknown } | null
+        return (
+          typeof at === 'object' && at !== null && Number.isFinite(at.x) && Number.isFinite(at.y)
+        )
+      })
+    )
+  }
   let sawNumber = false
   for (const ds of datasets) {
     for (const point of ds.data as unknown[]) {
@@ -541,25 +246,6 @@ function isVisuallyEmpty(datasets: ChartDataset[]): boolean {
     }
   }
   return sawNumber
-}
-
-/**
- * `value` as a positive finite number; `fallback` when it is unset, and also
- * when it is not one, which `warnings` records.
- */
-function positiveNumber(
-  field: string,
-  value: unknown,
-  fallback: number,
-  warnings: string[]
-): number {
-  if (value === undefined || value === null) return fallback
-  const n = typeof value === 'number' ? value : Number(value)
-  if (!Number.isFinite(n) || n <= 0) {
-    warnings.push(`${field} ${String(value)} is not a positive number; used ${fallback}.`)
-    return fallback
-  }
-  return n
 }
 
 function clampDimension(
@@ -683,8 +369,14 @@ export async function runGenerateChart(
       ...(ds.label ? { label: sanitizeForFont(ds.label) } : {}),
     })) as ChartDataset[]
 
-    const themedDatasets = applyThemePalette(datasets, theme, chartTypeRaw, warnings)
-    const resolved = resolveChartType(chartTypeRaw, themedDatasets, labels, theme, args)
+    const { datasets: themedDatasets, resolved } = paintedDatasets(
+      chartTypeRaw,
+      datasets,
+      labels,
+      theme,
+      args,
+      warnings
+    )
     const chartType = resolved.chartType
     if (resolved.labels !== undefined) labels = resolved.labels
     warnings.push(...resolved.notes)
@@ -772,7 +464,7 @@ export async function runGenerateChart(
         })
       )
     }
-    if (isVisuallyEmpty(themedDatasets)) {
+    if (isVisuallyEmpty(themedDatasets, chartTypeRaw === 'scatter' || chartTypeRaw === 'bubble')) {
       plugins.push(emptyStatePlugin('No data to display', theme.textColor))
     }
 
@@ -911,6 +603,7 @@ export async function runGenerateChart(
     // relative to the image.
     const canvas = createCanvas(layoutWidth, layoutHeight)
     const ctx = canvas.getContext('2d') as SKRSContext2D
+    const shownText = recordDrawnText(ctx)
     // Chart.js types target a browser CanvasRenderingContext2D; the Skia
     // context is API-compatible for the subset Chart.js uses.
     chart = new Chart(ctx as any, config)
@@ -942,7 +635,7 @@ export async function runGenerateChart(
     ensureDir(outputDir)
     const target = claimOutputFile(outputDir, filename)
     enforceQuota(outputDir, pngBuffer.byteLength, replacedBytes(target))
-    fs.writeFileSync(target.filePath, pngBuffer)
+    writeArtifact(target, pngBuffer)
 
     const summary =
       `Chart written: ${target.filename} (${canvas.width}x${canvas.height} px, ` +
@@ -951,7 +644,10 @@ export async function runGenerateChart(
       `sheets[].images: [{ path: '${target.filename}' }] to the XLSX generator, or ` +
       `image: { path: '${target.filename}' } or chart: { path: '${target.filename}' } ` +
       'on a PPTX slide.'
-    return artifactResult(target, 'png', { summary, warnings })
+    return {
+      ...artifactResult(target, 'png', { summary, warnings }),
+      shownText: drawnTexts(shownText),
+    }
   } catch (err) {
     if (err instanceof ChartDataError) return { success: false, error: err.message }
     return { success: false, error: err instanceof Error ? err.message : String(err) }

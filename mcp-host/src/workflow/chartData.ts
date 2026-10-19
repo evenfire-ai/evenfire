@@ -10,8 +10,8 @@
  * field and the fix. Warnings travel back in the tool result so the agent can
  * correct itself on the next call.
  */
+import { currencyPrefix, currencySuffix } from './numberText'
 import { own } from './ownEntry'
-import { currencyPrefix, currencySuffix } from './xlsxCells'
 
 /** Types whose points are {x,y} pairs rather than a value per label. */
 const XY_TYPES = new Set(['scatter', 'bubble'])
@@ -37,8 +37,9 @@ export interface NormalizedPoint {
 export interface NormalizedDataset {
   label?: string
   data: Array<number | null> | NormalizedPoint[]
-  backgroundColor?: string | string[]
-  borderColor?: string | string[]
+  /** Per value when a list; a gap (undefined) is a value with no color of its own. */
+  backgroundColor?: string | Array<string | undefined>
+  borderColor?: string | Array<string | undefined>
   fill?: boolean
 }
 
@@ -229,9 +230,17 @@ class NumberReader {
   }
 }
 
-/** Every string a chart's data holds, at the depths values are read from. */
-function dataTexts(datasets: unknown[]): string[] {
+/**
+ * The text of every value the chart reads as a number, where the point readers
+ * read it: a plain value, the second member of a [label, value] pair, a
+ * record's value field (the first one that holds a number, as readRecordPoint
+ * takes it) or, on scatter and bubble, x, y and the radius of a point or of an
+ * [x, y, r] array. Labels and other
+ * fields are text, not values, so they never set the decimal convention.
+ */
+function dataTexts(datasets: unknown[], chartType: string): string[] {
   const texts: string[] = []
+  const isXY = XY_TYPES.has(chartType)
   const add = (v: unknown) => {
     if (typeof v === 'string') texts.push(v)
   }
@@ -239,9 +248,33 @@ function dataTexts(datasets: unknown[]): string[] {
     const data = (ds as { data?: unknown } | null)?.data
     if (!Array.isArray(data)) continue
     for (const entry of data) {
-      add(entry)
-      if (Array.isArray(entry)) entry.forEach(add)
-      else if (entry && typeof entry === 'object') Object.values(entry).forEach(add)
+      if (typeof entry === 'string') add(entry)
+      else if (Array.isArray(entry)) {
+        if (isXY && entry.length >= 2) {
+          add(entry[0])
+          add(entry[1])
+          if (chartType === 'bubble') add(entry[2])
+        } else if (!isXY && entry.length === 2) add(entry[1])
+      } else if (entry && typeof entry === 'object') {
+        const obj = entry as Record<string, unknown>
+        if (isXY) {
+          add(obj.x)
+          add(obj.y)
+          if (chartType === 'bubble') add(obj.r ?? obj.radius ?? obj.size)
+          continue
+        }
+        for (const key of VALUE_KEYS) {
+          if (!(key in obj)) continue
+          const value = obj[key]
+          add(value)
+          // NumberReader.read returns or throws here, so readRecordPoint stops.
+          const read =
+            typeof value === 'number'
+              ? Number.isFinite(value)
+              : typeof value === 'string' && parseText(value) !== undefined
+          if (read) break
+        }
+      }
     }
   }
   return texts
@@ -568,12 +601,17 @@ export function normalizeChartData(raw: unknown, opts: NormalizeOptions): Normal
   }
 
   const isXY = XY_TYPES.has(chartType)
-  const reader = new NumberReader(dataTexts(obj.datasets))
+  // A single-series chart draws only the first dataset, so the rest are left
+  // out before anything is read from them: their values must not set the
+  // decimal convention, their labels must not become categories, and a value
+  // the chart could not read must not reject it.
+  const retained = SINGLE_SERIES_TYPES.has(chartType) ? obj.datasets.slice(0, 1) : obj.datasets
+  const reader = new NumberReader(dataTexts(retained, chartType))
   const datasets: NormalizedDataset[] = []
   /** Per dataset, the label each value carried, when every value carried one. */
   const labelled: Array<string[] | undefined> = []
 
-  obj.datasets.forEach((dsRaw, index) => {
+  retained.forEach((dsRaw, index) => {
     if (dsRaw === null || typeof dsRaw !== 'object' || Array.isArray(dsRaw)) {
       fail(`${root}.datasets[${index}] must be an object with a \`data\` array.`)
     }
@@ -598,14 +636,16 @@ export function normalizeChartData(raw: unknown, opts: NormalizeOptions): Normal
     datasets.push({ ...(carryStyle(ds) as NormalizedDataset), data: series.data })
   })
 
-  if (labelled.some(Boolean)) labels = placeByLabel(labels, datasets, labelled, root, warnings)
-
-  if (SINGLE_SERIES_TYPES.has(chartType) && datasets.length > 1) {
-    const extra = datasets.length - 1
+  if (retained.length < obj.datasets.length) {
+    const extra = obj.datasets.length - retained.length
     warnings.push(
       `\`${root}.datasets[${extra === 1 ? '1' : `1..${extra}`}]\`: "${chartType}" draws a ` +
         `single series; ${extra} extra dataset(s) were dropped.`
     )
+  }
+
+  if (labelled.some(Boolean)) {
+    labels = placeByLabel(labels, datasets, labelled, root, warnings, !SLICE_TYPES.has(chartType))
   }
 
   if (!isXY) {
@@ -663,18 +703,25 @@ export function normalizeChartData(raw: unknown, opts: NormalizeOptions): Normal
   return { labels, datasets, warnings }
 }
 
+/** Per-value styles, which go wherever their value is placed. */
+const POINT_STYLE_KEYS = ['backgroundColor', 'borderColor'] as const
+
 /**
  * Values that carry their own label ({label, value} records, [label, value]
  * pairs) placed at that label, not at their position: the categories are the
  * given labels, then any new ones in the order met. A series with no value for
- * a category leaves a gap there. Returns the categories.
+ * a category leaves a gap there. Each value's own colors go with it; with
+ * `wrapColors` a short color list repeats, as Chart.js repeats it, and without
+ * it (slice charts) a value past the list, like a gap, has no color of its own
+ * and is left for the renderer to color. Returns the categories.
  */
 function placeByLabel(
   given: string[] | undefined,
   datasets: NormalizedDataset[],
   labelled: Array<string[] | undefined>,
   root: string,
-  warnings: string[]
+  warnings: string[],
+  wrapColors: boolean
 ): string[] {
   const categories = given ? [...given] : []
   // Labels match whatever their case and surrounding spaces: 'jan' is the 'Jan' column.
@@ -686,6 +733,7 @@ function placeByLabel(
   let moved = false
   let repeated = 0
   const unmatched: number[] = []
+  const placedColors: Array<Array<string | undefined>> = []
   labelled.forEach((own, d) => {
     if (!own) return
     // Labels of its own that name none of the given ones are not categories but
@@ -697,6 +745,18 @@ function placeByLabel(
     }
     const values = datasets[d].data as Array<number | null>
     const placed: Array<number | null> = new Array(categories.length).fill(null)
+    const styles = POINT_STYLE_KEYS.flatMap(styleKey => {
+      const list = datasets[d][styleKey]
+      return Array.isArray(list) && list.length > 0
+        ? [
+            {
+              styleKey,
+              list,
+              placed: new Array<string | undefined>(categories.length).fill(undefined),
+            },
+          ]
+        : []
+    })
     const seen = new Set<string>()
     own.forEach((label, i) => {
       if (seen.has(key(label))) {
@@ -712,9 +772,19 @@ function placeByLabel(
       }
       if (at !== i) moved = true
       placed[at] = values[i]
+      for (const style of styles) {
+        style.placed[at] = wrapColors ? style.list[i % style.list.length] : style.list[i]
+      }
     })
     datasets[d] = { ...datasets[d], data: placed }
+    for (const style of styles) {
+      datasets[d][style.styleKey] = style.placed
+      placedColors.push(style.placed)
+    }
   })
+  // A placed color list reaches every category; those a later series added
+  // are gaps the renderer colors.
+  for (const list of placedColors) while (list.length < categories.length) list.push(undefined)
   // Series without labels of their own keep their positions, padded to every category.
   for (const ds of datasets) {
     const data = ds.data as Array<number | null>

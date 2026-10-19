@@ -3,11 +3,19 @@
  * follow their size, so costly features are refused up front and the rest is
  * drawn in a child process the host can kill, never on its event loop.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as childProcess from 'child_process'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { logger } from '../../logger'
 import { INTERNAL_TOOLS } from '../internalTools'
+
+// The real spawn, watched, to read what the renderer process is given.
+vi.mock('child_process', async original => {
+  const actual = await original<typeof import('child_process')>()
+  return { ...actual, spawn: vi.fn(actual.spawn) }
+})
 
 const pdf = INTERNAL_TOOLS.find(t => t.name === 'clerum__generate_pdf')!
 const markdown = INTERNAL_TOOLS.find(t => t.name === 'clerum__generate_markdown')!
@@ -101,6 +109,63 @@ describe('SVG images', () => {
     expect(performance.now() - started).toBeLessThan(15000)
     expect(longestGap).toBeLessThan(1000)
   }, 30000)
+})
+
+describe('an SVG the renderer cannot draw', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('says it could not be drawn and why, and logs the reason, instead of blaming the time', async () => {
+    const warn = vi.spyOn(logger, 'warn')
+    const result = await pdfWith('broken.svg', `<svg ${SVG} width="40" height="20"><rect width=`)
+    expect(result.success, result.error).toBe(true)
+    expect(result.content).toMatch(/broken\.svg' could not be drawn/)
+    expect(result.content).not.toMatch(/took longer/)
+    const logged = warn.mock.calls.find(([, message]) => String(message).includes('SVG'))
+    expect(logged?.[0]).toMatchObject({ component: 'EmbeddedImages', reason: 'exit', code: 1 })
+  })
+
+  it('says an SVG with no size has nothing to draw, not that it is too large', async () => {
+    const result = await pdfWith(
+      'zero.svg',
+      `<svg ${SVG} width="0" height="10"><rect width="10" height="10"/></svg>`
+    )
+    expect(result.success, result.error).toBe(true)
+    expect(result.content).toMatch(/zero\.svg' has no width or height to draw/)
+    expect(result.content).not.toMatch(/more pixels/)
+  })
+
+  it('leaves the SVG out, without crashing the Host, when the renderer cannot start', async () => {
+    const { EventEmitter } = await import('events')
+    const spawn = vi.mocked(childProcess.spawn)
+    // A spawn that runs out of file descriptors: no pipes, 'error' on the next tick.
+    spawn.mockImplementationOnce((() => {
+      const child = Object.assign(new EventEmitter(), {
+        pid: undefined,
+        stdout: null,
+        stderr: null,
+        stdin: null,
+        kill: () => true,
+      })
+      process.nextTick(() =>
+        child.emit('error', Object.assign(new Error('spawn EMFILE'), { code: 'EMFILE' }))
+      )
+      return child
+    }) as never)
+    const result = await pdfWith('plain.svg', NORMAL)
+    expect(result.success, result.error).toBe(true)
+    expect(result.content).toMatch(/plain\.svg' could not be drawn/)
+  })
+
+  it('gives the renderer no environment but a home directory', async () => {
+    const spawn = vi.mocked(childProcess.spawn)
+    spawn.mockClear()
+    await pdfWith('plain.svg', NORMAL)
+    const options = spawn.mock.calls.at(-1)?.[2] as { env?: Record<string, string> }
+    expect(Object.keys(options.env ?? {})).toEqual(['HOME'])
+    expect(options.env!.HOME).not.toBe('')
+  })
 })
 
 describe('raster images a PDF would decode', () => {

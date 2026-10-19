@@ -16,7 +16,21 @@ import { GlobalFonts, type SKRSContext2D, createCanvas } from '@napi-rs/canvas'
 import * as fs from 'fs'
 import * as path from 'path'
 import { logger } from '../logger'
+import { SUBSTITUTIONS } from './fontSubstitutions'
+import {
+  type FaceInfo,
+  type FaceMetrics,
+  type PdfFace,
+  addCodePoint,
+  collectionFaceNames,
+  coversCodePoint,
+  firstLetter,
+  readFaceInfo,
+} from './fontTables'
 import { own } from './ownEntry'
+
+export { asciiStandIn } from './fontSubstitutions'
+export type { FaceMetrics } from './fontTables'
 
 /** Family the bundled Roboto is registered under. */
 export const CHART_FONT_FAMILY = 'Clerum Sans'
@@ -58,7 +72,23 @@ const SYSTEM_FONT_DIRS = [
 const MISSING_PROBE = '\uE000'
 
 let faces: RobotoFaces | undefined
-let ready = false
+
+/**
+ * When the bundled faces are tried again after a failed load. A failure can
+ * pass (a read under memory or descriptor pressure), but a damaged package
+ * fails every time, so the tries are few and spaced; after the last one the
+ * system faces are used for the life of the process.
+ */
+const BUNDLED_RETRY_DELAYS_MS = [30_000, 5 * 60_000, 30 * 60_000]
+
+const bundled = {
+  /** Faces registered so far, so a retry registers only the ones still missing. */
+  registered: new Set<string>(),
+  failures: 0,
+  nextAttemptAt: 0,
+  settled: false,
+}
+let systemFontsRegistered = false
 
 function loadRobotoFaces(): RobotoFaces {
   if (faces) return faces
@@ -102,7 +132,7 @@ function registerSystemFonts(): void {
     }
     for (const file of files) {
       try {
-        GlobalFonts.registerFromPath(file)
+        if (!GlobalFonts.registerFromPath(file)) throw new Error('the renderer refused the face')
       } catch (err) {
         // A face the renderer cannot parse is not available; the image's package may be damaged.
         logger.warn({ file, err: errorText(err) }, 'Font face could not be registered')
@@ -112,21 +142,59 @@ function registerSystemFonts(): void {
 }
 
 /**
- * Register the bundled faces (and any system faces) exactly once. Safe to call
- * from every render path; later calls are free.
+ * Register the bundled faces and the system faces. Safe to call from every
+ * render path: once the bundled faces are in, or their retries are spent,
+ * later calls are free.
  */
 export function ensureFontsReady(): void {
-  if (ready) return
-  ready = true
+  if (!bundled.settled && Date.now() >= bundled.nextAttemptAt) loadBundledFaces()
+  if (!systemFontsRegistered) {
+    systemFontsRegistered = true
+    // Also the fallback: charts draw in these while the bundled faces are missing.
+    registerSystemFonts()
+  }
+}
+
+function loadBundledFaces(): void {
   try {
     const f = loadRobotoFaces()
-    GlobalFonts.register(f.normal, CHART_FONT_FAMILY)
-    GlobalFonts.register(f.bold, `${CHART_FONT_FAMILY} Bold`)
+    const refused: string[] = []
+    for (const [label, data, alias] of [
+      ['regular', f.normal, CHART_FONT_FAMILY],
+      ['bold', f.bold, `${CHART_FONT_FAMILY} Bold`],
+    ] as const) {
+      if (bundled.registered.has(label)) continue
+      // register answers null, without throwing, for a face it cannot use.
+      if (GlobalFonts.register(data, alias)) bundled.registered.add(label)
+      else refused.push(label)
+    }
+    if (refused.length > 0) {
+      throw new Error(`the renderer refused the ${refused.join(' and ')} face`)
+    }
+    bundled.settled = true
+    if (bundled.failures > 0) {
+      logger.info(
+        { attempts: bundled.failures + 1 },
+        'Bundled Roboto faces loaded after a failed try'
+      )
+    }
   } catch (err) {
-    // The system faces still register, so charts draw in them rather than in nothing.
-    logger.error({ err: errorText(err) }, 'Bundled Roboto faces could not be loaded')
+    const delay = BUNDLED_RETRY_DELAYS_MS[bundled.failures]
+    bundled.failures++
+    if (delay === undefined) {
+      bundled.settled = true
+      logger.error(
+        { err: errorText(err), attempts: bundled.failures },
+        'Bundled Roboto faces could not be loaded; system faces are used from now on'
+      )
+    } else {
+      bundled.nextAttemptAt = Date.now() + delay
+      logger.error(
+        { err: errorText(err), attempts: bundled.failures, retryInMs: delay },
+        'Bundled Roboto faces could not be loaded'
+      )
+    }
   }
-  registerSystemFonts()
 }
 
 function errorText(err: unknown): string {
@@ -176,14 +244,6 @@ const PDF_FAMILY_PREFIXES = [
 
 /** Fixed-width families, for code blocks. */
 const MONO_FAMILY_PREFIXES = ['DejaVuSansMono', 'NotoSansMono', 'LiberationMono', 'DejaVuSerifMono']
-
-/**
- * One face for pdfmake: an embedded buffer, a path to a standalone file, or a
- * `[path, postScriptName]` pair addressing a face inside a collection.
- * pdfmake spreads an array descriptor into `pdfKitDoc.font(...)`, which is the
- * only way to open one face of a `.ttc`.
- */
-type PdfFace = Buffer | string | [string, string]
 
 interface PdfFaces {
   normal: PdfFace
@@ -273,7 +333,8 @@ const LATIN_PROBES = ['A', 'g', '0']
 function coverageScore(file: string): number {
   const alias = '__ClerumProbeFace'
   try {
-    GlobalFonts.registerFromPath(file, alias)
+    // A refused face would leave the alias on the face probed before it.
+    if (!GlobalFonts.registerFromPath(file, alias)) return -1
   } catch {
     return -1
   }
@@ -289,282 +350,6 @@ function coverageScore(file: string): number {
     if (renderSignature(ch, font) !== missing) score++
   }
   return score
-}
-
-/** PostScript names read from each collection, by file. */
-const faceNamesByFile = new Map<string, string[]>()
-
-/**
- * PostScript names of the faces inside a TrueType Collection.
- *
- * Debian packages Noto CJK only as collections, and a collection cannot be
- * embedded in a PDF without naming which face to take — so without this, a
- * Chinese, Japanese or Korean document loses its text entirely. Parsed here
- * rather than through a font library because the only consumer of one is
- * pdfkit, reached through pdfmake.
- */
-function collectionFaceNames(file: string): string[] {
-  const known = faceNamesByFile.get(file)
-  if (known) return known
-  const names =
-    withFileReader(file, read => {
-      const found: string[] = []
-      for (const dirOffset of (collectionOffsets(read) ?? []).slice(0, 64)) {
-        const name = postScriptName(read, tableDirectory(read, dirOffset))
-        if (name && !found.includes(name)) found.push(name)
-      }
-      return found
-    }) ?? []
-  // Kept once read, so the faces a PDF names never hang on reading the file
-  // again; a read that failed is tried again next time.
-  if (names.length > 0) faceNamesByFile.set(file, names)
-  return names
-}
-
-// What a face can draw is read from its cmap, which is exactly what pdfkit
-// consults when it embeds text, instead of being inferred from a rendering.
-
-/** `length` bytes at `offset`, or undefined when that runs past the end. */
-type ByteReader = (offset: number, length: number) => Buffer | undefined
-
-function bufferReader(buf: Buffer): ByteReader {
-  return (offset, length) =>
-    offset >= 0 && length >= 0 && offset + length <= buf.length
-      ? buf.subarray(offset, offset + length)
-      : undefined
-}
-
-/** Run `use` over `file`, reading only the byte ranges it asks for. */
-function withFileReader<T>(file: string, use: (read: ByteReader) => T): T | undefined {
-  let fd: number
-  try {
-    fd = fs.openSync(file, 'r')
-  } catch {
-    return undefined
-  }
-  try {
-    const size = fs.fstatSync(fd).size
-    return use((offset, length) => {
-      if (offset < 0 || length < 0 || offset + length > size) return undefined
-      const out = Buffer.alloc(length)
-      fs.readSync(fd, out, 0, length, offset)
-      return out
-    })
-  } catch {
-    return undefined
-  } finally {
-    fs.closeSync(fd)
-  }
-}
-
-/** Table-directory offsets of the faces in a collection; undefined for a single face. */
-function collectionOffsets(read: ByteReader): number[] | undefined {
-  const head = read(0, 12)
-  if (!head || head.toString('latin1', 0, 4) !== 'ttcf') return undefined
-  const count = head.readUInt32BE(8)
-  const table = read(12, count * 4)
-  if (!table) return []
-  return Array.from({ length: count }, (_, i) => table.readUInt32BE(i * 4))
-}
-
-interface TableEntry {
-  offset: number
-  length: number
-}
-
-function tableDirectory(read: ByteReader, dirOffset: number): Map<string, TableEntry> {
-  const tables = new Map<string, TableEntry>()
-  const head = read(dirOffset, 12)
-  if (!head) return tables
-  const count = head.readUInt16BE(4)
-  const records = read(dirOffset + 12, count * 16)
-  if (!records) return tables
-  for (let t = 0; t < count; t++) {
-    const at = t * 16
-    tables.set(records.toString('latin1', at, at + 4), {
-      offset: records.readUInt32BE(at + 8),
-      length: records.readUInt32BE(at + 12),
-    })
-  }
-  return tables
-}
-
-function postScriptName(read: ByteReader, tables: Map<string, TableEntry>): string | undefined {
-  const entry = tables.get('name')
-  const table = entry && read(entry.offset, entry.length)
-  if (!table || table.length < 6) return undefined
-  const count = table.readUInt16BE(2)
-  const stringOffset = table.readUInt16BE(4)
-  for (let r = 0; r < count; r++) {
-    const rec = 6 + r * 12
-    if (rec + 12 > table.length) break
-    // nameID 6 is the PostScript name, which is what pdfkit looks up.
-    if (table.readUInt16BE(rec + 6) !== 6) continue
-    const platformId = table.readUInt16BE(rec)
-    const len = table.readUInt16BE(rec + 8)
-    const off = stringOffset + table.readUInt16BE(rec + 10)
-    if (off + len > table.length) continue
-    const raw = Buffer.from(table.subarray(off, off + len))
-    // Platforms 0 (Unicode) and 3 (Windows) store UTF-16BE; platform 1 is
-    // single-byte. A record of odd length is malformed and read byte by byte.
-    const wide = (platformId === 0 || platformId === 3) && raw.length % 2 === 0
-    const text = wide ? raw.swap16().toString('utf16le') : raw.toString('latin1')
-    const clean = text.replace(/[^\x20-\x7E]/g, '').trim()
-    if (clean) return clean
-  }
-  return undefined
-}
-
-/** Appends `cp` to sorted `[first, last, ...]` ranges, extending the last one when adjacent. */
-function addCodePoint(ranges: number[], cp: number): void {
-  const n = ranges.length
-  if (n > 0 && ranges[n - 1] === cp - 1) ranges[n - 1] = cp
-  else if (n === 0 || ranges[n - 1] < cp) ranges.push(cp, cp)
-}
-
-function format4Ranges(t: Buffer, off: number): number[] {
-  const ranges: number[] = []
-  const segX2 = t.readUInt16BE(off + 6)
-  const ends = off + 14
-  const starts = ends + segX2 + 2
-  const deltas = starts + segX2
-  const rangeOffsets = deltas + segX2
-  if (rangeOffsets + segX2 > t.length) return ranges
-  for (let s = 0; s < segX2 / 2; s++) {
-    const end = t.readUInt16BE(ends + 2 * s)
-    const start = t.readUInt16BE(starts + 2 * s)
-    const delta = t.readUInt16BE(deltas + 2 * s)
-    const ro = t.readUInt16BE(rangeOffsets + 2 * s)
-    for (let c = start; c <= Math.min(end, 0xfffe); c++) {
-      let glyph: number
-      if (ro === 0) {
-        glyph = (c + delta) & 0xffff
-      } else {
-        const at = rangeOffsets + 2 * s + ro + 2 * (c - start)
-        glyph = at + 2 <= t.length ? t.readUInt16BE(at) : 0
-        if (glyph !== 0) glyph = (glyph + delta) & 0xffff
-      }
-      if (glyph !== 0) addCodePoint(ranges, c)
-    }
-  }
-  return ranges
-}
-
-function format12Ranges(t: Buffer, off: number): number[] {
-  const groups: Array<[number, number]> = []
-  const count = t.readUInt32BE(off + 12)
-  for (let g = 0; g < count; g++) {
-    const at = off + 16 + g * 12
-    if (at + 12 > t.length) break
-    const first = t.readUInt32BE(at)
-    const last = t.readUInt32BE(at + 4)
-    // A group starting at glyph 0 maps its first code point to .notdef.
-    const from = t.readUInt32BE(at + 8) === 0 ? first + 1 : first
-    if (from <= last) groups.push([from, last])
-  }
-  groups.sort((a, b) => a[0] - b[0])
-  const ranges: number[] = []
-  for (const [first, last] of groups) {
-    const n = ranges.length
-    if (n > 0 && first <= ranges[n - 1] + 1) ranges[n - 1] = Math.max(ranges[n - 1], last)
-    else ranges.push(first, last)
-  }
-  return ranges
-}
-
-/** Unicode ranges the face's cmap maps to a glyph, from its widest Unicode subtable. */
-function cmapRanges(read: ByteReader, tables: Map<string, TableEntry>): number[] {
-  const entry = tables.get('cmap')
-  const t = entry && read(entry.offset, entry.length)
-  if (!t || t.length < 4) return []
-  let best: { off: number; format: number } | undefined
-  for (let i = 0; i < t.readUInt16BE(2); i++) {
-    const rec = 4 + i * 8
-    if (rec + 8 > t.length) break
-    const platform = t.readUInt16BE(rec)
-    const encoding = t.readUInt16BE(rec + 2)
-    const off = t.readUInt32BE(rec + 4)
-    if (off + 16 > t.length) continue
-    const format = t.readUInt16BE(off)
-    const unicode = platform === 0 || (platform === 3 && (encoding === 1 || encoding === 10))
-    if (!unicode || (format !== 4 && format !== 12)) continue
-    if (!best || (format === 12 && best.format !== 12)) best = { off, format }
-  }
-  if (!best) return []
-  return best.format === 12 ? format12Ranges(t, best.off) : format4Ranges(t, best.off)
-}
-
-interface FaceInfo {
-  /** Sorted `[first, last, ...]` code point ranges the face has glyphs for. */
-  ranges: number[]
-  /** Vertical metrics as pdfkit reads them, or undefined when the face has none. */
-  metrics?: FaceMetrics
-  /** Carries OpenType or AAT layout tables, so fontkit shapes and orders a right-to-left run itself. */
-  shapes: boolean
-  /** Has outlines pdfkit can embed; colour-bitmap emoji faces have none. */
-  outlines: boolean
-}
-
-/** From `hhea` and `head`, the tables fontkit reads ascent and descent from. */
-function faceMetrics(read: ByteReader, tables: Map<string, TableEntry>): FaceMetrics | undefined {
-  const hhea = tables.get('hhea')
-  const head = tables.get('head')
-  const vertical = hhea && read(hhea.offset + 4, 4)
-  const units = head && read(head.offset + 18, 2)
-  const em = units?.readUInt16BE(0)
-  if (!vertical || !em) return undefined
-  const ascent = vertical.readInt16BE(0) / em
-  return { ascent, lineHeight: ascent - vertical.readInt16BE(2) / em }
-}
-
-function faceInfoAt(read: ByteReader, dirOffset: number): FaceInfo {
-  const tables = tableDirectory(read, dirOffset)
-  return {
-    ranges: cmapRanges(read, tables),
-    metrics: faceMetrics(read, tables),
-    shapes: tables.has('GSUB') || tables.has('GPOS') || tables.has('morx'),
-    outlines:
-      (tables.has('glyf') || tables.has('CFF ')) && !tables.has('CBDT') && !tables.has('sbix'),
-  }
-}
-
-function readFaceInfo(face: PdfFace): FaceInfo | undefined {
-  if (Buffer.isBuffer(face)) {
-    const read = bufferReader(face)
-    return faceInfoAt(read, collectionOffsets(read)?.[0] ?? 0)
-  }
-  const [file, wanted] = Array.isArray(face) ? face : [face, undefined]
-  return withFileReader(file, read => {
-    const offsets = collectionOffsets(read)
-    if (!offsets) return faceInfoAt(read, 0)
-    const at = wanted
-      ? offsets.find(o => postScriptName(read, tableDirectory(read, o)) === wanted)
-      : offsets[0]
-    return at === undefined ? undefined : faceInfoAt(read, at)
-  })
-}
-
-/** The first letter `ranges` cover, to try a face with; "A" when they cover none. */
-function firstLetter(ranges: number[]): string {
-  for (let i = 0; i < ranges.length; i += 2) {
-    for (let cp = ranges[i]; cp <= ranges[i + 1] && cp - ranges[i] < 256; cp++) {
-      const ch = String.fromCodePoint(cp)
-      if (/\p{L}/u.test(ch)) return ch
-    }
-  }
-  return 'A'
-}
-
-function coversCodePoint(ranges: number[], cp: number): boolean {
-  let lo = 0
-  let hi = ranges.length / 2 - 1
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1
-    if (cp < ranges[mid * 2]) hi = mid - 1
-    else if (cp > ranges[mid * 2 + 1]) lo = mid + 1
-    else return true
-  }
-  return false
 }
 
 /** Collections worth embedding, and the script variants to prefer within them. */
@@ -690,11 +475,13 @@ function resolvePdfFaces(): PdfFaces {
     // in the face the PDF will embed.
     const file = Array.isArray(chosen.normal) ? chosen.normal[0] : chosen.normal
     try {
-      if (typeof file === 'string') GlobalFonts.registerFromPath(file, PDF_FONT_FAMILY)
+      if (typeof file === 'string' && !GlobalFonts.registerFromPath(file, PDF_FONT_FAMILY)) {
+        throw new Error('the renderer refused the face')
+      }
       pdfFaces = chosen
       return pdfFaces
     } catch (err) {
-      // Unparseable face: fall through to the bundled one, which covers less.
+      // Unparseable or refused face: fall through to the bundled one, which covers less.
       logger.warn(
         { file, err: errorText(err) },
         'PDF body face could not be registered; the bundled Roboto face is used'
@@ -795,36 +582,60 @@ const FALLBACK_PREFIXES = [
  * are listed; fontkit loops forever on some Meetei Mayek, Kaithi and Nastaliq
  * sequences, so no installed face is used unlisted.
  */
-const MORE_SCRIPT_PREFIXES = [
-  'NotoSansDevanagari',
-  'NotoSansBengali',
-  'NotoSansGurmukhi',
-  'NotoSansGujarati',
-  'NotoSansOriya',
-  'NotoSansTamil',
-  'NotoSansTelugu',
-  'NotoSansKannada',
-  'NotoSansMalayalam',
-  'NotoSansThai',
-  'NotoSansLao',
-  'NotoSansKhmer',
-  'NotoSansMyanmar',
-  'NotoSansArmenian',
-  'NotoSansGeorgian',
-  'NotoSansEthiopic',
+const MORE_SCRIPTS: ReadonlyArray<readonly [prefix: string, letter: number]> = [
+  ['NotoSansDevanagari', 0x0915],
+  ['NotoSansBengali', 0x0995],
+  ['NotoSansGurmukhi', 0x0a15],
+  ['NotoSansGujarati', 0x0a95],
+  ['NotoSansOriya', 0x0b15],
+  ['NotoSansTamil', 0x0b95],
+  ['NotoSansTelugu', 0x0c15],
+  ['NotoSansKannada', 0x0c95],
+  ['NotoSansMalayalam', 0x0d15],
+  ['NotoSansThai', 0x0e01],
+  ['NotoSansLao', 0x0e81],
+  ['NotoSansKhmer', 0x1780],
+  ['NotoSansMyanmar', 0x1000],
+  ['NotoSansArmenian', 0x0531],
+  ['NotoSansGeorgian', 0x10d0],
+  ['NotoSansEthiopic', 0x1200],
 ]
+const MORE_SCRIPT_PREFIXES = MORE_SCRIPTS.map(([prefix]) => prefix)
+
+/** The scripts the fallback faces are there for: a letter of each, and the faces named for it. */
+const SCRIPT_FACES: ReadonlyArray<
+  readonly [script: string, letter: number, prefixes: readonly string[]]
+> = [
+  ['Arabic', 0x0627, SCRIPT_FALLBACK_PREFIXES.filter(prefix => prefix.includes('Arabic'))],
+  ['Hebrew', 0x05d0, SCRIPT_FALLBACK_PREFIXES.filter(prefix => prefix.includes('Hebrew'))],
+  ...MORE_SCRIPTS.map(
+    ([prefix, letter]) => [prefix.slice('NotoSans'.length), letter, [prefix]] as const
+  ),
+]
+
+/** A Han character, drawn by the CJK collections. */
+const CJK_LETTER = 0x4e2d
+
+/**
+ * The scripts no installed face draws. A script with a face named for it is
+ * not missing, even without the preferred one (Debian has no Noto Sans Arabic
+ * UI); one without is missing only when no other face draws its letter
+ * (DejaVu Sans draws Armenian and Georgian). `draws` is asked only for those.
+ */
+export function missingScripts(
+  hasFace: (prefix: string) => boolean,
+  hasCjk: boolean,
+  draws: (cp: number) => boolean
+): string[] {
+  const missing = SCRIPT_FACES.filter(
+    ([, letter, prefixes]) => !prefixes.some(hasFace) && !draws(letter)
+  ).map(([script]) => script)
+  return hasCjk || draws(CJK_LETTER) ? missing : ['CJK', ...missing]
+}
 
 interface FallbackFamily {
   family: string
   faces: PdfFaces
-}
-
-/** Vertical metrics of a face in ems, as pdfkit uses them to lay out a line. */
-export interface FaceMetrics {
-  /** Height above the baseline. */
-  ascent: number
-  /** Ascent less descent: the height of one line before pdfmake's lineHeight factor. */
-  lineHeight: number
 }
 
 /** Everything a PDF typesetter needs to know about the faces available to it. */
@@ -876,6 +687,8 @@ function embeds(faces: PdfFaces, texts: string | string[]): boolean {
   }
 }
 
+const CJK_FALLBACK = 'Fallback-CJK'
+
 function discoverFallbacks(exclude: Set<string>): FallbackFamily[] {
   const out: FallbackFamily[] = []
   const seen = new Set<string>()
@@ -891,7 +704,7 @@ function discoverFallbacks(exclude: Set<string>): FallbackFamily[] {
   const cjkFile = cjk && faceFile(cjk.normal)
   if (cjk && cjkFile && !exclude.has(cjkFile)) {
     seen.add(cjkFile)
-    out.push({ family: 'Fallback-CJK', faces: cjk })
+    out.push({ family: CJK_FALLBACK, faces: cjk })
   }
   FALLBACK_PREFIXES.forEach(add)
   MORE_SCRIPT_PREFIXES.forEach(add)
@@ -931,8 +744,24 @@ class GlyphSource implements PdfGlyphSource {
         if (file) exclude.add(file)
       }
       this.fallbacks = discoverFallbacks(exclude)
+      this.reportMissingScripts(this.fallbacks)
     }
     return this.fallbacks
+  }
+
+  /** Logged once per process, since the faces are looked up once (glyphSource). */
+  private reportMissingScripts(fallbacks: FallbackFamily[]): void {
+    const missing = missingScripts(
+      prefix => facesForPrefix(prefix) !== undefined,
+      fallbacks.some(f => f.family === CJK_FALLBACK),
+      cp => this.familyFor(cp, PDF_FONT_FAMILY) !== undefined
+    )
+    if (missing.length > 0) {
+      logger.warn(
+        { component: 'fonts', scripts: missing },
+        'No installed face draws these scripts, so PDFs leave their characters out'
+      )
+    }
   }
 
   private infoOf(family: string): FaceInfo | undefined {
@@ -1010,8 +839,10 @@ class GlyphSource implements PdfGlyphSource {
       this.registered.add(alias)
       ensureFontsReady()
       try {
-        if (Buffer.isBuffer(face)) GlobalFonts.register(face, alias)
-        else GlobalFonts.registerFromPath(faceFile(face)!, alias)
+        const key = Buffer.isBuffer(face)
+          ? GlobalFonts.register(face, alias)
+          : GlobalFonts.registerFromPath(faceFile(face)!, alias)
+        if (!key) throw new Error('the renderer refused the face')
       } catch (err) {
         // Measured with the canvas default instead; only line breaking is approximate.
         logger.warn(
@@ -1120,118 +951,6 @@ export function canRender(ch: string): boolean {
   }
   coverage.set(cp, ok)
   return ok
-}
-
-/**
- * ASCII stand-ins for symbols models reach for constantly. Charts apply them
- * only when the character cannot be drawn; PDFs always apply them to emoji,
- * which no embedded face draws in color.
- */
-const SUBSTITUTIONS: Record<string, string> = {
-  '\u2192': '->',
-  '\u27F6': '->',
-  '\u279C': '->',
-  '\u2794': '->',
-  '\u2190': '<-',
-  '\u2194': '<->',
-  '\u21D2': '=>',
-  '\u21D0': '<=',
-  '\u21D4': '<=>',
-  '\u2191': '^',
-  '\u2193': 'v',
-  '\u2713': 'OK',
-  '\u2714': 'OK',
-  '\u2611': '[x]',
-  '\u2717': 'X',
-  '\u2718': 'X',
-  '\u2612': '[x]',
-  '\u2248': '~',
-  '\u2265': '>=',
-  '\u2264': '<=',
-  '\u2260': '!=',
-  '\u2261': '==',
-  '\u221E': 'inf',
-  '\u2022': '*',
-  '\u2023': '-',
-  '\u25AA': '-',
-  '\u25AB': '-',
-  '\u25E6': '-',
-  '\u25CF': '*',
-  '\u25CB': 'o',
-  '\u2605': '*',
-  '\u2606': '*',
-  '\u26A0': '!',
-  '\u2122': '(TM)',
-  '\u2120': '(SM)',
-  '\u2014': '-',
-  '\u2013': '-',
-  '\u2026': '...',
-  '\u201C': '"',
-  '\u201D': '"',
-  '\u2018': "'",
-  '\u2019': "'",
-  '\u2010': '-',
-  '\u2011': '-',
-  '\u2212': '-',
-  // Space variants: locale-formatted numbers and times carry U+202F and U+00A0.
-  '\u00A0': ' ',
-  '\u2000': ' ',
-  '\u2001': ' ',
-  '\u2002': ' ',
-  '\u2003': ' ',
-  '\u2004': ' ',
-  '\u2005': ' ',
-  '\u2006': ' ',
-  // A figure space and a narrow no-break space keep a number or a time such as
-  // '8:11 PM' on one line, so they stand in as a no-break space.
-  '\u2007': '\u00A0',
-  '\u2008': ' ',
-  '\u2009': ' ',
-  '\u200A': ' ',
-  '\u202F': '\u00A0',
-  '\u205F': ' ',
-  '\u3000': ' ',
-  // Status emoji, which models often put alone in a table cell. No embedded
-  // face draws them in colour, and a coloured circle means only its colour,
-  // so they become words.
-  '\u2705': 'OK',
-  '\u2716': 'X',
-  '\u274c': 'X',
-  '\u274e': 'X',
-  '\u2757': '!',
-  '\u2755': '!',
-  '\u2753': '?',
-  '\u2754': '?',
-  '\u2b50': '*',
-  '\u2b06': '^',
-  '\u2b07': 'v',
-  '\u27a1': '->',
-  '\u2b05': '<-',
-  '\u{1F7E2}': '(green)',
-  '\u{1F7E1}': '(yellow)',
-  '\u{1F7E0}': '(orange)',
-  '\u{1F534}': '(red)',
-  '\u{1F535}': '(blue)',
-  '\u{1F7E3}': '(purple)',
-  '\u{1F7E4}': '(brown)',
-  '\u26ab': '(black)',
-  '\u26aa': '(white)',
-  '\u{1F7E9}': '(green)',
-  '\u{1F7E8}': '(yellow)',
-  '\u{1F7E7}': '(orange)',
-  '\u{1F7E5}': '(red)',
-  '\u{1F7E6}': '(blue)',
-  '\u{1F7EA}': '(purple)',
-  '\u{1F7EB}': '(brown)',
-  '\u2b1b': '(black)',
-  '\u2b1c': '(white)',
-  '\u{1F4C8}': '(up)',
-  '\u{1F4C9}': '(down)',
-}
-
-/** The ASCII stand-in for a symbol or status emoji, when one is defined. */
-export function asciiStandIn(ch: string): string | undefined {
-  return SUBSTITUTIONS[ch]
 }
 
 /** Zero-width joiners, variation selectors and byte-order marks — safe to drop. */

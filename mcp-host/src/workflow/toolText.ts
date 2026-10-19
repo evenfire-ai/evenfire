@@ -65,8 +65,32 @@ export function cleanToolArgs<T>(value: T, depth = 0): T {
   return out as T
 }
 
-/** Characters the document renderers draw as nothing. */
-const INVISIBLE = /[­​-‏⁠-⁤﻿]/g
+/**
+ * Characters a viewer draws as nothing (Unicode's default ignorables): bidi
+ * controls, joiners, variation selectors, tags and the like.
+ */
+const INVISIBLE = /\p{Default_Ignorable_Code_Point}/gu
+
+/**
+ * Markdown link syntax a viewer does not print: a destination of any kind
+ * with its title ("](#notes)", "]( notes.md 'title')", "](<a b.md> (title))"),
+ * a reference ("][r]"), a reference definition and the brackets around a
+ * label. The text it runs on has its lines folded, so a definition is matched
+ * wherever it stands, up to its title. Whitespace sits where only one
+ * alternative can take it, and a label stops at the next bracket, so the
+ * pattern stays linear.
+ */
+const LINK_TITLE = String.raw`(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\))`
+const LINK_DESTINATION = String.raw`(?:<[^>\n]*>|(?:[^\s()]|\([^\s()]*\))+)`
+const LINK_SYNTAX = new RegExp(
+  [
+    String.raw`\]\([ \t]*(?:${LINK_DESTINATION}(?:[ \t]+(?:${LINK_TITLE}[ \t]*)?)?)?\)`,
+    String.raw`\]\[[^\]\n]*\]`,
+    String.raw`\[[^[\]\n]+\]:[ \t]*(?:<[^>\n]*>|\S+)(?:[ \t]+${LINK_TITLE})?`,
+    String.raw`[[\]]`,
+  ].join('|'),
+  'g'
+)
 
 /** A backslash before ASCII punctuation, which markdown prints as that character. */
 const MARKDOWN_ESCAPE = /\\([!-/:-@[-`{-~])/g
@@ -76,7 +100,8 @@ const MARKDOWN_ESCAPE = /\\([!-/:-@[-`{-~])/g
  * document generator may print it: as sent, cleaned as cleanToolArgs cleans
  * it, with HTML tags, character references, backslash escapes and invisible
  * characters taken out, with markdown markers taken out too, and read as
- * inline markdown, where a link prints its label. Text split by any of these
+ * inline markdown, where a link prints its label, and with the syntax of a
+ * link of any kind taken out. Text split by any of these
  * prints whole, so a check for leaked secrets that reads every form sees it
  * whole. Keys count because a generator can print one, as an XLSX sheet prints
  * the keys of record rows as its header. Like cleanToolArgs, it reads no
@@ -109,5 +134,7 @@ export function printedForms(args: unknown): string[] {
       .join('')
       .replace(INVISIBLE, '')
   )
-  return [...sent, ...cleaned, ...printed, ...bare, ...spoken]
+  // As a markdown viewer prints a link of any kind: its label only.
+  const unlinked = bare.map(text => text.replace(LINK_SYNTAX, ''))
+  return [...sent, ...cleaned, ...printed, ...bare, ...spoken, ...unlinked]
 }

@@ -4,8 +4,8 @@
  * another slide, so the generator lays text out itself. It measures with the
  * Roboto faces fonts.ts registers, within a few percent of Arial, the deck font.
  */
-import { isRtlText } from './docxScript'
 import { CJK_WIDE_CHAR, bodyFaceEm } from './fonts'
+import { isRtlText } from './textDirection'
 
 /** The one family the deck uses, for slides and charts alike. */
 export const PPTX_FONT_FACE = 'Arial'

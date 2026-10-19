@@ -4,7 +4,10 @@
 import { createCanvas, loadImage } from '@napi-rs/canvas'
 import { spawn } from 'child_process'
 import * as fs from 'fs'
+import * as os from 'os'
 import * as path from 'path'
+import { logger } from '../logger'
+import { isPartialArtifactName } from './artifactOutput'
 import { imageTarget } from './inlineMarkup'
 import { own } from './ownEntry'
 
@@ -237,7 +240,7 @@ function resolveImagePath(
     )
     file = sibling
   }
-  if (!fs.existsSync(file) || !fs.statSync(file).isFile()) {
+  if (isPartialArtifactName(file) || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
     warnings.push(`Image '${requested}' was not found in the output folder and was left out.`)
     return undefined
   }
@@ -434,7 +437,8 @@ process.stdin.on('data', chunk => chunks.push(chunk))
 process.stdin.on('end', async () => {
   try {
     const image = await loadImage(Buffer.concat(chunks))
-    if (!image.width || !image.height || image.width * image.height > Number(process.argv[2])) process.exit(2)
+    if (!image.width || !image.height) process.exit(3)
+    if (image.width * image.height > Number(process.argv[2])) process.exit(2)
     const canvas = createCanvas(image.width, image.height)
     canvas.getContext('2d').drawImage(image, 0, 0)
     process.stdout.end(canvas.toBuffer('image/png'))
@@ -446,11 +450,47 @@ process.stdin.on('end', async () => {
 
 let svgQueue: Promise<unknown> = Promise.resolve()
 
-/** PNG bytes of `svg`, rendered in a child process, one at a time; undefined when it fails or runs too long. */
-function renderSvg(svg: Buffer): Promise<Buffer | undefined> {
+/** Bytes of the renderer's error output kept for the log. */
+const STDERR_KEPT = 512
+
+/** Why the renderer gave no image. */
+type SvgFailure = 'spawn' | 'exit' | 'empty' | 'too-large' | 'timeout' | 'output'
+
+type SvgRender = { png: Buffer } | { failure: SvgFailure }
+
+/** The note for an SVG the renderer gave no image for. */
+function svgFailureNote(failure: SvgFailure): string {
+  switch (failure) {
+    case 'timeout':
+      return `took longer than ${SVG_RENDER_MS / 1000} s to draw`
+    case 'too-large':
+      return 'draws more pixels than this tool converts'
+    case 'empty':
+      return 'has no width or height to draw'
+    default:
+      return 'could not be drawn'
+  }
+}
+
+/** PNG bytes of `svg`, rendered in a child process, one at a time, or why there are none. */
+function renderSvg(svg: Buffer): Promise<SvgRender> {
   const run = svgQueue.then(
     () =>
-      new Promise<Buffer | undefined>(resolve => {
+      new Promise<SvgRender>(resolve => {
+        let done = false
+        let ended: SvgFailure | undefined
+        const failed = (
+          failure: SvgFailure,
+          detail: { code?: number | null; signal?: string | null; stderr?: string } = {}
+        ) => {
+          if (done) return
+          done = true
+          logger.warn(
+            { component: 'EmbeddedImages', reason: failure, ...detail },
+            'An SVG image could not be drawn and was left out'
+          )
+          resolve({ failure })
+        }
         let child: ReturnType<typeof spawn>
         try {
           child = spawn(
@@ -461,29 +501,65 @@ function renderSvg(svg: Buffer): Promise<Buffer | undefined> {
               require.resolve('@napi-rs/canvas'),
               String(MAX_DECODE_PIXELS),
             ],
-            // No environment: the renderer needs none, and it holds no secret.
-            { stdio: ['pipe', 'pipe', 'ignore'], env: {} }
+            // Only a home directory, which the renderer looks up when it loads
+            // the system fonts and which a user with no account entry lacks;
+            // it holds no secret.
+            {
+              stdio: ['pipe', 'pipe', 'pipe'],
+              env: { HOME: process.env.HOME || os.tmpdir() },
+            }
           )
         } catch {
-          resolve(undefined)
+          failed('spawn')
+          return
+        }
+        // Listened for first: a child that could not start (no file
+        // descriptors left) has no pipes and emits 'error' on the next tick,
+        // and may emit nothing else.
+        child.on('error', () => {
+          if (child.pid === undefined) {
+            clearTimeout(timer)
+            failed('spawn')
+          }
+        })
+        const timer = setTimeout(() => {
+          ended = 'timeout'
+          child.kill('SIGKILL')
+        }, SVG_RENDER_MS)
+        if (!child.stdout || !child.stderr || !child.stdin) {
+          clearTimeout(timer)
+          failed('spawn')
           return
         }
         const chunks: Buffer[] = []
         let size = 0
-        const timer = setTimeout(() => child.kill('SIGKILL'), SVG_RENDER_MS)
-        child.stdout!.on('data', (chunk: Buffer) => {
+        let stderr = ''
+        child.stdout.on('data', (chunk: Buffer) => {
           size += chunk.length
-          if (size > MAX_DECODE_PIXELS * 4) child.kill('SIGKILL')
-          else chunks.push(chunk)
+          if (size > MAX_DECODE_PIXELS * 4) {
+            ended = 'too-large'
+            child.kill('SIGKILL')
+          } else chunks.push(chunk)
         })
-        child.on('error', () => undefined)
-        child.on('close', code => {
+        child.stderr.on('data', (chunk: Buffer) => {
+          if (stderr.length < STDERR_KEPT) stderr += chunk.toString('utf8')
+        })
+        child.on('close', (code, signal) => {
           clearTimeout(timer)
           const png = Buffer.concat(chunks)
-          resolve(code === 0 && isPng(png) ? png : undefined)
+          if (!done && !ended && code === 0 && isPng(png)) {
+            done = true
+            resolve({ png })
+            return
+          }
+          // The renderer exits 2 for an image over the pixel limit, 3 for one with no size.
+          const failure =
+            ended ??
+            (code === 2 ? 'too-large' : code === 3 ? 'empty' : code === 0 ? 'output' : 'exit')
+          failed(failure, { code, signal, stderr: stderr.slice(0, STDERR_KEPT) || undefined })
         })
-        child.stdin!.on('error', () => undefined)
-        child.stdin!.end(svg)
+        child.stdin.on('error', () => undefined)
+        child.stdin.end(svg)
       })
   )
   svgQueue = run.catch(() => undefined)
@@ -612,12 +688,12 @@ export async function predecodeImages(args: unknown, outputDir: string): Promise
           refuse(key, refusal)
           continue
         }
-        const png = await renderSvg(input)
-        if (png) {
+        const drawn = await renderSvg(input)
+        if ('png' in drawn) {
           hold(key)
-          keepDecoded(key, png)
+          keepDecoded(key, drawn.png)
         } else {
-          refuse(key, `took longer than ${SVG_RENDER_MS / 1000} s to draw, or could not be drawn`)
+          refuse(key, svgFailureNote(drawn.failure))
         }
         continue
       }

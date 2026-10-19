@@ -2,14 +2,9 @@
  * Inline markdown, and the bits of HTML models mix into it, as Word runs.
  */
 import { ExternalHyperlink, type IFontAttributesProperties, type IRunOptions, TextRun } from 'docx'
-import {
-  type EastAsianScript,
-  bidiLanguage,
-  eastAsianScript,
-  isRtlText,
-  scriptSegments,
-} from './docxScript'
 import { htmlToMarkdownInline, markdownSpans } from './inlineMarkup'
+import { bidiLanguage, isRtlText, scriptSegments } from './textDirection'
+import { type EastAsianScript, eastAsianScript } from './textScript'
 
 export type DocxInline = TextRun | ExternalHyperlink
 

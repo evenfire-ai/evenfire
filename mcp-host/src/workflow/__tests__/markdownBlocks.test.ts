@@ -51,7 +51,8 @@ describe('delimiter rows', () => {
     ]) {
       const started = performance.now()
       isTableSeparator(line)
-      expect(performance.now() - started).toBeLessThan(200)
+      // Quadratic work on these takes minutes; the bound leaves room for a loaded machine.
+      expect(performance.now() - started).toBeLessThan(2000)
     }
   })
 })

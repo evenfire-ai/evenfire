@@ -518,7 +518,151 @@ describe('values that name their label', () => {
   })
 })
 
+describe('colors of values that name their label', () => {
+  it('go with their values', () => {
+    const r = normalizeChartData(
+      {
+        labels: ['Jan', 'Feb'],
+        datasets: [
+          {
+            data: [
+              { label: 'Feb', value: 20 },
+              { label: 'Jan', value: 10 },
+            ],
+            backgroundColor: ['red', 'green'],
+            borderColor: ['darkred', 'darkgreen'],
+          },
+        ],
+      },
+      bar
+    )
+    expect(r.datasets[0].data).toEqual([10, 20])
+    expect(r.datasets[0].backgroundColor).toEqual(['green', 'red'])
+    expect(r.datasets[0].borderColor).toEqual(['darkgreen', 'darkred'])
+  })
+
+  it('repeat a short list with their values on a bar chart, as Chart.js repeats it', () => {
+    // C, A and B sent against two colors: C red, A green, B red again.
+    const r = normalizeChartData(
+      {
+        labels: ['A', 'B', 'C'],
+        datasets: [
+          {
+            data: [
+              { label: 'C', value: 3 },
+              { label: 'A', value: 1 },
+              { label: 'B', value: 2 },
+            ],
+            backgroundColor: ['red', 'green'],
+          },
+        ],
+      },
+      bar
+    )
+    expect(r.datasets[0].data).toEqual([1, 2, 3])
+    expect(r.datasets[0].backgroundColor).toEqual(['green', 'red', 'red'])
+  })
+
+  it('leave a gap, and on a slice chart a value past a short list, without a color', () => {
+    const r = normalizeChartData(
+      {
+        labels: ['A', 'B', 'C'],
+        datasets: [
+          {
+            data: [
+              { label: 'C', value: 3 },
+              { label: 'A', value: 1 },
+            ],
+            backgroundColor: ['red'],
+          },
+        ],
+      },
+      { chartType: 'pie' }
+    )
+    expect(r.datasets[0].data).toEqual([1, null, 3])
+    expect(r.datasets[0].backgroundColor).toEqual([undefined, undefined, 'red'])
+  })
+
+  it('are left out with a value that repeats a label', () => {
+    const r = normalizeChartData(
+      {
+        datasets: [
+          {
+            data: [
+              { label: 'A', value: 1 },
+              { label: 'A', value: 9 },
+              { label: 'B', value: 2 },
+            ],
+            backgroundColor: ['red', 'blue', 'green'],
+          },
+        ],
+      },
+      bar
+    )
+    expect(r.labels).toEqual(['A', 'B'])
+    expect(r.datasets[0].data).toEqual([1, 2])
+    expect(r.datasets[0].backgroundColor).toEqual(['red', 'green'])
+  })
+
+  it('leave an empty color list as it was sent', () => {
+    const r = normalizeChartData(
+      {
+        labels: ['A', 'B'],
+        datasets: [
+          {
+            data: [
+              { label: 'B', value: 2 },
+              { label: 'A', value: 1 },
+            ],
+            backgroundColor: [],
+          },
+        ],
+      },
+      bar
+    )
+    expect(r.datasets[0].data).toEqual([1, 2])
+    expect(r.datasets[0].backgroundColor).toEqual([])
+  })
+
+  it('reach every category a later series adds', () => {
+    const r = normalizeChartData(
+      {
+        datasets: [
+          { data: [{ label: 'A', value: 1 }], backgroundColor: ['red'] },
+          { data: [{ label: 'B', value: 2 }] },
+        ],
+      },
+      bar
+    )
+    expect(r.labels).toEqual(['A', 'B'])
+    expect(r.datasets[0].data).toEqual([1, null])
+    expect(r.datasets[0].backgroundColor).toEqual(['red', undefined])
+  })
+})
+
 describe('single-series charts', () => {
+  it.each(['waterfall', 'funnel'] as const)('%s: a dropped series adds no category', chartType => {
+    const r = normalizeChartData(
+      {
+        datasets: [
+          {
+            label: 'Primary',
+            data: [
+              { label: 'Start', value: 2 },
+              { label: 'Change', value: -1 },
+            ],
+          },
+          { label: 'Second', data: [{ label: 'Phantom', value: 900 }] },
+        ],
+      },
+      { chartType }
+    )
+    expect(r.labels).toEqual(['Start', 'Change'])
+    expect(r.datasets).toHaveLength(1)
+    expect(r.datasets[0].data).toEqual([2, -1])
+    expect(r.warnings.join(' ')).toContain('1 extra dataset(s) were dropped')
+  })
+
   it('count only the series they draw when numbering missing labels', () => {
     const r = normalizeChartData(
       {
@@ -531,6 +675,78 @@ describe('single-series charts', () => {
       { chartType: 'waterfall' }
     )
     expect(r.labels).toEqual(['Start', 'Sales', 'Costs'])
+  })
+})
+
+describe('the decimal convention is read only from values the chart plots', () => {
+  it("is not taken from a record's label", () => {
+    const read = (label: string) =>
+      normalizeChartData({ datasets: [{ label: 'S', data: [{ label, value: '1,234' }] }] }, bar)
+        .datasets[0].data
+    expect(read('A')).toEqual([1234])
+    // Only the label changes: it is text, not a value.
+    expect(read('1.234,5')).toEqual([1234])
+  })
+
+  it('is not taken from the label of a [label, value] pair', () => {
+    const r = normalizeChartData({ datasets: [{ label: 'S', data: [['1.234,5', '1,234']] }] }, bar)
+    expect(r.datasets[0].data).toEqual([1234])
+  })
+
+  it.each(['gauge', 'waterfall', 'funnel'] as const)(
+    '%s: is not taken from a dropped series, which is not read at all',
+    chartType => {
+      const kept = { label: 'Kept', data: ['1,234'] }
+      const r = normalizeChartData(
+        { labels: ['A'], datasets: [kept, { label: 'Dropped', data: ['1.234,5'] }] },
+        { chartType }
+      )
+      expect(r.datasets[0].data).toEqual([1234])
+      // A dropped series the chart could not read does not reject the chart.
+      const unread = normalizeChartData(
+        { labels: ['A'], datasets: [kept, { label: 'Dropped', data: ['not a number'] }] },
+        { chartType }
+      )
+      expect(unread.datasets[0].data).toEqual([1234])
+      expect(unread.warnings.join(' ')).toContain('1 extra dataset(s) were dropped')
+    }
+  )
+
+  it.each([
+    [
+      'points',
+      [
+        { x: '1.234,5', y: '1' },
+        { x: '2', y: '1.200' },
+      ],
+    ],
+    [
+      '[x, y] arrays',
+      [
+        ['1.234,5', '1'],
+        ['2', '1.200'],
+      ],
+    ],
+  ])('is taken from the coordinates of scatter %s', (_label, data) => {
+    const r = normalizeChartData({ datasets: [{ label: 'S', data }] }, { chartType: 'scatter' })
+    expect(r.datasets[0].data).toEqual([
+      { x: 1234.5, y: 1 },
+      { x: 2, y: 1200 },
+    ])
+  })
+
+  it('is still taken from the values of every series a chart draws', () => {
+    const r = normalizeChartData(
+      {
+        labels: ['A', 'B'],
+        datasets: [
+          { label: 'One', data: ['1.200', '3'] },
+          { label: 'Two', data: ['1.234,5', '2'] },
+        ],
+      },
+      bar
+    )
+    expect(r.datasets[0].data).toEqual([1200, 3])
   })
 })
 

@@ -9,7 +9,7 @@ import {
   WidthType,
 } from 'docx'
 import { inlineRuns } from './docxInline'
-import { docxDirection, isRtlText } from './docxScript'
+import { docxDirection } from './docxScript'
 import {
   DOCX_CONTENT_WIDTH_TWIPS,
   DOCX_LANDSCAPE_CONTENT_WIDTH_TWIPS,
@@ -19,6 +19,7 @@ import {
 import { CJK_WIDE_CHAR, bodyFaceEm } from './fonts'
 import { inlineSpans } from './inlineMarkup'
 import { columnNames, headerText } from './tableRows'
+import { isRtlText } from './textDirection'
 
 export type DocxTableLayout = 'striped' | 'minimal' | 'grid'
 

@@ -4,34 +4,18 @@
  * written, so an unusable chart becomes a note in its own card and a warning
  * for the agent instead of an error that stops the page script.
  */
+import { colorWarnings, withoutInvalidColors } from './chartColors'
 import { ChartDataError, coerceNumber, normalizeChartData } from './chartData'
 import type { NormalizedDataset, NormalizedPoint } from './chartData'
 import { escapeHtml } from './dashboardHtml'
+import { DASHBOARD_CHART_TYPES } from './dashboardVocabulary'
+import { TINT_ALPHA, filled, seriesDefaults } from './seriesPaint'
 
-/** Every chart type the dashboard draws, the same set clerum__generate_chart accepts. */
-export const DASHBOARD_CHART_TYPES = [
-  'line',
-  'bar',
-  'horizontalBar',
-  'pie',
-  'doughnut',
-  'area',
-  'radar',
-  'polarArea',
-  'scatter',
-  'bubble',
-  'stackedBar',
-  'stackedArea',
-  'mixedBarLine',
-  'gauge',
-  'waterfall',
-  'funnel',
-] as const
+export { DASHBOARD_CHART_TYPES } from './dashboardVocabulary'
 
 const KNOWN_TYPES = new Set<string>(DASHBOARD_CHART_TYPES)
 const SLICE_TYPES = new Set(['pie', 'doughnut', 'polarArea'])
 const XY_TYPES = new Set(['scatter', 'bubble'])
-const TRANSLUCENT_TYPES = new Set(['line', 'area', 'stackedArea', 'radar', 'scatter', 'bubble'])
 
 /**
  * What the page script needs to draw one chart. Colors are left as tokens
@@ -88,6 +72,8 @@ interface ValueTable {
 interface Translated {
   chart: Omit<ClientChart, 'id'>
   warnings: string[]
+  /** What a composed chart draws, for the table shown in its place; others list their series. */
+  table?: ValueTable
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -108,65 +94,21 @@ function seriesColors(ds: NormalizedDataset, index: number, type: string): Recor
     }
   }
   const { color, dash } = paletteColor(index)
-  const border = ds.borderColor ?? color
+  // Shared with the PNG renderer (seriesPaint.ts).
+  const paint = seriesDefaults(type, ds, { color, tint: paletteColor(index, TINT_ALPHA).color })
   const dashed = dash && ds.borderColor === undefined ? { borderDash: dash } : {}
-  if (!TRANSLUCENT_TYPES.has(type)) {
-    return { borderColor: border, backgroundColor: ds.backgroundColor ?? color, ...dashed }
-  }
-  // Points take the fill color by default, which here is the faint area tint.
   return {
-    borderColor: border,
-    backgroundColor: ds.backgroundColor ?? paletteColor(index, 0.2).color,
-    pointBackgroundColor: border,
+    borderColor: filled(ds.borderColor, paint.borderColor, color),
+    backgroundColor: filled(ds.backgroundColor, paint.backgroundColor, color),
+    ...(paint.pointBackgroundColor ? { pointBackgroundColor: paint.pointBackgroundColor } : {}),
+    ...(paint.borderWidth ? { borderWidth: paint.borderWidth } : {}),
     ...dashed,
   }
 }
 
-/** CSS color keywords, which canvas and Chart.js both read. */
-const NAMED_COLORS = new Set(
-  (
-    'aliceblue antiquewhite aqua aquamarine azure beige bisque black blanchedalmond blue ' +
-    'blueviolet brown burlywood cadetblue chartreuse chocolate coral cornflowerblue cornsilk ' +
-    'crimson cyan darkblue darkcyan darkgoldenrod darkgray darkgreen darkgrey darkkhaki ' +
-    'darkmagenta darkolivegreen darkorange darkorchid darkred darksalmon darkseagreen ' +
-    'darkslateblue darkslategray darkslategrey darkturquoise darkviolet deeppink deepskyblue ' +
-    'dimgray dimgrey dodgerblue firebrick floralwhite forestgreen fuchsia gainsboro ghostwhite ' +
-    'gold goldenrod gray green greenyellow grey honeydew hotpink indianred indigo ivory khaki ' +
-    'lavender lavenderblush lawngreen lemonchiffon lightblue lightcoral lightcyan ' +
-    'lightgoldenrodyellow lightgray lightgreen lightgrey lightpink lightsalmon lightseagreen ' +
-    'lightskyblue lightslategray lightslategrey lightsteelblue lightyellow lime limegreen linen ' +
-    'magenta maroon mediumaquamarine mediumblue mediumorchid mediumpurple mediumseagreen ' +
-    'mediumslateblue mediumspringgreen mediumturquoise mediumvioletred midnightblue mintcream ' +
-    'mistyrose moccasin navajowhite navy oldlace olive olivedrab orange orangered orchid ' +
-    'palegoldenrod palegreen paleturquoise palevioletred papayawhip peachpuff peru pink plum ' +
-    'powderblue purple rebeccapurple red rosybrown royalblue saddlebrown salmon sandybrown ' +
-    'seagreen seashell sienna silver skyblue slateblue slategray slategrey snow springgreen ' +
-    'steelblue tan teal thistle tomato turquoise violet wheat white whitesmoke yellow ' +
-    'yellowgreen transparent'
-  ).split(' ')
-)
-
-/** Longer than any CSS color a chart needs, e.g. "hsl(210deg 50% 40% / 0.8)". */
-const MAX_COLOR_LENGTH = 64
-
-function isCssColor(value: unknown): boolean {
-  if (typeof value !== 'string' || value.length > MAX_COLOR_LENGTH) return false
-  const v = value.trim().toLowerCase()
-  return (
-    /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/.test(v) ||
-    /^(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch)\((?:[\d\s.,%/+-]|deg|g?rad|turn|none)*\)$/.test(v) ||
-    NAMED_COLORS.has(v)
-  )
-}
-
-/** Color warnings written out per chart; the rest are counted in one line. */
-const COLOR_WARNINGS_SHOWN = 3
-
 /**
- * `ds` without the colors that are not CSS colors, which canvas would paint
- * black: a single color is dropped for the palette's, a per-point one gets the
- * palette color of its point (slices) or of its series. Each rejected value's
- * path and text go to `bad`.
+ * `ds` without the colors that are not CSS colors (chartColors.ts); a slice
+ * with no usable color, or none of its own, takes its palette color.
  */
 function checkColors(
   ds: NormalizedDataset,
@@ -175,46 +117,22 @@ function checkColors(
   where: string,
   bad: Array<{ at: string; value: unknown }>
 ): NormalizedDataset {
-  const out = { ...ds }
+  const out = withoutInvalidColors(ds, index, where, bad)
+  if (!SLICE_TYPES.has(type)) return out
   for (const key of ['backgroundColor', 'borderColor'] as const) {
-    const value = ds[key]
-    if (value === undefined) continue
-    const at = `${where}.datasets[${index}].${key}`
-    if (!Array.isArray(value)) {
-      if (!isCssColor(value)) {
-        bad.push({ at, value })
-        delete out[key]
-      }
-      continue
-    }
-    out[key] = value.map((v, j) => {
-      if (isCssColor(v)) return v
-      bad.push({ at: `${at}[${j}]`, value: v })
-      return paletteColor(SLICE_TYPES.has(type) ? j : index).color
-    })
+    const value = out[key]
+    if (Array.isArray(value)) out[key] = value.map((v, j) => v ?? paletteColor(j).color)
   }
   return out
 }
 
-function colorWarnings(bad: Array<{ at: string; value: unknown }>, where: string): string[] {
-  const shown = bad.slice(0, COLOR_WARNINGS_SHOWN).map(({ at, value }) => {
-    const text = JSON.stringify(
-      typeof value === 'string' && value.length > 40 ? `${value.slice(0, 40)}…` : value
-    )
-    return (
-      `${at} ${text} is not a CSS color, so the palette color was used. ` +
-      'Pass hex such as "#2563eb", rgb(), hsl() or a color name.'
-    )
-  })
-  const more = bad.length - shown.length
-  if (more > 0) {
-    shown.push(`${where}: ${more} more colors are not CSS colors and were replaced the same way.`)
-  }
-  return shown
-}
-
 function readout(n: number): string {
   return Number.isInteger(n) ? String(n) : String(Number(n.toFixed(2)))
+}
+
+/** `n` at full precision, without the noise of adding binary fractions (0.1 + 0.2). */
+function plainNumber(n: number): string {
+  return String(Number(n.toPrecision(12)))
 }
 
 function firstSeriesValues(ds: NormalizedDataset | undefined): number[] {
@@ -290,7 +208,7 @@ function translate(
       chart.labels = pairs.map(p => p.l)
       // Per-stage colors follow their stage through the sort, as in the PNG
       // funnel; a short list wraps as Chart.js wraps it.
-      const follow = (colors: string | string[] | undefined) =>
+      const follow = (colors: string | Array<string | undefined> | undefined) =>
         Array.isArray(colors) && colors.length > 0
           ? pairs.map(p => colors[p.i % colors.length])
           : colors
@@ -301,7 +219,11 @@ function translate(
         borderColor: follow(first?.borderColor),
       }
       chart.datasets = [{ ...styled(stages, 0, 'bar'), label: '' }]
-      return { chart, warnings }
+      const table = {
+        labels: chart.labels,
+        series: [{ label: first?.label ?? '', values: stages.data.map(String) }],
+      }
+      return { chart, warnings, table }
     }
     case 'waterfall': {
       chart.type = 'bar'
@@ -318,6 +240,12 @@ function translate(
       floats.push([0, total])
       colors.push('$chart-0')
       chart.labels = [...labels, 'Total']
+      const table = {
+        labels: chart.labels,
+        series: [
+          { label: datasets[0]?.label ?? '', values: [...deltas.map(String), plainNumber(total)] },
+        ],
+      }
       chart.datasets = [
         {
           label: datasets[0]?.label ?? '',
@@ -326,7 +254,7 @@ function translate(
           borderColor: colors,
         },
       ]
-      return { chart, warnings }
+      return { chart, warnings, table }
     }
     case 'gauge': {
       chart.type = 'doughnut'
@@ -337,7 +265,10 @@ function translate(
       if (max !== requestedMax && spec.gaugeMax !== undefined && spec.gaugeMax !== null) {
         warnings.push(`gaugeMax ${String(spec.gaugeMax)} is not a positive number; used 100.`)
       }
-      const values = firstSeriesValues(datasets[0])
+      // The first number sent, as the PNG gauge reads it; a gap is no reading.
+      const values = ((datasets[0]?.data ?? []) as Array<number | null>).filter(
+        (v): v is number => typeof v === 'number'
+      )
       const raw = values[0] ?? 0
       if (values.length > 1) {
         warnings.push(
@@ -363,7 +294,12 @@ function translate(
         },
       ]
       chart.gauge = { value: readout(raw), max: readout(max) }
-      return { chart, warnings }
+      const table = {
+        // A gauge sent with no labels has only a numbered position, which names nothing.
+        labels: [Array.isArray(spec.labels) ? chart.labels[0] : '', 'Max'],
+        series: [{ label: datasets[0]?.label ?? '', values: [chart.gauge.value, chart.gauge.max] }],
+      }
+      return { chart, warnings, table }
     }
     default:
       chart.datasets = datasets.map((ds, i) => styled(ds, i))
@@ -424,7 +360,7 @@ export interface PreparedChart {
 }
 
 /** Validate one chart spec found at `where` in the arguments. */
-function prepareDashboardChart(raw: unknown, where: string): PreparedChart {
+export function prepareDashboardChart(raw: unknown, where: string): PreparedChart {
   if (!isRecord(raw)) {
     return {
       warnings: [],
@@ -486,7 +422,7 @@ function prepareDashboardChart(raw: unknown, where: string): PreparedChart {
       caption:
         type === 'gauge' && Array.isArray(raw.labels) ? optionalText(raw.labels[0]) : undefined,
       chart: translated.chart,
-      table: valueTable(type, labels, datasets),
+      table: translated.table ?? valueTable(type, labels, datasets),
       warnings,
     }
   } catch (err) {

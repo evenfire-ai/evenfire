@@ -2,6 +2,7 @@
  * Number formats for XLSX columns: the keywords a caller may ask for, and the
  * format a column gets from its header and values when nobody asked.
  */
+import { isModelledFormatCode } from '../artifacts/shownNumbers'
 import { own } from './ownEntry'
 import { CURRENCY_SYMBOLS } from './xlsxCells'
 
@@ -108,7 +109,10 @@ export function formatSpec(value: unknown): FormatSpec | undefined {
     if (code !== key) return { type: 'currency', symbol: `${upper} ` }
   }
   const trimmed = value.trim()
-  return looksLikeFormatCode(trimmed) ? { type: 'custom', numFmt: trimmed } : undefined
+  // A code is written only when the attachment check can read it as shown.
+  return looksLikeFormatCode(trimmed) && isModelledFormatCode(trimmed)
+    ? { type: 'custom', numFmt: trimmed }
+    : undefined
 }
 
 /** Header words, lowercased and without accents: "Tasa de conversión" → tasa, de, conversion. */

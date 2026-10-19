@@ -72,14 +72,48 @@ const MARK = /^[\p{Mn}\p{Me}]$/u
 /** Neither direction of its own: fontkit reads a run's direction from its first other character. */
 const NEUTRAL_SCRIPT = /^[\p{Script=Common}\p{Script=Inherited}]/u
 
-/** The scripts fontkit sets right to left. */
-const RTL_SCRIPT =
-  /^[\p{Script=Arabic}\p{Script=Hebrew}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Cypriot}\p{Script=Kharoshthi}\p{Script=Phoenician}\p{Script=Nko}\p{Script=Lydian}\p{Script=Avestan}\p{Script=Imperial_Aramaic}\p{Script=Inscriptional_Pahlavi}\p{Script=Inscriptional_Parthian}\p{Script=Old_South_Arabian}\p{Script=Old_Turkic}\p{Script=Samaritan}\p{Script=Mandaic}\p{Script=Meroitic_Cursive}\p{Script=Meroitic_Hieroglyphs}\p{Script=Manichaean}\p{Script=Mende_Kikakui}\p{Script=Nabataean}\p{Script=Old_North_Arabian}\p{Script=Palmyrene}\p{Script=Psalter_Pahlavi}]/u
+/**
+ * The scripts fontkit sets right to left, as Unicode script names: its own
+ * table of OpenType script tags, mirrored so a run is split where fontkit
+ * would turn. Which way a paragraph reads is decided in textDirection.ts.
+ */
+export const FONTKIT_RTL_SCRIPTS = [
+  'Arabic',
+  'Hebrew',
+  'Syriac',
+  'Thaana',
+  'Cypriot',
+  'Kharoshthi',
+  'Phoenician',
+  'Nko',
+  'Lydian',
+  'Avestan',
+  'Imperial_Aramaic',
+  'Inscriptional_Pahlavi',
+  'Inscriptional_Parthian',
+  'Old_South_Arabian',
+  'Old_Turkic',
+  'Samaritan',
+  'Mandaic',
+  'Meroitic_Cursive',
+  'Meroitic_Hieroglyphs',
+  'Manichaean',
+  'Mende_Kikakui',
+  'Nabataean',
+  'Old_North_Arabian',
+  'Palmyrene',
+  'Psalter_Pahlavi',
+] as const
+
+const FONTKIT_RTL = new RegExp(
+  `^[${FONTKIT_RTL_SCRIPTS.map(script => `\\p{Script=${script}}`).join('')}]`,
+  'u'
+)
 
 /** The direction fontkit gives a run that starts with `ch`, if `ch` decides it. */
 function scriptDirection(ch: string): 'L' | 'R' | undefined {
   if (NEUTRAL_SCRIPT.test(ch)) return undefined
-  return RTL_SCRIPT.test(ch) ? 'R' : 'L'
+  return FONTKIT_RTL.test(ch) ? 'R' : 'L'
 }
 
 /** A glyph of spaces only; a tab in code is set as four. */

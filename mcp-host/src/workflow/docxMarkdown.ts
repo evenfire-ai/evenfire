@@ -3,7 +3,7 @@
  */
 import { BorderStyle, HeadingLevel, Paragraph, ShadingType, type Table, TextRun } from 'docx'
 import { inlineRuns, textRuns } from './docxInline'
-import { docxDirection, isRtlText } from './docxScript'
+import { docxDirection } from './docxScript'
 import { DOCX_LIST_LEVELS, type DocxListNumbering, type DocxPalette, docxHex } from './docxStyle'
 import { buildDocxTable } from './docxTable'
 import { imageTarget } from './inlineMarkup'
@@ -15,6 +15,7 @@ import {
   isListLine,
   readBlock,
 } from './markdownBlocks'
+import { isRtlText } from './textDirection'
 
 export interface DocxBodyContext {
   palette: DocxPalette

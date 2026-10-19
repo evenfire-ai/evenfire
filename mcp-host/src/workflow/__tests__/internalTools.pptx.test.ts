@@ -25,12 +25,21 @@ function findTool(name: string): InternalToolDefinition {
 // All produced .pptx are zip archives — sanity check the magic header so we
 // don't accept a truncated or text file as valid output.
 function isPptxFile(p: string): boolean {
-  if (!fs.existsSync(p)) return false
-  const fd = fs.openSync(p, 'r')
-  const buf = Buffer.alloc(4)
-  fs.readSync(fd, buf, 0, 4, 0)
-  fs.closeSync(fd)
-  return buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04
+  // Opened once and read through that descriptor: a separate existence check
+  // could see another file than the one read.
+  let fd: number
+  try {
+    fd = fs.openSync(p, 'r')
+  } catch {
+    return false
+  }
+  try {
+    const buf = Buffer.alloc(4)
+    fs.readSync(fd, buf, 0, 4, 0)
+    return buf[0] === 0x50 && buf[1] === 0x4b && buf[2] === 0x03 && buf[3] === 0x04
+  } finally {
+    fs.closeSync(fd)
+  }
 }
 
 // ─── Tool registration ─────────────────────────────────────────────
