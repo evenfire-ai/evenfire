@@ -14689,6 +14689,7 @@ pre {
   display: flex;
   align-items: center;
   flex: 1 1 auto;
+  gap: var(--space-1);
   min-width: 0;
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm);
@@ -14697,7 +14698,7 @@ pre {
 
 .da-gfs-file-picker__input:focus-within {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+  box-shadow: none;
 }
 
 .da-gfs-file-picker__scheme {
@@ -14712,7 +14713,14 @@ pre {
   flex: 1 1 auto;
   min-width: 0;
   border: 0;
+  border-radius: 0;
+  outline: 0;
   background: transparent;
+  box-shadow: none;
+}
+
+.da-gfs-file-picker__input input:focus-visible {
+  outline: 0;
   box-shadow: none;
 }
 
