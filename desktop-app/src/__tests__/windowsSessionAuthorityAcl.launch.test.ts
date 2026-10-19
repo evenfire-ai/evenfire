@@ -132,11 +132,18 @@ describe('Windows session authority PowerShell launcher', () => {
           innerNativeErrorCode: 5,
           ownerClass: 'trusted-installer',
           aceClass: 'builtin-users',
+          aceWriteContent: true,
+          aceDeleteChild: false,
+          aceDelete: false,
+          aceWriteDacl: false,
+          aceTakeOwnership: false,
+          aceWriteMetadata: false,
+          aceInherited: true,
         }),
       })
     )
     expect(captureError(runVerifier)).toMatch(
-      /"phase":"acl-verifier-rejected".*"verifierPhase":"validate-ancestor-owner-depth-7".*"verifierDetail":"owner-invalid".*"verifierInnerErrorType":"Win32Exception".*"verifierInnerHresult":"0x80070005".*"verifierInnerNativeOperation":"access-check".*"verifierInnerNativeErrorCode":5.*"verifierOwnerClass":"trusted-installer".*"verifierAceClass":"builtin-users"/
+      /"phase":"acl-verifier-rejected".*"verifierPhase":"validate-ancestor-owner-depth-7".*"verifierDetail":"owner-invalid".*"verifierInnerErrorType":"Win32Exception".*"verifierInnerHresult":"0x80070005".*"verifierInnerNativeOperation":"access-check".*"verifierInnerNativeErrorCode":5.*"verifierOwnerClass":"trusted-installer".*"verifierAceClass":"builtin-users".*"verifierAceWriteContent":true.*"verifierAceDeleteChild":false.*"verifierAceWriteDacl":false.*"verifierAceInherited":true/
     )
   })
 

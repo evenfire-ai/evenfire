@@ -78,6 +78,25 @@ Set-Acl -LiteralPath $target -AclObject $acl
   )
 }
 
+function addAuthenticatedUsersCreateDirectory(target: string): void {
+  runPowerShell(
+    String.raw`
+$ErrorActionPreference = 'Stop'
+$target = [Environment]::GetEnvironmentVariable('EVENFIRE_ACL_TEST_TARGET')
+$acl = Get-Acl -LiteralPath $target
+$authenticatedUsers = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-11')
+$rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+  $authenticatedUsers,
+  [System.Security.AccessControl.FileSystemRights]::CreateDirectories,
+  [System.Security.AccessControl.AccessControlType]::Allow
+)
+$acl.AddAccessRule($rule)
+Set-Acl -LiteralPath $target -AclObject $acl
+`,
+    { EVENFIRE_ACL_TEST_TARGET: target }
+  )
+}
+
 function addCurrentUserInheritOnlyFullControl(target: string): void {
   runPowerShell(
     String.raw`
@@ -166,6 +185,14 @@ windowsDescribe('Windows session authority ACL native contract', () => {
     addEveryoneModify(userDataPath)
 
     expect(() => verifyWindowsSessionAuthorityDirectory(userDataPath, authorityPath)).toThrow(
+      'Windows session authority ACL verification failed'
+    )
+  })
+
+  it('rejects create-child access for Authenticated Users outside the volume root', () => {
+    addAuthenticatedUsersCreateDirectory(userDataPath)
+
+    expect(() => provisionWindowsSessionAuthorityDirectory(userDataPath, authorityPath)).toThrow(
       'Windows session authority ACL verification failed'
     )
   })

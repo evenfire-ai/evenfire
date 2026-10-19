@@ -282,6 +282,8 @@ try {
   $script:phase = 'compile-script'
   $script:ownerClass = $null
   $script:aceClass = $null
+  $script:aceMask = $null
+  $script:aceInherited = $null
   Add-Type -TypeDefinition $code -Language CSharp
   $script:phase = 'validate-request'
   $requestPayload = [Environment]::GetEnvironmentVariable('EVENFIRE_SESSION_AUTHORITY_ACL_REQUEST')
@@ -302,9 +304,12 @@ try {
   $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
   $systemSid = 'S-1-5-18'
   $administratorsSid = 'S-1-5-32-544'
+  $authenticatedUsersSid = 'S-1-5-11'
   $trustedInstallerSid = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
   $allowed = @($currentSid, $systemSid, $administratorsSid)
   $mutatingMask = [uint32](0x00000002 -bor 0x00000004 -bor 0x00000010 -bor 0x00000040 -bor 0x00000100 -bor 0x00010000 -bor 0x00040000 -bor 0x00080000)
+  $volumeRootCreateMask = [uint32](0x00000002 -bor 0x00000004)
+  $otherRootMutationMask = [uint32]($mutatingMask -band 0xFFFFFFF9)
   $traverseMask = [uint32](0x00000020 -bor 0x00000080)
   $createChildMask = [uint32](0x00000004 -bor 0x00000020 -bor 0x00000080)
   $privateMask = [uint32]0x001F01FF
@@ -356,8 +361,15 @@ try {
         -not $ace.InheritOnly -and (($ace.Mask -band $mutatingMask) -ne 0)) {
         $trustedAncestorAce = $ace.Sid -eq $trustedInstallerSid -and
           ($isVolumeRoot -or $ace.Inherited)
-        if (($allowed -notcontains $ace.Sid) -and -not $trustedAncestorAce) {
+        $authenticatedUsersCreateOnlyAtRoot = $isVolumeRoot -and
+          $ace.Sid -eq $authenticatedUsersSid -and
+          (($ace.Mask -band $volumeRootCreateMask) -ne 0) -and
+          (($ace.Mask -band $otherRootMutationMask) -eq 0)
+        if (($allowed -notcontains $ace.Sid) -and -not $trustedAncestorAce -and
+          -not $authenticatedUsersCreateOnlyAtRoot) {
           $script:aceClass = Get-OwnerClass $ace.Sid
+          $script:aceMask = [uint32]$ace.Mask
+          $script:aceInherited = [bool]$ace.Inherited
           throw 'ancestor-writable-by-other-principal'
         }
       }
@@ -481,6 +493,13 @@ try {
     innerNativeErrorCode = if ($innerException -is [ComponentModel.Win32Exception]) { $innerException.NativeErrorCode } else { $null }
     ownerClass = $script:ownerClass
     aceClass = $script:aceClass
+    aceWriteContent = if ($null -ne $script:aceMask) { ($script:aceMask -band 0x00000006) -ne 0 } else { $null }
+    aceDeleteChild = if ($null -ne $script:aceMask) { ($script:aceMask -band 0x00000040) -ne 0 } else { $null }
+    aceDelete = if ($null -ne $script:aceMask) { ($script:aceMask -band 0x00010000) -ne 0 } else { $null }
+    aceWriteDacl = if ($null -ne $script:aceMask) { ($script:aceMask -band 0x00040000) -ne 0 } else { $null }
+    aceTakeOwnership = if ($null -ne $script:aceMask) { ($script:aceMask -band 0x00080000) -ne 0 } else { $null }
+    aceWriteMetadata = if ($null -ne $script:aceMask) { ($script:aceMask -band 0x00000110) -ne 0 } else { $null }
+    aceInherited = $script:aceInherited
   } | ConvertTo-Json -Compress
   exit 2
 }
@@ -499,13 +518,13 @@ const POWERSHELL_ARGS = [
 
 function sanitizedWindowsAclFailure(stdout: string): {
   rejected: boolean
-  fields: Record<string, string | number>
+  fields: Record<string, string | number | boolean>
 } {
   try {
     const value: unknown = JSON.parse(stdout.trim())
     if (typeof value !== 'object' || value === null) return { rejected: false, fields: {} }
     const fields = value as Record<string, unknown>
-    const safe: Record<string, string | number> = {}
+    const safe: Record<string, string | number | boolean> = {}
     for (const field of [
       'phase',
       'errorType',
@@ -517,6 +536,13 @@ function sanitizedWindowsAclFailure(stdout: string): {
       'innerNativeErrorCode',
       'ownerClass',
       'aceClass',
+      'aceWriteContent',
+      'aceDeleteChild',
+      'aceDelete',
+      'aceWriteDacl',
+      'aceTakeOwnership',
+      'aceWriteMetadata',
+      'aceInherited',
     ] as const) {
       const item = fields[field]
       if (field === 'innerNativeErrorCode') {
@@ -542,6 +568,18 @@ function sanitizedWindowsAclFailure(stdout: string): {
         ) {
           safe[field] = item as string
         }
+        continue
+      }
+      if (
+        field === 'aceWriteContent' ||
+        field === 'aceDeleteChild' ||
+        field === 'aceDelete' ||
+        field === 'aceWriteDacl' ||
+        field === 'aceTakeOwnership' ||
+        field === 'aceWriteMetadata' ||
+        field === 'aceInherited'
+      ) {
+        if (typeof item === 'boolean') safe[field] = item
         continue
       }
       if (typeof item !== 'string') continue
@@ -607,9 +645,17 @@ function safePowerShellFailure(result: SpawnSyncReturns<string>, fallbackPhase: 
     'innerNativeErrorCode',
     'ownerClass',
     'aceClass',
+    'aceWriteContent',
+    'aceDeleteChild',
+    'aceDelete',
+    'aceWriteDacl',
+    'aceTakeOwnership',
+    'aceWriteMetadata',
+    'aceInherited',
   ] as const) {
     const value = verifierFailure.fields[field]
-    if (value) diagnostic[`verifier${field[0]!.toUpperCase()}${field.slice(1)}`] = value
+    if (value !== undefined)
+      diagnostic[`verifier${field[0]!.toUpperCase()}${field.slice(1)}`] = value
   }
   return `: ${JSON.stringify(diagnostic)}`
 }
