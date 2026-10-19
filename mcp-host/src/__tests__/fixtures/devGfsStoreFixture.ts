@@ -102,7 +102,15 @@ export function loadDevStore(root: string, snapshot: DevSnapshot): DevStore {
   const generation = readGeneration()
   const source = path.join(FIXTURE, snapshot)
   fs.mkdirSync(root, { recursive: true, mode: 0o700 })
-  fs.cpSync(source, root, { recursive: true, errorOnExist: true, force: false })
+  // Copy entry by entry: callers pass an existing mkdtemp root, and since Node
+  // 24.22 (nodejs/node#64124) cpSync with errorOnExist throws when the
+  // destination directory itself exists.
+  for (const entry of fs.readdirSync(source))
+    fs.cpSync(path.join(source, entry), path.join(root, entry), {
+      recursive: true,
+      errorOnExist: true,
+      force: false,
+    })
 
   // Git keeps no modes: restore the ones the dev store wrote, deepest first so
   // a 0700 directory never blocks its children.
