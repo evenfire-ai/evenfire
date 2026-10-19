@@ -56,8 +56,6 @@ export interface FailoverLlmPortOptions {
    * provider/credentials are not constructible (→ the engine skips it).
    */
   buildFallbackPort: (index: number) => LlmPort | null
-  /** Successful physical completion for this wrapper, never shared engine state. */
-  onServed?: (pair: ModelPair) => void
 }
 
 class FailoverLlmPort implements LlmPort {
@@ -153,7 +151,6 @@ class FailoverLlmPort implements LlmPort {
             signal?.throwIfAborted()
             const result = await call(port)
             signal?.throwIfAborted()
-            this.o.onServed?.({ provider: target.provider, model: port.modelName() })
             return result
           },
           servedModel: port.modelName(),
@@ -170,7 +167,6 @@ export interface WrapFailoverParams {
   engine: FailoverEngine
   policy: LlmPolicy
   buildFallbackPort: (index: number) => LlmPort | null
-  onServed?: (pair: ModelPair) => void
 }
 
 /**

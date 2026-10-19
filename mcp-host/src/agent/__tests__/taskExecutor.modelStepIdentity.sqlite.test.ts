@@ -1,15 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { config as appConfig } from '../../config'
 import { ConversationManager } from '../../core/conversation/conversation'
+import { toModelStepCheckpointView } from '../../core/conversation/modelStepCheckpointView'
 import { makeSqliteStore } from '../../core/conversation/persistence/__tests__/testHelpers'
 import { ModelStepCheckpointStore } from '../../core/conversation/persistence/modelStepCheckpointStore'
 import { LlmErrorCode } from '../../core/errors'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
+import { createModelStepCheckpointRecorder } from '../../core/orchestration/modelStepCheckpointRecorder'
 import { type ChatMessage, FinishReason, type ToolCall } from '../../core/types'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import { FailoverEngine } from '../../llm/failover/engine'
 import type { LlmPolicy } from '../../llm/failover/types'
 import type { SingleTurnProvider } from '../../llm/types'
+import { logger } from '../../logger'
 import { McpManager } from '../../mcp/manager'
 import type { Task, TaskError } from '../../queue/types'
 import type { McpTool } from '../../types'
@@ -183,6 +186,46 @@ async function continueTurn(
   return verdict
 }
 
+async function waitingOrigin(withConfirmed = true) {
+  Object.assign(appConfig, {
+    enableApproval: true,
+    dynamicToolsEnabled: false,
+    promptCacheEnabled: false,
+  })
+  vi.spyOn(Date, 'now').mockReturnValue(NOW)
+  const handle = makeSqliteStore()
+  const manager = new McpManager()
+  vi.spyOn(manager, 'getAllTools').mockReturnValue([
+    { name: 'server__write', serverName: 'server', inputSchema: { type: 'object' } },
+  ])
+  const execute = vi.spyOn(manager, 'callTool').mockResolvedValue({
+    toolName: 'server__write',
+    result: { content: [{ type: 'text', text: 'approved effect completed' }] },
+    isError: false,
+  })
+  const llm = provider('openai', (_messages, call) =>
+    call === 1
+      ? {
+          calls: [
+            ...(withConfirmed
+              ? [{ id: 'before-approval', name: 'system_info', arguments: {} }]
+              : []),
+            { id: 'approved-write', name: 'server__write', arguments: {} },
+          ],
+        }
+      : { error: new Error('upstream 503') }
+  )
+  const original = task('approval-origin')
+  const originalDeps = deps(handle, llm, manager)
+  originalDeps.taskLifecycle.register(original)
+  const executor = new TaskExecutor(original, originalDeps)
+  await executor.run()
+  expect(executor.executorState).toBe('waiting_approval')
+  expect(originalDeps.onApprovalNeeded).toHaveBeenCalledTimes(1)
+  expect(llm.calls()).toBe(1)
+  return { handle, execute, llm, original, originalDeps, executor }
+}
+
 describe('real-producer checkpoint identity regressions', () => {
   afterEach(() => {
     Object.assign(appConfig, savedConfig)
@@ -348,7 +391,7 @@ describe('real-producer checkpoint identity regressions', () => {
     }
   })
 
-  it('R3-M1: the checkpoint names the fallback that produced the tool result', async () => {
+  it('C-1: the checkpoint keeps the configured pair after fallback tool results', async () => {
     Object.assign(appConfig, {
       enableApproval: false,
       dynamicToolsEnabled: false,
@@ -382,9 +425,303 @@ describe('real-producer checkpoint identity regressions', () => {
       expect(fallback.calls()).toBe(2)
       expect(header(handle)).toMatchObject({
         status: 'resumable',
-        provider: 'openai',
-        model: 'fallback-model',
+        provider: 'claude',
+        model: 'primary-model',
       })
+    } finally {
+      await handle.shutdown()
+    }
+  })
+  it.each([true, false])(
+    'C-5: warm approval (prior tool=%s) offers Retry after 503 and completes without replay',
+    async withConfirmed => {
+      const f = await waitingOrigin(withConfirmed)
+      try {
+        if (withConfirmed) expect(header(f.handle)).toMatchObject({ status: 'open' })
+        else expect(header(f.handle)).toBeUndefined()
+        await f.executor.resumeAfterApproval(false)
+        await f.handle.persistQueue.drain()
+        expect(f.execute).toHaveBeenCalledTimes(1)
+        expect(f.llm.calls()).toBe(2)
+        expect(f.llm.requests[1]!.filter(m => m.tool_call_id === 'approved-write')).toEqual([
+          expect.objectContaining({
+            tool_call_id: 'approved-write',
+            content: expect.stringContaining('approved effect completed'),
+          }),
+        ])
+        expect(header(f.handle)).toMatchObject({ status: 'resumable' })
+        expect(
+          toModelStepCheckpointView(
+            (await f.originalDeps.modelStepCheckpoints!.store.loadLive(SESSION_KEY))!
+          )
+        ).toMatchObject({ retryAvailable: true, tools: { confirmed: withConfirmed ? 2 : 1 } })
+        expect(f.originalDeps.onFail).toHaveBeenCalledWith(
+          f.original,
+          expect.objectContaining({
+            code: LlmErrorCode.ModelOverloaded,
+            modelStepCheckpointId: header(f.handle).checkpoint_id,
+          })
+        )
+        const resumed = provider('openai', () => ({ content: 'approval continuation completed' }))
+        const verdict = await continueTurn(f.handle, f.original, f.originalDeps, resumed)
+        expect(verdict).toHaveBeenCalledWith({ kind: 'started' })
+        expect(resumed.calls()).toBe(1)
+        expect(resumed.requests[0]!.filter(m => m.tool_call_id === 'approved-write')).toEqual([
+          expect.objectContaining({
+            tool_call_id: 'approved-write',
+            content: expect.stringContaining('approved effect completed'),
+          }),
+        ])
+        expect(f.execute).toHaveBeenCalledTimes(1)
+        expect(header(f.handle).status).toBe('completed')
+      } finally {
+        await f.handle.shutdown()
+      }
+    }
+  )
+
+  it.each(['deny', 'cancel'] as const)(
+    'C-5: %s abandons the retained open approval checkpoint',
+    async action => {
+      const f = await waitingOrigin()
+      try {
+        expect(header(f.handle)).toMatchObject({ status: 'open' })
+        const settled = vi.spyOn(f.originalDeps.modelStepCheckpoints!.store, 'transition')
+        if (action === 'deny') await f.executor.deny()
+        else {
+          f.executor.abort()
+          await f.executor.waitForCompletion()
+          expect(f.executor.signal.aborted).toBe(true)
+        }
+        await f.handle.persistQueue.drain()
+        expect(settled).toHaveBeenCalledWith(
+          SESSION_KEY,
+          expect.objectContaining({ checkpointId: expect.any(String) }),
+          { from: ['open'], to: 'abandoned' }
+        )
+        expect(await settled.mock.results[0]!.value).not.toBeNull()
+        expect(header(f.handle)).toBeUndefined()
+        expect(f.execute).toHaveBeenCalledTimes(0)
+        expect(f.llm.calls()).toBe(1)
+      } finally {
+        await f.handle.shutdown()
+      }
+    }
+  )
+
+  it('C-5: boot abandons an open approval checkpoint and cold resume offers no Retry', async () => {
+    const f = await waitingOrigin()
+    try {
+      const row = header(f.handle)
+      expect(row).toMatchObject({ status: 'open' })
+      const checkpoints = f.originalDeps.modelStepCheckpoints!.store
+      expect(await checkpoints.bootReap('replacement-instance')).toEqual({
+        abandoned: 1,
+        reopened: 0,
+      })
+      expect(header(f.handle)).toBeUndefined()
+      const cold = new TaskExecutor(f.original, f.originalDeps)
+      await cold.rehydrateWaitingApproval(SESSION_KEY, f.executor.pendingApproval!)
+      await cold.resumeAfterApproval(false)
+      expect(f.execute).toHaveBeenCalledTimes(1)
+      expect(f.llm.calls()).toBe(2)
+      expect(f.originalDeps.onFail).toHaveBeenCalledWith(
+        f.original,
+        expect.objectContaining({ code: LlmErrorCode.ModelOverloaded })
+      )
+      expect(
+        (f.originalDeps.onFail as ReturnType<typeof vi.fn>).mock.calls[0]![1].modelStepCheckpointId
+      ).toBeUndefined()
+      expect(await checkpoints.loadLive(SESSION_KEY)).toBeNull()
+    } finally {
+      await f.handle.shutdown()
+    }
+  })
+
+  it('C-6: failed resumable settlement abandons the header and preserves the original turn error', async () => {
+    Object.assign(appConfig, {
+      enableApproval: false,
+      dynamicToolsEnabled: false,
+      promptCacheEnabled: false,
+    })
+    vi.spyOn(Date, 'now').mockReturnValue(NOW)
+    const handle = makeSqliteStore()
+    try {
+      const llm = provider('openai', (_messages, call) =>
+        call === 1
+          ? { calls: [{ id: 'tool-before-failure', name: 'system_info', arguments: {} }] }
+          : { error: new Error('upstream 503') }
+      )
+      const original = task('settlement-failure')
+      const originalDeps = deps(handle, llm)
+      const checkpoints = originalDeps.modelStepCheckpoints!.store
+      const writes = vi.spyOn(checkpoints, 'transition').mockImplementationOnce(async () => {
+        throw new Error('injected write failure')
+      })
+      originalDeps.taskLifecycle.register(original)
+      await new TaskExecutor(original, originalDeps).run()
+      expect(llm.calls()).toBe(2)
+      expect(llm.requests[1]!.filter(m => m.role === 'tool')).toHaveLength(1)
+      expect(originalDeps.onFail).toHaveBeenCalledWith(
+        original,
+        expect.objectContaining({
+          code: LlmErrorCode.ModelOverloaded,
+          message: 'upstream 503',
+          providerCode: 'provider_unavailable',
+        })
+      )
+      expect(writes).toHaveBeenCalledTimes(2)
+      expect(writes).toHaveBeenLastCalledWith(SESSION_KEY, expect.any(Object), {
+        from: ['open'],
+        to: 'abandoned',
+      })
+      expect(await writes.mock.results[1]!.value).not.toBeNull()
+      expect(header(handle)).toBeUndefined()
+      expect(await checkpoints.sweep()).toMatchObject({ purgedCheckpoints: 0 })
+      expect(header(handle)).toBeUndefined()
+    } finally {
+      await handle.shutdown()
+    }
+  })
+
+  it.each(['write_failure', 'fence_lost'] as const)(
+    'C-6: cleanup %s logs safe fields and preserves the original failure',
+    async cleanup => {
+      Object.assign(appConfig, {
+        enableApproval: false,
+        dynamicToolsEnabled: false,
+        promptCacheEnabled: false,
+      })
+      vi.spyOn(Date, 'now').mockReturnValue(NOW)
+      const handle = makeSqliteStore()
+      try {
+        const llm = provider('openai', (_messages, call) =>
+          call === 1
+            ? { calls: [{ id: 'confirmed-tool', name: 'system_info', arguments: {} }] }
+            : { error: new Error('upstream 503') }
+        )
+        const original = task('cleanup-failure')
+        const originalDeps = deps(handle, llm)
+        const writes = vi
+          .spyOn(originalDeps.modelStepCheckpoints!.store, 'transition')
+          .mockRejectedValueOnce(new Error('initial storage failure'))
+        if (cleanup === 'write_failure')
+          writes.mockRejectedValueOnce(new Error('private checkpoint body'))
+        else writes.mockResolvedValueOnce(null)
+        const warning = vi.spyOn(logger, 'warn')
+        originalDeps.taskLifecycle.register(original)
+        await new TaskExecutor(original, originalDeps).run()
+        expect(llm.calls()).toBe(2)
+        expect(llm.requests[1]!.some(m => m.tool_call_id === 'confirmed-tool')).toBe(true)
+        expect(writes).toHaveBeenCalledTimes(2)
+        expect(warning).toHaveBeenCalledWith(
+          { checkpointId: header(handle).checkpoint_id, op: 'abandon', errorName: 'Error' },
+          'model-step checkpoint cleanup failed after resumable settlement failure'
+        )
+        expect(originalDeps.onFail).toHaveBeenCalledExactlyOnceWith(
+          original,
+          expect.objectContaining({
+            code: LlmErrorCode.ModelOverloaded,
+            message: 'upstream 503',
+            providerCode: 'provider_unavailable',
+          })
+        )
+        expect(
+          (originalDeps.onFail as ReturnType<typeof vi.fn>).mock.calls[0]![1].modelStepCheckpointId
+        ).toBeUndefined()
+      } finally {
+        await handle.shutdown()
+      }
+    }
+  )
+  it('C-3: a reaped reused-ID dispatch stays unknown and continuation never replays the confirmed tool', async () => {
+    Object.assign(appConfig, {
+      enableApproval: false,
+      dynamicToolsEnabled: false,
+      promptCacheEnabled: false,
+    })
+    vi.spyOn(Date, 'now').mockReturnValue(NOW)
+    const handle = makeSqliteStore()
+    try {
+      const manager = new McpManager()
+      vi.spyOn(manager, 'getAllTools').mockReturnValue([
+        { name: 'server__write', serverName: 'server', inputSchema: { type: 'object' } },
+      ])
+      const execute = vi.spyOn(manager, 'callTool').mockResolvedValue({
+        toolName: 'server__write',
+        result: { content: [{ type: 'text', text: 'confirmed first effect' }] },
+        isError: false,
+      })
+      const call = { id: 'call_0', name: 'server__write', arguments: {} }
+      const llm = provider('openai', (_messages, attempt) =>
+        attempt === 1 ? { calls: [call] } : { error: new Error('upstream 503') }
+      )
+      const original = task('reused-id-origin')
+      const originalDeps = deps(handle, llm, manager)
+      originalDeps.taskLifecycle.register(original)
+      await new TaskExecutor(original, originalDeps).run()
+      expect(execute).toHaveBeenCalledTimes(1)
+      expect(llm.calls()).toBe(2)
+      const checkpoints = originalDeps.modelStepCheckpoints!.store
+      const row = header(handle)
+      expect(row.status).toBe('resumable')
+      const claim = await checkpoints.claim({
+        sessionKey: SESSION_KEY,
+        checkpointId: row.checkpoint_id,
+        version: row.version,
+        hostInstanceId: 'interrupted-instance',
+        newTaskId: 'interrupted-task',
+        leaseMs: 300_000,
+      })
+      if (claim.outcome !== 'claimed') throw new Error(`Claim failed: ${claim.outcome}`)
+      const recordedMessages = (await checkpoints.loadEntries(SESSION_KEY, row.checkpoint_id))
+        .filter(entry => entry.kind === 'message')
+        .map(entry => JSON.parse(entry.payload) as ChatMessage)
+      const recorder = createModelStepCheckpointRecorder({
+        store: checkpoints,
+        sessionKey: SESSION_KEY,
+        mode: {
+          kind: 'continuation',
+          fence: claim.fence,
+          confirmedResults: claim.snapshot.tools.confirmed,
+          loopState: claim.snapshot.header.loop_state,
+        },
+        redact: text => text,
+        taskBudget: () => claim.snapshot.header.task_budget,
+        resumableTtlMs: 86_400_000,
+        attachmentTtlMs: 3_600_000,
+        now: () => NOW,
+        onFenceLost: () => {
+          throw new Error('Unexpected producer fence loss')
+        },
+      })
+      await recorder.begin(recordedMessages)
+      await recorder.syncMessages([
+        ...recordedMessages,
+        { role: 'assistant', content: '', tool_calls: [call] },
+      ])
+      await recorder.recordDispatch(call)
+      // Simulate process loss between the durable dispatch and its tool effect.
+      expect((await checkpoints.loadLive(SESSION_KEY))!.tools).toEqual({
+        confirmed: 1,
+        unknown: 1,
+        notDispatched: 0,
+      })
+      expect(await checkpoints.bootReap('instance-a')).toEqual({ abandoned: 0, reopened: 1 })
+      expect(header(handle).status).toBe('resumable')
+      const resumed = provider('openai', () => ({ content: 'Recovered without replay' }))
+      const verdict = await continueTurn(handle, original, originalDeps, resumed)
+      expect(verdict).toHaveBeenCalledWith({ kind: 'started' })
+      expect(resumed.calls()).toBe(1)
+      expect(
+        resumed.requests[0]!.filter(m => m.role === 'tool' && m.tool_call_id === 'call_0')
+      ).toEqual([
+        expect.objectContaining({ content: expect.stringContaining('confirmed first effect') }),
+        expect.objectContaining({ content: 'Tool outcome unknown; not re-executed' }),
+      ])
+      expect(execute).toHaveBeenCalledTimes(1)
+      expect(originalDeps.onComplete).toHaveBeenCalledTimes(1)
+      expect(header(handle).status).toBe('completed')
     } finally {
       await handle.shutdown()
     }

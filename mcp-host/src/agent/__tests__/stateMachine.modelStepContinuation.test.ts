@@ -17,7 +17,9 @@ import { SqliteColdStartLoader } from '../../core/conversation/persistence/sqlit
 import { LlmErrorCode } from '../../core/errors'
 import { type ChatMessage, FinishReason } from '../../core/types'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
+import { FailoverEngine } from '../../llm/failover/engine'
 import type { SingleTurnProvider } from '../../llm/types'
+import { logger } from '../../logger'
 import { McpManager } from '../../mcp/manager'
 import { MessageQueue } from '../../queue/messageQueue'
 import type {
@@ -27,6 +29,7 @@ import type {
   TaskResponsePayload,
 } from '../../queue/types'
 import type { IncomingMessage } from '../../server/types'
+import { ModelStepContinuationService } from '../modelStepContinuation'
 import { sourceMessageForResume } from '../sourceMessageForResume'
 import { AgentStateMachine } from '../stateMachine'
 import {
@@ -259,6 +262,187 @@ afterEach(async () => {
 })
 
 describe('AgentStateMachine model-step continuation model pinning (#1043)', () => {
+  it('C-1: fallback tool results continue through the Host-only resolver on the configured primary', async () => {
+    const handle = makeSqliteStore()
+    handles.push(handle)
+    const { stateMachine, lifecycle } = agent(handle)
+    const manager = stateMachine.getConversationManager()
+    const primary = provider('claude')
+    const fallback = provider('openai')
+    const unavailable = () => {
+      throw new Error('upstream 503')
+    }
+    for (const llm of [primary, fallback])
+      llm.classifyError = () => ({
+        code: LlmErrorCode.ModelOverloaded,
+        retryable: true,
+        message: 'upstream 503',
+        httpStatus: 503,
+        providerCode: 'provider_unavailable',
+      })
+    const primaryCall = vi
+      .spyOn(primary, 'completeSingleTurnWithTools')
+      .mockImplementationOnce(async () => unavailable())
+    const fallbackCall = vi
+      .spyOn(fallback, 'completeSingleTurnWithTools')
+      .mockResolvedValueOnce({
+        content: null,
+        tool_calls: [{ id: 'fallback-tool', name: 'server__write', arguments: {} }],
+        usage: USAGE,
+        finish_reason: FinishReason.ToolUse,
+      })
+      .mockImplementationOnce(async () => unavailable())
+    const mcp = new McpManager()
+    vi.spyOn(mcp, 'getAllTools').mockReturnValue([
+      { name: 'server__write', serverName: 'server', inputSchema: { type: 'object' } },
+    ])
+    const execute = vi.spyOn(mcp, 'callTool').mockResolvedValue({
+      toolName: 'server__write',
+      result: { content: [{ type: 'text', text: 'fallback effect completed' }] },
+      isError: false,
+    })
+    stateMachine.setMcpManager(mcp)
+    stateMachine.setLLMProvider(primary as never, 'primary-model')
+    const policy = {
+      cooldownSeconds: 300,
+      triggerOn: ['provider_unavailable'] as const,
+      fallbacks: [{ provider: 'openai', model: 'fallback-model' }],
+    }
+    stateMachine.setFailoverSupport(() => ({
+      policy: { ...policy, triggerOn: [...policy.triggerOn] },
+      engine: new FailoverEngine(
+        { ...policy, triggerOn: [...policy.triggerOn] },
+        { metricInc: () => {} }
+      ),
+      buildProvider: () => fallback,
+    }))
+    const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
+      now: () => NOW,
+      blockedTtlMs: RESUMABLE_TTL_MS,
+    })
+    const checkpointSupport = support(handle, checkpoints)
+    stateMachine.setModelStepCheckpoints(checkpointSupport)
+    const origin: Task = {
+      id: 'fallback-origin',
+      source: 'channel',
+      sourceMessage: message(),
+      priority: 'normal',
+      status: 'pending',
+      createdAt: new Date(NOW),
+      conversationHistory: [],
+      responseCallback: vi.fn(async () => {}),
+    }
+    lifecycle.register(origin)
+    await stateMachine.executeTask(origin)
+    const snapshot = (await checkpoints.loadLive(SESSION_KEY))!
+    expect(primaryCall).toHaveBeenCalledTimes(1)
+    expect(fallbackCall).toHaveBeenCalledTimes(2)
+    expect(execute).toHaveBeenCalledTimes(1)
+    const resolver = vi.fn((selections: Record<string, string> | undefined) => ({
+      provider: primary,
+      model: selections?.claude ?? 'primary-model',
+      contextWindowTokens: 100_000,
+    }))
+    stateMachine.setTaskModelResolver(resolver)
+    const service = new ModelStepContinuationService({
+      checkpoints: checkpointSupport,
+      conversationManager: manager,
+      enqueue: async (sourceMessage, id, modelStepContinuation) => {
+        const next: Task = {
+          ...origin,
+          id,
+          sourceMessage,
+          modelStepContinuation,
+          status: 'pending',
+        }
+        lifecycle.register(next)
+        await stateMachine.executeTask(next)
+      },
+    })
+    const result = await service.continue({
+      userId: USER,
+      agent: AGENT,
+      chatId: CHAT,
+      checkpointId: snapshot.header.checkpoint_id,
+      version: snapshot.header.version,
+    })
+    expect(result).toMatchObject({ status: 202, body: { status: 'claimed' } })
+    expect(resolver).toHaveBeenCalledExactlyOnceWith({ claude: 'primary-model' })
+    expect(snapshot.header).toMatchObject({
+      provider: 'claude',
+      model: 'primary-model',
+      status: 'resumable',
+    })
+    expect(primaryCall).toHaveBeenCalledTimes(2)
+    expect(fallbackCall).toHaveBeenCalledTimes(2)
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(handle.worker.db.prepare('SELECT status FROM model_step_checkpoints').get()).toEqual({
+      status: 'completed',
+    })
+  })
+
+  it('C-5: approval expiry denies the suspended origin and abandons its open checkpoint', async () => {
+    Object.assign(appConfig, { enableApproval: true })
+    const handle = makeSqliteStore()
+    handles.push(handle)
+    const { stateMachine, lifecycle } = agent(handle)
+    const llm = provider('openai')
+    const request = vi.spyOn(llm, 'completeSingleTurnWithTools').mockResolvedValueOnce({
+      content: null,
+      tool_calls: [
+        { id: 'confirmed-first', name: 'system_info', arguments: {} },
+        { id: 'expired-write', name: 'server__write', arguments: {} },
+      ],
+      usage: USAGE,
+      finish_reason: FinishReason.ToolUse,
+    })
+    const mcp = new McpManager()
+    vi.spyOn(mcp, 'getAllTools').mockReturnValue([
+      { name: 'server__write', serverName: 'server', inputSchema: { type: 'object' } },
+    ])
+    const execute = vi.spyOn(mcp, 'callTool')
+    stateMachine.setMcpManager(mcp)
+    stateMachine.setLLMProvider(llm as never, 'primary-model')
+    const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
+      now: () => Date.now(),
+      blockedTtlMs: RESUMABLE_TTL_MS,
+    })
+    stateMachine.setModelStepCheckpoints(support(handle, checkpoints))
+    const origin: Task = {
+      id: 'expiry-origin',
+      source: 'channel',
+      sourceMessage: message(),
+      priority: 'normal',
+      status: 'pending',
+      createdAt: new Date(NOW),
+      conversationHistory: [],
+      responseCallback: vi.fn(async () => {}),
+    }
+    lifecycle.register(origin)
+    await stateMachine.executeTask(origin)
+    const approval = stateMachine.getPendingApprovals()[0]!
+    const open = handle.worker.db.prepare('SELECT * FROM model_step_checkpoints').get()
+    expect(open).toMatchObject({ status: 'open', claim_expires_at: null, expires_at: null })
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(await checkpoints.sweep()).toMatchObject({ expired: 0, purgedCheckpoints: 0 })
+    const deny = vi.spyOn(TaskExecutor.prototype, 'deny')
+    const transition = vi.spyOn(checkpoints, 'transition')
+    vi.spyOn(Date, 'now').mockReturnValue(NOW + 300_001)
+    expect(await stateMachine.handleApproval(USER, approval.requestId, true, 'rpc', AGENT)).toEqual(
+      { success: false, error: 'Approval request has expired' }
+    )
+    expect(deny).toHaveBeenCalledTimes(1)
+    await deny.mock.results[0]!.value
+    expect(transition).toHaveBeenCalledWith(SESSION_KEY, expect.any(Object), {
+      from: ['open'],
+      to: 'abandoned',
+    })
+    expect(await transition.mock.results[0]!.value).not.toBeNull()
+    expect(handle.worker.db.prepare('SELECT * FROM model_step_checkpoints').all()).toEqual([])
+    expect(stateMachine.getPendingApprovals()).toEqual([])
+    expect(execute).toHaveBeenCalledTimes(0)
+  })
+
   it('blocks an inconsistent continuation approval and rehydrates the healthy session', async () => {
     Object.assign(appConfig, { enableApproval: true })
     const handle = makeSqliteStore()
@@ -323,7 +507,7 @@ describe('AgentStateMachine model-step continuation model pinning (#1043)', () =
     expect(healthyConversation.pending_approval?.request_id).toBe('approval-healthy')
   })
 
-  it.each(['attachment_expired', 'lost_claim'] as const)(
+  it.each(['attachment_expired', 'lost_claim', 'corrupt_load_live', 'io_load_live'] as const)(
     'recovers %s per entry and rehydrates the healthy approval',
     async failure => {
       Object.assign(appConfig, { enableApproval: true })
@@ -413,14 +597,52 @@ describe('AgentStateMachine model-step continuation model pinning (#1043)', () =
           return loadLive(sessionKey)
         })
       }
+      const corruption = Object.assign(new Error('sensitive checkpoint body'), {
+        code: 'MODEL_STEP_CHECKPOINT_CORRUPT',
+        checkpointId: fence.checkpointId,
+        seq: 1,
+      })
+      const readFailure = new Error('injected worker IO failure')
+      const warning = vi.spyOn(logger, 'warn')
+      const transitions = vi.spyOn(checkpoints, 'transition')
+      const load =
+        failure === 'corrupt_load_live' || failure === 'io_load_live'
+          ? vi
+              .spyOn(checkpoints, 'loadLive')
+              .mockRejectedValueOnce(failure === 'corrupt_load_live' ? corruption : readFailure)
+          : undefined
       stateMachine.setModelStepCheckpoints({
         ...support(handle, checkpoints),
         hostInstanceId: 'host-instance-boot-recovery',
       })
       stateMachine.setColdStartLoader(new SqliteColdStartLoader(handle.store))
+      const rehydration = vi.spyOn(TaskExecutor.prototype, 'rehydrateWaitingApproval')
 
+      if (failure === 'io_load_live') {
+        await expect(stateMachine.bootstrap()).rejects.toBe(readFailure)
+        expect(load).toHaveBeenCalledTimes(1)
+        expect(
+          handle.worker.db.prepare('SELECT request_id FROM pending_approvals').all()
+        ).toHaveLength(2)
+        return
+      }
       await stateMachine.bootstrap()
       await handle.persistQueue.drain()
+      if (failure === 'corrupt_load_live') {
+        expect(load).toHaveBeenCalledTimes(1)
+        const badEntry = rehydration.mock.calls.findIndex(([key]) => key === SESSION_KEY)
+        expect(badEntry).toBeGreaterThanOrEqual(0)
+        await expect(rehydration.mock.results[badEntry]!.value).resolves.toBe('claim_lost')
+        expect(transitions).toHaveBeenCalledTimes(0)
+        expect(warning).toHaveBeenCalledWith(
+          {
+            sessionKey: SESSION_KEY,
+            taskId: 'task-continuation-state-b2',
+            code: 'MODEL_STEP_CHECKPOINT_CORRUPT',
+          },
+          expect.any(String)
+        )
+      }
 
       expect(
         handle.worker.db
@@ -431,7 +653,10 @@ describe('AgentStateMachine model-step continuation model pinning (#1043)', () =
       ).toEqual(
         failure === 'attachment_expired'
           ? { status: 'blocked', blocked_reason: 'attachment_expired' }
-          : { status: 'abandoned', blocked_reason: null }
+          : {
+              status: failure === 'corrupt_load_live' ? 'claimed' : 'abandoned',
+              blocked_reason: null,
+            }
       )
       expect(stateMachine.getPendingApprovals().map(approval => approval.requestId)).toEqual([
         'approval-healthy',

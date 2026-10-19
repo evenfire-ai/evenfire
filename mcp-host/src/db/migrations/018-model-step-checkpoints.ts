@@ -1,5 +1,5 @@
 /**
- * Migration 017 — durable model-step checkpoints (#1043).
+ * Migration 018 — durable model-step checkpoints (#1043).
  *
  * `model_step_checkpoints` is one header per tool-use turn; its entries are
  * append-only in `model_step_checkpoint_entries` so a long turn never rewrites
@@ -15,6 +15,12 @@ function hasMessagesColumn(db: Database): boolean {
   return (db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>).some(
     row => row.name === 'model_step_checkpoint_id'
   )
+}
+
+function hasSourceMessageColumn(db: Database): boolean {
+  return (
+    db.prepare('PRAGMA table_info(model_step_checkpoints)').all() as Array<{ name: string }>
+  ).some(row => row.name === 'source_message')
 }
 
 export function up(db: Database): void {
@@ -61,6 +67,10 @@ export function up(db: Database): void {
       PRIMARY KEY (checkpoint_id, seq)
     );
   `)
+  // Preview builds used migration 017 before source_message was added.
+  if (!hasSourceMessageColumn(db)) {
+    db.exec('ALTER TABLE model_step_checkpoints ADD COLUMN source_message TEXT;')
+  }
   if (!hasMessagesColumn(db)) {
     db.exec('ALTER TABLE messages ADD COLUMN model_step_checkpoint_id TEXT;')
   }

@@ -134,6 +134,84 @@ function statusOf(worker: InProcessWorkerHandle, checkpointId: string): string |
 }
 
 describe('ModelStepCheckpointStore (#1043)', () => {
+  it('C-1: a stale worker transition cannot overwrite the turn-start pair', async () => {
+    const worker = createInProcessWorker(tempDbPath())
+    const { checkpoints, queue } = storeOver(worker)
+    const { fence } = await openResumable(checkpoints)
+    // Model an old worker request carrying fields removed from the transition API.
+    const staleMetadata = { provider: 'openai', model: 'fallback-model' }
+    expect(
+      await queue.enqueueSync(
+        {
+          kind: 'model_step_checkpoint_transition',
+          fence,
+          from: ['resumable'],
+          to: 'resumable',
+          now: clock,
+          blockedTtlMs: 7 * 24 * 3_600_000,
+          ...staleMetadata,
+        },
+        SESSION_KEY
+      )
+    ).toEqual({ applied: true, version: 3 })
+    expect((await checkpoints.loadLive(SESSION_KEY))?.header).toMatchObject({
+      status: 'resumable',
+      version: 3,
+      provider: header().provider,
+      model: header().model,
+    })
+  })
+
+  it.each([
+    {
+      outcomes: ['confirmed', 'confirmed'],
+      expected: { confirmed: 2, unknown: 0, notDispatched: 0 },
+    },
+    {
+      outcomes: ['confirmed', 'unknown'],
+      expected: { confirmed: 1, unknown: 1, notDispatched: 0 },
+    },
+    {
+      outcomes: ['unknown', 'confirmed'],
+      expected: { confirmed: 1, unknown: 1, notDispatched: 0 },
+    },
+    { outcomes: ['unknown', 'unknown'], expected: { confirmed: 0, unknown: 2, notDispatched: 0 } },
+    {
+      outcomes: ['notDispatched', 'notDispatched'],
+      expected: { confirmed: 0, unknown: 0, notDispatched: 2 },
+    },
+    {
+      outcomes: ['notDispatched', 'confirmed'],
+      expected: { confirmed: 1, unknown: 0, notDispatched: 1 },
+    },
+    {
+      outcomes: ['confirmed', 'unknown', 'notDispatched', 'confirmed', 'unknown', 'notDispatched'],
+      expected: { confirmed: 2, unknown: 2, notDispatched: 2 },
+    },
+  ])('C-3: counts reused call_0 in each batch: $outcomes', async ({ outcomes, expected }) => {
+    const worker = createInProcessWorker(tempDbPath())
+    const { checkpoints } = storeOver(worker)
+    const fence = await checkpoints.open(header(), [userEntry])
+    const entries = outcomes.flatMap(outcome => [
+      announced('call_0'),
+      ...(outcome === 'notDispatched' ? [] : [dispatch('call_0')]),
+      ...(outcome === 'confirmed' ? [result('call_0')] : []),
+    ])
+    expect(await checkpoints.append(SESSION_KEY, fence, entries)).toBe(true)
+    expect(
+      await checkpoints.transition(SESSION_KEY, fence, {
+        from: ['open'],
+        to: 'resumable',
+        failedAt: clock,
+        expiresAt: clock + 1000,
+      })
+    ).toBe(2)
+    expect(await checkpoints.loadEntries(SESSION_KEY, fence.checkpointId)).toHaveLength(
+      entries.length + 1
+    )
+    expect((await checkpoints.loadLive(SESSION_KEY))?.tools).toEqual(expected)
+  })
+
   it.each([false, true])(
     'E3 R1-M2: lapsed lease agrees with claim when approval=%s',
     async approval => {
@@ -1087,7 +1165,7 @@ describe('ModelStepCheckpointStore (#1043)', () => {
     ).toEqual({ outcome: 'not_found' })
   })
 
-  describe('7. inline attachment bytes (migration 018)', () => {
+  describe('7. inline attachment bytes (migration 019)', () => {
     const bytes = new Uint8Array([0, 255, 1, 254, 10, 13, 37])
     const attachmentInput = (expiresAt: number) => ({
       attachmentId: 'att-1',

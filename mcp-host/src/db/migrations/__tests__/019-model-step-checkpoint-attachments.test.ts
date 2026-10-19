@@ -34,7 +34,7 @@ const insertBytes = (db: Database.Database, checkpointId: string, bytes: Buffer)
     .run(checkpointId, bytes.length, bytes)
 
 describe('migration 019 model-step checkpoint attachments (#1043)', () => {
-  it('is the last registered migration, right after 017', () => {
+  it('is the last registered migration, right after 018', () => {
     const names = migrations.map(m => m.name)
     expect(names[names.length - 1]).toBe('019-model-step-checkpoint-attachments')
     expect(names[names.length - 2]).toBe('018-model-step-checkpoints')
