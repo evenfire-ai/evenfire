@@ -33,7 +33,11 @@ import type {
 } from '../../interfaces'
 import type { RedactionRange } from '../../safety/safety'
 import type { Attachment, ToolOutput, ToolResult } from '../../types'
-import { ATTACHMENT_READ_TURN_STOP_MESSAGE, type AttachmentReadRedactor } from '../attachmentRead'
+import {
+  ATTACHMENT_READ_TURN_STOP_MESSAGE,
+  type AttachmentReadRedactor,
+  MIXED_REDACTION,
+} from '../attachmentRead'
 import { decodeCursor, encodeCursor, resolvePageSelection } from './selection'
 import {
   DOCUMENT_READ_TOOL_NAME,
@@ -187,8 +191,25 @@ function maskSlice(text: string, ranges: RedactionRange[], from: number, to: num
   return out + text.slice(cursor, to)
 }
 
+/**
+ * Sorted, disjoint ranges. Overlapping ranges are merged as
+ * `applyRedactionRanges` merges them, so text inside an overlap is replaced once.
+ */
 function sortedRanges(ranges: RedactionRange[]): RedactionRange[] {
-  return ranges.filter(range => range.end > range.start).sort((a, b) => a.start - b.start)
+  const merged: RedactionRange[] = []
+  const sorted = ranges
+    .filter(range => range.end > range.start)
+    .sort((a, b) => a.start - b.start || b.end - a.end)
+  for (const range of sorted) {
+    const last = merged[merged.length - 1]
+    if (last && range.start < last.end) {
+      if (range.end > last.end) last.end = range.end
+      if (range.replacement !== last.replacement) last.replacement = MIXED_REDACTION
+      continue
+    }
+    merged.push({ ...range })
+  }
+  return merged
 }
 
 export class DocumentReadTool implements Tool {
@@ -410,7 +431,8 @@ export class DocumentReadTool implements Tool {
       outcome.ok || outcome.reason === 'no_text_layer'
         ? await context?.visualInput?.resolveCapability(context.signal)
         : undefined
-    const offerVisual = capability?.status === 'supported'
+    // The same predicate `readVisual` requires before it can deliver images.
+    const offerVisual = capability?.status === 'supported' && !!capability.deliveryLimits
     if (!outcome.ok) return this.failure(identity, outcome, start, contentMismatch, offerVisual)
     const maxVisualCandidates =
       capability?.status === 'supported' && capability.deliveryLimits

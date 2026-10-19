@@ -161,6 +161,9 @@ describe('clerum__attachment_read', () => {
       reason: 'read_with_document_read',
     })
     expect(output.content).not.toContain(SENTINEL)
+    // The size comes from the reference; the PDF bytes are never decoded.
+    expect(output.metadata?.attachmentRead).toMatchObject({ fileBytes: pdf.length })
+    expect(decodeTextContent).not.toHaveBeenCalled()
   })
 
   it('reads a PNG sent as kind:file as binary, never as image input', async () => {

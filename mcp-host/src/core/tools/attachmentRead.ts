@@ -124,7 +124,7 @@ interface ByteRedaction {
 
 // The replacement `applyRedactionRanges` uses when overlapping ranges carry
 // different replacements.
-const MIXED_REDACTION = '[REDACTED]'
+export const MIXED_REDACTION = '[REDACTED]'
 
 const isHighSurrogate = (code: number): boolean => code >= 0xd800 && code <= 0xdbff
 const isLowSurrogate = (code: number): boolean => code >= 0xdc00 && code <= 0xdfff
@@ -347,7 +347,7 @@ export class AttachmentReadTool implements Tool {
     }
 
     // #656 — PDF and XLSX have their own reader; their bytes are never
-    // decoded as text here.
+    // decoded here. The Host built the reference's byteLength from them.
     if (reference.reader === 'pdf' || reference.reader === 'xlsx') {
       return this.ok(
         {
@@ -360,7 +360,7 @@ export class AttachmentReadTool implements Tool {
         {
           identity,
           offset,
-          fileBytes: this.cachedBytes(attachment.id, attachment.dataBase64),
+          fileBytes: reference.byteLength,
           unavailableReason: 'read_with_document_read',
         }
       )

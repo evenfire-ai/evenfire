@@ -354,7 +354,9 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
           process.execPath,
           ['--max-old-space-size=' + memoryCaps.maxHeapMb, ...workerEntry()],
           {
-            // No Host secrets or inherited Node loaders reach the child.
+            // The child inherits no environment variables or Node loaders. It
+            // is a memory and time boundary, not a security sandbox: it runs
+            // as the Host's user.
             env: {},
             // Dependency diagnostics may contain document data. Discard them.
             stdio: ['ignore', 'ignore', 'ignore', 'ipc'],

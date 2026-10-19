@@ -272,6 +272,37 @@ describe('DocumentReadTool visual mode', () => {
     )
     expect(supported.body).toMatchObject({ status: 'ok', visualCandidates: [1] })
   })
+
+  it('tells a scanned PDF needs a vision model when the capability has no delivery limits', async () => {
+    const file = admittedFile('pdf-file', await imageOnlyPdf(witnessCode()), 'application/pdf')
+    const scanned = fakeRunner({ ok: false, reason: 'no_text_layer' })
+    const withoutLimits: Partial<ExecutionContext> = {
+      visualInput: {
+        budget: {} as never,
+        resolveCapability: async () =>
+          ({
+            status: 'supported',
+            provider: 'fixture-provider',
+            model: 'fixture-model',
+            evidence: 'unit fixture',
+          }) as never,
+      },
+    }
+    const noProfile = await read(
+      toolFor([file], scanned.runJob),
+      { attachmentId: 'pdf-file' },
+      withoutLimits
+    )
+    expect(noProfile.body).toMatchObject({ status: 'error', reason: 'no_text_layer' })
+    expect(noProfile.body.message).toMatch(/requires a vision-capable model/)
+    // Control: with delivery limits the model is told to use mode "visual".
+    const capable = await read(
+      toolFor([file], fakeRunner({ ok: false, reason: 'no_text_layer' }).runJob),
+      { attachmentId: 'pdf-file' },
+      visualContext(true)
+    )
+    expect(capable.body.message).toMatch(/mode "visual"/)
+  })
 })
 
 describe('DocumentReadTool budgets', () => {
@@ -468,6 +499,32 @@ describe('DocumentReadTool configured masking', () => {
       sheets: [{ name: 'sheet [MASKED]', rows: [['[MASKED]', 'plain']] }],
     })
     expect(workbook.output.content).not.toContain(configured)
+  })
+
+  it('replaces overlapping ranges once, as the safety layer does', async () => {
+    const text = 'before ABCDEF after'
+    const overlapping: AttachmentReadRedactor = {
+      toolOutputRedactionRanges: (toolName, content) =>
+        toolName === 'clerum__document_read' && content === text
+          ? [
+              { start: 7, end: 10, replacement: '[A]' },
+              { start: 9, end: 13, replacement: '[B]' },
+              { start: 14, end: 19, replacement: '[C]' },
+            ]
+          : [],
+    }
+    const file = admittedFile('pdf-file', await imageOnlyPdf(witnessCode()), 'application/pdf')
+    const outcome: PdfTextOutcome = {
+      ok: true,
+      pageCount: 1,
+      pages: [{ page: 1, text, from: 0, to: text.length, lowText: false }],
+    }
+    const result = await read(
+      toolFor([file], fakeRunner(outcome).runJob, { redactor: overlapping }),
+      { attachmentId: 'pdf-file' }
+    )
+    // The overlap becomes one mixed replacement; the separate range keeps its own.
+    expect(result.body).toMatchObject({ pages: [{ text: 'before [REDACTED] [C]' }] })
   })
 })
 
