@@ -79,6 +79,39 @@ test('GFS resource-link parsing rejects malformed identities and untrusted URL c
   }
 })
 
+test('resource-link parser accepts only canonical identities and the shared link producers', () => {
+  const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+  const desktopLink = links.buildGfsResourceDeepLink(uri)
+  const profileLink = links.buildGfsResourceWebLink('https://another-env.example', uri)
+
+  assert.deepEqual(links.parseGfsResourceLink(uri), { uri })
+  assert.deepEqual(links.parseGfsResourceLink(desktopLink), { uri })
+  assert.deepEqual(links.parseGfsResourceLink(profileLink), { uri })
+  assert.deepEqual(links.parseGfsResourceLink(profileLink.replace('main%2F', 'Main%2F')), {
+    uri: 'gfs://Main/0123456789abcdef0123456789abcdef',
+  })
+
+  for (const rawLink of [
+    'gfs://main/folder/report.md',
+    'gfs://main/name-0123456789abcdef0123456789abcdef',
+    'gfs://main/01234567-89ab-cdef-0123-456789abcdef',
+    `https://profile.example/open/files?uri=${encodeURIComponent(encodeURIComponent(uri))}`,
+    `${profileLink}#fragment`,
+    profileLink.replace('https://another-env.example', 'https://user:secret@another-env.example'),
+    `${profileLink}&uri=${encodeURIComponent(uri)}`,
+    profileLink.replace('/open/files?', '/wrong/path?'),
+    profileLink.replace('https:', 'ftp:'),
+  ]) {
+    assert.equal(links.parseGfsResourceLink(rawLink), null, rawLink)
+  }
+
+  assert.equal(
+    links.normalizeGfsResourceUri('gfs://Main/0123456789ABCDEF0123456789ABCDEF'),
+    'gfs://Main/0123456789abcdef0123456789abcdef'
+  )
+  assert.equal(links.parseGfsResourceLink(`${uri}/`), null)
+})
+
 test('web and desktop links use the same canonical route contract', () => {
   const target = {
     recipeNs: 'sandbox-recipes',
