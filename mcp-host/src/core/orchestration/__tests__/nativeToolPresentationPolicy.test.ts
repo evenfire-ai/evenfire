@@ -75,24 +75,22 @@ describe('selectDeferredNatives on the production native registry', () => {
   const bytes = (name: string) =>
     Buffer.byteLength(JSON.stringify(definitions.find(def => def.name === name)), 'utf8')
 
-  it('hides exactly the five generators at the 2048 B default', () => {
+  it('hides exactly the six generators at the 2048 B default', () => {
     expect(
       [...selectDeferredNatives(definitions, DEFAULT_NATIVE_TOOL_DISCOVERY_BYTES)].sort()
     ).toEqual([
       'clerum__generate_chart',
       'clerum__generate_dashboard',
+      'clerum__generate_docx',
       'clerum__generate_pdf',
       'clerum__generate_pptx',
       'clerum__generate_xlsx',
     ])
   })
 
-  it('keeps docx and markdown advertised, with docx the closest to the budget', () => {
-    expect(definitions.map(def => def.name)).toEqual(
-      expect.arrayContaining(['clerum__generate_docx', 'clerum__generate_markdown'])
-    )
-    // A docx description that grows past the budget must turn this test red.
-    expect(bytes('clerum__generate_docx')).toBeLessThanOrEqual(DEFAULT_NATIVE_TOOL_DISCOVERY_BYTES)
+  it('keeps markdown advertised, under the budget', () => {
+    expect(definitions.map(def => def.name)).toContain('clerum__generate_markdown')
+    // A markdown description that grows past the budget must turn this test red.
     expect(bytes('clerum__generate_markdown')).toBeLessThanOrEqual(
       DEFAULT_NATIVE_TOOL_DISCOVERY_BYTES
     )

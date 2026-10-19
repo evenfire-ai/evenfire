@@ -383,6 +383,9 @@ describe('SqliteConversationStore — reopened continuation turns (#1043)', () =
     await expect(handle.store.persistContinuationStart(conv, 1)).rejects.toThrow()
 
     expect(handle.store.activeTurnNumber(conv)).toBe(2)
+    // The crashed worker never ACKs shutdown, so the queue reports the exit.
+    handles.splice(handles.indexOf(handle), 1)
+    await expect(handle.shutdown()).rejects.toThrow(/db worker exited \(code=1\)/)
   })
 
   it('ends a cancelled reopened turn in the origin turn without advancing the next number', async () => {

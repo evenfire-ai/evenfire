@@ -442,3 +442,25 @@ describe('HookInstallForm — what actually reaches the install route', () => {
     expect(payload.failMode).toBe('open')
   })
 })
+
+describe('HookInstallForm — install rejections render friendly copy', () => {
+  it.each([
+    ['hook_requires_org_scope', 'Only organization-scoped registry hooks can be installed.'],
+    [
+      'content_access_conflict',
+      'This hook declares metadata-only access at a lifecycle point that always receives content.',
+    ],
+    ['image_ref_not_digest_pinned', "This hook's image must be pinned by digest (@sha256:…)."],
+  ])('labels %s instead of rendering the raw code', async (code, label) => {
+    vi.mocked(api.installHookFromRegistry).mockRejectedValue(
+      Object.assign(new Error(`400 Bad Request - ${code}`), { code, body: { error: code } })
+    )
+    render(<HookInstallForm entry={entryWith({})} onCancel={noop} onInstalled={noop} />)
+    fireEvent.click(await screen.findByRole('button', { name: /continue/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /^install$/i }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(label)
+    expect(alert).not.toHaveTextContent(code)
+  })
+})

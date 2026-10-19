@@ -31,6 +31,16 @@ afterEach(async () => {
   clock = 1_000_000
 })
 
+/**
+ * A crashed worker exits without ACKing `shutdown`, so its queue records the
+ * exit as a failure and `close()` rejects with it. Stop tracking that queue and
+ * assert the crash was observed.
+ */
+async function expectCrashed(queue: PersistQueue): Promise<void> {
+  openQueues.splice(openQueues.indexOf(queue), 1)
+  await expect(queue.close()).rejects.toThrow(/db worker exited \(code=1\)/)
+}
+
 function tempDbPath(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'msc-1043-'))
   tempDirs.push(dir)
@@ -44,7 +54,11 @@ function storeOver(
   checkpoints: ModelStepCheckpointStore
   queue: PersistQueue
 } {
-  const queue = new PersistQueue(worker.worker, { syncTimeoutMs: 2000, asyncTimeoutMs: 5000 })
+  const queue = new PersistQueue(worker.worker, {
+    syncTimeoutMs: 2000,
+    asyncTimeoutMs: 5000,
+    stallTimeoutMs: 30_000,
+  })
   openQueues.push(queue)
   return {
     checkpoints: new ModelStepCheckpointStore(queue, { now: () => clock, blockedTtlMs }),
@@ -226,7 +240,6 @@ describe('ModelStepCheckpointStore (#1043)', () => {
       [4, 'tool_result', 'tc-1'],
       [5, 'tool_dispatch', 'tc-2'],
     ])
-    reopened.terminate()
   })
 
   it('2. at most one non-terminal checkpoint per session', async () => {
@@ -647,10 +660,11 @@ describe('ModelStepCheckpointStore (#1043)', () => {
     async function crashAfter(entries: ModelStepCheckpointEntryInput[]) {
       const dbPath = tempDbPath()
       const first = createInProcessWorker(dbPath)
-      const { checkpoints } = storeOver(first)
+      const { checkpoints, queue: firstQueue } = storeOver(first)
       const fence = await checkpoints.open(header(), [userEntry])
       if (entries.length > 0) await checkpoints.append(SESSION_KEY, fence, entries)
       first.crash()
+      await expectCrashed(firstQueue)
 
       const reopened = createInProcessWorker(dbPath)
       const cold = storeOver(reopened).checkpoints
@@ -658,20 +672,19 @@ describe('ModelStepCheckpointStore (#1043)', () => {
       const durableEntries = await cold.loadEntries(SESSION_KEY, 'cp-1')
       const reaped = await cold.bootReap('host-instance-after-crash')
       expect(await cold.loadEntries(SESSION_KEY, 'cp-1')).toEqual([])
-      return { live, durableEntries, reaped, status: statusOf(reopened, 'cp-1'), reopened }
+      return { live, durableEntries, reaped, status: statusOf(reopened, 'cp-1') }
     }
 
     it('before tool_dispatch: open is abandoned, no tool recorded', async () => {
-      const { live, durableEntries, reaped, status, reopened } = await crashAfter([])
+      const { live, durableEntries, reaped, status } = await crashAfter([])
       expect(durableEntries.map(entry => entry.kind)).toEqual(['message'])
       expect(live).toBeNull()
       expect(reaped).toEqual({ abandoned: 1, reopened: 0 })
       expect(status).toBeUndefined()
-      reopened.terminate()
     })
 
     it('after tool_result: the tool reads confirmed, open is abandoned', async () => {
-      const { live, durableEntries, reaped, status, reopened } = await crashAfter([
+      const { live, durableEntries, reaped, status } = await crashAfter([
         dispatch('tc-1'),
         result('tc-1'),
       ])
@@ -683,18 +696,14 @@ describe('ModelStepCheckpointStore (#1043)', () => {
       expect(live).toBeNull()
       expect(reaped).toEqual({ abandoned: 1, reopened: 0 })
       expect(status).toBeUndefined()
-      reopened.terminate()
     })
 
     it('between the effect and tool_result: the tool reads unknown', async () => {
-      const { live, durableEntries, reaped, status, reopened } = await crashAfter([
-        dispatch('tc-1'),
-      ])
+      const { live, durableEntries, reaped, status } = await crashAfter([dispatch('tc-1')])
       expect(durableEntries.map(entry => entry.kind)).toEqual(['message', 'tool_dispatch'])
       expect(live).toBeNull()
       expect(reaped).toEqual({ abandoned: 1, reopened: 0 })
       expect(status).toBeUndefined()
-      reopened.terminate()
     })
   })
 
@@ -967,7 +976,7 @@ describe('ModelStepCheckpointStore (#1043)', () => {
       ).n
 
     async function resumableWithBytes(worker: InProcessWorkerHandle, ttlMs = 3_600_000) {
-      const { checkpoints } = storeOver(worker)
+      const { checkpoints, queue } = storeOver(worker)
       const fence = await checkpoints.open(header(), [userEntry])
       await checkpoints.append(SESSION_KEY, fence, [dispatch('tc-1'), result('tc-1')])
       const version = await checkpoints.transition(SESSION_KEY, fence, {
@@ -977,14 +986,15 @@ describe('ModelStepCheckpointStore (#1043)', () => {
         expiresAt: clock + 7 * 24 * 3_600_000,
         attachments: [attachmentInput(clock + ttlMs)],
       })
-      return { checkpoints, fence, version: version as number }
+      return { checkpoints, queue, fence, version: version as number }
     }
 
     it('round-trip byte-exact after a cold reopen, and are readable while claimed', async () => {
       const dbPath = tempDbPath()
       const first = createInProcessWorker(dbPath)
-      await resumableWithBytes(first)
+      const { queue: firstQueue } = await resumableWithBytes(first)
       first.crash()
+      await expectCrashed(firstQueue)
       const reopened = createInProcessWorker(dbPath)
       const { checkpoints } = storeOver(reopened)
       const [row] = await checkpoints.loadAttachments(SESSION_KEY, 'cp-1')
@@ -1004,7 +1014,6 @@ describe('ModelStepCheckpointStore (#1043)', () => {
       })
       expect(claim.outcome).toBe('claimed')
       expect(await checkpoints.loadAttachments(SESSION_KEY, 'cp-1')).toHaveLength(1)
-      reopened.terminate()
     })
 
     it('expire after their own TTL while the checkpoint stays resumable', async () => {
@@ -1166,7 +1175,10 @@ describe('ModelStepCheckpointStore (#1043)', () => {
     await openResumable(checkpoints, 'cp-closed', 'k-closed')
     await openResumable(checkpoints, 'cp-live', 'k-live')
 
-    await queue.enqueueSync({ kind: 'sweep_closed_sessions', cutoffEpoch: 20 }, 'k-closed')
+    await queue.enqueueSync(
+      { kind: 'sweep_closed_sessions', cutoffEpoch: 20, limit: 100 },
+      'k-closed'
+    )
     expect(statusOf(worker, 'cp-closed')).toBeUndefined()
     expect(statusOf(worker, 'cp-ended')).toBe('resumable')
 
