@@ -1558,7 +1558,10 @@ describe('FilesPage', () => {
     })
     expect(within(readOnlyShareMenu).queryByRole('menuitem', { name: 'Share' })).toBeNull()
     expect(within(readOnlyShareMenu).getByRole('menuitem', { name: 'Copy link' })).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
+    })
+    expect(screen.queryByRole('menu', { name: 'Actions for notes.txt' })).toBeNull()
 
     // Same row with manage_acl held: the entry appears and opens the modal.
     hookMock.useGfsBrowserController.mockReturnValue({
@@ -1582,13 +1585,16 @@ describe('FilesPage', () => {
     })
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
+    })
+    await act(async () => {
       fireEvent.click(screen.getByRole('menuitem', { name: /^Share$/ }))
-      fireEvent.click(
-        within(screen.getByRole('menu', { name: 'Share options for notes.txt' })).getByRole(
-          'menuitem',
-          { name: 'Share' }
-        )
-      )
+    })
+    const managedShareMenu = await screen.findByRole('menu', {
+      name: 'Share options for notes.txt',
+    })
+    expect(within(managedShareMenu).getByRole('menuitem', { name: 'Share' })).toBeTruthy()
+    await act(async () => {
+      fireEvent.click(within(managedShareMenu).getByRole('menuitem', { name: 'Share' }))
     })
     expect(screen.queryByRole('menu', { name: 'Share options for notes.txt' })).toBeNull()
     // The manage modal opens (titled for the current selection — the mocked
@@ -4628,7 +4634,6 @@ describe('FilesPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Options for Nested' }))
     expect(screen.queryByRole('menuitem', { name: 'Refresh' })).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Options for Nested' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'New folder' }))
     const createDialog = screen.getByRole('dialog', { name: 'New folder' })
     expect(within(createDialog).getByText('Create a new folder in Nested.')).toBeTruthy()
