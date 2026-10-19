@@ -80,7 +80,8 @@ describe('AppService deliberate team transition ownership', () => {
       tokenStore: { getSessionToken: ReturnType<typeof vi.fn> }
       getDependenciesHealth(): Promise<unknown>
     }
-    app.tokenStore.getSessionToken.mockResolvedValue('saved-session-a')
+    await service.tokenStore.setSessionToken('saved-session-a', runtimeConfig.getActiveEnvKey())
+    service.tokenStore.setSessionToken.mockClear()
     const getMe = vi.fn(() => {
       getMeStarted.resolve()
       return getMeResponse.promise
@@ -186,7 +187,6 @@ describe('AppService deliberate team transition ownership', () => {
         appName: string
       }): Promise<unknown>
     }
-    app.tokenStore.getSessionToken.mockResolvedValue('saved-session-a')
     const getMe = vi.fn().mockResolvedValue(me)
     const getDesktopEnvironment = vi.fn(() => {
       discoveryStarted.resolve()
@@ -205,6 +205,8 @@ describe('AppService deliberate team transition ownership', () => {
       appName: 'Environment A',
     })
     await discoveryStarted.promise
+    await service.tokenStore.setSessionToken('saved-session-a', runtimeConfig.getActiveEnvKey())
+    service.tokenStore.setSessionToken.mockClear()
     const restore = service.getSessionState()
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(getMe).not.toHaveBeenCalled()

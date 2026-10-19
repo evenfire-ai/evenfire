@@ -18,13 +18,17 @@ type SetupActivation = {
 
 describe('AppService setup and saved-session ownership', () => {
   it('does not advance the session generation when saved-session restore fails while signed out', async () => {
-    const { service } = await createNativeCommitTestHarness()
+    const { service, runtimeConfig } = await createNativeCommitTestHarness()
     const app = service as unknown as {
       authClient: { getMe: ReturnType<typeof vi.fn> }
       tokenStore: { getSessionToken: ReturnType<typeof vi.fn> }
       getSessionGeneration: () => number
     }
-    app.tokenStore.getSessionToken.mockResolvedValue('synthetic-saved-session-a')
+    await service.tokenStore.setSessionToken(
+      'synthetic-saved-session-a',
+      runtimeConfig.getActiveEnvKey()
+    )
+    service.tokenStore.setSessionToken.mockClear()
     app.authClient = {
       getMe: vi.fn().mockRejectedValue(new Error('synthetic network failure')),
     }
@@ -36,7 +40,7 @@ describe('AppService setup and saved-session ownership', () => {
   it.each(['Google', 'password'] as const)(
     'lets a pending %s login win over a background saved-session restore',
     async provider => {
-      const { service } = await createNativeCommitTestHarness()
+      const { service, runtimeConfig } = await createNativeCommitTestHarness()
       const restoredUser = {
         id: 'user-a',
         email: 'user-a@example.test',
@@ -71,7 +75,11 @@ describe('AppService setup and saved-session ownership', () => {
         passwordLogin: vi.fn(() => loginResponse.promise),
         getMe: vi.fn().mockResolvedValue(restoredUser),
       }
-      app.tokenStore.getSessionToken.mockResolvedValue('synthetic-saved-session-a')
+      await service.tokenStore.setSessionToken(
+        'synthetic-saved-session-a',
+        runtimeConfig.getActiveEnvKey()
+      )
+      service.tokenStore.setSessionToken.mockClear()
 
       const login =
         provider === 'Google'
@@ -121,7 +129,8 @@ describe('AppService setup and saved-session ownership', () => {
       gfsScopeIdentity: { ownerId: string; teamId: string | null; baseUrl: string } | null
     }
     app.authClient = { getMe: vi.fn().mockResolvedValue(user) }
-    app.tokenStore.getSessionToken.mockResolvedValue('synthetic-session-a')
+    await service.tokenStore.setSessionToken('synthetic-session-a', runtimeConfig.getActiveEnvKey())
+    service.tokenStore.setSessionToken.mockClear()
     app.memberRegistrationServiceClient = { completeDesktopSetup: setupRequest }
     app.resolveRuntimeConfigIfNeeded = vi.fn().mockResolvedValue(undefined)
 
@@ -182,7 +191,8 @@ describe('AppService setup and saved-session ownership', () => {
     app.authClient = {
       getMe: vi.fn().mockReturnValue(restoredUser.promise),
     }
-    app.tokenStore.getSessionToken.mockResolvedValue('synthetic-session-a')
+    await service.tokenStore.setSessionToken('synthetic-session-a', runtimeConfig.getActiveEnvKey())
+    service.tokenStore.setSessionToken.mockClear()
     app.memberRegistrationServiceClient = { completeDesktopSetup: setupRequest }
     app.resolveRuntimeConfigIfNeeded = vi.fn().mockResolvedValue(undefined)
 

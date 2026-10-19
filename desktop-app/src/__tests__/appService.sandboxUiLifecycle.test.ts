@@ -3,6 +3,7 @@ import { app, shell } from 'electron'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { testSessionTokenWithExpiry } from '../../testSupport/authTestFixtures.js'
 import { AppService } from '../appService.js'
 import { __setChatStoreBaseDirForTests, unbindChatStore } from '../chatStoreBinding.js'
 import { wireMainWindowRendererReadiness } from '../mainWindowReadiness.js'
@@ -14,6 +15,7 @@ import {
   SANDBOX_UI_REFRESH_INTERVAL_MS,
   _resetSandboxUiRefreshForTests,
 } from '../sandboxUiSessionRefresh.js'
+import { TokenStore } from '../tokenStore.js'
 
 // The open/close lifecycle is exercised end to end through the REAL AppService,
 // the REAL sandbox-ui driver, the REAL session-refresh loop, the REAL plugin
@@ -114,9 +116,10 @@ vi.mock('electron', () => ({
       return false
     }
   },
-  app: { getPath: vi.fn(() => tmpdir()), isReady: () => false },
+  app: { getPath: vi.fn(() => userDataDir), isReady: () => true },
   safeStorage: {
     isEncryptionAvailable: vi.fn(() => false),
+    getSelectedStorageBackend: () => 'gnome_libsecret',
     encryptString: vi.fn(),
     decryptString: vi.fn(),
   },
@@ -140,7 +143,7 @@ vi.mock('../config.js', async importOriginal => {
   return {
     validateRpcProxyBaseUrl,
     getActiveRuntimeConfigOptionId: () => null,
-    getActiveEnvKey: () => 'test-env',
+    getActiveEnvKey: () => 'test_env-000000000000',
     getActiveLegacyEnvKeys: () => [],
     hydrateDesktopRuntimeConfig: () => undefined,
     isDesktopRuntimeConfigured: () => true,
@@ -154,7 +157,7 @@ vi.mock('../config.js', async importOriginal => {
         externalRestApiBaseUrl: 'http://rest',
         rpcProxyBaseUrl: 'https://rpc.example',
       },
-      envKey: 'test-env',
+      envKey: 'test_env-000000000000',
       storagePath: '/tmp/runtime-config.json',
       options: [],
     }),
@@ -191,14 +194,6 @@ vi.mock('../authClient.js', () => ({
     getMe = authMocks.getMe
     googleLogin = authMocks.googleLogin
     getDesktopEnvironment = authMocks.getDesktopEnvironment
-  },
-}))
-
-vi.mock('../tokenStore.js', () => ({
-  TokenStore: class {
-    getSessionToken = vi.fn().mockResolvedValue(null)
-    setSessionToken = vi.fn()
-    clearSessionToken = vi.fn()
   },
 }))
 
@@ -307,8 +302,15 @@ function mintCallsFor(recipeName: string): number {
   ).length
 }
 
+function createService(): AppService {
+  return new AppService({
+    tokenStore: new TokenStore({ isolatedUserDataPath: userDataDir }),
+    getUserDataDirectory: () => userDataDir,
+  })
+}
+
 function makeService(): AppService {
-  const svc = new AppService()
+  const svc = createService()
   ;(svc as unknown as { sessionToken: string }).sessionToken = 'fake-session-token'
   return svc
 }
@@ -388,7 +390,7 @@ describe('AppService sandbox-ui effective RPC endpoint', () => {
         appName: 'Discovered environment',
       })
     authMocks.googleLogin.mockResolvedValue({
-      token: 'fake-session-token',
+      token: testSessionTokenWithExpiry(),
       me: {
         id: 'user-a',
         email: 'user-a@example.test',
@@ -892,7 +894,7 @@ describe('AppService sandbox-ui embed across a login that replaces a live sessio
   })
 
   afterEach(() => {
-    vi.mocked(app.getPath).mockImplementation(() => tmpdir())
+    vi.mocked(app.getPath).mockImplementation(() => userDataDir)
   })
 
   async function loginAs(service: AppService, token: string, userId: string): Promise<void> {
@@ -920,7 +922,7 @@ describe('AppService sandbox-ui embed across a login that replaces a live sessio
   }
 
   async function serviceLoggedInAsA(): Promise<AppService> {
-    const service = new AppService()
+    const service = createService()
     initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
     await loginAs(service, 'fake-session-token-a', 'user-a')
     return service

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthClient } from '../authClient.js'
-import { ApiError, requestJson } from '../httpClient.js'
+import { ApiError, requestJson, setSessionInvalidationHandler } from '../httpClient.js'
 import { RpcProxyClient, SandboxUiSessionError } from '../rpcProxyClient.js'
 import { SharedFilesClient } from '../sharedFilesClient.js'
 import {
@@ -22,6 +22,7 @@ vi.mock('../config.js', () => ({
 }))
 
 afterEach(() => {
+  setSessionInvalidationHandler(undefined)
   vi.unstubAllGlobals()
 })
 
@@ -98,6 +99,69 @@ describe('requestJson Host-access 403 mapping', () => {
 
     expect(error.message.startsWith('502 Bad Gateway: ')).toBe(true)
     expect(error.message).not.toContain('host_access_revoked')
+  })
+})
+
+describe('authenticated session invalidation', () => {
+  it('checks the volatile session at dispatch and sends no request when the guard rejects', async () => {
+    const dispatchError = new Error('temporary session expired')
+    const guard = vi.fn(() => {
+      throw dispatchError
+    })
+    setSessionInvalidationHandler(undefined, guard)
+    const fetchMock = stubResponse(200, 'OK', '{}')
+
+    await expect(
+      requestJson('GET', 'http://rest/protected', { token: 'fixture-session-token' })
+    ).rejects.toBe(dispatchError)
+
+    expect(guard).toHaveBeenCalledExactlyOnceWith('fixture-session-token')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('notifies the main-process coordinator for a token-bearing 401, not a 403', async () => {
+    const invalidate = vi.fn()
+    setSessionInvalidationHandler(invalidate)
+    stubResponse(401, 'Unauthorized', '{}')
+
+    await expect(
+      requestJson('GET', 'http://rest/protected', { token: 'fixture-session-token' })
+    ).rejects.toBeInstanceOf(ApiError)
+    expect(invalidate).toHaveBeenCalledExactlyOnceWith('fixture-session-token')
+
+    invalidate.mockClear()
+    stubResponse(403, 'Forbidden', '{}')
+    await expect(
+      requestJson('GET', 'http://rest/protected', { token: 'fixture-session-token' })
+    ).rejects.toBeInstanceOf(ApiError)
+    expect(invalidate).not.toHaveBeenCalled()
+  })
+
+  it('notifies the coordinator when a raw authenticated stream is rejected with 401', async () => {
+    const invalidate = vi.fn()
+    setSessionInvalidationHandler(invalidate)
+    stubResponse(401, 'Unauthorized', '{}')
+
+    await expect(
+      new AuthClient().openWorkflowNotificationStream(
+        'fixture-stream-session-token',
+        () => {},
+        new AbortController().signal
+      )
+    ).rejects.toBeInstanceOf(ApiError)
+
+    expect(invalidate).toHaveBeenCalledExactlyOnceWith('fixture-stream-session-token')
+  })
+
+  it('does not report non-401 responses through the shared session invalidation hook', async () => {
+    const invalidate = vi.fn()
+    setSessionInvalidationHandler(invalidate)
+    const { reportSessionUnauthorized } = await import('../httpClient.js')
+
+    reportSessionUnauthorized('fixture-session-token', 403)
+    reportSessionUnauthorized('fixture-session-token', 500)
+
+    expect(invalidate).not.toHaveBeenCalled()
   })
 })
 

@@ -7,6 +7,8 @@ const mockRequestJson = vi.fn()
 
 vi.mock('../src/httpClient.js', () => ({
   requestJson: (...args: unknown[]) => mockRequestJson(...args),
+  assertSessionRequestAllowed: vi.fn(),
+  reportSessionUnauthorized: vi.fn(),
   ApiError: class ApiError extends Error {
     status: number
     bodyText: string

@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   createMainWindowCoordinator,
   createRetryableInitializer,
+  registerQuitDrain,
+  retryPendingExternalLogoutAfterQuitCancellation,
 } from '../mainWindowCoordinator.js'
 
 type TestWindow = {
@@ -106,5 +108,344 @@ describe('retryable initializer', () => {
     await expect(initializer.ensureInitialized()).resolves.toBeUndefined()
     await expect(initializer.ensureInitialized()).resolves.toBeUndefined()
     expect(initialize).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('quit drain registration', () => {
+  const nextImmediate = () => new Promise<void>(resolve => setImmediate(resolve))
+
+  it('reports retry callback errors and does not notify when no logout was applied', async () => {
+    const cancelQuitPreparation = vi.fn()
+    const onApplied = vi.fn()
+    const onFailure = vi.fn()
+    retryPendingExternalLogoutAfterQuitCancellation(
+      cancelQuitPreparation,
+      async () => false,
+      onApplied,
+      onFailure
+    )
+    await nextImmediate()
+
+    expect(cancelQuitPreparation).toHaveBeenCalledOnce()
+    expect(onApplied).not.toHaveBeenCalled()
+    expect(onFailure).not.toHaveBeenCalled()
+
+    const callbackError = new Error('renderer notification failed')
+    retryPendingExternalLogoutAfterQuitCancellation(
+      cancelQuitPreparation,
+      async () => true,
+      () => {
+        throw callbackError
+      },
+      onFailure
+    )
+    await nextImmediate()
+
+    expect(onFailure).toHaveBeenCalledWith(callbackError)
+  })
+
+  function createAppHarness() {
+    const listeners = new Map<string, (...args: any[]) => void>()
+    const app = {
+      on: vi.fn((event: string, listener: (...args: any[]) => void) => {
+        listeners.set(event, listener)
+      }),
+      quit: vi.fn(),
+    }
+    return {
+      app,
+      emit: (event: string, ...args: any[]) => listeners.get(event)?.(...args),
+    }
+  }
+
+  it('retries quit after the before-quit event has returned', async () => {
+    let beforeQuitListener: ((event: { preventDefault: () => void }) => void) | null = null
+    const quitEvent = { preventDefault: vi.fn() }
+    const app = {
+      on: vi.fn((event: string, listener: typeof beforeQuitListener) => {
+        if (event === 'before-quit') beforeQuitListener = listener
+      }),
+      quit: vi.fn(() => beforeQuitListener?.({ preventDefault: vi.fn() })),
+    }
+    const prepareForQuit = vi.fn(async () => undefined)
+    registerQuitDrain(
+      app as unknown as Parameters<typeof registerQuitDrain>[0],
+      prepareForQuit,
+      vi.fn()
+    )
+
+    beforeQuitListener?.(quitEvent)
+    expect(quitEvent.preventDefault).toHaveBeenCalledOnce()
+    await Promise.resolve()
+    expect(app.quit).not.toHaveBeenCalled()
+
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(app.quit).toHaveBeenCalledOnce()
+    expect(prepareForQuit).toHaveBeenCalledOnce()
+  })
+
+  it('reports preparation rejection and resumes quit', async () => {
+    const { app, emit } = createAppHarness()
+    const failure = new Error('storage drain failed')
+    const prepareForQuit = vi.fn<() => Promise<void>>().mockRejectedValue(failure)
+    const reportPreparationFailure = vi.fn()
+    registerQuitDrain(
+      app as unknown as Parameters<typeof registerQuitDrain>[0],
+      prepareForQuit,
+      vi.fn(),
+      reportPreparationFailure
+    )
+
+    const firstAttempt = { preventDefault: vi.fn() }
+    emit('before-quit', firstAttempt)
+    expect(firstAttempt.preventDefault).toHaveBeenCalledOnce()
+    await Promise.resolve()
+    await nextImmediate()
+
+    expect(reportPreparationFailure).toHaveBeenCalledWith(failure)
+    expect(app.quit).toHaveBeenCalledOnce()
+  })
+
+  it('coalesces repeated before-quit events while preparation is pending', async () => {
+    const { app, emit } = createAppHarness()
+    const preparation = deferred()
+    const prepareForQuit = vi.fn(() => preparation.promise)
+    registerQuitDrain(
+      app as unknown as Parameters<typeof registerQuitDrain>[0],
+      prepareForQuit,
+      vi.fn()
+    )
+    const first = { preventDefault: vi.fn() }
+    const second = { preventDefault: vi.fn() }
+
+    emit('before-quit', first)
+    emit('before-quit', second)
+
+    expect(first.preventDefault).toHaveBeenCalledOnce()
+    expect(second.preventDefault).toHaveBeenCalledOnce()
+    expect(prepareForQuit).toHaveBeenCalledOnce()
+
+    preparation.resolve()
+    await Promise.resolve()
+    await nextImmediate()
+
+    expect(app.quit).toHaveBeenCalledOnce()
+  })
+
+  it('reopens quit preparation after a page cancels the resumed quit', async () => {
+    const { app, emit } = createAppHarness()
+    const prepareForQuit = vi.fn(async () => undefined)
+    const cancelQuitPreparation = vi.fn()
+    registerQuitDrain(
+      app as unknown as Parameters<typeof registerQuitDrain>[0],
+      prepareForQuit,
+      cancelQuitPreparation
+    )
+
+    const firstAttempt = { preventDefault: vi.fn() }
+    emit('before-quit', firstAttempt)
+    expect(firstAttempt.preventDefault).toHaveBeenCalledOnce()
+    await Promise.resolve()
+    await nextImmediate()
+    expect(app.quit).toHaveBeenCalledOnce()
+
+    const resumedAttempt = { preventDefault: vi.fn() }
+    emit('before-quit', resumedAttempt)
+    expect(resumedAttempt.preventDefault).not.toHaveBeenCalled()
+
+    let willPreventUnload: ((event: { defaultPrevented: boolean }) => void) | undefined
+    emit(
+      'browser-window-created',
+      {},
+      {
+        isDestroyed: () => false,
+        webContents: {
+          on: vi.fn((_event: string, listener: typeof willPreventUnload) => {
+            willPreventUnload = listener
+          }),
+        },
+      }
+    )
+    willPreventUnload?.({ defaultPrevented: false })
+    await nextImmediate()
+
+    expect(cancelQuitPreparation).toHaveBeenCalledOnce()
+
+    const retryAttempt = { preventDefault: vi.fn() }
+    emit('before-quit', retryAttempt)
+    expect(retryAttempt.preventDefault).toHaveBeenCalledOnce()
+    await Promise.resolve()
+    await nextImmediate()
+    expect(prepareForQuit).toHaveBeenCalledTimes(2)
+  })
+
+  it('waits for preparation on a fresh attempt after a page cancels quit', async () => {
+    const { app, emit } = createAppHarness()
+    const firstPreparation = deferred()
+    const retryPreparation = deferred()
+    const prepareForQuit = vi
+      .fn<() => Promise<void>>()
+      .mockImplementationOnce(() => firstPreparation.promise)
+      .mockImplementationOnce(() => retryPreparation.promise)
+    const cancelQuitPreparation = vi.fn()
+    registerQuitDrain(
+      app as unknown as Parameters<typeof registerQuitDrain>[0],
+      prepareForQuit,
+      cancelQuitPreparation
+    )
+
+    emit('before-quit', { preventDefault: vi.fn() })
+    await Promise.resolve()
+    await nextImmediate()
+    expect(app.quit).not.toHaveBeenCalled()
+    firstPreparation.resolve()
+    await Promise.resolve()
+    await nextImmediate()
+    expect(app.quit).toHaveBeenCalledOnce()
+
+    let willPreventUnload: ((event: { defaultPrevented: boolean }) => void) | undefined
+    emit(
+      'browser-window-created',
+      {},
+      {
+        isDestroyed: () => false,
+        webContents: {
+          on: vi.fn((_event: string, listener: typeof willPreventUnload) => {
+            willPreventUnload = listener
+          }),
+        },
+      }
+    )
+    willPreventUnload?.({ defaultPrevented: false })
+    await nextImmediate()
+    expect(cancelQuitPreparation).toHaveBeenCalledOnce()
+
+    emit('before-quit', { preventDefault: vi.fn() })
+    await Promise.resolve()
+    expect(prepareForQuit).toHaveBeenCalledTimes(2)
+    await nextImmediate()
+    expect(app.quit).toHaveBeenCalledOnce()
+
+    retryPreparation.resolve()
+    await Promise.resolve()
+    await nextImmediate()
+    expect(app.quit).toHaveBeenCalledTimes(2)
+  })
+
+  it('reopens quit preparation when a listener prevents resumed before-quit', async () => {
+    const { app, emit } = createAppHarness()
+    const prepareForQuit = vi.fn(async () => undefined)
+    const cancelQuitPreparation = vi.fn()
+    registerQuitDrain(
+      app as unknown as Parameters<typeof registerQuitDrain>[0],
+      prepareForQuit,
+      cancelQuitPreparation
+    )
+
+    emit('before-quit', { preventDefault: vi.fn() })
+    await Promise.resolve()
+    await nextImmediate()
+    expect(app.quit).toHaveBeenCalledOnce()
+
+    const resumedQuit = { defaultPrevented: false, preventDefault: vi.fn() }
+    emit('before-quit', resumedQuit)
+    resumedQuit.defaultPrevented = true
+    await nextImmediate()
+    expect(cancelQuitPreparation).toHaveBeenCalledOnce()
+
+    const retry = { preventDefault: vi.fn() }
+    emit('before-quit', retry)
+    expect(retry.preventDefault).toHaveBeenCalledOnce()
+    await Promise.resolve()
+    await nextImmediate()
+    expect(prepareForQuit).toHaveBeenCalledTimes(2)
+  })
+
+  it('reopens quit preparation when a listener prevents will-quit', async () => {
+    const { app, emit } = createAppHarness()
+    const prepareForQuit = vi.fn(async () => undefined)
+    const cancelQuitPreparation = vi.fn()
+    registerQuitDrain(
+      app as unknown as Parameters<typeof registerQuitDrain>[0],
+      prepareForQuit,
+      cancelQuitPreparation
+    )
+
+    emit('before-quit', { preventDefault: vi.fn() })
+    await Promise.resolve()
+    await nextImmediate()
+    expect(app.quit).toHaveBeenCalledOnce()
+
+    const resumedQuit = { defaultPrevented: false }
+    emit('will-quit', resumedQuit)
+    resumedQuit.defaultPrevented = true
+    await nextImmediate()
+    expect(cancelQuitPreparation).toHaveBeenCalledOnce()
+
+    const retry = { preventDefault: vi.fn() }
+    emit('before-quit', retry)
+    expect(retry.preventDefault).toHaveBeenCalledOnce()
+    await Promise.resolve()
+    await nextImmediate()
+    expect(prepareForQuit).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps admission closed when resumed before-quit and will-quit are not vetoed', async () => {
+    const { app, emit } = createAppHarness()
+    const prepareForQuit = vi.fn(async () => undefined)
+    const cancelQuitPreparation = vi.fn()
+    registerQuitDrain(
+      app as unknown as Parameters<typeof registerQuitDrain>[0],
+      prepareForQuit,
+      cancelQuitPreparation
+    )
+
+    emit('before-quit', { preventDefault: vi.fn() })
+    await Promise.resolve()
+    await nextImmediate()
+    expect(app.quit).toHaveBeenCalledOnce()
+
+    emit('before-quit', { defaultPrevented: false, preventDefault: vi.fn() })
+    await nextImmediate()
+    emit('will-quit', { defaultPrevented: false })
+    await nextImmediate()
+
+    expect(cancelQuitPreparation).not.toHaveBeenCalled()
+    expect(prepareForQuit).toHaveBeenCalledOnce()
+  })
+
+  it('keeps admission closed when will-prevent-unload allows the page to unload', async () => {
+    const { app, emit } = createAppHarness()
+    const prepareForQuit = vi.fn(async () => undefined)
+    const cancelQuitPreparation = vi.fn()
+    registerQuitDrain(
+      app as unknown as Parameters<typeof registerQuitDrain>[0],
+      prepareForQuit,
+      cancelQuitPreparation
+    )
+
+    emit('before-quit', { preventDefault: vi.fn() })
+    await Promise.resolve()
+    await nextImmediate()
+    expect(app.quit).toHaveBeenCalledOnce()
+
+    let willPreventUnload: ((event: { defaultPrevented: boolean }) => void) | undefined
+    emit(
+      'browser-window-created',
+      {},
+      {
+        isDestroyed: () => false,
+        webContents: {
+          on: vi.fn((_event: string, listener: typeof willPreventUnload) => {
+            willPreventUnload = listener
+          }),
+        },
+      }
+    )
+    willPreventUnload?.({ defaultPrevented: true })
+    await nextImmediate()
+
+    expect(cancelQuitPreparation).not.toHaveBeenCalled()
+    expect(prepareForQuit).toHaveBeenCalledOnce()
   })
 })

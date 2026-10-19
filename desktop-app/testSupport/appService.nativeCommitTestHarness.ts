@@ -26,6 +26,7 @@ export type NativeCommitTestService = {
   authClient: { googleLogin: ReturnType<typeof vi.fn> }
   tokenStore: {
     clearSessionToken: ReturnType<typeof vi.fn>
+    clearSessionTokenStrictly: ReturnType<typeof vi.fn>
     getSessionToken: ReturnType<typeof vi.fn>
     setSessionToken: ReturnType<typeof vi.fn>
   }
@@ -36,6 +37,7 @@ export type NativeCommitTestService = {
   logout: () => Promise<number>
   selectRuntimeConfig: (optionId: string) => Promise<unknown>
   getSessionState: () => Promise<unknown>
+  getSessionGeneration: () => number
   getCachedUserId: () => string | null
   listGfsUploadSessions: () => Promise<unknown>
 }
@@ -67,10 +69,17 @@ export async function createNativeCommitTestHarness() {
       setName: vi.fn(),
       setPath: vi.fn(),
     },
+    safeStorage: {
+      isEncryptionAvailable: vi.fn(() => false),
+      getSelectedStorageBackend: vi.fn(() => 'basic_text'),
+      encryptString: vi.fn((value: string) => Buffer.from(value)),
+      decryptString: vi.fn((value: Uint8Array) => Buffer.from(value).toString()),
+    },
   }))
 
-  const [{ AppService }, runtimeConfig] = await Promise.all([
+  const [{ AppService }, { TokenStore }, runtimeConfig] = await Promise.all([
     import('../src/appService.js'),
+    import('../src/tokenStore.js'),
     import('../src/config.js'),
   ])
   const restA = 'https://api-a.example.test'
@@ -95,12 +104,17 @@ export async function createNativeCommitTestHarness() {
   await runtimeConfig.selectDesktopRuntimeConfigOption(optionA.id)
 
   const service = new AppService() as unknown as NativeCommitTestService
-  service.tokenStore = {
-    clearSessionToken: vi.fn().mockResolvedValue(undefined),
-    getSessionToken: vi.fn().mockResolvedValue(null),
-    setSessionToken: vi.fn().mockResolvedValue(undefined),
-  } as never
-  return { service, runtimeConfig, restA, restB, optionA, optionB }
+  const tokenStore = new TokenStore({ isolatedUserDataPath: userDataDir })
+  const clearSessionToken = tokenStore.clearSessionToken.bind(tokenStore)
+  const clearSessionTokenStrictly = tokenStore.clearSessionTokenStrictly.bind(tokenStore)
+  const getSessionToken = tokenStore.getSessionToken.bind(tokenStore)
+  const setSessionToken = tokenStore.setSessionToken.bind(tokenStore)
+  vi.spyOn(tokenStore, 'clearSessionToken').mockImplementation(clearSessionToken)
+  vi.spyOn(tokenStore, 'clearSessionTokenStrictly').mockImplementation(clearSessionTokenStrictly)
+  vi.spyOn(tokenStore, 'getSessionToken').mockImplementation(getSessionToken)
+  vi.spyOn(tokenStore, 'setSessionToken').mockImplementation(setSessionToken)
+  service.tokenStore = tokenStore as never
+  return { service, runtimeConfig, restA, restB, optionA, optionB, userDataDir }
 }
 
 export async function cleanupNativeCommitTestHarness(): Promise<void> {

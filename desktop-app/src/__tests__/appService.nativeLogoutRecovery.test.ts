@@ -4,24 +4,31 @@ import {
   createNativeCommitTestHarness,
 } from '../../testSupport/appService.nativeCommitTestHarness.js'
 import { testLoginResult } from '../../testSupport/authTestFixtures.js'
+import { readPendingExternalLogoutIntent } from '../pendingExternalLogout.js'
 
 afterEach(cleanupNativeCommitTestHarness)
 
 describe('AppService logout recovery ownership', () => {
-  it('keeps the current session when token removal fails on the same runtime boundary', async () => {
-    const { service } = await createNativeCommitTestHarness()
+  it('fails closed and fences restart restore when strict token removal fails', async () => {
+    const { service, runtimeConfig, userDataDir } = await createNativeCommitTestHarness()
+    const getMe = vi.fn()
     service.authClient = {
       googleLogin: vi.fn().mockResolvedValue(testLoginResult()),
+      getMe,
     } as never
     await service.googleLogin('initial-login')
-    service.tokenStore.clearSessionToken = vi
+    service.tokenStore.clearSessionTokenStrictly = vi
       .fn()
       .mockRejectedValue(new Error('keychain unavailable'))
 
-    await expect(service.logout()).rejects.toThrow('keychain unavailable')
+    await expect(service.logout()).resolves.toBeTypeOf('number')
 
-    expect(service.getCachedUserId()).toBe('user-a')
-    expect(service.sessionToken).toBe('synthetic-session-a')
-    await expect(service.listGfsUploadSessions()).resolves.toEqual([])
+    expect(service.getCachedUserId()).toBeNull()
+    expect(service.sessionToken).toBeNull()
+    expect(readPendingExternalLogoutIntent(userDataDir, runtimeConfig.getActiveEnvKey())).toEqual({
+      intent: 'logout-pending',
+    })
+    await expect(service.getSessionState()).resolves.toEqual({ authenticated: false, me: null })
+    expect(getMe).not.toHaveBeenCalled()
   })
 })

@@ -7,6 +7,7 @@ import { buildGfsFileReference, classifyBytes } from '@clerum/gfs-interaction-po
 import { AppService } from '../appService.js'
 import { __setChatStoreBaseDirForTests } from '../chatStoreBinding.js'
 import { ApiError } from '../httpClient.js'
+import { TokenStore } from '../tokenStore.js'
 import type { HostMessageAttachment } from '../types.js'
 
 const { declaredHeaderPngOfSize, jpegOfSize } = createRequire(import.meta.url)(
@@ -18,6 +19,11 @@ const { declaredHeaderPngOfSize, jpegOfSize } = createRequire(import.meta.url)(
 
 const MIB = 1024 * 1024
 const MESSAGE_SCOPES = ['host:message:invoke', 'host:task:read', 'host:wake:write'] as const
+const credentialFixture = vi.hoisted(() => ({ directory: '' }))
+vi.mock('electron', () => ({
+  app: { isReady: () => true, getPath: () => credentialFixture.directory },
+  safeStorage: { isEncryptionAvailable: () => false },
+}))
 
 function imageAttachment(
   id: string,
@@ -41,6 +47,7 @@ describe('AppService.invokeHostMessage', () => {
 
   beforeEach(async () => {
     chatStoreBaseDir = await fs.mkdtemp(path.join(os.tmpdir(), 'clerum-app-service-rpc-'))
+    credentialFixture.directory = chatStoreBaseDir
     __setChatStoreBaseDirForTests(chatStoreBaseDir)
   })
 
@@ -49,8 +56,15 @@ describe('AppService.invokeHostMessage', () => {
     await fs.rm(chatStoreBaseDir, { recursive: true, force: true })
   })
 
+  function createService(): AppService {
+    return new AppService({
+      tokenStore: new TokenStore({ isolatedUserDataPath: chatStoreBaseDir }),
+      getUserDataDirectory: () => chatStoreBaseDir,
+    })
+  }
+
   it('forces desktop host messages onto the authenticated rpc envelope', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'session-token'
     service.me = {
       id: '00000000-0000-4000-8000-000000000001',
@@ -110,7 +124,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('forwards a 5 MiB JPEG without letting the payload choose identity, host, or scopes', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'session-token'
     service.me = {
       id: '00000000-0000-4000-8000-000000000001',
@@ -167,7 +181,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('forwards a 10 MiB PNG + 5 MiB JPEG on the same authenticated envelope', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'session-token'
     service.me = {
       id: '00000000-0000-4000-8000-000000000001',
@@ -218,7 +232,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('rejects malformed attachments before issuing an RPC token', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'test-token-session'
     service.me = {
       id: '00000000-0000-4000-8000-000000000001',
@@ -277,7 +291,7 @@ describe('AppService.invokeHostMessage', () => {
     }
 
     function serviceWithRpc() {
-      const service = new AppService() as any
+      const service = createService() as any
       service.sessionToken = 'session-token'
       service.me = {
         id: '00000000-0000-4000-8000-000000000001',
@@ -342,7 +356,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('switches to a matching directory team before issuing RPC tokens for teamless sessions', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.desktopGfsUploadStatePath = vi
       .fn()
       .mockResolvedValue(path.join(chatStoreBaseDir, 'gfs-upload-state.json'))
@@ -391,9 +405,6 @@ describe('AppService.invokeHostMessage', () => {
         team: { id: 'team-1', name: 'Team One', role: 'member' },
       }),
     }
-    service.tokenStore = {
-      setSessionToken: vi.fn(),
-    }
     service.rpcTokenManager = {
       getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-test-token' }),
       clear: vi.fn(),
@@ -415,7 +426,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('does not fence GFS uploads during a transient cross-team operation hop', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.desktopGfsUploadStatePath = vi
       .fn()
       .mockResolvedValue(path.join(chatStoreBaseDir, 'gfs-upload-state.json'))
@@ -459,7 +470,6 @@ describe('AppService.invokeHostMessage', () => {
         team: { id: teamId, name: teamId === 'team-b' ? 'Team B' : 'Team A', role: 'member' },
       })),
     }
-    service.tokenStore = { setSessionToken: vi.fn() }
 
     await expect(
       service.runWithTeamContext('team-b', async (token: string) => token)
@@ -473,7 +483,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('blocks new GFS dispatches while a transient team token is installed', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'team-a-token'
     service.me = {
       id: 'user-1',
@@ -501,7 +511,6 @@ describe('AppService.invokeHostMessage', () => {
         team: { id: teamId, name: teamId, role: 'member' },
       })),
     }
-    service.tokenStore = { setSessionToken: vi.fn() }
 
     await expect(
       service.runWithTeamContext('team-b', async () => {
@@ -518,7 +527,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('keeps existing GFS controls usable through the real team-hop lifecycle', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     const statePath = path.join(chatStoreBaseDir, 'gfs-upload-state.json')
     const uploadId = '92929292-9292-4292-8292-929292929292'
     const session = {
@@ -596,7 +605,6 @@ describe('AppService.invokeHostMessage', () => {
         team: { id: teamId, name: teamId, role: 'member' },
       })),
     }
-    service.tokenStore = { setSessionToken: vi.fn() }
 
     await service.runWithTeamContext('team-b', async () => {
       await expect(service.getGfsUploadSnapshot(uploadId, 'main')).resolves.toMatchObject({
@@ -622,7 +630,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('fences the old GFS scope if a replacement team token cannot be refreshed', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'team-a-token'
     service.me = {
       id: 'user-1',
@@ -646,10 +654,9 @@ describe('AppService.invokeHostMessage', () => {
       }),
       getMe: vi.fn().mockRejectedValue(new Error('replacement session rejected')),
     }
-    service.tokenStore = { setSessionToken: vi.fn(), clearSessionToken: vi.fn() }
     service.rpcTokenManager = { clear: vi.fn() }
     service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn().mockResolvedValue(undefined)
-    service.clearAuthenticatedSessionState = vi.fn()
+    vi.spyOn(service, 'clearAuthenticatedSessionState')
 
     await expect(service.switchSessionToTeam('team-b', 'team-a-token')).rejects.toThrow(
       'replacement session rejected'
@@ -662,10 +669,14 @@ describe('AppService.invokeHostMessage', () => {
       baseUrl: 'https://external.example',
     })
     expect(service.clearAuthenticatedSessionState).toHaveBeenCalledTimes(1)
+    const restarted = createService() as any
+    restarted.authClient.getMe = vi.fn()
+    await expect(restarted.initialize()).resolves.toEqual({ authenticated: false, me: null })
+    expect(restarted.authClient.getMe).not.toHaveBeenCalled()
   })
 
   it('clears and revokes a replacement token even when GFS fence persistence fails', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'team-a-token'
     service.me = {
       id: 'user-1',
@@ -689,28 +700,25 @@ describe('AppService.invokeHostMessage', () => {
       }),
       getMe: vi.fn().mockRejectedValue(new Error('replacement session rejected')),
     }
-    service.tokenStore = {
-      setSessionToken: vi.fn(),
-      clearSessionToken: vi.fn(),
-    }
     service.rpcTokenManager = { clear: vi.fn() }
     service.suspendDesktopGfsUploadsForAuthBoundary = vi
       .fn()
       .mockRejectedValue(new Error('state file is read-only'))
-    service.clearAuthenticatedSessionState = vi.fn()
+    vi.spyOn(service, 'clearAuthenticatedSessionState')
 
     await expect(service.switchSessionToTeam('team-b', 'team-a-token')).rejects.toThrow(
       'replacement session rejected'
     )
 
     expect(service.clearAuthenticatedSessionState).toHaveBeenCalledTimes(1)
-    expect(service.tokenStore.clearSessionToken).toHaveBeenCalledWith(expect.any(String), {
-      legacyEnvKeys: expect.any(Array),
-    })
+    const restarted = createService() as any
+    restarted.authClient.getMe = vi.fn()
+    await expect(restarted.initialize()).resolves.toEqual({ authenticated: false, me: null })
+    expect(restarted.authClient.getMe).not.toHaveBeenCalled()
   })
 
   it('fences GFS uploads only after an explicit switchTeam succeeds', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'team-a-token'
     service.me = {
       id: 'user-1',
@@ -735,7 +743,6 @@ describe('AppService.invokeHostMessage', () => {
       }),
       getMe: vi.fn().mockResolvedValue({ ...service.me, teamId: 'team-b', teamName: 'Team B' }),
     }
-    service.tokenStore = { setSessionToken: vi.fn() }
     service.rpcTokenManager = { clear: vi.fn() }
     service.suspendDesktopGfsUploadsForAuthBoundary = vi.fn(async () => {
       await expect(
@@ -763,7 +770,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('clears the replacement team session when explicit GFS fence persistence fails', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'team-a-token'
     service.me = {
       id: 'user-1',
@@ -788,10 +795,6 @@ describe('AppService.invokeHostMessage', () => {
       }),
       getMe: vi.fn().mockResolvedValue({ ...service.me, teamId: 'team-b', teamName: 'Team B' }),
     }
-    service.tokenStore = {
-      setSessionToken: vi.fn(),
-      clearSessionToken: vi.fn(),
-    }
     service.rpcTokenManager = { clear: vi.fn() }
     service.suspendDesktopGfsUploadsForAuthBoundary = vi
       .fn()
@@ -806,9 +809,10 @@ describe('AppService.invokeHostMessage', () => {
     await expect(service.switchTeam('team-b')).rejects.toThrow('state file is read-only')
 
     expect(service.clearAuthenticatedSessionState).toHaveBeenCalledTimes(1)
-    expect(service.tokenStore.clearSessionToken).toHaveBeenCalledWith(expect.any(String), {
-      legacyEnvKeys: expect.any(Array),
-    })
+    const restarted = createService() as any
+    restarted.authClient.getMe = vi.fn()
+    await expect(restarted.initialize()).resolves.toEqual({ authenticated: false, me: null })
+    expect(restarted.authClient.getMe).not.toHaveBeenCalled()
     expect(depthDuringCleanup).toBeGreaterThan(0)
     expect(service.sessionToken).toBeNull()
     expect(service.me).toBeNull()
@@ -818,7 +822,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('does not fence GFS uploads when an explicit switchTeam is rejected', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'team-a-token'
     service.me = {
       id: 'user-1',
@@ -845,7 +849,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('uses the teamless session when a directly granted agent needs an RPC token', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'teamless-token'
     service.me = {
       id: 'user-1',
@@ -895,7 +899,7 @@ describe('AppService.invokeHostMessage', () => {
   })
 
   it('uses the access catalog response without probing host status', async () => {
-    const service = new AppService() as any
+    const service = createService() as any
     service.sessionToken = 'session-token'
     service.me = {
       id: '00000000-0000-4000-8000-000000000001',

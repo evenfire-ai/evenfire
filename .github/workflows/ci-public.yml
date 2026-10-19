@@ -177,7 +177,7 @@ jobs:
 
       - name: Build Profile UI image builder stage
         if: matrix.service == 'profile-ui'
-        run: timeout 900s docker build --target builder -f profile-ui/Dockerfile .
+        run: timeout 900s docker build --build-arg NODE_IMAGE=mirror.gcr.io/library/node:24-alpine --target builder -f profile-ui/Dockerfile .
 
       - name: Install Playwright Chromium
         if: matrix.service == 'desktop-app'
@@ -200,6 +200,7 @@ jobs:
         if: matrix.service == 'desktop-app'
         run: |
           node scripts/tests/run-node-test-files.mjs \
+            scripts/tests/ci-public-node-mirror.test.mjs \
             scripts/tests/subscription-image-coordinator.test.mjs \
             scripts/tests/subscription-image-coordinator-regressions.test.mjs \
             scripts/tests/subscription-image-runner.test.mjs \
@@ -308,6 +309,31 @@ jobs:
         if: matrix.service != 'mcp-servers' && matrix.service != 'packages/desktop-app-links' && matrix.service != 'packages/gfs-interaction-policy' && matrix.service != 'packages/network-policy-core' && matrix.service != 'packages/jwt-key-policy' && matrix.service != 'packages/llm-provider-attempt-contract' && matrix.service != 'packages/grok-provider-attempt-contract' && matrix.service != 'packages/llm-providers' && matrix.service != 'packages/codex-catalog-projection'
         working-directory: ${{ matrix.service }}
         run: npx tsc --noEmit
+
+  desktop-app-native-quit-drain:
+    name: Desktop native quit-drain (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: desktop-app/package-lock.json
+
+      - name: Install Desktop dependencies
+        working-directory: desktop-app
+        run: npm ci
+
+      - name: Verify Electron runtime
+        working-directory: desktop-app
+        run: npm run verify:electron
+
+      - name: Run native quit-drain fixture
+        working-directory: desktop-app
+        run: npm run test:native:quit-drain
 
   # ─── real-Postgres integration suites ─────────────────────────────────────
   # Runs EVERY *.realPostgres.integration suite against a real Postgres 16: the
