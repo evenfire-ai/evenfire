@@ -348,7 +348,7 @@ export function GfsResourceMenu({
   const hasShareSubmenu = shareMenuChildren.length > 0
   const shareGroup = hasShareSubmenu
     ? [
-        menuAction('share', 'Share', <IconShare />, () => setShareOpen(true), {
+        menuAction('share', 'Share', <IconShare />, () => setShareOpen(value => !value), {
           submenu: true,
         }),
       ].filter(isMenuAction)

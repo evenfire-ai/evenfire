@@ -121,6 +121,35 @@ describe('GfsResourceMenu', () => {
     expect(copyRoute).not.toHaveBeenCalled()
   })
 
+  it('toggles the Share submenu closed and returns focus after Escape', () => {
+    const actions = buildGfsResourceActions({
+      kind: 'file',
+      uri: 'gfs://main/0123456789abcdef0123456789abcdef',
+      handlers: {
+        share: vi.fn(),
+        'copy-link': vi.fn(),
+        'copy-route': vi.fn(),
+      },
+      canShare: true,
+    })
+    render(<GfsResourceMenu actions={actions} resourceName="report.txt" />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
+    const share = screen.getByRole('menuitem', { name: 'Share' })
+    fireEvent.click(share)
+    expect(screen.getByRole('menu', { name: 'Share options for report.txt' })).toBeTruthy()
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('menu', { name: 'Share options for report.txt' })).toBeNull()
+    expect(document.activeElement).toBe(share)
+
+    fireEvent.click(share)
+    expect(screen.getByRole('menu', { name: 'Share options for report.txt' })).toBeTruthy()
+    fireEvent.click(share)
+    expect(screen.queryByRole('menu', { name: 'Share options for report.txt' })).toBeNull()
+    expect(share.getAttribute('aria-expanded')).toBe('false')
+  })
+
   it('dispatches replacement selection and the selected file through the shared action', () => {
     const replace = vi.fn((file?: File, context?: { requestFileSelection?: () => void }) => {
       if (!file) context?.requestFileSelection?.()
