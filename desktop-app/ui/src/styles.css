@@ -15863,6 +15863,12 @@ pre {
   overflow: hidden;
 }
 
+.da-gfs-preview-unavailable-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--space-1) var(--space-2);
+}
+
 .da-gfs-image-preview-dialog__body,
 .da-gfs-video-preview-dialog__body {
   min-width: 0;

@@ -195,8 +195,9 @@ export function FilePreviewPage({
     canCopyContent: copyContentReady,
     refreshing,
   })
+  const menuResourceName = denied || unavailable || accessRevoked ? 'unavailable file' : fileName
   const fileActionsMenu = (
-    <GfsResourceMenu actions={getGfsMenuActions(resourceActions)} resourceName={fileName} />
+    <GfsResourceMenu actions={getGfsMenuActions(resourceActions)} resourceName={menuResourceName} />
   )
 
   const revalidateAccess = useCallback(async () => {
@@ -240,7 +241,10 @@ export function FilePreviewPage({
         {previewResourceActions.dialogs}
         <div className="da-gfs-preview-content">
           {denied || unavailable || accessRevoked ? (
-            <EmptyState title="File unavailable" body="This item is no longer available." />
+            <>
+              <div className="da-gfs-preview-unavailable-actions">{fileActionsMenu}</div>
+              <EmptyState title="File unavailable" body="This item is no longer available." />
+            </>
           ) : (
             <>
               {fileKind === 'image' ? (

@@ -616,6 +616,35 @@ describe('FilePreviewPage', () => {
     titlebarLeadingRoot.remove()
   })
 
+  it('keeps the canonical file ID action available without exposing an unavailable filename', () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue(controller())
+
+    render(
+      <FilePreviewPage
+        gfsUri={uri}
+        fileName="secret.png"
+        fileKind="image"
+        byteLength={1}
+        unavailable
+      />
+    )
+
+    expect(screen.getByRole('heading', { name: 'File unavailable', level: 3 })).toBeTruthy()
+    expect(screen.queryByText('secret.png')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Options for unavailable file' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Options for unavailable file' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy file ID' }))
+
+    expect(writeText).toHaveBeenCalledWith(uri)
+  })
+
   // R-4 (spec 18 §3.B.5): the preview tab must NOT close when access is revoked;
   // stale bytes are purged and replaced by a non-sensitive unavailable shell.
   it('purges the open preview when authority reports a revoked resource', async () => {
