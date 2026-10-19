@@ -315,10 +315,7 @@ export function createMembersRouter(): Router {
       } catch (error) {
         const message = error instanceof Error ? error.message : ''
         if (error instanceof ControlApiError && error.status === 400) {
-          const code =
-            error.body && typeof error.body === 'object' && 'error' in error.body
-              ? String((error.body as { error: unknown }).error)
-              : ''
+          const code = error.code ?? ''
           if (code === 'reason_required' || code === 'idempotency_key_required') {
             res.status(400).json(error.body)
             return

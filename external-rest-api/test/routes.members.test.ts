@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import { once } from 'node:events'
 import request from 'supertest'
+import { ControlApiError } from '../src/controlApiClient.js'
 import { createMembersRouter } from '../src/routes/members.js'
 
 const authTokenMock = vi.hoisted(() => ({
@@ -106,6 +107,45 @@ describe('routes/members', () => {
         correlationId: '11111111-1111-4111-8111-111111111111',
       }
     )
+  })
+
+  it.each(['reason_required', 'idempotency_key_required'])(
+    'forwards the exact Control API retirement code %s',
+    async code => {
+      authTokenMock.verifyToken.mockReturnValueOnce(claims)
+      const body = { error: code, correlationId: 'retirement-correlation' }
+      memberManagementMock.deleteManagedUser.mockRejectedValueOnce(
+        new ControlApiError('Control API rejected retirement', 400, body)
+      )
+
+      await request(makeApp())
+        .delete(`/members/${TARGET_USER_ID}`)
+        .set('authorization', 'Bearer good-token')
+        .set('Idempotency-Key', 'retire-user-2-v1')
+        .set('x-correlation-id', '11111111-1111-4111-8111-111111111111')
+        .send({ reason: 'team access no longer required' })
+        .expect(400, body)
+    }
+  )
+
+  it('does not treat a non-string Control API error as a stable retirement code', async () => {
+    authTokenMock.verifyToken.mockReturnValueOnce(claims)
+    memberManagementMock.deleteManagedUser.mockRejectedValueOnce(
+      new ControlApiError('Control API rejected retirement', 400, {
+        error: ['reason_required'],
+      })
+    )
+    const app = makeApp()
+    app.use((_error, _req, res, _next) => {
+      res.status(500).json({ error: 'internal_error' })
+    })
+
+    await request(app)
+      .delete(`/members/${TARGET_USER_ID}`)
+      .set('authorization', 'Bearer good-token')
+      .set('Idempotency-Key', 'retire-user-2-v1')
+      .send({ reason: 'team access no longer required' })
+      .expect(500, { error: 'internal_error' })
   })
 
   it.each([
