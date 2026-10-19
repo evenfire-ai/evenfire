@@ -3164,7 +3164,8 @@ export function useAgentChatController({
       attachments: ComposerImageAttachment[] = composerImageAttachments,
       files: ReadyComposerFileAttachment[] = readyComposerFiles,
       references: ComposerReferenceAttachment[] = composerReferenceAttachments,
-      preserveComposer = false
+      preserveComposer = false,
+      originWorkspaceTabId?: string | null
     ) => {
       const sendScope = sendScopeGeneration.current
       const sendScopeIdentity = currentAuthScopeRef.current
@@ -3172,7 +3173,8 @@ export function useAgentChatController({
       const originalDraftAgent = selectedAgent
       const originalDraftRevision = getComposerDraftRevision(
         originalDraftChat,
-        originalDraftAgent ?? undefined
+        originalDraftAgent ?? undefined,
+        originWorkspaceTabId
       )
       const originalAttachmentRevision = composerAttachmentRevisionRef.current
       const trimmedContent = content.trim()
@@ -3506,12 +3508,15 @@ export function useAgentChatController({
       const canConsumeComposer = !preserveComposer && sendStillAuthorized()
       const shouldClearOriginDraft =
         canConsumeComposer &&
-        getComposerDraftRevision(originalDraftChat, originalDraftAgent ?? undefined) ===
-          originalDraftRevision
+        getComposerDraftRevision(
+          originalDraftChat,
+          originalDraftAgent ?? undefined,
+          originWorkspaceTabId
+        ) === originalDraftRevision
       const shouldResetAttachments =
         canConsumeComposer && composerAttachmentRevisionRef.current === originalAttachmentRevision
       if (shouldClearOriginDraft) {
-        clearComposerDraft(originalDraftChat, originalDraftAgent ?? undefined)
+        clearComposerDraft(originalDraftChat, originalDraftAgent ?? undefined, originWorkspaceTabId)
       }
       if (shouldResetAttachments) resetComposerAttachments()
       setAgentError(null)
@@ -3954,7 +3959,7 @@ export function useAgentChatController({
   )
 
   const handleSendAgentMessage = useCallback(
-    async (text: string) => {
+    async (text: string, workspaceTabId?: string | null) => {
       // A document still being read is not part of the message yet: sending
       // now would silently leave it out.
       if (composerFilesBlockSend) return
@@ -3962,7 +3967,9 @@ export function useAgentChatController({
         text,
         composerImageAttachments,
         readyComposerFiles,
-        composerReferenceAttachments
+        composerReferenceAttachments,
+        false,
+        workspaceTabId
       )
     },
     [

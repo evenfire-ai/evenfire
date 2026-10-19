@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  claimPendingNewChatDraft,
+  cancelPendingResourceComposerPrefill,
+  claimPendingResourceComposerPrefill,
   clearComposerDraft,
   getComposerDraft,
+  releaseComposerDraftForWorkspaceTab,
   resetComposerDraftStore,
   setComposerDraft,
-  setPendingResourceComposerDraft,
+  setResourceComposerPrefill,
   subscribeComposerDraft,
 } from '../composerDraftStore'
 
@@ -31,26 +33,68 @@ describe('composerDraftStore', () => {
     expect(getComposerDraft(null)).toBe('pending')
   })
 
-  it('moves a pending resource prefill into the first selected agent bucket', () => {
-    setPendingResourceComposerDraft('gfs://main/resource')
+  it('keeps a pending resource prefill visible and claimable only by its destination tab', () => {
+    setResourceComposerPrefill('tab-a', 'gfs://main/resource', null)
 
-    expect(getComposerDraft(null)).toBe('gfs://main/resource')
-    expect(getComposerDraft(null, 'agent-a')).toBe('gfs://main/resource')
-    claimPendingNewChatDraft('agent-a')
+    expect(getComposerDraft(null, undefined, 'tab-a')).toBe('gfs://main/resource')
+    expect(getComposerDraft(null, 'agent-b', 'tab-b')).toBe('')
+    claimPendingResourceComposerPrefill('tab-b', 'agent-b')
+    expect(getComposerDraft(null, 'agent-b', 'tab-b')).toBe('')
 
-    expect(getComposerDraft(null, 'agent-a')).toBe('gfs://main/resource')
-    expect(getComposerDraft(null, 'agent-b')).toBe('')
-    expect(getComposerDraft(null)).toBe('')
+    claimPendingResourceComposerPrefill('tab-a', 'agent-a')
+    expect(getComposerDraft(null, 'agent-a', 'tab-a')).toBe('gfs://main/resource')
+    expect(getComposerDraft(null, 'agent-a', 'tab-b')).toBe('')
   })
 
-  it('preserves an existing agent draft when claiming a pending resource prefill', () => {
+  it('preserves an existing agent draft when a target resource prefill is requested', () => {
     setComposerDraft(null, 'existing draft', 'agent-a')
-    setPendingResourceComposerDraft('gfs://main/resource')
-
-    claimPendingNewChatDraft('agent-a')
+    expect(setResourceComposerPrefill('tab-a', 'gfs://main/resource', 'agent-a')).toBe(false)
 
     expect(getComposerDraft(null, 'agent-a')).toBe('existing draft')
-    expect(getComposerDraft(null)).toBe('')
+    expect(getComposerDraft(null, 'agent-a', 'tab-a')).toBe('existing draft')
+  })
+
+  it('isolates resource drafts for two blank tabs using the same agent', () => {
+    expect(setResourceComposerPrefill('tab-a', 'gfs://main/a', 'agent-a')).toBe(true)
+    expect(setResourceComposerPrefill('tab-b', 'gfs://main/b', 'agent-a')).toBe(true)
+
+    expect(getComposerDraft(null, 'agent-a', 'tab-a')).toBe('gfs://main/a')
+    expect(getComposerDraft(null, 'agent-a', 'tab-b')).toBe('gfs://main/b')
+    setComposerDraft(null, 'edited B', 'agent-a', 'tab-b')
+    expect(getComposerDraft(null, 'agent-a', 'tab-a')).toBe('gfs://main/a')
+    expect(getComposerDraft(null, 'agent-a', 'tab-b')).toBe('edited B')
+    clearComposerDraft(null, 'agent-a', 'tab-b')
+    expect(getComposerDraft(null, 'agent-a', 'tab-a')).toBe('gfs://main/a')
+    expect(getComposerDraft(null, 'agent-a', 'tab-b')).toBe('')
+  })
+
+  it('releases only the closing tab’s claimed and pending resource drafts', () => {
+    setResourceComposerPrefill('tab-a', 'gfs://main/a', 'agent-a')
+    setResourceComposerPrefill('tab-b', 'gfs://main/b', 'agent-a')
+    setResourceComposerPrefill('tab-pending', 'gfs://main/pending', null)
+
+    releaseComposerDraftForWorkspaceTab('tab-a')
+
+    expect(getComposerDraft(null, 'agent-a', 'tab-a')).toBe('')
+    expect(getComposerDraft(null, 'agent-a', 'tab-b')).toBe('gfs://main/b')
+    expect(getComposerDraft(null, undefined, 'tab-pending')).toBe('gfs://main/pending')
+
+    releaseComposerDraftForWorkspaceTab('tab-pending')
+    expect(getComposerDraft(null, undefined, 'tab-pending')).toBe('')
+  })
+
+  it('notifies only the owning tab when a delayed resource prefill is added or canceled', () => {
+    const ownerListener = vi.fn()
+    const otherListener = vi.fn()
+    subscribeComposerDraft(null, ownerListener, 'agent-a', 'tab-a')
+    subscribeComposerDraft(null, otherListener, 'agent-b', 'tab-b')
+
+    setResourceComposerPrefill('tab-a', 'gfs://main/resource', null)
+    expect(ownerListener).toHaveBeenCalledOnce()
+    expect(otherListener).not.toHaveBeenCalled()
+    cancelPendingResourceComposerPrefill('tab-a')
+    expect(ownerListener).toHaveBeenCalledTimes(2)
+    expect(otherListener).not.toHaveBeenCalled()
   })
 
   it('clears (deletes) the draft when set to an empty string', () => {

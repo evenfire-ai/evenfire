@@ -14,6 +14,7 @@ import {
 } from '../workspaceTabs'
 
 const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+const destinationTabId = 'chat-destination'
 
 afterEach(() => resetComposerDraftStore())
 
@@ -28,8 +29,8 @@ describe('prefillNewConversationWithGfsResource', () => {
         path: folder.gfsUri,
       })
     )
-    expect(prefillNewConversationWithGfsResource(tab, 'agent-1')).toBe(true)
-    expect(getComposerDraft(null, 'agent-1')).toBe(folder.gfsUri)
+    expect(prefillNewConversationWithGfsResource(tab, 'agent-1', destinationTabId)).toBe(true)
+    expect(getComposerDraft(null, 'agent-1', destinationTabId)).toBe(folder.gfsUri)
   })
 
   it('does not append or replace the resource when the same new-chat prefill repeats', async () => {
@@ -43,13 +44,13 @@ describe('prefillNewConversationWithGfsResource', () => {
       })
     )
 
-    expect(prefillNewConversationWithGfsResource(tab, 'agent-1')).toBe(true)
-    expect(prefillNewConversationWithGfsResource(tab, 'agent-1')).toBe(false)
-    expect(getComposerDraft(null, 'agent-1')).toBe(folder.gfsUri)
+    expect(prefillNewConversationWithGfsResource(tab, 'agent-1', destinationTabId)).toBe(true)
+    expect(prefillNewConversationWithGfsResource(tab, 'agent-1', destinationTabId)).toBe(false)
+    expect(getComposerDraft(null, 'agent-1', destinationTabId)).toBe(folder.gfsUri)
 
     setComposerDraft(null, 'existing draft', 'agent-1')
-    expect(prefillNewConversationWithGfsResource(tab, 'agent-1')).toBe(false)
-    expect(getComposerDraft(null, 'agent-1')).toBe('existing draft')
+    expect(prefillNewConversationWithGfsResource(tab, 'agent-1', destinationTabId)).toBe(false)
+    expect(getComposerDraft(null, 'agent-1', destinationTabId)).toBe('existing draft')
   })
 
   it('keeps a resource prefill pending until ChatPage selects an agent', async () => {
@@ -63,9 +64,10 @@ describe('prefillNewConversationWithGfsResource', () => {
       })
     )
 
-    expect(prefillNewConversationWithGfsResource(tab, null)).toBe(true)
-    expect(getComposerDraft(null)).toBe(folder.gfsUri)
-    expect(getComposerDraft(null, 'agent-1')).toBe(folder.gfsUri)
+    expect(prefillNewConversationWithGfsResource(tab, null, destinationTabId)).toBe(true)
+    expect(getComposerDraft(null, undefined, destinationTabId)).toBe(folder.gfsUri)
+    expect(getComposerDraft(null, 'agent-1', destinationTabId)).toBe(folder.gfsUri)
+    expect(getComposerDraft(null, 'agent-1', 'different-chat')).toBe('')
   })
 
   it('prefills a new chat from the active file route', async () => {
@@ -78,8 +80,8 @@ describe('prefillNewConversationWithGfsResource', () => {
         path: file.gfsUri,
       })
     )
-    expect(prefillNewConversationWithGfsResource(tab, 'agent-1')).toBe(true)
-    expect(getComposerDraft(null, 'agent-1')).toBe(file.gfsUri)
+    expect(prefillNewConversationWithGfsResource(tab, 'agent-1', destinationTabId)).toBe(true)
+    expect(getComposerDraft(null, 'agent-1', destinationTabId)).toBe(file.gfsUri)
   })
 
   it('prefills a new chat from an active file preview tab', async () => {
@@ -95,8 +97,8 @@ describe('prefillNewConversationWithGfsResource', () => {
         byteLength: 4,
       })
     )
-    expect(prefillNewConversationWithGfsResource(tab, 'agent-1')).toBe(true)
-    expect(getComposerDraft(null, 'agent-1')).toBe(file.gfsUri)
+    expect(prefillNewConversationWithGfsResource(tab, 'agent-1', destinationTabId)).toBe(true)
+    expect(getComposerDraft(null, 'agent-1', destinationTabId)).toBe(file.gfsUri)
   })
 
   it('preserves an existing draft and ignores unrelated or root tabs', () => {
@@ -105,20 +107,23 @@ describe('prefillNewConversationWithGfsResource', () => {
     expect(
       prefillNewConversationWithGfsResource(
         { id: 'files', kind: 'files', title: 'Files', files: { path: uri } },
-        'agent-1'
+        'agent-1',
+        destinationTabId
       )
     ).toBe(false)
     expect(getComposerDraft(null, 'agent-1')).toBe('keep this draft')
     expect(
       prefillNewConversationWithGfsResource(
         { id: 'root', kind: 'files', title: 'Files', files: { path: null } },
-        'agent-1'
+        'agent-1',
+        destinationTabId
       )
     ).toBe(false)
     expect(
       prefillNewConversationWithGfsResource(
         { id: 'chat', kind: 'chat', title: 'Chat', chat: { agentRef: 'agent-1', chatId: null } },
-        'agent-1'
+        'agent-1',
+        destinationTabId
       )
     ).toBe(false)
   })
@@ -132,7 +137,8 @@ describe('prefillNewConversationWithGfsResource', () => {
           title: 'Files',
           files: { path: 'gfs://main/../../private' },
         },
-        null
+        null,
+        destinationTabId
       )
     ).toBe(false)
   })

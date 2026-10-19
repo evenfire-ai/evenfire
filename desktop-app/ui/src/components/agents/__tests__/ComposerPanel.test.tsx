@@ -191,6 +191,7 @@ afterEach(() => {
     agentError: null,
     failedAgentSend: null,
     activeChatId: null,
+    workspaceChatTabId: null,
     activeMessageCount: 0,
     composerFocusRequestId: 0,
   })
@@ -1203,6 +1204,19 @@ describe('ComposerPanel with a pending image after a model switch', () => {
 
     fireEvent.click(screen.getByTestId('send-button'))
     expect(actionsMock.handleSendAgentMessage).toHaveBeenCalledTimes(2)
+  })
+
+  it('sends the exact workspace chat-tab owner with its draft', () => {
+    composerState.workspaceChatTabId = 'chat-owner-a'
+    draftState.value = 'gfs://main/0123456789abcdef0123456789abcdef'
+    render(<ComposerPanel inline />)
+
+    fireEvent.click(screen.getByTestId('send-button'))
+
+    expect(actionsMock.handleSendAgentMessage).toHaveBeenCalledWith(
+      'gfs://main/0123456789abcdef0123456789abcdef',
+      'chat-owner-a'
+    )
   })
 
   it('renders the pending image chip and dispatches removal with its id', () => {

@@ -35,7 +35,7 @@ export interface AgentChatActionsContextValue {
   handleRemoveComposerFileAttachment: (attachmentId: string) => void
   handleAddComposerReferenceAttachments: (attachments: ComposerReferenceAttachment[]) => void
   handleRemoveComposerReferenceAttachment: (attachmentId: string) => void
-  handleSendAgentMessage: (text: string) => Promise<void>
+  handleSendAgentMessage: (text: string, workspaceTabId?: string | null) => Promise<void>
   handleRetryFailedAgentSend: () => Promise<void>
   handleRecoverFailedAgentSend: () => void
   handleDiscardFailedAgentSend: () => void

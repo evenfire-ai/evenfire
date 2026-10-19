@@ -40,6 +40,7 @@ import {
 import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
 import type { ChatLocalMatch } from '@lib/chatLocalSearch'
 import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
+import { releaseComposerDraftForWorkspaceTab } from '@lib/composerDraftStore'
 import { EntityChangeRegistry } from '@lib/entityChangeRegistry'
 import { prefillNewConversationWithGfsResource } from '@lib/gfsConversationPrefill'
 import {
@@ -80,8 +81,8 @@ import {
   closeWorkspaceTab,
   createWorkspaceTabsState,
   cycleWorkspaceTab,
-  newChatTab,
   openAppTab,
+  prepareNewChatWorkspaceTab,
   reconcileWorkspaceChatTab,
   refreshPreviewTab,
   reorderWorkspaceTab,
@@ -570,6 +571,7 @@ export function App() {
       const wasActive = current.activeTabId === id
       const next = closeWorkspaceTab(current, id)
       if (next === current) return
+      releaseComposerDraftForWorkspaceTab(id)
       if (wasActive || activeGfsDeepLinkRef.current?.ownerTabId === id) {
         vm.beginUserNavigationIntent()
       }
@@ -595,7 +597,16 @@ export function App() {
     vm.beginUserNavigationIntent()
     vm.clearAppsPicker()
     const agentRef = vm.selectedAgent
-    prefillNewConversationWithGfsResource(vm.activeWorkspaceTab, agentRef)
+    const sourceTab = vm.activeWorkspaceTab
+    const destination = prepareNewChatWorkspaceTab(
+      workspaceTabsRef.current,
+      nextChatTabId(),
+      agentRef,
+      chatDrawerDivertableRef.current
+    )
+    workspaceTabsRef.current = destination.state
+    setWorkspaceTabs(destination.state)
+    prefillNewConversationWithGfsResource(sourceTab, agentRef, destination.tabId)
     if (chatDrawerDivertableRef.current) {
       // Drawer is a valid surface (app live, panel wide enough): open the blank
       // chat in the drawer without tearing the live embed down.
@@ -603,16 +614,11 @@ export function App() {
       if (agentRef) {
         vm.handleSelectChatAgent(agentRef, { selectLatest: false, keepNavItem: true })
       }
-      // A resource route stays in the pending new-chat draft bucket until the
-      // composer selects an agent; a non-resource route leaves that bucket alone.
     } else {
       // No divertable drawer: full-screen chat route so the new chat is reachable.
       leaveSandboxForChat()
       if (agentRef) {
         vm.handleSelectChatAgent(agentRef, { selectLatest: false })
-      } else {
-        const id = nextChatTabId()
-        setWorkspaceTabs(state => newChatTab(state, id, null))
       }
     }
     setComposerFocusRequestId(value => value + 1)
@@ -2949,9 +2955,30 @@ export function App() {
     setComposerFocusRequestId(value => value + 1)
   }, [])
 
+  // The same universal workspace state owns both the chat tab and the draft
+  // prefill destination. Drawer mode keeps the non-chat tab active, so its chat
+  // owner is resolved from the controller's selected conversation identity.
+  const chatWorkspaceTabs = React.useMemo(
+    () => visibleWorkspaceTabs.filter((tab): tab is WorkspaceTab => tab.kind === 'chat'),
+    [visibleWorkspaceTabs]
+  )
+  const drawerActiveChatTabId =
+    chatWorkspaceTabs.find(
+      tab =>
+        (tab.chat?.agentRef ?? null) === vm.selectedAgent &&
+        (tab.chat?.chatId ?? null) === (vm.activeChatId ?? null)
+    )?.id ?? null
+  const activeWorkspaceChatTab = activeWorkspaceTab(workspaceTabs)
+  const composerWorkspaceTabId = chatDrawerVisible
+    ? drawerActiveChatTabId
+    : vm.navItem === DESKTOP_ROUTES.chat && activeWorkspaceChatTab?.kind === 'chat'
+      ? activeWorkspaceChatTab.id
+      : null
+
   const chatComposerStateValue = React.useMemo(
     () => ({
       activeChatId: vm.activeChatId,
+      workspaceChatTabId: composerWorkspaceTabId,
       composerImageAttachments: vm.composerImageAttachments,
       composerFileAttachments: vm.composerFileAttachments,
       composerFileRefusals: vm.composerFileRefusals,
@@ -2965,6 +2992,7 @@ export function App() {
     }),
     [
       vm.activeChatId,
+      composerWorkspaceTabId,
       vm.composerImageAttachments,
       vm.composerFileAttachments,
       vm.composerFileRefusals,
@@ -3169,20 +3197,6 @@ export function App() {
       tone="primary"
     />
   ) : null
-  // The drawer switcher is chat-only: the chat sub-slice of the universal store.
-  // Its "current" chat is the controller's (selectedAgent, activeChatId) — NOT
-  // the store's active tab, which is the app tab while the drawer is open.
-  const chatWorkspaceTabs = React.useMemo(
-    () => visibleWorkspaceTabs.filter((tab): tab is WorkspaceTab => tab.kind === 'chat'),
-    [visibleWorkspaceTabs]
-  )
-  const drawerActiveChatTabId =
-    chatWorkspaceTabs.find(
-      tab =>
-        (tab.chat?.agentRef ?? null) === vm.selectedAgent &&
-        (tab.chat?.chatId ?? null) === (vm.activeChatId ?? null)
-    )?.id ?? null
-
   const desktopUpdateRequiredDialog =
     vm.isAuthenticated && vm.desktopReleaseStatus?.updateRequired ? (
       <DesktopUpdateRequiredDialog

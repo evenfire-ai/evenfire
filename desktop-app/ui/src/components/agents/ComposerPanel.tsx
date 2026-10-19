@@ -157,6 +157,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     agentError,
     failedAgentSend,
     activeChatId,
+    workspaceChatTabId,
     activeMessageCount,
     composerFocusRequestId,
   } = useChatComposerStateContext()
@@ -418,8 +419,9 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const filesBlockedForSend = composerFileAttachments.some(file => file.status !== 'ready')
   const handleSend = useCallback(() => {
     if (imagesBlockedForSend || filesBlockedForSend) return
-    void onSend(draft)
-  }, [onSend, draft, imagesBlockedForSend, filesBlockedForSend])
+    if (workspaceChatTabId) void onSend(draft, workspaceChatTabId)
+    else void onSend(draft)
+  }, [onSend, draft, imagesBlockedForSend, filesBlockedForSend, workspaceChatTabId])
 
   const handleComposerKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
