@@ -57,6 +57,29 @@ Set-Acl -LiteralPath $target -AclObject $acl
   )
 }
 
+function addCurrentUserInheritOnlyFullControl(target: string): void {
+  runPowerShell(
+    String.raw`
+$ErrorActionPreference = 'Stop'
+$target = [Environment]::GetEnvironmentVariable('EVENFIRE_ACL_TEST_TARGET')
+$acl = Get-Acl -LiteralPath $target
+$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+  [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+$rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+  $sid,
+  [System.Security.AccessControl.FileSystemRights]::FullControl,
+  $inheritance,
+  [System.Security.AccessControl.PropagationFlags]::InheritOnly,
+  [System.Security.AccessControl.AccessControlType]::Allow
+)
+$acl.AddAccessRule($rule)
+Set-Acl -LiteralPath $target -AclObject $acl
+`,
+    { EVENFIRE_ACL_TEST_TARGET: target }
+  )
+}
+
 windowsDescribe('Windows session authority ACL native contract', () => {
   beforeEach(async () => {
     temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'evenfire-session-acl-'))
@@ -95,6 +118,15 @@ windowsDescribe('Windows session authority ACL native contract', () => {
       'Windows session authority ACL verification failed'
     )
     expect(() => provisionWindowsSessionAuthorityDirectory(userDataPath, authorityPath)).toThrow(
+      'Windows session authority ACL verification failed'
+    )
+  })
+
+  it('rejects inherit-only ACEs that do not grant rights on the authority object itself', () => {
+    provisionWindowsSessionAuthorityDirectory(userDataPath, authorityPath)
+    addCurrentUserInheritOnlyFullControl(authorityPath)
+
+    expect(() => verifyWindowsSessionAuthorityDirectory(userDataPath, authorityPath)).toThrow(
       'Windows session authority ACL verification failed'
     )
   })

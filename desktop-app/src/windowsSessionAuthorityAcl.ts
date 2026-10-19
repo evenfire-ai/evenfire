@@ -214,7 +214,8 @@ public static class SessionAuthorityNative {
       if (raw.DiscretionaryAcl != null) {
         foreach (GenericAce ace in raw.DiscretionaryAcl) {
           var qualified = ace as QualifiedAce;
-          if (qualified == null || (!(ace is CommonAce) && !(ace is ObjectAce))) {
+          if (qualified == null || qualified.IsCallback ||
+              (!(ace is CommonAce) && !(ace is ObjectAce))) {
             aces.Add(new SessionAuthorityAce {
               Sid = "<unsupported>", Qualifier = "Unsupported", Mask = UInt32.MaxValue,
               Inherited = (ace.AceFlags & AceFlags.Inherited) != 0,
@@ -307,7 +308,8 @@ try {
     $present = @{}
     foreach ($ace in $snapshot.Aces) {
       if ($ace.Qualifier -notin @('AccessAllowed', 'AccessDenied')) { throw 'ace-invalid' }
-      if ($privateObject -and $ace.Qualifier -ne 'AccessAllowed') { throw 'ace-invalid' }
+      if ($privateObject -and
+        ($ace.Qualifier -ne 'AccessAllowed' -or $ace.InheritOnly)) { throw 'ace-invalid' }
       if ($privateObject -and ($allowed -notcontains $ace.Sid)) { throw 'principal-invalid' }
       if (-not $privateObject -and $ace.Qualifier -eq 'AccessAllowed' -and
         -not $ace.InheritOnly -and
