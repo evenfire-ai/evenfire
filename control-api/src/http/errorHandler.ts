@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from 'express'
 import { ApiException } from '@kubernetes/client-node'
 import { STATUS_CODES } from 'node:http'
+import { clearRateLimitHeaders } from '../middleware/rateLimitMiddleware.js'
 import { rootLogger } from '../observability/logger.js'
 import { PasswordMutationInternalError } from '../services/auth/passwordAdmissionError.js'
 import { memberRegistrationErrorResponse } from '../services/memberRegistrationErrors.js'
@@ -160,6 +161,9 @@ export function clerumErrorHandler(
   const log = req.log ?? rootLogger
 
   if (err instanceof PasswordMutationInternalError) {
+    clearRateLimitHeaders(res)
+    res.removeHeader('Retry-After')
+    res.setHeader('Cache-Control', 'no-store')
     res.status(500).json({ error: err.code, correlationId })
     return
   }
