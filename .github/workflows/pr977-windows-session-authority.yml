@@ -1,0 +1,61 @@
+name: PR 977 Windows session authority
+
+on:
+  push:
+    branches:
+      - test/pr977-windows-validation
+  pull_request:
+    branches:
+      - dev
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr977-windows-session-authority-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop-windows:
+    if: github.event_name != 'pull_request' || github.event.pull_request.number == 977
+    runs-on: windows-2025
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            desktop-app/package-lock.json
+            mcp-host/package-lock.json
+
+      - name: Install Host fixture dependencies
+        working-directory: mcp-host
+        run: npm ci
+
+      - name: Install Desktop dependencies
+        working-directory: desktop-app
+        run: npm ci
+
+      - name: Require native Windows ACL evidence
+        working-directory: desktop-app
+        env:
+          EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
+        run: npm test -- src/__tests__/windowsSessionAuthorityAcl.native.test.ts
+
+      - name: Build Desktop main and renderer
+        working-directory: desktop-app
+        run: npm run build
+
+      - name: Verify Electron runtime
+        working-directory: desktop-app
+        run: npm run verify:electron
+
+      - name: Run full Desktop suite
+        working-directory: desktop-app
+        env:
+          EVENFIRE_REQUIRE_WINDOWS_ACL_TEST: '1'
+        run: npm test
