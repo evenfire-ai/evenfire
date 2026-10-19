@@ -1,6 +1,7 @@
 import express, { NextFunction, Request, Response } from 'express'
 import cors from 'cors'
 import { config } from './config.js'
+import { invitationPasswordErrorHandler } from './http/passwordAdmissionError.js'
 import {
   publicCorrelationId,
   sanitizeSupportedControlApiPublicError,
@@ -78,7 +79,9 @@ export function createApp() {
   api.use(createContextSharedFilesystemsRouter())
   api.use(createGfsRouter())
   api.use(createTeamRouter())
-  api.use(createInvitationsRouter())
+  const invitationsRouter = createInvitationsRouter()
+  invitationsRouter.use(invitationPasswordErrorHandler)
+  api.use(invitationsRouter)
   api.use(createDirectoryRouter())
   api.use(createRpcRouter())
   api.use(createNotificationsRouter())

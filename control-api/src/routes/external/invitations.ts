@@ -1,8 +1,11 @@
-import { Router } from 'express'
+import { type Request, Router } from 'express'
 import { randomBytes } from 'node:crypto'
 import { config } from '../../config.js'
 import { withTransaction } from '../../db.js'
-import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
+import {
+  createExternalClientRateLimiters,
+  externalClientIpRateLimitKey,
+} from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
   rejectBodyUserTeamMismatch,
@@ -33,13 +36,8 @@ import {
 } from '../../services/invitationFlowRegistrationService.js'
 import { memberRegistrationErrorResponse } from '../../services/memberRegistrationErrors.js'
 
-function invitationLookupIpKey(req: {
-  ip?: string
-  socket?: { remoteAddress?: string }
-}): string | null {
-  const ip = req.ip ?? req.socket?.remoteAddress ?? null
-  if (!ip) return null
-  return `invite-token-ip:${String(ip).slice(0, 128)}`
+function invitationLookupIpKey(req: Request): string {
+  return `invite-token-ip:${externalClientIpRateLimitKey(req)}`
 }
 
 export function createExternalInvitationsRouter(): Router {
@@ -112,10 +110,23 @@ export function createExternalInvitationsRouter(): Router {
           if (memberRegistrationErrorResponse(error)) throw error
           return res.status(400).json({ error: 'invalid_invitation' })
         }
+        // Bind the trusted provider token to the submitted database row before
+        // the password service performs its independent lock-and-currentness check.
+        const invitation = await getInvitationByToken(validation.invitationUuid)
+        if (!invitation || invitation.id !== invitationId) {
+          return res.status(403).json({ error: 'forbidden' })
+        }
+        if (
+          invitation.email.toLowerCase() !== validation.email.toLowerCase() ||
+          invitation.purpose !== 'password_reset' ||
+          invitation.status !== 'pending'
+        ) {
+          return res.status(409).json({ error: 'invitation_not_pending' })
+        }
+
         const result = await setInvitationPasswordForEmail(
           validation.email,
-          validation.invitationUuid,
-          invitationId,
+          invitation.id,
           password
         )
         if ('error' in result) {
@@ -131,26 +142,30 @@ export function createExternalInvitationsRouter(): Router {
           if (result.error === 'expired') {
             return res.status(410).json({ error: 'expired' })
           }
+          if (result.error === 'user_retired') {
+            return res.status(401).json({ error: 'user_retired' })
+          }
           return res.status(400).json({ error: 'invalid_password' })
         }
 
-        if (!result.data.userId) {
-          return res.status(409).json({ error: 'invitation_not_ready' })
-        }
-        const authGeneration = Number(result.data.authGeneration)
+        const userId = result.data.userId
+        const session = result.data.sessionContext
         if (
-          result.data.lifecycleState !== 'active' ||
-          !Number.isSafeInteger(authGeneration) ||
-          authGeneration < 1
+          !userId ||
+          !session ||
+          session.userId !== userId ||
+          !Number.isSafeInteger(session.authGeneration) ||
+          session.authGeneration < 1
         ) {
           return res.status(409).json({ error: 'invitation_not_ready' })
         }
-
+        const { sessionContext: _sessionContext, ...response } = result.data
         return res.status(200).json({
-          ...result.data,
+          ...response,
           reauthenticationRequired: true,
         })
       } catch (error) {
+        if (sendPasswordAdmissionError(error, res)) return
         return next(error)
       }
     }
@@ -191,6 +206,9 @@ export function createExternalInvitationsRouter(): Router {
           }
           if (result.error === 'expired') {
             return res.status(410).json({ error: 'expired' })
+          }
+          if (result.error === 'user_retired') {
+            return res.status(401).json({ error: 'user_retired' })
           }
           return res.status(400).json({ error: 'invalid_password' })
         }
