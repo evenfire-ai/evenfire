@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process'
+import { type SpawnSyncReturns, spawnSync } from 'node:child_process'
 import path from 'node:path'
 
 export type WindowsSessionAuthorityAclEvidence = {
@@ -265,6 +265,7 @@ public static class SessionAuthorityNative {
 }
 '@
 try {
+  $script:phase = 'compile-script'
   Add-Type -TypeDefinition $code -Language CSharp
   $script:phase = 'validate-request'
   $requestPayload = [Environment]::GetEnvironmentVariable('EVENFIRE_SESSION_AUTHORITY_ACL_REQUEST')
@@ -431,13 +432,16 @@ try {
 }
 `
 
-const COMMAND = Buffer.from(SCRIPT, 'utf16le').toString('base64')
 const POWERSHELL_REQUEST = 'EVENFIRE_SESSION_AUTHORITY_ACL_REQUEST'
+const POWERSHELL_ARGS = ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '-'] as const
 
-function sanitizedWindowsAclFailure(stdout: string): string {
+function sanitizedWindowsAclFailure(stdout: string): {
+  rejected: boolean
+  fields: Record<string, string>
+} {
   try {
     const value: unknown = JSON.parse(stdout.trim())
-    if (typeof value !== 'object' || value === null) return ''
+    if (typeof value !== 'object' || value === null) return { rejected: false, fields: {} }
     const fields = value as Record<string, unknown>
     const safe: Record<string, string> = {}
     for (const field of ['phase', 'errorType', 'hresult', 'detail'] as const) {
@@ -446,10 +450,59 @@ function sanitizedWindowsAclFailure(stdout: string): string {
       const pattern = field === 'hresult' ? /^0x[0-9A-F]{8}$/i : /^[A-Za-z0-9-]{1,80}$/
       if (pattern.test(item)) safe[field] = item
     }
-    return Object.keys(safe).length > 0 ? `: ${JSON.stringify(safe)}` : ''
+    return { rejected: fields.ok === false, fields: safe }
   } catch {
-    return ''
+    return { rejected: false, fields: {} }
   }
+}
+
+function safePowerShellFailure(result: SpawnSyncReturns<string>, fallbackPhase: string): string {
+  const stdout = typeof result.stdout === 'string' ? result.stdout : ''
+  const stderrPresent = typeof result.stderr === 'string' && result.stderr.length > 0
+  const stdoutPresent = stdout.length > 0
+  const verifierFailure = sanitizedWindowsAclFailure(stdout)
+  const processStarted = typeof result.pid === 'number' && result.pid > 0
+  const processError = result.error as NodeJS.ErrnoException | undefined
+  const errorCode = processError?.code
+  const signal = result.signal
+  let phase = fallbackPhase
+
+  if (processError) {
+    phase = processStarted ? 'process-error-after-start' : 'process-launch'
+  } else if (signal) {
+    phase = 'process-terminated'
+  } else if (verifierFailure.rejected) {
+    phase =
+      verifierFailure.fields.phase === 'compile-script'
+        ? 'powershell-compilation-failed'
+        : 'acl-verifier-rejected'
+  } else if (result.status !== 0) {
+    phase = 'powershell-exit-without-rejection-evidence'
+  } else if (!stdoutPresent) {
+    phase = 'structured-output-missing'
+  }
+
+  const diagnostic: Record<string, string | number | boolean | null> = {
+    phase,
+    processStarted,
+    exitStatus: Number.isInteger(result.status) ? result.status : null,
+    stdoutPresent,
+    stderrPresent,
+  }
+  if (typeof errorCode === 'string' && /^[A-Z0-9_]{1,32}$/.test(errorCode)) {
+    diagnostic.processErrorCode = errorCode
+  }
+  if (
+    typeof signal === 'string' &&
+    ['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGABRT', 'SIGBREAK'].includes(signal)
+  ) {
+    diagnostic.signal = signal
+  }
+  for (const field of ['phase', 'errorType', 'hresult', 'detail'] as const) {
+    const value = verifierFailure.fields[field]
+    if (value) diagnostic[`verifier${field[0]!.toUpperCase()}${field.slice(1)}`] = value
+  }
+  return `: ${JSON.stringify(diagnostic)}`
 }
 
 function assertWindowsPlatform(): void {
@@ -468,31 +521,30 @@ function runWindowsAclOperation(request: Request): WindowsSessionAuthorityAclEvi
     'powershell.exe'
   )
   const payload = Buffer.from(JSON.stringify(request), 'utf8').toString('base64')
-  const result = spawnSync(
-    powershell,
-    ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', COMMAND],
-    {
-      encoding: 'utf8',
-      env: { ...process.env, [POWERSHELL_REQUEST]: payload },
-      maxBuffer: 1024 * 1024,
-      timeout: 15_000,
-      windowsHide: true,
-    }
-  )
+  const result = spawnSync(powershell, [...POWERSHELL_ARGS], {
+    encoding: 'utf8',
+    env: { ...process.env, [POWERSHELL_REQUEST]: payload },
+    input: SCRIPT,
+    maxBuffer: 1024 * 1024,
+    timeout: 15_000,
+    windowsHide: true,
+  })
   if (result.error || result.status !== 0 || result.signal || !result.stdout) {
     throw new Error(
-      `Windows session authority ACL verification failed${sanitizedWindowsAclFailure(String(result.stdout || ''))}`
+      `Windows session authority ACL verification failed${safePowerShellFailure(result, 'verifier-exit')}`
     )
   }
   let response: unknown
   try {
     response = JSON.parse(result.stdout.trim())
   } catch {
-    throw new Error('Windows session authority ACL verification returned invalid evidence')
+    throw new Error(
+      `Windows session authority ACL verification returned invalid evidence${safePowerShellFailure(result, 'structured-output-invalid')}`
+    )
   }
   if (!response || typeof response !== 'object' || !('ok' in response) || response.ok !== true)
     throw new Error(
-      `Windows session authority ACL verification failed${sanitizedWindowsAclFailure(result.stdout)}`
+      `Windows session authority ACL verification failed${safePowerShellFailure(result, 'verifier-rejected')}`
     )
   const evidence = response as Partial<WindowsSessionAuthorityAclEvidence> & { ok: boolean }
   if (
@@ -503,7 +555,9 @@ function runWindowsAclOperation(request: Request): WindowsSessionAuthorityAclEvi
     typeof evidence.objectCount !== 'number' ||
     evidence.objectCount < 1
   )
-    throw new Error('Windows session authority ACL verification returned incomplete evidence')
+    throw new Error(
+      `Windows session authority ACL verification returned incomplete evidence${safePowerShellFailure(result, 'evidence-incomplete')}`
+    )
   return {
     userSid: evidence.userSid,
     rootIdentity: evidence.rootIdentity,

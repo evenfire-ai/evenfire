@@ -1,0 +1,143 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import path from 'node:path'
+import { verifyWindowsSessionAuthorityDirectory } from '../windowsSessionAuthorityAcl.js'
+
+const { spawnSyncMock } = vi.hoisted(() => ({ spawnSyncMock: vi.fn() }))
+
+vi.mock('node:child_process', () => ({ spawnSync: spawnSyncMock }))
+
+const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+const validEvidence = {
+  userSid: 'S-1-5-21-1000',
+  rootIdentity: '00000001:00000001',
+  authorityIdentity: '00000001:00000002',
+  objectCount: 1,
+}
+
+function processResult(overrides: Record<string, unknown> = {}) {
+  return {
+    pid: 123,
+    output: [],
+    stdout: JSON.stringify({ ok: true, ...validEvidence }),
+    stderr: '',
+    status: 0,
+    signal: null,
+    error: undefined,
+    ...overrides,
+  }
+}
+
+function captureError(action: () => unknown): string {
+  try {
+    action()
+  } catch (error) {
+    if (error instanceof Error) return error.message
+    throw error
+  }
+  throw new Error('Expected the Windows ACL verifier to fail')
+}
+
+function runVerifier(): ReturnType<typeof verifyWindowsSessionAuthorityDirectory> {
+  return verifyWindowsSessionAuthorityDirectory('C:\\private\\data', 'C:\\private\\data\\sessions')
+}
+
+describe('Windows session authority PowerShell launcher', () => {
+  beforeEach(() => {
+    Object.defineProperty(process, 'platform', { ...platformDescriptor, value: 'win32' })
+    vi.stubEnv('SystemRoot', 'C:\\Windows')
+    spawnSyncMock.mockReturnValue(processResult())
+  })
+
+  afterEach(() => {
+    if (platformDescriptor) Object.defineProperty(process, 'platform', platformDescriptor)
+    vi.unstubAllEnvs()
+    vi.clearAllMocks()
+  })
+
+  it('keeps the oversized fixed verifier off the Windows process command line', () => {
+    expect(runVerifier()).toEqual(validEvidence)
+
+    const [executable, args, options] = spawnSyncMock.mock.calls[0]!
+    expect(args.slice(0, 3)).toEqual(['-NoLogo', '-NoProfile', '-NonInteractive'])
+    expect(args[3] === '-Command' && args[4] === '-').toBe(true)
+    expect(typeof options.input).toBe('string')
+    expect(options.input.length).toBeGreaterThan(16_384)
+
+    const commandLineLength =
+      executable.length + args.reduce((length: number, arg: string) => length + arg.length + 1, 0)
+    const encodedVerifierLength = Buffer.from(options.input, 'utf16le').toString('base64').length
+    const previousCommandLineLength =
+      executable.length +
+      '-NoLogo -NoProfile -NonInteractive -EncodedCommand '.length +
+      encodedVerifierLength
+
+    expect(commandLineLength).toBeLessThan(32_767)
+    expect(previousCommandLineLength).toBeGreaterThan(32_767)
+    expect(executable).toBe(
+      path.join('C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    )
+  })
+
+  it('classifies a process-launch error without exposing its message or paths', () => {
+    const failure = Object.assign(new Error('private path and command contents'), { code: 'E2BIG' })
+    spawnSyncMock.mockReturnValue(
+      processResult({ pid: -1, status: null, stdout: null, stderr: null, error: failure })
+    )
+
+    const message = captureError(runVerifier)
+    expect(message).toMatch(/"phase":"process-launch".*"processErrorCode":"E2BIG"/)
+    expect(message).not.toContain('private path')
+    expect(message).not.toContain('C:\\private')
+  })
+
+  it('distinguishes script compilation errors from verifier ACL rejection', () => {
+    spawnSyncMock.mockReturnValue(
+      processResult({
+        status: 2,
+        stdout: JSON.stringify({
+          ok: false,
+          phase: 'compile-script',
+          errorType: 'CompilationException',
+          hresult: '0x80131500',
+          detail: 'csharp-compile-failed',
+        }),
+        stderr: 'compiler output is intentionally not surfaced',
+      })
+    )
+
+    const compilationFailure = captureError(runVerifier)
+    expect(compilationFailure).toMatch(
+      /"phase":"powershell-compilation-failed".*"verifierPhase":"compile-script"/
+    )
+    expect(compilationFailure).not.toContain('compiler output')
+
+    spawnSyncMock.mockReturnValue(
+      processResult({
+        status: 2,
+        stdout: JSON.stringify({
+          ok: false,
+          phase: 'validate-authority-directory',
+          errorType: 'UnauthorizedAccessException',
+          hresult: '0x80070005',
+          detail: 'dacl-invalid',
+        }),
+      })
+    )
+    expect(captureError(runVerifier)).toMatch(
+      /"phase":"acl-verifier-rejected".*"verifierDetail":"dacl-invalid"/
+    )
+  })
+
+  it('classifies structured-output parsing failures without exposing output', () => {
+    spawnSyncMock.mockReturnValue(
+      processResult({ stdout: 'sensitive-unstructured-output', stderr: 'private stderr' })
+    )
+
+    const message = captureError(runVerifier)
+    expect(message).toMatch(
+      /"phase":"structured-output-invalid".*"stdoutPresent":true.*"stderrPresent":true/
+    )
+    expect(message).not.toContain('sensitive-unstructured-output')
+    expect(message).not.toContain('private stderr')
+  })
+})
