@@ -20,7 +20,6 @@ import {
 import type { GfsGrantListItem, GfsShareListItem } from '@/gfs/delegation.types'
 import { deriveGfsInheritedAccess } from '@/gfs/inheritedAccess'
 import { GFS_SESSION_AUTHORITY_ERROR_CODES } from '../../../../src/gfs/sessionAuthority.js'
-import { gfsResourceLabelResolver } from '../../lib/gfsResourceLabelResolver'
 import { desktopQueryClient } from '../../lib/queryClient'
 import { desktopQueryKeys } from './queryKeys'
 
@@ -364,7 +363,6 @@ export function revokeGfsSessionAccess(queryClient: QueryClient, sessionScope: s
   // logout has cleared the query client.
   if (queryClient.getQueryData<GfsAccessState>(accessStateKey) !== 'active') return
   queryClient.setQueryData(accessStateKey, 'revoked' as GfsAccessState)
-  gfsResourceLabelResolver.invalidatePrincipal(sessionScope)
   queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
 }
 

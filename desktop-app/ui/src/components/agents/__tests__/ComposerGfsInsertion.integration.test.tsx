@@ -188,7 +188,7 @@ describe('ComposerPanel producer-backed EvenDrive insertion', () => {
     })
     fireEvent.click(insertItem)
 
-    const inserted = `keep this[Release notes.md](${note.gfsUri})  text`
+    const inserted = `keep this${note.gfsUri}  text`
     await waitFor(() => expect(getComposerDraft('chat-1', 'agent-1')).toBe(inserted))
     view.rerender(
       <AuthContext.Provider value={auth as never}>
@@ -199,9 +199,9 @@ describe('ComposerPanel producer-backed EvenDrive insertion', () => {
     )
     await waitFor(() => expect(textarea.value).toBe(inserted))
     await waitFor(() => expect(document.activeElement).toBe(textarea))
-    const caretAfterLink = inserted.indexOf('  text') + 1
-    expect(textarea.selectionStart).toBe(caretAfterLink)
-    expect(textarea.selectionEnd).toBe(caretAfterLink)
+    const caretAfterUri = inserted.indexOf('  text') + 1
+    expect(textarea.selectionStart).toBe(caretAfterUri)
+    expect(textarea.selectionEnd).toBe(caretAfterUri)
 
     expect(producers.listAccessible).toHaveBeenCalledOnce()
     expect(producers.listChildren).toHaveBeenCalledWith(folderA.resourceId, 'main', undefined)
@@ -214,7 +214,7 @@ describe('ComposerPanel producer-backed EvenDrive insertion', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('menuitem', { name: 'Insert link to Release notes.md' }))
     })
-    const twiceInserted = `keep this[Release notes.md](${note.gfsUri}) [Release notes.md](${note.gfsUri})  text`
+    const twiceInserted = `keep this${note.gfsUri} ${note.gfsUri}  text`
     await waitFor(() => expect(getComposerDraft('chat-1', 'agent-1')).toBe(twiceInserted))
     expect(producers.listChildren).toHaveBeenCalledTimes(2)
   })

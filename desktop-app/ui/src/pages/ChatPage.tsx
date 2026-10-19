@@ -9,15 +9,9 @@ import { pickLatestAgent } from '@lib/agents'
 
 type ChatPageProps = {
   scrollContainerRef: RefObject<HTMLElement | null>
-  onOpenGfsResource?: (uri: string) => void
-  remoteGfsChangeEpoch?: number
 }
 
-export function ChatPage({
-  scrollContainerRef,
-  onOpenGfsResource,
-  remoteGfsChangeEpoch = 0,
-}: ChatPageProps) {
+export function ChatPage({ scrollContainerRef }: ChatPageProps) {
   const { agentNames, loading, error } = useAgentsDataController()
   const { selectedAgent, handleSelectChatAgent: onSelectAgent } = useNavigationContext()
   const { agentLastActiveByAgent } = useAgentActivityContext()
@@ -62,14 +56,7 @@ export function ChatPage({
     )
   }
 
-  return (
-    <AgentWorkspace
-      mode="chat"
-      scrollContainerRef={scrollContainerRef}
-      onOpenGfsResource={onOpenGfsResource}
-      remoteGfsChangeEpoch={remoteGfsChangeEpoch}
-    />
-  )
+  return <AgentWorkspace mode="chat" scrollContainerRef={scrollContainerRef} />
 }
 
 function ChatPageSkeleton() {

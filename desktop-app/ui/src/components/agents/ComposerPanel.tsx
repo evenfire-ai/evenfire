@@ -4,7 +4,6 @@ import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
 import { useChatComposerStateContext } from '@contexts/ChatComposerStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
-import type { RefMDEditor } from '@uiw/react-md-editor/nohighlight'
 import { normalizeGfsResourceUri } from '@clerum/desktop-app-links'
 import { Button, IconButton, MenuItem } from '@components/Common'
 import { GfsFileIcon } from '@components/GfsFileIcon'
@@ -35,7 +34,6 @@ import { useClickOutside } from '@hooks/useClickOutside'
 import { useComposerDraft } from '@hooks/useComposerDraft'
 import { useFlyoutPosition } from '@hooks/useFlyoutPosition'
 import { useHostModels } from '@hooks/useHostModels'
-import { buildComposerMarkdownSemanticModel } from '@lib/chatMessageSemantics'
 import { getComposerDraft, getComposerDraftRevision } from '@lib/composerDraftStore'
 import { formatFileSize } from '@lib/composerFileAdmission'
 import { prefillEmptyConversationWithGfsResource } from '@lib/gfsConversationPrefill'
@@ -47,17 +45,14 @@ import type {
   ComposerReferenceAttachment,
 } from '../../uiTypes'
 import { AnnotationCanvas } from './AnnotationCanvas'
-import { ChatMarkdownContent } from './ChatMarkdownContent'
 import { ComposerAgentFilesModal } from './ComposerAgentFilesModal'
 import { ComposerGfsLinkPicker, type ComposerGfsLinkSelection } from './ComposerGfsLinkPicker'
 import { ComposerGlobalFilesModal } from './ComposerGlobalFilesModal'
-import { MarkdownSourceEditor } from './MarkdownSourceEditor'
 import { ModelSelector } from './ModelSelector'
 
 type ComposerPanelProps = {
   inline?: boolean
   agentSelector?: React.ReactNode
-  remoteGfsChangeEpoch?: number
 }
 
 const COMPOSER_MAX_TEXT_HEIGHT = 240
@@ -72,10 +67,6 @@ type GfsInsertionSession = {
   expectedRevision: number
   anchor: number
   controllerScope: string | null
-}
-
-function escapeMarkdownLabel(label: string): string {
-  return label.replaceAll('\\', '\\\\').replaceAll('[', '\\[').replaceAll(']', '\\]')
 }
 
 function getComposerReferenceTypeLabel(type: ComposerReferenceAttachment['type']): string {
@@ -169,11 +160,7 @@ function getComposerFileNotice(file: ComposerFileAttachment): string | null {
   return null
 }
 
-export function ComposerPanel({
-  inline = false,
-  agentSelector,
-  remoteGfsChangeEpoch = 0,
-}: ComposerPanelProps) {
+export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelProps) {
   const { selectedAgent } = useNavigationContext()
   const {
     composerImageAttachments,
@@ -226,17 +213,11 @@ export function ComposerPanel({
   const [globalFilesModalOpen, setGlobalFilesModalOpen] = useState(false)
   const [dragActive, setDragActive] = useState(false)
   const [previewAttachmentId, setPreviewAttachmentId] = useState<string | null>(null)
-  const [composerSourceEditing, setComposerSourceEditing] = useState(false)
   // Per-chat draft from the module-scoped store. Typing only re-renders this
   // component (it's the sole subscriber); the value is restored automatically when
   // activeChatId changes and survives the inline→docked composer swap.
   const [draft, setDraft] = useComposerDraft(activeChatId, selectedAgent ?? undefined)
-  const composerPreviewModel = useMemo(() => buildComposerMarkdownSemanticModel(draft), [draft])
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null)
-  const composerEditorRef = useRef<RefMDEditor | null>(null)
-  const [composerEditorHeight, setComposerEditorHeight] = useState(
-    inline ? COMPOSER_INLINE_MIN_TEXT_HEIGHT : COMPOSER_MIN_TEXT_HEIGHT
-  )
   const composerInputWidthRef = useRef<number | null>(null)
   const composerFileInputRef = useRef<HTMLInputElement | null>(null)
   const composerInputShellRef = useRef<HTMLDivElement | null>(null)
@@ -317,18 +298,14 @@ export function ComposerPanel({
     if (!textarea) return
 
     const minimumHeight = inline ? COMPOSER_INLINE_MIN_TEXT_HEIGHT : COMPOSER_MIN_TEXT_HEIGHT
+    textarea.style.height = 'auto'
     const height = Math.min(
       Math.max(textarea.scrollHeight, minimumHeight),
       COMPOSER_MAX_TEXT_HEIGHT
     )
-    setComposerEditorHeight(current => (current === height ? current : height))
+    textarea.style.height = `${height}px`
     textarea.style.overflowY = textarea.scrollHeight > COMPOSER_MAX_TEXT_HEIGHT ? 'auto' : 'hidden'
   }, [inline])
-
-  const setComposerEditorRef = useCallback((editor: RefMDEditor | null) => {
-    composerEditorRef.current = editor
-    composerInputRef.current = editor?.textarea ?? null
-  }, [])
 
   useEffect(() => {
     resizeComposerInput()
@@ -618,7 +595,7 @@ export function ComposerPanel({
   }, [composerMenuOpen, composerSubmenu])
 
   const insertGfsLink = useCallback(
-    ({ label, uri }: ComposerGfsLinkSelection, controllerScope: string, sessionId: number) => {
+    ({ uri }: ComposerGfsLinkSelection, controllerScope: string, sessionId: number) => {
       const session = gfsInsertionSessionRef.current
       if (!session || gfsInsertionBusyRef.current) return
       if (session.id !== sessionId) return
@@ -645,10 +622,9 @@ export function ComposerPanel({
 
       gfsInsertionBusyRef.current = true
       const anchor = Math.max(0, Math.min(session.anchor, currentDraft.length))
-      const insertion = `[${escapeMarkdownLabel(label)}](${canonicalUri}) `
+      const insertion = `${canonicalUri} `
       const nextDraft = `${currentDraft.slice(0, anchor)}${insertion}${currentDraft.slice(anchor)}`
       const nextAnchor = anchor + insertion.length
-      setComposerSourceEditing(true)
       setDraft(nextDraft)
       session.expectedDraft = nextDraft
       session.expectedRevision = getComposerDraftRevision(activeChatId, selectedAgent ?? undefined)
@@ -1056,7 +1032,6 @@ export function ComposerPanel({
 
   const isDegraded = hostRuntimeStatus?.degraded?.reason === 'llm_key_missing'
   const hasComposerAttachments = composerAttachmentItems.length > 0
-  const showComposerMarkdownPreview = Boolean(draft) && !composerSourceEditing && !isDegraded
 
   return (
     <div className={`composer ${inline ? 'composer-inline' : 'composer-shell-footer'}`}>
@@ -1082,73 +1057,29 @@ export function ComposerPanel({
         onDrop={handleComposerDrop}
       >
         <div className="composer-textarea-viewport">
-          <MarkdownSourceEditor
+          <textarea
             key={activeChatId ?? 'no-chat'}
-            editorRef={setComposerEditorRef}
-            className={`composer-markdown-editor${showComposerMarkdownPreview ? ' composer-markdown-editor--hidden' : ''}`}
-            height={composerEditorHeight}
+            ref={composerInputRef}
+            data-testid="chat-input"
+            aria-label="Agent message composer"
             value={draft}
-            onChange={(value, event) => {
-              const nextValue = value ?? ''
-              handleDraftChange(nextValue, event?.currentTarget.selectionEnd ?? nextValue.length)
+            onChange={event => {
+              handleDraftChange(event.target.value, event.target.selectionEnd)
               resizeComposerInput()
             }}
-            textareaProps={{
-              'data-testid': 'chat-input',
-              'aria-label': 'Agent message composer',
-              'aria-hidden': showComposerMarkdownPreview || undefined,
-              tabIndex: showComposerMarkdownPreview ? -1 : undefined,
-              onFocus: () => setComposerSourceEditing(true),
-              onBlur: () => setComposerSourceEditing(false),
-              onClick: rememberGfsInsertionAnchor,
-              onKeyUp: rememberGfsInsertionAnchor,
-              onSelect: rememberGfsInsertionAnchor,
-              onPaste: handleComposerPaste,
-              onKeyDown: handleComposerKeyDown,
-              rows: 3,
-              disabled: isDegraded,
-              placeholder: isDegraded
+            onClick={rememberGfsInsertionAnchor}
+            onKeyUp={rememberGfsInsertionAnchor}
+            onSelect={rememberGfsInsertionAnchor}
+            onPaste={handleComposerPaste}
+            onKeyDown={handleComposerKeyDown}
+            rows={3}
+            disabled={isDegraded}
+            placeholder={
+              isDegraded
                 ? 'Agent degraded — fix the LLM Secret to resume.'
-                : `Message ${selectedAgent}... (Enter to send, Shift+Enter for newline)`,
-            }}
+                : `Message ${selectedAgent}... (Enter to send, Shift+Enter for newline)`
+            }
           />
-          {showComposerMarkdownPreview ? (
-            <div
-              className="composer-markdown-preview"
-              role="textbox"
-              aria-label="Agent message composer preview"
-              aria-readonly="true"
-              tabIndex={0}
-              onClick={event => {
-                if ((event.target as HTMLElement).closest('a')) return
-                setComposerSourceEditing(true)
-                window.requestAnimationFrame(() => composerInputRef.current?.focus())
-              }}
-              onKeyDown={event => {
-                if (event.key !== 'Enter' && event.key !== ' ') return
-                event.preventDefault()
-                setComposerSourceEditing(true)
-                window.requestAnimationFrame(() => composerInputRef.current?.focus())
-              }}
-            >
-              <ChatMarkdownContent
-                model={composerPreviewModel}
-                query=""
-                activeOccurrence={null}
-                remoteGfsChangeEpoch={remoteGfsChangeEpoch}
-                onEditLink={range => {
-                  setComposerSourceEditing(true)
-                  window.requestAnimationFrame(() => {
-                    const textarea = composerInputRef.current
-                    if (!textarea || !textarea.isConnected || textarea.value !== draft) return
-                    textarea.focus()
-                    textarea.setSelectionRange(range.start, range.end)
-                    rememberGfsInsertionAnchor()
-                  })
-                }}
-              />
-            </div>
-          ) : null}
         </div>
         {dragActive ? <div className="composer-drop-overlay">Drop files here</div> : null}
         <div className="composer-input-actions">

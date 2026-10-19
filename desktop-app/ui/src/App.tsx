@@ -59,7 +59,6 @@ import { resolveGfsPreview } from '@lib/gfsPreview'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { retireClosedGfsPreviewOwners } from '@lib/gfsPreviewRetryOwnership'
 import type { GfsResourceActionId, GfsResourceActionRequest } from '@lib/gfsResourceActions'
-import { gfsResourceLabelResolver } from '@lib/gfsResourceLabelResolver'
 import type { GfsResourceNavigationRequest } from '@lib/gfsResourceNavigationIntent'
 import { desktopQueryClient } from '@lib/queryClient'
 import {
@@ -335,19 +334,15 @@ export function App() {
   useWindowFocusBridge()
   const [themeMode, setThemeMode] = React.useState<ThemeMode>(getInitialThemeMode)
   const [remoteGfsChangeEpoch, setRemoteGfsChangeEpoch] = React.useState(0)
-  const gfsLabelPrincipal =
+  const gfsSearchPrincipal =
     vm.isAuthenticated && !vm.authTransitioning ? (vm.authenticatedPrincipalIdentity ?? null) : null
-  const previousGfsLabelPrincipalRef = React.useRef(gfsLabelPrincipal)
+  const previousGfsSearchPrincipalRef = React.useRef(gfsSearchPrincipal)
   React.useEffect(() => {
-    // ChatMarkdownContent owns the resolver's authenticated cache key. App
-    // only clears it when auth surfaces can unmount before observing logout.
-    if (gfsLabelPrincipal === null) gfsResourceLabelResolver.setActivePrincipal(null)
-    if (previousGfsLabelPrincipalRef.current === gfsLabelPrincipal) return
-    previousGfsLabelPrincipalRef.current = gfsLabelPrincipal
-    // Chat content may unmount before it can observe logout. Advance the same
-    // authority epoch so cached labels and late reads cannot cross that gap.
+    if (previousGfsSearchPrincipalRef.current === gfsSearchPrincipal) return
+    previousGfsSearchPrincipalRef.current = gfsSearchPrincipal
+    // Invalidate in-flight global-search resolutions when authentication changes.
     setRemoteGfsChangeEpoch(epoch => epoch + 1)
-  }, [gfsLabelPrincipal])
+  }, [gfsSearchPrincipal])
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState<boolean>(
     getInitialSidebarCollapsed
   )
@@ -3784,19 +3779,11 @@ export function App() {
                                       }
                                       surfaceId="chat-view-panel"
                                     >
-                                      <ChatPage
-                                        scrollContainerRef={contentPanelRef}
-                                        onOpenGfsResource={openGfsResourceLink}
-                                        remoteGfsChangeEpoch={remoteGfsChangeEpoch}
-                                      />
+                                      <ChatPage scrollContainerRef={contentPanelRef} />
                                     </ChatViewWorkspace>
                                   ))}
                                 {vm.navItem === DESKTOP_ROUTES.agents && (
-                                  <AgentsPage
-                                    scrollContainerRef={contentPanelRef}
-                                    onOpenGfsResource={openGfsResourceLink}
-                                    remoteGfsChangeEpoch={remoteGfsChangeEpoch}
-                                  />
+                                  <AgentsPage scrollContainerRef={contentPanelRef} />
                                 )}
                                 {vm.navItem === DESKTOP_ROUTES.files && (
                                   <FilesPage
@@ -3942,11 +3929,7 @@ export function App() {
                                     width={chatDrawerResize.width}
                                     resizing={chatDrawerResize.isResizing}
                                   >
-                                    <ChatPage
-                                      scrollContainerRef={chatDrawerRef}
-                                      onOpenGfsResource={openGfsResourceLink}
-                                      remoteGfsChangeEpoch={remoteGfsChangeEpoch}
-                                    />
+                                    <ChatPage scrollContainerRef={chatDrawerRef} />
                                   </ChatDrawer>
                                 </RightRailShell>
                               )}

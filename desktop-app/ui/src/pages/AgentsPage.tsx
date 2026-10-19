@@ -7,25 +7,15 @@ import { useAgentsDataController } from '../hooks/domain/useAgentsDataController
 
 type AgentsPageProps = {
   scrollContainerRef: RefObject<HTMLElement | null>
-  onOpenGfsResource?: (uri: string) => void
-  remoteGfsChangeEpoch?: number
 }
 
-export function AgentsPage({
-  scrollContainerRef,
-  onOpenGfsResource,
-  remoteGfsChangeEpoch = 0,
-}: AgentsPageProps) {
+export function AgentsPage({ scrollContainerRef }: AgentsPageProps) {
   const { agentNames, loading, error } = useAgentsDataController()
   const { selectedAgent } = useNavigationContext()
 
   return agentNames.length ? (
     selectedAgent ? (
-      <AgentWorkspace
-        scrollContainerRef={scrollContainerRef}
-        onOpenGfsResource={onOpenGfsResource}
-        remoteGfsChangeEpoch={remoteGfsChangeEpoch}
-      />
+      <AgentWorkspace scrollContainerRef={scrollContainerRef} />
     ) : (
       <FleetBoard />
     )

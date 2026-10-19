@@ -43,8 +43,6 @@ type AgentWorkspaceMode = 'agents' | 'chat'
 type AgentWorkspaceProps = {
   mode?: AgentWorkspaceMode
   scrollContainerRef: RefObject<HTMLElement | null>
-  onOpenGfsResource?: (uri: string) => void
-  remoteGfsChangeEpoch?: number
 }
 
 function AgentHero({
@@ -75,12 +73,7 @@ function AgentHero({
   )
 }
 
-export function AgentWorkspace({
-  mode = 'agents',
-  scrollContainerRef,
-  onOpenGfsResource,
-  remoteGfsChangeEpoch = 0,
-}: AgentWorkspaceProps) {
+export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWorkspaceProps) {
   const {
     selectedAgent,
     selectedAgentRoute,
@@ -607,16 +600,12 @@ export function AgentWorkspace({
                 <h2 className="agent-workspace-greeting">Start a new conversation with:</h2>
                 {agentSwitcherLabel}
               </div>
-              <ComposerPanel inline remoteGfsChangeEpoch={remoteGfsChangeEpoch} />
+              <ComposerPanel inline />
             </div>
           )}
           {isChatMode && (
             <div className="chat-thread-container">
-              <ChatThread
-                onScrollPositionChange={handleScrollPositionChange}
-                onOpenGfsResource={onOpenGfsResource}
-                remoteGfsChangeEpoch={remoteGfsChangeEpoch}
-              />
+              <ChatThread onScrollPositionChange={handleScrollPositionChange} />
               {showDelayedScrollToBottom && (
                 <div className="chat-scroll-to-bottom">
                   <IconButton
@@ -650,7 +639,7 @@ export function AgentWorkspace({
                   {activeSessionState.offlineMode ? 'Offline — showing cached chat' : 'Syncing…'}
                 </div>
               ) : null}
-              <ComposerPanel remoteGfsChangeEpoch={remoteGfsChangeEpoch} />
+              <ComposerPanel />
             </div>
           )}
         </div>

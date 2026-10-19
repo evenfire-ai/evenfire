@@ -322,7 +322,6 @@ describe.each([
   it('grows, caps scrolling, and shrinks its text viewport without covering it with actions', () => {
     const { container, rerender } = render(<ComposerPanel inline={inline} />)
     const textarea = screen.getByTestId('chat-input') as HTMLTextAreaElement
-    const editor = container.querySelector('.composer-markdown-editor') as HTMLElement
     const shell = container.querySelector('.composer-input-shell')
     const viewport = container.querySelector('.composer-textarea-viewport')
     const toolbar = container.querySelector('.composer-input-actions')
@@ -336,12 +335,12 @@ describe.each([
 
     setScrollHeight(textarea, 96)
     fireEvent.change(textarea, { target: { value: 'first\nsecond\nthird' } })
-    expect(editor.style.height).toBe('96px')
+    expect(textarea.style.height).toBe('96px')
     expect(textarea.style.overflowY).toBe('hidden')
 
     setScrollHeight(textarea, 1000)
     fireEvent.change(textarea, { target: { value: 'a very long draft' } })
-    expect(editor.style.height).toBe('240px')
+    expect(textarea.style.height).toBe('240px')
     expect(textarea.style.overflowY).toBe('auto')
 
     draftState.value = 'a very long draft'
@@ -349,7 +348,7 @@ describe.each([
     draftState.value = ''
     setScrollHeight(textarea, inline ? 48 : 56)
     rerender(<ComposerPanel inline={inline} />)
-    expect(editor.style.height).toBe(inline ? '48px' : '56px')
+    expect(textarea.style.height).toBe(inline ? '48px' : '56px')
     expect(textarea.style.overflowY).toBe('hidden')
   })
 
@@ -441,7 +440,7 @@ describe('ComposerPanel EvenDrive picker', () => {
     expect(globalFilesMock.modalProps?.attachedIds).toEqual(['global-file:main:aaaa'])
   })
 
-  it('inserts exact resource Markdown after selected text and keeps the picker open', async () => {
+  it('inserts the exact raw resource URI after selected text and keeps the picker open', async () => {
     globalFilesMock.showComposerItem = true
     Object.assign(composerState, { activeChatId: 'chat-1' })
     const initialDraft = 'keep this text'
@@ -460,17 +459,20 @@ describe('ComposerPanel EvenDrive picker', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Insert EvenDrive link' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Insert fixture link' }))
 
-    const inserted = 'keep this[Plan \\[2026\\]](gfs://main/0123456789abcdef0123456789abcdef)  text'
+    const inserted = 'keep thisgfs://main/0123456789abcdef0123456789abcdef  text'
     await waitFor(() => expect(getComposerDraft('chat-1', 'agent-1')).toBe(inserted))
     rerender(<ComposerPanel inline={false} />)
-    const caretAfterLink = inserted.indexOf('  text') + 1
-    await waitFor(() => expect(textarea.selectionStart).toBe(caretAfterLink))
-    expect(textarea.selectionEnd).toBe(caretAfterLink)
+    const caretAfterUri = inserted.indexOf('  text') + 1
+    await waitFor(() => expect(textarea.selectionStart).toBe(caretAfterUri))
+    expect(textarea.selectionEnd).toBe(caretAfterUri)
     await waitFor(() => expect(document.activeElement).toBe(textarea))
     expect(screen.getByRole('menuitem', { name: 'Insert fixture link' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Add context' }).getAttribute('aria-expanded')).toBe(
       'true'
     )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    expect(actionsMock.handleSendAgentMessage).toHaveBeenCalledWith(inserted)
   })
 
   it('rejects an insertion callback retained from a previous picker session', async () => {
@@ -547,64 +549,21 @@ describe('ComposerPanel EvenDrive picker', () => {
   })
 })
 
-describe('ComposerPanel Markdown link presentation', () => {
-  it('shows authored labels, opens the canonical source range, and preserves the draft', async () => {
-    const source = 'before [Project Plan](gfs://main/0123456789abcdef0123456789abcdef) after'
+describe('ComposerPanel plain GFS references', () => {
+  it('keeps the canonical URI visible and sends the exact source without a rich preview', () => {
+    const source = 'before gfs://main/0123456789abcdef0123456789abcdef after'
     draftState.value = source
     setComposerDraft('chat-1', source, 'agent-1')
     Object.assign(composerState, { activeChatId: 'chat-1' })
 
     const { container } = render(<ComposerPanel inline={false} />)
 
-    const visibleLink = screen.getByRole('link', { name: 'Project Plan' })
-    expect(visibleLink).toBeTruthy()
-    expect(container.querySelector('.composer-markdown-preview')?.textContent).toBe(
-      'before Project Plan after'
-    )
-    fireEvent.click(visibleLink)
-
     const textarea = screen.getByTestId('chat-input') as HTMLTextAreaElement
-    const start = source.indexOf('[Project Plan]')
-    const end = source.indexOf(') after') + 1
-    await waitFor(() => {
-      expect(document.activeElement).toBe(textarea)
-      expect(textarea.selectionStart).toBe(start)
-      expect(textarea.selectionEnd).toBe(end)
-    })
     expect(textarea.value).toBe(source)
-    expect(getComposerDraft('chat-1', 'agent-1')).toBe(source)
-
-    fireEvent.blur(textarea)
-    expect(await screen.findByRole('link', { name: 'Project Plan' })).toBeTruthy()
-  })
-
-  it('edits adjacent multiline Markdown links without changing the sent source', async () => {
-    const initial =
-      '[First](gfs://main/0123456789abcdef0123456789abcdef)[Second](gfs://main/abcdefabcdefabcdefabcdefabcdefab)'
-    const edited =
-      'Read [Release notes](gfs://main/0123456789abcdef0123456789abcdef) and [Plan](gfs://main/abcdefabcdefabcdefabcdefabcdefab).\nKeep this line.'
-    draftState.value = initial
-    draftState.set.mockImplementation(value => {
-      draftState.value = value
-      setComposerDraft('chat-1', value, 'agent-1')
-    })
-    setComposerDraft('chat-1', initial, 'agent-1')
-    Object.assign(composerState, { activeChatId: 'chat-1' })
-
-    const view = render(<ComposerPanel inline={false} />)
-    fireEvent.click(screen.getByRole('link', { name: 'First' }))
-
-    let textarea = screen.getByTestId('chat-input') as HTMLTextAreaElement
-    await waitFor(() => expect(document.activeElement).toBe(textarea))
-    fireEvent.change(textarea, { target: { value: edited, selectionStart: edited.length } })
-    expect(draftState.set).toHaveBeenLastCalledWith(edited)
-    expect(getComposerDraft('chat-1', 'agent-1')).toBe(edited)
-
-    view.rerender(<ComposerPanel inline={false} />)
-    textarea = screen.getByTestId('chat-input') as HTMLTextAreaElement
-    expect(textarea.value).toBe(edited)
+    expect(container.querySelector('.composer-markdown-preview')).toBeNull()
+    expect(screen.queryByRole('link')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
-    expect(actionsMock.handleSendAgentMessage).toHaveBeenCalledWith(edited)
+    expect(actionsMock.handleSendAgentMessage).toHaveBeenCalledWith(source)
   })
 })
 

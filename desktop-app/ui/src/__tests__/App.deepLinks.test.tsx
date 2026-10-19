@@ -13,7 +13,6 @@ import {
   recordLatestGfsConversationContext,
 } from '@lib/gfsConversationPrefill'
 import type { GfsResourceActionId, GfsResourceActionRequest } from '@lib/gfsResourceActions'
-import { gfsResourceLabelResolver } from '@lib/gfsResourceLabelResolver'
 import {
   type GfsResourceNavigationRequest,
   assignGfsResourceNavigationOwner,
@@ -103,6 +102,7 @@ const appHeaderHarness = vi.hoisted(() => ({
     placement?: 'default' | 'titlebar'
     searchFocusRequestId?: number
     notificationOpenRequestId?: number
+    gfsAuthorizationChangeEpoch?: number
     onOpenGfsResource?: (uri: string) => void
     onToggleChatDrawer?: () => void
   },
@@ -278,7 +278,7 @@ vi.mock('@pages/ChatPage', async () => {
   const { useNavigationContext } = await import('@contexts/NavigationContext')
   const { useComposerDraft } = await import('@hooks/useComposerDraft')
   return {
-    ChatPage: (props: { remoteGfsChangeEpoch?: number }) => {
+    ChatPage: () => {
       const { composerFocusRequestId } = useChatComposerStateContext()
       const { selectedAgent } = useNavigationContext()
       const [draft] = useComposerDraft(null, selectedAgent ?? undefined)
@@ -291,7 +291,6 @@ vi.mock('@pages/ChatPage', async () => {
           data-testid="chat-page-surface"
           data-composer-focus-request-id={composerFocusRequestId}
           data-composer-draft={draft}
-          data-remote-gfs-change-epoch={props.remoteGfsChangeEpoch ?? -1}
           ref={composerRef}
           value={draft}
           readOnly
@@ -905,7 +904,7 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
   })
 
-  it('forwards the real App GFS invalidation epoch into the ChatPage rendering boundary', async () => {
+  it('forwards the App GFS invalidation epoch to HeaderActions search', async () => {
     type TestGfsInvalidation = {
       type: 'scope.invalidated'
       schemaVersion: 1
@@ -938,8 +937,8 @@ describe('App deep-link orchestration', () => {
     } as Partial<AppController>)
 
     render(<App />)
-    const chatSurface = await screen.findByTestId('chat-page-surface')
-    expect(chatSurface.getAttribute('data-remote-gfs-change-epoch')).toBe('0')
+    await screen.findByTestId('chat-page-surface')
+    expect(appHeaderHarness.props?.gfsAuthorizationChangeEpoch).toBe(0)
     await waitFor(() => expect(emitEntityChange).toBeTypeOf('function'))
 
     act(() =>
@@ -951,19 +950,13 @@ describe('App deep-link orchestration', () => {
       })
     )
 
-    await waitFor(() =>
-      expect(
-        screen.getByTestId('chat-page-surface').getAttribute('data-remote-gfs-change-epoch')
-      ).toBe('1')
-    )
+    await waitFor(() => expect(appHeaderHarness.props?.gfsAuthorizationChangeEpoch).toBe(1))
 
     act(() => currentController.handleNavSelect(DESKTOP_ROUTES.files))
     await waitFor(() => expect(appHeaderHarness.props?.onToggleChatDrawer).toBeTypeOf('function'))
     act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
     await waitFor(() => expect(screen.getByTestId('chat-page-surface')).toBeTruthy())
-    expect(
-      screen.getByTestId('chat-page-surface').getAttribute('data-remote-gfs-change-epoch')
-    ).toBe('1')
+    expect(appHeaderHarness.props?.gfsAuthorizationChangeEpoch).toBe(1)
 
     act(() =>
       emitEntityChange?.({
@@ -973,15 +966,10 @@ describe('App deep-link orchestration', () => {
         scopes: ['authorization'],
       })
     )
-    await waitFor(() =>
-      expect(
-        screen.getByTestId('chat-page-surface').getAttribute('data-remote-gfs-change-epoch')
-      ).toBe('2')
-    )
+    await waitFor(() => expect(appHeaderHarness.props?.gfsAuthorizationChangeEpoch).toBe(2))
   })
 
-  it('advances the GFS label epoch across logout and same-principal relogin', async () => {
-    const setActivePrincipal = vi.spyOn(gfsResourceLabelResolver, 'setActivePrincipal')
+  it('advances the GFS search epoch across logout and same-principal relogin', async () => {
     currentController = makeController({
       initialExperienceLoading: false,
       selectedAgent: 'agent-a',
@@ -994,9 +982,8 @@ describe('App deep-link orchestration', () => {
     } as Partial<AppController>)
     render(<App />)
 
-    expect(
-      (await screen.findByTestId('chat-page-surface')).getAttribute('data-remote-gfs-change-epoch')
-    ).toBe('0')
+    await screen.findByTestId('chat-page-surface')
+    expect(appHeaderHarness.props?.gfsAuthorizationChangeEpoch).toBe(0)
 
     act(() => {
       currentController.isAuthenticated = false
@@ -1004,7 +991,6 @@ describe('App deep-link orchestration', () => {
       forceControllerRender()
     })
     await waitFor(() => expect(screen.queryByTestId('chat-page-surface')).toBeNull())
-    await waitFor(() => expect(setActivePrincipal).toHaveBeenCalledWith(null))
 
     act(() => {
       currentController.isAuthenticated = true
@@ -1012,11 +998,8 @@ describe('App deep-link orchestration', () => {
       forceControllerRender()
     })
 
-    expect(
-      (await screen.findByTestId('chat-page-surface')).getAttribute('data-remote-gfs-change-epoch')
-    ).toBe('2')
-    expect(setActivePrincipal).not.toHaveBeenCalledWith('user-a:user-a@example.com')
-    setActivePrincipal.mockRestore()
+    await screen.findByTestId('chat-page-surface')
+    expect(appHeaderHarness.props?.gfsAuthorizationChangeEpoch).toBe(2)
   })
 
   it('opens the existing route dialog from a sidebar row without selecting that row', async () => {
