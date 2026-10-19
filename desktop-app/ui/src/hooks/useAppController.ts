@@ -838,7 +838,9 @@ export function useAppController() {
           notif.resetNotifications()
           activeAuthenticatedSessionIdentityRef.current = null
           authenticatedSessionIdentityRef.current = null
-          if (!preserveNav) nav.handleNavSelect(DESKTOP_ROUTES.chat)
+          if (!preserveNav) {
+            nav.handleNavSelect(DESKTOP_ROUTES.chat, { source: 'programmatic' })
+          }
           return
         }
 
@@ -862,7 +864,7 @@ export function useAppController() {
           setPostPaintDataReady(true)
         }
         if (!preserveNav) {
-          nav.handleNavSelect(DESKTOP_ROUTES.chat)
+          nav.handleNavSelect(DESKTOP_ROUTES.chat, { source: 'programmatic' })
         }
       } finally {
         auth.refreshRuntimeConfigState().catch(() => undefined)

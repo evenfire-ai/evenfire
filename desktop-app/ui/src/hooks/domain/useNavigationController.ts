@@ -154,37 +154,49 @@ export function useNavigationController() {
   // (`useAppController.handleNavSelect`) loads exactly that value instead of
   // re-deriving the same rule in its own layer, so the loaded chat can never
   // drift from the focused one (D4).
-  const focusChatSection = useCallback((): { agentRef: string; chatId: string } | null => {
-    beginUserNavigationIntent()
-    setAppsPickerActive(false)
-    const current = workspaceTabsRef.current
-    const active = activeWorkspaceTab(current)
-    // Precedence (mini-spec 08 §1): the active chat wins (no re-homing); else
-    // RESUME the last active chat tab the user left — validated live against the
-    // store so a not-yet-reflected close cannot resurrect a stale id — rather than
-    // the last chat by array order; else the last chat by order (first boot, no
-    // last-active); else seed a blank.
-    const lastActiveId = lastActiveChatTabIdRef.current
-    const resumeTarget =
-      lastActiveId !== null
-        ? current.tabs.find(tab => tab.id === lastActiveId && tab.kind === 'chat')
-        : undefined
-    const target =
-      active?.kind === 'chat'
-        ? active
-        : (resumeTarget ?? [...current.tabs].reverse().find(tab => tab.kind === 'chat'))
-    if (target) {
-      setWorkspaceTabs(state =>
-        state.activeTabId === target.id ? state : { ...state, activeTabId: target.id }
-      )
-      return target.chat?.agentRef && target.chat.chatId
-        ? { agentRef: target.chat.agentRef, chatId: target.chat.chatId }
-        : null
-    }
-    const id = nextWorkspaceTabId()
-    setWorkspaceTabs(state => newChatTab(state, id, null))
-    return null
-  }, [beginUserNavigationIntent, nextWorkspaceTabId])
+  const focusChatSection = useCallback(
+    (
+      source: 'explicit' | 'programmatic' = 'explicit'
+    ): { agentRef: string; chatId: string } | null => {
+      if (source === 'explicit') {
+        beginUserNavigationIntent()
+      } else if (navigationIntentSequenceRef.current > 0) {
+        // A session/bootstrap continuation may select the default Chat route
+        // only while no explicit navigation has happened in this renderer.
+        // In particular, it must not replace a tab selected while auth loads.
+        return null
+      }
+      setAppsPickerActive(false)
+      const current = workspaceTabsRef.current
+      const active = activeWorkspaceTab(current)
+      // Precedence (mini-spec 08 §1): the active chat wins (no re-homing); else
+      // RESUME the last active chat tab the user left — validated live against the
+      // store so a not-yet-reflected close cannot resurrect a stale id — rather than
+      // the last chat by array order; else the last chat by order (first boot, no
+      // last-active); else seed a blank.
+      const lastActiveId = lastActiveChatTabIdRef.current
+      const resumeTarget =
+        lastActiveId !== null
+          ? current.tabs.find(tab => tab.id === lastActiveId && tab.kind === 'chat')
+          : undefined
+      const target =
+        active?.kind === 'chat'
+          ? active
+          : (resumeTarget ?? [...current.tabs].reverse().find(tab => tab.kind === 'chat'))
+      if (target) {
+        setWorkspaceTabs(state =>
+          state.activeTabId === target.id ? state : { ...state, activeTabId: target.id }
+        )
+        return target.chat?.agentRef && target.chat.chatId
+          ? { agentRef: target.chat.agentRef, chatId: target.chat.chatId }
+          : null
+      }
+      const id = nextWorkspaceTabId()
+      setWorkspaceTabs(state => newChatTab(state, id, null))
+      return null
+    },
+    [beginUserNavigationIntent, nextWorkspaceTabId]
+  )
 
   /**
    * Activate a chat tab so `navItem` derives to `chat` in the same commit as the
@@ -385,11 +397,16 @@ export function useNavigationController() {
   // coordinator can load exactly that conversation; `null` for every other route
   // and for a blank/seeded chat.
   const handleNavSelect = useCallback(
-    (item: NavItem): { agentRef: string; chatId: string } | null => {
+    (
+      item: NavItem,
+      options: { source?: 'explicit' | 'programmatic' } = {}
+    ): { agentRef: string; chatId: string } | null => {
+      const source = options.source ?? 'explicit'
+      if (source === 'programmatic' && navigationIntentSequenceRef.current > 0) return null
       if (item === DESKTOP_ROUTES.chat) {
         setSelectedAgent(null)
         setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
-        return focusChatSection()
+        return focusChatSection(source)
       }
       if (item === DESKTOP_ROUTES.apps) {
         showAppsPicker()
