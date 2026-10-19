@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import bcrypt from 'bcryptjs'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
-import { type DbClient, initDb } from '../src/db.js'
+import { type DbTransactionClient, type DbTransactionOptions, initDb } from '../src/db.js'
 import type { AuthClaims } from '../src/profileTypes.js'
 import type { EffectiveUserAccessPolicy } from '../src/services/access/userAccessPolicy.js'
 import { exchangeLegacyExternalUserSession } from '../src/services/auth/externalSessionIssuance.js'
@@ -41,19 +41,16 @@ vi.mock('../src/db.js', async importOriginal => {
   const pool = {
     query: (text: string, values?: unknown[]) => producerDatabase.pool!.query(text, values),
   }
-  const withTransaction = async <T>(work: (db: DbClient) => Promise<T>): Promise<T> => {
-    const client = await producerDatabase.pool!.connect()
-    try {
-      await client.query('BEGIN')
-      const result = await work(client as unknown as DbClient)
-      await client.query('COMMIT')
-      return result
-    } catch (error) {
-      await client.query('ROLLBACK')
-      throw error
-    } finally {
-      client.release()
-    }
+  const withTransaction = <T>(
+    work: (db: DbTransactionClient) => Promise<T>,
+    txPoolOrOptions?: Pool | DbTransactionOptions,
+    explicitOptions: DbTransactionOptions = {}
+  ): Promise<T> => {
+    const options: DbTransactionOptions =
+      txPoolOrOptions && typeof (txPoolOrOptions as Pool).connect !== 'function'
+        ? (txPoolOrOptions as DbTransactionOptions)
+        : explicitOptions
+    return actual.withTransaction(work, producerDatabase.pool!, options)
   }
   return { ...actual, pool, withTransaction }
 })

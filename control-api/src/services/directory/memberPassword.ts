@@ -1,6 +1,7 @@
 import bcrypt from 'bcryptjs'
 import { type DbClient, pool } from '../../db.js'
 import { type MemberPasswordWorkLease, runPasswordMutation } from '../auth/passwordWorkOwnership.js'
+import { revokeAllUserSessions } from '../auth/userSessionService.js'
 import {
   type InvitationUserRow,
   ensureInvitationUser,
@@ -121,6 +122,7 @@ export async function setInvitationPasswordForUser(
       if (!(await updateActivePasswordHash(db, user.id, passwordHash))) {
         return { error: 'user_retired' as const }
       }
+      await revokeAllUserSessions(user.id, 'password_changed', db)
 
       if (!invitation.accepted_user_id) {
         await db.query(`UPDATE invitations SET accepted_user_id = $2 WHERE id = $1`, [
@@ -192,6 +194,7 @@ export async function setInvitationPasswordForEmail(
       if (!(await updateActivePasswordHash(db, user.id, passwordHash))) {
         return { error: 'user_retired' as const }
       }
+      await revokeAllUserSessions(user.id, 'password_changed', db)
 
       const redeemed = await db.query(
         `UPDATE invitations
@@ -278,6 +281,7 @@ export async function updateUserPassword(
         ]
       )
       if (update.rows.length !== 1) return { error: 'credential_changed' as const }
+      await revokeAllUserSessions(normalizedUserId, 'password_changed', db)
       return { updated: true as const }
     },
     { mode: 'standard' }
