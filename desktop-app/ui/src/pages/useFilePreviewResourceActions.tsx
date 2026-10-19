@@ -132,9 +132,26 @@ export function useFilePreviewResourceActions({
   const affordances: ResourceAffordances | undefined = affordancesQuery.isError
     ? undefined
     : affordancesQuery.data
+  const sourceParentId = resource?.parentResourceId ?? null
+  const sourceParentAffordancesQuery = useQuery({
+    queryKey: desktopQueryKeys.gfsAffordances(sessionScope, sourceParentId ?? gfsUri, drive),
+    queryFn: () => window.clerum.gfs.affordances(sourceParentId!, drive),
+    enabled: Boolean(canResolve && resource?.kind === 'file' && sourceParentId),
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: 'always',
+  })
+  const sourceParentAffordances: ResourceAffordances | undefined =
+    sourceParentAffordancesQuery.isError ? undefined : sourceParentAffordancesQuery.data
   const canShare = Boolean(canResolve && affordances?.canDelegate)
   const canRename = Boolean(canResolve && affordances?.held.includes('write'))
   const canDelete = Boolean(canResolve && affordances?.held.includes('delete'))
+  const canMove = Boolean(
+    canResolve &&
+    resource?.kind === 'file' &&
+    sourceParentId &&
+    sourceParentAffordances?.held.includes('write') &&
+    sourceParentAffordances.held.includes('delete')
+  )
 
   const grantsQuery = useQuery({
     queryKey: desktopQueryKeys.gfsGrants(sessionScope, resourceId || gfsUri, drive),
@@ -181,6 +198,11 @@ export function useFilePreviewResourceActions({
   useEffect(() => {
     if (affordancesQuery.error) onAuthorityFailure(errorMessage(affordancesQuery.error))
   }, [affordancesQuery.error, onAuthorityFailure])
+  useEffect(() => {
+    if (sourceParentAffordancesQuery.error) {
+      onAuthorityFailure(errorMessage(sourceParentAffordancesQuery.error))
+    }
+  }, [onAuthorityFailure, sourceParentAffordancesQuery.error])
   useEffect(() => {
     for (const error of [grantsQuery.error, sharesQuery.error, inheritedQuery.error]) {
       if (error) onAuthorityFailure(errorMessage(error))
@@ -243,7 +265,7 @@ export function useFilePreviewResourceActions({
         setRenameOpen(true)
       },
       move: () => {
-        if (resource?.kind === 'file' && canResolve) setMoveOpen(true)
+        if (resource?.kind === 'file' && canMove) setMoveOpen(true)
       },
       download: () => {
         if (resource?.kind !== 'file' || !canResolve) return
@@ -262,7 +284,17 @@ export function useFilePreviewResourceActions({
         if (canDelete) setDeleteOpen(true)
       },
     }),
-    [canDelete, canRename, canResolve, fileName, gfsUri, onAuthorityFailure, pushToast, resource]
+    [
+      canDelete,
+      canMove,
+      canRename,
+      canResolve,
+      fileName,
+      gfsUri,
+      onAuthorityFailure,
+      pushToast,
+      resource,
+    ]
   )
 
   const handleRename = async () => {
@@ -295,9 +327,16 @@ export function useFilePreviewResourceActions({
   }
 
   const handleMove = async (destinationId: string, destinationName: string) => {
-    if (!resource) return
+    if (!resource || !canMove) return
     setMutationPending(true)
     try {
+      const destinationAffordances = await window.clerum.gfs.affordances(
+        destinationId,
+        resource.drive
+      )
+      if (!destinationAffordances.held.includes('write')) {
+        throw new Error('You do not have write access to the destination folder.')
+      }
       await window.clerum.gfs.moveResource(
         resource.resourceId,
         destinationId,
@@ -595,7 +634,7 @@ export function useFilePreviewResourceActions({
     dialogs,
     canShare,
     canRename,
-    canMove: Boolean(resource?.kind === 'file' && canResolve),
+    canMove,
     canDownload: Boolean(resource?.kind === 'file' && canResolve),
     canDelete,
     mutating: mutationPending,
