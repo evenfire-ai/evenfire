@@ -91,6 +91,8 @@ const REASON_MESSAGES: Record<DocumentReadReason, string> = {
     'The arguments do not select content of this document: check pages, sheet, mode and cursor (pages and mode apply to PDF only, sheet to XLSX only, cursor must come from a previous result).',
   visual_not_supported:
     'The current model does not accept image input, so mode "visual" is unavailable.',
+  host_memory_unavailable:
+    'The Host has too little free memory to start the document reader right now. The document is not the cause; try again later.',
 }
 
 const EXHAUSTED_MESSAGE =

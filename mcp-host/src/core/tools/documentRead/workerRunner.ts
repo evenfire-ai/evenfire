@@ -255,11 +255,8 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
     }
     if (!caps) {
       release()
-      return {
-        ok: false,
-        reason: 'document_limits_exceeded',
-        limit: 'heap',
-      } as DocumentJobOutcome<J>
+      // The Host lacks headroom before any document byte is parsed.
+      return { ok: false, reason: 'host_memory_unavailable' } as DocumentJobOutcome<J>
     }
     const memoryCaps = caps
     return new Promise<DocumentJobOutcome<J>>((resolve, reject) => {

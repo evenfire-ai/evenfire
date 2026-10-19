@@ -129,11 +129,8 @@ describe('document reader Host memory admission and queue', () => {
     samplers(sample)
     const child = childFixture()
     vi.mocked(spawn).mockReturnValueOnce(child)
-    expect(await runDocumentJob(job)).toEqual({
-      ok: false,
-      reason: 'document_limits_exceeded',
-      limit: 'heap',
-    })
+    // The Host lacks headroom: not a document limit.
+    expect(await runDocumentJob(job)).toEqual({ ok: false, reason: 'host_memory_unavailable' })
     expect(sample).toHaveBeenCalledTimes(1)
     expect(spawn).toHaveBeenCalledTimes(0)
     currentBytes = 256 * MIB

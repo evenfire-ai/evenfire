@@ -92,6 +92,7 @@ export type DocumentReadReason =
   | 'document_limits_exceeded'
   | 'invalid_range'
   | 'visual_not_supported'
+  | 'host_memory_unavailable'
 
 /** Which bound a `document_limits_exceeded` hit. */
 export type DocumentLimitName =
@@ -372,6 +373,7 @@ export type DocumentJobOutcome<J extends DocumentJob> = J extends PdfTextJob
 /**
  * Queues one job per Host process, then runs it in a fresh child. Linux
  * cgroup-v2 headroom narrows configured caps; insufficient admission headroom
+ * resolves `{ ok:false, reason:'host_memory_unavailable' }` without spawning,
  * and child/container memory overruns resolve with limit:'heap'. An unreadable
  * or v1 cgroup rejects as a worker defect. macOS uses configured caps.
  * Resolves with the job's outcome; a timeout
