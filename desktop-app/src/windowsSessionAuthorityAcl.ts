@@ -301,6 +301,7 @@ try {
   $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
   $systemSid = 'S-1-5-18'
   $administratorsSid = 'S-1-5-32-544'
+  $trustedInstallerSid = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
   $allowed = @($currentSid, $systemSid, $administratorsSid)
   $mutatingMask = [uint32](0x00000002 -bor 0x00000004 -bor 0x00000010 -bor 0x00000040 -bor 0x00000100 -bor 0x00010000 -bor 0x00040000 -bor 0x00080000)
   $traverseMask = [uint32](0x00000020 -bor 0x00000080)
@@ -325,6 +326,7 @@ try {
     if ($sid -eq $currentSid) { return 'current-user' }
     if ($sid -eq $systemSid) { return 'system' }
     if ($sid -eq $administratorsSid) { return 'administrators' }
+    if ($sid -eq $trustedInstallerSid) { return 'trusted-installer' }
     return 'other'
   }
   function Test-PrincipalRules($snapshot, [bool]$privateObject, [string]$policyPhase) {
@@ -506,7 +508,11 @@ function sanitizedWindowsAclFailure(stdout: string): {
         continue
       }
       if (field === 'ownerClass') {
-        if (['current-user', 'system', 'administrators', 'other'].includes(item as string)) {
+        if (
+          ['current-user', 'system', 'administrators', 'trusted-installer', 'other'].includes(
+            item as string
+          )
+        ) {
           safe[field] = item as string
         }
         continue
