@@ -46,6 +46,19 @@ async function queryWithDatabaseClock(sql: string, values?: unknown[]) {
   return mocks.query(sql, values)
 }
 
+async function queryWithPasswordWorkLease(sql: string, values?: unknown[]) {
+  if (sql.includes('SET LOCAL synchronous_commit = on')) {
+    return { rows: [], rowCount: 0 }
+  }
+  if (sql.includes('INSERT INTO password_verification_work')) {
+    return { rows: [{ singleton: true }], rowCount: 1 }
+  }
+  if (sql.includes('DELETE FROM password_verification_work')) {
+    return { rows: [{ singleton: true }], rowCount: 1 }
+  }
+  return queryWithDatabaseClock(sql, values)
+}
+
 function activeInvitationWindow() {
   return {
     created_at: new Date(Date.now() - 60_000),
@@ -60,7 +73,12 @@ describe('directory privacy and atomic authorization', () => {
     mocks.appendEvents.mockClear()
     mocks.registerInvitation.mockReset()
     mocks.registerInvitation.mockResolvedValue(undefined)
-    mocks.withTransaction.mockImplementation(async work => work({ query: queryWithDatabaseClock }))
+    mocks.withTransaction.mockImplementation(async (work, _client, hooks) => {
+      const result = await work({ query: queryWithPasswordWorkLease })
+      const callbacks = hooks as { onCommitAcknowledged?: () => void } | undefined
+      callbacks?.onCommitAcknowledged?.()
+      return result
+    })
   })
 
   it('projects managed members only through teams the caller currently manages', async () => {
@@ -491,6 +509,7 @@ describe('directory privacy and atomic authorization', () => {
         }
       }
       if (sql.includes('INSERT INTO profiles')) return { rows: [], rowCount: 0 }
+      if (sql.includes('UPDATE profiles')) return { rows: [], rowCount: 1 }
       if (sql.includes("SET status = 'accepted'")) {
         if (status !== 'pending') return { rows: [], rowCount: 0 }
         status = 'accepted'
@@ -643,21 +662,20 @@ describe('directory privacy and atomic authorization', () => {
 
     for (const operation of [
       () => setInvitationPasswordForUser(TARGET, invitation.email, invitation.id, 'valid-password'),
-      () =>
-        setInvitationPasswordForEmail(
-          invitation.email,
-          invitation.token,
-          invitation.id,
-          'valid-password'
-        ),
+      () => setInvitationPasswordForEmail(invitation.email, invitation.id, 'valid-password'),
     ]) {
       mocks.query.mockReset()
       mocks.query.mockImplementation(async (sql: string) => {
         if (
           sql.includes('FROM invitations i') &&
-          (sql.includes('WHERE i.id::text = $1') || sql.includes('WHERE i.token = $1'))
+          (sql.includes('i.id::text = $1') || sql.includes('i.token = $1'))
         ) {
-          return { rows: [invitation], rowCount: 1 }
+          return {
+            rows: [
+              sql.includes('FOR UPDATE OF i') ? { ...invitation, status: 'accepted' } : invitation,
+            ],
+            rowCount: 1,
+          }
         }
         if (sql.includes('FROM users') && sql.includes('WHERE email = $1')) {
           return {
@@ -681,12 +699,11 @@ describe('directory privacy and atomic authorization', () => {
       await expect(operation()).resolves.toEqual({ error: 'not_pending' })
       const sql = mocks.query.mock.calls.map(call => String(call[0])).join('\n')
       expect(sql).toContain('FOR UPDATE OF i')
-      expect(sql).toContain("AND status = 'pending'")
       expect(sql).not.toContain('SET password_hash')
     }
   })
 
-  it('atomically accepts a pending member invitation with first password setup', async () => {
+  it('accepts a member invitation before first password setup', async () => {
     const invitation = {
       id: '00000000-0000-4000-8000-000000000200',
       team_id: TEAM_A,
@@ -710,7 +727,7 @@ describe('directory privacy and atomic authorization', () => {
     mocks.query.mockImplementation(async (sql: string) => {
       if (
         sql.includes('FROM invitations i') &&
-        (sql.includes('WHERE i.token = $1') || sql.includes('WHERE i.id::text = $1'))
+        (sql.includes('i.token = $1') || sql.includes('i.id::text = $1'))
       ) {
         return {
           rows: [
@@ -728,12 +745,15 @@ describe('directory privacy and atomic authorization', () => {
               name: 'New user',
               picture: null,
               password_hash: passwordHash,
+              lifecycle_state: 'active',
+              lifecycle_version: lifecycleVersion,
             },
           ],
           rowCount: 1,
         }
       }
       if (sql.includes('INSERT INTO profiles')) return { rows: [], rowCount: 0 }
+      if (sql.includes('UPDATE profiles')) return { rows: [], rowCount: 1 }
       if (sql.includes("SET status = 'accepted'")) {
         if (status !== 'pending') return { rows: [], rowCount: 0 }
         status = 'accepted'
@@ -751,15 +771,16 @@ describe('directory privacy and atomic authorization', () => {
       }
       if (sql.includes('SET password_hash = $2')) {
         passwordHash = 'stored-hash'
-        return { rows: [], rowCount: 1 }
-      }
-      if (sql.includes('SET lifecycle_version = lifecycle_version + 1')) {
         lifecycleVersion += 1
         lifecycleAdvances += 1
         return { rows: [{ lifecycle_version: lifecycleVersion }], rowCount: 1 }
       }
-      if (sql.includes('SELECT id') && sql.includes('FROM users') && sql.includes('FOR UPDATE')) {
-        return { rows: [{ id: TARGET }], rowCount: 1 }
+      if (
+        sql.includes('SELECT id') &&
+        sql.includes('FROM users') &&
+        sql.includes('FOR NO KEY UPDATE')
+      ) {
+        return { rows: [{ id: TARGET, lifecycle_version: lifecycleVersion }], rowCount: 1 }
       }
       if (sql.includes('external_user_session_security_epochs')) return { rows: [], rowCount: 1 }
       if (sql.includes('UPDATE external_user_sessions')) return { rows: [], rowCount: 0 }
@@ -767,12 +788,10 @@ describe('directory privacy and atomic authorization', () => {
     })
 
     await expect(
-      setInvitationPasswordForEmail(
-        invitation.email,
-        invitation.token,
-        invitation.id,
-        'valid-password'
-      )
+      acceptInvitationForEmail(invitation.email, invitation.token, invitation.id)
+    ).resolves.toMatchObject({ data: { accepted: true, userId: TARGET, status: 'accepted' } })
+    await expect(
+      setInvitationPasswordForUser(TARGET, invitation.email, invitation.id, 'valid-password')
     ).resolves.toMatchObject({ data: { passwordUpdated: true, status: 'accepted' } })
     expect(status).toBe('accepted')
     expect(passwordHash).not.toBeNull()
@@ -780,18 +799,10 @@ describe('directory privacy and atomic authorization', () => {
     expect(lifecycleVersion).toBe(2)
     expect(lifecycleAdvances).toBe(1)
 
-    await expect(
-      setInvitationPasswordForEmail(
-        invitation.email,
-        invitation.token,
-        invitation.id,
-        'another-password'
-      )
-    ).resolves.toEqual({ error: 'not_pending' })
     expect(membershipWrites).toBe(1)
   })
 
-  it('rejects token-authenticated password setup after invitation acceptance', async () => {
+  it('rejects email-only password setup for a member invitation', async () => {
     const invitation = {
       id: '00000000-0000-4000-8000-000000000200',
       team_id: TEAM_A,
@@ -808,22 +819,19 @@ describe('directory privacy and atomic authorization', () => {
       team_name: 'Team A',
     }
     mocks.query.mockImplementation(async (sql: string) => {
-      if (sql.includes('FROM invitations i') && sql.includes('WHERE i.token = $1')) {
+      if (
+        sql.includes('FROM invitations i') &&
+        (sql.includes('i.token = $1') || sql.includes('i.id::text = $1'))
+      ) {
         return { rows: [invitation], rowCount: 1 }
       }
       throw new Error(`unexpected query: ${sql.slice(0, 40)}`)
     })
 
     await expect(
-      setInvitationPasswordForEmail(
-        invitation.email,
-        invitation.token,
-        invitation.id,
-        'attacker-password'
-      )
-    ).resolves.toEqual({ error: 'not_pending' })
+      setInvitationPasswordForEmail(invitation.email, invitation.id, 'attacker-password')
+    ).resolves.toEqual({ error: 'not_found' })
     const sql = mocks.query.mock.calls.map(call => String(call[0])).join('\n')
-    expect(sql).toContain('FOR UPDATE OF i')
     expect(sql).not.toContain('SET password_hash')
     expect(sql).not.toContain('external_user_session_security_epochs')
   })
@@ -976,9 +984,8 @@ describe('directory privacy and atomic authorization', () => {
     const currentHash = await bcrypt.hash('current-password', 4)
     mocks.query
       .mockResolvedValueOnce({ rows: [{ password_hash: currentHash }], rowCount: 1 })
-      .mockResolvedValueOnce({ rows: [{ id: MANAGER }], rowCount: 1 })
-      .mockResolvedValueOnce({ rows: [{ id: MANAGER }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ lifecycle_version: 2 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ id: MANAGER, lifecycle_version: 2 }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 2 })
 
@@ -986,21 +993,20 @@ describe('directory privacy and atomic authorization', () => {
       updateUserPassword(MANAGER, 'manager@example.com', 'current-password', 'next-password')
     ).resolves.toEqual({ updated: true })
 
-    expect(mocks.withTransaction).toHaveBeenCalledTimes(1)
+    expect(mocks.withTransaction).toHaveBeenCalledTimes(2)
     const passwordUpdate = String(mocks.query.mock.calls[1]?.[0])
+    expect(passwordUpdate).toContain('SET password_hash = $3')
+    expect(passwordUpdate).toContain('lifecycle_version = lifecycle_version + 1')
     expect(passwordUpdate).toContain('AND password_hash = $4')
-    expect(String(mocks.query.mock.calls[2]?.[0])).toContain('FOR UPDATE')
+    expect(passwordUpdate).toContain('RETURNING lifecycle_version')
+    expect(String(mocks.query.mock.calls[2]?.[0])).toContain('FOR NO KEY UPDATE')
     expect(String(mocks.query.mock.calls[3]?.[0])).toContain(
-      'SET lifecycle_version = lifecycle_version + 1'
-    )
-    expect(mocks.query.mock.calls[3]?.[1]).toEqual([MANAGER])
-    expect(String(mocks.query.mock.calls[4]?.[0])).toContain(
       'INSERT INTO external_user_session_security_epochs'
     )
-    expect(String(mocks.query.mock.calls[5]?.[0])).toContain('UPDATE external_user_sessions')
+    expect(String(mocks.query.mock.calls[4]?.[0])).toContain('UPDATE external_user_sessions')
     expect(
       mocks.query.mock.calls.filter(([sql]) =>
-        String(sql).includes('SET lifecycle_version = lifecycle_version + 1')
+        String(sql).includes('lifecycle_version = lifecycle_version + 1')
       )
     ).toHaveLength(1)
   })
