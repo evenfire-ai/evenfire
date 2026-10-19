@@ -40,6 +40,7 @@ import {
   type DocumentContinuation,
   type DocumentFormat,
   type DocumentJobFailure,
+  type DocumentLimitName,
   type DocumentReadLimit,
   type DocumentReadLimits,
   type DocumentReadReason,
@@ -764,10 +765,18 @@ export class DocumentReadTool implements Tool {
       }
     }
 
-    return this.fit(identity, cursor, measure, start, total, build, result =>
-      result.status === 'ok' && result.format === 'xlsx'
-        ? result.sheets.some(sheet => sheet.rows.length > 0)
-        : false
+    return this.fit(
+      identity,
+      cursor,
+      measure,
+      start,
+      total,
+      build,
+      result =>
+        result.status === 'ok' && result.format === 'xlsx'
+          ? result.sheets.some(sheet => sheet.rows.length > 0)
+          : false,
+      'row_width'
     )
   }
 
@@ -777,6 +786,8 @@ export class DocumentReadTool implements Tool {
    * Emits `build(total)` when it fits the page allowance; otherwise the
    * largest `build(n)` that fits and still carries content, found by binary
    * search over `n` with measurement only; otherwise the exhausted notice.
+   * When even one unit exceeds a full page allowance, a new turn cannot help:
+   * `oversized` names that limit as a typed failure instead of the notice.
    */
   private fit(
     identity: Identity,
@@ -785,7 +796,8 @@ export class DocumentReadTool implements Tool {
     start: number,
     total: number,
     build: (units: number, limit: DocumentReadLimit | null) => DocumentReadResult,
-    hasContent: (result: DocumentReadResult) => boolean
+    hasContent: (result: DocumentReadResult) => boolean,
+    oversized: DocumentLimitName | null = null
   ): ToolOutput {
     const noticeCost = measure(
       JSON.stringify(this.exhaustedResult(identity.attachmentId, identity.referenceId, cursor))
@@ -810,6 +822,13 @@ export class DocumentReadTool implements Tool {
         } else {
           hi = mid - 1
         }
+      }
+      if (best < 0 && limit === 'page_budget' && oversized) {
+        return this.failure(
+          identity,
+          { ok: false, reason: 'document_limits_exceeded', limit: oversized },
+          start
+        )
       }
       if (best < 0) return this.exhaustedOutput(identity, cursor, noticeCost)
       units = best

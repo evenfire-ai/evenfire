@@ -340,6 +340,63 @@ describe('DocumentReadTool budgets', () => {
     })
     expect(witness.body.status).toBe('ok')
   })
+
+  describe('an XLSX row wider than one page', () => {
+    const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    // 10 cells at the 2000-character cell cap: about 5000 tokens, above the
+    // 2000-token page of a 20k window.
+    const wideRow = Array.from({ length: 10 }, () => 'w'.repeat(2_000))
+    const xlsx = (rows: string[][]): XlsxOutcome => ({
+      ok: true,
+      sheetNames: ['Wide'],
+      sheets: [{ name: 'Wide', startRow: 1, rows, truncated: false }],
+    })
+
+    it('fails as row_width on a full page and emits a narrow row before it', async () => {
+      const file = admittedFile('xlsx-file', await valuesWorkbook(witnessCode()), XLSX_MIME)
+      const wide = await read(toolFor([file], fakeRunner(xlsx([wideRow])).runJob), {
+        attachmentId: 'xlsx-file',
+      })
+      expect(wide.output.is_error).toBe(true)
+      expect(wide.body).toMatchObject({
+        status: 'error',
+        reason: 'document_limits_exceeded',
+        limit: 'row_width',
+      })
+      // Control: a narrow first row fits and the wide row becomes the continuation.
+      const control = await read(toolFor([file], fakeRunner(xlsx([['narrow'], wideRow])).runJob), {
+        attachmentId: 'xlsx-file',
+      })
+      expect(control.body).toMatchObject({
+        status: 'ok',
+        sheets: [{ rows: [['narrow']] }],
+        continuation: { limit: 'page_budget' },
+      })
+    })
+
+    it('keeps the exhaustion notice when only the turn budget is short', async () => {
+      const file = admittedFile('xlsx-file', await valuesWorkbook(witnessCode()), XLSX_MIME)
+      const ledger = new AttachmentReadLedger()
+      const notice = measureResult(
+        JSON.stringify({
+          status: 'read_budget_exhausted',
+          attachmentId: 'xlsx-file',
+          referenceId: file.fileReference!.id,
+          message:
+            'The current-turn attachment read budget is exhausted. Reattach the file in a new message and pass resumeCursor as cursor to continue; earlier pages are not stored for re-reading.',
+        })
+      )
+      ledger.restore({ reads: 1, spentTokens: 0, bytesRead: 0 })
+      const spent = Math.max(0, ledger.pageAllowance(WINDOW_TOKENS, notice) - 100)
+      ledger.restore({ reads: 1, spentTokens: spent, bytesRead: 0 })
+      const result = await read(toolFor([file], fakeRunner(xlsx([wideRow])).runJob, { ledger }), {
+        attachmentId: 'xlsx-file',
+      })
+      // A new turn restores a full page, so the notice stays truthful here.
+      expect(result.body).toMatchObject({ status: 'read_budget_exhausted' })
+      expect(result.output.is_error).toBe(false)
+    })
+  })
 })
 
 describe('DocumentReadTool configured masking', () => {

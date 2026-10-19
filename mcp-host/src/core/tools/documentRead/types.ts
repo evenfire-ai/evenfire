@@ -104,6 +104,8 @@ export type DocumentLimitName =
   | 'output_bytes'
   | 'time'
   | 'heap'
+  /** One worksheet row alone does not fit a full page allowance. */
+  | 'row_width'
 
 // Key order is part of the contract, as in `clerum__attachment_read`: status,
 // format and paging fields first, content last, so a reader of the start of
