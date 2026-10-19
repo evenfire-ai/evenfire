@@ -6,10 +6,7 @@ import { requireInternalToken } from '../src/middleware/internalServiceAuth.js'
 import { createExternalInvitationsRouter } from '../src/routes/external/invitations.js'
 import { createExternalUsersRouter } from '../src/routes/external/users.js'
 import { PasswordAdmissionError } from '../src/services/auth/passwordCredentialVerification.js'
-import {
-  signExternalSessionToken,
-  verifyExternalSessionToken,
-} from '../src/utils/auth/externalSessionAuthToken.js'
+import { signExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
 import {
   type ExternalRestHttpProcess,
   boundedRequest as request,
@@ -810,21 +807,12 @@ describe('invitation/password producer response mappings', () => {
       purpose: 'password_reset',
       status: 'accepted',
       passwordUpdated: true,
+      reauthenticationRequired: true,
     })
     expect(response.body).not.toHaveProperty('token')
-    expect(String(response.headers['set-cookie'])).toContain('profile_session=')
+    expect(response.body).not.toHaveProperty('sessionContext')
+    expect(String(response.headers['set-cookie'])).toContain('profile_session=;')
     expect(String(response.headers['set-cookie'])).toContain('HttpOnly')
-    const cookie = String(response.headers['set-cookie']).match(/profile_session=([^;]+)/)?.[1]
-    expect(cookie).toBeTruthy()
-    const claims = verifyExternalSessionToken(decodeURIComponent(cookie!))
-    expect(claims).toMatchObject({
-      userId: preview.userId,
-      email: preview.email,
-      teamId: null,
-      role: 'member',
-      authGeneration: 7,
-    })
-    expect(claims!.exp).toBeGreaterThan(Math.floor(Date.now() / 1000))
 
     expect(directory.setInvitationPasswordForEmail).toHaveBeenCalledWith(
       preview.email,
@@ -1045,14 +1033,7 @@ describe('invitation/password producer response mappings', () => {
     }
   )
 
-  it.each([
-    'html',
-    'missing_session',
-    'empty_session',
-    'invalid_payload',
-    'legacy_busy',
-    'legacy_unavailable',
-  ] as const)(
+  it.each(['html', 'invalid_payload', 'legacy_busy', 'legacy_unavailable'] as const)(
     'alters only %s after real preview and serialized successful producer completion',
     async resetFault => {
       directory.setInvitationPasswordForEmail.mockResolvedValue({
