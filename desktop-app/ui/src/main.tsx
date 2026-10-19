@@ -1,5 +1,6 @@
 import React from 'react'
 import { QueryClientProvider } from '@tanstack/react-query'
+import '@uiw/react-md-editor/markdown-editor.css'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
 import './components/ArtifactsBadge.css'
