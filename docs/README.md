@@ -87,6 +87,7 @@ say so. [Design records](#design-records) are point-in-time and not maintained.
 | **Upgrade notes**                                                                |                                                                  |
 | [Workflow output PVC upgrade](deploy/workflow-output-pvc-upgrade.md)             | Per-recipe output PVC ownership change                           |
 | [Plugin Workload SDK upgrade](deploy/plugin-workload-sdk-upgrade.md)             | promptBridge / clientNotifications rollout order and migration   |
+| [Host PVC layout upgrade](deploy/host-pvc-layout-upgrade.md)                     | Upgrading stateless Hosts from v0.10.x / v0.11.x                 |
 | **Runbooks**                                                                     |                                                                  |
 | [GFS permission store](deploy/gfs-permission-store.md)                           | `gfs_controller` DB credential: provisioning, rotation, recovery |
 | [Password work ownership recovery](how-to/password-work-ownership-recovery.md)   | Recover the bcrypt work-bounding singleton                       |
@@ -112,6 +113,7 @@ Design-level explanations of specific subsystems. Read the overview first.
 | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
 | [Diagrams](architecture/diagrams/)                                                                 | Excalidraw sources                                                  |
 | [Stateless agent invariants](architecture/stateless-invariants.md)                                 | Guardrails for the suspend/wake agent lifecycle                     |
+| [Host storage layout](architecture/host-storage-layout.md)                                         | Workspace PVC layout, merge init, database failures, rollback rule  |
 | [HCC readiness flows](architecture/hcc-readiness-flows.md)                                         | Probe vs data-path readiness in host-context-controller             |
 | [Live entity-change semantics](architecture/live-entity-change-consumer-semantics.md)              | Latest-state convergence contract for live UI updates               |
 | [Governed tracing](architecture/governed-tracing.md)                                               | Control-plane evidence of what agents, admins, controllers did      |

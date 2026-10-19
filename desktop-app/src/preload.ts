@@ -663,7 +663,7 @@ const clerum = Object.freeze({
     getIndex: (agentRef: string) => ipcRenderer.invoke('chat:getIndex', { agentRef }),
     reconcileServerSessions: (
       agentRef: string,
-      sessions: Array<{ chatId: string; lastActivityAt?: string }>
+      sessions: Array<{ chatId: string; lastActivityAt?: string; title?: string }>
     ) => ipcRenderer.invoke('chat:reconcileSessions', { agentRef, sessions }),
     dismissOnboarding: (agentRef: string) =>
       ipcRenderer.invoke('chat:dismissOnboarding', { agentRef }),

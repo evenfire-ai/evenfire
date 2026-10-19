@@ -29,7 +29,7 @@ records it to a hash-chained audit log.
   `gfs://<drive>/<resourceId>` URI (`gfs-controller/src/api/read.ts`), stable
   across renames/moves — usable for deep links and for sharing one resource
   with someone who has no access to its parent folder.
-- **Grant vs. share.** A **grant** authorizes a *folder* (and everything
+- **Grant vs. share.** A **grant** authorizes a _folder_ (and everything
   under it); a **share** authorizes a single resource by its reference, for
   someone without folder access. Both are rows in the permission store, not
   filesystem ACLs (`gfs-controller/src/authz/`).
