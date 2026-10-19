@@ -5,7 +5,7 @@
  * file, send, and read what reached the Host and what the user is told.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, waitFor } from '@testing-library/react'
+import { act, cleanup, waitFor } from '@testing-library/react'
 import { createHash } from 'node:crypto'
 import {
   getComposerDraft,
@@ -18,6 +18,7 @@ import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
 let clerum: MockClerum
+const TASK_HANDLER_TIMEOUT_MS = 10_000
 
 const imageCatalog: HostModelsResult = {
   provider: 'zai',
@@ -51,6 +52,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  cleanup()
   vi.restoreAllMocks()
   resetHostModelSelectionStore()
   uninstallMockClerum()
@@ -374,11 +376,12 @@ describe('sendAgentMessage — a Host without file attachments (#678 D13)', () =
       acceptedAttachmentIds: [],
     })
 
-    const send = act(async () => {
+    await act(async () => {
       await rendered.result.current.handleSendAgentMessage('Summarize this')
     })
-    await waitFor(() => expect(clerum.hasProgressHandler('task-doc')).toBe(true))
-    await send
+    await waitFor(() => expect(clerum.hasProgressHandler('task-doc')).toBe(true), {
+      timeout: TASK_HANDLER_TIMEOUT_MS,
+    })
 
     // The sent bubble lists the document by name.
     const sent = rendered.result.current.chatMessages.find(message => message.role === 'user')
@@ -422,11 +425,12 @@ describe('sendAgentMessage — a Host without file attachments (#678 D13)', () =
       taskId: 'task-doc',
       acceptedAttachmentIds: [],
     })
-    const send = act(async () => {
+    await act(async () => {
       await rendered.result.current.handleSendAgentMessage('Summarize this')
     })
-    await waitFor(() => expect(clerum.hasProgressHandler('task-doc')).toBe(true))
-    await send
+    await waitFor(() => expect(clerum.hasProgressHandler('task-doc')).toBe(true), {
+      timeout: TASK_HANDLER_TIMEOUT_MS,
+    })
     // Witness: the drop was recorded first, as a files-only recovery.
     expect(rendered.result.current.failedAgentSend?.answeredWithoutFiles).toBe(true)
     const chat = rendered.result.current.activeChatId

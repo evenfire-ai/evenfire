@@ -382,13 +382,12 @@ describe('documents the Host never received (#678 A15)', () => {
   async function sendAsyncDropped(result: Result, taskId: string) {
     const file = await addReadyFile(result, 'notes.txt')
     clerum.rpc.invokeHostMessage.mockResolvedValueOnce({ taskId, acceptedAttachmentIds: [] })
-    const send = act(async () => {
+    await act(async () => {
       await result.current.handleSendAgentMessage('keep this payload')
     })
     await waitFor(() => expect(clerum.hasProgressHandler(taskId)).toBe(true), {
       timeout: WIRING_TIMEOUT_MS,
     })
-    await send
     // Liveness: the drop was recorded on the task's snapshot.
     expect(heldSnapshot()).toMatchObject({ taskId, reason: 'host_files_dropped' })
     expect(result.current.failedAgentSend?.answeredWithoutFiles).toBe(true)
