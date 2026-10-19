@@ -36,6 +36,27 @@ vi.mock('node:dns/promises', () => ({
   lookup: vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]),
 }))
 
+// Capture what the admin-registry router logs at warn level, to pin that a failed
+// digest check is logged (with bounded fields only) instead of silently skipped.
+const registryLogged = vi.hoisted(() => ({ warns: [] as unknown[][] }))
+vi.mock('../src/observability/logger.js', async importActual => {
+  const actual = await importActual<typeof import('../src/observability/logger.js')>()
+  const root = actual.rootLogger
+  const wrapped = Object.create(root) as typeof root
+  wrapped.child = ((bindings: Record<string, unknown>, options?: unknown) => {
+    const child = root.child(bindings, options as never)
+    if (bindings?.module === 'admin-registry') {
+      const warn = child.warn.bind(child)
+      child.warn = ((...args: unknown[]) => {
+        registryLogged.warns.push(args)
+        return (warn as (...a: unknown[]) => void)(...args)
+      }) as typeof child.warn
+    }
+    return child
+  }) as unknown as typeof root.child
+  return { ...actual, rootLogger: wrapped }
+})
+
 // ── Mock the registry client ─────────────────────────────────────────────────
 vi.mock('../src/services/registryClient.js', () => ({
   searchEntries: vi.fn(),
@@ -56,6 +77,7 @@ vi.mock('../src/services/registryClient.js', () => ({
 
 beforeEach(() => {
   vi.resetAllMocks()
+  registryLogged.warns.length = 0
   // Default: digest verification returns no digest (skip verification)
   vi.mocked(getDigest).mockResolvedValue({ digest: null })
   vi.mocked(getCredentialSchema).mockRejectedValue(new Error('No credential schema endpoint'))
@@ -1696,6 +1718,59 @@ describe('POST /admin/registry/install', () => {
     expect(res.body.error).toContain('digest mismatch')
   })
 
+  it.each([
+    {
+      stage: 'digest-lookup',
+      arrange: () => {
+        vi.mocked(getDigest).mockRejectedValueOnce(
+          Object.assign(new Error('upstream body with sensitive marker'), { status: 503 })
+        )
+      },
+    },
+    {
+      stage: 'bundle-download',
+      arrange: () => {
+        vi.mocked(getDigest).mockResolvedValueOnce({ digest: 'sha256:deadbeef00000000' })
+        vi.mocked(downloadBundle).mockRejectedValueOnce(
+          Object.assign(new Error('upstream body with sensitive marker'), { status: 502 })
+        )
+      },
+    },
+  ])(
+    'logs a warning and proceeds unverified when the $stage step fails',
+    async ({ stage, arrange }) => {
+      vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
+      vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
+      vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
+      arrange()
+      const { app } = makeInstallApp()
+
+      await request(app)
+        .post('/admin/registry/install')
+        .send({
+          serverName: 'digest-unverified',
+          contextRef: 'default-context',
+          registryEntryName: 'airtable-mcp',
+          registryEntryVersion: '1.0.0',
+          credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
+        })
+        .expect(201)
+
+      const digestWarns = registryLogged.warns.filter(
+        ([, msg]) =>
+          msg === 'Registry bundle digest verification failed; installing without verification'
+      )
+      expect(digestWarns).toHaveLength(1)
+      expect(digestWarns[0]![0]).toMatchObject({
+        registryEntryName: 'airtable-mcp',
+        registryEntryVersion: '1.0.0',
+        stage,
+        error: { name: 'Error' },
+      })
+      expect(JSON.stringify(digestWarns)).not.toContain('sensitive marker')
+    }
+  )
+
   it('proceeds when no digest is stored in registry', async () => {
     vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
     vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_REQUIRED)
@@ -1713,6 +1788,13 @@ describe('POST /admin/registry/install', () => {
         credentials: { AIRTABLE_API_KEY: 'sk-test-token-123' },
       })
       .expect(201)
+
+    expect(
+      registryLogged.warns.some(
+        ([, msg]) =>
+          msg === 'Registry bundle digest verification failed; installing without verification'
+      )
+    ).toBe(false)
   })
 
   it('generateRegistryName produces deterministic spec-compliant names', () => {
