@@ -266,6 +266,7 @@ public static class SessionAuthorityNative {
 '@
 try {
   Add-Type -TypeDefinition $code -Language CSharp
+  $script:phase = 'validate-request'
   $requestPayload = [Environment]::GetEnvironmentVariable('EVENFIRE_SESSION_AUTHORITY_ACL_REQUEST')
   if (-not $requestPayload) { throw 'request-missing' }
   $requestJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($requestPayload))
@@ -290,6 +291,7 @@ try {
   $createChildMask = [uint32](0x00000004 -bor 0x00000020 -bor 0x00000080)
   $privateMask = [uint32]0x001F01FF
   function Inspect-Object([string]$objectPath, [bool]$expectDirectory) {
+    $script:phase = 'inspect-native-object'
     $snapshot = [SessionAuthorityNative]::Inspect($objectPath)
     $expected = Normalize-Path $objectPath
     if ($snapshot.IsReparsePoint -or ($snapshot.IsDirectory -ne $expectDirectory) -or
@@ -304,6 +306,7 @@ try {
     return $allowed -contains $sid
   }
   function Test-PrincipalRules($snapshot, [bool]$privateObject) {
+    $script:phase = 'validate-owner-and-acl-principals'
     if (-not (Test-Owner $snapshot.OwnerSid $privateObject)) { throw 'owner-invalid' }
     $present = @{}
     foreach ($ace in $snapshot.Aces) {
@@ -326,6 +329,7 @@ try {
     }
   }
   function Test-CurrentEffectiveAccess($snapshot, [uint32]$required) {
+    $script:phase = 'validate-effective-access'
     if (($snapshot.EffectiveAccess -band $required) -ne $required) { throw 'effective-access-insufficient' }
   }
   function New-PrivateAcl([bool]$isDirectory) {
@@ -349,6 +353,7 @@ try {
     return $security
   }
   function Test-Ancestry([string]$start, [bool]$isUserData) {
+    $script:phase = 'validate-user-data-ancestry'
     $current = [IO.DirectoryInfo]::new($start)
     while ($null -ne $current) {
       $snapshot = Inspect-Object $current.FullName $true
@@ -361,6 +366,7 @@ try {
     }
   }
   function Test-PrivateTree([string]$directoryPath) {
+    $script:phase = 'validate-authority-tree'
     $pending = New-Object 'System.Collections.Generic.Stack[string]'
     $pending.Push($directoryPath)
     $count = 0
@@ -378,20 +384,25 @@ try {
     }
     return $count
   }
+  $script:phase = 'validate-user-data-ancestry'
   Test-Ancestry $root $true
+  $script:phase = 'validate-user-data-root'
   $rootBefore = Inspect-Object $root $true
   Test-PrincipalRules $rootBefore $false
   Test-CurrentEffectiveAccess $rootBefore $createChildMask
   if (-not [SessionAuthorityNative]::EntryExists($authority)) {
+    $script:phase = 'provision-authority-directory'
     if ($request.mode -ne 'provision') { throw 'authority-directory-absent' }
     $directoryInfo = [IO.DirectoryInfo]::new($authority)
     $directoryInfo.Create((New-PrivateAcl $true))
   }
   $authoritySnapshot = Inspect-Object $authority $true
+  $script:phase = 'validate-authority-directory'
   if (-not $authoritySnapshot.DaclProtected) { throw 'authority-dacl-inherited' }
   Test-PrincipalRules $authoritySnapshot $true
   Test-CurrentEffectiveAccess $authoritySnapshot $privateMask
   $objectCount = Test-PrivateTree $authority
+  $script:phase = 'revalidate-user-data-root'
   $rootSnapshot = Inspect-Object $root $true
   if ($rootSnapshot.Identity -ne $rootBefore.Identity -or
     [string]::Compare($rootSnapshot.FinalPath, $rootBefore.FinalPath, $true) -ne 0) {
@@ -406,13 +417,40 @@ try {
   } | ConvertTo-Json -Compress
   exit 0
 } catch {
-  [ordered]@{ ok = $false; code = 'windows-acl-verification-failed' } | ConvertTo-Json -Compress
+  $message = [string]$_.Exception.Message
+  $detail = if ($message -match '^[A-Za-z0-9-]{1,80}$') { $message } else { $null }
+  [ordered]@{
+    ok = $false
+    code = 'windows-acl-verification-failed'
+    phase = [string]$script:phase
+    errorType = $_.Exception.GetType().Name
+    hresult = ('0x{0:X8}' -f $_.Exception.HResult)
+    detail = $detail
+  } | ConvertTo-Json -Compress
   exit 2
 }
 `
 
 const COMMAND = Buffer.from(SCRIPT, 'utf16le').toString('base64')
 const POWERSHELL_REQUEST = 'EVENFIRE_SESSION_AUTHORITY_ACL_REQUEST'
+
+function sanitizedWindowsAclFailure(stdout: string): string {
+  try {
+    const value: unknown = JSON.parse(stdout.trim())
+    if (typeof value !== 'object' || value === null) return ''
+    const fields = value as Record<string, unknown>
+    const safe: Record<string, string> = {}
+    for (const field of ['phase', 'errorType', 'hresult', 'detail'] as const) {
+      const item = fields[field]
+      if (typeof item !== 'string') continue
+      const pattern = field === 'hresult' ? /^0x[0-9A-F]{8}$/i : /^[A-Za-z0-9-]{1,80}$/
+      if (pattern.test(item)) safe[field] = item
+    }
+    return Object.keys(safe).length > 0 ? `: ${JSON.stringify(safe)}` : ''
+  } catch {
+    return ''
+  }
+}
 
 function assertWindowsPlatform(): void {
   if (process.platform !== 'win32') throw new Error('Windows session authority ACL is unsupported')
@@ -441,8 +479,11 @@ function runWindowsAclOperation(request: Request): WindowsSessionAuthorityAclEvi
       windowsHide: true,
     }
   )
-  if (result.error || result.status !== 0 || result.signal || !result.stdout)
-    throw new Error('Windows session authority ACL verification failed')
+  if (result.error || result.status !== 0 || result.signal || !result.stdout) {
+    throw new Error(
+      `Windows session authority ACL verification failed${sanitizedWindowsAclFailure(String(result.stdout || ''))}`
+    )
+  }
   let response: unknown
   try {
     response = JSON.parse(result.stdout.trim())
@@ -450,7 +491,9 @@ function runWindowsAclOperation(request: Request): WindowsSessionAuthorityAclEvi
     throw new Error('Windows session authority ACL verification returned invalid evidence')
   }
   if (!response || typeof response !== 'object' || !('ok' in response) || response.ok !== true)
-    throw new Error('Windows session authority ACL verification failed')
+    throw new Error(
+      `Windows session authority ACL verification failed${sanitizedWindowsAclFailure(result.stdout)}`
+    )
   const evidence = response as Partial<WindowsSessionAuthorityAclEvidence> & { ok: boolean }
   if (
     typeof evidence.userSid !== 'string' ||
