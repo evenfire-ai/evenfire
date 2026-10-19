@@ -36,8 +36,8 @@ import {
 } from '../../services/invitationFlowRegistrationService.js'
 import { memberRegistrationErrorResponse } from '../../services/memberRegistrationErrors.js'
 
-function invitationLookupIpKey(req: Request): string {
-  return `invite-token-ip:${externalClientIpRateLimitKey(req)}`
+function invitationAdmissionKey(req: Request, operation: 'preview' | 'password-token'): string {
+  return `invite-token:${operation}:${externalClientIpRateLimitKey(req)}`
 }
 
 export function createExternalInvitationsRouter(): Router {
@@ -54,7 +54,7 @@ export function createExternalInvitationsRouter(): Router {
     rateLimitMiddleware({
       bucketType: 'external_invitation_lookup',
       maxPerMinute: 30,
-      getBucketKey: req => invitationLookupIpKey(req),
+      getBucketKey: req => invitationAdmissionKey(req, 'preview'),
       onBackendUnavailable: 'process-memory',
     }),
     async (req, res, next) => {
@@ -88,7 +88,7 @@ export function createExternalInvitationsRouter(): Router {
     rateLimitMiddleware({
       bucketType: 'external_invitation_password_token',
       maxPerMinute: 10,
-      getBucketKey: req => invitationLookupIpKey(req),
+      getBucketKey: req => invitationAdmissionKey(req, 'password-token'),
       onBackendUnavailable: 'process-memory',
     }),
     async (req, res, next) => {
@@ -214,6 +214,7 @@ export function createExternalInvitationsRouter(): Router {
         }
         return res.status(200).json(result.data)
       } catch (error) {
+        if (sendPasswordAdmissionError(error, res)) return
         return next(error)
       }
     }

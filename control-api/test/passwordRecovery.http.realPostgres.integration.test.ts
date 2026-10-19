@@ -68,6 +68,7 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
     const { clerumErrorHandler } = await import('../src/http/errorHandler.js')
     const { createExternalInvitationsRouter } =
       await import('../src/routes/external/invitations.js')
+    const { createExternalAuthRouter } = await import('../src/routes/external/auth.js')
     const { createExternalUsersRouter } = await import('../src/routes/external/users.js')
 
     controlApp = express()
@@ -82,6 +83,7 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
     const controlApi = express.Router()
     controlApi.use('/external', requireInternalService('external-rest-api'))
     controlApi.use(createExternalInvitationsRouter())
+    controlApi.use(createExternalAuthRouter({} as Parameters<typeof createExternalAuthRouter>[0]))
     controlApi.use(createExternalUsersRouter({} as Parameters<typeof createExternalUsersRouter>[0]))
     controlApp.use('/api/v1', controlApi)
     controlApp.use(clerumErrorHandler)

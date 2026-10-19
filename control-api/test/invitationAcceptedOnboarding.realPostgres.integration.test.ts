@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import bcrypt from 'bcryptjs'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
-import { type DbClient, initDb } from '../src/db.js'
+import { type DbTransactionClient, type DbTransactionOptions, initDb } from '../src/db.js'
 import {
   acceptInvitationForEmail,
   createInvitationForTeams,
@@ -27,19 +27,16 @@ vi.mock('../src/db.js', async importOriginal => {
   const pool = {
     query: (text: string, values?: unknown[]) => producerDatabase.pool!.query(text, values),
   }
-  const withTransaction = async <T>(work: (db: DbClient) => Promise<T>): Promise<T> => {
-    const client = await producerDatabase.pool!.connect()
-    try {
-      await client.query('BEGIN')
-      const result = await work(client as unknown as DbClient)
-      await client.query('COMMIT')
-      return result
-    } catch (error) {
-      await client.query('ROLLBACK')
-      throw error
-    } finally {
-      client.release()
-    }
+  const withTransaction = <T>(
+    work: (db: DbTransactionClient) => Promise<T>,
+    txPoolOrOptions?: Pool | DbTransactionOptions,
+    explicitOptions: DbTransactionOptions = {}
+  ): Promise<T> => {
+    const options: DbTransactionOptions =
+      txPoolOrOptions && typeof (txPoolOrOptions as Pool).connect !== 'function'
+        ? (txPoolOrOptions as DbTransactionOptions)
+        : explicitOptions
+    return actual.withTransaction(work, producerDatabase.pool!, options)
   }
   return { ...actual, pool, withTransaction }
 })
@@ -170,7 +167,7 @@ describeRealPostgres('accepted onboarding expiry on real PostgreSQL', () => {
           invitation.id,
           'Replay-Password-1!'
         )
-      ).resolves.toEqual({ error: 'expired' })
+      ).resolves.toEqual({ error: 'not_found' })
 
       const stored = await databasePool.query<{ password_hash: string | null }>(
         `SELECT password_hash FROM users WHERE id = $1`,
