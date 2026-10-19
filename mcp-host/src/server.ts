@@ -4,6 +4,7 @@
  * Routing and authz are split into dedicated modules under src/server/.
  */
 import express, { type NextFunction, type Request, type Response } from 'express'
+import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import * as fs from 'fs'
 import * as http from 'http'
 import * as path from 'path'
@@ -84,11 +85,11 @@ import {
   openExistingArtifactFile,
   resolveExistingArtifactFile,
 } from './workflow/artifactPaths'
-import { getOutputDir } from './workflow/internalTools'
 import { isInternalWorkflowArtifactName } from './workflow/mcpHostJwtState'
 import { runtimeAuthHealthSnapshot } from './workflow/runtimeAuthHealth'
 import { createWorkflowRouter } from './workflow/workflowRouter'
 import { WorkflowService } from './workflow/workflowService'
+import type { CallerOutputLookup } from './workspace/callerOutputs'
 
 export type {
   HostActivityEvent,
@@ -133,6 +134,12 @@ export type {
   SetModelResult,
   SetTitleResult,
 } from './server/types'
+
+/** A caller's generated files cannot be reached safely; no other folder is used instead. */
+const ARTIFACT_STORE_UNAVAILABLE = {
+  error: 'Generated files are unavailable right now',
+  code: 'artifact_store_unavailable',
+} as const
 
 /**
  * Body budgets for chat payloads carrying base64 attachments.
@@ -363,6 +370,7 @@ export class RPCServer {
   private setTitleHandler: SetTitleHandler | null = null
   private workflowRouter: ReturnType<typeof createWorkflowRouter> | null = null
   private artifactSecretEntriesProvider: (() => ArtifactSecretEntry[]) | null = null
+  private chatArtifactDirResolver: ((userId: string) => CallerOutputLookup) | null = null
   private lifecycleGate: RuntimeLifecycleGate | null = null
 
   constructor(port: number = 8080) {
@@ -721,21 +729,41 @@ export class RPCServer {
       }
       next()
     }
+    // A listing reads and stats the caller's folder and a download reads and
+    // redacts a file, so each caller gets a bucket of their own: every call
+    // comes through the same rpc-proxy address, where one bucket would let a
+    // single caller hold the Host's disk and starve the rest.
+    const limitArtifactCalls = rateLimit({
+      windowMs: 60_000,
+      limit: 600,
+      standardHeaders: 'draft-8',
+      legacyHeaders: false,
+      keyGenerator: req => {
+        const userId = getRuntimeCallerContext(req)?.userId
+        return userId ? `caller:${userId}` : ipKeyGenerator(req.ip ?? '')
+      },
+      message: { error: 'Too Many Requests', retryable: true },
+    })
 
     this.app.get(
       '/v1/runtime/artifacts',
       rejectWorkflowRuntimeArtifacts,
       runtimeEdgeGuard(['rpc-proxy']),
-      (_req, res) => {
+      limitArtifactCalls,
+      (req, res) => {
         try {
-          // Re-resolved per request: getOutputDir() depends on the Host CRD, which
-          // hydrates async after boot — a captured value would freeze the path
-          // (and point at the old /tmp emptyDir). D.2b.
-          const artifactDir = getOutputDir()
-          if (!fs.existsSync(artifactDir)) {
+          // Only the caller's own folder, re-verified per request; none yet
+          // means nothing generated.
+          const lookup = this.callerArtifactDir(req)
+          if ('missing' in lookup) {
             json(res, 200, { artifacts: [] })
             return
           }
+          if (!('dir' in lookup)) {
+            json(res, 503, ARTIFACT_STORE_UNAVAILABLE)
+            return
+          }
+          const artifactDir = lookup.dir
           const files = []
           for (const entry of fs.readdirSync(artifactDir, { withFileTypes: true })) {
             if (!entry.isFile() || isInternalWorkflowArtifactName(entry.name)) continue
@@ -764,13 +792,24 @@ export class RPCServer {
       '/v1/runtime/artifacts/:filename/download',
       rejectWorkflowRuntimeArtifacts,
       runtimeEdgeGuard(['rpc-proxy']),
+      limitArtifactCalls,
       (req, res) => {
         const filename = req.params.filename as string
         if (isInternalWorkflowArtifactName(filename)) {
           json(res, 404, { error: 'Artifact not found' })
           return
         }
-        const artifactDir = getOutputDir()
+        // Another user's file is not found here, whatever its name.
+        const lookup = this.callerArtifactDir(req)
+        if ('missing' in lookup) {
+          json(res, 404, { error: 'Artifact not found' })
+          return
+        }
+        if (!('dir' in lookup)) {
+          json(res, 503, ARTIFACT_STORE_UNAVAILABLE)
+          return
+        }
+        const artifactDir = lookup.dir
         let artifact: OpenedArtifactFile
         try {
           artifact = openExistingArtifactFile(artifactDir, filename)
@@ -960,6 +999,18 @@ export class RPCServer {
 
   setArtifactSecretEntriesProvider(provider: () => ArtifactSecretEntry[]): void {
     this.artifactSecretEntriesProvider = provider
+  }
+
+  /** Where a Desktop user's generated files are (callerOutputs.ts). */
+  setChatArtifactDirResolver(resolver: (userId: string) => CallerOutputLookup): void {
+    this.chatArtifactDirResolver = resolver
+  }
+
+  /** The requesting user's folder; unwired or without a user, unavailable, never a shared one. */
+  private callerArtifactDir(req: Request): CallerOutputLookup {
+    const userId = getRuntimeCallerContext(req)?.userId
+    if (!this.chatArtifactDirResolver || !userId) return { failureCode: 'ENOENT' }
+    return this.chatArtifactDirResolver(userId)
   }
 
   /** Stage 3 (stateless-agents) — wire the DRAINING fence + activity tracker

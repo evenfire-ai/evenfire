@@ -71,6 +71,15 @@ function pgAllows() {
 }
 
 describe('routes/workflows/shared/rateLimit', () => {
+  // The ledger mock and the edge limiter both use wall-clock minute windows.
+  // Freeze Date mid-window so a loop that crosses a real minute boundary
+  // cannot reset the budget before the expected 429. Tests that exercise
+  // window recovery set their own system time.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(1_800_000_030_000)
+  })
+
   afterEach(() => {
     vi.useRealTimers()
   })

@@ -14,6 +14,7 @@ import { readLiveGrokPolicyBinding, resolveGrokAttemptPolicy } from './grokPolic
 import type { GrokAttemptContext } from './grokSubscription'
 import { OpenAIProvider } from './openai'
 import { ProviderAttemptAuthorizer, resolveCodexAuthorizeUrl } from './providerAttemptAuthorizer'
+import type { ProviderEnvLookup } from './providerEnv'
 import { makeProvider } from './registry'
 import { ALL_PROVIDERS, descriptorFor, isLlmProvider } from './registryCore'
 // Re-export the transport interfaces (moved to ./types to break the registry
@@ -93,6 +94,12 @@ function createCodexRuntimeDeps(captured?: CodexAttemptContext) {
 export type CreateLlmProviderOptions = {
   capturedCodexAttemptContext?: CodexAttemptContext
   capturedGrokAttemptContext?: GrokAttemptContext
+  /**
+   * Non-secret provider env source (see ./providerEnv). Omitted → process.env.
+   * mcp-host's Host runtime passes the per-Host env from ConfigStore so values
+   * set under Control UI Host → Environment reach the drivers.
+   */
+  env?: ProviderEnvLookup
 }
 
 /**
@@ -130,16 +137,14 @@ export function createLLMProvider(
   // never throw here (their empty-key case is already handled above), so their
   // behaviour is byte-identical.
   try {
-    return makeProvider(
-      provider,
-      credentials,
-      modelName,
-      provider === 'codex-subscription'
+    return makeProvider(provider, credentials, modelName, {
+      env: options?.env,
+      ...(provider === 'codex-subscription'
         ? { codex: createCodexRuntimeDeps(options?.capturedCodexAttemptContext) }
         : provider === 'grok-subscription'
           ? { grok: createGrokRuntimeDeps(options?.capturedGrokAttemptContext) }
-          : undefined
-    )
+          : {}),
+    })
   } catch (err) {
     logger.error({}, 'Failed to construct LLM provider')
     return null

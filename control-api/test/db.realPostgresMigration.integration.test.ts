@@ -225,6 +225,8 @@ async function sequencePrivileges(pool: Pool, roleName: string): Promise<Privile
   return actual
 }
 
+const DAY_MS = 24 * 60 * 60 * 1_000
+
 describeRealPostgres('control-api real Postgres migrations', () => {
   const database = `control_api_migration_${randomBytes(6).toString('hex')}`
   const connectionString = databaseUrl(
@@ -1050,7 +1052,17 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     )
     expect(filterIndexes.rows.map(row => row.indexname)).toEqual([...requiredFilterIndexes].sort())
 
-    await dbPool.query(`
+    // These perf fixtures stay in the database when the retention wake below
+    // runs, and governed_trace_prune_expired_events prunes relative to
+    // clock_timestamp() (90 days for agent_run/administrative/reconcile
+    // telemetry). Anchor them to the wall clock so they can never age into
+    // the retention window and steal the wake's delete budget.
+    const perfFixtureBase = new Date(Math.floor((Date.now() - 2 * DAY_MS) / 1_000) * 1_000)
+    const perfFixtureBaseIso = perfFixtureBase.toISOString()
+    const perfWindowFrom = new Date(perfFixtureBase.getTime() - 13 * DAY_MS).toISOString()
+    const perfWindowTo = new Date(perfFixtureBase.getTime() + 17 * DAY_MS).toISOString()
+    await dbPool.query(
+      `
       WITH sessions AS (
         SELECT ordinal, gen_random_uuid() AS run_id, 'perf-session-' || ordinal AS session_id
           FROM generate_series(1, 300) ordinal
@@ -1085,7 +1097,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
                     ELSE '{}'::jsonb END,
                md5('perf-payload-' || ordinal || '-' || event_ordinal) ||
                  md5('perf-payload-extra-' || ordinal || '-' || event_ordinal),
-               '2026-07-14T10:00:00Z'::timestamptz + (ordinal * interval '1 second') +
+               $1::timestamptz + (ordinal * interval '1 second') +
                  (event_ordinal * interval '1 millisecond')
           FROM fixture
         ON CONFLICT DO NOTHING
@@ -1095,8 +1107,11 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         (event_family,event_id,schema_version,occurred_at,ingested_at,environment,run_id,payload_sha256)
       SELECT 'agent_run',event_id,1,occurred_at,ingested_at,'integration',run_id,payload_sha256
         FROM inserted
-    `)
-    await dbPool.query(`
+    `,
+      [perfFixtureBaseIso]
+    )
+    await dbPool.query(
+      `
       WITH inserted AS (
         INSERT INTO administrative_events (
           source_kind,source_service,source_event_id,idempotency_key,event_kind,action,outcome,
@@ -1107,7 +1122,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
                'service_action','permission_grant','succeeded','control-api','permission',
                'permission/' || ordinal,
                md5('perf-admin-payload-' || ordinal) || md5('perf-admin-payload-extra-' || ordinal),
-               '2026-07-14T11:00:00Z'::timestamptz + ordinal * interval '1 second'
+               $1::timestamptz + interval '1 hour' + ordinal * interval '1 second'
           FROM generate_series(1, 400) ordinal
         ON CONFLICT DO NOTHING
         RETURNING event_id,occurred_at,ingested_at,payload_sha256
@@ -1116,8 +1131,11 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         (event_family,event_id,schema_version,occurred_at,ingested_at,environment,payload_sha256)
       SELECT 'administrative',event_id,1,occurred_at,ingested_at,'integration',payload_sha256
         FROM inserted
-    `)
-    await dbPool.query(`
+    `,
+      [perfFixtureBaseIso]
+    )
+    await dbPool.query(
+      `
       WITH inserted AS (
         INSERT INTO infrastructure_telemetry_events (
           source_service,source_kind,source_occurrence_id,telemetry_type,trigger_kind,outcome,
@@ -1129,7 +1147,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
                'cluster-1','control-plane','Deployment','deployment/perf-' || ordinal,
                'Deployment','perf-' || ordinal,1,
                md5('perf-infra-payload-' || ordinal) || md5('perf-infra-payload-extra-' || ordinal),
-               '2026-07-14T12:00:00Z'::timestamptz + ordinal * interval '1 second',
+               $1::timestamptz + interval '2 hours' + ordinal * interval '1 second',
                md5('perf-infra-' || ordinal) || md5('perf-infra-extra-' || ordinal)
           FROM generate_series(1, 400) ordinal
         ON CONFLICT DO NOTHING
@@ -1139,7 +1157,9 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         (event_family,event_id,schema_version,occurred_at,ingested_at,environment,workload_ref,payload_sha256)
       SELECT 'infrastructure_telemetry',event_id,1,occurred_at,ingested_at,'integration',workload_ref,payload_sha256
         FROM inserted
-    `)
+    `,
+      [perfFixtureBaseIso]
+    )
     await dbPool.query(
       'ANALYZE agent_run_events, administrative_events, infrastructure_telemetry_events, governed_event_stream'
     )
@@ -1217,8 +1237,8 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     })
     await new PostgresGovernedSessionReplayRepository(explainClient('session_list') as never).list({
       filters: {
-        occurredFrom: '2026-07-01T00:00:00.000Z',
-        occurredTo: '2026-07-31T00:00:00.000Z',
+        occurredFrom: perfWindowFrom,
+        occurredTo: perfWindowTo,
         outcome: [],
         sourceService: [],
         sessionId: [],
@@ -1246,8 +1266,8 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         afterSequence: '9223372036854775807',
         highWatermark: '9223372036854775807',
         limit: 50,
-        occurredFrom: '2026-07-01T00:00:00.000Z',
-        occurredTo: '2026-07-31T00:00:00.000Z',
+        occurredFrom: perfWindowFrom,
+        occurredTo: perfWindowTo,
         filters,
       })
     }
@@ -1507,7 +1527,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       transaction: async () => {
         throw new Error('integration fixture supplies the transaction explicitly')
       },
-      now: () => new Date('2026-07-13T00:00:00.000Z'),
+      now: () => new Date(),
     })
     const tracePrincipal = {
       kind: 'mcp_host_runtime' as const,
@@ -1637,6 +1657,10 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     )
     expect(retainedAfterSecondBatch.rows[0]).toEqual({ family_count: '0', stream_count: '0' })
 
+    // Recent = well inside every retention window and not after ingestion
+    // (occurred_at <= ingested_at + 5 minutes), relative to the wall clock.
+    const recentOccurredAt = new Date(Date.now() - 60_000).toISOString()
+    const recentApprovalOccurredAt = new Date(Date.now() - 59_000).toISOString()
     const recentClient = await dbPool.connect()
     let recentEventId = ''
     try {
@@ -1652,7 +1676,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         recentBinding,
         {
           sourceEventId: randomUUID(),
-          occurredAt: '2026-07-13T00:00:00.000Z',
+          occurredAt: recentOccurredAt,
           eventType: 'run_start',
         }
       )
@@ -1672,7 +1696,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         },
         {
           sourceEventId: approvalSourceEventId,
-          occurredAt: '2026-07-13T00:00:01.000Z',
+          occurredAt: recentApprovalOccurredAt,
           eventType: 'approval',
           payload: { status: 'approved' },
         }
@@ -1990,6 +2014,66 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       [auditId]
     )
     expect(stored.rows).toEqual([{ sequence_no: auditId, subject: 'host:1st:mcp-host/chatllm' }])
+  })
+
+  it('adds workflow_schedules.concurrency_policy idempotently with a Forbid default', async () => {
+    const { initDb } = await import('../src/db.js')
+    const connector = { connect: () => dbPool.connect() }
+    const version = '0129_workflow_schedules_concurrency_policy'
+
+    await initDb(connector)
+    // Forget the record so initDb re-runs the body over the existing column.
+    await dbPool.query('DELETE FROM schema_migrations WHERE version = $1', [version])
+    await initDb(connector)
+
+    const recorded = await dbPool.query<{ count: string }>(
+      'SELECT count(*)::text AS count FROM schema_migrations WHERE version = $1',
+      [version]
+    )
+    expect(recorded.rows[0]?.count).toBe('1')
+
+    const column = await dbPool.query<{
+      column_default: string | null
+      is_nullable: string
+      data_type: string
+    }>(
+      `SELECT column_default, is_nullable, data_type
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'workflow_schedules'
+          AND column_name = 'concurrency_policy'`
+    )
+    expect(column.rows).toEqual([
+      { column_default: "'Forbid'::text", is_nullable: 'NO', data_type: 'text' },
+    ])
+
+    const checks = await dbPool.query<{ conname: string }>(
+      `SELECT conname
+         FROM pg_constraint
+        WHERE conrelid = 'public.workflow_schedules'::regclass
+          AND conname = 'workflow_schedules_concurrency_policy_check'`
+    )
+    expect(checks.rows).toHaveLength(1)
+
+    const client = await dbPool.connect()
+    try {
+      await client.query('BEGIN')
+      const inserted = await client.query<{ concurrency_policy: string }>(
+        `INSERT INTO workflow_schedules (recipe_namespace, recipe_name, cron_expression, next_fire_at)
+         VALUES ('p3-forbid-ns', 'p3-forbid-recipe', '*/5 * * * *', now())
+         RETURNING concurrency_policy`
+      )
+      expect(inserted.rows[0]?.concurrency_policy).toBe('Forbid')
+      await expect(
+        client.query(
+          `UPDATE workflow_schedules SET concurrency_policy = 'Sometimes'
+            WHERE recipe_namespace = 'p3-forbid-ns' AND recipe_name = 'p3-forbid-recipe'`
+        )
+      ).rejects.toThrow(/workflow_schedules_concurrency_policy_check/)
+    } finally {
+      await client.query('ROLLBACK')
+      client.release()
+    }
   })
 
   it('recognizes deployed entity-change aliases without replaying migration DDL', async () => {

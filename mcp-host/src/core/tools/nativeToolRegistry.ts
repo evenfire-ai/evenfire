@@ -1,3 +1,5 @@
+import * as fs from 'fs'
+import * as path from 'path'
 import type { CronScheduler } from '../../agent/cronScheduler'
 import { createGetCapabilitiesTool } from '../../capabilities/getCapabilitiesTool'
 import {
@@ -18,8 +20,16 @@ import type { LlmProvider } from '../../llm/registryCore'
 import type { McpManager } from '../../mcp/manager'
 import type { IncomingMessage } from '../../server'
 import type { McpTool } from '../../types'
-import { getOutputDir, resolveInternalTools } from '../../workflow/internalTools'
+import { checkToolArguments } from '../../workflow/argumentGate'
+import { resolveInternalTools } from '../../workflow/internalTools'
+import { boilerplateTexts } from '../../workflow/officeBoilerplate'
+import { printedForms } from '../../workflow/toolText'
 import type { InternalToolDefinition } from '../../workflow/types'
+import {
+  type CallerOutputLookup,
+  callerOutputUnavailableMessage,
+  resolveCallerOutputDir,
+} from '../../workspace/callerOutputs'
 import { ScopedWorkspace } from '../../workspace/scopedWorkspace'
 import type { Workspace } from '../../workspace/service'
 import type { AttachmentReadLedger } from '../attachments/attachmentReadBudget'
@@ -54,6 +64,18 @@ const CHAT_HIDDEN_INTERNAL_TOOL_NAMES = new Set([
   'clerum__trigger_workflow',
 ])
 
+/** Tools that write a document into the caller's outputs directory. */
+const GENERATOR_PREFIX = 'clerum__generate_'
+
+/** Whether `file`, links resolved, sits directly in `dir`. */
+function directlyInside(file: string, dir: string): boolean {
+  try {
+    return fs.realpathSync(path.dirname(file)) === dir && !fs.lstatSync(file).isSymbolicLink()
+  } catch {
+    return false
+  }
+}
+
 /** Adapter: wraps an InternalToolDefinition as a native Tool for use in chat mode. */
 class InternalToolAdapter implements Tool {
   constructor(
@@ -62,7 +84,13 @@ class InternalToolAdapter implements Tool {
     private readonly attachmentOptions: {
       maxBytes: number
       secretEntriesProvider?: () => Array<{ name: string; value: string }>
-    }
+    },
+    /**
+     * For a generator: the caller's own outputs directory, verified on each
+     * call (callerOutputs.ts). It replaces `outputDir`; when it cannot be
+     * verified the call writes nothing.
+     */
+    private readonly callerOutputs?: () => CallerOutputLookup
   ) {}
   name(): string {
     return this.def.name
@@ -88,8 +116,27 @@ class InternalToolAdapter implements Tool {
   }
   async execute(params: Record<string, unknown>, context?: ExecutionContext): Promise<ToolOutput> {
     const start = Date.now()
+    // The schema check a workflow step runs, before anything is resolved or
+    // written: a call it rejects creates no folder, file or attachment.
+    const checked = checkToolArguments(this.def, params)
+    if (!checked.ok) {
+      return { content: `Error: ${checked.error}`, duration_ms: Date.now() - start, is_error: true }
+    }
+    let outputDir = this.outputDir
+    if (this.callerOutputs) {
+      const resolved = this.callerOutputs()
+      if (!('dir' in resolved)) {
+        const code = 'failureCode' in resolved ? resolved.failureCode : 'ENOENT'
+        return {
+          content: `Error: ${callerOutputUnavailableMessage(code)}`,
+          duration_ms: Date.now() - start,
+          is_error: true,
+        }
+      }
+      outputDir = resolved.dir
+    }
     try {
-      const result = await this.def.execute(params, this.outputDir, {
+      const result = await this.def.execute(checked.input, outputDir, {
         signal: context?.signal,
         timeoutMs: context?.timeoutMs,
         visualInput: context?.visualInput,
@@ -103,15 +150,43 @@ class InternalToolAdapter implements Tool {
             result.artifact?.format ?? 'unknown'
           })`)
         : `Error: ${result.error ?? 'Unknown error'}`
+      // The file must be where the caller's folder is now; a folder swapped
+      // during the call must not route the file to anyone else.
+      if (
+        this.callerOutputs &&
+        result.success &&
+        result.artifact &&
+        !directlyInside(result.artifact.path, outputDir)
+      ) {
+        return {
+          content: `Error: ${callerOutputUnavailableMessage('EEXIST')}`,
+          duration_ms: Date.now() - start,
+          is_error: true,
+        }
+      }
+      const format = result.success ? result.artifact?.format : undefined
+      // Office packages carry the generator's own text; a protected value
+      // found only there is left to the payload check (officeBoilerplate).
+      const packageBoilerplate =
+        (format === 'docx' || format === 'xlsx' || format === 'pptx') &&
+        (this.attachmentOptions.secretEntriesProvider?.().length ?? 0) > 0
+          ? await boilerplateTexts(format)
+          : undefined
       const attachment =
         result.success && result.artifact
           ? buildGeneratedArtifactAttachment({
               sourceTool: this.def.name,
               artifact: result.artifact,
-              outputDir: this.outputDir,
+              outputDir,
               maxBytes: this.attachmentOptions.maxBytes,
-              sourcePayload: params,
+              // The file shows the arguments as the generator prints them, so a
+              // secret split by a tag or an escape is checked whole too, and
+              // anything else it shows that they do not spell (chart labels).
+              sourcePayload: [params, printedForms(params), result.shownText ?? []],
               secretEntriesProvider: this.attachmentOptions.secretEntriesProvider,
+              packageBoilerplate,
+              shownText: result.shownText,
+              writtenSha256: result.writtenSha256,
             })
           : null
       const images = result.success
@@ -212,7 +287,12 @@ export class NativeToolRegistry implements ToolRegistry {
       callerIdentity: string
       callerWorkspacePath?: string
       retentionOwnerId?: string
-    }
+    },
+    // The caller's verified root (`<host>/users/<key>`). The document
+    // generators write under its reserved outputs directory; without it they
+    // refuse to write, never falling back to a folder shared by the Host.
+    // Trailing optional; only taskExecutor passes it.
+    callerOutputRoot?: string
   ) {
     // A Host-owned GFS store establishes a trusted caller binding even when
     // memory is disabled. In that mode file tools never fall back to the shared
@@ -287,7 +367,8 @@ export class NativeToolRegistry implements ToolRegistry {
           : []),
       ]
       for (const tool of gfsTools) {
-        this.register(new InternalToolAdapter(tool, getOutputDir(), { maxBytes: 52_428_800 }))
+        // GFS tools write no artifact, so they get no output directory.
+        this.register(new InternalToolAdapter(tool, '', { maxBytes: 52_428_800 }))
       }
     }
 
@@ -391,7 +472,13 @@ export class NativeToolRegistry implements ToolRegistry {
 
     // Register internal file-generation/context tools. Workflow recipe control is exposed
     // through workflow_* tools in chat mode so Desktop-owned user/team context can stay hidden.
-    const outputDir = getOutputDir()
+    // Only the generators write files, each into the caller's own folder;
+    // the other internal tools take no output directory.
+    const outputDir = ''
+    const callerOutputs = (): CallerOutputLookup =>
+      callerOutputRoot
+        ? resolveCallerOutputDir(callerOutputRoot, { create: true })
+        : { failureCode: 'ENOENT' }
     const resolvedAttachmentOptions = {
       maxBytes: attachmentOptions?.maxBytes ?? 52_428_800,
       secretEntriesProvider: attachmentOptions?.secretEntriesProvider,
@@ -401,7 +488,14 @@ export class NativeToolRegistry implements ToolRegistry {
     // runtime that can't mount SFS at all) so the agent never sees dead tools.
     for (const tool of resolveInternalTools()) {
       if (CHAT_HIDDEN_INTERNAL_TOOL_NAMES.has(tool.name)) continue
-      this.register(new InternalToolAdapter(tool, outputDir, resolvedAttachmentOptions))
+      this.register(
+        new InternalToolAdapter(
+          tool,
+          outputDir,
+          resolvedAttachmentOptions,
+          tool.name.startsWith(GENERATOR_PREFIX) ? callerOutputs : undefined
+        )
+      )
     }
 
     // clerum__get_capabilities is a query-style internal tool that exposes

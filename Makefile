@@ -1401,6 +1401,40 @@ test-e2e-stateless-suspend-wake: ## Run stateless suspend/wake E2E gate (Phase 1
 	@echo "Running stateless suspend/wake E2E gate..."
 	E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-stateless-suspend-wake.sh
 
+.PHONY: test-e2e-hcc-storage-layout-switch
+test-e2e-hcc-storage-layout-switch: ## Run the #825 storage-layout gate across lifecycle switches (needs an owned branch profile, E2E_PROFILE_PORTS_ENV, E2E_DEV_LOGIN_EMAIL, forwards held)
+	@echo "Running HCC storage-layout switch E2E gate..."
+	E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 KUBECONTEXT="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}" bash scripts/e2e/e2e-hcc-storage-layout-switch.sh
+
+.PHONY: test-e2e-hcc-layout-upgrade
+test-e2e-hcc-layout-upgrade: ## Run the #825 upgrade lane from v0.11.0 to this head (UPGRADE_MODE=main|control; fresh owned branch profile, E2E_PROFILE_PORTS_ENV, E2E_DEV_LOGIN_EMAIL, E2E_UPGRADE_EVIDENCE_DIR)
+	@echo "Running HCC layout upgrade E2E lane ($(UPGRADE_MODE))..."
+	E2E_ALLOW_STATELESS_CADENCE_ACCELERATION=1 KUBECONTEXT="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}" bash scripts/e2e/e2e-hcc-layout-upgrade.sh "$(UPGRADE_MODE)"
+
+.PHONY: test-e2e-825-desktop-continuity
+test-e2e-825-desktop-continuity: ## Run the #825 Desktop journey across stateful/stateless switches (owned branch profile, forwards held, real model turns)
+	@set -eu; \
+	ctx="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}"; \
+	. scripts/e2e/e2e-lib.sh; \
+	is_branch_scoped_e2e_context "$$ctx" || { echo "Refusing #825 Desktop E2E: context '$$ctx' is not a branch-scoped Minikube profile (KUBECONTEXT=<profile>)" >&2; exit 1; }; \
+	test -n "$${E2E_DEV_LOGIN_EMAIL:-}" || { echo "Set E2E_DEV_LOGIN_EMAIL to the seeded Desktop login (admin@evenfire.local on a T2 profile)" >&2; exit 1; }; \
+	test -n "$${CONTROL_API_BASE_URL:-}" || { echo "CONTROL_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${EXTERNAL_REST_API_BASE_URL:-}" || { echo "EXTERNAL_REST_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${RPC_PROXY_BASE_URL:-}" || { echo "RPC_PROXY_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	require_branch_profile_urls "$$ctx" "$${CLERUM_PROFILE_PORTS_ENV:-$${E2E_PROFILE_PORTS_ENV:-}}"; \
+	report="$${E2E_825_DESKTOP_REPORT:-$(CURDIR)/desktop-app/test-results/e2e-825-desktop-continuity.json}"; \
+	mkdir -p "$$(dirname "$$report")"; rm -f "$$report"; \
+	cd desktop-app && npm run verify:electron && npm run build; \
+	status=0; \
+	env -u ELECTRON_RUN_AS_NODE KUBECONTEXT="$$ctx" E2E_K8S_CONTEXT="$$ctx" E2E_825_DESKTOP_CONTINUITY=1 \
+		PLAYWRIGHT_JSON_OUTPUT_NAME="$$report" ./node_modules/.bin/playwright test \
+		--config test/e2e-playwright/playwright.config.ts --reporter=list,json --retries=0 \
+		stateful-stateless-switch-continuity.spec.ts || status=$$?; \
+	echo "E2E_825_DESKTOP_PLAYWRIGHT_EXIT=$$status"; \
+	node "$(CURDIR)/scripts/e2e/playwright-report-gate.mjs" E2E_825_DESKTOP_STATS "$$report" || status=1; \
+	if [ "$$status" = 0 ]; then echo E2E_825_DESKTOP_RESULT=PASS; else echo E2E_825_DESKTOP_RESULT=FAIL; fi; \
+	exit $$status
+
 .PHONY: test-e2e-stateless-wake-recovery
 test-e2e-stateless-wake-recovery: ## Run stateless wake-recovery latency gate (R1 warm draining / R2 cold suspended / R3 drained-window p95 budgets; needs port-forwards + seeded chatllm-stateless)
 	@echo "Running stateless wake-recovery latency gate..."

@@ -725,6 +725,11 @@ export type DesktopRuntimeConfigState = {
   options: DesktopRuntimeConfigOption[]
 }
 
+export type DesktopRuntimeConfigHandoffSelection = {
+  runtimeConfigState: DesktopRuntimeConfigState
+  sessionGeneration: number
+}
+
 export type TokenMetadata = {
   hasSession: boolean
   rpcTokenExpiresAtMs: number | null

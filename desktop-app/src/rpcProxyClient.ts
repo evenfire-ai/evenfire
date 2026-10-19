@@ -437,8 +437,8 @@ async function parseApprovalDecisionResponse(response: Response): Promise<Approv
 // embed's click without any answer for a minute.
 export const SANDBOX_UI_MINT_TIMEOUT_MS = 15_000
 
-function url(path: string): string {
-  return `${config.rpcProxyBaseUrl.replace(/\/+$/, '')}${path}`
+function rpcProxyUrl(baseUrl: string, path: string): string {
+  return `${baseUrl.replace(/\/+$/, '')}${path}`
 }
 
 /**
@@ -502,12 +502,18 @@ function hostAccessDenialError(status: number, body: string): ApiError | null {
 }
 
 export class RpcProxyClient {
+  constructor(private readonly getRpcProxyBaseUrl: () => string = () => config.rpcProxyBaseUrl) {}
+
+  private url(path: string): string {
+    return rpcProxyUrl(this.getRpcProxyBaseUrl(), path)
+  }
+
   async health(): Promise<{ status: string }> {
-    return requestJson<{ status: string }>('GET', url('/health'))
+    return requestJson<{ status: string }>('GET', this.url('/health'))
   }
 
   async listServers(rpcAccessToken: string): Promise<RpcAllowedServersResult> {
-    return requestJson<RpcAllowedServersResult>('GET', url('/api/v1/rpc/servers'), {
+    return requestJson<RpcAllowedServersResult>('GET', this.url('/api/v1/rpc/servers'), {
       token: rpcAccessToken,
     })
   }
@@ -521,7 +527,7 @@ export class RpcProxyClient {
    * `AppService.shouldRefreshRpcToken` can drive the retry-after-refresh.
    */
   async getConnectors(rpcAccessToken: string): Promise<RpcConnectorsResult> {
-    return requestJson<RpcConnectorsResult>('GET', url('/api/v1/rpc/connectors'), {
+    return requestJson<RpcConnectorsResult>('GET', this.url('/api/v1/rpc/connectors'), {
       token: rpcAccessToken,
     })
   }
@@ -541,7 +547,7 @@ export class RpcProxyClient {
   ): Promise<void> {
     await requestJson<unknown>(
       'DELETE',
-      url(`/api/v1/mcp-oauth/${encodeURIComponent(mcpServerName)}/grant`),
+      this.url(`/api/v1/mcp-oauth/${encodeURIComponent(mcpServerName)}/grant`),
       {
         token: rpcAccessToken,
         // Body is optional; only send `contextId` when present. `userId` is NEVER
@@ -560,7 +566,7 @@ export class RpcProxyClient {
     const query = options?.async ? '?async=true' : ''
     return requestJson<HostMessageResponse>(
       'POST',
-      url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/messages${query}`),
+      this.url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/messages${query}`),
       {
         token: rpcAccessToken,
         body: payload,
@@ -575,7 +581,7 @@ export class RpcProxyClient {
   ): Promise<HostMessageResponse> {
     return requestJson<HostMessageResponse>(
       'GET',
-      url(
+      this.url(
         `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/tasks/${encodeURIComponent(taskId)}/result`
       ),
       { token: rpcAccessToken }
@@ -585,7 +591,7 @@ export class RpcProxyClient {
   async getHostStatus(rpcAccessToken: string, hostRef: string): Promise<HostRuntimeStatus> {
     return requestJson<HostRuntimeStatus>(
       'GET',
-      url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/status`),
+      this.url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/status`),
       {
         token: rpcAccessToken,
       }
@@ -602,10 +608,13 @@ export class RpcProxyClient {
    * Anything else (401/403/404/5xx) is an error for the caller to log.
    */
   async prewarmHost(rpcAccessToken: string, hostRef: string): Promise<{ status: string }> {
-    const response = await fetch(url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/wake`), {
-      method: 'POST',
-      headers: { authorization: `Bearer ${rpcAccessToken}` },
-    })
+    const response = await fetch(
+      this.url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/wake`),
+      {
+        method: 'POST',
+        headers: { authorization: `Bearer ${rpcAccessToken}` },
+      }
+    )
     if (response.status === 200 || response.status === 202 || response.status === 409) {
       const payload = (await response.json()) as { status?: string }
       const status = payload?.status
@@ -629,7 +638,7 @@ export class RpcProxyClient {
   async getHostHealth(rpcAccessToken: string, hostRef: string): Promise<HostRuntimeHealth> {
     return requestJson<HostRuntimeHealth>(
       'GET',
-      url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/health`),
+      this.url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/health`),
       {
         token: rpcAccessToken,
       }
@@ -647,7 +656,9 @@ export class RpcProxyClient {
     const query = params.toString()
     return requestJson<HostActivitySnapshot>(
       'GET',
-      url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/activity${query ? `?${query}` : ''}`),
+      this.url(
+        `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/activity${query ? `?${query}` : ''}`
+      ),
       { token: rpcAccessToken }
     )
   }
@@ -660,7 +671,7 @@ export class RpcProxyClient {
    * mint — this list is purely the picker payload.
    */
   async listSandboxUiApps(rpcAccessToken: string): Promise<{ apps: SandboxUiApp[] }> {
-    return requestJson<{ apps: SandboxUiApp[] }>('GET', url('/api/v1/sandbox-ui/apps'), {
+    return requestJson<{ apps: SandboxUiApp[] }>('GET', this.url('/api/v1/sandbox-ui/apps'), {
       token: rpcAccessToken,
     })
   }
@@ -683,7 +694,7 @@ export class RpcProxyClient {
     recipeName: string
   ): Promise<{ setCookie: string }> {
     const response = await fetch(
-      url(
+      this.url(
         `/api/v1/sandbox-ui/${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/session`
       ),
       {
@@ -720,7 +731,7 @@ export class RpcProxyClient {
     background = false
   ): Promise<{ authorizeUrl: string }> {
     const response = await fetch(
-      url(
+      this.url(
         `/api/v1/sandbox-ui/${encodeURIComponent(recipeNs)}/${encodeURIComponent(recipeName)}/oauth/authorize-url`
       ),
       {
@@ -771,7 +782,7 @@ export class RpcProxyClient {
     contextId?: string
   ): Promise<{ authorizeUrl: string }> {
     const response = await fetch(
-      url(`/api/v1/mcp-oauth/${encodeURIComponent(mcpServerName)}/authorize-url`),
+      this.url(`/api/v1/mcp-oauth/${encodeURIComponent(mcpServerName)}/authorize-url`),
       {
         method: 'POST',
         headers: {
@@ -810,7 +821,7 @@ export class RpcProxyClient {
     // falsely time out during a long, semantically-silent tool run.
     onKeepalive?: () => void
   ): Promise<void> {
-    const response = await fetch(url(path), {
+    const response = await fetch(this.url(path), {
       method: 'GET',
       headers: {
         accept: 'text/event-stream',
@@ -929,7 +940,7 @@ export class RpcProxyClient {
     toolCallId: string
   ): Promise<ApprovalDecisionResult> {
     const response = await fetch(
-      url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/approvals/approve`),
+      this.url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/approvals/approve`),
       {
         method: 'POST',
         headers: {
@@ -961,7 +972,7 @@ export class RpcProxyClient {
     reason: string
   ): Promise<ApprovalDecisionResult> {
     const response = await fetch(
-      url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/approvals/deny`),
+      this.url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/approvals/deny`),
       {
         method: 'POST',
         headers: {
@@ -985,7 +996,7 @@ export class RpcProxyClient {
 
   async cancelTask(rpcToken: string, hostRef: string, taskId: string): Promise<void> {
     const response = await fetch(
-      url(
+      this.url(
         `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/tasks/${encodeURIComponent(taskId)}/cancel`
       ),
       {
@@ -1014,7 +1025,7 @@ export class RpcProxyClient {
     artifacts: Array<{ name: string; format: string; sizeBytes: number; createdAt: string }>
   }> {
     const response = await fetch(
-      url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/artifacts`),
+      this.url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/artifacts`),
       {
         headers: { authorization: `Bearer ${rpcToken}` },
         signal: withTimeout(),
@@ -1035,7 +1046,7 @@ export class RpcProxyClient {
 
   async downloadArtifact(rpcToken: string, hostRef: string, filename: string): Promise<Buffer> {
     const response = await fetch(
-      url(
+      this.url(
         `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/artifacts/${encodeURIComponent(filename)}/download`
       ),
       {
@@ -1055,7 +1066,9 @@ export class RpcProxyClient {
     query: SessionsListQuery = {}
   ): Promise<SessionsListResult> {
     assertSafeRouteSegment('hostRef', hostRef)
-    const requestUrl = new URL(url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions`))
+    const requestUrl = new URL(
+      this.url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions`)
+    )
     if (query.agent) requestUrl.searchParams.set('agent', query.agent)
     if (query.limit !== undefined) requestUrl.searchParams.set('limit', String(query.limit))
     if (query.cursor) requestUrl.searchParams.set('cursor', query.cursor)
@@ -1087,7 +1100,7 @@ export class RpcProxyClient {
     assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
     assertSafeRouteSegment('chatId', chatId)
     const requestUrl = new URL(
-      url(
+      this.url(
         `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/messages`
       )
     )
@@ -1142,7 +1155,7 @@ export class RpcProxyClient {
     assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
     assertSafeRouteSegment('chatId', chatId)
     const response = await fetch(
-      url(
+      this.url(
         `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/context-breakdown`
       ),
       { headers: { authorization: `Bearer ${rpcToken}` }, signal: withTimeout() }
@@ -1186,7 +1199,7 @@ export class RpcProxyClient {
     const modelsPath = trimmedChatId
       ? `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/models?chatId=${encodeURIComponent(trimmedChatId)}`
       : `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/models`
-    const response = await fetch(url(modelsPath), {
+    const response = await fetch(this.url(modelsPath), {
       headers: { authorization: `Bearer ${rpcToken}` },
       signal: withTimeout(),
     })
@@ -1220,20 +1233,23 @@ export class RpcProxyClient {
     model: string,
     expectedRevision?: number
   ): Promise<SetHostModelResult> {
-    const response = await fetch(url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/model`), {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${rpcToken}`,
-        'content-type': 'application/json',
-      },
-      // `expectedRevision` is omitted unless the host projected a revision
-      // (issue #654 CAS), so an older host keeps receiving the exact body it
-      // accepts today.
-      body: JSON.stringify(
-        expectedRevision === undefined ? { chatId, model } : { chatId, model, expectedRevision }
-      ),
-      signal: withTimeout(),
-    })
+    const response = await fetch(
+      this.url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/model`),
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${rpcToken}`,
+          'content-type': 'application/json',
+        },
+        // `expectedRevision` is omitted unless the host projected a revision
+        // (issue #654 CAS), so an older host keeps receiving the exact body it
+        // accepts today.
+        body: JSON.stringify(
+          expectedRevision === undefined ? { chatId, model } : { chatId, model, expectedRevision }
+        ),
+        signal: withTimeout(),
+      }
+    )
     if (!response.ok) {
       const body = await readErrorBody(response)
       // Disambiguate the two failure sources by the body's `error` code — NOT
@@ -1288,7 +1304,7 @@ export class RpcProxyClient {
     assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
     assertSafeRouteSegment('chatId', chatId)
     const response = await fetch(
-      url(
+      this.url(
         `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/name`
       ),
       {
@@ -1320,7 +1336,7 @@ export class RpcProxyClient {
   ): Promise<{ hostRef: string; status: string; message?: string }> {
     return requestJson<{ hostRef: string; status: string; message?: string }>(
       'GET',
-      url(`/api/v1/desktop/${encodeURIComponent(hostRef)}`),
+      this.url(`/api/v1/desktop/${encodeURIComponent(hostRef)}`),
       {
         token: rpcAccessToken,
       }
@@ -1336,7 +1352,7 @@ export class RpcProxyClient {
     rpcAccessToken: string,
     hostRef: string
   ): Promise<{ ok: true; hostRef: string; setCookie: string[] }> {
-    const res = await fetch(url(`/api/v1/desktop/${encodeURIComponent(hostRef)}/session`), {
+    const res = await fetch(this.url(`/api/v1/desktop/${encodeURIComponent(hostRef)}/session`), {
       method: 'POST',
       headers: {
         authorization: `Bearer ${rpcAccessToken}`,

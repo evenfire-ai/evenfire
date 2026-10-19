@@ -340,6 +340,6 @@ if [ "$MISSING" -eq 0 ]; then
   exit 0
 else
   echo -e "${RED}${BOLD}${MISSING} required prerequisite(s) missing.${NC} Install the item(s) above, then re-run ${BOLD}make prereqs${NC}."
-  echo    "Full walkthrough: docs/get-started/minikube.md"
+  echo    "Full walkthrough: docs/get-started/quickstart.md"
   exit 1
 fi

@@ -354,8 +354,7 @@ function assertHookAdmissible(
       status: 400,
       body: {
         error: 'content_access_conflict',
-        reason:
-          'contentAccess: metadata is not allowed for a hook using moderate/postCallSuccess/onError (§8.4)',
+        reason: `contentAccess: metadata is not allowed for a hook using ${[...INHERENTLY_CONTENT_POINTS].join('/')} (§8.4)`,
       },
     }
   }

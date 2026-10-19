@@ -78,7 +78,7 @@ safe_source_paths = {
     "control-ui/components/llmcredentialfields/index.tsx",
     "control-ui/components/llmcredentialfields/types.ts",
     "control-ui/components/__tests__/llmcredentialfields.test.tsx",
-    "docs/agent-models-credentials-ux.md",
+    "docs/design/agent-models-credentials-ux.md",
     "deploy/scripts/lib/gfs-credential-rollout.sh",
     "deploy/scripts/lib/gfs-credential-secret.sh",
     "deploy/scripts/reconcile-gfs-deploy-credentials.sh",

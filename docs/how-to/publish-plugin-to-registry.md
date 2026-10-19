@@ -91,7 +91,8 @@ curl -s -H "Authorization: Bearer $REGISTRY_API_KEY" \
 A **local** connector runs from an image the registry hosts under your org. Push
 it before publishing the entry that references it.
 
-**Control UI → Publisher → Docker credentials** (`/publisher/credentials`)
+**Control UI → Marketplace → _your org_ → Credentials**
+(`/marketplace/org/credentials`, formerly Publisher → Docker credentials)
 generates a durable push credential and hands you the login command, a
 downloadable `dockerconfigjson` for CI, and your exact push coordinate. A key
 minted at **Marketplace → API keys** works identically — both are `efrk_` org

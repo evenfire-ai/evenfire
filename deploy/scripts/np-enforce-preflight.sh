@@ -4,7 +4,8 @@
 #
 # Read-only. Run this and get a clean exit BEFORE flipping enforcement — the
 # 2026-05-15 attempt was rolled back because allow-k8s-api-egress-* targeted
-# the wrong IP. See docs/deploy/gcp.md §7 for the full runbook.
+# the wrong IP. See docs/deploy/production.md (Recommended rollout order /
+# Security non-negotiables) for the surrounding production guidance.
 #
 # Checks (blockers fail the run; the label audit is a WARN):
 #   0. Current NetworkPolicy enforcement state            (informational)

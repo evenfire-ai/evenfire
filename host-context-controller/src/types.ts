@@ -556,7 +556,9 @@ export interface HostLifecycleStatus {
   state: HostLifecycleState
   /**
    * Highest observed Host generation whose wake trigger has been handled.
-   * Written by the mcp-host runtime; HCC only preserves it across writes.
+   * Written by HCC itself when it handles a wake (statelessLifecycleExecutor:
+   * the wake fast-path and the pre-scale-down wake guard); other lifecycle
+   * writes preserve it.
    */
   wakeHandledGeneration: number
   /** Human-readable rejection or temporary suspension-block reason. */

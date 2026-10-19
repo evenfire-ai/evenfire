@@ -8,56 +8,22 @@
 // suspended-host precondition before Electron starts; this spec must run through
 // that combined gate rather than being reported as a standalone cold-start test.
 //
-// ─────────────────────────────────────────────────────────────────────────────
-// KNOWN RED in this repository (Scenarios 4 and 5), for a reason unrelated to
-// the wake/lifecycle behavior this spec exists to prove.
+// One Electron app is shared by the serial scenarios of a pass (worker-scoped
+// fixtures below), so a pass logs in through the UI once. control-api charges
+// every password attempt, successful ones included, against a 5-per-15-minutes
+// budget (control-api/src/services/auth/passwordAdmissionState.ts): pass 1
+// spends global setup + this login + the Scenario 4 re-login = 3, pass 2 = 2.
 //
-// This spec was brought over by migration commit e0014958c together with the
-// host-lifecycle work, but the renderer contracts it reads were NOT brought
-// over with it. This tree's `desktop-app/ui/` is byte-identical to its own dev
-// branch (`git diff` over `desktop-app/ui/` is empty for this branch), so this
-// is NOT a runtime regression introduced here — the DOM contracts simply never
-// existed in this lineage.
-//
-// Absent DOM contracts (used here / present in this tree's renderer):
-//   data-chat-id                          10 / 0
-//   aria-current on message-list           3 / 0
-//   region "Latest sessions for selected
-//     agent"                               2 / 0
-// `ChatThread.tsx` renders `message-list` with only `data-testid` + `className`.
-//
-// Observed failure: Scenario 4 fails in readActiveChatId() below — `aria-current`
-// resolved null across 123 attempts. Scenario 5 never ran as a consequence.
-//
-// Why this is NOT fixed by adding the attributes: the three contracts are the
-// visible surface of an entire un-ported renderer lineage, not a missing
-// attribute. The upstream sessions region is driven by a catalog-knowledge
-// recovery model that does not exist here at all — `catalogKnowledge` has 46
-// references upstream and 0 in this tree, and `ChatListContext` additionally
-// lacks `serverOnlySessionRecoveryBlocked`,
-// `acknowledgeServerOnlySessionRecovery`, and the `CatalogKnowledge` type. In
-// total 40 files diverge under `desktop-app/ui/src`, including 10 issue-791
-// renderer test files that are absent here (ChatThread.issue791,
-// useChatListController.issue791, useAgentChatController.issue791,
-// reconcileChat.remoteAbsent, sendAgentMessage.scope.issue791, and others).
-//
-// Concretely, this tree renders the skeleton whenever `chatListLoading` is set,
-// blanking every `button[data-chat-id]`, whereas upstream guards it with
-// `chatListLoading && !sortedChats.length` so cached sessions stay visible
-// during a post-wake catalog refresh — which is exactly what
-// readSessionButtonChatIds() (≥2 session buttons after a re-suspend) leans on.
-// Porting only the attributes would therefore add unpinned production code
-// while these scenarios stayed red. Closing this properly means porting the
-// issue-791 renderer lineage (ChatListContext + useChatListController +
-// reconcileChat + sessionFsm and their tests), not patching the DOM.
-//
-// DO NOT weaken, relax, or delete the assertions in readActiveChatId(),
-// expectSessionButtonVisible(), readSessionButtonChatIds(), or
-// openExistingSession() to make these scenarios go green. They encode the real
-// two-chat continuity contract. Port the renderer lineage, or assert on a
-// contract this tree actually exposes.
-// ─────────────────────────────────────────────────────────────────────────────
-import { expect, loginAs, test } from './fixtures.js'
+// Chat identity uses the contracts this renderer exposes: a chat is renamed to
+// a run-scoped title through the sidebar, reopened with its `Open <title>`
+// row, recognised as active by `.nav-latest-session.active`, and mapped to its
+// chat id through the renderer bridge (`window.clerum.chat.list`), the same id
+// the host lists in `rpc.listSessions`. This renderer does not keep cached
+// sessions visible during a catalog refresh, so no scenario asserts it; that
+// behaviour is tracked by #827 (with #1109).
+import { type ElectronApplication, type Page, test as base } from '@playwright/test'
+import { expect, launchFreshElectron, loginAs } from './fixtures.js'
+import { fleetRowHostRefs } from './helpers/fleetRowHostRefs.js'
 import { openAgentsPage } from './navigationHelpers.js'
 
 const HOST_REF =
@@ -67,6 +33,59 @@ const HOST_REF =
 // step 10). Same historical env name the fixtures use; the leg drives the
 // visible email/password screen via loginAs() — no Keychain, no storage injection.
 const E2E_EMAIL = process.env.E2E_DEV_LOGIN_EMAIL || 'test@clerum.io'
+
+// One app and one UI login per pass (see the header). `dialogs` stays
+// test-scoped: each scenario records the dialogs raised during its own journey
+// and removes its listener, so listeners do not pile up on the shared page.
+const test = base.extend<{ dialogs: string[] }, { sharedApp: ElectronApplication; appPage: Page }>({
+  sharedApp: [
+    async ({}, use) => {
+      const app = await launchFreshElectron()
+      try {
+        await use(app)
+      } finally {
+        await app.close()
+      }
+    },
+    { scope: 'worker', timeout: 120_000 },
+  ],
+  appPage: [
+    async ({ sharedApp }, use) => {
+      const page = await sharedApp.firstWindow()
+      await page.waitForLoadState('domcontentloaded')
+      await loginAs(page, E2E_EMAIL)
+      await use(page)
+    },
+    { scope: 'worker', timeout: 120_000 },
+  ],
+  dialogs: async ({ appPage }, use) => {
+    const seen: string[] = []
+    const onDialog = (dialog: import('@playwright/test').Dialog) => {
+      seen.push(dialog.message())
+      void dialog.dismiss()
+    }
+    appPage.on('dialog', onDialog)
+    try {
+      await use(seen)
+    } finally {
+      appPage.off('dialog', onDialog)
+    }
+  },
+})
+
+// Scenario 4 names its two chats with a run id shared by both passes, so the
+// second pass (a new Electron process) finds the same chats. The bash gate
+// passes its RUN_ID to both passes.
+function sessionTitle(label: 'A' | 'B'): string {
+  const runId = process.env.E2E_STATELESS_RUN_ID
+  if (!runId) {
+    throw new Error(
+      '[stateless-wake] E2E_STATELESS_RUN_ID is not set — scripts/e2e/e2e-stateless-suspend-wake.sh ' +
+        'passes the same id to both Playwright passes so cycle 2 can find the cycle-1 chats.'
+    )
+  }
+  return `stateless-wake ${runId} ${label}`
+}
 
 // Which suspend/wake cycle this Playwright pass is proving. The bash gate runs
 // the spec twice: cycle 1 (every scenario except the repeat-cycle one) and,
@@ -168,12 +187,8 @@ function requireSuspendPrecondition(): void {
   }
 }
 
-async function visibleAgentNames(appPage: import('@playwright/test').Page): Promise<string[]> {
-  return appPage
-    .locator('.agents-table-row-clickable')
-    .evaluateAll(rows =>
-      rows.map(row => row.querySelector('strong')?.textContent?.trim() || '').filter(Boolean)
-    )
+async function visibleAgentHostRefs(appPage: import('@playwright/test').Page): Promise<string[]> {
+  return appPage.locator('.agents-table-row-clickable').evaluateAll(fleetRowHostRefs)
 }
 
 async function readHostRuntimeSignal(
@@ -226,7 +241,7 @@ test('Scenario 0 — authenticated catalog prewarms every visible agent before s
       appPage.locator('.agents-table-row-clickable', { hasText: HOST_REF }).first(),
       `[stateless-wake] Expected authorized agent row for "${HOST_REF}" before any stateless chat interaction.`
     ).toBeVisible({ timeout: 20_000 })
-    const names = await visibleAgentNames(appPage)
+    const names = await visibleAgentHostRefs(appPage)
     expect(names, 'Agents page should expose at least one visible authorized agent').toContain(
       HOST_REF
     )
@@ -376,16 +391,9 @@ async function expectComposerAcceptsFreshInput(
 
 test('Scenario 1 — catalog-prewarmed stateless conversation continues after selection', async ({
   appPage,
+  dialogs,
 }, testInfo) => {
   test.setTimeout(360_000)
-
-  // Attach the dialog listener BEFORE any send so no unhandled dialog can slip
-  // past between opening the agent and the first interaction.
-  const dialogs: string[] = []
-  appPage.on('dialog', dialog => {
-    dialogs.push(dialog.message())
-    void dialog.dismiss()
-  })
 
   // N5 — cheap env guard before any expensive UI navigation.
   requireSuspendPrecondition()
@@ -418,15 +426,9 @@ test('Scenario 1 — catalog-prewarmed stateless conversation continues after se
 
 test('Scenario 2 — wake/retry branch handling is safe; composer never gets stuck', async ({
   appPage,
+  dialogs,
 }, testInfo) => {
   test.setTimeout(360_000)
-
-  // Attach the dialog listener BEFORE the first send.
-  const dialogs: string[] = []
-  appPage.on('dialog', dialog => {
-    dialogs.push(dialog.message())
-    void dialog.dismiss()
-  })
 
   // N5 — cheap env guard before any expensive UI navigation.
   requireSuspendPrecondition()
@@ -463,15 +465,9 @@ test('Scenario 2 — wake/retry branch handling is safe; composer never gets stu
 
 test('Scenario 3 — end-to-end wake journey (observability probe, not a latency gate)', async ({
   appPage,
+  dialogs,
 }, testInfo) => {
   test.setTimeout(360_000)
-
-  // Attach the dialog listener BEFORE the send.
-  const dialogs: string[] = []
-  appPage.on('dialog', dialog => {
-    dialogs.push(dialog.message())
-    void dialog.dismiss()
-  })
 
   // N5 — cheap env guard before any expensive UI navigation.
   requireSuspendPrecondition()
@@ -651,105 +647,102 @@ async function probeStatelessPrewarm(appPage: import('@playwright/test').Page): 
   }, HOST_REF)
 }
 
-// Navigate to the dedicated agent view (no active chat) where the visible
-// "Latest sessions for selected agent" region renders — the same path the sibling
-// stateless-watch-session-continuity spec uses (Agents → Open details → Go to
-// Chat). Returns the region locator so callers can assert on session buttons by
-// data-chat-id. isDedicatedAgentView is `!activeChatId` (ChatThread.tsx), so this
-// view is the only place the session list is visible.
-async function openDedicatedAgentSessions(
-  appPage: import('@playwright/test').Page
-): Promise<import('@playwright/test').Locator> {
+// Leave the chat view for Agents, so a later check proves the sidebar still
+// lists the sessions after navigating away and back. The sidebar renders on
+// every route (SidebarNav), so the session rows stay reachable from here.
+async function navigateAwayToAgents(appPage: import('@playwright/test').Page): Promise<void> {
   await openAgentsPage(appPage)
   await expect(appPage.getByRole('heading', { name: /^Agents$/ })).toBeVisible({ timeout: 20_000 })
-  const detailsButton = appPage.getByRole('button', {
-    name: `Open details for ${HOST_REF}`,
-    exact: true,
-  })
-  await expect(detailsButton).toHaveCount(1)
-  await expect(detailsButton).toBeVisible({ timeout: 30_000 })
-  await expect(detailsButton).toBeEnabled()
-  await detailsButton.click()
-  await expect(appPage.getByRole('region', { name: 'Agent details' })).toBeVisible({
-    timeout: 20_000,
-  })
-  const goToChat = appPage.getByRole('button', { name: 'Go to Chat', exact: true })
-  await expect(goToChat).toBeVisible({ timeout: 20_000 })
-  await expect(goToChat).toBeEnabled()
-  await goToChat.click()
-  await expect(appPage.getByTestId('chat-input')).toBeVisible({ timeout: 30_000 })
-  await expect(appPage.getByRole('button', { name: /^Switch chat agent$/ })).toContainText(
-    HOST_REF,
-    { timeout: 30_000 }
-  )
-  const sessions = appPage.getByRole('region', { name: 'Latest sessions for selected agent' })
-  await expect(sessions).toBeVisible({ timeout: 30_000 })
-  return sessions
 }
 
-// The active chat's message-list carries aria-current='true' and a UUID
-// data-chat-id once a chat is selected (ChatThread.tsx). Returns that identity.
-//
-// KNOWN-RED SITE: this tree's ChatThread.tsx renders `message-list` with only
-// `data-testid` + `className`, so the `aria-current` expectation below is where
-// Scenario 4 fails. See the KNOWN RED block in this file's header for why the
-// fix is a renderer-lineage port and not a DOM patch. Do NOT relax these two
-// assertions to make the scenario pass.
-async function readActiveChatId(appPage: import('@playwright/test').Page): Promise<string> {
-  const messageList = appPage.getByTestId('message-list')
-  await expect(messageList).toHaveAttribute('aria-current', 'true', { timeout: TURN_TIMEOUT })
-  await expect(messageList).toHaveAttribute('data-chat-id', CHAT_UUID_RE, { timeout: TURN_TIMEOUT })
-  const chatId = await messageList.getAttribute('data-chat-id')
+// The chat id the renderer bridge stores for a titled chat on HOST_REF. Exactly
+// one chat may carry the title, and its id must be a UUID: the same id
+// rpc.listSessions reports for the host's session.
+async function chatIdForTitle(
+  appPage: import('@playwright/test').Page,
+  title: string
+): Promise<string> {
+  let ids: string[] = []
+  await expect
+    .poll(
+      async () => {
+        const chats = await appPage.evaluate(hostRef => window.clerum.chat.list(hostRef), HOST_REF)
+        ids = chats.filter(chat => chat.title === title).map(chat => chat.id)
+        return ids.length
+      },
+      { timeout: 20_000, message: `exactly one local chat titled "${title}" on ${HOST_REF}` }
+    )
+    .toBe(1)
+  const [chatId] = ids
   if (!chatId || !CHAT_UUID_RE.test(chatId)) {
-    throw new Error('[stateless-wake] active chat did not expose a UUID chat identity')
+    throw new Error(`[stateless-wake] chat "${title}" did not expose a UUID chat identity`)
   }
   return chatId
 }
 
-// B1 — assert a chat identity is visible in the "Latest sessions" list, not only
-// reported by the RPC. Reuses the sibling's `button[data-chat-id="..."]` pattern.
-async function expectSessionButtonVisible(
-  sessions: import('@playwright/test').Locator,
-  chatId: string
+// Name the active chat and return its identity. The active sidebar row must be
+// a HOST_REF session; after the rename its `Open <title>` button is that row's.
+async function nameActiveChat(
+  appPage: import('@playwright/test').Page,
+  title: string
+): Promise<string> {
+  const row = appPage.locator('.nav-latest-session.active')
+  await expect(row).toHaveCount(1, { timeout: TURN_TIMEOUT })
+  await expect(row.locator('.nav-latest-session__agent')).toHaveText(HOST_REF)
+  await row.getByRole('button', { name: /^Session options for / }).click()
+  await appPage.getByRole('menuitem', { name: 'Rename', exact: true }).click()
+  const input = appPage.getByRole('textbox', { name: 'Rename session', exact: true })
+  await expect(input).toBeVisible()
+  await input.fill(title)
+  await input.press('Enter')
+  await expect(row.getByRole('button', { name: `Open ${title}`, exact: true })).toBeVisible({
+    timeout: 30_000,
+  })
+  return chatIdForTitle(appPage, title)
+}
+
+// B1 — a chat is visible in the sidebar session list as a HOST_REF session, not
+// only reported by the RPC. On a re-suspended host the catalog is served
+// through the wake-capable read, so the bound covers that wake.
+async function expectSessionVisible(
+  appPage: import('@playwright/test').Page,
+  title: string
 ): Promise<void> {
-  const button = sessions.locator(`button[data-chat-id="${chatId}"]`)
+  const button = appPage.getByRole('button', { name: `Open ${title}`, exact: true })
   await expect(
     button,
-    `Session identity ${chatId} must be visible in the "Latest sessions" list`
-  ).toHaveCount(1)
+    `Session "${title}" must be visible in the sidebar session list`
+  ).toHaveCount(1, { timeout: WAKE_VISIBLE_TIMEOUT })
   await expect(button).toBeVisible()
+  const row = appPage.locator('.nav-latest-session', { has: button })
+  await expect(row.locator('.nav-latest-session__agent')).toHaveText(HOST_REF)
 }
 
-// Read the chat identities currently rendered as session buttons. Waits (bounded)
-// until at least two are listed — on a re-suspended host the catalog is served
-// through the wake-capable read, so this resolves after that wake; a genuinely
-// empty catalog fails the caller's assertion loudly rather than silently.
-async function readSessionButtonChatIds(
-  sessions: import('@playwright/test').Locator
-): Promise<string[]> {
-  const buttons = sessions.locator('button[data-chat-id]')
-  await expect(buttons.nth(1)).toBeVisible({ timeout: WAKE_VISIBLE_TIMEOUT })
-  const ids = await buttons.evaluateAll(nodes =>
-    nodes.map(node => node.getAttribute('data-chat-id') || '').filter(Boolean)
-  )
-  return [...new Set(ids)]
-}
-
-// Click a listed session and confirm it became the active chat (its identity
-// moves onto the message-list). Leaves the dedicated view for the thread view.
+// Click a listed session and confirm it became the active chat: its row is the
+// active one, the conversation breadcrumb names HOST_REF, and its title still
+// maps to the same chat identity. The "Switch chat agent" selector is not used:
+// the renderer shows it only on the new-chat landing (no active chat).
 async function openExistingSession(
   appPage: import('@playwright/test').Page,
-  sessions: import('@playwright/test').Locator,
+  title: string,
   chatId: string
 ): Promise<void> {
-  const button = sessions.locator(`button[data-chat-id="${chatId}"]`)
-  await expect(button).toHaveCount(1)
-  await expect(button).toBeVisible()
+  await expectSessionVisible(appPage, title)
+  const button = appPage.getByRole('button', { name: `Open ${title}`, exact: true })
   await expect(button).toBeEnabled()
   await button.click()
-  const messageList = appPage.getByTestId('message-list')
-  await expect(messageList).toHaveAttribute('data-chat-id', chatId, { timeout: 30_000 })
-  await expect(messageList).toHaveAttribute('aria-current', 'true')
+  await expect(
+    appPage
+      .locator('.nav-latest-session.active')
+      .getByRole('button', { name: `Open ${title}`, exact: true })
+  ).toBeVisible({ timeout: 30_000 })
+  await expect(appPage.getByRole('navigation', { name: 'Chat breadcrumb' })).toContainText(
+    HOST_REF,
+    { timeout: 30_000 }
+  )
+  expect(await chatIdForTitle(appPage, title), `"${title}" must keep its chat identity`).toBe(
+    chatId
+  )
 }
 
 // SF2 — transcript continuity through the visible UI: the earlier assistant reply
@@ -820,16 +813,9 @@ async function logoutViaUi(appPage: import('@playwright/test').Page): Promise<vo
 // bash gate's second pass after a fresh suspension.
 test('Scenario 4 — concurrent session/model/message on a COLD wake, then two-chat continuity across nav + login', async ({
   appPage,
+  dialogs,
 }, testInfo) => {
   test.setTimeout(720_000)
-
-  // Attach the dialog listener BEFORE any send so no unhandled wake dialog slips
-  // past the whole journey.
-  const dialogs: string[] = []
-  appPage.on('dialog', dialog => {
-    dialogs.push(dialog.message())
-    void dialog.dismiss()
-  })
 
   // N5 — cheap env guard before any expensive UI navigation.
   requireSuspendPrecondition()
@@ -961,7 +947,8 @@ test('Scenario 4 — concurrent session/model/message on a COLD wake, then two-c
       `${idleStartedAt} → ${idleEndedAt}.`
   ).toBe('cold')
   await expectComposerIdleReady(appPage, chatInput)
-  const chatIdA = await readActiveChatId(appPage)
+  const titleA = sessionTitle('A')
+  const chatIdA = await nameActiveChat(appPage, titleA)
 
   // Chat B — a SECOND distinct conversation on the same agent (New chat again).
   // The host is warm now, so this send exercises the warm path.
@@ -972,15 +959,14 @@ test('Scenario 4 — concurrent session/model/message on a COLD wake, then two-c
   const modeB = await resolveWakeOutcome(appPage, markerB)
   await recordMode(testInfo, 'scenario-4-chat-b', modeB)
   await expectComposerIdleReady(appPage, chatInput)
-  const chatIdB = await readActiveChatId(appPage)
+  const titleB = sessionTitle('B')
+  const chatIdB = await nameActiveChat(appPage, titleB)
   expect(chatIdA, 'the two chats must have distinct server identities').not.toBe(chatIdB)
 
-  // B1 (a) — BEFORE the post-warm burst, assert BOTH chat identities are visible
-  // in the "Latest sessions" region (not only through the RPC read). The region
-  // renders only in the dedicated agent view, so navigate there first.
-  let sessions = await openDedicatedAgentSessions(appPage)
-  await expectSessionButtonVisible(sessions, chatIdA)
-  await expectSessionButtonVisible(sessions, chatIdB)
+  // B1 (a) — BEFORE the post-warm burst, assert BOTH chats are visible in the
+  // sidebar session list (not only through the RPC read).
+  await expectSessionVisible(appPage, titleA)
+  await expectSessionVisible(appPage, titleB)
 
   // Keep the RPC session read as the transport-level no-403 + identity proof.
   const before = await readStatelessSessionIds(appPage)
@@ -994,9 +980,9 @@ test('Scenario 4 — concurrent session/model/message on a COLD wake, then two-c
     'both chat identities must surface in the server session list'
   ).toBe(true)
 
-  // Reopen chat B (leaving the dedicated view) so the composer + model picker are
-  // mounted for the warm-path burst and the SF3 model proof.
-  await openExistingSession(appPage, sessions, chatIdB)
+  // Reopen chat B from the sidebar so the composer + model picker are mounted
+  // for the warm-path burst and the SF3 model proof.
+  await openExistingSession(appPage, titleB, chatIdB)
 
   // SF3 — the model list must be genuinely usable, not merely "did not 403".
   // Assert a positive model count over the wake-capable RPC AND drive the visible
@@ -1046,11 +1032,11 @@ test('Scenario 4 — concurrent session/model/message on a COLD wake, then two-c
   await expect(chatBList.getByText(`Reply with exactly: ${markerC}`)).toHaveCount(1)
   await expect(chatBList.getByTestId('agent-response').filter({ hasText: markerC })).toHaveCount(1)
 
-  // Step 9 + B1 (b) — navigate away to Agents and back into the dedicated sessions
-  // view; assert BOTH identities are STILL visible in the session list.
-  sessions = await openDedicatedAgentSessions(appPage)
-  await expectSessionButtonVisible(sessions, chatIdA)
-  await expectSessionButtonVisible(sessions, chatIdB)
+  // Step 9 + B1 (b) — navigate away to Agents; assert BOTH chats are STILL
+  // visible in the sidebar session list.
+  await navigateAwayToAgents(appPage)
+  await expectSessionVisible(appPage, titleA)
+  await expectSessionVisible(appPage, titleB)
   const after = await readStatelessSessionIds(appPage)
   expect(
     after.error,
@@ -1067,10 +1053,10 @@ test('Scenario 4 — concurrent session/model/message on a COLD wake, then two-c
   // SF2 — transcript continuity through the VISIBLE UI: reopen chat A, then chat
   // B, and assert each earlier assistant reply is still rendered in message-list
   // (not merely chatId set-membership).
-  await openExistingSession(appPage, sessions, chatIdA)
+  await openExistingSession(appPage, titleA, chatIdA)
   await expectAssistantMarkerRendered(appPage, markerA)
-  sessions = await openDedicatedAgentSessions(appPage)
-  await openExistingSession(appPage, sessions, chatIdB)
+  await navigateAwayToAgents(appPage)
+  await openExistingSession(appPage, titleB, chatIdB)
   await expectAssistantMarkerRendered(appPage, markerB)
   await expectAssistantMarkerRendered(appPage, markerC)
 
@@ -1080,13 +1066,12 @@ test('Scenario 4 — concurrent session/model/message on a COLD wake, then two-c
   // assert both identities and their transcript content survive the auth cycle.
   await logoutViaUi(appPage)
   await loginAs(appPage, E2E_EMAIL)
-  sessions = await openDedicatedAgentSessions(appPage)
-  await expectSessionButtonVisible(sessions, chatIdA)
-  await expectSessionButtonVisible(sessions, chatIdB)
-  await openExistingSession(appPage, sessions, chatIdA)
+  await expectSessionVisible(appPage, titleA)
+  await expectSessionVisible(appPage, titleB)
+  await openExistingSession(appPage, titleA, chatIdA)
   await expectAssistantMarkerRendered(appPage, markerA)
-  sessions = await openDedicatedAgentSessions(appPage)
-  await openExistingSession(appPage, sessions, chatIdB)
+  await navigateAwayToAgents(appPage)
+  await openExistingSession(appPage, titleB, chatIdB)
   await expectAssistantMarkerRendered(appPage, markerB)
 
   // No unhandled wake dialog across the entire journey.
@@ -1113,28 +1098,27 @@ function requireSecondCyclePass(): void {
 
 test('Scenario 5 — repeat suspend/wake cycle keeps prior chats continuous (second cycle)', async ({
   appPage,
+  dialogs,
 }, testInfo) => {
   test.setTimeout(600_000)
-
-  const dialogs: string[] = []
-  appPage.on('dialog', dialog => {
-    dialogs.push(dialog.message())
-    void dialog.dismiss()
-  })
 
   requireSecondCyclePass()
   requireSuspendPrecondition()
 
   // The chats from the first pass persist server-side across the second suspend.
-  // Opening the dedicated session view serves the catalog through the wake-capable
-  // read; a re-suspended host must therefore surface >= 2 prior sessions here
-  // without a 403 or a false-empty catalog.
-  const sessions = await openDedicatedAgentSessions(appPage)
-  const priorIds = await readSessionButtonChatIds(sessions)
+  // The sidebar catalog is served through the wake-capable read; a re-suspended
+  // host must therefore list both Scenario 4 chats here without a 403 or a
+  // false-empty catalog.
+  const priorTitles = [sessionTitle('A'), sessionTitle('B')]
+  const priorIds: string[] = []
+  for (const title of priorTitles) {
+    await expectSessionVisible(appPage, title)
+    priorIds.push(await chatIdForTitle(appPage, title))
+  }
   expect(
-    priorIds.length,
-    'the >=2 chats created in the first cycle must survive a SECOND suspend/wake'
-  ).toBeGreaterThanOrEqual(2)
+    new Set(priorIds).size,
+    'the 2 chats created in the first cycle must survive a SECOND suspend/wake'
+  ).toBe(2)
 
   const catalog = await readStatelessSessionIds(appPage)
   expect(
@@ -1155,7 +1139,7 @@ test('Scenario 5 — repeat suspend/wake cycle keeps prior chats continuous (sec
   if (!targetChatId) {
     throw new Error('[stateless-wake] cycle-2 session catalog exposed no prior chat to reopen')
   }
-  await openExistingSession(appPage, sessions, targetChatId)
+  await openExistingSession(appPage, priorTitles[0], targetChatId)
   const messageList = appPage.getByTestId('message-list')
   const priorResponse = messageList.getByTestId('agent-response').first()
   await expect(

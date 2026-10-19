@@ -8,8 +8,8 @@ made on evidence that had already aged between its producer and its
 consumer._ Encode these as guardrails so the class does not reappear.
 
 This doc is the "how to not reintroduce the class" companion to the
-narrative in
-[`docs/architecture/overview.md` §12 (Stateless Agents / Host Lifecycle)](overview.md#12-stateless-agents-host-lifecycle).
+`spec.lifecycle.stateless` field and `status.lifecycle` states in the
+[Host CRD reference](../crds/host.md#spec-fields).
 
 ---
 

@@ -73,7 +73,11 @@ function harness(
 ) {
   const worker = createInProcessWorker(':memory:')
   workers.push(worker)
-  const queue = new PersistQueue(worker.worker, { syncTimeoutMs: 5000, asyncTimeoutMs: 5000 })
+  const queue = new PersistQueue(worker.worker, {
+    syncTimeoutMs: 5000,
+    asyncTimeoutMs: 5000,
+    stallTimeoutMs: 30_000,
+  })
   queues.push(queue)
   const now = overrides.now ?? (() => 1_000_000)
   const store = new ModelStepCheckpointStore(queue, { now, blockedTtlMs: 7 * 24 * 3_600_000 })
@@ -133,7 +137,11 @@ function storeHarness(): {
 } {
   const worker = createInProcessWorker(':memory:')
   workers.push(worker)
-  const queue = new PersistQueue(worker.worker, { syncTimeoutMs: 5000, asyncTimeoutMs: 5000 })
+  const queue = new PersistQueue(worker.worker, {
+    syncTimeoutMs: 5000,
+    asyncTimeoutMs: 5000,
+    stallTimeoutMs: 30_000,
+  })
   queues.push(queue)
   const clock = { value: 1_000_000 }
   return {

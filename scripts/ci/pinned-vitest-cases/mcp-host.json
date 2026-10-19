@@ -1582,5 +1582,25 @@
   {
     "suite": "statelessCronForcedApproval.test.ts",
     "fullName": "stateless cron_manage create/enable forced approval keeps the cron-sourced gate-only path: create suspends and every other call proceeds"
+  },
+  {
+    "suite": "workflowService.security.test.ts",
+    "fullName": "workflow tool allowlist enforced at call time (spec §3.1.2) never runs srv__write outside include, returns a tool error to the model, and completes the step"
+  },
+  {
+    "suite": "workflowService.security.test.ts",
+    "fullName": "workflow tool allowlist enforced at call time (spec §3.1.2) never runs clerum__trigger_workflow outside include, returns a tool error to the model, and completes the step"
+  },
+  {
+    "suite": "workflowService.security.test.ts",
+    "fullName": "workflow tool allowlist enforced at call time (spec §3.1.2) never runs clerum__read_workflow outside include, returns a tool error to the model, and completes the step"
+  },
+  {
+    "suite": "workflowService.security.test.ts",
+    "fullName": "workflow tool allowlist enforced at call time (spec §3.1.2) rejects every forbidden call in one turn while the allowlisted call still dispatches"
+  },
+  {
+    "suite": "workflowService.security.test.ts",
+    "fullName": "workflow tool allowlist enforced at call time (spec §3.1.2) does not let a rejected call satisfy toolChoice=required"
   }
 ]

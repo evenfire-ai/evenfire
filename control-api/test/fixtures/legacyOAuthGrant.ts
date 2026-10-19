@@ -223,6 +223,7 @@ export async function legacyConsent(
       },
     },
     userContextsReader: async () => ({ contextIds: [CONTEXT] }),
+    userServerAccessReader: async () => true,
     fetchFn: fetchFn as unknown as typeof fetch,
     stateSecret: STATE_SECRET,
     encryptionKey,
@@ -267,6 +268,7 @@ export async function currentConsent(
         },
       },
       userContextsReader: async () => ({ contextIds: [CONTEXT] }),
+      userServerAccessReader: async () => true,
       fetchFn: (async () => {
         throw new Error('remote/generic consent must not use fetchFn')
       }) as unknown as typeof fetch,

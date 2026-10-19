@@ -145,6 +145,55 @@ describe('useAgentChatController — characterization (D.0)', () => {
       expect(result.current.activeChatId).toBe('chat-1')
     })
 
+    it('preserves cached history when the same chat is reopened during setLastActive', async () => {
+      await clerum.chat.create('agent-x', 'chat-a')
+      await clerum.chat.upsertMessages('agent-x', 'chat-a', [
+        { id: 'local-turn', role: 'user', content: 'saved locally', timestamp: 1 },
+      ])
+
+      const firstSetLastActive = deferred<void>()
+      const setLastActive = clerum.chat.setLastActive.getMockImplementation()
+      if (!setLastActive) throw new Error('Expected the setLastActive test mock implementation')
+      let holdFirstCall = true
+      clerum.chat.setLastActive.mockImplementation(async (agentRef, chatId) => {
+        if (agentRef === 'agent-x' && chatId === 'chat-a' && holdFirstCall) {
+          holdFirstCall = false
+          await firstSetLastActive.promise
+        }
+        await setLastActive(agentRef, chatId)
+      })
+      clerum.rpc.loadSessionMessages.mockRejectedValue(new Error('offline'))
+
+      const { result } = renderController()
+      await settleMount()
+      await waitFor(() => expect(result.current.chatListLoading).toBe(false))
+
+      let initialSelection!: Promise<void>
+      await act(async () => {
+        initialSelection = result.current.switchToChat('agent-x', 'chat-a')
+        await Promise.resolve()
+      })
+      await waitFor(() =>
+        expect(clerum.chat.setLastActive).toHaveBeenCalledWith('agent-x', 'chat-a')
+      )
+      expect(result.current.activeChatId).toBe('chat-a')
+      expect(result.current.chatMessagesLoading).toBe(true)
+
+      await act(async () => {
+        await result.current.switchToChat('agent-x', 'chat-a')
+      })
+
+      await act(async () => {
+        firstSetLastActive.resolve()
+        await initialSelection
+      })
+
+      expect(result.current.activeChatId).toBe('chat-a')
+      expect(result.current.chatMessages).toEqual([
+        expect.objectContaining({ id: 'local-turn', content: 'saved locally' }),
+      ])
+    })
+
     it('4.2 hydrates a server-only chat (created on another device) and persists via replace', async () => {
       clerum.chat.loadMessages.mockResolvedValue([]) // nothing cached locally
       clerum.rpc.loadSessionMessages.mockResolvedValue({

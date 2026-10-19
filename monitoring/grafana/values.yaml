@@ -19,6 +19,9 @@ datasources:
     datasources:
       - name: Loki
         type: loki
+        # Stable uid: dashboards/loki-grafana-dashboard.json references this
+        # datasource by uid. Change both together.
+        uid: P8E80F9AEF21F6940
         access: proxy
         url: http://loki.monitoring:3100
         isDefault: false

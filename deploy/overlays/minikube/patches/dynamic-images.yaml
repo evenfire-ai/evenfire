@@ -1,4 +1,4 @@
-# NOTE on env-var image refs (CONTEXT_MAPPER_HOST_IMAGE, STDIO_BRIDGE_IMAGE,
+# NOTE on env-var image refs (CONTEXT_MAPPER_HOST_IMAGE,
 # CONTEXT_MAPPER_STDIO_BRIDGE_IMAGE, CLERUM_COORDINATOR_IMAGE, CLERUM_MCP_HOST_IMAGE):
 # we DELIBERATELY do NOT override their values here. The base values (:0.9.5)
 # are rewritten at render time by kustomize's image transformer, which has been

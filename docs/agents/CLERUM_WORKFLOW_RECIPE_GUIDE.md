@@ -490,6 +490,16 @@ steps:
       include: [search__web_search]      # server__tool with double underscore
 ```
 
+`allowedTools.include` is the step's **complete** toolset when it is non-empty.
+Only the listed tools are offered to the model and callable, and that includes
+platform tools such as `clerum__generate_pdf`, `clerum__list_workflows` or
+`clerum__get_capabilities`, which must be listed by name. A call to any other
+tool returns an error to the model and does not run. A rejected call is recorded as a failed tool call, so under
+`toolChoice: required` a step whose only tool calls were rejected ends failed
+(`required-tool-call-failed`). When `include` is omitted
+or empty, a step with `mcpServers` gets every tool of those servers plus the
+`clerum__*` tools, and a step without `mcpServers` is text-only.
+
 ---
 
 ## 6. Sandbox UI (`spec.ui`)
@@ -1283,8 +1293,8 @@ workloads:
   instruction: '...'                    # OR `run: {...}`
   dependsOn: [other-step]               # Ordering only
   mcpServers: [search]                  # workload IDs of MCP servers callable
-  allowedTools:                         # OBJECT — `include` array of server__tool names
-    include: [search__web_search]
+  allowedTools:                         # OBJECT — `include` array of server__tool names.
+    include: [search__web_search]       # Non-empty = the step's ONLY callable tools (list clerum__* too)
   maxIterations: 10
   timeoutSeconds: 300
   backoffSeconds: 5

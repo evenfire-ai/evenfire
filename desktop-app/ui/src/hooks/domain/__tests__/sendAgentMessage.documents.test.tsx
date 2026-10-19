@@ -7,7 +7,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, waitFor } from '@testing-library/react'
 import { createHash } from 'node:crypto'
-import { getComposerDraft, setComposerDraft } from '@lib/composerDraftStore'
+import {
+  getComposerDraft,
+  resetComposerDraftStore,
+  setComposerDraft,
+} from '@lib/composerDraftStore'
 import { loadHostModels, resetHostModelSelectionStore } from '@lib/hostModelSelectionStore'
 import type { HostModelsResult } from '../../../../../src/types'
 import { renderController } from './__fixtures__/controllerHarness'
@@ -39,6 +43,7 @@ const DROPPED =
 
 beforeEach(() => {
   uuidCounter = 0
+  resetComposerDraftStore()
   vi.spyOn(globalThis.crypto, 'randomUUID').mockImplementation(
     () => `uuid-${++uuidCounter}` as `${string}-${string}-${string}-${string}-${string}`
   )

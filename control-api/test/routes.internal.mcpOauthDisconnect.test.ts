@@ -15,7 +15,8 @@ import { MockGateway } from './mockGateway.js'
  *
  * Authorization BY FLAVOR (the security invariant, §2.3):
  *   - `user`    → the key is built on the forwarded userId, so a cross-user
- *     delete is structurally impossible.
+ *     delete is structurally impossible. No Context membership is required: a
+ *     user who has left every Context can still revoke their own token.
  *   - `context` → membership in the server's Context is required (getUserContexts),
  *     and a non-member is rejected 403 with NO delete.
  *
@@ -66,6 +67,8 @@ function seedOauthServer(
       metadata: { name: opts.name },
       spec: {
         contextRef: opts.contextRef ?? 'ctx-9',
+        image: 'example/gdrive-mcp:1',
+        transport: { type: 'streamableHttp', url: 'https://gdrive.example.com/mcp' },
         auth: { type: 'oauth' },
         oauth: {
           id: 'google-drive',
@@ -177,10 +180,14 @@ describe('DELETE /api/v1/internal/mcp-oauth/grant (spec 11 U4)', () => {
 
   // ── user flavor ──────────────────────────────────────────────────────────
 
-  it('user flavor: a MEMBER revokes → 204 and deletes the (user, own-userId) grant', async () => {
+  // These replace the earlier "a NON-member is rejected 403" expectation for the
+  // user flavor: the delete key is (userId, server), so the caller can only ever
+  // remove their own grant, and requiring membership would leave a user who
+  // left every Context unable to revoke their own token.
+  it('user flavor: a user in NO Context revokes → 204 and deletes only the (user, own-userId) grant', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-9' })
-    mockDb({ memberContexts: ['ctx-9'] })
-    const res = await del(app).send({ mcpServerName: 'gdrive', userId: 'user-7' })
+    mockDb({ memberContexts: [] })
+    const res = await del(app).send({ mcpServerName: 'gdrive', userId: 'user-8' })
     expect(res.status).toBe(204)
 
     const calls = deleteCalls()
@@ -190,16 +197,44 @@ describe('DELETE /api/v1/internal/mcp-oauth/grant (spec 11 U4)', () => {
     // the forwarded userId — a cross-user delete is structurally impossible.
     expect(sql).toContain("grant_kind = 'user'")
     // params order: [ownerKind, ns, serverName, userId, oauthClientId]
-    expect(params).toEqual(['mcpserver', MCP_NS, 'gdrive', 'user-7', 'google-drive'])
+    expect(params).toEqual(['mcpserver', MCP_NS, 'gdrive', 'user-8', 'google-drive'])
   })
 
-  it('user flavor: a NON-member is rejected 403 and NOTHING is deleted', async () => {
+  it('user flavor: does not consult Context membership at all', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user', contextRef: 'ctx-9' })
-    // user-8 belongs to other contexts, but NOT ctx-9.
     mockDb({ memberContexts: ['ctx-other'] })
     const res = await del(app).send({ mcpServerName: 'gdrive', userId: 'user-8' })
-    expect(res.status).toBe(403)
-    expect(res.body.error).toBe('context_membership_denied')
+    expect(res.status).toBe(204)
+    const membershipQuery = mockPoolQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('FROM user_contexts')
+    )
+    expect(membershipQuery).toBeUndefined()
+  })
+
+  // Existence and oauth-ness are still answered before any flavor-specific
+  // branch, for a user-flavor caller with no Contexts as for anyone else.
+  it('user flavor ordering: unknown server → 404 and non-oauth → 400, with no delete', async () => {
+    mockDb({ memberContexts: [] })
+    const missing = await del(app).send({ mcpServerName: 'ghost', userId: 'user-8' })
+    expect(missing.status).toBe(404)
+    expect(missing.body.error).toBe('server_not_found')
+
+    void gateway.createResource(
+      'mcpservers',
+      {
+        metadata: { name: 'plain' },
+        spec: {
+          contextRef: 'ctx-9',
+          image: 'example/plain-mcp:1',
+          transport: { type: 'streamableHttp', url: 'https://plain.example.com/mcp' },
+          auth: { type: 'none' },
+        },
+      },
+      MCP_NS
+    )
+    const plain = await del(app).send({ mcpServerName: 'plain', userId: 'user-8' })
+    expect(plain.status).toBe(400)
+    expect(plain.body.error).toBe('not_oauth_server')
     expect(deleteCalls()).toHaveLength(0)
   })
 

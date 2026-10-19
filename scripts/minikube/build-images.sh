@@ -114,6 +114,9 @@
 #                                      airtable-server.yaml) still names the
 #                                      local ref, and full-setup.sh sets this
 #                                      flag for exactly that case.
+#   PROFILE_DESKTOP_HANDOFF_ENABLED=true|false
+#                                      Build Profile UI with desktop handoff
+#                                      links enabled (default: false).
 # ======================================================================
 
 set -euo pipefail
@@ -144,6 +147,7 @@ MINIKUBE_REUSE_PLAYWRIGHT_MCP_IMAGE="${MINIKUBE_REUSE_PLAYWRIGHT_MCP_IMAGE:-true
 MINIKUBE_PLAYWRIGHT_MCP_SOURCE_IMAGE="${MINIKUBE_PLAYWRIGHT_MCP_SOURCE_IMAGE:-us-central1-docker.pkg.dev/your-gcp-project/clerum/playwright-server:latest}"
 MINIKUBE_PLAYWRIGHT_MCP_SOURCE_VISIBILITY="${MINIKUBE_PLAYWRIGHT_MCP_SOURCE_VISIBILITY:-private}"
 MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE="${MINIKUBE_BUILD_AIRTABLE_MCP_IMAGE:-false}"
+PROFILE_DESKTOP_HANDOFF_ENABLED="${PROFILE_DESKTOP_HANDOFF_ENABLED:-false}"
 MINIKUBE_IMAGE_INVENTORY_TIMEOUT_SECONDS="${MINIKUBE_IMAGE_INVENTORY_TIMEOUT_SECONDS:-30}"
 SKIP_UIS="${MINIKUBE_SKIP_UIS:-false}"
 
@@ -459,6 +463,13 @@ validate_build_configuration() {
     printf '%s\n' 'PROFILE_LOCK_REQUIRED: Minikube profile and Kubernetes context must match' >&2
     return 1
   fi
+  case "$PROFILE_DESKTOP_HANDOFF_ENABLED" in
+    true|false) ;;
+    *)
+      printf '%s\n' 'PROFILE_DESKTOP_HANDOFF_INVALID: expected true or false' >&2
+      return 2
+      ;;
+  esac
 
   docker_cli_env_validate_deadlines || return $?
   docker_cli_env_validate_seconds MINIKUBE_STATUS_TIMEOUT_SECONDS \
@@ -1005,6 +1016,9 @@ build_image() {
   fi
   if [ -n "$dockerfile" ]; then
     docker_args+=(-f "$dockerfile")
+  fi
+  if [ "$name" = profile-ui ]; then
+    docker_args+=(--build-arg "PROFILE_DESKTOP_HANDOFF_ENABLED=${PROFILE_DESKTOP_HANDOFF_ENABLED:-false}")
   fi
   if [ "$name" = codex-approved-tools-control-api-e2e ]; then
     docker_args+=(--build-arg CONTROL_API_IMAGE=clerum/control-api:test)

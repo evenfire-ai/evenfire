@@ -113,13 +113,14 @@ describe('rateLimiterService', () => {
   it('allows requests up to the limit and denies the (limit+1)-th in the same window', async () => {
     const key = 'test:bucket:1'
     const limit = 5
+    const nowMs = 1_700_000_000_000
     for (let i = 0; i < limit; i++) {
-      const r = await checkAndIncrement(key, limit)
+      const r = await checkAndIncrement(key, limit, nowMs)
       expect(r.allowed).toBe(true)
       expect(r.count).toBe(i + 1)
       expect(r.remaining).toBe(limit - (i + 1))
     }
-    const over = await checkAndIncrement(key, limit)
+    const over = await checkAndIncrement(key, limit, nowMs)
     expect(over.allowed).toBe(false)
     expect(over.count).toBe(limit + 1)
     expect(over.remaining).toBe(0)
@@ -152,8 +153,9 @@ describe('rateLimiterService', () => {
   it('concurrent increments observe distinct counter values (no race)', async () => {
     const key = 'test:bucket:concurrent'
     const limit = 100
+    const nowMs = 1_700_000_000_000
     const results = await Promise.all(
-      Array.from({ length: 10 }, () => checkAndIncrement(key, limit))
+      Array.from({ length: 10 }, () => checkAndIncrement(key, limit, nowMs))
     )
     const counts = results.map(r => r.count).sort((a, b) => a - b)
     expect(counts).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])

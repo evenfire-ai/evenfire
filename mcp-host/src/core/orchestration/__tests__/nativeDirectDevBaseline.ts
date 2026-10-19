@@ -1,12 +1,13 @@
 /**
- * I4 baseline (#1003): first-turn `tools[]` and system prompt that `origin/dev`
- * (8abf414a6, before native presentation existed) sends to the provider for each
- * MCP presentation cell. Captured by running the scenario of
- * `nativeToolPresentation.integration.test.ts` (I4 block) against that commit.
- * The Node executable and exceljs entry paths in shell_exec are replaced by
- * fixed tokens before hashing, since they differ per machine.
- * Native `direct` must reproduce it byte for byte. Regenerate only from a
- * pre-#1003 `dev` commit, never from this branch.
+ * I4 baseline (#1003): first-turn `tools[]` and system prompt sent to the
+ * provider for each MCP presentation cell before native presentation existed:
+ * `origin/dev` 8abf414a6 merged with the #931 native definitions. Captured by
+ * running the scenario of `nativeToolPresentation.integration.test.ts` (I4 block)
+ * against that tree. The Node executable and exceljs entry paths in shell_exec
+ * are replaced by fixed tokens before hashing, since they differ per machine.
+ * Native `direct` must reproduce it byte for byte. Regenerate only from a tree
+ * without native presentation (a pre-#1003 `dev` commit plus the change being
+ * measured), never from one that has it.
  */
 export const NATIVE_DIRECT_DEV_BASELINE: Record<
   string,
@@ -31,8 +32,8 @@ export const NATIVE_DIRECT_DEV_BASELINE: Record<
       'alpha__record__read_000',
       'beta__record__read_001',
     ],
-    toolsSha256: 'b1ca713b9735912bd2bed16a0276cf0291b036acac3fccbb6726d8ff8129ae51',
-    systemSha256: '3ebb09e177dee686677b3c1225a55ab2cfd4533da0b83a71c1f598be3917ceb1',
+    toolsSha256: 'fe3dbc488a0f97a2eb6fa943784b5c8afc9b10d62d463488ced58a18b305059a',
+    systemSha256: '668b69541f799f7326d65c58e240392cf7ffbb04fe19949f30f637963398f3f7',
   },
   'codex-direct/83': {
     toolNames: [
@@ -134,8 +135,8 @@ export const NATIVE_DIRECT_DEV_BASELINE: Record<
       'beta__record__read_079',
       'beta__record__read_081',
     ],
-    toolsSha256: '327fbe59ca5aff5ccf8b5f019e356adf3bdb1fb48800166601422486d87e2b51',
-    systemSha256: '9d17425a4c1a489dbe5554e84503d7dd7609b945b5a742b74b9f22c79cbe91f1',
+    toolsSha256: '52e43a3df88abfc266b25e6ea60a08f057695157f1e0f06d42107eda1f97ba04',
+    systemSha256: '3566ff2629f62dade922e57efc28b30e860cfb567d1270104b1f8cc7037e42c6',
   },
   'codex-auto/2': {
     toolNames: [
@@ -159,8 +160,8 @@ export const NATIVE_DIRECT_DEV_BASELINE: Record<
       'alpha__record__read_000',
       'beta__record__read_001',
     ],
-    toolsSha256: 'dbd22ccc4b33b7388dfd26d02c0c04572fea42ce58bb5715419193acf37f4552',
-    systemSha256: 'c1ea08fb7f41299c478a6c047989cd95ff50766512f6f75da864911f8b05988a',
+    toolsSha256: '7ce088f861c80b525a8297db3d516f2cda55438d4f087d13a4003c4042677afb',
+    systemSha256: 'd5ffa762e7a3f3ceb6b4467ba1254869855a2686e4a8cc0a13363f0e98db22da',
   },
   'codex-auto/83': {
     toolNames: [
@@ -182,8 +183,8 @@ export const NATIVE_DIRECT_DEV_BASELINE: Record<
       'clerum__tool_describe',
       'clerum__tool_call',
     ],
-    toolsSha256: 'aab50a36a266e0e92429b04a77feb947bded9ef1d092182bd6852c91046acc0c',
-    systemSha256: '05e7b66c8a650d02dccec491dfe4afefa349915e46a1c838a1a04fb462c7e613',
+    toolsSha256: '8066918e4db60a825574f6a9fb23cae660245fc0f72c545695e15c0f40500abb',
+    systemSha256: 'f3f347dc42c6c1c7e7bacdad998d4d80990110486dc0c0da39cd0a222b90d39d',
   },
   'codex-discovery/2': {
     toolNames: [
@@ -205,8 +206,8 @@ export const NATIVE_DIRECT_DEV_BASELINE: Record<
       'clerum__tool_describe',
       'clerum__tool_call',
     ],
-    toolsSha256: 'aab50a36a266e0e92429b04a77feb947bded9ef1d092182bd6852c91046acc0c',
-    systemSha256: '05e7b66c8a650d02dccec491dfe4afefa349915e46a1c838a1a04fb462c7e613',
+    toolsSha256: '8066918e4db60a825574f6a9fb23cae660245fc0f72c545695e15c0f40500abb',
+    systemSha256: 'f3f347dc42c6c1c7e7bacdad998d4d80990110486dc0c0da39cd0a222b90d39d',
   },
   'codex-discovery/83': {
     toolNames: [
@@ -228,8 +229,8 @@ export const NATIVE_DIRECT_DEV_BASELINE: Record<
       'clerum__tool_describe',
       'clerum__tool_call',
     ],
-    toolsSha256: 'aab50a36a266e0e92429b04a77feb947bded9ef1d092182bd6852c91046acc0c',
-    systemSha256: '05e7b66c8a650d02dccec491dfe4afefa349915e46a1c838a1a04fb462c7e613',
+    toolsSha256: '8066918e4db60a825574f6a9fb23cae660245fc0f72c545695e15c0f40500abb',
+    systemSha256: 'f3f347dc42c6c1c7e7bacdad998d4d80990110486dc0c0da39cd0a222b90d39d',
   },
   'legacy-on/2': {
     toolNames: [
@@ -253,8 +254,8 @@ export const NATIVE_DIRECT_DEV_BASELINE: Record<
       'alpha__record__read_000',
       'beta__record__read_001',
     ],
-    toolsSha256: 'dbd22ccc4b33b7388dfd26d02c0c04572fea42ce58bb5715419193acf37f4552',
-    systemSha256: '38c1064c65129f540cddf1845a9b89efe0fa596e0555f95ce8e9c5571f283d3e',
+    toolsSha256: '7ce088f861c80b525a8297db3d516f2cda55438d4f087d13a4003c4042677afb',
+    systemSha256: '327fa8298ebf97257ba4f14cb3a87a1eefbef9adc36980a4ead052393df34ebd',
   },
   'legacy-on/83': {
     toolNames: [
@@ -276,8 +277,8 @@ export const NATIVE_DIRECT_DEV_BASELINE: Record<
       'clerum__tool_describe',
       'clerum__tool_call',
     ],
-    toolsSha256: 'aab50a36a266e0e92429b04a77feb947bded9ef1d092182bd6852c91046acc0c',
-    systemSha256: 'c000f9d286f8df2cd366603fad392160b6a32434dcd6500dd267e9fce3bc66c2',
+    toolsSha256: '8066918e4db60a825574f6a9fb23cae660245fc0f72c545695e15c0f40500abb',
+    systemSha256: '992abacfbd64f470c8d97052ad522c07c56a77031c568b2020c822d5e19b723a',
   },
   'legacy-off/2': {
     toolNames: [
@@ -298,8 +299,8 @@ export const NATIVE_DIRECT_DEV_BASELINE: Record<
       'alpha__record__read_000',
       'beta__record__read_001',
     ],
-    toolsSha256: 'b1ca713b9735912bd2bed16a0276cf0291b036acac3fccbb6726d8ff8129ae51',
-    systemSha256: '70f6835c724d39b114547de5a079074ef0fff5bf61a8ee1bc3ffca7e17fd8f63',
+    toolsSha256: 'fe3dbc488a0f97a2eb6fa943784b5c8afc9b10d62d463488ced58a18b305059a',
+    systemSha256: 'd16364615e38bc03fc60b064dcb49bfed388da1e444bc9c3796f04ef159b2db4',
   },
   'legacy-off/83': {
     toolNames: [
@@ -401,7 +402,7 @@ export const NATIVE_DIRECT_DEV_BASELINE: Record<
       'beta__record__read_079',
       'beta__record__read_081',
     ],
-    toolsSha256: '327fbe59ca5aff5ccf8b5f019e356adf3bdb1fb48800166601422486d87e2b51',
-    systemSha256: 'f128c67670c742c3a75d54a3a6ec2dbf8333387976a40b3c6d54132c2848d080',
+    toolsSha256: '52e43a3df88abfc266b25e6ea60a08f057695157f1e0f06d42107eda1f97ba04',
+    systemSha256: '8fe54798922afd30541118853b4069f9223149201641c01a2351dca405534ac1',
   },
 }

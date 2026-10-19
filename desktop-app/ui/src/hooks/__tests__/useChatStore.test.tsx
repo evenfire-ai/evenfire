@@ -114,8 +114,32 @@ describe('useChatStore remote request cache', () => {
     await expect(stale).rejects.toThrow('host access revoked')
 
     // Witness: the fresh request is still the cached one for this key.
-    await expect(result.current.listSessions('host', query)).resolves.toEqual({ items: [] })
+    expect(result.current.listSessions('host', query)).toBe(fresh)
     expect(listSessions).toHaveBeenCalledTimes(2)
+  })
+
+  // #1091 A21 — each page carries the sequence number taken when its request was
+  // sent, so the renderer can tell a page requested before a rename settled.
+  it('stamps each catalog request when it is sent and keeps the stamp on a cache hit', async () => {
+    const listSessions = vi.fn(async () => ({ items: [] }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { rpc: { listSessions } },
+    })
+    const { result } = renderHook(() => useChatStore())
+    result.current.setRemoteCacheScope('authenticated:user-seq:team-seq')
+    const query = { agent: 'host', limit: 50 }
+
+    const first = await result.current.listSessions('host', query)
+    const cached = await result.current.listSessions('host', query)
+    const other = await result.current.listSessions('host-b', { agent: 'host-b', limit: 50 })
+    const forced = await result.current.listSessions('host', query, { force: true })
+
+    // Witness: one upstream call per issued request; the cache hit made none.
+    expect(listSessions).toHaveBeenCalledTimes(3)
+    expect(cached.issueSeq).toBe(first.issueSeq)
+    expect(other.issueSeq).toBeGreaterThan(first.issueSeq)
+    expect(forced.issueSeq).toBeGreaterThan(other.issueSeq)
   })
 
   // #654 M12 — the host-model catalog has exactly one cache, in

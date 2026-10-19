@@ -49,12 +49,6 @@ export function clearComposerDraft(chatId: string | null, agentRef?: string): vo
   setComposerDraft(chatId, '', agentRef)
 }
 
-/** Clears the draft for a chat and the "no chat yet" bucket (used on send). */
-export function clearComposerDraftAfterSend(chatId: string | null, agentRef?: string): void {
-  clearComposerDraft(null, agentRef)
-  if (chatId) clearComposerDraft(chatId)
-}
-
 /** Drop drafts on logout or principal/team change and notify mounted composers. */
 export function clearAllComposerDrafts(): void {
   for (const key of [...drafts.keys()]) {

@@ -1,13 +1,21 @@
 # How to: configure human-in-the-loop approvals
 
 The approval system is **on by default** (`CLERUM_ENABLE_APPROVAL` defaults to
-`true`). **MCP tool calls always require approval** — they **suspend** until an
-explicit approve or deny, and the per-tool overrides below do not apply to them.
+`true`). **An MCP tool call suspends** until an explicit approve or deny unless
+an earlier approval already covers it: approving once for the rest of the
+turn, an "always" grant for the tool, or a grant for its whole MCP server lets
+later matching calls run without a new prompt. The per-tool overrides below do
+not apply to MCP tools.
 Among **native** tools, five require approval by default — `shell_exec`,
-`http_request`, `cron_manage`, `browser_open`, and `browser_navigate` — while
-every other native tool runs without prompting; each native tool can be flipped
-with a per-tool override on `Host.spec.approval`. Pending approvals are
-persisted so they survive pod restarts.
+`http_request`, `cron_manage`, `browser_open`, and `browser_navigate`.
+`workflow_trigger` also requires approval, except when the task came from
+Telegram, Slack or Teams. Every other native tool runs without prompting. Each
+native tool can be flipped with a per-tool override on `Host.spec.approval`.
+
+Pending approvals are kept in mcp-host's conversation store. The default store
+(`CLERUM_SESSION_STORE=memory`) is in memory, so a pod restart loses them.
+Stateless Hosts use the SQLite store on their workspace volume, and the
+minikube overlay sets `CLERUM_SESSION_STORE=sqlite`.
 
 ## Mental model
 
@@ -103,8 +111,12 @@ stay approval-required by default regardless of what is set here. See
 | Telegram / Slack | Mobile / chat-native approve-deny |
 | Control plane APIs | Automation and integration tests |
 
-Channel callbacks are signature-verified; unauthorized actors cannot mint
-approvals by replaying chat. Wiring a chat surface up:
+Tool approvals from chat do not arrive as signed callbacks. channel-reader
+polls Telegram (long polling) and Slack with the bot's own token, and drops
+messages from senders the channel does not allow. Workflow approvals are
+different: the workflow approval reader takes inbound callbacks and checks
+Telegram's webhook secret token, Slack's HMAC signature, or Teams'
+authorization. Wiring a chat surface up:
 [Connect Telegram](connect-telegram.md), [Connect Slack](connect-slack.md).
 
 ## Verify
@@ -112,12 +124,14 @@ approvals by replaying chat. Wiring a chat surface up:
 1. Trigger a tool-using prompt (or E2E suite that exercises approvals).
 2. Confirm a pending approval appears on the configured surface.
 3. Deny once and confirm the tool does not run; approve and confirm it does.
-4. Restart `mcp-host` with a pending approval and confirm it still resolves.
+4. On a Host that uses the SQLite store, restart `mcp-host` with a pending
+   approval and confirm it still resolves.
 
 Cluster E2E coverage: [E2E guide](../testing/e2e-guide.md).
 
 ## Related
 
+- [Configure guardrails](configure-guardrails.md): rules whose `ask` decision uses this approval flow
 - Root [Security model](../../README.md#security-model)
 - [Host CRD](../crds/host.md)
 - [Connect Telegram](connect-telegram.md)

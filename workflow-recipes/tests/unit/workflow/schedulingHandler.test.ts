@@ -47,6 +47,7 @@ function makePool(selectRows: Array<Record<string, unknown>> = []): {
               allowed_actors: null,
               max_duration_seconds: null,
               ttl_seconds_after_finished: 2_592_000,
+              concurrency_policy: 'Forbid',
               ...rawRow,
             },
           ]
@@ -275,6 +276,88 @@ describe('reconcileScheduling', () => {
     expect(calls[1].sql).not.toMatch(/next_fire_at/)
     expect(calls[1].params[3]).toBe(1800)
     expect(calls[1].params[4]).toBe(3600)
+  })
+
+  it('writes concurrency_policy = Forbid on INSERT when the spec omits it (CRD default)', async () => {
+    const { pool, calls } = makePool([])
+    const result = await reconcileScheduling(pool, baseRecipe)
+    expect(result.action).toBe('created')
+    expect(calls[0].sql).toMatch(/concurrency_policy/)
+    expect(calls[1].sql).toMatch(/INSERT INTO workflow_schedules/)
+    expect(calls[1].sql).toMatch(/concurrency_policy/)
+    expect(calls[1].params[10]).toBe('Forbid')
+  })
+
+  it('writes an explicit concurrencyPolicy on INSERT', async () => {
+    const { pool, calls } = makePool([])
+    const recipe: SchedulingRecipe = {
+      ...baseRecipe,
+      spec: { scheduling: { cron: '*/5 * * * *', timezone: 'UTC', concurrencyPolicy: 'Allow' } },
+    }
+    await reconcileScheduling(pool, recipe)
+    expect(calls[1].params[10]).toBe('Allow')
+  })
+
+  it('falls back to Forbid for a value outside the CRD enum', async () => {
+    const { pool, calls } = makePool([])
+    const recipe = {
+      ...baseRecipe,
+      spec: {
+        scheduling: { cron: '*/5 * * * *', timezone: 'UTC', concurrencyPolicy: 'Sometimes' },
+      },
+    } as unknown as SchedulingRecipe
+    await reconcileScheduling(pool, recipe)
+    expect(calls[1].params[10]).toBe('Forbid')
+  })
+
+  it('issues an UPDATE when only concurrencyPolicy drifts, without resetting next_fire_at', async () => {
+    const { pool, calls } = makePool([
+      {
+        cron_expression: '0 9 * * *',
+        timezone: 'America/New_York',
+        enabled: true,
+        concurrency_policy: 'Forbid',
+      },
+    ])
+    const recipe: SchedulingRecipe = {
+      ...baseRecipe,
+      spec: {
+        scheduling: {
+          cron: '0 9 * * *',
+          timezone: 'America/New_York',
+          concurrencyPolicy: 'Allow',
+        },
+      },
+    }
+    const result = await reconcileScheduling(pool, recipe)
+    expect(result.action).toBe('updated')
+    expect(calls[1].sql).toMatch(/UPDATE workflow_schedules/)
+    expect(calls[1].sql).toMatch(/concurrency_policy = \$6/)
+    expect(calls[1].sql).not.toMatch(/next_fire_at/)
+    expect(calls[1].params[5]).toBe('Allow')
+    expect(calls[1].params.slice(6)).toEqual(['sandbox-recipes', 'daily-report'])
+  })
+
+  it('carries concurrency_policy on the cron-change UPDATE', async () => {
+    const { pool, calls } = makePool([
+      { cron_expression: '0 8 * * *', timezone: 'America/New_York', enabled: true },
+    ])
+    const recipe: SchedulingRecipe = {
+      ...baseRecipe,
+      spec: {
+        scheduling: {
+          cron: '0 9 * * *',
+          timezone: 'America/New_York',
+          concurrencyPolicy: 'Replace',
+        },
+      },
+    }
+    const result = await reconcileScheduling(pool, recipe)
+    expect(result.action).toBe('updated')
+    expect(calls[1].sql).toMatch(/next_fire_at/)
+    expect(calls[1].sql).toMatch(/concurrency_policy = \$9/)
+    expect(calls[1].params[8]).toBe('Replace')
+    expect(calls[1].params.slice(9)).toEqual(['sandbox-recipes', 'daily-report'])
   })
 
   it('fails closed when a scheduled recipe has no workflow team label', async () => {

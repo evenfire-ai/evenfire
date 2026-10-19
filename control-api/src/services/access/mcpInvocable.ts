@@ -37,6 +37,8 @@ import {
   type AgentDirectoryEntry,
   buildAgentDirectoryEntry,
 } from '../directory/accessReconciliation.js'
+import { getUserAgents } from '../directory/agentAccess.js'
+import { getUserContexts } from '../directory/contextAccess.js'
 
 const log = rootLogger.child({ module: 'mcpInvocable' })
 const connectorsLog = rootLogger.child({ module: 'mcp-connectors' })
@@ -147,6 +149,42 @@ function asArray<T>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : []
 }
 
+interface VisibleAgentHost {
+  host: HostCR
+  directoryEntry: AgentDirectoryEntry
+}
+
+/**
+ * The Hosts behind already-authorized agent names that the agent directory
+ * would show (same order as `agentNames`): disabled, deleting, foreign-namespace
+ * and sentinel Hosts, and Hosts whose directory name differs from the requested
+ * one, are dropped. A 404 drops the agent; any other read failure propagates,
+ * because it says nothing about whether the Host still exists.
+ *
+ * Shared by the per-agent catalogs and the per-user consent gate so that every
+ * Host a catalog shows is a Host the gate counts.
+ */
+async function loadVisibleAgentHosts(
+  gateway: Pick<K8sGateway, 'getResource'>,
+  hostsNamespace: string,
+  agentNames: readonly string[]
+): Promise<VisibleAgentHost[]> {
+  const resolved = await Promise.all(
+    agentNames.map(async (requestedName): Promise<VisibleAgentHost | null> => {
+      try {
+        const host = (await gateway.getResource('hosts', requestedName, hostsNamespace)) as HostCR
+        const directoryEntry = buildAgentDirectoryEntry(host, hostsNamespace)
+        if (!directoryEntry || directoryEntry.name !== requestedName) return null
+        return { host, directoryEntry }
+      } catch (error) {
+        if (isK8sResourceNotFound(error)) return null
+        throw error
+      }
+    })
+  )
+  return resolved.filter((item): item is VisibleAgentHost => item !== null)
+}
+
 /**
  * Resolve the set of allowed server names per context.
  * When `scopedContextIds` is provided, contexts NOT in scope are dropped.
@@ -154,7 +192,7 @@ function asArray<T>(value: unknown): T[] {
  * the caller authorizes by agent rather than by context.
  */
 async function loadAllowedNamesByContext(
-  gateway: K8sGateway,
+  gateway: Pick<K8sGateway, 'listResource'>,
   mcpServersNamespace: string,
   scopedContextIds?: ReadonlySet<string>
 ): Promise<Map<string, Set<string>>> {
@@ -171,6 +209,84 @@ async function loadAllowedNamesByContext(
     byContext.set(ctxId, set)
   }
   return byContext
+}
+
+/**
+ * Union of the `spec.mcpServers` allowlists of the given Contexts (by
+ * `spec.contextId`), names trimmed. Shared by the user-scope consent gate and
+ * the flat `/mcp-servers` rail, so those two cannot drift on which servers a
+ * set of Contexts enables. The per-agent resolvers (`resolveMcpServersForAgents`,
+ * `resolveConnectorsForAgents`) read `loadAllowedNamesByContext` directly
+ * instead: they need each agent's own Context allowlist, not a union, and
+ * both paths apply the same per-Context trimming there. An empty `contextIds`
+ * resolves without listing Contexts.
+ */
+export async function allowedMcpServerNamesForContexts(
+  gateway: Pick<K8sGateway, 'listResource'>,
+  mcpServersNamespace: string,
+  contextIds: readonly string[]
+): Promise<Set<string>> {
+  const union = new Set<string>()
+  if (contextIds.length === 0) return union
+  const allowedByContext = await loadAllowedNamesByContext(
+    gateway,
+    mcpServersNamespace,
+    new Set(contextIds)
+  )
+  for (const names of allowedByContext.values()) {
+    for (const name of names) union.add(name)
+  }
+  return union
+}
+
+/**
+ * Whether some Context the user reaches still enables `mcpServerName` through
+ * its `spec.mcpServers` allowlist. This is the access rule for consenting to
+ * (and completing consent for) a per-user OAuth server: the grant is keyed by
+ * (user, server) and serves every Context that enables the server, so access
+ * follows the allowlists, never the server's own `spec.contextRef`.
+ *
+ * A Context is reached directly (`getUserContexts`, active users) or through
+ * an agent assigned to the user (`getUserAgents` → a Host the agent directory
+ * shows → its `spec.contextRef`). Those are the two sources the flat
+ * `/mcp-servers` catalog and the per-agent connectors panel resolve from, so
+ * anything either offers the user can be connected. Team membership
+ * (`team_contexts`, `team_agents`) does not count: neither catalog reads it
+ * for a user, and this path has no trusted team id.
+ *
+ * Agents are read only when the direct Contexts do not enable the server, so
+ * a Host read failure cannot break consent that direct membership already
+ * allows; when it is needed, a failure propagates rather than answering
+ * false. Deliberately ignores grant presence: the consent flow exists
+ * precisely for servers that have no grant yet.
+ */
+export async function userHasContextEnablingMcpServer(opts: {
+  gateway: Pick<K8sGateway, 'listResource' | 'getResource'>
+  mcpServersNamespace: string
+  hostsNamespace: string
+  userId: string
+  mcpServerName: string
+}): Promise<boolean> {
+  const { contextIds } = await getUserContexts(opts.userId)
+  const direct = await allowedMcpServerNamesForContexts(
+    opts.gateway,
+    opts.mcpServersNamespace,
+    contextIds
+  )
+  if (direct.has(opts.mcpServerName)) return true
+
+  const { agentNames } = await getUserAgents(opts.userId)
+  const hosts = await loadVisibleAgentHosts(opts.gateway, opts.hostsNamespace, agentNames)
+  const agentContextIds: string[] = []
+  for (const { host } of hosts) {
+    const contextRef = host.spec?.contextRef
+    if (contextRef) agentContextIds.push(contextRef)
+  }
+  if (agentContextIds.length === 0) return false
+  const reached = await allowedMcpServerNamesForContexts(opts.gateway, opts.mcpServersNamespace, [
+    ...new Set([...contextIds, ...agentContextIds]),
+  ])
+  return reached.has(opts.mcpServerName)
 }
 
 /**
@@ -304,19 +420,14 @@ export async function resolveInvocableMcpServersForContexts(
   callerUserId: string,
   db: DbClient
 ): Promise<InvocableMcpServer[]> {
-  const scoped = new Set(scopedContextIds)
-  if (scoped.size === 0) return []
+  if (scopedContextIds.length === 0) return []
 
-  const [allowedByContext, mcpServers] = await Promise.all([
-    loadAllowedNamesByContext(gateway, mcpServersNamespace, scoped),
+  const [union, mcpServers] = await Promise.all([
+    allowedMcpServerNamesForContexts(gateway, mcpServersNamespace, scopedContextIds),
     gateway.listResource('mcpservers', mcpServersNamespace),
   ])
   const serverList = asArray<McpServerCR>(mcpServers)
 
-  const union = new Set<string>()
-  for (const names of allowedByContext.values()) {
-    for (const name of names) union.add(name)
-  }
   const grantPresence = await computeGrantPresence(
     db,
     mcpServersNamespace,
@@ -369,22 +480,9 @@ export async function resolveMcpServersForAgents(
   const { mcpServersNamespace, hostsNamespace, agentNames } = opts
   if (agentNames.length === 0) return []
 
-  const resolvedHosts = await Promise.all(
-    agentNames.map(async requestedName => {
-      try {
-        const host = (await gateway.getResource('hosts', requestedName, hostsNamespace)) as HostCR
-        const directoryEntry = buildAgentDirectoryEntry(host, hostsNamespace)
-        if (!directoryEntry || directoryEntry.name !== requestedName) return null
-        return { host, directoryEntry }
-      } catch (error) {
-        if (isK8sResourceNotFound(error)) return null
-        // A non-404 failure says nothing about whether this already-authorized
-        // Host still exists. Propagate it so callers can preserve their
-        // names-only compatibility field instead of silently revoking access.
-        throw error
-      }
-    })
-  )
+  // A non-404 Host read failure propagates so callers can preserve their
+  // names-only compatibility field instead of silently revoking access.
+  const visibleHosts = await loadVisibleAgentHosts(gateway, hostsNamespace, agentNames)
 
   let serverList: McpServerCR[] = []
   try {
@@ -398,15 +496,6 @@ export async function resolveMcpServersForAgents(
       'mcpservers list failed; directory served without MCP catalog'
     )
   }
-
-  const visibleHosts = resolvedHosts.filter(
-    (
-      item
-    ): item is {
-      host: HostCR
-      directoryEntry: AgentDirectoryEntry
-    } => item !== null
-  )
 
   const scopedContextIds = new Set<string>()
   for (const { host } of visibleHosts) {
@@ -543,21 +632,7 @@ export async function resolveConnectorsForAgents(
   const { mcpServersNamespace, hostsNamespace, agentNames, userId } = opts
   if (agentNames.length === 0) return []
 
-  const resolvedHosts = await Promise.all(
-    agentNames.map(async requestedName => {
-      try {
-        const host = (await gateway.getResource('hosts', requestedName, hostsNamespace)) as HostCR
-        const directoryEntry = buildAgentDirectoryEntry(host, hostsNamespace)
-        if (!directoryEntry || directoryEntry.name !== requestedName) return null
-        return { host, directoryEntry }
-      } catch (error) {
-        if (isK8sResourceNotFound(error)) return null
-        // A non-404 failure says nothing about whether this already-authorized
-        // Host still exists — propagate rather than silently dropping the agent.
-        throw error
-      }
-    })
-  )
+  const visibleHosts = await loadVisibleAgentHosts(gateway, hostsNamespace, agentNames)
 
   let serverList: McpServerCR[] = []
   try {
@@ -576,10 +651,6 @@ export async function resolveConnectorsForAgents(
     const n = s.metadata?.name
     if (n) byName.set(n, s)
   }
-
-  const visibleHosts = resolvedHosts.filter(
-    (item): item is { host: HostCR; directoryEntry: AgentDirectoryEntry } => item !== null
-  )
 
   const scopedContextIds = new Set<string>()
   for (const { host } of visibleHosts) {

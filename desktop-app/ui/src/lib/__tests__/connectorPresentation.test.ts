@@ -15,7 +15,7 @@ describe('statusPresentation', () => {
       label: 'Requires setup',
       tone: 'warning',
     })
-    expect(statusPresentation('no_oauth')).toEqual({ label: 'No OAuth', tone: 'neutral' })
+    expect(statusPresentation('no_oauth')).toEqual({ label: '—', tone: 'neutral' })
   })
 })
 

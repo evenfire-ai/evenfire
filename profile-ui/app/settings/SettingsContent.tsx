@@ -28,7 +28,11 @@ import {
   disconnectWorkflowApprovalMedium,
   listWorkflowApprovalMediums,
 } from '@lib/approvalChannels'
-import { buildDesktopEnvironmentLink, navigateToDesktopApp } from '@lib/desktopAppLinks'
+import {
+  buildDesktopEnvironmentLink,
+  isDesktopEnvironmentHandoffEnabled,
+  navigateToDesktopApp,
+} from '@lib/desktopAppLinks'
 import {
   EMPTY_PROFILE_CHANNELS,
   addDraftRow,
@@ -601,6 +605,7 @@ export function SettingsContent({
       {showDesktopSetupModal ? (
         <DesktopSetupModal
           busy={desktopSetupBusy}
+          handoffEnabled={isDesktopEnvironmentHandoffEnabled()}
           environment={desktopEnvironment}
           externalRestApiBaseUrl={desktopSetupExternalRestApiBaseUrl}
           onClose={() => setShowDesktopSetupModal(false)}
@@ -657,6 +662,7 @@ function ReadonlyChannelSection({
 
 function DesktopSetupModal({
   busy,
+  handoffEnabled,
   environment,
   externalRestApiBaseUrl,
   onClose,
@@ -664,14 +670,13 @@ function DesktopSetupModal({
   onOpenDesktop,
 }: {
   busy: boolean
+  handoffEnabled: boolean
   environment: DesktopEnvironmentResponse | null
   externalRestApiBaseUrl: string
   onClose: () => void
   onCopy: () => void
   onOpenDesktop: () => void
 }) {
-  const canOpenDesktop = Boolean(environment?.externalRestApiBaseUrl)
-
   return (
     <div
       className="cu-modal-backdrop"
@@ -714,11 +719,21 @@ function DesktopSetupModal({
               </Button>
             </div>
           </div>
-          <div className="settings-desktop-setup-actions">
-            <Button onClick={onOpenDesktop} disabled={busy || !canOpenDesktop}>
-              Open desktop app and setup
-            </Button>
-          </div>
+          {handoffEnabled ? (
+            <div className="settings-desktop-setup-actions">
+              <Button
+                onClick={onOpenDesktop}
+                disabled={busy || !environment?.externalRestApiBaseUrl}
+              >
+                Open desktop app and setup
+              </Button>
+            </div>
+          ) : (
+            <p className="settings-help">
+              Automatic Desktop handoff is temporarily unavailable. You can copy this API URL and
+              add it in Desktop.
+            </p>
+          )}
         </div>
       </section>
     </div>

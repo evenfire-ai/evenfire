@@ -15,6 +15,8 @@ RUN npm ci \
   && cp -R ../packages/frontend-components node_modules/@clerum/frontend-components
 
 COPY profile-ui ./
+ARG PROFILE_DESKTOP_HANDOFF_ENABLED=false
+ENV NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED=${PROFILE_DESKTOP_HANDOFF_ENABLED}
 RUN npm run build
 
 FROM node:24-alpine

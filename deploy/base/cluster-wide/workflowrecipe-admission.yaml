@@ -43,10 +43,10 @@ spec:
     - Deny
 ---
 # WorkflowRecipePolicy CRDs gate what recipes can declare (allowContextRef,
-# minIsolationLevel, …). Policies must co-locate with the recipes they
-# govern, otherwise the reconciler's namespace-scoped lookup in
-# workflow-recipes/src/reconciler/workflowRecipeReconciler.ts (line 297)
-# would miss them. Canonical storage is `sandbox-recipes`; `mcp-server` is
+# governance.requiredSecurityLevel, …). Policies must co-locate with the
+# recipes they govern, otherwise the reconciler's namespace-scoped lookup
+# (listWorkflowRecipePolicies in
+# workflow-recipes/src/reconciler/workflowRecipeReconciler.ts) would miss them. Canonical storage is `sandbox-recipes`; `mcp-server` is
 # reserved for rendered McpServer transport children.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
