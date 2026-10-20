@@ -124,7 +124,7 @@ import type {
   ModelStepCheckpointFence,
 } from '../db/worker/modelStepCheckpointOps'
 import type { ModelStepTurnFence } from '../db/worker/protocol'
-import { parseModelStepCheckpointLoopState } from '../db/worker/protocol'
+import { isModelStepFenceMismatch, parseModelStepCheckpointLoopState } from '../db/worker/protocol'
 import type { GfsDownloadStore } from '../internalTools/gfsDownloadStore'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../llm'
@@ -750,6 +750,12 @@ export class TaskExecutor {
             { taskId: this.taskId, err: persistError },
             'Failed to persist task limit interruption'
           )
+          // TL (R2-M2): the fenced completion rolled RAM back to Processing,
+          // and this path has no other release. Release the restored turn.
+          // With the fence lost the replacement owns the turn, so skip it.
+          if (this.task.modelStepContinuation && !this.continuationFenceLost) {
+            await this.continuationCleanup('fail_turn', () => this.failContinuationTurn())
+          }
         }
       } else if (this.task.modelStepContinuation && this.conversation && canEndTurn) {
         await this.continuationCleanup('fail_turn', () => this.failContinuationTurn())
@@ -1032,7 +1038,7 @@ export class TaskExecutor {
   }
 
   private isContinuationFenceMismatch(err: unknown): boolean {
-    return err instanceof Error && err.message === 'model-step continuation fence mismatch'
+    return isModelStepFenceMismatch(err)
   }
 
   private async failContinuationTurn(): Promise<void> {
@@ -1054,6 +1060,10 @@ export class TaskExecutor {
     } catch (err) {
       if (!this.isContinuationFenceMismatch(err)) throw err
       this.continuationFenceLost = true
+      // FT (R2-M2): the release can mismatch because a timed-out completion
+      // committed late. RAM was rolled back to this task's turn, so re-enter
+      // once and take the local release above instead of leaving it stuck.
+      await this.failContinuationTurn()
     }
   }
 
@@ -2355,6 +2365,14 @@ export class TaskExecutor {
         if (this.task.modelStepContinuation && this.continuationFenceLost) {
           throw new Error('Model-step continuation lost its checkpoint completion fence')
         }
+        // RAM-owner check (R2-M2 extra): a replacement may have reopened this
+        // conversation while the model call was in flight. Do not write over
+        // its RAM and rely on the rollback to undo it. No await may sit
+        // between this check and completeTurn's synchronous RAM mutation.
+        if (this.task.modelStepContinuation && this.conversation!.activeTaskId !== this.taskId) {
+          this.continuationFenceLost = true
+          throw new Error('Model-step continuation lost its checkpoint completion fence')
+        }
         const continuationFence = this.continuationTurnFence()
         try {
           await this.deps.conversationManager.completeTurn(
@@ -2374,8 +2392,11 @@ export class TaskExecutor {
             this.continuationFenceLost = true
             throw err
           }
-          if (this.task.modelStepContinuation) await this.failContinuationTurn()
-          else await this.deps.conversationManager.failTurn(this.conversation!)
+          // The release runs through continuationCleanup so its own rejection
+          // is logged and never masks the completion error rethrown below.
+          if (this.task.modelStepContinuation) {
+            await this.continuationCleanup('fail_turn', () => this.failContinuationTurn())
+          } else await this.deps.conversationManager.failTurn(this.conversation!)
           throw err
         }
         if (this.task.responseCallback) {

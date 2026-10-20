@@ -24,6 +24,7 @@ import type {
   ReapedSession,
   SessionRow,
 } from '../../../db/worker/protocol'
+import { isModelStepFenceMismatch } from '../../../db/worker/protocol'
 import type { ModelStepTurnFence } from '../../../db/worker/protocol'
 import { logger } from '../../../logger'
 import { parseSessionKey } from '../../../session/types'
@@ -985,9 +986,18 @@ export class SqliteConversationStore implements ConversationStore {
         sessionKey
       )
     } catch (err) {
-      if (this.reopenedTurnCompletionOwners.get(state) === marker.owner) {
+      // SF (R2-M2): the mirror follows the manager's fence-only rule for
+      // fail/cancel. Only a fence mismatch means the turn is still open;
+      // any other rejection leaves it closed in RAM, so close it here too.
+      if (
+        fence !== undefined &&
+        isModelStepFenceMismatch(err) &&
+        this.reopenedTurnCompletionOwners.get(state) === marker.owner
+      ) {
         state.reopenedTurnNumber = marker.previousReopenedTurnNumber
         this.restoreReopenedTurnMarker(state, marker)
+      } else {
+        this.releaseReopenedTurnMarker(state, marker)
       }
       throw err
     }
@@ -1027,12 +1037,19 @@ export class SqliteConversationStore implements ConversationStore {
         sessionKey
       )
     } catch (err) {
-      if (this.reopenedTurnCompletionOwners.get(state) === marker.owner) {
+      // SF (R2-M2): same rule as persistTurnCancel above.
+      if (
+        fence !== undefined &&
+        isModelStepFenceMismatch(err) &&
+        this.reopenedTurnCompletionOwners.get(state) === marker.owner
+      ) {
         if (marker.previousReopenedTurnNumber !== undefined) {
           state.nextTurnNumber = previousNextTurnNumber
         }
         state.reopenedTurnNumber = marker.previousReopenedTurnNumber
         this.restoreReopenedTurnMarker(state, marker)
+      } else {
+        this.releaseReopenedTurnMarker(state, marker)
       }
       throw err
     }

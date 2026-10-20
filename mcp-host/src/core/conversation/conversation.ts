@@ -1,3 +1,4 @@
+import { isModelStepFenceMismatch } from '../../db/worker/protocol'
 import type { ModelSelectionWriteOutcome, ModelStepTurnFence } from '../../db/worker/protocol'
 import { parseSessionKey } from '../../session/types'
 import { projectGfsApproval } from '../../visualInput/suspension'
@@ -24,6 +25,8 @@ import {
   SessionMessagesQuery,
 } from './conversationStore'
 import { userIdFromRpcPrefix } from './sessionKeyParts'
+
+export { isModelStepFenceMismatch } from '../../db/worker/protocol'
 
 /**
  * Manages conversation state and turn tracking.
@@ -395,7 +398,14 @@ export class ConversationManager {
     try {
       await Promise.resolve(this.store.persistTurnComplete(conversation, response, opts))
     } catch (err) {
-      if (opts?.completeModelStepCheckpoint && currentTurn) {
+      // R2-M2: a fenced completion rolls RAM back on any rejected write, not
+      // only on a fence mismatch. The durable row is unchanged (or, after a
+      // sync timeout, unknown), so the unpersisted answer must not stay in
+      // RAM; the executor releases the restored turn. failTurn/cancelTurn
+      // keep the fence-only rollback below.
+      const rollbackFence =
+        opts?.completeModelStepCheckpoint !== undefined || opts?.modelStepTurnFence !== undefined
+      if (rollbackFence && currentTurn) {
         this.restoreTurnResponse(
           currentTurn,
           completionOwner,
@@ -407,10 +417,7 @@ export class ConversationManager {
           currentTurn.completed_at = previousCompletedAt
         }
       }
-      if (
-        opts?.completeModelStepCheckpoint &&
-        this.turnCompletionOwners.get(conversation) === completionOwner
-      ) {
+      if (rollbackFence && this.turnCompletionOwners.get(conversation) === completionOwner) {
         conversation.state = ConversationState.Processing
         conversation.pending_approval = previousPendingApproval
         conversation.activeTaskId = previousActiveTaskId
@@ -635,10 +642,11 @@ export class ConversationManager {
     try {
       await Promise.resolve(this.store.persistTurnFail(conversation, fence))
     } catch (err) {
-      if (fence && currentTurn?.completed_at === writtenCompletedAt) {
+      const rollbackFence = fence !== undefined && isModelStepFenceMismatch(err)
+      if (rollbackFence && currentTurn?.completed_at === writtenCompletedAt) {
         currentTurn.completed_at = previousCompletedAt
       }
-      if (fence && this.turnCompletionOwners.get(conversation) === failOwner) {
+      if (rollbackFence && this.turnCompletionOwners.get(conversation) === failOwner) {
         conversation.state = previousState
         conversation.pending_approval = previousPendingApproval
         conversation.activeTaskId = previousActiveTaskId
@@ -708,7 +716,8 @@ export class ConversationManager {
         }
       },
       err => {
-        if (currentTurn) {
+        const rollbackFence = fence !== undefined && isModelStepFenceMismatch(err)
+        if (rollbackFence && currentTurn) {
           this.restoreTurnResponse(
             currentTurn,
             cancelOwner,
@@ -720,7 +729,7 @@ export class ConversationManager {
             currentTurn.completed_at = previousCompletedAt
           }
         }
-        if (this.turnCompletionOwners.get(conversation) === cancelOwner) {
+        if (rollbackFence && this.turnCompletionOwners.get(conversation) === cancelOwner) {
           conversation.state = previousState
           conversation.pending_approval = previousPendingApproval
           conversation.activeTaskId = previousActiveTaskId
