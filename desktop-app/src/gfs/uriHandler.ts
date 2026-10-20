@@ -691,7 +691,11 @@ export class GfsClient {
     input: GfsMoveInput,
     session: string
   ): Promise<{ resourceId: string; version: number }> {
-    return moveGfsResource(this.transport, input, session)
+    try {
+      return await moveGfsResource(this.transport, input, session)
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
   }
 
   async deleteResource(
@@ -803,7 +807,7 @@ function parseGfsGrantErrorFields(bodyText: string): GfsGrantErrorFields {
 }
 
 /**
- * Re-throw any GFS failure — grant, share, or read — with the server's
+ * Re-throw a GFS grant, share, read, or move failure with the server's
  * structured verdict fields embedded in the message.
  *
  * The transport (httpClient) throws an `ApiError` that stashes the raw response
@@ -865,7 +869,7 @@ function surfaceGfsGrantError(error: unknown): unknown {
   // Every `ApiError` now yields a `httpStatus=` part, so a wrapper is the norm
   // rather than the exception it used to be. The transport fields are not
   // copied onto it: `cause` keeps the original error object intact, and no
-  // main-process caller of these nine methods reads `.status`/`.bodyText` off
+  // main-process caller of these ten methods reads `.status`/`.bodyText` off
   // the rejection (the `ApiError` branches in `appService` belong to rpc-proxy
   // and stored-session paths; the upload retry path never imports this module).
   return new GfsUriError(`${baseMessage}${suffix}`, { cause: error })

@@ -3,7 +3,7 @@ import {
   isGfsNameConflict,
   nextAvailableGfsResourceName,
 } from '@clerum/gfs-interaction-policy'
-import { parseHttpStatus, parseRetryAfterSeconds } from '@lib/gfsGrantErrors'
+import { describeGfsReadError, parseHttpStatus, parseRetryAfterSeconds } from '@lib/gfsGrantErrors'
 import type { GfsDropRejection } from './dragSession.types'
 
 /** Server truth from a commit-time resolve of the source. */
@@ -31,6 +31,7 @@ export type MoveCommitOutcome =
   | { status: 'no-op'; message: string }
   | { status: 'conflict-stopped'; message: string }
   | { status: 'changed'; message: string }
+  | { status: 'destination-rejected'; message: string }
   | { status: 'source-unavailable'; message: string }
   | { status: 'target-unavailable'; message: string }
   | { status: 'rate-limited'; message: string; retryAfterSeconds?: number }
@@ -87,7 +88,7 @@ export async function commitGfsMove(
         message: 'EvenDrive cannot verify this item’s current location. Refresh and try again.',
       }
     }
-    return { status: 'unconfirmed', message: messageOf(error) }
+    return { status: 'unconfirmed', message: describeGfsReadError(error).message }
   }
 
   // Fresh-parent no-op guard before any request (a concurrent move may have
@@ -120,11 +121,18 @@ export async function commitGfsMove(
 
     const message = messageOf(error)
     const status = parseHttpStatus(message)
+    if (status === 400) {
+      return {
+        status: 'destination-rejected',
+        message: 'The server rejected this destination. Refresh and choose a different folder.',
+      }
+    }
     if (status === 412) {
       // No automatic re-PATCH: the item changed; require a new gesture.
       return {
         status: 'changed',
-        message: 'This item changed while you were moving it. Review its current location and try again.',
+        message:
+          'This item changed while you were moving it. Review its current location and try again.',
       }
     }
     if (status === 404) {
@@ -133,12 +141,12 @@ export async function commitGfsMove(
     if (status === 403) {
       // Generic unless a successful permission recheck proves the missing bit;
       // the pre-commit probes own the exact-reason copy.
-      return { status: 'unconfirmed', message }
+      return { status: 'unconfirmed', message: describeGfsReadError(error).message }
     }
     if (status === 429 || (!status && /too many/i.test(message))) {
       return {
         status: 'rate-limited',
-        message: 'Too many file requests — try again shortly.',
+        message: describeGfsReadError(error).message,
         ...(parseRetryAfterSeconds(message) !== null
           ? { retryAfterSeconds: parseRetryAfterSeconds(message) ?? undefined }
           : {}),
@@ -208,7 +216,6 @@ export function suggestNumberedMoveName(
   if (!occupiedDestinationNames.has(sourceName)) return undefined
   return nextAvailableGfsResourceName(sourceName, occupiedDestinationNames)
 }
-
 
 export type MoveToast = (message: string, tone: 'success' | 'error' | 'info') => void
 

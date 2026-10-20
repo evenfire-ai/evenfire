@@ -395,10 +395,11 @@ export async function gfsRouteFailureMessage(
   body: { code: string; message: string } = {
     code: 'forbidden',
     message: 'not authorized',
-  }
+  },
+  headers: Record<string, string> = {}
 ): Promise<string> {
   const server = createServer((_req, res) => {
-    res.writeHead(status, { 'content-type': 'application/json' })
+    res.writeHead(status, { 'content-type': 'application/json', ...headers })
     res.end(JSON.stringify({ ok: false, error: body }))
   })
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()))
