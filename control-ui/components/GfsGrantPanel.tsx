@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-components'
+import { planGfsInheritedRoleChange } from '@clerum/gfs-interaction-policy'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { GfsInheritedAccessDialog } from '@components/GfsInheritedAccessDialog'
 import { GfsSubjectPicker } from '@components/GfsSubjectPicker'
@@ -43,7 +44,8 @@ import type {
   GfsInheritedAccessSource,
 } from './GfsGrantPanel.types'
 import { buildGfsBulkSubjectOptions, toGfsBulkSubjectInputs } from './gfsGrantSubjectOptions'
-import { loadGfsInheritedAccess, planInheritedRoleChange } from './gfsInheritedAccess'
+import { loadGfsInheritedAccess } from './gfsInheritedAccess'
+import { isEditorPermissions } from './gfsInheritedAccessMerge'
 
 /**
  * P4-S07 — Operator delegation panel for the Global File System. The operator
@@ -147,6 +149,11 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
         mode: 'change-role'
         nextRole: AccessRole
         affected: Array<{ source: GfsInheritedAccessSource; permissions: string[] }>
+        /** Editor share-only sources excluded from writes (residual access). */
+        residualSources: GfsInheritedAccessSource[]
+        /** Grant-backed folders skipped because their own scope flag was
+         * unknown — never written with a defaulted scope (R1-M5). */
+        skippedFolderNames: string[]
       }
     | { row: GfsFileAccessRow; mode: 'remove' }
     | null
@@ -175,7 +182,15 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
         const key = subjectKey(subject)
         let entry = bySubject.get(key)
         if (!entry) {
-          entry = { subject, permissions: [], inherit: false, grantId: null, shareIds: [] }
+          entry = {
+            subject,
+            permissions: [],
+            inherit: false,
+            grantInherit: false,
+            grantId: null,
+            shareIds: [],
+            shareEntries: [],
+          }
           bySubject.set(key, entry)
         }
         return entry
@@ -184,12 +199,22 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
         const entry = entryFor(grant.subject)
         entry.grantId = grant.id
         entry.inherit = entry.inherit || grant.inherit
+        // R1-M5: the GRANT row's own scope flag, never OR'd with share
+        // coverage — a role write preserves exactly this.
+        entry.grantInherit = grant.inherit
         entry.permissions = [...new Set([...entry.permissions, ...grant.permissions])]
       }
       for (const share of shareResult.items) {
         const entry = entryFor(share.subject)
         entry.shareIds.push(share.id)
         entry.inherit = entry.inherit || share.includeDescendants
+        // R1-M5: each share row's own bits/scope survive the merge so role
+        // edits can disclose residual access truthfully.
+        entry.shareEntries.push({
+          rowId: share.id,
+          permissions: [...share.permissions],
+          includeDescendants: share.includeDescendants,
+        })
         entry.permissions = [...new Set([...entry.permissions, ...share.permissions])]
       }
       setExistingAccess([...bySubject.values()])
@@ -509,7 +534,22 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
     }
   }
 
-  async function updateAccessRole(item: GfsExistingAccessItem, nextRole: AccessRole) {
+  async function updateAccessRole(
+    item: GfsExistingAccessItem,
+    nextRole: AccessRole,
+    inheritedSources: GfsInheritedAccessSource[] = [],
+    skippedFolderNames: string[] = []
+  ) {
+    // R1-M5: role editing never creates a grant. A share-only direct row has
+    // no grant to rewrite and there is no share-update surface — refuse with
+    // honest feedback instead of converting the share into a grant.
+    if (item.grantId === null) {
+      showToast(
+        `${subjectLabel(item)}'s access comes from a sharing entry that can only be removed, not changed here.`,
+        { tone: 'error' }
+      )
+      return
+    }
     const permissions = rolePermissions(nextRole, hostOnlySubject(item.subject))
     setBusy(true)
     setError('')
@@ -519,17 +559,49 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
         resourceId: resource.resourceId,
         subject: item.subject,
         permissions,
-        inherit: item.inherit,
+        // R1-M5: the grant row's OWN scope flag — share coverage is never
+        // OR'd into a role write.
+        inherit: item.grantInherit,
       })
-      // The upserted grant supersedes any legacy URI share for this subject;
-      // the server has no share-update surface, so consolidation happens here.
-      for (const shareId of item.shareIds) await deleteGfsShare(shareId)
-      showToast(
-        `${subjectLabel(item)} is now ${nextRole === 'editor' ? 'an Editor' : 'Read-only'}.`,
-        {
-          tone: 'success',
-        }
-      )
+      // Shares survive role edits (R1-M5); when an editor-strength share
+      // remains, the effective role claim must say so.
+      const residualNames =
+        nextRole === 'read'
+          ? [
+              ...new Set([
+                ...inheritedSources
+                  .filter(source =>
+                    source.shareEntries.some(entry => isEditorPermissions(entry.permissions))
+                  )
+                  .map(source => source.name),
+                ...(item.shareEntries.some(entry => isEditorPermissions(entry.permissions))
+                  ? [resource.name]
+                  : []),
+              ]),
+            ]
+          : []
+      const details: string[] = []
+      if (skippedFolderNames.length > 0) {
+        details.push(
+          `Sharing details on ${joinFolderNames(skippedFolderNames)} could not be verified; existing access was kept.`
+        )
+      }
+      if (residualNames.length > 0) {
+        details.push(
+          `Sharing entries on ${joinFolderNames(residualNames)} still grant Editor access.`
+        )
+      }
+      if (details.length > 0) {
+        showToast(
+          `Changed grant access to ${nextRole === 'editor' ? 'Editor' : 'Read-only'} on ${resource.name}. ${details.join(' ')}`,
+          { tone: skippedFolderNames.length > 0 ? 'error' : 'info' }
+        )
+      } else {
+        showToast(
+          `${subjectLabel(item)} is now ${nextRole === 'editor' ? 'an Editor' : 'Read-only'}.`,
+          { tone: 'success' }
+        )
+      }
       await loadExistingAccess()
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Failed to update access')
@@ -553,20 +625,56 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
    * the access rows it can already read and lets the server accept or reject
    * each mutation. Per-folder affordance preflight is deferred to the backend
    * contract tracked separately from this PR.
+   *
+   * R1-M5: the shared split planner separates grant-backed sources (rewritten
+   * with their OWN scope flag) from share-only sources (never converted into
+   * grants, never deleted — residual access survives and is disclosed).
    */
   async function prepareParentRoleChange(row: GfsFileAccessRow, nextRole: AccessRole) {
     const inherited = row.inherited
     if (!inherited) return
     if (nextRole === roleForPermissions(row.permissions)) return
-    const affected = planInheritedRoleChange(inherited, nextRole === 'editor')
-    if (affected.length === 0) {
-      if (row.direct) await updateAccessRole(row.direct, nextRole)
+    const plan = planGfsInheritedRoleChange(inherited, nextRole === 'editor')
+    // Unknown own-scope folders are never written (no `?? true` default);
+    // they surface through the partial summary at confirm time.
+    const writable = plan.grantSources.filter(
+      (source): source is GfsInheritedAccessSource & { grantInherit: boolean } =>
+        typeof source.grantInherit === 'boolean'
+    )
+    const skippedFolderNames = plan.grantSources
+      .filter(source => typeof source.grantInherit !== 'boolean')
+      .map(source => source.name)
+    if (writable.length === 0) {
+      if (row.direct && row.direct.grantId !== null) {
+        await updateAccessRole(row.direct, nextRole, plan.shareOnlySources, skippedFolderNames)
+        return
+      }
+      // Unknown scope and non-editable shares are different reasons to keep access.
+      if (skippedFolderNames.length > 0) {
+        showToast(
+          `Sharing details on ${joinFolderNames(skippedFolderNames)} could not be verified; existing access was kept.`,
+          { tone: 'error' }
+        )
+        return
+      }
+      // Nothing writable anywhere: explain why nothing changed.
+      showToast(
+        `${subjectLabel(row)} still has ${roleForPermissions(row.permissions) === 'editor' ? 'Editor' : 'Read-only'} access from sharing entries that can't be edited here.`,
+        { tone: 'info' }
+      )
       return
     }
 
     const permissions = rolePermissions(nextRole, hostOnlySubject(row.subject))
-    const updates = affected.map(source => ({ source, permissions }))
-    setParentUpdate({ row, mode: 'change-role', nextRole, affected: updates })
+    const updates = writable.map(source => ({ source, permissions }))
+    setParentUpdate({
+      row,
+      mode: 'change-role',
+      nextRole,
+      affected: updates,
+      residualSources: plan.shareOnlySources,
+      skippedFolderNames,
+    })
   }
 
   /**
@@ -657,9 +765,11 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
             resourceId: source.resourceId,
             subject: row.subject,
             permissions,
-            inherit: true,
+            // R1-M5: the folder grant's OWN scope flag (prepare guaranteed a
+            // known boolean) — share coverage is never OR'd in and the
+            // folder's share rows are never touched by a role change.
+            inherit: source.grantInherit === true,
           })
-          for (const shareId of source.shareIds) await deleteGfsShare(shareId)
           updated += 1
         } catch (caught) {
           if (isAlreadyMissing(caught)) {
@@ -673,7 +783,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
           return
         }
       }
-      if (row.direct) {
+      if (row.direct && row.direct.grantId !== null) {
         try {
           const permissions = rolePermissions(request.nextRole, hostOnlySubject(row.subject))
           await putGfsGrant({
@@ -681,9 +791,10 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
             resourceId: resource.resourceId,
             subject: row.subject,
             permissions,
-            inherit: row.direct.inherit,
+            // The direct GRANT's own scope flag; direct shares survive role
+            // edits (R1-M5) and a share-only direct row never gains a grant.
+            inherit: row.direct.grantInherit,
           })
-          for (const shareId of row.direct.shareIds) await deleteGfsShare(shareId)
         } catch (caught) {
           await failPartially(
             caught,
@@ -692,12 +803,47 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
           return
         }
       }
-      showToast(
-        affectedNames.length > 0
-          ? `${subjectLabel(row)} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${joinFolderNames(affectedNames)} and everything inside ${affectedNames.length > 1 ? 'them' : 'it'}.`
-          : `${subjectLabel(row)} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${resource.name}.`,
-        { tone: 'success' }
-      )
+      // Residual honesty (R1-M5): a downgrade never claims effective
+      // Read-only while a surviving share entry still grants Editor.
+      const residualNames =
+        request.nextRole === 'read'
+          ? [
+              ...new Set([
+                ...[...request.residualSources, ...affected.map(update => update.source)]
+                  .filter(source =>
+                    source.shareEntries.some(entry => isEditorPermissions(entry.permissions))
+                  )
+                  .map(source => source.name),
+                ...(row.direct?.shareEntries.some(entry => isEditorPermissions(entry.permissions))
+                  ? [resource.name]
+                  : []),
+              ]),
+            ]
+          : []
+      const details: string[] = []
+      if (request.skippedFolderNames.length > 0) {
+        details.push(
+          `Updated ${updated} of ${affected.length + request.skippedFolderNames.length} folders. Sharing details on ${joinFolderNames(request.skippedFolderNames)} could not be verified; existing access was kept.`
+        )
+      }
+      if (residualNames.length > 0) {
+        details.push(
+          `Sharing entries on ${joinFolderNames(residualNames)} still grant Editor access.`
+        )
+      }
+      if (details.length > 0) {
+        showToast(
+          `Changed grant access to ${request.nextRole === 'editor' ? 'Editor' : 'Read-only'} on ${affectedNames.length > 0 ? joinFolderNames(affectedNames) : resource.name}. ${details.join(' ')}`,
+          { tone: request.skippedFolderNames.length > 0 ? 'error' : 'info' }
+        )
+      } else {
+        showToast(
+          affectedNames.length > 0
+            ? `${subjectLabel(row)} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${joinFolderNames(affectedNames)} and everything inside ${affectedNames.length > 1 ? 'them' : 'it'}.`
+            : `${subjectLabel(row)} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${resource.name}.`,
+          { tone: 'success' }
+        )
+      }
       await reload()
     } finally {
       setBusy(false)
@@ -812,6 +958,11 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
                 const label = subjectLabel(row)
                 const kind = subjectKind(row)
                 const inherited = row.inherited !== null
+                // R1-M5: a share-only direct row has no grant to rewrite and
+                // no share-edit surface — the role control stays disabled
+                // instead of offering a change that would create a grant.
+                const shareOnlyDirect =
+                  !inherited && row.direct !== null && row.direct.grantId === null
                 return (
                   <RecordListRow
                     className="cu-gfs-existing-access__item"
@@ -834,7 +985,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
                       <SelectionDropdown
                         ariaLabel={`Access role for ${label}`}
                         className="cu-gfs-existing-access__role"
-                        disabled={actionPending}
+                        disabled={actionPending || shareOnlyDirect}
                         multiple={false}
                         onChange={next => {
                           if (!inherited) {

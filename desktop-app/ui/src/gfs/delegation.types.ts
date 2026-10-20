@@ -69,7 +69,9 @@ export interface GfsShareListItem {
  * (includeDescendants=true), consolidated per folder with the row ids a
  * confirmed edit mutates. Derivation keeps EVERY contributing folder
  * (R1-H1): a removal revokes all of them and a downgrade lowers each one
- * above the target role.
+ * above the target role. Per-row provenance (R1-M5): the grant's own bits and
+ * scope flag and every share's own bits/scope are retained — a role change
+ * rewrites only grant-backed rows and never deletes or converts shares.
  */
 export interface GfsInheritedAccessSource {
   resourceId: string
@@ -78,6 +80,16 @@ export interface GfsInheritedAccessSource {
   permissions: string[]
   grantId: string | null
   shareIds: string[]
+  /** Exact bits of this folder's grant row, when one contributes. */
+  grantPermissions: string[] | null
+  /** The grant row's own scope flag; null when no grant row exists. */
+  grantInherit: boolean | null
+  /** Every contributing share row with its own bits and descendant scope. */
+  shareEntries: Array<{
+    rowId: string
+    permissions: string[]
+    includeDescendants: boolean
+  }>
 }
 
 /**

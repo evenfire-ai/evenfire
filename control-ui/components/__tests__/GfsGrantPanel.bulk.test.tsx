@@ -306,7 +306,9 @@ describe('GfsGrantPanel bulk access', () => {
     // The descendant-coverage badge stays out of the row.
     expect(within(existing).queryByText('Includes contents')).toBeNull()
 
-    // Role change consolidates: the grant upsert supersedes the legacy share.
+    // R1-M5: a role change rewrites only the grant row — with its OWN scope
+    // flag (false here; the share's includeDescendants is never OR'd in) —
+    // and the legacy share row survives.
     fireEvent.click(within(existing).getByRole('button', { name: 'Access role for Ada Lovelace' }))
     fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
 
@@ -316,15 +318,17 @@ describe('GfsGrantPanel bulk access', () => {
         resourceId: resource.resourceId,
         subject: userSubject,
         permissions: ['read', 'write', 'delete', 'manage_acl', 'share'],
-        inherit: true,
+        inherit: false,
       })
     )
-    await waitFor(() =>
-      expect(mockDeleteGfsShare).toHaveBeenCalledWith('44444444-4444-4444-4444-444444444444')
-    )
+    expect(mockDeleteGfsShare).not.toHaveBeenCalled()
   })
 
-  it('offers a toggleable role for a share-only principal and migrates it on change', async () => {
+  // R1-M5 — a share-only principal has no grant to rewrite and no
+  // share-update surface: the role control is disabled and a role change can
+  // never migrate the share into a grant. Explicit grant creation through the
+  // composer is the only path that creates grants.
+  it('disables the role toggle for a share-only principal instead of migrating it', async () => {
     mockGetGfsShares.mockResolvedValue({
       items: [
         {
@@ -348,21 +352,12 @@ describe('GfsGrantPanel bulk access', () => {
     expect(role).toHaveTextContent('Read')
     expect(within(existing).queryByText(/direct share|\buser\b/i)).toBeNull()
 
+    // The dropdown is disabled: no selection, no migration, no deletion.
+    expect(role.hasAttribute('disabled')).toBe(true)
     fireEvent.click(role)
-    fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
-
-    await waitFor(() =>
-      expect(mockPutGfsGrant).toHaveBeenCalledWith({
-        drive: 'main',
-        resourceId: resource.resourceId,
-        subject: userSubject,
-        permissions: ['read', 'write', 'delete', 'manage_acl', 'share'],
-        inherit: true,
-      })
-    )
-    await waitFor(() =>
-      expect(mockDeleteGfsShare).toHaveBeenCalledWith('44444444-4444-4444-4444-444444444444')
-    )
+    expect(screen.queryByRole('option', { name: 'Editor' })).toBeNull()
+    await waitFor(() => expect(mockPutGfsGrant).not.toHaveBeenCalled())
+    expect(mockDeleteGfsShare).not.toHaveBeenCalled()
   })
 
   it('sorts access records by visible principal identity', async () => {

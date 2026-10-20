@@ -355,6 +355,273 @@ describe('GfsGrantPanel inherited access', () => {
     ).toContain('Editor')
   })
 
+  // R1-M5 — a confirmed role change rewrites only the folder's GRANT (with
+  // its own scope flag); the folder's share rows survive as residual access
+  // and the outcome copy discloses the surviving Editor.
+  it('keeps the folder’s share rows on a confirmed role change and discloses the residual Editor', async () => {
+    const FOLDER_SHARE_ID = '88888888-8888-8888-8888-888888888888'
+    mockGetGfsGrants.mockImplementation(async resourceId => {
+      if (resourceId === FOLDER_ID) {
+        return {
+          items: [
+            {
+              id: FOLDER_GRANT_ID,
+              drive: 'main',
+              resourceId: FOLDER_ID,
+              subject: miguel,
+              permissions: ['read', 'write'],
+              inherit: true,
+            },
+          ],
+        }
+      }
+      return { items: [] }
+    })
+    mockGetGfsShares.mockImplementation(async resourceId => {
+      if (resourceId === FOLDER_ID) {
+        return {
+          items: [
+            {
+              id: FOLDER_SHARE_ID,
+              drive: 'main',
+              resourceId: FOLDER_ID,
+              subject: miguel,
+              permissions: ['read', 'write'],
+              includeDescendants: true,
+            },
+          ],
+        }
+      }
+      return { items: [] }
+    })
+    renderPanel()
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    const miguelRow = await within(existing).findByTestId(miguelRowTestId)
+
+    await chooseRole(miguelRow, 'Read')
+    const dialog = await screen.findByRole('alertdialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update role' }))
+
+    await waitFor(() =>
+      expect(mockPutGfsGrant).toHaveBeenCalledWith({
+        drive: 'main',
+        resourceId: FOLDER_ID,
+        subject: miguel,
+        permissions: ['read', 'share'],
+        inherit: true,
+      })
+    )
+    // The role change NEVER deletes the folder's share row.
+    expect(mockDeleteGfsShare).not.toHaveBeenCalledWith(FOLDER_SHARE_ID)
+    // The honest outcome names the changed folder and discloses the residual.
+    expect(
+      await screen.findByText(
+        'Changed grant access to Read-only on team-docs. Sharing entries on team-docs still grant Editor access.'
+      )
+    ).toBeTruthy()
+  })
+
+  // R1-M5 — a share-only ancestor is never converted into a grant: nothing
+  // is written, the confirmation never opens, and the user is told why.
+  it('refuses a share-only ancestor role change without creating a grant', async () => {
+    const FOLDER_SHARE_ID = '99999999-9999-9999-9999-999999999999'
+    mockGetGfsGrants.mockImplementation(async () => ({ items: [] }))
+    mockGetGfsShares.mockImplementation(async resourceId => {
+      if (resourceId === FOLDER_ID) {
+        return {
+          items: [
+            {
+              id: FOLDER_SHARE_ID,
+              drive: 'main',
+              resourceId: FOLDER_ID,
+              subject: miguel,
+              permissions: ['read', 'write'],
+              includeDescendants: true,
+            },
+          ],
+        }
+      }
+      return { items: [] }
+    })
+    renderPanel()
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    const miguelRow = await within(existing).findByTestId(miguelRowTestId)
+
+    await chooseRole(miguelRow, 'Read')
+
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(mockPutGfsGrant).not.toHaveBeenCalled()
+    expect(mockDeleteGfsShare).not.toHaveBeenCalled()
+    expect(
+      await screen.findByText(
+        /still has Editor access from sharing entries that can't be edited here/
+      )
+    ).toBeTruthy()
+  })
+
+  it('discloses inherited Editor shares when only a direct grant can be changed', async () => {
+    mockGetGfsGrants.mockImplementation(async resourceId => ({
+      items:
+        resourceId === FILE_ID
+          ? [
+              {
+                id: FILE_GRANT_ID,
+                drive: 'main',
+                resourceId: FILE_ID,
+                subject: miguel,
+                permissions: ['read', 'write'],
+                inherit: false,
+              },
+            ]
+          : [],
+    }))
+    mockGetGfsShares.mockImplementation(async resourceId => ({
+      items:
+        resourceId === FOLDER_ID
+          ? [
+              {
+                id: ROOT_SHARE_ID,
+                drive: 'main',
+                resourceId: FOLDER_ID,
+                subject: miguel,
+                permissions: ['read', 'write'],
+                includeDescendants: true,
+              },
+            ]
+          : [],
+    }))
+    renderPanel()
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    const row = await within(existing).findByTestId(miguelRowTestId)
+    await chooseRole(row, 'Read')
+    await waitFor(() =>
+      expect(mockPutGfsGrant).toHaveBeenCalledWith({
+        drive: 'main',
+        resourceId: FILE_ID,
+        subject: miguel,
+        permissions: ['read', 'share'],
+        inherit: false,
+      })
+    )
+    expect(mockPutGfsGrant).toHaveBeenCalledTimes(1)
+    expect(mockDeleteGfsShare).not.toHaveBeenCalled()
+    expect(
+      await screen.findByText(
+        'Changed grant access to Read-only on report.md. Sharing entries on team-docs still grant Editor access.'
+      )
+    ).toBeTruthy()
+  })
+
+  // R1-M5 — a share-only DIRECT row is not role-editable: the dropdown is
+  // disabled (no grant would be created by a role change).
+  it('disables the role dropdown for a share-only direct row', async () => {
+    const FILE_SHARE_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    mockGetGfsGrants.mockImplementation(async () => ({ items: [] }))
+    mockGetGfsShares.mockImplementation(async resourceId => {
+      if (resourceId === FILE_ID) {
+        return {
+          items: [
+            {
+              id: FILE_SHARE_ID,
+              drive: 'main',
+              resourceId: FILE_ID,
+              subject: marcela,
+              permissions: ['read', 'write'],
+              includeDescendants: false,
+            },
+          ],
+        }
+      }
+      return { items: [] }
+    })
+    renderPanel()
+
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    const marcelaRow = await within(existing).findByTestId(marcelaRowTestId)
+    const trigger = within(marcelaRow).getByRole('button', { name: 'Access role for Marcela' })
+    expect(trigger.hasAttribute('disabled')).toBe(true)
+    // A disabled dropdown never opens, so no role selection — and no grant
+    // write — can originate from a share-only direct row.
+    fireEvent.click(trigger)
+    expect(screen.queryByRole('option', { name: 'Editor' })).toBeNull()
+    await waitFor(() => expect(mockPutGfsGrant).not.toHaveBeenCalled())
+  })
+
+  // R1-M5 — a direct role write preserves the GRANT row's own scope flag
+  // (never the OR with share coverage) and keeps the share rows.
+  it('preserves the direct grant’s own inherit flag and its share rows on a role change', async () => {
+    const FILE_SHARE_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    mockGetGfsGrants.mockImplementation(async resourceId => {
+      if (resourceId === FILE_ID) {
+        return {
+          items: [
+            {
+              id: FILE_GRANT_ID,
+              drive: 'main',
+              resourceId: FILE_ID,
+              subject: marcela,
+              permissions: ['read'],
+              inherit: false,
+            },
+          ],
+        }
+      }
+      if (resourceId === FOLDER_ID) {
+        return {
+          items: [
+            {
+              id: FOLDER_GRANT_ID,
+              drive: 'main',
+              resourceId: FOLDER_ID,
+              subject: miguel,
+              permissions: ['read', 'write'],
+              inherit: true,
+            },
+          ],
+        }
+      }
+      return { items: [] }
+    })
+    mockGetGfsShares.mockImplementation(async resourceId => {
+      if (resourceId === FILE_ID) {
+        return {
+          items: [
+            {
+              id: FILE_SHARE_ID,
+              drive: 'main',
+              resourceId: FILE_ID,
+              subject: marcela,
+              permissions: ['read'],
+              includeDescendants: true,
+            },
+          ],
+        }
+      }
+      return { items: [] }
+    })
+    renderPanel()
+
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    const marcelaRow = within(existing)
+      .getAllByTestId(marcelaRowTestId)
+      .find(row => within(row).queryByText('Marcela') !== null)
+    await chooseRole(marcelaRow as HTMLElement, 'Editor')
+
+    // Direct row: no confirmation modal, the file grant is updated directly —
+    // with the grant's OWN inherit flag (false), not the OR'd union.
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    await waitFor(() =>
+      expect(mockPutGfsGrant).toHaveBeenCalledWith({
+        drive: 'main',
+        resourceId: FILE_ID,
+        subject: marcela,
+        permissions: ['read', 'write', 'delete', 'manage_acl', 'share'],
+        inherit: false,
+      })
+    )
+    expect(mockDeleteGfsShare).not.toHaveBeenCalled()
+  })
+
   it('removes an inherited member from the parent folder after confirmation', async () => {
     renderPanel()
     const existing = await screen.findByRole('region', { name: 'People with access' })

@@ -84,10 +84,9 @@ export function planInheritedRoleChange(
 /**
  * Folds one inheriting row into a subject's derived access item (creating it
  * on first sight) through the shared pure core, then projects the result back
- * to the app's legacy-exact source shape. The policy core carries richer
- * per-row provenance (grant bits/scope flag, share entries) for the upcoming
- * scoped per-source edit work; this adapter exposes exactly the fields the
- * app consumes today, so importers and tests observe byte-identical items.
+ * to the app's source shape INCLUDING the policy's per-row provenance
+ * (R1-M5: grant bits/scope flag and share entries survive the projection so
+ * role edits can preserve each row's own scope and never touch shares).
  */
 export function mergeInheritedAccessItem(
   current: GfsInheritedAccessItem | null,
@@ -139,7 +138,7 @@ export function mergeInheritedAccessItem(
   return toAppInheritedAccessItem(folded)
 }
 
-/** Project a policy item onto the app's legacy-exact item/source shape. */
+/** Project a policy item onto the app item/source shape (provenance kept, R1-M5). */
 function toAppInheritedAccessItem(item: PolicyInheritedAccessItem | null): GfsInheritedAccessItem {
   return {
     subject: item?.subject ?? { type: 'user' },
@@ -151,6 +150,14 @@ function toAppInheritedAccessItem(item: PolicyInheritedAccessItem | null): GfsIn
       permissions: [...source.permissions],
       grantId: source.grantId,
       shareIds: [...source.shareIds],
+      grantPermissions:
+        source.grantPermissions === null ? null : [...(source.grantPermissions ?? [])],
+      grantInherit: source.grantInherit ?? null,
+      shareEntries: (source.shareEntries ?? []).map(entry => ({
+        rowId: entry.rowId,
+        permissions: [...entry.permissions],
+        includeDescendants: entry.includeDescendants,
+      })),
     })),
   } as GfsInheritedAccessItem
 }

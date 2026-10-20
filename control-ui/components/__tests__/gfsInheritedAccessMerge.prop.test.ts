@@ -247,4 +247,58 @@ describe('gfsInheritedAccessMerge properties', () => {
       { numRuns: 300 }
     )
   })
+
+  // R1-M5 — the adapter projection PRESERVES per-row provenance: a
+  // grant-backed folder keeps the grant's own bits and scope flag, every
+  // share keeps its own row id/bits/scope, and re-folding a projected item
+  // (provenance-projected input) keeps them stable.
+  it('keeps each grant and share row’s own provenance through the projection', () => {
+    fc.assert(
+      fc.property(
+        subjectArb,
+        permissionsArb,
+        permissionsArb,
+        distinctFoldersArb,
+        (subject, grantBits, shareBits, folders) => {
+          const folder = folders[0]!
+          const grantId = 'grant-row'
+          const shareId = 'share-row'
+          const item = mergeInheritedAccessItem(
+            null,
+            { subject, permissions: grantBits, grantId, shareIds: [] },
+            folder
+          )
+          const withShare = mergeInheritedAccessItem(
+            item,
+            { subject, permissions: shareBits, grantId: null, shareIds: [shareId] },
+            folder
+          )
+          const source = withShare.sources.find(entry => entry.resourceId === folder.resourceId)
+          expect(source).toBeTruthy()
+          // The grant row's OWN bits and scope flag survive (the walker
+          // pre-filters inheriting grants, so inherit=true here).
+          expect(source?.grantId).toBe(grantId)
+          expect(source?.grantPermissions).toEqual(grantBits)
+          expect(source?.grantInherit).toBe(true)
+          // The share row keeps its own identity and bits — never OR'd into
+          // the grant's scope.
+          expect(source?.shareIds).toEqual([shareId])
+          expect(source?.shareEntries).toHaveLength(1)
+          expect(source?.shareEntries[0]).toEqual({
+            rowId: shareId,
+            permissions: shareBits,
+            includeDescendants: true,
+          })
+          // Re-folding the projected item is stable (idempotent projection).
+          const refolded = mergeInheritedAccessItem(
+            withShare,
+            { subject, permissions: grantBits, grantId, shareIds: [] },
+            folder
+          )
+          expect(refolded).toEqual(withShare)
+        }
+      ),
+      { numRuns: 300 }
+    )
+  })
 })
