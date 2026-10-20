@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { type ChildProcess, spawn } from 'node:child_process'
 import { EventEmitter, once } from 'node:events'
 import * as documentMemory from '../documentMemory'
+import * as oomScore from '../oomScore'
 import * as residentMemory from '../residentMemory'
 import type { XlsxJob } from '../types'
 import { runDocumentJob } from '../workerRunner'
@@ -50,6 +51,8 @@ function samplers(sample: () => Promise<documentMemory.DocumentCgroupMemory | nu
   vi.spyOn(documentMemory, 'documentCgroupSampler').mockReturnValue(sample)
   const rss = vi.fn(async () => MIB)
   vi.spyOn(residentMemory, 'residentMemorySampler').mockReturnValue(rss)
+  // Fake children have no /proc entry to mark on Linux.
+  vi.spyOn(oomScore, 'oomVictimMarker').mockReturnValue(async () => undefined)
   return rss
 }
 

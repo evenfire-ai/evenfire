@@ -1,11 +1,21 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { type ChildProcess, spawn } from 'node:child_process'
 import { once } from 'node:events'
+import { readFile } from 'node:fs/promises'
+import * as oomScore from '../oomScore'
+import { oomVictimMarker } from '../oomScore'
 import * as residentMemory from '../residentMemory'
 import { residentMemorySampler } from '../residentMemory'
 import type { DocumentJob, DocumentJobOutcome } from '../types'
 import { runDocumentJob } from '../workerRunner'
-import { documentLimits, emptyWorkbook, textPdf, valuesWorkbook, witnessCode } from './fixtures'
+import {
+  documentLimits,
+  emptyWorkbook,
+  longRunningWorkbook,
+  textPdf,
+  valuesWorkbook,
+  witnessCode,
+} from './fixtures'
 
 const childObservation = vi.hoisted(() => ({
   observe: undefined as ((child: ChildProcess) => void) | undefined,
@@ -242,6 +252,92 @@ describe('document reader child runner', () => {
     expect(child.signalCode).toBe('SIGKILL')
     sampler.mockRestore()
     await control()
+  })
+
+  it('fails loud on an unsupported OOM platform and leaves macOS unmarked', async () => {
+    expect(() => oomVictimMarker('win32')).toThrow('Unsupported document reader OOM platform')
+    await expect(oomVictimMarker('darwin')(process.pid)).resolves.toBeUndefined()
+    await control()
+  })
+
+  it.runIf(process.platform === 'linux')(
+    'marks the live Linux reader child as the first OOM victim',
+    async () => {
+      await control()
+      vi.mocked(spawn).mockClear()
+      const controller = new AbortController()
+      const reason = new Error('document read cancelled')
+      const pending = runDocumentJob(job(await longRunningWorkbook()), controller.signal)
+      const child = await liveChild()
+      // Liveness: the pid read below is the live reader, not a recycled pid.
+      expect(await readFile(`/proc/${child.pid}/cmdline`, 'utf8')).toMatch(/worker\.(ts|js)/)
+      await vi.waitFor(async () =>
+        expect((await readFile(`/proc/${child.pid}/oom_score_adj`, 'utf8')).trim()).toBe('1000')
+      )
+      controller.abort(reason)
+      await expect(pending).rejects.toBe(reason)
+    },
+    20_000
+  )
+
+  it('kills a real child when the OOM mark fails and runs a marked control', async () => {
+    const marker = vi.spyOn(oomScore, 'oomVictimMarker').mockImplementationOnce(() => async () => {
+      throw new Error('oom_score_adj unavailable')
+    })
+    const pending = runDocumentJob(job(await valuesWorkbook(witnessCode())))
+    const child = await liveChild()
+    await expect(pending).rejects.toThrow('Document reader worker failed')
+    // Liveness: the job did spawn its child, and the failed mark stopped it.
+    expect(spawn).toHaveBeenCalledTimes(1)
+    expect(child.signalCode).toBe('SIGKILL')
+    marker.mockRestore()
+    await control()
+  })
+
+  it('maps an external SIGKILL of a sent child to heap between real controls', async () => {
+    await control()
+    vi.mocked(spawn).mockClear()
+    const mark = oomVictimMarker(process.platform)
+    const marked: number[] = []
+    vi.spyOn(oomScore, 'oomVictimMarker').mockReturnValueOnce(async pid => {
+      await mark(pid)
+      marked.push(pid)
+    })
+    const pending = runDocumentJob(job(await longRunningWorkbook()))
+    const child = await liveChild()
+    // The kernel OOM killer acts on a child that is already reading.
+    await vi.waitFor(() => expect(marked).toEqual([child.pid]))
+    process.kill(child.pid!, 'SIGKILL')
+    await expect(pending).resolves.toEqual({
+      ok: false,
+      reason: 'document_limits_exceeded',
+      limit: 'heap',
+    })
+    await control()
+  }, 20_000)
+
+  it('bounds an oversized outcome in the parent when the child check is bypassed', async () => {
+    const outcome = {
+      ok: true,
+      sheetNames: ['Sheet1'],
+      sheets: [{ ...VALID_SHEET, rows: [['x'.repeat(4_096)]] }],
+    }
+    const bounded = runDocumentJob(
+      job(await valuesWorkbook(witnessCode()), {
+        limits: documentLimits({ maxOutputBytes: 1_024 }),
+      })
+    )
+    ;(await liveChild()).emit('message', outcome)
+    await expect(bounded).resolves.toEqual({
+      ok: false,
+      reason: 'document_limits_exceeded',
+      limit: 'output_bytes',
+    })
+    // Liveness: the same outcome under the default limit is delivered.
+    vi.mocked(spawn).mockClear()
+    const delivered = runDocumentJob(job(await valuesWorkbook(witnessCode())))
+    ;(await liveChild()).emit('message', outcome)
+    await expect(delivered).resolves.toEqual(outcome)
   })
 
   it.each([

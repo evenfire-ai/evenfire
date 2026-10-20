@@ -377,7 +377,10 @@ export type DocumentJobOutcome<J extends DocumentJob> = J extends PdfTextJob
  * Queues one job per Host process, then runs it in a fresh child. Linux
  * cgroup-v2 headroom narrows configured caps; insufficient admission headroom
  * resolves `{ ok:false, reason:'host_memory_unavailable' }` without spawning,
- * and child/container memory overruns resolve with limit:'heap'. An unreadable
+ * and child/container memory overruns resolve with limit:'heap'. The resident
+ * cap is sampled every 25 ms, not a hard per-child limit: on Linux the child
+ * is marked `oom_score_adj=1000` so a container OOM kills it before the Host,
+ * except where `memory.oom.group=1` kills the whole container. An unreadable
  * or v1 cgroup rejects as a worker defect. macOS uses configured caps.
  * Resolves with the job's outcome; a timeout
  * resolves `{ ok:false, reason:'document_limits_exceeded', limit:'time' }`, a

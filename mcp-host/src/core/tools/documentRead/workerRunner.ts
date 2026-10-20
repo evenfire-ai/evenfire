@@ -7,6 +7,7 @@ import {
   documentCgroupWorkingSetBytes,
   effectiveDocumentMemoryCaps,
 } from './documentMemory'
+import { oomVictimMarker } from './oomScore'
 import { residentMemorySampler } from './residentMemory'
 import type {
   DocumentJob,
@@ -242,10 +243,12 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
   return acquireDocumentReader(signal).then(async release => {
     let sampleResidentMemory: (pid: number) => Promise<number>
     let sampleCgroupMemory: ReturnType<typeof documentCgroupSampler>
+    let markOomVictim: ReturnType<typeof oomVictimMarker>
     let caps: ReturnType<typeof effectiveDocumentMemoryCaps>
     try {
       sampleResidentMemory = residentMemorySampler(process.platform)
       sampleCgroupMemory = documentCgroupSampler(process.platform)
+      markOomVictim = oomVictimMarker(process.platform)
       caps = effectiveDocumentMemoryCaps(job.limits, await sampleCgroupMemory())
     } catch {
       release()
@@ -283,7 +286,9 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
         if (failure === undefined) failure = nextFailure
         stopping = true
         try {
-          if (!child || !child.kill('SIGKILL')) throw workerFailed()
+          // Before a failed spawn emits `error`, its handle still exists with
+          // pid 0, and kill(0) would signal the Host's whole process group.
+          if (!child || child.pid === undefined || !child.kill('SIGKILL')) throw workerFailed()
         } catch {
           // A failed kill may have no exit event. Reject instead of leaving the
           // call pending; never turn a termination defect into a typed limit.
@@ -390,15 +395,28 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
         if (!stopping) {
           residentTimer = setInterval(() => void sample(), 25)
           void sample()
-          // Advanced IPC serializes only the supplied byte view. The source cap
-          // bounds this copy, and the caller retains ownership of its bytes.
-          if (!child.send) throw workerFailed()
-          child.send(job, error => {
-            if (error && !exited && !stopping) {
+          const spawned = child
+          if (spawned.pid === undefined || !spawned.send) throw workerFailed()
+          // The job is sent only once the child is the OOM victim, so it never
+          // runs unmarked; a failed mark is a defect.
+          markOomVictim(spawned.pid).then(
+            () => {
+              if (exited || stopping) return
+              // Advanced IPC serializes only the supplied byte view. The source
+              // cap bounds this copy, and the caller retains its bytes.
+              spawned.send(job, error => {
+                if (error && !exited && !stopping) {
+                  defect = true
+                  terminate()
+                }
+              })
+            },
+            () => {
+              if (exited || stopping) return
               defect = true
               terminate()
             }
-          })
+          )
         }
       } catch {
         if (child) {
