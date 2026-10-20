@@ -58,6 +58,17 @@ export interface GfsMoveReceiptInput {
 }
 
 /**
+ * Resources whose INHERITED access depends on the moved resource's ancestry.
+ * The open Share/Manage dialog is the live instance: when the moved item is
+ * that resource or one of its ancestors, the rows it shows were derived from
+ * a chain that no longer exists, and the dialog must re-read them instead of
+ * keeping the pre-move observation.
+ */
+export interface GfsMoveConvergenceOptions {
+  ancestryDependentResourceIds?: readonly string[]
+}
+
+/**
  * Collect the child→parent links currently present in cached children
  * listings (an observation of what this session has loaded — never a claim
  * that it covers the physical subtree). Children keys are
@@ -97,12 +108,19 @@ export function collectKnownChildParents(
  * (affordances, grants, shares, inherited access) without eager refetches.
  * Local receipts and remote hints converge through the same cache; there is
  * deliberately no echo matching (user hint frames carry no operation ids).
+ *
+ * Inherited access is the ONE family that is re-read rather than marked
+ * stale: it is derived from the resource's ANCESTRY, so a move of the
+ * resource or of one of its ancestors invalidates the rows an OPEN
+ * Share/Manage dialog is showing. `refetchType: 'active'` keeps that
+ * bounded — only a mounted dialog refetches; the rest stay stale-on-entry.
  */
 export function applyMoveConvergence(
   queryClient: QueryClient,
   scope: string,
   drive: string,
-  receipt: GfsMoveReceiptInput
+  receipt: GfsMoveReceiptInput,
+  options: GfsMoveConvergenceOptions = {}
 ): void {
   const known = { childParentByResourceId: collectKnownChildParents(queryClient, scope, drive) }
   const plan = planMoveConvergence(receipt, known)
@@ -135,10 +153,16 @@ export function applyMoveConvergence(
       queryKey: desktopQueryKeys.gfsShares(scope, resourceId, drive),
       refetchType: 'none',
     })
+  }
+  const inheritedAccessResourceIds = new Set([
+    ...plan.staleResourceIds,
+    ...(options.ancestryDependentResourceIds ?? []),
+  ])
+  for (const resourceId of inheritedAccessResourceIds) {
     void queryClient.invalidateQueries({
       exact: true,
       queryKey: desktopQueryKeys.gfsInheritedAccess(scope, resourceId, drive),
-      refetchType: 'none',
+      refetchType: 'active',
     })
   }
 }

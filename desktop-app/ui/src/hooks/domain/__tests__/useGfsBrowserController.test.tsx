@@ -2748,6 +2748,23 @@ function ManageProbe() {
       <button type="button" onClick={() => swallow(ctrl.refreshShares())}>
         refresh shares
       </button>
+      <button
+        type="button"
+        onClick={() =>
+          swallow(
+            ctrl.convergeCommittedMove(
+              {
+                resourceId: ctrl.crumbs[0]?.resourceId ?? '',
+                destinationId: 'destination-1',
+                oldParentId: null,
+              },
+              { version: 2 }
+            )
+          )
+        }
+      >
+        move oldest ancestor
+      </button>
       <button type="button" onClick={() => swallow(ctrl.revokeShare('share-42'))}>
         revoke share
       </button>
@@ -3207,6 +3224,79 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
       expect(screen.getByTestId('inherited-coverage').textContent).toBe('unavailable')
     )
     expect(screen.getByTestId('inherited-error').textContent).toBe('none')
+  })
+
+  // A move changes the ANCESTRY of the open resource, and the open
+  // Share/Manage dialog shows rows derived from that ancestry. The dialog must
+  // re-read them: keeping the pre-move observation would present inherited
+  // access that no longer exists.
+  it('re-reads the open inherited access when a move affects its ancestry', async () => {
+    const listGrants = vi.fn(async () => [])
+    const listShares = vi.fn(async () => [])
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async (uri: string) => {
+            const id = uri.split('/').pop()!
+            if (id === 'folder1') {
+              return {
+                resourceId: 'folder-1',
+                parentResourceId: null,
+                gfsUri: 'gfs://main/folder1',
+                name: 'Team docs',
+                kind: 'directory',
+                version: 1,
+              }
+            }
+            return {
+              resourceId: 'file-1',
+              parentResourceId: 'folder-1',
+              gfsUri: 'gfs://main/file1',
+              name: 'report.txt',
+              kind: 'file',
+              version: 1,
+            }
+          }),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'manage_acl'],
+            canDelegate: true,
+            grantableBits: ['read'],
+            canCreateShare: false,
+          })),
+          listGrants,
+          listShares,
+        },
+      },
+    })
+
+    render(<ManageProbe />, { wrapper: Harness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open root' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('file-1'))
+    await act(async () => {
+      screen.getByRole('button', { name: 'open manage' }).click()
+    })
+    await waitFor(() => expect(listGrants).toHaveBeenCalled())
+
+    const client = lastHarnessQueryClient!
+    const scope = ':user-a:team-a'
+    const inheritedKey = desktopQueryKeys.gfsInheritedAccess(scope, 'file-1', 'main')
+    const inheritedQuery = client.getQueryCache().find({ queryKey: inheritedKey })!
+    const before = inheritedQuery.state.dataUpdatedAt
+    expect(before).toBeGreaterThan(0)
+
+    // The oldest crumb is an ancestor of the open resource: moving it changes
+    // what the open resource inherits.
+    await act(async () => {
+      screen.getByRole('button', { name: 'move oldest ancestor' }).click()
+    })
+
+    await waitFor(() => expect(inheritedQuery.state.dataUpdatedAt).not.toBe(before))
   })
 
   // Every response and rejection crosses the real client/HTTP fixture seam.

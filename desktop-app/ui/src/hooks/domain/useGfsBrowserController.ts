@@ -1081,6 +1081,23 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     [current?.gfsUri, openUri]
   )
 
+  // The OPEN resource's inherited access is derived from its ANCESTRY. A move
+  // of that resource — or of one of its ancestors — changes what it
+  // inherits, so an open Share/Manage dialog must re-read those rows instead
+  // of showing the pre-move observation. The trail is the ancestry this
+  // session actually loaded; nothing outside it is claimed.
+  const openAncestryDependentResourceIds = useCallback(
+    (movedResourceId: string): string[] => {
+      const openResourceId = current?.resourceId
+      if (!openResourceId) return []
+      const affectsOpenAncestry =
+        movedResourceId === openResourceId ||
+        crumbs.some(crumb => crumb.resourceId === movedResourceId)
+      return affectsOpenAncestry ? [openResourceId] : []
+    },
+    [crumbs, current?.resourceId]
+  )
+
   // Move refreshes through the shared convergence planner (rev-2 §6): the
   // receipt selectively invalidates the old/new parent children listings and
   // accessible roots, and marks the moved resource plus its KNOWN cached
@@ -1120,17 +1137,25 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         )
       )
       if (sessionScope) {
-        applyMoveConvergence(queryClient, sessionScope, DRIVE, {
-          resourceId: input.resourceId,
-          oldParentId: input.oldParentId ?? null,
-          newParentId: input.destinationId,
-        })
+        applyMoveConvergence(
+          queryClient,
+          sessionScope,
+          DRIVE,
+          {
+            resourceId: input.resourceId,
+            oldParentId: input.oldParentId ?? null,
+            newParentId: input.destinationId,
+          },
+          {
+            ancestryDependentResourceIds: openAncestryDependentResourceIds(input.resourceId),
+          }
+        )
       } else {
         await refreshGfs()
       }
       if (movedCrumb) await openUri(movedCrumb.gfsUri)
     },
-    [crumbs, openUri, queryClient, refreshGfs, sessionScope]
+    [crumbs, openAncestryDependentResourceIds, openUri, queryClient, refreshGfs, sessionScope]
   )
 
   const moveResourceMutation = useMutation({
