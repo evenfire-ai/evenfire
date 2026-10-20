@@ -24,6 +24,7 @@ import { K8sSecretWatchLoop } from './k8sSecretWatchLoop'
 import { reconcileDurationSeconds, reconciliationsTotal, timerChecksTotal } from './metrics'
 import { createLogger } from './observability/logger'
 import {
+  TRANSPORT_NETWORK_CONDITION_TYPE,
   VERIFIED_AT_REFRESH_MS,
   hasPendingTransportNetworkReadiness,
   recipeHasExternalExactHostEgress,
@@ -66,7 +67,6 @@ import { SecretWatcher } from './reconciler/secretWatcher'
 import {
   type ReconcileResult,
   TRANSIENT_REQUEUE_BASE_MS,
-  TRANSPORT_NETWORK_CONDITION_TYPE,
   WorkflowRecipeReconciler,
 } from './reconciler/workflowRecipeReconciler'
 import {
@@ -1533,18 +1533,25 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     })
     if (selected.length === 0) return
 
-    // Policies are listed once per tick (not per recipe). Without them the lane
-    // cannot judge staleness; the forced reconcile this replaced would have failed
-    // at the same list call, and the next tick retries.
-    let policies: Awaited<ReturnType<WorkflowRecipeReconciler['listPoliciesForLane']>>
-    try {
-      policies = await this.reconciler.listPoliciesForLane(this.config.sandboxNamespace)
-    } catch (error) {
-      createLogger('wrc', 'workflow-recipes').warn(
-        'External egress refresh skipped; could not list policies',
-        { err: error }
-      )
-      return
+    // Policies are listed once per namespace per tick (not per recipe), keyed on the
+    // recipe's own namespace like the full pass. Without them the lane cannot judge
+    // staleness; the forced reconcile this replaced would have failed at the same
+    // list call, and the next tick retries. A failure is scoped to its namespace.
+    type Policies = Awaited<ReturnType<WorkflowRecipeReconciler['listPoliciesForLane']>>
+    const policyLists = new Map<string, Promise<Policies | undefined>>()
+    const policiesFor = (namespace: string): Promise<Policies | undefined> => {
+      let list = policyLists.get(namespace)
+      if (!list) {
+        list = this.reconciler.listPoliciesForLane(namespace).catch(error => {
+          createLogger('wrc', 'workflow-recipes').warn(
+            'External egress refresh skipped; could not list policies',
+            { err: error }
+          )
+          return undefined
+        })
+        policyLists.set(namespace, list)
+      }
+      return list
     }
 
     // #1016: replay the recorded DNS blocks through the egress lane. Only a stale
@@ -1556,6 +1563,11 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
       await this.enqueueTimerTask(name, 'egress', async fresh => {
         // Selection was computed at tick time; the class can change while queued.
         if (!recipeHasExternalExactHostEgress(fresh)) {
+          timerChecksTotal.inc({ timer: 'egress', result: 'skipped' })
+          return
+        }
+        const policies = await policiesFor(fresh.metadata.namespace)
+        if (!policies) {
           timerChecksTotal.inc({ timer: 'egress', result: 'skipped' })
           return
         }
@@ -1646,12 +1658,10 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         await this.escalate(fresh, 'workload_status', 'workload_status', false)
         return
       }
+      timerChecksTotal.inc({ timer: 'workload_status', result: 'clean' })
     }
 
-    if (!recipeReferencesNamedSecrets(fresh)) {
-      timerChecksTotal.inc({ timer: 'workload_status', result: 'clean' })
-      return
-    }
+    if (!recipeReferencesNamedSecrets(fresh)) return
     await this.checkOwnership(fresh)
   }
 
@@ -1664,6 +1674,7 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     const name = fresh.metadata.name
     const observed = await this.reconciler.observeSecretOwnership(fresh)
     if (observed.kind === 'error') {
+      timerChecksTotal.inc({ timer: 'ownership', result: 'error' })
       await this.escalate(fresh, 'ownership', 'ownership', false)
       return
     }
@@ -1739,9 +1750,16 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
           fresh,
           await readMcpHostPod(this.coreApi, fresh.metadata.name, this.config.sandboxNamespace)
         )
-      } catch {
+      } catch (error) {
         // An unreadable pod is treated as drift: the full pass is the safe answer.
+        // Counted and logged so a persistent probe failure (403, apiserver timeout)
+        // is visible instead of silently forcing a full reconcile every tick.
         needs = true
+        timerChecksTotal.inc({ timer: 'sdk_liveness', result: 'error' })
+        createLogger('wrc', fresh.metadata.name).warn(
+          'mcp-host liveness probe failed; escalating',
+          { err: error }
+        )
       }
       if (needs) {
         await this.escalate(fresh, 'sdk_liveness', 'sdk_liveness', false)

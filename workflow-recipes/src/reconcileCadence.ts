@@ -39,6 +39,7 @@ export type TimerName =
   | 'steady_backstop'
 export type Coalesce = false | 'spacing' | 'backstop'
 export interface ReconcileCadenceOutput {
+  /** Exposed for tests and diagnostics. */
   dnsBlocks: ReadonlyArray<'recipe_egress' | 'runtime_http_egress'>
   /** undefined = no ownership gate ran this pass */
   enforcedOwnership?: string

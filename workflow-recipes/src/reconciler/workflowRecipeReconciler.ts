@@ -28,7 +28,7 @@ import {
   TRANSPORT_NETWORK_CONDITION_TYPE,
   hasPendingTransportNetworkReadiness,
 } from '../recipePredicates'
-import type { ReconcileCadenceOutput } from '../reconcileCadence'
+import type { ReconcileCadenceOutput, ReconcileTrigger } from '../reconcileCadence'
 import {
   ConfigMapResourceDef,
   CronJobDef,
@@ -1428,11 +1428,10 @@ export class WorkflowRecipeReconciler {
   private async ensureSteadyWorkflowRuntimeCredentials(
     recipe: WorkflowRecipeCRD,
     resolvedRuntimeScopeRecipeName?: string
-  ): Promise<{ repairPending: boolean }> {
-    // Issue #1016 — a swallowed repair failure is not "settled": record it so the
-    // timer does not treat the pass as healthy.
-    let repairPending = false
-    if (!this.workflowReconciler) return { repairPending }
+  ): Promise<void> {
+    // Issue #1016 — a swallowed repair failure is not "settled": noteRepairPending()
+    // records it so the timer does not treat the pass as healthy.
+    if (!this.workflowReconciler) return
     const runtimeScopeRecipeName =
       resolvedRuntimeScopeRecipeName ?? (await this.workflowRuntimeScopeRecipeName(recipe))
     await this.bindCodexReconcileContext(recipe, runtimeScopeRecipeName)
@@ -1452,7 +1451,6 @@ export class WorkflowRecipeReconciler {
         runtimeScopeRecipeName
       )
     } catch (error) {
-      repairPending = true
       noteRepairPending()
       createLogger('wrc', recipe.metadata.name).error(
         'Failed to repair coordinator runtime credentials; continuing without phase change',
@@ -1468,7 +1466,6 @@ export class WorkflowRecipeReconciler {
         recipe.metadata.uid
       )
     } catch (error) {
-      repairPending = true
       noteRepairPending()
       createLogger('wrc', recipe.metadata.name).error(
         'Failed to repair mcpHost runtime credentials; continuing without phase change',
@@ -1487,7 +1484,6 @@ export class WorkflowRecipeReconciler {
       // retry would otherwise leave only per-policy warn lines. Conflicts were
       // already logged at warn by the apply and stay there.
       if (refreshed.retryPending) {
-        repairPending = true
         noteRepairPending()
         createLogger('wrc', recipe.metadata.name).error(
           'Runtime HTTP egress refresh left a NetworkPolicy pending a retry; a later refresh retries it',
@@ -1495,14 +1491,12 @@ export class WorkflowRecipeReconciler {
         )
       }
     } catch (error) {
-      repairPending = true
       noteRepairPending()
       createLogger('wrc', recipe.metadata.name).error(
         'Failed to refresh runtime HTTP egress; keeping the last valid NetworkPolicy',
         { name: recipe.metadata.name, err: error }
       )
     }
-    return { repairPending }
   }
 
   /**
@@ -1929,6 +1923,7 @@ export class WorkflowRecipeReconciler {
     return (this.dnsBlockRecords ??= new Map())
   }
 
+  // Exposed for tests and diagnostics.
   dnsBlockRecordFor(
     name: string
   ):
@@ -2040,7 +2035,7 @@ export class WorkflowRecipeReconciler {
 
   async reconcile(
     recipe: WorkflowRecipeCRD,
-    opts?: { trigger?: string }
+    opts?: { trigger?: ReconcileTrigger }
   ): Promise<ReconcileResult> {
     // issue #375: compute the Plugin Workload SDK capability projection ONCE per
     // reconcile and attach it to the result. shouldPatchRecipeStatus reads it to
@@ -2092,7 +2087,7 @@ export class WorkflowRecipeReconciler {
 
   private async reconcileInternal(
     recipe: WorkflowRecipeCRD,
-    trigger?: string
+    trigger?: ReconcileTrigger
   ): Promise<ReconcileResult> {
     const name = recipe.metadata.name
     const ns = recipe.metadata.namespace

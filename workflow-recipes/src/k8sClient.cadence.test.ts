@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { loadConfig } from './config'
 import { WorkflowRecipeWatcher } from './k8sClient'
 import { registry } from './metrics'
+import { captureLogger } from './reconciler/__tests__/captureLogger'
 import type { WorkflowRecipeCRD } from './types'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- private-member harness
@@ -437,6 +438,16 @@ describe('T3 egress lane timer (#1016 §3.3)', () => {
     expect(h.w.reconciler.listPoliciesForLane).toHaveBeenCalledWith('sandbox-recipes')
   })
 
+  it('lists once per recipe namespace and hands each recipe its own namespace list', async () => {
+    const h = lane('clean')
+    const other = egressRecipe('r2')
+    other.metadata.namespace = 'other-ns'
+    h.w.recipes.set('r2', other)
+    await tick(h)
+    const calls = h.w.reconciler.listPoliciesForLane.mock.calls.map((c: string[]) => c[0])
+    expect(calls.sort()).toEqual(['other-ns', 'sandbox-recipes'])
+  })
+
   it('skips the whole pass (no lane, no escalation) when listing policies throws', async () => {
     const h = lane('stale')
     h.w.reconciler.listPoliciesForLane.mockRejectedValue(new Error('api down'))
@@ -651,6 +662,24 @@ describe('T2 ownership + workload status timer (#1016 §3.4)', () => {
     expect(h.w.reconciler.reconcile).not.toHaveBeenCalled()
   })
 
+  it('status path with named Secrets counts one workload_status and one ownership result', async () => {
+    const h = t2(secretRecipe(), { observed: { kind: 'ok', signature: '' }, ready: true })
+    h.w.cadence.recordSettled('r', Date.now(), '')
+    const status = await counter('workload_status', 'clean')
+    const owner = await counter('ownership', 'clean')
+    await tick(h)
+    expect(await counter('workload_status', 'clean')).toBe(status + 1)
+    expect(await counter('ownership', 'clean')).toBe(owner + 1)
+  })
+
+  it('an ownership read error counts an ownership error and escalates', async () => {
+    const h = t2(secretRecipe(), { observed: { kind: 'error' }, ready: true })
+    const before = await counter('ownership', 'error')
+    await tick(h)
+    expect(await counter('ownership', 'error')).toBe(before + 1)
+    expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(1)
+  })
+
   it('status path without named Secrets counts a clean workload_status tick', async () => {
     const h = t2(recipe(), { ready: true })
     const before = await counter('workload_status', 'clean')
@@ -819,11 +848,22 @@ describe('T1 infra retry, SDK liveness probe and steady backstop (#1016 §3.5/§
       expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(1)
     }))
 
-  it('SDK probe throws: escalates sdk_liveness', () =>
+  it('SDK probe throws: escalates sdk_liveness, counts an error and warns', () =>
     withTime(async () => {
       const h = t1(sdkRecipe(), vi.fn().mockRejectedValue(new Error('boom')))
       h.w.cadence.recordSettled('r', Date.now(), '')
-      await h.tick()
+      const before = await counter('sdk_liveness', 'error')
+      const warn = captureLogger('warn')
+      try {
+        await h.tick()
+        expect(warn).toHaveBeenCalledWith(
+          'mcp-host liveness probe failed; escalating',
+          expect.objectContaining({ err: expect.any(Error) })
+        )
+      } finally {
+        warn.mockRestore()
+      }
+      expect(await counter('sdk_liveness', 'error')).toBe(before + 1)
       expect(h.spy).toHaveBeenCalledWith(
         h.w.recipes.get('r'),
         'sdk_liveness',
