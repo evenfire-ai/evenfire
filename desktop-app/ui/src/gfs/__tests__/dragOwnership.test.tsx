@@ -461,6 +461,29 @@ for (const surface of ['sidebar', 'files'] as const) {
       expect(h.api().activeSource()?.resourceId).toBe('external')
     })
 
+    it('dispatches the commit-time parent, not the drag-start parent', async () => {
+      // The item was moved elsewhere since the gesture started: the
+      // commit-time resolve sees a DIFFERENT parent than the drag did. The
+      // convergence must drop the item from the folder it really left, so the
+      // PATCH carries the resolved parent — the drag-start parent would
+      // leave a ghost row in the real old folder.
+      const h = await setup('file')
+      h.resolve.mockImplementation(async (uri: string) => {
+        const id = uri.split('/').pop()!
+        return resolvedFile(id, 'Source', { parentResourceId: 'other-parent' })
+      })
+      h.start()
+      h.drop()
+      await waitFor(() => expect(h.moveResource).toHaveBeenCalled())
+      expect(h.moveResource).toHaveBeenCalledWith(
+        'source',
+        'target',
+        expect.any(Number),
+        undefined,
+        'other-parent'
+      )
+    })
+
     it('revokes the session when a drag probe answers 401', async () => {
       // A probe 401 is a session failure: the drop is refused AND the session
       // must be revoked, not left active over a dead session.

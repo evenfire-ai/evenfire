@@ -55,12 +55,18 @@ export type MoveCommitOutcome =
 export interface MoveCommitDeps {
   /** Resolve by stable URI; throws on 403/404/transport like the read plane. */
   resolveSource: (gfsUri: string) => Promise<MoveCommitSourceSnapshot>
-  /** One move PATCH attempt; ifMatch is mandatory client policy. */
+  /**
+   * One move PATCH attempt; ifMatch is mandatory client policy. The
+   * `oldParentId` is the parent the COMMIT-TIME resolve observed — never the
+   * gesture's drag-start guess — because the convergence has to drop the item
+   * from the folder it really left. `null` means the physical root.
+   */
   moveResource: (
     resourceId: string,
     destinationId: string,
     ifMatch: number,
-    newName?: string
+    newName?: string,
+    oldParentId?: string | null
   ) => Promise<{ resourceId: string; version: number }>
   /** Central fail-closed classifier; returns true when the session died. */
   isSessionAuthorityFailure: (error: unknown) => boolean
@@ -136,7 +142,11 @@ export async function commitGfsMove(
         snapshot.resourceId,
         plan.destination.resourceId,
         snapshot.version,
-        moveName === snapshot.name ? undefined : moveName
+        moveName === snapshot.name ? undefined : moveName,
+        // The commit-time parent, so the convergence drops the item from the
+        // folder it really left (the drag-start parent can be stale, or
+        // unknown — and an unknown parent is not the physical root).
+        snapshot.parentResourceId
       )
       return {
         status: 'committed',

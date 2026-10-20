@@ -39,7 +39,7 @@ describe('commitGfsMove — commit-time source refresh', () => {
     const outcome = await commitGfsMove(deps({ moveResource }), plan())
     expect(outcome).toEqual({ status: 'committed', version: 8, previousParentId: 'old-parent' })
     expect(moveResource).toHaveBeenCalledTimes(1)
-    expect(moveResource).toHaveBeenCalledWith('r-1', 'dest-1', 7, undefined)
+    expect(moveResource).toHaveBeenCalledWith('r-1', 'dest-1', 7, undefined, 'old-parent')
   })
 
   it('refuses without a request when the fresh parent already IS the destination (no-op)', async () => {
@@ -116,7 +116,7 @@ describe('commitGfsMove — conflict policy (rev-2 §5)', () => {
       previousParentId: 'old-parent',
     })
     expect(moveResource).toHaveBeenCalledTimes(2)
-    expect(moveResource).toHaveBeenLastCalledWith('r-1', 'dest-1', 7, 'report (1).md')
+    expect(moveResource).toHaveBeenLastCalledWith('r-1', 'dest-1', 7, 'report (1).md', 'old-parent')
   })
 
   it('seeds the ladder from plan.occupiedDestinationNames so known-taken names are skipped', async () => {
@@ -150,7 +150,7 @@ describe('commitGfsMove — conflict policy (rev-2 §5)', () => {
       previousParentId: 'old-parent',
     })
     expect(moveResource).toHaveBeenCalledTimes(2)
-    expect(moveResource).toHaveBeenLastCalledWith('r-1', 'dest-1', 7, 'report (3).md')
+    expect(moveResource).toHaveBeenLastCalledWith('r-1', 'dest-1', 7, 'report (3).md', 'old-parent')
   })
 
   it('a concurrent-name storm stops after the attempt cap with the destination-changed copy', async () => {
@@ -262,6 +262,50 @@ describe('commitGfsMove — gesture ownership (rev-2 §4.1)', () => {
     )
     expect(outcome).toEqual({ status: 'gesture-lost' })
     expect(moveResource).toHaveBeenCalledTimes(1)
+  })
+
+  it('dispatches the commit-time parent, never the gesture parent', async () => {
+    // The convergence has to drop the item from the folder it REALLY left.
+    // The drag-start parent can be stale (or unknown), and an unknown parent
+    // is not the physical root.
+    const moveResource = vi.fn(async () => ({ resourceId: 'r-1', version: 8 }))
+    await commitGfsMove(
+      deps({
+        moveResource,
+        resolveSource: vi.fn(async () => resolved({ parentResourceId: 'fresh-parent' })),
+      }),
+      plan()
+    )
+    expect(moveResource).toHaveBeenCalledWith('r-1', 'dest-1', 7, undefined, 'fresh-parent')
+  })
+
+  it('dispatches every retry with the commit-time parent', async () => {
+    const moveResource = vi
+      .fn()
+      .mockImplementation(async (_id: string, _dest: string, _v: number, newName?: string) => {
+        if (newName === undefined) {
+          throw new Error(
+            'Error invoking remote method: Error: 409 Conflict: a resource with this name already exists httpStatus=409'
+          )
+        }
+        return { resourceId: 'r-1', version: 9 }
+      })
+    await commitGfsMove(
+      deps({
+        moveResource,
+        resolveSource: vi.fn(async () => resolved({ parentResourceId: 'fresh-parent' })),
+      }),
+      plan({ allowNumberedRename: true })
+    )
+    expect(moveResource).toHaveBeenNthCalledWith(1, 'r-1', 'dest-1', 7, undefined, 'fresh-parent')
+    expect(moveResource).toHaveBeenNthCalledWith(
+      2,
+      'r-1',
+      'dest-1',
+      7,
+      'report (1).md',
+      'fresh-parent'
+    )
   })
 
   it('dispatches when the gesture is still current', async () => {

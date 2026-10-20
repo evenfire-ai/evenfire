@@ -1356,13 +1356,13 @@ export function FilesPage({
               parentResourceId: resolved.parentResourceId,
             }
           },
-          moveResource: async (resourceId, destinationId, ifMatch, newName) => {
+          moveResource: async (resourceId, destinationId, ifMatch, newName, oldParentId) => {
             const receipt = await ctrl.moveResource(
               resourceId,
               destinationId,
               ifMatch,
               newName,
-              source.parentKnown ? source.parentResourceId : null
+              oldParentId
             )
             dispatchConfirmed = true
             return receipt
