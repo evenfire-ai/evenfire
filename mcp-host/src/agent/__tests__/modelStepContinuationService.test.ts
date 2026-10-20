@@ -233,6 +233,20 @@ function createHarness(
 }
 
 describe('ModelStepContinuationService — status-first claim precedence (#1043)', () => {
+  it('R2-L5 rejects the admission wait on an operational transition failure', async () => {
+    const { checkpoints, service, enqueue, captured, handle } = createHarness()
+    const { version } = await openResumable(checkpoints)
+    const pending = service.continue(continuationRequest(version))
+    const admitted = await captured
+    expect(enqueue).toHaveBeenCalledTimes(1)
+    expect(checkpointRow(handle, CHECKPOINT_ID).status).toBe('claimed')
+    expect(typeof admitted.continuation.onAdmissionError).toBe('function')
+
+    admitted.continuation.onAdmissionError!(new Error('Model-step continuation admission failed'))
+
+    await expect(pending).rejects.toThrow('Model-step continuation admission failed')
+  })
+
   it('answers the not-found vector for a missing checkpoint and for an abandoned one', async () => {
     const { checkpoints, service } = createHarness()
     const notFound = readVector('continue-response.not-found.json')
