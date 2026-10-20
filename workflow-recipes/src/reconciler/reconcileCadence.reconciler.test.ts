@@ -191,6 +191,17 @@ describe('DNS-block record (#1016)', () => {
     await expect(rec.reconcile(recipe)).rejects.toThrow('apiserver down')
     expect(rec.dnsBlockRecordFor('test-recipe')).toBeUndefined()
   })
+
+  it('marks a stale pass (initial liveness check fails) and drops the record', async () => {
+    const rec = newReconciler()
+    const recipe = makeRecipe({ status: { phase: 'active' } })
+    await rec.reconcile(recipe)
+    expect(rec.dnsBlockRecordFor('test-recipe')).toBeDefined()
+    mockCustomApi.getNamespacedCustomObject.mockRejectedValue({ code: 404 })
+    const result = await rec.reconcile(makeRecipe({ status: { phase: 'active' } }))
+    expect(result.cadence?.stale).toBe(true)
+    expect(rec.dnsBlockRecordFor('test-recipe')).toBeUndefined()
+  })
 })
 
 // ─── WorkflowReconciler runtime-HTTP egress hook (#1016, spec §3.3/§5) ───────

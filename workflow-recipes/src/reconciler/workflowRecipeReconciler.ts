@@ -155,6 +155,7 @@ import {
   noteDnsBlock,
   noteEnforcedOwnership,
   noteRepairPending,
+  noteStale,
   ownershipSignature,
   runInReconcileContext,
 } from './reconcileContext'
@@ -1768,6 +1769,8 @@ export class WorkflowRecipeReconciler {
       'Skipping stale reconcile because the recipe is gone or deleting',
       { name: recipe.metadata.name, stage }
     )
+    // Issue #1016 — a stale pass is unsettled and must not leave cadence records.
+    noteStale()
     return {
       phase: recipe.status?.phase ?? 'candidate',
       message: `Recipe deleted during reconcile; skipped ${stage}`,
@@ -2058,15 +2061,21 @@ export class WorkflowRecipeReconciler {
       throw error
     }
     const { value: result, ctx } = ran
-    // Record what this pass ran so the T3 lane replays exactly those blocks.
-    this.dnsBlockRecordMap.set(recipe.metadata.name, {
-      fingerprint,
-      blocks: new Set(ctx.dnsBlocks),
-    })
+    if (ctx.stale) {
+      // The recipe is deleting or gone: nothing this pass ran is worth replaying.
+      this.dnsBlockRecordMap.delete(recipe.metadata.name)
+    } else {
+      // Record what this pass ran so the T3 lane replays exactly those blocks.
+      this.dnsBlockRecordMap.set(recipe.metadata.name, {
+        fingerprint,
+        blocks: new Set(ctx.dnsBlocks),
+      })
+    }
     result.cadence = {
       dnsBlocks: [...ctx.dnsBlocks],
       enforcedOwnership: ctx.enforcedOwnership,
       repairPending: ctx.repairPending,
+      ...(ctx.stale && { stale: true }),
     }
     this.requeueForPendingLegacyNetworkPolicyDelete(recipe, result)
     result.pluginWorkloadSdkProjection = this.projectPluginWorkloadSdk(recipe, result)

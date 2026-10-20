@@ -114,6 +114,26 @@ describe('handleRecipeEvent cadence plumbing (#1016)', () => {
     expect(w.cadence.enforcedOwnership('r')).toBe('')
   })
 
+  it('does not stamp a stale result and clears earlier cadence state for the recipe', async () => {
+    const { w } = harness({
+      phase: 'active',
+      message: 'Recipe deleted during reconcile; skipped initial check',
+      workloadStatuses: [],
+      skipStatusPatch: true,
+      cadence: { dnsBlocks: [], enforcedOwnership: 'a|b', repairPending: false, stale: true },
+    })
+    w.cadence.recordSettled('r', 1, 'old-sig')
+    const out = await w.handleRecipeEvent('MODIFIED', recipe(), {
+      forceReconcile: true,
+      trigger: 'watch',
+    })
+    expect(out.settled).toBe(false)
+    expect(w.cadence.lastSettledAt('r')).toBeUndefined()
+    expect(w.cadence.enforcedOwnership('r')).toBeUndefined()
+    // Cache removal is left to the deletion event.
+    expect(w.recipes.has('r')).toBe(true)
+  })
+
   it('counts the reconcile by trigger and outcome', async () => {
     const { w } = harness()
     await w.handleRecipeEvent('MODIFIED', recipe(), { forceReconcile: true, trigger: 'ownership' })

@@ -1111,7 +1111,12 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
           this.clearTransientRetry(recipe.metadata.name)
         }
         const settled = isSettledResult(result)
-        if (settled) {
+        if (result.cadence?.stale) {
+          // Issue #1016 — the recipe is deleting or gone: drop its cadence stamps
+          // (settle time, ownership signatures). The deletion event removes it
+          // from the cache.
+          this.cadence.forget(recipe.metadata.name)
+        } else if (settled) {
           this.cadence.recordSettled(
             recipe.metadata.name,
             startedAt,

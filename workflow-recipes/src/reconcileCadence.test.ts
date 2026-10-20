@@ -56,6 +56,9 @@ describe('isSettledResult', () => {
     expect(isSettledResult({ requeueAfterMs: 5000 })).toBe(false)
     expect(isSettledResult({ cadence: { repairPending: true } })).toBe(false)
   })
+  it('is unsettled for a stale (deleting or gone) result', () => {
+    expect(isSettledResult({ cadence: { repairPending: false, stale: true } })).toBe(false)
+  })
 })
 
 describe('classifyInfrastructureRetry', () => {

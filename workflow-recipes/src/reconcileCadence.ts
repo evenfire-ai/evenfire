@@ -43,6 +43,8 @@ export interface ReconcileCadenceOutput {
   /** undefined = no ownership gate ran this pass */
   enforcedOwnership?: string
   repairPending: boolean
+  /** The pass found the recipe deleting or gone (`staleRecipeResult`): never settled. */
+  stale?: boolean
 }
 export interface ReconcileOutcome {
   ran: boolean
@@ -75,9 +77,9 @@ export function steadyBackstopMs(config: CadenceConfig): { ms: number; degenerat
 
 export function isSettledResult(r: {
   requeueAfterMs?: number
-  cadence?: { repairPending: boolean }
+  cadence?: { repairPending: boolean; stale?: boolean }
 }): boolean {
-  return !r.requeueAfterMs && r.cadence?.repairPending !== true
+  return !r.requeueAfterMs && r.cadence?.repairPending !== true && r.cadence?.stale !== true
 }
 
 /**

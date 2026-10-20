@@ -11,6 +11,8 @@ export interface ReconcileContext {
   dnsBlocks: Set<'recipe_egress' | 'runtime_http_egress'>
   enforcedOwnership?: string
   repairPending: boolean
+  /** The pass returned `staleRecipeResult` (recipe deleting or gone). */
+  stale: boolean
 }
 
 const storage = new AsyncLocalStorage<ReconcileContext>()
@@ -18,7 +20,7 @@ const storage = new AsyncLocalStorage<ReconcileContext>()
 export async function runInReconcileContext<T>(
   fn: () => Promise<T>
 ): Promise<{ value: T; ctx: ReconcileContext }> {
-  const ctx: ReconcileContext = { dnsBlocks: new Set(), repairPending: false }
+  const ctx: ReconcileContext = { dnsBlocks: new Set(), repairPending: false, stale: false }
   const value = await storage.run(ctx, fn)
   return { value, ctx }
 }
@@ -35,6 +37,12 @@ export function noteEnforcedOwnership(signature: string): void {
 export function noteRepairPending(): void {
   const ctx = storage.getStore()
   if (ctx) ctx.repairPending = true
+}
+
+/** Issue #1016 — the pass found the recipe deleting or gone; it settles nothing. */
+export function noteStale(): void {
+  const ctx = storage.getStore()
+  if (ctx) ctx.stale = true
 }
 
 /** Issue #1016 — canonical denied-set signature: sorted, '|'-joined; '' when none. */
