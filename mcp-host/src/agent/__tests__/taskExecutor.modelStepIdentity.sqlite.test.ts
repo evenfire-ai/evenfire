@@ -391,6 +391,98 @@ describe('real-producer checkpoint identity regressions', () => {
     }
   )
 
+  it('#1156: expired approval keeps approval_expired when the abandon rejects', async () => {
+    const resolve = vi.fn()
+    const f = await claimedContinuation(approvalProvider(), {
+      resolve,
+      probe: vi.fn(async () => ({ alive: [], expired: [] })),
+    })
+    try {
+      await f.executor.run()
+      expect(f.executor.executorState).toBe('waiting_approval')
+      const approval = f.executor.pendingApproval!
+      const expired = new ApprovalExpiredError({
+        code: 'approval_expired',
+        request_id: approval.request_id,
+        task_id: f.task.id,
+        tool_name: approval.tool_name,
+        expired_refs: [],
+        user_message: 'Approved content has expired.',
+      })
+      resolve.mockRejectedValueOnce(expired)
+      const transition = f.checkpoints.transition.bind(f.checkpoints)
+      const rejected = vi
+        .spyOn(f.checkpoints, 'transition')
+        .mockImplementation((sessionKey, fence, input) => {
+          if (input.to === 'abandoned') throw new TypeError('abandon failure body')
+          return transition(sessionKey, fence, input)
+        })
+      const logged = vi.spyOn(logger, 'error')
+      await f.executor.resumeAfterApproval(false)
+      expect(resolve).toHaveBeenCalledTimes(1)
+      expect(rejected).toHaveBeenCalledWith(
+        SESSION_KEY,
+        f.fence,
+        expect.objectContaining({ to: 'abandoned' })
+      )
+      expect(f.deps.onFail).toHaveBeenCalledExactlyOnceWith(
+        f.task,
+        expect.objectContaining({ code: 'approval_expired', message: expired.message })
+      )
+      expect(logged).toHaveBeenCalledWith(
+        {
+          taskId: f.task.id,
+          checkpointId: f.fence.checkpointId,
+          op: 'abandon',
+          errorName: 'TypeError',
+        },
+        'Model-step continuation cleanup failed'
+      )
+      expect(header(f.handle).status).toBe('claimed')
+      expect(f.execute).toHaveBeenCalledTimes(0)
+    } finally {
+      await f.handle.shutdown()
+    }
+  })
+
+  it('#1157: a lost claim at approval keeps its error when releasing the turn rejects', async () => {
+    const llm = approvalProvider()
+    const f = await claimedContinuation(llm)
+    try {
+      await f.executor.run()
+      expect(f.executor.executorState).toBe('waiting_approval')
+      const renew = vi.spyOn(f.checkpoints, 'renewLease').mockResolvedValue(false)
+      const releaseError = new TypeError('turn release failure body')
+      const failTurn = vi
+        .spyOn(f.deps.conversationManager, 'failTurn')
+        .mockRejectedValue(releaseError)
+      const deny = vi.spyOn(f.deps.conversationManager, 'deny').mockRejectedValue(releaseError)
+      const logged = vi.spyOn(logger, 'error')
+      await f.executor.resumeAfterApproval(false)
+      expect(renew).toHaveBeenCalled()
+      expect(failTurn.mock.calls.length + deny.mock.calls.length).toBeGreaterThan(0)
+      expect(f.deps.onFail).toHaveBeenCalledExactlyOnceWith(
+        f.task,
+        expect.objectContaining({
+          message: 'Model-step continuation claim was lost during approval',
+        })
+      )
+      expect(logged).toHaveBeenCalledWith(
+        {
+          taskId: f.task.id,
+          checkpointId: f.fence.checkpointId,
+          op: 'fail_turn',
+          errorName: 'TypeError',
+        },
+        'Model-step continuation cleanup failed'
+      )
+      expect(f.execute).toHaveBeenCalledTimes(0)
+      expect(llm.calls()).toBe(1)
+    } finally {
+      await f.handle.shutdown()
+    }
+  })
+
   it.each([
     { entry: 'run', cleanup: 'abandon' },
     { entry: 'run', cleanup: 'fail_turn' },
