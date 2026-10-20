@@ -5,6 +5,11 @@ import { ConversationManager } from '../conversation'
 import { InMemoryConversationStore } from '../conversationStore'
 
 const CHECKPOINT_FENCE = { checkpointId: 'cp-1', owner: 'task-origin', generation: 0 }
+const continuationFence = (taskId: string, turnNumber = 1) => ({
+  fence: CHECKPOINT_FENCE,
+  activeTaskId: taskId,
+  originTurnNumber: turnNumber,
+})
 const TRACE: TraceContextV1 = {
   version: 1,
   runId: 'run-1043',
@@ -55,18 +60,43 @@ describe('ConversationManager.resumeTurnForContinuation (#1043)', () => {
     await manager.startTurn(processing, 'origin', 'task-processing')
     expect(processing.state).toBe(ConversationState.Processing)
     await expectInvalidTransition(
-      manager.resumeTurnForContinuation(processing, 'task-cont', 1, null)
+      manager.resumeTurnForContinuation(
+        processing,
+        'task-cont',
+        1,
+        null,
+        undefined,
+        continuationFence('task-cont')
+      )
     )
 
     const answered = await manager.getOrCreate('user-answered')
     await manager.startTurn(answered, 'already answered', 'task-answered')
     await manager.completeTurn(answered, 'done')
     expect(answered.turns[0]?.response).toBe('done')
-    await expectInvalidTransition(manager.resumeTurnForContinuation(answered, 'task-cont', 1, null))
+    await expectInvalidTransition(
+      manager.resumeTurnForContinuation(
+        answered,
+        'task-cont',
+        1,
+        null,
+        undefined,
+        continuationFence('task-cont')
+      )
+    )
 
     const empty = await manager.getOrCreate('user-empty')
     expect(empty.state).toBe(ConversationState.Idle)
-    await expectInvalidTransition(manager.resumeTurnForContinuation(empty, 'task-cont', 1, null))
+    await expectInvalidTransition(
+      manager.resumeTurnForContinuation(
+        empty,
+        'task-cont',
+        1,
+        null,
+        undefined,
+        continuationFence('task-cont')
+      )
+    )
   })
 
   it('reopens the failed turn in Processing and clears per-turn wildcard consent', async () => {
@@ -80,7 +110,14 @@ describe('ConversationManager.resumeTurnForContinuation (#1043)', () => {
     expect(conv.turns[0]?.completed_at).toBeInstanceOf(Date)
     expect(conv.auto_approved_tools.has('*')).toBe(true)
 
-    await manager.resumeTurnForContinuation(conv, 'task-continuation', 1, TRACE)
+    await manager.resumeTurnForContinuation(
+      conv,
+      'task-continuation',
+      1,
+      TRACE,
+      undefined,
+      continuationFence('task-continuation')
+    )
 
     expect(conv.state).toBe(ConversationState.Processing)
     expect(conv.activeTaskId).toBe('task-continuation')
@@ -98,9 +135,25 @@ describe('ConversationManager.resumeTurnForContinuation (#1043)', () => {
     await manager.startTurn(conv, 'second', 'task-second')
     await manager.failTurn(conv)
 
-    await expectInvalidTransition(manager.resumeTurnForContinuation(conv, 'task-old', 1, null))
+    await expectInvalidTransition(
+      manager.resumeTurnForContinuation(
+        conv,
+        'task-old',
+        1,
+        null,
+        undefined,
+        continuationFence('task-old')
+      )
+    )
     expect(conv.state).toBe(ConversationState.Idle)
-    await manager.resumeTurnForContinuation(conv, 'task-latest', 2, null)
+    await manager.resumeTurnForContinuation(
+      conv,
+      'task-latest',
+      2,
+      null,
+      undefined,
+      continuationFence('task-latest', 2)
+    )
     expect(conv.activeTaskId).toBe('task-latest')
   })
 
@@ -113,7 +166,14 @@ describe('ConversationManager.resumeTurnForContinuation (#1043)', () => {
     expect(completedAt).toBeInstanceOf(Date)
 
     await expect(
-      manager.resumeTurnForContinuation(conv, 'task-continuation', 1, null)
+      manager.resumeTurnForContinuation(
+        conv,
+        'task-continuation',
+        1,
+        null,
+        undefined,
+        continuationFence('task-continuation')
+      )
     ).rejects.toThrow(/durable continuation start failed/)
 
     expect(conv.state).toBe(ConversationState.Idle)

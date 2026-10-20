@@ -242,7 +242,11 @@ describe('ConversationManager — state machine', () => {
       const turn = conv.turns[0]!
       turn.response = undefined
       turn.completed_at = undefined
-      await ownerManager.resumeTurnForContinuation(conv, 'task-b', 1, null)
+      await ownerManager.resumeTurnForContinuation(conv, 'task-b', 1, null, undefined, {
+        ...guard,
+        fence: { ...guard.fence, generation: 2 },
+        activeTaskId: 'task-b',
+      })
       if (ending === 'complete') await ownerManager.completeTurn(conv, 'same answer')
       else {
         await ownerManager.cancelTurn(conv, {

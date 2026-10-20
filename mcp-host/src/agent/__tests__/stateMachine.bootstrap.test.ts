@@ -114,8 +114,12 @@ async function bootFixture() {
     newTaskId: 'bad-boot-task',
     leaseMs: LEASE_MS,
   })
-  expect(claim.outcome).toBe('claimed')
-  await manager.resumeTurnForContinuation(badConversation, 'bad-boot-task', 1, null)
+  if (claim.outcome !== 'claimed') throw new Error('Boot fixture claim was not acquired')
+  await manager.resumeTurnForContinuation(badConversation, 'bad-boot-task', 1, null, undefined, {
+    fence: claim.fence,
+    activeTaskId: 'bad-boot-task',
+    originTurnNumber: 1,
+  })
   const healthyMessage = { ...message, threadId: 'healthy-chat', messageId: 'healthy-message' }
   const healthyConversation = await manager.getOrCreate(HEALTHY_SESSION, {
     userId: healthyMessage.sender,

@@ -837,8 +837,12 @@ describe('ModelStepContinuationService — admission failures (#1043)', () => {
         attachmentTtlMs: ATTACHMENT_TTL_MS,
       },
       conversationManager: manager,
-      enqueue: async (_message, taskId) => {
-        await manager.resumeTurnForContinuation(conversation, taskId, 1, null)
+      enqueue: async (_message, taskId, continuation) => {
+        await manager.resumeTurnForContinuation(conversation, taskId, 1, null, undefined, {
+          fence: continuation.fence,
+          activeTaskId: taskId,
+          originTurnNumber: 1,
+        })
         throw failure
       },
     })

@@ -3,8 +3,8 @@ import { createHash } from 'node:crypto'
 import { validateIncomingAttachments } from '../../../../agent/incomingAttachments'
 import { sourceMessageForResume } from '../../../../agent/sourceMessageForResume'
 import type { ModelStepCheckpointFence } from '../../../../db/worker/modelStepCheckpointOps'
-import type { PendingApprovalRow } from '../../../../db/worker/protocol'
-import type { Conversation } from '../../../types'
+import type { ModelStepTurnFence, PendingApprovalRow } from '../../../../db/worker/protocol'
+import { type Conversation, ConversationState } from '../../../types'
 import { ConversationManager } from '../../conversation'
 import { InMemoryConversationStore } from '../../conversationStore'
 import { DualConversationStore } from '../dualConversationStore'
@@ -67,7 +67,9 @@ function attachmentCount(handle: StoreHandle, checkpointId: string): number {
 async function claimedCheckpoint(
   handle: StoreHandle,
   sessionKey = SESSION_KEY,
-  checkpointId = 'cp-turn'
+  checkpointId = 'cp-turn',
+  originTurnNumber = 1,
+  continuationTaskId = 'task-continuation'
 ): Promise<ModelStepCheckpointFence> {
   const checkpoints = new ModelStepCheckpointStore(handle.persistQueue, {
     now: () => CLOCK,
@@ -77,7 +79,7 @@ async function claimedCheckpoint(
     {
       checkpointId,
       sessionKey,
-      originTurnNumber: 1,
+      originTurnNumber,
       originTaskId: 'task-origin',
       provider: 'codex-subscription',
       model: 'gpt-5.5',
@@ -128,13 +130,21 @@ async function claimedCheckpoint(
     checkpointId,
     version,
     hostInstanceId: 'host-instance-a',
-    newTaskId: 'task-continuation',
+    newTaskId: continuationTaskId,
     leaseMs: LEASE_MS,
   })
   if (claim.outcome !== 'claimed') {
     throw new Error(`checkpoint fixture claim failed: ${claim.outcome}`)
   }
   return claim.fence
+}
+
+function turnFence(
+  fence: ModelStepCheckpointFence,
+  activeTaskId = 'task-continuation',
+  originTurnNumber = 1
+): ModelStepTurnFence {
+  return { fence, activeTaskId, originTurnNumber }
 }
 
 describe('SqliteConversationStore — reopened continuation turns (#1043)', () => {
@@ -259,7 +269,15 @@ describe('SqliteConversationStore — reopened continuation turns (#1043)', () =
       leaseMs: LEASE_MS,
     })
     expect(first.outcome).toBe('claimed')
-    await manager.resumeTurnForContinuation(origin, 'task-old', 1, null)
+    if (first.outcome !== 'claimed') throw new Error('restart claim was rejected')
+    await manager.resumeTurnForContinuation(
+      origin,
+      'task-old',
+      1,
+      null,
+      undefined,
+      turnFence(first.fence, 'task-old')
+    )
     const ordinary = await manager.getOrCreate('ordinary:rpc:agent:default')
     await manager.startTurn(ordinary, 'ordinary input', 'task-ordinary')
 
@@ -289,7 +307,14 @@ describe('SqliteConversationStore — reopened continuation turns (#1043)', () =
     )
     const coldOrigin = await coldManager.getOrCreate(SESSION_KEY)
     expect(coldOrigin.turns[0]?.response).toBeUndefined()
-    await coldManager.resumeTurnForContinuation(coldOrigin, 'task-new', 1, null)
+    await coldManager.resumeTurnForContinuation(
+      coldOrigin,
+      'task-new',
+      1,
+      null,
+      undefined,
+      turnFence(next.fence, 'task-new')
+    )
     await coldManager.completeTurn(coldOrigin, 'recovered answer', {
       completeModelStepCheckpoint: next.fence,
       modelStepTurnFence: { fence: next.fence, activeTaskId: 'task-new', originTurnNumber: 1 },
@@ -313,8 +338,16 @@ describe('SqliteConversationStore — reopened continuation turns (#1043)', () =
     const conv = await manager.getOrCreate(SESSION_KEY)
     await manager.startTurn(conv, 'origin input', 'task-origin')
     await manager.failTurn(conv)
+    const fence = await claimedCheckpoint(handle)
 
-    await manager.resumeTurnForContinuation(conv, 'task-continuation', 1, null)
+    await manager.resumeTurnForContinuation(
+      conv,
+      'task-continuation',
+      1,
+      null,
+      undefined,
+      turnFence(fence)
+    )
     expect(handle.store.activeTurnNumber(conv)).toBe(1)
     handle.store.persistToolCall(conv, {
       name: 'list_files',
@@ -341,17 +374,26 @@ describe('SqliteConversationStore — reopened continuation turns (#1043)', () =
     const handle = freshStore()
     const manager = new ConversationManager(handle.store)
     const conv = await manager.getOrCreate(SESSION_KEY)
+    const invalidFence = turnFence(
+      { checkpointId: 'cp-invalid', owner: 'owner', generation: 1 },
+      'task-cont'
+    )
 
     await expect(
-      handle.store.persistContinuationStart({ ...conv, id: 'conv-untracked' }, 1)
+      handle.store.persistContinuationStart({ ...conv, id: 'conv-untracked' }, 1, invalidFence)
     ).rejects.toThrow(/untracked session/)
-    await expect(handle.store.persistContinuationStart(conv, 1)).rejects.toThrow(/latest turn is 0/)
+    await expect(handle.store.persistContinuationStart(conv, 1, invalidFence)).rejects.toThrow(
+      /latest turn is 0/
+    )
 
     await manager.startTurn(conv, 'origin input', 'task-origin')
     await manager.failTurn(conv)
     expect(handle.store.activeTurnNumber(conv)).toBe(2)
 
-    await handle.store.persistContinuationStart(conv, 1)
+    const fence = await claimedCheckpoint(handle)
+    conv.state = ConversationState.Processing
+    conv.activeTaskId = 'task-continuation'
+    await handle.store.persistContinuationStart(conv, 1, turnFence(fence))
     expect(handle.store.activeTurnNumber(conv)).toBe(1)
   })
 
@@ -363,9 +405,19 @@ describe('SqliteConversationStore — reopened continuation turns (#1043)', () =
     await manager.failTurn(conv)
     await manager.startTurn(conv, 'second input', 'task-second')
     await manager.failTurn(conv)
+    const invalidFence = turnFence(
+      { checkpointId: 'cp-invalid', owner: 'owner', generation: 1 },
+      'task-old',
+      2
+    )
+    const fence = await claimedCheckpoint(handle, SESSION_KEY, 'cp-turn-latest', 2)
+    conv.state = ConversationState.Processing
+    conv.activeTaskId = 'task-continuation'
 
-    await expect(handle.store.persistContinuationStart(conv, 1)).rejects.toThrow(/latest turn is 2/)
-    await handle.store.persistContinuationStart(conv, 2)
+    await expect(handle.store.persistContinuationStart(conv, 1, invalidFence)).rejects.toThrow(
+      /latest turn is 2/
+    )
+    await handle.store.persistContinuationStart(conv, 2, turnFence(fence, 'task-continuation', 2))
     expect(handle.store.activeTurnNumber(conv)).toBe(2)
   })
 
@@ -380,7 +432,13 @@ describe('SqliteConversationStore — reopened continuation turns (#1043)', () =
     ).toMatchObject({ n: 1 })
 
     handle.worker.crash()
-    await expect(handle.store.persistContinuationStart(conv, 1)).rejects.toThrow()
+    await expect(
+      handle.store.persistContinuationStart(
+        conv,
+        1,
+        turnFence({ checkpointId: 'cp-crash', owner: 'owner', generation: 1 })
+      )
+    ).rejects.toThrow()
 
     expect(handle.store.activeTurnNumber(conv)).toBe(2)
     // The crashed worker never ACKs shutdown, so the queue reports the exit.
@@ -394,7 +452,15 @@ describe('SqliteConversationStore — reopened continuation turns (#1043)', () =
     const conv = await manager.getOrCreate(SESSION_KEY)
     await manager.startTurn(conv, 'origin input', 'task-origin')
     await manager.failTurn(conv)
-    await manager.resumeTurnForContinuation(conv, 'task-continuation', 1, null)
+    const fence = await claimedCheckpoint(handle)
+    await manager.resumeTurnForContinuation(
+      conv,
+      'task-continuation',
+      1,
+      null,
+      undefined,
+      turnFence(fence)
+    )
 
     manager.cancelTurn(conv)
     await handle.persistQueue.drainSessionKey(SESSION_KEY)
@@ -417,7 +483,15 @@ describe('SqliteConversationStore — reopened continuation turns (#1043)', () =
     const conv = await manager.getOrCreate(SESSION_KEY)
     await manager.startTurn(conv, 'origin input', 'task-origin')
     await manager.failTurn(conv)
-    await manager.resumeTurnForContinuation(conv, 'task-continuation', 1, null)
+    const fence = await claimedCheckpoint(handle)
+    await manager.resumeTurnForContinuation(
+      conv,
+      'task-continuation',
+      1,
+      null,
+      undefined,
+      turnFence(fence)
+    )
 
     await manager.failTurn(conv)
     const session = handle.worker.db
@@ -446,7 +520,14 @@ describe('SqliteConversationStore — reopened continuation turns (#1043)', () =
     expect(checkpointStatus(handle, fence.checkpointId)).toBe('claimed')
     expect(attachmentCount(handle, fence.checkpointId)).toBe(1)
 
-    await manager.resumeTurnForContinuation(conv, 'task-continuation', 1, null)
+    await manager.resumeTurnForContinuation(
+      conv,
+      'task-continuation',
+      1,
+      null,
+      undefined,
+      turnFence(fence)
+    )
     await manager.completeTurn(conv, 'final answer', {
       completeModelStepCheckpoint: fence,
     })
@@ -456,6 +537,57 @@ describe('SqliteConversationStore — reopened continuation turns (#1043)', () =
     expect(finalRows[0]?.model_step_checkpoint_id).toBe(fence.checkpointId)
     expect(checkpointStatus(handle, fence.checkpointId)).toBe('completed')
     expect(attachmentCount(handle, fence.checkpointId)).toBe(0)
+  })
+
+  it('R1-L4 — rejects a delayed stale continuation start while the current owner can reopen', async () => {
+    const handle = freshStore()
+    const manager = new ConversationManager(handle.store)
+    const conv = await manager.getOrCreate(SESSION_KEY)
+    await manager.startTurn(conv, 'origin input', 'task-origin')
+    await manager.failTurn(conv)
+    const fence = await claimedCheckpoint(handle)
+    const ownerFence: ModelStepTurnFence = {
+      fence,
+      activeTaskId: 'task-continuation',
+      originTurnNumber: 1,
+    }
+    const durable = () =>
+      handle.worker.db
+        .prepare('SELECT state, active_task_id FROM sessions WHERE id = ?')
+        .get(conv.id) as { state: string; active_task_id: string | null }
+
+    await manager.resumeTurnForContinuation(
+      conv,
+      'task-continuation',
+      1,
+      null,
+      undefined,
+      ownerFence
+    )
+    expect(durable()).toEqual({ state: 'processing', active_task_id: 'task-continuation' })
+
+    await expect(
+      manager.resumeTurnForContinuation(conv, 'task-delayed-a', 1, null, 'task-continuation', {
+        ...ownerFence,
+        fence: { ...fence, generation: fence.generation - 1 },
+        activeTaskId: 'task-delayed-a',
+      })
+    ).rejects.toThrow('model-step continuation fence mismatch')
+    expect(durable()).toEqual({ state: 'processing', active_task_id: 'task-continuation' })
+    expect(conv.state).toBe('processing')
+    expect(conv.activeTaskId).toBe('task-continuation')
+
+    await manager.failTurn(conv, ownerFence)
+    await manager.resumeTurnForContinuation(
+      conv,
+      'task-continuation',
+      1,
+      null,
+      undefined,
+      ownerFence
+    )
+    expect(durable()).toEqual({ state: 'processing', active_task_id: 'task-continuation' })
+    expect(conv.activeTaskId).toBe('task-continuation')
   })
 
   it('requires a tracked, reopened turn for a completion fence; an ordinary completion leaves the claim live', async () => {
@@ -477,7 +609,14 @@ describe('SqliteConversationStore — reopened continuation turns (#1043)', () =
       })
     ).rejects.toThrow(/only complete a reopened turn/)
 
-    await manager.resumeTurnForContinuation(conv, 'task-continuation', 1, null)
+    await manager.resumeTurnForContinuation(
+      conv,
+      'task-continuation',
+      1,
+      null,
+      undefined,
+      turnFence(fence)
+    )
     await manager.completeTurn(conv, 'ordinary final')
 
     const ordinary = turnRows(handle, conv.id, 1).filter(row => row.content === 'ordinary final')
@@ -498,7 +637,14 @@ describe('SqliteConversationStore — reopened continuation turns (#1043)', () =
       owner: fence.owner,
       generation: fence.generation + 1,
     }
-    await manager.resumeTurnForContinuation(conv, 'task-continuation', 1, null)
+    await manager.resumeTurnForContinuation(
+      conv,
+      'task-continuation',
+      1,
+      null,
+      undefined,
+      turnFence(fence)
+    )
 
     await expect(
       handle.store.persistTurnComplete(conv, 'stale final', {
@@ -514,7 +660,7 @@ describe('SqliteConversationStore — reopened continuation turns (#1043)', () =
     ).toMatchObject({ n: 0 })
     expect(checkpointStatus(handle, fence.checkpointId)).toBe('claimed')
 
-    await handle.store.persistContinuationStart(conv, 1)
+    await handle.store.persistContinuationStart(conv, 1, turnFence(fence))
     await manager.completeTurn(conv, 'final answer', {
       completeModelStepCheckpoint: fence,
     })
@@ -535,7 +681,14 @@ describe('DualConversationStore — continuation routing (#1043)', () => {
     await manager.startTurn(conv, 'origin input', 'task-origin')
     await manager.failTurn(conv)
     const fence = await claimedCheckpoint(sqlite)
-    await manager.resumeTurnForContinuation(conv, 'task-continuation', 1, null)
+    await manager.resumeTurnForContinuation(
+      conv,
+      'task-continuation',
+      1,
+      null,
+      undefined,
+      turnFence(fence)
+    )
 
     const memoryComplete = vi.spyOn(memory, 'persistTurnComplete')
     const sqliteComplete = vi.spyOn(sqlite.store, 'persistTurnComplete')
@@ -560,9 +713,13 @@ describe('DualConversationStore — continuation routing (#1043)', () => {
       state: 'idle',
     } as Conversation
 
-    await expect(dualWithoutReopen.persistContinuationStart(conversation, 1)).rejects.toThrow(
-      /SQLite side of the dual store cannot reopen a turn/
-    )
+    await expect(
+      dualWithoutReopen.persistContinuationStart(
+        conversation,
+        1,
+        turnFence({ checkpointId: 'cp-dual', owner: 'owner', generation: 1 })
+      )
+    ).rejects.toThrow(/SQLite side of the dual store cannot reopen a turn/)
   })
 })
 
