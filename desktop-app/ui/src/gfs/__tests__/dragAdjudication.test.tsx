@@ -71,7 +71,7 @@ function installClerumGfsBridge() {
   })
 }
 
-function renderAdjudication() {
+function renderAdjudication(handleAuthorityFailure?: (message: string) => boolean) {
   const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
@@ -87,6 +87,7 @@ function renderAdjudication() {
           name: string
           version: number
         }>,
+        ...(handleAuthorityFailure ? { handleAuthorityFailure } : {}),
       }),
     { wrapper }
   )
@@ -268,5 +269,75 @@ describe('useGfsDragAdjudication — required-probe drop admission (R1-H1)', () 
     if (decision.allowed) {
       expect(decision.allowNumberedRename).toBe(false)
     }
+  })
+})
+
+describe('useGfsDragAdjudication — probe 401 revokes the session', () => {
+  it('reports a 401 from the affordances probe to the fail-closed classifier', async () => {
+    const message = await affordancesFailureMessage(401, {
+      code: 'unauthorized',
+      message: 'session expired',
+    })
+    probes = await grantedProbes({ 'dest-1': { error: new Error(message) } })
+    const handleAuthorityFailure = vi.fn(() => true)
+    const { result } = renderAdjudication(handleAuthorityFailure)
+
+    const decision = await result.current.adjudicateDrop(dragSource(), dropTarget())
+
+    expect(decision).toEqual({ allowed: false, reason: 'session-lost' })
+    expect(handleAuthorityFailure).toHaveBeenCalledWith(message)
+  })
+
+  it('reports a 401 from the direct source resolve to the fail-closed classifier', async () => {
+    // An unknown source parent forces the direct resolve of the source; a 401
+    // there must revoke, not just refuse the drop.
+    const message = 'Error invoking remote method: Error: 401 Unauthorized httpStatus=401'
+    resolve = vi.fn(async () => {
+      throw new Error(message)
+    })
+    probes = await grantedProbes()
+    const handleAuthorityFailure = vi.fn(() => true)
+    const { result } = renderAdjudication(handleAuthorityFailure)
+
+    const decision = await result.current.adjudicateDrop(
+      dragSource({ parentKnown: false, parentResourceId: null }),
+      dropTarget()
+    )
+
+    expect(decision).toEqual({ allowed: false, reason: 'session-lost' })
+    expect(handleAuthorityFailure).toHaveBeenCalledWith(message)
+  })
+
+  it('reports a 401 from the ancestor resolve to the fail-closed classifier', async () => {
+    const message = 'Error invoking remote method: Error: 401 Unauthorized httpStatus=401'
+    resolve = vi.fn(async () => {
+      throw new Error(message)
+    })
+    probes = await grantedProbes()
+    const handleAuthorityFailure = vi.fn(() => true)
+    const { result } = renderAdjudication(handleAuthorityFailure)
+
+    await result.current.adjudicateDrop(
+      dragSource({ kind: 'directory', knownAncestorIds: [] }),
+      // An unproven chain (no root sentinel) forces the ancestor resolve.
+      { ...dropTarget(), ancestorIds: ['root-1'] }
+    )
+
+    expect(handleAuthorityFailure).toHaveBeenCalledWith(message)
+  })
+
+  it('leaves a policy verdict local: a 403 probe never reaches the classifier', async () => {
+    const message = await affordancesFailureMessage(403, {
+      code: 'forbidden',
+      message: 'not authorized to read affordances',
+    })
+    probes = await grantedProbes({ 'dest-1': { error: new Error(message) } })
+    const handleAuthorityFailure = vi.fn(() => true)
+    const { result } = renderAdjudication(handleAuthorityFailure)
+
+    const decision = await result.current.adjudicateDrop(dragSource(), dropTarget())
+
+    expect(decision.allowed).toBe(false)
+    expect(handleAuthorityFailure).not.toHaveBeenCalled()
   })
 })

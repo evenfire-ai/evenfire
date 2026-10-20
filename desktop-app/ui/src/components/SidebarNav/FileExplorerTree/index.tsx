@@ -441,6 +441,9 @@ export function FileExplorerTree({
     scope: ctrl.sessionScope,
     drive: GFS_DRIVE_MAIN,
     resolve: (uri: string) => window.clerum.gfs.resolve(uri),
+    // A drag probe that answers 401 is a session failure, not a per-item
+    // refusal: the drop is refused AND the session revoked.
+    handleAuthorityFailure: (message: string) => ctrl.handleAuthorityFailure(message, 'operation'),
   })
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set())
   const [selectedId, setSelectedId] = useState<string | null>(null)

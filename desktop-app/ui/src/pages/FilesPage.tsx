@@ -345,6 +345,12 @@ export function FilesPage({
     scope: sessionScope,
     drive: GFS_DRIVE_MAIN,
     resolve: useCallback((uri: string) => window.clerum.gfs.resolve(uri), []),
+    // A drag probe that answers 401 is a session failure, not a per-item
+    // refusal: the drop is refused AND the session revoked.
+    handleAuthorityFailure: useCallback(
+      (message: string) => ctrl.handleAuthorityFailure(message, 'operation'),
+      [ctrl]
+    ),
   })
 
   useEffect(

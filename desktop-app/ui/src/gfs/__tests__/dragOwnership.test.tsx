@@ -459,5 +459,22 @@ for (const surface of ['sidebar', 'files'] as const) {
       expect(h.toast).not.toHaveBeenCalled()
       expect(h.api().activeSource()?.resourceId).toBe('external')
     })
+
+    it('revokes the session when a drag probe answers 401', async () => {
+      // A probe 401 is a session failure: the drop is refused AND the session
+      // must be revoked, not left active over a dead session.
+      const h = await setup('file')
+      const message = 'Error invoking remote method: Error: 401 Unauthorized httpStatus=401'
+      h.affordances.mockImplementation(async () => {
+        throw new Error(message)
+      })
+      h.start()
+      h.drop()
+      await waitFor(() =>
+        expect(h.ctrl.handleAuthorityFailure).toHaveBeenCalledWith(message, 'operation')
+      )
+      expect(h.moveResource).not.toHaveBeenCalled()
+      expect(h.toast).not.toHaveBeenCalled()
+    })
   })
 }

@@ -3,7 +3,11 @@ import { useQueryClient } from '@tanstack/react-query'
 import { decideDragAuthority, decideDragStructure } from '@clerum/gfs-interaction-policy'
 import { DRAG_COLD_CHECK_DEBOUNCE_MS } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
-import { describeGfsReadError, parseHttpStatus } from '@lib/gfsGrantErrors'
+import {
+  describeGfsReadError,
+  isGfsSessionAuthorityFailure,
+  parseHttpStatus,
+} from '@lib/gfsGrantErrors'
 import { GfsHoverCheckBudget, useGfsDragSession } from './dragSession'
 import type {
   GfsDragSource,
@@ -31,6 +35,15 @@ export interface GfsDragAdjudicationDeps {
   drive: string
   /** Resolve by stable URI (read plane; 403/404/429 throw). */
   resolve: (gfsUri: string) => Promise<ResolvedLike>
+  /**
+   * Central fail-closed classifier for the operation surface; returns true
+   * when it revoked the session. A probe 401 is a SESSION failure, not a
+   * per-resource policy verdict: the drop must be refused AND the session
+   * revoked, otherwise observer-less views keep rendering a dead session's
+   * data. Optional so a surface without an authority boundary still refuses
+   * the drop.
+   */
+  handleAuthorityFailure?: (message: string) => boolean
 }
 
 interface HeldAffordances {
@@ -91,6 +104,21 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
   const localBudgetRef = useRef(new GfsHoverCheckBudget())
   const debounceTimerRef = useRef<number | null>(null)
 
+  /**
+   * Hand a probe failure to the surface's central fail-closed classifier when
+   * it is a session-authority failure. The drop is refused either way; this
+   * is what makes the refusal also REVOKE the session instead of leaving an
+   * active accessState over a dead session.
+   */
+  const reportAuthorityFailure = useCallback(
+    (error: unknown): boolean => {
+      const message = error instanceof Error ? error.message : String(error ?? '')
+      if (!isGfsSessionAuthorityFailure(message, 'operation')) return false
+      return deps.handleAuthorityFailure?.(message) ?? false
+    },
+    [deps]
+  )
+
   const readCachedAffordances = useCallback(
     (resourceId: string): HeldAffordances | null => {
       if (!deps.scope) return null
@@ -114,10 +142,13 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
         })
         return { ok: true, held: held.held }
       } catch (error) {
+        // A 401 here is a session failure, not a refused probe: report it so
+        // the surface revokes instead of leaving the drop silently dead.
+        reportAuthorityFailure(error)
         return { ok: false, error }
       }
     },
-    [deps.drive, deps.scope, queryClient]
+    [deps.drive, deps.scope, queryClient, reportAuthorityFailure]
   )
 
   /** Warm hover verdict: cached structure + cached bits; ZERO network reads. */
@@ -305,9 +336,12 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
             targetAncestorIds: chain,
             knownSourceAncestorIds: new Set(source.knownAncestorIds),
           })
-        } catch {
+        } catch (error) {
           // Unreadable ancestry stays server-check-required; proceed below —
-          // a read failure upward is a visibility boundary, not a denial.
+          // a read failure upward is a visibility boundary, not a denial. A
+          // session failure is not a boundary: report it so the session is
+          // revoked instead of the drop dying quietly.
+          reportAuthorityFailure(error)
         }
       }
 
@@ -323,7 +357,12 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
           sourceParentForProbe = resolved.parentResourceId
         } catch (error) {
           const status = parseHttpStatus(error instanceof Error ? error.message : String(error))
-          if (status === 401) return { allowed: false, reason: 'session-lost' }
+          if (status === 401) {
+            // The drop is refused AND the session revoked: a 401 here means the
+            // session died, not that this item is off limits.
+            reportAuthorityFailure(error)
+            return { allowed: false, reason: 'session-lost' }
+          }
           if (status === 404) {
             return {
               allowed: false,
@@ -385,7 +424,7 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
         authority: { kind: 'observed-allowed', checkedAt: Date.now() },
       }
     },
-    [deps, fetchAffordances, resolveAncestorsUpTo]
+    [deps, fetchAffordances, reportAuthorityFailure, resolveAncestorsUpTo]
   )
 
   /** Fresh (5 s) source-resource write probe for the rename policy. */
