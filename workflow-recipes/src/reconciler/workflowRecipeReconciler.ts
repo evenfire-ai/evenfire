@@ -2035,7 +2035,10 @@ export class WorkflowRecipeReconciler {
     return 'clean'
   }
 
-  async reconcile(recipe: WorkflowRecipeCRD): Promise<ReconcileResult> {
+  async reconcile(
+    recipe: WorkflowRecipeCRD,
+    opts?: { trigger?: string }
+  ): Promise<ReconcileResult> {
     // issue #375: compute the Plugin Workload SDK capability projection ONCE per
     // reconcile and attach it to the result. shouldPatchRecipeStatus reads it to
     // publish a computed awaiting_policy↔validated transition that no
@@ -2048,7 +2051,7 @@ export class WorkflowRecipeReconciler {
     const fingerprint = dnsBlockFingerprint(recipe, this.config)
     let ran
     try {
-      ran = await runInReconcileContext(() => this.reconcileInternal(recipe))
+      ran = await runInReconcileContext(() => this.reconcileInternal(recipe, opts?.trigger))
     } catch (error) {
       // A thrown pass recorded nothing trustworthy: force the next full pass.
       this.dnsBlockRecordMap.delete(recipe.metadata.name)
@@ -2078,7 +2081,10 @@ export class WorkflowRecipeReconciler {
     return result
   }
 
-  private async reconcileInternal(recipe: WorkflowRecipeCRD): Promise<ReconcileResult> {
+  private async reconcileInternal(
+    recipe: WorkflowRecipeCRD,
+    trigger?: string
+  ): Promise<ReconcileResult> {
     const name = recipe.metadata.name
     const ns = recipe.metadata.namespace
     const currentPhase = recipe.status?.phase ?? 'candidate'
@@ -2101,7 +2107,12 @@ export class WorkflowRecipeReconciler {
       }
     }
 
-    createLogger('wrc', recipe.metadata.name).info('Reconciling recipe', { name, ns, currentPhase })
+    createLogger('wrc', recipe.metadata.name).info('Reconciling recipe', {
+      name,
+      ns,
+      currentPhase,
+      trigger,
+    })
 
     if (!(await this.recipeStillActive(recipe))) {
       return this.staleRecipeResult(recipe, 'initial check')

@@ -1086,6 +1086,7 @@ describe('runtime credential refresh loop helpers', () => {
     expect(enqueue).toHaveBeenCalledWith(sdkOnly.metadata.name, expect.any(Function))
     expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', sdkOnly, {
       forceReconcile: true,
+      trigger: 'infra_retry',
     })
   })
 
@@ -1217,6 +1218,7 @@ describe('runtime credential refresh loop helpers', () => {
     expect(enqueue).toHaveBeenCalledWith(initializing.metadata.name, expect.any(Function))
     expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', initializing, {
       forceReconcile: true,
+      trigger: 'infra_retry',
     })
   })
 })
@@ -1527,7 +1529,10 @@ describe('workload status refresh loop helpers', () => {
 
     internal.triggerSecretDrivenReconcile(recipe.metadata.name)
 
-    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', recipe, { forceReconcile: true })
+    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', recipe, {
+      forceReconcile: true,
+      trigger: 'secret_watch',
+    })
   })
 
   it('updates the cache but skips full reconcile for status-only watch events', async () => {
@@ -1788,7 +1793,7 @@ describe('workload status refresh loop helpers', () => {
     await internal.handleRecipeEvent('MODIFIED', granted)
 
     expect(internal.recipes.get(granted.metadata.name)).toBe(granted)
-    expect(reconcile).toHaveBeenCalledWith(granted)
+    expect(reconcile).toHaveBeenCalledWith(granted, { trigger: 'watch' })
   })
 
   it('forces a full reconcile when status-only refresh observes workload drift', async () => {
@@ -1820,7 +1825,10 @@ describe('workload status refresh loop helpers', () => {
     await internal.refreshWorkloadStatusOnly(recipe)
 
     expect(patchStatus).toHaveBeenCalledWith(recipe, result)
-    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', recipe, { forceReconcile: true })
+    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', recipe, {
+      forceReconcile: true,
+      trigger: 'workload_status',
+    })
   })
 
   it('forces a full reconcile for an ALL-READY recipe that references a named Secret (Issue #637 ownership backstop)', async () => {
@@ -1865,7 +1873,10 @@ describe('workload status refresh loop helpers', () => {
 
     await internal.refreshWorkloadStatusOnly(recipe)
 
-    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', recipe, { forceReconcile: true })
+    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', recipe, {
+      forceReconcile: true,
+      trigger: 'workload_status',
+    })
   })
 
   it('does NOT force a reconcile for an all-ready recipe with NO named Secret refs', async () => {
@@ -2111,7 +2122,7 @@ describe('status-only events drive DB sync (terminal + heartbeat)', () => {
       // CRD->DB terminal sync fires so the DB row transitions Running→Succeeded.
       expect(sync).toHaveBeenCalledTimes(1)
       expect(sync).toHaveBeenCalledWith(completed)
-      expect(reconcile).toHaveBeenCalledWith(completed)
+      expect(reconcile).toHaveBeenCalledWith(completed, { trigger: 'watch' })
       // Cache is updated.
       expect(internal.recipes.get(completed.metadata.name)).toBe(completed)
     }
@@ -2186,10 +2197,13 @@ describe('status-only events drive DB sync (terminal + heartbeat)', () => {
     )
     const errSpy = captureLogger('error').mockImplementation(() => undefined)
 
-    await expect(internal.handleRecipeEvent('MODIFIED', completed)).resolves.toBeUndefined()
+    await expect(internal.handleRecipeEvent('MODIFIED', completed)).resolves.toEqual({
+      ran: true,
+      settled: true,
+    })
 
     expect(sync).toHaveBeenCalledTimes(1)
-    expect(reconcile).toHaveBeenCalledWith(completed)
+    expect(reconcile).toHaveBeenCalledWith(completed, { trigger: 'watch' })
     expect(errSpy).toHaveBeenCalled()
     errSpy.mockRestore()
   })
@@ -2213,7 +2227,7 @@ describe('status-only events drive DB sync (terminal + heartbeat)', () => {
     // Generation changed ⇒ NOT status-only ⇒ full reconcile branch runs, which
     // also calls syncFromRecipeExecution at its start.
     expect(sync).toHaveBeenCalledWith(specChanged)
-    expect(reconcile).toHaveBeenCalledWith(specChanged)
+    expect(reconcile).toHaveBeenCalledWith(specChanged, { trigger: 'watch' })
   })
 })
 
@@ -2314,7 +2328,10 @@ describe('infrastructure telemetry enqueue isolation', () => {
     const { internal } = makeInternal(recipe, { enqueueInfrastructureTelemetry })
     const errSpy = captureLogger('error').mockImplementation(() => undefined)
 
-    await expect(internal.handleRecipeEvent('ADDED', recipe)).resolves.toBeUndefined()
+    await expect(internal.handleRecipeEvent('ADDED', recipe)).resolves.toEqual({
+      ran: true,
+      settled: true,
+    })
 
     expect(internal.reconciler.patchStatus).toHaveBeenCalled()
     expect(enqueueInfrastructureTelemetry).toHaveBeenCalled()
@@ -2366,6 +2383,7 @@ describe('transient-result requeue (scheduleTransientRetry)', () => {
       expect(enqueue).toHaveBeenCalledWith('flaky', expect.any(Function))
       expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', recipe, {
         forceReconcile: true,
+        trigger: 'transient_retry',
       })
     } finally {
       vi.useRealTimers()
@@ -2720,9 +2738,11 @@ describe('grant-update NOTIFY dispatch (issue #375 P3 wiring, H4/H5)', () => {
 
     expect(internal.handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', fresher, {
       forceReconcile: true,
+      trigger: 'notify',
     })
     expect(internal.handleRecipeEvent).not.toHaveBeenCalledWith('MODIFIED', recipe, {
       forceReconcile: true,
+      trigger: 'notify',
     })
   })
 
@@ -3028,6 +3048,7 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
     for (const name of ['with-ui-egress', 'with-wl-egress']) {
       expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', internal.recipes.get(name), {
         forceReconcile: true,
+        trigger: 'egress_fallback',
       })
     }
   })
@@ -3060,7 +3081,7 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
       expect(handleRecipeEvent).toHaveBeenCalledWith(
         'MODIFIED',
         internal.recipes.get('with-ui-egress'),
-        { forceReconcile: true }
+        { forceReconcile: true, trigger: 'egress_fallback' }
       )
 
       // Second tick fires again — the requeue is periodic, not one-shot.

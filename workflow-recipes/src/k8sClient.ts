@@ -21,6 +21,7 @@ import {
   createGovernedTraceReporter,
 } from './governedTraceReporter'
 import { K8sSecretWatchLoop } from './k8sSecretWatchLoop'
+import { reconcileDurationSeconds, reconciliationsTotal } from './metrics'
 import { createLogger } from './observability/logger'
 import {
   VERIFIED_AT_REFRESH_MS,
@@ -32,7 +33,13 @@ import {
   workflowNeedsRuntimeCredentialRefresh,
   workflowNeedsWorkloadStatusRefresh,
 } from './recipePredicates'
-import { workflowNeedsOwnershipBackstop } from './reconcileCadence'
+import {
+  CadenceState,
+  type ReconcileOutcome,
+  type ReconcileTrigger,
+  isSettledResult,
+  workflowNeedsOwnershipBackstop,
+} from './reconcileCadence'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from './reconciler/crdConstants'
 import {
   type ChildRecipeCreator,
@@ -577,6 +584,12 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     }
   >()
   private static readonly TRANSIENT_RETRY_MAX_MS = 60_000
+  // Issue #1016 — per-recipe pass-start/settle stamps for the timer cadence. Lazy
+  // so `Object.create(WorkflowRecipeWatcher.prototype)` harnesses need no field.
+  private _cadence?: CadenceState
+  private get cadence(): CadenceState {
+    return (this._cadence ??= new CadenceState())
+  }
 
   constructor(kc: k8s.KubeConfig, pool?: Pool | null) {
     this.kc = kc
@@ -662,7 +675,10 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
       // the recipe may have been deleted, or its namespace changed, while queued.
       const cached = this.recipes.get(recipeName)
       if (!cached || cached.metadata.namespace !== recipeNamespace) return Promise.resolve()
-      return this.handleRecipeEvent('MODIFIED', cached, { forceReconcile: true })
+      return this.handleRecipeEvent('MODIFIED', cached, {
+        forceReconcile: true,
+        trigger: 'notify',
+      })
     })
   }
 
@@ -818,7 +834,7 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     this.reconciler.invalidateOAuthBrokerSecretLedger(recipeName)
     const recipe = this.recipes.get(recipeName)
     if (recipe && !recipeHasBackgroundAccessClient(recipe)) {
-      this.triggerSecretDrivenReconcile(recipeName)
+      this.triggerSecretDrivenReconcile(recipeName, 'oauth_broker')
     }
   }
 
@@ -827,19 +843,26 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
    * just changed. The cached recipe object is reused — no extra GET against
    * the apiserver. If the recipe is no longer in our cache (e.g. it was
    * deleted between the Secret event and the debounce fire), we skip.
+   *
+   * Issue #1016 — the queued task re-reads the cache so it reconciles the newest
+   * recipe, not the snapshot taken when the Secret event fired.
    */
-  private triggerSecretDrivenReconcile(recipeName: string): void {
-    const recipe = this.recipes.get(recipeName)
-    if (!recipe) return
+  private triggerSecretDrivenReconcile(
+    recipeName: string,
+    trigger: ReconcileTrigger = 'secret_watch'
+  ): void {
+    if (!this.recipes.get(recipeName)) return
     // Issue #637 — a Secret re-label does NOT bump the recipe's metadata.generation,
     // so a plain 'MODIFIED' event is classified status-only and short-circuits BEFORE
     // reconcile() (and thus before the ownership gate `revokeOrRequeueSteadyWorkflow`).
     // forceReconcile makes the event-driven revocation actually re-evaluate ownership;
     // without it a foreign re-label is only caught by the slower 30s periodic backstop,
     // not the ~10s watcher debounce this path exists to provide.
-    this.eventQueue.enqueue(recipeName, () =>
-      this.handleRecipeEvent('MODIFIED', recipe, { forceReconcile: true })
-    )
+    this.eventQueue.enqueue(recipeName, () => {
+      const fresh = this.recipes.get(recipeName)
+      if (!fresh || fresh.metadata.deletionTimestamp) return Promise.resolve()
+      return this.handleRecipeEvent('MODIFIED', fresh, { forceReconcile: true, trigger })
+    })
   }
 
   private async tryInitializeWorkflow(): Promise<void> {
@@ -925,8 +948,9 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
   private async handleRecipeEvent(
     type: string,
     recipe: WorkflowRecipeCRD,
-    options: { forceReconcile?: boolean } = {}
-  ): Promise<void> {
+    options: { forceReconcile?: boolean; trigger?: ReconcileTrigger } = {}
+  ): Promise<ReconcileOutcome> {
+    const trigger = options.trigger ?? 'watch'
     if (type === 'ADDED' || type === 'MODIFIED') {
       const scheduledUid = this.transientRetries.get(recipe.metadata.name)?.recipeUid
       if (scheduledUid && scheduledUid !== recipe.metadata.uid) {
@@ -955,8 +979,8 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
             })
           }
         }
-        this.recipes.delete(recipe.metadata.name)
-        return
+        this.forgetRecipe(recipe.metadata.name)
+        return { ran: false, settled: false }
       }
 
       if (
@@ -994,20 +1018,21 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
             { name: recipe.metadata.name }
           )
         } else {
-          return
+          return { ran: false, settled: false }
         }
       }
 
       // Normal reconciliation — ensure finalizer first for cross-namespace safety.
       this.recipes.set(recipe.metadata.name, recipe)
+      let reconcileReturned = false
       try {
         if (!(await this.reconciler.isRecipeStillActive(recipe))) {
           createLogger('wrc', recipe.metadata.name).warn(
             'Skipping stale event because the recipe is gone or deleting',
             { name: recipe.metadata.name }
           )
-          this.recipes.delete(recipe.metadata.name)
-          return
+          this.forgetRecipe(recipe.metadata.name)
+          return { ran: false, settled: false }
         }
         if (this.dbRunProcessor && !dbSyncAttempted) {
           await this.dbRunProcessor.syncFromRecipeExecution(recipe)
@@ -1018,13 +1043,32 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
             'Skipping reconciliation because deletion began after the finalizer check',
             { name: recipe.metadata.name }
           )
-          this.recipes.delete(recipe.metadata.name)
-          return
+          this.forgetRecipe(recipe.metadata.name)
+          return { ran: false, settled: false }
         }
-        const result = await this.reconciler.reconcile(recipe)
+        const startedAt = Date.now()
+        this.cadence.recordPassStart(recipe.metadata.name, startedAt)
+        const endTimer = reconcileDurationSeconds.startTimer({ trigger })
+        // Issue #1016 — reconcile a clone: the classic lane filters spec.workloads /
+        // spec.bindings in place (includeWhen) and writes status fields onto its
+        // input, and the cache must keep the unfiltered spec the timers classify on.
+        const reconciled = structuredClone(recipe)
+        let result: ReconcileResult
+        try {
+          result = await this.reconciler.reconcile(reconciled, { trigger })
+        } catch (error) {
+          reconciliationsTotal.inc({ trigger, outcome: 'error' })
+          endTimer()
+          throw error
+        }
+        endTimer()
+        reconcileReturned = true
+        // The status decision and patch read the reconciled object, as they did
+        // before the clone: both resolve workload types from spec.workloads and
+        // merge into the status the pass may have updated in place.
         // Patch only when observable status changes. This avoids reconcile loops
         // while still allowing active parent recipes to clear stale execution state.
-        const willPatch = shouldPatchRecipeStatus(recipe, result)
+        const willPatch = shouldPatchRecipeStatus(reconciled, result)
         // issue #375 (P4): surface a computed-vs-published Plugin Workload SDK
         // state divergence — old→new plus whether a patch was emitted. With P1
         // this is rare; its value is forensic (it would have discriminated
@@ -1032,7 +1076,7 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         // minutes) and it verifies P1 in the field. Only states are logged — no
         // tokens/secrets (sec-003).
         const projectedSdkState = result.pluginWorkloadSdkProjection?.capability?.state
-        const persistedSdkState = recipe.status?.pluginWorkloadSdk?.state
+        const persistedSdkState = reconciled.status?.pluginWorkloadSdk?.state
         // The `validated → capability:null` cleanup case is intentionally NOT
         // forensically logged here (projectedSdkState is undefined for a cleared
         // capability); its clearing PATCH is still emitted via
@@ -1046,12 +1090,13 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
           })
         }
         if (willPatch) {
-          await this.reconciler.patchStatus(recipe, result)
+          await this.reconciler.patchStatus(reconciled, result)
           enqueueInfrastructureTelemetryBestEffort(
             this.traceReporter,
-            reconcileOutcomeTelemetryProjection(recipe, result)
+            reconcileOutcomeTelemetryProjection(reconciled, result)
           )
         }
+        reconciliationsTotal.inc({ trigger, outcome: willPatch ? 'patched' : 'noop' })
         // Transient (skipStatusPatch) results write no status ⇒ emit no MODIFIED
         // event, so schedule a deterministic backoff retry ourselves. Any other
         // result clears the per-recipe backoff.
@@ -1065,14 +1110,26 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         } else {
           this.clearTransientRetry(recipe.metadata.name)
         }
+        const settled = isSettledResult(result)
+        if (settled) {
+          this.cadence.recordSettled(
+            recipe.metadata.name,
+            startedAt,
+            result.cadence?.enforcedOwnership
+          )
+        }
+        return { ran: true, settled, enforcedOwnership: result.cadence?.enforcedOwnership }
       } catch (error) {
+        // A reconcile() throw was already counted above; count a later throw
+        // (status patch) here so every pass that ran lands in exactly one outcome.
+        if (reconcileReturned) reconciliationsTotal.inc({ trigger, outcome: 'error' })
         if (getErrorCode(error) === 404) {
           createLogger('wrc', recipe.metadata.name).warn(
             'Reconciliation skipped because the recipe is gone',
             { name: recipe.metadata.name }
           )
-          this.recipes.delete(recipe.metadata.name)
-          return
+          this.forgetRecipe(recipe.metadata.name)
+          return { ran: true, settled: false }
         }
         createLogger('wrc', recipe.metadata.name).error('Reconciliation failed', {
           name: recipe.metadata.name,
@@ -1092,12 +1149,24 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         if (!this.stopped) {
           this.scheduleTransientRetry(recipe.metadata.name, TRANSIENT_REQUEUE_BASE_MS, false)
         }
+        return { ran: true, settled: false }
       }
     } else if (type === 'DELETED') {
       // Resource is gone (finalizer already removed) — just clean cache.
       this.clearTransientRetry(recipe.metadata.name)
-      this.recipes.delete(recipe.metadata.name)
+      this.forgetRecipe(recipe.metadata.name)
     }
+    return { ran: false, settled: false }
+  }
+
+  /**
+   * Issue #1016 — drop a recipe from the cache together with its cadence stamps
+   * and the reconciler's DNS-block record, so a re-created recipe starts clean.
+   */
+  private forgetRecipe(name: string): void {
+    this.recipes.delete(name)
+    this.cadence.forget(name)
+    this.reconciler.forgetDnsBlockRecord?.(name)
   }
 
   private isStatusOnlyModifiedEvent(recipe: WorkflowRecipeCRD): boolean {
@@ -1189,9 +1258,16 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         value3: attempts + 1,
         delay,
       })
-      void this.eventQueue.enqueue(name, () =>
-        this.handleRecipeEvent('MODIFIED', cached, { forceReconcile: true })
-      )
+      // Issue #1016 — re-read inside the queued task: a newer MODIFIED may land
+      // while this retry waits behind the recipe's queue.
+      void this.eventQueue.enqueue(name, () => {
+        const fresh = this.recipes.get(name)
+        if (!fresh || fresh.metadata.deletionTimestamp) return Promise.resolve()
+        return this.handleRecipeEvent('MODIFIED', fresh, {
+          forceReconcile: true,
+          trigger: 'transient_retry',
+        })
+      })
     }, delay)
     timer.unref?.()
     // Fixed-interval progress requeues keep attempts pinned at 0 (no backoff);
@@ -1378,7 +1454,10 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
           // Generation is unchanged for a DNS-rotation refresh, so force the full
           // reconcile; otherwise handleRecipeEvent classifies this synthetic
           // MODIFIED as status-only and returns before the accumulator runs.
-          this.handleRecipeEvent('MODIFIED', latest, { forceReconcile: true })
+          this.handleRecipeEvent('MODIFIED', latest, {
+            forceReconcile: true,
+            trigger: 'egress_fallback',
+          })
         )
         enqueued++
       } catch (error) {
@@ -1439,7 +1518,10 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
       // observe/patch (a workflow's status is workflowExecution-driven) and force a
       // reconcile so the steady-state ownership gate re-classifies and revokes a
       // Secret re-labeled foreign even if the SecretWatcher event was missed.
-      await this.handleRecipeEvent('MODIFIED', recipe, { forceReconcile: true })
+      await this.handleRecipeEvent('MODIFIED', recipe, {
+        forceReconcile: true,
+        trigger: 'workload_status',
+      })
       return
     }
     const result = await this.reconciler.observeCurrentWorkloadStatus(recipe)
@@ -1457,7 +1539,10 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     // coalesced. The full reconcile is idempotent for an unchanged recipe.
     const ownershipRecheck = recipeReferencesNamedSecrets(recipe)
     if (ownershipRecheck || result.workloadStatuses.some(status => status.ready === false)) {
-      await this.handleRecipeEvent('MODIFIED', recipe, { forceReconcile: true })
+      await this.handleRecipeEvent('MODIFIED', recipe, {
+        forceReconcile: true,
+        trigger: 'workload_status',
+      })
     }
   }
 
@@ -1477,7 +1562,10 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
             // generation. Force the full reconcile; otherwise the watcher
             // classifies this synthetic MODIFIED event as status-only and
             // returns before re-running the eager SDK bootstrap lane.
-            this.handleRecipeEvent('MODIFIED', latest, { forceReconcile: true })
+            this.handleRecipeEvent('MODIFIED', latest, {
+              forceReconcile: true,
+              trigger: 'infra_retry',
+            })
           )
         }
       } catch (error) {
