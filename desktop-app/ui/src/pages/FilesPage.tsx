@@ -301,6 +301,8 @@ export function FilesPage({
   // shared dispatch; files commit directly on an allowed admission.
   const [pendingFolderMove, setPendingFolderMove] = useState<{
     source: GfsDragSource
+    gestureGeneration: number
+    sessionGeneration: number | null
     destination: { resourceId: string; name: string }
     allowNumberedRename: boolean
     suggestedName?: string
@@ -309,6 +311,7 @@ export function FilesPage({
   const draggingSourceRef = useRef<GfsDragSource | null>(null)
   const movingResourceRef = useRef<string | null>(null)
   const hoveredFolderRef = useRef<string | null>(null)
+  const hoverOwnerRef = useRef<GfsDragSource | null>(null)
   const dragSessionRef = useRef(0)
   const manageReturnCrumbsRef = useRef<GfsCrumb[] | null>(null)
   const uploadInputRef = useRef<HTMLInputElement | null>(null)
@@ -345,6 +348,39 @@ export function FilesPage({
     drive: GFS_DRIVE_MAIN,
     resolve: useCallback((uri: string) => window.clerum.gfs.resolve(uri), []),
   })
+
+  useEffect(
+    () => () => {
+      dragSessionRef.current += 1
+      hoverOwnerRef.current = null
+      adjudication.endDragSession()
+    },
+    [adjudication.endDragSession]
+  )
+
+  const liveDragScope = ctrl.accessState === 'revoked' ? null : (sessionScope ?? 'anonymous')
+  const liveDragScopeRef = useRef(liveDragScope)
+  liveDragScopeRef.current = liveDragScope
+  const previousDragScopeRef = useRef(liveDragScope)
+  useEffect(() => {
+    if (previousDragScopeRef.current === liveDragScope) return
+    previousDragScopeRef.current = liveDragScope
+    dragSessionRef.current += 1
+    draggingResourceRef.current = null
+    draggingSourceRef.current = null
+    hoveredFolderRef.current = null
+    hoverOwnerRef.current = null
+    adjudication.endDragSession()
+    setPendingFolderMove(null)
+    setDraggingResourceId(null)
+    setDragOverFolderId(null)
+    setDropStatesById({})
+  }, [adjudication.endDragSession, liveDragScope])
+
+  const ownsDrop = (source: GfsDragSource, epoch: number, sharedGeneration: number | null) =>
+    source.scope === liveDragScopeRef.current &&
+    epoch === dragSessionRef.current &&
+    (!dragSession || dragSession.currentGeneration() === sharedGeneration)
 
   const lastRemoteGfsChangeEpochRef = useRef(remoteGfsChangeEpoch)
   useEffect(() => {
@@ -1083,6 +1119,7 @@ export function FilesPage({
     draggingResourceRef.current = null
     draggingSourceRef.current = null
     hoveredFolderRef.current = null
+    hoverOwnerRef.current = null
     dragSession?.endDrag()
     adjudication.endDragSession()
     setDraggingResourceId(null)
@@ -1090,26 +1127,26 @@ export function FilesPage({
     setDropStatesById({})
   }
 
-  /** Drop-path cleanup owned by the gesture that started the drop: a newer
-   * gesture on THIS surface (epoch advanced) owns every local ref and timer,
-   * and a newer gesture on ANY surface (shared generation advanced) owns the
-   * session store. The unconditional native-dragend clear above stays. */
-  const finishDropCleanup = (gestureGeneration: number, sessionGeneration: number | null) => {
+  /** Release only the source and hover work owned by the admitted gesture. */
+  const finishDropCleanup = (
+    source: GfsDragSource,
+    gestureGeneration: number,
+    sessionGeneration: number | null
+  ) => {
     if (gestureGeneration !== dragSessionRef.current) return
     draggingResourceRef.current = null
     draggingSourceRef.current = null
-    hoveredFolderRef.current = null
     setDraggingResourceId(null)
-    setDragOverFolderId(null)
-    setDropStatesById({})
-    if (
-      dragSession &&
-      sessionGeneration !== null &&
-      dragSession.currentGeneration() === sessionGeneration
-    ) {
+    if (hoverOwnerRef.current === null || hoverOwnerRef.current === source) {
+      hoverOwnerRef.current = null
+      hoveredFolderRef.current = null
+      setDragOverFolderId(null)
+      setDropStatesById({})
+      adjudication.endDragSession()
+    }
+    if (dragSession && dragSession.currentGeneration() === sessionGeneration) {
       dragSession.endDrag()
     }
-    adjudication.endDragSession()
   }
 
   /** Ancestor chain of rows in the current listing, nearest-first: the open
@@ -1138,18 +1175,15 @@ export function FilesPage({
     }
   }
 
-  /** The active source is the session descriptor when its scope matches
-   * (cross-surface drags), else this surface's local ref. */
+  /** A provider owns transport identity; local refs are only a provider-absent fallback. */
   const resolveActiveSource = (): GfsDragSource | null => {
-    const fromSession = dragSession?.activeSource()
-    if (
-      fromSession &&
-      dragSession?.matchesScope(sessionScope ?? 'anonymous') &&
-      fromSession.drive === GFS_DRIVE_MAIN
-    ) {
-      return fromSession
-    }
-    return draggingSourceRef.current
+    if (!dragSession) return draggingSourceRef.current
+    const source = dragSession.activeSource()
+    return source &&
+      dragSession.matchesScope(sessionScope ?? 'anonymous') &&
+      source.drive === GFS_DRIVE_MAIN
+      ? source
+      : null
   }
 
   const applyHoverVerdict = (folderId: string, verdict: GfsDropVerdict): GfsDropVerdict => {
@@ -1207,6 +1241,7 @@ export function FilesPage({
     event.preventDefault()
     event.stopPropagation()
     hoveredFolderRef.current = folder.resourceId
+    hoverOwnerRef.current = source
     const target = {
       resourceId: folder.resourceId,
       name: folder.name,
@@ -1225,7 +1260,8 @@ export function FilesPage({
         target,
         source.parentKnown ? source.parentResourceId : null,
         () => {
-          if (hoveredFolderRef.current !== folder.resourceId) return
+          if (hoverOwnerRef.current !== source || hoveredFolderRef.current !== folder.resourceId)
+            return
           const fresh = adjudication.hoverVerdict(source, target)
           applyHoverVerdict(folder.resourceId, fresh)
         }
@@ -1375,7 +1411,7 @@ export function FilesPage({
         kind: destination.kind,
         ancestorIds: rowTargetAncestorIds(),
       })
-      if (dragGeneration !== dragSessionRef.current) return
+      if (!ownsDrop(source, dragGeneration, sessionGeneration)) return
       if (!decision.allowed) {
         const message = dropDenialMessage(decision, destination.name)
         if (message) pushToast?.(message, 'error')
@@ -1388,6 +1424,8 @@ export function FilesPage({
         const suggested = suggestNumberedMoveName(source.name, occupied)
         setPendingFolderMove({
           source,
+          gestureGeneration: dragGeneration,
+          sessionGeneration,
           destination: { resourceId: destination.resourceId, name: destination.name },
           allowNumberedRename: decision.allowNumberedRename,
           ...(suggested !== undefined ? { suggestedName: suggested } : {}),
@@ -1400,7 +1438,7 @@ export function FilesPage({
         decision.allowNumberedRename
       )
     } finally {
-      finishDropCleanup(dragGeneration, sessionGeneration)
+      finishDropCleanup(source, dragGeneration, sessionGeneration)
     }
   }
 
@@ -2593,7 +2631,10 @@ export function FilesPage({
           onConfirm={({ allowNumberedRename }) => {
             const pending = pendingFolderMove
             setPendingFolderMove(null)
-            if (pending) {
+            if (
+              pending &&
+              ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration)
+            ) {
               void runMoveCommit(pending.source, pending.destination, allowNumberedRename)
             }
           }}

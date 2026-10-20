@@ -444,9 +444,12 @@ export function FileExplorerTree({
   const [movingResourceId, setMovingResourceId] = useState<string | null>(null)
   const movingResourceIdRef = useRef<string | null>(null)
   const draggingSourceRef = useRef<GfsDragSource | null>(null)
+  const hoverOwnerRef = useRef<GfsDragSource | null>(null)
   const dragSessionEpochRef = useRef(0)
   const [pendingFolderMove, setPendingFolderMove] = useState<{
     source: GfsDragSource
+    gestureGeneration: number
+    sessionGeneration: number | null
     destination: { resourceId: string; name: string }
     allowNumberedRename: boolean
     suggestedName?: string
@@ -455,6 +458,38 @@ export function FileExplorerTree({
     node: GfsBrowserChild
     initialCrumbs: GfsCrumb[]
   } | null>(null)
+
+  useEffect(
+    () => () => {
+      dragSessionEpochRef.current += 1
+      hoverOwnerRef.current = null
+      adjudication.endDragSession()
+    },
+    [adjudication.endDragSession]
+  )
+
+  const liveDragScope = ctrl.accessState === 'revoked' ? null : (ctrl.sessionScope ?? 'anonymous')
+  const liveDragScopeRef = useRef(liveDragScope)
+  liveDragScopeRef.current = liveDragScope
+  const previousDragScopeRef = useRef(liveDragScope)
+  useEffect(() => {
+    if (previousDragScopeRef.current === liveDragScope) return
+    previousDragScopeRef.current = liveDragScope
+    dragSessionEpochRef.current += 1
+    draggingSourceRef.current = null
+    hoverOwnerRef.current = null
+    adjudication.endDragSession()
+    setPendingFolderMove(null)
+    setDropStatesByResourceId({})
+  }, [adjudication.endDragSession, liveDragScope])
+
+  const ownsDrop = useCallback(
+    (source: GfsDragSource, epoch: number, sharedGeneration: number | null) =>
+      source.scope === liveDragScopeRef.current &&
+      epoch === dragSessionEpochRef.current &&
+      (!dragSession || dragSession.currentGeneration() === sharedGeneration),
+    [dragSession]
+  )
 
   const roots = useMemo(() => sortTreeItems(ctrl.accessibleResources), [ctrl.accessibleResources])
 
@@ -476,30 +511,27 @@ export function FileExplorerTree({
     // folder confirmation never appeared). A new dragstart still invalidates
     // in-flight decisions.
     draggingSourceRef.current = null
+    hoverOwnerRef.current = null
     dragSession?.endDrag()
     adjudication.endDragSession()
     setDropStatesByResourceId({})
   }, [adjudication, dragSession])
 
-  /** Drop-path cleanup owned by the gesture that started the drop: a newer
-   * gesture on THIS surface (epoch advanced) owns every local ref and timer,
-   * and a newer gesture on ANY surface (shared generation advanced) owns the
-   * session store. The unconditional native-dragend clear above stays. */
+  /** Release only the source and hover work owned by the admitted gesture. */
   const finishNodeDropCleanup = useCallback(
-    (epoch: number, sessionGeneration: number | null) => {
+    (source: GfsDragSource, epoch: number, sessionGeneration: number | null) => {
       if (epoch !== dragSessionEpochRef.current) return
       draggingSourceRef.current = null
-      setDropStatesByResourceId({})
-      if (
-        dragSession &&
-        sessionGeneration !== null &&
-        dragSession.currentGeneration() === sessionGeneration
-      ) {
+      if (hoverOwnerRef.current === null || hoverOwnerRef.current === source) {
+        hoverOwnerRef.current = null
+        setDropStatesByResourceId({})
+        adjudication.endDragSession()
+      }
+      if (dragSession && dragSession.currentGeneration() === sessionGeneration) {
         dragSession.endDrag()
       }
-      adjudication.endDragSession()
     },
-    [adjudication, dragSession, dragSessionEpochRef]
+    [adjudication, dragSession]
   )
 
   const treeDragSourceFrom = useCallback(
@@ -562,15 +594,13 @@ export function FileExplorerTree({
   )
 
   const resolveActiveSource = useCallback((): GfsDragSource | null => {
-    const fromSession = dragSession?.activeSource()
-    if (
-      fromSession &&
-      dragSession?.matchesScope(ctrl.sessionScope ?? 'anonymous') &&
-      fromSession.drive === GFS_DRIVE_MAIN
-    ) {
-      return fromSession
-    }
-    return draggingSourceRef.current
+    if (!dragSession) return draggingSourceRef.current
+    const source = dragSession.activeSource()
+    return source &&
+      dragSession.matchesScope(ctrl.sessionScope ?? 'anonymous') &&
+      source.drive === GFS_DRIVE_MAIN
+      ? source
+      : null
   }, [ctrl.sessionScope, dragSession])
 
   const handleNodeDragOver = useCallback(
@@ -584,6 +614,7 @@ export function FileExplorerTree({
       if (!source || node.kind !== 'directory' || source.resourceId === node.resourceId) return
       event.preventDefault()
       event.stopPropagation()
+      hoverOwnerRef.current = source
       const verdict = adjudication.hoverVerdict(source, {
         resourceId: node.resourceId,
         name: node.name,
@@ -605,6 +636,7 @@ export function FileExplorerTree({
           { resourceId: node.resourceId, name: node.name, kind: node.kind, ancestorIds },
           source.parentKnown ? source.parentResourceId : null,
           () => {
+            if (hoverOwnerRef.current !== source) return
             setDropStatesByResourceId(previous => {
               const fresh = adjudication.hoverVerdict(source, {
                 resourceId: node.resourceId,
@@ -716,7 +748,7 @@ export function FileExplorerTree({
           kind: node.kind,
           ancestorIds,
         })
-        if (epoch !== dragSessionEpochRef.current) return
+        if (!ownsDrop(source, epoch, sessionGeneration)) return
         if (!decision.allowed) {
           const message = moveDenialMessage(decision, node.name)
           if (message) pushToast(message, 'error')
@@ -725,6 +757,8 @@ export function FileExplorerTree({
         if (source.kind === 'directory') {
           setPendingFolderMove({
             source,
+            gestureGeneration: epoch,
+            sessionGeneration,
             destination: { resourceId: node.resourceId, name: node.name },
             allowNumberedRename: decision.allowNumberedRename,
           })
@@ -736,14 +770,15 @@ export function FileExplorerTree({
           decision.allowNumberedRename
         )
       } finally {
-        finishNodeDropCleanup(epoch, sessionGeneration)
+        finishNodeDropCleanup(source, epoch, sessionGeneration)
       }
     },
     [
       adjudication,
       finishNodeDropCleanup,
       commitMove,
-      dragSessionEpochRef,
+      dragSession,
+      ownsDrop,
       pushToast,
       resolveActiveSource,
     ]
@@ -904,7 +939,10 @@ export function FileExplorerTree({
           onConfirm={({ allowNumberedRename }) => {
             const pending = pendingFolderMove
             setPendingFolderMove(null)
-            if (pending) {
+            if (
+              pending &&
+              ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration)
+            ) {
               void commitMove(pending.source, pending.destination, allowNumberedRename)
             }
           }}

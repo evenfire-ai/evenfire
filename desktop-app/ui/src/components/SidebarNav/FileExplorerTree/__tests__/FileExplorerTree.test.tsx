@@ -986,11 +986,11 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     await screen.findByRole('dialog', { name: 'Move folder B to C' })
   })
 
-  it('a stale drop’s cleanup releases only its own shared-store gesture', async () => {
+  it('a stale cross-surface drop cannot open a dialog or release the newer shared gesture', async () => {
     // R1-M4 cross-surface: A’s drop is pending in the tree when another
     // surface begins gesture B (here driven through the session api). A’s
-    // surface epoch is unchanged, so A’s own dialog legitimately opens — but
-    // its cleanup must not endDrag the shared store now owned by B.
+    // surface epoch is unchanged; the shared generation must still reject A
+    // and preserve the store now owned by B.
     const moveResource = vi.fn(async () => ({ resourceId: 'foldera', version: 9 }))
     type Affordances = { held: string[] }
     let releaseA!: (value: Affordances) => void
@@ -1073,12 +1073,12 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
       })
     ).toBe(true)
 
-    // A resolves late: its surface epoch is unchanged, so A’s own
-    // confirmation legitimately opens.
+    // A resolves late: the shared generation rejects its stale admission.
     await act(async () => {
       releaseA({ held: ['read', 'write'] })
     })
-    await screen.findByRole('dialog', { name: 'Move folder A to C' })
+    expect(screen.queryByRole('dialog', { name: 'Move folder A to C' })).toBeNull()
+    expect(moveResource).not.toHaveBeenCalled()
 
     // A’s cleanup must not have ended the shared store’s newer gesture.
     expect(sessionApi!.activeSource()?.resourceId).toBe('file-external')
