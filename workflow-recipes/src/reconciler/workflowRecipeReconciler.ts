@@ -43,6 +43,7 @@ import {
   StatefulSetDef,
   StatusCondition,
   WorkflowRecipeCRD,
+  WorkflowRecipePolicyCRD,
   WorkflowRecipeSpec,
   WorkflowRecipeStatus,
   WorkloadDef,
@@ -1937,6 +1938,96 @@ export class WorkflowRecipeReconciler {
     this.dnsBlockRecordMap.delete(name)
   }
 
+  /**
+   * Issue #1016 — classic-lane input resolution + includeWhen filtering, shared by
+   * the full pass (Step 3/3a) and the T3 egress lane. Mutates `recipe` in place, as
+   * the full pass always has; callers outside the full pass must pass a clone.
+   * Returns the resolved inputs and computed values the full pass reuses in Step 4.
+   */
+  private resolveEffectiveWorkloadSpec(recipe: WorkflowRecipeCRD): {
+    computedValues: ReturnType<typeof evaluateComputedValues> | undefined
+    resolvedInputs: ReturnType<typeof resolveInputs>
+    workloads: WorkloadDef[]
+  } {
+    // Step 3: Resolve inputs (with computed values)
+    const computedValues = recipe.spec.computed
+      ? evaluateComputedValues(recipe.spec.computed, recipe.spec.inputs ?? {})
+      : undefined
+    const resolvedInputs = resolveInputs(
+      recipe.spec.inputs ?? {},
+      recipe.spec.inputContract,
+      recipe.spec.profiles,
+      recipe.spec.activeProfile,
+      computedValues
+    )
+
+    // Step 3a: Filter by includeWhen before rendering Kubernetes resources.
+    const filtered = filterByIncludeWhen(
+      recipe.spec.workloads ?? [],
+      recipe.spec.resources,
+      recipe.spec.bindings,
+      resolvedInputs
+    )
+    // Replace spec arrays with filtered versions for the rest of the pipeline
+    recipe.spec.workloads = filtered.workloads
+    recipe.spec.resources =
+      filtered.resources.length > 0 ? filtered.resources : recipe.spec.resources
+    recipe.spec.bindings = filtered.bindings.length > 0 ? filtered.bindings : undefined
+
+    return { computedValues, resolvedInputs, workloads: filtered.workloads }
+  }
+
+  async listPoliciesForLane(namespace: string): Promise<WorkflowRecipePolicyCRD[]> {
+    return listWorkflowRecipePolicies(this.customApi, namespace)
+  }
+
+  /**
+   * Issue #1016 — T3 egress lane. Replays exactly the DNS-dependent blocks the last
+   * full pass recorded (never predicts the branch). 'stale' means the caller
+   * escalates a full reconcile, which re-records. Throws after the subtractive
+   * barrier on a DNS/apiserver failure (fail-closed), like the full pass.
+   */
+  async refreshDnsBlocks(
+    recipe: WorkflowRecipeCRD,
+    policies: WorkflowRecipePolicyCRD[]
+  ): Promise<'clean' | 'stale' | 'none'> {
+    const clone = structuredClone(recipe)
+    const record = this.dnsBlockRecordMap.get(clone.metadata.name)
+    if (!record || record.fingerprint !== dnsBlockFingerprint(clone, this.config)) return 'stale'
+    if (record.blocks.size === 0) return 'none'
+    if (!(await this.recipeStillActive(clone))) return 'none'
+    if (validateWorkflowRecipeLimits(clone.spec, this.config)) return 'stale'
+    // Mirror the full pass's policy gate: terminal or already policy-failed recipes skip it.
+    const phase = (clone.status?.phase ?? 'candidate') as RecipePhase
+    const alreadyPolicyFailed =
+      phase === 'failed' && clone.status?.message?.startsWith('Policy violation:')
+    if (!isTerminal(phase) && !alreadyPolicyFailed && enforcePolicy(clone, policies).length > 0) {
+      return 'stale'
+    }
+
+    if (record.blocks.has('recipe_egress')) {
+      if ((clone.spec.steps ?? []).length === 0) {
+        try {
+          this.resolveEffectiveWorkloadSpec(clone)
+        } catch {
+          return 'stale'
+        }
+      }
+      const plan = await this.prepareRecipeEgressContractions(clone)
+      await this.reconcileUiEgressPolicy(clone)
+      await this.reconcileWorkloadEgressPolicies(clone, plan.workload)
+    }
+    if (record.blocks.has('runtime_http_egress') && this.workflowReconciler) {
+      await this.workflowReconciler.refreshRuntimeHttpEgressNetworkPolicies(
+        clone.metadata.namespace,
+        clone.metadata.name,
+        clone.metadata.uid ?? clone.metadata.name,
+        clone.spec
+      )
+    }
+    return 'clean'
+  }
+
   async reconcile(recipe: WorkflowRecipeCRD): Promise<ReconcileResult> {
     // issue #375: compute the Plugin Workload SDK capability projection ONCE per
     // reconcile and attach it to the result. shouldPatchRecipeStatus reads it to
@@ -2838,30 +2929,11 @@ export class WorkflowRecipeReconciler {
       // so both workflow and non-workflow recipes are gated uniformly. No
       // duplicate check here.
 
-      // Step 3: Resolve inputs (with computed values)
-      const computedValues = recipe.spec.computed
-        ? evaluateComputedValues(recipe.spec.computed, recipe.spec.inputs ?? {})
-        : undefined
-      const resolvedInputs = resolveInputs(
-        recipe.spec.inputs ?? {},
-        recipe.spec.inputContract,
-        recipe.spec.profiles,
-        recipe.spec.activeProfile,
-        computedValues
-      )
-
-      // Step 3a: Filter by includeWhen before rendering Kubernetes resources.
-      const filtered = filterByIncludeWhen(
-        recipe.spec.workloads ?? [],
-        recipe.spec.resources,
-        recipe.spec.bindings,
-        resolvedInputs
-      )
-      // Replace spec arrays with filtered versions for the rest of the pipeline
-      recipe.spec.workloads = filtered.workloads
-      recipe.spec.resources =
-        filtered.resources.length > 0 ? filtered.resources : recipe.spec.resources
-      recipe.spec.bindings = filtered.bindings.length > 0 ? filtered.bindings : undefined
+      // Step 3 / 3a: resolve inputs (with computed values) and filter by includeWhen.
+      const { computedValues, resolvedInputs, workloads } =
+        this.resolveEffectiveWorkloadSpec(recipe)
+      // Same array the helper just assigned; re-asserting it keeps the non-optional narrowing.
+      recipe.spec.workloads = workloads
 
       // Re-validate after filtering (all workloads may have been excluded)
       if (recipe.spec.workloads.length === 0) {

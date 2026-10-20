@@ -8,6 +8,7 @@ import type { WorkflowRecipeCRD } from '../types'
 import { deriveWorkflowRuntimePlan } from '../workflow/runtimePlan'
 import { WorkflowReconciler } from '../workflow/workflowReconciler'
 import { ownershipSignature, runInReconcileContext } from './reconcileContext'
+import * as rb from './resourceBuilder'
 import { WorkflowRecipeReconciler } from './workflowRecipeReconciler'
 
 const ok = () => vi.fn().mockResolvedValue({})
@@ -771,5 +772,385 @@ describe('ownership signatures (#1016 §3.4)', () => {
     stubWorkflowReconciler(rec)
     const result = await rec.reconcile(steadyRecipe())
     expect(result.cadence?.repairPending).toBe(false)
+  })
+})
+
+// ─── T3 egress lane: refreshDnsBlocks (#1016, spec §3.3) ─────────────────────
+describe('refreshDnsBlocks egress lane (#1016 §3.3)', () => {
+  type Np = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
+  let store: Map<string, Np>
+  const key = (ns: string, name: string) => `${ns}/${name}`
+  const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v))
+
+  function installStore() {
+    store = new Map()
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockReset()
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+      ({ name, namespace }: { name: string; namespace: string }) =>
+        store.has(key(namespace, name))
+          ? Promise.resolve(clone(store.get(key(namespace, name))))
+          : Promise.reject({ code: 404 })
+    )
+    mockNetworkingApi.createNamespacedNetworkPolicy.mockReset()
+    mockNetworkingApi.createNamespacedNetworkPolicy.mockImplementation(
+      ({ namespace, body }: { namespace: string; body: Np }) => {
+        const stored = clone(body)
+        stored.metadata = { ...stored.metadata, namespace, uid: 'np-uid', resourceVersion: '1' }
+        store.set(key(namespace, body.metadata.name), stored)
+        return Promise.resolve(stored)
+      }
+    )
+    mockNetworkingApi.replaceNamespacedNetworkPolicy.mockReset()
+    mockNetworkingApi.replaceNamespacedNetworkPolicy.mockImplementation(
+      ({ name, namespace, body }: { name: string; namespace: string; body: Np }) => {
+        const stored = clone(body)
+        stored.metadata = { ...stored.metadata, namespace, uid: 'np-uid', resourceVersion: '2' }
+        store.set(key(namespace, name), stored)
+        return Promise.resolve(stored)
+      }
+    )
+    mockNetworkingApi.deleteNamespacedNetworkPolicy.mockReset()
+    mockNetworkingApi.deleteNamespacedNetworkPolicy.mockImplementation(
+      ({ name, namespace }: { name: string; namespace: string }) => {
+        store.delete(key(namespace, name))
+        return Promise.resolve({})
+      }
+    )
+    // Label-selector GC sweeps are out of scope; an empty list keeps them inert.
+    mockNetworkingApi.listNamespacedNetworkPolicy.mockReset()
+    mockNetworkingApi.listNamespacedNetworkPolicy.mockResolvedValue({ items: [] })
+  }
+
+  const clearWrites = () => {
+    mockNetworkingApi.replaceNamespacedNetworkPolicy.mockClear()
+    mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
+  }
+  const writeCalls = () =>
+    mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.calls.length +
+    mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls.length
+
+  const egressSpec = {
+    workloads: [
+      { id: 'ui', type: 'deployment', image: 'ui:1', port: 8080 },
+      {
+        id: 'on',
+        type: 'deployment',
+        image: 'w:1',
+        port: 8080,
+        egressBindings: [{ egressClass: 'exact-host', dns: 'on.example.com', port: 443 }],
+      },
+      {
+        id: 'off',
+        type: 'deployment',
+        image: 'w:1',
+        port: 8080,
+        includeWhen: '{{inputs.offEnabled}}',
+        egressBindings: [{ egressClass: 'exact-host', dns: 'off.example.com', port: 443 }],
+      },
+    ],
+    inputs: { offEnabled: false },
+    ui: {
+      workloadRef: 'ui',
+      port: 8080,
+      egress: { external: [{ fqdn: 'current.example.com', port: 443 }] },
+    },
+  }
+
+  const classicRecipe = (overrides: Partial<WorkflowRecipeCRD> = {}) =>
+    makeRecipe({ spec: egressSpec, status: { phase: 'active' }, ...overrides } as never)
+
+  const okLookup = async () => ({
+    kind: 'ok' as const,
+    ipv4: ['93.184.216.34'],
+    ipv6: [],
+    ttlSeconds: 300,
+  })
+  type Lookup = () => Promise<Awaited<ReturnType<typeof okLookup>>>
+
+  function reconcilerWith(lookup: Lookup = okLookup) {
+    return new WorkflowRecipeReconciler(new k8s.KubeConfig(), undefined, {
+      fqdnLookup: lookup,
+    } as never)
+  }
+
+  /** A reconciler that has recorded one full pass for `recipe`. */
+  async function recorded(recipe: WorkflowRecipeCRD, lookup?: Lookup) {
+    const rec = reconcilerWith(lookup)
+    await rec.reconcile(structuredClone(recipe))
+    return rec
+  }
+
+  beforeEach(() => {
+    process.env.CLERUM_NETWORK_POLICY_ENFORCEMENT_CONFIRMED = 'true'
+    installStore()
+    mockCustomApi.listNamespacedCustomObject.mockReset()
+    mockCustomApi.listNamespacedCustomObject.mockResolvedValue({ items: [] })
+    mockCustomApi.getNamespacedCustomObject.mockReset()
+    mockCustomApi.getNamespacedCustomObject.mockImplementation(({ plural }: { plural?: string }) =>
+      plural === 'contexts'
+        ? Promise.reject({ code: 404 })
+        : Promise.resolve({
+            metadata: { uid: 'uid-123', resourceVersion: '1', labels: {} },
+            status: {},
+            spec: { mcpServers: [] },
+          })
+    )
+  })
+
+  it('returns stale with no writes when nothing was recorded', async () => {
+    const rec = newReconciler()
+    expect(await rec.refreshDnsBlocks(classicRecipe(), [])).toBe('stale')
+    expect(writeCalls()).toBe(0)
+  })
+
+  it('returns stale with no writes when the fingerprint no longer matches', async () => {
+    const rec = await recorded(classicRecipe())
+    clearWrites()
+    const changed = classicRecipe({ status: { phase: 'active', message: 'changed' } })
+    expect(await rec.refreshDnsBlocks(changed, [])).toBe('stale')
+    expect(writeCalls()).toBe(0)
+  })
+
+  it('returns none with no writes when the recorded block set is empty', async () => {
+    const recipe = makeRecipe({
+      metadata: { name: 'dry-run-workflow', namespace: 'sandbox-recipes', uid: 'uid-123' },
+      spec: {
+        dryRun: true,
+        workloads: [{ id: 'api', type: 'deployment', image: 'api:latest', port: 8080 }],
+        steps: [{ id: 'run', run: { type: 'snippet', language: 'typescript', code: 'return 1' } }],
+      },
+      status: { phase: 'candidate' },
+    } as Partial<WorkflowRecipeCRD>)
+    const rec = newReconciler()
+    ;(rec as unknown as { workflowReconciler: unknown }).workflowReconciler = {
+      reconcile: vi.fn(),
+      validateWorkflowSpec: vi.fn().mockReturnValue(undefined),
+    }
+    await rec.reconcile(structuredClone(recipe))
+    expect([...(rec.dnsBlockRecordFor('dry-run-workflow')?.blocks ?? [])]).toEqual([])
+    clearWrites()
+    expect(await rec.refreshDnsBlocks(recipe, [])).toBe('none')
+    expect(writeCalls()).toBe(0)
+  })
+
+  it('returns none with no writes when the live recipe is being deleted', async () => {
+    const recipe = classicRecipe()
+    const rec = await recorded(recipe)
+    clearWrites()
+    mockCustomApi.getNamespacedCustomObject.mockResolvedValue({
+      metadata: { uid: 'uid-123', deletionTimestamp: '2026-01-01T00:00:00Z' },
+    })
+    expect(await rec.refreshDnsBlocks(recipe, [])).toBe('none')
+    expect(writeCalls()).toBe(0)
+  })
+
+  it('returns stale with no writes when a policy now rejects the recipe', async () => {
+    const recipe = classicRecipe()
+    const rec = await recorded(recipe)
+    clearWrites()
+    const denyUi = {
+      apiVersion: 'clerum.io/v1alpha1',
+      kind: 'WorkflowRecipePolicy',
+      metadata: { name: 'deny-ui', namespace: 'sandbox-recipes' },
+      spec: { detection: { imageDenylist: ['ui:*'] } },
+    } as never
+    expect(await rec.refreshDnsBlocks(recipe, [denyUi])).toBe('stale')
+    expect(writeCalls()).toBe(0)
+  })
+
+  it('skips the policy gate for an already policy-failed recipe, like the full pass', async () => {
+    const denyUi = {
+      apiVersion: 'clerum.io/v1alpha1',
+      kind: 'WorkflowRecipePolicy',
+      metadata: { name: 'deny-ui', namespace: 'sandbox-recipes' },
+      spec: { detection: { imageDenylist: ['ui:*'] } },
+    } as never
+    const failed = classicRecipe({ status: { phase: 'failed', message: 'Policy violation: x' } })
+    const lane = reconcilerWith()
+    const { dnsBlockFingerprint } = await import('./dnsBlockFingerprint')
+    const internals = lane as unknown as {
+      config: never
+      dnsBlockRecordMap: Map<string, unknown>
+    }
+    internals.dnsBlockRecordMap.set('test-recipe', {
+      fingerprint: dnsBlockFingerprint(failed, internals.config),
+      blocks: new Set(['recipe_egress']),
+    })
+    expect(await lane.refreshDnsBlocks(failed, [denyUi])).toBe('clean')
+  })
+
+  it('applies the includeWhen filter to a clone without mutating the input', async () => {
+    const recipe = classicRecipe()
+    const rec = await recorded(recipe)
+    installStore() // pre-state: no policies
+    const snapshot = structuredClone(recipe)
+    expect(await rec.refreshDnsBlocks(recipe, [])).toBe('clean')
+    expect(recipe).toEqual(snapshot)
+    const names = [...store.keys()]
+    expect(names).toContain(
+      key('sandbox-recipes', rb.workloadEgressPolicyName('test-recipe', 'on'))
+    )
+    expect(
+      names.filter(n => n.endsWith(`/${rb.workloadEgressPolicyName('test-recipe', 'off')}`))
+    ).toEqual([])
+  })
+
+  it('contracts before it resolves DNS', async () => {
+    const order: string[] = []
+    const lookup = vi.fn(async () => {
+      order.push('lookup')
+      return okLookup()
+    })
+    const recipe = classicRecipe()
+    const rec = await recorded(recipe, lookup)
+    // Policies exist now, so the contraction has something to read and narrow.
+    const inner = mockNetworkingApi.readNamespacedNetworkPolicy.getMockImplementation()!
+    mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation((a: never) => {
+      order.push('read')
+      return inner(a)
+    })
+    order.length = 0
+    await rec.refreshDnsBlocks(recipe, [])
+    expect(order).toContain('lookup')
+    expect(order.indexOf('read')).toBeGreaterThanOrEqual(0)
+    expect(order.indexOf('read')).toBeLessThan(order.indexOf('lookup'))
+  })
+
+  it('replays runtime_http_egress with (namespace, name, uid, spec)', async () => {
+    const recipe = makeRecipe({
+      spec: {
+        runtimeEgress: { http: { allowedHosts: ['api.example.com'] } },
+        steps: [
+          {
+            id: 'snippet',
+            run: {
+              type: 'snippet',
+              language: 'typescript',
+              code: 'return 1',
+              capabilities: { http: { allowedHosts: ['api.example.com'] } },
+            },
+          },
+        ],
+      },
+      status: { phase: 'active', workflowExecution: { phase: 'running' } },
+    } as Partial<WorkflowRecipeCRD>)
+    const refresh = vi.fn().mockResolvedValue({ conflicts: [], retryPending: false })
+    const rec = reconcilerWith()
+    ;(rec as unknown as { workflowReconciler: unknown }).workflowReconciler = {
+      reconcile: vi.fn(),
+      validateWorkflowSpec: vi.fn().mockReturnValue(undefined),
+      ensureMcpHostRuntimeCredentials: vi.fn(),
+      refreshRuntimeHttpEgressNetworkPolicies: refresh,
+    }
+    // The mocked WorkflowReconciler notes no blocks, so seed the record a steady pass writes.
+    const { dnsBlockFingerprint } = await import('./dnsBlockFingerprint')
+    const internals = rec as unknown as {
+      config: never
+      dnsBlockRecordMap: Map<string, unknown>
+    }
+    internals.dnsBlockRecordMap.set('test-recipe', {
+      fingerprint: dnsBlockFingerprint(recipe, internals.config),
+      blocks: new Set(['runtime_http_egress']),
+    })
+    expect(await rec.refreshDnsBlocks(recipe, [])).toBe('clean')
+    expect(refresh).toHaveBeenCalledTimes(1)
+    expect(refresh).toHaveBeenCalledWith(
+      'sandbox-recipes',
+      'test-recipe',
+      'uid-123',
+      expect.objectContaining({ runtimeEgress: recipe.spec.runtimeEgress })
+    )
+    expect(refresh.mock.calls[0]).toHaveLength(4)
+  })
+
+  it('rethrows a DNS failure after the contraction already applied', async () => {
+    const recipe = classicRecipe()
+    // Record with a working resolver so policies exist, then fail DNS in the lane.
+    let fail = false
+    const lookup = vi.fn(async () => {
+      if (fail) throw new Error('dns down')
+      return okLookup()
+    })
+    const rec = await recorded(recipe, lookup)
+    const uiPolicy = key('sandbox-ui', 'ui-egress-test-recipe')
+    expect(store.has(uiPolicy)).toBe(true)
+    // Widen the live policy with a stale destination so the contraction must rewrite it.
+    store.get(uiPolicy)!.spec.egress.push({
+      to: [{ ipBlock: { cidr: '203.0.113.9/32' } }],
+      ports: [{ protocol: 'TCP', port: 443 }],
+    })
+    fail = true
+    clearWrites()
+    const reads = mockNetworkingApi.readNamespacedNetworkPolicy
+    reads.mockClear()
+    await expect(rec.refreshDnsBlocks(recipe, [])).rejects.toThrow('dns down')
+    expect(reads).toHaveBeenCalled()
+    const readOrder = reads.mock.invocationCallOrder[0]
+    const lookupOrder = lookup.mock.invocationCallOrder[lookup.mock.invocationCallOrder.length - 1]
+    expect(readOrder).toBeLessThan(lookupOrder)
+    // The contraction rewrote the live UI policy before the lookup rejected.
+    expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalled()
+    expect(
+      mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.invocationCallOrder[0]
+    ).toBeLessThan(lookupOrder)
+  })
+
+  describe('parity with the full pass', () => {
+    const egressPolicies = () =>
+      Object.fromEntries(
+        [...store]
+          .filter(([k]) => /\/(ui-egress-|.*-egress)/.test(k))
+          .map(([k, v]) => [k, { spec: v.spec, annotations: v.metadata?.annotations }])
+      )
+
+    async function parity(recipe: WorkflowRecipeCRD, wire: (r: WorkflowRecipeReconciler) => void) {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(new Date('2026-06-01T00:00:00Z'))
+      try {
+        installStore()
+        const a = reconcilerWith()
+        wire(a)
+        await a.reconcile(structuredClone(recipe))
+        const full = egressPolicies()
+
+        installStore()
+        const b = reconcilerWith()
+        wire(b)
+        await b.reconcile(structuredClone(recipe))
+        installStore() // reset to the pre-state
+        expect(await b.refreshDnsBlocks(recipe, [])).toBe('clean')
+        const lane = egressPolicies()
+        expect(Object.keys(full).length).toBeGreaterThan(0)
+        expect(lane).toEqual(full)
+      } finally {
+        vi.useRealTimers()
+      }
+    }
+
+    it('matches for a classic recipe with external egress', async () => {
+      await parity(classicRecipe(), () => {})
+    })
+
+    it('matches for an SDK no-run workflow that falls through to deployWorkflowWorkloads', async () => {
+      const recipe = makeRecipe({
+        spec: {
+          ...egressSpec,
+          steps: [
+            { id: 'run', run: { type: 'snippet', language: 'typescript', code: 'return 1' } },
+          ],
+        },
+        status: { phase: 'candidate' },
+      } as Partial<WorkflowRecipeCRD>)
+      await parity(recipe, r => {
+        ;(r as unknown as { workflowReconciler: unknown }).workflowReconciler = {
+          reconcile: vi
+            .fn()
+            .mockResolvedValue({ phase: 'active', message: 'ok', workflowPhase: 'running' }),
+          validateWorkflowSpec: vi.fn().mockReturnValue(undefined),
+          ensureMcpHostRuntimeCredentials: vi.fn(),
+          refreshRuntimeHttpEgressNetworkPolicies: vi.fn(),
+        }
+      })
+    })
   })
 })
