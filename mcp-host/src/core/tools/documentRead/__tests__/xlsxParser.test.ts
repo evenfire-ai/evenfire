@@ -3,6 +3,7 @@ import ExcelJS from 'exceljs'
 import type { XlsxJob, XlsxOutcome } from '../types'
 import { runDocumentJob } from '../workerRunner'
 import {
+  cachedFormulaWorkbook,
   cfbBytes,
   continuationWorkbook,
   documentLimits,
@@ -286,4 +287,92 @@ describe('XLSX continuation', () => {
     // Building and parsing the 400k-cell workbook takes about 1 s alone and
     // several under a full-suite load; the bound is the worker's, not vitest's.
   }, 20_000)
+})
+
+describe('XLSX empty cached formula results (zach88 M5)', () => {
+  it('reads an empty cached string result as an empty cell through the real worker', async () => {
+    const outcome = await runDocumentJob(xlsxJob(await cachedFormulaWorkbook()))
+    // The column of empty results below the data adds no rows.
+    expect(outcome).toEqual({
+      ok: true,
+      sheetNames: ['Data'],
+      sheets: [
+        {
+          name: 'Data',
+          startRow: 1,
+          rows: [['label', null, '[formula] =1+1', 'x']],
+          truncated: false,
+        },
+      ],
+    })
+  })
+
+  it('reads a self-closing empty result as an empty cell', async () => {
+    const outcome = await parseDirect(
+      await cachedFormulaWorkbook(xml => xml.replaceAll('<v></v>', '<v/>'))
+    )
+    expect(outcome).toMatchObject({
+      ok: true,
+      sheets: [{ rows: [['label', null, '[formula] =1+1', 'x']] }],
+    })
+  })
+})
+
+async function textWorkbook(rows: string[][]): Promise<Buffer> {
+  const workbook = new ExcelJS.Workbook()
+  workbook.addWorksheet('Text').addRows(rows)
+  return Buffer.from(await workbook.xlsx.writeBuffer())
+}
+
+describe('XLSX serialized size budget (zach88 H1)', () => {
+  it('stops before the row that would take the outcome over maxExtractedChars', async () => {
+    const limits = documentLimits()
+    const wide = Array.from({ length: 5_000 }, (_, row) =>
+      Array.from({ length: 20 }, (_, column) => `${row}:${column}:${'x'.repeat(300)}`)
+    )
+    const bytes = await textWorkbook(wide)
+    const first = (await runDocumentJob(
+      xlsxJob(bytes, { limits: { ...limits, timeoutMs: 30_000 } })
+    )) as Extract<XlsxOutcome, { ok: true }>
+    expect(first.ok).toBe(true)
+    expect(first.stoppedBy).toBe('max_extracted_chars')
+    const rows = first.sheets[0]!.rows
+    // The rows the budget admits, each counted as it serializes.
+    const rowChars = rows.reduce((sum, row) => sum + JSON.stringify(row).length, 0)
+    expect(rowChars).toBeLessThanOrEqual(limits.maxExtractedChars)
+    expect(rowChars + JSON.stringify(wide[rows.length]).length).toBeGreaterThan(
+      limits.maxExtractedChars
+    )
+    // The whole outcome is the rows plus separators and a fixed sheet header.
+    expect(JSON.stringify(first).length).toBeLessThanOrEqual(
+      limits.maxExtractedChars + rows.length + 512
+    )
+    expect(first.next).toEqual({ sheetIndex: 0, row: rows.length + 1 })
+
+    const second = (await runDocumentJob(
+      xlsxJob(bytes, { start: first.next!, limits: { ...limits, timeoutMs: 30_000 } })
+    )) as Extract<XlsxOutcome, { ok: true }>
+    expect(second.sheets[0]!.startRow).toBe(rows.length + 1)
+    expect(second.sheets[0]!.rows[0]![0]).toBe(wide[rows.length]![0])
+  }, 60_000)
+
+  it('refuses a first row that alone exceeds maxExtractedChars as row_width', async () => {
+    const limits = documentLimits({ maxExtractedChars: 100 })
+    const outcome = await runDocumentJob(
+      xlsxJob(await textWorkbook([['y'.repeat(200)], ['short']]), { limits })
+    )
+    expect(outcome).toEqual({ ok: false, reason: 'document_limits_exceeded', limit: 'row_width' })
+
+    // Witness: a narrow first row under the same limit is read, and the wide
+    // second row becomes the continuation.
+    const narrow = await runDocumentJob(
+      xlsxJob(await textWorkbook([['short'], ['y'.repeat(200)]]), { limits })
+    )
+    expect(narrow).toMatchObject({
+      ok: true,
+      sheets: [{ rows: [['short']], truncated: true }],
+      next: { sheetIndex: 0, row: 2 },
+      stoppedBy: 'max_extracted_chars',
+    })
+  })
 })

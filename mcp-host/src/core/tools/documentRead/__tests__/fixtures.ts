@@ -1,5 +1,6 @@
 import { createCanvas } from '@napi-rs/canvas'
 import ExcelJS from 'exceljs'
+import JSZip from 'jszip'
 import { createHash, randomUUID } from 'node:crypto'
 import { PDFDocument, StandardFonts } from 'pdf-lib'
 import { validateIncomingAttachments } from '../../../../agent/incomingAttachments'
@@ -242,6 +243,39 @@ export async function richHyperlinkWorkbook(): Promise<Buffer> {
   } as unknown as ExcelJS.CellHyperlinkValue
   sheet.getCell('B1').value = 'after link'
   return Buffer.from(await workbook.xlsx.writeBuffer())
+}
+
+const EMPTY_RESULT = 'EMPTY_RESULT'
+const NO_RESULT = 'NO_RESULT'
+
+/**
+ * `Data!A1:D1` holds a label, `=""` with an empty cached result, `=1+1` with
+ * no cached result and `="x"` cached as `x`; `A2:A4` hold `=""` with empty
+ * cached results below the data. ExcelJS cannot write an empty `<v>`, so the
+ * sheet XML is rewritten after writing; `rewrite` edits it further.
+ */
+export async function cachedFormulaWorkbook(
+  rewrite: (sheetXml: string) => string = xml => xml
+): Promise<Buffer> {
+  const workbook = new ExcelJS.Workbook()
+  const sheet = workbook.addWorksheet('Data')
+  sheet.getCell('A1').value = 'label'
+  sheet.getCell('B1').value = { formula: '""', result: EMPTY_RESULT }
+  sheet.getCell('C1').value = { formula: '1+1', result: NO_RESULT }
+  sheet.getCell('D1').value = { formula: '"x"', result: 'x' }
+  for (const address of ['A2', 'A3', 'A4']) {
+    sheet.getCell(address).value = { formula: '""', result: EMPTY_RESULT }
+  }
+  const zip = await JSZip.loadAsync(await workbook.xlsx.writeBuffer())
+  const path = 'xl/worksheets/sheet1.xml'
+  const written = await zip.file(path)!.async('string')
+  const empty = `<v>${EMPTY_RESULT}</v>`
+  const absent = `<v>${NO_RESULT}</v>`
+  if (written.split(empty).length !== 5 || written.split(absent).length !== 2) {
+    throw new Error('Unexpected cached formula XML')
+  }
+  zip.file(path, rewrite(written.replaceAll(empty, '<v></v>').replace(absent, '')))
+  return zip.generateAsync({ type: 'nodebuffer' })
 }
 
 /** `1e20` in A1, with a date format when `dateFormatted` (an Invalid Date). */

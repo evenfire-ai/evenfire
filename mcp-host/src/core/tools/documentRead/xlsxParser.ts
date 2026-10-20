@@ -3,7 +3,8 @@
  *
  * Numbers, booleans and strings retain their values; empty cells become null.
  * Formulas use cached results, or `[formula] =<formula>` without one (never
- * evaluation), dates become ISO 8601,
+ * evaluation); an empty cached string result is an empty cell. Dates become
+ * ISO 8601,
  * rich text is concatenated, hyperlinks use display text, and errors use their
  * error strings. ExcelJS resolves shared strings. Merged values appear only
  * on their master cells. Strings are returned whole: the Tool redacts each
@@ -15,6 +16,8 @@
  * complete rows and charges their full width, including null gaps.
  */
 import ExcelJS from 'exceljs'
+import JSZip from 'jszip'
+import { SaxesParser } from 'saxes'
 import type { XlsxCellValue, XlsxJob, XlsxOutcome, XlsxSheetResult } from './types'
 import { checkZipExpansion } from './zipLimits'
 
@@ -27,6 +30,17 @@ const ZIP_MAGIC = [0x50, 0x4b, 0x03, 0x04]
  * the call fails as `document_parse_failed` rather than as a worker defect.
  */
 class UnreadableCellError extends Error {}
+
+/**
+ * A workbook part that cannot be found or parsed while reading cached formula
+ * results: a property of the file, like a failed load.
+ */
+class UnreadablePartError extends Error {}
+
+/** Addresses of formula cells whose cached result is an empty string. */
+type EmptyResults = ReadonlySet<string>
+
+const NO_EMPTY_RESULTS: EmptyResults = new Set()
 
 function computedValue(value: ExcelJS.CellValue): XlsxCellValue {
   if (value === null || value === undefined || value === '') return null
@@ -45,34 +59,153 @@ function computedValue(value: ExcelJS.CellValue): XlsxCellValue {
   throw new Error('Unsupported XLSX cell value')
 }
 
-function cellValue(cell: ExcelJS.Cell): XlsxCellValue {
+function hasNoResult(cell: ExcelJS.Cell): boolean {
+  return cell.result === undefined || cell.result === null
+}
+
+function cellValue(cell: ExcelJS.Cell, emptyResults: EmptyResults): XlsxCellValue {
   if (cell.isMerged && cell.master !== cell) return null
   // ExcelJS 4.4's formula value getter omits falsy results; the dedicated
   // cached-result getter preserves both 0 and false, including shared formulas.
   if (cell.type === ExcelJS.ValueType.Formula) {
-    return cell.result === undefined || cell.result === null
-      ? '[formula] =' + cell.formula
-      : computedValue(cell.result)
+    if (!hasNoResult(cell)) return computedValue(cell.result)
+    return emptyResults.has(cell.address) ? null : '[formula] =' + cell.formula
   }
   return computedValue(cell.value)
 }
 
-function lastNonEmptyRow(worksheet: ExcelJS.Worksheet): number {
+function lastNonEmptyRow(worksheet: ExcelJS.Worksheet, emptyResults: EmptyResults): number {
   let lastRow = 0
   worksheet.eachRow(row => {
     let hasValue = false
     row.eachCell(cell => {
-      if (!hasValue && cellValue(cell) !== null) hasValue = true
+      if (!hasValue && cellValue(cell, emptyResults) !== null) hasValue = true
     })
     if (hasValue) lastRow = row.number
   })
   return lastRow
 }
 
-function readRow(row: ExcelJS.Row | undefined): XlsxCellValue[] {
+function hasFormulaWithoutResult(worksheet: ExcelJS.Worksheet): boolean {
+  let found = false
+  worksheet.eachRow(row => {
+    row.eachCell(cell => {
+      if (!found && cell.type === ExcelJS.ValueType.Formula && hasNoResult(cell)) found = true
+    })
+  })
+  return found
+}
+
+async function readPart(
+  zip: JSZip,
+  path: string,
+  listen: (parser: SaxesParser) => void
+): Promise<void> {
+  const entry = zip.file(path)
+  if (!entry) throw new UnreadablePartError()
+  let xml: string
+  try {
+    xml = await entry.async('string')
+  } catch {
+    throw new UnreadablePartError()
+  }
+  const parser = new SaxesParser()
+  let malformed = false
+  parser.on('error', () => {
+    malformed = true
+  })
+  listen(parser)
+  parser.write(xml).close()
+  if (malformed) throw new UnreadablePartError()
+}
+
+/**
+ * ExcelJS 4.4 drops an empty cached result (`<v></v>`), so a formula whose
+ * result is an empty string looks like one with no cached result at all. The
+ * raw sheet XML tells them apart. It follows ExcelJS's own reading: element
+ * and attribute names as written, `r` as the cell address, and the sheet part
+ * resolved from the workbook relationships the same way. ExcelJS has already
+ * loaded these parts with the same XML parser, so a part this scan cannot
+ * read means the two readings disagree; it fails as `document_parse_failed`.
+ */
+async function emptyStringResults(
+  bytes: Uint8Array,
+  worksheets: readonly ExcelJS.Worksheet[]
+): Promise<Map<ExcelJS.Worksheet, EmptyResults>> {
+  let zip: JSZip
+  try {
+    zip = await JSZip.loadAsync(Uint8Array.from(bytes))
+  } catch {
+    throw new UnreadablePartError()
+  }
+  const relationIdBySheet = new Map<string, string>()
+  await readPart(zip, 'xl/workbook.xml', parser => {
+    parser.on('opentag', node => {
+      if (node.name !== 'sheet') return
+      const name = node.attributes.name
+      const relationId = node.attributes['r:id']
+      if (typeof name !== 'string' || typeof relationId !== 'string') return
+      if (relationIdBySheet.has(name)) throw new UnreadablePartError()
+      relationIdBySheet.set(name, relationId)
+    })
+  })
+  const targetByRelation = new Map<string, string>()
+  await readPart(zip, 'xl/_rels/workbook.xml.rels', parser => {
+    parser.on('opentag', node => {
+      if (node.name !== 'Relationship') return
+      const id = node.attributes.Id
+      const target = node.attributes.Target
+      if (typeof id === 'string' && typeof target === 'string') targetByRelation.set(id, target)
+    })
+  })
+
+  const results = new Map<ExcelJS.Worksheet, EmptyResults>()
+  for (const worksheet of worksheets) {
+    const relationId = relationIdBySheet.get(worksheet.name)
+    const target = relationId === undefined ? undefined : targetByRelation.get(relationId)
+    if (target === undefined) throw new UnreadablePartError()
+    const refs = new Set<string>()
+    let cell: { ref: string | undefined; str: boolean; formula: boolean; value?: string } | null =
+      null
+    let inValue = false
+    await readPart(zip, `xl/${target.replace(/^(\s|\/xl\/)+/, '')}`, parser => {
+      parser.on('opentag', node => {
+        if (node.name === 'c') {
+          const ref = node.attributes.r
+          cell = {
+            ref: typeof ref === 'string' ? ref : undefined,
+            str: node.attributes.t === 'str',
+            formula: false,
+          }
+        } else if (cell && node.name === 'f') {
+          cell.formula = true
+        } else if (cell && node.name === 'v') {
+          cell.value = ''
+          inValue = true
+        }
+      })
+      parser.on('text', text => {
+        if (cell && inValue) cell.value += text
+      })
+      parser.on('closetag', node => {
+        if (node.name === 'v') inValue = false
+        if (node.name !== 'c' || !cell) return
+        if (cell.str && cell.formula && cell.value === '') {
+          if (cell.ref === undefined) throw new UnreadablePartError()
+          refs.add(cell.ref)
+        }
+        cell = null
+      })
+    })
+    results.set(worksheet, refs)
+  }
+  return results
+}
+
+function readRow(row: ExcelJS.Row | undefined, emptyResults: EmptyResults): XlsxCellValue[] {
   const values: XlsxCellValue[] = []
   row?.eachCell((cell, column) => {
-    const value = cellValue(cell)
+    const value = cellValue(cell, emptyResults)
     if (value === null) return
     while (values.length < column - 1) values.push(null)
     values.push(value)
@@ -108,16 +241,34 @@ export async function parseXlsx(job: XlsxJob): Promise<XlsxOutcome> {
     return { ok: false, reason: 'document_parse_failed' }
   }
   try {
-    return readWorkbook(job, workbook)
+    const selection = selectWorksheets(job, workbook)
+    if ('reason' in selection) return selection
+    // Only a formula without a cached result can hide an empty string result.
+    const pending = selection.worksheets.filter(hasFormulaWithoutResult)
+    const emptyResults =
+      pending.length === 0
+        ? new Map<ExcelJS.Worksheet, EmptyResults>()
+        : await emptyStringResults(job.bytes, pending)
+    return readWorkbook(job, selection, emptyResults)
   } catch (error) {
-    if (error instanceof UnreadableCellError) {
+    if (error instanceof UnreadableCellError || error instanceof UnreadablePartError) {
       return { ok: false, reason: 'document_parse_failed' }
     }
     throw error
   }
 }
 
-function readWorkbook(job: XlsxJob, workbook: ExcelJS.Workbook): XlsxOutcome {
+interface WorksheetSelection {
+  sheetNames: string[]
+  sheetIndex: number
+  row: number
+  worksheets: ExcelJS.Worksheet[]
+}
+
+function selectWorksheets(
+  job: XlsxJob,
+  workbook: ExcelJS.Workbook
+): WorksheetSelection | Extract<XlsxOutcome, { ok: false }> {
   const worksheets = workbook.worksheets
   // Hidden and veryHidden sheets are included in workbook order.
   const sheetNames = worksheets.map(worksheet => worksheet.name)
@@ -137,14 +288,29 @@ function readWorkbook(job: XlsxJob, workbook: ExcelJS.Workbook): XlsxOutcome {
   }
   if (worksheets.length === 0) return { ok: false, reason: 'document_empty' }
   if (sheetIndex >= worksheets.length) return { ok: false, reason: 'invalid_range' }
+  return {
+    sheetNames,
+    sheetIndex,
+    row,
+    worksheets: worksheets.slice(sheetIndex, namedIndex === null ? undefined : sheetIndex + 1),
+  }
+}
 
-  const selection = worksheets
-    .slice(sheetIndex, namedIndex === null ? undefined : sheetIndex + 1)
-    .map((worksheet, offset) => ({
+function readWorkbook(
+  job: XlsxJob,
+  { sheetNames, sheetIndex, row, worksheets }: WorksheetSelection,
+  emptyResults: ReadonlyMap<ExcelJS.Worksheet, EmptyResults>
+): XlsxOutcome {
+  const selection = worksheets.map((worksheet, offset) => {
+    // A sheet that was not scanned has no formula without a cached result.
+    const empty = emptyResults.get(worksheet) ?? NO_EMPTY_RESULTS
+    return {
       worksheet,
+      emptyResults: empty,
       sheetIndex: sheetIndex + offset,
-      lastRow: lastNonEmptyRow(worksheet),
-    }))
+      lastRow: lastNonEmptyRow(worksheet, empty),
+    }
+  })
   // A selection with no computed values has no content. A named non-empty sheet
   // may still have no rows remaining at its requested cursor.
   if (selection.every(sheet => sheet.lastRow === 0)) {
@@ -166,7 +332,7 @@ function readWorkbook(job: XlsxJob, workbook: ExcelJS.Workbook): XlsxOutcome {
       truncated: false,
     }
     for (let rowNumber = startRow; rowNumber <= selected.lastRow; rowNumber += 1) {
-      const values = readRow(selected.worksheet.findRow(rowNumber))
+      const values = readRow(selected.worksheet.findRow(rowNumber), selected.emptyResults)
       const rowChars = JSON.stringify(values).length
       // A first row over the character limit can never be returned whole;
       // cells are not cut, because Host redaction needs complete values.
