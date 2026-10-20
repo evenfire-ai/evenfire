@@ -338,8 +338,14 @@ function buildAttachmentFileReference(fields) {
   )
 }
 
-/** Build a reference for a Global Files resource at an exact version. */
+/**
+ * Build a reference for a Global Files resource at an exact version. It names
+ * only the text reader (`text` or `none`): the document reader reads
+ * attachments, never GFS, and a Host that predates it accepts only those two
+ * readers, so a new Desktop works with an old Host.
+ */
 function buildGfsFileReference(fields) {
+  const classification = fields.classification ?? {}
   return buildReference(
     {
       kind: 'gfs',
@@ -348,7 +354,13 @@ function buildGfsFileReference(fields) {
       gfsUri: fields.gfsUri,
       version: fields.version,
     },
-    fields,
+    {
+      ...fields,
+      classification: {
+        ...classification,
+        reader: classification.textReadable === true ? 'text' : 'none',
+      },
+    },
     fields.digestHex === undefined ? undefined : { algorithm: 'sha256', hex: fields.digestHex }
   )
 }
