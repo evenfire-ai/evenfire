@@ -3,9 +3,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { SingleValueEditDialog } from '@clerum/frontend-components'
 import {
+  GFS_MOVE_MAX_NETWORK_ATTEMPTS,
   GFS_UPLOAD_NAME_EXHAUSTED_MESSAGE,
   GFS_UPLOAD_NAME_RETRY_LIMIT,
-  GFS_MOVE_MAX_NETWORK_ATTEMPTS,
   createGfsUploadNameReservationBook,
   decideDragPathStructure,
   gfsUploadNameRetryDecision,
@@ -1360,7 +1360,12 @@ export function GfsBrowser(): React.JSX.Element {
     movingResourceRef.current = source.resourceId
     setMovingResourceId(source.resourceId)
     try {
-      const occupiedNames = new Set<string>()
+      // Seed the ladder with the destination's known children (the same cache
+      // the confirmation suggestion came from) so the first 409 skips every
+      // already-taken numbered name instead of guessing it blind.
+      const occupiedNames = new Set<string>(
+        (childCacheRef.current.get(destination.resourceId)?.items ?? []).map(item => item.name)
+      )
       let moveName = source.name
       let moved = false
       let moveResult: unknown
@@ -1579,7 +1584,9 @@ export function GfsBrowser(): React.JSX.Element {
     }
   }
 
-  function structureDenialMessage(reason: 'self' | 'descendant' | 'same-parent' | 'root-source' | 'cross-drive'): string {
+  function structureDenialMessage(
+    reason: 'self' | 'descendant' | 'same-parent' | 'root-source' | 'cross-drive'
+  ): string {
     switch (reason) {
       case 'same-parent':
         return 'This item is already in this folder.'

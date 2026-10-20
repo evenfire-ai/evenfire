@@ -3843,7 +3843,7 @@ describe('GfsBrowser — folder drag-and-drop', () => {
     mockApiSend.mockReset()
   })
 
-  function folderPage() {
+  function folderPage(archiveChildren: ReturnType<typeof child>[] = []) {
     const archive = child('archive', 'directory', 1)
     const projects = child('projects', 'directory', 2)
     mockApiGet.mockImplementation(async (path: string) => {
@@ -3856,6 +3856,9 @@ describe('GfsBrowser — folder drag-and-drop', () => {
           items: [archive, projects],
           nextCursor: null,
         }
+      }
+      if (path === '/api/v1/gfs/resources/id-1/children') {
+        return { items: archiveChildren, nextCursor: null }
       }
       return { items: [], nextCursor: null }
     })
@@ -4046,5 +4049,62 @@ describe('GfsBrowser — folder drag-and-drop', () => {
       { drive: 'main' }
     )
     expect(await screen.findByText('Moved "projects" to "archive" as "projects (2)".')).toBeTruthy()
+  })
+
+  it('a cached destination seeds the ladder so the first 409 jumps to the first free numbered name', async () => {
+    // RP-003: archive is prefetched holding projects, projects (1) and
+    // projects (2). The blind ladder burned all three attempts on taken
+    // names and ended on "The destination changed". Seeded from the same
+    // cache the suggestion came from, attempt two lands on projects (3).
+    folderPage([
+      child('projects', 'directory', 3),
+      child('projects (1)', 'directory', 4),
+      child('projects (2)', 'directory', 5),
+    ])
+    const actualApi = await vi.importActual<typeof import('@lib/api')>('@lib/api')
+    const conflict = () => {
+      const text = JSON.stringify({
+        error: { code: 'already_exists', message: 'a resource with this name already exists' },
+      })
+      return actualApi.formatApiError(
+        new Response(text, { status: 409, statusText: 'Conflict' }),
+        text
+      )
+    }
+    mockApiSend.mockRejectedValueOnce(conflict()).mockResolvedValueOnce({
+      ok: true,
+      data: { resourceId: 'id-2', version: 1 },
+    })
+    renderBrowser()
+
+    await waitFor(() => expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull())
+    // Wait until the archive prefetch has landed in the children cache.
+    await waitFor(() =>
+      expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resources/id-1/children', {
+        drive: 'main',
+      })
+    )
+    const list = screen.getByRole('list', { name: 'Current folder resources' })
+    const projectsRow = within(list).getByText('projects').closest('li')!
+    const archiveRow = within(list).getByText('archive').closest('li')!
+
+    dragAndDrop(projectsRow, archiveRow)
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Move folder projects to archive',
+    })
+    // The suggestion is derived from the same cached names.
+    expect(within(dialog).getByText(/projects \(3\)/)).toBeTruthy()
+    fireEvent.click(within(dialog).getByRole('checkbox'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move', exact: true }))
+
+    await waitFor(() => expect(mockApiSend).toHaveBeenCalledTimes(2))
+    expect(mockApiSend).toHaveBeenNthCalledWith(
+      2,
+      'PATCH',
+      '/api/v1/gfs/resources/id-2',
+      { drive: 'main', newParentId: 'id-1', ifMatch: 0, newName: 'projects (3)' },
+      { drive: 'main' }
+    )
+    expect(await screen.findByText('Moved "projects" to "archive" as "projects (3)".')).toBeTruthy()
   })
 })

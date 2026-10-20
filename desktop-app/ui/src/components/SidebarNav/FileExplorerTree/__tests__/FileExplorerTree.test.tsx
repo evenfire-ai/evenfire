@@ -859,6 +859,97 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     await screen.findByRole('dialog', { name: 'Move folder A to B' })
   })
 
+  it('seeds the numbered-name ladder from the destination’s cached children (RP-003)', async () => {
+    // B is expanded and its children — A, A (1), A (2) — are in the shared
+    // children cache. The blind ladder burned all three attempts on taken
+    // names and ended on "The destination changed". Seeded from the cache,
+    // the first 409 jumps straight to A (3), and the confirmation suggests
+    // that same name.
+    const moveResource = vi.fn(
+      async (
+        _resourceId: string,
+        _destinationId: string,
+        _drive?: string,
+        _ifMatch?: number,
+        newName?: string
+      ) => {
+        if (
+          newName === undefined ||
+          newName === 'A' ||
+          newName === 'A (1)' ||
+          newName === 'A (2)'
+        ) {
+          throw new Error('409 Conflict: a resource with this name already exists httpStatus=409')
+        }
+        return { resourceId: 'foldera', version: 9 }
+      }
+    )
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folderb') return { held: ['read', 'write'] }
+      return { held: ['read', 'write', 'delete'] }
+    })
+    const resolve = vi.fn(async (uri: string) => {
+      const id = uri.split('/').pop()
+      const parent = id === 'grand' ? null : 'grand'
+      const name = id === 'foldera' ? 'A' : id === 'folderb' ? 'B' : 'Grand'
+      return {
+        drive: 'main',
+        resourceId: id === 'grand' ? 'grand' : id,
+        parentResourceId: parent,
+        name,
+        kind: 'directory',
+        version: id === 'foldera' ? 4 : 1,
+      }
+    })
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('foldera', 'A', 'directory', { version: 4 }),
+          accessibleResource('folderb', 'B', 'directory'),
+        ])
+      ),
+      listChildren: vi.fn(async (resourceId: string) => {
+        if (resourceId === 'folderb') {
+          return listChildrenPage([
+            childView('a-dup', 'A', 'directory'),
+            childView('a-1', 'A (1)', 'directory'),
+            childView('a-2', 'A (2)', 'directory'),
+          ])
+        }
+        return listChildrenPage([])
+      }),
+      affordances,
+      resolve,
+      moveResource,
+    })
+    const { pushToast } = renderTreeWithSession()
+
+    const rowA = await screen.findByRole('button', { name: 'A' })
+    const rowB = await screen.findByRole('button', { name: 'B' })
+    // Expand B so its children load into the shared children cache — the
+    // production path that makes the destination's names known.
+    fireEvent.click(screen.getByRole('button', { name: 'Expand B' }))
+    await screen.findByRole('button', { name: 'A (1)' })
+
+    const dataTransfer = dragTypes()
+    const aRow = rowA.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    fireEvent.dragStart(rowA, { dataTransfer })
+    fireEvent.dragOver(bRow, { dataTransfer })
+    fireEvent.drop(bRow, { dataTransfer })
+    fireEvent.dragEnd(aRow, { dataTransfer })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move folder A to B' })
+    // The suggestion comes from the cached destination names.
+    expect(within(dialog).getByText(/A \(3\)/)).toBeTruthy()
+    fireEvent.click(within(dialog).getByRole('checkbox'))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
+
+    await waitFor(() => expect(moveResource).toHaveBeenCalledTimes(2))
+    expect(moveResource).toHaveBeenNthCalledWith(2, 'foldera', 'folderb', 'main', 4, 'A (3)')
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith('Moved A to B as A (3)', 'success'))
+  })
+
   it('a new gesture after a lost dragend commits the dragged folder, not the stale one', async () => {
     // R1-H2: the browser can lose dragend (e.g. the source row is replaced by
     // a listing refresh mid-drag and dragend fires on a detached node). The

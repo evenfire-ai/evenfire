@@ -20,7 +20,12 @@ import { isGfsChildrenDenied, purgeDeniedGfsChildren } from '@/gfs/deniedChildre
 import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
 import type { GfsDragSource } from '@/gfs/dragSession'
 import { useGfsDragSession } from '@/gfs/dragSession'
-import { commitGfsMove, moveDenialMessage, toastMoveOutcome } from '@/gfs/moveCommit'
+import {
+  commitGfsMove,
+  moveDenialMessage,
+  suggestNumberedMoveName,
+  toastMoveOutcome,
+} from '@/gfs/moveCommit'
 import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
 import { IconChevronRight, IconContexts } from '../icons'
@@ -430,6 +435,7 @@ export function FileExplorerTree({
   pushToast,
 }: FileExplorerTreeProps) {
   const ctrl = useGfsBrowserController()
+  const queryClient = useQueryClient()
   const dragSession = useGfsDragSession()
   const adjudication = useGfsDragAdjudication({
     scope: ctrl.sessionScope,
@@ -492,6 +498,24 @@ export function FileExplorerTree({
   )
 
   const roots = useMemo(() => sortTreeItems(ctrl.accessibleResources), [ctrl.accessibleResources])
+
+  /** Cached destination names for the numbered-name ladder and suggestion —
+   * the same shared children cache the Files page seeds its commit from. */
+  const cachedDestinationNames = useCallback(
+    (destinationId: string): Set<string> => {
+      const cached = queryClient.getQueryData<{ pages?: Array<{ items?: GfsBrowserChild[] }> }>(
+        desktopQueryKeys.gfsChildren(
+          ctrl.sessionScope ?? 'anonymous',
+          destinationId,
+          GFS_DRIVE_MAIN
+        )
+      )
+      return new Set(
+        (cached?.pages ?? []).flatMap(page => page.items?.map(item => item.name) ?? [])
+      )
+    },
+    [ctrl.sessionScope, queryClient]
+  )
 
   const handleToggle = useCallback((resourceId: string) => {
     setExpandedIds(previous => {
@@ -715,6 +739,7 @@ export function FileExplorerTree({
             },
             destination,
             allowNumberedRename,
+            occupiedDestinationNames: cachedDestinationNames(destination.resourceId),
           }
         )
         toastMoveOutcome(pushToast, outcome, source.name, destination.name, source.kind)
@@ -724,7 +749,7 @@ export function FileExplorerTree({
         setMovingResourceId(null)
       }
     },
-    [ctrl, pushToast]
+    [cachedDestinationNames, ctrl, pushToast]
   )
 
   const handleNodeDrop = useCallback(
@@ -755,12 +780,15 @@ export function FileExplorerTree({
           return
         }
         if (source.kind === 'directory') {
+          const occupied = cachedDestinationNames(node.resourceId)
+          const suggested = suggestNumberedMoveName(source.name, occupied)
           setPendingFolderMove({
             source,
             gestureGeneration: epoch,
             sessionGeneration,
             destination: { resourceId: node.resourceId, name: node.name },
             allowNumberedRename: decision.allowNumberedRename,
+            ...(suggested !== undefined ? { suggestedName: suggested } : {}),
           })
           return
         }
@@ -775,6 +803,7 @@ export function FileExplorerTree({
     },
     [
       adjudication,
+      cachedDestinationNames,
       finishNodeDropCleanup,
       commitMove,
       dragSession,

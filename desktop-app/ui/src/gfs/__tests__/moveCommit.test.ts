@@ -102,14 +102,45 @@ describe('commitGfsMove — conflict policy (rev-2 §5)', () => {
   })
 
   it('with an approved policy it retries numbered names, whole-resource, capped at 3 attempts', async () => {
-    const moveResource = vi.fn().mockImplementation(async (_id: string, _dest: string, _v: number, newName?: string) => {
-      if (newName === undefined || newName === 'report.md') throw conflictError()
-      return { resourceId: 'r-1', version: 9 }
-    })
+    const moveResource = vi
+      .fn()
+      .mockImplementation(async (_id: string, _dest: string, _v: number, newName?: string) => {
+        if (newName === undefined || newName === 'report.md') throw conflictError()
+        return { resourceId: 'r-1', version: 9 }
+      })
     const outcome = await commitGfsMove(deps({ moveResource }), plan({ allowNumberedRename: true }))
     expect(outcome).toEqual({ status: 'committed', version: 9, renamedTo: 'report (1).md' })
     expect(moveResource).toHaveBeenCalledTimes(2)
     expect(moveResource).toHaveBeenLastCalledWith('r-1', 'dest-1', 7, 'report (1).md')
+  })
+
+  it('seeds the ladder from plan.occupiedDestinationNames so known-taken names are skipped', async () => {
+    // RP-003: with the destination already holding report.md, report (1).md
+    // and report (2).md, a blind ladder burns all three attempts on taken
+    // names. Seeded from the plan, the first 409 jumps straight past them.
+    const moveResource = vi
+      .fn()
+      .mockImplementation(async (_id: string, _dest: string, _v: number, newName?: string) => {
+        if (
+          newName === undefined ||
+          newName === 'report.md' ||
+          newName === 'report (1).md' ||
+          newName === 'report (2).md'
+        ) {
+          throw conflictError()
+        }
+        return { resourceId: 'r-1', version: 10 }
+      })
+    const outcome = await commitGfsMove(
+      deps({ moveResource }),
+      plan({
+        allowNumberedRename: true,
+        occupiedDestinationNames: new Set(['report.md', 'report (1).md', 'report (2).md']),
+      })
+    )
+    expect(outcome).toEqual({ status: 'committed', version: 10, renamedTo: 'report (3).md' })
+    expect(moveResource).toHaveBeenCalledTimes(2)
+    expect(moveResource).toHaveBeenLastCalledWith('r-1', 'dest-1', 7, 'report (3).md')
   })
 
   it('a concurrent-name storm stops after the attempt cap with the destination-changed copy', async () => {
@@ -191,8 +222,8 @@ describe('suggestNumberedMoveName', () => {
   it('proposes the first free numbered name only when the plain name is taken', () => {
     expect(suggestNumberedMoveName('report.md', new Set(['other.md']))).toBeUndefined()
     expect(suggestNumberedMoveName('report.md', new Set(['report.md']))).toBe('report (1).md')
-    expect(
-      suggestNumberedMoveName('report.md', new Set(['report.md', 'report (1).md']))
-    ).toBe('report (2).md')
+    expect(suggestNumberedMoveName('report.md', new Set(['report.md', 'report (1).md']))).toBe(
+      'report (2).md'
+    )
   })
 })
