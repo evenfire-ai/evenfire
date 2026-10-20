@@ -123,7 +123,8 @@ describe('CodexSubscriptionProvider', () => {
       ).rejects.toThrow(/successful terminal outcome/)
       await vi.runAllTimersAsync()
       await settled
-      expect(wired.stream).toHaveBeenCalledTimes(3)
+      expect(wired.authorize).toHaveBeenCalledTimes(1)
+      expect(wired.stream).toHaveBeenCalledTimes(1)
     }
   )
   function successfulBatch(count: number) {
@@ -1848,7 +1849,7 @@ describe('CodexSubscriptionProvider Retry-After retry (G1-9, #720)', () => {
     expect(wired.stream).toHaveBeenCalledTimes(1)
   })
 
-  it('G1-9h: a 429 followed by provider_unavailable respects the three-attempt cap (F4)', async () => {
+  it('G1-9h: a 429 retry stops after a dispatched provider_unavailable (F4)', async () => {
     vi.useFakeTimers()
     const outage = new CodexProxyError('provider_unavailable', 'proxy stream failed with 503')
     const stream = vi.fn().mockRejectedValueOnce(limited(1000)).mockRejectedValue(outage)
@@ -1867,9 +1868,9 @@ describe('CodexSubscriptionProvider Retry-After retry (G1-9, #720)', () => {
     const settled = expect(turn).rejects.toBe(outage)
     await vi.advanceTimersByTimeAsync(60_000)
     await settled
-    // Witness: both retries ran, then the three-attempt cap stopped the request.
-    expect(wired.authorize).toHaveBeenCalledTimes(3)
-    expect(wired.stream).toHaveBeenCalledTimes(3)
+    // The 429 retry ran; its dispatched outage cannot start another attempt.
+    expect(wired.authorize).toHaveBeenCalledTimes(2)
+    expect(wired.stream).toHaveBeenCalledTimes(2)
     expect(provider.classifyError(outage).code).toBe(LlmErrorCode.ModelOverloaded)
   })
 

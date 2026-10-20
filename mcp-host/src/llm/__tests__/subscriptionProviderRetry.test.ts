@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { maybeWrapFailover } from '../../core/adapters/failoverLlmPort'
 import { LlmPortAdapter } from '../../core/adapters/llmPortAdapter'
+import { LlmErrorCode } from '../../core/errors'
 import { isModelStepCheckpointEligibleError } from '../../core/orchestration/modelStepCheckpointEligibility'
 import { logger } from '../../logger'
 import { CodexLlmProxyClient, CodexProxyError } from '../codexLlmProxyClient'
@@ -10,6 +11,7 @@ import type { LlmPolicy } from '../failover/types'
 import { GrokLlmProxyClient, GrokProxyError } from '../grokLlmProxyClient'
 import { GrokSubscriptionProvider } from '../grokSubscription'
 import { CodexAuthorizeError } from '../providerAttemptAuthorizer'
+import { providerUnavailableRetryDelayMs } from '../rateLimitRetry'
 
 describe.each([
   [
@@ -59,8 +61,76 @@ describe.each([
       return { provider: new Provider(model, wired as never), wired, authorize, stream }
     }
 
+    it('R2-M7 does not repeat a dispatched terminal error with tool output', async () => {
+      const healthy = setup()
+      await expect(healthy.provider.completeSingleTurn(messages)).resolves.toMatchObject({
+        content: 'recovered',
+      })
+      expect(healthy.authorize).toHaveBeenCalledTimes(1)
+
+      const failed = { text: 'generated', toolCalls: [call], outcome: 'error' as const }
+      const { provider, authorize, stream } = setup(vi.fn().mockResolvedValue(failed))
+      const settled = provider.completeSingleTurnWithTools(messages, []).catch(error => error)
+      await vi.runAllTimersAsync()
+      const error = await settled
+      expect(provider.classifyError(error)).toMatchObject({
+        providerCode: 'provider_unavailable',
+        providerDispatched: true,
+      })
+      expect(stream).toHaveBeenCalledTimes(1)
+      expect(authorize).toHaveBeenCalledTimes(1)
+    })
+
+    it.each(['idle timeout', 'queued ticket refusal'])(
+      'R2-M8 ends a dispatched %s after its first 300-second attempt',
+      async reason => {
+        const started = Date.now()
+        const stream = vi.fn(
+          () =>
+            new Promise<never>((_resolve, reject) => {
+              setTimeout(() => reject(new ProxyError('provider_unavailable', reason)), 300_000)
+            })
+        )
+        const { provider, authorize } = setup(stream)
+        const settled = provider.completeSingleTurn(messages).catch(error => error)
+        await vi.runAllTimersAsync()
+        expect(await settled).toBeInstanceOf(ProxyError)
+        expect(stream).toHaveBeenCalledTimes(1)
+        expect(authorize).toHaveBeenCalledTimes(1)
+        expect(Date.now() - started).toBe(300_000)
+      }
+    )
+
+    it('R2-M7 keeps pre-dispatch authorization recovery live', async () => {
+      const { provider, authorize, stream } = setup()
+      authorize.mockRejectedValueOnce(new CodexAuthorizeError('provider_unavailable', 'refused'))
+      const settled = expect(provider.completeSingleTurn(messages)).resolves.toMatchObject({
+        content: 'recovered',
+      })
+      await vi.runAllTimersAsync()
+      await settled
+      expect(authorize).toHaveBeenCalledTimes(2)
+      expect(stream).toHaveBeenCalledTimes(1)
+    })
+
+    it('R2-M7 treats missing dispatch proof as ineligible for transient retry', () => {
+      expect(
+        providerUnavailableRetryDelayMs(
+          {
+            code: LlmErrorCode.ModelOverloaded,
+            retryable: true,
+            message: 'unavailable',
+            providerCode: 'provider_unavailable',
+          },
+          0
+        )
+      ).toBeUndefined()
+    })
+
     it('F4 retries one transient failure with a fresh authorize and returns the result', async () => {
-      const error = new ProxyError('provider_unavailable', 'upstream 503')
+      const error = new ProxyError('provider_unavailable', 'pre-dispatch refusal', {
+        dispatched: false,
+      })
       const { provider, authorize, stream } = setup(
         vi.fn().mockRejectedValueOnce(error).mockResolvedValueOnce(ok)
       )
@@ -105,7 +175,9 @@ describe.each([
       'F4 applies bounded jitter %s to both backoffs and can recover on the third attempt',
       async (random, firstDelay, secondDelay) => {
         vi.mocked(Math.random).mockReturnValue(random)
-        const error = new ProxyError('provider_unavailable', 'upstream 503')
+        const error = new ProxyError('provider_unavailable', 'pre-dispatch refusal', {
+          dispatched: false,
+        })
         const { provider, authorize, stream } = setup(
           vi
             .fn()
@@ -136,7 +208,10 @@ describe.each([
 
     it('F4 stops after three failures and rethrows the final original error unchanged', async () => {
       const errors = [1, 2, 3].map(
-        index => new ProxyError('provider_unavailable', `upstream 503 #${index}`)
+        index =>
+          new ProxyError('provider_unavailable', `pre-dispatch refusal #${index}`, {
+            dispatched: false,
+          })
       )
       const { provider, authorize, stream } = setup(
         vi
@@ -167,7 +242,11 @@ describe.each([
       [1500, 2],
     ])('F4 aborts at %i ms without any further authorize', async (abortAt, count) => {
       const { provider, authorize, stream } = setup(
-        vi.fn().mockRejectedValue(new ProxyError('provider_unavailable', 'upstream 503'))
+        vi
+          .fn()
+          .mockRejectedValue(
+            new ProxyError('provider_unavailable', 'pre-dispatch refusal', { dispatched: false })
+          )
       )
       const controller = new AbortController()
       const reason = new Error('caller stopped during backoff')
@@ -187,7 +266,11 @@ describe.each([
 
     it('F4 checks abort again when the backoff timer has already fired', async () => {
       const { provider, authorize, stream } = setup(
-        vi.fn().mockRejectedValue(new ProxyError('provider_unavailable', 'upstream 503'))
+        vi
+          .fn()
+          .mockRejectedValue(
+            new ProxyError('provider_unavailable', 'pre-dispatch refusal', { dispatched: false })
+          )
       )
       const controller = new AbortController()
       const reason = new Error('caller stopped after timer')
@@ -271,13 +354,10 @@ describe.each([
     })
 
     it.each(['error', 'unknown'] as const)(
-      'F4 holds failed %s tool frames until a successful attempt, then executes once',
+      'F4 discards dispatched %s tool frames without retry or execution',
       async outcome => {
         const { provider, authorize, stream } = setup(
-          vi
-            .fn()
-            .mockResolvedValueOnce({ text: '', toolCalls: [call], outcome })
-            .mockResolvedValueOnce({ ...ok, toolCalls: [call] })
+          vi.fn().mockResolvedValue({ text: '', toolCalls: [call], outcome })
         )
         const executeTool = vi.fn()
         const turn = provider
@@ -288,39 +368,28 @@ describe.each([
             result.tool_calls?.forEach(executeTool)
             return result
           })
-        const settled = expect(turn).resolves.toMatchObject({ tool_calls: [call] })
-        await vi.advanceTimersByTimeAsync(999)
-        expect(stream).toHaveBeenCalledTimes(1)
-        expect(executeTool).toHaveBeenCalledTimes(0)
-        await vi.advanceTimersByTimeAsync(1)
+        const settled = expect(turn).rejects.toBeInstanceOf(ProxyError)
+        await vi.runAllTimersAsync()
         await settled
-        expect(authorize).toHaveBeenCalledTimes(2)
-        expect(executeTool).toHaveBeenCalledExactlyOnceWith(call, 0, [call])
+        expect(stream).toHaveBeenCalledTimes(1)
+        expect(authorize).toHaveBeenCalledTimes(1)
+        expect(executeTool).toHaveBeenCalledTimes(0)
       }
     )
 
-    it('F4 buffers real SSE text and tool frames on a failed attempt, delivering only successful output', async () => {
+    it('F4 keeps failed real SSE text and tool frames from delivery without retry', async () => {
       function sse(frames: unknown[]) {
         return new Response(frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join(''), {
           headers: { 'content-type': 'text/event-stream' },
         })
       }
-      const fetchFn = vi
-        .fn()
-        .mockResolvedValueOnce(
-          sse([
-            { type: 'text', text: 'discarded partial' },
-            { type: 'tool_call', ...call },
-            { type: 'error', code: 'provider_unavailable' },
-          ])
-        )
-        .mockResolvedValueOnce(
-          sse([
-            { type: 'text', text: 'recovered' },
-            { type: 'tool_call', ...call },
-            { type: 'done', outcome: 'success' },
-          ])
-        )
+      const fetchFn = vi.fn().mockResolvedValue(
+        sse([
+          { type: 'text', text: 'discarded partial' },
+          { type: 'tool_call', ...call },
+          { type: 'error', code: 'provider_unavailable' },
+        ])
+      )
       const { wired, authorize } = setup()
       const proxy = new ProxyClient({
         runtimeUrl: 'http://proxy/completions',
@@ -333,18 +402,12 @@ describe.each([
         deliver(result)
         return result
       })
-      const settled = expect(turn).resolves.toMatchObject({
-        content: 'recovered',
-        tool_calls: [call],
-      })
-      await vi.advanceTimersByTimeAsync(999)
-      expect(fetchFn).toHaveBeenCalledTimes(1)
-      expect(deliver).toHaveBeenCalledTimes(0)
-      await vi.advanceTimersByTimeAsync(1)
+      const settled = expect(turn).rejects.toBeInstanceOf(ProxyError)
+      await vi.runAllTimersAsync()
       await settled
-      expect(authorize).toHaveBeenCalledTimes(2)
-      expect(deliver).toHaveBeenCalledTimes(1)
-      expect(deliver.mock.calls[0][0].content).toBe('recovered')
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(authorize).toHaveBeenCalledTimes(1)
+      expect(deliver).toHaveBeenCalledTimes(0)
     })
 
     it('F4 returns successful output once and schedules no retry after delivery', async () => {
@@ -358,8 +421,10 @@ describe.each([
       expect(authorize).toHaveBeenCalledTimes(1)
     })
 
-    it('F4 preserves checkpoint eligibility after exhausting attempts through the real adapter', async () => {
-      const error = new ProxyError('provider_unavailable', 'upstream 503')
+    it('F4 preserves checkpoint eligibility after exhausting pre-dispatch attempts through the real adapter', async () => {
+      const error = new ProxyError('provider_unavailable', 'pre-dispatch refusal', {
+        dispatched: false,
+      })
       const { provider, authorize, stream } = setup(vi.fn().mockRejectedValue(error))
       const adapter = new LlmPortAdapter(provider, model, providerName)
       const outcome = adapter.completeWithTools({ messages, tools: [] }).catch((err: Error) => err)
@@ -376,7 +441,9 @@ describe.each([
       const primary = setup(
         vi.fn(async () => {
           order.push('primary')
-          throw new ProxyError('provider_unavailable', 'upstream 503')
+          throw new ProxyError('provider_unavailable', 'pre-dispatch refusal', {
+            dispatched: false,
+          })
         })
       )
       const fallback = setup(

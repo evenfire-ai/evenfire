@@ -40,7 +40,7 @@ export function authorizeRetryDelayMs(
     : undefined
 }
 
-/** Two transient-outage retries, with 20% jitter around one and three seconds. */
+/** Two pre-dispatch outage retries, with 20% jitter around one and three seconds. */
 export function providerUnavailableRetryDelayMs(
   error: ClassifiedError,
   retryIndex: number
@@ -48,7 +48,8 @@ export function providerUnavailableRetryDelayMs(
   if (
     error.code !== LlmErrorCode.ModelOverloaded ||
     !error.retryable ||
-    error.providerCode !== 'provider_unavailable'
+    error.providerCode !== 'provider_unavailable' ||
+    error.providerDispatched !== false
   )
     return undefined
   const delayMs = [1000, 3000][retryIndex]
