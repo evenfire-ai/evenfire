@@ -30,7 +30,14 @@ import type { Attachment, ChatMessage, ToolResult } from '../../../types'
 import { DocumentReadTool } from '../index'
 import type { DocumentJob, RunDocumentJob } from '../types'
 import { runDocumentJob } from '../workerRunner'
-import { admittedFile, documentLimits, imageOnlyPdf, textPdf, witnessCode } from './fixtures'
+import {
+  admittedFile,
+  boundCursor,
+  documentLimits,
+  imageOnlyPdf,
+  textPdf,
+  witnessCode,
+} from './fixtures'
 
 const IMAGE_MESSAGE =
   'The current request already carries as many images as the model accepts, or the turn image memory is spent. Reattach the file in a new message and pass resumeCursor as cursor to continue.'
@@ -203,7 +210,7 @@ describe('document visual reads and the request image bounds', () => {
       results.push(toolResult(`call-${call}`, output, output.attachments))
     }
     expect(delivered).toEqual(Array.from({ length: 20 }, (_, index) => index + 1))
-    expect(cursor).toBe('v1.pdf.21.0')
+    expect(cursor).toBe(boundCursor('v1.pdf.21.0', file))
     expect(jobs).toHaveLength(5)
 
     const sixth = await reader.execute(
@@ -214,7 +221,7 @@ describe('document visual reads and the request image bounds', () => {
       status: 'read_budget_exhausted',
       attachmentId: file.id,
       referenceId: file.fileReference!.id,
-      resumeCursor: 'v1.pdf.21.0',
+      resumeCursor: boundCursor('v1.pdf.21.0', file),
       message: IMAGE_MESSAGE,
     })
     expect(sixth.attachments).toBeUndefined()
@@ -261,7 +268,7 @@ describe('document visual reads and the request image bounds', () => {
             arguments: {
               attachmentId: file.id,
               mode: 'visual',
-              cursor: 'v1.pdf.5.0',
+              cursor: boundCursor('v1.pdf.5.0', file),
             },
           },
         ],
@@ -277,7 +284,7 @@ describe('document visual reads and the request image bounds', () => {
     expect(first.status).toBe('ok')
     expect(pages(first)).toEqual([1, 2])
     expect(first.continuation).toEqual({
-      cursor: 'v1.pdf.3.0',
+      cursor: boundCursor('v1.pdf.3.0', narrow.file),
       limit: 'image_budget',
     })
     expect(second).toMatchObject({ status: 'read_budget_exhausted', message: IMAGE_MESSAGE })
@@ -287,7 +294,7 @@ describe('document visual reads and the request image bounds', () => {
     const [wide] = open.bodies
     expect(pages(wide)).toEqual([1, 2, 3, 4])
     expect(wide.continuation).toEqual({
-      cursor: 'v1.pdf.5.0',
+      cursor: boundCursor('v1.pdf.5.0', open.file),
       limit: 'max_pages',
     })
   }, 60_000)
@@ -451,7 +458,7 @@ describe('document visual reads and the request image bounds', () => {
     const cut = await read(18, 4032)
     expect(pages(cut.body)).toEqual([1, 2])
     expect(cut.body.continuation).toEqual({
-      cursor: 'v1.pdf.3.0',
+      cursor: boundCursor('v1.pdf.3.0', file),
       limit: 'image_budget',
     })
 

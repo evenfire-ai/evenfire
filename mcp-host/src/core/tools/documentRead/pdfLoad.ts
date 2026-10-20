@@ -68,9 +68,8 @@ export async function withPdfDocument<T>(
     // stopAtErrors rejects broken page data instead of returning partial text
     // or a silently incomplete image. No scripting API is called, and visual
     // reads disable annotations, including their actions and form appearances.
-    const options: DocumentInitParameters & { isEvalSupported: false } = {
+    const options: DocumentInitParameters = {
       data: job.bytes,
-      isEvalSupported: false,
       enableXfa: false,
       disableFontFace: true,
       useSystemFonts: false,

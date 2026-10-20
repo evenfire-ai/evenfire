@@ -357,11 +357,11 @@ export class DocumentReadTool implements Tool {
       (sheet !== undefined && typeof sheet !== 'string') ||
       (cursor !== undefined && typeof cursor !== 'string') ||
       (format === 'pdf' && sheet !== undefined) ||
-      (format === 'xlsx' && (pages !== undefined || mode !== undefined))
+      (format === 'xlsx' && (pages !== undefined || mode === 'visual'))
     ) {
       return this.failure(identity, { ok: false, reason: 'invalid_range' }, start)
     }
-    const position = cursor === undefined ? null : decodeCursor(cursor)
+    const position = cursor === undefined ? null : decodeCursor(cursor, identity.referenceId)
     if (
       cursor !== undefined &&
       (position === null ||
@@ -543,14 +543,17 @@ export class DocumentReadTool implements Tool {
         if (cut > unit.from)
           pages.push({ page: unit.page, text: maskSlice(unit.text, unit.ranges, unit.from, cut) })
         continuation = {
-          cursor: encodeCursor({ format: 'pdf', page: unit.page, charOffset: cut }),
+          cursor: encodeCursor(
+            { format: 'pdf', page: unit.page, charOffset: cut },
+            identity.referenceId
+          ),
           limit: fitLimit(limit),
         }
         break
       }
       if (!continuation && outcome.next) {
         continuation = {
-          cursor: encodeCursor({ format: 'pdf', ...outcome.next }),
+          cursor: encodeCursor({ format: 'pdf', ...outcome.next }, identity.referenceId),
           limit: stopLimit(outcome.stoppedBy),
         }
       }
@@ -724,7 +727,7 @@ export class DocumentReadTool implements Tool {
       ...(outcome.next
         ? {
             continuation: {
-              cursor: encodeCursor({ format: 'pdf', ...outcome.next }),
+              cursor: encodeCursor({ format: 'pdf', ...outcome.next }, identity.referenceId),
               // The request's free image slots, not this tool's page cap,
               // stopped the call: the rest needs a new message.
               limit:
@@ -848,12 +851,12 @@ export class DocumentReadTool implements Tool {
       let continuation: DocumentContinuation | undefined
       if (next) {
         continuation = {
-          cursor: encodeCursor({ format: 'xlsx', ...next }),
+          cursor: encodeCursor({ format: 'xlsx', ...next }, identity.referenceId),
           limit: fitLimit(limit),
         }
       } else if (outcome.next) {
         continuation = {
-          cursor: encodeCursor({ format: 'xlsx', ...outcome.next }),
+          cursor: encodeCursor({ format: 'xlsx', ...outcome.next }, identity.referenceId),
           limit: stopLimit(outcome.stoppedBy),
         }
       }
@@ -961,7 +964,7 @@ export class DocumentReadTool implements Tool {
       ...('limit' in failure && failure.limit ? { limit: failure.limit } : {}),
       message:
         (failure.reason === 'no_text_layer' && !imageInput
-          ? 'The selected pages have no text layer. Tell the user this file is scanned and requires a vision-capable model to read it.'
+          ? 'The selected pages have no text layer. If they contain visible content, a vision-capable model can read it.'
           : REASON_MESSAGES[failure.reason]) +
         (contentMismatch
           ? ' The file name or declared media type does not match its detected content.'

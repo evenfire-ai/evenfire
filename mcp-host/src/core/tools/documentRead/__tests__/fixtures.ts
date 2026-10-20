@@ -43,6 +43,13 @@ export function admittedFile(id: string, bytes: Buffer, mimeType: string): Attac
   return attachment
 }
 
+/** A cursor position as the tool issues it for `file`: bound to its content digest. */
+export function boundCursor(position: string, file: Attachment): string {
+  const digest = /@sha256:([0-9a-f]{64})$/.exec(file.fileReference?.id ?? '')
+  if (!digest) throw new Error('Test fixture has no content-addressed reference')
+  return `${position}.${digest[1]!.slice(0, 12)}`
+}
+
 export async function textPdf(pageCodes: string[]): Promise<Buffer> {
   const document = await PDFDocument.create()
   const font = await document.embedFont(StandardFonts.Helvetica)
@@ -167,6 +174,13 @@ export async function imageOnlyPdf(code: string): Promise<Buffer> {
   const embedded = await document.embedPng(await canvas.encode('png'))
   const page = document.addPage([side, side])
   page.drawImage(embedded, { x: 0, y: 0, width: side, height: side })
+  return Buffer.from(await document.save())
+}
+
+/** One page with nothing drawn on it: no text layer and no visible content. */
+export async function blankPdf(): Promise<Buffer> {
+  const document = await PDFDocument.create()
+  document.addPage([420, 180])
   return Buffer.from(await document.save())
 }
 

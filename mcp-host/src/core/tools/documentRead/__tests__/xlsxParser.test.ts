@@ -9,7 +9,6 @@ import {
   documentLimits,
   emptySelectionWorkbook,
   emptyWorkbook,
-  imageOnlyPdf,
   longRunningWorkbook,
   mergedWorkbook,
   outOfRangeNumberWorkbook,

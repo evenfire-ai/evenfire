@@ -18,9 +18,11 @@ import type {
 import { runDocumentJob } from '../workerRunner'
 import {
   admittedFile,
+  boundCursor,
   documentLimits,
   imageOnlyPdf,
   surrogateWorkbook,
+  textPdf,
   valuesWorkbook,
   witnessCode,
 } from './fixtures'
@@ -166,21 +168,53 @@ describe('DocumentReadTool dispatch and identity', () => {
       pages: [{ page: 1, text: 'text', from: 0, to: 4, lowText: false }],
     })
     const tool = toolFor([pdf], runJob)
-    for (const cursor of ['not-a-cursor', 'v1.xlsx.0.1', 'v1.pdf.0.0']) {
+    for (const cursor of [
+      'not-a-cursor',
+      boundCursor('v1.xlsx.0.1', pdf),
+      boundCursor('v1.pdf.0.0', pdf),
+    ]) {
       const result = await read(tool, { attachmentId: 'pdf-file', cursor })
       expect(result.body).toMatchObject({ status: 'error', reason: 'invalid_range' })
     }
     const visual = await read(tool, {
       attachmentId: 'pdf-file',
       mode: 'visual',
-      cursor: 'v1.pdf.1.1',
+      cursor: boundCursor('v1.pdf.1.1', pdf),
     })
     expect(visual.body).toMatchObject({ status: 'error', reason: 'invalid_range' })
     expect(calls).toHaveLength(0)
-    expect((await read(tool, { attachmentId: 'pdf-file', cursor: 'v1.pdf.1.0' })).body.status).toBe(
-      'ok'
-    )
+    expect(
+      (await read(tool, { attachmentId: 'pdf-file', cursor: boundCursor('v1.pdf.1.0', pdf) })).body
+        .status
+    ).toBe('ok')
     expect(calls).toHaveLength(1)
+  })
+
+  it('refuses a cursor issued for another document and resumes its own', async () => {
+    const codeA = witnessCode()
+    const codeB = witnessCode()
+    const pdfA = admittedFile(
+      'pdf-a',
+      await textPdf([`A1 ${codeA}`, `A2 ${codeA}`]),
+      'application/pdf'
+    )
+    const pdfB = admittedFile(
+      'pdf-b',
+      await textPdf([`B1 ${codeB}`, `B2 ${codeB}`]),
+      'application/pdf'
+    )
+    const tool = toolFor([pdfA, pdfB], runDocumentJob, {
+      limits: documentLimits({ maxTextPagesPerCall: 1 }),
+    })
+    const first = await read(tool, { attachmentId: 'pdf-a' })
+    const cursor = (first.body.continuation as { cursor: string }).cursor
+    expect(cursor).toBe(boundCursor('v1.pdf.2.0', pdfA))
+    const crossed = await read(tool, { attachmentId: 'pdf-b', cursor })
+    expect(crossed.body).toMatchObject({ status: 'error', reason: 'invalid_range' })
+    // Witness: the same cursor resumes the document it was issued for.
+    const resumed = await read(tool, { attachmentId: 'pdf-a', cursor })
+    expect(resumed.body).toMatchObject({ status: 'ok', pages: [{ page: 2 }] })
+    expect(JSON.stringify(resumed.body.pages)).toContain(`A2 ${codeA}`)
   })
 
   it('reports access failures and proves that an admitted read succeeds on the same path', async () => {
@@ -276,7 +310,7 @@ describe('DocumentReadTool visual mode', () => {
     expect(supported.body).toMatchObject({ status: 'ok', visualCandidates: [1] })
   })
 
-  it('tells a scanned PDF needs a vision model when the capability has no delivery limits', async () => {
+  it('points a PDF without a text layer to a vision-capable model when the capability has no delivery limits', async () => {
     const file = admittedFile('pdf-file', await imageOnlyPdf(witnessCode()), 'application/pdf')
     const scanned = fakeRunner({ ok: false, reason: 'no_text_layer' })
     const withoutLimits: Partial<ExecutionContext> = {
@@ -297,7 +331,7 @@ describe('DocumentReadTool visual mode', () => {
       withoutLimits
     )
     expect(noProfile.body).toMatchObject({ status: 'error', reason: 'no_text_layer' })
-    expect(noProfile.body.message).toMatch(/requires a vision-capable model/)
+    expect(noProfile.body.message).toMatch(/a vision-capable model can read it/)
     // Control: with delivery limits the model is told to use mode "visual".
     const capable = await read(
       toolFor([file], fakeRunner({ ok: false, reason: 'no_text_layer' }).runJob),
@@ -358,13 +392,13 @@ describe('DocumentReadTool budgets', () => {
     const { runJob, calls } = fakeRunner(textOutcome)
     const exhausted = await read(toolFor([file], runJob, { ledger }), {
       attachmentId: 'pdf-file',
-      cursor: 'v1.pdf.1.10',
+      cursor: boundCursor('v1.pdf.1.10', file),
     })
     expect(exhausted.body).toEqual({
       status: 'read_budget_exhausted',
       attachmentId: 'pdf-file',
       referenceId: file.fileReference!.id,
-      resumeCursor: 'v1.pdf.1.10',
+      resumeCursor: boundCursor('v1.pdf.1.10', file),
       message: expect.stringMatching(/new message/i),
     })
     expect(calls).toHaveLength(0)
@@ -550,7 +584,7 @@ describe('DocumentReadTool with the real worker', () => {
       format: 'xlsx',
       sheetNames: ['Values', 'Hidden'],
       sheets: [{ name: 'Values', startRow: 1, rows: [[code, 42, true]], truncated: true }],
-      continuation: { cursor: 'v1.xlsx.0.2', limit: 'max_rows' },
+      continuation: { cursor: boundCursor('v1.xlsx.0.2', file), limit: 'max_rows' },
     })
     const second = await read(tool, {
       attachmentId: 'xlsx-file',
@@ -560,7 +594,7 @@ describe('DocumentReadTool with the real worker', () => {
       { name: 'Values', startRow: 2, rows: [['formula-zero', 0, false]], truncated: true },
     ])
     expect(second.body.continuation).toEqual({
-      cursor: 'v1.xlsx.0.3',
+      cursor: boundCursor('v1.xlsx.0.3', file),
       limit: 'max_rows',
     })
   })

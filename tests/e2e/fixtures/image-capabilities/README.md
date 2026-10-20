@@ -58,7 +58,7 @@ file chip, sends, and requires the digest of the attached bytes in the answer,
 one `document-read-requested` row, one `document-answer` row carrying that
 digest, no image row and no `documentFailures`.
 
-The same lane also runs the E1 PDF and E2 XLSX journeys. They use Add context ->
+The same lane also runs the PDF and XLSX journeys. They use Add context ->
 Upload Files, require a `ready` chip with no "no reader" notice, prove two
 durable/visible messages, require the selected reader row and content digest,
 and allow no image delivery or document failure.

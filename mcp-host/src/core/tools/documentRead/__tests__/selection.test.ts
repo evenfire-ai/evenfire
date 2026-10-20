@@ -51,37 +51,74 @@ describe('document read page selection', () => {
   })
 })
 
+const DIGEST_A = 'a'.repeat(12) + '0'.repeat(52)
+const DIGEST_B = 'b'.repeat(12) + '0'.repeat(52)
+const REF_A = `att:m1:f1@sha256:${DIGEST_A}`
+const BIND_A = DIGEST_A.slice(0, 12)
+
 describe('document read cursors', () => {
   it('round-trips PDF and XLSX positions without making the format readable to the model', () => {
-    const pdf = encodeCursor({ format: 'pdf', page: 12, charOffset: 34 })
-    const xlsx = encodeCursor({ format: 'xlsx', sheetIndex: 5, row: 6 })
-    expect(decodeCursor(pdf)).toEqual({ format: 'pdf', page: 12, charOffset: 34 })
-    expect(decodeCursor(xlsx)).toEqual({ format: 'xlsx', sheetIndex: 5, row: 6 })
-    expect(pdf.startsWith('v1.pdf.')).toBe(true)
-    expect(xlsx.startsWith('v1.xlsx.')).toBe(true)
+    const pdf = encodeCursor({ format: 'pdf', page: 12, charOffset: 34 }, REF_A)
+    const xlsx = encodeCursor({ format: 'xlsx', sheetIndex: 5, row: 6 }, REF_A)
+    expect(decodeCursor(pdf, REF_A)).toEqual({ format: 'pdf', page: 12, charOffset: 34 })
+    expect(decodeCursor(xlsx, REF_A)).toEqual({ format: 'xlsx', sheetIndex: 5, row: 6 })
+    expect(pdf).toBe(`v1.pdf.12.34.${BIND_A}`)
+    expect(xlsx).toBe(`v1.xlsx.5.6.${BIND_A}`)
+  })
+
+  it('resumes the same bytes reattached in another message and refuses another document', () => {
+    const cursor = encodeCursor({ format: 'pdf', page: 3, charOffset: 0 }, REF_A)
+    // Witness: same content digest under a new message and attachment id.
+    expect(decodeCursor(cursor, `att:m2:f9@sha256:${DIGEST_A}`)).toEqual({
+      format: 'pdf',
+      page: 3,
+      charOffset: 0,
+    })
+    expect(decodeCursor(cursor, `att:m1:f1@sha256:${DIGEST_B}`)).toBeNull()
+  })
+
+  it('refuses a reference id without a content digest', () => {
+    expect(() => encodeCursor({ format: 'pdf', page: 1, charOffset: 0 }, 'att:m1:f1')).toThrow(
+      'Document reference id carries no content digest'
+    )
   })
 
   it('rejects foreign, malformed, crossed-format and invalid cursors', () => {
     const foreign = [
       '',
       'v1.pdf',
-      'v2.pdf.1.0',
-      'v1.txt.1.0',
-      'v1.pdf.0.0',
-      'v1.pdf.1.-1',
-      'v1.pdf.1.1.2',
-      'v1.xlsx.1.0',
-      'v1.xlsx.1.-1',
-      ' v1.pdf.1.0',
-      'v1.pdf.1.0 ',
-      'v1.pdf.0000000000.0',
+      `v2.pdf.1.0.${BIND_A}`,
+      `v1.txt.1.0.${BIND_A}`,
+      `v1.pdf.0.0.${BIND_A}`,
+      `v1.pdf.1.-1.${BIND_A}`,
+      `v1.pdf.1.1.2.${BIND_A}`,
+      `v1.xlsx.1.0.${BIND_A}`,
+      `v1.xlsx.1.-1.${BIND_A}`,
+      ` v1.pdf.1.0.${BIND_A}`,
+      `v1.pdf.1.0.${BIND_A} `,
+      `v1.pdf.0000000000.0.${BIND_A}`,
+      'v1.pdf.1.0',
+      `v1.pdf.1.0.${BIND_A.toUpperCase()}`,
+      `v1.pdf.1.0.${BIND_A.slice(1)}`,
     ]
-    for (const cursor of foreign) expect(decodeCursor(cursor)).toBeNull()
+    for (const cursor of foreign) expect(decodeCursor(cursor, REF_A)).toBeNull()
   })
 
   it('keeps a PDF zero offset valid while requiring XLSX rows to start at one', () => {
-    expect(decodeCursor('v1.pdf.1.0')).toEqual({ format: 'pdf', page: 1, charOffset: 0 })
-    expect(decodeCursor('v1.pdf.1.1')).toEqual({ format: 'pdf', page: 1, charOffset: 1 })
-    expect(decodeCursor('v1.xlsx.1.1')).toEqual({ format: 'xlsx', sheetIndex: 1, row: 1 })
+    expect(decodeCursor(`v1.pdf.1.0.${BIND_A}`, REF_A)).toEqual({
+      format: 'pdf',
+      page: 1,
+      charOffset: 0,
+    })
+    expect(decodeCursor(`v1.pdf.1.1.${BIND_A}`, REF_A)).toEqual({
+      format: 'pdf',
+      page: 1,
+      charOffset: 1,
+    })
+    expect(decodeCursor(`v1.xlsx.1.1.${BIND_A}`, REF_A)).toEqual({
+      format: 'xlsx',
+      sheetIndex: 1,
+      row: 1,
+    })
   })
 })

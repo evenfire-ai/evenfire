@@ -31,21 +31,34 @@ export function resolvePageSelection(spec: string | null, pageCount: number): nu
   return [...pages].sort((a, b) => a - b)
 }
 
-const CURSOR = /^v1\.(pdf|xlsx)\.(\d{1,9})\.(\d{1,12})$/
+const CURSOR = /^v1\.(pdf|xlsx)\.(\d{1,9})\.(\d{1,12})\.([0-9a-f]{12})$/
+const CONTENT_DIGEST = /@sha256:([0-9a-f]{64})$/
 
-export function encodeCursor(position: DocumentPosition): string {
+/**
+ * A cursor carries a prefix of the document's content digest, so it resumes
+ * the same bytes reattached in a later message and never another document.
+ */
+function cursorBinding(referenceId: string): string {
+  const match = CONTENT_DIGEST.exec(referenceId)
+  if (!match) throw new Error('Document reference id carries no content digest')
+  return match[1]!.slice(0, 12)
+}
+
+export function encodeCursor(position: DocumentPosition, referenceId: string): string {
+  const binding = cursorBinding(referenceId)
   return position.format === 'pdf'
-    ? `v1.pdf.${position.page}.${position.charOffset}`
-    : `v1.xlsx.${position.sheetIndex}.${position.row}`
+    ? `v1.pdf.${position.page}.${position.charOffset}.${binding}`
+    : `v1.xlsx.${position.sheetIndex}.${position.row}.${binding}`
 }
 
 /**
- * Parses a cursor the tool issued. Returns null for anything else; the
- * caller checks the position against the document it reads.
+ * Parses a cursor the tool issued for this document. Returns null for
+ * anything else, including a cursor of another document; the caller checks
+ * the position against the document it reads.
  */
-export function decodeCursor(cursor: string): DocumentPosition | null {
+export function decodeCursor(cursor: string, referenceId: string): DocumentPosition | null {
   const match = CURSOR.exec(cursor)
-  if (!match) return null
+  if (!match || match[4] !== cursorBinding(referenceId)) return null
   const first = Number(match[2])
   const second = Number(match[3])
   if (!Number.isSafeInteger(first) || !Number.isSafeInteger(second)) return null

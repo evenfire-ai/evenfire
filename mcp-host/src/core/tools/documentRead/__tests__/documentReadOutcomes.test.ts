@@ -14,6 +14,8 @@ import type { DocumentReadLimits, RunDocumentJob } from '../types'
 import { runDocumentJob } from '../workerRunner'
 import {
   admittedFile,
+  blankPdf,
+  boundCursor,
   documentLimits,
   emptySelectionWorkbook,
   imageOnlyPdf,
@@ -119,7 +121,10 @@ describe('document reader Tool outcomes through real child readers', () => {
       const firstBody = JSON.parse(first.content)
       expect(firstBody.status).toBe('ok')
       expect(firstBody.images.map((image: { page: number }) => image.page)).toEqual([1, 2, 3, 4])
-      expect(firstBody.continuation).toEqual({ cursor: 'v1.pdf.5.0', limit: 'max_pages' })
+      expect(firstBody.continuation).toEqual({
+        cursor: boundCursor('v1.pdf.5.0', file),
+        limit: 'max_pages',
+      })
       expect(first.attachments).toHaveLength(4)
       expect(await gridMatches(first.attachments![0]!.dataBase64!, codes[0]!)).toBe(true)
       const second = await reader.execute(
@@ -198,9 +203,18 @@ describe('document reader Tool outcomes through real child readers', () => {
       const body = JSON.parse(result.content)
       expect(body.reason).toBe('no_text_layer')
       expect(body.message).toContain(
-        supported ? 'mode "visual"' : 'Tell the user this file is scanned'
+        supported ? 'mode "visual"' : 'If they contain visible content'
       )
-      if (!supported) expect(body.message).toContain('vision-capable model')
+      if (!supported) {
+        expect(body.message).toContain('vision-capable model')
+        expect(body.message).not.toContain('scanned')
+        // A blank page has no text layer either; the message stays true for it.
+        const blank = admittedFile('blank', await blankPdf(), 'application/pdf')
+        const blankBody = JSON.parse(
+          (await tool(blank).execute({ attachmentId: blank.id }, context(null))).content
+        )
+        expect(blankBody).toMatchObject({ reason: 'no_text_layer', message: body.message })
+      }
       const rendered = await tool(file).execute(
         { attachmentId: file.id, mode: 'visual' },
         context(profile)
@@ -221,6 +235,29 @@ describe('document reader Tool outcomes through real child readers', () => {
       expect(textBody.pages[0].text.length).toBeGreaterThan(0)
     }
   )
+
+  it('reads an XLSX the same with mode omitted or "text" and refuses "visual"', async () => {
+    const file = admittedFile(
+      'mode-workbook',
+      await valuesWorkbook(witnessCode()),
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+    const omitted = JSON.parse(
+      (await tool(file).execute({ attachmentId: file.id }, context())).content
+    )
+    const text = JSON.parse(
+      (await tool(file).execute({ attachmentId: file.id, mode: 'text' }, context())).content
+    )
+    expect(omitted.status).toBe('ok')
+    expect(omitted.sheets.length).toBeGreaterThan(0)
+    expect(text).toEqual(omitted)
+    // Witness: the mode check still runs for XLSX.
+    const visual = JSON.parse(
+      (await tool(file).execute({ attachmentId: file.id, mode: 'visual' }, context(profile)))
+        .content
+    )
+    expect(visual).toMatchObject({ status: 'error', reason: 'invalid_range' })
+  })
 
   it('distinguishes malformed/mismatched content from an empty selection and reads a populated control', async () => {
     const malformed = admittedFile(
