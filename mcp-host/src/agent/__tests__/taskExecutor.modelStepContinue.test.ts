@@ -499,23 +499,6 @@ function checkpointEntries(handle: StoreHandle, checkpointId = 'checkpoint-b2') 
     .all(checkpointId) as Array<{ kind: string; tool_call_id: string | null }>
 }
 
-async function claimRetry(fixture: CheckpointFixture, taskId: string) {
-  const retryClaim = await fixture.checkpoints.claim({
-    sessionKey: SESSION_KEY,
-    checkpointId: fixture.fence.checkpointId,
-    version: header(fixture.handle).version,
-    hostInstanceId: `host-${taskId}`,
-    newTaskId: taskId,
-    leaseMs: LEASE_MS,
-  })
-  if (retryClaim.outcome !== 'claimed') {
-    throw new Error(`Retry claim failed: ${retryClaim.outcome}`)
-  }
-  fixture.taskBudget = retryClaim.snapshot.header.task_budget!
-  fixture.confirmedResults = retryClaim.snapshot.tools.confirmed
-  return retryClaim.fence
-}
-
 function gfsView(fields: Record<string, unknown> = {}) {
   return {
     ok: true,
