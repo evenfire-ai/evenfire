@@ -121,6 +121,76 @@ describe('GfsDragSessionProvider — lifecycle binding', () => {
     await waitFor(() => expect(api!.activeSource()).toBeNull())
   })
 
+  for (const [dimension, nextScope] of [
+    ['team', 'test:user-1:team-2'],
+    ['user', 'test:user-2:team-1'],
+    ['environment', 'other:user-1:team-1'],
+  ] as const) {
+    for (const nativeEnded of [false, true]) {
+      it(`invalidates ${dimension} scope changes with native end ${nativeEnded}`, () => {
+        const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        let api: ReturnType<typeof useGfsDragSession> | null = null
+        const view = () => (
+          <QueryClientProvider client={queryClient}>
+            <GfsDragSessionProvider>
+              <Probe onApi={captured => (api = captured)} />
+            </GfsDragSessionProvider>
+          </QueryClientProvider>
+        )
+        const mounted = render(view())
+        expect(api!.beginDrag(source())).toBe(true)
+        const admittedGeneration = api!.currentGeneration()
+        if (nativeEnded) {
+          api!.endDrag()
+          expect(api!.activeSource()).toBeNull()
+          // Native end preserves an admitted drop until authority changes.
+          expect(api!.currentGeneration()).toBe(admittedGeneration)
+        }
+        authState = {
+          ...authState,
+          me: {
+            ...authState.me,
+            ...(dimension === 'team' ? { teamId: 'team-2' } : {}),
+            ...(dimension === 'user' ? { id: 'user-2' } : {}),
+          },
+          runtimeConfigState: { envKey: dimension === 'environment' ? 'other' : 'test' },
+        }
+        mounted.rerender(view())
+        expect(api!.activeSource()).toBeNull()
+        expect(api!.currentGeneration()).toBeGreaterThan(admittedGeneration)
+        expect(api!.beginDrag(source({ resourceId: 'r-2', scope: nextScope }))).toBe(true)
+        expect(api!.activeSource()?.resourceId).toBe('r-2')
+        const newGeneration = api!.currentGeneration()
+        expect(api!.beginDrag(source())).toBe(false)
+        expect(api!.currentGeneration()).toBe(newGeneration)
+        expect(api!.activeSource()?.resourceId).toBe('r-2')
+      })
+    }
+  }
+
+  it('invalidates on logout and unmount while refusing further drags', () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    let api: ReturnType<typeof useGfsDragSession> | null = null
+    const view = () => (
+      <QueryClientProvider client={queryClient}>
+        <GfsDragSessionProvider>
+          <Probe onApi={captured => (api = captured)} />
+        </GfsDragSessionProvider>
+      </QueryClientProvider>
+    )
+    const mounted = render(view())
+    expect(api!.beginDrag(source())).toBe(true)
+    const generation = api!.currentGeneration()
+    authState = { ...authState, isAuthenticated: false }
+    mounted.rerender(view())
+    expect(api!.activeSource()).toBeNull()
+    expect(api!.currentGeneration()).toBeGreaterThan(generation)
+    expect(api!.beginDrag(source())).toBe(false)
+    const loggedOutGeneration = api!.currentGeneration()
+    mounted.unmount()
+    expect(api!.currentGeneration()).toBeGreaterThan(loggedOutGeneration)
+  })
+
   it('refuses to begin a drag for a foreign scope', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     let api: ReturnType<typeof useGfsDragSession> | null = null

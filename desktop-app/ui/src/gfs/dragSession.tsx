@@ -97,9 +97,15 @@ export function GfsDragSessionProvider({ children }: { children: React.ReactNode
     staleTime: Infinity,
   })
   const accessState: GfsAccessState = accessStateQuery.data ?? 'active'
+  const previousScopeRef = useRef(scope)
 
   useEffect(() => {
-    if (scope === null || accessState === 'revoked') store.invalidate('authority')
+    const scopeChanged = previousScopeRef.current !== scope
+    previousScopeRef.current = scope
+    // Native end may already have cleared the transport source while a drop
+    // is pending. Every scope transition still invalidates its ownership.
+    if (scopeChanged) store.invalidate('scope-change')
+    else if (scope === null || accessState === 'revoked') store.invalidate('authority')
   }, [accessState, scope, store])
 
   useEffect(() => () => store.invalidate('authority'), [store])
