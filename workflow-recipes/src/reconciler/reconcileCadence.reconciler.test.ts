@@ -1063,6 +1063,34 @@ describe('refreshDnsBlocks egress lane (#1016 §3.3)', () => {
     expect(refresh.mock.calls[0]).toHaveLength(4)
   })
 
+  it('throws when the runtime-HTTP refresh reports a policy pending a retry', async () => {
+    const recipe = makeRecipe({
+      spec: {
+        runtimeEgress: { http: { allowedHosts: ['api.example.com'] } },
+        steps: [{ id: 's', run: { type: 'snippet', language: 'typescript', code: 'return 1' } }],
+      },
+      status: { phase: 'active', workflowExecution: { phase: 'running' } },
+    } as Partial<WorkflowRecipeCRD>)
+    const refresh = vi.fn().mockResolvedValue({ conflicts: [], retryPending: true })
+    const rec = reconcilerWith()
+    ;(rec as unknown as { workflowReconciler: unknown }).workflowReconciler = {
+      refreshRuntimeHttpEgressNetworkPolicies: refresh,
+    }
+    const { dnsBlockFingerprint } = await import('./dnsBlockFingerprint')
+    const internals = rec as unknown as {
+      config: never
+      dnsBlockRecordMap: Map<string, unknown>
+    }
+    internals.dnsBlockRecordMap.set('test-recipe', {
+      fingerprint: dnsBlockFingerprint(recipe, internals.config),
+      blocks: new Set(['runtime_http_egress']),
+    })
+    await expect(rec.refreshDnsBlocks(recipe, [])).rejects.toThrow(
+      /test-recipe.*runtime HTTP egress NetworkPolicy.*pending a retry/
+    )
+    expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
   it('rethrows a DNS failure after the contraction already applied', async () => {
     const recipe = classicRecipe()
     // Record with a working resolver so policies exist, then fail DNS in the lane.

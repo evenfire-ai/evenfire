@@ -2018,12 +2018,19 @@ export class WorkflowRecipeReconciler {
       await this.reconcileWorkloadEgressPolicies(clone, plan.workload)
     }
     if (record.blocks.has('runtime_http_egress') && this.workflowReconciler) {
-      await this.workflowReconciler.refreshRuntimeHttpEgressNetworkPolicies(
+      const summary = await this.workflowReconciler.refreshRuntimeHttpEgressNetworkPolicies(
         clone.metadata.namespace,
         clone.metadata.name,
         clone.metadata.uid ?? clone.metadata.name,
         clone.spec
       )
+      // A per-policy apiserver failure is reported, not thrown; surface it so the
+      // caller escalates like any other block failure instead of reading 'clean'.
+      if (summary?.retryPending) {
+        throw new Error(
+          `WorkflowRecipe "${clone.metadata.name}" runtime HTTP egress NetworkPolicy is pending a retry`
+        )
+      }
     }
     return 'clean'
   }
