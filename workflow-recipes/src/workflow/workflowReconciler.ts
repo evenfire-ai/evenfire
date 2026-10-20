@@ -3614,6 +3614,9 @@ export class WorkflowReconciler {
       await this.pruneExpiredRuntimeHttpEgressNetworkPolicyOverlaps(recipeName, recipeUid, spec)
       throw error
     }
+    if (policies.length > 0 && runtimeHttpEgressClass(spec) === 'exact-host') {
+      noteDnsBlock('runtime_http_egress')
+    }
     return this.applyNetworkPolicyList(policies)
   }
 
@@ -3993,6 +3996,15 @@ export class WorkflowReconciler {
       mcpServerFullNames,
       snippetMcpServerFullNames
     )
+    // Issue #1016: record the block only when a runtime-HTTP policy was actually
+    // produced. The eager SDK path resolves DNS above but strips these policies
+    // (includeCoordinator=false, snippet runner awaiting), so it must record none.
+    if (
+      runtimeHttpEgressState &&
+      policies.some(policy => runtimeHttpEgressPolicyNames.includes(policy.metadata?.name ?? ''))
+    ) {
+      noteDnsBlock('runtime_http_egress')
+    }
     if (runtimeHttpEgressState) {
       this.annotateRuntimeHttpEgressPolicies(
         policies,
@@ -4175,8 +4187,6 @@ export class WorkflowReconciler {
     policyNames: string[],
     hosts: string[]
   ): Promise<RuntimeHttpEgressPolicyState> {
-    // Issue #1016: single choke point for every runtime-HTTP DNS site.
-    noteDnsBlock('runtime_http_egress')
     const now = new Date()
     const currentCidrs = normalizeCidrs(
       await (this.deps.resolveRuntimeHttpEgressCidrs ?? resolveRuntimeHttpEgressCidrs)(hosts)
