@@ -3226,6 +3226,69 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
     expect(screen.getByTestId('inherited-error').textContent).toBe('none')
   })
 
+  // An 'unavailable' coverage is a FAILED walk, not an observation. Caching it
+  // under the app's Infinity staleTime would keep the failure on screen as if
+  // it were authoritative; reopening Share must retry the walk.
+  it('retries an unavailable inherited derivation when Share is reopened', async () => {
+    const resolve = vi.fn(async (uri: string) => {
+      // The navigation resolve succeeds; every later resolve (the derivation's
+      // own walk) fails transiently.
+      if (uri.endsWith('/root')) {
+        return {
+          resourceId: 'file-1',
+          parentResourceId: 'folder-1',
+          gfsUri: 'gfs://main/file-1',
+          name: 'report.txt',
+          kind: 'file',
+          version: 1,
+        }
+      }
+      throw new Error('Error: 500 resolve_failed')
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve,
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'manage_acl'],
+            canDelegate: true,
+            grantableBits: ['read'],
+            canCreateShare: false,
+          })),
+          listGrants: vi.fn(async () => []),
+          listShares: vi.fn(async () => []),
+        },
+      },
+    })
+
+    render(<ManageProbe />, { wrapper: Harness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open root' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('file-1'))
+    await act(async () => {
+      screen.getByRole('button', { name: 'open manage' }).click()
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('inherited-coverage').textContent).toBe('unavailable')
+    )
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'close manage' }).click()
+    })
+    const before = resolve.mock.calls.length
+    await act(async () => {
+      screen.getByRole('button', { name: 'open manage' }).click()
+    })
+
+    // The failed walk is retried on reopen instead of being served from cache.
+    await waitFor(() => expect(resolve.mock.calls.length).toBeGreaterThan(before))
+  })
+
   // A move changes the ANCESTRY of the open resource, and the open
   // Share/Manage dialog shows rows derived from that ancestry. The dialog must
   // re-read them: keeping the pre-move observation would present inherited

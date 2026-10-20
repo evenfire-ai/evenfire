@@ -17,7 +17,11 @@ import {
   parseHttpStatus,
   parseRetryAfterSeconds,
 } from '@lib/gfsGrantErrors'
-import type { GfsGrantListItem, GfsShareListItem } from '@/gfs/delegation.types'
+import type {
+  GfsGrantListItem,
+  GfsInheritedAccessResult,
+  GfsShareListItem,
+} from '@/gfs/delegation.types'
 import { deriveGfsInheritedAccess } from '@/gfs/inheritedAccess'
 import { desktopQueryKeys } from './queryKeys'
 
@@ -502,6 +506,16 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     queryFn: () => deriveGfsInheritedAccess(current!.resourceId, DRIVE),
     enabled:
       Boolean(sessionScope) && Boolean(current) && grantsListEnabled && accessState === 'active',
+    // An 'unavailable' coverage is a FAILED walk, not an observation: a
+    // transient ancestor failure would otherwise be cached forever under the
+    // app's Infinity staleTime and reopening Share would keep showing the
+    // failure as if it were authoritative. Such a result stays stale, so
+    // reopening the dialog retries the walk. A complete observation keeps
+    // the app's normal policy (cached until something invalidates it).
+    staleTime: query =>
+      (query.state.data as GfsInheritedAccessResult | undefined)?.coverage === 'unavailable'
+        ? 0
+        : Infinity,
   })
   const refreshShares = useCallback(async () => {
     const resourceId = current?.resourceId

@@ -782,6 +782,32 @@ describe('GfsGrantPanel inherited access', () => {
     )
   })
 
+  // A failed derivation is a FAILURE, not an observation: it must never be
+  // cached as if it were authoritative. Reopening Share re-runs the walk.
+  it('retries an unavailable inherited derivation when Share is reopened', async () => {
+    mockGetGfsResourceByPath.mockImplementation(async () => {
+      throw Object.assign(new Error('503 unavailable'), { status: 503 })
+    })
+    const first = renderPanel()
+
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    expect(
+      await within(existing).findByText(
+        'Inherited access could not be loaded. Members with access from a parent folder may be missing.'
+      )
+    ).toBeTruthy()
+    const callsAfterFirstOpen = mockGetGfsResourceByPath.mock.calls.length
+    expect(callsAfterFirstOpen).toBeGreaterThan(0)
+
+    // Closing Share unmounts the panel; reopening it walks the ancestors
+    // again instead of serving the cached failure.
+    first.unmount()
+    renderPanel()
+    await waitFor(() =>
+      expect(mockGetGfsResourceByPath.mock.calls.length).toBeGreaterThan(callsAfterFirstOpen)
+    )
+  })
+
   it.each([403, 429, 500])(
     'keeps a known member and the existing notice after a later %s read failure',
     async status => {
