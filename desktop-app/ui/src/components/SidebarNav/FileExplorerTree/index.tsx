@@ -698,7 +698,8 @@ export function FileExplorerTree({
     async (
       source: GfsDragSource,
       destination: { resourceId: string; name: string },
-      allowNumberedRename: boolean
+      allowNumberedRename: boolean,
+      isCurrent?: () => boolean
     ) => {
       movingResourceIdRef.current = source.resourceId
       setMovingResourceId(source.resourceId)
@@ -729,6 +730,7 @@ export function FileExplorerTree({
                 error instanceof Error ? error.message : String(error),
                 'operation'
               ),
+            ...(isCurrent ? { isCurrent } : {}),
           },
           {
             source: {
@@ -795,7 +797,8 @@ export function FileExplorerTree({
         await commitMove(
           source,
           { resourceId: node.resourceId, name: node.name },
-          decision.allowNumberedRename
+          decision.allowNumberedRename,
+          () => ownsDrop(source, epoch, sessionGeneration)
         )
       } finally {
         finishNodeDropCleanup(source, epoch, sessionGeneration)
@@ -972,7 +975,9 @@ export function FileExplorerTree({
               pending &&
               ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration)
             ) {
-              void commitMove(pending.source, pending.destination, allowNumberedRename)
+              void commitMove(pending.source, pending.destination, allowNumberedRename, () =>
+                ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration)
+              )
             }
           }}
         />
@@ -1007,7 +1012,7 @@ export function FileExplorerTree({
               { resourceId: destinationId, name: destinationName },
               allowNumberedRename
             )
-            if (outcome.status === 'session-lost') {
+            if (outcome.status === 'session-lost' || outcome.status === 'gesture-lost') {
               setMoveDialogTarget(null)
               return
             }

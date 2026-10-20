@@ -147,7 +147,8 @@ for (const surface of ['sidebar', 'files'] as const) {
     async function setup(
       sourceKind: 'file' | 'directory' = 'directory',
       delayed = false,
-      denyTarget = false
+      denyTarget = false,
+      parkResolve = false
     ) {
       const bits = await affordancesResult(heldAffordances(['read', 'write', 'delete']))
       let release!: () => void
@@ -162,6 +163,29 @@ for (const surface of ['sidebar', 'files'] as const) {
         }
         return denyTarget && id === 'target' ? affordancesResult(heldAffordances(['read'])) : bits
       })
+      // The COMMIT-TIME resolve is the last read before the PATCH. Parking it
+      // reproduces the window the ownership re-check exists for: the gesture
+      // can be superseded while the source is being re-resolved.
+      let resolveGate: Promise<void> | null = null
+      let releaseResolve!: () => void
+      if (parkResolve) {
+        resolveGate = new Promise<void>(resolve => {
+          releaseResolve = resolve
+        })
+      }
+      const resolve = vi.fn(async (uri: string) => {
+        if (resolveGate) await resolveGate
+        const id = uri.split('/').pop()!
+        return resolveResource(
+          id === 'external' || (id === 'source' && sourceKind === 'file')
+            ? resolvedFile(id, id === 'external' ? 'external.txt' : 'Source', {
+                parentResourceId: 'grand',
+              })
+            : resolvedDirectory(id, id === 'source' ? 'Source' : id, {
+                parentResourceId: id === 'grand' ? null : 'grand',
+              })
+        )
+      })
       const moveResource = vi.fn(async (_id: string, _destination: string) => ({}))
       Object.defineProperty(window, 'clerum', {
         configurable: true,
@@ -175,18 +199,7 @@ for (const surface of ['sidebar', 'files'] as const) {
               ])
             ),
             affordances,
-            resolve: vi.fn(async (uri: string) => {
-              const id = uri.split('/').pop()!
-              return resolveResource(
-                id === 'external' || (id === 'source' && sourceKind === 'file')
-                  ? resolvedFile(id, id === 'external' ? 'external.txt' : 'Source', {
-                      parentResourceId: 'grand',
-                    })
-                  : resolvedDirectory(id, id === 'source' ? 'Source' : id, {
-                      parentResourceId: id === 'grand' ? null : 'grand',
-                    })
-              )
-            }),
+            resolve,
           },
         },
       })
@@ -254,6 +267,8 @@ for (const surface of ['sidebar', 'files'] as const) {
         drop,
         dataTransfer,
         release,
+        releaseResolve,
+        resolve,
         moveResource,
         affordances,
         toast,
@@ -426,6 +441,23 @@ for (const surface of ['sidebar', 'files'] as const) {
       await waitFor(() => expect(h.moveResource).toHaveBeenCalled())
       expect(h.moveResource.mock.calls[0]![0]).toBe('source')
       expect(h.moveResource.mock.calls[0]![1]).toBe('target')
+    })
+
+    it('never dispatches when the gesture is superseded during the commit-time resolve', async () => {
+      // The drop is admitted, then the shared session takes a NEW gesture
+      // while the commit-time resolve of the source is still in flight. The
+      // PATCH must not go out: the superseded session no longer owns it.
+      const h = await setup('file', false, false, true)
+      h.start()
+      h.drop()
+      await waitFor(() => expect(h.resolve).toHaveBeenCalled())
+      expect(h.api().beginDrag(externalSource())).toBe(true)
+      await act(async () => {
+        h.releaseResolve()
+      })
+      expect(h.moveResource).not.toHaveBeenCalled()
+      expect(h.toast).not.toHaveBeenCalled()
+      expect(h.api().activeSource()?.resourceId).toBe('external')
     })
   })
 }

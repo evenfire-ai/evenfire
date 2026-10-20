@@ -218,6 +218,46 @@ describe('commitGfsMove — server verdicts', () => {
   })
 })
 
+describe('commitGfsMove — gesture ownership (rev-2 §4.1)', () => {
+  it('never dispatches when the gesture is no longer current', async () => {
+    const moveResource = vi.fn()
+    const outcome = await commitGfsMove(deps({ moveResource, isCurrent: () => false }), plan())
+    expect(outcome).toEqual({ status: 'gesture-lost' })
+    expect(moveResource).not.toHaveBeenCalled()
+  })
+
+  it('re-checks ownership before every retry, so a gesture lost mid-ladder never re-PATCHes', async () => {
+    // The first attempt fails with a name conflict; the gesture is superseded
+    // while the numbered-name ladder is being prepared. The second attempt
+    // must not reach the server.
+    let checks = 0
+    const moveResource = vi.fn(async () => {
+      throw new Error(
+        'Error invoking remote method: Error: 409 Conflict: a resource with this name already exists httpStatus=409'
+      )
+    })
+    const outcome = await commitGfsMove(
+      deps({
+        moveResource,
+        isCurrent: () => {
+          checks += 1
+          return checks === 1
+        },
+      }),
+      plan({ allowNumberedRename: true })
+    )
+    expect(outcome).toEqual({ status: 'gesture-lost' })
+    expect(moveResource).toHaveBeenCalledTimes(1)
+  })
+
+  it('dispatches when the gesture is still current', async () => {
+    const moveResource = vi.fn(async () => ({ resourceId: 'r-1', version: 8 }))
+    const outcome = await commitGfsMove(deps({ moveResource, isCurrent: () => true }), plan())
+    expect(outcome).toEqual({ status: 'committed', version: 8 })
+    expect(moveResource).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('suggestNumberedMoveName', () => {
   it('proposes the first free numbered name only when the plain name is taken', () => {
     expect(suggestNumberedMoveName('report.md', new Set(['other.md']))).toBeUndefined()

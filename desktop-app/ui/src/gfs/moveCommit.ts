@@ -37,6 +37,8 @@ export type MoveCommitOutcome =
   | { status: 'rate-limited'; message: string; retryAfterSeconds?: number }
   | { status: 'unconfirmed'; message: string }
   | { status: 'session-lost' }
+  /** The gesture that asked for this move is gone; nothing was dispatched. */
+  | { status: 'gesture-lost' }
 
 export interface MoveCommitDeps {
   /** Resolve by stable URI; throws on 403/404/transport like the read plane. */
@@ -50,6 +52,15 @@ export interface MoveCommitDeps {
   ) => Promise<{ resourceId: string; version: number }>
   /** Central fail-closed classifier; returns true when the session died. */
   isSessionAuthorityFailure: (error: unknown) => boolean
+  /**
+   * Gesture-ownership predicate, absent on paths that own no gesture (the
+   * explicit Move dialog). A drag can be superseded WHILE the commit-time
+   * resolve is in flight — a newer drag on another surface, a scope change, a
+   * revoked session — and the PATCH would then move the item with a session
+   * the user no longer owns. Checked immediately before every dispatch
+   * attempt (so it also covers the numbered-name retries), never after.
+   */
+  isCurrent?: () => boolean
 }
 
 function messageOf(error: unknown): string {
@@ -101,6 +112,12 @@ export async function commitGfsMove(
   let moveName = snapshot.name
 
   for (let attempt = 0; attempt < GFS_MOVE_MAX_NETWORK_ATTEMPTS; attempt += 1) {
+    // Ownership re-check (rev-2 §4.1): the gesture that asked for this move
+    // may have been superseded while the commit-time resolve — or a previous
+    // attempt — was in flight. A PATCH dispatched after that would move the
+    // item under a session the user no longer owns, so the gesture is
+    // re-validated at the dispatch boundary instead of only at admission.
+    if (deps.isCurrent?.() === false) return { status: 'gesture-lost' }
     let error: unknown
     try {
       const receipt = await deps.moveResource(
@@ -246,6 +263,9 @@ export function toastMoveOutcome(
       pushToast?.(outcome.message, 'info')
       break
     case 'session-lost':
+    // A superseded gesture never reached the server: there is nothing to
+    // report and nothing to apologize for.
+    case 'gesture-lost':
       break
     default:
       pushToast?.(outcome.message, 'error')

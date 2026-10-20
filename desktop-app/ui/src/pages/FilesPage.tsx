@@ -1317,11 +1317,17 @@ export function FilesPage({
   }
 
   /** Shared move dispatch (rev-2 §5) used by the drag path, the folder
-   * confirmation and the Move dialog — one service, one code path. */
+   * confirmation and the Move dialog — one service, one code path.
+   *
+   * `isCurrent` is the gesture-ownership predicate: the drag path passes the
+   * ownership check it already runs at admission, so the commit re-validates
+   * it at the dispatch boundary too (the explicit Move dialog owns no gesture
+   * and passes none). */
   const runMoveCommit = async (
     source: GfsDragSource,
     destination: { resourceId: string; name: string },
-    allowNumberedRename: boolean
+    allowNumberedRename: boolean,
+    isCurrent?: () => boolean
   ): Promise<MoveCommitOutcome> => {
     movingResourceRef.current = source.resourceId
     setMovingResourceId(source.resourceId)
@@ -1348,6 +1354,7 @@ export function FilesPage({
               source.parentKnown ? source.parentResourceId : null
             ),
           isSessionAuthorityFailure: error => failClosedOnAuthorizationError(error),
+          ...(isCurrent ? { isCurrent } : {}),
         },
         {
           source: {
@@ -1380,6 +1387,8 @@ export function FilesPage({
           pushToast?.(outcome.message, 'info')
           break
         case 'session-lost':
+        // A superseded gesture never reached the server: nothing to report.
+        case 'gesture-lost':
           break
         default:
           pushToast?.(outcome.message, 'error')
@@ -1437,7 +1446,8 @@ export function FilesPage({
       await runMoveCommit(
         source,
         { resourceId: destination.resourceId, name: destination.name },
-        decision.allowNumberedRename
+        decision.allowNumberedRename,
+        () => ownsDrop(source, dragGeneration, sessionGeneration)
       )
     } finally {
       finishDropCleanup(source, dragGeneration, sessionGeneration)
@@ -1622,7 +1632,7 @@ export function FilesPage({
       { resourceId: destinationId, name: destinationName },
       allowNumberedRename
     )
-    if (outcome.status === 'session-lost') {
+    if (outcome.status === 'session-lost' || outcome.status === 'gesture-lost') {
       setMoveTarget(null)
       return
     }
@@ -2638,7 +2648,9 @@ export function FilesPage({
               pending &&
               ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration)
             ) {
-              void runMoveCommit(pending.source, pending.destination, allowNumberedRename)
+              void runMoveCommit(pending.source, pending.destination, allowNumberedRename, () =>
+                ownsDrop(pending.source, pending.gestureGeneration, pending.sessionGeneration)
+              )
             }
           }}
         />
