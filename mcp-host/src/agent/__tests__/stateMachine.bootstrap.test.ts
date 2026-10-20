@@ -197,60 +197,70 @@ async function bootFixture() {
   }
 }
 
-describe('AgentStateMachine corrupt checkpoint boot recovery (#1043 C-2)', () => {
-  it.each(['loadForTask', 'loadLive'] as const)(
-    'clears only the corrupt approval at %s and rehydrates the healthy session',
-    async read => {
-      const f = await bootFixture()
-      if (read === 'loadForTask') {
-        expect(f.corrupt().changes).toBe(1)
-      } else {
-        const loadLive = f.checkpoints.loadLive.bind(f.checkpoints)
-        vi.spyOn(f.checkpoints, 'loadLive').mockImplementationOnce(sessionKey => {
-          expect(f.corrupt().changes).toBe(1)
-          return loadLive(sessionKey)
-        })
-      }
-      const warn = vi.spyOn(logger, 'warn')
-      await expect(f.stateMachine.bootstrap()).resolves.toBeUndefined()
-      expect(f.approvals()).toEqual([{ request_id: 'approval-healthy' }])
-      expect(f.stateMachine.getPendingApprovals().map(a => a.requestId)).toEqual([
-        'approval-healthy',
-      ])
-      expect(f.badConversation.state).toBe(ConversationState.Idle)
-      expect(f.badConversation.pending_approval).toBeUndefined()
-      expect(f.healthyConversation.pending_approval?.request_id).toBe('approval-healthy')
-      expect(warn).toHaveBeenCalledWith(
-        {
-          sessionKey: BAD_SESSION,
-          taskId: 'bad-boot-task',
-          code: 'MODEL_STEP_CHECKPOINT_CORRUPT',
-        },
-        expect.any(String)
-      )
-
-      // Both normal retirement paths must work on the still-corrupt ledger.
-      if (read === 'loadForTask') {
-        vi.spyOn(Date, 'now').mockReturnValue(NOW + TTL_MS + 1)
-        expect(await f.checkpoints.sweep()).toMatchObject({ expired: 1, purgedCheckpoints: 1 })
-        expect(
-          f.handle.worker.db.prepare('SELECT checkpoint_id FROM model_step_checkpoints').all()
-        ).toEqual([])
-        expect(
-          f.handle.worker.db.prepare('SELECT seq FROM model_step_checkpoint_entries').all()
-        ).toEqual([])
-      } else {
-        await f.manager.startTurn(f.badConversation, 'Start a new turn', 'next-boot-task')
-        expect(
-          f.handle.worker.db.prepare('SELECT status FROM model_step_checkpoints').get()
-        ).toEqual({ status: 'abandoned' })
-        expect(await f.checkpoints.sweep()).toMatchObject({ purgedCheckpoints: 1 })
-        expect(
-          f.handle.worker.db.prepare('SELECT checkpoint_id FROM model_step_checkpoints').all()
-        ).toEqual([])
-      }
-    }
+async function expectCorruptApprovalRetired(
+  f: Awaited<ReturnType<typeof bootFixture>>,
+  warning: string
+) {
+  const warn = vi.spyOn(logger, 'warn')
+  await expect(f.stateMachine.bootstrap()).resolves.toBeUndefined()
+  expect(f.approvals()).toEqual([{ request_id: 'approval-healthy' }])
+  expect(f.stateMachine.getPendingApprovals().map(a => a.requestId)).toEqual(['approval-healthy'])
+  expect(f.badConversation.state).toBe(ConversationState.Idle)
+  expect(f.badConversation.pending_approval).toBeUndefined()
+  expect(f.healthyConversation.pending_approval?.request_id).toBe('approval-healthy')
+  expect(warn).toHaveBeenCalledWith(
+    {
+      sessionKey: BAD_SESSION,
+      taskId: 'bad-boot-task',
+      code: 'MODEL_STEP_CHECKPOINT_CORRUPT',
+    },
+    warning
   )
+}
+
+describe('AgentStateMachine corrupt checkpoint boot recovery (#1043 C-2)', () => {
+  it('handles corrupt loadForTask in the stateMachine catch and rehydrates the healthy session', async () => {
+    const f = await bootFixture()
+    expect(f.corrupt().changes).toBe(1)
+    const read = vi.spyOn(f.checkpoints, 'loadForTask')
+    await expectCorruptApprovalRetired(
+      f,
+      'Pending approval checkpoint is corrupt; retiring approval'
+    )
+    expect(read).toHaveBeenCalledWith(BAD_SESSION, 'bad-boot-task')
+
+    vi.spyOn(Date, 'now').mockReturnValue(NOW + TTL_MS + 1)
+    expect(await f.checkpoints.sweep()).toMatchObject({ expired: 1, purgedCheckpoints: 1 })
+    expect(
+      f.handle.worker.db.prepare('SELECT checkpoint_id FROM model_step_checkpoints').all()
+    ).toEqual([])
+    expect(
+      f.handle.worker.db.prepare('SELECT seq FROM model_step_checkpoint_entries').all()
+    ).toEqual([])
+  })
+
+  it('handles corrupt loadLive in the executor catch and rehydrates the healthy session', async () => {
+    const f = await bootFixture()
+    const loadLive = f.checkpoints.loadLive.bind(f.checkpoints)
+    const read = vi.spyOn(f.checkpoints, 'loadLive').mockImplementationOnce(sessionKey => {
+      expect(f.corrupt().changes).toBe(1)
+      return loadLive(sessionKey)
+    })
+    await expectCorruptApprovalRetired(
+      f,
+      'Pending approval checkpoint is corrupt; retiring the approval'
+    )
+    expect(read).toHaveBeenCalledWith(BAD_SESSION)
+
+    await f.manager.startTurn(f.badConversation, 'Start a new turn', 'next-boot-task')
+    expect(f.handle.worker.db.prepare('SELECT status FROM model_step_checkpoints').get()).toEqual({
+      status: 'abandoned',
+    })
+    expect(await f.checkpoints.sweep()).toMatchObject({ purgedCheckpoints: 1 })
+    expect(
+      f.handle.worker.db.prepare('SELECT checkpoint_id FROM model_step_checkpoints').all()
+    ).toEqual([])
+  })
 
   it.each(['worker_timeout', 'SQLITE_IOERR'])(
     'rejects bootstrap on %s from loadForTask without clearing approvals',
