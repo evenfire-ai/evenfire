@@ -63,7 +63,7 @@ import {
   type GfsDelegationSubjectOption,
   type GfsGrantListItem,
 } from '@/gfs/delegation'
-import type { GfsInheritedAccessSource } from '@/gfs/delegation.types'
+import type { GfsInheritedAccessSource, GfsInheritedCoverageState } from '@/gfs/delegation.types'
 import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
 import type { GfsDragSource, GfsDropRejection, GfsDropVerdict } from '@/gfs/dragSession'
 import { useGfsDragSession } from '@/gfs/dragSession'
@@ -114,6 +114,26 @@ const INHERITED_READ_BOUNDARY_HINT =
   'Some folders above this one are not visible to you. People may still have access through them, but we cannot show who.'
 const INHERITED_ACL_LIMITED_NOTICE =
   'Sharing details on some parent folders are not visible to you.'
+
+/**
+ * A role promise is only as good as the coverage it was made under: when the
+ * inherited walk did not complete, an ancestor the user cannot see may still
+ * grant a stronger role. The success copy then states what was NOT verified
+ * instead of promising an effective role the client never proved.
+ *
+ * The Desktop's role copy carries no trailing period, so the qualifier
+ * brings its own.
+ */
+function inheritedCoverageCaveat(coverage: GfsInheritedCoverageState | null): string {
+  if (coverage === 'complete') return ''
+  if (coverage === 'read-boundary') {
+    return '. Access through parent folders you cannot see was not verified.'
+  }
+  if (coverage === 'acl-limited') {
+    return '. Access through some parent folders was not verified because their sharing details are not visible to you.'
+  }
+  return '. Inherited access could not be verified, so access through parent folders you cannot see may still be stronger.'
+}
 
 function delegationSubjectOptions(
   directory: TeamDirectoryResult | undefined
@@ -703,7 +723,12 @@ export function FilesPage({
     setUpdatingAccessRole(true)
     try {
       await ctrl.grant([subjectKey], bits, item.inherit)
-      pushToast?.(`${label} is now ${role === 'editor' ? 'an Editor' : 'Read-only'}`, 'success')
+      pushToast?.(
+        `${label} is now ${role === 'editor' ? 'an Editor' : 'Read-only'}${inheritedCoverageCaveat(
+          ctrl.inheritedCoverage
+        )}`,
+        'success'
+      )
       await Promise.all([ctrl.refreshGrants(), ctrl.refreshShares()])
     } catch (roleError) {
       if (failClosedOnAuthorizationError(roleError)) return
@@ -969,8 +994,8 @@ export function FilesPage({
       } else {
         pushToast?.(
           affectedNames.length > 0
-            ? `${label} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${joinFolderNames(affectedNames)} and everything inside ${affectedNames.length > 1 ? 'them' : 'it'}`
-            : `${label} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${current?.name ?? 'this file'}`,
+            ? `${label} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${joinFolderNames(affectedNames)} and everything inside ${affectedNames.length > 1 ? 'them' : 'it'}${inheritedCoverageCaveat(ctrl.inheritedCoverage)}`
+            : `${label} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${current?.name ?? 'this file'}${inheritedCoverageCaveat(ctrl.inheritedCoverage)}`,
           'success'
         )
       }

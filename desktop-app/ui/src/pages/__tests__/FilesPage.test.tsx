@@ -57,6 +57,7 @@ function baseController() {
     loadingGrants: false,
     refreshGrants: vi.fn(),
     inheritedAccess: [],
+    inheritedCoverage: 'complete',
     loadingInheritedAccess: false,
     refreshInheritedAccess: vi.fn(),
     revokeGrant: vi.fn(),
@@ -3154,6 +3155,71 @@ describe('FilesPage', () => {
     )
     expect(refreshGrants).toHaveBeenCalledTimes(1)
     expect(pushToast).toHaveBeenCalledWith('chatllm is now an Editor', 'success')
+  })
+
+  // A role promise is only as good as the coverage it was made under: an
+  // ancestor the user cannot see may still grant Editor, so the success copy
+  // must say what was NOT verified instead of promising an effective role.
+  it('qualifies the role-change toast when the inherited coverage is incomplete', async () => {
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        agents: {
+          listMine: vi.fn(async () => [
+            {
+              name: 'chatllm',
+              contextRef: 'ctx-1',
+              mcpServers: [],
+              gfsSubject: { type: 'host', id: '1st:mcp-host/chatllm' },
+            },
+          ]),
+        },
+        team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
+      },
+    })
+    const grant = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder',
+        name: 'Team folder',
+        kind: 'directory',
+      },
+      affordances: {
+        held: ['read', 'write', 'manage_acl'],
+        canDelegate: true,
+        grantableBits: ['read', 'write'],
+        canCreateShare: false,
+      },
+      grants: [
+        {
+          id: 'grant-1',
+          drive: 'main',
+          resourceId: 'folder-1',
+          subject: { type: 'host', id: '1st:mcp-host/chatllm' },
+          permissions: ['read'],
+          inherit: true,
+        },
+      ],
+      // The inherited walk stopped at a privacy boundary: an ancestor the
+      // user cannot see may still grant Editor.
+      inheritedCoverage: 'read-boundary',
+      grant,
+    })
+
+    renderFilesPage(pushToast)
+    await openManageDialog('Team folder')
+    fireEvent.click(await screen.findByRole('button', { name: 'Access role for chatllm' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        'chatllm is now an Editor. Access through parent folders you cannot see was not verified.',
+        'success'
+      )
+    )
   })
 
   it('lists direct shares in the who-has-access list and revokes them', async () => {

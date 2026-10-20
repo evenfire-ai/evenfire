@@ -512,6 +512,47 @@ describe('GfsGrantPanel inherited access', () => {
     ).toBeTruthy()
   })
 
+  // A role promise is only as good as the coverage it was made under: an
+  // ancestor the operator cannot see may still grant Editor, so the success
+  // copy must say what was NOT verified instead of promising an effective
+  // role.
+  it('qualifies the role-change toast when the inherited coverage is incomplete', async () => {
+    const actual = await vi.importActual<typeof import('@lib/api')>('@lib/api')
+    const text = JSON.stringify({ error: 'request_failed', message: 'parent read failed' })
+    const error = actual.formatApiError(new Response(text, { status: 403 }), text)
+    mockGetGfsResourceByPath.mockImplementation(async (_drive, path) => {
+      if (path === '/team-docs') return byPathView(FOLDER_ID, 'team-docs')
+      throw error
+    })
+    mockGetGfsGrants.mockImplementation(async resourceId => ({
+      items:
+        resourceId === FILE_ID
+          ? [
+              {
+                id: FILE_GRANT_ID,
+                drive: 'main',
+                resourceId: FILE_ID,
+                subject: marcela,
+                permissions: ['read', 'write'],
+                inherit: false,
+              },
+            ]
+          : [],
+    }))
+    renderPanel()
+
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    const row = await within(existing).findByTestId(marcelaRowTestId)
+    await chooseRole(row, 'Read')
+
+    await waitFor(() => expect(mockPutGfsGrant).toHaveBeenCalledTimes(1))
+    expect(
+      await screen.findByText(
+        'Marcela is now Read-only. Access through parent folders you cannot see was not verified.'
+      )
+    ).toBeTruthy()
+  })
+
   // R1-M5 — a share-only DIRECT row is not role-editable: the dropdown is
   // disabled (no grant would be created by a role change).
   it('disables the role dropdown for a share-only direct row', async () => {

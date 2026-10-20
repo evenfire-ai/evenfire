@@ -110,6 +110,26 @@ const ROLE_OPTIONS: SelectionDropdownOption[] = [
   { value: 'editor', label: 'Editor' },
 ]
 
+/**
+ * A role promise is only as good as the coverage it was made under: when the
+ * inherited walk did not complete, an ancestor the operator cannot see may
+ * still grant a stronger role. The success copy then states what was NOT
+ * verified instead of promising an effective role the client never proved.
+ *
+ * The Control UI's role copy ends with a period, so the qualifier brings only
+ * its own leading space.
+ */
+function inheritedCoverageCaveat(coverage: GfsInheritedAccessCoverage, loading: boolean): string {
+  if (!loading && coverage === 'complete') return ''
+  if (coverage === 'read-boundary') {
+    return ' Access through parent folders you cannot see was not verified.'
+  }
+  if (coverage === 'acl-limited') {
+    return ' Access through some parent folders was not verified because their sharing details are not visible to you.'
+  }
+  return ' Inherited access could not be verified, so access through parent folders you cannot see may still be stronger.'
+}
+
 export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Element {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
@@ -609,7 +629,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
         )
       } else {
         showToast(
-          `${subjectLabel(item)} is now ${nextRole === 'editor' ? 'an Editor' : 'Read-only'}.`,
+          `${subjectLabel(item)} is now ${nextRole === 'editor' ? 'an Editor' : 'Read-only'}.${inheritedCoverageCaveat(inheritedAccessCoverage, inheritedAccessLoading)}`,
           { tone: 'success' }
         )
       }
@@ -850,8 +870,8 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       } else {
         showToast(
           affectedNames.length > 0
-            ? `${subjectLabel(row)} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${joinFolderNames(affectedNames)} and everything inside ${affectedNames.length > 1 ? 'them' : 'it'}.`
-            : `${subjectLabel(row)} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${resource.name}.`,
+            ? `${subjectLabel(row)} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${joinFolderNames(affectedNames)} and everything inside ${affectedNames.length > 1 ? 'them' : 'it'}.${inheritedCoverageCaveat(inheritedAccessCoverage, inheritedAccessLoading)}`
+            : `${subjectLabel(row)} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${resource.name}.${inheritedCoverageCaveat(inheritedAccessCoverage, inheritedAccessLoading)}`,
           { tone: 'success' }
         )
       }
