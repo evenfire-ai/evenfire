@@ -230,6 +230,55 @@ describe('commitGfsMove — server verdicts', () => {
     expect(outcome.status).toBe('unconfirmed')
     expect(moveResource).toHaveBeenCalledTimes(1)
   })
+
+  it('a validated 5xx that merely mentions "already exists" is not a name conflict', async () => {
+    // The vetted status is the verdict. A 5xx body can carry the phrase for
+    // any reason; re-PATCHing under a new name would rename an item the
+    // server never rejected.
+    const moveResource = vi.fn(async () => {
+      throw new Error(
+        'Error invoking remote method: Error: 500 Internal Server Error: a resource with this name already exists httpStatus=500'
+      )
+    })
+    const outcome = await commitGfsMove(deps({ moveResource }), plan({ allowNumberedRename: true }))
+    expect(outcome.status).toBe('unconfirmed')
+    // No numbered-name retry: the move was never a collision.
+    expect(moveResource).toHaveBeenCalledTimes(1)
+  })
+
+  it('a validated 503 that mentions "already exists" is verified, never retried', async () => {
+    const moveResource = vi.fn(async () => {
+      throw new Error(
+        'Error invoking remote method: Error: 503 Service Unavailable: destination already exists upstream httpStatus=503'
+      )
+    })
+    const resolveSource = vi
+      .fn()
+      .mockResolvedValueOnce(resolved())
+      .mockResolvedValueOnce(resolved({ parentResourceId: 'dest-1', version: 12 }))
+    const outcome = await commitGfsMove(
+      deps({ moveResource, resolveSource }),
+      plan({ allowNumberedRename: true })
+    )
+    // The move actually landed: the outcome is verified, not retried.
+    expect(outcome).toEqual({
+      status: 'committed',
+      version: 12,
+      previousParentId: 'old-parent',
+    })
+    expect(moveResource).toHaveBeenCalledTimes(1)
+  })
+  it('a 5xx body that mentions "already exists" without a vetted marker is not a name conflict', async () => {
+    // No `httpStatus=` marker crossed the boundary, but the response still
+    // carries its own status line: 5xx is not a collision, so the outcome is
+    // verified instead of retried under a new name.
+    const moveResource = vi.fn(async () => {
+      throw new Error('500 Internal Server Error: a resource with this name already exists')
+    })
+    const outcome = await commitGfsMove(deps({ moveResource }), plan({ allowNumberedRename: true }))
+    expect(outcome.status).toBe('unconfirmed')
+    expect(moveResource).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('commitGfsMove — gesture ownership (rev-2 §4.1)', () => {

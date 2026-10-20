@@ -1,5 +1,6 @@
 import {
   GFS_MOVE_MAX_NETWORK_ATTEMPTS,
+  gfsHttpStatusOf,
   isGfsNameConflict,
   nextAvailableGfsResourceName,
 } from '@clerum/gfs-interaction-policy'
@@ -83,6 +84,27 @@ export interface MoveCommitDeps {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * A name conflict is a 409 and nothing else.
+ *
+ * The shared classifier also accepts body PROSE ("already exists"), and a
+ * 5xx body can carry that prose while describing something else entirely
+ * (an upstream conflict, a replayed error, a message about a different
+ * resource). Treating such a response as a collision would skip the outcome
+ * verification and re-PATCH the move under a NEW name — renaming an item the
+ * server never rejected.
+ *
+ * The response's own status decides: the vetted `httpStatus=` marker first,
+ * then the shared status reader for a response that never carried one. Only
+ * when no status can be read at all does the prose classifier apply, because
+ * it is then the only evidence available.
+ */
+function isNameConflictResponse(error: unknown, status: number | null): boolean {
+  const effectiveStatus = status ?? gfsHttpStatusOf(error)
+  if (effectiveStatus !== null) return effectiveStatus === 409
+  return isGfsNameConflict(error)
 }
 
 /**
@@ -192,7 +214,7 @@ export async function commitGfsMove(
           : {}),
       }
     }
-    if (status !== 409 && !isGfsNameConflict(error)) {
+    if (!isNameConflictResponse(error, status)) {
       // Transport loss after dispatch: verify the outcome by identity; never
       // repeat a possibly committed move.
       const verified = await verifyOutcomeByResolve(deps, plan, snapshot)
