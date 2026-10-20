@@ -450,6 +450,17 @@ function statements(db: Database): Statements {
     deleteTerminalHeaders: db.prepare(`
       DELETE FROM model_step_checkpoints
       WHERE status IN ('completed','abandoned') AND updated_at <= @cutoff
+        AND NOT EXISTS (
+          SELECT 1 FROM sessions sess
+          WHERE sess.session_key = model_step_checkpoints.session_key
+            AND sess.active_task_id = model_step_checkpoints.continuation_task_id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM pending_approvals approval
+          JOIN sessions sess ON sess.id = approval.session_id
+          WHERE sess.session_key = model_step_checkpoints.session_key
+            AND approval.task_id = model_step_checkpoints.continuation_task_id
+        )
     `),
     ledgerKinds: db.prepare(`
       SELECT seq, kind, tool_call_id, payload FROM model_step_checkpoint_entries
