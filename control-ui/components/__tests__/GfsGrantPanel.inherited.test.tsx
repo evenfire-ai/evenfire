@@ -782,6 +782,31 @@ describe('GfsGrantPanel inherited access', () => {
     )
   })
 
+  it.each([403, 429, 500])(
+    'keeps a known member and the existing notice after a later %s read failure',
+    async status => {
+      const actual = await vi.importActual<typeof import('@lib/api')>('@lib/api')
+      const text = JSON.stringify({ error: 'request_failed', message: 'parent read failed' })
+      const error = actual.formatApiError(new Response(text, { status }), text)
+      mockGetGfsResourceByPath.mockImplementation(async (_drive, path) => {
+        if (path === '/team-docs') return byPathView(FOLDER_ID, 'team-docs')
+        throw error
+      })
+      renderPanel()
+      const existing = await screen.findByRole('region', { name: 'People with access' })
+      const member = await within(existing).findByTestId(miguelRowTestId)
+      expect(within(member).getByText('Miguel')).toBeTruthy()
+      await waitFor(() => expect(within(existing).queryByText('Loading access…')).toBeNull())
+      expect(within(existing).getByRole('status').className).toContain(
+        'cu-gfs-existing-access__notice'
+      )
+      expect(within(existing).getByRole('status').textContent).toMatch(
+        /parent folders|parent folder/
+      )
+      expect(within(existing).queryByText('No one has access yet.')).toBeNull()
+    }
+  )
+
   it('merges the same subject inherited through several folders into one row with the strongest source', async () => {
     mockGetGfsResourceByPath.mockImplementation(async (_drive, path) => {
       if (path === '/team-docs') return byPathView(FOLDER_ID, 'team-docs')

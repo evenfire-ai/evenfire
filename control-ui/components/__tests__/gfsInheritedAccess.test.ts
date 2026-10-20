@@ -34,7 +34,7 @@ describe('loadGfsInheritedAccess', () => {
     mockGetGfsShares.mockResolvedValue({ items: [] })
   })
 
-  it('fails when an ancestor ACL read fails instead of returning a partial role', async () => {
+  it('continues after an ancestor ACL denial and marks retained rows incomplete', async () => {
     mockGetGfsResourceByPath.mockImplementation(async (_drive, path) => {
       if (path === '/nested') return resourceView('nested-folder', 'nested', '/nested')
       if (path === '/') return resourceView('root-folder', '', '/')
@@ -56,22 +56,26 @@ describe('loadGfsInheritedAccess', () => {
       }
     })
 
-    await expect(loadGfsInheritedAccess({ path: '/nested/report.md' }, 'main')).rejects.toThrow(
-      'inherited_access_derivation_failed'
-    )
-    expect(mockGetGfsResourceByPath.mock.calls.map(([, path]) => path)).toEqual(['/nested'])
+    await expect(
+      loadGfsInheritedAccess({ path: '/nested/report.md' }, 'main')
+    ).resolves.toMatchObject({
+      coverage: 'acl-limited',
+      items: [{ subject: { type: 'user', id: 'member-1' }, permissions: ['read'] }],
+    })
+    expect(mockGetGfsResourceByPath.mock.calls.map(([, path]) => path)).toEqual(['/nested', '/'])
   })
 
-  it('fails when an ancestor cannot be resolved, matching Desktop walk semantics', async () => {
+  it('stops at an unreadable ancestor with explicit boundary coverage', async () => {
     mockGetGfsResourceByPath.mockImplementation(async (_drive, path) => {
       if (path === '/nested') throw new Error('403 forbidden')
       if (path === '/') return resourceView('root-folder', '', '/')
       throw new Error('unexpected path')
     })
 
-    await expect(loadGfsInheritedAccess({ path: '/nested/report.md' }, 'main')).rejects.toThrow(
-      'inherited_access_derivation_failed'
-    )
+    await expect(loadGfsInheritedAccess({ path: '/nested/report.md' }, 'main')).resolves.toEqual({
+      items: [],
+      coverage: 'read-boundary',
+    })
     expect(mockGetGfsResourceByPath.mock.calls.map(([, path]) => path)).toEqual(['/nested'])
   })
 
@@ -89,8 +93,8 @@ describe('loadGfsInheritedAccess', () => {
     mockGetGfsGrants.mockResolvedValue({ items: [] })
     mockGetGfsShares.mockResolvedValue({ items: [] })
 
-    const items = await loadGfsInheritedAccess({ path: null, gfsUri: 'gfs://main/abcdef' }, 'main')
-    expect(items).toEqual([])
+    const result = await loadGfsInheritedAccess({ path: null, gfsUri: 'gfs://main/abcdef' }, 'main')
+    expect(result).toEqual({ items: [], coverage: 'complete' })
     expect(apiGet).toHaveBeenCalledWith(
       '/api/v1/gfs/resolve',
       { uri: 'gfs://main/abcdef' },
@@ -100,19 +104,20 @@ describe('loadGfsInheritedAccess', () => {
     expect(mockGetGfsResourceByPath.mock.calls.map(([, path]) => path)).toEqual(['/'])
   })
 
-  it('fails the derivation when a path-less target cannot be resolved', async () => {
+  it('marks a path-less target boundary explicitly when it cannot be resolved', async () => {
     apiGet.mockRejectedValue(new Error('403 forbidden') as never)
     mockGetGfsResourceByPath.mockResolvedValue(resourceView('root-folder', '', '/'))
 
     await expect(
       loadGfsInheritedAccess({ path: null, gfsUri: 'gfs://main/abcdef' }, 'main')
-    ).rejects.toThrow('inherited_access_derivation_failed')
+    ).resolves.toEqual({ items: [], coverage: 'read-boundary' })
     expect(mockGetGfsResourceByPath).not.toHaveBeenCalled()
   })
 
-  it('fails the derivation when a target has neither a path nor a gfs URI', async () => {
-    await expect(loadGfsInheritedAccess({ path: null, gfsUri: null }, 'main')).rejects.toThrow(
-      'inherited_access_derivation_failed'
-    )
+  it('marks a target without a path or gfs URI unavailable', async () => {
+    await expect(loadGfsInheritedAccess({ path: null, gfsUri: null }, 'main')).resolves.toEqual({
+      items: [],
+      coverage: 'unavailable',
+    })
   })
 })

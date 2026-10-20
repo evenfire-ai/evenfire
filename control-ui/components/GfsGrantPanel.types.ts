@@ -114,3 +114,14 @@ export type GfsInheritedAccessItem = {
   /** Every contributing ancestor folder, nearest first (R1-H1). */
   sources: GfsInheritedAccessSource[]
 }
+
+export type GfsInheritedAccessCoverage =
+  | 'complete'
+  | 'read-boundary'
+  | 'acl-limited'
+  | 'unavailable'
+
+export interface GfsInheritedAccessResult {
+  items: GfsInheritedAccessItem[]
+  coverage: GfsInheritedAccessCoverage
+}

@@ -40,6 +40,7 @@ import type {
   GfsExistingAccessItem,
   GfsFileAccessRow,
   GfsGrantPanelProps,
+  GfsInheritedAccessCoverage,
   GfsInheritedAccessItem,
   GfsInheritedAccessSource,
 } from './GfsGrantPanel.types'
@@ -130,13 +131,19 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
   const existingAccessRequest = useRef(0)
   const existingAccessController = useRef<AbortController | null>(null)
   // Inherited access is derived separately: it comes from ancestor folders,
-  // not from this resource's direct grant/share rows. Only FILE dialogs use
-  // the derivation — folder dialogs keep their direct-only behavior.
+  // not from this resource's direct grant/share rows. Files and folders use
+  // the same retaining walk, with explicit incomplete-coverage feedback.
   const [inheritedAccess, setInheritedAccess] = useState<GfsInheritedAccessItem[]>([])
   const [inheritedAccessLoading, setInheritedAccessLoading] = useState(true)
-  // True only when the whole derivation failed (R1-M3): the access section
-  // then shows a quiet notice instead of trusting an empty derived list.
-  const [inheritedAccessFailed, setInheritedAccessFailed] = useState(false)
+  const [inheritedAccessCoverage, setInheritedAccessCoverage] =
+    useState<GfsInheritedAccessCoverage>('complete')
+  const inheritedAccessFailed = inheritedAccessCoverage !== 'complete'
+  const inheritedAccessNotice =
+    inheritedAccessCoverage === 'read-boundary'
+      ? 'There may be access from parent folders you cannot see.'
+      : inheritedAccessCoverage === 'acl-limited'
+        ? 'Sharing details on some parent folders are not visible to you.'
+        : 'Inherited access could not be loaded. Members with access from a parent folder may be missing.'
   const inheritedAccessRequest = useRef(0)
   const inheritedAccessController = useRef<AbortController | null>(null)
   // Pending parent-folder confirmation (role change or removal) for a member
@@ -243,7 +250,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
   const loadInheritedAccess = useCallback(async () => {
     inheritedAccessController.current?.abort()
     const requestId = ++inheritedAccessRequest.current
-    setInheritedAccessFailed(false)
+    setInheritedAccessCoverage('complete')
     // Inherited access is derived for FILES AND FOLDERS: a folder dialog must
     // show the identities its ancestors grant, not an empty list. The walk
     // resolves the canonical path itself when the target carries none.
@@ -251,21 +258,20 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
     inheritedAccessController.current = controller
     setInheritedAccessLoading(true)
     try {
-      const items = await loadGfsInheritedAccess(
+      const result = await loadGfsInheritedAccess(
         { path: resource.path, gfsUri: resource.gfsUri },
         DRIVE,
         controller.signal
       )
       if (requestId !== inheritedAccessRequest.current) return
-      setInheritedAccess(items)
+      setInheritedAccess(result.items)
+      setInheritedAccessCoverage(result.coverage)
     } catch {
       if (requestId !== inheritedAccessRequest.current) return
       setInheritedAccess([])
-      // A TOTAL derivation failure (the walk itself blew up) is surfaced as a
-      // quiet notice; per-ancestor best-effort skipping stays silent by
-      // design. An empty derived list alone would silently read as "no one
-      // else has access" (R1-M3).
-      setInheritedAccessFailed(true)
+      // Session expiry and cancellation still reject through the existing
+      // API/request boundary; never keep protected rows from a failed session.
+      setInheritedAccessCoverage('unavailable')
     } finally {
       if (requestId === inheritedAccessRequest.current) {
         inheritedAccessController.current = null
@@ -931,8 +937,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
           </div>
           {inheritedAccessFailed ? (
             <p role="status" className="cu-gfs-existing-access__notice">
-              Inherited access could not be loaded. Members with access from a parent folder may be
-              missing.
+              {inheritedAccessNotice}
             </p>
           ) : null}
           {existingAccessLoading || inheritedAccessLoading ? (
