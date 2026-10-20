@@ -1,7 +1,7 @@
 import { classifyGfsAclReadFailure, worstGfsCoverageClass } from '@clerum/gfs-interaction-policy'
 import type { GfsCoverageClass } from '@clerum/gfs-interaction-policy'
 import { GFS_BREADCRUMB_MAX_DEPTH } from '@constants/gfsBrowser'
-import { parseHttpStatus } from '@lib/gfsGrantErrors'
+import { isGfsSessionAuthorityFailure } from '@lib/gfsGrantErrors'
 import type { GfsInheritedAccessItem, GfsInheritedAccessResult } from './delegation.types'
 import { inheritedSubjectKey, mergeInheritedAccessItem } from './inheritedAccessMerge'
 
@@ -27,7 +27,7 @@ export { planInheritedRoleChange, strongestInheritedSource } from './inheritedAc
  * family's rows and the walk continues (`acl-limited`) — the readable
  * ancestor's parent id is already known from its resolve. Any other failure
  * (404/410, 429, transport, cycle, depth cap) stops the walk with the folded
- * rows and `unavailable`. HTTP 401 from any family is rethrown RAW: a session
+ * rows and `unavailable`. A session-authority failure (401 or typed lifecycle 403) is rethrown RAW: a session
  * death is never classified as a quiet boundary and keeps traveling the
  * controller's existing fail-closed error path.
  */
@@ -61,17 +61,21 @@ export async function deriveGfsInheritedAccess(
   let aclDenied = false
   let stopped = false
 
-  /** Vetted status marker from the main-process client; null when none. */
-  const statusOf = (error: unknown): number | null =>
-    parseHttpStatus(error instanceof Error ? error.message : String(error ?? ''))
+  // Match the existing session boundary before classifying an ordinary
+  // folder/ACL denial. Typed lifecycle 403s are session failures too.
+  const isAuthorityFailure = (error: unknown): boolean =>
+    isGfsSessionAuthorityFailure(
+      error instanceof Error ? error.message : String(error ?? ''),
+      'operation'
+    )
 
-  /** Classify a resolve failure; a session 401 rethrows the original error. */
+  /** Classify a resolve failure; session authority rethrows the original error. */
   const resolveFailureClass = (error: unknown): GfsCoverageClass => {
-    if (statusOf(error) === 401) throw error
+    if (isAuthorityFailure(error)) throw error
     return classifyGfsAclReadFailure(error)
   }
 
-  /** Classify an ACL-list failure (same 401 rule as resolve). */
+  /** Classify an ACL-list failure (same authority rule as resolve). */
   const aclFailureClass = resolveFailureClass
 
   let targetParentId: string | null
@@ -123,9 +127,9 @@ export async function deriveGfsInheritedAccess(
       window.clerum.gfs.listGrants(parent.resourceId, drive),
       window.clerum.gfs.listShares(parent.resourceId, drive),
     ])
-    // A session 401 from EITHER family rethrows before anything is folded.
+    // A session-authority failure from EITHER family rethrows before rows fold.
     for (const outcome of settled) {
-      if (outcome.status === 'rejected' && statusOf(outcome.reason) === 401) throw outcome.reason
+      if (outcome.status === 'rejected' && isAuthorityFailure(outcome.reason)) throw outcome.reason
     }
     const grants = settled[0].status === 'fulfilled' ? settled[0].value : null
     const shares = settled[1].status === 'fulfilled' ? settled[1].value : null

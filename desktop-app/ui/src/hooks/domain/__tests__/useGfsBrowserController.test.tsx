@@ -11,11 +11,19 @@ import {
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
+  affordancesResult,
   childView,
+  grantsListPage,
+  heldAffordances,
+  listAccessiblePage,
   listChildrenPage,
+  listGrantsFailureMessage,
+  listSharesFailureMessage,
   resolveDeniedMessage,
   resolveResource,
   resolvedDirectory,
+  resolvedFile,
+  sharesListPage,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { shouldRevalidateGfsQuery } from '@/lib/gfsEntityChangeState'
 import { desktopQueryKeys } from '../queryKeys'
@@ -2713,6 +2721,9 @@ function ManageProbe() {
       <div data-testid="shares-count">{ctrl.shares.length}</div>
       <div data-testid="inherited-error">{ctrl.inheritedAccessError ?? 'none'}</div>
       <div data-testid="inherited-coverage">{ctrl.inheritedCoverage ?? 'none'}</div>
+      <div data-testid="access-state">{ctrl.accessState}</div>
+      <div data-testid="crumbs">{ctrl.crumbs.map(crumb => crumb.name).join(' / ')}</div>
+      <div data-testid="held-permissions">{ctrl.affordances?.held.join(',') ?? 'none'}</div>
       <button type="button" onClick={() => swallow(ctrl.openUri('gfs://main/root'))}>
         open root
       </button>
@@ -3198,53 +3209,130 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
     expect(screen.getByTestId('inherited-error').textContent).toBe('none')
   })
 
-  it('still surfaces the raw inheritedAccessError for a session 401', async () => {
-    let resolveCalls = 0
-    Object.defineProperty(window, 'clerum', {
-      configurable: true,
-      value: {
-        gfs: {
-          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
-          resolve: vi.fn(async () => {
-            resolveCalls += 1
-            if (resolveCalls > 1) throw new Error('Error: 401 Unauthorized httpStatus=401')
-            return {
-              resourceId: 'file-1',
-              parentResourceId: 'folder-1',
-              gfsUri: 'gfs://main/file-1',
-              name: 'report.txt',
-              kind: 'file',
-              version: 1,
-            }
-          }),
-          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
-          affordances: vi.fn(async () => ({
-            held: ['read', 'manage_acl'],
+  // Every response and rejection crosses the real client/HTTP fixture seam.
+  // The observable contract is session state and protected metadata, not a
+  // briefly presented error string before the authority boundary clears it.
+  for (const route of ['resolve', 'grants', 'shares'] as const) {
+    for (const [status, code] of [
+      [401, 'unauthorized'],
+      [403, 'desktop_user_retired'],
+      [403, 'gfs_operator_link_invalid'],
+      [403, 'manage_acl_required'],
+    ] as const) {
+      it(`handles inherited ${route} ${code} through the correct authority boundary`, async () => {
+        const targetId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        const parentId = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+        const target = await resolveResource(
+          resolvedFile(targetId, 'report.txt', {
+            parentResourceId: parentId,
+          })
+        )
+        const parent = await resolveResource(resolvedDirectory(parentId, 'team-docs'))
+        const body = { code, message: code }
+        const failure =
+          route === 'resolve'
+            ? await resolveDeniedMessage(target.gfsUri, body, status)
+            : route === 'grants'
+              ? await listGrantsFailureMessage(status, body)
+              : await listSharesFailureMessage(status, body)
+        expect(failure).toContain(`httpStatus=${status}`)
+        expect(failure).toContain(code)
+        const directGrants = await grantsListPage([
+          {
+            id: 'direct-grant',
+            drive: 'main',
+            resourceId: targetId,
+            subject: { type: 'user', id: 'bob' },
+            permissions: ['read'],
+            inherit: false,
+          },
+        ])
+        const directShares = await sharesListPage([
+          {
+            id: 'direct-share',
+            drive: 'main',
+            resourceId: targetId,
+            subject: { type: 'user', id: 'carol' },
+            permissions: ['read'],
+            includeDescendants: false,
+          },
+        ])
+        const emptyGrants = await grantsListPage([])
+        const emptyShares = await sharesListPage([])
+        const accessible = await listAccessiblePage([])
+        const children = await listChildrenPage([])
+        const affordances = await affordancesResult(
+          heldAffordances(['read', 'manage_acl'], {
             canDelegate: true,
             grantableBits: ['read'],
             canCreateShare: false,
-          })),
-          listGrants: vi.fn(async () => []),
-          listShares: vi.fn(async () => []),
-        },
-      },
-    })
-
-    render(<ManageProbe />, { wrapper: Harness })
-
-    await act(async () => {
-      screen.getByRole('button', { name: 'open root' }).click()
-    })
-    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('file-1'))
-    await act(async () => {
-      screen.getByRole('button', { name: 'open manage' }).click()
-    })
-
-    await waitFor(() =>
-      expect(screen.getByTestId('inherited-error').textContent).toBe(
-        'Error: 401 Unauthorized httpStatus=401'
-      )
-    )
-    expect(screen.getByTestId('inherited-coverage').textContent).toBe('none')
-  })
+          })
+        )
+        let manageReadStarted = false
+        Object.defineProperty(window, 'clerum', {
+          configurable: true,
+          value: {
+            gfs: {
+              listAccessible: vi.fn(async () => accessible),
+              resolve: vi.fn(async (uri: string) => {
+                if (uri.endsWith(parentId.replace(/-/g, '')) || uri.endsWith(parentId))
+                  return parent
+                if (manageReadStarted && route === 'resolve') throw new Error(failure)
+                return target
+              }),
+              listChildren: vi.fn(async () => children),
+              affordances: vi.fn(async () => affordances),
+              listGrants: vi.fn(async (resourceId: string) => {
+                if (resourceId === targetId) return directGrants
+                if (route === 'grants') throw new Error(failure)
+                return emptyGrants
+              }),
+              listShares: vi.fn(async (resourceId: string) => {
+                if (resourceId === targetId) return directShares
+                if (route === 'shares') throw new Error(failure)
+                return emptyShares
+              }),
+            },
+          },
+        })
+        render(<ManageProbe />, { wrapper: Harness })
+        await act(async () => screen.getByRole('button', { name: 'open root' }).click())
+        await waitFor(() => expect(screen.getByTestId('current').textContent).toBe(targetId))
+        const client = lastHarnessQueryClient!
+        const scope = ':user-a:team-a'
+        const grantsKey = desktopQueryKeys.gfsGrants(scope, targetId, 'main')
+        const sharesKey = desktopQueryKeys.gfsShares(scope, targetId, 'main')
+        await act(async () => {
+          client.setQueryData(grantsKey, directGrants)
+          client.setQueryData(sharesKey, directShares)
+        })
+        expect(client.getQueryData(grantsKey)).toEqual(directGrants)
+        expect(client.getQueryData(sharesKey)).toEqual(directShares)
+        manageReadStarted = true
+        await act(async () => screen.getByRole('button', { name: 'open manage' }).click())
+        if (code === 'manage_acl_required') {
+          await waitFor(() =>
+            expect(screen.getByTestId('inherited-coverage').textContent).toBe(
+              route === 'resolve' ? 'read-boundary' : 'acl-limited'
+            )
+          )
+          expect(screen.getByTestId('access-state').textContent).toBe('active')
+          expect(screen.getByTestId('current').textContent).toBe(targetId)
+          expect(screen.getByTestId('grants-count').textContent).toBe('1')
+          expect(screen.getByTestId('shares-count').textContent).toBe('1')
+        } else {
+          await waitFor(() =>
+            expect(screen.getByTestId('access-state').textContent).toBe('revoked')
+          )
+          expect(screen.getByTestId('current').textContent).toBe('none')
+          expect(screen.getByTestId('crumbs').textContent).toBe('')
+          expect(screen.getByTestId('held-permissions').textContent).toBe('none')
+          expect(screen.getByTestId('grants-count').textContent).toBe('0')
+          expect(screen.getByTestId('shares-count').textContent).toBe('0')
+          expect(client.getQueryData(grantsKey)).toBeUndefined()
+          expect(client.getQueryData(sharesKey)).toBeUndefined()
+        }
+      })
+    }
+  }
 })
