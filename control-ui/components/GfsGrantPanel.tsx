@@ -144,6 +144,11 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       : inheritedAccessCoverage === 'acl-limited'
         ? 'Sharing details on some parent folders are not visible to you.'
         : 'Inherited access could not be loaded. Members with access from a parent folder may be missing.'
+  // Native tooltip explaining the read-boundary notice in plain language.
+  const inheritedAccessNoticeTitle =
+    inheritedAccessCoverage === 'read-boundary'
+      ? 'Some folders above this one are not visible to you. People may still have access through them, but we cannot show who.'
+      : undefined
   const inheritedAccessRequest = useRef(0)
   const inheritedAccessController = useRef<AbortController | null>(null)
   // Pending parent-folder confirmation (role change or removal) for a member
@@ -936,7 +941,11 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
             <h4>People with access</h4>
           </div>
           {inheritedAccessFailed ? (
-            <p role="status" className="cu-gfs-existing-access__notice">
+            <p
+              role="status"
+              className="cu-gfs-existing-access__notice"
+              title={inheritedAccessNoticeTitle}
+            >
               {inheritedAccessNotice}
             </p>
           ) : null}

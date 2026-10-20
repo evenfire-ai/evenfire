@@ -807,6 +807,26 @@ describe('GfsGrantPanel inherited access', () => {
     }
   )
 
+  // The read-boundary notice carries a plain-language hover explainer.
+  it('titles the read-boundary notice with a plain-language explainer', async () => {
+    const actual = await vi.importActual<typeof import('@lib/api')>('@lib/api')
+    const text = JSON.stringify({ error: 'request_failed', message: 'parent read failed' })
+    const error = actual.formatApiError(new Response(text, { status: 403 }), text)
+    mockGetGfsResourceByPath.mockImplementation(async (_drive, path) => {
+      if (path === '/team-docs') return byPathView(FOLDER_ID, 'team-docs')
+      throw error
+    })
+    renderPanel()
+
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    const notice = await within(existing).findByText(
+      'There may be access from parent folders you cannot see.'
+    )
+    expect(notice.closest('.cu-gfs-existing-access__notice')?.getAttribute('title')).toBe(
+      'Some folders above this one are not visible to you. People may still have access through them, but we cannot show who.'
+    )
+  })
+
   it('merges the same subject inherited through several folders into one row with the strongest source', async () => {
     mockGetGfsResourceByPath.mockImplementation(async (_drive, path) => {
       if (path === '/team-docs') return byPathView(FOLDER_ID, 'team-docs')

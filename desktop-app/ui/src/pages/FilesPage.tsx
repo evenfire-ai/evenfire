@@ -110,6 +110,8 @@ const INHERITED_DERIVATION_NOTICE =
 // a privacy boundary and an ACL-limited ancestor are normal states, not load
 // failures, so they must not wear the failure notice above — and vice versa.
 const INHERITED_READ_BOUNDARY_NOTICE = 'There may be access from parent folders you cannot see.'
+const INHERITED_READ_BOUNDARY_HINT =
+  'Some folders above this one are not visible to you. People may still have access through them, but we cannot show who.'
 const INHERITED_ACL_LIMITED_NOTICE =
   'Sharing details on some parent folders are not visible to you.'
 
@@ -566,6 +568,10 @@ export function FilesPage({
         : ctrl.inheritedCoverage === 'unavailable'
           ? INHERITED_DERIVATION_NOTICE
           : null
+  const inheritedAccessNoticeHint =
+    !ctrl.inheritedAccessError && ctrl.inheritedCoverage === 'read-boundary'
+      ? INHERITED_READ_BOUNDARY_HINT
+      : null
   const currentPreviewAvailable = currentIsFile && isGfsPreviewFile(current?.name ?? '')
   const droppedUploadRestriction = useMemo(() => {
     if (!current) {
@@ -2461,6 +2467,7 @@ export function FilesPage({
                   <GfsGrantList
                     agents={agentSubjects}
                     derivationNotice={inheritedAccessNotice}
+                    derivationNoticeHint={inheritedAccessNoticeHint}
                     error={grantsError}
                     inheritedItems={ctrl.inheritedAccess}
                     items={ctrl.grants}

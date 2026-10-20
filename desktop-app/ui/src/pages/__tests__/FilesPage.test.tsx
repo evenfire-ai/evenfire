@@ -1930,6 +1930,13 @@ describe('FilesPage', () => {
     expect(
       within(manageDialog).getByText('There may be access from parent folders you cannot see.')
     ).toBeTruthy()
+    // Hovering the banner (info icon or text) explains the notice in plain language.
+    const boundaryBanner = within(manageDialog)
+      .getByText('There may be access from parent folders you cannot see.')
+      .closest('.status-banner')
+    expect(boundaryBanner?.getAttribute('title')).toBe(
+      'Some folders above this one are not visible to you. People may still have access through them, but we cannot show who.'
+    )
     // A boundary is not a load failure — the failure copy must not appear.
     expect(within(manageDialog).queryByText(/could not be loaded/)).toBeNull()
     // Known authorized sources stay editable (no blanket partial read-only).
