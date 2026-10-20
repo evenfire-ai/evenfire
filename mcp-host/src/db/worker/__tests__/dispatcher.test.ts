@@ -5,7 +5,10 @@ import { runMigrations } from '../../migrate'
 import { applyPragmas } from '../../pragmas'
 import { prepareStatements } from '../../statements'
 import { createDispatcher, dispatch } from '../dispatcher'
-import type { ModelStepClaimOutcome } from '../modelStepCheckpointOps'
+import type {
+  ModelStepCheckpointAttachmentInput,
+  ModelStepClaimOutcome,
+} from '../modelStepCheckpointOps'
 import type {
   MessageRow,
   PendingApprovalRow,
@@ -19,7 +22,8 @@ async function seedClaimedCheckpoint(
   session: SessionRow,
   checkpointId: string,
   originTaskId: string,
-  continuationTaskId: string
+  continuationTaskId: string,
+  attachments?: ModelStepCheckpointAttachmentInput[]
 ) {
   const now = 20
   await dispatch(
@@ -69,6 +73,7 @@ async function seedClaimedCheckpoint(
       failedAt: now,
       expiresAt: now + 604_800_000,
       blockedTtlMs: 604_800_000,
+      attachments,
     },
     deps
   )) as { applied: boolean; version: number }
@@ -1100,6 +1105,87 @@ describe('dbWorker dispatcher', () => {
       .prepare('SELECT state, active_task_id FROM sessions WHERE id = ?')
       .get('conv-mismatch') as { state: string; active_task_id: string | null }
     expect(mismatch).toEqual({ state: 'idle', active_task_id: null })
+  })
+
+  it('#1158: approval reap deletes abandoned bytes in the same call and preserves a live neighbour', async () => {
+    const deps = createDispatcher(db)
+    const suspended = {
+      ...makeSession('conv-attachment-reap', 'u:rpc:agent:attachment-reap'),
+      state: 'awaiting_approval',
+      active_task_id: 'task-suspended',
+    }
+    const neighbour = {
+      ...makeSession('conv-attachment-live', 'u:rpc:agent:attachment-live'),
+      state: 'processing',
+      active_task_id: 'task-live',
+    }
+    for (const [session, checkpointId] of [
+      [suspended, 'cp-suspended'],
+      [neighbour, 'cp-live'],
+    ] as const) {
+      await dispatch({ kind: 'insert_session', payload: session }, deps)
+      await seedClaimedCheckpoint(
+        deps,
+        session,
+        checkpointId,
+        `origin-${checkpointId}`,
+        session.active_task_id,
+        [
+          {
+            attachmentId: 'att-1',
+            digestHex: 'ab'.repeat(32),
+            bytes: new Uint8Array([0, 255, 1, 254]),
+            expiresAt: 3_600_000,
+          },
+        ]
+      )
+    }
+    await dispatch(
+      {
+        kind: 'insert_pending_approval',
+        payload: {
+          request_id: 'req-suspended',
+          session_id: suspended.id,
+          task_id: suspended.active_task_id,
+          tool_name: 'shell_exec',
+          tool_call_id: 'tc-suspended',
+          parameters: '{}',
+          description: 'test',
+          context_snapshot: '[]',
+          completed_results: null,
+          intent_summary: null,
+          source_message: null,
+          registered_at: 0,
+          expires_at: 25,
+          trace_context: null,
+          reason: null,
+          mcp_server_name: null,
+        },
+      },
+      deps
+    )
+    const rows = db.prepare(
+      'SELECT attachment_id, bytes FROM model_step_checkpoint_attachments WHERE checkpoint_id = ?'
+    )
+    expect(rows.all('cp-suspended')).toHaveLength(1)
+    const retained = rows.all('cp-live')
+    expect(retained).toHaveLength(1)
+
+    const reaped = (await dispatch(
+      { kind: 'reap_awaiting_approval_sessions', nowEpoch: 30_000 },
+      deps
+    )) as ReapedSession[]
+    expect(reaped.map(row => row.sessionId)).toEqual([suspended.id])
+    expect(
+      db
+        .prepare('SELECT status FROM model_step_checkpoints WHERE checkpoint_id = ?')
+        .get('cp-suspended')
+    ).toEqual({ status: 'abandoned' })
+    expect(rows.all('cp-suspended')).toHaveLength(0)
+    expect(rows.all('cp-live')).toEqual(retained)
+    expect(
+      db.prepare('SELECT status FROM model_step_checkpoints WHERE checkpoint_id = ?').get('cp-live')
+    ).toEqual({ status: 'claimed' })
   })
 
   it('R1-M1 — processing reaper leaves no phantom turn 0 for untracked-turn sessions', async () => {

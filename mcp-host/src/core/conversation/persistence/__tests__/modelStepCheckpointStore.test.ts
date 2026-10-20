@@ -1194,6 +1194,59 @@ describe('ModelStepCheckpointStore (#1043)', () => {
       return { checkpoints, queue, fence, version: version as number }
     }
 
+    it('#1158: admission abandonment deletes bytes only after the owning fence applies', async () => {
+      const worker = createInProcessWorker(tempDbPath())
+      const { checkpoints, version } = await resumableWithBytes(worker)
+      const claim = await checkpoints.claim({
+        sessionKey: SESSION_KEY,
+        checkpointId: 'cp-1',
+        version,
+        hostInstanceId: 'host-instance-a',
+        newTaskId: 'task-cont-1',
+        leaseMs: LEASE_MS,
+      })
+      expect(claim.outcome).toBe('claimed')
+      if (claim.outcome !== 'claimed') throw new Error(claim.outcome)
+
+      const otherKey = 'user-1043:rpc:agent:other'
+      const otherFence = await checkpoints.open(header('cp-other', otherKey), [userEntry])
+      expect(
+        await checkpoints.transition(otherKey, otherFence, {
+          from: ['open'],
+          to: 'resumable',
+          failedAt: clock,
+          expiresAt: clock + 7 * 24 * 3_600_000,
+          attachments: [attachmentInput(clock + 3_600_000)],
+        })
+      ).toBe(2)
+      const rows = worker.db.prepare(
+        'SELECT attachment_id, bytes FROM model_step_checkpoint_attachments WHERE checkpoint_id = ?'
+      )
+      const retained = rows.all('cp-1')
+      const neighbour = rows.all('cp-other')
+      expect(retained).toHaveLength(1)
+      expect(neighbour).toHaveLength(1)
+
+      expect(
+        await checkpoints.abandonAdmission(SESSION_KEY, 'task-cont-1', {
+          ...claim.fence,
+          generation: claim.fence.generation + 1,
+        })
+      ).toEqual({ applied: false, resetSession: false })
+      expect(rows.all('cp-1')).toEqual(retained)
+      expect(statusOf(worker, 'cp-1')).toBe('claimed')
+      expect(rows.all('cp-other')).toEqual(neighbour)
+
+      expect(await checkpoints.abandonAdmission(SESSION_KEY, 'task-cont-1', claim.fence)).toEqual({
+        applied: true,
+        resetSession: false,
+      })
+      expect(statusOf(worker, 'cp-1')).toBe('abandoned')
+      expect(rows.all('cp-1')).toHaveLength(0)
+      expect(rows.all('cp-other')).toEqual(neighbour)
+      expect(statusOf(worker, 'cp-other')).toBe('resumable')
+    })
+
     it('round-trip byte-exact after a cold reopen, and are readable while claimed', async () => {
       const dbPath = tempDbPath()
       const first = createInProcessWorker(dbPath)

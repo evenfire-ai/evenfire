@@ -675,6 +675,10 @@ export function retireLiveModelStepCheckpoints(
   s.deleteDeadAttachments.run({ now })
 }
 
+export function deleteDeadModelStepCheckpointAttachments(db: Database, now: number): void {
+  statements(db).deleteDeadAttachments.run({ now })
+}
+
 /**
  * Deletes the checkpoints of the sessions a retention sweep is about to
  * delete. Call inside that sweep's transaction, before the session DELETE.
@@ -869,6 +873,7 @@ export function dispatchModelStepCheckpointOp(op: ModelStepCheckpointOp, db: Dat
           now: op.now,
         }).changes
         if (changed !== 1) return { applied: false, resetSession: false }
+        s.deleteAttachmentsOf.run(op.fence.checkpointId)
         const resetSession = s.resetAdmissionSession.run(op.sessionKey, op.taskId).changes === 1
         if (resetSession) {
           s.deleteAdmissionApproval.run(op.taskId, op.sessionKey)
