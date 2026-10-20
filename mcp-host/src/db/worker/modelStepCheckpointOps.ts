@@ -9,6 +9,7 @@
 import type { Database, Statement } from 'better-sqlite3'
 import { isModelStepCheckpointLeaseAlive } from '../../core/conversation/modelStepCheckpointLease'
 import { logger } from '../../logger'
+import { parseModelStepCheckpointLoopState } from './protocol'
 
 export type ModelStepCheckpointRowStatus =
   | 'open'
@@ -572,8 +573,15 @@ function validateHeader(header: ModelStepCheckpointRow): void {
   ) {
     throw new ModelStepCheckpointCorruptError(header.checkpoint_id, null)
   }
-  for (const raw of [header.loop_state, header.task_budget, header.source_message]) {
+  for (const raw of [header.task_budget, header.source_message]) {
     if (raw !== null) parseStoredObject(raw, header.checkpoint_id, null)
+  }
+  if (header.loop_state !== null) {
+    try {
+      parseModelStepCheckpointLoopState(header.loop_state)
+    } catch {
+      throw new ModelStepCheckpointCorruptError(header.checkpoint_id, null)
+    }
   }
 }
 

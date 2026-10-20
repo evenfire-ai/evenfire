@@ -83,7 +83,7 @@ async function claimedCheckpoint(
       model: 'gpt-5.5',
       hostId: 'host-a',
       principal: 'user-1043',
-      loopState: JSON.stringify({ iteration: 0 }),
+      loopState: JSON.stringify({ nextIteration: 0 }),
       taskBudget: null,
       sourceMessage: null,
     },

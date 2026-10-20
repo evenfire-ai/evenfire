@@ -117,7 +117,7 @@ function header(overrides: HeaderOverrides = {}): ModelStepCheckpointOpenHeader 
     model: 'gpt-6.1-sol',
     hostId: overrides.hostId ?? HOST_ID,
     principal: overrides.principal ?? USER_ID,
-    loopState: JSON.stringify({ iteration: 4 }),
+    loopState: JSON.stringify({ nextIteration: 4 }),
     taskBudget: JSON.stringify({ elapsedActiveMs: 1_234 }),
     sourceMessage:
       overrides.sourceMessage === undefined

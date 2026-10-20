@@ -1663,6 +1663,119 @@ describe('dbWorker dispatcher', () => {
       db.prepare('SELECT request_id FROM pending_approvals ORDER BY request_id').all()
     ).toEqual([{ request_id: 'req-task-ordinary' }])
   })
+
+  it('R2-M5 — loadForTask rejects a producer-written invalid loop state and loads a healthy neighbour', async () => {
+    const deps = createDispatcher(db)
+    const bad = {
+      ...makeSession('conv-bad-loop-state', 'u-bad:rpc:agent:chat'),
+      state: 'awaiting_approval',
+      active_task_id: 'task-bad-continuation',
+    }
+    const healthy = {
+      ...makeSession('conv-good-loop-state', 'u-good:rpc:agent:chat'),
+      state: 'awaiting_approval',
+      active_task_id: 'task-good-continuation',
+    }
+    for (const session of [bad, healthy]) {
+      await dispatch({ kind: 'insert_session', payload: session }, deps)
+    }
+    const openAndClaim = async (session: SessionRow, checkpointId: string) => {
+      await dispatch(
+        {
+          kind: 'model_step_checkpoint_open',
+          now: 20,
+          header: {
+            checkpointId,
+            sessionKey: session.session_key,
+            originTurnNumber: 1,
+            originTaskId: `${checkpointId}-origin`,
+            provider: 'openai',
+            model: 'checkpoint-model',
+            hostId: 'host-a',
+            principal: session.user_id!,
+            loopState: JSON.stringify({ nextIteration: 1 }),
+            taskBudget: null,
+            sourceMessage: null,
+          },
+          entries: [
+            {
+              kind: 'message',
+              toolCallId: null,
+              payload: JSON.stringify({ role: 'user', content: 'origin request' }),
+            },
+          ],
+        },
+        deps
+      )
+      await dispatch(
+        {
+          kind: 'model_step_checkpoint_transition',
+          fence: { checkpointId, owner: `${checkpointId}-origin`, generation: 0 },
+          from: ['open'],
+          to: 'resumable',
+          blockedTtlMs: 604_800_000,
+          now: 20,
+          failedAt: 20,
+          expiresAt: 604_800_020,
+        },
+        deps
+      )
+      const claim = (await dispatch(
+        {
+          kind: 'model_step_checkpoint_claim',
+          sessionKey: session.session_key,
+          checkpointId,
+          version: 2,
+          hostInstanceId: 'host-a',
+          newTaskId: session.active_task_id!,
+          leaseMs: 300_000,
+          now: 20,
+        },
+        deps
+      )) as ModelStepClaimOutcome
+      if (claim.outcome !== 'claimed') throw new Error(claim.outcome)
+      return claim.fence
+    }
+    const badFence = await openAndClaim(bad, 'cp-bad-loop-state')
+    const healthyFence = await openAndClaim(healthy, 'cp-good-loop-state')
+    await dispatch(
+      {
+        kind: 'model_step_checkpoint_update_state',
+        fence: badFence,
+        loopState: '{}',
+        taskBudget: null,
+        now: 21,
+      },
+      deps
+    )
+
+    await expect(
+      dispatch(
+        {
+          kind: 'model_step_checkpoint_load_for_task',
+          sessionKey: bad.session_key,
+          taskId: bad.active_task_id!,
+        },
+        deps
+      )
+    ).rejects.toMatchObject({
+      name: 'ModelStepCheckpointCorruptError',
+      code: 'MODEL_STEP_CHECKPOINT_CORRUPT',
+    })
+    const neighbour = (await dispatch(
+      {
+        kind: 'model_step_checkpoint_load_for_task',
+        sessionKey: healthy.session_key,
+        taskId: healthy.active_task_id!,
+      },
+      deps
+    )) as { header: { checkpoint_id: string; loop_state: string } }
+    expect(neighbour.header).toMatchObject({
+      checkpoint_id: healthyFence.checkpointId,
+      loop_state: JSON.stringify({ nextIteration: 1 }),
+    })
+  })
+
   it('integrity_check returns ok', async () => {
     const deps = createDispatcher(db)
     const r = (await dispatch({ kind: 'integrity_check' }, deps)) as {
