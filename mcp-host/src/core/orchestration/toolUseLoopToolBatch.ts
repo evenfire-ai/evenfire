@@ -14,7 +14,7 @@ import type {
 } from '../types'
 import type { LoopConfig } from './loopConfig'
 import { admitToolCall, executeAdmittedTool } from './toolCallPolicy'
-import { collectToolAttachments } from './toolUseLoopMessages'
+import { collectToolAttachments, requestImageUsage } from './toolUseLoopMessages'
 import { reportToolComplete, reportToolStart } from './toolUseLoopSingleTool'
 import { isWorkflowTriggerNotFoundToolResult } from './toolUseLoopWorkflowTriggerFallbacks'
 
@@ -276,7 +276,14 @@ export async function executeToolCalls(
 
     const progressStart = reportToolStart(config, call, iteration, i, calls.length, llmTextContent)
     if (admission.kind !== 'execute') throw new Error('Admitted tool call has no execution phase')
-    const toolResult = await executeAdmittedTool(admission, config, iteration)
+    // Tools run one at a time, so the usage seen here is the request's usage
+    // until this call's own result is appended.
+    const toolResult = await executeAdmittedTool(
+      admission,
+      config,
+      iteration,
+      priorMessages ? requestImageUsage(priorMessages, toolResults) : undefined
+    )
 
     // Retain policy-processed output before a subsequent tool can throw.
     if (config.onAttachments && toolResult.attachments?.length) {

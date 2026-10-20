@@ -119,12 +119,7 @@ export async function renderPdfPages(job: PdfVisualJob): Promise<PdfVisualOutcom
       return { ok: false, reason: 'invalid_range' }
     }
     const selection = requested.slice(startIndex, startIndex + job.limits.maxVisualPagesPerCall)
-    const threshold = job.maxDimensionAboveImageCount
-    const maxDimension = Math.min(
-      job.maxDimension,
-      job.limits.maxRenderDimension,
-      threshold && selection.length > threshold.count ? threshold.maxDimension : Infinity
-    )
+    const maxDimension = Math.min(job.maxDimension, job.limits.maxRenderDimension)
     const maxPixels = Math.min(job.maxPixelsPerCall, job.limits.maxRenderPixelsPerCall)
     // Each page's byte share is reserved up front, like its pixel share, so
     // the call's images together never exceed the aggregate bound.

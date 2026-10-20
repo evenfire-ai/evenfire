@@ -5,8 +5,9 @@ import { createHash } from 'node:crypto'
 import { PDFDocument } from 'pdf-lib'
 import type { IncomingMessage } from '../../../../server/types'
 import type { VisualDeliveryLimits } from '../../../../visualInput/deliveryLimits'
+import { VisualInputBudget } from '../../../../visualInput/policy'
 import { AttachmentReadLedger } from '../../../attachments/attachmentReadBudget'
-import type { ExecutionContext } from '../../../interfaces'
+import type { ExecutionContext, RequestImageUsage } from '../../../interfaces'
 import type { Attachment } from '../../../types'
 import { DocumentReadTool } from '../index'
 import type { DocumentReadLimits, RunDocumentJob } from '../types'
@@ -32,12 +33,17 @@ const profile: VisualDeliveryLimits = {
   maxPixels: 8_000_000,
 }
 
-function context(deliveryLimits: VisualDeliveryLimits | null = null): ExecutionContext {
+function context(
+  deliveryLimits: VisualDeliveryLimits | null = null,
+  requestImages: RequestImageUsage = { images: 0, bytes: 0, maxSide: 0 },
+  budget = new VisualInputBudget()
+): ExecutionContext {
   return {
     onOutput: () => undefined,
     measureResult: raw => Math.ceil(Buffer.byteLength(raw) / 4) + 4,
+    requestImages,
     visualInput: {
-      budget: {} as never,
+      budget,
       resolveCapability: async () =>
         deliveryLimits
           ? {
@@ -273,7 +279,7 @@ describe('document reader Tool outcomes through real child readers', () => {
     expect(xlsxBody.message).not.toContain('does not match')
   })
 
-  it('applies the delivery dimension threshold to the actual rendered image count', async () => {
+  it('renders every page at the threshold dimension on a threshold profile', async () => {
     const file = admittedFile(
       'dimension-pages',
       await textPdf(['one', 'two', 'three']),
@@ -292,10 +298,16 @@ describe('document reader Tool outcomes through real child readers', () => {
       { attachmentId: file.id, mode: 'visual' },
       context({ ...delivery, maxDimension: 24 })
     )
+    // Witness: without the threshold the same pages render at the profile bound.
+    const plain = await tool(file).execute(
+      { attachmentId: file.id, mode: 'visual', pages: '1-2' },
+      context(profile)
+    )
     for (const [result, dimension, count] of [
-      [below, 64, 2],
+      [below, 32, 2],
       [above, 32, 3],
       [smaller, 24, 3],
+      [plain, 64, 2],
     ] as const) {
       const body = JSON.parse(result.content)
       expect(body.status).toBe('ok')

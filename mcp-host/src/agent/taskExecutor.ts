@@ -61,6 +61,7 @@ import {
 import {
   collectToolAttachments,
   mergeCollectedAttachments,
+  requestImageUsage,
 } from '../core/orchestration/toolUseLoopMessages'
 import { turnStopResult } from '../core/orchestration/toolUseLoopRuntime'
 import {
@@ -813,7 +814,14 @@ export class TaskExecutor {
       // it through either approval gate. The local frozen approval still owns
       // message reconstruction and any connect_required re-suspension below.
       this.conversation.pending_approval = undefined
-      const toolResult = await executeSingleTool(suspendedCall, loopConfig)
+      // The frozen request: its messages plus the batch results before this call.
+      const toolResult = await executeSingleTool(
+        suspendedCall,
+        loopConfig,
+        undefined,
+        undefined,
+        requestImageUsage(approval.context_snapshot, resolvedCompletedResults)
+      )
       collectToolAttachments([toolResult], this.completedAttachments)
       this.executionBudget.assertTime()
 

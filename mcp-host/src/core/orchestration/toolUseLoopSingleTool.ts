@@ -6,7 +6,7 @@ import {
 } from '../../progress/intentExtraction.js'
 import type { ToolCallTokens } from '../../progress/types.js'
 import { ToolError } from '../errors'
-import type { ExecutionContext } from '../interfaces'
+import type { ExecutionContext, RequestImageUsage } from '../interfaces'
 import { RingBuffer } from '../tools/ringBuffer'
 import type { TokenUsage, ToolCall, ToolResult } from '../types'
 import type { LoopConfig } from './loopConfig'
@@ -31,7 +31,8 @@ export async function executeSingleTool(
     | 'measureToolMessage'
   >,
   iteration?: number,
-  transformResult?: (result: ToolResult) => Promise<ToolResult>
+  transformResult?: (result: ToolResult) => Promise<ToolResult>,
+  requestImages?: RequestImageUsage
 ): Promise<ToolResult> {
   const { toolRegistry, toolOutputProcessor, events, toolTimeout } = config
 
@@ -100,6 +101,7 @@ export async function executeSingleTool(
   const executionContext: ExecutionContext = {
     onOutput: chunk => ringBuffer?.append(chunk),
     visualInput: config.visualInput,
+    ...(requestImages ? { requestImages } : {}),
     measureResult: config.measureToolMessage
       ? content => measureContent(renderContent(content))
       : undefined,

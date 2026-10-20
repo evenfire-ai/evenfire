@@ -41,12 +41,14 @@ export interface DocumentReadParams {
 
 /**
  * Why a read stopped before the end of its selection. `page_budget` and
- * `turn_budget` come from the turn's read ledger; the others from the
- * per-call limits.
+ * `turn_budget` come from the turn's read ledger; `image_budget` from the
+ * images the model request already carries; the others from the per-call
+ * limits.
  */
 export type DocumentReadLimit =
   | 'page_budget'
   | 'turn_budget'
+  | 'image_budget'
   | 'max_pages'
   | 'max_extracted_chars'
   | 'max_rows'
@@ -277,8 +279,6 @@ export interface PdfVisualJob {
   /** Null/absent starts the selection; a visual cursor always has offset zero. */
   start?: PdfTextPosition | null
   maxDimension: number
-  /** Additional delivery bound applied to the actual number of rendered pages. */
-  maxDimensionAboveImageCount?: { count: number; maxDimension: number }
   maxPixelsPerCall: number
   maxImageBytes: number
   /** Encoded PNG bytes before base64; split evenly across rendered pages. */

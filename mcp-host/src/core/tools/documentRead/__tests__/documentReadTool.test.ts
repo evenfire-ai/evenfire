@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { createHash } from 'node:crypto'
 import type { IncomingMessage } from '../../../../server/types'
+import { VisualInputBudget } from '../../../../visualInput/policy'
 import { AttachmentReadLedger } from '../../../attachments/attachmentReadBudget'
 import type { ExecutionContext } from '../../../interfaces'
 import type { RedactionRange } from '../../../safety/safety'
@@ -86,8 +88,9 @@ async function read(
 
 function visualContext(supported: boolean): Partial<ExecutionContext> {
   return {
+    requestImages: { images: 0, bytes: 0, maxSide: 0 },
     visualInput: {
-      budget: {} as never,
+      budget: new VisualInputBudget(),
       resolveCapability: async () =>
         supported
           ? {
@@ -244,7 +247,7 @@ describe('DocumentReadTool visual mode', () => {
     })
     expect(supported.output.attachments).toEqual([
       expect.objectContaining({
-        id: `clerum__document_read:${file.fileReference!.id}:page-1`,
+        id: `clerum__document_read:${createHash('sha256').update(file.fileReference!.id).digest('hex')}:page-1`,
         kind: 'image',
         mimeType: 'image/png',
         sourceTool: 'clerum__document_read',

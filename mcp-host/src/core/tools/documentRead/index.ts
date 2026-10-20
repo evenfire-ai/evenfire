@@ -22,6 +22,7 @@
  * call. Document content is untrusted, is sanitized by the loop like any tool
  * output, and is never logged: this file logs nothing.
  */
+import { createHash } from 'node:crypto'
 import { extname } from 'node:path'
 import type { IncomingMessage } from '../../../server'
 import { AttachmentReadLedger, attachmentReadBudgets } from '../../attachments/attachmentReadBudget'
@@ -115,6 +116,9 @@ const DECLARED_DOCUMENT_FORMAT = new Map<string, 'pdf' | 'xlsx' | 'docx'>([
 
 const EXHAUSTED_MESSAGE =
   'The current-turn attachment read budget is exhausted. Reattach the file in a new message and pass resumeCursor as cursor to continue; earlier pages are not stored for re-reading.'
+
+const IMAGE_EXHAUSTED_MESSAGE =
+  'The current request already carries as many images as the model accepts, or the turn image memory is spent. Reattach the file in a new message and pass resumeCursor as cursor to continue.'
 
 const LIMIT_BY_STOP: Record<
   'max_pages' | 'max_extracted_chars' | 'max_rows' | 'max_cells',
@@ -253,7 +257,7 @@ export class DocumentReadTool implements Tool {
       'Read a PDF or XLSX file attached to the current message: the attached_file lines of the turn context with reader=pdf or reader=xlsx. ' +
       'PDF: mode "text" (default) returns the text of each page; pages selects pages ("1-3,5"). ' +
       'When visualCandidates lists pages with little or no text and image input is available, read those pages with mode "visual" to see them as images. ' +
-      `Mode "visual" renders at most ${this.limits.maxVisualPagesPerCall} pages per call. ` +
+      `Mode "visual" renders at most ${this.limits.maxVisualPagesPerCall} pages per call, and never more images than the model accepts in one request counting the images already in it; continuation.limit "image_budget" means the rest must be read in a new message. ` +
       'XLSX: returns sheets as rows of computed cell values (dates in ISO 8601); sheet selects one sheet by exact name. ' +
       'A formula without a stored calculated result is returned as "[formula] =<formula>" and is never evaluated. ' +
       'When continuation is present, call again with the same arguments and cursor set to continuation.cursor. ' +
@@ -590,11 +594,42 @@ export class DocumentReadTool implements Tool {
     context: ExecutionContext | undefined,
     start: number
   ): Promise<ToolOutput> {
-    const capability = await context?.visualInput?.resolveCapability(context.signal)
+    const visualInput = context?.visualInput
+    const capability = await visualInput?.resolveCapability(context?.signal)
     const profile = capability?.status === 'supported' ? capability.deliveryLimits : undefined
-    if (!profile) {
+    if (!visualInput || !profile) {
       return this.failure(identity, { ok: false, reason: 'visual_not_supported' }, start)
     }
+    // The model's image bounds apply to the whole request, so this call gets
+    // only what the images already in it leave.
+    const usage = context?.requestImages
+    if (!usage) throw new Error('Document visual read requires the request image usage')
+    // Above the threshold count every image must be small. Pages are rendered
+    // small on such profiles, so only a large image already in the request
+    // keeps the request at the threshold count.
+    const threshold = profile.maxDimensionAboveImageCount
+    const imageSlots = Math.min(
+      profile.maxImages - usage.images,
+      threshold && usage.maxSide > threshold.maxDimension
+        ? threshold.count - usage.images
+        : Infinity
+    )
+    const imageNotice = (): ToolOutput =>
+      this.exhaustedOutput(
+        identity,
+        cursor,
+        measure(
+          JSON.stringify(
+            this.exhaustedResult(
+              identity.attachmentId,
+              identity.referenceId,
+              cursor,
+              IMAGE_EXHAUSTED_MESSAGE
+            )
+          )
+        ),
+        IMAGE_EXHAUSTED_MESSAGE
+      )
     const encodedCap =
       profile.maxImageEncodedBytes === undefined
         ? Infinity
@@ -610,14 +645,27 @@ export class DocumentReadTool implements Tool {
       this.limits.maxRenderPixelsPerCall,
       profile.maxPixels ?? Infinity
     )
-    const maxDimension = Math.min(this.limits.maxRenderDimension, profile.maxDimension ?? Infinity)
-    const maxVisualPagesPerCall = Math.min(this.limits.maxVisualPagesPerCall, profile.maxImages)
-    // The model's aggregate image bound applies to this call's pages together;
-    // without one, the per-image cap times the page cap is the only bound.
-    const maxTotalImageBytes = Math.min(
+    const maxDimension = Math.min(
+      this.limits.maxRenderDimension,
+      profile.maxDimension ?? Infinity,
+      threshold?.maxDimension ?? Infinity
+    )
+    const pageCap = Math.min(this.limits.maxVisualPagesPerCall, profile.maxImages)
+    const maxVisualPagesPerCall = Math.min(pageCap, imageSlots)
+    // Without an aggregate model bound, the per-image cap times the page cap
+    // is the only bound for one call.
+    const callImageBytes = Math.min(
       maxImageBytes * this.limits.maxVisualPagesPerCall,
       profile.maxTotalImageBytes ?? Infinity
     )
+    // The request's aggregate bound minus what it already carries, and the
+    // turn's image memory: publication charges two bytes per base64 character.
+    const maxTotalImageBytes = Math.min(
+      callImageBytes,
+      (profile.maxTotalImageBytes ?? Infinity) - usage.bytes,
+      Math.floor((visualInput.budget.remainingResidentBytes * 3) / 8)
+    )
+    if (maxVisualPagesPerCall < 1 || maxTotalImageBytes < 1) return imageNotice()
     const outcome = await this.runJob(
       {
         kind: 'pdf_visual',
@@ -625,7 +673,6 @@ export class DocumentReadTool implements Tool {
         pages: pageSpec,
         start: position,
         maxDimension,
-        maxDimensionAboveImageCount: profile.maxDimensionAboveImageCount,
         maxPixelsPerCall,
         maxImageBytes,
         maxTotalImageBytes,
@@ -633,23 +680,27 @@ export class DocumentReadTool implements Tool {
       },
       context?.signal
     )
+    if (
+      !outcome.ok &&
+      outcome.reason === 'document_limits_exceeded' &&
+      outcome.limit === 'image_bytes' &&
+      maxTotalImageBytes < callImageBytes
+    ) {
+      // The page did not fit what the request has left, not the model's bound.
+      return imageNotice()
+    }
     if (!outcome.ok) return this.failure(identity, outcome, start, contentMismatch)
-    if (outcome.images.length > profile.maxImages) {
+    if (outcome.images.length > maxVisualPagesPerCall) {
       return this.failure(
         identity,
         { ok: false, reason: 'document_limits_exceeded', limit: 'pixels' },
         start
       )
     }
-    const threshold = profile.maxDimensionAboveImageCount
-    const deliveredDimension = Math.min(
-      maxDimension,
-      threshold && outcome.images.length > threshold.count ? threshold.maxDimension : Infinity
-    )
     for (const image of outcome.images) {
       if (
-        image.width > deliveredDimension ||
-        image.height > deliveredDimension ||
+        image.width > maxDimension ||
+        image.height > maxDimension ||
         image.width * image.height > maxPixelsPerCall ||
         image.png.byteLength > maxImageBytes
       ) {
@@ -674,7 +725,12 @@ export class DocumentReadTool implements Tool {
         ? {
             continuation: {
               cursor: encodeCursor({ format: 'pdf', ...outcome.next }),
-              limit: stopLimit(outcome.stoppedBy),
+              // The request's free image slots, not this tool's page cap,
+              // stopped the call: the rest needs a new message.
+              limit:
+                maxVisualPagesPerCall < pageCap && outcome.images.length === maxVisualPagesPerCall
+                  ? 'image_budget'
+                  : stopLimit(outcome.stoppedBy),
             },
           }
         : {}),
@@ -688,8 +744,11 @@ export class DocumentReadTool implements Tool {
     if (cost > this.ledger.pageAllowance(this.contextWindowTokens, noticeCost)) {
       return this.exhaustedOutput(identity, cursor, noticeCost)
     }
+    // Provider image ids allow only a short ASCII alphabet; the reference id
+    // carries a content digest and is returned in the JSON result instead.
+    const imageRef = createHash('sha256').update(identity.referenceId).digest('hex')
     const attachments: Attachment[] = outcome.images.map(image => ({
-      id: `${DOCUMENT_READ_TOOL_NAME}:${identity.referenceId}:page-${image.page}`,
+      id: `${DOCUMENT_READ_TOOL_NAME}:${imageRef}:page-${image.page}`,
       kind: 'image',
       mimeType: 'image/png',
       encoding: 'base64',
@@ -698,6 +757,14 @@ export class DocumentReadTool implements Tool {
       height: image.height,
       sourceTool: DOCUMENT_READ_TOOL_NAME,
     }))
+    // Publication charges the turn's image memory; nothing has allocated from
+    // it since the cap above, because tools run one at a time.
+    if (
+      attachments.reduce((sum, image) => sum + image.dataBase64.length * 2, 0) >
+      visualInput.budget.remainingResidentBytes
+    ) {
+      return imageNotice()
+    }
     this.pending = {
       ...identity,
       cursor,
@@ -940,12 +1007,13 @@ export class DocumentReadTool implements Tool {
   private exhaustedOutput(
     identity: Identity,
     cursor: string | undefined,
-    noticeCost: number
+    noticeCost: number,
+    message = EXHAUSTED_MESSAGE
   ): ToolOutput {
     this.pending = { ...identity, cursor, units: 0, reservedCost: noticeCost }
     return {
       content: JSON.stringify(
-        this.exhaustedResult(identity.attachmentId, identity.referenceId, cursor)
+        this.exhaustedResult(identity.attachmentId, identity.referenceId, cursor, message)
       ),
       duration_ms: 0,
       is_error: false,
@@ -956,14 +1024,15 @@ export class DocumentReadTool implements Tool {
   private exhaustedResult(
     attachmentId: string,
     referenceId?: string,
-    cursor?: string
+    cursor?: string,
+    message = EXHAUSTED_MESSAGE
   ): DocumentReadResult {
     return {
       status: 'read_budget_exhausted',
       attachmentId,
       ...(referenceId !== undefined ? { referenceId } : {}),
       ...(cursor !== undefined ? { resumeCursor: cursor } : {}),
-      message: EXHAUSTED_MESSAGE,
+      message,
     }
   }
 }
