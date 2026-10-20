@@ -60,6 +60,22 @@ function unavailableDecision(error: unknown): GfsDropRejection | null {
 }
 
 /**
+ * Required (admission-gating) probe failure: keep the mapped 401/429/404
+ * semantics and fail CLOSED with a generic unavailable for every other
+ * failure class (403, 5xx, transport). A required probe must positively
+ * establish its bits before any confirmation or mutation is offered.
+ */
+function requiredProbeRejection(error: unknown): GfsDropRejection {
+  return (
+    unavailableDecision(error) ?? {
+      allowed: false,
+      reason: 'unavailable',
+      message: describeGfsReadError(error).message,
+    }
+  )
+}
+
+/**
  * Hover/drop adjudication shared by the Files page and the sidebar explorer
  * (rev-2 §3, §4.1). Structure comes from loaded observations first (common
  * anchor / breadcrumb chains); authority comes from the SHARED TanStack
@@ -150,11 +166,7 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
    * priority check). No network resolves happen on hover.
    */
   const scheduleColdCheck = useCallback(
-    (
-      target: GfsDropTargetFact,
-      sourceParentId: string | null,
-      onComplete: () => void
-    ) => {
+    (target: GfsDropTargetFact, sourceParentId: string | null, onComplete: () => void) => {
       if (inFlightRef.current >= 2) return
       if (coldChecksRef.current >= DRAG_COLD_CHECK_BUDGET) return
       coldChecksRef.current += 1
@@ -167,10 +179,7 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
             if (readCachedAffordances(target.resourceId) === null) {
               await fetchAffordances(target.resourceId, AFFORDANCES_HOVER_STALE_MS)
             }
-            if (
-              sourceParentId !== null &&
-              readCachedAffordances(sourceParentId) === null
-            ) {
+            if (sourceParentId !== null && readCachedAffordances(sourceParentId) === null) {
               await fetchAffordances(sourceParentId, AFFORDANCES_HOVER_STALE_MS)
             }
             onComplete()
@@ -282,9 +291,7 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
       }
 
       // Exact authority: destination write + source-parent write & delete.
-      let sourceParentForProbe: string | null = source.parentKnown
-        ? source.parentResourceId
-        : null
+      let sourceParentForProbe: string | null = source.parentKnown ? source.parentResourceId : null
       if (sourceParentForProbe === null) {
         try {
           const resolved = await deps.resolve(source.gfsUri)
@@ -296,7 +303,8 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
             return {
               allowed: false,
               reason: 'source-location-unknown',
-              message: 'EvenDrive cannot verify this item’s current location. Refresh and try again.',
+              message:
+                'EvenDrive cannot verify this item’s current location. Refresh and try again.',
             }
           }
           return {
@@ -311,24 +319,34 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
         return { allowed: false, reason: 'root-source' }
       }
 
-      const destinationProbe = await fetchAffordances(target.resourceId, AFFORDANCES_MUTATION_STALE_MS)
+      const destinationProbe = await fetchAffordances(
+        target.resourceId,
+        AFFORDANCES_MUTATION_STALE_MS
+      )
       if (!destinationProbe.ok) {
-        const decision = unavailableDecision(destinationProbe.error)
-        if (decision) return decision
+        return requiredProbeRejection(destinationProbe.error)
       }
       const sourceParentProbe = await fetchAffordances(
         sourceParentForProbe,
         AFFORDANCES_MUTATION_STALE_MS
       )
       if (!sourceParentProbe.ok) {
-        const decision = unavailableDecision(sourceParentProbe.error)
-        if (decision) return decision
+        return requiredProbeRejection(sourceParentProbe.error)
       }
       const authority = decideDragAuthority({
-        destinationHeld: destinationProbe.ok ? destinationProbe.held : null,
-        sourceParentHeld: sourceParentProbe.ok ? sourceParentProbe.held : null,
+        destinationHeld: destinationProbe.held,
+        sourceParentHeld: sourceParentProbe.held,
       })
       if (authority.kind === 'deny') return { allowed: false, reason: authority.reason }
+      if (authority.kind !== 'observed-allowed') {
+        // Both required probes succeeded, so their bits are non-null; any
+        // non-positive verdict here must never be admitted as allowed.
+        return {
+          allowed: false,
+          reason: 'unavailable',
+          message: 'EvenDrive could not confirm permission for this move. Try again.',
+        }
+      }
 
       // Rename capability (not user consent): source-resource write proves a
       // combined rename+move; the folder confirmation records the opt-in.

@@ -40,6 +40,7 @@ import {
   type GfsAccessibleResource,
   type GfsChildView,
   GfsClient,
+  type GfsHeldAffordances,
   type GfsTransport,
   type ResolvedGfsResource,
 } from '../../../../src/gfs/uriHandler.js'
@@ -274,4 +275,80 @@ export function resolvedDirectory(
 export async function resolveResource(resource: ResolvedGfsResource): Promise<ResolvedGfsResource> {
   const client = new GfsClient(stubTransport({ ok: true, data: resource }))
   return structuredClone(await client.resolveUri(resource.gfsUri, SESSION_TOKEN))
+}
+
+/** A `GfsHeldAffordances` — the direct (NOT enveloped) affordances route body. */
+export function heldAffordances(
+  held: string[],
+  overrides: Partial<GfsHeldAffordances> = {}
+): GfsHeldAffordances {
+  return { held, isOperator: false, ...overrides }
+}
+
+/**
+ * Run held bits through the real `GfsClient.affordances` (the direct,
+ * un-enveloped affordances route) and the IPC structured-clone boundary —
+ * the value `window.clerum.gfs.affordances` resolves with in production.
+ */
+export async function affordancesResult(held: GfsHeldAffordances): Promise<GfsHeldAffordances> {
+  const client = new GfsClient(stubTransport({ ...held }))
+  return structuredClone(await client.affordances('fixture-parent', SESSION_TOKEN, 'main'))
+}
+
+/**
+ * The Error message `window.clerum.gfs.affordances` rejects with when the
+ * route answers a non-2xx — derived, not hand-written (T1), at the same honest
+ * seam as `resolveDeniedMessage`: the real `httpClient.requestJson` mints the
+ * ApiError from the HTTP status, and `GfsClient.affordances` surfaces it with
+ * its vetted `httpStatus=` marker.
+ */
+export async function affordancesFailureMessage(
+  status = 500,
+  body: { code: string; message: string } = {
+    code: 'internal',
+    message: 'gfs controller failed',
+  },
+  resourceId = 'fixture-parent'
+): Promise<string> {
+  const server = createServer((_req, res) => {
+    res.writeHead(status, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: false, error: body }))
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()))
+  try {
+    const address = server.address()
+    const port = typeof address === 'object' && address ? address.port : 0
+    const client = new GfsClient({
+      baseUrl: `http://127.0.0.1:${port}`,
+      requestJson,
+      fetchBytes: async () => new ArrayBuffer(0),
+    })
+    await client.affordances(resourceId, SESSION_TOKEN, 'main')
+    throw new Error(`expected affordances to reject with a ${status} failure`)
+  } catch (error) {
+    if (!(error instanceof Error)) return String(error)
+    return error.message
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
+}
+
+/**
+ * The Error message a transport-level affordances failure produces (dead
+ * endpoint, real `httpClient.requestJson`) — connection refused with no HTTP
+ * response, so `parseHttpStatus` must read no status from it.
+ */
+export async function affordancesTransportFailureMessage(): Promise<string> {
+  const client = new GfsClient({
+    baseUrl: 'http://127.0.0.1:9',
+    requestJson,
+    fetchBytes: async () => new ArrayBuffer(0),
+  })
+  try {
+    await client.affordances('fixture-parent', SESSION_TOKEN, 'main')
+    throw new Error('expected affordances to fail at the transport layer')
+  } catch (error) {
+    if (!(error instanceof Error)) return String(error)
+    return error.message
+  }
 }
