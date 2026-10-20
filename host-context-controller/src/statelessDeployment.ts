@@ -1,16 +1,17 @@
 /**
  * Pure, reconciler-state-free helpers for the stateless Host lifecycle:
  * image pull-policy resolution (Stage 6, W5), runtime-token JWT metadata
- * inspection, and the Stage 1.2 workspace-layout initContainer.
+ * inspection, and the workspace-layout merge initContainer every Host runs.
  */
 import * as k8s from '@kubernetes/client-node'
 import { config } from './config'
 import { HostCondition } from './types'
 
 /**
- * Condition surfacing a refused CONTEXT_MAPPER_STATELESS_IMAGE_PULL_POLICY
- * (Stage 6, W5). Mirrors the StatelessEnableRejected pattern: durable,
- * operator-visible, True only while the misconfiguration persists.
+ * Advisory condition for CONTEXT_MAPPER_STATELESS_IMAGE_PULL_POLICY (Stage 6,
+ * W5): True while IfNotPresent is applied to a mutable image reference. The
+ * policy is not overridden. Durable and operator-visible like
+ * StatelessEnableRejected, True only while the configuration persists.
  */
 export const STATELESS_PULL_POLICY_REJECTED_CONDITION_TYPE = 'StatelessPullPolicyRejected'
 /** Immutable CI image tag shape (sha-<gitsha>), as pushed by deploy-dev. */
@@ -22,38 +23,55 @@ function shellSingleQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`
 }
 /**
- * Idempotent workspace-layout migration run before mcp-host starts on
- * STATELESS Hosts only (Stage 1.2). The initContainer mounts the workspace
- * PVC at its root and reorganizes it into the dual-subPath layout:
- *   workspace/ → agent workspace (mounted at the workspace path)
- *   state/     → durable session state (mounted at /var/lib/clerum/state)
- * Legacy content at the PVC root moves into workspace/; legacy SQLite files
- * (state.db + WAL/SHM) move into state/. Every move is a same-filesystem
- * rename and `sync` flushes the directory updates.
+ * Init script run before mcp-host on every Host (issue #825). Every Host now
+ * mounts the workspace PVC root at its workspace path and keeps the
+ * conversation database at `<root>/state.db`. A PVC that a stateless Host
+ * split with the earlier `workspace-layout-init` (agent files in
+ * `workspace/`, the database in `state/`) is merged back to that layout.
  *
- * Round-trip resolution (Addendum 6 item 6): a stateful<->stateless round-trip
- * on the shared PVC can leave BOTH a root state.db (the freshest data, from the
- * stateful life the operator just left) AND an earlier stateless life's
- * state/state.db. Newest-source-wins: the older destination is preserved (never
- * deleted) as state/<db>.pre-<timestamp>.bak, the fresher root source then
- * migrates in via the normal path, and the resolution is logged loudly. This is
- * genuinely idempotent across round-trips — a post-migration run (no source) is
- * a no-op, and each later collision backs up under a NEW unique suffix.
+ * The merge runs only on the signature the earlier init leaves: `state/`
+ * and `workspace/` are both real directories and `state/` holds a file the
+ * init writes (`state.db`, `state.db-wal`, `state.db-shm` or a `.pre-*.bak`
+ * copy of one of those three). Any other tree exits 0 untouched: stateful,
+ * desktop, empty, a user folder named `state/` or `workspace/`, a `state/`
+ * holding other `state.db*` names, and a `state` or `workspace` that is a
+ * symlink or not a directory (an agent can create those on a stateful Host,
+ * so they must not stop it).
  *
- * Genuinely ambiguous states still fail before the first move, preserving every
- * source for operator recovery: SQLite sources SPLIT across root and workspace,
- * a workspace SQLite source colliding with the durable destination, duplicate
- * non-SQLite entries, symlinks, and non-directory managed paths.
- * lost+found stays put: it is root-owned on ext4 volumes and never user data.
- * No chown/chmod — the container runs as the same uid/fsGroup (1001) that owns
- * the PVC content.
+ * A tree with a root `state.db` main file, a database under `state/` and
+ * none under `workspace/` belongs to a Host that went back to stateful after
+ * its last stateless run (T5). The root database is the current one; the
+ * whole `state/` directory is renamed to `state.db.superseded-<UTC ts>` in
+ * one step, `workspace/` stays where it is, and the script exits 0. The
+ * renamed directory starts with `state.db`, so the workspace file guards
+ * deny it to agent tools.
+ *
+ * Every refusal prints one line and exits 1 before the first move:
+ *   F1 `state/` or `workspace/` cannot be listed and searched, or a database
+ *      entry is a symlink or not a regular file;
+ *   F2 more than one live database (a `state.db` main file or its journals)
+ *      across the root, `state/` and `workspace/`, except the root journals
+ *      a stopped merge leaves next to the remaining `state/state.db`;
+ *   F3 a name to move already exists at the root, or exists under both
+ *      `state/` and `workspace/` (an empty source directory is removed
+ *      instead), a directory that decides such a collision cannot be listed,
+ *      or `workspace/lost+found` would keep `workspace/` alive;
+ *   F4 the root, `state/`, `workspace/`, or a directory to be moved out of
+ *      them is not writable (renaming a directory rewrites its `..`).
+ * Moves: `workspace/*`, then `state/*` except `state.db`, then
+ * `state/state.db` last, so a stopped merge keeps the signature and the
+ * next start finishes it. Symlinks are renamed, never followed. The script
+ * never opens the database and deletes nothing but the emptied directories.
  */
-export function buildWorkspaceLayoutInitScript(root = WORKSPACE_PVC_ROOT_MOUNT_PATH): string {
+export function buildWorkspaceLayoutMergeScript(root = WORKSPACE_PVC_ROOT_MOUNT_PATH): string {
   return `set -eu
 root=${shellSingleQuote(root)}
-fail_layout() {
-  echo "workspace layout migration unsafe: $1" >&2
+fail_merge() {
+  echo "workspace layout merge refused: $1" >&2
   exit 1
+}
+present() {
+  [ -e "$1" ] || [ -L "$1" ]
 }
 canonical_dir() {
   (CDPATH= cd -P "$1" 2>/dev/null && pwd -P)
@@ -61,133 +79,152 @@ canonical_dir() {
 assert_managed_dir() {
   path="$1"
   label="$2"
-  [ ! -L "$path" ] || fail_layout "$label directory is a symlink: $path"
-  [ -d "$path" ] || fail_layout "$label path is not a directory: $path"
-  resolved="$(canonical_dir "$path")" || fail_layout "cannot resolve $label directory: $path"
+  [ ! -L "$path" ] || fail_merge "$label directory is a symlink: $path"
+  [ -d "$path" ] || fail_merge "$label path is not a directory: $path"
+  resolved="$(canonical_dir "$path")" || fail_merge "cannot resolve $label directory: $path"
   case "$resolved" in
     "$root_real"/*) ;;
-    *) fail_layout "$label directory escapes the workspace PVC root: $path" ;;
+    *) fail_merge "$label directory escapes the workspace PVC root: $path" ;;
   esac
 }
+is_empty_dir() {
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  listing="$(ls -A "$1" 2>/dev/null)" || fail_merge "cannot list directory: $1"
+  [ -z "$listing" ]
+}
+has_main() {
+  present "$1/state.db"
+}
+has_journal() {
+  present "$1/state.db-wal" || present "$1/state.db-shm"
+}
 
-[ ! -L "$root" ] || fail_layout "workspace PVC root is a symlink: $root"
-[ -d "$root" ] || fail_layout "workspace PVC root is not a directory: $root"
-root_real="$(canonical_dir "$root")" || fail_layout "cannot resolve workspace PVC root: $root"
-[ "$root_real" != "/" ] || fail_layout "workspace PVC root resolves to /"
+[ ! -L "$root" ] || fail_merge "workspace PVC root is a symlink: $root"
+[ -d "$root" ] || fail_merge "workspace PVC root is not a directory: $root"
+root_real="$(canonical_dir "$root")" || fail_merge "cannot resolve workspace PVC root: $root"
+[ "$root_real" != "/" ] || fail_merge "workspace PVC root resolves to /"
 
-# Validate both managed paths before creating either one. A symlink or regular
-# file must never redirect a migration outside the mounted PVC.
-for dir in workspace state; do
-  path="$root/$dir"
-  [ ! -L "$path" ] || fail_layout "$dir directory is a symlink: $path"
-  if [ -e "$path" ] && [ ! -d "$path" ]; then
-    fail_layout "$dir path is not a directory: $path"
+# Split-layout signature: real state/ and workspace/ directories, and a
+# database entry under state/.
+[ ! -L "$root/state" ] && [ -d "$root/state" ] || exit 0
+[ ! -L "$root/workspace" ] && [ -d "$root/workspace" ] || exit 0
+# The globs cannot see the entries of a state/ they cannot list or search.
+[ -r "$root/state" ] && [ -x "$root/state" ] ||
+  fail_merge "state directory is not readable and searchable: $root/state"
+# Only the names the earlier init writes count: the database, its journals
+# and the .pre-<ts>.bak copy it keeps of each of them from an older source.
+signature=0
+for entry in "$root/state"/state.db "$root/state"/state.db-wal "$root/state"/state.db-shm \\
+  "$root/state"/state.db.pre-*.bak "$root/state"/state.db-wal.pre-*.bak "$root/state"/state.db-shm.pre-*.bak; do
+  if present "$entry"; then signature=1; fi
+done
+[ "$signature" -eq 1 ] || exit 0
+
+# F1
+assert_managed_dir "$root/state" state
+assert_managed_dir "$root/workspace" workspace
+# The move globs cannot see the entries of a workspace/ they cannot list.
+[ -r "$root/workspace" ] && [ -x "$root/workspace" ] ||
+  fail_merge "workspace directory is not readable and searchable: $root/workspace"
+for dir in "$root" "$root/state" "$root/workspace"; do
+  for entry in "$dir"/state.db "$dir"/state.db-wal "$dir"/state.db-shm \\
+    "$dir"/state.db.pre-*.bak "$dir"/state.db-wal.pre-*.bak "$dir"/state.db-shm.pre-*.bak; do
+    present "$entry" || continue
+    [ ! -L "$entry" ] || fail_merge "SQLite file is a symlink: $entry"
+    [ -f "$entry" ] || fail_merge "SQLite file is not a regular file: $entry"
+  done
+done
+
+# Superseded split (T5): a stateless start moves the root database into
+# state/, so a root state.db comes from a stateful run after the last
+# stateless run and state/ holds the older history. Renaming state/ removes
+# the signature, so later starts exit 0.
+if has_main "$root" && { has_main "$root/state" || has_journal "$root/state"; } &&
+  ! has_main "$root/workspace" && ! has_journal "$root/workspace"; then
+  [ -w "$root" ] || fail_merge "not writable by uid $(id -u): $root"
+  superseded="$root/state.db.superseded-$(date -u +%Y%m%dT%H%M%SZ)"
+  ! present "$superseded" || fail_merge "destination exists: $superseded"
+  mv "$root/state" "$superseded"
+  sync
+  exit 0
+fi
+
+# F2
+live=0
+root_live=0
+workspace_live=0
+if has_main "$root" || has_journal "$root"; then root_live=1; live=$((live + 1)); fi
+if has_main "$root/state" || has_journal "$root/state"; then live=$((live + 1)); fi
+if has_main "$root/workspace" || has_journal "$root/workspace"; then
+  workspace_live=1
+  live=$((live + 1))
+fi
+resume=0
+if [ "$root_live" -eq 1 ] && ! has_main "$root" && has_main "$root/state" && [ "$workspace_live" -eq 0 ]; then
+  resume=1
+fi
+if [ "$live" -gt 1 ] && [ "$resume" -eq 0 ]; then
+  fail_merge "more than one live SQLite database across $root, $root/state and $root/workspace"
+fi
+
+# F3
+! present "$root/workspace/lost+found" || fail_merge "workspace/lost+found would remain: $root/workspace/lost+found"
+for entry in "$root/workspace"/* "$root/workspace"/.[!.]* "$root/workspace"/..?*; do
+  present "$entry" || continue
+  base="\${entry##*/}"
+  if present "$root/$base"; then
+    if is_empty_dir "$entry" && [ -d "$root/$base" ] && [ ! -L "$root/$base" ]; then continue; fi
+    fail_merge "destination exists: $root/$base"
   fi
 done
-for dir in workspace state; do
-  path="$root/$dir"
-  [ -d "$path" ] || mkdir "$path"
-  assert_managed_dir "$path" "$dir"
-done
-# Validate every destination before the first rename: a later SQLite collision
-# must not leave earlier root entries moved into a partial layout.
-for entry in "$root"/* "$root"/.[!.]* "$root"/..?*; do
-  [ -e "$entry" ] || [ -L "$entry" ] || continue
-  base="$(basename "$entry")"
-  case "$base" in
-    workspace|state|lost+found) continue ;;
-  esac
-  [ ! -L "$entry" ] || fail_layout "legacy source is a symlink: $entry"
-  case "$base" in
-    state.db|state.db-wal|state.db-shm) continue ;;
-  esac
-  if [ -e "$root/workspace/$base" ] || [ -L "$root/workspace/$base" ]; then
-    echo "workspace layout migration collision: destination exists: $root/workspace/$base" >&2
-    exit 1
+for entry in "$root/state"/* "$root/state"/.[!.]* "$root/state"/..?*; do
+  present "$entry" || continue
+  base="\${entry##*/}"
+  if present "$root/$base"; then
+    if is_empty_dir "$entry" && [ -d "$root/$base" ] && [ ! -L "$root/$base" ]; then continue; fi
+    fail_merge "destination exists: $root/$base"
+  fi
+  if present "$root/workspace/$base"; then
+    fail_merge "$base exists under both state/ and workspace/"
   fi
 done
-root_sqlite_source=0
-workspace_sqlite_source=0
-for db in state.db state.db-wal state.db-shm; do
-  [ ! -L "$root/$db" ] || fail_layout "legacy SQLite source is a symlink: $root/$db"
-  [ ! -L "$root/workspace/$db" ] || fail_layout "workspace SQLite source is a symlink: $root/workspace/$db"
-  [ ! -L "$root/state/$db" ] || fail_layout "durable SQLite destination is a symlink: $root/state/$db"
-  if [ -e "$root/$db" ] || [ -L "$root/$db" ]; then root_sqlite_source=1; fi
-  if [ -e "$root/workspace/$db" ] || [ -L "$root/workspace/$db" ]; then workspace_sqlite_source=1; fi
+
+# F4
+for dir in "$root" "$root/state" "$root/workspace"; do
+  [ -w "$dir" ] || fail_merge "not writable by uid $(id -u): $dir"
 done
-if [ "$root_sqlite_source" -eq 1 ] && [ "$workspace_sqlite_source" -eq 1 ]; then
-  echo "workspace layout migration collision: SQLite artifacts are split across root and workspace" >&2
-  exit 1
-fi
-# Newest-source-wins round-trip resolution (Addendum 6 item 6). A confirmed ROOT
-# SQLite source colliding with an existing durable state/ destination is a
-# stateful<->stateless round-trip: the operator just left the stateful life
-# (root state.db is the freshest data) over an earlier stateless life's
-# state/state.db. Preserve the older destination as state/<db>.pre-<ts>.bak
-# (NOTHING is ever deleted), then let the fresher root source migrate in via the
-# normal path below. The destination is proven non-symlink above.
-# WHY positional implies temporal: every stateless boot MOVES the SQLite set out
-# of root into state/ (the mv loops below), so root is left with no state.db. A
-# root state.db can therefore only have been (re)created by a STATEFUL life that
-# ran strictly AFTER the last stateless life — which is what makes "root source"
-# equivalent to "newer source" here, with no timestamp read required.
-root_dest_collision=0
-if [ "$root_sqlite_source" -eq 1 ]; then
-  for db in state.db state.db-wal state.db-shm; do
-    if [ -e "$root/state/$db" ] || [ -L "$root/state/$db" ]; then root_dest_collision=1; fi
-  done
-fi
-if [ "$root_dest_collision" -eq 1 ]; then
-  # One timestamped backup namespace per collision; guard uniqueness so two
-  # round-trips within the same second (or a re-collision) never overwrite an
-  # existing backup.
-  bak_ts="$(date -u +%Y%m%d%H%M%S)"
-  bak_suffix="$bak_ts"
-  bak_seq=0
-  while [ -e "$root/state/state.db.pre-$bak_suffix.bak" ] \
-    || [ -e "$root/state/state.db-wal.pre-$bak_suffix.bak" ] \
-    || [ -e "$root/state/state.db-shm.pre-$bak_suffix.bak" ]; do
-    bak_seq=$((bak_seq + 1))
-    bak_suffix="$bak_ts-$bak_seq"
-  done
-  backed_up=""
-  for db in state.db state.db-wal state.db-shm; do
-    if [ -e "$root/state/$db" ]; then
-      mv "$root/state/$db" "$root/state/$db.pre-$bak_suffix.bak"
-      backed_up="$backed_up $db"
-    fi
-  done
-  echo "workspace layout migration: newest-source-wins round-trip resolution -- backed up prior destination(s)$backed_up under state/*.pre-$bak_suffix.bak; migrating the fresher root SQLite source into state/" >&2
-fi
-# A WORKSPACE SQLite source colliding with the durable destination is a genuinely
-# ambiguous partial-migration state (not a clean round-trip): fail loud,
-# preserving every source for operator recovery.
-for db in state.db state.db-wal state.db-shm; do
-  if [ -e "$root/workspace/$db" ] || [ -L "$root/workspace/$db" ]; then
-    if [ -e "$root/state/$db" ] || [ -L "$root/state/$db" ]; then
-      echo "workspace layout migration collision: destination exists: $root/state/$db" >&2
-      exit 1
-    fi
-  fi
+# Renaming a directory to a new parent rewrites its .. entry, which needs
+# write permission on the directory itself.
+for entry in "$root/workspace"/* "$root/workspace"/.[!.]* "$root/workspace"/..?* \\
+  "$root/state"/* "$root/state"/.[!.]* "$root/state"/..?*; do
+  [ -d "$entry" ] && [ ! -L "$entry" ] || continue
+  ! present "$root/\${entry##*/}" || continue
+  [ -w "$entry" ] || fail_merge "not writable by uid $(id -u): $entry"
 done
-for entry in "$root"/* "$root"/.[!.]* "$root"/..?*; do
-  [ -e "$entry" ] || [ -L "$entry" ] || continue
-  base="$(basename "$entry")"
-  case "$base" in
-    workspace|state|lost+found) continue ;;
-  esac
+
+move_to_root() {
+  entry="$1"
+  base="\${entry##*/}"
+  assert_managed_dir "$root/state" state
   assert_managed_dir "$root/workspace" workspace
-  [ ! -L "$entry" ] || fail_layout "legacy source became a symlink: $entry"
-  mv "$entry" "$root/workspace/$base"
-done
-for db in state.db state.db-wal state.db-shm; do
-  if [ -e "$root/workspace/$db" ]; then
-    assert_managed_dir "$root/workspace" workspace
-    assert_managed_dir "$root/state" state
-    [ ! -L "$root/workspace/$db" ] || fail_layout "workspace SQLite source became a symlink: $root/workspace/$db"
-    mv "$root/workspace/$db" "$root/state/$db"
+  if present "$root/$base"; then
+    rmdir "$entry"
+  else
+    mv "$entry" "$root/$base"
   fi
+}
+for entry in "$root/workspace"/* "$root/workspace"/.[!.]* "$root/workspace"/..?*; do
+  present "$entry" || continue
+  move_to_root "$entry"
 done
+for entry in "$root/state"/* "$root/state"/.[!.]* "$root/state"/..?*; do
+  present "$entry" || continue
+  [ "\${entry##*/}" != state.db ] || continue
+  move_to_root "$entry"
+done
+if present "$root/state/state.db"; then move_to_root "$root/state/state.db"; fi
+rmdir "$root/workspace"
+rmdir "$root/state"
 sync
 `
 }
@@ -239,8 +276,8 @@ export function resolveStatelessImagePullPolicy(image: string): StatelessPullPol
 }
 
 /**
- * Durable condition for the stateless pull-policy guard (Stage 6, W5): True
- * (MutableImageReference) while IfNotPresent is refused for a mutable image,
+ * Durable advisory condition for the stateless pull policy (Stage 6, W5): True
+ * (MutableImageReference) while IfNotPresent is applied to a mutable image,
  * False (StatelessPullPolicyAccepted) otherwise. The message states the
  * enforced outcome so the operator sees what the pod actually runs with.
  */
@@ -313,33 +350,26 @@ export function effectiveRotateBeforeMs(expMs: number, issuedAtMs: number | null
 }
 
 /**
- * Stage 1.2 initContainer for STATELESS Hosts: mounts the workspace PVC at
- * its root and runs the idempotent layout migration (see
- * WORKSPACE_LAYOUT_INIT_SCRIPT). Runs as the same non-root identity as the
- * mcp-host container (uid/gid 1001, fsGroup 1001) so renames need no
- * chown/chmod.
+ * InitContainer that runs buildWorkspaceLayoutMergeScript() on the workspace
+ * PVC root, on every Host and at every start. It uses the Host image and the
+ * mcp-host container's securityContext, so it owns the files it renames
+ * exactly as the main container does.
  */
-export function buildWorkspaceLayoutInitContainer(
+export function buildWorkspaceLayoutMergeContainer(
   image: string,
-  imagePullPolicy: 'Always' | 'IfNotPresent' | 'Never'
+  imagePullPolicy: 'Always' | 'IfNotPresent' | 'Never',
+  securityContext: k8s.V1SecurityContext
 ): k8s.V1Container {
   return {
-    name: 'workspace-layout-init',
+    name: 'workspace-layout-merge',
     image,
     imagePullPolicy,
-    command: ['/bin/sh', '-c', buildWorkspaceLayoutInitScript()],
+    command: ['/bin/sh', '-c', buildWorkspaceLayoutMergeScript()],
     volumeMounts: [{ name: 'workspace', mountPath: WORKSPACE_PVC_ROOT_MOUNT_PATH }],
     resources: {
       requests: { memory: '32Mi', cpu: '10m' },
       limits: { memory: '64Mi', cpu: '200m' },
     },
-    securityContext: {
-      allowPrivilegeEscalation: false,
-      runAsNonRoot: true,
-      runAsUser: 1001,
-      runAsGroup: 1001,
-      capabilities: { drop: ['ALL'] },
-      seccompProfile: { type: 'RuntimeDefault' },
-    },
+    securityContext,
   }
 }

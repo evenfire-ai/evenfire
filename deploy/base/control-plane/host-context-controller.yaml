@@ -101,8 +101,6 @@ spec:
         # validated against the configured part/global concurrency budgets instead.
         - name: CONTEXT_MAPPER_GFSC_LIMIT_MEMORY
           value: 512Mi
-        - name: STDIO_BRIDGE_IMAGE
-          value: clerum/stdio-bridge:0.9.5
         - name: CONTEXT_MAPPER_RUNTIME_NAMESPACES
           value: mcp-server,sandbox-recipes,rpc-proxy,sandbox-ui
         # sandbox-ui pods are React HTTP servers — they don't talk to the K8s

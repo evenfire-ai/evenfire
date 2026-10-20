@@ -9,12 +9,7 @@ import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import {
-  E2E_DESKTOP_PASSWORD,
-  loginAs as apiLoginAs,
-  awaitPasswordPace,
-  seedDesktopPasswordLogin,
-} from './workflowUi'
+import { E2E_DESKTOP_PASSWORD, awaitPasswordPace, seedPasswordForEmail } from './workflowUi'
 
 const E2E_EMAIL = process.env.E2E_DEV_LOGIN_EMAIL || 'test@clerum.io'
 
@@ -59,8 +54,10 @@ export const test = base.extend<Fixtures>({
   },
 
   appPage: async ({ electronApp }, use) => {
-    const login = await apiLoginAs(E2E_EMAIL)
-    seedDesktopPasswordLogin(login.userId, E2E_EMAIL)
+    // Seed the password without an API login: control-api charges every
+    // attempt, successful ones included, against a 5-per-15-minutes budget
+    // (control-api/src/services/auth/passwordAdmissionState.ts).
+    seedPasswordForEmail(E2E_EMAIL)
 
     const page = await electronApp.firstWindow()
     await page.waitForLoadState('domcontentloaded')
@@ -139,8 +136,7 @@ export async function launchFreshElectron(): Promise<ElectronApplication> {
 }
 
 export async function loginAs(page: Page, email: string): Promise<void> {
-  const login = await apiLoginAs(email)
-  seedDesktopPasswordLogin(login.userId, email)
+  seedPasswordForEmail(email)
 
   const emailInput = page.locator('#email-input')
   const passwordInput = page.locator('#password-input')
