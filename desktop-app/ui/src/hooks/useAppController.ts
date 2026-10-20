@@ -335,6 +335,8 @@ export function useAppController() {
   const [hostAuthorityRevision, setHostAuthorityRevision] = useState(0)
   const selectedAgentRef = useRef(nav.selectedAgent)
   selectedAgentRef.current = nav.selectedAgent
+  const focusedChatAgentRef =
+    nav.activeTab?.kind === 'chat' ? (nav.activeTab.chat?.agentRef ?? null) : null
   const isHostAccessBlocked = useCallback(
     (agentRef: string) => hostAuthority.isBlocked(agentRef),
     [hostAuthority]
@@ -343,6 +345,11 @@ export function useAppController() {
     () => agentsData.agentNames.filter(agentRef => hostAuthority.isBlocked(agentRef)),
     [agentsData.agentNames, hostAuthority, hostAuthorityRevision]
   )
+  // ChatPage keeps the focused chat tab only while its Host has a Retry row:
+  // held and still in the catalog. Holds reset with the authority scope, so a
+  // team switch never keeps a tab of the previous team.
+  const keepFocusedChat =
+    focusedChatAgentRef !== null && heldAgentRefs.includes(focusedChatAgentRef)
   const heldHosts = useMemo<HeldHost[]>(
     () => heldAgentRefs.map(agentRef => ({ agentRef, label: agentDisplayName(agentRef) })),
     [agentDisplayName, heldAgentRefs]
@@ -721,38 +728,44 @@ export function useAppController() {
     const previousCatalog = previousAccessCatalogRef.current
     const catalog = agentsData.accessCatalog
     previousAccessCatalogRef.current = catalog
+    if (!auth.isAuthenticated || !catalog) return
+    // Compared with the previous catalog, so an effect re-run without a new
+    // catalog cannot announce the same loss twice. A new user or team explains
+    // the change by itself.
+    const leftCatalog = (agentRef: string) =>
+      previousCatalog?.userId === catalog.userId &&
+      previousCatalog.teamId === catalog.teamId &&
+      previousCatalog.agentNames.includes(agentRef) &&
+      !catalog.agentNames.includes(agentRef)
+    const announceLoss = (agentRef: string) => {
+      const name = previousCatalog?.agentDisplayByName?.[agentRef] ?? agentRef
+      pushToast(`${name} is no longer available.`, 'error')
+    }
+    // The focused chat tab's held Host loses its Retry row with the catalog, so
+    // ChatPage leaves the tab; say why.
+    if (
+      focusedChatAgentRef !== null &&
+      isHostAccessBlocked(focusedChatAgentRef) &&
+      leftCatalog(focusedChatAgentRef)
+    ) {
+      announceLoss(focusedChatAgentRef)
+    }
     const selected = nav.selectedAgent
-    if (!auth.isAuthenticated || !catalog || !selected) return
+    if (!selected) return
     const held = isHostAccessBlocked(selected)
     if (!held && catalog.agentNames.includes(selected)) return
     nav.setSelectedAgent(null)
-    // A held Host was already announced by `blockHostAccess`; a new user or team
-    // explains the change by itself.
-    if (
-      !held &&
-      previousCatalog?.userId === catalog.userId &&
-      previousCatalog.teamId === catalog.teamId &&
-      previousCatalog.agentNames.includes(selected)
-    ) {
-      const name = previousCatalog.agentDisplayByName?.[selected] ?? selected
-      pushToast(`${name} is no longer available.`, 'error')
-    }
+    // A held Host was already announced by `blockHostAccess`.
+    if (!held && leftCatalog(selected)) announceLoss(selected)
   }, [
     agentsData.accessCatalog,
     auth.isAuthenticated,
+    focusedChatAgentRef,
     nav.selectedAgent,
     nav.setSelectedAgent,
     isHostAccessBlocked,
     pushToast,
   ])
-
-  const focusedChatAgentRef =
-    nav.activeTab?.kind === 'chat' ? (nav.activeTab.chat?.agentRef ?? null) : null
-  // ChatPage keeps the focused chat tab while its Host is held, also after the
-  // catalog dropped that Host. Holds reset with the authority scope, so a team
-  // switch never keeps a tab of the previous team.
-  const keepFocusedChat =
-    focusedChatAgentRef !== null && hostAuthority.isBlocked(focusedChatAgentRef)
 
   const switchTeamForWorkspace = useCallback(
     async (teamId: string, options: { announce?: boolean } = {}) => {

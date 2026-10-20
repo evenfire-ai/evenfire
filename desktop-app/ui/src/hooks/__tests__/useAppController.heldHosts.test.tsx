@@ -589,7 +589,7 @@ describe('ChatPage with a held Host on the chat tab', () => {
     expect(getVm().activeWorkspaceTab?.chat?.chatId).toBe('chat-1')
   })
 
-  it('T-A9-P2: a held Host that also leaves the catalog keeps its chat instead of opening another Host', async () => {
+  it('T-A9-P2: a held Host on the chat tab that leaves the catalog says so and selects another Host', async () => {
     const { clerum, handle } = installAppControllerClerum({
       agentNames: [HOST_A, HOST_B],
       agentDisplayByName: DISPLAY_BY_NAME,
@@ -618,20 +618,16 @@ describe('ChatPage with a held Host on the chat tab', () => {
       expect(handle.refreshCatalog.mock.calls.length).toBe(refreshesBeforeHold + 1)
     )
     await waitFor(() => expect(cachedCatalog(queryClient)?.agentNames).toEqual([HOST_B]))
+    await waitFor(() => expect(getVm().selectedAgent).toBe(HOST_B))
     await settle()
 
-    // Liveness witness: the hold cleared the selection and its refresh dropped A,
-    // so ChatPage re-ran its auto-selection with only B as a candidate.
+    // Liveness witness: the hold cleared the selection, A is still held, and its
+    // refresh dropped A, so A has no Retry row to come back through.
     expect(trail.slice(trailBeforeHold)).toContain(null)
+    expect(getVm().isHostAccessBlocked(HOST_A)).toBe(true)
     expect(getVm().heldAgentRefs).toEqual([])
-    // A's chat tab stays focused with nothing selected; B is never opened.
-    expect(trail.slice(trailBeforeHold)).not.toContain(HOST_B)
-    expect(getVm().selectedAgent).toBe(null)
-    expect(hasTabFor(getVm(), HOST_B)).toBe(false)
-    expect(getVm().focusedChatAgentRef).toBe(HOST_A)
-    expect(getVm().activeWorkspaceTab?.chat?.chatId).toBe('chat-1')
-    // One message: A was deselected by its hold, so the catalog drop adds none.
-    expect(toastTexts(getVm())).toEqual([VERIFY_A])
+    // Both messages, in order: the hold, then the Host leaving the catalog.
+    expect(toastTexts(getVm())).toEqual([VERIFY_A, GONE_A])
   })
 
   it('T-J1-2: a Chat click on a held Host chat opens that chat once access is verified', async () => {
