@@ -725,3 +725,191 @@ describe('T2 ownership + workload status timer (#1016 §3.4)', () => {
     expect(h.w.reconciler.reconcile).not.toHaveBeenCalled()
   })
 })
+
+describe('T1 infra retry, SDK liveness probe and steady backstop (#1016 §3.5/§3.6)', () => {
+  const T0 = new Date('2026-10-08T12:00:00Z').getTime()
+  const counter = async (timer: string, result: string) => {
+    const m = (await registry.getSingleMetric('clerum_wrc_timer_checks_total')!.get()).values
+    return m.find(v => v.labels.timer === timer && v.labels.result === result)?.value ?? 0
+  }
+  const withTime = async (fn: () => Promise<void>) => {
+    vi.useFakeTimers()
+    vi.setSystemTime(T0)
+    try {
+      await fn()
+    } finally {
+      vi.useRealTimers()
+    }
+  }
+  const sdkRecipe = (): WorkflowRecipeCRD => {
+    const r = recipe()
+    r.spec.workloads = []
+    ;(r.spec as Any).pluginWorkloadSdk = { promptBridge: {} }
+    r.status = {
+      phase: 'active',
+      pluginWorkloadSdk: { state: 'validated', bootstrapPodUid: 'pod-1' },
+    } as Any
+    return r
+  }
+  const stuckRecipe = (): WorkflowRecipeCRD => {
+    const r = recipe()
+    ;(r.spec as Any).steps = [{ id: 's1', instruction: 'go' }]
+    r.status = { phase: 'deploying', workflowExecution: { phase: 'initializing' } } as Any
+    return r
+  }
+  const egressRecipe = (): WorkflowRecipeCRD => {
+    const r = recipe()
+    ;(r.spec as Any).ui = { egress: { external: [{ host: 'api.example.com', port: 443 }] } }
+    return r
+  }
+  const t1 = (r: WorkflowRecipeCRD, readNamespacedPod = vi.fn()) => {
+    const h = harness()
+    Object.assign(h.w.reconciler, {
+      refreshInProgressWorkflowRuntimeCredentials: vi.fn().mockResolvedValue(undefined),
+    })
+    h.w._coreApi = { readNamespacedPod }
+    h.w.recipes.set('r', r)
+    const spy = vi.spyOn(h.w, 'escalate')
+    const tick = async () => {
+      await h.w.refreshRuntimeCredentialsForInProgressRecipes()
+      await h.drain()
+    }
+    return { ...h, spy, tick, readNamespacedPod }
+  }
+  const healthyPod = { metadata: { uid: 'pod-1' }, status: { phase: 'Running' } }
+
+  it('stuck states retry every tick with spacing coalescing', async () => {
+    const h = t1(stuckRecipe())
+    await h.tick()
+    expect(h.spy).toHaveBeenCalledWith(
+      h.w.recipes.get('r'),
+      'infra_retry',
+      'infra_retry',
+      'spacing'
+    )
+    expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(1)
+    expect(h.readNamespacedPod).not.toHaveBeenCalled()
+  })
+
+  it('SDK healthy and recently settled: probe runs against <name>-mcp-host, no reconcile', () =>
+    withTime(async () => {
+      const h = t1(sdkRecipe(), vi.fn().mockResolvedValue(healthyPod))
+      h.w.cadence.recordSettled('r', Date.now(), '')
+      const before = await counter('sdk_liveness', 'clean')
+      await h.tick()
+      expect(h.readNamespacedPod).toHaveBeenCalledWith({
+        name: 'r-mcp-host',
+        namespace: 'sandbox-recipes',
+      })
+      expect(h.w.reconciler.reconcile).not.toHaveBeenCalled()
+      expect(await counter('sdk_liveness', 'clean')).toBe(before + 1)
+    }))
+
+  it('SDK pod absent: escalates sdk_liveness, not coalesced', () =>
+    withTime(async () => {
+      const h = t1(sdkRecipe(), vi.fn().mockRejectedValue({ code: 404 }))
+      h.w.cadence.recordSettled('r', Date.now(), '')
+      await h.tick()
+      expect(h.spy).toHaveBeenCalledWith(
+        h.w.recipes.get('r'),
+        'sdk_liveness',
+        'sdk_liveness',
+        false
+      )
+      expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(1)
+    }))
+
+  it('SDK probe throws: escalates sdk_liveness', () =>
+    withTime(async () => {
+      const h = t1(sdkRecipe(), vi.fn().mockRejectedValue(new Error('boom')))
+      h.w.cadence.recordSettled('r', Date.now(), '')
+      await h.tick()
+      expect(h.spy).toHaveBeenCalledWith(
+        h.w.recipes.get('r'),
+        'sdk_liveness',
+        'sdk_liveness',
+        false
+      )
+      expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(1)
+    }))
+
+  it('SDK healthy but stale (170s) or never settled: steady_backstop reconcile', () =>
+    withTime(async () => {
+      for (const settledAgo of [170_000, undefined]) {
+        const h = t1(sdkRecipe(), vi.fn().mockResolvedValue(healthyPod))
+        if (settledAgo !== undefined) h.w.cadence.recordSettled('r', Date.now() - settledAgo, '')
+        await h.tick()
+        expect(h.spy).toHaveBeenCalledWith(
+          h.w.recipes.get('r'),
+          'steady_backstop',
+          'steady_backstop',
+          'backstop'
+        )
+        expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(1)
+      }
+    }))
+
+  it('settled 100s ago: backstop does not fire', () =>
+    withTime(async () => {
+      const h = t1(egressRecipe())
+      h.w.cadence.recordSettled('r', Date.now() - 100_000, '')
+      await h.tick()
+      expect(h.w.reconciler.reconcile).not.toHaveBeenCalled()
+    }))
+
+  it('steady non-SDK workflow with egress and no Secrets: backstop when stale', () =>
+    withTime(async () => {
+      const r = egressRecipe()
+      ;(r.spec as Any).steps = [{ id: 's1', instruction: 'go' }]
+      r.status = { phase: 'active', workflowExecution: { phase: 'running' } } as Any
+      const h = t1(r)
+      h.w.cadence.recordSettled('r', Date.now() - 170_000, '')
+      await h.tick()
+      expect(h.spy).toHaveBeenCalledWith(
+        h.w.recipes.get('r'),
+        'steady_backstop',
+        'steady_backstop',
+        'backstop'
+      )
+      expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(1)
+    }))
+
+  it('latched-failed classic recipe with egress: backstop when stale', () =>
+    withTime(async () => {
+      const r = egressRecipe()
+      r.status = { phase: 'failed' } as Any
+      const h = t1(r)
+      h.w.cadence.recordSettled('r', Date.now() - 170_000, '')
+      await h.tick()
+      expect(h.spy).toHaveBeenCalledWith(
+        h.w.recipes.get('r'),
+        'steady_backstop',
+        'steady_backstop',
+        'backstop'
+      )
+      expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(1)
+    }))
+
+  it('a recipe in no forcing predicate is never enqueued or reconciled', async () => {
+    const h = t1(recipe())
+    await h.tick()
+    expect(h.w.eventQueue.enqueue).not.toHaveBeenCalled()
+    expect(h.w.reconciler.reconcile).not.toHaveBeenCalled()
+  })
+
+  it('a degenerate backstop uses spacing coalescing', async () => {
+    const h = t1(egressRecipe())
+    h.w.config = {
+      ...h.w.config,
+      runtimeTokenTtlSeconds: 120,
+      runtimeTokenRefreshBeforeSeconds: 60,
+    }
+    await h.tick()
+    expect(h.spy).toHaveBeenCalledWith(
+      h.w.recipes.get('r'),
+      'steady_backstop',
+      'steady_backstop',
+      'spacing'
+    )
+  })
+})

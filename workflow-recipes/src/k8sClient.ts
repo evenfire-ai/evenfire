@@ -39,8 +39,10 @@ import {
   type ReconcileOutcome,
   type ReconcileTrigger,
   type TimerName,
+  classifyInfrastructureRetry,
   coalesceSpacingMs,
   isSettledResult,
+  needsSteadyBackstop,
   steadyBackstopMs,
   workflowNeedsOwnershipBackstop,
 } from './reconcileCadence'
@@ -79,6 +81,7 @@ import {
   CODEX_CONNECTION_REF_ANNOTATION,
   SUBSCRIPTION_CONNECTION_REF_ANNOTATION,
 } from './workflow/llmAllowedModelsSnapshot'
+import { readMcpHostPod, sdkLivenessNeedsReconcile } from './workflow/mcpHostProbe'
 import { networkPolicyConditionsChanged } from './workflow/workflowReconciler'
 
 // Issue #1016: the pure predicates live in `recipePredicates.ts` (and the widened
@@ -538,6 +541,12 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
   private watch: k8s.Watch
   private kc: k8s.KubeConfig
   private customApi: k8s.CustomObjectsApi
+  // Issue #1016 — lazy so `Object.create(WorkflowRecipeWatcher.prototype)` harnesses
+  // (no `kc`) can inject a stub through `_coreApi`.
+  private _coreApi?: k8s.CoreV1Api
+  private get coreApi(): k8s.CoreV1Api {
+    return (this._coreApi ??= this.kc.makeApiClient(k8s.CoreV1Api))
+  }
   private watchRequest: { abort: () => void } | null = null
   private recipes: Map<string, WorkflowRecipeCRD> = new Map()
   private reconciler: WorkflowRecipeReconciler
@@ -802,6 +811,13 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     // Non-fatal: if the Secret doesn't exist, workflow recipes will gracefully fail
     // but traditional workload recipes continue to work.
     await this.tryInitializeWorkflow()
+
+    if (steadyBackstopMs(this.config).degenerate) {
+      createLogger('wrc', 'workflow-recipes').info(
+        'Steady backstop interval degenerates to every T1 tick for this token TTL',
+        { value2: this.config.runtimeTokenTtlSeconds }
+      )
+    }
 
     await this.startWatch()
     await this.startSecretWatch()
@@ -1688,27 +1704,59 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         if (workflowNeedsRuntimeCredentialRefresh(latest)) {
           await this.reconciler.refreshInProgressWorkflowRuntimeCredentials(latest)
         }
-        if (workflowNeedsInfrastructureReconcile(latest)) {
-          await this.eventQueue.enqueue(recipeName, () =>
-            // Infrastructure retries are timer-driven with an unchanged CRD
-            // generation. Force the full reconcile; otherwise the watcher
-            // classifies this synthetic MODIFIED event as status-only and
-            // returns before re-running the eager SDK bootstrap lane.
-            this.handleRecipeEvent('MODIFIED', latest, {
-              forceReconcile: true,
-              trigger: 'infra_retry',
-            })
-          )
-        }
       } catch (error) {
-        createLogger('wrc', recipeName).error(
-          'Runtime credential refresh or infrastructure retry failed',
-          { recipeName, err: error }
-        )
+        createLogger('wrc', recipeName).error('Runtime credential refresh failed', {
+          recipeName,
+          err: error,
+        })
       }
+      if (!needsSteadyBackstop(latest)) return
+      // enqueueTimerTask catches task errors itself, so this never rejects.
+      await this.enqueueTimerTask(recipeName, 'infra_retry', fresh =>
+        this.runInfrastructureCheck(fresh)
+      )
     })
 
     await Promise.all(refreshes)
+  }
+
+  /**
+   * Issue #1016 — narrow T1 check, recomputed from the fresh cache entry. Stuck
+   * states retry every tick (spacing-coalesced); SDK recipes get a one-GET mcp-host
+   * probe and escalate only on drift; everything in the backstop set otherwise gets
+   * one full reconcile per steady backstop interval.
+   */
+  private async runInfrastructureCheck(fresh: WorkflowRecipeCRD): Promise<void> {
+    const kind = classifyInfrastructureRetry(fresh)
+    if (kind === 'stuck') {
+      await this.escalate(fresh, 'infra_retry', 'infra_retry', 'spacing')
+      return
+    }
+    if (kind === 'sdk_liveness') {
+      let needs: boolean
+      try {
+        needs = sdkLivenessNeedsReconcile(
+          fresh,
+          await readMcpHostPod(this.coreApi, fresh.metadata.name, this.config.sandboxNamespace)
+        )
+      } catch {
+        // An unreadable pod is treated as drift: the full pass is the safe answer.
+        needs = true
+      }
+      if (needs) {
+        await this.escalate(fresh, 'sdk_liveness', 'sdk_liveness', false)
+        return
+      }
+      timerChecksTotal.inc({ timer: 'sdk_liveness', result: 'clean' })
+    }
+    if (!needsSteadyBackstop(fresh)) return
+    const backstop = steadyBackstopMs(this.config)
+    await this.escalate(
+      fresh,
+      'steady_backstop',
+      'steady_backstop',
+      backstop.degenerate ? 'spacing' : 'backstop'
+    )
   }
 
   async stop(): Promise<void> {

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { loadConfig } from './config'
 import {
   WorkflowRecipeWatcher,
   controllerErrorTelemetryProjection,
@@ -1055,12 +1056,51 @@ describe('runtime credential refresh loop helpers', () => {
     ).toBe(false)
   })
 
-  // Issue #1016 Task 10 (T1 rewrite): a timer-driven SDK infrastructure retry will
-  // escalate (still past the status-only generation guard) only on the sdk_liveness
-  // conditions. The full assertions land with Task 10.
-  it.todo(
-    'escalates a timer-driven SDK infrastructure retry only on the sdk_liveness conditions (Task 10)'
-  )
+  // Issue #1016 Task 10 (T1 rewrite): a timer-driven SDK infrastructure retry
+  // escalates (still past the status-only generation guard) only on the sdk_liveness
+  // conditions: here, when the mcp-host probe reports the pod absent.
+  it('escalates a timer-driven SDK infrastructure retry only when the probe reports the pod absent', async () => {
+    const sdkRecipe = makeWorkflowRecipe({
+      metadata: { name: 'sdk-recipe', namespace: 'sandbox-recipes' },
+      spec: { steps: [], pluginWorkloadSdk: { promptBridge: {} } },
+      status: {
+        phase: 'active',
+        pluginWorkloadSdk: { state: 'validated', bootstrapPodUid: 'pod-1' },
+      },
+    } as Partial<WorkflowRecipeCRD>)
+    const run = async (readNamespacedPod: ReturnType<typeof vi.fn>) => {
+      const handleRecipeEvent = vi.fn().mockResolvedValue({ ran: true, settled: true })
+      const internal = Object.create(WorkflowRecipeWatcher.prototype) as Record<string, unknown>
+      Object.assign(internal, {
+        recipes: new Map([[sdkRecipe.metadata.name, sdkRecipe]]),
+        reconciler: { refreshInProgressWorkflowRuntimeCredentials: vi.fn() },
+        eventQueue: { enqueue: vi.fn((_k: string, task: () => Promise<void>) => task()) },
+        handleRecipeEvent,
+        _coreApi: { readNamespacedPod },
+        config: { ...loadConfig(), sandboxNamespace: 'sandbox-recipes' },
+        stopped: false,
+      })
+      // Recently settled, so only the liveness probe can force a pass.
+      ;(
+        internal as { cadence: { recordSettled: (n: string, t: number, s: string) => void } }
+      ).cadence.recordSettled(sdkRecipe.metadata.name, Date.now(), '')
+      await (
+        internal as { refreshRuntimeCredentialsForInProgressRecipes: () => Promise<void> }
+      ).refreshRuntimeCredentialsForInProgressRecipes()
+      return handleRecipeEvent
+    }
+
+    const healthy = await run(
+      vi.fn().mockResolvedValue({ metadata: { uid: 'pod-1' }, status: { phase: 'Running' } })
+    )
+    expect(healthy).not.toHaveBeenCalled()
+
+    const absent = await run(vi.fn().mockRejectedValue({ code: 404 }))
+    expect(absent).toHaveBeenCalledWith('MODIFIED', sdkRecipe, {
+      forceReconcile: true,
+      trigger: 'sdk_liveness',
+    })
+  })
 
   it('keeps reconciling a promptBridge SDK recipe with no run so the eager mcp-host stays configured', () => {
     // phase=active, workflowExecution cleared (eager SDK path) — must still requeue.
