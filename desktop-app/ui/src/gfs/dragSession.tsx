@@ -1,10 +1,43 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
 import { useQuery } from '@tanstack/react-query'
+import { DRAG_COLD_CHECK_BUDGET, DRAG_COLD_CHECK_MAX_CONCURRENCY } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
-import type { GfsDragSessionApi, GfsDragSource } from './dragSession.types'
+import type { GfsDragSessionApi, GfsDragSource, GfsHoverCheckLease } from './dragSession.types'
 
 type GfsAccessState = 'active' | 'revoked'
+
+/** Same lease rules for shared gestures and provider-absent single-surface mode. */
+export class GfsHoverCheckBudget {
+  private ledger = { generation: -1, dispatched: 0, inFlight: 0 }
+
+  beginCheck(
+    expectedGeneration: number,
+    currentGeneration: number,
+    active: boolean
+  ): GfsHoverCheckLease | null {
+    if (!active || expectedGeneration !== currentGeneration) return null
+    if (this.ledger.generation !== currentGeneration) {
+      this.ledger = { generation: currentGeneration, dispatched: 0, inFlight: 0 }
+    }
+    const ledger = this.ledger
+    if (
+      ledger.dispatched >= DRAG_COLD_CHECK_BUDGET ||
+      ledger.inFlight >= DRAG_COLD_CHECK_MAX_CONCURRENCY
+    )
+      return null
+    ledger.dispatched += 1
+    ledger.inFlight += 1
+    let completed = false
+    return {
+      complete: () => {
+        if (completed) return
+        completed = true
+        if (this.ledger === ledger) ledger.inFlight -= 1
+      },
+    }
+  }
+}
 
 /**
  * Per-session drag coordinator (rev-2 §4): exactly one active in-window
@@ -21,6 +54,7 @@ export class GfsDragSessionStore implements GfsDragSessionApi {
   private active: GfsDragSource | null = null
   private generation = 0
   private boundScope: string | null = null
+  private hoverBudget = new GfsHoverCheckBudget()
 
   beginDrag(source: Omit<GfsDragSource, 'generation'>): boolean {
     if (this.active && this.boundScope !== source.scope) return false
@@ -51,6 +85,10 @@ export class GfsDragSessionStore implements GfsDragSessionApi {
 
   currentGeneration(): number {
     return this.generation
+  }
+
+  beginHoverCheck(expectedGeneration: number): GfsHoverCheckLease | null {
+    return this.hoverBudget.beginCheck(expectedGeneration, this.generation, this.active !== null)
   }
 }
 
@@ -124,6 +162,7 @@ export function GfsDragSessionProvider({ children }: { children: React.ReactNode
       matchesScope: candidate => store.matchesScope(candidate),
       invalidate: reason => store.invalidate(reason),
       currentGeneration: () => store.currentGeneration(),
+      beginHoverCheck: expectedGeneration => store.beginHoverCheck(expectedGeneration),
     }),
     [accessState, scope, store]
   )

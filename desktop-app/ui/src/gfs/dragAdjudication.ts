@@ -1,9 +1,10 @@
-import { useCallback, useRef } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { decideDragAuthority, decideDragStructure } from '@clerum/gfs-interaction-policy'
-import { DRAG_COLD_CHECK_BUDGET, DRAG_COLD_CHECK_DEBOUNCE_MS } from '@constants/gfsBrowser'
+import { DRAG_COLD_CHECK_DEBOUNCE_MS } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { describeGfsReadError, parseHttpStatus } from '@lib/gfsGrantErrors'
+import { GfsHoverCheckBudget, useGfsDragSession } from './dragSession'
 import type {
   GfsDragSource,
   GfsDropDecision,
@@ -85,9 +86,10 @@ function requiredProbeRejection(error: unknown): GfsDropRejection {
  */
 export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
   const queryClient = useQueryClient()
-  const coldChecksRef = useRef(0)
+  const session = useGfsDragSession()
+  const localGestureRef = useRef({ generation: 0, active: false })
+  const localBudgetRef = useRef(new GfsHoverCheckBudget())
   const debounceTimerRef = useRef<number | null>(null)
-  const inFlightRef = useRef(0)
 
   const readCachedAffordances = useCallback(
     (resourceId: string): HeldAffordances | null => {
@@ -159,55 +161,78 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
     [readCachedAffordances]
   )
 
-  /**
-   * Schedule one budgeted cold check for a hovered target: at most two
-   * feature requests (destination + known source parent) run concurrently
-   * after the dwell debounce; over-budget stays silent (drop performs the
-   * priority check). No network resolves happen on hover.
-   */
+  /** A dwell belongs to its schedule-time gesture. Canceled/warm checks are
+   * free; a cold chain acquires one shared slot only when it dispatches. */
   const scheduleColdCheck = useCallback(
     (target: GfsDropTargetFact, sourceParentId: string | null, onComplete: () => void) => {
-      if (inFlightRef.current >= 2) return
-      if (coldChecksRef.current >= DRAG_COLD_CHECK_BUDGET) return
-      coldChecksRef.current += 1
-      inFlightRef.current += 1
+      const localGeneration = localGestureRef.current.generation
+      const expectedGeneration = session?.currentGeneration() ?? localGeneration
+      const isCurrent = () =>
+        deps.scope !== null &&
+        localGeneration === localGestureRef.current.generation &&
+        (session
+          ? session.currentGeneration() === expectedGeneration && session.matchesScope(deps.scope)
+          : localGestureRef.current.active)
       if (debounceTimerRef.current !== null) window.clearTimeout(debounceTimerRef.current)
       debounceTimerRef.current = window.setTimeout(() => {
         debounceTimerRef.current = null
+        if (!isCurrent()) return
+        const warm =
+          readCachedAffordances(target.resourceId) !== null &&
+          (sourceParentId === null || readCachedAffordances(sourceParentId) !== null)
+        if (warm) {
+          if (isCurrent()) onComplete()
+          return
+        }
+        const lease = session
+          ? session.beginHoverCheck(expectedGeneration)
+          : localBudgetRef.current.beginCheck(
+              expectedGeneration,
+              localGestureRef.current.generation,
+              localGestureRef.current.active
+            )
+        if (!lease) return
         void (async () => {
           try {
+            if (!isCurrent()) return
             if (readCachedAffordances(target.resourceId) === null) {
               await fetchAffordances(target.resourceId, AFFORDANCES_HOVER_STALE_MS)
             }
+            if (!isCurrent()) return
             if (sourceParentId !== null && readCachedAffordances(sourceParentId) === null) {
               await fetchAffordances(sourceParentId, AFFORDANCES_HOVER_STALE_MS)
             }
-            onComplete()
+            if (isCurrent()) onComplete()
           } finally {
-            inFlightRef.current -= 1
+            lease.complete()
           }
         })()
       }, DRAG_COLD_CHECK_DEBOUNCE_MS)
     },
-    [fetchAffordances, readCachedAffordances]
+    [deps.scope, fetchAffordances, readCachedAffordances, session]
   )
 
-  /** Reset the per-drag budget (new dragstart). */
-  const beginDragSession = useCallback(() => {
-    coldChecksRef.current = 0
-    inFlightRef.current = 0
+  const cancelHover = useCallback(() => {
     if (debounceTimerRef.current !== null) {
       window.clearTimeout(debounceTimerRef.current)
       debounceTimerRef.current = null
     }
   }, [])
 
+  const beginDragSession = useCallback(() => {
+    localGestureRef.current = { generation: localGestureRef.current.generation + 1, active: true }
+    cancelHover()
+  }, [cancelHover])
+
   const endDragSession = useCallback(() => {
-    if (debounceTimerRef.current !== null) {
-      window.clearTimeout(debounceTimerRef.current)
-      debounceTimerRef.current = null
-    }
-  }, [])
+    localGestureRef.current = { generation: localGestureRef.current.generation + 1, active: false }
+    cancelHover()
+  }, [cancelHover])
+
+  useEffect(() => {
+    endDragSession()
+    return endDragSession
+  }, [deps.scope, endDragSession])
 
   /**
    * Bounded upward continuation of the target's ancestor chain (rev-2 §3.1):

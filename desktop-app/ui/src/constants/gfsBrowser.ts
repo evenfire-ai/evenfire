@@ -20,3 +20,6 @@ export const DRAG_COLD_CHECK_DEBOUNCE_MS = 150
 /** At most this many NEW cold destination checks per drag; beyond it targets
  * stay "checking" and receive a priority check on drop (rev-2 §4.1). */
 export const DRAG_COLD_CHECK_BUDGET = 8
+
+/** Concurrent cold-hover probe chains per gesture, shared across both surfaces. */
+export const DRAG_COLD_CHECK_MAX_CONCURRENCY = 2

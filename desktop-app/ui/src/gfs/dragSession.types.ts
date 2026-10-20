@@ -79,6 +79,11 @@ export interface GfsDropRejection {
 
 export type GfsDropDecision = GfsDropAdmission | GfsDropRejection
 
+/** One cold-hover chain's slot; release is idempotent and generation-bound. */
+export interface GfsHoverCheckLease {
+  complete(): void
+}
+
 /** Provider API (rev-2 §4): one ephemeral source per session; no registry,
  * no nonce MIME, no credentials. */
 export interface GfsDragSessionApi {
@@ -91,4 +96,6 @@ export interface GfsDragSessionApi {
   /** Monotonic gesture counter; lets a surface release the shared store only
    * when the store still belongs to the gesture that captured it. */
   currentGeneration(): number
+  /** Acquire only for a still-active captured gesture; never charge a newer one. */
+  beginHoverCheck(expectedGeneration: number): GfsHoverCheckLease | null
 }
