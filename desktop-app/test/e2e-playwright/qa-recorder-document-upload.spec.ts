@@ -350,6 +350,21 @@ async function selectSupportedModel(page: Page, model: string) {
  * unsent, the authenticated surface must not be mounted, otherwise the journey
  * could pass without a real sign-in.
  */
+/**
+ * control-api admits one password verification per 7.5 s across all identities
+ * (`PASSWORD_ADMISSION_POLICY.paceMs`) and answers 429 inside that window, which
+ * Desktop reports as a generic login failure. The tests in this file sign in
+ * one after another, so each login waits out the pace of the previous one.
+ */
+const PASSWORD_VERIFICATION_PACE_MS = 7_500
+let previousPasswordLoginAt: number | undefined
+
+async function waitForPasswordPace() {
+  if (previousPasswordLoginAt === undefined) return
+  const remainingMs = previousPasswordLoginAt + PASSWORD_VERIFICATION_PACE_MS - Date.now()
+  if (remainingMs > 0) await new Promise(resolve => setTimeout(resolve, remainingMs))
+}
+
 async function signIn(page: Page) {
   await expect(page.locator('.boot-overlay')).toBeHidden({ timeout: 30_000 })
 
@@ -369,7 +384,10 @@ async function signIn(page: Page) {
   await expect(sendButton(page)).toHaveCount(0)
   await expect(page.getByTestId('nav-chat')).toHaveCount(0)
 
+  await waitForPasswordPace()
   await login(page, desktopCredentials())
+  // Taken after the server has answered, so the next login starts a full pace later.
+  previousPasswordLoginAt = Date.now()
   await expect(page.getByTestId('nav-chat')).toBeVisible({ timeout: 30_000 })
 }
 
