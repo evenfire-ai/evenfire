@@ -3896,6 +3896,152 @@ describe('FilesPage', () => {
     )
   })
 
+  it('a stale drop’s cleanup does not clear a newer gesture', async () => {
+    // R1-M4: gesture A’s drop adjudication is still pending when gesture B
+    // starts on the same surface. A’s late resolution must return without
+    // cleaning up B: B’s hover state stays, and B’s drop still commits B.
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(async (_resourceId: string, _destinationId: string) => ({}))
+    type Affordances = {
+      held: string[]
+      canDelegate: boolean
+      grantableBits: string[]
+      canCreateShare: boolean
+    }
+    let releaseA!: (value: Affordances) => void
+    const gatedA = new Promise<Affordances>(resolve => {
+      releaseA = resolve
+    })
+    let aProbePending = true
+    const affordances = vi.fn((): Promise<Affordances> => {
+      if (aProbePending) {
+        aProbePending = false
+        return gatedA
+      }
+      return Promise.resolve({
+        held: ['read', 'write', 'delete'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      })
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          affordances,
+          resolve: vi.fn(async (uri: string) => {
+            const id = uri.split('/').pop() ?? ''
+            return {
+              resourceId: id,
+              gfsUri: uri,
+              kind: 'file',
+              name: id === 'file-2' ? 'b.txt' : 'a.txt',
+              version: 3,
+              parentResourceId: 'folder-1',
+            }
+          }),
+        },
+      },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'a.txt',
+          kind: 'file',
+          path: '/Product/a.txt',
+          version: 3,
+          bytes: 12,
+        },
+        {
+          resourceId: 'file-2',
+          rid: 'file-2',
+          gfsUri: 'gfs://main/file-2',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'b.txt',
+          kind: 'file',
+          path: '/Product/b.txt',
+          version: 3,
+          bytes: 12,
+        },
+        {
+          resourceId: 'dest-1',
+          rid: 'dest-1',
+          gfsUri: 'gfs://main/dest-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Dest',
+          kind: 'directory',
+          path: '/Product/Dest',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+
+    const rowA = screen.getByRole('button', { name: 'Open a.txt' })
+    const rowB = screen.getByRole('button', { name: 'Open b.txt' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Dest' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+
+    // Gesture A: drop adjudication parks on the gated affordances probe.
+    fireEvent.dragStart(rowA, { dataTransfer })
+    fireEvent.dragOver(destinationRow, { dataTransfer })
+    fireEvent.drop(destinationRow, { dataTransfer })
+
+    // Gesture B starts before A’s adjudication resolves; its hover is live.
+    fireEvent.dragStart(rowB, { dataTransfer })
+    fireEvent.dragOver(destinationRow, { dataTransfer })
+    await waitFor(() => expect(destinationRow.getAttribute('data-drop-state')).toBe('checking'))
+
+    // A resolves late: it must return (wrong generation) and clean up nothing.
+    await act(async () => {
+      releaseA({
+        held: ['read', 'write', 'delete'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      })
+    })
+    expect(moveResource).not.toHaveBeenCalledWith(
+      'file-1',
+      'dest-1',
+      expect.anything(),
+      expect.anything()
+    )
+    // B’s hover state survived A’s stale cleanup.
+    expect(destinationRow.getAttribute('data-drop-state')).toBe('checking')
+
+    // B’s drop is still operable and commits B.
+    fireEvent.drop(destinationRow, { dataTransfer })
+    await waitFor(() => expect(moveResource).toHaveBeenCalled())
+    expect(moveResource.mock.calls[0]![0]).toBe('file-2')
+    expect(moveResource.mock.calls[0]![1]).toBe('dest-1')
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith('Moved b.txt to Dest', 'success'))
+  })
+
   it('presents a rate-limited drop check in the shared read-plane words', async () => {
     // The affordances check is one of the nine methods `surfaceGfsGrantError`
     // wraps, so its rejection reaches the renderer as the IPC wrapper plus the

@@ -117,6 +117,7 @@ export function GfsDragSessionProvider({ children }: { children: React.ReactNode
       activeSource: () => store.activeSource(),
       matchesScope: candidate => store.matchesScope(candidate),
       invalidate: reason => store.invalidate(reason),
+      currentGeneration: () => store.currentGeneration(),
     }),
     [accessState, scope, store]
   )

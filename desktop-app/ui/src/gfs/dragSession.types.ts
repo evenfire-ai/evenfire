@@ -88,4 +88,7 @@ export interface GfsDragSessionApi {
   /** True while the stored source belongs to the caller's live scope. */
   matchesScope(scope: string | null): boolean
   invalidate(reason: 'authority' | 'scope-change'): void
+  /** Monotonic gesture counter; lets a surface release the shared store only
+   * when the store still belongs to the gesture that captured it. */
+  currentGeneration(): number
 }

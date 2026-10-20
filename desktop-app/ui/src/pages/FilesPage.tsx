@@ -984,6 +984,28 @@ export function FilesPage({
     setDropStatesById({})
   }
 
+  /** Drop-path cleanup owned by the gesture that started the drop: a newer
+   * gesture on THIS surface (epoch advanced) owns every local ref and timer,
+   * and a newer gesture on ANY surface (shared generation advanced) owns the
+   * session store. The unconditional native-dragend clear above stays. */
+  const finishDropCleanup = (gestureGeneration: number, sessionGeneration: number | null) => {
+    if (gestureGeneration !== dragSessionRef.current) return
+    draggingResourceRef.current = null
+    draggingSourceRef.current = null
+    hoveredFolderRef.current = null
+    setDraggingResourceId(null)
+    setDragOverFolderId(null)
+    setDropStatesById({})
+    if (
+      dragSession &&
+      sessionGeneration !== null &&
+      dragSession.currentGeneration() === sessionGeneration
+    ) {
+      dragSession.endDrag()
+    }
+    adjudication.endDragSession()
+  }
+
   /** Ancestor chain of rows in the current listing, nearest-first: the open
    * folder and its breadcrumb ancestors (an observation, never a guess). */
   const rowTargetAncestorIds = (): (string | null)[] =>
@@ -1239,6 +1261,7 @@ export function FilesPage({
     if (!source || destination.kind !== 'directory' || movingResourceRef.current) return
 
     const dragGeneration = dragSessionRef.current
+    const sessionGeneration = dragSession?.currentGeneration() ?? null
     try {
       const decision = await adjudication.adjudicateDrop(source, {
         resourceId: destination.resourceId,
@@ -1271,7 +1294,7 @@ export function FilesPage({
         decision.allowNumberedRename
       )
     } finally {
-      clearResourceDrag()
+      finishDropCleanup(dragGeneration, sessionGeneration)
     }
   }
 

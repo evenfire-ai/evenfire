@@ -17,8 +17,13 @@ import {
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 // ── drag-and-drop (rev-2 D1) ─────────────────────────────────────────────────
 
-import { GfsDragSessionProvider } from '@/gfs/dragSession'
+import { GfsDragSessionProvider, useGfsDragSession } from '@/gfs/dragSession'
 import { FileExplorerTree } from '..'
+
+function SessionProbe({ onApi }: { onApi: (api: ReturnType<typeof useGfsDragSession>) => void }) {
+  onApi(useGfsDragSession())
+  return null
+}
 
 // useGfsBrowserController only reads { isAuthenticated, me, runtimeConfigState }
 // from AuthContext. Mock just those so the tree's controller instance stands up
@@ -907,6 +912,176 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     // The confirmation must describe B's move — not the stale A.
     await screen.findByRole('dialog', { name: 'Move folder B to C' })
     expect(screen.queryByRole('dialog', { name: 'Move folder A to C' })).toBeNull()
+  })
+
+  it('a stale drop’s cleanup does not clear a newer gesture in the tree', async () => {
+    // R1-M4: gesture A’s drop adjudication is pending when gesture B starts on
+    // the same surface. A’s late resolution must return without ending B: B’s
+    // drop must still open the confirmation for B.
+    const moveResource = vi.fn(async () => ({ resourceId: 'folderb', version: 9 }))
+    type Affordances = { held: string[] }
+    let releaseA!: (value: Affordances) => void
+    const gatedA = new Promise<Affordances>(resolve => {
+      releaseA = resolve
+    })
+    let aProbePending = true
+    const affordances = vi.fn((): Promise<Affordances> => {
+      if (aProbePending) {
+        aProbePending = false
+        return gatedA
+      }
+      return Promise.resolve({ held: ['read', 'write', 'delete'] })
+    })
+    const resolve = vi.fn(async (uri: string) => {
+      const id = uri.split('/').pop()
+      const parent = id === 'grand' ? null : 'grand'
+      const name =
+        id === 'foldera' ? 'A' : id === 'folderb' ? 'B' : id === 'folderc' ? 'C' : 'Grand'
+      return {
+        drive: 'main',
+        resourceId: id === 'grand' ? 'grand' : id,
+        parentResourceId: parent,
+        name,
+        kind: 'directory',
+        version: id === 'foldera' ? 4 : 1,
+      }
+    })
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('foldera', 'A', 'directory', { version: 4 }),
+          accessibleResource('folderb', 'B', 'directory'),
+          accessibleResource('folderc', 'C', 'directory'),
+        ])
+      ),
+      affordances,
+      resolve,
+      moveResource,
+    })
+    renderTreeWithSession()
+
+    const rowA = await screen.findByRole('button', { name: 'A' })
+    const rowB = await screen.findByRole('button', { name: 'B' })
+    const rowC = await screen.findByRole('button', { name: 'C' })
+    const dataTransfer = dragTypes()
+    const cRow = rowC.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+
+    // Gesture A: its drop adjudication parks on the gated affordances probe.
+    fireEvent.dragStart(rowA, { dataTransfer })
+    fireEvent.drop(cRow, { dataTransfer })
+
+    // Gesture B starts before A’s adjudication resolves (supersedes A).
+    fireEvent.dragStart(rowB, { dataTransfer })
+
+    // A resolves late: wrong epoch — no dialog for A, no commit, no cleanup
+    // of B.
+    await act(async () => {
+      releaseA({ held: ['read', 'write'] })
+    })
+    expect(screen.queryByRole('dialog', { name: 'Move folder A to C' })).toBeNull()
+    expect(moveResource).not.toHaveBeenCalled()
+
+    // B’s drop is still operable and confirms B’s move.
+    fireEvent.drop(cRow, { dataTransfer })
+    await screen.findByRole('dialog', { name: 'Move folder B to C' })
+  })
+
+  it('a stale drop’s cleanup releases only its own shared-store gesture', async () => {
+    // R1-M4 cross-surface: A’s drop is pending in the tree when another
+    // surface begins gesture B (here driven through the session api). A’s
+    // surface epoch is unchanged, so A’s own dialog legitimately opens — but
+    // its cleanup must not endDrag the shared store now owned by B.
+    const moveResource = vi.fn(async () => ({ resourceId: 'foldera', version: 9 }))
+    type Affordances = { held: string[] }
+    let releaseA!: (value: Affordances) => void
+    const gatedA = new Promise<Affordances>(resolve => {
+      releaseA = resolve
+    })
+    let aProbePending = true
+    const affordances = vi.fn((): Promise<Affordances> => {
+      if (aProbePending) {
+        aProbePending = false
+        return gatedA
+      }
+      return Promise.resolve({ held: ['read', 'write', 'delete'] })
+    })
+    const resolve = vi.fn(async (uri: string) => {
+      const id = uri.split('/').pop()
+      const parent = id === 'grand' ? null : 'grand'
+      const name = id === 'foldera' ? 'A' : id === 'folderc' ? 'C' : 'Grand'
+      return {
+        drive: 'main',
+        resourceId: id === 'grand' ? 'grand' : id,
+        parentResourceId: parent,
+        name,
+        kind: 'directory',
+        version: 1,
+      }
+    })
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('foldera', 'A', 'directory', { version: 1 }),
+          accessibleResource('folderc', 'C', 'directory'),
+        ])
+      ),
+      affordances,
+      resolve,
+      moveResource,
+    })
+    let sessionApi: ReturnType<typeof useGfsDragSession> | null = null
+    const onOpenFolder = vi.fn()
+    const onOpenPreview = vi.fn()
+    const pushToast = vi.fn()
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <GfsDragSessionProvider>
+          <FileExplorerTree
+            onOpenFolder={onOpenFolder}
+            onOpenPreview={onOpenPreview}
+            pushToast={pushToast}
+          />
+          <SessionProbe onApi={api => (sessionApi = api)} />
+        </GfsDragSessionProvider>
+      </QueryClientProvider>
+    )
+
+    const rowA = await screen.findByRole('button', { name: 'A' })
+    const rowC = await screen.findByRole('button', { name: 'C' })
+    const dataTransfer = dragTypes()
+    const cRow = rowC.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+
+    // Gesture A (this surface): drop adjudication parks on the gated probe.
+    fireEvent.dragStart(rowA, { dataTransfer })
+    fireEvent.drop(cRow, { dataTransfer })
+
+    // The OTHER surface begins gesture B: the shared store superscedes, but
+    // this surface’s epoch is untouched.
+    expect(
+      sessionApi!.beginDrag({
+        resourceId: 'file-external',
+        gfsUri: 'gfs://main/file-external',
+        drive: 'main',
+        kind: 'file',
+        name: 'ext.txt',
+        parentKnown: true,
+        parentResourceId: 'grand',
+        knownAncestorIds: ['grand'],
+        origin: 'files',
+        scope: 'test:user-1:team-1',
+      })
+    ).toBe(true)
+
+    // A resolves late: its surface epoch is unchanged, so A’s own
+    // confirmation legitimately opens.
+    await act(async () => {
+      releaseA({ held: ['read', 'write'] })
+    })
+    await screen.findByRole('dialog', { name: 'Move folder A to C' })
+
+    // A’s cleanup must not have ended the shared store’s newer gesture.
+    expect(sessionApi!.activeSource()?.resourceId).toBe('file-external')
   })
 
   it('moves a dragged folder into an unrelated folder through the one confirmation', async () => {

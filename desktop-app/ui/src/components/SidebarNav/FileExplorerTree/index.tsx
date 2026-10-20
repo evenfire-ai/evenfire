@@ -481,6 +481,27 @@ export function FileExplorerTree({
     setDropStatesByResourceId({})
   }, [adjudication, dragSession])
 
+  /** Drop-path cleanup owned by the gesture that started the drop: a newer
+   * gesture on THIS surface (epoch advanced) owns every local ref and timer,
+   * and a newer gesture on ANY surface (shared generation advanced) owns the
+   * session store. The unconditional native-dragend clear above stays. */
+  const finishNodeDropCleanup = useCallback(
+    (epoch: number, sessionGeneration: number | null) => {
+      if (epoch !== dragSessionEpochRef.current) return
+      draggingSourceRef.current = null
+      setDropStatesByResourceId({})
+      if (
+        dragSession &&
+        sessionGeneration !== null &&
+        dragSession.currentGeneration() === sessionGeneration
+      ) {
+        dragSession.endDrag()
+      }
+      adjudication.endDragSession()
+    },
+    [adjudication, dragSession, dragSessionEpochRef]
+  )
+
   const treeDragSourceFrom = useCallback(
     (
       node: GfsBrowserChild,
@@ -687,6 +708,7 @@ export function FileExplorerTree({
       const source = resolveActiveSource()
       if (!source || node.kind !== 'directory' || movingResourceIdRef.current) return
       const epoch = dragSessionEpochRef.current
+      const sessionGeneration = dragSession?.currentGeneration() ?? null
       try {
         const decision = await adjudication.adjudicateDrop(source, {
           resourceId: node.resourceId,
@@ -714,10 +736,17 @@ export function FileExplorerTree({
           decision.allowNumberedRename
         )
       } finally {
-        clearDragState()
+        finishNodeDropCleanup(epoch, sessionGeneration)
       }
     },
-    [adjudication, clearDragState, commitMove, dragSessionEpochRef, pushToast, resolveActiveSource]
+    [
+      adjudication,
+      finishNodeDropCleanup,
+      commitMove,
+      dragSessionEpochRef,
+      pushToast,
+      resolveActiveSource,
+    ]
   )
 
   const handleRequestMove = useCallback(
