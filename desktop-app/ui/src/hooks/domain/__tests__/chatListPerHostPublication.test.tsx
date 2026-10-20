@@ -843,7 +843,11 @@ describe('Latest sessions reload keeps published remote rows (H5)', () => {
   it('T-R3M1-1: a reload does not carry a published remote row that now has a local copy', async () => {
     let indexA = localIndex([])
     let pageA: Promise<SessionsListResult> = Promise.resolve(
-      serverSessions([{ agent: HOST_A, chatId: 'remote-r', title: 'Remote R' }])
+      serverSessions([
+        { agent: HOST_A, chatId: 'remote-r', title: 'Remote R' },
+        // Stays remote-only, so the reload has a row it must carry.
+        { agent: HOST_A, chatId: 'remote-s', title: 'Remote S' },
+      ])
     )
     let aReads = 0
     clerum.chat.getIndex.mockImplementation(async (agentRef: string) =>
@@ -857,7 +861,12 @@ describe('Latest sessions reload keeps published remote rows (H5)', () => {
     const { controller, commits } = renderObserved({ selectedAgent: null, agentNames: HOSTS })
     const published = () =>
       controller.result.current.latestChatSessions.map(row => [row.id, row.remote === true])
-    await waitFor(() => expect(published()).toEqual([['remote-r', true]]))
+    await waitFor(() =>
+      expect([...published()].sort()).toEqual([
+        ['remote-r', true],
+        ['remote-s', true],
+      ])
+    )
 
     const nextPageA = deferred<SessionsListResult>()
     let nextPageAResolved = false
@@ -879,7 +888,14 @@ describe('Latest sessions reload keeps published remote rows (H5)', () => {
     expect(aReads).toBe(readsBeforeReload + 1)
     expect(nextPageAResolved).toBe(false)
     const afterReload = commits.slice(firstCommitOfReload)
-    expect(afterReload.some(rows => rows.some(row => !row.remote))).toBe(true)
+    const withLocalCopy = afterReload.filter(rows =>
+      rows.some(row => row.id === 'remote-r' && !row.remote)
+    )
+    expect(withLocalCopy.length).toBeGreaterThan(0)
+    // The remote-only row is carried in every such commit; the local copy is not doubled.
+    expect(
+      withLocalCopy.filter(rows => !rows.some(row => row.id === 'remote-s' && row.remote))
+    ).toEqual([])
     expect(afterReload.filter(rows => new Set(ids(rows)).size !== rows.length)).toEqual([])
   })
 })
