@@ -197,14 +197,63 @@ describe('mixed-fleet cadence simulation (#1016)', () => {
             r => workflowNeedsWorkloadStatusRefresh(r) || workflowNeedsOwnershipBackstop(r)
           ).length +
         (SIM_MS / t3Ms) * all.filter(recipeHasExternalExactHostEgress).length
-      // eslint-disable-next-line no-console -- simulation figure quoted in the PR report
-      console.info(
-        `[simulation] reconciles=${total} old-behaviour=${oldEstimate} byTrigger=${JSON.stringify(
-          Object.fromEntries([...new Set(triggers)].map(t => [t, count(t)]))
-        )}`
-      )
       expect(total).toBeLessThanOrEqual(RECONCILE_BUDGET)
-      expect(total).toBeGreaterThan(0)
+      const byTrigger = JSON.stringify(
+        Object.fromEntries([...new Set(triggers)].map(t => [t, count(t)]))
+      )
+      const detail = `reconciles=${total} old-behaviour=${oldEstimate} byTrigger=${byTrigger}`
+      expect(total, detail).toBeLessThanOrEqual(RECONCILE_BUDGET)
+
+      // Positive evidence (the budget must not pass vacuously): every recipe was
+      // backstopped about 4 times (165s backstop on a 30s tick over 600s).
+      const callsFor = (mock: { mock: { calls: Any[][] } }, name: string): number =>
+        mock.mock.calls.filter(c => (c[0]?.metadata?.name ?? c[0]?.name) === name).length
+      const names = all.map(r => r.metadata.name)
+      for (const name of names) {
+        expect(
+          callsFor(w.reconciler.reconcile, name),
+          `${name} backstops: ${detail}`
+        ).toBeGreaterThanOrEqual(3)
+      }
+      expect(total, detail).toBeGreaterThanOrEqual(27)
+      // Each class stayed on its own narrow path.
+      for (const name of names.filter(n => n.startsWith('sdk-'))) {
+        expect(
+          w._coreApi.readNamespacedPod.mock.calls.filter(
+            (c: Any[]) => c[0].name === `${name}-mcp-host`
+          ).length,
+          `${name} pod probe`
+        ).toBeGreaterThan(0)
+      }
+      for (const name of names.filter(n => n.startsWith('secrets-'))) {
+        expect(
+          callsFor(w.reconciler.observeSecretOwnership, name),
+          `${name} ownership`
+        ).toBeGreaterThan(0)
+      }
+      for (const name of names.filter(n => /^(egress|workflowEgress|failedEgress)/.test(n))) {
+        expect(
+          callsFor(w.reconciler.refreshDnsBlocks, name),
+          `${name} egress lane`
+        ).toBeGreaterThanOrEqual(60)
+      }
+      // The failed classic recipe's lane answers 'none' and it only ever backstops.
+      const failedIdx = w.reconciler.refreshDnsBlocks.mock.calls
+        .map((c: Any[], i: number) => (c[0].metadata.name === 'failedEgress-0' ? i : -1))
+        .filter((i: number) => i >= 0)
+      expect(failedIdx.length).toBeGreaterThan(0)
+      for (const i of failedIdx) {
+        expect(await w.reconciler.refreshDnsBlocks.mock.results[i].value).toBe('none')
+      }
+      expect(
+        triggers.filter(
+          (_, i) => w.reconciler.reconcile.mock.calls[i][0].metadata.name === 'failedEgress-0'
+        )
+      ).toEqual(
+        Array(4)
+          .fill('steady_backstop')
+          .slice(0, callsFor(w.reconciler.reconcile, 'failedEgress-0'))
+      )
       // A healthy fleet has nothing to repair: only the steady backstop drives full passes.
       for (const t of [
         'ownership',
@@ -219,9 +268,12 @@ describe('mixed-fleet cadence simulation (#1016)', () => {
 
       // Restart: fresh CadenceState over the same cache, one more tick of every timer.
       triggers.length = 0
+      const ownershipBefore = w.reconciler.observeSecretOwnership.mock.calls.length
       w._cadence = new CadenceState()
       await advance(t1Ms)
       await drain()
+      expect(triggers.length).toBeGreaterThan(0)
+      expect(w.reconciler.observeSecretOwnership.mock.calls.length).toBeGreaterThan(ownershipBefore)
       expect(count('ownership')).toBe(0)
       expect(triggers.every(t => t === 'steady_backstop')).toBe(true)
       expect(triggers.length).toBeLessThanOrEqual(all.length)
