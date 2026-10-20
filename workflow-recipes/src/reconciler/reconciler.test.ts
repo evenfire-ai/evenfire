@@ -759,6 +759,82 @@ describe('WorkflowRecipeReconciler', () => {
       expect((await reconciler.observeCurrentWorkloadStatus(recipe)).phase).toBe('degraded')
       expect((await reconciler.observeCurrentWorkloadStatus(recipe)).phase).toBe('active')
     })
+
+    it('T2 revokes a stepless SDK workload whose envSecret is foreign, with no SecretWatcher (#1016, Issue #637)', async () => {
+      // End to end through the REAL reconciler: the T2 tick observes the denied
+      // set, finds no enforced baseline, escalates a full pass, and that pass's
+      // ownership gate tears the workload down and surfaces the condition.
+      ;(
+        reconciler as unknown as { config: { pluginWorkloadSdkEnabled: boolean } }
+      ).config.pluginWorkloadSdkEnabled = true
+      ;(reconciler as unknown as { workflowReconciler: unknown }).workflowReconciler = {
+        reconcile: vi.fn(),
+        reconcilePluginWorkloadSdkOnly: vi.fn().mockResolvedValue({
+          phase: 'active',
+          message: 'Plugin Workload SDK mcp-host registered',
+          pluginWorkloadSdkBootstrapProof: {
+            ready: true,
+            contractVersion: 2,
+            podUid: 'sdk-pod-uid',
+            provider: 'zai',
+            model: 'glm-4.7',
+            policyReady: true,
+            verifiedAt: '2026-08-04T00:00:00.000Z',
+          },
+          networkPolicies: {
+            conflicts: [],
+            retryPending: false,
+            prune: 'converged',
+            legacy: 'removed',
+          },
+        }),
+        setCodexReconcileContext: vi.fn(),
+      }
+      // sdk-creds is owned by ANOTHER recipe.
+      mockCoreApi.readNamespacedSecret.mockImplementation((args: { name: string }) =>
+        args.name === 'sdk-creds'
+          ? Promise.resolve({
+              metadata: {
+                resourceVersion: '1',
+                labels: { 'clerum.io/owner-recipe': 'some-other-recipe' },
+              },
+              data: { token: 'eA==' },
+            })
+          : Promise.resolve({ metadata: { resourceVersion: '1' } })
+      )
+      const recipe = makeRecipe({
+        spec: {
+          agent: { provider: 'zai', model: 'glm-4.7' },
+          workloads: [
+            {
+              id: 'app',
+              type: 'deployment',
+              image: 'nginx:1.30.1-alpine',
+              port: 8080,
+              envSecret: { name: 'sdk-creds', keys: [{ secretKey: 'token', envVar: 'TOKEN' }] },
+            },
+          ],
+          pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
+        },
+        status: { phase: 'active' },
+      })
+      const observe = vi.spyOn(reconciler, 'observeSecretOwnership')
+      const statusObserve = vi.spyOn(reconciler, 'observeCurrentWorkloadStatus')
+      const watcher = watcherFor(reconciler, recipe)
+      try {
+        await watcher.refreshWorkloadStatusesForSteadyRecipes()
+
+        expect(observe).toHaveBeenCalledTimes(1)
+        expect(statusObserve).not.toHaveBeenCalled()
+        expect(mockAppsApi.deleteNamespacedDeployment).toHaveBeenCalled()
+        expect(mockAppsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+        expect(patchedStatus().conditions).toContainEqual(
+          expect.objectContaining({ type: 'EnvSecretOwnershipDenied', status: 'True' })
+        )
+      } finally {
+        stopWatcher(watcher)
+      }
+    })
   })
 
   function captureNetworkPolicyLogs(): {

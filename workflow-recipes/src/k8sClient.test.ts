@@ -1055,40 +1055,12 @@ describe('runtime credential refresh loop helpers', () => {
     ).toBe(false)
   })
 
-  it('forces timer-driven infrastructure retries past the status-only generation guard', async () => {
-    const enqueue = vi.fn((_key: string, task: () => Promise<void>) => task())
-    const handleRecipeEvent = vi.fn().mockResolvedValue(undefined)
-    const sdkOnly = makeWorkflowRecipe({
-      metadata: { name: 'sdk-only', namespace: 'sandbox-recipes' },
-      spec: {
-        steps: [],
-        workloads: [{ id: 'api', type: 'deployment', image: 'clerum/api:test' }],
-        pluginWorkloadSdk: { promptBridge: {} },
-      },
-      status: { phase: 'active' },
-    })
-
-    type InternalWatcher = {
-      recipes: Map<string, WorkflowRecipeCRD>
-      eventQueue: { enqueue: typeof enqueue }
-      handleRecipeEvent: typeof handleRecipeEvent
-      refreshRuntimeCredentialsForInProgressRecipes: () => Promise<void>
-      stopped: boolean
-    }
-    const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
-    internal.recipes = new Map([[sdkOnly.metadata.name, sdkOnly]])
-    internal.eventQueue = { enqueue }
-    internal.handleRecipeEvent = handleRecipeEvent
-    internal.stopped = false
-
-    await internal.refreshRuntimeCredentialsForInProgressRecipes()
-
-    expect(enqueue).toHaveBeenCalledWith(sdkOnly.metadata.name, expect.any(Function))
-    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', sdkOnly, {
-      forceReconcile: true,
-      trigger: 'infra_retry',
-    })
-  })
+  // Issue #1016 Task 10 (T1 rewrite): a timer-driven SDK infrastructure retry will
+  // escalate (still past the status-only generation guard) only on the sdk_liveness
+  // conditions. The full assertions land with Task 10.
+  it.todo(
+    'escalates a timer-driven SDK infrastructure retry only on the sdk_liveness conditions (Task 10)'
+  )
 
   it('keeps reconciling a promptBridge SDK recipe with no run so the eager mcp-host stays configured', () => {
     // phase=active, workflowExecution cleared (eager SDK path) — must still requeue.
@@ -1443,9 +1415,9 @@ describe('workload status refresh loop helpers', () => {
     expect(enqueue).toHaveBeenCalledTimes(2)
     expect(enqueue).toHaveBeenCalledWith(active.metadata.name, expect.any(Function))
     expect(enqueue).toHaveBeenCalledWith(degraded.metadata.name, expect.any(Function))
-    // Non-workflow recipes go through the full status-refresh path (ownershipOnly: false).
-    expect(refreshWorkloadStatusOnly).toHaveBeenCalledWith(active, { ownershipOnly: false })
-    expect(refreshWorkloadStatusOnly).toHaveBeenCalledWith(degraded, { ownershipOnly: false })
+    // Issue #1016 — the task takes only the fresh recipe and derives its path from it.
+    expect(refreshWorkloadStatusOnly).toHaveBeenCalledWith(active)
+    expect(refreshWorkloadStatusOnly).toHaveBeenCalledWith(degraded)
   })
 
   it('re-enqueues steady WORKFLOW recipes that project a named Secret for an ownership-only backstop (Issue #637)', async () => {
@@ -1497,12 +1469,11 @@ describe('workload status refresh loop helpers', () => {
 
     await internal.refreshWorkloadStatusesForSteadyRecipes()
 
-    // Only the workflow-with-secret is enqueued, in ownership-only mode (no status patch).
+    // Only the workflow-with-secret is enqueued; the task derives the ownership-only
+    // path (no status patch) from the fresh recipe (Issue #1016).
     expect(enqueue).toHaveBeenCalledTimes(1)
     expect(enqueue).toHaveBeenCalledWith(workflowWithSecret.metadata.name, expect.any(Function))
-    expect(refreshWorkloadStatusOnly).toHaveBeenCalledWith(workflowWithSecret, {
-      ownershipOnly: true,
-    })
+    expect(refreshWorkloadStatusOnly).toHaveBeenCalledWith(workflowWithSecret)
   })
 
   it('triggerSecretDrivenReconcile forces a full reconcile so a Secret re-label reaches the ownership gate (Issue #637)', async () => {
@@ -1831,56 +1802,73 @@ describe('workload status refresh loop helpers', () => {
     })
   })
 
-  it('forces a full reconcile for an ALL-READY recipe that references a named Secret (Issue #637 ownership backstop)', async () => {
-    const recipe = makeWorkloadRecipe({
-      metadata: { name: 'active-recipe', namespace: 'sandbox-recipes', generation: 7 },
-      status: { phase: 'active', message: 'All workloads deployed' },
-      spec: {
-        workloads: [
-          {
-            id: 'api',
-            type: 'deployment',
-            image: 'clerum/api:test',
-            envSecret: { name: 'api-creds', keys: [{ secretKey: 'k', envVar: 'K' }] },
-          },
-        ],
-      },
-    })
-    // NO drift: every workload is ready → the `ready === false` term is false, so the
-    // forced reconcile can ONLY come from the ownershipRecheck term. This isolates
-    // `ownershipRecheck`: reverting the `ownershipRecheck ||` guard makes it red (the
-    // deterministic backstop that re-runs the Secret-ownership gate would be lost).
-    const result = {
-      phase: 'active' as const,
-      message: 'All workloads deployed',
-      workloadStatuses: [{ id: 'api', phase: 'running', ready: true }],
-    }
-    const observeCurrentWorkloadStatus = vi.fn().mockResolvedValue(result)
-    const patchStatus = vi.fn().mockResolvedValue(undefined)
-    const handleRecipeEvent = vi.fn().mockResolvedValue(undefined)
-
-    type InternalWatcher = {
-      reconciler: {
-        observeCurrentWorkloadStatus: typeof observeCurrentWorkloadStatus
-        patchStatus: typeof patchStatus
+  it.each([
+    ['unchanged', 'api:api-creds', false],
+    ['changed', '', true],
+  ] as const)(
+    'an ALL-READY named-Secret recipe with an %s denied signature (enforced %j) reconciles=%s (Issue #637 ownership backstop, #1016)',
+    async (_label, enforced, reconciles) => {
+      const recipe = makeWorkloadRecipe({
+        metadata: { name: 'active-recipe', namespace: 'sandbox-recipes', generation: 7 },
+        status: { phase: 'active', message: 'All workloads deployed' },
+        spec: {
+          workloads: [
+            {
+              id: 'api',
+              type: 'deployment',
+              image: 'clerum/api:test',
+              envSecret: { name: 'api-creds', keys: [{ secretKey: 'k', envVar: 'K' }] },
+            },
+          ],
+        },
+      })
+      // NO drift: every workload is ready, so any forced reconcile can ONLY come from the
+      // ownership check. Issue #1016 makes it edge-triggered: the observed denied set
+      // ('api:api-creds') is compared with what the last settled pass enforced; only a
+      // change escalates (trigger 'ownership').
+      const result = {
+        phase: 'active' as const,
+        message: 'All workloads deployed',
+        workloadStatuses: [{ id: 'api', phase: 'running', ready: true }],
       }
-      handleRecipeEvent: typeof handleRecipeEvent
-      refreshWorkloadStatusOnly: (recipe: WorkflowRecipeCRD) => Promise<void>
+      const observeCurrentWorkloadStatus = vi.fn().mockResolvedValue(result)
+      const observeSecretOwnership = vi
+        .fn()
+        .mockResolvedValue({ kind: 'ok', signature: 'api:api-creds' })
+      const patchStatus = vi.fn().mockResolvedValue(undefined)
+      const handleRecipeEvent = vi.fn().mockResolvedValue(undefined)
+
+      type InternalWatcher = {
+        reconciler: {
+          observeCurrentWorkloadStatus: typeof observeCurrentWorkloadStatus
+          observeSecretOwnership: typeof observeSecretOwnership
+          patchStatus: typeof patchStatus
+        }
+        cadence: { recordSettled: (name: string, at: number, enforced?: string) => void }
+        handleRecipeEvent: typeof handleRecipeEvent
+        refreshWorkloadStatusOnly: (recipe: WorkflowRecipeCRD) => Promise<void>
+      }
+      const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+      internal.reconciler = { observeCurrentWorkloadStatus, observeSecretOwnership, patchStatus }
+      internal.handleRecipeEvent = handleRecipeEvent
+      internal.cadence.recordSettled(recipe.metadata.name, Date.now(), enforced)
+
+      await internal.refreshWorkloadStatusOnly(recipe)
+
+      expect(observeSecretOwnership).toHaveBeenCalledWith(recipe)
+      if (reconciles) {
+        expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', recipe, {
+          forceReconcile: true,
+          trigger: 'ownership',
+        })
+      } else {
+        expect(handleRecipeEvent).not.toHaveBeenCalled()
+      }
     }
-    const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
-    internal.reconciler = { observeCurrentWorkloadStatus, patchStatus }
-    internal.handleRecipeEvent = handleRecipeEvent
-
-    await internal.refreshWorkloadStatusOnly(recipe)
-
-    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', recipe, {
-      forceReconcile: true,
-      trigger: 'workload_status',
-    })
-  })
+  )
 
   it('does NOT force a reconcile for an all-ready recipe with NO named Secret refs', async () => {
-    // Proves the ownershipRecheck term is load-bearing (not always-true): a steady
+    // Proves the named-Secret ownership path is selective (not always-true): a steady
     // recipe with no envSecret/imagePullSecrets and no drift must stay cheap.
     const recipe = makeWorkloadRecipe({
       metadata: { name: 'active-recipe', namespace: 'sandbox-recipes', generation: 7 },

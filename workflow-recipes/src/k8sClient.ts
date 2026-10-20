@@ -1580,65 +1580,101 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
   private async refreshWorkloadStatusesForSteadyRecipes(): Promise<void> {
     if (this.stopped) return
 
-    const refreshes = [...this.recipes.keys()].map(async recipeName => {
-      const latest = this.recipes.get(recipeName)
-      if (!latest) return
-      const needsStatusRefresh = workflowNeedsWorkloadStatusRefresh(latest)
-      // Issue #637 — workflow recipes are excluded from the status refresh but must
-      // still get a periodic ownership re-classification (their only other revocation
-      // path is the event-driven SecretWatcher).
-      const needsOwnershipBackstop = workflowNeedsOwnershipBackstop(latest)
-      if (!needsStatusRefresh && !needsOwnershipBackstop) return
-
-      try {
-        await this.eventQueue.enqueue(recipeName, () =>
-          this.refreshWorkloadStatusOnly(latest, { ownershipOnly: !needsStatusRefresh })
+    // Tick-time selection is only a pre-filter; the queued task re-reads the cache
+    // and recomputes its path from the fresh recipe.
+    await Promise.all(
+      [...this.recipes.keys()].map(async recipeName => {
+        const latest = this.recipes.get(recipeName)
+        if (!latest) return
+        // Issue #637 — workflow and SDK recipes are excluded from the status refresh
+        // but still need the periodic ownership re-classification (their only other
+        // revocation path is the event-driven SecretWatcher).
+        if (
+          !workflowNeedsWorkloadStatusRefresh(latest) &&
+          !workflowNeedsOwnershipBackstop(latest)
+        ) {
+          return
+        }
+        await this.enqueueTimerTask(recipeName, 'ownership', fresh =>
+          this.refreshWorkloadStatusOnly(fresh)
         )
-      } catch (error) {
-        createLogger('wrc', recipeName).error('Workload status refresh failed', {
-          recipeName,
-          err: error,
-        })
-      }
-    })
-
-    await Promise.all(refreshes)
+      })
+    )
   }
 
-  private async refreshWorkloadStatusOnly(
-    recipe: WorkflowRecipeCRD,
-    opts: { ownershipOnly?: boolean } = {}
-  ): Promise<void> {
-    if (opts.ownershipOnly) {
-      // Issue #637 — workflow-recipe ownership backstop. Skip the workload-status
-      // observe/patch (a workflow's status is workflowExecution-driven) and force a
-      // reconcile so the steady-state ownership gate re-classifies and revokes a
-      // Secret re-labeled foreign even if the SecretWatcher event was missed.
-      await this.handleRecipeEvent('MODIFIED', recipe, {
-        forceReconcile: true,
-        trigger: 'workload_status',
-      })
+  /**
+   * Issue #1016 §3.4 — the narrow T2 check. Status-path recipes observe workload
+   * readiness (and patch drift); a not-ready workload escalates. Recipes that
+   * project named Secrets then observe the denied Secret set and escalate only
+   * when it differs from what the last settled full pass enforced (#637), on a
+   * read error, or on the first non-empty observation after a restart.
+   */
+  private async refreshWorkloadStatusOnly(fresh: WorkflowRecipeCRD): Promise<void> {
+    const statusPath = workflowNeedsWorkloadStatusRefresh(fresh)
+    const ownershipBackstop = workflowNeedsOwnershipBackstop(fresh)
+    if (!statusPath && !ownershipBackstop) {
+      timerChecksTotal.inc({ timer: 'ownership', result: 'skipped' })
       return
     }
-    const result = await this.reconciler.observeCurrentWorkloadStatus(recipe)
-    if (shouldPatchRecipeStatus(recipe, result)) {
-      await this.reconciler.patchStatus(recipe, result)
-      enqueueInfrastructureTelemetryBestEffort(
-        this.traceReporter,
-        reconcileOutcomeTelemetryProjection(recipe, result)
-      )
+
+    if (statusPath) {
+      const result = await this.reconciler.observeCurrentWorkloadStatus(fresh)
+      if (shouldPatchRecipeStatus(fresh, result)) {
+        await this.reconciler.patchStatus(fresh, result)
+        enqueueInfrastructureTelemetryBestEffort(
+          this.traceReporter,
+          reconcileOutcomeTelemetryProjection(fresh, result)
+        )
+      }
+      if (result.workloadStatuses.some(status => status.ready === false)) {
+        await this.escalate(fresh, 'workload_status', 'workload_status', false)
+        return
+      }
     }
-    // Issue #637 — periodically force a full reconcile for recipes that project a
-    // name-based Secret, so the ownership gate re-classifies and a Secret re-labeled
-    // foreign in mcp-server/sandbox-ui is revoked DETERMINISTICALLY (within this
-    // interval) even if the SecretWatcher's event-driven fan-out was delayed or
-    // coalesced. The full reconcile is idempotent for an unchanged recipe.
-    const ownershipRecheck = recipeReferencesNamedSecrets(recipe)
-    if (ownershipRecheck || result.workloadStatuses.some(status => status.ready === false)) {
-      await this.handleRecipeEvent('MODIFIED', recipe, {
-        forceReconcile: true,
-        trigger: 'workload_status',
-      })
+
+    if (!recipeReferencesNamedSecrets(fresh)) {
+      timerChecksTotal.inc({ timer: 'workload_status', result: 'clean' })
+      return
+    }
+    await this.checkOwnership(fresh)
+  }
+
+  /**
+   * Issue #1016 §3.4 / #637 — edge-triggered ownership backstop. Compares the
+   * observed denied set with the signature the last settled full pass ENFORCED
+   * (recorded by any trigger, the SecretWatcher included).
+   */
+  private async checkOwnership(fresh: WorkflowRecipeCRD): Promise<void> {
+    const name = fresh.metadata.name
+    const observed = await this.reconciler.observeSecretOwnership(fresh)
+    if (observed.kind === 'error') {
+      await this.escalate(fresh, 'ownership', 'ownership', false)
+      return
+    }
+    const recorded = this.cadence.enforcedOwnership(name)
+    if (recorded === undefined && observed.signature === '') {
+      // Restart: nothing denied => nothing to revoke; record without a reconcile burst.
+      this.cadence.recordObservedOwnership(name, '')
+      timerChecksTotal.inc({ timer: 'ownership', result: 'clean' })
+      return
+    }
+    if (recorded === observed.signature) {
+      timerChecksTotal.inc({ timer: 'ownership', result: 'clean' })
+      return
+    }
+    const coalesce: Coalesce =
+      this.cadence.noGateSignature(name) === observed.signature ? 'backstop' : false
+    const outcome = await this.escalate(fresh, 'ownership', 'ownership', coalesce)
+    if (
+      outcome &&
+      outcome !== 'coalesced' &&
+      outcome.ran &&
+      outcome.settled &&
+      outcome.enforcedOwnership === undefined
+    ) {
+      // The full pass reached no ownership gate: no revocation is possible on this
+      // branch, so later identical observations wait for the steady backstop.
+      this.cadence.setNoGateSignature(name, observed.signature)
     }
   }
 

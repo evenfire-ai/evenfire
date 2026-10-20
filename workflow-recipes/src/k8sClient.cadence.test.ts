@@ -455,3 +455,273 @@ describe('T3 egress lane timer (#1016 §3.3)', () => {
     expect(h.w.reconciler.refreshDnsBlocks).not.toHaveBeenCalled()
   })
 })
+
+describe('T2 ownership + workload status timer (#1016 §3.4)', () => {
+  const T0 = new Date('2026-10-08T12:00:00Z').getTime()
+  const counter = async (timer: string, result: string) => {
+    const m = (await registry.getSingleMetric('clerum_wrc_timer_checks_total')!.get()).values
+    return m.find(v => v.labels.timer === timer && v.labels.result === result)?.value ?? 0
+  }
+  const withTime = async (fn: () => Promise<void>) => {
+    vi.useFakeTimers()
+    vi.setSystemTime(T0)
+    try {
+      await fn()
+    } finally {
+      vi.useRealTimers()
+    }
+  }
+  /** A classic status-path recipe whose 'api' workload projects the named Secret 's'. */
+  const secretRecipe = (name = 'r', gen = 1): WorkflowRecipeCRD => {
+    const r = recipe(name, gen)
+    r.spec.workloads = [
+      {
+        id: 'api',
+        type: 'deployment',
+        image: 'x',
+        envSecret: { name: 's', keys: [{ secretKey: 'k', envVar: 'K' }] },
+      },
+    ] as Any
+    return r
+  }
+  const sdkRecipe = (): WorkflowRecipeCRD => {
+    const r = secretRecipe()
+    ;(r.spec as Any).pluginWorkloadSdk = { promptBridge: {} }
+    return r
+  }
+  const workflowRecipe = (): WorkflowRecipeCRD => {
+    const r = secretRecipe()
+    ;(r.spec as Any).steps = [{ id: 's1', instruction: 'go' }]
+    return r
+  }
+  type Observed = { kind: 'ok'; signature: string } | { kind: 'error'; reason: string }
+  const passResult = (cadence: Record<string, unknown>) => ({
+    phase: 'active',
+    message: 'ok',
+    workloadStatuses: [],
+    skipStatusPatch: true,
+    cadence: { dnsBlocks: [], repairPending: false, ...cadence },
+  })
+  const t2 = (
+    r: WorkflowRecipeCRD = secretRecipe(),
+    opts: { observed?: Observed; ready?: boolean; pass?: Record<string, unknown> } = {}
+  ) => {
+    const observed: Observed = opts.observed ?? { kind: 'ok', signature: '' }
+    // By default the escalated pass enforces exactly what was observed.
+    const enforced = observed.kind === 'ok' ? observed.signature : ''
+    const h = harness(passResult(opts.pass ?? { enforcedOwnership: enforced }))
+    Object.assign(h.w.reconciler, {
+      observeSecretOwnership: vi.fn().mockResolvedValue(observed),
+      observeCurrentWorkloadStatus: vi.fn().mockResolvedValue({
+        phase: 'active',
+        message: 'ok',
+        workloadStatuses: [{ id: 'api', phase: 'running', ready: opts.ready ?? true }],
+      }),
+    })
+    h.w.recipes.set('r', r)
+    return h
+  }
+  const tick = async (h: ReturnType<typeof t2>) => {
+    await h.w.refreshWorkloadStatusesForSteadyRecipes()
+    await h.drain()
+  }
+
+  it('an observed signature equal to the enforced one is clean: no reconcile', async () => {
+    const h = t2(secretRecipe(), { observed: { kind: 'ok', signature: 'api:s' } })
+    h.w.cadence.recordSettled('r', Date.now(), 'api:s')
+    const before = await counter('ownership', 'clean')
+    await tick(h)
+    expect(h.w.reconciler.observeSecretOwnership).toHaveBeenCalledWith(h.w.recipes.get('r'))
+    expect(h.w.reconciler.reconcile).not.toHaveBeenCalled()
+    expect(await counter('ownership', 'clean')).toBe(before + 1)
+  })
+
+  it('restart: an empty first observation is recorded without a reconcile', async () => {
+    const h = t2(secretRecipe(), { observed: { kind: 'ok', signature: '' } })
+    await tick(h)
+    expect(h.w.reconciler.reconcile).not.toHaveBeenCalled()
+    expect(h.w.cadence.enforcedOwnership('r')).toBe('')
+    await tick(h)
+    expect(h.w.reconciler.reconcile).not.toHaveBeenCalled()
+  })
+
+  it('restart: a non-empty first observation escalates ownership once, not coalesced', async () => {
+    const h = t2(secretRecipe(), { observed: { kind: 'ok', signature: 'api:s' } })
+    const spy = vi.spyOn(h.w, 'escalate')
+    await tick(h)
+    expect(spy).toHaveBeenCalledWith(h.w.recipes.get('r'), 'ownership', 'ownership', false)
+    expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(1)
+    expect(h.w.cadence.enforcedOwnership('r')).toBe('api:s')
+    await tick(h)
+    expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(1)
+  })
+
+  it("recorded '' and observed 'api:s' escalates, not coalesced, even with a start 1s ago", () =>
+    withTime(async () => {
+      const h = t2(secretRecipe(), { observed: { kind: 'ok', signature: 'api:s' } })
+      h.w.cadence.recordSettled('r', T0 - 1_000, '')
+      h.w.cadence.recordPassStart('r', T0 - 1_000)
+      const spy = vi.spyOn(h.w, 'escalate')
+      await tick(h)
+      expect(spy).toHaveBeenCalledWith(h.w.recipes.get('r'), 'ownership', 'ownership', false)
+      expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(1)
+      expect(h.w.reconciler.reconcile.mock.calls[0][1]).toEqual({ trigger: 'ownership' })
+    }))
+
+  it('re-own through the SecretWatcher, then a re-deny on T2 escalates immediately', async () => {
+    const h = t2(secretRecipe(), {
+      observed: { kind: 'ok', signature: 'api:s' },
+      pass: { enforcedOwnership: '' },
+    })
+    h.w.cadence.recordSettled('r', Date.now(), 'api:s')
+    h.w.triggerSecretDrivenReconcile('r')
+    await h.drain()
+    expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(1)
+    expect(h.w.cadence.enforcedOwnership('r')).toBe('')
+    const spy = vi.spyOn(h.w, 'escalate')
+    await tick(h)
+    expect(spy).toHaveBeenCalledWith(h.w.recipes.get('r'), 'ownership', 'ownership', false)
+    expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(2)
+  })
+
+  it('an observation error escalates ownership, not coalesced', () =>
+    withTime(async () => {
+      const h = t2(secretRecipe(), { observed: { kind: 'error', reason: 'read_error' } })
+      h.w.cadence.recordSettled('r', T0 - 1_000, '')
+      h.w.cadence.recordPassStart('r', T0 - 1_000)
+      const spy = vi.spyOn(h.w, 'escalate')
+      await tick(h)
+      expect(spy).toHaveBeenCalledWith(h.w.recipes.get('r'), 'ownership', 'ownership', false)
+      expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(1)
+    }))
+
+  it('a pass that ran no gate records noGateSignature; identical ticks then use backstop coalescing', () =>
+    withTime(async () => {
+      const h = t2(secretRecipe(), {
+        observed: { kind: 'ok', signature: 'api:s' },
+        pass: {}, // enforcedOwnership undefined => no ownership gate ran
+      })
+      h.w.cadence.recordSettled('r', T0 - 500_000, '')
+      const spy = vi.spyOn(h.w, 'escalate')
+      await tick(h)
+      expect(spy).toHaveBeenLastCalledWith(h.w.recipes.get('r'), 'ownership', 'ownership', false)
+      expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(1)
+      expect(h.w.cadence.noGateSignature('r')).toBe('api:s')
+      expect(h.w.cadence.enforcedOwnership('r')).toBe('')
+
+      vi.setSystemTime(T0 + 100_000) // settled 100s ago (< 165s backstop)
+      await tick(h)
+      expect(spy).toHaveBeenLastCalledWith(
+        h.w.recipes.get('r'),
+        'ownership',
+        'ownership',
+        'backstop'
+      )
+      expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(1)
+
+      vi.setSystemTime(T0 + 170_000) // settled 170s ago (>= 165s backstop)
+      await tick(h)
+      expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(2)
+    }))
+
+  it('an unsettled escalation (failing teardown, repairPending) keeps the entry; the next tick escalates again', async () => {
+    const h = t2(secretRecipe(), {
+      observed: { kind: 'ok', signature: 'api:s' },
+      pass: { enforcedOwnership: 'api:s', repairPending: true },
+    })
+    h.w.cadence.recordSettled('r', Date.now() - 1_000, '')
+    try {
+      await tick(h)
+      expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(1)
+      expect(h.w.cadence.enforcedOwnership('r')).toBe('')
+      expect(h.w.cadence.noGateSignature('r')).toBeUndefined()
+      await tick(h)
+      expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(2)
+    } finally {
+      for (const { timer } of h.w.transientRetries.values()) clearTimeout(timer)
+    }
+  })
+
+  it('status path: all ready and clean ownership does not reconcile', async () => {
+    const h = t2(secretRecipe(), { observed: { kind: 'ok', signature: '' }, ready: true })
+    h.w.cadence.recordSettled('r', Date.now(), '')
+    await tick(h)
+    expect(h.w.reconciler.observeCurrentWorkloadStatus).toHaveBeenCalledTimes(1)
+    expect(h.w.reconciler.observeSecretOwnership).toHaveBeenCalledTimes(1)
+    expect(h.w.reconciler.reconcile).not.toHaveBeenCalled()
+  })
+
+  it('status path without named Secrets counts a clean workload_status tick', async () => {
+    const h = t2(recipe(), { ready: true })
+    const before = await counter('workload_status', 'clean')
+    await tick(h)
+    expect(h.w.reconciler.observeCurrentWorkloadStatus).toHaveBeenCalledTimes(1)
+    expect(h.w.reconciler.observeSecretOwnership).not.toHaveBeenCalled()
+    expect(h.w.reconciler.reconcile).not.toHaveBeenCalled()
+    expect(await counter('workload_status', 'clean')).toBe(before + 1)
+  })
+
+  it('status path: a not-ready workload escalates workload_status, not coalesced, before ownership', () =>
+    withTime(async () => {
+      const h = t2(secretRecipe(), { observed: { kind: 'ok', signature: '' }, ready: false })
+      h.w.cadence.recordSettled('r', T0 - 1_000, '')
+      h.w.cadence.recordPassStart('r', T0 - 1_000)
+      const spy = vi.spyOn(h.w, 'escalate')
+      await tick(h)
+      expect(spy).toHaveBeenCalledWith(
+        h.w.recipes.get('r'),
+        'workload_status',
+        'workload_status',
+        false
+      )
+      expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(1)
+      expect(h.w.reconciler.observeSecretOwnership).not.toHaveBeenCalled()
+    }))
+
+  it('selects a stepless SDK recipe with named Secrets and takes the ownership-only path', async () => {
+    const h = t2(sdkRecipe(), { observed: { kind: 'ok', signature: 'api:s' } })
+    await tick(h)
+    expect(h.w.reconciler.observeCurrentWorkloadStatus).not.toHaveBeenCalled()
+    expect(h.w.reconciler.observeSecretOwnership).toHaveBeenCalledTimes(1)
+    expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    [
+      'an SDK no-run workflow',
+      () => {
+        const r = workflowRecipe()
+        ;(r.spec as Any).pluginWorkloadSdk = { promptBridge: {} }
+        return r
+      },
+    ],
+    [
+      'a degraded non-SDK workflow',
+      () => {
+        const r = workflowRecipe()
+        r.status = { phase: 'degraded' } as Any
+        return r
+      },
+    ],
+  ])('%s with a foreign envSecret escalates ownership on the next tick', async (_n, make) => {
+    const h = t2(make(), { observed: { kind: 'ok', signature: 'api:s' } })
+    h.w.cadence.recordSettled('r', Date.now(), '')
+    const spy = vi.spyOn(h.w, 'escalate')
+    await tick(h)
+    expect(spy).toHaveBeenCalledWith(h.w.recipes.get('r'), 'ownership', 'ownership', false)
+    expect(h.w.reconciler.observeCurrentWorkloadStatus).not.toHaveBeenCalled()
+    expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(1)
+  })
+
+  it('class flip: steps added while queued => the task takes the ownership-only path', async () => {
+    const h = t2(secretRecipe(), { observed: { kind: 'ok', signature: '' } })
+    h.w.cadence.recordSettled('r', Date.now(), '')
+    await h.w.refreshWorkloadStatusesForSteadyRecipes()
+    const flipped = workflowRecipe()
+    h.w.recipes.set('r', flipped)
+    await h.drain()
+    expect(h.w.reconciler.observeCurrentWorkloadStatus).not.toHaveBeenCalled()
+    expect(h.w.reconciler.observeSecretOwnership).toHaveBeenCalledWith(flipped)
+    expect(h.w.reconciler.reconcile).not.toHaveBeenCalled()
+  })
+})
