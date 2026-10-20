@@ -2869,6 +2869,28 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     return injected
   }
 
+  // The persist queue rejects the assistant boundary once with the real
+  // worker fence-mismatch error and never sends it (a replacement claimed
+  // the checkpoint at generation+1 while this task was still running).
+  function injectBoundaryFenceMismatch(fixture: CheckpointFixture, content: RegExp) {
+    const queue = fixture.handle.persistQueue
+    const real = queue.enqueueSync.bind(queue)
+    const injected = { count: 0 }
+    queue.enqueueSync = ((op: any, sessionKey?: string) => {
+      if (
+        injected.count === 0 &&
+        op.kind === 'persist_turn_boundary' &&
+        op.message?.role === 'assistant' &&
+        content.test(String(op.message?.content))
+      ) {
+        injected.count += 1
+        return Promise.reject(new Error('model-step continuation fence mismatch'))
+      }
+      return real(op, sessionKey)
+    }) as typeof queue.enqueueSync
+    return injected
+  }
+
   async function releasedAndNextTurnIsTwo(fixture: CheckpointFixture, unpersisted?: RegExp) {
     const { conversation, row } = fencedSession(fixture)
     expect(row).toEqual({ state: 'idle', active_task_id: null })
@@ -2948,6 +2970,23 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
     expect(turnRows(fixture.handle)).toEqual([
       expect.objectContaining({ role: 'user', content: fixture.message.content, turn_number: 1 }),
     ])
+    await releasedAndNextTurnIsTwo(fixture, /active execution reached/)
+  })
+
+  it('R2-M2 X8. a fenced limit completion rejected with a fence mismatch releases the turn locally', async () => {
+    const fixture = await claimedCheckpoint({ taskBudget: budget({ durationMs: 100 }) })
+    const injected = injectBoundaryFenceMismatch(fixture, /active execution reached/)
+    const { run, llm } = await limitContinuationRun(fixture)
+    expect(injected.count).toBe(1)
+    expect(llm.calls()).toBe(1)
+    expect(run.onFail).toHaveBeenCalledTimes(1)
+    expect(run.onFail.mock.calls[0]![1].code).toBe('TASK_DURATION_LIMIT')
+    expect(run.onComplete).not.toHaveBeenCalled()
+    expect(turnRows(fixture.handle)).toEqual([
+      expect.objectContaining({ role: 'user', content: fixture.message.content, turn_number: 1 }),
+    ])
+    // O1 restored Processing under this task; the local release must still
+    // run even though the mismatch marked the fence lost.
     await releasedAndNextTurnIsTwo(fixture, /active execution reached/)
   })
 
