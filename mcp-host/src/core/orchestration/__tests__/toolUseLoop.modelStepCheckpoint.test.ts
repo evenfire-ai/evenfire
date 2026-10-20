@@ -17,6 +17,7 @@ import type { ModelStepCheckpointEntryRow } from '../../../db/worker/modelStepCh
 import type { ModelStepCheckpointAttachmentRow } from '../../../db/worker/modelStepCheckpointOps'
 import type { ModelStepCheckpointAttachmentInput } from '../../../db/worker/modelStepCheckpointOps'
 import type { ModelStepCheckpointFence } from '../../../db/worker/modelStepCheckpointOps'
+import { logger } from '../../../logger'
 import {
   type InProcessWorkerHandle,
   createInProcessWorker,
@@ -1526,6 +1527,41 @@ describe('runToolUseLoop model-step checkpoint (#1043)', () => {
     expect(header(worker)).toBeUndefined()
     expect(entries(worker)).toEqual([])
   })
+
+  it.each([true, false])(
+    '#1157: settle rejection preserves the loop failure when loop throws=%s',
+    async throws => {
+      const { recorder } = harness()
+      const loopError = new Error('original loop failure')
+      const settleError = new TypeError('settlement failure body must not be logged')
+      const reasoning = createMockReasoning([{ type: 'text', content: 'completed' }])
+      const config = withRecorder(reasoning, [createMockTool('read_file')], recorder)
+      const emit = config.events.emit.bind(config.events)
+      const loop = vi.spyOn(config.events, 'emit').mockImplementation(event => {
+        if (throws && event.type === 'loop:iteration') throw loopError
+        emit(event)
+      })
+      const settle = vi.spyOn(recorder, 'settle').mockRejectedValue(settleError)
+      const logged = vi.spyOn(logger, 'error')
+      try {
+        await expect(runToolUseLoop(config, [user])).rejects.toBe(throws ? loopError : settleError)
+        expect(loop).toHaveBeenCalledWith(expect.objectContaining({ type: 'loop:iteration' }))
+        expect(settle).toHaveBeenCalledExactlyOnceWith(
+          throws ? undefined : expect.objectContaining({ type: 'response', content: 'completed' })
+        )
+        if (throws) {
+          expect(logged).toHaveBeenCalledWith(
+            { checkpointId: recorder.checkpointId, errorName: 'TypeError' },
+            'Model-step checkpoint settlement failed after loop failure'
+          )
+        } else {
+          expect(reasoning.respondWithTools).toHaveBeenCalledTimes(1)
+        }
+      } finally {
+        logged.mockRestore()
+      }
+    }
+  )
 
   it('6. volume: 1000 tool calls are recorded; recorder overhead is measured', async () => {
     const calls = Array.from({ length: 1000 }, (_, i) => ({

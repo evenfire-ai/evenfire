@@ -68,14 +68,28 @@ export async function runToolUseLoop(
   // #1043 — the recorder settles exactly once, whatever way the loop exits.
   await recorder.begin(initialMessages)
   let result: LoopResult | undefined
+  let loopError: unknown
   try {
     result = await runLoopIterations(config, initialMessages, jobDescription)
-  } finally {
+  } catch (error) {
+    loopError = error
+  }
+  try {
     const checkpointId = await recorder.settle(result)
     if (checkpointId !== undefined && result?.type === 'error') {
       result = { ...result, checkpointId }
     }
+  } catch (error) {
+    if (result !== undefined) throw error
+    logger.error(
+      {
+        checkpointId: recorder.checkpointId,
+        errorName: error instanceof Error ? error.name : typeof error,
+      },
+      'Model-step checkpoint settlement failed after loop failure'
+    )
   }
+  if (result === undefined) throw loopError
   return result
 }
 
