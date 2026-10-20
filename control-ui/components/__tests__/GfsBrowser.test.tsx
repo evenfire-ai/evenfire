@@ -3847,7 +3847,10 @@ describe('GfsBrowser — folder drag-and-drop', () => {
     const archive = child('archive', 'directory', 1)
     const projects = child('projects', 'directory', 2)
     mockApiGet.mockImplementation(async (path: string) => {
-      if (path === '/api/v1/gfs/tree' || path === '/api/v1/gfs/resources/11111111-1111-1111-1111-111111111111/children') {
+      if (
+        path === '/api/v1/gfs/tree' ||
+        path === '/api/v1/gfs/resources/11111111-1111-1111-1111-111111111111/children'
+      ) {
         return {
           rootResourceId: '11111111-1111-1111-1111-111111111111',
           items: [archive, projects],
@@ -3876,13 +3879,11 @@ describe('GfsBrowser — folder drag-and-drop', () => {
   }
 
   it('stops a folder drop at the one confirmation and commits on Move', async () => {
-    const { archive, projects } = folderPage()
+    const { projects } = folderPage()
     mockApiSend.mockResolvedValueOnce({ ok: true, data: { resourceId: 'id-2', version: 1 } })
     renderBrowser()
 
-    await waitFor(() =>
-      expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull()
-    )
+    await waitFor(() => expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull())
     const projectsRow = within(screen.getByRole('list', { name: 'Current folder resources' }))
       .getByText('projects')
       .closest('li')!
@@ -3896,7 +3897,9 @@ describe('GfsBrowser — folder drag-and-drop', () => {
       name: 'Move folder projects to archive',
     })
     expect(
-      within(dialog).getByText(/Inherited access to this folder and its contents follows the new location/)
+      within(dialog).getByText(
+        /Inherited access to this folder and its contents follows the new location/
+      )
     ).toBeTruthy()
     // The structure guard passed on fresh canonical paths (both rows carry
     // paths; sibling folders are structurally safe) — no request yet.
@@ -3922,9 +3925,7 @@ describe('GfsBrowser — folder drag-and-drop', () => {
     folderPage()
     renderBrowser()
 
-    await waitFor(() =>
-      expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull()
-    )
+    await waitFor(() => expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull())
     const list = screen.getByRole('list', { name: 'Current folder resources' })
     const projectsRow = within(list).getByText('projects').closest('li')!
     const archiveRow = within(list).getByText('archive').closest('li')!
@@ -3947,7 +3948,10 @@ describe('GfsBrowser — folder drag-and-drop', () => {
     const nestedArchive = child('archive', 'directory', 1)
     nestedArchive.path = '/projects/archive'
     mockApiGet.mockImplementation(async (path: string) => {
-      if (path === '/api/v1/gfs/tree' || path === '/api/v1/gfs/resources/11111111-1111-1111-1111-111111111111/children') {
+      if (
+        path === '/api/v1/gfs/tree' ||
+        path === '/api/v1/gfs/resources/11111111-1111-1111-1111-111111111111/children'
+      ) {
         return {
           rootResourceId: '11111111-1111-1111-1111-111111111111',
           items: [projects, nestedArchive],
@@ -3958,9 +3962,7 @@ describe('GfsBrowser — folder drag-and-drop', () => {
     })
     renderBrowser()
 
-    await waitFor(() =>
-      expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull()
-    )
+    await waitFor(() => expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull())
     const list = screen.getByRole('list', { name: 'Current folder resources' })
     const projectsRow = within(list).getByText('projects').closest('li')!
     const archiveRow = within(list).getByText('archive').closest('li')!
@@ -3981,14 +3983,15 @@ describe('GfsBrowser — folder drag-and-drop', () => {
       const text = JSON.stringify({
         error: { code: 'already_exists', message: 'a resource with this name already exists' },
       })
-      return actualApi.formatApiError(new Response(text, { status: 409, statusText: 'Conflict' }), text)
+      return actualApi.formatApiError(
+        new Response(text, { status: 409, statusText: 'Conflict' }),
+        text
+      )
     }
     mockApiSend.mockRejectedValueOnce(conflict())
     renderBrowser()
 
-    await waitFor(() =>
-      expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull()
-    )
+    await waitFor(() => expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull())
     const list = screen.getByRole('list', { name: 'Current folder resources' })
     const projectsRow = within(list).getByText('projects').closest('li')!
     const archiveRow = within(list).getByText('archive').closest('li')!
@@ -4000,9 +4003,7 @@ describe('GfsBrowser — folder drag-and-drop', () => {
     // The numbered-name policy is an explicit opt-in (unchecked by default).
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move', exact: true }))
 
-    expect(
-      await screen.findByText(/An item with this name already exists/)
-    ).toBeTruthy()
+    expect(await screen.findByText(/An item with this name already exists/)).toBeTruthy()
     expect(mockApiSend).toHaveBeenCalledTimes(1)
   })
 
@@ -4013,7 +4014,10 @@ describe('GfsBrowser — folder drag-and-drop', () => {
       const text = JSON.stringify({
         error: { code: 'already_exists', message: 'a resource with this name already exists' },
       })
-      return actualApi.formatApiError(new Response(text, { status: 409, statusText: 'Conflict' }), text)
+      return actualApi.formatApiError(
+        new Response(text, { status: 409, statusText: 'Conflict' }),
+        text
+      )
     }
     mockApiSend
       .mockRejectedValueOnce(conflict())
@@ -4021,9 +4025,7 @@ describe('GfsBrowser — folder drag-and-drop', () => {
       .mockResolvedValueOnce({ ok: true, data: { resourceId: 'id-2', version: 1 } })
     renderBrowser()
 
-    await waitFor(() =>
-      expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull()
-    )
+    await waitFor(() => expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull())
     const list = screen.getByRole('list', { name: 'Current folder resources' })
     const projectsRow = within(list).getByText('projects').closest('li')!
     const archiveRow = within(list).getByText('archive').closest('li')!

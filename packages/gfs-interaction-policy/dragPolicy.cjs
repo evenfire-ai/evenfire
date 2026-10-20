@@ -14,12 +14,6 @@
  * grants start below the drive root.
  */
 
-/** Structural deny reasons (shared across both apps). */
-const DRAG_STRUCTURE_DENY_REASONS = ['self', 'descendant', 'same-parent', 'root-source', 'cross-drive']
-
-/** Sufficient negative observations — "not in the subtree, as far as current facts prove". */
-const DRAG_STRUCTURE_EVIDENCES = ['file', 'common-anchor', 'known-chain', 'fresh-path']
-
 /**
  * Maximum move PATCH attempts per user gesture (numbered-name conflicts),
  * within the existing absolute GFS_UPLOAD_NAME_RETRY_LIMIT name ceiling.
@@ -57,7 +51,8 @@ function isNonEmptyString(value) {
 function decideDragStructure(input) {
   const source = input?.source
   const target = input?.target
-  if (!source || !target) throw new TypeError('decideDragStructure requires source and target facts')
+  if (!source || !target)
+    throw new TypeError('decideDragStructure requires source and target facts')
   if (!isNonEmptyString(source.resourceId) || !isNonEmptyString(target.resourceId)) {
     throw new TypeError('decideDragStructure requires non-empty resource ids')
   }
@@ -66,10 +61,7 @@ function decideDragStructure(input) {
   if (source.parentKnown === true && source.parentResourceId == null) {
     return { kind: 'deny', reason: 'root-source' }
   }
-  if (
-    source.parentKnown === true &&
-    source.parentResourceId === target.resourceId
-  ) {
+  if (source.parentKnown === true && source.parentResourceId === target.resourceId) {
     return { kind: 'deny', reason: 'same-parent' }
   }
   if (source.kind === 'file') return { kind: 'observed-safe', evidence: 'file' }
@@ -79,7 +71,8 @@ function decideDragStructure(input) {
     input.knownSourceAncestorIds instanceof Set ? input.knownSourceAncestorIds : new Set()
   for (const ancestorId of chain) {
     if (ancestorId === source.resourceId) return { kind: 'deny', reason: 'descendant' }
-    if (knownSourceAncestors.has(ancestorId)) return { kind: 'observed-safe', evidence: 'common-anchor' }
+    if (knownSourceAncestors.has(ancestorId))
+      return { kind: 'observed-safe', evidence: 'common-anchor' }
   }
   if (chain.length > 0 && chain[chain.length - 1] === null) {
     // The observation walked to the physical root without meeting the source:

@@ -33,11 +33,7 @@ import {
   IconShare,
   IconUpload,
 } from '@components/SidebarNav/icons'
-import {
-  FOLDER_HOVER_EXPAND_DELAY_MS,
-  GFS_DRIVE_MAIN,
-  GFS_RESOURCE_DRAG_TYPE,
-} from '@constants/gfsBrowser'
+import { GFS_DRIVE_MAIN, GFS_RESOURCE_DRAG_TYPE } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import {
   GFS_UNAVAILABLE_LOCATION_MESSAGE,
