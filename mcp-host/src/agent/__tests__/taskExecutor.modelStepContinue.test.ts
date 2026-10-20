@@ -2702,4 +2702,280 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
       expect.objectContaining({ role: 'assistant', content: 'next answer', turn_number: 2 }),
     ])
   })
+
+  // R2-M2 (Addendum 13): a fenced completion rolls RAM back on any rejected
+  // write, and the executor then releases the turn on every ending path.
+  function fencedSession(fixture: CheckpointFixture) {
+    const conversation = fixture.manager.getSessionByKey(SESSION_KEY)
+    if (!conversation) throw new Error('continuation conversation is missing')
+    const row = fixture.handle.worker.db
+      .prepare('SELECT state, active_task_id FROM sessions WHERE id = ?')
+      .get(conversation.id) as { state: string; active_task_id: string | null }
+    return { conversation, row }
+  }
+
+  async function nextTurnIsTwo(fixture: CheckpointFixture) {
+    const { conversation } = fencedSession(fixture)
+    await fixture.manager.startTurn(conversation, 'next question', 'task-next')
+    await fixture.manager.completeTurn(conversation, 'next answer')
+    await fixture.handle.persistQueue.drain()
+    const next = turnRows(fixture.handle).filter(
+      row => row.content === 'next question' || row.content === 'next answer'
+    )
+    expect(next).toEqual([
+      expect.objectContaining({ role: 'user', content: 'next question', turn_number: 2 }),
+      expect.objectContaining({ role: 'assistant', content: 'next answer', turn_number: 2 }),
+    ])
+  }
+
+  it('R2-M2 X1. a non-fence rejection of the fenced response completion releases the owned turn', async () => {
+    const fixture = await claimedCheckpoint({})
+    fixture.handle.worker.db.exec(`
+      CREATE TRIGGER reject_response BEFORE INSERT ON messages
+      WHEN NEW.role = 'assistant' AND NEW.content = 'false response'
+      BEGIN SELECT RAISE(ABORT, 'probe completion rejected'); END
+    `)
+    const llm = provider(undefined, () => ({ content: 'false response' }))
+    const run = await runContinuation(fixture, llm)
+    await run.executor.run()
+    await fixture.handle.persistQueue.drain()
+
+    expect(llm.calls()).toBe(1)
+    expect(run.onFail).toHaveBeenCalledTimes(1)
+    expect(run.onFail.mock.calls[0]![1].message).toContain('probe completion rejected')
+    expect(run.onComplete).not.toHaveBeenCalled()
+    expect(header(fixture.handle)).toMatchObject({ status: 'abandoned' })
+    expect(turnRows(fixture.handle)).toEqual([
+      expect.objectContaining({ role: 'user', content: fixture.message.content, turn_number: 1 }),
+    ])
+    const { conversation, row } = fencedSession(fixture)
+    expect(row).toEqual({ state: 'idle', active_task_id: null })
+    expect(conversation.state).toBe('idle')
+    expect(conversation.activeTaskId).toBeUndefined()
+    expect(conversation.turns.at(-1)?.response).toBeUndefined()
+    const history = fixture.manager.buildMessageHistory(conversation).map(m => m.content)
+    expect(history).toContain(fixture.message.content)
+    expect(history).not.toContain('false response')
+
+    fixture.handle.worker.db.exec('DROP TRIGGER reject_response')
+    await nextTurnIsTwo(fixture)
+  })
+
+  it('R2-M2 X2. a non-fence rejection of the fenced limit completion releases the owned turn', async () => {
+    const fixture = await claimedCheckpoint({ taskBudget: budget({ durationMs: 100 }) })
+    fixture.handle.worker.db.exec(`
+      CREATE TRIGGER reject_limit BEFORE INSERT ON messages
+      WHEN NEW.role = 'assistant' AND NEW.content LIKE '%active execution reached%'
+      BEGIN SELECT RAISE(ABORT, 'probe limit completion rejected'); END
+    `)
+    const { run, llm } = await limitContinuationRun(fixture)
+
+    expect(llm.calls()).toBe(1)
+    expect(run.onFail).toHaveBeenCalledTimes(1)
+    expect(run.onFail.mock.calls[0]![1].code).toBe('TASK_DURATION_LIMIT')
+    expect(header(fixture.handle)).toMatchObject({ status: 'abandoned' })
+    expect(turnRows(fixture.handle)).toEqual([
+      expect.objectContaining({ role: 'user', content: fixture.message.content, turn_number: 1 }),
+    ])
+    const { conversation, row } = fencedSession(fixture)
+    expect(row).toEqual({ state: 'idle', active_task_id: null })
+    expect(conversation.state).toBe('idle')
+    expect(conversation.activeTaskId).toBeUndefined()
+    expect(conversation.turns.at(-1)?.response).toBeUndefined()
+
+    fixture.handle.worker.db.exec('DROP TRIGGER reject_limit')
+    await nextTurnIsTwo(fixture)
+  })
+
+  async function limitContinuationRun(fixture: CheckpointFixture) {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    let enteredProvider!: () => void
+    const providerEntered = new Promise<void>(resolve => {
+      enteredProvider = resolve
+    })
+    const llm = provider(undefined, () => {
+      enteredProvider()
+      return new Promise(resolve => setTimeout(() => resolve({}), 250))
+    })
+    const run = await runContinuation(fixture, llm)
+    const execution = run.executor.run()
+    await providerEntered
+    await vi.advanceTimersByTimeAsync(101)
+    await execution
+    await fixture.handle.persistQueue.drain()
+    vi.useRealTimers()
+    return { run, llm }
+  }
+
+  it('R2-M2 X3. when the release after a rejected completion also rejects, the original error wins and the next turn numbers N+1', async () => {
+    const fixture = await claimedCheckpoint({})
+    fixture.handle.worker.db.exec(`
+      CREATE TRIGGER reject_response BEFORE INSERT ON messages
+      WHEN NEW.role = 'assistant' AND NEW.content = 'false response'
+      BEGIN SELECT RAISE(ABORT, 'probe completion rejected'); END;
+      CREATE TRIGGER reject_release BEFORE UPDATE OF state ON sessions
+      WHEN NEW.state = 'idle' AND OLD.active_task_id = 'task-continuation-b2'
+      BEGIN SELECT RAISE(ABORT, 'probe release rejected'); END;
+    `)
+    const llm = provider(undefined, () => ({ content: 'false response' }))
+    const run = await runContinuation(fixture, llm)
+    await run.executor.run()
+    await fixture.handle.persistQueue.drain()
+
+    expect(llm.calls()).toBe(1)
+    expect(run.onFail).toHaveBeenCalledTimes(1)
+    // Extra 3: the completion error reaches onFail, not the release error.
+    expect(run.onFail.mock.calls[0]![1].message).toContain('probe completion rejected')
+    expect(run.onFail.mock.calls[0]![1].message).not.toContain('probe release rejected')
+    expect(run.onComplete).not.toHaveBeenCalled()
+    expect(turnRows(fixture.handle)).toEqual([
+      expect.objectContaining({ role: 'user', content: fixture.message.content, turn_number: 1 }),
+    ])
+    const { conversation } = fencedSession(fixture)
+    expect(conversation.state).toBe('idle')
+    expect(conversation.activeTaskId).toBeUndefined()
+
+    fixture.handle.worker.db.exec('DROP TRIGGER reject_response; DROP TRIGGER reject_release;')
+    await nextTurnIsTwo(fixture)
+  })
+
+  // The persist queue rejects with its sync-timeout error. 'late-commit' lets
+  // the boundary commit first (the worker finished after the timeout);
+  // 'no-commit' never sends it (the worker failed later).
+  function injectBoundaryTimeout(
+    fixture: CheckpointFixture,
+    content: RegExp,
+    mode: 'late-commit' | 'no-commit'
+  ) {
+    const queue = fixture.handle.persistQueue
+    const real = queue.enqueueSync.bind(queue)
+    const injected = { count: 0 }
+    queue.enqueueSync = ((op: any, sessionKey?: string) => {
+      if (
+        injected.count === 0 &&
+        op.kind === 'persist_turn_boundary' &&
+        op.message?.role === 'assistant' &&
+        content.test(String(op.message?.content))
+      ) {
+        injected.count += 1
+        const timeout = new Error('db worker timeout (2000ms) for op=persist_turn_boundary')
+        if (mode === 'no-commit') return Promise.reject(timeout)
+        return real(op, sessionKey).then(() => {
+          throw timeout
+        })
+      }
+      return real(op, sessionKey)
+    }) as typeof queue.enqueueSync
+    return injected
+  }
+
+  async function releasedAndNextTurnIsTwo(fixture: CheckpointFixture, unpersisted?: RegExp) {
+    const { conversation, row } = fencedSession(fixture)
+    expect(row).toEqual({ state: 'idle', active_task_id: null })
+    expect(conversation.state).toBe('idle')
+    expect(conversation.activeTaskId).toBeUndefined()
+    if (unpersisted) {
+      expect(conversation.turns.at(-1)?.response).toBeUndefined()
+      const history = fixture.manager.buildMessageHistory(conversation).map(m => String(m.content))
+      expect(history).toContain(fixture.message.content)
+      expect(history.some(content => unpersisted.test(content))).toBe(false)
+    }
+    await nextTurnIsTwo(fixture)
+  }
+
+  it('R2-M2 X4. a fenced response completion that times out after a late commit releases the turn', async () => {
+    const fixture = await claimedCheckpoint({})
+    const injected = injectBoundaryTimeout(fixture, /^late answer$/, 'late-commit')
+    const llm = provider(undefined, () => ({ content: 'late answer' }))
+    const run = await runContinuation(fixture, llm)
+    await run.executor.run()
+    await fixture.handle.persistQueue.drain()
+    expect(injected.count).toBe(1)
+    expect(llm.calls()).toBe(1)
+    expect(run.onFail).toHaveBeenCalledTimes(1)
+    expect(run.onComplete).not.toHaveBeenCalled()
+    expect(turnRows(fixture.handle)).toEqual([
+      expect.objectContaining({ role: 'user', content: fixture.message.content, turn_number: 1 }),
+      expect.objectContaining({ role: 'assistant', content: 'late answer', turn_number: 1 }),
+    ])
+    await releasedAndNextTurnIsTwo(fixture)
+  })
+
+  it('R2-M2 X5. a fenced limit completion that times out after a late commit releases the turn', async () => {
+    const fixture = await claimedCheckpoint({ taskBudget: budget({ durationMs: 100 }) })
+    const injected = injectBoundaryTimeout(fixture, /active execution reached/, 'late-commit')
+    const { run, llm } = await limitContinuationRun(fixture)
+    expect(injected.count).toBe(1)
+    expect(llm.calls()).toBe(1)
+    expect(run.onFail).toHaveBeenCalledTimes(1)
+    expect(run.onFail.mock.calls[0]![1].code).toBe('TASK_DURATION_LIMIT')
+    expect(turnRows(fixture.handle)).toEqual([
+      expect.objectContaining({ role: 'user', content: fixture.message.content, turn_number: 1 }),
+      expect.objectContaining({
+        role: 'assistant',
+        turn_number: 1,
+        content: expect.stringContaining('active execution reached'),
+      }),
+    ])
+    await releasedAndNextTurnIsTwo(fixture)
+  })
+
+  it('R2-M2 X6. a fenced response completion that times out without a commit releases the turn', async () => {
+    const fixture = await claimedCheckpoint({})
+    const injected = injectBoundaryTimeout(fixture, /^lost answer$/, 'no-commit')
+    const llm = provider(undefined, () => ({ content: 'lost answer' }))
+    const run = await runContinuation(fixture, llm)
+    await run.executor.run()
+    await fixture.handle.persistQueue.drain()
+    expect(injected.count).toBe(1)
+    expect(llm.calls()).toBe(1)
+    expect(run.onFail).toHaveBeenCalledTimes(1)
+    expect(run.onComplete).not.toHaveBeenCalled()
+    expect(turnRows(fixture.handle)).toEqual([
+      expect.objectContaining({ role: 'user', content: fixture.message.content, turn_number: 1 }),
+    ])
+    await releasedAndNextTurnIsTwo(fixture, /^lost answer$/)
+  })
+
+  it('R2-M2 X7. a fenced limit completion that times out without a commit releases the turn', async () => {
+    const fixture = await claimedCheckpoint({ taskBudget: budget({ durationMs: 100 }) })
+    const injected = injectBoundaryTimeout(fixture, /active execution reached/, 'no-commit')
+    const { run, llm } = await limitContinuationRun(fixture)
+    expect(injected.count).toBe(1)
+    expect(llm.calls()).toBe(1)
+    expect(run.onFail).toHaveBeenCalledTimes(1)
+    expect(run.onFail.mock.calls[0]![1].code).toBe('TASK_DURATION_LIMIT')
+    expect(turnRows(fixture.handle)).toEqual([
+      expect.objectContaining({ role: 'user', content: fixture.message.content, turn_number: 1 }),
+    ])
+    await releasedAndNextTurnIsTwo(fixture, /active execution reached/)
+  })
+
+  it('R2-M2 owner check. a continuation that lost RAM ownership does not write over the replacement turn', async () => {
+    const fixture = await claimedCheckpoint({})
+    // While this task waits on the model, a replacement reopens the same
+    // in-RAM conversation and becomes its owner.
+    const llm = provider(undefined, () => {
+      const conversation = fixture.manager.getSessionByKey(SESSION_KEY)
+      if (!conversation) throw new Error('continuation conversation is missing')
+      conversation.activeTaskId = 'task-replacement'
+      return { content: 'stale answer' }
+    })
+    const run = await runContinuation(fixture, llm)
+    await run.executor.run()
+    await fixture.handle.persistQueue.drain()
+
+    expect(llm.calls()).toBe(1)
+    expect(run.onFail).toHaveBeenCalledTimes(1)
+    expect(run.onComplete).not.toHaveBeenCalled()
+    const { conversation, row } = fencedSession(fixture)
+    // The stale task never touched the replacement's RAM or the durable rows.
+    expect(conversation.state).toBe('processing')
+    expect(conversation.activeTaskId).toBe('task-replacement')
+    expect(conversation.turns.at(-1)?.response).toBeUndefined()
+    expect(row).toEqual({ state: 'processing', active_task_id: 'task-continuation-b2' })
+    expect(turnRows(fixture.handle)).toEqual([
+      expect.objectContaining({ role: 'user', content: fixture.message.content, turn_number: 1 }),
+    ])
+  })
 })

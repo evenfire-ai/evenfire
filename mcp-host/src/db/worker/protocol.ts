@@ -77,6 +77,16 @@ export interface ModelStepTurnFence {
   originTurnNumber: number
 }
 
+const MODEL_STEP_FENCE_MISMATCH_MESSAGES: ReadonlySet<string> = new Set([
+  'model-step continuation fence mismatch',
+  'model-step checkpoint fence mismatch on completion',
+])
+
+/** Matches the exact fence-mismatch errors produced by the SQLite worker. */
+export function isModelStepFenceMismatch(err: unknown): boolean {
+  return err instanceof Error && MODEL_STEP_FENCE_MISMATCH_MESSAGES.has(err.message)
+}
+
 // ─── Row shapes (DB-side representation) ───────────────────────────────
 
 export interface SessionRow {
