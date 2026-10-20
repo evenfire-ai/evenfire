@@ -459,6 +459,55 @@ describe('GfsGrantPanel inherited access', () => {
     ).toBeTruthy()
   })
 
+  // R1-M5 — a role change rewrites the folder's GRANT row only; the folder's
+  // SHARE row survives it, so the member keeps Editor through it. The
+  // confirmation must disclose that BEFORE the operator approves.
+  it('discloses the surviving Editor share in the confirmation before anything is applied', async () => {
+    const FOLDER_SHARE_ID = '77777777-7777-4777-8777-777777777777'
+    mockGetGfsGrants.mockImplementation(async resourceId => ({
+      items:
+        resourceId === FOLDER_ID
+          ? [
+              {
+                id: FOLDER_GRANT_ID,
+                drive: 'main',
+                resourceId: FOLDER_ID,
+                subject: miguel,
+                permissions: ['read', 'write'],
+                inherit: true,
+              },
+            ]
+          : [],
+    }))
+    mockGetGfsShares.mockImplementation(async resourceId => ({
+      items:
+        resourceId === FOLDER_ID
+          ? [
+              {
+                id: FOLDER_SHARE_ID,
+                drive: 'main',
+                resourceId: FOLDER_ID,
+                subject: miguel,
+                permissions: ['read', 'write'],
+                includeDescendants: true,
+              },
+            ]
+          : [],
+    }))
+    renderPanel()
+
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    const miguelRow = await within(existing).findByTestId(miguelRowTestId)
+    await chooseRole(miguelRow, 'Read')
+
+    const dialog = await screen.findByRole('alertdialog')
+    expect(
+      within(dialog).getByText(
+        'Sharing entries on team-docs still grant Editor access. This change does not remove them.'
+      )
+    ).toBeTruthy()
+  })
+
   it('discloses inherited Editor shares when only a direct grant can be changed', async () => {
     mockGetGfsGrants.mockImplementation(async resourceId => ({
       items:

@@ -111,6 +111,29 @@ const ROLE_OPTIONS: SelectionDropdownOption[] = [
 ]
 
 /**
+ * Folders whose SHARING entries still grant Editor after a downgrade (R1-M5):
+ * a role change rewrites the folder's GRANT row only, so a share row survives
+ * it and the member keeps Editor through it. The confirmation discloses these
+ * BEFORE the operator approves; the post-change toast repeats the disclosure.
+ */
+function collectResidualEditorFolderNames(
+  sources: readonly GfsInheritedAccessSource[],
+  directShareEntries: readonly { permissions: string[] }[],
+  directName: string
+): string[] {
+  return [
+    ...new Set([
+      ...sources
+        .filter(source => source.shareEntries.some(entry => isEditorPermissions(entry.permissions)))
+        .map(source => source.name),
+      ...(directShareEntries.some(entry => isEditorPermissions(entry.permissions))
+        ? [directName]
+        : []),
+    ]),
+  ]
+}
+
+/**
  * A role promise is only as good as the coverage it was made under: when the
  * inherited walk did not complete, an ancestor the operator cannot see may
  * still grant a stronger role. The success copy then states what was NOT
@@ -186,6 +209,8 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
         /** Grant-backed folders skipped because their own scope flag was
          * unknown — never written with a defaulted scope (R1-M5). */
         skippedFolderNames: string[]
+        /** Folders whose sharing entries still grant Editor after the change. */
+        residualEditorFolderNames: string[]
       }
     | { row: GfsFileAccessRow; mode: 'remove' }
     | null
@@ -598,18 +623,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       // remains, the effective role claim must say so.
       const residualNames =
         nextRole === 'read'
-          ? [
-              ...new Set([
-                ...inheritedSources
-                  .filter(source =>
-                    source.shareEntries.some(entry => isEditorPermissions(entry.permissions))
-                  )
-                  .map(source => source.name),
-                ...(item.shareEntries.some(entry => isEditorPermissions(entry.permissions))
-                  ? [resource.name]
-                  : []),
-              ]),
-            ]
+          ? collectResidualEditorFolderNames(inheritedSources, item.shareEntries, resource.name)
           : []
       const details: string[] = []
       if (skippedFolderNames.length > 0) {
@@ -705,6 +719,16 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       affected: updates,
       residualSources: plan.shareOnlySources,
       skippedFolderNames,
+      // The surviving Editor shares are disclosed IN the confirmation, before
+      // the operator approves a role that will not remove them.
+      residualEditorFolderNames:
+        nextRole === 'read'
+          ? collectResidualEditorFolderNames(
+              [...plan.shareOnlySources, ...writable],
+              row.direct?.shareEntries ?? [],
+              resource.name
+            )
+          : [],
     })
   }
 
@@ -838,18 +862,11 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       // Read-only while a surviving share entry still grants Editor.
       const residualNames =
         request.nextRole === 'read'
-          ? [
-              ...new Set([
-                ...[...request.residualSources, ...affected.map(update => update.source)]
-                  .filter(source =>
-                    source.shareEntries.some(entry => isEditorPermissions(entry.permissions))
-                  )
-                  .map(source => source.name),
-                ...(row.direct?.shareEntries.some(entry => isEditorPermissions(entry.permissions))
-                  ? [resource.name]
-                  : []),
-              ]),
-            ]
+          ? collectResidualEditorFolderNames(
+              [...request.residualSources, ...affected.map(update => update.source)],
+              row.direct?.shareEntries ?? [],
+              resource.name
+            )
           : []
       const details: string[] = []
       if (request.skippedFolderNames.length > 0) {
@@ -1085,6 +1102,14 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
                       })),
                 fileCurrentRole: roleForPermissions(parentUpdate.row.permissions),
                 nextRole: parentUpdate.mode === 'change-role' ? parentUpdate.nextRole : undefined,
+                // The surviving Editor shares are disclosed BEFORE the
+                // operator approves: the effective role this dialog shows is
+                // not the whole truth, and only the post-change toast used to
+                // say so.
+                ...(parentUpdate.mode === 'change-role' &&
+                parentUpdate.residualEditorFolderNames.length > 0
+                  ? { residualEditorFolderNames: parentUpdate.residualEditorFolderNames }
+                  : {}),
               }
             : null
         }

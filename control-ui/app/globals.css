@@ -14362,6 +14362,14 @@ button.cu-gfs-tree__button:focus-visible,
   color: var(--cu-text);
 }
 
+/* R1-M5: the confirmation states the surviving Editor shares BEFORE the
+   operator approves, not only in the post-change toast. */
+.cu-gfs-parent-update__residual {
+  margin: 0;
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-sm);
+}
+
 .cu-gfs-parent-update__help {
   display: grid;
   gap: var(--cu-space-2);

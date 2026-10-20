@@ -66,7 +66,8 @@ export function GfsMoveConfirmDialog({
         <div className="cu-gfs-move-confirm__body">
           <p className="cu-gfs-move-confirm__impact">
             Inherited access to this folder and its contents follows the new location. Direct
-            sharing entries stay with their items, and grantees may lose access.
+            sharing entries stay with their items — including any access they grant — and grantees
+            may lose access.
           </p>
           {request.canRename ? (
             <label className="cu-gfs-move-confirm__rename-toggle">

@@ -135,6 +135,31 @@ function inheritedCoverageCaveat(coverage: GfsInheritedCoverageState | null): st
   return '. Inherited access could not be verified, so access through parent folders you cannot see may still be stronger.'
 }
 
+/**
+ * Folders whose SHARING entries still grant Editor after a downgrade (R1-M5):
+ * a role change rewrites the folder's GRANT row only, so a share row survives
+ * it and the member keeps Editor through it. The confirmation discloses these
+ * BEFORE the user approves; the post-change toast repeats the disclosure.
+ */
+function collectResidualEditorFolderNames(
+  sources: readonly GfsInheritedAccessSource[],
+  directShares: readonly { permissions: string[] }[],
+  directName: string
+): string[] {
+  return [
+    ...new Set([
+      ...sources
+        .filter(source =>
+          source.shareEntries.some(entry => isEditorGfsPermissions(entry.permissions))
+        )
+        .map(source => source.name),
+      ...(directShares.some(share => isEditorGfsPermissions(share.permissions))
+        ? [directName]
+        : []),
+    ]),
+  ]
+}
+
 function delegationSubjectOptions(
   directory: TeamDirectoryResult | undefined
 ): GfsDelegationSubjectOption[] {
@@ -305,6 +330,8 @@ export function FilesPage({
         updates: Array<{ source: GfsInheritedAccessSource; bits: string[] }>
         residualSources: GfsInheritedAccessSource[]
         skippedFolderNames: string[]
+        /** Folders whose sharing entries still grant Editor after the change. */
+        residualEditorFolderNames: string[]
       }
     | { row: GfsMergedAccessRow; label: string; mode: 'remove' }
     | null
@@ -774,6 +801,14 @@ export function FilesPage({
           updates: [],
           residualSources: plan.shareOnlySources,
           skippedFolderNames,
+          residualEditorFolderNames:
+            role === 'read'
+              ? collectResidualEditorFolderNames(
+                  plan.shareOnlySources,
+                  row.shares,
+                  current?.name ?? 'this file'
+                )
+              : [],
         })
         return
       }
@@ -829,6 +864,16 @@ export function FilesPage({
       updates,
       residualSources: plan.shareOnlySources,
       skippedFolderNames,
+      // The surviving Editor shares are disclosed IN the confirmation, before
+      // the user approves a role that will not remove them.
+      residualEditorFolderNames:
+        role === 'read'
+          ? collectResidualEditorFolderNames(
+              [...plan.shareOnlySources, ...writable],
+              row.shares,
+              current?.name ?? 'this file'
+            )
+          : [],
     })
   }
 
@@ -967,18 +1012,11 @@ export function FilesPage({
       // Read-only while a surviving share entry still grants Editor.
       const residualNames =
         request.nextRole === 'read'
-          ? [
-              ...new Set([
-                ...[...request.residualSources, ...updates.map(update => update.source)]
-                  .filter(source =>
-                    source.shareEntries.some(entry => isEditorGfsPermissions(entry.permissions))
-                  )
-                  .map(source => source.name),
-                ...(request.row.shares.some(share => isEditorGfsPermissions(share.permissions))
-                  ? [current?.name ?? 'this item']
-                  : []),
-              ]),
-            ]
+          ? collectResidualEditorFolderNames(
+              [...request.residualSources, ...updates.map(update => update.source)],
+              request.row.shares,
+              current?.name ?? 'this item'
+            )
           : []
       const residualMessage =
         residualNames.length > 0
@@ -2583,6 +2621,13 @@ export function FilesPage({
                       })),
                 fileCurrentRole: roleForAccessPermissions(parentUpdate.row.permissions),
                 nextRole: parentUpdate.mode === 'change-role' ? parentUpdate.nextRole : undefined,
+                // The surviving Editor shares are disclosed BEFORE the user
+                // approves: the effective role this dialog shows is not the
+                // whole truth, and only the post-change toast used to say so.
+                ...(parentUpdate.mode === 'change-role' &&
+                parentUpdate.residualEditorFolderNames.length > 0
+                  ? { residualEditorFolderNames: parentUpdate.residualEditorFolderNames }
+                  : {}),
               }
             : null
         }

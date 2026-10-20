@@ -16893,6 +16893,14 @@ pre {
   color: var(--text);
 }
 
+/* R1-M5: the confirmation states the surviving Editor shares BEFORE the
+   user approves, not only in the post-change toast. */
+.da-gfs-parent-update-dialog__residual {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
 .da-gfs-parent-update-dialog__help {
   display: grid;
   gap: var(--space-2);

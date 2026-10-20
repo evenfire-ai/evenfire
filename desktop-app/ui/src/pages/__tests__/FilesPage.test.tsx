@@ -1985,6 +1985,63 @@ describe('FilesPage', () => {
     expect(within(manageDialog).queryByText(/cannot see\./)).toBeNull()
   })
 
+  it('discloses the surviving Editor share in the confirmation before anything is applied', async () => {
+    // R1-M5: a role change rewrites the folder's GRANT row only; the folder's
+    // SHARE row survives it, so the member keeps Editor through it. The
+    // confirmation shows the effective role it is about to promise — it must
+    // also say what survives, BEFORE the operator approves.
+    installInheritedDirectoryMocks()
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue(
+      inheritedFileController({
+        inheritedAccess: [
+          {
+            subject: { type: 'user', id: 'user-2' },
+            permissions: ['read', 'write'],
+            inheritedFrom: ['Team folder'],
+            sources: [
+              {
+                resourceId: 'folder-1',
+                name: 'Team folder',
+                permissions: ['read', 'write'],
+                grantId: 'parent-grant-1',
+                shareIds: ['parent-share-1'],
+                grantPermissions: ['read', 'write'],
+                grantInherit: true,
+                shareEntries: [
+                  {
+                    rowId: 'parent-share-1',
+                    permissions: ['read', 'write'],
+                    includeDescendants: true,
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      })
+    )
+
+    renderFilesPage(pushToast)
+    await openManageDialog('report.txt')
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
+
+    await act(async () => {
+      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+    })
+
+    const confirmDialog = await screen.findByRole('alertdialog')
+    expect(
+      within(confirmDialog).getByText(
+        'Sharing entries on Team folder still grant Editor access. This change does not remove them.'
+      )
+    ).toBeTruthy()
+  })
+
   it('confirms an inherited role change against the parent folder and applies it there', async () => {
     installInheritedDirectoryMocks()
     const parentGrant = (window.clerum.gfs as unknown as { grant: ReturnType<typeof vi.fn> }).grant
