@@ -751,9 +751,11 @@ export class TaskExecutor {
             'Failed to persist task limit interruption'
           )
           // TL (R2-M2): the fenced completion rolled RAM back to Processing,
-          // and this path has no other release. Release the restored turn.
-          // With the fence lost the replacement owns the turn, so skip it.
-          if (this.task.modelStepContinuation && !this.continuationFenceLost) {
+          // and this path has no other release. Release the restored turn
+          // even when the fence was just lost: failContinuationTurn then does
+          // only the owner-guarded local release, which cannot touch a
+          // replacement that already reopened the turn.
+          if (this.task.modelStepContinuation) {
             await this.continuationCleanup('fail_turn', () => this.failContinuationTurn())
           }
         }
