@@ -86,6 +86,8 @@ source "${PROJECT_DIR}/scripts/minikube/image-mode.sh"
 source "${SCRIPT_DIR}/_lib/np08-cleanup.sh"
 # shellcheck source=scripts/e2e/_lib/np08-provenance.sh
 source "${SCRIPT_DIR}/_lib/np08-provenance.sh"
+# shellcheck source=scripts/e2e/_lib/np08-rollout.sh
+source "${SCRIPT_DIR}/_lib/np08-rollout.sh"
 
 SYNC_CONFIGMAP="${CLERUM_PRE_GATE_SYNC_CONFIGMAP:-clerum-pre-gate-sync-state}"
 PORTS_ENV="${CLERUM_PROFILE_PORTS_ENV:-${HOME}/.cache/clerum/minikube-profiles/${profile}/ports.env}"
@@ -368,6 +370,17 @@ kctl -n "${MCP_NS}" patch context "${CONTEXT_A}" --type=json \
 fixture_context_patched=1
 kctl -n "${MCP_NS}" patch context "${CONTEXT_A}" --type=json \
   -p="[{\"op\":\"add\",\"path\":\"/spec/mcpServers/-\",\"value\":\"${SERVER_C}\"}]" >/dev/null
+
+# The fixture patch makes HCC reconcile this Host, and a runtime-token
+# rotation rolls the pod by changing the template revision annotation. A
+# journey exec started in the outgoing pod dies with it (exit 137), so wait
+# for the triggered rollout to complete and the template to stop changing.
+if ! np08_wait_rollout_settled "${HOST_NS}" "${HOST_DEPLOYMENT}" \
+  "${NP08_ROLLOUT_SETTLE_TIMEOUT_SECONDS:-300}" 3 "${NP08_ROLLOUT_POLL_SECONDS:-5}"; then
+  echo 'FAIL: mcp-host rollout did not settle before the NP-08 journey' >&2
+  exit 1
+fi
+echo 'PASS mcp-host rollout settled after the fixture patch'
 
 echo 'E2E setup: waiting for HCC to observe the synthetic Context/McpServer fixtures'
 
