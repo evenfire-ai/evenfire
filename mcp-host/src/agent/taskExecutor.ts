@@ -187,6 +187,13 @@ import type { AgentConfig, ExecutorFailoverSupport, ModelStepCheckpointSupport }
 
 export type ExecutorState = 'processing' | 'waiting_approval' | 'completed' | 'failed'
 
+class ContinuationLeaseRenewalError extends Error {
+  constructor() {
+    super('Model-step continuation lease renewal failed')
+    this.name = 'ContinuationLeaseRenewalError'
+  }
+}
+
 /**
  * R2 — the serialized session key a task runs under. Extracted so the agent's
  * per-task model resolver (`executeTask`) reads the SAME key the executor's
@@ -701,8 +708,13 @@ export class TaskExecutor {
       let canEndTurn =
         !this.task.modelStepContinuation || this.conversation?.activeTaskId === this.taskId
       if (this.task.modelStepContinuation) {
-        await this.continuationCleanup('abandon', () => this.abandonModelStepContinuation())
-        this.emitContinuationVerdict({ kind: 'lost' })
+        if (error instanceof ContinuationLeaseRenewalError) {
+          if (!this.continuationVerdictEmitted)
+            this.task.modelStepContinuation.onAdmissionError?.(error)
+        } else {
+          await this.continuationCleanup('abandon', () => this.abandonModelStepContinuation())
+          this.emitContinuationVerdict({ kind: 'lost' })
+        }
         canEndTurn = this.conversation?.activeTaskId === this.taskId
       }
       if (
@@ -874,6 +886,28 @@ export class TaskExecutor {
     await stop?.()
   }
 
+  private async renewContinuationClaim(
+    sessionKey: string,
+    continuation: ModelStepContinuationRef,
+    support: ModelStepCheckpointSupport
+  ): Promise<boolean> {
+    try {
+      return await support.store.renewLease(sessionKey, continuation.fence, support.claimLeaseMs)
+    } catch (error) {
+      await this.stopContinuationLease()
+      logger.error(
+        {
+          taskId: this.taskId,
+          checkpointId: continuation.checkpointId,
+          op: 'renew_lease',
+          errorName: error instanceof Error ? error.name : typeof error,
+        },
+        'Model-step continuation lease renewal failed'
+      )
+      throw new ContinuationLeaseRenewalError()
+    }
+  }
+
   private startContinuationLease(
     sessionKey: string,
     continuation: ModelStepContinuationRef,
@@ -933,11 +967,7 @@ export class TaskExecutor {
     }
     const renewedAt = Date.now()
     if (
-      !(await support.store.renewLease(
-        resolveTaskSessionKey(this.task),
-        continuation.fence,
-        support.claimLeaseMs
-      ))
+      !(await this.renewContinuationClaim(resolveTaskSessionKey(this.task), continuation, support))
     ) {
       this.continuationFenceLost = true
       throw new Error('Model-step continuation claim was lost during approval')
@@ -1033,7 +1063,7 @@ export class TaskExecutor {
     const message = this.task.sourceMessage
     if (!support || !message) throw new Error('Model-step continuation execution is not wired')
     const sessionKey = resolveTaskSessionKey(this.task)
-    if (!(await support.store.renewLease(sessionKey, continuation.fence, support.claimLeaseMs))) {
+    if (!(await this.renewContinuationClaim(sessionKey, continuation, support))) {
       this.continuationFenceLost = true
       this.failContinuationPreparation({ kind: 'lost' })
       return undefined
@@ -1151,7 +1181,7 @@ export class TaskExecutor {
     }
     this.executionBudget.assertTime()
     // Preparation can outlast a lease. Fence again before reopening the turn.
-    if (!(await support.store.renewLease(sessionKey, continuation.fence, support.claimLeaseMs))) {
+    if (!(await this.renewContinuationClaim(sessionKey, continuation, support))) {
       this.continuationFenceLost = true
       this.failContinuationPreparation({ kind: 'lost' })
       return undefined
@@ -1711,7 +1741,8 @@ export class TaskExecutor {
       }
     } catch (error) {
       if (this.task.modelStepContinuation && !this.continuationClaimReleased) {
-        await this.continuationCleanup('abandon', () => this.abandonModelStepContinuation())
+        if (!(error instanceof ContinuationLeaseRenewalError))
+          await this.continuationCleanup('abandon', () => this.abandonModelStepContinuation())
         await this.continuationCleanup('fail_turn', () => this.failContinuationTurn())
       }
       if (this.task.modelStepContinuation && this.continuationFenceLost) {

@@ -353,11 +353,13 @@ async function runContinuation(
   onComplete: ReturnType<typeof vi.fn<(task: Task) => void>>
   onApprovalNeeded: ReturnType<typeof vi.fn>
   verdict: ReturnType<typeof vi.fn>
+  admissionError: ReturnType<typeof vi.fn<(error: Error) => void>>
 }> {
   const onFail = vi.fn<(task: Task, error: TaskError) => void>()
   const onComplete = vi.fn<(task: Task) => void>()
   const onApprovalNeeded = vi.fn()
   const verdict = vi.fn(options.onVerdict)
+  const admissionError = vi.fn<(error: Error) => void>()
   const taskId = options.taskId ?? 'task-continuation-b2'
   const task: Task = {
     id: taskId,
@@ -371,10 +373,13 @@ async function runContinuation(
       { role: 'user', content: fixture.message.content, timestamp: new Date(NOW) },
     ],
     responseCallback: vi.fn(async () => {}),
-    modelStepContinuation: continuationRef(fixture, verdict, {
-      taskId: options.taskId,
-      fence: options.fence,
-    }),
+    modelStepContinuation: {
+      ...continuationRef(fixture, verdict, {
+        taskId: options.taskId,
+        fence: options.fence,
+      }),
+      onAdmissionError: admissionError,
+    },
   }
   const lifecycle = new TaskLifecycle()
   lifecycle.register(task)
@@ -414,7 +419,7 @@ async function runContinuation(
     // Keep the caller-supplied event emitter observable even if other deps change.
     ...(options.events ? { coreEvents: options.events } : {}),
   } satisfies TaskExecutorDeps)
-  return { task, executor, onFail, onComplete, onApprovalNeeded, verdict }
+  return { task, executor, onFail, onComplete, onApprovalNeeded, verdict, admissionError }
 }
 
 async function expireAndReclaimFixture(
@@ -1627,6 +1632,109 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
       }),
     ])
   })
+
+  it.each(['initial preparation', 'pre-reopen preparation'] as const)(
+    'R2-M6 keeps a claimed checkpoint when %s renewal throws',
+    async stage => {
+      const fixture = await claimedCheckpoint({})
+      const logged = vi.spyOn(logger, 'error').mockImplementation(() => {})
+      const realRenew = fixture.checkpoints.renewLease.bind(fixture.checkpoints)
+      const renewal = vi.spyOn(fixture.checkpoints, 'renewLease')
+      if (stage === 'pre-reopen preparation') renewal.mockImplementationOnce(realRenew)
+      renewal.mockRejectedValueOnce(new Error('temporary SQLite worker failure'))
+      const llm = provider()
+      const run = await runContinuation(fixture, llm)
+
+      await run.executor.run()
+      await fixture.handle.persistQueue.drain()
+
+      expect(renewal).toHaveBeenCalledTimes(stage === 'initial preparation' ? 1 : 2)
+      expect(logged).toHaveBeenCalledWith(
+        {
+          taskId: run.task.id,
+          checkpointId: fixture.fence.checkpointId,
+          op: 'renew_lease',
+          errorName: 'Error',
+        },
+        'Model-step continuation lease renewal failed'
+      )
+      expect(run.onFail).toHaveBeenCalledTimes(1)
+      expect(run.onFail.mock.calls[0]![1]).toMatchObject({
+        code: LlmErrorCode.ApiCallFailed,
+        message: 'Model-step continuation lease renewal failed',
+      })
+      expect(llm.calls()).toBe(0)
+      expect(run.verdict).not.toHaveBeenCalled()
+      expect(run.admissionError).toHaveBeenCalledTimes(1)
+      expect(run.admissionError.mock.calls[0]![0].message).toBe(
+        'Model-step continuation lease renewal failed'
+      )
+      expect(header(fixture.handle).status).toBe('claimed')
+      expect(
+        (run.executor as unknown as { continuationLeaseStop: unknown }).continuationLeaseStop
+      ).toBeUndefined()
+    }
+  )
+
+  it.each(['before approval', 'before dispatch'] as const)(
+    'R2-M6 keeps the claimed checkpoint when approval renewal throws %s',
+    async stage => {
+      Object.assign(appConfig, { enableApproval: true })
+      const fixture = await claimedCheckpoint({})
+      const llm = provider(undefined, () => ({
+        calls: [
+          { id: 'approval-renewal', name: 'shell_exec', arguments: { command: 'printf held' } },
+        ],
+      }))
+      const run = await runContinuation(fixture, llm, {
+        deps: {
+          approvalConfig: {
+            defaultPolicy: 'channel_users',
+            channels: {},
+            tools: { shell_exec: true },
+          },
+        },
+      })
+      await run.executor.run()
+      expect(run.onApprovalNeeded).toHaveBeenCalledTimes(1)
+      const logged = vi.spyOn(logger, 'error').mockImplementation(() => {})
+      const realRenew = fixture.checkpoints.renewLease.bind(fixture.checkpoints)
+      const renewal = vi.spyOn(fixture.checkpoints, 'renewLease')
+      if (stage === 'before dispatch') renewal.mockImplementationOnce(realRenew)
+      renewal.mockRejectedValueOnce(new Error('temporary SQLite worker failure'))
+
+      await run.executor.resumeAfterApproval(true)
+      await fixture.handle.persistQueue.drain()
+
+      expect(renewal).toHaveBeenCalledTimes(stage === 'before approval' ? 1 : 2)
+      expect(logged).toHaveBeenCalledWith(
+        {
+          taskId: run.task.id,
+          checkpointId: fixture.fence.checkpointId,
+          op: 'renew_lease',
+          errorName: 'Error',
+        },
+        'Model-step continuation lease renewal failed'
+      )
+      expect(run.onFail).toHaveBeenCalledTimes(1)
+      expect(run.onFail.mock.calls[0]![1]).toMatchObject({
+        code: LlmErrorCode.ApiCallFailed,
+        message: 'Model-step continuation lease renewal failed',
+      })
+      expect(llm.calls()).toBe(1)
+      expect(header(fixture.handle).status).toBe('claimed')
+      expect(
+        fixture.handle.worker.db
+          .prepare(
+            "SELECT kind FROM model_step_checkpoint_entries WHERE checkpoint_id = ? AND tool_call_id = ? AND kind = 'tool_dispatch'"
+          )
+          .all(fixture.fence.checkpointId, 'approval-renewal')
+      ).toEqual([])
+      expect(
+        (run.executor as unknown as { continuationLeaseStop: unknown }).continuationLeaseStop
+      ).toBeUndefined()
+    }
+  )
 
   it('11b. a provider outage after approval retries without executing the approved tool again', async () => {
     Object.assign(appConfig, { enableApproval: true })

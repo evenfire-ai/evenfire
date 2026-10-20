@@ -142,6 +142,8 @@ export interface ModelStepContinuationRef {
    * POST can answer within its bounded wait.
    */
   onVerdict: (verdict: ModelStepContinuationVerdict) => void
+  /** Rejects the admission wait when a pre-executor operation fails. */
+  onAdmissionError?: (error: Error) => void
 }
 
 export type ModelStepContinuationVerdict =
