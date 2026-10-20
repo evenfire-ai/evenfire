@@ -25,6 +25,10 @@ import { OperatorConfig, loadConfig } from '../config'
 import { getPool } from '../db'
 import { createLogger } from '../observability/logger'
 import {
+  TRANSPORT_NETWORK_CONDITION_TYPE,
+  hasPendingTransportNetworkReadiness,
+} from '../recipePredicates'
+import {
   ConfigMapResourceDef,
   CronJobDef,
   DaemonSetDef,
@@ -182,17 +186,9 @@ const WORKFLOW_ACTOR_TYPE_LABEL = 'clerum.io/workflow-actor-type'
  * to write it; `replaceResource` then skips its "Updated resource" log.
  */
 const NO_WRITE = Symbol('no-write')
-export const TRANSPORT_NETWORK_CONDITION_TYPE = 'TransportExternalEgressReady'
+// Issue #1016: defined in `recipePredicates.ts`; re-exported so existing imports keep working.
+export { TRANSPORT_NETWORK_CONDITION_TYPE, hasPendingTransportNetworkReadiness }
 const TRANSPORT_NETWORK_CONDITION_TYPES = new Set([TRANSPORT_NETWORK_CONDITION_TYPE])
-
-export function hasPendingTransportNetworkReadiness(recipe: WorkflowRecipeCRD): boolean {
-  return (
-    recipe.status?.conditions?.some(
-      condition =>
-        condition.type === TRANSPORT_NETWORK_CONDITION_TYPE && condition.status !== 'True'
-    ) ?? false
-  )
-}
 
 function pendingTransportNetworkConditions(
   recipe: WorkflowRecipeCRD,

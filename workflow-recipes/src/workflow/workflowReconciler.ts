@@ -201,8 +201,23 @@ const DEFAULT_WORKFLOW_OUTPUT_STORAGE_SIZE = '256Mi'
 const WORKFLOW_OUTPUT_PVC_DELETE_WAIT_MS = 30_000
 const WORKFLOW_OUTPUT_PVC_DELETE_POLL_MS = 1_000
 const MAX_WORKFLOW_OUTPUT_PREPARE_ATTEMPTS = 3
-const MIN_RUNTIME_TOKEN_FILE_REFRESH_LEAD_SECONDS = 75
+export const MIN_RUNTIME_TOKEN_FILE_REFRESH_LEAD_SECONDS = 75
 const RUNTIME_TOKEN_REFRESH_EXPIRY_SAFETY_SECONDS = 5
+
+/** Issue #1016 — shared by the WR getter and the WRC steady backstop so they cannot drift. */
+export function runtimeTokenFileRefreshLeadSeconds(config: {
+  runtimeTokenTtlSeconds: number
+  runtimeTokenRefreshBeforeSeconds: number
+}): number {
+  const maxLead = Math.max(
+    1,
+    config.runtimeTokenTtlSeconds - RUNTIME_TOKEN_REFRESH_EXPIRY_SAFETY_SECONDS
+  )
+  return Math.min(
+    maxLead,
+    Math.max(config.runtimeTokenRefreshBeforeSeconds, MIN_RUNTIME_TOKEN_FILE_REFRESH_LEAD_SECONDS)
+  )
+}
 const MAX_SNIPPET_CODE_LENGTH = 20_000
 const SNIPPET_SECRET_ALIAS_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
 const CONTROL_PLANE_ADMIN_USAGE_USER_PREFIX = 'admin-ui/'
@@ -1746,14 +1761,7 @@ export class WorkflowReconciler {
   }
 
   private get runtimeTokenFileRefreshBeforeSeconds(): number {
-    const maxLead = Math.max(
-      1,
-      this.deps.config.runtimeTokenTtlSeconds - RUNTIME_TOKEN_REFRESH_EXPIRY_SAFETY_SECONDS
-    )
-    return Math.min(
-      maxLead,
-      Math.max(this.runtimeTokenRefreshBeforeSeconds, MIN_RUNTIME_TOKEN_FILE_REFRESH_LEAD_SECONDS)
-    )
+    return runtimeTokenFileRefreshLeadSeconds(this.deps.config)
   }
 
   validateWorkflowSpec(spec: WorkflowRecipeSpec): string | undefined {
