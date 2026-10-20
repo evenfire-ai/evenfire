@@ -15,6 +15,8 @@ export const DOCUMENT_MIN_RESIDENT_BYTES = 128 * MIB
 export interface DocumentCgroupMemory {
   maxBytes: number | null
   currentBytes: number
+  /** File-backed pages on the inactive LRU: reclaimable page cache. */
+  inactiveFileBytes: number
 }
 
 function memoryBytes(value: string): number {
@@ -24,6 +26,33 @@ function memoryBytes(value: string): number {
     throw new Error('Document reader cgroup memory unavailable')
   }
   return bytes
+}
+
+/** One flat-keyed `memory.stat` counter; a missing or duplicated key is a defect. */
+function statBytes(stat: string, key: string): number {
+  let value: number | undefined
+  for (const line of stat.split('\n')) {
+    const match = /^([a-z_]+) (\S+)$/.exec(line)
+    if (match?.[1] !== key) continue
+    if (value !== undefined) throw new Error('Document reader cgroup memory unavailable')
+    value = memoryBytes(match[2]!)
+  }
+  if (value === undefined) throw new Error('Document reader cgroup memory unavailable')
+  return value
+}
+
+/**
+ * The kubelet working set: `memory.current` minus file pages on the inactive
+ * LRU. Those pages are reclaimable cache, so counting them as used refuses
+ * readers on a warm Host whose anonymous memory is small. `file` is not
+ * subtracted because it includes shmem, and `active_file` is not subtracted
+ * because kubelet counts it. `memory.current` and `memory.stat` are separate
+ * reads, so a concurrent write can grow inactive_file past the earlier current
+ * snapshot; the clamp keeps that race from becoming a defect (cadvisor does the
+ * same).
+ */
+export function documentCgroupWorkingSetBytes(memory: DocumentCgroupMemory): number {
+  return Math.max(0, memory.currentBytes - memory.inactiveFileBytes)
 }
 
 /**
@@ -51,12 +80,17 @@ export function documentCgroupSampler(
       if (directory !== root && !directory.startsWith(root + sep)) {
         throw new Error('Document reader cgroup memory unavailable')
       }
-      const [maximum, current] = await Promise.all([
+      const [maximum, current, stat] = await Promise.all([
         readFile(resolve(directory, 'memory.max'), 'utf8'),
         readFile(resolve(directory, 'memory.current'), 'utf8'),
+        readFile(resolve(directory, 'memory.stat'), 'utf8'),
       ])
       const maxBytes = maximum.trim() === 'max' ? null : memoryBytes(maximum)
-      return { maxBytes, currentBytes: memoryBytes(current) }
+      return {
+        maxBytes,
+        currentBytes: memoryBytes(current),
+        inactiveFileBytes: statBytes(stat, 'inactive_file'),
+      }
     } catch {
       // File errors are fixed-message defects and cannot expose Host paths.
       throw new Error('Document reader cgroup memory unavailable')
@@ -78,7 +112,8 @@ export function effectiveDocumentMemoryCaps(
   if (cgroup?.maxBytes === null || cgroup === null) {
     return { maxResidentBytes: configuredResidentBytes, maxHeapMb: limits.maxHeapMb }
   }
-  const headroom = cgroup.maxBytes - cgroup.currentBytes - DOCUMENT_CGROUP_MARGIN_BYTES
+  const headroom =
+    cgroup.maxBytes - documentCgroupWorkingSetBytes(cgroup) - DOCUMENT_CGROUP_MARGIN_BYTES
   const maxResidentBytes = Math.min(configuredResidentBytes, headroom)
   const maxHeapMb = Math.min(
     limits.maxHeapMb,

@@ -125,7 +125,7 @@ describe('document reader Host memory admission and queue', () => {
 
   it('reads headroom and refuses the floor without spawning, then admits a live reader', async () => {
     let currentBytes = 321 * MIB
-    const sample = vi.fn(async () => ({ maxBytes: 512 * MIB, currentBytes }))
+    const sample = vi.fn(async () => ({ maxBytes: 512 * MIB, currentBytes, inactiveFileBytes: 0 }))
     samplers(sample)
     const child = childFixture()
     vi.mocked(spawn).mockReturnValueOnce(child)
@@ -142,11 +142,34 @@ describe('document reader Host memory admission and queue', () => {
     expect((await admitted).ok).toBe(true)
   })
 
+  it('admits on the working set when the same current is reclaimable cache', async () => {
+    let memory: documentMemory.DocumentCgroupMemory = {
+      maxBytes: 512 * MIB,
+      currentBytes: 468 * MIB,
+      inactiveFileBytes: 0,
+    }
+    const sample = vi.fn(async () => memory)
+    samplers(sample)
+    const child = childFixture()
+    vi.mocked(spawn).mockReturnValueOnce(child)
+    // Liveness: with no reclaimable cache this current refuses without spawning.
+    expect(await runDocumentJob(job)).toEqual({ ok: false, reason: 'host_memory_unavailable' })
+    expect(spawn).toHaveBeenCalledTimes(0)
+    memory = { ...memory, inactiveFileBytes: 403 * MIB }
+    const admitted = runDocumentJob(job)
+    await vi.waitFor(() => expect(child.send).toHaveBeenCalledTimes(1))
+    expect(spawn).toHaveBeenCalledTimes(1)
+    // 512 - 65 working set - 64 margin = 383 MiB resident, 319 MiB heap.
+    expect(vi.mocked(spawn).mock.calls[0]?.[1]).toContain('--max-old-space-size=319')
+    finish(child)
+    expect((await admitted).ok).toBe(true)
+  })
+
   it('rejects unreadable Linux headroom as a defect and admits a measured control', async () => {
     const sample = vi
       .fn<() => Promise<documentMemory.DocumentCgroupMemory | null>>()
       .mockRejectedValueOnce(new Error('unreadable cgroup'))
-      .mockResolvedValue({ maxBytes: 512 * MIB, currentBytes: 128 * MIB })
+      .mockResolvedValue({ maxBytes: 512 * MIB, currentBytes: 128 * MIB, inactiveFileBytes: 0 })
     samplers(sample)
     await expect(runDocumentJob(job)).rejects.toThrow('Document reader worker failed')
     expect(sample).toHaveBeenCalledTimes(1)
@@ -161,7 +184,7 @@ describe('document reader Host memory admission and queue', () => {
 
   it('kills for concurrent Host growth even while the child RSS is below its cap', async () => {
     let currentBytes = 128 * MIB
-    const sample = vi.fn(async () => ({ maxBytes: 512 * MIB, currentBytes }))
+    const sample = vi.fn(async () => ({ maxBytes: 512 * MIB, currentBytes, inactiveFileBytes: 0 }))
     const rss = samplers(sample)
     const child = childFixture()
     vi.mocked(spawn).mockReturnValueOnce(child)
@@ -180,8 +203,38 @@ describe('document reader Host memory admission and queue', () => {
     expect(await rss()).toBe(MIB)
   })
 
+  it('ignores reclaimable page cache mid-job and kills only when the working set grows', async () => {
+    let memory: documentMemory.DocumentCgroupMemory = {
+      maxBytes: 512 * MIB,
+      currentBytes: 468 * MIB,
+      inactiveFileBytes: 403 * MIB,
+    }
+    const sample = vi.fn(async () => memory)
+    const rss = samplers(sample)
+    const child = childFixture()
+    vi.mocked(spawn).mockReturnValueOnce(child)
+    const pending = runDocumentJob(job)
+    await vi.waitFor(() => expect(rss).toHaveBeenCalled())
+    await new Promise<void>(resolve => setTimeout(resolve, 80))
+    // Working set is 65 MiB: several samples stay below the 448 MiB fence.
+    expect(sample.mock.calls.length).toBeGreaterThan(2)
+    expect(child.send).toHaveBeenCalledTimes(1)
+    expect(child.signalCode).toBeNull()
+    memory = { ...memory, inactiveFileBytes: 0 }
+    expect(await pending).toEqual({
+      ok: false,
+      reason: 'document_limits_exceeded',
+      limit: 'heap',
+    })
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL')
+  })
+
   it('starts the second job only after the first settles and rereads its headroom', async () => {
-    const sample = vi.fn(async () => ({ maxBytes: 512 * MIB, currentBytes: 128 * MIB }))
+    const sample = vi.fn(async () => ({
+      maxBytes: 512 * MIB,
+      currentBytes: 128 * MIB,
+      inactiveFileBytes: 0,
+    }))
     samplers(sample)
     const firstChild = childFixture()
     const secondChild = childFixture()

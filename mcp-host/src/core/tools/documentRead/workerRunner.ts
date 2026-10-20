@@ -4,6 +4,7 @@ import { serialize } from 'node:v8'
 import {
   DOCUMENT_CGROUP_MARGIN_BYTES,
   documentCgroupSampler,
+  documentCgroupWorkingSetBytes,
   effectiveDocumentMemoryCaps,
 } from './documentMemory'
 import { residentMemorySampler } from './residentMemory'
@@ -329,7 +330,7 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
             !exited &&
             cgroup?.maxBytes !== null &&
             cgroup !== null &&
-            cgroup.currentBytes >= cgroup.maxBytes - DOCUMENT_CGROUP_MARGIN_BYTES
+            documentCgroupWorkingSetBytes(cgroup) >= cgroup.maxBytes - DOCUMENT_CGROUP_MARGIN_BYTES
           ) {
             terminate({ ok: false, reason: 'document_limits_exceeded', limit: 'heap' })
             return
