@@ -325,6 +325,35 @@ describe('document reader child runner', () => {
   })
 
   it.each([
+    [
+      'an XLSX character stop',
+      {
+        ok: true,
+        sheetNames: ['Sheet1'],
+        sheets: [{ ...VALID_SHEET, truncated: true }],
+        next: { sheetIndex: 0, row: 2 },
+        stoppedBy: 'max_extracted_chars',
+      },
+    ],
+    [
+      'a first row over the character limit',
+      { ok: false, reason: 'document_limits_exceeded', limit: 'row_width' },
+    ],
+  ])('accepts %s from the XLSX producer, and refuses an unknown stop', async (_name, message) => {
+    const accepted = runDocumentJob(job(await valuesWorkbook(witnessCode())))
+    ;(await liveChild()).emit('message', message)
+    await expect(accepted).resolves.toEqual(message)
+
+    vi.mocked(spawn).mockClear()
+    const refused = runDocumentJob(job(await valuesWorkbook(witnessCode())))
+    ;(await liveChild()).emit('message', {
+      ...message,
+      ...(message.ok ? { stoppedBy: 'max_bytes' } : { limit: 'row_bytes' }),
+    })
+    await expect(refused).rejects.toThrow('Document reader worker failed')
+  })
+
+  it.each([
     { ok: true, pageCount: 1, pages: [{ page: 0, text: 'x', from: 0, to: 1, lowText: false }] },
     { ok: true, pageCount: 0, pages: [] },
     {

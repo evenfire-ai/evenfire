@@ -104,7 +104,8 @@ export type DocumentLimitName =
   | 'output_bytes'
   | 'time'
   | 'heap'
-  /** One worksheet row alone does not fit a full page allowance. */
+  /** One worksheet row alone does not fit a full page allowance or the
+   * per-call extracted-character limit. */
   | 'row_width'
 
 // Key order is part of the contract, as in `clerum__attachment_read`: status,
@@ -362,7 +363,7 @@ export type XlsxOutcome =
       sheetNames: string[]
       sheets: XlsxSheetResult[]
       next?: XlsxPosition
-      stoppedBy?: 'max_rows' | 'max_cells'
+      stoppedBy?: 'max_rows' | 'max_cells' | 'max_extracted_chars'
     }
   | DocumentJobFailure
 

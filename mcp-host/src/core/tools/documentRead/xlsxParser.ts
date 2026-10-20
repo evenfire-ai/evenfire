@@ -154,6 +154,9 @@ function readWorkbook(job: XlsxJob, workbook: ExcelJS.Workbook): XlsxOutcome {
   const sheets: XlsxSheetResult[] = []
   let rowCount = 0
   let cellCount = 0
+  // Serialized row size, padding and escapes included, so the outcome the
+  // Host receives and measures stays bounded whatever the cells hold.
+  let charCount = 0
   for (const selected of selection) {
     const startRow = selected.sheetIndex === sheetIndex ? row : 1
     const sheet: XlsxSheetResult = {
@@ -164,6 +167,12 @@ function readWorkbook(job: XlsxJob, workbook: ExcelJS.Workbook): XlsxOutcome {
     }
     for (let rowNumber = startRow; rowNumber <= selected.lastRow; rowNumber += 1) {
       const values = readRow(selected.worksheet.findRow(rowNumber))
+      const rowChars = JSON.stringify(values).length
+      // A first row over the character limit can never be returned whole;
+      // cells are not cut, because Host redaction needs complete values.
+      if (rowCount === 0 && rowChars > job.limits.maxExtractedChars) {
+        return { ok: false, reason: 'document_limits_exceeded', limit: 'row_width' }
+      }
       // The first row of a call is always returned, so every continuation
       // advances even when one row alone is wider than the cell limit.
       const stoppedBy =
@@ -171,7 +180,9 @@ function readWorkbook(job: XlsxJob, workbook: ExcelJS.Workbook): XlsxOutcome {
           ? 'max_rows'
           : rowCount > 0 && cellCount + values.length > job.limits.maxCellsPerCall
             ? 'max_cells'
-            : undefined
+            : rowCount > 0 && charCount + rowChars > job.limits.maxExtractedChars
+              ? 'max_extracted_chars'
+              : undefined
       if (stoppedBy) {
         sheet.truncated = true
         if (sheet.rows.length > 0 || job.sheet !== null) sheets.push(sheet)
@@ -186,6 +197,7 @@ function readWorkbook(job: XlsxJob, workbook: ExcelJS.Workbook): XlsxOutcome {
       sheet.rows.push(values)
       rowCount += 1
       cellCount += values.length
+      charCount += rowChars
     }
     if (sheet.rows.length > 0 || job.sheet !== null) sheets.push(sheet)
   }

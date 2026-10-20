@@ -156,7 +156,9 @@ describe('document reader real-process memory limits', () => {
   it('bounds shared-string fan-out inside the child before IPC with a 32 MiB Host bound', async () => {
     // Review baseline: 100k copies of 2000 chars added about 533 MB to the Host.
     const bytes = await sharedStringWorkbook(20_000, 2_000)
-    const limits = documentLimits({ maxOutputBytes: MiB })
+    // The character budget would stop this read first; lifting it here keeps
+    // the child's own output_bytes check under test.
+    const limits = documentLimits({ maxOutputBytes: MiB, maxExtractedChars: 100_000_000 })
     expect((await runDocumentJob(xlsx(await valuesWorkbook(witnessCode()), limits))).ok).toBe(true)
     const before = process.memoryUsage().rss
     const previousSpawns = vi.mocked(spawn).mock.calls.length

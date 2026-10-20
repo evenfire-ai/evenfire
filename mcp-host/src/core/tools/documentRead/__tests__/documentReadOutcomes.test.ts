@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createCanvas, loadImage } from '@napi-rs/canvas'
+import ExcelJS from 'exceljs'
 import { createHash } from 'node:crypto'
 import { PDFDocument } from 'pdf-lib'
 import type { IncomingMessage } from '../../../../server/types'
@@ -343,4 +344,48 @@ describe('document reader Tool outcomes through real child readers', () => {
     const file = admittedFile('formulas', await valuesWorkbook(witnessCode()), XLSX_MIME)
     expect(tool(file).description()).toContain('[formula] =<formula>')
   })
+
+  it('measures only bounded candidates for a large workbook and advances its cursor (zach88 H1)', async () => {
+    const workbook = new ExcelJS.Workbook()
+    workbook
+      .addWorksheet('Large')
+      .addRows(
+        Array.from({ length: 5_000 }, (_, row) =>
+          Array.from({ length: 20 }, (_, column) => `${row}:${column}:${'x'.repeat(300)}`)
+        )
+      )
+    const file = admittedFile('large', Buffer.from(await workbook.xlsx.writeBuffer()), XLSX_MIME)
+    const limits = documentLimits({ timeoutMs: 30_000 })
+    const measured: number[] = []
+    const measuring = (): ExecutionContext => ({
+      ...context(),
+      measureResult: raw => {
+        measured.push(raw.length)
+        return Math.ceil(Buffer.byteLength(raw) / 4) + 4
+      },
+    })
+    const reader = tool(file, limits)
+    const first = JSON.parse((await reader.execute({ attachmentId: file.id }, measuring())).content)
+    expect(first.status).toBe('ok')
+    expect(first.sheets[0].startRow).toBe(1)
+    expect(measured.length).toBeGreaterThan(0)
+    expect(Math.max(...measured)).toBeLessThanOrEqual(limits.maxExtractedChars + 4_096)
+
+    const second = JSON.parse(
+      (
+        await reader.execute(
+          { attachmentId: file.id, cursor: first.continuation.cursor },
+          measuring()
+        )
+      ).content
+    )
+    expect(second.status).toBe('ok')
+    expect(second.sheets[0].startRow).toBe(first.sheets[0].rows.length + 1)
+    expect(Math.max(...measured)).toBeLessThanOrEqual(limits.maxExtractedChars + 4_096)
+
+    // Witness: a small workbook is read through the same path.
+    const small = admittedFile('small', await valuesWorkbook(witnessCode()), XLSX_MIME)
+    const control = await tool(small, limits).execute({ attachmentId: small.id }, measuring())
+    expect(JSON.parse(control.content)).toMatchObject({ status: 'ok', format: 'xlsx' })
+  }, 90_000)
 })

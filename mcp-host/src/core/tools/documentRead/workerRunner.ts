@@ -41,6 +41,7 @@ const LIMIT_NAMES: ReadonlySet<unknown> = new Set<DocumentLimitName>([
   'output_bytes',
   'time',
   'heap',
+  'row_width',
 ])
 
 const isCount = (value: unknown, minimum = 0): value is number =>
@@ -142,7 +143,7 @@ function isJobOutcome(kind: DocumentJob['kind'], message: unknown): boolean {
             isCount(message.next.sheetIndex) &&
             message.next.sheetIndex < message.sheetNames.length &&
             isCount(message.next.row, 1))) &&
-        hasStopReason(message, ['max_rows', 'max_cells'])
+        hasStopReason(message, ['max_rows', 'max_cells', 'max_extracted_chars'])
       )
   }
 }
