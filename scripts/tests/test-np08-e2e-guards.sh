@@ -12,6 +12,8 @@ MAKEFILE="${ROOT}/Makefile"
 source "${ROOT}/scripts/e2e/_lib/np08-cleanup.sh"
 # shellcheck source=scripts/e2e/_lib/np08-provenance.sh
 source "${ROOT}/scripts/e2e/_lib/np08-provenance.sh"
+# shellcheck source=scripts/e2e/_lib/np08-rollout.sh
+source "${ROOT}/scripts/e2e/_lib/np08-rollout.sh"
 
 # Consumed dynamically by the sourced cleanup helper.
 # shellcheck disable=SC2034
@@ -229,3 +231,88 @@ pass 'CI validates NP-08 wiring statically without cluster writes'
 node --check "${RUNTIME_ACCESS_MODULE}"
 node --test "${RUNTIME_ACCESS_TEST}"
 pass 'NP-08 access selection and retry unit tests pass'
+
+# --- rollout settle gate (token-rotation rollout killed the journey exec) ---
+ROLLOUT_STATE_DIR="$(mktemp -d)"
+trap 'rm -rf "${ROLLOUT_STATE_DIR}"' EXIT
+
+deploy_json() {
+  local generation="$1" observed="$2" ready="$3" updated="$4" revision="$5"
+  printf '%s' "{\"metadata\":{\"generation\":${generation}},\"status\":{\"observedGeneration\":${observed},\"readyReplicas\":${ready},\"updatedReplicas\":${updated}},\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"clerum.io/runtime-token-revision\":\"${revision}\"}}}}}"
+}
+
+kctl() {
+  local args="$*"
+  case "${args}" in
+    *'get deployment'*)
+      local index_file="${ROLLOUT_STATE_DIR}/deploy-index"
+      local index=0
+      [[ -f "${index_file}" ]] && index="$(cat "${index_file}")"
+      index=$((index + 1))
+      printf '%s' "${index}" >"${index_file}"
+      case "${ROLLOUT_SCENARIO:-settle}" in
+        settle)
+          # rolling, revision A complete, revision B (rotation), then B stable
+          case "${index}" in
+            1) deploy_json 5 4 1 0 'rev-a' ;;
+            2) deploy_json 5 5 1 1 'rev-a' ;;
+            *) deploy_json 6 6 1 1 'rev-b' ;;
+          esac
+          ;;
+        unstable)
+          deploy_json "${index}" "${index}" 1 1 "rev-${index}"
+          ;;
+        never-ready)
+          deploy_json 5 5 0 1 'rev-a'
+          ;;
+        error)
+          return 42
+          ;;
+      esac
+      ;;
+    *'get replicaset'*|*'get rs'*)
+      printf '%s' '{"items":[{"metadata":{"name":"chatllm-current"},"spec":{"replicas":1}}]}'
+      ;;
+    *)
+      return 99
+      ;;
+  esac
+}
+
+ROLLOUT_SCENARIO='settle' \
+  np08_wait_rollout_settled 'mcp-host' 'chatllm' 30 3 0 ||
+  fail 'rollout settle rejected a rollout that completes and then stays stable'
+[[ "$(cat "${ROLLOUT_STATE_DIR}/deploy-index")" == '5' ]] ||
+  fail 'rollout settle did not wait for three identical complete snapshots'
+pass 'rollout settle waits out a token-rotation rollout and then requires stability'
+
+printf '0' >"${ROLLOUT_STATE_DIR}/deploy-index"
+if ROLLOUT_SCENARIO='unstable' np08_wait_rollout_settled 'mcp-host' 'chatllm' 1 3 0 >/dev/null 2>&1; then
+  fail 'rollout settle accepted a deployment whose token revision keeps changing'
+fi
+pass 'rollout settle fails closed while the token revision keeps changing'
+
+printf '0' >"${ROLLOUT_STATE_DIR}/deploy-index"
+if ROLLOUT_SCENARIO='never-ready' np08_wait_rollout_settled 'mcp-host' 'chatllm' 1 3 0 >/dev/null 2>&1; then
+  fail 'rollout settle accepted a deployment that never becomes ready'
+fi
+pass 'rollout settle fails closed while the deployment is not ready'
+
+printf '0' >"${ROLLOUT_STATE_DIR}/deploy-index"
+if ROLLOUT_SCENARIO='error' np08_wait_rollout_settled 'mcp-host' 'chatllm' 1 3 0 >/dev/null 2>&1; then
+  fail 'rollout settle accepted a failed deployment read'
+fi
+pass 'rollout settle fails closed on a deployment read error'
+
+if ! grep -Fq 'np08_wait_rollout_settled' "${E2E_SCRIPT}" ||
+  ! grep -Fq '_lib/np08-rollout.sh' "${E2E_SCRIPT}"; then
+  fail 'the deployed E2E is not wired to the rollout settle gate'
+fi
+patch_line="$(grep -n -m1 'fixture_context_patched=1' "${E2E_SCRIPT}" | cut -d: -f1)"
+settle_line="$(grep -n -m1 'np08_wait_rollout_settled' "${E2E_SCRIPT}" | cut -d: -f1)"
+journey_line="$(grep -n -m1 'NP08_RUNTIME_ACTION=journey' "${E2E_SCRIPT}" | cut -d: -f1)"
+if [[ -z "${patch_line}" || -z "${settle_line}" || -z "${journey_line}" ||
+  "${patch_line}" -ge "${settle_line}" || "${settle_line}" -ge "${journey_line}" ]]; then
+  fail 'the rollout settle gate is not ordered between the fixture patch and the journey exec'
+fi
+pass 'the journey exec waits for a settled mcp-host rollout after the fixture patch'
