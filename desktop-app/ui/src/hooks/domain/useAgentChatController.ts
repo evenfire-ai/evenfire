@@ -1091,7 +1091,8 @@ export function useAgentChatController({
     // A confirmed team switch changes the scope in this same batch. The chat
     // list's scope effect also drops remote rows, but only after that commit,
     // so it alone would leave the previous team's rows visible for one commit,
-    // and an old-scope read that settles before that commit would publish again.
+    // and an old-scope catalog or selected-list read that settles before that
+    // commit would publish again.
     // Every caller of `resetChat` changes the scope.
     invalidateAuthorityScope()
     hideAllRemoteRows()
@@ -3674,7 +3675,8 @@ export function useAgentChatController({
         if (!taskId) {
           // Synchronous (non-async) response — a direct reply or a structured error.
           const errorRecord = responseRecord.error as
-            { message?: string; code?: string; provider?: string } | undefined
+            | { message?: string; code?: string; provider?: string }
+            | undefined
           // Issue #654: a synchronous failure can arrive as `{error: …}` OR as
           // `{success: false}` without an error object. Both are failures — HTTP
           // 200 or a missing `success` boolean never imply success.

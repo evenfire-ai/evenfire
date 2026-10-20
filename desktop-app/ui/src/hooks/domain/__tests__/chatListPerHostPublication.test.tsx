@@ -528,7 +528,7 @@ describe('per-Host Latest sessions publication', () => {
   })
 })
 
-// H5: a cross-agent reload keeps the remote rows it already published
+// A cross-agent reload keeps the remote rows it already published
 // until that Host's new catalog arrives. Each test observes every committed
 // list, because the defect is a single frame without the row.
 describe('Latest sessions reload keeps published remote rows (H5)', () => {

@@ -460,10 +460,12 @@ export function useChatListController({
     )
   }, [])
 
-  // Discards every in-flight list read of the current scope at once. The scope
-  // effect below does the same, but only after the commit that changes the
-  // scope, so a read that settles before that commit would still pass its
-  // checks and publish into the next scope's first commit.
+  // Discards the in-flight catalog and selected-list reads of the current
+  // scope at once. The scope effect below does the same, but only after the
+  // commit that changes the scope, so such a read that settles before that
+  // commit would still pass its checks and publish into the next scope's first
+  // commit. The local phase of the Latest sessions loader does not read these
+  // generations.
   const invalidateAuthorityScope = useCallback(() => {
     requestGenerationRef.current += 1
     authorityScopeGenerationRef.current += 1

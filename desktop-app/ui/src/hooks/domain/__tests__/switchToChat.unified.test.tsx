@@ -983,7 +983,7 @@ describe('switchToChat (unified, D.4)', () => {
     expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledTimes(1)
   })
 
-  // H11 (#1110): a local chat longer than one window (80), with no server turn
+  // A local chat longer than one window (80), with no server turn
   // markers and no new history from the reconcile. The probe for older local
   // messages reads one message past the window (`limit === 1`); the double
   // rejects it and delegates every other read to the real ChatStore.
