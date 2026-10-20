@@ -10,6 +10,7 @@ import { PreparedStatements, prepareStatements } from '../statements'
 import { withBusyRetry } from './busyRetry'
 import {
   completeModelStepCheckpointWithMessage,
+  deleteDeadModelStepCheckpointAttachments,
   deleteModelStepCheckpointsOfSweptSessions,
   dispatchModelStepCheckpointOp,
   isModelStepCheckpointOp,
@@ -512,6 +513,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
                 reapedAt: nowMs,
               })
             }
+            deleteDeadModelStepCheckpointAttachments(db, nowMs)
             return out
           })
           return tx.immediate()
