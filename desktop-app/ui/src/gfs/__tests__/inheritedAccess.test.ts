@@ -36,7 +36,7 @@ function resolveView(
 }
 
 function installClerumGfs(
-  resolve: (uri: string) => Promise<ReturnType<typeof resolveView> | null>,
+  resolve: (uri: string) => Promise<Awaited<ReturnType<typeof resolveResource>> | null>,
   listGrants: (resourceId: string) => Promise<unknown[]>,
   listShares: (resourceId: string) => Promise<unknown[]>
 ) {

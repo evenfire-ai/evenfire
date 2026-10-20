@@ -3261,13 +3261,7 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
         const emptyShares = await sharesListPage([])
         const accessible = await listAccessiblePage([])
         const children = await listChildrenPage([])
-        const affordances = await affordancesResult(
-          heldAffordances(['read', 'manage_acl'], {
-            canDelegate: true,
-            grantableBits: ['read'],
-            canCreateShare: false,
-          })
-        )
+        const affordances = await affordancesResult(heldAffordances(['read', 'manage_acl']))
         let manageReadStarted = false
         Object.defineProperty(window, 'clerum', {
           configurable: true,
