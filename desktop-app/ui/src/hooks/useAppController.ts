@@ -335,8 +335,11 @@ export function useAppController() {
   const [hostAuthorityRevision, setHostAuthorityRevision] = useState(0)
   const selectedAgentRef = useRef(nav.selectedAgent)
   selectedAgentRef.current = nav.selectedAgent
+  // The Apps picker shows no active tab, so no chat is focused while it is open.
   const focusedChatAgentRef =
-    nav.activeTab?.kind === 'chat' ? (nav.activeTab.chat?.agentRef ?? null) : null
+    nav.activeTab?.kind === 'chat' && !nav.appsPickerActive
+      ? (nav.activeTab.chat?.agentRef ?? null)
+      : null
   const focusedChatAgentRefRef = useRef(focusedChatAgentRef)
   focusedChatAgentRefRef.current = focusedChatAgentRef
   const isHostAccessBlocked = useCallback(
