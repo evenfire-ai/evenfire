@@ -1608,10 +1608,32 @@ export class AgentStateMachine extends EventEmitter {
         return false
       }
       if (!continuationModel) {
-        const blocked = await this.blockUnavailableContinuation(
-          continuation,
-          resolveTaskSessionKey(task)
-        )
+        let blocked: boolean
+        try {
+          blocked = await this.blockUnavailableContinuation(
+            continuation,
+            resolveTaskSessionKey(task)
+          )
+        } catch (error) {
+          logger.error(
+            {
+              taskId: task.id,
+              checkpointId: continuation.checkpointId,
+              op: 'block_unavailable',
+              errorName: error instanceof Error ? error.name : typeof error,
+            },
+            'Model-step continuation admission failed'
+          )
+          const admissionError = new Error('Model-step continuation admission failed')
+          continuation.onAdmissionError?.(admissionError)
+          this.handleTaskFailure(task, {
+            code: LlmErrorCode.ApiCallFailed,
+            message: admissionError.message,
+            retryable: true,
+            provider: continuation.provider,
+          })
+          return false
+        }
         continuation.onVerdict(
           blocked ? { kind: 'blocked', blockedReason: 'model_unavailable' } : { kind: 'lost' }
         )

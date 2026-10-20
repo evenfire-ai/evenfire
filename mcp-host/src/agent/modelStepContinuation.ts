@@ -164,9 +164,12 @@ export class ModelStepContinuationService {
           }
     }
 
-    let resolveVerdict!: (verdict: ModelStepContinuationVerdict) => void
+    type AdmissionDecision =
+      | ModelStepContinuationVerdict
+      | { kind: 'operational_error'; error: Error }
+    let resolveVerdict!: (decision: AdmissionDecision) => void
     let verdictEmitted = false
-    const verdictPromise = new Promise<ModelStepContinuationVerdict>(resolve => {
+    const verdictPromise = new Promise<AdmissionDecision>(resolve => {
       resolveVerdict = resolve
     })
     try {
@@ -222,6 +225,11 @@ export class ModelStepContinuationService {
           verdictEmitted = true
           resolveVerdict(verdict)
         },
+        onAdmissionError: error => {
+          if (verdictEmitted) return
+          verdictEmitted = true
+          resolveVerdict({ kind: 'operational_error', error })
+        },
       }
       await this.deps.enqueue(sourceMessage, claim.taskId, continuation)
     } catch (err) {
@@ -249,9 +257,9 @@ export class ModelStepContinuationService {
     }
 
     let timer: ReturnType<typeof setTimeout> | undefined
-    let verdict: ModelStepContinuationVerdict | undefined
+    let decision: AdmissionDecision | undefined
     try {
-      verdict = await Promise.race([
+      decision = await Promise.race([
         verdictPromise,
         new Promise<undefined>(resolve => {
           timer = setTimeout(() => resolve(undefined), MODEL_STEP_CONTINUATION_VERDICT_TIMEOUT_MS)
@@ -261,6 +269,8 @@ export class ModelStepContinuationService {
     } finally {
       clearTimeout(timer)
     }
+    if (decision?.kind === 'operational_error') throw decision.error
+    const verdict = decision
     if (verdict?.kind === 'lost') return notFound()
     if (verdict?.kind === 'blocked') {
       return {

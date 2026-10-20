@@ -951,6 +951,111 @@ describe('AgentStateMachine model-step continuation model pinning (#1043)', () =
     ).toEqual({ status: 'blocked', blocked_reason: 'model_unavailable' })
   })
 
+  it('R2-L5 fails an unavailable-model transition error without inventing a checkpoint verdict', async () => {
+    const handle = makeSqliteStore()
+    handles.push(handle)
+    const { checkpoints, fence, taskBudget } = await claimedCheckpoint(handle)
+    const { stateMachine, lifecycle } = agent()
+    const llm = provider('openai')
+    stateMachine.setLLMProvider(llm as never, 'host-default-model')
+    stateMachine.setTaskModelResolver(() => null)
+    stateMachine.setModelStepCheckpoints(support(handle, checkpoints))
+    const onVerdict = vi.fn()
+    const onAdmissionError = vi.fn()
+    const responseCallback = vi.fn(async () => {})
+    const continuationTask = task(
+      {
+        checkpointId: fence.checkpointId,
+        originTaskId: 'task-origin-state-b2',
+        originTurnNumber: 1,
+        provider: PIN.provider,
+        model: PIN.model,
+        fence,
+        confirmedResults: 0,
+        taskBudget,
+        onVerdict,
+        onAdmissionError,
+      },
+      responseCallback
+    )
+    lifecycle.register(continuationTask)
+    const transition = vi
+      .spyOn(checkpoints, 'transition')
+      .mockRejectedValueOnce(new Error('temporary SQLite worker failure'))
+
+    expect(await stateMachine.executeTask(continuationTask)).toBe(false)
+    await handle.persistQueue.drain()
+
+    expect(transition).toHaveBeenCalledTimes(1)
+    expect(onAdmissionError).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ message: 'Model-step continuation admission failed' })
+    )
+    expect(responseCallback).toHaveBeenCalledTimes(1)
+    expect(delivered(responseCallback).error).toMatchObject({
+      code: LlmErrorCode.ApiCallFailed,
+      message: 'Model-step continuation admission failed',
+      retryable: true,
+      provider: PIN.provider,
+    })
+    expect(llm.calls()).toBe(0)
+    expect(onVerdict).not.toHaveBeenCalled()
+    expect(
+      handle.worker.db
+        .prepare('SELECT status FROM model_step_checkpoints WHERE checkpoint_id = ?')
+        .get(fence.checkpointId)
+    ).toEqual({ status: 'claimed' })
+  })
+
+  it('R2-L5 rejects the continuation service after the real model gate fails', async () => {
+    const handle = makeSqliteStore()
+    handles.push(handle)
+    const { checkpoints, fence } = await claimedCheckpoint(handle)
+    const version = await checkpoints.transition(SESSION_KEY, fence, {
+      from: ['claimed'],
+      to: 'resumable',
+      failedAt: NOW,
+      expiresAt: NOW + RESUMABLE_TTL_MS,
+    })
+    expect(version).not.toBeNull()
+    const { stateMachine, lifecycle } = agent()
+    stateMachine.setLLMProvider(provider('openai') as never, 'host-default-model')
+    stateMachine.setTaskModelResolver(() => null)
+    stateMachine.setModelStepCheckpoints(support(handle, checkpoints))
+    const responseCallback = vi.fn(async () => {})
+    const transition = vi
+      .spyOn(checkpoints, 'transition')
+      .mockRejectedValueOnce(new Error('temporary SQLite worker failure'))
+    const service = new ModelStepContinuationService({
+      checkpoints: support(handle, checkpoints),
+      conversationManager: stateMachine.getConversationManager(),
+      enqueue: async (sourceMessage, id, continuation) => {
+        const admitted = { ...task(continuation, responseCallback), id, sourceMessage }
+        lifecycle.register(admitted)
+        await stateMachine.executeTask(admitted)
+      },
+    })
+
+    await expect(
+      service.continue({
+        userId: USER,
+        agent: AGENT,
+        chatId: CHAT,
+        checkpointId: fence.checkpointId,
+        version: version!,
+      })
+    ).rejects.toThrow('Model-step continuation admission failed')
+    await handle.persistQueue.drain()
+
+    expect(transition).toHaveBeenCalledTimes(1)
+    expect(responseCallback).toHaveBeenCalledTimes(1)
+    expect(delivered(responseCallback).error?.code).toBe(LlmErrorCode.ApiCallFailed)
+    expect(
+      handle.worker.db
+        .prepare('SELECT status FROM model_step_checkpoints WHERE checkpoint_id = ?')
+        .get(fence.checkpointId)
+    ).toEqual({ status: 'claimed' })
+  })
+
   it('12. emits lost when the Host has no model-step checkpoint support', async () => {
     const handle = makeSqliteStore()
     handles.push(handle)
