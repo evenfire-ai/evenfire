@@ -40,7 +40,9 @@ import {
   type GfsAccessibleResource,
   type GfsChildView,
   GfsClient,
+  type GfsGrantListItem,
   type GfsHeldAffordances,
+  type GfsShareListItem,
   type GfsTransport,
   type ResolvedGfsResource,
 } from '../../../../src/gfs/uriHandler.js'
@@ -351,4 +353,99 @@ export async function affordancesTransportFailureMessage(): Promise<string> {
     if (!(error instanceof Error)) return String(error)
     return error.message
   }
+}
+
+// ── ACL list fixtures (R1-H3 inherited-access walk) ──────────────────────────
+// Appended without touching the H1/H8 helpers above; distinct names.
+
+/**
+ * Run grant rows through the real `GfsClient.listGrants` (envelope unwrap +
+ * items-array validation) and the IPC structured-clone boundary — the exact
+ * value `window.clerum.gfs.listGrants` resolves with in production. Bound to
+ * the renderer `.d.ts` return type so producer/renderer drift fails the
+ * typecheck, like the builders above.
+ */
+export async function grantsListPage(
+  items: GfsGrantListItem[]
+): Promise<Awaited<ReturnType<typeof window.clerum.gfs.listGrants>>> {
+  const client = new GfsClient(stubTransport({ items }))
+  return structuredClone(await client.listGrants({ resourceId: 'fixture-parent' }, SESSION_TOKEN))
+}
+
+/** Same as `grantsListPage` for the shares list. */
+export async function sharesListPage(
+  items: GfsShareListItem[]
+): Promise<Awaited<ReturnType<typeof window.clerum.gfs.listShares>>> {
+  const client = new GfsClient(stubTransport({ items }))
+  return structuredClone(await client.listShares({ resourceId: 'fixture-parent' }, SESSION_TOKEN))
+}
+
+/**
+ * The Error message a GfsClient read route rejects with when the server answers
+ * a non-2xx — derived, not hand-written (T1), at the same honest seam as
+ * `resolveDeniedMessage`/`affordancesFailureMessage`: a temp HTTP endpoint
+ * returns the gfsc error envelope, the real `httpClient.requestJson` mints the
+ * `ApiError`, and `surfaceGfsGrantError` appends the vetted `httpStatus=` (and
+ * `retryAfterSeconds=`) markers the renderer classifies on. Generalized over
+ * the invoked client method; the ACL wrappers below keep call sites readable.
+ */
+export async function gfsRouteFailureMessage(
+  invoke: (client: GfsClient) => Promise<unknown>,
+  status = 403,
+  body: { code: string; message: string } = {
+    code: 'forbidden',
+    message: 'not authorized',
+  }
+): Promise<string> {
+  const server = createServer((_req, res) => {
+    res.writeHead(status, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: false, error: body }))
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()))
+  try {
+    const address = server.address()
+    const port = typeof address === 'object' && address ? address.port : 0
+    const client = new GfsClient({
+      baseUrl: `http://127.0.0.1:${port}`,
+      requestJson,
+      fetchBytes: async () => new ArrayBuffer(0),
+    })
+    await invoke(client)
+    throw new Error(`expected the gfs route to reject with a ${status} failure`)
+  } catch (error) {
+    if (!(error instanceof Error)) return String(error)
+    return error.message
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
+}
+
+/** Producer-derived grants-list rejection (default: a 403 manage_acl denial). */
+export async function listGrantsFailureMessage(
+  status = 403,
+  body: { code: string; message: string } = {
+    code: 'manage_acl_required',
+    message: 'viewing the access list requires manage_acl',
+  }
+): Promise<string> {
+  return gfsRouteFailureMessage(
+    client => client.listGrants({ resourceId: 'fixture-parent' }, SESSION_TOKEN),
+    status,
+    body
+  )
+}
+
+/** Producer-derived shares-list rejection (default: a 403 manage_acl denial). */
+export async function listSharesFailureMessage(
+  status = 403,
+  body: { code: string; message: string } = {
+    code: 'manage_acl_required',
+    message: 'viewing the share list requires manage_acl',
+  }
+): Promise<string> {
+  return gfsRouteFailureMessage(
+    client => client.listShares({ resourceId: 'fixture-parent' }, SESSION_TOKEN),
+    status,
+    body
+  )
 }

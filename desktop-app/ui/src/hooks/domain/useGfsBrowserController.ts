@@ -523,11 +523,13 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       Boolean(sessionScope) && Boolean(current) && grantsListEnabled && accessState === 'active',
   })
   // Inherited access (ancestor folders' inheriting grants/shares) is derived
-  // client-side because the grants/shares GETs list only direct rows. Only
-  // FILE dialogs consume the derivation — folder dialogs keep their
-  // direct-only behavior. A derivation failure only means no inherited rows
-  // render — the direct grants/shares surfaces keep their own error
-  // reporting. Gated to the Manage dialog like the direct listings.
+  // client-side because the grants/shares GETs list only direct rows. FILES
+  // AND FOLDERS consume the derivation (the walk is kind-agnostic). A stop is
+  // reported as coverage (R1-H3): rows folded before the stop are retained
+  // with `inheritedCoverage` telling the dialog which notice to show; only a
+  // raw session 401 (or a throw the walk cannot classify) reaches
+  // `inheritedAccessError`. Gated to the Manage dialog like the direct
+  // listings.
   const inheritedAccessQuery = useQuery({
     queryKey: desktopQueryKeys.gfsInheritedAccess(
       sessionScope ?? 'anonymous',
@@ -535,9 +537,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       DRIVE
     ),
     queryFn: () => deriveGfsInheritedAccess(current!.resourceId, DRIVE),
-    // FILES AND FOLDERS: a folder Manage dialog must show the identities its
-    // ancestors grant (the walk is kind-agnostic — it resolves the target and
-    // follows parent resource ids), so only the dialog + session gates apply.
     enabled:
       Boolean(sessionScope) && Boolean(current) && grantsListEnabled && accessState === 'active',
   })
@@ -884,9 +883,15 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     [authorityPending, sharesQuery.data]
   )
   const inheritedAccess = useMemo(
-    () => (authorityPending || accessState === 'revoked' ? [] : (inheritedAccessQuery.data ?? [])),
+    () =>
+      authorityPending || accessState === 'revoked' ? [] : (inheritedAccessQuery.data?.items ?? []),
     [accessState, authorityPending, inheritedAccessQuery.data]
   )
+  // R1-H3: coverage of the walk that produced `inheritedAccess` (null while
+  // never loaded). The scope/revoked guard above intentionally does NOT apply:
+  // coverage describes the observation, and a revoked session empties the
+  // rows through that guard instead.
+  const inheritedCoverage = inheritedAccessQuery.data?.coverage ?? null
   const accessibleErrorMessage = accessibleQuery.error ? toMessage(accessibleQuery.error) : null
   // The timestamp is a dependency in its own right, not decoration. It is the
   // only thing that distinguishes two consecutive failures carrying the same
@@ -1363,16 +1368,18 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     sharesError: sharesQuery.error,
     loadingShares: sharesQuery.isFetching,
     refreshShares,
-    // Client-derived ancestor access for FILE Manage dialogs: normal-looking
-    // toggleable rows whose edits route through the parent-folder
-    // confirmation. Per-ancestor failures inside the derivation stay silent;
-    // a total failure is reported through inheritedAccessError.
+    // Client-derived ancestor access for FILE AND FOLDER Manage dialogs:
+    // normal-looking toggleable rows whose edits route through the
+    // parent-folder confirmation. Rows folded before a walk stop are always
+    // retained (R1-H3); the stop itself is reported through
+    // inheritedCoverage/inheritedAccessError.
     inheritedAccess,
+    inheritedCoverage,
     loadingInheritedAccess: inheritedAccessQuery.isFetching,
-    // A TOTAL derivation failure surfaces as this message; the Share dialog
-    // renders a quiet notice because "no inherited rows" would silently read
-    // as "no one else has access". Per-ancestor best-effort skipping stays
-    // silent by design.
+    // Only an UNCLASSIFIED throw (today: a raw session 401) surfaces here; the
+    // dialog renders a quiet notice because "no inherited rows" would silently
+    // read as "no one else has access". Walk stops with classified coverage
+    // are reported through inheritedCoverage instead.
     inheritedAccessError: inheritedAccessQuery.error ? toMessage(inheritedAccessQuery.error) : null,
     refreshInheritedAccess,
     revokeShare: (shareId: string) => revokeShareMutation.mutateAsync(shareId),

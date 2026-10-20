@@ -95,3 +95,24 @@ export interface GfsInheritedAccessItem {
   /** Every contributing ancestor folder, nearest first (R1-H1). */
   sources: GfsInheritedAccessSource[]
 }
+
+/**
+ * Terminal coverage of one inherited-access walk (R1-H3, permissions.md T1).
+ * Every non-`complete` state still carries the rows folded so far — known
+ * authorized sources are retained and stay editable; the state only decides
+ * which notice the dialog shows.
+ */
+export type GfsInheritedCoverageState =
+  | 'complete'
+  /** Resolve 403 above the readable chain: an expected privacy boundary. */
+  | 'read-boundary'
+  /** A readable ancestor's grants/shares list answered 403 (no manage_acl). */
+  | 'acl-limited'
+  /** missing / rate-limited / retryable / error / cycle / depth-cap. */
+  | 'unavailable'
+
+/** `deriveGfsInheritedAccess` result: retained rows plus honest coverage. */
+export interface GfsInheritedAccessResult {
+  items: GfsInheritedAccessItem[]
+  coverage: GfsInheritedCoverageState
+}

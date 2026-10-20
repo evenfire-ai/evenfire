@@ -1904,6 +1904,72 @@ describe('FilesPage', () => {
     ).toContain('Editor')
   })
 
+  // R1-H3: a visibility boundary keeps the known rows AND shows the accurate
+  // boundary notice — not the load-failure copy — on the existing banner.
+  it('renders retained inherited rows alongside the read-boundary notice', async () => {
+    installInheritedDirectoryMocks()
+    hookMock.useGfsBrowserController.mockReturnValue(
+      inheritedFileController({
+        inheritedCoverage: 'read-boundary',
+        inheritedAccessError: null,
+      })
+    )
+
+    renderFilesPage()
+    await openManageDialog('report.txt')
+
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')
+    expect(within(row).getByText('Test Two')).toBeTruthy()
+    expect(
+      within(manageDialog).getByText('There may be access from parent folders you cannot see.')
+    ).toBeTruthy()
+    // A boundary is not a load failure — the failure copy must not appear.
+    expect(within(manageDialog).queryByText(/could not be loaded/)).toBeNull()
+    // Known authorized sources stay editable (no blanket partial read-only).
+    expect(
+      within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
+    ).toContain('Editor')
+  })
+
+  it('renders the acl-limited notice without hiding known rows', async () => {
+    installInheritedDirectoryMocks()
+    hookMock.useGfsBrowserController.mockReturnValue(
+      inheritedFileController({
+        inheritedCoverage: 'acl-limited',
+        inheritedAccessError: null,
+      })
+    )
+
+    renderFilesPage()
+    await openManageDialog('report.txt')
+
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    expect(within(manageDialog).findByTestId('gfs-access-row-inherited-user:user-2')).toBeTruthy()
+    expect(
+      within(manageDialog).getByText(
+        'Sharing details on some parent folders are not visible to you.'
+      )
+    ).toBeTruthy()
+  })
+
+  it('renders the load-failure notice for unavailable coverage', async () => {
+    installInheritedDirectoryMocks()
+    hookMock.useGfsBrowserController.mockReturnValue(
+      inheritedFileController({
+        inheritedCoverage: 'unavailable',
+        inheritedAccessError: null,
+      })
+    )
+
+    renderFilesPage()
+    await openManageDialog('report.txt')
+
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    expect(within(manageDialog).getByText(/Inherited access could not be loaded/)).toBeTruthy()
+    expect(within(manageDialog).queryByText(/cannot see\./)).toBeNull()
+  })
+
   it('confirms an inherited role change against the parent folder and applies it there', async () => {
     installInheritedDirectoryMocks()
     const parentGrant = (window.clerum.gfs as unknown as { grant: ReturnType<typeof vi.fn> }).grant

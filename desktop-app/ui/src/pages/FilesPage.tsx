@@ -110,6 +110,12 @@ function hasDraggedGfsResource(event: ReactDragEvent<HTMLElement>): boolean {
 
 const INHERITED_DERIVATION_NOTICE =
   'Inherited access could not be loaded. Members with access from a parent folder may be missing.'
+// R1-H3 coverage notices (permissions.md T1 / inherited-permissions spec §7):
+// a privacy boundary and an ACL-limited ancestor are normal states, not load
+// failures, so they must not wear the failure notice above — and vice versa.
+const INHERITED_READ_BOUNDARY_NOTICE = 'There may be access from parent folders you cannot see.'
+const INHERITED_ACL_LIMITED_NOTICE =
+  'Sharing details on some parent folders are not visible to you.'
 
 function delegationSubjectOptions(
   directory: TeamDirectoryResult | undefined
@@ -509,11 +515,20 @@ export function FilesPage({
   const canManageCurrent = !accessRevoked && hasBit(affordances, 'manage_acl')
   const currentIsFolder = current?.kind === 'directory'
   const currentIsFile = current?.kind === 'file'
-  // A total inherited-derivation failure becomes a quiet notice in the Share
+  // An incomplete inherited derivation becomes a quiet notice in the Share
   // dialog: an empty derived list alone would silently read as "no one else
-  // has access" (R1-M3). Applies to FILES AND FOLDERS; per-ancestor
-  // best-effort skipping stays silent.
-  const inheritedAccessNotice = ctrl.inheritedAccessError ? INHERITED_DERIVATION_NOTICE : null
+  // has access" (R1-M3). R1-H3: rows folded before a walk stop are still
+  // rendered — the notice only discloses what is missing, choosing accurate
+  // copy per coverage state (boundary states are not load failures).
+  const inheritedAccessNotice = ctrl.inheritedAccessError
+    ? INHERITED_DERIVATION_NOTICE
+    : ctrl.inheritedCoverage === 'read-boundary'
+      ? INHERITED_READ_BOUNDARY_NOTICE
+      : ctrl.inheritedCoverage === 'acl-limited'
+        ? INHERITED_ACL_LIMITED_NOTICE
+        : ctrl.inheritedCoverage === 'unavailable'
+          ? INHERITED_DERIVATION_NOTICE
+          : null
   const currentPreviewAvailable = currentIsFile && isGfsPreviewFile(current?.name ?? '')
   const droppedUploadRestriction = useMemo(() => {
     if (!current) {

@@ -2712,6 +2712,7 @@ function ManageProbe() {
       <div data-testid="grants-count">{ctrl.grants.length}</div>
       <div data-testid="shares-count">{ctrl.shares.length}</div>
       <div data-testid="inherited-error">{ctrl.inheritedAccessError ?? 'none'}</div>
+      <div data-testid="inherited-coverage">{ctrl.inheritedCoverage ?? 'none'}</div>
       <button type="button" onClick={() => swallow(ctrl.openUri('gfs://main/root'))}>
         open root
       </button>
@@ -3144,7 +3145,10 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
   // R1-M3 — a total inherited-derivation failure (the file itself cannot be
   // re-resolved for the walk) must surface as controller error state instead
   // of silently collapsing to an empty list.
-  it('exposes inheritedAccessError when the derivation fails entirely', async () => {
+  // R1-H3: a classified mid-walk failure no longer throws — the coverage
+  // state ('unavailable') tells the dialog which notice to show, and only a
+  // raw session 401 still surfaces through inheritedAccessError.
+  it('exposes inheritedCoverage unavailable when a mid-walk resolve fails', async () => {
     let resolveCalls = 0
     Object.defineProperty(window, 'clerum', {
       configurable: true,
@@ -3189,7 +3193,58 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
     })
 
     await waitFor(() =>
-      expect(screen.getByTestId('inherited-error').textContent).toBe('Error: 500 resolve_failed')
+      expect(screen.getByTestId('inherited-coverage').textContent).toBe('unavailable')
     )
+    expect(screen.getByTestId('inherited-error').textContent).toBe('none')
+  })
+
+  it('still surfaces the raw inheritedAccessError for a session 401', async () => {
+    let resolveCalls = 0
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => {
+            resolveCalls += 1
+            if (resolveCalls > 1) throw new Error('Error: 401 Unauthorized httpStatus=401')
+            return {
+              resourceId: 'file-1',
+              parentResourceId: 'folder-1',
+              gfsUri: 'gfs://main/file-1',
+              name: 'report.txt',
+              kind: 'file',
+              version: 1,
+            }
+          }),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'manage_acl'],
+            canDelegate: true,
+            grantableBits: ['read'],
+            canCreateShare: false,
+          })),
+          listGrants: vi.fn(async () => []),
+          listShares: vi.fn(async () => []),
+        },
+      },
+    })
+
+    render(<ManageProbe />, { wrapper: Harness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open root' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('file-1'))
+    await act(async () => {
+      screen.getByRole('button', { name: 'open manage' }).click()
+    })
+
+    await waitFor(() =>
+      expect(screen.getByTestId('inherited-error').textContent).toBe(
+        'Error: 401 Unauthorized httpStatus=401'
+      )
+    )
+    expect(screen.getByTestId('inherited-coverage').textContent).toBe('none')
   })
 })
