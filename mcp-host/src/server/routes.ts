@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express'
 import { parseIncomingFileReferences } from '../agent/fileReferenceResolver'
+import type { ModelStepContinuationHandler } from '../agent/modelStepContinuation'
 import { config } from '../config'
 import { ConversationError, ConversationErrorCode } from '../core/errors'
 import type { ApprovalDecision } from '../core/extensions/approvalTypes'
@@ -50,6 +51,7 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 
 export type RouteHandlers = {
   messageHandler: MessageHandler | null
+  modelStepContinuationHandler?: ModelStepContinuationHandler | null
   statusHandler: StatusHandler | null
   approvalHandler: ApprovalHandler | null
   providerWorkflowApprovalDecisionHandler: ProviderWorkflowApprovalDecisionHandler | null
@@ -295,6 +297,71 @@ export async function handleStatusRoute(
   } catch (error) {
     logger.error({ err: error }, '[Server] Error getting status')
     json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
+  }
+}
+
+export async function handleModelStepContinuationRoute(
+  req: Request,
+  res: Response,
+  handlers: RouteHandlers
+): Promise<void> {
+  try {
+    const caller = getRuntimeCallerContext(req)
+    if (caller?.caller !== 'rpc-proxy' || !caller.userId) {
+      json(res, 401, { error: 'Missing rpc edge caller context' })
+      return
+    }
+    const agent = String(req.params.agent || '').trim()
+    const chatId = String(req.params.chatId || '').trim()
+    const checkpointId = String(req.params.checkpointId || '').trim()
+    if (
+      !isSafeAgentRouteSegment(agent) ||
+      !isSafeRouteSegment(chatId) ||
+      !isSafeRouteSegment(checkpointId)
+    ) {
+      badRequest(res, 'Invalid agent, chatId or checkpointId')
+      return
+    }
+    const version: unknown = req.body?.version
+    if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1) {
+      badRequest(res, 'version must be a positive integer')
+      return
+    }
+    // This route is behind runtimeEdgeGuard(['rpc-proxy']). Only the proxy's
+    // percent-encoded JSON header can supply a trace; the body stays version-only.
+    const traceHeader = req.headers?.['x-clerum-edge-trace-context']
+    let traceContext: unknown
+    try {
+      traceContext =
+        typeof traceHeader === 'string' ? JSON.parse(decodeURIComponent(traceHeader)) : undefined
+    } catch {
+      badRequest(res, 'Invalid continuation traceContext')
+      return
+    }
+    if (
+      !isTraceContextV1(traceContext) ||
+      traceContext.sessionId !== chatId ||
+      traceContext.origin !== 'direct_chat'
+    ) {
+      badRequest(res, 'Invalid continuation traceContext')
+      return
+    }
+    if (!handlers.modelStepContinuationHandler) {
+      json(res, 501, { error: 'Model-step continuation handler not configured' })
+      return
+    }
+    const result = await handlers.modelStepContinuationHandler({
+      userId: caller.userId,
+      agent,
+      chatId,
+      checkpointId,
+      version,
+      traceContext,
+    })
+    json(res, result.status, result.body)
+  } catch (err) {
+    logger.error({ err }, '[Server] Error continuing model-step checkpoint')
+    json(res, 500, { error: 'Model-step continuation failed' })
   }
 }
 
@@ -1360,7 +1427,7 @@ export async function handleSessionMessagesRoute(
     json(res, 200, result)
   } catch (error) {
     logger.error({ err: error }, '[Server] Error fetching session messages')
-    json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
+    json(res, 500, { error: 'Failed to fetch session messages' })
   }
 }
 

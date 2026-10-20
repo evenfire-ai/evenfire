@@ -52,16 +52,15 @@ function bridgeError(call: ToolCall, message: string): ToolResult {
  *  - `'handled'` — an error was pushed to `toolResults`; caller must `continue`.
  *  - a `ToolCall` — proceed with this (possibly rewritten) call.
  */
-function resolveBridgeCall(
+export function resolveBridgeCall(
   call: ToolCall,
-  config: LoopConfig,
+  bridge: LoopConfig['bridge'],
   toolResults: ToolResult[],
   // Computed ONCE per batch by `executeToolCalls` and passed in, so we don't
   // re-derive the (potentially 290-entry) deferrable catalog Set on every call.
   // `undefined` when no bridge tools are registered — no work to do.
   deferrableCatalogNames: Set<string> | undefined
 ): ToolCall | 'handled' {
-  const bridge = config.bridge
   if (!bridge || !deferrableCatalogNames) return call
 
   if (call.name === 'clerum__tool_call') {
@@ -220,7 +219,7 @@ export async function executeToolCalls(
     // tool_use_id. Direct calls to deferred MCP tools (Critical #9) are also
     // routed through the same scope gate here. A `'handled'` return means an
     // error was already pushed — skip this call.
-    const rewritten = resolveBridgeCall(call, config, toolResults, deferrableCatalogNames)
+    const rewritten = resolveBridgeCall(call, config.bridge, toolResults, deferrableCatalogNames)
     if (rewritten === 'handled') continue
     call = rewritten
 
@@ -276,6 +275,9 @@ export async function executeToolCalls(
 
     const progressStart = reportToolStart(config, call, iteration, i, calls.length, llmTextContent)
     if (admission.kind !== 'execute') throw new Error('Admitted tool call has no execution phase')
+    // #1043 — the dispatch is durable before the tool's effect, and the
+    // result right after it: a dispatch without a result reads `unknown`.
+    await config.modelStepCheckpointRecorder?.recordDispatch(call)
     const toolResult = await executeAdmittedTool(admission, config, iteration)
 
     // Retain policy-processed output before a subsequent tool can throw.
@@ -285,6 +287,7 @@ export async function executeToolCalls(
       if (attachments.length) config.onAttachments(attachments)
     }
     if (config.abortSignal?.aborted) {
+      await config.modelStepCheckpointRecorder?.recordResult(call, toolResult)
       toolResults.push(toolResult)
       return { toolResults, cancelled: true }
     }
@@ -348,6 +351,7 @@ export async function executeToolCalls(
       return { toolResults, pendingApproval: approval }
     }
 
+    await config.modelStepCheckpointRecorder?.recordResult(call, toolResult)
     toolResults.push(toolResult)
 
     reportToolComplete(

@@ -112,8 +112,19 @@ export class IncomingMessageHandler {
 
   constructor(
     private readonly message: IncomingMessage,
-    private readonly deps: MessageHandlerDeps
+    private readonly deps: MessageHandlerDeps,
+    preparedTask?: Task
   ) {
+    // A checkpoint continuation already has the task id persisted by its
+    // claim. Reuse that task and the async delivery path without parsing a
+    // new turn or creating a second delivery identity.
+    if (preparedTask) {
+      if (preparedTask.sourceMessage !== message) {
+        throw new Error('Prepared task does not carry this incoming message')
+      }
+      this.task = preparedTask
+      return
+    }
     const { isBackground, content } = parseBackgroundPrefix(message.content)
     const effectiveMessage = isBackground ? { ...message, content } : message
 

@@ -131,8 +131,15 @@ export class TaskExecutionBudget {
     clearTimeout(this.timer)
     this.timer = undefined
     this.visualInputs.close()
+    return this.snapshot()
+  }
+  /**
+   * #1043 — the same snapshot `pause()` returns, without stopping the timer or
+   * closing the visual budget: a model-step checkpoint records it mid-turn.
+   */
+  snapshot(): TaskExecutionBudgetSnapshot {
     return {
-      elapsedActiveMs: this.elapsedActiveMs,
+      elapsedActiveMs: this.elapsed(),
       iterationsUsed: this.iterationsUsed,
       durationMs: this.durationMs,
       maxIterations: this.maxIterations,

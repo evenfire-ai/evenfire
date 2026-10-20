@@ -161,7 +161,8 @@ export type ResumeFileAttachment = Omit<Attachment, 'dataBase64'> & { kind: 'fil
  * #666 R4-M2 — the source message persisted with an approval so a cold
  * restart rebuilds the file-reference pins and attachment lines. Image
  * attachments are dropped (their content lives in the frozen snapshot) and
- * inline file bytes (dataBase64) never persist.
+ * inline file bytes (dataBase64) never persist in the approval row. (#1043: a
+ * resumable model-step checkpoint holds them separately for a short TTL.)
  */
 export type ResumeSourceMessage = Pick<
   HostIncomingMessage,
@@ -688,7 +689,8 @@ export interface PendingApproval {
   /**
    * #666 R4-M2 — the sanitized source message persisted with the approval so a
    * cold restart rebuilds the file-reference pins and attachment metadata.
-   * Inline attachment bytes (dataBase64) are stripped before persisting.
+   * Inline attachment bytes (dataBase64) are stripped before persisting this
+   * approval row.
    */
   sourceMessage?: ResumeSourceMessage
   /** Intent summary (LLM's explanation of why this tool was called),
@@ -714,7 +716,12 @@ export interface PendingApproval {
 export type LoopResult =
   | { type: 'response'; content: string; usage: TokenUsage; attachments?: Attachment[] }
   | { type: 'need_approval'; approval: PendingApproval }
-  | { type: 'error'; error: Error }
+  | {
+      type: 'error'
+      error: Error
+      /** #1043 — set when the failed turn left a resumable model-step checkpoint. */
+      checkpointId?: string
+    }
   | {
       type: 'exhaustion'
       reason?: 'iteration_limit' | 'task_budget' | 'turn_stop'

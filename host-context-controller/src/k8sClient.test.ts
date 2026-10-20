@@ -14,7 +14,7 @@ import {
   listAllSharedFileSystems,
 } from './k8sClient'
 import { hccLogger } from './logger'
-import { registry } from './metrics'
+import { initialConvergenceLastSuccessTimestampSeconds, registry } from './metrics'
 import {
   DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE,
   type NetworkPolicyReconciler,
@@ -65,6 +65,16 @@ async function readInitialConvergenceMetric(
   if (!metric) throw new Error(`${name} is not registered`)
   const snapshot = await metric.get()
   return snapshot.values.find(entry => entry.labels.lane === lane)?.value ?? 0
+}
+
+/**
+ * The last-success gauge is process-global and stores `Date.now() / 1000`, so a
+ * pass certified by an earlier test in the same millisecond leaves an equal
+ * sample and a strict "timestamp moved" assertion fails. Zero the lane before
+ * reading the baseline: only a write made by this test can then exceed it.
+ */
+function zeroNetworkPolicyLastSuccessTimestamp(): void {
+  initialConvergenceLastSuccessTimestampSeconds.set({ lane: 'NetworkPolicy' }, 0)
 }
 
 async function readLabeledConvergenceMetric(
@@ -4496,6 +4506,7 @@ describe('McpServerWatcher startup', () => {
       },
     })
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    zeroNetworkPolicyLastSuccessTimestamp()
     const successTimestampBefore = await readInitialConvergenceMetric(
       'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
       'NetworkPolicy'
@@ -4653,6 +4664,7 @@ describe('McpServerWatcher startup', () => {
     seedNetworkPolicyPassInventory(watcher)
     ;(watcher as any).initialConvergenceRetryAttempts.set('NetworkPolicy', 4)
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    zeroNetworkPolicyLastSuccessTimestamp()
     const successTimestampBefore = await readInitialConvergenceMetric(
       'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
       'NetworkPolicy'
@@ -5290,6 +5302,7 @@ describe('McpServerWatcher startup', () => {
     ;(watcher as any).contextCacheSynced = true
     ;(watcher as any).mcpServerCacheSynced = false
     ;(watcher as any).initialConvergenceRetryAttempts.set('NetworkPolicy', 2)
+    zeroNetworkPolicyLastSuccessTimestamp()
     const successTimestampBefore = await readInitialConvergenceMetric(
       'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
       'NetworkPolicy'

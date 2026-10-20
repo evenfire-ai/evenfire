@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LIMITS } from '@clerum/llm-provider-attempt-contract'
 import {
   VISUAL_LIMITS,
@@ -17,6 +17,7 @@ import { LlmPortAdapter } from '../../core/adapters/llmPortAdapter'
 import { LlmError, LlmErrorCode } from '../../core/errors'
 import { DeferrableToolController } from '../../core/orchestration/deferrableToolController'
 import { DefaultLoopController } from '../../core/orchestration/loopConfig'
+import { isModelStepCheckpointEligibleError } from '../../core/orchestration/modelStepCheckpointEligibility'
 import type { ChatMessage } from '../../core/types'
 import { CodexProxyError } from '../codexLlmProxyClient'
 import { CodexSubscriptionProvider, attachmentBudgetRefusalMessage } from '../codexSubscription'
@@ -69,6 +70,8 @@ function deps(overrides?: {
 }
 
 describe('CodexSubscriptionProvider', () => {
+  afterEach(() => vi.useRealTimers())
+
   it.each(['visual_host_share', 'visual_gate', 'proxy_capacity_exceeded'] as const)(
     'keeps the provider usable after a local %s admission refusal',
     async code => {
@@ -103,6 +106,7 @@ describe('CodexSubscriptionProvider', () => {
   it.each(['unknown', 'canceled', 'error'])(
     'never returns executable calls from a %s batch',
     async outcome => {
+      vi.useFakeTimers()
       const wired = deps({
         stream: vi.fn().mockResolvedValue({
           text: 'partial',
@@ -111,12 +115,16 @@ describe('CodexSubscriptionProvider', () => {
         }),
       })
       const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
-      await expect(
+      const settled = expect(
         provider.completeSingleTurnWithTools(
           [{ role: 'user', content: 'hi' }],
           [{ name: 'echo', description: 'echo', parameters: {} }]
         )
       ).rejects.toThrow(/successful terminal outcome/)
+      await vi.runAllTimersAsync()
+      await settled
+      expect(wired.authorize).toHaveBeenCalledTimes(1)
+      expect(wired.stream).toHaveBeenCalledTimes(1)
     }
   )
   function successfulBatch(count: number) {
@@ -821,6 +829,7 @@ describe('CodexSubscriptionProvider', () => {
   })
 
   it('does not treat an unknown empty stream as a successful stop', async () => {
+    vi.useFakeTimers()
     const wired = deps({
       stream: vi.fn().mockResolvedValue({
         text: '',
@@ -829,9 +838,11 @@ describe('CodexSubscriptionProvider', () => {
       }),
     })
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
-    await expect(
+    const settled = expect(
       provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
     ).rejects.toMatchObject({ code: 'provider_unavailable' })
+    await vi.runAllTimersAsync()
+    await settled
   })
 
   it.each([
@@ -1838,18 +1849,26 @@ describe('CodexSubscriptionProvider Retry-After retry (G1-9, #720)', () => {
     expect(wired.stream).toHaveBeenCalledTimes(1)
   })
 
-  it('G1-9h: a retry whose stream fails with provider_unavailable surfaces that error (review round 2 M5)', async () => {
+  it('G1-9h: a 429 retry stops after a dispatched provider_unavailable (F4)', async () => {
     vi.useFakeTimers()
     const outage = new CodexProxyError('provider_unavailable', 'proxy stream failed with 503')
-    const stream = vi.fn().mockRejectedValueOnce(limited(1000)).mockRejectedValueOnce(outage)
-    const wired = deps({ authorize: authorizeTwice(), stream })
+    const stream = vi.fn().mockRejectedValueOnce(limited(1000)).mockRejectedValue(outage)
+    const wired = deps({
+      authorize: vi.fn(async ({ providerAttemptIndex }) => ({
+        providerAttemptId: `attempt-${providerAttemptIndex}`,
+        requestHash,
+        executionTicket: `ticket-${providerAttemptIndex}`,
+        expiresAt: '2026-08-20T10:00:00.000Z',
+      })),
+      stream,
+    })
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
 
     const turn = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
     const settled = expect(turn).rejects.toBe(outage)
     await vi.advanceTimersByTimeAsync(60_000)
     await settled
-    // Witness: the retry ran; the negative is that nothing ran after it.
+    // The 429 retry ran; its dispatched outage cannot start another attempt.
     expect(wired.authorize).toHaveBeenCalledTimes(2)
     expect(wired.stream).toHaveBeenCalledTimes(2)
     expect(provider.classifyError(outage).code).toBe(LlmErrorCode.ModelOverloaded)
@@ -2218,5 +2237,105 @@ describe('CodexSubscriptionProvider Retry-After retry (G1-9, #720)', () => {
     expect(abortInGap).toBe(false)
     expect(wired.authorize).toHaveBeenCalledTimes(1)
     expect(wired.stream).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('model-step checkpoint eligibility on the LlmError boundary (#1043)', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  const heldToolCall = { id: 'call-1', name: 'echo', arguments: { text: 'held' } }
+
+  async function failThroughAdapter(wired: ReturnType<typeof deps>): Promise<LlmError> {
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    const adapter = new LlmPortAdapter(provider, 'gpt-5.3-codex', 'codex-subscription')
+    const pending = adapter
+      .completeWithTools({ messages: [{ role: 'user', content: 'go' }], tools: [] })
+      .then(
+        response => ({ response }),
+        (error: unknown) => ({ error })
+      )
+    await vi.runAllTimersAsync()
+    const outcome = await pending
+    if (!('error' in outcome)) throw new Error('expected the adapter to reject')
+    expect(outcome.error).toBeInstanceOf(LlmError)
+    return outcome.error as LlmError
+  }
+
+  it.each([
+    [
+      'an HTTP 503 from the proxy',
+      () =>
+        vi
+          .fn()
+          .mockRejectedValue(
+            new CodexProxyError(
+              'provider_unavailable',
+              'proxy stream failed with 503 (provider_unavailable)'
+            )
+          ),
+    ],
+    [
+      'held tool frames without a success terminal',
+      () => vi.fn().mockResolvedValue({ text: '', toolCalls: [heldToolCall], outcome: 'error' }),
+    ],
+    [
+      'an error terminal',
+      () => vi.fn().mockResolvedValue({ text: 'partial', toolCalls: [], outcome: 'error' }),
+    ],
+  ])('%s reaches the loop as an eligible provider_unavailable', async (_label, makeStream) => {
+    const wired = deps({ stream: makeStream() })
+    const error = await failThroughAdapter(wired)
+    expect(wired.stream).toHaveBeenCalled()
+    expect(error).toMatchObject({
+      code: LlmErrorCode.ModelOverloaded,
+      retryable: true,
+      providerCode: 'provider_unavailable',
+    })
+    expect(isModelStepCheckpointEligibleError(error)).toBe(true)
+  })
+
+  it.each([
+    [
+      'connection_unavailable',
+      () => ({
+        authorize: vi
+          .fn()
+          .mockRejectedValue(new CodexAuthorizeError('connection_unavailable', 'catalog down')),
+      }),
+    ],
+    [
+      'rate_limited',
+      () => ({
+        stream: vi.fn().mockRejectedValue(new CodexProxyError('rate_limited', 'upstream 429')),
+      }),
+    ],
+    [
+      'stream_duration_exceeded',
+      () => ({
+        stream: vi
+          .fn()
+          .mockRejectedValue(new CodexProxyError('stream_duration_exceeded', 'too long')),
+      }),
+    ],
+    [
+      'outcome_unknown',
+      () => ({
+        stream: vi.fn().mockResolvedValue({ text: 'partial', toolCalls: [], outcome: 'unknown' }),
+      }),
+    ],
+    [
+      'tool_call_limit_exceeded',
+      () => ({
+        stream: vi
+          .fn()
+          .mockRejectedValue(new CodexProxyError('tool_call_limit_exceeded', 'over limit')),
+      }),
+    ],
+  ])('%s is not eligible', async (providerCode, makeOverrides) => {
+    const error = await failThroughAdapter(deps(makeOverrides()))
+    // Witness: the classifier ran and kept the provider-native code.
+    expect(error.providerCode).toBe(providerCode)
+    expect(isModelStepCheckpointEligibleError(error)).toBe(false)
   })
 })

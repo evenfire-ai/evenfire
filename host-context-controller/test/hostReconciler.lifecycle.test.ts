@@ -381,7 +381,8 @@ async function mintedRuntimeCredentialRecord(
   coreApi.readNamespacedSecret.mockRejectedValue({ code: 404 })
   await (producer as any).ensureMcpHostRuntimeTokenSecret(host)
   const created = coreApi.createNamespacedSecret.mock.calls.at(-1)?.[0].body as
-    k8s.V1Secret | undefined
+    | k8s.V1Secret
+    | undefined
   if (!created?.stringData) throw new Error('producer pass wrote no runtime credential Secret')
   let record: k8s.V1Secret = {
     ...created,
@@ -406,7 +407,8 @@ async function mintedRuntimeCredentialRecord(
     coreApi.readNamespacedSecret.mockResolvedValue(record)
     await (producer as any).ensureMcpHostRuntimeTokenSecret(host)
     const consumed = coreApi.replaceNamespacedSecret.mock.calls.at(-1)?.[0].body as
-      k8s.V1Secret | undefined
+      | k8s.V1Secret
+      | undefined
     if (
       consumed?.metadata?.annotations?.['clerum.io/runtime-token-bootstrap-state'] !== 'consumed'
     ) {

@@ -677,6 +677,30 @@ describe('Cross-provider ToolCall normalization', () => {
       retryable: false,
     })
   })
+
+  // #1043: both codes collapse onto ModelOverloaded; the model-step checkpoint
+  // tells them apart by providerCode, so the adapter must keep it.
+  it.each(['provider_unavailable', 'connection_unavailable'])(
+    'keeps providerCode %s on a ModelOverloaded LlmError',
+    async providerCode => {
+      const mockProvider: SingleTurnProvider = {
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools: vi.fn().mockRejectedValue(new Error('outage')),
+        getProviderType: () => 'codex-subscription' as const,
+        classifyError: vi.fn(() => ({
+          code: LlmErrorCode.ModelOverloaded,
+          retryable: true,
+          message: 'outage',
+          providerCode,
+        })),
+      }
+      const adapter = new LlmPortAdapter(mockProvider, 'gpt-5.3-codex', 'codex-subscription')
+      await expect(
+        adapter.completeWithTools({ messages: [{ role: 'user', content: 'Hi' }], tools: [] })
+      ).rejects.toMatchObject({ code: LlmErrorCode.ModelOverloaded, retryable: true, providerCode })
+      expect(mockProvider.classifyError).toHaveBeenCalledTimes(1)
+    }
+  )
 })
 
 describe('LlmPortAdapter image destination degrade', () => {

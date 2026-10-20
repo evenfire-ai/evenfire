@@ -79,6 +79,8 @@ describe('migration 008 — active trace context', () => {
         '015-session-model-selection-revision',
         '016-pending-approval-authorization-scope',
         '017-session-parent-index',
+        '018-model-step-checkpoints',
+        '019-model-step-checkpoint-attachments',
       ],
       pending: [],
     })

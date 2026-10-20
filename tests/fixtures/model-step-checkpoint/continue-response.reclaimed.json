@@ -1,0 +1,9 @@
+{
+  "httpStatus": 202,
+  "body": {
+    "taskId": "b5a4c3d2-e1f0-4a9b-8c7d-6e5f4a3b2c10",
+    "checkpointId": "msc_01J9Z7Q4R2M3N5P6Q7R8S9T0V1",
+    "status": "claimed",
+    "replayed": false
+  }
+}

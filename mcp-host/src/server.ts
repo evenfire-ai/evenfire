@@ -9,8 +9,10 @@ import * as fs from 'fs'
 import * as http from 'http'
 import * as path from 'path'
 import { register } from 'prom-client'
+import type { ModelStepContinuationHandler } from './agent/modelStepContinuation'
 import { readOpenedArtifactBuffer, redactArtifactForDelivery } from './artifacts/artifactBytes'
 import type { ArtifactSecretEntry } from './artifacts/artifactRedaction'
+import { MODEL_STEP_CONTINUE_RUNTIME_ROUTE } from './core/conversation/modelStepCheckpointContract'
 import './internalTools/gfsDownloadMetrics'
 import type { RuntimeLifecycleGate } from './lifecycle/statelessHeartbeat'
 import { logger } from './logger'
@@ -29,6 +31,7 @@ import {
   handleCronResultAckRoute,
   handleCronResultsRoute,
   handleMessageRoute,
+  handleModelStepContinuationRoute,
   handleModelsListRoute,
   handleProgressStreamRoute,
   handleProviderMessageAuthorizationRoute,
@@ -333,6 +336,7 @@ export class RPCServer {
   private app = express()
   private readonly port: number
   private messageHandler: MessageHandler | null = null
+  private modelStepContinuationHandler: ModelStepContinuationHandler | null = null
   private statusHandler: StatusHandler | null = null
   private approvalHandler: ApprovalHandler | null = null
   private providerWorkflowApprovalDecisionHandler: ProviderWorkflowApprovalDecisionHandler | null =
@@ -483,6 +487,20 @@ export class RPCServer {
         }
         this.lifecycleGate?.noteIntakeActivity()
         await handleMessageRoute(req, res, this.routeDeps())
+      }
+    )
+
+    this.app.post(
+      MODEL_STEP_CONTINUE_RUNTIME_ROUTE,
+      runtimeEdgeGuard(['rpc-proxy']),
+      async (req, res) => {
+        if (this.lifecycleGate?.isIntakeFenced()) {
+          this.lifecycleGate.noteFencedIntake()
+          json(res, 503, { code: 'host_draining' })
+          return
+        }
+        this.lifecycleGate?.noteIntakeActivity()
+        await handleModelStepContinuationRoute(req, res, this.routeDeps())
       }
     )
 
@@ -866,6 +884,10 @@ export class RPCServer {
     this.messageHandler = handler
   }
 
+  onModelStepContinuation(handler: ModelStepContinuationHandler): void {
+    this.modelStepContinuationHandler = handler
+  }
+
   onStatus(handler: StatusHandler): void {
     this.statusHandler = handler
   }
@@ -1000,6 +1022,7 @@ export class RPCServer {
   private routeDeps() {
     return {
       messageHandler: this.messageHandler,
+      modelStepContinuationHandler: this.modelStepContinuationHandler,
       statusHandler: this.statusHandler,
       approvalHandler: this.approvalHandler,
       providerWorkflowApprovalDecisionHandler: this.providerWorkflowApprovalDecisionHandler,
