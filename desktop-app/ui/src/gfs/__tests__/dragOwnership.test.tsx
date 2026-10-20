@@ -92,6 +92,7 @@ function baseController() {
     replaceFileFromPath: vi.fn(),
     renameResource: vi.fn(),
     moveResource: vi.fn(),
+    convergeCommittedMove: vi.fn(),
     deleteResource: vi.fn(),
     mutating: false,
     reset: vi.fn(),
@@ -475,6 +476,35 @@ for (const surface of ['sidebar', 'files'] as const) {
       )
       expect(h.moveResource).not.toHaveBeenCalled()
       expect(h.toast).not.toHaveBeenCalled()
+    })
+
+    it('converges the cache when the move landed but its response was lost', async () => {
+      // The PATCH lands, the response never arrives: the mutation REJECTS, so
+      // the mutation's own success path (and the convergence it owns) never
+      // runs. The commit verifies the move by resolve, and the surface then
+      // converges the cache itself — otherwise the item keeps rendering in
+      // the old folder until the next navigation.
+      const h = await setup('file')
+      const original = h.resolve.getMockImplementation()!
+      let resolveCalls = 0
+      h.resolve.mockImplementation(async (uri: string) => {
+        resolveCalls += 1
+        const resolved = await original(uri)
+        // The commit-time resolve still sees the OLD parent; the verification
+        // resolve sees the item in the destination.
+        return resolveCalls >= 2 ? { ...resolved, parentResourceId: 'target' } : resolved
+      })
+      h.moveResource.mockImplementationOnce(async () => {
+        throw new Error('network error')
+      })
+      h.start()
+      h.drop()
+      await waitFor(() => expect(h.ctrl.convergeCommittedMove).toHaveBeenCalled())
+      expect(h.ctrl.convergeCommittedMove).toHaveBeenCalledWith(
+        { resourceId: 'source', destinationId: 'target', oldParentId: 'grand' },
+        { version: expect.any(Number) }
+      )
+      expect(h.toast).toHaveBeenCalledWith('Moved Source to Target', 'success')
     })
   })
 }

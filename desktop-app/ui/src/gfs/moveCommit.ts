@@ -27,7 +27,19 @@ export interface MoveCommitPlan {
 }
 
 export type MoveCommitOutcome =
-  | { status: 'committed'; version: number; renamedTo?: string }
+  | {
+      status: 'committed'
+      version: number
+      renamedTo?: string
+      /**
+       * The parent the item lived in at COMMIT time (the fresh resolve's
+       * observation, never the drag-start guess). The convergence needs the
+       * real old parent to drop the item from that folder's cached listing —
+       * including on the transport-loss path, where the mutation that would
+       * normally converge it never succeeded.
+       */
+      previousParentId: string | null
+    }
   | { status: 'no-op'; message: string }
   | { status: 'conflict-stopped'; message: string }
   | { status: 'changed'; message: string }
@@ -129,6 +141,7 @@ export async function commitGfsMove(
       return {
         status: 'committed',
         version: receipt.version,
+        previousParentId: snapshot.parentResourceId,
         ...(moveName !== snapshot.name ? { renamedTo: moveName } : {}),
       }
     } catch (attemptError) {
@@ -216,6 +229,10 @@ async function verifyOutcomeByResolve(
       return {
         status: 'committed',
         version: resolved.version,
+        // The pre-move parent from the commit-time resolve: the transport-loss
+        // path has no mutation receipt to converge with, so the outcome
+        // carries the parent the item actually left.
+        previousParentId: before.parentResourceId,
         ...(resolved.name !== before.name ? { renamedTo: resolved.name } : {}),
       }
     }

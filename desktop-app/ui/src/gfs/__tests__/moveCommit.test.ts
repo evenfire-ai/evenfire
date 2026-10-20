@@ -37,7 +37,7 @@ describe('commitGfsMove — commit-time source refresh', () => {
   it('resolves the source and sends exactly one PATCH with the fresh version and ifMatch', async () => {
     const moveResource = vi.fn(async () => ({ resourceId: 'r-1', version: 8 }))
     const outcome = await commitGfsMove(deps({ moveResource }), plan())
-    expect(outcome).toEqual({ status: 'committed', version: 8 })
+    expect(outcome).toEqual({ status: 'committed', version: 8, previousParentId: 'old-parent' })
     expect(moveResource).toHaveBeenCalledTimes(1)
     expect(moveResource).toHaveBeenCalledWith('r-1', 'dest-1', 7, undefined)
   })
@@ -109,7 +109,12 @@ describe('commitGfsMove — conflict policy (rev-2 §5)', () => {
         return { resourceId: 'r-1', version: 9 }
       })
     const outcome = await commitGfsMove(deps({ moveResource }), plan({ allowNumberedRename: true }))
-    expect(outcome).toEqual({ status: 'committed', version: 9, renamedTo: 'report (1).md' })
+    expect(outcome).toEqual({
+      status: 'committed',
+      version: 9,
+      renamedTo: 'report (1).md',
+      previousParentId: 'old-parent',
+    })
     expect(moveResource).toHaveBeenCalledTimes(2)
     expect(moveResource).toHaveBeenLastCalledWith('r-1', 'dest-1', 7, 'report (1).md')
   })
@@ -138,7 +143,12 @@ describe('commitGfsMove — conflict policy (rev-2 §5)', () => {
         occupiedDestinationNames: new Set(['report.md', 'report (1).md', 'report (2).md']),
       })
     )
-    expect(outcome).toEqual({ status: 'committed', version: 10, renamedTo: 'report (3).md' })
+    expect(outcome).toEqual({
+      status: 'committed',
+      version: 10,
+      renamedTo: 'report (3).md',
+      previousParentId: 'old-parent',
+    })
     expect(moveResource).toHaveBeenCalledTimes(2)
     expect(moveResource).toHaveBeenLastCalledWith('r-1', 'dest-1', 7, 'report (3).md')
   })
@@ -204,7 +214,11 @@ describe('commitGfsMove — server verdicts', () => {
       // Post-loss verification: the move actually landed.
       .mockResolvedValueOnce(resolved({ parentResourceId: 'dest-1', version: 11 }))
     const outcome = await commitGfsMove(deps({ moveResource, resolveSource }), plan())
-    expect(outcome).toEqual({ status: 'committed', version: 11 })
+    expect(outcome).toEqual({
+      status: 'committed',
+      version: 11,
+      previousParentId: 'old-parent',
+    })
     expect(moveResource).toHaveBeenCalledTimes(1)
   })
 
@@ -253,7 +267,7 @@ describe('commitGfsMove — gesture ownership (rev-2 §4.1)', () => {
   it('dispatches when the gesture is still current', async () => {
     const moveResource = vi.fn(async () => ({ resourceId: 'r-1', version: 8 }))
     const outcome = await commitGfsMove(deps({ moveResource, isCurrent: () => true }), plan())
-    expect(outcome).toEqual({ status: 'committed', version: 8 })
+    expect(outcome).toEqual({ status: 'committed', version: 8, previousParentId: 'old-parent' })
     expect(moveResource).toHaveBeenCalledTimes(1)
   })
 })

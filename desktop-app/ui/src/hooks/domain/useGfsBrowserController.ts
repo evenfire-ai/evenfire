@@ -1091,22 +1091,22 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // reconcile navigation to the new location (resolve + ancestor walk) so a
   // follow-up Rename/Delete/Move runs with the post-move version, not the
   // pre-move one (which would 409 on ifMatch).
-  const moveResourceMutation = useMutation({
-    mutationFn: (input: {
-      resourceId: string
-      destinationId: string
-      ifMatch?: number
-      newName?: string
-      oldParentId?: string | null
-    }) =>
-      window.clerum.gfs.moveResource(
-        input.resourceId,
-        input.destinationId,
-        DRIVE,
-        input.ifMatch,
-        input.newName
-      ),
-    onSuccess: async (receipt, input) => {
+  //
+  // The convergence is a named step because it has TWO entry points: the
+  // mutation's success path, and the transport-loss path where the PATCH
+  // landed but its response never arrived (the mutation rejected, so its
+  // success path never ran — without this the item kept rendering in the old
+  // folder until the next navigation).
+  const convergeCommittedMove = useCallback(
+    async (
+      input: {
+        resourceId: string
+        destinationId: string
+        newName?: string
+        oldParentId?: string | null
+      },
+      receipt: { version: number }
+    ) => {
       const movedCrumb = crumbs.find(crumb => crumb.resourceId === input.resourceId)
       setCrumbs(prev =>
         prev.map(crumb =>
@@ -1129,6 +1129,27 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         await refreshGfs()
       }
       if (movedCrumb) await openUri(movedCrumb.gfsUri)
+    },
+    [crumbs, openUri, queryClient, refreshGfs, sessionScope]
+  )
+
+  const moveResourceMutation = useMutation({
+    mutationFn: (input: {
+      resourceId: string
+      destinationId: string
+      ifMatch?: number
+      newName?: string
+      oldParentId?: string | null
+    }) =>
+      window.clerum.gfs.moveResource(
+        input.resourceId,
+        input.destinationId,
+        DRIVE,
+        input.ifMatch,
+        input.newName
+      ),
+    onSuccess: async (receipt, input) => {
+      await convergeCommittedMove(input, receipt)
     },
     onError: failClosedOnMutationError,
   })
@@ -1378,6 +1399,12 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       }),
     deleteResource: (resourceId: string, ifMatch?: number) =>
       deleteResourceMutation.mutateAsync({ resourceId, ifMatch }),
+    /**
+     * Convergence for a move that landed without a receipt (transport loss):
+     * the mutation rejected, so its success path never ran, and the item would
+     * otherwise keep rendering in the old folder until the next navigation.
+     */
+    convergeCommittedMove,
     mutating:
       createFolderMutation.isPending ||
       createFileMutation.isPending ||

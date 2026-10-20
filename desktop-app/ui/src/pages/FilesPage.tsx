@@ -1338,6 +1338,11 @@ export function FilesPage({
     movingResourceRef.current = source.resourceId
     setMovingResourceId(source.resourceId)
     try {
+      // A transport loss after dispatch leaves the mutation REJECTED even
+      // though the PATCH landed. The commit verifies that by resolve; the
+      // convergence then has to run here, because the mutation's own success
+      // path never did.
+      let dispatchConfirmed = false
       const outcome = await commitGfsMove(
         {
           resolveSource: async gfsUri => {
@@ -1351,14 +1356,17 @@ export function FilesPage({
               parentResourceId: resolved.parentResourceId,
             }
           },
-          moveResource: (resourceId, destinationId, ifMatch, newName) =>
-            ctrl.moveResource(
+          moveResource: async (resourceId, destinationId, ifMatch, newName) => {
+            const receipt = await ctrl.moveResource(
               resourceId,
               destinationId,
               ifMatch,
               newName,
               source.parentKnown ? source.parentResourceId : null
-            ),
+            )
+            dispatchConfirmed = true
+            return receipt
+          },
           isSessionAuthorityFailure: error => failClosedOnAuthorizationError(error),
           ...(isCurrent ? { isCurrent } : {}),
         },
@@ -1374,6 +1382,20 @@ export function FilesPage({
           occupiedDestinationNames: cachedDestinationNames(destination.resourceId),
         }
       )
+      if (outcome.status === 'committed' && !dispatchConfirmed) {
+        // The PATCH landed but the response was lost: the mutation rejected,
+        // so its success path (and the convergence it owns) never ran. The
+        // item HAS moved — converge the cache now so it stops rendering in
+        // the old folder.
+        await ctrl.convergeCommittedMove(
+          {
+            resourceId: source.resourceId,
+            destinationId: destination.resourceId,
+            oldParentId: outcome.previousParentId,
+          },
+          { version: outcome.version }
+        )
+      }
       switch (outcome.status) {
         case 'committed':
           pushToast?.(

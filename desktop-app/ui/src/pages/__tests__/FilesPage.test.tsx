@@ -78,6 +78,7 @@ function baseController() {
     replaceFileFromPath: vi.fn(),
     renameResource: vi.fn(),
     moveResource: vi.fn(),
+    convergeCommittedMove: vi.fn(),
     deleteResource: vi.fn(),
     mutating: false,
     reset: vi.fn(),
