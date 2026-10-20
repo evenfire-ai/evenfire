@@ -6,6 +6,7 @@ import { makeSqliteStore } from '../../core/conversation/persistence/__tests__/t
 import { ModelStepCheckpointStore } from '../../core/conversation/persistence/modelStepCheckpointStore'
 import { buildConnectRequiredApproval } from '../../core/extensions/mcpApprovalGateController'
 import { BasicSafety } from '../../core/safety/safety'
+import { serializeModelStepCheckpointLoopState } from '../../db/worker/protocol'
 import { logger } from '../../logger'
 import { handleSessionMessagesRoute } from '../routes'
 import { createSessionRouteHandlers, loadSessionModelStepCheckpoint } from '../sessionRouteHandlers'
@@ -59,7 +60,10 @@ describe('session read model-step recording cost', () => {
             model: 'model',
             hostId: 'host-a',
             principal: 'user-A',
-            loopState: '{}',
+            loopState: serializeModelStepCheckpointLoopState({
+              nextIteration: 0,
+              originUserMessageIndex: 0,
+            }),
             taskBudget: null,
             sourceMessage: null,
           },
@@ -175,7 +179,10 @@ describe('session read model-step recording cost', () => {
           model: 'model',
           hostId: 'host-a',
           principal: 'user-A',
-          loopState: '{}',
+          loopState: serializeModelStepCheckpointLoopState({
+            nextIteration: 0,
+            originUserMessageIndex: 0,
+          }),
           taskBudget: null,
           sourceMessage: null,
         },
