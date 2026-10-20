@@ -197,13 +197,12 @@ describe('inheritedAccessMerge properties', () => {
         const comparisons = [leftRank < rightRank, leftRank === rightRank, leftRank > rightRank]
         expect(comparisons.filter(Boolean)).toHaveLength(1)
 
-        const toSource = (permissions: string[]): GfsInheritedAccessSource => ({
-          resourceId: 'r',
-          name: 'r',
-          permissions,
-          grantId: null,
-          shareIds: [],
-        })
+        const toSource = (permissions: string[]): GfsInheritedAccessSource =>
+          mergeInheritedAccessItem(
+            null,
+            { subject: { type: 'user', id: 'member' }, permissions, grantId: null, shareIds: [] },
+            { resourceId: 'r', name: 'r' }
+          ).sources[0]!
         const forward = strongestInheritedSource([toSource(left), toSource(right)])
         const backward = strongestInheritedSource([toSource(right), toSource(left)])
         expect(roleRank(forward?.permissions ?? [])).toBe(roleRank(backward?.permissions ?? []))
@@ -218,13 +217,19 @@ describe('inheritedAccessMerge properties', () => {
         distinctFoldersArb,
         fc.array(permissionsArb, { minLength: 1, maxLength: 8 }),
         (folders, permissionSets) => {
-          const sources: GfsInheritedAccessSource[] = folders.map((folder, index) => ({
-            resourceId: folder.resourceId,
-            name: folder.name,
-            permissions: permissionSets[index % permissionSets.length]!,
-            grantId: null,
-            shareIds: [],
-          }))
+          const sources: GfsInheritedAccessSource[] = folders.map(
+            (folder, index) =>
+              mergeInheritedAccessItem(
+                null,
+                {
+                  subject: { type: 'user', id: 'member' },
+                  permissions: permissionSets[index % permissionSets.length]!,
+                  grantId: null,
+                  shareIds: [],
+                },
+                folder
+              ).sources[0]!
+          )
           const permissions = [...new Set(sources.flatMap(source => source.permissions))]
           const item = { permissions, sources }
           const editorSources = sources.filter(source => isEditorPermissions(source.permissions))
