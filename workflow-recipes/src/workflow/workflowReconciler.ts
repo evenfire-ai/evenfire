@@ -43,6 +43,7 @@ import {
   classifyOwnerlessNetworkPolicyOwnership,
   decideNetworkPolicyConvergence,
 } from '../reconciler/networkPolicyConvergence'
+import { noteDnsBlock } from '../reconciler/reconcileContext'
 import {
   resolveStatefulSetHeadlessServiceName,
   resolveWorkloadMcpServerLabel,
@@ -4174,6 +4175,8 @@ export class WorkflowReconciler {
     policyNames: string[],
     hosts: string[]
   ): Promise<RuntimeHttpEgressPolicyState> {
+    // Issue #1016: single choke point for every runtime-HTTP DNS site.
+    noteDnsBlock('runtime_http_egress')
     const now = new Date()
     const currentCidrs = normalizeCidrs(
       await (this.deps.resolveRuntimeHttpEgressCidrs ?? resolveRuntimeHttpEgressCidrs)(hosts)

@@ -28,6 +28,7 @@ import {
   TRANSPORT_NETWORK_CONDITION_TYPE,
   hasPendingTransportNetworkReadiness,
 } from '../recipePredicates'
+import type { ReconcileCadenceOutput } from '../reconcileCadence'
 import {
   ConfigMapResourceDef,
   CronJobDef,
@@ -84,6 +85,7 @@ import { evaluateComputedValues } from './computedValuesEvaluator'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from './crdConstants'
 import { deleteOutcomeFields, observeNamespacedDelete, shouldRecordDelete } from './deleteOutcome'
 import { sort as sortDependencies } from './dependencyGraph'
+import { dnsBlockFingerprint } from './dnsBlockFingerprint'
 import {
   type AccumulateOutput,
   accumulateExternalEgress,
@@ -148,6 +150,7 @@ import {
 } from './pluginWorkloadSdkValidator'
 import { listWorkflowRecipePolicies } from './policyClient'
 import { enforcePolicy } from './policyEnforcer'
+import { noteDnsBlock, runInReconcileContext } from './reconcileContext'
 import * as rb from './resourceBuilder'
 import {
   classifySecretAccess,
@@ -688,6 +691,8 @@ export interface ReconcileResult {
   requeueFixedInterval?: boolean
   /** A legacy-only timer must not repeat the recipe's runtime lifecycle. */
   requeueOperation?: 'legacy-network-policy-delete'
+  /** Issue #1016: what this full pass ran, recorded for the cadence scheduler. */
+  cadence?: ReconcileCadenceOutput
 }
 
 type LegacyNetworkPolicyDeleteRetryResult = Pick<
@@ -1893,6 +1898,27 @@ export class WorkflowRecipeReconciler {
 
   // ─── Main Pipeline ────────────────────────────────────────────────
 
+  // Issue #1016: lazy so harnesses that skip construction need no setup.
+  private dnsBlockRecords?: Map<
+    string,
+    { fingerprint: string; blocks: ReadonlySet<'recipe_egress' | 'runtime_http_egress'> }
+  >
+  private get dnsBlockRecordMap() {
+    return (this.dnsBlockRecords ??= new Map())
+  }
+
+  dnsBlockRecordFor(
+    name: string
+  ):
+    | { fingerprint: string; blocks: ReadonlySet<'recipe_egress' | 'runtime_http_egress'> }
+    | undefined {
+    return this.dnsBlockRecordMap.get(name)
+  }
+
+  forgetDnsBlockRecord(name: string): void {
+    this.dnsBlockRecordMap.delete(name)
+  }
+
   async reconcile(recipe: WorkflowRecipeCRD): Promise<ReconcileResult> {
     // issue #375: compute the Plugin Workload SDK capability projection ONCE per
     // reconcile and attach it to the result. shouldPatchRecipeStatus reads it to
@@ -1901,7 +1927,28 @@ export class WorkflowRecipeReconciler {
     // the same object instead of rebuilding it. Paths that bypass this method
     // (e.g. observeCurrentWorkloadStatus) leave the projection undefined, which
     // both consumers treat as "no SDK opinion this pass".
-    const result = await this.reconcileInternal(recipe)
+    // Issue #1016: the fingerprint is taken BEFORE the pass because the classic
+    // lane mutates `recipe.spec` in place; it must describe the pass's input.
+    const fingerprint = dnsBlockFingerprint(recipe, this.config)
+    let ran
+    try {
+      ran = await runInReconcileContext(() => this.reconcileInternal(recipe))
+    } catch (error) {
+      // A thrown pass recorded nothing trustworthy: force the next full pass.
+      this.dnsBlockRecordMap.delete(recipe.metadata.name)
+      throw error
+    }
+    const { value: result, ctx } = ran
+    // Record what this pass ran so the T3 lane replays exactly those blocks.
+    this.dnsBlockRecordMap.set(recipe.metadata.name, {
+      fingerprint,
+      blocks: new Set(ctx.dnsBlocks),
+    })
+    result.cadence = {
+      dnsBlocks: [...ctx.dnsBlocks],
+      enforcedOwnership: ctx.enforcedOwnership,
+      repairPending: ctx.repairPending,
+    }
     this.requeueForPendingLegacyNetworkPolicyDelete(recipe, result)
     result.pluginWorkloadSdkProjection = this.projectPluginWorkloadSdk(recipe, result)
     createLogger('wrc', recipe.metadata.name).info('recipe reconciliation completed', {
@@ -5036,6 +5083,7 @@ export class WorkflowRecipeReconciler {
   private async prepareRecipeEgressContractions(
     recipe: WorkflowRecipeCRD
   ): Promise<RecipeEgressContractionPlan> {
+    noteDnsBlock('recipe_egress')
     await this.contractUiEgressPolicy(recipe)
     const workload = await this.contractWorkloadEgressPolicies(recipe)
     await this.contractUiIngressPolicies(recipe)
