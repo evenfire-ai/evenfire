@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { loadConfig } from './config'
 import { WorkflowRecipeWatcher } from './k8sClient'
 import { registry } from './metrics'
 import type { WorkflowRecipeCRD } from './types'
@@ -33,7 +34,7 @@ function harness(
     stopped: false,
     traceReporter: null,
     dbRunProcessor: null,
-    config: { sandboxNamespace: 'sandbox-recipes' },
+    config: { ...loadConfig(), sandboxNamespace: 'sandbox-recipes' },
     eventQueue: {
       enqueue: vi.fn((_k: string, t: () => Promise<unknown>) => {
         queue.push(t)
@@ -183,4 +184,142 @@ describe('handleRecipeEvent cadence plumbing (#1016)', () => {
       vi.useRealTimers()
     }
   })
+})
+
+describe('timer task wrapper (#1016)', () => {
+  const T0 = new Date('2026-10-08T12:00:00Z').getTime()
+  const counter = async (timer: string, result: string) => {
+    const m = (await registry.getSingleMetric('clerum_wrc_timer_checks_total')!.get()).values
+    return m.find(v => v.labels.timer === timer && v.labels.result === result)?.value ?? 0
+  }
+  const withTime = async (fn: () => Promise<void>) => {
+    vi.useFakeTimers()
+    vi.setSystemTime(T0)
+    try {
+      await fn()
+    } finally {
+      vi.useRealTimers()
+    }
+  }
+
+  it('drops a duplicate enqueue while the first is queued and counts coalesced', async () => {
+    const { w, drain } = harness()
+    w.recipes.set('r', recipe())
+    const before = await counter('egress', 'coalesced')
+    const task = vi.fn().mockResolvedValue(undefined)
+    void w.enqueueTimerTask('r', 'egress', task)
+    void w.enqueueTimerTask('r', 'egress', task)
+    await drain()
+    expect(task).toHaveBeenCalledTimes(1)
+    expect(await counter('egress', 'coalesced')).toBe(before + 1)
+    expect(w.cadence.pendingTimerTasks.size).toBe(0)
+  })
+
+  it('skips the task when the recipe left the cache before it ran', async () => {
+    const { w, drain } = harness()
+    w.recipes.set('r', recipe())
+    const before = await counter('egress', 'skipped')
+    const task = vi.fn()
+    void w.enqueueTimerTask('r', 'egress', task)
+    w.recipes.delete('r')
+    await drain()
+    expect(task).not.toHaveBeenCalled()
+    expect(await counter('egress', 'skipped')).toBe(before + 1)
+    expect(w.cadence.pendingTimerTasks.size).toBe(0)
+  })
+
+  it('hands the task the NEWEST cached recipe (fresh read)', async () => {
+    const { w, drain } = harness()
+    w.recipes.set('r', recipe('r', 1))
+    const task = vi.fn().mockResolvedValue(undefined)
+    void w.enqueueTimerTask('r', 'egress', task)
+    w.recipes.set('r', recipe('r', 2))
+    await drain()
+    expect(task.mock.calls[0][0].metadata.generation).toBe(2)
+  })
+
+  it('catches task errors (counts error, clears the pending key, never rejects)', async () => {
+    const { w, drain } = harness()
+    w.recipes.set('r', recipe())
+    const before = await counter('egress', 'error')
+    const p = w.enqueueTimerTask('r', 'egress', async () => {
+      throw new Error('boom')
+    })
+    await drain()
+    await expect(p).resolves.toBeUndefined()
+    expect(await counter('egress', 'error')).toBe(before + 1)
+    expect(w.cadence.pendingTimerTasks.size).toBe(0)
+  })
+
+  it('spacing: a pass started 10s ago (spacing 15s) coalesces', () =>
+    withTime(async () => {
+      const { w } = harness()
+      w.cadence.recordPassStart('r', T0 - 10_000)
+      expect(await w.escalate(recipe(), 'infra_retry', 'infra_retry', 'spacing')).toBe('coalesced')
+      expect(w.reconciler.reconcile).not.toHaveBeenCalled()
+    }))
+
+  it('spacing: a pass started 16s ago runs', () =>
+    withTime(async () => {
+      const { w } = harness()
+      w.cadence.recordPassStart('r', T0 - 16_000)
+      const out = await w.escalate(recipe(), 'infra_retry', 'infra_retry', 'spacing')
+      expect(out).toMatchObject({ ran: true })
+      expect(w.reconciler.reconcile).toHaveBeenCalledTimes(1)
+    }))
+
+  it('spacing: three consecutive 30s ticks with 2s reconciles run three times', () =>
+    withTime(async () => {
+      const { w } = harness()
+      w.reconciler.reconcile.mockImplementation(async (r: WorkflowRecipeCRD) => {
+        r.spec.workloads = []
+        await new Promise(res => setTimeout(res, 2_000))
+        return {
+          phase: 'active',
+          message: 'ok',
+          workloadStatuses: [],
+          skipStatusPatch: true,
+          cadence: { dnsBlocks: [], repairPending: false },
+        }
+      })
+      for (let i = 0; i < 3; i++) {
+        const p = w.escalate(recipe(), 'infra_retry', 'infra_retry', 'spacing')
+        await vi.advanceTimersByTimeAsync(2_000)
+        expect(await p).not.toBe('coalesced')
+        await vi.advanceTimersByTimeAsync(28_000)
+      }
+      expect(w.reconciler.reconcile).toHaveBeenCalledTimes(3)
+    }))
+
+  it('backstop: settled 100s ago (backstop 165s) coalesces', () =>
+    withTime(async () => {
+      const { w } = harness()
+      w.cadence.recordSettled('r', T0 - 100_000, '')
+      expect(await w.escalate(recipe(), 'steady_backstop', 'steady_backstop', 'backstop')).toBe(
+        'coalesced'
+      )
+    }))
+
+  it('backstop: settled 170s ago runs', () =>
+    withTime(async () => {
+      const { w } = harness()
+      w.cadence.recordSettled('r', T0 - 170_000, '')
+      const out = await w.escalate(recipe(), 'steady_backstop', 'steady_backstop', 'backstop')
+      expect(out).toMatchObject({ ran: true })
+    }))
+
+  it('backstop: no settled stamp runs', () =>
+    withTime(async () => {
+      const { w } = harness()
+      const out = await w.escalate(recipe(), 'steady_backstop', 'steady_backstop', 'backstop')
+      expect(out).toMatchObject({ ran: true })
+    }))
+
+  it('coalesce=false runs even when a pass started 1s ago', () =>
+    withTime(async () => {
+      const { w } = harness()
+      w.cadence.recordPassStart('r', T0 - 1_000)
+      const out = await w.escalate(recipe(), 'ownership', 'ownership', false)
+      expect(out).toMatchObject({ ran: true })
+    }))
 })

@@ -21,7 +21,7 @@ import {
   createGovernedTraceReporter,
 } from './governedTraceReporter'
 import { K8sSecretWatchLoop } from './k8sSecretWatchLoop'
-import { reconcileDurationSeconds, reconciliationsTotal } from './metrics'
+import { reconcileDurationSeconds, reconciliationsTotal, timerChecksTotal } from './metrics'
 import { createLogger } from './observability/logger'
 import {
   VERIFIED_AT_REFRESH_MS,
@@ -35,9 +35,13 @@ import {
 } from './recipePredicates'
 import {
   CadenceState,
+  type Coalesce,
   type ReconcileOutcome,
   type ReconcileTrigger,
+  type TimerName,
+  coalesceSpacingMs,
   isSettledResult,
+  steadyBackstopMs,
   workflowNeedsOwnershipBackstop,
 } from './reconcileCadence'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from './reconciler/crdConstants'
@@ -589,6 +593,70 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
   private _cadence?: CadenceState
   private get cadence(): CadenceState {
     return (this._cadence ??= new CadenceState())
+  }
+
+  /**
+   * Issue #1016 — every timer escalation goes through here: dedupe while queued,
+   * re-read the cache inside the queued task (never a tick-time snapshot), and let
+   * the task recompute its classification from `fresh`. Errors are caught here so
+   * the timers' Promise.all never rejects; the pending key always clears.
+   */
+  private enqueueTimerTask(
+    name: string,
+    timer: TimerName,
+    task: (fresh: WorkflowRecipeCRD) => Promise<void>
+  ): Promise<void> {
+    const key = `${timer}:${name}`
+    if (this.cadence.pendingTimerTasks.has(key)) {
+      timerChecksTotal.inc({ timer, result: 'coalesced' })
+      return Promise.resolve()
+    }
+    this.cadence.pendingTimerTasks.add(key)
+    return this.eventQueue.enqueue(name, async () => {
+      try {
+        const fresh = this.recipes.get(name)
+        if (!fresh || fresh.metadata.deletionTimestamp || this.stopped) {
+          timerChecksTotal.inc({ timer, result: 'skipped' })
+          return
+        }
+        await task(fresh)
+      } catch (error) {
+        timerChecksTotal.inc({ timer, result: 'error' })
+        createLogger('wrc', name).error('Periodic check failed', { timer, err: error })
+      } finally {
+        this.cadence.pendingTimerTasks.delete(key)
+      }
+    })
+  }
+
+  /**
+   * Issue #1016 — escalate a timer finding to a forced full reconcile, unless
+   * coalesced: 'spacing' skips when the last pass STARTED < tick/2 ago; 'backstop'
+   * skips unless the last SETTLED pass is at least STEADY_BACKSTOP_MS old (or none).
+   */
+  private async escalate(
+    fresh: WorkflowRecipeCRD,
+    trigger: ReconcileTrigger,
+    timer: TimerName,
+    coalesce: Coalesce
+  ): Promise<ReconcileOutcome | 'coalesced'> {
+    const name = fresh.metadata.name
+    const now = Date.now()
+    if (coalesce === 'spacing') {
+      const last = this.cadence.lastStartAt(name)
+      if (last !== undefined && now - last < coalesceSpacingMs(this.config)) {
+        timerChecksTotal.inc({ timer, result: 'coalesced' })
+        return 'coalesced'
+      }
+    } else if (coalesce === 'backstop') {
+      const last = this.cadence.lastSettledAt(name)
+      if (last !== undefined && now - last < steadyBackstopMs(this.config).ms) {
+        timerChecksTotal.inc({ timer, result: 'coalesced' })
+        return 'coalesced'
+      }
+    }
+    timerChecksTotal.inc({ timer, result: 'escalated' })
+    return this.handleRecipeEvent('MODIFIED', fresh, { forceReconcile: true, trigger })
   }
 
   constructor(kc: k8s.KubeConfig, pool?: Pool | null) {
