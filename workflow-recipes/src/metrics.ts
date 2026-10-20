@@ -53,10 +53,26 @@ export const recipesTotal = gauge({
   labelNames: ['phase'] as const,
 })
 
+// Issue #1016 — one increment per WorkflowRecipeReconciler.reconcile() call.
+// trigger: what caused the pass; outcome: patched | noop | error. Bounded labels.
 export const reconciliationsTotal = counter({
   name: 'clerum_wrc_reconciliations_total',
-  help: 'Total WorkflowRecipe reconciliations',
-  labelNames: ['result'] as const,
+  help: 'Total WorkflowRecipe full reconciliations by trigger and outcome',
+  labelNames: ['trigger', 'outcome'] as const,
+})
+
+export const reconcileDurationSeconds = histogram({
+  name: 'clerum_wrc_reconcile_duration_seconds',
+  help: 'WorkflowRecipe full reconcile duration by trigger',
+  labelNames: ['trigger'] as const,
+  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30],
+})
+
+// Issue #1016 — narrow timer checks: clean | escalated | coalesced | skipped | error.
+export const timerChecksTotal = counter({
+  name: 'clerum_wrc_timer_checks_total',
+  help: 'WRC periodic timer checks by timer and result',
+  labelNames: ['timer', 'result'] as const,
 })
 
 export const mcpSessionsActive = gauge({
