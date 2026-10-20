@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
-import { useReducer } from 'react'
+import { type ReactElement, type ReactNode, useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
+import { desktopQueryDefaults } from '@lib/queryClient'
 import { toActiveSandboxUiApps } from '@lib/sandboxUiAppSelection'
 import type { SandboxUiAppListing } from '@lib/sandboxUiAppSelection.types'
 import {
@@ -274,6 +276,15 @@ function makeSandboxUiBridge() {
 
 type OpenGfsPayload = Awaited<ReturnType<typeof openGfsResourcePayload>>
 
+function renderApp(ui: ReactElement) {
+  const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+  return render(ui, {
+    wrapper: ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    ),
+  })
+}
+
 describe('App sandbox-ui embed always has an owning app tab', () => {
   let currentController: AppController
   let openGfsResourceCb: ((resource: OpenGfsPayload) => void) | null
@@ -334,7 +345,7 @@ describe('App sandbox-ui embed always has an owning app tab', () => {
   })
 
   async function renderWithLiveApp(app: typeof ALPHA) {
-    render(<App />)
+    renderApp(<App />)
     // The strip relaunch resolves the tab's app against the loaded listing.
     await waitFor(() => expect(sandboxUi.listApps).toHaveBeenCalled())
     await act(async () => {
@@ -411,7 +422,7 @@ describe('App sandbox-ui embed always has an owning app tab', () => {
     currentController.selectedAgent = 'agent-a'
     currentController.activeChatId = 'chat-1'
     ;(currentController as { chatList: unknown }).chatList = [{ id: 'chat-1', title: 'Planning' }]
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(sandboxUi.listApps).toHaveBeenCalled())
     act(() => sidebarHarness.props?.onSelect?.(DESKTOP_ROUTES.apps))
     expect(currentController.appsPickerActive).toBe(true)
@@ -538,7 +549,7 @@ describe('App sandbox-ui embed always has an owning app tab', () => {
   })
 
   it('keeps the newer launch owned when a superseded open resolves late and its view then dies', async () => {
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(sandboxUi.listApps).toHaveBeenCalled())
     await act(async () => {
       await Promise.resolve()

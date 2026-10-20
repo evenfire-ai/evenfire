@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
-import { type ReactNode, useEffect, useReducer } from 'react'
+import { type ReactElement, type ReactNode, useEffect, useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, render, waitFor } from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
+import { desktopQueryDefaults } from '@lib/queryClient'
 import {
   activeWorkspaceTab,
   createWorkspaceTabsState,
@@ -367,6 +369,15 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   return controller
 }
 
+function renderApp(ui: ReactElement) {
+  const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+  return render(ui, {
+    wrapper: ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    ),
+  })
+}
+
 describe('App deep-link orchestration', () => {
   let currentController: AppController
   let emitDeepLink: ((link: SandboxUiDeepLinkEnvelope) => void) | null
@@ -392,7 +403,7 @@ describe('App deep-link orchestration', () => {
       },
     } as Partial<AppController>)
 
-    render(<App />)
+    renderApp(<App />)
 
     expect(confirmDialogHarness.props?.title).toBe('Add desktop environment?')
     const dialogBody = renderToStaticMarkup(<>{confirmDialogHarness.props?.body}</>)
@@ -423,7 +434,7 @@ describe('App deep-link orchestration', () => {
       handleConfirmDesktopEnvironmentSwitchConfirmation: confirmSwitch,
     } as Partial<AppController>)
 
-    render(<App />)
+    renderApp(<App />)
 
     expect(confirmDialogHarness.props?.title).toBe('Switch desktop environment?')
     expect(confirmDialogHarness.props?.confirmLabel).toBe('Sign out and switch')
@@ -499,7 +510,7 @@ describe('App deep-link orchestration', () => {
       initialExperienceLoading: false,
       navItem: DESKTOP_ROUTES.apps,
     } as Partial<AppController>)
-    render(<App />)
+    renderApp(<App />)
     expect(sidebarHarness.props?.collapsed).toBe(false)
 
     act(() => {
@@ -527,7 +538,7 @@ describe('App deep-link orchestration', () => {
       initialExperienceLoading: false,
       navItem: DESKTOP_ROUTES.apps,
     } as Partial<AppController>)
-    render(<App />)
+    renderApp(<App />)
 
     act(() => {
       sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
@@ -561,7 +572,7 @@ describe('App deep-link orchestration', () => {
       initialExperienceLoading: false,
       navItem: DESKTOP_ROUTES.apps,
     } as Partial<AppController>)
-    render(<App />)
+    renderApp(<App />)
     expect(sidebarHarness.props?.collapsed).toBe(true)
 
     act(() => {
@@ -587,7 +598,7 @@ describe('App deep-link orchestration', () => {
         initialExperienceLoading: false,
         navItem,
       } as Partial<AppController>)
-      const view = render(<App />)
+      const view = renderApp(<App />)
 
       expect(appHeaderHarness.props?.placement).toBe('titlebar')
 
@@ -600,7 +611,7 @@ describe('App deep-link orchestration', () => {
       initialExperienceLoading: false,
       selectedAgent: 'alpha',
     } as Partial<AppController>)
-    render(<App />)
+    renderApp(<App />)
 
     act(() => emitCommand?.('chat.newTab'))
     expect(currentController.handleSelectChatAgent).toHaveBeenCalledWith('alpha', {
@@ -619,7 +630,7 @@ describe('App deep-link orchestration', () => {
       selectedAgent: 'alpha',
       activeChatId: 'chat-1',
     } as Partial<AppController>)
-    render(<App />)
+    renderApp(<App />)
 
     act(() => emitCommand?.('search.open'))
     expect(appHeaderHarness.props?.searchFocusRequestId).toBe(1)
@@ -632,7 +643,7 @@ describe('App deep-link orchestration', () => {
 
   it('suppresses application commands while plugin consent owns the app surface', () => {
     currentController = makeController({ initialExperienceLoading: false })
-    render(<App />)
+    renderApp(<App />)
     const consent = document.createElement('div')
     consent.className = 'da-plugin-consent'
     consent.setAttribute('role', 'dialog')
@@ -650,7 +661,7 @@ describe('App deep-link orchestration', () => {
       navItem: DESKTOP_ROUTES.apps,
       selectedAgent: 'alpha',
     } as Partial<AppController>)
-    render(<App />)
+    renderApp(<App />)
     act(() => {
       sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
         appRef: 'ns/app',
@@ -684,7 +695,7 @@ describe('App deep-link orchestration', () => {
       navItem: DESKTOP_ROUTES.apps,
       selectedAgent: 'alpha',
     } as Partial<AppController>)
-    render(<App />)
+    renderApp(<App />)
     act(() => {
       sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
         appRef: 'ns/app',
@@ -708,7 +719,7 @@ describe('App deep-link orchestration', () => {
       initialExperienceLoading: false,
       navItem: DESKTOP_ROUTES.apps,
     } as Partial<AppController>)
-    render(<App />)
+    renderApp(<App />)
     act(() => emitCommand?.('commands.open', 'sandbox'))
     act(() => commandPaletteHarness.props?.onClose())
 
@@ -717,7 +728,7 @@ describe('App deep-link orchestration', () => {
 
   it('opens Settings Shortcuts through the registered palette action', () => {
     currentController = makeController({ initialExperienceLoading: false })
-    render(<App />)
+    renderApp(<App />)
     act(() => emitCommand?.('commands.open'))
     act(() => commandPaletteHarness.props?.onExecute('settings.shortcuts'))
 
@@ -727,7 +738,7 @@ describe('App deep-link orchestration', () => {
 
   it('routes approved core palette actions through their existing owners', () => {
     currentController = makeController({ initialExperienceLoading: false })
-    render(<App />)
+    renderApp(<App />)
     act(() => emitCommand?.('commands.open'))
 
     act(() => commandPaletteHarness.props?.onExecute('settings.open'))
@@ -748,7 +759,7 @@ describe('App deep-link orchestration', () => {
 
   it('routes approved contextual palette actions through shell and app owners', () => {
     currentController = makeController({ initialExperienceLoading: false })
-    render(<App />)
+    renderApp(<App />)
     act(() => emitCommand?.('commands.open'))
 
     for (const [commandId, route] of [
@@ -788,7 +799,7 @@ describe('App deep-link orchestration', () => {
 
   it('resets controlled command requests with the authenticated shell lifetime', async () => {
     currentController = makeController({ initialExperienceLoading: false })
-    const { rerender } = render(<App />)
+    const { rerender } = renderApp(<App />)
 
     act(() => emitCommand?.('commands.open'))
     act(() => commandPaletteHarness.props?.onExecute('notifications.open'))
@@ -862,7 +873,7 @@ describe('App deep-link orchestration', () => {
         },
       ],
     })
-    const { rerender } = render(<App />)
+    const { rerender } = renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -905,7 +916,7 @@ describe('App deep-link orchestration', () => {
         },
       ],
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -927,7 +938,7 @@ describe('App deep-link orchestration', () => {
 
   it('acknowledges an authenticated app link when confirmation is cancelled', async () => {
     currentController = makeController({ initialExperienceLoading: false })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -961,7 +972,7 @@ describe('App deep-link orchestration', () => {
         },
       ],
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(sandboxUiPageHarness.props).not.toBeNull())
     // The native WebContentsView paints above renderer DOM, so the overlay
     // signal must stay off until a deep-link dialog actually needs to show.
@@ -991,7 +1002,7 @@ describe('App deep-link orchestration', () => {
       navItem: DESKTOP_ROUTES.apps,
       handleEnsureTeamContext: ensureTeamContext,
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1038,7 +1049,7 @@ describe('App deep-link orchestration', () => {
       navItem: DESKTOP_ROUTES.apps,
       handleEnsureTeamContext: ensureTeamContext,
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1096,7 +1107,7 @@ describe('App deep-link orchestration', () => {
         },
       ],
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1115,7 +1126,7 @@ describe('App deep-link orchestration', () => {
   })
 
   it('never presents a user A link after user B becomes authenticated', async () => {
-    const { rerender } = render(<App />)
+    const { rerender } = renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1162,7 +1173,7 @@ describe('App deep-link orchestration', () => {
           resolveColdList = resolve
         })
     )
-    const { rerender } = render(<App />)
+    const { rerender } = renderApp(<App />)
 
     currentController = makeController({
       initialExperienceLoading: false,
@@ -1192,7 +1203,7 @@ describe('App deep-link orchestration', () => {
 
   it('restores the previous team when the linked app is unavailable', async () => {
     currentController = makeController({ initialExperienceLoading: false })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1226,7 +1237,7 @@ describe('App deep-link orchestration', () => {
       selectedAgent: 'alpha',
       activeChatId: 'chat-1',
     } as Partial<AppController>)
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1254,7 +1265,7 @@ describe('App deep-link orchestration', () => {
       navItem: DESKTOP_ROUTES.apps,
       handleEnsureTeamContext: ensureTeamContext,
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(sandboxUiPageHarness.props).not.toBeNull())
 
     act(() => {
@@ -1296,7 +1307,7 @@ describe('App deep-link orchestration', () => {
         },
       ],
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1335,7 +1346,7 @@ describe('App deep-link orchestration', () => {
       handleEnsureTeamContext: ensureTeamContext,
       getCurrentTeamId: () => liveTeamId,
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1370,7 +1381,7 @@ describe('App deep-link orchestration', () => {
     acknowledgeDeepLink.mockImplementationOnce(() => {
       throw new Error('bridge unavailable')
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1404,7 +1415,7 @@ describe('App deep-link orchestration', () => {
         },
       ],
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1437,7 +1448,7 @@ describe('App deep-link orchestration', () => {
         },
       ],
     }))
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1488,7 +1499,7 @@ describe('App deep-link orchestration', () => {
         },
       ],
     }))
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1553,7 +1564,7 @@ describe('App deep-link orchestration', () => {
         },
       ],
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1608,7 +1619,7 @@ describe('App deep-link orchestration', () => {
         },
       ],
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1684,7 +1695,7 @@ describe('App deep-link orchestration', () => {
         },
       ],
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1723,7 +1734,7 @@ describe('App deep-link orchestration', () => {
       initialExperienceLoading: false,
       handleEnsureTeamContext: ensureTeamContext,
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1762,7 +1773,7 @@ describe('App deep-link orchestration', () => {
       initialExperienceLoading: false,
       handleEnsureTeamContext: ensureTeamContext,
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1795,7 +1806,7 @@ describe('App deep-link orchestration', () => {
         },
       ],
     })
-    render(<App />)
+    renderApp(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
@@ -1870,7 +1881,7 @@ describe('App deep-link orchestration', () => {
   it('restores the saved route when an app tab is reactivated (mini-spec 05 §3, T3)', async () => {
     currentController = makeController({ initialExperienceLoading: false })
     listApps.mockResolvedValue({ apps: [READY_APP] })
-    render(<App />)
+    renderApp(<App />)
     await launchAppFromSidebar()
     // Launched at the default route — nothing persisted yet.
     expect(sandboxUiPageHarness.props?.shortcutApp?.routePath).toBeUndefined()
@@ -1894,7 +1905,7 @@ describe('App deep-link orchestration', () => {
   it('keeps two tabs of the same app on their own routes when alternating (§5)', async () => {
     currentController = makeController({ initialExperienceLoading: false })
     listApps.mockResolvedValue({ apps: [READY_APP] })
-    render(<App />)
+    renderApp(<App />)
 
     // Two tabs of the same app: [chat, A, B].
     await launchAppFromSidebar()
@@ -1921,7 +1932,7 @@ describe('App deep-link orchestration', () => {
   it('closes the embed exactly once on deactivation — the store is the single emitter (§3)', async () => {
     currentController = makeController({ initialExperienceLoading: false })
     listApps.mockResolvedValue({ apps: [READY_APP] })
-    render(<App />)
+    renderApp(<App />)
     await launchAppFromSidebar()
 
     closeSandboxUi.mockClear()
@@ -1935,7 +1946,7 @@ describe('App deep-link orchestration', () => {
   it('does not re-close after an UNsolicited close reconciles the tab as not mounted (§3)', async () => {
     currentController = makeController({ initialExperienceLoading: false })
     listApps.mockResolvedValue({ apps: [READY_APP] })
-    render(<App />)
+    renderApp(<App />)
     await launchAppFromSidebar()
 
     // Unsolicited teardown (crash / quit / partition GC) arrives while the app
@@ -1960,7 +1971,7 @@ describe('App deep-link orchestration', () => {
   it('closes an embed re-mounted within the still-active app tab (Blocker — arm-on-open)', async () => {
     currentController = makeController({ initialExperienceLoading: false })
     listApps.mockResolvedValue({ apps: [READY_APP] })
-    render(<App />)
+    renderApp(<App />)
     await launchAppFromSidebar()
 
     // Back-to-apps / unsolicited onClosed clears the liveness ref but leaves the
@@ -1998,7 +2009,7 @@ describe('App deep-link orchestration', () => {
       handleEnsureTeamContext: ensureTeamContext,
     })
     listApps.mockResolvedValue({ apps: [READY_APP] })
-    render(<App />)
+    renderApp(<App />)
     await launchAppFromSidebar()
     const outgoingId = appTabs()[0]?.id
 
@@ -2041,7 +2052,7 @@ describe('App deep-link orchestration', () => {
   it('does not close or overwrite an app tab reactivated before the stale getLocation resolves (R1-H1, T3)', async () => {
     currentController = makeController({ initialExperienceLoading: false })
     listApps.mockResolvedValue({ apps: [READY_APP] })
-    render(<App />)
+    renderApp(<App />)
     await launchAppFromSidebar() // tabs: [chat, A]; A is live
 
     closeSandboxUi.mockClear()
@@ -2083,7 +2094,7 @@ describe('App deep-link orchestration', () => {
     currentController = makeController({ initialExperienceLoading: false })
     // Two genuinely distinct apps: A's stale continuation must not tear down B.
     listApps.mockResolvedValue({ apps: [READY_APP, READY_APP_B] })
-    render(<App />)
+    renderApp(<App />)
     await launchAppFromSidebar('ns/app') // tabs: [chat, A]; A is live
 
     closeSandboxUi.mockClear()
@@ -2142,7 +2153,7 @@ describe('App deep-link orchestration', () => {
     // The deep link targets an UNAVAILABLE app (ns/missing) so the post-handoff
     // open fails cleanly instead of relaunching an app and muddying the assertions.
     listApps.mockResolvedValue({ apps: [READY_APP] })
-    render(<App />)
+    renderApp(<App />)
     await launchAppFromSidebar('ns/app') // tabs: [chat, A]; A live, liveRef = A
     const outgoingId = appTabs()[0]?.id
 
@@ -2195,7 +2206,7 @@ describe('App deep-link orchestration', () => {
     currentController = makeController({ initialExperienceLoading: false })
     // Two genuinely distinct apps so the read can carry the WRONG app's location.
     listApps.mockResolvedValue({ apps: [READY_APP, READY_APP_B] })
-    render(<App />)
+    renderApp(<App />)
     await launchAppFromSidebar('ns/app') // tabs: [chat, A]; A live
     const outgoingId = appTabs()[0]?.id
 
@@ -2227,7 +2238,7 @@ describe('App deep-link orchestration', () => {
   it('preserves the outgoing tab route when the deactivation read surfaces a foreign app (R4-M1, §3, T3)', async () => {
     currentController = makeController({ initialExperienceLoading: false })
     listApps.mockResolvedValue({ apps: [READY_APP, READY_APP_B] })
-    render(<App />)
+    renderApp(<App />)
     await launchAppFromSidebar('ns/app') // tabs: [chat, A]; A live & active
     const outgoingId = appTabs()[0]!.id
 
@@ -2268,7 +2279,7 @@ describe('App deep-link orchestration', () => {
       handleEnsureTeamContext: ensureTeamContext,
     })
     listApps.mockResolvedValue({ apps: [READY_APP] })
-    render(<App />)
+    renderApp(<App />)
     await launchAppFromSidebar('ns/app') // A live & active
     const outgoingId = appTabs()[0]!.id
 
