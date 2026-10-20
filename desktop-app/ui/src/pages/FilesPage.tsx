@@ -65,11 +65,13 @@ import {
 } from '@/gfs/delegation'
 import type { GfsInheritedAccessSource, GfsInheritedCoverageState } from '@/gfs/delegation.types'
 import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
-import type { GfsDragSource, GfsDropRejection, GfsDropVerdict } from '@/gfs/dragSession'
+import { ownsGfsDrop } from '@/gfs/dragOwnership'
+import type { GfsDragSource, GfsDropVerdict } from '@/gfs/dragSession'
 import { useGfsDragSession } from '@/gfs/dragSession'
 import { GfsFilePicker } from '@/gfs/filePicker'
-import { commitGfsMove, suggestNumberedMoveName } from '@/gfs/moveCommit'
+import { moveDenialMessage, suggestNumberedMoveName } from '@/gfs/moveCommit'
 import type { MoveCommitOutcome } from '@/gfs/moveCommit'
+import { runGfsMoveCommit } from '@/gfs/moveCommitRunner'
 import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
 import type { TeamDirectoryResult } from '../../../src/types'
@@ -429,9 +431,15 @@ export function FilesPage({
   }, [adjudication.endDragSession, liveDragScope])
 
   const ownsDrop = (source: GfsDragSource, epoch: number, sharedGeneration: number | null) =>
-    source.scope === liveDragScopeRef.current &&
-    epoch === dragSessionRef.current &&
-    (!dragSession || dragSession.currentGeneration() === sharedGeneration)
+    ownsGfsDrop(
+      source,
+      { epoch, sessionGeneration: sharedGeneration },
+      {
+        epoch: dragSessionRef.current,
+        scope: liveDragScopeRef.current,
+        sessionGeneration: dragSession?.currentGeneration() ?? null,
+      }
+    )
 
   const lastRemoteGfsChangeEpochRef = useRef(remoteGfsChangeEpoch)
   useEffect(() => {
@@ -1358,33 +1366,6 @@ export function FilesPage({
     return new Set((cached?.pages ?? []).flatMap(page => page.items?.map(item => item.name) ?? []))
   }
 
-  const dropDenialMessage = (
-    rejection: GfsDropRejection,
-    destinationName: string
-  ): string | null => {
-    switch (rejection.reason) {
-      case 'destination-write':
-        return `You can’t move files to ${destinationName} because you don’t have write permission for this folder.`
-      case 'source-write':
-        return 'You cannot move this item out of its current folder without write access there.'
-      case 'source-delete':
-        return 'You do not have permission to remove this item from its current folder.'
-      case 'same-parent':
-        return 'This item is already in this folder.'
-      case 'self':
-      case 'descendant':
-        return 'A folder cannot be moved into itself or one of its subfolders.'
-      case 'root-source':
-        return 'The top-level folder cannot be moved.'
-      case 'cross-drive':
-        return 'Items can’t be moved between drives.'
-      case 'session-lost':
-        return null
-      default:
-        return rejection.message ?? 'This move is not available right now. Try again in a moment.'
-    }
-  }
-
   /** Shared move dispatch (rev-2 §5) used by the drag path, the folder
    * confirmation and the Move dialog — one service, one code path.
    *
@@ -1401,90 +1382,22 @@ export function FilesPage({
     movingResourceRef.current = source.resourceId
     setMovingResourceId(source.resourceId)
     try {
-      // A transport loss after dispatch leaves the mutation REJECTED even
-      // though the PATCH landed. The commit verifies that by resolve; the
-      // convergence then has to run here, because the mutation's own success
-      // path never did.
-      let dispatchConfirmed = false
-      const outcome = await commitGfsMove(
+      return await runGfsMoveCommit(
         {
-          resolveSource: async gfsUri => {
-            const resolved = await window.clerum.gfs.resolve(gfsUri)
-            return {
-              resourceId: resolved.resourceId,
-              gfsUri,
-              kind: resolved.kind === 'directory' ? 'directory' : 'file',
-              name: resolved.name,
-              version: resolved.version,
-              parentResourceId: resolved.parentResourceId,
-            }
-          },
-          moveResource: async (resourceId, destinationId, ifMatch, newName, oldParentId) => {
-            const receipt = await ctrl.moveResource(
-              resourceId,
-              destinationId,
-              ifMatch,
-              newName,
-              oldParentId
-            )
-            dispatchConfirmed = true
-            return receipt
-          },
-          isSessionAuthorityFailure: error => failClosedOnAuthorizationError(error),
-          ...(isCurrent ? { isCurrent } : {}),
+          moveResource: (resourceId, destinationId, ifMatch, newName, oldParentId) =>
+            ctrl.moveResource(resourceId, destinationId, ifMatch, newName, oldParentId),
+          handleAuthorityFailure: message => ctrl.handleAuthorityFailure(message, 'operation'),
+          convergeCommittedMove: (input, receipt) => ctrl.convergeCommittedMove(input, receipt),
+          ...(pushToast ? { pushToast } : {}),
         },
         {
-          source: {
-            resourceId: source.resourceId,
-            gfsUri: source.gfsUri,
-            kind: source.kind,
-            name: source.name,
-          },
+          source,
           destination,
           allowNumberedRename,
           occupiedDestinationNames: cachedDestinationNames(destination.resourceId),
+          ...(isCurrent ? { isCurrent } : {}),
         }
       )
-      if (outcome.status === 'committed' && !dispatchConfirmed) {
-        // The PATCH landed but the response was lost: the mutation rejected,
-        // so its success path (and the convergence it owns) never ran. The
-        // item HAS moved — converge the cache now so it stops rendering in
-        // the old folder.
-        await ctrl.convergeCommittedMove(
-          {
-            resourceId: source.resourceId,
-            destinationId: destination.resourceId,
-            oldParentId: outcome.previousParentId,
-          },
-          { version: outcome.version }
-        )
-      }
-      switch (outcome.status) {
-        case 'committed':
-          pushToast?.(
-            outcome.renamedTo
-              ? `Moved ${source.name} to ${destination.name} as ${outcome.renamedTo}`
-              : `Moved ${source.name} to ${destination.name}`,
-            'success'
-          )
-          if (source.kind === 'directory') {
-            pushToast?.(
-              'Moving a folder changes who can access its contents — access now follows the new location.',
-              'info'
-            )
-          }
-          break
-        case 'no-op':
-          pushToast?.(outcome.message, 'info')
-          break
-        case 'session-lost':
-        // A superseded gesture never reached the server: nothing to report.
-        case 'gesture-lost':
-          break
-        default:
-          pushToast?.(outcome.message, 'error')
-      }
-      return outcome
     } finally {
       movingResourceRef.current = null
       setMovingResourceId(null)
@@ -1515,7 +1428,7 @@ export function FilesPage({
       })
       if (!ownsDrop(source, dragGeneration, sessionGeneration)) return
       if (!decision.allowed) {
-        const message = dropDenialMessage(decision, destination.name)
+        const message = moveDenialMessage(decision, destination.name)
         if (message) pushToast?.(message, 'error')
         return
       }

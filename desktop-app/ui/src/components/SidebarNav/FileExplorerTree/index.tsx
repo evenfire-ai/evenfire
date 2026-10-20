@@ -18,14 +18,11 @@ import { resolveGfsPreview } from '@lib/gfsPreview'
 import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
 import { isGfsChildrenDenied, purgeDeniedGfsChildren } from '@/gfs/deniedChildren'
 import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
+import { ownsGfsDrop } from '@/gfs/dragOwnership'
 import type { GfsDragSource } from '@/gfs/dragSession'
 import { useGfsDragSession } from '@/gfs/dragSession'
-import {
-  commitGfsMove,
-  moveDenialMessage,
-  suggestNumberedMoveName,
-  toastMoveOutcome,
-} from '@/gfs/moveCommit'
+import { moveDenialMessage, suggestNumberedMoveName } from '@/gfs/moveCommit'
+import { runGfsMoveCommit } from '@/gfs/moveCommitRunner'
 import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
 import { IconChevronRight, IconContexts } from '../icons'
@@ -494,9 +491,15 @@ export function FileExplorerTree({
 
   const ownsDrop = useCallback(
     (source: GfsDragSource, epoch: number, sharedGeneration: number | null) =>
-      source.scope === liveDragScopeRef.current &&
-      epoch === dragSessionEpochRef.current &&
-      (!dragSession || dragSession.currentGeneration() === sharedGeneration),
+      ownsGfsDrop(
+        source,
+        { epoch, sessionGeneration: sharedGeneration },
+        {
+          epoch: dragSessionEpochRef.current,
+          scope: liveDragScopeRef.current,
+          sessionGeneration: dragSession?.currentGeneration() ?? null,
+        }
+      ),
     [dragSession]
   )
 
@@ -707,70 +710,22 @@ export function FileExplorerTree({
       movingResourceIdRef.current = source.resourceId
       setMovingResourceId(source.resourceId)
       try {
-        // A transport loss after dispatch leaves the mutation REJECTED even
-        // though the PATCH landed. The commit verifies that by resolve; the
-        // convergence then has to run here, because the mutation's own success
-        // path never did.
-        let dispatchConfirmed = false
-        const outcome = await commitGfsMove(
+        return await runGfsMoveCommit(
           {
-            resolveSource: async gfsUri => {
-              const resolved = await window.clerum.gfs.resolve(gfsUri)
-              return {
-                resourceId: resolved.resourceId,
-                gfsUri,
-                kind: resolved.kind === 'directory' ? 'directory' : 'file',
-                name: resolved.name,
-                version: resolved.version,
-                parentResourceId: resolved.parentResourceId,
-              }
-            },
-            moveResource: async (resourceId, destinationId, ifMatch, newName, oldParentId) => {
-              const receipt = await ctrl.moveResource(
-                resourceId,
-                destinationId,
-                ifMatch,
-                newName,
-                oldParentId
-              )
-              dispatchConfirmed = true
-              return receipt
-            },
-            isSessionAuthorityFailure: error =>
-              ctrl.handleAuthorityFailure(
-                error instanceof Error ? error.message : String(error),
-                'operation'
-              ),
-            ...(isCurrent ? { isCurrent } : {}),
+            moveResource: (resourceId, destinationId, ifMatch, newName, oldParentId) =>
+              ctrl.moveResource(resourceId, destinationId, ifMatch, newName, oldParentId),
+            handleAuthorityFailure: message => ctrl.handleAuthorityFailure(message, 'operation'),
+            convergeCommittedMove: (input, receipt) => ctrl.convergeCommittedMove(input, receipt),
+            pushToast,
           },
           {
-            source: {
-              resourceId: source.resourceId,
-              gfsUri: source.gfsUri,
-              kind: source.kind,
-              name: source.name,
-            },
+            source,
             destination,
             allowNumberedRename,
             occupiedDestinationNames: cachedDestinationNames(destination.resourceId),
+            ...(isCurrent ? { isCurrent } : {}),
           }
         )
-        if (outcome.status === 'committed' && !dispatchConfirmed) {
-          // The PATCH landed but the response was lost: the mutation rejected,
-          // so its success path (and the convergence it owns) never ran. The
-          // item HAS moved — converge the cache now so it stops rendering in
-          // the old folder.
-          await ctrl.convergeCommittedMove(
-            {
-              resourceId: source.resourceId,
-              destinationId: destination.resourceId,
-              oldParentId: outcome.previousParentId,
-            },
-            { version: outcome.version }
-          )
-        }
-        toastMoveOutcome(pushToast, outcome, source.name, destination.name, source.kind)
-        return outcome
       } finally {
         movingResourceIdRef.current = null
         setMovingResourceId(null)
