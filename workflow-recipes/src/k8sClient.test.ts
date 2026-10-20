@@ -3143,6 +3143,7 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
       })
       const enqueue = vi.fn((_key: string, task: () => Promise<void>) => task())
       const refreshDnsBlocks = vi.fn().mockReturnValue(gate.then(() => 'clean'))
+      const listPoliciesForLane = vi.fn().mockResolvedValue([])
       const handleRecipeEvent = vi.fn().mockResolvedValue(undefined)
       const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
       internal.recipes = new Map([['with-ui-egress', makeUiEgressRecipe('with-ui-egress')]])
@@ -3159,16 +3160,21 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
       internal.reconciler = {
         externalEgressRefreshMinTtlMs: Infinity,
         refreshDnsBlocks,
-        listPoliciesForLane: vi.fn().mockResolvedValue([]),
+        listPoliciesForLane,
       }
 
       internal.startExternalEgressRefreshLoop()
       await vi.advanceTimersByTimeAsync(60_000) // first tick — pass starts, stays in-flight
       expect(refreshDnsBlocks).toHaveBeenCalledTimes(1)
+      expect(listPoliciesForLane).toHaveBeenCalledTimes(1)
       expect(internal.externalEgressRefreshRunning).toBe(true)
 
       await vi.advanceTimersByTimeAsync(60_000) // second tick — must be skipped
       expect(refreshDnsBlocks).toHaveBeenCalledTimes(1)
+      // listPoliciesForLane runs BEFORE the timer wrapper, so the wrapper's
+      // per-recipe dedupe cannot mask a missing in-flight guard: only the
+      // reschedule-after-completion guard keeps a second pass from starting.
+      expect(listPoliciesForLane).toHaveBeenCalledTimes(1)
 
       release?.()
       await gate
