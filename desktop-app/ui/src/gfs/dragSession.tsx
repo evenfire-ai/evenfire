@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react'
-import { useQuery } from '@tanstack/react-query'
 import { useAuthContext } from '@contexts/AuthContext'
+import { useQuery } from '@tanstack/react-query'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsDragSessionApi, GfsDragSource } from './dragSession.types'
 
@@ -11,8 +11,11 @@ type GfsAccessState = 'active' | 'revoked'
  * source, held in refs (dragover never re-renders the tree). The store is
  * bound to the live session scope and the SHARED access-state query, so a
  * logout, env/user/team switch or a definite lifecycle rejection clears the
- * drag. Payload identity is the in-window descriptor; generations only
- * discard stale async callbacks — they are not credentials or a wire registry.
+ * drag. A lost dragend must not outlive the next trusted gesture: a
+ * same-session beginDrag SUPERSEDES the stale source with a new generation,
+ * while a foreign-session gesture is still refused. Payload identity is the
+ * in-window descriptor; generations only discard stale async callbacks — they
+ * are not credentials or a wire registry.
  */
 export class GfsDragSessionStore implements GfsDragSessionApi {
   private active: GfsDragSource | null = null
@@ -20,7 +23,7 @@ export class GfsDragSessionStore implements GfsDragSessionApi {
   private boundScope: string | null = null
 
   beginDrag(source: Omit<GfsDragSource, 'generation'>): boolean {
-    if (this.active) return false
+    if (this.active && this.boundScope !== source.scope) return false
     this.generation += 1
     this.active = { ...source, generation: this.generation }
     this.boundScope = source.scope
@@ -66,9 +69,7 @@ function sessionScopeOf(auth: {
   runtimeConfigState: { envKey: string } | null
 }): string | null {
   const envKey = auth.runtimeConfigState?.envKey ?? ''
-  return auth.isAuthenticated && auth.me
-    ? `${envKey}:${auth.me.id}:${auth.me.teamId ?? ''}`
-    : null
+  return auth.isAuthenticated && auth.me ? `${envKey}:${auth.me.id}:${auth.me.teamId ?? ''}` : null
 }
 
 export function GfsDragSessionProvider({ children }: { children: React.ReactNode }) {

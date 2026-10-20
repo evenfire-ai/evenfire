@@ -525,7 +525,12 @@ export function FileExplorerTree({
         generation: dragSessionEpochRef.current,
       }
       const { generation: _generation, ...sourceForStore } = source
-      dragSession?.beginDrag(sourceForStore)
+      if (dragSession && !dragSession.beginDrag(sourceForStore)) {
+        // The session refused the gesture (foreign scope or revoked access):
+        // never publish a local payload the shared session did not accept.
+        event.preventDefault()
+        return
+      }
       adjudication.beginDragSession()
       event.dataTransfer.effectAllowed = 'move'
       event.dataTransfer.setData(GFS_RESOURCE_DRAG_TYPE, node.resourceId)

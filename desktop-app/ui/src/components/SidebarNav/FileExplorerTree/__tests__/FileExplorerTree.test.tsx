@@ -854,6 +854,61 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     await screen.findByRole('dialog', { name: 'Move folder A to B' })
   })
 
+  it('a new gesture after a lost dragend commits the dragged folder, not the stale one', async () => {
+    // R1-H2: the browser can lose dragend (e.g. the source row is replaced by
+    // a listing refresh mid-drag and dragend fires on a detached node). The
+    // stale source must not adjudicate the NEXT gesture's drop: the new
+    // trusted gesture takes ownership of the session instead.
+    const moveResource = vi.fn(async () => ({ resourceId: 'folderb', version: 9 }))
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folderc') return { held: ['read', 'write'] }
+      return { held: ['read', 'write', 'delete'] }
+    })
+    const resolve = vi.fn(async (uri: string) => {
+      const id = uri.split('/').pop()
+      const parent = id === 'grand' ? null : 'grand'
+      const name =
+        id === 'foldera' ? 'A' : id === 'folderb' ? 'B' : id === 'folderc' ? 'C' : 'Grand'
+      return {
+        drive: 'main',
+        resourceId: id === 'grand' ? 'grand' : id,
+        parentResourceId: parent,
+        name,
+        kind: 'directory',
+        version: id === 'foldera' ? 4 : 1,
+      }
+    })
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('foldera', 'A', 'directory', { version: 4 }),
+          accessibleResource('folderb', 'B', 'directory'),
+          accessibleResource('folderc', 'C', 'directory'),
+        ])
+      ),
+      affordances,
+      resolve,
+      moveResource,
+    })
+    renderTreeWithSession()
+
+    const rowA = await screen.findByRole('button', { name: 'A' })
+    const rowB = await screen.findByRole('button', { name: 'B' })
+    const rowC = await screen.findByRole('button', { name: 'C' })
+    const dataTransfer = dragTypes()
+    const cRow = rowC.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+
+    // Gesture A starts and its dragend is LOST (no dragEnd fired here).
+    fireEvent.dragStart(rowA, { dataTransfer })
+    // Gesture B supersedes the stale A and drops onto C.
+    fireEvent.dragStart(rowB, { dataTransfer })
+    fireEvent.drop(cRow, { dataTransfer })
+
+    // The confirmation must describe B's move — not the stale A.
+    await screen.findByRole('dialog', { name: 'Move folder B to C' })
+    expect(screen.queryByRole('dialog', { name: 'Move folder A to C' })).toBeNull()
+  })
+
   it('moves a dragged folder into an unrelated folder through the one confirmation', async () => {
     // Two directly-shared folders under one unshared common parent 'grand':
     // the drop must walk B's (bounded) ancestry, find the common anchor via

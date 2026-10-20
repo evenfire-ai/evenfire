@@ -47,16 +47,32 @@ afterEach(() => {
 })
 
 describe('GfsDragSessionStore — one active source per session', () => {
-  it('begins one drag, refuses a second, and clears on endDrag', () => {
+  it('supersedes a stale same-session source with the next trusted gesture', () => {
+    // A lost dragend (detached-node dragend after a listing refresh) leaves
+    // the old source active. The next same-session gesture must OWN the
+    // session — refusing it would leave the stale source adjudicating the
+    // new gesture's drop (wrong-resource move).
     const store = new GfsDragSessionStore()
     expect(store.beginDrag(source())).toBe(true)
-    expect(store.beginDrag(source({ resourceId: 'r-2' }))).toBe(false)
-    expect(store.activeSource()?.resourceId).toBe('r-1')
+    const stale = store.activeSource()
+    expect(store.beginDrag(source({ resourceId: 'r-2', name: 'b.txt' }))).toBe(true)
+    const active = store.activeSource()
+    expect(active?.resourceId).toBe('r-2')
+    expect(active?.generation).toBeGreaterThan(stale?.generation ?? 0)
     store.endDrag()
     expect(store.activeSource()).toBeNull()
     // After clearing, a new drag can start with a fresh generation.
+    expect(store.beginDrag(source({ resourceId: 'r-3' }))).toBe(true)
+    expect(store.activeSource()?.generation).toBeGreaterThan(active?.generation ?? 0)
+  })
+
+  it('refuses a foreign-session gesture and keeps the active source', () => {
+    const store = new GfsDragSessionStore()
+    store.beginDrag(source())
+    expect(store.beginDrag(source({ scope: 'other:user-9:team-9' }))).toBe(false)
+    expect(store.activeSource()?.resourceId).toBe('r-1')
+    // The refused gesture did not consume a generation.
     expect(store.beginDrag(source({ resourceId: 'r-2' }))).toBe(true)
-    expect(store.activeSource()?.generation).toBeGreaterThan(1)
   })
 
   it('matches scope only while the same session drag is active', () => {
@@ -117,5 +133,22 @@ describe('GfsDragSessionProvider — lifecycle binding', () => {
     )
     expect(api!.beginDrag(source({ scope: 'other:user-9:' }))).toBe(false)
     expect(api!.activeSource()).toBeNull()
+  })
+
+  it('supersedes a stale same-session drag through the provider guards', () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    let api: ReturnType<typeof useGfsDragSession> | null = null
+    render(
+      <QueryClientProvider client={queryClient}>
+        <GfsDragSessionProvider>
+          <Probe onApi={captured => (api = captured)} />
+        </GfsDragSessionProvider>
+      </QueryClientProvider>
+    )
+    expect(api!.beginDrag(source())).toBe(true)
+    // Lost dragend: the stale source lingers. The next trusted same-session
+    // gesture passes the provider guards and takes ownership of the session.
+    expect(api!.beginDrag(source({ resourceId: 'r-2' }))).toBe(true)
+    expect(api!.activeSource()?.resourceId).toBe('r-2')
   })
 })
