@@ -13,8 +13,13 @@ It is distinct from Resend, which re-sends the user's original message.
 Codex/Grok subscription providers retry a transient `provider_unavailable` before
 failover, for at most 3 attempts total (backoffs of about 1 s and 3 s, with jitter).
 Each attempt uses fresh authorization and a fresh attempt index. Automatic retry
-is allowed only before any output has streamed; only after these attempts are
-exhausted can that failure leave a resumable checkpoint.
+is allowed only when the failed attempt is known not to have reached the
+provider (`providerDispatched === false`, for example a failed authorization)
+and no output has streamed. An attempt that may have been dispatched, such as a
+proxy timeout, is not retried, because a second call could be billed twice.
+Only after these attempts end can that failure leave a resumable checkpoint.
+Sources: [retry guard](../../mcp-host/src/llm/rateLimitRetry.ts#L52),
+[dispatch flag](../../mcp-host/src/llm/types.ts#L61).
 
 Retry remains available after an approval resume while the Host stays up. If the
 Host restarts while a turn waits for approval, that turn's checkpoint is abandoned
@@ -39,7 +44,7 @@ optional `modelStepCheckpoint` next to `state`, `activeTaskId`, `pendingApproval
 |---|---|---|
 | `checkpointId` | string | Stable for the life of the checkpoint, across re-claims. |
 | `version` | number | Increases on every transition. The continuation POST echoes it. |
-| `status` | `resumable` \| `claimed` \| `blocked` | `completed` and `abandoned` checkpoints are never served and are purged on the next five-minute sweep. A claimed row with a lapsed lease and no live approval is projected as `resumable` at its stored version. Blocked rows retain their configured TTL. |
+| `status` | `resumable` \| `claimed` \| `blocked` | `completed` and `abandoned` checkpoints are never served and are purged on the next five-minute sweep, except while the session's active task is the checkpoint's continuation task or a pending approval is bound to the checkpoint; those headers are purged on a later sweep. `open` checkpoints (a turn still recording its first tool steps) are never served. A claimed row with a lapsed lease and no live approval is projected as `resumable` at its stored version. Blocked rows retain their configured TTL. |
 | `retryAvailable` | boolean | `true` only when `status` is `resumable`. |
 | `originTaskId` | string | The failed task. It stays terminal. |
 | `continuationTaskId` | string, optional | Present when `status` is `claimed`. |
@@ -75,7 +80,8 @@ The status is checked first. The version is compared only when the status is `re
 
 | Order | Checkpoint state | Response | Example |
 |---|---|---|---|
-| 1 | `abandoned`, missing, or another session | `404 { code: "model_step_checkpoint_not_found" }` | `continue-response.not-found.json` |
+| 1 | `abandoned`, `open`, missing, or another session | `404 { code: "model_step_checkpoint_not_found" }` | `continue-response.not-found.json` |
+| 1b | `resumable`, `claimed` or `blocked` past `expiresAt`, with no live lease or same-task approval (before the sweep abandons it) | Same `404` as row 1 | `continue-response.not-found.json` |
 | 2 | `completed` (before the next terminal sweep; then row 1) | `200 { taskId, checkpointId, status: "completed", replayed: true }` | `continue-response.completed.json` |
 | 3 | `claimed`, lease or same-task approval live (any version) | `202 { taskId: continuationTaskId, checkpointId, status: "claimed", replayed: true }` | `continue-response.replayed.json` |
 | 3b | `claimed`, lease expired and no live same-task approval (any version) | Re-claim: revalidate (row 6); on success `202 { taskId: <new>, checkpointId, status: "claimed", replayed: false }` | `continue-response.reclaimed.json` |
@@ -84,6 +90,7 @@ The status is checked first. The version is compared only when the status is `re
 | 6 | `resumable`, same version, revalidation fails | `409 { code: "model_step_checkpoint_blocked", blockedReason }`; the checkpoint becomes `blocked` | `continue-response.blocked.json` |
 | 7 | `resumable`, same version, claim won | `202 { taskId, checkpointId, status: "claimed", replayed: false }` | `continue-response.claimed.json` |
 | 7b | Claim won, then `reference_check_failed` | Same `202` as row 7; the ordinary async task result carries the file-reference error. The checkpoint is already `resumable` with a new version. | See below. |
+| 7c | Claim won, then, within the 10 s verdict wait, the continuation finds it no longer owns the claim (a lease renewal returns `false`, or another claim or transition replaced its fence), or preparation fails and the claim is abandoned | `404 { code: "model_step_checkpoint_not_found" }`, synchronously. The checkpoint keeps the state its current owner gave it. | `continue-response.not-found.json` |
 
 Every claim creates a new task id: the task lifecycle refuses a terminal id. "The same
 continuation" means the same `checkpointId` and the same recorded entries.
@@ -101,7 +108,13 @@ Other responses are outside the checkpoint-state table:
   safe integer, or invalid trace context; `401 { error: "Missing rpc edge caller context" }`;
   `501 { error: "Model-step continuation handler not configured" }`;
   `500 { error: "Model-step continuation failed" }`.
-  [Host route](../../mcp-host/src/server/routes.ts#L304).
+  The `500` is also returned after a won claim when, within the verdict wait,
+  admission cannot enqueue the task, a claim lease renewal fails with a worker
+  error (the checkpoint stays `claimed` until its lease expires), or the
+  transition to `blocked` cannot be stored. The task fails through the ordinary
+  task-result path; no `202` is sent.
+  [Host route](../../mcp-host/src/server/routes.ts#L304),
+  [admission error](../../mcp-host/src/agent/modelStepContinuation.ts#L228).
 - Host `503 { code: "host_draining" }` enters the proxy's wake-and-hold path.
   If the Host is still waking when the hold ends, the proxy may return
   `503 { code: "host_waking", hostRef, retryAfterMs, message, lastKnownState }`
