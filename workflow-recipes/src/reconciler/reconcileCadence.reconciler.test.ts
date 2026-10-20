@@ -7,6 +7,7 @@ import * as k8s from '@kubernetes/client-node'
 import type { WorkflowRecipeCRD } from '../types'
 import { deriveWorkflowRuntimePlan } from '../workflow/runtimePlan'
 import { WorkflowReconciler } from '../workflow/workflowReconciler'
+import { captureLoggerLevels } from './__tests__/captureLogger'
 import { ownershipSignature, runInReconcileContext } from './reconcileContext'
 import * as rb from './resourceBuilder'
 import { WorkflowRecipeReconciler } from './workflowRecipeReconciler'
@@ -1132,6 +1133,80 @@ describe('refreshDnsBlocks egress lane (#1016 §3.3)', () => {
     expect(
       mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.invocationCallOrder[0]
     ).toBeLessThan(lookupOrder)
+  })
+
+  describe('log hygiene (#1016 §3.7)', () => {
+    const fakeWorkflowReconciler = () => ({
+      reconcile: vi
+        .fn()
+        .mockResolvedValue({ phase: 'active', message: 'ok', workflowPhase: 'running' }),
+      validateWorkflowSpec: vi.fn().mockReturnValue(undefined),
+      ensureMcpHostRuntimeCredentials: vi.fn(),
+      refreshRuntimeHttpEgressNetworkPolicies: vi.fn(),
+    })
+    const messages = (mock: { mock: { calls: unknown[][] } }) =>
+      mock.mock.calls.map(c => String(c[0]))
+    const lane = (mock: { mock: { calls: unknown[][] } }) =>
+      mock.mock.calls.filter(c => c[0] === 'Running workflow infrastructure lane')
+
+    function sdkRecipe(phase: string) {
+      return makeRecipe({
+        spec: {
+          ...egressSpec,
+          pluginWorkloadSdk: { clientNotifications: {} },
+          steps: [
+            { id: 'run', run: { type: 'snippet', language: 'typescript', code: 'return 1' } },
+          ],
+        },
+        status: { phase },
+      } as unknown as Partial<WorkflowRecipeCRD>)
+    }
+
+    it('labels an SDK no-run fall-through pass sdk_eager and drops the first-deployment wording', async () => {
+      const { calls, restore } = captureLoggerLevels(['info', 'debug'])
+      try {
+        const rec = reconcilerWith()
+        ;(rec as unknown as { workflowReconciler: unknown }).workflowReconciler =
+          fakeWorkflowReconciler()
+        await rec.reconcile(sdkRecipe('active'))
+        const runs = lane(calls.info)
+        expect(runs).toHaveLength(1)
+        expect(runs[0][1]).toMatchObject({ reason: 'sdk_eager' })
+        expect(messages(calls.info)).not.toContain(
+          'Creating workflow infrastructure for first deployment'
+        )
+      } finally {
+        restore()
+      }
+    })
+
+    it('labels a candidate workflow first_deploy', async () => {
+      const { calls, restore } = captureLoggerLevels(['info'])
+      try {
+        const rec = reconcilerWith()
+        ;(rec as unknown as { workflowReconciler: unknown }).workflowReconciler =
+          fakeWorkflowReconciler()
+        await rec.reconcile(sdkRecipe('candidate'))
+        expect(lane(calls.info)[0][1]).toMatchObject({ reason: 'first_deploy' })
+      } finally {
+        restore()
+      }
+    })
+
+    it('logs unchanged no-op lines of an unchanged classic recipe at debug, not info', async () => {
+      const recipe = classicRecipe()
+      const rec = reconcilerWith()
+      await rec.reconcile(structuredClone(recipe))
+      const { calls, restore } = captureLoggerLevels(['info', 'debug'])
+      try {
+        await rec.reconcile(structuredClone(recipe))
+        const noop = (m: string) => /unchanged|Unchanged/.test(m) && /skipping|no-op/.test(m)
+        expect(messages(calls.debug).filter(noop).length).toBeGreaterThan(0)
+        expect(messages(calls.info).filter(noop)).toEqual([])
+      } finally {
+        restore()
+      }
+    })
   })
 
   describe('parity with the full pass', () => {

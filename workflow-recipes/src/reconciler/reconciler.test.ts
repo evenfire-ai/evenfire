@@ -842,7 +842,7 @@ describe('WorkflowRecipeReconciler', () => {
     restore: () => void
   } {
     const previousLevel = process.env.LOG_LEVEL
-    process.env.LOG_LEVEL = 'info'
+    process.env.LOG_LEVEL = 'debug'
     const entries: Array<Record<string, unknown>> = []
     const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
       const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString()
@@ -930,7 +930,7 @@ describe('WorkflowRecipeReconciler', () => {
             })
             expect(captured.entries).toContainEqual(
               expect.objectContaining({
-                level: 'info',
+                level: 'debug',
                 msg: 'network policy unchanged; skipping update',
                 policy: name,
                 namespace,
@@ -2900,7 +2900,7 @@ describe('WorkflowRecipeReconciler', () => {
         expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
         expect(captured.entries).toContainEqual(
           expect.objectContaining({
-            level: 'info',
+            level: 'debug',
             msg: 'network policy unchanged; skipping update',
             policy: 'wl-ingress-r-w',
             namespace: NS,
@@ -4185,7 +4185,7 @@ describe('WorkflowRecipeReconciler', () => {
         try {
           await ensure()
           expect(
-            loggedFor(logs.calls.info, 'StatefulSet spec hash unchanged; skipping update', name)
+            loggedFor(logs.calls.debug, 'StatefulSet spec hash unchanged; skipping update', name)
           ).toBe(1)
         } finally {
           logs.restore()
@@ -4225,7 +4225,7 @@ describe('WorkflowRecipeReconciler', () => {
           await ensure()
           const name = createdBody().metadata.name
           expect(
-            loggedFor(logs.calls.info, 'StatefulSet spec hash unchanged; skipping update', name)
+            loggedFor(logs.calls.debug, 'StatefulSet spec hash unchanged; skipping update', name)
           ).toBe(1)
           expect(readsOf(read, name, namespace)).toBe(2)
         } finally {
@@ -4307,7 +4307,7 @@ describe('WorkflowRecipeReconciler', () => {
         try {
           await reconciler.reconcile(recipe)
           expect(
-            loggedFor(logs.calls.info, 'StatefulSet spec hash unchanged; skipping update', name)
+            loggedFor(logs.calls.debug, 'StatefulSet spec hash unchanged; skipping update', name)
           ).toBe(1)
         } finally {
           logs.restore()
@@ -4356,7 +4356,7 @@ describe('WorkflowRecipeReconciler', () => {
           }
         ).ensureStatefulSet(workload, recipe, 'minimal', {})
         expect(
-          logs.calls.info.mock.calls.filter(
+          logs.calls.debug.mock.calls.filter(
             ([msg, ctx]) =>
               msg === 'StatefulSet spec hash unchanged; skipping update' &&
               (ctx as { name?: string })?.name === name
@@ -6243,7 +6243,7 @@ describe('WorkflowRecipeReconciler', () => {
         const recipe = makeRecipe()
         recipe.metadata.generation = 7
         const previousLevel = process.env.LOG_LEVEL
-        process.env.LOG_LEVEL = 'info'
+        process.env.LOG_LEVEL = 'debug'
         const receipts: Array<Record<string, unknown>> = []
         const write = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
           for (const line of String(chunk).split('\n')) {
@@ -8473,7 +8473,7 @@ describe('WorkflowRecipeReconciler', () => {
     restore: () => void
   } {
     const previousLevel = process.env.LOG_LEVEL
-    process.env.LOG_LEVEL = 'info'
+    process.env.LOG_LEVEL = 'debug'
     const entries: EgressRecord[] = []
     const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
       const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString()
@@ -15430,7 +15430,7 @@ describe('WorkflowRecipeReconciler', () => {
       mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
       mockNetworkingApi.readNamespacedNetworkPolicy.mockClear()
       const previousLevel = process.env.LOG_LEVEL
-      process.env.LOG_LEVEL = 'info'
+      process.env.LOG_LEVEL = 'debug'
       const logEntries: Array<Record<string, unknown>> = []
       const logSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
         const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString()

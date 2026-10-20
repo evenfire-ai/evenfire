@@ -2547,9 +2547,10 @@ export class WorkflowRecipeReconciler {
         }
       }
 
-      // ─── First-time infrastructure creation ──────────────────────────
-      // Only reaches here on first deploy (candidate phase) or when no wfExecPhase yet.
-      // After this, the skip guards above prevent redundant reconciles.
+      // ─── Workflow infrastructure lane ────────────────────────────────
+      // Reached on first deploy, on a degraded or recovering workflow, and on
+      // every pass for SDK no-run workflows (#375 fall-through). The steady
+      // short-circuits above handle everything else.
 
       const workflowComputedValues = recipe.spec.computed
         ? evaluateComputedValues(recipe.spec.computed, recipe.spec.inputs ?? {})
@@ -2732,10 +2733,14 @@ export class WorkflowRecipeReconciler {
         }
       }
 
-      createLogger('wrc', recipe.metadata.name).info(
-        'Creating workflow infrastructure for first deployment',
-        { name, length: recipe.spec.steps!.length }
-      )
+      createLogger('wrc', recipe.metadata.name).info('Running workflow infrastructure lane', {
+        name,
+        length: recipe.spec.steps!.length,
+        reason:
+          recipe.status?.phase === 'active' && recipe.spec.pluginWorkloadSdk
+            ? 'sdk_eager'
+            : 'first_deploy',
+      })
       // Recovery handoff: when this workflow was latched `failed` by a transient
       // infra blip, hand the inner reconciler a `recovering` execution phase
       // (preserving message/steps/conditions) so it retries infrastructure
@@ -4697,7 +4702,7 @@ export class WorkflowRecipeReconciler {
       stampSpecHash(idempotency.manifest)
       const gate = await this.applyGate(idempotency)
       if (gate === 'unchanged') {
-        createLogger('wrc', 'workflow-recipes').info(
+        createLogger('wrc', 'workflow-recipes').debug(
           'Resource spec hash unchanged; skipping update',
           { label }
         )
@@ -4724,7 +4729,7 @@ export class WorkflowRecipeReconciler {
       if (idempotency) {
         const raced = await this.applyGate(idempotency)
         if (raced === 'unchanged') {
-          createLogger('wrc', 'workflow-recipes').info(
+          createLogger('wrc', 'workflow-recipes').debug(
             'Resource spec hash unchanged; skipping update',
             { label }
           )
@@ -5033,7 +5038,7 @@ export class WorkflowRecipeReconciler {
     name: string
   ): Promise<void> {
     if (existing.metadata?.annotations?.[SPEC_HASH_ANNOTATION] === desiredHash) {
-      createLogger('wrc', 'workflow-recipes').info(
+      createLogger('wrc', 'workflow-recipes').debug(
         'StatefulSet spec hash unchanged; skipping update',
         { name, namespace }
       )
@@ -5382,7 +5387,7 @@ export class WorkflowRecipeReconciler {
     // write when the persisted window is aging (renewalDue, audit M1), even if
     // the set is unchanged, so a stable-then-rotated IP keeps its overlap grace.
     if (!this.egressWriteNeeded(existing, policy) && !egressRenewalDue && !egressStateChanged) {
-      createLogger('wrc', recipe.metadata.name).info('NetworkPolicy egress set unchanged; no-op', {
+      createLogger('wrc', recipe.metadata.name).debug('NetworkPolicy egress set unchanged; no-op', {
         policyName,
         ns,
       })
@@ -5947,7 +5952,7 @@ export class WorkflowRecipeReconciler {
         !wlEgressRenewalDue &&
         !wlEgressStateChanged
       ) {
-        createLogger('wrc', recipe.metadata.name).info(
+        createLogger('wrc', recipe.metadata.name).debug(
           'network policy egress set unchanged; skipping live apply',
           { policy: wlPolicyName, namespace: wlNs, family: 'workload-egress' }
         )
@@ -6489,7 +6494,7 @@ export class WorkflowRecipeReconciler {
       )
     }
     if (decision.action === 'unchanged' && !readResult.recoveredFromReadFailure) {
-      log.info('network policy unchanged; skipping update', fields)
+      log.debug('network policy unchanged; skipping update', fields)
       return
     }
 

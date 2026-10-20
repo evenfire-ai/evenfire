@@ -3606,7 +3606,7 @@ describe('transport Service read-first apply', () => {
     await delegateTransportWorkloads(deps, makeRecipe(), NS, new Map())
     clear()
 
-    const infoLog = captureLogger('info')
+    const infoLog = captureLogger('debug')
     try {
       await delegateTransportWorkloads(deps, makeRecipe(), NS, new Map())
 

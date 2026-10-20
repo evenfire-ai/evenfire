@@ -5787,7 +5787,7 @@ export class WorkflowReconciler {
       )
       switch (decision.action) {
         case 'unchanged':
-          this.log.info(`Unchanged NetworkPolicy "${name}"; skipping update`, { namespace })
+          this.log.debug(`Unchanged NetworkPolicy "${name}"; skipping update`, { namespace })
           return { policy: name, action: 'unchanged' }
         case 'conflict':
           this.log.warn(`NetworkPolicy "${name}" is not owned by this workflow; leaving it`, {

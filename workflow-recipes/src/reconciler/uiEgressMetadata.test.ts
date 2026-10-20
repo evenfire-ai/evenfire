@@ -71,7 +71,7 @@ function uiPolicyFixture() {
 describe('UI egress dedicated writer metadata and lifecycle', () => {
   it('keeps an equivalent UI policy read-only with a positive no-op witness', async () => {
     const fixture = uiPolicyFixture()
-    const logs = captureLogger('info')
+    const logs = captureLogger('debug')
 
     await fixture.reconcile()
 
