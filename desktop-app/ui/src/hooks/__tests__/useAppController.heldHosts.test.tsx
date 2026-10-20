@@ -412,6 +412,54 @@ describe('useAppController held Hosts', () => {
     }
   )
 
+  it('T-R2L2-1: a new hold after a successful Retry is announced again', async () => {
+    const { clerum, handle } = installAppControllerClerum({
+      agentNames: [HOST_A, HOST_B],
+      agentDisplayByName: DISPLAY_BY_NAME,
+    })
+    const catalog = installCatalog(clerum)
+    const transcriptError = await ipcGenericForbidden('rpc:loadSessionMessages')
+    let denyTranscript = true
+    clerum.rpc.loadSessionMessages.mockImplementation(async (hostRef: string) => {
+      if (hostRef === HOST_A && denyTranscript) throw transcriptError
+      return { agent: hostRef, chatId: '', turns: [] }
+    })
+    const { app, commits } = await mount(clerum, handle)
+
+    act(() => {
+      app.result.current.handleSelectChatAgent(HOST_A, { chatId: 'chat-1', selectLatest: false })
+    })
+    await waitFor(() => expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true))
+    await waitFor(() => expect(app.result.current.selectedAgent).toBe(null))
+    await waitFor(() => expect(toastsSeen(commits)).toEqual([VERIFY_A]))
+
+    // Retry: the verification succeeds, releases A and selects it again.
+    denyTranscript = false
+    act(() => {
+      app.result.current.handleSelectChatAgent(HOST_A, { chatId: 'chat-1', selectLatest: false })
+    })
+    await waitFor(() => expect(app.result.current.selectedAgent).toBe(HOST_A))
+    expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(false)
+
+    denyTranscript = true
+    act(() => {
+      app.result.current.handleSelectChatAgent(HOST_A, { chatId: 'chat-2', selectLatest: false })
+    })
+    await waitFor(() => expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true))
+    await waitFor(() => expect(app.result.current.selectedAgent).toBe(null))
+    await settle()
+
+    // Liveness witness: one verification read released the first hold, and the
+    // second hold came from a transcript read of chat-2.
+    expect(catalog.verifyReads(HOST_A)).toBe(1)
+    expect(
+      clerum.rpc.loadSessionMessages.mock.calls.some(
+        ([hostRef, , chatId]) => hostRef === HOST_A && chatId === 'chat-2'
+      )
+    ).toBe(true)
+    expect(toastsSeen(commits)).toEqual([VERIFY_A, VERIFY_A])
+  })
+
   it('T-A9-O2: a hold of another Host whose refresh drops the selected Host says so once', async () => {
     const { clerum, handle } = installAppControllerClerum({
       agentNames: [HOST_A, HOST_B],
