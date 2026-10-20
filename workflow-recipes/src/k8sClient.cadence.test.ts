@@ -323,3 +323,135 @@ describe('timer task wrapper (#1016)', () => {
       expect(out).toMatchObject({ ran: true })
     }))
 })
+
+describe('T3 egress lane timer (#1016 §3.3)', () => {
+  const T0 = new Date('2026-10-08T12:00:00Z').getTime()
+  const counter = async (timer: string, result: string) => {
+    const m = (await registry.getSingleMetric('clerum_wrc_timer_checks_total')!.get()).values
+    return m.find(v => v.labels.timer === timer && v.labels.result === result)?.value ?? 0
+  }
+  const egressRecipe = (name = 'r'): WorkflowRecipeCRD => {
+    const r = recipe(name)
+    ;(r.spec as Any).ui = {
+      workloadRef: 'api',
+      port: 8080,
+      egress: { external: [{ fqdn: 'api.github.com', port: 443 }] },
+    }
+    return r
+  }
+  const lane = (result: 'clean' | 'stale' | 'none' | Error = 'clean') => {
+    const policies = [{ metadata: { name: 'p' } }]
+    const h = harness()
+    Object.assign(h.w.reconciler, {
+      listPoliciesForLane: vi.fn().mockResolvedValue(policies),
+      refreshDnsBlocks: vi.fn(async () => {
+        if (result instanceof Error) throw result
+        return result
+      }),
+    })
+    h.w.recipes.set('r', egressRecipe())
+    return { ...h, policies }
+  }
+  const tick = async (h: ReturnType<typeof lane>) => {
+    const p = h.w.refreshExternalEgressForActiveRecipes()
+    // let the policy list resolve and the tasks enqueue, then run the queue
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    await h.drain()
+    await p
+  }
+
+  it("'clean' replays the lane with the fresh recipe and policies; no reconcile", async () => {
+    const h = lane('clean')
+    const before = await counter('egress', 'clean')
+    await tick(h)
+    expect(h.w.reconciler.refreshDnsBlocks).toHaveBeenCalledTimes(1)
+    expect(h.w.reconciler.refreshDnsBlocks).toHaveBeenCalledWith(h.w.recipes.get('r'), h.policies)
+    expect(h.w.reconciler.reconcile).not.toHaveBeenCalled()
+    expect(await counter('egress', 'clean')).toBe(before + 1)
+  })
+
+  it("'none' does not reconcile and counts as clean", async () => {
+    const h = lane('none')
+    const before = await counter('egress', 'clean')
+    await tick(h)
+    expect(h.w.reconciler.reconcile).not.toHaveBeenCalled()
+    expect(await counter('egress', 'clean')).toBe(before + 1)
+  })
+
+  it("a failed classic recipe with egress never reconciles over 10 ticks (lane 'none')", async () => {
+    const h = lane('none')
+    h.w.recipes.set('r', { ...egressRecipe(), status: { phase: 'failed' } })
+    for (let i = 0; i < 10; i++) await tick(h)
+    expect(h.w.reconciler.refreshDnsBlocks).toHaveBeenCalledTimes(10)
+    expect(h.w.reconciler.reconcile).not.toHaveBeenCalled()
+  })
+
+  it("'stale' escalates once as egress_fallback with spacing coalescing", async () => {
+    const h = lane('stale')
+    h.w.handleRecipeEvent = vi.fn().mockResolvedValue({ ran: true, settled: true })
+    const spy = vi.spyOn(h.w, 'escalate')
+    await tick(h)
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(spy).toHaveBeenCalledWith(h.w.recipes.get('r'), 'egress_fallback', 'egress', 'spacing')
+    expect(h.w.handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', h.w.recipes.get('r'), {
+      forceReconcile: true,
+      trigger: 'egress_fallback',
+    })
+  })
+
+  it("'stale' within spacing of a recent pass start is coalesced", async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(T0)
+    try {
+      const h = lane('stale')
+      h.w.cadence.recordPassStart('r', T0 - 1_000)
+      await tick(h)
+      expect(h.w.reconciler.reconcile).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a lane throw escalates egress_fallback NOT coalesced, even with a start stamped 1s ago', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(T0)
+    try {
+      const h = lane(new Error('block failed'))
+      h.w.cadence.recordPassStart('r', T0 - 1_000)
+      const spy = vi.spyOn(h.w, 'escalate')
+      await tick(h)
+      expect(spy).toHaveBeenCalledWith(h.w.recipes.get('r'), 'egress_fallback', 'egress', false)
+      expect(h.w.reconciler.reconcile).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('lists policies once per tick, not once per recipe', async () => {
+    const h = lane('clean')
+    h.w.recipes.set('r2', egressRecipe('r2'))
+    h.w.recipes.set('r3', egressRecipe('r3'))
+    await tick(h)
+    expect(h.w.reconciler.refreshDnsBlocks).toHaveBeenCalledTimes(3)
+    expect(h.w.reconciler.listPoliciesForLane).toHaveBeenCalledTimes(1)
+    expect(h.w.reconciler.listPoliciesForLane).toHaveBeenCalledWith('sandbox-recipes')
+  })
+
+  it('skips the whole pass (no lane, no escalation) when listing policies throws', async () => {
+    const h = lane('stale')
+    h.w.reconciler.listPoliciesForLane.mockRejectedValue(new Error('api down'))
+    await tick(h)
+    expect(h.w.reconciler.refreshDnsBlocks).not.toHaveBeenCalled()
+    expect(h.w.reconciler.reconcile).not.toHaveBeenCalled()
+  })
+
+  it('re-checks egress selection against the fresh recipe inside the task', async () => {
+    const h = lane('stale')
+    const p = h.w.refreshExternalEgressForActiveRecipes()
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    h.w.recipes.set('r', recipe('r', 2)) // egress removed while queued
+    await h.drain()
+    await p
+    expect(h.w.reconciler.refreshDnsBlocks).not.toHaveBeenCalled()
+  })
+})

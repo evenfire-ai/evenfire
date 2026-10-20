@@ -1517,41 +1517,64 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     })
     if (selected.length === 0) return
 
-    let enqueued = 0
+    // Policies are listed once per tick (not per recipe). Without them the lane
+    // cannot judge staleness; the forced reconcile this replaced would have failed
+    // at the same list call, and the next tick retries.
+    let policies: Awaited<ReturnType<WorkflowRecipeReconciler['listPoliciesForLane']>>
+    try {
+      policies = await this.reconciler.listPoliciesForLane(this.config.sandboxNamespace)
+    } catch (error) {
+      createLogger('wrc', 'workflow-recipes').warn(
+        'External egress refresh skipped; could not list policies',
+        { err: error }
+      )
+      return
+    }
+
+    // #1016: replay the recorded DNS blocks through the egress lane. Only a stale
+    // record (spacing-coalesced) or a lane failure (not coalesced) escalates to a
+    // full reconcile; a clean tick no longer forces one every TTL/2.
+    const counts = { clean: 0, stale: 0, escalated: 0 }
     await runWithConcurrency(selected, EXTERNAL_EGRESS_REFRESH_MAX_CONCURRENCY, async name => {
       if (this.stopped) return
-      const latest = this.recipes.get(name)
-      if (!latest) return
-      try {
-        await this.eventQueue.enqueue(name, () =>
-          // Generation is unchanged for a DNS-rotation refresh, so force the full
-          // reconcile; otherwise handleRecipeEvent classifies this synthetic
-          // MODIFIED as status-only and returns before the accumulator runs.
-          this.handleRecipeEvent('MODIFIED', latest, {
-            forceReconcile: true,
-            trigger: 'egress_fallback',
+      await this.enqueueTimerTask(name, 'egress', async fresh => {
+        // Selection was computed at tick time; the class can change while queued.
+        if (!recipeHasExternalExactHostEgress(fresh)) {
+          timerChecksTotal.inc({ timer: 'egress', result: 'skipped' })
+          return
+        }
+        let outcome: 'clean' | 'stale' | 'none'
+        try {
+          outcome = await this.reconciler.refreshDnsBlocks(fresh, policies)
+        } catch (error) {
+          // Error object only: never hostnames or Secret data.
+          createLogger('wrc', name).warn('Egress refresh failed; escalating to a full reconcile', {
+            err: error,
           })
-        )
-        enqueued++
-      } catch (error) {
-        createLogger('wrc', 'workflow-recipes').error('External egress refresh failed', {
-          name,
-          err: error,
-        })
-      }
+          counts.escalated++
+          await this.escalate(fresh, 'egress_fallback', 'egress', false)
+          return
+        }
+        if (outcome === 'stale') {
+          counts.stale++
+          await this.escalate(fresh, 'egress_fallback', 'egress', 'spacing')
+          return
+        }
+        counts.clean++
+        timerChecksTotal.inc({ timer: 'egress', result: 'clean' })
+      })
     })
 
     // Counts and duration only — never the resolved FQDNs/IPs or any Secret.
     // This line summarises a FLEET-WIDE sweep: naming every host of every recipe
-    // here would dump the whole fleet's egress onto one line, every pass, with no
-    // way to attribute an address back to a policy. The per-host record lives
-    // where the set is decided and written instead — `logResolvedEgressSet` in
-    // workflowRecipeReconciler.ts, one entry per FQDN, only when the set changed
-    // and only once the policy has landed (#299). Secrets stay out of both.
-    createLogger('wrc', 'workflow-recipes').info(
-      'Re-enqueued recipes for external egress refresh',
-      { enqueued, length: selected.length, value3: Date.now() - started }
-    )
+    // here would dump the whole fleet's egress onto one line, every pass. The
+    // per-host record lives where the set is decided and written instead —
+    // `logResolvedEgressSet` in workflowRecipeReconciler.ts (#299).
+    createLogger('wrc', 'workflow-recipes').info('External egress refresh pass', {
+      ...counts,
+      length: selected.length,
+      value3: Date.now() - started,
+    })
   }
 
   private async refreshWorkloadStatusesForSteadyRecipes(): Promise<void> {

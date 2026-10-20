@@ -2997,11 +2997,16 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
     config: {
       externalEgressRefreshIntervalSeconds: number
       externalEgressRefreshFloorSeconds: number
+      sandboxNamespace?: string
     }
     externalEgressRefreshTimer: ReturnType<typeof setInterval> | null
     externalEgressRefreshRunning: boolean
     // H2 (issue #299): the refresh loop reads the reconciler's observed min TTL.
-    reconciler: { externalEgressRefreshMinTtlMs: number }
+    reconciler: {
+      externalEgressRefreshMinTtlMs: number
+      refreshDnsBlocks?: (r: WorkflowRecipeCRD, p: unknown[]) => Promise<'clean' | 'stale' | 'none'>
+      listPoliciesForLane?: (ns: string) => Promise<unknown[]>
+    }
     refreshExternalEgressForActiveRecipes: () => Promise<void>
     startExternalEgressRefreshLoop: () => void
     stop: () => Promise<void>
@@ -3010,6 +3015,10 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
   function makeInternal(recipes: WorkflowRecipeCRD[]) {
     const enqueue = vi.fn((_key: string, task: () => Promise<void>) => task())
     const handleRecipeEvent = vi.fn().mockResolvedValue(undefined)
+    // #1016: the T3 timer replays recorded DNS blocks through the reconciler's
+    // egress lane; a clean tick never reaches handleRecipeEvent.
+    const refreshDnsBlocks = vi.fn().mockResolvedValue('clean')
+    const listPoliciesForLane = vi.fn().mockResolvedValue([])
     const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
     internal.recipes = new Map(recipes.map(r => [r.metadata.name, r]))
     internal.eventQueue = { enqueue }
@@ -3018,15 +3027,20 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
     internal.config = {
       externalEgressRefreshIntervalSeconds: 60,
       externalEgressRefreshFloorSeconds: 5,
+      sandboxNamespace: 'sandbox-recipes',
     }
     internal.externalEgressRefreshTimer = null
     internal.externalEgressRefreshRunning = false
-    internal.reconciler = { externalEgressRefreshMinTtlMs: Infinity }
-    return { internal, enqueue, handleRecipeEvent }
+    internal.reconciler = {
+      externalEgressRefreshMinTtlMs: Infinity,
+      refreshDnsBlocks,
+      listPoliciesForLane,
+    }
+    return { internal, enqueue, handleRecipeEvent, refreshDnsBlocks, listPoliciesForLane }
   }
 
   it('refreshExternalEgressForActiveRecipes re-enqueues ONLY recipes with external exact-host egress', async () => {
-    const { internal, enqueue, handleRecipeEvent } = makeInternal([
+    const { internal, enqueue, handleRecipeEvent, refreshDnsBlocks } = makeInternal([
       makeUiEgressRecipe('with-ui-egress'),
       makeWorkloadEgressRecipe('with-wl-egress'),
       makePlainRecipe('plain'),
@@ -3043,14 +3057,13 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
     expect(enqueue).not.toHaveBeenCalledWith('transport', expect.any(Function))
     expect(enqueue).toHaveBeenCalledTimes(2)
 
-    // A full reconcile is forced (generation is unchanged, so a plain MODIFIED
-    // would short-circuit before the accumulator runs).
+    // #1016: the egress lane replays each selected recipe's recorded DNS blocks;
+    // a clean tick forces no full reconcile.
+    expect(refreshDnsBlocks).toHaveBeenCalledTimes(2)
     for (const name of ['with-ui-egress', 'with-wl-egress']) {
-      expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', internal.recipes.get(name), {
-        forceReconcile: true,
-        trigger: 'egress_fallback',
-      })
+      expect(refreshDnsBlocks).toHaveBeenCalledWith(internal.recipes.get(name), [])
     }
+    expect(handleRecipeEvent).not.toHaveBeenCalled()
   })
 
   it('refreshExternalEgressForActiveRecipes is a no-op while stopped', async () => {
@@ -3063,30 +3076,26 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
   it('the timer re-enqueues external-egress recipes on each tick at the clamped interval', async () => {
     vi.useFakeTimers()
     try {
-      const { internal, handleRecipeEvent } = makeInternal([
+      const { internal, refreshDnsBlocks } = makeInternal([
         makeUiEgressRecipe('with-ui-egress'),
         makePlainRecipe('plain'),
       ])
 
       internal.startExternalEgressRefreshLoop()
       expect(internal.externalEgressRefreshTimer).not.toBeNull()
-      expect(handleRecipeEvent).not.toHaveBeenCalled()
+      expect(refreshDnsBlocks).not.toHaveBeenCalled()
 
       // 1ms before the 60s interval: nothing has fired.
       await vi.advanceTimersByTimeAsync(59_999)
-      expect(handleRecipeEvent).not.toHaveBeenCalled()
+      expect(refreshDnsBlocks).not.toHaveBeenCalled()
 
       await vi.advanceTimersByTimeAsync(1)
-      expect(handleRecipeEvent).toHaveBeenCalledTimes(1)
-      expect(handleRecipeEvent).toHaveBeenCalledWith(
-        'MODIFIED',
-        internal.recipes.get('with-ui-egress'),
-        { forceReconcile: true, trigger: 'egress_fallback' }
-      )
+      expect(refreshDnsBlocks).toHaveBeenCalledTimes(1)
+      expect(refreshDnsBlocks).toHaveBeenCalledWith(internal.recipes.get('with-ui-egress'), [])
 
-      // Second tick fires again — the requeue is periodic, not one-shot.
+      // Second tick fires again — the refresh is periodic, not one-shot.
       await vi.advanceTimersByTimeAsync(60_000)
-      expect(handleRecipeEvent).toHaveBeenCalledTimes(2)
+      expect(refreshDnsBlocks).toHaveBeenCalledTimes(2)
     } finally {
       vi.useRealTimers()
     }
@@ -3095,16 +3104,16 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
   it('advances the refresh to TTL/2 when the reconciler has observed a low TTL (H2 wiring)', async () => {
     vi.useFakeTimers()
     try {
-      const { internal, handleRecipeEvent } = makeInternal([makeUiEgressRecipe('with-ui-egress')])
+      const { internal, refreshDnsBlocks } = makeInternal([makeUiEgressRecipe('with-ui-egress')])
       // The reconciler observed GitHub's ~15s TTL → the loop must fire at 7.5s,
       // not the 60s configured interval.
-      internal.reconciler = { externalEgressRefreshMinTtlMs: 15_000 }
+      internal.reconciler.externalEgressRefreshMinTtlMs = 15_000
 
       internal.startExternalEgressRefreshLoop()
       await vi.advanceTimersByTimeAsync(7_499)
-      expect(handleRecipeEvent).not.toHaveBeenCalled()
+      expect(refreshDnsBlocks).not.toHaveBeenCalled()
       await vi.advanceTimersByTimeAsync(1)
-      expect(handleRecipeEvent).toHaveBeenCalledTimes(1)
+      expect(refreshDnsBlocks).toHaveBeenCalledTimes(1)
     } finally {
       vi.useRealTimers()
     }
@@ -3126,14 +3135,15 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
   it('does not start a second refresh pass while one is still running (no concurrent duplicates)', async () => {
     vi.useFakeTimers()
     try {
-      // handleRecipeEvent returns a promise that stays pending until we release it,
+      // refreshDnsBlocks returns a promise that stays pending until we release it,
       // so the first pass is still in-flight when the second tick fires.
       let release: (() => void) | undefined
       const gate = new Promise<void>(resolve => {
         release = resolve
       })
       const enqueue = vi.fn((_key: string, task: () => Promise<void>) => task())
-      const handleRecipeEvent = vi.fn().mockReturnValue(gate)
+      const refreshDnsBlocks = vi.fn().mockReturnValue(gate.then(() => 'clean'))
+      const handleRecipeEvent = vi.fn().mockResolvedValue(undefined)
       const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
       internal.recipes = new Map([['with-ui-egress', makeUiEgressRecipe('with-ui-egress')]])
       internal.eventQueue = { enqueue }
@@ -3142,18 +3152,23 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
       internal.config = {
         externalEgressRefreshIntervalSeconds: 60,
         externalEgressRefreshFloorSeconds: 5,
+        sandboxNamespace: 'sandbox-recipes',
       }
       internal.externalEgressRefreshTimer = null
       internal.externalEgressRefreshRunning = false
-      internal.reconciler = { externalEgressRefreshMinTtlMs: Infinity }
+      internal.reconciler = {
+        externalEgressRefreshMinTtlMs: Infinity,
+        refreshDnsBlocks,
+        listPoliciesForLane: vi.fn().mockResolvedValue([]),
+      }
 
       internal.startExternalEgressRefreshLoop()
       await vi.advanceTimersByTimeAsync(60_000) // first tick — pass starts, stays in-flight
-      expect(handleRecipeEvent).toHaveBeenCalledTimes(1)
+      expect(refreshDnsBlocks).toHaveBeenCalledTimes(1)
       expect(internal.externalEgressRefreshRunning).toBe(true)
 
       await vi.advanceTimersByTimeAsync(60_000) // second tick — must be skipped
-      expect(handleRecipeEvent).toHaveBeenCalledTimes(1)
+      expect(refreshDnsBlocks).toHaveBeenCalledTimes(1)
 
       release?.()
       await gate
@@ -3165,7 +3180,7 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
   it('stop() clears the refresh timer so no further ticks fire', async () => {
     vi.useFakeTimers()
     try {
-      const { internal, handleRecipeEvent } = makeInternal([makeUiEgressRecipe('with-ui-egress')])
+      const { internal, refreshDnsBlocks } = makeInternal([makeUiEgressRecipe('with-ui-egress')])
       // Minimal shape for stop() — every other subsystem is absent in this fixture.
       const stoppableInternal = internal as unknown as {
         transientRetries: Map<string, { timer: ReturnType<typeof setTimeout>; attempts: number }>
@@ -3189,12 +3204,16 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
       internal.startExternalEgressRefreshLoop()
       expect(internal.externalEgressRefreshTimer).not.toBeNull()
 
+      // One tick runs the lane before stop().
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(refreshDnsBlocks).toHaveBeenCalledTimes(1)
+
       await internal.stop()
       expect(internal.externalEgressRefreshTimer).toBeNull()
       expect(internal.stopped).toBe(true)
 
       await vi.advanceTimersByTimeAsync(120_000)
-      expect(handleRecipeEvent).not.toHaveBeenCalled()
+      expect(refreshDnsBlocks).toHaveBeenCalledTimes(1)
     } finally {
       vi.useRealTimers()
     }
