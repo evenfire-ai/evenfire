@@ -150,7 +150,13 @@ import {
 } from './pluginWorkloadSdkValidator'
 import { listWorkflowRecipePolicies } from './policyClient'
 import { enforcePolicy } from './policyEnforcer'
-import { noteDnsBlock, runInReconcileContext } from './reconcileContext'
+import {
+  noteDnsBlock,
+  noteEnforcedOwnership,
+  noteRepairPending,
+  ownershipSignature,
+  runInReconcileContext,
+} from './reconcileContext'
 import * as rb from './resourceBuilder'
 import {
   classifySecretAccess,
@@ -1420,8 +1426,11 @@ export class WorkflowRecipeReconciler {
   private async ensureSteadyWorkflowRuntimeCredentials(
     recipe: WorkflowRecipeCRD,
     resolvedRuntimeScopeRecipeName?: string
-  ): Promise<void> {
-    if (!this.workflowReconciler) return
+  ): Promise<{ repairPending: boolean }> {
+    // Issue #1016 — a swallowed repair failure is not "settled": record it so the
+    // timer does not treat the pass as healthy.
+    let repairPending = false
+    if (!this.workflowReconciler) return { repairPending }
     const runtimeScopeRecipeName =
       resolvedRuntimeScopeRecipeName ?? (await this.workflowRuntimeScopeRecipeName(recipe))
     await this.bindCodexReconcileContext(recipe, runtimeScopeRecipeName)
@@ -1441,6 +1450,8 @@ export class WorkflowRecipeReconciler {
         runtimeScopeRecipeName
       )
     } catch (error) {
+      repairPending = true
+      noteRepairPending()
       createLogger('wrc', recipe.metadata.name).error(
         'Failed to repair coordinator runtime credentials; continuing without phase change',
         { name: recipe.metadata.name, err: error }
@@ -1455,6 +1466,8 @@ export class WorkflowRecipeReconciler {
         recipe.metadata.uid
       )
     } catch (error) {
+      repairPending = true
+      noteRepairPending()
       createLogger('wrc', recipe.metadata.name).error(
         'Failed to repair mcpHost runtime credentials; continuing without phase change',
         { name: recipe.metadata.name, err: error }
@@ -1472,17 +1485,22 @@ export class WorkflowRecipeReconciler {
       // retry would otherwise leave only per-policy warn lines. Conflicts were
       // already logged at warn by the apply and stay there.
       if (refreshed.retryPending) {
+        repairPending = true
+        noteRepairPending()
         createLogger('wrc', recipe.metadata.name).error(
           'Runtime HTTP egress refresh left a NetworkPolicy pending a retry; a later refresh retries it',
           { name: recipe.metadata.name }
         )
       }
     } catch (error) {
+      repairPending = true
+      noteRepairPending()
       createLogger('wrc', recipe.metadata.name).error(
         'Failed to refresh runtime HTTP egress; keeping the last valid NetworkPolicy',
         { name: recipe.metadata.name, err: error }
       )
     }
+    return { repairPending }
   }
 
   /**
@@ -2989,6 +3007,10 @@ export class WorkflowRecipeReconciler {
             `(transient read error) — requeuing before delegating or rendering workloads`
         )
       }
+      // Issue #1016 — record the denied set this gate enforced. The SDK-only
+      // `failed` return further down is reached after this same gate, so it needs
+      // no extra note.
+      noteEnforcedOwnership(ownershipSignature(secretOwnership.deniedPairs))
 
       // Step 7b: Pre-deploy McpServer CRDs for network isolation (Option C handshake)
       // Creates McpServer CRDs with clerum.io/pre-deploy annotation BEFORE workload
@@ -3065,6 +3087,7 @@ export class WorkflowRecipeReconciler {
           // instance and surface the denial so the operator labels the Secret.
           await this.teardownDeniedWorkload(workload, recipe, secretKeys).catch(err => {
             deniedTeardownFailed = true
+            noteRepairPending()
             createLogger('wrc', recipe.metadata.name).error(
               'Teardown of denied workload failed; will requeue',
               { id: workload.id, err }
@@ -3943,6 +3966,7 @@ export class WorkflowRecipeReconciler {
           `(transient read error) — requeuing before delegating or rendering workloads`
       )
     }
+    noteEnforcedOwnership(ownershipSignature(secretOwnership.deniedPairs))
 
     // Pre-deploy McpServer CRDs for network isolation.
     // MCP batch targets `this.config.namespace` (= mcp-server), not the
@@ -6829,9 +6853,12 @@ export class WorkflowRecipeReconciler {
     messageByWorkload: Map<string, string>
     conditions: StatusCondition[]
     errored: boolean
+    /** `${workloadId}:${secretName}` for every denied ref (Issue #1016). */
+    deniedPairs: string[]
   } {
     const now = new Date().toISOString()
     const deniedWorkloadIds = new Set<string>()
+    const deniedPairs: string[] = []
     const messageByWorkload = new Map<string, string>()
     const deniedDetails: string[] = []
     let errored = false
@@ -6851,6 +6878,7 @@ export class WorkflowRecipeReconciler {
       }
       if (deniedRefs.length > 0) {
         deniedWorkloadIds.add(w.id)
+        for (const n of deniedRefs) deniedPairs.push(`${w.id}:${n}`)
         const msg =
           `Secret(s) ${deniedRefs.map(n => `"${n}"`).join(', ')} not owned by recipe ` +
           `"${recipe.metadata.name}" — label clerum.io/shared=true or ` +
@@ -6874,7 +6902,7 @@ export class WorkflowRecipeReconciler {
           ? [cond('False', 'NoForeignSecretRefs', 'All referenced Secrets are owned or shared')]
           : []
 
-    return { deniedWorkloadIds, messageByWorkload, conditions, errored }
+    return { deniedWorkloadIds, messageByWorkload, conditions, errored, deniedPairs }
   }
 
   /**
@@ -6911,7 +6939,10 @@ export class WorkflowRecipeReconciler {
     const hasSecretRefs = (recipe.spec.workloads ?? []).some(
       w => !!w.envSecret?.name || (w.imagePullSecrets ?? []).length > 0
     )
-    if (!hasSecretRefs) return clean
+    if (!hasSecretRefs) {
+      noteEnforcedOwnership('')
+      return clean
+    }
 
     let secretKeys: rb.SecretKeysByName
     try {
@@ -6939,6 +6970,7 @@ export class WorkflowRecipeReconciler {
       }
     }
     if (secretOwnership.deniedWorkloadIds.size === 0) {
+      noteEnforcedOwnership('')
       return { conditions: secretOwnership.conditions, hadDenied: false, needsRequeue: false }
     }
 
@@ -6968,13 +7000,37 @@ export class WorkflowRecipeReconciler {
       }
     }
     if (failedTeardowns.length > 0) {
+      // Issue #1016 — teardown incomplete: pending repair, no enforced signature.
+      noteRepairPending()
       return {
         ...clean,
         needsRequeue: true,
         requeueReason: `teardown failed for ${failedTeardowns.join(', ')}`,
       }
     }
+    noteEnforcedOwnership(ownershipSignature(secretOwnership.deniedPairs))
     return { conditions: secretOwnership.conditions, hadDenied: true, needsRequeue: false }
+  }
+
+  /**
+   * Issue #1016 — detection only: observe the denied set on the UNFILTERED spec.
+   * Never tears down anything.
+   */
+  async observeSecretOwnership(
+    recipe: WorkflowRecipeCRD
+  ): Promise<
+    { kind: 'ok'; signature: string } | { kind: 'error'; reason: 'read_error' | 'unverifiable' }
+  > {
+    const clone = structuredClone(recipe)
+    let secretKeys: rb.SecretKeysByName
+    try {
+      secretKeys = await this.readReferencedSecrets(clone)
+    } catch {
+      return { kind: 'error', reason: 'read_error' }
+    }
+    const partition = this.partitionWorkloadsBySecretOwnership(clone, secretKeys)
+    if (partition.errored) return { kind: 'error', reason: 'unverifiable' }
+    return { kind: 'ok', signature: ownershipSignature(partition.deniedPairs) }
   }
 
   /**

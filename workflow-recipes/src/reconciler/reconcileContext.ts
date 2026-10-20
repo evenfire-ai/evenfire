@@ -36,3 +36,8 @@ export function noteRepairPending(): void {
   const ctx = storage.getStore()
   if (ctx) ctx.repairPending = true
 }
+
+/** Issue #1016 — canonical denied-set signature: sorted, '|'-joined; '' when none. */
+export function ownershipSignature(deniedPairs: readonly string[]): string {
+  return [...deniedPairs].sort().join('|')
+}
