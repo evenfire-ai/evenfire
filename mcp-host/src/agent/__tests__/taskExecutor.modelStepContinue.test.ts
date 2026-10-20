@@ -35,6 +35,7 @@ import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import { FailoverEngine } from '../../llm/failover/engine'
 import type { LlmPolicy } from '../../llm/failover/types'
 import type { SingleTurnProvider } from '../../llm/types'
+import { logger } from '../../logger'
 import { McpManager } from '../../mcp/manager'
 import type { ModelStepContinuationRef, Task, TaskError } from '../../queue/types'
 import type { IncomingMessage } from '../../server/types'
@@ -1706,6 +1707,7 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
 
   it('11b2. a poisoned approval with a failed abandon stops its lease without releasing the claim', async () => {
     Object.assign(appConfig, { enableApproval: true })
+    const logged = vi.spyOn(logger, 'error')
     const fixture = await claimedCheckpoint({})
     const append = vi
       .spyOn(fixture.checkpoints, 'append')
@@ -1729,9 +1731,23 @@ describe('TaskExecutor model-step continuation (#1043)', () => {
         },
       },
     })
-    await expect(run.executor.run()).rejects.toThrow('abandon failed')
+    // #1157: the abandon failure is logged; the task still fails with its own error.
+    await run.executor.run()
     expect(append).toHaveBeenCalled()
     expect(llm.calls()).toBe(1)
+    expect(run.onFail).toHaveBeenCalledTimes(1)
+    expect(run.onFail.mock.calls[0]![1].message).toBe(
+      'Model-step checkpoint abandonment did not release its claim'
+    )
+    expect(logged).toHaveBeenCalledWith(
+      {
+        taskId: run.task.id,
+        checkpointId: fixture.fence.checkpointId,
+        op: 'abandon',
+        errorName: 'Error',
+      },
+      'Model-step continuation cleanup failed'
+    )
     expect(header(fixture.handle).status).toBe('claimed')
     const internals = run.executor as unknown as {
       continuationClaimReleased: boolean

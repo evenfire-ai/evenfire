@@ -701,7 +701,7 @@ export class TaskExecutor {
       let canEndTurn =
         !this.task.modelStepContinuation || this.conversation?.activeTaskId === this.taskId
       if (this.task.modelStepContinuation) {
-        await this.abandonModelStepContinuation()
+        await this.continuationCleanup('abandon', () => this.abandonModelStepContinuation())
         this.emitContinuationVerdict({ kind: 'lost' })
         canEndTurn = this.conversation?.activeTaskId === this.taskId
       }
@@ -740,7 +740,7 @@ export class TaskExecutor {
           )
         }
       } else if (this.task.modelStepContinuation && this.conversation && canEndTurn) {
-        await this.failContinuationTurn()
+        await this.continuationCleanup('fail_turn', () => this.failContinuationTurn())
       }
       const taskError = this.toTaskError(error)
       logger.error(
@@ -822,6 +822,26 @@ export class TaskExecutor {
     this.failContinuationPreparation(
       version === null ? { kind: 'lost' } : { kind: 'blocked', blockedReason }
     )
+  }
+
+  private async continuationCleanup(
+    op: 'abandon' | 'fail_turn',
+    fn: () => Promise<void>
+  ): Promise<void> {
+    try {
+      await fn()
+    } catch (error) {
+      // Preserve the task failure; an unreleased claim recovers through its lease.
+      logger.error(
+        {
+          taskId: this.taskId,
+          checkpointId: this.task.modelStepContinuation?.checkpointId,
+          op,
+          errorName: error instanceof Error ? error.name : typeof error,
+        },
+        'Model-step continuation cleanup failed'
+      )
+    }
   }
 
   private async abandonModelStepContinuation(): Promise<void> {
@@ -1474,7 +1494,12 @@ export class TaskExecutor {
       } catch (error) {
         if (error instanceof ApprovalExpiredError) {
           logger.warn({ taskId: this.taskId }, 'Approval expired before tool execution')
-          await this.deps.conversationManager.failTurn(this.conversation!)
+          if (this.task.modelStepContinuation) {
+            await this.continuationCleanup('abandon', () => this.abandonModelStepContinuation())
+            await this.continuationCleanup('fail_turn', () => this.failContinuationTurn())
+          } else {
+            await this.deps.conversationManager.failTurn(this.conversation!)
+          }
           this.state = 'failed'
           this.deps.onFail(this.task, {
             code: 'approval_expired',
@@ -1525,13 +1550,17 @@ export class TaskExecutor {
 
       const execStart = Date.now()
       this.executionBudget.assertTime()
-      const continuationRecorder = this.task.modelStepContinuation
+      let continuationRecorder = this.task.modelStepContinuation
         ? await this.requireContinuationClaim()
         : this.originRecorder
       if (continuationRecorder) await continuationRecorder.begin(approval.context_snapshot)
       await continuationRecorder?.recordDispatch(suspendedCall)
       if (continuationRecorder?.poisoned) {
-        throw new Error('Model-step continuation approved dispatch could not be recorded')
+        if (this.task.modelStepContinuation) {
+          throw new Error('Model-step continuation approved dispatch could not be recorded')
+        }
+        await this.abandonOriginCheckpoint()
+        continuationRecorder = undefined
       }
       // approve() already resolved the durable approval. Consume its retained
       // RAM copy before execution so the next model-generated call cannot reuse
@@ -1614,7 +1643,11 @@ export class TaskExecutor {
         await continuationRecorder.recordResult(suspendedCall, toolResult)
         await continuationRecorder.syncMessages(messages)
         if (continuationRecorder.poisoned) {
-          throw new Error('Model-step continuation approved result could not be recorded')
+          if (this.task.modelStepContinuation) {
+            throw new Error('Model-step continuation approved result could not be recorded')
+          }
+          await this.abandonOriginCheckpoint()
+          continuationRecorder = undefined
         }
         loopConfig.modelStepCheckpointRecorder = continuationRecorder
       }
@@ -1678,11 +1711,11 @@ export class TaskExecutor {
       }
     } catch (error) {
       if (this.task.modelStepContinuation && !this.continuationClaimReleased) {
-        await this.abandonModelStepContinuation()
-        await this.failContinuationTurn()
+        await this.continuationCleanup('abandon', () => this.abandonModelStepContinuation())
+        await this.continuationCleanup('fail_turn', () => this.failContinuationTurn())
       }
       if (this.task.modelStepContinuation && this.continuationFenceLost) {
-        await this.failContinuationTurn()
+        await this.continuationCleanup('fail_turn', () => this.failContinuationTurn())
       }
       if (
         this.legacyApprovalBudget &&

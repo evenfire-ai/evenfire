@@ -4,10 +4,15 @@ import { ConversationManager } from '../../core/conversation/conversation'
 import { toModelStepCheckpointView } from '../../core/conversation/modelStepCheckpointView'
 import { makeSqliteStore } from '../../core/conversation/persistence/__tests__/testHelpers'
 import { ModelStepCheckpointStore } from '../../core/conversation/persistence/modelStepCheckpointStore'
-import { LlmErrorCode } from '../../core/errors'
+import { LlmError, LlmErrorCode } from '../../core/errors'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { createModelStepCheckpointRecorder } from '../../core/orchestration/modelStepCheckpointRecorder'
-import { type ChatMessage, FinishReason, type ToolCall } from '../../core/types'
+import {
+  ApprovalExpiredError,
+  type ChatMessage,
+  FinishReason,
+  type ToolCall,
+} from '../../core/types'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import { FailoverEngine } from '../../llm/failover/engine'
 import type { LlmPolicy } from '../../llm/failover/types'
@@ -186,7 +191,10 @@ async function continueTurn(
   return verdict
 }
 
-async function waitingOrigin(withConfirmed = true) {
+async function waitingOrigin(
+  withConfirmed = true,
+  afterApproval: Reply = { error: new Error('upstream 503') }
+) {
   Object.assign(appConfig, {
     enableApproval: true,
     dynamicToolsEnabled: false,
@@ -197,6 +205,7 @@ async function waitingOrigin(withConfirmed = true) {
   const manager = new McpManager()
   vi.spyOn(manager, 'getAllTools').mockReturnValue([
     { name: 'server__write', serverName: 'server', inputSchema: { type: 'object' } },
+    { name: 'publisher__publish', serverName: 'publisher', inputSchema: { type: 'object' } },
   ])
   const execute = vi.spyOn(manager, 'callTool').mockResolvedValue({
     toolName: 'server__write',
@@ -213,7 +222,7 @@ async function waitingOrigin(withConfirmed = true) {
             { id: 'approved-write', name: 'server__write', arguments: {} },
           ],
         }
-      : { error: new Error('upstream 503') }
+      : afterApproval
   )
   const original = task('approval-origin')
   const originalDeps = deps(handle, llm, manager)
@@ -226,11 +235,302 @@ async function waitingOrigin(withConfirmed = true) {
   return { handle, execute, llm, original, originalDeps, executor }
 }
 
+async function claimedContinuation(
+  llm: SingleTurnProvider,
+  spilloverResolver?: TaskExecutorDeps['spilloverResolver']
+) {
+  const origin = await waitingOrigin()
+  await origin.executor.resumeAfterApproval(false)
+  const row = header(origin.handle)
+  expect(row.status).toBe('resumable')
+  const checkpoints = origin.originalDeps.modelStepCheckpoints!.store
+  const claim = await checkpoints.claim({
+    sessionKey: SESSION_KEY,
+    checkpointId: row.checkpoint_id,
+    version: row.version,
+    hostInstanceId: 'instance-a',
+    newTaskId: 'cleanup-continuation',
+    leaseMs: 300_000,
+  })
+  if (claim.outcome !== 'claimed') throw new Error(`Claim failed: ${claim.outcome}`)
+  const nextTask = task('cleanup-continuation')
+  nextTask.modelStepContinuation = {
+    checkpointId: row.checkpoint_id,
+    originTaskId: origin.original.id,
+    originTurnNumber: row.origin_turn_number,
+    provider: row.provider,
+    model: row.model,
+    fence: claim.fence,
+    confirmedResults: claim.snapshot.tools.confirmed,
+    taskBudget: row.task_budget,
+    onVerdict: vi.fn(),
+  }
+  const nextDeps: TaskExecutorDeps = {
+    ...origin.originalDeps,
+    llmProvider: llm,
+    spilloverResolver,
+    coreEvents: new SimpleEventEmitter(),
+    taskLifecycle: new TaskLifecycle(),
+    onFail: vi.fn(),
+    onComplete: vi.fn(),
+    onApprovalNeeded: vi.fn(),
+  }
+  nextDeps.taskLifecycle.register(nextTask)
+  origin.execute.mockClear()
+  return {
+    handle: origin.handle,
+    execute: origin.execute,
+    checkpoints,
+    fence: claim.fence,
+    task: nextTask,
+    deps: nextDeps,
+    executor: new TaskExecutor(nextTask, nextDeps),
+  }
+}
+
+function approvalProvider() {
+  return provider('openai', (_messages, call) =>
+    call === 1
+      ? {
+          calls: [
+            { id: 'continuation-before-approval', name: 'system_info', arguments: {} },
+            { id: 'continuation-approved-write', name: 'publisher__publish', arguments: {} },
+          ],
+        }
+      : { content: 'approved continuation completed' }
+  )
+}
+
 describe('real-producer checkpoint identity regressions', () => {
   afterEach(() => {
     Object.assign(appConfig, savedConfig)
     vi.restoreAllMocks()
   })
+
+  it.each([false, true])(
+    '#1156: expired approval releases the local turn with replacement owner=%s',
+    async replacement => {
+      const resolve = vi.fn()
+      const llm = approvalProvider()
+      const f = await claimedContinuation(llm, {
+        resolve,
+        probe: vi.fn(async () => ({ alive: [], expired: [] })),
+      })
+      try {
+        await f.executor.run()
+        expect(f.executor.executorState).toBe('waiting_approval')
+        expect(f.deps.onApprovalNeeded).toHaveBeenCalledTimes(1)
+        const approval = f.executor.pendingApproval!
+        const expired = new ApprovalExpiredError({
+          code: 'approval_expired',
+          request_id: approval.request_id,
+          task_id: f.task.id,
+          tool_name: approval.tool_name,
+          expired_refs: [],
+          user_message: 'Approved content has expired.',
+        })
+        let replacementFence = f.fence
+        resolve.mockImplementationOnce(async () => {
+          if (replacement) {
+            const replacementStore = new ModelStepCheckpointStore(f.handle.persistQueue, {
+              now: () => NOW + 300_001,
+              blockedTtlMs: 7 * 24 * 3_600_000,
+            })
+            const claim = await replacementStore.claim({
+              sessionKey: SESSION_KEY,
+              checkpointId: f.fence.checkpointId,
+              version: header(f.handle).version,
+              hostInstanceId: 'replacement-instance',
+              newTaskId: 'replacement-task',
+              leaseMs: 300_000,
+            })
+            expect(claim.outcome).toBe('claimed')
+            if (claim.outcome !== 'claimed') throw new Error(`Claim failed: ${claim.outcome}`)
+            replacementFence = claim.fence
+          }
+          throw expired
+        })
+        const failTurn = vi.spyOn(f.deps.conversationManager, 'failTurn')
+        await f.executor.resumeAfterApproval(false)
+        await f.handle.persistQueue.drain()
+        expect(resolve).toHaveBeenCalledTimes(1)
+        expect(f.deps.onFail).toHaveBeenCalledExactlyOnceWith(
+          f.task,
+          expect.objectContaining({ code: 'approval_expired', message: expired.message })
+        )
+        const conversation = f.deps.conversationManager.getSessionByKey(SESSION_KEY)!
+        expect(conversation.state).toBe('idle')
+        expect(conversation.activeTaskId).toBeUndefined()
+        expect(
+          f.handle.worker.db.prepare('SELECT state, active_task_id FROM sessions').get()
+        ).toEqual({
+          state: 'idle',
+          active_task_id: null,
+        })
+        expect(f.execute).toHaveBeenCalledTimes(0)
+        expect(llm.calls()).toBe(1)
+        if (replacement) {
+          expect(header(f.handle)).toMatchObject({
+            status: 'claimed',
+            claim_owner: replacementFence.owner,
+            claim_generation: replacementFence.generation,
+          })
+          expect(replacementFence.generation).toBeGreaterThan(f.fence.generation)
+          expect(failTurn).toHaveBeenCalledExactlyOnceWith(conversation)
+        } else {
+          expect(header(f.handle).status).toBe('abandoned')
+          expect(failTurn).toHaveBeenCalledExactlyOnceWith(conversation, {
+            fence: f.fence,
+            activeTaskId: f.task.id,
+            originTurnNumber: f.task.modelStepContinuation!.originTurnNumber,
+          })
+        }
+      } finally {
+        await f.handle.shutdown()
+      }
+    }
+  )
+
+  it.each([
+    { entry: 'run', cleanup: 'abandon' },
+    { entry: 'run', cleanup: 'fail_turn' },
+    { entry: 'resume', cleanup: 'abandon' },
+    { entry: 'resume', cleanup: 'fail_turn' },
+  ] as const)(
+    'D1/#1157: $entry preserves the loop error when $cleanup rejects',
+    async ({ entry, cleanup }) => {
+      const llm = approvalProvider()
+      const f = await claimedContinuation(llm)
+      try {
+        if (entry === 'resume') {
+          await f.executor.run()
+          expect(f.executor.executorState).toBe('waiting_approval')
+          expect(f.deps.onApprovalNeeded).toHaveBeenCalledTimes(1)
+        }
+        const loopError = new LlmError(
+          'original loop failure',
+          'openai',
+          LlmErrorCode.RateLimited,
+          true
+        )
+        const emit = f.deps.coreEvents.emit.bind(f.deps.coreEvents)
+        const loop = vi.spyOn(f.deps.coreEvents, 'emit').mockImplementation(event => {
+          if (event.type === 'loop:iteration') throw loopError
+          emit(event)
+        })
+        const cleanupError = new TypeError('cleanup failure body must not be logged')
+        const rejected =
+          cleanup === 'abandon'
+            ? vi.spyOn(f.checkpoints, 'transition').mockRejectedValue(cleanupError)
+            : vi.spyOn(f.deps.conversationManager, 'failTurn').mockRejectedValue(cleanupError)
+        const logged = vi.spyOn(logger, 'error')
+        const escaped = await (
+          entry === 'run' ? f.executor.run() : f.executor.resumeAfterApproval(false)
+        ).then(
+          () => undefined,
+          error => error
+        )
+        expect(loop).toHaveBeenCalledWith(expect.objectContaining({ type: 'loop:iteration' }))
+        expect(rejected).toHaveBeenCalled()
+        expect(f.deps.onFail).toHaveBeenCalledExactlyOnceWith(
+          f.task,
+          expect.objectContaining({ code: loopError.code, message: loopError.message })
+        )
+        expect(logged).toHaveBeenCalledWith(
+          {
+            taskId: f.task.id,
+            checkpointId: f.fence.checkpointId,
+            op: cleanup,
+            errorName: 'TypeError',
+          },
+          'Model-step continuation cleanup failed'
+        )
+        expect(escaped).toBeUndefined()
+        expect(f.executor.executorState).toBe('failed')
+        if (cleanup === 'abandon') {
+          expect(header(f.handle).status).toBe('claimed')
+          expect(await f.checkpoints.renewLease(SESSION_KEY, f.fence, 300_000)).toBe(true)
+        }
+      } finally {
+        await f.handle.shutdown()
+      }
+    }
+  )
+
+  it.each(['tool_dispatch', 'tool_result'] as const)(
+    'M-1: fresh approval completes when append rejects at %s',
+    async kind => {
+      const f = await waitingOrigin(true, { content: 'approved effect accepted' })
+      try {
+        const checkpoints = f.originalDeps.modelStepCheckpoints!.store
+        const append = checkpoints.append.bind(checkpoints)
+        const rejected = vi.fn()
+        vi.spyOn(checkpoints, 'append').mockImplementation(async (...args) => {
+          if (args[2].some(entry => entry.kind === kind && entry.toolCallId === 'approved-write')) {
+            rejected()
+            throw new Error('injected approval append failure')
+          }
+          return append(...args)
+        })
+        await f.executor.resumeAfterApproval(false)
+        expect(rejected).toHaveBeenCalledTimes(1)
+        expect(f.execute).toHaveBeenCalledTimes(1)
+        expect(f.llm.calls()).toBe(2)
+        expect(f.llm.requests[1]!.filter(m => m.tool_call_id === 'approved-write')).toEqual([
+          expect.objectContaining({
+            content: expect.stringContaining('approved effect completed'),
+          }),
+        ])
+        expect(f.originalDeps.onComplete).toHaveBeenCalledExactlyOnceWith(f.original)
+        expect(f.originalDeps.onFail).not.toHaveBeenCalled()
+        expect(await checkpoints.loadLive(SESSION_KEY)).toBeNull()
+        expect(header(f.handle)).toBeUndefined()
+      } finally {
+        await f.handle.shutdown()
+      }
+    }
+  )
+
+  it.each(['tool_dispatch', 'tool_result'] as const)(
+    'M-1: continuation approval fails when append rejects at %s',
+    async kind => {
+      const llm = approvalProvider()
+      const f = await claimedContinuation(llm)
+      try {
+        await f.executor.run()
+        expect(f.executor.executorState).toBe('waiting_approval')
+        expect(f.deps.onApprovalNeeded).toHaveBeenCalledTimes(1)
+        const append = f.checkpoints.append.bind(f.checkpoints)
+        const rejected = vi.fn()
+        vi.spyOn(f.checkpoints, 'append').mockImplementation(async (...args) => {
+          if (
+            args[2].some(
+              entry => entry.kind === kind && entry.toolCallId === 'continuation-approved-write'
+            )
+          ) {
+            rejected()
+            throw new Error('injected continuation append failure')
+          }
+          return append(...args)
+        })
+        await f.executor.resumeAfterApproval(false)
+        expect(rejected).toHaveBeenCalledTimes(1)
+        expect(f.deps.onFail).toHaveBeenCalledExactlyOnceWith(
+          f.task,
+          expect.objectContaining({
+            code: LlmErrorCode.ApiCallFailed,
+            message: `Model-step continuation approved ${kind === 'tool_dispatch' ? 'dispatch' : 'result'} could not be recorded`,
+          })
+        )
+        expect(f.execute).toHaveBeenCalledTimes(kind === 'tool_dispatch' ? 0 : 1)
+        expect(llm.calls()).toBe(1)
+        expect(header(f.handle).status).toBe('abandoned')
+        expect(f.deps.onComplete).not.toHaveBeenCalled()
+      } finally {
+        await f.handle.shutdown()
+      }
+    }
+  )
 
   it.each([
     { removed: false, expected: 'started' },
