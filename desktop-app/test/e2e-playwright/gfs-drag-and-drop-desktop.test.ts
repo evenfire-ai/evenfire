@@ -61,7 +61,11 @@ async function dragRowOntoRow(page: Page, sourceRow: Locator, targetRow: Locator
   await page.mouse.down()
   await page.mouse.move((start.x + end.x) / 2, (start.y + end.y) / 2, { steps: 6 })
   await page.mouse.move(end.x, end.y, { steps: 6 })
-  await expect(targetRow).toHaveAttribute('data-drop-state', 'allowed', { timeout: 15_000 })
+  // Folder ancestry can remain unknown during hover even with warm permissions.
+  // Release a checking target so drop-time priority adjudication can run.
+  await expect(targetRow).toHaveAttribute('data-drop-state', /^(allowed|checking)$/, {
+    timeout: 15_000,
+  })
   await page.mouse.up()
 }
 
