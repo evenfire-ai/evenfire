@@ -40,6 +40,8 @@ interface DispatcherStatements {
   selectRecoverableCheckpointForTurn: Statement
   /** The exact claim that may write the continuation's boundary. */
   selectModelStepTurnFence: Statement
+  /** The exact claim that may reopen the continuation's origin turn. */
+  selectContinuationStartFence: Statement
   /** The stamps a `replace_messages` rewrite must carry over. */
   selectStampedMessages: Statement
   /** Re-applies one carried-over checkpoint stamp. */
@@ -78,6 +80,17 @@ function prepareDispatcherStatements(db: Database): DispatcherStatements {
          JOIN sessions s ON s.session_key = c.session_key
         WHERE s.id = ?
           AND s.active_task_id = ?
+          AND c.checkpoint_id = ?
+          AND c.claim_owner = ?
+          AND c.claim_generation = ?
+          AND c.origin_turn_number = ?
+          AND c.status IN ('claimed', 'resumable', 'abandoned')`
+    ),
+    selectContinuationStartFence: db.prepare(
+      `SELECT 1 AS ok
+         FROM model_step_checkpoints c
+         JOIN sessions s ON s.session_key = c.session_key
+        WHERE s.id = ?
           AND c.checkpoint_id = ?
           AND c.claim_owner = ?
           AND c.claim_generation = ?
@@ -152,16 +165,28 @@ function hasRecoverableModelStepCheckpointForTurn(
 function assertModelStepTurnFence(
   deps: DispatcherDeps,
   sessionId: string,
-  fence: ModelStepTurnFence
+  fence: ModelStepTurnFence,
+  continuationStart = false
 ): void {
-  const row = deps.dispatcherStatements.selectModelStepTurnFence.get(
-    sessionId,
-    fence.activeTaskId,
-    fence.fence.checkpointId,
-    fence.fence.owner,
-    fence.fence.generation,
-    fence.originTurnNumber
-  )
+  // A continuation start may replace a stale task that still owns the durable
+  // session, so it is fenced by the claim alone; closing writes also require
+  // the session to belong to the fenced task.
+  const row = continuationStart
+    ? deps.dispatcherStatements.selectContinuationStartFence.get(
+        sessionId,
+        fence.fence.checkpointId,
+        fence.fence.owner,
+        fence.fence.generation,
+        fence.originTurnNumber
+      )
+    : deps.dispatcherStatements.selectModelStepTurnFence.get(
+        sessionId,
+        fence.activeTaskId,
+        fence.fence.checkpointId,
+        fence.fence.owner,
+        fence.fence.generation,
+        fence.originTurnNumber
+      )
   if (row === undefined) {
     throw new Error('model-step continuation fence mismatch')
   }
@@ -262,7 +287,12 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       return withBusyRetry(() => {
         const tx = db.transaction(() => {
           if (op.modelStepTurnFence) {
-            assertModelStepTurnFence(deps, op.sessionId, op.modelStepTurnFence)
+            assertModelStepTurnFence(
+              deps,
+              op.sessionId,
+              op.modelStepTurnFence,
+              op.state === 'processing' && typeof op.activeTaskId === 'string'
+            )
           }
           // active_task_id: a string sets it; null/undefined pass NULL to the
           // COALESCE (keeps current). The explicit clear below handles null.

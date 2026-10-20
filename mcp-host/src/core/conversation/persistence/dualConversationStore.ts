@@ -301,11 +301,15 @@ export class DualConversationStore implements ConversationStore {
     ])
   }
 
-  async persistContinuationStart(conv: Conversation, turnNumber: number): Promise<void> {
+  async persistContinuationStart(
+    conv: Conversation,
+    turnNumber: number,
+    fence: ModelStepTurnFence
+  ): Promise<void> {
     if (!this.sqlite.persistContinuationStart) {
       throw new Error('The SQLite side of the dual store cannot reopen a turn')
     }
-    await this.sqlite.persistContinuationStart(conv, turnNumber)
+    await this.sqlite.persistContinuationStart(conv, turnNumber, fence)
   }
 
   async persistTurnCancel(conv: Conversation, fence?: ModelStepTurnFence): Promise<void> {

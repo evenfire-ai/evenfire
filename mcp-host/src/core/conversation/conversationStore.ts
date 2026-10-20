@@ -331,7 +331,11 @@ export interface ConversationStore {
    * final response or cancellation) with that number, without starting a new
    * turn. Only durable stores implement it.
    */
-  persistContinuationStart?(conv: Conversation, turnNumber: number): Promise<void>
+  persistContinuationStart?(
+    conv: Conversation,
+    turnNumber: number,
+    fence: ModelStepTurnFence
+  ): Promise<void>
   /** Called when a turn is cancelled (synthetic response injected). */
   persistTurnCancel(conv: Conversation, fence?: ModelStepTurnFence): Promise<void> | void
   /** Called when a turn fails (no response written). */

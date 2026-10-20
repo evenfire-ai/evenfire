@@ -445,7 +445,8 @@ export class ConversationManager {
     taskId: string,
     turnNumber: number,
     traceContext: TraceContextV1 | null,
-    replaceActiveTaskId?: string
+    replaceActiveTaskId: string | undefined,
+    fence: ModelStepTurnFence
   ): Promise<void> {
     const replacingStaleTask =
       conversation.state === ConversationState.Processing &&
@@ -486,7 +487,7 @@ export class ConversationManager {
     conversation.auto_approved_tools.delete('*')
     currentTurn.completed_at = undefined
     try {
-      await this.store.persistContinuationStart(conversation, turnNumber)
+      await this.store.persistContinuationStart(conversation, turnNumber, fence)
     } catch (err) {
       if (this.turnCompletionOwners.get(conversation) === continuationOwner) {
         conversation.state = previousState

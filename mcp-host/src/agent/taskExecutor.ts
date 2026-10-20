@@ -1210,7 +1210,12 @@ export class TaskExecutor {
       this.taskId,
       continuation.originTurnNumber,
       this.task.traceContext ?? null,
-      this.conversation.state === 'processing' ? this.conversation.activeTaskId : undefined
+      this.conversation.state === 'processing' ? this.conversation.activeTaskId : undefined,
+      {
+        fence: continuation.fence,
+        activeTaskId: this.taskId,
+        originTurnNumber: continuation.originTurnNumber,
+      }
     )
     this.turnTiming?.addSessionLoadMs(Date.now() - sessionLoadStart)
     this.captureTaskTokenBaseline()

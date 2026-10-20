@@ -890,7 +890,11 @@ export class SqliteConversationStore implements ConversationStore {
    * anchor. The session flips back to processing under the continuation task,
    * awaited like `persistTurnStart`.
    */
-  async persistContinuationStart(conv: Conversation, turnNumber: number): Promise<void> {
+  async persistContinuationStart(
+    conv: Conversation,
+    turnNumber: number,
+    fence: ModelStepTurnFence
+  ): Promise<void> {
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (!sessionKey) throw new Error(`Cannot reopen a turn of untracked session ${conv.id}`)
     this.reconcilePinning(sessionKey, conv)
@@ -910,6 +914,7 @@ export class SqliteConversationStore implements ConversationStore {
           state: conv.state,
           activeTaskId: conv.activeTaskId ?? null,
           activeTraceContext: conv.traceContext ? JSON.stringify(conv.traceContext) : null,
+          modelStepTurnFence: fence,
         },
         sessionKey
       )

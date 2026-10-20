@@ -450,7 +450,14 @@ describe('AgentStateMachine model-step continuation model pinning (#1043)', () =
     const manager = new ConversationManager(handle.store)
     const { checkpoints, fence, taskBudget } = await claimedCheckpoint(handle, manager)
     const badConversation = manager.getSessionByKey(SESSION_KEY)!
-    await manager.resumeTurnForContinuation(badConversation, 'task-continuation-state-b2', 1, null)
+    await manager.resumeTurnForContinuation(
+      badConversation,
+      'task-continuation-state-b2',
+      1,
+      null,
+      undefined,
+      { fence, activeTaskId: 'task-continuation-state-b2', originTurnNumber: 1 }
+    )
     await manager.suspendForApproval(badConversation, {
       request_id: 'approval-inconsistent',
       tool_name: 'shell_exec',
@@ -524,7 +531,9 @@ describe('AgentStateMachine model-step continuation model pinning (#1043)', () =
         badConversation,
         'task-continuation-state-b2',
         1,
-        null
+        null,
+        undefined,
+        { fence, activeTaskId: 'task-continuation-state-b2', originTurnNumber: 1 }
       )
       await manager.suspendForApproval(badConversation, {
         request_id: 'approval-recovery',
@@ -678,7 +687,14 @@ describe('AgentStateMachine model-step continuation model pinning (#1043)', () =
     const manager = new ConversationManager(handle.store)
     const { checkpoints, fence, taskBudget } = await claimedCheckpoint(handle, manager)
     const badConversation = manager.getSessionByKey(SESSION_KEY)!
-    await manager.resumeTurnForContinuation(badConversation, 'task-continuation-state-b2', 1, null)
+    await manager.resumeTurnForContinuation(
+      badConversation,
+      'task-continuation-state-b2',
+      1,
+      null,
+      undefined,
+      { fence, activeTaskId: 'task-continuation-state-b2', originTurnNumber: 1 }
+    )
     await manager.suspendForApproval(badConversation, {
       request_id: 'approval-unavailable',
       tool_name: 'shell_exec',
@@ -755,7 +771,14 @@ describe('AgentStateMachine model-step continuation model pinning (#1043)', () =
       ])
     ).toBe(true)
     const conversation = manager.getSessionByKey(SESSION_KEY)!
-    await manager.resumeTurnForContinuation(conversation, 'task-continuation-state-b2', 1, null)
+    await manager.resumeTurnForContinuation(
+      conversation,
+      'task-continuation-state-b2',
+      1,
+      null,
+      undefined,
+      { fence, activeTaskId: 'task-continuation-state-b2', originTurnNumber: 1 }
+    )
     await manager.suspendForApproval(conversation, {
       request_id: 'approval-cold-state',
       tool_name: 'shell_exec',
