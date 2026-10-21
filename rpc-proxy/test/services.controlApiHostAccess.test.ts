@@ -198,6 +198,47 @@ describe('control-api canonical host access client', () => {
     }
   )
 
+  // The direct-run-bound 404 is the common send shape during the rollout: it
+  // must reach the typed fence instead of the old 502. Both binding operations
+  // are covered, and the request shape proves the binding was actually POSTed.
+  it.each([
+    [
+      'a direct-run-bound legacy send',
+      { directRunBinding: BINDING },
+      'host-access',
+      '/mcp-hosts/host-a',
+    ],
+    [
+      'a direct-run-bound message resolution',
+      { messageResolution: true, directRunBinding: BINDING },
+      'host-message-resolution',
+      '/mcp-hosts/host-a/message-resolution',
+    ],
+  ] as const)(
+    'a 404 on %s is a typed version mismatch and posts the binding',
+    async (_label, options, operation, pathSuffix) => {
+      const fetchImpl = vi.fn(
+        async (_url: string | URL | Request, _init?: RequestInit) =>
+          new Response(JSON.stringify({ error: 'not found' }), {
+            status: 404,
+            headers: { 'content-type': 'application/json' },
+          })
+      )
+
+      const rejection = fetchHostConnectionFromControlApi('user-1', 'host-a', 'signed-rpc-token', {
+        ...options,
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+
+      await expect(rejection).rejects.toBeInstanceOf(ControlApiHostVersionMismatchError)
+      await expect(rejection).rejects.toMatchObject({ operation })
+      expect(fetchImpl).toHaveBeenCalledOnce()
+      const [url, init] = fetchImpl.mock.calls[0]!
+      expect(String(url)).toMatch(new RegExp(`${pathSuffix}$`))
+      expect(init).toMatchObject({ method: 'POST', body: JSON.stringify(BINDING) })
+    }
+  )
+
   it('a 404 on artifact-read names the artifact operation as a version mismatch', async () => {
     const fetchImpl = jsonResponse(404, { error: 'not found' })
 

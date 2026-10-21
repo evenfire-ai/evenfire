@@ -170,6 +170,10 @@ describe('R44-H1 legacy Host-message admission', () => {
 
     const resolverCalls = gateway.listResource.mock.calls.length
     const bindingCalls = bindingService.bind.mock.calls.length
+    // Witness: the admitted half really authorized and bound, so the unchanged
+    // counts after both refusals are not a zero-against-zero comparison.
+    expect(resolverCalls).toBeGreaterThan(0)
+    expect(bindingCalls).toBeGreaterThan(0)
     const legacyDenied = await request(server)
       .post(LEGACY_ROUTE(USER_A, 'host-a'))
       .set('x-rpc-access-token', jwt)
@@ -226,7 +230,18 @@ describe('R44-H1 legacy Host-message admission', () => {
   })
 
   it('rejects invalid auth, scope, claim, and binding before charging', async () => {
-    const { server, gateway } = app()
+    const { server, gateway, bindingService } = app()
+    // Liveness witness: one fully valid bound request proves the limiter, live
+    // Host authorization, and the binding are observable in this test.
+    await request(server)
+      .post(LEGACY_ROUTE(USER_A, 'host-a'))
+      .set('x-rpc-access-token', token(USER_A, ['host-a']))
+      .send(BINDING)
+      .expect(200)
+    expect(limiter.checkAndIncrement).toHaveBeenCalledOnce()
+    expect(gateway.listResource).toHaveBeenCalledOnce()
+    expect(bindingService.bind).toHaveBeenCalledOnce()
+
     await request(server).post(ROUTE(USER_A, 'host-a')).send({}).expect(401)
     await send(server, USER_A, 'host-a', {}, 'bad-token').expect(401)
     await send(
@@ -257,8 +272,10 @@ describe('R44-H1 legacy Host-message admission', () => {
       .set('content-type', 'application/json')
       .send('{"runId":')
       .expect(400)
-    expect(limiter.checkAndIncrement).not.toHaveBeenCalled()
-    expect(gateway.listResource).not.toHaveBeenCalled()
+    // Every rejected shape above left the witness baseline unchanged.
+    expect(limiter.checkAndIncrement).toHaveBeenCalledOnce()
+    expect(gateway.listResource).toHaveBeenCalledOnce()
+    expect(bindingService.bind).toHaveBeenCalledOnce()
   })
 
   it('charges a valid request before a later live grant denial', async () => {

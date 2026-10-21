@@ -38,12 +38,6 @@ export function apiErrorHandler(
   // refusal of Host access, so it must never collapse into a 403 denial or an
   // opaque 500. The public body names the mismatch; the operation stays local.
   if (err instanceof ControlApiHostVersionMismatchError) {
-    console.warn(
-      JSON.stringify({
-        event: 'control_api_host_version_mismatch',
-        operation: err.operation,
-      })
-    )
     res.status(503).json({ error: 'control_api_version_mismatch' })
     return
   }

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { clerumErrorHandler } from '../src/http/errorHandler.js'
 import type { K8sGateway } from '../src/k8s.js'
 import { createRpcAccessUsersRouter } from '../src/routes/rpc-access/users.js'
 import { DirectRunBindingConflictError } from '../src/services/tracing/directRunAttributionBindingService.js'
@@ -813,6 +814,55 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef — error propagation
     )
 
     await request(app).get(`/rpc/access/users/u/mcp-hosts/product`).expect(500)
+  })
+
+  it('returns an operational 5xx, never 404, when the Host listing dependency answers 404', async () => {
+    svc.getUserAgents.mockResolvedValue({ userId: 'u', agentNames: ['product'] })
+    const k8sNotFound = Object.assign(new Error('namespaces "mcp-host" not found'), {
+      code: 404,
+      body: {
+        kind: 'Status',
+        status: 'Failure',
+        reason: 'NotFound',
+        message: 'namespaces "mcp-host" not found',
+      },
+    })
+    const listResource = vi
+      .fn()
+      .mockRejectedValueOnce(k8sNotFound)
+      .mockResolvedValue([{ metadata: { name: 'product' }, spec: { enabled: true } }])
+    const gatewayStub = {
+      listResource,
+      getResource: vi.fn(),
+      createResource: vi.fn(),
+      updateResource: vi.fn(),
+      deleteResource: vi.fn(),
+    }
+    const app = express()
+    app.use(express.json())
+    app.use(
+      createRpcAccessUsersRouter(gatewayStub as unknown as K8sGateway, {
+        bindingService: { bind: vi.fn() },
+      })
+    )
+    app.use(clerumErrorHandler)
+
+    const dependencyFailure = await request(app).get(`/rpc/access/users/u/mcp-hosts/product`)
+    // A Kubernetes 404 is a dependency failure on this RPC path: forwarding it
+    // as 404 would make rpc-proxy report a peer version mismatch.
+    expect(dependencyFailure.status).not.toBe(404)
+    expect(dependencyFailure.status).toBe(500)
+    expect(dependencyFailure.body).toMatchObject({ error: 'Internal Server Error' })
+
+    // Positive control in the same test: once the dependency answers, the same
+    // route and handler resolve the Host normally.
+    const resolved = await request(app).get(`/rpc/access/users/u/mcp-hosts/product`).expect(200)
+    expect(resolved.body).toEqual({
+      userId: 'u',
+      hostRef: 'product',
+      url: 'http://product.mcp-host.svc.cluster.local:8080',
+    })
+    expect(listResource).toHaveBeenCalledTimes(2)
   })
 })
 
