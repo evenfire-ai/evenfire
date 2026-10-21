@@ -1696,9 +1696,10 @@ export function App() {
 
   // What a deep link does once its launch settled. Mounted: done. Failed: retried
   // with the failure's message until the retry budget runs out. Abandoned (the
-  // user left its tab before it mounted): dropped without a retry, which would
-  // reopen an app the user walked away from, and the team it switched to is
-  // given back.
+  // user moved off its tab before it mounted, or the session or window holding
+  // it went away): dropped as is. A retry would reopen an app the user walked
+  // away from, and giving back the team or the originating chat would pull the
+  // user out of wherever they just went; their navigation wins.
   const finishSandboxUiDeepLinkLaunch = React.useCallback(
     async (context: PendingSandboxUiDeepLinkLaunch, launchId: LaunchId, outcome: LaunchOutcome) => {
       if (context.generation !== sandboxUiDeepLinkGenerationRef.current) {
@@ -1717,7 +1718,6 @@ export function App() {
         return
       }
       if (outcome === 'abandoned') {
-        await restoreSandboxUiDeepLinkTeam(context)
         await acknowledgeSandboxUiDeepLink(context.linkId)
         return
       }
@@ -1735,7 +1735,6 @@ export function App() {
       clearSandboxUiDeepLinkProcessing,
       deferSandboxUiDeepLinkUntilTerminal,
       embed,
-      restoreSandboxUiDeepLinkTeam,
     ]
   )
 

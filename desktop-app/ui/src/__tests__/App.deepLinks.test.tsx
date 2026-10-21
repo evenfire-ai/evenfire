@@ -157,7 +157,11 @@ vi.mock('@components/CommandPalette', () => ({
   },
 }))
 vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
-vi.mock('@components/Common', () => ({ Button: () => null, ToastStack: () => null }))
+vi.mock('@components/Common', () => ({
+  Button: () => null,
+  IconButton: () => null,
+  ToastStack: () => null,
+}))
 vi.mock('@components/ConfirmDialog', () => ({
   ConfirmDialog: (props: {
     title: string
@@ -2004,7 +2008,7 @@ describe('App deep-link orchestration', () => {
     expect(closeSandboxUi()).toHaveBeenCalledWith({ launchId: main.openCall(0).launchId })
   })
 
-  it('acks a cross-team link left before it mounted without retrying it, and gives the team back', async () => {
+  it('acks a cross-team link left before it mounted without retrying it or switching teams back', async () => {
     let liveTeamId = 'team-a'
     const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
       if (!teamId || teamId === liveTeamId) return false
@@ -2032,8 +2036,8 @@ describe('App deep-link orchestration', () => {
     await selectTab(0)
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
-    expect(ensureTeamContext).toHaveBeenLastCalledWith({ teamId: 'team-a', announce: true })
-    expect(liveTeamId).toBe('team-a')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(liveTeamId).toBe('team-b')
     expect(confirmDialogHarness.props?.title).not.toBe('App link could not be opened')
     expect(currentController.pushToast).not.toHaveBeenCalledWith(
       expect.stringContaining('Could not open app link'),
@@ -2043,6 +2047,47 @@ describe('App deep-link orchestration', () => {
     await act(async () => {
       await new Promise(resolve => window.setTimeout(resolve, 50))
     })
+    expect(openSandboxUi()).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the user where they navigated when a cross-team link is abandoned', async () => {
+    let liveTeamId = 'team-a'
+    const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
+      if (!teamId || teamId === liveTeamId) return false
+      liveTeamId = teamId
+      return true
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.chat,
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+      handleEnsureTeamContext: ensureTeamContext,
+      getCurrentTeamId: () => liveTeamId,
+    } as Partial<AppController>)
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    main.holdNextOpen()
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
+    })
+    await confirmPendingAppLink()
+    await waitForAppOpen()
+    expect(liveTeamId).toBe('team-b')
+
+    // The user goes to Files while the linked app is still opening.
+    act(() => {
+      currentController.handleNavSelect(DESKTOP_ROUTES.files)
+    })
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    await act(async () => {
+      await new Promise(resolve => window.setTimeout(resolve, 50))
+    })
+    expect(liveTeamId).toBe('team-b')
+    expect(activeWorkspaceTab(currentController.workspaceTabs)?.kind).toBe('files')
     expect(openSandboxUi()).toHaveBeenCalledTimes(1)
   })
 
