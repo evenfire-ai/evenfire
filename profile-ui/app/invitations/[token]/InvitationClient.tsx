@@ -214,6 +214,9 @@ export function InvitationClient({
       if (value.code === 'expired') return 'This invitation has expired.'
       if (value.code === 'forbidden') return 'Invitation email does not match.'
       if (value.code === 'not_found') return 'Invitation not found.'
+      if (value.code === 'password_already_set') {
+        return 'This account already has a password. Sign in instead.'
+      }
     }
     const message = value.message.replace(/^\d{3}\s+[A-Za-z ]+\s+-\s+/, '')
     if (message === 'invalid_password') return 'Password must be between 8 and 256 characters.'

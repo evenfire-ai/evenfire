@@ -29,6 +29,7 @@ function invitationPasswordDomainError(
   | 'not_pending'
   | 'expired'
   | 'invalid_password'
+  | 'password_already_set'
   | null {
   const code = error.code
   if (error.status === 400 && code === 'invalid_password') return 'invalid_password'
@@ -37,6 +38,7 @@ function invitationPasswordDomainError(
   if (error.status === 404 && code === 'not_found') return 'not_found'
   if (error.status === 409 && code === 'invitation_not_accepted') return 'not_accepted'
   if (error.status === 409 && code === 'invitation_not_pending') return 'not_pending'
+  if (error.status === 409 && code === 'password_already_set') return 'password_already_set'
   if (error.status === 410 && code === 'expired') return 'expired'
   return null
 }
@@ -104,6 +106,7 @@ export async function setupInvitationPassword(
     | 'not_pending'
     | 'expired'
     | 'invalid_password'
+    | 'password_already_set'
   data?: InvitationPreview & { passwordUpdated: boolean }
 }> {
   try {

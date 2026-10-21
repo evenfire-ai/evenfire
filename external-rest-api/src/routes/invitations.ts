@@ -102,6 +102,7 @@ function sendInvitationPasswordError(
     | 'expired'
     | 'invalid_invitation'
     | 'invalid_password'
+    | 'password_already_set'
 ): void {
   if (error === 'invalid_invitation') {
     res.status(400).json({ error: 'invalid_invitation' })
@@ -117,6 +118,12 @@ function sendInvitationPasswordError(
   }
   if (error === 'not_accepted') {
     res.status(409).json({ error: 'Invitation must be accepted before setting a password' })
+    return
+  }
+  if (error === 'password_already_set') {
+    res
+      .status(409)
+      .json({ error: 'This account already has a password', code: 'password_already_set' })
     return
   }
   if (error === 'not_pending') {
@@ -259,7 +266,9 @@ async function completePasswordReset(
   email: string,
   invitationId: string,
   password: string,
-  sendError: typeof sendInvitationPasswordError = sendInvitationPasswordError
+  // The reset producer cannot report password_already_set; type this hook to
+  // the reset errors it can publish.
+  sendError: typeof sendPasswordResetError = sendInvitationPasswordError
 ): Promise<void> {
   const result = await setupInvitationPasswordWithToken(token, email, invitationId, password)
   if (result.error) {

@@ -10,6 +10,7 @@ export const TERMINAL_PASSWORD_ERROR_CODES: ReadonlySet<string> = new Set([
   'invalid_invitation',
   'not_found',
   'expired',
+  'password_already_set',
 ])
 
 export function isTerminalPasswordError(value: unknown): value is ProfileApiError {

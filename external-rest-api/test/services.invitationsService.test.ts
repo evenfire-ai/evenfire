@@ -41,6 +41,24 @@ describe('invitation service error and token boundaries', () => {
     }
   })
 
+  it('classifies a producer password_already_set rejection as a terminal domain error', async () => {
+    client.request.mockRejectedValueOnce(
+      new ControlApiError(
+        'Control API POST /external/invitations/password failed (409): password_already_set',
+        409,
+        { error: 'password_already_set' }
+      )
+    )
+
+    await expect(
+      setupInvitationPassword(
+        { userId: 'user-1', email: 'user@example.com', sessionToken: 'session-token' },
+        'inv-1',
+        'valid-password'
+      )
+    ).resolves.toEqual({ error: 'password_already_set' })
+  })
+
   it('discards any transitional session representation from atomic password setup', async () => {
     client.request.mockResolvedValueOnce({
       id: 'inv-1',
