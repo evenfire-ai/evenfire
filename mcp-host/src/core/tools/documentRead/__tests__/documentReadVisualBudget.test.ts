@@ -12,6 +12,7 @@ import {
   resolveVisualDeliveryLimits,
 } from '../../../../visualInput/deliveryLimits'
 import { VisualInputBudget } from '../../../../visualInput/policy'
+import { assertVisualRequestFits } from '../../../../visualInput/requestPolicy'
 import { AttachmentReadLedger } from '../../../attachments/attachmentReadBudget'
 import { makeFakeConversation } from '../../../conversation/__testing__/makeFakeConversation'
 import type {
@@ -124,6 +125,91 @@ function earlierImages(count: number, side?: number): ChatMessage {
       })),
     ],
   }
+}
+
+/** `count` earlier tool images whose decoded bytes total `decodedBytes`. */
+function earlierToolImages(count: number, decodedBytes: number, side: number): ChatMessage {
+  const data = Buffer.alloc(decodedBytes).toString('base64')
+  return {
+    role: 'user',
+    content: 'Earlier rendered pages',
+    contentParts: [
+      { type: 'text', text: 'Earlier rendered pages' },
+      ...Array.from({ length: count }, (_, index) => ({
+        type: 'image' as const,
+        mimeType: 'image/png' as const,
+        data,
+        width: side,
+        height: side,
+        source: {
+          kind: 'tool' as const,
+          attachmentId: `earlier-${index}`,
+          toolCallId: 'call-prior',
+        },
+      })),
+    ],
+  }
+}
+
+/**
+ * A child that returns the exact byte cap the Tool admitted, split across its
+ * page allowance: every returned page sits at a bound, so the request built
+ * from this outcome is the largest the admission permits.
+ */
+function cappedVisualRunner(): { runJob: RunDocumentJob; jobs: DocumentJob[] } {
+  const jobs: DocumentJob[] = []
+  const runJob: RunDocumentJob = async job => {
+    jobs.push(job)
+    if (job.kind !== 'pdf_visual') throw new Error('expected a PDF visual job')
+    const pages = job.limits.maxVisualPagesPerCall
+    const perPage = Math.floor(job.maxTotalImageBytes / pages)
+    const images = Array.from({ length: pages }, (_, index) => ({
+      page: index + 1,
+      // 2000 px is the Claude many-image dimension; 2000x1000 keeps four pages
+      // inside the 8,000,000-pixel per-call budget.
+      width: 2_000,
+      height: 1_000,
+      png: new Uint8Array(
+        index === pages - 1 ? job.maxTotalImageBytes - perPage * (pages - 1) : perPage
+      ),
+    }))
+    return { ok: true, pageCount: pages, images } as never
+  }
+  return { runJob, jobs }
+}
+
+/** The request a provider sees after this visual result joins the earlier images. */
+function finalVisualRequest(prior: ChatMessage[], images: Attachment[]): ChatMessage[] {
+  return [
+    ...prior,
+    {
+      role: 'user',
+      content: 'Rendered pages',
+      contentParts: [
+        { type: 'text', text: 'Rendered pages' },
+        ...images.map(image => {
+          if (
+            image.dataBase64 === undefined ||
+            image.width === undefined ||
+            image.height === undefined
+          )
+            throw new Error('the visual result has no measured image')
+          return {
+            type: 'image' as const,
+            mimeType: 'image/png' as const,
+            data: image.dataBase64,
+            width: image.width,
+            height: image.height,
+            source: { kind: 'tool' as const, attachmentId: image.id, toolCallId: 'call-visual' },
+          }
+        }),
+      ],
+    },
+  ]
+}
+
+function requestBytes(messages: ChatMessage[]): number {
+  return Buffer.byteLength(JSON.stringify(messages), 'utf8')
 }
 
 function toolResult(
@@ -660,4 +746,66 @@ describe('document visual reads and the request image bounds', () => {
       Math.ceil((usageBytes * 4) / 3) + Math.ceil((job.maxTotalImageBytes * 4) / 3) + 2_000_000
     ).toBeLessThanOrEqual(ANTHROPIC.maxVisualRequestBytes)
   }, 15_000)
+
+  it('R2-L3/H2: the admitted visual request fits the real ANTHROPIC asserter', async () => {
+    const file = admittedFile('compose', await imageOnlyPdf(witnessCode()), 'application/pdf')
+    // At the many-image count threshold but below the dimension threshold:
+    // 20 small images already in the request.
+    const prior = [earlierToolImages(20, 200_000, 1_500)]
+    const usage = requestImageUsage(prior, [])
+    expect(usage).toEqual({ images: 20, bytes: 4_000_000, maxSide: 1_500 })
+
+    const admitted = cappedVisualRunner()
+    const output = await documentTool(file, admitted.runJob).execute(
+      { attachmentId: file.id, mode: 'visual' },
+      context(ANTHROPIC, usage)
+    )
+    expect(JSON.parse(output.content)).toMatchObject({
+      status: 'ok',
+      format: 'pdf',
+      mode: 'visual',
+    })
+    expect(output.attachments).toHaveLength(4)
+    const admittedJob = admitted.jobs[0]
+    if (admittedJob?.kind !== 'pdf_visual') throw new Error('the visual read did not run a job')
+    // The request-byte term is what keeps this call below the other caps.
+    expect(admittedJob.maxTotalImageBytes).toBeLessThan(
+      admittedJob.maxImageBytes * admittedJob.limits.maxVisualPagesPerCall
+    )
+    const admittedRequest = finalVisualRequest(prior, output.attachments!)
+    expect(requestBytes(admittedRequest)).toBeLessThanOrEqual(ANTHROPIC.maxVisualRequestBytes)
+    // `verificationRequired` forces the last-mile predicate for tool-rendered
+    // images (no GFS source), which is the composition this test pins.
+    // Witness: the real asserter accepts the largest request admission allows.
+    expect(() =>
+      assertVisualRequestFits(admittedRequest, { messages: admittedRequest }, true, ANTHROPIC)
+    ).not.toThrow()
+
+    // Counterfactual twin: remove only the request-byte datum from the profile.
+    // The other limits now admit more image bytes, and the same asserter rejects
+    // the larger request. No production code is toggled.
+    const withoutRequestBound = { ...ANTHROPIC, maxVisualRequestBytes: Infinity }
+    const unbounded = cappedVisualRunner()
+    const unboundedOutput = await documentTool(file, unbounded.runJob).execute(
+      { attachmentId: file.id, mode: 'visual' },
+      context(withoutRequestBound, usage)
+    )
+    expect(unboundedOutput.attachments).toHaveLength(4)
+    const unboundedJob = unbounded.jobs[0]
+    if (unboundedJob?.kind !== 'pdf_visual') throw new Error('the visual read did not run a job')
+    expect(unboundedJob.maxTotalImageBytes).toBe(
+      unboundedJob.maxImageBytes * unboundedJob.limits.maxVisualPagesPerCall
+    )
+    expect(unboundedJob.maxTotalImageBytes).toBeGreaterThan(admittedJob.maxTotalImageBytes)
+    const unboundedRequest = finalVisualRequest(prior, unboundedOutput.attachments!)
+    expect(requestBytes(unboundedRequest)).toBeGreaterThan(ANTHROPIC.maxVisualRequestBytes)
+    expect(() =>
+      assertVisualRequestFits(unboundedRequest, { messages: unboundedRequest }, true, ANTHROPIC)
+    ).toThrow('limit_exceeded')
+    // The only changed input was the request-byte datum.
+    expect({
+      ...withoutRequestBound,
+      maxVisualRequestBytes: ANTHROPIC.maxVisualRequestBytes,
+    }).toEqual(ANTHROPIC)
+  }, 30_000)
 })

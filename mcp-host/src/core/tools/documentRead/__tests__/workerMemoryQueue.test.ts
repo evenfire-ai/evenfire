@@ -77,6 +77,43 @@ afterEach(async () => {
 })
 
 describe('document reader Host memory admission and queue', () => {
+  it('never sends the job before the deferred OOM mark resolves', async () => {
+    samplers(vi.fn(async () => null))
+    let markerStarted!: () => void
+    const started = new Promise<void>(resolve => {
+      markerStarted = resolve
+    })
+    let releaseMarker!: () => void
+    const markerPending = new Promise<void>(resolve => {
+      releaseMarker = resolve
+    })
+    let markerCompleted = false
+    vi.mocked(oomScore.oomVictimMarker).mockReturnValueOnce(async () => {
+      markerStarted()
+      await markerPending
+      markerCompleted = true
+    })
+    const child = childFixture()
+    vi.mocked(spawn).mockReturnValueOnce(child)
+
+    const pending = runDocumentJob(job)
+    await started
+    // The marker is still pending. Give any send that does not await it a full
+    // event-loop turn to run before asserting the child received nothing.
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(markerCompleted).toBe(false)
+    expect(spawn).toHaveBeenCalledTimes(1)
+    expect(child.send).toHaveBeenCalledTimes(0)
+
+    releaseMarker()
+    await vi.waitFor(() => expect(child.send).toHaveBeenCalledTimes(1))
+    expect(markerCompleted).toBe(true)
+    expect(child.send).toHaveBeenCalledWith(job, expect.any(Function))
+    // Witness: after the mark resolves the job is sent and completes normally.
+    finish(child)
+    expect((await pending).ok).toBe(true)
+  })
+
   it('keeps the reader slot after a failed kill until the child exit is observed', async () => {
     samplers(vi.fn(async () => null))
     const firstChild = childFixture()
