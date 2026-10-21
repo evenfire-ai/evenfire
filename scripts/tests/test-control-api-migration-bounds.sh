@@ -271,6 +271,51 @@ if run_fixture active-jobspec-mismatch >/dev/null; then
 fi
 mv "$fixture_root/jobspec-matched.json" "$capture"
 
+# The API server does not preserve the key order of the submitted manifest, so
+# the configuration identity must not depend on it. Reverse every object's
+# keys (arrays keep their order) and the Job must still be reused; change one
+# value under the same reordering and it must still be rejected.
+reorder_job_keys() {
+  ruby -rjson -e '
+    reverse_keys = lambda do |value|
+      case value
+      when Hash then value.keys.reverse.each_with_object({}) { |k, acc| acc[k] = reverse_keys.call(value[k]) }
+      when Array then value.map { |entry| reverse_keys.call(entry) }
+      else value
+      end
+    end
+    job = reverse_keys.call(JSON.parse(File.read(ARGV.fetch(0))))
+    job["spec"]["template"]["spec"]["serviceAccountName"] = ARGV.fetch(1) unless ARGV.fetch(1).empty?
+    File.write(ARGV.fetch(0), JSON.generate(job))
+  ' "$1" "$2"
+}
+cp "$capture" "$fixture_root/reordered-matched.json"
+cp "$capture" "$fixture_root/reordered.json"
+reorder_job_keys "$fixture_root/reordered.json" ""
+cmp -s "$fixture_root/reordered.json" "$fixture_root/reordered-matched.json" && \
+  fail "key reordering fixture did not change the serialized Job"
+cp "$fixture_root/reordered.json" "$capture"
+run_fixture active-reordered-matches >/dev/null || \
+  fail "active migration Job with reordered object keys was not reused"
+cp "$fixture_root/reordered-matched.json" "$capture"
+reorder_job_keys "$capture" "wrong-service-account"
+if run_fixture active-reordered-mismatch >/dev/null; then
+  fail "active migration Job with reordered keys and changed configuration was accepted"
+fi
+cp "$fixture_root/reordered-matched.json" "$capture"
+# The digest sorts arrays; the direct contract comparison must keep their order.
+ruby -rjson -e '
+  job = JSON.parse(File.read(ARGV.fetch(0)))
+  env = job["spec"]["template"]["spec"]["containers"][0]["env"]
+  abort("fixture needs at least two env entries") unless env.is_a?(Array) && env.length >= 2
+  job["spec"]["template"]["spec"]["containers"][0]["env"] = env.reverse
+  File.write(ARGV.fetch(0), JSON.generate(job))
+' "$capture" || fail "could not build the reordered env fixture"
+if run_fixture active-env-order-mismatch >/dev/null; then
+  fail "active migration Job with reordered env entries was accepted"
+fi
+mv "$fixture_root/reordered-matched.json" "$capture"
+
 status_output="$(expect_fixture_failure 'existing migration Job status check' \
   run_fixture active-status-error)"
 [[ "$status_output" == *'could not determine existing migration Job status'* ]] || \

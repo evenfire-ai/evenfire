@@ -187,6 +187,20 @@ verify_active_job_identity() {
     return 1
   fi
   ruby -rjson -rdigest -e '
+    # Same canonical form as build_job_manifest: the API server does not keep
+    # the submitted key order, so the identity digest must not depend on it.
+    def deep_sort(value)
+      case value
+      when Hash
+        value.keys.sort.each_with_object({}) do |key, acc|
+          acc[key] = deep_sort(value[key])
+        end
+      when Array
+        value.map { |entry| deep_sort(entry) }.sort_by { |entry| JSON.generate(entry) }
+      else
+        value
+      end
+    end
     normalize_container = lambda do |value|
       container = Marshal.load(Marshal.dump(value))
       container.delete("terminationMessagePath") if
@@ -260,8 +274,8 @@ verify_active_job_identity() {
     abort("active migration Job image mismatch") unless expected_image == actual_image
     expected_contract = execution_contract.call(expected)
     actual_contract = execution_contract.call(actual)
-    expected_identity = Digest::SHA256.hexdigest(JSON.generate(expected_contract))
-    actual_identity = Digest::SHA256.hexdigest(JSON.generate(actual_contract))
+    expected_identity = Digest::SHA256.hexdigest(JSON.generate(deep_sort(expected_contract)))
+    actual_identity = Digest::SHA256.hexdigest(JSON.generate(deep_sort(actual_contract)))
     abort("expected migration Job configuration annotation mismatch") unless
       expected_identity == expected_annotations["clerum.io/migration-configuration-sha256"]
     abort("active migration Job configuration annotation mismatch") unless
@@ -477,6 +491,22 @@ extract_control_api_image() {
 
 build_job_manifest() {
   ruby -ryaml -rjson -rdigest -e '
+    # Canonical form for the configuration digest, shared with
+    # verify_active_job_identity (copied from verify-networkpolicies.sh).
+    # Array order is not part of the digest; verify_active_job_identity still
+    # compares the normalized contracts directly, which keeps it significant.
+    def deep_sort(value)
+      case value
+      when Hash
+        value.keys.sort.each_with_object({}) do |key, acc|
+          acc[key] = deep_sort(value[key])
+        end
+      when Array
+        value.map { |entry| deep_sort(entry) }.sort_by { |entry| JSON.generate(entry) }
+      else
+        value
+      end
+    end
     job_name = ENV.fetch("JOB_NAME")
     docs = []
     YAML.load_stream(File.read(ARGV[0])) do |doc|
@@ -645,7 +675,7 @@ build_job_manifest() {
     end
     configuration_contract = { "jobSpec" => normalize_job_spec.call(job.fetch("spec")) }
     job["metadata"]["annotations"]["clerum.io/migration-configuration-sha256"] =
-      Digest::SHA256.hexdigest(JSON.generate(configuration_contract))
+      Digest::SHA256.hexdigest(JSON.generate(deep_sort(configuration_contract)))
 
     puts JSON.generate(job)
   ' "$RENDERED_MANIFEST_FILE"

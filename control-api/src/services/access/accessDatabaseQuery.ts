@@ -216,6 +216,14 @@ export async function withAccessDatabaseTransaction<T>(
   let transactionStarted = false
   let commitSent = false
   let releaseError: Error | boolean | undefined
+  // pg-pool removes its idle 'error' listener while a client is checked out.
+  // Hold one for the whole loan so a backend failure during non-SQL work cannot
+  // become an uncaught EventEmitter error, and discard the client on release.
+  let asyncClientError: Error | undefined
+  const onClientError = (err: unknown): void => {
+    asyncClientError ??= err instanceof Error ? err : new Error(String(err))
+  }
+  client.on('error', onClientError)
   const query = (text: string, values?: unknown[]) =>
     runAccessDatabaseQuery(client, budget, text, values ?? [], {
       onDatabaseFailure: options.onDatabaseFailure,
@@ -279,6 +287,10 @@ export async function withAccessDatabaseTransaction<T>(
     throw error
   } finally {
     forgetStatementTimeout(client)
+    client.removeListener('error', onClientError)
+    // Keep the primary failure; adopt the async one only when there is none, so
+    // a poisoned client always reaches release() with a truthy value.
+    if (asyncClientError && !releaseError) releaseError = asyncClientError
     client.release(releaseError)
   }
 }
