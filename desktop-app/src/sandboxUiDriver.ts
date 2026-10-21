@@ -111,9 +111,10 @@ export type MountSandboxUiArgs = {
   /** Main-side cleanup for a teardown nobody asked for (crash, parent closed). */
   onClosed?: () => void
   /**
-   * Fired exactly once when the view this mount created is torn down, for any
-   * reason, including a teardown that fails half-way. Never fired when the
-   * mount did not get as far as creating a view.
+   * Fired exactly once when this mount's view is torn down, for any reason,
+   * including a teardown that fails half-way. Only a mount that got as far as
+   * making its view the active one fires it: a view created but not yet active
+   * (a step between its construction and its activation threw) never does.
    */
   onReleased?: (event: SandboxUiReleasedEvent) => void
   /**
