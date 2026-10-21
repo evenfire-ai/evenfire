@@ -28,7 +28,7 @@
  *   row, so one fixture name yields a folder that holds both a file and a
  *   child folder.
  */
-import { type Locator, type Page, expect, test } from '@playwright/test'
+import { type ElectronApplication, type Locator, type Page, expect, test } from '@playwright/test'
 import {
   assertGfsFixtureCleaned,
   cleanupGfsFixture,
@@ -51,20 +51,51 @@ function toast(page: Page, text: string): Locator {
 }
 
 /**
+ * A dropped `kubectl exec` stream is transport noise, not a verdict: the
+ * shared harness opens one exec session per call and the stream can end
+ * early. One bounded retry keeps the journey setup deterministic; a second
+ * failure propagates.
+ */
+async function withTransportRetry<T>(what: string, action: () => T): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return action()
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught)
+      const transportNoise = /\bEOF\b|socket hang up|connection reset|stream closed/i.test(message)
+      if (attempt >= 2 || !transportNoise) throw caught
+      await new Promise(resolve => setTimeout(resolve, 1_500))
+    }
+  }
+}
+
+/**
  * Grant the fixture to the seeded E2E persona: read/write/delete, inherited
  * by the fixture subtree. Without this the fixtures exist but the persona
  * cannot read them, cannot move them, and the shared-with-me listing does
  * not carry them at all.
  */
-function grantFixtureToE2eUser(resourceId: string): void {
-  seedGfsGrant({
-    resourceId,
-    subjectType: 'user',
-    subjectId: getE2EUserId(),
-    permissions: ['read', 'write', 'delete'],
-    inherit: true,
-    grantedBy: 'e2e:gfs-drag-and-drop',
-  })
+async function grantFixtureToE2eUser(resourceId: string): Promise<void> {
+  await withTransportRetry('seedGfsGrant', () =>
+    seedGfsGrant({
+      resourceId,
+      subjectType: 'user',
+      subjectId: getE2EUserId(),
+      permissions: ['read', 'write', 'delete'],
+      inherit: true,
+      grantedBy: 'e2e:gfs-drag-and-drop',
+    })
+  )
+}
+
+/** Seed a fixture folder (and its child) with one bounded transport retry. */
+async function seedFixtureDirectory(name: string) {
+  return withTransportRetry('seedGfsDirectoryFixture', () => seedGfsDirectoryFixture(name))
+}
+
+/** Seed a fixture file (and its folder) with one bounded transport retry. */
+async function seedFixtureFile(name: string) {
+  return withTransportRetry('seedGfsFileFixture', () => seedGfsFileFixture(name))
 }
 
 /**
@@ -146,11 +177,16 @@ test.describe('EvenDrive drag and drop (desktop grid)', () => {
     // same fixture folder row, so the folder ends up holding BOTH the file
     // and the destination folder as siblings.
     const fixtureName = uniqueGfsFixtureName('e2e-gfs-dnd-file')
-    const file = seedGfsFileFixture(fixtureName)
-    const dir = seedGfsDirectoryFixture(fixtureName)
-    grantFixtureToE2eUser(dir.resourceId)
-    const { app, page } = await launchAndLogin()
+    // The setup runs INSIDE the cleanup scope: a failed seed, grant or
+    // login must not leave seeded rows behind.
+    let app: ElectronApplication | undefined
     try {
+      const file = await seedFixtureFile(fixtureName)
+      const dir = await seedFixtureDirectory(fixtureName)
+      await grantFixtureToE2eUser(dir.resourceId)
+      const launched = await launchAndLogin()
+      app = launched.app
+      const page = launched.page
       await openFixtureFolder(page, fixtureName)
       const fileRow = gridRow(page, file.fileName)
       const dirRow = gridRow(page, dir.childName)
@@ -180,7 +216,7 @@ test.describe('EvenDrive drag and drop (desktop grid)', () => {
       // The moved file is gone from the folder listing it was dragged out of.
       await expect(fileRow).toBeHidden({ timeout: 30_000 })
     } finally {
-      await app.close().catch(() => undefined)
+      await app?.close().catch(() => undefined)
       cleanupGfsFixture(fixtureName)
       assertGfsFixtureCleaned(fixtureName)
     }
@@ -189,16 +225,19 @@ test.describe('EvenDrive drag and drop (desktop grid)', () => {
   test('folder drag stops at the one confirmation: Cancel is a no-op, Move commits with impact info', async () => {
     const sourceName = uniqueGfsFixtureName('e2e-gfs-dnd-src')
     const destinationName = uniqueGfsFixtureName('e2e-gfs-dnd-dst')
-    const sourceDir = seedGfsDirectoryFixture(sourceName)
-    const destinationDir = seedGfsDirectoryFixture(destinationName)
-    // The moved folder is the fixture's CHILD, so its old parent is the
-    // fixture folder: the persona holds write+delete there and the move
-    // never needs authority on the drive root.
-    grantFixtureToE2eUser(sourceDir.resourceId)
-    grantFixtureToE2eUser(sourceDir.childResourceId)
-    grantFixtureToE2eUser(destinationDir.resourceId)
-    const { app, page } = await launchAndLogin()
+    let app: ElectronApplication | undefined
     try {
+      const sourceDir = await seedFixtureDirectory(sourceName)
+      const destinationDir = await seedFixtureDirectory(destinationName)
+      // The moved folder is the fixture's CHILD, so its old parent is the
+      // fixture folder: the persona holds write+delete there and the move
+      // never needs authority on the drive root.
+      await grantFixtureToE2eUser(sourceDir.resourceId)
+      await grantFixtureToE2eUser(sourceDir.childResourceId)
+      await grantFixtureToE2eUser(destinationDir.resourceId)
+      const launched = await launchAndLogin()
+      app = launched.app
+      const page = launched.page
       await openFilesSharedRoot(page)
       const sourceRow = gridRow(page, sourceDir.childName)
       const destinationRow = gridRow(page, destinationDir.name)
@@ -261,7 +300,7 @@ test.describe('EvenDrive drag and drop (desktop grid)', () => {
         })
       ).toBeNull()
     } finally {
-      await app.close().catch(() => undefined)
+      await app?.close().catch(() => undefined)
       cleanupGfsFixture(sourceName)
       cleanupGfsFixture(destinationName)
       assertGfsFixtureCleaned(sourceName)

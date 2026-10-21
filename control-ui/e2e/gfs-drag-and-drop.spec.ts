@@ -14,12 +14,11 @@
 // cannot synthesize the custom `application/x-evenfire-gfs-resource` payload
 // the browser sets on the draggable rows, while mouse.down/move/up over a
 // draggable=true element makes Chromium run the real HTML5 DnD sequence.
-import { type APIRequestContext, type Locator, type Page, expect, test } from '@playwright/test'
+import { type Locator, type Page, expect, test } from '@playwright/test'
 import {
   CONTROL_API_URL,
   CONTROL_UI_URL,
   adminCredentials,
-  api,
   assertAllowedTarget,
   createSecureTempFile,
   loginThroughUi,
@@ -70,43 +69,129 @@ function toast(page: Page, text: string): Locator {
 }
 
 /**
- * Best-effort recursive cleanup: walk the drive from its root and delete
- * every fixture resource with a matching exact name, children before
- * parents. Journeys only move fixtures between self-created folders, so a
- * moved fixture always remains inside the fixture subtree the sweep covers.
+ * Call the Control API operator plane FROM THE PAGE, so the admin session
+ * cookie is always attached.
+ *
+ * `page.request` is not used here on purpose: Playwright's request context
+ * only exempts `localhost` from the secure-cookie-over-http filter, so a
+ * `http://127.0.0.1:<port>` CONTROL_UI_URL makes every `page.request` call
+ * unauthenticated (401) while the browser session itself is live. A cleanup
+ * that silently 401s leaves the shared drive dirty and still reports the
+ * journey as green. Fetching from inside the page uses the browser's own
+ * cookie jar, so the cleanup behaves the same for every host spelling.
  */
-async function cleanupGfsDragDropFixtures(
-  request: APIRequestContext,
-  names: ReadonlySet<string>
-): Promise<void> {
-  try {
-    const tree = await api<{ items?: GfsChild[]; rootResourceId?: string }>(
-      request,
+async function adminFetch(
+  page: Page,
+  method: string,
+  pathName: string,
+  body?: unknown
+): Promise<{ status: number; data: Record<string, unknown> }> {
+  return page.evaluate(
+    async ([requestMethod, requestPath, requestBody]) => {
+      const response = await fetch(requestPath, {
+        method: requestMethod,
+        headers: requestBody ? { 'content-type': 'application/json' } : {},
+        body: requestBody ? JSON.stringify(requestBody) : undefined,
+        credentials: 'same-origin',
+      })
+      const text = await response.text()
+      let data: Record<string, unknown> = {}
+      try {
+        data = text ? (JSON.parse(text) as Record<string, unknown>) : {}
+      } catch {
+        data = { raw: text }
+      }
+      return { status: response.status, data }
+    },
+    [method, pathName, body ?? null] as const
+  )
+}
+
+/** Every child of a folder, following the listing cursor to the end. */
+async function listChildren(page: Page, parentResourceId: string): Promise<GfsChild[]> {
+  const items: GfsChild[] = []
+  let cursor: string | null = null
+  do {
+    const query = cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''
+    const response = await adminFetch(
+      page,
       'GET',
-      '/api/v1/gfs/tree?drive=main'
+      `/control-api/api/v1/gfs/resources/${encodeURIComponent(parentResourceId)}/children?drive=main${query}`
     )
-    const rootResourceId = tree.data.rootResourceId
-    if (!rootResourceId) return
+    if (response.status !== 200) {
+      throw new Error(`children listing failed with HTTP ${response.status}`)
+    }
+    const payload = response.data as { items?: GfsChild[]; nextCursor?: string | null }
+    items.push(...(payload.items ?? []))
+    cursor = payload.nextCursor ?? null
+  } while (cursor)
+  return items
+}
+
+/**
+ * Recursive cleanup: walk the drive from its root and delete every fixture
+ * resource with a matching exact name, children before parents. Journeys only
+ * move fixtures between self-created folders, so a moved fixture always
+ * remains inside the fixture subtree the sweep covers.
+ *
+ * The cleanup PROVES itself: every fixture name must be gone when the sweep
+ * finishes. A leftover fixture fails the journey loudly instead of silently
+ * dirtying the shared drive.
+ */
+async function cleanupGfsDragDropFixtures(page: Page, names: ReadonlySet<string>): Promise<void> {
+  const failures: string[] = []
+  try {
+    const tree = await adminFetch(page, 'GET', '/control-api/api/v1/gfs/tree?drive=main')
+    if (tree.status !== 200) {
+      throw new Error(`drive tree failed with HTTP ${tree.status}`)
+    }
+    const rootResourceId = (tree.data as { rootResourceId?: string }).rootResourceId
+    if (!rootResourceId) throw new Error('the drive root id did not resolve')
     async function sweep(parentResourceId: string): Promise<void> {
-      const children = await api<{ items?: GfsChild[] }>(
-        request,
-        'GET',
-        `/api/v1/gfs/resources/${encodeURIComponent(parentResourceId)}/children?drive=main`
-      )
-      for (const child of children.data.items ?? []) {
+      for (const child of await listChildren(page, parentResourceId)) {
         if (!names.has(child.name)) continue
         if (child.kind === 'directory') await sweep(child.resourceId)
-        await api(
-          request,
+        const deleted = await adminFetch(
+          page,
           'DELETE',
-          `/api/v1/gfs/proxy/v1/resources/${encodeURIComponent(child.rid)}`,
+          `/control-api/api/v1/gfs/proxy/v1/resources/${encodeURIComponent(child.rid)}`,
           { ifMatch: child.version }
         )
+        if (deleted.status >= 300) {
+          failures.push(`delete ${child.name} failed with HTTP ${deleted.status}`)
+        }
       }
     }
     await sweep(rootResourceId)
-  } catch {
-    // Best-effort: EvenDrive is global, so leftover fixtures are the only concern.
+  } catch (caught) {
+    failures.push(`sweep failed: ${caught instanceof Error ? caught.message : String(caught)}`)
+  }
+
+  // Prove the cleanup: no fixture name may survive anywhere under the root.
+  const survivors: string[] = []
+  try {
+    const tree = await adminFetch(page, 'GET', '/control-api/api/v1/gfs/tree?drive=main')
+    const rootResourceId = (tree.data as { rootResourceId?: string }).rootResourceId
+    if (!rootResourceId) throw new Error('the drive root id did not resolve for the check')
+    const walk = async (parentResourceId: string, depth: number): Promise<void> => {
+      if (depth > 6) return
+      for (const child of await listChildren(page, parentResourceId)) {
+        if (names.has(child.name)) survivors.push(child.name)
+        if (child.kind === 'directory') await walk(child.resourceId, depth + 1)
+      }
+    }
+    await walk(rootResourceId, 0)
+  } catch (caught) {
+    failures.push(
+      `cleanup verification failed: ${caught instanceof Error ? caught.message : String(caught)}`
+    )
+  }
+
+  if (survivors.length > 0) {
+    failures.push(`fixtures still present after cleanup: ${survivors.join(', ')}`)
+  }
+  if (failures.length > 0) {
+    throw new Error(`[gfs-dnd] fixture cleanup incomplete — ${failures.join(' | ')}`)
   }
 }
 
@@ -225,7 +310,7 @@ test.describe('EvenDrive drag and drop', () => {
       await screenshotAndLog(page, testInfo, 'gfs-dnd-file-move')
     } finally {
       await tempFile?.cleanup().catch(() => {})
-      await cleanupGfsDragDropFixtures(page.request, new Set([parentName, folderName, fileName]))
+      await cleanupGfsDragDropFixtures(page, new Set([parentName, folderName, fileName]))
     }
   })
 
@@ -271,10 +356,7 @@ test.describe('EvenDrive drag and drop', () => {
       await expect(resourceRow(page, sourceName)).toBeVisible()
       await screenshotAndLog(page, testInfo, 'gfs-dnd-folder-cancel')
     } finally {
-      await cleanupGfsDragDropFixtures(
-        page.request,
-        new Set([parentName, sourceName, destinationName])
-      )
+      await cleanupGfsDragDropFixtures(page, new Set([parentName, sourceName, destinationName]))
     }
   })
 
@@ -312,10 +394,7 @@ test.describe('EvenDrive drag and drop', () => {
       await expect(resourceRow(page, sourceName)).toHaveCount(0)
       await screenshotAndLog(page, testInfo, 'gfs-dnd-folder-commit')
     } finally {
-      await cleanupGfsDragDropFixtures(
-        page.request,
-        new Set([parentName, sourceName, destinationName])
-      )
+      await cleanupGfsDragDropFixtures(page, new Set([parentName, sourceName, destinationName]))
     }
   })
 
@@ -387,7 +466,7 @@ test.describe('EvenDrive drag and drop', () => {
       await expect(dialog).toBeHidden({ timeout: 20_000 })
     } finally {
       await cleanupGfsDragDropFixtures(
-        page.request,
+        page,
         new Set([outerName, folderAName, childOfAName, siblingName])
       )
     }
@@ -442,7 +521,7 @@ test.describe('EvenDrive drag and drop', () => {
       await expect(resourceRow(page, fileName)).toBeVisible({ timeout: 20_000 })
       await screenshotAndLog(page, testInfo, 'gfs-dnd-os-drop-upload')
     } finally {
-      await cleanupGfsDragDropFixtures(page.request, new Set([parentName, fileName]))
+      await cleanupGfsDragDropFixtures(page, new Set([parentName, fileName]))
     }
   })
 
@@ -479,7 +558,7 @@ test.describe('EvenDrive drag and drop', () => {
       await expect(resourceRow(page, `${sourceName} (1)`)).toBeVisible({ timeout: 20_000 })
     } finally {
       await cleanupGfsDragDropFixtures(
-        page.request,
+        page,
         new Set([parentName, sourceName, `${sourceName} (1)`, destinationName])
       )
     }
@@ -523,10 +602,7 @@ test.describe('EvenDrive drag and drop', () => {
       // The source folder did not move.
       await expect(resourceRow(page, sourceName)).toBeVisible({ timeout: 20_000 })
     } finally {
-      await cleanupGfsDragDropFixtures(
-        page.request,
-        new Set([parentName, sourceName, destinationName])
-      )
+      await cleanupGfsDragDropFixtures(page, new Set([parentName, sourceName, destinationName]))
     }
   })
 })
