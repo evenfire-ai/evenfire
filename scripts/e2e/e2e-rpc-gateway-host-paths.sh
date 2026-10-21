@@ -18,17 +18,21 @@
 #
 # Required environment:
 #   KUBECONTEXT (or E2E_K8S_CONTEXT)  explicit branch-profile context
-#   E2E_PROFILE_PORTS_ENV             ports.env of that branch profile; the
-#                                     External REST and rpc-proxy URLs come
-#                                     from it, never from fixed ports
+#   E2E_PROFILE_PORTS_ENV             <profile root>/<profile>/ports.env of
+#                                     that same profile (T2 exports it as
+#                                     T2_PORTS_ENV); the External REST and
+#                                     rpc-proxy URLs come from it, never from
+#                                     fixed ports
 #   E2E_DEV_LOGIN_EMAIL               seeded Desktop login for the Host owner
 #   E2E_USER_PASSWORD or ADMIN_PASSWORD
 # Optional:
 #   E2E_GATEWAY_HOST_REF (default chatllm)
 #   E2E_TURN_TIMEOUT (default 120), J4_DEADLINE_SECONDS (default 300)
 #
-# J4_DEADLINE_SECONDS bounds the whole run: every curl and kubectl call gets
-# at most the remaining budget, and the run fails when the budget is spent.
+# J4_DEADLINE_SECONDS is the run budget: no request, kubectl call or retry
+# sleep starts once it is spent, each gets at most the remaining budget, and
+# the run fails when it expires. A timed-out kubectl call can take up to the
+# 2 s kill grace of run-with-deadline.mjs to terminate.
 # ======================================================================
 set -euo pipefail
 
@@ -43,6 +47,15 @@ fi
 require_safe_kube_context
 if [ -z "${E2E_PROFILE_PORTS_ENV:-}" ] || [ ! -r "$E2E_PROFILE_PORTS_ENV" ]; then
   echo "J4 requires E2E_PROFILE_PORTS_ENV pointing at the branch profile ports.env" >&2
+  exit 2
+fi
+# A profile keeps its ports map at <profile root>/<profile>/ports.env
+# (scripts/minikube-profiles/branch-profile.sh set_profile_paths), and the
+# Minikube context is named after the profile. A ports file from another
+# profile would send the login and the message to that profile's services.
+ports_profile="$(basename "$(cd "$(dirname "$E2E_PROFILE_PORTS_ENV")" && pwd -P)")"
+if [ "$ports_profile" != "$E2E_KUBECONTEXT" ]; then
+  echo "J4 refuses to run: ${E2E_PROFILE_PORTS_ENV} belongs to profile ${ports_profile}, not ${E2E_KUBECONTEXT}" >&2
   exit 2
 fi
 profile_port_value() {
@@ -71,6 +84,14 @@ GATEWAY_NS=control-plane
 GATEWAY_SELECTOR=app=control-api-rpc-gateway
 E2E_TURN_TIMEOUT="${E2E_TURN_TIMEOUT:-120}"
 J4_DEADLINE_SECONDS="${J4_DEADLINE_SECONDS:-300}"
+# The budget arithmetic is integer-only; a fractional value would make the
+# comparisons error out and skip the cap.
+for setting in E2E_TURN_TIMEOUT J4_DEADLINE_SECONDS; do
+  if ! [[ "${!setting}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "J4 requires ${setting} to be a positive integer number of seconds, got '${!setting}'" >&2
+    exit 2
+  fi
+done
 RUN_ID="$(date +%s)-$$-${RANDOM}"
 MARKER="j4-gateway-${RUN_ID}"
 THREAD_ID="e2e-rpc-gateway-host-paths-${RUN_ID}"
@@ -216,7 +237,11 @@ while :; do
   # Only the documented retryable wake signal is retried, with a bounded budget.
   if [ "$HTTP_STATUS" = "503" ] && grep -q 'host_waking' <<<"$HTTP_BODY" && [ "$attempts" -lt 5 ]; then
     warn "message got retryable 503 host_waking (attempt ${attempts}/5)"
-    sleep 5
+    # A spent budget skips the sleep; the next within_deadline fails the run.
+    pause="$(call_budget 5)"
+    if [ "$pause" -gt 0 ]; then
+      sleep "$pause"
+    fi
     continue
   fi
   message_sent=true

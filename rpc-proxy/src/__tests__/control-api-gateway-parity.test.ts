@@ -45,14 +45,16 @@ const RPC_CLAIMS = {
   exp: 9999999999,
 }
 
-// Every source file that builds a control-api URL, with the number of URL
-// construction sites it contains. A new site means a new request shape: add
-// its emitter to emittedRequests() and update this inventory.
-const CONTROL_API_URL_SITES: Record<string, number> = {
+// Every source file outside config.ts that mentions controlApiBaseUrl, with
+// the number of mentions. The two services count their local
+// controlApiBaseUrl() helper's definition and body; every other mention is a
+// URL construction site. Any new use of the base URL, in any form, changes a
+// count: add its emitter to emittedRequests() and update this inventory.
+const CONTROL_API_BASE_URL_MENTIONS: Record<string, number> = {
   'routes/mcpOauth.ts': 2,
   'routes/sandboxUi.ts': 3,
-  'services/controlApiRestService.ts': 4,
-  'services/sandboxUiRegistry.ts': 2,
+  'services/controlApiRestService.ts': 6,
+  'services/sandboxUiRegistry.ts': 4,
 }
 
 function productionSources(): Array<{ rel: string; source: string }> {
@@ -74,22 +76,14 @@ function productionSources(): Array<{ rel: string; source: string }> {
   return files
 }
 
-function controlApiUrlSites(): Record<string, number> {
-  const sites: Record<string, number> = {}
+function controlApiBaseUrlMentions(): Record<string, number> {
+  const mentions: Record<string, number> = {}
   for (const { rel, source } of productionSources()) {
-    const count = (
-      source.match(/\$\{(?:config\.)?controlApiBaseUrl(?:\(\)|\.replace\([^}]*\))\}/g) ?? []
-    ).length
-    if (count > 0) sites[rel] = count
+    if (rel === 'config.ts') continue
+    const count = source.split('controlApiBaseUrl').length - 1
+    if (count > 0) mentions[rel] = count
   }
-  return sites
-}
-
-function filesReadingControlApiBaseUrl(): string[] {
-  return productionSources()
-    .filter(({ rel, source }) => rel !== 'config.ts' && source.includes('controlApiBaseUrl'))
-    .map(({ rel }) => rel)
-    .sort()
+  return mentions
 }
 
 interface GatewayLocation {
@@ -281,11 +275,7 @@ describe('control-api-rpc-gateway parity with the rpc-proxy emitter', () => {
   })
 
   it('exercises every control-api URL construction site in rpc-proxy', () => {
-    expect(controlApiUrlSites()).toEqual(CONTROL_API_URL_SITES)
-    // A URL built another way (new URL(path, base), a helper in a new file)
-    // escapes the site count, so every file that reads the base URL must be
-    // listed in the inventory.
-    expect(filesReadingControlApiBaseUrl()).toEqual(Object.keys(CONTROL_API_URL_SITES).sort())
+    expect(controlApiBaseUrlMentions()).toEqual(CONTROL_API_BASE_URL_MENTIONS)
   })
 
   it('keeps the default deny for paths and methods rpc-proxy does not emit', () => {
