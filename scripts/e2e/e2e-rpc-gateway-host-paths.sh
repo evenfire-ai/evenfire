@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+# ======================================================================
+# J4 — rpc-proxy Host sub-paths through control-api-rpc-gateway
+# ======================================================================
+# A user message and an artifact list go through rpc-proxy, which resolves
+# the Host through control-api-rpc-gateway:
+#   POST /api/v1/rpc/access/users/:userId/mcp-hosts/:hostRef/message-resolution
+#   GET  /api/v1/rpc/access/users/:userId/mcp-hosts/:hostRef/artifact-read
+# The gateway ends in a default `return 403`, so a missing location turns
+# both journeys into an opaque denial. Signals per journey:
+#   1. rpc-proxy answers HTTP 200;
+#   2. the gateway access log has the sub-path with status 200 and no 403;
+#   3. for the message, the user turn is persisted in the Host's state.db.
+#
+# Meant as a T2 healthcheck:
+#   T2_HEALTHCHECK_COMMAND="KUBECONTEXT=<profile> bash scripts/e2e/e2e-rpc-gateway-host-paths.sh"
+#
+# Required environment:
+#   KUBECONTEXT (or E2E_K8S_CONTEXT)  explicit branch-profile context
+#   E2E_DEV_LOGIN_EMAIL               seeded Desktop login for the Host owner
+#   E2E_USER_PASSWORD or ADMIN_PASSWORD
+# Optional:
+#   E2E_GATEWAY_HOST_REF (default chatllm)
+#   EXTERNAL_REST_API_BASE_URL (default http://127.0.0.1:8091)
+#   RPC_PROXY_BASE_URL (default http://127.0.0.1:8094)
+#   E2E_TURN_TIMEOUT (default 120), J4_DEADLINE_SECONDS (default 300)
+# ======================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/e2e-lib.sh"
+
+if [ -z "${E2E_KUBECONTEXT:-}" ]; then
+  echo "J4 requires an explicit KUBECONTEXT (or E2E_K8S_CONTEXT); the global current-context is never used" >&2
+  exit 2
+fi
+require_safe_kube_context
+: "${E2E_DEV_LOGIN_EMAIL:?J4 requires E2E_DEV_LOGIN_EMAIL (the seeded Desktop login)}"
+DEV_PASSWORD="${E2E_USER_PASSWORD:-${ADMIN_PASSWORD:-}}"
+if [ -z "$DEV_PASSWORD" ]; then
+  echo "J4 requires E2E_USER_PASSWORD or ADMIN_PASSWORD" >&2
+  exit 2
+fi
+
+HOST_REF="${E2E_GATEWAY_HOST_REF:-chatllm}"
+EXT_BASE="${EXTERNAL_REST_API_BASE_URL:-http://127.0.0.1:8091}"
+RPC_BASE="${RPC_PROXY_BASE_URL:-http://127.0.0.1:8094}"
+GATEWAY_NS=control-plane
+GATEWAY_SELECTOR=app=control-api-rpc-gateway
+E2E_TURN_TIMEOUT="${E2E_TURN_TIMEOUT:-120}"
+J4_DEADLINE_SECONDS="${J4_DEADLINE_SECONDS:-300}"
+RUN_ID="$(date +%s)-$$-${RANDOM}"
+MARKER="j4-gateway-${RUN_ID}"
+THREAD_ID="e2e-rpc-gateway-host-paths-${RUN_ID}"
+STARTED_SECONDS=$SECONDS
+
+within_deadline() {
+  if [ $((SECONDS - STARTED_SECONDS)) -ge "$J4_DEADLINE_SECONDS" ]; then
+    fail "J4 deadline of ${J4_DEADLINE_SECONDS}s expired before: $1"
+    print_results || true
+    exit 1
+  fi
+}
+
+http_call() {
+  # http_call <label> <curl args...> → HTTP_STATUS / HTTP_BODY
+  local label=$1 resp
+  shift
+  if ! resp=$(curl -sS -w '\n%{http_code}' "$@"); then
+    echo "${label}: curl error" >&2
+    return 1
+  fi
+  HTTP_STATUS="$(printf '%s\n' "$resp" | tail -n1)"
+  HTTP_BODY="$(printf '%s\n' "$resp" | sed '$d')"
+}
+
+header "Prerequisites"
+for bin in jq curl; do
+  command -v "$bin" >/dev/null 2>&1 || { fail "missing required binary: $bin"; print_results || true; exit 1; }
+done
+for base in "$EXT_BASE" "$RPC_BASE"; do
+  code="$(curl -sS -o /dev/null -w '%{http_code}' -m 10 "${base}/health" || true)"
+  if [ "$code" = "200" ]; then
+    ok "${base}/health → 200"
+  else
+    fail "${base}/health → ${code:-000} (port-forward down or service unhealthy)"
+    print_results || true
+    exit 1
+  fi
+done
+gateway_pods="$(kctl -n "$GATEWAY_NS" get pods -l "$GATEWAY_SELECTOR" \
+  --field-selector=status.phase=Running -o name)"
+if [ -n "$gateway_pods" ]; then
+  ok "control-api-rpc-gateway pods running: $(printf '%s' "$gateway_pods" | tr '\n' ' ')"
+else
+  fail "no Running control-api-rpc-gateway pod in ${GATEWAY_NS}"
+  kctl -n "$GATEWAY_NS" get pods -l "$GATEWAY_SELECTOR" -o wide >&2 || true
+  print_results || true
+  exit 1
+fi
+
+header "Tokens"
+http_call password-login -m 30 -X POST "${EXT_BASE}/api/v1/auth/password-login" \
+  -H 'Content-Type: application/json' \
+  -d "$(jq -cn --arg e "$E2E_DEV_LOGIN_EMAIL" --arg p "$DEV_PASSWORD" '{email: $e, password: $p}')"
+SESSION_TOKEN="$(printf '%s' "$HTTP_BODY" | jq -r '.token // empty' 2>/dev/null || true)"
+if [ "$HTTP_STATUS" = "200" ] && [ -n "$SESSION_TOKEN" ]; then
+  ok "session token minted for ${E2E_DEV_LOGIN_EMAIL}"
+else
+  fail "password-login → HTTP ${HTTP_STATUS} (no session token)"
+  print_results || true
+  exit 1
+fi
+
+mint_rpc_token() {
+  http_call rpc/token -m 30 -X POST "${EXT_BASE}/api/v1/rpc/token" \
+    -H "Authorization: Bearer ${SESSION_TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -cn --arg h "$HOST_REF" '{hostRefs: [$h], scopes: ["host:message:invoke", "host:task:read"]}')"
+  RPC_TOKEN="$(printf '%s' "$HTTP_BODY" | jq -r '.token // empty' 2>/dev/null || true)"
+  [ "$HTTP_STATUS" = "200" ] && [ -n "$RPC_TOKEN" ]
+}
+if mint_rpc_token; then
+  ok "RPC token minted for hostRef=${HOST_REF}"
+else
+  fail "rpc/token → HTTP ${HTTP_STATUS}: ${HTTP_BODY}"
+  print_results || true
+  exit 1
+fi
+
+# The gateway log window starts here, before the first journey request.
+LOG_SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+header "Journey: message through message-resolution"
+attempts=0
+while :; do
+  within_deadline "message send"
+  attempts=$((attempts + 1))
+  mint_rpc_token || { fail "rpc/token re-mint → HTTP ${HTTP_STATUS}"; break; }
+  http_call message -m "$E2E_TURN_TIMEOUT" -X POST "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/messages" \
+    -H "Authorization: Bearer ${RPC_TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -cn --arg c "J4 gateway check ${MARKER}. Reply with OK." --arg t "$THREAD_ID" '{content: $c, threadId: $t}')"
+  # Only the documented retryable wake signal is retried, with a bounded budget.
+  if [ "$HTTP_STATUS" = "503" ] && printf '%s' "$HTTP_BODY" | grep -q 'host_waking' && [ "$attempts" -lt 5 ]; then
+    warn "message got retryable 503 host_waking (attempt ${attempts}/5)"
+    sleep 5
+    continue
+  fi
+  break
+done
+if [ "$HTTP_STATUS" = "200" ] && printf '%s' "$HTTP_BODY" | jq -e '.success == true' >/dev/null 2>&1; then
+  ok "POST /rpc/hosts/${HOST_REF}/messages → 200 success=true"
+else
+  fail "POST /rpc/hosts/${HOST_REF}/messages → HTTP ${HTTP_STATUS}: ${HTTP_BODY}"
+fi
+
+header "Journey: artifact list through artifact-read"
+within_deadline "artifact read"
+mint_rpc_token || fail "rpc/token re-mint → HTTP ${HTTP_STATUS}"
+http_call artifacts -m 30 "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/artifacts" \
+  -H "Authorization: Bearer ${RPC_TOKEN}"
+if [ "$HTTP_STATUS" = "200" ]; then
+  ok "GET /rpc/hosts/${HOST_REF}/artifacts → 200"
+else
+  fail "GET /rpc/hosts/${HOST_REF}/artifacts → HTTP ${HTTP_STATUS}: ${HTTP_BODY}"
+fi
+
+header "Gateway access log"
+within_deadline "gateway log read"
+gateway_log="$(kctl -n "$GATEWAY_NS" logs -l "$GATEWAY_SELECTOR" --since-time="$LOG_SINCE" \
+  --tail=-1 --max-log-requests=10)" || { fail "cannot read control-api-rpc-gateway logs"; gateway_log=""; }
+check_gateway_line() {
+  local method=$1 suffix=$2 pattern
+  pattern="\"${method} /api/v1/rpc/access/users/[^/ ]+/mcp-hosts/${HOST_REF}/${suffix} HTTP/[0-9.]+\" "
+  if printf '%s\n' "$gateway_log" | grep -Eq "${pattern}200 "; then
+    ok "gateway logged ${method} .../${suffix} → 200"
+  else
+    fail "gateway has no ${method} .../${suffix} line with 200 since ${LOG_SINCE}"
+  fi
+  if printf '%s\n' "$gateway_log" | grep -Eq "${pattern}403 "; then
+    fail "gateway denied ${method} .../${suffix} with 403 (missing or wrong location)"
+  else
+    ok "gateway logged no 403 for ${method} .../${suffix}"
+  fi
+}
+check_gateway_line POST message-resolution
+check_gateway_line GET artifact-read
+
+header "Persisted user turn"
+within_deadline "state.db read"
+pod="$(ready_pod_name "$MCP_HOST_NS" "app=${HOST_REF}" || true)"
+if [ -z "$pod" ]; then
+  fail "no Ready pod for app=${HOST_REF} in ${MCP_HOST_NS}"
+else
+  db_dir="$(kctl exec "$pod" -n "$MCP_HOST_NS" -- printenv CLERUM_SESSION_DB_DIR 2>/dev/null || true)"
+  if [ -z "$db_dir" ]; then
+    fail "pod ${pod} has no CLERUM_SESSION_DB_DIR"
+  else
+    db_path="${db_dir%/}/state.db"
+    sql="SELECT COUNT(*) FROM messages WHERE role='user' AND (content LIKE '%${MARKER}%' OR content_parts LIKE '%${MARKER}%')"
+    if kctl exec "$pod" -n "$MCP_HOST_NS" -- sh -c 'command -v sqlite3' >/dev/null 2>&1; then
+      count="$(kctl exec "$pod" -n "$MCP_HOST_NS" -- sqlite3 -readonly "$db_path" "$sql" || true)"
+    else
+      count="$(kctl exec "$pod" -n "$MCP_HOST_NS" -- env "DB=${db_path}" "SQL=${sql}" node -e \
+        'const D=require("/app/node_modules/better-sqlite3");const db=new D(process.env.DB,{readonly:true});db.pragma("busy_timeout=5000");const row=db.prepare(process.env.SQL).get();console.log(row?Object.values(row)[0]:0);' || true)"
+    fi
+    count="$(printf '%s' "$count" | tr -d '[:space:]')"
+    if [ "$count" = "1" ]; then
+      ok "user turn ${MARKER} persisted once in ${db_path}"
+    else
+      fail "expected 1 persisted user turn with ${MARKER} in ${db_path}, found '${count}'"
+    fi
+  fi
+fi
+
+print_results
