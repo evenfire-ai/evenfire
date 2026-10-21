@@ -414,6 +414,29 @@ describe('mountSandboxUiView lifecycle cleanup', () => {
     })
   })
 
+  it('reports a view released only once it is detached and its webContents closed', async () => {
+    const parentWindow = new FakeParentWindow()
+    const seenAtRelease: Array<{ detached: boolean; closed: boolean }> = []
+    await mountSandboxUiView(
+      mountArgs({
+        parentWindow,
+        onReleased: () => {
+          const view = electronMocks.views[0]!
+          seenAtRelease.push({
+            detached: parentWindow.contentView.removeChildView.mock.calls.some(
+              ([removed]) => removed === view
+            ),
+            closed: view.webContents.isDestroyed(),
+          })
+        },
+      })
+    )
+
+    await unmountSandboxUiView()
+
+    expect(seenAtRelease).toEqual([{ detached: true, closed: true }])
+  })
+
   it('keeps only the newest view when cookie writes complete out of order', async () => {
     const parentWindow = new FakeParentWindow()
     let resolveFirstCookie!: () => void
