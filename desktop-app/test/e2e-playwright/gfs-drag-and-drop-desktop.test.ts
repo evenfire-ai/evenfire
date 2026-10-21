@@ -40,6 +40,7 @@ import {
   seedGfsGrant,
   uniqueGfsFixtureName,
 } from '../../../tests/e2e/gfsUiFixtures'
+import { withTransportRetry } from './gfsTransportRetry'
 import { launchAndLogin } from './workflowUi'
 
 function gridRow(page: Page, name: string): Locator {
@@ -48,25 +49,6 @@ function gridRow(page: Page, name: string): Locator {
 
 function toast(page: Page, text: string): Locator {
   return page.locator('[role="status"], [role="alert"]').filter({ hasText: text })
-}
-
-/**
- * A dropped `kubectl exec` stream is transport noise, not a verdict: the
- * shared harness opens one exec session per call and the stream can end
- * early. One bounded retry keeps the journey setup deterministic; a second
- * failure propagates.
- */
-async function withTransportRetry<T>(what: string, action: () => T): Promise<T> {
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      return action()
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : String(caught)
-      const transportNoise = /\bEOF\b|socket hang up|connection reset|stream closed/i.test(message)
-      if (attempt >= 2 || !transportNoise) throw caught
-      await new Promise(resolve => setTimeout(resolve, 1_500))
-    }
-  }
 }
 
 /**
@@ -96,6 +78,20 @@ async function seedFixtureDirectory(name: string) {
 /** Seed a fixture file (and its folder) with one bounded transport retry. */
 async function seedFixtureFile(name: string) {
   return withTransportRetry('seedGfsFileFixture', () => seedGfsFileFixture(name))
+}
+
+/**
+ * Remove a fixture and prove it is gone, with one bounded transport retry.
+ *
+ * The cleanup is part of the lane's contract, and the shared harness reaches
+ * the cluster through one `kubectl exec` per call — a dropped stream there
+ * aborts the cleanup BEFORE it writes the tombstone, which leaves the seeded
+ * rows live. A retry is the difference between a transport hiccup and a
+ * dirty shared drive; a second failure still fails the journey.
+ */
+async function removeFixture(name: string): Promise<void> {
+  await withTransportRetry('cleanupGfsFixture', () => cleanupGfsFixture(name))
+  await withTransportRetry('assertGfsFixtureCleaned', () => assertGfsFixtureCleaned(name))
 }
 
 /**
@@ -217,8 +213,7 @@ test.describe('EvenDrive drag and drop (desktop grid)', () => {
       await expect(fileRow).toBeHidden({ timeout: 30_000 })
     } finally {
       await app?.close().catch(() => undefined)
-      cleanupGfsFixture(fixtureName)
-      assertGfsFixtureCleaned(fixtureName)
+      await removeFixture(fixtureName)
     }
   })
 
@@ -301,10 +296,8 @@ test.describe('EvenDrive drag and drop (desktop grid)', () => {
       ).toBeNull()
     } finally {
       await app?.close().catch(() => undefined)
-      cleanupGfsFixture(sourceName)
-      cleanupGfsFixture(destinationName)
-      assertGfsFixtureCleaned(sourceName)
-      assertGfsFixtureCleaned(destinationName)
+      await removeFixture(sourceName)
+      await removeFixture(destinationName)
     }
   })
 })
