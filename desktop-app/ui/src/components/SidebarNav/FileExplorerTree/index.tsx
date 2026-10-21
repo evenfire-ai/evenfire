@@ -21,6 +21,7 @@ import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
 import { ownsGfsDrop } from '@/gfs/dragOwnership'
 import type { GfsDragSource } from '@/gfs/dragSession'
 import { useGfsDragSession } from '@/gfs/dragSession'
+import { gfsDropVerdictAnnouncement } from '@/gfs/dropVerdict'
 import { moveDenialMessage, suggestNumberedMoveName } from '@/gfs/moveCommit'
 import { runGfsMoveCommit } from '@/gfs/moveCommitRunner'
 import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
@@ -451,6 +452,10 @@ export function FileExplorerTree({
   const [dropStatesByResourceId, setDropStatesByResourceId] = useState<
     Record<string, FileExplorerDropState>
   >({})
+  // The drop verdict is painted on the target row, which assistive technology
+  // never announces. The spoken form lives here so the verdict reaches a
+  // screen reader as well (RP-026).
+  const [dropVerdictAnnouncement, setDropVerdictAnnouncement] = useState('')
   const [movingResourceId, setMovingResourceId] = useState<string | null>(null)
   const movingResourceIdRef = useRef<string | null>(null)
   const draggingSourceRef = useRef<GfsDragSource | null>(null)
@@ -549,6 +554,7 @@ export function FileExplorerTree({
     dragSession?.endDrag()
     adjudication.endDragSession()
     setDropStatesByResourceId({})
+    setDropVerdictAnnouncement('')
   }, [adjudication, dragSession])
 
   /** Release only the source and hover work owned by the admitted gesture. */
@@ -660,6 +666,7 @@ export function FileExplorerTree({
           ? previous
           : { ...previous, [node.resourceId]: verdict.state }
       )
+      setDropVerdictAnnouncement(gfsDropVerdictAnnouncement(verdict.state, node.name))
       // 'checking' must keep the drop LANDABLE (rev-2 §4.1): dropEffect 'none'
       // makes Chromium cancel the drag at release, so the drop-time priority
       // adjudication could never run and unresolved authority checks silently
@@ -682,6 +689,7 @@ export function FileExplorerTree({
                 ? previous
                 : { ...previous, [node.resourceId]: fresh.state }
             )
+            setDropVerdictAnnouncement(gfsDropVerdictAnnouncement(fresh.state, node.name))
           }
         )
       }
@@ -700,6 +708,7 @@ export function FileExplorerTree({
         delete next[node.resourceId]
         return next
       })
+      setDropVerdictAnnouncement('')
     },
     []
   )
@@ -748,6 +757,7 @@ export function FileExplorerTree({
       event.preventDefault()
       event.stopPropagation()
       setDropStatesByResourceId({})
+      setDropVerdictAnnouncement('')
       const source = resolveActiveSource()
       if (!source || node.kind !== 'directory' || movingResourceIdRef.current) return
       const epoch = dragSessionEpochRef.current
@@ -873,6 +883,12 @@ export function FileExplorerTree({
 
   return (
     <div className="da-file-explorer">
+      {/* The drop verdict is painted on the target row; this live region is
+          its spoken form, so a screen reader learns whether the folder under
+          the pointer accepts the move (RP-026). */}
+      <p aria-live="polite" className="visually-hidden">
+        {dropVerdictAnnouncement}
+      </p>
       {ctrl.accessState === 'revoked' ? (
         // Mirror the Files page's revoked surface, adapted to the sidebar's
         // compact chrome. Without this branch a revoked drive falls through to

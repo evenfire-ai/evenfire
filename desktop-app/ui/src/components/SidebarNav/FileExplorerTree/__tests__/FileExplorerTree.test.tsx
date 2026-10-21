@@ -1442,6 +1442,50 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     expect(bRow.getAttribute('data-drop-state')).toBe('checking')
   })
 
+  it('announces the drop verdict to assistive technology (RP-026)', async () => {
+    // The verdict is painted on the target row (a tint and a data attribute),
+    // which a screen reader never announces. The live region states it.
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folderb') return { held: ['read', 'write'] }
+      return { held: ['read', 'write', 'delete'] }
+    })
+    const resolve = vi.fn(async (uri: string) => {
+      const id = uri.split('/').pop()
+      return {
+        drive: 'main',
+        resourceId: id === 'grand' ? 'grand' : id,
+        parentResourceId: id === 'grand' ? null : 'grand',
+        name: id === 'foldera' ? 'A' : id === 'folderb' ? 'B' : 'Grand',
+        kind: 'directory',
+        version: id === 'foldera' ? 4 : 1,
+      }
+    })
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('foldera', 'A', 'directory', { version: 4 }),
+          accessibleResource('folderb', 'B', 'directory'),
+        ])
+      ),
+      affordances,
+      resolve,
+      moveResource: vi.fn(async () => ({ resourceId: 'foldera', version: 9 })),
+    })
+    renderTreeWithSession()
+
+    const rowA = await screen.findByRole('button', { name: 'A' })
+    const rowB = await screen.findByRole('button', { name: 'B' })
+    const dataTransfer = dragTypes()
+    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+
+    fireEvent.dragStart(rowA, { dataTransfer })
+    fireEvent.dragOver(bRow, { dataTransfer })
+
+    // The verdict is spoken, not only painted — synchronously with the hover,
+    // before any probe resolves.
+    expect(screen.getByText(/Checking whether you can move into B/)).toBeTruthy()
+  })
+
   it('cancels the hover-expand timer when the drop lands on the row (RP-024)', async () => {
     // The browser does not necessarily fire a dragleave after a drop, so the
     // row's own hover-expand timer survived the drop: the folder expanded

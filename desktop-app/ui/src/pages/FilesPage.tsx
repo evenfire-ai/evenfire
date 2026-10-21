@@ -68,6 +68,7 @@ import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
 import { ownsGfsDrop } from '@/gfs/dragOwnership'
 import type { GfsDragSource, GfsDropVerdict } from '@/gfs/dragSession'
 import { useGfsDragSession } from '@/gfs/dragSession'
+import { gfsDropVerdictAnnouncement } from '@/gfs/dropVerdict'
 import { GfsFilePicker } from '@/gfs/filePicker'
 import { moveDenialMessage, suggestNumberedMoveName } from '@/gfs/moveCommit'
 import type { MoveCommitOutcome } from '@/gfs/moveCommit'
@@ -344,6 +345,10 @@ export function FilesPage({
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null)
   const [movingResourceId, setMovingResourceId] = useState<string | null>(null)
   const [dropStatesById, setDropStatesById] = useState<Record<string, GfsDropVerdict['state']>>({})
+  // The drop verdict is painted on the target row; this live region is its
+  // spoken form, so a screen reader learns whether the folder under the
+  // pointer accepts the move (RP-026).
+  const [dropVerdictAnnouncement, setDropVerdictAnnouncement] = useState('')
   // Folder drops stop at ONE confirmation (impact + naming policy) before the
   // shared dispatch; files commit directly on an allowed admission.
   const [pendingFolderMove, setPendingFolderMove] = useState<{
@@ -428,6 +433,7 @@ export function FilesPage({
     setDraggingResourceId(null)
     setDragOverFolderId(null)
     setDropStatesById({})
+    setDropVerdictAnnouncement('')
   }, [adjudication.endDragSession, liveDragScope])
 
   const ownsDrop = (source: GfsDragSource, epoch: number, sharedGeneration: number | null) =>
@@ -1265,7 +1271,11 @@ export function FilesPage({
       : null
   }
 
-  const applyHoverVerdict = (folderId: string, verdict: GfsDropVerdict): GfsDropVerdict => {
+  const applyHoverVerdict = (
+    folderId: string,
+    verdict: GfsDropVerdict,
+    folderName = ''
+  ): GfsDropVerdict => {
     if (verdict.state === 'allowed') {
       setDragOverFolderId(folderId)
     } else if (hoveredFolderRef.current === folderId) {
@@ -1274,6 +1284,7 @@ export function FilesPage({
     setDropStatesById(previous =>
       previous[folderId] === verdict.state ? previous : { ...previous, [folderId]: verdict.state }
     )
+    setDropVerdictAnnouncement(gfsDropVerdictAnnouncement(verdict.state, folderName))
     return verdict
   }
 
@@ -1327,7 +1338,11 @@ export function FilesPage({
       kind: folder.kind,
       ancestorIds: rowTargetAncestorIds(),
     } as const
-    const verdict = applyHoverVerdict(folder.resourceId, adjudication.hoverVerdict(source, target))
+    const verdict = applyHoverVerdict(
+      folder.resourceId,
+      adjudication.hoverVerdict(source, target),
+      folder.name
+    )
     // 'checking' must keep the drop LANDABLE: with dropEffect 'none' Chromium
     // cancels the drag at release, so the drop-time priority adjudication
     // (rev-2 §4.1 — "priority check on drop instead of a false deny") could
@@ -1342,7 +1357,7 @@ export function FilesPage({
           if (hoverOwnerRef.current !== source || hoveredFolderRef.current !== folder.resourceId)
             return
           const fresh = adjudication.hoverVerdict(source, target)
-          applyHoverVerdict(folder.resourceId, fresh)
+          applyHoverVerdict(folder.resourceId, fresh, folder.name)
         }
       )
     }
@@ -1355,6 +1370,7 @@ export function FilesPage({
     if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
       hoveredFolderRef.current = null
       setDragOverFolderId(null)
+      setDropVerdictAnnouncement('')
     }
   }
 
@@ -1414,6 +1430,7 @@ export function FilesPage({
     hoveredFolderRef.current = null
     setDragOverFolderId(null)
     setDropStatesById({})
+    setDropVerdictAnnouncement('')
     const source = resolveActiveSource()
     if (!source || destination.kind !== 'directory' || movingResourceRef.current) return
 
@@ -1838,6 +1855,12 @@ export function FilesPage({
 
   return (
     <section className="page da-gfs-page">
+      {/* The drop verdict is painted on the target row; this live region is
+          its spoken form, so a screen reader learns whether the folder under
+          the pointer accepts the move (RP-026). */}
+      <p aria-live="polite" className="visually-hidden">
+        {dropVerdictAnnouncement}
+      </p>
       <div className="page-header">
         <h2>Files</h2>
         <p className="muted">Browse and manage everything shared with you in one place.</p>
