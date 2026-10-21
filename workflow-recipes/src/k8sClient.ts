@@ -26,11 +26,9 @@ import { createLogger } from './observability/logger'
 import {
   TRANSPORT_NETWORK_CONDITION_TYPE,
   VERIFIED_AT_REFRESH_MS,
-  hasPendingTransportNetworkReadiness,
   recipeHasExternalExactHostEgress,
   recipeReferencesNamedSecrets,
   runtimeCredentialRefreshIntervalMs,
-  workflowNeedsInfrastructureReconcile,
   workflowNeedsRuntimeCredentialRefresh,
   workflowNeedsWorkloadStatusRefresh,
 } from './recipePredicates'
