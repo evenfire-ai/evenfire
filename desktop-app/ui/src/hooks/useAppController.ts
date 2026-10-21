@@ -363,8 +363,20 @@ export function useAppController() {
     (agentRef: string) => hostAuthority.getEpoch(agentRef),
     [hostAuthority]
   )
+  // Last name each catalog of this authority scope gave a Host, so a held Host
+  // that left the catalog is still named in its verification toast. Cleared
+  // with the holds when the scope changes.
+  const knownHostNamesRef = useRef(new Map<string, string>())
+  const lastKnownHostName = useCallback(
+    (agentRef: string) =>
+      agentsData.agentDisplayByName[agentRef] ??
+      knownHostNamesRef.current.get(agentRef) ??
+      agentRef,
+    [agentsData.agentDisplayByName]
+  )
   useEffect(() => {
     hostAuthority.reset()
+    knownHostNamesRef.current.clear()
     setHostAuthorityRevision(revision => revision + 1)
   }, [authorityScope, hostAuthority])
   const { invalidateSessionCatalog } = useChatStore()
@@ -423,7 +435,7 @@ export function useAppController() {
           status: httpErrorStatus(error) ?? null,
         })
         if (authorityScopeRef.current === scope) {
-          pushToast(`Could not verify access to ${agentDisplayName(agentRef)}.`, 'error')
+          pushToast(`Could not verify access to ${lastKnownHostName(agentRef)}.`, 'error')
         }
         return false
       }
@@ -435,7 +447,7 @@ export function useAppController() {
       setHostAuthorityRevision(revision => revision + 1)
       return true
     },
-    [agentDisplayName, hostAuthority, invalidateSessionCatalog, pushToast]
+    [hostAuthority, invalidateSessionCatalog, lastKnownHostName, pushToast]
   )
   const chat = useAgentChatController({
     selectedAgent: nav.selectedAgent,
@@ -738,6 +750,12 @@ export function useAppController() {
     const catalog = agentsData.accessCatalog
     previousAccessCatalogRef.current = catalog
     if (!auth.isAuthenticated || !catalog) return
+    for (const agentRef of catalog.agentNames) {
+      const name = catalog.agentDisplayByName?.[agentRef]
+      if (name) {
+        knownHostNamesRef.current.set(agentRef, name)
+      }
+    }
     // Compared with the previous catalog, so an effect re-run without a new
     // catalog cannot announce the same loss twice. A new user or team explains
     // the change by itself.

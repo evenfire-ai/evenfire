@@ -501,6 +501,98 @@ describe('useAppController held Hosts', () => {
     expect(toastsSeen(commits)).toEqual([REVOKED_A, GONE_A])
   })
 
+  it('T-R4L2-1: a failed verification names a Host that left the catalog by its last known name', async () => {
+    const { clerum, handle } = installAppControllerClerum({
+      agentNames: [HOST_A, HOST_B],
+      agentDisplayByName: DISPLAY_BY_NAME,
+    })
+    const catalog = installCatalog(clerum)
+    catalog.deny(HOST_A, await ipcGenericForbidden('rpc:listSessions'))
+    const { app, commits } = await mount(clerum, handle)
+    act(() => {
+      app.result.current.handleSelectChatAgent(HOST_B, { selectLatest: false })
+    })
+    await waitFor(() => expect(app.result.current.selectedAgent).toBe(HOST_B))
+    await holdThroughCatalog(app, catalog, HOST_A)
+    await settle()
+    expect(app.result.current.heldAgentRefs).toEqual([HOST_A])
+    handle.refreshCatalog.mockImplementation(async () => createCatalog([HOST_B], DISPLAY_B_ONLY))
+
+    // The catalog drops A, then a second catalog without A lands, then the
+    // focus moves away and back: no catalog on screen names A any more.
+    for (let refresh = 0; refresh < 2; refresh += 1) {
+      await act(async () => {
+        await app.result.current.handleRefreshWorkspaceData(DESKTOP_ROUTES.agents)
+      })
+      await settle()
+    }
+    act(() => {
+      app.result.current.handleNavSelect(DESKTOP_ROUTES.files)
+    })
+    act(() => {
+      app.result.current.handleNavSelect(DESKTOP_ROUTES.chat)
+    })
+    await settle()
+    // Liveness witness: A is held and absent from the catalog on screen.
+    expect(cachedCatalog(app.queryClient)?.agentNames).toEqual([HOST_B])
+    expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true)
+    expect(toastsSeen(commits)).toEqual([GONE_A])
+    const verificationError = await ipcGenericForbidden('rpc:listSessions')
+    catalog.setVerify(async () => {
+      throw verificationError
+    })
+
+    act(() => {
+      app.result.current.handleSelectChatAgent(HOST_A, { selectLatest: false })
+    })
+    await waitFor(() => expect(catalog.verifyReads(HOST_A)).toBe(1))
+    await settle()
+
+    expect(toastsSeen(commits)).toEqual([GONE_A, VERIFY_A])
+
+    // Team 2 lists the same ref without a name. The name team 1 gave it must
+    // not follow it: in team 2 it is another Host.
+    const toastsBeforeSwitch = toastsSeen(commits).length
+    catalog.deny(HOST_A, await ipcGenericForbidden('rpc:listSessions'))
+    handle.refreshCatalog.mockImplementation(async () =>
+      createCatalog([HOST_A, HOST_B], DISPLAY_B_ONLY, 'team-2')
+    )
+    await act(async () => {
+      await app.result.current.handleEnsureTeamContext({ teamId: 'team-2' })
+    })
+    await waitFor(() => expect(app.result.current.heldAgentRefs).toEqual([HOST_A]))
+    catalog.allow(HOST_A)
+    // Liveness witness: the switch completed and team 2 holds its own A.
+    expect(handle.switchTeam).toHaveBeenCalledWith('team-2')
+    expect(cachedCatalog(app.queryClient)).toMatchObject({
+      teamId: 'team-2',
+      agentNames: [HOST_A, HOST_B],
+    })
+    expect(app.result.current.heldHosts).toEqual([{ agentRef: HOST_A, label: HOST_A }])
+
+    handle.refreshCatalog.mockImplementation(async () =>
+      createCatalog([HOST_B], DISPLAY_B_ONLY, 'team-2')
+    )
+    await act(async () => {
+      await app.result.current.handleRefreshWorkspaceData(DESKTOP_ROUTES.agents)
+    })
+    await settle()
+    // Liveness witness: team 2's catalog dropped A while A is held.
+    expect(cachedCatalog(app.queryClient)).toMatchObject({ teamId: 'team-2', agentNames: [HOST_B] })
+    expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true)
+
+    act(() => {
+      app.result.current.handleSelectChatAgent(HOST_A, { selectLatest: false })
+    })
+    await waitFor(() => expect(catalog.verifyReads(HOST_A)).toBe(2))
+    await settle()
+
+    expect(toastsSeen(commits).slice(toastsBeforeSwitch)).toEqual([
+      `${HOST_A} is no longer available.`,
+      `Could not verify access to ${HOST_A}.`,
+    ])
+  })
+
   it('T-R2L2-1: a new hold after a successful Retry is announced again', async () => {
     const { clerum, handle } = installAppControllerClerum({
       agentNames: [HOST_A, HOST_B],
