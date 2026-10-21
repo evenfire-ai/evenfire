@@ -20,6 +20,40 @@ import type { SandboxUiDeepLinkEnvelope } from '@/App.types'
 import type { DesktopCommandId } from '../../../src/desktopCommands'
 import { type SandboxUiMainFake, createSandboxUiMainFake } from './__fixtures__/sandboxUiMainFake'
 
+// The sandbox-ui main fake runs the real main process; these are the
+// layers under it that the suite does not stand up.
+vi.mock(
+  'electron',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiElectronFakes')).electronModule
+)
+vi.mock(
+  '../../../src/config',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).configModule
+)
+vi.mock(
+  '../../../src/sandboxUiPartitionGc',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).partitionGcModule
+)
+vi.mock(
+  '../../../src/rpcTokenManager',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks'))
+      .rpcTokenManagerModule
+)
+vi.mock(
+  '../../../src/authClient',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).authClientModule
+)
+vi.mock(
+  '../../../src/tokenStore',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).tokenStoreModule
+)
+
 // The universal tab store lives inside the controller; the mock reproduces that
 // contract — `navItem` is DERIVED from the store, the store is reactive, and nav
 // drives it through the real producers (T1). See App.chatDrawer.test for the
@@ -577,7 +611,7 @@ describe('App deep-link orchestration', () => {
     act(() => appHeaderHarness.props?.onShellOverlayOpenChange?.(true))
     expect(sandboxUiPageHarness.props?.headerShellOverlayOpen).toBe(true)
 
-    act(() => main.crash())
+    await act(() => main.crash())
 
     await waitFor(() => expect(embedState().failure?.kind).toBe('crashed'))
     expect(sandboxUiPageHarness.props?.headerShellOverlayOpen).toBe(false)
@@ -801,8 +835,9 @@ describe('App deep-link orchestration', () => {
     })
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.useRealTimers()
+    await main.dispose()
   })
 
   // The deep link's launch reached main (`times` opens so far). Main mounts it
@@ -1886,7 +1921,7 @@ describe('App deep-link orchestration', () => {
     render(<App />)
     await launchAppFromSidebar()
 
-    act(() => main.crash())
+    await act(() => main.crash())
     await waitFor(() => expect(embedState().failure?.kind).toBe('crashed'))
 
     await selectTab(0)

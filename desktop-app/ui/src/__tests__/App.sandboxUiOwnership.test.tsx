@@ -26,6 +26,40 @@ import type { SandboxUiDeepLinkEnvelope } from '@/App.types'
 import { openGfsResourcePayload, resolvedFile } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { type SandboxUiMainFake, createSandboxUiMainFake } from './__fixtures__/sandboxUiMainFake'
 
+// The sandbox-ui main fake runs the real main process; these are the
+// layers under it that the suite does not stand up.
+vi.mock(
+  'electron',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiElectronFakes')).electronModule
+)
+vi.mock(
+  '../../../src/config',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).configModule
+)
+vi.mock(
+  '../../../src/sandboxUiPartitionGc',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).partitionGcModule
+)
+vi.mock(
+  '../../../src/rpcTokenManager',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks'))
+      .rpcTokenManagerModule
+)
+vi.mock(
+  '../../../src/authClient',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).authClientModule
+)
+vi.mock(
+  '../../../src/tokenStore',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).tokenStoreModule
+)
+
 // Wiring of App to the embed ownership machine: which event each gesture
 // dispatches, in which commit, and that the real SandboxUiPage paints what the
 // machine holds. Who owns the embed under every interleaving is not decided
@@ -388,6 +422,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
   afterEach(async () => {
     cleanup()
     await new Promise(resolve => window.setTimeout(resolve, 0))
+    await main.dispose()
     expect(flushSyncErrors).toEqual([])
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
@@ -540,7 +575,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     await renderApp()
     await openFromSidebar(ALPHA, 1)
 
-    act(() => main.crash())
+    await act(() => main.crash())
     expect(await screen.findByText('The app closed unexpectedly.')).toBeTruthy()
     expect(sidebarHarness.props?.activeSandboxUiApp ?? null).toBeNull()
 
@@ -556,13 +591,14 @@ describe('App wires gestures and main events to the embed ownership machine', ()
 
   it('shows a crash while the app is still opening with Reopen (DEC-10)', async () => {
     await renderApp()
-    main.holdNextOpen()
+    const held = main.holdNextOpen()
+    main.crashNextMount()
     act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(ALPHA!))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
     expect(screen.getByText('Loading app')).toBeTruthy()
 
-    act(() => main.crash())
-
+    // The view mounts and its renderer dies before the open settles.
+    held().resolve()
     expect(await screen.findByText('The app closed unexpectedly.')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Reopen' }))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
@@ -572,7 +608,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
   it('relaunches a dead view when its tab is clicked again', async () => {
     await renderApp()
     await openFromSidebar(ALPHA, 1)
-    act(() => main.crash())
+    await act(() => main.crash())
     await screen.findByText('The app closed unexpectedly.')
 
     fireEvent.click(screen.getByRole('button', { name: 'Alpha', pressed: true }))
@@ -615,9 +651,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     await openFromSidebar(ALPHA, 1)
     const first = main.openCall(0).launchId
 
-    act(() => main.refreshFailed('stale failure', crypto.randomUUID()))
-    expect(screen.queryByText(/Session refresh failed/)).toBeNull()
-    act(() => main.refreshFailed('mint failed'))
+    await act(() => main.refreshFailed(new Error('mint failed')))
     expect(await screen.findByText('Session refresh failed: mint failed.')).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
@@ -626,6 +660,23 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     expect(sandboxUi.close).toHaveBeenCalledWith({ launchId: first })
     // The banner belonged to the view that was replaced.
     await waitFor(() => expect(screen.queryByText(/Session refresh failed/)).toBeNull())
+  })
+
+  it('ignores the session failure of a view it already replaced', async () => {
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
+    const first = main.openCall(0).launchId
+
+    // The replaced view's loop gives up before the close for it reaches main.
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh app content' }))
+    await act(() => main.refreshFailed(new Error('stale failure')))
+    await act(() => main.settle())
+
+    expect(main.reported('sandboxUi:refreshError')).toEqual([
+      expect.objectContaining({ launchId: first, message: 'stale failure' }),
+    ])
+    expect(screen.queryByText(/Session refresh failed/)).toBeNull()
+    expect(main.live()?.launchId).toBe(main.openCall(1).launchId)
   })
 
   it('goes back to apps on the app.backToApps command, keeping the tab', async () => {
@@ -645,9 +696,19 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     await renderApp()
     await openFromSidebar(ALPHA, 1)
 
-    act(() => main.retitle('Alpha Inbox'))
+    await act(() => main.retitle('Alpha Inbox'))
     expect(screen.getByRole('button', { name: 'Alpha Inbox', pressed: true })).toBeTruthy()
-    act(() => main.retitle('Stale', crypto.randomUUID()))
+
+    // The view a relaunch replaces retitles itself before its close reaches main.
+    const first = main.openCall(0).launchId
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh app content' }))
+    await act(() => main.retitle('Stale'))
+    await act(() => main.settle())
+
+    expect(main.reported('sandboxUi:titleChanged')).toContainEqual(
+      expect.objectContaining({ launchId: first, title: 'Stale' })
+    )
+    expect(screen.getByRole('button', { name: 'Alpha Inbox', pressed: true })).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Stale' })).toBeNull()
   })
 
@@ -727,7 +788,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     await renderApp()
     await openFromSidebar(BETA, 1)
     // The app renames its own tab; that title must never name it to main.
-    act(() => main.retitle('Beta Inbox'))
+    await act(() => main.retitle('Beta Inbox'))
     await openFromSidebar(ALPHA, 2)
     const alpha = main.openCall(1).launchId
     const betaTab = tabOf(BETA!.appRef)!
@@ -737,7 +798,9 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     await refreshCatalogOnFocus()
     main.navigate('/inbox')
     fireEvent.click(screen.getByRole('button', { name: 'Beta Inbox', pressed: false }))
-    await flushMacrotask()
+    // Alpha retitles itself before the close the click sent reaches main.
+    await act(() => main.retitle('Alpha Late'))
+    await act(() => main.settle())
 
     expect(sandboxUi.close).toHaveBeenCalledWith({ launchId: alpha })
     expect(sandboxUi.open).toHaveBeenCalledTimes(2)
@@ -745,8 +808,10 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     expect(owner()).toBeUndefined()
     expect(screen.queryByTestId('sandbox-ui-mounted')).toBeNull()
     expect(await screen.findByRole('button', { name: 'Open Alpha' })).toBeTruthy()
-    // A late title from Alpha does not relabel Beta, and Alpha keeps its route.
-    act(() => main.retitle('Alpha Late', alpha))
+    // Alpha's late title does not relabel Beta, and Alpha keeps its route.
+    expect(main.reported('sandboxUi:titleChanged')).toContainEqual(
+      expect.objectContaining({ launchId: alpha, title: 'Alpha Late' })
+    )
     expect(controller.workspaceTabs.tabs.find(tab => tab.id === betaTab.id)?.title).toBe(
       'Beta Inbox'
     )

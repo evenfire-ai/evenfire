@@ -3,12 +3,52 @@ import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
-import { createSandboxUiMainFake } from '../../__tests__/__fixtures__/sandboxUiMainFake'
+import {
+  type SandboxUiMainFake,
+  createSandboxUiMainFake,
+} from '../../__tests__/__fixtures__/sandboxUiMainFake'
 import { SandboxUiPage as SandboxUiPageBase } from '../SandboxUiPage'
 import {
   LaunchingSandboxUiPage as SandboxUiPage,
   createPageEmbed,
 } from './__fixtures__/launchingSandboxUiPage'
+
+// The sandbox-ui main fake runs the real main process; these are the
+// layers under it that the suite does not stand up.
+vi.mock(
+  'electron',
+  async () =>
+    (await import('../../../../src/__tests__/__fixtures__/sandboxUiElectronFakes')).electronModule
+)
+vi.mock(
+  '../../../../src/config',
+  async () =>
+    (await import('../../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).configModule
+)
+vi.mock(
+  '../../../../src/sandboxUiPartitionGc',
+  async () =>
+    (await import('../../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks'))
+      .partitionGcModule
+)
+vi.mock(
+  '../../../../src/rpcTokenManager',
+  async () =>
+    (await import('../../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks'))
+      .rpcTokenManagerModule
+)
+vi.mock(
+  '../../../../src/authClient',
+  async () =>
+    (await import('../../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks'))
+      .authClientModule
+)
+vi.mock(
+  '../../../../src/tokenStore',
+  async () =>
+    (await import('../../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks'))
+      .tokenStoreModule
+)
 
 const sandboxUi = {
   listApps: vi.fn(),
@@ -37,6 +77,7 @@ function installClerumApi(): void {
 }
 
 describe('SandboxUiPage', () => {
+  let mainFake: SandboxUiMainFake | null = null
   beforeEach(() => {
     vi.clearAllMocks()
     sandboxUi.setBounds.mockResolvedValue(undefined)
@@ -77,6 +118,8 @@ describe('SandboxUiPage', () => {
   afterEach(async () => {
     cleanup()
     await new Promise(resolve => window.setTimeout(resolve, 0))
+    await mainFake?.dispose()
+    mainFake = null
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
     delete (window as { clerum?: unknown }).clerum
@@ -1073,6 +1116,7 @@ describe('SandboxUiPage', () => {
     // events are needed here; they come from the shared fake, wired the way App
     // wires them.
     const main = createSandboxUiMainFake()
+    mainFake = main
     sandboxUi.open.mockImplementation(main.bridge.open)
     sandboxUi.close.mockImplementation(main.bridge.close)
     const embed = createPageEmbed()

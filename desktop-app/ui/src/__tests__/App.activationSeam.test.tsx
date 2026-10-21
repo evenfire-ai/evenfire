@@ -22,6 +22,40 @@ import type { SandboxUiDeepLinkEnvelope } from '@/App.types'
 import { openGfsResourcePayload, resolvedFile } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { type SandboxUiMainFake, createSandboxUiMainFake } from './__fixtures__/sandboxUiMainFake'
 
+// The sandbox-ui main fake runs the real main process; these are the
+// layers under it that the suite does not stand up.
+vi.mock(
+  'electron',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiElectronFakes')).electronModule
+)
+vi.mock(
+  '../../../src/config',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).configModule
+)
+vi.mock(
+  '../../../src/sandboxUiPartitionGc',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).partitionGcModule
+)
+vi.mock(
+  '../../../src/rpcTokenManager',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks'))
+      .rpcTokenManagerModule
+)
+vi.mock(
+  '../../../src/authClient',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).authClientModule
+)
+vi.mock(
+  '../../../src/tokenStore',
+  async () =>
+    (await import('../../../src/__tests__/__fixtures__/sandboxUiMainModuleMocks')).tokenStoreModule
+)
+
 // Every gesture that activates an app tab must do it through App's single
 // activation seam, which commits the store and the launch together under
 // `flushSync`. A store write that activates an app tab from anywhere else (an
@@ -369,6 +403,7 @@ describe('App activates app tabs only through its activation seam', () => {
   afterEach(async () => {
     cleanup()
     await new Promise(resolve => window.setTimeout(resolve, 0))
+    await main.dispose()
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
     delete (window as { clerum?: unknown }).clerum
@@ -501,7 +536,7 @@ describe('App activates app tabs only through its activation seam', () => {
 
     await openFromSidebar(ALPHA, 1)
     // A title from the live embed renames its tab.
-    act(() => main.retitle('Alpha Inbox'))
+    await act(() => main.retitle('Alpha Inbox'))
     // Leaving the app persists its route, and a plugin handoff opens a preview.
     main.navigate('/inbox')
     const payload = await openGfsResourcePayload(
@@ -534,8 +569,9 @@ describe('App activates app tabs only through its activation seam', () => {
   async function renderWithRetitledLiveAlpha(gesture: () => void) {
     await renderApp()
     await openFromSidebar(ALPHA, 1)
-    act(() => {
-      main.retitle('Alpha Inbox')
+    // The title is in, but App has not rendered it, when the gesture runs.
+    await act(async () => {
+      await main.retitle('Alpha Inbox')
       gesture()
     })
     await flushMacrotask()

@@ -26,22 +26,24 @@ import {
   selectWorkspaceTab,
 } from '../../ui/src/lib/workspaceTabs'
 import type { WorkspaceTabsState } from '../../ui/src/lib/workspaceTabs.types'
-import { AppService } from '../appService.js'
-import { wireMainWindowRendererReadiness } from '../mainWindowReadiness.js'
-import { _resetPluginSdkRuntimeForTests, initPluginSdkRuntime } from '../pluginSdkRuntime.js'
-import { _resetPluginSurfacesForTests } from '../pluginSurfaceRegistry.js'
-import { getActiveSandboxUi, unmountSandboxUiView } from '../sandboxUiDriver.js'
-import {
-  SANDBOX_UI_REFRESH_INTERVAL_MS,
-  _resetSandboxUiRefreshForTests,
-} from '../sandboxUiSessionRefresh.js'
+import type { AppService } from '../appService.js'
+import { getActiveSandboxUi } from '../sandboxUiDriver.js'
+import { SANDBOX_UI_REFRESH_INTERVAL_MS } from '../sandboxUiSessionRefresh.js'
 import type { SandboxUiReleasedEvent } from '../types.js'
 import {
-  FakeParentWindow,
+  type FakeParentWindow,
   type FakeWebContents,
   type FakeWebContentsView,
   electronMocks,
 } from './__fixtures__/sandboxUiElectronFakes.js'
+import {
+  type FakeMainWebContents,
+  type RealMain,
+  mintOk,
+  resetRealMain,
+  sandboxUiMintFetch,
+  startRealMain,
+} from './__fixtures__/sandboxUiRealMain.js'
 
 // Ownership of the native embed, end to end: the REAL reducer and interpreter
 // in the renderer, the REAL `sandboxUi:open`/`sandboxUi:close` IPC handlers of
@@ -62,49 +64,30 @@ vi.mock(
   async () => (await import('./__fixtures__/sandboxUiElectronFakes.js')).electronModule
 )
 
-vi.mock('../config.js', () => ({
-  getActiveEnvKey: () => 'test-env',
-  getActiveLegacyEnvKeys: () => [],
-  config: {
-    rpcProxyBaseUrl: 'https://rpc.example',
-    externalRestApiBaseUrl: 'http://rest',
-    desktopProfileUiBaseUrl: 'https://profile.example.com',
-    desktopProfileUiBaseUrlExplicit: false,
-    enableDevLoginUi: false,
-    requestTimeoutMs: 60000,
-    appName: 'test',
-  },
-}))
+vi.mock(
+  '../config.js',
+  async () => (await import('./__fixtures__/sandboxUiMainModuleMocks.js')).configModule
+)
 
-vi.mock('../sandboxUiPartitionGc.js', async () => ({
-  touchSandboxUiPartition: (await import('./__fixtures__/sandboxUiElectronFakes.js')).electronMocks
-    .touchSandboxUiPartition,
-}))
+vi.mock(
+  '../sandboxUiPartitionGc.js',
+  async () => (await import('./__fixtures__/sandboxUiMainModuleMocks.js')).partitionGcModule
+)
 
-// The RPC token is issued by control-api through external-rest-api, a layer this
-// suite does not stand up; the mint itself runs through the real RpcProxyClient.
-vi.mock('../rpcTokenManager.js', () => ({
-  RpcTokenManager: class {
-    getOrIssue = vi.fn(async () => ({ token: 'fake-rpc-token' }))
-    clear = vi.fn()
-    getMetadata = vi.fn(() => ({ expiresAtMs: null, scopes: [], hostRefs: [] }))
-  },
-}))
+vi.mock(
+  '../rpcTokenManager.js',
+  async () => (await import('./__fixtures__/sandboxUiMainModuleMocks.js')).rpcTokenManagerModule
+)
 
-vi.mock('../authClient.js', () => ({
-  AuthClient: class {
-    health = vi.fn().mockResolvedValue({ status: 'ok' })
-    getMe = vi.fn()
-  },
-}))
+vi.mock(
+  '../authClient.js',
+  async () => (await import('./__fixtures__/sandboxUiMainModuleMocks.js')).authClientModule
+)
 
-vi.mock('../tokenStore.js', () => ({
-  TokenStore: class {
-    getSessionToken = vi.fn().mockResolvedValue(null)
-    setSessionToken = vi.fn()
-    clearSessionToken = vi.fn()
-  },
-}))
+vi.mock(
+  '../tokenStore.js',
+  async () => (await import('./__fixtures__/sandboxUiMainModuleMocks.js')).tokenStoreModule
+)
 
 const RUNS = Number(process.env.EMBED_PROP_RUNS ?? 4000)
 const SEED = process.env.EMBED_PROP_SEED ? Number(process.env.EMBED_PROP_SEED) : undefined
@@ -185,64 +168,7 @@ async function drainScheduler(
 
 // ─── The real main process behind a fake wire ──────────────────────────────
 
-// rpc-proxy's mint contract: 204 + a Path-scoped Set-Cookie on success, any
-// other status with a text body on failure.
-function mintOk(recipeName: string): Response {
-  return new Response(null, {
-    status: 204,
-    headers: {
-      'set-cookie':
-        `clerum_sandbox_ui_session=tok-${recipeName}; ` +
-        `Path=/api/v1/sandbox-ui/sandbox-recipes/${recipeName}/; HttpOnly`,
-    },
-  })
-}
-
-let currentWorld: World | null = null
 let userDataDir = ''
-
-const fetchMock = vi.fn(async (input: string | URL | Request): Promise<Response> => {
-  const url = String(input instanceof Request ? input.url : input)
-  const match = /\/api\/v1\/sandbox-ui\/sandbox-recipes\/([^/]+)\/session$/.exec(url)
-  if (!match) throw new Error(`unexpected fetch ${url}`)
-  const recipeName = decodeURIComponent(match[1]!)
-  const world = currentWorld
-  if (!world) throw new Error('mint outside a world')
-  const response = world.failingRecipes.has(recipeName)
-    ? new Response('upstream unavailable', { status: 503 })
-    : mintOk(recipeName)
-  if (world.immediateMints) return response
-  return world.sink.schedule(Promise.resolve(response), `mint ${recipeName}`)
-})
-
-class FakeMainWebContents {
-  private readonly listeners = new Map<string, Set<(...args: unknown[]) => void>>()
-  reload = vi.fn()
-
-  on(event: string, handler: (...args: unknown[]) => void): this {
-    if (!this.listeners.has(event)) this.listeners.set(event, new Set())
-    this.listeners.get(event)!.add(handler)
-    return this
-  }
-
-  emit(event: string, ...args: unknown[]): void {
-    this.listeners.get(event)?.forEach(handler => handler(...args))
-  }
-
-  isDestroyed(): boolean {
-    return false
-  }
-}
-
-async function resetMain(): Promise<void> {
-  if (currentWorld) currentWorld.dead = true
-  currentWorld = null
-  await unmountSandboxUiView()
-  _resetSandboxUiRefreshForTests()
-  _resetPluginSurfacesForTests()
-  _resetPluginSdkRuntimeForTests()
-  electronMocks.views.length = 0
-}
 
 type ToMain = {
   channel: 'sandboxUi:open' | 'sandboxUi:close'
@@ -342,9 +268,9 @@ const IDEMPOTENT_EVENTS = new Set<EmbedEvent['type']>([
  */
 class World {
   readonly sink: TaskSink
-  readonly parent = new FakeParentWindow()
-  readonly sender = { id: 1 }
-  readonly mainWebContents = new FakeMainWebContents()
+  readonly main: RealMain
+  readonly parent: FakeParentWindow
+  readonly mainWebContents: FakeMainWebContents
   readonly service: AppService
   readonly failingRecipes = new Set<string>(['gamma'])
   immediateMints = false
@@ -352,7 +278,6 @@ class World {
   crashNextLoad = false
   /** The session changes the moment the next view starts loading. */
   sessionChangeNextLoad = false
-  dead = false
   tabs: WorkspaceTabsState
   machine: EmbedOwnershipMachine
   generation = 0
@@ -410,8 +335,12 @@ class World {
     owner: LaunchId | null
   } | null = null
 
-  private constructor(options: WorldOptions) {
+  private constructor(options: WorldOptions, main: RealMain) {
     this.sink = options.sink
+    this.main = main
+    this.parent = main.parent
+    this.mainWebContents = main.mainWebContents
+    this.service = main.service
     this.launchIds = [...(options.launchIds ?? [])]
     this.slotFailures = options.slotFailures ?? []
     this.batch = options.batch ?? false
@@ -420,35 +349,29 @@ class World {
     tabs = openAppTab(tabs, { id: 'ws-tab-3', appRef: APPS.beta, title: 'Beta' })
     tabs = openAppTab(tabs, { id: 'ws-tab-4', appRef: APPS.gamma, title: 'Gamma' })
     this.tabs = selectWorkspaceTab(tabs, 'chat-tab-1')
-    const service = new AppService()
-    ;(service as unknown as { sessionToken: string }).sessionToken = 'fake-session-token'
-    this.service = service
     this.machine = this.createMachine()
   }
 
   static async create(options: WorldOptions): Promise<World> {
-    await resetMain()
-    const world = new World(options)
-    initPluginSdkRuntime({ service: world.service, getMainWindow: () => null, userDataDir })
-    electronMocks.ipcHandlers.clear()
-    electronMocks.windowsBySender.clear()
-    const { registerIpcHandlers } = await import('../ipc.js')
-    registerIpcHandlers(world.service)
-    electronMocks.windowsBySender.set(world.sender, world.parent)
-    world.parent.webContents.send.mockImplementation((channel: string, payload: unknown) => {
-      if (!world.dead) world.fromMain(channel, payload)
+    await resetRealMain()
+    // The callbacks only run once the world exists: nothing reaches main before
+    // the first gesture.
+    let world!: World
+    const main = startRealMain({
+      userDataDir,
+      mint: recipeName => world.mint(recipeName),
+      onSend: (channel, payload) => world.fromMain(channel, payload),
+      onLoad: (webContents, url) => world.onLoad(webContents, url),
     })
-    wireMainWindowRendererReadiness({
-      webContents: world.mainWebContents as never,
-      isCurrentWindow: () => true,
-      markNotReady: () => {},
-      sandboxUi: world.service,
-    })
-    currentWorld = world
-    electronMocks.onLoadURL = (webContents, url) => currentWorld?.onLoad(webContents, url)
+    world = new World(options, main)
     if (!options.lateMeasurer) world.registerMeasurer()
     world.machine.projected(world.activeAppTabId())
     return world
+  }
+
+  /** Main is gone (the world was reset); nothing may act on it any more. */
+  get dead(): boolean {
+    return this.main.dead
   }
 
   // ── renderer ──
@@ -751,8 +674,16 @@ class World {
 
   /** What a logout or a login over the live session does to the embed. */
   private invalidateSession(): void {
-    const service = this.service as unknown as { invalidateSandboxUiSession(): void }
-    service.invalidateSandboxUiSession()
+    this.main.invalidateSession()
+  }
+
+  /** rpc-proxy's answer to a session mint, delivered when the scheduler says so. */
+  mint(recipeName: string): Promise<Response> | Response {
+    const response = this.failingRecipes.has(recipeName)
+      ? new Response('upstream unavailable', { status: 503 })
+      : mintOk(recipeName)
+    if (this.immediateMints) return response
+    return this.sink.schedule(Promise.resolve(response), `mint ${recipeName}`)
   }
 
   /** Schedules an accident; one with no view to hit yet tries again later, a few times. */
@@ -791,16 +722,7 @@ class World {
       this.shownRoutes.set(message.launchId, new Set([routePath]))
       this.opensInMain += 1
     }
-    const handler = electronMocks.ipcHandlers.get(message.channel)!
-    let result: Promise<unknown>
-    try {
-      result = handler(
-        { sender: this.sender, senderFrame: { url: 'file:///app/index.html' } },
-        message.payload
-      )
-    } catch (error) {
-      result = Promise.reject(error)
-    }
+    const result = this.main.invoke(message.channel, message.payload)
     const label = `reply ${message.channel} ${short(message.launchId)}`
     if (op === 'open') {
       void result.then(
@@ -1259,15 +1181,14 @@ afterAll(async () => {
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-  vi.stubGlobal('fetch', fetchMock)
+  vi.stubGlobal('fetch', sandboxUiMintFetch)
   // The driver logs every injected failure; the properties judge them.
   vi.spyOn(console, 'warn').mockImplementation(() => {})
   vi.spyOn(console, 'error').mockImplementation(() => {})
 })
 
 afterEach(async () => {
-  await resetMain()
-  electronMocks.onLoadURL = null
+  await resetRealMain()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
   vi.useRealTimers()
