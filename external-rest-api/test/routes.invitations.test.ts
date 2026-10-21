@@ -471,6 +471,95 @@ describe('routes/invitations', () => {
     }
   )
 
+  it.each([
+    ['an empty bearer header', '203.0.113.31', { authorization: 'Bearer ' }],
+    ['an empty authorization header', '203.0.113.32', { authorization: '' }],
+    ['a non-bearer authorization header', '203.0.113.33', { authorization: 'Basic dXNlcjpwdw==' }],
+    ['a malformed authorization header', '203.0.113.34', { authorization: 'garbage' }],
+    ['an empty profile session cookie', '203.0.113.35', { cookie: 'profile_session=' }],
+    [
+      'a non-bearer authorization header next to a session cookie',
+      '203.0.113.36',
+      { authorization: 'Basic dXNlcjpwdw==', cookie: 'profile_session=synthetic-cookie-session' },
+    ],
+  ])(
+    'fails closed with 401 for %s presented alongside an invitation link',
+    async (_case, ip, headers: Record<string, string>) => {
+      // The verifier accepts any token it is given, so a 401 here can only come
+      // from the presented credential being empty or malformed.
+      authTokenMock.verifyToken.mockReturnValue({
+        userId: 'user-1',
+        email: 'invitee@example.com',
+        teamId: '',
+        role: 'member',
+        exp: 9999999999,
+      })
+      invitationsServiceMock.getInvitationByToken.mockResolvedValue({
+        id: 'inv-1',
+        email: 'invitee@example.com',
+        purpose: 'member_invitation',
+        status: 'pending',
+      })
+      // The invitation-link path would succeed if it were reached.
+      invitationsServiceMock.acceptInvitation.mockResolvedValue({
+        data: {
+          userId: 'user-1',
+          email: 'invitee@example.com',
+          token: 'synthetic-invited-session-token',
+        },
+      })
+      invitationsServiceMock.setupInvitationPassword.mockResolvedValue({
+        data: { id: 'inv-1', passwordUpdated: true },
+      })
+
+      let pending = request(makeApp()).post('/invitations/password').set('x-forwarded-for', ip)
+      for (const [name, value] of Object.entries(headers)) pending = pending.set(name, value)
+      const res = await pending
+        .send({
+          token: 'invitation-link-token',
+          email: 'invitee@example.com',
+          invitationId: 'inv-1',
+          password: 'user123!',
+        })
+        .expect(401)
+
+      expect(res.body).toEqual({ error: 'Unauthorized' })
+      // Liveness: the route reached the credential decision.
+      expect(invitationsServiceMock.getInvitationByToken).toHaveBeenCalledWith(
+        'invitation-link-token'
+      )
+      expect(authTokenMock.verifyToken).not.toHaveBeenCalled()
+      expect(invitationsServiceMock.acceptInvitation).not.toHaveBeenCalled()
+      expect(invitationsServiceMock.setupInvitationPassword).not.toHaveBeenCalled()
+      expect(invitationsServiceMock.setupInvitationPasswordWithToken).not.toHaveBeenCalled()
+    }
+  )
+
+  it('uses the bearer header over a session cookie when both are presented', async () => {
+    authTokenMock.verifyToken.mockReturnValue({
+      userId: 'user-1',
+      email: 'invitee@example.com',
+      teamId: '',
+      role: 'member',
+      exp: 9999999999,
+    })
+    invitationsServiceMock.setupInvitationPassword.mockResolvedValue({
+      data: { id: 'inv-1', passwordUpdated: true },
+    })
+
+    await request(makeApp())
+      .post('/invitations/password')
+      .set('x-forwarded-for', '203.0.113.37')
+      .set('authorization', 'Bearer fresh-session-token')
+      .set('cookie', 'profile_session=synthetic-cookie-session')
+      .send({ invitationId: 'inv-1', password: 'user123!' })
+      .expect(200)
+
+    expect(authTokenMock.verifyToken).toHaveBeenCalledTimes(1)
+    expect(authTokenMock.verifyToken).toHaveBeenCalledWith('fresh-session-token')
+    expect(invitationsServiceMock.acceptInvitation).not.toHaveBeenCalled()
+  })
+
   it('sets invitation password with a valid bearer token without accepting again', async () => {
     authTokenMock.verifyToken.mockReturnValue({
       userId: 'user-1',

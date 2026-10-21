@@ -14,7 +14,13 @@ import {
   getInvitationByToken,
   listPendingInvitations,
 } from '../services/invitationsService.js'
-import { clearProfileSessionCookie, setProfileSessionCookie } from '../sessionCookie.js'
+import {
+  PROFILE_SESSION_COOKIE,
+  clearProfileSessionCookie,
+  hasCookie,
+  readCookie,
+  setProfileSessionCookie,
+} from '../sessionCookie.js'
 
 const tokenLookupRateLimit = createRateLimiter({ windowMs: 60_000, maxRequests: 30 })
 const acceptRateLimit = createRateLimiter({ windowMs: 60_000, maxRequests: 10 })
@@ -133,6 +139,15 @@ function sendPasswordResetError(
   res.status(response.status).json({ error: response.code, message: response.message })
 }
 
+// The session token a request presents. A present Authorization header must
+// carry a bearer credential; any other value yields '' and fails verification
+// instead of yielding to the cookie.
+function presentedSessionToken(authorization: string | undefined, req: Request): string {
+  if (authorization === undefined) return readCookie(req, PROFILE_SESSION_COOKIE)
+  const raw = authorization.trim()
+  return /^bearer\s+/i.test(raw) ? raw.replace(/^bearer\s+/i, '').trim() : ''
+}
+
 async function invitationPasswordAuthFromRequest(req: Request): Promise<
   | { auth: InvitationPasswordAuth }
   | {
@@ -140,11 +155,14 @@ async function invitationPasswordAuthFromRequest(req: Request): Promise<
       body: Record<string, string>
     }
 > {
-  const sessionToken = extractAuthToken(req)
-  if (sessionToken) {
-    // A presented session credential is the only proof considered: an invalid
-    // one fails closed instead of falling through to the invitation link.
-    const claims = verifyToken(sessionToken)
+  // A presented session credential is the only proof considered: an invalid
+  // one fails closed instead of falling through to the invitation link.
+  // Presence is decided before extraction, because extractAuthToken returns ''
+  // for an empty or malformed credential and '' must not read as "absent".
+  const authorization = req.headers.authorization
+  if (authorization !== undefined || hasCookie(req, PROFILE_SESSION_COOKIE)) {
+    const sessionToken = presentedSessionToken(authorization, req)
+    const claims = sessionToken ? verifyToken(sessionToken) : null
     if (!claims) {
       return { status: 401, body: { error: 'Unauthorized' } }
     }
