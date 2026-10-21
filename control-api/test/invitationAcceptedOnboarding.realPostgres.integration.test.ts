@@ -159,7 +159,7 @@ describeRealPostgres('accepted onboarding expiry on real PostgreSQL', () => {
 
       await expect(
         acceptInvitationForEmail(invitation.email, invitation.token, invitation.id)
-      ).resolves.toEqual({ error: 'not_pending' })
+      ).resolves.toMatchObject({ data: { accepted: true, userId, status: 'accepted' } })
       await expect(
         setInvitationPasswordForEmail(
           invitation.email,

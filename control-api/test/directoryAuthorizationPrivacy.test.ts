@@ -473,7 +473,7 @@ describe('directory privacy and atomic authorization', () => {
     expect(sql).not.toContain('UPDATE profiles')
   })
 
-  it('allows exactly one general invitation acceptance and rejects password-reset use', async () => {
+  it('replays a general invitation acceptance for the same user and rejects password-reset use', async () => {
     const invitation = {
       id: '00000000-0000-4000-8000-000000000200',
       team_id: TEAM_A,
@@ -490,9 +490,19 @@ describe('directory privacy and atomic authorization', () => {
     }
     let status = invitation.status
     let membershipWrites = 0
+    let acceptanceWrites = 0
     mocks.query.mockImplementation(async (sql: string) => {
       if (sql.includes("$2 = '' AND i.token = $1")) {
-        return { rows: [{ ...invitation, status }], rowCount: 1 }
+        return {
+          rows: [
+            {
+              ...invitation,
+              status,
+              accepted_user_id: status === 'accepted' ? TARGET : null,
+            },
+          ],
+          rowCount: 1,
+        }
       }
       if (sql.includes('FROM users') && sql.includes('WHERE email = $1')) {
         return {
@@ -513,6 +523,7 @@ describe('directory privacy and atomic authorization', () => {
       if (sql.includes("SET status = 'accepted'")) {
         if (status !== 'pending') return { rows: [], rowCount: 0 }
         status = 'accepted'
+        acceptanceWrites += 1
         return { rows: [{ id: invitation.id }], rowCount: 1 }
       }
       if (sql.includes('FROM invitation_teams it') && sql.includes('JOIN teams')) {
@@ -534,13 +545,12 @@ describe('directory privacy and atomic authorization', () => {
       throw new Error(`unexpected query: ${sql.slice(0, 40)}`)
     })
 
-    await expect(
-      acceptInvitationForEmail(invitation.email, invitation.token)
-    ).resolves.toMatchObject({ data: { accepted: true, userId: TARGET } })
-    await expect(acceptInvitationForEmail(invitation.email, invitation.token)).resolves.toEqual({
-      error: 'not_pending',
-    })
+    const first = await acceptInvitationForEmail(invitation.email, invitation.token)
+    expect(first).toMatchObject({ data: { accepted: true, userId: TARGET } })
+    const replay = await acceptInvitationForEmail(invitation.email, invitation.token)
+    expect(replay).toEqual(first)
     expect(membershipWrites).toBe(1)
+    expect(acceptanceWrites).toBe(1)
 
     status = 'pending'
     const passwordReset = { ...invitation, purpose: 'password_reset' }

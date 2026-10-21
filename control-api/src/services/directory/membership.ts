@@ -380,6 +380,40 @@ async function acceptPendingMembershipInvitation(
   return true
 }
 
+/**
+ * Applies an invitation acceptance after the caller locked the invitation row.
+ *
+ * Pending invitations take the single-use transition. An already accepted
+ * invitation owned by the same user is replayed without any invitation or
+ * membership write, so a retried acceptance cannot create a second membership
+ * or move the acceptance timestamp. The base's one-time backfill of a legacy
+ * accepted row whose accepted_user_id is still null stays conditional. A
+ * different user never inherits an accepted invitation.
+ */
+async function applyInvitationAcceptance(
+  db: Pick<DbClient, 'query'>,
+  invitation: InvitationRow,
+  userId: string
+): Promise<{ error: 'forbidden' } | { error: 'not_pending' } | null> {
+  if (invitation.status === 'accepted') {
+    if (invitation.accepted_user_id && invitation.accepted_user_id !== userId) {
+      return { error: 'forbidden' as const }
+    }
+    if (!invitation.accepted_user_id) {
+      await db.query(
+        `UPDATE invitations SET accepted_user_id = $2
+          WHERE id = $1 AND accepted_user_id IS NULL`,
+        [invitation.id, userId]
+      )
+    }
+    return null
+  }
+  if (!(await acceptPendingMembershipInvitation(db, invitation, userId))) {
+    return { error: 'not_pending' as const }
+  }
+  return null
+}
+
 async function insertInvitationTeams(
   db: Pick<DbClient, 'query'>,
   invitationId: string,
@@ -1236,10 +1270,13 @@ export async function acceptInvitation(
     if (invitation.email.toLowerCase() !== email.toLowerCase()) {
       return { error: 'forbidden' as const }
     }
-    if (invitation.status !== 'pending' || invitation.purpose === 'password_reset') {
+    if (invitation.purpose === 'password_reset') {
       return { error: 'not_pending' as const }
     }
-    if (invitation.expires_at.getTime() <= Date.now()) {
+    if (invitation.status === 'revoked' || invitation.status === 'draft') {
+      return { error: 'not_pending' as const }
+    }
+    if (invitation.status === 'pending' && invitation.expires_at.getTime() <= Date.now()) {
       return { error: 'expired' as const }
     }
 
@@ -1249,9 +1286,8 @@ export async function acceptInvitation(
       return { error: 'forbidden' as const }
     }
 
-    if (!(await acceptPendingMembershipInvitation(db, invitation, user.id))) {
-      return { error: 'not_pending' as const }
-    }
+    const acceptance = await applyInvitationAcceptance(db, invitation, user.id)
+    if (acceptance) return acceptance
 
     const refreshed = await getInvitationRecordByToken(db, invitation.token)
     if (!refreshed) {
@@ -1284,19 +1320,21 @@ export async function acceptInvitationForEmailInTransaction(
   if (invitation.email.toLowerCase() !== email.toLowerCase()) {
     return { error: 'forbidden' as const }
   }
-  if (invitation.status !== 'pending' || invitation.purpose === 'password_reset') {
+  if (invitation.purpose === 'password_reset') {
     return { error: 'not_pending' as const }
   }
-  if (invitation.expires_at.getTime() <= Date.now()) {
+  if (invitation.status === 'revoked' || invitation.status === 'draft') {
+    return { error: 'not_pending' as const }
+  }
+  if (invitation.status === 'pending' && invitation.expires_at.getTime() <= Date.now()) {
     return { error: 'expired' as const }
   }
 
   const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
   if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
 
-  if (!(await acceptPendingMembershipInvitation(db, invitation, user.id))) {
-    return { error: 'not_pending' as const }
-  }
+  const acceptance = await applyInvitationAcceptance(db, invitation, user.id)
+  if (acceptance) return acceptance
 
   const refreshed = await getInvitationRecordByToken(db, invitation.token)
   if (!refreshed) {
@@ -1329,6 +1367,9 @@ export async function acceptInvitationById(email: string, invitationId: string) 
     if (invitation.email.toLowerCase() !== email.toLowerCase()) {
       return { error: 'forbidden' as const }
     }
+    if (invitation.purpose === 'password_reset') {
+      return { error: 'not_pending' as const }
+    }
     if (invitation.status === 'revoked' || invitation.status === 'draft') {
       return { error: 'not_pending' as const }
     }
@@ -1339,17 +1380,8 @@ export async function acceptInvitationById(email: string, invitationId: string) 
     const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
     if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
 
-    if (invitation.status === 'pending' && invitation.purpose !== 'password_reset') {
-      if (!(await acceptPendingMembershipInvitation(db, invitation, user.id))) {
-        return { error: 'not_pending' as const }
-      }
-    } else if (invitation.status === 'accepted' && !invitation.accepted_user_id) {
-      await db.query(
-        `UPDATE invitations SET accepted_user_id = $2
-          WHERE id = $1 AND accepted_user_id IS NULL`,
-        [invitation.id, user.id]
-      )
-    }
+    const acceptance = await applyInvitationAcceptance(db, invitation, user.id)
+    if (acceptance) return acceptance
 
     const refreshed = await getInvitationRecordByToken(db, invitation.token)
     if (!refreshed) {
