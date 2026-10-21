@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import express, { type Request as ExpressRequest } from 'express'
 import { execFileSync } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
@@ -37,6 +37,21 @@ import { ingestUsageEventsInTransaction } from '../src/services/usageEvents.js'
 import { signRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import './realPostgres.requirement.ts'
+
+// This suite owns migrations, live authority and binding against its own
+// database. The global Host-message admission pool points at the deployment
+// DSN, not this suite's random database, and the limiter has its own real-PG
+// suite; mock it here so the legacy send path exercises real authorization.
+const rateLimiterMock = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
+vi.mock('../src/services/rateLimiterService.js', () => rateLimiterMock)
+rateLimiterMock.checkAndIncrement.mockResolvedValue({
+  allowed: true,
+  remaining: 59,
+  resetMs: Date.now() + 60_000,
+  windowStartMs: Date.now(),
+  count: 1,
+  backendAvailable: true,
+})
 
 type PrivilegeExpectation = Record<string, Set<string>>
 

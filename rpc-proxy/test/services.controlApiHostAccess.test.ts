@@ -5,6 +5,7 @@ import {
   fetchArtifactReadHostConnectionFromControlApi,
   fetchHostConnectionFromControlApi,
 } from '../src/services/controlApiRestService.js'
+import { ControlApiHostVersionMismatchError } from '../src/services/controlApiVersionError.js'
 
 const BINDING = {
   runId: '00000000-0000-4000-8000-000000000123',
@@ -178,15 +179,38 @@ describe('control-api canonical host access client', () => {
     expect(fetchImpl).toHaveBeenCalledOnce()
   })
 
-  it('a non-direct-run 404 resolves to host_access_denied', async () => {
-    const fetchImpl = jsonResponse(404, { error: 'not found' })
+  it.each([
+    ['the legacy host read', {}, 'host-access'],
+    ['message resolution', { messageResolution: true }, 'host-message-resolution'],
+  ] as const)(
+    'a 404 on %s is a typed version mismatch, never a denial',
+    async (_label, options, operation) => {
+      const fetchImpl = jsonResponse(404, { error: 'not found' })
 
-    await expect(
-      fetchHostConnectionFromControlApi('user-1', 'host-a', 'signed-rpc-token', {
+      const rejection = fetchHostConnectionFromControlApi('user-1', 'host-a', 'signed-rpc-token', {
+        ...options,
         fetchImpl: fetchImpl as typeof fetch,
       })
-    ).resolves.toEqual({ denied: true, code: 'host_access_denied' })
-    expect(fetchImpl).toHaveBeenCalledOnce()
+
+      await expect(rejection).rejects.toBeInstanceOf(ControlApiHostVersionMismatchError)
+      await expect(rejection).rejects.toMatchObject({ operation })
+      expect(fetchImpl).toHaveBeenCalledOnce()
+    }
+  )
+
+  it('a 404 on artifact-read names the artifact operation as a version mismatch', async () => {
+    const fetchImpl = jsonResponse(404, { error: 'not found' })
+
+    const rejection = fetchArtifactReadHostConnectionFromControlApi(
+      'user-1',
+      'host-a',
+      'signed-rpc-token',
+      { fetchImpl: fetchImpl as typeof fetch }
+    )
+
+    await expect(rejection).rejects.toBeInstanceOf(ControlApiHostVersionMismatchError)
+    await expect(rejection).rejects.toMatchObject({ operation: 'host-artifact-read' })
+    expect(String(fetchImpl.mock.calls[0]![0])).toMatch(/\/artifact-read$/)
   })
 
   it.each([

@@ -19,6 +19,7 @@ import {
   fetchUserConnectorsFromControlApi,
   requestHostWakeFromControlApi,
 } from '../services/controlApiRestService.js'
+import { ControlApiHostVersionMismatchError } from '../services/controlApiVersionError.js'
 import {
   type HostAccessDenialCode,
   isHostAccessDenied,
@@ -475,7 +476,7 @@ export function createRpcRouter(): Router {
     requireRpcAuth,
     requireScope('host:message:invoke'),
     chatJsonBody,
-    async (req: AuthedRequest, res) => {
+    async (req: AuthedRequest, res, next) => {
       // Host runtime write path (REST-oriented):
       // - separate from read-only status stream
       // - explicitly scoped to host:message:invoke
@@ -663,6 +664,12 @@ export function createRpcRouter(): Router {
         const rejection = controlApiHostAccessRejection(error)
         if (rejection) {
           respondControlApiHostAccessRejection(res, rejection)
+          return
+        }
+        if (error instanceof ControlApiHostVersionMismatchError) {
+          // Let the terminal handler name the deployment mismatch as a 503
+          // instead of misreporting it as an unavailable Host (502) or denial.
+          next(error)
           return
         }
         console.warn(
@@ -1412,7 +1419,7 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/tasks/:taskId/result',
     requireRpcAuth,
     requireScope('host:message:invoke'),
-    async (req: AuthedRequest, res) => {
+    async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
@@ -1469,6 +1476,10 @@ export function createRpcRouter(): Router {
           respondUpstreamUnavailable(res, error)
         }
       } catch (error) {
+        if (error instanceof ControlApiHostVersionMismatchError) {
+          next(error)
+          return
+        }
         console.warn(`[RPC_PROXY] task result forward failed error=${describeErrorForLog(error)}`)
         respondUpstreamUnavailable(res, error)
       }
@@ -1479,7 +1490,7 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/tasks/:taskId/cancel',
     requireRpcAuth,
     requireScope('host:message:invoke'),
-    async (req: AuthedRequest, res) => {
+    async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
@@ -1545,6 +1556,10 @@ export function createRpcRouter(): Router {
           respondUpstreamUnavailable(res, error)
         }
       } catch (error) {
+        if (error instanceof ControlApiHostVersionMismatchError) {
+          next(error)
+          return
+        }
         console.warn(`[RPC_PROXY] cancel forward failed error=${describeErrorForLog(error)}`)
         respondUpstreamUnavailable(res, error)
       }

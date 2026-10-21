@@ -181,6 +181,17 @@ describe('POST /rpc/access/users/:userId/mcp-hosts/:hostRef — atomic access an
       userId,
     }))
     svc.getTeamAgents.mockReset()
+    // The strict POST now shares the Host-message admission bucket with
+    // /message-resolution, so every exercised request must clear it.
+    rateLimiterMock.checkAndIncrement.mockReset()
+    rateLimiterMock.checkAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 59,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+      backendAvailable: true,
+    })
   })
 
   it('authorizes once, derives identity from verified claims, and records the binding', async () => {

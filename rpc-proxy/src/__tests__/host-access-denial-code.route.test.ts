@@ -194,15 +194,63 @@ describe('host authorization 403 carries a machine-readable code at every site',
     }
   )
 
-  it.each(DENYING_ROUTES)('$label: a missing host (404) -> host_access_denied', async route => {
+  it.each(DENYING_ROUTES)(
+    '$label: a missing control-api operation (404) -> typed version mismatch',
+    async route => {
+      controlApiAnswer = { status: 404, body: { error: 'not found' } }
+
+      const res = await send(route)
+
+      // Witness: the request reached control-api and no host was contacted, so
+      // this is the peer answering 404, not a route that never ran.
+      expect(controlApiCalls).toHaveLength(1)
+      expect(hostCalls).toEqual([])
+      expect(res.status).toBe(503)
+      expect(res.body).toEqual({ error: 'control_api_version_mismatch' })
+    }
+  )
+
+  it('messages: a real 403 denial stays host_access_denied', async () => {
+    // Witness for the 404 test above: the 403 mapping is still live on the same
+    // route, so the version-mismatch body is not a blanket replacement.
+    const messages = DENYING_ROUTES.find(route => route.label === 'messages')!
+    controlApiAnswer = {
+      status: 403,
+      body: CONTROL_API_403_BODY,
+      headers: { [REASON_HEADER]: 'host_disabled' },
+    }
+
+    const res = await send(messages)
+
+    expect(controlApiCalls).toHaveLength(1)
+    expect(hostCalls).toEqual([])
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: DENIED_ERROR, code: 'host_access_denied' })
+  })
+
+  // These two answer their own 404 (rather than a coded 403) on a Host denial,
+  // so they live outside DENYING_ROUTES; their outer catches used to turn the
+  // same control-api 404 into 502. Both must reach the terminal 503 mapping.
+  it.each([
+    {
+      label: 'task result',
+      method: 'get' as const,
+      path: '/rpc/hosts/chatllm/tasks/task-1/result',
+    },
+    {
+      label: 'task cancel',
+      method: 'post' as const,
+      path: '/rpc/hosts/chatllm/tasks/task-1/cancel',
+    },
+  ])('$label: a missing control-api operation (404) -> typed version mismatch', async route => {
     controlApiAnswer = { status: 404, body: { error: 'not found' } }
 
     const res = await send(route)
 
     expect(controlApiCalls).toHaveLength(1)
     expect(hostCalls).toEqual([])
-    expect(res.status).toBe(403)
-    expect(res.body).toEqual({ error: DENIED_ERROR, code: 'host_access_denied' })
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'control_api_version_mismatch' })
   })
 })
 

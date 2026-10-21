@@ -147,7 +147,14 @@ async function bindDirectRunWithinBudget(
   }
 }
 
-async function respondWithAuthorizedHostConnection(
+/**
+ * The single Host-message resolution path shared by the legacy strict POST and
+ * the /message-resolution route. The cheap signed-selector checks and admission
+ * live here, before the expensive live Host authorization, so a caller on
+ * either route consumes the same verified-subject bucket during the rollout
+ * window and a mismatched selector never charges it.
+ */
+async function respondWithAdmittedHostConnection(
   req: RpcAuthedRequest,
   res: Response,
   gateway: K8sGateway,
@@ -161,6 +168,22 @@ async function respondWithAuthorizedHostConnection(
   const claims = req.rpcAuth
   if (!claims) {
     denyHostAccess(req, res, 'claims_missing')
+    return
+  }
+  // Same order as /message-resolution's claim-match middleware: a signed
+  // selector that disagrees with the URL is a request-shape error, never a
+  // reason to consume the subject's message budget.
+  if (!userId || claims.sub !== userId) {
+    denyHostAccess(req, res, 'subject_mismatch')
+    return
+  }
+  if (!hostRef || !claims.hostRefs.includes(hostRef)) {
+    denyHostAccess(req, res, 'host_claim_missing')
+    return
+  }
+  const admission = await admitHostMessage(claims.sub)
+  if (admission.status !== 'allowed') {
+    respondHostMessageAdmissionFailure(res, admission)
     return
   }
   const authorization = await authorizeRpcHostAccess(gateway, claims, userId, hostRef, directory)
@@ -384,7 +407,7 @@ export function createRpcAccessUsersRouter(
           return
         }
 
-        await respondWithAuthorizedHostConnection(
+        await respondWithAdmittedHostConnection(
           req,
           res,
           gateway,
@@ -411,17 +434,7 @@ export function createRpcAccessUsersRouter(
     requireRpcTokenHostMatch('hostRef', (req, res, reason) => denyHostAccess(req, res, reason)),
     async (req: HostMessageResolutionRequest, res, next) => {
       try {
-        const claims = req.rpcAuth
-        if (!claims) {
-          denyHostAccess(req, res, 'claims_missing')
-          return
-        }
-        const admission = await admitHostMessage(claims.sub)
-        if (admission.status !== 'allowed') {
-          respondHostMessageAdmissionFailure(res, admission)
-          return
-        }
-        await respondWithAuthorizedHostConnection(
+        await respondWithAdmittedHostConnection(
           req,
           res,
           gateway,
