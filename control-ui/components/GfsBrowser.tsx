@@ -1346,7 +1346,18 @@ export function GfsBrowser(): React.JSX.Element {
   async function moveResource(
     source: GfsChild,
     destination: Pick<GfsChild, 'resourceId' | 'name' | 'kind'>,
-    options: { bubbleError?: boolean; allowNumberedRename?: boolean } = {}
+    options: {
+      bubbleError?: boolean
+      allowNumberedRename?: boolean
+      /**
+       * Names the caller already knows the destination holds (the Move
+       * dialog loads them while it shows the destination tree). They are
+       * merged into the ladder seed, so a destination the browser's children
+       * cache never saw does not cost three blind attempts on names that
+       * are already taken (RP-003).
+       */
+      occupiedNames?: readonly string[]
+    } = {}
   ): Promise<void> {
     const { bubbleError = false, allowNumberedRename = true } = options
     if (
@@ -1361,11 +1372,13 @@ export function GfsBrowser(): React.JSX.Element {
     setMovingResourceId(source.resourceId)
     try {
       // Seed the ladder with the destination's known children (the same cache
-      // the confirmation suggestion came from) so the first 409 skips every
-      // already-taken numbered name instead of guessing it blind.
-      const occupiedNames = new Set<string>(
-        (childCacheRef.current.get(destination.resourceId)?.items ?? []).map(item => item.name)
-      )
+      // the confirmation suggestion came from, plus whatever the caller
+      // observed) so the first 409 skips every already-taken numbered name
+      // instead of guessing it blind.
+      const occupiedNames = new Set<string>([
+        ...(childCacheRef.current.get(destination.resourceId)?.items ?? []).map(item => item.name),
+        ...(options.occupiedNames ?? []),
+      ])
       let moveName = source.name
       let moved = false
       let moveResult: unknown
@@ -2696,11 +2709,11 @@ export function GfsBrowser(): React.JSX.Element {
           busy={movingResourceId === moveTarget.resourceId}
           initialCrumbs={moveDialogCrumbs}
           onClose={() => setMoveTarget(null)}
-          onMove={async (destinationId, destinationName) => {
+          onMove={async destination => {
             await moveResource(
               moveTarget,
-              { resourceId: destinationId, name: destinationName, kind: 'directory' },
-              { bubbleError: true }
+              { resourceId: destination.resourceId, name: destination.name, kind: 'directory' },
+              { bubbleError: true, occupiedNames: destination.occupiedNames }
             )
             setMoveTarget(null)
           }}

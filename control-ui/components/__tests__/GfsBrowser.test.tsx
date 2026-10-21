@@ -1914,6 +1914,88 @@ describe('GfsBrowser', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
   })
 
+  it('seeds the Move-dialog ladder with the names the destination already holds', async () => {
+    // RP-003 residual: the destination is a NESTED folder, so the browser's
+    // children cache never saw it — the Move dialog is the only surface that
+    // knows the names it holds. Without that seed the ladder starts blind,
+    // burns all three attempts on name, name (1) and name (2) and reports
+    // "The destination changed" while name (3) is free.
+    const projects = child('Projects', 'directory', 1)
+    const source = child('name', 'file', 2)
+    const archive = child('Archive', 'directory', 3)
+    mockApiGet.mockImplementation(async (path: string) => {
+      if (path === '/api/v1/gfs/tree') {
+        return {
+          rootResourceId: '11111111-1111-1111-1111-111111111111',
+          items: [projects, source],
+          nextCursor: null,
+        }
+      }
+      if (path === '/api/v1/gfs/resources/id-1/children') {
+        return { items: [archive], nextCursor: null }
+      }
+      if (path === '/api/v1/gfs/resources/id-3/children') {
+        return {
+          items: [
+            child('name', 'file', 4),
+            child('name (1)', 'file', 5),
+            child('name (2)', 'file', 6),
+          ],
+          nextCursor: null,
+        }
+      }
+      return { items: [], nextCursor: null }
+    })
+    const actualApi = await vi.importActual<typeof import('@lib/api')>('@lib/api')
+    const conflict = () => {
+      const text = JSON.stringify({
+        error: { code: 'already_exists', message: 'a resource with this name already exists' },
+      })
+      return actualApi.formatApiError(
+        new Response(text, { status: 409, statusText: 'Conflict' }),
+        text
+      )
+    }
+    // The destination holds name, name (1) and name (2); name (3) is free.
+    mockApiSend.mockImplementation(async (_method: string, _path: string, body: unknown) => {
+      const requested = (body as { newName?: string } | undefined)?.newName ?? 'name'
+      if (requested !== 'name (3)') throw conflict()
+      return { ok: true, data: { resourceId: 'id-2', version: 1 } }
+    })
+    renderBrowser()
+
+    await waitFor(() => expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull())
+    // The destination is NOT part of the visible listing: the browser's
+    // children cache is cold for it.
+    const list = screen.getByRole('list', { name: 'Current folder resources' })
+    expect(within(list).queryByText('Archive')).toBeNull()
+
+    await openResourceMenu('name')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Move file name' })
+    // Walk the dialog tree down to the nested destination.
+    fireEvent.click(await within(dialog).findByRole('button', { name: 'Projects' }))
+    fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+
+    await waitFor(() => expect(mockApiSend).toHaveBeenCalledTimes(2))
+    expect(mockApiSend).toHaveBeenNthCalledWith(
+      1,
+      'PATCH',
+      '/api/v1/gfs/resources/id-2',
+      { drive: 'main', newParentId: 'id-3', ifMatch: 0 },
+      { drive: 'main' }
+    )
+    expect(mockApiSend).toHaveBeenNthCalledWith(
+      2,
+      'PATCH',
+      '/api/v1/gfs/resources/id-2',
+      { drive: 'main', newParentId: 'id-3', ifMatch: 0, newName: 'name (3)' },
+      { drive: 'main' }
+    )
+    expect(await screen.findByText('Moved "name" to "Archive" as "name (3)".')).toBeTruthy()
+  })
+
   it('retries a conflicting move with numbered names until the destination accepts it', async () => {
     const actualApi = await vi.importActual<typeof import('@lib/api')>('@lib/api')
     const folder = child('archive', 'directory', 1)

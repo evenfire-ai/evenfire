@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { IconFolder } from '@components/Sidebar/icons'
 import { IconCheck, IconChevronRight, IconX } from '@components/icons'
 import { Button } from '@components/ui'
@@ -34,11 +34,16 @@ function TreeFolder({
   level,
   selected,
   targetId,
+  onChildrenLoaded,
   onSelect,
   onToggle,
 }: MoveTreeFolderProps) {
   const expanded = expandedIds.has(folder.resourceId)
   const [children, setChildren] = useState<MoveFolder[]>([])
+  // The accumulated children across pages. A ref (not state) so the load
+  // never merges a stale page set, and so the names reported upward are the
+  // complete list this folder has shown.
+  const loadedChildrenRef = useRef<MoveFolder[]>([])
   const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [loaded, setLoaded] = useState(false)
   const [attempted, setAttempted] = useState(false)
@@ -64,9 +69,19 @@ function TreeFolder({
         `/api/v1/gfs/resources/${encodeURIComponent(folder.resourceId)}/children`,
         query
       )) as MoveTreePage
-      setChildren(previous => (cursor ? [...previous, ...page.items] : page.items))
+      const merged = cursor ? [...loadedChildrenRef.current, ...page.items] : page.items
+      loadedChildrenRef.current = merged
+      setChildren(merged)
       setNextCursor(page.nextCursor)
       setLoaded(true)
+      // These are the names the folder already holds. The move ladder needs
+      // them: a destination discovered only through this dialog is unknown to
+      // the browser's children cache, and a blind ladder burns its attempts
+      // on names that are already taken (RP-003).
+      onChildrenLoaded(
+        folder.resourceId,
+        merged.map(item => item.name)
+      )
     } catch (loadError) {
       setError(messageOf(loadError))
     } finally {
@@ -136,6 +151,7 @@ function TreeFolder({
               folder={child}
               key={child.resourceId}
               level={level + 1}
+              onChildrenLoaded={onChildrenLoaded}
               onSelect={onSelect}
               onToggle={onToggle}
               selected={selected}
@@ -195,6 +211,14 @@ export function GfsMoveDialog({
   const [loading, setLoading] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState('')
+  // The names this dialog has observed inside each folder. The drive root's
+  // own listing arrives with the tree; every other folder reports its
+  // children as they load (RP-003).
+  const knownChildNamesRef = useRef<Map<string, string[]>>(new Map())
+
+  function reportChildrenLoaded(folderId: string, names: string[]): void {
+    knownChildNamesRef.current.set(folderId, names)
+  }
 
   async function loadRoots(cursor?: string): Promise<void> {
     setLoading(true)
@@ -247,11 +271,46 @@ export function GfsMoveDialog({
     setExpandedIds(previous => new Set(previous).add(folder.resourceId))
   }
 
+  /**
+   * The names the destination already holds, as far as this dialog knows
+   * them. The drive root's listing IS the root's children; every other
+   * destination reports its children while the tree loads them. A destination
+   * that was never expanded is read once here, so the ladder is never seeded
+   * blind — the browser's own children cache is cold for a folder only this
+   * dialog discovered (RP-003).
+   */
+  async function destinationOccupiedNames(destination: SelectedMoveDestination): Promise<string[]> {
+    if (destination.resourceId === rootResourceId) {
+      return rootFolders.map(folder => folder.name)
+    }
+    const known = knownChildNamesRef.current.get(destination.resourceId)
+    if (known) return known
+    try {
+      const page = (await apiGet(
+        `/api/v1/gfs/resources/${encodeURIComponent(destination.resourceId)}/children`,
+        { drive: DRIVE }
+      )) as MoveTreePage
+      const names = (page?.items ?? []).map(item => item.name)
+      knownChildNamesRef.current.set(destination.resourceId, names)
+      return names
+    } catch {
+      // The seed is an optimization, never the authority: the server's 409 is
+      // what decides a collision. A failed read leaves the ladder blind but
+      // the move itself intact.
+      return []
+    }
+  }
+
   async function commit(): Promise<void> {
     if (!selected || busy) return
     setError('')
     try {
-      await onMove(selected.resourceId, selected.name)
+      const occupiedNames = await destinationOccupiedNames(selected)
+      await onMove({
+        resourceId: selected.resourceId,
+        name: selected.name,
+        occupiedNames,
+      })
     } catch (moveError) {
       setError(messageOf(moveError))
     }
@@ -355,6 +414,7 @@ export function GfsMoveDialog({
                 folder={folder}
                 key={folder.resourceId}
                 level={rootResourceId ? 2 : 1}
+                onChildrenLoaded={reportChildrenLoaded}
                 onSelect={selectFolder}
                 onToggle={toggleFolder}
                 selected={selected}
