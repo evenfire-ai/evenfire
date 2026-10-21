@@ -660,11 +660,18 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     const previousUrl = lastMainFrameUrl
     lastMainFrameUrl = navigatedUrl
     const withinApp = isSandboxUiNavigationWithinPrefix(navigatedUrl, allowedNavigationPrefix)
-    // A new document the user reached after the handoff gave up (a multi-page
-    // app) is the live route. A reload commits the same URL and the commits a
-    // pending handoff is still waiting through are not the user's: neither may
-    // replace the requested route.
-    if (withinApp && documentLoaded && !clientRouteHandoffPending && navigatedUrl !== previousUrl) {
+    // With no requested route there is nothing a boot rewrite could overwrite,
+    // so the first document committed inside the app is already the live
+    // route; waiting for the load would drop where the user goes meanwhile.
+    // Otherwise, a new document the user reached after the handoff gave up (a
+    // multi-page app) is the live route. A reload commits the same URL and the
+    // commits a pending handoff is still waiting through are not the user's:
+    // neither may replace the requested route.
+    if (
+      withinApp &&
+      (!needsClientRouteHandoff ||
+        (documentLoaded && !clientRouteHandoffPending && navigatedUrl !== previousUrl))
+    ) {
       active.routeSettled = true
     }
     if (httpResponseCode !== 401 || !withinApp) return

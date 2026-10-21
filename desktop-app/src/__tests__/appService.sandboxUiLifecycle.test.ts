@@ -1543,6 +1543,59 @@ describe('AppService sandbox-ui route settling', () => {
     expect(getActiveSandboxUiLocation()).toEqual(location('/welcome'))
   })
 
+  // Chromium commits a document (`did-navigate`) well before it finishes
+  // loading; the fake's commitLoad does both at once, so these emit the commit
+  // alone for the URL the driver asked to load.
+  function commitWithoutFinishing(
+    webContents: InstanceType<typeof electronMocks.FakeWebContentsView>['webContents'],
+    url = webContents.pendingUrl
+  ) {
+    webContents.currentUrl = url
+    webContents.emit('did-navigate', {}, url, 200, '')
+  }
+
+  it('a view with no requested route follows the user before the document finishes loading', async () => {
+    const { service, released, webContents } = await openLoading()
+    commitWithoutFinishing(webContents)
+    webContents.navigateInPage(`${APP_VIEW_URL}/settings`)
+    expect(getActiveSandboxUiLocation()).toEqual(location('/settings'))
+    await service.closeSandboxUi()
+    expect(released.map(event => event.location)).toEqual([{ routePath: '/settings' }])
+  })
+
+  it('a deep link copied before the load finishes points where the user went', async () => {
+    const { buildSandboxUiWebLink } = await import('../sandboxUiDeepLinks.js')
+    const { config } = await import('../config.js')
+    vi.spyOn(config, 'desktopProfileUiBaseUrlExplicit', 'get').mockReturnValue(true)
+    const { service, webContents } = await openLoading()
+    commitWithoutFinishing(webContents)
+    webContents.navigateInPage(`${APP_VIEW_URL}/settings`)
+    await expect(service.createSandboxUiDeepLink()).resolves.toEqual({
+      url: buildSandboxUiWebLink('https://profile.example.com', location('/settings')),
+    })
+  })
+
+  it('a view with no requested route reports a document the server redirected it to before it loads', async () => {
+    const { webContents } = await openLoading()
+    commitWithoutFinishing(webContents, `${APP_VIEW_URL}/welcome`)
+    expect(getActiveSandboxUiLocation()).toEqual(location('/welcome'))
+  })
+
+  it('a view with no requested route ignores a document committed outside the app', async () => {
+    const { webContents } = await openLoading()
+    commitWithoutFinishing(webContents, 'https://idp.example/login')
+    expect(getActiveSandboxUiLocation()).toEqual(location())
+  })
+
+  it('a boot redirect before the load does not replace a requested route', async () => {
+    const { service, released, webContents } = await openLoading('/r/first')
+    commitWithoutFinishing(webContents)
+    webContents.navigateInPage(`${APP_VIEW_URL}/login`)
+    expect(getActiveSandboxUiLocation()).toEqual(location('/r/first'))
+    await service.closeSandboxUi()
+    expect(released.map(event => event.location)).toEqual([{ routePath: '/r/first' }])
+  })
+
   it('an in-page navigation before the first load does not replace the requested route', async () => {
     const { service, webContents } = await openLoading('/r/first')
     webContents.navigateInPage(`${APP_VIEW_URL}/#boot`)
