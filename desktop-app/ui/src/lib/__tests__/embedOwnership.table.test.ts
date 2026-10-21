@@ -96,6 +96,8 @@ const mountedSeq = [...openingSeq, ev.mounted(A)]
 const closeRequestedSeq = [...mountedSeq, ev.backToApps()]
 /** B is the owner of T1, waiting for A (closeRequested). */
 const waitingSeq = [...mountedSeq, ev.relaunch(LB)]
+/** A is the owner of T1; main released its view and has yet to reject its open. */
+const releasedOpeningSeq = [...openingSeq, ev.released(A, 'open_failed', { routePath: '/r' })]
 
 const phaseOf = (s: EmbedOwnershipState, id: LaunchId): ViewPhase | undefined =>
   s.views.get(id)?.phase
@@ -117,6 +119,9 @@ describe('fixtures reach the phase they claim', () => {
     const w = stateOf(waitingSeq)
     expect(phaseOf(w, B)).toBe('waiting')
     expect(w.owner).toBe(B)
+    const ro = stateOf(releasedOpeningSeq)
+    expect(phaseOf(ro, A)).toBe('releasedOpening')
+    expect(ro.owner).toBe(A)
   })
 })
 
@@ -452,6 +457,120 @@ describe('decision table rows', () => {
     expectNoop(out.state, ev.openFailed(A))
   })
 
+  it('R1c: the opening owner released because its open failed keeps the launch for its rejection', () => {
+    const out = reduceEmbedOwnership(
+      stateOf(openingSeq),
+      ev.released(A, 'open_failed', { routePath: '/r' })
+    )
+    expect(out.state.owner).toBe(A)
+    expect(phaseOf(out.state, A)).toBe('releasedOpening')
+    expect(out.state.failure).toBeNull()
+    expect(out.state.lastRoute.get(T1)).toEqual({ routePath: '/r' })
+    expect(out.effects).toEqual([
+      { type: 'persistRoute', tabId: T1, route: { action: 'set', routePath: '/r' } },
+    ])
+  })
+
+  it('R1c: the rejection that follows fails the launch with its message', () => {
+    const out = reduceEmbedOwnership(stateOf(releasedOpeningSeq), ev.openFailed(A, 'attach failed'))
+    expect(out.state.owner).toBeNull()
+    expect(out.state.views.size).toBe(0)
+    expect(out.state.failure).toEqual({
+      tabId: T1,
+      launchId: A,
+      kind: 'open',
+      message: 'attach failed',
+    })
+    expect(out.effects).toEqual([{ type: 'launchSettled', launchId: A, outcome: 'failed' }])
+  })
+
+  it('R1c: a rejection that arrives before the release fails the launch; the release is late', () => {
+    const s = stateOf([...openingSeq, ev.openFailed(A, 'attach failed')])
+    expect(s.failure).toMatchObject({ launchId: A, message: 'attach failed' })
+    expectNoop(s, ev.released(A, 'open_failed', { routePath: '/r' }))
+  })
+
+  it('R1c: a second release of the released view changes nothing', () => {
+    const s = stateOf(releasedOpeningSeq)
+    expectNoop(s, ev.released(A, 'open_failed', { routePath: '/r' }))
+    expectNoop(s, ev.released(A, 'crashed', null))
+  })
+
+  it('R1c: a relaunch before the rejection closes nothing and waits for it', () => {
+    const s = stateOf([...releasedOpeningSeq, ev.relaunch(LB)])
+    expect(s.owner).toBe(B)
+    expect(phaseOf(s, A)).toBe('releasedOpening')
+    expect(phaseOf(s, B)).toBe('waiting')
+    const out = reduceEmbedOwnership(s, ev.openFailed(A))
+    expect(out.state.failure).toBeNull()
+    expect(phaseOf(out.state, B)).toBe('measuring')
+    expect(out.effects).toEqual([
+      { type: 'measure', launchId: B },
+      { type: 'launchSettled', launchId: A, outcome: 'abandoned' },
+    ])
+    expect(
+      run([...releasedOpeningSeq, ev.relaunch(LB), ev.openFailed(A)]).effects
+    ).not.toContainEqual(expect.objectContaining({ type: 'close' }))
+  })
+
+  it('R1c: leaving the tab before the rejection closes nothing and abandons the launch', () => {
+    const s = stateOf([...releasedOpeningSeq, ev.projected(T2)])
+    expect(s.owner).toBeNull()
+    expect(phaseOf(s, A)).toBe('releasedOpening')
+    const out = reduceEmbedOwnership(s, ev.openFailed(A))
+    expect(out.state.views.size).toBe(0)
+    expect(out.state.failure).toBeNull()
+    expect(out.effects).toEqual([{ type: 'launchSettled', launchId: A, outcome: 'abandoned' }])
+    expect(run([...releasedOpeningSeq, ev.projected(T2)]).effects).not.toContainEqual(
+      expect.objectContaining({ type: 'close' })
+    )
+  })
+
+  it('R1c: a handoff before the rejection waits for it', () => {
+    const s = stateOf([...releasedOpeningSeq, ev.handoff(7)])
+    expect([...s.handoffs[0]!.waitFor]).toEqual([A])
+    const out = reduceEmbedOwnership(s, ev.openFailed(A))
+    expect(out.state.handoffs).toEqual([])
+    expect(out.effects).toContainEqual({ type: 'handoffReady', requestId: 7 })
+  })
+
+  it('R1c: a re-click before the rejection changes nothing', () => {
+    const s = stateOf(releasedOpeningSeq)
+    const out = reduceEmbedOwnership(s, ev.intent(launch(C, T1)))
+    expect(out.state).toBe(s)
+    expect(out.effects).toEqual([{ type: 'launchSettled', launchId: C, outcome: 'abandoned' }])
+  })
+
+  it('R1c: coming back to the tab before the rejection launches again once it lands', () => {
+    const s = stateOf([...releasedOpeningSeq, ev.projected(T2), ev.projected(T1), ev.intent(LB)])
+    expect(s.owner).toBe(B)
+    expect(phaseOf(s, B)).toBe('waiting')
+    const out = reduceEmbedOwnership(s, ev.openFailed(A))
+    expect(out.state.owner).toBe(B)
+    expect(phaseOf(out.state, B)).toBe('measuring')
+    expect(out.effects).toEqual([
+      { type: 'measure', launchId: B },
+      { type: 'launchSettled', launchId: A, outcome: 'abandoned' },
+    ])
+  })
+
+  it('R1c: a mount confirmation for the released view drops it as abandoned', () => {
+    const out = reduceEmbedOwnership(stateOf(releasedOpeningSeq), ev.mounted(A))
+    expect(out.state.owner).toBeNull()
+    expect(out.state.views.size).toBe(0)
+    expect(out.effects).toEqual([{ type: 'launchSettled', launchId: A, outcome: 'abandoned' }])
+  })
+
+  it('R1c: a closing view released because its open failed is just gone', () => {
+    const s = stateOf([...openingSeq, ev.backToApps()])
+    const out = reduceEmbedOwnership(s, ev.released(A, 'open_failed', { routePath: '/r' }))
+    expect(out.state.views.size).toBe(0)
+    expect(out.state.failure).toBeNull()
+    expect(out.effects).toEqual([
+      { type: 'persistRoute', tabId: T1, route: { action: 'set', routePath: '/r' } },
+    ])
+  })
+
   it('R1b: a crash of a closing view is not a crash failure', () => {
     const out = reduceEmbedOwnership(stateOf(closeRequestedSeq), ev.released(A, 'crashed', null))
     expect(out.state.failure).toBeNull()
@@ -508,6 +627,7 @@ describe('totality: every unlisted (event, condition) pair is a no-op by referen
     { name: 'mounted owner', seq: mountedSeq, target: A },
     { name: 'closeRequested', seq: closeRequestedSeq, target: A },
     { name: 'closeRequested behind waiting owner', seq: waitingSeq, target: A },
+    { name: 'releasedOpening owner', seq: releasedOpeningSeq, target: A },
   ]
 
   const targetedEvents: Array<{ key: string; make: (id: LaunchId) => EmbedEvent }> = [
@@ -518,6 +638,10 @@ describe('totality: every unlisted (event, condition) pair is a no-op by referen
     { key: 'closeFailed', make: id => ev.closeFailed(id) },
     { key: 'released(replaced,loc)', make: id => ev.released(id, 'replaced', { routePath: '/q' }) },
     { key: 'released(crashed,null)', make: id => ev.released(id, 'crashed', null) },
+    {
+      key: 'released(open_failed,loc)',
+      make: id => ev.released(id, 'open_failed', { routePath: '/q' }),
+    },
     { key: 'titleChanged', make: id => ev.title(id) },
   ]
 
@@ -530,6 +654,7 @@ describe('totality: every unlisted (event, condition) pair is a no-op by referen
       'openSettled(failed)',
       'released(replaced,loc)',
       'released(crashed,null)',
+      'released(open_failed,loc)',
       'titleChanged',
     ],
     'measuring owner': [
@@ -538,6 +663,7 @@ describe('totality: every unlisted (event, condition) pair is a no-op by referen
       'openSettled(failed)',
       'released(replaced,loc)',
       'released(crashed,null)',
+      'released(open_failed,loc)',
       'titleChanged',
     ],
     'opening owner': [
@@ -545,12 +671,14 @@ describe('totality: every unlisted (event, condition) pair is a no-op by referen
       'openSettled(failed)',
       'released(replaced,loc)',
       'released(crashed,null)',
+      'released(open_failed,loc)',
       'titleChanged',
     ],
     'mounted owner': [
       'openSettled(failed)',
       'released(replaced,loc)',
       'released(crashed,null)',
+      'released(open_failed,loc)',
       'titleChanged',
     ],
     closeRequested: [
@@ -558,13 +686,16 @@ describe('totality: every unlisted (event, condition) pair is a no-op by referen
       'closeFailed',
       'released(replaced,loc)',
       'released(crashed,null)',
+      'released(open_failed,loc)',
     ],
     'closeRequested behind waiting owner': [
       'openSettled(failed)',
       'closeFailed',
       'released(replaced,loc)',
       'released(crashed,null)',
+      'released(open_failed,loc)',
     ],
+    'releasedOpening owner': ['openSettled(mounted)', 'openSettled(failed)', 'titleChanged'],
   }
 
   for (const fx of fixtures) {
@@ -600,6 +731,8 @@ describe('totality: every unlisted (event, condition) pair is a no-op by referen
       [openingSeq, ev.openFailed(A)],
       [closeRequestedSeq, ev.released(A, 'closed', { routePath: '/x' })],
       [mountedSeq, ev.released(A, 'crashed', null)],
+      [openingSeq, ev.released(A, 'open_failed', { routePath: '/r' })],
+      [releasedOpeningSeq, ev.openFailed(A)],
       [closeRequestedSeq, ev.closeFailed(A)],
       [measuringSeq, ev.measured(A)],
       [measuringSeq, ev.measured(A, null)],
@@ -803,7 +936,12 @@ describe('effect ordering', () => {
 
 // ---- R-settle across all rows ----------------------------------------------------
 
-const PENDING: ReadonlySet<ViewPhase> = new Set(['waiting', 'measuring', 'opening'])
+const PENDING: ReadonlySet<ViewPhase> = new Set([
+  'waiting',
+  'measuring',
+  'opening',
+  'releasedOpening',
+])
 const pendingIds = (s: EmbedOwnershipState) =>
   new Set([...s.views.values()].filter(v => PENDING.has(v.phase)).map(v => v.launchId))
 
@@ -875,7 +1013,8 @@ function eventSequence() {
     'crashed' as const,
     'parent_closed' as const,
     'session' as const,
-    'renderer_replaced' as const
+    'renderer_replaced' as const,
+    'open_failed' as const
   )
   const ev1: fc.Arbitrary<EmbedEvent> = fc.oneof(
     fc.option(tab, { nil: null }).map(ev.projected),
@@ -923,6 +1062,18 @@ describe('R-settle walks every row', () => {
     R1a: [...mountedSeq, ev.released(A, 'crashed', null)],
     'R1a (opening)': [...openingSeq, ev.released(A, 'crashed', null)],
     R1b: [...openingSeq, ev.released(A, 'session', null)],
+    R1c: [...releasedOpeningSeq, ev.openFailed(A)],
+    'R1c (relaunch)': [...releasedOpeningSeq, ev.relaunch(LB), ev.openFailed(A), ev.measured(B)],
+    'R1c (left)': [...releasedOpeningSeq, ev.projected(T2), ev.openFailed(A)],
+    'R1c (back)': [
+      ...releasedOpeningSeq,
+      ev.projected(T2),
+      ev.projected(T1),
+      ev.intent(LB),
+      ev.openFailed(A),
+      ev.measured(B),
+    ],
+    'R1c (mounted)': [...releasedOpeningSeq, ev.mounted(A)],
     R2: [...closeRequestedSeq, ev.released(A), ev.released(A)],
     X1: [...closeRequestedSeq, ev.closeFailed(A)],
     T1: [...mountedSeq, ev.title(A)],

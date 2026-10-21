@@ -18,6 +18,7 @@ import type {
   EmbedOwnershipMachine,
   EmbedRefreshErrorEvent,
 } from '../../ui/src/lib/embedOwnershipMachine.types'
+import { embedFailureMessage, embedViewState } from '../../ui/src/lib/embedOwnershipView'
 import {
   activeWorkspaceTab,
   closeWorkspaceTab,
@@ -198,6 +199,8 @@ type Reality =
   /** The next view dies (crash, session change) inside its mount, before its open settles. */
   | 'crashDuringMount'
   | 'sessionDuringMount'
+  /** The next view mounts, then attaching it to the window throws: its open fails. */
+  | 'attachFailsDuringMount'
   | 'crash'
   | 'title'
   | 'navigate'
@@ -278,6 +281,8 @@ class World {
   crashNextLoad = false
   /** The session changes the moment the next view starts loading. */
   sessionChangeNextLoad = false
+  /** Attaching the next view to the window throws, after main made it the active view. */
+  attachFailsNextMount = false
   tabs: WorkspaceTabsState
   machine: EmbedOwnershipMachine
   generation = 0
@@ -364,6 +369,17 @@ class World {
       onLoad: (webContents, url) => world.onLoad(webContents, url),
     })
     world = new World(options, main)
+    const attach = main.parent.contentView.addChildView.getMockImplementation() as (
+      view: unknown
+    ) => void
+    main.parent.contentView.addChildView.mockImplementation((view: unknown) => {
+      if (world.attachFailsNextMount) {
+        world.attachFailsNextMount = false
+        world.log.push('reality attach fails inside the mount')
+        throw new Error('attach failed')
+      }
+      attach(view)
+    })
     if (!options.lateMeasurer) world.registerMeasurer()
     world.machine.projected(world.activeAppTabId())
     return world
@@ -640,6 +656,10 @@ class World {
     }
     if (kind === 'sessionDuringMount') {
       this.sessionChangeNextLoad = true
+      return true
+    }
+    if (kind === 'attachFailsDuringMount') {
+      this.attachFailsNextMount = true
       return true
     }
     const active = getActiveSandboxUi()
@@ -1150,6 +1170,7 @@ const realityArb = fc.array(
   fc.constantFrom<Reality>(
     'crashDuringMount',
     'sessionDuringMount',
+    'attachFailsDuringMount',
     'crash',
     'title',
     'navigate',
@@ -1569,6 +1590,74 @@ describe('embed ownership named cases (real main process)', () => {
     expect(world.outcomes.get(launchId)).toBe('abandoned')
     expect(world.machine.getSnapshot().failure).toBeNull()
     expectNoView(world)
+    world.checkDrained()
+    assertClean(world)
+  })
+
+  it('K26: an open that mounts and then fails shows its error and fails its launch', async () => {
+    const { sink, world } = await manualWorld()
+    world.attachFailsNextMount = true
+
+    const launchId = world.selectTab(TAB_ALPHA)!
+    await sink.runAll()
+
+    const snapshot = world.machine.getSnapshot()
+    const view = embedViewState(snapshot)
+    expect(view.kind).toBe('failed')
+    expect(view.kind === 'failed' && embedFailureMessage(view.failure)).toBe('attach failed')
+    expect(world.outcomes.get(launchId)).toBe('failed')
+    // main releases the view it mounted before rejecting the open, and the
+    // route it was asked for still reaches the tab.
+    expect(world.releases).toEqual([
+      { launchId, reason: 'open_failed', location: { routePath: `/r/${launchId}` } },
+    ])
+    expect(world.tabs.tabs.find(tab => tab.id === TAB_ALPHA)?.app?.savedRoutePath).toBe(
+      `/r/${launchId}`
+    )
+    expect(snapshot.owner).toBeNull()
+    expectNoView(world)
+    world.checkDrained()
+    assertClean(world)
+  })
+
+  it('K26: a relaunch between the release and the rejection waits for the failed open, then opens', async () => {
+    const { sink, world } = await manualWorld()
+    world.attachFailsNextMount = true
+
+    const failed = world.selectTab(TAB_ALPHA)!
+    // Main's release of the failed view reaches the renderer; the open's
+    // rejection is still on the wire behind it.
+    await sink.runAll(isLabel('ipc→renderer reply sandboxUi:open', short(failed)))
+    expect(world.releases.map(release => release.reason)).toEqual(['open_failed'])
+    expect(world.machine.getSnapshot().views.get(failed)?.phase).toBe('releasedOpening')
+    const relaunched = world.relaunch()!
+    // Main already let the failed view go: nothing is sent to close it, and the
+    // relaunch measures only once the failed open has settled.
+    expect(closesSent(world)).toEqual([])
+    expect(world.machine.getSnapshot().views.get(relaunched)?.phase).toBe('waiting')
+    await sink.runAll()
+
+    expect(world.outcomes.get(failed)).toBe('abandoned')
+    expect(world.outcomes.get(relaunched)).toBe('mounted')
+    expect(getActiveSandboxUi()?.launchId).toBe(relaunched)
+    expect(closesSent(world)).toEqual([])
+    world.checkDrained()
+    assertClean(world)
+  })
+
+  it('K26: coming back to the tab before the failed open rejects launches it again', async () => {
+    const { sink, world } = await manualWorld()
+    world.attachFailsNextMount = true
+
+    const failed = world.selectTab(TAB_ALPHA)!
+    await sink.runAll(isLabel('ipc→renderer reply sandboxUi:open', short(failed)))
+    world.selectTab(TAB_BETA)
+    const back = world.selectTab(TAB_ALPHA)!
+    await sink.runAll()
+
+    expect(world.outcomes.get(failed)).toBe('abandoned')
+    expect(world.outcomes.get(back)).toBe('mounted')
+    expect(getActiveSandboxUi()?.launchId).toBe(back)
     world.checkDrained()
     assertClean(world)
   })

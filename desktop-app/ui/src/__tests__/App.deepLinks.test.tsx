@@ -1544,6 +1544,54 @@ describe('App deep-link orchestration', () => {
     expect(ensureTeamContext).toHaveBeenCalledTimes(1)
   })
 
+  it('defers a cross-team link whose open mounts and then fails, with its error', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let liveTeamId = 'team-a'
+    const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
+      if (!teamId || teamId === liveTeamId) return false
+      liveTeamId = teamId
+      return true
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      handleEnsureTeamContext: ensureTeamContext,
+      getCurrentTeamId: () => liveTeamId,
+    })
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+        },
+      ],
+    })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
+    })
+    main.failNextOpenAfterMount(new Error('attach failed'))
+    await confirmPendingAppLink()
+    await waitForAppOpen()
+
+    await waitFor(() => {
+      expect(currentController.pushToast).toHaveBeenCalledWith('attach failed', 'error')
+    })
+    await act(async () => {
+      await main.settle()
+    })
+    expect(main.reported('sandboxUi:released')).toEqual([
+      expect.objectContaining({ reason: 'open_failed' }),
+    ])
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+    expect(liveTeamId).toBe('team-b')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+  })
+
   it('retries a failed cross-team native mount without treating its own restore as a user switch', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     let liveTeamId = 'team-a'

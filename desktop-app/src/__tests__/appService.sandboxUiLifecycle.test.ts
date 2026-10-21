@@ -1067,6 +1067,33 @@ describe('AppService sandbox-ui view release', () => {
     expectNoOrphanView(parentWindow)
   })
 
+  it('releases a view whose open failed after mounting it as open_failed, before rejecting', async () => {
+    const { service, parentWindow, launch } = await setupReleaseRecorder('/r/asked')
+    const order: Array<[string, unknown]> = []
+    const args = launch('first-app', {
+      onReleased: event => {
+        order.push(['released', event])
+      },
+    })
+    parentWindow.contentView.addChildView.mockImplementationOnce(() => {
+      throw new Error('attach failed')
+    })
+
+    await service.openSandboxUi(args).catch((error: Error) => {
+      order.push(['rejected', error.message])
+    })
+
+    expect(order).toEqual([
+      [
+        'released',
+        { launchId: args.launchId, reason: 'open_failed', location: { routePath: '/r/asked' } },
+      ],
+      ['rejected', 'attach failed'],
+    ])
+    expect(getActiveSandboxUi()).toBeNull()
+    expectNoOrphanView(parentWindow)
+  })
+
   it('a close naming another launch leaves the live view alone', async () => {
     const { service, parentWindow, released, launch } = await setupReleaseRecorder()
     const args = launch('first-app')

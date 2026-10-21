@@ -134,7 +134,7 @@ describe('the App suites’ sandbox-ui bridge delivers what main produces, in or
     await open(A)
     await main.settle()
 
-    expect(seen).toEqual([`released ${A} closed {}`, `open ${A} failed: attach failed`])
+    expect(seen).toEqual([`released ${A} open_failed {}`, `open ${A} failed: attach failed`])
     expect(main.live()).toBeNull()
   })
 

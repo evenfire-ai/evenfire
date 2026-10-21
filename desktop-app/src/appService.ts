@@ -5947,8 +5947,10 @@ export class AppService {
       await this.mintAndMountSandboxUiView(args, recipeNs, recipeName, sessionEpoch)
     } catch (error) {
       // Only this open's own view, never one another launch owns; its release
-      // goes out before the rejection.
-      const reason = this.sandboxUiSessionEpoch === sessionEpoch ? 'closed' : 'session'
+      // goes out before the rejection. `open_failed` tells the renderer that
+      // rejection is on its way, so it reports the failure instead of an
+      // abandoned launch; a session that ended meanwhile is the real cause.
+      const reason = this.sandboxUiSessionEpoch === sessionEpoch ? 'open_failed' : 'session'
       await this.teardownSandboxUiView(reason, args.launchId)
       throw error
     }

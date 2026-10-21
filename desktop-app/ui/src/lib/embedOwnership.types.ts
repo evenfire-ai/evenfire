@@ -31,6 +31,12 @@ export type ViewPhase =
   | 'mounted'
   /** CAS close emitted; ends with `released`, a failed `openSettled` or `closeFailed`. */
   | 'closeRequested'
+  /**
+   * Main released the view of an open that failed after mounting it; the launch
+   * still waits for that open's rejection, which carries the failure. Nothing
+   * of it is left in main, so it is never closed.
+   */
+  | 'releasedOpening'
 
 export type ViewRecord = Launch & { phase: ViewPhase }
 

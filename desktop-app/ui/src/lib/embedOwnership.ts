@@ -26,7 +26,7 @@ import type {
  *
  * Every transition is followed by the level rules, in this order:
  *   sweep   — a record that is not the owner is dropped if main never saw it, or
- *             CAS-closed once if it did;
+ *             CAS-closed once if main still holds its view;
  *   advance — an owner waits until no other record of its tab is left, so it
  *             opens at the route its predecessor leaves behind;
  *   handoff — a handoff completes when none of the views it waits for remain;
@@ -52,7 +52,10 @@ export function createEmbedOwnershipState(): EmbedOwnershipState {
 }
 
 const isPending = (v: ViewRecord): boolean =>
-  v.phase === 'waiting' || v.phase === 'measuring' || v.phase === 'opening'
+  v.phase === 'waiting' ||
+  v.phase === 'measuring' ||
+  v.phase === 'opening' ||
+  v.phase === 'releasedOpening'
 
 function pendingIds(state: EmbedOwnershipState): LaunchId[] {
   const ids: LaunchId[] = []
@@ -91,10 +94,16 @@ function openRoutePath(state: EmbedOwnershipState, record: ViewRecord): string |
   return record.route.routePath
 }
 
-/** Nothing of the launch's tab is still alive in a non-closing phase. */
+/**
+ * Nothing of the launch's tab is still alive in a non-closing phase. A released
+ * view that lost ownership only waits for its rejection, so it is as good as
+ * closing; while it is still the owner, its failure is about to show.
+ */
 function tabIsFree(state: EmbedOwnershipState, launch: Launch): boolean {
   for (const v of state.views.values()) {
-    if (v.tabId === launch.tabId && v.phase !== 'closeRequested') return false
+    if (v.tabId !== launch.tabId || v.phase === 'closeRequested') continue
+    if (v.phase === 'releasedOpening' && v.launchId !== state.owner) continue
+    return false
   }
   return true
 }
@@ -181,6 +190,15 @@ function applyRow(state: EmbedOwnershipState, event: EmbedEvent): RowResult {
       const record = state.views.get(event.launchId)
       if (!record) return unchanged
       if (event.outcome === 'mounted') {
+        // Main never confirms a view it already released; should it, the launch
+        // has no view left to own.
+        if (record.phase === 'releasedOpening') {
+          const dropped = withoutView(state, record.launchId)
+          return {
+            state: record.launchId === state.owner ? { ...dropped, owner: null } : dropped,
+            effects: [],
+          }
+        }
         // A launch already being closed keeps waiting for its `released`.
         if (record.phase !== 'opening') return unchanged
         return {
@@ -211,10 +229,16 @@ function applyRow(state: EmbedOwnershipState, event: EmbedEvent): RowResult {
 
     case 'released': {
       const record = state.views.get(event.launchId)
-      if (!record) return unchanged
-      let next = withoutView(state, record.launchId)
+      // Main releases a view once; the record only waits for its open's rejection.
+      if (!record || record.phase === 'releasedOpening') return unchanged
+      // The owner keeps the launch until the rejection that follows, so the
+      // failure it carries is reported instead of an abandoned launch.
+      const heldForRejection = event.reason === 'open_failed' && record.phase === 'opening'
+      let next = heldForRejection
+        ? withView(state, { ...record, phase: 'releasedOpening' })
+        : withoutView(state, record.launchId)
       const wasOwner = record.launchId === state.owner
-      if (wasOwner) next = { ...next, owner: null }
+      if (wasOwner && !heldForRejection) next = { ...next, owner: null }
       const effects: EmbedEffect[] = []
       if (event.location !== null) {
         const lastRoute = new Map(next.lastRoute)
@@ -225,7 +249,8 @@ function applyRow(state: EmbedOwnershipState, event: EmbedEvent): RowResult {
       }
       // A crash of the view the user is waiting on or looking at must leave the tab
       // something to show and a way back. Any other release (session end, a view
-      // being closed) is not the app's fault and leaves the tab simply unowned.
+      // being closed) is not the app's fault and leaves the tab simply unowned,
+      // except an open that failed, whose rejection reports it.
       const crashed =
         event.reason === 'crashed' &&
         wasOwner &&
@@ -266,6 +291,7 @@ function sweep(state: EmbedOwnershipState, effects: EmbedEffect[]): EmbedOwnersh
       next = withView(next, { ...v, phase: 'closeRequested' })
       effects.push({ type: 'close', launchId: v.launchId })
     }
+    // `releasedOpening` stays until its rejection: main already let the view go.
   }
   return next
 }

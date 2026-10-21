@@ -34,11 +34,14 @@ export type { SandboxUiDeepLinkEnvelope } from '@clerum/desktop-app-links'
 
 /**
  * Why a sandbox-ui view died. `crashed` never carries a location: handing the
- * route back would relaunch straight into whatever crashed it.
+ * route back would relaunch straight into whatever crashed it. `open_failed`
+ * is a view torn down by the open that mounted it, which then rejects: the
+ * failure is that rejection, so the renderer must wait for it.
  */
 export type SandboxUiReleaseReason =
   | 'replaced'
   | 'closed'
+  | 'open_failed'
   | 'crashed'
   | 'parent_closed'
   | 'session'
