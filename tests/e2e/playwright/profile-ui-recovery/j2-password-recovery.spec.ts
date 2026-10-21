@@ -45,8 +45,11 @@ test('J2 recovery link clears the logout fence, revokes the prior session, and l
   await page.goto('/invitations/synthetic-reset-proof')
   await expect(page.getByRole('heading', { name: 'Reset password' })).toBeVisible()
 
-  // The recovery link must clear the fence before the form can reach the backend.
-  await expect.poll(() => readLogoutFence(page)).toBeNull()
+  // Opening the link is only a stale preview, not an authoritative recovery
+  // result. The fence must survive even when the browser clock says the link
+  // is current; the reset submission itself is allowed through the fence.
+  await expect(page.getByRole('button', { name: 'Reset password' })).toBeVisible()
+  expect(await readLogoutFence(page)).toBe('true')
 
   await page.getByLabel('Password', { exact: true }).fill(RECOVERY_MEMBER.replacementPassword)
   await page.getByLabel('Confirm password').fill(RECOVERY_MEMBER.replacementPassword)
@@ -60,6 +63,8 @@ test('J2 recovery link clears the logout fence, revokes the prior session, and l
   expect(resetResult.status()).toBe(200)
 
   await expect(page.getByRole('heading', { name: 'Password updated' })).toBeVisible()
+  // The server accepted the recovery action: only now may the fence go.
+  await expect.poll(() => readLogoutFence(page)).toBeNull()
   expect(await sessionCookieValue(page)).toBeNull()
 
   const revoked = await fetchMeWithCookie(page, priorSession)
@@ -153,10 +158,13 @@ test('J2 a redeemed recovery link keeps the logout fence over a live session', a
   )
   expect(await readLogoutFence(page)).toBe('true')
 
-  // A current pending recovery capability is the only release witness.
-  // E2E_GUARDIAN_NAVIGATION: email-reset-entry — a current recovery link releases the fence
+  // A current pending preview is still only a page view. It must not release
+  // the fence: a stale snapshot plus a slow browser clock would otherwise let
+  // the surviving session resume without a server decision. The other J2 test
+  // proves release after the server accepts the reset.
+  // E2E_GUARDIAN_NAVIGATION: email-reset-entry — a pending preview does not release the fence
   await page.goto('/invitations/synthetic-pending-reset-proof')
   await expect(page.getByRole('heading', { name: 'Reset password' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Reset password' })).toBeVisible()
-  await expect.poll(() => readLogoutFence(page)).toBeNull()
+  expect(await readLogoutFence(page)).toBe('true')
 })

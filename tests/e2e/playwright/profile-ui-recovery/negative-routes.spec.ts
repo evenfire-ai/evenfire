@@ -76,7 +76,24 @@ test('negative routes show an explicit error and never issue a session', async (
 
 test('direct access to the authenticated home without login shows the login form', async ({
   page,
+  browser,
 }) => {
+  // Same-observer witness: a real product login in an isolated context proves
+  // this test's cookie observer sees product-issued sessions. It never seeds
+  // the credentials or cookies used by the unauthenticated navigation below.
+  const witnessContext = await browser.newContext({ baseURL: test.info().project.use.baseURL })
+  const witnessPage = await witnessContext.newPage()
+  try {
+    await witnessPage.goto('/')
+    await signInThroughUi(witnessPage, LOGOUT_MEMBER.email, LOGOUT_MEMBER.password)
+    await expect(
+      witnessPage.getByRole('heading', { name: 'Welcome, Synthetic Logout Member' })
+    ).toBeVisible()
+    expect(await sessionCookieValue(witnessPage)).toBeTruthy()
+  } finally {
+    await witnessContext.close()
+  }
+
   const homeSession = page.waitForResponse(
     response => response.url().endsWith('/api/v1/me') && response.request().method() === 'GET'
   )

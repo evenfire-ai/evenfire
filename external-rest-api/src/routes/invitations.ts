@@ -64,6 +64,29 @@ function acceptInvitationErrorResponse(error: AcceptInvitationError): {
   return { status: 400, body: { error: 'Invitation is not pending' } }
 }
 
+// The password fallback publishes stable machine codes: profile-ui classifies
+// terminal states from `code` (profile-ui/lib/invitationErrors.ts).
+const FALLBACK_ACCEPT_ERROR_RESPONSES: Record<
+  AcceptInvitationError,
+  { status: number; body: Record<string, string> }
+> = {
+  invalid: { status: 400, body: { error: 'Invalid invitation' } },
+  not_found: { status: 404, body: { error: 'Invitation not found', code: 'not_found' } },
+  forbidden: { status: 403, body: { error: 'Invitation email does not match authenticated user' } },
+  expired: { status: 410, body: { error: 'Invitation has expired', code: 'expired' } },
+  not_pending: {
+    status: 400,
+    body: { error: 'Invitation is not pending', code: 'invitation_not_pending' },
+  },
+}
+
+function fallbackAcceptErrorResponse(error: AcceptInvitationError): {
+  status: number
+  body: Record<string, string>
+} {
+  return FALLBACK_ACCEPT_ERROR_RESPONSES[error]
+}
+
 function sendAcceptInvitationError(res: Response, error: AcceptInvitationError): void {
   const response = acceptInvitationErrorResponse(error)
   res.status(response.status).json(response.body)
@@ -85,7 +108,7 @@ function sendInvitationPasswordError(
     return
   }
   if (error === 'not_found') {
-    res.status(404).json({ error: 'Invitation not found' })
+    res.status(404).json({ error: 'Invitation not found', code: 'not_found' })
     return
   }
   if (error === 'forbidden') {
@@ -97,11 +120,13 @@ function sendInvitationPasswordError(
     return
   }
   if (error === 'not_pending') {
-    res.status(409).json({ error: 'Invitation has already been used' })
+    res
+      .status(409)
+      .json({ error: 'Invitation has already been used', code: 'invitation_not_pending' })
     return
   }
   if (error === 'expired') {
-    res.status(410).json({ error: 'Invitation has expired' })
+    res.status(410).json({ error: 'Invitation has expired', code: 'expired' })
     return
   }
   res.status(400).json({ error: 'Password must be between 8 and 256 characters' })
@@ -199,16 +224,14 @@ async function invitationPasswordAuthFromRequest(req: Request): Promise<
 
   const accepted = await acceptInvitation(token, email, requestedSessionContract(req))
   if (accepted.error) {
-    return acceptInvitationErrorResponse(accepted.error)
+    return fallbackAcceptErrorResponse(accepted.error)
   }
   // A replay is an explicit success without a session. It must not continue
   // into the password change: the token no longer proves a pending invitation,
   // so it maps exactly like a not-pending acceptance instead of the 502 that
-  // marks a broken first-acceptance response. `error` stays byte-identical to
-  // that mapping; `code` is the stable machine signal for the fallback replay.
+  // marks a broken first-acceptance response.
   if (accepted.data?.replay) {
-    const replay = acceptInvitationErrorResponse('not_pending')
-    return { status: replay.status, body: { ...replay.body, code: 'invitation_not_pending' } }
+    return fallbackAcceptErrorResponse('not_pending')
   }
   if (!accepted.data?.token || !accepted.data.userId) {
     return { status: 502, body: { error: 'Failed to start invited session' } }

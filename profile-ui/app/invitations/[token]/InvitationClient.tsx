@@ -17,6 +17,7 @@ import {
   setupAcceptedInvitationPasswordWithToken,
   setupInvitationPasswordWithToken,
 } from '@lib/api'
+import { isTerminalPasswordError } from '@lib/invitationErrors'
 import {
   buildInvitationHeading,
   buildInvitationTeamsLabel,
@@ -28,31 +29,6 @@ import { InvitationActionPanel } from './InvitationActionPanel'
 import type { InvitationClientProps } from './types'
 
 type PasswordPhase = 'editing' | 'submitting' | 'updated' | 'outcome_unknown' | 'terminal'
-
-// A submit error that means the proof can never be used again. Retrying the
-// same form only repeats the failure, so the screen must offer a way forward.
-const TERMINAL_PASSWORD_ERROR_CODES = new Set([
-  'invitation_not_pending',
-  'invalid_invitation',
-  'not_found',
-])
-
-function isTerminalPasswordError(value: unknown): boolean {
-  return (
-    value instanceof ProfileApiError &&
-    value.code !== null &&
-    TERMINAL_PASSWORD_ERROR_CODES.has(value.code)
-  )
-}
-
-// The logout fence may only be released while the recovery capability can
-// still set a password: a pending, unexpired password-reset invitation.
-function isCurrentRecoveryCapability(invitation: InvitationPreview | null, now: number): boolean {
-  if (!invitation || invitation.purpose !== 'password_reset') return false
-  if (invitation.status !== 'pending') return false
-  const expiresAt = Date.parse(invitation.expiresAt)
-  return Number.isFinite(expiresAt) && expiresAt > now
-}
 
 function statusForInvitation(invitation: InvitationPreview): string {
   if (invitation.purpose === 'password_reset') {
@@ -137,15 +113,6 @@ export function InvitationClient({
   useEffect(() => {
     setPasswordPhase('editing')
   }, [invitationToken])
-
-  useEffect(() => {
-    // A recovery link is a fresh sign-in path only while it can still set the
-    // password. A redeemed, expired or invalid link must keep the fence so a
-    // surviving session cannot resume without a login.
-    if (isCurrentRecoveryCapability(initialInvitation, Date.now())) {
-      clearUnconfirmedLogout()
-    }
-  }, [initialInvitation])
 
   const invitationExpired = useMemo(() => {
     if (!invitation || invitation.status !== 'pending') return false
@@ -236,6 +203,17 @@ export function InvitationClient({
         return 'This recovery link is invalid or expired.'
       }
       return 'We could not update your password. Please try again.'
+    }
+    if (value instanceof ProfileApiError && value.code) {
+      if (value.code === 'invalid_password') return 'Password must be between 8 and 256 characters.'
+      if (value.code === 'invalid_invitation') return 'This recovery link is invalid or expired.'
+      if (value.code === 'invitation_not_accepted')
+        return 'Accept the invitation before setting a password.'
+      if (value.code === 'invitation_not_pending' || value.code === 'invitation_not_ready')
+        return 'This invitation has already been used.'
+      if (value.code === 'expired') return 'This invitation has expired.'
+      if (value.code === 'forbidden') return 'Invitation email does not match.'
+      if (value.code === 'not_found') return 'Invitation not found.'
     }
     const message = value.message.replace(/^\d{3}\s+[A-Za-z ]+\s+-\s+/, '')
     if (message === 'invalid_password') return 'Password must be between 8 and 256 characters.'
@@ -330,6 +308,10 @@ export function InvitationClient({
         ? setupInvitationPasswordWithToken
         : setupAcceptedInvitationPasswordWithToken
       await setupPassword(invitationToken, invitation.email, invitation.id, password)
+      // The server accepted the recovery proof. Only that authoritative result
+      // releases the logout fence: a page view or a client-clock expiry is not
+      // proof that the surviving session can be discarded safely.
+      if (isPasswordReset) clearUnconfirmedLogout()
       // The backend issues no session from password setup. The screen must send
       // the person to the ordinary login instead of hydrating a recovery session.
       setPasswordPhase('updated')
@@ -439,7 +421,7 @@ export function InvitationClient({
           <InvitationActionPanel
             mode="terminal"
             loginHref={profileLoginHref}
-            forgotPasswordHref={isPasswordReset ? forgotPasswordHref : undefined}
+            forgotPasswordHref={forgotPasswordHref}
           />
         ) : invitationUsed ? (
           <InvitationActionPanel

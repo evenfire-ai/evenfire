@@ -152,16 +152,20 @@ describe('R6 recovery outcome and guided reauthentication', () => {
     expect(mocks.setupInvitationPasswordWithToken).toHaveBeenCalledTimes(2)
   })
 
-  it('clears the logout fence when the recovery link opens and still completes the reset', async () => {
+  it('keeps the logout fence on the recovery preview and clears it after the reset is accepted', async () => {
     window.localStorage.setItem(LOGOUT_FENCE_KEY, 'true')
     expect(window.localStorage.getItem(LOGOUT_FENCE_KEY)).toBe('true')
 
     renderReset()
 
-    await waitFor(() => expect(window.localStorage.getItem(LOGOUT_FENCE_KEY)).toBeNull())
+    // Opening the link is not an authoritative recovery result.
+    expect(screen.getByRole('button', { name: 'Reset password' })).toBeInTheDocument()
+    expect(window.localStorage.getItem(LOGOUT_FENCE_KEY)).toBe('true')
+
     fillPassword()
     submitReset()
     await waitFor(expectPasswordUpdatedScreen)
+    expect(window.localStorage.getItem(LOGOUT_FENCE_KEY)).toBeNull()
     expect(mocks.setupInvitationPasswordWithToken).toHaveBeenCalledOnce()
   })
 })

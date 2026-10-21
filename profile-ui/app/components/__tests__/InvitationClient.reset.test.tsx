@@ -3,7 +3,22 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { PROFILE_ROUTES } from '@constants/routes'
 import { ProfileApiError } from '@lib/api'
 import type { InvitationPreview } from '@/app/types/api'
+import contractDocument from '../../../../tests/contracts/invitation-password-public-errors.json'
 import { InvitationClient } from '../../invitations/[token]/InvitationClient'
+
+type ContractEntry = {
+  route: 'password' | 'password-reset'
+  previewPurpose?: string
+  serviceError?: string
+  acceptError?: string
+  status: number
+  body: Record<string, string>
+  componentPreview: 'reset' | 'accepted_member'
+  terminal: boolean
+  uiMessage: string
+}
+
+const contract = contractDocument as Record<string, ContractEntry>
 
 const mocks = vi.hoisted(() => ({
   acceptInvitation: vi.fn(),
@@ -73,6 +88,19 @@ function expectPasswordUpdatedScreen(email: string) {
   expect(screen.queryByLabelText('Password')).toBeNull()
 }
 
+function stubEdgeResponse(status: number, body: Record<string, string>) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(body), {
+        status,
+        statusText: 'Synthetic Edge Status',
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+  )
+}
+
 beforeEach(() => {
   window.localStorage.clear()
   mocks.acceptInvitation.mockReset()
@@ -89,7 +117,10 @@ beforeEach(() => {
   })
 })
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
 
 describe('InvitationClient guided password reauthentication', () => {
   it('moves a completed reset to the password-updated screen with a login link', async () => {
@@ -188,78 +219,59 @@ describe('InvitationClient guided password reauthentication', () => {
     expect(screen.queryByRole('heading', { name: 'Password updated' })).toBeNull()
   })
 
-  it.each([
-    [
-      'invitation_not_pending',
-      409,
-      '409 Conflict - invitation already used',
-      'This invitation has already been used.',
-    ],
-    [
-      'invalid_invitation',
-      400,
-      '400 Bad Request - recovery link rejected',
-      'This recovery link is invalid or expired.',
-    ],
-    ['not_found', 404, '404 Not Found - recovery link unknown', 'Invitation not found.'],
-  ] as const)(
-    'turns a %s submit failure into usable terminal actions instead of blaming the new password',
-    async (code, status, detail, message) => {
-      mocks.setupInvitationPasswordWithToken.mockRejectedValue(
-        new ProfileApiError(status, code, detail)
-      )
+  it.each(Object.entries(contract))(
+    'turns the real %s edge response into terminal actions from the parsed body',
+    async (_name, entry) => {
+      const actual = await vi.importActual<typeof import('@lib/api')>('@lib/api')
+      const preview = entry.componentPreview === 'reset' ? passwordReset : acceptedMemberInvitation
+      if (entry.componentPreview === 'reset') {
+        mocks.setupInvitationPasswordWithToken.mockImplementation(
+          async (invitationUrlId: string, email: string, invitationId: string, password: string) =>
+            actual.setupInvitationPasswordWithToken(invitationUrlId, email, invitationId, password)
+        )
+      } else {
+        mocks.setupAcceptedInvitationPasswordWithToken.mockImplementation(
+          async (invitationUrlId: string, email: string, invitationId: string, password: string) =>
+            actual.setupAcceptedInvitationPasswordWithToken(
+              invitationUrlId,
+              email,
+              invitationId,
+              password
+            )
+        )
+      }
+      stubEdgeResponse(entry.status, entry.body)
+
       render(
         <InvitationClient
-          invitationToken="invalidated-reset-proof"
-          initialInvitation={passwordReset}
+          invitationToken="invalidated-invitation-proof"
+          initialInvitation={preview}
           initialError=""
         />
       )
 
+      const submitLabel =
+        entry.componentPreview === 'reset' ? 'Reset password' : 'Set password and continue'
       // The initial preview rendered the live form; the proof dies afterwards.
-      expect(screen.getByRole('button', { name: 'Reset password' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: submitLabel })).toBeInTheDocument()
       fillPassword()
-      fireEvent.click(screen.getByRole('button', { name: 'Reset password' }))
+      fireEvent.click(screen.getByRole('button', { name: submitLabel }))
 
-      expect(await screen.findByText(message)).toBeInTheDocument()
+      expect(await screen.findByText(entry.uiMessage)).toBeInTheDocument()
       expect(screen.queryByRole('heading', { name: 'Password updated' })).toBeNull()
       expect(screen.queryByLabelText('Password')).toBeNull()
-      expect(screen.queryByRole('button', { name: 'Reset password' })).toBeNull()
+      expect(screen.queryByRole('button', { name: submitLabel })).toBeNull()
       expect(screen.getByRole('link', { name: 'Sign in' }).getAttribute('href')).toBe(
-        PROFILE_ROUTES.login({ email: passwordReset.email })
+        PROFILE_ROUTES.login({ email: preview.email })
       )
       expect(
         screen.getByRole('link', { name: 'Request a new recovery link' }).getAttribute('href')
-      ).toBe(PROFILE_ROUTES.forgotPassword({ email: passwordReset.email }))
-      expect(mocks.setupInvitationPasswordWithToken).toHaveBeenCalledOnce()
+      ).toBe(PROFILE_ROUTES.forgotPassword({ email: preview.email }))
+      expect(fetch).toHaveBeenCalledOnce()
     }
   )
 
-  it('offers only sign in when a member invitation proof is invalidated after preview', async () => {
-    mocks.setupAcceptedInvitationPasswordWithToken.mockRejectedValue(
-      new ProfileApiError(409, 'invitation_not_pending', '409 Conflict - invitation_not_pending')
-    )
-    render(
-      <InvitationClient
-        invitationToken="invalidated-member-proof"
-        initialInvitation={acceptedMemberInvitation}
-        initialError=""
-      />
-    )
-
-    fillPassword()
-    fireEvent.click(screen.getByRole('button', { name: 'Set password and continue' }))
-
-    expect(await screen.findByText('This invitation has already been used.')).toBeInTheDocument()
-    expect(screen.queryByLabelText('Password')).toBeNull()
-    expect(screen.getByRole('link', { name: 'Sign in' }).getAttribute('href')).toBe(
-      PROFILE_ROUTES.login({ email: acceptedMemberInvitation.email })
-    )
-    expect(screen.queryByRole('link', { name: 'Request a new recovery link' })).toBeNull()
-    expect(mocks.setupAcceptedInvitationPasswordWithToken).toHaveBeenCalledOnce()
-  })
-
-  it('releases the logout fence only for a current pending recovery capability', () => {
+  it('keeps the logout fence on every preview and clears it only after the reset is accepted', async () => {
     window.localStorage.setItem('profile_logout_unconfirmed', 'true')
 
     const { rerender } = render(
@@ -313,8 +325,16 @@ describe('InvitationClient guided password reauthentication', () => {
         initialError=""
       />
     )
-    // A current pending capability is the only case that releases the fence.
+    // Even a current pending preview is a page view, not an authoritative
+    // server result: a stale snapshot and a slow browser clock cannot release
+    // the fence here.
     expect(screen.getByRole('button', { name: 'Reset password' })).toBeInTheDocument()
+    expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBe('true')
+
+    fillPassword()
+    fireEvent.click(screen.getByRole('button', { name: 'Reset password' }))
+    await waitFor(() => expectPasswordUpdatedScreen(passwordReset.email))
+    // Only the accepted reset releases the surviving session.
     expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBeNull()
   })
 
