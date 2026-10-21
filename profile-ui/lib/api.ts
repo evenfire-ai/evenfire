@@ -1,7 +1,6 @@
 'use client'
 
 import {
-  EVENFIRE_RELEASES_URL,
   EXTERNAL_REST_API_BASE_URL,
   EXTERNAL_SESSION_TOKEN_EXPIRES_AT_KEY,
   EXTERNAL_SESSION_TOKEN_KEY,
@@ -514,8 +513,4 @@ export function getConfiguredExternalRestApiBaseUrl(): string {
   } catch {
     return EXTERNAL_REST_API_BASE_URL.replace(/\/+$/, '')
   }
-}
-
-export function getEvenfireDownloadUrl(): string {
-  return EVENFIRE_RELEASES_URL
 }

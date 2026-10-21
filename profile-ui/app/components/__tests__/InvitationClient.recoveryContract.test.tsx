@@ -87,7 +87,7 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('R6 recovery outcome and guided reauthentication', () => {
-  it('moves a committed reset to the password-updated screen without a session', async () => {
+  it('moves a committed reset to the password-updated screen', async () => {
     renderReset()
     fillPassword()
     submitReset()

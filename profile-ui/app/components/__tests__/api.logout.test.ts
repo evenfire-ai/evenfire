@@ -54,7 +54,7 @@ describe('Profile logout client boundary', () => {
     expect(vi.mocked(fetch).mock.calls[2]?.[1]?.credentials).toBe('include')
   })
 
-  it('clears the in-memory and stored fence on the recovery path', async () => {
+  it('clears the in-memory and stored logout fence', async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(new Response('', { status: 503 }))
       .mockResolvedValueOnce(

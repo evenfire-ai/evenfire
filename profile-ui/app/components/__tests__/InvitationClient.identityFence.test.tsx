@@ -43,7 +43,7 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('R6 reset response session boundary', () => {
-  it('does not hydrate a session from the reset response', async () => {
+  it('shows the password-updated screen from the reset response without navigating', async () => {
     render(
       <InvitationClient
         invitationToken="r6-one-use-reset-proof"

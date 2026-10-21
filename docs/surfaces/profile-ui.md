@@ -37,9 +37,9 @@ Surfaces](README.md) for how the three consoles divide the platform.
    the ordinary login. Password reset (`POST
    /api/v1/invitations/password-reset`) follows the same post-password
    contract.
-5. **The person signs in with the new password** and lands on the profile home,
-   which offers the Download Evenfire link — not an automatic handoff. The
-   member installs the [Desktop App](desktop-app.md) themselves.
+5. **The person signs in with the new password** and lands on the profile home.
+   Profile UI does not hand off automatically; the member starts the
+   [Desktop App](desktop-app.md) and completes step 6 from there.
 6. **The Desktop App completes the handoff later**, from its own sign-in
    screen: entering the invited email there makes the Desktop App look up
    the invitation profile and open Profile UI's `/desktop-setup?email=...`
