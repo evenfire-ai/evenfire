@@ -1,7 +1,7 @@
 import { classifyGfsAclReadFailure, worstGfsCoverageClass } from '@clerum/gfs-interaction-policy'
 import type { GfsCoverageClass } from '@clerum/gfs-interaction-policy'
 import { GFS_BREADCRUMB_MAX_DEPTH } from '@constants/gfsBrowser'
-import { isGfsSessionAuthorityFailure } from '@lib/gfsGrantErrors'
+import { isGfsSessionAuthorityFailure, parseHttpStatus } from '@lib/gfsGrantErrors'
 import type { GfsInheritedAccessItem, GfsInheritedAccessResult } from './delegation.types'
 import { inheritedSubjectKey, mergeInheritedAccessItem } from './inheritedAccessMerge'
 
@@ -69,10 +69,21 @@ export async function deriveGfsInheritedAccess(
       'operation'
     )
 
-  /** Classify a resolve failure; session authority rethrows the original error. */
+  /**
+   * Classify a resolve failure; session authority rethrows the original error.
+   *
+   * The status that decided the response is the VETTED one the main process
+   * appended to the message. The shared classifier reads the first
+   * `httpStatus=` token it finds, and a copy carried by the server's own body
+   * sits AHEAD of the vetted suffix — so a 500 whose body mentions another
+   * status was classified by that other status (RP-008). The vetted status is
+   * therefore passed explicitly, and the shared reader's structured field
+   * takes precedence over its own message scan.
+   */
   const resolveFailureClass = (error: unknown): GfsCoverageClass => {
     if (isAuthorityFailure(error)) throw error
-    return classifyGfsAclReadFailure(error)
+    const vetted = parseHttpStatus(error instanceof Error ? error.message : String(error ?? ''))
+    return classifyGfsAclReadFailure(vetted === null ? error : { status: vetted })
   }
 
   /** Classify an ACL-list failure (same authority rule as resolve). */
@@ -179,8 +190,14 @@ export async function deriveGfsInheritedAccess(
   }
 
   const worst = worstGfsCoverageClass(classes)
+  // The depth cap means the walk never reached the root: the observation is
+  // incomplete in a way the quiet boundary states do not express. It must not
+  // hide behind an earlier denial — the shared precedence ranks "denied"
+  // first, so a walk that was denied AND truncated reported the denial and
+  // never said that rows above the cap were never seen (RP-021).
+  const hitDepthCap = classes.includes('depth-cap')
   const coverage =
-    worst !== 'complete' && worst !== 'denied'
+    hitDepthCap || (worst !== 'complete' && worst !== 'denied')
       ? 'unavailable'
       : readBoundary
         ? 'read-boundary'

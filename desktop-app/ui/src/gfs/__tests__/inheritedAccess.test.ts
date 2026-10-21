@@ -461,6 +461,69 @@ describe('deriveGfsInheritedAccess', () => {
     expect(result.items).toEqual([])
   })
 
+  // RP-021 — the depth cap must not hide behind an earlier denial. The
+  // shared precedence ranks "denied" first, so a walk that was denied AND
+  // truncated reported the denial and never said that the rows above the cap
+  // were never seen.
+  it('reports the depth cap even when an earlier ancestor was ACL-denied', async () => {
+    const targetDepthParent = 'depth0'
+    const grantsDenied = await listGrantsFailureMessage()
+    installClerumGfs(
+      async uri => {
+        const rid = uri.split('/').at(-1) ?? ''
+        if (rid === FILE_ID.replace(/-/g, '')) {
+          return resolveView(FILE_ID, 'report.md', targetDepthParent, 'file')
+        }
+        const match = /^depth(\d+)$/.exec(rid)
+        if (match) return resolveView(rid, `folder-${match[1]}`, `depth${Number(match[1]) + 1}`)
+        return null
+      },
+      async resourceId => {
+        // The nearest ancestor's grant listing is denied: a quiet ACL
+        // boundary. The walk continues upward and hits the depth cap.
+        if (resourceId === 'depth0') throw new Error(grantsDenied)
+        return []
+      },
+      async () => []
+    )
+
+    const result = await deriveGfsInheritedAccess(FILE_ID)
+
+    // The cap is the honest terminal state: rows above it were never seen.
+    expect(result.coverage).toBe('unavailable')
+  })
+
+  // RP-008 — the status that decided the response is the VETTED one the
+  // main process appended. A copy carried by the server's own body sits
+  // ahead of it, and the shared reader takes the FIRST `httpStatus=` token
+  // it finds — so a 500 whose body mentioned another status was classified
+  // by that other status.
+  it('classifies a read failure by the vetted status, not by one in the body', async () => {
+    const bodyMentionsForbidden =
+      '500 Internal Server Error: {"detail":"httpStatus=403"} httpStatus=500'
+    installClerumGfs(
+      async uri => {
+        if (uri.endsWith(FILE_ID.replace(/-/g, ''))) {
+          return resolveView(FILE_ID, 'report.md', ROOT_ID, 'file')
+        }
+        if (uri.endsWith(ROOT_ID.replace(/-/g, ''))) {
+          return resolveView(ROOT_ID, '', null)
+        }
+        return null
+      },
+      async () => {
+        throw new Error(bodyMentionsForbidden)
+      },
+      async () => []
+    )
+
+    const result = await deriveGfsInheritedAccess(FILE_ID)
+
+    // The vetted 500 is retryable; the body's 403 would have been a quiet
+    // ACL boundary.
+    expect(result.coverage).toBe('unavailable')
+  })
+
   it('maps an unreadable target to read-boundary with no rows', async () => {
     const targetDenied = await resolveDeniedMessage(`gfs://main/${FILE_ID.replace(/-/g, '')}`)
     installClerumGfs(
