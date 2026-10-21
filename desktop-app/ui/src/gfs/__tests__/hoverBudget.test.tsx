@@ -233,6 +233,30 @@ describe('gesture-owned hover budget (R1-M2)', () => {
     expect(decision.allowed).toBe(true)
   })
 
+  it('does not let one erroring destination burn the cold-check budget (RP-022)', async () => {
+    // A destination that answers nothing stays cold, so every hover over it
+    // dispatched another probe and every probe spent one slot of the shared
+    // budget: ONE failing destination could burn all eight and leave every
+    // other target stuck on "checking".
+    const h = await setup()
+    h.affordances.mockImplementation(async (id: string) => {
+      if (id === 'bad') throw new Error('503 upstream unavailable httpStatus=503')
+      return h.bits
+    })
+    const done = vi.fn()
+    for (let i = 0; i < DRAG_COLD_CHECK_BUDGET; i++) {
+      h.result.current.first.scheduleColdCheck(target('bad'), null, done)
+      await h.dwell()
+    }
+    // The failing target was probed once; the budget still has room for the
+    // targets that answer.
+    expect(h.affordances.mock.calls.map(call => call[0])).toEqual(['bad'])
+
+    h.result.current.first.scheduleColdCheck(target('good'), null, done)
+    await h.dwell()
+    expect(h.affordances.mock.calls.map(call => call[0])).toContain('good')
+  })
+
   it('cancels a pending dwell when its hook unmounts', async () => {
     const h = await setup()
     const done = vi.fn()

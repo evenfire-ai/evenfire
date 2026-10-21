@@ -103,6 +103,21 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
   const localGestureRef = useRef({ generation: 0, active: false })
   const localBudgetRef = useRef(new GfsHoverCheckBudget())
   const debounceTimerRef = useRef<number | null>(null)
+  /**
+   * The targets whose cold check already FAILED in this gesture.
+   *
+   * A destination that answers nothing stays cold, so every hover over it
+   * dispatched a fresh probe and every probe spent one slot of the shared
+   * cold-check budget. One erroring destination could therefore burn the
+   * whole budget and leave every other target stuck on "checking". The
+   * failure is remembered for the gesture instead: the target is probed once,
+   * and the drop-time priority check is where a failed target gets a fresh
+   * read (RP-022).
+   */
+  const failedColdTargetsRef = useRef<{ generation: number; ids: Set<string> }>({
+    generation: -1,
+    ids: new Set(),
+  })
 
   /**
    * Hand a probe failure to the surface's central fail-closed classifier when
@@ -218,6 +233,12 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
       debounceTimerRef.current = window.setTimeout(() => {
         debounceTimerRef.current = null
         if (!isCurrent()) return
+        if (failedColdTargetsRef.current.generation !== localGeneration) {
+          failedColdTargetsRef.current = { generation: localGeneration, ids: new Set() }
+        }
+        // Already failed in this gesture: probing it again would spend
+        // another budget slot and still answer nothing (RP-022).
+        if (failedColdTargetsRef.current.ids.has(target.resourceId)) return
         const warm =
           readCachedAffordances(target.resourceId) !== null &&
           (sourceParentId === null || readCachedAffordances(sourceParentId) !== null)
@@ -237,7 +258,14 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
           try {
             if (!isCurrent()) return
             if (readCachedAffordances(target.resourceId) === null) {
-              await fetchAffordances(target.resourceId, AFFORDANCES_HOVER_STALE_MS)
+              const probe = await fetchAffordances(target.resourceId, AFFORDANCES_HOVER_STALE_MS)
+              if (!probe.ok) {
+                // The target answered nothing: remember it for this gesture
+                // and stop — the source-parent probe cannot produce a verdict
+                // for a target whose own bits are unknown (RP-022).
+                if (isCurrent()) failedColdTargetsRef.current.ids.add(target.resourceId)
+                return
+              }
             }
             if (!isCurrent()) return
             if (sourceParentId !== null && readCachedAffordances(sourceParentId) === null) {
@@ -442,15 +470,22 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
     [deps, fetchAffordances, reportAuthorityFailure, resolveAncestorsUpTo]
   )
 
-  /** Fresh (5 s) source-resource write probe for the rename policy. */
+  /**
+   * Fresh (5 s) source-resource write probe for the rename policy.
+   *
+   * The rename option authorizes a MUTATION, so it must rest on a current
+   * observation. A cached "write" of any age used to answer this probe
+   * directly: a member whose write access had since been revoked still got
+   * the numbered-rename option offered, and the move was only refused later
+   * by the server. The cache is now consulted only through the same
+   * freshness window the mutation probes use (RP-023).
+   */
   const probeSourceWrite = useCallback(
     async (resourceId: string): Promise<boolean> => {
-      const cached = readCachedAffordances(resourceId)
-      if (cached?.held.includes('write')) return true
       const fresh = await fetchAffordances(resourceId, AFFORDANCES_MUTATION_STALE_MS)
       return fresh.ok && fresh.held.includes('write')
     },
-    [fetchAffordances, readCachedAffordances]
+    [fetchAffordances]
   )
 
   return {

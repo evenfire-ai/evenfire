@@ -3,6 +3,7 @@ import { type ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, renderHook } from '@testing-library/react'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { describeGfsReadError, parseHttpStatus } from '@lib/gfsGrantErrors'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
@@ -76,7 +77,7 @@ function renderAdjudication(handleAuthorityFailure?: (message: string) => boolea
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   )
-  return renderHook(
+  const hook = renderHook(
     () =>
       useGfsDragAdjudication({
         scope: SCOPE,
@@ -91,6 +92,7 @@ function renderAdjudication(handleAuthorityFailure?: (message: string) => boolea
       }),
     { wrapper }
   )
+  return { ...hook, queryClient }
 }
 
 async function grantedProbes(
@@ -269,6 +271,31 @@ describe('useGfsDragAdjudication — required-probe drop admission (R1-H1)', () 
     if (decision.allowed) {
       expect(decision.allowNumberedRename).toBe(false)
     }
+  })
+})
+
+describe('useGfsDragAdjudication — the rename probe reads a fresh observation (RP-023)', () => {
+  it('re-probes the source instead of trusting a stale cached positive', async () => {
+    // The numbered-rename option authorizes a mutation. A cached "write" from
+    // an older observation used to answer the probe directly, so a member
+    // whose write access had since been revoked was still offered the rename
+    // — and the move was only refused later, by the server.
+    const message = await affordancesFailureMessage(403, {
+      code: 'manage_acl_required',
+      message: 'write access was revoked',
+    })
+    probes = await grantedProbes({ 'src-1': { error: new Error(message) } })
+    const { result, queryClient } = renderAdjudication()
+    const key = desktopQueryKeys.gfsAffordances(SCOPE, 'src-1', 'main')
+
+    // A minute-old observation of "write": stale, so it may not decide.
+    queryClient.setQueryData(key, { held: ['write'] }, { updatedAt: Date.now() - 60_000 })
+    expect(await result.current.probeSourceWrite('src-1')).toBe(false)
+
+    // A current observation still answers without a network read: the probe
+    // fixture would fail if one were made.
+    queryClient.setQueryData(key, { held: ['write'] })
+    expect(await result.current.probeSourceWrite('src-1')).toBe(true)
   })
 })
 
