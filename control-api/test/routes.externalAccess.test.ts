@@ -94,6 +94,7 @@ describe('external user-access contracts', () => {
       exp: 2_000_000_000,
       iat: 1_900_000_000,
       sessionContract: 'v1',
+      authGeneration: 1,
     })
     mocks.validateV1.mockResolvedValue({
       status: 'valid',

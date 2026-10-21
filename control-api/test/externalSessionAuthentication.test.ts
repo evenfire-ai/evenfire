@@ -127,25 +127,24 @@ describe('external user-session authentication boundary', () => {
     ).resolves.toEqual({ status: 'invalid', reason: 'session_contract_not_accepted' })
   })
 
-  it('subjects pre-generation v1 tokens to the same compatibility-drain gate', async () => {
+  it('rejects a signature-valid v1 token without a lifecycle generation', async () => {
     const identity = validIdentity({ sid: '', sessionVersion: 0 })
     sessionMocks.validateLegacyUserSession.mockResolvedValue({ status: 'valid', identity })
-    const token = preGenerationV1Token()
 
     await expect(
-      authenticateExternalUserSession(token, { purpose: 'protected', policy: policy() })
-    ).resolves.toMatchObject({
-      status: 'authenticated',
-      contract: 'v1',
-      claims: { authGeneration: 1 },
-      authorityContext: { contract: 'v1', authGeneration: 1 },
-    })
-    await expect(
-      authenticateExternalUserSession(token, {
+      authenticateExternalUserSession(preGenerationV1Token(), {
         purpose: 'protected',
-        policy: policy({ acceptV1: false, issueV1: false }),
+        policy: policy(),
       })
-    ).resolves.toEqual({ status: 'invalid', reason: 'session_contract_not_accepted' })
+    ).resolves.toEqual({ status: 'invalid', reason: 'invalid_representation' })
+    expect(sessionMocks.validateLegacyUserSession).not.toHaveBeenCalled()
+
+    // Liveness witness: a token with generation one, under the same policy
+    // and mocks, reaches legacy validation and authenticates.
+    await expect(
+      authenticateExternalUserSession(v1Token(), { purpose: 'protected', policy: policy() })
+    ).resolves.toMatchObject({ status: 'authenticated', contract: 'v1' })
+    expect(sessionMocks.validateLegacyUserSession).toHaveBeenCalledTimes(1)
   })
 
   it('normalizes v2 without team authority and applies purpose-specific acceptance', async () => {

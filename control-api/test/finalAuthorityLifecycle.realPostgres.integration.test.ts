@@ -196,7 +196,7 @@ describeRealPostgres('final catalog and resolve lifecycle authority on real Post
       expect.objectContaining<AccessCatalogRequestError>({ code: 'session_not_live' })
     )
 
-    const originalIncarnation = await createUser('missing-generation-canonicalized')
+    const originalIncarnation = await createUser('generation-one-current')
     await expect(
       buildAccessCatalog(
         {

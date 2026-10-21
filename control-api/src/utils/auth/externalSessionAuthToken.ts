@@ -55,8 +55,7 @@ export function verifyExternalSessionToken(token: string): AuthClaims | null {
       (teamId !== null && typeof teamId !== 'string') ||
       typeof payload?.role !== 'string' ||
       typeof payload?.exp !== 'number' ||
-      (authGeneration !== undefined &&
-        legacyExternalSessionAuthGeneration({ authGeneration }) === null)
+      legacyExternalSessionAuthGeneration({ authGeneration }) === null
     ) {
       return null
     }
@@ -69,7 +68,7 @@ export function verifyExternalSessionToken(token: string): AuthClaims | null {
       email: payload.email,
       teamId,
       role: payload.role as AuthClaims['role'],
-      ...(authGeneration === undefined ? {} : { authGeneration: Number(authGeneration) }),
+      authGeneration: Number(authGeneration),
       exp: payload.exp,
       ...(typeof payload.iat === 'number' ? { iat: payload.iat } : {}),
       ...(typeof payload.jti === 'string' ? { jti: payload.jti } : {}),
