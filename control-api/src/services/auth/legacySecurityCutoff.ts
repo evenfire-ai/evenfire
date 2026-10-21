@@ -5,12 +5,16 @@
  * A V1 session token is rejected when its whole-second `iat` is at or before
  * external_user_session_security_epochs.valid_after, compared as an exact
  * instant. Live security events store the second before the event; the
- * lifecycle generation bumped in the same transaction rejects the event's own
- * second. The historical password backfill stores password_set_at, which had
- * no generation bump, so the whole second of that change is rejected.
+ * lifecycle generation bumped in the same transaction rejects tokens of the
+ * previous generation issued in the event's own second. The historical
+ * password backfill stores password_set_at, which had no generation bump, so
+ * the whole second of that change is rejected.
  *
- * pg parses timestamptz to a millisecond Date by truncation and SQL compares
- * the exact numeric epoch; for an integer `iat` both give the same decision.
+ * For a finite cutoff that a JavaScript Date can hold, pg parses timestamptz
+ * to a millisecond Date by truncation and SQL compares the exact numeric
+ * epoch; for an integer `iat` both give the same decision. PostgreSQL also
+ * stores infinity and dates beyond the Date range. No writer produces them,
+ * and the TypeScript form throws on them instead of deciding.
  */
 export function legacySecurityCutoffRejects(
   issuedAtSeconds: number,

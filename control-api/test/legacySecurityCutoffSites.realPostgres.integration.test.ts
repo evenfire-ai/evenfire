@@ -276,7 +276,8 @@ describeRealPostgres('V1 security cutoff at every comparator on real PostgreSQL'
         { db: databasePool, policy: legacyPolicy }
       )
 
-    await setCutoff(user.userId, await databaseSecond(5))
+    // An hour ahead, so the cutoff cannot pass before issuance reads the clock.
+    await setCutoff(user.userId, await databaseSecond(3_600))
     await expect(issue()).rejects.toMatchObject({
       name: 'ExternalSessionIssuanceUnavailableError',
       code: 'session_issuance_temporarily_unavailable',
@@ -289,5 +290,69 @@ describeRealPostgres('V1 security cutoff at every comparator on real PostgreSQL'
     const claims = verifyExternalSessionToken(issued.token)
     expect(claims?.userId).toBe(user.userId)
     expect(claims!.iat!).toBeGreaterThan(pastCutoff)
+  })
+
+  // PostgreSQL stores timestamps that a JavaScript Date cannot hold. No writer
+  // produces them; the TypeScript comparators must still refuse rather than
+  // compare against NaN and accept.
+  it('fails closed on a stored cutoff outside the JavaScript Date range', async () => {
+    const user = await principal('cutoff-out-of-range')
+    const token = legacyToken(user, await databaseSecond(-60))
+    const issue = () =>
+      issueExternalUserSession(
+        {
+          contract: 'v1',
+          userId: user.userId,
+          email: user.email,
+          teamId: user.teamId,
+          role: 'member',
+          authenticationMethods: ['password'],
+        },
+        { db: databasePool, policy: legacyPolicy }
+      )
+
+    for (const stored of ['infinity', '-infinity', '294000-01-01 00:00:00+00']) {
+      await databasePool.query(
+        `INSERT INTO external_user_session_security_epochs(user_id, valid_after, reason, updated_at)
+         VALUES ($1, $2::timestamptz, 'cutoff_site_test', now())
+         ON CONFLICT (user_id) DO UPDATE SET valid_after = EXCLUDED.valid_after`,
+        [user.userId, stored]
+      )
+      await expect(
+        validateLegacyUserSession(token.token, token.claims, { db: databasePool }),
+        stored
+      ).rejects.toThrow('invalid V1 security cutoff')
+      await expect(
+        validateExternalSessionAuthorityContext(v1Context(token.token, token.claims), {
+          db: databasePool,
+        }),
+        stored
+      ).rejects.toThrow('invalid V1 security cutoff')
+      await expect(
+        observeExternalSessionCurrentness(authenticated(token.token, token.claims), {
+          db: databasePool,
+        }),
+        stored
+      ).resolves.toMatchObject({ status: 'unavailable' })
+      await expect(issue(), stored).rejects.toThrow('invalid V1 security cutoff')
+    }
+
+    // Liveness witness: with a finite past cutoff the same token and user pass
+    // every comparator above.
+    await setCutoff(user.userId, await databaseSecond(-120))
+    await expect(
+      validateLegacyUserSession(token.token, token.claims, { db: databasePool })
+    ).resolves.toMatchObject({ status: 'valid' })
+    await expect(
+      validateExternalSessionAuthorityContext(v1Context(token.token, token.claims), {
+        db: databasePool,
+      })
+    ).resolves.toMatchObject({ status: 'valid' })
+    await expect(
+      observeExternalSessionCurrentness(authenticated(token.token, token.claims), {
+        db: databasePool,
+      })
+    ).resolves.toEqual({ status: 'current' })
+    await expect(issue()).resolves.toMatchObject({ token: expect.any(String) })
   })
 })
