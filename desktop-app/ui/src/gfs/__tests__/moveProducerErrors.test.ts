@@ -90,7 +90,7 @@ describe('real move producer verdicts (R1-M3)', () => {
     [412, 'changed'],
     [429, 'rate-limited'],
   ] as const)(
-    'preserves trusted %i metadata and emits %s without outcome verification or automatic retry',
+    'preserves trusted %i metadata and emits %s without an automatic retry',
     async (status, expected) => {
       const wire = await wireFailure(
         status,
@@ -100,7 +100,11 @@ describe('real move producer verdicts (R1-M3)', () => {
       expect(parseHttpStatus(wire.text)).toBe(status)
       const result = await run(wire.text)
       expect(result.outcome.status).toBe(expected)
-      expect(result.resolveSource).toHaveBeenCalledTimes(1)
+      // Every verdict but the 404 is emitted from the trusted status alone.
+      // The 404 is ambiguous — the server answers 404 for a vanished source
+      // AND for a vanished destination (RP-027) — so that one verdict costs
+      // a single targeted re-read of the source to name the side.
+      expect(result.resolveSource).toHaveBeenCalledTimes(status === 404 ? 2 : 1)
       expect(result.moveResource).toHaveBeenCalledTimes(1)
       if (result.outcome.status === 'rate-limited') {
         expect(result.outcome.retryAfterSeconds).toBe(7)
