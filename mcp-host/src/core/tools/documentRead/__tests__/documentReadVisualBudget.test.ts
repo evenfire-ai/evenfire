@@ -615,9 +615,12 @@ describe('document visual reads and the request image bounds', () => {
   it('reports a page that does not fit the bytes the request has left as a pause', async () => {
     const file = admittedFile('scan', await imageOnlyPdf(witnessCode()), 'application/pdf')
     const { runJob, jobs } = countingRunner()
+    // Leave less room in the request-byte bound than one rendered page needs:
+    // the 4 MB text reserve is already outside what these images may use.
+    const usageBytes = Math.floor(((CODEX.maxVisualRequestBytes - 4_000_000) * 3) / 4) - 100
     const tight = await documentTool(file, runJob).execute(
       { attachmentId: file.id, mode: 'visual' },
-      context(CODEX, { images: 0, bytes: CODEX.maxTotalImageBytes! - 64, maxSide: 0 })
+      context(CODEX, { images: 0, bytes: usageBytes, maxSide: 0 })
     )
     expect(jobs).toHaveLength(1)
     expect(JSON.parse(tight.content)).toMatchObject({
@@ -743,7 +746,7 @@ describe('document visual reads and the request image bounds', () => {
     const job = jobs[0]
     if (job?.kind !== 'pdf_visual') throw new Error('the visual read did not run a visual job')
     expect(
-      Math.ceil((usageBytes * 4) / 3) + Math.ceil((job.maxTotalImageBytes * 4) / 3) + 2_000_000
+      Math.ceil((usageBytes * 4) / 3) + Math.ceil((job.maxTotalImageBytes * 4) / 3) + 4_000_000
     ).toBeLessThanOrEqual(ANTHROPIC.maxVisualRequestBytes)
   }, 15_000)
 
@@ -779,6 +782,23 @@ describe('document visual reads and the request image bounds', () => {
     // Witness: the real asserter accepts the largest request admission allows.
     expect(() =>
       assertVisualRequestFits(admittedRequest, { messages: admittedRequest }, true, ANTHROPIC)
+    ).not.toThrow()
+
+    // A large snapshot text shares the same provider request. The 4 MB text
+    // reserve covers 3 MiB: the admitted images plus this accompaniment still
+    // pass the real asserter, which is the final typed backstop.
+    const withLargeText = [
+      ...prior,
+      {
+        role: 'user' as const,
+        content: 'Large context',
+        contentParts: [{ type: 'text' as const, text: 'x'.repeat(3 * 1024 * 1024) }],
+      },
+    ]
+    const textRequest = finalVisualRequest(withLargeText, output.attachments!)
+    expect(requestBytes(textRequest)).toBeLessThanOrEqual(ANTHROPIC.maxVisualRequestBytes)
+    expect(() =>
+      assertVisualRequestFits(textRequest, { messages: textRequest }, true, ANTHROPIC)
     ).not.toThrow()
 
     // Counterfactual twin: remove only the request-byte datum from the profile.

@@ -120,8 +120,17 @@ const EXHAUSTED_MESSAGE =
 const IMAGE_EXHAUSTED_MESSAGE =
   'The current request already carries as many images as the model accepts, or the turn image memory is spent. Reattach the file in a new message and pass resumeCursor as cursor to continue.'
 
-/** Estimated bytes for the text that accompanies the images in the same request. */
-const VISUAL_REQUEST_TEXT_RESERVE_BYTES = 2_000_000
+/**
+ * Bytes reserved for the text that accompanies the images in the same
+ * request. The Tool has no measurement of it: `requestImages` carries only
+ * images, and `contextWindowTokens` bounds tokens, not serialized bytes. A
+ * 1M-token context can hold several MB of snapshot text, so 2 MB left the
+ * admitted images and the real text above the provider's serialized bound;
+ * 4 MB covers a 1M-token context at roughly four UTF-8 bytes per token and the
+ * measured 2.1 MB case. Every byte here is unavailable to images, and the
+ * provider request asserter downstream remains the typed backstop.
+ */
+const VISUAL_REQUEST_TEXT_RESERVE_BYTES = 4_000_000
 
 const LIMIT_BY_STOP: Record<
   'max_pages' | 'max_extracted_chars' | 'max_rows' | 'max_cells',
@@ -822,10 +831,11 @@ export class DocumentReadTool implements Tool {
       return ranges.length === 0 ? value : maskSlice(value, ranges, 0, value.length)
     }
     const maxCellChars = this.limits.maxCellChars
+    const sheetNames = outcome.sheetNames.map(redact)
     const sheets = outcome.sheets.map(sheet => ({
-      ...sheet,
       name: redact(sheet.name),
       sheetIndex: outcome.sheetNames.indexOf(sheet.name),
+      startRow: sheet.startRow,
       // Redact the whole value first; the cap then only shortens masked text.
       rows: sheet.rows.map(row =>
         row.map(
@@ -833,11 +843,107 @@ export class DocumentReadTool implements Tool {
             typeof cell === 'string' ? truncateCell(redact(cell), maxCellChars) : cell
         )
       ),
+      truncated: sheet.truncated,
+      lastRow: sheet.lastRow,
+      skipped: [...(sheet.skippedRows?.first ?? [])].sort((a, b) => a - b),
     }))
     if (sheets.some(sheet => sheet.sheetIndex < 0)) {
       throw new Error('Document worker returned a sheet outside its sheetNames')
     }
+
+    // A row that cannot fit even alone in a full ledger page is emitted as []
+    // (the same shape the worker uses for its own skipped rows) instead of
+    // failing the whole read: the next row must stay reachable. The probe is
+    // the smallest result a call starting at that row could emit (the row, its
+    // sheet envelope and the continuation to the next row), measured after
+    // redaction and the cell cap exactly as `build` measures its results.
+    const pageTokens = attachmentReadBudgets(this.contextWindowTokens).pageTokens
+    const skippedRowsBySheet = sheets.map((sheet, sheetIndex) => {
+      const skipped = [...sheet.skipped]
+      const parserSkipped = new Set(skipped)
+      const nextSheet = sheets[sheetIndex + 1]
+      for (let rowIndex = 0; rowIndex < sheet.rows.length; rowIndex += 1) {
+        const rowNumber = sheet.startRow + rowIndex
+        if (parserSkipped.has(rowNumber)) continue
+        const remainsInSheet = rowIndex + 1 < sheet.rows.length
+        // A last row still leaves rows of the same sheet when the worker's
+        // window stopped after it; the result must say so.
+        const truncated = remainsInSheet || sheet.truncated
+        const continuation: DocumentContinuation | undefined = remainsInSheet
+          ? {
+              cursor: encodeCursor(
+                { format: 'xlsx', sheetIndex: sheet.sheetIndex, row: rowNumber + 1 },
+                identity.referenceId
+              ),
+              limit: 'page_budget',
+            }
+          : nextSheet
+            ? {
+                cursor: encodeCursor(
+                  {
+                    format: 'xlsx',
+                    sheetIndex: nextSheet.sheetIndex,
+                    row: nextSheet.startRow,
+                  },
+                  identity.referenceId
+                ),
+                limit: 'page_budget',
+              }
+            : outcome.next
+              ? {
+                  cursor: encodeCursor({ format: 'xlsx', ...outcome.next }, identity.referenceId),
+                  limit: stopLimit(outcome.stoppedBy),
+                }
+              : undefined
+        const probe: DocumentReadResult = {
+          status: 'ok',
+          ...identity,
+          format: 'xlsx',
+          sheetNames,
+          ...(continuation ? { continuation } : {}),
+          sheets: [
+            {
+              name: sheet.name,
+              startRow: rowNumber,
+              rows: [sheet.rows[rowIndex]!],
+              truncated,
+              lastRow: sheet.lastRow,
+            },
+          ],
+        }
+        if (measure(JSON.stringify(probe)) > pageTokens) {
+          sheet.rows[rowIndex] = []
+          skipped.push(rowNumber)
+        }
+      }
+      return skipped.sort((a, b) => a - b)
+    })
+
     const total = sheets.reduce((sum, sheet) => sum + sheet.rows.length, 0)
+
+    const buildSheet = (
+      sheet: (typeof sheets)[number],
+      emittedRows: number,
+      skipped: readonly number[]
+    ): XlsxSheetResult => {
+      const endRow = sheet.startRow + emittedRows
+      const emittedSkipped = skipped.filter(row => row >= sheet.startRow && row < endRow)
+      return {
+        name: sheet.name,
+        startRow: sheet.startRow,
+        rows: emittedRows === sheet.rows.length ? sheet.rows : sheet.rows.slice(0, emittedRows),
+        truncated: emittedRows === sheet.rows.length ? sheet.truncated : true,
+        lastRow: sheet.lastRow,
+        ...(emittedSkipped.length > 0
+          ? {
+              skippedRows: {
+                count: emittedSkipped.length,
+                first: emittedSkipped.slice(0, 20),
+              },
+            }
+          : {}),
+      }
+    }
 
     const build = (rowCount: number, limit: DocumentReadLimit | null): DocumentReadResult => {
       const out: XlsxSheetResult[] = []
@@ -846,30 +952,14 @@ export class DocumentReadTool implements Tool {
       for (let i = 0; i < sheets.length; i += 1) {
         const sheet = sheets[i]!
         if (remaining >= sheet.rows.length) {
-          out.push({
-            name: sheet.name,
-            startRow: sheet.startRow,
-            rows: sheet.rows,
-            truncated: sheet.truncated,
-            lastRow: sheet.lastRow,
-            ...(sheet.skippedRows ? { skippedRows: sheet.skippedRows } : {}),
-          })
+          out.push(buildSheet(sheet, sheet.rows.length, skippedRowsBySheet[i]!))
           remaining -= sheet.rows.length
           continue
         }
         if (remaining > 0) {
           // Skipped rows beyond the slice are re-read (and re-reported) via
           // the continuation cursor; the count covers the emitted rows.
-          const endRow = sheet.startRow + remaining
-          const first = sheet.skippedRows?.first.filter(row => row < endRow) ?? []
-          out.push({
-            name: sheet.name,
-            startRow: sheet.startRow,
-            rows: sheet.rows.slice(0, remaining),
-            truncated: true,
-            lastRow: sheet.lastRow,
-            ...(first.length > 0 ? { skippedRows: { count: first.length, first } } : {}),
-          })
+          out.push(buildSheet(sheet, remaining, skippedRowsBySheet[i]!))
         }
         next = { sheetIndex: sheet.sheetIndex, row: sheet.startRow + remaining }
         break
@@ -890,7 +980,7 @@ export class DocumentReadTool implements Tool {
         status: 'ok',
         ...identity,
         format: 'xlsx',
-        sheetNames: outcome.sheetNames.map(redact),
+        sheetNames,
         ...(continuation ? { continuation } : {}),
         sheets: out,
       }

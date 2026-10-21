@@ -89,10 +89,13 @@ export interface XlsxSheetResult {
   lastRow: number
   /**
    * Rows inside `rows` whose full width alone exceeds the per-call
-   * extracted-character limit. Their cells are not returned (the row reads
-   * as `[]`); every other row of the window is. `count` covers the rows of
-   * this result; `first` lists at most 20 of their worksheet row numbers.
-   * Absent when no row was skipped.
+   * extracted-character limit or a full page of the turn's read ledger.
+   * Their cells are not returned (the row reads as `[]`); every other row of
+   * the window is. In a worker outcome, `first` is the complete list of
+   * skipped worksheet rows in the returned window and `count === first.length`;
+   * in the Tool result, `first` is capped at 20 and `count` is the total number
+   * of skipped rows inside the rows that result returns. Absent when no row
+   * was skipped.
    */
   skippedRows?: { count: number; first: number[] }
 }

@@ -13,6 +13,7 @@ import type {
   DocumentReadLimits,
   PdfTextOutcome,
   RunDocumentJob,
+  XlsxCellValue,
   XlsxOutcome,
 } from '../types'
 import { runDocumentJob } from '../workerRunner'
@@ -414,32 +415,80 @@ describe('DocumentReadTool budgets', () => {
     // 10 cells at the 2000-character cell cap: about 5000 tokens, above the
     // 2000-token page of a 20k window.
     const wideRow = Array.from({ length: 10 }, () => 'w'.repeat(2_000))
-    const xlsx = (rows: string[][]): XlsxOutcome => ({
+    const xlsx = (
+      rows: XlsxCellValue[][],
+      skippedRows?: { count: number; first: number[] }
+    ): XlsxOutcome => ({
       ok: true,
       sheetNames: ['Wide'],
-      sheets: [{ name: 'Wide', startRow: 1, rows, truncated: false, lastRow: rows.length }],
+      sheets: [
+        {
+          name: 'Wide',
+          startRow: 1,
+          rows,
+          truncated: false,
+          lastRow: rows.length,
+          ...(skippedRows ? { skippedRows } : {}),
+        },
+      ],
     })
 
-    it('fails as row_width on a full page and emits a narrow row before it', async () => {
+    it('emits a first wide row as [] and reads the narrow row after it', async () => {
       const file = admittedFile('xlsx-file', await valuesWorkbook(witnessCode()), XLSX_MIME)
-      const wide = await read(toolFor([file], fakeRunner(xlsx([wideRow])).runJob), {
+      const result = await read(toolFor([file], fakeRunner(xlsx([wideRow, ['witness']])).runJob), {
         attachmentId: 'xlsx-file',
       })
-      expect(wide.output.is_error).toBe(true)
-      expect(wide.body).toMatchObject({
-        status: 'error',
-        reason: 'document_limits_exceeded',
-        limit: 'row_width',
-      })
-      // Control: a narrow first row fits and the wide row becomes the continuation.
-      const control = await read(toolFor([file], fakeRunner(xlsx([['narrow'], wideRow])).runJob), {
-        attachmentId: 'xlsx-file',
-      })
-      expect(control.body).toMatchObject({
+      expect(result.output.is_error).toBe(false)
+      expect(result.body).toMatchObject({
         status: 'ok',
-        sheets: [{ rows: [['narrow']] }],
-        continuation: { limit: 'page_budget' },
+        sheets: [
+          {
+            startRow: 1,
+            rows: [[], ['witness']],
+            skippedRows: { count: 1, first: [1] },
+          },
+        ],
       })
+      expect(result.body.continuation).toBeUndefined()
+    })
+
+    it('merges an interior wide row with the parser skipped rows in worksheet order', async () => {
+      const file = admittedFile('xlsx-file', await valuesWorkbook(witnessCode()), XLSX_MIME)
+      const result = await read(
+        toolFor(
+          [file],
+          fakeRunner(xlsx([['before'], wideRow, [], ['after']], { count: 1, first: [3] })).runJob
+        ),
+        { attachmentId: 'xlsx-file' }
+      )
+      expect(result.body).toMatchObject({
+        status: 'ok',
+        sheets: [
+          {
+            startRow: 1,
+            rows: [['before'], [], [], ['after']],
+            skippedRows: { count: 2, first: [2, 3] },
+          },
+        ],
+      })
+    })
+
+    it('skips a wide last row and keeps the row before it', async () => {
+      const file = admittedFile('xlsx-file', await valuesWorkbook(witnessCode()), XLSX_MIME)
+      const result = await read(toolFor([file], fakeRunner(xlsx([['before'], wideRow])).runJob), {
+        attachmentId: 'xlsx-file',
+      })
+      expect(result.body).toMatchObject({
+        status: 'ok',
+        sheets: [
+          {
+            startRow: 1,
+            rows: [['before'], []],
+            skippedRows: { count: 1, first: [2] },
+          },
+        ],
+      })
+      expect(result.body.continuation).toBeUndefined()
     })
 
     it('keeps the exhaustion notice when only the turn budget is short', async () => {
@@ -457,12 +506,90 @@ describe('DocumentReadTool budgets', () => {
       ledger.restore({ reads: 1, spentTokens: 0, bytesRead: 0 })
       const spent = Math.max(0, ledger.pageAllowance(WINDOW_TOKENS, notice) - 100)
       ledger.restore({ reads: 1, spentTokens: spent, bytesRead: 0 })
-      const result = await read(toolFor([file], fakeRunner(xlsx([wideRow])).runJob, { ledger }), {
-        attachmentId: 'xlsx-file',
-      })
+      // A row that fits a full page still does not fit the short turn allowance.
+      const result = await read(
+        toolFor(
+          [file],
+          fakeRunner(xlsx([Array.from({ length: 3 }, () => 'n'.repeat(2_000))])).runJob,
+          { ledger }
+        ),
+        { attachmentId: 'xlsx-file' }
+      )
       // A new turn restores a full page, so the notice stays truthful here.
       expect(result.body).toMatchObject({ status: 'read_budget_exhausted' })
       expect(result.output.is_error).toBe(false)
+    })
+  })
+
+  describe('XLSX skippedRows accounting', () => {
+    const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    const skippedRange = (from: number, count: number): number[] =>
+      Array.from({ length: count }, (_, index) => from + index)
+    const xlsx = (rows: XlsxCellValue[][], first: number[]): XlsxOutcome => ({
+      ok: true,
+      sheetNames: ['Rows'],
+      sheets: [
+        {
+          name: 'Rows',
+          startRow: 1,
+          rows,
+          truncated: false,
+          lastRow: rows.length,
+          skippedRows: { count: first.length, first },
+        },
+      ],
+    })
+
+    it('counts the 30 skipped rows the ledger emits and caps first at 20', async () => {
+      const file = admittedFile('xlsx-file', await valuesWorkbook(witnessCode()), XLSX_MIME)
+      // 30 parser-skipped rows, then rows of about 250 tokens each: the page
+      // cuts before the window ends, with all 30 skipped rows inside it.
+      const rows: XlsxCellValue[][] = [
+        ...Array.from({ length: 30 }, () => []),
+        ...Array.from({ length: 20 }, () => ['n'.repeat(1_000)]),
+      ]
+      const result = await read(
+        toolFor([file], fakeRunner(xlsx(rows, skippedRange(1, 30))).runJob),
+        { attachmentId: 'xlsx-file' }
+      )
+      const sheet = (result.body.sheets as Array<Record<string, unknown>>)[0]!
+      expect(sheet.skippedRows).toEqual({
+        count: 30,
+        first: skippedRange(1, 20),
+      })
+      const emitted = (sheet.rows as unknown[]).length
+      expect(emitted).toBeGreaterThan(30)
+      expect(emitted).toBeLessThan(50)
+      expect(result.body.continuation).toEqual({
+        cursor: boundCursor(`v1.xlsx.0.${emitted + 1}`, file),
+        limit: 'page_budget',
+      })
+    })
+
+    it('counts only the skipped rows inside the emitted range', async () => {
+      const file = admittedFile('xlsx-file', await valuesWorkbook(witnessCode()), XLSX_MIME)
+      // Five skipped rows at the start, 40 rows of about 100 tokens each, then
+      // five skipped rows the one-page cut cannot reach.
+      const rows: XlsxCellValue[][] = [
+        ...Array.from({ length: 5 }, () => []),
+        ...Array.from({ length: 40 }, () => ['n'.repeat(400)]),
+        ...Array.from({ length: 5 }, () => []),
+      ]
+      const result = await read(
+        toolFor(
+          [file],
+          fakeRunner(xlsx(rows, [...skippedRange(1, 5), ...skippedRange(46, 5)])).runJob
+        ),
+        { attachmentId: 'xlsx-file' }
+      )
+      const sheet = (result.body.sheets as Array<Record<string, unknown>>)[0]!
+      expect(sheet.skippedRows).toEqual({ count: 5, first: skippedRange(1, 5) })
+      const emitted = (sheet.rows as unknown[]).length
+      expect(emitted).toBeLessThan(46)
+      expect(result.body.continuation).toEqual({
+        cursor: boundCursor(`v1.xlsx.0.${emitted + 1}`, file),
+        limit: 'page_budget',
+      })
     })
   })
 })
