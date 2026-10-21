@@ -710,14 +710,18 @@ spec:
                 scheduling:
                   type: object
                   description: >-
-                    Enables recurring execution of this recipe via a K8s CronJob.
+                    Legacy form of spec.triggers.schedule, which takes precedence.
+                    Enables recurring execution of this recipe: WRC syncs a
+                    Postgres workflow_schedules row and a control-api worker
+                    fires it. No Kubernetes CronJob is created.
                     Only valid when spec.steps[] is non-empty.
                   properties:
                     cron:
                       type: string
                       maxLength: 100
                       description: >-
-                        Standard cron expression (five fields). E.g. "0 9 * * MON".
+                        Five-field cron expression, numeric only. E.g. "0 9 * * 1".
+                        Named days and months (MON, JAN) are rejected.
                     timezone:
                       type: string
                       maxLength: 63
@@ -728,9 +732,11 @@ spec:
                       enum: [Forbid, Replace, Allow]
                       default: Forbid
                       description: >-
-                        Forbid: skip trigger if a child is still running.
-                        Replace: cancel running child, start new one.
-                        Allow: permit concurrent executions up to policy limit.
+                        Applies to scheduled ticks only.
+                        Forbid: skip the tick while a run of this recipe is still
+                        live, then advance to the next window.
+                        Allow: every tick fires; runs may overlap.
+                        Replace: accepted but not implemented; behaves like Allow.
                     successfulHistoryLimit:
                       type: integer
                       minimum: 0
@@ -785,8 +791,9 @@ spec:
                       type: object
                       description: >-
                         PRESENCE enables cron-based scheduled triggering. WRC
-                        emits a CronJob that calls POST /trigger with a
-                        system-attributed JWT.
+                        syncs a Postgres workflow_schedules row and a control-api
+                        worker fires each matured tick as a system-attributed run.
+                        No Kubernetes CronJob is created.
                       required: [cron]
                       properties:
                         cron:
@@ -802,9 +809,11 @@ spec:
                           enum: [Forbid, Replace, Allow]
                           default: Forbid
                           description: >-
-                            Forbid: skip trigger if a run is still active.
-                            Replace: cancel active run, start new one.
-                            Allow: permit concurrent executions.
+                            Applies to scheduled ticks only.
+                            Forbid: skip the tick while a run of this recipe is
+                            still live, then advance to the next window.
+                            Allow: every tick fires; runs may overlap.
+                            Replace: accepted but not implemented; behaves like Allow.
                         suspend:
                           type: boolean
                           default: false
