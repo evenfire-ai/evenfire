@@ -17,6 +17,13 @@ import {
   parseHttpStatus,
   parseRetryAfterSeconds,
 } from '@lib/gfsGrantErrors'
+import {
+  type GfsOpenLocationRegistry,
+  ancestryDependentGfsResourceIds,
+  nextGfsOpenLocationId,
+  publishGfsOpenLocation,
+  readGfsOpenLocations,
+} from '@lib/gfsOpenLocations'
 import type {
   GfsGrantListItem,
   GfsInheritedAccessResult,
@@ -339,6 +346,49 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     },
     [queryClient, sessionScope]
   )
+
+  // The open location is CLIENT state, not server state: it records which
+  // resource this mount has open and the ancestry this mount observed. It is
+  // published through the query cache so EVERY mount sees it — a move
+  // committed by the sidebar must be able to tell that it changes what the
+  // Files page's open Share/Manage dialog inherits (RP-005).
+  //
+  // The subscription exists only to keep the cache entry alive: an
+  // unobserved entry is garbage-collected while the app is idle, and the
+  // registry would silently empty itself. `notifyOnChangeProps: []` keeps
+  // another mount's publish from re-rendering this one — the registry is
+  // read imperatively, never rendered.
+  useQuery({
+    queryKey: desktopQueryKeys.gfsOpenLocations(sessionScope ?? 'anonymous'),
+    queryFn: async () => ({}) as GfsOpenLocationRegistry,
+    enabled: false,
+    initialData: {} as GfsOpenLocationRegistry,
+    gcTime: Infinity,
+    staleTime: Infinity,
+    notifyOnChangeProps: [],
+  })
+  // One identity per controller mount: the registry holds an entry per
+  // mount, and a mount that navigates replaces only its own entry.
+  const openLocationIdRef = useRef<string | null>(null)
+  if (openLocationIdRef.current === null) openLocationIdRef.current = nextGfsOpenLocationId()
+  const openLocationId = openLocationIdRef.current
+  useEffect(() => {
+    if (!sessionScope) return
+    // The ancestry this mount observed is the trail it loaded: the open
+    // resource's ancestors, nearest first. A revoked session has no open
+    // location to claim.
+    const location =
+      accessState === 'active' && current
+        ? {
+            resourceId: current.resourceId,
+            ancestorResourceIds: crumbs.slice(0, -1).map(crumb => crumb.resourceId),
+          }
+        : null
+    publishGfsOpenLocation(queryClient, sessionScope, openLocationId, location)
+    return () => {
+      publishGfsOpenLocation(queryClient, sessionScope, openLocationId, null)
+    }
+  }, [accessState, crumbs, current?.resourceId, openLocationId, queryClient, sessionScope])
 
   useEffect(() => {
     const previous = previousSessionScopeRef.current
@@ -1098,18 +1148,23 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // The OPEN resource's inherited access is derived from its ANCESTRY. A move
   // of that resource — or of one of its ancestors — changes what it
   // inherits, so an open Share/Manage dialog must re-read those rows instead
-  // of showing the pre-move observation. The trail is the ancestry this
-  // session actually loaded; nothing outside it is claimed.
+  // of showing the pre-move observation.
+  //
+  // The ancestry is read from the SHARED open-location registry, not from
+  // this mount's own crumbs: the dialog that shows those rows can live in
+  // ANOTHER controller (the Files page) while the move is committed by this
+  // one (the sidebar). Controller-local crumbs only ever proved the chain
+  // this mount observed, and a resource opened by URI has ancestors that no
+  // children cache ever listed (RP-005).
   const openAncestryDependentResourceIds = useCallback(
     (movedResourceId: string): string[] => {
-      const openResourceId = current?.resourceId
-      if (!openResourceId) return []
-      const affectsOpenAncestry =
-        movedResourceId === openResourceId ||
-        crumbs.some(crumb => crumb.resourceId === movedResourceId)
-      return affectsOpenAncestry ? [openResourceId] : []
+      if (!sessionScope) return []
+      return ancestryDependentGfsResourceIds(
+        readGfsOpenLocations(queryClient, sessionScope),
+        movedResourceId
+      )
     },
-    [crumbs, current?.resourceId]
+    [queryClient, sessionScope]
   )
 
   // Move refreshes through the shared convergence planner (rev-2 §6): the

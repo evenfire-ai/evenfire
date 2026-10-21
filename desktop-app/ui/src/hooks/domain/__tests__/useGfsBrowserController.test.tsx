@@ -3483,3 +3483,135 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
     }
   }
 })
+
+// A move committed by ONE surface must reach the Share/Manage dialog ANOTHER
+// surface has open. The Files page opened a deep descendant by URI — its
+// ancestry lives in ITS controller, and the children caches that could
+// connect it to the moved ancestor were never loaded — while the sidebar, a
+// SEPARATE controller with its own crumbs, moves that ancestor.
+function TwoSurfaceProbe() {
+  const [manageOpen, setManageOpen] = useState(false)
+  const files = useGfsBrowserController({ grantsListEnabled: manageOpen })
+  const sidebar = useGfsBrowserController()
+  return (
+    <>
+      <div data-testid="files-current">{files.current?.resourceId ?? 'none'}</div>
+      <div data-testid="files-crumbs">
+        {files.crumbs.map(crumb => crumb.resourceId).join(' / ')}
+      </div>
+      <button type="button" onClick={() => swallow(files.openUri('gfs://main/leaf1'))}>
+        open leaf
+      </button>
+      <button type="button" onClick={() => setManageOpen(true)}>
+        open manage
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          swallow(
+            sidebar.convergeCommittedMove(
+              {
+                resourceId: 'ancestor-1',
+                destinationId: 'destination-1',
+                oldParentId: null,
+              },
+              { version: 2 }
+            )
+          )
+        }
+      >
+        move ancestor
+      </button>
+    </>
+  )
+}
+
+describe('useGfsBrowserController — cross-surface move convergence (RP-005)', () => {
+  afterEach(() => {
+    cleanup()
+    lastHarnessQueryClient = null
+    vi.restoreAllMocks()
+  })
+
+  it("re-reads another surface's open inherited access when a move affects its ancestry", async () => {
+    const listGrants = vi.fn(async () => [])
+    const listShares = vi.fn(async () => [])
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async (uri: string) => {
+            const id = uri.split('/').pop()!
+            if (id === 'leaf1') {
+              return {
+                resourceId: 'leaf-1',
+                parentResourceId: 'parent-1',
+                gfsUri: 'gfs://main/leaf1',
+                name: 'leaf.txt',
+                kind: 'file',
+                version: 1,
+              }
+            }
+            if (id === 'parent1') {
+              return {
+                resourceId: 'parent-1',
+                parentResourceId: 'ancestor-1',
+                gfsUri: 'gfs://main/parent1',
+                name: 'Parent',
+                kind: 'directory',
+                version: 1,
+              }
+            }
+            return {
+              resourceId: 'ancestor-1',
+              parentResourceId: null,
+              gfsUri: 'gfs://main/ancestor1',
+              name: 'Ancestor',
+              kind: 'directory',
+              version: 1,
+            }
+          }),
+          // No children listing is ever loaded, so the shared cache holds no
+          // child→parent link that could connect the open leaf to its
+          // ancestor: the ancestry exists only in the Files controller.
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'manage_acl'],
+            canDelegate: true,
+            grantableBits: ['read'],
+            canCreateShare: false,
+          })),
+          listGrants,
+          listShares,
+        },
+      },
+    })
+
+    render(<TwoSurfaceProbe />, { wrapper: Harness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open leaf' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('files-current').textContent).toBe('leaf-1'))
+    expect(screen.getByTestId('files-crumbs').textContent).toBe('ancestor-1 / parent-1 / leaf-1')
+    await act(async () => {
+      screen.getByRole('button', { name: 'open manage' }).click()
+    })
+    await waitFor(() => expect(listGrants).toHaveBeenCalled())
+
+    const client = lastHarnessQueryClient!
+    const scope = ':user-a:team-a'
+    const inheritedKey = desktopQueryKeys.gfsInheritedAccess(scope, 'leaf-1', 'main')
+    const inheritedQuery = client.getQueryCache().find({ queryKey: inheritedKey })!
+    const before = inheritedQuery.state.dataUpdatedAt
+    expect(before).toBeGreaterThan(0)
+
+    // The OTHER surface moves the open leaf's ancestor.
+    await act(async () => {
+      screen.getByRole('button', { name: 'move ancestor' }).click()
+    })
+
+    await waitFor(() => expect(inheritedQuery.state.dataUpdatedAt).not.toBe(before))
+  })
+})
