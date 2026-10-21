@@ -506,8 +506,8 @@ export function App() {
 
   // The launch of the app tab the last commit left active, or none when that
   // tab is not an app or its app cannot be resolved right now (registry
-  // reconciling, list refreshing): the tab is left intact and relaunches once
-  // the list has it again.
+  // reconciling, list refreshing): the tab is left intact. The list coming back
+  // does not relaunch it; the next gesture that launches into the tab does.
   const launchForActiveAppTab = React.useCallback((): Launch | null => {
     const state = embed.getSnapshot()
     const tabId = state.activeAppTabId
