@@ -65,23 +65,6 @@ describe('public access-contract forwarding', () => {
     )
   })
 
-  it('forwards resolve bodies without interpreting action identity', async () => {
-    const body = {
-      requiredCapability: 'team.read',
-      resource: { environmentId: 'env', type: 'team', logicalId: 'team-1' },
-    }
-    mocks.controlApiRequest.mockResolvedValue({ status: 'allowed' })
-    await request(app())
-      .post('/me/access/resolve')
-      .set('authorization', 'Bearer session-token')
-      .send(body)
-      .expect(200, { status: 'allowed' })
-    expect(mocks.controlApiRequest).toHaveBeenCalledWith('POST', '/external/access/resolve', {
-      userSessionToken: 'session-token',
-      body,
-    })
-  })
-
   it('rebuilds a bounded public error instead of forwarding upstream fields', async () => {
     mocks.controlApiRequest.mockRejectedValue(
       new ControlApiError('upstream', 503, {

@@ -70,17 +70,10 @@ export function createAccessRouter(): Router {
     }
   })
 
-  router.post('/me/access/resolve', async (req: AuthedRequest, res, next) => {
-    try {
-      const result = await controlApiRequest('POST', '/external/access/resolve', {
-        userSessionToken: extractAuthToken(req),
-        body: req.body,
-      })
-      res.status(200).json(result)
-    } catch (error) {
-      forwardAccessError(error, res, next)
-    }
-  })
-
+  // There is deliberately no POST /me/access/resolve here. The control-api
+  // /external/access/resolve handler stays dormant until the access-resolution
+  // contract is enabled, so this edge must not forward to it. Re-adding a
+  // forwarding route re-exposes it; routes.accessResolveExposure.test.ts pins
+  // the absence.
   return router
 }
