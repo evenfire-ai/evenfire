@@ -80,7 +80,7 @@ export async function switchTeam(
   try {
     membership = await controlApiRequest<{ team_id: string; role: TeamRole; team_name: string }>(
       'GET',
-      `/external/users/${userId}/memberships/${nextTeamId}`,
+      `/external/users/${userId}/memberships/${encodeURIComponent(nextTeamId)}`,
       { userSessionToken: sessionToken }
     )
   } catch (error) {

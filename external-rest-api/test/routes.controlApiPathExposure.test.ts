@@ -17,7 +17,9 @@ const RESEND_POSITIVE = `${PUBLIC_API_PREFIX}/members/invitations/${INVITATION_I
 const SFS_PREFIX = `${PUBLIC_API_PREFIX}/me/contexts/ctx-a/shared-filesystems/team-mission/proxy`
 const SFS_RESOLVE_ALIAS = `${SFS_PREFIX}/..%2f..%2f..%2f..%2f..%2faccess%2fresolve`
 const SFS_CAPABILITIES_ALIAS = `${SFS_PREFIX}/..%2f..%2f..%2f..%2f..%2faccess%2fcapabilities`
-const SFS_POSITIVE = `${SFS_PREFIX}/files/report.txt?download=1`
+// Product shape from workspace-files-controller: GET /v1/files/download?path=...
+const SFS_DOWNLOAD_POSITIVE = `${SFS_PREFIX}/v1/files/download?path=notes%2Fplan.md`
+const SFS_ENCODED_QUESTION_MARK = `${SFS_PREFIX}/files/a%3Fb.txt?download=1`
 
 const claims = {
   userId: '10000000-0000-4000-8000-000000000001',
@@ -99,6 +101,33 @@ function jsonResponse(body: unknown): Response {
   })
 }
 
+function binaryResponse(body: string): Response {
+  return new Response(body, {
+    status: 200,
+    headers: { 'content-type': 'application/octet-stream' },
+  })
+}
+
+async function expectProductShapedDownloadReachesStub(): Promise<void> {
+  const positive = await rawRequest({
+    method: 'GET',
+    path: SFS_DOWNLOAD_POSITIVE,
+    token: 'session-token',
+  })
+
+  expect(positive.status).toBe(200)
+  expect(positive.body).toBe('file-data')
+  expect(mocks.controlApiFetch).toHaveBeenCalledTimes(1)
+  const [url, init] = mocks.controlApiFetch.mock.calls[0] as [string, RequestInit]
+  const upstream = new URL(url)
+  expect(upstream.pathname).toBe(
+    `${PUBLIC_API_PREFIX}/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/v1/files/download`
+  )
+  expect(upstream.search).toBe('?path=notes%2Fplan.md')
+  expect(init.method).toBe('GET')
+  expect((init.headers as Record<string, string>)['x-user-session-token']).toBe('session-token')
+}
+
 describe('control-api path exposure through public aliases', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -146,46 +175,60 @@ describe('control-api path exposure through public aliases', () => {
     expect((init.headers as Record<string, string>)['x-user-session-token']).toBe('session-token')
   })
 
-  it('rejects both encoded SFS relay aliases before fetch while an ordinary SFS file read stays live', async () => {
-    mocks.controlApiFetch.mockResolvedValueOnce(
-      new Response('file-data', {
-        status: 200,
-        headers: { 'content-type': 'application/octet-stream' },
-      })
-    )
+  it('rejects the encoded SFS resolve alias before fetch while a product-shaped download stays live', async () => {
+    mocks.controlApiFetch.mockResolvedValueOnce(binaryResponse('file-data'))
 
-    for (const aliasPath of [SFS_RESOLVE_ALIAS, SFS_CAPABILITIES_ALIAS]) {
-      const alias = await rawRequest({
-        method: 'GET',
-        path: aliasPath,
-        token: 'session-token',
-        correlationId: 'sfs-alias-correlation',
-      })
+    const alias = await rawRequest({
+      method: 'GET',
+      path: SFS_RESOLVE_ALIAS,
+      token: 'session-token',
+      correlationId: 'sfs-resolve-alias-correlation',
+    })
 
-      expect(alias.status, aliasPath).toBe(400)
-      expect(alias.body, aliasPath).toEqual(invalidRequestEnvelope('sfs-alias-correlation'))
-    }
+    expect(alias.status).toBe(400)
+    expect(alias.body).toEqual(invalidRequestEnvelope('sfs-resolve-alias-correlation'))
     expect(mocks.verifyToken).toHaveBeenCalledWith('session-token')
     expect(mocks.controlApiFetch).not.toHaveBeenCalled()
 
-    // Positive witness in the same test: a normal SFS file path, including the
-    // relay's opaque query forwarding, reaches the stubbed upstream.
-    const positive = await rawRequest({
+    await expectProductShapedDownloadReachesStub()
+  })
+
+  it('rejects the encoded SFS capabilities alias before fetch while a product-shaped download stays live', async () => {
+    mocks.controlApiFetch.mockResolvedValueOnce(binaryResponse('file-data'))
+
+    const alias = await rawRequest({
       method: 'GET',
-      path: SFS_POSITIVE,
+      path: SFS_CAPABILITIES_ALIAS,
+      token: 'session-token',
+      correlationId: 'sfs-capabilities-alias-correlation',
+    })
+
+    expect(alias.status).toBe(400)
+    expect(alias.body).toEqual(invalidRequestEnvelope('sfs-capabilities-alias-correlation'))
+    expect(mocks.verifyToken).toHaveBeenCalledWith('session-token')
+    expect(mocks.controlApiFetch).not.toHaveBeenCalled()
+
+    await expectProductShapedDownloadReachesStub()
+  })
+
+  it('keeps an encoded question mark inside one SFS wildcard segment and forwards the query separately', async () => {
+    mocks.controlApiFetch.mockResolvedValueOnce(binaryResponse('file-data'))
+
+    const response = await rawRequest({
+      method: 'GET',
+      path: SFS_ENCODED_QUESTION_MARK,
       token: 'session-token',
     })
 
-    expect(positive.status).toBe(200)
-    expect(positive.body).toBe('file-data')
+    expect(response.status).toBe(200)
+    expect(response.body).toBe('file-data')
     expect(mocks.controlApiFetch).toHaveBeenCalledTimes(1)
     const [url, init] = mocks.controlApiFetch.mock.calls[0] as [string, RequestInit]
     const upstream = new URL(url)
     expect(upstream.pathname).toBe(
-      `${PUBLIC_API_PREFIX}/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/files/report.txt`
+      `${PUBLIC_API_PREFIX}/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/files/a%3Fb.txt`
     )
     expect(upstream.search).toBe('?download=1')
     expect(init.method).toBe('GET')
-    expect((init.headers as Record<string, string>)['x-user-session-token']).toBe('session-token')
   })
 })

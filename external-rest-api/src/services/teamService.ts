@@ -150,7 +150,7 @@ export async function updateMemberRole(
   try {
     target = await controlApiRequest<{ role: TeamRole }>(
       'GET',
-      `/external/teams/${auth.teamId}/members/${targetUserId}/role`,
+      `/external/teams/${auth.teamId}/members/${encodeURIComponent(targetUserId)}/role`,
       { userSessionToken: auth.sessionToken }
     )
   } catch (error) {
@@ -164,7 +164,7 @@ export async function updateMemberRole(
   }
   const updated = await controlApiRequest<unknown>(
     'PATCH',
-    `/external/teams/${auth.teamId}/members/${targetUserId}/role`,
+    `/external/teams/${auth.teamId}/members/${encodeURIComponent(targetUserId)}/role`,
     {
       body: {
         role: newRole,
@@ -206,7 +206,7 @@ export async function deleteMember(auth: AuthContext, userId: string) {
   try {
     deleted = await controlApiRequest<unknown>(
       'DELETE',
-      `/external/teams/${auth.teamId}/members/${userId}`,
+      `/external/teams/${auth.teamId}/members/${encodeURIComponent(userId)}`,
       {
         userSessionToken: auth.sessionToken,
       }

@@ -3,6 +3,7 @@ import {
   ControlApiError,
   ControlApiPathError,
   assertControlApiPathAllowed,
+  assertControlApiRawQueryAllowed,
   controlApiBinaryRequestWithStatus,
   controlApiPassthroughGet,
   controlApiRequest,
@@ -10,13 +11,17 @@ import {
   controlApiStreamRequest,
 } from '../src/controlApiClient.js'
 
-// A bare `?` is intentionally allowed: the SharedFileSystem relay forwards the
-// caller's opaque query string through the path argument
-// (src/routes/contextSharedFilesystems.ts:88-95) and the brief forbids changing
-// that interpolation site. The query cannot change the pathname, and every
-// dot-segment form below still rejects a relocated pathname. `#` is rejected
-// because URL construction would turn it into a fragment and drop the suffix.
+// A `?` in the path is rejected: Express decodes `%3f` in a route param before
+// the call site interpolates it, and URL construction would otherwise truncate
+// the suffix and select a different control-api handler. The SharedFileSystem
+// relay's opaque query travels through `rawQueryString` instead.
 const REJECTED_PATHS = [
+  ['raw query delimiter', '/external/members/invitations?/resend'],
+  ['raw query truncation', '/external/members/U?/teams/T'],
+  [
+    'raw SFS wildcard question mark',
+    '/external/contexts/c/shared-filesystems/s/proxy/files/a?b.txt',
+  ],
   ['raw dot-dot segment', '/external/members/invitations/../../access/resolve?/resend'],
   ['encoded dot-dot segments', '/external/members/invitations/%2e%2e/%2e%2e/access/resolve'],
   ['mixed-case encoded dot-dot segments', '/external/members/invitations/%2E./%2e./access/resolve'],
@@ -44,11 +49,21 @@ const ACCEPTED_PATHS = [
     'shared filesystem relay file',
     '/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/files/report.txt',
   ],
-  [
-    'shared filesystem relay query',
-    '/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/files/report.txt?download=1',
-  ],
 ] as const
+
+const REJECTED_RAW_QUERIES = [
+  ['missing leading question mark', 'download=1'],
+  ['fragment delimiter', '?download=1#fragment'],
+  ['control character', '?download=\u0001'],
+] as const
+
+const ACCEPTED_RAW_QUERIES = [
+  ['empty', ''],
+  ['product-shaped download', '?path=notes%2Fplan.md'],
+] as const
+
+const REJECTED_PATH = '/external/members/invitations/../../access/resolve?/resend'
+const ACCEPTED_PATH = '/external/access/capabilities'
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -57,8 +72,22 @@ function jsonResponse(body: unknown): Response {
   })
 }
 
+function stubFetch(): ReturnType<typeof vi.fn> {
+  // A Response body can be consumed once, so each call needs a fresh response.
+  const fetchMock = vi
+    .fn()
+    .mockImplementation(() => Promise.resolve(jsonResponse({ served: true })))
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
+function fetchedUrl(fetchMock: ReturnType<typeof vi.fn>, callIndex: number): URL {
+  const [url] = fetchMock.mock.calls[callIndex] as [string, RequestInit]
+  return new URL(url)
+}
+
 describe('control-api path guard', () => {
-  it('rejects every relocation form while accepting the ordinary control-api paths in the same test', () => {
+  it('rejects every relocation form including a raw question mark while accepting ordinary control-api paths in the same test', () => {
     for (const [name, path] of REJECTED_PATHS) {
       expect(() => assertControlApiPathAllowed(path), name).toThrow(ControlApiPathError)
     }
@@ -70,7 +99,7 @@ describe('control-api path guard', () => {
   it('classifies a rejected path as the existing invalid-request client error', () => {
     expect.assertions(4)
     try {
-      assertControlApiPathAllowed('/external/members/invitations/../../access/resolve?/resend')
+      assertControlApiPathAllowed(REJECTED_PATH)
     } catch (error) {
       expect(error).toBeInstanceOf(ControlApiPathError)
       expect(error).toBeInstanceOf(ControlApiError)
@@ -79,36 +108,123 @@ describe('control-api path guard', () => {
     }
   })
 
-  it('fails closed in every control-api client before fetch, then fetches the accepted path', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ served: true }))
-    vi.stubGlobal('fetch', fetchMock)
-    const rejected = '/external/members/invitations/../../access/resolve?/resend'
+  it('accepts only an empty or leading-question-mark raw query without fragments or control characters', () => {
+    for (const [name, rawQueryString] of ACCEPTED_RAW_QUERIES) {
+      expect(() => assertControlApiRawQueryAllowed(rawQueryString), name).not.toThrow()
+    }
+    for (const [name, rawQueryString] of REJECTED_RAW_QUERIES) {
+      expect(() => assertControlApiRawQueryAllowed(rawQueryString), name).toThrow(
+        ControlApiPathError
+      )
+    }
+  })
 
-    await expect(controlApiRequest('POST', rejected)).rejects.toBeInstanceOf(ControlApiPathError)
-    await expect(controlApiRequestWithStatus('POST', rejected)).rejects.toBeInstanceOf(
+  it('fails loudly before fetch when raw and structured queries are both supplied', async () => {
+    const fetchMock = stubFetch()
+
+    await expect(
+      controlApiStreamRequest(
+        'GET',
+        '/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/files',
+        { query: { download: '1' }, rawQueryString: '?download=1' }
+      )
+    ).rejects.toThrow('mutually exclusive')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('fails closed in the JSON client before fetch, then fetches accepted paths', async () => {
+    const fetchMock = stubFetch()
+
+    await expect(controlApiRequest('POST', REJECTED_PATH)).rejects.toBeInstanceOf(
       ControlApiPathError
     )
-    await expect(controlApiBinaryRequestWithStatus('GET', rejected)).rejects.toBeInstanceOf(
-      ControlApiPathError
-    )
-    await expect(controlApiStreamRequest('GET', rejected)).rejects.toBeInstanceOf(
-      ControlApiPathError
-    )
-    await expect(controlApiPassthroughGet(rejected, '?state=proof')).rejects.toBeInstanceOf(
+    await expect(controlApiRequestWithStatus('POST', REJECTED_PATH)).rejects.toBeInstanceOf(
       ControlApiPathError
     )
     expect(fetchMock).not.toHaveBeenCalled()
 
-    // Same-test positive witness: an ordinary path still reaches the stubbed
-    // transport through the same client and the same credential path.
-    await expect(controlApiRequest('GET', '/external/access/capabilities')).resolves.toEqual({
-      served: true,
+    // Same-test positive witness for each JSON entry point.
+    await expect(controlApiRequestWithStatus('GET', ACCEPTED_PATH)).resolves.toEqual({
+      data: { served: true },
+      status: 200,
+    })
+    await expect(controlApiRequest('GET', ACCEPTED_PATH)).resolves.toEqual({ served: true })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    for (const callIndex of [0, 1]) {
+      expect(fetchedUrl(fetchMock, callIndex).pathname).toBe('/api/v1/external/access/capabilities')
+    }
+  })
+
+  it('fails closed in the binary client before fetch, then fetches an accepted path', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(Buffer.from('binary-body'), {
+        status: 200,
+        headers: { 'content-type': 'application/octet-stream' },
+      })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(controlApiBinaryRequestWithStatus('GET', REJECTED_PATH)).rejects.toBeInstanceOf(
+      ControlApiPathError
+    )
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    const result = await controlApiBinaryRequestWithStatus('GET', ACCEPTED_PATH)
+    expect(result.body.equals(Buffer.from('binary-body'))).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchedUrl(fetchMock, 0).pathname).toBe('/api/v1/external/access/capabilities')
+  })
+
+  it('fails closed in the stream client before fetch, then forwards a raw query unchanged', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('stream-body', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(controlApiStreamRequest('GET', REJECTED_PATH)).rejects.toBeInstanceOf(
+      ControlApiPathError
+    )
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    const response = await controlApiStreamRequest(
+      'GET',
+      '/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/v1/files/download',
+      { rawQueryString: '?path=notes%2Fplan.md' }
+    )
+    expect(await response.text()).toBe('stream-body')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const upstream = fetchedUrl(fetchMock, 0)
+    expect(upstream.pathname).toBe(
+      '/api/v1/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/v1/files/download'
+    )
+    expect(upstream.search).toBe('?path=notes%2Fplan.md')
+  })
+
+  it('fails closed in the passthrough client before fetch, then fetches an accepted path', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('<html>callback</html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(controlApiPassthroughGet(REJECTED_PATH, '?state=proof')).rejects.toBeInstanceOf(
+      ControlApiPathError
+    )
+    await expect(
+      controlApiPassthroughGet('/oauth-callback/google-gmail', '?state=proof#fragment')
+    ).rejects.toBeInstanceOf(ControlApiPathError)
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    const result = await controlApiPassthroughGet('/oauth-callback/google-gmail', '?state=proof')
+    expect(result).toEqual({
+      status: 200,
+      contentType: 'text/html; charset=utf-8',
+      body: '<html>callback</html>',
     })
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
-    expect(new URL(url).pathname).toBe('/api/v1/external/access/capabilities')
-    expect(init.method).toBe('GET')
-    expect((init.headers as Record<string, string>)['x-service-token']).toBe('external-rest-api')
+    const upstream = fetchedUrl(fetchMock, 0)
+    expect(upstream.pathname).toBe('/api/v1/oauth-callback/google-gmail')
+    expect(upstream.search).toBe('?state=proof')
   })
 
   afterEach(() => {
