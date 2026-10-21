@@ -263,7 +263,7 @@ export class DocumentReadTool implements Tool {
       `Per file: at most ${maxSourceMiB} MiB, ${this.limits.maxPageCount} PDF pages, and ${maxUncompressedMiB} MiB of decompressed XLSX data. ` +
       `PDF: mode "text" (default) returns up to ${this.limits.maxTextPagesPerCall} pages and ${this.limits.maxExtractedChars} characters per call; ` +
       `mode "visual" renders up to ${this.limits.maxVisualPagesPerCall} pages per call; pages selects pages ("1-20,25"). ` +
-      `XLSX: one sheet per call (sheet selects it by exact name), up to ${this.limits.maxRowsPerCall} rows and ${this.limits.maxCellsPerCall} cells, each cell cut to ${this.limits.maxCellChars} characters; ` +
+      `XLSX: returns sheets in workbook order (sheet selects one sheet by exact name), up to ${this.limits.maxRowsPerCall} rows and ${this.limits.maxCellsPerCall} cells per call, each cell cut to ${this.limits.maxCellChars} characters; ` +
       "lastRow is the sheet's last non-empty row, and rows wider than the per-call budget are skipped and listed in skippedRows. " +
       'When continuation is present, call again with the same arguments and cursor set to continuation.cursor. ' +
       'When a file needs more than one call, write a short markdown summary of each section in your reply, naming the pages or rows it covers and ending with the cursor to resume from, and work from those summaries: file content is available only in the current turn. ' +
