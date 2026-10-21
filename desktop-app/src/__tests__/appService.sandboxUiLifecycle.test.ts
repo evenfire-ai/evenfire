@@ -1538,7 +1538,7 @@ describe('AppService sandbox-ui route settling', () => {
   })
 
   it('a view with no requested route reports where the server sent its first load', async () => {
-    const { service, webContents } = await openLoading()
+    const { webContents } = await openLoading()
     webContents.commitLoad(200, `${APP_VIEW_URL}/welcome`)
     expect(getActiveSandboxUiLocation()).toEqual(location('/welcome'))
   })
