@@ -34,6 +34,7 @@ type InvitationActionPanelProps =
       forgotPasswordHref: string
     }
   | { mode: 'link-error'; loginHref: string }
+  | { mode: 'terminal'; loginHref: string; forgotPasswordHref?: string }
   | { mode: 'expired'; loginHref: string }
   | {
       mode: 'accept'
@@ -149,6 +150,19 @@ export function InvitationActionPanel(props: InvitationActionPanelProps) {
           <a className="cu-btn" href={props.loginHref}>
             Sign in
           </a>
+        </div>
+      )
+    case 'terminal':
+      return (
+        <div className="stack">
+          <a className="cu-btn cu-btn--primary" href={props.loginHref}>
+            Sign in
+          </a>
+          {props.forgotPasswordHref ? (
+            <a className="cu-btn" href={props.forgotPasswordHref}>
+              Request a new recovery link
+            </a>
+          ) : null}
         </div>
       )
     case 'expired':

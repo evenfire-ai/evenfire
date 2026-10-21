@@ -44,6 +44,15 @@ export async function readControlApiMetrics(page: Page): Promise<ControlApiMetri
   return (await response.json()) as ControlApiMetrics
 }
 
+export async function expectBrowserRoute(
+  page: Page,
+  expected: { pathname: string; query?: Record<string, string> }
+) {
+  const current = new URL(page.url())
+  expect(current.pathname).toBe(expected.pathname)
+  expect(Object.fromEntries(current.searchParams.entries())).toEqual(expected.query ?? {})
+}
+
 export async function sessionCookieValue(page: Page): Promise<string | null> {
   const cookies = await page.context().cookies()
   const cookie = cookies.find(candidate => candidate.name === 'profile_session')

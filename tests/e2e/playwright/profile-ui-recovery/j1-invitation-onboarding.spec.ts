@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import {
   ONBOARDING_MEMBER,
+  expectBrowserRoute,
   readControlApiMetrics,
   sessionCookieValue,
   signInThroughUi,
@@ -63,11 +64,31 @@ test('J1 invitation onboarding ends in guided sign-in and a real login', async (
     'href',
     `/?email=${encodeURIComponent(ONBOARDING_MEMBER.email)}`
   )
-  await loginLink.click()
 
+  // The password-updated screen is component state. A direct entry through the
+  // invitation URL must still show a usable forward action.
+  await page.reload()
+  await expectBrowserRoute(page, { pathname: '/invitations/synthetic-member-invitation' })
+  await expect(
+    page.getByText('This invitation has already been used.', { exact: true })
+  ).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Sign in' })).toHaveAttribute(
+    'href',
+    `/?email=${encodeURIComponent(ONBOARDING_MEMBER.email)}`
+  )
+
+  await loginLink.click()
+  await expectBrowserRoute(page, {
+    pathname: '/',
+    query: { email: ONBOARDING_MEMBER.email },
+  })
   await expect(page.getByLabel('Email', { exact: true })).toHaveValue(ONBOARDING_MEMBER.email)
   await signInThroughUi(page, ONBOARDING_MEMBER.email, ONBOARDING_MEMBER.password)
 
+  await expectBrowserRoute(page, {
+    pathname: '/',
+    query: { email: ONBOARDING_MEMBER.email },
+  })
   await expect(page.getByRole('heading', { name: 'Welcome, Synthetic Member' })).toBeVisible()
   await expect(page.getByText('onboarding-member@example.invalid')).toBeVisible()
 

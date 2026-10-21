@@ -1,7 +1,31 @@
 import { expect, test } from '@playwright/test'
-import { readControlApiMetrics, sessionCookieValue } from './journeys'
+import {
+  LOGOUT_MEMBER,
+  readControlApiMetrics,
+  sessionCookieValue,
+  signInThroughUi,
+} from './journeys'
 
-test('negative routes show an explicit error and never issue a session', async ({ page }) => {
+test('negative routes show an explicit error and never issue a session', async ({
+  page,
+  browser,
+}) => {
+  // Same-observer witness: a real product login in an isolated context proves
+  // this cookie observer sees product-issued sessions. It never seeds the
+  // credentials or cookies used by the negative navigation below.
+  const witnessContext = await browser.newContext({ baseURL: test.info().project.use.baseURL })
+  const witnessPage = await witnessContext.newPage()
+  try {
+    await witnessPage.goto('/')
+    await signInThroughUi(witnessPage, LOGOUT_MEMBER.email, LOGOUT_MEMBER.password)
+    await expect(
+      witnessPage.getByRole('heading', { name: 'Welcome, Synthetic Logout Member' })
+    ).toBeVisible()
+    expect(await sessionCookieValue(witnessPage)).toBeTruthy()
+  } finally {
+    await witnessContext.close()
+  }
+
   const before = await readControlApiMetrics(page)
 
   const expiredDocument = page.waitForResponse(response =>

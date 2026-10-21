@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import {
   LOGOUT_MEMBER,
+  expectBrowserRoute,
   fetchMeWithCookie,
   readControlApiMetrics,
   sessionCookieValue,
@@ -11,6 +12,7 @@ test('J3 logout returns to login and the previous session is rejected', async ({
   // E2E_GUARDIAN_NAVIGATION: root-entry — the ordinary login that owns the session
   await page.goto('/')
   await signInThroughUi(page, LOGOUT_MEMBER.email, LOGOUT_MEMBER.password)
+  await expectBrowserRoute(page, { pathname: '/' })
   await expect(
     page.getByRole('heading', { name: 'Welcome, Synthetic Logout Member' })
   ).toBeVisible()
@@ -18,6 +20,12 @@ test('J3 logout returns to login and the previous session is rejected', async ({
   const priorSession = await sessionCookieValue(page)
   expect(priorSession).toBeTruthy()
   if (!priorSession) throw new Error('login did not set a profile session')
+
+  // Logout from an authenticated sub-route so the resulting home URL is a real
+  // navigation signal instead of the page's starting URL.
+  await page.getByRole('link', { name: 'Settings' }).click()
+  await expect(page).toHaveURL(/\/settings\/profile$/)
+  await expectBrowserRoute(page, { pathname: '/settings/profile' })
 
   const logoutResponse = page.waitForResponse(
     response =>
@@ -27,7 +35,9 @@ test('J3 logout returns to login and the previous session is rejected', async ({
   const logoutResult = await logoutResponse
   expect(logoutResult.status()).toBe(200)
 
+  await expect(page).toHaveURL(/\/$/)
   await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible()
+  await expectBrowserRoute(page, { pathname: '/' })
   await expect(page.getByRole('heading', { name: 'Welcome, Synthetic Logout Member' })).toHaveCount(
     0
   )
@@ -37,6 +47,7 @@ test('J3 logout returns to login and the previous session is rejected', async ({
   expect(oldSession.status).toBe(401)
 
   await page.goto('/')
+  await expectBrowserRoute(page, { pathname: '/' })
   await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Welcome, Synthetic Logout Member' })).toHaveCount(
     0

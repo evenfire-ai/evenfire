@@ -1,6 +1,8 @@
 import { expect, test } from '@playwright/test'
 import {
+  LOGOUT_MEMBER,
   RECOVERY_MEMBER,
+  expectBrowserRoute,
   fetchMeWithCookie,
   readControlApiMetrics,
   readLogoutFence,
@@ -14,6 +16,7 @@ test('J2 recovery link clears the logout fence, revokes the prior session, and l
   // E2E_GUARDIAN_NAVIGATION: root-entry — the ordinary login that owns the prior session
   await page.goto('/')
   await signInThroughUi(page, RECOVERY_MEMBER.email, RECOVERY_MEMBER.password)
+  await expectBrowserRoute(page, { pathname: '/' })
   await expect(
     page.getByRole('heading', { name: 'Welcome, Synthetic Recovery Member' })
   ).toBeVisible()
@@ -62,10 +65,27 @@ test('J2 recovery link clears the logout fence, revokes the prior session, and l
   const revoked = await fetchMeWithCookie(page, priorSession)
   expect(revoked.status).toBe(401)
 
+  // The password-updated screen is component state. A direct entry through the
+  // recovery URL must still offer a usable forward action.
+  await page.reload()
+  await expectBrowserRoute(page, { pathname: '/invitations/synthetic-reset-proof' })
+  await expect(
+    page.getByText('This invitation has already been used.', { exact: true })
+  ).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Request a new recovery link' })).toBeVisible()
+
   await page.getByRole('link', { name: 'Sign in' }).click()
+  await expectBrowserRoute(page, {
+    pathname: '/',
+    query: { email: RECOVERY_MEMBER.email },
+  })
   await expect(page.getByLabel('Email', { exact: true })).toHaveValue(RECOVERY_MEMBER.email)
   await signInThroughUi(page, RECOVERY_MEMBER.email, RECOVERY_MEMBER.replacementPassword)
 
+  await expectBrowserRoute(page, {
+    pathname: '/',
+    query: { email: RECOVERY_MEMBER.email },
+  })
   await expect(
     page.getByRole('heading', { name: 'Welcome, Synthetic Recovery Member' })
   ).toBeVisible()
@@ -86,4 +106,57 @@ test('J2 recovery link clears the logout fence, revokes the prior session, and l
   expect(metrics.loginSuccesses.filter(entry => entry.userId === RECOVERY_MEMBER.id)).toHaveLength(
     2
   )
+})
+
+test('J2 a redeemed recovery link keeps the logout fence over a live session', async ({ page }) => {
+  // E2E_GUARDIAN_NAVIGATION: root-entry — the ordinary login that owns the live session
+  await page.goto('/')
+  await signInThroughUi(page, LOGOUT_MEMBER.email, LOGOUT_MEMBER.password)
+  await expectBrowserRoute(page, { pathname: '/' })
+  await expect(
+    page.getByRole('heading', { name: 'Welcome, Synthetic Logout Member' })
+  ).toBeVisible()
+
+  const liveSession = await sessionCookieValue(page)
+  expect(liveSession).toBeTruthy()
+  if (!liveSession) throw new Error('login did not set a profile session')
+  const validBefore = await fetchMeWithCookie(page, liveSession)
+  expect(validBefore.status).toBe(200)
+  expect(validBefore.body).toMatchObject({ id: LOGOUT_MEMBER.id })
+
+  await page.route('**/api/v1/auth/logout', route => route.abort('failed'))
+  await test.step('logout fence precondition: unconfirmed logout leaves the recovery fence', async () => {
+    await page.locator('aside').getByRole('button', { name: 'Log out' }).click()
+    await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible()
+    await expect.poll(() => readLogoutFence(page)).toBe('true')
+    expect(await sessionCookieValue(page)).toBe(liveSession)
+  })
+  await page.unroute('**/api/v1/auth/logout')
+
+  // E2E_GUARDIAN_NAVIGATION: email-reset-entry — a redeemed recovery link cannot release the fence
+  await page.goto('/invitations/synthetic-used-reset-proof')
+  await expect(
+    page.getByText('This invitation has already been used.', { exact: true })
+  ).toBeVisible()
+  expect(await readLogoutFence(page)).toBe('true')
+  expect(await sessionCookieValue(page)).toBe(liveSession)
+  const stillValid = await fetchMeWithCookie(page, liveSession)
+  expect(stillValid.status).toBe(200)
+
+  // The fence still blocks the surviving cookie from resuming the session.
+  // E2E_GUARDIAN_NAVIGATION: root-entry — the fenced live session stays at login
+  await page.goto('/')
+  await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible()
+  await expectBrowserRoute(page, { pathname: '/' })
+  await expect(page.getByRole('heading', { name: 'Welcome, Synthetic Logout Member' })).toHaveCount(
+    0
+  )
+  expect(await readLogoutFence(page)).toBe('true')
+
+  // A current pending recovery capability is the only release witness.
+  // E2E_GUARDIAN_NAVIGATION: email-reset-entry — a current recovery link releases the fence
+  await page.goto('/invitations/synthetic-pending-reset-proof')
+  await expect(page.getByRole('heading', { name: 'Reset password' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Reset password' })).toBeVisible()
+  await expect.poll(() => readLogoutFence(page)).toBeNull()
 })

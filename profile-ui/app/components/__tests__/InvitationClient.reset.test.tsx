@@ -188,23 +188,134 @@ describe('InvitationClient guided password reauthentication', () => {
     expect(screen.queryByRole('heading', { name: 'Password updated' })).toBeNull()
   })
 
-  it('shows a recovery-link error instead of blaming the new password', async () => {
-    mocks.setupInvitationPasswordWithToken.mockRejectedValue(
-      new ProfileApiError(400, 'invalid_invitation', '400 Bad Request - recovery link rejected')
+  it.each([
+    [
+      'invitation_not_pending',
+      409,
+      '409 Conflict - invitation already used',
+      'This invitation has already been used.',
+    ],
+    [
+      'invalid_invitation',
+      400,
+      '400 Bad Request - recovery link rejected',
+      'This recovery link is invalid or expired.',
+    ],
+    ['not_found', 404, '404 Not Found - recovery link unknown', 'Invitation not found.'],
+  ] as const)(
+    'turns a %s submit failure into usable terminal actions instead of blaming the new password',
+    async (code, status, detail, message) => {
+      mocks.setupInvitationPasswordWithToken.mockRejectedValue(
+        new ProfileApiError(status, code, detail)
+      )
+      render(
+        <InvitationClient
+          invitationToken="invalidated-reset-proof"
+          initialInvitation={passwordReset}
+          initialError=""
+        />
+      )
+
+      // The initial preview rendered the live form; the proof dies afterwards.
+      expect(screen.getByRole('button', { name: 'Reset password' })).toBeInTheDocument()
+      fillPassword()
+      fireEvent.click(screen.getByRole('button', { name: 'Reset password' }))
+
+      expect(await screen.findByText(message)).toBeInTheDocument()
+      expect(screen.queryByRole('heading', { name: 'Password updated' })).toBeNull()
+      expect(screen.queryByLabelText('Password')).toBeNull()
+      expect(screen.queryByRole('button', { name: 'Reset password' })).toBeNull()
+      expect(screen.getByRole('link', { name: 'Sign in' }).getAttribute('href')).toBe(
+        PROFILE_ROUTES.login({ email: passwordReset.email })
+      )
+      expect(
+        screen.getByRole('link', { name: 'Request a new recovery link' }).getAttribute('href')
+      ).toBe(PROFILE_ROUTES.forgotPassword({ email: passwordReset.email }))
+      expect(mocks.setupInvitationPasswordWithToken).toHaveBeenCalledOnce()
+    }
+  )
+
+  it('offers only sign in when a member invitation proof is invalidated after preview', async () => {
+    mocks.setupAcceptedInvitationPasswordWithToken.mockRejectedValue(
+      new ProfileApiError(409, 'invitation_not_pending', '409 Conflict - invitation_not_pending')
     )
     render(
       <InvitationClient
-        invitationToken="invalid-reset-proof"
-        initialInvitation={passwordReset}
+        invitationToken="invalidated-member-proof"
+        initialInvitation={acceptedMemberInvitation}
         initialError=""
       />
     )
 
     fillPassword()
-    fireEvent.click(screen.getByRole('button', { name: 'Reset password' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Set password and continue' }))
 
-    expect(await screen.findByText('This recovery link is invalid or expired.')).toBeInTheDocument()
-    expect(screen.queryByRole('heading', { name: 'Password updated' })).toBeNull()
+    expect(await screen.findByText('This invitation has already been used.')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Password')).toBeNull()
+    expect(screen.getByRole('link', { name: 'Sign in' }).getAttribute('href')).toBe(
+      PROFILE_ROUTES.login({ email: acceptedMemberInvitation.email })
+    )
+    expect(screen.queryByRole('link', { name: 'Request a new recovery link' })).toBeNull()
+    expect(mocks.setupAcceptedInvitationPasswordWithToken).toHaveBeenCalledOnce()
+  })
+
+  it('releases the logout fence only for a current pending recovery capability', () => {
+    window.localStorage.setItem('profile_logout_unconfirmed', 'true')
+
+    const { rerender } = render(
+      <InvitationClient
+        invitationToken="used-recovery-proof"
+        initialInvitation={{
+          ...passwordReset,
+          status: 'accepted',
+          passwordPending: false,
+          acceptedAt: new Date().toISOString(),
+        }}
+        initialError=""
+      />
+    )
+    // A redeemed link is visible but cannot recover: the fence must survive.
+    expect(screen.getByText('This invitation has already been used.')).toBeInTheDocument()
+    expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBe('true')
+
+    rerender(
+      <InvitationClient
+        invitationToken="expired-recovery-proof"
+        initialInvitation={{
+          ...passwordReset,
+          expiresAt: new Date(Date.now() - 60_000).toISOString(),
+        }}
+        initialError=""
+      />
+    )
+    expect(
+      screen.getByText('This invitation has expired.', { selector: '.message--error-plain' })
+    ).toBeInTheDocument()
+    expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBe('true')
+
+    rerender(
+      <InvitationClient
+        invitationToken="unmatched-recovery-proof"
+        initialInvitation={null}
+        initialError="Invitation not found."
+      />
+    )
+    expect(screen.getByRole('alert')).toHaveTextContent('Invitation not found.')
+    expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBe('true')
+
+    rerender(
+      <InvitationClient
+        invitationToken="current-recovery-proof"
+        initialInvitation={{
+          ...passwordReset,
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        }}
+        initialError=""
+      />
+    )
+    // A current pending capability is the only case that releases the fence.
+    expect(screen.getByRole('button', { name: 'Reset password' })).toBeInTheDocument()
+    expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBeNull()
   })
 
   it('does not resubmit a reset proof after an ambiguous recovery outcome', async () => {
