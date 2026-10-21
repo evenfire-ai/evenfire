@@ -2,6 +2,7 @@ import { type DbClient, pool } from '../../db.js'
 import type { AuthClaims } from '../../profileTypes.js'
 import type { UserSessionV2Claims } from '../../utils/auth/userSessionV2Token.js'
 import type { ExternalSessionAuthentication } from './externalSessionAuthentication.js'
+import { legacySecurityCutoffRejects } from './legacySecurityCutoff.js'
 import { legacyExternalSessionAuthGeneration } from './legacyV1Generation.js'
 import {
   ExternalSessionBackendUnavailableError,
@@ -93,8 +94,7 @@ export async function observeExternalSessionCurrentness(
         return { status: 'denied', reason: 'legacy_generation_changed' }
       }
       if (row.token_revoked) return { status: 'denied', reason: 'legacy_representation_revoked' }
-      const validAfter = dateOf(row.valid_after)
-      if (validAfter && context.issuedAt * 1000 <= validAfter.getTime()) {
+      if (legacySecurityCutoffRejects(context.issuedAt, row.valid_after)) {
         return { status: 'denied', reason: 'legacy_security_cutoff' }
       }
       return { status: 'current' }

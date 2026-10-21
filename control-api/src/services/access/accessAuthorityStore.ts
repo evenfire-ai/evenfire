@@ -1,6 +1,7 @@
 import type { DbClient } from '../../db.js'
 import type { TeamRole } from '../../profileTypes.js'
 import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAuthentication.js'
+import { legacySecurityCutoffRejectsSql } from '../auth/legacySecurityCutoff.js'
 import { runAccessDatabaseQuery } from './accessDatabaseQuery.js'
 import type { AccessExecutionBudget } from './accessExecutionBudget.js'
 import {
@@ -139,7 +140,7 @@ export async function loadPrincipalAuthoritySnapshot(input: {
                   SELECT 1
                     FROM external_user_session_security_epochs e
                    WHERE e.user_id = u.id
-                     AND $7::bigint * 1000 <= EXTRACT(EPOCH FROM e.valid_after) * 1000
+                     AND ${legacySecurityCutoffRejectsSql('$7::bigint', 'e.valid_after')}
                 )
               )
             END AS session_live,

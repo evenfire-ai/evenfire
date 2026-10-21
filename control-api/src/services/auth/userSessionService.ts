@@ -14,6 +14,7 @@ import {
 } from '../access/accessDatabaseQuery.js'
 import type { AccessExecutionBudget } from '../access/accessExecutionBudget.js'
 import type { ExternalSessionAuthorityContext } from './externalSessionAuthentication.js'
+import { legacySecurityCutoffRejects } from './legacySecurityCutoff.js'
 import { legacyExternalSessionAuthGeneration } from './legacyV1Generation.js'
 
 export const USER_SESSION_IDLE_LIFETIME_SECONDS = 14 * 24 * 60 * 60
@@ -624,7 +625,7 @@ export async function validateExternalSessionAuthorityContext(
       | undefined
     if (!row) return { status: 'invalid', reason: 'user_not_found' }
     if (row.token_revoked) return { status: 'revoked', reason: 'logout' }
-    if (row.valid_after && context.issuedAt * 1000 <= dateOf(row.valid_after).getTime()) {
+    if (legacySecurityCutoffRejects(context.issuedAt, row.valid_after)) {
       return { status: 'revoked', reason: 'security_event' }
     }
     return {
@@ -702,7 +703,7 @@ export async function validateLegacyUserSession(
       return { status: 'revoked', reason: 'security_event' }
     }
     if (row.token_revoked) return { status: 'revoked', reason: 'logout' }
-    if (row.valid_after && issuedAt * 1000 <= dateOf(row.valid_after).getTime()) {
+    if (legacySecurityCutoffRejects(issuedAt, row.valid_after)) {
       return { status: 'revoked', reason: 'security_event' }
     }
     return {
