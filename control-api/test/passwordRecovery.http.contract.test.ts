@@ -701,7 +701,9 @@ describe('invitation/password producer response mappings', () => {
       'r6-user',
       'r6-member@example.invalid',
       scenario.invitationId,
-      scenario.password
+      scenario.password,
+      undefined,
+      { rejectIfPasswordAlreadySet: true }
     )
     expect(directory.setInvitationPasswordForUser).toHaveBeenCalledTimes(2)
     expect(directory.acceptInvitationForEmail).not.toHaveBeenCalled()

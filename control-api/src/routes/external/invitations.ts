@@ -193,13 +193,23 @@ export function createExternalInvitationsRouter(): Router {
           return res.status(400).json({ error: 'invalid payload' })
         }
 
-        const result = await setInvitationPasswordForUser(userId, email, invitationId, password)
+        const result = await setInvitationPasswordForUser(
+          userId,
+          email,
+          invitationId,
+          password,
+          undefined,
+          { rejectIfPasswordAlreadySet: true }
+        )
         if ('error' in result) {
           if (result.error === 'not_found') {
             return res.status(404).json({ error: 'not_found' })
           }
           if (result.error === 'forbidden') {
             return res.status(403).json({ error: 'forbidden' })
+          }
+          if (result.error === 'password_already_set') {
+            return res.status(409).json({ error: 'password_already_set' })
           }
           if (result.error === 'not_accepted') {
             return res.status(409).json({ error: 'invitation_not_accepted' })

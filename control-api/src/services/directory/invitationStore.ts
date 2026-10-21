@@ -142,6 +142,27 @@ export async function lockPasswordResetUser(
   return (result.rows[0] as InvitationUserRow | undefined) ?? null
 }
 
+/**
+ * Locks the authoritative user row inside the transaction that is about to
+ * write the password. A passwordless invited user is represented by
+ * `users.password_hash IS NULL`: the column is nullable and
+ * `ensureInvitationUser` inserts only email and name.
+ */
+export async function lockInvitationUserForPasswordSetup(
+  db: Pick<DbClient, 'query'>,
+  userId: string
+): Promise<InvitationUserRow | null> {
+  const result = await db.query(
+    `SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version
+       FROM users
+      WHERE id = $1
+      LIMIT 1
+      FOR NO KEY UPDATE`,
+    [userId]
+  )
+  return (result.rows[0] as InvitationUserRow | undefined) ?? null
+}
+
 export async function ensureInvitationUser(
   db: Pick<DbClient, 'query'>,
   email: string,

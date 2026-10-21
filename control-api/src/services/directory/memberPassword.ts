@@ -9,6 +9,7 @@ import {
   invitationResponse,
   invitationUserIsRetired,
   loadInvitationTeams,
+  lockInvitationUserForPasswordSetup,
   lockPasswordResetUser,
 } from './invitationStore.js'
 import { getMemberSessionContext } from './login.js'
@@ -68,12 +69,22 @@ async function revokeSiblingPasswordResets(
   )
 }
 
+export type SetInvitationPasswordOptions = {
+  /**
+   * Only the external session password route is first-password-only. The admin
+   * finalization and the password-reset branch keep their existing overwrite
+   * semantics, so they never pass this option.
+   */
+  rejectIfPasswordAlreadySet?: boolean
+}
+
 export async function setInvitationPasswordForUser(
   userId: string,
   email: string,
   invitationId: string,
   password: string,
-  passwordWorkLease?: MemberPasswordWorkLease
+  passwordWorkLease?: MemberPasswordWorkLease,
+  options?: SetInvitationPasswordOptions
 ) {
   const trimmedUserId = userId.trim()
   const normalizedEmail = email.trim().toLowerCase()
@@ -125,6 +136,16 @@ export async function setInvitationPasswordForUser(
       const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
       if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
       if (user.id !== trimmedUserId) return { error: 'forbidden' as const }
+      if (options?.rejectIfPasswordAlreadySet) {
+        // The unlocked lookup above is not authoritative for this decision.
+        // Lock the row inside the writing transaction and read password_hash
+        // from it, so a concurrent first set either commits before this lock
+        // (and this request sees its hash) or waits behind it.
+        const lockedUser = await lockInvitationUserForPasswordSetup(db, user.id)
+        if (!lockedUser) return { error: 'not_found' as const }
+        if (invitationUserIsRetired(lockedUser)) return { error: 'user_retired' as const }
+        if (lockedUser.password_hash) return { error: 'password_already_set' as const }
+      }
       const passwordHash = await bcrypt.hash(trimmedPassword, 12)
       const lifecycleVersion = await updateActivePasswordHash(db, user.id, passwordHash)
       if (lifecycleVersion === null) {
