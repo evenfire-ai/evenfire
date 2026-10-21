@@ -312,6 +312,32 @@ describe('AppService sandbox UI lifecycle serialization', () => {
     expect(finalUnmountOrder).toBeGreaterThan(mountOrder)
     expect(finalCancelOrder).toBeGreaterThan(refreshStartOrder)
   })
+
+  it('refuses a refresh that lands after the session changed, without minting for the next session', async () => {
+    const service = makeService() as unknown as {
+      mintSandboxUiSession: ReturnType<typeof vi.fn>
+      openSandboxUi: AppService['openSandboxUi']
+      clearAuthenticatedSessionState(): void
+      sessionToken: string | null
+    }
+    service.mintSandboxUiSession = vi.fn().mockResolvedValue({
+      setCookie:
+        'clerum_sandbox_ui_session=first;' + ' Path=/api/v1/sandbox-ui/sandbox-recipes/first-app/',
+    })
+    await service.openSandboxUi(openArgs('first-app'))
+    const { refresh } = mockStartSandboxUiRefresh.mock.calls[0]![0] as {
+      refresh: (ns: string, name: string) => Promise<{ setCookie: string }>
+    }
+
+    service.clearAuthenticatedSessionState()
+    // A new user is signed in by the time the stale loop fires.
+    service.sessionToken = 'next-session-token'
+
+    await expect(refresh('sandbox-recipes', 'first-app')).rejects.toThrow(
+      'The session changed while this app request was in flight'
+    )
+    expect(service.mintSandboxUiSession).toHaveBeenCalledOnce()
+  })
 })
 
 describe('AppService.openForgotPassword', () => {
