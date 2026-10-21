@@ -152,19 +152,11 @@ export function createExternalInvitationsRouter(): Router {
         }
 
         const userId = result.data.userId
-        const session = result.data.sessionContext
-        if (
-          !userId ||
-          !session ||
-          session.userId !== userId ||
-          !Number.isSafeInteger(session.authGeneration) ||
-          session.authGeneration < 1
-        ) {
+        if (!userId) {
           return res.status(409).json({ error: 'invitation_not_ready' })
         }
-        const { sessionContext: _sessionContext, ...response } = result.data
         return res.status(200).json({
-          ...response,
+          ...result.data,
           reauthenticationRequired: true,
         })
       } catch (error) {

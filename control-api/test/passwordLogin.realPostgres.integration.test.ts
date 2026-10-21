@@ -470,7 +470,7 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
     expect(recoveryUpdateCommitted).toBe(true)
     expect(result).toBeDefined()
     expect(result).toMatchObject({
-      data: { passwordUpdated: true, sessionContext: { userId } },
+      data: { passwordUpdated: true },
     })
     expect(
       (

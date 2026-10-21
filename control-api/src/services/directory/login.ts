@@ -199,21 +199,6 @@ export async function passwordLoginData(input: { email: string; password: string
   })
 }
 
-/** Resolve ordinary session claims in the same transaction as password recovery. */
-export async function getMemberSessionContext(
-  db: Pick<DbTransactionClient, 'query'>,
-  user: { id: string; email: string; lifecycle_version?: number | string | null }
-) {
-  const membership = await currentMemberMembership(db, user)
-  return {
-    userId: user.id,
-    email: user.email,
-    teamId: membership.team_id,
-    role: membership.role,
-    authGeneration: Number(user.lifecycle_version || 0),
-  }
-}
-
 export async function verifyUserPassword(input: {
   userId: string
   email: string

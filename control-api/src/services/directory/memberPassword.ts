@@ -12,7 +12,6 @@ import {
   lockInvitationUserForPasswordSetup,
   lockPasswordResetUser,
 } from './invitationStore.js'
-import { getMemberSessionContext } from './login.js'
 
 async function updateActivePasswordHash(
   db: Pick<DbClient, 'query'>,
@@ -111,8 +110,7 @@ export async function setInvitationPasswordForUser(
       passwordWorkLease
     )
     if ('error' in result) return result
-    const { sessionContext: _sessionContext, ...data } = result.data
-    return { data }
+    return { data: result.data }
   }
   if (candidate.purpose !== 'member_invitation' && candidate.purpose !== 'admin_desktop_access') {
     return { error: 'not_found' as const }
@@ -245,11 +243,9 @@ export async function setInvitationPasswordForEmail(
 
       const response = await loadInvitationPasswordResponse(db, invitation.id, user, passwordHash)
       if (!response) return { error: 'not_found' as const }
-      const sessionContext = await getMemberSessionContext(db, user)
       return {
         data: {
           passwordUpdated: true,
-          sessionContext,
           ...response,
         },
       }

@@ -212,13 +212,6 @@ describe('external invitation routes when the hub is unavailable', () => {
         passwordUpdated: true,
         authGeneration: 1,
         lifecycleState: 'active',
-        sessionContext: {
-          userId: '00000000-0000-4000-8000-000000000001',
-          email: 'a@b.c',
-          teamId: null,
-          role: 'member',
-          authGeneration: 1,
-        },
       },
     })
 
@@ -232,6 +225,8 @@ describe('external invitation routes when the hub is unavailable', () => {
     expect(response.status).toBe(200)
     expect(response.body.reauthenticationRequired).toBe(true)
     expect(response.body).not.toHaveProperty('token')
+    expect(response.body).not.toHaveProperty('sessionContext')
+    expect(response.headers['set-cookie']).toBeUndefined()
     expect(directory.getInvitationByToken).toHaveBeenCalledWith('database-secret-capability')
     expect(directory.setInvitationPasswordForEmail).toHaveBeenCalledWith(
       'a@b.c',

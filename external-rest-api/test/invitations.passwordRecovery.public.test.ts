@@ -223,6 +223,40 @@ describe('password reset preview authority failures', () => {
     expect(response.text).not.toContain(recoveryProof)
     expect(fetchMock).not.toHaveBeenCalled()
   })
+
+  it('maps an ordinary invitation rejection on the dedicated reset route without a session cookie', async () => {
+    const requests: Array<{ method?: string; url?: string; body?: Record<string, unknown> }> = []
+    await startUpstream(async (req, res) => {
+      const chunks: Buffer[] = []
+      for await (const chunk of req) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+      }
+      requests.push({
+        method: req.method,
+        url: req.url,
+        body: JSON.parse(Buffer.concat(chunks).toString('utf8')),
+      })
+      res.writeHead(409, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ error: 'invitation_not_pending' }))
+    })
+
+    const response = await submitDedicatedReset()
+
+    expect(response.status).toBe(409)
+    expect(response.body).toMatchObject({ error: 'invitation_not_pending' })
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).toMatchObject({
+      method: 'POST',
+      url: '/api/v1/external/invitations/password-token',
+      body: {
+        token: recoveryProof,
+        email: 'member@example.invalid',
+        invitationId: '00000000-0000-4000-8000-000000000001',
+        password: 'Synthetic-Replacement-Password-123',
+      },
+    })
+  })
 })
 
 const fetchMock = vi.fn()

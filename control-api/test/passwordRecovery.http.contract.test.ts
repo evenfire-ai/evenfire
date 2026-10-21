@@ -781,13 +781,6 @@ describe('invitation/password producer response mappings', () => {
         lifecycleState: 'active',
         authGeneration: 7,
         passwordUpdated: true,
-        sessionContext: {
-          userId: preview.userId,
-          email: preview.email,
-          teamId: null,
-          role: 'member',
-          authGeneration: 7,
-        },
       },
     })
 
@@ -827,6 +820,45 @@ describe('invitation/password producer response mappings', () => {
     expect(directory.acceptInvitationForEmail).not.toHaveBeenCalled()
   })
 
+  it('returns no session and sets no cookie from the reset producer', async () => {
+    directory.setInvitationPasswordForEmail.mockResolvedValueOnce({
+      data: {
+        id: preview.id,
+        userId: preview.userId,
+        email: preview.email,
+        teamId: null,
+        role: 'member',
+        purpose: 'password_reset',
+        status: 'accepted',
+        lifecycleState: 'active',
+        authGeneration: 7,
+        passwordUpdated: true,
+      },
+    })
+
+    const response = await request(producerServer)
+      .post('/api/v1/external/invitations/password-token')
+      .set('authorization', `Bearer ${internalServiceToken}`)
+      .set('x-service-token', 'external-rest-api')
+      .send({
+        token: 'r6-synthetic-reset-proof',
+        email: preview.email,
+        invitationId: preview.id,
+        password: 'R6-synthetic-valid-password',
+      })
+
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({
+      userId: preview.userId,
+      passwordUpdated: true,
+      reauthenticationRequired: true,
+    })
+    expect(response.body).not.toHaveProperty('token')
+    expect(response.body).not.toHaveProperty('sessionContext')
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(directory.setInvitationPasswordForEmail).toHaveBeenCalledOnce()
+  })
+
   it('keeps a dropped post-dispatch reset acknowledgement unknown and never retries it', async () => {
     const originalControlApiBaseUrl = externalConfig.controlApiBaseUrl
     externalConfig.controlApiBaseUrl = `http://127.0.0.1:${responseDropProxyPort}/api/v1`
@@ -842,13 +874,6 @@ describe('invitation/password producer response mappings', () => {
         lifecycleState: 'active',
         authGeneration: 7,
         passwordUpdated: true,
-        sessionContext: {
-          userId: preview.userId,
-          email: preview.email,
-          teamId: null,
-          role: 'member',
-          authGeneration: 7,
-        },
       },
     })
 
@@ -1044,13 +1069,6 @@ describe('invitation/password producer response mappings', () => {
           status: 'accepted',
           role: 'member',
           passwordUpdated: true,
-          sessionContext: {
-            userId: preview.userId,
-            email: preview.email,
-            teamId: null,
-            role: 'member',
-            authGeneration: 7,
-          },
         },
       })
       let writes = 0
