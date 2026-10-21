@@ -64,6 +64,57 @@ export class ControlApiUnexpectedResponseError extends Error {
   }
 }
 
+/**
+ * A caller-influenced control-api path would have selected a route other than
+ * the one the edge intended. It is a client error, not an upstream failure:
+ * extend ControlApiError so the existing public invalid-request mapping
+ * (sanitizeControlApiPublicError and the app's 4xx handler) handles it without
+ * a new status scheme.
+ */
+export class ControlApiPathError extends ControlApiError {
+  constructor() {
+    super('Control API request path is not allowed', 400, { error: 'invalid_request' })
+    this.name = 'ControlApiPathError'
+  }
+}
+
+const DOT_SEGMENT = /^(?:\.|\.\.)$/
+
+/**
+ * The single boundary that keeps a caller-influenced value from selecting a
+ * different control-api route. Call sites interpolate route parameters into
+ * `path`; URL construction would otherwise normalize dot segments or drop a
+ * `#` fragment and dispatch the resulting path with this edge's service
+ * identity.
+ *
+ * A trailing raw query is accepted because the SharedFileSystem relay forwards
+ * the caller's opaque query string verbatim through `path`
+ * (routes/contextSharedFilesystems.ts:88-95). Only the pathname is compared,
+ * and a query string cannot change the pathname. A raw `#` is rejected because
+ * URL construction would turn it into a fragment and drop the path suffix.
+ */
+export function assertControlApiPathAllowed(path: string): void {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`
+  if (normalizedPath.includes('#')) throw new ControlApiPathError()
+
+  const queryIndex = normalizedPath.indexOf('?')
+  const pathname = queryIndex === -1 ? normalizedPath : normalizedPath.slice(0, queryIndex)
+  // Express decodes encoded separators and dots in route params before a call
+  // site interpolates them. Decode both for the segment check so a value that a
+  // proxy or another decoder could still resolve cannot pass as a literal.
+  const decodedSegments = pathname.replace(/%2f/gi, '/').replace(/%2e/gi, '.').split('/')
+  if (decodedSegments.some(segment => DOT_SEGMENT.test(segment))) {
+    throw new ControlApiPathError()
+  }
+
+  const base = config.controlApiBaseUrl.replace(/\/+$/, '')
+  const basePathname = new URL(base).pathname.replace(/\/+$/, '')
+  const constructedPathname = new URL(`${base}${normalizedPath}`).pathname
+  if (constructedPathname !== `${basePathname}${pathname}`) {
+    throw new ControlApiPathError()
+  }
+}
+
 const SAFE_RATE_LIMIT_RESPONSE_HEADERS = [
   'retry-after',
   'x-ratelimit-limit',
@@ -101,6 +152,7 @@ function safeForwardableResponseHeaders(headers: Headers, status: number): Recor
 }
 
 function buildUrl(path: string, query?: Record<string, string | undefined>): string {
+  assertControlApiPathAllowed(path)
   const base = config.controlApiBaseUrl.replace(/\/+$/, '')
   const normalizedPath = path.startsWith('/') ? path : `/${path}`
   const url = new URL(`${base}${normalizedPath}`)
@@ -139,6 +191,8 @@ export async function controlApiRequestWithStatus<T>(
     extraHeaders?: Record<string, string>
   }
 ): Promise<ControlApiResponse<T>> {
+  // Build and validate the URL before any credential enters a request object.
+  const url = buildUrl(path, options?.query)
   const headers: Record<string, string> = {
     'content-type': 'application/json',
     authorization: `Bearer ${config.controlApiServiceToken}`,
@@ -152,7 +206,6 @@ export async function controlApiRequestWithStatus<T>(
     Object.assign(headers, options.extraHeaders)
   }
 
-  const url = buildUrl(path, options?.query)
   const body = options?.body !== undefined ? JSON.stringify(options.body) : undefined
   const operation: ControlApiTransportOperation =
     method === 'GET' || method === 'HEAD' ? 'read' : 'mutation'
@@ -232,6 +285,8 @@ export async function controlApiBinaryRequestWithStatus(
     extraHeaders?: Record<string, string>
   }
 ): Promise<{ body: Buffer; status: number; headers: Record<string, string> }> {
+  // Build and validate the URL before any credential enters a request object.
+  const url = buildUrl(path, options?.query)
   const headers: Record<string, string> = {
     authorization: `Bearer ${config.controlApiServiceToken}`,
     'x-service-token': config.controlApiServiceName,
@@ -244,7 +299,7 @@ export async function controlApiBinaryRequestWithStatus(
     Object.assign(headers, options.extraHeaders)
   }
 
-  const response = await fetch(buildUrl(path, options?.query), { method, headers })
+  const response = await fetch(url, { method, headers })
   if (!response.ok) {
     let parsed: unknown = null
     const raw = await readResponseText(response)
@@ -288,6 +343,8 @@ export async function controlApiStreamRequest(
     throwOnHttpError?: boolean
   }
 ): Promise<Response> {
+  // Build and validate the URL before any credential enters a request object.
+  const url = buildUrl(path, options?.query)
   const headers: Record<string, string> = {
     authorization: `Bearer ${config.controlApiServiceToken}`,
     'x-service-token': config.controlApiServiceName,
@@ -309,7 +366,7 @@ export async function controlApiStreamRequest(
   if (options?.body && typeof options.body === 'object' && Symbol.asyncIterator in options.body) {
     fetchInit.duplex = 'half'
   }
-  const response = await fetch(buildUrl(path, options?.query), fetchInit)
+  const response = await fetch(url, fetchInit)
   if (!response.ok && options?.throwOnHttpError !== false) {
     let parsed: unknown = null
     const raw = await readResponseText(response)
@@ -341,6 +398,7 @@ export async function controlApiPassthroughGet(
   path: string,
   rawQueryString: string
 ): Promise<{ status: number; contentType: string; body: string }> {
+  assertControlApiPathAllowed(path)
   const base = config.controlApiBaseUrl.replace(/\/+$/, '')
   const normalizedPath = path.startsWith('/') ? path : `/${path}`
   const response = await fetch(`${base}${normalizedPath}${rawQueryString}`, {
