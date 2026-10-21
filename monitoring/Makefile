@@ -6,16 +6,22 @@
 #   GRAFANA_SIZE    Grafana PVC size
 #   GRAFANA_PORT    local port for port_forward_grafana (Control UI also uses
 #                   3000 on minikube, so pick another port when both run)
+#   KUBE_CONTEXT    kube context for every kubectl/helm call (empty: the
+#                   kubeconfig's current context)
 #
 # Example (minikube):
-#   make install_loki install_grafana STORAGE_CLASS=standard LOKI_SIZE=10Gi GRAFANA_SIZE=2Gi
-#   make port_forward_grafana GRAFANA_PORT=3001
+#   make install_loki install_grafana KUBE_CONTEXT=clerum-test STORAGE_CLASS=standard LOKI_SIZE=10Gi GRAFANA_SIZE=2Gi
+#   make port_forward_grafana KUBE_CONTEXT=clerum-test GRAFANA_PORT=3001
 
 STORAGE_CLASS ?= do-block-storage
 LOKI_SIZE ?= 100Gi
 GRAFANA_SIZE ?= 10Gi
 GRAFANA_PORT ?= 3000
 LOKI_CHART_VERSION ?= 2.9.10
+KUBE_CONTEXT ?=
+
+KUBECTL = kubectl$(if $(KUBE_CONTEXT), --context $(KUBE_CONTEXT))
+HELM = helm$(if $(KUBE_CONTEXT), --kube-context $(KUBE_CONTEXT))
 
 LOKI_SET = --set loki.persistence.storageClassName=$(STORAGE_CLASS) \
 	--set loki.persistence.size=$(LOKI_SIZE)
@@ -28,37 +34,37 @@ GRAFANA_SET = --set persistence.storageClassName=$(STORAGE_CLASS) \
 setup:
 	helm repo add grafana https://grafana.github.io/helm-charts
 	helm repo update
-	kubectl apply -f namespace.yaml
+	$(KUBECTL) apply -f namespace.yaml
 
 install_loki:
-	helm install loki grafana/loki-stack --version "$(LOKI_CHART_VERSION)" --namespace=monitoring -f loki/values.yaml $(LOKI_SET)
+	$(HELM) install loki grafana/loki-stack --version "$(LOKI_CHART_VERSION)" --namespace=monitoring -f loki/values.yaml $(LOKI_SET)
 
 upgrade_loki:
-	helm upgrade loki grafana/loki-stack --version "$(LOKI_CHART_VERSION)" --namespace=monitoring -f loki/values.yaml $(LOKI_SET)
+	$(HELM) upgrade loki grafana/loki-stack --version "$(LOKI_CHART_VERSION)" --namespace=monitoring -f loki/values.yaml $(LOKI_SET)
 
 uninstall_loki:
-	helm uninstall loki --namespace=monitoring
+	$(HELM) uninstall loki --namespace=monitoring
 
 # Creates or updates the grafana-dashboards ConfigMap that grafana/values.yaml
 # mounts (dashboardsConfigMaps.default). Grafana pods cannot start without it.
 dashboards:
-	kubectl create configmap grafana-dashboards \
+	$(KUBECTL) create configmap grafana-dashboards \
 		--from-file=dashboards/ \
-		--namespace=monitoring --dry-run=client -o yaml | kubectl apply -f -
+		--namespace=monitoring --dry-run=client -o yaml | $(KUBECTL) apply -f -
 
 install_grafana: dashboards
-	helm install grafana grafana/grafana --namespace=monitoring -f grafana/values.yaml $(GRAFANA_SET)
+	$(HELM) install grafana grafana/grafana --namespace=monitoring -f grafana/values.yaml $(GRAFANA_SET)
 
 upgrade_grafana: dashboards
-	helm upgrade grafana grafana/grafana --namespace=monitoring -f grafana/values.yaml $(GRAFANA_SET)
+	$(HELM) upgrade grafana grafana/grafana --namespace=monitoring -f grafana/values.yaml $(GRAFANA_SET)
 
 uninstall_grafana:
-	helm uninstall grafana --namespace=monitoring
+	$(HELM) uninstall grafana --namespace=monitoring
 
 port_forward_grafana:
-	kubectl port-forward -n monitoring svc/grafana $(GRAFANA_PORT):80
+	$(KUBECTL) port-forward -n monitoring svc/grafana $(GRAFANA_PORT):80
 
 status:
-	kubectl get pods -n monitoring
-	kubectl get daemonset -n monitoring
-	kubectl get pvc -n monitoring
+	$(KUBECTL) get pods -n monitoring
+	$(KUBECTL) get daemonset -n monitoring
+	$(KUBECTL) get pvc -n monitoring

@@ -42,25 +42,27 @@ make install_grafana
 On minikube, override the storage class and sizes:
 
 ```bash
-make install_loki install_grafana STORAGE_CLASS=standard LOKI_SIZE=10Gi GRAFANA_SIZE=2Gi
+make install_loki install_grafana KUBE_CONTEXT=<your-context> STORAGE_CLASS=standard LOKI_SIZE=10Gi GRAFANA_SIZE=2Gi
 ```
 
 ### Make variables
 
-| Variable             | Default            | Description                                 |
-| -------------------- | ------------------ | ------------------------------------------- |
-| `STORAGE_CLASS`      | `do-block-storage` | Storage class for the Loki and Grafana PVCs |
-| `LOKI_SIZE`          | `100Gi`            | Loki PVC size                               |
-| `GRAFANA_SIZE`       | `10Gi`             | Grafana PVC size                            |
-| `GRAFANA_PORT`       | `3000`             | Local port for `port_forward_grafana`       |
-| `LOKI_CHART_VERSION` | `2.9.10`           | loki-stack chart version                    |
+| Variable             | Default            | Description                                  |
+| -------------------- | ------------------ | -------------------------------------------- |
+| `STORAGE_CLASS`      | `do-block-storage` | Storage class for the Loki and Grafana PVCs  |
+| `LOKI_SIZE`          | `100Gi`            | Loki PVC size                                |
+| `GRAFANA_SIZE`       | `10Gi`             | Grafana PVC size                             |
+| `GRAFANA_PORT`       | `3000`             | Local port for `port_forward_grafana`        |
+| `LOKI_CHART_VERSION` | `2.9.10`           | loki-stack chart version                     |
+| `KUBE_CONTEXT`       | (empty)            | Kube context for every `kubectl`/`helm` call |
 
 ## Makefile Targets
 
-These targets pass no `--context` / `--kube-context`: they run `kubectl` and
-`helm` against your kubeconfig's **current** context. Check
-`kubectl config current-context` before you run any of them, or use the
-explicit commands in
+Every target passes `KUBE_CONTEXT` as `--context` to `kubectl` and as
+`--kube-context` to `helm`. If you leave `KUBE_CONTEXT` unset, they run against
+your kubeconfig's **current** context, so set it (for example
+`make status KUBE_CONTEXT=<your-context>`) or check
+`kubectl config current-context` first. The explicit commands are in
 [docs/operations/monitoring.md](../docs/operations/monitoring.md#install-on-minikube).
 
 | Target                 | Description                                                                                       |
@@ -105,4 +107,4 @@ make port_forward_grafana GRAFANA_PORT=3001
 ```
 
 To forward against an explicit cluster context instead of the current one:
-`kubectl --context <your-context> port-forward -n monitoring svc/grafana 3001:80`.
+`make port_forward_grafana KUBE_CONTEXT=<your-context> GRAFANA_PORT=3001`.

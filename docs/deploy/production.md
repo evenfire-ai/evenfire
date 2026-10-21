@@ -292,9 +292,9 @@ kubectl --context "$KCTX" cluster-info   # confirm this is the cluster you mean
    [GFS permission-store credential lifecycle](gfs-permission-store.md)
    (`provision-gfs-db.sh`, `provision-gfs-runtime.sh`).
    `provision-gfs-runtime.sh` refuses a non-dev context unless it is listed in
-   `ALLOWED_CONTEXTS` or you pass `--allow-prod`. `provision-gfs-db.sh` has no
-   such guard: it runs against whatever `CONTEXT` you give it, so check that
-   value before you run it.
+   `ALLOWED_CONTEXTS` or you pass `--allow-prod`. `provision-gfs-db.sh`
+   refuses any context other than a local Minikube one unless that exact
+   context is listed in `ALLOWED_CONTEXTS`.
 
 6. **First admin.** control-api creates the bootstrap admin from
    `CONTROL_API_ADMIN_BOOTSTRAP_USERNAME`, `CONTROL_API_ADMIN_BOOTSTRAP_EMAIL`

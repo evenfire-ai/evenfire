@@ -702,6 +702,26 @@ if T2_PUBLIC_ROOT="$public_repo" T2_PUBLIC_BASE_REF="$public_base" \
   echo 'FAIL: public boundary ignored a secret in an untracked file' >&2
   exit 1
 fi
+rm -f "$public_repo/runtime.txt"
+# A .env file is sensitive at any depth, not only at the repository root.
+mkdir -p "$public_repo/service"
+printf 'base\n' >"$public_repo/service/.env"
+if T2_PUBLIC_ROOT="$public_repo" T2_PUBLIC_BASE_REF="$public_base" \
+  bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" 2>"$tmp/nested-env.err"; then
+  echo 'FAIL: public boundary accepted a nested .env file' >&2
+  exit 1
+fi
+grep -Fq -- '- service/.env: sensitive file name' "$tmp/nested-env.err"
+rm -rf "$public_repo/service"
+# A form feed inside a line must not split it and hide the value after it.
+printf 'note\fDATABASE_URL=%s://private-host:5432/db\n' postgresql >"$public_repo/runtime.txt"
+if T2_PUBLIC_ROOT="$public_repo" T2_PUBLIC_BASE_REF="$public_base" \
+  bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" 2>"$tmp/formfeed.err"; then
+  echo 'FAIL: public boundary let a form feed hide a private URL' >&2
+  exit 1
+fi
+grep -Fq -- '- runtime.txt: private PostgreSQL URL' "$tmp/formfeed.err"
+rm -f "$public_repo/runtime.txt"
 
 # A logger test asserts the redaction marker under a secret-named key; that is
 # not a credential. A real value, or one that merely contains the marker, is.
