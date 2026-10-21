@@ -36,11 +36,23 @@ export interface GfsGrantPanelProps {
 /**
  * One displayed access row per subject: the direct grant plus any legacy URI
  * shares for that same subject, merged. Role changes rewrite only the grant
- * row and preserve its own scope flag; share rows survive role edits and are
- * removed only through explicit removal (R1-M5) — the server has no
- * share-update surface, so a share-only row is not role-editable and a role
- * change never creates a grant for it.
+ * row and preserve its own scope flag; a share-only row is not role-editable
+ * and a role change never creates a grant for it (R1-M5). A share row that
+ * CONFLICTS with the requested role is revoked together with the grant write
+ * (RP-032) — the server has no share-update surface — while a share row that
+ * already matches the target role survives.
  */
+/**
+ * One sharing row on a resource, with its own bits and descendant scope
+ * (R1-M5). A role change preserves this per-row provenance; RP-032 revokes
+ * only the rows whose bits CONFLICT with the requested role.
+ */
+export type GfsGrantShareEntry = {
+  rowId: string
+  permissions: string[]
+  includeDescendants: boolean
+}
+
 export type GfsExistingAccessItem = {
   subject: GfsSubjectInput
   permissions: string[]
@@ -51,11 +63,7 @@ export type GfsExistingAccessItem = {
   grantId: string | null
   shareIds: string[]
   /** Every direct share row with its own bits and descendant scope (R1-M5). */
-  shareEntries: Array<{
-    rowId: string
-    permissions: string[]
-    includeDescendants: boolean
-  }>
+  shareEntries: GfsGrantShareEntry[]
 }
 
 /**
@@ -94,11 +102,7 @@ export type GfsInheritedAccessSource = {
   /** The grant row's own scope flag; null when no grant row exists. */
   grantInherit: boolean | null
   /** Every contributing share row with its own bits and descendant scope. */
-  shareEntries: Array<{
-    rowId: string
-    permissions: string[]
-    includeDescendants: boolean
-  }>
+  shareEntries: GfsGrantShareEntry[]
 }
 
 /**
