@@ -48,9 +48,11 @@ const DISPLAY_B = 'Billing Host'
 const DISPLAY_BY_NAME = { [HOST_A]: DISPLAY_A, [HOST_B]: DISPLAY_B }
 // A catalog that dropped A also drops its name, so a toast can only take it from the previous one.
 const DISPLAY_B_ONLY = { [HOST_B]: DISPLAY_B }
+const DISPLAY_A_ONLY = { [HOST_A]: DISPLAY_A }
 const VERIFY_A = `Could not verify access to ${DISPLAY_A}.`
 const REVOKED_A = `Access to ${DISPLAY_A} was revoked.`
 const GONE_A = `${DISPLAY_A} is no longer available.`
+const GONE_B = `${DISPLAY_B} is no longer available.`
 
 /**
  * A `listSessions` double. Page reads (`limit: 50`) of a denied Host reject
@@ -412,6 +414,44 @@ describe('useAppController held Hosts', () => {
     }
   )
 
+  it.each([
+    ['a generic 403', () => ipcGenericForbidden('rpc:listSessions')],
+    ['host_access_revoked', () => ipcHostAccessRevoked('rpc:listSessions')],
+  ])(
+    'T-R4M1-2: a background Host held by %s that leaves the catalog is announced once',
+    async (_label, rejection) => {
+      const { clerum, handle } = installAppControllerClerum({
+        agentNames: [HOST_A, HOST_B],
+        agentDisplayByName: DISPLAY_BY_NAME,
+      })
+      const catalog = installCatalog(clerum)
+      catalog.deny(HOST_B, await rejection())
+      const { app, commits } = await mount(clerum, handle)
+      act(() => {
+        app.result.current.handleSelectChatAgent(HOST_A, { selectLatest: false })
+      })
+      await waitFor(() => expect(app.result.current.selectedAgent).toBe(HOST_A))
+      await holdThroughCatalog(app, catalog, HOST_B)
+      await settle()
+      // Liveness witness: B is held and listed, with no toast, before the catalog drops it.
+      expect(app.result.current.heldAgentRefs).toEqual([HOST_B])
+      expect(toastsSeen(commits)).toEqual([])
+      handle.refreshCatalog.mockImplementation(async () => createCatalog([HOST_A], DISPLAY_A_ONLY))
+
+      await act(async () => {
+        await app.result.current.handleRefreshWorkspaceData(DESKTOP_ROUTES.agents)
+      })
+      await waitFor(() => expect(cachedCatalog(app.queryClient)?.agentNames).toEqual([HOST_A]))
+      await settle()
+
+      // Liveness witness: B is still held and lost its Retry row; A is untouched.
+      expect(app.result.current.isHostAccessBlocked(HOST_B)).toBe(true)
+      expect(app.result.current.heldAgentRefs).toEqual([])
+      expect(app.result.current.selectedAgent).toBe(HOST_A)
+      expect(toastsSeen(commits)).toEqual([GONE_B])
+    }
+  )
+
   it('T-R2L2-1: a new hold after a successful Retry is announced again', async () => {
     const { clerum, handle } = installAppControllerClerum({
       agentNames: [HOST_A, HOST_B],
@@ -734,64 +774,70 @@ describe('ChatPage with a held Host on the chat tab', () => {
     expect(toastTexts(getVm())).toEqual([VERIFY_A, REVOKED_A])
   })
 
-  it('T-A23-1: a held chat tab Host that leaves the catalog while the Apps picker is open gives no toast', async () => {
-    const { clerum, handle } = installAppControllerClerum({
-      agentNames: [HOST_A, HOST_B],
-      agentDisplayByName: DISPLAY_BY_NAME,
-    })
-    installCatalog(clerum)
-    const transcriptError = await ipcGenericForbidden('rpc:loadSessionMessages')
-    let denyTranscript = false
-    clerum.rpc.loadSessionMessages.mockImplementation(async (hostRef: string) => {
-      if (hostRef === HOST_A && denyTranscript) throw transcriptError
-      return { agent: hostRef, chatId: '', turns: [] }
-    })
-    const trail: Array<string | null> = []
-    const { getVm, queryClient } = await mountChat(trail)
-    await openChat(getVm, HOST_A, 'chat-1')
-    await openChat(getVm, HOST_A, 'chat-2')
-    const refreshesBeforeHold = handle.refreshCatalog.mock.calls.length
-    const catalogWithoutA = deferred<void>()
-    handle.refreshCatalog.mockImplementation(async () => {
-      await catalogWithoutA.promise
-      return createCatalog([HOST_B], DISPLAY_B_ONLY)
-    })
+  it.each([
+    ['the Apps picker is open', DESKTOP_ROUTES.apps],
+    ['the Files tab is active', DESKTOP_ROUTES.files],
+  ] as const)(
+    'T-A23-1: a held chat tab Host that leaves the catalog while %s says so at once, not again on return',
+    async (_label, awayRoute) => {
+      const { clerum, handle } = installAppControllerClerum({
+        agentNames: [HOST_A, HOST_B],
+        agentDisplayByName: DISPLAY_BY_NAME,
+      })
+      installCatalog(clerum)
+      const transcriptError = await ipcGenericForbidden('rpc:loadSessionMessages')
+      let denyTranscript = false
+      clerum.rpc.loadSessionMessages.mockImplementation(async (hostRef: string) => {
+        if (hostRef === HOST_A && denyTranscript) throw transcriptError
+        return { agent: hostRef, chatId: '', turns: [] }
+      })
+      const trail: Array<string | null> = []
+      const { getVm, queryClient } = await mountChat(trail)
+      await openChat(getVm, HOST_A, 'chat-1')
+      await openChat(getVm, HOST_A, 'chat-2')
+      const refreshesBeforeHold = handle.refreshCatalog.mock.calls.length
+      const catalogWithoutA = deferred<void>()
+      handle.refreshCatalog.mockImplementation(async () => {
+        await catalogWithoutA.promise
+        return createCatalog([HOST_B], DISPLAY_B_ONLY)
+      })
 
-    denyTranscript = true
-    await openChat(getVm, HOST_A, 'chat-1')
-    await waitFor(() => expect(getVm().isHostAccessBlocked(HOST_A)).toBe(true))
-    await waitFor(() =>
-      expect(handle.refreshCatalog.mock.calls.length).toBe(refreshesBeforeHold + 1)
-    )
-    await waitFor(() => expect(toastTexts(getVm())).toEqual([VERIFY_A]))
-    act(() => {
-      getVm().handleNavSelect(DESKTOP_ROUTES.apps)
-    })
-    // Liveness witness: the picker is shown instead of the chat.
-    expect(getVm().appsPickerActive).toBe(true)
-    expect(getVm().navItem).toBe(DESKTOP_ROUTES.apps)
+      denyTranscript = true
+      await openChat(getVm, HOST_A, 'chat-1')
+      await waitFor(() => expect(getVm().isHostAccessBlocked(HOST_A)).toBe(true))
+      await waitFor(() =>
+        expect(handle.refreshCatalog.mock.calls.length).toBe(refreshesBeforeHold + 1)
+      )
+      await waitFor(() => expect(toastTexts(getVm())).toEqual([VERIFY_A]))
+      act(() => {
+        getVm().handleNavSelect(awayRoute)
+      })
+      // Liveness witness: the chat is no longer shown.
+      expect(getVm().navItem).toBe(awayRoute)
+      expect(getVm().focusedChatAgentRef).toBe(null)
 
-    await act(async () => {
-      catalogWithoutA.resolve()
-    })
-    await waitFor(() => expect(cachedCatalog(queryClient)?.agentNames).toEqual([HOST_B]))
-    await settle()
+      await act(async () => {
+        catalogWithoutA.resolve()
+      })
+      await waitFor(() => expect(cachedCatalog(queryClient)?.agentNames).toEqual([HOST_B]))
+      await settle()
 
-    // Liveness witness: the catalog without A landed while A is held.
-    expect(getVm().isHostAccessBlocked(HOST_A)).toBe(true)
-    expect(getVm().heldAgentRefs).toEqual([])
-    expect(toastTexts(getVm())).toEqual([VERIFY_A])
-    // The picker shows no chat tab, so none is focused.
-    expect(getVm().focusedChatAgentRef).toBe(null)
+      // Liveness witness: the catalog without A landed while A is held, so A
+      // lost its Retry row away from the chat.
+      expect(getVm().isHostAccessBlocked(HOST_A)).toBe(true)
+      expect(getVm().heldAgentRefs).toEqual([])
+      expect(toastTexts(getVm())).toEqual([VERIFY_A, GONE_A])
 
-    // Back on Chat the catalog has not changed, so the loss is not announced late.
-    act(() => {
-      getVm().handleNavSelect(DESKTOP_ROUTES.chat)
-    })
-    await waitFor(() => expect(getVm().selectedAgent).toBe(HOST_B))
-    await settle()
-    expect(toastTexts(getVm())).toEqual([VERIFY_A])
-  })
+      // Back on Chat the catalog has not changed, so the loss is not announced again.
+      act(() => {
+        getVm().handleNavSelect(DESKTOP_ROUTES.chat)
+      })
+      await waitFor(() => expect(getVm().selectedAgent).toBe(HOST_B))
+      await settle()
+      expect(hasTabFor(getVm(), HOST_A)).toBe(true)
+      expect(toastTexts(getVm())).toEqual([VERIFY_A, GONE_A])
+    }
+  )
 
   it('T-A23-2: a revocation of the chat tab Host while the Apps picker is open gives no toast', async () => {
     const { clerum } = installAppControllerClerum({

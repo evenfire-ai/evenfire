@@ -749,14 +749,11 @@ export function useAppController() {
       const name = previousCatalog?.agentDisplayByName?.[agentRef] ?? agentRef
       pushToast(`${name} is no longer available.`, 'error')
     }
-    // The focused chat tab's held Host loses its Retry row with the catalog, so
-    // ChatPage leaves the tab; say why.
-    if (
-      focusedChatAgentRef !== null &&
-      isHostAccessBlocked(focusedChatAgentRef) &&
-      leftCatalog(focusedChatAgentRef)
-    ) {
-      announceLoss(focusedChatAgentRef)
+    // A held Host loses its Retry row with the catalog, wherever the focus is,
+    // so say why now: a later run compares this catalog with itself. The
+    // previous catalog is read because `heldAgentRefs` lists current Hosts only.
+    for (const agentRef of previousCatalog?.agentNames ?? []) {
+      if (isHostAccessBlocked(agentRef) && leftCatalog(agentRef)) announceLoss(agentRef)
     }
     const selected = nav.selectedAgent
     if (!selected) return
@@ -768,7 +765,6 @@ export function useAppController() {
   }, [
     agentsData.accessCatalog,
     auth.isAuthenticated,
-    focusedChatAgentRef,
     nav.selectedAgent,
     nav.setSelectedAgent,
     isHostAccessBlocked,
