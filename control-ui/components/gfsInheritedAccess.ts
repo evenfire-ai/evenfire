@@ -18,8 +18,6 @@ import type {
 } from './GfsGrantPanel.types'
 import { inheritedSubjectKey, mergeInheritedAccessItem } from './gfsInheritedAccessMerge'
 
-export { planInheritedRoleChange, strongestInheritedSource } from './gfsInheritedAccessMerge'
-
 /** `/docs/report.md` → `['/docs', '/']` (nearest ancestor first, depth-capped). */
 export function gfsAncestorPaths(path: string): string[] {
   return gfsAncestorPathsOf(path)

@@ -3,12 +3,8 @@ import {
   gfsSubjectKeyOf,
   isEditorGfsPermissions,
   mergeGfsInheritedAccessItem as mergeInheritedAccessPolicy,
-  strongestGfsInheritedSource,
 } from '@clerum/gfs-interaction-policy'
-import type {
-  GfsInheritedAccessItem as PolicyInheritedAccessItem,
-  GfsInheritedAccessSource as PolicyInheritedAccessSource,
-} from '@clerum/gfs-interaction-policy'
+import type { GfsInheritedAccessItem as PolicyInheritedAccessItem } from '@clerum/gfs-interaction-policy'
 import type { GfsInheritedAccessItem, GfsInheritedAccessSource } from './delegation.types'
 
 /**
@@ -44,41 +40,6 @@ export interface InheritedAccessContribution {
 export interface InheritedAccessFolder {
   resourceId: string
   name: string
-}
-
-/** The strongest contributing folder: editor beats read, nearest among equals. */
-export function strongestInheritedSource(
-  sources: GfsInheritedAccessSource[]
-): GfsInheritedAccessSource | null {
-  return strongestGfsInheritedSource(
-    sources as PolicyInheritedAccessSource[]
-  ) as GfsInheritedAccessSource | null
-}
-
-/**
- * Which ancestor folders a confirmed role change to the target role must
- * touch (R1-H1 semantics, verified against Google Drive):
- * - downgrade: EVERY source whose role is above the target (ancestors at or
- *   below the target stay untouched);
- * - upgrade: the single strongest source (nearest among equals) — the
- *   effective role is the strongest across sources, so one raise is enough;
- * - no-op (target equals the effective role): none.
- *
- * Kept flat and order-preserving (the app's established contract): the
- * richer grant-vs-share split planner remains available from the shared
- * package for the scoped per-source edit work.
- */
-export function planInheritedRoleChange(
-  item: Pick<GfsInheritedAccessItem, 'permissions' | 'sources'>,
-  targetRoleIsEditor: boolean
-): GfsInheritedAccessSource[] {
-  const effectiveIsEditor = isEditorGfsPermissions(item.permissions)
-  if (targetRoleIsEditor === effectiveIsEditor) return []
-  if (!targetRoleIsEditor) {
-    return item.sources.filter(source => isEditorGfsPermissions(source.permissions))
-  }
-  const strongest = strongestInheritedSource(item.sources)
-  return strongest ? [strongest] : []
 }
 
 /**

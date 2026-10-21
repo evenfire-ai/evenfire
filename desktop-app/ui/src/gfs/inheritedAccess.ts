@@ -5,8 +5,6 @@ import { isGfsSessionAuthorityFailure, parseHttpStatus } from '@lib/gfsGrantErro
 import type { GfsInheritedAccessItem, GfsInheritedAccessResult } from './delegation.types'
 import { inheritedSubjectKey, mergeInheritedAccessItem } from './inheritedAccessMerge'
 
-export { planInheritedRoleChange, strongestInheritedSource } from './inheritedAccessMerge'
-
 /**
  * Derives the inherited access for one resource on the client. The user-plane
  * grants/shares GETs list only the rows configured directly on a resource, so

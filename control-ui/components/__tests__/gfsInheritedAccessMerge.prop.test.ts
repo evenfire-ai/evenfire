@@ -6,9 +6,7 @@ import {
   type InheritedAccessFolder,
   isEditorPermissions,
   mergeInheritedAccessItem,
-  planInheritedRoleChange,
   roleRank,
-  strongestInheritedSource,
 } from '../gfsInheritedAccessMerge'
 
 /**
@@ -195,55 +193,7 @@ describe('gfsInheritedAccessMerge properties', () => {
         const rightRank = roleRank(right)
         const comparisons = [leftRank < rightRank, leftRank === rightRank, leftRank > rightRank]
         expect(comparisons.filter(Boolean)).toHaveLength(1)
-
-        const toSource = (permissions: string[]): GfsInheritedAccessSource => ({
-          resourceId: 'r',
-          name: 'r',
-          permissions,
-          grantId: null,
-          shareIds: [],
-        })
-        const forward = strongestInheritedSource([toSource(left), toSource(right)])
-        const backward = strongestInheritedSource([toSource(right), toSource(left)])
-        expect(roleRank(forward?.permissions ?? [])).toBe(roleRank(backward?.permissions ?? []))
       }),
-      { numRuns: 300 }
-    )
-  })
-
-  it('the R1-H1 plan never drops an above-target source', () => {
-    fc.assert(
-      fc.property(
-        distinctFoldersArb,
-        fc.array(permissionsArb, { minLength: 1, maxLength: 8 }),
-        (folders, permissionSets) => {
-          const sources: GfsInheritedAccessSource[] = folders.map((folder, index) => ({
-            resourceId: folder.resourceId,
-            name: folder.name,
-            permissions: permissionSets[index % permissionSets.length]!,
-            grantId: null,
-            shareIds: [],
-          }))
-          const permissions = [...new Set(sources.flatMap(source => source.permissions))]
-          const item = { permissions, sources }
-          const editorSources = sources.filter(source => isEditorPermissions(source.permissions))
-          const readSources = sources.filter(source => !isEditorPermissions(source.permissions))
-
-          const downgrade = planInheritedRoleChange(item, false)
-          expect(downgrade).toHaveLength(editorSources.length)
-
-          const upgrade = planInheritedRoleChange(item, true)
-          if (isEditorPermissions(permissions)) {
-            expect(upgrade).toHaveLength(0)
-          } else {
-            expect(upgrade).toHaveLength(1)
-          }
-
-          const noOp = planInheritedRoleChange(item, isEditorPermissions(permissions))
-          expect(noOp).toHaveLength(0)
-          expect(readSources.length + editorSources.length).toBe(sources.length)
-        }
-      ),
       { numRuns: 300 }
     )
   })
