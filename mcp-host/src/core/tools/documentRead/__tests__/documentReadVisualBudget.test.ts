@@ -624,4 +624,40 @@ describe('document visual reads and the request image bounds', () => {
     expect(JSON.parse(rendered.rawContent!)).toMatchObject({ status: 'ok', images: [{ page: 1 }] })
     expect(rendered.attachments).toHaveLength(1)
   }, 15_000)
+
+  it('U6: bounds a visual read by the request byte budget before it spawns the worker', async () => {
+    const file = admittedFile('scan', await imageOnlyPdf(witnessCode()), 'application/pdf')
+    const { runJob, jobs } = countingRunner()
+    const reader = documentTool(file, runJob)
+
+    // Images already in the request occupy their base64 size on the wire: 22.5
+    // MB decode to 30 MB, so the 32 MB request bound minus the text reserve
+    // leaves no room for a PNG and the call pauses without a child.
+    const spent = await reader.execute(
+      { attachmentId: file.id, mode: 'visual' },
+      context(ANTHROPIC, { images: 4, bytes: 22_500_000, maxSide: 0 })
+    )
+    expect(jobs).toHaveLength(0)
+    expect(JSON.parse(spent.content)).toMatchObject({
+      status: 'read_budget_exhausted',
+      message: IMAGE_MESSAGE,
+    })
+    expect(spent.attachments).toBeUndefined()
+
+    // Witness: with 10 MB the call renders, and the budget the job receives
+    // keeps the whole request under the provider's 32 MB serialized bound.
+    const usageBytes = 10_000_000
+    const rendered = await reader.execute(
+      { attachmentId: file.id, mode: 'visual' },
+      context(ANTHROPIC, { images: 4, bytes: usageBytes, maxSide: 0 })
+    )
+    expect(JSON.parse(rendered.content)).toMatchObject({ status: 'ok', images: [{ page: 1 }] })
+    expect(rendered.attachments).toHaveLength(1)
+    expect(jobs).toHaveLength(1)
+    const job = jobs[0]
+    if (job?.kind !== 'pdf_visual') throw new Error('the visual read did not run a visual job')
+    expect(
+      Math.ceil((usageBytes * 4) / 3) + Math.ceil((job.maxTotalImageBytes * 4) / 3) + 2_000_000
+    ).toBeLessThanOrEqual(ANTHROPIC.maxVisualRequestBytes)
+  }, 15_000)
 })
