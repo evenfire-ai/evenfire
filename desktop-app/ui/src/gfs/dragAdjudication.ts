@@ -109,12 +109,22 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
    * it is a session-authority failure. The drop is refused either way; this
    * is what makes the refusal also REVOKE the session instead of leaving an
    * active accessState over a dead session.
+   *
+   * The classification travels back to the caller: a session failure is
+   * TERMINAL for the gesture (the session it was reading is gone), while a
+   * per-resource policy verdict stays local to the attempted operation.
    */
   const reportAuthorityFailure = useCallback(
-    (error: unknown): boolean => {
+    (error: unknown): { message: string; sessionFailure: boolean; revoked: boolean } => {
       const message = error instanceof Error ? error.message : String(error ?? '')
-      if (!isGfsSessionAuthorityFailure(message, 'operation')) return false
-      return deps.handleAuthorityFailure?.(message) ?? false
+      if (!isGfsSessionAuthorityFailure(message, 'operation')) {
+        return { message, sessionFailure: false, revoked: false }
+      }
+      return {
+        message,
+        sessionFailure: true,
+        revoked: deps.handleAuthorityFailure?.(message) ?? false,
+      }
     },
     [deps]
   )
@@ -337,11 +347,16 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
             knownSourceAncestorIds: new Set(source.knownAncestorIds),
           })
         } catch (error) {
-          // Unreadable ancestry stays server-check-required; proceed below —
-          // a read failure upward is a visibility boundary, not a denial. A
-          // session failure is not a boundary: report it so the session is
-          // revoked instead of the drop dying quietly.
-          reportAuthorityFailure(error)
+          // A read failure upward is a visibility boundary, not a denial: the
+          // ancestry stays unproven and the server PATCH remains the backstop.
+          // A SESSION failure is not a boundary — the session the ancestry
+          // would be read from is gone. Report it so the session is revoked
+          // and STOP: continuing would let the later probes answer "allowed"
+          // over a dead session (RP-002).
+          const failure = reportAuthorityFailure(error)
+          if (failure.sessionFailure) {
+            return { allowed: false, reason: 'session-lost' }
+          }
         }
       }
 

@@ -317,13 +317,19 @@ describe('useGfsDragAdjudication — probe 401 revokes the session', () => {
     const handleAuthorityFailure = vi.fn(() => true)
     const { result } = renderAdjudication(handleAuthorityFailure)
 
-    await result.current.adjudicateDrop(
+    const decision = await result.current.adjudicateDrop(
       dragSource({ kind: 'directory', knownAncestorIds: [] }),
       // An unproven chain (no root sentinel) forces the ancestor resolve.
       { ...dropTarget(), ancestorIds: ['root-1'] }
     )
 
     expect(handleAuthorityFailure).toHaveBeenCalledWith(message)
+    // A session failure is TERMINAL for the gesture: the ancestry read died
+    // with the session, so the adjudication must not continue into the later
+    // probes and answer "allowed" over a dead session (RP-002).
+    expect(decision).toEqual({ allowed: false, reason: 'session-lost' })
+    // The failed resolve is the LAST read: nothing after it ran.
+    expect(resolve).toHaveBeenCalledTimes(1)
   })
 
   it('leaves a policy verdict local: a 403 probe never reaches the classifier', async () => {

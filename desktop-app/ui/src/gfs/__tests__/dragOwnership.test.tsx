@@ -531,3 +531,64 @@ for (const surface of ['sidebar', 'files'] as const) {
     })
   })
 }
+
+// RP-002: a session failure while resolving the drop target's ancestry ends
+// the gesture. The Files page is the surface where that read happens: its
+// rows carry no loaded ancestry (the current view is a root listing), so a
+// folder drop must resolve the target's ancestors before it can admit the
+// move — and a session that died during that read must never end in an
+// ALLOWED verdict.
+describe('files surface drop admission (RP-002)', () => {
+  it('never dispatches the move when the ancestor resolve reports a session failure', async () => {
+    const message = 'Error invoking remote method: Error: 401 Unauthorized httpStatus=401'
+    const bits = await affordancesResult(heldAffordances(['read', 'write', 'delete']))
+    const affordances = vi.fn(async () => bits)
+    const resolve = vi.fn(async () => {
+      throw new Error(message)
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listChildren: vi.fn(async () => listChildrenPage([])),
+          affordances,
+          resolve,
+        },
+      },
+    })
+    const { items } = await listAccessiblePage([
+      accessibleResource('source', 'Source', 'directory', { parentResourceId: 'grand' }),
+      accessibleResource('target', 'Target', 'directory', { parentResourceId: 'grand' }),
+    ])
+    const moveResource = vi.fn(async () => ({}))
+    const ctrl = { ...baseController(), accessibleResources: items, items, moveResource }
+    mocks.controller.mockReturnValue(ctrl)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const toast = vi.fn()
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <GfsDragSessionProvider>
+          <FilesPage pushToast={toast} />
+        </GfsDragSessionProvider>
+      </QueryClientProvider>
+    )
+
+    const dataTransfer = transfer()
+    fireEvent.dragStart(screen.getByRole('button', { name: 'Open Source' }), { dataTransfer })
+    fireEvent.drop(screen.getByRole('button', { name: 'Open Target' }), { dataTransfer })
+
+    // The session is revoked and the gesture ends: no confirmation, no
+    // dispatch, nothing announced.
+    await waitFor(() =>
+      expect(ctrl.handleAuthorityFailure).toHaveBeenCalledWith(message, 'operation')
+    )
+    expect(screen.queryByRole('dialog', { name: 'Move folder Source to Target' })).toBeNull()
+    expect(moveResource).not.toHaveBeenCalled()
+    expect(toast).not.toHaveBeenCalled()
+    // The ancestry read is the last thing that ran: no affordance probe
+    // followed it.
+    expect(resolve).toHaveBeenCalledTimes(1)
+    expect(affordances).not.toHaveBeenCalled()
+  })
+})
