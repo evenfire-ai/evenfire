@@ -710,6 +710,61 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     await waitFor(() => expect(screen.queryByText(/Session refresh failed/)).toBeNull())
   })
 
+  it('clears the session failure and its Retry once a resumed refresh of the same view succeeds', async () => {
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
+    const first = main.openCall(0).launchId
+    main.navigate('/tickets/7')
+
+    await act(() => main.refreshFailed(new Error('mint failed')))
+    expect(await screen.findByText('Session refresh failed: mint failed.')).toBeTruthy()
+    const liveBefore = main.live()
+
+    await act(() => main.hostReturned())
+    await act(() => main.settle())
+
+    expect(main.reported('sandboxUi:refreshRecovered')).toEqual([
+      { appRef: ALPHA!.appRef, launchId: first },
+    ])
+    await waitFor(() => expect(screen.queryByText(/Session refresh failed/)).toBeNull())
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+    expect(sandboxUi.open).toHaveBeenCalledTimes(1)
+    expect(sandboxUi.close).not.toHaveBeenCalled()
+    expect(main.live()).toEqual(liveBefore)
+    expect(main.live()).toEqual({ launchId: first, appRef: ALPHA!.appRef, routePath: '/tickets/7' })
+  })
+
+  // The machine drops a recovery of a launch that no longer owns the embed, so a
+  // late one cannot take down the failure of the view that replaced it.
+  it("keeps a relaunched view's session failure when a recovery of the view it replaced arrives late", async () => {
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
+    const first = main.openCall(0).launchId
+    await act(() => main.refreshFailed(new Error('mint failed')))
+    await act(() => main.hostReturned())
+    await act(() => main.settle())
+    const staleRecovery = main.reported('sandboxUi:refreshRecovered').at(-1) as {
+      appRef: string
+      launchId: string
+    }
+    expect(staleRecovery).toEqual({ appRef: ALPHA!.appRef, launchId: first })
+
+    await act(() => main.refreshFailed(new Error('mint failed')))
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
+    await act(() => main.settle())
+    const second = main.openCall(1).launchId
+    expect(main.live()?.launchId).toBe(second)
+    await act(() => main.refreshFailed(new Error('second view failed')))
+    expect(await screen.findByText('Session refresh failed: second view failed.')).toBeTruthy()
+
+    act(() => latestListener<typeof staleRecovery>(sandboxUi.onRefreshRecovered)(staleRecovery))
+    await flushMacrotask()
+
+    expect(screen.getByText('Session refresh failed: second view failed.')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy()
+  })
+
   it('ignores the session failure of a view it already replaced', async () => {
     await renderApp()
     await openFromSidebar(ALPHA, 1)

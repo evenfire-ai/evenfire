@@ -70,6 +70,8 @@ export type StartSandboxUiRefreshArgs = {
   /** Hard-reloads the embed after a mint that recovers a top-level 401. */
   reload: () => void
   onError: (err: Error) => void
+  /** A mint succeeded after `onError` reported that retries had run out. */
+  onRecovered: () => void
   /**
    * Wall-clock time the initial mint was requested. The cookie's lifetime is
    * counted from the server's issue time, so the request start is the
@@ -108,6 +110,8 @@ type ActiveRefresh = Omit<StartSandboxUiRefreshArgs, 'now' | 'mintedAt'> & {
   unauthorizedRecoveryMintSeq: number | null
   /** Last time a return event or a 401 reopened retries after they ran out. */
   lastResumeAt: number | null
+  /** `onError` fired and no mint has succeeded since. */
+  errorReported: boolean
 }
 
 let activeRefresh: ActiveRefresh | null = null
@@ -222,6 +226,17 @@ async function attemptMint(ref: ActiveRefresh, trigger: RefreshTrigger): Promise
     ref.reload()
   }
   armTimer(ref)
+  // Cleared only here, after reload() and armTimer(): if either throws, the
+  // next successful mint still owes the renderer its recovery signal. A
+  // throwing listener must not leave the loop without a timer either.
+  if (ref.errorReported) {
+    ref.errorReported = false
+    try {
+      ref.onRecovered()
+    } catch (err) {
+      console.error('[SandboxUI] refresh recovery listener failed:', err)
+    }
+  }
 }
 
 function scheduleRetry(ref: ActiveRefresh, err: Error): void {
@@ -234,6 +249,7 @@ function scheduleRetry(ref: ActiveRefresh, err: Error): void {
   ref.consecutiveFailures += 1
   if (now + delay > ref.retryDeadline) {
     ref.nextAttemptAt = null
+    ref.errorReported = true
     ref.onError(err)
     return
   }
@@ -261,6 +277,7 @@ export function startSandboxUiRefresh(args: StartSandboxUiRefreshArgs): void {
     reloadOnNextMint: false,
     unauthorizedRecoveryMintSeq: null,
     lastResumeAt: null,
+    errorReported: false,
   }
 
   senderToRefreshContext.set(args.webContentsId, ref)

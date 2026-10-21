@@ -16,6 +16,7 @@ import {
 import { getActiveSandboxUi, getActiveSandboxUiLocation } from '../../../../src/sandboxUiDriver'
 import {
   SANDBOX_UI_COOKIE_TTL_MS,
+  SANDBOX_UI_RATE_LIMIT_MS,
   SANDBOX_UI_REFRESH_INTERVAL_MS,
   SANDBOX_UI_RETRY_GRACE_MS,
 } from '../../../../src/sandboxUiSessionRefresh'
@@ -72,6 +73,7 @@ export function createSandboxUiMainFake() {
   const refreshErrorListeners = new Set<
     (event: { appRef: string; launchId: string; message: string }) => void
   >()
+  const refreshRecoveredListeners = new Set<(event: { appRef: string; launchId: string }) => void>()
   const userDataDir = mkdtempSync(path.join(tmpdir(), 'clerum-sandbox-ui-main-'))
   const openMints: MintDecision[] = []
   let failNextMount: Error | null = null
@@ -123,6 +125,11 @@ export function createSandboxUiMainFake() {
         case 'sandboxUi:refreshError':
           for (const listener of [...refreshErrorListeners]) {
             listener(payload as { appRef: string; launchId: string; message: string })
+          }
+          return
+        case 'sandboxUi:refreshRecovered':
+          for (const listener of [...refreshRecoveredListeners]) {
+            listener(payload as { appRef: string; launchId: string })
           }
       }
     })
@@ -246,6 +253,12 @@ export function createSandboxUiMainFake() {
         (listener: (event: { appRef: string; launchId: string; message: string }) => void) => {
           refreshErrorListeners.add(listener)
           return () => refreshErrorListeners.delete(listener)
+        }
+      ),
+      onRefreshRecovered: vi.fn(
+        (listener: (event: { appRef: string; launchId: string }) => void) => {
+          refreshRecoveredListeners.add(listener)
+          return () => refreshRecoveredListeners.delete(listener)
         }
       ),
     },
@@ -376,6 +389,24 @@ export function createSandboxUiMainFake() {
       }
       if (reported('sandboxUi:refreshError').length === reportsBefore) {
         throw new Error('main did not report the refresh failure')
+      }
+      return toRendererLane
+    },
+    /**
+     * The user comes back to the window after `awayMs` and rpc-proxy accepts
+     * the session mint that brings: main must be due to refresh by then, either
+     * because it gave up earlier or because the session is about to expire.
+     * Resolves once what main reported about it has reached the renderer.
+     */
+    async hostReturned(awayMs: number = SANDBOX_UI_RATE_LIMIT_MS): Promise<void> {
+      if (!liveView()) throw new Error('no live view to return to')
+      const mintsBefore = sandboxUiMintFetch.mock.calls.length
+      // Return events reopen exhausted retries at most once per rate-limit window.
+      clockOffsetMs += awayMs
+      main.parent.emit('focus')
+      for (let i = 0; i < 100; i++) await Promise.resolve()
+      if (sandboxUiMintFetch.mock.calls.length === mintsBefore) {
+        throw new Error('returning to the window did not make main mint a session')
       }
       return toRendererLane
     },

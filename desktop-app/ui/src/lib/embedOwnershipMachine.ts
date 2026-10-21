@@ -243,6 +243,10 @@ export function createEmbedOwnershipMachine(
       if (disposed || event.launchId !== state.owner) return
       deps.onOwnerRefreshError?.(event)
     },
+    onRefreshRecovered: event => {
+      if (disposed || event.launchId !== state.owner) return
+      deps.onOwnerRefreshRecovered?.(event)
+    },
     registerMeasurer(next) {
       if (disposed) return () => {}
       measurer = next

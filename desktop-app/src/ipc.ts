@@ -2128,6 +2128,10 @@ export function registerIpcHandlers(service: AppService): void {
           if (parentWindow.isDestroyed()) return
           parentWindow.webContents.send('sandboxUi:refreshError', { appRef, launchId, message })
         },
+        onRefreshRecovered: () => {
+          if (parentWindow.isDestroyed()) return
+          parentWindow.webContents.send('sandboxUi:refreshRecovered', { appRef, launchId })
+        },
         onTitleChanged: title => {
           if (parentWindow.isDestroyed()) return
           parentWindow.webContents.send('sandboxUi:titleChanged', { appRef, launchId, title })

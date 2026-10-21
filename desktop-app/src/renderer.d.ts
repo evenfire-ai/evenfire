@@ -768,8 +768,8 @@ declare global {
           defaultPath?: string
           routePath?: string
           bounds: { x: number; y: number; width: number; height: number; dpr?: number }
-          // Echoed by main on `onReleased` / `onRefreshError` / `onTitleChanged`
-          // for the view this open mounts.
+          // Echoed by main on `onReleased` / `onRefreshError` / `onRefreshRecovered` /
+          // `onTitleChanged` for the view this open mounts.
           launchId: string
         }) => Promise<void>
         // Closes that launch's view only if it is still the live one.
@@ -819,6 +819,10 @@ declare global {
         onReleased: (callback: (args: SandboxUiReleasedEvent) => void) => () => void
         onRefreshError: (
           callback: (args: { appRef: string; launchId: string; message: string }) => void
+        ) => () => void
+        // A refresh that `onRefreshError` reported as failed succeeded later.
+        onRefreshRecovered: (
+          callback: (args: { appRef: string; launchId: string }) => void
         ) => () => void
         onTitleChanged: (
           callback: (args: { appRef: string; launchId: string; title: string }) => void

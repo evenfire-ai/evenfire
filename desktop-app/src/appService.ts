@@ -5920,6 +5920,8 @@ export class AppService {
     /** Exactly once per view this open mounts, even if the open then rejects. */
     onReleased?: (event: import('./sandboxUiDriver.js').SandboxUiReleasedEvent) => void
     onRefreshError?: (message: string) => void
+    /** A refresh succeeded after `onRefreshError` reported that it had given up. */
+    onRefreshRecovered?: () => void
     onOauthError?: (message: string) => void
     onTitleChanged?: (title: string) => void
   }): Promise<void> {
@@ -6061,6 +6063,10 @@ export class AppService {
       onError: err => {
         if (this.sandboxUiSessionEpoch !== sessionEpoch) return
         args.onRefreshError?.(err instanceof Error ? err.message : String(err))
+      },
+      onRecovered: () => {
+        if (this.sandboxUiSessionEpoch !== sessionEpoch) return
+        args.onRefreshRecovered?.()
       },
     })
   }

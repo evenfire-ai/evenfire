@@ -74,14 +74,17 @@ describe('sandboxUi:open launch id', () => {
 
     // The replaced view reports after the relaunch of the same app.
     first!.onRefreshError?.('refresh failed')
+    first!.onRefreshRecovered?.()
     first!.onTitleChanged?.('Old title')
     second!.onTitleChanged?.('New title')
+    second!.onRefreshRecovered?.()
 
     expect(electron.send.mock.calls).toEqual([
       [
         'sandboxUi:refreshError',
         { appRef: 'sandbox-recipes/alpha', launchId: launch1, message: 'refresh failed' },
       ],
+      ['sandboxUi:refreshRecovered', { appRef: 'sandbox-recipes/alpha', launchId: launch1 }],
       [
         'sandboxUi:titleChanged',
         { appRef: 'sandbox-recipes/alpha', launchId: launch1, title: 'Old title' },
@@ -90,6 +93,7 @@ describe('sandboxUi:open launch id', () => {
         'sandboxUi:titleChanged',
         { appRef: 'sandbox-recipes/alpha', launchId: launch2, title: 'New title' },
       ],
+      ['sandboxUi:refreshRecovered', { appRef: 'sandbox-recipes/alpha', launchId: launch2 }],
     ])
   })
 

@@ -412,6 +412,10 @@ export function App() {
       },
       onOwnerRefreshError: event =>
         setEmbedRefreshError({ launchId: event.launchId, message: event.message }),
+      // The machine already drops recoveries of a launch that lost the embed;
+      // matching the launch here keeps one from ever clearing another's error.
+      onOwnerRefreshRecovered: event =>
+        setEmbedRefreshError(prev => (prev?.launchId === event.launchId ? null : prev)),
       onTransition: ({ previous, next }) => {
         // The tab stays but its embed is gone (back to apps, team handoff, a
         // failed open, a crash, a session end): drop the chrome that belonged
@@ -469,10 +473,14 @@ export function App() {
     const offReleased = sandboxUi.onReleased?.(event => embed.onReleased(event))
     const offTitle = sandboxUi.onTitleChanged?.(event => embed.onTitleChanged(event))
     const offRefreshError = sandboxUi.onRefreshError?.(event => embed.onRefreshError(event))
+    const offRefreshRecovered = sandboxUi.onRefreshRecovered?.(event =>
+      embed.onRefreshRecovered(event)
+    )
     return () => {
       offReleased?.()
       offTitle?.()
       offRefreshError?.()
+      offRefreshRecovered?.()
       lifetime.mounts -= 1
       queueMicrotask(() => {
         if (lifetime.mounts > 0 || lifetime.disposed) return

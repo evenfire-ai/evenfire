@@ -408,6 +408,51 @@ describe('embed ownership machine — notifications', () => {
     expect(onOwnerRefreshError).toHaveBeenCalledWith({ launchId: 'l-1', message: 'live' })
   })
 
+  it("reports only the owner's refresh recoveries", async () => {
+    const onOwnerRefreshRecovered = vi.fn()
+    const h = harness({ onOwnerRefreshRecovered })
+    await mountedOwner(h, launch('l-1'))
+
+    h.machine.onRefreshRecovered({ launchId: 'l-old' })
+    h.machine.onRefreshRecovered({ launchId: 'l-1' })
+
+    expect(onOwnerRefreshRecovered).toHaveBeenCalledTimes(1)
+    expect(onOwnerRefreshRecovered).toHaveBeenCalledWith({ launchId: 'l-1' })
+  })
+
+  // Main keeps refreshing a view until its close is dequeued, so a recovery of
+  // the replaced launch can follow the close the relaunch sent.
+  it('drops a recovery of a relaunched view, sent before or after its close reached main', async () => {
+    const onOwnerRefreshRecovered = vi.fn()
+    const h = harness({ onOwnerRefreshRecovered })
+    await mountedOwner(h, launch('l-1'))
+
+    h.machine.relaunch(launch('l-2'))
+    expect(h.bridge.close).toHaveBeenCalledWith({ launchId: 'l-1' })
+    h.machine.onRefreshRecovered({ launchId: 'l-1' })
+    h.closes.get('l-1')!.resolve()
+    await flush()
+    h.machine.onRefreshRecovered({ launchId: 'l-1' })
+
+    expect(h.machine.getSnapshot().owner).toBe('l-2')
+    expect(onOwnerRefreshRecovered).not.toHaveBeenCalled()
+  })
+
+  it('drops a recovery once its launch left the embed, and every recovery after dispose', async () => {
+    const onOwnerRefreshRecovered = vi.fn()
+    const h = harness({ onOwnerRefreshRecovered })
+    await mountedOwner(h, launch('l-1'))
+    h.machine.backToApps()
+    h.machine.onRefreshRecovered({ launchId: 'l-1' })
+
+    const disposed = harness({ onOwnerRefreshRecovered })
+    await mountedOwner(disposed, launch('l-2'))
+    disposed.machine.dispose()
+    disposed.machine.onRefreshRecovered({ launchId: 'l-2' })
+
+    expect(onOwnerRefreshRecovered).not.toHaveBeenCalled()
+  })
+
   it('announces a handoff once the views it waits for are gone', async () => {
     const onHandoffReady = vi.fn()
     const h = harness({ onHandoffReady })

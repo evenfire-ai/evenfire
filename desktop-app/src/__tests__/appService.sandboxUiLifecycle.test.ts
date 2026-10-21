@@ -449,10 +449,15 @@ describe('AppService sandbox-ui session against a failing rpc-proxy', () => {
     // The retry deadline is wall-clock, so here the wall clock moves with the timers.
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
     const onRefreshError = vi.fn()
+    const onRefreshRecovered = vi.fn()
     const service = makeService()
     initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
     const parentWindow = new FakeParentWindow()
-    await service.openSandboxUi({ ...openArgs('first-app', parentWindow), onRefreshError })
+    await service.openSandboxUi({
+      ...openArgs('first-app', parentWindow),
+      onRefreshError,
+      onRefreshRecovered,
+    })
     const embed = getActiveSandboxUi()!
     mintResponders.set('first-app', () => mintFails(503, 'upstream unavailable'))
 
@@ -464,6 +469,7 @@ describe('AppService sandbox-ui session against a failing rpc-proxy', () => {
     await vi.advanceTimersByTimeAsync(120_000)
     expect(onRefreshError).toHaveBeenCalledOnce()
     expect(onRefreshError.mock.calls[0]![0]).toContain('503')
+    expect(onRefreshRecovered).not.toHaveBeenCalled()
     const mintsWhenExhausted = mintCallsFor('first-app')
     await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS)
     expect(mintCallsFor('first-app')).toBe(mintsWhenExhausted)
@@ -478,6 +484,61 @@ describe('AppService sandbox-ui session against a failing rpc-proxy', () => {
     expect(electronMocks.sessionObject.cookies.set).toHaveBeenCalledWith(
       expect.objectContaining({ value: 'tok-first-app' })
     )
+    expect(onRefreshRecovered).toHaveBeenCalledOnce()
+  })
+
+  it('a recovery whose cookie write lands after logout is not reported', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    const onRefreshError = vi.fn()
+    const onRefreshRecovered = vi.fn()
+    const service = makeService()
+    initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
+    const parentWindow = new FakeParentWindow()
+    await service.openSandboxUi({
+      ...openArgs('first-app', parentWindow),
+      onRefreshError,
+      onRefreshRecovered,
+    })
+    const embed = getActiveSandboxUi()!
+    mintResponders.set('first-app', () => mintFails(503, 'upstream unavailable'))
+    await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1)
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(onRefreshError).toHaveBeenCalledOnce()
+
+    mintResponders.delete('first-app')
+    let finishCookieWrite: () => void = () => undefined
+    electronMocks.sessionObject.cookies.set.mockClear()
+    electronMocks.sessionObject.cookies.set.mockImplementationOnce(
+      () =>
+        new Promise<void>(resolve => {
+          finishCookieWrite = resolve
+        })
+    )
+    const refresh = service.requestSandboxUiRefresh(embed.webContentsId)
+    await vi.waitFor(() => expect(electronMocks.sessionObject.cookies.set).toHaveBeenCalledOnce(), {
+      timeout: 1_000,
+    })
+    // Lifecycle work ahead of the session's close keeps the loop running while
+    // the cookie write lands under the next session.
+    let releaseQueue: () => void = () => undefined
+    const queueBusy = (
+      service as unknown as { enqueueSandboxUiLifecycle(op: () => Promise<void>): Promise<void> }
+    ).enqueueSandboxUiLifecycle(
+      () =>
+        new Promise<void>(resolve => {
+          releaseQueue = resolve
+        })
+    )
+    await service.logout()
+    finishCookieWrite()
+    await refresh
+    expect(getActiveSandboxUi()?.webContentsId).toBe(embed.webContentsId)
+
+    releaseQueue()
+    await queueBusy
+    await vi.waitFor(() => expect(getActiveSandboxUi()).toBeNull(), { timeout: 1_000 })
+    expect(onRefreshRecovered).not.toHaveBeenCalled()
+    expect(onRefreshError).toHaveBeenCalledOnce()
   })
 })
 

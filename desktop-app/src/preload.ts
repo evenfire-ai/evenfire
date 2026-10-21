@@ -755,6 +755,12 @@ const clerum = Object.freeze({
       ipcRenderer.on('sandboxUi:refreshError', listener)
       return () => ipcRenderer.off('sandboxUi:refreshError', listener)
     },
+    onRefreshRecovered: (callback: (args: { appRef: string; launchId: string }) => void) => {
+      const listener = (_event: unknown, args: { appRef: string; launchId: string }) =>
+        callback(args)
+      ipcRenderer.on('sandboxUi:refreshRecovered', listener)
+      return () => ipcRenderer.off('sandboxUi:refreshRecovered', listener)
+    },
     onTitleChanged: (
       callback: (args: { appRef: string; launchId: string; title: string }) => void
     ) => {

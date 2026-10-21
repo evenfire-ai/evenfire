@@ -38,6 +38,8 @@ export type EmbedTabsUpdater = (state: WorkspaceTabsState) => WorkspaceTabsState
 
 export type EmbedRefreshErrorEvent = { launchId: LaunchId; message: string }
 
+export type EmbedRefreshRecoveredEvent = { launchId: LaunchId }
+
 export type EmbedTitleChangedEvent = { launchId: LaunchId; title: string }
 
 export type EmbedOwnershipMachineDeps = {
@@ -47,6 +49,8 @@ export type EmbedOwnershipMachineDeps = {
   onHandoffReady?: (requestId: number) => void
   /** Only refresh failures of the launch that owns the embed when they arrive. */
   onOwnerRefreshError?: (event: EmbedRefreshErrorEvent) => void
+  /** Only recoveries of the launch that owns the embed when they arrive. */
+  onOwnerRefreshRecovered?: (event: EmbedRefreshRecoveredEvent) => void
   /**
    * Every reduced event with the state around it and its effects, before the
    * effects run. It must not dispatch: it observes, it does not decide.
@@ -73,6 +77,7 @@ export type EmbedOwnershipMachine = {
   onReleased(event: SandboxUiReleasedEvent): void
   onTitleChanged(event: EmbedTitleChangedEvent): void
   onRefreshError(event: EmbedRefreshErrorEvent): void
+  onRefreshRecovered(event: EmbedRefreshRecoveredEvent): void
   /** The page registers while its slot exists; measures wait until one is registered. */
   registerMeasurer(measurer: EmbedSlotMeasurer): () => void
   /**

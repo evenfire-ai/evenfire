@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { SANDBOX_UI_REFRESH_INTERVAL_MS } from '../../../src/sandboxUiSessionRefresh'
 import { type SandboxUiMainFake, createSandboxUiMainFake } from './__fixtures__/sandboxUiMainFake'
 
 vi.mock(
@@ -60,6 +61,12 @@ describe('the App suites’ sandbox-ui bridge delivers what main produces, in or
     seen = []
     main.bridge.onReleased(event => {
       seen.push(`released ${event.launchId} ${event.reason} ${JSON.stringify(event.location)}`)
+    })
+    main.bridge.onRefreshError(event => {
+      seen.push(`refreshError ${event.launchId} ${event.message}`)
+    })
+    main.bridge.onRefreshRecovered(event => {
+      seen.push(`refreshRecovered ${event.launchId} ${event.appRef}`)
     })
   })
 
@@ -188,6 +195,34 @@ describe('the App suites’ sandbox-ui bridge delivers what main produces, in or
     await main.settle()
 
     expect(seen).toEqual([`released ${A} closed {"routePath":"/inbox"}`, `close ${A} ok`])
+  })
+
+  it('reports a refresh that succeeds after main gave up as recovered, for the view that failed', async () => {
+    await open(A)
+    await main.settle()
+    seen = []
+
+    await main.refreshFailed(new Error('upstream unavailable'))
+    await main.hostReturned()
+    await main.settle()
+
+    expect(seen).toEqual([
+      expect.stringMatching(new RegExp(`^refreshError ${A} .*upstream unavailable`)),
+      `refreshRecovered ${A} sandbox-recipes/alpha`,
+    ])
+    expect(main.live()?.launchId).toBe(A)
+  })
+
+  it('reports no recovery for a refresh that never failed', async () => {
+    await open(A)
+    await main.settle()
+    seen = []
+
+    await main.hostReturned(SANDBOX_UI_REFRESH_INTERVAL_MS)
+    await main.settle()
+
+    expect(seen).toEqual([])
+    expect(main.live()?.launchId).toBe(A)
   })
 
   it('releases the live view when the session changes', async () => {
