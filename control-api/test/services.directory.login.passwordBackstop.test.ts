@@ -58,7 +58,7 @@ describe('directory Google login without team memberships', () => {
       expect.anything()
     )
     expect(dbMocks.txQuery).toHaveBeenCalledWith(
-      expect.stringContaining("WHERE team_members.status <> 'deleted'"),
+      expect.stringContaining('ON CONFLICT (team_id, user_id) DO NOTHING'),
       ['u1', 'a@b.com']
     )
   })

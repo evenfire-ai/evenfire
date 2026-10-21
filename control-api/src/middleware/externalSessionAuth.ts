@@ -2,7 +2,7 @@ import { NextFunction, Request, Response } from 'express'
 import { DatabaseError } from 'pg'
 import { pool } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
-import { AuthClaims, TeamRole } from '../profileTypes.js'
+import { AuthClaims } from '../profileTypes.js'
 import { verifyExternalSessionToken } from '../utils/auth/externalSessionAuthToken.js'
 
 /** Retry-After sent when the user row cannot be read to validate a session. */
@@ -184,15 +184,4 @@ export function rejectBodyUserTeamMismatch(
     return
   }
   next()
-}
-
-export function requireExternalRole(allowedRoles: TeamRole[]) {
-  return (req: ExternalAuthedRequest, res: Response, next: NextFunction): void => {
-    const role = req.externalAuth?.role
-    if (!role || !allowedRoles.includes(role)) {
-      res.status(403).json({ error: 'Forbidden' })
-      return
-    }
-    next()
-  }
 }

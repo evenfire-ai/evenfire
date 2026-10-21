@@ -26,10 +26,10 @@ import {
 } from './invitationStore.js'
 import type { InviteRole, TeamRole } from './types.js'
 import {
+  canManagerInviteAssignment,
   normalizeChannels,
   normalizeTeamRoleInput,
   roleCanDeleteMembers,
-  roleCanInviteMembers,
 } from './types.js'
 import { DesktopUserRetirementError, retireDesktopUser } from './users.js'
 
@@ -223,12 +223,12 @@ export async function listMembers(teamId: string) {
 
 export async function findMemberRole(teamId: string, userId: string) {
   const result = await pool.query(
-    `SELECT role
-       FROM team_members
-       JOIN users u ON u.id = team_members.user_id
-      WHERE team_id = $1
-        AND user_id = $2
-        AND status = 'active'
+    `SELECT tm.role
+       FROM team_members tm
+       JOIN users u ON u.id = tm.user_id
+      WHERE tm.team_id = $1
+        AND tm.user_id = $2
+        AND tm.status = 'active'
         AND u.lifecycle_state = 'active'
       LIMIT 1`,
     [teamId, userId]
@@ -488,13 +488,14 @@ export async function createPasswordSetupInvitationForUser(userId: string) {
     return { error: 'no_accepted_invitation' as const }
   }
 
-  const teams = await loadInvitationTeams(pool, acceptedInvitation.id, acceptedInvitation)
   const fallbackName = acceptedInvitation.email.split('@')[0] || acceptedInvitation.email
+  // Password setup leaves memberships as they are now; the accepted invitation
+  // only proves the user was invited.
   const created = await createInvitationForTeams({
     inviteeName: acceptedInvitation.invitee_name || fallbackName,
     email: acceptedInvitation.email,
-    teamAssignments: teams.map(team => ({ teamId: team.team_id, role: team.role })),
-    fallbackRole: acceptedInvitation.role,
+    teamAssignments: [],
+    fallbackRole: 'member',
   })
   return {
     sent: true as const,
@@ -1085,15 +1086,6 @@ async function getManagerRolesForTeams(
   )
 }
 
-function canManagerInviteAssignment(
-  managerRole: TeamRole | undefined,
-  assignmentRole: InviteRole
-): boolean {
-  if (!roleCanInviteMembers(managerRole)) return false
-  if (assignmentRole === 'admin') return roleCanDeleteMembers(managerRole)
-  return true
-}
-
 async function managerCanControlAllInvitationTeams(
   managerUserId: string,
   teams: readonly InvitationTeamRow[]
@@ -1185,37 +1177,12 @@ export async function createManagedInvitationForUser(
     ])
   )
   for (const assignment of assignments) {
-    const managerRole = managerRoles.get(assignment.teamId)
-    if (!roleCanInviteMembers(managerRole)) {
-      return { error: 'forbidden' as const }
-    }
-    if (assignment.role === 'admin' && !roleCanDeleteMembers(managerRole)) {
+    if (!canManagerInviteAssignment(managerRoles.get(assignment.teamId), assignment.role)) {
       return { error: 'forbidden' as const }
     }
   }
 
   const fallbackName = normalizedEmail.split('@')[0] || normalizedEmail
-  if (normalizedInviteeName) {
-    const updatedUser = await pool.query(
-      `UPDATE users
-          SET name = $2,
-              updated_at = NOW()
-        WHERE email = $1
-    RETURNING id`,
-      [normalizedEmail, normalizedInviteeName]
-    )
-    const userId = String((updatedUser.rows[0] as { id?: string } | undefined)?.id || '')
-    if (userId) {
-      await pool.query(
-        `INSERT INTO profiles(user_id, display_name)
-         VALUES($1, $2)
-         ON CONFLICT (user_id)
-         DO UPDATE SET display_name = EXCLUDED.display_name,
-                       updated_at = NOW()`,
-        [userId, normalizedInviteeName]
-      )
-    }
-  }
 
   return {
     invitation: await createInvitationForTeams({
