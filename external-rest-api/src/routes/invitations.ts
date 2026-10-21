@@ -35,27 +35,24 @@ type InvitationPasswordAuth = {
   sessionToken: string
 }
 
-function sendAcceptInvitationError(
-  res: Response,
-  error: 'not_found' | 'forbidden' | 'not_pending' | 'expired' | 'invalid'
-): void {
-  if (error === 'invalid') {
-    res.status(400).json({ error: 'Invalid invitation' })
-    return
-  }
-  if (error === 'not_found') {
-    res.status(404).json({ error: 'Invitation not found' })
-    return
-  }
+type AcceptInvitationError = 'not_found' | 'forbidden' | 'not_pending' | 'expired' | 'invalid'
+
+function acceptInvitationErrorResponse(error: AcceptInvitationError): {
+  status: number
+  body: Record<string, string>
+} {
+  if (error === 'invalid') return { status: 400, body: { error: 'Invalid invitation' } }
+  if (error === 'not_found') return { status: 404, body: { error: 'Invitation not found' } }
   if (error === 'forbidden') {
-    res.status(403).json({ error: 'Invitation email does not match authenticated user' })
-    return
+    return { status: 403, body: { error: 'Invitation email does not match authenticated user' } }
   }
-  if (error === 'expired') {
-    res.status(410).json({ error: 'Invitation has expired' })
-    return
-  }
-  res.status(400).json({ error: 'Invitation is not pending' })
+  if (error === 'expired') return { status: 410, body: { error: 'Invitation has expired' } }
+  return { status: 400, body: { error: 'Invitation is not pending' } }
+}
+
+function sendAcceptInvitationError(res: Response, error: AcceptInvitationError): void {
+  const response = acceptInvitationErrorResponse(error)
+  res.status(response.status).json(response.body)
 }
 
 function sendInvitationPasswordError(
@@ -179,17 +176,14 @@ async function invitationPasswordAuthFromRequest(req: Request): Promise<
 
   const accepted = await acceptInvitation(token, email, requestedSessionContract(req))
   if (accepted.error) {
-    const response = {
-      invalid: { status: 400, body: { error: 'Invalid invitation' } },
-      not_found: { status: 404, body: { error: 'Invitation not found' } },
-      forbidden: {
-        status: 403,
-        body: { error: 'Invitation email does not match authenticated user' },
-      },
-      expired: { status: 410, body: { error: 'Invitation has expired' } },
-      not_pending: { status: 400, body: { error: 'Invitation is not pending' } },
-    }[accepted.error]
-    return response ?? { status: 502, body: { error: 'Failed to start invited session' } }
+    return acceptInvitationErrorResponse(accepted.error)
+  }
+  // A replay is an explicit success without a session. It must not continue
+  // into the password change: the token no longer proves a pending invitation,
+  // so it maps exactly like a not-pending acceptance instead of the 502 that
+  // marks a broken first-acceptance response.
+  if (accepted.data?.replay) {
+    return acceptInvitationErrorResponse('not_pending')
   }
   if (!accepted.data?.token || !accepted.data.userId) {
     return { status: 502, body: { error: 'Failed to start invited session' } }
@@ -399,8 +393,20 @@ export function createInvitationsRouter(): Router {
         sendAcceptInvitationError(res, result.error)
         return
       }
-      setProfileSessionCookie(req, res, result.data!.token)
-      const { token: _token, ...data } = result.data!
+      const accepted = result.data
+      if (!accepted) {
+        throw new Error('control-api accepted an invitation without a response payload')
+      }
+      if (accepted.replay) {
+        const { token: _token, ...data } = accepted
+        res.status(200).json(data)
+        return
+      }
+      if (!accepted.token) {
+        throw new Error('control-api accepted an invitation without issuing a session')
+      }
+      setProfileSessionCookie(req, res, accepted.token)
+      const { token: _token, ...data } = accepted
       res.status(200).json(data)
     } catch (error) {
       next(error)

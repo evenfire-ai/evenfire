@@ -328,6 +328,10 @@ export function createExternalInvitationsRouter(): Router {
             validation.invitationUuid
           )
           if ('error' in result && result.error) return { error: result.error }
+          // Only the transaction that consumed a pending invitation proves the
+          // capability. A replay must stay a success without minting a session,
+          // because the token may already be public knowledge.
+          if ('replay' in result.data) return { data: result.data, replay: true as const }
           const lockedUser = await db.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [
             result.data.userId,
           ])
@@ -357,6 +361,9 @@ export function createExternalInvitationsRouter(): Router {
             return res.status(410).json({ error: 'expired' })
           }
           return res.status(400).json({ error: 'not_pending' })
+        }
+        if ('replay' in accepted) {
+          return res.status(200).json(accepted.data)
         }
 
         return res.status(200).json({

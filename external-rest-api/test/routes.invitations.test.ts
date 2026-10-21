@@ -622,6 +622,189 @@ describe('routes/invitations', () => {
     expect(String(res.headers['set-cookie'])).toContain('HttpOnly')
   })
 
+  it('accepts a replay without publishing a profile session', async () => {
+    invitationsServiceMock.acceptInvitation
+      .mockResolvedValueOnce({
+        data: {
+          accepted: true,
+          userId: 'user-1',
+          email: 'invitee@example.com',
+          teamId: 'team-1',
+          teamName: 'Team 1',
+          role: 'member',
+          token: 'first-session-token',
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          accepted: true,
+          userId: 'user-1',
+          email: 'invitee@example.com',
+          teamId: 'team-1',
+          teamName: 'Team 1',
+          role: 'member',
+          replay: true,
+        },
+      })
+
+    const first = await request(makeApp())
+      .post('/invitations/accept')
+      .set('x-forwarded-for', '198.51.100.201')
+      .send({ token: 'invitation-link-token', email: 'invitee@example.com' })
+      .expect(200)
+    const replay = await request(makeApp())
+      .post('/invitations/accept')
+      .set('x-forwarded-for', '198.51.100.202')
+      .send({ token: 'invitation-link-token', email: 'invitee@example.com' })
+      .expect(200)
+
+    // Positive control: the first acceptance still publishes the session.
+    expect(String(first.headers['set-cookie'])).toContain('profile_session=first-session-token')
+    expect(first.body).not.toHaveProperty('replay')
+    expect(replay.body).toMatchObject({
+      accepted: true,
+      userId: 'user-1',
+      email: 'invitee@example.com',
+      replay: true,
+    })
+    expect(replay.body).not.toHaveProperty('token')
+    expect(replay.headers['set-cookie']).toBeUndefined()
+    expect(invitationsServiceMock.acceptInvitation).toHaveBeenCalledTimes(2)
+  })
+
+  it('refuses password setup for a replayed accepted invitation and reaches the password call for a pending one', async () => {
+    invitationsServiceMock.getInvitationByToken.mockResolvedValue({
+      id: 'inv-1',
+      email: 'invitee@example.com',
+      purpose: 'member_invitation',
+      status: 'accepted',
+    })
+    invitationsServiceMock.acceptInvitation
+      .mockResolvedValueOnce({
+        data: {
+          accepted: true,
+          userId: 'user-1',
+          email: 'invitee@example.com',
+          teamId: null,
+          teamName: null,
+          role: 'member',
+          replay: true,
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          accepted: true,
+          userId: 'user-1',
+          email: 'invitee@example.com',
+          teamId: null,
+          teamName: null,
+          role: 'member',
+          token: 'invited-session-token',
+        },
+      })
+    invitationsServiceMock.setupInvitationPassword.mockResolvedValue({
+      data: { id: 'inv-1', passwordUpdated: true },
+    })
+
+    const replayed = await request(makeApp())
+      .post('/invitations/password')
+      .set('x-forwarded-for', '198.51.100.203')
+      .send({
+        token: 'accepted-invitation-link',
+        email: 'invitee@example.com',
+        invitationId: 'inv-1',
+        password: 'user123!',
+      })
+      .expect(400)
+
+    expect(replayed.body).toEqual({ error: 'Invitation is not pending' })
+    expect(replayed.headers['set-cookie']).toBeUndefined()
+    expect(invitationsServiceMock.setupInvitationPassword).not.toHaveBeenCalled()
+    expect(invitationsServiceMock.setupInvitationPasswordWithToken).not.toHaveBeenCalled()
+
+    // Positive control: the same request for a pending invitation receives a
+    // session, reaches the password change and clears the replaced cookie.
+    const pending = await request(makeApp())
+      .post('/invitations/password')
+      .set('x-forwarded-for', '198.51.100.204')
+      .send({
+        token: 'pending-invitation-link',
+        email: 'invitee@example.com',
+        invitationId: 'inv-1',
+        password: 'user123!',
+      })
+      .expect(200)
+
+    expect(invitationsServiceMock.setupInvitationPassword).toHaveBeenCalledWith(
+      {
+        userId: 'user-1',
+        email: 'invitee@example.com',
+        sessionToken: 'invited-session-token',
+      },
+      'inv-1',
+      'user123!'
+    )
+    expect(String(pending.headers['set-cookie'])).toContain('profile_session=;')
+    expect(invitationsServiceMock.acceptInvitation).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps the invited-session 502 when a non-replay acceptance has no token', async () => {
+    invitationsServiceMock.getInvitationByToken.mockResolvedValue({
+      id: 'inv-1',
+      email: 'invitee@example.com',
+      purpose: 'member_invitation',
+      status: 'pending',
+    })
+    const acceptedWithoutSession = {
+      data: {
+        accepted: true,
+        userId: 'user-1',
+        email: 'invitee@example.com',
+        teamId: null,
+        teamName: null,
+        role: 'member',
+      },
+    }
+    invitationsServiceMock.acceptInvitation
+      .mockResolvedValueOnce(acceptedWithoutSession)
+      .mockResolvedValueOnce({
+        data: { ...acceptedWithoutSession.data, token: 'invited-session-token' },
+      })
+    invitationsServiceMock.setupInvitationPassword.mockResolvedValue({
+      data: { id: 'inv-1', passwordUpdated: true },
+    })
+
+    const broken = await request(makeApp())
+      .post('/invitations/password')
+      .set('x-forwarded-for', '198.51.100.205')
+      .send({
+        token: 'pending-invitation-link',
+        email: 'invitee@example.com',
+        invitationId: 'inv-1',
+        password: 'user123!',
+      })
+      .expect(502)
+
+    expect(broken.body).toEqual({ error: 'Failed to start invited session' })
+    expect(broken.headers['set-cookie']).toBeUndefined()
+    expect(invitationsServiceMock.setupInvitationPassword).not.toHaveBeenCalled()
+
+    // Positive witness: the same branch succeeds once the non-replay response
+    // carries the invited session.
+    await request(makeApp())
+      .post('/invitations/password')
+      .set('x-forwarded-for', '198.51.100.206')
+      .send({
+        token: 'pending-invitation-link',
+        email: 'invitee@example.com',
+        invitationId: 'inv-1',
+        password: 'user123!',
+      })
+      .expect(200)
+    expect(invitationsServiceMock.setupInvitationPassword).toHaveBeenCalledTimes(1)
+    expect(invitationsServiceMock.acceptInvitation).toHaveBeenCalledTimes(2)
+  })
+
   it('rejects password setup without a bearer token or invitation token identity', async () => {
     await request(makeApp())
       .post('/invitations/password')

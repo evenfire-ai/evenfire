@@ -106,11 +106,20 @@ describe('external invitation routes when the hub is unavailable', () => {
     expect(res.body.error).toBe('member_registration_unavailable')
   })
 
-  it('issues only for the transaction that consumes a pending invitation', async () => {
+  it('issues a session only for the first acceptance and returns a replay without one', async () => {
     flow.validateInvitationFlowToken.mockResolvedValue({
       email: 'a@b.c',
       invitationUuid: 'database-capability',
     })
+    const replayData = {
+      accepted: true as const,
+      userId: '00000000-0000-4000-8000-000000000001',
+      email: 'a@b.c',
+      teamId: null,
+      role: 'member',
+      authGeneration: 1,
+      replay: true as const,
+    }
     directory.acceptInvitationForEmailInTransaction
       .mockResolvedValueOnce({
         data: {
@@ -122,8 +131,7 @@ describe('external invitation routes when the hub is unavailable', () => {
           authGeneration: 1,
         },
       })
-      .mockResolvedValueOnce({ error: 'not_pending' })
-      .mockResolvedValueOnce({ error: 'not_pending' })
+      .mockResolvedValueOnce({ data: replayData })
     database.query.mockImplementation(async sql => {
       const text = String(sql)
       if (text.includes('SELECT id FROM users') && text.includes('FOR UPDATE')) {
@@ -145,22 +153,45 @@ describe('external invitation routes when the hub is unavailable', () => {
     const replay = await request(app())
       .post('/external/invitations/accept')
       .send({ email: 'a@b.c', token: 'one-use-flow' })
-    const passwordReset = await request(app())
-      .post('/external/invitations/accept')
-      .send({ email: 'a@b.c', token: 'password-reset-flow' })
 
     expect(first.status).toBe(200)
     expect(first.body.token).toBe('session-token')
-    expect(replay.status).toBe(400)
-    expect(replay.body).toEqual({ error: 'not_pending' })
-    expect(passwordReset.status).toBe(400)
-    expect(passwordReset.body).toEqual({ error: 'not_pending' })
+    expect(first.body).not.toHaveProperty('replay')
+    expect(replay.status).toBe(200)
+    expect(replay.body).toEqual(replayData)
+    expect(replay.body).not.toHaveProperty('token')
+    expect(replay.body).not.toHaveProperty('sessionContract')
     expect(tokenSigner.sign).toHaveBeenCalledTimes(1)
+    // Only the first acceptance reaches the user lock and the issuance reads.
     expect(database.query).toHaveBeenCalledTimes(4)
     expect(String(database.query.mock.calls[0]?.[0])).toContain('FOR UPDATE')
     expect(String(database.query.mock.calls[1]?.[0])).toContain('lifecycle_version')
     expect(String(database.query.mock.calls[2]?.[0])).toContain('clock_timestamp()')
     expect(String(database.query.mock.calls[3]?.[0])).toContain('SELECT valid_after')
+    expect(flow.validateInvitationFlowToken).toHaveBeenCalledTimes(2)
+  })
+
+  it('maps a genuine not_pending acceptance to 400 without starting a session', async () => {
+    flow.validateInvitationFlowToken.mockResolvedValue({
+      email: 'a@b.c',
+      invitationUuid: 'database-capability',
+    })
+    directory.acceptInvitationForEmailInTransaction.mockReset()
+    directory.acceptInvitationForEmailInTransaction.mockResolvedValue({ error: 'not_pending' })
+
+    const res = await request(app())
+      .post('/external/invitations/accept')
+      .send({ email: 'a@b.c', token: 'not-pending-flow' })
+
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ error: 'not_pending' })
+    expect(tokenSigner.sign).not.toHaveBeenCalled()
+    expect(database.query).not.toHaveBeenCalled()
+    expect(directory.acceptInvitationForEmailInTransaction).toHaveBeenCalledWith(
+      expect.anything(),
+      'a@b.c',
+      'database-capability'
+    )
   })
 
   it('binds the secret capability to the public id and never issues on password setup', async () => {

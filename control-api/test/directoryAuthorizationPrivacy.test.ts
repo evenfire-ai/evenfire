@@ -548,7 +548,14 @@ describe('directory privacy and atomic authorization', () => {
     const first = await acceptInvitationForEmail(invitation.email, invitation.token)
     expect(first).toMatchObject({ data: { accepted: true, userId: TARGET } })
     const replay = await acceptInvitationForEmail(invitation.email, invitation.token)
-    expect(replay).toEqual(first)
+    expect(replay).toMatchObject({
+      data: { accepted: true, userId: TARGET, replay: true },
+    })
+    // The replay repeats the retained payload and only adds the replay signal.
+    if (!('data' in first) || !('data' in replay)) {
+      throw new Error('acceptance replay did not return data')
+    }
+    expect(replay.data).toEqual({ ...first.data, replay: true })
     expect(membershipWrites).toBe(1)
     expect(acceptanceWrites).toBe(1)
 

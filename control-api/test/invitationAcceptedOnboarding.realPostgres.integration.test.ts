@@ -85,6 +85,16 @@ describeRealPostgres('accepted onboarding expiry on real PostgreSQL', () => {
     }
   }
 
+  async function storedPasswordHash(userId: string): Promise<string | null> {
+    const stored = await databasePool.query<{ password_hash: string | null }>(
+      `SELECT password_hash FROM users WHERE id = $1`,
+      [userId]
+    )
+    const row = stored.rows[0]
+    if (!row) throw new Error(`password hash read did not return user ${userId}`)
+    return row.password_hash
+  }
+
   beforeAll(async () => {
     adminPool = new Pool({ connectionString: adminUrl })
     await adminPool.query(`DROP ROLE IF EXISTS ${runtimeRoles.join(', ')}`)
@@ -159,21 +169,44 @@ describeRealPostgres('accepted onboarding expiry on real PostgreSQL', () => {
 
       await expect(
         acceptInvitationForEmail(invitation.email, invitation.token, invitation.id)
-      ).resolves.toMatchObject({ data: { accepted: true, userId, status: 'accepted' } })
+      ).resolves.toMatchObject({
+        data: { accepted: true, userId, status: 'accepted', replay: true },
+      })
+
+      const passwordBeforeRejection = await storedPasswordHash(userId)
+      expect(passwordBeforeRejection).toEqual(expect.any(String))
+
+      // Same setter, real invitation id: a member invitation is not a
+      // password-reset capability, so the reset path must refuse before it
+      // writes anything for this user.
+      await expect(
+        setInvitationPasswordForEmail(invitation.email, invitation.id, 'Replay-Password-1!', userId)
+      ).resolves.toEqual({ error: 'not_found' })
+      await expect(storedPasswordHash(userId)).resolves.toBe(passwordBeforeRejection)
+
+      // Positive witness for the same setter: a real password-reset invitation
+      // for this user changes the hash, proving the refusal above is not an
+      // unreachable path that can never write.
+      await requestProfilePasswordReset(invitation.email)
+      const resetInvitation = await databasePool.query<{ id: string }>(
+        `SELECT id::text AS id
+           FROM invitations
+          WHERE email = $1 AND purpose = 'password_reset'
+          ORDER BY created_at DESC
+          LIMIT 1`,
+        [invitation.email]
+      )
+      const resetInvitationId = resetInvitation.rows[0]?.id
+      if (!resetInvitationId) throw new Error('password-reset witness invitation was not created')
       await expect(
         setInvitationPasswordForEmail(
           invitation.email,
-          invitation.token,
-          invitation.id,
-          'Replay-Password-1!'
+          resetInvitationId,
+          'Witness-Password-1!',
+          userId
         )
-      ).resolves.toEqual({ error: 'not_found' })
-
-      const stored = await databasePool.query<{ password_hash: string | null }>(
-        `SELECT password_hash FROM users WHERE id = $1`,
-        [userId]
-      )
-      expect(stored.rows[0]?.password_hash).toEqual(expect.any(String))
+      ).resolves.toMatchObject({ data: { passwordUpdated: true } })
+      await expect(storedPasswordHash(userId)).resolves.not.toBe(passwordBeforeRejection)
     }
   )
 

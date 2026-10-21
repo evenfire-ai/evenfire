@@ -60,11 +60,12 @@ describeRealPostgres('membership invitation acceptance idempotency on real Postg
 
   async function createInvitation(options: {
     label: string
+    email?: string
     purpose?: InvitationPurpose
     status?: InvitationStatus
     expiresAt?: Date
   }): Promise<InvitationFixture> {
-    const email = `${options.label}-${randomUUID()}@example.test`
+    const email = options.email ?? `${options.label}-${randomUUID()}@example.test`
     const token = `token-${randomUUID()}`
     const inserted = await holder.pool.query<{ id: string }>(
       `INSERT INTO invitations(email, role, token, status, purpose, expires_at)
@@ -193,10 +194,14 @@ describeRealPostgres('membership invitation acceptance idempotency on real Postg
 
     const replay = await acceptInvitationForEmail(invitation.email, invitation.token, invitation.id)
 
-    expect(replay).toEqual(first)
+    expect(replay).toEqual({ data: { ...first.data, replay: true } })
     const replayState = await invitationState(invitation.id)
     expect(replayState.accepted_user_id).toBe(userId)
-    expect(replayState.accepted_at?.toISOString()).toBe(firstState.accepted_at?.toISOString())
+    const firstAcceptedAt = firstState.accepted_at
+    if (!(firstAcceptedAt instanceof Date)) {
+      throw new Error('first acceptance did not record an accepted_at timestamp')
+    }
+    expect(replayState.accepted_at?.toISOString()).toBe(firstAcceptedAt.toISOString())
     await expect(memberships(userId)).resolves.toEqual([
       { team_id: teamId, role: 'inviter', status: 'active' },
     ])
@@ -222,7 +227,11 @@ describeRealPostgres('membership invitation acceptance idempotency on real Postg
     ])
     const rejectedState = await invitationState(invitation.id)
     expect(rejectedState.accepted_user_id).toBe(userId)
-    expect(rejectedState.accepted_at?.toISOString()).toBe(acceptedState.accepted_at?.toISOString())
+    const acceptedAt = acceptedState.accepted_at
+    if (!(acceptedAt instanceof Date)) {
+      throw new Error('acceptance did not record an accepted_at timestamp')
+    }
+    expect(rejectedState.accepted_at?.toISOString()).toBe(acceptedAt.toISOString())
   })
 
   it('refuses an explicit user id that does not own the invitation email', async () => {
@@ -284,6 +293,20 @@ describeRealPostgres('membership invitation acceptance idempotency on real Postg
       accepted_user_id: previousOwnerId,
     })
     await expect(memberships(ownerId)).resolves.toEqual([])
+
+    // Positive witness for the empty-membership assertion above: the same
+    // membership observation path returns a row after a pending acceptance for
+    // this user, so an empty read is not a query that can never see rows.
+    const witnessInvitation = await createInvitation({
+      label: 'owner-membership-witness',
+      email: invitation.email,
+    })
+    await expect(
+      acceptInvitation(ownerId, invitation.email, witnessInvitation.token, witnessInvitation.id)
+    ).resolves.toMatchObject({ data: { accepted: true, userId: ownerId } })
+    await expect(memberships(ownerId)).resolves.toEqual([
+      { team_id: teamId, role: 'member', status: 'active' },
+    ])
 
     await holder.pool.query(`DELETE FROM users WHERE id = $1`, [previousOwnerId])
     await expect(
@@ -442,6 +465,10 @@ describeRealPostgres('membership invitation acceptance idempotency on real Postg
     const state = await invitationState(invitation.id)
     expect(state.status).toBe('accepted')
     expect(state.accepted_user_id).toBe(userId)
-    expect(state.accepted_at?.toISOString()).toBe(left.data.acceptedAt)
+    const acceptedAt = state.accepted_at
+    if (!(acceptedAt instanceof Date)) {
+      throw new Error('concurrent acceptance did not record an accepted_at timestamp')
+    }
+    expect(acceptedAt.toISOString()).toBe(left.data.acceptedAt)
   })
 })

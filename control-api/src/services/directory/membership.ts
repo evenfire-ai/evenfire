@@ -386,15 +386,18 @@ async function acceptPendingMembershipInvitation(
  * Pending invitations take the single-use transition. An already accepted
  * invitation owned by the same user is replayed without any invitation or
  * membership write, so a retried acceptance cannot create a second membership
- * or move the acceptance timestamp. The base's one-time backfill of a legacy
- * accepted row whose accepted_user_id is still null stays conditional. A
- * different user never inherits an accepted invitation.
+ * or move the acceptance timestamp. The replay is signalled to the caller
+ * because a replayed acceptance must not issue a user session: only the
+ * transaction that consumed a pending invitation proves the capability. The
+ * base's one-time backfill of a legacy accepted row whose accepted_user_id is
+ * still null stays conditional and is also a replay, not a new authentication.
+ * A different user never inherits an accepted invitation.
  */
 async function applyInvitationAcceptance(
   db: Pick<DbClient, 'query'>,
   invitation: InvitationRow,
   userId: string
-): Promise<{ error: 'forbidden' } | { error: 'not_pending' } | null> {
+): Promise<{ error: 'forbidden' } | { error: 'not_pending' } | { replay: true } | null> {
   if (invitation.status === 'accepted') {
     if (invitation.accepted_user_id && invitation.accepted_user_id !== userId) {
       return { error: 'forbidden' as const }
@@ -406,7 +409,7 @@ async function applyInvitationAcceptance(
         [invitation.id, userId]
       )
     }
-    return null
+    return { replay: true as const }
   }
   if (!(await acceptPendingMembershipInvitation(db, invitation, userId))) {
     return { error: 'not_pending' as const }
@@ -1287,7 +1290,8 @@ export async function acceptInvitation(
     }
 
     const acceptance = await applyInvitationAcceptance(db, invitation, user.id)
-    if (acceptance) return acceptance
+    if (acceptance && 'error' in acceptance) return acceptance
+    const replay = acceptance?.replay === true
 
     const refreshed = await getInvitationRecordByToken(db, invitation.token)
     if (!refreshed) {
@@ -1300,6 +1304,7 @@ export async function acceptInvitation(
       data: {
         accepted: true as const,
         ...payload,
+        ...(replay ? { replay: true as const } : {}),
       },
     }
   })
@@ -1334,7 +1339,8 @@ export async function acceptInvitationForEmailInTransaction(
   if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
 
   const acceptance = await applyInvitationAcceptance(db, invitation, user.id)
-  if (acceptance) return acceptance
+  if (acceptance && 'error' in acceptance) return acceptance
+  const replay = acceptance?.replay === true
 
   const refreshed = await getInvitationRecordByToken(db, invitation.token)
   if (!refreshed) {
@@ -1348,6 +1354,7 @@ export async function acceptInvitationForEmailInTransaction(
       accepted: true as const,
       ...payload,
       userId: user.id,
+      ...(replay ? { replay: true as const } : {}),
     },
   }
 }
@@ -1381,7 +1388,8 @@ export async function acceptInvitationById(email: string, invitationId: string) 
     if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
 
     const acceptance = await applyInvitationAcceptance(db, invitation, user.id)
-    if (acceptance) return acceptance
+    if (acceptance && 'error' in acceptance) return acceptance
+    const replay = acceptance?.replay === true
 
     const refreshed = await getInvitationRecordByToken(db, invitation.token)
     if (!refreshed) {
@@ -1395,6 +1403,7 @@ export async function acceptInvitationById(email: string, invitationId: string) 
         accepted: true as const,
         ...payload,
         userId: user.id,
+        ...(replay ? { replay: true as const } : {}),
       },
     }
   })
