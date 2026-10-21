@@ -7,18 +7,8 @@ import { InvitationClient } from '../../invitations/[token]/InvitationClient'
 
 const mocks = vi.hoisted(() => ({
   acceptInvitation: vi.fn(),
-  checkAuth: vi.fn(),
-  routerReplace: vi.fn(),
   setupAcceptedInvitationPasswordWithToken: vi.fn(),
   setupInvitationPasswordWithToken: vi.fn(),
-}))
-
-vi.mock('next/navigation', () => ({
-  useRouter: () => ({ replace: mocks.routerReplace }),
-}))
-
-vi.mock('@components/AuthContext', () => ({
-  useAuth: () => ({ checkAuth: mocks.checkAuth }),
 }))
 
 vi.mock('@lib/api', async () => {
@@ -26,7 +16,6 @@ vi.mock('@lib/api', async () => {
   return {
     ...actual,
     acceptInvitation: mocks.acceptInvitation,
-    getEvenfireDownloadUrl: () => 'https://downloads.example.invalid/evenfire',
     setupAcceptedInvitationPasswordWithToken: mocks.setupAcceptedInvitationPasswordWithToken,
     setupInvitationPasswordWithToken: mocks.setupInvitationPasswordWithToken,
   }
@@ -73,13 +62,20 @@ function fillPassword() {
   })
 }
 
+function expectPasswordUpdatedScreen(email: string) {
+  expect(screen.getByRole('heading', { name: 'Password updated' })).toBeInTheDocument()
+  expect(
+    screen.getByText('Your password has been updated. Sign in with your new password to continue.')
+  ).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'Sign in' }).getAttribute('href')).toBe(
+    PROFILE_ROUTES.login({ email })
+  )
+  expect(screen.queryByLabelText('Password')).toBeNull()
+}
+
 beforeEach(() => {
+  window.localStorage.clear()
   mocks.acceptInvitation.mockReset()
-  mocks.checkAuth.mockReset().mockResolvedValue({
-    status: 'authenticated',
-    me: { id: 'user-1', email: 'member@example.invalid' },
-  })
-  mocks.routerReplace.mockReset()
   mocks.setupAcceptedInvitationPasswordWithToken.mockReset().mockResolvedValue({
     ...acceptedMemberInvitation,
     passwordPending: false,
@@ -88,14 +84,15 @@ beforeEach(() => {
   mocks.setupInvitationPasswordWithToken.mockReset().mockResolvedValue({
     ...passwordReset,
     status: 'accepted',
+    passwordPending: false,
     passwordUpdated: true,
   })
 })
 
 afterEach(cleanup)
 
-describe('InvitationClient verified password recovery', () => {
-  it('navigates to the authenticated home after reset completes', async () => {
+describe('InvitationClient guided password reauthentication', () => {
+  it('moves a completed reset to the password-updated screen with a login link', async () => {
     render(
       <InvitationClient
         invitationToken="verified-reset-proof"
@@ -107,83 +104,18 @@ describe('InvitationClient verified password recovery', () => {
     fillPassword()
     fireEvent.click(screen.getByRole('button', { name: 'Reset password' }))
 
-    await waitFor(() => expect(mocks.routerReplace).toHaveBeenCalledWith(PROFILE_ROUTES.home))
-    expect(mocks.checkAuth).toHaveBeenCalledOnce()
-    expect(mocks.checkAuth.mock.invocationCallOrder[0]).toBeLessThan(
-      mocks.routerReplace.mock.invocationCallOrder[0]
-    )
-    expect(mocks.acceptInvitation).not.toHaveBeenCalled()
+    await waitFor(() => expectPasswordUpdatedScreen(passwordReset.email))
     expect(mocks.setupInvitationPasswordWithToken).toHaveBeenCalledWith(
       'verified-reset-proof',
-      'member@example.invalid',
-      'reset-1',
+      passwordReset.email,
+      passwordReset.id,
       'new-synthetic-password'
     )
+    expect(mocks.acceptInvitation).not.toHaveBeenCalled()
+    expect(mocks.setupAcceptedInvitationPasswordWithToken).not.toHaveBeenCalled()
   })
 
-  it('keeps a committed reset retryable when session hydration fails, without resubmitting it', async () => {
-    mocks.checkAuth
-      .mockReset()
-      .mockResolvedValueOnce({ status: 'unavailable' })
-      .mockResolvedValueOnce({
-        status: 'authenticated',
-        me: { id: 'user-1', email: 'member@example.invalid' },
-      })
-    render(
-      <InvitationClient
-        invitationToken="verified-reset-proof"
-        initialInvitation={passwordReset}
-        initialError=""
-      />
-    )
-
-    fillPassword()
-    fireEvent.click(screen.getByRole('button', { name: 'Reset password' }))
-
-    expect(
-      await screen.findByText(
-        'Your password was updated, but we could not verify your account session. Try again.'
-      )
-    ).toBeTruthy()
-    expect(mocks.routerReplace).not.toHaveBeenCalled()
-    expect(mocks.setupInvitationPasswordWithToken).toHaveBeenCalledOnce()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Retry account session check' }))
-
-    await waitFor(() => expect(mocks.routerReplace).toHaveBeenCalledWith(PROFILE_ROUTES.home))
-    expect(mocks.checkAuth).toHaveBeenCalledTimes(2)
-    expect(mocks.setupInvitationPasswordWithToken).toHaveBeenCalledOnce()
-  })
-
-  it('does not navigate when hydrated identity differs from the recovered member', async () => {
-    mocks.checkAuth.mockResolvedValueOnce({
-      status: 'authenticated',
-      me: { id: 'different-user', email: 'other@example.invalid' },
-    })
-    render(
-      <InvitationClient
-        invitationToken="verified-reset-proof"
-        initialInvitation={passwordReset}
-        initialError=""
-      />
-    )
-
-    fillPassword()
-    fireEvent.click(screen.getByRole('button', { name: 'Reset password' }))
-
-    expect(
-      await screen.findByText(
-        'Your password was updated, but the signed-in account does not match this recovery link.'
-      )
-    ).toBeTruthy()
-    expect(mocks.routerReplace).not.toHaveBeenCalled()
-    expect(mocks.setupInvitationPasswordWithToken).toHaveBeenCalledOnce()
-  })
-
-  it('keeps member invitation password setup on its existing page flow', async () => {
-    mocks.setupInvitationPasswordWithToken.mockRejectedValue(
-      new ProfileApiError(409, 'invitation_not_pending', '409 Conflict - invitation_not_pending')
-    )
+  it('moves a completed member invitation password setup to the password-updated screen', async () => {
     render(
       <InvitationClient
         invitationToken="member-invitation-proof"
@@ -195,18 +127,17 @@ describe('InvitationClient verified password recovery', () => {
     fillPassword()
     fireEvent.click(screen.getByRole('button', { name: 'Set password and continue' }))
 
-    await waitFor(() => expect(screen.getByText('You are now registered with Evenfire.')))
-    expect(mocks.routerReplace).not.toHaveBeenCalled()
+    await waitFor(() => expectPasswordUpdatedScreen(acceptedMemberInvitation.email))
     expect(mocks.setupAcceptedInvitationPasswordWithToken).toHaveBeenCalledWith(
       'member-invitation-proof',
-      'member@example.invalid',
-      'reset-1',
+      acceptedMemberInvitation.email,
+      acceptedMemberInvitation.id,
       'new-synthetic-password'
     )
     expect(mocks.setupInvitationPasswordWithToken).not.toHaveBeenCalled()
   })
 
-  it('keeps admin desktop password setup on the ordinary invitation operation', async () => {
+  it('moves a completed admin desktop password setup to the password-updated screen', async () => {
     mocks.setupAcceptedInvitationPasswordWithToken.mockResolvedValue({
       ...acceptedAdminDesktopInvitation,
       passwordPending: false,
@@ -223,11 +154,11 @@ describe('InvitationClient verified password recovery', () => {
     fillPassword()
     fireEvent.click(screen.getByRole('button', { name: 'Set password and continue' }))
 
-    await waitFor(() => expect(screen.getByText('You are now registered with Evenfire.')))
+    await waitFor(() => expectPasswordUpdatedScreen(acceptedAdminDesktopInvitation.email))
     expect(mocks.setupAcceptedInvitationPasswordWithToken).toHaveBeenCalledWith(
       'admin-invitation-proof',
-      'admin@example.invalid',
-      'admin-invite-1',
+      acceptedAdminDesktopInvitation.email,
+      acceptedAdminDesktopInvitation.id,
       'new-synthetic-password'
     )
     expect(mocks.setupInvitationPasswordWithToken).not.toHaveBeenCalled()
@@ -252,10 +183,9 @@ describe('InvitationClient verified password recovery', () => {
       await screen.findByText(
         'Account recovery is temporarily busy. Please wait a moment and try again.'
       )
-    ).toBeTruthy()
+    ).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Reset password' })).toBeEnabled()
-    expect(mocks.checkAuth).not.toHaveBeenCalled()
-    expect(mocks.routerReplace).not.toHaveBeenCalled()
+    expect(screen.queryByRole('heading', { name: 'Password updated' })).toBeNull()
   })
 
   it('shows a recovery-link error instead of blaming the new password', async () => {
@@ -273,9 +203,8 @@ describe('InvitationClient verified password recovery', () => {
     fillPassword()
     fireEvent.click(screen.getByRole('button', { name: 'Reset password' }))
 
-    expect(await screen.findByText('This recovery link is invalid or expired.')).toBeTruthy()
-    expect(mocks.checkAuth).not.toHaveBeenCalled()
-    expect(mocks.routerReplace).not.toHaveBeenCalled()
+    expect(await screen.findByText('This recovery link is invalid or expired.')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Password updated' })).toBeNull()
   })
 
   it('does not resubmit a reset proof after an ambiguous recovery outcome', async () => {
@@ -302,17 +231,15 @@ describe('InvitationClient verified password recovery', () => {
         'We could not confirm whether your password change completed. Try signing in with the new password. If that does not work, request a new reset link.',
         { exact: true }
       )
-    ).toBeTruthy()
+    ).toBeInTheDocument()
     expect(screen.queryByLabelText('Password')).toBeNull()
     expect(screen.queryByRole('button', { name: 'Reset password' })).toBeNull()
     expect(screen.getByRole('link', { name: 'Try signing in' }).getAttribute('href')).toBe(
-      PROFILE_ROUTES.login({ email: 'member@example.invalid' })
+      PROFILE_ROUTES.login({ email: passwordReset.email })
     )
     expect(
       screen.getByRole('link', { name: 'Request a new recovery link' }).getAttribute('href')
-    ).toBe(PROFILE_ROUTES.forgotPassword({ email: 'member@example.invalid' }))
+    ).toBe(PROFILE_ROUTES.forgotPassword({ email: passwordReset.email }))
     expect(mocks.setupInvitationPasswordWithToken).toHaveBeenCalledOnce()
-    expect(mocks.checkAuth).not.toHaveBeenCalled()
-    expect(mocks.routerReplace).not.toHaveBeenCalled()
   })
 })

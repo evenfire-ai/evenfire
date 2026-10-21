@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { AuthExpiredError, apiGet, loginWithPassword, logoutProfileUI } from '@lib/api'
+import {
+  AuthExpiredError,
+  apiGet,
+  clearUnconfirmedLogout,
+  loginWithPassword,
+  logoutProfileUI,
+} from '@lib/api'
 
 describe('Profile logout client boundary', () => {
   beforeEach(() => {
@@ -46,5 +52,27 @@ describe('Profile logout client boundary', () => {
     await expect(apiGet('/api/v1/me')).resolves.toEqual({ id: 'user-1' })
 
     expect(vi.mocked(fetch).mock.calls[2]?.[1]?.credentials).toBe('include')
+  })
+
+  it('clears the in-memory and stored fence on the recovery path', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response('', { status: 503 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: 'user-1' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      )
+
+    await expect(logoutProfileUI()).resolves.toEqual({ revocationConfirmed: false })
+    expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBe('true')
+    await expect(apiGet('/api/v1/me')).rejects.toBeInstanceOf(AuthExpiredError)
+    expect(fetch).toHaveBeenCalledOnce()
+
+    clearUnconfirmedLogout()
+
+    expect(window.localStorage.getItem('profile_logout_unconfirmed')).toBeNull()
+    await expect(apiGet('/api/v1/me')).resolves.toEqual({ id: 'user-1' })
+    expect(fetch).toHaveBeenCalledTimes(2)
   })
 })

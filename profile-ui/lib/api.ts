@@ -57,7 +57,12 @@ function markLogoutUnconfirmed(): void {
   }
 }
 
-function clearUnconfirmedLogout(): void {
+/**
+ * Clears the logout fence. A recovery link is a fresh sign-in path: when a
+ * previous logout could not confirm revocation, the fence would otherwise
+ * block the recovery form before it reaches the backend.
+ */
+export function clearUnconfirmedLogout(): void {
   if (typeof window === 'undefined') return
   logoutUnconfirmedInMemory = false
   try {

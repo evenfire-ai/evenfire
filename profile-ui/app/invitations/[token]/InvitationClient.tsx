@@ -9,13 +9,11 @@ import {
   useRef,
   useState,
 } from 'react'
-import { useRouter } from 'next/navigation'
-import { useAuth } from '@components/AuthContext'
 import { PROFILE_ROUTES } from '@constants/routes'
 import {
   ProfileApiError,
   acceptInvitation,
-  getEvenfireDownloadUrl,
+  clearUnconfirmedLogout,
   setupAcceptedInvitationPasswordWithToken,
   setupInvitationPasswordWithToken,
 } from '@lib/api'
@@ -29,14 +27,7 @@ import type { InvitationPreview } from '@/app/types/api'
 import { InvitationActionPanel } from './InvitationActionPanel'
 import type { InvitationClientProps } from './types'
 
-type RecoveryPhase =
-  | { state: 'editing' }
-  | { state: 'submitting' }
-  | { state: 'checking_session' }
-  | { state: 'committed' }
-  | { state: 'session_unverified' }
-  | { state: 'outcome_unknown' }
-  | { state: 'authenticated' }
+type PasswordPhase = 'editing' | 'submitting' | 'updated' | 'outcome_unknown'
 
 function statusForInvitation(invitation: InvitationPreview): string {
   if (invitation.purpose === 'password_reset') {
@@ -95,8 +86,6 @@ export function InvitationClient({
   initialInvitation,
   initialError,
 }: InvitationClientProps) {
-  const router = useRouter()
-  const { checkAuth } = useAuth()
   const [invitation, setInvitation] = useState<InvitationPreview | null>(initialInvitation)
   const [error, setError] = useState(initialError)
   const [status, setStatus] = useState(() =>
@@ -106,7 +95,7 @@ export function InvitationClient({
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [submitting, setSubmitting] = useState<'accept' | 'password' | null>(null)
-  const [recoveryPhase, setRecoveryPhase] = useState<RecoveryPhase>({ state: 'editing' })
+  const [passwordPhase, setPasswordPhase] = useState<PasswordPhase>('editing')
   const actionInFlightRef = useRef(false)
 
   useEffect(() => {
@@ -121,8 +110,14 @@ export function InvitationClient({
   }, [initialInvitation, initialError])
 
   useEffect(() => {
-    setRecoveryPhase({ state: 'editing' })
+    setPasswordPhase('editing')
   }, [invitationToken])
+
+  useEffect(() => {
+    // A recovery link is a fresh sign-in path. A previous logout that could not
+    // confirm revocation leaves a fence that would otherwise block this form.
+    if (initialInvitation?.purpose === 'password_reset') clearUnconfirmedLogout()
+  }, [initialInvitation])
 
   const invitationExpired = useMemo(() => {
     if (!invitation || invitation.status !== 'pending') return false
@@ -137,7 +132,6 @@ export function InvitationClient({
       : `This invitation will expire in ${remaining}.`
   }, [invitation, now])
 
-  const downloadUrl = getEvenfireDownloadUrl()
   const isPasswordReset = invitation?.purpose === 'password_reset'
   const teamLabel = invitation
     ? buildInvitationTeamsLabel(invitation.teams, invitation.teamName)
@@ -156,12 +150,30 @@ export function InvitationClient({
     email: invitation?.email.trim().toLowerCase(),
   })
   const busy = submitting !== null
-  const recoveryNeedsSessionCheck =
-    isPasswordReset &&
-    ['committed', 'checking_session', 'session_unverified', 'authenticated'].includes(
-      recoveryPhase.state
-    )
-  const recoveryOutcomeUnknown = isPasswordReset && recoveryPhase.state === 'outcome_unknown'
+  const passwordUpdated = passwordPhase === 'updated'
+  const recoveryOutcomeUnknown = isPasswordReset && passwordPhase === 'outcome_unknown'
+  const invitationUsed = Boolean(
+    invitation && invitation.status === 'accepted' && !invitation.passwordPending
+  )
+  const showPasswordSetup = Boolean(
+    invitation &&
+    !passwordUpdated &&
+    !recoveryOutcomeUnknown &&
+    !invitationUsed &&
+    !invitationExpired &&
+    ((isPasswordReset && invitation.status === 'pending') ||
+      (invitation.status === 'accepted' && invitation.passwordPending))
+  )
+  const pageTitle = passwordUpdated
+    ? 'Password updated'
+    : isPasswordReset
+      ? 'Reset password'
+      : buildInvitationHeading(invitation?.teamName)
+  const pageStatus = passwordUpdated
+    ? 'Your password has been updated.'
+    : invitationUsed
+      ? 'This invitation has already been used.'
+      : status || (error ? 'We could not open this invitation.' : 'Invitation loaded.')
 
   function friendlyInvitationError(value: unknown, isRecovery = false): string {
     if (!(value instanceof Error)) return 'Failed to update invitation.'
@@ -258,54 +270,13 @@ export function InvitationClient({
     void handleAccept()
   }
 
-  async function verifyRecoveredSession(expectedUserId: string) {
-    setRecoveryPhase({ state: 'checking_session' })
-    setError('')
-    try {
-      const result = await checkAuth()
-      if (result.status === 'authenticated') {
-        if (result.me.id === expectedUserId) {
-          setRecoveryPhase({ state: 'authenticated' })
-          router.replace(PROFILE_ROUTES.home)
-          return
-        }
-        setRecoveryPhase({ state: 'session_unverified' })
-        setError(
-          'Your password was updated, but the signed-in account does not match this recovery link.'
-        )
-        return
-      }
-      setRecoveryPhase({ state: 'session_unverified' })
-      setError(
-        'Your password was updated, but we could not verify your account session. Try again.'
-      )
-    } catch {
-      setRecoveryPhase({ state: 'session_unverified' })
-      setError(
-        'Your password was updated, but we could not verify your account session. Try again.'
-      )
-    }
-  }
-
-  async function retryRecoveredSession() {
-    if (
-      (recoveryPhase.state !== 'committed' &&
-        recoveryPhase.state !== 'session_unverified' &&
-        recoveryPhase.state !== 'authenticated') ||
-      !invitation?.userId ||
-      busy
-    ) {
-      return
-    }
-    await verifyRecoveredSession(invitation.userId)
-  }
-
   async function handlePasswordSubmit() {
     if (
       !invitation ||
       busy ||
       actionInFlightRef.current ||
-      (isPasswordReset && recoveryPhase.state !== 'editing')
+      passwordPhase === 'updated' ||
+      passwordPhase === 'outcome_unknown'
     ) {
       return
     }
@@ -321,48 +292,28 @@ export function InvitationClient({
     }
     actionInFlightRef.current = true
     setSubmitting('password')
-    if (isPasswordReset) setRecoveryPhase({ state: 'submitting' })
+    setPasswordPhase('submitting')
     try {
       const setupPassword = isPasswordReset
         ? setupInvitationPasswordWithToken
         : setupAcceptedInvitationPasswordWithToken
-      const response = await setupPassword(
-        invitationToken,
-        invitation.email,
-        invitation.id,
-        password
-      )
-      if (isPasswordReset) {
-        setRecoveryPhase({ state: 'committed' })
-        setStatus('Your password has been updated.')
-        setPassword('')
-        setConfirmPassword('')
-        if (!invitation.userId || response.userId !== invitation.userId) {
-          setRecoveryPhase({ state: 'session_unverified' })
-          setError(
-            'Your password was updated, but the signed-in account does not match this recovery link.'
-          )
-          return
-        }
-        await verifyRecoveredSession(invitation.userId)
-        return
-      }
-      applyInvitationUpdate({
-        ...invitation,
-        ...response,
-        status: response.status || 'accepted',
-        passwordPending: false,
-      })
+      await setupPassword(invitationToken, invitation.email, invitation.id, password)
+      // The backend issues no session from password setup. The screen must send
+      // the person to the ordinary login instead of hydrating a recovery session.
+      setPasswordPhase('updated')
+      setStatus('Your password has been updated.')
+      setPassword('')
+      setConfirmPassword('')
     } catch (nextError) {
       if (isPasswordReset && isAmbiguousRecoveryOutcome(nextError)) {
-        setRecoveryPhase({ state: 'outcome_unknown' })
+        setPasswordPhase('outcome_unknown')
         setPassword('')
         setConfirmPassword('')
         setError(
           'We could not confirm whether your password change completed. Try signing in with the new password. If that does not work, request a new reset link.'
         )
       } else {
-        if (isPasswordReset) setRecoveryPhase({ state: 'editing' })
+        setPasswordPhase('editing')
         setError(friendlyInvitationError(nextError, isPasswordReset))
       }
     } finally {
@@ -390,12 +341,8 @@ export function InvitationClient({
       <section className="page-card">
         <div className="stack-tight">
           <p className="eyebrow">Evenfire Invitation</p>
-          <h1 className="page-title page-title--large">
-            {isPasswordReset ? 'Reset password' : buildInvitationHeading(invitation?.teamName)}
-          </h1>
-          <p className="body-copy">
-            {status || (error ? 'We could not open this invitation.' : 'Invitation loaded.')}
-          </p>
+          <h1 className="page-title page-title--large">{pageTitle}</h1>
+          <p className="body-copy">{pageStatus}</p>
         </div>
 
         {error ? (
@@ -439,22 +386,26 @@ export function InvitationClient({
           </div>
         ) : null}
 
-        {!invitation ? null : recoveryNeedsSessionCheck ? (
-          <InvitationActionPanel
-            mode="session-check"
-            disabled={busy || recoveryPhase.state === 'checking_session' || !invitation.userId}
-            checking={recoveryPhase.state === 'checking_session'}
-            onRetrySession={() => void retryRecoveredSession()}
-            loginHref={profileLoginHref}
-          />
-        ) : isPasswordReset && recoveryOutcomeUnknown ? (
+        {!invitation ? (
+          <InvitationActionPanel mode="link-error" loginHref={profileLoginHref} />
+        ) : passwordUpdated ? (
+          <InvitationActionPanel mode="password-updated" loginHref={profileLoginHref} />
+        ) : recoveryOutcomeUnknown ? (
           <InvitationActionPanel
             mode="outcome-unknown"
             loginHref={profileLoginHref}
             forgotPasswordHref={forgotPasswordHref}
           />
-        ) : (isPasswordReset && invitation.status === 'pending') ||
-          (invitation.status === 'accepted' && invitation.passwordPending) ? (
+        ) : invitationUsed ? (
+          <InvitationActionPanel
+            mode="used"
+            loginHref={profileLoginHref}
+            isPasswordReset={isPasswordReset}
+            forgotPasswordHref={forgotPasswordHref}
+          />
+        ) : invitationExpired ? (
+          <InvitationActionPanel mode="expired" loginHref={profileLoginHref} />
+        ) : showPasswordSetup ? (
           <InvitationActionPanel
             mode="password-setup"
             isPasswordReset={isPasswordReset}
@@ -467,14 +418,6 @@ export function InvitationClient({
             onPasswordKeyDown={handlePasswordKeyDown}
             onPasswordAction={handlePasswordAction}
           />
-        ) : invitation.status === 'accepted' ? (
-          <InvitationActionPanel
-            mode="accepted"
-            downloadUrl={downloadUrl}
-            loginHref={profileLoginHref}
-          />
-        ) : invitationExpired ? (
-          <InvitationActionPanel mode="expired" />
         ) : (
           <InvitationActionPanel
             mode="accept"
