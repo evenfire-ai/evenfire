@@ -6083,6 +6083,20 @@ export class AppService {
     )
   }
 
+  /**
+   * Reloads the document of the view `launchId` owns, in place: same view, same
+   * session cookie, same refresh loop, so nothing is minted. Enqueued
+   * synchronously like `openSandboxUi`, so it acts on the view the queue holds
+   * when it gets there; a launch that no longer owns the view reloads nothing.
+   */
+  reloadSandboxUi(options: { launchId: string }): Promise<void> {
+    return this.enqueueSandboxUiLifecycle(async () => {
+      const driver = await import('./sandboxUiDriver.js')
+      if (driver.getActiveSandboxUi()?.launchId !== options.launchId) return
+      driver.reloadActiveSandboxUiView()
+    })
+  }
+
   private async teardownSandboxUiView(
     reason: import('./sandboxUiDriver.js').SandboxUiReleaseReason,
     onlyLaunchId?: string

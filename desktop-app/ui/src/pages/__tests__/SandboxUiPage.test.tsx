@@ -348,7 +348,7 @@ describe('SandboxUiPage', () => {
     expect(screen.getByRole('button', { name: 'Copy current app link' })).toBeTruthy()
   })
 
-  it('asks its owner to relaunch on Refresh, only once the app is mounted', async () => {
+  it('asks its owner to refresh on Refresh, only once the app is mounted', async () => {
     sandboxUi.listApps.mockResolvedValue({
       apps: [
         {
@@ -368,8 +368,9 @@ describe('SandboxUiPage', () => {
           finishOpen = resolve
         })
     )
+    const onRefresh = vi.fn()
     const onRelaunch = vi.fn()
-    render(<SandboxUiPage onRelaunch={onRelaunch} />)
+    render(<SandboxUiPage onRefresh={onRefresh} onRelaunch={onRelaunch} />)
     fireEvent.click(await screen.findByRole('button', { name: 'Open Sales CRM' }))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledOnce())
     // While the view is still opening there is nothing to refresh.
@@ -378,8 +379,9 @@ describe('SandboxUiPage', () => {
     await act(async () => finishOpen())
     fireEvent.click(await screen.findByRole('button', { name: 'Refresh app content' }))
 
-    expect(onRelaunch).toHaveBeenCalledOnce()
-    // The relaunch is the owner's: the page itself neither reloads nor closes.
+    expect(onRefresh).toHaveBeenCalledOnce()
+    expect(onRelaunch).not.toHaveBeenCalled()
+    // The refresh is the owner's: the page itself neither reloads nor closes.
     expect(sandboxUi.close).not.toHaveBeenCalled()
   })
 

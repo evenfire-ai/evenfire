@@ -2075,7 +2075,8 @@ export function registerIpcHandlers(service: AppService): void {
   // `sandboxUi:open` and `sandboxUi:close` must reach the AppService queue with
   // no `await` before it, in both handlers: a close the renderer sends right
   // after an open for the same launch would otherwise be enqueued first and
-  // miss the view the open then mounts.
+  // miss the view the open then mounts. `sandboxUi:reload` follows the same
+  // rule, so main serves it in the order the renderer sent it.
   ipcMain.handle(
     'sandboxUi:open',
     async (
@@ -2142,6 +2143,14 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     const launchId = parseSandboxUiLaunchId(payload?.launchId)
     await service.closeSandboxUi({ launchId })
+  })
+
+  // Same launch-id contract as close: a reload that names no launch must not
+  // degrade into reloading whatever view is live.
+  ipcMain.handle('sandboxUi:reload', async (event, payload?: { launchId?: unknown } | null) => {
+    assertTrustedSender(event)
+    const launchId = parseSandboxUiLaunchId(payload?.launchId)
+    await service.reloadSandboxUi({ launchId })
   })
 
   ipcMain.handle('sandboxUi:copyDeepLink', async (event, payload: { teamId?: unknown }) => {

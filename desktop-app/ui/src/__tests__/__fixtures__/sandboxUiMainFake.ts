@@ -24,10 +24,10 @@ import type { SandboxUiReleasedEvent } from '../../../../src/types'
 /**
  * The trusted renderer's `window.clerum.sandboxUi` lifecycle bridge, backed by
  * the REAL main process: AppService's lifecycle queue, the sandbox-ui driver,
- * the session refresh loop and the `sandboxUi:open` / `sandboxUi:close`
- * handlers of ipc.ts, on the Electron fakes. Nothing here decides what main
- * reports: every `released`, every open outcome and every location comes from
- * that code. The helpers only act on the world (rpc-proxy's answer to a mint,
+ * the session refresh loop and the `sandboxUi:open` / `sandboxUi:close` /
+ * `sandboxUi:reload` handlers of ipc.ts, on the Electron fakes. Nothing here
+ * decides what main reports: every `released`, every open outcome and every
+ * location comes from that code. The helpers only act on the world (rpc-proxy's answer to a mint,
  * the embed's renderer crashing, the user navigating the app, time passing).
  *
  * The wire is two FIFO lanes, as IPC is: a call reaches main one macrotask
@@ -153,6 +153,19 @@ export function createSandboxUiMainFake() {
   // The document a view asked for commits and loads a task later, as a real
   // page does; until then the view stands for the route it was asked to show.
   function onLoad(webContents: FakeWebContents): void {
+    // A reload commits the document the view is showing again, a task later.
+    webContents.reloadIgnoringCache.mockImplementation(() => {
+      inFlight += 1
+      void macrotask()
+        .then(() => {
+          if (webContents.destroyed || main.dead || !webContents.currentUrl) return
+          webContents.emit('did-navigate', {}, webContents.currentUrl, 200, '')
+          webContents.emit('did-finish-load')
+        })
+        .finally(() => {
+          inFlight -= 1
+        })
+    })
     if (crashNextMount) {
       crashNextMount = false
       webContents.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 139 })
@@ -203,6 +216,7 @@ export function createSandboxUiMainFake() {
 
   const open = vi.fn((request: SandboxUiOpenCall) => send('sandboxUi:open', request))
   const close = vi.fn((request: { launchId: string }) => send('sandboxUi:close', request))
+  const reload = vi.fn((request: { launchId: string }) => send('sandboxUi:reload', request))
 
   function liveView() {
     const active = getActiveSandboxUi()
@@ -217,6 +231,7 @@ export function createSandboxUiMainFake() {
     bridge: {
       open,
       close,
+      reload,
       onReleased: vi.fn((listener: (event: SandboxUiReleasedEvent) => void) => {
         releasedListeners.add(listener)
         return () => releasedListeners.delete(listener)
@@ -239,6 +254,10 @@ export function createSandboxUiMainFake() {
       const call = open.mock.calls[index]
       if (!call) throw new Error(`no open call #${index}`)
       return call[0]
+    },
+    /** How many times main reloaded the document of the view it has mounted right now. */
+    liveReloads(): number {
+      return liveView()?.view.webContents.reloadIgnoringCache.mock.calls.length ?? 0
     },
     /** The view main has mounted right now, and the route it stands for. */
     live(): { launchId: string; appRef: string; routePath?: string } | null {

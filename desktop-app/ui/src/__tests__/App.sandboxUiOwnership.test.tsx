@@ -616,34 +616,82 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     expect(lastLaunch().type).toBe('intent')
   })
 
-  it('relaunches from Refresh: the live view closes first and the new one opens where it stood', async () => {
+  it('reloads a healthy view in place from Refresh: same view, same route, no relaunch', async () => {
     await renderApp()
     await openFromSidebar(ALPHA, 1)
     const first = main.openCall(0).launchId
     main.navigate('/tickets/7')
 
     fireEvent.click(screen.getByRole('button', { name: 'Refresh app content' }))
-    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
+    await act(() => main.settle())
 
-    expect(lastLaunch()).toMatchObject({
-      type: 'relaunch',
-      launch: { tabId: tabOf(ALPHA!.appRef)!.id },
-    })
-    expect(sandboxUi.close).toHaveBeenCalledWith({ launchId: first })
-    expect(sandboxUi.close.mock.invocationCallOrder[0]!).toBeLessThan(
-      sandboxUi.open.mock.invocationCallOrder[1]!
-    )
-    expect(main.openCall(1).routePath).toBe('/tickets/7')
-    expect(await screen.findByRole('button', { name: 'Refresh app content' })).toBeTruthy()
+    expect(main.liveReloads()).toBe(1)
+    expect(main.live()).toEqual({ launchId: first, appRef: ALPHA!.appRef, routePath: '/tickets/7' })
+    expect(sandboxUi.open).toHaveBeenCalledTimes(1)
+    expect(sandboxUi.close).not.toHaveBeenCalled()
+    expect(main.reported('sandboxUi:released')).toEqual([])
+    expect(owner()?.launchId).toBe(first)
+    expect(screen.getByRole('button', { name: 'Refresh app content' })).toBeTruthy()
   })
 
-  it('relaunches from the app.refresh command without flushing inside an effect', async () => {
+  it('reloads a healthy view in place from the app.refresh command', async () => {
     await renderApp()
     await openFromSidebar(ALPHA, 1)
+    const first = main.openCall(0).launchId
 
     await shortcut('app.refresh')
-    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
+    await act(() => main.settle())
+
+    expect(main.liveReloads()).toBe(1)
+    expect(main.live()?.launchId).toBe(first)
+    expect(sandboxUi.open).toHaveBeenCalledTimes(1)
+    expect(sandboxUi.close).not.toHaveBeenCalled()
+    expect(flushSyncErrors).toEqual([])
+  })
+
+  // Refresh is offered while the last render showed a mounted view, but the
+  // machine can move on before React renders again. Refresh then reopens the
+  // tab: it never reloads a view that is not mounted, gone or still opening.
+  it('relaunches from app.refresh when the view ended before React rendered it', async () => {
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
+    const first = main.openCall(0).launchId
+
+    await act(async () => {
+      void main.crash()
+      const release = main.reported('sandboxUi:released').at(-1) as Parameters<
+        EmbedOwnershipMachine['onReleased']
+      >[0]
+      expect(release).toMatchObject({ launchId: first, reason: 'crashed' })
+      machineHarness.machine!.onReleased(release)
+      shortcutCommandCb?.('app.refresh', 'host')
+    })
+    await act(() => main.settle())
+
+    expect(sandboxUi.reload).not.toHaveBeenCalled()
     expect(lastLaunch().type).toBe('relaunch')
+    expect(main.live()?.launchId).toBe(main.openCall(1).launchId)
+  })
+
+  it('relaunches from app.refresh while the relaunch before it is still opening', async () => {
+    await renderApp()
+    await openFromSidebar(ALPHA, 1)
+    await act(() => main.refreshFailed(new Error('mint failed')))
+    const retry = await screen.findByRole('button', { name: 'Retry' })
+
+    act(() => {
+      fireEvent.click(retry)
+      shortcutCommandCb?.('app.refresh', 'host')
+    })
+    await act(() => main.settle())
+
+    expect(sandboxUi.reload).not.toHaveBeenCalled()
+    expect(machineHarness.launches.slice(-2).map(entry => entry.type)).toEqual([
+      'relaunch',
+      'relaunch',
+    ])
+    expect(main.live()?.launchId).toBe(machineHarness.launches.at(-1)!.launch.launchId)
+    expect(main.liveReloads()).toBe(0)
   })
 
   it("shows the live view's session failure with Retry, which relaunches it", async () => {
@@ -667,8 +715,8 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     await openFromSidebar(ALPHA, 1)
     const first = main.openCall(0).launchId
 
-    // The replaced view's loop gives up before the close for it reaches main.
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh app content' }))
+    // The replaced view's loop gives up before the open replacing it reaches main.
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(BETA!))
     await act(() => main.refreshFailed(new Error('stale failure')))
     await act(() => main.settle())
 
@@ -699,16 +747,17 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     await act(() => main.retitle('Alpha Inbox'))
     expect(screen.getByRole('button', { name: 'Alpha Inbox', pressed: true })).toBeTruthy()
 
-    // The view a relaunch replaces retitles itself before its close reaches main.
+    // The view an open replaces retitles itself before that open reaches main.
     const first = main.openCall(0).launchId
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh app content' }))
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(BETA!))
     await act(() => main.retitle('Stale'))
     await act(() => main.settle())
 
     expect(main.reported('sandboxUi:titleChanged')).toContainEqual(
       expect.objectContaining({ launchId: first, title: 'Stale' })
     )
-    expect(screen.getByRole('button', { name: 'Alpha Inbox', pressed: true })).toBeTruthy()
+    expect(main.live()?.launchId).toBe(main.openCall(1).launchId)
+    expect(screen.getByRole('button', { name: 'Alpha Inbox', pressed: false })).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Stale' })).toBeNull()
   })
 

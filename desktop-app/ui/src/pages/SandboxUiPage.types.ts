@@ -28,7 +28,9 @@ export type SandboxUiPageProps = {
   // The picker grid hands the chosen app to the owner instead of opening it
   // itself, so every embed is opened against a workspace tab that owns it.
   onLaunchApp: (app: ActiveSandboxUiApp) => void
-  /** Tears the active tab's view down and opens a fresh one (Refresh, Reopen, Retry). */
+  /** Refreshes the content of the active tab's app (Refresh). */
+  onRefresh?: () => void
+  /** Tears the active tab's view down and opens a fresh one (Reopen, Retry). */
   onRelaunch?: () => void
   onEmbedBoundsApplied?: () => void
   onEmbedSlotTopChange?: (topPx: number) => void

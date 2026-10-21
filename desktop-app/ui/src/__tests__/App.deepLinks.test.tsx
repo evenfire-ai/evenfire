@@ -801,17 +801,19 @@ describe('App deep-link orchestration', () => {
     await waitForMounted()
     expect(commandPaletteHarness.props?.isEligible('app.refresh')).toBe(true)
 
-    // Refresh relaunches the app: the live view closes and a new one opens.
+    // Refresh reloads the live view in place: no close, no new view.
     const first = main.openCall(0).launchId
     await act(async () => commandPaletteHarness.props?.onExecute('app.refresh'))
-    await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(2))
-    expect(closeSandboxUi()).toHaveBeenCalledWith({ launchId: first })
-    await waitForMounted()
+    await act(() => main.settle())
+    expect(main.liveReloads()).toBe(1)
+    expect(main.live()?.launchId).toBe(first)
+    expect(openSandboxUi()).toHaveBeenCalledTimes(1)
+    expect(closeSandboxUi()).not.toHaveBeenCalled()
 
     act(() => emitCommand?.('commands.open'))
     await act(async () => commandPaletteHarness.props?.onExecute('app.backToApps'))
     await waitFor(() => expect(embedState().owner).toBeNull())
-    expect(closeSandboxUi()).toHaveBeenLastCalledWith({ launchId: main.openCall(1).launchId })
+    expect(closeSandboxUi()).toHaveBeenLastCalledWith({ launchId: first })
   })
 
   it('resets controlled command requests with the authenticated shell lifetime', async () => {

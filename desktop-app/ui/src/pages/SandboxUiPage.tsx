@@ -218,6 +218,7 @@ export function SandboxUiPage({
   localSearchRequestId = 0,
   titlebarLeadingContainer = null,
   onLaunchApp,
+  onRefresh,
   onRelaunch,
   onEmbedBoundsApplied,
   onEmbedSlotTopChange,
@@ -479,7 +480,7 @@ export function SandboxUiPage({
               <TitlebarLeadingAction
                 className="sandbox-ui-refresh-btn"
                 label="Refresh app content"
-                onClick={() => onRelaunch?.()}
+                onClick={() => onRefresh?.()}
               >
                 <IconRefresh />
               </TitlebarLeadingAction>

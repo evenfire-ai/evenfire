@@ -598,13 +598,30 @@ export function App() {
     [embed, launchForActiveAppTab, setWorkspaceTabs, vm.clearAppsPicker]
   )
 
-  // Refresh, Reopen after a crash and Retry after a session failure: tear the
-  // active tab's view down, healthy or not, and open a fresh one (new view, new
+  // Reopen after a crash and Retry after a session failure: tear the active
+  // tab's view down, healthy or not, and open a fresh one (new view, new
   // session) where the old one stood. It never comes from a re-click, which
   // leaves a live view alone.
   const relaunchActiveApp = React.useCallback(() => {
     activateAndLaunch(state => state, undefined, { kind: 'activeTab', replace: true })
   }, [activateAndLaunch])
+
+  // Refresh reloads a mounted view in place, so the app keeps its session
+  // storage, history and full URL and nothing is minted. Read from the machine,
+  // not the last render: the view may have ended, or a relaunch may have taken
+  // the tab, since Refresh was offered. Without a mounted view there is nothing
+  // to reload, so the tab is relaunched instead.
+  const refreshActiveApp = React.useCallback(() => {
+    const state = embed.getSnapshot()
+    const owner = state.owner === null ? undefined : state.views.get(state.owner)
+    if (owner?.phase !== 'mounted') {
+      relaunchActiveApp()
+      return
+    }
+    void window.clerum.sandboxUi.reload({ launchId: owner.launchId }).catch(error => {
+      console.warn('[SandboxUI] Could not reload the app:', error)
+    })
+  }, [embed, relaunchActiveApp])
 
   // Load the CONTENT of a workspace tab once it is (about to be) active — the
   // universal reveal seam. It never selects the tab itself (the store already
@@ -2197,7 +2214,7 @@ export function App() {
         return
       }
       if (commandId === 'app.refresh') {
-        relaunchActiveApp()
+        refreshActiveApp()
         return
       }
       if (commandId === 'app.backToApps') {
@@ -2291,7 +2308,7 @@ export function App() {
       handleNewWorkspaceChatTab,
       handleSidebarNavSelect,
       openChatDrawer,
-      relaunchActiveApp,
+      refreshActiveApp,
       revealWorkspaceTab,
       sandboxUiMounted,
       vm.activeChatId,
@@ -3025,6 +3042,7 @@ export function App() {
                                     localSearchRequestId={sandboxLocalSearchRequestId}
                                     titlebarLeadingContainer={titlebarLeadingRoot}
                                     onLaunchApp={handleOpenSandboxUiApp}
+                                    onRefresh={refreshActiveApp}
                                     onRelaunch={relaunchActiveApp}
                                     onEmbedBoundsApplied={handleSandboxUiBoundsApplied}
                                     onEmbedSlotTopChange={setChatDrawerEmbedTop}

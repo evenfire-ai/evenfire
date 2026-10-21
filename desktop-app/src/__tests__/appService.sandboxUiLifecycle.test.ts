@@ -1773,3 +1773,132 @@ describe('sandbox-ui IPC close ordering and payloads', () => {
     ])
   })
 })
+
+// Refresh of a healthy view reloads its document in place: same view, same
+// session, same refresh loop. Only the launch that owns the view can reload it.
+describe('sandbox-ui IPC reload of the live view', () => {
+  type Sender = { id: number }
+
+  async function setupIpc() {
+    const service = makeService()
+    initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir })
+    electronMocks.ipcHandlers.clear()
+    electronMocks.windowsBySender.clear()
+    const { registerIpcHandlers } = await import('../ipc.js')
+    registerIpcHandlers(service)
+    const sender: Sender = { id: 1 }
+    const parentWindow = new FakeParentWindow()
+    electronMocks.windowsBySender.set(sender, parentWindow)
+    const invokeFrom = (frameUrl: string, channel: string, payload?: unknown) => {
+      const handler = electronMocks.ipcHandlers.get(channel)
+      if (!handler) throw new Error(`no IPC handler registered for ${channel}`)
+      return handler({ sender, senderFrame: { url: frameUrl } }, payload)
+    }
+    const invoke = (channel: string, payload?: unknown): Promise<unknown> =>
+      invokeFrom('file:///app/index.html', channel, payload)
+    const open = (launchId: string) =>
+      invoke('sandboxUi:open', {
+        recipeNs: 'sandbox-recipes',
+        recipeName: 'first-app',
+        defaultPath: '/',
+        bounds: { x: 0, y: 0, width: 400, height: 300 },
+        launchId,
+      })
+    const releasedSends = () =>
+      parentWindow.webContents.send.mock.calls.filter(
+        ([channel]) => channel === 'sandboxUi:released'
+      )
+    const reloads = () =>
+      electronMocks.views.map(view => view.webContents.reloadIgnoringCache.mock.calls.length)
+    return { service, parentWindow, invoke, invokeFrom, open, releasedSends, reloads }
+  }
+
+  it('reloads the view its launch owns without a new mint, a release or a new view', async () => {
+    const { invoke, open, releasedSends, reloads, parentWindow } = await setupIpc()
+    const launchId = crypto.randomUUID()
+    await open(launchId)
+    const live = getActiveSandboxUi()
+    fetchMock.mockClear()
+
+    await invoke('sandboxUi:reload', { launchId })
+
+    expect(reloads()).toEqual([1])
+    expect(getActiveSandboxUi()).toEqual(live)
+    expect(parentWindow.contentView.children).toEqual([electronMocks.views[0]])
+    expect(releasedSends()).toEqual([])
+    expect(mintCallsFor('first-app')).toBe(0)
+    // The session refresh loop of the view keeps running.
+    await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1_000)
+    expect(mintCallsFor('first-app')).toBe(1)
+  })
+
+  it('a reload naming a launch that no longer owns the view reloads nothing', async () => {
+    const { invoke, open, reloads } = await setupIpc()
+    const first = crypto.randomUUID()
+    const second = crypto.randomUUID()
+    await open(first)
+    await open(second)
+
+    await invoke('sandboxUi:reload', { launchId: first })
+
+    expect(getActiveSandboxUi()?.launchId).toBe(second)
+    expect(reloads()).toEqual([0, 0])
+  })
+
+  it('a reload sent right after its open reloads the view that open mounts', async () => {
+    const { invoke, open, reloads } = await setupIpc()
+    const launchId = crypto.randomUUID()
+
+    // Both invokes are dispatched in the same tick, in send order.
+    await Promise.all([open(launchId), invoke('sandboxUi:reload', { launchId })])
+
+    expect(getActiveSandboxUi()?.launchId).toBe(launchId)
+    expect(reloads()).toEqual([1])
+  })
+
+  it('a reload that reaches main after its view crashed or its session ended does nothing', async () => {
+    const { service, invoke, open, reloads } = await setupIpc()
+    const crashed = crypto.randomUUID()
+    await open(crashed)
+    electronMocks.views[0]!.webContents.emit(
+      'render-process-gone',
+      {},
+      { reason: 'crashed', exitCode: 139 }
+    )
+    await invoke('sandboxUi:reload', { launchId: crashed })
+
+    const loggedOut = crypto.randomUUID()
+    await open(loggedOut)
+    ;(service as unknown as { invalidateSandboxUiSession(): void }).invalidateSandboxUiSession()
+    await invoke('sandboxUi:reload', { launchId: loggedOut })
+
+    expect(getActiveSandboxUi()).toBeNull()
+    expect(reloads()).toEqual([0, 0])
+  })
+
+  it.each([undefined, null, {}, { launchId: '../x' }, { launchId: 'launch-1' }])(
+    'rejects a reload with payload %j without reloading the live view',
+    async payload => {
+      const { service, invoke, open, reloads } = await setupIpc()
+      await open(crypto.randomUUID())
+
+      await expect(invoke('sandboxUi:reload', payload)).rejects.toThrow(/launchId/)
+      await drainLifecycleQueue(service)
+
+      expect(reloads()).toEqual([0])
+    }
+  )
+
+  it('rejects a reload from an untrusted sender without reloading the live view', async () => {
+    const { service, invokeFrom, open, reloads } = await setupIpc()
+    const launchId = crypto.randomUUID()
+    await open(launchId)
+
+    await expect(
+      invokeFrom('https://evil.example/', 'sandboxUi:reload', { launchId })
+    ).rejects.toThrow(/Untrusted/)
+    await drainLifecycleQueue(service)
+
+    expect(reloads()).toEqual([0])
+  })
+})

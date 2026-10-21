@@ -774,6 +774,8 @@ declare global {
         }) => Promise<void>
         // Closes that launch's view only if it is still the live one.
         close: (args: { launchId: string }) => Promise<void>
+        // Reloads that launch's view in place only if it is still the live one.
+        reload: (args: { launchId: string }) => Promise<void>
         copyDeepLink: (teamId?: string) => Promise<{ url: string }>
         listPendingDeepLinks: () => Promise<{ links: SandboxUiDeepLinkEnvelope[] }>
         clearPendingDeepLinks: () => Promise<void>

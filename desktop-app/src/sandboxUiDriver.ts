@@ -1101,10 +1101,10 @@ export function reloadSandboxUiWebContents(
 }
 
 /**
- * Reload the active embed in place once its session refresh has re-minted the
- * cookie after the document came back 401. No-op when nothing is mounted or the
- * view was already torn down. The user-facing Refresh relaunches the view
- * instead, so it never comes through here.
+ * Reload the active embed in place, keeping its view, session and refresh loop.
+ * Used by the user-facing Refresh of a healthy view and by the session refresh
+ * once it has re-minted the cookie after the document came back 401. No-op when
+ * nothing is mounted or the view was already torn down.
  */
 export function reloadActiveSandboxUiView(): void {
   reloadSandboxUiWebContents(active?.view.webContents)

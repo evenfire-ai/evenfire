@@ -683,6 +683,8 @@ const clerum = Object.freeze({
     }) => ipcRenderer.invoke('sandboxUi:open', args),
     // Closes that launch's view only if it is still the live one.
     close: (args: { launchId: string }) => ipcRenderer.invoke('sandboxUi:close', args),
+    // Reloads that launch's view in place only if it is still the live one.
+    reload: (args: { launchId: string }) => ipcRenderer.invoke('sandboxUi:reload', args),
     copyDeepLink: (teamId?: string) => ipcRenderer.invoke('sandboxUi:copyDeepLink', { teamId }),
     listPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:listPendingDeepLinks'),
     clearPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:clearPendingDeepLinks'),
