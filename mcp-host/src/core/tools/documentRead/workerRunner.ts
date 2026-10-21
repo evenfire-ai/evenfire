@@ -5,13 +5,13 @@ import { serialize } from 'node:v8'
 import { logger } from '../../../logger'
 import {
   DOCUMENT_CGROUP_MARGIN_BYTES,
-  DOCUMENT_CHILD_VIRTUAL_RESERVE_BYTES,
+  childVirtualReserveBytes,
   documentCgroupSampler,
   documentCgroupWorkingSetBytes,
   effectiveDocumentMemoryCaps,
 } from './documentMemory'
 import { oomVictimMarker } from './oomScore'
-import { childVirtualDataBytes, residentMemorySampler } from './residentMemory'
+import { residentMemorySampler } from './residentMemory'
 import type {
   DocumentJob,
   DocumentJobFailure,
@@ -64,6 +64,54 @@ const hasStopReason = (message: Record<string, unknown>, stops: readonly string[
   message.next === undefined
     ? message.stoppedBy === undefined
     : typeof message.stoppedBy === 'string' && stops.includes(message.stoppedBy)
+
+/**
+ * The XLSX producer lists every row its returned window skipped, so the
+ * contract is checked as a whole: the declared count is exhaustive, no more
+ * rows are listed than returned, the numbers are strictly increasing and
+ * inside the window, and every listed row keeps an empty slot. The previous
+ * 20-entry cap is gone: a wide sheet may skip every row of a full window.
+ * `isXlsxSheet` separately requires the window to end at or before `lastRow`.
+ */
+function isSkippedRows(skippedRows: unknown, startRow: number, rows: readonly unknown[]): boolean {
+  if (!isRecord(skippedRows)) return false
+  const { count, first } = skippedRows
+  if (!isCount(count, 1) || !Array.isArray(first) || first.length === 0) return false
+  if (count !== first.length || first.length > rows.length) return false
+  let previous = 0
+  for (const row of first) {
+    if (!isCount(row, 1) || row <= previous) return false
+    if (row < startRow || row >= startRow + rows.length) return false
+    const slot = rows[row - startRow]
+    if (!Array.isArray(slot) || slot.length !== 0) return false
+    previous = row
+  }
+  return true
+}
+
+/** One XLSX sheet under the producer contract above. */
+function isXlsxSheet(sheet: unknown): boolean {
+  if (!isRecord(sheet)) return false
+  if (
+    typeof sheet.name !== 'string' ||
+    !isCount(sheet.startRow, 1) ||
+    typeof sheet.truncated !== 'boolean' ||
+    !isCount(sheet.lastRow) ||
+    !Array.isArray(sheet.rows)
+  ) {
+    return false
+  }
+  const startRow = sheet.startRow
+  const lastRow = sheet.lastRow
+  const rows = sheet.rows
+  if (rows.length > 0 && lastRow < startRow + rows.length - 1) return false
+  if (sheet.skippedRows !== undefined && !isSkippedRows(sheet.skippedRows, startRow, rows)) {
+    return false
+  }
+  return isArrayOf(rows, row =>
+    isArrayOf(row, cell => cell === null || ['string', 'number', 'boolean'].includes(typeof cell))
+  )
+}
 
 /**
  * The outcome contract the Tool relies on, checked at the process boundary so
@@ -128,32 +176,7 @@ function isJobOutcome(kind: DocumentJob['kind'], message: unknown): boolean {
       return (
         Array.isArray(message.sheetNames) &&
         isArrayOf(message.sheetNames, name => typeof name === 'string') &&
-        isArrayOf(
-          message.sheets,
-          sheet =>
-            isRecord(sheet) &&
-            typeof sheet.name === 'string' &&
-            isCount(sheet.startRow, 1) &&
-            typeof sheet.truncated === 'boolean' &&
-            isCount(sheet.lastRow) &&
-            Array.isArray(sheet.rows) &&
-            (sheet.skippedRows === undefined ||
-              (isRecord(sheet.skippedRows) &&
-                isCount(sheet.skippedRows.count, 1) &&
-                isNonEmptyArrayOf(sheet.skippedRows.first, row => isCount(row, 1)) &&
-                (sheet.skippedRows.first as unknown[]).length <= 20 &&
-                (sheet.skippedRows.first as number[]).every(
-                  row =>
-                    row >= (sheet.startRow as number) &&
-                    row < (sheet.startRow as number) + (sheet.rows as unknown[]).length
-                ))) &&
-            isArrayOf(sheet.rows, row =>
-              isArrayOf(
-                row,
-                cell => cell === null || ['string', 'number', 'boolean'].includes(typeof cell)
-              )
-            )
-        ) &&
+        isArrayOf(message.sheets, isXlsxSheet) &&
         (message.sheets as Array<{ rows: unknown[] }>).some(sheet => sheet.rows.length > 0) &&
         (message.next === undefined ||
           (isRecord(message.next) &&
@@ -210,9 +233,17 @@ export async function rlimitDataEnforced(
   }
 }
 
-/** RLIMIT_DATA in KiB: the resident cap plus the child's non-resident VmData. */
-export function dataLimitKiB(maxResidentBytes: number): number {
-  return Math.ceil((maxResidentBytes + DOCUMENT_CHILD_VIRTUAL_RESERVE_BYTES) / 1_024)
+/**
+ * RLIMIT_DATA in KiB: the resident cap plus the non-resident VmData measured
+ * for this architecture. A null reserve means the architecture was never
+ * calibrated; callers on Linux then refuse to spawn instead of guessing.
+ */
+export function dataLimitKiB(maxResidentBytes: number, arch: string = process.arch): number {
+  const reserve = childVirtualReserveBytes(arch)
+  if (reserve === null) {
+    throw new Error('Unsupported document reader virtual reserve architecture')
+  }
+  return Math.ceil((maxResidentBytes + reserve) / 1_024)
 }
 
 export interface WorkerSpawnCommand {
@@ -228,7 +259,8 @@ export interface WorkerSpawnCommand {
 export function workerSpawnCommand(
   platform: NodeJS.Platform,
   maxResidentBytes: number,
-  maxHeapMb: number
+  maxHeapMb: number,
+  arch: string = process.arch
 ): WorkerSpawnCommand {
   const heap = '--max-old-space-size=' + maxHeapMb
   if (platform === 'linux') {
@@ -237,7 +269,7 @@ export function workerSpawnCommand(
       args: [
         '-c',
         'ulimit -d "$0" && exec "$@"',
-        String(dataLimitKiB(maxResidentBytes)),
+        String(dataLimitKiB(maxResidentBytes, arch)),
         process.execPath,
         heap,
         ...workerEntry(),
@@ -315,19 +347,25 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
   }
 
   return acquireDocumentReader(signal).then(async release => {
-    let sampleResidentMemory: (pid: number) => Promise<number>
+    let sampleResidentMemory: ReturnType<typeof residentMemorySampler>
     let sampleCgroupMemory: ReturnType<typeof documentCgroupSampler>
     let markOomVictim: ReturnType<typeof oomVictimMarker>
     let caps: ReturnType<typeof effectiveDocumentMemoryCaps>
     let rlimitEnforced: boolean
+    let dataReserveSupported: boolean
     try {
       sampleResidentMemory = residentMemorySampler(process.platform)
       sampleCgroupMemory = documentCgroupSampler(process.platform)
       markOomVictim = oomVictimMarker(process.platform)
       rlimitEnforced = await rlimitDataEnforced(process.platform)
-      caps = rlimitEnforced
-        ? effectiveDocumentMemoryCaps(job.limits, await sampleCgroupMemory())
-        : null
+      // Linux needs a calibrated VmData reserve to derive RLIMIT_DATA. macOS
+      // spawns directly and does not use one.
+      dataReserveSupported =
+        process.platform !== 'linux' || childVirtualReserveBytes(process.arch) !== null
+      caps =
+        rlimitEnforced && dataReserveSupported
+          ? effectiveDocumentMemoryCaps(job.limits, await sampleCgroupMemory())
+          : null
     } catch {
       release()
       throw workerFailed()
@@ -336,9 +374,10 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
       release()
       throw signal.reason
     }
-    if (!rlimitEnforced) {
+    if (!rlimitEnforced || !dataReserveSupported) {
       release()
-      // Linux would ignore the hard ceiling; never run unbounded.
+      // Linux would ignore the hard ceiling, or the architecture has no
+      // calibrated reserve: never run unbounded and never guess.
       return { ok: false, reason: 'host_memory_unavailable' } as DocumentJobOutcome<J>
     }
     if (!caps) {
@@ -359,8 +398,7 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
       let sampling = false
       let residentTimer: ReturnType<typeof setInterval> | undefined
       let maxSampledResidentBytes = 0
-      let childVmDataBytes: number | null = null
-      let vmDataSampled = false
+      let maxSampledVmDataBytes: number | null = null
 
       const cleanup = () => {
         clearTimeout(timer)
@@ -398,26 +436,30 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
       const onExit = (code: number | null, exitSignal: NodeJS.Signals | null) => {
         exited = true
         cleanup()
+        // Signal-based diagnosis is deliberately coarse and accepted as such:
+        // V8 heap exhaustion traps (SIGTRAP) or aborts (SIGABRT), so a non-OOM
+        // SIGTRAP or SIGABRT is still reported as `heap`; the kernel OOM killer
+        // uses SIGKILL. An unchecked malloc failure that raises SIGSEGV is
+        // reported as a `defect`, not as a memory limit. Operation
+        // distinguishes the two from this same line: a maximum sampled RSS
+        // below `residentCapBytes` points at V8 heap exhaustion, while a sample
+        // at the cap points at a native allocation failure.
         const signaledHeap =
           !defect &&
           (exitSignal === 'SIGABRT' || exitSignal === 'SIGKILL' || exitSignal === 'SIGTRAP')
+        // A typed failure produced by the child is a real outcome, not "ok".
+        const typedChildFailure: DocumentJobFailure | undefined =
+          outcome !== undefined && !outcome.ok ? (outcome as DocumentJobFailure) : undefined
         const result: 'ok' | 'failure' | 'defect' | 'aborted' = aborted
           ? 'aborted'
-          : failure
+          : failure || signaledHeap || typedChildFailure
             ? 'failure'
-            : signaledHeap
-              ? 'failure'
-              : defect || code !== 0 || !outcome
-                ? 'defect'
-                : 'ok'
+            : defect || code !== 0 || !outcome
+              ? 'defect'
+              : 'ok'
         const limit: DocumentLimitName | undefined =
           result === 'failure'
-            ? (failure?.limit ??
-              (signaledHeap
-                ? 'heap'
-                : outcome !== undefined && !outcome.ok
-                  ? outcome.limit
-                  : undefined))
+            ? (failure?.limit ?? (signaledHeap ? 'heap' : typedChildFailure?.limit))
             : undefined
         // One line per job: limits and observed memory only. Never document
         // content, file paths or the child's error text.
@@ -429,9 +471,11 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
             exitCode: code,
             residentCapBytes: memoryCaps.maxResidentBytes,
             dataLimitKiB:
-              process.platform === 'linux' ? dataLimitKiB(memoryCaps.maxResidentBytes) : null,
+              process.platform === 'linux'
+                ? dataLimitKiB(memoryCaps.maxResidentBytes, process.arch)
+                : null,
             maxSampledResidentBytes,
-            ...(typeof childVmDataBytes === 'number' ? { childVmDataBytes } : {}),
+            ...(maxSampledVmDataBytes === null ? {} : { childVmDataBytes: maxSampledVmDataBytes }),
           },
           'document reader job finished'
         )
@@ -463,19 +507,16 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
             terminate({ ok: false, reason: 'document_limits_exceeded', limit: 'heap' })
             return
           }
-          const bytes = await sampleResidentMemory(child.pid)
+          const observed = await sampleResidentMemory(child.pid)
           if (!stopping && !exited) {
-            maxSampledResidentBytes = Math.max(maxSampledResidentBytes, bytes)
-            if (bytes > memoryCaps.maxResidentBytes) {
+            maxSampledResidentBytes = Math.max(maxSampledResidentBytes, observed.rssBytes)
+            // Telemetry only: VmData comes from the same `/proc/<pid>/status`
+            // read, so it adds no per-tick file access. macOS reports null.
+            if (observed.vmDataBytes !== null) {
+              maxSampledVmDataBytes = Math.max(maxSampledVmDataBytes ?? 0, observed.vmDataBytes)
+            }
+            if (observed.rssBytes > memoryCaps.maxResidentBytes) {
               terminate({ ok: false, reason: 'document_limits_exceeded', limit: 'heap' })
-            } else if (!vmDataSampled && process.platform === 'linux') {
-              // Telemetry only: a read racing the exit omits the field.
-              vmDataSampled = true
-              try {
-                childVmDataBytes = await childVirtualDataBytes(child.pid)
-              } catch {
-                childVmDataBytes = null
-              }
             }
           }
         } catch {

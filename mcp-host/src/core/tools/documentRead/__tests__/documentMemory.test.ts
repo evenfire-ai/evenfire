@@ -3,8 +3,9 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  DOCUMENT_CHILD_VIRTUAL_RESERVE_BYTES,
   DOCUMENT_IPC_RESERVE_BYTES,
+  DOCUMENT_VIRTUAL_DRIFT_RESERVE_BYTES,
+  childVirtualReserveBytes,
   documentCgroupSampler,
   documentCgroupWorkingSetBytes,
   effectiveDocumentMemoryCaps,
@@ -137,29 +138,38 @@ describe('document reader cgroup-v2 memory', () => {
 
   it('takes the minimum of configured RSS and headroom, reserving native memory before the heap', () => {
     const cgroup = { maxBytes: 1024 * MIB, currentBytes: 256 * MIB, inactiveFileBytes: 0 }
+    // 1024 - 256 working set - 64 margin - 113 IPC - 128 drift = 463 MiB.
     expect(effectiveDocumentMemoryCaps(documentLimits({ maxHeapMb: 1_024 }), cgroup)).toEqual({
-      maxResidentBytes: 591 * MIB,
-      maxHeapMb: 527,
+      maxResidentBytes: 463 * MIB,
+      maxHeapMb: 399,
     })
     expect(effectiveDocumentMemoryCaps(documentLimits({ maxResidentMb: 160 }), cgroup)).toEqual({
       maxResidentBytes: 160 * MIB,
       maxHeapMb: 96,
     })
     expect(effectiveDocumentMemoryCaps(documentLimits({ maxHeapMb: 64 }), cgroup)).toEqual({
-      maxResidentBytes: 591 * MIB,
+      maxResidentBytes: 463 * MIB,
       maxHeapMb: 64,
     })
   })
 
-  it('reserves the IPC transients on top of the cgroup margin', () => {
+  it('calibrates the child virtual reserve per architecture and reserves the drift', () => {
     expect(DOCUMENT_IPC_RESERVE_BYTES).toBe(113 * MIB)
-    // Measured on the Alpine arm64 image (idle worker VmData minus resident)
-    // plus cross-arch drift; see documentMemory.ts.
-    expect(DOCUMENT_CHILD_VIRTUAL_RESERVE_BYTES).toBe(1_408 * MIB)
-    // 512 - 100 working set - 64 margin - 113 IPC = 235 MiB.
+    expect(DOCUMENT_VIRTUAL_DRIFT_RESERVE_BYTES).toBe(128 * MIB)
+    // Measured idle worker VmData minus resident in the pinned Alpine image:
+    // x64 2052 - 89 = 1963 MiB, arm64 1348 - 66 = 1282 MiB; both plus drift.
+    expect(childVirtualReserveBytes('x64')).toBe((1_963 + 128) * MIB)
+    expect(childVirtualReserveBytes('arm64')).toBe((1_282 + 128) * MIB)
+    // Liveness: an architecture without a measurement gets no reserve.
+    expect(childVirtualReserveBytes('ia32')).toBeNull()
+    expect(childVirtualReserveBytes('riscv64')).toBeNull()
+  })
+
+  it('reserves the drift, IPC transients and cgroup margin before the resident cap', () => {
+    // 640 - 100 working set - 64 margin - 113 IPC - 128 drift = 235 MiB.
     expect(
       effectiveDocumentMemoryCaps(documentLimits(), {
-        maxBytes: 512 * MIB,
+        maxBytes: 640 * MIB,
         currentBytes: 100 * MIB,
         inactiveFileBytes: 0,
       })
@@ -170,14 +180,14 @@ describe('document reader cgroup-v2 memory', () => {
     expect(
       effectiveDocumentMemoryCaps(documentLimits(), {
         maxBytes: 512 * MIB,
-        currentBytes: 207 * MIB + 1,
+        currentBytes: 79 * MIB + 1,
         inactiveFileBytes: 0,
       })
     ).toBeNull()
     expect(
       effectiveDocumentMemoryCaps(documentLimits(), {
         maxBytes: 512 * MIB,
-        currentBytes: 207 * MIB,
+        currentBytes: 79 * MIB,
         inactiveFileBytes: 0,
       })
     ).toEqual({ maxResidentBytes: 128 * MIB, maxHeapMb: 64 })
@@ -188,8 +198,8 @@ describe('document reader cgroup-v2 memory', () => {
   it('ignores reclaimable inactive file cache when admitting a reader', () => {
     const warm = { maxBytes: 512 * MIB, currentBytes: 468 * MIB, inactiveFileBytes: 403 * MIB }
     expect(effectiveDocumentMemoryCaps(documentLimits(), warm)).toEqual({
-      maxResidentBytes: 270 * MIB,
-      maxHeapMb: 206,
+      maxResidentBytes: 142 * MIB,
+      maxHeapMb: 78,
     })
     // Liveness: the same current with no reclaimable cache must still refuse.
     expect(
@@ -211,6 +221,6 @@ describe('document reader cgroup-v2 memory', () => {
         currentBytes: 100 * MIB,
         inactiveFileBytes: 120 * MIB,
       })
-    ).toEqual({ maxResidentBytes: 335 * MIB, maxHeapMb: 271 })
+    ).toEqual({ maxResidentBytes: 207 * MIB, maxHeapMb: 143 })
   })
 })

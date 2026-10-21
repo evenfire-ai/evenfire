@@ -49,7 +49,7 @@ function finish(child: ChildProcess) {
 
 function samplers(sample: () => Promise<documentMemory.DocumentCgroupMemory | null>) {
   vi.spyOn(documentMemory, 'documentCgroupSampler').mockReturnValue(sample)
-  const rss = vi.fn(async () => MIB)
+  const rss = vi.fn(async () => ({ rssBytes: MIB, vmDataBytes: null }))
   vi.spyOn(residentMemory, 'residentMemorySampler').mockReturnValue(rss)
   // Fake children have no /proc entry to mark on Linux.
   vi.spyOn(oomScore, 'oomVictimMarker').mockReturnValue(async () => undefined)
@@ -165,7 +165,7 @@ describe('document reader Host memory admission and queue', () => {
 
   it('reads headroom and refuses the floor without spawning, then admits a live reader', async () => {
     let currentBytes = 321 * MIB
-    const sample = vi.fn(async () => ({ maxBytes: 512 * MIB, currentBytes, inactiveFileBytes: 0 }))
+    const sample = vi.fn(async () => ({ maxBytes: 640 * MIB, currentBytes, inactiveFileBytes: 0 }))
     samplers(sample)
     const child = childFixture()
     vi.mocked(spawn).mockReturnValueOnce(child)
@@ -177,7 +177,8 @@ describe('document reader Host memory admission and queue', () => {
     const admitted = runDocumentJob(job)
     await vi.waitFor(() => expect(child.send).toHaveBeenCalledTimes(1))
     expect(spawn).toHaveBeenCalledTimes(1)
-    // 512 - 128 working set - 64 margin - 113 IPC = 207 MiB resident, 143 MiB heap.
+    // 640 - 128 working set - 64 margin - 113 IPC - 128 drift = 207 MiB resident,
+    // 143 MiB heap.
     expect(vi.mocked(spawn).mock.calls[0]?.[1]).toContain('--max-old-space-size=143')
     finish(child)
     expect((await admitted).ok).toBe(true)
@@ -185,7 +186,7 @@ describe('document reader Host memory admission and queue', () => {
 
   it('admits on the working set when the same current is reclaimable cache', async () => {
     let memory: documentMemory.DocumentCgroupMemory = {
-      maxBytes: 512 * MIB,
+      maxBytes: 640 * MIB,
       currentBytes: 468 * MIB,
       inactiveFileBytes: 0,
     }
@@ -200,7 +201,8 @@ describe('document reader Host memory admission and queue', () => {
     const admitted = runDocumentJob(job)
     await vi.waitFor(() => expect(child.send).toHaveBeenCalledTimes(1))
     expect(spawn).toHaveBeenCalledTimes(1)
-    // 512 - 65 working set - 64 margin - 113 IPC = 270 MiB resident, 206 MiB heap.
+    // 640 - 65 working set - 64 margin - 113 IPC - 128 drift = 270 MiB resident,
+    // 206 MiB heap.
     expect(vi.mocked(spawn).mock.calls[0]?.[1]).toContain('--max-old-space-size=206')
     finish(child)
     expect((await admitted).ok).toBe(true)
@@ -210,7 +212,7 @@ describe('document reader Host memory admission and queue', () => {
     const sample = vi
       .fn<() => Promise<documentMemory.DocumentCgroupMemory | null>>()
       .mockRejectedValueOnce(new Error('unreadable cgroup'))
-      .mockResolvedValue({ maxBytes: 512 * MIB, currentBytes: 128 * MIB, inactiveFileBytes: 0 })
+      .mockResolvedValue({ maxBytes: 640 * MIB, currentBytes: 128 * MIB, inactiveFileBytes: 0 })
     samplers(sample)
     await expect(runDocumentJob(job)).rejects.toThrow('Document reader worker failed')
     expect(sample).toHaveBeenCalledTimes(1)
@@ -225,7 +227,11 @@ describe('document reader Host memory admission and queue', () => {
 
   it('kills for concurrent Host growth even while the child RSS is below its cap', async () => {
     let currentBytes = 128 * MIB
-    const sample = vi.fn(async () => ({ maxBytes: 512 * MIB, currentBytes, inactiveFileBytes: 0 }))
+    const sample = vi.fn(async () => ({
+      maxBytes: 1024 * MIB,
+      currentBytes,
+      inactiveFileBytes: 0,
+    }))
     const rss = samplers(sample)
     const child = childFixture()
     vi.mocked(spawn).mockReturnValueOnce(child)
@@ -233,7 +239,8 @@ describe('document reader Host memory admission and queue', () => {
     await vi.waitFor(() => expect(rss).toHaveBeenCalled())
     expect(child.send).toHaveBeenCalledTimes(1)
     expect(child.signalCode).toBeNull()
-    currentBytes = 448 * MIB
+    // The fence is max - margin: 1024 - 64 = 960 MiB of working set.
+    currentBytes = 960 * MIB
     expect(await pending).toEqual({
       ok: false,
       reason: 'document_limits_exceeded',
@@ -241,7 +248,7 @@ describe('document reader Host memory admission and queue', () => {
     })
     expect(sample.mock.calls.length).toBeGreaterThan(2)
     expect(child.kill).toHaveBeenCalledWith('SIGKILL')
-    expect(await rss()).toBe(MIB)
+    expect(await rss()).toEqual({ rssBytes: MIB, vmDataBytes: null })
   })
 
   it('ignores reclaimable page cache mid-job and kills only when the working set grows', async () => {
@@ -272,7 +279,7 @@ describe('document reader Host memory admission and queue', () => {
 
   it('starts the second job only after the first settles and rereads its headroom', async () => {
     const sample = vi.fn(async () => ({
-      maxBytes: 512 * MIB,
+      maxBytes: 640 * MIB,
       currentBytes: 128 * MIB,
       inactiveFileBytes: 0,
     }))

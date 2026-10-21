@@ -5,13 +5,18 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { logger } from '../../../../logger'
-import { DOCUMENT_CHILD_VIRTUAL_RESERVE_BYTES } from '../documentMemory'
+import { childVirtualReserveBytes } from '../documentMemory'
 import * as oomScore from '../oomScore'
 import { oomVictimMarker } from '../oomScore'
 import * as residentMemory from '../residentMemory'
 import { residentMemorySampler } from '../residentMemory'
-import type { DocumentJob, DocumentJobOutcome } from '../types'
-import { rlimitDataEnforced, runDocumentJob, workerSpawnCommand } from '../workerRunner'
+import type { DocumentJob, DocumentJobOutcome, XlsxOutcome } from '../types'
+import {
+  dataLimitKiB,
+  rlimitDataEnforced,
+  runDocumentJob,
+  workerSpawnCommand,
+} from '../workerRunner'
 import {
   documentLimits,
   emptyWorkbook,
@@ -20,6 +25,7 @@ import {
   valuesWorkbook,
   witnessCode,
 } from './fixtures'
+import { heapPressureWorkbook, inflatedWorkbook } from './memoryFixtures'
 
 const MIB = 1_048_576
 const temporaryRoots: string[] = []
@@ -127,8 +133,22 @@ describe('document reader child runner', () => {
     await control()
     expect(spawn).toHaveBeenCalledTimes(1)
     const args = vi.mocked(spawn).mock.calls[0]!
-    expect(args[0]).toBe(process.execPath)
-    expect(args[1]).toContain('--max-old-space-size=256')
+    if (process.platform === 'linux') {
+      // Linux spawns through the RLIMIT_DATA wrapper: the shell receives the
+      // per-architecture limit in $0 and execs the Node binary with the heap
+      // flag and entry point.
+      expect(args[0]).toBe('/bin/sh')
+      expect(args[1]?.slice(0, 3)).toEqual([
+        '-c',
+        'ulimit -d "$0" && exec "$@"',
+        String(dataLimitKiB(768 * MIB, process.arch)),
+      ])
+      expect(args[1]?.[3]).toBe(process.execPath)
+      expect(args[1]?.[4]).toBe('--max-old-space-size=256')
+    } else {
+      expect(args[0]).toBe(process.execPath)
+      expect(args[1]).toContain('--max-old-space-size=256')
+    }
     expect(args[2]?.env).toEqual({})
     expect(args[2]?.stdio).toEqual(['ignore', 'ignore', 'ignore', 'ipc'])
   })
@@ -208,17 +228,32 @@ describe('document reader child runner', () => {
     await control()
   })
 
-  it('maps V8 heap exhaustion to heap while a normal heap succeeds', async () => {
-    const bytes = await valuesWorkbook(witnessCode())
+  it('maps V8 heap exhaustion to heap while the same bytes parse under a normal heap', async () => {
+    // 128k unique 256-character shared strings stay live in the child heap for
+    // the whole sheet walk: the small heap must exhaust V8 while parsing, and
+    // the very same bytes must still produce the witness values when the heap
+    // is normal. This does not depend on the workbook's fixed overhead.
+    const fixture = await heapPressureWorkbook(131_072, 256, witnessCode())
+    const limits = documentLimits({
+      maxSourceBytes: fixture.bytes.byteLength,
+      maxUncompressedBytes: 96 * MIB,
+      timeoutMs: 30_000,
+    })
     expect(
       await runDocumentJob(
-        job(bytes, {
-          limits: documentLimits({ maxHeapMb: 24, timeoutMs: 15_000 }),
+        job(fixture.bytes, {
+          limits: { ...limits, maxHeapMb: 24 },
         })
       )
     ).toEqual({ ok: false, reason: 'document_limits_exceeded', limit: 'heap' })
-    expect((await runDocumentJob(job(bytes))).ok).toBe(true)
-  }, 20_000)
+    const control = (await runDocumentJob(
+      job(fixture.bytes, { limits: { ...limits, maxHeapMb: 256 } })
+    )) as XlsxOutcome
+    expect(control.ok).toBe(true)
+    if (!control.ok) throw new Error('Heap-pressure control failed')
+    expect(control.sheets[0]!.rows).toEqual([[fixture.first, fixture.last], [fixture.second]])
+    expect(control.sheets[0]!.lastRow).toBe(2)
+  }, 60_000)
 
   it('bounds output with a normal-size control', async () => {
     const bytes = await valuesWorkbook(witnessCode())
@@ -253,7 +288,14 @@ describe('document reader child runner', () => {
     )
     const pending = runDocumentJob(job(await valuesWorkbook(witnessCode())))
     const child = await liveChild()
-    expect(await residentMemorySampler(process.platform)(child.pid!)).toBeGreaterThan(0)
+    const sample = await residentMemorySampler(process.platform)(child.pid!)
+    expect(sample.rssBytes).toBeGreaterThan(0)
+    if (process.platform === 'linux') {
+      // VmData comes from the same status read as RSS.
+      expect(sample.vmDataBytes).toBeGreaterThan(0)
+    } else {
+      expect(sample.vmDataBytes).toBeNull()
+    }
     expect((await pending).ok).toBe(true)
   })
 
@@ -419,6 +461,125 @@ describe('document reader child runner', () => {
       },
     ],
     [
+      'a skipped-row count that disagrees with first',
+      {
+        ok: true,
+        sheetNames: ['Sheet1'],
+        sheets: [
+          {
+            name: 'Sheet1',
+            startRow: 1,
+            truncated: false,
+            lastRow: 2,
+            rows: [[], ['value']],
+            skippedRows: { count: 2, first: [1] },
+          },
+        ],
+      },
+    ],
+    [
+      'more skipped rows than the window holds',
+      {
+        ok: true,
+        sheetNames: ['Sheet1'],
+        sheets: [
+          {
+            name: 'Sheet1',
+            startRow: 1,
+            truncated: false,
+            lastRow: 1,
+            rows: [[]],
+            skippedRows: { count: 2, first: [1, 2] },
+          },
+        ],
+      },
+    ],
+    [
+      'skipped rows that are not strictly increasing',
+      {
+        ok: true,
+        sheetNames: ['Sheet1'],
+        sheets: [
+          {
+            name: 'Sheet1',
+            startRow: 1,
+            truncated: false,
+            lastRow: 2,
+            rows: [[], []],
+            skippedRows: { count: 2, first: [2, 1] },
+          },
+        ],
+      },
+    ],
+    [
+      'a skipped row below the window',
+      {
+        ok: true,
+        sheetNames: ['Sheet1'],
+        sheets: [
+          {
+            name: 'Sheet1',
+            startRow: 2,
+            truncated: false,
+            lastRow: 3,
+            rows: [[], ['value']],
+            skippedRows: { count: 1, first: [1] },
+          },
+        ],
+      },
+    ],
+    [
+      'a skipped row at the end of the window',
+      {
+        ok: true,
+        sheetNames: ['Sheet1'],
+        sheets: [
+          {
+            name: 'Sheet1',
+            startRow: 1,
+            truncated: false,
+            lastRow: 2,
+            rows: [[], ['value']],
+            skippedRows: { count: 1, first: [3] },
+          },
+        ],
+      },
+    ],
+    [
+      'a skipped row whose slot is not empty',
+      {
+        ok: true,
+        sheetNames: ['Sheet1'],
+        sheets: [
+          {
+            name: 'Sheet1',
+            startRow: 1,
+            truncated: false,
+            lastRow: 2,
+            rows: [['value'], []],
+            skippedRows: { count: 1, first: [1] },
+          },
+        ],
+      },
+    ],
+    [
+      'a lastRow before the end of the returned window',
+      {
+        ok: true,
+        sheetNames: ['Sheet1'],
+        sheets: [
+          {
+            name: 'Sheet1',
+            startRow: 1,
+            truncated: false,
+            lastRow: 1,
+            rows: [[], ['value']],
+            skippedRows: { count: 1, first: [1] },
+          },
+        ],
+      },
+    ],
+    [
       'a PDF outcome for an XLSX job',
       {
         ok: true,
@@ -464,6 +625,33 @@ describe('document reader child runner', () => {
       ...(message.ok ? { stoppedBy: 'max_bytes' } : { limit: 'row_bytes' }),
     })
     await expect(refused).rejects.toThrow('Document reader worker failed')
+  })
+
+  it('accepts an exhaustive skipped-row window with more than twenty rows', async () => {
+    const skipped = 23
+    const rows = [...Array.from({ length: skipped }, () => []), ['after-skip'], ['tail']]
+    const message = {
+      ok: true,
+      sheetNames: ['Sheet1'],
+      sheets: [
+        {
+          name: 'Sheet1',
+          startRow: 1,
+          truncated: false,
+          lastRow: rows.length,
+          rows,
+          skippedRows: {
+            count: skipped,
+            first: Array.from({ length: skipped }, (_, index) => index + 1),
+          },
+        },
+      ],
+    }
+    const accepted = runDocumentJob(job(await valuesWorkbook(witnessCode())))
+    ;(await liveChild()).emit('message', message)
+    await expect(accepted).resolves.toEqual(message)
+    // Liveness: a real child still delivers its own valid outcome afterward.
+    await control()
   })
 
   it.each([
@@ -538,24 +726,40 @@ describe('document reader child runner', () => {
     expect(outcome).toMatchObject({ ok: true, pageCount: 1 })
   })
 
-  it('spawns through a data-limited shell only on Linux', () => {
+  it('spawns through a data-limited shell only on Linux and reserves per architecture', () => {
     const residentBytes = 130 * MIB + 1
-    const expectedKiB = Math.ceil((residentBytes + DOCUMENT_CHILD_VIRTUAL_RESERVE_BYTES) / 1_024)
-    const linux = workerSpawnCommand('linux', residentBytes, 256)
-    const darwin = workerSpawnCommand('darwin', residentBytes, 256)
+    const x64KiB = Math.ceil((residentBytes + (1_963 + 128) * MIB) / 1_024)
+    const arm64KiB = Math.ceil((residentBytes + (1_282 + 128) * MIB) / 1_024)
+    const linux = workerSpawnCommand('linux', residentBytes, 256, 'x64')
+    const linuxArm64 = workerSpawnCommand('linux', residentBytes, 256, 'arm64')
+    const darwin = workerSpawnCommand('darwin', residentBytes, 256, 'x64')
     expect(linux.file).toBe('/bin/sh')
     expect(linux.args.slice(0, 5)).toEqual([
       '-c',
       'ulimit -d "$0" && exec "$@"',
-      String(expectedKiB),
+      String(x64KiB),
       process.execPath,
       '--max-old-space-size=256',
     ])
+    expect(linuxArm64.args[2]).toBe(String(arm64KiB))
     // "$@" preserves the multiline source bootstrap as one argument.
     expect(linux.args.slice(5)).toEqual(darwin.args.slice(1))
     expect(darwin.file).toBe(process.execPath)
     expect(darwin.args[0]).toBe('--max-old-space-size=256')
     expect(darwin.args.slice(1)).not.toHaveLength(0)
+  })
+
+  it('fails loud instead of guessing a reserve for an uncalibrated architecture', () => {
+    expect(childVirtualReserveBytes('x64')).toBe((1_963 + 128) * MIB)
+    expect(childVirtualReserveBytes('arm64')).toBe((1_282 + 128) * MIB)
+    expect(childVirtualReserveBytes('ia32')).toBeNull()
+    expect(dataLimitKiB(1, 'x64')).toBe(Math.ceil(((1_963 + 128) * MIB + 1) / 1_024))
+    expect(() => dataLimitKiB(1, 'riscv64')).toThrow(
+      'Unsupported document reader virtual reserve architecture'
+    )
+    expect(() => workerSpawnCommand('linux', 1, 256, 's390x')).toThrow(
+      'Unsupported document reader virtual reserve architecture'
+    )
   })
 
   it('requires exactly N in ignore_rlimit_data and fails closed otherwise', async () => {
@@ -603,6 +807,32 @@ describe('document reader child runner', () => {
     expect(spawn).toHaveBeenCalledTimes(1)
   })
 
+  it('refuses to spawn on Linux when its architecture has no calibrated reserve', async () => {
+    const bytes = await valuesWorkbook(witnessCode())
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
+    const arch = Object.getOwnPropertyDescriptor(process, 'arch')!
+    vi.mocked(readFile).mockResolvedValueOnce('N' as never)
+    Object.defineProperty(process, 'platform', { ...platform, value: 'linux' })
+    Object.defineProperty(process, 'arch', { ...arch, value: 'ia32' })
+    try {
+      expect(await runDocumentJob(job(bytes))).toEqual({
+        ok: false,
+        reason: 'host_memory_unavailable',
+      })
+      // The premise is enforced, but the uncalibrated reserve still refuses.
+      expect(vi.mocked(readFile)).toHaveBeenCalledWith(
+        '/sys/module/kernel/parameters/ignore_rlimit_data',
+        'utf8'
+      )
+      expect(spawn).not.toHaveBeenCalled()
+    } finally {
+      Object.defineProperty(process, 'platform', platform)
+      Object.defineProperty(process, 'arch', arch)
+    }
+    await control()
+    expect(spawn).toHaveBeenCalledTimes(1)
+  })
+
   it('logs one bounded job line without document content or paths', async () => {
     const info = vi.spyOn(logger, 'info')
     await control()
@@ -629,4 +859,51 @@ describe('document reader child runner', () => {
     if (process.platform === 'linux') expect(typeof fields.dataLimitKiB).toBe('number')
     else expect(fields.dataLimitKiB).toBeNull()
   })
+
+  it('logs the real failure outcome and limit of a typed child result', async () => {
+    const info = vi.spyOn(logger, 'info')
+    expect(
+      await runDocumentJob(
+        job(await inflatedWorkbook(8 * MIB), {
+          limits: documentLimits({ maxUncompressedBytes: MIB }),
+        })
+      )
+    ).toEqual({ ok: false, reason: 'document_limits_exceeded', limit: 'uncompressed_bytes' })
+    const failureLine = info.mock.calls.find(
+      ([, message]: [Record<string, unknown>, string]) => message === 'document reader job finished'
+    )
+    expect(failureLine).toBeDefined()
+    expect(failureLine![0]).toMatchObject({
+      outcome: 'failure',
+      limit: 'uncompressed_bytes',
+      exitCode: 0,
+      exitSignal: null,
+    })
+    // Liveness: a successful job on the same logging path omits the limit.
+    info.mockClear()
+    await control()
+    const okLine = info.mock.calls.find(
+      ([, message]: [Record<string, unknown>, string]) => message === 'document reader job finished'
+    )
+    expect(okLine).toBeDefined()
+    expect(okLine![0]).toMatchObject({ outcome: 'ok' })
+    expect(okLine![0].limit).toBeUndefined()
+  }, 20_000)
+
+  it.runIf(process.platform === 'linux')(
+    'logs the maximum child VmData sampled from a real job',
+    async () => {
+      const info = vi.spyOn(logger, 'info')
+      expect((await runDocumentJob(job(await valuesWorkbook(witnessCode())))).ok).toBe(true)
+      const line = info.mock.calls.find(
+        ([, message]: [Record<string, unknown>, string]) =>
+          message === 'document reader job finished'
+      )
+      expect(line).toBeDefined()
+      // The old single sample was taken before exec and read a shell-sized
+      // value; the maximum observed over the whole job must be real Node VmData.
+      expect(line![0].childVmDataBytes).toBeGreaterThan(256 * MIB)
+    },
+    20_000
+  )
 })

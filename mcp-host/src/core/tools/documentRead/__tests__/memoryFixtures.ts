@@ -269,3 +269,90 @@ export async function streamingWorkbook(rows: number): Promise<Buffer> {
   zip.file('xl/worksheets/sheet1.xml', chunks.join(''))
   return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' })
 }
+
+export interface HeapPressureWorkbook {
+  bytes: Buffer
+  first: string
+  second: string
+  last: string
+}
+
+/**
+ * A workbook whose shared-string table holds `strings` unique values of
+ * `characters` each. The parser retains the whole table while it walks the
+ * sheet, so a small `--max-old-space-size` exhausts V8 during parsing; the
+ * same bytes parse normally under a larger heap. The sheet itself returns two
+ * rows with witness values, so the control proves the workbook is valid.
+ */
+export async function heapPressureWorkbook(
+  strings: number,
+  characters: number,
+  witness: string
+): Promise<HeapPressureWorkbook> {
+  if (strings < 2) throw new Error('Heap-pressure fixture needs at least two strings')
+  const value = (index: number): string => {
+    const prefix = `${witness}-${index}-`
+    return prefix + 'x'.repeat(Math.max(0, characters - prefix.length))
+  }
+  const sharedStrings = [
+    '<?xml version="1.0"?><sst ' +
+      'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ' +
+      `count="${strings}" uniqueCount="${strings}">`,
+  ]
+  for (let index = 0; index < strings; index += 1) {
+    sharedStrings.push(`<si><t>${value(index)}</t></si>`)
+  }
+  sharedStrings.push('</sst>')
+  const zip = new JSZip()
+  zip.file(
+    '[Content_Types].xml',
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/xml"/>' +
+      '<Override PartName="/xl/workbook.xml" ' +
+      'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+      '<Override PartName="/xl/worksheets/sheet1.xml" ' +
+      'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
+      '<Override PartName="/xl/sharedStrings.xml" ' +
+      'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>' +
+      '</Types>'
+  )
+  zip.file(
+    '_rels/.rels',
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId1" ' +
+      'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" ' +
+      'Target="xl/workbook.xml"/></Relationships>'
+  )
+  zip.file(
+    'xl/workbook.xml',
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ' +
+      'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+      '<sheets><sheet name="Heap" sheetId="1" r:id="rId1"/></sheets></workbook>'
+  )
+  zip.file(
+    'xl/_rels/workbook.xml.rels',
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId1" ' +
+      'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" ' +
+      'Target="worksheets/sheet1.xml"/>' +
+      '<Relationship Id="rId2" ' +
+      'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" ' +
+      'Target="sharedStrings.xml"/></Relationships>'
+  )
+  zip.file('xl/sharedStrings.xml', sharedStrings.join(''))
+  zip.file(
+    'xl/worksheets/sheet1.xml',
+    '<?xml version="1.0"?><worksheet ' +
+      'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>' +
+      `<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>${strings - 1}</v></c></row>` +
+      '<row r="2"><c r="A2" t="s"><v>1</v></c></row>' +
+      '</sheetData></worksheet>'
+  )
+  const bytes = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' })
+  return { bytes, first: value(0), second: value(1), last: value(strings - 1) }
+}

@@ -12,14 +12,41 @@ export const DOCUMENT_CGROUP_MARGIN_BYTES = 64 * MIB
 // re-serialization (32 MiB) and the base64 of a 20 MiB PNG (27 MiB). Estimated
 // from the specified caps, not measured.
 export const DOCUMENT_IPC_RESERVE_BYTES = 113 * MIB
-// The non-resident part of the child's base VmData that RLIMIT_DATA must also
-// admit: V8's code-range/pointer-cage reservations, native mappings and
-// shared libraries. Measured on the Alpine arm64 image (worker idle after
-// loading pdfjs/canvas/exceljs helpers: VmData 1348 MiB, resident 67 MiB, so
-// V = 1280 MiB) plus 128 MiB for cross-arch drift; the amd64 calibration on
-// CI (G1) still owns tightening it. Too small starves legitimate reads with
-// allocation failures; too large weakens the resident bound by the excess.
-export const DOCUMENT_CHILD_VIRTUAL_RESERVE_BYTES = 1_408 * MIB
+// Cross-architecture drift around the measured child VmData. It is added to
+// each per-architecture reserve below and also discounted from the cgroup
+// headroom: the reserve is part of RLIMIT_DATA, so an admission that ignored
+// it would grant resident room the container does not have. A 2048 MiB
+// container with a 1113 MiB working set only has 935 MiB left, and the reserve
+// would let a reader claim more than that before the RLIMIT_DATA ceiling binds.
+export const DOCUMENT_VIRTUAL_DRIFT_RESERVE_BYTES = 128 * MIB
+
+/**
+ * The non-resident part of the child's base VmData that RLIMIT_DATA must also
+ * admit: V8's code-range/pointer-cage reservations, native mappings and shared
+ * libraries, measured with the worker idle after loading its modules in the
+ * pinned `node:24.16.0-alpine@sha256:21f403…` image:
+ *
+ * - x64: VmData 2052 MiB, RSS 89 MiB, so V = 1963 MiB.
+ * - arm64: VmData 1348 MiB, RSS 66 MiB, so V = 1282 MiB.
+ *
+ * `DOCUMENT_VIRTUAL_DRIFT_RESERVE_BYTES` is added to both. The amd64 figure
+ * was measured through Rosetta, so CI amd64 (G1) is the durable confirmation
+ * of this reserve. Too small starves legitimate reads with allocation
+ * failures; too large weakens the resident bound by the excess. An
+ * uncalibrated architecture has no reserve, and Linux refuses to spawn rather
+ * than guess one.
+ */
+export function childVirtualReserveBytes(arch: string): number | null {
+  switch (arch) {
+    case 'x64':
+      return (1_963 + 128) * MIB
+    case 'arm64':
+      return (1_282 + 128) * MIB
+    default:
+      return null
+  }
+}
+
 // V8's old-space cap excludes Node, pdfjs/canvas, buffers and decoded images.
 export const DOCUMENT_NATIVE_ALLOWANCE_BYTES = 64 * MIB
 // Admission requires at least 64 MiB of heap plus the native allowance.
@@ -129,7 +156,8 @@ export function effectiveDocumentMemoryCaps(
     cgroup.maxBytes -
     documentCgroupWorkingSetBytes(cgroup) -
     DOCUMENT_CGROUP_MARGIN_BYTES -
-    DOCUMENT_IPC_RESERVE_BYTES
+    DOCUMENT_IPC_RESERVE_BYTES -
+    DOCUMENT_VIRTUAL_DRIFT_RESERVE_BYTES
   const maxResidentBytes = Math.min(configuredResidentBytes, headroom)
   const maxHeapMb = Math.min(
     limits.maxHeapMb,
