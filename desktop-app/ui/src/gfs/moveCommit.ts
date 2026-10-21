@@ -198,7 +198,42 @@ export async function commitGfsMove(
       }
     }
     if (status === 404) {
-      return { status: 'target-unavailable', message: 'This folder is no longer available.' }
+      // The PATCH answers 404 for a vanished SOURCE and for a vanished
+      // DESTINATION alike, and the two need different copy: telling a user
+      // that "this folder is no longer available" when their item was
+      // deleted sends them looking in the wrong place. One read tells them
+      // apart — the source still resolves when only the destination is gone
+      // (RP-027).
+      try {
+        const resolvedSource = await deps.resolveSource(plan.source.gfsUri)
+        if (resolvedSource.parentResourceId === plan.destination.resourceId) {
+          // The move landed after all; the 404 answered about something else.
+          return {
+            status: 'committed',
+            version: resolvedSource.version,
+            previousParentId: snapshot.parentResourceId,
+            ...(resolvedSource.name !== snapshot.name ? { renamedTo: resolvedSource.name } : {}),
+          }
+        }
+        return {
+          status: 'target-unavailable',
+          message: 'This folder is no longer available.',
+        }
+      } catch (resolveError) {
+        const resolveStatus = parseHttpStatus(messageOf(resolveError))
+        if (resolveStatus === 404 || resolveStatus === 410) {
+          return {
+            status: 'source-unavailable',
+            message: 'EvenDrive cannot verify this item’s current location. Refresh and try again.',
+          }
+        }
+        // The side that is gone could not be established: say so instead of
+        // naming a side that may still be there.
+        return {
+          status: 'unconfirmed',
+          message: 'Couldn’t confirm the move. Refresh before trying again.',
+        }
+      }
     }
     if (status === 403) {
       // Generic unless a successful permission recheck proves the missing bit;

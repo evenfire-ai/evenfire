@@ -178,7 +178,7 @@ describe('commitGfsMove — server verdicts', () => {
     expect(moveResource).toHaveBeenCalledTimes(1)
   })
 
-  it('404 maps to target-unavailable', async () => {
+  it('a 404 PATCH with a resolvable source maps to target-unavailable', async () => {
     const outcome = await commitGfsMove(
       deps({
         moveResource: vi.fn(async () => {
@@ -188,6 +188,54 @@ describe('commitGfsMove — server verdicts', () => {
       plan()
     )
     expect(outcome.status).toBe('target-unavailable')
+  })
+
+  // RP-027 — the PATCH answers 404 for a vanished source AND for a vanished
+  // destination. Telling a user that "this folder is no longer available"
+  // when their item was deleted sends them looking in the wrong place.
+  it('a 404 PATCH with a vanished source maps to source-unavailable', async () => {
+    // The commit-time resolve succeeds; the re-read after the 404 fails.
+    let reads = 0
+    const resolveSource = vi.fn(async (_gfsUri: string) => {
+      reads += 1
+      if (reads > 1) throw new Error('404 Not Found: httpStatus=404')
+      return resolved()
+    })
+    const outcome = await commitGfsMove(
+      deps({
+        resolveSource,
+        moveResource: vi.fn(async () => {
+          throw new Error('404 Not Found: httpStatus=404')
+        }),
+      }),
+      plan()
+    )
+    expect(outcome.status).toBe('source-unavailable')
+    // The source is re-read once to tell the two sides apart.
+    expect(resolveSource).toHaveBeenCalledTimes(2)
+  })
+
+  it('a 404 PATCH that already landed in the destination commits', async () => {
+    let reads = 0
+    const resolveSource = vi.fn(async (_gfsUri: string) => {
+      reads += 1
+      if (reads > 1) return resolved({ parentResourceId: 'dest-1', version: 9 })
+      return resolved()
+    })
+    const outcome = await commitGfsMove(
+      deps({
+        resolveSource,
+        moveResource: vi.fn(async () => {
+          throw new Error('404 Not Found: httpStatus=404')
+        }),
+      }),
+      plan()
+    )
+    expect(outcome).toEqual({
+      status: 'committed',
+      version: 9,
+      previousParentId: 'old-parent',
+    })
   })
 
   it('429 maps to rate-limited with the parsed window', async () => {
