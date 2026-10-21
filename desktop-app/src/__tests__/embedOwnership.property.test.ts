@@ -170,6 +170,7 @@ async function drainScheduler(
 // ─── The real main process behind a fake wire ──────────────────────────────
 
 let userDataDir = ''
+const oracleFailures: string[] = []
 
 type ToMain = {
   channel: 'sandboxUi:open' | 'sandboxUi:close'
@@ -404,7 +405,18 @@ class World {
       },
       onHandoffReady: requestId => this.continueHandoff(requestId),
       onOwnerRefreshError: event => this.refreshErrors.push(event),
-      onTransition: transition => this.checkTransition(transition, generation),
+      // The machine swallows whatever onTransition throws (a renderer hook must
+      // not wedge it), so a broken check would go silent. Record it on the world
+      // for assertClean and on the module for tests that never call it.
+      onTransition: transition => {
+        try {
+          this.checkTransition(transition, generation)
+        } catch (error) {
+          const detail = `checkTransition threw on ${transition.event.type}: ${String(error)}`
+          this.violation('oracle', detail)
+          oracleFailures.push(detail)
+        }
+      },
     })
   }
 
@@ -1201,6 +1213,7 @@ afterAll(async () => {
 })
 
 beforeEach(() => {
+  oracleFailures.length = 0
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
   vi.stubGlobal('fetch', sandboxUiMintFetch)
   // The driver logs every injected failure; the properties judge them.
@@ -1213,6 +1226,9 @@ afterEach(async () => {
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
   vi.useRealTimers()
+  if (oracleFailures.length > 0) {
+    throw new Error(`the transition oracle threw:\n${oracleFailures.slice(0, 5).join('\n')}`)
+  }
 })
 
 function assertClean(world: World): void {
