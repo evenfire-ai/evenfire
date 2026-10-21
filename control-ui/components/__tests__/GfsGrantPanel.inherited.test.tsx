@@ -510,7 +510,10 @@ describe('GfsGrantPanel inherited access', () => {
     await waitFor(() => expect(mockDeleteGfsShare).toHaveBeenCalledWith(FOLDER_SHARE_ID))
   })
 
-  it('discloses inherited Editor shares when only a direct grant can be changed', async () => {
+  // RP-011 — when only the direct grant can be rewritten, the access the
+  // member keeps through the shares this panel cannot edit is disclosed in a
+  // confirmation BEFORE the write, not only in the post-change feedback.
+  it('discloses inherited Editor shares before the direct grant is changed', async () => {
     mockGetGfsGrants.mockImplementation(async resourceId => ({
       items:
         resourceId === FILE_ID
@@ -545,6 +548,20 @@ describe('GfsGrantPanel inherited access', () => {
     const existing = await screen.findByRole('region', { name: 'People with access' })
     const row = await within(existing).findByTestId(miguelRowTestId)
     await chooseRole(row, 'Read')
+
+    // The confirmation opens BEFORE anything is written, and it names the
+    // Editor access the change does not remove.
+    const dialog = await screen.findByRole('alertdialog')
+    expect(
+      within(dialog).getByText(
+        'Sharing entries on team-docs still grant Editor access. This change does not remove them.'
+      )
+    ).toBeTruthy()
+    expect(within(dialog).getByText(/changes this item's own access only/)).toBeTruthy()
+    expect(mockPutGfsGrant).not.toHaveBeenCalled()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update role' }))
+
     await waitFor(() =>
       expect(mockPutGfsGrant).toHaveBeenCalledWith({
         drive: 'main',
@@ -555,6 +572,9 @@ describe('GfsGrantPanel inherited access', () => {
       })
     )
     expect(mockPutGfsGrant).toHaveBeenCalledTimes(1)
+    // Nothing is revoked here: the item carries no sharing entry of its own,
+    // and the share-only ancestor's entry is not one this panel may rewrite.
+    // It survives and is disclosed in the outcome.
     expect(mockDeleteGfsShare).not.toHaveBeenCalled()
     expect(
       await screen.findByText(

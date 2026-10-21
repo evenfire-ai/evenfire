@@ -750,6 +750,27 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       .map(source => source.name)
     if (writable.length === 0) {
       if (row.direct && row.direct.grantId !== null) {
+        // Only this item's own grant can be rewritten, but the member also
+        // inherits Editor through share rows this panel cannot edit. The
+        // operator approves the change in the SAME confirmation every other
+        // role change uses, so the access those shares keep is disclosed
+        // BEFORE the write instead of only in the post-change feedback
+        // (RP-011). With nothing left granting Editor, the direct write
+        // needs no confirmation.
+        const residualEditorFolderNames =
+          nextRole === 'read' ? collectResidualEditorFolderNames(plan.shareOnlySources) : []
+        if (residualEditorFolderNames.length > 0) {
+          setParentUpdate({
+            row,
+            mode: 'change-role',
+            nextRole,
+            affected: [],
+            residualSources: plan.shareOnlySources,
+            skippedFolderNames,
+            residualEditorFolderNames,
+          })
+          return
+        }
         await updateAccessRole(row.direct, nextRole, plan.shareOnlySources, skippedFolderNames)
         return
       }
