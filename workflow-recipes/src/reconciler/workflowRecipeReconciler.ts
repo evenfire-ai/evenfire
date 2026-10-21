@@ -7122,15 +7122,34 @@ export class WorkflowRecipeReconciler {
   }
 
   /**
-   * Issue #1016 — detection only: observe the denied set on the UNFILTERED spec.
-   * Never tears down anything.
+   * Issue #1016 (PRE-002) — the workload view a timer observation must use: a clone
+   * filtered exactly as the classic full pass filters it (includeWhen), so the
+   * observation and the enforcement see the same workloads. Workflow recipes are
+   * not filtered by the full pass and come back unfiltered. A resolution failure
+   * or an all-excluded result also falls back to the unfiltered clone; the full
+   * pass reports those cases itself.
+   */
+  effectiveObservationView(recipe: WorkflowRecipeCRD): WorkflowRecipeCRD {
+    const view = structuredClone(recipe)
+    if ((view.spec.steps ?? []).length > 0) return view
+    try {
+      this.resolveEffectiveWorkloadSpec(view)
+    } catch {
+      return structuredClone(recipe)
+    }
+    return (view.spec.workloads ?? []).length > 0 ? view : structuredClone(recipe)
+  }
+
+  /**
+   * Issue #1016 — detection only: observe the denied set on the same effective
+   * (includeWhen-filtered) view the full pass enforces. Never tears down anything.
    */
   async observeSecretOwnership(
     recipe: WorkflowRecipeCRD
   ): Promise<
     { kind: 'ok'; signature: string } | { kind: 'error'; reason: 'read_error' | 'unverifiable' }
   > {
-    const clone = structuredClone(recipe)
+    const clone = this.effectiveObservationView(recipe)
     let secretKeys: rb.SecretKeysByName
     try {
       secretKeys = await this.readReferencedSecrets(clone)

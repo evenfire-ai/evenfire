@@ -1239,6 +1239,7 @@ describe('runtime credential refresh loop helpers', () => {
 })
 
 describe('workload status refresh loop helpers', () => {
+  const effectiveObservationView = vi.fn((r: WorkflowRecipeCRD) => structuredClone(r))
   function makeWorkloadRecipe(overrides: Partial<WorkflowRecipeCRD> = {}): WorkflowRecipeCRD {
     return makeWorkflowRecipe({
       ...overrides,
@@ -1826,6 +1827,7 @@ describe('workload status refresh loop helpers', () => {
 
     type InternalWatcher = {
       reconciler: {
+        effectiveObservationView: typeof effectiveObservationView
         observeCurrentWorkloadStatus: typeof observeCurrentWorkloadStatus
         patchStatus: typeof patchStatus
       }
@@ -1833,7 +1835,7 @@ describe('workload status refresh loop helpers', () => {
       refreshWorkloadStatusOnly: (recipe: WorkflowRecipeCRD) => Promise<void>
     }
     const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
-    internal.reconciler = { observeCurrentWorkloadStatus, patchStatus }
+    internal.reconciler = { effectiveObservationView, observeCurrentWorkloadStatus, patchStatus }
     internal.handleRecipeEvent = handleRecipeEvent
 
     await internal.refreshWorkloadStatusOnly(recipe)
@@ -1883,6 +1885,7 @@ describe('workload status refresh loop helpers', () => {
 
       type InternalWatcher = {
         reconciler: {
+          effectiveObservationView: typeof effectiveObservationView
           observeCurrentWorkloadStatus: typeof observeCurrentWorkloadStatus
           observeSecretOwnership: typeof observeSecretOwnership
           patchStatus: typeof patchStatus
@@ -1892,7 +1895,12 @@ describe('workload status refresh loop helpers', () => {
         refreshWorkloadStatusOnly: (recipe: WorkflowRecipeCRD) => Promise<void>
       }
       const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
-      internal.reconciler = { observeCurrentWorkloadStatus, observeSecretOwnership, patchStatus }
+      internal.reconciler = {
+        effectiveObservationView,
+        observeCurrentWorkloadStatus,
+        observeSecretOwnership,
+        patchStatus,
+      }
       internal.handleRecipeEvent = handleRecipeEvent
       internal.cadence.recordSettled(recipe.metadata.name, Date.now(), enforced)
 
@@ -1928,6 +1936,7 @@ describe('workload status refresh loop helpers', () => {
 
     type InternalWatcher = {
       reconciler: {
+        effectiveObservationView: typeof effectiveObservationView
         observeCurrentWorkloadStatus: typeof observeCurrentWorkloadStatus
         patchStatus: typeof patchStatus
       }
@@ -1935,7 +1944,7 @@ describe('workload status refresh loop helpers', () => {
       refreshWorkloadStatusOnly: (recipe: WorkflowRecipeCRD) => Promise<void>
     }
     const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
-    internal.reconciler = { observeCurrentWorkloadStatus, patchStatus }
+    internal.reconciler = { effectiveObservationView, observeCurrentWorkloadStatus, patchStatus }
     internal.handleRecipeEvent = handleRecipeEvent
 
     await internal.refreshWorkloadStatusOnly(recipe)

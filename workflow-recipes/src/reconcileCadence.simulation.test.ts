@@ -120,6 +120,7 @@ function simulation() {
       refreshInProgressWorkflowRuntimeCredentials: vi.fn().mockResolvedValue(undefined),
       listPoliciesForLane: vi.fn().mockResolvedValue([]),
       observeSecretOwnership: vi.fn().mockResolvedValue({ kind: 'ok', signature: '' }),
+      effectiveObservationView: vi.fn((r: WorkflowRecipeCRD) => structuredClone(r)),
       observeCurrentWorkloadStatus: vi.fn(async (r: WorkflowRecipeCRD) => ({
         phase: 'active',
         message: 'ok',

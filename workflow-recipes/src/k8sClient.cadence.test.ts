@@ -47,6 +47,7 @@ function harness(
     reconciler: {
       isRecipeStillActive: vi.fn().mockResolvedValue(true),
       ensureFinalizer: vi.fn().mockResolvedValue(undefined),
+      effectiveObservationView: vi.fn((r: WorkflowRecipeCRD) => structuredClone(r)),
       reconcile: vi.fn(async (r: WorkflowRecipeCRD) => {
         r.spec.workloads = []
         return { ...reconcileResult }
@@ -662,6 +663,18 @@ describe('T2 ownership + workload status timer (#1016 §3.4)', () => {
     expect(h.w.reconciler.observeCurrentWorkloadStatus).toHaveBeenCalledTimes(1)
     expect(h.w.reconciler.observeSecretOwnership).toHaveBeenCalledTimes(1)
     expect(h.w.reconciler.reconcile).not.toHaveBeenCalled()
+  })
+
+  it('status path observes and patches the effective (includeWhen-filtered) view (PRE-002)', async () => {
+    const h = t2(recipe(), { ready: true })
+    const view = recipe()
+    view.spec.workloads = []
+    h.w.reconciler.effectiveObservationView.mockReturnValue(view)
+    // Force a status patch so the patched recipe is observable too.
+    h.w.recipes.get('r')!.status = { phase: 'degraded' } as Any
+    await tick(h)
+    expect(h.w.reconciler.observeCurrentWorkloadStatus).toHaveBeenCalledWith(view)
+    expect(h.w.reconciler.patchStatus).toHaveBeenCalledWith(view, expect.anything())
   })
 
   it('status path with named Secrets counts one workload_status and one ownership result', async () => {

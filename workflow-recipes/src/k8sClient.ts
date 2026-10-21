@@ -1653,12 +1653,15 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     }
 
     if (statusPath) {
-      const result = await this.reconciler.observeCurrentWorkloadStatus(fresh)
-      if (shouldPatchRecipeStatus(fresh, result)) {
-        await this.reconciler.patchStatus(fresh, result)
+      // PRE-002: observe and patch the includeWhen-filtered view the full pass
+      // deploys, never workloads it deliberately excluded.
+      const view = this.reconciler.effectiveObservationView(fresh)
+      const result = await this.reconciler.observeCurrentWorkloadStatus(view)
+      if (shouldPatchRecipeStatus(view, result)) {
+        await this.reconciler.patchStatus(view, result)
         enqueueInfrastructureTelemetryBestEffort(
           this.traceReporter,
-          reconcileOutcomeTelemetryProjection(fresh, result)
+          reconcileOutcomeTelemetryProjection(view, result)
         )
       }
       if (result.workloadStatuses.some(status => status.ready === false)) {

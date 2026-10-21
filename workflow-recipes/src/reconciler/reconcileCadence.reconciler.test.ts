@@ -596,14 +596,13 @@ describe('ownership signatures (#1016 §3.4)', () => {
     expect(mockAppsApi.createNamespacedDeployment).not.toHaveBeenCalled()
   })
 
-  it('observeSecretOwnership sees includeWhen-excluded workloads and leaves the input untouched', async () => {
+  it('observeSecretOwnership falls back to the unfiltered spec when includeWhen excludes every workload', async () => {
     const rec = newReconciler()
     stubSecrets({ s: 'foreign' })
     const recipe = makeRecipe({
       spec: {
-        workloads: [
-          envSecretWorkload('api', 's', { includeWhen: { param: 'enabled', equals: 'yes' } }),
-        ],
+        inputs: { enabled: false },
+        workloads: [envSecretWorkload('api', 's', { includeWhen: '{{inputs.enabled}}' })],
       },
       status: { phase: 'active' },
     } as Partial<WorkflowRecipeCRD>)
@@ -614,6 +613,47 @@ describe('ownership signatures (#1016 §3.4)', () => {
     })
     expect(JSON.stringify(recipe)).toBe(before)
     for (const m of deleteMocks()) expect(m).not.toHaveBeenCalled()
+  })
+
+  // PRE-002: the observation must see the same includeWhen-filtered workloads the
+  // classic full pass enforces, or an excluded workload's foreign Secret makes the
+  // observed signature differ from the enforced one on every tick.
+  it('observeSecretOwnership ignores an includeWhen-excluded workload of a classic recipe', async () => {
+    const rec = newReconciler()
+    stubSecrets({ mine: 'owned', theirs: 'foreign' })
+    const recipe = makeRecipe({
+      spec: {
+        inputs: { enabled: false },
+        workloads: [
+          envSecretWorkload('api', 'mine'),
+          envSecretWorkload('extra', 'theirs', { includeWhen: '{{inputs.enabled}}' }),
+        ],
+      },
+      status: { phase: 'active' },
+    } as Partial<WorkflowRecipeCRD>)
+    const before = JSON.stringify(recipe)
+    await expect(rec.observeSecretOwnership(recipe)).resolves.toEqual({ kind: 'ok', signature: '' })
+    expect(rec.effectiveObservationView(recipe).spec.workloads?.map(w => w.id)).toEqual(['api'])
+    expect(JSON.stringify(recipe)).toBe(before)
+  })
+
+  it('effectiveObservationView leaves a workflow recipe unfiltered, like the full pass', () => {
+    const rec = newReconciler()
+    const recipe = makeRecipe({
+      spec: {
+        steps: [{ id: 's1', instruction: 'go' }],
+        inputs: { enabled: false },
+        workloads: [
+          envSecretWorkload('api', 'mine'),
+          envSecretWorkload('extra', 'theirs', { includeWhen: '{{inputs.enabled}}' }),
+        ],
+      },
+      status: { phase: 'active' },
+    } as Partial<WorkflowRecipeCRD>)
+    expect(rec.effectiveObservationView(recipe).spec.workloads?.map(w => w.id)).toEqual([
+      'api',
+      'extra',
+    ])
   })
 
   it('classic gate notes the enforced signature; teardown failure notes repairPending', async () => {
