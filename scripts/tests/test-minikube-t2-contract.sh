@@ -645,8 +645,19 @@ fi
 # Exercise the adjudicator with representative failure statuses without Docker
 # or Kubernetes; every one must fail the suite despite the green JSON payload.
 t1_exit_root="$tmp/t1-exit-adjudicator"
-mkdir -p "$t1_exit_root/control-api/test"
+mkdir -p "$t1_exit_root/control-api/test" "$t1_exit_root/scripts/ci"
 printf 'fixture\n' >"$t1_exit_root/control-api/test/fake.realPostgres.test.ts"
+# run_suite reads the private producer suites from the suite contract first.
+printf 'fixture\n' >"$t1_exit_root/control-api/test/privateA.realPostgres.test.ts"
+printf 'fixture\n' >"$t1_exit_root/control-api/test/privateB.realPostgres.test.ts"
+cat >"$t1_exit_root/scripts/ci/password-recovery-suite-contract.mjs" <<'EOF'
+if (process.argv[2] === 'verify') process.exit(0)
+if (process.argv[2] === 'private' && process.argv[3] === 'all') {
+  console.log('test/privateA.realPostgres.test.ts\ntest/privateB.realPostgres.test.ts')
+  process.exit(0)
+}
+process.exit(2)
+EOF
 for exit_code in 1 2 7 126 137; do
   if EXIT_CODE="$exit_code" T1_EXIT_ROOT="$t1_exit_root" bash -c '
     set -euo pipefail

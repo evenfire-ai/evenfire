@@ -19,6 +19,8 @@
  *     measured, so a secret split by `maxBytes`, by the budget fit or by a
  *     model-chosen `offset` is masked on both sides (jozer-rami M2). The
  *     loop's per-page sanitizer still runs on the result.
+ *   - `reader:'pdf'` / `reader:'xlsx'`: a typed binary result pointing to
+ *     `clerum__document_read` (#656); the bytes are never decoded here.
  *   - `reader:'none'`: a typed binary result; the bytes are never decoded.
  *
  * The text-or-binary rule is the one `clerum__gfs_read` applies
@@ -88,6 +90,13 @@ export type AttachmentReadResult =
     }
   | {
       attachmentId: string
+      referenceId: FileReferenceV1['id']
+      kind: 'binary'
+      reader: 'pdf' | 'xlsx'
+      reason: 'read_with_document_read'
+    }
+  | {
+      attachmentId: string
       referenceId?: FileReferenceV1['id']
       kind: 'read_budget_exhausted'
       resumeOffset: number
@@ -115,7 +124,7 @@ interface ByteRedaction {
 
 // The replacement `applyRedactionRanges` uses when overlapping ranges carry
 // different replacements.
-const MIXED_REDACTION = '[REDACTED]'
+export const MIXED_REDACTION = '[REDACTED]'
 
 const isHighSurrogate = (code: number): boolean => code >= 0xd800 && code <= 0xdbff
 const isLowSurrogate = (code: number): boolean => code >= 0xdc00 && code <= 0xdfff
@@ -232,6 +241,7 @@ export class AttachmentReadTool implements Tool {
       `A page holds at most maxBytes (default ${this.maxBytesPerCall} bytes) and ends earlier when the page or turn budget binds; ` +
       'when truncated is true, limit names the bound that ended the page and nextOffset is where the next page starts. ' +
       'Pass a smaller maxBytes to read less at a time. ' +
+      'Files with reader=pdf or reader=xlsx are read with clerum__document_read instead. ' +
       'Files the native UTF-8 reader cannot interpret return a binary result without content; ' +
       'say this tool cannot read the file instead of guessing its content. ' +
       'Reading is current-turn only: page and turn budgets bound each response, and when they are exhausted ' +
@@ -336,6 +346,25 @@ export class AttachmentReadTool implements Tool {
       })
     }
 
+    // #656 — PDF and XLSX have their own reader; their bytes are never
+    // decoded here. The Host built the reference's byteLength from them.
+    if (reference.reader === 'pdf' || reference.reader === 'xlsx') {
+      return this.ok(
+        {
+          ...identity,
+          kind: 'binary',
+          reader: reference.reader,
+          reason: 'read_with_document_read',
+        },
+        start,
+        {
+          identity,
+          offset,
+          fileBytes: reference.byteLength,
+          unavailableReason: 'read_with_document_read',
+        }
+      )
+    }
     if (reference.reader === 'none') {
       return this.ok(
         { ...identity, kind: 'binary', reader: 'none', reason: 'no_reader_for_class' },
@@ -595,6 +624,7 @@ export class AttachmentReadTool implements Tool {
         | 'no_reader_for_class'
         | 'text_decode_rejected'
         | 'bytes_unavailable_after_restart'
+        | 'read_with_document_read'
     }
   ): ToolOutput {
     const content = JSON.stringify(result)

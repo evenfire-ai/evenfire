@@ -2,21 +2,39 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LIMITS as CODEX_LIMITS } from '@clerum/llm-provider-attempt-contract'
 import { config as appConfig } from '../../config'
 import { LlmPortAdapter } from '../../core/adapters/llmPortAdapter'
+import { AttachmentReadLedger } from '../../core/attachments/attachmentReadBudget'
 import { makeFakeConversation } from '../../core/conversation/__testing__/makeFakeConversation'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { LlmError, LlmErrorCode } from '../../core/errors'
 import { PressureContextManager } from '../../core/extensions/contextManager'
+import type { RequestImageUsage } from '../../core/interfaces'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
 import { parseCodexToolPresentation } from '../../core/orchestration/toolPresentationPolicy'
 import { executeSingleTool, runToolUseLoop } from '../../core/orchestration/toolUseLoop'
+import { executeSingleTool as executeSingleToolDirect } from '../../core/orchestration/toolUseLoopSingleTool'
 import { TOOL_DISCOVERY_TEXT } from '../../core/reasoning/promptBuilder'
 import { registerDesktopTools } from '../../core/tools/desktopTools'
+import { DocumentReadTool } from '../../core/tools/documentRead'
+import {
+  admittedFile,
+  documentLimits,
+  imageOnlyPdf,
+  witnessCode,
+} from '../../core/tools/documentRead/__tests__/fixtures'
+import type { RunDocumentJob } from '../../core/tools/documentRead/types'
 import {
   requestEffectiveWorkflowList,
   resolveEffectiveWorkflowTarget,
 } from '../../core/tools/workflowEffectiveTargets'
-import type { Attachment, ChatMessage, MessageContentPart, TraceContextV1 } from '../../core/types'
+import type {
+  Attachment,
+  ChatMessage,
+  MessageContentPart,
+  ToolResult,
+  TraceContextV1,
+} from '../../core/types'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
+import { PNG_2X2_BASE64 } from '../../llm/__tests__/codexImageFixtures'
 import { anthropicApiError } from '../../llm/__tests__/sdkErrorFixtures'
 import { ClaudeProvider } from '../../llm/claude'
 import { FailoverEngine } from '../../llm/failover/engine'
@@ -25,6 +43,8 @@ import { OpenAIProvider } from '../../llm/openai'
 import { PromptCache } from '../../llm/promptCache'
 import { logger } from '../../logger'
 import type { Task, TaskError, TaskSource } from '../../queue/types'
+import { resolveOfficialVisualDeliveryLimits } from '../../visualInput/deliveryLimits'
+import { VisualInputBudget } from '../../visualInput/policy'
 import { resolveProviderWorkflowCallerContext } from '../../workflow/providerWorkflowCallerContextClient'
 import { TaskExecutor, type TaskExecutorDeps, executionModeForSource } from '../taskExecutor'
 
@@ -970,6 +990,125 @@ describe('TaskExecutor', () => {
     expect(runToolUseLoop).toHaveBeenCalledTimes(2)
     expect(executor.executorState).toBe('completed')
     expect(deps.onComplete).toHaveBeenCalledTimes(1)
+  })
+
+  it('R2-L2: a resumed visual read receives the images already in its frozen request', async () => {
+    const file = admittedFile('resume-scan', await imageOnlyPdf(witnessCode()), 'application/pdf')
+    const runJob: RunDocumentJob = async () => {
+      throw new Error('a request at its image-slot limit must pause before the worker')
+    }
+    const reader = new DocumentReadTool(
+      { ...createTask('Read the scan').sourceMessage!, attachments: [file] },
+      {
+        contextWindowTokens: 20_000,
+        ledger: new AttachmentReadLedger(),
+        redactor: { toolOutputRedactionRanges: () => [] },
+        runJob,
+        limits: documentLimits(),
+      }
+    )
+    const snapshot: ChatMessage[] = [
+      {
+        role: 'user',
+        content: 'Earlier rendered pages',
+        contentParts: [
+          { type: 'text', text: 'Earlier rendered pages' },
+          ...Array.from({ length: 20 }, (_, index) => ({
+            type: 'image' as const,
+            mimeType: 'image/png' as const,
+            data: PNG_2X2_BASE64,
+            // Above the many-image dimension threshold with the model's image
+            // count already spent: this read has no free slot.
+            width: 2_048,
+            height: 2_048,
+            source: {
+              kind: 'tool' as const,
+              attachmentId: `earlier-${index}`,
+              toolCallId: 'call-earlier',
+            },
+          })),
+        ],
+      },
+    ]
+    vi.mocked(runToolUseLoop)
+      .mockResolvedValueOnce({
+        type: 'need_approval',
+        approval: {
+          request_id: 'req-document-resume',
+          tool_name: reader.name(),
+          parameters: { attachmentId: file.id, mode: 'visual' },
+          description: 'Read the scanned page',
+          tool_call_id: 'call-document-resume',
+          context_snapshot: snapshot,
+        },
+      } as any)
+      .mockResolvedValueOnce({ type: 'response', content: 'Done' } as any)
+
+    let resumed: ToolResult | undefined
+    let forwardedRequestImages: RequestImageUsage | undefined
+    vi.mocked(executeSingleTool).mockImplementationOnce(
+      async (call, config, iteration, transform, requestImages) => {
+        forwardedRequestImages = requestImages
+        const result = await executeSingleToolDirect(
+          call,
+          {
+            ...config,
+            toolRegistry: {
+              get: name => (name === reader.name() ? reader : null),
+              listDefinitions: () => [],
+              register: vi.fn(),
+            },
+            visualInput: {
+              budget: new VisualInputBudget(),
+              resolveCapability: async () => ({
+                status: 'supported' as const,
+                provider: 'anthropic',
+                model: 'claude-test',
+                evidence: 'unit fixture',
+                deliveryLimits: resolveOfficialVisualDeliveryLimits(
+                  'claude',
+                  'https://api.anthropic.com/',
+                  'completeWithTools'
+                )!,
+              }),
+            },
+          },
+          iteration,
+          transform,
+          requestImages
+        )
+        resumed = result
+        return result
+      }
+    )
+
+    const deps = createDeps()
+    const task = createTask('Read the scan')
+    const executor = new TaskExecutor(task, deps)
+
+    await executor.run()
+    expect(executor.executorState).toBe('waiting_approval')
+    expect(vi.mocked(executeSingleTool)).not.toHaveBeenCalled()
+
+    await executor.resumeAfterApproval(false)
+
+    expect(vi.mocked(executeSingleTool)).toHaveBeenCalledTimes(1)
+    // This is the datum taskExecutor must forward from the frozen snapshot.
+    expect(forwardedRequestImages).toEqual({
+      images: 20,
+      bytes: 20 * Buffer.from(PNG_2X2_BASE64, 'base64').length,
+      maxSide: 2_048,
+    })
+    expect(resumed?.is_error).toBe(false)
+    expect(JSON.parse(resumed!.rawContent ?? resumed!.content)).toMatchObject({
+      status: 'read_budget_exhausted',
+      attachmentId: file.id,
+      message: expect.stringContaining('The current request already carries as many images'),
+    })
+    // Witness: the approval resume ran to completion with the visual read's result.
+    expect(executor.executorState).toBe('completed')
+    expect(deps.onComplete).toHaveBeenCalledTimes(1)
+    expect(runToolUseLoop).toHaveBeenCalledTimes(2)
   })
 
   it('U5: a 401 on resume re-suspends as connect_required, then re-executes on connect (no double approval)', async () => {

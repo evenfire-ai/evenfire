@@ -4,7 +4,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 const { describe, it } = require('node:test')
-const { classifyBytes } = require('./fileClassifier.cjs')
+const { FILE_CLASSES, MEDIA_TYPE_BY_CLASS, classifyBytes } = require('./fileClassifier.cjs')
 const {
   FILE_REFERENCE_MAX_COUNT,
   FILE_REFERENCE_SCHEMA_VERSION,
@@ -15,7 +15,7 @@ const {
   quotePromptValue,
 } = require('./fileReference.cjs')
 
-const EXPECTED_VECTOR_COUNT = 45
+const EXPECTED_VECTOR_COUNT = 53
 const { vectors } = JSON.parse(
   fs.readFileSync(path.join(__dirname, 'fixtures', 'file-reference-vectors.v1.json'), 'utf8')
 )
@@ -143,9 +143,70 @@ describe('builders', () => {
       classification: declared,
     })
     assert.equal(built.ok, true, built.ok ? '' : built.message)
+    assert.equal(built.value.reader, 'none')
     assert.equal(built.value.id, `gfs:personal:${RID}@v7`)
     assert.equal(built.value.detection, 'declared')
     assert.equal(built.value.digest, undefined)
+  })
+
+  // A Host older than the document reader accepts only `text` or `none` on any reference.
+  it('names only the text reader on a gfs reference for every class', () => {
+    const extensionByClass = {
+      text: 'txt',
+      markdown: 'md',
+      html: 'html',
+      code: 'ts',
+      svg: 'svg',
+      jpeg: 'jpg',
+      png: 'png',
+      pdf: 'pdf',
+      docx: 'docx',
+      xlsx: 'xlsx',
+      binary_unsupported: 'bin',
+    }
+    assert.deepEqual(Object.keys(extensionByClass).sort(), [...FILE_CLASSES].sort())
+    for (const fileClass of FILE_CLASSES) {
+      const name = `f.${extensionByClass[fileClass]}`
+      const declared = classifyBytes({
+        bytes: new Uint8Array(0),
+        totalByteLength: 2048,
+        declaredMediaType: MEDIA_TYPE_BY_CLASS[fileClass],
+        filename: name,
+      })
+      assert.equal(declared.class, fileClass)
+      const built = buildGfsFileReference({
+        drive: 'personal',
+        resourceId: RID,
+        gfsUri: `gfs://personal/${RID}`,
+        version: 1,
+        name,
+        declaredMediaType: MEDIA_TYPE_BY_CLASS[fileClass],
+        byteLength: 2048,
+        classification: declared,
+      })
+      assert.equal(built.ok, true, built.ok ? '' : built.message)
+      assert.equal(built.value.reader, declared.textReadable ? 'text' : 'none', fileClass)
+    }
+  })
+
+  it('keeps the document reader on an attachment reference', () => {
+    const declared = classifyBytes({
+      bytes: new Uint8Array(0),
+      totalByteLength: 2048,
+      declaredMediaType: 'application/pdf',
+      filename: 'q3.pdf',
+    })
+    const built = buildAttachmentFileReference({
+      attachmentId: 'att-1',
+      messageId: 'msg-1',
+      name: 'q3.pdf',
+      declaredMediaType: 'application/pdf',
+      byteLength: 2048,
+      digestHex: HEX,
+      classification: declared,
+    })
+    assert.equal(built.ok, true, built.ok ? '' : built.message)
+    assert.equal(built.value.reader, 'pdf')
   })
 
   it('normalizes an NFD gfs name to NFC, which the parser then accepts', () => {

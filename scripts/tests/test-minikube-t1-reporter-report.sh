@@ -284,19 +284,35 @@ PY
   #    stderr, sanitized. run_suite runs under set -e, as in production.
   run_project="$TEST_DIR/run-project"
   run_file="$run_project/control-api/early.realPostgres.test.ts"
-  mkdir -p "$run_project/control-api"
+  mkdir -p "$run_project/control-api/test" "$run_project/scripts/ci"
   printf 'fixture\n' >"$run_file"
+  # The private password-recovery producer suites match the real-Postgres glob
+  # but need a producer T1 does not have; run_suite must leave them out.
+  private_a='test/privateProducerA.realPostgres.integration.test.ts'
+  private_b='test/privateProducerB.realPostgres.integration.test.ts'
+  printf 'fixture\n' >"$run_project/control-api/$private_a"
+  printf 'fixture\n' >"$run_project/control-api/$private_b"
+  cat >"$run_project/scripts/ci/password-recovery-suite-contract.mjs" <<EOF
+if (process.argv[2] === 'verify') process.exit(0)
+if (process.argv[2] === 'private' && process.argv[3] === 'all') {
+  console.log('$private_a\n$private_b')
+  process.exit(0)
+}
+process.exit(2)
+EOF
   run_password='RunPlain9Secret'
   run_bearer='FixtureRunBearer8'
   npm_marker="$TEST_DIR/npm-ran"
+  npm_args="$TEST_DIR/npm-args"
   PROJECT_DIR="$run_project"
   T1_TMP_DIR="$TEST_DIR/run-tmp"
   mkdir -p "$T1_TMP_DIR"
   RUN_FILE="$run_file" RUN_DSN_SCHEME="$dsn_scheme" RUN_BEARER="$run_bearer" NPM_MARKER="$npm_marker"
-  RUN_PASSWORD="$run_password"
-  export RUN_FILE RUN_DSN_SCHEME RUN_BEARER NPM_MARKER RUN_PASSWORD
+  RUN_PASSWORD="$run_password" NPM_ARGS="$npm_args"
+  export RUN_FILE RUN_DSN_SCHEME RUN_BEARER NPM_MARKER RUN_PASSWORD NPM_ARGS
   npm() {
     local output_file=''
+    printf '%s\n' "$@" >"$NPM_ARGS"
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --outputFile=*) output_file="${1#--outputFile=}" ;;
@@ -351,6 +367,8 @@ PY
   ' bash "$dsn_scheme://isolated" >"$TEST_DIR/run-suite.out" 2>"$run_err"
   run_status=$?
   [ -s "$npm_marker" ] || fail 'the npm stand-in never ran (liveness witness missing)'
+  grep -Fxq 'early.realPostgres.test.ts' "$npm_args" || fail 'run_suite did not pass the public suite to Vitest'
+  grep -Fq 'privateProducer' "$npm_args" && fail 'run_suite passed a private producer suite to Vitest'
   grep -Fq 'REAL_PG_SUITE_FAILED' "$run_err" || fail 'run_suite did not fail on the failing reporter'
   [ "$run_status" -ne 0 ] || fail 'run_suite returned success on a failing reporter'
   grep -Fq "FAILED FILE: $run_file" "$run_err" \

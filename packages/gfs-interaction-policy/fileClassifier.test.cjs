@@ -6,7 +6,7 @@ const path = require('node:path')
 const { describe, it } = require('node:test')
 const { classifyBytes, FILE_CLASSES, MEDIA_TYPE_BY_CLASS } = require('./fileClassifier.cjs')
 
-const EXPECTED_VECTOR_COUNT = 38
+const EXPECTED_VECTOR_COUNT = 48
 const { vectors } = JSON.parse(
   fs.readFileSync(path.join(__dirname, 'fixtures', 'classifier-vectors.v1.json'), 'utf8')
 )
@@ -65,7 +65,7 @@ describe('classifyBytes', () => {
     })
     assert.equal(result.class, 'pdf')
     assert.equal(result.textReadable, false)
-    assert.equal(result.reader, 'none')
+    assert.equal(result.reader, 'pdf')
   })
 
   it('ignores media type parameters and case', () => {
@@ -77,6 +77,62 @@ describe('classifyBytes', () => {
     })
     assert.equal(result.class, 'markdown')
     assert.equal(result.mismatch, false)
+  })
+})
+
+describe('a password-protected workbook', () => {
+  // Made once with msoffcrypto-tool from a one-sheet ExcelJS workbook
+  // (password "fixture-password"). It is a CFB container, not a zip.
+  const encrypted = new Uint8Array(
+    fs.readFileSync(path.join(__dirname, 'fixtures', 'encrypted-workbook.xlsx'))
+  )
+  const classify = (bytes, filename, declaredMediaType) =>
+    classifyBytes({ bytes, totalByteLength: bytes.length, declaredMediaType, filename })
+
+  it('is a real CFB file holding both encryption streams', () => {
+    assert.deepEqual(
+      [...encrypted.subarray(0, 8)],
+      [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]
+    )
+    const text = Buffer.from(encrypted).toString('utf16le')
+    assert.ok(text.includes('EncryptionInfo'))
+    assert.ok(text.includes('EncryptedPackage'))
+  })
+
+  it('reaches the xlsx reader when declared as a workbook', () => {
+    const result = classify(encrypted, 'locked.xlsx', MEDIA_TYPE_BY_CLASS.xlsx)
+    assert.equal(result.class, 'xlsx')
+    assert.equal(result.reader, 'xlsx')
+    assert.equal(result.detection, 'magic')
+    assert.equal(result.mismatch, false)
+  })
+
+  it('stays unsupported without a declaration', () => {
+    const result = classify(encrypted, null, null)
+    assert.equal(result.class, 'binary_unsupported')
+    assert.equal(result.reader, 'none')
+  })
+
+  it('stays unsupported with a mismatch once the encryption stream is gone', () => {
+    const marker = Buffer.from('EncryptedPackage', 'utf16le')
+    const altered = Buffer.from(encrypted)
+    // The name appears in the directory entry and in the DataSpaces map.
+    let replaced = 0
+    for (let at = altered.indexOf(marker); at >= 0; at = altered.indexOf(marker, at + 1)) {
+      Buffer.from('OrdinaryPackage!', 'utf16le').copy(altered, at)
+      replaced += 1
+    }
+    assert.ok(replaced > 0, 'the fixture holds the EncryptedPackage stream name')
+    const result = classify(new Uint8Array(altered), 'locked.xlsx', MEDIA_TYPE_BY_CLASS.xlsx)
+    assert.equal(result.class, 'binary_unsupported')
+    assert.equal(result.mismatch, true)
+  })
+
+  it('leaves an unencrypted workbook classified by its zip entries', () => {
+    const plain = vectors.find(vector => vector.name === 'xlsx by zip entries')
+    const result = classify(bytesOf(plain), 'sheet.xlsx', MEDIA_TYPE_BY_CLASS.xlsx)
+    assert.equal(result.class, 'xlsx')
+    assert.equal(result.detection, 'magic')
   })
 })
 

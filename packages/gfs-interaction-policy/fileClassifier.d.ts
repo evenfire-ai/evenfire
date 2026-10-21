@@ -15,12 +15,15 @@ export type FileClassFamily = 'text' | 'image' | 'document_binary' | 'binary_uns
 
 export type FileDetection = 'magic' | 'text_utf8' | 'declared'
 
+/** The reader the Host uses for a class: UTF-8 text, a document reader, or none. */
+export type FileReader = 'text' | 'pdf' | 'xlsx' | 'none'
+
 export interface FileClassification {
   class: FileClass
   detectedMediaType: string
   detection: FileDetection
   textReadable: boolean
-  reader: 'text' | 'none'
+  reader: FileReader
   modelImageInput: 'candidate' | 'unsupported'
   /** The detected family differs from the one the declared media type or the extension implies. */
   mismatch: boolean
@@ -36,7 +39,8 @@ export declare const MEDIA_TYPE_BY_CLASS: Readonly<Record<FileClass, string>>
  * `detection: 'declared'` is returned only for a prefix shorter than 64 KiB
  * (including an empty one) that carries no signature and no evidence against
  * the declared media type or extension. Every other result is decided by the
- * bytes, and the declared type only breaks ties inside the text family.
+ * bytes. The declared type breaks ties inside the text family and selects
+ * XLSX or DOCX for an encrypted OOXML container whose subtype is hidden.
  */
 export declare function classifyBytes(input: {
   bytes: Uint8Array

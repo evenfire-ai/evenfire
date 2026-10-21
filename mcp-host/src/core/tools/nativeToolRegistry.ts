@@ -40,6 +40,9 @@ import type { SpilloverStorage } from '../spillover'
 import { ToolDefinition, ToolOutput } from '../types'
 import { AttachmentReadTool } from './attachmentRead'
 import { CronManageTool } from './cronManage'
+import { DocumentReadTool } from './documentRead'
+import { DEFAULT_DOCUMENT_READ_LIMITS } from './documentRead/types'
+import { runDocumentJob } from './documentRead/workerRunner'
 import { FileReadTool } from './fileRead'
 import { FileWriteTool } from './fileWrite'
 import { buildGeneratedArtifactAttachment } from './generatedArtifactAttachments'
@@ -413,6 +416,25 @@ export class NativeToolRegistry implements ToolRegistry {
       this.register(
         new AttachmentReadTool(sourceMessage, maxBytes, { contextWindowTokens, ledger, redactor })
       )
+      // #656 — PDF and XLSX attachments are read by `clerum__document_read`,
+      // which draws from the same turn ledger.
+      if (
+        sourceMessage.attachments.some(
+          a =>
+            a.kind === 'file' &&
+            (a.fileReference?.reader === 'pdf' || a.fileReference?.reader === 'xlsx')
+        )
+      ) {
+        this.register(
+          new DocumentReadTool(sourceMessage, {
+            contextWindowTokens,
+            ledger,
+            redactor,
+            runJob: runDocumentJob,
+            limits: DEFAULT_DOCUMENT_READ_LIMITS,
+          })
+        )
+      }
     }
 
     const envGetter = (key: string): string | undefined => {

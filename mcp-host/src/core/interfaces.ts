@@ -74,6 +74,17 @@ export interface ToolTraceDescriptor {
   sourceRef: string | null
 }
 
+export interface RequestImageUsage {
+  images: number
+  /** Decoded image bytes. */
+  bytes: number
+  /**
+   * Longest side of any image already in the request, or Infinity when one
+   * carries no geometry; 0 when there is none.
+   */
+  maxSide: number
+}
+
 /**
  * Passed to Tool.execute() for tools that stream output during execution.
  * Tools that opt in (via supportsProgressOutput() === true) call onOutput()
@@ -86,6 +97,13 @@ export interface ExecutionContext {
   timeoutMs?: number
   signal?: AbortSignal
   visualInput?: VisualInputContext
+  /**
+   * Images the model request already carries when this call runs: every image
+   * part of the conversation plus the images of earlier results in this batch.
+   * An upper bound (no deduplication). Absent when the caller has no request
+   * context.
+   */
+  requestImages?: RequestImageUsage
   /** Pure estimate of the complete sanitized/wrapped message for this call. */
   measureResult?: (content: string) => number
   /**
