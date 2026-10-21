@@ -785,6 +785,24 @@ describe('ownership signatures (#1016 §3.4)', () => {
     const result = await rec.reconcile(steadyRecipe())
     expect(result.cadence?.repairPending).toBe(false)
   })
+
+  // RP-004: a returned (not thrown) failure must not leave a replayable record
+  // that under-states the blocks, or T3 stops escalating until the T1 backstop.
+  it('an unsettled (repairPending) pass drops the DNS-block record; a settled one keeps it', async () => {
+    const recipe = steadyRecipe()
+    const healthy = newReconciler()
+    stubWorkflowReconciler(healthy)
+    await healthy.reconcile(structuredClone(recipe))
+    expect(healthy.dnsBlockRecordFor(recipe.metadata.name)).toBeDefined()
+
+    const pending = newReconciler()
+    stubWorkflowReconciler(pending, {
+      refreshRuntimeHttpEgressNetworkPolicies: vi.fn().mockResolvedValue({ retryPending: true }),
+    })
+    const result = await pending.reconcile(structuredClone(recipe))
+    expect(result.cadence?.repairPending).toBe(true)
+    expect(pending.dnsBlockRecordFor(recipe.metadata.name)).toBeUndefined()
+  })
 })
 
 // ─── T3 egress lane: refreshDnsBlocks (#1016, spec §3.3) ─────────────────────

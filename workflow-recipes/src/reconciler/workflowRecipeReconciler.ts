@@ -28,7 +28,11 @@ import {
   TRANSPORT_NETWORK_CONDITION_TYPE,
   hasPendingTransportNetworkReadiness,
 } from '../recipePredicates'
-import type { ReconcileCadenceOutput, ReconcileTrigger } from '../reconcileCadence'
+import {
+  type ReconcileCadenceOutput,
+  type ReconcileTrigger,
+  isSettledResult,
+} from '../reconcileCadence'
 import {
   ConfigMapResourceDef,
   CronJobDef,
@@ -2073,6 +2077,12 @@ export class WorkflowRecipeReconciler {
       ...(ctx.stale && { stale: true }),
     }
     this.requeueForPendingLegacyNetworkPolicyDelete(recipe, result)
+    if (!isSettledResult(result)) {
+      // An unsettled pass (e.g. a returned DNS-build failure with repair pending)
+      // may have recorded fewer blocks than it should replay; drop the record so
+      // the next T3 tick reads 'stale' and escalates, as before #1016.
+      this.dnsBlockRecordMap.delete(recipe.metadata.name)
+    }
     result.pluginWorkloadSdkProjection = this.projectPluginWorkloadSdk(recipe, result)
     createLogger('wrc', recipe.metadata.name).info('recipe reconciliation completed', {
       recipe: recipe.metadata.name,
