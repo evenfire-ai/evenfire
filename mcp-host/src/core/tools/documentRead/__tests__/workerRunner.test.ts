@@ -1,13 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { type ChildProcess, spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { logger } from '../../../../logger'
+import { DOCUMENT_CHILD_VIRTUAL_RESERVE_BYTES } from '../documentMemory'
 import * as oomScore from '../oomScore'
 import { oomVictimMarker } from '../oomScore'
 import * as residentMemory from '../residentMemory'
 import { residentMemorySampler } from '../residentMemory'
 import type { DocumentJob, DocumentJobOutcome } from '../types'
-import { runDocumentJob } from '../workerRunner'
+import { rlimitDataEnforced, runDocumentJob, workerSpawnCommand } from '../workerRunner'
 import {
   documentLimits,
   emptyWorkbook,
@@ -16,6 +20,16 @@ import {
   valuesWorkbook,
   witnessCode,
 } from './fixtures'
+
+const MIB = 1_048_576
+const temporaryRoots: string[] = []
+
+// The RLIMIT_DATA premise reads a fixed absolute sysfs path. Delegate to the
+// real filesystem unless a case overrides the next read.
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  return { ...actual, readFile: vi.fn(actual.readFile) }
+})
 
 const childObservation = vi.hoisted(() => ({
   observe: undefined as ((child: ChildProcess) => void) | undefined,
@@ -71,6 +85,9 @@ async function control(): Promise<void> {
 }
 
 afterEach(async () => {
+  await Promise.all(
+    temporaryRoots.splice(0).map(root => rm(root, { recursive: true, force: true }))
+  )
   childObservation.observe = undefined
   vi.restoreAllMocks()
   const children = vi
@@ -519,5 +536,97 @@ describe('document reader child runner', () => {
       })
     )) as DocumentJobOutcome<DocumentJob>
     expect(outcome).toMatchObject({ ok: true, pageCount: 1 })
+  })
+
+  it('spawns through a data-limited shell only on Linux', () => {
+    const residentBytes = 130 * MIB + 1
+    const expectedKiB = Math.ceil((residentBytes + DOCUMENT_CHILD_VIRTUAL_RESERVE_BYTES) / 1_024)
+    const linux = workerSpawnCommand('linux', residentBytes, 256)
+    const darwin = workerSpawnCommand('darwin', residentBytes, 256)
+    expect(linux.file).toBe('/bin/sh')
+    expect(linux.args.slice(0, 5)).toEqual([
+      '-c',
+      'ulimit -d "$0" && exec "$@"',
+      String(expectedKiB),
+      process.execPath,
+      '--max-old-space-size=256',
+    ])
+    // "$@" preserves the multiline source bootstrap as one argument.
+    expect(linux.args.slice(5)).toEqual(darwin.args.slice(1))
+    expect(darwin.file).toBe(process.execPath)
+    expect(darwin.args[0]).toBe('--max-old-space-size=256')
+    expect(darwin.args.slice(1)).not.toHaveLength(0)
+  })
+
+  it('requires exactly N in ignore_rlimit_data and fails closed otherwise', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'document-rlimit-'))
+    temporaryRoots.push(root)
+    const parameter = join(root, 'ignore_rlimit_data')
+    const missing = join(root, 'missing')
+    await writeFile(parameter, '  N\n')
+    expect(await rlimitDataEnforced('linux', parameter)).toBe(true)
+    // Liveness: the same file read as Y refuses, so N came from its content.
+    await writeFile(parameter, 'Y\n')
+    expect(await rlimitDataEnforced('linux', parameter)).toBe(false)
+    await writeFile(parameter, 'N\nY\n')
+    expect(await rlimitDataEnforced('linux', parameter)).toBe(false)
+    expect(await rlimitDataEnforced('linux', missing)).toBe(false)
+    expect(await rlimitDataEnforced('darwin', missing)).toBe(true)
+  })
+
+  it('reads the RLIMIT_DATA premise per job and refuses to spawn when ignored', async () => {
+    const bytes = await valuesWorkbook(witnessCode())
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!
+    const premiseRead = vi.mocked(readFile)
+    premiseRead.mockResolvedValueOnce('Y' as never).mockResolvedValueOnce('Y' as never)
+    Object.defineProperty(process, 'platform', { ...descriptor, value: 'linux' })
+    try {
+      expect(await runDocumentJob(job(bytes))).toEqual({
+        ok: false,
+        reason: 'host_memory_unavailable',
+      })
+      expect(await runDocumentJob(job(bytes))).toEqual({
+        ok: false,
+        reason: 'host_memory_unavailable',
+      })
+      // No cache: two jobs read the parameter twice.
+      expect(premiseRead).toHaveBeenCalledTimes(2)
+      expect(premiseRead).toHaveBeenCalledWith(
+        '/sys/module/kernel/parameters/ignore_rlimit_data',
+        'utf8'
+      )
+      expect(spawn).not.toHaveBeenCalled()
+    } finally {
+      Object.defineProperty(process, 'platform', descriptor)
+    }
+    await control()
+    expect(spawn).toHaveBeenCalledTimes(1)
+  })
+
+  it('logs one bounded job line without document content or paths', async () => {
+    const info = vi.spyOn(logger, 'info')
+    await control()
+    const line = info.mock.calls.find(
+      ([, message]: [Record<string, unknown>, string]) => message === 'document reader job finished'
+    )
+    expect(line).toBeDefined()
+    const [fields] = line!
+    const allowed = new Set([
+      'outcome',
+      'limit',
+      'exitSignal',
+      'exitCode',
+      'residentCapBytes',
+      'dataLimitKiB',
+      'maxSampledResidentBytes',
+      'childVmDataBytes',
+    ])
+    expect(Object.keys(fields).every(key => allowed.has(key))).toBe(true)
+    expect(JSON.stringify(fields)).not.toContain('/')
+    expect(fields).toMatchObject({ outcome: 'ok', exitCode: 0, exitSignal: null })
+    expect(typeof fields.residentCapBytes).toBe('number')
+    expect(typeof fields.maxSampledResidentBytes).toBe('number')
+    if (process.platform === 'linux') expect(typeof fields.dataLimitKiB).toBe('number')
+    else expect(fields.dataLimitKiB).toBeNull()
   })
 })

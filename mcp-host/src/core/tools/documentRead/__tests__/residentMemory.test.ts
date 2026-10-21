@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFile } from 'node:fs/promises'
-import { residentMemorySampler } from '../residentMemory'
+import { childVirtualDataBytes, residentMemorySampler } from '../residentMemory'
 
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
@@ -47,5 +47,36 @@ describe('Linux resident-memory sampler', () => {
     expect(await sample(123)).toBe(0)
     vi.mocked(readFile).mockResolvedValueOnce('Name:\tnode\nState:\tR (running)\nVmRSS:\t1024 kB\n')
     expect(await sample(123)).toBe(1_048_576)
+  })
+})
+
+describe('Linux child virtual data', () => {
+  it('reads VmData and omits it for a reaped or exiting process', async () => {
+    vi.mocked(readFile).mockResolvedValueOnce(
+      'Name:\tnode\nState:\tR (running)\nVmData:\t2048 kB\n'
+    )
+    expect(await childVirtualDataBytes(123, 'linux')).toBe(2_097_152)
+    expect(readFile).toHaveBeenLastCalledWith('/proc/123/status', 'utf8')
+    vi.mocked(readFile).mockResolvedValueOnce('State:\tZ (zombie)\n')
+    expect(await childVirtualDataBytes(123, 'linux')).toBeNull()
+    vi.mocked(readFile).mockResolvedValueOnce('Name:\tnode\nState:\tR (running)\nThreads:\t1\n')
+    expect(await childVirtualDataBytes(123, 'linux')).toBeNull()
+    vi.mocked(readFile).mockResolvedValueOnce('Name:\tnode\nState:\tR (running)\n')
+    expect(await childVirtualDataBytes(123, 'linux')).toBeNull()
+  })
+
+  it('leaves macOS without procfs and rejects an unsupported platform', async () => {
+    expect(await childVirtualDataBytes(123, 'darwin')).toBeNull()
+    expect(() => childVirtualDataBytes(123, 'win32')).toThrow(
+      'Unsupported document reader resident memory platform'
+    )
+  })
+
+  it('propagates a kernel read failure and reads a live process afterward', async () => {
+    const reason = new Error('kernel VmData access denied')
+    vi.mocked(readFile).mockRejectedValueOnce(reason)
+    await expect(childVirtualDataBytes(123, 'linux')).rejects.toBe(reason)
+    vi.mocked(readFile).mockResolvedValueOnce('VmData:\t1024 kB\n')
+    expect(await childVirtualDataBytes(123, 'linux')).toBe(1_048_576)
   })
 })

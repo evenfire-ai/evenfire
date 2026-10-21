@@ -1,14 +1,17 @@
 import { type ChildProcess, spawn } from 'node:child_process'
+import { readFile } from 'node:fs/promises'
 import { extname, join } from 'node:path'
 import { serialize } from 'node:v8'
+import { logger } from '../../../logger'
 import {
   DOCUMENT_CGROUP_MARGIN_BYTES,
+  DOCUMENT_CHILD_VIRTUAL_RESERVE_BYTES,
   documentCgroupSampler,
   documentCgroupWorkingSetBytes,
   effectiveDocumentMemoryCaps,
 } from './documentMemory'
 import { oomVictimMarker } from './oomScore'
-import { residentMemorySampler } from './residentMemory'
+import { childVirtualDataBytes, residentMemorySampler } from './residentMemory'
 import type {
   DocumentJob,
   DocumentJobFailure,
@@ -185,6 +188,65 @@ function workerEntry(): string[] {
   return ['-e', bootstrap]
 }
 
+/**
+ * `ignore_rlimit_data=Y` makes Linux ignore RLIMIT_DATA, so the hard child
+ * ceiling would silently disappear. The premise is read on every job and
+ * never cached; an unreadable parameter is indistinguishable from an ignored
+ * limit and fails closed with `host_memory_unavailable`. macOS has no such
+ * knob, and its direct spawn has no data limit.
+ */
+export async function rlimitDataEnforced(
+  platform: NodeJS.Platform,
+  filePath = '/sys/module/kernel/parameters/ignore_rlimit_data'
+): Promise<boolean> {
+  if (platform === 'darwin') return true
+  if (platform !== 'linux') {
+    throw new Error('Unsupported document reader RLIMIT_DATA platform')
+  }
+  try {
+    return (await readFile(filePath, 'utf8')).trim() === 'N'
+  } catch {
+    return false
+  }
+}
+
+/** RLIMIT_DATA in KiB: the resident cap plus the child's non-resident VmData. */
+export function dataLimitKiB(maxResidentBytes: number): number {
+  return Math.ceil((maxResidentBytes + DOCUMENT_CHILD_VIRTUAL_RESERVE_BYTES) / 1_024)
+}
+
+export interface WorkerSpawnCommand {
+  file: string
+  args: string[]
+}
+
+/**
+ * Linux caps the child's data segment from the shell: `ulimit -d` takes KiB,
+ * then `exec "$@"` replaces the shell and preserves each argument exactly,
+ * including the multiline source bootstrap. macOS keeps the direct spawn.
+ */
+export function workerSpawnCommand(
+  platform: NodeJS.Platform,
+  maxResidentBytes: number,
+  maxHeapMb: number
+): WorkerSpawnCommand {
+  const heap = '--max-old-space-size=' + maxHeapMb
+  if (platform === 'linux') {
+    return {
+      file: '/bin/sh',
+      args: [
+        '-c',
+        'ulimit -d "$0" && exec "$@"',
+        String(dataLimitKiB(maxResidentBytes)),
+        process.execPath,
+        heap,
+        ...workerEntry(),
+      ],
+    }
+  }
+  return { file: process.execPath, args: [heap, ...workerEntry()] }
+}
+
 interface WaitingDocumentReader {
   start: () => void
 }
@@ -257,11 +319,15 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
     let sampleCgroupMemory: ReturnType<typeof documentCgroupSampler>
     let markOomVictim: ReturnType<typeof oomVictimMarker>
     let caps: ReturnType<typeof effectiveDocumentMemoryCaps>
+    let rlimitEnforced: boolean
     try {
       sampleResidentMemory = residentMemorySampler(process.platform)
       sampleCgroupMemory = documentCgroupSampler(process.platform)
       markOomVictim = oomVictimMarker(process.platform)
-      caps = effectiveDocumentMemoryCaps(job.limits, await sampleCgroupMemory())
+      rlimitEnforced = await rlimitDataEnforced(process.platform)
+      caps = rlimitEnforced
+        ? effectiveDocumentMemoryCaps(job.limits, await sampleCgroupMemory())
+        : null
     } catch {
       release()
       throw workerFailed()
@@ -269,6 +335,11 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
     if (signal?.aborted) {
       release()
       throw signal.reason
+    }
+    if (!rlimitEnforced) {
+      release()
+      // Linux would ignore the hard ceiling; never run unbounded.
+      return { ok: false, reason: 'host_memory_unavailable' } as DocumentJobOutcome<J>
     }
     if (!caps) {
       release()
@@ -287,6 +358,9 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
       let stopping = false
       let sampling = false
       let residentTimer: ReturnType<typeof setInterval> | undefined
+      let maxSampledResidentBytes = 0
+      let childVmDataBytes: number | null = null
+      let vmDataSampled = false
 
       const cleanup = () => {
         clearTimeout(timer)
@@ -324,10 +398,47 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
       const onExit = (code: number | null, exitSignal: NodeJS.Signals | null) => {
         exited = true
         cleanup()
+        const signaledHeap =
+          !defect &&
+          (exitSignal === 'SIGABRT' || exitSignal === 'SIGKILL' || exitSignal === 'SIGTRAP')
+        const result: 'ok' | 'failure' | 'defect' | 'aborted' = aborted
+          ? 'aborted'
+          : failure
+            ? 'failure'
+            : signaledHeap
+              ? 'failure'
+              : defect || code !== 0 || !outcome
+                ? 'defect'
+                : 'ok'
+        const limit: DocumentLimitName | undefined =
+          result === 'failure'
+            ? (failure?.limit ??
+              (signaledHeap
+                ? 'heap'
+                : outcome !== undefined && !outcome.ok
+                  ? outcome.limit
+                  : undefined))
+            : undefined
+        // One line per job: limits and observed memory only. Never document
+        // content, file paths or the child's error text.
+        logger.info(
+          {
+            outcome: result,
+            ...(limit === undefined ? {} : { limit }),
+            exitSignal,
+            exitCode: code,
+            residentCapBytes: memoryCaps.maxResidentBytes,
+            dataLimitKiB:
+              process.platform === 'linux' ? dataLimitKiB(memoryCaps.maxResidentBytes) : null,
+            maxSampledResidentBytes,
+            ...(typeof childVmDataBytes === 'number' ? { childVmDataBytes } : {}),
+          },
+          'document reader job finished'
+        )
         if (aborted) reject(abortReason)
         else if (failure) resolve(failure as DocumentJobOutcome<J>)
-        else if (!defect && (exitSignal === 'SIGABRT' || exitSignal === 'SIGKILL')) {
-          // V8 heap exhaustion aborts Node; the OS OOM killer uses SIGKILL.
+        else if (signaledHeap) {
+          // V8 heap exhaustion aborts or traps; the OS OOM killer uses SIGKILL.
           resolve({
             ok: false,
             reason: 'document_limits_exceeded',
@@ -353,8 +464,19 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
             return
           }
           const bytes = await sampleResidentMemory(child.pid)
-          if (!stopping && !exited && bytes > memoryCaps.maxResidentBytes) {
-            terminate({ ok: false, reason: 'document_limits_exceeded', limit: 'heap' })
+          if (!stopping && !exited) {
+            maxSampledResidentBytes = Math.max(maxSampledResidentBytes, bytes)
+            if (bytes > memoryCaps.maxResidentBytes) {
+              terminate({ ok: false, reason: 'document_limits_exceeded', limit: 'heap' })
+            } else if (!vmDataSampled && process.platform === 'linux') {
+              // Telemetry only: a read racing the exit omits the field.
+              vmDataSampled = true
+              try {
+                childVmDataBytes = await childVirtualDataBytes(child.pid)
+              } catch {
+                childVmDataBytes = null
+              }
+            }
           }
         } catch {
           // A read racing an observed exit needs no cap. Every failure while
@@ -369,19 +491,20 @@ export const runDocumentJob: RunDocumentJob = <J extends DocumentJob>(
       }
 
       try {
-        child = spawn(
-          process.execPath,
-          ['--max-old-space-size=' + memoryCaps.maxHeapMb, ...workerEntry()],
-          {
-            // The child inherits no environment variables or Node loaders. It
-            // is a memory and time boundary, not a security sandbox: it runs
-            // as the Host's user.
-            env: {},
-            // Dependency diagnostics may contain document data. Discard them.
-            stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
-            serialization: 'advanced',
-          }
+        const command = workerSpawnCommand(
+          process.platform,
+          memoryCaps.maxResidentBytes,
+          memoryCaps.maxHeapMb
         )
+        child = spawn(command.file, command.args, {
+          // The child inherits no environment variables or Node loaders. It
+          // is a memory and time boundary, not a security sandbox: it runs
+          // as the Host's user.
+          env: {},
+          // Dependency diagnostics may contain document data. Discard them.
+          stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+          serialization: 'advanced',
+        })
         child.once('message', (message: DocumentJobOutcome<J>) => {
           try {
             if (!isJobOutcome(job.kind, message)) {

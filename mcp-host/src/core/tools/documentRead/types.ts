@@ -385,20 +385,24 @@ export type DocumentJobOutcome<J extends DocumentJob> = J extends PdfTextJob
     : XlsxOutcome
 
 /**
- * Queues one job per Host process, then runs it in a fresh child. Linux
- * cgroup-v2 headroom narrows configured caps; insufficient admission headroom
- * resolves `{ ok:false, reason:'host_memory_unavailable' }` without spawning,
- * and child/container memory overruns resolve with limit:'heap'. The resident
- * cap is sampled every 25 ms, not a hard per-child limit: on Linux the child
- * is marked `oom_score_adj=1000` so a container OOM kills it before the Host,
- * except where `memory.oom.group=1` kills the whole container. An unreadable
- * or v1 cgroup rejects as a worker defect. macOS uses configured caps.
- * Resolves with the job's outcome; a timeout
- * resolves `{ ok:false, reason:'document_limits_exceeded', limit:'time' }`, a
- * an outcome above `maxOutputBytes`
- * `limit:'output_bytes'`, and any other child crash rejects as a defect.
- * An aborted signal rejects with its reason without spawning while queued,
- * or kills an active child. Implemented by `workerRunner.ts`.
+ * Queues one job per Host process, then runs it in a fresh child. On Linux the
+ * child's data segment is capped with RLIMIT_DATA (its admitted resident cap
+ * plus a fixed non-resident reserve), so an oversized allocation fails inside
+ * the child before the cgroup sees it. The 25 ms resident/cgroup sampler is an
+ * early stop and telemetry, not the hard ceiling. Linux cgroup-v2 headroom
+ * narrows configured caps; insufficient admission headroom, or a kernel with
+ * `ignore_rlimit_data=Y`, resolves
+ * `{ ok:false, reason:'host_memory_unavailable' }` without spawning. Child and
+ * container memory overruns resolve with limit:'heap'. The child is marked
+ * `oom_score_adj=1000`, so a container OOM still prefers it, except where
+ * `memory.oom.group=1` kills the whole container. An unreadable or v1 cgroup
+ * rejects as a worker defect. macOS has no RLIMIT_DATA fence and uses the
+ * configured caps. Resolves with the job's outcome; a timeout resolves
+ * `{ ok:false, reason:'document_limits_exceeded', limit:'time' }`, an outcome
+ * above `maxOutputBytes` resolves `limit:'output_bytes'`, and any other child
+ * crash rejects as a defect. An aborted signal rejects with its reason without
+ * spawning while queued, or kills an active child. Implemented by
+ * `workerRunner.ts`.
  */
 export type RunDocumentJob = <J extends DocumentJob>(
   job: J,

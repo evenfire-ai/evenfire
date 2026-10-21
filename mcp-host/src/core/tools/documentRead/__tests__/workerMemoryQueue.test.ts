@@ -41,7 +41,7 @@ function finish(child: ChildProcess) {
   child.emit('message', {
     ok: true,
     sheetNames: ['Values'],
-    sheets: [{ name: 'Values', startRow: 1, rows: [[42]], truncated: false }],
+    sheets: [{ name: 'Values', startRow: 1, lastRow: 1, rows: [[42]], truncated: false }],
   })
   Object.assign(child, { exitCode: 0 })
   child.emit('exit', 0, null)
@@ -136,11 +136,12 @@ describe('document reader Host memory admission and queue', () => {
     expect(await runDocumentJob(job)).toEqual({ ok: false, reason: 'host_memory_unavailable' })
     expect(sample).toHaveBeenCalledTimes(1)
     expect(spawn).toHaveBeenCalledTimes(0)
-    currentBytes = 256 * MIB
+    currentBytes = 128 * MIB
     const admitted = runDocumentJob(job)
     await vi.waitFor(() => expect(child.send).toHaveBeenCalledTimes(1))
     expect(spawn).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(spawn).mock.calls[0]?.[1]).toContain('--max-old-space-size=128')
+    // 512 - 128 working set - 64 margin - 113 IPC = 207 MiB resident, 143 MiB heap.
+    expect(vi.mocked(spawn).mock.calls[0]?.[1]).toContain('--max-old-space-size=143')
     finish(child)
     expect((await admitted).ok).toBe(true)
   })
@@ -162,8 +163,8 @@ describe('document reader Host memory admission and queue', () => {
     const admitted = runDocumentJob(job)
     await vi.waitFor(() => expect(child.send).toHaveBeenCalledTimes(1))
     expect(spawn).toHaveBeenCalledTimes(1)
-    // 512 - 65 working set - 64 margin = 383 MiB resident, 319 MiB heap.
-    expect(vi.mocked(spawn).mock.calls[0]?.[1]).toContain('--max-old-space-size=319')
+    // 512 - 65 working set - 64 margin - 113 IPC = 270 MiB resident, 206 MiB heap.
+    expect(vi.mocked(spawn).mock.calls[0]?.[1]).toContain('--max-old-space-size=206')
     finish(child)
     expect((await admitted).ok).toBe(true)
   })
@@ -292,5 +293,27 @@ describe('document reader Host memory admission and queue', () => {
     finish(nextChild)
     expect((await next).ok).toBe(true)
     expect(spawn).toHaveBeenCalledTimes(2)
+  })
+
+  it('classifies SIGTRAP as a heap limit and keeps a normal exit successful', async () => {
+    samplers(vi.fn(async () => null))
+    const trapped = childFixture()
+    vi.mocked(spawn).mockReturnValueOnce(trapped)
+    const pending = runDocumentJob(job)
+    await vi.waitFor(() => expect(trapped.send).toHaveBeenCalledTimes(1))
+    Object.assign(trapped, { signalCode: 'SIGTRAP' })
+    trapped.emit('exit', null, 'SIGTRAP')
+    expect(await pending).toEqual({
+      ok: false,
+      reason: 'document_limits_exceeded',
+      limit: 'heap',
+    })
+    // Liveness: the same fixture with a normal exit delivers its outcome.
+    const normal = childFixture()
+    vi.mocked(spawn).mockReturnValueOnce(normal)
+    const control = runDocumentJob(job)
+    await vi.waitFor(() => expect(normal.send).toHaveBeenCalledTimes(1))
+    finish(normal)
+    expect((await control).ok).toBe(true)
   })
 })

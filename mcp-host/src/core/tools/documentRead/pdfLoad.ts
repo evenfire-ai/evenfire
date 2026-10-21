@@ -5,6 +5,7 @@ import type {
   PDFDocumentLoadingTask,
   PDFDocumentProxy,
 } from 'pdfjs-dist/types/src/display/api'
+import { isAllocationError } from './documentMemory'
 import type { DocumentJobFailure, PdfTextJob, PdfVisualJob } from './types'
 
 // tsc rewrites import() to require() in this CommonJS package. This static
@@ -114,6 +115,10 @@ export async function withPdfDocument<T>(
       // pdfjs 6 rejects an oversized embedded image with this fixed error when
       // stopAtErrors is enabled, before it decodes the image stream.
       outcome = { ok: false, reason: 'document_limits_exceeded', limit: 'pixels' }
+    } else if (isAllocationError(error)) {
+      // A failed buffer inside pdf.js is the child's memory ceiling, even when
+      // pdf.js wrapped it in UnknownErrorException.
+      outcome = { ok: false, reason: 'document_limits_exceeded', limit: 'heap' }
     } else if (name !== undefined && PDF_DATA_EXCEPTIONS.has(name)) {
       outcome = { ok: false, reason: 'document_parse_failed' }
     } else {

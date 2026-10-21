@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  DOCUMENT_CHILD_VIRTUAL_RESERVE_BYTES,
+  DOCUMENT_IPC_RESERVE_BYTES,
   documentCgroupSampler,
   documentCgroupWorkingSetBytes,
   effectiveDocumentMemoryCaps,
@@ -134,33 +136,46 @@ describe('document reader cgroup-v2 memory', () => {
   })
 
   it('takes the minimum of configured RSS and headroom, reserving native memory before the heap', () => {
-    const cgroup = { maxBytes: 512 * MIB, currentBytes: 256 * MIB, inactiveFileBytes: 0 }
-    expect(effectiveDocumentMemoryCaps(documentLimits(), cgroup)).toEqual({
-      maxResidentBytes: 192 * MIB,
-      maxHeapMb: 128,
+    const cgroup = { maxBytes: 1024 * MIB, currentBytes: 256 * MIB, inactiveFileBytes: 0 }
+    expect(effectiveDocumentMemoryCaps(documentLimits({ maxHeapMb: 1_024 }), cgroup)).toEqual({
+      maxResidentBytes: 591 * MIB,
+      maxHeapMb: 527,
     })
     expect(effectiveDocumentMemoryCaps(documentLimits({ maxResidentMb: 160 }), cgroup)).toEqual({
       maxResidentBytes: 160 * MIB,
       maxHeapMb: 96,
     })
     expect(effectiveDocumentMemoryCaps(documentLimits({ maxHeapMb: 64 }), cgroup)).toEqual({
-      maxResidentBytes: 192 * MIB,
+      maxResidentBytes: 591 * MIB,
       maxHeapMb: 64,
     })
+  })
+
+  it('reserves the IPC transients on top of the cgroup margin', () => {
+    expect(DOCUMENT_IPC_RESERVE_BYTES).toBe(113 * MIB)
+    expect(DOCUMENT_CHILD_VIRTUAL_RESERVE_BYTES).toBe(512 * MIB)
+    // 512 - 100 working set - 64 margin - 113 IPC = 235 MiB.
+    expect(
+      effectiveDocumentMemoryCaps(documentLimits(), {
+        maxBytes: 512 * MIB,
+        currentBytes: 100 * MIB,
+        inactiveFileBytes: 0,
+      })
+    ).toEqual({ maxResidentBytes: 235 * MIB, maxHeapMb: 171 })
   })
 
   it('refuses below the admission floor and admits its exact boundary', () => {
     expect(
       effectiveDocumentMemoryCaps(documentLimits(), {
         maxBytes: 512 * MIB,
-        currentBytes: 320 * MIB + 1,
+        currentBytes: 207 * MIB + 1,
         inactiveFileBytes: 0,
       })
     ).toBeNull()
     expect(
       effectiveDocumentMemoryCaps(documentLimits(), {
         maxBytes: 512 * MIB,
-        currentBytes: 320 * MIB,
+        currentBytes: 207 * MIB,
         inactiveFileBytes: 0,
       })
     ).toEqual({ maxResidentBytes: 128 * MIB, maxHeapMb: 64 })
@@ -171,8 +186,8 @@ describe('document reader cgroup-v2 memory', () => {
   it('ignores reclaimable inactive file cache when admitting a reader', () => {
     const warm = { maxBytes: 512 * MIB, currentBytes: 468 * MIB, inactiveFileBytes: 403 * MIB }
     expect(effectiveDocumentMemoryCaps(documentLimits(), warm)).toEqual({
-      maxResidentBytes: 383 * MIB,
-      maxHeapMb: 319,
+      maxResidentBytes: 270 * MIB,
+      maxHeapMb: 206,
     })
     // Liveness: the same current with no reclaimable cache must still refuse.
     expect(
@@ -194,6 +209,6 @@ describe('document reader cgroup-v2 memory', () => {
         currentBytes: 100 * MIB,
         inactiveFileBytes: 120 * MIB,
       })
-    ).toEqual({ maxResidentBytes: 448 * MIB, maxHeapMb: 384 })
+    ).toEqual({ maxResidentBytes: 335 * MIB, maxHeapMb: 271 })
   })
 })

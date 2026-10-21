@@ -4,9 +4,18 @@ import type { DocumentReadLimits } from './types'
 
 const MIB = 1_048_576
 
-// Reserve room for the Host's concurrent growth and the bounded source/outcome
-// IPC copies (11 MiB + 32 MiB), including growth between 25 ms samples.
+// Reserve room for the Host's own concurrent growth, including growth between
+// 25 ms samples. The transient IPC copies are accounted for separately below.
 export const DOCUMENT_CGROUP_MARGIN_BYTES = 64 * MIB
+// One job's transient Host-side copies: the base64 source decode (11 MiB), the
+// job serialization (11 MiB), the received outcome (32 MiB), the control
+// re-serialization (32 MiB) and the base64 of a 20 MiB PNG (27 MiB). Estimated
+// from the specified caps, not measured.
+export const DOCUMENT_IPC_RESERVE_BYTES = 113 * MIB
+// The non-resident part of the child's base VmData that RLIMIT_DATA must also
+// admit: V8's heap reservation, native mappings and shared libraries. This is
+// an estimate pending calibration on the amd64 image (G1).
+export const DOCUMENT_CHILD_VIRTUAL_RESERVE_BYTES = 512 * MIB
 // V8's old-space cap excludes Node, pdfjs/canvas, buffers and decoded images.
 export const DOCUMENT_NATIVE_ALLOWANCE_BYTES = 64 * MIB
 // Admission requires at least 64 MiB of heap plus the native allowance.
@@ -113,7 +122,10 @@ export function effectiveDocumentMemoryCaps(
     return { maxResidentBytes: configuredResidentBytes, maxHeapMb: limits.maxHeapMb }
   }
   const headroom =
-    cgroup.maxBytes - documentCgroupWorkingSetBytes(cgroup) - DOCUMENT_CGROUP_MARGIN_BYTES
+    cgroup.maxBytes -
+    documentCgroupWorkingSetBytes(cgroup) -
+    DOCUMENT_CGROUP_MARGIN_BYTES -
+    DOCUMENT_IPC_RESERVE_BYTES
   const maxResidentBytes = Math.min(configuredResidentBytes, headroom)
   const maxHeapMb = Math.min(
     limits.maxHeapMb,
@@ -121,4 +133,36 @@ export function effectiveDocumentMemoryCaps(
   )
   if (maxResidentBytes < DOCUMENT_MIN_RESIDENT_BYTES || maxHeapMb < 64) return null
   return { maxResidentBytes, maxHeapMb }
+}
+
+/**
+ * The closed list of allocation failures that mean a memory ceiling, not a
+ * document defect: V8's fatal allocation flag, the RangeError messages Node
+ * and the platform raise for a failed buffer, and the wrapper pdf.js uses.
+ * A wrapper may carry the original error as `cause` up to three levels deep.
+ * This module is the shared, side-effect-free memory boundary for both the
+ * worker and `pdfLoad.ts`.
+ */
+export function isAllocationError(error: unknown): boolean {
+  let current: unknown = error
+  for (let depth = 0; depth <= 3; depth += 1) {
+    if (!(current instanceof Error)) return false
+    if ((current as NodeJS.ErrnoException).code === 'ERR_MEMORY_ALLOCATION_FAILED') return true
+    if (
+      current.name === 'RangeError' &&
+      (current.message === 'Array buffer allocation failed' ||
+        current.message === 'Failed to allocate memory')
+    ) {
+      return true
+    }
+    if (
+      current.name === 'UnknownErrorException' &&
+      (current.message.includes('allocation failed') ||
+        current.message.includes('Failed to allocate memory'))
+    ) {
+      return true
+    }
+    current = current.cause
+  }
+  return false
 }

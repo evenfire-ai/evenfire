@@ -1,7 +1,8 @@
 import { serialize } from 'node:v8'
+import { isAllocationError } from './documentMemory'
 import { renderPdfPages } from './pdfRender'
 import { parsePdfText } from './pdfText'
-import type { DocumentJob, DocumentJobOutcome } from './types'
+import type { DocumentJob, DocumentJobFailure, DocumentJobOutcome } from './types'
 
 async function dispatch(job: DocumentJob): Promise<DocumentJobOutcome<DocumentJob>> {
   switch (job.kind) {
@@ -24,8 +25,21 @@ process.once('message', async (job: DocumentJob) => {
   // Normalize the exact received view without another document-sized copy.
   job.bytes = new Uint8Array(job.bytes.buffer, job.bytes.byteOffset, job.bytes.byteLength)
   // Readers classify document conditions. An escaping exception crashes only
-  // this child, and the parent reports the fixed defect without its text.
-  const outcome = await dispatch(job)
+  // this child, and the parent reports the fixed defect without its text. An
+  // allocation failure is the memory ceiling doing its job, so it becomes the
+  // typed heap limit through the same bounded output path.
+  let outcome: DocumentJobOutcome<DocumentJob>
+  try {
+    outcome = await dispatch(job)
+  } catch (error) {
+    if (!isAllocationError(error)) throw error
+    const failure: DocumentJobFailure = {
+      ok: false,
+      reason: 'document_limits_exceeded',
+      limit: 'heap',
+    }
+    outcome = failure
+  }
   // Measure strings and raw PNG bytes before IPC can copy them into the Host.
   // Serialization and its temporary buffer stay inside the memory-capped child.
   const bounded: DocumentJobOutcome<DocumentJob> =

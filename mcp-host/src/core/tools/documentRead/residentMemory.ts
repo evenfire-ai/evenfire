@@ -46,3 +46,34 @@ function kilobytesToBytes(value: string): number {
   }
   return bytes
 }
+
+/**
+ * Best-effort `VmData` of one reader child, the non-resident part of the
+ * address space that RLIMIT_DATA also counts. A zombie or an exiting process
+ * has already released it, so the sample is omitted instead of reported as
+ * zero; a kernel read that races the exit is the caller's to omit, never a
+ * job defect. macOS has no procfs and returns null.
+ */
+export function childVirtualDataBytes(
+  pid: number,
+  platform: NodeJS.Platform = process.platform
+): Promise<number | null> {
+  switch (platform) {
+    case 'linux':
+      return linuxChildVirtualDataBytes(pid)
+    case 'darwin':
+      return Promise.resolve(null)
+    default:
+      throw new Error('Unsupported document reader resident memory platform')
+  }
+}
+
+async function linuxChildVirtualDataBytes(pid: number): Promise<number | null> {
+  const status = await readFile(`/proc/${pid}/status`, 'utf8')
+  // The same two release windows as the resident sampler: the zombie state,
+  // and the interval before it where the kernel prints no Vm* lines.
+  if (/^State:\s+Z\b/m.test(status)) return null
+  if (/^Name:/m.test(status) && /^State:/m.test(status) && !/^Vm/m.test(status)) return null
+  const data = /^VmData:\s+(\d+)\s+kB$/m.exec(status)
+  return data ? kilobytesToBytes(data[1]) : null
+}
