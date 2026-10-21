@@ -4,7 +4,6 @@ import {
   fetchMeWithCookie,
   readControlApiMetrics,
   readLogoutFence,
-  seedLogoutFence,
   sessionCookieValue,
   signInThroughUi,
 } from './journeys'
@@ -26,10 +25,18 @@ test('J2 recovery link clears the logout fence, revokes the prior session, and l
   expect(validBefore.status).toBe(200)
   expect(validBefore.body).toMatchObject({ id: RECOVERY_MEMBER.id })
 
-  await test.step('logout fence precondition: PROFILE_LOGOUT_UNCONFIRMED_KEY from a previous logout', async () => {
-    await seedLogoutFence(page)
-    expect(await readLogoutFence(page)).toBe('true')
+  await page.route('**/api/v1/auth/logout', route => route.abort('failed'))
+  await test.step('logout fence precondition: unconfirmed logout leaves the recovery fence', async () => {
+    await page.locator('aside').getByRole('button', { name: 'Log out' }).click()
+    await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible()
+    await expect.poll(() => readLogoutFence(page)).toBe('true')
+    // The aborted logout never revoked the server-side session or cleared the
+    // cookie, which is exactly the state the recovery link must recover from.
+    expect(await sessionCookieValue(page)).toBe(priorSession)
   })
+  await page.unroute('**/api/v1/auth/logout')
+  const stillValidAfterLogout = await fetchMeWithCookie(page, priorSession)
+  expect(stillValidAfterLogout.status).toBe(200)
 
   // E2E_GUARDIAN_NAVIGATION: email-reset-entry — the synthetic emailed recovery link
   await page.goto('/invitations/synthetic-reset-proof')

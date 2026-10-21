@@ -729,8 +729,10 @@ jobs:
       - name: Audit live Profile UI recovery Playwright spec
         run: >-
           python3 tools/e2e_static_audit.py
-          tests/e2e/playwright/profile-ui-recovery/reset-session-hydration.spec.ts
-          tests/e2e/playwright/profile-ui-recovery/ordinary-invitation-onboarding.spec.ts
+          tests/e2e/playwright/profile-ui-recovery/j1-invitation-onboarding.spec.ts
+          tests/e2e/playwright/profile-ui-recovery/j2-password-recovery.spec.ts
+          tests/e2e/playwright/profile-ui-recovery/j3-logout.spec.ts
+          tests/e2e/playwright/profile-ui-recovery/negative-routes.spec.ts
 
   # ─── Registry contract — boot evenfire-registry and drive the real client ──
   # Catches wire-format drift in clerumRegistryClient.ts before merge. Requires

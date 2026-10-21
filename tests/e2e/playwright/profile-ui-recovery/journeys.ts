@@ -22,6 +22,7 @@ export const ONBOARDING_MEMBER = {
 
 type ControlApiMetrics = {
   meRequests: Array<{ userId: string }>
+  passwordTokenRequests: Array<{ token: string; invitationId: string }>
   loginSuccesses: Array<{ userId: string }>
   passwordUpdates: Array<{ userId: string; invitationId: string | null }>
   logoutRequests: Array<{ hasToken: boolean }>
@@ -45,7 +46,8 @@ export async function readControlApiMetrics(page: Page): Promise<ControlApiMetri
 
 export async function sessionCookieValue(page: Page): Promise<string | null> {
   const cookies = await page.context().cookies()
-  return cookies.find(cookie => cookie.name === 'profile_session')?.value || null
+  const cookie = cookies.find(candidate => candidate.name === 'profile_session')
+  return cookie ? cookie.value : null
 }
 
 export async function signInThroughUi(page: Page, email: string, password: string) {
@@ -60,10 +62,8 @@ export async function signInThroughUi(page: Page, email: string, password: strin
   expect((await loginResponse).status()).toBe(200)
 }
 
-export async function seedLogoutFence(page: Page): Promise<void> {
-  await page.evaluate(key => window.localStorage.setItem(key, 'true'), LOGOUT_FENCE_KEY)
-}
-
+// Read-only view of the logout fence. The lane never seeds it: J2 produces it
+// through a real logout whose revocation request is aborted.
 export async function readLogoutFence(page: Page): Promise<string | null> {
   return page.evaluate(key => window.localStorage.getItem(key), LOGOUT_FENCE_KEY)
 }
@@ -72,8 +72,9 @@ export async function fetchMeWithCookie(page: Page, cookieValue: string) {
   const response = await page.request.get('/external-rest-api/api/v1/me', {
     headers: { cookie: `profile_session=${cookieValue}` },
   })
+  const text = await response.text()
   return {
     status: response.status(),
-    body: response.ok() ? await response.json() : await response.json().catch(() => null),
+    body: text ? (JSON.parse(text) as unknown) : null,
   }
 }

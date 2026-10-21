@@ -267,6 +267,71 @@ realPg('Profile UI recovery lane fixture parity on PostgreSQL 16', () => {
     }
   })
 
+  it('parities rejected invitation mutations without creating a session', async () => {
+    const rejected = [
+      {
+        path: '/external/invitations/accept',
+        body: {
+          email: fixtureModule.RECOVERY_USERS.usedInvitee.email,
+          token: 'synthetic-used-invitation',
+        },
+        error: 'not_pending',
+      },
+      {
+        path: '/external/invitations/accept',
+        body: {
+          email: fixtureModule.RECOVERY_USERS.recovery.email,
+          token: 'synthetic-reset-proof',
+        },
+        error: 'not_pending',
+      },
+      {
+        path: '/external/invitations/accept',
+        body: {
+          email: fixtureModule.RECOVERY_USERS.onboarding.email,
+          token: 'synthetic-invented-token',
+        },
+        error: 'invalid_invitation',
+      },
+      {
+        path: '/external/invitations/password-token',
+        body: {
+          email: fixtureModule.RECOVERY_USERS.recovery.email,
+          token: 'synthetic-invented-token',
+          invitationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2',
+          password: 'Synthetic-Fixture-Parity-123',
+        },
+        error: 'invalid_invitation',
+      },
+      {
+        path: '/external/invitations/password-token',
+        body: {
+          email: 'wrong-recovery@example.invalid',
+          token: 'synthetic-reset-proof',
+          invitationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2',
+          password: 'Synthetic-Fixture-Parity-123',
+        },
+        error: 'invalid_invitation',
+      },
+      {
+        path: '/external/invitations/password-token',
+        body: {
+          email: fixtureModule.RECOVERY_USERS.recovery.email,
+          token: 'synthetic-reset-proof',
+          invitationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3',
+          password: 'Synthetic-Fixture-Parity-123',
+        },
+        error: 'forbidden',
+      },
+    ]
+    for (const scenario of rejected) {
+      const parity = await expectParity('POST', scenario.path, { body: scenario.body })
+      expect(parity.real.status).toBeGreaterThanOrEqual(400)
+      expect(parity.real.body).toMatchObject({ error: scenario.error })
+      expect(parity.synthetic.body).not.toHaveProperty('token')
+    }
+  })
+
   it('parities accept, authenticated password setup and the resulting session identity', async () => {
     const accepted = await expectParity('POST', '/external/invitations/accept', {
       body: {
@@ -324,6 +389,24 @@ realPg('Profile UI recovery lane fixture parity on PostgreSQL 16', () => {
     expect(fixtureMe.status).toBe(realMe.status)
     expect(bodyShape(fixtureMe.body)).toEqual(bodyShape(realMe.body))
     expect(realMe.status).toBe(200)
+
+    const repeatPayload = {
+      userId: fixtureModule.RECOVERY_USERS.onboarding.id,
+      email: fixtureModule.RECOVERY_USERS.onboarding.email,
+      invitationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1',
+      password: fixtureModule.RECOVERY_PASSWORDS.replacement,
+    }
+    const realRepeat = await requestReal('POST', '/external/invitations/password', {
+      body: repeatPayload,
+      sessionToken: (realLogin.body as { token: string }).token,
+    })
+    const fixtureRepeat = await requestFixture('POST', '/external/invitations/password', {
+      body: repeatPayload,
+      sessionToken: (fixtureLogin.body as { token: string }).token,
+    })
+    expect(fixtureRepeat.status).toBe(realRepeat.status)
+    expect(bodyShape(fixtureRepeat.body)).toEqual(bodyShape(realRepeat.body))
+    expect(realRepeat.status).toBe(200)
 
     const realRevoked = await requestReal(
       'GET',

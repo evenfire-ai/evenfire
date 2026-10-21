@@ -290,15 +290,12 @@ export async function createRecoveryControlApi({
         .toLowerCase()
       metrics.acceptRequests.push({ token })
       const invitation = invitations.get(token)
-      if (!invitation) return { status: 404, body: { error: 'not_found' } }
+      if (!invitation) return { status: 400, body: { error: 'invalid_invitation' } }
       if (invitation.email.toLowerCase() !== email) {
-        return { status: 403, body: { error: 'forbidden' } }
+        return { status: 400, body: { error: 'invalid_invitation' } }
       }
-      if (invitation.purpose === 'password_reset') {
-        return { status: 409, body: { error: 'not_pending' } }
-      }
-      if (invitation.status !== 'pending') {
-        return { status: 409, body: { error: 'not_pending' } }
+      if (invitation.purpose === 'password_reset' || invitation.status !== 'pending') {
+        return { status: 400, body: { error: 'not_pending' } }
       }
       if (Date.parse(invitation.expiresAt) <= Date.now()) {
         return { status: 410, body: { error: 'expired' } }
@@ -328,10 +325,16 @@ export async function createRecoveryControlApi({
       const password = String(body?.password || '')
       metrics.passwordTokenRequests.push({ token, invitationId })
       const invitation = invitations.get(token)
-      if (!invitation || invitation.id !== invitationId) {
+      if (!invitation) {
+        return { status: 400, body: { error: 'invalid_invitation' } }
+      }
+      if (invitation.email.toLowerCase() !== email) {
+        return { status: 400, body: { error: 'invalid_invitation' } }
+      }
+      if (invitation.id !== invitationId) {
         return { status: 403, body: { error: 'forbidden' } }
       }
-      if (invitation.email.toLowerCase() !== email || invitation.purpose !== 'password_reset') {
+      if (invitation.purpose !== 'password_reset') {
         return { status: 409, body: { error: 'invitation_not_pending' } }
       }
       if (invitation.status !== 'pending') {
@@ -375,8 +378,8 @@ export async function createRecoveryControlApi({
       if (!['member_invitation', 'admin_desktop_access'].includes(invitation.purpose)) {
         return { status: 404, body: { error: 'not_found' } }
       }
-      if (invitation.status !== 'accepted' || session.user.passwordHash) {
-        return { status: 409, body: { error: 'invitation_not_pending' } }
+      if (invitation.status !== 'accepted') {
+        return { status: 409, body: { error: 'invitation_not_accepted' } }
       }
       const nextHash = await passwordHash(password)
       if (!nextHash) return { status: 400, body: { error: 'invalid_password' } }
