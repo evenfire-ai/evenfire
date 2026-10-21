@@ -58,12 +58,17 @@ export function createEmbedOwnershipMachine(
         const previous = state
         const transition = reduceEmbedOwnership(previous, next)
         state = transition.state
-        deps.onTransition?.({
-          event: next,
-          previous,
-          next: transition.state,
-          effects: transition.effects,
-        })
+        // An observer failing must not keep this transition's effects from running.
+        try {
+          deps.onTransition?.({
+            event: next,
+            previous,
+            next: transition.state,
+            effects: transition.effects,
+          })
+        } catch (error) {
+          console.error('[embedOwnership] onTransition failed:', next.type, error)
+        }
         for (const effect of transition.effects) runEffect(effect)
       }
     } finally {

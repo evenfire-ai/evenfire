@@ -363,6 +363,38 @@ describe('embed ownership machine — tab store writes', () => {
   })
 })
 
+describe('embed ownership machine — transition observer', () => {
+  it('still opens, notifies and settles a launch when onTransition throws', async () => {
+    const h = harness({
+      onTransition: () => {
+        throw new Error('observer broke')
+      },
+    })
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const listener = vi.fn()
+    h.machine.subscribe(listener)
+    // A caller that survives the throw must still see the launch go through.
+    const survive = (dispatch: () => void) => {
+      try {
+        dispatch()
+      } catch {
+        // asserted through the observable outcome below
+      }
+    }
+    h.machine.registerMeasurer(measured)
+    survive(() => h.machine.projected(TAB_A))
+    const settled = h.machine.registerWhenSettled('l-1')
+    survive(() => h.machine.intent(launch('l-1')))
+    await flush()
+
+    expect(h.bridge.open).toHaveBeenCalledWith(expect.objectContaining({ launchId: 'l-1' }))
+    expect(listener).toHaveBeenCalled()
+    h.opens.get('l-1')!.resolve()
+    await expect(settled).resolves.toBe('mounted')
+    error.mockRestore()
+  })
+})
+
 describe('embed ownership machine — notifications', () => {
   it("reports only the owner's refresh failures", async () => {
     const onOwnerRefreshError = vi.fn()
