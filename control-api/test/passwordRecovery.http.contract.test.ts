@@ -833,6 +833,14 @@ describe('invitation/password producer response mappings', () => {
         lifecycleState: 'active',
         authGeneration: 7,
         passwordUpdated: true,
+        token: 'synthetic-producer-session-token',
+        sessionContext: {
+          userId: preview.userId,
+          email: preview.email,
+          teamId: null,
+          role: 'member',
+          authGeneration: 7,
+        },
       },
     })
 

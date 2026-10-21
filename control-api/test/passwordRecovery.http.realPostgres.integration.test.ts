@@ -523,7 +523,7 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
     ).toBe(unavailableMember.passwordHash)
   })
 
-  it('revokes the pre-reset session, sets no session, and accepts only a fresh login', async () => {
+  it('revokes the pre-reset session, sets no session, rejects the old password, and accepts a fresh login', async () => {
     const member = await memberWithPassword()
     const sessionCookie = `profile_session=${member.token}`
     const beforeReset = await request(publicApp).get('/api/v1/me').set('cookie', sessionCookie)
@@ -569,6 +569,14 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
     const revoked = await request(publicApp).get('/api/v1/me').set('cookie', sessionCookie)
     expect(revoked.status).toBe(401)
 
+    await db.pool.query(
+      "UPDATE password_verification_pace SET next_permit = clock_timestamp() - interval '1 second'"
+    )
+    const stalePasswordLogin = await request(publicApp)
+      .post('/api/v1/auth/password-login')
+      .set('x-forwarded-for', nextSourceIp())
+      .send({ email: member.email, password: currentPassword })
+    expect(stalePasswordLogin.status).toBe(401)
     await db.pool.query(
       "UPDATE password_verification_pace SET next_permit = clock_timestamp() - interval '1 second'"
     )

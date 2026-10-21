@@ -224,6 +224,40 @@ describe('password reset preview authority failures', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it('never forwards producer session fields from a successful reset', async () => {
+    await startUpstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(
+        JSON.stringify({
+          id: '00000000-0000-4000-8000-000000000001',
+          email: 'member@example.invalid',
+          purpose: 'password_reset',
+          status: 'accepted',
+          passwordUpdated: true,
+          reauthenticationRequired: true,
+          token: 'synthetic-producer-session-token',
+          sessionContext: {
+            userId: 'synthetic-user',
+            email: 'member@example.invalid',
+            authGeneration: 2,
+          },
+        })
+      )
+    })
+
+    const response = await submitDedicatedReset()
+
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({
+      passwordUpdated: true,
+      reauthenticationRequired: true,
+    })
+    expect(response.body).not.toHaveProperty('token')
+    expect(response.body).not.toHaveProperty('sessionContext')
+    expect(String(response.headers['set-cookie'])).toContain('profile_session=;')
+    expect(String(response.headers['set-cookie'])).not.toMatch(/profile_session=[^;]+/)
+  })
+
   it('maps an ordinary invitation rejection on the dedicated reset route without a session cookie', async () => {
     const requests: Array<{ method?: string; url?: string; body?: Record<string, unknown> }> = []
     await startUpstream(async (req, res) => {
@@ -297,6 +331,34 @@ describe('setupInvitationPasswordWithToken', () => {
         'short'
       )
     ).resolves.toEqual({ error: 'invalid_password' })
+  })
+
+  it('strips producer session fields from the reset response', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: 'synthetic-reset-row',
+          email: 'member@example.invalid',
+          status: 'accepted',
+          passwordUpdated: true,
+          reauthenticationRequired: true,
+          token: 'synthetic-producer-session-token',
+          sessionContext: { userId: 'synthetic-user', authGeneration: 2 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    )
+
+    const result = await setupInvitationPasswordWithToken(
+      'synthetic-proof',
+      'member@example.invalid',
+      'synthetic-row-id',
+      'Synthetic-Valid-Password-123'
+    )
+
+    expect(result.data).toMatchObject({ passwordUpdated: true, reauthenticationRequired: true })
+    expect(result.data).not.toHaveProperty('token')
+    expect(result.data).not.toHaveProperty('sessionContext')
   })
 
   it('rejects an unrecognized producer error instead of treating it as a password error', async () => {

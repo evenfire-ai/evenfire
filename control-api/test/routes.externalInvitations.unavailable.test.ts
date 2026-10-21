@@ -212,6 +212,14 @@ describe('external invitation routes when the hub is unavailable', () => {
         passwordUpdated: true,
         authGeneration: 1,
         lifecycleState: 'active',
+        token: 'synthetic-producer-session-token',
+        sessionContext: {
+          userId: '00000000-0000-4000-8000-000000000001',
+          email: 'a@b.c',
+          teamId: null,
+          role: 'member',
+          authGeneration: 1,
+        },
       },
     })
 

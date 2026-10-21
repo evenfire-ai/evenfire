@@ -40,6 +40,22 @@ function invitationAdmissionKey(req: Request, operation: 'preview' | 'password-t
   return `invite-token:${operation}:${externalClientIpRateLimitKey(req)}`
 }
 
+// Password setup never returns a session representation. Strip the fields at
+// the public boundary even if a directory implementation supplies them.
+function withoutSessionResponseFields<T extends object>(
+  data: T
+): Omit<T, 'sessionContext' | 'token'> {
+  const {
+    sessionContext: _sessionContext,
+    token: _token,
+    ...response
+  } = data as T & {
+    sessionContext?: unknown
+    token?: unknown
+  }
+  return response
+}
+
 export function createExternalInvitationsRouter(): Router {
   const router = Router()
   const externalInvitationsEdgeRateLimits = createExternalClientRateLimiters(
@@ -156,7 +172,7 @@ export function createExternalInvitationsRouter(): Router {
           return res.status(409).json({ error: 'invitation_not_ready' })
         }
         return res.status(200).json({
-          ...result.data,
+          ...withoutSessionResponseFields(result.data),
           reauthenticationRequired: true,
         })
       } catch (error) {
@@ -217,7 +233,7 @@ export function createExternalInvitationsRouter(): Router {
           }
           return res.status(400).json({ error: 'invalid_password' })
         }
-        return res.status(200).json(result.data)
+        return res.status(200).json(withoutSessionResponseFields(result.data))
       } catch (error) {
         if (sendPasswordAdmissionError(error, res)) return
         return next(error)

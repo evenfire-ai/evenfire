@@ -67,6 +67,22 @@ function unknownRecoveryOutcome(): ControlApiError {
   )
 }
 
+// Password setup never publishes a session representation. Keep the public
+// consumer contract free of these fields even against a mixed-version producer.
+function withoutSessionResponseFields<T extends object>(
+  data: T
+): Omit<T, 'sessionContext' | 'token'> {
+  const {
+    sessionContext: _sessionContext,
+    token: _token,
+    ...response
+  } = data as T & {
+    sessionContext?: unknown
+    token?: unknown
+  }
+  return response
+}
+
 function passwordAuthorityUnavailable(): ControlApiError {
   return new ControlApiError(
     'Password recovery authority unavailable',
@@ -104,7 +120,7 @@ export async function setupInvitationPassword(
         userSessionToken: auth.sessionToken,
       }
     )
-    return { data }
+    return { data: withoutSessionResponseFields(data) }
   } catch (error) {
     if (error instanceof ControlApiTransportError) throw passwordAuthorityUnavailable()
     if (
@@ -148,12 +164,14 @@ export async function setupInvitationPasswordWithToken(
         passwordUpdated: boolean
         reauthenticationRequired?: boolean
         token?: string
+        sessionContext?: unknown
       }
     >('POST', '/external/invitations/password-token', {
       body: { email, token, invitationId, password },
     })
-    const { token: _discardedSessionRepresentation, ...safe } = data
-    return { data: { ...safe, reauthenticationRequired: true } }
+    return {
+      data: { ...withoutSessionResponseFields(data), reauthenticationRequired: true },
+    }
   } catch (error) {
     if (error instanceof ControlApiTransportError) throw unknownRecoveryOutcome()
     if (error instanceof ControlApiError && error.status === 429) throw error
