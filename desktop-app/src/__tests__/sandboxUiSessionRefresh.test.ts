@@ -525,6 +525,50 @@ describe('recovery after retries ran out or went stale', () => {
     expect(reload).toHaveBeenCalledTimes(1)
   })
 
+  it('a 401 once the recovery cookie expired is recovered, even while the timer mint is retrying', async () => {
+    const refresh = vi.fn<SandboxUiRefreshFn>(mintOk)
+    const reload = vi.fn()
+    const args = makeArgs({ refresh, reload })
+    startSandboxUiRefresh(args)
+    handleSandboxUiUnauthorizedNavigation(args.webContentsId)
+    await flush()
+    expect(reload).toHaveBeenCalledTimes(1)
+
+    // The timer mint fails and keeps retrying; the recovery cookie dies.
+    refresh.mockImplementation(mintDown)
+    await advance(SANDBOX_UI_COOKIE_TTL_MS + 5_000)
+    // The user navigates: the dead cookie 401s. Its own mint fails too, but
+    // the retry that lands must still reload the dead page.
+    handleSandboxUiUnauthorizedNavigation(args.webContentsId)
+    refresh.mockImplementation(mintOk)
+    await advance(30_000)
+
+    expect(reload).toHaveBeenCalledTimes(2)
+  })
+
+  it('a 401 once the recovery cookie expired reopens retries that ran out', async () => {
+    const refresh = vi.fn<SandboxUiRefreshFn>(mintOk)
+    const reload = vi.fn()
+    const onError = vi.fn()
+    const args = makeArgs({ refresh, reload, onError })
+    startSandboxUiRefresh(args)
+    handleSandboxUiUnauthorizedNavigation(args.webContentsId)
+    await flush()
+    expect(reload).toHaveBeenCalledTimes(1)
+
+    refresh.mockImplementation(mintDown)
+    await advance(SANDBOX_UI_REFRESH_INTERVAL_MS + 100_000)
+    expect(onError).toHaveBeenCalledTimes(1)
+    const callsWhenExhausted = refresh.mock.calls.length
+
+    refresh.mockImplementation(mintOk)
+    handleSandboxUiUnauthorizedNavigation(args.webContentsId)
+    await flush()
+
+    expect(refresh).toHaveBeenCalledTimes(callsWhenExhausted + 1)
+    expect(reload).toHaveBeenCalledTimes(2)
+  })
+
   it('a restore after sleeping through a failure gets a fresh retry window instead of reporting', async () => {
     const window = new FakeBrowserWindow()
     const refresh = vi.fn<SandboxUiRefreshFn>(mintDown)
@@ -632,6 +676,53 @@ describe('concurrent triggers share one mint', () => {
     await flush()
     expect(refresh).toHaveBeenCalledTimes(1)
     expect(reload).toHaveBeenCalledTimes(1)
+  })
+
+  it('a 401 during the mint of a restore after the recovery cookie expired reloads once it lands', async () => {
+    const window = new FakeBrowserWindow()
+    const { refresh, land } = heldMint()
+    const reload = vi.fn()
+    const args = makeArgs({ parentWindow: window, refresh, reload })
+    startSandboxUiRefresh(args)
+    handleSandboxUiUnauthorizedNavigation(args.webContentsId)
+    land()
+    await flush()
+    expect(reload).toHaveBeenCalledTimes(1)
+
+    window.minimized = true
+    window.emit('minimize')
+    await advance(SANDBOX_UI_COOKIE_TTL_MS + 60_000)
+    window.minimized = false
+    window.emit('restore')
+    await flush()
+    expect(refresh).toHaveBeenCalledTimes(2)
+
+    handleSandboxUiUnauthorizedNavigation(args.webContentsId)
+    land()
+    await flush()
+    expect(refresh).toHaveBeenCalledTimes(2)
+    expect(reload).toHaveBeenCalledTimes(2)
+  })
+
+  it('a 401 under the recovery cookie while a newer mint is in flight reloads once it lands', async () => {
+    const { refresh, land } = heldMint()
+    const reload = vi.fn()
+    const args = makeArgs({ refresh, reload })
+    startSandboxUiRefresh(args)
+    handleSandboxUiUnauthorizedNavigation(args.webContentsId)
+    land()
+    await flush()
+    expect(reload).toHaveBeenCalledTimes(1)
+
+    // The timer mint starts while the recovery cookie is still valid.
+    await advance(SANDBOX_UI_REFRESH_INTERVAL_MS + 1)
+    expect(refresh).toHaveBeenCalledTimes(2)
+
+    handleSandboxUiUnauthorizedNavigation(args.webContentsId)
+    land()
+    await flush()
+    expect(refresh).toHaveBeenCalledTimes(2)
+    expect(reload).toHaveBeenCalledTimes(2)
   })
 
   it('a focus burst neither duplicates nor advances the mint', async () => {

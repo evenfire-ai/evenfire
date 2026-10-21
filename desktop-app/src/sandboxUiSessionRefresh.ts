@@ -347,13 +347,22 @@ export async function handleEmbedRefreshRequest(senderId: number): Promise<void>
 /**
  * The embed's top-level document came back 401 (an expired cookie leaves a
  * dead error page with no script to ask for a refresh). Re-mints and reloads,
- * at most once per mint: if the cookie minted for that recovery still yields
- * a 401, the next one is left alone instead of looping.
+ * at most once per mint.
+ *
+ * A 401 under the cookie minted for the previous recovery is ignored only
+ * while that cookie should still be valid and no newer mint is in flight:
+ * only then does it mean the server rejected a fresh cookie, and reloading
+ * again would loop. Once that cookie expired (a failing timer mint, a long
+ * minimize) the 401 is the expected outcome and must still be recovered, or
+ * the embed stays on a dead page; a newer mint in flight brings a different
+ * cookie, so reloading under it is a new attempt rather than a loop.
  */
 export function handleSandboxUiUnauthorizedNavigation(webContentsId: number): void {
   const ref = senderToRefreshContext.get(webContentsId)
   if (!ref || ref.stopped) return
-  if (ref.unauthorizedRecoveryMintSeq === ref.mintSeq) return
+  const recoveryCookieRejected =
+    ref.unauthorizedRecoveryMintSeq === ref.mintSeq && !ref.inflight && ref.now() < ref.expiresAt
+  if (recoveryCookieRejected) return
   const exhausted = ref.nextAttemptAt === null
   // A pending recovery is already being retried — unless its retries ran out,
   // in which case this 401 is the only signal left that can reopen them.
