@@ -187,8 +187,9 @@ create_airtable() {
 # create the static `clerum-channel-reader-credentials` Secret and the
 # matching e2e CommunicationChannel CRDs. With the static deployment
 # retired in favor of per-Host channel-reader pods, channel credentials
-# are written by control-api's `/admin/channel-secrets` endpoint from
-# the Control UI (Channel credentials panel), and CommunicationChannels
+# are written per CommunicationChannel by control-api's
+# `PUT /api/v1/admin/communication-channels/<name>/credentials` endpoint
+# from the Control UI (Channel credentials panel), and CommunicationChannels
 # are created via the Control UI's "New communication channel" page.
 #
 # The functions are kept as one-line redirects so operators with old
@@ -197,8 +198,8 @@ create_airtable() {
 _deprecated_channel_target() {
   local target="$1"
   warn "  '$target' target retired in #273 — static clerum-channel-reader Deployment is gone."
-  info "  Create per-Host channel credentials via the Control UI (Channel credentials panel)."
-  info "  Direct API: POST/PUT /api/v1/admin/channel-secrets { host, data: { 'telegram-bot-token': '...' } }"
+  info "  Set channel credentials per CommunicationChannel in the Control UI (Channel credentials panel)."
+  info "  Direct API: PUT /api/v1/admin/communication-channels/<name>/credentials { \"telegram-bot-token\": \"...\" }"
 }
 
 create_telegram() { _deprecated_channel_target telegram; }
@@ -208,10 +209,10 @@ create_email()    { _deprecated_channel_target email; }
 create_channels() { _deprecated_channel_target channels; }
 
 # (#273) The _preserve_channel_secret_keys helper that lived here is gone
-# along with create_telegram/slack/email/channels. Per-Host credentials are
+# along with create_telegram/slack/email/channels. Channel credentials are
 # now multi-owner-safe by virtue of control-api's mergeSecret semantics
-# (`/admin/channel-secrets` PUT), not by this script reading + re-writing
-# the whole shared Secret on every key change.
+# (`PUT /admin/communication-channels/<name>/credentials`), not by this
+# script reading + re-writing the whole shared Secret on every key change.
 
 # =============================================================================
 # Status: show what's deployed without making changes
@@ -245,17 +246,18 @@ show_status() {
 
   echo ""
   echo "  Namespace: channels"
-  # Per-Host channel-reader credential Secrets are written by control-api's
-  # /admin/channel-secrets endpoint (Control UI), one per Host. Listing them
-  # by managed label since names are dynamic (channel-reader-<host>-credentials).
+  # Channel credential Secrets are written per CommunicationChannel by
+  # control-api's PUT /admin/communication-channels/<name>/credentials
+  # (Control UI). Each channel names its Secret in spec.credentialsSecretRef
+  # (cc-<name>-credentials unless an operator set a custom ref), so list those.
   local channel_secrets
-  channel_secrets=$(kubectl get secret -n channels -l clerum.io/component=channel-reader \
-    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+  channel_secrets=$(kubectl get communicationchannels -n channels \
+    -o jsonpath='{range .items[*]}{.spec.credentialsSecretRef.name}{"\n"}{end}' 2>/dev/null | grep . || true)
   if [ -n "$channel_secrets" ]; then
-    echo -e "  ${GREEN}EXISTS${NC} per-Host channel-reader credential Secrets:"
+    echo -e "  ${GREEN}EXISTS${NC} CommunicationChannel credential Secrets:"
     echo "$channel_secrets" | sed 's/^/    /'
   else
-    echo -e "  ${YELLOW}NONE${NC}    no per-Host channel-reader credentials configured (create via Control UI)"
+    echo -e "  ${YELLOW}NONE${NC}    no CommunicationChannel credentials configured (create via Control UI)"
   fi
 
   echo ""
@@ -278,8 +280,8 @@ show_status() {
   _check "Claude provider"       CLAUDE_API_KEY
   _check "ZAI provider"          ZAI_API_KEY
   _check "Bailian provider"      BAILIAN_API_KEY
-  _check "Telegram channel"      CLERUM_TELEGRAM_BOT_TOKEN CLERUM_TELEGRAM_USER_ID
-  _check "Slack channel"         CLERUM_SLACK_BOT_TOKEN CLERUM_SLACK_CHANNEL_ID CLERUM_SLACK_USERNAME
+  # Telegram/Slack readiness is not an .env property: channel credentials are
+  # set per CommunicationChannel in the Control UI (see "Namespace: channels").
   _check "Email (real IMAP)"     CLERUM_EMAIL_USERNAME CLERUM_EMAIL_PASSWORD
   echo -e "  ${GREEN}READY${NC}  Email (Mailpit in-cluster) — no credentials needed"
   echo -e "  ${GREEN}READY${NC}  Kubernetes — cluster connected"
