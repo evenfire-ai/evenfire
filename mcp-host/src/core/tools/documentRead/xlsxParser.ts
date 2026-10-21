@@ -11,7 +11,7 @@
  * media parts are never inflated. Strings accumulate only in the V8 heap
  * (bounded synchronously) plus one row at a time.
  *
- * Value semantics mirror the earlier ExcelJS-model reader: numbers, booleans
+ * Value semantics follow the earlier ExcelJS-model reader: numbers, booleans
  * and strings retain their values; empty cells become null. Formulas use
  * cached results, or `[formula] =<formula>` without one (never evaluation);
  * an empty cached string result is an empty cell. Dates become ISO 8601,
@@ -27,18 +27,44 @@
  * Interior empty rows remain; trailing empty rows do not. Paging returns
  * complete rows and charges their full width, including null gaps. A row
  * whose full width alone exceeds `maxExtractedChars` is not returned: it
- * keeps its slot as `[]` and is listed in `skippedRows`, so one wide row
- * never makes the whole read fail. `lastRow` is the sheet's last row with a
- * computed value; the whole selected sheet is walked for it even after the
- * returned window stops.
+ * keeps its slot as `[]` and is listed in `skippedRows` (the complete list
+ * of the window, so `count === first.length`; the Tool applies its own
+ * display cap), so one wide row never makes the whole read fail. `lastRow`
+ * is the sheet's last row with a computed value; the whole selected sheet is
+ * walked for it even after the returned window stops.
  *
  * Worksheet rows and cells must arrive in document order (every writer emits
- * them so); a non-increasing row number is `document_parse_failed`.
+ * them so); a non-increasing row number is `document_parse_failed`. A row
+ * without `r` takes the row number of its first cell reference, when that
+ * cell has one; otherwise it is the next row after the previous one.
+ *
+ * Known divergences from that reader, deliberately accepted here (this is not
+ * full ExcelJS parity):
+ *
+ * - Rows out of document order fail the document instead of being sorted or
+ *   merged into the model.
+ * - A value stored on a merge slave cell (`<mergeCells>` range) is discarded,
+ *   as Excel itself empties those cells, but it still counts toward `lastRow`
+ *   and toward the row/character budgets that admitted the window; those
+ *   counters are not recomputed after merges. A trailing row emptied only by
+ *   its merge is dropped from the returned window without changing `lastRow`.
+ * - Only `xl/worksheets/sheetN.xml` parts reached through the workbook
+ *   relationships are worksheets; any other part naming is ignored.
+ * - Date detection reads the cell style index against the global `<numFmts>`
+ *   table and the built-in formats; `<dxfs>` number formats are never global.
+ * - `_xHHHH_` escapes are decoded in one pass over each complete `<t>` (Excel's
+ *   TextXform), in shared strings, inline strings and rich-text runs, so
+ *   `_x005F_x000D_` stays the literal `_x000D_`.
+ * - Cell numbers use `parseFloat`, matching ExcelJS: a decimal comma such as
+ *   `1,5` reads as `1` instead of failing the whole document.
+ * - An invisible cell (style only, no value) adds no width, and an empty
+ *   string cell is an empty cell.
  */
+import JSZip from 'jszip'
 import { createRequire } from 'node:module'
 import { StringDecoder } from 'node:string_decoder'
-import JSZip from 'jszip'
 import { SaxesParser, type SaxesTag } from 'saxes'
+import { isAllocationError } from './documentMemory'
 import type {
   DocumentReadLimits,
   XlsxCellValue,
@@ -117,7 +143,12 @@ async function streamChunks(
       // Destroying this adapter makes its inflater keep pushing after EOF,
       // which throws asynchronously. Pausing the adapter and its JSZip helper
       // stops the next compressed block and bounds the unconsumed tail; the
-      // error sink above absorbs a late end-of-stream size error.
+      // error sink above absorbs a late end-of-stream size error. Measured on
+      // a forged 64 MiB part whose declared size was 1 KiB: after the 1 MiB
+      // counter tripped, the producer emitted no further byte following the
+      // rejection, so the residual is at most the already-buffered tail of one
+      // chunk. Heap/RLIMIT_DATA and the job timeout stay as hard bounds if a
+      // future JSZip stops honoring `pause`.
       stream.pause()
       ;(stream as { _helper?: { pause?: () => void } })._helper?.pause?.()
       reject(error)
@@ -196,7 +227,11 @@ async function streamXmlPart(
       parserFailure ||
       error instanceof InflatedLimitError ||
       error instanceof UnreadableCellError ||
-      error instanceof UnreadablePartError
+      error instanceof UnreadablePartError ||
+      // An allocation failure is the memory ceiling, not a property of the
+      // file: the worker must classify it as `heap`, so it cannot become an
+      // UnreadablePartError here.
+      isAllocationError(error)
     ) {
       throw error
     }
@@ -232,9 +267,32 @@ function columnNumber(letters: string): number | undefined {
   return column > 0 ? column : undefined
 }
 
-function columnFromRef(ref: string): number | undefined {
-  const match = /^\$?([A-Za-z]+)\$?\d+$/.exec(ref.trim())
-  return match ? columnNumber(match[1]!) : undefined
+interface CellReference {
+  column: number
+  row: number
+}
+
+/** Parses an A1-style cell reference into its 1-based column and row. */
+function cellReference(ref: string): CellReference | undefined {
+  const match = /^\$?([A-Za-z]+)\$?(\d+)$/.exec(ref.trim())
+  if (!match) return undefined
+  const column = columnNumber(match[1]!)
+  const row = Number(match[2])
+  if (column === undefined || !Number.isSafeInteger(row) || row < 1) return undefined
+  return { column, row }
+}
+
+/**
+ * Excel's `TextXform`: `_xHHHH_` names one UTF-16 code unit. It is a single
+ * pass over the complete text of a `<t>` (never a chunk, or an escape split
+ * between chunks would corrupt), so `_x005F_x000D_` decodes to the literal
+ * `_x000D_` instead of a carriage return.
+ */
+function decodeTextXform(text: string): string {
+  if (!text.includes('_x')) return text
+  return text.replace(/_x([0-9A-F]{4})_/g, (_match, hex: string) =>
+    String.fromCharCode(parseInt(hex, 16))
+  )
 }
 
 // ─── Workbook structure ─────────────────────────────────────
@@ -311,10 +369,17 @@ async function parseStyles(zip: JSZip, counter: InflatedCounter): Promise<StyleT
   const customFormats = new Map<number, string>()
   const cellFormatIds: number[] = []
   if (zip.file('xl/styles.xml')) {
+    // Only the workbook's global `<numFmts>` section defines cell number
+    // formats. `<dxfs>` has its own `<numFmt>` children (differential formats
+    // for conditional formatting) whose ids collide with the global table;
+    // reading them would overwrite a date format with a numeric one.
+    let inNumFmts = false
     let inCellXfs = false
     await streamXmlPart(zip, 'xl/styles.xml', counter, parser => {
       parser.on('opentag', node => {
-        if (node.name === 'numFmt') {
+        if (node.name === 'numFmts') {
+          inNumFmts = true
+        } else if (node.name === 'numFmt' && inNumFmts) {
           const id = Number(tagAttribute(node, 'numFmtId'))
           const code = tagAttribute(node, 'formatCode')
           // ExcelJS unescapes backslash-escaped characters in format codes.
@@ -329,7 +394,8 @@ async function parseStyles(zip: JSZip, counter: InflatedCounter): Promise<StyleT
         }
       })
       parser.on('closetag', node => {
-        if (node.name === 'cellXfs') inCellXfs = false
+        if (node.name === 'numFmts') inNumFmts = false
+        else if (node.name === 'cellXfs') inCellXfs = false
       })
     })
   }
@@ -350,18 +416,26 @@ async function parseSharedStrings(zip: JSZip, counter: InflatedCounter): Promise
   let current: string | null = null
   let inText = false
   let inPhonetic = false
+  // One `<t>` can be split across parser chunks, so its complete text is
+  // buffered and the TextXform decode runs once, on `</t>`.
+  let textBuffer = ''
   await streamXmlPart(zip, 'xl/sharedStrings.xml', counter, parser => {
     parser.on('opentag', node => {
       if (node.name === 'si') current = ''
       else if (node.name === 'rPh') inPhonetic = true
-      else if (node.name === 't' && current !== null && !inPhonetic) inText = true
+      else if (node.name === 't' && current !== null && !inPhonetic) {
+        inText = true
+        textBuffer = ''
+      }
     })
     parser.on('text', text => {
-      if (inText && current !== null) current += text
+      if (inText) textBuffer += text
     })
     parser.on('closetag', node => {
-      if (node.name === 't') inText = false
-      else if (node.name === 'rPh') inPhonetic = false
+      if (node.name === 't') {
+        if (inText && current !== null) current += decodeTextXform(textBuffer)
+        inText = false
+      } else if (node.name === 'rPh') inPhonetic = false
       else if (node.name === 'si' && current !== null) {
         strings.push(current)
         current = null
@@ -406,7 +480,9 @@ function isoDateValue(text: string): string {
 }
 
 function numericValue(text: string, cell: CellState, context: ValueContext): XlsxCellValue {
-  const value = Number(text)
+  // ExcelJS parses a numeric cell with `parseFloat`, so a locale decimal comma
+  // reads as its leading integer ("1,5" -> 1) instead of failing the document.
+  const value = parseFloat(text)
   if (Number.isNaN(value)) throw new UnreadableCellError()
   return context.styles.isDateStyle(cell.styleIndex) ? dateValue(value, context.date1904) : value
 }
@@ -536,7 +612,9 @@ class SheetWindow {
       sheet.rows.push([])
       this.rowCount += 1
       sheet.skippedCount += 1
-      if (sheet.skippedFirst.length < 20) sheet.skippedFirst.push(rowNumber)
+      // The complete list of the window: `count === first.length`. The Tool
+      // applies the display cap when it builds the model-visible result.
+      sheet.skippedFirst.push(rowNumber)
       return true
     }
     if (this.rowCount > 0 && this.cellCount + values.length > this.limits.maxCellsPerCall) {
@@ -617,9 +695,15 @@ function rowValues(pairs: readonly RowPair[], sorted: boolean): XlsxCellValue[] 
   return values
 }
 
-/** A merged range keeps its value only on the top-left (master) cell. */
-function applyMerges(sheet: MutableSheet, merges: readonly MergeRange[]): void {
-  if (merges.length === 0 || sheet.rows.length === 0) return
+/**
+ * A merged range keeps its value only on the top-left (master) cell. Returns
+ * the row indices the merge emptied completely, so the caller can drop a
+ * trailing slot that holds no value any more without touching a skipped wide
+ * row, which is also `[]` but keeps its slot.
+ */
+function applyMerges(sheet: MutableSheet, merges: readonly MergeRange[]): ReadonlySet<number> {
+  const emptied = new Set<number>()
+  if (merges.length === 0 || sheet.rows.length === 0) return emptied
   for (let index = 0; index < sheet.rows.length; index += 1) {
     const rowNumber = sheet.startRow + index
     const values = sheet.rows[index]!
@@ -637,7 +721,9 @@ function applyMerges(sheet: MutableSheet, merges: readonly MergeRange[]): void {
     }
     if (!changed) continue
     while (values.length > 0 && values[values.length - 1] === null) values.pop()
+    if (values.length === 0) emptied.add(index)
   }
+  return emptied
 }
 
 /**
@@ -675,6 +761,10 @@ async function streamSheet(
   let inInline = false
   let inText = false
   let inPhonetic = false
+  let textBuffer = ''
+  // A row without `r` takes the row number of its first cell reference,
+  // when that cell has one; until then it is simply the next row.
+  let rowNumberPending = false
 
   const closeCell = (): void => {
     const cell = currentCell
@@ -743,9 +833,11 @@ async function streamSheet(
         let next: number
         if (raw === undefined) {
           next = previousRow + 1
+          rowNumberPending = true
         } else {
           next = Number(raw)
           if (!Number.isSafeInteger(next) || next < 1) throw new UnreadablePartError()
+          rowNumberPending = false
         }
         if (next <= previousRow) throw new UnreadablePartError()
         previousRow = next
@@ -769,11 +861,20 @@ async function streamSheet(
           if (column > MAX_COLUMN) throw new UnreadablePartError()
           address = columnLetters(column) + String(rowNumber)
         } else {
-          const parsed = columnFromRef(ref)
+          const parsed = cellReference(ref)
           if (parsed === undefined) throw new UnreadablePartError()
-          column = parsed
+          column = parsed.column
+          if (rowNumberPending) {
+            // The row omitted `r`; its first explicit cell reference names the
+            // row. Growth must still be strict.
+            if (parsed.row <= previousRow) throw new UnreadablePartError()
+            previousRow = parsed.row
+            rowNumber = parsed.row
+            collectRow = rowNumber >= nextEmitRow && !window.stopped
+          }
           address = ref
         }
+        rowNumberPending = false
         previousCellColumn = column
         const style = tagAttribute(node, 's')
         const styleIndex = style === undefined ? undefined : Number(style)
@@ -796,6 +897,7 @@ async function streamSheet(
         inInline = false
         inText = false
         inPhonetic = false
+        textBuffer = ''
         return
       }
       if (currentCell === undefined) return
@@ -820,13 +922,16 @@ async function streamSheet(
         inPhonetic = true
         return
       }
-      if (name === 't' && inInline && !inPhonetic) inText = true
+      if (name === 't' && inInline && !inPhonetic) {
+        inText = true
+        textBuffer = ''
+      }
     })
     parser.on('text', text => {
       if (currentCell === undefined) return
       if (inValue) currentCell.valueText += text
       else if (inFormula) currentCell.formulaText = (currentCell.formulaText ?? '') + text
-      else if (inInline && inText && !inPhonetic) currentCell.inlineText += text
+      else if (inInline && inText && !inPhonetic) textBuffer += text
     })
     parser.on('closetag', node => {
       const name = node.name
@@ -855,6 +960,9 @@ async function streamSheet(
         return
       }
       if (name === 't') {
+        if (inText && currentCell !== undefined) {
+          currentCell.inlineText += decodeTextXform(textBuffer)
+        }
         inText = false
         return
       }
@@ -986,7 +1094,14 @@ export async function parseXlsx(job: XlsxJob): Promise<XlsxOutcome> {
         window,
         context
       )
-      applyMerges(sheet, merges)
+      const emptiedRows = applyMerges(sheet, merges)
+      // A merge can leave the last admitted row with no value (only slave
+      // cells held one). `lastRow` is unchanged: the stored slave value was
+      // already counted for lastRow and the window budget, which is the
+      // accepted residual documented above.
+      while (sheet.rows.length > 0 && emptiedRows.has(sheet.rows.length - 1)) {
+        sheet.rows.pop()
+      }
       if (sheet.lastRow > 0) hasContent = true
       if (sheet.rows.length > 0 || job.sheet !== null) sheets.push(sheetResult(sheet))
       if (window.stopped) {

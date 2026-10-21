@@ -410,3 +410,64 @@ export async function sheetXmlWorkbook(sheetXml: string, sheetName = 'Sheet1'): 
   zip.file('xl/worksheets/sheet1.xml', sheetXml)
   return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' })
 }
+
+/**
+ * A date cell and a number cell whose styles collide with a differential
+ * format: the workbook-global `numFmtId` 164 is `yyyy-mm-dd`, while `<dxfs>`
+ * declares the same id as `0.00` for conditional formatting. Only the global
+ * `<numFmts>` section may define the date, so A1 must stay an ISO date.
+ */
+export async function differentialNumFmtWorkbook(): Promise<Buffer> {
+  const workbook = new ExcelJS.Workbook()
+  const sheet = workbook.addWorksheet('Dates')
+  const date = sheet.getCell('A1')
+  date.value = new Date(Date.UTC(2026, 0, 2, 3, 4, 5))
+  date.numFmt = 'yyyy-mm-dd'
+  sheet.getCell('B1').value = 1.5
+  const zip = await JSZip.loadAsync(await workbook.xlsx.writeBuffer())
+  const stylesPath = 'xl/styles.xml'
+  const written = await zip.file(stylesPath)!.async('string')
+  if (!written.includes('<dxfs count="0"/>') || !written.includes('numFmtId="164"')) {
+    throw new Error('Unexpected styles XML for the differential-format fixture')
+  }
+  zip.file(
+    stylesPath,
+    written.replace(
+      '<dxfs count="0"/>',
+      '<dxfs count="1"><dxf><numFmt numFmtId="164" formatCode="0.00"/></dxf></dxfs>'
+    )
+  )
+  return zip.generateAsync({ type: 'nodebuffer' })
+}
+
+/**
+ * A workbook whose shared strings, inline string and rich-text runs carry
+ * Excel TextXform escapes. The data cells are `t="s"` into `sharedStrings.xml`,
+ * which holds `A_x000D_B`, `tab_x0009_end` and `_x005F_x000D_`, so the reads
+ * exercise embedded CR, tab and the literal-underscore form of `_x005F_`.
+ */
+export async function escapedTextWorkbook(): Promise<Buffer> {
+  const worksheet =
+    '<?xml version="1.0"?><worksheet ' +
+    'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>' +
+    '<row r="1">' +
+    '<c r="A1" t="s"><v>0</v></c>' +
+    '<c r="B1" t="s"><v>1</v></c>' +
+    '<c r="C1" t="s"><v>2</v></c>' +
+    '<c r="D1" t="inlineStr"><is><t>inline_x000D_break</t></is></c>' +
+    '<c r="E1" t="inlineStr"><is>' +
+    '<r><t>rich_x0009_</t></r><r><t>tail_x005F_x000D_</t></r>' +
+    '</is></c>' +
+    '</row></sheetData></worksheet>'
+  const zip = await JSZip.loadAsync(await sheetXmlWorkbook(worksheet))
+  const strings =
+    '<?xml version="1.0"?><sst ' +
+    'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ' +
+    'count="3" uniqueCount="3">' +
+    '<si><t>A_x000D_B</t></si>' +
+    '<si><t>tab_x0009_end</t></si>' +
+    '<si><t>_x005F_x000D_</t></si>' +
+    '</sst>'
+  zip.file('xl/sharedStrings.xml', strings)
+  return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' })
+}

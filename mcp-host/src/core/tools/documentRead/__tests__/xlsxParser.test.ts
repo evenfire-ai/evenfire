@@ -1,20 +1,24 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import ExcelJS from 'exceljs'
+import { Readable } from 'node:stream'
+import { logger } from '../../../../logger'
 import type { XlsxJob, XlsxOutcome } from '../types'
 import { runDocumentJob } from '../workerRunner'
 import {
   cachedFormulaWorkbook,
   cfbBytes,
   continuationWorkbook,
+  differentialNumFmtWorkbook,
   documentLimits,
   emptySelectionWorkbook,
   emptyWorkbook,
+  escapedTextWorkbook,
   longRunningWorkbook,
   mergedWorkbook,
   outOfRangeNumberWorkbook,
   richHyperlinkWorkbook,
-  sheetlessWorkbook,
   sheetXmlWorkbook,
+  sheetlessWorkbook,
   surrogateWorkbook,
   valuesWorkbook,
   wideWorkbook,
@@ -66,6 +70,58 @@ describe('XLSX parser cell shapes from other writers', () => {
       ok: false,
       reason: 'document_parse_failed',
     })
+  })
+})
+
+describe('XLSX TextXform escapes', () => {
+  it('decodes _xHHHH_ once per complete <t> in shared strings, inline strings and rich runs', async () => {
+    const bytes = await escapedTextWorkbook()
+    const outcome = (await parseDirect(bytes)) as Extract<XlsxOutcome, { ok: true }>
+    expect(outcome.ok).toBe(true)
+    expect(outcome.sheets[0]!.rows).toEqual([
+      ['A\rB', 'tab\tend', '_x000D_', 'inline\rbreak', 'rich\ttail_x000D_'],
+    ])
+    // Golden witness: ExcelJS applies the same one-pass TextXform to the
+    // shared strings of this workbook.
+    const workbook = new ExcelJS.Workbook()
+    await workbook.xlsx.load(bytes as unknown as ArrayBuffer)
+    const sheet = workbook.getWorksheet('Sheet1')!
+    expect([
+      sheet.getCell('A1').value,
+      sheet.getCell('B1').value,
+      sheet.getCell('C1').value,
+    ]).toEqual(['A\rB', 'tab\tend', '_x000D_'])
+  })
+
+  it('keeps an escape whole when a <t> arrives split across parser chunks', async () => {
+    // Dense escapes across a few hundred KiB cross many stream boundaries; a
+    // per-chunk decode would leave some `_x000D_` literals behind.
+    const repetitions = 50_000
+    const inline = 'prefix' + '_x000D_'.repeat(repetitions)
+    const outcome = (await parseDirect(
+      await sheetXmlWorkbook(
+        '<?xml version="1.0"?><worksheet ' +
+          'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>' +
+          `<row r="1"><c r="A1" t="inlineStr"><is><t>${inline}</t></is></c></row>` +
+          '</sheetData></worksheet>'
+      )
+    )) as Extract<XlsxOutcome, { ok: true }>
+    expect(outcome.ok).toBe(true)
+    expect(outcome.sheets[0]!.rows[0]).toEqual(['prefix' + '\r'.repeat(repetitions)])
+  })
+})
+
+describe('XLSX styles and number formats', () => {
+  it('ignores differential <dxfs> numFmt ids that collide with the global table', async () => {
+    const bytes = await differentialNumFmtWorkbook()
+    const outcome = (await parseDirect(bytes)) as Extract<XlsxOutcome, { ok: true }>
+    expect(outcome.ok).toBe(true)
+    // Global 164 = yyyy-mm-dd, dxf 164 = 0.00: the date must not become 46024.
+    expect(outcome.sheets[0]!.rows).toEqual([['2026-01-02T03:04:05.000Z', 1.5]])
+    // The same file through ExcelJS keeps the date cell a Date.
+    const workbook = new ExcelJS.Workbook()
+    await workbook.xlsx.load(bytes as unknown as ArrayBuffer)
+    expect(workbook.getWorksheet('Dates')!.getCell('A1').value).toBeInstanceOf(Date)
   })
 })
 
@@ -454,46 +510,113 @@ describe('XLSX wide rows are non-terminal (zach88 M2)', () => {
     expect(outcome.next).toBeUndefined()
     expect(outcome.stoppedBy).toBeUndefined()
   })
+
+  it('reports the complete skipped-row list of the window and count equals its length', async () => {
+    // The parser no longer caps `first` at 20; the Tool applies the display
+    // cap. The worker boundary check is owned by the runner contract.
+    const limits = documentLimits({ maxExtractedChars: 100 })
+    const wide = Array.from({ length: 25 }, (_, row) => [`${row}:${'y'.repeat(200)}`])
+    const outcome = (await parseDirect(await textWorkbook(wide), { limits })) as Extract<
+      XlsxOutcome,
+      { ok: true }
+    >
+    const first = Array.from({ length: 25 }, (_, row) => row + 1)
+    expect(outcome.ok).toBe(true)
+    expect(outcome.sheets).toEqual([
+      {
+        name: 'Text',
+        startRow: 1,
+        rows: wide.map(() => []),
+        truncated: false,
+        lastRow: 25,
+        skippedRows: { count: 25, first },
+      },
+    ])
+    expect(outcome.sheets[0]!.skippedRows!.first).toHaveLength(
+      outcome.sheets[0]!.skippedRows!.count
+    )
+  })
 })
 
 describe('XLSX streaming read (zach88 M1)', () => {
-  it('reads a 150k-row window without holding the sheet and reports lastRow', async () => {
-    const rowCount = 150_000
-    const bytes = await streamingWorkbook(rowCount)
+  interface ObservedJob {
+    outcome: Extract<XlsxOutcome, { ok: true }>
+    maxSampledResidentBytes: number
+  }
+
+  /** Runs one real child and returns the runner's own RSS telemetry line. */
+  async function observedJob(
+    bytes: Buffer,
+    limits: ReturnType<typeof documentLimits>
+  ): Promise<ObservedJob> {
+    const info = vi.spyOn(logger, 'info')
+    try {
+      const outcome = (await runDocumentJob(xlsxJob(bytes, { limits }))) as Extract<
+        XlsxOutcome,
+        { ok: true }
+      >
+      const line = info.mock.calls.find(
+        ([, message]: [Record<string, unknown>, string]) =>
+          message === 'document reader job finished'
+      )
+      expect(line).toBeDefined()
+      const fields = line![0] as { maxSampledResidentBytes?: unknown }
+      expect(typeof fields.maxSampledResidentBytes).toBe('number')
+      return { outcome, maxSampledResidentBytes: fields.maxSampledResidentBytes as number }
+    } finally {
+      info.mockRestore()
+    }
+  }
+
+  function expectWindow(job: ObservedJob, rowCount: number): void {
+    expect(job.outcome.ok).toBe(true)
+    expect(job.outcome.sheets[0]!.lastRow).toBe(rowCount)
+    expect(job.outcome.sheets[0]!.rows).toHaveLength(5_000)
+    // Witnesses in both sizes: the first row, the last row of the window and
+    // the uncached formula in F1.
+    expect(job.outcome.sheets[0]!.rows[0]).toEqual([10, 11, 12, 13, 14, '[formula] =1+1'])
+    expect(job.outcome.sheets[0]!.rows[4_999]).toEqual([
+      50_000, 50_001, 50_002, 50_003, 50_004, 50_005,
+    ])
+    expect(job.outcome.next).toEqual({ sheetIndex: 0, row: 5_001 })
+    expect(job.outcome.stoppedBy).toBe('max_rows')
+  }
+
+  it('keeps the child resident footprint flat between 150k and 15k rows', async () => {
     const limits = documentLimits({
       maxRowsPerCall: 5_000,
       maxCellsPerCall: 100_000,
       maxExtractedChars: 400_000,
-      timeoutMs: 30_000,
+      timeoutMs: 60_000,
       maxHeapMb: 512,
       maxResidentMb: 768,
     })
-    const before = process.memoryUsage().rss
-    const outcome = (await runDocumentJob(xlsxJob(bytes, { limits }))) as Extract<
-      XlsxOutcome,
-      { ok: true }
-    >
-    const after = process.memoryUsage().rss
-    expect(outcome.ok).toBe(true)
-    expect(outcome.sheets[0]!.lastRow).toBe(rowCount)
-    expect(outcome.sheets[0]!.rows).toHaveLength(5_000)
-    expect(outcome.sheets[0]!.rows[0]).toEqual([10, 11, 12, 13, 14, '[formula] =1+1'])
-    expect(outcome.sheets[0]!.rows[4_999]).toEqual([50_000, 50_001, 50_002, 50_003, 50_004, 50_005])
-    expect(outcome.next).toEqual({ sheetIndex: 0, row: 5_001 })
-    expect(outcome.stoppedBy).toBe('max_rows')
-    // The Host sees only the window: the sheet itself never enters its heap.
-    expect(after - before).toBeLessThanOrEqual(32 * 1_048_576)
+    // The Host RSS of this vitest process says nothing about the child: the
+    // runner's `maxSampledResidentBytes` is sampled from the child itself.
+    const large = await observedJob(await streamingWorkbook(150_000), limits)
+    const small = await observedJob(await streamingWorkbook(15_000), limits)
+    expectWindow(large, 150_000)
+    expectWindow(small, 15_000)
+    expect(large.maxSampledResidentBytes).toBeGreaterThan(0)
+    expect(small.maxSampledResidentBytes).toBeGreaterThan(0)
+    const growth = large.maxSampledResidentBytes - small.maxSampledResidentBytes
+    // Mutation: a parser that retained the sheet added 108 MiB to the 150k
+    // child in the local mutation check (six numeric cells per row), far over
+    // this bound, so the witness is not vacuous.
+    expect(growth).toBeLessThan(32 * 1_048_576)
     process.stdout.write(
-      'XLSX 150k Host RSS witness ' +
+      'XLSX child RSS witness ' +
         JSON.stringify({
-          before,
-          after,
-          growth: after - before,
+          largeRows: 150_000,
+          largeSampledBytes: large.maxSampledResidentBytes,
+          smallRows: 15_000,
+          smallSampledBytes: small.maxSampledResidentBytes,
+          growth,
           bound: 32 * 1_048_576,
         }) +
         '\n'
     )
-  }, 60_000)
+  }, 120_000)
 })
 
 describe('XLSX writer dialects', () => {
@@ -595,5 +718,197 @@ describe('XLSX writer dialects', () => {
       ok: true,
       sheets: [{ rows: [[1], [2]] }],
     })
+  })
+})
+
+describe('XLSX merge and numeric dialects', () => {
+  const dialectWorksheet = (rows: string): string =>
+    '<?xml version="1.0"?><worksheet ' +
+    'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>' +
+    rows +
+    '</sheetData></worksheet>'
+  const worksheetWithMerges = (rows: string, merges: string): string =>
+    '<?xml version="1.0"?><worksheet ' +
+    'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>' +
+    rows +
+    `</sheetData><mergeCells count="1">${merges}</mergeCells></worksheet>`
+
+  it('drops a trailing row emptied by its merge without changing lastRow', async () => {
+    // Only the slave cell of A2:B2 holds a value; nulling it leaves the last
+    // admitted row with no cells, which Excel never reports.
+    const outcome = await parseDirect(
+      await sheetXmlWorkbook(
+        worksheetWithMerges(
+          '<row r="1"><c r="A1" t="str"><v>top</v></c></row>' +
+            '<row r="2"><c r="B2" t="str"><v>slave</v></c></row>',
+          '<mergeCell ref="A2:B2"/>'
+        )
+      )
+    )
+    expect(outcome).toEqual({
+      ok: true,
+      sheetNames: ['Sheet1'],
+      sheets: [
+        {
+          name: 'Sheet1',
+          startRow: 1,
+          rows: [['top']],
+          truncated: false,
+          lastRow: 2,
+        },
+      ],
+    })
+
+    // Witness: the same emptied row keeps its slot when a later row follows,
+    // because it is then an interior row of the contiguous window.
+    const interior = await parseDirect(
+      await sheetXmlWorkbook(
+        worksheetWithMerges(
+          '<row r="1"><c r="A1" t="str"><v>top</v></c></row>' +
+            '<row r="2"><c r="B2" t="str"><v>slave</v></c></row>' +
+            '<row r="3"><c r="C3" t="str"><v>tail</v></c></row>',
+          '<mergeCell ref="A2:B2"/>'
+        )
+      )
+    )
+    expect(interior).toEqual({
+      ok: true,
+      sheetNames: ['Sheet1'],
+      sheets: [
+        {
+          name: 'Sheet1',
+          startRow: 1,
+          rows: [['top'], [], [null, null, 'tail']],
+          truncated: false,
+          lastRow: 3,
+        },
+      ],
+    })
+  })
+
+  it('reads a decimal-comma number like ExcelJS and rejects non-numeric text', async () => {
+    const outcome = await parseDirect(
+      await sheetXmlWorkbook(
+        dialectWorksheet(
+          '<row r="1"><c r="A1"><v>1,5</v></c><c r="B1"><v>-2.25</v></c><c r="C1"><v>3</v></c></row>'
+        )
+      )
+    )
+    // ExcelJS uses parseFloat: the comma cuts the number at its integer part.
+    expect(outcome).toEqual({
+      ok: true,
+      sheetNames: ['Sheet1'],
+      sheets: [
+        {
+          name: 'Sheet1',
+          startRow: 1,
+          rows: [[1, -2.25, 3]],
+          truncated: false,
+          lastRow: 1,
+        },
+      ],
+    })
+    // Liveness: text with no leading number still fails the document.
+    const invalid = await parseDirect(
+      await sheetXmlWorkbook(dialectWorksheet('<row r="1"><c r="A1"><v>not-a-number</v></c></row>'))
+    )
+    expect(invalid).toEqual({ ok: false, reason: 'document_parse_failed' })
+  })
+
+  it('takes the row number from the first explicit cell reference of a row without r', async () => {
+    const outcome = await parseDirect(
+      await sheetXmlWorkbook(
+        dialectWorksheet(
+          '<row r="1"><c r="A1"><v>1</v></c></row>' +
+            '<row><c r="A5"><v>5</v></c><c r="B5"><v>6</v></c></row>'
+        )
+      )
+    )
+    expect(outcome).toEqual({
+      ok: true,
+      sheetNames: ['Sheet1'],
+      sheets: [
+        {
+          name: 'Sheet1',
+          startRow: 1,
+          rows: [[1], [], [], [], [5, 6]],
+          truncated: false,
+          lastRow: 5,
+        },
+      ],
+    })
+
+    // Growth is still strict: the cell reference cannot move the row back.
+    const outOfOrder = await parseDirect(
+      await sheetXmlWorkbook(
+        dialectWorksheet(
+          '<row r="3"><c r="A3"><v>3</v></c></row>' + '<row><c r="A2"><v>2</v></c></row>'
+        )
+      )
+    )
+    expect(outOfOrder).toEqual({ ok: false, reason: 'document_parse_failed' })
+  })
+})
+
+describe('XLSX allocation failures from a part stream', () => {
+  it('propagates a RangeError allocation failure so the worker classifies it as heap', async () => {
+    // The streaming wrapper must not disguise a memory-ceiling failure as an
+    // unreadable part: the worker maps `isAllocationError` to `limit: heap`.
+    const bytes = await valuesWorkbook(witnessCode())
+    const jszip = await vi.importActual<{ default?: typeof import('jszip') }>('jszip')
+    const RealJSZip = (jszip.default ?? jszip) as typeof import('jszip')
+    const realZip = await RealJSZip.loadAsync(bytes)
+    let currentZip: unknown = realZip
+    vi.resetModules()
+    vi.doMock('jszip', () => ({
+      default: {
+        loadAsync: async () => currentZip,
+      },
+    }))
+    const originalSend = process.send
+    if (!process.send) process.send = (() => true) as unknown as typeof process.send
+    const listenersBefore = new Set(process.listeners('message'))
+    const sends: unknown[] = []
+    try {
+      await import('../worker')
+      const handler = process
+        .listeners('message')
+        .find(listener => !listenersBefore.has(listener)) as (job: XlsxJob) => Promise<void>
+      expect(handler).toBeDefined()
+      process.send = ((message: unknown) => {
+        sends.push(message)
+        return true
+      }) as unknown as typeof process.send
+
+      // Control: the same worker and wrapper read a valid workbook.
+      await handler(xlsxJob(bytes))
+      expect(sends).toHaveLength(1)
+      expect(sends[0]).toMatchObject({ ok: true, sheetNames: ['Values', 'Hidden'] })
+      const control = sends[0] as Extract<XlsxOutcome, { ok: true }>
+      expect(control.sheets[0]!.rows[0]![0]).toMatch(/^DOC-/)
+
+      // Injected failure: the part stream emits the allocation RangeError.
+      currentZip = {
+        file: () => ({
+          dir: false,
+          nodeStream: () =>
+            new Readable({
+              read() {
+                this.destroy(new RangeError('Array buffer allocation failed'))
+              },
+            }),
+        }),
+      }
+      await handler(xlsxJob(bytes))
+      expect(sends).toHaveLength(2)
+      expect(sends[1]).toEqual({ ok: false, reason: 'document_limits_exceeded', limit: 'heap' })
+    } finally {
+      process.send = originalSend
+      for (const listener of process.listeners('message')) {
+        if (!listenersBefore.has(listener)) process.removeListener('message', listener)
+      }
+      vi.doUnmock('jszip')
+      vi.resetModules()
+    }
   })
 })
