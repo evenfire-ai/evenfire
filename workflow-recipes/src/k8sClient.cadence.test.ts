@@ -805,7 +805,10 @@ describe('T1 infra retry, SDK liveness probe and steady backstop (#1016 §3.5/§
     }
     return { ...h, spy, tick, readNamespacedPod }
   }
-  const healthyPod = { metadata: { uid: 'pod-1' }, status: { phase: 'Running' } }
+  const healthyPod = {
+    metadata: { uid: 'pod-1' },
+    status: { phase: 'Running', conditions: [{ type: 'Ready', status: 'True' }] },
+  }
 
   it('stuck states retry every tick with spacing coalescing', async () => {
     const h = t1(stuckRecipe())

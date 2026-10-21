@@ -1091,7 +1091,10 @@ describe('runtime credential refresh loop helpers', () => {
     }
 
     const healthy = await run(
-      vi.fn().mockResolvedValue({ metadata: { uid: 'pod-1' }, status: { phase: 'Running' } })
+      vi.fn().mockResolvedValue({
+        metadata: { uid: 'pod-1' },
+        status: { phase: 'Running', conditions: [{ type: 'Ready', status: 'True' }] },
+      })
     )
     expect(healthy).not.toHaveBeenCalled()
 

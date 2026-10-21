@@ -108,7 +108,7 @@ function simulation() {
     _coreApi: {
       readNamespacedPod: vi.fn(async ({ name }: { name: string }) => ({
         metadata: { uid: `pod-${name.replace(/-mcp-host$/, '')}` },
-        status: { phase: 'Running' },
+        status: { phase: 'Running', conditions: [{ type: 'Ready', status: 'True' }] },
       })),
     },
     reconciler: {

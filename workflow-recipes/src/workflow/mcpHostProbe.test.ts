@@ -26,7 +26,13 @@ const sdk = (state?: string, uid: string | null = 'pod-1', steps = 0): WorkflowR
         : {}),
     },
   }) as unknown as WorkflowRecipeCRD
-const running = { kind: 'present', phase: 'Running', uid: 'pod-1', deleting: false } as const
+const running = {
+  kind: 'present',
+  phase: 'Running',
+  uid: 'pod-1',
+  deleting: false,
+  ready: true,
+} as const
 
 describe('readMcpHostPod', () => {
   it('reads `${name}-mcp-host` in the given namespace and maps 404 to absent', async () => {
@@ -38,17 +44,28 @@ describe('readMcpHostPod', () => {
     })
     expect(res).toEqual({ kind: 'absent' })
   })
-  it('returns phase, uid and deletion state', async () => {
+  it('returns phase, uid, deletion state and readiness', async () => {
     const readNamespacedPod = vi.fn().mockResolvedValue({
       metadata: { uid: 'pod-1', deletionTimestamp: new Date() },
-      status: { phase: 'Running' },
+      status: { phase: 'Running', conditions: [{ type: 'Ready', status: 'True' }] },
     })
     expect(await readMcpHostPod({ readNamespacedPod } as never, 'r', 'ns')).toEqual({
       kind: 'present',
       phase: 'Running',
       uid: 'pod-1',
       deleting: true,
+      ready: true,
     })
+  })
+  it('reports a Running pod whose Ready condition is False (or missing) as not ready', async () => {
+    for (const conditions of [[{ type: 'Ready', status: 'False' }], undefined]) {
+      const readNamespacedPod = vi.fn().mockResolvedValue({
+        metadata: { uid: 'pod-1' },
+        status: { phase: 'Running', conditions },
+      })
+      const res = await readMcpHostPod({ readNamespacedPod } as never, 'r', 'ns')
+      expect(res).toMatchObject({ kind: 'present', phase: 'Running', ready: false })
+    }
   })
   it('rethrows non-404 errors', async () => {
     const readNamespacedPod = vi.fn().mockRejectedValue({ code: 500 })
@@ -64,6 +81,7 @@ describe('sdkLivenessNeedsReconcile', () => {
     ['absent', sdk('validated'), { kind: 'absent' }],
     ['Failed', sdk('validated'), { ...running, phase: 'Failed' }],
     ['deleting', sdk('validated'), { ...running, deleting: true }],
+    ['Running but not Ready (RP-001)', sdk('validated'), { ...running, ready: false }],
     ['uid mismatch', sdk('validated', 'pod-OLD'), running],
     ['awaiting_policy', sdk('awaiting_policy'), running],
     ['degraded', sdk('degraded'), running],
