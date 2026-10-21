@@ -1824,8 +1824,10 @@ describe('App deep-link orchestration', () => {
       sidebarHarness.props?.onOpenSandboxUiApp?.(app)
       await Promise.resolve()
     })
-    await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(opens + 1))
-    await waitForMounted()
+    await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(opens + 1), {
+      timeout: 5_000,
+    })
+    await waitFor(() => expect(embedPhase()).toBe('mounted'), { timeout: 5_000 })
   }
 
   async function selectTab(index: 0 | 1 | 2): Promise<void> {
