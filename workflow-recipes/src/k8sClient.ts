@@ -566,7 +566,6 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
   private runtimeCredentialRefreshTimer: ReturnType<typeof setInterval> | null = null
   private runtimeCredentialRefreshRunning = false
   private workloadStatusRefreshTimer: ReturnType<typeof setInterval> | null = null
-  private workloadStatusRefreshRunning = false
   // issue #299 — periodic external-egress requeue. GitHub (and other single-A-record
   // rotators) change their resolved IP without bumping the CRD generation, so the
   // accumulator's sliding window only converges if we re-reconcile on a timer.
@@ -1458,9 +1457,15 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     this.runtimeCredentialRefreshTimer = setInterval(() => {
       if (this.runtimeCredentialRefreshRunning) return
       this.runtimeCredentialRefreshRunning = true
-      void this.refreshRuntimeCredentialsForInProgressRecipes().finally(() => {
-        this.runtimeCredentialRefreshRunning = false
-      })
+      // Issue #1016 (RP-002): the running flag covers only the direct credential
+      // refreshes and check admission, never the queued checks. One recipe's
+      // blocked queue must not stall every other recipe's next tick; its own
+      // pending key already coalesces its repeat admissions.
+      void this.admitRuntimeCredentialSweep()
+        .then(() => undefined)
+        .finally(() => {
+          this.runtimeCredentialRefreshRunning = false
+        })
     }, intervalMs)
     this.runtimeCredentialRefreshTimer.unref?.()
   }
@@ -1472,11 +1477,10 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     // Re-enqueue steady active/degraded workload recipes so reconcile observes
     // Kubernetes status and patches degradation or recovery.
     this.workloadStatusRefreshTimer = setInterval(() => {
-      if (this.workloadStatusRefreshRunning) return
-      this.workloadStatusRefreshRunning = true
-      void this.refreshWorkloadStatusesForSteadyRecipes().finally(() => {
-        this.workloadStatusRefreshRunning = false
-      })
+      // Issue #1016 (RP-002): admit only; never wait for the queued checks, so one
+      // recipe's blocked queue cannot stall every other recipe's next tick. Its own
+      // pending key coalesces its repeat admissions.
+      this.admitWorkloadStatusSweep()
     }, WORKLOAD_STATUS_REFRESH_INTERVAL_MS)
     this.workloadStatusRefreshTimer.unref?.()
   }
@@ -1605,29 +1609,32 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     })
   }
 
+  /** Admits one T2 sweep and waits for every queued check (tests drain with this). */
   private async refreshWorkloadStatusesForSteadyRecipes(): Promise<void> {
-    if (this.stopped) return
+    await Promise.all(this.admitWorkloadStatusSweep())
+  }
+
+  /** Admits the T2 checks and returns each queued check's completion without waiting. */
+  private admitWorkloadStatusSweep(): Array<Promise<void>> {
+    if (this.stopped) return []
 
     // Tick-time selection is only a pre-filter; the queued task re-reads the cache
     // and recomputes its path from the fresh recipe.
-    await Promise.all(
-      [...this.recipes.keys()].map(async recipeName => {
-        const latest = this.recipes.get(recipeName)
-        if (!latest) return
-        // Issue #637 — workflow and SDK recipes are excluded from the status refresh
-        // but still need the periodic ownership re-classification (their only other
-        // revocation path is the event-driven SecretWatcher).
-        if (
-          !workflowNeedsWorkloadStatusRefresh(latest) &&
-          !workflowNeedsOwnershipBackstop(latest)
-        ) {
-          return
-        }
-        await this.enqueueTimerTask(recipeName, 'ownership', fresh =>
+    const queued: Array<Promise<void>> = []
+    for (const [recipeName, latest] of this.recipes) {
+      // Issue #637 — workflow and SDK recipes are excluded from the status refresh
+      // but still need the periodic ownership re-classification (their only other
+      // revocation path is the event-driven SecretWatcher).
+      if (!workflowNeedsWorkloadStatusRefresh(latest) && !workflowNeedsOwnershipBackstop(latest)) {
+        continue
+      }
+      queued.push(
+        this.enqueueTimerTask(recipeName, 'ownership', fresh =>
           this.refreshWorkloadStatusOnly(fresh)
         )
-      })
-    )
+      )
+    }
+    return queued
   }
 
   /**
@@ -1705,9 +1712,20 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     }
   }
 
+  /** Runs one T1 sweep and waits for every queued check (tests drain with this). */
   private async refreshRuntimeCredentialsForInProgressRecipes(): Promise<void> {
-    if (this.stopped) return
+    await Promise.all(await this.admitRuntimeCredentialSweep())
+  }
 
+  /**
+   * Runs the direct in-progress credential refreshes and admits the T1 checks.
+   * Resolves once the direct work is done, with each queued check's completion
+   * left un-awaited (RP-002).
+   */
+  private async admitRuntimeCredentialSweep(): Promise<Array<Promise<void>>> {
+    if (this.stopped) return []
+
+    const queued: Array<Promise<void>> = []
     const refreshes = [...this.recipes.keys()].map(async recipeName => {
       const latest = this.recipes.get(recipeName)
       if (!latest) return
@@ -1723,12 +1741,15 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
       }
       if (!needsSteadyBackstop(latest)) return
       // enqueueTimerTask catches task errors itself, so this never rejects.
-      await this.enqueueTimerTask(recipeName, 'infra_retry', fresh =>
-        this.runInfrastructureCheck(fresh)
+      queued.push(
+        this.enqueueTimerTask(recipeName, 'infra_retry', fresh =>
+          this.runInfrastructureCheck(fresh)
+        )
       )
     })
 
     await Promise.all(refreshes)
+    return queued
   }
 
   /**

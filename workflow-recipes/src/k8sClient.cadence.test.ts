@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from 'vitest'
 import { loadConfig } from './config'
 import { WorkflowRecipeWatcher } from './k8sClient'
 import { registry } from './metrics'
+import { runtimeCredentialRefreshIntervalMs } from './recipePredicates'
 import { captureLogger } from './reconciler/__tests__/captureLogger'
+import { RecipeEventQueue } from './reconciler/recipeEventQueue'
 import type { WorkflowRecipeCRD } from './types'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- private-member harness
@@ -954,5 +956,109 @@ describe('T1 infra retry, SDK liveness probe and steady backstop (#1016 §3.5/§
       'steady_backstop',
       'spacing'
     )
+  })
+})
+
+describe('fleet sweeps never wait on one recipe’s queued check (#1016 RP-002)', () => {
+  const T0 = new Date('2026-10-08T12:00:00Z').getTime()
+  /** A real per-recipe queue, so a hung task blocks only its own key. */
+  const realQueueHarness = () => {
+    const h = harness()
+    h.w.eventQueue = new RecipeEventQueue()
+    h.w.runtimeCredentialRefreshTimer = null
+    h.w.workloadStatusRefreshTimer = null
+    return h
+  }
+  const hang = () => new Promise<never>(() => {})
+  const passOk = () =>
+    Promise.resolve({
+      phase: 'active',
+      message: 'ok',
+      workloadStatuses: [],
+      skipStatusPatch: true,
+      cadence: { dnsBlocks: [], repairPending: false },
+    })
+
+  it('T1: a hung check for recipe A does not stop the next tick probing SDK recipe B', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(T0)
+    const h = realQueueHarness()
+    try {
+      const a = recipe('a')
+      ;(a.spec as Any).ui = { egress: { external: [{ host: 'api.example.com', port: 443 }] } }
+      const b = recipe('b')
+      b.spec.workloads = []
+      ;(b.spec as Any).pluginWorkloadSdk = { promptBridge: {} }
+      b.status = {
+        phase: 'active',
+        pluginWorkloadSdk: { state: 'validated', bootstrapPodUid: 'pod-1' },
+      } as Any
+      h.w.recipes.set('a', a)
+      h.w.recipes.set('b', b)
+      // B settled just now, so only its probe (never its backstop) can reconcile it.
+      h.w.cadence.recordSettled('b', Date.now(), '')
+      Object.assign(h.w.reconciler, {
+        refreshInProgressWorkflowRuntimeCredentials: vi.fn().mockResolvedValue(undefined),
+        // A never settled => its backstop escalates, and that pass never returns.
+        reconcile: vi.fn((r: WorkflowRecipeCRD) => (r.metadata.name === 'a' ? hang() : passOk())),
+      })
+      const readNamespacedPod = vi
+        .fn()
+        .mockResolvedValueOnce({
+          metadata: { uid: 'pod-1' },
+          status: { phase: 'Running', conditions: [{ type: 'Ready', status: 'True' }] },
+        })
+        .mockRejectedValue({ code: 404 })
+      h.w._coreApi = { readNamespacedPod }
+
+      h.w.startRuntimeCredentialRefreshLoop()
+      const intervalMs = runtimeCredentialRefreshIntervalMs(h.w.config)
+      await vi.advanceTimersByTimeAsync(intervalMs)
+      expect(readNamespacedPod).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(intervalMs)
+
+      // Before the fix the fleet-wide running flag stayed held by A's hung pass,
+      // so B's second probe and its recovery pass never ran.
+      expect(readNamespacedPod).toHaveBeenCalledTimes(2)
+      expect(
+        h.w.reconciler.reconcile.mock.calls.some(
+          ([r]: [WorkflowRecipeCRD]) => r.metadata.name === 'b'
+        )
+      ).toBe(true)
+    } finally {
+      clearInterval(h.w.runtimeCredentialRefreshTimer)
+      vi.useRealTimers()
+    }
+  })
+
+  it('T2: a hung check for recipe A does not stop the next tick observing recipe B', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(T0)
+    const h = realQueueHarness()
+    try {
+      h.w.recipes.set('a', recipe('a'))
+      h.w.recipes.set('b', recipe('b'))
+      const observeCurrentWorkloadStatus = vi.fn((r: WorkflowRecipeCRD) =>
+        r.metadata.name === 'a'
+          ? hang()
+          : Promise.resolve({
+              phase: 'active',
+              message: 'ok',
+              workloadStatuses: [{ id: 'api', phase: 'running', ready: true }],
+            })
+      )
+      Object.assign(h.w.reconciler, { observeCurrentWorkloadStatus })
+      const observedB = () =>
+        observeCurrentWorkloadStatus.mock.calls.filter(([r]) => r.metadata.name === 'b').length
+
+      h.w.startWorkloadStatusRefreshLoop()
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(observedB()).toBe(1)
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(observedB()).toBe(2)
+    } finally {
+      clearInterval(h.w.workloadStatusRefreshTimer)
+      vi.useRealTimers()
+    }
   })
 })
