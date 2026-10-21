@@ -335,13 +335,13 @@ export function useAppController() {
   const [hostAuthorityRevision, setHostAuthorityRevision] = useState(0)
   const selectedAgentRef = useRef(nav.selectedAgent)
   selectedAgentRef.current = nav.selectedAgent
+  // The stored active chat tab stays the chat while the Apps picker is open over it.
+  const activeChatAgentRef =
+    nav.activeTab?.kind === 'chat' ? (nav.activeTab.chat?.agentRef ?? null) : null
+  const activeChatAgentRefRef = useRef(activeChatAgentRef)
+  activeChatAgentRefRef.current = activeChatAgentRef
   // The Apps picker shows no active tab, so no chat is focused while it is open.
-  const focusedChatAgentRef =
-    nav.activeTab?.kind === 'chat' && !nav.appsPickerActive
-      ? (nav.activeTab.chat?.agentRef ?? null)
-      : null
-  const focusedChatAgentRefRef = useRef(focusedChatAgentRef)
-  focusedChatAgentRefRef.current = focusedChatAgentRef
+  const focusedChatAgentRef = nav.appsPickerActive ? null : activeChatAgentRef
   const isHostAccessBlocked = useCallback(
     (agentRef: string) => hostAuthority.isBlocked(agentRef),
     [hostAuthority]
@@ -377,9 +377,10 @@ export function useAppController() {
       setHostAuthorityRevision(revision => revision + 1)
       const selected = selectedAgentRef.current === agentRef
       if (selected) nav.setSelectedAgent(null)
-      // A revocation is also announced while the Host's chat tab is focused:
-      // an earlier uncertain hold may already have cleared the selection.
-      if (selected || (kind === 'revoked' && focusedChatAgentRefRef.current === agentRef)) {
+      // A revocation is also announced for the Host of the active chat tab, even
+      // under the Apps picker: an earlier uncertain hold may already have
+      // cleared the selection, and the toast is about the Host, not the tab.
+      if (selected || (kind === 'revoked' && activeChatAgentRefRef.current === agentRef)) {
         const name = agentDisplayName(agentRef)
         // No Retry promise: the refresh below can drop the Host from the catalog,
         // and the Retry row lists only Hosts the catalog still has.

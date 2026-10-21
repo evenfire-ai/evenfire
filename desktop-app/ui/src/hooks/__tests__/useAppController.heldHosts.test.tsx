@@ -839,7 +839,7 @@ describe('ChatPage with a held Host on the chat tab', () => {
     }
   )
 
-  it('T-A23-2: a revocation of the chat tab Host while the Apps picker is open gives no toast', async () => {
+  it('T-A23-2: a revocation of the chat tab Host under the Apps picker is announced', async () => {
     const { clerum } = installAppControllerClerum({
       agentNames: [HOST_A, HOST_B],
       agentDisplayByName: DISPLAY_BY_NAME,
@@ -886,11 +886,16 @@ describe('ChatPage with a held Host on the chat tab', () => {
     })
     await settle()
 
-    // Liveness witness: the revocation reached the store as a new hold.
+    // Liveness witness: the revocation reached the store as a new hold, with
+    // nothing selected and the picker still open.
     expect(getVm().hostAuthorityRevision).toBeGreaterThan(revisionAfterUncertain)
-    expect(toastTexts(getVm())).toEqual([VERIFY_A])
-    // The picker shows no chat tab, so none is focused.
+    expect(getVm().selectedAgent).toBe(null)
+    expect(getVm().appsPickerActive).toBe(true)
+    // The stored chat tab is still A's, so the revocation is announced.
+    expect(toastTexts(getVm())).toEqual([VERIFY_A, REVOKED_A])
+    // The picker shows no chat tab, so none is focused and none is kept.
     expect(getVm().focusedChatAgentRef).toBe(null)
+    expect(getVm().keepFocusedChat).toBe(false)
   })
 
   it('T-J1-2: a Chat click on a held Host chat opens that chat once access is verified', async () => {
