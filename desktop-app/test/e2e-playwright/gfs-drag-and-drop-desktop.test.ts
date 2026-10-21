@@ -11,13 +11,33 @@
  * sidebar explorer tree variant of the same flows is covered by the
  * FileExplorerTree vitest suite (including the dragend-race regressions);
  * this journey covers the visible grid surface end to end.
+ *
+ * FIXTURE AND AUTHORITY MODEL (why the journey is shaped the way it is).
+ * - Fixture names must satisfy the shared harness' E2E namespace guard
+ *   (`e2e-gfs-*`); the shared-with-me listing is driven by DIRECT grants.
+ * - A move is parent-relative (control-api `applyResourcePatch`): it needs
+ *   write+delete on the OLD parent and write on the destination. The
+ *   persona therefore holds read/write/delete on the fixture folder, which
+ *   covers every fixture child.
+ * - The shared-with-me listing shows resources with a direct grant, and the
+ *   Desktop suppresses a FILE that lives inside a listed folder. A file
+ *   drag therefore happens INSIDE the fixture folder (where the file and
+ *   the destination folder are siblings), while the folder drag happens at
+ *   the shared root between two directly granted folders.
+ * - Both helpers accept the SAME name and return the SAME fixture folder
+ *   row, so one fixture name yields a folder that holds both a file and a
+ *   child folder.
  */
 import { type Locator, type Page, expect, test } from '@playwright/test'
 import {
   assertGfsFixtureCleaned,
   cleanupGfsFixture,
+  countGfsLiveChildrenByName,
+  getE2EUserId,
+  getGfsChildResourceSummary,
   seedGfsDirectoryFixture,
   seedGfsFileFixture,
+  seedGfsGrant,
   uniqueGfsFixtureName,
 } from '../../../tests/e2e/gfsUiFixtures'
 import { launchAndLogin } from './workflowUi'
@@ -30,6 +50,34 @@ function toast(page: Page, text: string): Locator {
   return page.locator('[role="status"], [role="alert"]').filter({ hasText: text })
 }
 
+/**
+ * Grant the fixture to the seeded E2E persona: read/write/delete, inherited
+ * by the fixture subtree. Without this the fixtures exist but the persona
+ * cannot read them, cannot move them, and the shared-with-me listing does
+ * not carry them at all.
+ */
+function grantFixtureToE2eUser(resourceId: string): void {
+  seedGfsGrant({
+    resourceId,
+    subjectType: 'user',
+    subjectId: getE2EUserId(),
+    permissions: ['read', 'write', 'delete'],
+    inherit: true,
+    grantedBy: 'e2e:gfs-drag-and-drop',
+  })
+}
+
+/**
+ * Open the Files surface at the shared root.
+ *
+ * The Files surface renders NO aria-current on its breadcrumb, so the old
+ * `aria-current="page"` assertion could never pass and both journeys died
+ * before they reached a gesture. The signals the UI really renders at the
+ * shared root are used instead: the root-only resource menu ("Options for
+ * Shared with me" is rendered only when no folder is open) and the
+ * breadcrumb's own state — at the root there is no parent to return to, so
+ * "Shared with me" is not navigable.
+ */
 async function openFilesSharedRoot(page: Page): Promise<void> {
   const filesNav = page.getByRole('button', { name: /^Files$/, exact: true }).first()
   await expect(filesNav).toBeVisible({ timeout: 30_000 })
@@ -38,7 +86,28 @@ async function openFilesSharedRoot(page: Page): Promise<void> {
     .getByRole('navigation', { name: 'File location', exact: true })
     .getByRole('button', { name: 'Shared with me', exact: true })
   await expect(sharedWithMe).toBeVisible({ timeout: 30_000 })
-  await expect(sharedWithMe).toHaveAttribute('aria-current', 'page')
+  await expect(
+    page.getByRole('button', { name: 'Options for Shared with me', exact: true })
+  ).toBeVisible({ timeout: 30_000 })
+  await expect(sharedWithMe).toBeDisabled()
+}
+
+/** Descend into a fixture folder from the shared root. */
+async function openFixtureFolder(page: Page, folderName: string): Promise<void> {
+  await openFilesSharedRoot(page)
+  const row = gridRow(page, folderName)
+  await row.waitFor({ state: 'visible', timeout: 60_000 })
+  await row.click()
+  // The folder is open: its crumb is in the location trail and the root-only
+  // resource menu is gone.
+  await expect(
+    page
+      .getByRole('navigation', { name: 'File location', exact: true })
+      .getByRole('button', { name: folderName, exact: true })
+  ).toBeVisible({ timeout: 30_000 })
+  await expect(
+    page.getByRole('button', { name: 'Options for Shared with me', exact: true })
+  ).toHaveCount(0)
 }
 
 /**
@@ -73,49 +142,72 @@ test.describe('EvenDrive drag and drop (desktop grid)', () => {
   test.setTimeout(300_000)
 
   test('file drag into a folder moves it without a confirmation', async () => {
-    const fileFixtureName = uniqueGfsFixtureName('e2e-dnd-file')
-    const dirFixtureName = uniqueGfsFixtureName('e2e-dnd-dir')
-    const file = seedGfsFileFixture(fileFixtureName)
-    const dir = seedGfsDirectoryFixture(dirFixtureName)
+    // ONE fixture name: the file helper and the directory helper reuse the
+    // same fixture folder row, so the folder ends up holding BOTH the file
+    // and the destination folder as siblings.
+    const fixtureName = uniqueGfsFixtureName('e2e-gfs-dnd-file')
+    const file = seedGfsFileFixture(fixtureName)
+    const dir = seedGfsDirectoryFixture(fixtureName)
+    grantFixtureToE2eUser(dir.resourceId)
     const { app, page } = await launchAndLogin()
     try {
-      await openFilesSharedRoot(page)
+      await openFixtureFolder(page, fixtureName)
       const fileRow = gridRow(page, file.fileName)
-      const dirRow = gridRow(page, dir.name)
+      const dirRow = gridRow(page, dir.childName)
       await fileRow.waitFor({ state: 'visible', timeout: 60_000 })
       await dirRow.waitFor({ state: 'visible', timeout: 60_000 })
 
       await dragRowOntoRow(page, fileRow, dirRow)
 
-      await expect(toast(page, `Moved ${file.fileName} to ${dir.name}`)).toBeVisible({
+      await expect(toast(page, `Moved ${file.fileName} to ${dir.childName}`)).toBeVisible({
         timeout: 30_000,
       })
+      // Persisted location: the file is a live child of the destination
+      // folder, and it left the folder it started in.
+      await expect
+        .poll(
+          () =>
+            countGfsLiveChildrenByName({
+              parentResourceId: dir.childResourceId,
+              name: file.fileName,
+            }),
+          { timeout: 30_000, intervals: [250, 1_000] }
+        )
+        .toBe(1)
+      expect(
+        getGfsChildResourceSummary({ parentResourceId: dir.resourceId, name: file.fileName })
+      ).toBeNull()
+      // The moved file is gone from the folder listing it was dragged out of.
       await expect(fileRow).toBeHidden({ timeout: 30_000 })
     } finally {
       await app.close().catch(() => undefined)
-      cleanupGfsFixture(fileFixtureName)
-      cleanupGfsFixture(dirFixtureName)
-      assertGfsFixtureCleaned(fileFixtureName)
-      assertGfsFixtureCleaned(dirFixtureName)
+      cleanupGfsFixture(fixtureName)
+      assertGfsFixtureCleaned(fixtureName)
     }
   })
 
   test('folder drag stops at the one confirmation: Cancel is a no-op, Move commits with impact info', async () => {
-    const sourceDirName = uniqueGfsFixtureName('e2e-dnd-src')
-    const destinationDirName = uniqueGfsFixtureName('e2e-dnd-dst')
-    const sourceDir = seedGfsDirectoryFixture(sourceDirName)
-    const destinationDir = seedGfsDirectoryFixture(destinationDirName)
+    const sourceName = uniqueGfsFixtureName('e2e-gfs-dnd-src')
+    const destinationName = uniqueGfsFixtureName('e2e-gfs-dnd-dst')
+    const sourceDir = seedGfsDirectoryFixture(sourceName)
+    const destinationDir = seedGfsDirectoryFixture(destinationName)
+    // The moved folder is the fixture's CHILD, so its old parent is the
+    // fixture folder: the persona holds write+delete there and the move
+    // never needs authority on the drive root.
+    grantFixtureToE2eUser(sourceDir.resourceId)
+    grantFixtureToE2eUser(sourceDir.childResourceId)
+    grantFixtureToE2eUser(destinationDir.resourceId)
     const { app, page } = await launchAndLogin()
     try {
       await openFilesSharedRoot(page)
-      const sourceRow = gridRow(page, sourceDir.name)
+      const sourceRow = gridRow(page, sourceDir.childName)
       const destinationRow = gridRow(page, destinationDir.name)
       await sourceRow.waitFor({ state: 'visible', timeout: 60_000 })
       await destinationRow.waitFor({ state: 'visible', timeout: 60_000 })
 
       await dragRowOntoRow(page, sourceRow, destinationRow)
       const confirmDialog = page.getByRole('dialog', {
-        name: `Move folder ${sourceDir.name} to ${destinationDir.name}`,
+        name: `Move folder ${sourceDir.childName} to ${destinationDir.name}`,
         exact: true,
       })
       await expect(confirmDialog).toBeVisible({ timeout: 30_000 })
@@ -126,12 +218,20 @@ test.describe('EvenDrive drag and drop (desktop grid)', () => {
       await expect(confirmDialog).toBeHidden({ timeout: 15_000 })
       // Cancel committed nothing: the source row is still listed.
       await expect(sourceRow).toBeVisible({ timeout: 30_000 })
+      expect(
+        countGfsLiveChildrenByName({
+          parentResourceId: destinationDir.resourceId,
+          name: sourceDir.childName,
+        })
+      ).toBe(0)
 
       await dragRowOntoRow(page, sourceRow, destinationRow)
       await expect(confirmDialog).toBeVisible({ timeout: 30_000 })
       await confirmDialog.getByRole('button', { name: 'Move', exact: true }).click()
 
-      await expect(toast(page, `Moved ${sourceDir.name} to ${destinationDir.name}`)).toBeVisible({
+      await expect(
+        toast(page, `Moved ${sourceDir.childName} to ${destinationDir.name}`)
+      ).toBeVisible({
         timeout: 30_000,
       })
       await expect(
@@ -140,13 +240,32 @@ test.describe('EvenDrive drag and drop (desktop grid)', () => {
           'Moving a folder changes who can access its contents — access now follows the new location.'
         )
       ).toBeVisible({ timeout: 30_000 })
-      await expect(sourceRow).toBeHidden({ timeout: 30_000 })
+      // Persisted location: the folder is a live child of the destination
+      // and it left the fixture folder it started in. (The shared-with-me
+      // listing keeps a directly granted FOLDER visible after the move, so
+      // the persisted location — not the row count — is the proof.)
+      await expect
+        .poll(
+          () =>
+            countGfsLiveChildrenByName({
+              parentResourceId: destinationDir.resourceId,
+              name: sourceDir.childName,
+            }),
+          { timeout: 30_000, intervals: [250, 1_000] }
+        )
+        .toBe(1)
+      expect(
+        getGfsChildResourceSummary({
+          parentResourceId: sourceDir.resourceId,
+          name: sourceDir.childName,
+        })
+      ).toBeNull()
     } finally {
       await app.close().catch(() => undefined)
-      cleanupGfsFixture(sourceDirName)
-      cleanupGfsFixture(destinationDirName)
-      assertGfsFixtureCleaned(sourceDirName)
-      assertGfsFixtureCleaned(destinationDirName)
+      cleanupGfsFixture(sourceName)
+      cleanupGfsFixture(destinationName)
+      assertGfsFixtureCleaned(sourceName)
+      assertGfsFixtureCleaned(destinationName)
     }
   })
 })
