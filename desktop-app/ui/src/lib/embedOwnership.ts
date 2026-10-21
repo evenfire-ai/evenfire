@@ -378,6 +378,8 @@ export function reduceEmbedOwnership(
   }
   next = advance(next, effects)
   next = completeHandoffs(next, effects)
+  // A handoff added and completed in this same reduce leaves a fresh empty array;
+  // keeping the old one lets reuseIfUnchanged return `previous` when nothing else moved.
   if (next.handoffs.length === 0 && state.handoffs.length === 0) {
     next = next.handoffs === state.handoffs ? next : { ...next, handoffs: state.handoffs }
   }
