@@ -44,7 +44,13 @@ describe('XLSX parser cell shapes from other writers', () => {
     >
     expect(outcome).toMatchObject({ ok: true })
     expect(outcome.sheets).toEqual([
-      { name: 'Links', startRow: 1, rows: [['bold label', 'after link']], truncated: false },
+      {
+        name: 'Links',
+        startRow: 1,
+        rows: [['bold label', 'after link']],
+        truncated: false,
+        lastRow: 1,
+      },
     ])
   })
 
@@ -89,6 +95,7 @@ describe('XLSX parser values and selection', () => {
         name: 'Values',
         startRow: 1,
         truncated: false,
+        lastRow: 8,
         rows: [
           [code, 42, true],
           ['formula-zero', 0, false],
@@ -100,7 +107,7 @@ describe('XLSX parser values and selection', () => {
           ['tail'],
         ],
       },
-      { name: 'Hidden', startRow: 1, rows: [['hidden cell']], truncated: false },
+      { name: 'Hidden', startRow: 1, rows: [['hidden cell']], truncated: false, lastRow: 1 },
     ])
     expect(outcome.sheets[0]!.rows).toHaveLength(8)
   })
@@ -111,7 +118,9 @@ describe('XLSX parser values and selection', () => {
     expect(outcome).toEqual({
       ok: true,
       sheetNames: ['Values', 'Hidden'],
-      sheets: [{ name: 'Hidden', startRow: 1, rows: [['hidden cell']], truncated: false }],
+      sheets: [
+        { name: 'Hidden', startRow: 1, rows: [['hidden cell']], truncated: false, lastRow: 1 },
+      ],
     })
   })
 
@@ -129,6 +138,7 @@ describe('XLSX parser values and selection', () => {
           startRow: 1,
           rows: [['merged value'], ['merged master', null, null, 'after merge']],
           truncated: false,
+          lastRow: 2,
         },
       ],
     })
@@ -221,6 +231,7 @@ describe('XLSX continuation', () => {
         startRow: 1,
         rows: [['alpha-1'], ['alpha-2'], ['alpha-3']],
         truncated: true,
+        lastRow: 4,
       },
     ])
     expect(first.next).toEqual({ sheetIndex: 0, row: 4 })
@@ -232,12 +243,13 @@ describe('XLSX continuation', () => {
       })
     )) as Extract<XlsxOutcome, { ok: true }>
     expect(second.sheets).toEqual([
-      { name: 'Alpha', startRow: 4, rows: [['alpha-4']], truncated: false },
+      { name: 'Alpha', startRow: 4, rows: [['alpha-4']], truncated: false, lastRow: 4 },
       {
         name: 'Beta',
         startRow: 1,
         rows: [['beta-1'], ['beta-2']],
         truncated: true,
+        lastRow: 3,
       },
     ])
     expect(second.next).toEqual({ sheetIndex: 1, row: 3 })
@@ -267,6 +279,7 @@ describe('XLSX continuation', () => {
           ],
         ],
         truncated: true,
+        lastRow: 2,
       },
     ])
     expect(outcome.next).toEqual({ sheetIndex: 0, row: 2 })
@@ -301,6 +314,7 @@ describe('XLSX empty cached formula results (zach88 M5)', () => {
           startRow: 1,
           rows: [['label', null, '[formula] =1+1', 'x']],
           truncated: false,
+          lastRow: 1,
         },
       ],
     })

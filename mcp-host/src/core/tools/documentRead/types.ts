@@ -79,11 +79,22 @@ export interface XlsxSheetResult {
   startRow: number
   /**
    * Contiguous: `rows[i]` is worksheet row `startRow + i`, and an empty row
-   * inside the returned range is `[]`. Cursors depend on this.
+   * inside the returned range is `[]`. Cursors depend on this. A row listed
+   * in `skippedRows` also occupies its slot as `[]`.
    */
   rows: XlsxCellValue[][]
   /** True when rows of this sheet remain after the last returned one. */
   truncated: boolean
+  /** Last worksheet row holding a computed value; 0 for an empty sheet. */
+  lastRow: number
+  /**
+   * Rows inside `rows` whose full width alone exceeds the per-call
+   * extracted-character limit. Their cells are not returned (the row reads
+   * as `[]`); every other row of the window is. `count` covers the rows of
+   * this result; `first` lists at most 20 of their worksheet row numbers.
+   * Absent when no row was skipped.
+   */
+  skippedRows?: { count: number; first: number[] }
 }
 
 export type DocumentReadReason =

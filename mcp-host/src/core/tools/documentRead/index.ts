@@ -833,16 +833,24 @@ export class DocumentReadTool implements Tool {
             startRow: sheet.startRow,
             rows: sheet.rows,
             truncated: sheet.truncated,
+            lastRow: sheet.lastRow,
+            ...(sheet.skippedRows ? { skippedRows: sheet.skippedRows } : {}),
           })
           remaining -= sheet.rows.length
           continue
         }
         if (remaining > 0) {
+          // Skipped rows beyond the slice are re-read (and re-reported) via
+          // the continuation cursor; the count covers the emitted rows.
+          const endRow = sheet.startRow + remaining
+          const first = sheet.skippedRows?.first.filter(row => row < endRow) ?? []
           out.push({
             name: sheet.name,
             startRow: sheet.startRow,
             rows: sheet.rows.slice(0, remaining),
             truncated: true,
+            lastRow: sheet.lastRow,
+            ...(first.length > 0 ? { skippedRows: { count: first.length, first } } : {}),
           })
         }
         next = { sheetIndex: sheet.sheetIndex, row: sheet.startRow + remaining }

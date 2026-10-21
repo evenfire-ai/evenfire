@@ -63,7 +63,7 @@ async function liveChild(): Promise<ChildProcess> {
 }
 
 // Valid content, so each malformed case below fails only on the property it names.
-const VALID_SHEET = { name: 'Sheet1', startRow: 1, truncated: false, rows: [['value']] }
+const VALID_SHEET = { name: 'Sheet1', startRow: 1, truncated: false, lastRow: 1, rows: [['value']] }
 const PAGE = { page: 1, text: 'x', from: 0, to: 1, lowText: false }
 
 async function control(): Promise<void> {

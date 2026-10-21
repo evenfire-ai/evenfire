@@ -132,6 +132,18 @@ function isJobOutcome(kind: DocumentJob['kind'], message: unknown): boolean {
             typeof sheet.name === 'string' &&
             isCount(sheet.startRow, 1) &&
             typeof sheet.truncated === 'boolean' &&
+            isCount(sheet.lastRow) &&
+            Array.isArray(sheet.rows) &&
+            (sheet.skippedRows === undefined ||
+              (isRecord(sheet.skippedRows) &&
+                isCount(sheet.skippedRows.count, 1) &&
+                isNonEmptyArrayOf(sheet.skippedRows.first, row => isCount(row, 1)) &&
+                (sheet.skippedRows.first as unknown[]).length <= 20 &&
+                (sheet.skippedRows.first as number[]).every(
+                  row =>
+                    row >= (sheet.startRow as number) &&
+                    row < (sheet.startRow as number) + (sheet.rows as unknown[]).length
+                ))) &&
             isArrayOf(sheet.rows, row =>
               isArrayOf(
                 row,

@@ -417,7 +417,7 @@ describe('DocumentReadTool budgets', () => {
     const xlsx = (rows: string[][]): XlsxOutcome => ({
       ok: true,
       sheetNames: ['Wide'],
-      sheets: [{ name: 'Wide', startRow: 1, rows, truncated: false }],
+      sheets: [{ name: 'Wide', startRow: 1, rows, truncated: false, lastRow: rows.length }],
     })
 
     it('fails as row_width on a full page and emits a narrow row before it', async () => {
@@ -478,7 +478,7 @@ describe('DocumentReadTool configured masking', () => {
     const outcome: XlsxOutcome = {
       ok: true,
       sheetNames: ['Characters'],
-      sheets: [{ name: 'Characters', startRow: 1, rows: [[value]], truncated: false }],
+      sheets: [{ name: 'Characters', startRow: 1, rows: [[value]], truncated: false, lastRow: 1 }],
     }
     const result = await read(
       toolFor([file], fakeRunner(outcome).runJob, {
@@ -524,6 +524,7 @@ describe('DocumentReadTool configured masking', () => {
           startRow: 1,
           rows: [[configured, 'plain']],
           truncated: false,
+          lastRow: 1,
         },
       ],
     }
@@ -591,7 +592,13 @@ describe('DocumentReadTool with the real worker', () => {
       cursor: (first.body.continuation as { cursor: string }).cursor,
     })
     expect(second.body.sheets).toEqual([
-      { name: 'Values', startRow: 2, rows: [['formula-zero', 0, false]], truncated: true },
+      {
+        name: 'Values',
+        startRow: 2,
+        rows: [['formula-zero', 0, false]],
+        truncated: true,
+        lastRow: 8,
+      },
     ])
     expect(second.body.continuation).toEqual({
       cursor: boundCursor('v1.xlsx.0.3', file),

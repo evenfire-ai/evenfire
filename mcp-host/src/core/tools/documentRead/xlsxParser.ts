@@ -330,6 +330,7 @@ function readWorkbook(
       startRow,
       rows: [],
       truncated: false,
+      lastRow: selected.lastRow,
     }
     for (let rowNumber = startRow; rowNumber <= selected.lastRow; rowNumber += 1) {
       const values = readRow(selected.worksheet.findRow(rowNumber), selected.emptyResults)
