@@ -153,7 +153,9 @@ describe('document reader cgroup-v2 memory', () => {
 
   it('reserves the IPC transients on top of the cgroup margin', () => {
     expect(DOCUMENT_IPC_RESERVE_BYTES).toBe(113 * MIB)
-    expect(DOCUMENT_CHILD_VIRTUAL_RESERVE_BYTES).toBe(512 * MIB)
+    // Measured on the Alpine arm64 image (idle worker VmData minus resident)
+    // plus cross-arch drift; see documentMemory.ts.
+    expect(DOCUMENT_CHILD_VIRTUAL_RESERVE_BYTES).toBe(1_408 * MIB)
     // 512 - 100 working set - 64 margin - 113 IPC = 235 MiB.
     expect(
       effectiveDocumentMemoryCaps(documentLimits(), {

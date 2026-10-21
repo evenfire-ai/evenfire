@@ -13,9 +13,13 @@ export const DOCUMENT_CGROUP_MARGIN_BYTES = 64 * MIB
 // from the specified caps, not measured.
 export const DOCUMENT_IPC_RESERVE_BYTES = 113 * MIB
 // The non-resident part of the child's base VmData that RLIMIT_DATA must also
-// admit: V8's heap reservation, native mappings and shared libraries. This is
-// an estimate pending calibration on the amd64 image (G1).
-export const DOCUMENT_CHILD_VIRTUAL_RESERVE_BYTES = 512 * MIB
+// admit: V8's code-range/pointer-cage reservations, native mappings and
+// shared libraries. Measured on the Alpine arm64 image (worker idle after
+// loading pdfjs/canvas/exceljs helpers: VmData 1348 MiB, resident 67 MiB, so
+// V = 1280 MiB) plus 128 MiB for cross-arch drift; the amd64 calibration on
+// CI (G1) still owns tightening it. Too small starves legitimate reads with
+// allocation failures; too large weakens the resident bound by the excess.
+export const DOCUMENT_CHILD_VIRTUAL_RESERVE_BYTES = 1_408 * MIB
 // V8's old-space cap excludes Node, pdfjs/canvas, buffers and decoded images.
 export const DOCUMENT_NATIVE_ALLOWANCE_BYTES = 64 * MIB
 // Admission requires at least 64 MiB of heap plus the native allowance.
