@@ -52,7 +52,7 @@ const controlApiServer = createServer(async (request, response) => {
   try {
     const result = await controlApi.handle({
       method: request.method,
-      path: url.pathname.slice('/api/v1'.length),
+      path: `${url.pathname.slice('/api/v1'.length)}${url.search}`,
       headers: request.headers,
       body,
     })
