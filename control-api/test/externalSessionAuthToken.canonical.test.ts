@@ -37,7 +37,7 @@ describe('external session V1 token canonical representation', () => {
     }
   })
 
-  it('accepts the canonical JWS and rejects every generated segment alias', () => {
+  it('accepts the canonical JWS and rejects every generated alias and malformed representation', () => {
     const token = signedToken()
     expect(verifyExternalSessionToken(token)).toMatchObject({ userId, authGeneration: 1 })
 
@@ -55,12 +55,10 @@ describe('external session V1 token canonical representation', () => {
         `${variant.segment}/${variant.kind} alias`
       ).toBeNull()
     }
-  })
 
-  it('rejects non-canonical segment counts and out-of-alphabet text', () => {
-    const token = signedToken()
-    expect(verifyExternalSessionToken(token)).toMatchObject({ userId })
-
+    // Pre-existing malformed forms stay rejected. They do not distinguish the
+    // canonical check by themselves, so they live in this mutation-killing test
+    // instead of a separate test that could never go red.
     const malformed = [
       `${token}.`,
       `${token}.extra`,
