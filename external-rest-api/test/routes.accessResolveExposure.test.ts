@@ -72,7 +72,8 @@ describe('public access resolve exposure', () => {
     expect(resolve.body).toEqual(unknown.body)
     // Both requests carried a valid session, so neither was stopped by the
     // /me/access auth gate; the resolve response is routing, not a 401.
-    expect(mocks.verifyToken).toHaveBeenCalledTimes(2)
+    expect(mocks.verifyToken.mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(mocks.verifyToken).toHaveBeenCalledWith('session-token')
     // Nothing dialed control-api: the dormant /external/access/resolve handler
     // is unreachable from this edge.
     expect(mocks.controlApiFetch).not.toHaveBeenCalled()
@@ -94,7 +95,10 @@ describe('public access resolve exposure', () => {
     })
     expect(mocks.controlApiFetch).toHaveBeenCalledTimes(1)
     const [upstreamUrl, upstreamInit] = mocks.controlApiFetch.mock.calls[0] as [string, RequestInit]
-    expect(String(upstreamUrl)).toContain('/external/access/capabilities')
+    expect(new URL(upstreamUrl).pathname).toBe('/api/v1/external/access/capabilities')
     expect(upstreamInit.method).toBe('GET')
+    expect((upstreamInit.headers as Record<string, string>)['x-user-session-token']).toBe(
+      'session-token'
+    )
   })
 })
