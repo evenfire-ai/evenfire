@@ -132,7 +132,9 @@ describe('useAppController held Hosts', () => {
     unmount = app.unmount
     await waitFor(() => expect(app.result.current.isAuthenticated).toBe(true))
     await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
-    expect(handle.refreshCatalog).toHaveBeenCalled()
+    // Boot ends with the post-paint catalog refresh, so later refresh counts
+    // measure only what the test itself triggers.
+    await waitFor(() => expect(handle.refreshCatalog).toHaveBeenCalledTimes(2))
     expect(clerum.rpc.listSessions).toHaveBeenCalled()
     return { app, commits }
   }
@@ -675,6 +677,11 @@ describe('ChatPage with a held Host on the chat tab', () => {
     )
     // Liveness witness: ChatPage's auto-selection runs, and picked a Host at boot.
     await waitFor(() => expect(app.getVm().selectedAgent).not.toBe(null))
+    // Boot ends with the post-paint catalog refresh, so later refresh counts
+    // measure only what the test itself triggers.
+    await waitFor(() =>
+      expect(vi.mocked(window.clerum.access.refreshCatalog)).toHaveBeenCalledTimes(2)
+    )
     return app
   }
 
