@@ -73,6 +73,33 @@ describe('EvenDrive drag-and-drop E2E gate', () => {
   })
 
   describe('run verdict', () => {
+    const passingReport = { stats: { expected: 2, skipped: 0, unexpected: 0, flaky: 0 } }
+
+    it.each([
+      { status: 1 },
+      { status: null, signal: 'SIGTERM' },
+      { status: null, error: new Error('spawn failed') },
+    ])('rejects a green report when Playwright did not exit zero (%j)', run => {
+      expect(evaluateGateReport(passingReport, run).problems.join('\n')).toContain(
+        'did not exit successfully'
+      )
+    })
+
+    it('rejects a run-level error even when individual journeys passed', () => {
+      const report = { ...passingReport, errors: [{ message: 'teardown failed' }] }
+      expect(evaluateGateReport(report).problems.join('\n')).toContain('run-level error')
+    })
+
+    it('rejects flaky journeys', () => {
+      const report = { stats: { ...passingReport.stats, flaky: 1 } }
+      expect(evaluateGateReport(report).problems.join('\n')).toContain('flaky')
+    })
+
+    it('rejects malformed result counts', () => {
+      const report = { stats: { ...passingReport.stats, skipped: 'invalid' } }
+      expect(evaluateGateReport(report).problems.join('\n')).toContain('invalid result counts')
+    })
+
     it('treats a run that executed zero journeys as a failure', () => {
       const verdict = evaluateGateReport({ stats: { expected: 0, skipped: 7, unexpected: 0 } })
       expect(verdict.problems.join('\n')).toContain('executed zero journeys')

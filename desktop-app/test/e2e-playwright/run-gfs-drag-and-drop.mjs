@@ -140,8 +140,14 @@ export function collectGateProblems(env) {
  * at least one journey actually executed, nothing was skipped, and nothing
  * failed. A report that ran zero journeys is NOT a pass.
  */
-export function evaluateGateReport(report) {
+export function evaluateGateReport(report, run = { status: 0 }) {
   const problems = []
+  if (run.error || run.signal || run.status !== 0) {
+    problems.push('Playwright did not exit successfully. The report cannot certify this run.')
+  }
+  if (Array.isArray(report?.errors) && report.errors.length > 0) {
+    problems.push('Playwright reported a run-level error. The report cannot certify this run.')
+  }
   const stats = report && typeof report === 'object' ? (report.stats ?? {}) : {}
   const expected = Number(stats.expected ?? 0)
   const skipped = Number(stats.skipped ?? 0)
@@ -157,8 +163,22 @@ export function evaluateGateReport(report) {
   if (skipped > 0) {
     problems.push(`${skipped} journey(s) were skipped. A skipped journey is not a green result.`)
   }
+  if (
+    !Number.isInteger(skipped) ||
+    skipped < 0 ||
+    !Number.isInteger(unexpected) ||
+    unexpected < 0 ||
+    !Number.isInteger(flaky) ||
+    flaky < 0 ||
+    !Number.isInteger(expected)
+  ) {
+    problems.push('The journey report has invalid result counts.')
+  }
   if (unexpected > 0) {
     problems.push(`${unexpected} journey(s) failed.`)
+  }
+  if (flaky > 0) {
+    problems.push(`${flaky} journey(s) were flaky. The run was not a clean pass.`)
   }
 
   return { problems, stats: { expected, skipped, unexpected, flaky } }
@@ -228,6 +248,8 @@ async function main() {
   const dir = artifactDir()
   const reportPath = path.join(dir, 'playwright-report.json')
   const playwrightBin = resolvePlaywrightBin()
+  // A previous successful run must never supply evidence for a failed launch.
+  fs.rmSync(reportPath, { force: true })
 
   process.stdout.write(
     `[E2E-GATE] running the EvenDrive drag-and-drop journeys (report: ${reportPath})\n`
@@ -245,6 +267,7 @@ async function main() {
     {
       cwd: APP_ROOT,
       stdio: 'inherit',
+      timeout: 75 * 60_000,
       env: { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: reportPath },
     }
   )
@@ -266,7 +289,7 @@ async function main() {
     return 1
   }
 
-  const verdict = evaluateGateReport(report)
+  const verdict = evaluateGateReport(report, run)
   if (verdict.problems.length > 0) {
     process.stderr.write('[E2E-GATE] The EvenDrive drag-and-drop gate did NOT pass:\n')
     for (const problem of verdict.problems) process.stderr.write(`  - ${problem}\n`)
@@ -276,7 +299,7 @@ async function main() {
   process.stdout.write(
     `[E2E-GATE] PASS — ${verdict.stats.expected} journey(s) executed, 0 skipped, 0 failed.\n`
   )
-  return run.status === 0 ? 0 : 1
+  return 0
 }
 
 const invokedDirectly =
