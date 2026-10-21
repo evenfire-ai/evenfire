@@ -142,10 +142,13 @@ async function invitationPasswordAuthFromRequest(req: Request): Promise<
 > {
   const sessionToken = extractAuthToken(req)
   if (sessionToken) {
+    // A presented session credential is the only proof considered: an invalid
+    // one fails closed instead of falling through to the invitation link.
     const claims = verifyToken(sessionToken)
-    if (claims) {
-      return { auth: { userId: claims.userId, email: claims.email, sessionToken } }
+    if (!claims) {
+      return { status: 401, body: { error: 'Unauthorized' } }
     }
+    return { auth: { userId: claims.userId, email: claims.email, sessionToken } }
   }
 
   const token = String(req.body?.token || '').trim()

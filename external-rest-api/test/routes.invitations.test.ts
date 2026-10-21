@@ -49,7 +49,7 @@ describe('routes/invitations', () => {
       data: {
         userId: 'user-1',
         email: 'invitee@example.com',
-        token: 'invited-session-token',
+        token: 'synthetic-invited-session-token',
       },
     })
     invitationsServiceMock.setupInvitationPassword.mockResolvedValue({
@@ -73,7 +73,7 @@ describe('routes/invitations', () => {
       reauthenticationRequired: true,
     })
     expect(String(res.headers['set-cookie'])).toContain('profile_session=;')
-    expect(String(res.headers['set-cookie'])).not.toContain('invited-session-token')
+    expect(String(res.headers['set-cookie'])).not.toContain('synthetic-invited-session-token')
     expect(String(res.headers['set-cookie'])).toContain('HttpOnly')
     expect(authTokenMock.verifyToken).not.toHaveBeenCalled()
     expect(invitationsServiceMock.getInvitationByToken).toHaveBeenCalledWith(
@@ -85,7 +85,11 @@ describe('routes/invitations', () => {
       'v2'
     )
     expect(invitationsServiceMock.setupInvitationPassword).toHaveBeenCalledWith(
-      { userId: 'user-1', email: 'invitee@example.com', sessionToken: 'invited-session-token' },
+      {
+        userId: 'user-1',
+        email: 'invitee@example.com',
+        sessionToken: 'synthetic-invited-session-token',
+      },
       'inv-1',
       'user123!'
     )
@@ -417,52 +421,55 @@ describe('routes/invitations', () => {
     expect(JSON.stringify(res.body)).not.toContain('/external/invitations/token')
   })
 
-  it('falls back to invitation token flow when an old bearer token is invalid', async () => {
-    authTokenMock.verifyToken.mockReturnValue(null)
-    invitationsServiceMock.getInvitationByToken.mockResolvedValue({
-      id: 'inv-1',
-      email: 'invitee@example.com',
-      purpose: 'member_invitation',
-      status: 'pending',
-    })
-    invitationsServiceMock.acceptInvitation.mockResolvedValue({
-      data: {
-        userId: 'user-1',
+  it.each([
+    ['bearer header', 'authorization', 'Bearer stale-token'],
+    ['profile session cookie', 'cookie', 'profile_session=stale-token'],
+  ])(
+    'fails closed with 401 when an invalid %s is presented alongside an invitation link',
+    async (_source, header, value) => {
+      authTokenMock.verifyToken.mockReturnValue(null)
+      invitationsServiceMock.getInvitationByToken.mockResolvedValue({
+        id: 'inv-1',
         email: 'invitee@example.com',
-        token: 'invited-session-token',
-      },
-    })
-    invitationsServiceMock.setupInvitationPassword.mockResolvedValue({
-      data: { id: 'inv-1', passwordUpdated: true },
-    })
-
-    await request(makeApp())
-      .post('/invitations/password')
-      .set('authorization', 'Bearer stale-token')
-      .send({
-        token: 'invitation-link-token',
-        email: 'invitee@example.com',
-        invitationId: 'inv-1',
-        password: 'user123!',
+        purpose: 'member_invitation',
+        status: 'pending',
       })
-      .expect(200)
+      // The invitation-link path would succeed if it were reached.
+      invitationsServiceMock.acceptInvitation.mockResolvedValue({
+        data: {
+          userId: 'user-1',
+          email: 'invitee@example.com',
+          token: 'synthetic-invited-session-token',
+        },
+      })
+      invitationsServiceMock.setupInvitationPassword.mockResolvedValue({
+        data: { id: 'inv-1', passwordUpdated: true },
+      })
 
-    expect(authTokenMock.verifyToken).toHaveBeenCalledWith('stale-token')
-    expect(invitationsServiceMock.getInvitationByToken).toHaveBeenCalledWith(
-      'invitation-link-token'
-    )
-    expect(invitationsServiceMock.acceptInvitation).toHaveBeenCalledWith(
-      'invitation-link-token',
-      'invitee@example.com',
-      undefined
-    )
-    expect(invitationsServiceMock.setupInvitationPassword).toHaveBeenCalledWith(
-      { userId: 'user-1', email: 'invitee@example.com', sessionToken: 'invited-session-token' },
-      'inv-1',
-      'user123!'
-    )
-    expect(invitationsServiceMock.setupInvitationPasswordWithToken).not.toHaveBeenCalled()
-  })
+      const res = await request(makeApp())
+        .post('/invitations/password')
+        // Own rate-limit bucket: the module-level limiter is shared across this file.
+        .set('x-forwarded-for', '203.0.113.20')
+        .set(header, value)
+        .send({
+          token: 'invitation-link-token',
+          email: 'invitee@example.com',
+          invitationId: 'inv-1',
+          password: 'user123!',
+        })
+        .expect(401)
+
+      expect(res.body).toEqual({ error: 'Unauthorized' })
+      // Liveness: the presented credential was verified and rejected.
+      expect(authTokenMock.verifyToken).toHaveBeenCalledWith('stale-token')
+      expect(invitationsServiceMock.getInvitationByToken).toHaveBeenCalledWith(
+        'invitation-link-token'
+      )
+      expect(invitationsServiceMock.acceptInvitation).not.toHaveBeenCalled()
+      expect(invitationsServiceMock.setupInvitationPassword).not.toHaveBeenCalled()
+      expect(invitationsServiceMock.setupInvitationPasswordWithToken).not.toHaveBeenCalled()
+    }
+  )
 
   it('sets invitation password with a valid bearer token without accepting again', async () => {
     authTokenMock.verifyToken.mockReturnValue({
