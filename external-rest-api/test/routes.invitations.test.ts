@@ -717,7 +717,12 @@ describe('routes/invitations', () => {
       })
       .expect(400)
 
-    expect(replayed.body).toEqual({ error: 'Invitation is not pending' })
+    // `error` is unchanged and `code` is the stable machine signal stream A can
+    // match without parsing the human message.
+    expect(replayed.body).toEqual({
+      error: 'Invitation is not pending',
+      code: 'invitation_not_pending',
+    })
     expect(replayed.headers['set-cookie']).toBeUndefined()
     expect(invitationsServiceMock.setupInvitationPassword).not.toHaveBeenCalled()
     expect(invitationsServiceMock.setupInvitationPasswordWithToken).not.toHaveBeenCalled()
@@ -746,6 +751,110 @@ describe('routes/invitations', () => {
     )
     expect(String(pending.headers['set-cookie'])).toContain('profile_session=;')
     expect(invitationsServiceMock.acceptInvitation).toHaveBeenCalledTimes(2)
+  })
+
+  it('refuses an invalid password before the sessionless fallback consumes a pending invitation', async () => {
+    const state = { invitation: 'pending' as 'pending' | 'accepted', acceptCalls: 0 }
+    invitationsServiceMock.getInvitationByToken.mockImplementation(async () => ({
+      id: 'inv-1',
+      email: 'invitee@example.com',
+      purpose: 'member_invitation',
+      status: state.invitation,
+    }))
+    invitationsServiceMock.acceptInvitation.mockImplementation(async () => {
+      state.acceptCalls += 1
+      if (state.invitation === 'accepted') {
+        return {
+          data: {
+            accepted: true,
+            userId: 'user-1',
+            email: 'invitee@example.com',
+            replay: true,
+          },
+        }
+      }
+      // Model the producer's one-time transition: only this call consumes it.
+      state.invitation = 'accepted'
+      return {
+        data: {
+          accepted: true,
+          userId: 'user-1',
+          email: 'invitee@example.com',
+          token: 'invited-session-token',
+        },
+      }
+    })
+    invitationsServiceMock.setupInvitationPassword.mockResolvedValue({
+      data: { id: 'inv-1', passwordUpdated: true },
+    })
+
+    const invalidPasswords = ['short', '        ', 'x'.repeat(257)]
+    for (const [index, password] of invalidPasswords.entries()) {
+      const rejected = await request(makeApp())
+        .post('/invitations/password')
+        .set('x-forwarded-for', `198.51.100.${210 + index}`)
+        .send({
+          token: 'pending-invitation-link',
+          email: 'invitee@example.com',
+          invitationId: 'inv-1',
+          password,
+        })
+        .expect(400)
+      expect(rejected.body).toEqual({
+        error: 'Password must be between 8 and 256 characters',
+      })
+      expect(rejected.headers['set-cookie']).toBeUndefined()
+      // Read the modeled producer state back: each refusal left it pending.
+      expect(state.invitation).toBe('pending')
+    }
+    expect(invitationsServiceMock.acceptInvitation).not.toHaveBeenCalled()
+    expect(invitationsServiceMock.setupInvitationPassword).not.toHaveBeenCalled()
+
+    // Liveness: a valid retry still consumes the invitation and succeeds. Its
+    // cleared profile cookie is the positive witness for the invalid requests'
+    // no-cookie assertions above.
+    const accepted = await request(makeApp())
+      .post('/invitations/password')
+      .set('x-forwarded-for', '198.51.100.220')
+      .send({
+        token: 'pending-invitation-link',
+        email: 'invitee@example.com',
+        invitationId: 'inv-1',
+        password: 'user123!',
+      })
+      .expect(200)
+    expect(String(accepted.headers['set-cookie'])).toContain('profile_session=;')
+    expect(String(accepted.headers['set-cookie'])).toContain('HttpOnly')
+    expect(state.invitation).toBe('accepted')
+    expect(state.acceptCalls).toBe(1)
+    expect(invitationsServiceMock.setupInvitationPassword).toHaveBeenCalledWith(
+      {
+        userId: 'user-1',
+        email: 'invitee@example.com',
+        sessionToken: 'invited-session-token',
+      },
+      'inv-1',
+      'user123!'
+    )
+
+    // The consumed state is real: the same fallback now receives the replay
+    // refusal instead of a second password write.
+    const replayed = await request(makeApp())
+      .post('/invitations/password')
+      .set('x-forwarded-for', '198.51.100.221')
+      .send({
+        token: 'pending-invitation-link',
+        email: 'invitee@example.com',
+        invitationId: 'inv-1',
+        password: 'user123!',
+      })
+      .expect(400)
+    expect(replayed.body).toEqual({
+      error: 'Invitation is not pending',
+      code: 'invitation_not_pending',
+    })
+    expect(state.acceptCalls).toBe(2)
+    expect(invitationsServiceMock.setupInvitationPassword).toHaveBeenCalledTimes(1)
   })
 
   it('keeps the invited-session 502 when a non-replay acceptance has no token', async () => {

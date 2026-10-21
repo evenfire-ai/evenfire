@@ -117,6 +117,39 @@ describeRealPostgres('membership invitation acceptance idempotency on real Postg
     return result.rows[0]!.count
   }
 
+  async function membershipWriteCount(): Promise<number> {
+    const result = await holder.pool.query<{ writes: number }>(
+      `SELECT writes FROM team_membership_write_probe`
+    )
+    return result.rows[0]!.writes
+  }
+
+  async function resetMembershipWriteProbe(): Promise<void> {
+    await holder.pool.query(`UPDATE team_membership_write_probe SET writes = 0`)
+  }
+
+  // Both concurrent acceptance statements execute the same locked invitation
+  // SELECT. Counting them in pg_stat_activity proves they are queued on the
+  // barrier's row lock before it is released, so this is a real overlap rather
+  // than two calls that happened to run one after the other.
+  async function waitForLockedAcceptances(expected: number): Promise<void> {
+    const deadline = Date.now() + 5_000
+    while (Date.now() < deadline) {
+      const result = await holder.pool.query<{ count: number }>(
+        `SELECT count(*)::int AS count
+           FROM pg_stat_activity
+          WHERE datname = current_database()
+            AND wait_event_type = 'Lock'
+            AND query LIKE '%FOR UPDATE OF i%'`
+      )
+      if (result.rows[0]!.count >= expected) return
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+    throw new Error(
+      `expected ${expected} invitation acceptance statements waiting on the invitation row lock`
+    )
+  }
+
   beforeAll(async () => {
     adminPool = new Pool({ connectionString: adminUrl })
     await adminPool.query(`CREATE DATABASE "${database}"`)
@@ -126,6 +159,28 @@ describeRealPostgres('membership invitation acceptance idempotency on real Postg
     await initDb(holder.pool)
     teamId = randomUUID()
     await holder.pool.query(`INSERT INTO teams(id, name) VALUES ($1, 'Idempotency Team')`, [teamId])
+    // Test-only write observer on the scratch database: every membership
+    // INSERT/UPDATE increments one counter, so a concurrent replay that
+    // re-applies an identical UPSERT is visible even when the final row is
+    // unchanged.
+    await holder.pool.query(`
+      CREATE TABLE team_membership_write_probe (writes integer NOT NULL)
+    `)
+    await holder.pool.query(`INSERT INTO team_membership_write_probe(writes) VALUES (0)`)
+    await holder.pool.query(`
+      CREATE FUNCTION record_team_membership_write() RETURNS trigger
+      LANGUAGE plpgsql AS $$
+      BEGIN
+        UPDATE team_membership_write_probe SET writes = writes + 1;
+        RETURN NULL;
+      END;
+      $$
+    `)
+    await holder.pool.query(`
+      CREATE TRIGGER team_membership_write_probe_trigger
+      AFTER INSERT OR UPDATE ON team_members
+      FOR EACH ROW EXECUTE FUNCTION record_team_membership_write()
+    `)
   }, 60_000)
 
   afterAll(async () => {
@@ -442,33 +497,70 @@ describeRealPostgres('membership invitation acceptance idempotency on real Postg
     await expect(memberships(String(accepted.data.userId))).resolves.toHaveLength(1)
   })
 
-  it('leaves one membership when two acceptances race', async () => {
+  it('writes one membership when two acceptances overlap on the invitation row lock', async () => {
     const invitation = await createInvitation({ label: 'concurrent' })
+    await resetMembershipWriteProbe()
 
-    const [left, right] = await Promise.all([
-      acceptInvitationForEmail(invitation.email, invitation.token, invitation.id),
-      acceptInvitationForEmail(invitation.email, invitation.token, invitation.id),
-    ])
+    // Hold the invitation row so both acceptances queue on the same lock before
+    // either can consume the pending transition. Releasing it then lets exactly
+    // one win and the other observe the accepted row.
+    const barrier = await holder.pool.connect()
+    let accepting: Array<ReturnType<typeof acceptInvitationForEmail>> = []
+    let barrierCommitted = false
+    try {
+      await barrier.query('BEGIN')
+      await barrier.query(`SELECT id FROM invitations WHERE id = $1 FOR UPDATE`, [invitation.id])
+      // Start both acceptances only after the barrier owns the row, so both
+      // necessarily queue behind it.
+      accepting = [
+        acceptInvitationForEmail(invitation.email, invitation.token, invitation.id),
+        acceptInvitationForEmail(invitation.email, invitation.token, invitation.id),
+      ]
+      await waitForLockedAcceptances(2)
+      await barrier.query('COMMIT')
+      barrierCommitted = true
 
-    expect(left).toMatchObject({ data: { accepted: true, status: 'accepted' } })
-    expect(right).toMatchObject({ data: { accepted: true, status: 'accepted' } })
-    if (!('data' in left) || !('data' in right)) {
-      throw new Error('concurrent acceptance did not return results')
+      const [left, right] = await Promise.all(accepting)
+
+      expect(left).toMatchObject({ data: { accepted: true, status: 'accepted' } })
+      expect(right).toMatchObject({ data: { accepted: true, status: 'accepted' } })
+      if (!('data' in left) || !('data' in right)) {
+        throw new Error('concurrent acceptance did not return results')
+      }
+      // Exactly one of the two acceptances consumed the pending row.
+      const replays = [left.data.replay, right.data.replay].filter(Boolean)
+      expect(replays).toHaveLength(1)
+      expect(left.data.userId).toBe(right.data.userId)
+      expect(left.data.acceptedAt).toBe(right.data.acceptedAt)
+      const userId = String(left.data.userId)
+
+      // The observer counts actual membership writes, so an identical UPSERT
+      // applied by the replay would raise this above one even though the final
+      // row, role and timestamps stay identical.
+      await expect(membershipWriteCount()).resolves.toBe(1)
+
+      await expect(memberships(userId)).resolves.toEqual([
+        { team_id: teamId, role: 'member', status: 'active' },
+      ])
+      const state = await invitationState(invitation.id)
+      expect(state.status).toBe('accepted')
+      expect(state.accepted_user_id).toBe(userId)
+      const acceptedAt = state.accepted_at
+      if (!(acceptedAt instanceof Date)) {
+        throw new Error('concurrent acceptance did not record an accepted_at timestamp')
+      }
+      expect(acceptedAt.toISOString()).toBe(left.data.acceptedAt)
+
+      // Liveness witness: the probe observes a real membership update, so the
+      // one-write assertion above is not a trigger that never fires.
+      await holder.pool.query(`UPDATE team_members SET role = role WHERE user_id = $1`, [userId])
+      await expect(membershipWriteCount()).resolves.toBe(2)
+    } finally {
+      if (!barrierCommitted) {
+        await barrier.query('ROLLBACK')
+        await Promise.allSettled(accepting)
+      }
+      barrier.release()
     }
-    expect(left.data.userId).toBe(right.data.userId)
-    expect(left.data.acceptedAt).toBe(right.data.acceptedAt)
-    const userId = String(left.data.userId)
-
-    await expect(memberships(userId)).resolves.toEqual([
-      { team_id: teamId, role: 'member', status: 'active' },
-    ])
-    const state = await invitationState(invitation.id)
-    expect(state.status).toBe('accepted')
-    expect(state.accepted_user_id).toBe(userId)
-    const acceptedAt = state.accepted_at
-    if (!(acceptedAt instanceof Date)) {
-      throw new Error('concurrent acceptance did not record an accepted_at timestamp')
-    }
-    expect(acceptedAt.toISOString()).toBe(left.data.acceptedAt)
   })
 })

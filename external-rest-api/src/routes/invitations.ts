@@ -25,6 +25,20 @@ import {
 const tokenLookupRateLimit = createRateLimiter({ windowMs: 60_000, maxRequests: 30 })
 const acceptRateLimit = createRateLimiter({ windowMs: 60_000, maxRequests: 10 })
 
+// The invitation password producer validates the trimmed value against the
+// same inclusive bounds. The edge checks it before any acceptance so an invalid
+// password cannot consume a still-pending invitation.
+const INVITATION_PASSWORD_MIN_LENGTH = 8
+const INVITATION_PASSWORD_MAX_LENGTH = 256
+
+function isValidInvitationPassword(password: string): boolean {
+  const trimmed = password.trim()
+  return (
+    trimmed.length >= INVITATION_PASSWORD_MIN_LENGTH &&
+    trimmed.length <= INVITATION_PASSWORD_MAX_LENGTH
+  )
+}
+
 function requestedSessionContract(req: Request): 'v2' | undefined {
   return req.header('x-evenfire-session-contract') === 'v2' ? 'v2' : undefined
 }
@@ -174,6 +188,15 @@ async function invitationPasswordAuthFromRequest(req: Request): Promise<
     return { status: 401, body: { error: 'Unauthorized' } }
   }
 
+  // Validate before this fallback accepts the invitation: that acceptance is a
+  // one-time consumption, so an invalid password must be refused while the link
+  // is still pending. A presented session never reaches this branch, so its
+  // 401 precedence is unchanged.
+  const password = String(req.body?.password || '')
+  if (!isValidInvitationPassword(password)) {
+    return { status: 400, body: { error: 'Password must be between 8 and 256 characters' } }
+  }
+
   const accepted = await acceptInvitation(token, email, requestedSessionContract(req))
   if (accepted.error) {
     return acceptInvitationErrorResponse(accepted.error)
@@ -181,9 +204,11 @@ async function invitationPasswordAuthFromRequest(req: Request): Promise<
   // A replay is an explicit success without a session. It must not continue
   // into the password change: the token no longer proves a pending invitation,
   // so it maps exactly like a not-pending acceptance instead of the 502 that
-  // marks a broken first-acceptance response.
+  // marks a broken first-acceptance response. `error` stays byte-identical to
+  // that mapping; `code` is the stable machine signal for the fallback replay.
   if (accepted.data?.replay) {
-    return acceptInvitationErrorResponse('not_pending')
+    const replay = acceptInvitationErrorResponse('not_pending')
+    return { status: replay.status, body: { ...replay.body, code: 'invitation_not_pending' } }
   }
   if (!accepted.data?.token || !accepted.data.userId) {
     return { status: 502, body: { error: 'Failed to start invited session' } }
