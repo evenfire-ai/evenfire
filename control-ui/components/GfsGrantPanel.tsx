@@ -624,7 +624,14 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
   ): Promise<string[]> {
     const revoked: string[] = []
     for (const entry of conflictingShareEntries(entries, nextRole)) {
-      await deleteGfsShare(entry.rowId)
+      try {
+        await deleteGfsShare(entry.rowId)
+      } catch (caught) {
+        // The row is already gone: the sharing entry grants nothing, so the
+        // outcome is the one a successful delete would have produced. Calling
+        // it a failure would claim residual Editor access that cannot exist.
+        if (!isAlreadyMissing(caught)) throw caught
+      }
       revoked.push(entry.rowId)
     }
     return revoked
@@ -888,7 +895,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       }
       const affected = request.affected
       const affectedNames = affected.map(update => update.source.name)
-      const revokedFolderNames: string[] = []
+      const revokedFolderNames = new Set<string>()
       let updated = 0
       for (const { source, permissions } of affected) {
         try {
@@ -918,7 +925,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
         // so a sharing entry that still grants Editor goes with it.
         try {
           const revoked = await revokeConflictingShares(source.shareEntries, request.nextRole)
-          if (revoked.length > 0) revokedFolderNames.push(source.name)
+          if (revoked.length > 0) revokedFolderNames.add(source.name)
         } catch (caught) {
           if (!isAlreadyMissing(caught)) {
             setError(caught instanceof Error ? caught.message : 'Failed to revoke a sharing entry')
@@ -954,7 +961,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
         // through a link on the item itself.
         try {
           const revoked = await revokeConflictingShares(row.direct.shareEntries, request.nextRole)
-          if (revoked.length > 0) revokedFolderNames.push(resource.name)
+          if (revoked.length > 0) revokedFolderNames.add(resource.name)
         } catch (caught) {
           if (!isAlreadyMissing(caught)) {
             setError(caught instanceof Error ? caught.message : 'Failed to revoke a sharing entry')
@@ -977,8 +984,8 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
           `Updated ${updated} of ${affected.length + request.skippedFolderNames.length} folders. Sharing details on ${joinFolderNames(request.skippedFolderNames)} could not be verified; existing access was kept.`
         )
       }
-      if (revokedFolderNames.length > 0) {
-        details.push(revokedSharesCopy(revokedFolderNames))
+      if (revokedFolderNames.size > 0) {
+        details.push(revokedSharesCopy([...revokedFolderNames]))
       }
       if (residualNames.length > 0) {
         details.push(

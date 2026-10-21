@@ -324,6 +324,70 @@ describe('GfsGrantPanel bulk access', () => {
     expect(mockDeleteGfsShare).not.toHaveBeenCalled()
   })
 
+  // RP-032 — a Read DOWNGRADE on a merged grant+share row revokes the
+  // sharing entry that still grants Editor (the server has no share-update
+  // surface), while the grant is rewritten with its OWN scope flag. A Read
+  // sharing entry is not a conflict and survives.
+  it('revokes the conflicting sharing entry when a merged grant and share row is downgraded', async () => {
+    const EDITOR_SHARE_ID = '55555555-5555-4555-8555-555555555555'
+    const READ_SHARE_ID = '66666666-6666-4666-8666-666666666666'
+    mockGetGfsGrants.mockResolvedValue({
+      items: [
+        {
+          id: '33333333-3333-3333-3333-333333333333',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: userSubject,
+          permissions: ['read', 'write'],
+          inherit: false,
+        },
+      ],
+    })
+    mockGetGfsShares.mockResolvedValue({
+      items: [
+        {
+          id: EDITOR_SHARE_ID,
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: userSubject,
+          permissions: ['read', 'write'],
+          includeDescendants: true,
+        },
+        {
+          id: READ_SHARE_ID,
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: userSubject,
+          permissions: ['read'],
+          includeDescendants: true,
+        },
+      ],
+    })
+    mockPutGfsGrant.mockResolvedValue(successfulMutation(userSubject))
+
+    renderPanel()
+
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    fireEvent.click(within(existing).getByRole('button', { name: 'Access role for Ada Lovelace' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+
+    // The grant keeps its OWN scope flag (false) — the shares' descendant
+    // coverage is never OR'd into the grant write.
+    await waitFor(() =>
+      expect(mockPutGfsGrant).toHaveBeenCalledWith({
+        drive: 'main',
+        resourceId: resource.resourceId,
+        subject: userSubject,
+        permissions: ['read', 'share'],
+        inherit: false,
+      })
+    )
+    // Only the CONFLICTING entry is revoked; the Read entry survives.
+    await waitFor(() => expect(mockDeleteGfsShare).toHaveBeenCalledWith(EDITOR_SHARE_ID))
+    expect(mockDeleteGfsShare).not.toHaveBeenCalledWith(READ_SHARE_ID)
+    expect(mockDeleteGfsShare).toHaveBeenCalledTimes(1)
+  })
+
   // R1-M5 — a share-only principal has no grant to rewrite and no
   // share-update surface: the role control is disabled and a role change can
   // never migrate the share into a grant. Explicit grant creation through the

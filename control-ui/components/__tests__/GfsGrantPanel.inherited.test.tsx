@@ -422,6 +422,192 @@ describe('GfsGrantPanel inherited access', () => {
     expect(screen.queryByText(/still grant Editor access/)).toBeNull()
   })
 
+  // RP-032 — conflicting-only: on the rewritten folder the Editor sharing
+  // entry goes, the Read sharing entry stays (with its own descendant
+  // coverage), and neither entry is touched on any other resource.
+  it('revokes only the conflicting sharing entry on the rewritten folder', async () => {
+    const EDITOR_SHARE_ID = '14141414-1414-4141-8141-141414141414'
+    const READ_SHARE_ID = '15151515-1515-4151-8151-151515151515'
+    mockGetGfsGrants.mockImplementation(async resourceId => {
+      if (resourceId === FOLDER_ID) {
+        return {
+          items: [
+            {
+              id: FOLDER_GRANT_ID,
+              drive: 'main',
+              resourceId: FOLDER_ID,
+              subject: miguel,
+              permissions: ['read', 'write'],
+              inherit: true,
+            },
+          ],
+        }
+      }
+      return { items: [] }
+    })
+    mockGetGfsShares.mockImplementation(async resourceId => {
+      if (resourceId === FOLDER_ID) {
+        return {
+          items: [
+            {
+              id: EDITOR_SHARE_ID,
+              drive: 'main',
+              resourceId: FOLDER_ID,
+              subject: miguel,
+              permissions: ['read', 'write'],
+              includeDescendants: true,
+            },
+            {
+              id: READ_SHARE_ID,
+              drive: 'main',
+              resourceId: FOLDER_ID,
+              subject: miguel,
+              permissions: ['read'],
+              includeDescendants: true,
+            },
+          ],
+        }
+      }
+      return { items: [] }
+    })
+    renderPanel()
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    const miguelRow = await within(existing).findByTestId(miguelRowTestId)
+
+    await chooseRole(miguelRow, 'Read')
+    const dialog = await screen.findByRole('alertdialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update role' }))
+
+    await waitFor(() => expect(mockDeleteGfsShare).toHaveBeenCalledWith(EDITOR_SHARE_ID))
+    // The Read entry already grants the target role: it is not a conflict and
+    // survives, with its own descendant coverage intact.
+    expect(mockDeleteGfsShare).not.toHaveBeenCalledWith(READ_SHARE_ID)
+    expect(mockDeleteGfsShare).toHaveBeenCalledTimes(1)
+  })
+
+  // RP-032 — a revocation that fails mid-cascade is a PARTIAL outcome: the
+  // folders already written stay written, the folder whose sharing entry
+  // could not be revoked keeps granting Editor, and the copy says exactly
+  // how far the change got.
+  it('states the true partial outcome when a folder sharing entry cannot be revoked', async () => {
+    const EDITOR_SHARE_ID = '16161616-1616-4161-8161-161616161616'
+    mockGetGfsGrants.mockImplementation(async resourceId => {
+      if (resourceId === FOLDER_ID) {
+        return {
+          items: [
+            {
+              id: FOLDER_GRANT_ID,
+              drive: 'main',
+              resourceId: FOLDER_ID,
+              subject: miguel,
+              permissions: ['read', 'write'],
+              inherit: true,
+            },
+          ],
+        }
+      }
+      return { items: [] }
+    })
+    mockGetGfsShares.mockImplementation(async resourceId => {
+      if (resourceId === FOLDER_ID) {
+        return {
+          items: [
+            {
+              id: EDITOR_SHARE_ID,
+              drive: 'main',
+              resourceId: FOLDER_ID,
+              subject: miguel,
+              permissions: ['read', 'write'],
+              includeDescendants: true,
+            },
+          ],
+        }
+      }
+      return { items: [] }
+    })
+    mockDeleteGfsShare.mockRejectedValueOnce(
+      Object.assign(new Error('403 share_revocation_rejected'), {
+        status: 403,
+        code: 'share_revocation_rejected',
+        serverMessage: 'share_revocation_rejected',
+      })
+    )
+    renderPanel()
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    const miguelRow = await within(existing).findByTestId(miguelRowTestId)
+
+    await chooseRole(miguelRow, 'Read')
+    const dialog = await screen.findByRole('alertdialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update role' }))
+
+    // The folder's GRANT was rewritten, but its sharing entry survived: the
+    // outcome says so instead of claiming the member lost Editor access.
+    expect(
+      await screen.findByText(
+        'Updated 1 of 1 folders — a sharing entry on team-docs could not be revoked, so Editor access may remain.'
+      )
+    ).toBeTruthy()
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('share_revocation_rejected')
+  })
+
+  // RP-032 — a sharing entry that is ALREADY GONE grants nothing: the
+  // outcome is the one a successful delete produced, so the panel must not
+  // claim residual Editor access that cannot exist.
+  it('does not report residual Editor access when the sharing entry is already gone', async () => {
+    const FILE_SHARE_ID = '17171717-1717-4171-8171-171717171717'
+    mockGetGfsGrants.mockImplementation(async resourceId => ({
+      items:
+        resourceId === FILE_ID
+          ? [
+              {
+                id: FILE_GRANT_ID,
+                drive: 'main',
+                resourceId: FILE_ID,
+                subject: miguel,
+                permissions: ['read', 'write'],
+                inherit: false,
+              },
+            ]
+          : [],
+    }))
+    mockGetGfsShares.mockImplementation(async resourceId => ({
+      items:
+        resourceId === FILE_ID
+          ? [
+              {
+                id: FILE_SHARE_ID,
+                drive: 'main',
+                resourceId: FILE_ID,
+                subject: miguel,
+                permissions: ['read', 'write'],
+                includeDescendants: true,
+              },
+            ]
+          : [],
+    }))
+    mockDeleteGfsShare.mockRejectedValueOnce(
+      Object.assign(new Error('404 share_not_found'), {
+        status: 404,
+        code: 'share_not_found',
+        serverMessage: 'share_not_found',
+      })
+    )
+    renderPanel()
+
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    const miguelRow = await within(existing).findByTestId(miguelRowTestId)
+    await chooseRole(miguelRow, 'Read')
+
+    expect(
+      await screen.findByText(
+        'Changed grant access to Read-only on report.md. The sharing entry on report.md was revoked.'
+      )
+    ).toBeTruthy()
+    expect(screen.queryByText(/could not be revoked/)).toBeNull()
+    expect(screen.queryByText(/still grant Editor access/)).toBeNull()
+  })
+
   // R1-M5 — a share-only ancestor is never converted into a grant: nothing
   // is written, the confirmation never opens, and the user is told why.
   it('refuses a share-only ancestor role change without creating a grant', async () => {
@@ -684,6 +870,73 @@ describe('GfsGrantPanel inherited access', () => {
     await waitFor(() => expect(mockPutGfsGrant).toHaveBeenCalledTimes(1))
     expect(mockDeleteGfsShare).not.toHaveBeenCalled()
     expect(await screen.findByText('Miguel is now Read-only.')).toBeTruthy()
+  })
+
+  // RP-032 — an UPGRADE revokes nothing: a Read sharing entry AND an Editor
+  // sharing entry both survive, so raising the grant never drops access the
+  // operator did not ask to drop. The grant's OWN scope flag is preserved.
+  it('keeps both a Read sharing entry and an Editor sharing entry on an upgrade to Editor', async () => {
+    const READ_SHARE_ID = '12121212-1212-4121-8121-121212121212'
+    const EDITOR_SHARE_ID = '13131313-1313-4131-8131-131313131313'
+    mockGetGfsGrants.mockImplementation(async resourceId => ({
+      items:
+        resourceId === FILE_ID
+          ? [
+              {
+                id: FILE_GRANT_ID,
+                drive: 'main',
+                resourceId: FILE_ID,
+                subject: marcela,
+                permissions: ['read'],
+                inherit: false,
+              },
+            ]
+          : [],
+    }))
+    mockGetGfsShares.mockImplementation(async resourceId => ({
+      items:
+        resourceId === FILE_ID
+          ? [
+              {
+                id: READ_SHARE_ID,
+                drive: 'main',
+                resourceId: FILE_ID,
+                subject: marcela,
+                permissions: ['read'],
+                includeDescendants: true,
+              },
+              {
+                id: EDITOR_SHARE_ID,
+                drive: 'main',
+                resourceId: FILE_ID,
+                subject: marcela,
+                permissions: ['read', 'write'],
+                includeDescendants: true,
+              },
+            ]
+          : [],
+    }))
+    renderPanel()
+
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    const marcelaRow = await within(existing).findByTestId(marcelaRowTestId)
+    await chooseRole(marcelaRow, 'Editor')
+
+    // The grant is raised to Editor with its OWN scope flag (false) — the
+    // shares' includeDescendants is never OR'd into the grant write.
+    await waitFor(() =>
+      expect(mockPutGfsGrant).toHaveBeenCalledWith({
+        drive: 'main',
+        resourceId: FILE_ID,
+        subject: marcela,
+        permissions: ['read', 'write', 'delete', 'manage_acl', 'share'],
+        inherit: false,
+      })
+    )
+    // Neither sharing entry conflicts with the target role, so neither is
+    // revoked: the Read entry keeps its descendant coverage and the Editor
+    // entry survives the upgrade.
+    expect(mockDeleteGfsShare).not.toHaveBeenCalled()
   })
 
   // RP-032 — a revocation that fails is a PARTIAL outcome: the role changed,
