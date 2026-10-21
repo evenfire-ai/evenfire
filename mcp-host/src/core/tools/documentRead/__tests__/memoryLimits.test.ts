@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createCanvas, loadImage } from '@napi-rs/canvas'
 import { type ChildProcess, spawn } from 'node:child_process'
 import { serialize } from 'node:v8'
-import type { DocumentJob, DocumentJobOutcome, DocumentLimitName, PdfVisualJob } from '../types'
+import type {
+  DocumentJob,
+  DocumentJobOutcome,
+  DocumentLimitName,
+  PdfVisualJob,
+  XlsxOutcome,
+} from '../types'
 import { runDocumentJob } from '../workerRunner'
 import { documentLimits, valuesWorkbook, witnessCode } from './fixtures'
 import {
@@ -11,6 +17,7 @@ import {
   inflatedTextPdf,
   inflatedWorkbook,
   sharedStringWorkbook,
+  underdeclaredPartWorkbook,
   underdeclaredWorkbook,
   zip64Workbook,
 } from './memoryFixtures'
@@ -56,13 +63,22 @@ function pdfVisual(bytes: Buffer, limits = documentLimits()): PdfVisualJob {
 }
 
 describe('document reader real-process memory limits', () => {
-  it('RSS kills an XLSX inflater and keeps Host growth below 32 MiB', async () => {
+  it('skips unused XLSX media and keeps Host growth below 32 MiB', async () => {
     // Review baseline: 516 KB -> 1.9 GB RSS; 1.5 MB -> 4.6 GB in the Host.
     const bytes = await inflatedWorkbook(128 * MiB)
     const limits = documentLimits({ maxResidentMb: 256, maxUncompressedBytes: 256 * MiB })
-    expect((await runDocumentJob(xlsx(await valuesWorkbook(witnessCode()), limits))).ok).toBe(true)
+    const code = witnessCode()
+    const control = (await runDocumentJob(xlsx(await valuesWorkbook(code), limits))) as XlsxOutcome
+    expect(control.ok).toBe(true)
+    if (!control.ok) throw new Error('XLSX media control failed')
+    expect(control.sheets[0]!.rows[0]![0]).toBe(code)
     const before = process.memoryUsage().rss
-    expectLimit(await runDocumentJob(xlsx(bytes, limits)), 'heap')
+    const outcome = (await runDocumentJob(xlsx(bytes, limits))) as XlsxOutcome
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) throw new Error('XLSX media fixture failed')
+    // The unused media is never inflated; the real workbook still parses.
+    expect(outcome.sheets[0]!.rows.length).toBeGreaterThan(0)
+    expect(outcome.sheets[0]!.lastRow).toBe(8)
     const after = process.memoryUsage().rss
     expect(after - before).toBeLessThanOrEqual(32 * MiB)
     process.stdout.write(
@@ -72,6 +88,8 @@ describe('document reader real-process memory limits', () => {
           after,
           growth: after - before,
           bound: 32 * MiB,
+          rows: outcome.sheets[0]!.rows.length,
+          lastRow: outcome.sheets[0]!.lastRow,
         }) +
         '\n'
     )
@@ -99,11 +117,40 @@ describe('document reader real-process memory limits', () => {
     expectLimit(await runDocumentJob(xlsx(await zip64Workbook(1n << 54n))), 'uncompressed_bytes')
   }, 10_000)
 
-  it('RSS kills an XLSX inflater with forged declared sizes and parses a normal control', async () => {
+  it('does not inflate forged XLSX media sizes and parses the real workbook', async () => {
     const bytes = await underdeclaredWorkbook(128 * MiB)
     const limits = documentLimits({ maxResidentMb: 256, maxUncompressedBytes: MiB })
-    expect((await runDocumentJob(xlsx(await valuesWorkbook(witnessCode()), limits))).ok).toBe(true)
-    expectLimit(await runDocumentJob(xlsx(bytes, limits)), 'heap')
+    const code = witnessCode()
+    const control = (await runDocumentJob(xlsx(await valuesWorkbook(code), limits))) as XlsxOutcome
+    expect(control.ok).toBe(true)
+    if (!control.ok) throw new Error('XLSX forged-media control failed')
+    expect(control.sheets[0]!.rows[0]![0]).toBe(code)
+    const outcome = (await runDocumentJob(xlsx(bytes, limits))) as XlsxOutcome
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) throw new Error('XLSX forged-media fixture failed')
+    // The forged media is not a selected part, so it is never inflated.
+    expect(outcome.sheets[0]!.rows.length).toBeGreaterThan(0)
+    expect(outcome.sheets[0]!.lastRow).toBe(8)
+  }, 20_000)
+
+  it('counts real inflated sheet and shared-string bytes, with a valid control', async () => {
+    const limits = documentLimits({ maxUncompressedBytes: 64 * 1024 })
+    const code = witnessCode()
+    const control = (await runDocumentJob(xlsx(await valuesWorkbook(code), limits))) as XlsxOutcome
+    expect(control.ok).toBe(true)
+    if (!control.ok) throw new Error('XLSX real-counter control failed')
+    expect(control.sheets[0]!.rows[0]![0]).toBe(code)
+    // Both parts declare 1 KiB but inflate to 256 KiB of text.
+    expectLimit(
+      await runDocumentJob(xlsx(await underdeclaredPartWorkbook('sheet', 256 * 1024), limits)),
+      'uncompressed_bytes'
+    )
+    expectLimit(
+      await runDocumentJob(
+        xlsx(await underdeclaredPartWorkbook('sharedStrings', 256 * 1024), limits)
+      ),
+      'uncompressed_bytes'
+    )
   }, 20_000)
 
   it('RSS kills a blocking PDF FlateStream while a normal text PDF succeeds', async () => {

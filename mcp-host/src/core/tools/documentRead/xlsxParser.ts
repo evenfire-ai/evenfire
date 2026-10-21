@@ -1,28 +1,75 @@
 /**
- * Pure XLSX parsing for `clerum__document_read`, inside the isolated worker.
+ * Streaming XLSX parsing for `clerum__document_read`, inside the isolated
+ * worker.
  *
- * Numbers, booleans and strings retain their values; empty cells become null.
- * Formulas use cached results, or `[formula] =<formula>` without one (never
- * evaluation); an empty cached string result is an empty cell. Dates become
- * ISO 8601,
- * rich text is concatenated, hyperlinks use display text, and errors use their
- * error strings. ExcelJS resolves shared strings. Merged values appear only
- * on their master cells. Strings are returned whole: the Tool redacts each
- * complete value before applying `maxCellChars`, so a cap never cuts a secret
- * into fragments that no longer match.
+ * The selected sheets are read part by part (workbook, relationships, styles,
+ * shared strings, then each selected sheet) straight from the ZIP entry
+ * streams into a SAX parser: no part is materialized whole, and the real
+ * inflated bytes of every part read are counted chunk by chunk against
+ * `maxUncompressedBytes` before the parser sees them, so a forged central
+ * directory cannot inflate past the declared bound. Unselected sheets and
+ * media parts are never inflated. Strings accumulate only in the V8 heap
+ * (bounded synchronously) plus one row at a time.
+ *
+ * Value semantics mirror the earlier ExcelJS-model reader: numbers, booleans
+ * and strings retain their values; empty cells become null. Formulas use
+ * cached results, or `[formula] =<formula>` without one (never evaluation);
+ * an empty cached string result is an empty cell. Dates become ISO 8601,
+ * rich text is concatenated (phonetic guides excluded), hyperlinks use
+ * display text, and errors use their error strings. Merged values appear only
+ * on their master cells (merge ranges stream after the rows, so slave cells
+ * of the returned window are nulled before the outcome is built). Strings
+ * are returned whole: the Tool redacts each complete value before applying
+ * `maxCellChars`, so a cap never cuts a secret into fragments that no longer
+ * match.
  *
  * Rows preserve null gaps and stop at their last non-empty computed cell.
  * Interior empty rows remain; trailing empty rows do not. Paging returns
- * complete rows and charges their full width, including null gaps.
+ * complete rows and charges their full width, including null gaps. A row
+ * whose full width alone exceeds `maxExtractedChars` is not returned: it
+ * keeps its slot as `[]` and is listed in `skippedRows`, so one wide row
+ * never makes the whole read fail. `lastRow` is the sheet's last row with a
+ * computed value; the whole selected sheet is walked for it even after the
+ * returned window stops.
+ *
+ * Worksheet rows and cells must arrive in document order (every writer emits
+ * them so); a non-increasing row number is `document_parse_failed`.
  */
-import ExcelJS from 'exceljs'
+import { createRequire } from 'node:module'
+import { StringDecoder } from 'node:string_decoder'
 import JSZip from 'jszip'
-import { SaxesParser } from 'saxes'
-import type { XlsxCellValue, XlsxJob, XlsxOutcome, XlsxSheetResult } from './types'
+import { SaxesParser, type SaxesTag } from 'saxes'
+import type {
+  DocumentReadLimits,
+  XlsxCellValue,
+  XlsxJob,
+  XlsxOutcome,
+  XlsxPosition,
+  XlsxSheetResult,
+} from './types'
 import { checkZipExpansion } from './zipLimits'
+
+// ExcelJS's own helpers define the date-format detection, serial-to-date
+// conversion, shared-formula sliding and built-in number formats the model
+// reader used; reuse them so computed values do not drift from it. The
+// package ships no type declarations for these internals.
+const excelRequire = createRequire(__filename)
+const { isDateFmt, excelToDate } = excelRequire('exceljs/lib/utils/utils') as {
+  isDateFmt: (format: string | undefined) => boolean
+  excelToDate: (value: number, date1904: boolean) => Date
+}
+const { slideFormula } = excelRequire('exceljs/lib/utils/shared-formula') as {
+  slideFormula: (formula: string, fromCell: string, toCell: string) => string
+}
+const defaultNumFormats = excelRequire('exceljs/lib/xlsx/defaultnumformats') as Record<
+  number,
+  { f?: string }
+>
 
 const CFB_MAGIC = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]
 const ZIP_MAGIC = [0x50, 0x4b, 0x03, 0x04]
+// Excel's last sheet column is XFD.
+const MAX_COLUMN = 16_384
 
 /**
  * A cell whose stored value has no representation, such as a date-formatted
@@ -31,186 +78,849 @@ const ZIP_MAGIC = [0x50, 0x4b, 0x03, 0x04]
  */
 class UnreadableCellError extends Error {}
 
-/**
- * A workbook part that cannot be found or parsed while reading cached formula
- * results: a property of the file, like a failed load.
- */
+/** A workbook part that cannot be found or parsed: a property of the file. */
 class UnreadablePartError extends Error {}
 
-/** Addresses of formula cells whose cached result is an empty string. */
-type EmptyResults = ReadonlySet<string>
+/** The real inflated bytes of the parts read passed the configured bound. */
+class InflatedLimitError extends Error {}
 
-const NO_EMPTY_RESULTS: EmptyResults = new Set()
+class InflatedCounter {
+  private total = 0
 
-function computedValue(value: ExcelJS.CellValue): XlsxCellValue {
-  if (value === null || value === undefined || value === '') return null
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-    return value
+  constructor(private readonly limit: number) {}
+
+  add(bytes: number): void {
+    this.total += bytes
+    if (this.total > this.limit) throw new InflatedLimitError()
   }
-  if (value instanceof Date) {
-    if (Number.isNaN(value.getTime())) throw new UnreadableCellError()
-    return value.toISOString()
-  }
-  if ('formula' in value || 'sharedFormula' in value) return computedValue(value.result)
-  if ('richText' in value) return value.richText.map(part => part.text).join('') || null
-  // A formatted display text is stored as rich text, not as a string.
-  if ('hyperlink' in value) return computedValue(value.text)
-  if ('error' in value) return value.error
-  throw new Error('Unsupported XLSX cell value')
 }
 
-function hasNoResult(cell: ExcelJS.Cell): boolean {
-  return cell.result === undefined || cell.result === null
-}
-
-function cellValue(cell: ExcelJS.Cell, emptyResults: EmptyResults): XlsxCellValue {
-  if (cell.isMerged && cell.master !== cell) return null
-  // ExcelJS 4.4's formula value getter omits falsy results; the dedicated
-  // cached-result getter preserves both 0 and false, including shared formulas.
-  if (cell.type === ExcelJS.ValueType.Formula) {
-    if (!hasNoResult(cell)) return computedValue(cell.result)
-    return emptyResults.has(cell.address) ? null : '[formula] =' + cell.formula
-  }
-  return computedValue(cell.value)
-}
-
-function lastNonEmptyRow(worksheet: ExcelJS.Worksheet, emptyResults: EmptyResults): number {
-  let lastRow = 0
-  worksheet.eachRow(row => {
-    let hasValue = false
-    row.eachCell(cell => {
-      if (!hasValue && cellValue(cell, emptyResults) !== null) hasValue = true
-    })
-    if (hasValue) lastRow = row.number
+/** Consumes a readable stream one chunk at a time, with backpressure. */
+async function streamChunks(
+  stream: NodeJS.ReadableStream,
+  consume: (chunk: Buffer) => void
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    let settled = false
+    // An abandoned JSZip stream can still emit its asynchronous end-of-stream
+    // size error. Keep a sink attached so that late event is not uncaught.
+    stream.on('error', () => {})
+    const detach = (): void => {
+      stream.removeListener('data', onData)
+      stream.removeListener('end', onEnd)
+      stream.removeListener('error', onError)
+    }
+    const fail = (error: unknown): void => {
+      if (settled) return
+      settled = true
+      detach()
+      // Destroying this adapter makes its inflater keep pushing after EOF,
+      // which throws asynchronously. Pausing the adapter and its JSZip helper
+      // stops the next compressed block and bounds the unconsumed tail; the
+      // error sink above absorbs a late end-of-stream size error.
+      stream.pause()
+      ;(stream as { _helper?: { pause?: () => void } })._helper?.pause?.()
+      reject(error)
+    }
+    const onData = (chunk: Buffer | string): void => {
+      if (settled) return
+      stream.pause()
+      try {
+        consume(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+      } catch (error) {
+        fail(error)
+        return
+      }
+      stream.resume()
+    }
+    const onEnd = (): void => {
+      if (settled) return
+      settled = true
+      detach()
+      resolve()
+    }
+    const onError = (error: unknown): void => fail(error)
+    stream.on('data', onData)
+    stream.once('end', onEnd)
+    stream.once('error', onError)
+    stream.resume()
   })
-  return lastRow
 }
 
-function hasFormulaWithoutResult(worksheet: ExcelJS.Worksheet): boolean {
-  let found = false
-  worksheet.eachRow(row => {
-    row.eachCell(cell => {
-      if (!found && cell.type === ExcelJS.ValueType.Formula && hasNoResult(cell)) found = true
-    })
-  })
-  return found
-}
-
-async function readPart(
+/**
+ * Streams one ZIP part through a SAX parser, counting its real inflated
+ * bytes before the parser sees each chunk. A missing or malformed part is
+ * `UnreadablePartError`; listener errors keep their own classification.
+ */
+async function streamXmlPart(
   zip: JSZip,
   path: string,
+  counter: InflatedCounter,
   listen: (parser: SaxesParser) => void
 ): Promise<void> {
   const entry = zip.file(path)
-  if (!entry) throw new UnreadablePartError()
-  let xml: string
-  try {
-    xml = await entry.async('string')
-  } catch {
-    throw new UnreadablePartError()
-  }
+  if (!entry || entry.dir) throw new UnreadablePartError()
   const parser = new SaxesParser()
   let malformed = false
   parser.on('error', () => {
     malformed = true
   })
   listen(parser)
-  parser.write(xml).close()
+  const decoder = new StringDecoder('utf8')
+  let stream: NodeJS.ReadableStream | undefined
+  let parserFailure = false
+  const write = (text: string): void => {
+    if (text.length === 0) return
+    try {
+      parser.write(text)
+    } catch (error) {
+      parserFailure = true
+      throw error
+    }
+  }
+  try {
+    stream = entry.nodeStream()
+    await streamChunks(stream, buffer => {
+      counter.add(buffer.byteLength)
+      write(decoder.write(buffer))
+    })
+    write(decoder.end())
+    try {
+      parser.close()
+    } catch (error) {
+      parserFailure = true
+      throw error
+    }
+  } catch (error) {
+    if (
+      parserFailure ||
+      error instanceof InflatedLimitError ||
+      error instanceof UnreadableCellError ||
+      error instanceof UnreadablePartError
+    ) {
+      throw error
+    }
+    throw new UnreadablePartError()
+  }
   if (malformed) throw new UnreadablePartError()
 }
 
-/**
- * ExcelJS 4.4 drops an empty cached result (`<v></v>`), so a formula whose
- * result is an empty string looks like one with no cached result at all. The
- * raw sheet XML tells them apart. It follows ExcelJS's own reading: element
- * and attribute names as written, `r` as the cell address, and the sheet part
- * resolved from the workbook relationships the same way. ExcelJS has already
- * loaded these parts with the same XML parser, so a part this scan cannot
- * read means the two readings disagree; it fails as `document_parse_failed`.
- */
-async function emptyStringResults(
-  bytes: Uint8Array,
-  worksheets: readonly ExcelJS.Worksheet[]
-): Promise<Map<ExcelJS.Worksheet, EmptyResults>> {
-  let zip: JSZip
-  try {
-    zip = await JSZip.loadAsync(Uint8Array.from(bytes))
-  } catch {
-    throw new UnreadablePartError()
+function tagAttribute(node: SaxesTag, name: string): string | undefined {
+  const value = node.attributes[name]
+  return typeof value === 'string' ? value : undefined
+}
+
+function columnLetters(column: number): string {
+  let letters = ''
+  let remaining = column
+  while (remaining > 0) {
+    const digit = (remaining - 1) % 26
+    letters = String.fromCharCode(65 + digit) + letters
+    remaining = Math.floor((remaining - 1) / 26)
   }
-  const relationIdBySheet = new Map<string, string>()
-  await readPart(zip, 'xl/workbook.xml', parser => {
+  return letters
+}
+
+function columnNumber(letters: string): number | undefined {
+  let column = 0
+  for (const char of letters.toUpperCase()) {
+    const value = char.charCodeAt(0) - 64
+    if (value < 1 || value > 26) return undefined
+    column = column * 26 + value
+    if (column > MAX_COLUMN) return undefined
+  }
+  return column > 0 ? column : undefined
+}
+
+function columnFromRef(ref: string): number | undefined {
+  const match = /^\$?([A-Za-z]+)\$?\d+$/.exec(ref.trim())
+  return match ? columnNumber(match[1]!) : undefined
+}
+
+// ─── Workbook structure ─────────────────────────────────────
+
+interface SheetMeta {
+  name: string
+  path: string
+}
+
+interface WorkbookMeta {
+  sheets: SheetMeta[]
+  date1904: boolean
+}
+
+/**
+ * Resolves the workbook's worksheet parts exactly as the previous reader's
+ * loader did: sheets appear in workbook order (hidden and veryHidden
+ * included), a sheet whose relationship or worksheet part is missing is
+ * ignored, and chartsheets are not worksheets.
+ */
+function sheetPartPath(target: string): string {
+  const trimmed = target.trim()
+  if (trimmed.startsWith('/xl/')) return trimmed.slice(1)
+  if (trimmed.startsWith('xl/')) return trimmed
+  if (trimmed.startsWith('/')) return trimmed.slice(1)
+  return 'xl/' + trimmed
+}
+
+async function parseWorkbookMeta(zip: JSZip, counter: InflatedCounter): Promise<WorkbookMeta> {
+  let date1904 = false
+  const relationBySheet: Array<{ name: string; relationId: string | undefined }> = []
+  await streamXmlPart(zip, 'xl/workbook.xml', counter, parser => {
     parser.on('opentag', node => {
-      if (node.name !== 'sheet') return
-      const name = node.attributes.name
-      const relationId = node.attributes['r:id']
-      if (typeof name !== 'string' || typeof relationId !== 'string') return
-      if (relationIdBySheet.has(name)) throw new UnreadablePartError()
-      relationIdBySheet.set(name, relationId)
+      if (node.name === 'workbookPr') {
+        const flag = tagAttribute(node, 'date1904')
+        if (flag === '1' || flag === 'true') date1904 = true
+      } else if (node.name === 'sheet') {
+        const name = tagAttribute(node, 'name')
+        if (name === undefined) throw new UnreadablePartError()
+        relationBySheet.push({ name, relationId: tagAttribute(node, 'r:id') })
+      }
     })
   })
   const targetByRelation = new Map<string, string>()
-  await readPart(zip, 'xl/_rels/workbook.xml.rels', parser => {
+  await streamXmlPart(zip, 'xl/_rels/workbook.xml.rels', counter, parser => {
     parser.on('opentag', node => {
       if (node.name !== 'Relationship') return
-      const id = node.attributes.Id
-      const target = node.attributes.Target
-      if (typeof id === 'string' && typeof target === 'string') targetByRelation.set(id, target)
+      const id = tagAttribute(node, 'Id')
+      const target = tagAttribute(node, 'Target')
+      if (id !== undefined && target !== undefined) targetByRelation.set(id, target)
     })
   })
-
-  const results = new Map<ExcelJS.Worksheet, EmptyResults>()
-  for (const worksheet of worksheets) {
-    const relationId = relationIdBySheet.get(worksheet.name)
+  const sheets: SheetMeta[] = []
+  for (const { name, relationId } of relationBySheet) {
     const target = relationId === undefined ? undefined : targetByRelation.get(relationId)
-    if (target === undefined) throw new UnreadablePartError()
-    const refs = new Set<string>()
-    let cell: { ref: string | undefined; str: boolean; formula: boolean; value?: string } | null =
-      null
-    let inValue = false
-    await readPart(zip, `xl/${target.replace(/^(\s|\/xl\/)+/, '')}`, parser => {
-      parser.on('opentag', node => {
-        if (node.name === 'c') {
-          const ref = node.attributes.r
-          cell = {
-            ref: typeof ref === 'string' ? ref : undefined,
-            str: node.attributes.t === 'str',
-            formula: false,
-          }
-        } else if (cell && node.name === 'f') {
-          cell.formula = true
-        } else if (cell && node.name === 'v') {
-          cell.value = ''
-          inValue = true
-        }
-      })
-      parser.on('text', text => {
-        if (cell && inValue) cell.value += text
-      })
-      parser.on('closetag', node => {
-        if (node.name === 'v') inValue = false
-        if (node.name !== 'c' || !cell) return
-        if (cell.str && cell.formula && cell.value === '') {
-          if (cell.ref === undefined) throw new UnreadablePartError()
-          refs.add(cell.ref)
-        }
-        cell = null
-      })
-    })
-    results.set(worksheet, refs)
+    if (target === undefined) continue
+    const path = sheetPartPath(target)
+    // The loader only materialized entries named xl/worksheets/sheetN.xml.
+    if (!/^xl\/worksheets\/sheet\d+\.xml$/.test(path)) continue
+    const entry = zip.file(path)
+    if (!entry || entry.dir) continue
+    sheets.push({ name, path })
   }
-  return results
+  return { sheets, date1904 }
 }
 
-function readRow(row: ExcelJS.Row | undefined, emptyResults: EmptyResults): XlsxCellValue[] {
-  const values: XlsxCellValue[] = []
-  row?.eachCell((cell, column) => {
-    const value = cellValue(cell, emptyResults)
-    if (value === null) return
-    while (values.length < column - 1) values.push(null)
-    values.push(value)
+// ─── Styles and shared strings ──────────────────────────────
+
+interface StyleTable {
+  isDateStyle: (styleIndex: number | undefined) => boolean
+}
+
+async function parseStyles(zip: JSZip, counter: InflatedCounter): Promise<StyleTable> {
+  const customFormats = new Map<number, string>()
+  const cellFormatIds: number[] = []
+  if (zip.file('xl/styles.xml')) {
+    let inCellXfs = false
+    await streamXmlPart(zip, 'xl/styles.xml', counter, parser => {
+      parser.on('opentag', node => {
+        if (node.name === 'numFmt') {
+          const id = Number(tagAttribute(node, 'numFmtId'))
+          const code = tagAttribute(node, 'formatCode')
+          // ExcelJS unescapes backslash-escaped characters in format codes.
+          if (Number.isSafeInteger(id) && code !== undefined) {
+            customFormats.set(id, code.replace(/\\(.)/g, '$1'))
+          }
+        } else if (node.name === 'cellXfs') {
+          inCellXfs = true
+        } else if (node.name === 'xf' && inCellXfs) {
+          const id = Number(tagAttribute(node, 'numFmtId') ?? '0')
+          cellFormatIds.push(Number.isSafeInteger(id) ? id : 0)
+        }
+      })
+      parser.on('closetag', node => {
+        if (node.name === 'cellXfs') inCellXfs = false
+      })
+    })
+  }
+  return {
+    isDateStyle: styleIndex => {
+      if (styleIndex === undefined) return false
+      const formatId = cellFormatIds[styleIndex]
+      if (formatId === undefined) return false
+      const code = customFormats.get(formatId) ?? defaultNumFormats[formatId]?.f
+      return code !== undefined && isDateFmt(code)
+    },
+  }
+}
+
+async function parseSharedStrings(zip: JSZip, counter: InflatedCounter): Promise<string[]> {
+  const strings: string[] = []
+  if (!zip.file('xl/sharedStrings.xml')) return strings
+  let current: string | null = null
+  let inText = false
+  let inPhonetic = false
+  await streamXmlPart(zip, 'xl/sharedStrings.xml', counter, parser => {
+    parser.on('opentag', node => {
+      if (node.name === 'si') current = ''
+      else if (node.name === 'rPh') inPhonetic = true
+      else if (node.name === 't' && current !== null && !inPhonetic) inText = true
+    })
+    parser.on('text', text => {
+      if (inText && current !== null) current += text
+    })
+    parser.on('closetag', node => {
+      if (node.name === 't') inText = false
+      else if (node.name === 'rPh') inPhonetic = false
+      else if (node.name === 'si' && current !== null) {
+        strings.push(current)
+        current = null
+      }
+    })
   })
+  return strings
+}
+
+// ─── Cell values ────────────────────────────────────────────
+
+interface CellState {
+  /** The cell address as written, or synthesized for a cell without `r`. */
+  ref: string
+  column: number
+  type: string | undefined
+  styleIndex: number | undefined
+  hasValue: boolean
+  valueText: string
+  inlineText: string
+  formulaText: string | undefined
+  formulaSharedId: string | undefined
+}
+
+interface ValueContext {
+  sharedStrings: string[]
+  styles: StyleTable
+  date1904: boolean
+  sharedFormulas: Map<string, { formula: string; masterRef: string }>
+}
+
+function dateValue(serial: number, date1904: boolean): string {
+  const date = excelToDate(serial, date1904)
+  if (Number.isNaN(date.getTime())) throw new UnreadableCellError()
+  return date.toISOString()
+}
+
+function isoDateValue(text: string): string {
+  const date = new Date(text)
+  if (Number.isNaN(date.getTime())) throw new UnreadableCellError()
+  return date.toISOString()
+}
+
+function numericValue(text: string, cell: CellState, context: ValueContext): XlsxCellValue {
+  const value = Number(text)
+  if (Number.isNaN(value)) throw new UnreadableCellError()
+  return context.styles.isDateStyle(cell.styleIndex) ? dateValue(value, context.date1904) : value
+}
+
+function booleanValue(text: string): boolean {
+  return text === '1' || text === 'true'
+}
+
+function formulaDisplay(cell: CellState, context: ValueContext): string {
+  if (cell.formulaText !== undefined && cell.formulaText !== '') return cell.formulaText
+  if (cell.formulaSharedId !== undefined) {
+    const master = context.sharedFormulas.get(cell.formulaSharedId)
+    if (master === undefined) throw new UnreadablePartError()
+    try {
+      return slideFormula(master.formula, master.masterRef, cell.ref)
+    } catch {
+      throw new UnreadablePartError()
+    }
+  }
+  return cell.formulaText ?? ''
+}
+
+function sharedStringValue(text: string, context: ValueContext): XlsxCellValue {
+  if (text === '') return null
+  const shared = context.sharedStrings[Number(text)]
+  return shared === undefined || shared === '' ? null : shared
+}
+
+function computedCellValue(cell: CellState, context: ValueContext): XlsxCellValue {
+  const isFormula = cell.formulaText !== undefined || cell.formulaSharedId !== undefined
+  if (isFormula) {
+    // A shared formula's master registers its text for its followers.
+    if (cell.formulaSharedId !== undefined && cell.formulaText) {
+      context.sharedFormulas.set(cell.formulaSharedId, {
+        formula: cell.formulaText,
+        masterRef: cell.ref,
+      })
+    }
+    if (!cell.hasValue) return '[formula] =' + formulaDisplay(cell, context)
+    switch (cell.type) {
+      case 'str':
+        // An empty cached string result is an empty cell, including the
+        // self-closing <v/> form.
+        return cell.valueText === '' ? null : cell.valueText
+      case 'b':
+        return cell.valueText === '' ? null : booleanValue(cell.valueText)
+      case 'e':
+        return cell.valueText === '' ? null : cell.valueText
+      case 's':
+        return sharedStringValue(cell.valueText, context)
+      case 'd':
+        return cell.valueText === '' ? null : isoDateValue(cell.valueText)
+      case 'inlineStr':
+        return cell.inlineText === '' ? null : cell.inlineText
+      default:
+        // A dropped empty <v> of a numeric result is no cached result.
+        if (cell.valueText === '') return '[formula] =' + formulaDisplay(cell, context)
+        return numericValue(cell.valueText, cell, context)
+    }
+  }
+  switch (cell.type) {
+    case 's':
+      return cell.hasValue ? sharedStringValue(cell.valueText, context) : null
+    case 'inlineStr':
+      return cell.inlineText === '' ? null : cell.inlineText
+    case 'str':
+      return !cell.hasValue || cell.valueText === '' ? null : cell.valueText
+    case 'b':
+      return !cell.hasValue || cell.valueText === '' ? null : booleanValue(cell.valueText)
+    case 'e':
+      return !cell.hasValue || cell.valueText === '' ? null : cell.valueText
+    case 'd':
+      return !cell.hasValue || cell.valueText === '' ? null : isoDateValue(cell.valueText)
+    default:
+      if (!cell.hasValue || cell.valueText === '') return null
+      return numericValue(cell.valueText, cell, context)
+  }
+}
+
+// ─── Window accounting ──────────────────────────────────────
+
+type StoppedBy = 'max_rows' | 'max_cells' | 'max_extracted_chars'
+
+interface MutableSheet {
+  name: string
+  startRow: number
+  rows: XlsxCellValue[][]
+  truncated: boolean
+  lastRow: number
+  skippedCount: number
+  skippedFirst: number[]
+}
+
+class SheetWindow {
+  rowCount = 0
+  stoppedBy: StoppedBy | undefined
+  next: XlsxPosition | undefined
+  private cellCount = 0
+  private charCount = 0
+
+  constructor(private readonly limits: DocumentReadLimits) {}
+
+  get stopped(): boolean {
+    return this.stoppedBy !== undefined
+  }
+
+  /**
+   * Charges one row to the per-call budgets. Returns false when this row is
+   * where the read stops; `next` then names it for the continuation. The
+   * first row of a call is always returned, so every continuation advances
+   * even when one row alone is wider than the cell limit. A row that alone
+   * exceeds the character limit is not charged at all: it keeps its slot as
+   * `[]` and is listed in `skippedRows`.
+   */
+  add(
+    sheet: MutableSheet,
+    sheetIndex: number,
+    rowNumber: number,
+    values: XlsxCellValue[]
+  ): boolean {
+    if (this.rowCount >= this.limits.maxRowsPerCall) {
+      this.stop(sheet, sheetIndex, rowNumber, 'max_rows')
+      return false
+    }
+    const rowChars = JSON.stringify(values).length
+    if (rowChars > this.limits.maxExtractedChars) {
+      sheet.rows.push([])
+      this.rowCount += 1
+      sheet.skippedCount += 1
+      if (sheet.skippedFirst.length < 20) sheet.skippedFirst.push(rowNumber)
+      return true
+    }
+    if (this.rowCount > 0 && this.cellCount + values.length > this.limits.maxCellsPerCall) {
+      this.stop(sheet, sheetIndex, rowNumber, 'max_cells')
+      return false
+    }
+    if (this.rowCount > 0 && this.charCount + rowChars > this.limits.maxExtractedChars) {
+      this.stop(sheet, sheetIndex, rowNumber, 'max_extracted_chars')
+      return false
+    }
+    sheet.rows.push(values)
+    this.rowCount += 1
+    this.cellCount += values.length
+    this.charCount += rowChars
+    return true
+  }
+
+  private stop(
+    sheet: MutableSheet,
+    sheetIndex: number,
+    rowNumber: number,
+    reason: StoppedBy
+  ): void {
+    this.stoppedBy = reason
+    this.next = { sheetIndex, row: rowNumber }
+    sheet.truncated = true
+  }
+}
+
+// ─── Worksheet streaming ────────────────────────────────────
+
+interface MergeRange {
+  top: number
+  left: number
+  bottom: number
+  right: number
+}
+
+interface RowPair {
+  column: number
+  value: XlsxCellValue
+}
+
+function mergeRange(ref: string): MergeRange {
+  const match = /^\$?([A-Za-z]+)\$?(\d+)(?::\$?([A-Za-z]+)\$?(\d+))?$/.exec(ref.trim())
+  if (!match) throw new UnreadablePartError()
+  const firstColumn = columnNumber(match[1]!)
+  const firstRow = Number(match[2])
+  const lastColumn = match[3] === undefined ? firstColumn : columnNumber(match[3])
+  const lastRow = match[4] === undefined ? firstRow : Number(match[4])
+  if (
+    firstColumn === undefined ||
+    lastColumn === undefined ||
+    !Number.isSafeInteger(firstRow) ||
+    !Number.isSafeInteger(lastRow) ||
+    firstRow < 1 ||
+    lastRow < 1
+  ) {
+    throw new UnreadablePartError()
+  }
+  return {
+    top: Math.min(firstRow, lastRow),
+    left: Math.min(firstColumn, lastColumn),
+    bottom: Math.max(firstRow, lastRow),
+    right: Math.max(firstColumn, lastColumn),
+  }
+}
+
+function rowValues(pairs: readonly RowPair[], sorted: boolean): XlsxCellValue[] {
+  const ordered = sorted ? pairs : [...pairs].sort((left, right) => left.column - right.column)
+  const values: XlsxCellValue[] = []
+  for (const { column, value } of ordered) {
+    const index = column - 1
+    while (values.length < index) values.push(null)
+    if (values.length === index) values.push(value)
+    else values[index] = value
+  }
   return values
+}
+
+/** A merged range keeps its value only on the top-left (master) cell. */
+function applyMerges(sheet: MutableSheet, merges: readonly MergeRange[]): void {
+  if (merges.length === 0 || sheet.rows.length === 0) return
+  for (let index = 0; index < sheet.rows.length; index += 1) {
+    const rowNumber = sheet.startRow + index
+    const values = sheet.rows[index]!
+    let changed = false
+    for (const merge of merges) {
+      if (rowNumber < merge.top || rowNumber > merge.bottom) continue
+      const from = Math.max(1, merge.left)
+      const to = Math.min(values.length, merge.right)
+      for (let column = from; column <= to; column += 1) {
+        if (rowNumber === merge.top && column === merge.left) continue
+        if (values[column - 1] === null || values[column - 1] === undefined) continue
+        values[column - 1] = null
+        changed = true
+      }
+    }
+    if (!changed) continue
+    while (values.length > 0 && values[values.length - 1] === null) values.pop()
+  }
+}
+
+/**
+ * Streams one worksheet. Rows with values are emitted; interior empty rows
+ * are emitted only once a later row with a value confirms them, so trailing
+ * empty rows are discarded. The whole part is still walked after the window
+ * stops, to compute `lastRow`.
+ */
+async function streamSheet(
+  zip: JSZip,
+  sheetMeta: SheetMeta,
+  counter: InflatedCounter,
+  sheet: MutableSheet,
+  sheetIndex: number,
+  startRow: number,
+  window: SheetWindow,
+  context: ValueContext
+): Promise<readonly MergeRange[]> {
+  const merges: MergeRange[] = []
+  let rowNumber = 0
+  let previousRow = 0
+  let rowOpen = false
+  let collectRow = false
+  let rowHasValue = false
+  let rowPairs: RowPair[] = []
+  let rowPairsSorted = true
+  let previousPairColumn = 0
+  let nextEmitRow = startRow
+  let inSheetData = false
+  let inMergeCells = false
+  let currentCell: CellState | undefined
+  let previousCellColumn = 0
+  let inValue = false
+  let inFormula = false
+  let inInline = false
+  let inText = false
+  let inPhonetic = false
+
+  const closeCell = (): void => {
+    const cell = currentCell
+    currentCell = undefined
+    if (cell === undefined) return
+    const value = computedCellValue(cell, context)
+    if (value === null) return
+    rowHasValue = true
+    if (!collectRow) return
+    if (cell.column < previousPairColumn) rowPairsSorted = false
+    previousPairColumn = cell.column
+    rowPairs.push({ column: cell.column, value })
+  }
+
+  const addEmptyRowsUntil = (end: number): void => {
+    while (nextEmitRow < end && !window.stopped) {
+      const emptyRow = nextEmitRow
+      if (!window.add(sheet, sheetIndex, emptyRow, [])) return
+      nextEmitRow = emptyRow + 1
+    }
+  }
+
+  const closeRow = (): void => {
+    const closingRow = rowNumber
+    const pairs = rowPairs
+    const sorted = rowPairsSorted
+    const hasValue = rowHasValue
+    const collected = collectRow
+    rowOpen = false
+    collectRow = false
+    rowHasValue = false
+    rowPairs = []
+    rowPairsSorted = true
+    previousPairColumn = 0
+    if (!hasValue) return
+    sheet.lastRow = closingRow
+    if (!collected || window.stopped) return
+    addEmptyRowsUntil(closingRow)
+    if (window.stopped) return
+    const values = rowValues(pairs, sorted)
+    if (window.add(sheet, sheetIndex, closingRow, values)) nextEmitRow = closingRow + 1
+  }
+
+  await streamXmlPart(zip, sheetMeta.path, counter, parser => {
+    parser.on('opentag', node => {
+      const name = node.name
+      if (name === 'sheetData') {
+        inSheetData = true
+        return
+      }
+      if (name === 'mergeCells') {
+        inMergeCells = true
+        return
+      }
+      if (name === 'mergeCell') {
+        if (!inMergeCells) return
+        const ref = tagAttribute(node, 'ref')
+        if (ref === undefined) throw new UnreadablePartError()
+        merges.push(mergeRange(ref))
+        return
+      }
+      if (!inSheetData) return
+      if (name === 'row') {
+        if (rowOpen) throw new UnreadablePartError()
+        const raw = tagAttribute(node, 'r')
+        let next: number
+        if (raw === undefined) {
+          next = previousRow + 1
+        } else {
+          next = Number(raw)
+          if (!Number.isSafeInteger(next) || next < 1) throw new UnreadablePartError()
+        }
+        if (next <= previousRow) throw new UnreadablePartError()
+        previousRow = next
+        rowNumber = next
+        rowOpen = true
+        rowHasValue = false
+        rowPairs = []
+        rowPairsSorted = true
+        previousPairColumn = 0
+        previousCellColumn = 0
+        collectRow = next >= nextEmitRow && !window.stopped
+        return
+      }
+      if (name === 'c') {
+        if (!rowOpen || currentCell !== undefined) throw new UnreadablePartError()
+        const ref = tagAttribute(node, 'r')
+        let column: number
+        let address: string
+        if (ref === undefined) {
+          column = previousCellColumn + 1
+          if (column > MAX_COLUMN) throw new UnreadablePartError()
+          address = columnLetters(column) + String(rowNumber)
+        } else {
+          const parsed = columnFromRef(ref)
+          if (parsed === undefined) throw new UnreadablePartError()
+          column = parsed
+          address = ref
+        }
+        previousCellColumn = column
+        const style = tagAttribute(node, 's')
+        const styleIndex = style === undefined ? undefined : Number(style)
+        currentCell = {
+          ref: address,
+          column,
+          type: tagAttribute(node, 't'),
+          styleIndex:
+            styleIndex !== undefined && Number.isSafeInteger(styleIndex) && styleIndex >= 0
+              ? styleIndex
+              : undefined,
+          hasValue: false,
+          valueText: '',
+          inlineText: '',
+          formulaText: undefined,
+          formulaSharedId: undefined,
+        }
+        inValue = false
+        inFormula = false
+        inInline = false
+        inText = false
+        inPhonetic = false
+        return
+      }
+      if (currentCell === undefined) return
+      if (name === 'f') {
+        currentCell.formulaText = ''
+        const sharedId = tagAttribute(node, 'si')
+        if (sharedId !== undefined) currentCell.formulaSharedId = sharedId
+        inFormula = true
+        return
+      }
+      if (name === 'v') {
+        currentCell.hasValue = true
+        currentCell.valueText = ''
+        inValue = true
+        return
+      }
+      if (name === 'is') {
+        inInline = true
+        return
+      }
+      if (name === 'rPh') {
+        inPhonetic = true
+        return
+      }
+      if (name === 't' && inInline && !inPhonetic) inText = true
+    })
+    parser.on('text', text => {
+      if (currentCell === undefined) return
+      if (inValue) currentCell.valueText += text
+      else if (inFormula) currentCell.formulaText = (currentCell.formulaText ?? '') + text
+      else if (inInline && inText && !inPhonetic) currentCell.inlineText += text
+    })
+    parser.on('closetag', node => {
+      const name = node.name
+      if (name === 'sheetData') {
+        inSheetData = false
+        return
+      }
+      if (name === 'mergeCells') {
+        inMergeCells = false
+        return
+      }
+      if (name === 'row') {
+        if (rowOpen) closeRow()
+        return
+      }
+      if (name === 'c') {
+        closeCell()
+        return
+      }
+      if (name === 'v') {
+        inValue = false
+        return
+      }
+      if (name === 'f') {
+        inFormula = false
+        return
+      }
+      if (name === 't') {
+        inText = false
+        return
+      }
+      if (name === 'rPh') {
+        inPhonetic = false
+        return
+      }
+      if (name === 'is') inInline = false
+    })
+  })
+  return merges
+}
+
+// ─── Selection and outcome ──────────────────────────────────
+
+interface WorksheetSelection {
+  sheetNames: string[]
+  sheetIndex: number
+  row: number
+  sheets: SheetMeta[]
+}
+
+/**
+ * Mirrors the previous selection: all sheets in workbook order unless a name
+ * is given, hidden sheets included, with the same checks in the same order.
+ */
+function selectWorksheets(
+  job: XlsxJob,
+  workbook: WorkbookMeta
+): WorksheetSelection | Extract<XlsxOutcome, { ok: false }> {
+  const sheetNames = workbook.sheets.map(sheet => sheet.name)
+  const namedIndex = job.sheet === null ? null : sheetNames.indexOf(job.sheet)
+  if (namedIndex === -1) return { ok: false, reason: 'invalid_range' }
+  // A null initial cursor starts the selection; only the parser knows a named
+  // sheet's workbook index before a continuation has been issued.
+  const { sheetIndex, row } = job.start ?? { sheetIndex: namedIndex ?? 0, row: 1 }
+  if (
+    !Number.isSafeInteger(sheetIndex) ||
+    !Number.isSafeInteger(row) ||
+    sheetIndex < 0 ||
+    row < 1 ||
+    (namedIndex !== null && sheetIndex !== namedIndex)
+  ) {
+    return { ok: false, reason: 'invalid_range' }
+  }
+  if (workbook.sheets.length === 0) return { ok: false, reason: 'document_empty' }
+  if (sheetIndex >= workbook.sheets.length) return { ok: false, reason: 'invalid_range' }
+  return {
+    sheetNames,
+    sheetIndex,
+    row,
+    sheets: workbook.sheets.slice(sheetIndex, namedIndex === null ? undefined : sheetIndex + 1),
+  }
+}
+
+function sheetResult(sheet: MutableSheet): XlsxSheetResult {
+  return {
+    name: sheet.name,
+    startRow: sheet.startRow,
+    rows: sheet.rows,
+    truncated: sheet.truncated,
+    lastRow: sheet.lastRow,
+    ...(sheet.skippedCount > 0
+      ? { skippedRows: { count: sheet.skippedCount, first: sheet.skippedFirst } }
+      : {}),
+  }
 }
 
 export async function parseXlsx(job: XlsxJob): Promise<XlsxOutcome> {
@@ -230,146 +940,79 @@ export async function parseXlsx(job: XlsxJob): Promise<XlsxOutcome> {
   const zipFailure = checkZipExpansion(job.bytes, job.limits.maxUncompressedBytes)
   if (zipFailure) return zipFailure
 
-  const workbook = new ExcelJS.Workbook()
+  let zip: JSZip
   try {
-    // Copy exactly the supplied view, without including its backing buffer's
-    // prefix/suffix or allowing the loader to mutate the caller's bytes.
-    await workbook.xlsx.load(Uint8Array.from(job.bytes).buffer)
+    zip = await JSZip.loadAsync(job.bytes)
   } catch {
-    // The load and an unreadable cell are properties of the file; any other
-    // failure while walking a loaded workbook is a defect and crashes the worker.
     return { ok: false, reason: 'document_parse_failed' }
   }
+
   try {
+    const counter = new InflatedCounter(job.limits.maxUncompressedBytes)
+    const workbook = await parseWorkbookMeta(zip, counter)
     const selection = selectWorksheets(job, workbook)
     if ('reason' in selection) return selection
-    // Only a formula without a cached result can hide an empty string result.
-    const pending = selection.worksheets.filter(hasFormulaWithoutResult)
-    const emptyResults =
-      pending.length === 0
-        ? new Map<ExcelJS.Worksheet, EmptyResults>()
-        : await emptyStringResults(job.bytes, pending)
-    return readWorkbook(job, selection, emptyResults)
+    const styles = await parseStyles(zip, counter)
+    const sharedStrings = await parseSharedStrings(zip, counter)
+    const window = new SheetWindow(job.limits)
+    const sheets: XlsxSheetResult[] = []
+    let hasContent = false
+    for (let offset = 0; offset < selection.sheets.length; offset += 1) {
+      const sheetMeta = selection.sheets[offset]!
+      const sheetIndex = selection.sheetIndex + offset
+      const startRow = sheetIndex === selection.sheetIndex ? selection.row : 1
+      const sheet: MutableSheet = {
+        name: sheetMeta.name,
+        startRow,
+        rows: [],
+        truncated: false,
+        lastRow: 0,
+        skippedCount: 0,
+        skippedFirst: [],
+      }
+      const context: ValueContext = {
+        sharedStrings,
+        styles,
+        date1904: workbook.date1904,
+        sharedFormulas: new Map(),
+      }
+      const merges = await streamSheet(
+        zip,
+        sheetMeta,
+        counter,
+        sheet,
+        sheetIndex,
+        startRow,
+        window,
+        context
+      )
+      applyMerges(sheet, merges)
+      if (sheet.lastRow > 0) hasContent = true
+      if (sheet.rows.length > 0 || job.sheet !== null) sheets.push(sheetResult(sheet))
+      if (window.stopped) {
+        return {
+          ok: true,
+          sheetNames: selection.sheetNames,
+          sheets,
+          next: window.next!,
+          stoppedBy: window.stoppedBy!,
+        }
+      }
+    }
+    // A selection with no computed values has no content. A named non-empty
+    // sheet may still have no rows remaining at its requested cursor.
+    if (!hasContent) return { ok: false, reason: 'document_empty' }
+    // Continuations always name an existing row, so a start past the last
+    // computed value of the selection is a cursor this tool never issued.
+    if (window.rowCount === 0) return { ok: false, reason: 'invalid_range' }
+    return { ok: true, sheetNames: selection.sheetNames, sheets }
   } catch (error) {
+    if (error instanceof InflatedLimitError) {
+      return { ok: false, reason: 'document_limits_exceeded', limit: 'uncompressed_bytes' }
+    }
     if (error instanceof UnreadableCellError || error instanceof UnreadablePartError) {
       return { ok: false, reason: 'document_parse_failed' }
     }
     throw error
   }
-}
-
-interface WorksheetSelection {
-  sheetNames: string[]
-  sheetIndex: number
-  row: number
-  worksheets: ExcelJS.Worksheet[]
-}
-
-function selectWorksheets(
-  job: XlsxJob,
-  workbook: ExcelJS.Workbook
-): WorksheetSelection | Extract<XlsxOutcome, { ok: false }> {
-  const worksheets = workbook.worksheets
-  // Hidden and veryHidden sheets are included in workbook order.
-  const sheetNames = worksheets.map(worksheet => worksheet.name)
-  const namedIndex = job.sheet === null ? null : sheetNames.indexOf(job.sheet)
-  if (namedIndex === -1) return { ok: false, reason: 'invalid_range' }
-  // A null initial cursor starts the selection; only the parser knows a
-  // named sheet's workbook index before a continuation has been issued.
-  const { sheetIndex, row } = job.start ?? { sheetIndex: namedIndex ?? 0, row: 1 }
-  if (
-    !Number.isSafeInteger(sheetIndex) ||
-    !Number.isSafeInteger(row) ||
-    sheetIndex < 0 ||
-    row < 1 ||
-    (namedIndex !== null && sheetIndex !== namedIndex)
-  ) {
-    return { ok: false, reason: 'invalid_range' }
-  }
-  if (worksheets.length === 0) return { ok: false, reason: 'document_empty' }
-  if (sheetIndex >= worksheets.length) return { ok: false, reason: 'invalid_range' }
-  return {
-    sheetNames,
-    sheetIndex,
-    row,
-    worksheets: worksheets.slice(sheetIndex, namedIndex === null ? undefined : sheetIndex + 1),
-  }
-}
-
-function readWorkbook(
-  job: XlsxJob,
-  { sheetNames, sheetIndex, row, worksheets }: WorksheetSelection,
-  emptyResults: ReadonlyMap<ExcelJS.Worksheet, EmptyResults>
-): XlsxOutcome {
-  const selection = worksheets.map((worksheet, offset) => {
-    // A sheet that was not scanned has no formula without a cached result.
-    const empty = emptyResults.get(worksheet) ?? NO_EMPTY_RESULTS
-    return {
-      worksheet,
-      emptyResults: empty,
-      sheetIndex: sheetIndex + offset,
-      lastRow: lastNonEmptyRow(worksheet, empty),
-    }
-  })
-  // A selection with no computed values has no content. A named non-empty sheet
-  // may still have no rows remaining at its requested cursor.
-  if (selection.every(sheet => sheet.lastRow === 0)) {
-    return { ok: false, reason: 'document_empty' }
-  }
-
-  const sheets: XlsxSheetResult[] = []
-  let rowCount = 0
-  let cellCount = 0
-  // Serialized row size, padding and escapes included, so the outcome the
-  // Host receives and measures stays bounded whatever the cells hold.
-  let charCount = 0
-  for (const selected of selection) {
-    const startRow = selected.sheetIndex === sheetIndex ? row : 1
-    const sheet: XlsxSheetResult = {
-      name: selected.worksheet.name,
-      startRow,
-      rows: [],
-      truncated: false,
-      lastRow: selected.lastRow,
-    }
-    for (let rowNumber = startRow; rowNumber <= selected.lastRow; rowNumber += 1) {
-      const values = readRow(selected.worksheet.findRow(rowNumber), selected.emptyResults)
-      const rowChars = JSON.stringify(values).length
-      // A first row over the character limit can never be returned whole;
-      // cells are not cut, because Host redaction needs complete values.
-      if (rowCount === 0 && rowChars > job.limits.maxExtractedChars) {
-        return { ok: false, reason: 'document_limits_exceeded', limit: 'row_width' }
-      }
-      // The first row of a call is always returned, so every continuation
-      // advances even when one row alone is wider than the cell limit.
-      const stoppedBy =
-        rowCount >= job.limits.maxRowsPerCall
-          ? 'max_rows'
-          : rowCount > 0 && cellCount + values.length > job.limits.maxCellsPerCall
-            ? 'max_cells'
-            : rowCount > 0 && charCount + rowChars > job.limits.maxExtractedChars
-              ? 'max_extracted_chars'
-              : undefined
-      if (stoppedBy) {
-        sheet.truncated = true
-        if (sheet.rows.length > 0 || job.sheet !== null) sheets.push(sheet)
-        return {
-          ok: true,
-          sheetNames,
-          sheets,
-          next: { sheetIndex: selected.sheetIndex, row: rowNumber },
-          stoppedBy,
-        }
-      }
-      sheet.rows.push(values)
-      rowCount += 1
-      cellCount += values.length
-      charCount += rowChars
-    }
-    if (sheet.rows.length > 0 || job.sheet !== null) sheets.push(sheet)
-  }
-  // Continuations always name an existing row, so a start past the last
-  // computed value of the selection is a cursor this tool never issued.
-  if (rowCount === 0) return { ok: false, reason: 'invalid_range' }
-  return { ok: true, sheetNames, sheets }
 }

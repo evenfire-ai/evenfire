@@ -154,3 +154,118 @@ export function inflatedImagePdf(width: number, height = width): Buffer {
     ),
   ])
 }
+
+/**
+ * Rewrites one entry's declared uncompressed size (central directory and
+ * local header) while leaving its real inflated bytes untouched, so the
+ * reader's own chunk counter is the only bound that can stop it.
+ */
+function underdeclareEntry(bytes: Buffer, name: string, declared: number): Buffer {
+  const end = bytes.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]))
+  if (end < 0) throw new Error('Fixture has no central directory')
+  for (let entry = bytes.readUInt32LE(end + 16); entry < end; ) {
+    const nameLength = bytes.readUInt16LE(entry + 28)
+    const extraLength = bytes.readUInt16LE(entry + 30)
+    const commentLength = bytes.readUInt16LE(entry + 32)
+    const entryName = bytes.toString('utf8', entry + 46, entry + 46 + nameLength)
+    if (entryName === name) {
+      const local = bytes.readUInt32LE(entry + 42)
+      bytes.writeUInt32LE(declared, entry + 24)
+      bytes.writeUInt32LE(declared, local + 22)
+      return bytes
+    }
+    entry += 46 + nameLength + extraLength + commentLength
+  }
+  throw new Error(`Fixture has no ${name} entry`)
+}
+
+/**
+ * A workbook whose worksheet or shared-strings entry declares 1 KiB but
+ * inflates to `characters` bytes of text, plus a valid sheet that uses it.
+ */
+export async function underdeclaredPartWorkbook(
+  part: 'sheet' | 'sharedStrings',
+  characters: number
+): Promise<Buffer> {
+  const zip = await JSZip.loadAsync(await valuesWorkbook(witnessCode()))
+  const name = part === 'sheet' ? 'xl/worksheets/sheet1.xml' : 'xl/sharedStrings.xml'
+  const text = 'A'.repeat(characters)
+  const xml =
+    part === 'sheet'
+      ? '<?xml version="1.0"?><worksheet ' +
+        'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>' +
+        `<row r="1"><c r="A1" t="inlineStr"><is><t>${text}</t></is></c></row>` +
+        '</sheetData></worksheet>'
+      : '<?xml version="1.0"?><sst ' +
+        'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ' +
+        `count="1" uniqueCount="1"><si><t>${text}</t></si></sst>`
+  zip.file(name, xml)
+  return underdeclareEntry(
+    await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }),
+    name,
+    1_024
+  )
+}
+
+/**
+ * A 150k-row-class streaming fixture: six numeric cells per row and one
+ * formula without a cached result in `F1`. Built directly as sheet XML so the
+ * Host does not materialize an ExcelJS model to create it.
+ */
+export async function streamingWorkbook(rows: number): Promise<Buffer> {
+  const chunks: string[] = [
+    '<?xml version="1.0"?><worksheet ' +
+      'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>',
+  ]
+  for (let row = 1; row <= rows; row += 1) {
+    const cells: string[] = []
+    for (let column = 0; column < 6; column += 1) {
+      const ref = String.fromCharCode(65 + column) + row
+      if (row === 1 && column === 5) {
+        cells.push(`<c r="${ref}"><f>1+1</f></c>`)
+      } else {
+        cells.push(`<c r="${ref}"><v>${row * 10 + column}</v></c>`)
+      }
+    }
+    chunks.push(`<row r="${row}">${cells.join('')}</row>`)
+  }
+  chunks.push('</sheetData></worksheet>')
+  const zip = new JSZip()
+  zip.file(
+    '[Content_Types].xml',
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/xml"/>' +
+      '<Override PartName="/xl/workbook.xml" ' +
+      'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+      '<Override PartName="/xl/worksheets/sheet1.xml" ' +
+      'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
+      '</Types>'
+  )
+  zip.file(
+    '_rels/.rels',
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId1" ' +
+      'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" ' +
+      'Target="xl/workbook.xml"/></Relationships>'
+  )
+  zip.file(
+    'xl/workbook.xml',
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ' +
+      'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+      '<sheets><sheet name="Streaming" sheetId="1" r:id="rId1"/></sheets></workbook>'
+  )
+  zip.file(
+    'xl/_rels/workbook.xml.rels',
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId1" ' +
+      'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" ' +
+      'Target="worksheets/sheet1.xml"/></Relationships>'
+  )
+  zip.file('xl/worksheets/sheet1.xml', chunks.join(''))
+  return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' })
+}

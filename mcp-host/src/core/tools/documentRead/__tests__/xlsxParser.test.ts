@@ -14,11 +14,13 @@ import {
   outOfRangeNumberWorkbook,
   richHyperlinkWorkbook,
   sheetlessWorkbook,
+  sheetXmlWorkbook,
   surrogateWorkbook,
   valuesWorkbook,
   wideWorkbook,
   witnessCode,
 } from './fixtures'
+import { streamingWorkbook } from './memoryFixtures'
 
 function xlsxJob(bytes: Buffer, overrides: Partial<Omit<XlsxJob, 'kind' | 'bytes'>> = {}): XlsxJob {
   return {
@@ -369,23 +371,229 @@ describe('XLSX serialized size budget (zach88 H1)', () => {
     expect(second.sheets[0]!.rows[0]![0]).toBe(wide[rows.length]![0])
   }, 60_000)
 
-  it('refuses a first row that alone exceeds maxExtractedChars as row_width', async () => {
+  it('skips a first row that alone exceeds maxExtractedChars as [] and keeps its neighbours', async () => {
     const limits = documentLimits({ maxExtractedChars: 100 })
     const outcome = await runDocumentJob(
       xlsxJob(await textWorkbook([['y'.repeat(200)], ['short']]), { limits })
     )
-    expect(outcome).toEqual({ ok: false, reason: 'document_limits_exceeded', limit: 'row_width' })
+    expect(outcome).toEqual({
+      ok: true,
+      sheetNames: ['Text'],
+      sheets: [
+        {
+          name: 'Text',
+          startRow: 1,
+          rows: [[], ['short']],
+          truncated: false,
+          lastRow: 2,
+          skippedRows: { count: 1, first: [1] },
+        },
+      ],
+    })
 
-    // Witness: a narrow first row under the same limit is read, and the wide
-    // second row becomes the continuation.
+    // Witness: a narrow first row keeps its value and the wide second row
+    // occupies its slot as []; neither row makes the read terminal.
     const narrow = await runDocumentJob(
       xlsxJob(await textWorkbook([['short'], ['y'.repeat(200)]]), { limits })
     )
-    expect(narrow).toMatchObject({
+    expect(narrow).toEqual({
       ok: true,
-      sheets: [{ rows: [['short']], truncated: true }],
-      next: { sheetIndex: 0, row: 2 },
-      stoppedBy: 'max_extracted_chars',
+      sheetNames: ['Text'],
+      sheets: [
+        {
+          name: 'Text',
+          startRow: 1,
+          rows: [['short'], []],
+          truncated: false,
+          lastRow: 2,
+          skippedRows: { count: 1, first: [2] },
+        },
+      ],
+    })
+  })
+})
+
+describe('XLSX wide rows are non-terminal (zach88 M2)', () => {
+  it('keeps the neighbours of a wide interior row and names it', async () => {
+    const limits = documentLimits({ maxExtractedChars: 100 })
+    const outcome = (await runDocumentJob(
+      xlsxJob(await textWorkbook([['before'], ['y'.repeat(200)], ['after']]), { limits })
+    )) as Extract<XlsxOutcome, { ok: true }>
+    expect(outcome.ok).toBe(true)
+    expect(outcome.sheets).toEqual([
+      {
+        name: 'Text',
+        startRow: 1,
+        rows: [['before'], [], ['after']],
+        truncated: false,
+        lastRow: 3,
+        skippedRows: { count: 1, first: [2] },
+      },
+    ])
+    expect(outcome.next).toBeUndefined()
+    expect(outcome.stoppedBy).toBeUndefined()
+  })
+
+  it('returns only [] slots when every row is wide, with the full count', async () => {
+    const limits = documentLimits({ maxExtractedChars: 100 })
+    const wide = [['y'.repeat(200)], ['z'.repeat(200)], ['w'.repeat(200)]]
+    const outcome = (await runDocumentJob(
+      xlsxJob(await textWorkbook(wide), { limits })
+    )) as Extract<XlsxOutcome, { ok: true }>
+    expect(outcome.ok).toBe(true)
+    expect(outcome.sheets).toEqual([
+      {
+        name: 'Text',
+        startRow: 1,
+        rows: [[], [], []],
+        truncated: false,
+        lastRow: 3,
+        skippedRows: { count: 3, first: [1, 2, 3] },
+      },
+    ])
+    expect(outcome.next).toBeUndefined()
+    expect(outcome.stoppedBy).toBeUndefined()
+  })
+})
+
+describe('XLSX streaming read (zach88 M1)', () => {
+  it('reads a 150k-row window without holding the sheet and reports lastRow', async () => {
+    const rowCount = 150_000
+    const bytes = await streamingWorkbook(rowCount)
+    const limits = documentLimits({
+      maxRowsPerCall: 5_000,
+      maxCellsPerCall: 100_000,
+      maxExtractedChars: 400_000,
+      timeoutMs: 30_000,
+      maxHeapMb: 512,
+      maxResidentMb: 768,
+    })
+    const before = process.memoryUsage().rss
+    const outcome = (await runDocumentJob(xlsxJob(bytes, { limits }))) as Extract<
+      XlsxOutcome,
+      { ok: true }
+    >
+    const after = process.memoryUsage().rss
+    expect(outcome.ok).toBe(true)
+    expect(outcome.sheets[0]!.lastRow).toBe(rowCount)
+    expect(outcome.sheets[0]!.rows).toHaveLength(5_000)
+    expect(outcome.sheets[0]!.rows[0]).toEqual([10, 11, 12, 13, 14, '[formula] =1+1'])
+    expect(outcome.sheets[0]!.rows[4_999]).toEqual([50_000, 50_001, 50_002, 50_003, 50_004, 50_005])
+    expect(outcome.next).toEqual({ sheetIndex: 0, row: 5_001 })
+    expect(outcome.stoppedBy).toBe('max_rows')
+    // The Host sees only the window: the sheet itself never enters its heap.
+    expect(after - before).toBeLessThanOrEqual(32 * 1_048_576)
+    process.stdout.write(
+      'XLSX 150k Host RSS witness ' +
+        JSON.stringify({
+          before,
+          after,
+          growth: after - before,
+          bound: 32 * 1_048_576,
+        }) +
+        '\n'
+    )
+  }, 60_000)
+})
+
+describe('XLSX writer dialects', () => {
+  const worksheet = (rows: string): string =>
+    '<?xml version="1.0"?><worksheet ' +
+    'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>' +
+    rows +
+    '</sheetData></worksheet>'
+
+  it('reads a t="d" ISO date and rejects an invalid one with a valid control', async () => {
+    const valid = await parseDirect(
+      await sheetXmlWorkbook(
+        worksheet(
+          '<row r="1"><c r="A1" t="d"><v>2026-01-02T03:04:05.000Z</v></c>' +
+            '<c r="B1"><v>42</v></c></row>'
+        )
+      )
+    )
+    expect(valid).toEqual({
+      ok: true,
+      sheetNames: ['Sheet1'],
+      sheets: [
+        {
+          name: 'Sheet1',
+          startRow: 1,
+          rows: [['2026-01-02T03:04:05.000Z', 42]],
+          truncated: false,
+          lastRow: 1,
+        },
+      ],
+    })
+    const invalid = await parseDirect(
+      await sheetXmlWorkbook(worksheet('<row r="1"><c r="A1" t="d"><v>not-a-date</v></c></row>'))
+    )
+    expect(invalid).toEqual({ ok: false, reason: 'document_parse_failed' })
+  })
+
+  it('reads rows and cells without r as sequential', async () => {
+    const outcome = await parseDirect(
+      await sheetXmlWorkbook(
+        worksheet(
+          '<row><c><v>1</v></c><c><v>2</v></c></row>' + '<row><c t="str"><v>x</v></c></row>'
+        )
+      )
+    )
+    expect(outcome).toEqual({
+      ok: true,
+      sheetNames: ['Sheet1'],
+      sheets: [
+        {
+          name: 'Sheet1',
+          startRow: 1,
+          rows: [[1, 2], ['x']],
+          truncated: false,
+          lastRow: 2,
+        },
+      ],
+    })
+  })
+
+  it('selects a 32-character sheet name exactly', async () => {
+    const name = 'S'.repeat(32)
+    const bytes = await sheetXmlWorkbook(
+      worksheet('<row r="1"><c r="A1" t="str"><v>value</v></c></row>'),
+      name
+    )
+    expect(await parseDirect(bytes, { sheet: name })).toEqual({
+      ok: true,
+      sheetNames: [name],
+      sheets: [
+        {
+          name,
+          startRow: 1,
+          rows: [['value']],
+          truncated: false,
+          lastRow: 1,
+        },
+      ],
+    })
+  })
+
+  it('rejects a non-increasing row number with a readable control', async () => {
+    const outOfOrder = await parseDirect(
+      await sheetXmlWorkbook(
+        worksheet(
+          '<row r="2"><c r="A2"><v>2</v></c></row>' + '<row r="1"><c r="A1"><v>1</v></c></row>'
+        )
+      )
+    )
+    expect(outOfOrder).toEqual({ ok: false, reason: 'document_parse_failed' })
+    const control = await parseDirect(
+      await sheetXmlWorkbook(
+        worksheet(
+          '<row r="1"><c r="A1"><v>1</v></c></row>' + '<row r="2"><c r="A2"><v>2</v></c></row>'
+        )
+      )
+    )
+    expect(control).toMatchObject({
+      ok: true,
+      sheets: [{ rows: [[1], [2]] }],
     })
   })
 })
