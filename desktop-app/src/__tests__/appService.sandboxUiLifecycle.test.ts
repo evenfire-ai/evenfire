@@ -15,7 +15,6 @@ import {
   unmountSandboxUiView,
 } from '../sandboxUiDriver.js'
 import {
-  SANDBOX_UI_RATE_LIMIT_MS,
   SANDBOX_UI_REFRESH_INTERVAL_MS,
   _resetSandboxUiRefreshForTests,
 } from '../sandboxUiSessionRefresh.js'
@@ -1597,21 +1596,21 @@ describe('AppService sandbox-ui route settling', () => {
   })
 
   it('an in-page navigation before the first load does not replace the requested route', async () => {
-    const { service, webContents } = await openLoading('/r/first')
+    const { webContents } = await openLoading('/r/first')
     webContents.navigateInPage(`${APP_VIEW_URL}/#boot`)
     webContents.commitLoad(503)
     expect(getActiveSandboxUiLocation()).toEqual(location('/r/first'))
   })
 
   it('an in-page navigation of a subframe does not replace the requested route', async () => {
-    const { service, webContents } = await openLoading('/r/first')
+    const { webContents } = await openLoading('/r/first')
     webContents.commitLoad(503)
     webContents.emit('did-navigate-in-page', {}, `${APP_VIEW_URL}/frame`, false)
     expect(getActiveSandboxUiLocation()).toEqual(location('/r/first'))
   })
 
   it('a handoff that finds the app already on the route settles it', async () => {
-    const { service, webContents } = await openLoading('/r/first')
+    const { webContents } = await openLoading('/r/first')
     webContents.commitLoad(200, `${APP_VIEW_URL}/r/first`)
     await vi.waitFor(() => expect(webContents.executeJavaScript).toHaveBeenCalledOnce(), {
       timeout: 1_000,
@@ -1621,7 +1620,7 @@ describe('AppService sandbox-ui route settling', () => {
   })
 
   it('a handoff the app does not take keeps the requested route', async () => {
-    const { service, webContents } = await openLoading('/r/first')
+    const { webContents } = await openLoading('/r/first')
     webContents.historyLocked = true
     webContents.commitLoad()
     await vi.waitFor(() => expect(webContents.executeJavaScript).toHaveBeenCalledOnce(), {
@@ -1648,14 +1647,14 @@ describe('AppService sandbox-ui route settling', () => {
 
   it('a handoff that gives up before the first load does not settle on that first load', async () => {
     // The app takes longer than the handoff waits to answer at all.
-    const { service, webContents } = await openLoading('/r/first')
+    const { webContents } = await openLoading('/r/first')
     await vi.advanceTimersByTimeAsync(30_000)
     webContents.commitLoad()
     expect(getActiveSandboxUiLocation()).toEqual(location('/r/first'))
   })
 
   it('a document committed outside the app does not replace the requested route', async () => {
-    const { service, webContents } = await openLoading('/r/first')
+    const { webContents } = await openLoading('/r/first')
     webContents.commitLoad(503)
     await vi.advanceTimersByTimeAsync(30_000)
     webContents.navigateTo('https://elsewhere.example/landing')
@@ -1663,7 +1662,7 @@ describe('AppService sandbox-ui route settling', () => {
   })
 
   it('a reload after the router moved the URL during boot keeps the requested route', async () => {
-    const { service, webContents } = await openLoading('/r/first')
+    const { webContents } = await openLoading('/r/first')
     // The app's router rewrites the URL before the document finishes loading.
     webContents.emit('did-navigate', {}, `${APP_VIEW_URL}/`, 200, '')
     webContents.navigateInPage(`${APP_VIEW_URL}/home`)
@@ -1678,7 +1677,7 @@ describe('AppService sandbox-ui route settling', () => {
   })
 
   it('a new document committed while the handoff still waits keeps the requested route', async () => {
-    const { service, webContents } = await openLoading('/r/first')
+    const { webContents } = await openLoading('/r/first')
     webContents.commitLoad(503)
     webContents.navigateTo(`${APP_VIEW_URL}/starting`, 503)
     expect(getActiveSandboxUiLocation()).toEqual(location('/r/first'))
