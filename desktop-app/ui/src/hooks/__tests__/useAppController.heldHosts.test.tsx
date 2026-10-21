@@ -316,7 +316,7 @@ describe('useAppController held Hosts', () => {
     ['a generic 403', () => ipcGenericForbidden('rpc:loadSessionMessages'), VERIFY_A],
     ['host_access_revoked', () => ipcHostAccessRevoked('rpc:loadSessionMessages'), REVOKED_A],
   ])(
-    'T-F3-1:losing the selected Host to %s clears the selection with a toast',
+    'T-F3-1: losing the selected Host to %s clears the selection with a toast',
     async (_label, rejection, expectedToast) => {
       const { clerum, handle } = installAppControllerClerum({
         agentNames: [HOST_A, HOST_B],
