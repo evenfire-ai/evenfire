@@ -211,6 +211,18 @@ function FileExplorerNode({
   const isDirectoryRow = isDirectory
   const canDrag = isUnreadable !== true && movingResourceId == null
 
+  // Hover a collapsed directory for FOLDER_HOVER_EXPAND_DELAY_MS to expand it
+  // through its existing loader (rev-2 §4.1). The timer is owned here so a
+  // leave/drop/drag-end in this row cancels exactly its own expansion.
+  const hoverExpandTimerRef = useRef<number | null>(null)
+  const clearHoverExpand = useCallback(() => {
+    if (hoverExpandTimerRef.current !== null) {
+      clearTimeout(hoverExpandTimerRef.current)
+      hoverExpandTimerRef.current = null
+    }
+  }, [])
+  useEffect(() => clearHoverExpand, [clearHoverExpand])
+
   const handleRowDragOver = useCallback(
     (event: React.DragEvent<HTMLDivElement>) => {
       // Nested rows live in the sibling `.da-file-explorer__group`, so a child
@@ -231,22 +243,14 @@ function FileExplorerNode({
         const closestRow = event.target.closest('.da-file-explorer__row')
         if (closestRow !== null && closestRow !== event.currentTarget) return
       }
+      // The drop ends the gesture; the browser does not necessarily fire a
+      // dragleave afterwards, so this row's OWN hover-expand timer would still
+      // fire and expand a folder the user never asked to open (RP-024).
+      clearHoverExpand()
       onNodeDrop(node, event, ancestorIds)
     },
-    [ancestorIds, node, onNodeDrop]
+    [ancestorIds, clearHoverExpand, node, onNodeDrop]
   )
-
-  // Hover a collapsed directory for FOLDER_HOVER_EXPAND_DELAY_MS to expand it
-  // through its existing loader (rev-2 §4.1). The timer is owned here so a
-  // leave/drop/drag-end in this row cancels exactly its own expansion.
-  const hoverExpandTimerRef = useRef<number | null>(null)
-  const clearHoverExpand = useCallback(() => {
-    if (hoverExpandTimerRef.current !== null) {
-      clearTimeout(hoverExpandTimerRef.current)
-      hoverExpandTimerRef.current = null
-    }
-  }, [])
-  useEffect(() => clearHoverExpand, [clearHoverExpand])
 
   const handleRowDragEnterOrOver = useCallback(
     (event: React.DragEvent<HTMLDivElement>) => {
@@ -667,17 +671,17 @@ export function FileExplorerTree({
           source.parentKnown ? source.parentResourceId : null,
           () => {
             if (hoverOwnerRef.current !== source) return
-            setDropStatesByResourceId(previous => {
-              const fresh = adjudication.hoverVerdict(source, {
-                resourceId: node.resourceId,
-                name: node.name,
-                kind: node.kind,
-                ancestorIds,
-              })
-              return previous[node.resourceId] === fresh.state
+            const fresh = adjudication.hoverVerdict(source, {
+              resourceId: node.resourceId,
+              name: node.name,
+              kind: node.kind,
+              ancestorIds,
+            })
+            setDropStatesByResourceId(previous =>
+              previous[node.resourceId] === fresh.state
                 ? previous
                 : { ...previous, [node.resourceId]: fresh.state }
-            })
+            )
           }
         )
       }
@@ -901,6 +905,10 @@ export function FileExplorerTree({
               accessActive={ctrl.accessState === 'active'}
               ancestorCrumbs={[]}
               ancestorIds={node.parentResourceId != null ? [node.parentResourceId] : []}
+              // The forest roots are drop targets like any other row: their
+              // verdict belongs to them, so the root row receives its own
+              // state instead of only the map its children read (RP-019).
+              dropState={dropStatesByResourceId[node.resourceId]}
               dropStatesByResourceId={dropStatesByResourceId}
               expandedIds={expandedIds}
               key={node.resourceId}

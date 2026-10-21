@@ -3,6 +3,7 @@ import { useRef, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { FOLDER_HOVER_EXPAND_DELAY_MS } from '@constants/gfsBrowser'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import { activeWorkspaceTab, openFilesTab } from '@lib/workspaceTabs'
@@ -1395,6 +1396,109 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     })
     const treeItem = rowA.closest('[role="treeitem"]')!
     expect(treeItem.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('gives the forest ROOT rows their drop state (RP-019)', async () => {
+    // The forest roots are drop targets like any nested row. Before the fix
+    // the root node never received its own `dropState`, so the verdict was
+    // painted nowhere: the drag looked dead on the very rows the user aims at.
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folderb') return { held: ['read', 'write'] }
+      return { held: ['read', 'write', 'delete'] }
+    })
+    const resolve = vi.fn(async (uri: string) => {
+      const id = uri.split('/').pop()
+      return {
+        drive: 'main',
+        resourceId: id === 'grand' ? 'grand' : id,
+        parentResourceId: id === 'grand' ? null : 'grand',
+        name: id === 'foldera' ? 'A' : id === 'folderb' ? 'B' : 'Grand',
+        kind: 'directory',
+        version: id === 'foldera' ? 4 : 1,
+      }
+    })
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('foldera', 'A', 'directory', { version: 4 }),
+          accessibleResource('folderb', 'B', 'directory'),
+        ])
+      ),
+      affordances,
+      resolve,
+      moveResource: vi.fn(async () => ({ resourceId: 'foldera', version: 9 })),
+    })
+    renderTreeWithSession()
+
+    const rowA = await screen.findByRole('button', { name: 'A' })
+    const rowB = await screen.findByRole('button', { name: 'B' })
+    const dataTransfer = dragTypes()
+    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+
+    fireEvent.dragStart(rowA, { dataTransfer })
+    fireEvent.dragOver(bRow, { dataTransfer })
+
+    // The root row carries the verdict, exactly like a nested row does.
+    expect(bRow.getAttribute('data-drop-state')).toBe('checking')
+  })
+
+  it('cancels the hover-expand timer when the drop lands on the row (RP-024)', async () => {
+    // The browser does not necessarily fire a dragleave after a drop, so the
+    // row's own hover-expand timer survived the drop: the folder expanded
+    // after the gesture ended, opening a folder the user never asked for.
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folderb') return { held: ['read', 'write'] }
+      return { held: ['read', 'write', 'delete'] }
+    })
+    const resolve = vi.fn(async (uri: string) => {
+      const id = uri.split('/').pop()
+      return {
+        drive: 'main',
+        resourceId: id === 'grand' ? 'grand' : id,
+        parentResourceId: id === 'grand' ? null : 'grand',
+        name: id === 'foldera' ? 'A' : id === 'folderb' ? 'B' : 'Grand',
+        kind: 'directory',
+        version: id === 'foldera' ? 4 : 1,
+      }
+    })
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('foldera', 'A', 'directory', { version: 4 }),
+          accessibleResource('folderb', 'B', 'directory'),
+        ])
+      ),
+      affordances,
+      resolve,
+      moveResource: vi.fn(async () => ({ resourceId: 'foldera', version: 9 })),
+    })
+    renderTreeWithSession()
+
+    const rowA = await screen.findByRole('button', { name: 'A' })
+    const rowB = await screen.findByRole('button', { name: 'B' })
+    const dataTransfer = dragTypes()
+    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+
+    // The hover-expand delay is the thing under test: fake the timers only
+    // once the rows exist, so the queries above keep their real clock.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      fireEvent.dragStart(rowA, { dataTransfer })
+      // The dwell over the collapsed folder schedules its hover-expand.
+      fireEvent.dragOver(bRow, { dataTransfer })
+      // The drop ends the gesture.
+      fireEvent.drop(bRow, { dataTransfer })
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(FOLDER_HOVER_EXPAND_DELAY_MS + 50)
+      })
+
+      // B is still collapsed: the user never asked to open it.
+      expect(screen.getByRole('button', { name: 'Expand B' })).toBeTruthy()
+      expect(screen.queryByRole('button', { name: 'Collapse B' })).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('Shift+F10 opens the existing Move dialog from the tree row', async () => {
