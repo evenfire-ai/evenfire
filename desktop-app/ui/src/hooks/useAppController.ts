@@ -363,17 +363,11 @@ export function useAppController() {
     (agentRef: string) => hostAuthority.getEpoch(agentRef),
     [hostAuthority]
   )
-  // Last name each catalog of this authority scope gave a Host, so a held Host
-  // that left the catalog is still named in its verification toast. Cleared
-  // with the holds when the scope changes.
+  // Last name each catalog of the current principal gave a Host, so a held
+  // Host that left the catalog is still named in its verification toast. Read
+  // when the toast is shown, so a verification pending across a rename uses the
+  // new name. Cleared with the holds when the scope changes.
   const knownHostNamesRef = useRef(new Map<string, string>())
-  const lastKnownHostName = useCallback(
-    (agentRef: string) =>
-      agentsData.agentDisplayByName[agentRef] ??
-      knownHostNamesRef.current.get(agentRef) ??
-      agentRef,
-    [agentsData.agentDisplayByName]
-  )
   useEffect(() => {
     hostAuthority.reset()
     knownHostNamesRef.current.clear()
@@ -435,7 +429,8 @@ export function useAppController() {
           status: httpErrorStatus(error) ?? null,
         })
         if (authorityScopeRef.current === scope) {
-          pushToast(`Could not verify access to ${lastKnownHostName(agentRef)}.`, 'error')
+          const name = knownHostNamesRef.current.get(agentRef) ?? agentRef
+          pushToast(`Could not verify access to ${name}.`, 'error')
         }
         return false
       }
@@ -447,7 +442,7 @@ export function useAppController() {
       setHostAuthorityRevision(revision => revision + 1)
       return true
     },
-    [hostAuthority, invalidateSessionCatalog, lastKnownHostName, pushToast]
+    [hostAuthority, invalidateSessionCatalog, pushToast]
   )
   const chat = useAgentChatController({
     selectedAgent: nav.selectedAgent,
@@ -750,10 +745,17 @@ export function useAppController() {
     const catalog = agentsData.accessCatalog
     previousAccessCatalogRef.current = catalog
     if (!auth.isAuthenticated || !catalog) return
-    for (const agentRef of catalog.agentNames) {
-      const name = catalog.agentDisplayByName?.[agentRef]
-      if (name) {
-        knownHostNamesRef.current.set(agentRef, name)
+    // A team switch sets the new principal before its catalog arrives, so the
+    // previous team's catalog can still be cached here. The team clause goes
+    // with the Desktop team retirement; the user clause stays.
+    const catalogOfPrincipal =
+      catalog.userId === auth.me?.id && (catalog.teamId ?? '') === principalTeamId
+    if (catalogOfPrincipal) {
+      for (const agentRef of catalog.agentNames) {
+        const name = catalog.agentDisplayByName?.[agentRef]
+        if (name) {
+          knownHostNamesRef.current.set(agentRef, name)
+        }
       }
     }
     // Compared with the previous catalog, so an effect re-run without a new
@@ -784,6 +786,8 @@ export function useAppController() {
   }, [
     agentsData.accessCatalog,
     auth.isAuthenticated,
+    auth.me?.id,
+    principalTeamId,
     nav.selectedAgent,
     nav.setSelectedAgent,
     isHostAccessBlocked,
