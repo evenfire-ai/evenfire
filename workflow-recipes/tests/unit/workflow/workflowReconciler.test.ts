@@ -479,7 +479,7 @@ function captureRunLaneNetworkPolicyLogs(): {
   restore: () => void
 } {
   const previousLevel = process.env.LOG_LEVEL
-  process.env.LOG_LEVEL = 'info'
+  process.env.LOG_LEVEL = 'debug'
   const entries: Array<Record<string, unknown>> = []
   const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
     const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString()
@@ -5041,7 +5041,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
             logs.entries
               .filter(entry => String(entry.msg).includes('test-wf-coord-to-wrc'))
               .map(entry => [entry.level, entry.msg])
-          ).toEqual([['info', 'Unchanged NetworkPolicy "test-wf-coord-to-wrc"; skipping update']])
+          ).toEqual([['debug', 'Unchanged NetworkPolicy "test-wf-coord-to-wrc"; skipping update']])
         } finally {
           logs.restore()
         }

@@ -759,6 +759,82 @@ describe('WorkflowRecipeReconciler', () => {
       expect((await reconciler.observeCurrentWorkloadStatus(recipe)).phase).toBe('degraded')
       expect((await reconciler.observeCurrentWorkloadStatus(recipe)).phase).toBe('active')
     })
+
+    it('T2 revokes a stepless SDK workload whose envSecret is foreign, with no SecretWatcher (#1016, Issue #637)', async () => {
+      // End to end through the REAL reconciler: the T2 tick observes the denied
+      // set, finds no enforced baseline, escalates a full pass, and that pass's
+      // ownership gate tears the workload down and surfaces the condition.
+      ;(
+        reconciler as unknown as { config: { pluginWorkloadSdkEnabled: boolean } }
+      ).config.pluginWorkloadSdkEnabled = true
+      ;(reconciler as unknown as { workflowReconciler: unknown }).workflowReconciler = {
+        reconcile: vi.fn(),
+        reconcilePluginWorkloadSdkOnly: vi.fn().mockResolvedValue({
+          phase: 'active',
+          message: 'Plugin Workload SDK mcp-host registered',
+          pluginWorkloadSdkBootstrapProof: {
+            ready: true,
+            contractVersion: 2,
+            podUid: 'sdk-pod-uid',
+            provider: 'zai',
+            model: 'glm-4.7',
+            policyReady: true,
+            verifiedAt: '2026-08-04T00:00:00.000Z',
+          },
+          networkPolicies: {
+            conflicts: [],
+            retryPending: false,
+            prune: 'converged',
+            legacy: 'removed',
+          },
+        }),
+        setCodexReconcileContext: vi.fn(),
+      }
+      // sdk-creds is owned by ANOTHER recipe.
+      mockCoreApi.readNamespacedSecret.mockImplementation((args: { name: string }) =>
+        args.name === 'sdk-creds'
+          ? Promise.resolve({
+              metadata: {
+                resourceVersion: '1',
+                labels: { 'clerum.io/owner-recipe': 'some-other-recipe' },
+              },
+              data: { token: 'eA==' },
+            })
+          : Promise.resolve({ metadata: { resourceVersion: '1' } })
+      )
+      const recipe = makeRecipe({
+        spec: {
+          agent: { provider: 'zai', model: 'glm-4.7' },
+          workloads: [
+            {
+              id: 'app',
+              type: 'deployment',
+              image: 'nginx:1.30.1-alpine',
+              port: 8080,
+              envSecret: { name: 'sdk-creds', keys: [{ secretKey: 'token', envVar: 'TOKEN' }] },
+            },
+          ],
+          pluginWorkloadSdk: { promptBridge: {}, allowedCallers: ['app'] },
+        },
+        status: { phase: 'active' },
+      })
+      const observe = vi.spyOn(reconciler, 'observeSecretOwnership')
+      const statusObserve = vi.spyOn(reconciler, 'observeCurrentWorkloadStatus')
+      const watcher = watcherFor(reconciler, recipe)
+      try {
+        await watcher.refreshWorkloadStatusesForSteadyRecipes()
+
+        expect(observe).toHaveBeenCalledTimes(1)
+        expect(statusObserve).not.toHaveBeenCalled()
+        expect(mockAppsApi.deleteNamespacedDeployment).toHaveBeenCalled()
+        expect(mockAppsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+        expect(patchedStatus().conditions).toContainEqual(
+          expect.objectContaining({ type: 'EnvSecretOwnershipDenied', status: 'True' })
+        )
+      } finally {
+        stopWatcher(watcher)
+      }
+    })
   })
 
   function captureNetworkPolicyLogs(): {
@@ -766,7 +842,7 @@ describe('WorkflowRecipeReconciler', () => {
     restore: () => void
   } {
     const previousLevel = process.env.LOG_LEVEL
-    process.env.LOG_LEVEL = 'info'
+    process.env.LOG_LEVEL = 'debug'
     const entries: Array<Record<string, unknown>> = []
     const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
       const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString()
@@ -854,7 +930,7 @@ describe('WorkflowRecipeReconciler', () => {
             })
             expect(captured.entries).toContainEqual(
               expect.objectContaining({
-                level: 'info',
+                level: 'debug',
                 msg: 'network policy unchanged; skipping update',
                 policy: name,
                 namespace,
@@ -2824,7 +2900,7 @@ describe('WorkflowRecipeReconciler', () => {
         expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
         expect(captured.entries).toContainEqual(
           expect.objectContaining({
-            level: 'info',
+            level: 'debug',
             msg: 'network policy unchanged; skipping update',
             policy: 'wl-ingress-r-w',
             namespace: NS,
@@ -4109,7 +4185,7 @@ describe('WorkflowRecipeReconciler', () => {
         try {
           await ensure()
           expect(
-            loggedFor(logs.calls.info, 'StatefulSet spec hash unchanged; skipping update', name)
+            loggedFor(logs.calls.debug, 'StatefulSet spec hash unchanged; skipping update', name)
           ).toBe(1)
         } finally {
           logs.restore()
@@ -4149,7 +4225,7 @@ describe('WorkflowRecipeReconciler', () => {
           await ensure()
           const name = createdBody().metadata.name
           expect(
-            loggedFor(logs.calls.info, 'StatefulSet spec hash unchanged; skipping update', name)
+            loggedFor(logs.calls.debug, 'StatefulSet spec hash unchanged; skipping update', name)
           ).toBe(1)
           expect(readsOf(read, name, namespace)).toBe(2)
         } finally {
@@ -4231,7 +4307,7 @@ describe('WorkflowRecipeReconciler', () => {
         try {
           await reconciler.reconcile(recipe)
           expect(
-            loggedFor(logs.calls.info, 'StatefulSet spec hash unchanged; skipping update', name)
+            loggedFor(logs.calls.debug, 'StatefulSet spec hash unchanged; skipping update', name)
           ).toBe(1)
         } finally {
           logs.restore()
@@ -4280,7 +4356,7 @@ describe('WorkflowRecipeReconciler', () => {
           }
         ).ensureStatefulSet(workload, recipe, 'minimal', {})
         expect(
-          logs.calls.info.mock.calls.filter(
+          logs.calls.debug.mock.calls.filter(
             ([msg, ctx]) =>
               msg === 'StatefulSet spec hash unchanged; skipping update' &&
               (ctx as { name?: string })?.name === name
@@ -6167,7 +6243,7 @@ describe('WorkflowRecipeReconciler', () => {
         const recipe = makeRecipe()
         recipe.metadata.generation = 7
         const previousLevel = process.env.LOG_LEVEL
-        process.env.LOG_LEVEL = 'info'
+        process.env.LOG_LEVEL = 'debug'
         const receipts: Array<Record<string, unknown>> = []
         const write = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
           for (const line of String(chunk).split('\n')) {
@@ -8397,7 +8473,7 @@ describe('WorkflowRecipeReconciler', () => {
     restore: () => void
   } {
     const previousLevel = process.env.LOG_LEVEL
-    process.env.LOG_LEVEL = 'info'
+    process.env.LOG_LEVEL = 'debug'
     const entries: EgressRecord[] = []
     const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
       const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString()
@@ -15354,7 +15430,7 @@ describe('WorkflowRecipeReconciler', () => {
       mockNetworkingApi.createNamespacedNetworkPolicy.mockClear()
       mockNetworkingApi.readNamespacedNetworkPolicy.mockClear()
       const previousLevel = process.env.LOG_LEVEL
-      process.env.LOG_LEVEL = 'info'
+      process.env.LOG_LEVEL = 'debug'
       const logEntries: Array<Record<string, unknown>> = []
       const logSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
         const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString()

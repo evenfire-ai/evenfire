@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { loadConfig } from './config'
 import {
   WorkflowRecipeWatcher,
   controllerErrorTelemetryProjection,
@@ -1055,37 +1056,52 @@ describe('runtime credential refresh loop helpers', () => {
     ).toBe(false)
   })
 
-  it('forces timer-driven infrastructure retries past the status-only generation guard', async () => {
-    const enqueue = vi.fn((_key: string, task: () => Promise<void>) => task())
-    const handleRecipeEvent = vi.fn().mockResolvedValue(undefined)
-    const sdkOnly = makeWorkflowRecipe({
-      metadata: { name: 'sdk-only', namespace: 'sandbox-recipes' },
-      spec: {
-        steps: [],
-        workloads: [{ id: 'api', type: 'deployment', image: 'clerum/api:test' }],
-        pluginWorkloadSdk: { promptBridge: {} },
+  // Issue #1016 Task 10 (T1 rewrite): a timer-driven SDK infrastructure retry
+  // escalates (still past the status-only generation guard) only on the sdk_liveness
+  // conditions: here, when the mcp-host probe reports the pod absent.
+  it('escalates a timer-driven SDK infrastructure retry only when the probe reports the pod absent', async () => {
+    const sdkRecipe = makeWorkflowRecipe({
+      metadata: { name: 'sdk-recipe', namespace: 'sandbox-recipes' },
+      spec: { steps: [], pluginWorkloadSdk: { promptBridge: {} } },
+      status: {
+        phase: 'active',
+        pluginWorkloadSdk: { state: 'validated', bootstrapPodUid: 'pod-1' },
       },
-      status: { phase: 'active' },
-    })
-
-    type InternalWatcher = {
-      recipes: Map<string, WorkflowRecipeCRD>
-      eventQueue: { enqueue: typeof enqueue }
-      handleRecipeEvent: typeof handleRecipeEvent
-      refreshRuntimeCredentialsForInProgressRecipes: () => Promise<void>
-      stopped: boolean
+    } as Partial<WorkflowRecipeCRD>)
+    const run = async (readNamespacedPod: ReturnType<typeof vi.fn>) => {
+      const handleRecipeEvent = vi.fn().mockResolvedValue({ ran: true, settled: true })
+      const internal = Object.create(WorkflowRecipeWatcher.prototype) as Record<string, unknown>
+      Object.assign(internal, {
+        recipes: new Map([[sdkRecipe.metadata.name, sdkRecipe]]),
+        reconciler: { refreshInProgressWorkflowRuntimeCredentials: vi.fn() },
+        eventQueue: { enqueue: vi.fn((_k: string, task: () => Promise<void>) => task()) },
+        handleRecipeEvent,
+        _coreApi: { readNamespacedPod },
+        config: { ...loadConfig(), sandboxNamespace: 'sandbox-recipes' },
+        stopped: false,
+      })
+      // Recently settled, so only the liveness probe can force a pass.
+      ;(
+        internal as { cadence: { recordSettled: (n: string, t: number, s: string) => void } }
+      ).cadence.recordSettled(sdkRecipe.metadata.name, Date.now(), '')
+      await (
+        internal as { refreshRuntimeCredentialsForInProgressRecipes: () => Promise<void> }
+      ).refreshRuntimeCredentialsForInProgressRecipes()
+      return handleRecipeEvent
     }
-    const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
-    internal.recipes = new Map([[sdkOnly.metadata.name, sdkOnly]])
-    internal.eventQueue = { enqueue }
-    internal.handleRecipeEvent = handleRecipeEvent
-    internal.stopped = false
 
-    await internal.refreshRuntimeCredentialsForInProgressRecipes()
+    const healthy = await run(
+      vi.fn().mockResolvedValue({
+        metadata: { uid: 'pod-1' },
+        status: { phase: 'Running', conditions: [{ type: 'Ready', status: 'True' }] },
+      })
+    )
+    expect(healthy).not.toHaveBeenCalled()
 
-    expect(enqueue).toHaveBeenCalledWith(sdkOnly.metadata.name, expect.any(Function))
-    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', sdkOnly, {
+    const absent = await run(vi.fn().mockRejectedValue({ code: 404 }))
+    expect(absent).toHaveBeenCalledWith('MODIFIED', sdkRecipe, {
       forceReconcile: true,
+      trigger: 'sdk_liveness',
     })
   })
 
@@ -1217,11 +1233,13 @@ describe('runtime credential refresh loop helpers', () => {
     expect(enqueue).toHaveBeenCalledWith(initializing.metadata.name, expect.any(Function))
     expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', initializing, {
       forceReconcile: true,
+      trigger: 'infra_retry',
     })
   })
 })
 
 describe('workload status refresh loop helpers', () => {
+  const effectiveObservationView = vi.fn((r: WorkflowRecipeCRD) => structuredClone(r))
   function makeWorkloadRecipe(overrides: Partial<WorkflowRecipeCRD> = {}): WorkflowRecipeCRD {
     return makeWorkflowRecipe({
       ...overrides,
@@ -1441,9 +1459,9 @@ describe('workload status refresh loop helpers', () => {
     expect(enqueue).toHaveBeenCalledTimes(2)
     expect(enqueue).toHaveBeenCalledWith(active.metadata.name, expect.any(Function))
     expect(enqueue).toHaveBeenCalledWith(degraded.metadata.name, expect.any(Function))
-    // Non-workflow recipes go through the full status-refresh path (ownershipOnly: false).
-    expect(refreshWorkloadStatusOnly).toHaveBeenCalledWith(active, { ownershipOnly: false })
-    expect(refreshWorkloadStatusOnly).toHaveBeenCalledWith(degraded, { ownershipOnly: false })
+    // Issue #1016 — the task takes only the fresh recipe and derives its path from it.
+    expect(refreshWorkloadStatusOnly).toHaveBeenCalledWith(active)
+    expect(refreshWorkloadStatusOnly).toHaveBeenCalledWith(degraded)
   })
 
   it('re-enqueues steady WORKFLOW recipes that project a named Secret for an ownership-only backstop (Issue #637)', async () => {
@@ -1495,12 +1513,11 @@ describe('workload status refresh loop helpers', () => {
 
     await internal.refreshWorkloadStatusesForSteadyRecipes()
 
-    // Only the workflow-with-secret is enqueued, in ownership-only mode (no status patch).
+    // Only the workflow-with-secret is enqueued; the task derives the ownership-only
+    // path (no status patch) from the fresh recipe (Issue #1016).
     expect(enqueue).toHaveBeenCalledTimes(1)
     expect(enqueue).toHaveBeenCalledWith(workflowWithSecret.metadata.name, expect.any(Function))
-    expect(refreshWorkloadStatusOnly).toHaveBeenCalledWith(workflowWithSecret, {
-      ownershipOnly: true,
-    })
+    expect(refreshWorkloadStatusOnly).toHaveBeenCalledWith(workflowWithSecret)
   })
 
   it('triggerSecretDrivenReconcile forces a full reconcile so a Secret re-label reaches the ownership gate (Issue #637)', async () => {
@@ -1527,7 +1544,10 @@ describe('workload status refresh loop helpers', () => {
 
     internal.triggerSecretDrivenReconcile(recipe.metadata.name)
 
-    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', recipe, { forceReconcile: true })
+    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', recipe, {
+      forceReconcile: true,
+      trigger: 'secret_watch',
+    })
   })
 
   it('updates the cache but skips full reconcile for status-only watch events', async () => {
@@ -1788,7 +1808,7 @@ describe('workload status refresh loop helpers', () => {
     await internal.handleRecipeEvent('MODIFIED', granted)
 
     expect(internal.recipes.get(granted.metadata.name)).toBe(granted)
-    expect(reconcile).toHaveBeenCalledWith(granted)
+    expect(reconcile).toHaveBeenCalledWith(granted, { trigger: 'watch' })
   })
 
   it('forces a full reconcile when status-only refresh observes workload drift', async () => {
@@ -1807,6 +1827,7 @@ describe('workload status refresh loop helpers', () => {
 
     type InternalWatcher = {
       reconciler: {
+        effectiveObservationView: typeof effectiveObservationView
         observeCurrentWorkloadStatus: typeof observeCurrentWorkloadStatus
         patchStatus: typeof patchStatus
       }
@@ -1814,62 +1835,91 @@ describe('workload status refresh loop helpers', () => {
       refreshWorkloadStatusOnly: (recipe: WorkflowRecipeCRD) => Promise<void>
     }
     const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
-    internal.reconciler = { observeCurrentWorkloadStatus, patchStatus }
+    internal.reconciler = { effectiveObservationView, observeCurrentWorkloadStatus, patchStatus }
     internal.handleRecipeEvent = handleRecipeEvent
 
     await internal.refreshWorkloadStatusOnly(recipe)
 
     expect(patchStatus).toHaveBeenCalledWith(recipe, result)
-    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', recipe, { forceReconcile: true })
-  })
-
-  it('forces a full reconcile for an ALL-READY recipe that references a named Secret (Issue #637 ownership backstop)', async () => {
-    const recipe = makeWorkloadRecipe({
-      metadata: { name: 'active-recipe', namespace: 'sandbox-recipes', generation: 7 },
-      status: { phase: 'active', message: 'All workloads deployed' },
-      spec: {
-        workloads: [
-          {
-            id: 'api',
-            type: 'deployment',
-            image: 'clerum/api:test',
-            envSecret: { name: 'api-creds', keys: [{ secretKey: 'k', envVar: 'K' }] },
-          },
-        ],
-      },
+    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', recipe, {
+      forceReconcile: true,
+      trigger: 'workload_status',
     })
-    // NO drift: every workload is ready → the `ready === false` term is false, so the
-    // forced reconcile can ONLY come from the ownershipRecheck term. This isolates
-    // `ownershipRecheck`: reverting the `ownershipRecheck ||` guard makes it red (the
-    // deterministic backstop that re-runs the Secret-ownership gate would be lost).
-    const result = {
-      phase: 'active' as const,
-      message: 'All workloads deployed',
-      workloadStatuses: [{ id: 'api', phase: 'running', ready: true }],
-    }
-    const observeCurrentWorkloadStatus = vi.fn().mockResolvedValue(result)
-    const patchStatus = vi.fn().mockResolvedValue(undefined)
-    const handleRecipeEvent = vi.fn().mockResolvedValue(undefined)
-
-    type InternalWatcher = {
-      reconciler: {
-        observeCurrentWorkloadStatus: typeof observeCurrentWorkloadStatus
-        patchStatus: typeof patchStatus
-      }
-      handleRecipeEvent: typeof handleRecipeEvent
-      refreshWorkloadStatusOnly: (recipe: WorkflowRecipeCRD) => Promise<void>
-    }
-    const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
-    internal.reconciler = { observeCurrentWorkloadStatus, patchStatus }
-    internal.handleRecipeEvent = handleRecipeEvent
-
-    await internal.refreshWorkloadStatusOnly(recipe)
-
-    expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', recipe, { forceReconcile: true })
   })
+
+  it.each([
+    ['unchanged', 'api:api-creds', false],
+    ['changed', '', true],
+  ] as const)(
+    'an ALL-READY named-Secret recipe with an %s denied signature (enforced %j) reconciles=%s (Issue #637 ownership backstop, #1016)',
+    async (_label, enforced, reconciles) => {
+      const recipe = makeWorkloadRecipe({
+        metadata: { name: 'active-recipe', namespace: 'sandbox-recipes', generation: 7 },
+        status: { phase: 'active', message: 'All workloads deployed' },
+        spec: {
+          workloads: [
+            {
+              id: 'api',
+              type: 'deployment',
+              image: 'clerum/api:test',
+              envSecret: { name: 'api-creds', keys: [{ secretKey: 'k', envVar: 'K' }] },
+            },
+          ],
+        },
+      })
+      // NO drift: every workload is ready, so any forced reconcile can ONLY come from the
+      // ownership check. Issue #1016 makes it edge-triggered: the observed denied set
+      // ('api:api-creds') is compared with what the last settled pass enforced; only a
+      // change escalates (trigger 'ownership').
+      const result = {
+        phase: 'active' as const,
+        message: 'All workloads deployed',
+        workloadStatuses: [{ id: 'api', phase: 'running', ready: true }],
+      }
+      const observeCurrentWorkloadStatus = vi.fn().mockResolvedValue(result)
+      const observeSecretOwnership = vi
+        .fn()
+        .mockResolvedValue({ kind: 'ok', signature: 'api:api-creds' })
+      const patchStatus = vi.fn().mockResolvedValue(undefined)
+      const handleRecipeEvent = vi.fn().mockResolvedValue(undefined)
+
+      type InternalWatcher = {
+        reconciler: {
+          effectiveObservationView: typeof effectiveObservationView
+          observeCurrentWorkloadStatus: typeof observeCurrentWorkloadStatus
+          observeSecretOwnership: typeof observeSecretOwnership
+          patchStatus: typeof patchStatus
+        }
+        cadence: { recordSettled: (name: string, at: number, enforced?: string) => void }
+        handleRecipeEvent: typeof handleRecipeEvent
+        refreshWorkloadStatusOnly: (recipe: WorkflowRecipeCRD) => Promise<void>
+      }
+      const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+      internal.reconciler = {
+        effectiveObservationView,
+        observeCurrentWorkloadStatus,
+        observeSecretOwnership,
+        patchStatus,
+      }
+      internal.handleRecipeEvent = handleRecipeEvent
+      internal.cadence.recordSettled(recipe.metadata.name, Date.now(), enforced)
+
+      await internal.refreshWorkloadStatusOnly(recipe)
+
+      expect(observeSecretOwnership).toHaveBeenCalledWith(recipe)
+      if (reconciles) {
+        expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', recipe, {
+          forceReconcile: true,
+          trigger: 'ownership',
+        })
+      } else {
+        expect(handleRecipeEvent).not.toHaveBeenCalled()
+      }
+    }
+  )
 
   it('does NOT force a reconcile for an all-ready recipe with NO named Secret refs', async () => {
-    // Proves the ownershipRecheck term is load-bearing (not always-true): a steady
+    // Proves the named-Secret ownership path is selective (not always-true): a steady
     // recipe with no envSecret/imagePullSecrets and no drift must stay cheap.
     const recipe = makeWorkloadRecipe({
       metadata: { name: 'active-recipe', namespace: 'sandbox-recipes', generation: 7 },
@@ -1886,6 +1936,7 @@ describe('workload status refresh loop helpers', () => {
 
     type InternalWatcher = {
       reconciler: {
+        effectiveObservationView: typeof effectiveObservationView
         observeCurrentWorkloadStatus: typeof observeCurrentWorkloadStatus
         patchStatus: typeof patchStatus
       }
@@ -1893,7 +1944,7 @@ describe('workload status refresh loop helpers', () => {
       refreshWorkloadStatusOnly: (recipe: WorkflowRecipeCRD) => Promise<void>
     }
     const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
-    internal.reconciler = { observeCurrentWorkloadStatus, patchStatus }
+    internal.reconciler = { effectiveObservationView, observeCurrentWorkloadStatus, patchStatus }
     internal.handleRecipeEvent = handleRecipeEvent
 
     await internal.refreshWorkloadStatusOnly(recipe)
@@ -2111,7 +2162,7 @@ describe('status-only events drive DB sync (terminal + heartbeat)', () => {
       // CRD->DB terminal sync fires so the DB row transitions Running→Succeeded.
       expect(sync).toHaveBeenCalledTimes(1)
       expect(sync).toHaveBeenCalledWith(completed)
-      expect(reconcile).toHaveBeenCalledWith(completed)
+      expect(reconcile).toHaveBeenCalledWith(completed, { trigger: 'watch' })
       // Cache is updated.
       expect(internal.recipes.get(completed.metadata.name)).toBe(completed)
     }
@@ -2186,10 +2237,13 @@ describe('status-only events drive DB sync (terminal + heartbeat)', () => {
     )
     const errSpy = captureLogger('error').mockImplementation(() => undefined)
 
-    await expect(internal.handleRecipeEvent('MODIFIED', completed)).resolves.toBeUndefined()
+    await expect(internal.handleRecipeEvent('MODIFIED', completed)).resolves.toEqual({
+      ran: true,
+      settled: true,
+    })
 
     expect(sync).toHaveBeenCalledTimes(1)
-    expect(reconcile).toHaveBeenCalledWith(completed)
+    expect(reconcile).toHaveBeenCalledWith(completed, { trigger: 'watch' })
     expect(errSpy).toHaveBeenCalled()
     errSpy.mockRestore()
   })
@@ -2213,7 +2267,7 @@ describe('status-only events drive DB sync (terminal + heartbeat)', () => {
     // Generation changed ⇒ NOT status-only ⇒ full reconcile branch runs, which
     // also calls syncFromRecipeExecution at its start.
     expect(sync).toHaveBeenCalledWith(specChanged)
-    expect(reconcile).toHaveBeenCalledWith(specChanged)
+    expect(reconcile).toHaveBeenCalledWith(specChanged, { trigger: 'watch' })
   })
 })
 
@@ -2314,7 +2368,10 @@ describe('infrastructure telemetry enqueue isolation', () => {
     const { internal } = makeInternal(recipe, { enqueueInfrastructureTelemetry })
     const errSpy = captureLogger('error').mockImplementation(() => undefined)
 
-    await expect(internal.handleRecipeEvent('ADDED', recipe)).resolves.toBeUndefined()
+    await expect(internal.handleRecipeEvent('ADDED', recipe)).resolves.toEqual({
+      ran: true,
+      settled: true,
+    })
 
     expect(internal.reconciler.patchStatus).toHaveBeenCalled()
     expect(enqueueInfrastructureTelemetry).toHaveBeenCalled()
@@ -2366,6 +2423,7 @@ describe('transient-result requeue (scheduleTransientRetry)', () => {
       expect(enqueue).toHaveBeenCalledWith('flaky', expect.any(Function))
       expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', recipe, {
         forceReconcile: true,
+        trigger: 'transient_retry',
       })
     } finally {
       vi.useRealTimers()
@@ -2720,9 +2778,11 @@ describe('grant-update NOTIFY dispatch (issue #375 P3 wiring, H4/H5)', () => {
 
     expect(internal.handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', fresher, {
       forceReconcile: true,
+      trigger: 'notify',
     })
     expect(internal.handleRecipeEvent).not.toHaveBeenCalledWith('MODIFIED', recipe, {
       forceReconcile: true,
+      trigger: 'notify',
     })
   })
 
@@ -2977,11 +3037,16 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
     config: {
       externalEgressRefreshIntervalSeconds: number
       externalEgressRefreshFloorSeconds: number
+      sandboxNamespace?: string
     }
     externalEgressRefreshTimer: ReturnType<typeof setInterval> | null
     externalEgressRefreshRunning: boolean
     // H2 (issue #299): the refresh loop reads the reconciler's observed min TTL.
-    reconciler: { externalEgressRefreshMinTtlMs: number }
+    reconciler: {
+      externalEgressRefreshMinTtlMs: number
+      refreshDnsBlocks?: (r: WorkflowRecipeCRD, p: unknown[]) => Promise<'clean' | 'stale' | 'none'>
+      listPoliciesForLane?: (ns: string) => Promise<unknown[]>
+    }
     refreshExternalEgressForActiveRecipes: () => Promise<void>
     startExternalEgressRefreshLoop: () => void
     stop: () => Promise<void>
@@ -2990,6 +3055,10 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
   function makeInternal(recipes: WorkflowRecipeCRD[]) {
     const enqueue = vi.fn((_key: string, task: () => Promise<void>) => task())
     const handleRecipeEvent = vi.fn().mockResolvedValue(undefined)
+    // #1016: the T3 timer replays recorded DNS blocks through the reconciler's
+    // egress lane; a clean tick never reaches handleRecipeEvent.
+    const refreshDnsBlocks = vi.fn().mockResolvedValue('clean')
+    const listPoliciesForLane = vi.fn().mockResolvedValue([])
     const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
     internal.recipes = new Map(recipes.map(r => [r.metadata.name, r]))
     internal.eventQueue = { enqueue }
@@ -2998,15 +3067,20 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
     internal.config = {
       externalEgressRefreshIntervalSeconds: 60,
       externalEgressRefreshFloorSeconds: 5,
+      sandboxNamespace: 'sandbox-recipes',
     }
     internal.externalEgressRefreshTimer = null
     internal.externalEgressRefreshRunning = false
-    internal.reconciler = { externalEgressRefreshMinTtlMs: Infinity }
-    return { internal, enqueue, handleRecipeEvent }
+    internal.reconciler = {
+      externalEgressRefreshMinTtlMs: Infinity,
+      refreshDnsBlocks,
+      listPoliciesForLane,
+    }
+    return { internal, enqueue, handleRecipeEvent, refreshDnsBlocks, listPoliciesForLane }
   }
 
   it('refreshExternalEgressForActiveRecipes re-enqueues ONLY recipes with external exact-host egress', async () => {
-    const { internal, enqueue, handleRecipeEvent } = makeInternal([
+    const { internal, enqueue, handleRecipeEvent, refreshDnsBlocks } = makeInternal([
       makeUiEgressRecipe('with-ui-egress'),
       makeWorkloadEgressRecipe('with-wl-egress'),
       makePlainRecipe('plain'),
@@ -3023,13 +3097,13 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
     expect(enqueue).not.toHaveBeenCalledWith('transport', expect.any(Function))
     expect(enqueue).toHaveBeenCalledTimes(2)
 
-    // A full reconcile is forced (generation is unchanged, so a plain MODIFIED
-    // would short-circuit before the accumulator runs).
+    // #1016: the egress lane replays each selected recipe's recorded DNS blocks;
+    // a clean tick forces no full reconcile.
+    expect(refreshDnsBlocks).toHaveBeenCalledTimes(2)
     for (const name of ['with-ui-egress', 'with-wl-egress']) {
-      expect(handleRecipeEvent).toHaveBeenCalledWith('MODIFIED', internal.recipes.get(name), {
-        forceReconcile: true,
-      })
+      expect(refreshDnsBlocks).toHaveBeenCalledWith(internal.recipes.get(name), [])
     }
+    expect(handleRecipeEvent).not.toHaveBeenCalled()
   })
 
   it('refreshExternalEgressForActiveRecipes is a no-op while stopped', async () => {
@@ -3042,30 +3116,26 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
   it('the timer re-enqueues external-egress recipes on each tick at the clamped interval', async () => {
     vi.useFakeTimers()
     try {
-      const { internal, handleRecipeEvent } = makeInternal([
+      const { internal, refreshDnsBlocks } = makeInternal([
         makeUiEgressRecipe('with-ui-egress'),
         makePlainRecipe('plain'),
       ])
 
       internal.startExternalEgressRefreshLoop()
       expect(internal.externalEgressRefreshTimer).not.toBeNull()
-      expect(handleRecipeEvent).not.toHaveBeenCalled()
+      expect(refreshDnsBlocks).not.toHaveBeenCalled()
 
       // 1ms before the 60s interval: nothing has fired.
       await vi.advanceTimersByTimeAsync(59_999)
-      expect(handleRecipeEvent).not.toHaveBeenCalled()
+      expect(refreshDnsBlocks).not.toHaveBeenCalled()
 
       await vi.advanceTimersByTimeAsync(1)
-      expect(handleRecipeEvent).toHaveBeenCalledTimes(1)
-      expect(handleRecipeEvent).toHaveBeenCalledWith(
-        'MODIFIED',
-        internal.recipes.get('with-ui-egress'),
-        { forceReconcile: true }
-      )
+      expect(refreshDnsBlocks).toHaveBeenCalledTimes(1)
+      expect(refreshDnsBlocks).toHaveBeenCalledWith(internal.recipes.get('with-ui-egress'), [])
 
-      // Second tick fires again — the requeue is periodic, not one-shot.
+      // Second tick fires again — the refresh is periodic, not one-shot.
       await vi.advanceTimersByTimeAsync(60_000)
-      expect(handleRecipeEvent).toHaveBeenCalledTimes(2)
+      expect(refreshDnsBlocks).toHaveBeenCalledTimes(2)
     } finally {
       vi.useRealTimers()
     }
@@ -3074,16 +3144,16 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
   it('advances the refresh to TTL/2 when the reconciler has observed a low TTL (H2 wiring)', async () => {
     vi.useFakeTimers()
     try {
-      const { internal, handleRecipeEvent } = makeInternal([makeUiEgressRecipe('with-ui-egress')])
+      const { internal, refreshDnsBlocks } = makeInternal([makeUiEgressRecipe('with-ui-egress')])
       // The reconciler observed GitHub's ~15s TTL → the loop must fire at 7.5s,
       // not the 60s configured interval.
-      internal.reconciler = { externalEgressRefreshMinTtlMs: 15_000 }
+      internal.reconciler.externalEgressRefreshMinTtlMs = 15_000
 
       internal.startExternalEgressRefreshLoop()
       await vi.advanceTimersByTimeAsync(7_499)
-      expect(handleRecipeEvent).not.toHaveBeenCalled()
+      expect(refreshDnsBlocks).not.toHaveBeenCalled()
       await vi.advanceTimersByTimeAsync(1)
-      expect(handleRecipeEvent).toHaveBeenCalledTimes(1)
+      expect(refreshDnsBlocks).toHaveBeenCalledTimes(1)
     } finally {
       vi.useRealTimers()
     }
@@ -3105,14 +3175,16 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
   it('does not start a second refresh pass while one is still running (no concurrent duplicates)', async () => {
     vi.useFakeTimers()
     try {
-      // handleRecipeEvent returns a promise that stays pending until we release it,
+      // refreshDnsBlocks returns a promise that stays pending until we release it,
       // so the first pass is still in-flight when the second tick fires.
       let release: (() => void) | undefined
       const gate = new Promise<void>(resolve => {
         release = resolve
       })
       const enqueue = vi.fn((_key: string, task: () => Promise<void>) => task())
-      const handleRecipeEvent = vi.fn().mockReturnValue(gate)
+      const refreshDnsBlocks = vi.fn().mockReturnValue(gate.then(() => 'clean'))
+      const listPoliciesForLane = vi.fn().mockResolvedValue([])
+      const handleRecipeEvent = vi.fn().mockResolvedValue(undefined)
       const internal = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
       internal.recipes = new Map([['with-ui-egress', makeUiEgressRecipe('with-ui-egress')]])
       internal.eventQueue = { enqueue }
@@ -3121,18 +3193,28 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
       internal.config = {
         externalEgressRefreshIntervalSeconds: 60,
         externalEgressRefreshFloorSeconds: 5,
+        sandboxNamespace: 'sandbox-recipes',
       }
       internal.externalEgressRefreshTimer = null
       internal.externalEgressRefreshRunning = false
-      internal.reconciler = { externalEgressRefreshMinTtlMs: Infinity }
+      internal.reconciler = {
+        externalEgressRefreshMinTtlMs: Infinity,
+        refreshDnsBlocks,
+        listPoliciesForLane,
+      }
 
       internal.startExternalEgressRefreshLoop()
       await vi.advanceTimersByTimeAsync(60_000) // first tick — pass starts, stays in-flight
-      expect(handleRecipeEvent).toHaveBeenCalledTimes(1)
+      expect(refreshDnsBlocks).toHaveBeenCalledTimes(1)
+      expect(listPoliciesForLane).toHaveBeenCalledTimes(1)
       expect(internal.externalEgressRefreshRunning).toBe(true)
 
       await vi.advanceTimersByTimeAsync(60_000) // second tick — must be skipped
-      expect(handleRecipeEvent).toHaveBeenCalledTimes(1)
+      expect(refreshDnsBlocks).toHaveBeenCalledTimes(1)
+      // listPoliciesForLane runs BEFORE the timer wrapper, so the wrapper's
+      // per-recipe dedupe cannot mask a missing in-flight guard: only the
+      // reschedule-after-completion guard keeps a second pass from starting.
+      expect(listPoliciesForLane).toHaveBeenCalledTimes(1)
 
       release?.()
       await gate
@@ -3144,7 +3226,7 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
   it('stop() clears the refresh timer so no further ticks fire', async () => {
     vi.useFakeTimers()
     try {
-      const { internal, handleRecipeEvent } = makeInternal([makeUiEgressRecipe('with-ui-egress')])
+      const { internal, refreshDnsBlocks } = makeInternal([makeUiEgressRecipe('with-ui-egress')])
       // Minimal shape for stop() — every other subsystem is absent in this fixture.
       const stoppableInternal = internal as unknown as {
         transientRetries: Map<string, { timer: ReturnType<typeof setTimeout>; attempts: number }>
@@ -3168,12 +3250,16 @@ describe('external egress periodic refresh (issue #299 §3.2/§5)', () => {
       internal.startExternalEgressRefreshLoop()
       expect(internal.externalEgressRefreshTimer).not.toBeNull()
 
+      // One tick runs the lane before stop().
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(refreshDnsBlocks).toHaveBeenCalledTimes(1)
+
       await internal.stop()
       expect(internal.externalEgressRefreshTimer).toBeNull()
       expect(internal.stopped).toBe(true)
 
       await vi.advanceTimersByTimeAsync(120_000)
-      expect(handleRecipeEvent).not.toHaveBeenCalled()
+      expect(refreshDnsBlocks).toHaveBeenCalledTimes(1)
     } finally {
       vi.useRealTimers()
     }

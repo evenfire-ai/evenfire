@@ -636,7 +636,7 @@ async function ensureTransportService(
   }
 
   if (specHashUnchanged(svc, existing) && controllerOwnerUidMatches(svc, existing)) {
-    log.info('Transport Service unchanged; skipping update', { service: name })
+    log.debug('Transport Service unchanged; skipping update', { service: name })
     return
   }
 
@@ -820,7 +820,7 @@ async function ensureMcpServer(
     if (replaced) {
       log.info('Updated McpServer', { mcpServer: meta.name })
     } else {
-      log.info('McpServer unchanged; skipping update', { mcpServer: meta.name })
+      log.debug('McpServer unchanged; skipping update', { mcpServer: meta.name })
     }
   } catch (error) {
     if (getErrorCode(error) === 404) {
@@ -841,7 +841,7 @@ async function ensureMcpServer(
           if (replaced) {
             log.info('Updated McpServer after create conflict', { mcpServer: meta.name })
           } else {
-            log.info('McpServer unchanged after create conflict; skipping update', {
+            log.debug('McpServer unchanged after create conflict; skipping update', {
               mcpServer: meta.name,
             })
           }

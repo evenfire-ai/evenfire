@@ -25,6 +25,15 @@ import { OperatorConfig, loadConfig } from '../config'
 import { getPool } from '../db'
 import { createLogger } from '../observability/logger'
 import {
+  TRANSPORT_NETWORK_CONDITION_TYPE,
+  hasPendingTransportNetworkReadiness,
+} from '../recipePredicates'
+import {
+  type ReconcileCadenceOutput,
+  type ReconcileTrigger,
+  isSettledResult,
+} from '../reconcileCadence'
+import {
   ConfigMapResourceDef,
   CronJobDef,
   DaemonSetDef,
@@ -38,6 +47,7 @@ import {
   StatefulSetDef,
   StatusCondition,
   WorkflowRecipeCRD,
+  WorkflowRecipePolicyCRD,
   WorkflowRecipeSpec,
   WorkflowRecipeStatus,
   WorkloadDef,
@@ -80,6 +90,7 @@ import { evaluateComputedValues } from './computedValuesEvaluator'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from './crdConstants'
 import { deleteOutcomeFields, observeNamespacedDelete, shouldRecordDelete } from './deleteOutcome'
 import { sort as sortDependencies } from './dependencyGraph'
+import { dnsBlockFingerprint } from './dnsBlockFingerprint'
 import {
   type AccumulateOutput,
   accumulateExternalEgress,
@@ -144,6 +155,14 @@ import {
 } from './pluginWorkloadSdkValidator'
 import { listWorkflowRecipePolicies } from './policyClient'
 import { enforcePolicy } from './policyEnforcer'
+import {
+  noteDnsBlock,
+  noteEnforcedOwnership,
+  noteRepairPending,
+  noteStale,
+  ownershipSignature,
+  runInReconcileContext,
+} from './reconcileContext'
 import * as rb from './resourceBuilder'
 import {
   classifySecretAccess,
@@ -182,17 +201,9 @@ const WORKFLOW_ACTOR_TYPE_LABEL = 'clerum.io/workflow-actor-type'
  * to write it; `replaceResource` then skips its "Updated resource" log.
  */
 const NO_WRITE = Symbol('no-write')
-export const TRANSPORT_NETWORK_CONDITION_TYPE = 'TransportExternalEgressReady'
+// Issue #1016: defined in `recipePredicates.ts`; re-exported so existing imports keep working.
+export { TRANSPORT_NETWORK_CONDITION_TYPE, hasPendingTransportNetworkReadiness }
 const TRANSPORT_NETWORK_CONDITION_TYPES = new Set([TRANSPORT_NETWORK_CONDITION_TYPE])
-
-export function hasPendingTransportNetworkReadiness(recipe: WorkflowRecipeCRD): boolean {
-  return (
-    recipe.status?.conditions?.some(
-      condition =>
-        condition.type === TRANSPORT_NETWORK_CONDITION_TYPE && condition.status !== 'True'
-    ) ?? false
-  )
-}
 
 function pendingTransportNetworkConditions(
   recipe: WorkflowRecipeCRD,
@@ -692,6 +703,8 @@ export interface ReconcileResult {
   requeueFixedInterval?: boolean
   /** A legacy-only timer must not repeat the recipe's runtime lifecycle. */
   requeueOperation?: 'legacy-network-policy-delete'
+  /** Issue #1016: what this full pass ran, recorded for the cadence scheduler. */
+  cadence?: ReconcileCadenceOutput
 }
 
 type LegacyNetworkPolicyDeleteRetryResult = Pick<
@@ -1420,6 +1433,8 @@ export class WorkflowRecipeReconciler {
     recipe: WorkflowRecipeCRD,
     resolvedRuntimeScopeRecipeName?: string
   ): Promise<void> {
+    // Issue #1016 — a swallowed repair failure is not "settled": noteRepairPending()
+    // records it so the timer does not treat the pass as healthy.
     if (!this.workflowReconciler) return
     const runtimeScopeRecipeName =
       resolvedRuntimeScopeRecipeName ?? (await this.workflowRuntimeScopeRecipeName(recipe))
@@ -1440,6 +1455,7 @@ export class WorkflowRecipeReconciler {
         runtimeScopeRecipeName
       )
     } catch (error) {
+      noteRepairPending()
       createLogger('wrc', recipe.metadata.name).error(
         'Failed to repair coordinator runtime credentials; continuing without phase change',
         { name: recipe.metadata.name, err: error }
@@ -1454,6 +1470,7 @@ export class WorkflowRecipeReconciler {
         recipe.metadata.uid
       )
     } catch (error) {
+      noteRepairPending()
       createLogger('wrc', recipe.metadata.name).error(
         'Failed to repair mcpHost runtime credentials; continuing without phase change',
         { name: recipe.metadata.name, err: error }
@@ -1471,12 +1488,14 @@ export class WorkflowRecipeReconciler {
       // retry would otherwise leave only per-policy warn lines. Conflicts were
       // already logged at warn by the apply and stay there.
       if (refreshed.retryPending) {
+        noteRepairPending()
         createLogger('wrc', recipe.metadata.name).error(
           'Runtime HTTP egress refresh left a NetworkPolicy pending a retry; a later refresh retries it',
           { name: recipe.metadata.name }
         )
       }
     } catch (error) {
+      noteRepairPending()
       createLogger('wrc', recipe.metadata.name).error(
         'Failed to refresh runtime HTTP egress; keeping the last valid NetworkPolicy',
         { name: recipe.metadata.name, err: error }
@@ -1748,6 +1767,8 @@ export class WorkflowRecipeReconciler {
       'Skipping stale reconcile because the recipe is gone or deleting',
       { name: recipe.metadata.name, stage }
     )
+    // Issue #1016 — a stale pass is unsettled and must not leave cadence records.
+    noteStale()
     return {
       phase: recipe.status?.phase ?? 'candidate',
       message: `Recipe deleted during reconcile; skipped ${stage}`,
@@ -1897,7 +1918,129 @@ export class WorkflowRecipeReconciler {
 
   // ─── Main Pipeline ────────────────────────────────────────────────
 
-  async reconcile(recipe: WorkflowRecipeCRD): Promise<ReconcileResult> {
+  // Issue #1016: lazy so harnesses that skip construction need no setup.
+  private dnsBlockRecords?: Map<
+    string,
+    { fingerprint: string; blocks: ReadonlySet<'recipe_egress' | 'runtime_http_egress'> }
+  >
+  private get dnsBlockRecordMap() {
+    return (this.dnsBlockRecords ??= new Map())
+  }
+
+  // Exposed for tests and diagnostics.
+  dnsBlockRecordFor(
+    name: string
+  ):
+    | { fingerprint: string; blocks: ReadonlySet<'recipe_egress' | 'runtime_http_egress'> }
+    | undefined {
+    return this.dnsBlockRecordMap.get(name)
+  }
+
+  forgetDnsBlockRecord(name: string): void {
+    this.dnsBlockRecordMap.delete(name)
+  }
+
+  /**
+   * Issue #1016 — classic-lane input resolution + includeWhen filtering, shared by
+   * the full pass (Step 3/3a) and the T3 egress lane. Mutates `recipe` in place, as
+   * the full pass always has; callers outside the full pass must pass a clone.
+   * Returns the resolved inputs and computed values the full pass reuses in Step 4.
+   */
+  private resolveEffectiveWorkloadSpec(recipe: WorkflowRecipeCRD): {
+    computedValues: ReturnType<typeof evaluateComputedValues> | undefined
+    resolvedInputs: ReturnType<typeof resolveInputs>
+    workloads: WorkloadDef[]
+  } {
+    // Step 3: Resolve inputs (with computed values)
+    const computedValues = recipe.spec.computed
+      ? evaluateComputedValues(recipe.spec.computed, recipe.spec.inputs ?? {})
+      : undefined
+    const resolvedInputs = resolveInputs(
+      recipe.spec.inputs ?? {},
+      recipe.spec.inputContract,
+      recipe.spec.profiles,
+      recipe.spec.activeProfile,
+      computedValues
+    )
+
+    // Step 3a: Filter by includeWhen before rendering Kubernetes resources.
+    const filtered = filterByIncludeWhen(
+      recipe.spec.workloads ?? [],
+      recipe.spec.resources,
+      recipe.spec.bindings,
+      resolvedInputs
+    )
+    // Replace spec arrays with filtered versions for the rest of the pipeline
+    recipe.spec.workloads = filtered.workloads
+    recipe.spec.resources =
+      filtered.resources.length > 0 ? filtered.resources : recipe.spec.resources
+    recipe.spec.bindings = filtered.bindings.length > 0 ? filtered.bindings : undefined
+
+    return { computedValues, resolvedInputs, workloads: filtered.workloads }
+  }
+
+  async listPoliciesForLane(namespace: string): Promise<WorkflowRecipePolicyCRD[]> {
+    return listWorkflowRecipePolicies(this.customApi, namespace)
+  }
+
+  /**
+   * Issue #1016 — T3 egress lane. Replays exactly the DNS-dependent blocks the last
+   * full pass recorded (never predicts the branch). 'stale' means the caller
+   * escalates a full reconcile, which re-records. Throws after the subtractive
+   * barrier on a DNS/apiserver failure (fail-closed), like the full pass.
+   */
+  async refreshDnsBlocks(
+    recipe: WorkflowRecipeCRD,
+    policies: WorkflowRecipePolicyCRD[]
+  ): Promise<'clean' | 'stale' | 'none'> {
+    const clone = structuredClone(recipe)
+    const record = this.dnsBlockRecordMap.get(clone.metadata.name)
+    if (!record || record.fingerprint !== dnsBlockFingerprint(clone, this.config)) return 'stale'
+    if (record.blocks.size === 0) return 'none'
+    if (!(await this.recipeStillActive(clone))) return 'none'
+    if (validateWorkflowRecipeLimits(clone.spec, this.config)) return 'stale'
+    // Mirror the full pass's policy gate: terminal or already policy-failed recipes skip it.
+    const phase = (clone.status?.phase ?? 'candidate') as RecipePhase
+    const alreadyPolicyFailed =
+      phase === 'failed' && clone.status?.message?.startsWith('Policy violation:')
+    if (!isTerminal(phase) && !alreadyPolicyFailed && enforcePolicy(clone, policies).length > 0) {
+      return 'stale'
+    }
+
+    if (record.blocks.has('recipe_egress')) {
+      if ((clone.spec.steps ?? []).length === 0) {
+        try {
+          this.resolveEffectiveWorkloadSpec(clone)
+        } catch {
+          return 'stale'
+        }
+      }
+      const plan = await this.prepareRecipeEgressContractions(clone)
+      await this.reconcileUiEgressPolicy(clone)
+      await this.reconcileWorkloadEgressPolicies(clone, plan.workload)
+    }
+    if (record.blocks.has('runtime_http_egress') && this.workflowReconciler) {
+      const summary = await this.workflowReconciler.refreshRuntimeHttpEgressNetworkPolicies(
+        clone.metadata.namespace,
+        clone.metadata.name,
+        clone.metadata.uid ?? clone.metadata.name,
+        clone.spec
+      )
+      // A per-policy apiserver failure is reported, not thrown; surface it so the
+      // caller escalates like any other block failure instead of reading 'clean'.
+      if (summary?.retryPending) {
+        throw new Error(
+          `WorkflowRecipe "${clone.metadata.name}" runtime HTTP egress NetworkPolicy is pending a retry`
+        )
+      }
+    }
+    return 'clean'
+  }
+
+  async reconcile(
+    recipe: WorkflowRecipeCRD,
+    opts?: { trigger?: ReconcileTrigger }
+  ): Promise<ReconcileResult> {
     // issue #375: compute the Plugin Workload SDK capability projection ONCE per
     // reconcile and attach it to the result. shouldPatchRecipeStatus reads it to
     // publish a computed awaiting_policy↔validated transition that no
@@ -1905,8 +2048,41 @@ export class WorkflowRecipeReconciler {
     // the same object instead of rebuilding it. Paths that bypass this method
     // (e.g. observeCurrentWorkloadStatus) leave the projection undefined, which
     // both consumers treat as "no SDK opinion this pass".
-    const result = await this.reconcileInternal(recipe)
+    // Issue #1016: the fingerprint is taken BEFORE the pass because the classic
+    // lane mutates `recipe.spec` in place; it must describe the pass's input.
+    const fingerprint = dnsBlockFingerprint(recipe, this.config)
+    let ran
+    try {
+      ran = await runInReconcileContext(() => this.reconcileInternal(recipe, opts?.trigger))
+    } catch (error) {
+      // A thrown pass recorded nothing trustworthy: force the next full pass.
+      this.dnsBlockRecordMap.delete(recipe.metadata.name)
+      throw error
+    }
+    const { value: result, ctx } = ran
+    if (ctx.stale) {
+      // The recipe is deleting or gone: nothing this pass ran is worth replaying.
+      this.dnsBlockRecordMap.delete(recipe.metadata.name)
+    } else {
+      // Record what this pass ran so the T3 lane replays exactly those blocks.
+      this.dnsBlockRecordMap.set(recipe.metadata.name, {
+        fingerprint,
+        blocks: new Set(ctx.dnsBlocks),
+      })
+    }
+    result.cadence = {
+      dnsBlocks: [...ctx.dnsBlocks],
+      enforcedOwnership: ctx.enforcedOwnership,
+      repairPending: ctx.repairPending,
+      ...(ctx.stale && { stale: true }),
+    }
     this.requeueForPendingLegacyNetworkPolicyDelete(recipe, result)
+    if (!isSettledResult(result)) {
+      // An unsettled pass (e.g. a returned DNS-build failure with repair pending)
+      // may have recorded fewer blocks than it should replay; drop the record so
+      // the next T3 tick reads 'stale' and escalates, as before #1016.
+      this.dnsBlockRecordMap.delete(recipe.metadata.name)
+    }
     result.pluginWorkloadSdkProjection = this.projectPluginWorkloadSdk(recipe, result)
     createLogger('wrc', recipe.metadata.name).info('recipe reconciliation completed', {
       recipe: recipe.metadata.name,
@@ -1919,7 +2095,10 @@ export class WorkflowRecipeReconciler {
     return result
   }
 
-  private async reconcileInternal(recipe: WorkflowRecipeCRD): Promise<ReconcileResult> {
+  private async reconcileInternal(
+    recipe: WorkflowRecipeCRD,
+    trigger?: ReconcileTrigger
+  ): Promise<ReconcileResult> {
     const name = recipe.metadata.name
     const ns = recipe.metadata.namespace
     const currentPhase = recipe.status?.phase ?? 'candidate'
@@ -1942,7 +2121,12 @@ export class WorkflowRecipeReconciler {
       }
     }
 
-    createLogger('wrc', recipe.metadata.name).info('Reconciling recipe', { name, ns, currentPhase })
+    createLogger('wrc', recipe.metadata.name).info('Reconciling recipe', {
+      name,
+      ns,
+      currentPhase,
+      trigger,
+    })
 
     if (!(await this.recipeStillActive(recipe))) {
       return this.staleRecipeResult(recipe, 'initial check')
@@ -2368,9 +2552,10 @@ export class WorkflowRecipeReconciler {
         }
       }
 
-      // ─── First-time infrastructure creation ──────────────────────────
-      // Only reaches here on first deploy (candidate phase) or when no wfExecPhase yet.
-      // After this, the skip guards above prevent redundant reconciles.
+      // ─── Workflow infrastructure lane ────────────────────────────────
+      // Reached on first deploy, on a degraded or recovering workflow, and on
+      // every pass for SDK no-run workflows (#375 fall-through). The steady
+      // short-circuits above handle everything else.
 
       const workflowComputedValues = recipe.spec.computed
         ? evaluateComputedValues(recipe.spec.computed, recipe.spec.inputs ?? {})
@@ -2553,10 +2738,14 @@ export class WorkflowRecipeReconciler {
         }
       }
 
-      createLogger('wrc', recipe.metadata.name).info(
-        'Creating workflow infrastructure for first deployment',
-        { name, length: recipe.spec.steps!.length }
-      )
+      createLogger('wrc', recipe.metadata.name).info('Running workflow infrastructure lane', {
+        name,
+        length: recipe.spec.steps!.length,
+        reason:
+          recipe.status?.phase === 'active' && recipe.spec.pluginWorkloadSdk
+            ? 'sdk_eager'
+            : 'first_deploy',
+      })
       // Recovery handoff: when this workflow was latched `failed` by a transient
       // infra blip, hand the inner reconciler a `recovering` execution phase
       // (preserving message/steps/conditions) so it retries infrastructure
@@ -2777,30 +2966,11 @@ export class WorkflowRecipeReconciler {
       // so both workflow and non-workflow recipes are gated uniformly. No
       // duplicate check here.
 
-      // Step 3: Resolve inputs (with computed values)
-      const computedValues = recipe.spec.computed
-        ? evaluateComputedValues(recipe.spec.computed, recipe.spec.inputs ?? {})
-        : undefined
-      const resolvedInputs = resolveInputs(
-        recipe.spec.inputs ?? {},
-        recipe.spec.inputContract,
-        recipe.spec.profiles,
-        recipe.spec.activeProfile,
-        computedValues
-      )
-
-      // Step 3a: Filter by includeWhen before rendering Kubernetes resources.
-      const filtered = filterByIncludeWhen(
-        recipe.spec.workloads ?? [],
-        recipe.spec.resources,
-        recipe.spec.bindings,
-        resolvedInputs
-      )
-      // Replace spec arrays with filtered versions for the rest of the pipeline
-      recipe.spec.workloads = filtered.workloads
-      recipe.spec.resources =
-        filtered.resources.length > 0 ? filtered.resources : recipe.spec.resources
-      recipe.spec.bindings = filtered.bindings.length > 0 ? filtered.bindings : undefined
+      // Step 3 / 3a: resolve inputs (with computed values) and filter by includeWhen.
+      const { computedValues, resolvedInputs, workloads } =
+        this.resolveEffectiveWorkloadSpec(recipe)
+      // Same array the helper just assigned; re-asserting it keeps the non-optional narrowing.
+      recipe.spec.workloads = workloads
 
       // Re-validate after filtering (all workloads may have been excluded)
       if (recipe.spec.workloads.length === 0) {
@@ -2946,6 +3116,10 @@ export class WorkflowRecipeReconciler {
             `(transient read error) — requeuing before delegating or rendering workloads`
         )
       }
+      // Issue #1016 — record the denied set this gate enforced. The SDK-only
+      // `failed` return further down is reached after this same gate, so it needs
+      // no extra note.
+      noteEnforcedOwnership(ownershipSignature(secretOwnership.deniedPairs))
 
       // Step 7b: Pre-deploy McpServer CRDs for network isolation (Option C handshake)
       // Creates McpServer CRDs with clerum.io/pre-deploy annotation BEFORE workload
@@ -3022,6 +3196,7 @@ export class WorkflowRecipeReconciler {
           // instance and surface the denial so the operator labels the Secret.
           await this.teardownDeniedWorkload(workload, recipe, secretKeys).catch(err => {
             deniedTeardownFailed = true
+            noteRepairPending()
             createLogger('wrc', recipe.metadata.name).error(
               'Teardown of denied workload failed; will requeue',
               { id: workload.id, err }
@@ -3900,6 +4075,7 @@ export class WorkflowRecipeReconciler {
           `(transient read error) — requeuing before delegating or rendering workloads`
       )
     }
+    noteEnforcedOwnership(ownershipSignature(secretOwnership.deniedPairs))
 
     // Pre-deploy McpServer CRDs for network isolation.
     // MCP batch targets `this.config.namespace` (= mcp-server), not the
@@ -4531,7 +4707,7 @@ export class WorkflowRecipeReconciler {
       stampSpecHash(idempotency.manifest)
       const gate = await this.applyGate(idempotency)
       if (gate === 'unchanged') {
-        createLogger('wrc', 'workflow-recipes').info(
+        createLogger('wrc', 'workflow-recipes').debug(
           'Resource spec hash unchanged; skipping update',
           { label }
         )
@@ -4558,7 +4734,7 @@ export class WorkflowRecipeReconciler {
       if (idempotency) {
         const raced = await this.applyGate(idempotency)
         if (raced === 'unchanged') {
-          createLogger('wrc', 'workflow-recipes').info(
+          createLogger('wrc', 'workflow-recipes').debug(
             'Resource spec hash unchanged; skipping update',
             { label }
           )
@@ -4867,7 +5043,7 @@ export class WorkflowRecipeReconciler {
     name: string
   ): Promise<void> {
     if (existing.metadata?.annotations?.[SPEC_HASH_ANNOTATION] === desiredHash) {
-      createLogger('wrc', 'workflow-recipes').info(
+      createLogger('wrc', 'workflow-recipes').debug(
         'StatefulSet spec hash unchanged; skipping update',
         { name, namespace }
       )
@@ -5040,6 +5216,7 @@ export class WorkflowRecipeReconciler {
   private async prepareRecipeEgressContractions(
     recipe: WorkflowRecipeCRD
   ): Promise<RecipeEgressContractionPlan> {
+    noteDnsBlock('recipe_egress')
     await this.contractUiEgressPolicy(recipe)
     const workload = await this.contractWorkloadEgressPolicies(recipe)
     await this.contractUiIngressPolicies(recipe)
@@ -5215,7 +5392,7 @@ export class WorkflowRecipeReconciler {
     // write when the persisted window is aging (renewalDue, audit M1), even if
     // the set is unchanged, so a stable-then-rotated IP keeps its overlap grace.
     if (!this.egressWriteNeeded(existing, policy) && !egressRenewalDue && !egressStateChanged) {
-      createLogger('wrc', recipe.metadata.name).info('NetworkPolicy egress set unchanged; no-op', {
+      createLogger('wrc', recipe.metadata.name).debug('NetworkPolicy egress set unchanged; no-op', {
         policyName,
         ns,
       })
@@ -5780,7 +5957,7 @@ export class WorkflowRecipeReconciler {
         !wlEgressRenewalDue &&
         !wlEgressStateChanged
       ) {
-        createLogger('wrc', recipe.metadata.name).info(
+        createLogger('wrc', recipe.metadata.name).debug(
           'network policy egress set unchanged; skipping live apply',
           { policy: wlPolicyName, namespace: wlNs, family: 'workload-egress' }
         )
@@ -6322,7 +6499,7 @@ export class WorkflowRecipeReconciler {
       )
     }
     if (decision.action === 'unchanged' && !readResult.recoveredFromReadFailure) {
-      log.info('network policy unchanged; skipping update', fields)
+      log.debug('network policy unchanged; skipping update', fields)
       return
     }
 
@@ -6785,9 +6962,12 @@ export class WorkflowRecipeReconciler {
     messageByWorkload: Map<string, string>
     conditions: StatusCondition[]
     errored: boolean
+    /** `${workloadId}:${secretName}` for every denied ref (Issue #1016). */
+    deniedPairs: string[]
   } {
     const now = new Date().toISOString()
     const deniedWorkloadIds = new Set<string>()
+    const deniedPairs: string[] = []
     const messageByWorkload = new Map<string, string>()
     const deniedDetails: string[] = []
     let errored = false
@@ -6807,6 +6987,7 @@ export class WorkflowRecipeReconciler {
       }
       if (deniedRefs.length > 0) {
         deniedWorkloadIds.add(w.id)
+        for (const n of deniedRefs) deniedPairs.push(`${w.id}:${n}`)
         const msg =
           `Secret(s) ${deniedRefs.map(n => `"${n}"`).join(', ')} not owned by recipe ` +
           `"${recipe.metadata.name}" — label clerum.io/shared=true or ` +
@@ -6830,7 +7011,7 @@ export class WorkflowRecipeReconciler {
           ? [cond('False', 'NoForeignSecretRefs', 'All referenced Secrets are owned or shared')]
           : []
 
-    return { deniedWorkloadIds, messageByWorkload, conditions, errored }
+    return { deniedWorkloadIds, messageByWorkload, conditions, errored, deniedPairs }
   }
 
   /**
@@ -6867,7 +7048,10 @@ export class WorkflowRecipeReconciler {
     const hasSecretRefs = (recipe.spec.workloads ?? []).some(
       w => !!w.envSecret?.name || (w.imagePullSecrets ?? []).length > 0
     )
-    if (!hasSecretRefs) return clean
+    if (!hasSecretRefs) {
+      noteEnforcedOwnership('')
+      return clean
+    }
 
     let secretKeys: rb.SecretKeysByName
     try {
@@ -6895,6 +7079,7 @@ export class WorkflowRecipeReconciler {
       }
     }
     if (secretOwnership.deniedWorkloadIds.size === 0) {
+      noteEnforcedOwnership('')
       return { conditions: secretOwnership.conditions, hadDenied: false, needsRequeue: false }
     }
 
@@ -6924,13 +7109,56 @@ export class WorkflowRecipeReconciler {
       }
     }
     if (failedTeardowns.length > 0) {
+      // Issue #1016 — teardown incomplete: pending repair, no enforced signature.
+      noteRepairPending()
       return {
         ...clean,
         needsRequeue: true,
         requeueReason: `teardown failed for ${failedTeardowns.join(', ')}`,
       }
     }
+    noteEnforcedOwnership(ownershipSignature(secretOwnership.deniedPairs))
     return { conditions: secretOwnership.conditions, hadDenied: true, needsRequeue: false }
+  }
+
+  /**
+   * Issue #1016 (PRE-002) — the workload view a timer observation must use: a clone
+   * filtered exactly as the classic full pass filters it (includeWhen), so the
+   * observation and the enforcement see the same workloads. Workflow recipes are
+   * not filtered by the full pass and come back unfiltered. A resolution failure
+   * or an all-excluded result also falls back to the unfiltered clone; the full
+   * pass reports those cases itself.
+   */
+  effectiveObservationView(recipe: WorkflowRecipeCRD): WorkflowRecipeCRD {
+    const view = structuredClone(recipe)
+    if ((view.spec.steps ?? []).length > 0) return view
+    try {
+      this.resolveEffectiveWorkloadSpec(view)
+    } catch {
+      return structuredClone(recipe)
+    }
+    return (view.spec.workloads ?? []).length > 0 ? view : structuredClone(recipe)
+  }
+
+  /**
+   * Issue #1016 — detection only: observe the denied set on the same effective
+   * (includeWhen-filtered) view the full pass enforces. Never tears down anything.
+   */
+  async observeSecretOwnership(
+    recipe: WorkflowRecipeCRD
+  ): Promise<
+    { kind: 'ok'; signature: string } | { kind: 'error'; reason: 'read_error' | 'unverifiable' }
+  > {
+    const clone = this.effectiveObservationView(recipe)
+    let secretKeys: rb.SecretKeysByName
+    try {
+      secretKeys = await this.readReferencedSecrets(clone)
+    } catch {
+      return { kind: 'error', reason: 'read_error' }
+    }
+    const partition = this.partitionWorkloadsBySecretOwnership(clone, secretKeys)
+    if (partition.errored) return { kind: 'error', reason: 'unverifiable' }
+    return { kind: 'ok', signature: ownershipSignature(partition.deniedPairs) }
   }
 
   /**

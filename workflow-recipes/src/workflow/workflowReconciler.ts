@@ -43,6 +43,7 @@ import {
   classifyOwnerlessNetworkPolicyOwnership,
   decideNetworkPolicyConvergence,
 } from '../reconciler/networkPolicyConvergence'
+import { noteDnsBlock } from '../reconciler/reconcileContext'
 import {
   resolveStatefulSetHeadlessServiceName,
   resolveWorkloadMcpServerLabel,
@@ -201,8 +202,23 @@ const DEFAULT_WORKFLOW_OUTPUT_STORAGE_SIZE = '256Mi'
 const WORKFLOW_OUTPUT_PVC_DELETE_WAIT_MS = 30_000
 const WORKFLOW_OUTPUT_PVC_DELETE_POLL_MS = 1_000
 const MAX_WORKFLOW_OUTPUT_PREPARE_ATTEMPTS = 3
-const MIN_RUNTIME_TOKEN_FILE_REFRESH_LEAD_SECONDS = 75
+export const MIN_RUNTIME_TOKEN_FILE_REFRESH_LEAD_SECONDS = 75
 const RUNTIME_TOKEN_REFRESH_EXPIRY_SAFETY_SECONDS = 5
+
+/** Issue #1016 — shared by the WR getter and the WRC steady backstop so they cannot drift. */
+export function runtimeTokenFileRefreshLeadSeconds(config: {
+  runtimeTokenTtlSeconds: number
+  runtimeTokenRefreshBeforeSeconds: number
+}): number {
+  const maxLead = Math.max(
+    1,
+    config.runtimeTokenTtlSeconds - RUNTIME_TOKEN_REFRESH_EXPIRY_SAFETY_SECONDS
+  )
+  return Math.min(
+    maxLead,
+    Math.max(config.runtimeTokenRefreshBeforeSeconds, MIN_RUNTIME_TOKEN_FILE_REFRESH_LEAD_SECONDS)
+  )
+}
 const MAX_SNIPPET_CODE_LENGTH = 20_000
 const SNIPPET_SECRET_ALIAS_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
 const CONTROL_PLANE_ADMIN_USAGE_USER_PREFIX = 'admin-ui/'
@@ -1746,14 +1762,7 @@ export class WorkflowReconciler {
   }
 
   private get runtimeTokenFileRefreshBeforeSeconds(): number {
-    const maxLead = Math.max(
-      1,
-      this.deps.config.runtimeTokenTtlSeconds - RUNTIME_TOKEN_REFRESH_EXPIRY_SAFETY_SECONDS
-    )
-    return Math.min(
-      maxLead,
-      Math.max(this.runtimeTokenRefreshBeforeSeconds, MIN_RUNTIME_TOKEN_FILE_REFRESH_LEAD_SECONDS)
-    )
+    return runtimeTokenFileRefreshLeadSeconds(this.deps.config)
   }
 
   validateWorkflowSpec(spec: WorkflowRecipeSpec): string | undefined {
@@ -3605,6 +3614,9 @@ export class WorkflowReconciler {
       await this.pruneExpiredRuntimeHttpEgressNetworkPolicyOverlaps(recipeName, recipeUid, spec)
       throw error
     }
+    if (policies.length > 0 && runtimeHttpEgressClass(spec) === 'exact-host') {
+      noteDnsBlock('runtime_http_egress')
+    }
     return this.applyNetworkPolicyList(policies)
   }
 
@@ -3984,6 +3996,15 @@ export class WorkflowReconciler {
       mcpServerFullNames,
       snippetMcpServerFullNames
     )
+    // Issue #1016: record the block only when a runtime-HTTP policy was actually
+    // produced. The eager SDK path resolves DNS above but strips these policies
+    // (includeCoordinator=false, snippet runner awaiting), so it must record none.
+    if (
+      runtimeHttpEgressState &&
+      policies.some(policy => runtimeHttpEgressPolicyNames.includes(policy.metadata?.name ?? ''))
+    ) {
+      noteDnsBlock('runtime_http_egress')
+    }
     if (runtimeHttpEgressState) {
       this.annotateRuntimeHttpEgressPolicies(
         policies,
@@ -5766,7 +5787,7 @@ export class WorkflowReconciler {
       )
       switch (decision.action) {
         case 'unchanged':
-          this.log.info(`Unchanged NetworkPolicy "${name}"; skipping update`, { namespace })
+          this.log.debug(`Unchanged NetworkPolicy "${name}"; skipping update`, { namespace })
           return { policy: name, action: 'unchanged' }
         case 'conflict':
           this.log.warn(`NetworkPolicy "${name}" is not owned by this workflow; leaving it`, {
