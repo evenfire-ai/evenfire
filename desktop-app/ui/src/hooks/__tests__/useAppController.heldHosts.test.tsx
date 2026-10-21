@@ -452,6 +452,53 @@ describe('useAppController held Hosts', () => {
     }
   )
 
+  it('T-R4L1-1: a revocation, then the catalog dropping the Host, shows both toasts once, in order', async () => {
+    const { clerum, handle } = installAppControllerClerum({
+      agentNames: [HOST_A, HOST_B],
+      agentDisplayByName: DISPLAY_BY_NAME,
+    })
+    installCatalog(clerum)
+    const transcriptError = await ipcHostAccessRevoked('rpc:loadSessionMessages')
+    clerum.rpc.loadSessionMessages.mockImplementation(async (hostRef: string) => {
+      if (hostRef === HOST_A) throw transcriptError
+      return { agent: hostRef, chatId: '', turns: [] }
+    })
+    const { app, commits } = await mount(clerum, handle)
+    const refreshesBeforeHold = handle.refreshCatalog.mock.calls.length
+
+    act(() => {
+      app.result.current.handleSelectChatAgent(HOST_A, { chatId: 'chat-1', selectLatest: false })
+    })
+    await waitFor(() => expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true))
+    await waitFor(() =>
+      expect(handle.refreshCatalog.mock.calls.length).toBe(refreshesBeforeHold + 1)
+    )
+    await settle()
+    // Liveness witness: the revocation was announced while the catalog still lists A.
+    expect(cachedCatalog(app.queryClient)?.agentNames).toEqual([HOST_A, HOST_B])
+    expect(app.result.current.selectedAgent).toBe(null)
+    expect(toastsSeen(commits)).toEqual([REVOKED_A])
+    handle.refreshCatalog.mockImplementation(async () => createCatalog([HOST_B], DISPLAY_B_ONLY))
+
+    await act(async () => {
+      await app.result.current.handleRefreshWorkspaceData(DESKTOP_ROUTES.agents)
+    })
+    await waitFor(() => expect(cachedCatalog(app.queryClient)?.agentNames).toEqual([HOST_B]))
+    await settle()
+
+    // Two events, two toasts: the revocation, then the loss of the Host.
+    expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true)
+    expect(toastsSeen(commits)).toEqual([REVOKED_A, GONE_A])
+
+    // A navigation re-run with the same catalog adds no third toast.
+    act(() => {
+      app.result.current.handleNavSelect(DESKTOP_ROUTES.files)
+    })
+    await settle()
+    expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.files)
+    expect(toastsSeen(commits)).toEqual([REVOKED_A, GONE_A])
+  })
+
   it('T-R2L2-1: a new hold after a successful Retry is announced again', async () => {
     const { clerum, handle } = installAppControllerClerum({
       agentNames: [HOST_A, HOST_B],
