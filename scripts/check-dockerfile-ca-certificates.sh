@@ -56,7 +56,7 @@ while IFS= read -r dockerfile; do
         n = split(list, tok, /[ \t]+/)
         for (i = 1; i <= n; i++) {
           if (tok[i] == "" || substr(tok[i], 1, 1) == "-") continue
-          sub(/=.*$/, "", tok[i])   # strip pinned versions: nodejs=24.16.0-1
+          sub(/=.*$/, "", tok[i])   # strip pinned versions: nodejs=24.22.1-1nodesource1
           if (tok[i] == "ca-certificates" || tok[i] == "ca-certificates-bundle") {
             has_ca = 1
             continue
