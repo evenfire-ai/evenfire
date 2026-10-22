@@ -15,6 +15,7 @@ import {
   CALLBACK_UNCONFIGURED_FAILURE,
   ENTRA_NO_SCOPES_DISCOVER,
   ENTRA_UNKNOWN_GUID_DISCOVER,
+  ENTRA_UNKNOWN_TENANT_DISCOVER_FAILURE,
   LINEAR_DISCOVER,
   LINEAR_DISCOVER_UNCONFIGURED,
   LINEAR_INSTALLED,
@@ -803,5 +804,57 @@ describe('AddRemoteServerWizard', () => {
     fireEvent.change(scopesInput(), { target: { value: 'bad"scope' } })
     expect(screen.getByText(/contains characters OAuth does not allow/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled()
+  })
+
+  it('entra: a tenant Entra does not know shows "did not recognize" and keeps the tenant', async () => {
+    const unknownTenant = '00000000-0000-0000-0000-000000000001'
+    discoverMock
+      .mockRejectedValueOnce(apiErrorFrom(WORKIQ_DISCOVER_TENANT_REQUIRED))
+      .mockRejectedValueOnce(apiErrorFrom(ENTRA_UNKNOWN_TENANT_DISCOVER_FAILURE))
+    renderWizard()
+    await fillIdentity(WORKIQ_URL, 'workiq')
+    clickDetect()
+    await screen.findByLabelText(/Microsoft Entra tenant ID/)
+    fireEvent.change(tenantInput(), { target: { value: unknownTenant } })
+    clickDetect()
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Microsoft Entra ID did not recognize this tenant ID.'
+    )
+    expect(tenantInput()).toHaveValue(unknownTenant)
+    expect(screen.getByRole('button', { name: 'Detect' })).toBeEnabled()
+  })
+
+  it('entra: editing the tenant after a detect forces a re-detect', async () => {
+    await detectEntra(WORKIQ_DISCOVER)
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeInTheDocument()
+
+    fireEvent.change(tenantInput(), { target: { value: '11111111-2222-3333-4444-555555555555' } })
+    expect(screen.getByRole('button', { name: 'Detect' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Continue' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Configure/ })).toBeDisabled()
+  })
+
+  it('without a profile, advertised scopes OAuth would reject are accepted as advertised', async () => {
+    // No golden advertises a scope outside RFC 6749; Linear's body with only `scopes`
+    // changed stands for a server whose PRM lists one (control-api copies the list as is).
+    const nonConforming: DiscoverRemoteResponse = {
+      ...LINEAR_DISCOVER,
+      detected: { ...LINEAR_DISCOVER.detected, scopes: ['read', 'issues\\write'] },
+    }
+    discoverMock.mockResolvedValue(nonConforming)
+    installMock.mockResolvedValue(LINEAR_INSTALLED)
+    renderWizard()
+    await fillIdentity('https://mcp.linear.app/mcp', 'linear')
+    clickDetect()
+    expect(await screen.findByLabelText('Scopes')).toHaveValue('read issues\\write')
+    expect(screen.queryByText(/contains characters OAuth does not allow/)).not.toBeInTheDocument()
+
+    const continueButton = screen.getByRole('button', { name: 'Continue' })
+    expect(continueButton).toBeEnabled()
+    fireEvent.click(await toConfirm())
+    await waitFor(() => expect(installMock).toHaveBeenCalledTimes(1))
+    expect(lastInstallBody()).not.toHaveProperty('scopes')
   })
 })
