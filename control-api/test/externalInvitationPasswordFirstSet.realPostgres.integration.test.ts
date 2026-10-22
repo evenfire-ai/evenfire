@@ -298,9 +298,10 @@ describeRealPostgres('external invitation password setup on real PostgreSQL', ()
       authenticationMethods: ['password'],
     })
     // A refused call must not overwrite user-chosen identity fields either.
-    // ensureInvitationUser writes users.name and profiles.display_name from the
-    // invitation's invitee_name, so pin both rows to recognizable values before
-    // the refusal and require them to survive it byte-identically.
+    // The first-password path resolves the invitee through the invitation user
+    // helper, which must leave an existing users.name and profiles.display_name
+    // untouched; pin both rows to recognizable values before the refusal and
+    // require them to survive it byte-identically.
     await holder.pool.query(
       `UPDATE users
           SET name = 'User selected name',

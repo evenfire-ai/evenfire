@@ -209,7 +209,7 @@ export async function setInvitationPasswordForEmail(
       if (expectedUserId && user.id !== expectedUserId.trim()) {
         return { error: 'forbidden' as const }
       }
-      const invitation = await getInvitationRecordById(db, trimmedInvitationId, true)
+      const invitation = await getInvitationRecordById(db, trimmedInvitationId, { lock: true })
       if (!invitation || invitation.purpose !== 'password_reset') {
         return { error: 'not_found' as const }
       }
