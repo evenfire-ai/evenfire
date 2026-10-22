@@ -250,6 +250,8 @@ describe('AddRemoteServerWizard', () => {
         grantScope: 'user',
       })
     )
+    // Without a profile, the untouched advertised scopes are left to control-api.
+    expect(lastInstallBody()).not.toHaveProperty('scopes')
     await waitFor(() => expect(onInstalled).toHaveBeenCalledTimes(1))
     expect(await screen.findByText(/installed\./i)).toBeInTheDocument()
   })
