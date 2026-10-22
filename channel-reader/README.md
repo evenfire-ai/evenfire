@@ -1,6 +1,6 @@
 # Clerum Channel Reader
 
-A Node.js/TypeScript application that fetches messages from Telegram, Email (IMAP), and Slack. `CommunicationChannel` config controls transport reachability and optional sender pre-filters. Workflow approval identity verification is a separate Profile UI flow and is enforced only by workflow approval/trigger handling.
+A Node.js/TypeScript application that receives messages from Telegram, Email (IMAP), Slack, and Microsoft Teams. `CommunicationChannel` config controls transport reachability and optional sender pre-filters. Workflow approval identity verification is a separate Profile UI flow and is enforced only by workflow approval/trigger handling.
 
 ## Modes
 
@@ -163,7 +163,12 @@ npm install
 npm run build
 
 export CLERUM_DEV_MODE=true
-export CLERUM_CHANNEL='{"hostRef":"dev","telegram":[{"channelId":"test","chatType":"private","userIds":["123"]}]}'
+# Must match the mcp-host Host name (mcp-host dev mode defaults to dev-host).
+# channel-reader's own dev default is "dev", which mcp-host rejects with 403.
+export CLERUM_HOST_REF=dev-host
+# Dev mode defaults to http://localhost:8080; set this if mcp-host runs elsewhere.
+export CLERUM_MCP_HOST_URL="http://localhost:8080"
+export CLERUM_CHANNEL='{"hostRef":"dev-host","telegram":[{"channelId":"test","chatType":"private","userIds":["123"]}]}'
 export CLERUM_TELEGRAM_BOT_TOKEN="your-token"
 npm start
 ```
@@ -186,10 +191,13 @@ For local iteration, use dev mode above.
 # Build image
 docker build -t clerum/channel-reader:latest .
 
-# Run in dev mode
+# Run in dev mode against an mcp-host on the Docker host's port 8080
 docker run --rm \
+  --add-host=host.docker.internal:host-gateway \
   -e CLERUM_DEV_MODE=true \
-  -e CLERUM_CHANNEL='{"hostRef":"dev","telegram":[{"channelId":"test","chatType":"private","userIds":["123"]}]}' \
+  -e CLERUM_HOST_REF=dev-host \
+  -e CLERUM_MCP_HOST_URL=http://host.docker.internal:8080 \
+  -e CLERUM_CHANNEL='{"hostRef":"dev-host","telegram":[{"channelId":"test","chatType":"private","userIds":["123"]}]}' \
   -e CLERUM_TELEGRAM_BOT_TOKEN="your-token" \
   clerum/channel-reader:latest
 ```

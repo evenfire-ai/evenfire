@@ -9,6 +9,7 @@ import type { ApiRequestError, ApiRequestOptions } from './api.types'
 import type { GenericDiscoveryPrefill } from './oauthGeneric.types'
 import type {
   McpSecretSummary,
+  OAuthCallbackConfig,
   OAuthCredentialManifest,
   OAuthInstallSubmit,
 } from './oauthInstall.types'
@@ -668,18 +669,13 @@ export type GfsOperatorSubjectInput = { type: 'operator' }
 export type GfsContextSubjectInput = { type: 'context'; id: string }
 
 export type GfsBulkGrantSubjectInput =
-  | GfsUserSubjectInput
-  | GfsTeamSubjectInput
-  | GfsHostSubjectInput
+  GfsUserSubjectInput | GfsTeamSubjectInput | GfsHostSubjectInput
 export type GfsBulkShareSubjectInput = GfsUserSubjectInput | GfsTeamSubjectInput
 export type GfsSubjectInput =
-  | GfsBulkGrantSubjectInput
-  | GfsOperatorSubjectInput
-  | GfsContextSubjectInput
+  GfsBulkGrantSubjectInput | GfsOperatorSubjectInput | GfsContextSubjectInput
 
 type GfsSubjectMutationInput<TBulkSubject extends GfsSubjectInput> =
-  | { subject: GfsSubjectInput; subjects?: never }
-  | { subject?: never; subjects: TBulkSubject[] }
+  { subject: GfsSubjectInput; subjects?: never } | { subject?: never; subjects: TBulkSubject[] }
 
 type GfsMutationRequestBody = {
   drive?: string
@@ -1831,11 +1827,7 @@ export async function createMcpServer(payload: {
 
 /** Cleanup stages control-api reports as `pending` when an mcp-server uninstall stops. */
 export type McpServerUninstallStage =
-  | 'contexts'
-  | 'dynamic_client'
-  | 'oauth_grants'
-  | 'secrets'
-  | 'mcp_server'
+  'contexts' | 'dynamic_client' | 'oauth_grants' | 'secrets' | 'mcp_server'
 
 const MCP_SERVER_UNINSTALL_STAGE_LABELS: Record<McpServerUninstallStage, string> = {
   contexts: 'agent access',
@@ -2005,9 +1997,7 @@ export async function updateMcpSecret(name: string, data: Record<string, string>
 }
 
 export type RecipeSecretOwnership =
-  | { kind: 'shared' }
-  | { kind: 'owner-recipe'; recipeName: string }
-  | { kind: 'unlabeled' }
+  { kind: 'shared' } | { kind: 'owner-recipe'; recipeName: string } | { kind: 'unlabeled' }
 
 export type RecipeSecretItem = {
   name: string
@@ -3014,13 +3004,7 @@ export type WorkflowRecipePhase =
   | 'rollback-failed'
 
 export type WorkflowExecutionPhase =
-  | 'pending'
-  | 'initializing'
-  | 'running'
-  | 'completed'
-  | 'failed'
-  | 'cancelled'
-  | 'recovering'
+  'pending' | 'initializing' | 'running' | 'completed' | 'failed' | 'cancelled' | 'recovering'
 
 export type WorkflowRecipeStatus = {
   phase?: WorkflowRecipePhase
@@ -3743,6 +3727,15 @@ export async function getOAuthCredentialManifest(
 }
 
 /**
+ * The deployment's public OAuth callback for Marketplace OAuth installs. control-api
+ * owns CONTROL_API_OAUTH_CALLBACK_BASE_URL and returns the exact redirect-URI template
+ * (over `{oauthClientId}`), or `configured: false` when none is set.
+ */
+export async function getOAuthCallbackConfig(): Promise<OAuthCallbackConfig> {
+  return apiGet('/api/v1/admin/oauth/callback') as Promise<OAuthCallbackConfig>
+}
+
+/**
  * Dry-run generic AS discovery (E-19.5, D-A6). Posts the operator-typed issuer/URL and
  * resolves to the prefill SUGGESTION the wizard offers on Apply. No writes. On failure
  * the thrown Error carries `.code`/`.body` (the `discovery_failed` detail kind or a
@@ -3829,10 +3822,7 @@ export async function installRecipeFromRegistry(
 // capability ceiling, and the may_deny ⇒ fail-closed rule; error bodies arrive as
 // { error, reason? } (surfaced via the thrown Error's `.body`/`.code`).
 export type HookCapability =
-  | 'may_deny'
-  | 'may_rewrite'
-  | 'may_substitute_result'
-  | 'may_add_context'
+  'may_deny' | 'may_rewrite' | 'may_substitute_result' | 'may_add_context'
 
 export type InstallHookFromRegistryRequest = {
   hostRef: string
@@ -4031,8 +4021,7 @@ export async function listOrgGrants(pluginName?: string): Promise<{ grants: OrgG
 
 export async function createOrgGrant(input: CreateOrgGrantInput): Promise<OrgGrant> {
   const raw = (await registryCodedRequest('POST', '/api/v1/admin/registry/grants', input)) as
-    | RawOrgGrant
-    | undefined
+    RawOrgGrant | undefined
   return normalizeOrgGrant(raw ?? {})
 }
 
@@ -4350,12 +4339,7 @@ export type PluginWorkloadSdkQuotaCounter = {
 }
 
 export type PluginWorkloadSdkInvocationStatus =
-  | 'in_progress'
-  | 'complete'
-  | 'failed'
-  | 'provider_unavailable'
-  | 'accepted'
-  | 'delivered'
+  'in_progress' | 'complete' | 'failed' | 'provider_unavailable' | 'accepted' | 'delivered'
 
 export type PluginWorkloadSdkInvocation = {
   id: string
@@ -4576,12 +4560,7 @@ export async function listOrgImages(): Promise<{ org: string; images: OrgImage[]
 // registry_signing_material_unavailable.
 
 export type RegistryConnectionState =
-  | 'disconnected'
-  | 'pending'
-  | 'connecting'
-  | 'approved'
-  | 'rejected'
-  | 'connected'
+  'disconnected' | 'pending' | 'connecting' | 'approved' | 'rejected' | 'connected'
 
 export type RegistryRecoveryError =
   | 'already_claimed'

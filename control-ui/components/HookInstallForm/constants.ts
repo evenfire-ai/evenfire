@@ -80,4 +80,8 @@ export const HOOK_INSTALL_ERROR_LABELS: Record<string, string> = {
   deny_requires_fail_closed: 'A hook that may deny must run in fail-closed mode.',
   image_not_allowlisted: "This hook's image is not allow-listed for installation.",
   unknown_credential_keys: 'One or more credential keys are not recognized by this hook.',
+  hook_requires_org_scope: 'Only organization-scoped registry hooks can be installed.',
+  content_access_conflict:
+    'This hook declares metadata-only access at a lifecycle point that always receives content.',
+  image_ref_not_digest_pinned: "This hook's image must be pinned by digest (@sha256:…).",
 }
