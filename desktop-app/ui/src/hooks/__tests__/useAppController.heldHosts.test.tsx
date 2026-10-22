@@ -791,6 +791,94 @@ describe('useAppController held Hosts', () => {
     }
   )
 
+  it("T-R5L3-1: a hold during a team switch never takes the previous team's name", async () => {
+    const { clerum, handle } = installAppControllerClerum({
+      agentNames: [HOST_A, HOST_B],
+      agentDisplayByName: DISPLAY_BY_NAME,
+    })
+    installCatalog(clerum)
+    const { app, commits } = await mount(clerum, handle)
+    await settle()
+    const team2 = deferred<ReturnType<typeof producerCatalog>>()
+    handle.refreshCatalog.mockImplementation(() => team2.promise)
+
+    let switching!: Promise<boolean>
+    await act(async () => {
+      switching = app.result.current.handleEnsureTeamContext({ teamId: 'team-2' })
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(app.result.current.currentTeamId).toBe('team-2'))
+    // Liveness witness: the session is on team 2 while the cached catalog is
+    // still team 1's, which names B "Billing Host".
+    expect(cachedCatalog(app.queryClient)?.teamId).toBe('team-1')
+
+    const transcriptError = await ipcGenericForbidden('rpc:loadSessionMessages')
+    clerum.rpc.loadSessionMessages.mockImplementation(async () => {
+      throw transcriptError
+    })
+    act(() => {
+      app.result.current.handleSelectChatAgent(HOST_B, {
+        chatId: 'team-2-chat',
+        selectLatest: false,
+      })
+    })
+    await waitFor(() => expect(app.result.current.isHostAccessBlocked(HOST_B)).toBe(true))
+    await waitFor(() => expect(toastsSeen(commits).length).toBeGreaterThan(0))
+    expect(
+      clerum.rpc.loadSessionMessages.mock.calls.some(
+        ([host, , chatId]) => host === HOST_B && chatId === 'team-2-chat'
+      )
+    ).toBe(true)
+
+    // Inside the switch window: no catalog of team 2 has landed, so B is named by its ref.
+    expect(cachedCatalog(app.queryClient)?.teamId).toBe('team-1')
+    expect(toastsSeen(commits)).toEqual([`Could not verify access to ${HOST_B}.`])
+    expect(app.result.current.heldHosts).toEqual([{ agentRef: HOST_B, label: HOST_B }])
+
+    await act(async () => {
+      team2.resolve(
+        producerCatalog(
+          [HOST_A, HOST_B],
+          { ...DISPLAY_BY_NAME, [HOST_B]: 'Team Two Host' },
+          'team-2'
+        )
+      )
+      await switching
+    })
+    await waitFor(() =>
+      expect(app.result.current.heldHosts).toEqual([{ agentRef: HOST_B, label: 'Team Two Host' }])
+    )
+  })
+
+  it('T-R5L1-2: a padded session team still names Hosts from its catalog', async () => {
+    const { clerum, handle } = installAppControllerClerum({
+      me: { teamId: '  team-1  ' },
+      agentNames: [HOST_A, HOST_B],
+      agentDisplayByName: DISPLAY_BY_NAME,
+    })
+    const catalog = installCatalog(clerum)
+    catalog.deny(HOST_A, await ipcGenericForbidden('rpc:listSessions'))
+    const { app, commits } = await mount(clerum, handle)
+    await settle()
+    // Liveness witness: the catalog carries the trimmed team the producer keys it by.
+    expect(cachedCatalog(app.queryClient)?.teamId).toBe('team-1')
+
+    await holdThroughCatalog(app, catalog, HOST_A)
+    await settle()
+    expect(app.result.current.heldHosts).toEqual([{ agentRef: HOST_A, label: DISPLAY_A }])
+
+    const verificationError = await ipcGenericForbidden('rpc:listSessions')
+    catalog.setVerify(async () => {
+      throw verificationError
+    })
+    act(() => {
+      app.result.current.handleSelectChatAgent(HOST_A, { selectLatest: false })
+    })
+    await waitFor(() => expect(catalog.verifyReads(HOST_A)).toBe(1))
+    await settle()
+    expect(toastsSeen(commits)).toEqual([VERIFY_A])
+  })
+
   it('T-R2L2-1: a new hold after a successful Retry is announced again', async () => {
     const { clerum, handle } = installAppControllerClerum({
       agentNames: [HOST_A, HOST_B],

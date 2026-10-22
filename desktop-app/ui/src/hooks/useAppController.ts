@@ -324,6 +324,28 @@ export function useAppController() {
     (agentName: string) => agentsData.agentDisplayByName[agentName] ?? agentName,
     [agentsData.agentDisplayByName]
   )
+  // A team switch sets the new principal before its catalog arrives, so the
+  // previous team's catalog can still be cached. The team clause goes with the
+  // Desktop team retirement; the user clause stays.
+  const isPrincipalCatalog = useCallback(
+    (catalog: AccessCatalog) =>
+      catalog.userId === auth.me?.id && (catalog.teamId ?? '') === principalTeamId,
+    [auth.me?.id, principalTeamId]
+  )
+  // Names a held Host in its Retry row and toasts. Only a catalog of the
+  // current principal names it, so a hold during a team switch never shows the
+  // previous team's name.
+  const principalCatalogName = useCallback(
+    (catalog: AccessCatalog | null, agentRef: string) =>
+      (catalog && isPrincipalCatalog(catalog)
+        ? catalog.agentDisplayByName?.[agentRef]
+        : undefined) ?? agentRef,
+    [isPrincipalCatalog]
+  )
+  // Toasts shown after an await read the catalog on screen then, not the one
+  // their callback was created with.
+  const liveAccessCatalogRef = useRef(agentsData.accessCatalog)
+  liveAccessCatalogRef.current = agentsData.accessCatalog
   // Keyed by the session team, not the display directory: the directory
   // arriving after paint is not a team change and must not reset the holds.
   const authorityScope = `${auth.runtimeConfigState?.envKey ?? ''}:${auth.isAuthenticated}:${authenticatedPrincipalIdentity ?? ''}:${principalTeamId}`
@@ -358,8 +380,12 @@ export function useAppController() {
   const keepFocusedChat =
     focusedChatAgentRef !== null && heldAgentRefs.includes(focusedChatAgentRef)
   const heldHosts = useMemo<HeldHost[]>(
-    () => heldAgentRefs.map(agentRef => ({ agentRef, label: agentDisplayName(agentRef) })),
-    [agentDisplayName, heldAgentRefs]
+    () =>
+      heldAgentRefs.map(agentRef => ({
+        agentRef,
+        label: principalCatalogName(agentsData.accessCatalog, agentRef),
+      })),
+    [agentsData.accessCatalog, heldAgentRefs, principalCatalogName]
   )
   const getHostAuthorityEpoch = useCallback(
     (agentRef: string) => hostAuthority.getEpoch(agentRef),
@@ -389,7 +415,7 @@ export function useAppController() {
       // under the Apps picker: an earlier uncertain hold may already have
       // cleared the selection, and the toast is about the Host, not the tab.
       if (selected || (kind === 'revoked' && activeChatAgentRefRef.current === agentRef)) {
-        const name = agentDisplayName(agentRef)
+        const name = principalCatalogName(liveAccessCatalogRef.current, agentRef)
         // No Retry promise: the refresh below can drop the Host from the catalog,
         // and the Retry row lists only Hosts the catalog still has.
         pushToast(
@@ -402,11 +428,11 @@ export function useAppController() {
       void agentsData.refresh()
     },
     [
-      agentDisplayName,
       agentsData.refresh,
       hostAuthority,
       invalidateSessionCatalog,
       nav.setSelectedAgent,
+      principalCatalogName,
       pushToast,
     ]
   )
@@ -747,11 +773,7 @@ export function useAppController() {
     const catalog = agentsData.accessCatalog
     previousAccessCatalogRef.current = catalog
     if (!auth.isAuthenticated || !catalog) return
-    // A team switch sets the new principal before its catalog arrives, so the
-    // previous team's catalog can still be cached here. The team clause goes
-    // with the Desktop team retirement; the user clause stays.
-    const catalogOfPrincipal =
-      catalog.userId === auth.me?.id && (catalog.teamId ?? '') === principalTeamId
+    const catalogOfPrincipal = isPrincipalCatalog(catalog)
     if (catalogOfPrincipal) {
       for (const agentRef of catalog.agentNames) {
         const name = catalog.agentDisplayByName?.[agentRef]
@@ -788,8 +810,7 @@ export function useAppController() {
   }, [
     agentsData.accessCatalog,
     auth.isAuthenticated,
-    auth.me?.id,
-    principalTeamId,
+    isPrincipalCatalog,
     nav.selectedAgent,
     nav.setSelectedAgent,
     isHostAccessBlocked,
