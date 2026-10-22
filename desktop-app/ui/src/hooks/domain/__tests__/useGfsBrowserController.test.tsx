@@ -26,6 +26,7 @@ import {
   sharesListPage,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { shouldRevalidateGfsQuery } from '@/lib/gfsEntityChangeState'
+import { readGfsOpenLocations } from '@/lib/gfsOpenLocations'
 import { desktopQueryKeys } from '../queryKeys'
 import { useGfsBrowserController } from '../useGfsBrowserController'
 
@@ -3613,5 +3614,68 @@ describe('useGfsBrowserController — cross-surface move convergence (RP-005)', 
     })
 
     await waitFor(() => expect(inheritedQuery.state.dataUpdatedAt).not.toBe(before))
+  })
+
+  it('publishes the open location in the registry order the relocation helper assumes', async () => {
+    // The controller's CRUMBS are root-first (ancestor-1 / parent-1 / leaf-1),
+    // but the shared open-location registry documents — and the relocation
+    // helper slice()s — a NEAREST-FIRST chain. Publishing the crumbs without
+    // reversing them made a relocation of an intermediate ancestor keep the
+    // stale ancestors ABOVE it and drop the still-real ones BELOW it.
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async (uri: string) => {
+            const id = uri.split('/').pop()!
+            if (id === 'leaf1') {
+              return {
+                resourceId: 'leaf-1',
+                parentResourceId: 'parent-1',
+                gfsUri: 'gfs://main/leaf1',
+                name: 'leaf.txt',
+                kind: 'file',
+                version: 1,
+              }
+            }
+            if (id === 'parent1') {
+              return {
+                resourceId: 'parent-1',
+                parentResourceId: 'ancestor-1',
+                gfsUri: 'gfs://main/parent1',
+                name: 'Parent',
+                kind: 'directory',
+                version: 1,
+              }
+            }
+            return {
+              resourceId: 'ancestor-1',
+              parentResourceId: null,
+              gfsUri: 'gfs://main/ancestor1',
+              name: 'Ancestor',
+              kind: 'directory',
+              version: 1,
+            }
+          }),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+        },
+      },
+    })
+
+    render(<TwoSurfaceProbe />, { wrapper: Harness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open leaf' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('files-current').textContent).toBe('leaf-1'))
+    expect(screen.getByTestId('files-crumbs').textContent).toBe('ancestor-1 / parent-1 / leaf-1')
+
+    const client = lastHarnessQueryClient!
+    // Nearest first: parent-1 before ancestor-1. The sidebar mount has
+    // nothing open, so the files mount is the registry's only entry.
+    expect(readGfsOpenLocations(client, ':user-a:team-a')).toEqual([
+      { resourceId: 'leaf-1', ancestorResourceIds: ['parent-1', 'ancestor-1'] },
+    ])
   })
 })

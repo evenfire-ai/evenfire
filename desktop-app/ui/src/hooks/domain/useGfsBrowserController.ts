@@ -374,14 +374,18 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   const openLocationId = openLocationIdRef.current
   useEffect(() => {
     if (!sessionScope) return
-    // The ancestry this mount observed is the trail it loaded: the open
-    // resource's ancestors, nearest first. A revoked session has no open
-    // location to claim.
+    // The ancestry this mount observed is the trail it loaded. Crumbs are
+    // ROOT-FIRST, so publishing them reverses them into the registry's
+    // NEAREST-FIRST contract — the order the relocation helper slices from
+    // the nearest end. A revoked session has no open location to claim.
     const location =
       accessState === 'active' && current
         ? {
             resourceId: current.resourceId,
-            ancestorResourceIds: crumbs.slice(0, -1).map(crumb => crumb.resourceId),
+            ancestorResourceIds: crumbs
+              .slice(0, -1)
+              .map(crumb => crumb.resourceId)
+              .reverse(),
           }
         : null
     publishGfsOpenLocation(queryClient, sessionScope, openLocationId, location)

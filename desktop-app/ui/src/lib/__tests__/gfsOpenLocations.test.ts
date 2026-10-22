@@ -118,6 +118,90 @@ describe('gfsOpenLocations', () => {
     })
   })
 
+  describe('producer-order chains, two controllers (RP-005 revalidation)', () => {
+    // The controller's crumbs are ROOT-FIRST, and the publication step
+    // reverses them into this registry's NEAREST-FIRST contract: a leaf L
+    // under root > X > A > C publishes [C, A, X, root]. These regressions
+    // hold the relocated chains to that contract — an order disagreement
+    // between the producer and the relocation helper used to keep the stale
+    // ancestors ABOVE the moved one and drop the still-real ones BELOW it.
+    function registryWithProducerChains() {
+      return {
+        files: { resourceId: 'L', ancestorResourceIds: ['C', 'A', 'X', 'root'] },
+        sidebar: { resourceId: 'B', ancestorResourceIds: ['P', 'root'] },
+        preview: { resourceId: 'Q', ancestorResourceIds: ['root'] },
+      }
+    }
+
+    it('keeps every ancestor below the moved one, in producer order', () => {
+      // The sidebar moves A under B. C is BELOW A in the leaf's chain — it
+      // stays; X and root sat ABOVE A and are replaced by B's own chain.
+      expect(relocateObservedChain(['C', 'A', 'X', 'root'], 'A', 'B', ['P', 'root'])).toEqual([
+        'C',
+        'A',
+        'B',
+        'P',
+        'root',
+      ])
+    })
+
+    it('still claims the leaf for a later move of the intermediate ancestor below the moved one', () => {
+      const afterFirst = relocatePublishedChains(registryWithProducerChains(), 'A', 'B')
+      expect(afterFirst.files?.ancestorResourceIds).toEqual(['C', 'A', 'B', 'P', 'root'])
+      // C survived the relocation as the leaf's nearest ancestor, so a
+      // SECOND move of C — not just of A or B — must still claim the leaf.
+      expect(ancestryDependentGfsResourceIds(Object.values(afterFirst), 'C')).toEqual(['L'])
+      expect(ancestryDependentGfsResourceIds(Object.values(afterFirst), 'B')).toEqual(['L', 'B'])
+    })
+
+    it('relocates the chain when the OPEN resource itself is the moved one', () => {
+      // The sidebar moves its own open B under Q. B's ENTIRE observed
+      // ancestry belonged to the old location, so the new chain starts at Q
+      // — plus Q's own observed ancestors, because the preview surface has
+      // Q open. A later move of Q must then claim B.
+      const after = relocatePublishedChains(registryWithProducerChains(), 'B', 'Q')
+      expect(after.sidebar?.ancestorResourceIds).toEqual(['Q', 'root'])
+      expect(ancestryDependentGfsResourceIds(Object.values(after), 'Q')).toEqual(['B', 'Q'])
+    })
+
+    it('stops the self-moved chain at the new parent when no surface has it open', () => {
+      const after = relocatePublishedChains(
+        { sidebar: { resourceId: 'B', ancestorResourceIds: ['P', 'root'] } },
+        'B',
+        'Q'
+      )
+      expect(after.sidebar?.ancestorResourceIds).toEqual(['Q'])
+    })
+
+    it("clears the open resource's ancestry when it moves to the drive root", () => {
+      const after = relocatePublishedChains(registryWithProducerChains(), 'B', null)
+      expect(after.sidebar?.ancestorResourceIds).toEqual([])
+    })
+
+    it('publishes the self-move relocation into the shared registry', () => {
+      const queryClient = new QueryClient()
+      publishGfsOpenLocation(queryClient, SCOPE, 'sidebar', {
+        resourceId: 'B',
+        ancestorResourceIds: ['P', 'root'],
+      })
+      publishGfsOpenLocation(queryClient, SCOPE, 'preview', {
+        resourceId: 'Q',
+        ancestorResourceIds: ['root'],
+      })
+
+      publishGfsMoveRelocation(queryClient, SCOPE, 'B', 'Q')
+
+      expect(readGfsOpenLocations(queryClient, SCOPE)).toEqual([
+        { resourceId: 'B', ancestorResourceIds: ['Q', 'root'] },
+        { resourceId: 'Q', ancestorResourceIds: ['root'] },
+      ])
+      // The SECOND move now claims the sidebar's own open folder.
+      expect(
+        ancestryDependentGfsResourceIds(readGfsOpenLocations(queryClient, SCOPE), 'Q')
+      ).toEqual(['B', 'Q'])
+    })
+  })
+
   it('keeps the registry inside the shared query cache', () => {
     const queryClient = new QueryClient()
     publishGfsOpenLocation(queryClient, SCOPE, 'mount-a', {

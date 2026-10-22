@@ -106,6 +106,11 @@ export function relocateObservedChain(
  * move of the moved resource's NEW parent would otherwise miss the surfaces
  * that have a descendant open — the registry and the children cache both
  * still hold the pre-move chain.
+ *
+ * The surface whose OPEN resource is the moved one relocates too: its whole
+ * observed ancestry belonged to the old location, so the new chain starts at
+ * the new parent — plus the new parent's own observed ancestors when another
+ * surface has it open.
  */
 export function relocatePublishedChains(
   locations: GfsOpenLocationRegistry,
@@ -118,14 +123,22 @@ export function relocatePublishedChains(
     ? (Object.values(locations).find(location => location.resourceId === newParentId)
         ?.ancestorResourceIds ?? [])
     : []
+  const aboveNewParent = newParentChain.filter(
+    ancestor => ancestor !== newParentId && ancestor !== movedResourceId
+  )
   const next: GfsOpenLocationRegistry = {}
   for (const [id, location] of Object.entries(locations)) {
-    const relocated = relocateObservedChain(
-      location.ancestorResourceIds,
-      movedResourceId,
-      newParentId,
-      newParentChain
-    )
+    const relocated =
+      location.resourceId === movedResourceId
+        ? newParentId
+          ? [newParentId, ...aboveNewParent]
+          : []
+        : relocateObservedChain(
+            location.ancestorResourceIds,
+            movedResourceId,
+            newParentId,
+            newParentChain
+          )
     const unchanged =
       relocated.length === location.ancestorResourceIds.length &&
       relocated.every((value, index) => value === location.ancestorResourceIds[index])
