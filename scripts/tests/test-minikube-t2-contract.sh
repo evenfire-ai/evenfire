@@ -62,6 +62,7 @@ done
 "$ROOT/scripts/tests/test-minikube-t1-port-forward-owner.sh"
 "$ROOT/scripts/tests/test-minikube-t2-process-owner.sh"
 "$ROOT/scripts/tests/test-minikube-t1-reporter-report.sh"
+CODEX_SCRATCH_ROOT="$TMP_ROOT" node --test "$ROOT/scripts/tests/password-recovery-suite-contract.test.mjs"
 "$ROOT/scripts/tests/test-minikube-explicit-context.sh"
 "$ROOT/scripts/tests/test-minikube-t2-evidence.sh"
 "$ROOT/scripts/tests/test-minikube-targeted-health.sh"
