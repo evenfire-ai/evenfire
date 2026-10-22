@@ -2700,6 +2700,23 @@ describe('Microsoft Entra ID — authorizationServer override on /discover and i
     ])
   })
 
+  it('/discover ignores a PRM scopes_supported that is a string, not a list', async () => {
+    const res = await request(
+      await entraApp(
+        workIqPilotWithPrm('entra-string-scopes', prm => {
+          prm.scopes_supported = 'fdcc1f02-fc51-4226-8753-f668596af7f7/WorkIQAgent.Ask'
+        }),
+        gatewayWithContext()
+      )
+    )
+      .post('/admin/mcp-servers/remote/discover')
+      .send({ baseUrl: ENTRA_WORKIQ_PILOT.mcpUrl, authorizationServer: TENANT_AUTHORITY })
+    expect(res.status).toBe(200)
+    // The real Entra tenant metadata advertises only sign-in scopes.
+    expect(res.body.detected.scopes).toEqual(['openid', 'profile', 'email', 'offline_access'])
+    expect(res.body.detected.scopeAudienceMissing).toBe(true)
+  })
+
   it('/discover keeps an empty-string audience violation in the response', async () => {
     const res = await request(
       await entraApp(

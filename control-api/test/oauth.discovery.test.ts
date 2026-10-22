@@ -5,8 +5,11 @@ import type {
   PinnedTransportInput,
 } from '../src/http/pinnedFetch.js'
 import {
+  type AuthorizationServerMetadata,
   type DiscoveryDeps,
+  type ProtectedResourceMetadata,
   asMetadataUrls,
+  defaultScopes,
   discoverRemoteOAuth,
   parseResourceMetadataChallenge,
   wellKnownPrmUrls,
@@ -820,4 +823,37 @@ describe('discoverRemoteOAuth — entra-v2 profile (PKCE, refresh, scope audienc
       expect(outcome.error.kind).toBe('issuer_mismatch')
     })
   }
+})
+
+describe('defaultScopes — untrusted scopes_supported', () => {
+  // The metadata is third-party JSON, so these shapes are what a hostile or broken server
+  // can send, typed loosely on purpose.
+  const prm = (scopes: unknown) =>
+    ({
+      resource: 'https://mcp.example.com/mcp',
+      scopes_supported: scopes,
+    }) as unknown as ProtectedResourceMetadata
+  const as = (scopes?: unknown) =>
+    ({
+      issuer: 'https://as.example.com',
+      authorization_endpoint: 'https://as.example.com/authorize',
+      token_endpoint: 'https://as.example.com/token',
+      ...(scopes === undefined ? {} : { scopes_supported: scopes }),
+    }) as unknown as AuthorizationServerMetadata
+
+  it('a non-array PRM value is ignored and the AS list is used', () => {
+    expect(defaultScopes(prm('a b'), as(['x']))).toEqual(['x'])
+  })
+
+  it('non-string entries are dropped', () => {
+    expect(defaultScopes(prm(['a', 1, null]), as(['x']))).toEqual(['a'])
+  })
+
+  it('an empty PRM list is an answer: it does not fall back to the AS', () => {
+    expect(defaultScopes(prm([]), as(['x']))).toEqual([])
+  })
+
+  it('neither side advertises scopes → []', () => {
+    expect(defaultScopes(prm(undefined), as())).toEqual([])
+  })
 })
