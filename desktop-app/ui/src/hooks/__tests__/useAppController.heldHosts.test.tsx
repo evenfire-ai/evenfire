@@ -808,6 +808,15 @@ describe('useAppController held Hosts', () => {
       })
       expect(app.result.current.currentTeamId).toBe(principalTeam)
 
+      // Hold a Host that is not selected, so no selection change rewrites the
+      // names, before the directory arrives.
+      await holdThroughCatalog(app, catalog, HOST_A)
+      await settle()
+      // Liveness witness: A is held and its page read ran.
+      expect(catalog.pageReads(HOST_A)).toBeGreaterThan(0)
+      expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true)
+      expect(app.result.current.heldAgentRefs).toEqual([HOST_A])
+
       // The display directory names team-1 after paint; the session team is unchanged.
       await act(async () => {
         directory.resolve({ items: [], currentTeamId: 'team-1' })
@@ -815,12 +824,10 @@ describe('useAppController held Hosts', () => {
       await waitFor(() => expect(app.result.current.currentTeamId).toBe('team-1'))
       await settle()
 
-      // Hold a Host that is not selected, so no selection change rewrites the names.
-      await holdThroughCatalog(app, catalog, HOST_A)
-      await settle()
-      // Liveness witness: A is held, its page read ran, and no new catalog
-      // object reached the screen that could have refilled the names.
-      expect(catalog.pageReads(HOST_A)).toBeGreaterThan(0)
+      // The hold survives the directory arrival, and no new catalog object
+      // reached the screen that could have refilled the names.
+      expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true)
+      expect(app.result.current.heldAgentRefs).toEqual([HOST_A])
       expect(cachedCatalog(app.queryClient)).toBe(catalogBeforeDirectory)
       const verificationError = await ipcGenericForbidden('rpc:listSessions')
       catalog.setVerify(async () => {
