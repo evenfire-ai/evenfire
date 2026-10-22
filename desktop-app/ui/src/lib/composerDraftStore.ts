@@ -66,6 +66,10 @@ function removePendingResourcePrefill(tabId: string): void {
   emit(tabListenerKey(tabId))
 }
 
+function hasUnclaimedResourcePrefill(): boolean {
+  return pendingResourcePrefillsByTab.size > 0
+}
+
 export function getComposerDraftRevision(
   chatId: string | null,
   agentRef?: string,
@@ -164,7 +168,12 @@ export function setComposerDraft(
 ): boolean {
   const key = keyFor(chatId, agentRef)
   const resourceOwner = resourceDraftOwnersByKey.get(key)
-  if (!workspaceTabId && resourceOwner) return false
+  // A pending pre-agent prefill has no draft key until its owning tab claims it.
+  // A tab-less caller cannot prove its no-chat write is disjoint from that
+  // request, so preserve the request and fail closed until it is claimed/canceled.
+  if (!workspaceTabId && chatId === null && (resourceOwner || hasUnclaimedResourcePrefill())) {
+    return false
+  }
   if (chatId === null && workspaceTabId) {
     const pending = pendingResourcePrefillsByTab.get(workspaceTabId)
     const owner = resourceDraftOwnersByKey.get(key)
@@ -202,7 +211,9 @@ export function clearComposerDraft(
 ): boolean {
   const key = keyFor(chatId, agentRef)
   const resourceOwner = resourceDraftOwnersByKey.get(key)
-  if (!workspaceTabId && resourceOwner) return false
+  if (!workspaceTabId && chatId === null && (resourceOwner || hasUnclaimedResourcePrefill())) {
+    return false
+  }
   if (workspaceTabId) {
     const tabDraft = tabDrafts.get(workspaceTabId)
     if (tabDraft?.key === key) {

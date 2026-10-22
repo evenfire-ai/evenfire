@@ -91,6 +91,37 @@ describe('composerDraftStore', () => {
     )
   })
 
+  it('keeps tabless writes from consuming an unclaimed tab-owned prefill', () => {
+    fc.assert(
+      fc.property(
+        fc.string({ minLength: 1 }),
+        fc.string().map(value => `recovered:${value}`),
+        (ownerSuffix, recoveryText) => {
+          resetComposerDraftStore()
+          const ownerTabId = `pending-owner-${ownerSuffix}`
+          const resourceUri = `gfs://main/${'b'.repeat(32)}`
+          expect(setResourceComposerPrefill(ownerTabId, resourceUri, null)).toBe(true)
+
+          // A tab-less recovery cannot know which agent will claim this request.
+          expect(setComposerDraft(null, recoveryText, 'agent-a')).toBe(false)
+          expect(getComposerDraft(null, 'agent-a', ownerTabId)).toBe(resourceUri)
+
+          claimPendingResourceComposerPrefill(ownerTabId, 'agent-a')
+          expect(getComposerDraft(null, 'agent-a', ownerTabId)).toBe(resourceUri)
+        }
+      )
+    )
+  })
+
+  it('keeps tabless clears from canceling an unclaimed tab-owned prefill', () => {
+    setResourceComposerPrefill('pending-owner', `gfs://main/${'c'.repeat(32)}`, null)
+
+    expect(clearComposerDraft(null, 'agent-a')).toBe(false)
+    expect(getComposerDraft(null, 'agent-a', 'pending-owner')).toBe(`gfs://main/${'c'.repeat(32)}`)
+    claimPendingResourceComposerPrefill('pending-owner', 'agent-a')
+    expect(getComposerDraft(null, 'agent-a', 'pending-owner')).toBe(`gfs://main/${'c'.repeat(32)}`)
+  })
+
   it('keeps tabless clears from deleting another tab resource draft', () => {
     fc.assert(
       fc.property(fc.string({ minLength: 1 }), ownerSuffix => {
