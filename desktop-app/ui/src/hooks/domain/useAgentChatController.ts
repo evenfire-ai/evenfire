@@ -3654,8 +3654,7 @@ export function useAgentChatController({
         if (!taskId) {
           // Synchronous (non-async) response — a direct reply or a structured error.
           const errorRecord = responseRecord.error as
-            | { message?: string; code?: string; provider?: string }
-            | undefined
+            { message?: string; code?: string; provider?: string } | undefined
           // Issue #654: a synchronous failure can arrive as `{error: …}` OR as
           // `{success: false}` without an error object. Both are failures — HTTP
           // 200 or a missing `success` boolean never imply success.

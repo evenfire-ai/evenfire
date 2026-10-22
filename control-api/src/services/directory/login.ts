@@ -1,4 +1,4 @@
-import { withTransaction } from '../../db.js'
+import { type DbTransactionClient, withTransaction } from '../../db.js'
 import { verifyMemberPassword } from '../auth/passwordCredentialVerification.js'
 import type { TeamRole } from './types.js'
 
@@ -131,6 +131,19 @@ function teamlessMemberMembership(): MembershipRow {
   }
 }
 
+async function currentMemberMembership(
+  db: Pick<DbTransactionClient, 'query'>,
+  user: { id: string; email: string }
+): Promise<MembershipRow> {
+  let membership = await findFirstActiveMembership(db, user.id)
+  if ((membership.rowCount ?? 0) === 0) {
+    await healAcceptedInvitationMemberships(db, user.id, user.email)
+    await linkAcceptedInvitationsToUser(db, user.id, user.email)
+    membership = await findFirstActiveMembership(db, user.id)
+  }
+  return (membership.rows[0] as MembershipRow | undefined) || teamlessMemberMembership()
+}
+
 export async function googleLoginData(input: { email: string; name?: string; picture?: string }) {
   return withTransaction(async db => {
     const existing = await db.query(
@@ -202,26 +215,6 @@ export async function passwordLoginData(input: { email: string; password: string
   const user = await verifyMemberPassword(input.email, input.password, { publicLogin: true })
   if (!user) return null
   return withTransaction(async db => {
-    let membership = await findFirstActiveMembership(db, user.id)
-    if ((membership.rowCount ?? 0) === 0) {
-      await healAcceptedInvitationMemberships(db, user.id, user.email)
-      await linkAcceptedInvitationsToUser(db, user.id, user.email)
-      membership = await findFirstActiveMembership(db, user.id)
-    }
-
-    if ((membership.rowCount ?? 0) === 0) {
-      return {
-        authGeneration: Number(user.lifecycle_version || 0),
-        user: {
-          id: user.id,
-          email: user.email,
-          name: user.name,
-          picture: user.picture,
-        },
-        membership: teamlessMemberMembership(),
-      }
-    }
-
     return {
       authGeneration: Number(user.lifecycle_version || 0),
       user: {
@@ -230,9 +223,24 @@ export async function passwordLoginData(input: { email: string; password: string
         name: user.name,
         picture: user.picture,
       },
-      membership: membership.rows[0] as MembershipRow,
+      membership: await currentMemberMembership(db, user),
     }
   })
+}
+
+/** Resolve ordinary session claims in the same transaction as password recovery. */
+export async function getMemberSessionContext(
+  db: Pick<DbTransactionClient, 'query'>,
+  user: { id: string; email: string; lifecycle_version?: number | string | null }
+) {
+  const membership = await currentMemberMembership(db, user)
+  return {
+    userId: user.id,
+    email: user.email,
+    teamId: membership.team_id,
+    role: membership.role,
+    authGeneration: Number(user.lifecycle_version || 0),
+  }
 }
 
 export async function verifyUserPassword(input: {
