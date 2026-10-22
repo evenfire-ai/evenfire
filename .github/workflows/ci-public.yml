@@ -126,7 +126,8 @@ jobs:
       - name: Verify patched test Playwright with a real browser session
         if: matrix.variant.name == 'playwright-test'
         run: |
-          timeout 90 docker run --rm -i --network none --entrypoint node --workdir /app runtime-smoke < mcp-servers/playwright/test/runtime-smoke.cjs
+          docker image inspect runtime-smoke --format '{{.Id}}'
+          timeout 90 docker run --rm -i --pull=never --network none --cap-drop ALL --security-opt no-new-privileges --memory=1g --cpus=1 --entrypoint node --workdir /app runtime-smoke --input-type=commonjs < mcp-servers/playwright/test/runtime-smoke.cjs
 
   test:
     name: Build / test / typecheck (${{ matrix.service }})

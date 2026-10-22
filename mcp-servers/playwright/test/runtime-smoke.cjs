@@ -4,18 +4,46 @@
 // no credentials, external page, host mount or published container image.
 const assert = require('node:assert/strict')
 const { spawn, execFileSync } = require('node:child_process')
+const { createHash } = require('node:crypto')
 const fs = require('node:fs')
 const { createServer } = require('node:http')
-const { createRequire } = require('node:module')
 const net = require('node:net')
 const { setTimeout: delay } = require('node:timers/promises')
 
-const fromApp = createRequire('/app/package.json')
-const { Client } = fromApp('@modelcontextprotocol/sdk/client/index.js')
-const { StreamableHTTPClientTransport } = fromApp(
-  '@modelcontextprotocol/sdk/client/streamableHttp.js'
-)
 const outputDir = '/tmp/playwright-runtime-smoke'
+
+// MCP permits JSON or SSE responses. The image bundles its server SDK inside
+// Playwright, so use native fetch for its public HTTP contract instead of
+// depending on an unexported client package.
+async function responseMessage(response, id) {
+  if (response.headers.get('content-type')?.startsWith('application/json')) return response.json()
+  assert.match(response.headers.get('content-type') ?? '', /text\/event-stream/)
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffered = ''
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) throw new Error('MCP stream ended without the response')
+      buffered = (buffered + decoder.decode(value, { stream: true })).replace(/\r\n/g, '\n')
+      let boundary
+      while ((boundary = buffered.indexOf('\n\n')) !== -1) {
+        const frame = buffered.slice(0, boundary)
+        buffered = buffered.slice(boundary + 2)
+        const data = frame
+          .split('\n')
+          .filter(line => line.startsWith('data:'))
+          .map(line => line.slice(5).trimStart())
+          .join('\n')
+        if (!data) continue
+        const message = JSON.parse(data)
+        if (message.id === id) return message
+      }
+    }
+  } finally {
+    await reader.cancel()
+  }
+}
 
 async function portReady(port) {
   for (let attempt = 0; attempt < 40; attempt += 1) {
@@ -80,23 +108,54 @@ async function main() {
   server.once('error', error => {
     spawnError = error
   })
-  const client = new Client({ name: 'runtime-smoke', version: '1.0.0' }, { capabilities: {} })
-  const transport = new StreamableHTTPClientTransport(new URL('http://127.0.0.1:8931/mcp'))
+  let session,
+    protocol,
+    sequence = 0
+  const request = async (method, params, notification = false) => {
+    const id = notification ? undefined : ++sequence
+    const response = await fetch('http://127.0.0.1:8931/mcp', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        ...(session ? { 'Mcp-Session-Id': session } : {}),
+        ...(protocol ? { 'MCP-Protocol-Version': protocol } : {}),
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+      signal: AbortSignal.timeout(15_000),
+    })
+    assert.ok(response.ok, `MCP ${method}: HTTP ${response.status}`)
+    session = response.headers.get('mcp-session-id') || session
+    if (notification) {
+      await response.body?.cancel()
+      return
+    }
+    const message = await responseMessage(response, id)
+    assert.equal(message.id, id)
+    assert.equal(message.error, undefined, JSON.stringify(message.error))
+    return message.result
+  }
   const text = result =>
     result.content
       .filter(row => row.type === 'text')
       .map(row => row.text)
       .join('\n')
   const call = async (name, args = {}) => {
-    const result = await client.callTool({ name, arguments: args })
+    const result = await request('tools/call', { name, arguments: args })
     assert.notEqual(result.isError, true, `${name}: ${text(result)}`)
     return result
   }
   try {
     await portReady(8931)
     if (spawnError) throw spawnError
-    await client.connect(transport)
-    const tools = new Set((await client.listTools()).tools.map(tool => tool.name))
+    const initialized = await request('initialize', {
+      protocolVersion: '2025-03-26',
+      capabilities: {},
+      clientInfo: { name: 'runtime-smoke', version: '1.0.0' },
+    })
+    protocol = initialized.protocolVersion
+    await request('notifications/initialized', {}, true)
+    const tools = new Set((await request('tools/list', {})).tools.map(tool => tool.name))
     for (const name of [
       'browser_navigate',
       'browser_snapshot',
@@ -115,7 +174,9 @@ async function main() {
     const agent = text(await call('browser_evaluate', { function: '() => navigator.userAgent' }))
     const browserVersion = /(?:HeadlessChrome|Chrome)\/[\d.]+/.exec(agent)
     assert.ok(browserVersion, agent)
-    await call('browser_take_screenshot', { filename: 'runtime.png' })
+    // This pinned MCP resolves relative filenames against /app. Use the
+    // caller-owned test directory while keeping the application read-only.
+    await call('browser_take_screenshot', { filename: `${outputDir}/runtime.png` })
     const screenshot = fs.readFileSync(`${outputDir}/runtime.png`)
     assert.equal(screenshot.subarray(0, 8).toString('hex'), '89504e470d0a1a0a')
     console.log(
@@ -127,10 +188,10 @@ async function main() {
         navigation: true,
         realClick: true,
         screenshotBytes: screenshot.length,
+        screenshotSha256: createHash('sha256').update(screenshot).digest('hex'),
       })
     )
   } finally {
-    await client.close()
     server.kill('SIGTERM')
     fixture.closeAllConnections()
     await new Promise(resolve => fixture.close(resolve))
