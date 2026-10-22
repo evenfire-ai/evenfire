@@ -271,9 +271,7 @@ validate_test_limit_inputs
 header "Phase 0 - Prerequisites"
 require_safe_kube_context
 check_prerequisites
-for ns in "$SANDBOX_UI_NS"; do
-  kctl get ns "$ns" >/dev/null && ok "Namespace '${ns}' exists" || fail "Namespace '${ns}' not found"
-done
+kctl get ns "$SANDBOX_UI_NS" >/dev/null && ok "Namespace '${SANDBOX_UI_NS}' exists" || fail "Namespace '${SANDBOX_UI_NS}' not found"
 kctl get configmap "$LIMIT_CONFIGMAP" -n "$CONTROL_NS" >/dev/null &&
   ok "ConfigMap ${CONTROL_NS}/${LIMIT_CONFIGMAP} exists" ||
   fail "ConfigMap ${CONTROL_NS}/${LIMIT_CONFIGMAP} not found"
