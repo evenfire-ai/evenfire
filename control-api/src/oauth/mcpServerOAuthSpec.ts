@@ -305,8 +305,9 @@ function remoteOAuthSpecIncoherence(
   }
   // Without `resource` the scopes alone pick the token's audience, and the scopes or the
   // base URL can be edited after the install (API or kubectl). The hard audience rules
-  // are therefore re-checked against the base URL in force now. GUID scopes the platform
-  // cannot tie to the host pass: writing the CR is the operator's confirmation.
+  // are therefore re-checked against the base URL in force now: a known API's GUID scope
+  // off its own host is refused. GUID scopes of an API the platform does not know pass:
+  // writing the CR is the operator's confirmation.
   if (oauth.asProfile === 'entra-v2') {
     const scopes = withProfileScopes(normalizeScopes(oauth.scopes) ?? [], 'entra-v2')
     if (

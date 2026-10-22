@@ -762,6 +762,16 @@ describe('discoverRemoteOAuth — entra-v2 profile (PKCE, refresh, scope audienc
     expect(r.unverifiedScopes).toBeUndefined()
   })
 
+  it('row 16: the Agent 365 GUID advertised by the Work IQ host → scopeAudienceViolation, never unverified', async () => {
+    const agent365Scope = '05879165-0320-489e-b644-f72b33f3edf0/McpServers.Mail.All'
+    const pilot = workIqPilotWithPrm('entra-agent365-guid-on-workiq', prm => {
+      prm.scopes_supported = [agent365Scope]
+    })
+    const r = await discoverWithTenant(pilot)
+    expect(r.scopeAudienceViolation).toBe(agent365Scope)
+    expect(r.unverifiedScopes).toBeUndefined()
+  })
+
   it('row 17: no PRM scopes (sign-in scopes of the AS only) → scopeAudienceMissing', async () => {
     const r = await discoverWithTenant(ENTRA_NO_SCOPES_PILOT)
     expect(r.scopeAudienceMissing).toBe(true)

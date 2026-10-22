@@ -289,6 +289,8 @@ describe('profileScopeViolation', () => {
     'https://workiq.svc.cloud.microsoft.evil.example/x',
     'https://workiq.svc.cloud.microsoft',
     'FDCC1F02-FC51-4226-8753-F668596AF7F7/WorkIQAgent.Ask',
+    AGENT365_GUID_SCOPE,
+    `api://${AGENT365_GUID_SCOPE}`,
     '',
   ]
   for (const scope of rejected) {
@@ -304,6 +306,20 @@ describe('profileScopeViolation', () => {
       expect(profileScopeViolation('entra-v2', WORKIQ_URL, [`api://${guid}/x`])).toBe(
         `api://${guid}/x`
       )
+    }
+  })
+
+  it('a known GUID is accepted only on the host tied to it', () => {
+    for (const [scope, ownBase] of [
+      [WORKIQ_GUID_SCOPE, WORKIQ_URL],
+      [AGENT365_GUID_SCOPE, AGENT365_URL],
+    ]) {
+      expect(profileScopeViolation('entra-v2', ownBase, [scope])).toBeNull()
+      for (const base of [WORKIQ_URL, AGENT365_URL, 'https://evil.example/mcp']) {
+        if (base === ownBase) continue
+        expect(profileScopeViolation('entra-v2', base, [scope])).toBe(scope)
+        expect(profileScopeViolation('entra-v2', base, [`api://${scope}`])).toBe(`api://${scope}`)
+      }
     }
   })
 
@@ -391,13 +407,12 @@ describe('profileUnverifiedScopes', () => {
     ).toEqual([UNKNOWN_GUID_SCOPE, `api://${UNKNOWN_GUID_SCOPE}`])
   })
 
-  it('a known GUID on another host is unverified', () => {
-    expect(profileUnverifiedScopes('entra-v2', WORKIQ_URL, [AGENT365_GUID_SCOPE])).toEqual([
-      AGENT365_GUID_SCOPE,
-    ])
-    expect(profileUnverifiedScopes('entra-v2', AGENT365_URL, [WORKIQ_GUID_SCOPE])).toEqual([
-      WORKIQ_GUID_SCOPE,
-    ])
+  it('a known GUID on another host is never unverified (it is rejected instead)', () => {
+    expect(profileUnverifiedScopes('entra-v2', WORKIQ_URL, [AGENT365_GUID_SCOPE])).toEqual([])
+    expect(profileUnverifiedScopes('entra-v2', AGENT365_URL, [WORKIQ_GUID_SCOPE])).toEqual([])
+    expect(
+      profileUnverifiedScopes('entra-v2', 'https://evil.example/mcp', [WORKIQ_GUID_SCOPE])
+    ).toEqual([])
   })
 
   it('a blocked GUID is never unverified (it is rejected instead)', () => {
@@ -455,6 +470,21 @@ describe('audience classification properties', () => {
           expect(unverified).toEqual([])
         }
       })
+    )
+  })
+
+  it('a known GUID is a violation exactly when the base URL is not on its host', () => {
+    fc.assert(
+      fc.property(
+        hostArb,
+        fc.constantFrom(...KNOWN_LITERAL),
+        fc.constantFrom('', 'api://'),
+        (host, [guid, knownHost], prefix) => {
+          const scope = `${prefix}${guid}/Read`
+          const violation = profileScopeViolation('entra-v2', `https://${host}/mcp`, [scope])
+          expect(violation).toBe(host === knownHost ? null : scope)
+        }
+      )
     )
   })
 

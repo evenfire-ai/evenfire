@@ -3054,12 +3054,15 @@ describe('Microsoft Entra ID — remote install with scopes, scope audience and 
     await expectNoWrites(gw)
   })
 
-  it('row 16: the Agent 365 GUID on the Work IQ host → 400 scope_audience_unverified', async () => {
+  it('row 16: the Agent 365 GUID on the Work IQ host → 400 scope_audience_mismatch even when confirmed', async () => {
     const gw = gatewayWithContext()
     const agent365Scope = '05879165-0320-489e-b644-f72b33f3edf0/McpServers.Mail.All'
-    const res = await entraInstall(ENTRA_WORKIQ_PILOT, gw, { scopes: [agent365Scope] })
+    const res = await entraInstall(ENTRA_WORKIQ_PILOT, gw, {
+      scopes: [agent365Scope],
+      confirmedUnverifiedScopes: [agent365Scope],
+    })
     expect(res.status).toBe(400)
-    expect(res.body).toMatchObject({ error: 'scope_audience_unverified', scopes: [agent365Scope] })
+    expect(res.body).toMatchObject({ error: 'scope_audience_mismatch', scope: agent365Scope })
     await expectNoWrites(gw)
   })
 

@@ -335,6 +335,15 @@ const INCOHERENT: ReadonlyArray<{
     consentOnly: false,
   },
   {
+    // The Work IQ app GUID is tied to its own host, so an edited base URL cannot carry its
+    // tokens elsewhere even though a GUID scope names no host.
+    label: 'entra-v2 GUID-form scope of a known API after baseUrl moved to another host',
+    oauth: () => ({ ...workIqGuid.spec.oauth }),
+    remote: () => ({ ...workIqGuid.spec.remote, baseUrl: EVIL_BASE_URL }),
+    reason: 'scope_audience_mismatch',
+    consentOnly: false,
+  },
+  {
     label: 'entra-v2 without spec.remote',
     oauth: () => ({ ...workIqGuid.spec.oauth }),
     remote: undefined,
@@ -498,20 +507,6 @@ describe('entra-v2 runtime audience: what stays coherent', () => {
         'srv',
         workIqWithScopes(['11111111-2222-3333-4444-555555555555/Tools.Read']),
         workIqRemote()
-      )
-      expect(resolveServerOAuthSubject(cr, phase)?.decl.id).toBe(workIqGuid.spec.oauth.id)
-    })
-
-    // A GUID-form scope is not tied to the base URL, so moving the base URL to another
-    // host goes unnoticed; this pins that limit rather than leaving it implicit.
-    it(`${phase}: the Work IQ GUID scope with baseUrl moved to another host stays coherent`, () => {
-      const cr = crFrom(
-        'srv',
-        { ...workIqGuid.spec.oauth },
-        {
-          ...workIqGuid.spec.remote,
-          baseUrl: EVIL_BASE_URL,
-        }
       )
       expect(resolveServerOAuthSubject(cr, phase)?.decl.id).toBe(workIqGuid.spec.oauth.id)
     })

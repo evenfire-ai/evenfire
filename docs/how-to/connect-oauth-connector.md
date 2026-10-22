@@ -218,7 +218,8 @@ from you, and both are checked the same way.
 | `https://<server-host>/...` or `api://<server-host>/...`, where `<server-host>` is exactly the host of the server URL                                                                                                                                                                              | Accepted.                                                            |
 | GUID form (`<guid>/<permission>` or `api://<guid>/<permission>`, lower-case GUID) of a Microsoft MCP API on its own host: Work IQ `fdcc1f02-fc51-4226-8753-f668596af7f7` on `workiq.svc.cloud.microsoft`, Agent 365 Tools `05879165-0320-489e-b644-f72b33f3edf0` on `agent365.svc.cloud.microsoft` | Accepted.                                                            |
 | GUID form of a blocked Microsoft API (list below)                                                                                                                                                                                                                                                  | Always rejected (`scope_audience_mismatch`), even if you confirm it. |
-| Any other GUID form, including a known one on a different host                                                                                                                                                                                                                                     | Accepted only after you confirm it (`scope_audience_unverified`).    |
+| GUID form of one of those two Microsoft MCP APIs on any other host                                                                                                                                                                                                                                 | Always rejected (`scope_audience_mismatch`), even if you confirm it. |
+| Any other GUID form (an API the platform does not know)                                                                                                                                                                                                                                            | Accepted only after you confirm it (`scope_audience_unverified`).    |
 | Anything else: a bare permission such as `Mail.Read` (Entra reads it as Microsoft Graph), a URL on another host, or a URL with a user name or port                                                                                                                                                 | Rejected (`scope_audience_mismatch`).                                |
 
 **Blocked APIs.** Microsoft Graph, SharePoint Online, Exchange Online, Azure
@@ -249,15 +250,18 @@ with the confirming admin and the scopes.
 unverified GUID scopes: whoever can write the resource can already change its
 server URL. It does not bypass the other rules. On every authorization,
 callback, token use, and refresh, control-api checks the scopes again against
-the current `spec.remote.baseUrl`. A blocked API, a URL on another host, a
-bare permission, or a missing server scope is refused with
+the current `spec.remote.baseUrl`. A blocked API, a known Microsoft MCP API's
+GUID off its own host, a URL on another host, a bare permission, or a missing
+server scope is refused with
 `409 remote_oauth_spec_incoherent` (reason `scope_audience_mismatch`), and
 existing grants stop being served until the resource is fixed.
 
-> **Limit with GUID scopes.** A GUID scope is not tied to a host, so if only
-> `spec.remote.baseUrl` changes, the platform cannot tell that the token now
-> goes to a different server. Prefer the URL form (`api://<server-host>/...`)
-> when the server accepts it.
+> **Limit with unknown GUID scopes.** The GUID of an API the platform does not
+> know is not tied to a host, so if only `spec.remote.baseUrl` changes, the
+> platform cannot tell that the token now goes to a different server. Prefer the
+> URL form (`api://<server-host>/...`) when the server accepts it. The Work IQ
+> and Agent 365 Tools GUIDs are tied to their hosts, so that change is detected
+> for them.
 
 Ask for scopes of one API only. Entra issues each token for a single
 resource, so mixing scopes of different APIs, or `.default` with specific

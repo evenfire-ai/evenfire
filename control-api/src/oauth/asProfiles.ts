@@ -136,7 +136,12 @@ function classifyEntraScope(scope: string, host: string): { kind: ScopeClass; gu
   const guidForm = GUID_SCOPE_RE.exec(scope)
   if (guidForm) {
     const guid = guidForm[2]
-    return { kind: ENTRA_BLOCKED_RESOURCE_APPS.has(guid) ? 'blocked-guid' : 'guid', guid }
+    if (ENTRA_BLOCKED_RESOURCE_APPS.has(guid)) return { kind: 'blocked-guid', guid }
+    // A known API has one legitimate host, so on any other host its token is a leak, not
+    // something the operator could confirm; this also catches a base URL edited after the
+    // install, which the runtime re-check classifies with the same rule.
+    const knownHost = ENTRA_KNOWN_RESOURCE_APPS.get(guid)
+    return { kind: knownHost === undefined || knownHost === host ? 'guid' : 'foreign', guid }
   }
   // A literal prefix, never `new URL`: WHATWG parsing accepts userinfo and a port, so
   // `api://<graph-guid>@<host>/x` would otherwise report the MCP host.
@@ -180,8 +185,9 @@ export function profileHasResourceScope(
 }
 
 /**
- * Scopes in GUID form whose API cannot be tied to the MCP host: accepted only when
- * the operator confirms each one. Empty without a profile. Order kept, no duplicates.
+ * Scopes in GUID form whose API the platform does not know, so it cannot tie them to the
+ * MCP host: accepted only when the operator confirms each one. A known API on another
+ * host is a violation instead. Empty without a profile. Order kept, no duplicates.
  */
 export function profileUnverifiedScopes(
   id: AsProfileId | undefined,
@@ -192,7 +198,7 @@ export function profileUnverifiedScopes(
   const host = new URL(mcpBaseUrl).hostname
   const unverified = scopes.filter(scope => {
     const { kind, guid } = classifyEntraScope(scope, host)
-    return kind === 'guid' && ENTRA_KNOWN_RESOURCE_APPS.get(guid as string) !== host
+    return kind === 'guid' && !ENTRA_KNOWN_RESOURCE_APPS.has(guid as string)
   })
   return [...new Set(unverified)]
 }
