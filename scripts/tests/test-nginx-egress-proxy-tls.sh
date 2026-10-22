@@ -239,19 +239,52 @@ upstream_handshake() {
     "https://upstream.test:$hp/liveness"
 }
 
+READY_SECONDS=30
+LOG_SECONDS=15
+
+# Polls until the command prints 200, for at most READY_SECONDS of wall-clock
+# time (each attempt has its own curl --max-time, so attempts are not counted).
 wait_for() {
   local what="$1" container="$2"
   shift 2
-  local _
-  for _ in $(seq 1 60); do
+  local deadline=$((SECONDS + READY_SECONDS))
+  while [ "$SECONDS" -lt "$deadline" ]; do
     if [ "$("$@" 2>/dev/null || true)" = "200" ]; then
       return 0
     fi
     sleep 0.5
   done
-  echo "FAIL: $what did not become ready within 30s" >&2
+  echo "FAIL: $what did not become ready within ${READY_SECONDS}s" >&2
   docker logs "$container" >&2 2>&1 || true
   exit 1
+}
+
+# Container log (nginx writes its error log to stderr). Returns 2 when the log
+# cannot be read, so an unreadable log never reads as "line absent". Callers
+# run it in a command substitution and must check that status.
+container_log() {
+  local out
+  if ! out="$(docker logs "$1" 2>&1)"; then
+    echo "FAIL: could not read the log of $1: $out" >&2
+    return 2
+  fi
+  printf '%s\n' "$out"
+}
+
+# Waits up to LOG_SECONDS for a fixed string in a container log. nginx writes a
+# log line after it answers, so a single read right after the response races it.
+# Returns 1 on timeout and 2 on a log read error.
+wait_log() {
+  local container="$1" text="$2" log
+  local deadline=$((SECONDS + LOG_SECONDS))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    log="$(container_log "$container")" || return 2
+    if printf '%s\n' "$log" | grep -qF -- "$text"; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  return 1
 }
 
 for cert in valid chain2 untrusted expired wrongsan; do
@@ -347,8 +380,12 @@ proxy_request() {
     "http://127.0.0.1:$(host_port "$container" 3000)/mcp"
 }
 
+# Prints the upstream log lines for a token (empty when none). Returns 2 when
+# the upstream log cannot be read.
 upstream_log_line() {
-  docker logs "$UPSTREAM" 2>&1 | grep -F "token=$1 " || true
+  local log
+  log="$(container_log "$UPSTREAM")" || return 2
+  printf '%s\n' "$log" | grep -F "token=$1 " || true
 }
 
 expect_accept() {
@@ -359,13 +396,14 @@ expect_accept() {
   cases=$((cases + 1))
   start_proxy "$case_name" "$port" yes
   code="$(proxy_request "$container" "$token")"
-  line="$(upstream_log_line "$token")"
   if [ "$code" != "200" ]; then
-    fail "$case_name: expected 200, got $code; proxy log: $(docker logs "$container" 2>&1 | tail -n 5)"
+    fail "$case_name: expected 200, got $code; proxy log: $(container_log "$container" | tail -n 5)"
   elif ! grep -qF "echo token=$token" "$WORK/body"; then
     fail "$case_name: response body does not carry the token: $(cat "$WORK/body")"
-  elif [ -z "$line" ]; then
-    fail "$case_name: upstream never logged token $token"
+  elif ! wait_log "$UPSTREAM" "token=$token "; then
+    fail "$case_name: upstream did not log token $token within ${LOG_SECONDS}s"
+  elif ! line="$(upstream_log_line "$token")"; then
+    fail "$case_name: could not read the upstream log"
   elif ! printf '%s' "$line" | grep -qF "port=$port uri=/mcp token=$token sni=upstream.test auth=\"Bearer $AUTH_SECRET\""; then
     fail "$case_name: upstream saw the wrong port, path, SNI or Authorization: $line"
   else
@@ -375,7 +413,7 @@ expect_accept() {
 }
 
 expect_reject() {
-  local case_name="$1" mount_ca="$2" reason="$3" port container token code live
+  local case_name="$1" mount_ca="$2" reason="$3" port container token code live after seen
   port="$(port_of "$case_name")"
   container="$NAME-proxy-$case_name"
   token="tok-$case_name-$RUN_ID"
@@ -387,14 +425,21 @@ expect_reject() {
   fi
   start_proxy "$case_name" "$port" "$mount_ca"
   code="$(proxy_request "$container" "$token")"
+  after="after-$case_name-$RUN_ID"
   if [ "$code" != "502" ]; then
     fail "$case_name: expected 502, got $code"
-  elif ! docker logs "$container" 2>&1 | grep -qF -- "$reason"; then
-    fail "$case_name: proxy log has no '$reason': $(docker logs "$container" 2>&1 | tail -n 5)"
-  elif [ -n "$(upstream_log_line "$token")" ]; then
-    fail "$case_name: request token reached the upstream"
+  elif ! wait_log "$container" "$reason"; then
+    fail "$case_name: proxy log has no '$reason' within ${LOG_SECONDS}s: $(container_log "$container" | tail -n 5)"
+  # The upstream logs requests in order. Once a direct request sent after the
+  # proxy attempt is in its log, a forwarded token would be there too.
+  elif [ "$(upstream_handshake "$port" "$after")" != "200" ] || ! wait_log "$UPSTREAM" "token=$after "; then
+    fail "$case_name: the upstream did not log the direct request $after sent after the proxy attempt"
+  elif ! seen="$(upstream_log_line "$token")"; then
+    fail "$case_name: could not read the upstream log"
+  elif [ -n "$seen" ]; then
+    fail "$case_name: request token reached the upstream: $seen"
   else
-    echo "PASS: $case_name -> 502 ($reason), upstream live, token not forwarded"
+    echo "PASS: $case_name -> 502 ($reason), upstream live and logging, token not forwarded"
   fi
   docker rm -f "$container" >/dev/null
 }

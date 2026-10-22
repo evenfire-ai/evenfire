@@ -1512,7 +1512,7 @@ same `control-api-config` key by default.
 | OAuth secret missing | `/oauth/authorize-url` returns 503 `integration_not_configured`. NOTE: `/oauth/token` does **not** — with no grant it returns `404 no_grant` and never reads the Secret (§7.2.1). | Create K8s Secret in `sandbox-recipes`. |
 | UI workload declares `envSecret` | Admission ACCEPTS it (no CEL rule blocks this), then the pod sticks in `CreateContainerConfigError`: `secret "X" not found`, even though the Secret exists in `sandbox-recipes`. UI workloads run in `sandbox-ui`, which has no Secrets (§6.3). | Split the recipe: thin UI workload (no creds) + sibling backend workload in `sandbox-recipes` that owns the `envSecret`. Wire them with `spec.bindings[]`. |
 | OAuth callback `400 invalid_recipe_namespace` | Recipe in wrong namespace. | Use `sandbox-recipes`. |
-| Workload runs as root | Image entrypoint requires root (`nginx:alpine` etc). | Switch to non-root variant or set `security.runAsUser`. |
+| Workload runs as root | Image entrypoint requires root (the upstream `nginx` image, etc). | Switch to non-root variant or set `security.runAsUser`. |
 | StatefulSet PVC mount fails to chown | `fsGroup` missing. | Set `fsGroup` = `runAsGroup`. |
 | OAuth refresh fails after weeks | Provider rotated secret or user revoked. | `/oauth/token` returns 502 `refresh_failed`; show Reconnect UI. |
 | Embed stuck on "still updating" | Pod not Ready. | Check `healthCheck` returns 2xx; binding `0.0.0.0:8080`. |
