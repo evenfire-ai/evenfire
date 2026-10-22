@@ -52,6 +52,7 @@ import {
   parseHttpStatus,
   parseRetryAfterSeconds,
 } from '@lib/gfsGrantErrors'
+import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
 import { isGfsPreviewFile, resolveGfsPreview } from '@lib/gfsPreview'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
@@ -543,6 +544,13 @@ export function FilesPage({
   // The Manage modal lists ACL rows, and view-ACL = manage-ACL server-side —
   // a caller without the bit gets the API's 403, so the entry must not show.
   const canManageCurrent = !accessRevoked && hasBit(affordances, 'manage_acl')
+  const canMoveCurrent = Boolean(
+    !accessRevoked &&
+    current?.parentResourceId &&
+    hasGfsMoveSourcePermissions(
+      ctrl.moveSourceParentAffordancesById?.[current.parentResourceId]?.held
+    )
+  )
   const currentIsFolder = current?.kind === 'directory'
   const currentIsFile = current?.kind === 'file'
   // A total inherited-derivation failure becomes a quiet notice in the Share
@@ -1438,6 +1446,23 @@ export function FilesPage({
     return Boolean(resource.permissions?.includes('manage_acl'))
   }
 
+  /** Move uses the exact server-authorized old parent, not the row's own bits or virtual root. */
+  const rowCanMove = (resource: GfsDriveResource): boolean => {
+    const sourceParentId = resource.parentResourceId
+    if (!sourceParentId || accessRevoked) return false
+    const sourceParent =
+      sourceParentId === current?.resourceId
+        ? ctrl.affordances
+        : ctrl.moveSourceParentAffordancesById?.[sourceParentId]
+    if (
+      sourceParentId === current?.resourceId &&
+      (ctrl.loadingAffordances || ctrl.affordancesError)
+    ) {
+      return false
+    }
+    return hasGfsMoveSourcePermissions(sourceParent?.held)
+  }
+
   /** Move commits bubble their failure back to the dialog (in-place banner);
    *  success toasts and closes it. An authority rejection instead fails the
    *  session closed and closes the dialog — the revoked state takes over.
@@ -1632,7 +1657,7 @@ export function FilesPage({
           delete: () => setDeleteTarget(current),
         },
         canRename: canWriteCurrent,
-        canMove: !accessRevoked,
+        canMove: canMoveCurrent,
         canCreateFolder: currentIsFolder && canWriteCurrent,
         canUpload: currentIsFolder && canWriteCurrent,
         canShare: canManageCurrent,
@@ -1699,7 +1724,7 @@ export function FilesPage({
         },
         canOpenFolder: isDirectory,
         canRename,
-        canMove: !accessRevoked,
+        canMove: rowCanMove(resource),
         canCreateFolder: canWrite,
         canUpload: canWrite,
         canShare: canManage,
@@ -2107,17 +2132,23 @@ export function FilesPage({
                           <GfsResourceMenu
                             actions={resourceMenuActionsFor(resource)}
                             resourceName={resource.name}
-                            onOpenChange={open =>
+                            onOpenChange={open => {
                               ctrl.setRowAffordancesResourceId(open ? resource.resourceId : null)
-                            }
+                              ctrl.setMoveSourceParentResourceId?.(
+                                open ? resource.parentResourceId : null
+                              )
+                            }}
                           />
                         ) : (
                           <GfsResourceMenu
                             actions={resourceMenuActionsFor(resource)}
                             resourceName={resource.name}
-                            onOpenChange={open =>
+                            onOpenChange={open => {
                               ctrl.setRowAffordancesResourceId(open ? resource.resourceId : null)
-                            }
+                              ctrl.setMoveSourceParentResourceId?.(
+                                open ? resource.parentResourceId : null
+                              )
+                            }}
                           />
                         )}
                       </span>

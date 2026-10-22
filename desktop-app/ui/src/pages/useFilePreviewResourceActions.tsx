@@ -8,6 +8,7 @@ import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import { describeGfsGrantError, describeGfsReadError } from '@lib/gfsGrantErrors'
+import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
 import type { GfsAccessRole } from '@/gfs/GfsGrantList'
 import {
@@ -151,8 +152,7 @@ export function useFilePreviewResourceActions({
     canResolve &&
     resource?.kind === 'file' &&
     sourceParentId &&
-    sourceParentAffordances?.held.includes('write') &&
-    sourceParentAffordances.held.includes('delete')
+    hasGfsMoveSourcePermissions(sourceParentAffordances?.held)
   )
 
   const grantsQuery = useQuery({

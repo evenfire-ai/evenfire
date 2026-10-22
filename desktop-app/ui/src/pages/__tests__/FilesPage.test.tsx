@@ -42,6 +42,8 @@ function baseController() {
     rowAffordancesResourceId: null,
     setRowAffordancesResourceId: vi.fn(),
     rowAffordancesByResourceId: {},
+    moveSourceParentAffordancesById: {},
+    setMoveSourceParentResourceId: vi.fn(),
     rowAffordances: null,
     rowAffordancesError: null,
     loadingAccessible: false,
@@ -181,6 +183,73 @@ describe('FilesPage', () => {
     cleanup()
     vi.useRealTimers()
     vi.restoreAllMocks()
+  })
+
+  it('hides Move for a shared-root row unless its exact source parent can write and delete', async () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [
+        {
+          resourceId: 'shared-file',
+          rid: '0123456789abcdef0123456789abcdef',
+          gfsUri: 'gfs://main/0123456789abcdef0123456789abcdef',
+          drive: 'main',
+          parentResourceId: 'source-parent',
+          name: 'report.txt',
+          kind: 'file',
+          path: '/report.txt',
+          version: 1,
+          bytes: 12,
+          permissions: ['read', 'write', 'delete', 'manage_acl'],
+        },
+      ],
+      moveSourceParentAffordancesById: {
+        'source-parent': delegationAffordances(new Set(['read', 'write']), false),
+      },
+    })
+
+    renderFilesPage()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
+    })
+
+    expect(screen.queryByRole('menuitem', { name: 'Move to' })).toBeNull()
+  })
+
+  it('hides breadcrumb Move when the current resource parent lacks delete authority', async () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'current-folder',
+        gfsUri: 'gfs://main/0123456789abcdef0123456789abcdef',
+        parentResourceId: 'source-parent',
+        name: 'Current folder',
+        kind: 'directory',
+        version: 1,
+        bytes: 0,
+      },
+      crumbs: [
+        {
+          resourceId: 'current-folder',
+          gfsUri: 'gfs://main/0123456789abcdef0123456789abcdef',
+          parentResourceId: 'source-parent',
+          name: 'Current folder',
+          kind: 'directory',
+          version: 1,
+          bytes: 0,
+        },
+      ],
+      moveSourceParentAffordancesById: {
+        'source-parent': delegationAffordances(new Set(['read', 'write']), false),
+      },
+    })
+
+    renderFilesPage()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Current folder' }))
+    })
+
+    expect(screen.queryByRole('menuitem', { name: 'Move to' })).toBeNull()
   })
 
   it('renders unavailable automatic discovery as an info notice, not a technical error', () => {
@@ -1564,6 +1633,7 @@ describe('FilesPage', () => {
       current: {
         resourceId: 'folder-1',
         gfsUri: 'gfs://main/folder-1',
+        parentResourceId: 'source-parent',
         name: 'Product',
         kind: 'directory',
         version: 1,
@@ -3308,6 +3378,7 @@ describe('FilesPage', () => {
       current: {
         resourceId: 'folder-1',
         gfsUri: 'gfs://main/folder-1',
+        parentResourceId: 'source-parent',
         name: 'Product',
         kind: 'directory',
         version: 1,
@@ -3330,6 +3401,9 @@ describe('FilesPage', () => {
         canCreateShare: true,
       },
       moveResource,
+      moveSourceParentAffordancesById: {
+        'source-parent': delegationAffordances(new Set(['write', 'delete']), false),
+      },
     }
     hookMock.useGfsBrowserController.mockReturnValue(controllerState)
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -3590,6 +3664,7 @@ describe('FilesPage', () => {
       current: {
         resourceId: 'folder-1',
         gfsUri: 'gfs://main/folder-1',
+        parentResourceId: 'source-parent',
         name: 'Product',
         kind: 'directory',
         version: 1,
@@ -3711,6 +3786,7 @@ describe('FilesPage', () => {
         },
       ],
       items: [child],
+      affordances: delegationAffordances(new Set(['read', 'write', 'delete']), false),
       moveResource,
     })
 
@@ -3771,6 +3847,7 @@ describe('FilesPage', () => {
       current: {
         resourceId: 'folder-1',
         gfsUri: 'gfs://main/folder-1',
+        parentResourceId: 'source-parent',
         name: 'Product',
         kind: 'directory',
         version: 1,
@@ -3851,6 +3928,7 @@ describe('FilesPage', () => {
       current: {
         resourceId: 'folder-1',
         gfsUri: 'gfs://main/folder-1',
+        parentResourceId: 'source-parent',
         name: 'Product',
         kind: 'directory',
         version: 1,
@@ -4420,6 +4498,7 @@ describe('FilesPage', () => {
       current: {
         resourceId: 'folder-1',
         gfsUri: 'gfs://main/folder-1',
+        parentResourceId: 'source-parent',
         name: 'Product',
         kind: 'directory',
         version: 1,
@@ -4448,6 +4527,8 @@ describe('FilesPage', () => {
         },
       ],
       rowAffordancesByResourceId: { 'folder-2': fullBits },
+      affordances: fullBits,
+      moveSourceParentAffordancesById: { 'source-parent': fullBits },
     })
     const parentView = renderFilesPage()
     await act(async () => {
@@ -4505,6 +4586,7 @@ describe('FilesPage', () => {
       current: {
         resourceId: 'folder-2',
         gfsUri: 'gfs://main/folder-2',
+        parentResourceId: 'folder-1',
         name: 'Nested',
         kind: 'directory',
         version: 2,
@@ -4520,12 +4602,14 @@ describe('FilesPage', () => {
         {
           resourceId: 'folder-2',
           gfsUri: 'gfs://main/folder-2',
+          parentResourceId: 'folder-1',
           name: 'Nested',
           kind: 'directory',
           version: 2,
         },
       ],
       affordances: fullBits,
+      moveSourceParentAffordancesById: { 'folder-1': fullBits },
     })
     const phaseThreeView = renderFilesPage(
       undefined,

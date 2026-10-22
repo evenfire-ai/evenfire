@@ -126,6 +126,7 @@ export function suppressNavigableShares<T extends NavigableShareRow>(rows: T[]):
 export interface GfsCrumb {
   resourceId: string
   gfsUri: string
+  parentResourceId?: string | null
   name: string
   kind: 'file' | 'directory'
   version: number
@@ -471,6 +472,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     ),
     queryFn: () => window.clerum.gfs.affordances(current!.resourceId, DRIVE),
     enabled: Boolean(sessionScope) && Boolean(current) && accessState === 'active',
+    refetchOnMount: true,
+    refetchOnWindowFocus: true,
+    staleTime: 60_000,
   })
   const refreshAffordances = useCallback(async () => {
     const resourceId = current?.resourceId
@@ -489,6 +493,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
    * the Manage dialog, so opening Manage for the same resource is free.
    */
   const [rowAffordancesResourceId, setRowAffordancesResourceId] = useState<string | null>(null)
+  const [rowMoveSourceParentResourceId, setRowMoveSourceParentResourceId] = useState<string | null>(
+    null
+  )
   const rowAffordancesQuery = useQuery({
     queryKey: desktopQueryKeys.gfsAffordances(
       sessionScope ?? 'anonymous',
@@ -809,6 +816,36 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       staleTime: 60_000,
     })),
   })
+  const moveSourceParentIds = useMemo(() => {
+    const ids = new Set<string>()
+    if (current?.parentResourceId && current.parentResourceId !== current.resourceId) {
+      ids.add(current.parentResourceId)
+    }
+    if (rowMoveSourceParentResourceId && rowMoveSourceParentResourceId !== current?.resourceId) {
+      ids.add(rowMoveSourceParentResourceId)
+    }
+    return [...ids]
+  }, [current?.parentResourceId, current?.resourceId, rowMoveSourceParentResourceId])
+  const moveSourceParentQueries = useQueries({
+    queries: moveSourceParentIds.map(resourceId => ({
+      queryKey: desktopQueryKeys.gfsAffordances(sessionScope ?? 'anonymous', resourceId, DRIVE),
+      queryFn: () => window.clerum.gfs.affordances(resourceId, DRIVE),
+      enabled: Boolean(sessionScope) && !authorityPending && accessState === 'active',
+      refetchOnMount: true as const,
+      refetchOnWindowFocus: true as const,
+      staleTime: 60_000,
+    })),
+  })
+  const moveSourceParentAffordancesById = useMemo(() => {
+    const byId: Record<string, GfsBrowserAffordances> = {}
+    if (authorityPending || accessState === 'revoked') return byId
+    moveSourceParentIds.forEach((resourceId, index) => {
+      const query = moveSourceParentQueries[index]
+      if (!query?.data || query.isError || query.isFetching) return
+      byId[resourceId] = query.data as GfsBrowserAffordances
+    })
+    return byId
+  }, [accessState, authorityPending, moveSourceParentIds, moveSourceParentQueries])
   const rowAffordancesByResourceId = useMemo(() => {
     const byResourceId: Record<string, GfsBrowserAffordances> = {}
     if (authorityPending || accessState === 'revoked') return byResourceId
@@ -835,6 +872,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       ? { message: toMessage(rowAffordancesQuery.error), surface: 'operation' as const }
       : null,
     ...rowAffordancesQueries.map(query =>
+      query.error ? { message: toMessage(query.error), surface: 'operation' as const } : null
+    ),
+    ...moveSourceParentQueries.map(query =>
       query.error ? { message: toMessage(query.error), surface: 'operation' as const } : null
     ),
     grantsQuery.error
@@ -1002,6 +1042,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         const crumb: GfsCrumb = {
           resourceId: resource.resourceId,
           gfsUri: resource.gfsUri,
+          parentResourceId: resource.parentResourceId ?? null,
           name: resource.name,
           kind: resource.kind === 'directory' ? 'directory' : 'file',
           version: resource.version ?? 0,
@@ -1028,6 +1069,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
               ancestors.push({
                 resourceId: parent.resourceId,
                 gfsUri: parent.gfsUri,
+                parentResourceId: parent.parentResourceId ?? null,
                 name: parent.name,
                 kind: 'directory',
                 version: parent.version ?? 0,
@@ -1184,6 +1226,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         {
           resourceId: child.resourceId,
           gfsUri: child.gfsUri,
+          parentResourceId: child.parentResourceId,
           name: child.name,
           kind: 'directory',
           version: child.version,
@@ -1202,6 +1245,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         {
           resourceId: resource.resourceId,
           gfsUri: resource.gfsUri,
+          parentResourceId: resource.parentResourceId,
           name: resource.name,
           kind: resource.kind === 'directory' ? 'directory' : 'file',
           version: resource.version,
@@ -1280,8 +1324,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     affordancesError: affordancesQuery.error ? toPresentedMessage(affordancesQuery.error) : null,
     loadingAffordances: affordancesQuery.isFetching,
     rowAffordancesByResourceId,
+    moveSourceParentAffordancesById,
     rowAffordancesResourceId,
     setRowAffordancesResourceId,
+    setMoveSourceParentResourceId: setRowMoveSourceParentResourceId,
     rowAffordances:
       authorityPending || accessState === 'revoked'
         ? null
