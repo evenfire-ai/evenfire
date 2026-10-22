@@ -228,11 +228,11 @@ function renderHarness(
 function expectFolderRowMutationMenu(resourceName: string, available: boolean) {
   const menu = screen.getByRole('menu', { name: `Actions for ${resourceName}` })
   for (const action of ['New folder', 'Upload file', 'Rename', 'Delete']) {
-    const menuItem = within(menu).queryByRole('menuitem', { name: action, exact: true })
+    const menuItem = within(menu).queryByRole('menuitem', { name: action })
     if (available) expect(menuItem).toBeTruthy()
     else expect(menuItem).toBeNull()
   }
-  const shareTrigger = within(menu).getByRole('menuitem', { name: 'Share', exact: true })
+  const shareTrigger = within(menu).getByRole('menuitem', { name: 'Share' })
   if (screen.queryByRole('menu', { name: `Share options for ${resourceName}` })) {
     fireEvent.keyDown(window, { key: 'Escape' })
   }
@@ -240,7 +240,6 @@ function expectFolderRowMutationMenu(resourceName: string, available: boolean) {
   const shareMenu = screen.getByRole('menu', { name: `Share options for ${resourceName}` })
   const manageAction = within(shareMenu).queryByRole('menuitem', {
     name: 'Share',
-    exact: true,
   })
   if (available) expect(manageAction).toBeTruthy()
   else expect(manageAction).toBeNull()
