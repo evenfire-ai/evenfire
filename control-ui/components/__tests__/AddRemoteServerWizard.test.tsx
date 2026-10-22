@@ -740,6 +740,24 @@ describe('AddRemoteServerWizard', () => {
     expect(install).toBeDisabled()
   })
 
+  it('entra 9c: scopes edited to the host form drop the advertised list to confirm', async () => {
+    installMock.mockResolvedValue(WORKIQ_INSTALLED)
+    expect(ENTRA_UNKNOWN_GUID_DISCOVER.detected.unverifiedScopes?.length).toBeGreaterThan(0)
+    const hostScope = 'api://workiq.svc.cloud.microsoft/WorkIQAgent.Ask'
+    await detectEntra(ENTRA_UNKNOWN_GUID_DISCOVER)
+    fireEvent.change(scopesInput(), { target: { value: hostScope } })
+    fillCredentials()
+    const install = await toConfirm()
+
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
+    expect(screen.queryByText(/cannot tie to this server/)).not.toBeInTheDocument()
+    expect(install).toBeEnabled()
+    fireEvent.click(install)
+    await waitFor(() => expect(installMock).toHaveBeenCalledTimes(1))
+    expect(lastInstallBody()?.scopes).toEqual([hostScope])
+    expect(lastInstallBody()).not.toHaveProperty('confirmedUnverifiedScopes')
+  })
+
   it('entra 10: an edited scope the backend cannot verify turns into the confirmation', async () => {
     const edited = (SCOPE_AUDIENCE_UNVERIFIED_FAILURE.body as { scopes: string[] }).scopes
     installMock
