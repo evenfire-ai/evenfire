@@ -132,6 +132,7 @@ type PendingSandboxUiDeepLinkLaunch = {
   switchedTeam: boolean
   conversationOrigin: SandboxUiConversationOrigin | null
   originNavigation: WorkspaceNavigationSnapshot
+  originApp: ActiveSandboxUiApp | null
   navigationIntentSequence: number
   restoreWorkspace: boolean
 }
@@ -431,6 +432,9 @@ export function App() {
   const sandboxUiDeepLinkOriginNavigationByIdRef = React.useRef(
     new Map<number, WorkspaceNavigationSnapshot>()
   )
+  const sandboxUiDeepLinkOriginAppByIdRef = React.useRef(
+    new Map<number, ActiveSandboxUiApp | null>()
+  )
   const sandboxUiDeepLinkIntentByIdRef = React.useRef(new Map<number, number>())
   const sandboxUiDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
   const sandboxUiDeepLinkGenerationRef = React.useRef(0)
@@ -439,7 +443,7 @@ export function App() {
   // `revealWorkspaceTab` (defined above `launchSandboxUiApp`) can call it without
   // a TDZ on the launch callback.
   const relaunchSandboxUiAppRef = React.useRef<
-    ((app: ActiveSandboxUiApp, tabId: string) => void) | null
+    ((app: ActiveSandboxUiApp, tabId: string) => { navigationIntentSequence: number }) | null
   >(null)
   // Id of the app tab whose native embed is currently live in the main process
   // (mini-spec 05 §3). The store governs the embed lifecycle: when the active
@@ -1410,6 +1414,7 @@ export function App() {
     launchingSandboxUiDeepLinkRef.current = null
     sandboxUiDeepLinkRestoreTeamByIdRef.current.clear()
     sandboxUiDeepLinkOriginNavigationByIdRef.current.clear()
+    sandboxUiDeepLinkOriginAppByIdRef.current.clear()
     sandboxUiDeepLinkIntentByIdRef.current.clear()
     sandboxUiDeepLinkGenerationRef.current += 1
     void window.clerum.sandboxUi.clearPendingDeepLinks().catch(error => {
@@ -1570,9 +1575,7 @@ export function App() {
       vm.handleSelectChatAgent,
     ]
   )
-  relaunchSandboxUiAppRef.current = (app, tabId) => {
-    launchSandboxUiApp(app, null, tabId)
-  }
+  relaunchSandboxUiAppRef.current = (app, tabId) => launchSandboxUiApp(app, null, tabId)
 
   // Store-governed embed lifecycle (mini-spec 05 §3, replaces the old
   // SandboxUiPage unmount-cleanup close). The live embed belongs to whichever
@@ -1786,6 +1789,7 @@ export function App() {
       clearSandboxUiDeepLinkProcessing(linkId)
       sandboxUiDeepLinkRestoreTeamByIdRef.current.delete(linkId)
       sandboxUiDeepLinkOriginNavigationByIdRef.current.delete(linkId)
+      sandboxUiDeepLinkOriginAppByIdRef.current.delete(linkId)
       sandboxUiDeepLinkIntentByIdRef.current.delete(linkId)
       try {
         await window.clerum.sandboxUi.acknowledgeDeepLink(linkId)
@@ -1857,6 +1861,24 @@ export function App() {
         )
         if (restoredIntent !== null) {
           sandboxUiDeepLinkIntentByIdRef.current.set(context.linkId, restoredIntent)
+          const originTab = activeWorkspaceTab(context.originNavigation.workspaceTabs)
+          if (
+            context.originApp &&
+            originTab?.kind === 'app' &&
+            originTab.app?.appRef === context.originApp.appRef
+          ) {
+            const restoredApp = {
+              ...context.originApp,
+              routePath: originTab.app.savedRoutePath,
+            }
+            const relaunch = relaunchSandboxUiAppRef.current?.(restoredApp, originTab.id)
+            if (relaunch) {
+              sandboxUiDeepLinkIntentByIdRef.current.set(
+                context.linkId,
+                relaunch.navigationIntentSequence
+              )
+            }
+          }
         }
       }
     },
@@ -2161,6 +2183,21 @@ export function App() {
         sandboxUiDeepLinkOriginNavigationByIdRef.current.get(pending.link.id) ??
         vm.captureWorkspaceNavigation()
       sandboxUiDeepLinkOriginNavigationByIdRef.current.set(pending.link.id, originNavigation)
+      let originApp: ActiveSandboxUiApp | null
+      if (sandboxUiDeepLinkOriginAppByIdRef.current.has(pending.link.id)) {
+        originApp = sandboxUiDeepLinkOriginAppByIdRef.current.get(pending.link.id) ?? null
+      } else {
+        const originTab = activeWorkspaceTab(originNavigation.workspaceTabs)
+        const candidate =
+          (activeSandboxUiApp?.appRef === originTab?.app?.appRef ? activeSandboxUiApp : null) ??
+          availableSandboxUiApps.find(app => app.appRef === originTab?.app?.appRef) ??
+          null
+        originApp =
+          originTab?.kind === 'app' && originTab.app?.appRef === candidate?.appRef
+            ? candidate
+            : null
+        sandboxUiDeepLinkOriginAppByIdRef.current.set(pending.link.id, originApp)
+      }
       let navigationIntentSequence =
         sandboxUiDeepLinkIntentByIdRef.current.get(pending.link.id) ?? vm.navigationIntentSequence
       sandboxUiDeepLinkIntentByIdRef.current.set(pending.link.id, navigationIntentSequence)
@@ -2179,6 +2216,7 @@ export function App() {
         ) {
           sandboxUiDeepLinkRestoreTeamByIdRef.current.delete(pending.link.id)
           sandboxUiDeepLinkOriginNavigationByIdRef.current.delete(pending.link.id)
+          sandboxUiDeepLinkOriginAppByIdRef.current.delete(pending.link.id)
           sandboxUiDeepLinkIntentByIdRef.current.delete(pending.link.id)
           clearSandboxUiDeepLinkProcessing(pending.link.id)
           const next = failPendingSandboxUiDeepLink(
@@ -2239,6 +2277,7 @@ export function App() {
                 switchedTeam,
                 conversationOrigin: pending.conversationOrigin,
                 originNavigation,
+                originApp,
                 navigationIntentSequence,
                 restoreWorkspace: false,
               }
@@ -2282,6 +2321,7 @@ export function App() {
             switchedTeam,
             conversationOrigin: pending.conversationOrigin,
             originNavigation,
+            originApp,
             navigationIntentSequence,
             restoreWorkspace: false,
           }
@@ -2311,6 +2351,7 @@ export function App() {
           switchedTeam,
           conversationOrigin: pending.conversationOrigin,
           originNavigation,
+          originApp,
           navigationIntentSequence,
           restoreWorkspace: true,
         }
@@ -2332,6 +2373,7 @@ export function App() {
           switchedTeam,
           conversationOrigin: pending.conversationOrigin,
           originNavigation,
+          originApp,
           navigationIntentSequence,
           restoreWorkspace: true,
         })

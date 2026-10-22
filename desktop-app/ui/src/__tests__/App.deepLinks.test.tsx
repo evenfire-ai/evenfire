@@ -46,6 +46,7 @@ import {
   installAppControllerClerum,
 } from '../hooks/domain/__tests__/__fixtures__/appControllerHarness'
 import { desktopQueryKeys } from '../hooks/domain/queryKeys'
+import type { NavItem } from '../uiTypes'
 
 // The universal tab store lives inside the controller; the mock reproduces that
 // contract — `navItem` is DERIVED from the store, the store is reactive, and nav
@@ -153,6 +154,7 @@ const sidebarHarness = vi.hoisted(() => ({
     onCollapsedChange?: (next: boolean) => void
     availableSandboxUiApps?: SidebarLaunchApp[]
     onOpenSandboxUiApp?: (app: SidebarLaunchApp) => void
+    onSelect?: (item: NavItem) => void
   },
 }))
 
@@ -3312,26 +3314,19 @@ describe('App deep-link orchestration', () => {
       handleEnsureTeamContext: ensureTeamContext,
       getCurrentTeamId: () => liveTeamId,
     })
-    listApps.mockResolvedValue({
-      apps: [
-        {
-          appRef: 'ns/app',
-          title: 'Linked App',
-          defaultPath: '/',
-          ready: true,
-          phase: 'active',
-        },
-      ],
-    })
+    listApps.mockResolvedValue({ apps: [READY_APP, READY_APP_B] })
     render(<App />)
+    await launchAppFromSidebar('ns/app-b')
+    getSandboxUiLocation.mockResolvedValue({ appRef: 'ns/app-b', routePath: '/origin/live' })
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
     })
     await confirmPendingAppLink()
+    const targetShortcutOpenRequestId = sandboxUiPageHarness.props?.shortcutOpenRequestId
     act(() => {
-      currentController.handleNavSelect(DESKTOP_ROUTES.settings)
+      sidebarHarness.props?.onSelect?.(DESKTOP_ROUTES.settings)
     })
     await reportShortcutOpenResult({ status: 'failed', message: 'native mount failed' })
 
@@ -3341,6 +3336,8 @@ describe('App deep-link orchestration', () => {
     expect(liveTeamId).toBe('team-b')
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.settings)
     expect(currentController.workspaceTabs.tabs.some(tab => tab.kind === 'settings')).toBe(true)
+    expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).not.toBe('ns/app-b')
+    expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBe(targetShortcutOpenRequestId)
     expect(ensureTeamContext).toHaveBeenCalledTimes(1)
 
     await act(async () => {
@@ -3609,13 +3606,17 @@ describe('App deep-link orchestration', () => {
     // The embed reports this current route as it is closed for the cross-team
     // handoff. App persists it through the real workspace tab producer.
     getSandboxUiLocation.mockResolvedValue({ appRef: 'ns/app', routePath: '/tickets/live' })
+    closeSandboxUi.mockClear()
     act(() => emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' }))
     await confirmPendingAppLink()
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(closeSandboxUi).toHaveBeenCalledOnce()
     const expectedWorkspace = setAppTabSavedRoutePath(originWorkspace, appTab.id, '/tickets/live')
     expect(currentController.workspaceTabs).toEqual(expectedWorkspace)
     expect(currentController.workspaceTabs.activeTabId).toBe(appTab.id)
+    expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe(appTab.app?.appRef)
+    expect(sandboxUiPageHarness.props?.shortcutApp?.routePath).toBe('/tickets/live')
     expect(currentController.selectedAgent).toBe('alpha')
     expect(currentController.selectedAgentRoute).toBe('mcp-servers')
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(2, {
