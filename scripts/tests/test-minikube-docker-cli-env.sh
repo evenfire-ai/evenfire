@@ -295,6 +295,10 @@ STUB
   export T2_PROFILE=fixture-profile
   export T2_CONTEXT=fixture-profile
   export MINIKUBE_PROFILE=fixture-profile
+  # Image-reuse scenarios must not inherit the caller's Playwright build options.
+  export MINIKUBE_REUSE_PLAYWRIGHT_MCP_IMAGE=true
+  export MINIKUBE_PLAYWRIGHT_MCP_SOURCE_VISIBILITY=private
+  export MINIKUBE_PLAYWRIGHT_MCP_SOURCE_IMAGE=us-central1-docker.pkg.dev/fixture-project/fixture-registry/playwright-server:test
 }
 
 assert_endpoint_resolution_and_context_precedence() {
