@@ -347,7 +347,9 @@ PY
     PROJECT_DIR="$RUN_PROJECT"
     T1_TMP_DIR="$RUN_TMP"
     T1_REDACT_PASSWORD="$RUN_PASSWORD"
-    T1_PRIVATE_RECOVERY_SUITES=("$RUN_PROJECT/private-a" "$RUN_PROJECT/private-b")
+    # This fixture tests reporter failures; inventory validation has its own
+    # real-selector contract in password-recovery-suite-contract.test.mjs.
+    list_real_pg_files() { printf "%s\n" "$RUN_FILE"; }
     run_suite control-api isolated "$1"
   ' bash "$dsn_scheme://isolated" >"$TEST_DIR/run-suite.out" 2>"$run_err"
   run_status=$?

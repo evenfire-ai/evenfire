@@ -13173,6 +13173,12 @@ pre {
   pointer-events: none;
 }
 
+/* Recovery action (Reopen / Retry) at the trailing end of an app status banner. */
+.sandbox-ui-status-action {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 .sandbox-ui-loading {
   position: relative;
   z-index: 1;

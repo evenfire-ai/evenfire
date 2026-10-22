@@ -1,4 +1,4 @@
-FROM node:24-alpine AS builder
+FROM node:24.22.1-alpine AS builder
 WORKDIR /app
 
 ARG CONTROL_API_INTERNAL_URL=http://control-api.control-plane.svc.cluster.local:8090
@@ -34,7 +34,7 @@ COPY scripts/qa-recorder /app/scripts/qa-recorder
 COPY control-ui ./
 RUN npm run build
 
-FROM node:24-alpine
+FROM node:24.22.1-alpine
 RUN addgroup -S app && adduser -S app -G app
 WORKDIR /app
 

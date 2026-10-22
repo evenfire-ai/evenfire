@@ -39,7 +39,6 @@ PG_USER=""
 PG_PASSWORD=""
 PG_DATABASE=""
 T1_REDACT_PASSWORD=""
-T1_PRIVATE_RECOVERY_SUITES=()
 T1_STATUS=NOT_RUN
 T1_NEXT_COMMAND='repair the first reported Real PostgreSQL precondition, then re-run T1'
 T1_TOTAL_TESTS=0
@@ -319,7 +318,16 @@ PY
 }
 
 list_real_pg_files() {
-  local package="$1"
+  local package="$1" file
+  if [ "$package" = control-api ]; then
+    # Reuse CI's validated census. Private producer suites require a separate
+    # authorized service/database lane, documented in the private PG runbook.
+    node "$PROJECT_DIR/scripts/ci/password-recovery-suite-contract.mjs" public |
+      while IFS= read -r file; do
+        printf '%s/%s\n' "$PROJECT_DIR" "$file"
+      done
+    return
+  fi
   find "$PROJECT_DIR/$package" -type f -name '*realPostgres*.test.ts' \
     ! -name 'realPostgres.requirement.ts' -print | sort
 }
@@ -338,40 +346,6 @@ is_isolated_control_api_file() {
       return 1
       ;;
   esac
-}
-
-# The two cross-service password-recovery suites need the private Member
-# Registration producer, which this lane does not deploy; without it they are
-# collected as skipped and T1 refuses the pending tests. Public CI excludes the
-# same files, so read them from the shared contract instead of a second list.
-load_private_recovery_suites() {
-  local selection entry
-  T1_PRIVATE_RECOVERY_SUITES=()
-  selection="$(node "$PROJECT_DIR/scripts/ci/password-recovery-suite-contract.mjs" private all)" || {
-    T1_NEXT_COMMAND='repair tests/contracts/password-recovery-suites.json, then re-run T1'
-    die_t1 ZERO_TESTS_EXECUTED 'password-recovery suite contract could not be verified'
-  }
-  while IFS= read -r entry; do
-    [ -n "$entry" ] || continue
-    [ -s "$PROJECT_DIR/control-api/$entry" ] || {
-      T1_NEXT_COMMAND='repair tests/contracts/password-recovery-suites.json, then re-run T1'
-      die_t1 ZERO_TESTS_EXECUTED "private password-recovery suite is missing: control-api/$entry"
-    }
-    T1_PRIVATE_RECOVERY_SUITES+=("$PROJECT_DIR/control-api/$entry")
-  done <<<"$selection"
-  [ "${#T1_PRIVATE_RECOVERY_SUITES[@]}" -eq 2 ] || {
-    T1_NEXT_COMMAND='repair tests/contracts/password-recovery-suites.json, then re-run T1'
-    die_t1 ZERO_TESTS_EXECUTED \
-      "password-recovery contract listed ${#T1_PRIVATE_RECOVERY_SUITES[@]} private suites, expected 2"
-  }
-}
-
-is_private_recovery_suite() {
-  local path="$1" private
-  for private in "${T1_PRIVATE_RECOVERY_SUITES[@]}"; do
-    [ "$path" = "$private" ] && return 0
-  done
-  return 1
 }
 
 require_isolated_control_api_files() {
@@ -478,18 +452,18 @@ PY
 
 run_suite() {
   local package="$1" lane="$2" admin_url="$3"
-  local expected_files=0 reported_files=0 file log_file json_file stats
+  local expected_files=0 reported_files=0 file log_file json_file stats selection
   local suite_started_seconds="$SECONDS" suite_duration_seconds=0
   local -a files=() vitest_filters=()
 
-  if [ "$package" = control-api ] && [ "${#T1_PRIVATE_RECOVERY_SUITES[@]}" -ne 2 ]; then
-    T1_NEXT_COMMAND='load the password-recovery suite contract before selecting control-api suites'
-    die_t1 ZERO_TESTS_EXECUTED 'private password-recovery exclusions were not loaded'
+  if ! selection="$(list_real_pg_files "$package")"; then
+    T1_NEXT_COMMAND='restore the exact PostgreSQL suite manifest and its files, then re-run T1'
+    die_t1 REAL_PG_REPORT_INCOMPLETE "PostgreSQL suite inventory could not be validated for $package"
+    return 1
   fi
   while IFS= read -r file; do
     [ -z "$file" ] && continue
     if [ "$package" = control-api ]; then
-      is_private_recovery_suite "$file" && continue
       if [ "$lane" = isolated ]; then
         is_isolated_control_api_file "$file" || continue
       else
@@ -500,7 +474,7 @@ run_suite() {
     fi
     files+=("$file")
     vitest_filters+=("${file#"$PROJECT_DIR/$package/"}")
-  done < <(list_real_pg_files "$package")
+  done <<< "$selection"
 
   expected_files="${#files[@]}"
   if ! [[ "$expected_files" =~ ^[1-9][0-9]*$ ]]; then
@@ -512,6 +486,10 @@ run_suite() {
     die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE "Real PostgreSQL $lane DSN is empty for $package"
   fi
 
+  if [ "$package" = control-api ]; then
+    printf '[minikube-t1] private producer PostgreSQL lanes: NOT_RUN; see docs/testing/password-recovery-private-postgres.md\n'
+    t2_evidence_write private-producer NOT_RUN 'Member Registration producer suites require the separate private PostgreSQL lane'
+  fi
   log_file="$T1_TMP_DIR/$(printf '%s' "$package-$lane" | tr / _).log"
   json_file="$T1_TMP_DIR/$(printf '%s' "$package-$lane" | tr / _).json"
   printf '[minikube-t1] running %s %s Real PostgreSQL suites (%s files)\n' \
@@ -707,7 +685,6 @@ user, password, port = sys.stdin.buffer.read().split(b"\0")[:3]
 print("postgresql://" + quote(user.decode(), safe="") + ":" + quote(password.decode(), safe="") + "@127.0.0.1:" + port.decode() + "/postgres", end="")
 ')"
   require_isolated_control_api_files
-  load_private_recovery_suites
   start_isolated_postgres
   T1_GFS_RESTORE_REQUIRED=true
   run_suite control-api isolated "$ISOLATED_DSN"
