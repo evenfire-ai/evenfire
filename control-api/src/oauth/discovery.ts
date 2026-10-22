@@ -522,19 +522,33 @@ function isResourceConsistentWithMcpUrl(resource: string, mcpUrl: URL): boolean 
 }
 
 /**
- * RFC 8414 §3.3: the AS metadata `issuer` must be identical to the authorization
- * server it was retrieved from. Otherwise a hostile AS response could hand us an
- * `issuer` we then trust for the RFC 9207 callback `iss` check. Compared as
- * origin+path with trailing slashes normalized.
+ * An RFC 8414 §2 issuer identifier: no query, no fragment and no userinfo. Checked
+ * on the raw string because `URL` drops an empty `?` or `#`.
  */
-function isIssuerConsistentWithBase(issuer: string, base: URL): boolean {
+function isBareIdentifier(raw: string, parsed: URL): boolean {
+  return (
+    !raw.includes('?') && !raw.includes('#') && parsed.username === '' && parsed.password === ''
+  )
+}
+
+/**
+ * RFC 8414 §3.3: the AS metadata `issuer` must be identical to the authorization
+ * server it was retrieved from; neither carries a query, fragment or userinfo
+ * (RFC 8414 §2). Otherwise a hostile AS response could hand us an `issuer` we then
+ * trust for the RFC 9207 callback `iss` check. Compared as origin+path with
+ * trailing slashes normalized.
+ */
+function isIssuerConsistentWithBase(issuer: string, base: string): boolean {
   let issuerUrl: URL
+  let baseUrl: URL
   try {
     issuerUrl = new URL(issuer)
+    baseUrl = new URL(base)
   } catch {
     return false
   }
-  return issuerUrl.origin === base.origin && trimmedPath(issuerUrl) === trimmedPath(base)
+  if (!isBareIdentifier(issuer, issuerUrl) || !isBareIdentifier(base, baseUrl)) return false
+  return issuerUrl.origin === baseUrl.origin && trimmedPath(issuerUrl) === trimmedPath(baseUrl)
 }
 
 /**
@@ -707,7 +721,7 @@ export async function discoverRemoteOAuth(
     // RFC 8414 §3.3: `issuer` must match the AS we fetched the metadata from. The
     // `issuer` feeds the RFC 9207 callback `iss` check, so a hostile mismatch is
     // rejected here rather than trusted downstream.
-    if (!isIssuerConsistentWithBase(candidate.issuer, asBaseUrl)) {
+    if (!isIssuerConsistentWithBase(candidate.issuer, asBase)) {
       lastAsError = {
         kind: 'issuer_mismatch',
         detail: `AS issuer "${candidate.issuer}" does not match authorization server "${asBase}"`,
@@ -864,7 +878,7 @@ async function resolveAsMetadataFromBase(
       }
       continue
     }
-    if (!isIssuerConsistentWithBase(candidate.issuer, asBaseUrl)) {
+    if (!isIssuerConsistentWithBase(candidate.issuer, asBaseUrl.toString())) {
       lastError = {
         kind: 'issuer_mismatch',
         detail: `AS issuer "${candidate.issuer}" does not match authorization server "${asBaseUrl.toString()}"`,

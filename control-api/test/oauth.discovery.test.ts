@@ -426,6 +426,31 @@ describe('discoverRemoteOAuth — third-party metadata self-consistency (C2/C3)'
     if (!outcome.ok) expect(outcome.error.kind).toBe('issuer_mismatch')
   })
 
+  // Table row 11: RFC 8414 §2 forbids query and fragment in an issuer, and userinfo is
+  // no part of an identifier. URL origin+pathname ignore all three, so an issuer that
+  // carries them must be compared as written, even when the `?` or `#` is empty.
+  for (const issuer of [
+    'https://mcp.notion.com?',
+    'https://mcp.notion.com#',
+    'https://mcp.notion.com/?q=1',
+    'https://mcp.notion.com#f',
+    'https://u:p@mcp.notion.com',
+  ]) {
+    it(`C3: rejects an issuer with query, fragment or userinfo (${issuer})`, async () => {
+      const asJson = JSON.stringify({ ...JSON.parse(PILOTS.notion.as.json), issuer })
+      const [oauthUrl, oidcUrl] = asMetadataUrls(new URL('https://mcp.notion.com'))
+      const pilot = {
+        ...PILOTS.notion,
+        as: { url: oauthUrl, json: asJson },
+        // Served on both AS-metadata candidates so neither clears the check.
+        asExtra: [{ url: oidcUrl, status: 200, json: asJson }],
+      }
+      const outcome = await discoverRemoteOAuth(pilot.mcpUrl, deps(makeDiscoveryTransport(pilot)))
+      expect(outcome.ok).toBe(false)
+      if (!outcome.ok) expect(outcome.error.kind).toBe('issuer_mismatch')
+    })
+  }
+
   it('C3: accepts the real pilots (issuer == authorization server base)', async () => {
     for (const key of ['notion', 'sentry'] as const) {
       const outcome = await discoverRemoteOAuth(
