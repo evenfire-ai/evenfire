@@ -10,7 +10,14 @@ import { RFC1123_RE } from '../../http/rfc1123.js'
 import { type ValidationError, validateOAuthEndpointUrl } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
 import { type UiAuthedRequest } from '../../middleware/controlUIAuth.js'
-import { withProfileScopes } from '../../oauth/asProfiles.js'
+import {
+  type AsProfileId,
+  SCOPE_TOKEN_RE,
+  profileHasResourceScope,
+  profileScopeViolation,
+  profileUnverifiedScopes,
+  withProfileScopes,
+} from '../../oauth/asProfiles.js'
 import { buildCimdDocument } from '../../oauth/cimd.js'
 import { MAX_CLIENT_ID_LENGTH, isCimdClientId } from '../../oauth/cimdIdentity.js'
 import {
@@ -108,6 +115,8 @@ function logDcrRevokeLocalOnly(serverName: string, hasRegistrationClientUri: boo
 // importers (and the mapping's own test) keep resolving it from this module.
 export { discoveryHttpStatus }
 
+const MAX_SCOPES = 128 // mirrors the McpServer CRD spec.oauth.scopes maxItems
+
 // `authorizationServer` names the operator's Microsoft Entra tenant authority when the
 // server advertises Entra's multi-tenant one; discovery rejects any other override.
 const authorizationServerSchema = z.string().min(1).max(2048)
@@ -128,6 +137,15 @@ const installBodySchema = z.object({
   clientSecret: z.string().min(1).optional(),
   grantScope: z.enum(['user', 'context']).optional(),
   authorizationServer: authorizationServerSchema.optional(),
+  // The full list to request; replaces the advertised defaults. The profile's required
+  // scopes are added on top and count towards MAX_SCOPES.
+  scopes: z
+    .array(z.string().min(1).max(512).regex(SCOPE_TOKEN_RE))
+    .min(1)
+    .max(MAX_SCOPES)
+    .optional(),
+  // The exact GUID-form scopes the operator confirmed as this server's own API.
+  confirmedUnverifiedScopes: z.array(z.string().min(1).max(512)).max(MAX_SCOPES).optional(),
 })
 
 type InstallBody = z.infer<typeof installBodySchema>
@@ -222,6 +240,8 @@ export interface RemoteOAuthSpec {
   supportsRefresh: boolean
   clientIdRef?: RemoteOAuthClientSecretRef
   clientSecretRef?: RemoteOAuthClientSecretRef
+  /** Closed authorization-server profile recognised from the pinned issuer; drives the wire. */
+  asProfile?: AsProfileId
 }
 
 /**
@@ -245,6 +265,8 @@ export function buildRemoteOAuthSpec(
     cimdClientId?: string
     /** Pre-registered confidential: operator-supplied plaintext client_id — DEC-23 backfill. */
     preRegisteredClientId?: string
+    /** The scopes the install validated; defaults to {@link effectiveRemoteScopes}. */
+    scopes?: string[]
   }
 ): RemoteOAuthSpec {
   const oauth: RemoteOAuthSpec = {
@@ -255,12 +277,13 @@ export function buildRemoteOAuthSpec(
     issuer: result.issuer,
     resource: result.resource,
     grantScope: opts.grantScope,
-    scopes: effectiveRemoteScopes(result),
+    scopes: opts.scopes ?? effectiveRemoteScopes(result),
     bearerInBody: result.quirks.bearerInBody,
     supportsRefresh: result.quirks.supportsRefresh,
   }
   if (result.endpoints.registration) oauth.registrationEndpoint = result.endpoints.registration
   if (result.issForCallback) oauth.issForCallback = result.issForCallback
+  if (result.asProfile) oauth.asProfile = result.asProfile
   // C4 discriminator (DEC-18): Secret refs present ⇒ read the secret from the K8s
   // Secret (pre-registered). No refs + clientMode 'confidential' + `id` set ⇒ read
   // the secret from the encrypted `dynamic_clients` store (DCR). The two sources
@@ -714,6 +737,60 @@ export function createAdminRemoteMcpRouter(
         return
       }
 
+      // Validated before any write. With a profile the operator's list is what gets
+      // installed, never a re-discovered one: the wizard showed and confirmed exactly it.
+      const reqLog = req.log ?? log
+      if (discovery.asProfile && body.scopes === undefined) {
+        res.status(400).json({
+          error: 'invalid_request',
+          message: 'scopes is required for Microsoft Entra ID servers',
+        })
+        return
+      }
+      const scopes = effectiveRemoteScopes(discovery, body.scopes)
+      if (scopes.length > MAX_SCOPES) {
+        res.status(400).json({
+          error: 'invalid_request',
+          message: `at most ${MAX_SCOPES} scopes, including those the authorization server requires`,
+        })
+        return
+      }
+      // `body.baseUrl` passed the kernel above, so it parses and the audience checks cannot throw.
+      const audienceViolation = profileScopeViolation(discovery.asProfile, body.baseUrl, scopes)
+      if (audienceViolation !== null) {
+        reqLog.warn(
+          { event: 'remote_install_scope_audience_rejected', serverName: body.serverName },
+          'remote install rejected: scope outside the server audience'
+        )
+        res.status(400).json({
+          error: 'scope_audience_mismatch',
+          scope: audienceViolation,
+          message:
+            'with Microsoft Entra ID, every resource scope must belong to this server; this scope would mint a token for another API',
+        })
+        return
+      }
+      if (!profileHasResourceScope(discovery.asProfile, body.baseUrl, scopes)) {
+        res.status(400).json({
+          error: 'scope_audience_missing',
+          message:
+            'with Microsoft Entra ID, at least one scope must belong to this server; sign-in scopes alone mint a Microsoft Graph token',
+        })
+        return
+      }
+      const confirmed = new Set(body.confirmedUnverifiedScopes ?? [])
+      const unverifiedScopes = profileUnverifiedScopes(discovery.asProfile, body.baseUrl, scopes)
+      const unconfirmed = unverifiedScopes.filter(scope => !confirmed.has(scope))
+      if (unconfirmed.length > 0) {
+        res.status(400).json({
+          error: 'scope_audience_unverified',
+          scopes: unconfirmed,
+          message:
+            'these scopes name an API this platform cannot tie to the server; confirm they belong to it to continue',
+        })
+        return
+      }
+
       // The requested mode must match what server-side discovery actually resolved
       // (D-4: discovery is authoritative). CIMD ⇒ AS must offer CIMD; DCR ⇒ AS must
       // offer a registration endpoint (registrationMode 'dcr').
@@ -972,7 +1049,7 @@ export function createAdminRemoteMcpRouter(
         const dcrRequest = buildDcrRequest(discovery, {
           clientMode,
           redirectUris: [redirectUri],
-          scopes: effectiveRemoteScopes(discovery),
+          scopes,
         })
         const dcrOutcome = await registerDynamicClient(dcrDeps, registrationEndpoint, dcrRequest)
         if (!dcrOutcome.ok) {
@@ -1272,6 +1349,7 @@ export function createAdminRemoteMcpRouter(
         ...(dcrClientId ? { dynamicClientId: dcrClientId } : {}),
         ...(cimdClientId ? { cimdClientId } : {}),
         ...(preRegisteredClientId ? { preRegisteredClientId } : {}),
+        scopes,
       })
 
       const mcpServerSpec: Record<string, unknown> = {
@@ -1493,6 +1571,19 @@ export function createAdminRemoteMcpRouter(
         },
         'remote oauth mcp server installed'
       )
+      if (unverifiedScopes.length > 0) {
+        // Audit trail of who vouched for a token audience the platform could not verify.
+        // Scopes are not secret; this record exists to name them.
+        reqLog.info(
+          {
+            event: 'remote_install_unverified_scopes_confirmed',
+            serverName,
+            admin: req.adminAuth?.sub,
+            scopes: unverifiedScopes,
+          },
+          'remote install: operator confirmed scopes whose API cannot be tied to the server'
+        )
+      }
 
       // Names-only summary — never echo the secret material or the pinned tokens.
       res.status(201).json({

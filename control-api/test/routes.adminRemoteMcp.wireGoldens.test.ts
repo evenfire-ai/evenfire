@@ -16,6 +16,7 @@ import {
   DCR_PUBLIC_REGISTRATION_RESPONSE,
   DROPBOX_PILOT,
   ENTRA_NO_SCOPES_PILOT,
+  ENTRA_SHAREPOINT_SCOPE_PILOT,
   ENTRA_UNKNOWN_GUID_PILOT,
   ENTRA_WORKIQ_PILOT,
   PILOTS,
@@ -255,6 +256,60 @@ describe('remote MCP wire goldens — POST / (install)', () => {
     expect(actual.status).toBe(201)
     expect(actual).toEqual(golden('install.atlassian', actual))
   })
+
+  it('install.workiq: Entra tenant, pre-registered per-server 201', async () => {
+    const { db } = makeInMemoryDynamicClientsDb()
+    const actual = await install(
+      ENTRA_WORKIQ_PILOT,
+      {
+        serverName: 'workiq',
+        mode: 'pre-registered',
+        clientId: '11111111-2222-3333-4444-555555555555',
+        clientSecret: 'test-secret',
+        authorizationServer: ENTRA_TENANT_AUTHORITY,
+        scopes: ['api://workiq.svc.cloud.microsoft/WorkIQAgent.Ask'],
+      },
+      { deps: { db } }
+    )
+    expect(actual.status).toBe(201)
+    expect(actual).toEqual(golden('install.workiq', actual))
+  })
+
+  const ENTRA_INSTALL_REJECTIONS: Array<{
+    name: string
+    pilot: () => PilotFixture
+    scopes: string[]
+  }> = [
+    {
+      name: 'install.scopeAudienceUnverified',
+      pilot: () => ENTRA_UNKNOWN_GUID_PILOT,
+      scopes: ['11111111-2222-3333-4444-555555555555/Tools.Read'],
+    },
+    {
+      name: 'install.scopeAudienceMismatch',
+      pilot: () => ENTRA_SHAREPOINT_SCOPE_PILOT,
+      scopes: ['00000003-0000-0ff1-ce00-000000000000/AllSites.Read'],
+    },
+    {
+      name: 'install.scopeAudienceMissing',
+      pilot: () => ENTRA_NO_SCOPES_PILOT,
+      scopes: ['offline_access'],
+    },
+  ]
+  for (const c of ENTRA_INSTALL_REJECTIONS) {
+    it(`${c.name}: Entra install rejected before any write → 400`, async () => {
+      const actual = await install(c.pilot(), {
+        serverName: 'workiq',
+        mode: 'pre-registered',
+        clientId: '11111111-2222-3333-4444-555555555555',
+        clientSecret: 'test-secret',
+        authorizationServer: ENTRA_TENANT_AUTHORITY,
+        scopes: c.scopes,
+      })
+      expect(actual.status).toBe(400)
+      expect(actual).toEqual(golden(c.name, actual))
+    })
+  }
 
   it('install.linear: shared CIMD 201', async () => {
     const actual = await install(PILOTS.linear, { serverName: 'linear', mode: 'cimd' })
