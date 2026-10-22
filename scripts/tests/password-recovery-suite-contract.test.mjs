@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
@@ -249,6 +249,21 @@ test('Minikube T1 selects the exact public inventory and preserves GFS discovery
     const gfs = minikubeSelection(fixture, 'gfs-controller')
     assert.equal(gfs.status, 0, gfs.stderr)
     assert.equal(gfs.stdout.trim(), join(fixture, 'gfs-controller/test/public.realPostgres.test.ts'))
+  })
+})
+
+test('suite CLI validates the census through a symlinked entry point', () => {
+  withMinikubeSelectionFixture(fixture => {
+    const alias = join(fixture, 'suite-cli.mjs')
+    symlinkSync(join(fixture, 'scripts/ci/password-recovery-suite-contract.mjs'), alias)
+    const selected = spawnSync(process.execPath, [alias, 'public'], { encoding: 'utf8' })
+    assert.equal(selected.status, 0, selected.stderr)
+    assert.deepEqual(selected.stdout.trim().split('\n'), manifest.publicPostgres)
+
+    rmSync(join(fixture, manifest.privatePostgres.local))
+    const rejected = spawnSync(process.execPath, [alias, 'verify'], { encoding: 'utf8' })
+    assert.notEqual(rejected.status, 0, 'a symlinked CLI must still validate every declared suite')
+    assert.match(rejected.stderr, /ENOENT|Missing or empty recovery suite/)
   })
 })
 

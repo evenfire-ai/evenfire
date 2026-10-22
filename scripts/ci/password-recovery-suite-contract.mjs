@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { closeSync, constants, fstatSync, openSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, relative, resolve } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
 import { pinnedSuiteViolations } from './assert-pinned-vitest-suites.mjs'
 
 export function verifySuiteManifest(root, manifest) {
@@ -88,7 +88,7 @@ export function reportViolations(root, manifest, lane, report) {
   return violations
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (import.meta.main) {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
   try {
     const manifest = verifySuiteManifest(
