@@ -133,8 +133,8 @@ export async function setInvitationPasswordForUser(
       if (invitation.status !== 'accepted') return { error: 'not_accepted' as const }
       if (options?.rejectIfPasswordAlreadySet) {
         // The first-password decision must precede ensureInvitationUser, which
-        // rewrites users.name and profiles.display_name from the invitation:
-        // deciding after it would mutate a refused call. Lock the session user
+        // can insert the invitee's users and profiles rows: deciding after it
+        // would write on a refused call. Lock the session user
         // row inside the writing transaction and decide from the authoritative
         // hash, so a concurrent first set either commits before this lock (and
         // this request sees its hash) or waits behind it.
