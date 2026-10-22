@@ -879,6 +879,104 @@ describe('useAppController held Hosts', () => {
     expect(toastsSeen(commits)).toEqual([VERIFY_A])
   })
 
+  /** Start a refresh, switch to team 2 while it is in flight, and return its gate. */
+  async function switchWithStaleRefreshInFlight(
+    app: ReturnType<typeof renderAppController>,
+    handle: AppControllerClerumHandle
+  ) {
+    const staleRefresh = deferred<ReturnType<typeof producerCatalog>>()
+    handle.refreshCatalog.mockImplementation(() => staleRefresh.promise)
+    const callsBefore = handle.refreshCatalog.mock.calls.length
+    let refreshing!: Promise<void>
+    await act(async () => {
+      refreshing = app.result.current.handleRefreshWorkspaceData(DESKTOP_ROUTES.agents)
+      await Promise.resolve()
+    })
+    let switching!: Promise<boolean>
+    await act(async () => {
+      switching = app.result.current.handleEnsureTeamContext({ teamId: 'team-2' })
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(app.result.current.currentTeamId).toBe('team-2'))
+    expect(handle.switchTeam).toHaveBeenCalledWith('team-2')
+    // Liveness witness: the switch's refresh joined the read started before
+    // it, so the catalog that read returns is team 1's.
+    expect(handle.refreshCatalog).toHaveBeenCalledTimes(callsBefore + 1)
+    expect(cachedCatalog(app.queryClient)?.teamId).toBe('team-1')
+    const land = async (catalog: ReturnType<typeof producerCatalog>) => {
+      await act(async () => {
+        staleRefresh.resolve(catalog)
+        await Promise.all([refreshing, switching])
+      })
+      await waitFor(() =>
+        expect(cachedCatalog(app.queryClient)?.agentNames).toEqual(catalog.agentNames)
+      )
+      await settle()
+    }
+    return { land }
+  }
+
+  it('T-R5L4-1: a pre-switch catalog landing after a team switch announces no loss', async () => {
+    const { clerum, handle } = installAppControllerClerum({
+      agentNames: [HOST_A, HOST_B],
+      agentDisplayByName: DISPLAY_BY_NAME,
+    })
+    installCatalog(clerum)
+    const { app, commits } = await mount(clerum, handle)
+    await settle()
+    const { land } = await switchWithStaleRefreshInFlight(app, handle)
+
+    const transcriptError = await ipcGenericForbidden('rpc:loadSessionMessages')
+    clerum.rpc.loadSessionMessages.mockImplementation(async () => {
+      throw transcriptError
+    })
+    act(() => {
+      app.result.current.handleSelectChatAgent(HOST_B, {
+        chatId: 'team-2-chat',
+        selectLatest: false,
+      })
+    })
+    await waitFor(() => expect(app.result.current.isHostAccessBlocked(HOST_B)).toBe(true))
+    await settle()
+    const beforeLanding = toastsSeen(commits).length
+
+    await land(producerCatalog([HOST_A]))
+    // Liveness witnesses: team 1's catalog without B landed in team 2, and B is
+    // still held but no longer listed.
+    expect(cachedCatalog(app.queryClient)?.teamId).toBe('team-1')
+    expect(app.result.current.currentTeamId).toBe('team-2')
+    expect(app.result.current.isHostAccessBlocked(HOST_B)).toBe(true)
+    expect(app.result.current.heldAgentRefs).toEqual([])
+    expect(toastsSeen(commits).slice(beforeLanding)).toEqual([])
+  })
+
+  it('T-R5L4-2: a pre-switch catalog landing after a team switch keeps the team-2 Host selected', async () => {
+    const { clerum, handle } = installAppControllerClerum({
+      agentNames: [HOST_A, HOST_B],
+      agentDisplayByName: DISPLAY_BY_NAME,
+    })
+    installCatalog(clerum)
+    const { app, commits } = await mount(clerum, handle)
+    await settle()
+    const { land } = await switchWithStaleRefreshInFlight(app, handle)
+
+    act(() => {
+      app.result.current.handleSelectChatAgent(HOST_B, {
+        chatId: 'team-2-chat',
+        selectLatest: false,
+      })
+    })
+    await waitFor(() => expect(app.result.current.selectedAgent).toBe(HOST_B))
+    const beforeLanding = toastsSeen(commits).length
+
+    await land(producerCatalog([HOST_A]))
+    // Liveness witness: team 1's catalog without B landed in team 2.
+    expect(cachedCatalog(app.queryClient)?.teamId).toBe('team-1')
+    expect(app.result.current.currentTeamId).toBe('team-2')
+    expect(app.result.current.selectedAgent).toBe(HOST_B)
+    expect(toastsSeen(commits).slice(beforeLanding)).toEqual([])
+  })
+
   it('T-R2L2-1: a new hold after a successful Retry is announced again', async () => {
     const { clerum, handle } = installAppControllerClerum({
       agentNames: [HOST_A, HOST_B],

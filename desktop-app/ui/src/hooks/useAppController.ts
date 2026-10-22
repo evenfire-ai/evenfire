@@ -776,13 +776,13 @@ export function useAppController() {
     const catalog = agentsData.accessCatalog
     previousAccessCatalogRef.current = catalog
     if (!auth.isAuthenticated || !catalog) return
-    const catalogOfPrincipal = isPrincipalCatalog(catalog)
-    if (catalogOfPrincipal) {
-      for (const agentRef of catalog.agentNames) {
-        const name = catalog.agentDisplayByName?.[agentRef]
-        if (name) {
-          knownHostNamesRef.current.set(agentRef, name)
-        }
+    // A catalog of another principal (the previous team's, landing after a
+    // switch) names no Host and decides no selection or loss.
+    if (!isPrincipalCatalog(catalog)) return
+    for (const agentRef of catalog.agentNames) {
+      const name = catalog.agentDisplayByName?.[agentRef]
+      if (name) {
+        knownHostNamesRef.current.set(agentRef, name)
       }
     }
     // Compared with the previous catalog, so an effect re-run without a new
