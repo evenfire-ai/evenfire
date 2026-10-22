@@ -2970,6 +2970,31 @@ describe('Microsoft Entra ID — remote install with scopes, scope audience and 
     })
   })
 
+  it('row 14: the confirmation is audited once the CR exists, even if attach and its rollback fail', async () => {
+    const gw = gatewayWithContext()
+    vi.spyOn(gw, 'updateResource').mockRejectedValueOnce(new Error('attach boom'))
+    vi.spyOn(gw, 'deleteResource').mockRejectedValue(new Error('delete boom'))
+    const reqLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    const res = await entraInstall(
+      ENTRA_UNKNOWN_GUID_PILOT,
+      gw,
+      { scopes: [UNKNOWN_GUID_SCOPE], confirmedUnverifiedScopes: [UNKNOWN_GUID_SCOPE] },
+      { reqLog }
+    )
+    expect(res.status).toBe(500)
+    // The rollback failed, so the CR — and with it the confirmation — is live.
+    expect((await installedOauth(gw)).scopes).toEqual([UNKNOWN_GUID_SCOPE, 'offline_access'])
+    expect(reqLog.info).toHaveBeenCalledWith(
+      {
+        event: 'remote_install_unverified_scopes_confirmed',
+        serverName: 'workiq',
+        admin: 'admin-7',
+        scopes: [UNKNOWN_GUID_SCOPE],
+      },
+      expect.any(String)
+    )
+  })
+
   it('row 13: a known GUID on its host needs no confirmation and leaves no audit record', async () => {
     const gw = gatewayWithContext()
     const reqLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }

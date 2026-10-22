@@ -1445,6 +1445,21 @@ export function createAdminRemoteMcpRouter(
         }
         throw err
       }
+      if (unverifiedScopes.length > 0) {
+        // Audit trail of who vouched for a token audience the platform could not verify.
+        // Emitted as soon as the CR exists: a CR that outlives a failed later step or a
+        // failed rollback is used at runtime, and writing it counts as the confirmation.
+        // Scopes are not secret; this record exists to name them.
+        reqLog.info(
+          {
+            event: 'remote_install_unverified_scopes_confirmed',
+            serverName,
+            admin: req.adminAuth?.sub,
+            scopes: unverifiedScopes,
+          },
+          'remote install: operator confirmed scopes whose API cannot be tied to the server'
+        )
+      }
 
       // ── Saga step 2b (DCR only): bind the pending row to the created CR's uid ──
       // Only DCR wrote a dynamic_clients row; other modes skip this. Binding seals the
@@ -1571,19 +1586,6 @@ export function createAdminRemoteMcpRouter(
         },
         'remote oauth mcp server installed'
       )
-      if (unverifiedScopes.length > 0) {
-        // Audit trail of who vouched for a token audience the platform could not verify.
-        // Scopes are not secret; this record exists to name them.
-        reqLog.info(
-          {
-            event: 'remote_install_unverified_scopes_confirmed',
-            serverName,
-            admin: req.adminAuth?.sub,
-            scopes: unverifiedScopes,
-          },
-          'remote install: operator confirmed scopes whose API cannot be tied to the server'
-        )
-      }
 
       // Names-only summary — never echo the secret material or the pinned tokens.
       res.status(201).json({
