@@ -9,9 +9,12 @@ lives in [host-context-controller](../host-context-controller/) (`src/reconciler
 
 ## The image
 
-- Base: `nginx:1.30.1-alpine` — kept because its entrypoint runs `envsubst` on
-  `/etc/nginx/templates/*.template` at startup, which HCC relies on for
-  credential injection.
+- Base: `nginx:1.30.6-alpine`, pinned by multi-arch index digest — kept because
+  its entrypoint runs `envsubst` on `/etc/nginx/templates/*.template` at
+  startup, which HCC relies on for credential injection. 1.30.6 is the stable
+  release that fixes CVE-2026-15176, CVE-2026-93479, CVE-2026-95101,
+  CVE-2026-97629 and CVE-2026-97205; `scripts/validate-nginx-images.sh`
+  rejects older platform references.
 - Hardened to run as non-root (`USER 101:101`): the `user` directive is removed
   from `nginx.conf`, the PID file moves to `/tmp/nginx.pid`, the shipped
   `default.conf` is removed, and nginx dirs plus `/tmp` temp dirs are chowned
@@ -77,6 +80,12 @@ comes from `spec.transport.port` (default 3000); `/health` answers on it.
 
 The generated config, sanitization rules, and deployment shape are asserted in
 [host-context-controller/src/\_\_tests\_\_/reconciler.remote.test.ts](../host-context-controller/src/__tests__/reconciler.remote.test.ts).
+
+[scripts/tests/test-nginx-egress-proxy-tls.sh](../scripts/tests/test-nginx-egress-proxy-tls.sh)
+builds this image, renders the template through the HCC reconciler, and runs it
+against a local TLS upstream: a trusted chain (direct and with two
+intermediates) is accepted; an untrusted CA, an expired certificate, a hostname
+mismatch, and the test CA without the mounted trust store are rejected.
 
 ## Build & deploy
 

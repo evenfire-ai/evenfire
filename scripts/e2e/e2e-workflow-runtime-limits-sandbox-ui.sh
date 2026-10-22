@@ -151,7 +151,7 @@ derive_cleanup_limit_inputs() {
 
 print_workload() {
   local id=$1
-  printf '  - id: %s\n    type: deployment\n    image: nginxinc/nginx-unprivileged:1.27-alpine\n    port: 8080\n' "$id"
+  printf '  - id: %s\n    type: deployment\n    image: nginxinc/nginx-unprivileged:1.30.6-alpine\n    port: 8080\n' "$id"
 }
 
 print_internal_ref() {
