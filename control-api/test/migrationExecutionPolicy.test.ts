@@ -104,7 +104,7 @@ describe('D34 migration execution policy', () => {
     ).toBe(false)
   })
 
-  it('preserves the approved historical migration bodies byte-for-byte', async () => {
+  it('pins the reviewed PR1 migration bodies byte-for-byte', async () => {
     // S1d changed the PR1 bodies before any shared environment applied them:
     // statement-level catalog triggers are no longer installed by 0130, 0133/0134
     // replace row triggers in place, and planned indexes left the transactions.
