@@ -258,6 +258,12 @@ export function effectiveRemoteScopes(result: DiscoveryResult, override?: string
   return [...new Set(scopes)]
 }
 
+/** `spec.oauth.asProfile` of the object the apiserver returned for a write. */
+function persistedAsProfile(persisted: unknown): unknown {
+  const spec = (persisted as { spec?: { oauth?: { asProfile?: unknown } } } | null)?.spec
+  return spec?.oauth?.asProfile
+}
+
 export function buildRemoteOAuthSpec(
   result: DiscoveryResult,
   opts: {
@@ -1412,6 +1418,7 @@ export function createAdminRemoteMcpRouter(
       let createdClientSecretSnapshot: SecretSnapshot | null = null
       let createdServerPreconditions: ResourcePreconditions | undefined
       let createdServerUid: string | undefined
+      let createdServer: unknown
       if (effectiveClientMode === 'confidential' && clientSecretName) {
         try {
           createdClientSecretSnapshot = await gateway.createSecret({
@@ -1445,7 +1452,7 @@ export function createAdminRemoteMcpRouter(
 
       // ── Saga step 2: create the McpServer CR (rollback Secret on failure) ──
       try {
-        const createdServer = await gateway.createResource(
+        createdServer = await gateway.createResource(
           'mcpservers',
           { metadata: { name: serverName, labels: managedLabels }, spec: mcpServerSpec },
           targetNs
@@ -1488,28 +1495,86 @@ export function createAdminRemoteMcpRouter(
         )
       }
 
+      /** Fenced delete of the CR this install created; false when it could not be removed. */
+      const rollbackCreatedServer = async (): Promise<boolean> => {
+        try {
+          await gateway.deleteResource(
+            'mcpservers',
+            serverName,
+            targetNs,
+            createdServerPreconditions
+          )
+          await waitForDeletion(
+            () => gateway.getResource('mcpservers', serverName, targetNs),
+            `McpServer/${serverName}`
+          )
+          return true
+        } catch {
+          // Best-effort rollback; preserve the reported failure.
+          return false
+        }
+      }
+
+      // ── Saga step 2a: the profile must survive the write ──────────────────
+      // An apiserver whose McpServer CRD predates `asProfile` prunes it and still answers
+      // 201. The CR would keep the Entra issuer on the generic wire (RFC 8707 `resource`,
+      // no scope on exchange and refresh), and since the profile's presence is immutable
+      // under the newer CRD, applying it later cannot repair the object: it must not stay.
+      const requestedAsProfile = oauthSpec.asProfile
+      if (
+        requestedAsProfile !== undefined &&
+        persistedAsProfile(createdServer) !== requestedAsProfile
+      ) {
+        const serverRemoved = await rollbackCreatedServer()
+        let secretRemoved = true
+        if (createdClientSecretSnapshot && clientSecretName) {
+          try {
+            await gateway.deleteSecret(clientSecretName, targetNs, {
+              uid: createdClientSecretSnapshot.uid,
+              resourceVersion: createdClientSecretSnapshot.resourceVersion,
+            })
+          } catch {
+            secretRemoved = false
+          }
+        }
+        await rollbackDynamicClient()
+        reqLog.warn(
+          {
+            event: 'remote_install_crd_outdated',
+            serverName,
+            namespace: targetNs,
+            field: 'spec.oauth.asProfile',
+          },
+          'remote install refused: the apiserver pruned spec.oauth.asProfile'
+        )
+        if (!serverRemoved || !secretRemoved) {
+          reqLog.error(
+            {
+              event: 'remote_install_crd_outdated_rollback_failed',
+              serverName,
+              namespace: targetNs,
+              serverRemoved,
+              secretRemoved,
+            },
+            'remote install rollback after a pruned asProfile left objects behind'
+          )
+        }
+        res.status(409).json({
+          error: 'mcpserver_crd_outdated',
+          code: 'mcpserver_crd_outdated',
+          message:
+            'McpServer spec.oauth.asProfile was not persisted by Kubernetes. ' +
+            'Apply the latest clerum-crds before installing this server.',
+        })
+        return
+      }
+
       // ── Saga step 2b (DCR only): bind the pending row to the created CR's uid ──
       // Only DCR wrote a dynamic_clients row; other modes skip this. Binding seals the
       // row to the McpServer's metadata.uid so a later teardown/reclaim can fence by the
       // exact installation. A missing uid or a lost bind means the row is no longer ours
       // — compensate the CR (fenced) and this install rather than leave a dangling row.
       if (body.mode === 'dcr' && dcrRegistered) {
-        const rollbackCreatedServer = async (): Promise<void> => {
-          try {
-            await gateway.deleteResource(
-              'mcpservers',
-              serverName,
-              targetNs,
-              createdServerPreconditions
-            )
-            await waitForDeletion(
-              () => gateway.getResource('mcpservers', serverName, targetNs),
-              `McpServer/${serverName}`
-            )
-          } catch {
-            // Best-effort rollback; preserve the reported failure.
-          }
-        }
         if (createdServerUid === undefined) {
           // Without a uid the row can never be bound (it would strand as pending and be
           // reclaimed by the TTL). Compensate now instead of leaving that residue.

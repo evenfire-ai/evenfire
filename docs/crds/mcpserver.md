@@ -253,9 +253,12 @@ API translates to this explicit `egressClass: public-web` CRD shape.
 - **AS-PROFILE-ISSUER:** when `spec.oauth.asProfile` is set, `spec.oauth.issuer` must be a Microsoft Entra ID tenant authority, matching `^https://login[.]microsoftonline[.]com/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/v2[.]0$` (lower-case tenant GUID, no trailing slash). Otherwise the write is rejected with `spec.oauth.asProfile entra-v2 requires spec.oauth.issuer to be a Microsoft Entra ID tenant authority`. A profile stops sending the RFC 8707 `resource`, so it must stay on the issuer it was recognised from. control-api applies the same check at runtime and refuses an object written before the rule was in the cluster (`409 remote_oauth_spec_incoherent`, reason `as_profile_issuer_mismatch`).
 
 > **Apply the CRD before control-api.** An apiserver whose McpServer CRD does not
-> declare `asProfile` drops the field on write and still answers 200. The server
-> is then installed without the profile: control-api sends the RFC 8707
-> `resource`, which Entra rejects. See
+> declare `asProfile` drops the field on write and still answers 200. The install
+> route detects this, removes what it created and answers `409 mcpserver_crd_outdated`.
+> An object written another way (`kubectl`, GitOps) keeps the Entra issuer without
+> the profile; control-api refuses it at runtime (`409 remote_oauth_spec_incoherent`,
+> reason `as_profile_issuer_mismatch`), and because the profile cannot be added after
+> creation it must be deleted and recreated once the CRD is applied. See
 > [Deploy order for additive schema fields](../../charts/clerum-crds/README.md#deploy-order-for-additive-schema-fields).
 
 ## Example

@@ -303,6 +303,17 @@ function remoteOAuthSpecIncoherence(
   ) {
     return 'as_profile_issuer_mismatch'
   }
+  // The converse: the install always pins the profile its issuer is recognised from, so
+  // a tenant issuer without one was written outside it, typically by an apiserver whose
+  // CRD predates the field and pruned it. On the generic wire that issuer either rejects
+  // the exchange or picks the audience from the browser's scopes.
+  if (
+    oauth.asProfile === undefined &&
+    typeof oauth.issuer === 'string' &&
+    detectAsProfile(oauth.issuer) !== null
+  ) {
+    return 'as_profile_issuer_mismatch'
+  }
   // Without `resource` the scopes alone pick the token's audience, and the scopes or the
   // base URL can be edited after the install (API or kubectl). The hard audience rules
   // are therefore re-checked against the base URL in force now: a known API's GUID scope
@@ -359,7 +370,9 @@ function asEndpointsOnIssuerSite(oauth: McpServerOAuthDecl): boolean {
 /**
  * Runtime mirror of the remote-carril coherence rules of the McpServer CRD
  * (REMOTE-SECRET-PAIRING for `public`, REMOTE-BEARER-HEADER, AS-PROFILE-ISSUER), of the
- * install's scope-audience rules for an authorization-server profile, and of the install's
+ * install's profile pinning (a recognised issuer always carries its profile; the CRD does
+ * not require it, and an older CRD prunes the field), of the install's
+ * scope-audience rules for an authorization-server profile, and of the install's
  * per-server callback rules (no CIMD client and same-site AS endpoints when the AS
  * does not return `iss`, which the CRD cannot express). Throws
  * {@link RemoteOAuthSpecIncoherentError} for a remote server whose shape no

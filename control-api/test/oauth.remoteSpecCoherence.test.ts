@@ -127,6 +127,12 @@ function workIqWithScopes(scopes: string[]): Record<string, unknown> {
   return { ...workIqGuid.spec.oauth, scopes }
 }
 
+/** The installed Work IQ `spec.oauth` minus the profile, as an outdated CRD persists it. */
+function workIqWithoutProfile(): Record<string, unknown> {
+  const { asProfile: _pruned, ...oauth } = workIqGuid.spec.oauth
+  return oauth
+}
+
 /** A Notion pre-registered CR with the profile stamped on it: no producer, a direct write. */
 function profileOnNotionOAuth(): Record<string, unknown> {
   const oauth = buildRemoteOAuthSpec(notionDiscovery, {
@@ -267,6 +273,14 @@ const INCOHERENT: ReadonlyArray<{
   {
     label: 'unknown asProfile on the Entra issuer',
     oauth: () => ({ ...workIqGuid.spec.oauth, asProfile: 'other' }),
+    remote: workIqRemote,
+    reason: 'as_profile_issuer_mismatch',
+    consentOnly: false,
+  },
+  {
+    // What an apiserver with a CRD older than the field leaves of a real Work IQ install.
+    label: 'Entra tenant issuer without asProfile (pruned by an outdated CRD)',
+    oauth: workIqWithoutProfile,
     remote: workIqRemote,
     reason: 'as_profile_issuer_mismatch',
     consentOnly: false,

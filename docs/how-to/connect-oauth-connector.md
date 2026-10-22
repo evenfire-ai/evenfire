@@ -500,6 +500,7 @@ out too, but the screen only tracks the current one.
 | Install asks to confirm scopes (`scope_audience_unverified`)                        | A GUID scope names an API the platform cannot tie to the server                                                | Confirm only if that API belongs to the server; otherwise change the scope                               |
 | `409 oauth_client_id_in_use`                                                        | The app registration is already used by another server                                                         | Create a separate app registration for each server                                                       |
 | Connect or token requests fail with `409 remote_oauth_spec_incoherent`              | The McpServer was edited and breaks a rule (reason `scope_audience_mismatch` or `as_profile_issuer_mismatch`)  | Fix `spec.oauth.scopes` or `spec.remote.baseUrl`, or reinstall the server                                |
+| Install returns `409 mcpserver_crd_outdated`                                        | The cluster's McpServer CRD predates `spec.oauth.asProfile`, so Kubernetes dropped it                          | Apply the latest clerum-crds, then install again                                                         |
 
 ## Related
 

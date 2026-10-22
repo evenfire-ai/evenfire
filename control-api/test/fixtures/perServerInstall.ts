@@ -93,6 +93,8 @@ export async function installRemoteServer(opts: {
   discovery: DiscoveryResult
   body: Record<string, unknown>
   registration?: Record<string, unknown>
+  /** Stands in for the correlation middleware's `req.log`, for suites that assert logs. */
+  reqLog?: unknown
 }): Promise<InstallOutcome> {
   const { transport, calls } = makeDcrTransport({
     registrationEndpoint: opts.discovery.endpoints.registration,
@@ -101,6 +103,12 @@ export async function installRemoteServer(opts: {
   })
   const app = express()
   app.use(express.json())
+  if (opts.reqLog) {
+    app.use((req, _res, next) => {
+      ;(req as { log?: unknown }).log = opts.reqLog
+      next()
+    })
+  }
   app.use(
     createAdminRemoteMcpRouter(opts.gateway as unknown as K8sGateway, {
       db: opts.db,
