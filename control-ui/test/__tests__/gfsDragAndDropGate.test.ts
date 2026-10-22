@@ -9,6 +9,7 @@ import {
   collectGateProblems,
   collectReportJourneys,
   evaluateGateReport,
+  invalidatePreviousAttemptArtifacts,
   tallyReportJourneys,
   writeSanitizedRunSummary,
 } from '../../e2e/run-gfs-drag-and-drop.mjs'
@@ -298,6 +299,52 @@ describe('EvenDrive drag-and-drop E2E gate', () => {
       expect(summary.processExit).toBe(1)
       expect(summary.verdict).toBe('fail')
       fs.rmSync(filePath, { force: true })
+    })
+  })
+
+  describe('stale attempt artifacts', () => {
+    it('removes a previous PASS summary when the next attempt starts (success → early failure)', () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gfs-dnd-artifacts-'))
+      try {
+        // A previous attempt completed and passed, leaving its artifacts.
+        const report = journeyReport([{ title: 'journey one' }])
+        writeSanitizedRunSummary({
+          lane: LANE,
+          revision: 'abc123',
+          branch: 'feat/example',
+          command: COMMAND,
+          report,
+          run: { status: 0 },
+          selectedJourneys: collectReportJourneys(report),
+          verdict: 'pass',
+          filePath: path.join(dir, 'playwright-summary.json'),
+        })
+        fs.writeFileSync(path.join(dir, 'playwright-report.json'), '{}')
+        fs.writeFileSync(path.join(dir, 'playwright-selection.json'), '{}')
+        expect(fs.existsSync(path.join(dir, 'playwright-summary.json'))).toBe(true)
+
+        // The next attempt fails before it can write its own summary. The
+        // previous pass must not survive it as apparent evidence.
+        invalidatePreviousAttemptArtifacts(dir)
+        for (const name of [
+          'playwright-summary.json',
+          'playwright-report.json',
+          'playwright-selection.json',
+        ]) {
+          expect(fs.existsSync(path.join(dir, name))).toBe(false)
+        }
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('tolerates an artifact directory with nothing to remove', () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gfs-dnd-artifacts-'))
+      try {
+        expect(() => invalidatePreviousAttemptArtifacts(dir)).not.toThrow()
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true })
+      }
     })
   })
 

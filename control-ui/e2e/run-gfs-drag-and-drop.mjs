@@ -334,6 +334,21 @@ export function writeSanitizedRunSummary({
   return summary
 }
 
+/**
+ * Remove every artifact a PREVIOUS attempt left behind, before this attempt
+ * can fail ahead of writing its own.
+ *
+ * The raw report and selection were already cleared at run start; the
+ * SANITIZED SUMMARY was not. A previous PASS summary that survives a launch
+ * which then fails early — refused setup, unreachable endpoint, missing or
+ * unreadable report — reads as evidence for a run that never happened.
+ */
+export function invalidatePreviousAttemptArtifacts(dir) {
+  fs.rmSync(path.join(dir, 'playwright-summary.json'), { force: true })
+  fs.rmSync(path.join(dir, 'playwright-report.json'), { force: true })
+  fs.rmSync(path.join(dir, 'playwright-selection.json'), { force: true })
+}
+
 /** Bounded reachability probe. Never prints the response body. */
 export async function probeReachable(url, timeoutMs = PROBE_TIMEOUT_MS) {
   try {
@@ -395,6 +410,10 @@ function readJson(filePath) {
 
 async function main() {
   const env = process.env
+  // A previous attempt's artifacts must not outlive the start of this one,
+  // whichever way it ends: an old PASS summary left behind by an early
+  // failure would read as evidence for a run that never happened.
+  invalidatePreviousAttemptArtifacts(artifactDir())
   const problems = collectGateProblems(env)
   if (problems.length > 0) {
     process.stderr.write('[E2E-GATE] The EvenDrive drag-and-drop gate cannot run:\n')
@@ -424,9 +443,6 @@ async function main() {
   const reportPath = path.join(dir, 'playwright-report.json')
   const selectionPath = path.join(dir, 'playwright-selection.json')
   const playwrightBin = resolvePlaywrightBin()
-  // A previous successful run must never supply evidence for a failed launch.
-  fs.rmSync(reportPath, { force: true })
-  fs.rmSync(selectionPath, { force: true })
 
   // Enumerate the journeys Playwright SELECTS before running them. The run's
   // report is reconciled against this inventory, so a report that describes
