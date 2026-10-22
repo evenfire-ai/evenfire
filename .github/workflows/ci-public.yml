@@ -987,19 +987,25 @@ jobs:
   nginx-image-guard:
     name: Validate platform NGINX images
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Run NGINX image guard
         run: bash scripts/validate-nginx-images.sh
       - name: Test NGINX image guard
         run: bash scripts/tests/test-validate-nginx-images.sh
+      - name: Test NGINX digest verifier
+        run: bash scripts/tests/test-verify-nginx-image-digests.sh
       - name: Verify pinned NGINX digests against the registry
+        env:
+          NGINX_REGISTRY_MIRROR: mirror.gcr.io
         run: bash scripts/verify-nginx-image-digests.sh
 
   # ─── Remote MCP egress proxy TLS contract (native amd64 + arm64) ──────────
   nginx-egress-proxy-tls:
     name: Egress proxy TLS (${{ matrix.arch }})
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -1015,6 +1021,8 @@ jobs:
         working-directory: host-context-controller
         run: npm ci
       - name: Run egress proxy TLS contract
+        env:
+          NGINX_REGISTRY_MIRROR: mirror.gcr.io
         run: bash scripts/tests/test-nginx-egress-proxy-tls.sh
 
   # ─── Cf-Access header-read guard ──────────────────────────────────────────

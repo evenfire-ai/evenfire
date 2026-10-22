@@ -79,9 +79,35 @@ fail() {
 
 BASE_IMAGE="$(sed -n 's/^FROM[[:space:]]\{1,\}\([^[:space:]]*\).*/\1/p' "$DOCKERFILE_DIR/Dockerfile")"
 [ -n "$BASE_IMAGE" ] || { echo "FAIL: no FROM line in $DOCKERFILE_DIR/Dockerfile" >&2; exit 1; }
-docker build -q -t "$PROXY_IMAGE" "$DOCKERFILE_DIR" >/dev/null
+# With NGINX_REGISTRY_MIRROR set (CI uses mirror.gcr.io), the Docker Hub base is
+# pulled from the mirror by digest, for the build and for the upstream. The
+# build log must name the mirror reference: a --build-context key that does not
+# match the FROM line is ignored by BuildKit, which then pulls Docker Hub.
+UPSTREAM_IMAGE="$BASE_IMAGE"
+MIRROR="${NGINX_REGISTRY_MIRROR:-}"
+if [ -n "$MIRROR" ]; then
+  case "$BASE_IMAGE" in
+    nginx:*@sha256:*) ;;
+    *) echo "FAIL: NGINX_REGISTRY_MIRROR is set, but FROM '$BASE_IMAGE' is not a Docker Hub nginx:<tag>@<digest>" >&2; exit 1 ;;
+  esac
+  UPSTREAM_IMAGE="$MIRROR/library/nginx@${BASE_IMAGE#*@}"
+  BUILD_LOG="$WORK/build.log"
+  if ! docker buildx build --progress=plain --load --build-context "$BASE_IMAGE=docker-image://$UPSTREAM_IMAGE" \
+    -t "$PROXY_IMAGE" "$DOCKERFILE_DIR" >"$BUILD_LOG" 2>&1; then
+    cat "$BUILD_LOG" >&2
+    echo "FAIL: building $PROXY_IMAGE from $UPSTREAM_IMAGE failed" >&2
+    exit 1
+  fi
+  if ! grep -qF "$UPSTREAM_IMAGE" "$BUILD_LOG"; then
+    cat "$BUILD_LOG" >&2
+    echo "FAIL: the build log does not name $UPSTREAM_IMAGE; the base came from another registry" >&2
+    exit 1
+  fi
+else
+  docker build -q -t "$PROXY_IMAGE" "$DOCKERFILE_DIR" >/dev/null
+fi
 echo "arch: $(docker version --format '{{.Server.Arch}}')"
-echo "base image: $BASE_IMAGE"
+echo "base image: $BASE_IMAGE (pulled as $UPSTREAM_IMAGE)"
 echo "proxy image: $(docker run --rm --entrypoint nginx "$PROXY_IMAGE" -v 2>&1)"
 echo "proxy user: $(docker run --rm --entrypoint id "$PROXY_IMAGE")"
 
@@ -223,7 +249,7 @@ docker network create "$NETWORK" >/dev/null
 docker run -d --name "$UPSTREAM" --network "$NETWORK" --network-alias upstream.test \
   -v "$PKI:/fixtures:ro" -v "$WORK/upstream.conf:/etc/nginx/conf.d/default.conf:ro" \
   -p 127.0.0.1::8441 -p 127.0.0.1::8442 -p 127.0.0.1::8443 -p 127.0.0.1::8444 -p 127.0.0.1::8445 \
-  "$BASE_IMAGE" >/dev/null
+  "$UPSTREAM_IMAGE" >/dev/null
 
 host_port() {
   docker port "$1" "$2/tcp" | head -n1 | sed 's/.*://'
