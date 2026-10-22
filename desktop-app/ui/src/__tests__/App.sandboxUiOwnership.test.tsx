@@ -556,7 +556,10 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     await flushMacrotask()
 
     expect(sandboxUi.close).toHaveBeenCalledWith({ launchId: first })
-    expect(tabOf(ALPHA!.appRef)?.app?.savedRoutePath).toBe('/inbox')
+    // The saved route lands with the deactivation continuation, which can
+    // commit a tick after the close under load: wait for the store write
+    // instead of sampling it once.
+    await waitFor(() => expect(tabOf(ALPHA!.appRef)?.app?.savedRoutePath).toBe('/inbox'))
 
     fireEvent.click(screen.getByRole('button', { name: 'Alpha', pressed: false }))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
