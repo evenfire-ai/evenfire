@@ -56,6 +56,7 @@ function installGfs(options: {
       gfs: {
         resolve: vi.fn(async () => resource),
         affordances,
+        listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
         downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
         moveResource,
         listAccessible: options.listAccessible ?? (async () => ({ items: [], nextCursor: null })),
@@ -204,6 +205,59 @@ describe('FilePreviewPage move permission contract', () => {
       await within(dialog).findByText('You do not have write access to the destination folder.')
     ).toBeTruthy()
     expect(moveResource).not.toHaveBeenCalled()
+  })
+
+  it('keeps a confirmed move visible while fresh source-parent permissions are pending', async () => {
+    const destinationPage = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+    ])
+    let sourceCalls = 0
+    let finishSourceRefresh!: (value: ReturnType<typeof delegationAffordances>) => void
+    const moveResource = vi.fn(async () => undefined)
+    const { affordances } = installGfs({
+      source: () => {
+        sourceCalls += 1
+        if (sourceCalls !== 2) return Promise.resolve(fullAccess)
+        return new Promise(resolve => {
+          finishSourceRefresh = resolve
+        })
+      },
+      listAccessible: async () => destinationPage,
+      move: moveResource,
+    })
+    installController()
+    const { queryClient } = renderPreview()
+
+    await screen.findByAltText('Preview of diagram.png')
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith(parentId, 'main'))
+    const menu = await openPreviewActions()
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
+    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Move here (Archive)' })).toBeTruthy()
+    )
+
+    void queryClient.invalidateQueries({
+      predicate: query => query.queryKey.includes(parentId),
+    })
+    await waitFor(() => expect(sourceCalls).toBe(2))
+    fireEvent.click(screen.getByRole('button', { name: 'Move here (Archive)' }))
+    const checkingVisible = Boolean(screen.queryByText('Checking permissions…'))
+
+    await act(async () => finishSourceRefresh(fullAccess))
+    expect(checkingVisible).toBe(true)
+    await waitFor(() =>
+      expect(moveResource).toHaveBeenCalledWith(
+        '0123456789abcdef0123456789abcdef',
+        'destination-1',
+        'main',
+        7
+      )
+    )
+    expect(screen.queryByRole('dialog', { name: 'Move file diagram.png' })).toBeNull()
   })
 
   it('moves with exact resource version after both parent and destination checks pass', async () => {

@@ -3810,9 +3810,15 @@ describe('FilesPage', () => {
       ],
       nextCursor: null,
     }))
+    const affordances = vi.fn(async (resourceId: string) =>
+      delegationAffordances(
+        new Set(resourceId === 'folder-1' ? ['read', 'write', 'delete'] : ['read', 'write']),
+        false
+      )
+    )
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { listChildren } },
+      value: { gfs: { affordances, listChildren } },
     })
     const child = {
       resourceId: 'child-1',

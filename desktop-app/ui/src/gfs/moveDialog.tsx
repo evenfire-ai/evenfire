@@ -198,6 +198,7 @@ export function GfsMoveDialog({
   onMove,
   onClose,
   busy = false,
+  permissionStatus = null,
   onAuthorityFailure,
 }: GfsMoveDialogProps) {
   const initialDestination = initialCrumbs[initialCrumbs.length - 1]
@@ -347,6 +348,11 @@ export function GfsMoveDialog({
           </span>
         </header>
         <div className="da-gfs-manage-dialog__body">
+          {permissionStatus === 'checking' ? (
+            <p className="muted" role="status">
+              Checking permissions…
+            </p>
+          ) : null}
           {error ? <StatusBanner tone="error" text={error} /> : null}
           {listError ? <StatusBanner tone="error" text={listError} /> : null}
           <div className="da-gfs-move-dialog__current-location">
@@ -432,7 +438,9 @@ export function GfsMoveDialog({
                 aria-label={
                   selectedDestination ? `Move here (${selectedDestination.name})` : 'Move'
                 }
-                disabled={!selectedDestination || pathPassesThroughTarget || isNoOpDestination}
+                disabled={
+                  busy || !selectedDestination || pathPassesThroughTarget || isNoOpDestination
+                }
                 loading={busy}
                 onClick={() => void commit()}
                 type="button"

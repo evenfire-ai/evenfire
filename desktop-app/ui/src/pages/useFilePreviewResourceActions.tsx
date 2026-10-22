@@ -110,10 +110,12 @@ export function useFilePreviewResourceActions({
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [renameName, setRenameName] = useState(fileName)
   const [mutationPending, setMutationPending] = useState(false)
+  const [movePermissionStatus, setMovePermissionStatus] = useState<'checking' | null>(null)
   const [revokingGrantId, setRevokingGrantId] = useState<string | null>(null)
   const [revokingShareId, setRevokingShareId] = useState<string | null>(null)
   const deletePendingRef = useRef(false)
   const renamePendingRef = useRef(false)
+  const moveRequestRef = useRef(0)
 
   const resourceQuery = useQuery({
     queryKey: [...desktopQueryKeys.gfsRoot, sessionScope, 'preview-resource', gfsUri],
@@ -136,6 +138,22 @@ export function useFilePreviewResourceActions({
     ? undefined
     : affordancesQuery.data
   const sourceParentId = resource?.parentResourceId ?? null
+  const moveContextRef = useRef({
+    gfsUri,
+    sessionScope,
+    resourceId: resource?.resourceId ?? null,
+    parentResourceId: sourceParentId,
+    drive: resource?.drive ?? GFS_DRIVE_MAIN,
+    version: resource?.version ?? null,
+  })
+  moveContextRef.current = {
+    gfsUri,
+    sessionScope,
+    resourceId: resource?.resourceId ?? null,
+    parentResourceId: sourceParentId,
+    drive: resource?.drive ?? GFS_DRIVE_MAIN,
+    version: resource?.version ?? null,
+  }
   const sourceParentAffordancesQuery = useQuery({
     queryKey: desktopQueryKeys.gfsAffordances(sessionScope, sourceParentId ?? gfsUri, drive),
     queryFn: () => window.clerum.gfs.affordances(sourceParentId!, drive),
@@ -217,6 +235,9 @@ export function useFilePreviewResourceActions({
   }, [grantsQuery.error, inheritedQuery.error, onAuthorityFailure, sharesQuery.error])
 
   useEffect(() => {
+    moveRequestRef.current += 1
+    setMovePermissionStatus(null)
+    setMutationPending(false)
     setShareOpen(false)
     setRenameOpen(false)
     setMoveOpen(false)
@@ -337,13 +358,54 @@ export function useFilePreviewResourceActions({
   }
 
   const handleMove = async (destinationId: string, destinationName: string) => {
-    if (!resource || !canMove) return
+    if (!resource || !sourceParentId) return
+    const requestId = ++moveRequestRef.current
+    const moveContext = {
+      gfsUri,
+      sessionScope,
+      resourceId: resource.resourceId,
+      parentResourceId: sourceParentId,
+      drive: resource.drive,
+      version: resource.version,
+    }
+    const isActiveMove = () => moveRequestRef.current === requestId
+    const hasCurrentMoveContext = () => {
+      const current = moveContextRef.current
+      return (
+        current.gfsUri === moveContext.gfsUri &&
+        current.sessionScope === moveContext.sessionScope &&
+        current.resourceId === moveContext.resourceId &&
+        current.parentResourceId === moveContext.parentResourceId &&
+        current.drive === moveContext.drive &&
+        current.version === moveContext.version
+      )
+    }
+    setMovePermissionStatus('checking')
     setMutationPending(true)
     try {
+      const sourceCheck = await sourceParentAffordancesQuery.refetch({ cancelRefetch: false })
+      if (!isActiveMove()) return
+      if (!hasCurrentMoveContext()) {
+        throw new Error(
+          'Move was not started because the workspace changed; review the destination.'
+        )
+      }
+      if (sourceCheck.isError || !sourceCheck.data) {
+        throw sourceCheck.error ?? new Error('Could not verify source folder permissions.')
+      }
+      if (!hasGfsMoveSourcePermissions(sourceCheck.data.held)) {
+        throw new Error('You do not have write and delete access to the source folder.')
+      }
       const destinationAffordances = await window.clerum.gfs.affordances(
         destinationId,
         resource.drive
       )
+      if (!isActiveMove()) return
+      if (!hasCurrentMoveContext()) {
+        throw new Error(
+          'Move was not started because the workspace changed; review the destination.'
+        )
+      }
       if (!destinationAffordances.held.includes('write')) {
         throw new Error('You do not have write access to the destination folder.')
       }
@@ -353,14 +415,19 @@ export function useFilePreviewResourceActions({
         resource.drive,
         resource.version
       )
+      if (!isActiveMove() || !hasCurrentMoveContext()) return
       await invalidateResource()
       setMoveOpen(false)
       pushToast?.(`Moved ${resource.name} to ${destinationName}`, 'success')
     } catch (error) {
+      if (!isActiveMove()) return
       if (onAuthorityFailure(errorMessage(error))) setMoveOpen(false)
       else throw error
     } finally {
-      setMutationPending(false)
+      if (isActiveMove()) {
+        setMovePermissionStatus(null)
+        setMutationPending(false)
+      }
     }
   }
 
@@ -621,8 +688,14 @@ export function useFilePreviewResourceActions({
           sessionScope={sessionScope}
           initialCrumbs={[]}
           onMove={handleMove}
-          onClose={() => setMoveOpen(false)}
+          onClose={() => {
+            moveRequestRef.current += 1
+            setMovePermissionStatus(null)
+            setMutationPending(false)
+            setMoveOpen(false)
+          }}
           busy={mutationPending}
+          permissionStatus={movePermissionStatus}
           onAuthorityFailure={onAuthorityFailure}
         />
       ) : null}
