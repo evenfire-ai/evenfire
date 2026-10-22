@@ -715,6 +715,8 @@ export function App() {
       const wasActive = current.activeTabId === id
       const projected = closeWorkspaceTab(current, id)
       if (projected === current) return
+      const closed = current.tabs.find(tab => tab.id === id)
+      if (closed) vm.forgetClosedChatHost(closed, projected)
       // Closing the active tab activates a neighbor (or empties the workspace,
       // §5). Reveal it so its content follows the strip. Whether an app is
       // launched is decided on the commit, not on App's last render: a pending
@@ -725,7 +727,7 @@ export function App() {
         ACTIVATED_TAB_LAUNCH
       )
     },
-    [activateAndLaunch, revealWorkspaceTab]
+    [activateAndLaunch, revealWorkspaceTab, vm.forgetClosedChatHost]
   )
 
   // Session-only strip reorder (drag & drop / keyboard). It never changes the

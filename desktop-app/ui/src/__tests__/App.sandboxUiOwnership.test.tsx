@@ -249,6 +249,7 @@ function makeController(): AppController {
     openFilesSection,
     openPreviewSection,
     lastActiveChatTabId: null,
+    forgetClosedChatHost: vi.fn(),
     activeChatId: null,
     chatList: [],
     latestChatSessions: [],

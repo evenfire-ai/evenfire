@@ -18,6 +18,7 @@ import {
 } from '../lib/hostAuthorityStore'
 import { selectUnauthenticatedView } from '../lib/unauthenticatedView'
 import { summarizeWorkflowResource } from '../lib/workflows'
+import type { WorkspaceTab, WorkspaceTabsState } from '../lib/workspaceTabs.types'
 import type {
   AgentApprovalNotificationTarget,
   AgentConversationNotificationTarget,
@@ -378,8 +379,22 @@ export function useAppController() {
   // The Host of the conversation the chat drawer shows. A hold clears the
   // selection to stop reads, so the drawer, which is never the active tab,
   // keeps that identity here. Written by every chat selection and by a drawer
-  // request for a held Host; reset with the authority scope.
+  // request for a held Host; reset with the authority scope and when the user
+  // closes the last chat tab of that Host.
   const lastChatHostRef = useRef<string | null>(null)
+  // Called by the tab strip before it commits a close. Closing the last chat
+  // tab of the recorded Host dismisses its conversation, so the drawer no longer
+  // shows it. Cleared here, not in an effect: ChatPage's effect would otherwise
+  // run first with the old value.
+  const forgetClosedChatHost = useCallback(
+    (closed: WorkspaceTab, remaining: WorkspaceTabsState) => {
+      const agentRef = closed.kind === 'chat' ? (closed.chat?.agentRef ?? null) : null
+      if (agentRef === null || lastChatHostRef.current !== agentRef) return
+      if (remaining.tabs.some(tab => tab.kind === 'chat' && tab.chat?.agentRef === agentRef)) return
+      lastChatHostRef.current = null
+    },
+    []
+  )
   const isHostAccessBlocked = useCallback(
     (agentRef: string) => hostAuthority.isBlocked(agentRef),
     [hostAuthority]
@@ -1722,6 +1737,7 @@ export function useAppController() {
     clearAppsPicker: nav.clearAppsPicker,
     activateWorkspaceChatTab: nav.activateChatTab,
     lastActiveChatTabId: nav.lastActiveChatTabId,
+    forgetClosedChatHost,
     openFilesSection: nav.openFilesSection,
     openPreviewSection: nav.openPreviewSection,
     handleOpenAgentWorkspace,

@@ -343,6 +343,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     openFilesSection,
     openPreviewSection,
     lastActiveChatTabId: null,
+    forgetClosedChatHost: vi.fn(),
     activeChatId: null,
     chatList: [],
     latestChatSessions: [],

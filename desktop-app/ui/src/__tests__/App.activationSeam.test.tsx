@@ -233,6 +233,7 @@ function makeController(writes: StoreWrite[]): AppController {
     openFilesSection,
     openPreviewSection,
     lastActiveChatTabId: null,
+    forgetClosedChatHost: vi.fn(),
     activeChatId: null,
     chatList: [],
     latestChatSessions: [],
@@ -472,6 +473,13 @@ describe('App activates app tabs only through its activation seam', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close New chat' }))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(3))
     expect(activeTab()?.app?.appRef).toBe(ALPHA!.appRef)
+    // The close tells the controller which chat tab went and what remains, so
+    // the drawer can forget a Host whose last chat tab the user closed.
+    expect(controller.forgetClosedChatHost).toHaveBeenCalledTimes(1)
+    const [closed, remaining] = vi.mocked(controller.forgetClosedChatHost).mock.calls[0]!
+    expect(closed).toMatchObject({ id: 'chat-tab-1', kind: 'chat' })
+    expect(remaining.tabs.map((tab: { id: string }) => tab.id)).not.toContain('chat-tab-1')
+    expect(remaining.tabs.some((tab: { kind: string }) => tab.kind === 'app')).toBe(true)
 
     // open #1 (sidebar) + strip select + close-to-neighbor.
     expectActivationsOnlyThroughSeam(3)

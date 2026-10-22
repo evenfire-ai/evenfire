@@ -5,6 +5,7 @@ import { NavigationContext, useNavigationContext } from '@contexts/NavigationCon
 import { act, cleanup, waitFor } from '@testing-library/react'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { ChatPage } from '@pages/ChatPage'
+import { closeWorkspaceTab } from '../../lib/workspaceTabs'
 import {
   createCatalog,
   installAppControllerClerum,
@@ -530,6 +531,24 @@ async function settle() {
   })
 }
 
+// Closes a tab as App's strip does: the controller hears which tab went and
+// what remains before the store commits the close.
+function closeTabAsApp(vm: ReturnType<typeof useAppController>, id: string) {
+  const current = vm.workspaceTabs
+  const closed = current.tabs.find(tab => tab.id === id)
+  if (!closed) throw new Error(`no tab ${id}`)
+  vm.forgetClosedChatHost(closed, closeWorkspaceTab(current, id))
+  vm.setWorkspaceTabs(state => closeWorkspaceTab(state, id))
+}
+
+function chatTabIdOf(vm: ReturnType<typeof useAppController>, agentRef: string): string {
+  const tab = vm.workspaceTabs.tabs.find(
+    candidate => candidate.kind === 'chat' && candidate.chat?.agentRef === agentRef
+  )
+  if (!tab) throw new Error(`no chat tab of ${agentRef}`)
+  return tab.id
+}
+
 /**
  * The chat drawer over Files when the Host of its conversation is held. The
  * drawer is never the stored active tab, so the keep rule has to come from the
@@ -890,6 +909,7 @@ describe('useAppController — chat drawer over a held Host', () => {
     // when its read is denied.
     act(() => getVm().handleSelectChatAgent(HOST_A, { selectLatest: false }))
     await waitFor(() => expect(getVm().selectedAgent).toBe(HOST_A))
+    const chatTabIdA = chatTabIdOf(getVm(), HOST_A)
     act(() => getVm().handleOpenAgentWorkspace(HOST_A))
     await waitFor(() => expect(getVm().navItem).toBe(DESKTOP_ROUTES.agents))
     expect(getVm().selectedAgent).toBe(HOST_A)
@@ -914,6 +934,106 @@ describe('useAppController — chat drawer over a held Host', () => {
     expect(verifyReadsA).toBe(0)
     expect(getVm().selectedAgent).toBe(null)
     expect(trail.slice(start)).not.toContain(HOST_B)
+    expect(getVm().toasts.map(toast => toast.text)).toEqual([VERIFY_A])
+
+    // Same mounted drawer: closing A's only chat tab dismisses that
+    // conversation, the keep ends, and ChatPage picks the listed B. This is
+    // the witness that the drawer above could auto-select and did not.
+    const kept = trail.length
+    act(() => closeTabAsApp(getVm(), chatTabIdA))
+    await waitFor(() => expect(getVm().selectedAgent).toBe(HOST_B))
+    expect(getVm().workspaceTabs.tabs.some(tab => tab.kind === 'chat')).toBe(false)
+    expect(getVm().isHostAccessBlocked(HOST_A)).toBe(true)
+    expect(getVm().keepFocusedChat).toBe(false)
+    expect(trail.slice(kept)).toContain(HOST_B)
+    expect(verifyReadsA).toBe(0)
+  })
+
+  it("T-A34-1 closing the last chat tab of the drawer's Host ends the keep", async () => {
+    const { clerum, handle } = installAppControllerClerum({
+      agentNames: [HOST_A, HOST_B],
+      agentDisplayByName: namesOf([HOST_A, HOST_B]),
+    })
+    const denied = await ipcGenericForbidden('rpc:listSessions')
+    const gate = deferred<void>()
+    let pageReadsA = 0
+    let verifyReadsA = 0
+    clerum.rpc.listSessions.mockImplementation(
+      async (host: string, _team: string, query?: { limit?: number }) => {
+        if (host !== HOST_A) return serverSessions([])
+        if (query?.limit === 1) {
+          verifyReadsA += 1
+          throw denied
+        }
+        pageReadsA += 1
+        await gate.promise
+        throw denied
+      }
+    )
+    const trail: Array<string | null> = []
+    let openDrawer: (value: boolean) => void = () => undefined
+    let getController: Awaited<ReturnType<typeof renderChatActionConsumer>>['getVm'] | null = null
+    function Drawer() {
+      const vm = useNavigationContext()
+      const [open, setOpen] = useState(false)
+      openDrawer = setOpen
+      const select = useCallback(
+        (host: string, opts: Parameters<typeof vm.handleSelectChatAgent>[1] = {}) => {
+          if (!getController) throw new Error('the controller is not rendered yet')
+          getController().handleSelectChatAgent(host, { ...opts, keepNavItem: true })
+        },
+        []
+      )
+      const showing = open && vm.navItem === DESKTOP_ROUTES.files
+      useLayoutEffect(() => {
+        trail.push(vm.selectedAgent)
+      }, [vm.selectedAgent])
+      return showing ? (
+        <div data-testid="drawer-chat">
+          <NavigationContext.Provider value={{ ...vm, handleSelectChatAgent: select }}>
+            <ChatPage scrollContainerRef={{ current: null }} />
+          </NavigationContext.Provider>
+        </div>
+      ) : null
+    }
+    const { getVm, queryByTestId } = await renderChatActionConsumer(<Drawer />)
+    getController = getVm
+    await waitFor(() => expect(handle.refreshCatalog).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(pageReadsA).toBeGreaterThan(0))
+
+    // A is selected in chat first, then opened from Agents; no drawer is open
+    // when its read is denied.
+    act(() => getVm().handleSelectChatAgent(HOST_A, { selectLatest: false }))
+    await waitFor(() => expect(getVm().selectedAgent).toBe(HOST_A))
+    const chatTabId = chatTabIdOf(getVm(), HOST_A)
+    act(() => getVm().handleOpenAgentWorkspace(HOST_A))
+    await waitFor(() => expect(getVm().navItem).toBe(DESKTOP_ROUTES.agents))
+    expect(getVm().selectedAgent).toBe(HOST_A)
+    expect(queryByTestId('drawer-chat')).toBeNull()
+    await act(async () => {
+      gate.resolve()
+      await gate.promise
+    })
+    await waitFor(() => expect(getVm().isHostAccessBlocked(HOST_A)).toBe(true))
+    await waitFor(() => expect(getVm().selectedAgent).toBe(null))
+
+    // The user closes A's chat tab while its hold is still listed.
+    act(() => closeTabAsApp(getVm(), chatTabId))
+    await waitFor(() => expect(getVm().lastActiveChatTabId).toBe(null))
+    expect(getVm().workspaceTabs.tabs.some(tab => tab.kind === 'chat')).toBe(false)
+    act(() => getVm().handleNavSelect(DESKTOP_ROUTES.files))
+    await waitFor(() => expect(getVm().activeWorkspaceTab?.kind).toBe(DESKTOP_ROUTES.files))
+    const start = trail.length
+    act(() => openDrawer(true))
+    await waitFor(() => expect(queryByTestId('drawer-chat')).not.toBeNull())
+    await settle()
+
+    // With no chat tab to restore, the mounted drawer must pick listed B.
+    expect(getVm().isHostAccessBlocked(HOST_A)).toBe(true)
+    expect(getVm().keepFocusedChat).toBe(false)
+    expect(verifyReadsA).toBe(0)
+    expect(getVm().selectedAgent).toBe(HOST_B)
+    expect(trail.slice(start)).toContain(HOST_B)
     expect(getVm().toasts.map(toast => toast.text)).toEqual([VERIFY_A])
   })
 
