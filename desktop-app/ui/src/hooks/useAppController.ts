@@ -178,6 +178,12 @@ export function useAppController() {
   const activeAuthenticatedSessionIdentityRef = useRef<string | null>(null)
   const authenticatedSessionIdentityRef = useRef<string | null>(null)
   const catalogRefreshPromiseRef = useRef<Promise<AccessCatalog> | null>(null)
+  const onExternalSessionEnded = useCallback(() => {
+    activeAuthenticatedSessionIdentityRef.current = null
+    authenticatedSessionIdentityRef.current = null
+    setPostPaintDataReady(false)
+    nav.resetSessionNavigation()
+  }, [nav.resetSessionNavigation])
 
   const onSessionNeedsLoad = useCallback(async (options?: { preserveNav?: boolean }) => {
     return loadSessionRef.current(options)
@@ -192,6 +198,7 @@ export function useAppController() {
   const auth = useAuthController({
     setStatus: fullSetStatus,
     onSessionNeedsLoad,
+    onSessionEnded: onExternalSessionEnded,
     logoutForEnvironmentMismatch,
   })
 
@@ -718,6 +725,7 @@ export function useAppController() {
         // team's tasks stay alive server-side and converge on return via reconcile.
         // Main-process stream teardown is Fase 4.
         chat.resetChat()
+        nav.resetSessionNavigation()
         // The connectors panel key is identity-unscoped, and its payload carries
         // per-connector OAuth authorization state — drop it here (before the
         // refresh below repopulates) so the previous team's grants cannot show,
@@ -752,6 +760,7 @@ export function useAppController() {
       auth.setMe,
       chat.resetChat,
       connectorsData.reset,
+      nav.resetSessionNavigation,
       fullSetStatus,
       refreshAuthenticatedData,
       setPostPaintDataReady,
@@ -820,6 +829,16 @@ export function useAppController() {
           })
         const sessionState = await window.clerum.auth.getSessionState()
         const authenticated = Boolean(sessionState.authenticated && sessionState.me)
+        const sessionIdentity =
+          authenticated && sessionState.me
+            ? `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
+            : null
+        const previousIdentity = activeAuthenticatedSessionIdentityRef.current
+        if (sessionIdentity && previousIdentity !== null && previousIdentity !== sessionIdentity) {
+          // Invalidate the prior workspace before publishing another principal
+          // or allowing its asynchronous catalog refresh to finish.
+          nav.resetSessionNavigation()
+        }
         auth.setIsAuthenticated(authenticated)
         auth.setMe(sessionState.me)
 
@@ -847,16 +866,16 @@ export function useAppController() {
         auth.setPassword('')
         auth.setEmail(sessionState.me.email || '')
         void auth.refreshDesktopReleaseStatus()
-        const sessionIdentity = `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
-        activeAuthenticatedSessionIdentityRef.current = sessionIdentity
-        if (authenticatedSessionIdentityRef.current !== sessionIdentity) {
+        const authenticatedIdentity = sessionIdentity!
+        activeAuthenticatedSessionIdentityRef.current = authenticatedIdentity
+        if (authenticatedSessionIdentityRef.current !== authenticatedIdentity) {
           setPostPaintDataReady(false)
           const loaded = await refreshAuthenticatedData({
             initialLoad: true,
-            sessionIdentity,
+            sessionIdentity: authenticatedIdentity,
           })
-          if (loaded && activeAuthenticatedSessionIdentityRef.current === sessionIdentity) {
-            authenticatedSessionIdentityRef.current = sessionIdentity
+          if (loaded && activeAuthenticatedSessionIdentityRef.current === authenticatedIdentity) {
+            authenticatedSessionIdentityRef.current = authenticatedIdentity
           }
         } else {
           // A prior post-paint callback may have been invalidated by an identity
@@ -888,6 +907,7 @@ export function useAppController() {
       contextsData.reset,
       mcpServersData.reset,
       nav.handleNavSelect,
+      nav.resetSessionNavigation,
       notif.resetNotifications,
       queryClient,
       refreshAuthenticatedData,
@@ -928,6 +948,7 @@ export function useAppController() {
       authenticatedSessionIdentityRef.current = null
       const logoutResult = await window.clerum.auth.logout()
       logoutGeneration = logoutResult.sessionGeneration
+      nav.resetSessionNavigation()
       reflectSignedOutState()
       chat.resetChat()
       notif.resetNotifications()
@@ -972,6 +993,7 @@ export function useAppController() {
     fullSetStatus,
     loadSession,
     mcpServersData.reset,
+    nav.resetSessionNavigation,
     notif.resetNotifications,
     queryClient,
     resetWorkflowsData,

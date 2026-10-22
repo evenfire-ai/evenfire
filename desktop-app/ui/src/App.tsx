@@ -79,7 +79,6 @@ import {
 import {
   activeWorkspaceTab,
   closeWorkspaceTab,
-  createWorkspaceTabsState,
   cycleWorkspaceTab,
   openAppTab,
   prepareNewChatWorkspaceTab,
@@ -2381,16 +2380,13 @@ export function App() {
     vm.selectedAgent,
   ])
 
-  // Reset ephemeral UI + the workspace store when the authenticated principal
-  // CHANGES (team switch / re-login), not on the initial mount — the controller
-  // already seeds a fresh store there, and resetting on mount would clobber the
-  // derived route before the first paint.
+  // Reset transient UI when the authenticated principal changes. The navigation
+  // controller resets the workspace before publishing the new identity.
   const previousPrincipalIdentityRef = React.useRef<string | null | undefined>(undefined)
   React.useEffect(() => {
     const previousIdentity = previousPrincipalIdentityRef.current
     previousPrincipalIdentityRef.current = vm.authenticatedPrincipalIdentity
     if (previousIdentity === undefined) return
-    setWorkspaceTabs(createWorkspaceTabsState('chat-tab-1'))
     vm.clearAppsPicker()
     setComposerFocusRequestId(0)
     setGlobalSearchFocusRequestId(0)

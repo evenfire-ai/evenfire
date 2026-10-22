@@ -141,6 +141,22 @@ export function useNavigationController() {
 
   const clearAppsPicker = useCallback(() => setAppsPickerActive(false), [])
 
+  // Session identity owns the workspace contents. Tear navigation down before a
+  // different principal is published, and give the new session one fresh blank
+  // Chat tab. Advancing the local intent sequence fences pending continuations;
+  // this is not a user selection and does not advance the main-process link
+  // generation.
+  const resetSessionNavigation = useCallback(() => {
+    beginNavigationIntent()
+    setSelectedAgent(null)
+    setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
+    setAppsPickerActive(false)
+    const chatTabId = nextWorkspaceTabId()
+    setWorkspaceTabs(createWorkspaceTabsState(chatTabId))
+    lastActiveChatTabIdRef.current = chatTabId
+    setLastActiveChatTabId(chatTabId)
+  }, [beginNavigationIntent, nextWorkspaceTabId, setWorkspaceTabs])
+
   // Apps route with no launched app → the picker residual. Redundant (and thus
   // skipped) when an app tab is already active, since that already derives to
   // the Apps route.
@@ -457,6 +473,7 @@ export function useNavigationController() {
     appsPickerActive,
     showAppsPicker,
     clearAppsPicker,
+    resetSessionNavigation,
     activateChatTab,
     lastActiveChatTabId,
     openFilesSection,
