@@ -552,9 +552,12 @@ export function AddRemoteServerWizard({
                 </div>
               ) : null}
 
-              {detected.scopeAudienceViolation ? (
+              {/* An empty advertised scope is itself the violation and arrives as `''`. */}
+              {detected.scopeAudienceViolation !== undefined ? (
                 <div className="cu-banner cu-banner--warning" role="status">
-                  {`The server suggests the scope "${detected.scopeAudienceViolation}", which would mint a token for another API. Replace it with this server's own scope before installing.`}
+                  {detected.scopeAudienceViolation
+                    ? `The server suggests the scope "${detected.scopeAudienceViolation}", which would mint a token for another API. Replace it with this server's own scope before installing.`
+                    : "The server advertises an empty scope, which OAuth does not allow. It is left out of the scopes below; check they include this server's own scope before installing."}
                 </div>
               ) : null}
 

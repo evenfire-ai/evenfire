@@ -13,6 +13,7 @@ import {
   ATLASSIAN_DISCOVER,
   ATLASSIAN_DISCOVER_UNCONFIGURED,
   CALLBACK_UNCONFIGURED_FAILURE,
+  ENTRA_EMPTY_SCOPE_DISCOVER,
   ENTRA_NO_SCOPES_DISCOVER,
   ENTRA_UNKNOWN_GUID_DISCOVER,
   ENTRA_UNKNOWN_TENANT_DISCOVER_FAILURE,
@@ -784,6 +785,14 @@ describe('AddRemoteServerWizard', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Add this server’s own scope. Sign-in scopes alone (openid, profile, email, offline_access) would send a Microsoft Graph token to the server.'
     )
+  })
+
+  it('entra 12b: an empty advertised scope still raises the audience warning', async () => {
+    expect(ENTRA_EMPTY_SCOPE_DISCOVER.detected.scopeAudienceViolation).toBe('')
+    await detectEntra(ENTRA_EMPTY_SCOPE_DISCOVER)
+    const banner = screen.getByText(/The server advertises an empty scope/)
+    expect(banner.closest('[role="status"]')).not.toBeNull()
+    expect(banner).not.toHaveTextContent('""')
   })
 
   it('entra 13: 128 scopes pass the field; the backend limit message is shown', async () => {

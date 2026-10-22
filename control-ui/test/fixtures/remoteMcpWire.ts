@@ -60,6 +60,10 @@ export const ENTRA_UNKNOWN_GUID_DISCOVER = loadGolden<DiscoverRemoteResponse>(
 /** Work IQ whose PRM advertises no scopes: only sign-in scopes are left (scopeAudienceMissing). */
 export const ENTRA_NO_SCOPES_DISCOVER =
   loadGolden<DiscoverRemoteResponse>('discover.entraNoScopes').body
+/** Work IQ whose PRM advertises an empty scope beside its own: `scopeAudienceViolation` is `''`. */
+export const ENTRA_EMPTY_SCOPE_DISCOVER = loadGolden<DiscoverRemoteResponse>(
+  'discover.entraEmptyScope'
+).body
 
 export const ALL_DISCOVER_BODIES: ReadonlyArray<{ name: string; body: DiscoverRemoteResponse }> = [
   { name: 'linear', body: LINEAR_DISCOVER },
@@ -70,6 +74,7 @@ export const ALL_DISCOVER_BODIES: ReadonlyArray<{ name: string; body: DiscoverRe
   { name: 'dcr-confidential', body: DCR_CONFIDENTIAL_DISCOVER },
   { name: 'pre-registered-per-server', body: PRE_REGISTERED_PER_SERVER_DISCOVER },
   { name: 'workiq', body: WORKIQ_DISCOVER },
+  { name: 'entra-empty-scope', body: ENTRA_EMPTY_SCOPE_DISCOVER },
 ]
 
 // ─── /discover from a control-api older than the per-server callback ─────────

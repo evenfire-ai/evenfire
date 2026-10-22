@@ -15,6 +15,7 @@ import {
   ATLASSIAN_V2_PILOT,
   DCR_PUBLIC_REGISTRATION_RESPONSE,
   DROPBOX_PILOT,
+  ENTRA_EMPTY_SCOPE_PILOT,
   ENTRA_NO_SCOPES_PILOT,
   ENTRA_SHAREPOINT_SCOPE_PILOT,
   ENTRA_UNKNOWN_GUID_PILOT,
@@ -218,6 +219,7 @@ describe('remote MCP wire goldens — POST /discover', () => {
     { name: 'discover.workiq', pilot: () => ENTRA_WORKIQ_PILOT },
     { name: 'discover.entraUnknownGuid', pilot: () => ENTRA_UNKNOWN_GUID_PILOT },
     { name: 'discover.entraNoScopes', pilot: () => ENTRA_NO_SCOPES_PILOT },
+    { name: 'discover.entraEmptyScope', pilot: () => ENTRA_EMPTY_SCOPE_PILOT },
   ]
   for (const c of ENTRA_CASES) {
     it(`${c.name}: with the Entra tenant authority → 200`, async () => {

@@ -395,6 +395,11 @@ export const ENTRA_SHAREPOINT_SCOPE_PILOT = workIqPilotWithPrm('entra-sharepoint
   prm.scopes_supported = ['00000003-0000-0ff1-ce00-000000000000/AllSites.Read']
 })
 
+/** `scopes_supported` → an empty scope beside Work IQ's own: the empty one alone breaks the audience rule. */
+export const ENTRA_EMPTY_SCOPE_PILOT = workIqPilotWithPrm('entra-empty-scope', prm => {
+  prm.scopes_supported = ['', 'fdcc1f02-fc51-4226-8753-f668596af7f7/WorkIQAgent.Ask']
+})
+
 /** `scopes_supported` removed: the requested scopes fall back to the AS's OIDC-only list. */
 export const ENTRA_NO_SCOPES_PILOT = workIqPilotWithPrm('entra-no-scopes', prm => {
   delete prm.scopes_supported
