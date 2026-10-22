@@ -27,10 +27,11 @@ export function ChatPage({ scrollContainerRef }: ChatPageProps) {
       didAutoSelect.current = false
     }
     if (didAutoSelect.current || selectedAgent || !agentNames.length) return
-    // The focused tab is a chat of a held Host that still has its Retry row:
-    // keep it. Its messages stay hidden while the Host is held, and the Retry
-    // row, or the verification a Chat click started, selects it again; picking
-    // another Host would send the user's next message to that Host instead.
+    // The chat on screen (the focused chat tab, or the drawer's conversation
+    // whose Host the hold deselected) belongs to a held Host that still has its
+    // Retry row: keep it. Its messages stay hidden while the Host is held, and
+    // the Retry row, or the verification a Chat click started, selects it again;
+    // picking another Host would send the user's next message to that Host.
     // Once the Host leaves the catalog there is no Retry row, so another Host
     // is picked and the coordinator says the Host is no longer available.
     if (keepFocusedChat) return

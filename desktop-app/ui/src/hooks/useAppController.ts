@@ -372,6 +372,8 @@ export function useAppController() {
   activeChatAgentRefRef.current = activeChatAgentRef
   // The Apps picker shows no active tab, so no chat is focused while it is open.
   const focusedChatAgentRef = nav.appsPickerActive ? null : activeChatAgentRef
+  // The selected Host a hold deselected, until the next selection or scope change.
+  const interruptedHostRef = useRef<string | null>(null)
   const isHostAccessBlocked = useCallback(
     (agentRef: string) => hostAuthority.isBlocked(agentRef),
     [hostAuthority]
@@ -380,11 +382,18 @@ export function useAppController() {
     () => agentsData.agentNames.filter(agentRef => hostAuthority.isBlocked(agentRef)),
     [agentsData.agentNames, hostAuthority, hostAuthorityRevision]
   )
-  // ChatPage keeps the focused chat tab only while its Host has a Retry row:
-  // held and still in the catalog. Holds reset with the authority scope, so a
-  // team switch never keeps a tab of the previous team.
-  const keepFocusedChat =
-    focusedChatAgentRef !== null && heldAgentRefs.includes(focusedChatAgentRef)
+  // ChatPage keeps its conversation only while the Host has a Retry row: held
+  // and still in the catalog. The Host is the focused chat tab's, or, for the
+  // chat drawer, which is never the active tab, the Host the hold deselected.
+  // Holds reset with the authority scope, so a team switch never keeps a chat
+  // of the previous team.
+  const interruptedHostOnSurface =
+    interruptedHostRef.current !== null &&
+    !nav.appsPickerActive &&
+    (focusedChatAgentRef === interruptedHostRef.current || nav.activeTab?.kind !== 'chat')
+  const keptChatAgentRef =
+    focusedChatAgentRef ?? (interruptedHostOnSurface ? interruptedHostRef.current : null)
+  const keepFocusedChat = keptChatAgentRef !== null && heldAgentRefs.includes(keptChatAgentRef)
   const heldHosts = useMemo<HeldHost[]>(
     () =>
       heldAgentRefs.map(agentRef => ({
@@ -400,8 +409,13 @@ export function useAppController() {
   useEffect(() => {
     hostAuthority.reset()
     knownHostNamesRef.current.clear()
+    interruptedHostRef.current = null
     setHostAuthorityRevision(revision => revision + 1)
   }, [authorityScope, hostAuthority])
+  // A new selection ends the interruption: the surface now shows that Host.
+  useEffect(() => {
+    if (nav.selectedAgent !== null) interruptedHostRef.current = null
+  }, [nav.selectedAgent])
   const { invalidateSessionCatalog } = useChatStore()
   const blockHostAccess = useCallback(
     (agentRef: string, kind: HostAuthorityHoldKind) => {
@@ -411,7 +425,10 @@ export function useAppController() {
       if (!hostAuthority.hold(agentRef, kind)) return
       setHostAuthorityRevision(revision => revision + 1)
       const selected = selectedAgentRef.current === agentRef
-      if (selected) nav.setSelectedAgent(null)
+      if (selected) {
+        interruptedHostRef.current = agentRef
+        nav.setSelectedAgent(null)
+      }
       // A revocation is also announced for the Host of the active chat tab, even
       // under the Apps picker: an earlier uncertain hold may already have
       // cleared the selection, and the toast is about the Host, not the tab.

@@ -8,8 +8,9 @@ export interface NavigationContextValue {
   /** `heldAgentRefs` with the names the Retry rows show. */
   heldHosts: HeldHost[]
   /**
-   * True while the focused chat tab's Host is held and still in the catalog, so
-   * its Retry row exists: ChatPage must not select another Host.
+   * True while the Host of the chat on screen (the focused chat tab's, or the
+   * one a hold deselected under the chat drawer) is held and still in the
+   * catalog, so its Retry row exists: ChatPage must not select another Host.
    */
   keepFocusedChat: boolean
   selectedAgentRoute: AgentWorkspaceRoute

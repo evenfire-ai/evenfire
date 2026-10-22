@@ -1,15 +1,22 @@
 // @vitest-environment jsdom
+import { useCallback, useLayoutEffect, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, waitFor } from '@testing-library/react'
+import { NavigationContext, useNavigationContext } from '@contexts/NavigationContext'
+import { act, cleanup, waitFor } from '@testing-library/react'
 import { DESKTOP_ROUTES } from '@constants/navigation'
+import { ChatPage } from '@pages/ChatPage'
 import {
+  createCatalog,
   installAppControllerClerum,
   renderAppController,
 } from '../domain/__tests__/__fixtures__/appControllerHarness'
-import { deferred } from '../domain/__tests__/__fixtures__/catalogFixtures'
+import { deferred, serverSessions } from '../domain/__tests__/__fixtures__/catalogFixtures'
+import { renderChatActionConsumer } from '../domain/__tests__/__fixtures__/chatActionConsumerHarness'
+import { ipcGenericForbidden } from '../domain/__tests__/__fixtures__/ipcErrors'
 import { uninstallMockClerum } from '../domain/__tests__/__fixtures__/mockClerum'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+vi.mock('@components/agents/AgentWorkspace', () => ({ AgentWorkspace: () => null }))
 
 /**
  * The chat drawer coexists with the live app on the `apps` route. Selecting a
@@ -489,5 +496,186 @@ describe('useAppController — chat drawer keepNavItem', () => {
       app.unmount()
       unmount = null
     }
+  })
+})
+
+const HOST_A = 'agent-a'
+const HOST_B = 'agent-b'
+const HOST_C = 'agent-c'
+const DISPLAY: Record<string, string> = {
+  [HOST_A]: 'Research Host',
+  [HOST_B]: 'Billing Host',
+  [HOST_C]: 'Ops Host',
+}
+const VERIFY_A = `Could not verify access to ${DISPLAY[HOST_A]}.`
+const GONE_A = `${DISPLAY[HOST_A]} is no longer available.`
+const GONE_B = `${DISPLAY[HOST_B]} is no longer available.`
+
+// The producer names every Host it lists, and only those.
+function namesOf(refs: string[]): Record<string, string> {
+  return Object.fromEntries(
+    refs.map(ref => {
+      const name = DISPLAY[ref]
+      if (!name) throw new Error(`no display name for ${ref}`)
+      return [ref, name]
+    })
+  )
+}
+
+async function settle() {
+  await act(async () => {
+    await new Promise(resolve => setTimeout(resolve, 20))
+  })
+}
+
+/**
+ * The chat drawer over Files when the Host of its conversation is held. The
+ * drawer is never the stored active tab, so the keep rule has to come from the
+ * Host the hold interrupted, not from the tab strip.
+ */
+describe('useAppController — chat drawer over a held Host', () => {
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+    uninstallMockClerum()
+  })
+
+  async function holdDrawerHost(options: { dropAOnHold: boolean; hosts?: string[] }) {
+    const hosts = options.hosts ?? [HOST_A, HOST_B]
+    const { clerum, handle } = installAppControllerClerum({
+      agentNames: hosts,
+      agentDisplayByName: namesOf(hosts),
+    })
+    clerum.rpc.listSessions.mockImplementation(async () => serverSessions([]))
+    const pending = deferred<{ agent: string; chatId: string; turns: never[] }>()
+    let reads = 0
+    clerum.rpc.loadSessionMessages.mockImplementation((host: string) => {
+      if (host === HOST_A && ++reads === 1) return pending.promise
+      return Promise.resolve({ agent: host, chatId: 'drawer-chat', turns: [] })
+    })
+    const trail: Array<string | null> = []
+    let setMounted: (value: boolean) => void = () => undefined
+    let getController: Awaited<ReturnType<typeof renderChatActionConsumer>>['getVm'] | null = null
+    function Drawer() {
+      const vm = useNavigationContext()
+      const [mounted, set] = useState(true)
+      setMounted = set
+      // App passes keepNavItem for every selection made while the drawer shows.
+      const select = useCallback(
+        (host: string, opts: Parameters<typeof vm.handleSelectChatAgent>[1] = {}) => {
+          if (!getController) throw new Error('the controller is not rendered yet')
+          getController().handleSelectChatAgent(host, { ...opts, keepNavItem: true })
+        },
+        []
+      )
+      useLayoutEffect(() => {
+        trail.push(vm.selectedAgent)
+      }, [vm.selectedAgent])
+      return vm.navItem === DESKTOP_ROUTES.files && mounted ? (
+        <div data-testid="drawer-chat">
+          <NavigationContext.Provider value={{ ...vm, handleSelectChatAgent: select }}>
+            <ChatPage scrollContainerRef={{ current: null }} />
+          </NavigationContext.Provider>
+        </div>
+      ) : null
+    }
+    const utils = await renderChatActionConsumer(<Drawer />)
+    const { getVm } = utils
+    getController = getVm
+    await waitFor(() => expect(handle.refreshCatalog).toHaveBeenCalledTimes(2))
+    act(() => {
+      getVm().handleNavSelect(DESKTOP_ROUTES.files)
+    })
+    // Liveness: the drawer's ChatPage auto-selection runs.
+    await waitFor(() => expect(getVm().selectedAgent).toBe(HOST_A))
+    act(() => {
+      getVm().handleSelectChatAgent(HOST_A, {
+        chatId: 'drawer-chat',
+        selectLatest: false,
+        keepNavItem: true,
+      })
+    })
+    await waitFor(() => expect(clerum.rpc.loadSessionMessages).toHaveBeenCalled())
+    expect(getVm().activeWorkspaceTab?.kind).toBe(DESKTOP_ROUTES.files)
+    if (options.dropAOnHold) {
+      const remaining = hosts.filter(host => host !== HOST_A)
+      handle.refreshCatalog.mockImplementation(async () =>
+        createCatalog(remaining, namesOf(remaining))
+      )
+    }
+    const start = trail.length
+    await act(async () => {
+      pending.reject(await ipcGenericForbidden('rpc:loadSessionMessages'))
+      await pending.promise.catch(() => undefined)
+    })
+    await waitFor(() => expect(getVm().isHostAccessBlocked(HOST_A)).toBe(true))
+    await settle()
+    return { ...utils, handle, trail, start, setMounted: (value: boolean) => setMounted(value) }
+  }
+
+  it('T-R5M1-1 keeps the drawer on the held Host instead of selecting another one', async () => {
+    const { getVm, trail, start } = await holdDrawerHost({ dropAOnHold: false })
+
+    // Witness: the hold deselected A.
+    expect(trail.slice(start)).toEqual([null])
+    expect(getVm().heldAgentRefs).toEqual([HOST_A])
+    expect(getVm().keepFocusedChat).toBe(true)
+    expect(getVm().selectedAgent).toBe(null)
+    expect(getVm().toasts.map(toast => toast.text)).toEqual([VERIFY_A])
+  })
+
+  it('T-R5M1-2 still selects no other Host after the drawer is unmounted and mounted again', async () => {
+    const { getVm, trail, start, setMounted, queryByTestId } = await holdDrawerHost({
+      dropAOnHold: false,
+    })
+
+    act(() => setMounted(false))
+    await settle()
+    // Witness: the drawer's ChatPage left the tree and came back.
+    expect(queryByTestId('drawer-chat')).toBeNull()
+    act(() => setMounted(true))
+    await settle()
+    expect(queryByTestId('drawer-chat')).not.toBeNull()
+
+    expect(getVm().isHostAccessBlocked(HOST_A)).toBe(true)
+    expect(trail.slice(start)).toEqual([null])
+    expect(getVm().selectedAgent).toBe(null)
+  })
+
+  it('T-R5M1-3 selects a listed Host and says so when the held Host leaves the catalog', async () => {
+    const { getVm, trail, start } = await holdDrawerHost({ dropAOnHold: true })
+
+    await waitFor(() => expect(getVm().selectedAgent).toBe(HOST_B))
+    // Witness: A was deselected by the hold before B was picked.
+    expect(trail.slice(start)).toEqual([null, HOST_B])
+    expect(getVm().heldAgentRefs).toEqual([])
+    expect(getVm().keepFocusedChat).toBe(false)
+    expect(getVm().toasts.map(toast => toast.text)).toEqual([VERIFY_A, GONE_A])
+  })
+
+  it('T-R5M1-4 forgets the interrupted Host once the user selects another one', async () => {
+    const { getVm, handle, trail, start } = await holdDrawerHost({
+      dropAOnHold: false,
+      hosts: [HOST_A, HOST_B, HOST_C],
+    })
+    expect(getVm().selectedAgent).toBe(null)
+
+    act(() => {
+      getVm().handleSelectChatAgent(HOST_B, { selectLatest: false, keepNavItem: true })
+    })
+    await waitFor(() => expect(getVm().selectedAgent).toBe(HOST_B))
+    handle.refreshCatalog.mockImplementation(async () =>
+      createCatalog([HOST_A, HOST_C], namesOf([HOST_A, HOST_C]))
+    )
+    await act(async () => {
+      await getVm().handleRefreshWorkspaceData(DESKTOP_ROUTES.agents)
+    })
+    await settle()
+
+    // Witness: B was selected, then deselected when it left; A is still held and listed.
+    expect(trail.slice(start, start + 2)).toEqual([null, HOST_B])
+    expect(getVm().heldAgentRefs).toEqual([HOST_A])
+    expect(getVm().selectedAgent).toBe(HOST_C)
+    expect(getVm().toasts.map(toast => toast.text)).toEqual([VERIFY_A, GONE_B])
   })
 })
