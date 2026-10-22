@@ -1036,6 +1036,75 @@ describe('useAppController held Hosts', () => {
     expect(toastsSeen(commits).slice(beforeLanding)).toEqual([])
   })
 
+  it.each([
+    ['omits it', producerCatalog([HOST_B])],
+    ['names it differently', producerCatalog([HOST_A, HOST_B])],
+  ])(
+    'T-R5G612-1: a foreign catalog that %s does not hide the later loss of a team-2 held Host',
+    async (_variant, foreignCatalog) => {
+      const { clerum, handle } = installAppControllerClerum({
+        agentNames: [HOST_A, HOST_B],
+        agentDisplayByName: DISPLAY_BY_NAME,
+      })
+      installCatalog(clerum)
+      const transcriptError = await ipcGenericForbidden('rpc:loadSessionMessages')
+      clerum.rpc.loadSessionMessages.mockImplementation(async (hostRef: string) => {
+        if (hostRef === HOST_A) throw transcriptError
+        return { agent: hostRef, chatId: '', turns: [] }
+      })
+      const { app, commits } = await mount(clerum, handle)
+      const teamTwoLabels = { ...DISPLAY_BY_NAME, [HOST_A]: TEAM_TWO_HOST }
+      handle.refreshCatalog.mockImplementation(async () =>
+        producerCatalog([HOST_A, HOST_B], teamTwoLabels, 'team-2')
+      )
+      await act(async () => {
+        await app.result.current.handleEnsureTeamContext({ teamId: 'team-2' })
+      })
+      await waitFor(() => expect(cachedCatalog(app.queryClient)?.teamId).toBe('team-2'))
+
+      act(() => {
+        app.result.current.handleSelectChatAgent(HOST_A, {
+          chatId: 'team-2-chat',
+          selectLatest: false,
+        })
+      })
+      await waitFor(() => expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true))
+      await waitFor(() =>
+        expect(app.result.current.heldHosts).toEqual([{ agentRef: HOST_A, label: TEAM_TWO_HOST }])
+      )
+      await settle()
+
+      handle.refreshCatalog.mockImplementation(async () => foreignCatalog)
+      await act(async () => {
+        await app.result.current.handleRefreshWorkspaceData(DESKTOP_ROUTES.agents)
+      })
+      // Liveness witness: team 1's catalog is cached while the principal is in team 2.
+      expect(cachedCatalog(app.queryClient)).toMatchObject({
+        teamId: 'team-1',
+        agentNames: foreignCatalog.agentNames,
+      })
+      expect(app.result.current.currentTeamId).toBe('team-2')
+      expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true)
+      await settle()
+      const beforeLoss = toastsSeen(commits).length
+
+      handle.refreshCatalog.mockImplementation(async () =>
+        producerCatalog([HOST_B], teamTwoLabels, 'team-2')
+      )
+      await act(async () => {
+        await app.result.current.handleRefreshWorkspaceData(DESKTOP_ROUTES.agents)
+      })
+      await settle()
+      expect(cachedCatalog(app.queryClient)).toMatchObject({
+        teamId: 'team-2',
+        agentNames: [HOST_B],
+      })
+      expect(toastsSeen(commits).slice(beforeLoss)).toEqual([
+        `${TEAM_TWO_HOST} is no longer available.`,
+      ])
+    }
+  )
+
   it('T-R2L2-1: a new hold after a successful Retry is announced again', async () => {
     const { clerum, handle } = installAppControllerClerum({
       agentNames: [HOST_A, HOST_B],
@@ -1143,7 +1212,7 @@ describe('useAppController held Hosts', () => {
     expect(toastsSeen(commits)).toEqual([GONE_A])
   })
 
-  it('T-A9-T1: a team switch whose catalog lacks the selected Host deselects it without a toast', async () => {
+  it('T-A9-T1: a team switch whose catalog lacks the selected Host deselects it without a toast, and a later loss in team 2 is announced', async () => {
     const { clerum, handle } = installAppControllerClerum({
       agentNames: [HOST_A, HOST_B],
       agentDisplayByName: DISPLAY_BY_NAME,
@@ -1172,6 +1241,21 @@ describe('useAppController held Hosts', () => {
       agentNames: [HOST_B],
     })
     expect(toastsSeen(commits).filter(text => text.includes(DISPLAY_A))).toEqual([])
+
+    // Positive witness for the silence above: the same rule announces a loss
+    // inside team 2 once team 2's catalog is the one compared.
+    act(() => {
+      app.result.current.handleSelectChatAgent(HOST_B, { selectLatest: false })
+    })
+    await waitFor(() => expect(app.result.current.selectedAgent).toBe(HOST_B))
+    handle.refreshCatalog.mockImplementation(async () => createCatalog([], {}, 'team-2'))
+    await act(async () => {
+      await app.result.current.handleRefreshWorkspaceData(DESKTOP_ROUTES.agents)
+    })
+    await waitFor(() => expect(app.result.current.selectedAgent).toBe(null))
+    await settle()
+    expect(cachedCatalog(app.queryClient)).toMatchObject({ teamId: 'team-2', agentNames: [] })
+    expect(toastsSeen(commits)).toEqual([GONE_B])
   })
 
   it('T-R5A3-1: no commit of the new principal lists a Retry row from the previous catalog', async () => {

@@ -797,13 +797,14 @@ export function useAppController() {
 
   const previousAccessCatalogRef = useRef<AccessCatalog | null>(null)
   useEffect(() => {
-    const previousCatalog = previousAccessCatalogRef.current
     const catalog = agentsData.accessCatalog
+    // A catalog of another principal (the previous team's, landing after a
+    // switch) names no Host, decides no selection or loss, and does not become
+    // the catalog the next loss is measured against.
+    if (catalog !== principalCatalog) return
+    const previousCatalog = previousAccessCatalogRef.current
     previousAccessCatalogRef.current = catalog
     if (!auth.isAuthenticated || !catalog) return
-    // A catalog of another principal (the previous team's, landing after a
-    // switch) names no Host and decides no selection or loss.
-    if (catalog !== principalCatalog) return
     for (const agentRef of catalog.agentNames) {
       const name = catalog.agentDisplayByName?.[agentRef]
       if (name) {
