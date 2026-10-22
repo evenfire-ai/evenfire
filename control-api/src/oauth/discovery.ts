@@ -692,18 +692,16 @@ async function resolvePrm(
  */
 function authorizationServerOverrideRejection(
   override: string,
-  prm: ProtectedResourceMetadata
+  advertisedAs: string
 ): string | null {
   if (!isEntraTenantAuthority(override)) {
     return 'authorizationServer must be a Microsoft Entra ID tenant authority (https://login.microsoftonline.com/<tenant-id>/v2.0)'
   }
-  const advertised = Array.isArray(prm.authorization_servers) ? prm.authorization_servers : []
-  const advertisesEntraMultiTenant = advertised.some(entry => {
-    if (typeof entry !== 'string' || !URL.canParse(entry)) return false
-    return isEntraMultiTenantAuthority(new URL(entry))
-  })
-  if (!advertisesEntraMultiTenant) {
-    return 'the protected resource does not advertise the Microsoft Entra ID multi-tenant authority'
+  // Only the first entry counts: discovery replaces `authorization_servers[0]` and only
+  // that entry raises `tenant_required`, so an Entra multi-tenant authority listed later
+  // must not license swapping out an unrelated first authorization server.
+  if (!URL.canParse(advertisedAs) || !isEntraMultiTenantAuthority(new URL(advertisedAs))) {
+    return "the protected resource's first authorization server is not the Microsoft Entra ID multi-tenant authority"
   }
   return null
 }
@@ -752,7 +750,7 @@ export async function discoverRemoteOAuth(
 
   let asBase = advertisedAs
   if (opts.authorizationServer !== undefined) {
-    const rejection = authorizationServerOverrideRejection(opts.authorizationServer, prm)
+    const rejection = authorizationServerOverrideRejection(opts.authorizationServer, advertisedAs)
     if (rejection !== null) {
       log.warn(
         { discovery: 'authorization_server_override_rejected' },

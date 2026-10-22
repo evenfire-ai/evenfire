@@ -655,7 +655,26 @@ describe('discoverRemoteOAuth — Microsoft Entra tenant authority (tenant_requi
       error: {
         kind: 'authorization_server_override_rejected',
         detail:
-          'the protected resource does not advertise the Microsoft Entra ID multi-tenant authority',
+          "the protected resource's first authorization server is not the Microsoft Entra ID multi-tenant authority",
+      },
+    })
+    expect(hostsOf(requestedUrls)).not.toContain('login.microsoftonline.com')
+  })
+
+  it('the multi-tenant authority listed after another authorization server does not license the override', async () => {
+    const pilot = workIqPilotWithPrm('entra-organizations-second', prm => {
+      prm.authorization_servers = ['https://other-as.example', ORGANIZATIONS]
+    })
+    const { transport, requestedUrls } = recordingTransport(makeDiscoveryTransport(pilot))
+    const outcome = await discoverRemoteOAuth(pilot.mcpUrl, deps(transport), {
+      authorizationServer: TENANT_AUTHORITY,
+    })
+    expect(outcome).toEqual({
+      ok: false,
+      error: {
+        kind: 'authorization_server_override_rejected',
+        detail:
+          "the protected resource's first authorization server is not the Microsoft Entra ID multi-tenant authority",
       },
     })
     expect(hostsOf(requestedUrls)).not.toContain('login.microsoftonline.com')
