@@ -2741,8 +2741,8 @@ describe('App deep-link orchestration', () => {
         ? catalogFor('team-a', 'team-a-only-agent')
         : catalogFor('team-b', 'team-b-only-agent')
     )
-    Object.assign(clerum.team, { switch: switchTeam })
-    Object.assign(clerum.access, { refreshCatalog })
+    Object.assign(window.clerum.team, { switch: switchTeam })
+    Object.assign(window.clerum.access, { refreshCatalog })
 
     let resolveApps!: (value: { apps: [] }) => void
     let targetAppsLoading = false
@@ -2778,16 +2778,16 @@ describe('App deep-link orchestration', () => {
 
     const actual =
       await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
-    let realController: AppController | null = null
+    const realController: { current: AppController | null } = { current: null }
     const restoredWorkspaceTabs: WorkspaceState[] = []
     vi.mocked(useAppController).mockImplementation(() => {
-      realController = actual.useAppController()
-      const restoreWorkspaceNavigation = realController.restoreWorkspaceNavigation
-      realController.restoreWorkspaceNavigation = (snapshot, expectedIntentSequence) => {
+      realController.current = actual.useAppController()
+      const restoreWorkspaceNavigation = realController.current.restoreWorkspaceNavigation
+      realController.current.restoreWorkspaceNavigation = (snapshot, expectedIntentSequence) => {
         restoredWorkspaceTabs.push(snapshot.workspaceTabs)
         return restoreWorkspaceNavigation(snapshot, expectedIntentSequence)
       }
-      return realController
+      return realController.current
     })
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     render(
@@ -2798,19 +2798,19 @@ describe('App deep-link orchestration', () => {
       </QueryClientProvider>
     )
 
-    await waitFor(() => expect(realController?.initialExperienceLoading).toBe(false))
+    await waitFor(() => expect(realController.current?.initialExperienceLoading).toBe(false))
     await waitFor(() =>
       expect(
         queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)?.teamAgentNames
       ).toEqual(['team-a-only-agent'])
     )
     act(() => {
-      realController?.handleSelectChatAgent('team-a-only-agent', {
+      realController.current?.handleSelectChatAgent('team-a-only-agent', {
         selectLatest: false,
       })
     })
-    let originWorkspace = realController?.workspaceTabs
-    expect(realController?.selectedAgent).toBe('team-a-only-agent')
+    let originWorkspace = realController.current?.workspaceTabs
+    expect(realController.current?.selectedAgent).toBe('team-a-only-agent')
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
     const target = parseSandboxUiDeepLink(
@@ -2820,9 +2820,9 @@ describe('App deep-link orchestration', () => {
     const producedLink = queue.enqueue(target)
     act(() => emitDeepLink?.(producedLink))
     await confirmPendingAppLink()
-    originWorkspace = realController?.workspaceTabs
+    originWorkspace = realController.current?.workspaceTabs
     await waitFor(() => expect(targetAppsLoading).toBe(true))
-    await waitFor(() => expect(realController?.currentTeamId).toBe('team-b'))
+    await waitFor(() => expect(realController.current?.currentTeamId).toBe('team-b'))
     await waitFor(() =>
       expect(
         queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)?.teamAgentNames
@@ -2833,10 +2833,10 @@ describe('App deep-link orchestration', () => {
       resolveApps({ apps: [] })
     })
 
-    await waitFor(() => expect(realController?.currentTeamId).toBe('team-a'))
+    await waitFor(() => expect(realController.current?.currentTeamId).toBe('team-a'))
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(producedLink.id))
-    expect(realController?.workspaceTabs).toEqual(originWorkspace)
-    expect(realController?.selectedAgent).toBe('team-a-only-agent')
+    expect(realController.current?.workspaceTabs).toEqual(originWorkspace)
+    expect(realController.current?.selectedAgent).toBe('team-a-only-agent')
     expect(restoredWorkspaceTabs).toEqual([originWorkspace])
     expect(switchTeam).toHaveBeenNthCalledWith(1, 'team-b')
     expect(switchTeam).toHaveBeenNthCalledWith(2, 'team-a')
@@ -2856,24 +2856,24 @@ describe('App deep-link orchestration', () => {
     act(() => emitDeepLink?.(explicitLink))
     await confirmPendingAppLink()
     await waitFor(() => expect(targetAppsLoading).toBe(true))
-    await waitFor(() => expect(realController?.currentTeamId).toBe('team-b'))
+    await waitFor(() => expect(realController.current?.currentTeamId).toBe('team-b'))
     await waitFor(() =>
       expect(
         queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)?.teamAgentNames
       ).toEqual(['team-b-only-agent'])
     )
     act(() => {
-      realController?.handleSelectChatAgent('team-b-only-agent', {
+      realController.current?.handleSelectChatAgent('team-b-only-agent', {
         selectLatest: false,
       })
     })
-    expect(realController?.selectedAgent).toBe('team-b-only-agent')
+    expect(realController.current?.selectedAgent).toBe('team-b-only-agent')
     await act(async () => {
       resolveApps({ apps: [] })
     })
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(explicitLink.id))
-    expect(realController?.currentTeamId).toBe('team-b')
-    expect(realController?.selectedAgent).toBe('team-b-only-agent')
+    expect(realController.current?.currentTeamId).toBe('team-b')
+    expect(realController.current?.selectedAgent).toBe('team-b-only-agent')
     expect(restoredWorkspaceTabs).toEqual([originWorkspace])
   })
 

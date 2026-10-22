@@ -42,7 +42,7 @@ describe('useAppController team-scoped catalog selection', () => {
       teamDirectory: { items: [], currentTeamId: 'team-a' },
     })
     let currentTeamId = 'team-a'
-    Object.assign(clerum.team, {
+    Object.assign(window.clerum.team, {
       switch: vi.fn(async (teamId: string) => {
         currentTeamId = teamId
         return {
@@ -51,7 +51,7 @@ describe('useAppController team-scoped catalog selection', () => {
         }
       }),
     })
-    Object.assign(clerum.access, {
+    Object.assign(window.clerum.access, {
       refreshCatalog: vi.fn(async () =>
         currentTeamId === 'team-a'
           ? productionCatalog('team-a', 'team-a-only-agent')
