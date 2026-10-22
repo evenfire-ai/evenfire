@@ -325,8 +325,9 @@ export function useAppController() {
     [agentsData.agentDisplayByName]
   )
   // A team switch sets the new principal before its catalog arrives, so the
-  // previous team's catalog can still be cached. The team clause goes with the
-  // Desktop team retirement; the user clause stays.
+  // previous team's catalog can still be cached. The main process builds each
+  // catalog for the trimmed session team and records that team on it, so a
+  // catalog whose team differs from the session team belongs to another team.
   const isPrincipalCatalog = useCallback(
     (catalog: AccessCatalog) =>
       catalog.userId === auth.me?.id && (catalog.teamId ?? '') === principalTeamId,
