@@ -381,6 +381,14 @@ vi.mock('@pages/UnavailablePage', () => ({ UnavailablePage: () => null }))
 vi.mock('@pages/WorkflowsPage', () => ({ WorkflowsPage: () => null }))
 
 type AppController = ReturnType<typeof useAppController>
+type WorkspaceNavigationSnapshot = Pick<
+  AppController,
+  | 'workspaceTabs'
+  | 'selectedAgent'
+  | 'selectedAgentRoute'
+  | 'appsPickerActive'
+  | 'lastActiveChatTabId'
+>
 
 function makeController(overrides: Partial<AppController> = {}): AppController {
   const noop = vi.fn()
@@ -405,11 +413,35 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   const beginUserNavigationIntent = vi.fn(() => {
     testNavigationIntentSequence += 1
     testUserNavigationGeneration += 1
+    controller.navigationIntentSequence = testNavigationIntentSequence
     forceControllerRender()
     return testNavigationIntentSequence
   })
   const isNavigationIntentCurrent = vi.fn(
     (sequence: number) => sequence === testNavigationIntentSequence
+  )
+  const captureWorkspaceNavigation = vi.fn(
+    (): WorkspaceNavigationSnapshot => ({
+      workspaceTabs: controller.workspaceTabs,
+      selectedAgent: controller.selectedAgent,
+      selectedAgentRoute: controller.selectedAgentRoute,
+      appsPickerActive: controller.appsPickerActive,
+      lastActiveChatTabId: controller.lastActiveChatTabId,
+    })
+  )
+  const restoreWorkspaceNavigation = vi.fn(
+    (snapshot: WorkspaceNavigationSnapshot, expectedIntentSequence: number) => {
+      if (!isNavigationIntentCurrent(expectedIntentSequence)) return null
+      testNavigationIntentSequence += 1
+      controller.navigationIntentSequence = testNavigationIntentSequence
+      controller.workspaceTabs = snapshot.workspaceTabs
+      controller.selectedAgent = snapshot.selectedAgent
+      controller.selectedAgentRoute = snapshot.selectedAgentRoute
+      controller.appsPickerActive = snapshot.appsPickerActive
+      controller.lastActiveChatTabId = snapshot.lastActiveChatTabId
+      forceControllerRender()
+      return testNavigationIntentSequence
+    }
   )
   const showAppsPicker = vi.fn(() => {
     if (controller.appsPickerActive) return
@@ -432,6 +464,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     ): GfsResourceNavigationRequest | null => {
       if (userNavigationGenerationAtActivation !== testUserNavigationGeneration) return null
       testNavigationIntentSequence += 1
+      controller.navigationIntentSequence = testNavigationIntentSequence
       forceControllerRender()
       const intentSequence = testNavigationIntentSequence
       const state = controller.workspaceTabs
@@ -578,6 +611,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     workspaceTabs: createWorkspaceTabsState('chat-tab-1'),
     setWorkspaceTabs,
     activeWorkspaceTab: undefined,
+    lastActiveChatTabId: null,
     nextWorkspaceTabId,
     appsPickerActive: false,
     showAppsPicker,
@@ -635,6 +669,8 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     navigationIntentSequence: testNavigationIntentSequence,
     beginUserNavigationIntent,
     isNavigationIntentCurrent,
+    captureWorkspaceNavigation,
+    restoreWorkspaceNavigation,
     beginGfsResourceNavigation,
     isGfsResourceNavigationCurrent,
     activateGfsResourceNavigation,
@@ -2636,11 +2672,7 @@ describe('App deep-link orchestration', () => {
     )
   })
 
-  // Guard for conversationOrigin use (3): retiring back-to-conversation must not
-  // touch the deep-link team restore, which re-selects the originating chat after
-  // rolling a failed cross-team link back to the original team. Passes before and
-  // after the retirement.
-  it('re-selects the originating chat when a failed cross-team link rolls the team back', async () => {
+  it('preserves the originating chat workspace when an unavailable cross-team link rolls back', async () => {
     currentController = makeController({
       initialExperienceLoading: false,
       navItem: DESKTOP_ROUTES.chat,
@@ -2649,6 +2681,7 @@ describe('App deep-link orchestration', () => {
     } as Partial<AppController>)
     render(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
+    const originWorkspace = currentController.workspaceTabs
 
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' })
@@ -2661,11 +2694,8 @@ describe('App deep-link orchestration', () => {
       teamId: 'team-a',
       announce: true,
     })
-    expect(currentController.handleSelectChatAgent).toHaveBeenCalledWith('alpha', {
-      selectLatest: false,
-      chatId: 'chat-1',
-      title: 'Conversation',
-    })
+    expect(currentController.workspaceTabs).toEqual(originWorkspace)
+    expect(currentController.selectedAgent).toBe('alpha')
   })
 
   it('closes the active embed before switching teams for a failed cross-team handoff', async () => {
@@ -2923,20 +2953,21 @@ describe('App deep-link orchestration', () => {
         'info'
       )
     })
-    expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(liveTeamId).toBe('team-a')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
     expect(ensureTeamContext).toHaveBeenCalledWith({
       teamId: 'team-b',
       announce: true,
     })
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
 
     await act(async () => {
       vi.advanceTimersByTime(1_000)
       await Promise.resolve()
     })
     await waitFor(() => expect(currentController.pushToast).toHaveBeenCalledTimes(2))
-    expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(liveTeamId).toBe('team-a')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(4)
 
     ready = true
     await act(async () => {
@@ -2947,7 +2978,7 @@ describe('App deep-link orchestration', () => {
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(ensureTeamContext).toHaveBeenCalledTimes(5)
   })
 
   it('retries a failed cross-team native mount without treating its own restore as a user switch', async () => {
@@ -2963,6 +2994,11 @@ describe('App deep-link orchestration', () => {
       handleEnsureTeamContext: ensureTeamContext,
       getCurrentTeamId: () => liveTeamId,
     })
+    currentController.handleSelectChatAgent('alpha', {
+      chatId: 'origin-chat',
+      title: 'Origin conversation',
+    })
+    currentController.openFilesSection('gfs://main/0123456789abcdef0123456789abcdef')
     listApps.mockResolvedValue({
       apps: [
         {
@@ -2976,6 +3012,8 @@ describe('App deep-link orchestration', () => {
     })
     render(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
+    const originWorkspace = currentController.workspaceTabs
+    const originAgent = currentController.selectedAgent
 
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
@@ -2986,7 +3024,11 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => {
       expect(currentController.pushToast).toHaveBeenCalledWith('native mount failed', 'error')
     })
-    expect(liveTeamId).toBe('team-b')
+    expect(liveTeamId).toBe('team-a')
+    expect(currentController.workspaceTabs).toEqual(originWorkspace)
+    expect(currentController.selectedAgent).toBe(originAgent)
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(1, { teamId: 'team-b', announce: true })
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
 
     await act(async () => {
@@ -2998,7 +3040,9 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(acknowledgeDeepLink).toHaveBeenCalledTimes(1)
     expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(currentController.workspaceTabs).not.toEqual(originWorkspace)
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(3, { teamId: 'team-b', announce: true })
+    expect(ensureTeamContext).toHaveBeenCalledTimes(3)
     expect(currentController.pushToast).not.toHaveBeenCalledWith(
       expect.stringContaining('you switched teams'),
       'error'
@@ -3041,8 +3085,8 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => {
       expect(currentController.pushToast).toHaveBeenCalledWith('native mount failed', 'error')
     })
-    expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(liveTeamId).toBe('team-a')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
 
     liveTeamId = 'team-c'
     await act(async () => {
@@ -3061,10 +3105,9 @@ describe('App deep-link orchestration', () => {
     )
     expect(confirmDialogHarness.props?.title).toBe('App link could not be opened')
     expect(liveTeamId).toBe('team-c')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
-    // The launch put the shell on the Apps route via the store (observable that
-    // replaced the retired single `handleNavSelect(apps)` call).
-    expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
+    // The failed handoff restored the origin route before the user switched teams.
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.chat)
     expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBe(1)
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
 
@@ -3073,8 +3116,63 @@ describe('App deep-link orchestration', () => {
       await Promise.resolve()
     })
     expect(liveTeamId).toBe('team-c')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+  })
+
+  it('preserves newer explicit navigation when a cross-team app mount fails', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let liveTeamId = 'team-a'
+    const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
+      if (!teamId || teamId === liveTeamId) return false
+      liveTeamId = teamId
+      return true
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      handleEnsureTeamContext: ensureTeamContext,
+      getCurrentTeamId: () => liveTeamId,
+    })
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+        },
+      ],
+    })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
+    })
+    await confirmPendingAppLink()
+    act(() => {
+      currentController.handleNavSelect(DESKTOP_ROUTES.settings)
+    })
+    await reportShortcutOpenResult({ status: 'failed', message: 'native mount failed' })
+
+    await waitFor(() => {
+      expect(currentController.pushToast).toHaveBeenCalledWith('native mount failed', 'error')
+    })
+    expect(liveTeamId).toBe('team-b')
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.settings)
+    expect(currentController.workspaceTabs.tabs.some(tab => tab.kind === 'settings')).toBe(true)
+    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      vi.advanceTimersByTime(1_000)
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(acknowledgeDeepLink).toHaveBeenCalledOnce()
+    expect(liveTeamId).toBe('team-b')
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.settings)
+    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
   })
 
   it('retries a transient team-context failure and opens without duplicate mounts', async () => {

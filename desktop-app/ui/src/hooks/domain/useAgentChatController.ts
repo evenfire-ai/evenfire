@@ -661,6 +661,13 @@ export function useAgentChatController({
   const sendScopeGeneration = useRef(0)
   const currentAuthScopeRef = useRef(`${isAuthenticated}:${authenticatedScope}`)
   currentAuthScopeRef.current = `${isAuthenticated}:${authenticatedScope}`
+  const composerOwnerScope = `${isAuthenticated}:${currentEnvironmentKey}:${userScopeKey}`
+  const lastComposerOwnerScope = useRef(composerOwnerScope)
+  useEffect(() => {
+    if (lastComposerOwnerScope.current === composerOwnerScope) return
+    lastComposerOwnerScope.current = composerOwnerScope
+    clearAllComposerDrafts()
+  }, [composerOwnerScope])
   // #654 M5 — the userMessageId of the most recent send that retained its
   // payload. A retry compares it before and after to learn whether it retained
   // a snapshot of its own; `sendAgentMessage` has several early returns (image
@@ -671,7 +678,6 @@ export function useAgentChatController({
     const scope = `${isAuthenticated}:${authenticatedScope}`
     if (lastRetentionScope.current === scope) return
     lastRetentionScope.current = scope
-    clearAllComposerDrafts()
     // The memo key already carries the scope; this frees the previous scope's entries.
     transcriptMemoRef.current?.clear()
     sendScopeGeneration.current += 1

@@ -715,17 +715,10 @@ export function useAppController() {
         if (!sessionState.authenticated || !sessionState.me) {
           throw new Error('Team switch ended without an authenticated session')
         }
-        // GAP-N4: the renderer half of a team switch. `clearActiveChat`
-        // only deselects — the previous team's tracker entries and FSM projection
-        // survive, so a late terminal from an old-team task could run side effects
-        // and stale badges leak across teams. Tear down the renderer chat state
-        // (tracker.releaseAll + fsm.reset via resetChat) exactly like logout, once
-        // the switch is CONFIRMED (before `refreshAuthenticatedData` repopulates) —
-        // doing it before the RPC would wipe the view on a failed switch. The old
-        // team's tasks stay alive server-side and converge on return via reconcile.
-        // Main-process stream teardown is Fase 4.
-        chat.resetChat()
-        nav.resetSessionNavigation()
+        // Team is a data scope, not a principal boundary: stop old-team activity
+        // streams and let the team-scoped stores revalidate without clearing the
+        // user's tabs, selection, focus, or drafts.
+        await chat.stopAllActivityStreams()
         // The connectors panel key is identity-unscoped, and its payload carries
         // per-connector OAuth authorization state — drop it here (before the
         // refresh below repopulates) so the previous team's grants cannot show,
@@ -758,9 +751,8 @@ export function useAppController() {
       auth.setEmail,
       auth.setIsAuthenticated,
       auth.setMe,
-      chat.resetChat,
+      chat.stopAllActivityStreams,
       connectorsData.reset,
-      nav.resetSessionNavigation,
       fullSetStatus,
       refreshAuthenticatedData,
       setPostPaintDataReady,
@@ -1571,6 +1563,8 @@ export function useAppController() {
     // over these — `navItem` above is its read-only projection).
     workspaceTabs: nav.workspaceTabs,
     setWorkspaceTabs: nav.setWorkspaceTabs,
+    captureWorkspaceNavigation: nav.captureWorkspaceNavigation,
+    restoreWorkspaceNavigation: nav.restoreWorkspaceNavigation,
     navigationIntentSequence: nav.navigationIntentSequence,
     beginUserNavigationIntent: nav.beginUserNavigationIntent,
     isNavigationIntentCurrent: nav.isNavigationIntentCurrent,

@@ -30,6 +30,7 @@ import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { isGfsSessionAuthorityFailure } from '@hooks/domain/useGfsBrowserController'
+import type { WorkspaceNavigationSnapshot } from '@hooks/domain/useNavigationController'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
 import {
@@ -130,6 +131,9 @@ type PendingSandboxUiDeepLinkLaunch = {
   linkTeamId?: string
   switchedTeam: boolean
   conversationOrigin: SandboxUiConversationOrigin | null
+  originNavigation: WorkspaceNavigationSnapshot
+  navigationIntentSequence: number
+  restoreWorkspace: boolean
 }
 
 function formatLinkProvidedEnvironmentName(name: string): string {
@@ -424,6 +428,10 @@ export function App() {
   const gfsDeepLinkAcceptingRef = React.useRef(true)
   const gfsRouteDialogRequestSequenceRef = React.useRef(0)
   const sandboxUiDeepLinkRestoreTeamByIdRef = React.useRef(new Map<number, string>())
+  const sandboxUiDeepLinkOriginNavigationByIdRef = React.useRef(
+    new Map<number, WorkspaceNavigationSnapshot>()
+  )
+  const sandboxUiDeepLinkIntentByIdRef = React.useRef(new Map<number, number>())
   const sandboxUiDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
   const sandboxUiDeepLinkGenerationRef = React.useRef(0)
   const sandboxUiShortcutOpenRequestIdRef = React.useRef(0)
@@ -1401,6 +1409,8 @@ export function App() {
     processingSandboxUiDeepLinkIdRef.current = null
     launchingSandboxUiDeepLinkRef.current = null
     sandboxUiDeepLinkRestoreTeamByIdRef.current.clear()
+    sandboxUiDeepLinkOriginNavigationByIdRef.current.clear()
+    sandboxUiDeepLinkIntentByIdRef.current.clear()
     sandboxUiDeepLinkGenerationRef.current += 1
     void window.clerum.sandboxUi.clearPendingDeepLinks().catch(error => {
       console.warn('[Desktop] Could not clear stale app deep links:', error)
@@ -1524,7 +1534,7 @@ export function App() {
       // Store→embed: activate the app tab (a new one, or the backgrounded one on
       // relaunch). Its `kind:'app'` derives `navItem` to the Apps route this
       // commit and clears the instance-less picker residual.
-      vm.beginUserNavigationIntent()
+      const navigationIntentSequence = vm.beginUserNavigationIntent()
       vm.clearAppsPicker()
       // Compute the id only on the open-new branch so the sequence counter
       // advances exactly as before: relaunch of an existing tab must not burn one.
@@ -1550,7 +1560,7 @@ export function App() {
           keepNavItem: true,
         })
       }
-      return requestId
+      return { requestId, navigationIntentSequence }
     },
     [
       nextChatTabId,
@@ -1775,6 +1785,8 @@ export function App() {
       setPendingSandboxUiDeepLinkState(next)
       clearSandboxUiDeepLinkProcessing(linkId)
       sandboxUiDeepLinkRestoreTeamByIdRef.current.delete(linkId)
+      sandboxUiDeepLinkOriginNavigationByIdRef.current.delete(linkId)
+      sandboxUiDeepLinkIntentByIdRef.current.delete(linkId)
       try {
         await window.clerum.sandboxUi.acknowledgeDeepLink(linkId)
       } catch (error) {
@@ -1816,31 +1828,45 @@ export function App() {
   const restoreSandboxUiDeepLinkTeam = React.useCallback(
     async (context: PendingSandboxUiDeepLinkLaunch) => {
       if (
-        !context.switchedTeam ||
-        !context.originalTeamId ||
-        !context.linkTeamId ||
-        vm.getCurrentTeamId() !== context.linkTeamId ||
-        context.generation !== sandboxUiDeepLinkGenerationRef.current
-      ) {
+        context.generation !== sandboxUiDeepLinkGenerationRef.current ||
+        !vm.isNavigationIntentCurrent(context.navigationIntentSequence) ||
+        (context.switchedTeam &&
+          (!context.originalTeamId ||
+            !context.linkTeamId ||
+            vm.getCurrentTeamId() !== context.linkTeamId))
+      )
         return
-      }
-      try {
-        await vm.handleEnsureTeamContext({ teamId: context.originalTeamId, announce: true })
-        const origin = context.conversationOrigin
-        if (origin && (!origin.teamId || origin.teamId === context.originalTeamId)) {
-          vm.handleSelectChatAgent(origin.agentName, {
-            selectLatest: false,
-            chatId: origin.chatId,
-            title: origin.title,
-          })
+
+      if (context.switchedTeam) {
+        try {
+          await vm.handleEnsureTeamContext({ teamId: context.originalTeamId, announce: true })
+        } catch (rollbackError) {
+          const message =
+            rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+          vm.pushToast(`Could not restore the previous team: ${message}`, 'error')
         }
-      } catch (rollbackError) {
-        const message =
-          rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
-        vm.pushToast(`Could not restore the previous team: ${message}`, 'error')
+      }
+
+      if (
+        context.restoreWorkspace &&
+        vm.isNavigationIntentCurrent(context.navigationIntentSequence)
+      ) {
+        const restoredIntent = vm.restoreWorkspaceNavigation(
+          context.originNavigation,
+          context.navigationIntentSequence
+        )
+        if (restoredIntent !== null) {
+          sandboxUiDeepLinkIntentByIdRef.current.set(context.linkId, restoredIntent)
+        }
       }
     },
-    [vm.getCurrentTeamId, vm.handleEnsureTeamContext, vm.handleSelectChatAgent, vm.pushToast]
+    [
+      vm.getCurrentTeamId,
+      vm.handleEnsureTeamContext,
+      vm.isNavigationIntentCurrent,
+      vm.pushToast,
+      vm.restoreWorkspaceNavigation,
+    ]
   )
 
   const deferSandboxUiDeepLinkUntilTerminal = React.useCallback(
@@ -1850,9 +1876,8 @@ export function App() {
       launchContext: PendingSandboxUiDeepLinkLaunch,
       tone: 'info' | 'error' = 'error'
     ) => {
-      if (deferSandboxUiDeepLink(pending, message, tone)) {
-        await restoreSandboxUiDeepLinkTeam(launchContext)
-      }
+      deferSandboxUiDeepLink(pending, message, tone)
+      await restoreSandboxUiDeepLinkTeam(launchContext)
     },
     [deferSandboxUiDeepLink, restoreSandboxUiDeepLinkTeam]
   )
@@ -2132,6 +2157,13 @@ export function App() {
     void (async () => {
       const restoreTeamId = sandboxUiDeepLinkRestoreTeamByIdRef.current.get(pending.link.id)
       const originalTeamId = restoreTeamId ?? vm.getCurrentTeamId()
+      const originNavigation =
+        sandboxUiDeepLinkOriginNavigationByIdRef.current.get(pending.link.id) ??
+        vm.captureWorkspaceNavigation()
+      sandboxUiDeepLinkOriginNavigationByIdRef.current.set(pending.link.id, originNavigation)
+      let navigationIntentSequence =
+        sandboxUiDeepLinkIntentByIdRef.current.get(pending.link.id) ?? vm.navigationIntentSequence
+      sandboxUiDeepLinkIntentByIdRef.current.set(pending.link.id, navigationIntentSequence)
       let switchedTeam = Boolean(
         restoreTeamId && pending.link.teamId && restoreTeamId !== pending.link.teamId
       )
@@ -2142,9 +2174,12 @@ export function App() {
           restoreTeamId &&
           pending.retryCount &&
           pending.link.teamId &&
-          currentTeamId !== pending.link.teamId
+          currentTeamId !== pending.link.teamId &&
+          currentTeamId !== restoreTeamId
         ) {
           sandboxUiDeepLinkRestoreTeamByIdRef.current.delete(pending.link.id)
+          sandboxUiDeepLinkOriginNavigationByIdRef.current.delete(pending.link.id)
+          sandboxUiDeepLinkIntentByIdRef.current.delete(pending.link.id)
           clearSandboxUiDeepLinkProcessing(pending.link.id)
           const next = failPendingSandboxUiDeepLink(
             pendingSandboxUiDeepLinksRef.current,
@@ -2158,6 +2193,10 @@ export function App() {
           )
           return
         }
+        if (!vm.isNavigationIntentCurrent(navigationIntentSequence)) {
+          await acknowledgeSandboxUiDeepLink(pending.link.id)
+          return
+        }
         if (pending.link.teamId && pending.link.teamId !== currentTeamId) {
           await closeActiveSandboxUiEmbedForHandoff()
           try {
@@ -2168,6 +2207,10 @@ export function App() {
             switchedTeam = switchedTeam || didSwitchTeam
             if (switchedTeam && originalTeamId !== pending.link.teamId) {
               sandboxUiDeepLinkRestoreTeamByIdRef.current.set(pending.link.id, originalTeamId)
+            }
+            if (!vm.isNavigationIntentCurrent(navigationIntentSequence)) {
+              await acknowledgeSandboxUiDeepLink(pending.link.id)
+              return
             }
           } catch (error) {
             switchedTeam =
@@ -2186,6 +2229,9 @@ export function App() {
                 linkTeamId: pending.link.teamId,
                 switchedTeam,
                 conversationOrigin: pending.conversationOrigin,
+                originNavigation,
+                navigationIntentSequence,
+                restoreWorkspace: false,
               }
               await deferSandboxUiDeepLinkUntilTerminal(
                 pending,
@@ -2201,8 +2247,16 @@ export function App() {
           }
         }
         if (processingGeneration !== sandboxUiDeepLinkGenerationRef.current) return
+        if (!vm.isNavigationIntentCurrent(navigationIntentSequence)) {
+          await acknowledgeSandboxUiDeepLink(pending.link.id)
+          return
+        }
         const result = await window.clerum.sandboxUi.listApps()
         if (processingGeneration !== sandboxUiDeepLinkGenerationRef.current) return
+        if (!vm.isNavigationIntentCurrent(navigationIntentSequence)) {
+          await acknowledgeSandboxUiDeepLink(pending.link.id)
+          return
+        }
         const availableApps = toActiveSandboxUiApps(result.apps)
         setAvailableSandboxUiApps(availableApps)
         const resolution = resolveSandboxUiDeepLinkApp(result.apps, pending.link.appRef)
@@ -2218,6 +2272,9 @@ export function App() {
             linkTeamId: pending.link.teamId,
             switchedTeam,
             conversationOrigin: pending.conversationOrigin,
+            originNavigation,
+            navigationIntentSequence,
+            restoreWorkspace: false,
           }
           await deferSandboxUiDeepLinkUntilTerminal(
             pending,
@@ -2227,21 +2284,26 @@ export function App() {
           )
           return
         }
-        const requestId = launchSandboxUiApp(
+        const launch = launchSandboxUiApp(
           {
             ...resolution.app,
             ...(pending.link.path ? { routePath: pending.link.path } : {}),
           },
           pending.conversationOrigin ?? sandboxUiConversationOrigin
         )
+        navigationIntentSequence = launch.navigationIntentSequence
+        sandboxUiDeepLinkIntentByIdRef.current.set(pending.link.id, navigationIntentSequence)
         launchingSandboxUiDeepLinkRef.current = {
           linkId: pending.link.id,
-          requestId,
+          requestId: launch.requestId,
           generation: processingGeneration,
           originalTeamId,
           linkTeamId: pending.link.teamId,
           switchedTeam,
           conversationOrigin: pending.conversationOrigin,
+          originNavigation,
+          navigationIntentSequence,
+          restoreWorkspace: true,
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
@@ -2260,6 +2322,9 @@ export function App() {
           linkTeamId: pending.link.teamId,
           switchedTeam,
           conversationOrigin: pending.conversationOrigin,
+          originNavigation,
+          navigationIntentSequence,
+          restoreWorkspace: false,
         })
         await acknowledgeSandboxUiDeepLink(pending.link.id)
       }
@@ -2279,6 +2344,9 @@ export function App() {
     vm.authenticatedPrincipalIdentity,
     vm.getCurrentTeamId,
     vm.handleEnsureTeamContext,
+    vm.captureWorkspaceNavigation,
+    vm.isNavigationIntentCurrent,
+    vm.navigationIntentSequence,
     vm.isAuthenticated,
     vm.pushToast,
     setPendingSandboxUiDeepLinkState,

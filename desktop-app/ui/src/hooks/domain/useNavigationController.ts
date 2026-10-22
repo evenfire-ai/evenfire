@@ -25,6 +25,14 @@ import type { WorkspaceTabsState } from '../../lib/workspaceTabs.types'
 import { mapKindToRoute, settingsSectionForRoute } from '../../lib/workspaceTabsRoute'
 import type { AgentWorkspaceRoute, NavItem } from '../../uiTypes'
 
+export interface WorkspaceNavigationSnapshot {
+  workspaceTabs: WorkspaceTabsState
+  selectedAgent: string | null
+  selectedAgentRoute: AgentWorkspaceRoute
+  appsPickerActive: boolean
+  lastActiveChatTabId: string | null
+}
+
 /**
  * Owner of the universal tab store (mini-spec 03 §3/§4/§6). The store lives here
  * — upstream of `useAgentChatController`, which reads `navItem` in its effect
@@ -156,6 +164,32 @@ export function useNavigationController() {
     lastActiveChatTabIdRef.current = chatTabId
     setLastActiveChatTabId(chatTabId)
   }, [beginNavigationIntent, nextWorkspaceTabId, setWorkspaceTabs])
+
+  const captureWorkspaceNavigation = useCallback(
+    (): WorkspaceNavigationSnapshot => ({
+      workspaceTabs: workspaceTabsRef.current,
+      selectedAgent,
+      selectedAgentRoute,
+      appsPickerActive,
+      lastActiveChatTabId: lastActiveChatTabIdRef.current,
+    }),
+    [appsPickerActive, selectedAgent, selectedAgentRoute]
+  )
+
+  const restoreWorkspaceNavigation = useCallback(
+    (snapshot: WorkspaceNavigationSnapshot, expectedIntentSequence: number): number | null => {
+      if (!isNavigationIntentCurrent(expectedIntentSequence)) return null
+      const restoredIntentSequence = beginNavigationIntent()
+      setWorkspaceTabs(snapshot.workspaceTabs)
+      setSelectedAgent(snapshot.selectedAgent)
+      setSelectedAgentRoute(snapshot.selectedAgentRoute)
+      setAppsPickerActive(snapshot.appsPickerActive)
+      lastActiveChatTabIdRef.current = snapshot.lastActiveChatTabId
+      setLastActiveChatTabId(snapshot.lastActiveChatTabId)
+      return restoredIntentSequence
+    },
+    [beginNavigationIntent, isNavigationIntentCurrent, setWorkspaceTabs]
+  )
 
   // Apps route with no launched app → the picker residual. Redundant (and thus
   // skipped) when an app tab is already active, since that already derives to
@@ -474,6 +508,8 @@ export function useNavigationController() {
     showAppsPicker,
     clearAppsPicker,
     resetSessionNavigation,
+    captureWorkspaceNavigation,
+    restoreWorkspaceNavigation,
     activateChatTab,
     lastActiveChatTabId,
     openFilesSection,
