@@ -43,6 +43,7 @@ import {
   useGfsBrowserController,
 } from '@hooks/domain/useGfsBrowserController'
 import { isEventFromNestedInteractive } from '@lib/clickableRowProps'
+import { assertGfsAuthorityRetryAllowed } from '@lib/gfsAuthorityQueryPolicy'
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
 import {
@@ -271,6 +272,9 @@ export function FilesPage({
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<GfsActionTarget | null>(null)
   const [moveTarget, setMoveTarget] = useState<GfsActionTarget | null>(null)
+  const [movePermissionStatus, setMovePermissionStatus] = useState<'checking' | 'failed' | null>(
+    null
+  )
   const [renameTarget, setRenameTarget] = useState<GfsActionTarget | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [openLinkOpen, setOpenLinkOpen] = useState(false)
@@ -355,6 +359,8 @@ export function FilesPage({
     resolving,
     refreshAffordances,
   } = ctrl
+  const moveWorkspaceRef = useRef({ sessionScope, currentResourceId: current?.resourceId ?? null })
+  moveWorkspaceRef.current = { sessionScope, currentResourceId: current?.resourceId ?? null }
 
   const lastRemoteGfsChangeEpochRef = useRef(remoteGfsChangeEpoch)
   useEffect(() => {
@@ -553,6 +559,54 @@ export function FilesPage({
   )
   const currentIsFolder = current?.kind === 'directory'
   const currentIsFile = current?.kind === 'file'
+  const movePermissionParentId = currentIsFile
+    ? current?.parentResourceId
+    : currentIsFolder
+      ? current?.resourceId
+      : null
+  const movePermissionQuery = movePermissionParentId
+    ? currentIsFolder
+      ? {
+          affordances: ctrl.affordances ?? undefined,
+          error: ctrl.affordancesError,
+          isFetching: ctrl.loadingAffordances,
+        }
+      : ctrl.moveSourceParentStatusById?.[movePermissionParentId]
+    : undefined
+  const movePermissionNotice = !movePermissionParentId
+    ? null
+    : movePermissionQuery?.isFetching
+      ? { message: 'Checking move permissions…', pending: true }
+      : movePermissionQuery?.error
+        ? {
+            message: `Could not verify move permissions: ${movePermissionQuery.error}`,
+            pending: false,
+          }
+        : movePermissionQuery?.affordances &&
+            !hasGfsMoveSourcePermissions(movePermissionQuery.affordances.held)
+          ? {
+              message:
+                'Move is unavailable because you need write and delete access to the source folder.',
+              pending: false,
+            }
+          : null
+  const retryMovePermission = () => {
+    if (!movePermissionParentId || !sessionScope) return
+    const queryKey = desktopQueryKeys.gfsAffordances(
+      sessionScope,
+      movePermissionParentId,
+      GFS_DRIVE_MAIN
+    )
+    try {
+      assertGfsAuthorityRetryAllowed(queryClient, queryKey)
+    } catch {
+      return
+    }
+    void queryClient.refetchQueries({
+      exact: true,
+      queryKey,
+    })
+  }
   // A total inherited-derivation failure becomes a quiet notice in the Share
   // dialog: an empty derived list alone would silently read as "no one else
   // has access" (R1-M3). Per-ancestor best-effort skipping stays silent.
@@ -1470,16 +1524,89 @@ export function FilesPage({
   const handleMoveTarget = async (destinationId: string, destinationName: string) => {
     if (!moveTarget) return
     const target = moveTarget
+    const sourceParentId =
+      target.parentResourceId ??
+      (target.resourceId === current?.resourceId ? current.parentResourceId : null)
+    const origin = {
+      sessionScope,
+      currentResourceId: current?.resourceId ?? null,
+      resourceId: target.resourceId,
+      sourceParentId,
+      destinationId,
+      version: target.version,
+    }
+    const contextStillMatches = () =>
+      moveWorkspaceRef.current.sessionScope === origin.sessionScope &&
+      moveWorkspaceRef.current.currentResourceId === origin.currentResourceId
+    let permissionsChecked = false
+    setMovePermissionStatus('checking')
     try {
+      if (!sessionScope || !sourceParentId) {
+        throw new Error('Could not verify the source folder for this move.')
+      }
+      const sourceKey = desktopQueryKeys.gfsAffordances(
+        sessionScope,
+        sourceParentId,
+        GFS_DRIVE_MAIN
+      )
+      const destinationKey = desktopQueryKeys.gfsAffordances(
+        sessionScope,
+        destinationId,
+        GFS_DRIVE_MAIN
+      )
+      assertGfsAuthorityRetryAllowed(queryClient, sourceKey)
+      assertGfsAuthorityRetryAllowed(queryClient, destinationKey)
+      const [source, destination] = await Promise.all([
+        queryClient.fetchQuery({
+          queryKey: sourceKey,
+          queryFn: () => window.clerum.gfs.affordances(sourceParentId, GFS_DRIVE_MAIN),
+          staleTime: 0,
+          retry: false,
+        }),
+        queryClient.fetchQuery({
+          queryKey: destinationKey,
+          queryFn: () => window.clerum.gfs.affordances(destinationId, GFS_DRIVE_MAIN),
+          staleTime: 0,
+          retry: false,
+        }),
+      ])
+      if (!pageActiveRef.current) return
+      if (!contextStillMatches()) {
+        throw new Error(
+          'Move was not started because the workspace changed; review the destination.'
+        )
+      }
+      if (!hasGfsMoveSourcePermissions(source.held)) {
+        throw new Error('You do not have write and delete access to the source folder.')
+      }
+      if (!destination.held.includes('write')) {
+        throw new Error('You do not have write access to the destination folder.')
+      }
+      permissionsChecked = true
+      if (!contextStillMatches()) {
+        throw new Error(
+          'Move was not started because the workspace changed; review the destination.'
+        )
+      }
       await ctrl.moveResource(target.resourceId, destinationId, target.version)
+      if (!pageActiveRef.current || !contextStillMatches()) return
     } catch (moveError) {
-      if (failClosedOnAuthorizationError(moveError)) {
+      if (!pageActiveRef.current) return
+      if (moveWorkspaceRef.current.sessionScope !== origin.sessionScope) {
         setMoveTarget(null)
+        setMovePermissionStatus(null)
         return
       }
+      if (failClosedOnAuthorizationError(moveError)) {
+        setMoveTarget(null)
+        setMovePermissionStatus(null)
+        return
+      }
+      setMovePermissionStatus(permissionsChecked ? null : 'failed')
       throw moveError
     }
     setMoveTarget(null)
+    setMovePermissionStatus(null)
     pushToast?.(`Moved ${target.name} to ${destinationName}`, 'success')
   }
 
@@ -1858,6 +1985,19 @@ export function FilesPage({
           ) : null}
 
           {accessibleNotice ? <StatusBanner tone="info" text={accessibleNotice} /> : null}
+          {movePermissionNotice ? (
+            <div role={movePermissionNotice.pending ? 'status' : 'alert'}>
+              <StatusBanner
+                tone={movePermissionNotice.pending ? 'info' : 'error'}
+                text={movePermissionNotice.message}
+              />
+              {!movePermissionNotice.pending ? (
+                <Button onClick={retryMovePermission} size="sm" variant="outline">
+                  Retry permission check
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
           {pendingGfsDeepLinkFailure ? (
             <div role="alert">
               <StatusBanner tone="error" text={pendingGfsDeepLinkFailure.message} />
@@ -2495,15 +2635,19 @@ export function FilesPage({
 
       {moveTarget ? (
         <GfsMoveDialog
-          busy={ctrl.mutating}
+          busy={ctrl.mutating || movePermissionStatus === 'checking'}
           initialCrumbs={
             moveTarget.resourceId === current?.resourceId ? crumbs.slice(0, -1) : crumbs
           }
-          onClose={() => setMoveTarget(null)}
+          onClose={() => {
+            setMovePermissionStatus(null)
+            setMoveTarget(null)
+          }}
           onMove={handleMoveTarget}
           onAuthorityFailure={message => ctrl.handleAuthorityFailure(message, 'operation')}
           sessionScope={sessionScope}
           target={moveTarget}
+          permissionStatus={movePermissionStatus}
         />
       ) : null}
     </section>

@@ -5,10 +5,17 @@ import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
-import { createEmptyWorkspaceTabsState, openFilesTab, setFilesTabPath } from '@lib/workspaceTabs'
+import {
+  createEmptyWorkspaceTabsState,
+  openFilesTab,
+  selectWorkspaceTab,
+  setFilesTabPath,
+} from '@lib/workspaceTabs'
 import type { WorkspaceTabsState } from '@lib/workspaceTabs.types'
 import {
+  accessibleResource,
   childView,
   listAccessiblePage,
   listChildrenPage,
@@ -92,6 +99,7 @@ function authValue(): AuthContextValue {
 
 const SEED_URI = 'gfs://main/aaa'
 const DEEP_LINK_URI = 'gfs://main/0123456789abcdef0123456789abcdef'
+const INACTIVE_URI = 'gfs://main/inactive-files-tab'
 
 /** App's files render seam, reduced to the tab-persistence contract under test. */
 function FilesTabHarness({
@@ -103,6 +111,7 @@ function FilesTabHarness({
   onPendingGfsDeepLinkOutcome,
   onOpenPreview,
   onOpenPendingGfsPreview,
+  includeInactiveTab = false,
 }: {
   remoteGfsChangeEpoch?: number
   pendingGfsDeepLink?: { id: number; uri: string } | null
@@ -119,13 +128,19 @@ function FilesTabHarness({
     preview: GfsPreviewResource,
     returnLocation: { gfsUri: string | null; name: string | null }
   ) => boolean
+  includeInactiveTab?: boolean
 }) {
+  useWindowFocusBridge()
   const queryClient = useQueryClient()
   const [state, setState] = useState<WorkspaceTabsState>(() => {
     let next = createEmptyWorkspaceTabsState()
     // A non-root files tab, already persisted at a live gfsUri (as if reopened
     // from a prior session / focused by a deep-link).
     next = openFilesTab(next, { id: 'files-1', path: SEED_URI, title: 'Reports' })
+    if (includeInactiveTab) {
+      next = openFilesTab(next, { id: 'files-inactive', path: INACTIVE_URI, title: 'Inactive' })
+      next = selectWorkspaceTab(next, 'files-1')
+    }
     return next
   })
 
@@ -180,6 +195,7 @@ function FilesTabHarness({
 
 function renderHarness(
   props: {
+    includeInactiveTab?: boolean
     pendingGfsDeepLink?: { id: number; uri: string } | null
     pendingGfsUri?: string | null
     isPendingGfsDeepLinkCurrent?: () => boolean
@@ -212,8 +228,151 @@ function renderHarness(
 describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', () => {
   afterEach(() => {
     cleanup()
+    vi.useRealTimers()
     vi.restoreAllMocks()
     delete (window as { clerum?: unknown }).clerum
+  })
+
+  it('uses the shared permission freshness window only for the active Files tab', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', { gfsUri: SEED_URI })
+    )
+    const resolve = vi.fn(async (uri: string) => {
+      if (uri === SEED_URI) return folder
+      if (uri === INACTIVE_URI) {
+        return resolveResource(
+          resolvedDirectory('folder-inactive', 'Inactive', { gfsUri: INACTIVE_URI })
+        )
+      }
+      throw new Error(`unexpected test resource URI: ${uri}`)
+    })
+    const affordances = vi.fn(async () =>
+      delegationAffordances(new Set(['read', 'write', 'delete']), false)
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve,
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances,
+        },
+      },
+    })
+
+    const { client, unmount } = renderHarness({ includeInactiveTab: true })
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith('folder-active', 'main'))
+    const activeReads = () => affordances.mock.calls.length
+    expect(activeReads()).toBe(1)
+    expect(resolve).not.toHaveBeenCalledWith(INACTIVE_URI)
+
+    vi.useFakeTimers()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+      window.dispatchEvent(new Event('blur'))
+      window.dispatchEvent(new Event('focus'))
+      window.dispatchEvent(new Event('blur'))
+      window.dispatchEvent(new Event('focus'))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(activeReads()).toBe(1)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(14_001)
+      window.dispatchEvent(new Event('blur'))
+      window.dispatchEvent(new Event('focus'))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1)
+    })
+    expect(activeReads()).toBe(2)
+    expect(resolve).not.toHaveBeenCalledWith(INACTIVE_URI)
+
+    unmount()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(16_000)
+      window.dispatchEvent(new Event('blur'))
+      window.dispatchEvent(new Event('focus'))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(activeReads()).toBe(2)
+    client.clear()
+  })
+
+  it('keeps Files Move open while checking both parents and denies a revoked source', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', { gfsUri: SEED_URI })
+    )
+    const children = await listChildrenPage([
+      childView('notes-file', 'notes.txt', 'file', {
+        parentResourceId: 'folder-active',
+      }),
+    ])
+    const destinations = await listAccessiblePage([
+      accessibleResource('archive-folder', 'Archive', 'directory'),
+    ])
+    let sourceCalls = 0
+    let finishSourceRefresh!: (value: ReturnType<typeof delegationAffordances>) => void
+    const moveResource = vi.fn(async () => undefined)
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folder-active') {
+        sourceCalls += 1
+        if (sourceCalls === 2) {
+          return new Promise<ReturnType<typeof delegationAffordances>>(resolve => {
+            finishSourceRefresh = resolve
+          })
+        }
+      }
+      return delegationAffordances(new Set(['read', 'write', 'delete']), false)
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => destinations),
+          resolve: vi.fn(async () => folder),
+          listChildren: vi.fn(async (resourceId: string) =>
+            resourceId === 'folder-active' ? children : listChildrenPage([])
+          ),
+          affordances,
+          moveResource,
+        },
+      },
+    })
+
+    renderHarness()
+    await waitFor(() => expect(sourceCalls).toBe(1))
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
+    })
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    await act(async () => {
+      fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    })
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+    })
+
+    expect(within(dialog).getByText('Checking permissions…')).toBeTruthy()
+    await waitFor(() => expect(sourceCalls).toBe(2))
+    expect(moveResource).not.toHaveBeenCalled()
+
+    await act(async () => {
+      finishSourceRefresh(delegationAffordances(new Set(['read', 'delete']), false))
+    })
+    expect(
+      await within(dialog).findByText(
+        'You do not have write and delete access to the source folder.'
+      )
+    ).toBeTruthy()
+    expect(within(dialog).getByRole('button', { name: 'Retry permission check' })).toBeTruthy()
+    expect(moveResource).not.toHaveBeenCalled()
   })
 
   it('keeps the seeded path/title during the async load, then reflects the live location', async () => {

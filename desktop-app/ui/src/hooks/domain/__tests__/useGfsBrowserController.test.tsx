@@ -1002,7 +1002,7 @@ describe('useGfsBrowserController', () => {
     expect(listChildren).toHaveBeenCalledTimes(1)
     first.unmount()
 
-    vi.setSystemTime(mountedAt + 17_000)
+    vi.setSystemTime(mountedAt + 7_000)
     const second = render(<Probe />, { wrapper })
     await enterWorkspace()
     await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2))
@@ -1020,10 +1020,10 @@ describe('useGfsBrowserController', () => {
     expect(rowCalls()).toBe(3)
     second.unmount()
 
-    // Past the 60s bound the bits are stale, so a permission change made
+    // Past the 15s bound the bits are stale, so a permission change made
     // outside this page is still picked up — the bound is a delay, not a
     // suppression.
-    vi.setSystemTime(mountedAt + 70_000)
+    vi.setSystemTime(mountedAt + 17_000)
     render(<Probe />, { wrapper })
     await enterWorkspace()
     await waitFor(() => expect(rowCalls()).toBe(6))

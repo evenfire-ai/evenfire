@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { EmptyState } from '@components/Common'
+import { Button, EmptyState, StatusBanner } from '@components/Common'
 import { GfsImagePreviewBody } from '@components/GfsImagePreview'
 import { GfsMarkdownPreviewBody } from '@components/GfsMarkdownPreview'
 import { GfsResourceMenu } from '@components/GfsResourceMenu'
@@ -253,6 +253,24 @@ export function FilePreviewPage({
       />
       <div className="da-gfs-preview-page">
         {previewResourceActions.dialogs}
+        {previewResourceActions.permissionNotices.map(notice => (
+          <div key={notice.id} role={notice.pending ? 'status' : 'alert'}>
+            <StatusBanner tone={notice.pending ? 'info' : 'error'} text={notice.message} />
+            {!notice.pending ? (
+              <Button
+                onClick={() =>
+                  void Promise.resolve()
+                    .then(notice.retry)
+                    .catch(() => undefined)
+                }
+                size="sm"
+                variant="outline"
+              >
+                Retry permission check
+              </Button>
+            ) : null}
+          </div>
+        ))}
         <div className="da-gfs-preview-content">
           {denied || unavailable || accessRevoked ? (
             <>

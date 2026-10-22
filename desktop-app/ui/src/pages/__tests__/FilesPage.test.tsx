@@ -1536,7 +1536,7 @@ describe('FilesPage', () => {
     }
     fireEvent.dragEnter(browser, { dataTransfer })
 
-    expect(screen.getByRole('status').textContent).toContain('Drop files to upload to Team folder')
+    expect(screen.getByText('Drop files to upload to Team folder')).toBeTruthy()
     fireEvent.drop(browser, { dataTransfer })
     await waitFor(() =>
       expect(createFileFromPath).toHaveBeenCalledWith('folder-1', 'notes.md', '/tmp/notes.md')

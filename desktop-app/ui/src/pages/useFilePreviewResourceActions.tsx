@@ -6,6 +6,10 @@ import { ConfirmDialog } from '@components/ConfirmDialog'
 import { IconClose, IconShare } from '@components/SidebarNav/icons'
 import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import {
+  assertGfsAuthorityRetryAllowed,
+  gfsAuthorityQueryPolicy,
+} from '@lib/gfsAuthorityQueryPolicy'
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import { describeGfsGrantError, describeGfsReadError } from '@lib/gfsGrantErrors'
 import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
@@ -110,7 +114,9 @@ export function useFilePreviewResourceActions({
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [renameName, setRenameName] = useState(fileName)
   const [mutationPending, setMutationPending] = useState(false)
-  const [movePermissionStatus, setMovePermissionStatus] = useState<'checking' | null>(null)
+  const [movePermissionStatus, setMovePermissionStatus] = useState<'checking' | 'failed' | null>(
+    null
+  )
   const [revokingGrantId, setRevokingGrantId] = useState<string | null>(null)
   const [revokingShareId, setRevokingShareId] = useState<string | null>(null)
   const deletePendingRef = useRef(false)
@@ -131,12 +137,10 @@ export function useFilePreviewResourceActions({
     queryKey: desktopQueryKeys.gfsAffordances(sessionScope, resourceId || gfsUri, drive),
     queryFn: () => window.clerum.gfs.affordances(resourceId, drive),
     enabled: Boolean(canResolve && resourceId && resource?.kind === 'file'),
-    refetchOnMount: 'always',
-    refetchOnWindowFocus: 'always',
+    ...gfsAuthorityQueryPolicy,
   })
-  const affordances: ResourceAffordances | undefined = affordancesQuery.isError
-    ? undefined
-    : affordancesQuery.data
+  const affordances: ResourceAffordances | undefined =
+    affordancesQuery.isError || affordancesQuery.isFetching ? undefined : affordancesQuery.data
   const sourceParentId = resource?.parentResourceId ?? null
   const moveContextRef = useRef({
     gfsUri,
@@ -158,25 +162,103 @@ export function useFilePreviewResourceActions({
     queryKey: desktopQueryKeys.gfsAffordances(sessionScope, sourceParentId ?? gfsUri, drive),
     queryFn: () => window.clerum.gfs.affordances(sourceParentId!, drive),
     enabled: Boolean(canResolve && resource?.kind === 'file' && sourceParentId),
-    // Revalidate when a preview mounts, then bound focus refreshes so repeated
-    // window focus events do not issue an affordance request every time.
-    refetchOnMount: 'always',
-    refetchOnWindowFocus: true,
-    staleTime: 15_000,
+    ...gfsAuthorityQueryPolicy,
   })
   const sourceParentAffordances: ResourceAffordances | undefined =
     sourceParentAffordancesQuery.isError || sourceParentAffordancesQuery.isFetching
       ? undefined
       : sourceParentAffordancesQuery.data
-  const canShare = Boolean(canResolve && affordances?.canDelegate)
+  const canShare = Boolean(canResolve && !affordancesQuery.isFetching && affordances?.canDelegate)
   const canRename = Boolean(canResolve && affordances?.held.includes('write'))
   const canDelete = Boolean(canResolve && affordances?.held.includes('delete'))
   const canMove = Boolean(
     canResolve &&
     resource?.kind === 'file' &&
     sourceParentId &&
+    !sourceParentAffordancesQuery.isFetching &&
+    !sourceParentAffordancesQuery.isError &&
     hasGfsMoveSourcePermissions(sourceParentAffordances?.held)
   )
+  const sharePermissionAffordances = affordances ?? {
+    canDelegate: false,
+    grantableBits: [],
+    canCreateShare: false,
+  }
+  const sharePermissionError = affordancesQuery.error
+    ? describeGfsReadError(affordancesQuery.error).message
+    : null
+  const permissionNotices = [
+    affordancesQuery.isFetching && affordancesQuery.data
+      ? {
+          id: 'resource-permissions',
+          message: 'Checking file permissions…',
+          pending: true,
+          retry: () => {
+            assertGfsAuthorityRetryAllowed(
+              queryClient,
+              desktopQueryKeys.gfsAffordances(sessionScope, resourceId || gfsUri, drive)
+            )
+            return affordancesQuery.refetch()
+          },
+        }
+      : affordancesQuery.error
+        ? {
+            id: 'resource-permissions',
+            message: `Could not verify file permissions: ${describeGfsReadError(affordancesQuery.error).message}`,
+            pending: false,
+            retry: () => {
+              assertGfsAuthorityRetryAllowed(
+                queryClient,
+                desktopQueryKeys.gfsAffordances(sessionScope, resourceId || gfsUri, drive)
+              )
+              return affordancesQuery.refetch()
+            },
+          }
+        : null,
+    sourceParentId
+      ? sourceParentAffordancesQuery.isFetching && sourceParentAffordancesQuery.data
+        ? {
+            id: 'move-source-permissions',
+            message: 'Checking move permissions…',
+            pending: true,
+            retry: () => {
+              assertGfsAuthorityRetryAllowed(
+                queryClient,
+                desktopQueryKeys.gfsAffordances(sessionScope, sourceParentId, drive)
+              )
+              return sourceParentAffordancesQuery.refetch()
+            },
+          }
+        : sourceParentAffordancesQuery.error
+          ? {
+              id: 'move-source-permissions',
+              message: `Could not verify move permissions: ${describeGfsReadError(sourceParentAffordancesQuery.error).message}`,
+              pending: false,
+              retry: () => {
+                assertGfsAuthorityRetryAllowed(
+                  queryClient,
+                  desktopQueryKeys.gfsAffordances(sessionScope, sourceParentId, drive)
+                )
+                return sourceParentAffordancesQuery.refetch()
+              },
+            }
+          : sourceParentAffordancesQuery.data &&
+              !hasGfsMoveSourcePermissions(sourceParentAffordancesQuery.data.held)
+            ? {
+                id: 'move-source-permissions',
+                message: 'You need write and delete access to the source folder to move this file.',
+                pending: false,
+                retry: () => {
+                  assertGfsAuthorityRetryAllowed(
+                    queryClient,
+                    desktopQueryKeys.gfsAffordances(sessionScope, sourceParentId, drive)
+                  )
+                  return sourceParentAffordancesQuery.refetch()
+                },
+              }
+            : null
+      : null,
+  ].filter((notice): notice is NonNullable<typeof notice> => notice !== null)
 
   const grantsQuery = useQuery({
     queryKey: desktopQueryKeys.gfsGrants(sessionScope, resourceId || gfsUri, drive),
@@ -382,7 +464,20 @@ export function useFilePreviewResourceActions({
     }
     setMovePermissionStatus('checking')
     setMutationPending(true)
+    let permissionsChecked = false
     try {
+      assertGfsAuthorityRetryAllowed(
+        queryClient,
+        desktopQueryKeys.gfsAffordances(
+          moveContext.sessionScope,
+          moveContext.parentResourceId,
+          moveContext.drive
+        )
+      )
+      assertGfsAuthorityRetryAllowed(
+        queryClient,
+        desktopQueryKeys.gfsAffordances(moveContext.sessionScope, destinationId, moveContext.drive)
+      )
       const sourceCheck = await sourceParentAffordancesQuery.refetch({ cancelRefetch: false })
       if (!isActiveMove()) return
       if (!hasCurrentMoveContext()) {
@@ -396,10 +491,16 @@ export function useFilePreviewResourceActions({
       if (!hasGfsMoveSourcePermissions(sourceCheck.data.held)) {
         throw new Error('You do not have write and delete access to the source folder.')
       }
-      const destinationAffordances = await window.clerum.gfs.affordances(
-        destinationId,
-        resource.drive
-      )
+      const destinationAffordances = await queryClient.fetchQuery({
+        queryKey: desktopQueryKeys.gfsAffordances(
+          moveContext.sessionScope,
+          destinationId,
+          moveContext.drive
+        ),
+        queryFn: () => window.clerum.gfs.affordances(destinationId, moveContext.drive),
+        staleTime: 0,
+        retry: false,
+      })
       if (!isActiveMove()) return
       if (!hasCurrentMoveContext()) {
         throw new Error(
@@ -409,6 +510,7 @@ export function useFilePreviewResourceActions({
       if (!destinationAffordances.held.includes('write')) {
         throw new Error('You do not have write access to the destination folder.')
       }
+      permissionsChecked = true
       await window.clerum.gfs.moveResource(
         resource.resourceId,
         destinationId,
@@ -421,11 +523,15 @@ export function useFilePreviewResourceActions({
       pushToast?.(`Moved ${resource.name} to ${destinationName}`, 'success')
     } catch (error) {
       if (!isActiveMove()) return
-      if (onAuthorityFailure(errorMessage(error))) setMoveOpen(false)
-      else throw error
+      if (onAuthorityFailure(errorMessage(error))) {
+        setMoveOpen(false)
+        setMovePermissionStatus(null)
+      } else {
+        setMovePermissionStatus(permissionsChecked ? null : 'failed')
+        throw error
+      }
     } finally {
       if (isActiveMove()) {
-        setMovePermissionStatus(null)
         setMutationPending(false)
       }
     }
@@ -450,7 +556,15 @@ export function useFilePreviewResourceActions({
   }
 
   const handleGrant = async (subjectKeys: string[], bits: string[]) => {
-    if (!resource) return
+    if (
+      !resource ||
+      !affordances ||
+      affordancesQuery.isFetching ||
+      affordancesQuery.isError ||
+      !affordances.canDelegate
+    ) {
+      return
+    }
     try {
       await window.clerum.gfs.grant(resource.resourceId, subjectKeys, bits, resource.drive, false)
       await Promise.all([grantsQuery.refetch(), sharesQuery.refetch(), inheritedQuery.refetch()])
@@ -535,7 +649,7 @@ export function useFilePreviewResourceActions({
 
   const dialogs = (
     <>
-      {canResolve && shareOpen && resource && affordances?.canDelegate ? (
+      {canResolve && shareOpen && resource ? (
         <div
           className="da-gfs-manage-modal"
           role="presentation"
@@ -574,7 +688,9 @@ export function useFilePreviewResourceActions({
                   </div>
                 </div>
                 <GfsDelegationPanel
-                  affordances={affordances}
+                  affordances={sharePermissionAffordances}
+                  permissionPending={affordancesQuery.isFetching}
+                  permissionError={sharePermissionError}
                   subjectOptions={shareSubjects}
                   subjectOptionsLoading={teamsQuery.isFetching || agentsQuery.isFetching}
                   subjectOptionsError={
@@ -715,6 +831,7 @@ export function useFilePreviewResourceActions({
   return {
     handlers,
     dialogs,
+    permissionNotices,
     canShare,
     canRename,
     canMove,

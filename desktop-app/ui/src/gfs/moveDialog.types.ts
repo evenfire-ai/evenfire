@@ -19,7 +19,7 @@ export type GfsMoveDialogProps = {
   onMove: (destinationId: string, destinationName: string) => Promise<void>
   onClose: () => void
   busy?: boolean
-  permissionStatus?: 'checking' | null
+  permissionStatus?: 'checking' | 'failed' | null
   /** Central fail-closed boundary (R4 spec §1): destination-listing authority
    *  failures must revoke the session even though the dialog owns these
    *  query observers. Policy verdicts return false and stay local. */

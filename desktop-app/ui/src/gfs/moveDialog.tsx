@@ -354,6 +354,11 @@ export function GfsMoveDialog({
             </p>
           ) : null}
           {error ? <StatusBanner tone="error" text={error} /> : null}
+          {permissionStatus === 'failed' ? (
+            <Button onClick={() => void commit()} size="sm" variant="outline">
+              Retry permission check
+            </Button>
+          ) : null}
           {listError ? <StatusBanner tone="error" text={listError} /> : null}
           <div className="da-gfs-move-dialog__current-location">
             <span>Current location:</span>

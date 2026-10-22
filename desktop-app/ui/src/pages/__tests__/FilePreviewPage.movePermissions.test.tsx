@@ -25,6 +25,7 @@ const readOnly = delegationAffordances(new Set(['read']), false)
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   vi.restoreAllMocks()
 })
 
@@ -258,6 +259,62 @@ describe('FilePreviewPage move permission contract', () => {
       )
     )
     expect(screen.queryByRole('dialog', { name: 'Move file diagram.png' })).toBeNull()
+  })
+
+  it('holds a source 429 retry until its Retry-After window expires', async () => {
+    const destinationPage = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+    ])
+    let sourceCalls = 0
+    const limited = new Error(
+      "Error invoking remote method 'gfs:affordances': 429 Too Many Requests " +
+        'httpStatus=429 retryAfterSeconds=7'
+    )
+    const source = vi.fn(async () => {
+      sourceCalls += 1
+      if (sourceCalls === 2) throw limited
+      return fullAccess
+    })
+    const moveResource = vi.fn(async () => undefined)
+    installGfs({ source, listAccessible: async () => destinationPage, move: moveResource })
+    installController()
+    const { queryClient } = renderPreview()
+
+    await screen.findByAltText('Preview of diagram.png')
+    await waitFor(() => expect(sourceCalls).toBe(1))
+    const menu = await openPreviewActions()
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
+    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+
+    expect(
+      await within(dialog).findByText('Too many file requests — try again in 7s.')
+    ).toBeTruthy()
+    expect(within(dialog).getByRole('button', { name: 'Retry permission check' })).toBeTruthy()
+    expect(moveResource).not.toHaveBeenCalled()
+
+    vi.useFakeTimers()
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(sourceCalls).toBe(2)
+    expect(moveResource).not.toHaveBeenCalled()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(7_001)
+    })
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
+      for (let index = 0; index < 10; index += 1) await Promise.resolve()
+    })
+    expect(moveResource).toHaveBeenCalledTimes(1)
+    queryClient.clear()
   })
 
   it('moves with exact resource version after both parent and destination checks pass', async () => {

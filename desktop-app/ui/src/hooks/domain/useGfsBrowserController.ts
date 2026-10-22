@@ -9,6 +9,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query'
 import { GFS_BREADCRUMB_MAX_DEPTH } from '@constants/gfsBrowser'
+import { gfsAuthorityQueryPolicy } from '@lib/gfsAuthorityQueryPolicy'
 import {
   describeGfsReadError,
   isRateLimited,
@@ -472,9 +473,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     ),
     queryFn: () => window.clerum.gfs.affordances(current!.resourceId, DRIVE),
     enabled: Boolean(sessionScope) && Boolean(current) && accessState === 'active',
-    refetchOnMount: true,
-    refetchOnWindowFocus: true,
-    staleTime: 60_000,
+    ...gfsAuthorityQueryPolicy,
   })
   const refreshAffordances = useCallback(async () => {
     const resourceId = current?.resourceId
@@ -504,6 +503,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     ),
     queryFn: () => window.clerum.gfs.affordances(rowAffordancesResourceId!, DRIVE),
     enabled: Boolean(sessionScope) && Boolean(rowAffordancesResourceId) && accessState === 'active',
+    ...gfsAuthorityQueryPolicy,
   })
   // The grants listing is the revoke-id source (the grant PUT returns no ids),
   // so writes must refetch it. Enabled only while the Manage dialog is open.
@@ -798,22 +798,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         currentIsDirectory &&
         !authorityPending &&
         accessState === 'active',
-      // Permission changes made outside this page must not leave row actions
-      // stale when a folder is revisited — but `'always'` paid for that with a
-      // refetch per visible child on EVERY mount, against data the project
-      // default keeps fresh forever (`staleTime: Infinity`). Re-entering a
-      // 45-child folder seconds later spent 40 requests to re-derive bits the
-      // cache already held, which was 47% of the affordances traffic in the
-      // incident behind #681.
-      //
-      // A 60s bound keeps the out-of-band case working and makes the re-entry
-      // free. The cost is that a row's permission bits may be up to 60s stale
-      // after a change made elsewhere; server-side enforcement is unchanged, so
-      // a stale row action still gets the 403 this page already handles. The
-      // menu-level affordances query above serves Infinity-cached bits today,
-      // so this is tighter than the status quo beside it, not looser.
-      refetchOnMount: true as const,
-      staleTime: 60_000,
+      ...gfsAuthorityQueryPolicy,
     })),
   })
   const moveSourceParentIds = useMemo(() => {
@@ -831,9 +816,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       queryKey: desktopQueryKeys.gfsAffordances(sessionScope ?? 'anonymous', resourceId, DRIVE),
       queryFn: () => window.clerum.gfs.affordances(resourceId, DRIVE),
       enabled: Boolean(sessionScope) && !authorityPending && accessState === 'active',
-      refetchOnMount: true as const,
-      refetchOnWindowFocus: true as const,
-      staleTime: 60_000,
+      ...gfsAuthorityQueryPolicy,
     })),
   })
   const moveSourceParentAffordancesById = useMemo(() => {
@@ -843,6 +826,26 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       const query = moveSourceParentQueries[index]
       if (!query?.data || query.isError || query.isFetching) return
       byId[resourceId] = query.data as GfsBrowserAffordances
+    })
+    return byId
+  }, [accessState, authorityPending, moveSourceParentIds, moveSourceParentQueries])
+  const moveSourceParentStatusById = useMemo(() => {
+    const byId: Record<
+      string,
+      {
+        affordances?: GfsBrowserAffordances
+        error: string | null
+        isFetching: boolean
+      }
+    > = {}
+    if (authorityPending || accessState === 'revoked') return byId
+    moveSourceParentIds.forEach((resourceId, index) => {
+      const query = moveSourceParentQueries[index]
+      byId[resourceId] = {
+        affordances: query?.data as GfsBrowserAffordances | undefined,
+        error: query?.error ? toPresentedMessage(query.error) : null,
+        isFetching: Boolean(query?.isFetching),
+      }
     })
     return byId
   }, [accessState, authorityPending, moveSourceParentIds, moveSourceParentQueries])
@@ -1325,6 +1328,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     loadingAffordances: affordancesQuery.isFetching,
     rowAffordancesByResourceId,
     moveSourceParentAffordancesById,
+    moveSourceParentStatusById,
     rowAffordancesResourceId,
     setRowAffordancesResourceId,
     setMoveSourceParentResourceId: setRowMoveSourceParentResourceId,
