@@ -252,59 +252,69 @@ describe('EvenDrive drag-and-drop Desktop E2E gate', () => {
 
   describe('sanitized run summary', () => {
     it('binds the revision, the selected cases, the outcomes and the exit code', () => {
-      const filePath = path.join(os.tmpdir(), `gfs-dnd-summary-${LANE}.json`)
-      const report = journeyReport([{ title: 'journey one' }, { title: 'journey two' }])
-      const summary = writeSanitizedRunSummary({
-        lane: LANE,
-        revision: 'abc123',
-        branch: 'feat/example',
-        command: COMMAND,
-        report,
-        run: { status: 0 },
-        selectedJourneys: collectReportJourneys(report),
-        verdict: 'pass',
-        filePath,
-      })
+      // A uniquely created directory, never a predictably named file directly
+      // in the system temporary directory (CodeQL js/insecure-temporary-file).
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gfs-dnd-summary-'))
+      const filePath = path.join(dir, 'playwright-summary.json')
+      try {
+        const report = journeyReport([{ title: 'journey one' }, { title: 'journey two' }])
+        const summary = writeSanitizedRunSummary({
+          lane: LANE,
+          revision: 'abc123',
+          branch: 'feat/example',
+          command: COMMAND,
+          report,
+          run: { status: 0 },
+          selectedJourneys: collectReportJourneys(report),
+          verdict: 'pass',
+          filePath,
+        })
 
-      expect(summary).toMatchObject({
-        lane: LANE,
-        revision: 'abc123',
-        branch: 'feat/example',
-        command: COMMAND,
-        processExit: 0,
-        verdict: 'pass',
-      })
-      expect(summary.selected).toEqual(['journey one', 'journey two'])
-      expect(summary.journeys).toEqual([
-        { title: 'journey one', status: 'expected' },
-        { title: 'journey two', status: 'expected' },
-      ])
-      expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toEqual(summary)
-      fs.rmSync(filePath, { force: true })
+        expect(summary).toMatchObject({
+          lane: LANE,
+          revision: 'abc123',
+          branch: 'feat/example',
+          command: COMMAND,
+          processExit: 0,
+          verdict: 'pass',
+        })
+        expect(summary.selected).toEqual(['journey one', 'journey two'])
+        expect(summary.journeys).toEqual([
+          { title: 'journey one', status: 'expected' },
+          { title: 'journey two', status: 'expected' },
+        ])
+        expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toEqual(summary)
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true })
+      }
     })
 
     it('does not carry the raw report text into the summary', () => {
-      const filePath = path.join(os.tmpdir(), `gfs-dnd-summary-private-${LANE}.json`)
-      const report = {
-        ...journeyReport([{ title: 'journey one', outcome: 'unexpected' }]),
-        errors: [{ message: 'the upstream said: private-token-value' }],
-      }
-      const summary = writeSanitizedRunSummary({
-        lane: LANE,
-        revision: 'abc123',
-        branch: 'feat/example',
-        command: COMMAND,
-        report,
-        run: { status: 1 },
-        selectedJourneys: collectReportJourneys(report),
-        verdict: 'fail',
-        filePath,
-      })
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gfs-dnd-summary-'))
+      const filePath = path.join(dir, 'playwright-summary.json')
+      try {
+        const report = {
+          ...journeyReport([{ title: 'journey one', outcome: 'unexpected' }]),
+          errors: [{ message: 'the upstream said: private-token-value' }],
+        }
+        const summary = writeSanitizedRunSummary({
+          lane: LANE,
+          revision: 'abc123',
+          branch: 'feat/example',
+          command: COMMAND,
+          report,
+          run: { status: 1 },
+          selectedJourneys: collectReportJourneys(report),
+          verdict: 'fail',
+          filePath,
+        })
 
-      expect(JSON.stringify(summary)).not.toContain('private-token-value')
-      expect(summary.processExit).toBe(1)
-      expect(summary.verdict).toBe('fail')
-      fs.rmSync(filePath, { force: true })
+        expect(JSON.stringify(summary)).not.toContain('private-token-value')
+        expect(summary.processExit).toBe(1)
+        expect(summary.verdict).toBe('fail')
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true })
+      }
     })
   })
 
