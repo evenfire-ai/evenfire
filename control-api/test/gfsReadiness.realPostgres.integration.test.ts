@@ -20,7 +20,10 @@ function quoteIdent(value: string): string {
 }
 
 describeRealPostgres('GFS Phase 0 real PostgreSQL readiness', () => {
-  const latestMigration = CONTROL_API_MIGRATIONS.at(-1)!
+  // A fresh initDb records canonical receipts only; aliases come from DEV history.
+  const aliasedMigration = CONTROL_API_MIGRATIONS.filter(
+    migration => (migration.legacyVersions?.length ?? 0) > 0
+  ).at(-1)!
   const database = `gfs_readiness_${randomBytes(6).toString('hex')}`
   const connectionString = databaseUrl(
     adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres',
@@ -74,21 +77,17 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL readiness', () => {
     }
   })
 
-  it('keeps Control API readiness when the latest migration has an accepted historical receipt', async () => {
-    const acceptedAliases = latestMigration.legacyVersions ?? []
-    expect(acceptedAliases.length).toBeGreaterThan(0)
+  it('keeps Control API readiness when a migration has only an accepted historical receipt', async () => {
+    const acceptedAlias = aliasedMigration.legacyVersions![0]
 
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
-      await client.query('DELETE FROM schema_migrations WHERE version = $1', [
-        latestMigration.version,
+      const removed = await client.query('DELETE FROM schema_migrations WHERE version = $1', [
+        aliasedMigration.version,
       ])
-      const aliasReceipts = await client.query<{ version: string }>(
-        `SELECT version FROM schema_migrations WHERE version = ANY($1::text[])`,
-        [acceptedAliases]
-      )
-      expect(aliasReceipts.rows.map(row => row.version)).not.toHaveLength(0)
+      expect(removed.rowCount).toBe(1)
+      await client.query('INSERT INTO schema_migrations (version) VALUES ($1)', [acceptedAlias])
       await expect(assertDbReady(client)).resolves.toBeUndefined()
     } finally {
       await client.query('ROLLBACK').catch(() => undefined)
@@ -96,24 +95,18 @@ describeRealPostgres('GFS Phase 0 real PostgreSQL readiness', () => {
     }
   })
 
-  it('fails Control API readiness only when the latest migration and every accepted alias are absent', async () => {
-    const acceptedLatestReceipts = [
-      latestMigration.version,
-      ...(latestMigration.legacyVersions ?? []),
-    ]
+  it('fails Control API readiness only when a migration and every accepted alias are absent', async () => {
+    const acceptedReceipts = [aliasedMigration.version, ...aliasedMigration.legacyVersions!]
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
-      await client.query(`DELETE FROM schema_migrations WHERE version = ANY($1::text[])`, [
-        acceptedLatestReceipts,
-      ])
-      const remainingReceipts = await client.query<{ version: string }>(
-        `SELECT version FROM schema_migrations WHERE version = ANY($1::text[])`,
-        [acceptedLatestReceipts]
+      const removed = await client.query(
+        `DELETE FROM schema_migrations WHERE version = ANY($1::text[])`,
+        [acceptedReceipts]
       )
-      expect(remainingReceipts.rows).toHaveLength(0)
+      expect(removed.rowCount).toBe(1)
       await expect(assertDbReady(client)).rejects.toMatchObject({
-        message: `Control API database is not ready: missing migrations ${latestMigration.version}`,
+        message: `Control API database is not ready: missing migrations ${aliasedMigration.version}`,
       })
     } finally {
       await client.query('ROLLBACK').catch(() => undefined)

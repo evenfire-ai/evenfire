@@ -84,15 +84,6 @@ export async function applyUserAccessFoundationSchema(db: DbClient): Promise<voi
     CREATE INDEX IF NOT EXISTS authorization_resource_revisions_updated_idx
       ON authorization_resource_revisions (environment_id, updated_at DESC);
 
-    CREATE TABLE IF NOT EXISTS authorization_catalog_revision (
-      singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
-      revision BIGINT NOT NULL DEFAULT 1 CHECK (revision > 0),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    INSERT INTO authorization_catalog_revision(singleton)
-    VALUES(TRUE)
-    ON CONFLICT (singleton) DO NOTHING;
-
     CREATE TABLE IF NOT EXISTS operational_catalog_source_state (
       environment_id TEXT NOT NULL,
       source_family TEXT NOT NULL,
@@ -226,8 +217,8 @@ export async function applyCatalogUtf8OrderingSchema(db: DbClient): Promise<void
 }
 
 /**
- * Replace the repository-wide catalog hot row with the transactional user,
- * team, resource, and operational-source revisions consumed by catalog reads.
+ * Install the transactional user, team, resource, and operational-source
+ * revision writers consumed by catalog reads.
  */
 export async function applyComposableCatalogRevisionSchema(db: DbClient): Promise<void> {
   await db.query(`
@@ -267,36 +258,6 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
       SET component_class = EXCLUDED.component_class,
           rationale = EXCLUDED.rationale;
 
-    CREATE OR REPLACE FUNCTION authorization_bump_user_revision(target_user_id UUID)
-    RETURNS VOID
-    LANGUAGE SQL
-    SECURITY DEFINER
-    SET search_path = pg_catalog, public
-    AS $$
-      INSERT INTO authorization_user_revisions(user_id, revision, updated_at)
-      SELECT users.id, 1, clock_timestamp()
-        FROM users
-       WHERE users.id = target_user_id
-      ON CONFLICT (user_id) DO UPDATE
-        SET revision = authorization_user_revisions.revision + 1,
-            updated_at = clock_timestamp();
-    $$;
-
-    CREATE OR REPLACE FUNCTION authorization_bump_team_revision(target_team_id UUID)
-    RETURNS VOID
-    LANGUAGE SQL
-    SECURITY DEFINER
-    SET search_path = pg_catalog, public
-    AS $$
-      INSERT INTO authorization_team_revisions(team_id, revision, updated_at)
-      SELECT teams.id, 1, clock_timestamp()
-        FROM teams
-       WHERE teams.id = target_team_id
-      ON CONFLICT (team_id) DO UPDATE
-        SET revision = authorization_team_revisions.revision + 1,
-            updated_at = clock_timestamp();
-    $$;
-
     CREATE OR REPLACE FUNCTION authorization_bump_subject_revision(
       target_subject_type TEXT,
       target_subject_id TEXT
@@ -304,7 +265,7 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     RETURNS VOID
     LANGUAGE plpgsql
     SECURITY DEFINER
-    SET search_path = pg_catalog, public
+    SET search_path = pg_catalog, public, pg_temp
     AS $$
     BEGIN
       IF target_subject_type NOT IN ('user', 'team', 'operator', 'host', 'context') THEN
@@ -333,7 +294,7 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     RETURNS TRIGGER
     LANGUAGE plpgsql
     SECURITY DEFINER
-    SET search_path = pg_catalog, public
+    SET search_path = pg_catalog, public, pg_temp
     AS $$
     BEGIN
       IF TG_OP <> 'DELETE' THEN
@@ -350,7 +311,7 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     RETURNS TRIGGER
     LANGUAGE plpgsql
     SECURITY DEFINER
-    SET search_path = pg_catalog, public
+    SET search_path = pg_catalog, public, pg_temp
     AS $$
     BEGIN
       IF TG_OP <> 'DELETE' THEN
@@ -367,7 +328,7 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     RETURNS TRIGGER
     LANGUAGE plpgsql
     SECURITY DEFINER
-    SET search_path = pg_catalog, public
+    SET search_path = pg_catalog, public, pg_temp
     AS $$
     DECLARE row_value RECORD;
     BEGIN
@@ -396,7 +357,7 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     RETURNS TRIGGER
     LANGUAGE plpgsql
     SECURITY DEFINER
-    SET search_path = pg_catalog, public
+    SET search_path = pg_catalog, public, pg_temp
     AS $$
     BEGIN
       IF TG_OP <> 'DELETE' THEN
@@ -415,7 +376,7 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     RETURNS TRIGGER
     LANGUAGE plpgsql
     SECURITY DEFINER
-    SET search_path = pg_catalog, public
+    SET search_path = pg_catalog, public, pg_temp
     AS $$
     BEGIN
       IF TG_OP <> 'DELETE' THEN
@@ -434,7 +395,7 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     RETURNS TRIGGER
     LANGUAGE plpgsql
     SECURITY DEFINER
-    SET search_path = pg_catalog, public
+    SET search_path = pg_catalog, public, pg_temp
     AS $$
     BEGIN
       IF TG_OP <> 'DELETE' THEN
@@ -453,7 +414,7 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     RETURNS VOID
     LANGUAGE plpgsql
     SECURITY DEFINER
-    SET search_path = pg_catalog, public
+    SET search_path = pg_catalog, public, pg_temp
     AS $$
     DECLARE target_environment_id TEXT;
     BEGIN
@@ -482,7 +443,7 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     RETURNS TRIGGER
     LANGUAGE plpgsql
     SECURITY DEFINER
-    SET search_path = pg_catalog, public
+    SET search_path = pg_catalog, public, pg_temp
     AS $$
     BEGIN
       IF TG_OP <> 'DELETE' THEN
@@ -507,7 +468,7 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     RETURNS VOID
     LANGUAGE plpgsql
     SECURITY DEFINER
-    SET search_path = pg_catalog, public
+    SET search_path = pg_catalog, public, pg_temp
     AS $$
     DECLARE subject RECORD;
     BEGIN
@@ -530,7 +491,7 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     RETURNS TRIGGER
     LANGUAGE plpgsql
     SECURITY DEFINER
-    SET search_path = pg_catalog, public
+    SET search_path = pg_catalog, public, pg_temp
     AS $$
     BEGIN
       IF TG_OP <> 'DELETE' THEN
@@ -546,30 +507,8 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     END;
     $$;
 
-    DROP TRIGGER IF EXISTS users_catalog_revision ON users;
-    DROP TRIGGER IF EXISTS teams_catalog_revision ON teams;
-    DROP TRIGGER IF EXISTS team_members_catalog_revision ON team_members;
-    DROP TRIGGER IF EXISTS user_contexts_catalog_revision ON user_contexts;
-    DROP TRIGGER IF EXISTS team_contexts_catalog_revision ON team_contexts;
-    DROP TRIGGER IF EXISTS user_agents_catalog_revision ON user_agents;
-    DROP TRIGGER IF EXISTS team_agents_catalog_revision ON team_agents;
-    DROP TRIGGER IF EXISTS user_workflow_triggers_catalog_revision ON user_workflow_triggers;
-    DROP TRIGGER IF EXISTS team_workflow_triggers_catalog_revision ON team_workflow_triggers;
-    DROP TRIGGER IF EXISTS workflow_runs_catalog_revision ON workflow_runs;
-    DROP TRIGGER IF EXISTS workflow_approval_requests_catalog_revision ON workflow_approval_requests;
-    DROP TRIGGER IF EXISTS notification_deliveries_catalog_revision ON notification_deliveries;
-    DROP TRIGGER IF EXISTS gfs_resources_catalog_revision ON gfs_resources;
-    DROP TRIGGER IF EXISTS gfs_grants_catalog_revision ON gfs_grants;
-    DROP TRIGGER IF EXISTS gfs_shares_catalog_revision ON gfs_shares;
-    DROP TRIGGER IF EXISTS operational_resource_index_catalog_revision ON operational_resource_index;
-    DROP TRIGGER IF EXISTS operational_resource_relationships_catalog_revision
-      ON operational_resource_relationships;
-    DROP TRIGGER IF EXISTS operational_catalog_source_state_catalog_revision
-      ON operational_catalog_source_state;
-
     -- CREATE OR REPLACE takes ShareRowExclusiveLock (readers continue); a
-    -- DROP of an existing trigger would take AccessExclusiveLock. The
-    -- *_catalog_revision drops above lock nothing when the trigger is absent.
+    -- DROP of an existing trigger would take AccessExclusiveLock.
     CREATE OR REPLACE TRIGGER users_authorization_revision
       AFTER INSERT OR UPDATE OR DELETE ON users
       FOR EACH ROW EXECUTE FUNCTION authorization_bump_user_row_revision();
@@ -594,9 +533,6 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     CREATE OR REPLACE TRIGGER gfs_resources_authorization_revision
       AFTER INSERT OR UPDATE OR DELETE ON gfs_resources
       FOR EACH ROW EXECUTE FUNCTION authorization_bump_gfs_resource_revision();
-
-    DROP FUNCTION IF EXISTS authorization_bump_catalog_revision();
-    DROP TABLE IF EXISTS authorization_catalog_revision;
 
     REVOKE ALL ON TABLE authorization_catalog_writer_components FROM PUBLIC;
     REVOKE ALL ON TABLE authorization_catalog_environment FROM PUBLIC;
@@ -637,10 +573,12 @@ async function applyAuthorizationRevisionFunctions(db: DbClient): Promise<void> 
     RETURNS VOID
     LANGUAGE SQL
     SECURITY DEFINER
-    SET search_path = pg_catalog, public
+    SET search_path = pg_catalog, public, pg_temp
     AS $$
       INSERT INTO authorization_user_revisions(user_id, revision, updated_at)
-      VALUES(target_user_id, 1, clock_timestamp())
+      SELECT users.id, 1, clock_timestamp()
+        FROM users
+       WHERE users.id = target_user_id
       ON CONFLICT (user_id) DO UPDATE
         SET revision = authorization_user_revisions.revision + 1,
             updated_at = clock_timestamp();
@@ -650,10 +588,12 @@ async function applyAuthorizationRevisionFunctions(db: DbClient): Promise<void> 
     RETURNS VOID
     LANGUAGE SQL
     SECURITY DEFINER
-    SET search_path = pg_catalog, public
+    SET search_path = pg_catalog, public, pg_temp
     AS $$
       INSERT INTO authorization_team_revisions(team_id, revision, updated_at)
-      VALUES(target_team_id, 1, clock_timestamp())
+      SELECT teams.id, 1, clock_timestamp()
+        FROM teams
+       WHERE teams.id = target_team_id
       ON CONFLICT (team_id) DO UPDATE
         SET revision = authorization_team_revisions.revision + 1,
             updated_at = clock_timestamp();
@@ -667,7 +607,7 @@ async function applyAuthorizationRevisionFunctions(db: DbClient): Promise<void> 
     RETURNS VOID
     LANGUAGE SQL
     SECURITY DEFINER
-    SET search_path = pg_catalog, public
+    SET search_path = pg_catalog, public, pg_temp
     AS $$
       INSERT INTO authorization_resource_revisions(
         environment_id, resource_type, resource_id, revision, updated_at
@@ -690,26 +630,11 @@ async function applyAuthorizationRevisionFunctions(db: DbClient): Promise<void> 
 
 async function applyAuthorizationRevisionTriggers(db: DbClient): Promise<void> {
   await db.query(`
-    CREATE OR REPLACE FUNCTION authorization_bump_catalog_revision()
-    RETURNS TRIGGER
-    LANGUAGE plpgsql
-    SECURITY DEFINER
-    SET search_path = pg_catalog, public
-    AS $$
-    BEGIN
-      UPDATE authorization_catalog_revision
-         SET revision = revision + 1,
-             updated_at = clock_timestamp()
-       WHERE singleton = TRUE;
-      RETURN NULL;
-    END;
-    $$;
-
     CREATE OR REPLACE FUNCTION authorization_bump_team_membership_revision()
     RETURNS TRIGGER
     LANGUAGE plpgsql
     SECURITY DEFINER
-    SET search_path = pg_catalog, public
+    SET search_path = pg_catalog, public, pg_temp
     AS $$
     BEGIN
       IF TG_OP <> 'DELETE' THEN
@@ -731,7 +656,7 @@ async function applyAuthorizationRevisionTriggers(db: DbClient): Promise<void> {
     RETURNS TRIGGER
     LANGUAGE plpgsql
     SECURITY DEFINER
-    SET search_path = pg_catalog, public
+    SET search_path = pg_catalog, public, pg_temp
     AS $$
     BEGIN
       IF TG_OP <> 'DELETE' THEN
@@ -750,7 +675,7 @@ async function applyAuthorizationRevisionTriggers(db: DbClient): Promise<void> {
     RETURNS TRIGGER
     LANGUAGE plpgsql
     SECURITY DEFINER
-    SET search_path = pg_catalog, public
+    SET search_path = pg_catalog, public, pg_temp
     AS $$
     BEGIN
       IF TG_OP <> 'DELETE' THEN
@@ -769,7 +694,7 @@ async function applyAuthorizationRevisionTriggers(db: DbClient): Promise<void> {
     RETURNS TRIGGER
     LANGUAGE plpgsql
     SECURITY DEFINER
-    SET search_path = pg_catalog, public
+    SET search_path = pg_catalog, public, pg_temp
     AS $$
     BEGIN
       IF TG_OP <> 'DELETE' THEN
@@ -795,7 +720,7 @@ async function applyAuthorizationRevisionTriggers(db: DbClient): Promise<void> {
     RETURNS TRIGGER
     LANGUAGE plpgsql
     SECURITY DEFINER
-    SET search_path = pg_catalog, public
+    SET search_path = pg_catalog, public, pg_temp
     AS $$
     BEGIN
       IF TG_OP <> 'DELETE' THEN
@@ -859,11 +784,6 @@ async function applyAuthorizationRevisionTriggers(db: DbClient): Promise<void> {
     END;
     $$;
 
-    -- No *_catalog_revision statement triggers are installed here:
-    -- 0133_composable_catalog_revisions replaces the global catalog revision,
-    -- and dropping an installed trigger there would take AccessExclusiveLock.
-
-    REVOKE ALL ON FUNCTION authorization_bump_catalog_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_team_membership_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_user_grant_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_team_grant_revision() FROM PUBLIC;
@@ -905,7 +825,6 @@ async function applyUserAccessRuntimePrivileges(db: DbClient): Promise<void> {
       authorization_user_revisions,
       authorization_team_revisions,
       authorization_resource_revisions,
-      authorization_catalog_revision,
       operational_catalog_source_state,
       operational_resource_index,
       operational_resource_relationships,
@@ -929,7 +848,5 @@ async function applyUserAccessRuntimePrivileges(db: DbClient): Promise<void> {
       authorization_team_revisions,
       authorization_resource_revisions
       TO control_api_runtime;
-
-    GRANT SELECT ON TABLE authorization_catalog_revision TO control_api_runtime;
   `)
 }

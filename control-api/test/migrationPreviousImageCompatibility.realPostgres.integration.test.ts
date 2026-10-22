@@ -139,29 +139,16 @@ describeRealPostgres('D34 previous-image writer compatibility on real PostgreSQL
       )
       expect(state?.definition).not.toMatch(new RegExp(`VALUES\\s*\\(${targetId}`, 'i'))
     }
-    expect(
-      await databasePool.query(
-        `SELECT 1 FROM schema_migrations
-          WHERE version = '0144_authorization_revision_delete_compatibility'`
-      )
-    ).toMatchObject({ rowCount: 1 })
   })
 
-  it('fixes an applied 0125 prefix before previous writers delete users or teams', async () => {
-    const writerSource = readFileSync(
-      new URL('../src/services/directory/teams.ts', import.meta.url)
-    )
-    expect(createHash('sha256').update(writerSource).digest('hex')).toBe(
-      PRE_D34_TEAMS_WRITER_SHA256
-    )
-
+  it('lets the runtime role delete a user and a team with a deleted membership', async () => {
     const userId = randomUUID()
     const teamId = randomUUID()
     await databasePool.query(
-      `INSERT INTO users(id, email, name) VALUES ($1, $2, 'D34 prefix repair')`,
-      [userId, `d34-prefix-${userId}@example.test`]
+      `INSERT INTO users(id, email, name) VALUES ($1, $2, 'D34 runtime delete')`,
+      [userId, `d34-runtime-delete-${userId}@example.test`]
     )
-    await databasePool.query(`INSERT INTO teams(id, name) VALUES ($1, 'D34 prefix repair')`, [
+    await databasePool.query(`INSERT INTO teams(id, name) VALUES ($1, 'D34 runtime delete')`, [
       teamId,
     ])
     await databasePool.query(
@@ -170,51 +157,7 @@ describeRealPostgres('D34 previous-image writer compatibility on real PostgreSQL
       [teamId, userId]
     )
 
-    const before = await databasePool.query<{
-      name: string
-      owner: string
-      acl: string[] | null
-      config: string[] | null
-    }>(
-      `SELECT proname AS name, pg_get_userbyid(proowner) AS owner, proacl AS acl,
-              proconfig AS config
-         FROM pg_proc
-        WHERE oid = ANY(ARRAY[
-          'public.authorization_bump_team_revision(uuid)'::regprocedure,
-          'public.authorization_bump_user_revision(uuid)'::regprocedure
-        ])
-        ORDER BY proname`
-    )
-    expect(before.rows).toHaveLength(2)
-
-    await databasePool.query(`
-      CREATE OR REPLACE FUNCTION public.authorization_bump_user_revision(target_user_id UUID)
-      RETURNS VOID
-      LANGUAGE SQL
-      SECURITY DEFINER
-      SET search_path = pg_catalog, public
-      AS $$
-        INSERT INTO authorization_user_revisions(user_id, revision, updated_at)
-        VALUES(target_user_id, 1, clock_timestamp())
-        ON CONFLICT (user_id) DO UPDATE
-          SET revision = authorization_user_revisions.revision + 1,
-              updated_at = clock_timestamp();
-      $$;
-
-      CREATE OR REPLACE FUNCTION public.authorization_bump_team_revision(target_team_id UUID)
-      RETURNS VOID
-      LANGUAGE SQL
-      SECURITY DEFINER
-      SET search_path = pg_catalog, public
-      AS $$
-        INSERT INTO authorization_team_revisions(team_id, revision, updated_at)
-        VALUES(target_team_id, 1, clock_timestamp())
-        ON CONFLICT (team_id) DO UPDATE
-          SET revision = authorization_team_revisions.revision + 1,
-              updated_at = clock_timestamp();
-      $$;
-    `)
-
+    vi.resetModules()
     const actualDb = await vi.importActual<typeof import('../src/db.js')>('../src/db.js')
     vi.doMock('../src/db.js', () => ({
       ...actualDb,
@@ -229,56 +172,7 @@ describeRealPostgres('D34 previous-image writer compatibility on real PostgreSQL
       import('../src/services/directory/teams.js'),
       import('../src/services/directory/users.js'),
     ])
-    await expect(adminDeleteTeam(teamId)).rejects.toMatchObject({ code: '23503' })
-    await expect(adminDeleteUser(userId)).rejects.toMatchObject({ code: '23503' })
 
-    await databasePool.query(
-      `DELETE FROM schema_migrations
-        WHERE version = ANY($1::text[])`,
-      [
-        [
-          '0144_authorization_revision_delete_compatibility',
-          '0143_authorization_revision_delete_compatibility',
-          '0138_authorization_revision_delete_compatibility',
-        ],
-      ]
-    )
-    await initDb({ connect: () => databasePool.connect() })
-
-    const repaired = await databasePool.query<{
-      name: string
-      owner: string
-      acl: string[] | null
-      config: string[] | null
-      definition: string
-    }>(
-      `SELECT proname AS name,
-              pg_get_userbyid(proowner) AS owner,
-              proacl AS acl,
-              proconfig AS config,
-              pg_get_functiondef(oid) AS definition
-         FROM pg_proc
-        WHERE oid = ANY(ARRAY[
-          'public.authorization_bump_team_revision(uuid)'::regprocedure,
-          'public.authorization_bump_user_revision(uuid)'::regprocedure
-        ])
-        ORDER BY proname`
-    )
-    expect(repaired.rows).toHaveLength(2)
-    for (const [name, parentTable, targetId] of [
-      ['authorization_bump_team_revision', 'teams', 'target_team_id'],
-      ['authorization_bump_user_revision', 'users', 'target_user_id'],
-    ]) {
-      const current = repaired.rows.find(row => row.name === name)
-      const original = before.rows.find(row => row.name === name)
-      expect(current?.config).toContain('search_path=pg_catalog, public, pg_temp')
-      expect(current?.definition).toMatch(
-        new RegExp(`SELECT ${parentTable}\\.id[\\s\\S]*FROM ${parentTable}`, 'i')
-      )
-      expect(current?.definition).not.toMatch(new RegExp(`VALUES\\s*\\(${targetId}`, 'i'))
-      expect(current?.owner).toBe(original?.owner)
-      expect(current?.acl).toEqual(original?.acl)
-    }
     expect(await adminDeleteUser(userId)).toEqual({ ok: true, id: userId })
     expect(await adminDeleteTeam(teamId)).toEqual({ ok: true, id: teamId })
     expect(await databasePool.query(`SELECT 1 FROM users WHERE id = $1`, [userId])).toMatchObject({
@@ -287,11 +181,5 @@ describeRealPostgres('D34 previous-image writer compatibility on real PostgreSQL
     expect(await databasePool.query(`SELECT 1 FROM teams WHERE id = $1`, [teamId])).toMatchObject({
       rowCount: 0,
     })
-    expect(
-      await databasePool.query(
-        `SELECT 1 FROM schema_migrations
-          WHERE version = '0144_authorization_revision_delete_compatibility'`
-      )
-    ).toMatchObject({ rowCount: 1 })
   })
 })

@@ -2887,62 +2887,13 @@ describeRealPostgres('control-api real Postgres migrations', () => {
   })
 
   it('prevents temp-type shadowing in access-foundation SECURITY DEFINER triggers', async () => {
-    const { initDb } = await import('../src/db.js')
-    const connector = { connect: () => dbPool.connect() }
-    const hardeningVersion = '0135_user_access_foundation_definer_temp_shadow_hardening'
-
-    const preUpgradeFunctions = await readAccessFoundationDefinerState(dbPool)
-    expect(preUpgradeFunctions.rows.map(row => row.function_name)).toEqual(
+    const definerFunctions = await readAccessFoundationDefinerState(dbPool)
+    expect(definerFunctions.rows.map(row => row.function_name)).toEqual(
       [...accessFoundationDefinerNames].sort()
     )
-    for (const { config } of preUpgradeFunctions.rows) {
+    for (const { config } of definerFunctions.rows) {
       expect(config).toEqual(['search_path=pg_catalog, public, pg_temp'])
     }
-
-    const originalOwnersAndGrants = preUpgradeFunctions.rows.map(
-      ({ function_name, owner, acl }) => ({ function_name, owner, acl })
-    )
-
-    // Model an already-migrated pre-fix database: restore the old function
-    // settings and remove only the new forward-migration marker.
-    for (const signature of accessFoundationDefinerSignatures) {
-      await dbPool.query(`ALTER FUNCTION public.${signature} SET search_path = pg_catalog, public`)
-    }
-    const hardeningReceipts = [
-      hardeningVersion,
-      '0134_user_access_foundation_definer_temp_shadow_hardening',
-      '012b_user_access_foundation_definer_temp_shadow_hardening',
-      '012a_user_access_foundation_definer_temp_shadow_hardening',
-    ]
-    const removedMarker = await dbPool.query(
-      `DELETE FROM schema_migrations
-        WHERE version = ANY($1::text[])
-        RETURNING version`,
-      [hardeningReceipts]
-    )
-    expect(removedMarker.rows.map(row => row.version).sort()).toEqual([...hardeningReceipts].sort())
-
-    await initDb(connector)
-    const migratedMarker = await dbPool.query<{ version: string }>(
-      `SELECT version FROM schema_migrations WHERE version = $1`,
-      [hardeningVersion]
-    )
-    expect(migratedMarker.rows).toEqual([{ version: hardeningVersion }])
-
-    const upgradedFunctions = await readAccessFoundationDefinerState(dbPool)
-    expect(upgradedFunctions.rows.map(row => row.function_name)).toEqual(
-      [...accessFoundationDefinerNames].sort()
-    )
-    for (const { config } of upgradedFunctions.rows) {
-      expect(config).toEqual(['search_path=pg_catalog, public, pg_temp'])
-    }
-    expect(
-      upgradedFunctions.rows.map(({ function_name, owner, acl }) => ({
-        function_name,
-        owner,
-        acl,
-      }))
-    ).toEqual(originalOwnersAndGrants)
 
     const attackerRole = `entity_change_shadow_${randomBytes(5).toString('hex')}`
     const attackerPassword = randomBytes(24).toString('hex')

@@ -7,11 +7,7 @@ export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '0131_invitation_delivery_commands',
   '0132_catalog_utf8_ordering',
   '0133_composable_catalog_revisions',
-  '0134_gfs_catalog_revision_components',
-  '0135_user_access_foundation_definer_temp_shadow_hardening',
-  '0136_legacy_password_security_epoch_backfill',
-  // Executed immediately after 0130 by the runner, before remaining PR1 migrations.
-  '0144_authorization_revision_delete_compatibility',
+  '0134_legacy_password_security_epoch_backfill',
 ] as const)
 
 export const DEV_POST_0106_MIGRATION_VERSIONS = Object.freeze([
@@ -50,14 +46,8 @@ const CLASSIFIED_POST_0106_MIGRATION_VERSIONS = Object.freeze([
 export type MigrationDescriptor = {
   version: string
   legacyVersions?: readonly string[]
-  // Keep supported older-reader identities alongside the current receipt.
-  preserveLegacyReceipts?: boolean
   apply: (db: DbClient) => Promise<void>
 }
-
-const AUTHORIZATION_REVISION_COMPATIBILITY_PREREQUISITE = '0130_user_access_foundation'
-const AUTHORIZATION_REVISION_COMPATIBILITY_VERSION =
-  '0144_authorization_revision_delete_compatibility'
 
 type ApplyPendingPr1MigrationsInput = {
   db: DbClient
@@ -98,9 +88,6 @@ export async function applyPendingPr1Migrations({
   const canonicalVersions = new Set(byVersion.keys())
   const aliasOwners = new Map<string, string>()
   for (const migration of migrations) {
-    if (migration.preserveLegacyReceipts && !migration.legacyVersions?.length) {
-      throw new Error(`Migration ${migration.version} preserves no legacy receipts`)
-    }
     for (const alias of migration.legacyVersions ?? []) {
       if (canonicalVersions.has(alias)) {
         throw new Error(`Migration alias collides with canonical version: ${alias}`)
@@ -128,118 +115,21 @@ export async function applyPendingPr1Migrations({
   for (const version of CLASSIFIED_POST_0106_MIGRATION_VERSIONS) {
     const migration = byVersion.get(version)
     if (!migration) throw new Error(`Missing registered post-0106 migration: ${version}`)
-    const compatibilityMigration =
-      version === AUTHORIZATION_REVISION_COMPATIBILITY_PREREQUISITE
-        ? byVersion.get(AUTHORIZATION_REVISION_COMPATIBILITY_VERSION)
-        : undefined
-    if (version === AUTHORIZATION_REVISION_COMPATIBILITY_PREREQUISITE && !compatibilityMigration) {
-      throw new Error(
-        `Missing registered authorization revision compatibility migration: ${AUTHORIZATION_REVISION_COMPATIBILITY_VERSION}`
-      )
-    }
+    if (appliedVersions.has(version)) continue
     const acceptedLegacyVersion = migration.legacyVersions?.find(alias =>
       appliedVersions.has(alias)
     )
-    const preservedMigrationReceipts = migration.preserveLegacyReceipts
-      ? (migration.legacyVersions ?? [])
-      : []
-    const currentMigrationApplied = appliedVersions.has(version) || Boolean(acceptedLegacyVersion)
-    if (currentMigrationApplied) {
-      const currentReceiptPending = !appliedVersions.has(version)
-      const preservedMigrationReceiptsPending = preservedMigrationReceipts.filter(
-        alias => !appliedVersions.has(alias)
-      )
-      const acceptedCompatibilityLegacyVersion = compatibilityMigration?.legacyVersions?.find(
-        alias => appliedVersions.has(alias)
-      )
-      const compatibilityReceiptPending =
-        compatibilityMigration && !appliedVersions.has(compatibilityMigration.version)
-      const preservedCompatibilityReceipts = compatibilityMigration?.preserveLegacyReceipts
-        ? (compatibilityMigration.legacyVersions ?? [])
-        : []
-      const preservedCompatibilityReceiptsPending = preservedCompatibilityReceipts.filter(
-        alias => !appliedVersions.has(alias)
-      )
-      const compatibilityBodyPending =
-        compatibilityMigration &&
-        !appliedVersions.has(compatibilityMigration.version) &&
-        !acceptedCompatibilityLegacyVersion
-      if (
-        currentReceiptPending ||
-        preservedMigrationReceiptsPending.length > 0 ||
-        compatibilityReceiptPending ||
-        preservedCompatibilityReceiptsPending.length > 0
-      ) {
-        await runBoundedTransaction(db, async () => {
-          if (currentReceiptPending) await recordMigration(db, version)
-          for (const alias of preservedMigrationReceiptsPending) {
-            await recordMigration(db, alias)
-          }
-          if (compatibilityBodyPending) {
-            await compatibilityMigration!.apply(db)
-          }
-          if (compatibilityMigration && compatibilityReceiptPending) {
-            await recordMigration(db, compatibilityMigration.version)
-          }
-          if (compatibilityMigration) {
-            for (const alias of preservedCompatibilityReceiptsPending) {
-              await recordMigration(db, alias)
-            }
-          }
-        })
-        if (currentReceiptPending) appliedVersions.add(version)
-        for (const alias of preservedMigrationReceiptsPending) appliedVersions.add(alias)
-        if (compatibilityReceiptPending) {
-          appliedVersions.add(compatibilityMigration.version)
-        }
-        for (const alias of preservedCompatibilityReceiptsPending) appliedVersions.add(alias)
-      }
+    if (acceptedLegacyVersion) {
+      await runBoundedTransaction(db, () => recordMigration(db, version))
+      appliedVersions.add(version)
       continue
     }
 
-    const isPr1Migration = expected.has(version)
-    const compatibilityReceiptAlreadyApplied = compatibilityMigration
-      ? appliedVersions.has(compatibilityMigration.version) ||
-        compatibilityMigration.legacyVersions?.some(alias => appliedVersions.has(alias))
-      : false
-    if (compatibilityMigration && compatibilityReceiptAlreadyApplied) {
-      throw new Error(
-        `Team revision compatibility is recorded before its prerequisite: ${compatibilityMigration.version}`
-      )
-    }
-    if (isPr1Migration && !acceptedLegacyVersion) {
-      await preparePr1Migration(db, version)
-    }
-
+    if (expected.has(version)) await preparePr1Migration(db, version)
     await runBoundedTransaction(db, async () => {
-      if (!acceptedLegacyVersion) await migration.apply(db)
+      await migration.apply(db)
       await recordMigration(db, version)
-      for (const alias of preservedMigrationReceipts) {
-        if (!appliedVersions.has(alias)) await recordMigration(db, alias)
-      }
-      if (compatibilityMigration) {
-        const acceptedAlias = compatibilityMigration.legacyVersions?.find(alias =>
-          appliedVersions.has(alias)
-        )
-        if (!appliedVersions.has(compatibilityMigration.version) && !acceptedAlias) {
-          await compatibilityMigration.apply(db)
-        }
-        if (!appliedVersions.has(compatibilityMigration.version)) {
-          await recordMigration(db, compatibilityMigration.version)
-        }
-        const compatibilityAliases = compatibilityMigration.preserveLegacyReceipts
-          ? (compatibilityMigration.legacyVersions ?? [])
-          : []
-        for (const alias of compatibilityAliases) {
-          if (!appliedVersions.has(alias)) await recordMigration(db, alias)
-        }
-      }
     })
     appliedVersions.add(version)
-    for (const alias of preservedMigrationReceipts) appliedVersions.add(alias)
-    if (compatibilityMigration) appliedVersions.add(compatibilityMigration.version)
-    if (compatibilityMigration?.preserveLegacyReceipts) {
-      for (const alias of compatibilityMigration.legacyVersions ?? []) appliedVersions.add(alias)
-    }
   }
 }

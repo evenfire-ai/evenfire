@@ -66,8 +66,9 @@ describe('db.initDb', () => {
     expect(sqls.some(sql => sql.includes('DROP TABLE IF EXISTS workflow_run_outputs'))).toBe(false)
     expect(sqls).not.toContain('ROLLBACK')
     // The migration plan now includes four separately committed parent-dev receipts at 0126-0129.
-    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(32)
-    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(32)
+    // S1e folded three PR1 migrations; PR1 is five versions plus the 0132 function transaction.
+    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(30)
+    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(30)
     expect(sqls[sqls.length - 2]).toBe('COMMIT')
     expect(sqls[sqls.length - 1]).toContain('SELECT pg_advisory_unlock')
     expect(clientRelease).toHaveBeenCalledTimes(1)

@@ -41,33 +41,6 @@ const ROW_REVISION_TRIGGER_TABLES = [
   'gfs_shares',
   'gfs_resources',
 ] as const
-// The statement-level triggers the 0130 body installed before S1d. A database
-// that applied that body still carries them until 0133 drops them.
-const LEGACY_CATALOG_TRIGGER_TABLES = [
-  'users',
-  'teams',
-  'team_members',
-  'user_contexts',
-  'team_contexts',
-  'user_agents',
-  'team_agents',
-  'user_workflow_triggers',
-  'team_workflow_triggers',
-  'workflow_runs',
-  'workflow_approval_requests',
-  'notification_deliveries',
-  'gfs_resources',
-  'gfs_grants',
-  'gfs_shares',
-  'operational_resource_index',
-  'operational_resource_relationships',
-  'operational_catalog_source_state',
-] as const
-const LEGACY_CATALOG_TRIGGERS_SQL = LEGACY_CATALOG_TRIGGER_TABLES.map(
-  table => `CREATE OR REPLACE TRIGGER ${table}_catalog_revision AFTER INSERT OR UPDATE OR DELETE ON ${table}
-    FOR EACH STATEMENT EXECUTE FUNCTION authorization_bump_catalog_revision();`
-).join('\n')
-
 function databaseUrl(baseUrl: string, database: string): string {
   const value = new URL(baseUrl)
   value.pathname = `/${database}`
@@ -141,19 +114,13 @@ type MigrationRun = {
   preExistingTables: Set<string>
   commits: CommitSnapshot[]
   composableCatalogProbes: Record<string, Probe> | null
-  legacyTriggersBeforeComposableCatalog: number | null
 }
 
-async function migrate(
-  pool: Pool,
-  observer: Pool,
-  options: { installLegacyCatalogTriggers: boolean }
-): Promise<MigrationRun> {
+async function migrate(pool: Pool, observer: Pool): Promise<MigrationRun> {
   const run: MigrationRun = {
     preExistingTables: new Set(),
     commits: [],
     composableCatalogProbes: null,
-    legacyTriggersBeforeComposableCatalog: null,
   }
   const pendingVersions: string[] = []
   let accessFoundationSeen = false
@@ -177,12 +144,6 @@ async function migrate(
           if (text.trim() === 'COMMIT') {
             const versions = pendingVersions.splice(0)
             if (versions.some(version => PR1_VERSIONS.has(version))) {
-              if (
-                options.installLegacyCatalogTriggers &&
-                versions.includes('0130_user_access_foundation')
-              ) {
-                await client.query(LEGACY_CATALOG_TRIGGERS_SQL)
-              }
               if (versions.includes(COMPOSABLE_CATALOG_VERSION)) {
                 run.composableCatalogProbes = {
                   readUsers: await probe(observer, 'SELECT count(*) FROM users'),
@@ -192,17 +153,6 @@ async function migrate(
               }
               run.commits.push({ versions, locks: await relationLocks(observer, pid) })
             }
-          }
-          if (
-            run.legacyTriggersBeforeComposableCatalog === null &&
-            text.includes('DROP TRIGGER IF EXISTS users_catalog_revision ON users')
-          ) {
-            const installed = await observer.query<{ count: number }>(
-              `SELECT count(*)::int AS count
-                 FROM pg_trigger
-                WHERE NOT tgisinternal AND tgname LIKE '%\\_catalog\\_revision'`
-            )
-            run.legacyTriggersBeforeComposableCatalog = installed.rows[0]!.count
           }
           return client.query(text, values)
         },
@@ -229,44 +179,34 @@ function blockingLocks(run: MigrationRun): (RelationLock & { versions: string })
 describeRealPostgres('PR1 migration locks on real PostgreSQL', () => {
   const suffix = randomBytes(6).toString('hex')
   const freshDatabase = `control_api_pr1_locks_fresh_${suffix}`
-  const legacyDatabase = `control_api_pr1_locks_legacy_${suffix}`
   const baseUrl = adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres'
   let adminPool: Pool
   let freshPool: Pool
   let freshObserver: Pool
-  let legacyPool: Pool
-  let legacyObserver: Pool
   let fresh: MigrationRun
-  let legacy: MigrationRun
 
   beforeAll(async () => {
     adminPool = new Pool({ connectionString: adminUrl })
     await adminPool.query(`DROP ROLE IF EXISTS ${runtimeRoles.join(', ')}`)
     await adminPool.query(`CREATE DATABASE ${quoteIdentifier(freshDatabase)}`)
-    await adminPool.query(`CREATE DATABASE ${quoteIdentifier(legacyDatabase)}`)
     freshPool = new Pool({ connectionString: databaseUrl(baseUrl, freshDatabase), max: 2 })
     freshObserver = new Pool({ connectionString: databaseUrl(baseUrl, freshDatabase), max: 3 })
-    legacyPool = new Pool({ connectionString: databaseUrl(baseUrl, legacyDatabase), max: 2 })
-    legacyObserver = new Pool({ connectionString: databaseUrl(baseUrl, legacyDatabase), max: 3 })
-    fresh = await migrate(freshPool, freshObserver, { installLegacyCatalogTriggers: false })
-    legacy = await migrate(legacyPool, legacyObserver, { installLegacyCatalogTriggers: true })
+    fresh = await migrate(freshPool, freshObserver)
   }, 120_000)
 
   afterAll(async () => {
     try {
-      for (const pool of [freshPool, freshObserver, legacyPool, legacyObserver]) {
+      for (const pool of [freshPool, freshObserver]) {
         if (pool) await endPoolAndWaitForClients(pool)
       }
       if (adminPool) {
-        for (const database of [freshDatabase, legacyDatabase]) {
-          await adminPool.query(
-            `SELECT pg_terminate_backend(pid)
-               FROM pg_stat_activity
-              WHERE datname = $1 AND pid <> pg_backend_pid()`,
-            [database]
-          )
-          await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)}`)
-        }
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid)
+             FROM pg_stat_activity
+            WHERE datname = $1 AND pid <> pg_backend_pid()`,
+          [freshDatabase]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(freshDatabase)}`)
         await adminPool.query(`DROP ROLE IF EXISTS ${runtimeRoles.join(', ')}`)
       }
     } finally {
@@ -331,18 +271,5 @@ describeRealPostgres('PR1 migration locks on real PostgreSQL', () => {
         table
       ).toBe(true)
     }
-  })
-
-  it('converges a database that applied the earlier 0130 body to the fresh end state', async () => {
-    // Liveness: the legacy database really carried the 18 statement triggers
-    // into 0133, and dropping them there is visible as AccessExclusive locks.
-    expect(legacy.legacyTriggersBeforeComposableCatalog).toBe(LEGACY_CATALOG_TRIGGER_TABLES.length)
-    expect(blockingLocks(legacy)).toContainEqual({
-      relname: 'users',
-      mode: 'AccessExclusiveLock',
-      versions: expect.stringContaining(COMPOSABLE_CATALOG_VERSION),
-    })
-
-    expect(await triggerDefinitions(legacyPool)).toEqual(await triggerDefinitions(freshPool))
   })
 })
