@@ -3,6 +3,7 @@ import type { PinnedTransport } from '../http/pinnedFetch.js'
 import { pinnedFetch } from '../http/pinnedFetch.js'
 import type { DnsResolver } from '../http/validateMcpServerSpec.js'
 import { rootLogger } from '../observability/logger.js'
+import type { AsProfileId } from './asProfiles.js'
 import { getDynamicClient } from './dynamicClientStore.js'
 import {
   type RemoteOAuthSpecIncoherence,
@@ -63,7 +64,7 @@ export type ServerOAuthSecretSource =
 export interface RemoteClientRouting {
   authorizationEndpoint: string
   tokenEndpoint: string
-  /** RFC 8707 resource indicator, echoed in authorize + token/refresh. */
+  /** RFC 8707 resource indicator; absent when the authorization-server profile does not send it. */
   resource?: string
   clientMode: 'public' | 'confidential'
   /** D-8: token in the body vs Authorization header (mcp-host concern; carried for parity). */
@@ -77,6 +78,8 @@ export interface RemoteClientRouting {
    * it must match this value rather than being ignored.
    */
   issuer?: string
+  /** Closed authorization-server profile pinned on the CR; drives the wire (asProfiles.ts). */
+  asProfile?: AsProfileId
 }
 
 /**

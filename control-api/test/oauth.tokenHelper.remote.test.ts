@@ -5,6 +5,12 @@ import { resolveServerOAuthSubject } from '../src/oauth/mcpServerOAuthSpec.js'
 import * as store from '../src/oauth/store.js'
 import { getAccessToken } from '../src/oauth/tokenHelper.js'
 import { buildRemoteOAuthSpec } from '../src/routes/admin/remoteMcp.js'
+import { normalizeMcpServerOwnerDecl } from '../src/routes/mcpOauth.js'
+import {
+  type InstalledMcpServer,
+  WORKIQ_GUID_SCOPE,
+  installWorkIqServer,
+} from './fixtures/perServerInstall.js'
 import { PILOTS, makeDiscoveryTransport } from './fixtures/remoteOAuthDiscovery.js'
 
 /**
@@ -113,7 +119,10 @@ describe('getAccessToken — remote refresh is IP-pinned (DEC-17)', () => {
     expect(calls).toHaveLength(1)
     expect(calls[0].url).toBe(TOKEN_ENDPOINT)
     expect(calls[0].connectedIP).toBe(VALIDATED_IP)
-    expect(calls[0].body).toContain('grant_type=refresh_token')
+    // I6: without a profile the body is the pre-profile one — resource, never scope.
+    expect(calls[0].body).toBe(
+      `grant_type=refresh_token&refresh_token=REMOTE-RT&client_id=${encodeURIComponent(CLIENT_ID)}&resource=${encodeURIComponent(notion.resource)}`
+    )
     expect(refreshSpy).toHaveBeenCalledWith(
       expect.anything(),
       ENCRYPTION_KEY,
@@ -142,5 +151,72 @@ describe('getAccessToken — no-refresh derived from metadata (D-8, fail-closed)
     expect(result).toEqual({ kind: 'no_grant' })
     expect(calls).toHaveLength(0)
     vi.restoreAllMocks()
+  })
+})
+
+describe('getAccessToken — entra-v2 refresh wire (I5, I7)', () => {
+  const ENTRA_TOKEN_ENDPOINT =
+    'https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/oauth2/v2.0/token'
+  let workIq: InstalledMcpServer
+
+  beforeAll(async () => {
+    workIq = await installWorkIqServer({ scopes: [WORKIQ_GUID_SCOPE] })
+  })
+
+  async function refreshWith(server: InstalledMcpServer) {
+    vi.spyOn(store, 'getOAuthGrant').mockResolvedValue(staleGrant())
+    vi.spyOn(store, 'refreshOAuthGrantTokens').mockResolvedValue({ updated: true } as never)
+    const { transport, calls } = recordingTransport(
+      JSON.stringify({ access_token: 'NEW-AT', expires_in: 3600 })
+    )
+    const owner = normalizeMcpServerOwnerDecl(server as never)
+    if (!owner) throw new Error('fixture: the Work IQ CR did not resolve')
+    const clientIdRef = server.spec.oauth.clientIdRef as { name: string; key: string }
+    const clientSecretRef = server.spec.oauth.clientSecretRef as { name: string; key: string }
+    const result = await getAccessToken(
+      { ...KEY, recipeName: server.metadata.name, oauthClientId: String(server.spec.oauth.id) },
+      {
+        db: { query: async () => ({ rows: [] }) } as never,
+        recipeReader: { read: async () => owner },
+        secretReader: {
+          read: async () => ({
+            [clientIdRef.key]: String(server.spec.oauth.id),
+            [clientSecretRef.key]: 'entra-client-secret',
+          }),
+        },
+        fetchFn: (async () => {
+          throw new Error('remote refresh must NOT use fetchFn')
+        }) as unknown as typeof fetch,
+        encryptionKey: ENCRYPTION_KEY,
+        resolveDns: async () => [VALIDATED_IP],
+        pinnedTransport: transport,
+      }
+    )
+    vi.restoreAllMocks()
+    return { result, calls }
+  }
+
+  it('the POSTed refresh body carries scope with offline_access and no resource', async () => {
+    expect(workIq.spec.oauth.resource).toBe('https://workiq.svc.cloud.microsoft/mcp')
+    const { result, calls } = await refreshWith(workIq)
+    expect(result).toMatchObject({ kind: 'ok', accessToken: 'NEW-AT' })
+    expect(calls).toHaveLength(1)
+    expect(calls[0].url).toBe(ENTRA_TOKEN_ENDPOINT)
+    const body = new URLSearchParams(calls[0].body ?? '')
+    expect(body.get('grant_type')).toBe('refresh_token')
+    expect(body.get('scope')).toBe(`${WORKIQ_GUID_SCOPE} offline_access`)
+    expect(body.has('resource')).toBe(false)
+    expect(calls[0].body).not.toContain('resource=')
+  })
+
+  it('a CR edited to drop offline_access still refreshes with it', async () => {
+    const edited: InstalledMcpServer = {
+      ...workIq,
+      spec: { ...workIq.spec, oauth: { ...workIq.spec.oauth, scopes: [WORKIQ_GUID_SCOPE] } },
+    }
+    const { calls } = await refreshWith(edited)
+    expect(new URLSearchParams(calls[0].body ?? '').get('scope')).toBe(
+      `${WORKIQ_GUID_SCOPE} offline_access`
+    )
   })
 })

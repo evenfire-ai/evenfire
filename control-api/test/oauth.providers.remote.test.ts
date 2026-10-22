@@ -80,6 +80,42 @@ describe('buildRemoteRefreshRequest (public client, RFC 8707)', () => {
     const req = buildRemoteRefreshRequest(TOKEN_ENDPOINT, { refreshToken: 'RT', clientId: 'CID' })
     expect(req.body).toBe('grant_type=refresh_token&refresh_token=RT&client_id=CID')
   })
+
+  it('appends scope, space-joined, when scopes are given', () => {
+    const req = buildRemoteRefreshRequest(
+      TOKEN_ENDPOINT,
+      { refreshToken: 'RT', clientId: 'CID' },
+      undefined,
+      ['a', 'offline_access']
+    )
+    expect(req.body).toBe(
+      'grant_type=refresh_token&refresh_token=RT&client_id=CID&scope=a%20offline_access'
+    )
+  })
+
+  it('puts scope before resource when both are given', () => {
+    const req = buildRemoteRefreshRequest(
+      TOKEN_ENDPOINT,
+      { refreshToken: 'RT', clientId: 'CID', clientSecret: 'SEC' },
+      RESOURCE,
+      ['api://workiq.svc.cloud.microsoft/WorkIQAgent.Ask', 'offline_access']
+    )
+    expect(req.body).toBe(
+      'grant_type=refresh_token&refresh_token=RT&client_id=CID&client_secret=SEC&scope=api%3A%2F%2Fworkiq.svc.cloud.microsoft%2FWorkIQAgent.Ask%20offline_access&resource=https%3A%2F%2Fmcp.notion.com'
+    )
+  })
+
+  it('an empty scope list leaves the body byte-identical to the resource-only body', () => {
+    const withEmpty = buildRemoteRefreshRequest(
+      TOKEN_ENDPOINT,
+      { refreshToken: 'RT', clientId: 'CID' },
+      RESOURCE,
+      []
+    )
+    expect(withEmpty.body).toBe(
+      'grant_type=refresh_token&refresh_token=RT&client_id=CID&resource=https%3A%2F%2Fmcp.notion.com'
+    )
+  })
 })
 
 describe('parseRemoteTokenResponse', () => {

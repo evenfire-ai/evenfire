@@ -310,7 +310,7 @@ export const ENTRA_TENANT_OIDC_JSON =
 export const ENTRA_UNKNOWN_TENANT_OIDC_400_JSON =
   '{"error":"invalid_tenant","error_description":"AADSTS90002: Tenant \'00000000-0000-0000-0000-000000000001\' not found. Check to make sure you have the correct tenant ID and are signing into the correct cloud. Check with your subscription administrator, this may happen if there are no active subscriptions for the tenant. Trace ID: fd7c437e-5de4-418f-a92d-2542f3ff1e00 Correlation ID: f396dc2b-aa03-4985-b73a-a44d76d054af Timestamp: 2026-10-21 14:15:01Z","error_codes":[90002],"timestamp":"2026-10-21 14:15:01Z","trace_id":"fd7c437e-5de4-418f-a92d-2542f3ff1e00","correlation_id":"f396dc2b-aa03-4985-b73a-a44d76d054af","error_uri":"https://login.microsoftonline.com/error?code=90002"}'
 
-const ENTRA_TENANT_AUTHORITY =
+export const ENTRA_TENANT_AUTHORITY =
   'https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0'
 
 /** OIDC metadata both Entra pilots serve: the real tenant, `organizations` and an unknown tenant. */
