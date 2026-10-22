@@ -12,9 +12,15 @@ import {
 } from '../http/validateMcpServerSpec.js'
 import { type Logger, rootLogger } from '../observability/logger.js'
 import {
+  type AsProfileId,
   ENTRA_TENANT_AUTHORITY_TEMPLATE,
+  detectAsProfile,
   isEntraMultiTenantAuthority,
   isEntraTenantAuthority,
+  profileHasResourceScope,
+  profileScopeViolation,
+  profileUnverifiedScopes,
+  withProfileScopes,
 } from './asProfiles.js'
 
 /**
@@ -325,6 +331,27 @@ export interface DiscoveryResult {
   }
   registrationMode: RegistrationMode
   quirks: RemoteQuirks
+  /** Closed authorization-server profile recognised from the pinned issuer (`asProfiles.ts`). */
+  asProfile?: AsProfileId
+  /**
+   * With a profile, the first derived scope that would mint a token for another API.
+   * Informative only: the install validates the operator's final list. May be `''`.
+   */
+  scopeAudienceViolation?: string
+  /** With a profile, the derived GUID-form scopes the platform cannot tie to the MCP host. */
+  unverifiedScopes?: string[]
+  /** With a profile, the derived scopes name no resource (sign-in scopes only). */
+  scopeAudienceMissing?: true
+}
+
+/** Default requested scopes: PRM `scopes_supported`, else AS `scopes_supported`, else none. Untrusted → strings only. */
+export function defaultScopes(
+  prm: ProtectedResourceMetadata,
+  as: AuthorizationServerMetadata
+): string[] {
+  const pick = (v: unknown): string[] | undefined =>
+    Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : undefined
+  return pick(prm.scopes_supported) ?? pick(as.scopes_supported) ?? []
 }
 
 export type DiscoveryOutcome =
@@ -685,7 +712,8 @@ function authorizationServerOverrideRejection(
  * Full RFC 9728 → 8414 discovery for a remote MCP server URL. Returns the pinned
  * endpoints, `resource` (RFC 8707), issuer/`iss` handling (RFC 9207), the
  * registration mode (D-3) and transport quirks (D-8). Fail-closed if the AS does
- * not advertise S256 (invariant 3), and — when it does not return `iss` (RFC 9207) —
+ * not advertise S256, unless the pinned issuer matches a closed authorization-server
+ * profile (`asProfiles.ts`) (invariant 3), and — when it does not return `iss` (RFC 9207) —
  * if any of its endpoints leaves the issuer's registrable domain
  * (`as_endpoints_cross_site`), before anything is registered against it.
  *
@@ -816,9 +844,16 @@ export async function discoverRemoteOAuth(
     return { ok: false, error: lastAsError }
   }
 
-  // Invariant 3: fail closed unless S256 is advertised (ignore `plain`).
+  // Recognised only from an issuer that passed the strict comparison above, so a profile
+  // never widens which issuers are trusted.
+  const profile = detectAsProfile(as.issuer)
+
+  // Invariant 3: fail closed unless S256 is advertised (ignore `plain`). A profile stands
+  // in for the advertisement only for an authorization server that documents S256
+  // support but omits it from its metadata (`asProfiles.ts`).
   const challengeMethods = as.code_challenge_methods_supported
-  if (!Array.isArray(challengeMethods) || !challengeMethods.includes('S256')) {
+  const advertisesS256 = Array.isArray(challengeMethods) && challengeMethods.includes('S256')
+  if (!advertisesS256 && profile === null) {
     return {
       ok: false,
       error: {
@@ -875,6 +910,12 @@ export async function discoverRemoteOAuth(
     })
   )
 
+  const quirks = deriveQuirks(as, prm)
+  // `mcpUrl` already parsed in `resolvePrm`, so the audience checks cannot throw here.
+  const derivedScopes = withProfileScopes(defaultScopes(prm, as), profile?.id)
+  const violation = profileScopeViolation(profile?.id, mcpUrl, derivedScopes)
+  const unverified = profileUnverifiedScopes(profile?.id, mcpUrl, derivedScopes)
+
   return {
     ok: true,
     result: {
@@ -890,7 +931,13 @@ export async function discoverRemoteOAuth(
           typeof as.registration_endpoint === 'string' ? as.registration_endpoint : undefined,
       },
       registrationMode,
-      quirks: deriveQuirks(as, prm),
+      quirks: profile ? { ...quirks, supportsRefresh: true } : quirks,
+      ...(profile ? { asProfile: profile.id } : {}),
+      ...(violation !== null ? { scopeAudienceViolation: violation } : {}),
+      ...(unverified.length > 0 ? { unverifiedScopes: unverified } : {}),
+      ...(profileHasResourceScope(profile?.id, mcpUrl, derivedScopes)
+        ? {}
+        : { scopeAudienceMissing: true as const }),
     },
   }
 }

@@ -10,6 +10,7 @@ import { RFC1123_RE } from '../../http/rfc1123.js'
 import { type ValidationError, validateOAuthEndpointUrl } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
 import { type UiAuthedRequest } from '../../middleware/controlUIAuth.js'
+import { withProfileScopes } from '../../oauth/asProfiles.js'
 import { buildCimdDocument } from '../../oauth/cimd.js'
 import { MAX_CLIENT_ID_LENGTH, isCimdClientId } from '../../oauth/cimdIdentity.js'
 import {
@@ -23,6 +24,7 @@ import { bestEffortRfc7592Delete } from '../../oauth/dcrCleanup.js'
 import {
   type DiscoveryResult,
   advertisesIssBinding,
+  defaultScopes,
   discoverRemoteOAuth,
   registrationModeInputs,
   selectRegistrationMode,
@@ -222,8 +224,12 @@ export interface RemoteOAuthSpec {
   clientSecretRef?: RemoteOAuthClientSecretRef
 }
 
-function derivedScopes(result: DiscoveryResult): string[] {
-  return result.prm.scopes_supported ?? result.as.scopes_supported ?? []
+/**
+ * The scopes an install requests: the operator's list when given, else the advertised
+ * defaults, plus whatever the authorization-server profile always requires.
+ */
+export function effectiveRemoteScopes(result: DiscoveryResult, override?: string[]): string[] {
+  return withProfileScopes(override ?? defaultScopes(result.prm, result.as), result.asProfile)
 }
 
 export function buildRemoteOAuthSpec(
@@ -249,7 +255,7 @@ export function buildRemoteOAuthSpec(
     issuer: result.issuer,
     resource: result.resource,
     grantScope: opts.grantScope,
-    scopes: derivedScopes(result),
+    scopes: effectiveRemoteScopes(result),
     bearerInBody: result.quirks.bearerInBody,
     supportsRefresh: result.quirks.supportsRefresh,
   }
@@ -587,11 +593,17 @@ export function createAdminRemoteMcpRouter(
           resource: r.resource,
           issuer: r.issuer,
           ...(r.issForCallback ? { issForCallback: r.issForCallback } : {}),
+          ...(r.asProfile ? { asProfile: r.asProfile } : {}),
+          ...(r.scopeAudienceViolation !== undefined
+            ? { scopeAudienceViolation: r.scopeAudienceViolation }
+            : {}),
+          ...(r.unverifiedScopes ? { unverifiedScopes: r.unverifiedScopes } : {}),
+          ...(r.scopeAudienceMissing ? { scopeAudienceMissing: true } : {}),
           // Without `iss` the same-site rule is all that ties these hosts to the
           // issuer, and it cannot tell two hosts of one registrable domain apart; the
           // operator sees them before trusting them.
           ...(callback.variant === 'per-server' ? { asEndpointHosts: asEndpointHostsOf(r) } : {}),
-          scopes: derivedScopes(r),
+          scopes: effectiveRemoteScopes(r),
           quirks: r.quirks,
         },
       })
@@ -960,7 +972,7 @@ export function createAdminRemoteMcpRouter(
         const dcrRequest = buildDcrRequest(discovery, {
           clientMode,
           redirectUris: [redirectUri],
-          scopes: derivedScopes(discovery),
+          scopes: effectiveRemoteScopes(discovery),
         })
         const dcrOutcome = await registerDynamicClient(dcrDeps, registrationEndpoint, dcrRequest)
         if (!dcrOutcome.ok) {

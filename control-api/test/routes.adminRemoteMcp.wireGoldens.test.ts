@@ -15,6 +15,8 @@ import {
   ATLASSIAN_V2_PILOT,
   DCR_PUBLIC_REGISTRATION_RESPONSE,
   DROPBOX_PILOT,
+  ENTRA_NO_SCOPES_PILOT,
+  ENTRA_UNKNOWN_GUID_PILOT,
   ENTRA_WORKIQ_PILOT,
   PILOTS,
   type PilotFixture,
@@ -51,6 +53,8 @@ vi.mock('node:crypto', async importOriginal => {
 })
 
 const ORIGIN = 'https://control.example.com'
+const ENTRA_TENANT_AUTHORITY =
+  'https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0'
 const PUBLIC_IP = async () => ['93.184.216.34']
 const UPDATE = process.env.UPDATE_WIRE_GOLDENS === '1'
 const WIRE_DIR = new URL('./fixtures/wire/', import.meta.url)
@@ -206,6 +210,19 @@ describe('remote MCP wire goldens — POST /discover', () => {
       } finally {
         config.oauthCallbackBaseUrl = ORIGIN
       }
+    })
+  }
+
+  const ENTRA_CASES: Array<{ name: string; pilot: () => PilotFixture }> = [
+    { name: 'discover.workiq', pilot: () => ENTRA_WORKIQ_PILOT },
+    { name: 'discover.entraUnknownGuid', pilot: () => ENTRA_UNKNOWN_GUID_PILOT },
+    { name: 'discover.entraNoScopes', pilot: () => ENTRA_NO_SCOPES_PILOT },
+  ]
+  for (const c of ENTRA_CASES) {
+    it(`${c.name}: with the Entra tenant authority → 200`, async () => {
+      const actual = await discover(c.pilot(), { authorizationServer: ENTRA_TENANT_AUTHORITY })
+      expect(actual.status).toBe(200)
+      expect(actual).toEqual(golden(c.name, actual))
     })
   }
 

@@ -36,6 +36,7 @@ import {
   DCR_PUBLIC_WITH_ECHOED_SECRET_REGISTRATION_RESPONSE,
   DCR_VERCEL_DOWNGRADE_REGISTRATION_JSON,
   DCR_VERCEL_DOWNGRADE_REGISTRATION_RESPONSE,
+  ENTRA_AGENT365_MAIL_PILOT,
   ENTRA_WORKIQ_PILOT,
   NOTION_PRM_JSON,
   PILOTS,
@@ -45,6 +46,7 @@ import {
   makeDcrTransport,
   makeDiscoveryTransport,
   makeInMemoryDynamicClientsDb,
+  workIqPilotWithPrm,
 } from './fixtures/remoteOAuthDiscovery.js'
 import { MockGateway } from './mockGateway.js'
 
@@ -2660,6 +2662,50 @@ describe('Microsoft Entra ID — authorizationServer override on /discover and i
       authorizationServer: 'https://login.microsoftonline.com/organizations/v2.0',
       tenantAuthorityTemplate: 'https://login.microsoftonline.com/{tenantId}/v2.0',
     })
+  })
+
+  it('row 2: /discover of Work IQ with the tenant → profile and PRM scopes plus offline_access', async () => {
+    const res = await request(await entraApp(ENTRA_WORKIQ_PILOT, gatewayWithContext()))
+      .post('/admin/mcp-servers/remote/discover')
+      .send({ baseUrl: ENTRA_WORKIQ_PILOT.mcpUrl, authorizationServer: TENANT_AUTHORITY })
+    expect(res.status).toBe(200)
+    expect(res.body.detected.asProfile).toBe('entra-v2')
+    expect(res.body.detected.registrationMode).toBe('manual')
+    expect(res.body.detected.quirks).toEqual({ bearerInBody: false, supportsRefresh: true })
+    expect(res.body.detected.scopes).toEqual([
+      'fdcc1f02-fc51-4226-8753-f668596af7f7/WorkIQAgent.Ask',
+      'offline_access',
+    ])
+    expect(res.body.callback.variant).toBe('per-server')
+    expect(res.body.detected.issForCallback).toBeUndefined()
+  })
+
+  it('Agent 365 Mail: offline_access, already in its PRM, is not added twice', async () => {
+    const res = await request(await entraApp(ENTRA_AGENT365_MAIL_PILOT, gatewayWithContext()))
+      .post('/admin/mcp-servers/remote/discover')
+      .send({ baseUrl: ENTRA_AGENT365_MAIL_PILOT.mcpUrl, authorizationServer: TENANT_AUTHORITY })
+    expect(res.status).toBe(200)
+    expect(res.body.detected.scopes).toEqual([
+      'https://agent365.svc.cloud.microsoft/agents/tenants/72f988bf-86f1-41af-91ab-2d7cd011db47/servers/mcp_MailTools/.default',
+      'openid',
+      'profile',
+      'offline_access',
+    ])
+  })
+
+  it('/discover keeps an empty-string audience violation in the response', async () => {
+    const res = await request(
+      await entraApp(
+        workIqPilotWithPrm('entra-empty-scope', prm => {
+          prm.scopes_supported = ['', 'https://graph.microsoft.com/x']
+        }),
+        gatewayWithContext()
+      )
+    )
+      .post('/admin/mcp-servers/remote/discover')
+      .send({ baseUrl: ENTRA_WORKIQ_PILOT.mcpUrl, authorizationServer: TENANT_AUTHORITY })
+    expect(res.status).toBe(200)
+    expect(res.body.detected.scopeAudienceViolation).toBe('')
   })
 
   it('row 10: /discover passes the override to discovery (Linear rejects a tenant authority)', async () => {

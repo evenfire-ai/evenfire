@@ -362,7 +362,7 @@ export const ENTRA_AGENT365_MAIL_PILOT: PilotFixture = {
 // re-serialized, every other byte as captured). Each stands for a PRM the platform must
 // handle but no live server is known to emit — hostile or misconfigured scopes, a PRM
 // that already names the tenant — so the change is the only invented part.
-function workIqPilotWithPrm(
+export function workIqPilotWithPrm(
   name: string,
   mutate: (prm: Record<string, unknown>) => void
 ): PilotFixture {
