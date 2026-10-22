@@ -203,7 +203,11 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   // Per-chat draft from the module-scoped store. Typing only re-renders this
   // component (it's the sole subscriber); the value is restored automatically when
   // activeChatId changes and survives the inline→docked composer swap.
-  const [draft, setDraft] = useComposerDraft(activeChatId, selectedAgent ?? undefined)
+  const [draft, setDraft, draftOwnerConflictTabId] = useComposerDraft(
+    activeChatId,
+    selectedAgent ?? undefined,
+    workspaceChatTabId
+  )
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null)
   const composerInputWidthRef = useRef<number | null>(null)
   const composerFileInputRef = useRef<HTMLInputElement | null>(null)
@@ -395,10 +399,10 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
 
   const handleDraftChange = useCallback(
     (value: string) => {
-      setDraft(value)
+      const result = setDraft(value)
       // Clear any pending send error as the user resumes typing. No re-render up-tree
       // unless an error is actually present.
-      clearComposerSendError()
+      if (result.accepted) clearComposerSendError()
     },
     [clearComposerSendError, setDraft]
   )
@@ -413,15 +417,23 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     composerImageAttachments.length > 0 && hostModelSelection.visualSendBlocked
   // Per-instance id: the main panel and the chat drawer can both be mounted.
   const imageNoticeId = useId()
+  const draftOwnerConflictId = useId()
   // #678 — a document that is still being read is not part of the message yet.
   // Sending now would leave it out without saying so, so send stays disabled
   // until each chip is ready or removed.
   const filesBlockedForSend = composerFileAttachments.some(file => file.status !== 'ready')
   const handleSend = useCallback(() => {
-    if (imagesBlockedForSend || filesBlockedForSend) return
+    if (imagesBlockedForSend || filesBlockedForSend || draftOwnerConflictTabId) return
     if (workspaceChatTabId) void onSend(draft, workspaceChatTabId)
     else void onSend(draft)
-  }, [onSend, draft, imagesBlockedForSend, filesBlockedForSend, workspaceChatTabId])
+  }, [
+    onSend,
+    draft,
+    draftOwnerConflictTabId,
+    imagesBlockedForSend,
+    filesBlockedForSend,
+    workspaceChatTabId,
+  ])
 
   const handleComposerKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -901,6 +913,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
             ref={composerInputRef}
             data-testid="chat-input"
             aria-label="Agent message composer"
+            aria-describedby={draftOwnerConflictTabId ? draftOwnerConflictId : undefined}
             value={draft}
             onChange={event => {
               handleDraftChange(event.target.value)
@@ -909,7 +922,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
             onPaste={handleComposerPaste}
             onKeyDown={handleComposerKeyDown}
             rows={3}
-            disabled={isDegraded}
+            disabled={isDegraded || Boolean(draftOwnerConflictTabId)}
             placeholder={
               isDegraded
                 ? 'Agent degraded — fix the LLM Secret to resume.'
@@ -917,6 +930,11 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
             }
           />
         </div>
+        {draftOwnerConflictTabId ? (
+          <div className="composer-draft-owner-conflict" id={draftOwnerConflictId} role="alert">
+            Another workspace tab owns this draft. Select that tab to continue editing.
+          </div>
+        ) : null}
         {dragActive ? <div className="composer-drop-overlay">Drop files here</div> : null}
         <div className="composer-input-actions">
           {agentSelector && <span className="composer-agent-selector-slot">{agentSelector}</span>}
@@ -1208,13 +1226,21 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                 agentSending ||
                 imagesBlockedForSend ||
                 filesBlockedForSend ||
+                Boolean(draftOwnerConflictTabId) ||
                 (!draft.trim() &&
                   composerImageAttachments.length === 0 &&
                   composerFileAttachments.length === 0 &&
                   composerReferenceAttachments.length === 0)
               }
               aria-label={agentSending ? 'Sending message' : 'Send message'}
-              aria-describedby={imagesBlockedForSend ? imageNoticeId : undefined}
+              aria-describedby={
+                [
+                  imagesBlockedForSend ? imageNoticeId : null,
+                  draftOwnerConflictTabId ? draftOwnerConflictId : null,
+                ]
+                  .filter(Boolean)
+                  .join(' ') || undefined
+              }
               label={agentSending ? 'Sending message' : 'Send message'}
               size="sm"
               title={agentSending ? 'Sending...' : 'Send message'}

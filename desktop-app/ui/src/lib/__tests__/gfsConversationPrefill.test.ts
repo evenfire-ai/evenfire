@@ -101,7 +101,7 @@ describe('prefillNewConversationWithGfsResource', () => {
     expect(getComposerDraft(null, 'agent-1', destinationTabId)).toBe(file.gfsUri)
   })
 
-  it('preserves an existing draft and ignores unrelated or root tabs', () => {
+  it('keeps a legacy draft beside a valid Files prefill and ignores root or chat tabs', () => {
     setComposerDraft(null, 'keep this draft', 'agent-1')
 
     expect(
@@ -110,7 +110,8 @@ describe('prefillNewConversationWithGfsResource', () => {
         'agent-1',
         destinationTabId
       )
-    ).toBe(false)
+    ).toBe(true)
+    expect(getComposerDraft(null, 'agent-1', destinationTabId)).toBe(uri)
     expect(getComposerDraft(null, 'agent-1')).toBe('keep this draft')
     expect(
       prefillNewConversationWithGfsResource(

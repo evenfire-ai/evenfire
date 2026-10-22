@@ -38,12 +38,13 @@ function emit(key: string): void {
   for (const listener of listeners) listener()
 }
 
-function setDraftByKey(key: string, value: string): void {
-  if ((drafts.get(key) ?? '') === value) return
+function setDraftByKey(key: string, value: string): boolean {
+  if ((drafts.get(key) ?? '') === value) return false
   revisions.set(key, ++revision)
   if (value) drafts.set(key, value)
   else drafts.delete(key)
   emit(key)
+  return true
 }
 
 function setTabDraft(tabId: string, key: string, value: string, requestId?: number): void {
@@ -59,6 +60,7 @@ function setTabDraft(tabId: string, key: string, value: string, requestId?: numb
     })
   } else tabDrafts.delete(tabId)
   emit(tabListenerKey(tabId))
+  emit(key)
 }
 
 function removePendingResourcePrefill(tabId: string): void {
@@ -66,8 +68,39 @@ function removePendingResourcePrefill(tabId: string): void {
   emit(tabListenerKey(tabId))
 }
 
-function hasUnclaimedResourcePrefill(): boolean {
-  return pendingResourcePrefillsByTab.size > 0
+function findTabDraftOwnerForKey(key: string): string | null {
+  for (const [tabId, tabDraft] of tabDrafts) {
+    if (tabDraft.key === key) return tabId
+  }
+  return null
+}
+
+function hasForeignTabDraftOwner(key: string, workspaceTabId: string): boolean {
+  for (const [tabId, tabDraft] of tabDrafts) {
+    if (tabDraft.key === key && tabId !== workspaceTabId) return true
+  }
+  return false
+}
+
+/** Return the conflicting workspace owner for this exact draft key, if any. */
+export function getComposerDraftOwnerConflict(
+  chatId: string | null,
+  agentRef?: string,
+  workspaceTabId?: string | null
+): string | null {
+  if (chatId !== null) return null
+  const key = keyFor(chatId, agentRef)
+  if (workspaceTabId && tabDrafts.get(workspaceTabId)?.key === key) return null
+
+  const resourceOwner = resourceDraftOwnersByKey.get(key)
+  if (resourceOwner && resourceOwner.tabId !== workspaceTabId) return resourceOwner.tabId
+  if (resourceOwner && resourceOwner.tabId === workspaceTabId) return null
+
+  return workspaceTabId
+    ? hasForeignTabDraftOwner(key, workspaceTabId)
+      ? findTabDraftOwnerForKey(key)
+      : null
+    : findTabDraftOwnerForKey(key)
 }
 
 export function getComposerDraftRevision(
@@ -78,6 +111,11 @@ export function getComposerDraftRevision(
   if (workspaceTabId) {
     const tabDraft = tabDrafts.get(workspaceTabId)
     if (tabDraft?.key === keyFor(chatId, agentRef)) return tabRevisions.get(workspaceTabId) ?? 0
+    const owner = resourceDraftOwnersByKey.get(keyFor(chatId, agentRef))
+    if (owner && owner.tabId !== workspaceTabId) return 0
+    if (owner?.tabId === workspaceTabId) return revisions.get(keyFor(chatId, agentRef)) ?? 0
+    if (hasForeignTabDraftOwner(keyFor(chatId, agentRef), workspaceTabId)) return 0
+    if (chatId === null) return 0
   }
   return revisions.get(keyFor(chatId, agentRef)) ?? 0
 }
@@ -95,7 +133,10 @@ export function getComposerDraft(
     if (pending && chatId === null) return pending.uri
   }
   const owner = resourceDraftOwnersByKey.get(key)
-  if (owner && owner.tabId !== workspaceTabId) return ''
+  if (owner) return owner.tabId === workspaceTabId ? (drafts.get(key) ?? '') : ''
+  if (workspaceTabId && hasForeignTabDraftOwner(key, workspaceTabId)) return ''
+  if (workspaceTabId && chatId === null) return ''
+  if (!workspaceTabId && findTabDraftOwnerForKey(key)) return drafts.get(key) ?? ''
   return drafts.get(key) ?? ''
 }
 
@@ -105,22 +146,26 @@ export function setResourceComposerPrefill(
   uri: string,
   agentRef: string | null
 ): boolean {
-  if (!workspaceTabId || getComposerDraft(null, agentRef ?? undefined, workspaceTabId)) {
-    return false
-  }
+  if (!workspaceTabId) return false
   const requestId = ++resourcePrefillRequestSequence
   const key = keyFor(null, agentRef ?? undefined)
+  if (tabDrafts.get(workspaceTabId)?.key === key) return false
+  if (pendingResourcePrefillsByTab.has(workspaceTabId)) return false
   const existing = drafts.get(key) ?? ''
   const existingOwner = resourceDraftOwnersByKey.get(key)
 
   if (agentRef) {
-    if (existing && !existingOwner) return false
+    if (existingOwner?.tabId === workspaceTabId) return false
+    if (existing && !existingOwner) {
+      setTabDraft(workspaceTabId, key, uri, requestId)
+      return true
+    }
     if (existingOwner && existingOwner.tabId !== workspaceTabId) {
       setTabDraft(workspaceTabId, key, uri, requestId)
       return true
     }
     resourceDraftOwnersByKey.set(key, { tabId: workspaceTabId, requestId })
-    setDraftByKey(key, uri)
+    if (!setDraftByKey(key, uri)) emit(key)
     return true
   }
 
@@ -142,6 +187,7 @@ export function claimPendingResourceComposerPrefill(
   const existing = drafts.get(key) ?? ''
   const owner = resourceDraftOwnersByKey.get(key)
   if (existing && !owner) {
+    setTabDraft(workspaceTabId, key, pending.uri, pending.requestId)
     removePendingResourcePrefill(workspaceTabId)
     return
   }
@@ -168,37 +214,58 @@ export function setComposerDraft(
 ): boolean {
   const key = keyFor(chatId, agentRef)
   const resourceOwner = resourceDraftOwnersByKey.get(key)
-  // A pending pre-agent prefill has no draft key until its owning tab claims it.
-  // A tab-less caller cannot prove its no-chat write is disjoint from that
-  // request, so preserve the request and fail closed until it is claimed/canceled.
-  if (!workspaceTabId && chatId === null && (resourceOwner || hasUnclaimedResourcePrefill())) {
+  const currentTabDraft = workspaceTabId ? tabDrafts.get(workspaceTabId) : undefined
+  const ownsTabDraft = currentTabDraft?.key === key
+  const ownsResourceDraft =
+    resourceOwner?.tabId !== undefined && resourceOwner.tabId === workspaceTabId
+  const hasForeignOwner = workspaceTabId
+    ? (resourceOwner !== undefined && resourceOwner.tabId !== workspaceTabId) ||
+      hasForeignTabDraftOwner(key, workspaceTabId)
+    : Boolean(resourceOwner || findTabDraftOwnerForKey(key))
+  if (chatId === null && hasForeignOwner && !ownsTabDraft && !ownsResourceDraft) {
     return false
   }
   if (chatId === null && workspaceTabId) {
     const pending = pendingResourcePrefillsByTab.get(workspaceTabId)
     const owner = resourceDraftOwnersByKey.get(key)
-    const currentTabDraft = tabDrafts.get(workspaceTabId)
-    if (currentTabDraft?.key === key || (owner && owner.tabId !== workspaceTabId)) {
+    if (currentTabDraft?.key === key) {
       removePendingResourcePrefill(workspaceTabId)
       setTabDraft(workspaceTabId, key, value, currentTabDraft?.requestId)
       return true
     }
+    if (owner && owner.tabId !== workspaceTabId) return false
     if (pending) {
       removePendingResourcePrefill(workspaceTabId)
       if ((drafts.get(key) ?? '') && !owner) {
-        setTabDraft(workspaceTabId, key, value)
+        setTabDraft(workspaceTabId, key, value, pending.requestId)
         return true
       }
       if (!value) {
-        if (owner?.tabId === workspaceTabId) resourceDraftOwnersByKey.delete(key)
-        setDraftByKey(key, '')
+        const removedOwner = owner?.tabId === workspaceTabId
+        if (removedOwner) resourceDraftOwnersByKey.delete(key)
+        const changed = setDraftByKey(key, '')
+        if (removedOwner && !changed) emit(key)
         return true
       }
       resourceDraftOwnersByKey.set(key, { tabId: workspaceTabId, requestId: pending.requestId })
       setDraftByKey(key, value)
       return true
     }
-    if (owner?.tabId === workspaceTabId && !value) resourceDraftOwnersByKey.delete(key)
+    if ((drafts.get(key) ?? '') && !owner) {
+      setTabDraft(workspaceTabId, key, value)
+      return true
+    }
+    const removedOwner = owner?.tabId === workspaceTabId && !value
+    if (removedOwner) resourceDraftOwnersByKey.delete(key)
+    if (!owner && value) {
+      resourceDraftOwnersByKey.set(key, {
+        tabId: workspaceTabId,
+        requestId: ++resourcePrefillRequestSequence,
+      })
+    }
+    const changed = setDraftByKey(key, value)
+    if (removedOwner && !changed) emit(key)
+    return true
   }
   setDraftByKey(key, value)
   return true
@@ -211,11 +278,19 @@ export function clearComposerDraft(
 ): boolean {
   const key = keyFor(chatId, agentRef)
   const resourceOwner = resourceDraftOwnersByKey.get(key)
-  if (!workspaceTabId && chatId === null && (resourceOwner || hasUnclaimedResourcePrefill())) {
+  const currentTabDraft = workspaceTabId ? tabDrafts.get(workspaceTabId) : undefined
+  const ownsTabDraft = currentTabDraft?.key === key
+  const ownsResourceDraft =
+    resourceOwner?.tabId !== undefined && resourceOwner.tabId === workspaceTabId
+  const hasForeignOwner = workspaceTabId
+    ? (resourceOwner !== undefined && resourceOwner.tabId !== workspaceTabId) ||
+      hasForeignTabDraftOwner(key, workspaceTabId)
+    : Boolean(resourceOwner || findTabDraftOwnerForKey(key))
+  if (chatId === null && hasForeignOwner && !ownsTabDraft && !ownsResourceDraft) {
     return false
   }
   if (workspaceTabId) {
-    const tabDraft = tabDrafts.get(workspaceTabId)
+    const tabDraft = currentTabDraft
     if (tabDraft?.key === key) {
       setTabDraft(workspaceTabId, key, '')
       return true
@@ -224,10 +299,12 @@ export function clearComposerDraft(
     const owner = resourceDraftOwnersByKey.get(key)
     if (owner && owner.tabId !== workspaceTabId) return false
     if (owner?.tabId === workspaceTabId) resourceDraftOwnersByKey.delete(key)
+    if (!owner && chatId === null && drafts.has(key)) return false
   } else {
     resourceDraftOwnersByKey.delete(key)
   }
-  setDraftByKey(key, '')
+  const changed = setDraftByKey(key, '')
+  if (workspaceTabId && resourceOwner?.tabId === workspaceTabId && !changed) emit(key)
   return true
 }
 
@@ -245,7 +322,7 @@ export function releaseComposerDraftForWorkspaceTab(workspaceTabId: string): voi
   for (const [key, owner] of resourceDraftOwnersByKey) {
     if (owner.tabId !== workspaceTabId) continue
     resourceDraftOwnersByKey.delete(key)
-    setDraftByKey(key, '')
+    if (!setDraftByKey(key, '')) emit(key)
   }
 }
 

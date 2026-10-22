@@ -7,12 +7,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useAppController } from '@hooks/useAppController'
-import {
-  claimPendingResourceComposerPrefill,
-  getComposerDraft,
-  resetComposerDraftStore,
-} from '@lib/composerDraftStore'
-import { prefillNewConversationWithGfsResource } from '@lib/gfsConversationPrefill'
+import { getComposerDraft, resetComposerDraftStore } from '@lib/composerDraftStore'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { desktopQueryClient } from '@lib/queryClient'
 import {
@@ -84,6 +79,7 @@ function activateChatState(
 // is stubbed to null / prop-capture.
 const sidebarHarness = vi.hoisted(() => ({
   props: null as null | {
+    onNewChat?: () => void
     onOpenSandboxUiApp?: (app: { appRef: string; label: string; defaultPath: string }) => void
   },
 }))
@@ -155,7 +151,11 @@ vi.mock('@pages/ChatPage', async () => {
       const { activeChatId, composerFocusRequestId, workspaceChatTabId } =
         useChatComposerStateContext()
       const { selectedAgent } = useNavigationContext()
-      const [draft, setDraft] = useComposerDraft(activeChatId, selectedAgent ?? undefined)
+      const [draft, setDraft, ownerConflictTabId] = useComposerDraft(
+        activeChatId,
+        selectedAgent ?? undefined,
+        workspaceChatTabId
+      )
       return (
         <div
           data-testid="chat-page-surface"
@@ -164,6 +164,15 @@ vi.mock('@pages/ChatPage', async () => {
           data-workspace-chat-tab-id={workspaceChatTabId ?? ''}
           data-composer-draft={draft}
         >
+          <textarea
+            aria-label="App drawer composer"
+            disabled={Boolean(ownerConflictTabId)}
+            onChange={event => setDraft(event.currentTarget.value)}
+            value={draft}
+          />
+          {ownerConflictTabId ? (
+            <div role="alert">Another workspace tab owns this draft.</div>
+          ) : null}
           <button type="button" onClick={() => setDraft('failed-send recovery')}>
             Write tabless recovery draft
           </button>
@@ -1753,6 +1762,7 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
   afterEach(() => {
     cleanup()
     delete (window as { clerum?: unknown }).clerum
+    resetComposerDraftStore()
     vi.unstubAllGlobals()
   })
 
@@ -1773,6 +1783,52 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
     bindPanelWidth()
     act(() => fireResize())
   }
+
+  it('prevents a sibling New Chat tab from editing the exact resource-owned key', async () => {
+    resetComposerDraftStore()
+    const folder = await resolveResource(
+      resolvedDirectory('abcdefabcdefabcdefabcdefabcdefab', 'Shared folder')
+    )
+    let workspaceTabs = openFilesTab(createEmptyWorkspaceTabsState(), {
+      id: 'files-resource-tab',
+      path: folder.gfsUri,
+    })
+    workspaceTabs = openFilesTab(workspaceTabs, { id: 'files-empty-tab', path: null })
+    workspaceTabs = selectWorkspaceTab(workspaceTabs, 'files-resource-tab')
+    currentController = makeController({
+      selectedAgent: 'agent-a',
+      activeChatId: null,
+      workspaceTabs,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+
+    render(<App />)
+    bindPanelWidth()
+    act(() => sidebarHarness.props?.onNewChat?.())
+
+    const ownerComposer = await screen.findByTestId('chat-page-surface')
+    const ownerTabId = ownerComposer.getAttribute('data-workspace-chat-tab-id')
+    expect(ownerTabId).toBeTruthy()
+    await waitFor(() =>
+      expect(ownerComposer.getAttribute('data-composer-draft')).toBe(folder.gfsUri)
+    )
+
+    resizeTo(300)
+    const filesTabs = screen.getAllByRole('button', { name: 'Files' })
+    expect(filesTabs).toHaveLength(2)
+    const siblingFilesTab = filesTabs[1]
+    if (!siblingFilesTab) throw new Error('Expected a second Files workspace tab')
+    act(() => fireEvent.click(siblingFilesTab))
+    act(() => sidebarHarness.props?.onNewChat?.())
+
+    const siblingComposer = await screen.findByTestId('chat-page-surface')
+    expect(siblingComposer.getAttribute('data-workspace-chat-tab-id')).not.toBe(ownerTabId)
+    expect(siblingComposer.getAttribute('data-composer-draft')).toBe('')
+    const siblingInput = screen.getByRole('textbox', { name: 'App drawer composer' })
+    expect((siblingInput as HTMLTextAreaElement).disabled).toBe(true)
+    expect(screen.getByRole('alert').textContent).toContain('Another workspace tab owns this draft')
+    expect(getComposerDraft(null, 'agent-a', ownerTabId)).toBe(folder.gfsUri)
+  })
 
   it('suppresses the drawer below the threshold and restores it on re-widen, but a manual close stays closed', () => {
     render(<App />)
@@ -2011,8 +2067,7 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
     expect(getComposerDraft(null)).toBe('failed-send recovery')
   })
 
-  it('keeps an unclaimed Files prefill when the drawer writes without a chat tab', async () => {
-    const handleSendAgentMessage = vi.fn()
+  it('binds a Files New Chat prefill to the exact tab created by the App producer', async () => {
     const folder = await resolveResource(
       resolvedDirectory('0123456789abcdef0123456789abcdef', 'Shared folder')
     )
@@ -2020,35 +2075,34 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
       id: 'files-owner-tab',
       path: folder.gfsUri,
     })
-    const ownerChatTabId = 'pending-prefill-chat-tab'
-    expect(
-      prefillNewConversationWithGfsResource(activeWorkspaceTab(workspaceTabs), null, ownerChatTabId)
-    ).toBe(true)
 
     currentController = makeController({
       initialExperienceLoading: false,
-      selectedAgent: null,
+      selectedAgent: 'agent-a',
       activeChatId: null,
-      navItem: DESKTOP_ROUTES.files,
       chatList: CHAT_LIST,
       workspaceTabs,
-      handleSendAgentMessage,
     } as Partial<AppController>)
     render(<App />)
     expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
     act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
-
-    const composer = screen.getByTestId('chat-page-surface')
-    expect(composer.getAttribute('data-workspace-chat-tab-id')).toBe('')
-    expect(composer.getAttribute('data-composer-draft')).toBe('')
+    let legacyComposer = screen.getByTestId('chat-page-surface')
+    expect(legacyComposer.getAttribute('data-workspace-chat-tab-id')).toBeTruthy()
+    act(() => fireEvent.click(screen.getByRole('button', { name: 'Close New chat' })))
+    legacyComposer = screen.getByTestId('chat-page-surface')
+    expect(legacyComposer.getAttribute('data-workspace-chat-tab-id')).toBe('')
     fireEvent.click(screen.getByRole('button', { name: 'Write tabless recovery draft' }))
+    expect(getComposerDraft(null, 'agent-a')).toBe('failed-send recovery')
+    expect(sidebarHarness.props?.onNewChat).toBeTypeOf('function')
 
-    expect(composer.getAttribute('data-composer-draft')).toBe('')
-    expect(getComposerDraft(null)).toBe('')
-    claimPendingResourceComposerPrefill(ownerChatTabId, 'agent-a')
+    act(() => sidebarHarness.props?.onNewChat?.())
+
+    const composer = await screen.findByTestId('chat-page-surface')
+    const ownerChatTabId = composer.getAttribute('data-workspace-chat-tab-id')
+    expect(ownerChatTabId).toBeTruthy()
+    await waitFor(() => expect(composer.getAttribute('data-composer-draft')).toBe(folder.gfsUri))
     expect(getComposerDraft(null, 'agent-a', ownerChatTabId)).toBe(folder.gfsUri)
-    expect(getComposerDraft(null, 'agent-a')).toBe('')
-    expect(handleSendAgentMessage).not.toHaveBeenCalled()
+    expect(getComposerDraft(null, 'agent-a')).toBe('failed-send recovery')
   })
 
   // T5 invariant — on a DOM/files tab (no embed to measure) the drawer must dock

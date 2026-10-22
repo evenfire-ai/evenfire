@@ -13,6 +13,7 @@ import {
   GROK_COMPOSER_MAX_IMAGE_BYTES,
 } from '@constants/attachments'
 import type { HostModelsResult } from '@hooks/useChatStore'
+import type { ComposerDraftWriteResult } from '@hooks/useComposerDraft'
 import { readComposerFile } from '@lib/composerFileAdmission'
 import {
   type ImageInputDecision,
@@ -47,7 +48,11 @@ const composerState: ChatComposerStateContextValue = {
   requestComposerFocus: vi.fn(),
 }
 
-const draftState = { value: '', set: vi.fn() }
+const draftState = {
+  value: '',
+  ownerConflictTabId: null as string | null,
+  set: vi.fn<(value: string) => ComposerDraftWriteResult>(() => ({ accepted: true })),
+}
 
 /** Stable action spies so guard tests can assert what did (not) reach the controller. */
 const actionsMock = {
@@ -94,7 +99,7 @@ vi.mock('@hooks/domain/useMcpServersDataController', () => ({
 }))
 
 vi.mock('@hooks/useComposerDraft', () => ({
-  useComposerDraft: () => [draftState.value, draftState.set],
+  useComposerDraft: () => [draftState.value, draftState.set, draftState.ownerConflictTabId],
 }))
 
 /**
@@ -182,6 +187,7 @@ afterEach(() => {
   globalFilesMock.showComposerItem = false
   globalFilesMock.modalProps = undefined
   draftState.value = ''
+  draftState.ownerConflictTabId = null
   draftState.set.mockReset()
   Object.assign(composerState, {
     composerImageAttachments: [],
@@ -254,6 +260,49 @@ describe.each([
     rerender(<ComposerPanel inline={inline} />)
     expect(textarea.style.height).toBe(inline ? '48px' : '56px')
     expect(textarea.style.overflowY).toBe('hidden')
+  })
+
+  it('disables a composer owned by another workspace tab and explains the conflict', () => {
+    draftState.ownerConflictTabId = 'workspace-owner-tab'
+    render(<ComposerPanel inline={inline} />)
+
+    const textarea = screen.getByTestId('chat-input') as HTMLTextAreaElement
+    expect(textarea.disabled).toBe(true)
+    expect(textarea.getAttribute('aria-describedby')).toBeTruthy()
+    const conflict = screen.getByRole('alert')
+    expect(conflict.textContent).toContain('Another workspace tab owns this draft')
+    const sendButton = screen.getByTestId('send-button') as HTMLButtonElement
+    expect(sendButton.disabled).toBe(true)
+    expect(sendButton.getAttribute('aria-describedby')).toContain(conflict.id)
+  })
+
+  it('keeps a failed send when a raced draft write is rejected', () => {
+    composerState.agentError = 'Sending failed'
+    composerState.failedAgentSend = {
+      content: 'failed payload',
+      attachments: [],
+      files: [],
+      references: [],
+      message: 'Retry is available',
+      kind: 'upstream',
+      timestamp: 1,
+      agentRef: 'agent-1',
+      chatId: 'chat-1',
+    }
+    draftState.set.mockReturnValue({
+      accepted: false,
+      reason: 'owned-by-another-tab',
+      ownerTabId: 'owner-tab',
+    })
+    render(<ComposerPanel inline />)
+    actionsMock.clearComposerSendError.mockClear()
+
+    fireEvent.change(screen.getByTestId('chat-input'), { target: { value: 'raced keystroke' } })
+
+    expect(draftState.set).toHaveBeenCalledWith('raced keystroke')
+    expect(actionsMock.clearComposerSendError).not.toHaveBeenCalled()
+    expect(screen.getByText('Sending failed')).toBeTruthy()
+    expect(screen.getByText('Retry is available')).toBeTruthy()
   })
 
   it('keeps context and model popovers outside the clipped text viewport', () => {
