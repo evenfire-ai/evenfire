@@ -11,6 +11,8 @@ const refuse = code => {
   throw new RunnerAdmissionError(code)
 }
 const fixedFiles = [
+  '.nvmrc',
+  'scripts/check-node-version.cjs',
   'desktop-app/package.json',
   'desktop-app/package-lock.json',
   'desktop-app/tsconfig.json',

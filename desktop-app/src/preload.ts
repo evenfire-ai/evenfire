@@ -7,6 +7,7 @@ import type {
   HostMessageRequest,
   ProfileSettingsOpenOptions,
   SandboxUiDeepLinkEnvelope,
+  SandboxUiReleasedEvent,
 } from './types.js'
 
 // Sandboxed Electron preloads cannot load relative runtime modules. Keep this
@@ -221,7 +222,14 @@ const clerum = Object.freeze({
       drive?: string,
       ifMatch?: number,
       newName?: string
-    ) => ipcRenderer.invoke('gfs:moveResource', { resourceId, destinationId, drive, ifMatch, newName }),
+    ) =>
+      ipcRenderer.invoke('gfs:moveResource', {
+        resourceId,
+        destinationId,
+        drive,
+        ifMatch,
+        newName,
+      }),
     deleteResource: (resourceId: string, drive?: string, ifMatch?: number) =>
       ipcRenderer.invoke('gfs:deleteResource', { resourceId, drive, ifMatch }),
     grant: (
@@ -685,9 +693,10 @@ const clerum = Object.freeze({
       bounds: { x: number; y: number; width: number; height: number; dpr?: number }
       launchId: string
     }) => ipcRenderer.invoke('sandboxUi:open', args),
-    close: () => ipcRenderer.invoke('sandboxUi:close'),
-    reload: () => ipcRenderer.invoke('sandboxUi:reload'),
-    getLocation: () => ipcRenderer.invoke('sandboxUi:getLocation'),
+    // Closes that launch's view only if it is still the live one.
+    close: (args: { launchId: string }) => ipcRenderer.invoke('sandboxUi:close', args),
+    // Reloads that launch's view in place only if it is still the live one.
+    reload: (args: { launchId: string }) => ipcRenderer.invoke('sandboxUi:reload', args),
     copyDeepLink: (teamId?: string) => ipcRenderer.invoke('sandboxUi:copyDeepLink', { teamId }),
     listPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:listPendingDeepLinks'),
     clearPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:clearPendingDeepLinks'),
@@ -743,11 +752,10 @@ const clerum = Object.freeze({
       ipcRenderer.on('sandboxUi:deepLink', listener)
       return () => ipcRenderer.off('sandboxUi:deepLink', listener)
     },
-    onClosed: (callback: (args: { appRef: string; launchId: string }) => void) => {
-      const listener = (_event: unknown, args: { appRef: string; launchId: string }) =>
-        callback(args)
-      ipcRenderer.on('sandboxUi:closed', listener)
-      return () => ipcRenderer.off('sandboxUi:closed', listener)
+    onReleased: (callback: (args: SandboxUiReleasedEvent) => void) => {
+      const listener = (_event: unknown, args: SandboxUiReleasedEvent) => callback(args)
+      ipcRenderer.on('sandboxUi:released', listener)
+      return () => ipcRenderer.off('sandboxUi:released', listener)
     },
     onRefreshError: (
       callback: (args: { appRef: string; launchId: string; message: string }) => void
@@ -758,6 +766,12 @@ const clerum = Object.freeze({
       ) => callback(args)
       ipcRenderer.on('sandboxUi:refreshError', listener)
       return () => ipcRenderer.off('sandboxUi:refreshError', listener)
+    },
+    onRefreshRecovered: (callback: (args: { appRef: string; launchId: string }) => void) => {
+      const listener = (_event: unknown, args: { appRef: string; launchId: string }) =>
+        callback(args)
+      ipcRenderer.on('sandboxUi:refreshRecovered', listener)
+      return () => ipcRenderer.off('sandboxUi:refreshRecovered', listener)
     },
     onTitleChanged: (
       callback: (args: { appRef: string; launchId: string; title: string }) => void

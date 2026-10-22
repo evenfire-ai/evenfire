@@ -40,6 +40,7 @@ import {
   RpcConnectorsResult,
   SandboxUiApp,
   SandboxUiDeepLinkEnvelope,
+  SandboxUiReleasedEvent,
   SessionLifecycleState,
   SessionMessagesQuery,
   SessionMessagesResult,
@@ -768,13 +769,14 @@ declare global {
           defaultPath?: string
           routePath?: string
           bounds: { x: number; y: number; width: number; height: number; dpr?: number }
-          // Echoed by main on `onClosed` / `onRefreshError` / `onTitleChanged`
-          // for the view this open mounts.
+          // Echoed by main on `onReleased` / `onRefreshError` / `onRefreshRecovered` /
+          // `onTitleChanged` for the view this open mounts.
           launchId: string
         }) => Promise<void>
-        close: () => Promise<void>
-        reload: () => Promise<void>
-        getLocation: () => Promise<{ appRef: string; routePath?: string } | null>
+        // Closes that launch's view only if it is still the live one.
+        close: (args: { launchId: string }) => Promise<void>
+        // Reloads that launch's view in place only if it is still the live one.
+        reload: (args: { launchId: string }) => Promise<void>
         copyDeepLink: (teamId?: string) => Promise<{ url: string }>
         listPendingDeepLinks: () => Promise<{ links: SandboxUiDeepLinkEnvelope[] }>
         clearPendingDeepLinks: () => Promise<void>
@@ -813,9 +815,15 @@ declare global {
           }) => void
         ) => () => void
         onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => () => void
-        onClosed: (callback: (args: { appRef: string; launchId: string }) => void) => () => void
+        // Once per view main tears down, whatever the reason, with the route it
+        // represented (`null`: unreadable, keep the last known one).
+        onReleased: (callback: (args: SandboxUiReleasedEvent) => void) => () => void
         onRefreshError: (
           callback: (args: { appRef: string; launchId: string; message: string }) => void
+        ) => () => void
+        // A refresh that `onRefreshError` reported as failed succeeded later.
+        onRefreshRecovered: (
+          callback: (args: { appRef: string; launchId: string }) => void
         ) => () => void
         onTitleChanged: (
           callback: (args: { appRef: string; launchId: string; title: string }) => void

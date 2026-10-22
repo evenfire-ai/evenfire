@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { type ReactElement, type ReactNode, useReducer } from 'react'
+import { type ReactElement, type ReactNode, useLayoutEffect, useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
 import {
@@ -13,6 +13,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useAppController } from '@hooks/useAppController'
+import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { desktopQueryClient, desktopQueryDefaults } from '@lib/queryClient'
 import {
@@ -85,8 +86,7 @@ const sidebarHarness = vi.hoisted(() => ({
 }))
 const sandboxUiPageHarness = vi.hoisted(() => ({
   props: null as null | {
-    onEmbeddedAppMounted?: () => void
-    onEmbeddedAppBack?: () => void
+    embed: EmbedOwnershipMachine
     onEmbedBoundsApplied?: () => void
     onEmbedSlotTopChange?: (topPx: number) => void
     onEmbedSlotRightChange?: (rightPx: number) => void
@@ -162,9 +162,15 @@ vi.mock('@pages/ContextsPage', () => ({ ContextsPage: () => null }))
 vi.mock('@pages/FilesPage', () => ({ FilesPage: () => null }))
 vi.mock('@pages/FilePreviewPage', () => ({ FilePreviewPage: () => null }))
 vi.mock('@pages/McpServersPage', () => ({ McpServersPage: () => null }))
+// Like the real page, the stub measures the slot for each launch while mounted.
 vi.mock('@pages/SandboxUiPage', () => ({
   SandboxUiPage: (props: NonNullable<typeof sandboxUiPageHarness.props>) => {
     sandboxUiPageHarness.props = props
+    const { embed } = props
+    useLayoutEffect(
+      () => embed.registerMeasurer(async () => ({ x: 0, y: 0, width: 400, height: 300 })),
+      [embed]
+    )
     return null
   },
 }))
@@ -629,7 +635,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
   // embed acks its bounds and the drawer is READY — bumping on visibility alone
   // would open the option list while still inert, leaving it unfocused. This pins
   // that ordering at the observable level: options appear only after ready.
-  it('defers the chat.switcher open until the drawer is ready, not merely visible', () => {
+  it('defers the chat.switcher open until the drawer is ready, not merely visible', async () => {
     currentController = makeController({
       selectedAgent: 'alpha',
       activeChatId: 'chat-1',
@@ -655,6 +661,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
           setVisible: vi.fn().mockResolvedValue(undefined),
           setBounds: vi.fn().mockResolvedValue(undefined),
           focusActive: vi.fn().mockResolvedValue(true),
+          open: vi.fn().mockResolvedValue(undefined),
           close: vi.fn().mockResolvedValue(undefined),
         },
       } as unknown as Window['clerum'],
@@ -672,7 +679,11 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
         defaultPath: '/',
       })
     })
-    act(() => sandboxUiPageHarness.props?.onEmbeddedAppMounted?.())
+    // main mounts the launch.
+    await waitFor(() => {
+      const state = sandboxUiPageHarness.props!.embed.getSnapshot()
+      expect(state.owner && state.views.get(state.owner)?.phase).toBe('mounted')
+    })
     act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
 
@@ -812,7 +823,8 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     })
     expect(appHeaderHarness.props?.notificationTrayLeft).toBe(716)
 
-    act(() => sandboxUiPageHarness.props?.onEmbeddedAppBack?.())
+    // Back to apps: the embed is gone while the tab stays.
+    act(() => sandboxUiPageHarness.props?.embed.dispatch({ type: 'backToApps' }))
     expect(appHeaderHarness.props?.notificationTrayMode).toBe('overlay')
     expect(appHeaderHarness.props?.notificationTrayLeft).toBeNull()
 

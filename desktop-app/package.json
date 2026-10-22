@@ -92,7 +92,7 @@
     "wait-on": "^8.0.5"
   },
   "engines": {
-    "node": "24.x"
+    "node": "^24.22.1"
   },
   "overrides": {
     "@tootallnate/once": "^3.0.1",
