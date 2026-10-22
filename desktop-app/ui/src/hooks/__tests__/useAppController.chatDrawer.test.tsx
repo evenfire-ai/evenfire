@@ -840,4 +840,81 @@ describe('useAppController — chat drawer over a held Host', () => {
     expect(getVm().selectedAgent).toBe(null)
     expect(trail.slice(beforeHold)).toEqual([null])
   })
+
+  it('T-R5F2-1 opening the Apps picker over Files keeps the drawer on the held Host', async () => {
+    const { clerum, handle } = installAppControllerClerum({
+      agentNames: [HOST_A, HOST_B],
+      agentDisplayByName: namesOf([HOST_A, HOST_B]),
+    })
+    clerum.rpc.listSessions.mockImplementation(async () => serverSessions([]))
+    const pending = deferred<{ agent: string; chatId: string; turns: never[] }>()
+    let transcriptReadsA = 0
+    clerum.rpc.loadSessionMessages.mockImplementation((host: string) => {
+      if (host === HOST_A && ++transcriptReadsA === 1) return pending.promise
+      return Promise.resolve({ agent: host, chatId: 'drawer-chat', turns: [] })
+    })
+    const trail: Array<string | null> = []
+    let getController: Awaited<ReturnType<typeof renderChatActionConsumer>>['getVm'] | null = null
+    function Drawer() {
+      const vm = useNavigationContext()
+      const select = useCallback(
+        (host: string, opts: Parameters<typeof vm.handleSelectChatAgent>[1] = {}) => {
+          if (!getController) throw new Error('the controller is not rendered yet')
+          getController().handleSelectChatAgent(host, { ...opts, keepNavItem: true })
+        },
+        []
+      )
+      // The harness provides the whole controller vm; App mounts the drawer
+      // over any non-chat tab, the Apps picker included (`App.tsx` drawerAvailable).
+      const activeKind = (vm as { activeWorkspaceTab?: { kind: string } }).activeWorkspaceTab?.kind
+      const desired = activeKind !== undefined && activeKind !== 'chat'
+      useLayoutEffect(() => {
+        if (getController) getController().chatDrawerDesiredRef.current = desired
+      })
+      useLayoutEffect(() => {
+        trail.push(vm.selectedAgent)
+      }, [vm.selectedAgent])
+      return desired ? (
+        <div data-testid="drawer-chat">
+          <NavigationContext.Provider value={{ ...vm, handleSelectChatAgent: select }}>
+            <ChatPage scrollContainerRef={{ current: null }} />
+          </NavigationContext.Provider>
+        </div>
+      ) : null
+    }
+    const { getVm, queryByTestId } = await renderChatActionConsumer(<Drawer />)
+    getController = getVm
+    await waitFor(() => expect(handle.refreshCatalog).toHaveBeenCalledTimes(2))
+    act(() => getVm().handleNavSelect(DESKTOP_ROUTES.files))
+    await waitFor(() => expect(queryByTestId('drawer-chat')).not.toBeNull())
+    await waitFor(() => expect(getVm().selectedAgent).toBe(HOST_A))
+    act(() =>
+      getVm().handleSelectChatAgent(HOST_A, {
+        chatId: 'drawer-chat',
+        selectLatest: false,
+        keepNavItem: true,
+      })
+    )
+    await waitFor(() => expect(clerum.rpc.loadSessionMessages).toHaveBeenCalled())
+    await act(async () => {
+      pending.reject(await ipcGenericForbidden('rpc:loadSessionMessages'))
+      await pending.promise.catch(() => undefined)
+    })
+    await waitFor(() => expect(getVm().isHostAccessBlocked(HOST_A)).toBe(true))
+    await waitFor(() => expect(getVm().selectedAgent).toBe(null))
+    expect(getVm().heldAgentRefs).toEqual([HOST_A])
+    const beforePicker = trail.length
+
+    act(() => getVm().handleNavSelect(DESKTOP_ROUTES.apps))
+    await waitFor(() => expect(getVm().appsPickerActive).toBe(true))
+    await settle()
+    // Witnesses: the picker is open, Files is still the stored tab, and the
+    // drawer's ChatPage is still mounted under it.
+    expect(getVm().activeWorkspaceTab?.kind).toBe(DESKTOP_ROUTES.files)
+    expect(queryByTestId('drawer-chat')).not.toBeNull()
+    expect(getVm().isHostAccessBlocked(HOST_A)).toBe(true)
+    expect(getVm().keepFocusedChat).toBe(true)
+    expect(getVm().selectedAgent).toBe(null)
+    expect(trail.slice(beforePicker)).toEqual([])
+  })
 })

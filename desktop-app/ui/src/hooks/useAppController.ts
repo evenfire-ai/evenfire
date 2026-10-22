@@ -397,12 +397,14 @@ export function useAppController() {
   // ChatPage keeps its conversation only while the Host has a Retry row: held
   // and still in the catalog. The Host is the focused chat tab's, or, for the
   // chat drawer, which is never the active tab, the Host the hold deselected.
+  // The drawer is available over any stored non-chat tab, the Apps picker
+  // included, so the picker does not end the drawer's keep.
   // Holds reset with the authority scope, so a team switch never keeps a chat
   // of the previous team.
   const interruptedHostOnSurface =
     interruptedHostRef.current !== null &&
-    !nav.appsPickerActive &&
-    (focusedChatAgentRef === interruptedHostRef.current || nav.activeTab?.kind !== 'chat')
+    nav.activeTab !== undefined &&
+    nav.activeTab.kind !== 'chat'
   const keptChatAgentRef =
     focusedChatAgentRef ?? (interruptedHostOnSurface ? interruptedHostRef.current : null)
   const keepFocusedChat = keptChatAgentRef !== null && heldAgentRefs.includes(keptChatAgentRef)
