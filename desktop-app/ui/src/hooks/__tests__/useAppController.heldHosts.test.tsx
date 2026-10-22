@@ -26,6 +26,7 @@ import {
 import { deferred, serverSessions } from '../domain/__tests__/__fixtures__/catalogFixtures'
 import { renderChatActionConsumer } from '../domain/__tests__/__fixtures__/chatActionConsumerHarness'
 import {
+  type RpcChannel,
   ipcGenericForbidden,
   ipcHostAccessRevoked,
 } from '../domain/__tests__/__fixtures__/ipcErrors'
@@ -404,8 +405,8 @@ describe('useAppController held Hosts', () => {
   })
 
   it.each([
-    ['a generic 403', (channel: string) => ipcGenericForbidden(channel), VERIFY_A],
-    ['host_access_revoked', (channel: string) => ipcHostAccessRevoked(channel), REVOKED_A],
+    ['a generic 403', (channel: RpcChannel) => ipcGenericForbidden(channel), VERIFY_A],
+    ['host_access_revoked', (channel: RpcChannel) => ipcHostAccessRevoked(channel), REVOKED_A],
   ])(
     'T-F3-2: losing a Host that is neither selected nor on the chat tab to %s shows no toast',
     async (_label, rejection, selectedHoldToast) => {

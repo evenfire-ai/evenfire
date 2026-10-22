@@ -949,10 +949,10 @@ describe('useAppController — chat drawer over a held Host', () => {
       )
 
       const trail: Array<string | null> = []
-      let openDrawer = () => {
+      let openDrawer: () => void = () => {
         throw new Error('the surface is not mounted')
       }
-      let rerenderOwner = () => {
+      let rerenderOwner: () => void = () => {
         throw new Error('the controller is not mounted')
       }
       function Surface() {
