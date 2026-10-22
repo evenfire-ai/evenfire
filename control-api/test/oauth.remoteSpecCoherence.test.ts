@@ -304,6 +304,19 @@ const INCOHERENT: ReadonlyArray<{
     consentOnly: false,
   },
   {
+    // A CR written while Azure SQL was still an unknown GUID must stop resolving once it is
+    // blocked; the server's own scope next to it does not save it.
+    label: 'entra-v2 with the Work IQ scope plus an Azure SQL Database GUID scope',
+    oauth: () =>
+      workIqWithScopes([
+        WORKIQ_GUID_SCOPE,
+        '022907d3-0f1b-48f7-badc-1ba6abab6d66/user_impersonation',
+      ]),
+    remote: workIqRemote,
+    reason: 'scope_audience_mismatch',
+    consentOnly: false,
+  },
+  {
     label: 'entra-v2 with a Microsoft Graph URL scope',
     oauth: () => workIqWithScopes(['https://graph.microsoft.com/x']),
     remote: workIqRemote,

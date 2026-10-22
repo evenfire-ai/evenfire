@@ -225,9 +225,20 @@ from you, and both are checked the same way.
 **Blocked APIs.** Microsoft Graph, SharePoint Online, Exchange Online, Azure
 Service Management, Azure AD Graph, Azure Key Vault, Azure Storage, Office 365
 Management APIs, Microsoft Intune, Microsoft Defender for Endpoint
-(WindowsDefenderATP), and Skype for Business Online. These are high-impact
-Microsoft APIs that never host an MCP server, so a token for them must never
-reach one.
+(WindowsDefenderATP), Skype for Business Online, Dynamics CRM, Azure SQL
+Database, Log Analytics API, Skype and Teams Tenant Admin API, and Microsoft
+Teams Services. These are high-impact Microsoft APIs, and a GUID form names no
+host, so a confirmed one would let a token for them reach any MCP server. Only
+the GUID form is blocked: a Microsoft MCP server whose audience is on its own
+host (for example Dataverse at `<org>.crm.dynamics.com/api/mcp`) is connected
+with a URL-form scope on that host, which is accepted as usual.
+
+Azure DevOps and Power BI are deliberately not on this list. Their URL-form
+audience lives on a host other than their MCP server, so their GUID form (for
+example `00000009-0000-0000-c000-000000000000/.default` for Power BI) is the
+only way to connect them; it is accepted after you confirm it, like any other
+unknown API. That path is allowed by the audience policy but has not been
+verified end to end against either server (see **Not supported** below).
 
 **The server's own scope is required.** At least one scope must name the
 server's API (a URL on its host, or a GUID form that is accepted or
@@ -269,10 +280,11 @@ scopes, fails when the user connects.
 
 **Not supported:**
 
-- MCP servers whose scope lives on a different host than the server, such as
-  Power BI (`api.fabric.microsoft.com/v1/mcp/powerbi`, with scopes on
-  `analysis.windows.net`). The URL form is rejected, and the GUID form with
-  confirmation has not been verified.
+- Verified support for MCP servers whose scope lives on a different host than
+  the server, such as Power BI (`api.fabric.microsoft.com/v1/mcp/powerbi`, with
+  scopes on `analysis.windows.net`) or Azure DevOps (`mcp.dev.azure.com`). The
+  URL form is rejected; the GUID form is accepted after confirmation, but has
+  not been verified end to end.
 - National clouds (`login.microsoftonline.us`, `login.partner.microsoftonline.cn`),
   personal Microsoft accounts (`consumers`), and the v1 authority
   (`sts.windows.net`).

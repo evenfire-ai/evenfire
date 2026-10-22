@@ -57,7 +57,21 @@ export const ENTRA_TENANT_AUTHORITY_TEMPLATE = 'https://login.microsoftonline.co
 /** RFC 6749 §3.3 scope-token; remoteMcp.ts imports it from here. */
 export const SCOPE_TOKEN_RE = /^[\x21\x23-\x5B\x5D-\x7E]+$/
 
-/** First-party APIs whose tokens must never reach an MCP host, whatever the operator confirms. */
+/**
+ * First-party APIs whose GUID-form scopes are always rejected, whatever the operator confirms:
+ * a GUID names no host, so a confirmed one would let Entra mint a token for these high-impact
+ * APIs and hand it to whatever MCP host the CR points at.
+ *
+ * Only the GUID form is blocked. A first-party MCP server whose audience lives on its own host
+ * (for example Dataverse at <org>.crm.dynamics.com/api/mcp) is connected with that host's
+ * URL-form scope, which the host rule already accepts.
+ *
+ * Left out on purpose, because their URL-form audience lives on a host other than their MCP
+ * server, so the GUID form (confirmed by the operator) is the only way to connect them:
+ * - Azure DevOps (499b84ac-1321-427f-aa17-267ca6975798), MCP server at mcp.dev.azure.com;
+ * - Power BI Service (00000009-0000-0000-c000-000000000000), MCP server at
+ *   api.fabric.microsoft.com while its URL audience is analysis.windows.net.
+ */
 export const ENTRA_BLOCKED_RESOURCE_APPS: ReadonlyMap<string, string> = new Map([
   ['00000003-0000-0000-c000-000000000000', 'Microsoft Graph'],
   ['00000003-0000-0ff1-ce00-000000000000', 'SharePoint Online'],
@@ -70,6 +84,11 @@ export const ENTRA_BLOCKED_RESOURCE_APPS: ReadonlyMap<string, string> = new Map(
   ['0000000a-0000-0000-c000-000000000000', 'Microsoft Intune'],
   ['fc780465-2017-40d4-a0c5-307022471b92', 'WindowsDefenderATP'],
   ['00000004-0000-0ff1-ce00-000000000000', 'Skype for Business Online'],
+  ['00000007-0000-0000-c000-000000000000', 'Dynamics CRM'],
+  ['022907d3-0f1b-48f7-badc-1ba6abab6d66', 'Azure SQL Database'],
+  ['ca7f3f0b-7d91-482c-8e09-c5d840d0eac5', 'Log Analytics API'],
+  ['48ac35b8-9aa8-4d74-927d-1f4a14a0b239', 'Skype and Teams Tenant Admin API'],
+  ['cc15fd57-2c6c-4117-a88c-83b1d56b4bbe', 'Microsoft Teams Services'],
 ])
 
 /** First-party MCP APIs tied to the only host allowed to receive their tokens. */

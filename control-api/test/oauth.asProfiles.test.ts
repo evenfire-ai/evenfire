@@ -46,6 +46,11 @@ const BLOCKED_LITERAL: Array<[string, string]> = [
   ['0000000a-0000-0000-c000-000000000000', 'Microsoft Intune'],
   ['fc780465-2017-40d4-a0c5-307022471b92', 'WindowsDefenderATP'],
   ['00000004-0000-0ff1-ce00-000000000000', 'Skype for Business Online'],
+  ['00000007-0000-0000-c000-000000000000', 'Dynamics CRM'],
+  ['022907d3-0f1b-48f7-badc-1ba6abab6d66', 'Azure SQL Database'],
+  ['ca7f3f0b-7d91-482c-8e09-c5d840d0eac5', 'Log Analytics API'],
+  ['48ac35b8-9aa8-4d74-927d-1f4a14a0b239', 'Skype and Teams Tenant Admin API'],
+  ['cc15fd57-2c6c-4117-a88c-83b1d56b4bbe', 'Microsoft Teams Services'],
 ]
 const KNOWN_LITERAL: Array<[string, string]> = [
   ['fdcc1f02-fc51-4226-8753-f668596af7f7', 'workiq.svc.cloud.microsoft'],
@@ -53,7 +58,7 @@ const KNOWN_LITERAL: Array<[string, string]> = [
 ]
 
 describe('closed tables', () => {
-  it('ENTRA_BLOCKED_RESOURCE_APPS is exactly the 11 high-impact first-party APIs', () => {
+  it('ENTRA_BLOCKED_RESOURCE_APPS is exactly the 16 high-impact first-party APIs', () => {
     expect([...ENTRA_BLOCKED_RESOURCE_APPS.entries()]).toEqual(BLOCKED_LITERAL)
   })
 
@@ -271,6 +276,11 @@ describe('profileScopeViolation', () => {
     '0000000a-0000-0000-c000-000000000000',
     'fc780465-2017-40d4-a0c5-307022471b92',
     '00000004-0000-0ff1-ce00-000000000000',
+    '00000007-0000-0000-c000-000000000000',
+    '022907d3-0f1b-48f7-badc-1ba6abab6d66',
+    'ca7f3f0b-7d91-482c-8e09-c5d840d0eac5',
+    '48ac35b8-9aa8-4d74-927d-1f4a14a0b239',
+    'cc15fd57-2c6c-4117-a88c-83b1d56b4bbe',
   ]
   const rejected = [
     'https://graph.microsoft.com/Mail.Read',
@@ -299,8 +309,8 @@ describe('profileScopeViolation', () => {
     })
   }
 
-  it('the 11 blocked GUIDs are rejected in both forms (written as literals)', () => {
-    expect(blockedGuids).toHaveLength(11)
+  it('the 16 blocked GUIDs are rejected in both forms (written as literals)', () => {
+    expect(blockedGuids).toHaveLength(16)
     for (const guid of blockedGuids) {
       expect(profileScopeViolation('entra-v2', WORKIQ_URL, [`${guid}/x`])).toBe(`${guid}/x`)
       expect(profileScopeViolation('entra-v2', WORKIQ_URL, [`api://${guid}/x`])).toBe(
@@ -424,6 +434,37 @@ describe('profileUnverifiedScopes', () => {
   it('[] without a profile', () => {
     expect(profileUnverifiedScopes(undefined, WORKIQ_URL, [UNKNOWN_GUID_SCOPE])).toEqual([])
   })
+})
+
+describe('high-impact first-party data APIs are blocked, not confirmable', () => {
+  const dataApiGuids = [
+    '00000007-0000-0000-c000-000000000000', // Dynamics CRM
+    '022907d3-0f1b-48f7-badc-1ba6abab6d66', // Azure SQL Database
+    'ca7f3f0b-7d91-482c-8e09-c5d840d0eac5', // Log Analytics API
+    '48ac35b8-9aa8-4d74-927d-1f4a14a0b239', // Skype and Teams Tenant Admin API
+    'cc15fd57-2c6c-4117-a88c-83b1d56b4bbe', // Microsoft Teams Services
+  ]
+
+  for (const guid of dataApiGuids) {
+    for (const scope of [`${guid}/x`, `api://${guid}/x`]) {
+      it(`${scope} is a violation and never unverified`, () => {
+        expect(profileScopeViolation('entra-v2', WORKIQ_URL, [scope])).toBe(scope)
+        expect(profileUnverifiedScopes('entra-v2', WORKIQ_URL, [scope])).toEqual([])
+      })
+    }
+  }
+
+  // Their URL-form audience lives on a host other than their MCP server, so the GUID form
+  // is the only way to connect them and must stay confirmable rather than blocked.
+  for (const [name, scope] of [
+    ['Azure DevOps', '499b84ac-1321-427f-aa17-267ca6975798/.default'],
+    ['Power BI Service', '00000009-0000-0000-c000-000000000000/.default'],
+  ]) {
+    it(`${name} stays an unknown GUID that needs confirmation`, () => {
+      expect(profileScopeViolation('entra-v2', WORKIQ_URL, [scope])).toBeNull()
+      expect(profileUnverifiedScopes('entra-v2', WORKIQ_URL, [scope])).toEqual([scope])
+    })
+  }
 })
 
 describe('audience classification properties', () => {
