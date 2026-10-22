@@ -404,15 +404,18 @@ describe('useAppController held Hosts', () => {
   })
 
   it.each([
-    ['a generic 403', () => ipcGenericForbidden('rpc:listSessions')],
-    ['host_access_revoked', () => ipcHostAccessRevoked('rpc:listSessions')],
+    ['a generic 403', (channel: string) => ipcGenericForbidden(channel), VERIFY_A],
+    ['host_access_revoked', (channel: string) => ipcHostAccessRevoked(channel), REVOKED_A],
   ])(
     'T-F3-2: losing a Host that is neither selected nor on the chat tab to %s shows no toast',
-    async (_label, rejection) => {
-      const { clerum, handle } = installAppControllerClerum({ agentNames: [HOST_A, HOST_B] })
+    async (_label, rejection, selectedHoldToast) => {
+      const { clerum, handle } = installAppControllerClerum({
+        agentNames: [HOST_A, HOST_B],
+        agentDisplayByName: DISPLAY_BY_NAME,
+      })
       const catalog = installCatalog(clerum)
-      catalog.deny(HOST_B, await rejection())
-      const { app } = await mount(clerum, handle)
+      catalog.deny(HOST_B, await rejection('rpc:listSessions'))
+      const { app, commits } = await mount(clerum, handle)
 
       act(() => {
         app.result.current.handleSelectChatAgent(HOST_A, { selectLatest: false })
@@ -429,9 +432,23 @@ describe('useAppController held Hosts', () => {
       expect(app.result.current.focusedChatAgentRef).not.toBe(HOST_B)
       expect(
         toastTexts(app.result.current).filter(
-          text => text.includes(HOST_B) || text.includes('access')
+          text => text.includes(HOST_B) || text.includes(DISPLAY_B) || /access/i.test(text)
         )
       ).toEqual([])
+
+      // Positive phase: the same denial on the selected Host is announced, so the
+      // hold toast can be seen in this test.
+      const transcriptError = await rejection('rpc:loadSessionMessages')
+      clerum.rpc.loadSessionMessages.mockImplementation(async (hostRef: string) => {
+        if (hostRef === HOST_A) throw transcriptError
+        return { agent: hostRef, chatId: '', turns: [] }
+      })
+      act(() => {
+        app.result.current.handleSelectChatAgent(HOST_A, { chatId: 'chat-1', selectLatest: false })
+      })
+      await waitFor(() => expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true))
+      await waitFor(() => expect(app.result.current.selectedAgent).toBe(null))
+      expect(toastsSeen(commits).filter(text => /access/i.test(text))).toEqual([selectedHoldToast])
     }
   )
 
@@ -975,6 +992,33 @@ describe('useAppController held Hosts', () => {
     return { land }
   }
 
+  /** Team 2's own catalog lists B, the next one drops it: exactly one loss toast for B. */
+  async function expectTeamTwoLossOfB(
+    app: ReturnType<typeof renderAppController>,
+    handle: AppControllerClerumHandle,
+    commits: Vm[]
+  ) {
+    const landTeamTwo = async (names: string[]) => {
+      handle.refreshCatalog.mockImplementation(async () =>
+        producerCatalog(names, DISPLAY_BY_NAME, 'team-2')
+      )
+      await act(async () => {
+        await app.result.current.handleRefreshWorkspaceData(DESKTOP_ROUTES.agents)
+      })
+      await waitFor(() =>
+        expect(cachedCatalog(app.queryClient)).toMatchObject({
+          teamId: 'team-2',
+          agentNames: names,
+        })
+      )
+      await settle()
+    }
+    await landTeamTwo([HOST_A, HOST_B])
+    const beforeLoss = toastsSeen(commits).length
+    await landTeamTwo([HOST_A])
+    expect(toastsSeen(commits).slice(beforeLoss)).toEqual([GONE_B])
+  }
+
   it('T-R5L4-1: a pre-switch catalog landing after a team switch announces no loss', async () => {
     const { clerum, handle } = installAppControllerClerum({
       agentNames: [HOST_A, HOST_B],
@@ -1007,6 +1051,9 @@ describe('useAppController held Hosts', () => {
     expect(app.result.current.isHostAccessBlocked(HOST_B)).toBe(true)
     expect(app.result.current.heldAgentRefs).toEqual([])
     expect(toastsSeen(commits).slice(beforeLanding)).toEqual([])
+
+    // Positive phase: B's loss from team 2's own catalogs is announced.
+    await expectTeamTwoLossOfB(app, handle, commits)
   })
 
   it('T-R5L4-2: a pre-switch catalog landing after a team switch keeps the team-2 Host selected', async () => {
@@ -1034,6 +1081,9 @@ describe('useAppController held Hosts', () => {
     expect(app.result.current.currentTeamId).toBe('team-2')
     expect(app.result.current.selectedAgent).toBe(HOST_B)
     expect(toastsSeen(commits).slice(beforeLanding)).toEqual([])
+
+    // Positive phase: B's loss from team 2's own catalogs is announced.
+    await expectTeamTwoLossOfB(app, handle, commits)
   })
 
   it.each([
