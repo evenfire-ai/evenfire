@@ -528,7 +528,7 @@ export function mapRemoteInstallError(
       const scope = typeof body?.scope === 'string' ? body.scope : ''
       return scope
         ? `The scope "${scope}" belongs to another API, so a token for it must not be sent to this server. Remove it or use this server's own scope.`
-        : "A scope belongs to another API, so a token for it must not be sent to this server. Remove it or use this server's own scope."
+        : "The scope belongs to another API, so a token for it must not be sent to this server. Remove it or use this server's own scope."
     }
     case 'scope_audience_missing':
       return 'Add this server’s own scope. Sign-in scopes alone (openid, profile, email, offline_access) would send a Microsoft Graph token to the server.'

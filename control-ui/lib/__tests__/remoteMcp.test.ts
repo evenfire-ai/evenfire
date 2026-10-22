@@ -619,7 +619,9 @@ describe('mapRemoteInstallError', () => {
       code: 'scope_audience_mismatch',
       body: { error: 'scope_audience_mismatch' },
     })
-    expect(mapRemoteInstallError(err)).toMatch(/^A scope belongs to another API/)
+    expect(mapRemoteInstallError(err)).toBe(
+      "The scope belongs to another API, so a token for it must not be sent to this server. Remove it or use this server's own scope."
+    )
   })
 
   it('maps scope_audience_missing to "add this server\'s own scope"', () => {
