@@ -1907,6 +1907,7 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
   let currentController: AppController
 
   beforeEach(() => {
+    resetComposerDraftStore()
     vi.clearAllMocks()
     sidebarHarness.props = null
     sandboxUiPageHarness.props = null
@@ -1941,6 +1942,7 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
   afterEach(() => {
     cleanup()
     delete (window as { clerum?: unknown }).clerum
+    resetComposerDraftStore()
   })
 
   // R2: available on app/files/settings, never on chat.
