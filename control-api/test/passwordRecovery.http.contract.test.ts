@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { readFileSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'
 import type { IncomingHttpHeaders, Server } from 'node:http'
 import { requireInternalToken } from '../src/middleware/internalServiceAuth.js'
@@ -13,6 +14,23 @@ import {
   startExternalRestHttpProcess,
 } from './helpers/externalRestHttpProcess.js'
 import { responseDropProxyApp } from './helpers/passwordRecoveryResponseProxy.js'
+
+// The edge publishes these bodies and profile-ui classifies them by `code`
+// from the same document, so the producer mappings are pinned to it.
+const invitationPasswordContract = JSON.parse(
+  readFileSync(
+    new URL('../../tests/contracts/invitation-password-public-errors.json', import.meta.url),
+    'utf8'
+  )
+) as Record<
+  'password_not_found' | 'password_not_pending' | 'password_expired',
+  { status: number; body: Record<string, string> }
+>
+const {
+  password_not_found: notFound,
+  password_not_pending: notPending,
+  password_expired: expired,
+} = invitationPasswordContract
 
 const externalConfig = {
   controlApiBaseUrl: '',
@@ -481,14 +499,9 @@ describe('invitation/password producer response mappings', () => {
       403,
       { error: 'Invitation is invalid or unavailable' },
     ],
-    ['missing invitation', { error: 'not_found' }, 404, { error: 'Invitation not found' }],
-    [
-      'redeemed invitation',
-      { error: 'not_pending' },
-      409,
-      { error: 'Invitation has already been used' },
-    ],
-    ['expired invitation', { error: 'expired' }, 410, { error: 'Invitation has expired' }],
+    ['missing invitation', { error: 'not_found' }, notFound.status, notFound.body],
+    ['redeemed invitation', { error: 'not_pending' }, notPending.status, notPending.body],
+    ['expired invitation', { error: 'expired' }, expired.status, expired.body],
   ])(
     'maps the producer %s domain response to the public contract',
     async (label, result, status, body) => {
@@ -610,8 +623,8 @@ describe('invitation/password producer response mappings', () => {
       serviceResult: { error: 'user_retired' },
       producerStatus: 401,
       producerBody: { error: 'user_retired' },
-      publicStatus: 404,
-      publicBody: { error: 'Invitation not found' },
+      publicStatus: notFound.status,
+      publicBody: notFound.body,
     },
     {
       label: 'wrong member binding',
@@ -630,8 +643,8 @@ describe('invitation/password producer response mappings', () => {
       serviceResult: { error: 'not_found' },
       producerStatus: 404,
       producerBody: { error: 'not_found' },
-      publicStatus: 404,
-      publicBody: { error: 'Invitation not found' },
+      publicStatus: notFound.status,
+      publicBody: notFound.body,
     },
     {
       label: 'invitation no longer accepted',
@@ -650,8 +663,8 @@ describe('invitation/password producer response mappings', () => {
       serviceResult: { error: 'not_pending' },
       producerStatus: 409,
       producerBody: { error: 'invitation_not_pending' },
-      publicStatus: 409,
-      publicBody: { error: 'Invitation has already been used' },
+      publicStatus: notPending.status,
+      publicBody: notPending.body,
     },
     {
       label: 'reset invitation expired through authenticated setup',
@@ -660,8 +673,8 @@ describe('invitation/password producer response mappings', () => {
       serviceResult: { error: 'expired' },
       producerStatus: 410,
       producerBody: { error: 'expired' },
-      publicStatus: 410,
-      publicBody: { error: 'Invitation has expired' },
+      publicStatus: expired.status,
+      publicBody: expired.body,
     },
   ])('maps the authenticated password-setup producer outcome: $label', async scenario => {
     directory.setInvitationPasswordForUser.mockResolvedValue(scenario.serviceResult)
