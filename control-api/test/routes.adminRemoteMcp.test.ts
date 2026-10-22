@@ -36,8 +36,10 @@ import {
   DCR_PUBLIC_WITH_ECHOED_SECRET_REGISTRATION_RESPONSE,
   DCR_VERCEL_DOWNGRADE_REGISTRATION_JSON,
   DCR_VERCEL_DOWNGRADE_REGISTRATION_RESPONSE,
+  ENTRA_WORKIQ_PILOT,
   NOTION_PRM_JSON,
   PILOTS,
+  type PilotFixture,
   VERCEL_PILOT,
   dcrPilot,
   makeDcrTransport,
@@ -2555,5 +2557,132 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
         expect(res.body.callback).toEqual({ configured: false, variant: 'per-server' })
       })
     }
+  })
+})
+
+describe('Microsoft Entra ID — authorizationServer override on /discover and install', () => {
+  const PUBLIC_IP = async () => ['93.184.216.34']
+  const ORIGIN = 'https://control.example.com'
+  const TENANT_AUTHORITY =
+    'https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0'
+  let savedCallbackBaseUrl: string
+
+  beforeEach(() => {
+    vi.mocked(discoverRemoteOAuth).mockReset()
+    savedCallbackBaseUrl = config.oauthCallbackBaseUrl
+    config.oauthCallbackBaseUrl = ORIGIN
+  })
+  afterEach(() => {
+    config.oauthCallbackBaseUrl = savedCallbackBaseUrl
+  })
+
+  /**
+   * The router wired to the REAL discovery client and transport probe over a pilot's
+   * recorded bytes (T1), through the `discover`/`probe` seams, so what the route passes
+   * to discovery (the override included) decides the outcome.
+   */
+  async function entraApp(
+    pilot: PilotFixture,
+    gw: MockGateway,
+    deps: AdminRemoteMcpDeps = {}
+  ): Promise<express.Express> {
+    const actual = await vi.importActual<typeof import('../src/oauth/discovery.js')>(
+      '../src/oauth/discovery.js'
+    )
+    const transport = makeDiscoveryTransport(pilot)
+    return makeApp(gw, boundProbe(transport), {
+      discover: (url, discoveryDeps, opts) =>
+        actual.discoverRemoteOAuth(
+          url,
+          { ...discoveryDeps, transport, resolveDns: PUBLIC_IP },
+          opts
+        ),
+      ...deps,
+    })
+  }
+
+  async function expectNoWrites(gw: MockGateway, serverName: string): Promise<void> {
+    await expect(gw.getSecret(`${serverName}-oauth-client`, NS)).rejects.toThrow()
+    await expect(gw.getResource('mcpservers', serverName, NS)).rejects.toThrow()
+  }
+
+  it('/discover without baseUrl → 400 invalid_request with the schema issues', async () => {
+    const res = await request(makeApp(gatewayWithContext()))
+      .post('/admin/mcp-servers/remote/discover')
+      .send({})
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('invalid_request')
+    expect(Array.isArray(res.body.detail)).toBe(true)
+    expect(res.body.detail[0].path).toEqual(['baseUrl'])
+    expect(discoverRemoteOAuth).not.toHaveBeenCalled()
+  })
+
+  it('row 7: /discover kernel-rejects a non-https authorizationServer before discovery', async () => {
+    const res = await request(makeApp(gatewayWithContext()))
+      .post('/admin/mcp-servers/remote/discover')
+      .send({
+        baseUrl: ENTRA_WORKIQ_PILOT.mcpUrl,
+        authorizationServer: TENANT_AUTHORITY.replace('https:', 'http:'),
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('must use https')
+    expect(res.body.errors[0].field).toBe('authorizationServer')
+    expect(discoverRemoteOAuth).not.toHaveBeenCalled()
+  })
+
+  it('row 7: install kernel-rejects a non-https authorizationServer before discovery or writes', async () => {
+    const gw = gatewayWithContext()
+    const res = await request(makeApp(gw))
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'workiq',
+        contextRef: 'ctx-a',
+        baseUrl: ENTRA_WORKIQ_PILOT.mcpUrl,
+        mode: 'pre-registered',
+        clientId: 'entra-client',
+        clientSecret: 'entra-secret',
+        authorizationServer: TENANT_AUTHORITY.replace('https:', 'http:'),
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.errors[0].field).toBe('authorizationServer')
+    expect(discoverRemoteOAuth).not.toHaveBeenCalled()
+    await expectNoWrites(gw, 'workiq')
+  })
+
+  it('/discover of Work IQ without an override → 400 tenant_required with the template', async () => {
+    const res = await request(await entraApp(ENTRA_WORKIQ_PILOT, gatewayWithContext()))
+      .post('/admin/mcp-servers/remote/discover')
+      .send({ baseUrl: ENTRA_WORKIQ_PILOT.mcpUrl })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('discovery_failed')
+    expect(res.body.detail).toMatchObject({
+      kind: 'tenant_required',
+      authorizationServer: 'https://login.microsoftonline.com/organizations/v2.0',
+      tenantAuthorityTemplate: 'https://login.microsoftonline.com/{tenantId}/v2.0',
+    })
+  })
+
+  it('row 10: /discover passes the override to discovery (Linear rejects a tenant authority)', async () => {
+    const res = await request(await entraApp(PILOTS.linear, gatewayWithContext()))
+      .post('/admin/mcp-servers/remote/discover')
+      .send({ baseUrl: PILOTS.linear.mcpUrl, authorizationServer: TENANT_AUTHORITY })
+    expect(res.status).toBe(400)
+    expect(res.body.detail.kind).toBe('authorization_server_override_rejected')
+  })
+
+  it('row 10: install passes the override to discovery and writes nothing when it is rejected', async () => {
+    const gw = gatewayWithContext()
+    const res = await request(await entraApp(PILOTS.linear, gw))
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'linear-entra',
+        contextRef: 'ctx-a',
+        baseUrl: PILOTS.linear.mcpUrl,
+        mode: 'cimd',
+        authorizationServer: TENANT_AUTHORITY,
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.detail.kind).toBe('authorization_server_override_rejected')
+    await expectNoWrites(gw, 'linear-entra')
   })
 })

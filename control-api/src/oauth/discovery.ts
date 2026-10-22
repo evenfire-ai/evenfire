@@ -11,6 +11,11 @@ import {
   validateOAuthEndpointUrl,
 } from '../http/validateMcpServerSpec.js'
 import { type Logger, rootLogger } from '../observability/logger.js'
+import {
+  ENTRA_TENANT_AUTHORITY_TEMPLATE,
+  isEntraMultiTenantAuthority,
+  isEntraTenantAuthority,
+} from './asProfiles.js'
 
 /**
  * Remote MCP-OAuth discovery client (spec 19 §4/§5 C1, D-3/D-8).
@@ -284,6 +289,19 @@ export type DiscoveryError =
   | { kind: 'content_encoding_rejected'; url: string; encoding: string }
   /** Without RFC 9207, an AS endpoint is not on the issuer's registrable domain. */
   | { kind: 'as_endpoints_cross_site'; field: string; detail: string }
+  /**
+   * The authorization server is Microsoft Entra ID's multi-tenant authority, whose
+   * metadata declares a templated issuer that can never match. The operator must name
+   * the tenant; `tenantAuthorityTemplate` is the URL to complete.
+   */
+  | {
+      kind: 'tenant_required'
+      authorizationServer: string
+      tenantAuthorityTemplate: string
+      detail: string
+    }
+  /** The operator-supplied authorization server is not accepted for this resource. */
+  | { kind: 'authorization_server_override_rejected'; detail: string }
 
 export interface DiscoveryResult {
   prm: ProtectedResourceMetadata
@@ -638,6 +656,32 @@ async function resolvePrm(
 }
 
 /**
+ * Why an operator-supplied authorization server cannot replace the one the PRM
+ * advertises, or null when it can. Accepted only to name the tenant of Microsoft
+ * Entra ID's multi-tenant authority: on authorization servers that separate tenants
+ * by path on one origin (`auth.atlassian.com/<id>`, Keycloak realms, Okta
+ * `/oauth2/<id>`), a "same origin" override would let the operator point a resource at
+ * another tenant's issuer, so no wider override is offered.
+ */
+function authorizationServerOverrideRejection(
+  override: string,
+  prm: ProtectedResourceMetadata
+): string | null {
+  if (!isEntraTenantAuthority(override)) {
+    return 'authorizationServer must be a Microsoft Entra ID tenant authority (https://login.microsoftonline.com/<tenant-id>/v2.0)'
+  }
+  const advertised = Array.isArray(prm.authorization_servers) ? prm.authorization_servers : []
+  const advertisesEntraMultiTenant = advertised.some(entry => {
+    if (typeof entry !== 'string' || !URL.canParse(entry)) return false
+    return isEntraMultiTenantAuthority(new URL(entry))
+  })
+  if (!advertisesEntraMultiTenant) {
+    return 'the protected resource does not advertise the Microsoft Entra ID multi-tenant authority'
+  }
+  return null
+}
+
+/**
  * Full RFC 9728 → 8414 discovery for a remote MCP server URL. Returns the pinned
  * endpoints, `resource` (RFC 8707), issuer/`iss` handling (RFC 9207), the
  * registration mode (D-3) and transport quirks (D-8). Fail-closed if the AS does
@@ -646,7 +690,10 @@ async function resolvePrm(
  * (`as_endpoints_cross_site`), before anything is registered against it.
  *
  * `hasPreRegisteredClient` reflects operator config (a pre-registered Secret),
- * defaulting to false.
+ * defaulting to false. `authorizationServer` is the operator's tenant authority for a
+ * resource that advertises Microsoft Entra ID's multi-tenant authority
+ * (`tenant_required`); any other override is `authorization_server_override_rejected`
+ * and nothing is fetched from it.
  *
  * Contract with control-ui: the `/discover` and install responses built from this
  * result are pinned as wire goldens by test/routes.adminRemoteMcp.wireGoldens.test.ts,
@@ -656,7 +703,7 @@ async function resolvePrm(
 export async function discoverRemoteOAuth(
   mcpUrl: string,
   deps: DiscoveryDeps,
-  opts: { hasPreRegisteredClient?: boolean } = {}
+  opts: { hasPreRegisteredClient?: boolean; authorizationServer?: string } = {}
 ): Promise<DiscoveryOutcome> {
   const log = (deps.logger ?? rootLogger).child({ module: 'oauth-discovery' })
 
@@ -667,12 +714,28 @@ export async function discoverRemoteOAuth(
   }
   const prm = prmResult.prm
 
-  const asBase = prm.authorization_servers?.[0]
-  if (typeof asBase !== 'string' || asBase.length === 0) {
+  const advertisedAs = prm.authorization_servers?.[0]
+  if (typeof advertisedAs !== 'string' || advertisedAs.length === 0) {
     return {
       ok: false,
       error: { kind: 'no_authorization_server', detail: 'PRM has no authorization_servers[0]' },
     }
+  }
+
+  let asBase = advertisedAs
+  if (opts.authorizationServer !== undefined) {
+    const rejection = authorizationServerOverrideRejection(opts.authorizationServer, prm)
+    if (rejection !== null) {
+      log.warn(
+        { discovery: 'authorization_server_override_rejected' },
+        'remote discovery rejected the operator-supplied authorization server'
+      )
+      return {
+        ok: false,
+        error: { kind: 'authorization_server_override_rejected', detail: rejection },
+      }
+    }
+    asBase = opts.authorizationServer
   }
 
   let asBaseUrl: URL
@@ -685,6 +748,23 @@ export async function discoverRemoteOAuth(
         kind: 'invalid_metadata',
         url: asBase,
         detail: 'authorization_servers[0] is not a valid URL',
+      },
+    }
+  }
+
+  // Entra's multi-tenant authority declares the literal issuer
+  // `https://login.microsoftonline.com/{tenantid}/v2.0`, which can never equal the base,
+  // so fetching it could only end in `issuer_mismatch`. Ask for the tenant instead.
+  if (isEntraMultiTenantAuthority(asBaseUrl)) {
+    log.warn({ discovery: 'tenant_required' }, 'remote discovery needs the Entra tenant')
+    return {
+      ok: false,
+      error: {
+        kind: 'tenant_required',
+        authorizationServer: asBase,
+        tenantAuthorityTemplate: ENTRA_TENANT_AUTHORITY_TEMPLATE,
+        detail:
+          'authorization server is the Microsoft Entra ID multi-tenant authority; name the tenant',
       },
     }
   }

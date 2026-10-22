@@ -12,6 +12,7 @@ import {
   wellKnownPrmUrls,
 } from '../src/oauth/discovery.js'
 import {
+  ENTRA_AGENT365_MAIL_PILOT,
   ENTRA_WORKIQ_PILOT,
   PILOTS,
   makeDiscoveryTransport,
@@ -541,5 +542,126 @@ describe('Entra pilot transport (asExtra + recordingTransport)', () => {
     expect(JSON.parse(ok.bodyText).issuer).toBe('https://login.microsoftonline.com/{tenantid}/v2.0')
     expect(JSON.parse(rejected.bodyText).error).toBe('invalid_tenant')
     expect(requestedUrls).toEqual([organizations.url, unknownTenant.url, rfc8414Url])
+  })
+})
+
+describe('discoverRemoteOAuth — Microsoft Entra tenant authority (tenant_required + override)', () => {
+  const TENANT_AUTHORITY =
+    'https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0'
+  const ORGANIZATIONS = 'https://login.microsoftonline.com/organizations/v2.0'
+
+  function hostsOf(urls: string[]): string[] {
+    return urls.map(url => new URL(url).hostname)
+  }
+
+  for (const pilot of [ENTRA_WORKIQ_PILOT, ENTRA_AGENT365_MAIL_PILOT]) {
+    it(`row 1 (${pilot.name}): the multi-tenant authority → tenant_required, nothing fetched from Entra`, async () => {
+      const { transport, requestedUrls } = recordingTransport(makeDiscoveryTransport(pilot))
+      const outcome = await discoverRemoteOAuth(pilot.mcpUrl, deps(transport))
+      expect(outcome).toEqual({
+        ok: false,
+        error: {
+          kind: 'tenant_required',
+          authorizationServer: ORGANIZATIONS,
+          tenantAuthorityTemplate: 'https://login.microsoftonline.com/{tenantId}/v2.0',
+          detail:
+            'authorization server is the Microsoft Entra ID multi-tenant authority; name the tenant',
+        },
+      })
+      expect(requestedUrls.length).toBeGreaterThan(0)
+      expect(hostsOf(requestedUrls)).not.toContain('login.microsoftonline.com')
+    })
+  }
+
+  const NOT_A_TENANT_AUTHORITY =
+    'authorizationServer must be a Microsoft Entra ID tenant authority (https://login.microsoftonline.com/<tenant-id>/v2.0)'
+
+  it('row 3: an upper-case tenant GUID is not a tenant authority → override rejected', async () => {
+    const { transport, requestedUrls } = recordingTransport(
+      makeDiscoveryTransport(ENTRA_WORKIQ_PILOT)
+    )
+    const outcome = await discoverRemoteOAuth(ENTRA_WORKIQ_PILOT.mcpUrl, deps(transport), {
+      authorizationServer:
+        'https://login.microsoftonline.com/72F988BF-86F1-41AF-91AB-2D7CD011DB47/v2.0',
+    })
+    expect(outcome).toEqual({
+      ok: false,
+      error: { kind: 'authorization_server_override_rejected', detail: NOT_A_TENANT_AUTHORITY },
+    })
+    expect(hostsOf(requestedUrls)).not.toContain('login.microsoftonline.com')
+  })
+
+  it('row 4: an unknown tenant → fetch_failed carrying the Entra 400 and its URL', async () => {
+    const unknownTenant =
+      'https://login.microsoftonline.com/00000000-0000-0000-0000-000000000001/v2.0'
+    const outcome = await discoverRemoteOAuth(
+      ENTRA_WORKIQ_PILOT.mcpUrl,
+      deps(makeDiscoveryTransport(ENTRA_WORKIQ_PILOT)),
+      { authorizationServer: unknownTenant }
+    )
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.error).toMatchObject({
+      kind: 'fetch_failed',
+      status: 400,
+      url: `${unknownTenant}/.well-known/openid-configuration`,
+    })
+  })
+
+  it('row 5: an override on another host is rejected and that host is never fetched', async () => {
+    const { transport, requestedUrls } = recordingTransport(
+      makeDiscoveryTransport(ENTRA_WORKIQ_PILOT)
+    )
+    const outcome = await discoverRemoteOAuth(ENTRA_WORKIQ_PILOT.mcpUrl, deps(transport), {
+      authorizationServer: 'https://evil.example/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0',
+    })
+    expect(outcome).toEqual({
+      ok: false,
+      error: { kind: 'authorization_server_override_rejected', detail: NOT_A_TENANT_AUTHORITY },
+    })
+    expect(hostsOf(requestedUrls)).not.toContain('evil.example')
+    expect(hostsOf(requestedUrls)).not.toContain('login.microsoftonline.com')
+  })
+
+  it('row 6: the multi-tenant authority itself is not a tenant authority → override rejected', async () => {
+    const outcome = await discoverRemoteOAuth(
+      ENTRA_WORKIQ_PILOT.mcpUrl,
+      deps(makeDiscoveryTransport(ENTRA_WORKIQ_PILOT)),
+      { authorizationServer: ORGANIZATIONS }
+    )
+    expect(outcome).toEqual({
+      ok: false,
+      error: { kind: 'authorization_server_override_rejected', detail: NOT_A_TENANT_AUTHORITY },
+    })
+  })
+
+  it('row 10: a resource that does not advertise Entra (Linear) rejects a tenant authority', async () => {
+    const { transport, requestedUrls } = recordingTransport(makeDiscoveryTransport(PILOTS.linear))
+    const outcome = await discoverRemoteOAuth(PILOTS.linear.mcpUrl, deps(transport), {
+      authorizationServer: TENANT_AUTHORITY,
+    })
+    expect(outcome).toEqual({
+      ok: false,
+      error: {
+        kind: 'authorization_server_override_rejected',
+        detail:
+          'the protected resource does not advertise the Microsoft Entra ID multi-tenant authority',
+      },
+    })
+    expect(hostsOf(requestedUrls)).not.toContain('login.microsoftonline.com')
+  })
+
+  it('a valid override fetches the tenant authority, not the advertised multi-tenant one', async () => {
+    const { transport, requestedUrls } = recordingTransport(
+      makeDiscoveryTransport(ENTRA_WORKIQ_PILOT)
+    )
+    await discoverRemoteOAuth(ENTRA_WORKIQ_PILOT.mcpUrl, deps(transport), {
+      authorizationServer: TENANT_AUTHORITY,
+    })
+    const entraUrls = requestedUrls.filter(
+      url => new URL(url).hostname === 'login.microsoftonline.com'
+    )
+    expect(entraUrls).toContain(`${TENANT_AUTHORITY}/.well-known/openid-configuration`)
+    expect(entraUrls.some(url => url.includes('/organizations/'))).toBe(false)
   })
 })

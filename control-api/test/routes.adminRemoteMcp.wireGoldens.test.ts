@@ -15,6 +15,7 @@ import {
   ATLASSIAN_V2_PILOT,
   DCR_PUBLIC_REGISTRATION_RESPONSE,
   DROPBOX_PILOT,
+  ENTRA_WORKIQ_PILOT,
   PILOTS,
   type PilotFixture,
   dcrPilot,
@@ -101,10 +102,13 @@ function gatewayWithContext(): MockGateway {
   return gw
 }
 
-async function discover(pilot: PilotFixture): Promise<WireCapture> {
+async function discover(
+  pilot: PilotFixture,
+  extraBody: Record<string, unknown> = {}
+): Promise<WireCapture> {
   const res = await request(appFor(pilot, gatewayWithContext()))
     .post('/admin/mcp-servers/remote/discover')
-    .send({ baseUrl: pilot.mcpUrl })
+    .send({ baseUrl: pilot.mcpUrl, ...extraBody })
   return { status: res.status, body: res.body }
 }
 
@@ -204,6 +208,12 @@ describe('remote MCP wire goldens — POST /discover', () => {
       }
     })
   }
+
+  it('discover.workiqTenantRequired: Work IQ without a tenant → 400 tenant_required', async () => {
+    const actual = await discover(ENTRA_WORKIQ_PILOT)
+    expect(actual.status).toBe(400)
+    expect(actual).toEqual(golden('discover.workiqTenantRequired', actual))
+  })
 
   it('discover.issuerPublicSuffix: issuer on a public suffix, no RFC 9207 → 400', async () => {
     const actual = await discover(ISSUER_ON_PUBLIC_SUFFIX_PILOT)

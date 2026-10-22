@@ -109,6 +109,19 @@ describe('discoveryHttpStatus — DiscoveryError → HTTP status decision table'
       error: { kind: 'as_endpoints_cross_site', field: 'token', detail: 'token on another site' },
       status: 400,
     },
+    {
+      error: {
+        kind: 'tenant_required',
+        authorizationServer: 'https://login.microsoftonline.com/organizations/v2.0',
+        tenantAuthorityTemplate: 'https://login.microsoftonline.com/{tenantId}/v2.0',
+        detail: 'name the tenant',
+      },
+      status: 400,
+    },
+    {
+      error: { kind: 'authorization_server_override_rejected', detail: 'not a tenant authority' },
+      status: 400,
+    },
   ]
 
   for (const { error, status } of cases) {

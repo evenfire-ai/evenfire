@@ -7,7 +7,7 @@ import { asyncHandler } from '../../http/asyncHandler.js'
 import { extractK8sError } from '../../http/k8sError.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { RFC1123_RE } from '../../http/rfc1123.js'
-import { validateOAuthEndpointUrl } from '../../http/validateMcpServerSpec.js'
+import { type ValidationError, validateOAuthEndpointUrl } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
 import { type UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { buildCimdDocument } from '../../oauth/cimd.js'
@@ -106,8 +106,13 @@ function logDcrRevokeLocalOnly(serverName: string, hasRegistrationClientUri: boo
 // importers (and the mapping's own test) keep resolving it from this module.
 export { discoveryHttpStatus }
 
+// `authorizationServer` names the operator's Microsoft Entra tenant authority when the
+// server advertises Entra's multi-tenant one; discovery rejects any other override.
+const authorizationServerSchema = z.string().min(1).max(2048)
+
 const discoverBodySchema = z.object({
   baseUrl: z.string().min(1),
+  authorizationServer: authorizationServerSchema.optional(),
 })
 
 // Install body: serverName + contextRef + baseUrl + registration mode. A
@@ -120,9 +125,18 @@ const installBodySchema = z.object({
   clientId: z.string().min(1).max(MAX_CLIENT_ID_LENGTH).optional(),
   clientSecret: z.string().min(1).optional(),
   grantScope: z.enum(['user', 'context']).optional(),
+  authorizationServer: authorizationServerSchema.optional(),
 })
 
 type InstallBody = z.infer<typeof installBodySchema>
+
+/** Kernel §4 on the operator's authorization-server override, before any fetch. */
+async function authorizationServerKernelErrors(
+  authorizationServer: string | undefined
+): Promise<ValidationError[]> {
+  if (authorizationServer === undefined) return []
+  return validateOAuthEndpointUrl(authorizationServer, 'authorizationServer')
+}
 
 /**
  * Fenced-delete preconditions from a just-created object, or undefined when the
@@ -506,10 +520,10 @@ export function createAdminRemoteMcpRouter(
     asyncHandler(async (req: UiAuthedRequest, res) => {
       const parsed = discoverBodySchema.safeParse(req.body)
       if (!parsed.success) {
-        res.status(400).json({ error: 'baseUrl is required' })
+        res.status(400).json({ error: 'invalid_request', detail: parsed.error.issues })
         return
       }
-      const { baseUrl } = parsed.data
+      const { baseUrl, authorizationServer } = parsed.data
 
       // Kernel §4: the admin-typed URL is untrusted input of origin — validate before
       // any fetch (discovery also kernel-guards internally, but a clean 400 here gives
@@ -519,8 +533,13 @@ export function createAdminRemoteMcpRouter(
         res.status(400).json({ error: kernelErrors[0].message, errors: kernelErrors })
         return
       }
+      const asKernelErrors = await authorizationServerKernelErrors(authorizationServer)
+      if (asKernelErrors.length > 0) {
+        res.status(400).json({ error: asKernelErrors[0].message, errors: asKernelErrors })
+        return
+      }
 
-      const outcome = await discover(baseUrl, { logger: log })
+      const outcome = await discover(baseUrl, { logger: log }, { authorizationServer })
       if (!outcome.ok) {
         log.warn({ discovery: outcome.error.kind }, 'remote discovery (dry-run) failed')
         res
@@ -620,6 +639,11 @@ export function createAdminRemoteMcpRouter(
         res.status(400).json({ error: kernelErrors[0].message, errors: kernelErrors })
         return
       }
+      const asKernelErrors = await authorizationServerKernelErrors(body.authorizationServer)
+      if (asKernelErrors.length > 0) {
+        res.status(400).json({ error: asKernelErrors[0].message, errors: asKernelErrors })
+        return
+      }
 
       // Pre-check: a name already taken by a LIVE McpServer is rejected before any
       // discovery or AS mint, so we never register a throwaway client at the AS for a
@@ -645,7 +669,10 @@ export function createAdminRemoteMcpRouter(
       const outcome = await discover(
         body.baseUrl,
         { logger: log },
-        { hasPreRegisteredClient: body.mode === 'pre-registered' }
+        {
+          hasPreRegisteredClient: body.mode === 'pre-registered',
+          authorizationServer: body.authorizationServer,
+        }
       )
       if (!outcome.ok) {
         log.warn({ discovery: outcome.error.kind }, 'remote install discovery failed')

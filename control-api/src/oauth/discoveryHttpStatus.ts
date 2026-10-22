@@ -27,6 +27,8 @@ export function discoveryHttpStatus(error: DiscoveryError): number {
     case 'prm_resource_mismatch':
     case 'issuer_mismatch':
     case 'as_endpoints_cross_site':
+    case 'tenant_required':
+    case 'authorization_server_override_rejected':
       return 400
     default: {
       const _exhaustive: never = error
