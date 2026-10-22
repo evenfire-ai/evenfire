@@ -102,6 +102,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       console.log(
         `Recovery suite contract: ${manifest.publicPostgres.length} public PostgreSQL suites; 2 private exclusions`
       )
+    else if (command === 'public' && !lane && !path)
+      console.log(manifest.publicPostgres.join('\n'))
     else if (command === 'private' && ['local', 'configured', 'all'].includes(lane) && !path)
       console.log(
         (lane === 'all'
@@ -117,7 +119,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       console.log(`Recovery ${lane} report: complete and passing`)
     } else
       throw new Error(
-        'Usage: password-recovery-suite-contract.mjs verify | private local/configured/all | report lane report.json'
+        'Usage: password-recovery-suite-contract.mjs verify | public | private local/configured/all | report lane report.json'
       )
   } catch (error) {
     console.error(error.message)
