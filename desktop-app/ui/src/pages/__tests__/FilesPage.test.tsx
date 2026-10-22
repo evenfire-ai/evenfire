@@ -1506,8 +1506,9 @@ describe('FilesPage', () => {
     expect(createFileFromPath).not.toHaveBeenCalled()
   })
 
-  it('keeps cached write access available while affordances refresh', async () => {
+  it('blocks dropped uploads while affordances refresh', async () => {
     const createFileFromPath = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
       current: {
@@ -1527,7 +1528,7 @@ describe('FilesPage', () => {
       createFileFromPath,
     })
 
-    renderFilesPage()
+    renderFilesPage(pushToast)
     const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
     const dataTransfer = {
       dropEffect: 'none',
@@ -1536,11 +1537,19 @@ describe('FilesPage', () => {
     }
     fireEvent.dragEnter(browser, { dataTransfer })
 
-    expect(screen.getByText('Drop files to upload to Team folder')).toBeTruthy()
+    expect(
+      screen.getByText(
+        'Upload permissions for Team folder are still being checked. Try again in a moment.'
+      )
+    ).toBeTruthy()
     fireEvent.drop(browser, { dataTransfer })
     await waitFor(() =>
-      expect(createFileFromPath).toHaveBeenCalledWith('folder-1', 'notes.md', '/tmp/notes.md')
+      expect(pushToast).toHaveBeenCalledWith(
+        'Upload permissions for Team folder are still being checked. Try again in a moment.',
+        'error'
+      )
     )
+    expect(createFileFromPath).not.toHaveBeenCalled()
   })
 
   it('explains why dropped preview files cannot be uploaded without folder write permission', () => {
@@ -3515,8 +3524,8 @@ describe('FilesPage', () => {
     await waitFor(() => expect(refreshAffordances).toHaveBeenCalledTimes(1))
   })
 
-  it('does not present stale read-only access while permissions are refreshing', async () => {
-    hookMock.useGfsBrowserController.mockReturnValue({
+  it('keeps Manage open without stale read-only access while permissions refresh', async () => {
+    const controllerState = {
       ...baseController(),
       current: {
         resourceId: 'folder-1',
@@ -3530,13 +3539,26 @@ describe('FilesPage', () => {
         grantableBits: [],
         canCreateShare: false,
       },
-      loadingAffordances: true,
-    })
+      loadingAffordances: false,
+    }
+    hookMock.useGfsBrowserController.mockReturnValue(controllerState)
 
-    renderFilesPage()
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = render(
+      <QueryClientProvider client={client}>
+        <FilesPage />
+      </QueryClientProvider>
+    )
     await openManageDialog('Product')
+    controllerState.loadingAffordances = true
+    view.rerender(
+      <QueryClientProvider client={client}>
+        <FilesPage />
+      </QueryClientProvider>
+    )
 
     expect(screen.getByText('Checking permissions…')).toBeTruthy()
+    expect(screen.getByRole('combobox', { name: 'Add people, teams, or agents' })).toBeTruthy()
     expect(screen.queryByText('Read-only access')).toBeNull()
   })
 

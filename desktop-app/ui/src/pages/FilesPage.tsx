@@ -545,11 +545,17 @@ export function FilesPage({
       ),
     [ctrl]
   )
-  const canWriteCurrent = !accessRevoked && hasBit(affordances, 'write')
-  const canDeleteCurrent = !accessRevoked && hasBit(affordances, 'delete')
+  const currentPermissionsConfirmed = Boolean(
+    affordances && !loadingAffordances && !affordancesError
+  )
+  const canWriteCurrent =
+    !accessRevoked && currentPermissionsConfirmed && hasBit(affordances, 'write')
+  const canDeleteCurrent =
+    !accessRevoked && currentPermissionsConfirmed && hasBit(affordances, 'delete')
   // The Manage modal lists ACL rows, and view-ACL = manage-ACL server-side —
   // a caller without the bit gets the API's 403, so the entry must not show.
-  const canManageCurrent = !accessRevoked && hasBit(affordances, 'manage_acl')
+  const canManageCurrent =
+    !accessRevoked && currentPermissionsConfirmed && hasBit(affordances, 'manage_acl')
   const canMoveCurrent = Boolean(
     !accessRevoked &&
     current?.parentResourceId &&
@@ -623,6 +629,9 @@ export function FilesPage({
     if (affordancesError) {
       return `Uploads to ${current.name} are unavailable because permissions could not be verified: ${affordancesError}`
     }
+    if (loadingAffordances) {
+      return `Upload permissions for ${current.name} are still being checked. Try again in a moment.`
+    }
     if (!affordances) {
       return `Upload permissions for ${current.name} are still loading. Try again in a moment.`
     }
@@ -630,7 +639,7 @@ export function FilesPage({
       return `You can’t upload to ${current.name} because you don’t have write permission for this folder.`
     }
     return null
-  }, [affordances, affordancesError, canWriteCurrent, current, currentIsFolder])
+  }, [affordances, affordancesError, canWriteCurrent, current, currentIsFolder, loadingAffordances])
 
   useEffect(() => {
     if (!manageOpen || !current?.resourceId) return
@@ -1985,6 +1994,19 @@ export function FilesPage({
           ) : null}
 
           {accessibleNotice ? <StatusBanner tone="info" text={accessibleNotice} /> : null}
+          {current && loadingAffordances ? (
+            <div role="status">
+              <StatusBanner tone="info" text={`Checking permissions for ${current.name}…`} />
+            </div>
+          ) : null}
+          {current && affordancesError ? (
+            <div role="alert">
+              <StatusBanner
+                tone="error"
+                text={`Could not verify permissions for ${current.name}: ${affordancesError}`}
+              />
+            </div>
+          ) : null}
           {movePermissionNotice ? (
             <div role={movePermissionNotice.pending ? 'status' : 'alert'}>
               <StatusBanner
