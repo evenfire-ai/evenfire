@@ -35,6 +35,22 @@ const pluginReference: ComposerPluginReference = {
   name: 'helper',
   label: 'helper plugin',
 }
+/** A SECOND payload, for the R3-M4 "two batches" case. */
+const secondImage: ComposerImageAttachment = {
+  id: 'input-image-two',
+  name: 'input-two.png',
+  mimeType: 'image/png',
+  dataBase64: 'ZGVm',
+  sizeBytes: 3,
+  previewDataUrl: 'data:image/png;base64,ZGVm',
+}
+const secondReference: ComposerPluginReference = {
+  id: 'plugin-ref-two',
+  type: 'plugin',
+  namespace: 'ns',
+  name: 'helper-two',
+  label: 'helper plugin two',
+}
 const catalog: HostModelsResult = {
   provider: 'zai',
   hostDefault: 'glm-5.3-flash',
@@ -292,6 +308,97 @@ describe('STORY-38 — attachments survive message cancel', () => {
     expect(rendered.result.current.composerImageAttachments).toHaveLength(1)
     expect(keptToastCall(rendered.spies)?.[0]).toBe('Attachments kept')
   })
+
+  it.each([
+    ['first settles first', [0, 1]],
+    ['second settles first', [1, 0]],
+  ])(
+    'keeps BOTH restorations when two cancels settle while another chat is viewed (R3-M4, %s)',
+    async (_name, settlementOrder) => {
+      // Two DISTINCT cancellations for the SAME originating chat settle while
+      // the user views a different chat. Both batches are parked under that
+      // chat's identity: the later one must NOT overwrite the earlier one, or
+      // the first batch's attachments are lost for good.
+      const cancelDeferreds: Array<() => void> = []
+      clerum.rpc.cancelTask.mockImplementation(
+        () =>
+          new Promise<void>(resolve => {
+            cancelDeferreds.push(resolve)
+          })
+      )
+      const rendered = renderController()
+      await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalled())
+      await act(async () => {
+        await loadHostModels(modelTransport, 'agent-x', null)
+      })
+      act(() => rendered.result.current.handleAddComposerImageAttachments([image]))
+      act(() => rendered.result.current.handleAddComposerReferenceAttachments([pluginReference]))
+      await sendAsync(rendered.result, 'task-first')
+      const originChat = rendered.result.current.activeChatId
+
+      // The first task FAILS: its payload stays retained (that is what the
+      // cancel restores) and the chat is free to run a SECOND task.
+      clerum.rpc.getTaskResult.mockResolvedValue({ status: 'failed', error: 'the task failed' })
+      await act(async () => {
+        clerum.emitTaskProgress('task-first', { type: 'closed' })
+      })
+      await waitFor(() => expect(clerum.rpc.getTaskResult).toHaveBeenCalled())
+
+      // The first send auto-created the chat, and the visual send guard reads
+      // the CHAT-scoped model selection: reload it for the second send.
+      await act(async () => {
+        await loadHostModels(modelTransport, 'agent-x', rendered.result.current.activeChatId, {
+          force: true,
+        })
+      })
+
+      // A SECOND send, with its own payload, in the SAME chat.
+      act(() => rendered.result.current.handleAddComposerImageAttachments([secondImage]))
+      act(() => rendered.result.current.handleAddComposerReferenceAttachments([secondReference]))
+      await sendAsync(rendered.result, 'task-second')
+
+      // Move to another chat, then let both cancels settle there.
+      await act(async () => {
+        await rendered.result.current.switchToChat('agent-x', 'another-chat')
+      })
+      let firstCancel!: Promise<void>
+      let secondCancel!: Promise<void>
+      act(() => {
+        firstCancel = rendered.result.current.cancelTask('task-first')
+        secondCancel = rendered.result.current.cancelTask('task-second')
+      })
+      expect(cancelDeferreds).toHaveLength(2)
+      await act(async () => {
+        for (const index of settlementOrder) cancelDeferreds[index]!()
+        await Promise.all([firstCancel, secondCancel])
+      })
+
+      // Nothing landed in the other chat's composer.
+      expect(rendered.result.current.composerImageAttachments).toHaveLength(0)
+      expect(rendered.result.current.composerReferenceAttachments).toHaveLength(0)
+
+      // Returning to the origin chat applies BOTH parked batches: no
+      // attachment was overwritten, whichever order they settled in.
+      await act(async () => {
+        await rendered.result.current.switchToChat('agent-x', originChat!)
+      })
+      expect(rendered.result.current.composerImageAttachments).toHaveLength(2)
+      expect(rendered.result.current.composerReferenceAttachments).toHaveLength(2)
+      expect(rendered.result.current.composerImageAttachments.map(item => item.id).sort()).toEqual(
+        [image.id, secondImage.id].sort()
+      )
+      // Each batch brought its own toast, bound to the same agent + chat.
+      const keptToasts = rendered.spies.pushToast.mock.calls.filter(([message]) =>
+        String(message).startsWith('Attachments kept')
+      )
+      expect(keptToasts).toHaveLength(2)
+      for (const [, , options] of keptToasts) {
+        expect((options as { action?: { label: string } } | undefined)?.action?.label).toBe(
+          'Discard all'
+        )
+      }
+    }
+  )
 
   it.each([
     ['success answer', 'resolve'],

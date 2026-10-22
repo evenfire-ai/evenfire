@@ -719,14 +719,21 @@ export function useAgentChatController({
   // composer state (cleared on session/agent-scope reset, never persisted): a
   // cancel settling while another chat is viewed PRESERVES the kept
   // attachments and applies them when the originating chat is active again.
+  //
+  // R3-M4 — the parked value is a QUEUE of restoration batches, not a single
+  // batch: two cancellations settling for the SAME originating chat while the
+  // user views another chat must not overwrite one another. Each batch keeps
+  // its own attachments, its own caps and its own toast.
   const parkedRestorationsRef = useRef(
     new Map<
       string,
       {
         agentRef: string
         chatId: string | null
-        images: ComposerImageAttachment[]
-        references: ComposerReferenceAttachment[]
+        batches: Array<{
+          images: ComposerImageAttachment[]
+          references: ComposerReferenceAttachment[]
+        }>
       }
     >()
   )
@@ -930,13 +937,19 @@ export function useAgentChatController({
   // R2-M1 — a parked cancel-restoration applies when its originating chat
   // becomes active again (runs after the visibility sync above, so the ref it
   // guards through is current).
+  //
+  // R3-M4 — EVERY parked batch is applied, in the order the cancellations
+  // settled. A single batch would let a later cancellation overwrite an
+  // earlier one's attachments, losing them for good.
   useEffect(() => {
     if (!selectedAgent) return
     const key = `${selectedAgent}::${activeChatId}`
     const parked = parkedRestorationsRef.current.get(key)
     if (!parked) return
     parkedRestorationsRef.current.delete(key)
-    applyKeptAttachments(parked.agentRef, parked.chatId, parked.images, parked.references)
+    for (const batch of parked.batches) {
+      applyKeptAttachments(parked.agentRef, parked.chatId, batch.images, batch.references)
+    }
   }, [activeChatId, selectedAgent, applyKeptAttachments])
 
   // Cleanup activity streams on unmount
@@ -3616,12 +3629,22 @@ export function useAgentChatController({
       if (!stillViewingOrigin) {
         // Preserve: the task snapshot is released by the caller, but the kept
         // payload survives here until its chat is viewed again.
-        parkedRestorationsRef.current.set(`${agentRef}::${originChatId}`, {
-          agentRef,
-          chatId: originChatId,
-          images: preparedImages,
-          references,
-        })
+        //
+        // R3-M4: the batch is APPENDED to the chat's queue. Two
+        // cancellations settling for the same originating chat while another
+        // chat is viewed must both survive — the later one does not replace
+        // the earlier one's attachments.
+        const key = `${agentRef}::${originChatId}`
+        const parked = parkedRestorationsRef.current.get(key)
+        if (parked) {
+          parked.batches.push({ images: preparedImages, references })
+        } else {
+          parkedRestorationsRef.current.set(key, {
+            agentRef,
+            chatId: originChatId,
+            batches: [{ images: preparedImages, references }],
+          })
+        }
         return
       }
       applyKeptAttachments(agentRef, originChatId, preparedImages, references)
