@@ -2324,7 +2324,7 @@ export function App() {
           conversationOrigin: pending.conversationOrigin,
           originNavigation,
           navigationIntentSequence,
-          restoreWorkspace: false,
+          restoreWorkspace: true,
         })
         await acknowledgeSandboxUiDeepLink(pending.link.id)
       }

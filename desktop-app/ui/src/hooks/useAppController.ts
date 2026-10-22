@@ -248,6 +248,10 @@ export function useAppController() {
     teamsData.teams.find(team => team.id === currentTeamId)?.name || auth.me?.teamName || ''
   const currentTeamIdRef = useRef(currentTeamId)
   currentTeamIdRef.current = currentTeamId
+  const accessCatalogScopeRef = useRef<{
+    principal: string | null
+    teamId: string | null
+  } | null>(null)
   const notificationTeamContextQueueRef = useRef<Promise<void>>(Promise.resolve())
   const openAgentConversationFromNotificationRef = useRef<
     (target: AgentConversationNotificationTarget) => Promise<void>
@@ -688,17 +692,31 @@ export function useAppController() {
 
   useEffect(() => {
     if (!auth.isAuthenticated) return
-    if (agentsData.accessCatalog && nav.selectedAgent) {
-      if (
-        !agentsData.agentNames.includes(nav.selectedAgent) ||
-        isHostAccessBlocked(nav.selectedAgent)
-      ) {
-        nav.setSelectedAgent(null)
-      }
+    const catalog = agentsData.accessCatalog
+    if (!catalog) return
+    const previousScope = accessCatalogScopeRef.current
+    accessCatalogScopeRef.current = {
+      principal: authenticatedPrincipalIdentity,
+      teamId: catalog.teamId ?? null,
+    }
+    if (!nav.selectedAgent) return
+    if (isHostAccessBlocked(nav.selectedAgent)) {
+      nav.setSelectedAgent(null)
+      return
+    }
+    // Team catalogs are scoped data. A same-principal team switch must retain
+    // the workspace's agent selection while its data revalidates in the new
+    // scope; a later refresh within that team still applies revocations.
+    const changedTeamForSamePrincipal =
+      previousScope?.principal === authenticatedPrincipalIdentity &&
+      previousScope.teamId !== (catalog.teamId ?? null)
+    if (!changedTeamForSamePrincipal && !agentsData.agentNames.includes(nav.selectedAgent)) {
+      nav.setSelectedAgent(null)
     }
   }, [
     agentsData.accessCatalog,
     agentsData.agentNames,
+    authenticatedPrincipalIdentity,
     auth.isAuthenticated,
     nav.selectedAgent,
     nav.setSelectedAgent,

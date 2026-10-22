@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
 import { type ReactNode, useEffect, useReducer, useRef, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { buildSandboxUiDeepLink, parseSandboxUiDeepLink } from '@clerum/desktop-app-links'
 import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '@clerum/desktop-app-links'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
@@ -36,6 +39,13 @@ import {
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import type { DesktopCommandId } from '../../../src/desktopCommands'
 import { GfsResourceDeepLinkQueue } from '../../../src/gfsResourceDeepLinkQueue'
+import { SandboxUiDeepLinkQueue } from '../../../src/sandboxUiDeepLinkQueue'
+import type { AccessCatalog } from '../../../src/types'
+import {
+  HARNESS_ME,
+  installAppControllerClerum,
+} from '../hooks/domain/__tests__/__fixtures__/appControllerHarness'
+import { desktopQueryKeys } from '../hooks/domain/queryKeys'
 
 // The universal tab store lives inside the controller; the mock reproduces that
 // contract — `navItem` is DERIVED from the store, the store is reactive, and nav
@@ -2696,6 +2706,175 @@ describe('App deep-link orchestration', () => {
     })
     expect(currentController.workspaceTabs).toEqual(originWorkspace)
     expect(currentController.selectedAgent).toBe('alpha')
+  })
+
+  it('restores a team-A-only selection after a produced unavailable app link rolls back', async () => {
+    const existingBridge = window.clerum
+    const { clerum } = installAppControllerClerum({
+      me: { teamId: 'team-a', teamName: 'Team A' },
+      teamDirectory: { items: [], currentTeamId: 'team-a' },
+    })
+    let activeTeamId = 'team-a'
+    const catalogFor = (teamId: string, agentName: string): AccessCatalog => ({
+      userId: HARNESS_ME.id,
+      teamId,
+      userContextIds: [],
+      userAgentNames: [],
+      teamContextIds: [],
+      teamAgentNames: [agentName],
+      contextIds: [],
+      agentNames: [agentName],
+      mcpServersByAgent: {},
+      agentContextByName: { [agentName]: null },
+      agentProviderByName: { [agentName]: null },
+      agentDisplayByName: { [agentName]: agentName },
+    })
+    const switchTeam = vi.fn(async (teamId: string) => {
+      activeTeamId = teamId
+      return {
+        authenticated: true,
+        me: { ...HARNESS_ME, teamId, teamName: teamId === 'team-a' ? 'Team A' : 'Team B' },
+      }
+    })
+    const refreshCatalog = vi.fn(async () =>
+      activeTeamId === 'team-a'
+        ? catalogFor('team-a', 'team-a-only-agent')
+        : catalogFor('team-b', 'team-b-only-agent')
+    )
+    Object.assign(clerum.team, { switch: switchTeam })
+    Object.assign(clerum.access, { refreshCatalog })
+
+    let resolveApps!: (value: { apps: [] }) => void
+    let targetAppsLoading = false
+    let targetAppsCalls = 0
+    const pendingAppsResult = () =>
+      new Promise<{ apps: [] }>(resolve => {
+        resolveApps = resolve
+      })
+    let targetAppsResult = pendingAppsResult()
+    listApps.mockImplementation(async () => {
+      if (activeTeamId !== 'team-b') return { apps: [] }
+      targetAppsCalls += 1
+      targetAppsLoading = targetAppsCalls >= 2
+      return targetAppsResult
+    })
+    const queue = new SandboxUiDeepLinkQueue()
+    acknowledgeDeepLink.mockImplementation(async (id: number) => queue.acknowledge(id))
+    const appBridge = existingBridge
+    Object.assign(clerum, {
+      shortcuts: appBridge.shortcuts,
+      app: appBridge.app,
+      gfs: appBridge.gfs,
+      sandboxUi: {
+        ...appBridge.sandboxUi,
+        listPendingDeepLinks: vi.fn(async () => ({ links: [] })),
+        onDeepLink: vi.fn((callback: (link: SandboxUiDeepLinkEnvelope) => void) => {
+          emitDeepLink = callback
+          return vi.fn()
+        }),
+        acknowledgeDeepLink,
+      },
+    })
+
+    const actual =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    let realController: AppController | null = null
+    const restoredWorkspaceTabs: WorkspaceState[] = []
+    vi.mocked(useAppController).mockImplementation(() => {
+      realController = actual.useAppController()
+      const restoreWorkspaceNavigation = realController.restoreWorkspaceNavigation
+      realController.restoreWorkspaceNavigation = (snapshot, expectedIntentSequence) => {
+        restoredWorkspaceTabs.push(snapshot.workspaceTabs)
+        return restoreWorkspaceNavigation(snapshot, expectedIntentSequence)
+      }
+      return realController
+    })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTaskTrackerProvider>
+          <App />
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => expect(realController?.initialExperienceLoading).toBe(false))
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)?.teamAgentNames
+      ).toEqual(['team-a-only-agent'])
+    )
+    act(() => {
+      realController?.handleSelectChatAgent('team-a-only-agent', {
+        selectLatest: false,
+      })
+    })
+    let originWorkspace = realController?.workspaceTabs
+    expect(realController?.selectedAgent).toBe('team-a-only-agent')
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({ recipeNs: 'ns', recipeName: 'missing', teamId: 'team-b' })
+    )
+    if (!target) throw new Error('The production app-link parser rejected the fixture URL')
+    const producedLink = queue.enqueue(target)
+    act(() => emitDeepLink?.(producedLink))
+    await confirmPendingAppLink()
+    originWorkspace = realController?.workspaceTabs
+    await waitFor(() => expect(targetAppsLoading).toBe(true))
+    await waitFor(() => expect(realController?.currentTeamId).toBe('team-b'))
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)?.teamAgentNames
+      ).toEqual(['team-b-only-agent'])
+    )
+    expect(switchTeam).toHaveBeenCalledWith('team-b')
+    await act(async () => {
+      resolveApps({ apps: [] })
+    })
+
+    await waitFor(() => expect(realController?.currentTeamId).toBe('team-a'))
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(producedLink.id))
+    expect(realController?.workspaceTabs).toEqual(originWorkspace)
+    expect(realController?.selectedAgent).toBe('team-a-only-agent')
+    expect(restoredWorkspaceTabs).toEqual([originWorkspace])
+    expect(switchTeam).toHaveBeenNthCalledWith(1, 'team-b')
+    expect(switchTeam).toHaveBeenNthCalledWith(2, 'team-a')
+
+    targetAppsCalls = 0
+    targetAppsLoading = false
+    targetAppsResult = pendingAppsResult()
+    const explicitTarget = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'missing-after-selection',
+        teamId: 'team-b',
+      })
+    )
+    if (!explicitTarget) throw new Error('The production app-link parser rejected the fixture URL')
+    const explicitLink = queue.enqueue(explicitTarget)
+    act(() => emitDeepLink?.(explicitLink))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(targetAppsLoading).toBe(true))
+    await waitFor(() => expect(realController?.currentTeamId).toBe('team-b'))
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)?.teamAgentNames
+      ).toEqual(['team-b-only-agent'])
+    )
+    act(() => {
+      realController?.handleSelectChatAgent('team-b-only-agent', {
+        selectLatest: false,
+      })
+    })
+    expect(realController?.selectedAgent).toBe('team-b-only-agent')
+    await act(async () => {
+      resolveApps({ apps: [] })
+    })
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(explicitLink.id))
+    expect(realController?.currentTeamId).toBe('team-b')
+    expect(realController?.selectedAgent).toBe('team-b-only-agent')
+    expect(restoredWorkspaceTabs).toEqual([originWorkspace])
   })
 
   it('closes the active embed before switching teams for a failed cross-team handoff', async () => {
