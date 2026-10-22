@@ -53,6 +53,7 @@ const VERIFY_A = `Could not verify access to ${DISPLAY_A}.`
 const REVOKED_A = `Access to ${DISPLAY_A} was revoked.`
 const GONE_A = `${DISPLAY_A} is no longer available.`
 const GONE_B = `${DISPLAY_B} is no longer available.`
+const TEAM_TWO_HOST = 'Team Two Host'
 
 /**
  * A `listSessions` double. Page reads (`limit: 50`) of a denied Host reject
@@ -531,7 +532,7 @@ describe('useAppController held Hosts', () => {
     await holdThroughCatalog(app, catalog, HOST_A)
     await settle()
     expect(app.result.current.heldAgentRefs).toEqual([HOST_A])
-    handle.refreshCatalog.mockImplementation(async () => createCatalog([HOST_B], DISPLAY_B_ONLY))
+    handle.refreshCatalog.mockImplementation(async () => producerCatalog([HOST_B]))
 
     // The catalog drops A, then a second catalog without A lands, then the
     // focus moves away and back: no catalog on screen names A any more.
@@ -565,28 +566,54 @@ describe('useAppController held Hosts', () => {
 
     expect(toastsSeen(commits)).toEqual([GONE_A, VERIFY_A])
 
-    // Team 2 lists the same ref without a name. The name team 1 gave it must
-    // not follow it: in team 2 it is another Host.
+    // Team 2 lists the same ref under its own name. Until team 2's catalog
+    // lands, team 1's name must not follow the ref: in team 2 it is another
+    // Host. Asserted inside that window, because team 2's catalog then
+    // overwrites the name anyway.
     const toastsBeforeSwitch = toastsSeen(commits).length
-    catalog.deny(HOST_A, await ipcGenericForbidden('rpc:listSessions'))
-    handle.refreshCatalog.mockImplementation(async () =>
-      createCatalog([HOST_A, HOST_B], DISPLAY_B_ONLY, 'team-2')
-    )
+    const teamTwoCatalog = deferred<ReturnType<typeof producerCatalog>>()
+    handle.refreshCatalog.mockImplementation(() => teamTwoCatalog.promise)
+    let switching!: Promise<boolean>
     await act(async () => {
-      await app.result.current.handleEnsureTeamContext({ teamId: 'team-2' })
+      switching = app.result.current.handleEnsureTeamContext({ teamId: 'team-2' })
+      await Promise.resolve()
     })
-    await waitFor(() => expect(app.result.current.heldAgentRefs).toEqual([HOST_A]))
-    catalog.allow(HOST_A)
-    // Liveness witness: the switch completed and team 2 holds its own A.
+    await waitFor(() => expect(app.result.current.currentTeamId).toBe('team-2'))
+    // Liveness witness: the session is on team 2 while the cached catalog is
+    // still team 1's, which no longer lists A.
+    expect(cachedCatalog(app.queryClient)).toMatchObject({ teamId: 'team-1', agentNames: [HOST_B] })
+    const transcriptError = await ipcGenericForbidden('rpc:loadSessionMessages')
+    clerum.rpc.loadSessionMessages.mockImplementation(async (hostRef: string) => {
+      if (hostRef === HOST_A) throw transcriptError
+      return { agent: hostRef, chatId: '', turns: [] }
+    })
+    act(() => {
+      app.result.current.handleSelectChatAgent(HOST_A, {
+        chatId: 'team-2-chat',
+        selectLatest: false,
+      })
+    })
+    await waitFor(() => expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true))
+    await waitFor(() => expect(toastsSeen(commits).length).toBe(toastsBeforeSwitch + 1))
+    expect(cachedCatalog(app.queryClient)?.teamId).toBe('team-1')
+    expect(toastsSeen(commits).slice(toastsBeforeSwitch)).toEqual([
+      `Could not verify access to ${HOST_A}.`,
+    ])
+
+    await act(async () => {
+      teamTwoCatalog.resolve(
+        producerCatalog([HOST_A, HOST_B], { ...DISPLAY_BY_NAME, [HOST_A]: TEAM_TWO_HOST }, 'team-2')
+      )
+      await switching
+    })
+    // Liveness witness: the switch completed and team 2 names its own A.
+    await waitFor(() =>
+      expect(app.result.current.heldHosts).toEqual([{ agentRef: HOST_A, label: TEAM_TWO_HOST }])
+    )
     expect(handle.switchTeam).toHaveBeenCalledWith('team-2')
-    expect(cachedCatalog(app.queryClient)).toMatchObject({
-      teamId: 'team-2',
-      agentNames: [HOST_A, HOST_B],
-    })
-    expect(app.result.current.heldHosts).toEqual([{ agentRef: HOST_A, label: HOST_A }])
 
     handle.refreshCatalog.mockImplementation(async () =>
-      createCatalog([HOST_B], DISPLAY_B_ONLY, 'team-2')
+      producerCatalog([HOST_B], DISPLAY_BY_NAME, 'team-2')
     )
     await act(async () => {
       await app.result.current.handleRefreshWorkspaceData(DESKTOP_ROUTES.agents)
@@ -595,16 +622,18 @@ describe('useAppController held Hosts', () => {
     // Liveness witness: team 2's catalog dropped A while A is held.
     expect(cachedCatalog(app.queryClient)).toMatchObject({ teamId: 'team-2', agentNames: [HOST_B] })
     expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true)
+    const verifyReadsBefore = catalog.verifyReads(HOST_A)
 
     act(() => {
       app.result.current.handleSelectChatAgent(HOST_A, { selectLatest: false })
     })
-    await waitFor(() => expect(catalog.verifyReads(HOST_A)).toBe(2))
+    await waitFor(() => expect(catalog.verifyReads(HOST_A)).toBe(verifyReadsBefore + 1))
     await settle()
 
     expect(toastsSeen(commits).slice(toastsBeforeSwitch)).toEqual([
-      `${HOST_A} is no longer available.`,
       `Could not verify access to ${HOST_A}.`,
+      `${TEAM_TWO_HOST} is no longer available.`,
+      `Could not verify access to ${TEAM_TWO_HOST}.`,
     ])
   })
 
@@ -619,7 +648,7 @@ describe('useAppController held Hosts', () => {
       app.result.current.handleSelectChatAgent(HOST_B, { selectLatest: false })
     })
     await waitFor(() => expect(app.result.current.selectedAgent).toBe(HOST_B))
-    const teamTwoCatalog = deferred<ReturnType<typeof createCatalog>>()
+    const teamTwoCatalog = deferred<ReturnType<typeof producerCatalog>>()
     handle.refreshCatalog.mockImplementation(() => teamTwoCatalog.promise)
     let switchDone!: Promise<boolean>
     await act(async () => {
@@ -629,20 +658,21 @@ describe('useAppController held Hosts', () => {
     await waitFor(() => expect(app.result.current.currentTeamId).toBe('team-2'))
     // Liveness witness: the principal is team 2 while the cache still holds
     // team 1's catalog, which names A.
-    expect(cachedCatalog(app.queryClient)?.teamId).toBe('team-1')
+    expect(cachedCatalog(app.queryClient)).toMatchObject({
+      teamId: 'team-1',
+      agentNames: [HOST_A, HOST_B],
+    })
     // Navigation re-runs the catalog effect inside that window.
     act(() => {
       app.result.current.handleNavSelect(DESKTOP_ROUTES.agents)
     })
     await waitFor(() => expect(app.result.current.selectedAgent).toBe(null))
     await settle()
-    await act(async () => {
-      teamTwoCatalog.resolve(createCatalog([HOST_A, HOST_B], DISPLAY_B_ONLY, 'team-2'))
-      await switchDone
-    })
-    await settle()
-    expect(cachedCatalog(app.queryClient)?.teamId).toBe('team-2')
 
+    // A hold inside the window: team 1's catalog, re-read by that effect, must
+    // not have named A. Team 2's catalog overwrites the name once it lands, so
+    // this is the only place the gate shows.
+    const toastsBeforeHold = toastsSeen(commits).length
     const transcriptError = await ipcGenericForbidden('rpc:loadSessionMessages')
     clerum.rpc.loadSessionMessages.mockImplementation(async (hostRef: string) => {
       if (hostRef === HOST_A) throw transcriptError
@@ -655,10 +685,26 @@ describe('useAppController held Hosts', () => {
       })
     })
     await waitFor(() => expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true))
-    await settle()
+    await waitFor(() => expect(toastsSeen(commits).length).toBe(toastsBeforeHold + 1))
+    expect(cachedCatalog(app.queryClient)?.teamId).toBe('team-1')
+    expect(toastsSeen(commits).slice(toastsBeforeHold)).toEqual([
+      `Could not verify access to ${HOST_A}.`,
+    ])
     expect(app.result.current.heldHosts).toEqual([{ agentRef: HOST_A, label: HOST_A }])
+
+    await act(async () => {
+      teamTwoCatalog.resolve(
+        producerCatalog([HOST_A, HOST_B], { ...DISPLAY_BY_NAME, [HOST_A]: TEAM_TWO_HOST }, 'team-2')
+      )
+      await switchDone
+    })
+    // Liveness witness: team 2's catalog landed and names its own A.
+    await waitFor(() =>
+      expect(app.result.current.heldHosts).toEqual([{ agentRef: HOST_A, label: TEAM_TWO_HOST }])
+    )
+    expect(cachedCatalog(app.queryClient)?.teamId).toBe('team-2')
     handle.refreshCatalog.mockImplementation(async () =>
-      createCatalog([HOST_B], DISPLAY_B_ONLY, 'team-2')
+      producerCatalog([HOST_B], DISPLAY_BY_NAME, 'team-2')
     )
     await act(async () => {
       await app.result.current.handleRefreshWorkspaceData(DESKTOP_ROUTES.agents)
@@ -667,7 +713,6 @@ describe('useAppController held Hosts', () => {
     // Liveness witness: team 2's catalog dropped A while A is held.
     expect(cachedCatalog(app.queryClient)).toMatchObject({ teamId: 'team-2', agentNames: [HOST_B] })
     expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true)
-    const toastsBeforeVerify = toastsSeen(commits).length
     const verificationError = await ipcGenericForbidden('rpc:listSessions')
     catalog.setVerify(async () => {
       throw verificationError
@@ -679,8 +724,10 @@ describe('useAppController held Hosts', () => {
     await waitFor(() => expect(catalog.verifyReads(HOST_A)).toBe(1))
     await settle()
 
-    expect(toastsSeen(commits).slice(toastsBeforeVerify)).toEqual([
+    expect(toastsSeen(commits).slice(toastsBeforeHold)).toEqual([
       `Could not verify access to ${HOST_A}.`,
+      `${TEAM_TWO_HOST} is no longer available.`,
+      `Could not verify access to ${TEAM_TWO_HOST}.`,
     ])
   })
 
@@ -707,7 +754,7 @@ describe('useAppController held Hosts', () => {
 
     const renamed = 'Renamed Research Host'
     handle.refreshCatalog.mockImplementation(async () =>
-      createCatalog([HOST_A, HOST_B], { [HOST_A]: renamed, [HOST_B]: DISPLAY_B })
+      producerCatalog([HOST_A, HOST_B], { ...DISPLAY_BY_NAME, [HOST_A]: renamed })
     )
     await act(async () => {
       await app.result.current.handleRefreshWorkspaceData(DESKTOP_ROUTES.agents)
@@ -716,7 +763,7 @@ describe('useAppController held Hosts', () => {
     await waitFor(() =>
       expect(app.result.current.heldHosts).toEqual([{ agentRef: HOST_A, label: renamed }])
     )
-    handle.refreshCatalog.mockImplementation(async () => createCatalog([HOST_B], DISPLAY_B_ONLY))
+    handle.refreshCatalog.mockImplementation(async () => producerCatalog([HOST_B]))
     await act(async () => {
       await app.result.current.handleRefreshWorkspaceData(DESKTOP_ROUTES.agents)
     })
