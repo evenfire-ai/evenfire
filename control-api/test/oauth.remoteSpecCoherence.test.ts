@@ -280,6 +280,16 @@ const INCOHERENT: ReadonlyArray<{
     consentOnly: false,
   },
   {
+    // The server's own scope satisfies the resource-scope rule, so only the audience
+    // violation catches a Graph scope added next to it.
+    label: 'entra-v2 with the Work IQ scope plus a Microsoft Graph GUID scope',
+    oauth: () =>
+      workIqWithScopes([WORKIQ_GUID_SCOPE, '00000003-0000-0000-c000-000000000000/Mail.Read']),
+    remote: workIqRemote,
+    reason: 'scope_audience_mismatch',
+    consentOnly: false,
+  },
+  {
     label: 'entra-v2 with a Microsoft Graph URL scope',
     oauth: () => workIqWithScopes(['https://graph.microsoft.com/x']),
     remote: workIqRemote,
