@@ -1330,7 +1330,71 @@ describe('ChatPage with a held Host on the chat tab', () => {
     expect(getVm().keepFocusedChat).toBe(false)
   })
 
-  it('T-J1-2: a Chat click on a held Host chat opens that chat once access is verified', async () => {
+  it('T-R5L2-1: a revocation after the Host left the catalog names it by its last known name', async () => {
+    const { clerum, handle } = installAppControllerClerum({
+      agentNames: [HOST_A, HOST_B],
+      agentDisplayByName: DISPLAY_BY_NAME,
+    })
+    installCatalog(clerum)
+    const errorByChat = new Map([
+      ['chat-1', await ipcGenericForbidden('rpc:loadSessionMessages')],
+      ['chat-2', await ipcHostAccessRevoked('rpc:loadSessionMessages')],
+    ])
+    const transcripts = new Map<string, ReturnType<typeof deferred<void>>>()
+    let denyTranscript = false
+    clerum.rpc.loadSessionMessages.mockImplementation(
+      async (hostRef: string, _agent: string, chatId: string) => {
+        if (hostRef !== HOST_A || !denyTranscript) return { agent: hostRef, chatId: '', turns: [] }
+        const pending = deferred<void>()
+        transcripts.set(chatId, pending)
+        await pending.promise
+        throw errorByChat.get(chatId)
+      }
+    )
+    const trail: Array<string | null> = []
+    const { getVm, queryClient } = await mountChat(trail)
+    const catalogWithoutA = deferred<void>()
+    handle.refreshCatalog.mockImplementation(async () => {
+      await catalogWithoutA.promise
+      return producerCatalog([HOST_B])
+    })
+
+    denyTranscript = true
+    await openChat(getVm, HOST_A, 'chat-1')
+    await waitFor(() => expect(transcripts.has('chat-1')).toBe(true))
+    await openChat(getVm, HOST_A, 'chat-2')
+    await waitFor(() => expect(transcripts.has('chat-2')).toBe(true))
+    await act(async () => {
+      transcripts.get('chat-1')?.resolve()
+    })
+    await waitFor(() => expect(getVm().isHostAccessBlocked(HOST_A)).toBe(true))
+    await waitFor(() => expect(toastTexts(getVm())).toEqual([VERIFY_A]))
+    act(() => {
+      getVm().handleNavSelect(DESKTOP_ROUTES.apps)
+    })
+    expect(getVm().appsPickerActive).toBe(true)
+
+    await act(async () => {
+      catalogWithoutA.resolve()
+    })
+    await waitFor(() => expect(cachedCatalog(queryClient)?.agentNames).toEqual([HOST_B]))
+    // Liveness witness: the loss is announced first, so the current catalog no
+    // longer names A when the revocation arrives.
+    await waitFor(() => expect(toastTexts(getVm())).toEqual([VERIFY_A, GONE_A]))
+    const revisionAfterLoss = getVm().hostAuthorityRevision
+
+    await act(async () => {
+      transcripts.get('chat-2')?.resolve()
+    })
+    await settle()
+
+    // Liveness witness: the revocation reached the store as a new hold.
+    expect(getVm().hostAuthorityRevision).toBeGreaterThan(revisionAfterLoss)
+    expect(getVm().activeWorkspaceTab?.chat?.agentRef).toBe(HOST_A)
+    expect(toastTexts(getVm())).toEqual([VERIFY_A, GONE_A, REVOKED_A])
+  })
+
+  it('T-J1-2:a Chat click on a held Host chat opens that chat once access is verified', async () => {
     const { clerum, handle } = installAppControllerClerum({ agentNames: [HOST_A, HOST_B] })
     const catalog = installCatalog(clerum)
     catalog.deny(HOST_A, await ipcGenericForbidden('rpc:listSessions'))

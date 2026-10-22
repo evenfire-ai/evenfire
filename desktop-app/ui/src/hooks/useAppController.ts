@@ -332,14 +332,20 @@ export function useAppController() {
       catalog.userId === auth.me?.id && (catalog.teamId ?? '') === principalTeamId,
     [auth.me?.id, principalTeamId]
   )
+  // Last name each catalog of the current principal gave a Host, so a held
+  // Host that left the catalog is still named in its toasts. Cleared with the
+  // holds when the scope changes.
+  const knownHostNamesRef = useRef(new Map<string, string>())
   // Names a held Host in its Retry row and toasts. Only a catalog of the
   // current principal names it, so a hold during a team switch never shows the
-  // previous team's name.
+  // previous team's name; a Host that left that catalog keeps its last name.
   const principalCatalogName = useCallback(
     (catalog: AccessCatalog | null, agentRef: string) =>
       (catalog && isPrincipalCatalog(catalog)
         ? catalog.agentDisplayByName?.[agentRef]
-        : undefined) ?? agentRef,
+        : undefined) ??
+      knownHostNamesRef.current.get(agentRef) ??
+      agentRef,
     [isPrincipalCatalog]
   )
   // Toasts shown after an await read the catalog on screen then, not the one
@@ -391,11 +397,6 @@ export function useAppController() {
     (agentRef: string) => hostAuthority.getEpoch(agentRef),
     [hostAuthority]
   )
-  // Last name each catalog of the current principal gave a Host, so a held
-  // Host that left the catalog is still named in its verification toast. Read
-  // when the toast is shown, so a verification pending across a rename uses the
-  // new name. Cleared with the holds when the scope changes.
-  const knownHostNamesRef = useRef(new Map<string, string>())
   useEffect(() => {
     hostAuthority.reset()
     knownHostNamesRef.current.clear()
@@ -457,7 +458,9 @@ export function useAppController() {
           status: httpErrorStatus(error) ?? null,
         })
         if (authorityScopeRef.current === scope) {
-          const name = knownHostNamesRef.current.get(agentRef) ?? agentRef
+          // Read after the await, so a verification pending across a rename
+          // uses the new name.
+          const name = principalCatalogName(liveAccessCatalogRef.current, agentRef)
           pushToast(`Could not verify access to ${name}.`, 'error')
         }
         return false
@@ -470,7 +473,7 @@ export function useAppController() {
       setHostAuthorityRevision(revision => revision + 1)
       return true
     },
-    [hostAuthority, invalidateSessionCatalog, pushToast]
+    [hostAuthority, invalidateSessionCatalog, principalCatalogName, pushToast]
   )
   const chat = useAgentChatController({
     selectedAgent: nav.selectedAgent,
