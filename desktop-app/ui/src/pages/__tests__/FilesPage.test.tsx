@@ -3311,15 +3311,19 @@ describe('FilesPage', () => {
         }),
       ])
     )
-    const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3, 4]).buffer }))
     const pushToast = vi.fn()
     const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
     const appendedNames: string[] = []
     const zipStream = {
       start: vi.fn(async () => ({ jobId: 'job-1' })),
-      append: vi.fn(async (_jobId: string, name: string) => {
-        appendedNames.push(name)
-      }),
+      // The renderer hands over a NAME and a URI: the main process fetches
+      // the payload and writes it into the archive (R1-H2).
+      appendFromUri: vi.fn(
+        async (_jobId: string, name: string, _uri: string, _options?: { maxBytes?: number }) => {
+          appendedNames.push(name)
+          return { name, bytes: 4 }
+        }
+      ),
       finish: vi.fn(async (_jobId: string, suggestedName: string) => ({
         saved: true,
         filePath: `/saved/${suggestedName}`,
@@ -3329,7 +3333,7 @@ describe('FilesPage', () => {
     }
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { listChildren, download, zipStream } },
+      value: { gfs: { listChildren, zipStream } },
     })
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
@@ -3374,10 +3378,17 @@ describe('FilesPage', () => {
     expect(listChildren).toHaveBeenCalledWith('folder-1', 'main', undefined, {
       signal: expect.any(AbortSignal),
     })
-    expect(download).toHaveBeenCalledWith('gfs://main/doc-1', {
-      maxBytes: 512 * 1024 * 1024,
-      signal: expect.any(AbortSignal),
-    })
+    // The payload never reaches the renderer: the walk hands the main
+    // process a name and a URI, and the main process does the transfer.
+    expect(zipStream.appendFromUri).toHaveBeenCalledWith(
+      'job-1',
+      'Assets/plan.md',
+      'gfs://main/doc-1',
+      {
+        maxBytes: 512 * 1024 * 1024,
+        signal: expect.any(AbortSignal),
+      }
+    )
     // The streamed save path: the entry reached the main-process writer and
     // finish saved the archive — no renderer anchor download for zips.
     expect(appendedNames).toEqual(['Assets/plan.md'])
@@ -3403,12 +3414,12 @@ describe('FilesPage', () => {
         }),
       ])
     )
-    const download = vi.fn(async () => ({ bytes: new ArrayBuffer(0) }))
+    const appendFromUri = vi.fn(async () => ({ name: 'x', bytes: 0 }))
     const pushToast = vi.fn()
     const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { listChildren, download } },
+      value: { gfs: { listChildren, zipStream: { appendFromUri } } },
     })
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
@@ -3444,7 +3455,7 @@ describe('FilesPage', () => {
     })
     expect(screen.queryByTestId('gfs-zip-progress')).toBeNull()
 
-    expect(download).not.toHaveBeenCalled()
+    expect(appendFromUri).not.toHaveBeenCalled()
     expect(click).not.toHaveBeenCalled()
     expect(pushToast).toHaveBeenCalledWith(
       expect.stringContaining('exceeds the 512 MiB folder-zip limit'),
@@ -3455,12 +3466,12 @@ describe('FilesPage', () => {
   it('tells the user an empty folder has nothing to zip instead of saving an empty archive', async () => {
     vi.useFakeTimers()
     const listChildren = vi.fn(async () => ({ items: [], nextCursor: null }))
-    const download = vi.fn(async () => ({ bytes: new ArrayBuffer(0) }))
+    const appendFromUri = vi.fn(async () => ({ name: 'x', bytes: 0 }))
     const pushToast = vi.fn()
     const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { listChildren, download } },
+      value: { gfs: { listChildren, zipStream: { appendFromUri } } },
     })
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
@@ -3499,7 +3510,7 @@ describe('FilesPage', () => {
     expect(listChildren).toHaveBeenCalledWith('folder-1', 'main', undefined, {
       signal: expect.any(AbortSignal),
     })
-    expect(download).not.toHaveBeenCalled()
+    expect(appendFromUri).not.toHaveBeenCalled()
     expect(click).not.toHaveBeenCalled()
     expect(pushToast).toHaveBeenCalledWith('"Empty" has no downloadable files.', 'info')
   })
@@ -3514,18 +3525,17 @@ describe('FilesPage', () => {
         }),
       ])
     )
-    const download = vi.fn(async () => ({ bytes: new Uint8Array([1, 2, 3, 4]).buffer }))
     const pushToast = vi.fn()
     const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
     const zipStream = {
       start: vi.fn(async () => ({ jobId: 'job-1' })),
-      append: vi.fn(async () => undefined),
+      appendFromUri: vi.fn(async () => ({ name: 'x', bytes: 4 })),
       finish: vi.fn(async () => ({ saved: true, filePath: '/saved/x.zip', entryCount: 1 })),
       abort: vi.fn(async () => ({ aborted: true })),
     }
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { listChildren, download, zipStream } },
+      value: { gfs: { listChildren, zipStream } },
     })
     const folderRow = {
       resourceId: 'folder-1',

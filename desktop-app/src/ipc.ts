@@ -19,7 +19,13 @@ import {
 } from './chatStoreBinding.js'
 import { GFS_DOWNLOAD_MAX_BYTES_CEILING } from './gfs/downloadLimits.js'
 import { GFS_PREVIEW_MAX_BYTES } from './gfs/previewLimits.js'
-import { abortZipJob, appendZipEntry, finishZipJob, startZipJob } from './gfs/zipStream.js'
+import {
+  abortZipJob,
+  appendZipEntry,
+  appendZipEntryStreaming,
+  finishZipJob,
+  startZipJob,
+} from './gfs/zipStream.js'
 import { assertSafeRouteSegment } from './pathSafety.js'
 import {
   PLUGIN_SDK_CAPABILITIES_CHANNEL,
@@ -255,6 +261,16 @@ export function assertTrustedSender(event: IpcMainInvokeEvent): void {
   if (!isFileSender && !isDevSender) {
     throw new Error('Untrusted IPC sender')
   }
+}
+
+/**
+ * The identity of the window that owns a ZIP job (R3-M2). A job is opened by
+ * one window and may only be driven by that window: without this, any renderer
+ * that got hold of a job id could append to, finish or abort another
+ * window's archive.
+ */
+function zipJobOwnerId(event: IpcMainInvokeEvent): string {
+  return String(event.sender?.id ?? 'unknown')
 }
 
 type DesktopNotificationActionInput = {
@@ -579,12 +595,23 @@ export function registerIpcHandlers(service: AppService): void {
     }
   )
   // Streamed, file-backed folder-zip assembly (R1-H2): entries append to a
-  // main-process temp file, finish saves through a native dialog. All four
-  // channels trust-check; append validates the entry name before any header is
-  // written (R1-M2 defense in depth).
+  // main-process temp file, finish saves through a native dialog. All five
+  // channels trust-check.
+  //
+  // The MAIN process owns the guarantees here (the renderer is untrusted):
+  //   - every entry name is validated as a canonical relative path BEFORE a
+  //     byte of entry data is written (R3-M1);
+  //   - the aggregate byte/entry budget, the ZIP32 bounds, the job's owner and
+  //     the concurrency bounds are enforced here, not only in the renderer
+  //     (R3-M2);
+  //   - the job owns its handle and its temp file until the save completes
+  //     (R3-M3).
+  //
+  // The job is bound to the window that opened it: another window cannot
+  // append to, finish or abort it.
   ipcMain.handle('gfs:zipStream:start', async event => {
     assertTrustedSender(event)
-    return { jobId: await startZipJob() }
+    return { jobId: await startZipJob(zipJobOwnerId(event)) }
   })
   ipcMain.handle(
     'gfs:zipStream:append',
@@ -598,20 +625,66 @@ export function registerIpcHandlers(service: AppService): void {
       if (payload.bytes.byteLength > GFS_DOWNLOAD_MAX_BYTES_CEILING) {
         throw new Error('zip entry exceeds the allowed maximum')
       }
-      const writtenName = await appendZipEntry(sanitizeString(payload.jobId), name, payload.bytes)
+      const writtenName = await appendZipEntry(
+        sanitizeString(payload.jobId),
+        zipJobOwnerId(event),
+        name,
+        payload.bytes
+      )
       return { name: writtenName }
+    }
+  )
+  // The folder-zip transfer (R1-H2): the main process fetches the resource and
+  // writes it straight into the temp file, chunk by chunk. The payload never
+  // crosses the IPC boundary and never materializes as one buffer in either
+  // process — the renderer only learns the entry's name and size.
+  ipcMain.handle(
+    'gfs:zipStream:appendFromUri',
+    async (
+      event,
+      payload: { jobId: string; name: string; uri: string; maxBytes: number; requestId?: string }
+    ) => {
+      assertTrustedSender(event)
+      const name = sanitizeString(payload?.name)
+      if (!name) throw new Error('zipStream appendFromUri requires an entry name')
+      const uri = sanitizeString(payload?.uri)
+      if (!uri) throw new Error('zipStream appendFromUri requires a resource URI')
+      const maxBytes = sanitizeOptionalPositiveInteger(payload?.maxBytes, 'maxBytes')
+      if (maxBytes === undefined) {
+        throw new Error('zipStream appendFromUri requires a positive maxBytes')
+      }
+      if (maxBytes > GFS_DOWNLOAD_MAX_BYTES_CEILING) {
+        throw new Error('zip entry exceeds the allowed maximum')
+      }
+      const requestId = payload?.requestId ? sanitizeString(payload.requestId) : undefined
+      const result = await runWithGfsAbortSignal(requestId, signal =>
+        appendZipEntryStreaming(
+          sanitizeString(payload.jobId),
+          zipJobOwnerId(event),
+          name,
+          async sink => {
+            await service.downloadGfsUriInto(uri, maxBytes, signal, chunk => sink.write(chunk))
+          },
+          {}
+        )
+      )
+      return { name: result.name, bytes: result.bytes }
     }
   )
   ipcMain.handle(
     'gfs:zipStream:finish',
     async (event, payload: { jobId: string; suggestedName: string }) => {
       assertTrustedSender(event)
-      return finishZipJob(sanitizeString(payload.jobId), sanitizeString(payload.suggestedName))
+      return finishZipJob(
+        sanitizeString(payload.jobId),
+        zipJobOwnerId(event),
+        sanitizeString(payload.suggestedName)
+      )
     }
   )
   ipcMain.handle('gfs:zipStream:abort', async (event, payload: { jobId: string }) => {
     assertTrustedSender(event)
-    await abortZipJob(sanitizeString(payload.jobId))
+    await abortZipJob(sanitizeString(payload.jobId), zipJobOwnerId(event))
     return { aborted: true }
   })
   ipcMain.handle(

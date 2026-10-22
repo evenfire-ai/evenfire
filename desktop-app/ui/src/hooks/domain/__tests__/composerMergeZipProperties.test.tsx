@@ -4,6 +4,12 @@
  * normalization rules the cancel-restore and folder-zip paths rely on. These
  * complement the example tests: the examples pin behavior at the boundaries,
  * the properties pin the invariants for arbitrary inputs.
+ *
+ * The property runs are deliberately LARGE: the merge and allocation rules
+ * interact (caps, dedupe, ordering, case folding), and a small sample proves
+ * little about a rule that only misbehaves in a rare combination. Every run
+ * starts from a VALID composer state, so the invariants are provable against
+ * states production can actually hold.
  */
 import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
@@ -11,11 +17,19 @@ import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
 import { COMPOSER_MAX_IMAGE_ATTACHMENTS } from '@constants/attachments'
 import { GFS_ZIP_MAX_SEGMENT_NAME_BYTES, sanitizeZipSegment } from '@lib/gfsFolderZip'
 import type { ComposerImageAttachment, ComposerReferenceAttachment } from '@/uiTypes'
-import { entryNameFitsZipFields, finalizeEntryName } from '../../../../../src/gfs/zipEntryName'
+import { ZipEntryNameAllocator, entryNameFitsZipFields } from '../../../../../src/gfs/zipEntryName'
 import {
   mergeComposerImageAttachments,
   mergeComposerReferenceAttachments,
 } from '../useComposerAttachments'
+
+/**
+ * Tens of thousands of cases per property. The properties are small (arrays
+ * of short strings), so this costs seconds, not minutes — and it is the
+ * difference between "the invariant held for 80 samples" and "the invariant
+ * held for 25 000".
+ */
+const PROPERTY_RUNS = 25_000
 
 const imageArbitrary = fc
   .record({
@@ -114,7 +128,7 @@ describe('composer merge invariants (R1-M6)', () => {
           expect(outcome.dropped).toBeLessThanOrEqual(notHeldIncoming.length)
         }
       ),
-      { numRuns: 80 }
+      { numRuns: PROPERTY_RUNS }
     )
   })
 
@@ -154,7 +168,7 @@ describe('composer merge invariants (R1-M6)', () => {
           )
         }
       ),
-      { numRuns: 60 }
+      { numRuns: PROPERTY_RUNS }
     )
   })
 
@@ -180,7 +194,7 @@ describe('composer merge invariants (R1-M6)', () => {
           expect(second.duplicates + second.dropped).toBe(incoming.length)
         }
       ),
-      { numRuns: 60 }
+      { numRuns: PROPERTY_RUNS }
     )
   })
 
@@ -203,7 +217,7 @@ describe('composer merge invariants (R1-M6)', () => {
           expect(outcome.next.slice(0, existing.length)).toEqual(existing)
         }
       ),
-      { numRuns: 80 }
+      { numRuns: PROPERTY_RUNS }
     )
   })
 
@@ -226,7 +240,7 @@ describe('composer merge invariants (R1-M6)', () => {
           expect(second.duplicates + second.dropped).toBe(incoming.length)
         }
       ),
-      { numRuns: 60 }
+      { numRuns: PROPERTY_RUNS }
     )
   })
 })
@@ -243,22 +257,25 @@ describe('zip path normalization invariants (R1-M6)', () => {
         )
         expect(segment).not.toBe('.')
         expect(segment).not.toBe('..')
+        // A Windows DEVICE name is not a name: `CON` is the console device.
+        expect(/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i.test(segment)).toBe(false)
       }),
-      { numRuns: 200 }
+      { numRuns: PROPERTY_RUNS }
     )
   })
 
-  it('finalized entry names never collide case-folded and always fit the 16-bit fields', () => {
+  it('allocated entry names never collide case-folded and always fit the 16-bit fields', () => {
     fc.assert(
       fc.property(
         fc.array(fc.string({ minLength: 1, maxLength: 24 }), { maxLength: 30 }),
         names => {
-          const usedFolded = new Set<string>()
+          const allocator = new ZipEntryNameAllocator()
           const written: string[] = []
           for (const name of names) {
-            const finalized = finalizeEntryName(name, usedFolded)
-            usedFolded.add(finalized.folded)
-            written.push(finalized.name)
+            const plan = allocator.plan(name)
+            if (!plan.fits) continue
+            allocator.commit(plan)
+            written.push(plan.name)
           }
           const folded = new Set(written.map(name => name.toLowerCase()))
           expect(folded.size).toBe(written.length)
@@ -266,7 +283,66 @@ describe('zip path normalization invariants (R1-M6)', () => {
           for (const name of written) expect(entryNameFitsZipFields(name)).toBe(true)
         }
       ),
-      { numRuns: 60 }
+      { numRuns: PROPERTY_RUNS }
+    )
+  })
+
+  it('never lets a FILE and a DIRECTORY share a path (R3-M5)', () => {
+    // The invariant that keeps an archive valid on a case-insensitive
+    // extractor: no committed file may sit at a path another committed file
+    // implies as a directory.
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.array(fc.string({ minLength: 1, maxLength: 12 }), { minLength: 1, maxLength: 4 }),
+          { maxLength: 20 }
+        ),
+        paths => {
+          const allocator = new ZipEntryNameAllocator()
+          const committed: string[] = []
+          for (const segments of paths) {
+            const plan = allocator.plan(segments.join('/'))
+            if (!plan.fits) continue
+            allocator.commit(plan)
+            committed.push(plan.name)
+          }
+          const files = new Set(committed.map(name => name.toLowerCase()))
+          const directories = new Set<string>()
+          for (const name of committed) {
+            const parts = name.split('/')
+            parts.pop()
+            let current = ''
+            for (const part of parts) {
+              current = current === '' ? part : `${current}/${part}`
+              directories.add(current.toLowerCase())
+            }
+          }
+          for (const file of files) {
+            expect(directories.has(file)).toBe(false)
+          }
+        }
+      ),
+      { numRuns: PROPERTY_RUNS }
+    )
+  })
+
+  it('allocates deterministically: the same inputs give the same names', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.string({ minLength: 1, maxLength: 16 }), { maxLength: 20 }),
+        names => {
+          const allocate = () => {
+            const allocator = new ZipEntryNameAllocator()
+            return names.map(name => {
+              const plan = allocator.plan(name)
+              if (plan.fits) allocator.commit(plan)
+              return plan.name
+            })
+          }
+          expect(allocate()).toEqual(allocate())
+        }
+      ),
+      { numRuns: PROPERTY_RUNS }
     )
   })
 })

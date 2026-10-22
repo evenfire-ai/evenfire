@@ -100,6 +100,18 @@ export interface GfsTransport {
     token: string,
     opts?: { maxBytes?: number; signal?: AbortSignal }
   ): Promise<ArrayBuffer>
+  /**
+   * Streamed binary fetch for downloads (folder-zip). `onChunk` receives the
+   * body one chunk at a time, so a large payload never materializes as one
+   * buffer (R1-H2). OPTIONAL: a transport that does not implement it falls
+   * back to `fetchBytes`, which keeps the payload whole but still bounded.
+   */
+  fetchByteStream?(
+    url: string,
+    token: string,
+    opts: { maxBytes: number; signal?: AbortSignal },
+    onChunk: (chunk: Uint8Array) => Promise<void>
+  ): Promise<number>
 }
 
 /**
@@ -468,6 +480,42 @@ export class GfsClient {
             })
           : await this.transport.fetchBytes(proxyUrl, token)
       return { resource, bytes }
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
+  }
+
+  /**
+   * Resolve then STREAM the resource bytes through the brokered proxy into
+   * `onChunk` (R1-H2). The payload never materializes as one buffer: the
+   * caller writes each chunk straight into the ZIP temp file, so the peak
+   * memory is one chunk regardless of the file's size.
+   *
+   * `opts.maxBytes` is a hard ceiling enforced producer-side, exactly as in
+   * `download`: an over-budget body is refused mid-stream, before the excess
+   * is written.
+   */
+  async downloadInto(
+    uri: string,
+    token: string,
+    opts: { maxBytes: number; signal?: AbortSignal },
+    onChunk: (chunk: Uint8Array) => Promise<void>
+  ): Promise<{ resource: ResolvedGfsResource; bytes: number }> {
+    const resource = await this.resolveUri(uri, token, opts.signal)
+    const proxyUrl = joinUrl(
+      this.transport.baseUrl,
+      `/api/v1/me/gfs/proxy/${resource.resourceId}?drive=${encodeURIComponent(resource.drive)}`
+    )
+    try {
+      if (this.transport.fetchByteStream) {
+        const bytes = await this.transport.fetchByteStream(proxyUrl, token, opts, onChunk)
+        return { resource, bytes }
+      }
+      // Fallback for a transport without a streaming fetch: the payload is
+      // whole, but the ceiling is still enforced before it is handed over.
+      const buffer = await this.transport.fetchBytes(proxyUrl, token, opts)
+      await onChunk(new Uint8Array(buffer))
+      return { resource, bytes: buffer.byteLength }
     } catch (error) {
       throw surfaceGfsGrantError(error)
     }

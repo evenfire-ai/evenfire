@@ -185,6 +185,21 @@ const clerum = Object.freeze({
       start: () => ipcRenderer.invoke('gfs:zipStream:start'),
       append: (jobId: string, name: string, bytes: ArrayBuffer) =>
         ipcRenderer.invoke('gfs:zipStream:append', { jobId, name, bytes }),
+      // The folder-zip transfer (R1-H2): the MAIN process fetches the
+      // resource and writes it into the archive chunk by chunk, so the payload
+      // never crosses this boundary. The walk's stop signal rides along as a
+      // requestId, exactly like the other cancellable GFS calls.
+      appendFromUri: (
+        jobId: string,
+        name: string,
+        uri: string,
+        options?: { maxBytes?: number; signal?: AbortSignal }
+      ) =>
+        cancellableGfsInvoke(
+          'gfs:zipStream:appendFromUri',
+          { jobId, name, uri, maxBytes: options?.maxBytes },
+          options?.signal
+        ),
       finish: (jobId: string, suggestedName: string) =>
         ipcRenderer.invoke('gfs:zipStream:finish', { jobId, suggestedName }),
       abort: (jobId: string) => ipcRenderer.invoke('gfs:zipStream:abort', { jobId }),

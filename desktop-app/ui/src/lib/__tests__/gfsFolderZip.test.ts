@@ -52,16 +52,28 @@ function folder(
   }
 }
 
+/**
+ * A producer for one resource: it answers with the entry's byte count, or
+ * throws the way the real producer would (a 403, a 413, a 500).
+ */
+type ZipProducer = (uri: string, options?: { maxBytes?: number }) => Promise<{ bytes: number }>
+
 export interface RecordedZipStream {
-  appended: Array<{ name: string; bytes: ArrayBuffer }>
+  appended: Array<{ name: string; uri: string; bytes: number }>
   finishedWith: Array<{ suggestedName: string }>
   abortedJobs: string[]
   deps: import('../gfsFolderZip').GfsZipStreamDeps
 }
 
-/** File-backed stream fake: records appends, finishes "saved" to a path. */
-function recordedZipStream(options: { saved?: boolean } = {}): RecordedZipStream {
-  const appended: Array<{ name: string; bytes: ArrayBuffer }> = []
+/**
+ * File-backed stream fake: records appends, finishes "saved" to a path. The
+ * archive is assembled in the MAIN process in production; the renderer only
+ * hands over a name and a URI, so the fake records the same two things.
+ */
+function recordedZipStream(
+  options: { saved?: boolean; producers?: Record<string, ZipProducer> } = {}
+): RecordedZipStream {
+  const appended: Array<{ name: string; uri: string; bytes: number }> = []
   const finishedWith: Array<{ suggestedName: string }> = []
   const abortedJobs: string[] = []
   let jobCounter = 0
@@ -71,10 +83,20 @@ function recordedZipStream(options: { saved?: boolean } = {}): RecordedZipStream
     abortedJobs,
     deps: {
       start: vi.fn(async () => ({ jobId: `job-${++jobCounter}` })),
-      append: vi.fn(async (jobId: string, name: string, bytes: ArrayBuffer) => {
-        void jobId
-        appended.push({ name, bytes })
-      }),
+      appendFromUri: vi.fn(
+        async (
+          jobId: string,
+          name: string,
+          uri: string,
+          requestOptions?: { maxBytes?: number }
+        ) => {
+          void jobId
+          const producer = options.producers?.[uri]
+          const result = producer ? await producer(uri, requestOptions) : { bytes: uri.length }
+          appended.push({ name, uri, bytes: result.bytes })
+          return { name, bytes: result.bytes }
+        }
+      ),
       finish: vi.fn(async (jobId: string, suggestedName: string) => {
         void jobId
         finishedWith.push({ suggestedName })
@@ -97,13 +119,10 @@ function streamEntryNames(stream: RecordedZipStream): string[] {
 
 function depsFor(
   pages: Record<string, Array<{ items: GfsZipChildItem[]; nextCursor: string | null }>>,
-  downloads: Record<
-    string,
-    (uri: string, options?: { maxBytes?: number }) => Promise<{ bytes: ArrayBuffer }>
-  > = {},
+  producers: Record<string, ZipProducer> = {},
   streamOptions: { saved?: boolean } = {}
 ): GfsFolderZipDeps & { zipStreamRecord: RecordedZipStream } {
-  const stream = recordedZipStream(streamOptions)
+  const stream = recordedZipStream({ ...streamOptions, producers })
   return {
     listChildren: vi.fn(async (resourceId: string, _drive: string, cursor?: string) => {
       const pageList = pages[resourceId]
@@ -113,11 +132,6 @@ function depsFor(
       if (!page) throw new Error(`no page ${index} for ${resourceId}`)
       return { items: page.items, nextCursor: page.nextCursor }
     }),
-    download: vi.fn(async (uri: string, options?: { maxBytes?: number }) => {
-      const produce = downloads[uri]
-      if (produce) return produce(uri, options)
-      return { bytes: bytesOf(uri) }
-    }),
     zipStream: stream.deps,
     // Spacing itself has a dedicated manual-clock test below the walk; here it
     // is a no-op so the orchestration tests run instantly.
@@ -125,10 +139,6 @@ function depsFor(
     sleep: async () => undefined,
     zipStreamRecord: stream,
   }
-}
-
-function bytesOf(text: string): ArrayBuffer {
-  return new TextEncoder().encode(text).buffer as ArrayBuffer
 }
 
 describe('createGfsReadThrottle', () => {
@@ -203,6 +213,79 @@ describe('createGfsFolderZip', () => {
     ).toEqual([1, 2, 3])
   })
 
+  it('never carries payload bytes through the renderer (R1-H2)', async () => {
+    // The renderer hands the main process a NAME and a URI; the payload is
+    // fetched and written in main, chunk by chunk. The walk therefore never
+    // asks the renderer for bytes at all.
+    const deps = depsFor({
+      root: [{ items: [folder({ resourceId: 'big', name: 'big.bin' })], nextCursor: null }],
+    })
+    await createGfsFolderZip({ resourceId: 'root', drive: 'main', name: 'Docs' }, { deps })
+
+    const append = deps.zipStreamRecord.deps.appendFromUri as ReturnType<typeof vi.fn>
+    expect(append).toHaveBeenCalledTimes(1)
+    const [jobId, name, uri, options] = append.mock.calls[0] as [
+      string,
+      string,
+      string,
+      { maxBytes?: number; signal?: AbortSignal } | undefined,
+    ]
+    expect(name).toBe('Docs/big.bin')
+    expect(uri).toBe('gfs://main/big')
+    expect(options?.maxBytes).toBeGreaterThan(0)
+    // No ArrayBuffer anywhere in the call: the payload stays in main.
+    expect(JSON.stringify(append.mock.calls)).not.toContain('ArrayBuffer')
+    expect(jobId).toMatch(/^job-/)
+  })
+
+  it('keeps the renderer free of payload bytes at the near-limit ceiling (R1-H2)', async () => {
+    // The near-limit memory claim: even at the full ceiling the renderer only
+    // hands over a NAME and a URI. The producer's byte count is the biggest
+    // number the renderer ever sees, and it is a COUNT, not a payload.
+    const seenBounds: Array<number | undefined> = []
+    const deps = depsFor(
+      {
+        root: [
+          {
+            items: [
+              folder({ resourceId: 'big', name: 'big.bin', bytes: undefined as unknown as number }),
+            ],
+            nextCursor: null,
+          },
+        ],
+      },
+      {
+        'gfs://main/big': async (_uri: string, options?: { maxBytes?: number }) => {
+          seenBounds.push(options?.maxBytes)
+          return { bytes: 64 * 1024 * 1024 }
+        },
+      }
+    )
+
+    const result = await createGfsFolderZip(
+      { resourceId: 'root', drive: 'main', name: 'Big' },
+      { deps }
+    )
+
+    // The transfer was bounded by the WHOLE remaining budget, and the walk
+    // finished with the archive saved.
+    expect(seenBounds).toEqual([512 * 1024 * 1024])
+    expect(result.fileCount).toBe(1)
+    expect(result.saved).toBe(true)
+    expect(result.savedPath).toBe('/saved/Big.zip')
+    // The renderer never received the bytes: the only thing it passed on is
+    // the name, the URI and the bound.
+    const append = deps.zipStreamRecord.deps.appendFromUri as ReturnType<typeof vi.fn>
+    const [, , , options] = append.mock.calls[0] as [
+      string,
+      string,
+      string,
+      { maxBytes?: number } | undefined,
+    ]
+    expect(options?.maxBytes).toBe(512 * 1024 * 1024)
+    expect(JSON.stringify(append.mock.calls)).not.toContain('ArrayBuffer')
+  })
+
   it('skips unreadable rows and 403 downloads with visible reasons', async () => {
     const deps = depsFor(
       {
@@ -224,7 +307,6 @@ describe('createGfsFolderZip', () => {
         ],
       },
       {
-        'gfs://main/ok': async () => ({ bytes: bytesOf('fine') }),
         'gfs://main/denied': async () => {
           throw new Error('gfs download failed: 403 httpStatus=403 forbidden')
         },
@@ -255,7 +337,6 @@ describe('createGfsFolderZip', () => {
           }
         throw new Error("Error invoking remote method 'gfs:listChildren': Error: httpStatus=403")
       }),
-      download: async () => ({ bytes: bytesOf('x') }),
       throttle: { acquire: async () => undefined },
       sleep: async () => undefined,
       zipStream: recordedZipStream().deps,
@@ -345,7 +426,7 @@ describe('createGfsFolderZip', () => {
     )
     // Bounded work: the refusal fires inside the FIRST listing page.
     expect(deps.listChildren).toHaveBeenCalledTimes(1)
-    expect(deps.download).not.toHaveBeenCalled()
+    expect(deps.zipStreamRecord.deps.appendFromUri).not.toHaveBeenCalled()
   })
 
   it('forwards the stop signal to the producer bridge on both call kinds (R1-M1)', async () => {
@@ -358,9 +439,13 @@ describe('createGfsFolderZip', () => {
         _options?: { signal?: AbortSignal }
       ) => new Promise<GfsZipChildrenPage>(() => undefined)
     )
-    const download = vi.fn(async () => ({ bytes: new ArrayBuffer(4) }))
+    const appendFromUri = vi.fn(
+      async () => new Promise<{ name: string; bytes: number }>(() => undefined)
+    )
     const previousClerum = (window as { clerum?: unknown }).clerum
-    ;(window as { clerum?: unknown }).clerum = { gfs: { listChildren, download } }
+    ;(window as { clerum?: unknown }).clerum = {
+      gfs: { listChildren, zipStream: { appendFromUri } },
+    }
 
     try {
       const walk = createGfsFolderZip(
@@ -384,15 +469,18 @@ describe('createGfsFolderZip', () => {
   })
 
   it('aborts the stream job on any failure path so no temp file survives (R1-H2)', async () => {
-    const stream = recordedZipStream()
+    const stream = recordedZipStream({
+      producers: {
+        'gfs://main/doomed': async () => {
+          throw new Error('gfs download failed: 500 httpStatus=500')
+        },
+      },
+    })
     const deps: GfsFolderZipDeps = {
       listChildren: vi.fn(async () => ({
         items: [folder({ resourceId: 'doomed', name: 'doomed.txt' })],
         nextCursor: null,
       })),
-      download: async () => {
-        throw new Error('gfs download failed: 500 httpStatus=500')
-      },
       zipStream: stream.deps,
       throttle: { acquire: async () => undefined },
       sleep: async () => undefined,
@@ -407,14 +495,17 @@ describe('createGfsFolderZip', () => {
     expect(stream.abortedJobs).toHaveLength(1)
 
     // Stop mid-walk takes the same cleanup path.
-    const stopStream = recordedZipStream()
+    const stopStream = recordedZipStream({
+      producers: {
+        'gfs://main/first': () => new Promise<{ bytes: number }>(() => undefined),
+      },
+    })
     const controller = new AbortController()
     const stopDeps: GfsFolderZipDeps = {
       listChildren: vi.fn(async () => ({
         items: [folder({ resourceId: 'first', name: 'first.txt' })],
         nextCursor: null,
       })),
-      download: () => new Promise<{ bytes: ArrayBuffer }>(() => undefined),
       zipStream: stopStream.deps,
       throttle: { acquire: async () => undefined },
       sleep: async () => undefined,
@@ -500,8 +591,8 @@ describe('createGfsFolderZip', () => {
       { deps }
     ).catch(error => error)
 
-    // The only file lived under the pruned subtree: nothing archivable, and
-    // the skip notice explains why with a path a human can read.
+    // The only file lived under the pruned subtree: nothing archivable, and the
+    // skip notice explains why with a path a human can read.
     expect(result).toBeInstanceOf(GfsFolderZipEmptyError)
     const skipped = (result as GfsFolderZipEmptyError).skipped
     expect(skipped[0]?.reason).toBe('Path too long')
@@ -511,7 +602,7 @@ describe('createGfsFolderZip', () => {
     const listingCalls = vi.mocked(deps.listChildren).mock.calls.length
     expect(listingCalls).toBeLessThanOrEqual(110)
     expect(listingCalls).toBeGreaterThanOrEqual(90)
-    expect(deps.download).not.toHaveBeenCalled()
+    expect(deps.zipStreamRecord.deps.appendFromUri).not.toHaveBeenCalled()
   })
 
   it('refuses when the actual downloaded bytes exceed the ceiling', async () => {
@@ -524,7 +615,7 @@ describe('createGfsFolderZip', () => {
           },
         ],
       },
-      { 'gfs://main/lied': async () => ({ bytes: new ArrayBuffer(2048) }) }
+      { 'gfs://main/lied': async () => ({ bytes: 2048 }) }
     )
 
     await expect(
@@ -555,7 +646,7 @@ describe('createGfsFolderZip', () => {
         ],
       },
       {
-        'gfs://main/ghost': async (uri: string, options?: { maxBytes?: number }) => {
+        'gfs://main/ghost': async (_uri: string, options?: { maxBytes?: number }) => {
           expect(options?.maxBytes).toBe(1024)
           throw new Error('gfs download exceeds the 1024-byte limit httpStatus=413')
         },
@@ -607,23 +698,32 @@ describe('createGfsFolderZip', () => {
       {
         'gfs://main/fill': async (_uri: string, options?: { maxBytes?: number }) => {
           seenBounds.push(options?.maxBytes)
-          return { bytes: new ArrayBuffer(1024) }
+          return { bytes: 1024 }
         },
         'gfs://main/after-a': async (_uri: string, options?: { maxBytes?: number }) => {
           seenBounds.push(options?.maxBytes)
-          return { bytes: new ArrayBuffer(1) }
+          return { bytes: 1 }
         },
         'gfs://main/after-b': async (_uri: string, options?: { maxBytes?: number }) => {
           seenBounds.push(options?.maxBytes)
-          return { bytes: new ArrayBuffer(1) }
+          return { bytes: 1 }
         },
       }
     )
 
-    const result = await createGfsFolderZip(
+    // R1-M6: the walk's outcome is CAPTURED, so a regression fails as an
+    // assertion ("the walk did not finish cleanly") instead of as an
+    // unhandled rejection thrown before the first expectation.
+    const outcome = await createGfsFolderZip(
       { resourceId: 'root', drive: 'main', name: 'Exact' },
       { deps, limits: { maxTotalBytes: 1024 } }
+    ).then(
+      value => ({ ok: true as const, value }),
+      error => ({ ok: false as const, error })
     )
+    expect(outcome.ok).toBe(true)
+    if (!outcome.ok) return
+    const result = outcome.value
 
     expect(seenBounds).toEqual([1024])
     expect(result.fileCount).toBe(1)
@@ -653,11 +753,11 @@ describe('createGfsFolderZip', () => {
       {
         'gfs://main/half-a': async (_uri: string, options?: { maxBytes?: number }) => {
           seenMaxBytes.push(options?.maxBytes)
-          return { bytes: new ArrayBuffer(512) }
+          return { bytes: 512 }
         },
         'gfs://main/half-b': async (_uri: string, options?: { maxBytes?: number }) => {
           seenMaxBytes.push(options?.maxBytes)
-          return { bytes: new ArrayBuffer(512) }
+          return { bytes: 512 }
         },
       }
     )
@@ -681,7 +781,6 @@ describe('createGfsFolderZip', () => {
           throw new Error('gfs children failed: 429 httpStatus=429 retryAfterSeconds=2')
         return { items: [], nextCursor: null }
       }),
-      download: async () => ({ bytes: new ArrayBuffer(0) }),
       throttle: { acquire: async () => undefined },
       sleep: async () => undefined,
       zipStream: recordedZipStream().deps,
@@ -699,11 +798,9 @@ describe('createGfsFolderZip', () => {
     const controller = new AbortController()
     const deps: GfsFolderZipDeps = {
       listChildren,
-      download: async () => ({ bytes: new ArrayBuffer(0) }),
-      zipStream: recordedZipStream().deps,
-      // The first slot never frees: the walk parks here until the stop lands.
       throttle: { acquire: () => new Promise<void>(() => undefined) },
       sleep: async () => undefined,
+      zipStream: recordedZipStream().deps,
     }
 
     const walk = createGfsFolderZip(
@@ -718,16 +815,17 @@ describe('createGfsFolderZip', () => {
 
   it('stops during a hung download instead of waiting out the request (M3)', async () => {
     const controller = new AbortController()
-    const deps: GfsFolderZipDeps = {
-      listChildren: vi.fn(async () => ({
-        items: [folder({ resourceId: 'hung', name: 'hung.txt' })],
-        nextCursor: null,
-      })),
-      download: () => new Promise<{ bytes: ArrayBuffer }>(() => undefined),
-      throttle: { acquire: async () => undefined },
-      sleep: async () => undefined,
-      zipStream: recordedZipStream().deps,
-    }
+    const deps = depsFor(
+      {
+        root: [
+          {
+            items: [folder({ resourceId: 'hung', name: 'hung.txt' })],
+            nextCursor: null,
+          },
+        ],
+      },
+      { 'gfs://main/hung': () => new Promise<{ bytes: number }>(() => undefined) }
+    )
 
     const walk = createGfsFolderZip(
       { resourceId: 'root', drive: 'main', name: 'Stopped' },
@@ -750,7 +848,6 @@ describe('createGfsFolderZip', () => {
         // walk would park here forever and a Stop could never land.
         return new Promise<GfsZipChildrenPage>(() => undefined)
       }),
-      download: async () => ({ bytes: new ArrayBuffer(0) }),
       throttle: { acquire: async () => undefined },
       sleep: async () => undefined,
       zipStream: recordedZipStream().deps,
@@ -770,18 +867,21 @@ describe('createGfsFolderZip', () => {
   })
 
   it('aborts on a non-permission download failure instead of a holey archive', async () => {
-    const deps: GfsFolderZipDeps = {
-      listChildren: vi.fn(async () => ({
-        items: [folder({ resourceId: 'flaky', name: 'flaky.txt' })],
-        nextCursor: null,
-      })),
-      download: async () => {
-        throw new Error('gfs download failed: 500 httpStatus=500')
+    const deps = depsFor(
+      {
+        root: [
+          {
+            items: [folder({ resourceId: 'flaky', name: 'flaky.txt' })],
+            nextCursor: null,
+          },
+        ],
       },
-      throttle: { acquire: async () => undefined },
-      sleep: async () => undefined,
-      zipStream: recordedZipStream().deps,
-    }
+      {
+        'gfs://main/flaky': async () => {
+          throw new Error('gfs download failed: 500 httpStatus=500')
+        },
+      }
+    )
 
     await expect(
       createGfsFolderZip({ resourceId: 'root', drive: 'main', name: 'Broken' }, { deps })
@@ -828,6 +928,62 @@ describe('createGfsFolderZip', () => {
     expect(result.fileName).toBe('Weird_Name_.zip')
   })
 
+  it('escapes Windows device names so the archive extracts on Windows', async () => {
+    // `CON`, `NUL` and `COM1` are the console device on Windows: an entry
+    // with that name either fails to extract or writes to the device.
+    const deps = depsFor({
+      root: [
+        {
+          items: [
+            folder({ resourceId: 'd1', name: 'CON' }),
+            folder({ resourceId: 'd2', name: 'nul.txt' }),
+            folder({ resourceId: 'd3', name: 'COM1' }),
+            folder({ resourceId: 'd4', name: 'ordinary.txt' }),
+          ],
+          nextCursor: null,
+        },
+      ],
+    })
+    const result = await createGfsFolderZip(
+      { resourceId: 'root', drive: 'main', name: 'Devices' },
+      { deps }
+    )
+    const names = streamEntryNames(deps.zipStreamRecord)
+    expect(names.sort()).toEqual(
+      ['Devices/_COM1', 'Devices/_CON', 'Devices/_nul.txt', 'Devices/ordinary.txt'].sort()
+    )
+    // The SAVED archive's own name is escaped too: `CON.zip` is the device.
+    expect(result.fileName).toBe('Devices.zip')
+  })
+
+  it('resolves a case-insensitive file/directory conflict (R3-M5)', async () => {
+    // `Report/child.txt` and a sibling FILE named `report` conflict at a path
+    // COMPONENT on a case-insensitive filesystem, even though their full
+    // names differ.
+    const deps = depsFor({
+      root: [
+        {
+          items: [
+            folder({ resourceId: 'dir', name: 'Report', kind: 'directory' }),
+            folder({ resourceId: 'file', name: 'report' }),
+          ],
+          nextCursor: null,
+        },
+      ],
+      dir: [{ items: [folder({ resourceId: 'child', name: 'child.txt' })], nextCursor: null }],
+    })
+    const result = await createGfsFolderZip(
+      { resourceId: 'root', drive: 'main', name: 'Root' },
+      { deps }
+    )
+    const names = streamEntryNames(deps.zipStreamRecord)
+    expect(names).toHaveLength(2)
+    // The sibling file was renamed away from the directory's name.
+    expect(names).toContain('Root/Report/child.txt')
+    expect(names).toContain('Root/report (2)')
+    expect(result.skipped).toEqual([])
+  })
+
   it('caps entry-name length so the 16-bit ZIP name fields cannot truncate (L4)', async () => {
     // 70 000 ASCII bytes would overflow ZIP's uint16 name length and corrupt
     // the archive; the segment must be cut under the documented ceiling.
@@ -859,7 +1015,7 @@ describe('createGfsFolderZip', () => {
     const emojiDeps = depsFor({
       root: [
         {
-          items: [folder({ resourceId: 'emoji', name: `${'😀'.repeat(600)}x` })],
+          items: [folder({ resourceId: 'emoji', name: `${'\u{1F600}'.repeat(600)}x` })],
           nextCursor: null,
         },
       ],
@@ -931,10 +1087,9 @@ describe('createGfsFolderZip', () => {
         if (attempts === 1) throw new Error('429 httpStatus=429 retryAfterSeconds=0')
         return { items: [], nextCursor: null }
       }),
-      download: async () => ({ bytes: new ArrayBuffer(0) }),
-      zipStream: recordedZipStream().deps,
       throttle: { acquire },
       sleep: async () => undefined,
+      zipStream: recordedZipStream().deps,
     }
 
     // An empty retry answer short-circuits as "no downloadable files"; the

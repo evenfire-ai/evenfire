@@ -21,11 +21,9 @@
  * archive.
  */
 import { isRateLimited, parseHttpStatus, parseRetryAfterSeconds } from '@lib/gfsGrantErrors'
-import {
-  entryNameFitsZipFields,
-  finalizeEntryName,
-  foldEntryName,
-} from '../../../src/gfs/zipEntryName'
+import { ZipEntryNameAllocator, foldEntryName } from '../../../src/gfs/zipEntryName'
+import { escapeReservedWindowsDeviceName } from '../../../src/gfs/zipEntryPath'
+import { ZIP_MAX_ENTRIES, ZIP_MAX_TOTAL_BYTES } from '../../../src/gfs/zipLimits'
 
 /**
  * Client-side pacing for the walk, a deliberate conservative margin: the
@@ -37,12 +35,14 @@ export const GFS_ZIP_READS_PER_MINUTE = 120
 /**
  * Refuse before buffering: total bytes across the folder. 512 MiB bounds the
  * streamed archive's temp-file size and each transfer's producer-side bound;
- * renderer peak memory is ONE in-flight transfer (≤ this cap), independent of
- * folder size (spec: round-2 extensions, streamed assembly).
+ * the RENDERER holds no payload bytes at all (the main process fetches and
+ * writes each transfer chunk by chunk), so peak memory is one chunk in main
+ * plus the archive's central-directory metadata (spec: round-2 extensions,
+ * streamed assembly; R1-H2).
  */
-export const GFS_ZIP_MAX_TOTAL_BYTES = 512 * 1024 * 1024
+export const GFS_ZIP_MAX_TOTAL_BYTES = ZIP_MAX_TOTAL_BYTES
 /** Refuse before buffering: total file entries across the folder. */
-export const GFS_ZIP_MAX_ENTRIES = 2000
+export const GFS_ZIP_MAX_ENTRIES = ZIP_MAX_ENTRIES
 
 export interface GfsZipSkippedEntry {
   path: string
@@ -130,7 +130,19 @@ export interface GfsZipChildrenPage {
 
 export interface GfsZipStreamDeps {
   start(): Promise<{ jobId: string }>
-  append(jobId: string, name: string, bytes: ArrayBuffer): Promise<unknown>
+  /**
+   * Appends one entry by handing the MAIN process the resource URI: the
+   * payload is fetched and written into the archive chunk by chunk, so it
+   * never crosses the IPC boundary and never materializes as one buffer
+   * (R1-H2). `options.maxBytes` is the producer-side bound for this
+   * transfer; `options.signal` stops the producer-side fetch.
+   */
+  appendFromUri(
+    jobId: string,
+    name: string,
+    uri: string,
+    options?: { maxBytes?: number; signal?: AbortSignal }
+  ): Promise<{ name: string; bytes: number }>
   finish(
     jobId: string,
     suggestedName: string
@@ -149,15 +161,6 @@ export interface GfsFolderZipDeps {
     cursor?: string,
     options?: { signal?: AbortSignal }
   ): Promise<GfsZipChildrenPage>
-  /**
-   * Downloads one file. `options.maxBytes` is the producer-side bound for the
-   * transfer (R1-H2): the bounded fetch rejects before an over-budget body
-   * materializes in either process. `options.signal` as above.
-   */
-  download(
-    uri: string,
-    options?: { maxBytes?: number; signal?: AbortSignal }
-  ): Promise<{ bytes: ArrayBuffer }>
   /**
    * Streamed, file-backed archive assembly in the main process (R1-H2): one
    * append per downloaded file, one finish at the end, abort cleans the temp
@@ -265,7 +268,12 @@ export function sanitizeZipSegment(name: string): string {
     GFS_ZIP_MAX_SEGMENT_NAME_BYTES
   )
   if (!cleaned || cleaned === '.' || cleaned === '..') return 'unnamed'
-  return cleaned
+  // The escape happens AFTER the truncation (a truncated name can end up
+  // reserved) and is re-trimmed, so the segment still fits the byte ceiling.
+  return truncateToUtf8Bytes(
+    escapeReservedWindowsDeviceName(cleaned),
+    GFS_ZIP_MAX_SEGMENT_NAME_BYTES
+  )
 }
 
 function sanitizeFileName(name: string): string {
@@ -274,6 +282,15 @@ function sanitizeFileName(name: string): string {
     .replace(/[\s.]+$/, '')
     .trim()
   return cleaned || 'folder'
+}
+
+/** The saved archive's own file name, escaped from Windows device names. */
+function sanitizeArchiveFileName(name: string): string {
+  const cleaned = sanitizeFileName(name)
+  const separator = cleaned.lastIndexOf('.')
+  const stem = separator > 0 ? cleaned.slice(0, separator) : cleaned
+  const extension = separator > 0 ? cleaned.slice(separator) : ''
+  return `${escapeReservedWindowsDeviceName(stem)}${extension}`
 }
 
 export async function createGfsFolderZip(
@@ -291,18 +308,15 @@ export async function createGfsFolderZip(
       window.clerum.gfs.listChildren(resourceId, drive, cursor, {
         signal: requestOptions?.signal ?? options.signal,
       }))
-  const download: GfsFolderZipDeps['download'] =
-    options.deps?.download ??
-    ((uri, requestOptions) =>
-      window.clerum.gfs.download(uri, {
-        maxBytes: requestOptions?.maxBytes,
-        signal: requestOptions?.signal ?? options.signal,
-      }))
   // Default lazily reaches the bridge so a walk that never appends (aborted
   // early, refused at planning) does not require window.clerum to exist.
   const zipStream: GfsFolderZipDeps['zipStream'] = options.deps?.zipStream ?? {
     start: () => window.clerum.gfs.zipStream.start(),
-    append: (jobId, name, bytes) => window.clerum.gfs.zipStream.append(jobId, name, bytes),
+    appendFromUri: (jobId, name, uri, requestOptions) =>
+      window.clerum.gfs.zipStream.appendFromUri(jobId, name, uri, {
+        maxBytes: requestOptions?.maxBytes,
+        signal: requestOptions?.signal ?? options.signal,
+      }),
     finish: (jobId, suggestedName) => window.clerum.gfs.zipStream.finish(jobId, suggestedName),
     abort: jobId => window.clerum.gfs.zipStream.abort(jobId),
   }
@@ -443,11 +457,20 @@ export async function createGfsFolderZip(
   if (files.length === 0) throw new GfsFolderZipEmptyError(folder.name, skipped)
 
   // ── Phase 2: throttled downloads streamed into the main-process archive. ──
-  // The renderer holds ONE in-flight transfer at a time (R1-H2); any failure
-  // aborts the stream job so the temp file never outlives the walk.
+  // The renderer holds NO payload bytes at all (R1-H2): each transfer is
+  // fetched and written by the main process, chunk by chunk, straight into the
+  // archive's temp file. Any failure aborts the stream job so the temp file
+  // never outlives the walk.
   const { jobId } = await zipStream.start()
   let archivedCount = 0
-  const usedFoldedNames = new Set<string>()
+  const nameAllocator = new ZipEntryNameAllocator()
+  // Reserve the DIRECTORY paths the archive will imply BEFORE any file name
+  // is allocated (R3-M5): a file that shares a name with one of them is
+  // renamed, never the directory — and the outcome no longer depends on the
+  // order the listing happened to return the entries in.
+  for (const directoryPath of impliedDirectoryPaths(files)) {
+    nameAllocator.reserveDirectory(directoryPath)
+  }
   let addedBytes = 0
   try {
     for (const [index, file] of files.entries()) {
@@ -471,14 +494,27 @@ export async function createGfsFolderZip(
         currentPath: file.path,
       })
       await withAbort(throttle.acquire())
-      let bytes: ArrayBuffer
+      // Finalize the entry name HERE (case-insensitive collision suffix, and
+      // the path-component reservation that keeps a file and a directory from
+      // sharing a name on a case-insensitive filesystem) and validate the
+      // FINALIZED name against the 16-bit ZIP fields before it is sent: a
+      // name that only overflows after suffixing is a visible skip, never a
+      // truncated header (R1-M2, R3-M5, spec: round-2).
+      const plan = nameAllocator.plan(file.path)
+      if (!plan.fits) {
+        skipped.push({ path: shortenForNotice(file.path), reason: 'Path too long' })
+        continue
+      }
+      let appended: { name: string; bytes: number }
       try {
-        // R1-H2: bound the transfer producer-side by the remaining budget so
-        // an over-limit body (dishonest or missing declared size) is rejected
-        // before it materializes in the renderer; the receipt check below
-        // stays as the backstop.
-        bytes = (await withRateLimitRetry(() => download(file.uri, { maxBytes: remainingBytes })))
-          .bytes
+        // R1-H2: the transfer is bounded producer-side by the remaining
+        // budget, so an over-limit body is rejected before it is written.
+        appended = await withRateLimitRetry(() =>
+          zipStream.appendFromUri(jobId, plan.name, file.uri, {
+            maxBytes: remainingBytes,
+            signal,
+          })
+        )
       } catch (error) {
         if (isFolderZipAbortError(error)) throw error
         const message = toMessage(error)
@@ -494,8 +530,8 @@ export async function createGfsFolderZip(
         }
         throw error
       }
-      const data = new Uint8Array(bytes)
-      addedBytes += data.length
+      nameAllocator.commit(plan)
+      addedBytes += appended.bytes
       if (addedBytes > maxTotalBytes) {
         // Defensive backstop: the producer-side bound makes this unreachable
         // unless the bound itself was ignored — fail loudly, not silently.
@@ -503,17 +539,6 @@ export async function createGfsFolderZip(
           `"${folder.name}" exceeded the ${formatZipBytes(maxTotalBytes)} folder-zip limit while downloading. Download smaller subfolders individually.`
         )
       }
-      // Finalize the entry name HERE (case-insensitive collision suffix) and
-      // validate the FINALIZED name against the 16-bit ZIP fields before any
-      // header is written: a name that only overflows after suffixing is a
-      // visible skip, never a truncated header (R1-M2, spec: round-2).
-      const finalized = finalizeEntryName(file.path, usedFoldedNames)
-      if (!entryNameFitsZipFields(finalized.name)) {
-        skipped.push({ path: shortenForNotice(file.path), reason: 'Path too long' })
-        continue
-      }
-      usedFoldedNames.add(finalized.folded)
-      await zipStream.append(jobId, finalized.name, bytes)
       archivedCount += 1
     }
 
@@ -529,7 +554,7 @@ export async function createGfsFolderZip(
       filesAdded: archivedCount,
       currentPath: null,
     })
-    const fileName = `${sanitizeFileName(folder.name)}.zip`
+    const fileName = `${sanitizeArchiveFileName(folder.name)}.zip`
     const saved = await zipStream.finish(jobId, fileName)
     return {
       saved: saved.saved,
@@ -546,6 +571,24 @@ export async function createGfsFolderZip(
 }
 
 export { foldEntryName }
+
+/**
+ * Every directory path the archive will imply, in first-seen order: each
+ * file's path minus its last segment, and every ancestor of that.
+ */
+function impliedDirectoryPaths(files: Array<{ path: string }>): string[] {
+  const paths = new Set<string>()
+  for (const file of files) {
+    const segments = file.path.split('/')
+    segments.pop()
+    let current = ''
+    for (const segment of segments) {
+      current = current === '' ? segment : `${current}/${segment}`
+      paths.add(current)
+    }
+  }
+  return [...paths]
+}
 
 function formatZipBytes(bytes: number): string {
   if (bytes >= 1024 * 1024 * 1024) return `${Math.round(bytes / (1024 * 1024 * 1024))} GiB`

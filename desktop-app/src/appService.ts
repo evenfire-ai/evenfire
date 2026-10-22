@@ -20,7 +20,7 @@ import {
   canonicalizeDesktopRestEndpoint,
   sameDesktopRestEndpoint,
 } from './desktopEnvironmentUrl.js'
-import { fetchBoundedBytes } from './gfs/boundedDownload.js'
+import { fetchBoundedBytes, streamBoundedBytes } from './gfs/boundedDownload.js'
 import { type DelegationAffordances, delegationAffordances } from './gfs/delegation.js'
 import {
   DesktopGfsUploadJob,
@@ -877,6 +877,7 @@ export class AppService {
     },
     requestJson,
     fetchBytes: (url, token, opts) => fetchBoundedBytes(url, token, opts),
+    fetchByteStream: (url, token, opts, onChunk) => streamBoundedBytes(url, token, opts, onChunk),
   })
   private readonly tokenStore = new TokenStore()
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
@@ -2105,6 +2106,28 @@ export class AppService {
       uri,
       this.requireSessionToken(),
       maxBytes !== undefined || signal !== undefined ? { maxBytes, signal } : undefined
+    )
+  }
+
+  /**
+   * Resolve then STREAM a gfs:// resource's bytes into `onChunk` (R1-H2).
+   *
+   * The folder-zip walk uses this instead of `downloadGfsUri`: the payload is
+   * written straight into the ZIP temp file chunk by chunk, so neither the
+   * main process nor the renderer ever holds a whole file in memory. The
+   * ceiling is enforced producer-side, mid-stream.
+   */
+  async downloadGfsUriInto(
+    uri: string,
+    maxBytes: number,
+    signal: AbortSignal | undefined,
+    onChunk: (chunk: Uint8Array) => Promise<void>
+  ) {
+    return this.gfsClient.downloadInto(
+      uri,
+      this.requireSessionToken(),
+      signal ? { maxBytes, signal } : { maxBytes },
+      onChunk
     )
   }
 

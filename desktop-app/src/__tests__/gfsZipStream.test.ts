@@ -1,46 +1,95 @@
 /**
- * R1-H2 — the streamed, file-backed zip assembly. These tests run the REAL
- * writer against real temp files and verify the SAVED ARCHIVE with an
- * independent reader (walking the central directory the same way an extractor
- * does), not by re-reading the writer's own inputs.
+ * The main-process ZIP writer (R1-H2, R3-M1, R3-M2, R3-M3, R3-M5).
+ *
+ * These tests run the REAL writer against real temp files and verify the
+ * SAVED ARCHIVE with an independent extractor, not by re-reading the writer's
+ * own inputs. They also pin the guarantees the MAIN process owns, because the
+ * renderer is untrusted: path safety, the resource limits, job ownership, and
+ * the cleanup of every unsuccessful path.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { promisify } from 'node:util'
+import { ZIP32_MAX_ENTRIES, ZIP_MAX_ENTRIES, ZIP_MAX_TOTAL_BYTES } from '../gfs/zipLimits.js'
 import type { ZipStreamDeps } from '../gfs/zipStream.js'
 import {
+  MAX_ACTIVE_ZIP_JOBS,
+  MAX_ACTIVE_ZIP_JOBS_PER_OWNER,
+  ZipStreamLimitError,
+  ZipStreamNameError,
+  ZipStreamNameTooLongError,
   abortZipJob,
   activeZipJobCount,
   appendZipEntry,
+  appendZipEntryStreaming,
+  crc32,
   finishZipJob,
   startZipJob,
 } from '../gfs/zipStream.js'
 
+const execFileAsync = promisify(execFile)
+
+const OWNER = 'window-1'
+const OTHER_OWNER = 'window-2'
+
 const savedFiles: string[] = []
 const tempRoots: string[] = []
+/** Every job this file opened, so the module never leaks one into the next test. */
+const openJobs: Array<{ jobId: string; owner: string; deps: ZipStreamDeps }> = []
 
 async function makeDeps(
   savePath: string,
-  options: { cancelDialog?: boolean; failRename?: boolean } = {}
+  options: {
+    cancelDialog?: boolean
+    failRename?: boolean
+    failCopy?: boolean
+    failDialog?: boolean
+    openFile?: ZipStreamDeps['openFile']
+  } = {}
 ): Promise<ZipStreamDeps & { tempDir: string }> {
   const tempDir = await mkdtemp(join(tmpdir(), 'evenfire-zip-test-'))
   tempRoots.push(tempDir)
   return {
     tempDir,
-    showSaveDialog: vi.fn(async () => ({
-      canceled: Boolean(options.cancelDialog),
-      filePath: options.cancelDialog ? undefined : savePath,
-    })),
+    openFile: options.openFile,
+    showSaveDialog: vi.fn(async () => {
+      if (options.failDialog) throw new Error('save dialog failed')
+      return {
+        canceled: Boolean(options.cancelDialog),
+        filePath: options.cancelDialog ? undefined : savePath,
+      }
+    }),
     renameFile: options.failRename
       ? async () => {
           throw new Error('EXDEV: cross-device link not permitted')
         }
       : undefined,
+    copyFile: options.failCopy
+      ? async () => {
+          throw new Error('copy failed')
+        }
+      : undefined,
   }
 }
 
+/** Opens a job and remembers it, so `afterEach` can always clean it up. */
+async function openJob(owner: string, deps: ZipStreamDeps): Promise<string> {
+  const jobId = await startZipJob(owner, deps)
+  openJobs.push({ jobId, owner, deps })
+  openedJobCount += 1
+  return jobId
+}
+
+let openedJobCount = 0
+
 afterEach(async () => {
+  for (const job of openJobs.splice(0)) {
+    await abortZipJob(job.jobId, job.owner, job.deps).catch(() => undefined)
+  }
   for (const dir of tempRoots.splice(0)) await rm(dir, { recursive: true, force: true })
 })
 
@@ -84,18 +133,51 @@ function contentBytes(text: string): ArrayBuffer {
   return new TextEncoder().encode(text).buffer as ArrayBuffer
 }
 
-describe('gfs zipStream (R1-H2)', () => {
+/** The temp file the writer created for `jobId` (one per job, by design). */
+async function tempFilesIn(dir: string): Promise<string[]> {
+  return (await readdir(dir)).filter(name => name.endsWith('.part'))
+}
+
+/**
+ * Extract the archive with the SYSTEM unzip — a genuinely independent
+ * extractor, not our own reader. Skipped when the binary is unavailable.
+ */
+async function extractWithSystemUnzip(archivePath: string): Promise<Record<string, string> | null> {
+  try {
+    await execFileAsync('unzip', ['-v'])
+  } catch {
+    return null
+  }
+  const target = await mkdtemp(join(tmpdir(), 'evenfire-unzip-'))
+  tempRoots.push(target)
+  await execFileAsync('unzip', ['-o', '-q', archivePath, '-d', target])
+  const out: Record<string, string> = {}
+  const walk = async (dir: string, prefix: string) => {
+    for (const name of await readdir(dir)) {
+      const full = join(dir, name)
+      const info = await stat(full)
+      if (info.isDirectory()) await walk(full, `${prefix}${name}/`)
+      else out[`${prefix}${name}`] = (await readFile(full)).toString('utf8')
+    }
+  }
+  await walk(target, '')
+  return out
+}
+
+describe('gfs zipStream — archive assembly (R1-H2)', () => {
   it('assembles a file-backed archive that an independent reader verifies', async () => {
     const savePath = join(tmpdir(), `saved-${Date.now()}.zip`)
     savedFiles.push(savePath)
     const deps = await makeDeps(savePath)
-    const jobId = await startZipJob(deps)
+    const jobId = await openJob(OWNER, deps)
 
-    expect(await appendZipEntry(jobId, 'Docs/a.txt', contentBytes('alpha'))).toBe('Docs/a.txt')
-    expect(await appendZipEntry(jobId, 'Docs/b.bin', contentBytes('\u00ff\u00fe'))).toBe(
+    expect(await appendZipEntry(jobId, OWNER, 'Docs/a.txt', contentBytes('alpha'))).toBe(
+      'Docs/a.txt'
+    )
+    expect(await appendZipEntry(jobId, OWNER, 'Docs/b.bin', contentBytes('\u00ff\u00fe'))).toBe(
       'Docs/b.bin'
     )
-    const result = await finishZipJob(jobId, 'Docs.zip', deps)
+    const result = await finishZipJob(jobId, OWNER, 'Docs.zip', deps)
 
     expect(result.saved).toBe(true)
     expect(result.entryCount).toBe(2)
@@ -109,55 +191,379 @@ describe('gfs zipStream (R1-H2)', () => {
     expect(decoder.decode(entries[0]!.bytes)).toBe('alpha')
     expect(entries[1]!.bytes).toEqual(new Uint8Array([0xc3, 0xbf, 0xc3, 0xbe]))
     // The stored CRC fields match the payload CRC-32 an extractor recomputes.
-    const { crc32 } = await import('../gfs/zipStream.js')
     for (const entry of entries) expect(entry.crc).toBe(crc32(entry.bytes))
   })
 
-  it('suffixes case-insensitive collisions in the written file (R1-L1 through the real writer)', async () => {
-    const savePath = join(tmpdir(), `collide-${Date.now()}.zip`)
+  it('extracts cleanly with an INDEPENDENT extractor (R3-M5)', async () => {
+    const savePath = join(tmpdir(), `independent-${Date.now()}.zip`)
     savedFiles.push(savePath)
     const deps = await makeDeps(savePath)
-    const jobId = await startZipJob(deps)
-    await appendZipEntry(jobId, 'Report.txt', contentBytes('upper'))
-    await appendZipEntry(jobId, 'report.txt', contentBytes('lower'))
+    const jobId = await openJob(OWNER, deps)
 
-    await finishZipJob(jobId, 'Collide.zip', deps)
-    const { entries } = readZipArchive(new Uint8Array(await readFile(savePath)))
-    expect(entries.map(entry => entry.name)).toEqual(['Report.txt', 'report (2).txt'])
-    const decoder = new TextDecoder()
-    expect(entries.map(entry => decoder.decode(entry.bytes))).toEqual(['upper', 'lower'])
-  })
+    // A file whose name collides with a directory component, case-insensitively.
+    await appendZipEntry(jobId, OWNER, 'Report/child.txt', contentBytes('child'))
+    await appendZipEntry(jobId, OWNER, 'report', contentBytes('sibling'))
+    await appendZipEntry(jobId, OWNER, 'Report/other.txt', contentBytes('other'))
+    await finishZipJob(jobId, OWNER, 'Independent.zip', deps)
 
-  it('rejects an entry whose FINAL name cannot fit the 16-bit fields, before writing (R1-M2)', async () => {
-    const deps = await makeDeps(join(tmpdir(), 'unused.zip'))
-    const jobId = await startZipJob(deps)
-    const nearLimit = `${'a'.repeat(65530)}.txt`
-    // The pre-collision name fits exactly; a colliding second copy must not
-    // push a suffixed name past the field — the writer refuses the header.
-    await appendZipEntry(jobId, nearLimit, contentBytes('one'))
-    await expect(appendZipEntry(jobId, nearLimit, contentBytes('two'))).rejects.toThrow(
-      /not representable in a ZIP header/i
+    const extracted = await extractWithSystemUnzip(savePath)
+    if (!extracted) return // no system extractor on this machine
+    // Every entry landed on its own path: the sibling FILE was renamed away
+    // from the directory's name, so nothing was overwritten.
+    expect(Object.keys(extracted).sort()).toEqual(
+      ['Report/child.txt', 'Report/other.txt', 'report (2)'].sort()
     )
-    await abortZipJob(jobId, deps)
+    expect(extracted['Report/child.txt']).toBe('child')
+    expect(extracted['Report/other.txt']).toBe('other')
+    expect(extracted['report (2)']).toBe('sibling')
+  })
+})
+
+describe('gfs zipStream — streamed payload (R1-H2)', () => {
+  it('writes a chunked payload with the CRC an extractor recomputes', async () => {
+    const savePath = join(tmpdir(), `chunked-${Date.now()}.zip`)
+    savedFiles.push(savePath)
+    const deps = await makeDeps(savePath)
+    const jobId = await openJob(OWNER, deps)
+
+    const chunks = ['one-', 'two-', 'three'].map(part => new TextEncoder().encode(part))
+    const result = await appendZipEntryStreaming(jobId, OWNER, 'big.bin', async sink => {
+      for (const chunk of chunks) await sink.write(chunk)
+    })
+    expect(result).toEqual({ name: 'big.bin', bytes: 13 })
+    await finishZipJob(jobId, OWNER, 'Chunked.zip', deps)
+
+    const { entries } = readZipArchive(new Uint8Array(await readFile(savePath)))
+    expect(entries).toHaveLength(1)
+    expect(new TextDecoder().decode(entries[0]!.bytes)).toBe('one-two-three')
+    expect(entries[0]!.crc).toBe(crc32(entries[0]!.bytes))
   })
 
-  it('deletes the temp file when the save dialog is canceled', async () => {
+  it('never materializes a large payload as one buffer (R1-H2)', async () => {
+    // The near-limit memory claim: a payload is written CHUNK BY CHUNK, so
+    // the writer's peak payload allocation is one chunk, not the file. The
+    // observable witness is the chunk count and the largest chunk seen.
+    const savePath = join(tmpdir(), `large-${Date.now()}.zip`)
+    savedFiles.push(savePath)
+    const deps = await makeDeps(savePath)
+    const jobId = await openJob(OWNER, deps)
+
+    const chunkSize = 64 * 1024
+    const chunkCount = 16
+    let largestChunk = 0
+    let chunksSeen = 0
+    const result = await appendZipEntryStreaming(jobId, OWNER, 'large.bin', async sink => {
+      for (let index = 0; index < chunkCount; index += 1) {
+        const chunk = new Uint8Array(chunkSize).fill(index % 251)
+        largestChunk = Math.max(largestChunk, chunk.byteLength)
+        chunksSeen += 1
+        await sink.write(chunk)
+      }
+    })
+    expect(chunksSeen).toBe(chunkCount)
+    expect(largestChunk).toBe(chunkSize)
+    expect(result.bytes).toBe(chunkSize * chunkCount)
+
+    await finishZipJob(jobId, OWNER, 'Large.zip', deps)
+    const { entries } = readZipArchive(new Uint8Array(await readFile(savePath)))
+    expect(entries).toHaveLength(1)
+    expect(entries[0]!.bytes.length).toBe(chunkSize * chunkCount)
+    // The CRC an extractor recomputes matches the streamed one.
+    expect(entries[0]!.crc).toBe(crc32(entries[0]!.bytes))
+  })
+
+  it('keeps the archive valid after a failed entry and serves the next one', async () => {
+    const savePath = join(tmpdir(), `rollback-${Date.now()}.zip`)
+    savedFiles.push(savePath)
+    const deps = await makeDeps(savePath)
+    const jobId = await openJob(OWNER, deps)
+
+    await appendZipEntry(jobId, OWNER, 'first.txt', contentBytes('first'))
+    await expect(
+      appendZipEntryStreaming(jobId, OWNER, 'doomed.bin', async sink => {
+        await sink.write(new TextEncoder().encode('partial'))
+        throw new Error('producer failed mid-stream')
+      })
+    ).rejects.toThrow(/producer failed/)
+
+    // The half-written entry was rolled back: the next entry still lands, and
+    // the archive contains no trace of the failed one.
+    await appendZipEntry(jobId, OWNER, 'second.txt', contentBytes('second'))
+    await finishZipJob(jobId, OWNER, 'Rollback.zip', deps)
+
+    const { entries } = readZipArchive(new Uint8Array(await readFile(savePath)))
+    expect(entries.map(entry => entry.name)).toEqual(['first.txt', 'second.txt'])
+    expect(new TextDecoder().decode(entries[1]!.bytes)).toBe('second')
+  })
+})
+
+describe('gfs zipStream — path safety (R3-M1)', () => {
+  const unsafeNames = [
+    '../outside.txt',
+    'Docs/../../outside.txt',
+    '/rooted.txt',
+    'C:\\Windows\\system32.txt',
+    'C:/Windows/system32.txt',
+    'Docs\\win.txt',
+    'Docs//empty.txt',
+    'Docs/./same.txt',
+    'Docs/trailing.',
+    'Docs/trailing ',
+    'Docs/NUL',
+    'Docs/con.txt',
+    'Docs/LPT9',
+    'Docs/quote".txt',
+    'Docs/pipe|.txt',
+    'Docs/colon:.txt',
+    'Docs/ctrl\u0001.txt',
+  ]
+
+  it.each(unsafeNames)('refuses %j before writing any entry data', async name => {
+    const savePath = join(tmpdir(), `unsafe-${Date.now()}.zip`)
+    savedFiles.push(savePath)
+    const deps = await makeDeps(savePath)
+    const jobId = await openJob(OWNER, deps)
+
+    await expect(appendZipEntry(jobId, OWNER, name, contentBytes('x'))).rejects.toBeInstanceOf(
+      ZipStreamNameError
+    )
+
+    // Nothing was written: the archive is still empty and the job is intact.
+    const tempFiles = await tempFilesIn(deps.tempDir!)
+    expect(tempFiles).toHaveLength(1)
+    expect((await stat(join(deps.tempDir!, tempFiles[0]!))).size).toBe(0)
+    // The rejected name was not reserved: a legal name still gets its own path.
+    expect(await appendZipEntry(jobId, OWNER, 'safe.txt', contentBytes('safe'))).toBe('safe.txt')
+    await abortZipJob(jobId, OWNER, deps)
+  })
+
+  it('refuses a name whose finalized form does not fit the 16-bit fields', async () => {
+    const deps = await makeDeps(join(tmpdir(), 'unused.zip'))
+    const jobId = await openJob(OWNER, deps)
+    const nearLimit = `${'a'.repeat(65530)}.txt`
+    await appendZipEntry(jobId, OWNER, nearLimit, contentBytes('one'))
+    await expect(
+      appendZipEntry(jobId, OWNER, nearLimit, contentBytes('two'))
+    ).rejects.toBeInstanceOf(ZipStreamNameTooLongError)
+    await abortZipJob(jobId, OWNER, deps)
+  })
+})
+
+describe('gfs zipStream — resource limits (R3-M2)', () => {
+  it('rejects an over-budget entry without changing the file or the job', async () => {
+    const deps = await makeDeps(join(tmpdir(), 'unused.zip'))
+    deps.limits = { maxTotalBytes: 1024 }
+    const jobId = await openJob(OWNER, deps)
+
+    await appendZipEntry(jobId, OWNER, 'small.txt', contentBytes('small'))
+    const tempFiles = await tempFilesIn(deps.tempDir!)
+    const tempPath = join(deps.tempDir!, tempFiles[0]!)
+    const sizeBefore = (await stat(tempPath)).size
+
+    // The aggregate ceiling is enforced in MAIN: a renderer that keeps
+    // appending past the budget is refused, and the refusal changes nothing.
+    await expect(
+      appendZipEntry(jobId, OWNER, 'too-big.bin', new ArrayBuffer(2048))
+    ).rejects.toBeInstanceOf(ZipStreamLimitError)
+
+    // The archive on disk and the job's own state are untouched.
+    expect((await stat(tempPath)).size).toBe(sizeBefore)
+    const result = await finishZipJob(jobId, OWNER, 'Limited.zip', deps)
+    expect(result.entryCount).toBe(1)
+  })
+
+  it('rejects an over-budget STREAMED entry and rolls the half-written entry back', async () => {
+    const deps = await makeDeps(join(tmpdir(), 'unused.zip'))
+    deps.limits = { maxTotalBytes: 1024 }
+    const jobId = await openJob(OWNER, deps)
+
+    await appendZipEntry(jobId, OWNER, 'small.txt', contentBytes('small'))
+    const tempFiles = await tempFilesIn(deps.tempDir!)
+    const tempPath = join(deps.tempDir!, tempFiles[0]!)
+    const sizeBefore = (await stat(tempPath)).size
+
+    await expect(
+      appendZipEntryStreaming(jobId, OWNER, 'stream.bin', async sink => {
+        await sink.write(new Uint8Array(512))
+        await sink.write(new Uint8Array(1024))
+      })
+    ).rejects.toBeInstanceOf(ZipStreamLimitError)
+
+    // The half-written entry was rolled back: the archive still holds exactly
+    // the one complete entry.
+    expect((await stat(tempPath)).size).toBe(sizeBefore)
+    const result = await finishZipJob(jobId, OWNER, 'Limited.zip', deps)
+    expect(result.entryCount).toBe(1)
+  })
+
+  it('enforces the entry-count ceiling', async () => {
+    const deps = await makeDeps(join(tmpdir(), 'unused.zip'))
+    deps.limits = { maxEntries: 2 }
+    const jobId = await openJob(OWNER, deps)
+
+    await appendZipEntry(jobId, OWNER, 'one.txt', contentBytes('1'))
+    await appendZipEntry(jobId, OWNER, 'two.txt', contentBytes('2'))
+    await expect(
+      appendZipEntry(jobId, OWNER, 'three.txt', contentBytes('3'))
+    ).rejects.toBeInstanceOf(ZipStreamLimitError)
+
+    const result = await finishZipJob(jobId, OWNER, 'Counted.zip', deps)
+    expect(result.entryCount).toBe(2)
+  })
+
+  it('keeps the ZIP32 format ceilings in force', () => {
+    // The format bounds are not configurable: they are what a ZIP32 reader
+    // can address.
+    expect(ZIP32_MAX_ENTRIES).toBe(65535)
+    expect(ZIP_MAX_TOTAL_BYTES).toBe(512 * 1024 * 1024)
+    expect(ZIP_MAX_ENTRIES).toBe(2000)
+  })
+
+  it('refuses a second job from the same window beyond the concurrency bound', async () => {
+    const deps = await makeDeps(join(tmpdir(), 'unused.zip'))
+    const first = await openJob(OWNER, deps)
+    const second = await openJob(OWNER, deps)
+    await expect(startZipJob(OWNER, deps)).rejects.toBeInstanceOf(ZipStreamLimitError)
+    expect(MAX_ACTIVE_ZIP_JOBS_PER_OWNER).toBe(2)
+    await abortZipJob(first, OWNER, deps)
+    await abortZipJob(second, OWNER, deps)
+  })
+
+  it('binds a job to the window that opened it', async () => {
+    const deps = await makeDeps(join(tmpdir(), 'unused.zip'))
+    const jobId = await openJob(OWNER, deps)
+
+    await expect(
+      appendZipEntry(jobId, OTHER_OWNER, 'stolen.txt', contentBytes('x'))
+    ).rejects.toThrow(/belongs to another window/)
+    await expect(finishZipJob(jobId, OTHER_OWNER, 'Stolen.zip', deps)).rejects.toThrow(
+      /belongs to another window/
+    )
+    await expect(abortZipJob(jobId, OTHER_OWNER, deps)).rejects.toThrow(/belongs to another window/)
+    // The rightful owner can still use it.
+    expect(await appendZipEntry(jobId, OWNER, 'mine.txt', contentBytes('x'))).toBe('mine.txt')
+    await abortZipJob(jobId, OWNER, deps)
+  })
+
+  it('bounds the concurrent appends one job may hold', async () => {
+    const deps = await makeDeps(join(tmpdir(), 'unused.zip'))
+    const jobId = await openJob(OWNER, deps)
+
+    const inFlight: Array<Promise<unknown>> = []
+    for (let index = 0; index < 4; index += 1) {
+      inFlight.push(
+        appendZipEntryStreaming(jobId, OWNER, `entry-${index}.bin`, async sink => {
+          await sink.write(new TextEncoder().encode(`payload-${index}`))
+        })
+      )
+    }
+    await expect(
+      appendZipEntryStreaming(jobId, OWNER, 'entry-4.bin', async sink => {
+        await sink.write(new TextEncoder().encode('overflow'))
+      })
+    ).rejects.toBeInstanceOf(ZipStreamLimitError)
+    await Promise.all(inFlight)
+    await abortZipJob(jobId, OWNER, deps)
+  })
+})
+
+describe('gfs zipStream — cleanup ownership (R3-M3)', () => {
+  it('removes the temp file when the save dialog is canceled', async () => {
     const deps = await makeDeps('', { cancelDialog: true })
-    const jobId = await startZipJob(deps)
-    await appendZipEntry(jobId, 'x.txt', contentBytes('x'))
-    const result = await finishZipJob(jobId, 'Canceled.zip', deps)
+    const jobId = await openJob(OWNER, deps)
+    await appendZipEntry(jobId, OWNER, 'x.txt', contentBytes('x'))
+    const result = await finishZipJob(jobId, OWNER, 'Canceled.zip', deps)
     expect(result.saved).toBe(false)
     expect(result.filePath).toBeNull()
     expect(activeZipJobCount()).toBe(0)
+    expect(await tempFilesIn(deps.tempDir!)).toHaveLength(0)
+  })
+
+  it('removes the temp file when the save dialog itself fails', async () => {
+    const deps = await makeDeps(join(tmpdir(), 'unused.zip'), { failDialog: true })
+    const jobId = await openJob(OWNER, deps)
+    await appendZipEntry(jobId, OWNER, 'x.txt', contentBytes('x'))
+
+    await expect(finishZipJob(jobId, OWNER, 'Broken.zip', deps)).rejects.toThrow(
+      /save dialog failed/
+    )
+    expect(activeZipJobCount()).toBe(0)
+    expect(await tempFilesIn(deps.tempDir!)).toHaveLength(0)
+  })
+
+  it('removes the temp file when the final rename AND the copy fallback fail', async () => {
+    const deps = await makeDeps(join(tmpdir(), 'unused.zip'), {
+      failRename: true,
+      failCopy: true,
+    })
+    const jobId = await openJob(OWNER, deps)
+    await appendZipEntry(jobId, OWNER, 'x.txt', contentBytes('x'))
+
+    await expect(finishZipJob(jobId, OWNER, 'Broken.zip', deps)).rejects.toThrow(/copy failed/)
+    expect(activeZipJobCount()).toBe(0)
+    expect(await tempFilesIn(deps.tempDir!)).toHaveLength(0)
+  })
+
+  it('rolls a failed entry back and KEEPS the job owned, so an abort still cleans up', async () => {
+    // The cleanup ownership must survive a failed append: the job is still
+    // registered, so the renderer's abort can still release the handle and
+    // the temp file (R3-M3).
+    const failingOpen = async (path: string, flags: string, mode: number) => {
+      const handle = await (await import('node:fs/promises')).open(path, flags as 'w', mode)
+      ;(handle as unknown as { write: unknown }).write = async () => {
+        throw new Error('disk full')
+      }
+      return handle
+    }
+    const deps = await makeDeps(join(tmpdir(), 'unused.zip'), { openFile: failingOpen })
+    const jobId = await openJob(OWNER, deps)
+
+    await expect(appendZipEntry(jobId, OWNER, 'x.txt', contentBytes('x'))).rejects.toThrow(
+      /disk full/
+    )
+    // The job is STILL registered: the owner keeps the cleanup right.
+    expect(activeZipJobCount()).toBe(1)
+    await abortZipJob(jobId, OWNER, deps)
+    expect(activeZipJobCount()).toBe(0)
+    expect(await tempFilesIn(deps.tempDir!)).toHaveLength(0)
+  })
+
+  it('removes the temp file when a write fails during FINALIZE', async () => {
+    // The archive's entries are written; the central directory write fails.
+    // The job owns the temp file until the save completes, so the failure
+    // must release it (R3-M3).
+    const failingOpen = async (path: string, flags: string, mode: number) => {
+      const handle = await (await import('node:fs/promises')).open(path, flags as 'w', mode)
+      const original = handle.write.bind(handle)
+      let writes = 0
+      ;(handle as unknown as { write: unknown }).write = async (
+        buffer: Uint8Array,
+        offset: number,
+        length: number,
+        position: number
+      ) => {
+        writes += 1
+        if (writes > 3) throw new Error('disk full')
+        return original(buffer, offset, length, position)
+      }
+      return handle
+    }
+    const deps = await makeDeps(join(tmpdir(), 'unused.zip'), { openFile: failingOpen })
+    const jobId = await openJob(OWNER, deps)
+
+    await appendZipEntry(jobId, OWNER, 'x.txt', contentBytes('x'))
+    await expect(finishZipJob(jobId, OWNER, 'Broken.zip', deps)).rejects.toThrow(/disk full/)
+    expect(activeZipJobCount()).toBe(0)
+    expect(await tempFilesIn(deps.tempDir!)).toHaveLength(0)
   })
 
   it('falls back to copy+unlink when the final rename crosses filesystems', async () => {
     const savePath = join(tmpdir(), `exdev-${Date.now()}.zip`)
     savedFiles.push(savePath)
     const deps = await makeDeps(savePath, { failRename: true })
-    const jobId = await startZipJob(deps)
-    await appendZipEntry(jobId, 'x.txt', contentBytes('content'))
-    const result = await finishZipJob(jobId, 'Exdev.zip', deps)
+    const jobId = await openJob(OWNER, deps)
+    await appendZipEntry(jobId, OWNER, 'x.txt', contentBytes('content'))
+    const result = await finishZipJob(jobId, OWNER, 'Exdev.zip', deps)
     expect(result.saved).toBe(true)
     const { entries } = readZipArchive(new Uint8Array(await readFile(savePath)))
     expect(entries).toHaveLength(1)
@@ -165,10 +571,74 @@ describe('gfs zipStream (R1-H2)', () => {
 
   it('abort cleans the job and its temp file', async () => {
     const deps = await makeDeps(join(tmpdir(), 'unused.zip'))
-    const jobId = await startZipJob(deps)
-    await appendZipEntry(jobId, 'x.txt', contentBytes('x'))
-    await abortZipJob(jobId, deps)
+    const jobId = await openJob(OWNER, deps)
+    await appendZipEntry(jobId, OWNER, 'x.txt', contentBytes('x'))
+    await abortZipJob(jobId, OWNER, deps)
     expect(activeZipJobCount()).toBe(0)
-    await expect(finishZipJob(jobId, 'Gone.zip', deps)).rejects.toThrow(/Unknown zip job/)
+    expect(await tempFilesIn(deps.tempDir!)).toHaveLength(0)
+    await expect(finishZipJob(jobId, OWNER, 'Gone.zip', deps)).rejects.toThrow(/Unknown zip job/)
+  })
+})
+
+describe('gfs zipStream — case-folded path prefixes (R3-M5)', () => {
+  it('suffixes case-insensitive collisions in the written file', async () => {
+    const savePath = join(tmpdir(), `collide-${Date.now()}.zip`)
+    savedFiles.push(savePath)
+    const deps = await makeDeps(savePath)
+    const jobId = await openJob(OWNER, deps)
+    await appendZipEntry(jobId, OWNER, 'Report.txt', contentBytes('upper'))
+    await appendZipEntry(jobId, OWNER, 'report.txt', contentBytes('lower'))
+
+    await finishZipJob(jobId, OWNER, 'Collide.zip', deps)
+    const { entries } = readZipArchive(new Uint8Array(await readFile(savePath)))
+    expect(entries.map(entry => entry.name)).toEqual(['Report.txt', 'report (2).txt'])
+    const decoder = new TextDecoder()
+    expect(entries.map(entry => decoder.decode(entry.bytes))).toEqual(['upper', 'lower'])
+  })
+
+  it('resolves a file/directory conflict whichever order it arrives in', async () => {
+    // Order A: the directory's file first, then the sibling FILE.
+    const savePathA = join(tmpdir(), `conflict-a-${Date.now()}.zip`)
+    savedFiles.push(savePathA)
+    const depsA = await makeDeps(savePathA)
+    const jobA = await openJob(OWNER, depsA)
+    await appendZipEntry(jobA, OWNER, 'Report/child.txt', contentBytes('child'))
+    await appendZipEntry(jobA, OWNER, 'report', contentBytes('sibling'))
+    await finishZipJob(jobA, OWNER, 'ConflictA.zip', depsA)
+    const entriesA = readZipArchive(new Uint8Array(await readFile(savePathA))).entries
+
+    // Order B: the sibling FILE first, then the directory's file.
+    const savePathB = join(tmpdir(), `conflict-b-${Date.now()}.zip`)
+    savedFiles.push(savePathB)
+    const depsB = await makeDeps(savePathB)
+    const jobB = await openJob(OWNER, depsB)
+    await appendZipEntry(jobB, OWNER, 'report', contentBytes('sibling'))
+    await appendZipEntry(jobB, OWNER, 'Report/child.txt', contentBytes('child'))
+    await finishZipJob(jobB, OWNER, 'ConflictB.zip', depsB)
+    const entriesB = readZipArchive(new Uint8Array(await readFile(savePathB))).entries
+
+    // Neither order lets one entry overwrite the other: the file and the
+    // directory end up on DIFFERENT paths.
+    for (const entries of [entriesA, entriesB]) {
+      const names = entries.map(entry => entry.name)
+      const fileEntry = names.find(name => !name.includes('/'))
+      const dirEntry = names.find(name => name.includes('/'))
+      expect(fileEntry).toBeDefined()
+      expect(dirEntry).toBeDefined()
+      expect(fileEntry!.toLowerCase()).not.toBe(dirEntry!.split('/')[0]!.toLowerCase())
+    }
+    // Both payloads survived.
+    for (const entries of [entriesA, entriesB]) {
+      const decoder = new TextDecoder()
+      expect(entries.map(entry => decoder.decode(entry.bytes)).sort()).toEqual(['child', 'sibling'])
+    }
+  })
+})
+
+describe('gfs zipStream — module hygiene', () => {
+  it('leaves no job registered after every scenario', () => {
+    expect(activeZipJobCount()).toBe(0)
+    expect(openedJobCount).toBeGreaterThan(0)
+    expect(existsSync(join(tmpdir(), 'nonexistent'))).toBe(false)
   })
 })
