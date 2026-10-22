@@ -147,6 +147,7 @@ function makeController(): AppController {
     currentTeamId: 'team-a',
     navItem: DESKTOP_ROUTES.chat,
     selectedAgent: null,
+    chatDrawerDesiredRef: { current: false },
     selectedAgentRoute: null,
     selectedContext: null,
     selectedTeam: null,

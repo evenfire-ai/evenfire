@@ -323,6 +323,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     currentTeamId: 'team-a',
     navItem: DESKTOP_ROUTES.chat,
     selectedAgent: null,
+    chatDrawerDesiredRef: { current: false },
     selectedAgentRoute: null,
     selectedContext: null,
     selectedTeam: null,
@@ -1807,6 +1808,35 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
     resizeTo(2000)
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
     expect(screen.queryByRole('button', { name: 'Open chats' })).toBeNull()
+  })
+
+  // The controller marks a held Host as interrupted only when the drawer was
+  // showing its chat. App hands it the open intent, not the visibility: a hold
+  // that lands while width suppression hides the drawer still belongs to it.
+  it('gives the controller the drawer open intent, also while the width hides the drawer', () => {
+    render(<App />)
+    const desired = () => currentController.chatDrawerDesiredRef.current
+    expect(desired()).toBe(false)
+
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
+    expect(desired()).toBe(true)
+
+    resizeTo(800)
+    // Witness: the drawer is suppressed, so visibility and intent now differ.
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
+    expect(desired()).toBe(true)
+
+    resizeTo(1200)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
+    expect(desired()).toBe(false)
   })
 
   // Repro of round-4 #1: below the minimum panel width the drawer is suppressed

@@ -375,7 +375,11 @@ export function useAppController() {
   activeChatAgentRefRef.current = activeChatAgentRef
   // The Apps picker shows no active tab, so no chat is focused while it is open.
   const focusedChatAgentRef = nav.appsPickerActive ? null : activeChatAgentRef
-  // The selected Host a hold deselected, until the next selection or scope change.
+  // App writes the chat drawer's open intent on every render. It stays true
+  // while the width hides the drawer, which keeps its chat when it returns.
+  const chatDrawerDesiredRef = useRef(false)
+  // The selected Host a hold deselected while the chat drawer was open, until
+  // the next selection or scope change.
   const interruptedHostRef = useRef<string | null>(null)
   const isHostAccessBlocked = useCallback(
     (agentRef: string) => hostAuthority.isBlocked(agentRef),
@@ -434,7 +438,7 @@ export function useAppController() {
       setHostAuthorityRevision(revision => revision + 1)
       const selected = selectedAgentRef.current === agentRef
       if (selected) {
-        interruptedHostRef.current = agentRef
+        if (chatDrawerDesiredRef.current) interruptedHostRef.current = agentRef
         nav.setSelectedAgent(null)
       }
       // A revocation is also announced for the Host of the active chat tab, even
@@ -1697,6 +1701,7 @@ export function useAppController() {
     heldHosts,
     focusedChatAgentRef,
     keepFocusedChat,
+    chatDrawerDesiredRef,
     hostAuthorityRevision,
     selectedAgentRoute: nav.selectedAgentRoute,
     setSelectedAgent: nav.setSelectedAgent,
