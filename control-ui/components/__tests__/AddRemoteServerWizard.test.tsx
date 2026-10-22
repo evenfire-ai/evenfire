@@ -13,6 +13,8 @@ import {
   ATLASSIAN_DISCOVER,
   ATLASSIAN_DISCOVER_UNCONFIGURED,
   CALLBACK_UNCONFIGURED_FAILURE,
+  ENTRA_NO_SCOPES_DISCOVER,
+  ENTRA_UNKNOWN_GUID_DISCOVER,
   LINEAR_DISCOVER,
   LINEAR_DISCOVER_UNCONFIGURED,
   LINEAR_INSTALLED,
@@ -21,6 +23,12 @@ import {
   PRE_REGISTERED_PER_SERVER_DISCOVER,
   PRE_REGISTERED_PER_SERVER_INSTALLED,
   PRE_REGISTERED_SHARED_INSTALLED,
+  SCOPE_AUDIENCE_MISSING_FAILURE,
+  SCOPE_AUDIENCE_UNVERIFIED_FAILURE,
+  SCOPE_LIMIT_EXCEEDED_FAILURE,
+  WORKIQ_DISCOVER,
+  WORKIQ_DISCOVER_TENANT_REQUIRED,
+  WORKIQ_INSTALLED,
   apiErrorFrom,
 } from '../../test/fixtures/remoteMcpWire'
 import { AddRemoteServerWizard } from '../AddRemoteServerWizard'
@@ -76,6 +84,10 @@ afterEach(() => {
   // next test, then restore the default successful copy.
   copyMock.mockReset()
   copyMock.mockResolvedValue(true)
+  // Same for the network stubs: a test that fails before consuming its queued answers
+  // must not hand them to the next one.
+  discoverMock.mockReset()
+  installMock.mockReset()
 })
 
 function renderWizard(props?: Partial<Parameters<typeof AddRemoteServerWizard>[0]>) {
@@ -122,7 +134,7 @@ describe('AddRemoteServerWizard', () => {
     expect(screen.getByText('https://mcp.notion.com/token')).toBeInTheDocument()
     // Notion's issuer and resource share this value, so it appears more than once.
     expect(screen.getAllByText('https://mcp.notion.com').length).toBeGreaterThanOrEqual(1)
-    expect(screen.getByText('default')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('default')).toBeInTheDocument()
   })
 
   it('D-4: editing the URL after a detect invalidates it and blocks proceeding until re-detect', async () => {
@@ -492,5 +504,304 @@ describe('AddRemoteServerWizard', () => {
     expect(
       screen.queryByRole('region', { name: 'Authorization server hosts' })
     ).not.toBeInTheDocument()
+  })
+
+  // ── Microsoft Entra ID (tenant prompt, editable scopes, profile) ───────────
+
+  const WORKIQ_URL = 'https://workiq.svc.cloud.microsoft/mcp'
+  const TENANT = '72f988bf-86f1-41af-91ab-2d7cd011db47'
+  const TENANT_AUTHORITY = `https://login.microsoftonline.com/${TENANT}/v2.0`
+
+  function tenantInput() {
+    return screen.getByLabelText(/Microsoft Entra tenant ID/)
+  }
+
+  function scopesInput() {
+    return screen.getByLabelText('Scopes')
+  }
+
+  function lastInstallBody() {
+    const calls = installMock.mock.calls
+    return calls[calls.length - 1]?.[0]
+  }
+
+  /** Detect → tenant_required → type the tenant → Detect against `body`. */
+  async function detectEntra(body: DiscoverRemoteResponse, tenant = TENANT) {
+    discoverMock
+      .mockRejectedValueOnce(apiErrorFrom(WORKIQ_DISCOVER_TENANT_REQUIRED))
+      .mockResolvedValueOnce(body)
+    const utils = renderWizard()
+    await fillIdentity(WORKIQ_URL, 'workiq')
+    clickDetect()
+    await screen.findByLabelText(/Microsoft Entra tenant ID/)
+    fireEvent.change(tenantInput(), { target: { value: tenant } })
+    clickDetect()
+    await screen.findByLabelText('Scopes')
+    return utils
+  }
+
+  function fillCredentials() {
+    fireEvent.change(screen.getByLabelText(/Client ID/), { target: { value: 'cid' } })
+    fireEvent.change(screen.getByLabelText(/Client secret/), { target: { value: 'secret' } })
+  }
+
+  async function toConfirm() {
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    return screen.findByRole('button', { name: 'Install remote server' })
+  }
+
+  it('entra 1: tenant_required asks for the tenant instead of showing an error', async () => {
+    discoverMock.mockRejectedValueOnce(apiErrorFrom(WORKIQ_DISCOVER_TENANT_REQUIRED))
+    renderWizard()
+    await fillIdentity(WORKIQ_URL, 'workiq')
+    clickDetect()
+
+    expect(await screen.findByLabelText(/Microsoft Entra tenant ID/)).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    // Still on step 0, waiting for the tenant.
+    expect(screen.getByRole('button', { name: 'Detect' })).toBeDisabled()
+  })
+
+  it('entra 2: a tenant that is not a GUID keeps Detect disabled and says why', async () => {
+    discoverMock.mockRejectedValueOnce(apiErrorFrom(WORKIQ_DISCOVER_TENANT_REQUIRED))
+    renderWizard()
+    await fillIdentity(WORKIQ_URL, 'workiq')
+    clickDetect()
+    await screen.findByLabelText(/Microsoft Entra tenant ID/)
+
+    fireEvent.change(tenantInput(), { target: { value: 'contoso.onmicrosoft.com' } })
+    expect(screen.getByRole('button', { name: 'Detect' })).toBeDisabled()
+    expect(screen.getByText(/Enter the tenant ID as a GUID/)).toBeInTheDocument()
+    expect(discoverMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('entra 3: an upper-case GUID is sent as the lower-case tenant authority', async () => {
+    await detectEntra(WORKIQ_DISCOVER, TENANT.toUpperCase())
+    expect(discoverMock).toHaveBeenCalledTimes(2)
+    expect(discoverMock).toHaveBeenNthCalledWith(1, WORKIQ_URL)
+    expect(discoverMock).toHaveBeenNthCalledWith(2, WORKIQ_URL, TENANT_AUTHORITY)
+  })
+
+  it('entra 4: shows the Entra profile, the unsent resource and the advertised scopes', async () => {
+    await detectEntra(WORKIQ_DISCOVER)
+    const summary = screen.getByRole('region', { name: 'Detected OAuth configuration' })
+    expect(summary).toHaveTextContent('Authorization serverMicrosoft Entra ID')
+    expect(summary).toHaveTextContent(
+      `${WORKIQ_DISCOVER.detected.resource} (not sent to Microsoft Entra ID)`
+    )
+    expect(scopesInput()).toHaveValue(WORKIQ_DISCOVER.detected.scopes.join(' '))
+    expect(screen.queryByText(/does not support token refresh/i)).not.toBeInTheDocument()
+
+    fillCredentials()
+    await toConfirm()
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
+  })
+
+  it('entra 5: the install sends the shown scopes and the tenant authority', async () => {
+    installMock.mockResolvedValue(WORKIQ_INSTALLED)
+    await detectEntra(WORKIQ_DISCOVER)
+    fillCredentials()
+    await toConfirm()
+    // The confirm step lists the scopes that will be requested.
+    expect(screen.getByRole('region', { name: 'Install summary' })).toHaveTextContent(
+      `Scopes${WORKIQ_DISCOVER.detected.scopes.join(' ')}`
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Install remote server' }))
+
+    await waitFor(() => expect(installMock).toHaveBeenCalledTimes(1))
+    expect(lastInstallBody()).toMatchObject({
+      serverName: 'workiq',
+      mode: 'pre-registered',
+      authorizationServer: TENANT_AUTHORITY,
+      scopes: WORKIQ_DISCOVER.detected.scopes,
+    })
+    expect(lastInstallBody()).not.toHaveProperty('confirmedUnverifiedScopes')
+    expect(await screen.findByRole('textbox', { name: 'Redirect URI' })).toHaveValue(
+      WORKIQ_INSTALLED.redirectUri
+    )
+  })
+
+  it('entra 5b: edited scopes are what the install sends', async () => {
+    installMock.mockResolvedValue(WORKIQ_INSTALLED)
+    await detectEntra(WORKIQ_DISCOVER)
+    fireEvent.change(scopesInput(), {
+      target: { value: 'api://workiq.svc.cloud.microsoft/WorkIQAgent.Ask' },
+    })
+    fillCredentials()
+    await toConfirm()
+    fireEvent.click(screen.getByRole('button', { name: 'Install remote server' }))
+
+    await waitFor(() => expect(installMock).toHaveBeenCalledTimes(1))
+    expect(lastInstallBody()?.scopes).toEqual(['api://workiq.svc.cloud.microsoft/WorkIQAgent.Ask'])
+  })
+
+  it('entra 5c: an emptied field with the profile still sends the advertised list', async () => {
+    installMock.mockResolvedValue(WORKIQ_INSTALLED)
+    await detectEntra(WORKIQ_DISCOVER)
+    fireEvent.change(scopesInput(), { target: { value: '   ' } })
+    fillCredentials()
+    await toConfirm()
+    fireEvent.click(screen.getByRole('button', { name: 'Install remote server' }))
+
+    await waitFor(() => expect(installMock).toHaveBeenCalledTimes(1))
+    expect(lastInstallBody()?.scopes).toEqual(WORKIQ_DISCOVER.detected.scopes)
+  })
+
+  it('entra 6: editing the URL drops the tenant prompt', async () => {
+    discoverMock.mockRejectedValueOnce(apiErrorFrom(WORKIQ_DISCOVER_TENANT_REQUIRED))
+    renderWizard()
+    await fillIdentity(WORKIQ_URL, 'workiq')
+    clickDetect()
+    await screen.findByLabelText(/Microsoft Entra tenant ID/)
+    fireEvent.change(tenantInput(), { target: { value: TENANT } })
+
+    fireEvent.change(screen.getByPlaceholderText('https://mcp.example.com/mcp'), {
+      target: { value: 'https://mcp.linear.app/mcp' },
+    })
+    expect(screen.queryByLabelText(/Microsoft Entra tenant ID/)).not.toBeInTheDocument()
+
+    // A later tenant_required for the new URL starts from an empty tenant.
+    discoverMock.mockRejectedValueOnce(apiErrorFrom(WORKIQ_DISCOVER_TENANT_REQUIRED))
+    clickDetect()
+    expect(await screen.findByLabelText(/Microsoft Entra tenant ID/)).toHaveValue('')
+    expect(discoverMock).toHaveBeenLastCalledWith('https://mcp.linear.app/mcp')
+  })
+
+  it('entra 7: a server advertising no scopes installs with an empty field and no scopes', async () => {
+    // No golden advertises an empty list; Linear's body with only `scopes` emptied stands
+    // for a PRM and AS that both omit scopes_supported (the backend then derives []).
+    const noScopes: DiscoverRemoteResponse = {
+      ...LINEAR_DISCOVER,
+      detected: { ...LINEAR_DISCOVER.detected, scopes: [] },
+    }
+    discoverMock.mockResolvedValue(noScopes)
+    installMock.mockResolvedValue(LINEAR_INSTALLED)
+    renderWizard()
+    await fillIdentity('https://mcp.linear.app/mcp', 'linear')
+    clickDetect()
+    expect(await screen.findByLabelText('Scopes')).toHaveValue('')
+
+    const install = await toConfirm()
+    expect(install).toBeEnabled()
+    fireEvent.click(install)
+    await waitFor(() => expect(installMock).toHaveBeenCalledTimes(1))
+    expect(lastInstallBody()).not.toHaveProperty('scopes')
+    expect(lastInstallBody()).not.toHaveProperty('authorizationServer')
+  })
+
+  it('entra 7b: without a profile, untouched scopes are not sent and edited ones are', async () => {
+    discoverMock.mockResolvedValue(LINEAR_DISCOVER)
+    installMock.mockResolvedValue(LINEAR_INSTALLED)
+    renderWizard()
+    await fillIdentity('https://mcp.linear.app/mcp', 'linear')
+    clickDetect()
+    await screen.findByLabelText('Scopes')
+    fireEvent.change(scopesInput(), { target: { value: 'read' } })
+    fireEvent.click(await toConfirm())
+    await waitFor(() => expect(installMock).toHaveBeenCalledTimes(1))
+    expect(lastInstallBody()?.scopes).toEqual(['read'])
+  })
+
+  it('entra 9: an unverifiable advertised scope must be confirmed, and the confirmation is sent', async () => {
+    installMock.mockResolvedValue(WORKIQ_INSTALLED)
+    const unverified = ENTRA_UNKNOWN_GUID_DISCOVER.detected.unverifiedScopes ?? []
+    expect(unverified.length).toBeGreaterThan(0)
+    await detectEntra(ENTRA_UNKNOWN_GUID_DISCOVER)
+    fillCredentials()
+    const install = await toConfirm()
+
+    const notice = screen.getByText(/cannot tie to this server/).closest('[role="status"]')
+    expect(notice).not.toBeNull()
+    for (const scope of unverified) expect(notice).toHaveTextContent(scope)
+    const confirm = screen.getByRole('checkbox', {
+      name: 'I confirm these scopes belong to this server’s own API.',
+    })
+    expect(install).toBeDisabled()
+
+    fireEvent.click(confirm)
+    expect(install).toBeEnabled()
+    fireEvent.click(install)
+    await waitFor(() => expect(installMock).toHaveBeenCalledTimes(1))
+    expect(lastInstallBody()?.confirmedUnverifiedScopes).toEqual(unverified)
+  })
+
+  it('entra 9b: going back clears a confirmation', async () => {
+    await detectEntra(ENTRA_UNKNOWN_GUID_DISCOVER)
+    fillCredentials()
+    await toConfirm()
+    fireEvent.click(screen.getByRole('checkbox'))
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+    const install = await toConfirm()
+    expect(screen.getByRole('checkbox')).not.toBeChecked()
+    expect(install).toBeDisabled()
+  })
+
+  it('entra 10: an edited scope the backend cannot verify turns into the confirmation', async () => {
+    const edited = (SCOPE_AUDIENCE_UNVERIFIED_FAILURE.body as { scopes: string[] }).scopes
+    installMock
+      .mockRejectedValueOnce(apiErrorFrom(SCOPE_AUDIENCE_UNVERIFIED_FAILURE))
+      .mockResolvedValueOnce(WORKIQ_INSTALLED)
+    await detectEntra(WORKIQ_DISCOVER)
+    fireEvent.change(scopesInput(), { target: { value: edited.join(' ') } })
+    fillCredentials()
+    const install = await toConfirm()
+    // The discover-time list does not cover edited scopes: nothing to confirm yet.
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
+    fireEvent.click(install)
+
+    const confirm = await screen.findByRole('checkbox')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(install).toBeDisabled()
+    expect(lastInstallBody()).not.toHaveProperty('confirmedUnverifiedScopes')
+
+    fireEvent.click(confirm)
+    fireEvent.click(install)
+    await waitFor(() => expect(installMock).toHaveBeenCalledTimes(2))
+    expect(lastInstallBody()).toMatchObject({ scopes: edited, confirmedUnverifiedScopes: edited })
+  })
+
+  it('entra 11: a known GUID scope for its own host needs no confirmation', async () => {
+    expect(WORKIQ_DISCOVER.detected.unverifiedScopes).toBeUndefined()
+    await detectEntra(WORKIQ_DISCOVER)
+    fillCredentials()
+    const install = await toConfirm()
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
+    expect(screen.queryByText(/cannot tie to this server/)).not.toBeInTheDocument()
+    expect(install).toBeEnabled()
+  })
+
+  it('entra 12: sign-in scopes only warn on detect and the install explains the 400', async () => {
+    installMock.mockRejectedValueOnce(apiErrorFrom(SCOPE_AUDIENCE_MISSING_FAILURE))
+    await detectEntra(ENTRA_NO_SCOPES_DISCOVER)
+    const banner = screen.getByText(/doesn’t advertise its own scope/)
+    expect(banner.closest('[role="status"]')).not.toBeNull()
+
+    fillCredentials()
+    fireEvent.click(await toConfirm())
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Add this server’s own scope. Sign-in scopes alone (openid, profile, email, offline_access) would send a Microsoft Graph token to the server.'
+    )
+  })
+
+  it('entra 13: 128 scopes pass the field; the backend limit message is shown', async () => {
+    installMock.mockRejectedValueOnce(apiErrorFrom(SCOPE_LIMIT_EXCEEDED_FAILURE))
+    await detectEntra(WORKIQ_DISCOVER)
+    const many = Array.from({ length: 128 }, (_, i) => `api://workiq.svc.cloud.microsoft/Scope${i}`)
+    fireEvent.change(scopesInput(), { target: { value: many.join(' ') } })
+    expect(screen.queryByText(/At most 128 scopes/)).not.toBeInTheDocument()
+
+    fillCredentials()
+    fireEvent.click(await toConfirm())
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      (SCOPE_LIMIT_EXCEEDED_FAILURE.body as { message: string }).message
+    )
+    expect(lastInstallBody()?.scopes).toEqual(many)
+  })
+
+  it('entra: a scope with characters OAuth forbids blocks Continue with the profile', async () => {
+    await detectEntra(WORKIQ_DISCOVER)
+    fireEvent.change(scopesInput(), { target: { value: 'bad"scope' } })
+    expect(screen.getByText(/contains characters OAuth does not allow/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled()
   })
 })
