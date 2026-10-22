@@ -765,7 +765,11 @@ export function createAdminRemoteMcpRouter(
       const audienceViolation = profileScopeViolation(discovery.asProfile, body.baseUrl, scopes)
       if (audienceViolation !== null) {
         reqLog.warn(
-          { event: 'remote_install_scope_audience_rejected', serverName: body.serverName },
+          {
+            event: 'remote_install_scope_audience_rejected',
+            serverName: body.serverName,
+            reason: 'mismatch',
+          },
           'remote install rejected: scope outside the server audience'
         )
         res.status(400).json({
@@ -777,6 +781,14 @@ export function createAdminRemoteMcpRouter(
         return
       }
       if (!profileHasResourceScope(discovery.asProfile, body.baseUrl, scopes)) {
+        reqLog.warn(
+          {
+            event: 'remote_install_scope_audience_rejected',
+            serverName: body.serverName,
+            reason: 'missing',
+          },
+          'remote install rejected: no scope belongs to the server audience'
+        )
         res.status(400).json({
           error: 'scope_audience_missing',
           message:
@@ -788,6 +800,15 @@ export function createAdminRemoteMcpRouter(
       const unverifiedScopes = profileUnverifiedScopes(discovery.asProfile, body.baseUrl, scopes)
       const unconfirmed = unverifiedScopes.filter(scope => !confirmed.has(scope))
       if (unconfirmed.length > 0) {
+        reqLog.warn(
+          {
+            event: 'remote_install_scope_audience_rejected',
+            serverName: body.serverName,
+            reason: 'unverified',
+            scopes: unconfirmed,
+          },
+          'remote install rejected: scopes not confirmed as belonging to the server'
+        )
         res.status(400).json({
           error: 'scope_audience_unverified',
           scopes: unconfirmed,

@@ -3068,8 +3068,45 @@ describe('Microsoft Entra ID — remote install with scopes, scope audience and 
     const reqLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
     await entraInstall(ENTRA_GRAPH_SCOPE_PILOT, gw, { scopes: ['Mail.Read'] }, { reqLog })
     expect(reqLog.warn).toHaveBeenCalledWith(
-      { event: 'remote_install_scope_audience_rejected', serverName: 'workiq' },
+      { event: 'remote_install_scope_audience_rejected', serverName: 'workiq', reason: 'mismatch' },
       'remote install rejected: scope outside the server audience'
+    )
+  })
+
+  it('a missing server audience is logged on the request logger', async () => {
+    const gw = gatewayWithContext()
+    const reqLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    const res = await entraInstall(
+      ENTRA_NO_SCOPES_PILOT,
+      gw,
+      { scopes: ['offline_access'] },
+      { reqLog }
+    )
+    expect(res.body.error).toBe('scope_audience_missing')
+    expect(reqLog.warn).toHaveBeenCalledWith(
+      { event: 'remote_install_scope_audience_rejected', serverName: 'workiq', reason: 'missing' },
+      'remote install rejected: no scope belongs to the server audience'
+    )
+  })
+
+  it('unconfirmed unverified scopes are logged on the request logger with those scopes', async () => {
+    const gw = gatewayWithContext()
+    const reqLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    const res = await entraInstall(
+      ENTRA_UNKNOWN_GUID_PILOT,
+      gw,
+      { scopes: [UNKNOWN_GUID_SCOPE] },
+      { reqLog }
+    )
+    expect(res.body.error).toBe('scope_audience_unverified')
+    expect(reqLog.warn).toHaveBeenCalledWith(
+      {
+        event: 'remote_install_scope_audience_rejected',
+        serverName: 'workiq',
+        reason: 'unverified',
+        scopes: [UNKNOWN_GUID_SCOPE],
+      },
+      'remote install rejected: scopes not confirmed as belonging to the server'
     )
   })
 
