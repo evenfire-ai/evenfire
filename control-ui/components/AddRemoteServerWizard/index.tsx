@@ -155,6 +155,9 @@ export function AddRemoteServerWizard({
     : null
   const asEndpointHosts = detected?.asEndpointHosts
 
+  // control-api requires the scopes for any authorization-server profile, not only
+  // Entra's; `entraProfile` only picks Entra-specific copy.
+  const hasAsProfile = Boolean(detected?.asProfile)
   const entraProfile = detected?.asProfile === 'entra-v2'
   // Without a profile, the advertised list is accepted as typed even when it breaks
   // RFC 6749, so a server with non-conforming scopes is not blocked here. With a profile
@@ -162,7 +165,7 @@ export function AddRemoteServerWizard({
   const scopeTokens = scopesInput.trim().split(/\s+/).filter(Boolean)
   const scopesAsAdvertised =
     detected !== null &&
-    !entraProfile &&
+    !hasAsProfile &&
     scopeTokens.length === detected.scopes.length &&
     scopeTokens.every((scope, i) => scope === detected.scopes[i])
   const parsedScopes = scopesAsAdvertised
@@ -307,7 +310,7 @@ export function AddRemoteServerWizard({
         clientSecret: needsCredentials ? clientSecret : undefined,
         // With a profile control-api requires the list, so the one on screen is always
         // sent rather than letting a re-discovery decide what gets installed.
-        scopes: entraProfile ? effectiveScopes : scopesOverride,
+        scopes: hasAsProfile ? effectiveScopes : scopesOverride,
         authorizationServer: detectedAuthorizationServer,
         confirmedUnverifiedScopes: unverifiedConfirmed ? unverifiedToConfirm : undefined,
       })
