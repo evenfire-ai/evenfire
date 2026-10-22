@@ -233,6 +233,15 @@ describe('remote MCP wire goldens — POST /discover', () => {
     expect(actual).toEqual(golden('discover.workiqTenantRequired', actual))
   })
 
+  it('discover.entraUnknownTenant: a tenant Entra does not know → 424 fetch_failed', async () => {
+    const actual = await discover(ENTRA_WORKIQ_PILOT, {
+      authorizationServer:
+        'https://login.microsoftonline.com/00000000-0000-0000-0000-000000000001/v2.0',
+    })
+    expect(actual.status).toBe(424)
+    expect(actual).toEqual(golden('discover.entraUnknownTenant', actual))
+  })
+
   it('discover.issuerPublicSuffix: issuer on a public suffix, no RFC 9207 → 400', async () => {
     const actual = await discover(ISSUER_ON_PUBLIC_SUFFIX_PILOT)
     expect(actual.status).toBe(400)
@@ -310,6 +319,23 @@ describe('remote MCP wire goldens — POST / (install)', () => {
       expect(actual).toEqual(golden(c.name, actual))
     })
   }
+
+  it('install.scopeLimitExceeded: 128 scopes plus the profile offline_access → 400', async () => {
+    const scopes = Array.from(
+      { length: 128 },
+      (_, i) => `api://workiq.svc.cloud.microsoft/Scope${i}`
+    )
+    const actual = await install(ENTRA_WORKIQ_PILOT, {
+      serverName: 'workiq',
+      mode: 'pre-registered',
+      clientId: '11111111-2222-3333-4444-555555555555',
+      clientSecret: 'test-secret',
+      authorizationServer: ENTRA_TENANT_AUTHORITY,
+      scopes,
+    })
+    expect(actual.status).toBe(400)
+    expect(actual).toEqual(golden('install.scopeLimitExceeded', actual))
+  })
 
   it('install.linear: shared CIMD 201', async () => {
     const actual = await install(PILOTS.linear, { serverName: 'linear', mode: 'cimd' })
