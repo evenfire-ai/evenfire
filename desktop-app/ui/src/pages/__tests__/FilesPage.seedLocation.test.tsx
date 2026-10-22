@@ -375,6 +375,50 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     expect(moveResource).not.toHaveBeenCalled()
   })
 
+  it('loads the real source-parent query for a shared-with-me row before rendering Move', async () => {
+    const parentResourceId = 'source-parent'
+    const row = accessibleResource('shared-folder', 'Shared folder', 'directory', {
+      gfsUri: 'gfs://main/shared-folder',
+      parentResourceId,
+      permissions: ['read'],
+    })
+    const sourcePermissions = delegationAffordances(new Set(['read', 'write', 'delete']), false)
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === parentResourceId) return sourcePermissions
+      if (resourceId === row.resourceId) return delegationAffordances(new Set(['read']), false)
+      throw new Error(`unexpected affordance request for ${resourceId}`)
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => listAccessiblePage([row])),
+          resolve: vi.fn(),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances,
+          listGrants: vi.fn(async () => []),
+          listShares: vi.fn(async () => []),
+        },
+        team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
+        agents: { listMine: vi.fn(async () => []) },
+      },
+    })
+
+    const { client } = renderHarness({ pendingGfsUri: null })
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Options for Shared folder' })).toBeTruthy()
+    )
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Shared folder' }))
+    })
+
+    const queryKey = desktopQueryKeys.gfsAffordances(':user-1:team-1', parentResourceId, 'main')
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith(parentResourceId, 'main'))
+    await waitFor(() => expect(client.getQueryData(queryKey)).toBe(sourcePermissions))
+    expect(screen.getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+    client.clear()
+  })
+
   it('hides current-folder mutations while real permission refresh is pending or rate limited', async () => {
     const folder = await resolveResource(
       resolvedDirectory('folder-active', 'Reports', { gfsUri: SEED_URI })
