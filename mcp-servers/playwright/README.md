@@ -2,7 +2,7 @@
 
 MCP server for browser automation, packaging the upstream Microsoft Playwright MCP image (`mcr.microsoft.com/playwright/mcp`, digest-pinned). Uses StreamableHTTP transport on port 8931.
 
-The [`Dockerfile`](./Dockerfile) keeps the pinned upstream application and browser dependencies, replaces its Node 22.22.0 binary with the official digest-pinned Node 24.22.1 glibc binary, and pre-installs Chromium (`playwright install chromium`). CI verifies the effective Node version and CLI loading on amd64 and arm64. There is no `src/` in this directory, so the tool list remains defined by the upstream [Playwright MCP](https://github.com/microsoft/playwright-mcp) application.
+This is upstream-image packaging, not first-party source: the [`Dockerfile`](./Dockerfile) extends the pinned upstream image and pre-installs the Chromium browser (`playwright install chromium`). There is no `src/` in this directory, so the tool list is defined by the upstream image — per the CRD description, it provides browser automation tools for navigation, DOM interaction, code execution, and screenshot capture. See the upstream [Playwright MCP](https://github.com/microsoft/playwright-mcp) project for the current tool set.
 
 ## Environment Variables / Secrets
 
@@ -21,7 +21,7 @@ docker build -t playwright-mcp-server:latest .
 - `scripts/minikube/build-images.sh` optionally builds/reuses it as `clerum/playwright-mcp-server:test` (gated by `MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE`; the default minikube overlay does not deploy it).
 - `.github/workflows/build-publish.yml` publishes it to `ghcr.io/evenfire-ai/playwright-server` on changes under `mcp-servers/playwright/`.
 
-The in-tree `mcpserver.yaml` still pins the upstream image with Node 22.22.0. A security rollout must publish the validated repository image and replace that reference with its multiarch digest. Changing the Dockerfile alone does not update that manifest, and a mutable `latest` reference does not bind it to the validated artifact.
+Note: the in-tree `mcpserver.yaml` currently points directly at the upstream digest-pinned image rather than the locally built one.
 
 ## Kubernetes Deployment
 
@@ -44,3 +44,15 @@ See [`mcpserver.yaml`](./mcpserver.yaml) for the full CRD spec. Key fields:
 ## Status
 
 Available; deployable via the makefile. No test suite in this directory (unlike `airtable/` and `mongodb/`). Referenced by `docs/crds/context.md` and `charts/clerum-crds/examples/context1.yaml` (a `Context` listing `playwright-server`), and by the `deploy-playwright` target in [`../makefile`](../makefile).
+
+## Node security update status (2026-10-22)
+
+The current upstream digest declares Node 22.22.0. The official `latest`
+(`v0.0.83`), `v0.0.82` and `v0.0.81` image configurations declare Node 24.21.0
+on both amd64 and arm64. These are below the applicable fixed versions in the
+[October 2026 Node advisory](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases).
+
+Keep the official application image and verify an upstream security release
+before updating the deployment digest. The platform's standalone Node upgrade
+does not patch this bundled runtime. This repository does not replace the
+upstream Node binary or publish a custom Node variant for this update.
