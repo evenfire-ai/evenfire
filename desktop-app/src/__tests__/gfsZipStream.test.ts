@@ -10,7 +10,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises'
+import { mkdtemp, open, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -241,11 +241,27 @@ describe('gfs zipStream — streamed payload (R1-H2)', () => {
 
   it('never materializes a large payload as one buffer (R1-H2)', async () => {
     // The near-limit memory claim: a payload is written CHUNK BY CHUNK, so
-    // the writer's peak payload allocation is one chunk, not the file. The
-    // observable witness is the chunk count and the largest chunk seen.
+    // the writer's peak payload allocation is one chunk, not the file.
+    //
+    // The observable witness is the WRITER's own write granularity: the file
+    // handle must never be handed a buffer larger than one chunk. Watching
+    // the PRODUCER's chunk count alone would pass even for a writer that
+    // collected the whole payload into one buffer before writing it — which
+    // is exactly the pre-R1-H2 shape this claim has to exclude.
     const savePath = join(tmpdir(), `large-${Date.now()}.zip`)
     savedFiles.push(savePath)
-    const deps = await makeDeps(savePath)
+    const writeSizes: number[] = []
+    const deps = await makeDeps(savePath, {
+      openFile: async (path, flags, mode) => {
+        const handle = await open(path, flags, mode)
+        const original = handle.write.bind(handle) as (...args: unknown[]) => Promise<unknown>
+        handle.write = ((buffer: Uint8Array, ...rest: unknown[]) => {
+          writeSizes.push(buffer.byteLength)
+          return original(buffer, ...rest)
+        }) as typeof handle.write
+        return handle
+      },
+    })
     const jobId = await openJob(OWNER, deps)
 
     const chunkSize = 64 * 1024
@@ -263,6 +279,12 @@ describe('gfs zipStream — streamed payload (R1-H2)', () => {
     expect(chunksSeen).toBe(chunkCount)
     expect(largestChunk).toBe(chunkSize)
     expect(result.bytes).toBe(chunkSize * chunkCount)
+
+    // The writer's own writes: one per chunk, never a whole-payload buffer.
+    // The local header and the CRC patch are small and are excluded by size.
+    expect(writeSizes.length).toBeGreaterThanOrEqual(chunkCount)
+    expect(Math.max(...writeSizes)).toBeLessThanOrEqual(chunkSize)
+    expect(writeSizes.filter(size => size === chunkSize)).toHaveLength(chunkCount)
 
     await finishZipJob(jobId, OWNER, 'Large.zip', deps)
     const { entries } = readZipArchive(new Uint8Array(await readFile(savePath)))
