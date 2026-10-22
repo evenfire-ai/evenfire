@@ -246,10 +246,16 @@ export interface RemoteOAuthSpec {
 
 /**
  * The scopes an install requests: the operator's list when given, else the advertised
- * defaults, plus whatever the authorization-server profile always requires.
+ * defaults, plus whatever the authorization-server profile always requires. Duplicates
+ * are dropped (first occurrence wins) here rather than in `withProfileScopes`, which the
+ * runtime also applies to already-installed CRs whose wire must not change.
  */
 export function effectiveRemoteScopes(result: DiscoveryResult, override?: string[]): string[] {
-  return withProfileScopes(override ?? defaultScopes(result.prm, result.as), result.asProfile)
+  const scopes = withProfileScopes(
+    override ?? defaultScopes(result.prm, result.as),
+    result.asProfile
+  )
+  return [...new Set(scopes)]
 }
 
 export function buildRemoteOAuthSpec(

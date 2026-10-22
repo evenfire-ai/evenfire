@@ -3100,4 +3100,32 @@ describe('Microsoft Entra ID — remote install with scopes, scope audience and 
     expect(JSON.parse(post?.body ?? '{}').scope).toBe('custom')
     expect((await installedOauth(gw, 'notion-dcr-scopes')).scopes).toEqual(['custom'])
   })
+
+  it('DCR without a profile: a repeated scope is requested and installed once, in first-seen order', async () => {
+    const gw = gatewayWithContext()
+    const { db } = makeInMemoryDynamicClientsDb()
+    const { transport, calls } = makeDcrTransport({
+      responseJson: JSON.stringify(DCR_PUBLIC_REGISTRATION_RESPONSE),
+      redirectUris: 'requested',
+    })
+    const pilot = dcrPilot('public')
+    const app = makeApp(gw, genericProbe, {
+      ...(await pilotDeps(pilot)),
+      db,
+      dcr: { transport, resolveDns: PUBLIC_IP },
+    })
+    const res = await request(app)
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'notion-dcr-dup-scopes',
+        contextRef: 'ctx-a',
+        baseUrl: pilot.mcpUrl,
+        mode: 'dcr',
+        scopes: ['a', 'b', 'a'],
+      })
+    expect(res.status).toBe(201)
+    const post = calls.find(c => c.method === 'POST')
+    expect(JSON.parse(post?.body ?? '{}').scope).toBe('a b')
+    expect((await installedOauth(gw, 'notion-dcr-dup-scopes')).scopes).toEqual(['a', 'b'])
+  })
 })
