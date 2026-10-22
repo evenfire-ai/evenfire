@@ -1,5 +1,5 @@
 /**
- * E2E_GUARDIAN_ENTRY_POINT: root entry, visible configuration and login.
+ * Entry contract: public root, visible configuration and login.
  * E2E_GUARDIAN_IPC_FLOW: chat and both approval decisions use genuine Desktop
  * IPC. The prepared workflow workload produces a receipt and its JSON artifact;
  * this helper only reads receipt evidence after the real workflow executes.

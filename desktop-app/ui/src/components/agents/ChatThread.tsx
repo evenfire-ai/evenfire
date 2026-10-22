@@ -795,7 +795,13 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                           key={message.messageKey}
                           id={chatMessageDomId(message.id)}
                           data-chat-message-id={message.id}
-                          data-testid={message.role === 'assistant' ? 'agent-response' : undefined}
+                          data-testid={
+                            message.role === 'assistant'
+                              ? 'agent-response'
+                              : message.role === 'user'
+                                ? 'user-message'
+                                : undefined
+                          }
                           className={`chat-bubble ${message.role}${message.isError ? ' chat-bubble--error' : ''}${
                             htmlPreview || hasHtmlArtifactMention ? ' chat-bubble--wide' : ''
                           }`}
@@ -1019,6 +1025,10 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
                 return (
                   <div
                     key={chat.id}
+                    data-testid="agent-chat-row"
+                    data-agent-ref={selectedAgent}
+                    data-chat-id={chat.id}
+                    aria-current={chat.id === activeChatId ? 'true' : undefined}
                     className={`agent-dedicated-session-row${isMenuOpen ? ' menu-open' : ''}`}
                   >
                     <span className="agent-dedicated-session-main">

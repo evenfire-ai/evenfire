@@ -338,7 +338,8 @@ for (const kind of CREATE_KINDS) {
 }
 
 // #493: successful replace() only, inside replaceWithConflictRetry. Kind is
-// next.kind ?? 'unknown'. Direct Role PUTs stay invisible until G5.
+// next.kind ?? 'unknown'. Host Role PUTs go through the helper and are
+// counted; replace() calls made outside the helper are not.
 export const writesTotal = counter({
   name: 'clerum_hcc_writes_total',
   help: 'Successful Kubernetes replace() calls issued through replaceWithConflictRetry, by object kind.',

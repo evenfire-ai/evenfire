@@ -56,6 +56,7 @@ vi.mock('../../lib/api', async importOriginal => {
     getHostDetailBundle: vi.fn(),
     getHost: vi.fn(),
     getLlmModels: vi.fn(),
+    getMcpServers: vi.fn(),
     apiSend: vi.fn(),
   }
 })
@@ -177,6 +178,9 @@ describe('HostDetailsPage optional subscription throttling', () => {
         updated_at: '',
       })),
     })
+    // This suite tracks only subscription metadata GETs. Connector details use
+    // the API client directly and are outside that rate-limit contract.
+    vi.mocked(api.getMcpServers).mockResolvedValue({ items: [] } as never)
     fetchMock = vi.fn((input: RequestInfo | URL) => {
       if (String(input).endsWith('/capabilities'))
         return Promise.resolve(

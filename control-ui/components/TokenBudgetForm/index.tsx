@@ -358,7 +358,7 @@ export function TokenBudgetForm({
 
       <FormSection
         title="Thresholds"
-        description="Guardrails applied per task (enforcement arrives in a later phase)."
+        description="Guardrails applied per task. With Block enforcement, a task cannot start below the minimum remaining and is stopped once it exceeds the per-task cap. With Warn, neither stops a task."
       >
         <div className="cu-form-grid cu-form-grid--2">
           <Field

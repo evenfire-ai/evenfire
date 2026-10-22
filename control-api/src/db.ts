@@ -1783,6 +1783,30 @@ async function applyWorkflowRunRetentionColumnsMigration(db: DbClient): Promise<
   `)
 }
 
+/**
+ * Mirror of `spec.triggers.schedule.concurrencyPolicy` (and the legacy
+ * `spec.scheduling.concurrencyPolicy`), written by the WRC schedule sync and
+ * enforced by the control-api schedule worker. The default matches the CRD
+ * default (`Forbid`). The CHECK is part of the column definition, so
+ * `ADD COLUMN IF NOT EXISTS` skips the column and its constraint together on a
+ * re-run; the body is idempotent.
+ */
+async function applyWorkflowScheduleConcurrencyPolicyMigration(db: DbClient): Promise<void> {
+  await db.query(`
+    -- The schedule worker takes FOR UPDATE row locks on workflow_schedules every
+    -- sweep and the ALTER needs ACCESS EXCLUSIVE: bound the wait so a stuck
+    -- holder fails the migration Job loudly instead of hanging it (same 60s
+    -- budget and rationale as the plugin workload SDK reconciliation migration).
+    SET LOCAL lock_timeout = '60s';
+    ALTER TABLE workflow_schedules
+      ADD COLUMN IF NOT EXISTS concurrency_policy TEXT NOT NULL DEFAULT 'Forbid'
+        CONSTRAINT workflow_schedules_concurrency_policy_check
+        CHECK (concurrency_policy IN ('Forbid', 'Replace', 'Allow'));
+    -- Pending migrations share one transaction: do not leak the timeout.
+    SET LOCAL lock_timeout = '0';
+  `)
+}
+
 async function applyWorkflowTriggerSharedFoundationSchema(db: DbClient): Promise<void> {
   await db.query(`
     CREATE TABLE IF NOT EXISTS workflow_approval_trigger_intents (
@@ -6349,6 +6373,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0128_password_work_ownership',
     apply: applyPasswordWorkOwnershipSchema,
   },
+  {
+    version: '0129_workflow_schedules_concurrency_policy',
+    apply: applyWorkflowScheduleConcurrencyPolicyMigration,
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {
@@ -6730,7 +6758,27 @@ export async function assertDbReady(db: DbClient = pool): Promise<void> {
   }
 }
 
-export type DbTransactionOptions = { signal?: AbortSignal }
+export type DbTransactionOptions = {
+  signal?: AbortSignal
+  /** Called only after PostgreSQL acknowledges COMMIT. Must be synchronous and non-throwing. */
+  onCommitAcknowledged?: () => void
+  /** Called when COMMIT was sent but PostgreSQL did not acknowledge its outcome. */
+  onCommitOutcomeUnknown?: () => void
+}
+
+const UNKNOWN_COMMIT_OUTCOME_SQLSTATES = new Set(['08007', '40003'])
+
+function isDefinitivePostgresCommitErrorResponse(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const response = error as { name?: unknown; code?: unknown; severity?: unknown }
+  return (
+    response.name === 'error' &&
+    typeof response.code === 'string' &&
+    /^[0-9A-Z]{5}$/.test(response.code) &&
+    response.severity === 'ERROR' &&
+    !UNKNOWN_COMMIT_OUTCOME_SQLSTATES.has(response.code)
+  )
+}
 
 export async function withTransaction<T>(
   work: (db: DbTransactionClient) => Promise<T>,
@@ -6870,6 +6918,7 @@ export async function withTransaction<T>(
     commitSent = true
     await client.query('COMMIT')
     transactionFinished = true
+    options.onCommitAcknowledged?.()
     // An acknowledged COMMIT is the outcome, even if the signal aborted
     // meanwhile: the finally still evicts the session instead of restoring it.
     return result
@@ -6884,8 +6933,12 @@ export async function withTransaction<T>(
         releaseError = rollbackError instanceof Error ? rollbackError : true
       }
     }
-    // Once COMMIT was sent, a missing reply is an unknown durable outcome.
-    // Cancellation does not establish rollback, no spend or no dispatch.
+    // Only an ERROR-severity PostgreSQL response proves COMMIT was rejected.
+    // FATAL/PANIC may terminate a backend after COMMIT succeeded while its
+    // acknowledgement is withheld, so those and SQLSTATE 08007/40003 stay unknown.
+    if (commitSent && !transactionFinished && !isDefinitivePostgresCommitErrorResponse(error)) {
+      options.onCommitOutcomeUnknown?.()
+    }
     signal?.throwIfAborted()
     throw error
   } finally {

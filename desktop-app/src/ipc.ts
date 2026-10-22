@@ -12,6 +12,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { parseFileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import { AppService } from './appService.js'
+import { runChatGetIndex } from './chatGetIndexHandler.js'
 import {
   getChatStoreBindingGeneration,
   requireChatStore,
@@ -358,6 +359,10 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     return service.getSessionState()
   })
+  ipcMain.handle('auth:getSessionGeneration', async event => {
+    assertTrustedSender(event)
+    return service.getSessionGeneration()
+  })
   ipcMain.handle('auth:getDependenciesHealth', async event => {
     assertTrustedSender(event)
     return service.getDependenciesHealth()
@@ -370,18 +375,52 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     return service.selectRuntimeConfig(sanitizeString(payload?.optionId))
   })
+  ipcMain.handle(
+    'auth:selectRuntimeConfigForHandoff',
+    async (event, payload: { optionId: string; expectedSessionGeneration: unknown }) => {
+      assertTrustedSender(event)
+      const expectedSessionGeneration = payload?.expectedSessionGeneration
+      if (
+        typeof expectedSessionGeneration !== 'number' ||
+        !Number.isSafeInteger(expectedSessionGeneration) ||
+        expectedSessionGeneration < 0
+      ) {
+        throw new Error('Invalid session generation')
+      }
+      return service.selectRuntimeConfigForHandoff(
+        sanitizeString(payload?.optionId),
+        expectedSessionGeneration
+      )
+    }
+  )
   ipcMain.handle('auth:clearRuntimeConfigSelection', async event => {
     assertTrustedSender(event)
     return service.clearRuntimeConfigSelection()
   })
-  ipcMain.handle('auth:saveRuntimeConfig', async (event, payload: DesktopRuntimeConfig) => {
-    assertTrustedSender(event)
-    return service.saveRuntimeConfig({
-      externalRestApiBaseUrl: sanitizeString(payload?.externalRestApiBaseUrl),
-      rpcProxyBaseUrl: sanitizeString(payload?.rpcProxyBaseUrl),
-      appName: sanitizeString(payload?.appName),
-    })
-  })
+  ipcMain.handle(
+    'auth:saveRuntimeConfig',
+    async (event, payload: DesktopRuntimeConfig & { expectedSessionGeneration?: unknown }) => {
+      assertTrustedSender(event)
+      const rawExpectedSessionGeneration = payload?.expectedSessionGeneration
+      if (
+        rawExpectedSessionGeneration !== undefined &&
+        (typeof rawExpectedSessionGeneration !== 'number' ||
+          !Number.isSafeInteger(rawExpectedSessionGeneration) ||
+          rawExpectedSessionGeneration < 0)
+      ) {
+        throw new Error('Invalid session generation')
+      }
+      const runtimeConfig = {
+        externalRestApiBaseUrl: sanitizeString(payload?.externalRestApiBaseUrl),
+        rpcProxyBaseUrl: sanitizeString(payload?.rpcProxyBaseUrl),
+        appName: sanitizeString(payload?.appName),
+      }
+      if (rawExpectedSessionGeneration === undefined) {
+        return service.saveRuntimeConfig(runtimeConfig)
+      }
+      return service.saveRuntimeConfig(runtimeConfig, rawExpectedSessionGeneration)
+    }
+  )
   ipcMain.handle('auth:deleteRuntimeConfig', async (event, payload: { optionId: string }) => {
     assertTrustedSender(event)
     return service.deleteRuntimeConfig(sanitizeString(payload?.optionId))
@@ -464,8 +503,8 @@ export function registerIpcHandlers(service: AppService): void {
   })
   ipcMain.handle('auth:logout', async event => {
     assertTrustedSender(event)
-    await service.logout()
-    return { ok: true }
+    const sessionGeneration = await service.logout()
+    return { ok: true, sessionGeneration }
   })
 
   ipcMain.handle('notifications:isSupported', async event => {
@@ -1820,7 +1859,7 @@ export function registerIpcHandlers(service: AppService): void {
       event,
       payload: {
         agentRef: string
-        sessions?: Array<{ chatId?: unknown; lastActivityAt?: unknown }>
+        sessions?: Array<{ chatId?: unknown; lastActivityAt?: unknown; title?: unknown }>
       }
     ) => {
       assertTrustedSender(event)
@@ -1832,6 +1871,8 @@ export function registerIpcHandlers(service: AppService): void {
               chatId: sanitizeString(session?.chatId),
               lastActivityAt:
                 typeof session?.lastActivityAt === 'string' ? session.lastActivityAt : undefined,
+              title:
+                typeof session?.title === 'string' ? session.title.trim() || undefined : undefined,
             }))
             .filter(session => Boolean(session.chatId))
         : []
@@ -1843,25 +1884,20 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     const agentRef = sanitizeString(payload?.agentRef)
     if (!agentRef) throw new Error('agentRef is required')
-    const store = requireChatStore()
-    // The catalog read must never depend on the deleted-chat artifact cleanup:
-    // a cleanup failure (scope changed mid-flight, no session, an unreadable
-    // chats directory) would otherwise reject the read and leave the renderer
-    // without the tombstones it filters deleted chats with. The failure is
-    // reported with its code and the cleanup stays queued for the next read.
-    // Only this agent's queue is retried (the renderer reads every agent in a
-    // fan-out); the store walks every agent once per bind on its own.
-    try {
-      const authority = service.getChatDeletionFenceAuthority()
-      await store.retryPendingDeleteCleanups(authority.authorityScope, agentRef)
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException | undefined)?.code
-      console.warn(
-        `[chat:getIndex] Deleted-chat cleanup retry failed for agent "${agentRef}"${code ? ` (${code})` : ''}; returning the index with its tombstones`,
-        error
-      )
-    }
-    return store.getIndex(agentRef)
+    return runChatGetIndex(
+      {
+        store: requireChatStore(),
+        getChatDeletionFenceAuthority: () => service.getChatDeletionFenceAuthority(),
+        warnCleanupFailure: error => {
+          const code = (error as NodeJS.ErrnoException | undefined)?.code
+          console.warn(
+            `[chat:getIndex] Deleted-chat cleanup retry failed for agent "${agentRef}"${code ? ` (${code})` : ''}; returning the index with its tombstones`,
+            error
+          )
+        },
+      },
+      agentRef
+    )
   })
 
   ipcMain.handle('chat:dismissOnboarding', async (event, payload: { agentRef: string }) => {

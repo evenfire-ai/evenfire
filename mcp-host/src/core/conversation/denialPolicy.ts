@@ -3,7 +3,7 @@
  *
  * A denial blocks one exact tool name in one conversation until the user who
  * denied it approves that tool again. It survives a restart (persisted on
- * `sessions.denied_tools` as `[{ tool, userId }]`, migration 017).
+ * `sessions.denied_tools` as `[{ tool, userId }]`, migration 018).
  *
  * Every rule lives here, used by both decision lanes (ApprovalController and
  * the guardrail `ask` lane in toolCallPolicy) and both persistence ends
