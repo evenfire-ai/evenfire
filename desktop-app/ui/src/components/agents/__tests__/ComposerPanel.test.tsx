@@ -41,6 +41,7 @@ const composerState: ChatComposerStateContextValue = {
   agentError: null,
   failedAgentSend: null,
   activeChatId: null,
+  workspaceChatTabId: null,
   activeMessageCount: 0,
   composerFocusRequestId: 0,
   requestComposerFocus: vi.fn(),
@@ -1244,6 +1245,7 @@ describe('ComposerPanel failed-send recovery actions', () => {
   it('offers explicit recovery and dispatch and routes each action to the controller', () => {
     composerState.failedAgentSend = failedSend
     composerState.agentError = 'Sending failed'
+    composerState.workspaceChatTabId = 'owner-tab'
     render(<ComposerPanel inline />)
 
     expect(screen.getByText('Sending failed')).toBeTruthy()
@@ -1251,6 +1253,7 @@ describe('ComposerPanel failed-send recovery actions', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Recover input' }))
     expect(actionsMock.handleRecoverFailedAgentSend).toHaveBeenCalledTimes(1)
+    expect(actionsMock.handleRecoverFailedAgentSend).toHaveBeenCalledWith('owner-tab')
     expect(actionsMock.handleDiscardFailedAgentSend).not.toHaveBeenCalled()
 
     fireEvent.click(screen.getByRole('button', { name: 'Discard failed input' }))

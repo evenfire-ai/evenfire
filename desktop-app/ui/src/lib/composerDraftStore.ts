@@ -161,8 +161,10 @@ export function setComposerDraft(
   value: string,
   agentRef?: string,
   workspaceTabId?: string | null
-): void {
+): boolean {
   const key = keyFor(chatId, agentRef)
+  const resourceOwner = resourceDraftOwnersByKey.get(key)
+  if (!workspaceTabId && resourceOwner) return false
   if (chatId === null && workspaceTabId) {
     const pending = pendingResourcePrefillsByTab.get(workspaceTabId)
     const owner = resourceDraftOwnersByKey.get(key)
@@ -170,48 +172,52 @@ export function setComposerDraft(
     if (currentTabDraft?.key === key || (owner && owner.tabId !== workspaceTabId)) {
       removePendingResourcePrefill(workspaceTabId)
       setTabDraft(workspaceTabId, key, value, currentTabDraft?.requestId)
-      return
+      return true
     }
     if (pending) {
       removePendingResourcePrefill(workspaceTabId)
       if ((drafts.get(key) ?? '') && !owner) {
         setTabDraft(workspaceTabId, key, value)
-        return
+        return true
       }
       if (!value) {
         if (owner?.tabId === workspaceTabId) resourceDraftOwnersByKey.delete(key)
         setDraftByKey(key, '')
-        return
+        return true
       }
       resourceDraftOwnersByKey.set(key, { tabId: workspaceTabId, requestId: pending.requestId })
       setDraftByKey(key, value)
-      return
+      return true
     }
     if (owner?.tabId === workspaceTabId && !value) resourceDraftOwnersByKey.delete(key)
   }
   setDraftByKey(key, value)
+  return true
 }
 
 export function clearComposerDraft(
   chatId: string | null,
   agentRef?: string,
   workspaceTabId?: string | null
-): void {
+): boolean {
   const key = keyFor(chatId, agentRef)
+  const resourceOwner = resourceDraftOwnersByKey.get(key)
+  if (!workspaceTabId && resourceOwner) return false
   if (workspaceTabId) {
     const tabDraft = tabDrafts.get(workspaceTabId)
     if (tabDraft?.key === key) {
       setTabDraft(workspaceTabId, key, '')
-      return
+      return true
     }
     removePendingResourcePrefill(workspaceTabId)
     const owner = resourceDraftOwnersByKey.get(key)
-    if (owner && owner.tabId !== workspaceTabId) return
+    if (owner && owner.tabId !== workspaceTabId) return false
     if (owner?.tabId === workspaceTabId) resourceDraftOwnersByKey.delete(key)
   } else {
     resourceDraftOwnersByKey.delete(key)
   }
   setDraftByKey(key, '')
+  return true
 }
 
 /** Cancel an unclaimed request when its destination workspace tab closes. */

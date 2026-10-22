@@ -48,7 +48,7 @@ describe('prefillNewConversationWithGfsResource', () => {
     expect(prefillNewConversationWithGfsResource(tab, 'agent-1', destinationTabId)).toBe(false)
     expect(getComposerDraft(null, 'agent-1', destinationTabId)).toBe(folder.gfsUri)
 
-    setComposerDraft(null, 'existing draft', 'agent-1')
+    setComposerDraft(null, 'existing draft', 'agent-1', destinationTabId)
     expect(prefillNewConversationWithGfsResource(tab, 'agent-1', destinationTabId)).toBe(false)
     expect(getComposerDraft(null, 'agent-1', destinationTabId)).toBe('existing draft')
   })

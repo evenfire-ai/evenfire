@@ -1312,7 +1312,12 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       {failedAgentSend ? (
         <div className="composer-footer">
           <div className="action-row">
-            <Button onClick={onRecoverFailedSend} disabled={agentSending} size="xs" variant="ghost">
+            <Button
+              onClick={() => onRecoverFailedSend(workspaceChatTabId)}
+              disabled={agentSending}
+              size="xs"
+              variant="ghost"
+            >
               {failedAgentSend.answeredWithoutFiles ? 'Recover files' : 'Recover input'}
             </Button>
             <Button onClick={onDiscardFailedSend} disabled={agentSending} size="xs" variant="ghost">

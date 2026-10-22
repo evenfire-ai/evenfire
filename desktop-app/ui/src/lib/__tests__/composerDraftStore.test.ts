@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import fc from 'fast-check'
 import {
   cancelPendingResourceComposerPrefill,
   claimPendingResourceComposerPrefill,
@@ -66,6 +67,43 @@ describe('composerDraftStore', () => {
     clearComposerDraft(null, 'agent-a', 'tab-b')
     expect(getComposerDraft(null, 'agent-a', 'tab-a')).toBe('gfs://main/a')
     expect(getComposerDraft(null, 'agent-a', 'tab-b')).toBe('')
+  })
+
+  it('keeps tabless writes from replacing another tab resource draft', () => {
+    fc.assert(
+      fc.property(
+        fc.string({ minLength: 1 }),
+        fc.string().map(value => `replacement:${value}`),
+        (ownerSuffix, replacement) => {
+          resetComposerDraftStore()
+          const ownerTabId = `owner-${ownerSuffix}`
+          const resourceUri = `gfs://main/${'a'.repeat(32)}`
+          expect(setResourceComposerPrefill(ownerTabId, resourceUri, 'agent-a')).toBe(true)
+
+          // A caller without a workspace identity cannot read the tab-owned
+          // resource draft; it must not be allowed to overwrite or clear it.
+          expect(getComposerDraft(null, 'agent-a')).toBe('')
+          const accepted = setComposerDraft(null, replacement, 'agent-a')
+          expect(getComposerDraft(null, 'agent-a', ownerTabId)).toBe(resourceUri)
+          expect(accepted).toBe(false)
+        }
+      )
+    )
+  })
+
+  it('keeps tabless clears from deleting another tab resource draft', () => {
+    fc.assert(
+      fc.property(fc.string({ minLength: 1 }), ownerSuffix => {
+        resetComposerDraftStore()
+        const ownerTabId = `owner-${ownerSuffix}`
+        const resourceUri = `gfs://main/${'a'.repeat(32)}`
+        expect(setResourceComposerPrefill(ownerTabId, resourceUri, 'agent-a')).toBe(true)
+
+        const cleared = clearComposerDraft(null, 'agent-a')
+        expect(getComposerDraft(null, 'agent-a', ownerTabId)).toBe(resourceUri)
+        expect(cleared).toBe(false)
+      })
+    )
   })
 
   it('releases only the closing tab’s claimed and pending resource drafts', () => {

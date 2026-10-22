@@ -3654,7 +3654,8 @@ export function useAgentChatController({
         if (!taskId) {
           // Synchronous (non-async) response — a direct reply or a structured error.
           const errorRecord = responseRecord.error as
-            { message?: string; code?: string; provider?: string } | undefined
+            | { message?: string; code?: string; provider?: string }
+            | undefined
           // Issue #654: a synchronous failure can arrive as `{error: …}` OR as
           // `{success: false}` without an error object. Both are failures — HTTP
           // 200 or a missing `success` boolean never imply success.
@@ -4052,61 +4053,77 @@ export function useAgentChatController({
     setAgentError(null)
   }, [visibleFailure, releaseRetainedSend, releaseRetainedFailuresForChat])
 
-  const handleRecoverFailedAgentSend = useCallback(() => {
-    if (
-      !visibleFailure ||
-      visibleFailure.agentRef !== activeChatVisibilityRef.current.selectedAgent ||
-      visibleFailure.chatId !== activeChatVisibilityRef.current.activeChatId
-    )
-      return
-    if (visibleFailure.answeredWithoutFiles) {
-      // The text and the other attachments were answered: bring back only the
-      // documents the Host never received, and send nothing. Restoring replaces
-      // the composer's documents, so only documents already there block it; a
-      // new draft or other attachments stay as they are.
-      if (composerFileAttachments.length) {
+  const handleRecoverFailedAgentSend = useCallback(
+    (workspaceTabId?: string | null) => {
+      if (
+        !visibleFailure ||
+        visibleFailure.agentRef !== activeChatVisibilityRef.current.selectedAgent ||
+        visibleFailure.chatId !== activeChatVisibilityRef.current.activeChatId
+      )
+        return
+      if (visibleFailure.answeredWithoutFiles) {
+        // The text and the other attachments were answered: bring back only the
+        // documents the Host never received, and send nothing. Restoring replaces
+        // the composer's documents, so only documents already there block it; a
+        // new draft or other attachments stay as they are.
+        if (composerFileAttachments.length) {
+          pushToast(
+            'Remove the documents in the composer before recovering the earlier files.',
+            'error'
+          )
+          return
+        }
+        const undelivered = new Set(visibleFailure.undeliveredFileIds ?? [])
+        handleRestoreComposerFiles(visibleFailure.files.filter(file => undelivered.has(file.id)))
+        handleDiscardFailedAgentSend()
+        return
+      }
+      if (
+        getComposerDraft(activeChatId, selectedAgent ?? undefined, workspaceTabId) ||
+        composerImageAttachments.length ||
+        composerFileAttachments.length ||
+        composerReferenceAttachments.length
+      ) {
+        pushToast('Keep or clear the current draft before recovering the earlier input.', 'error')
+        return
+      }
+      if (
+        !setComposerDraft(
+          activeChatId,
+          visibleFailure.content,
+          selectedAgent ?? undefined,
+          workspaceTabId
+        )
+      ) {
         pushToast(
-          'Remove the documents in the composer before recovering the earlier files.',
+          'This composer no longer owns the draft. Select its chat tab and try again.',
           'error'
         )
         return
       }
-      const undelivered = new Set(visibleFailure.undeliveredFileIds ?? [])
-      handleRestoreComposerFiles(visibleFailure.files.filter(file => undelivered.has(file.id)))
+      handleAddComposerImageAttachments(
+        visibleFailure.attachments.map(attachment => ({
+          ...attachment,
+          previewDataUrl: `data:${attachment.mimeType};base64,${attachment.dataBase64}`,
+        }))
+      )
+      handleRestoreComposerFiles(visibleFailure.files)
+      handleAddComposerReferenceAttachments(visibleFailure.references)
       handleDiscardFailedAgentSend()
-      return
-    }
-    if (
-      getComposerDraft(activeChatId, selectedAgent ?? undefined) ||
-      composerImageAttachments.length ||
-      composerFileAttachments.length ||
-      composerReferenceAttachments.length
-    ) {
-      pushToast('Keep or clear the current draft before recovering the earlier input.', 'error')
-      return
-    }
-    setComposerDraft(activeChatId, visibleFailure.content, selectedAgent ?? undefined)
-    handleAddComposerImageAttachments(
-      visibleFailure.attachments.map(attachment => ({
-        ...attachment,
-        previewDataUrl: `data:${attachment.mimeType};base64,${attachment.dataBase64}`,
-      }))
-    )
-    handleRestoreComposerFiles(visibleFailure.files)
-    handleAddComposerReferenceAttachments(visibleFailure.references)
-    handleDiscardFailedAgentSend()
-  }, [
-    visibleFailure,
-    activeChatId,
-    composerImageAttachments,
-    composerFileAttachments,
-    composerReferenceAttachments,
-    pushToast,
-    handleRestoreComposerFiles,
-    handleAddComposerImageAttachments,
-    handleAddComposerReferenceAttachments,
-    handleDiscardFailedAgentSend,
-  ])
+    },
+    [
+      visibleFailure,
+      activeChatId,
+      composerImageAttachments,
+      composerFileAttachments,
+      composerReferenceAttachments,
+      pushToast,
+      handleRestoreComposerFiles,
+      handleAddComposerImageAttachments,
+      handleAddComposerReferenceAttachments,
+      handleDiscardFailedAgentSend,
+    ]
+  )
 
   const cancelTask = useCallback(
     async (taskId: string) => {
