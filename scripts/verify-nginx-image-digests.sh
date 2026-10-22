@@ -9,10 +9,20 @@
 # Usage: verify-nginx-image-digests.sh [name:tag@sha256:digest ...]
 # With no arguments, the references come from
 # validate-nginx-images.sh --list-digest-pins. Needs docker buildx and jq.
+#
+# Each reference is inspected once, under the name it is written with. When
+# NGINX_REGISTRY_MIRROR is set (CI uses mirror.gcr.io), Docker Hub names
+# (nginx, docker.io/library/nginx, nginxinc/nginx-unprivileged,
+# docker.io/nginxinc/nginx-unprivileged) are inspected on that mirror instead:
+# same digest, same bytes. A failed inspect is an error; there is no retry and
+# no second registry. A variable registry prefix is not resolved.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/nginx-image-policy.sh
+source "$SCRIPT_DIR/nginx-image-policy.sh"
 REQUIRED_PLATFORMS="linux/amd64 linux/arm64"
+MIRROR="${NGINX_REGISTRY_MIRROR:-}"
 
 if [ "$#" -gt 0 ]; then
   refs="$(printf '%s\n' "$@")"
@@ -27,17 +37,32 @@ fi
 failed=0
 checked=0
 while IFS= read -r ref; do
-  name_tag="${ref%@*}"
-  digest="${ref#*@}"
-  tag="${name_tag##*:}"
-  if [ "$name_tag" = "$ref" ] || ! [[ "$tag" =~ ^([0-9]+\.[0-9]+\.[0-9]+)(-[[:alnum:]_.-]+)?$ ]]; then
-    echo "ERROR: $ref is not name:<x.y.z>[-suffix]@sha256:<digest>" >&2
+  problem="$(nginx_ref_problem "$ref")"
+  split_ref "$ref"
+  if [ -n "$problem" ]; then
+    echo "ERROR: $ref: $problem" >&2
     failed=1
     continue
   fi
-  want="${BASH_REMATCH[1]}"
-  if ! image_json="$(docker buildx imagetools inspect "${name_tag%:*}@$digest" --format '{{json .Image}}')"; then
-    echo "ERROR: could not inspect $ref" >&2
+  if [ -z "$ref_digest" ]; then
+    echo "ERROR: $ref has no digest to verify" >&2
+    failed=1
+    continue
+  fi
+  want="${ref_tag%%-*}"
+  name="${ref%@*}"
+  name="${name%:*}"
+  case "$name" in
+    nginx | docker.io/library/nginx) hub_repo="library/nginx" ;;
+    nginxinc/nginx-unprivileged | docker.io/nginxinc/nginx-unprivileged) hub_repo="nginxinc/nginx-unprivileged" ;;
+    *) hub_repo="" ;;
+  esac
+  target="$name@$ref_digest"
+  if [ -n "$MIRROR" ] && [ -n "$hub_repo" ]; then
+    target="$MIRROR/$hub_repo@$ref_digest"
+  fi
+  if ! image_json="$(docker buildx imagetools inspect "$target" --format '{{json .Image}}')"; then
+    echo "ERROR: could not inspect $target (for $ref)" >&2
     failed=1
     continue
   fi
@@ -51,13 +76,13 @@ while IFS= read -r ref; do
   for platform in $REQUIRED_PLATFORMS; do
     got="$(awk -v p="$platform" '$1 == p { print $2 }' <<<"$versions")"
     if [ -z "$got" ]; then
-      echo "ERROR: $ref has no $platform manifest" >&2
+      echo "ERROR: $target has no $platform manifest (for $ref)" >&2
       failed=1
     elif [ "$got" != "$want" ]; then
-      echo "ERROR: $ref $platform declares NGINX_VERSION=$got, tag says $want" >&2
+      echo "ERROR: $target $platform declares NGINX_VERSION=$got, tag says $want (for $ref)" >&2
       failed=1
     else
-      echo "ok: $ref $platform NGINX_VERSION=$got"
+      echo "ok: $target $platform NGINX_VERSION=$got (for $ref)"
     fi
   done
   checked=$((checked + 1))
