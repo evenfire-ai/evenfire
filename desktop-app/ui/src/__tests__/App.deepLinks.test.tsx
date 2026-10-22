@@ -120,7 +120,11 @@ const filesPageHarness = vi.hoisted(() => ({
   },
 }))
 const previewPageHarness = vi.hoisted(() => ({
-  props: null as null | { onOpenRoute?: () => void },
+  props: null as null | {
+    gfsUri?: string
+    onOpenRoute?: () => void
+    onRenameCommitted?: (gfsUri: string) => void
+  },
 }))
 
 const commandPaletteHarness = vi.hoisted(() => ({
@@ -1781,6 +1785,44 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(filesPageHarness.handledRouteRequestIds).toEqual([1, 2]))
     expect(filesPageHarness.mountCount).toBe(1)
     expect(openFilesSection).toHaveBeenCalledTimes(2)
+  })
+
+  it("wires Preview rename through App's canonical-URI metadata refresh", async () => {
+    const resource = await resolveResource(
+      resolvedFile('77777777777777777777777777777777', 'renamed-report.md')
+    )
+    const workspaceTabs = openPreviewTab(createWorkspaceTabsState('chat-tab-1'), {
+      id: 'preview-rename-owner',
+      title: 'report.md',
+      gfsUri: resource.gfsUri,
+      fileKind: 'markdown',
+      byteLength: 4,
+      resourceVersion: 0,
+    })
+    resolveGfsResource.mockResolvedValue(resource)
+    currentController = makeController({
+      initialExperienceLoading: false,
+      workspaceTabs,
+    })
+    render(<App />)
+
+    await waitFor(() => expect(previewPageHarness.props?.onRenameCommitted).toBeTypeOf('function'))
+    await act(async () => {
+      previewPageHarness.props?.onRenameCommitted?.(resource.gfsUri)
+      await Promise.resolve()
+    })
+
+    await waitFor(() =>
+      expect(
+        currentController.workspaceTabs.tabs.find(tab => tab.id === 'preview-rename-owner')?.title
+      ).toBe('renamed-report.md')
+    )
+    expect(resolveGfsResource).toHaveBeenCalledWith(resource.gfsUri)
+    expect(currentController.workspaceTabs.activeTabId).toBe('preview-rename-owner')
+    expect(
+      currentController.workspaceTabs.tabs.find(tab => tab.id === 'preview-rename-owner')?.preview
+        ?.gfsUri
+    ).toBe(resource.gfsUri)
   })
 
   // With universal-tabs an open app is a `kind:'app'` tab in the global strip, so

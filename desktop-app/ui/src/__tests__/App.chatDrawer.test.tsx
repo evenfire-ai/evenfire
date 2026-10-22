@@ -7,10 +7,12 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useAppController } from '@hooks/useAppController'
+import { getComposerDraft, resetComposerDraftStore } from '@lib/composerDraftStore'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { desktopQueryClient } from '@lib/queryClient'
 import {
   activeWorkspaceTab,
+  createEmptyWorkspaceTabsState,
   createWorkspaceTabsState,
   newChatTab,
   openChatTab,
@@ -139,15 +141,26 @@ vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
 // than hand-written controller state.
 vi.mock('@pages/ChatPage', async () => {
   const { useChatComposerStateContext } = await import('@contexts/ChatComposerStateContext')
+  const { useNavigationContext } = await import('@contexts/NavigationContext')
+  const { useComposerDraft } = await import('@hooks/useComposerDraft')
   return {
     ChatPage: () => {
-      const { activeChatId, composerFocusRequestId } = useChatComposerStateContext()
+      const { activeChatId, composerFocusRequestId, workspaceChatTabId } =
+        useChatComposerStateContext()
+      const { selectedAgent } = useNavigationContext()
+      const [draft, setDraft] = useComposerDraft(activeChatId, selectedAgent ?? undefined)
       return (
         <div
           data-testid="chat-page-surface"
           data-active-chat-id={activeChatId ?? ''}
           data-composer-focus-request-id={composerFocusRequestId}
-        />
+          data-workspace-chat-tab-id={workspaceChatTabId ?? ''}
+          data-composer-draft={draft}
+        >
+          <button type="button" onClick={() => setDraft('failed-send recovery')}>
+            Write tabless recovery draft
+          </button>
+        </div>
       )
     },
   }
@@ -472,6 +485,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
   afterEach(() => {
     cleanup()
     delete (window as { clerum?: unknown }).clerum
+    resetComposerDraftStore()
   })
 
   it('reopening the drawer keeps the switched-to chat instead of re-seeding the origin', () => {
@@ -1966,6 +1980,26 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
     // No native view to ack a shrunk-bounds gate → ready immediately, not inert.
     expect(drawer!.getAttribute('data-ready')).toBe('true')
     expect(drawer!.hasAttribute('inert')).toBe(false)
+  })
+
+  it('passes a nullable composer tab owner through the App drawer context', () => {
+    const workspaceTabs = openFilesTab(createEmptyWorkspaceTabsState(), { id: 'files-owner-tab' })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      selectedAgent: null,
+      activeChatId: null,
+      workspaceTabs,
+    } as Partial<AppController>)
+    render(<App />)
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+
+    const composer = screen.getByTestId('chat-page-surface')
+    expect(composer.getAttribute('data-workspace-chat-tab-id')).toBe('')
+    expect(composer.getAttribute('data-composer-draft')).toBe('')
+    fireEvent.click(screen.getByRole('button', { name: 'Write tabless recovery draft' }))
+
+    expect(getComposerDraft(null)).toBe('failed-send recovery')
   })
 
   // T5 invariant — on a DOM/files tab (no embed to measure) the drawer must dock
