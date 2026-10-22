@@ -77,8 +77,9 @@ describe('useAppController team context', () => {
     await waitFor(() => expect(app.result.current.isAuthenticated).toBe(true))
     await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
     // Witness: the directory team is visible to the rest of the app, so a
-    // fallback to it would have a value to use.
-    expect(app.result.current.currentTeamId).toBe(meTeamId || 'team-dir')
+    // fallback to it would have a value to use. The cache scope carries the
+    // session team trimmed, as the delete fence does.
+    expect(app.result.current.currentTeamId).toBe(meTeamId.trim() || 'team-dir')
 
     await act(async () => {
       await app.result.current.captureChatDeleteFence('agent-x')
