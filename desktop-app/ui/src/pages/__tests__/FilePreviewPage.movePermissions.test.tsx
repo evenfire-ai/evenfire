@@ -104,6 +104,36 @@ async function openPreviewActions() {
 }
 
 describe('FilePreviewPage move permission contract', () => {
+  it('hides Move when the source parent has read and write but lacks delete', async () => {
+    const sourceReadWrite = delegationAffordances(new Set(['read', 'write']), false)
+    installGfs({ source: async () => sourceReadWrite })
+    installController()
+    renderPreview()
+
+    await screen.findByAltText('Preview of diagram.png')
+    await waitFor(() =>
+      expect(window.clerum.gfs.affordances).toHaveBeenCalledWith(parentId, 'main')
+    )
+    const menu = await openPreviewActions()
+
+    expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
+  })
+
+  it('allows Move from a write/delete parent even when the file itself is read-only', async () => {
+    const sourceWriteDelete = delegationAffordances(new Set(['write', 'delete']), false)
+    installGfs({ source: async () => sourceWriteDelete, destination: async () => readOnly })
+    installController()
+    renderPreview()
+
+    await screen.findByAltText('Preview of diagram.png')
+    await waitFor(() =>
+      expect(window.clerum.gfs.affordances).toHaveBeenCalledWith(parentId, 'main')
+    )
+    const menu = await openPreviewActions()
+
+    expect(within(menu).getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+  })
+
   it('hides Move until the source parent has server-derived write and delete bits', async () => {
     const { affordances } = installGfs({ source: async () => readOnly })
     installController()

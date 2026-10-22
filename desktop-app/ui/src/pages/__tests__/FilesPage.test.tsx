@@ -216,6 +216,37 @@ describe('FilesPage', () => {
     expect(screen.queryByRole('menuitem', { name: 'Move to' })).toBeNull()
   })
 
+  it('offers Move when a read-only shared file has source-parent write and delete rights', async () => {
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: [
+        {
+          resourceId: 'shared-file',
+          rid: '0123456789abcdef0123456789abcdef',
+          gfsUri: 'gfs://main/0123456789abcdef0123456789abcdef',
+          drive: 'main',
+          parentResourceId: 'source-parent',
+          name: 'report.txt',
+          kind: 'file',
+          path: '/report.txt',
+          version: 1,
+          bytes: 12,
+          permissions: ['read'],
+        },
+      ],
+      moveSourceParentAffordancesById: {
+        'source-parent': delegationAffordances(new Set(['write', 'delete']), false),
+      },
+    })
+
+    renderFilesPage()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
+    })
+
+    expect(screen.getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+  })
+
   it('hides breadcrumb Move when the current resource parent lacks delete authority', async () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
