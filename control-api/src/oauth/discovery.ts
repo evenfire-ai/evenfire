@@ -917,8 +917,17 @@ export async function discoverAuthorizationServerMetadata(
   let prm: ProtectedResourceMetadata | undefined
   let resource: string | undefined
 
-  // Issuer-first (DA-2): the typed URL is most likely an AS issuer.
-  const issuerFirst = await resolveAsMetadataFromBase(base, deps)
+  // Issuer-first (DA-2): the typed URL is most likely an AS issuer. Only its origin
+  // and path locate the well-known documents, so the operator's query, fragment or
+  // userinfo are dropped before the comparison; the issuer the AS declares must still
+  // be bare. The PRM fallback below keeps `authorization_servers[0]` strict: that one
+  // is a third party's claim of the identifier, not a locator typed by the operator.
+  const operatorBase = new URL(base.href)
+  operatorBase.search = ''
+  operatorBase.hash = ''
+  operatorBase.username = ''
+  operatorBase.password = ''
+  const issuerFirst = await resolveAsMetadataFromBase(operatorBase, deps)
   if (issuerFirst.ok) {
     as = issuerFirst.as
   } else {
