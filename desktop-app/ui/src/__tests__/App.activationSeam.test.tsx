@@ -260,7 +260,6 @@ function makeController(writes: StoreWrite[]): AppController {
     handleEnsureTeamContext: vi.fn(async () => false),
     getCurrentTeamId: vi.fn(() => 'team-a'),
     isHostAccessBlocked: vi.fn(() => false),
-    chatDrawerDesiredRef: { current: false },
     handleSelectChatAgent: vi.fn(() => forceControllerRender()),
     handleOpenNotification: vi.fn(async () => undefined),
     handleNavSelect: vi.fn((item: string) => {

@@ -315,7 +315,6 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     currentTeamId: 'team-a',
     navItem: DESKTOP_ROUTES.chat,
     selectedAgent: null,
-    chatDrawerDesiredRef: { current: false },
     selectedAgentRoute: null,
     workspaceTabs: createWorkspaceTabsState('chat-tab-1'),
     setWorkspaceTabs,

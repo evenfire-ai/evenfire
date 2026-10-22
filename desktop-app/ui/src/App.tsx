@@ -952,8 +952,6 @@ export function App() {
   // measurement, and visibility derives from it — no dependency cycle with the
   // hook's `active` input, which is the desire alone.
   const chatDrawerDesired = drawerAvailable && chatDrawerOpen
-  // A hold marks the drawer's Host as interrupted only while the drawer is open.
-  vm.chatDrawerDesiredRef.current = chatDrawerDesired
   // Per-kind content floor (§A3): app tabs reserve the embed's legible floor; DOM
   // tabs reserve a smaller floor, so a chat+DOM split survives narrower windows.
   const drawerContentFloor = drawerHasEmbed ? CHAT_DRAWER_EMBED_FLOOR : CHAT_DRAWER_DOM_FLOOR

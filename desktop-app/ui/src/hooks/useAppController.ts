@@ -375,12 +375,11 @@ export function useAppController() {
   activeChatAgentRefRef.current = activeChatAgentRef
   // The Apps picker shows no active tab, so no chat is focused while it is open.
   const focusedChatAgentRef = nav.appsPickerActive ? null : activeChatAgentRef
-  // App writes the chat drawer's open intent on every render. It stays true
-  // while the width hides the drawer, which keeps its chat when it returns.
-  const chatDrawerDesiredRef = useRef(false)
-  // The selected Host a hold deselected while the chat drawer was open, until
-  // the next selection or scope change.
-  const interruptedHostRef = useRef<string | null>(null)
+  // The Host of the conversation the chat drawer shows. A hold clears the
+  // selection to stop reads, so the drawer, which is never the active tab,
+  // keeps that identity here. Written by every chat selection and by a drawer
+  // request for a held Host; reset with the authority scope.
+  const lastChatHostRef = useRef<string | null>(null)
   const isHostAccessBlocked = useCallback(
     (agentRef: string) => hostAuthority.isBlocked(agentRef),
     [hostAuthority]
@@ -396,18 +395,17 @@ export function useAppController() {
   )
   // ChatPage keeps its conversation only while the Host has a Retry row: held
   // and still in the catalog. The Host is the focused chat tab's, or, for the
-  // chat drawer, which is never the active tab, the Host the hold deselected.
-  // The drawer is available over any stored non-chat tab, the Apps picker
-  // included, so the picker does not end the drawer's keep.
+  // chat drawer, the Host of the last chat selection. The drawer is available
+  // over any stored non-chat tab, the Apps picker included, so the picker does
+  // not end the drawer's keep.
   // Holds reset with the authority scope, so a team switch never keeps a chat
   // of the previous team.
-  const interruptedHostOnSurface =
-    interruptedHostRef.current !== null &&
-    nav.activeTab !== undefined &&
-    nav.activeTab.kind !== 'chat'
-  const keptChatAgentRef =
-    focusedChatAgentRef ?? (interruptedHostOnSurface ? interruptedHostRef.current : null)
+  const drawerHost =
+    nav.activeTab !== undefined && nav.activeTab.kind !== 'chat' ? lastChatHostRef.current : null
+  const keptChatAgentRef = focusedChatAgentRef ?? drawerHost
   const keepFocusedChat = keptChatAgentRef !== null && heldAgentRefs.includes(keptChatAgentRef)
+  const heldAgentRefsRef = useRef(heldAgentRefs)
+  heldAgentRefsRef.current = heldAgentRefs
   const heldHosts = useMemo<HeldHost[]>(
     () =>
       heldAgentRefs.map(agentRef => ({
@@ -423,13 +421,9 @@ export function useAppController() {
   useEffect(() => {
     hostAuthority.reset()
     knownHostNamesRef.current.clear()
-    interruptedHostRef.current = null
+    lastChatHostRef.current = null
     setHostAuthorityRevision(revision => revision + 1)
   }, [authorityScope, hostAuthority])
-  // A new selection ends the interruption: the surface now shows that Host.
-  useEffect(() => {
-    if (nav.selectedAgent !== null) interruptedHostRef.current = null
-  }, [nav.selectedAgent])
   const { invalidateSessionCatalog } = useChatStore()
   const blockHostAccess = useCallback(
     (agentRef: string, kind: HostAuthorityHoldKind) => {
@@ -439,10 +433,7 @@ export function useAppController() {
       if (!hostAuthority.hold(agentRef, kind)) return
       setHostAuthorityRevision(revision => revision + 1)
       const selected = selectedAgentRef.current === agentRef
-      if (selected) {
-        if (chatDrawerDesiredRef.current) interruptedHostRef.current = agentRef
-        nav.setSelectedAgent(null)
-      }
+      if (selected) nav.setSelectedAgent(null)
       // A revocation is also announced for the Host of the active chat tab, even
       // under the Apps picker: an earlier uncertain hold may already have
       // cleared the selection, and the toast is about the Host, not the tab.
@@ -1193,6 +1184,7 @@ export function useAppController() {
       } = {}
     ) => {
       if (!agentName) return
+      lastChatHostRef.current = agentName
       const targetChatId = String(options.chatId || '').trim()
       // Fast path — ONLY when we are already on the chat route. `switchToChat`
       // sets the active chat imperatively and leaves no pending selection behind,
@@ -1313,16 +1305,16 @@ export function useAppController() {
         return
       }
       // The drawer (`keepNavItem`) asked for this held Host with nothing
-      // selected, so its conversation is the one on that surface: keep it while
-      // the verification runs, as for a hold the drawer showed. A Host the
-      // drawer already keeps stays kept: a request is not a selection, so only
-      // a selection (or a scope reset) ends that keep.
+      // selected, so its conversation is the one the drawer now shows: keep it
+      // while the verification runs. A drawer that already shows another held,
+      // listed Host keeps that one: a denied request is not a selection.
+      const lastChatHost = lastChatHostRef.current
       if (
         options.keepNavItem &&
         selectedAgentRef.current === null &&
-        interruptedHostRef.current === null
+        !(lastChatHost !== null && heldAgentRefsRef.current.includes(lastChatHost))
       ) {
-        interruptedHostRef.current = agentName
+        lastChatHostRef.current = agentName
       }
       const scope = authorityScopeRef.current
       void verifyHostAccess(agentName).then(verified => {
@@ -1715,7 +1707,6 @@ export function useAppController() {
     heldHosts,
     focusedChatAgentRef,
     keepFocusedChat,
-    chatDrawerDesiredRef,
     hostAuthorityRevision,
     selectedAgentRoute: nav.selectedAgentRoute,
     setSelectedAgent: nav.setSelectedAgent,
