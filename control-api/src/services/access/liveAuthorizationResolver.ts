@@ -2,9 +2,7 @@ import type { DbClient } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
 import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAuthentication.js'
 import {
-  type AuthorityCandidate,
   filterCandidatesForOperationTarget,
-  loadPrincipalAuthoritySnapshot,
   loadResourceAuthority,
   operationTargetIsCurrentlyValid,
 } from './accessAuthorityStore.js'
@@ -21,6 +19,7 @@ import {
   buildAccessPath,
   selectEquivalentAccessPath,
 } from './accessPath.js'
+import type { AuthorityCandidate } from './authorityCandidates.js'
 import {
   authorizationRevision,
   canonicalAccessPathSeeds,
@@ -39,6 +38,7 @@ import {
   isOperationalAccessResourceType,
   loadOperationalResourceGraph,
 } from './operationalAccessReader.js'
+import { loadPrincipalAuthoritySnapshot } from './principalAuthoritySnapshot.js'
 import {
   type CanonicalResourceIdentity,
   canonicalResourceIdentity,

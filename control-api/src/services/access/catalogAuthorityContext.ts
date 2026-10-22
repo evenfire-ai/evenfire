@@ -1,7 +1,6 @@
 import type { DbClient } from '../../db.js'
 import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAuthentication.js'
 import { legacySecurityCutoffRejectsSql } from '../auth/legacySecurityCutoff.js'
-import { parseAuthorizationMemberships } from './accessAuthorityStore.js'
 import type { AccessExecutionBudget } from './accessExecutionBudget.js'
 import { revisionOfValues } from './authorizationRevision.js'
 import type {
@@ -14,6 +13,7 @@ import {
   OPERATIONAL_SOURCE_FAMILIES,
   type OperationalSourceFamily,
 } from './operationalAccessProjection.js'
+import { parseAuthorizationMemberships } from './principalAuthoritySnapshot.js'
 
 export class CatalogAuthorityError extends Error {
   constructor(readonly code: 'principal_not_found' | 'session_not_live' | 'source_state_invalid') {
