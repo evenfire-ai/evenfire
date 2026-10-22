@@ -7,7 +7,12 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useAppController } from '@hooks/useAppController'
-import { getComposerDraft, resetComposerDraftStore } from '@lib/composerDraftStore'
+import {
+  claimPendingResourceComposerPrefill,
+  getComposerDraft,
+  resetComposerDraftStore,
+} from '@lib/composerDraftStore'
+import { prefillNewConversationWithGfsResource } from '@lib/gfsConversationPrefill'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { desktopQueryClient } from '@lib/queryClient'
 import {
@@ -27,6 +32,8 @@ import { USER_SCOPE_INVALIDATED } from '@/gfs/__fixtures__/entityChangeFixtures'
 import {
   openGfsResourcePayload,
   resolveDeniedMessage,
+  resolveResource,
+  resolvedDirectory,
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import type { AppNotification } from '@/uiTypes'
@@ -2000,6 +2007,46 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Write tabless recovery draft' }))
 
     expect(getComposerDraft(null)).toBe('failed-send recovery')
+  })
+
+  it('keeps an unclaimed Files prefill when the drawer writes without a chat tab', async () => {
+    const handleSendAgentMessage = vi.fn()
+    const folder = await resolveResource(
+      resolvedDirectory('0123456789abcdef0123456789abcdef', 'Shared folder')
+    )
+    const workspaceTabs = openFilesTab(createEmptyWorkspaceTabsState(), {
+      id: 'files-owner-tab',
+      path: folder.gfsUri,
+    })
+    const ownerChatTabId = 'pending-prefill-chat-tab'
+    expect(
+      prefillNewConversationWithGfsResource(activeWorkspaceTab(workspaceTabs), null, ownerChatTabId)
+    ).toBe(true)
+
+    currentController = makeController({
+      initialExperienceLoading: false,
+      selectedAgent: null,
+      activeChatId: null,
+      navItem: DESKTOP_ROUTES.files,
+      chatList: CHAT_LIST,
+      workspaceTabs,
+      handleSendAgentMessage,
+    } as Partial<AppController>)
+    render(<App />)
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+
+    const composer = screen.getByTestId('chat-page-surface')
+    expect(composer.getAttribute('data-workspace-chat-tab-id')).toBe('')
+    expect(composer.getAttribute('data-composer-draft')).toBe('')
+    fireEvent.click(screen.getByRole('button', { name: 'Write tabless recovery draft' }))
+
+    expect(composer.getAttribute('data-composer-draft')).toBe('')
+    expect(getComposerDraft(null)).toBe('')
+    claimPendingResourceComposerPrefill(ownerChatTabId, 'agent-a')
+    expect(getComposerDraft(null, 'agent-a', ownerChatTabId)).toBe(folder.gfsUri)
+    expect(getComposerDraft(null, 'agent-a')).toBe('')
+    expect(handleSendAgentMessage).not.toHaveBeenCalled()
   })
 
   // T5 invariant — on a DOM/files tab (no embed to measure) the drawer must dock
