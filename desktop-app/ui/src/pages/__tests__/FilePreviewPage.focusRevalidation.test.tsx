@@ -31,7 +31,7 @@ describe('FilePreviewPage focus revalidation', () => {
           rid: resourceId,
           gfsUri: uri,
           drive: 'main',
-          parentResourceId: null,
+          parentResourceId: 'source-parent',
           name: 'diagram.png',
           kind: 'file',
           version: 7,
@@ -44,12 +44,13 @@ describe('FilePreviewPage focus revalidation', () => {
             pendingDenials.push(reject)
           })
       )
+    const affordances = vi.fn(async () => delegationAffordances(new Set(['read']), false))
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
         gfs: {
           resolve,
-          affordances: vi.fn(async () => delegationAffordances(new Set(['read']), false)),
+          affordances,
           downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
         },
       },
@@ -82,10 +83,13 @@ describe('FilePreviewPage focus revalidation', () => {
 
     expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
     await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith('source-parent', 'main'))
+    expect(affordances.mock.calls.filter(([id]) => id === 'source-parent')).toHaveLength(1)
     act(() => window.dispatchEvent(new Event('blur')))
     act(() => window.dispatchEvent(new Event('focus')))
 
     await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2))
+    expect(affordances.mock.calls.filter(([id]) => id === 'source-parent')).toHaveLength(1)
     expect(pendingDenials).toHaveLength(1)
     await act(async () => {
       pendingDenials.forEach(reject => reject(denied))

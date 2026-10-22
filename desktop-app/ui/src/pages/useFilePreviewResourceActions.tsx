@@ -140,11 +140,16 @@ export function useFilePreviewResourceActions({
     queryKey: desktopQueryKeys.gfsAffordances(sessionScope, sourceParentId ?? gfsUri, drive),
     queryFn: () => window.clerum.gfs.affordances(sourceParentId!, drive),
     enabled: Boolean(canResolve && resource?.kind === 'file' && sourceParentId),
+    // Revalidate when a preview mounts, then bound focus refreshes so repeated
+    // window focus events do not issue an affordance request every time.
     refetchOnMount: 'always',
-    refetchOnWindowFocus: 'always',
+    refetchOnWindowFocus: true,
+    staleTime: 15_000,
   })
   const sourceParentAffordances: ResourceAffordances | undefined =
-    sourceParentAffordancesQuery.isError ? undefined : sourceParentAffordancesQuery.data
+    sourceParentAffordancesQuery.isError || sourceParentAffordancesQuery.isFetching
+      ? undefined
+      : sourceParentAffordancesQuery.data
   const canShare = Boolean(canResolve && affordances?.canDelegate)
   const canRename = Boolean(canResolve && affordances?.held.includes('write'))
   const canDelete = Boolean(canResolve && affordances?.held.includes('delete'))
