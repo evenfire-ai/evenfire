@@ -133,19 +133,24 @@ export async function setInvitationPasswordForUser(
         return { error: 'not_found' as const }
       }
       if (invitation.status !== 'accepted') return { error: 'not_accepted' as const }
+      if (options?.rejectIfPasswordAlreadySet) {
+        // The first-password decision must precede ensureInvitationUser, which
+        // rewrites users.name and profiles.display_name from the invitation:
+        // deciding after it would mutate a refused call. Lock the session user
+        // row inside the writing transaction and decide from the authoritative
+        // hash, so a concurrent first set either commits before this lock (and
+        // this request sees its hash) or waits behind it.
+        const lockedUser = await lockInvitationUserForPasswordSetup(db, trimmedUserId)
+        if (!lockedUser) return { error: 'not_found' as const }
+        if (invitationUserIsRetired(lockedUser)) return { error: 'user_retired' as const }
+        if (lockedUser.email.toLowerCase() !== invitation.email.toLowerCase()) {
+          return { error: 'forbidden' as const }
+        }
+        if (lockedUser.password_hash) return { error: 'password_already_set' as const }
+      }
       const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
       if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
       if (user.id !== trimmedUserId) return { error: 'forbidden' as const }
-      if (options?.rejectIfPasswordAlreadySet) {
-        // The unlocked lookup above is not authoritative for this decision.
-        // Lock the row inside the writing transaction and read password_hash
-        // from it, so a concurrent first set either commits before this lock
-        // (and this request sees its hash) or waits behind it.
-        const lockedUser = await lockInvitationUserForPasswordSetup(db, user.id)
-        if (!lockedUser) return { error: 'not_found' as const }
-        if (invitationUserIsRetired(lockedUser)) return { error: 'user_retired' as const }
-        if (lockedUser.password_hash) return { error: 'password_already_set' as const }
-      }
       const passwordHash = await bcrypt.hash(trimmedPassword, 12)
       const lifecycleVersion = await updateActivePasswordHash(db, user.id, passwordHash)
       if (lifecycleVersion === null) {

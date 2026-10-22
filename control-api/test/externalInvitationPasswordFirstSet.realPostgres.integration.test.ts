@@ -159,6 +159,32 @@ describeRealPostgres('external invitation password setup on real PostgreSQL', ()
     return result.rows[0]!.count
   }
 
+  async function profileState(userId: string): Promise<{
+    name: string | null
+    user_updated_at: Date
+    display_name: string | null
+    profile_updated_at: Date
+  }> {
+    const result = await holder.pool.query<{
+      name: string | null
+      user_updated_at: Date
+      display_name: string | null
+      profile_updated_at: Date
+    }>(
+      `SELECT u.name,
+              u.updated_at AS user_updated_at,
+              p.display_name,
+              p.updated_at AS profile_updated_at
+         FROM users u
+         JOIN profiles p ON p.user_id = u.id
+        WHERE u.id = $1`,
+      [userId]
+    )
+    const snapshot = result.rows[0]
+    if (!snapshot) throw new Error(`profile for user ${userId} was not found`)
+    return snapshot
+  }
+
   async function acceptedMember(label: string): Promise<MemberFixture> {
     const email = `${label}-${randomUUID()}@example.test`
     const invitation = await createSilentInvitationForTeams({
@@ -233,7 +259,7 @@ describeRealPostgres('external invitation password setup on real PostgreSQL', ()
     }
   })
 
-  it('sets the first password and refuses the second without any credential write', async () => {
+  it('sets the first password and refuses the second without any credential or profile write', async () => {
     const member = await acceptedMember('first-password')
     const firstPassword = 'First-Member-Password-1!'
     const secondPassword = 'Second-Member-Password-2!'
@@ -271,6 +297,30 @@ describeRealPostgres('external invitation password setup on real PostgreSQL', ()
       email: member.email,
       authenticationMethods: ['password'],
     })
+    // A refused call must not overwrite user-chosen identity fields either.
+    // ensureInvitationUser writes users.name and profiles.display_name from the
+    // invitation's invitee_name, so pin both rows to recognizable values before
+    // the refusal and require them to survive it byte-identically.
+    await holder.pool.query(
+      `UPDATE users
+          SET name = 'User selected name',
+              updated_at = '2001-01-01T00:00:00Z'
+        WHERE id = $1`,
+      [member.userId]
+    )
+    await holder.pool.query(
+      `UPDATE profiles
+          SET display_name = 'User selected profile',
+              updated_at = '2001-01-01T00:00:00Z'
+        WHERE user_id = $1`,
+      [member.userId]
+    )
+    const profileBeforeRefusal = await profileState(member.userId)
+    expect(profileBeforeRefusal).toMatchObject({
+      name: 'User selected name',
+      display_name: 'User selected profile',
+    })
+
     const beforeRefusal = await storedUser(member.email)
     const invitationBefore = await invitationState(member.invitationId)
     const sessionsBefore = await activeSessionCount(member.userId)
@@ -295,6 +345,10 @@ describeRealPostgres('external invitation password setup on real PostgreSQL', ()
     expect(second.status).toBe(409)
     expect(second.body).toEqual({ error: 'password_already_set' })
     expect(second.headers['set-cookie']).toBeUndefined()
+
+    // users.name, users.updated_at, profiles.display_name and
+    // profiles.updated_at all survive the refusal unchanged.
+    expect(await profileState(member.userId)).toEqual(profileBeforeRefusal)
 
     const afterRefusal = await storedUser(member.email)
     expect(afterRefusal.id).toBe(beforeRefusal.id)
