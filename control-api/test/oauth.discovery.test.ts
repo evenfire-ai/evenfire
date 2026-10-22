@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { PinnedRawResponse, PinnedTransport } from '../src/http/pinnedFetch.js'
+import type {
+  PinnedRawResponse,
+  PinnedTransport,
+  PinnedTransportInput,
+} from '../src/http/pinnedFetch.js'
 import {
   type DiscoveryDeps,
   asMetadataUrls,
@@ -7,7 +11,12 @@ import {
   parseResourceMetadataChallenge,
   wellKnownPrmUrls,
 } from '../src/oauth/discovery.js'
-import { PILOTS, makeDiscoveryTransport } from './fixtures/remoteOAuthDiscovery.js'
+import {
+  ENTRA_WORKIQ_PILOT,
+  PILOTS,
+  makeDiscoveryTransport,
+  recordingTransport,
+} from './fixtures/remoteOAuthDiscovery.js'
 
 /**
  * Discovery client (spec 19 §4/§5 C1 + C1.5 H2 pin). Fixtures are the real
@@ -487,5 +496,25 @@ describe('parseResourceMetadataChallenge', () => {
   it('returns undefined when no header / no field', () => {
     expect(parseResourceMetadataChallenge(null)).toBeUndefined()
     expect(parseResourceMetadataChallenge('Bearer realm="x"')).toBeUndefined()
+  })
+})
+
+describe('Entra pilot transport (asExtra + recordingTransport)', () => {
+  it('serves each extra AS metadata URL with its captured status and records every request', async () => {
+    const { transport, requestedUrls } = recordingTransport(
+      makeDiscoveryTransport(ENTRA_WORKIQ_PILOT)
+    )
+    const get = (url: string) =>
+      transport({ url, method: 'GET', headers: {} } as PinnedTransportInput)
+    const rfc8414Url =
+      'https://login.microsoftonline.com/.well-known/oauth-authorization-server/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0'
+    const [organizations, unknownTenant] = ENTRA_WORKIQ_PILOT.asExtra ?? []
+    const ok = await get(organizations.url)
+    const rejected = await get(unknownTenant.url)
+    const unserved = await get(rfc8414Url)
+    expect([ok.status, rejected.status, unserved.status]).toEqual([200, 400, 404])
+    expect(JSON.parse(ok.bodyText).issuer).toBe('https://login.microsoftonline.com/{tenantid}/v2.0')
+    expect(JSON.parse(rejected.bodyText).error).toBe('invalid_tenant')
+    expect(requestedUrls).toEqual([organizations.url, unknownTenant.url, rfc8414Url])
   })
 })
