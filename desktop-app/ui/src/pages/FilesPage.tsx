@@ -322,6 +322,7 @@ export function FilesPage({
   const uploadTargetRef = useRef<{
     parentResourceId: string
     occupiedNames: Set<string>
+    parentName: string
   } | null>(null)
   const uploadNameReservationsRef = useRef(createGfsUploadNameReservationBook())
   const handledRouteDialogRequestIdRef = useRef(0)
@@ -359,6 +360,36 @@ export function FilesPage({
     resolving,
     refreshAffordances,
   } = ctrl
+  const rowPermissionStatusFor = (resourceId: string) =>
+    ctrl.rowPermissionStatusByResourceId?.[resourceId]
+  const rowPermissionNoticeFor = (resourceId: string, resourceName: string) => {
+    const statuses = ctrl.rowPermissionStatusByResourceId
+    if (!statuses) return null
+    const status = statuses[resourceId]
+    if (status?.status === 'ready') return null
+    if (status?.status === 'error') {
+      return {
+        role: 'alert' as const,
+        tone: 'error' as const,
+        message: `Could not verify permissions for ${resourceName}: ${status.message}`,
+      }
+    }
+    return {
+      role: 'status' as const,
+      tone: 'info' as const,
+      message: `Checking permissions for ${resourceName}…`,
+    }
+  }
+  const rowPermissionsReadyFor = (resourceId: string) => {
+    if (!ctrl.rowPermissionStatusByResourceId) return true
+    return rowPermissionStatusFor(resourceId)?.status === 'ready'
+  }
+  const requireRowPermissions = (resourceId: string, resourceName: string) => {
+    if (resourceId === current?.resourceId || rowPermissionsReadyFor(resourceId)) return true
+    const notice = rowPermissionNoticeFor(resourceId, resourceName)
+    if (notice) pushToast?.(notice.message, notice.tone === 'error' ? 'error' : 'info')
+    return false
+  }
   const moveWorkspaceRef = useRef({ sessionScope, currentResourceId: current?.resourceId ?? null })
   moveWorkspaceRef.current = { sessionScope, currentResourceId: current?.resourceId ?? null }
 
@@ -484,17 +515,21 @@ export function FilesPage({
     manageReturnCrumbsRef.current = null
     if (returnCrumbs) ctrl.restoreCrumbs(returnCrumbs)
   }, [ctrl.restoreCrumbs])
-  const openCreateFolder = useCallback((parentResourceId: string, parentName: string) => {
-    setCreateFolderName('')
-    setCreateFolderError(null)
-    setCreateFolderParentId(parentResourceId)
-    setCreateFolderParentName(parentName)
-    setRenameOpen(false)
-    setDeleteOpen(false)
-    setShareDetailsOpen(false)
-    setManageOpen(false)
-    setCreateFolderOpen(true)
-  }, [])
+  const openCreateFolder = useCallback(
+    (parentResourceId: string, parentName: string) => {
+      if (!requireRowPermissions(parentResourceId, parentName)) return
+      setCreateFolderName('')
+      setCreateFolderError(null)
+      setCreateFolderParentId(parentResourceId)
+      setCreateFolderParentName(parentName)
+      setRenameOpen(false)
+      setDeleteOpen(false)
+      setShareDetailsOpen(false)
+      setManageOpen(false)
+      setCreateFolderOpen(true)
+    },
+    [requireRowPermissions]
+  )
 
   useEffect(() => {
     if (!createFolderOpen) return
@@ -1152,9 +1187,12 @@ export function FilesPage({
     const requestedName = createFolderName.trim()
     const parentResourceId = createFolderParentId
     if (!requestedName || !parentResourceId) return
+    const parentName = createFolderParentName ?? 'folder'
+    if (!requireRowPermissions(parentResourceId, parentName)) return
     setCreateFolderError(null)
     try {
       const name = await normalizeGfsResourceName(requestedName)
+      if (!requireRowPermissions(parentResourceId, parentName)) return
       await ctrl.createFolder(parentResourceId, name)
       closeCreateFolder()
       pushToast?.(`Folder ${name} created`, 'success')
@@ -1167,9 +1205,11 @@ export function FilesPage({
   const handleUploadFile = async (
     file: File | null | undefined,
     parentResourceId = current?.resourceId,
-    occupiedNames = new Set(items.map(item => item.name))
+    occupiedNames = new Set(items.map(item => item.name)),
+    parentName = current?.name ?? 'folder'
   ) => {
     if (!file || !parentResourceId) return
+    if (!requireRowPermissions(parentResourceId, parentName)) return
     try {
       assertGfsFileUploadSize(file.size)
       const normalizedName = await normalizeGfsResourceName(file.name)
@@ -1185,6 +1225,7 @@ export function FilesPage({
           const name = nameReservation.reserveNext()
 
           try {
+            if (!requireRowPermissions(parentResourceId, parentName)) return
             await ctrl.createFileFromPath(parentResourceId, name, filePath)
             nameReservation.markSuccess(name)
             pushToast?.(`Uploaded ${name}`, 'success')
@@ -1208,8 +1249,13 @@ export function FilesPage({
     }
   }
 
-  const requestUploadForFolder = (parentResourceId: string, occupiedNames: Set<string>) => {
-    uploadTargetRef.current = { parentResourceId, occupiedNames }
+  const requestUploadForFolder = (
+    parentResourceId: string,
+    occupiedNames: Set<string>,
+    parentName: string
+  ) => {
+    if (!requireRowPermissions(parentResourceId, parentName)) return
+    uploadTargetRef.current = { parentResourceId, occupiedNames, parentName }
     uploadInputRef.current?.click()
   }
 
@@ -1396,7 +1442,12 @@ export function FilesPage({
     const occupiedNames = new Set(items.map(item => item.name))
     try {
       for (const file of droppedFiles) {
-        await handleUploadFile(file, destinationResourceId, occupiedNames)
+        await handleUploadFile(
+          file,
+          destinationResourceId,
+          occupiedNames,
+          current?.name ?? 'folder'
+        )
       }
     } finally {
       setDroppedUploadCount(0)
@@ -1453,6 +1504,10 @@ export function FilesPage({
   }
 
   const handleDeleteResource = async (resource: GfsActionTarget) => {
+    if (!requireRowPermissions(resource.resourceId, resource.name)) {
+      setDeleteTarget(null)
+      return
+    }
     try {
       await ctrl.deleteResource(resource.resourceId, resource.version)
       pushToast?.(`Deleted ${resource.name}`, 'success')
@@ -1475,7 +1530,7 @@ export function FilesPage({
    * transitioning.
    */
   const rowAffordancesFor = (resource: GfsDriveResource) => {
-    if (!currentIsFolder) return null
+    if (!currentIsFolder || !rowPermissionsReadyFor(resource.resourceId)) return null
     return (
       ctrl.rowAffordancesByResourceId?.[resource.resourceId] ??
       (ctrl.rowAffordancesResourceId === resource.resourceId ? ctrl.rowAffordances : null)
@@ -1485,18 +1540,21 @@ export function FilesPage({
   /** Delete gate for list rows. Shared-with-me rows carry their permission
    * bits directly; child rows use their own server-computed affordances. */
   const rowCanDelete = (resource: GfsDriveResource): boolean => {
+    if (!rowPermissionsReadyFor(resource.resourceId)) return false
     if (currentIsFolder) return hasBit(rowAffordancesFor(resource), 'delete')
     return Boolean(resource.permissions?.includes('delete'))
   }
 
   /** Rename needs `write` on the resource itself. */
   const rowCanRename = (resource: GfsDriveResource): boolean => {
+    if (!rowPermissionsReadyFor(resource.resourceId)) return false
     if (currentIsFolder) return hasBit(rowAffordancesFor(resource), 'write')
     return Boolean(resource.permissions?.includes('write'))
   }
 
   /** Child folder operations use the server-derived write bit for that row. */
   const rowCanWrite = (resource: GfsDriveResource): boolean => {
+    if (!rowPermissionsReadyFor(resource.resourceId)) return false
     if (currentIsFolder) return hasBit(rowAffordancesFor(resource), 'write')
     return Boolean(resource.permissions?.includes('write'))
   }
@@ -1505,6 +1563,7 @@ export function FilesPage({
    *  server-side). A read-only row must not offer a Manage entry that would
    *  only 403 on open. */
   const rowCanManage = (resource: GfsDriveResource): boolean => {
+    if (!rowPermissionsReadyFor(resource.resourceId)) return false
     if (currentIsFolder) return hasBit(rowAffordancesFor(resource), 'manage_acl')
     return Boolean(resource.permissions?.includes('manage_acl'))
   }
@@ -1631,12 +1690,14 @@ export function FilesPage({
     const target = renameTarget
     const requestedName = renameDraft.trim()
     if (!requestedName) return
+    if (!requireRowPermissions(target.resourceId, target.name)) return
     try {
       const name = await normalizeGfsResourceName(requestedName)
       if (name === target.name) {
         setRenameTarget(null)
         return
       }
+      if (!requireRowPermissions(target.resourceId, target.name)) return
       await ctrl.renameResource(target.resourceId, name, target.version)
       setRenameTarget(null)
       pushToast?.(`Renamed to ${name}`, 'success')
@@ -1647,6 +1708,7 @@ export function FilesPage({
   }
 
   const openRenameTarget = (target: GfsActionTarget) => {
+    if (!requireRowPermissions(target.resourceId, target.name)) return
     setRenameTarget(target)
     setRenameDraft(target.name)
   }
@@ -1738,6 +1800,7 @@ export function FilesPage({
 
   const openManage = (resource: GfsDriveResource) => {
     if (resource.resourceId !== current?.resourceId) {
+      if (!requireRowPermissions(resource.resourceId, resource.name || resource.drive)) return
       beginExplicitFilesNavigation()
       manageReturnCrumbsRef.current = [...crumbs]
       ctrl.openResource(resource)
@@ -1774,7 +1837,11 @@ export function FilesPage({
           move: () => setMoveTarget(current),
           'new-folder': () => openCreateFolder(current.resourceId, current.name),
           'upload-file': () =>
-            requestUploadForFolder(current.resourceId, new Set(items.map(item => item.name))),
+            requestUploadForFolder(
+              current.resourceId,
+              new Set(items.map(item => item.name)),
+              current.name
+            ),
           share: () => openManageCurrent(),
           preview:
             currentIsFile && currentPreviewAvailable
@@ -1847,7 +1914,7 @@ export function FilesPage({
             ? () => openCreateFolder(resource.resourceId, resource.name)
             : undefined,
           'upload-file': canWrite
-            ? () => requestUploadForFolder(resource.resourceId, new Set())
+            ? () => requestUploadForFolder(resource.resourceId, new Set(), resource.name)
             : undefined,
           rename: () => openRenameTarget(resource),
           move: () => setMoveTarget(resource),
@@ -1978,7 +2045,12 @@ export function FilesPage({
                   uploadTargetRef.current = null
                   event.currentTarget.value = ''
                   if (!file || !target) return
-                  void handleUploadFile(file, target.parentResourceId, target.occupiedNames)
+                  void handleUploadFile(
+                    file,
+                    target.parentResourceId,
+                    target.occupiedNames,
+                    target.parentName
+                  )
                 }}
               />
             </div>
@@ -2163,6 +2235,8 @@ export function FilesPage({
               </div>
               <div className="da-grid__body">
                 {visibleResources.map(resource => {
+                  const resourceName = resource.name || resource.drive
+                  const permissionNotice = rowPermissionNoticeFor(resource.resourceId, resourceName)
                   const isDragging =
                     draggingResourceId === resource.resourceId ||
                     movingResourceId === resource.resourceId
@@ -2257,6 +2331,11 @@ export function FilesPage({
                             <Badge tone="neutral">No access</Badge>
                           ) : null}
                         </span>
+                        {permissionNotice ? (
+                          <span className="muted" role={permissionNotice.role}>
+                            {permissionNotice.message}
+                          </span>
+                        ) : null}
                       </span>
                       <span className="da-gfs-drive__size da-grid__cell da-grid__cell--right">
                         {formatSharedFileSize(resource.bytes)}

@@ -225,6 +225,28 @@ function renderHarness(
   }
 }
 
+function expectFolderRowMutationMenu(resourceName: string, available: boolean) {
+  const menu = screen.getByRole('menu', { name: `Actions for ${resourceName}` })
+  for (const action of ['New folder', 'Upload file', 'Rename', 'Delete']) {
+    const menuItem = within(menu).queryByRole('menuitem', { name: action, exact: true })
+    if (available) expect(menuItem).toBeTruthy()
+    else expect(menuItem).toBeNull()
+  }
+  const shareTrigger = within(menu).getByRole('menuitem', { name: 'Share', exact: true })
+  if (screen.queryByRole('menu', { name: `Share options for ${resourceName}` })) {
+    fireEvent.keyDown(window, { key: 'Escape' })
+  }
+  fireEvent.click(shareTrigger)
+  const shareMenu = screen.getByRole('menu', { name: `Share options for ${resourceName}` })
+  const manageAction = within(shareMenu).queryByRole('menuitem', {
+    name: 'Share',
+    exact: true,
+  })
+  if (available) expect(manageAction).toBeTruthy()
+  else expect(manageAction).toBeNull()
+  fireEvent.keyDown(window, { key: 'Escape' })
+}
+
 describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', () => {
   afterEach(() => {
     cleanup()
@@ -416,6 +438,277 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     await waitFor(() => expect(affordances).toHaveBeenCalledWith(parentResourceId, 'main'))
     await waitFor(() => expect(client.getQueryData(queryKey)).toBe(sourcePermissions))
     expect(screen.getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+    client.clear()
+  })
+
+  it('withholds child-row mutation actions while row permissions are stale, pending, or rate limited', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', { gfsUri: SEED_URI })
+    )
+    const report = childView('child-report', 'report.txt', 'file', {
+      parentResourceId: 'folder-active',
+    })
+    const childFolder = childView('child-folder', 'Child folder', 'directory', {
+      parentResourceId: 'folder-active',
+    })
+    const children = await listChildrenPage([report, childFolder])
+    const fullAccess = delegationAffordances(
+      new Set(['read', 'write', 'delete', 'manage_acl', 'share']),
+      false
+    )
+    let reportCalls = 0
+    let childFolderCalls = 0
+    let rejectReportRefresh!: (error: Error) => void
+    let rejectFolderRefresh!: (error: Error) => void
+    const pendingReportRefresh = new Promise<ReturnType<typeof delegationAffordances>>(
+      (_, reject) => {
+        rejectReportRefresh = reject
+      }
+    )
+    const pendingFolderRefresh = new Promise<ReturnType<typeof delegationAffordances>>(
+      (_, reject) => {
+        rejectFolderRefresh = reject
+      }
+    )
+    const affordances = vi.fn((resourceId: string) => {
+      if (resourceId === 'child-report') {
+        reportCalls += 1
+        if (reportCalls === 2) return pendingReportRefresh
+      }
+      if (resourceId === 'child-folder') {
+        childFolderCalls += 1
+        if (childFolderCalls === 2) return pendingFolderRefresh
+      }
+      return Promise.resolve(fullAccess)
+    })
+    const renameResource = vi.fn(async () => undefined)
+    const deleteResource = vi.fn(async () => undefined)
+    const createFolder = vi.fn(async () => undefined)
+    const createFileFromPath = vi.fn(async () => undefined)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => folder),
+          listChildren: vi.fn(async () => children),
+          affordances,
+          renameResource,
+          deleteResource,
+          createFolder,
+          createFileFromPath,
+        },
+      },
+    })
+
+    const { client } = renderHarness()
+    await screen.findByText('report.txt')
+    await waitFor(() => expect(reportCalls).toBe(1))
+    await waitFor(() => expect(childFolderCalls).toBe(1))
+    expect(screen.getByRole('button', { name: 'Share report.txt' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Share Child folder' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Rename Child folder' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Options for Child folder' }))
+    expectFolderRowMutationMenu('Child folder', true)
+    const reportKey = desktopQueryKeys.gfsAffordances(':user-1:team-1', 'child-report', 'main')
+    const folderKey = desktopQueryKeys.gfsAffordances(':user-1:team-1', 'child-folder', 'main')
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
+    })
+    fireEvent.click(
+      within(screen.getByRole('menu', { name: 'Actions for report.txt' })).getByRole('menuitem', {
+        name: 'Delete',
+      })
+    )
+    const deleteDialog = screen.getByRole('dialog', { name: 'Delete report.txt?' })
+
+    await act(async () => {
+      await client.invalidateQueries({ exact: true, queryKey: reportKey, refetchType: 'none' })
+      await client.invalidateQueries({ exact: true, queryKey: folderKey, refetchType: 'none' })
+    })
+    await waitFor(() => {
+      expect(screen.getByText('Checking permissions for report.txt…')).toBeTruthy()
+      expect(screen.getByText('Checking permissions for Child folder…')).toBeTruthy()
+    })
+    expect(screen.queryByRole('button', { name: 'Share report.txt' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Rename report.txt' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Share Child folder' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Rename Child folder' })).toBeNull()
+    expectFolderRowMutationMenu('Child folder', false)
+    await act(async () => {
+      fireEvent.click(within(deleteDialog).getByRole('button', { name: 'Delete' }))
+    })
+    expect(deleteResource).not.toHaveBeenCalled()
+
+    await act(async () => {
+      void client.invalidateQueries({ exact: true, queryKey: reportKey, refetchType: 'active' })
+      void client.invalidateQueries({ exact: true, queryKey: folderKey, refetchType: 'active' })
+    })
+    await waitFor(() => expect(reportCalls).toBe(2))
+    await waitFor(() => expect(childFolderCalls).toBe(2))
+    await waitFor(() => {
+      expect(screen.getByText('Checking permissions for report.txt…')).toBeTruthy()
+      expect(screen.getByText('Checking permissions for Child folder…')).toBeTruthy()
+    })
+    expectFolderRowMutationMenu('Child folder', false)
+
+    await act(async () => {
+      rejectReportRefresh(new Error('429 Too Many Requests'))
+      rejectFolderRefresh(new Error('429 Too Many Requests'))
+      await Promise.resolve()
+    })
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Could not verify permissions for report\.txt.*Too many file requests/i)
+      ).toBeTruthy()
+      expect(
+        screen.getByText(/Could not verify permissions for Child folder.*Too many file requests/i)
+      ).toBeTruthy()
+    })
+    expect(screen.queryByRole('button', { name: 'Share report.txt' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Rename report.txt' })).toBeNull()
+    expectFolderRowMutationMenu('Child folder', false)
+    for (const queryKey of [reportKey, folderKey]) {
+      await act(async () => {
+        void client.invalidateQueries({ exact: true, queryKey, refetchType: 'active' })
+      })
+    }
+    await waitFor(() => expect(reportCalls).toBe(3))
+    await waitFor(() => expect(childFolderCalls).toBe(3))
+    expect(await screen.findByRole('button', { name: 'Share report.txt' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Share Child folder' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Rename Child folder' })).toBeTruthy()
+    expectFolderRowMutationMenu('Child folder', true)
+    expect(renameResource).not.toHaveBeenCalled()
+    expect(createFolder).not.toHaveBeenCalled()
+    expect(createFileFromPath).not.toHaveBeenCalled()
+    client.clear()
+  })
+
+  it('withholds shared-row mutation actions during stale, pending, failed, and recovering list checks', async () => {
+    const sharedFile = accessibleResource('shared-file', 'shared.txt', 'file', {
+      permissions: ['read', 'write', 'delete', 'manage_acl', 'share'],
+    })
+    const sharedFolder = accessibleResource('shared-folder', 'Shared folder', 'directory', {
+      permissions: ['read', 'write', 'delete', 'manage_acl', 'share'],
+    })
+    const sharedPage = await listAccessiblePage([sharedFile, sharedFolder])
+    let listCalls = 0
+    let rejectRefresh!: (error: Error) => void
+    const pendingRefresh = new Promise<Awaited<ReturnType<typeof listAccessiblePage>>>(
+      (_, reject) => {
+        rejectRefresh = reject
+      }
+    )
+    const listAccessible = vi.fn(async () => {
+      listCalls += 1
+      if (listCalls === 2) return pendingRefresh
+      return sharedPage
+    })
+    const renameResource = vi.fn(async () => undefined)
+    const deleteResource = vi.fn(async () => undefined)
+    const createFolder = vi.fn(async () => undefined)
+    const createFileFromPath = vi.fn(async () => undefined)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible,
+          resolve: vi.fn(),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () =>
+            delegationAffordances(
+              new Set(['read', 'write', 'delete', 'manage_acl', 'share']),
+              false
+            )
+          ),
+          renameResource,
+          deleteResource,
+          createFolder,
+          createFileFromPath,
+        },
+      },
+    })
+
+    const { client } = renderHarness({ pendingGfsUri: null })
+    await screen.findByText('shared.txt')
+    await waitFor(() => expect(listCalls).toBe(1))
+    expect(screen.getByRole('button', { name: 'Share shared.txt' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Rename shared.txt' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Share Shared folder' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Rename Shared folder' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Options for Shared folder' }))
+    expectFolderRowMutationMenu('Shared folder', true)
+    const accessibleKey = desktopQueryKeys.gfsAccessible(':user-1:team-1', 'main')
+    const cachedPage = client.getQueryData(accessibleKey)
+    expect(cachedPage).toBeDefined()
+
+    await act(async () => {
+      await client.invalidateQueries({
+        exact: true,
+        queryKey: accessibleKey,
+        refetchType: 'none',
+      })
+    })
+    await waitFor(() => {
+      expect(screen.getByText('Checking permissions for shared.txt…')).toBeTruthy()
+      expect(screen.getByText('Checking permissions for Shared folder…')).toBeTruthy()
+    })
+    expect(screen.queryByRole('button', { name: 'Share shared.txt' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Rename shared.txt' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Share Shared folder' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Rename Shared folder' })).toBeNull()
+    expectFolderRowMutationMenu('Shared folder', false)
+
+    await act(async () => {
+      void client.invalidateQueries({
+        exact: true,
+        queryKey: accessibleKey,
+        refetchType: 'active',
+      })
+    })
+    await waitFor(() => expect(listCalls).toBe(2))
+    await waitFor(() => {
+      expect(screen.getByText('Checking permissions for shared.txt…')).toBeTruthy()
+      expect(screen.getByText('Checking permissions for Shared folder…')).toBeTruthy()
+    })
+    expectFolderRowMutationMenu('Shared folder', false)
+    await act(async () => {
+      rejectRefresh(new Error('429 Too Many Requests'))
+      await Promise.resolve()
+    })
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Could not verify permissions for shared\.txt.*Too many file requests/i)
+      ).toBeTruthy()
+      expect(
+        screen.getByText(/Could not verify permissions for Shared folder.*Too many file requests/i)
+      ).toBeTruthy()
+    })
+    expect(screen.queryByRole('button', { name: 'Share shared.txt' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Rename shared.txt' })).toBeNull()
+    expectFolderRowMutationMenu('Shared folder', false)
+
+    await act(async () => {
+      void client.invalidateQueries({
+        exact: true,
+        queryKey: accessibleKey,
+        refetchType: 'active',
+      })
+    })
+    await waitFor(() => expect(listCalls).toBe(3))
+    expect(await screen.findByRole('button', { name: 'Share shared.txt' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Rename shared.txt' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Share Shared folder' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Rename Shared folder' })).toBeTruthy()
+    expectFolderRowMutationMenu('Shared folder', true)
+    expect(renameResource).not.toHaveBeenCalled()
+    expect(deleteResource).not.toHaveBeenCalled()
+    expect(createFolder).not.toHaveBeenCalled()
+    expect(createFileFromPath).not.toHaveBeenCalled()
     client.clear()
   })
 

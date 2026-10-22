@@ -9,7 +9,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query'
 import { GFS_BREADCRUMB_MAX_DEPTH } from '@constants/gfsBrowser'
-import { gfsAuthorityQueryPolicy } from '@lib/gfsAuthorityQueryPolicy'
+import { GFS_AUTHORITY_STALE_TIME_MS, gfsAuthorityQueryPolicy } from '@lib/gfsAuthorityQueryPolicy'
 import {
   describeGfsReadError,
   isRateLimited,
@@ -139,6 +139,11 @@ export interface GfsBrowserAffordances {
   canDelegate: boolean
   grantableBits: string[]
   canCreateShare: boolean
+}
+
+export interface GfsRowPermissionStatus {
+  status: 'checking' | 'error' | 'ready'
+  message: string | null
 }
 
 export interface GfsBrowserControllerOptions {
@@ -417,11 +422,13 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       return listAccessible(DRIVE, pageParam)
     },
     enabled: Boolean(sessionScope) && canListAccessibleResources && accessState === 'active',
+    staleTime: GFS_AUTHORITY_STALE_TIME_MS,
     // Accessible resources are permission-derived state. Another session can
     // revoke a grant/share while this user is away from Files, so an
     // Infinity-cached list must not survive a Files remount without a server
     // check — even though the app-level client defaults disable refetching.
     refetchOnMount: 'always',
+    notifyOnChangeProps: 'all',
     // Grants are often made from another surface (control-ui, an operator,
     // another user) while this window stays open; focusing the app must
     // surface the new shares without a hard reload — unless the server just
@@ -798,6 +805,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         currentIsDirectory &&
         !authorityPending &&
         accessState === 'active',
+      notifyOnChangeProps: 'all',
       ...gfsAuthorityQueryPolicy,
     })),
   })
@@ -853,7 +861,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     const byResourceId: Record<string, GfsBrowserAffordances> = {}
     if (authorityPending || accessState === 'revoked') return byResourceId
     items.forEach((item, index) => {
-      const data = rowAffordancesQueries[index]?.data
+      const query = rowAffordancesQueries[index]
+      if (!query?.data || query.isFetching || query.isError || query.isStale) return
+      const data = query.data
       if (data) byResourceId[item.resourceId] = data as GfsBrowserAffordances
     })
     return byResourceId
@@ -917,6 +927,54 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           ),
     [accessibleQuery.data, authorityPending]
   )
+  const rowPermissionStatusByResourceId = useMemo(() => {
+    const byResourceId: Record<string, GfsRowPermissionStatus> = {}
+    const queryStatus = (
+      query:
+        | {
+            data?: unknown
+            error?: unknown
+            isError?: boolean
+            isFetching?: boolean
+            isStale?: boolean
+          }
+        | undefined
+    ) => {
+      if (query?.isFetching) return { status: 'checking', message: null } as const
+      if (query?.isError) {
+        return {
+          status: 'error',
+          message: toPresentedMessage(query.error),
+        } as const
+      }
+      if (!query?.data || query.isStale) return { status: 'checking', message: null } as const
+      return { status: 'ready', message: null } as const
+    }
+    items.forEach((item, index) => {
+      byResourceId[item.resourceId] =
+        authorityPending || accessState === 'revoked'
+          ? { status: 'checking', message: null }
+          : queryStatus(rowAffordancesQueries[index])
+    })
+    accessibleResources.forEach(resource => {
+      byResourceId[resource.resourceId] =
+        authorityPending || accessState === 'revoked'
+          ? { status: 'checking', message: null }
+          : queryStatus(accessibleQuery)
+    })
+    return byResourceId
+  }, [
+    accessState,
+    accessibleQuery.data,
+    accessibleQuery.error,
+    accessibleQuery.isError,
+    accessibleQuery.isFetching,
+    accessibleQuery.isStale,
+    accessibleResources,
+    authorityPending,
+    items,
+    rowAffordancesQueries,
+  ])
   const grants = useMemo<GfsGrantListItem[]>(
     () => (authorityPending ? [] : (grantsQuery.data ?? [])),
     [authorityPending, grantsQuery.data]
@@ -1327,13 +1385,18 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     affordancesError: affordancesQuery.error ? toPresentedMessage(affordancesQuery.error) : null,
     loadingAffordances: affordancesQuery.isFetching,
     rowAffordancesByResourceId,
+    rowPermissionStatusByResourceId,
     moveSourceParentAffordancesById,
     moveSourceParentStatusById,
     rowAffordancesResourceId,
     setRowAffordancesResourceId,
     setMoveSourceParentResourceId: setRowMoveSourceParentResourceId,
     rowAffordances:
-      authorityPending || accessState === 'revoked'
+      authorityPending ||
+      accessState === 'revoked' ||
+      rowAffordancesQuery.isFetching ||
+      rowAffordancesQuery.isError ||
+      rowAffordancesQuery.isStale
         ? null
         : ((rowAffordancesQuery.data as GfsBrowserAffordances | undefined) ?? null),
     rowAffordancesError: rowAffordancesQuery.error
