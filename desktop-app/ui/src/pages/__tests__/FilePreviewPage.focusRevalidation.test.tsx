@@ -44,7 +44,9 @@ describe('FilePreviewPage focus revalidation', () => {
             pendingDenials.push(reject)
           })
       )
-    const affordances = vi.fn(async () => delegationAffordances(new Set(['read']), false))
+    const affordances = vi.fn(async (..._args: [string, string]) =>
+      delegationAffordances(new Set(['read']), false)
+    )
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
