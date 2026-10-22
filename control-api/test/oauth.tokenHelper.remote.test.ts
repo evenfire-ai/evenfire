@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
+import { config } from '../src/config.js'
 import type { PinnedRawResponse, PinnedTransportInput } from '../src/http/pinnedFetch.js'
 import { type DiscoveryResult, discoverRemoteOAuth } from '../src/oauth/discovery.js'
 import { resolveServerOAuthSubject } from '../src/oauth/mcpServerOAuthSpec.js'
@@ -10,8 +11,10 @@ import {
   type InstalledMcpServer,
   WORKIQ_GUID_SCOPE,
   installWorkIqServer,
+  seedContext,
 } from './fixtures/perServerInstall.js'
 import { PILOTS, makeDiscoveryTransport } from './fixtures/remoteOAuthDiscovery.js'
+import { MockGateway } from './mockGateway.js'
 
 /**
  * C4/DEC-17 + D-8 — the REMOTE refresh goes through the IP-pinned transport (never
@@ -158,9 +161,13 @@ describe('getAccessToken — entra-v2 refresh wire (I5, I7)', () => {
   const ENTRA_TOKEN_ENDPOINT =
     'https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/oauth2/v2.0/token'
   let workIq: InstalledMcpServer
+  // The gateway the install wrote to: the client Secret is read from it, as written.
+  let gateway: MockGateway
 
   beforeAll(async () => {
-    workIq = await installWorkIqServer({ scopes: [WORKIQ_GUID_SCOPE] })
+    gateway = new MockGateway(config.mcpServersNamespace)
+    await seedContext(gateway, config.mcpServersNamespace, 'ctx-a')
+    workIq = await installWorkIqServer({ scopes: [WORKIQ_GUID_SCOPE], gateway })
   })
 
   async function refreshWith(server: InstalledMcpServer) {
@@ -171,18 +178,23 @@ describe('getAccessToken — entra-v2 refresh wire (I5, I7)', () => {
     )
     const owner = normalizeMcpServerOwnerDecl(server as never)
     if (!owner) throw new Error('fixture: the Work IQ CR did not resolve')
-    const clientIdRef = server.spec.oauth.clientIdRef as { name: string; key: string }
-    const clientSecretRef = server.spec.oauth.clientSecretRef as { name: string; key: string }
     const result = await getAccessToken(
       { ...KEY, recipeName: server.metadata.name, oauthClientId: String(server.spec.oauth.id) },
       {
         db: { query: async () => ({ rows: [] }) } as never,
         recipeReader: { read: async () => owner },
         secretReader: {
-          read: async () => ({
-            [clientIdRef.key]: String(server.spec.oauth.id),
-            [clientSecretRef.key]: 'entra-client-secret',
-          }),
+          async read(name, namespace) {
+            const raw = (await gateway.getSecret(name, namespace)) as {
+              data?: Record<string, string>
+            }
+            return Object.fromEntries(
+              Object.entries(raw.data ?? {}).map(([k, v]) => [
+                k,
+                Buffer.from(v, 'base64').toString(),
+              ])
+            )
+          },
         },
         fetchFn: (async () => {
           throw new Error('remote refresh must NOT use fetchFn')
@@ -204,6 +216,8 @@ describe('getAccessToken — entra-v2 refresh wire (I5, I7)', () => {
     expect(calls[0].url).toBe(ENTRA_TOKEN_ENDPOINT)
     const body = new URLSearchParams(calls[0].body ?? '')
     expect(body.get('grant_type')).toBe('refresh_token')
+    expect(body.get('client_id')).toBe(String(workIq.spec.oauth.id))
+    expect(body.get('client_secret')).toBe('entra-client-secret')
     expect(body.get('scope')).toBe(`${WORKIQ_GUID_SCOPE} offline_access`)
     expect(body.has('resource')).toBe(false)
     expect(calls[0].body).not.toContain('resource=')
