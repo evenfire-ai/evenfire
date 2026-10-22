@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { parse } from 'yaml'
 import {
   AS_PROFILE_IDS,
   ENTRA_BLOCKED_RESOURCE_APPS,
@@ -490,4 +494,33 @@ describe('isEntraMultiTenantAuthority', () => {
   for (const url of no) {
     it(`false for ${url}`, () => expect(isEntraMultiTenantAuthority(new URL(url))).toBe(false))
   }
+})
+
+describe('CRD parity', () => {
+  it('the mcpserver.yaml AS-PROFILE-ISSUER rule carries ENTRA_TENANT_ISSUER_PATTERN verbatim', () => {
+    const crdPath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      '../../charts/clerum-crds/crds/mcpserver.yaml'
+    )
+    const crd = parse(readFileSync(crdPath, 'utf8')) as {
+      spec: {
+        versions: Array<{
+          schema: {
+            openAPIV3Schema: {
+              properties: {
+                spec: { 'x-kubernetes-validations': Array<{ rule: string; message: string }> }
+              }
+            }
+          }
+        }>
+      }
+    }
+    const rules =
+      crd.spec.versions[0].schema.openAPIV3Schema.properties.spec['x-kubernetes-validations']
+    const asProfileIssuer = rules.find(r =>
+      r.message.startsWith('spec.oauth.asProfile entra-v2 requires')
+    )
+    expect(asProfileIssuer, 'AS-PROFILE-ISSUER rule present').toBeDefined()
+    expect(asProfileIssuer?.rule).toContain(`.matches('${ENTRA_TENANT_ISSUER_PATTERN}')`)
+  })
 })
