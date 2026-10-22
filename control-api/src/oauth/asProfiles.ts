@@ -44,8 +44,8 @@ export interface AsProfile {
 export interface RemoteWire {
   /** Send RFC 8707 `resource` on authorize, token and refresh. */
   sendResource: boolean
-  /** Send the requested scopes as `scope` on the refresh request. */
-  refreshWithScope: boolean
+  /** Send the requested scopes as `scope` on every token-endpoint request (code exchange and refresh). */
+  scopeOnTokenRequests: boolean
 }
 
 /** The CEL-compatible issuer pattern; the CRD rule and `detectAsProfile` share this exact text. */
@@ -85,8 +85,8 @@ const ENTRA_V2: AsProfile = Object.freeze({
   requiredScopes: Object.freeze(['offline_access']),
 })
 
-const WIRE_DEFAULT: RemoteWire = Object.freeze({ sendResource: true, refreshWithScope: false })
-const WIRE_ENTRA_V2: RemoteWire = Object.freeze({ sendResource: false, refreshWithScope: true })
+const WIRE_DEFAULT: RemoteWire = Object.freeze({ sendResource: true, scopeOnTokenRequests: false })
+const WIRE_ENTRA_V2: RemoteWire = Object.freeze({ sendResource: false, scopeOnTokenRequests: true })
 
 const ENTRA_TENANT_ISSUER_RE = new RegExp(ENTRA_TENANT_ISSUER_PATTERN)
 const ENTRA_LOGIN_HOST = 'login.microsoftonline.com'

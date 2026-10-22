@@ -320,7 +320,7 @@ async function refreshRemoteGrant(
     remote.resource,
     // Entra's refresh token is valid for every consented API, so without `scope` the
     // refreshed token's audience would not be pinned to this server.
-    remoteWireForProfile(remote.asProfile).refreshWithScope ? decl.scopes : undefined
+    remoteWireForProfile(remote.asProfile).scopeOnTokenRequests ? decl.scopes : undefined
   )
   const posted = await postRemoteTokenForm(
     remote.tokenEndpoint,

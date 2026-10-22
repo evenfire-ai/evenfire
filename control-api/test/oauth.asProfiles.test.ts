@@ -170,10 +170,13 @@ describe('isAsProfileId / asProfileById / remoteWireForProfile', () => {
   })
 
   it('remoteWireForProfile', () => {
-    expect(remoteWireForProfile(undefined)).toEqual({ sendResource: true, refreshWithScope: false })
+    expect(remoteWireForProfile(undefined)).toEqual({
+      sendResource: true,
+      scopeOnTokenRequests: false,
+    })
     expect(remoteWireForProfile('entra-v2')).toEqual({
       sendResource: false,
-      refreshWithScope: true,
+      scopeOnTokenRequests: true,
     })
   })
 })
