@@ -100,7 +100,7 @@ fi
 if command -v node >/dev/null 2>&1; then
   NODE_VER="$(node --version | sed 's/^v//')"
   NODE_MAJOR="${NODE_VER%%.*}"
-  if node "$SCRIPT_DIR/check-node-version.mjs" >/dev/null 2>&1; then
+  if node "$SCRIPT_DIR/check-node-version.cjs" >/dev/null 2>&1; then
     ok "node     v${NODE_VER}"
     if [ "$NODE_MAJOR" != "24" ]; then
       warn "node     v${NODE_VER} runs the quickstart, but Desktop/Electron validation requires 24.x"

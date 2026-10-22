@@ -6,7 +6,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import { assertNodeVersion } from '../../check-node-version.mjs'
+import { assertNodeVersion } from '../../check-node-version.cjs'
 
 export class RunnerAdmissionError extends Error {
   constructor(code) {

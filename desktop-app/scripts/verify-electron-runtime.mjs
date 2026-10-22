@@ -1,5 +1,5 @@
 import fs from 'node:fs'
-import { assertNodeVersion } from '../../scripts/check-node-version.mjs'
+import { assertNodeVersion } from '../../scripts/check-node-version.cjs'
 
 // Desktop validation is the one place the Node major is contractual: the
 // Electron postinstall and the prebuilt runtime are matched to Node 24, and CI

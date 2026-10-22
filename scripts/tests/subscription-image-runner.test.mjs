@@ -463,7 +463,7 @@ test('minimal source context excludes ignored/private/Git files and unrelated re
   const packages = ['packages/llm-provider-attempt-contract']
   for (const filename of [
     '.nvmrc',
-    'scripts/check-node-version.mjs',
+    'scripts/check-node-version.cjs',
     'desktop-app/src/main.ts',
     'desktop-app/ui/src/App.tsx',
     'packages/llm-provider-attempt-contract/testImageFixtures.cjs',

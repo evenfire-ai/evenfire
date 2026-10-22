@@ -12,7 +12,7 @@ const refuse = code => {
 }
 const fixedFiles = [
   '.nvmrc',
-  'scripts/check-node-version.mjs',
+  'scripts/check-node-version.cjs',
   'desktop-app/package.json',
   'desktop-app/package-lock.json',
   'desktop-app/tsconfig.json',

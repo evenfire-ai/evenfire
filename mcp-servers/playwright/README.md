@@ -43,7 +43,7 @@ See [`mcpserver.yaml`](./mcpserver.yaml) for the full CRD spec. Key fields:
 
 ## Status
 
-Available; deployable via the makefile. No test suite in this directory (unlike `airtable/` and `mongodb/`). Referenced by `docs/crds/context.md` and `charts/clerum-crds/examples/context1.yaml` (a `Context` listing `playwright-server`), and by the `deploy-playwright` target in [`../makefile`](../makefile).
+Available; deployable via the makefile. The container runtime smoke test is described below. Referenced by `docs/crds/context.md` and `charts/clerum-crds/examples/context1.yaml` (a `Context` listing `playwright-server`), and by the `deploy-playwright` target in [`../makefile`](../makefile).
 
 ## Temporary Node security patch for tests (2026-10-22)
 
