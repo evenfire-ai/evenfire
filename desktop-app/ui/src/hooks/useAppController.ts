@@ -940,6 +940,8 @@ export function useAppController() {
     }
     try {
       auth.setBusy(true)
+      const logoutResult = await window.clerum.auth.logout()
+      logoutGeneration = logoutResult.sessionGeneration
       await chat.stopAllActivityStreams()
       catalogRefreshPromiseRef.current = null
       agentsData.reset()
@@ -949,15 +951,13 @@ export function useAppController() {
       teamsData.reset()
       resetWorkflowsData()
       queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
-      // Drop ALL cached queries on logout: the singleton
+      // Drop ALL cached queries on confirmed logout: the singleton
       // desktopQueryClient uses staleTime:Infinity, so any env-scoped data left
       // in cache would otherwise bleed into the next login (possibly a different
       // environment, since the env is chosen pre-login).
       queryClient.clear()
       activeAuthenticatedSessionIdentityRef.current = null
       authenticatedSessionIdentityRef.current = null
-      const logoutResult = await window.clerum.auth.logout()
-      logoutGeneration = logoutResult.sessionGeneration
       nav.resetSessionNavigation()
       reflectSignedOutState()
       chat.resetChat()

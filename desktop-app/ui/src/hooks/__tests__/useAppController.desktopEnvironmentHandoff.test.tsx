@@ -1,6 +1,13 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, waitFor } from '@testing-library/react'
+import { DESKTOP_ROUTES } from '@constants/navigation'
+import {
+  getComposerDraft,
+  resetComposerDraftStore,
+  setComposerDraft,
+} from '@lib/composerDraftStore'
+import { activeWorkspaceTab } from '@lib/workspaceTabs'
 import {
   cleanupNativeCommitTestHarness,
   createNativeCommitTestHarness,
@@ -11,17 +18,23 @@ import {
   renderAppController,
 } from '../domain/__tests__/__fixtures__/appControllerHarness'
 import { uninstallMockClerum } from '../domain/__tests__/__fixtures__/mockClerum'
+import { desktopQueryKeys } from '../domain/queryKeys'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 describe('useAppController desktop environment handoff', () => {
   let unmount: (() => void) | null = null
 
+  beforeEach(() => {
+    resetComposerDraftStore()
+  })
+
   afterEach(async () => {
     unmount?.()
     unmount = null
     vi.restoreAllMocks()
     uninstallMockClerum()
+    resetComposerDraftStore()
     await cleanupNativeCommitTestHarness()
   })
 
@@ -74,6 +87,58 @@ describe('useAppController desktop environment handoff', () => {
     return { app, handle, handoff, native, targetOptionId: native.optionB.id }
   }
 
+  function seedSamePrincipalWorkspace(app: ReturnType<typeof renderAppController>) {
+    act(() => {
+      app.result.current.handleSelectChatAgent('agent-x', {
+        chatId: 'logout-preservation-chat',
+        title: 'Same-principal conversation',
+        selectLatest: false,
+      })
+      app.result.current.openFilesSection('gfs://main/0123456789abcdef0123456789abcdef')
+    })
+    const workspace = app.result.current.workspaceTabs
+    const activeTab = activeWorkspaceTab(workspace)
+    const chatTab = workspace.tabs.find(
+      tab => tab.kind === 'chat' && tab.chat?.chatId === 'logout-preservation-chat'
+    )
+    if (activeTab?.kind !== 'files') throw new Error('expected the producer-created Files tab')
+    if (chatTab?.kind !== 'chat') throw new Error('expected the producer-created chat tab')
+    const draft = 'same-principal owned draft'
+    expect(setComposerDraft('logout-preservation-chat', draft, 'agent-x', chatTab.id)).toBe(true)
+    const accessCatalog = app.queryClient.getQueryData(desktopQueryKeys.accessCatalog)
+    if (!accessCatalog) throw new Error('expected the authenticated catalog query to be cached')
+    const gfsCacheKey = [...desktopQueryKeys.gfsRoot, 'logout-preservation']
+    const gfsCacheValue = { principalId: 'user-1', marker: 'same-principal gfs data' }
+    app.queryClient.setQueryData(gfsCacheKey, gfsCacheValue)
+    return {
+      workspace,
+      activeTabId: activeTab.id,
+      chatTabId: chatTab.id,
+      draft,
+      accessCatalog,
+      gfsCacheKey,
+      gfsCacheValue,
+    }
+  }
+
+  function expectSamePrincipalWorkspace(
+    app: ReturnType<typeof renderAppController>,
+    preserved: ReturnType<typeof seedSamePrincipalWorkspace>
+  ) {
+    expect(app.result.current.me?.id).toBe('user-1')
+    expect(app.result.current.workspaceTabs).toEqual(preserved.workspace)
+    expect(activeWorkspaceTab(app.result.current.workspaceTabs)?.id).toBe(preserved.activeTabId)
+    expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.files)
+    expect(app.result.current.selectedAgent).toBe('agent-x')
+    expect(getComposerDraft('logout-preservation-chat', 'agent-x', preserved.chatTabId)).toBe(
+      preserved.draft
+    )
+    expect(app.queryClient.getQueryData(desktopQueryKeys.accessCatalog)).toEqual(
+      preserved.accessCatalog
+    )
+    expect(app.queryClient.getQueryData(preserved.gfsCacheKey)).toEqual(preserved.gfsCacheValue)
+  }
+
   it('keeps the signed-in session and skips selection when the user cancels', async () => {
     const { app, handle, handoff } = await openSwitchConfirmation()
 
@@ -90,10 +155,23 @@ describe('useAppController desktop environment handoff', () => {
   })
 
   it('signs out before selecting the saved environment with the logout generation', async () => {
-    const { app, handle, handoff, targetOptionId } = await openSwitchConfirmation()
+    const { app, handle, handoff, native, targetOptionId } = await openSwitchConfirmation()
+    const preserved = seedSamePrincipalWorkspace(app)
+    const tokenStore = native.service as unknown as {
+      tokenStore: { clearSessionToken: ReturnType<typeof vi.fn> }
+    }
+    let finishNativeLogout!: () => void
+    tokenStore.tokenStore.clearSessionToken.mockImplementationOnce(
+      () => new Promise<void>(resolve => (finishNativeLogout = resolve))
+    )
 
-    await act(async () => app.result.current.handleConfirmDesktopEnvironmentSwitchConfirmation())
-    await act(async () => handoff)
+    act(() => app.result.current.handleConfirmDesktopEnvironmentSwitchConfirmation())
+    await waitFor(() => expect(tokenStore.tokenStore.clearSessionToken).toHaveBeenCalledOnce())
+    expectSamePrincipalWorkspace(app, preserved)
+    await act(async () => {
+      finishNativeLogout()
+      await handoff
+    })
 
     expect(handle.logout).toHaveBeenCalledOnce()
     const logoutResult = await handle.logout.mock.results[0]?.value
@@ -106,6 +184,11 @@ describe('useAppController desktop environment handoff', () => {
     )
     expect(app.result.current.isAuthenticated).toBe(false)
     expect(app.result.current.runtimeConfigState?.activeOptionId).toBe(targetOptionId)
+    expect(app.result.current.selectedAgent).toBeNull()
+    expect(app.result.current.workspaceTabs.tabs).toHaveLength(1)
+    expect(getComposerDraft('logout-preservation-chat', 'agent-x', preserved.chatTabId)).toBe('')
+    expect(app.queryClient.getQueryData(desktopQueryKeys.accessCatalog)).toBeUndefined()
+    expect(app.queryClient.getQueryData(preserved.gfsCacheKey)).toBeUndefined()
   })
 
   it('keeps the committed logout when renderer session reload fails', async () => {
@@ -130,6 +213,7 @@ describe('useAppController desktop environment handoff', () => {
 
   it('keeps the signed-in session and reports the native logout failure', async () => {
     const { app, handle, handoff, native } = await openSwitchConfirmation()
+    const preserved = seedSamePrincipalWorkspace(app)
     const tokenStore = native.service as unknown as {
       tokenStore: { clearSessionToken: ReturnType<typeof vi.fn> }
     }
@@ -143,6 +227,7 @@ describe('useAppController desktop environment handoff', () => {
     expect(handle.logout).toHaveBeenCalledOnce()
     expect(handle.selectRuntimeConfigForHandoff).not.toHaveBeenCalled()
     expect(app.result.current.isAuthenticated).toBe(true)
+    expectSamePrincipalWorkspace(app, preserved)
     expect(app.result.current.statusText).toContain(
       "Logout failed: Error invoking remote method 'auth:logout': Error: secure storage unavailable"
     )
