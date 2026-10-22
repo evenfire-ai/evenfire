@@ -12,6 +12,8 @@ import { config } from '../src/config.js'
 const invitationToken = 'synthetic-member-invitation-proof'
 const invitationId = '00000000-0000-4000-8000-000000000001'
 const inviteeEmail = 'member@example.invalid'
+const witnessToken = 'synthetic-witness-invitation-proof'
+const witnessSession = 'synthetic-witness-session-token'
 
 type UpstreamRequest = { method?: string; url?: string; body?: Record<string, unknown> }
 
@@ -63,6 +65,21 @@ describe('sessionless invitation password fallback through the producer', () => 
         return
       }
       if (req.method === 'POST' && req.url === '/api/v1/external/invitations/accept') {
+        if (requests.at(-1)?.body?.token === witnessToken) {
+          res.writeHead(200)
+          res.end(
+            JSON.stringify({
+              accepted: true,
+              teamId: null,
+              teamName: null,
+              role: 'member',
+              email: inviteeEmail,
+              userId: '00000000-0000-4000-8000-000000000003',
+              token: witnessSession,
+            })
+          )
+          return
+        }
         res.writeHead(accept.status)
         res.end(JSON.stringify(accept.body))
         return
@@ -77,6 +94,22 @@ describe('sessionless invitation password fallback through the producer', () => 
     const address = upstream.address() as AddressInfo
     config.controlApiBaseUrl = `http://127.0.0.1:${address.port}/api/v1`
     return requests
+  }
+
+  // Positive witness in the same app and producer: a first acceptance through
+  // the edge issues the product session cookie the fallback response must lack.
+  async function expectWitnessSessionCookie(requests: UpstreamRequest[]) {
+    const witness = await request(createApp())
+      .post('/api/v1/invitations/accept')
+      .send({ token: witnessToken, email: inviteeEmail })
+    expect(witness.status).toBe(200)
+    expect(String(witness.headers['set-cookie'] ?? '')).toContain(
+      `profile_session=${witnessSession}`
+    )
+    expect(requests.map(entry => `${entry.method} ${entry.url}`)).toEqual([
+      'POST /api/v1/external/invitations/accept',
+    ])
+    requests.splice(0)
   }
 
   async function submitFallbackPassword() {
@@ -109,6 +142,7 @@ describe('sessionless invitation password fallback through the producer', () => 
         replay: true,
       },
     })
+    await expectWitnessSessionCookie(requests)
 
     const response = await submitFallbackPassword()
 
@@ -122,6 +156,7 @@ describe('sessionless invitation password fallback through the producer', () => 
 
   it('maps a producer 400 not_pending to the non-terminal invalid invitation body', async () => {
     const requests = await startProducer({ status: 400, body: { error: 'not_pending' } })
+    await expectWitnessSessionCookie(requests)
 
     const response = await submitFallbackPassword()
 
