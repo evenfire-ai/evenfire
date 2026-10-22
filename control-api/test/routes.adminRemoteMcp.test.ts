@@ -2687,6 +2687,19 @@ describe('Microsoft Entra ID — authorizationServer override on /discover and i
     expect(res.body.detected.issForCallback).toBeUndefined()
   })
 
+  it("row 4: an unknown tenant → 424 fetch_failed carrying Entra's 400 and its URL", async () => {
+    const unknownTenant =
+      'https://login.microsoftonline.com/00000000-0000-0000-0000-000000000001/v2.0'
+    const res = await request(await entraApp(ENTRA_WORKIQ_PILOT, gatewayWithContext()))
+      .post('/admin/mcp-servers/remote/discover')
+      .send({ baseUrl: ENTRA_WORKIQ_PILOT.mcpUrl, authorizationServer: unknownTenant })
+    expect(res.status).toBe(424)
+    expect(res.body.error).toBe('discovery_failed')
+    expect(res.body.detail.kind).toBe('fetch_failed')
+    expect(res.body.detail.status).toBe(400)
+    expect(res.body.detail.url.startsWith('https://login.microsoftonline.com/')).toBe(true)
+  })
+
   it('Agent 365 Mail: offline_access, already in its PRM, is not added twice', async () => {
     const res = await request(await entraApp(ENTRA_AGENT365_MAIL_PILOT, gatewayWithContext()))
       .post('/admin/mcp-servers/remote/discover')
