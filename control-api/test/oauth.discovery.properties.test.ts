@@ -207,11 +207,11 @@ describe('issuer identity (RFC 8414 §3.3 / §2): no query, fragment or userinfo
   // not interfere with the issuer comparison under test.
   const base = 'https://as.example.com/p'
   const [oauthUrl, oidcUrl] = asMetadataUrls(new URL(base))
-  const prmJson = JSON.stringify({
-    ...JSON.parse(PILOTS.sentry.prm.json),
-    authorization_servers: [base],
-  })
-  const discoverWithIssuer = (issuer: string) => {
+  const discoverWithIssuer = (issuer: string, advertisedBase = base) => {
+    const prmJson = JSON.stringify({
+      ...JSON.parse(PILOTS.sentry.prm.json),
+      authorization_servers: [advertisedBase],
+    })
     const asJson = JSON.stringify({ ...JSON.parse(PILOTS.sentry.as.json), issuer })
     const pilot = {
       ...PILOTS.sentry,
@@ -240,6 +240,27 @@ describe('issuer identity (RFC 8414 §3.3 / §2): no query, fragment or userinfo
         if (!outcome.ok) expect(outcome.error.kind).toBe('issuer_mismatch')
       })
     )
+  })
+
+  // The other half of the identity: a bare issuer against a decorated
+  // `authorization_servers[0]`. The well-known URLs derive from origin+path only, so
+  // the same metadata is served and only the base's own identifier shape can reject it.
+  it('a PRM authorization server decorated with a query or fragment, even an empty one, is issuer_mismatch', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.constantFrom('?', '#', '?q=1', '#f'), fc.string(), async (mark, tail) => {
+        const outcome = await discoverWithIssuer(base, `${base}${mark}${tail}`)
+        expect(outcome.ok).toBe(false)
+        if (!outcome.ok) expect(outcome.error.kind).toBe('issuer_mismatch')
+      })
+    )
+  })
+
+  it('a PRM authorization server with userinfo is issuer_mismatch', async () => {
+    for (const advertised of ['https://u:p@as.example.com/p', 'https://u@as.example.com/p']) {
+      const outcome = await discoverWithIssuer(base, advertised)
+      expect(outcome.ok).toBe(false)
+      if (!outcome.ok) expect(outcome.error.kind).toBe('issuer_mismatch')
+    }
   })
 
   it('an issuer with userinfo is issuer_mismatch', async () => {
