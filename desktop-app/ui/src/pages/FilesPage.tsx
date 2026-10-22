@@ -2318,14 +2318,12 @@ export function FilesPage({
                     <h4>Add people, teams, agents, or workflows</h4>
                   </div>
                 </div>
-                {loadingAffordances ? (
-                  <p className="muted">Refreshing permissions…</p>
-                ) : affordancesError ? (
-                  <StatusBanner tone="error" text={affordancesError} />
-                ) : affordances ? (
+                {affordances ? (
                   <>
                     <GfsDelegationPanel
                       affordances={affordances}
+                      permissionPending={loadingAffordances}
+                      permissionError={affordancesError}
                       subjectOptions={grantSubjectOptions}
                       subjectOptionsLoading={
                         teamDirectoryQuery.isFetching || myAgentsQuery.isFetching
@@ -2339,6 +2337,12 @@ export function FilesPage({
                       onDetailViewChange={setShareDetailsOpen}
                     />
                   </>
+                ) : loadingAffordances ? (
+                  <p className="muted" role="status">
+                    Refreshing permissions…
+                  </p>
+                ) : affordancesError ? (
+                  <StatusBanner tone="error" text={affordancesError} />
                 ) : (
                   <p className="muted">Loading permissions…</p>
                 )}

@@ -3,17 +3,21 @@ import { useEffect, useRef, useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query'
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { createEmptyWorkspaceTabsState, openFilesTab, setFilesTabPath } from '@lib/workspaceTabs'
 import type { WorkspaceTabsState } from '@lib/workspaceTabs.types'
 import {
+  childView,
+  listAccessiblePage,
+  listChildrenPage,
   resolveDeniedMessage,
   resolveResource,
   resolvedDirectory,
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import { delegationAffordances } from '../../../../src/gfs/delegation.js'
 import { FilesPage } from '../FilesPage'
 
 // This suite mounts the REAL FilesPage on the REAL useGfsBrowserController (T1:
@@ -801,5 +805,144 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       )
       expect(screen.queryByText('private-notes.md')).toBeNull()
     })
+  })
+
+  it('keeps typed Manage fields during a background permission revalidation', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('folder-1', 'Reports', { gfsUri: SEED_URI })
+    )
+    const report = childView('file-1', 'report.txt', 'file', {
+      parentResourceId: 'folder-1',
+      gfsUri: 'gfs://main/file-1',
+    })
+    const children = await listChildrenPage([report])
+    const accessible = await listAccessiblePage([])
+    const fullAccess = delegationAffordances(
+      new Set(['read', 'write', 'delete', 'manage_acl', 'share']),
+      false
+    )
+    let deferNextFileCheck = false
+    let finishFileCheck: ((value: ReturnType<typeof delegationAffordances>) => void) | undefined
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'file-1' && deferNextFileCheck) {
+        deferNextFileCheck = false
+        return new Promise<ReturnType<typeof delegationAffordances>>(resolve => {
+          finishFileCheck = resolve
+        })
+      }
+      return fullAccess
+    })
+    const resolve = vi.fn(async (uri: string) => {
+      if (uri === SEED_URI) return folder
+      if (uri.endsWith('/file1')) {
+        return resolvedFile('file-1', 'report.txt', {
+          gfsUri: 'gfs://main/file-1',
+          parentResourceId: 'folder-1',
+        })
+      }
+      if (uri.endsWith('/folder1')) return folder
+      throw new Error(`unexpected test resource URI: ${uri}`)
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => accessible),
+          resolve,
+          listChildren: vi.fn(async (resourceId: string) =>
+            resourceId === 'folder-1' ? children : { items: [], nextCursor: null }
+          ),
+          affordances,
+          listGrants: vi.fn(async () => []),
+          listShares: vi.fn(async () => []),
+        },
+        team: {
+          directory: vi.fn(async () => ({
+            currentTeamId: 'team-1',
+            items: [
+              {
+                team: { id: 'team-2', name: 'Team Two', role: 'member' as const },
+                members: [],
+                contextIds: [],
+                agentNames: [],
+              },
+            ],
+          })),
+        },
+        agents: { listMine: vi.fn(async () => []) },
+      },
+    })
+
+    const { client } = renderHarness()
+    await screen.findByText('report.txt')
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith('file-1', 'main'))
+    fireEvent.click(screen.getByRole('button', { name: 'Share report.txt' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    const picker = within(dialog).getByRole('combobox', {
+      name: 'Add people, teams, or agents',
+    })
+    fireEvent.focus(picker)
+    fireEvent.click(within(dialog).getByRole('option', { name: /Team Two/ }))
+    fireEvent.click(
+      within(dialog).getByRole('button', { name: 'Access role for selected recipients' })
+    )
+    fireEvent.click(within(dialog).getByRole('option', { name: 'Editor' }))
+
+    deferNextFileCheck = true
+    void client.invalidateQueries({
+      predicate: query =>
+        query.queryKey.includes('file-1') && query.queryKey.includes('affordances'),
+      refetchType: 'active',
+    })
+    await waitFor(() => expect(finishFileCheck).toBeTypeOf('function'))
+    const recipientRetained = Boolean(within(dialog).queryByText('Team Two'))
+    const roleRetained =
+      within(dialog)
+        .queryByRole('button', { name: 'Access role for selected recipients' })
+        ?.textContent?.includes('Editor') ?? false
+    const checkingVisible = Boolean(within(dialog).queryByRole('status'))
+    const shareDisabled = within(dialog)
+      .queryByRole('button', { name: 'Share' })
+      ?.hasAttribute('disabled')
+
+    await act(async () => finishFileCheck?.(fullAccess))
+    expect(recipientRetained).toBe(true)
+    expect(roleRetained).toBe(true)
+    expect(checkingVisible).toBe(true)
+    expect(shareDisabled).toBe(true)
+    await waitFor(() =>
+      expect(within(dialog).getByRole('button', { name: 'Share' }).hasAttribute('disabled')).toBe(
+        false
+      )
+    )
+    expect(within(dialog).getByText('Team Two')).toBeTruthy()
+    expect(
+      within(dialog)
+        .getByRole('button', { name: 'Access role for selected recipients' })
+        .textContent?.includes('Editor')
+    ).toBe(true)
+
+    const readOnly = delegationAffordances(new Set(['read']), false)
+    finishFileCheck = undefined
+    deferNextFileCheck = true
+    void client.invalidateQueries({
+      predicate: query =>
+        query.queryKey.includes('file-1') && query.queryKey.includes('affordances'),
+      refetchType: 'active',
+    })
+    await waitFor(() => expect(finishFileCheck).toBeTypeOf('function'))
+    await act(async () => finishFileCheck?.(readOnly))
+    await waitFor(() =>
+      expect(within(dialog).getByRole('button', { name: 'Share' }).hasAttribute('disabled')).toBe(
+        true
+      )
+    )
+    expect(within(dialog).getByText('Team Two')).toBeTruthy()
+    expect(
+      within(dialog)
+        .getByRole('button', { name: 'Access role for selected recipients' })
+        .textContent?.includes('Editor')
+    ).toBe(true)
+    expect(within(dialog).getByText(/Your sharing permission changed/)).toBeTruthy()
   })
 })
