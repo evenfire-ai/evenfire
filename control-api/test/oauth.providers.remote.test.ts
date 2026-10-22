@@ -64,6 +64,36 @@ describe('buildRemoteTokenRequest (public client, RFC 8707)', () => {
   })
 })
 
+describe('buildRemoteTokenRequest — scopes (entra-v2 code exchange)', () => {
+  const INPUT = {
+    code: 'CODE',
+    clientId: 'CID',
+    redirectUri: 'https://cb.example.com/remote',
+    codeVerifier: 'VER',
+  }
+  const STANDARD =
+    'grant_type=authorization_code&code=CODE&client_id=CID&redirect_uri=https%3A%2F%2Fcb.example.com%2Fremote&code_verifier=VER'
+
+  it('appends scope, space-joined, when scopes are given', () => {
+    const req = buildRemoteTokenRequest(TOKEN_ENDPOINT, INPUT, undefined, ['a', 'offline_access'])
+    expect(req.body).toBe(`${STANDARD}&scope=a%20offline_access`)
+  })
+
+  it('puts scope before resource when both are given', () => {
+    const req = buildRemoteTokenRequest(TOKEN_ENDPOINT, INPUT, RESOURCE, ['a', 'offline_access'])
+    expect(req.body).toBe(
+      `${STANDARD}&scope=a%20offline_access&resource=https%3A%2F%2Fmcp.notion.com`
+    )
+  })
+
+  it('without scopes (absent or empty) the body is byte-identical', () => {
+    expect(buildRemoteTokenRequest(TOKEN_ENDPOINT, INPUT).body).toBe(STANDARD)
+    expect(buildRemoteTokenRequest(TOKEN_ENDPOINT, INPUT, RESOURCE, []).body).toBe(
+      `${STANDARD}&resource=https%3A%2F%2Fmcp.notion.com`
+    )
+  })
+})
+
 describe('buildRemoteRefreshRequest (public client, RFC 8707)', () => {
   it('omits client_secret and appends resource', () => {
     const req = buildRemoteRefreshRequest(

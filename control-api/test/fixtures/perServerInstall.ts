@@ -135,13 +135,20 @@ export interface InstalledMcpServer {
  * any edit they make on top is the direct write (API or kubectl) they model.
  */
 export async function installWorkIqServer(
-  opts: { scopes?: string[]; serverName?: string; contextRef?: string } = {}
+  opts: {
+    scopes?: string[]
+    serverName?: string
+    contextRef?: string
+    /** A gateway the suite already seeded with `contextRef`; a fresh one otherwise. */
+    gateway?: MockGateway
+    db?: DbClient
+  } = {}
 ): Promise<InstalledMcpServer> {
   const serverName = opts.serverName ?? 'workiq'
   const contextRef = opts.contextRef ?? 'ctx-a'
   const namespace = config.mcpServersNamespace
-  const gateway = new MockGateway(namespace)
-  await seedContext(gateway, namespace, contextRef)
+  const gateway = opts.gateway ?? new MockGateway(namespace)
+  if (!opts.gateway) await seedContext(gateway, namespace, contextRef)
   const discovery = await discoverPilot(ENTRA_WORKIQ_PILOT, {
     hasPreRegisteredClient: true,
     authorizationServer: ENTRA_TENANT_AUTHORITY,
@@ -151,7 +158,7 @@ export async function installWorkIqServer(
   try {
     const res = await installRemoteServer({
       gateway,
-      db: makeInMemoryDynamicClientsDb().db,
+      db: opts.db ?? makeInMemoryDynamicClientsDb().db,
       discovery,
       body: {
         serverName,

@@ -3,7 +3,7 @@ import type { PinnedTransport } from '../http/pinnedFetch.js'
 import { pinnedFetch } from '../http/pinnedFetch.js'
 import type { DnsResolver } from '../http/validateMcpServerSpec.js'
 import { rootLogger } from '../observability/logger.js'
-import type { AsProfileId } from './asProfiles.js'
+import { type AsProfileId, remoteWireForProfile } from './asProfiles.js'
 import { getDynamicClient } from './dynamicClientStore.js'
 import {
   type RemoteOAuthSpecIncoherence,
@@ -989,7 +989,11 @@ async function exchangeRemoteAuthCode(
       redirectUri: grant.redirectUri,
       codeVerifier,
     },
-    remote.resource
+    remote.resource,
+    // The authorize request's `scope` travels through the browser and can be edited;
+    // without `scope` on the redemption Entra issues the token for whatever that leg
+    // asked for, so the CR's scopes are what pin the audience here.
+    remoteWireForProfile(remote.asProfile).scopeOnTokenRequests ? decl.scopes : undefined
   )
   const posted = await postRemoteTokenForm(
     remote.tokenEndpoint,

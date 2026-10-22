@@ -657,14 +657,16 @@ export function buildRemoteAuthorizeUrl(
 /**
  * Build a remote token-exchange POST against a discovered `tokenEndpoint`, as a
  * public client (omits `client_secret` when `input.clientSecret` is absent — the
- * standard builder already drops it) and appending RFC 8707 `resource` when given.
+ * standard builder already drops it), appending `scope` and then RFC 8707 `resource`
+ * when given. Without either the body is the standard exchange body.
  */
 export function buildRemoteTokenRequest(
   tokenEndpoint: string,
   input: TokenExchangeInput,
-  resource?: string
+  resource?: string,
+  scopes?: readonly string[]
 ): TokenRequest {
-  return appendResource(standardTokenRequest(tokenEndpoint, input), resource)
+  return appendResource(appendScope(standardTokenRequest(tokenEndpoint, input), scopes), resource)
 }
 
 /** Append the space-joined `scope` param to an already form-encoded body. */
