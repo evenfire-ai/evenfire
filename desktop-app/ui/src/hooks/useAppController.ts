@@ -1314,8 +1314,14 @@ export function useAppController() {
       }
       // The drawer (`keepNavItem`) asked for this held Host with nothing
       // selected, so its conversation is the one on that surface: keep it while
-      // the verification runs, as for a hold the drawer showed.
-      if (options.keepNavItem && selectedAgentRef.current === null) {
+      // the verification runs, as for a hold the drawer showed. A Host the
+      // drawer already keeps stays kept: a request is not a selection, so only
+      // a selection (or a scope reset) ends that keep.
+      if (
+        options.keepNavItem &&
+        selectedAgentRef.current === null &&
+        interruptedHostRef.current === null
+      ) {
         interruptedHostRef.current = agentName
       }
       const scope = authorityScopeRef.current

@@ -509,6 +509,7 @@ const DISPLAY: Record<string, string> = {
   [HOST_C]: 'Ops Host',
 }
 const VERIFY_A = `Could not verify access to ${DISPLAY[HOST_A]}.`
+const VERIFY_B = `Could not verify access to ${DISPLAY[HOST_B]}.`
 const GONE_A = `${DISPLAY[HOST_A]} is no longer available.`
 const GONE_B = `${DISPLAY[HOST_B]} is no longer available.`
 
@@ -541,13 +542,29 @@ describe('useAppController — chat drawer over a held Host', () => {
     uninstallMockClerum()
   })
 
-  async function holdDrawerHost(options: { dropAOnHold: boolean; hosts?: string[] }) {
+  async function holdDrawerHost(options: {
+    dropAOnHold: boolean
+    hosts?: string[]
+    // A Host whose Latest sessions read is denied at boot, so it is held in
+    // the background while nothing selects it.
+    backgroundHold?: string
+  }) {
     const hosts = options.hosts ?? [HOST_A, HOST_B]
     const { clerum, handle } = installAppControllerClerum({
       agentNames: hosts,
       agentDisplayByName: namesOf(hosts),
     })
-    clerum.rpc.listSessions.mockImplementation(async () => serverSessions([]))
+    const backgroundDenial = options.backgroundHold
+      ? await ipcGenericForbidden('rpc:listSessions')
+      : null
+    clerum.rpc.listSessions.mockImplementation(
+      async (host: string, _team: string, query?: { limit?: number }) => {
+        if (backgroundDenial && host === options.backgroundHold && query?.limit !== 1) {
+          throw backgroundDenial
+        }
+        return serverSessions([])
+      }
+    )
     const pending = deferred<{ agent: string; chatId: string; turns: never[] }>()
     let reads = 0
     clerum.rpc.loadSessionMessages.mockImplementation((host: string) => {
@@ -583,7 +600,15 @@ describe('useAppController — chat drawer over a held Host', () => {
     const utils = await renderChatActionConsumer(<Drawer />)
     const { getVm } = utils
     getController = getVm
-    await waitFor(() => expect(handle.refreshCatalog).toHaveBeenCalledTimes(2))
+    const backgroundHost = options.backgroundHold
+    if (backgroundHost) {
+      // The background hold refreshes the catalog once more than the boot does.
+      await waitFor(() => expect(getVm().isHostAccessBlocked(backgroundHost)).toBe(true))
+      await waitFor(() => expect(handle.refreshCatalog.mock.calls.length).toBeGreaterThanOrEqual(3))
+      await settle()
+    } else {
+      await waitFor(() => expect(handle.refreshCatalog).toHaveBeenCalledTimes(2))
+    }
     act(() => {
       getVm().handleNavSelect(DESKTOP_ROUTES.files)
     })
@@ -613,7 +638,14 @@ describe('useAppController — chat drawer over a held Host', () => {
     })
     await waitFor(() => expect(getVm().isHostAccessBlocked(HOST_A)).toBe(true))
     await settle()
-    return { ...utils, handle, trail, start, setMounted: (value: boolean) => setMounted(value) }
+    return {
+      ...utils,
+      clerum,
+      handle,
+      trail,
+      start,
+      setMounted: (value: boolean) => setMounted(value),
+    }
   }
 
   it('T-R5M1-1 keeps the drawer on the held Host instead of selecting another one', async () => {
@@ -680,6 +712,50 @@ describe('useAppController — chat drawer over a held Host', () => {
     expect(getVm().heldAgentRefs).toEqual([HOST_A])
     expect(getVm().selectedAgent).toBe(HOST_C)
     expect(getVm().toasts.map(toast => toast.text)).toEqual([VERIFY_A, GONE_B])
+  })
+
+  it('T-A31SOL1-1 a denied request for another held Host does not end the drawer keep', async () => {
+    const { getVm, clerum, handle, trail, start, queryByTestId } = await holdDrawerHost({
+      dropAOnHold: false,
+      hosts: [HOST_A, HOST_B, HOST_C],
+      backgroundHold: HOST_B,
+    })
+    expect(getVm().heldAgentRefs).toEqual([HOST_A, HOST_B])
+    expect(getVm().keepFocusedChat).toBe(true)
+
+    const denied = await ipcGenericForbidden('rpc:listSessions')
+    let verifyReadsB = 0
+    clerum.rpc.listSessions.mockImplementation(
+      async (host: string, _team: string, query?: { limit?: number }) => {
+        if (host === HOST_B && query?.limit === 1) {
+          verifyReadsB += 1
+          throw denied
+        }
+        return serverSessions([])
+      }
+    )
+    // The drawer's switcher asks for B; B is held, so this is a verification.
+    act(() => getVm().handleSelectChatAgent(HOST_B, { selectLatest: false, keepNavItem: true }))
+    await waitFor(() => expect(getVm().toasts.map(toast => toast.text)).toContain(VERIFY_B))
+    // Witness: B's verification ran and was denied; nothing was selected.
+    expect(verifyReadsB).toBe(1)
+    expect(getVm().selectedAgent).toBe(null)
+
+    handle.refreshCatalog.mockImplementation(async () =>
+      createCatalog([HOST_A, HOST_C], namesOf([HOST_A, HOST_C]))
+    )
+    await act(async () => {
+      await getVm().handleRefreshWorkspaceData(DESKTOP_ROUTES.agents)
+    })
+    await settle()
+
+    // Witness: B left the catalog while the drawer is still mounted.
+    expect(getVm().isHostAccessBlocked(HOST_B)).toBe(true)
+    expect(queryByTestId('drawer-chat')).not.toBeNull()
+    expect(getVm().heldAgentRefs).toEqual([HOST_A])
+    expect(getVm().keepFocusedChat).toBe(true)
+    expect(getVm().selectedAgent).toBe(null)
+    expect(trail.slice(start)).toEqual([null])
   })
 
   it('T-R5F1-1 a hold made while no drawer showed the chat does not keep a later drawer blank', async () => {
