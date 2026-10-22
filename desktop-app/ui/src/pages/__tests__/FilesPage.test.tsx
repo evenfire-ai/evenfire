@@ -1014,6 +1014,35 @@ describe('FilesPage', () => {
     expect(screen.queryByRole('menuitem', { name: 'New folder' })).toBeNull()
     expect(screen.queryByRole('menuitem', { name: 'Upload file' })).toBeNull()
     expect(screen.getByLabelText('Upload file')).toBeTruthy()
+    expect(uploadInput().tabIndex).toBe(-1)
+    expect(uploadInput().getAttribute('aria-hidden')).toBe('true')
+  })
+
+  it('does not default the shared upload input to the current folder without an explicit target', async () => {
+    const createFileFromPath = vi.fn(async () => undefined)
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'current-folder',
+        gfsUri: 'gfs://main/0123456789abcdef0123456789abcdef',
+        name: 'Current folder',
+        kind: 'directory',
+        version: 1,
+      },
+      affordances: delegationAffordances(new Set(['read', 'write']), false),
+      createFileFromPath,
+    })
+    renderFilesPage()
+
+    const input = uploadInput()
+
+    const upload = new File(['notes'], 'notes.md', { type: 'text/markdown' })
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [upload] } })
+      await new Promise(resolve => window.setTimeout(resolve, 0))
+    })
+
+    expect(createFileFromPath).not.toHaveBeenCalled()
   })
 
   it('uploads a writable Shared with me folder row without changing the current location', async () => {
@@ -1224,6 +1253,7 @@ describe('FilesPage', () => {
     })
 
     renderFilesPage(pushToast)
+    await chooseResourceAction('Team folder', 'Upload file')
     fireEvent.change(uploadInput(), {
       target: { files: [new File(['report'], 'report.txt', { type: 'text/plain' })] },
     })

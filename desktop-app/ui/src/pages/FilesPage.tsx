@@ -1831,15 +1831,18 @@ export function FilesPage({
             <div className="da-gfs-drive__upload-input">
               <input
                 aria-label="Upload file"
+                aria-hidden="true"
                 className="visually-hidden"
                 ref={uploadInputRef}
+                tabIndex={-1}
                 type="file"
                 onChange={event => {
                   const file = event.currentTarget.files?.[0]
                   const target = uploadTargetRef.current
                   uploadTargetRef.current = null
                   event.currentTarget.value = ''
-                  void handleUploadFile(file, target?.parentResourceId, target?.occupiedNames)
+                  if (!file || !target) return
+                  void handleUploadFile(file, target.parentResourceId, target.occupiedNames)
                 }}
               />
             </div>
