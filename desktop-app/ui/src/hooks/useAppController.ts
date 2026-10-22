@@ -60,6 +60,12 @@ import {
 import { scheduleAfterFirstPaint } from './scheduleAfterFirstPaint'
 import { useChatStore } from './useChatStore'
 
+export interface ConversationAccessProof {
+  authorityScope: string
+  teamContextRevision: number
+  hostAuthorityEpoch: number
+}
+
 // U5 cold-start buffer: how long an OAuth completion whose sessions are not yet
 // seeded is retried against later snapshots before it is discarded. Long enough
 // to cover the async/auth-gated session load after `rendererReady`, short enough
@@ -241,6 +247,9 @@ export function useAppController() {
     teamsData.teams.find(team => team.id === currentTeamId)?.name || auth.me?.teamName || ''
   const currentTeamIdRef = useRef(currentTeamId)
   currentTeamIdRef.current = currentTeamId
+  const [teamContextRevision, setTeamContextRevision] = useState(0)
+  const teamContextRevisionRef = useRef(teamContextRevision)
+  teamContextRevisionRef.current = teamContextRevision
   const notificationTeamContextQueueRef = useRef<Promise<void>>(Promise.resolve())
   const openAgentConversationFromNotificationRef = useRef<
     (target: AgentConversationNotificationTarget) => Promise<void>
@@ -326,7 +335,13 @@ export function useAppController() {
   const authorityScope = `${auth.runtimeConfigState?.envKey ?? ''}:${auth.isAuthenticated}:${authenticatedPrincipalIdentity ?? ''}:${currentTeamId}`
   const authorityScopeRef = useRef(authorityScope)
   authorityScopeRef.current = authorityScope
+  const conversationAccessProofByChatRef = useRef(new Map<string, ConversationAccessProof>())
   const navigationIntentEpochRef = useRef(0)
+  const beginNavigationIntent = useCallback(() => ++navigationIntentEpochRef.current, [])
+  const isNavigationIntentCurrent = useCallback(
+    (intent: number) => navigationIntentEpochRef.current === intent,
+    []
+  )
   // Lazy-init: the factory must run once per mount, like the FSM store.
   const hostAuthorityRef = useRef<HostAuthorityStore | null>(null)
   if (!hostAuthorityRef.current) hostAuthorityRef.current = createHostAuthorityStore()
@@ -344,6 +359,7 @@ export function useAppController() {
   )
   useEffect(() => {
     hostAuthority.reset()
+    conversationAccessProofByChatRef.current.clear()
     setHostAuthorityRevision(revision => revision + 1)
   }, [authorityScope, hostAuthority])
   const { invalidateSessionCatalog } = useChatStore()
@@ -384,6 +400,66 @@ export function useAppController() {
     },
     [hostAuthority]
   )
+  const verifyConversationAccess = useCallback(
+    async (agentRef: string, chatId: string): Promise<ConversationAccessProof | null> => {
+      const heldAtEpoch = hostAuthority.heldAtEpoch(agentRef)
+      const scope = authorityScopeRef.current
+      const teamRevision = teamContextRevisionRef.current
+      const hostEpoch = hostAuthority.getEpoch(agentRef)
+      invalidateSessionCatalog(agentRef)
+      try {
+        // A team-context retry must authorize this exact conversation before
+        // App reveals it: the renderer's local transcript cache is not scoped
+        // by team and may still contain the previous team's messages.
+        await window.clerum.rpc.loadSessionMessages(agentRef, agentRef, chatId)
+      } catch {
+        return null
+      }
+      if (
+        authorityScopeRef.current !== scope ||
+        teamContextRevisionRef.current !== teamRevision ||
+        hostAuthority.getEpoch(agentRef) !== hostEpoch
+      ) {
+        return null
+      }
+      if (heldAtEpoch === undefined) {
+        if (hostAuthority.isBlocked(agentRef)) return null
+      } else {
+        if (!hostAuthority.release(agentRef, heldAtEpoch)) return null
+        setHostAuthorityRevision(revision => revision + 1)
+      }
+      const proof = {
+        authorityScope: scope,
+        teamContextRevision: teamRevision,
+        hostAuthorityEpoch: hostAuthority.getEpoch(agentRef),
+      }
+      conversationAccessProofByChatRef.current.set(JSON.stringify([agentRef, chatId]), proof)
+      return proof
+    },
+    [hostAuthority, invalidateSessionCatalog]
+  )
+  const isConversationAccessProofCurrent = useCallback(
+    (agentRef: string, chatId: string, proof: ConversationAccessProof): boolean => {
+      const stored = conversationAccessProofByChatRef.current.get(
+        JSON.stringify([agentRef, chatId])
+      )
+      return Boolean(
+        stored === proof &&
+        authorityScopeRef.current === proof.authorityScope &&
+        teamContextRevisionRef.current === proof.teamContextRevision &&
+        hostAuthority.getEpoch(agentRef) === proof.hostAuthorityEpoch &&
+        !hostAuthority.isBlocked(agentRef)
+      )
+    },
+    [hostAuthority]
+  )
+  const isConversationAccessVerifiedForCurrentTeam = useCallback(
+    (agentRef: string, chatId: string): boolean => {
+      const proof = conversationAccessProofByChatRef.current.get(JSON.stringify([agentRef, chatId]))
+      return Boolean(proof && isConversationAccessProofCurrent(agentRef, chatId, proof))
+    },
+    [isConversationAccessProofCurrent]
+  )
   const chat = useAgentChatController({
     selectedAgent: nav.selectedAgent,
     agentNames: agentsData.agentNames,
@@ -408,7 +484,6 @@ export function useAppController() {
     hostAuthorityRevision,
     chatAuthorityTeamId: principalTeamId,
   })
-
   // §4.7.4: the ONE central approval-decision function, bound to the chat
   // controller's FSM store. All four surfaces (desktop notification, in-app bell,
   // in-chat gate, in-flight placeholder) funnel through it so the badge converges
@@ -708,6 +783,31 @@ export function useAppController() {
         if (!sessionState.authenticated || !sessionState.me) {
           throw new Error('Team switch ended without an authenticated session')
         }
+        const previousTeamId = currentTeamIdRef.current
+        const nextTeamId = sessionState.me.teamId || teamId
+        const teamContextChanged = nextTeamId !== previousTeamId
+        const activeChatTab =
+          nav.activeTab?.kind === 'chat' &&
+          nav.activeTab.chat?.agentRef &&
+          nav.activeTab.chat.chatId
+            ? nav.activeTab
+            : null
+        const agentsToSuppress = new Set<string>()
+        if (teamContextChanged && activeChatTab?.kind === 'chat' && activeChatTab.chat?.agentRef) {
+          agentsToSuppress.add(activeChatTab.chat.agentRef)
+          if (nav.selectedAgent) agentsToSuppress.add(nav.selectedAgent)
+        } else if (teamContextChanged && chat.activeChatId && nav.selectedAgent) {
+          // The chat drawer keeps its app workspace tab active while its chat is
+          // displayed, so use the controller identity when no concrete workspace
+          // chat tab is active.
+          agentsToSuppress.add(nav.selectedAgent)
+        }
+        if (teamContextChanged) {
+          const nextRevision = teamContextRevisionRef.current + 1
+          teamContextRevisionRef.current = nextRevision
+          conversationAccessProofByChatRef.current.clear()
+          setTeamContextRevision(nextRevision)
+        }
         // GAP-N4: the renderer half of a team switch. `clearActiveChat`
         // only deselects — the previous team's tracker entries and FSM projection
         // survive, so a late terminal from an old-team task could run side effects
@@ -718,6 +818,13 @@ export function useAppController() {
         // team's tasks stay alive server-side and converge on return via reconcile.
         // Main-process stream teardown is Fase 4.
         chat.resetChat()
+        // resetChat clears the active conversation before the new team context
+        // can render. Preserve a concrete chat selection's no-auto-select intent
+        // in the same transition so the controller cannot load that team's latest
+        // conversation until the user retries with exact access verification.
+        for (const agentRef of agentsToSuppress) {
+          chat.setPendingChatSelection(agentRef, null, { suppressAutoSelect: true })
+        }
         // The connectors panel key is identity-unscoped, and its payload carries
         // per-connector OAuth authorization state — drop it here (before the
         // refresh below repopulates) so the previous team's grants cannot show,
@@ -726,7 +833,7 @@ export function useAppController() {
         auth.setIsAuthenticated(true)
         auth.setMe(sessionState.me)
         auth.setEmail(sessionState.me.email || '')
-        currentTeamIdRef.current = sessionState.me.teamId || teamId
+        currentTeamIdRef.current = nextTeamId
         const switchedIdentity = `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
         activeAuthenticatedSessionIdentityRef.current = switchedIdentity
         authenticatedSessionIdentityRef.current = switchedIdentity
@@ -750,10 +857,15 @@ export function useAppController() {
       auth.setEmail,
       auth.setIsAuthenticated,
       auth.setMe,
+      chat.activeChatId,
       chat.resetChat,
+      chat.setPendingChatSelection,
       connectorsData.reset,
       fullSetStatus,
+      nav.activeTab,
+      nav.selectedAgent,
       refreshAuthenticatedData,
+      setTeamContextRevision,
       setPostPaintDataReady,
       teamsData.teams,
     ]
@@ -1003,7 +1115,7 @@ export function useAppController() {
   const handleOpenAgentWorkspace = useCallback(
     (agentName: string, route: AgentWorkspaceRoute = AGENT_WORKSPACE_ROUTES.connectors) => {
       if (!agentName) return
-      const navigationIntentEpoch = ++navigationIntentEpochRef.current
+      const navigationIntentEpoch = beginNavigationIntent()
       if (!isHostAccessBlocked(agentName)) {
         openAgentWorkspace(agentName, route)
         return
@@ -1019,7 +1131,7 @@ export function useAppController() {
         }
       })
     },
-    [isHostAccessBlocked, openAgentWorkspace, verifyHostAccess]
+    [beginNavigationIntent, isHostAccessBlocked, openAgentWorkspace, verifyHostAccess]
   )
 
   // ─── Cross-domain: handleSelectChatAgent (Chat page agent picker) ───
@@ -1148,7 +1260,7 @@ export function useAppController() {
   const handleSelectChatAgent = useCallback(
     (agentName: string, options: Parameters<typeof selectChatAgent>[1] = {}) => {
       if (!agentName) return
-      const navigationIntentEpoch = ++navigationIntentEpochRef.current
+      const navigationIntentEpoch = beginNavigationIntent()
       if (!isHostAccessBlocked(agentName)) {
         selectChatAgent(agentName, options)
         return
@@ -1164,12 +1276,20 @@ export function useAppController() {
         }
       })
     },
-    [isHostAccessBlocked, selectChatAgent, verifyHostAccess]
+    [beginNavigationIntent, isHostAccessBlocked, selectChatAgent, verifyHostAccess]
   )
 
   // ─── Cross-domain: handleNavSelect (extended) ───
   const handleNavSelect = useCallback(
-    (item: NavItem) => {
+    (
+      item: NavItem,
+      options?: {
+        onFocusedChat?: (focusedChat: { agentRef: string; chatId: string }) => boolean
+      }
+    ) => {
+      // Route changes supersede any workspace-tab selection waiting for Host
+      // access verification, so a late response cannot steal navigation back.
+      beginNavigationIntent()
       const focusedChat = nav.handleNavSelect(item)
       if (item === DESKTOP_ROUTES.chat) {
         // `nav.handleNavSelect` owns the "which chat did this focus" precedence
@@ -1181,6 +1301,7 @@ export function useAppController() {
         // copy of the precedence lives here — that seam duplication (D4) would let
         // the loaded chat drift from the focused one if the rule ever changed.
         if (focusedChat) {
+          if (options?.onFocusedChat?.(focusedChat)) return
           handleSelectChatAgent(focusedChat.agentRef, {
             chatId: focusedChat.chatId,
             selectLatest: false,
@@ -1196,6 +1317,7 @@ export function useAppController() {
     [
       activity.agentLastActiveByAgent,
       agentsData.agentNames,
+      beginNavigationIntent,
       handleSelectChatAgent,
       nav.handleNavSelect,
     ]
@@ -1206,6 +1328,7 @@ export function useAppController() {
       target: AgentConversationNotificationTarget,
       options: { keepNavItem?: boolean } = {}
     ) => {
+      const navigationIntentEpoch = beginNavigationIntent()
       const targetAgent = String(target.agentName || '').trim()
       if (!targetAgent) return
       const targetChatId = String(target.chatId || '').trim()
@@ -1221,8 +1344,20 @@ export function useAppController() {
       try {
         if (requiresTeamSwitch) {
           await ensureTeamContext({ teamId: targetTeamId })
+          if (!isNavigationIntentCurrent(navigationIntentEpoch)) return
         }
         if (isHostAccessBlocked(targetAgent) && !(await verifyHostAccess(targetAgent))) return
+        if (!isNavigationIntentCurrent(navigationIntentEpoch)) return
+        if (requiresTeamSwitch && targetChatId) {
+          const proof = await verifyConversationAccess(targetAgent, targetChatId)
+          if (
+            !proof ||
+            !isConversationAccessProofCurrent(targetAgent, targetChatId, proof) ||
+            !isNavigationIntentCurrent(navigationIntentEpoch)
+          ) {
+            return
+          }
+        }
 
         if (stayInDrawer) {
           // handleSelectChatAgent(keepNavItem) sets the active chat without
@@ -1236,24 +1371,21 @@ export function useAppController() {
           return
         }
 
-        // Same imperative-fast-path guard as handleSelectChatAgent: `switchToChat`
-        // leaves no pending selection, so it only survives while the route (and
-        // hence the agent-selection effect's deps) does not change. Opening a
-        // notification from the Apps embed / a workspace / settings flips
-        // `navItem` below, re-running that effect into its reset branch — the
-        // conversation would blank to the "new chat" empty state and then land on
-        // the most recent chat instead of the notification's. From another route
-        // we fall through to the pending-selection path, which replays the
-        // requested chat across the re-run.
+        // On the chat route, switch directly once any required cross-team exact
+        // access proof above has succeeded. A team reset may already have consumed
+        // its explicit empty-selection intent, and setting a new pending selection
+        // will not rerun the agent effect when its route and agent stay unchanged.
+        // From another route, keep the pending path so the selection survives the
+        // route change and is replayed by the effect.
         if (
           targetChatId &&
-          !requiresTeamSwitch &&
           nav.selectedAgent === targetAgent &&
           nav.navItem === DESKTOP_ROUTES.chat
         ) {
           try {
             await chat.switchToChat(targetAgent, targetChatId, {
               onCurrentError: error => {
+                if (!isNavigationIntentCurrent(navigationIntentEpoch)) return
                 fullSetStatus(
                   `Could not open notification: ${error instanceof Error ? error.message : String(error)}`,
                   'error'
@@ -1265,6 +1397,7 @@ export function useAppController() {
             // This UI event observes that rejection without reporting it again.
             return
           }
+          if (!isNavigationIntentCurrent(navigationIntentEpoch)) return
           nav.activateChatTab(targetAgent, targetChatId)
           return
         }
@@ -1282,10 +1415,14 @@ export function useAppController() {
     [
       chat.setPendingChatSelection,
       chat.switchToChat,
+      beginNavigationIntent,
       ensureTeamContext,
       fullSetStatus,
       handleSelectChatAgent,
       isHostAccessBlocked,
+      isNavigationIntentCurrent,
+      isConversationAccessProofCurrent,
+      verifyConversationAccess,
       verifyHostAccess,
       nav.activateChatTab,
       nav.navItem,
@@ -1484,6 +1621,7 @@ export function useAppController() {
     isAuthenticated: auth.isAuthenticated,
     me: auth.me,
     currentTeamId,
+    teamContextRevision,
     availableTeamIds,
     teamDirectoryHydrated: teamsData.teamDirectoryHydrated,
     authenticatedPrincipalIdentity,
@@ -1539,6 +1677,14 @@ export function useAppController() {
     navItem: nav.navItem,
     selectedAgent: nav.selectedAgent,
     isHostAccessBlocked,
+    isChatDeleted: chat.isChatDeleted,
+    verifyHostAccess,
+    verifyConversationAccess,
+    isConversationAccessProofCurrent,
+    isConversationAccessVerifiedForCurrentTeam,
+    clearActiveChat: chat.clearActiveChat,
+    beginNavigationIntent,
+    isNavigationIntentCurrent,
     hostAuthorityRevision,
     selectedAgentRoute: nav.selectedAgentRoute,
     setSelectedAgent: nav.setSelectedAgent,
@@ -1573,6 +1719,7 @@ export function useAppController() {
     toasts,
     pushToast,
     markNotificationsRead: notif.markNotificationsRead,
+    markNotificationRead: notif.markNotificationRead,
     clearNotifications: notif.clearNotifications,
     removeNotification: notif.removeNotification,
     resolveApprovalNotification: notif.resolveApprovalNotification,

@@ -105,6 +105,27 @@ describe('useAppController — universal tab store ports', () => {
     expect(chatTabsAfter).toBe(chatTabsBefore)
   })
 
+  it('invalidates a pending tab intent when a newer route navigation starts', async () => {
+    installAppControllerClerum({ agentNames: ['agent-x'] })
+    const app = renderAppController()
+    unmount = app.unmount
+
+    await waitFor(() => expect(app.result.current.isAuthenticated).toBe(true))
+    await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
+
+    let pendingIntent = 0
+    act(() => {
+      pendingIntent = app.result.current.beginNavigationIntent()
+    })
+    expect(app.result.current.isNavigationIntentCurrent(pendingIntent)).toBe(true)
+
+    act(() => {
+      app.result.current.handleNavSelect(DESKTOP_ROUTES.connectors)
+    })
+
+    expect(app.result.current.isNavigationIntentCurrent(pendingIntent)).toBe(false)
+  })
+
   // (b) A pending chat selection survives a tab/route change: selecting a chat
   // with keepNavItem while on the apps route records the pending selection, and
   // the agent-selection effect replays it (the chat actually loads) without

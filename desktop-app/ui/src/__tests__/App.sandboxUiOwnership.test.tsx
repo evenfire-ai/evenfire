@@ -91,6 +91,7 @@ function makeController(): AppController {
   const noop = vi.fn()
   let controller: AppController
   let tabSequence = 2
+  let navigationIntentEpoch = 0
   const nextWorkspaceTabId = vi.fn(() => `ws-tab-${tabSequence++}`)
   const setWorkspaceTabs = vi.fn((updater: unknown) => {
     const next =
@@ -186,8 +187,16 @@ function makeController(): AppController {
     runtimeConfigMissing: false,
     authTransitioning: false,
     handleEnsureTeamContext: vi.fn(async () => false),
+    beginNavigationIntent: vi.fn(() => ++navigationIntentEpoch),
+    isNavigationIntentCurrent: vi.fn((intent: number) => intent === navigationIntentEpoch),
     getCurrentTeamId: vi.fn(() => 'team-a'),
     isHostAccessBlocked: vi.fn(() => false),
+    isChatDeleted: vi.fn(() => false),
+    isConversationAccessProofCurrent: vi.fn(() => false),
+    isConversationAccessVerifiedForCurrentTeam: vi.fn(() => false),
+    verifyConversationAccess: vi.fn(async () => null),
+    verifyHostAccess: vi.fn(async () => false),
+    teamContextRevision: 0,
     handleSelectChatAgent,
     handleOpenNotification: vi.fn(async () => undefined),
     // Only the Apps entry matters here: like the real navigation controller it

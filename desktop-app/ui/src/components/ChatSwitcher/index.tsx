@@ -10,13 +10,17 @@ import type { ChatSwitcherProps } from './types'
 /**
  * Open-chats selector for the chat drawer header. It is a thin, read-only view
  * over the chat sub-slice of the universal store: `tabs` are the chat tabs,
- * `activeTabId` the drawer's current chat, and `onSelect`/`onNewChat` drive that
- * same store — no second tab store. Per-chat status badges reuse
+ * `activeTabId` the current or requested chat, and `onSelect`/`onNewChat` drive
+ * that same store — no second tab store. Per-chat status badges reuse
  * `sessionStateByChatKey` exactly as the global `WorkspaceTabStrip` does.
  */
 export function ChatSwitcher({
   tabs,
   activeTabId,
+  pendingTabId = null,
+  loadingTabId = null,
+  unavailableTabId = null,
+  unavailableReason = 'access',
   onSelect,
   onNewChat,
   focusRequestId = 0,
@@ -29,6 +33,9 @@ export function ChatSwitcher({
   const lastFocusRequestIdRef = useRef(focusRequestId)
 
   const active = tabs.find(tab => tab.id === activeTabId) ?? tabs[0]
+  const activePending = active?.id === pendingTabId
+  const activeLoading = active?.id === loadingTabId
+  const activeUnavailable = active?.id === unavailableTabId
   const activeIndex = Math.max(
     0,
     tabs.findIndex(tab => tab.id === active?.id)
@@ -88,12 +95,26 @@ export function ChatSwitcher({
         aria-expanded={open}
         aria-haspopup="listbox"
         aria-label="Open chats"
+        aria-busy={activePending || activeLoading || undefined}
         block
         className="chat-switcher__trigger"
         color="neutral"
         onClick={() => setOpen(current => !current)}
         ref={triggerRef}
         size="sm"
+        title={
+          activePending
+            ? 'Checking host access to this conversation'
+            : activeLoading
+              ? 'Loading conversation'
+              : activeUnavailable
+                ? unavailableReason === 'conversation'
+                  ? 'Conversation unavailable. Close this tab or select to retry.'
+                  : unavailableReason === 'team-context'
+                    ? 'Team changed while this conversation was opening. Select to retry.'
+                    : 'Could not verify host access. Select to retry.'
+                : undefined
+        }
         variant="soft"
       >
         <span className="chat-switcher__trigger-main">
@@ -102,6 +123,10 @@ export function ChatSwitcher({
             unreadTerminal={false}
           />
           <span className="chat-switcher__label">{active?.title ?? 'New chat'}</span>
+          {(activePending || activeLoading) && (
+            <span className="chat-view-tab__pending" aria-hidden="true" />
+          )}
+          {activeUnavailable && <span className="chat-view-tab__access-error" aria-hidden="true" />}
         </span>
         <span aria-hidden="true" className="chat-switcher__chevron">
           ▾
@@ -112,11 +137,28 @@ export function ChatSwitcher({
           <div className="chat-switcher__options">
             {tabs.map((tab, index) => {
               const isActive = tab.id === activeTabId
+              const pending = tab.id === pendingTabId
+              const loading = tab.id === loadingTabId
+              const unavailable = tab.id === unavailableTabId
               return (
                 <Button
                   key={tab.id}
                   align="start"
                   aria-selected={isActive}
+                  aria-label={
+                    pending
+                      ? `${tab.title}, checking access`
+                      : loading
+                        ? `${tab.title}, loading conversation`
+                        : unavailable
+                          ? unavailableReason === 'conversation'
+                            ? `${tab.title}, conversation unavailable`
+                            : unavailableReason === 'team-context'
+                              ? `${tab.title}, team changed`
+                              : `${tab.title}, access check failed`
+                          : undefined
+                  }
+                  aria-busy={pending || loading || undefined}
                   className={`chat-switcher__option${isActive ? ' is-active' : ''}`}
                   color="neutral"
                   onClick={() => choose(tab.id)}
@@ -125,6 +167,19 @@ export function ChatSwitcher({
                   }}
                   role="option"
                   size="sm"
+                  title={
+                    pending
+                      ? 'Checking host access to this conversation'
+                      : loading
+                        ? 'Loading conversation'
+                        : unavailable
+                          ? unavailableReason === 'conversation'
+                            ? 'Conversation unavailable. Close this tab or select to retry.'
+                            : unavailableReason === 'team-context'
+                              ? 'Team changed while this conversation was opening. Select to retry.'
+                              : 'Could not verify host access. Select to retry.'
+                          : undefined
+                  }
                   variant="ghost"
                 >
                   <ChatStateBadge
@@ -132,6 +187,12 @@ export function ChatSwitcher({
                     unreadTerminal={false}
                   />
                   <span className="chat-switcher__label">{tab.title}</span>
+                  {(pending || loading) && (
+                    <span className="chat-view-tab__pending" aria-hidden="true" />
+                  )}
+                  {unavailable && (
+                    <span className="chat-view-tab__access-error" aria-hidden="true" />
+                  )}
                 </Button>
               )
             })}
