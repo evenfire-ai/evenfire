@@ -221,6 +221,24 @@ async function childNames(page: Page, parentResourceId: string): Promise<string[
   return (await listChildren(page, parentResourceId)).map(child => child.name)
 }
 
+/**
+ * Dismiss the admin account-setup notice.
+ *
+ * The notice renders as an OVERLAY that covers the toolbar, and a click under
+ * an overlay never lands: Playwright waits for the element to receive the
+ * event, so an undismissed notice hangs the journey until the test timeout.
+ * It appears once the admin profile resolves — after the shell — so the
+ * dismissal waits for it with a bounded timeout instead of racing it.
+ */
+async function dismissAccountNotice(page: Page): Promise<void> {
+  const remindLater = page.getByRole('button', { name: 'Remind me later' })
+  try {
+    await remindLater.click({ timeout: 5_000 })
+  } catch {
+    // No notice on this run: nothing to dismiss.
+  }
+}
+
 async function beginJourney(page: Page): Promise<void> {
   assertAllowedTarget('CONTROL_UI_URL', CONTROL_UI_URL)
   assertAllowedTarget('CONTROL_API_URL', CONTROL_API_URL)
@@ -236,9 +254,13 @@ async function beginJourney(page: Page): Promise<void> {
   await expect(page.getByRole('button', { name: 'New folder', exact: true })).toBeEnabled({
     timeout: 20_000,
   })
+  await dismissAccountNotice(page)
 }
 
 async function createFolderViaUi(page: Page, name: string): Promise<void> {
+  // The overlay notice can render after the journey started; the first click
+  // is the one it would swallow.
+  await dismissAccountNotice(page)
   await page.getByRole('button', { name: 'New folder', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: 'New folder', exact: true })
   await expect(dialog).toBeVisible({ timeout: 20_000 })
