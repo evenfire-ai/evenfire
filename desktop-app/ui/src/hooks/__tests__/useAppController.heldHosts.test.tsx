@@ -14,6 +14,7 @@ import { useNavigationContext } from '@contexts/NavigationContext'
 import type { QueryClient } from '@tanstack/react-query'
 import { act, cleanup, waitFor } from '@testing-library/react'
 import { DESKTOP_ROUTES } from '@constants/navigation'
+import { newChatTab } from '@lib/workspaceTabs'
 import { ChatPage } from '@pages/ChatPage'
 import type { SessionsListResult } from '../../../../src/types'
 import {
@@ -42,6 +43,8 @@ type ListSessionsQuery = { agent?: string; limit?: number; cursor?: string }
 
 const HOST_A = 'agent-a'
 const HOST_B = 'agent-b'
+// Listed only by team 2's catalog.
+const HOST_C = 'agent-c'
 // Visible names distinct from the refs, so a toast that used the ref would fail.
 const DISPLAY_A = 'Research Host'
 const DISPLAY_B = 'Billing Host'
@@ -690,7 +693,8 @@ describe('useAppController held Hosts', () => {
     expect(toastsSeen(commits).slice(toastsBeforeHold)).toEqual([
       `Could not verify access to ${HOST_A}.`,
     ])
-    expect(app.result.current.heldHosts).toEqual([{ agentRef: HOST_A, label: HOST_A }])
+    // No catalog of team 2 has landed, so no Retry row is listed yet.
+    expect(app.result.current.heldHosts).toEqual([])
 
     await act(async () => {
       teamTwoCatalog.resolve(
@@ -884,10 +888,11 @@ describe('useAppController held Hosts', () => {
       )
     ).toBe(true)
 
-    // Inside the switch window: no catalog of team 2 has landed, so B is named by its ref.
+    // Inside the switch window: no catalog of team 2 has landed, so the toast
+    // names B by its ref and no Retry row is listed yet.
     expect(cachedCatalog(app.queryClient)?.teamId).toBe('team-1')
     expect(toastsSeen(commits)).toEqual([`Could not verify access to ${HOST_B}.`])
-    expect(app.result.current.heldHosts).toEqual([{ agentRef: HOST_B, label: HOST_B }])
+    expect(app.result.current.heldHosts).toEqual([])
 
     await act(async () => {
       team2.resolve(
@@ -1167,6 +1172,73 @@ describe('useAppController held Hosts', () => {
       agentNames: [HOST_B],
     })
     expect(toastsSeen(commits).filter(text => text.includes(DISPLAY_A))).toEqual([])
+  })
+
+  it('T-R5A3-1: no commit of the new principal lists a Retry row from the previous catalog', async () => {
+    const { clerum, handle } = installAppControllerClerum({
+      agentNames: [HOST_A, HOST_B],
+      agentDisplayByName: DISPLAY_BY_NAME,
+    })
+    installCatalog(clerum)
+    const transcriptError = await ipcGenericForbidden('rpc:loadSessionMessages')
+    const deniedTranscripts = new Set<string>([HOST_A])
+    clerum.rpc.loadSessionMessages.mockImplementation(async (hostRef: string) => {
+      if (deniedTranscripts.has(hostRef)) throw transcriptError
+      return { agent: hostRef, chatId: '', turns: [] }
+    })
+    const { app, commits } = await mount(clerum, handle)
+    act(() => {
+      app.result.current.handleSelectChatAgent(HOST_A, {
+        chatId: 'team-1-chat',
+        selectLatest: false,
+      })
+    })
+    await waitFor(() => expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true))
+    // Liveness witness: team 1's hold is listed before the switch.
+    expect(app.result.current.heldHosts).toEqual([{ agentRef: HOST_A, label: DISPLAY_A }])
+    const commitsBeforeSwitch = commits.length
+
+    const teamTwoCatalog = deferred<ReturnType<typeof producerCatalog>>()
+    handle.refreshCatalog.mockImplementation(() => teamTwoCatalog.promise)
+    let switching!: Promise<boolean>
+    await act(async () => {
+      switching = app.result.current.handleEnsureTeamContext({ teamId: 'team-2' })
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(app.result.current.currentTeamId).toBe('team-2'))
+    const teamTwoCommits = () =>
+      commits.slice(commitsBeforeSwitch).filter(vm => vm.currentTeamId === 'team-2')
+    expect(teamTwoCommits().length).toBeGreaterThan(0)
+    // The first render of team 2 runs before the scope reset effect clears the
+    // hold of A, so only the catalog's principal keeps A's row out of it.
+    expect(teamTwoCommits()[0]?.heldHosts).toEqual([])
+
+    // A hold placed in team 2 while its catalog is still pending.
+    deniedTranscripts.add(HOST_B)
+    act(() => {
+      app.result.current.handleSelectChatAgent(HOST_B, {
+        chatId: 'team-2-chat',
+        selectLatest: false,
+      })
+    })
+    await waitFor(() => expect(app.result.current.isHostAccessBlocked(HOST_B)).toBe(true))
+    await settle()
+    // Witness: the cached catalog is still team 1's, and it lists A and B.
+    expect(cachedCatalog(app.queryClient)).toMatchObject({
+      teamId: 'team-1',
+      agentNames: [HOST_A, HOST_B],
+    })
+    expect(teamTwoCommits().flatMap(vm => vm.heldHosts)).toEqual([])
+
+    await act(async () => {
+      teamTwoCatalog.resolve(producerCatalog([HOST_B], { [HOST_B]: TEAM_TWO_HOST }, 'team-2'))
+      await switching
+    })
+    // Positive half: team 2's own catalog lists B, so its Retry row appears.
+    await waitFor(() =>
+      expect(app.result.current.heldHosts).toEqual([{ agentRef: HOST_B, label: TEAM_TWO_HOST }])
+    )
+    expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(false)
   })
 })
 
@@ -1644,5 +1716,96 @@ describe('ChatPage with a held Host on the chat tab', () => {
     // Nothing holds A, so ChatPage picks the remaining Host.
     expect(getVm().isHostAccessBlocked(HOST_A)).toBe(false)
     expect(toastTexts(getVm())).toEqual([GONE_A])
+  })
+
+  /** Starts a team switch whose catalog stays pending until the returned `land` runs. */
+  async function switchWithPendingCatalog(getVm: () => Vm) {
+    const teamTwoCatalog = deferred<ReturnType<typeof producerCatalog>>()
+    vi.mocked(window.clerum.access.refreshCatalog).mockImplementation(() => teamTwoCatalog.promise)
+    let switching!: Promise<boolean>
+    await act(async () => {
+      switching = getVm().handleEnsureTeamContext({ teamId: 'team-2' })
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(getVm().currentTeamId).toBe('team-2'))
+    return async () => {
+      await act(async () => {
+        teamTwoCatalog.resolve(producerCatalog([HOST_C], { [HOST_C]: TEAM_TWO_HOST }, 'team-2'))
+        await switching
+      })
+    }
+  }
+
+  it('T-R5A1-1a: ChatPage picks no Host from the previous team catalog during a team switch', async () => {
+    const { clerum } = installAppControllerClerum({
+      agentNames: [HOST_A, HOST_B],
+      agentDisplayByName: DISPLAY_BY_NAME,
+    })
+    installCatalog(clerum)
+    const trail: Array<string | null> = []
+    const { getVm, queryClient } = await mountChat(trail)
+    const land = await switchWithPendingCatalog(getVm)
+
+    const trailBeforeClear = trail.length
+    act(() => {
+      getVm().setSelectedAgent(null)
+    })
+    await settle()
+    // Witness: team 2 is the principal while the cached catalog is team 1's.
+    expect(cachedCatalog(queryClient)).toMatchObject({
+      teamId: 'team-1',
+      agentNames: [HOST_A, HOST_B],
+    })
+    expect(trail.slice(trailBeforeClear)).toEqual([null])
+    expect(getVm().selectableAgentRefs).toEqual([])
+
+    await land()
+    // Positive half: ChatPage selects once team 2's catalog lands.
+    await waitFor(() => expect(getVm().selectedAgent).toBe(HOST_C))
+    expect(trail.slice(trailBeforeClear)).toEqual([null, HOST_C])
+  })
+
+  it('T-R5A1-1b: the Chat nav pick takes no Host from the previous team catalog during a team switch', async () => {
+    const { clerum } = installAppControllerClerum({
+      agentNames: [HOST_A, HOST_B],
+      agentDisplayByName: DISPLAY_BY_NAME,
+    })
+    installCatalog(clerum)
+    // No ChatPage here, so only the nav handler can select a Host.
+    const trail: Array<string | null> = []
+    const { getVm, queryClient } = await renderChatActionConsumer(<SelectionTrail trail={trail} />)
+    await waitFor(() =>
+      expect(vi.mocked(window.clerum.access.refreshCatalog)).toHaveBeenCalledTimes(2)
+    )
+    // Liveness witness: the nav pick selects a team 1 Host before the switch.
+    act(() => {
+      getVm().handleNavSelect(DESKTOP_ROUTES.chat)
+    })
+    await waitFor(() => expect(getVm().selectedAgent).not.toBe(null))
+    act(() => {
+      getVm().setSelectedAgent(null)
+      getVm().setWorkspaceTabs(state => newChatTab(state, 'blank-before-switch', null))
+    })
+    await waitFor(() => expect(getVm().selectedAgent).toBe(null))
+    const land = await switchWithPendingCatalog(getVm)
+
+    const trailBeforeClick = trail.length
+    act(() => {
+      getVm().handleNavSelect(DESKTOP_ROUTES.chat)
+    })
+    await settle()
+    expect(cachedCatalog(queryClient)).toMatchObject({
+      teamId: 'team-1',
+      agentNames: [HOST_A, HOST_B],
+    })
+    expect(trail.slice(trailBeforeClick)).toEqual([])
+    expect(getVm().selectedAgent).toBe(null)
+
+    await land()
+    // Positive half: a click after team 2's catalog landed picks its Host.
+    act(() => {
+      getVm().handleNavSelect(DESKTOP_ROUTES.chat)
+    })
+    await waitFor(() => expect(getVm().selectedAgent).toBe(HOST_C))
   })
 })

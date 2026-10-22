@@ -21,7 +21,14 @@ vi.mock('@hooks/domain/useAgentsDataController', () => ({
 vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => {
     navigationReads.push({ selectedAgent, heldAgentRefs })
-    return { selectedAgent, heldAgentRefs, keepFocusedChat, handleSelectChatAgent: onSelectAgent }
+    // The controller derives the selectable Hosts as the listed, non-held ones.
+    const selectableAgentRefs = agentNames.filter(agentRef => !heldAgentRefs.includes(agentRef))
+    return {
+      selectedAgent,
+      selectableAgentRefs,
+      keepFocusedChat,
+      handleSelectChatAgent: onSelectAgent,
+    }
   },
 }))
 vi.mock('@contexts/AgentActivityContext', () => ({

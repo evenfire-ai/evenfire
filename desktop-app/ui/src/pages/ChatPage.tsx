@@ -15,7 +15,7 @@ export function ChatPage({ scrollContainerRef }: ChatPageProps) {
   const { agentNames, loading, error } = useAgentsDataController()
   const {
     selectedAgent,
-    heldAgentRefs,
+    selectableAgentRefs,
     keepFocusedChat,
     handleSelectChatAgent: onSelectAgent,
   } = useNavigationContext()
@@ -23,10 +23,10 @@ export function ChatPage({ scrollContainerRef }: ChatPageProps) {
   const didAutoSelect = useRef(false)
 
   useEffect(() => {
-    if (!selectedAgent && agentNames.length) {
+    if (!selectedAgent && selectableAgentRefs.length) {
       didAutoSelect.current = false
     }
-    if (didAutoSelect.current || selectedAgent || !agentNames.length) return
+    if (didAutoSelect.current || selectedAgent || !selectableAgentRefs.length) return
     // The chat on screen (the focused chat tab, or the drawer's conversation
     // whose Host the hold deselected) belongs to a held Host that still has its
     // Retry row: keep it. Its messages stay hidden while the Host is held, and
@@ -36,19 +36,9 @@ export function ChatPage({ scrollContainerRef }: ChatPageProps) {
     // is picked and the coordinator says the Host is no longer available.
     if (keepFocusedChat) return
     didAutoSelect.current = true
-    const best = pickLatestAgent(
-      agentNames.filter(agentRef => !heldAgentRefs.includes(agentRef)),
-      agentLastActiveByAgent
-    )
+    const best = pickLatestAgent(selectableAgentRefs, agentLastActiveByAgent)
     if (best) onSelectAgent(best, { selectLatest: false })
-  }, [
-    agentNames,
-    agentLastActiveByAgent,
-    selectedAgent,
-    onSelectAgent,
-    heldAgentRefs,
-    keepFocusedChat,
-  ])
+  }, [selectableAgentRefs, agentLastActiveByAgent, selectedAgent, onSelectAgent, keepFocusedChat])
 
   if (loading && !agentNames.length) {
     return <ChatPageSkeleton />

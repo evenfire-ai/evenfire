@@ -2505,7 +2505,7 @@ export function App() {
     () => ({
       navItem: vm.navItem,
       selectedAgent: vm.selectedAgent,
-      heldAgentRefs: vm.heldAgentRefs,
+      selectableAgentRefs: vm.selectableAgentRefs,
       heldHosts: vm.heldHosts,
       keepFocusedChat: vm.keepFocusedChat,
       selectedAgentRoute: vm.selectedAgentRoute,
@@ -2520,7 +2520,7 @@ export function App() {
       vm.handleOpenAgentWorkspace,
       handleSelectChatAgentWithTabs,
       vm.keepFocusedChat,
-      vm.heldAgentRefs,
+      vm.selectableAgentRefs,
       vm.heldHosts,
       vm.navItem,
       vm.selectedAgent,

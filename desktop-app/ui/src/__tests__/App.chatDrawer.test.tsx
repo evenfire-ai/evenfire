@@ -145,13 +145,13 @@ vi.mock('@pages/ChatPage', async () => {
   return {
     ChatPage: () => {
       const { activeChatId, composerFocusRequestId } = useChatComposerStateContext()
-      const { heldAgentRefs, heldHosts, keepFocusedChat } = useNavigationContext()
+      const { selectableAgentRefs, heldHosts, keepFocusedChat } = useNavigationContext()
       return (
         <div
           data-testid="chat-page-surface"
           data-active-chat-id={activeChatId ?? ''}
           data-composer-focus-request-id={composerFocusRequestId}
-          data-held-agent-refs={JSON.stringify(heldAgentRefs ?? null)}
+          data-selectable-agent-refs={JSON.stringify(selectableAgentRefs ?? null)}
           data-held-hosts={JSON.stringify(heldHosts ?? null)}
           data-keep-focused-chat={String(keepFocusedChat)}
         />
@@ -536,26 +536,26 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     expect(appHeaderHarness.unreadNotificationCount).toBe(0)
   })
 
-  // The controller tests stop at `vm.heldAgentRefs`, and the ChatPage and
+  // The controller tests stop at `vm.selectableAgentRefs`, and the ChatPage and
   // SidebarNav tests mock NavigationContext; this pins the App step between them.
-  it('passes the held Hosts and the keep-focused-chat flag from the controller to NavigationContext', () => {
+  it('passes the selectable Hosts, the held Hosts and the keep-focused-chat flag from the controller to NavigationContext', () => {
     currentController = makeController({
-      heldAgentRefs: [],
+      selectableAgentRefs: [],
       heldHosts: [],
       keepFocusedChat: false,
     } as Partial<AppController>)
     const { rerender } = render(<App />)
     const surface = () => screen.getByTestId('chat-page-surface')
-    expect(surface().dataset.heldAgentRefs).toBe('[]')
+    expect(surface().dataset.selectableAgentRefs).toBe('[]')
     expect(surface().dataset.heldHosts).toBe('[]')
     expect(surface().dataset.keepFocusedChat).toBe('false')
 
     // One field per step, so neither update rides on the other's dependency.
     act(() => {
-      currentController.heldAgentRefs = ['alpha']
+      currentController.selectableAgentRefs = ['alpha']
       rerender(<App />)
     })
-    expect(surface().dataset.heldAgentRefs).toBe('["alpha"]')
+    expect(surface().dataset.selectableAgentRefs).toBe('["alpha"]')
     expect(surface().dataset.heldHosts).toBe('[]')
     expect(surface().dataset.keepFocusedChat).toBe('false')
 

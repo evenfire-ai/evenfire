@@ -4,8 +4,12 @@ import type { AgentWorkspaceRoute, HeldHost, NavItem } from '../uiTypes'
 export interface NavigationContextValue {
   navItem: NavItem
   selectedAgent: string | null
-  heldAgentRefs: string[]
-  /** `heldAgentRefs` with the names the Retry rows show. */
+  /**
+   * Hosts ChatPage may select by itself: listed by the current principal's
+   * catalog and not held. Empty while a team switch waits for its catalog.
+   */
+  selectableAgentRefs: string[]
+  /** The held Hosts of the current principal's catalog, with the names the Retry rows show. */
   heldHosts: HeldHost[]
   /**
    * True while the Host of the chat on screen (the focused chat tab's, or the

@@ -67,6 +67,7 @@ import { useChatStore } from './useChatStore'
 // that a stale grant can never drive a much-later resume. RPC token TTL is 300s;
 // this stays well under it.
 const MCP_OAUTH_RESUME_BUFFER_TTL_MS = 45_000
+const EMPTY_AGENT_REFS: string[] = []
 
 const DENY_REASON_BY_SOURCE: Record<ApprovalDecisionTarget['source'], string> = {
   desktop_notification: 'Denied from desktop notification',
@@ -328,31 +329,32 @@ export function useAppController() {
   // previous team's catalog can still be cached. The main process builds each
   // catalog for the trimmed session team and records that team on it, so a
   // catalog whose team differs from the session team belongs to another team.
-  const isPrincipalCatalog = useCallback(
-    (catalog: AccessCatalog) =>
-      catalog.userId === auth.me?.id && (catalog.teamId ?? '') === principalTeamId,
-    [auth.me?.id, principalTeamId]
-  )
+  // Holds, names and the automatic Host choice read only this catalog.
+  const principalCatalog =
+    agentsData.accessCatalog &&
+    agentsData.accessCatalog.userId === auth.me?.id &&
+    (agentsData.accessCatalog.teamId ?? '') === principalTeamId
+      ? agentsData.accessCatalog
+      : null
+  const principalAgentNames = principalCatalog?.agentNames ?? EMPTY_AGENT_REFS
   // Last name each catalog of the current principal gave a Host, so a held
   // Host that left the catalog is still named in its toasts. Cleared with the
   // holds when the scope changes.
   const knownHostNamesRef = useRef(new Map<string, string>())
-  // Names a held Host in its Retry row and toasts. Only a catalog of the
-  // current principal names it, so a hold during a team switch never shows the
-  // previous team's name; a Host that left that catalog keeps its last name.
+  // Names a held Host in its Retry row and toasts, from a catalog of the
+  // current principal, so a hold during a team switch never shows the previous
+  // team's name; a Host that left that catalog keeps its last name.
   const principalCatalogName = useCallback(
     (catalog: AccessCatalog | null, agentRef: string) =>
-      (catalog && isPrincipalCatalog(catalog)
-        ? catalog.agentDisplayByName?.[agentRef]
-        : undefined) ??
+      catalog?.agentDisplayByName?.[agentRef] ??
       knownHostNamesRef.current.get(agentRef) ??
       agentRef,
-    [isPrincipalCatalog]
+    []
   )
   // Toasts shown after an await read the catalog on screen then, not the one
   // their callback was created with.
-  const liveAccessCatalogRef = useRef(agentsData.accessCatalog)
-  liveAccessCatalogRef.current = agentsData.accessCatalog
+  const liveAccessCatalogRef = useRef(principalCatalog)
+  liveAccessCatalogRef.current = principalCatalog
   // Keyed by the session team, not the display directory: the directory
   // arriving after paint is not a team change and must not reset the holds.
   const authorityScope = `${auth.runtimeConfigState?.envKey ?? ''}:${auth.isAuthenticated}:${authenticatedPrincipalIdentity ?? ''}:${principalTeamId}`
@@ -380,8 +382,13 @@ export function useAppController() {
     [hostAuthority]
   )
   const heldAgentRefs = useMemo(
-    () => agentsData.agentNames.filter(agentRef => hostAuthority.isBlocked(agentRef)),
-    [agentsData.agentNames, hostAuthority, hostAuthorityRevision]
+    () => principalAgentNames.filter(agentRef => hostAuthority.isBlocked(agentRef)),
+    [principalAgentNames, hostAuthority, hostAuthorityRevision]
+  )
+  // The Hosts ChatPage and the Chat nav may pick by themselves.
+  const selectableAgentRefs = useMemo(
+    () => principalAgentNames.filter(agentRef => !hostAuthority.isBlocked(agentRef)),
+    [principalAgentNames, hostAuthority, hostAuthorityRevision]
   )
   // ChatPage keeps its conversation only while the Host has a Retry row: held
   // and still in the catalog. The Host is the focused chat tab's, or, for the
@@ -399,9 +406,9 @@ export function useAppController() {
     () =>
       heldAgentRefs.map(agentRef => ({
         agentRef,
-        label: principalCatalogName(agentsData.accessCatalog, agentRef),
+        label: principalCatalogName(principalCatalog, agentRef),
       })),
-    [agentsData.accessCatalog, heldAgentRefs, principalCatalogName]
+    [principalCatalog, heldAgentRefs, principalCatalogName]
   )
   const getHostAuthorityEpoch = useCallback(
     (agentRef: string) => hostAuthority.getEpoch(agentRef),
@@ -796,7 +803,7 @@ export function useAppController() {
     if (!auth.isAuthenticated || !catalog) return
     // A catalog of another principal (the previous team's, landing after a
     // switch) names no Host and decides no selection or loss.
-    if (!isPrincipalCatalog(catalog)) return
+    if (catalog !== principalCatalog) return
     for (const agentRef of catalog.agentNames) {
       const name = catalog.agentDisplayByName?.[agentRef]
       if (name) {
@@ -831,7 +838,7 @@ export function useAppController() {
   }, [
     agentsData.accessCatalog,
     auth.isAuthenticated,
-    isPrincipalCatalog,
+    principalCatalog,
     nav.selectedAgent,
     nav.setSelectedAgent,
     isHostAccessBlocked,
@@ -1332,10 +1339,7 @@ export function useAppController() {
           })
           return
         }
-        const latestAgent = pickLatestAgent(
-          agentsData.agentNames.filter(agentRef => !isHostAccessBlocked(agentRef)),
-          activity.agentLastActiveByAgent
-        )
+        const latestAgent = pickLatestAgent(selectableAgentRefs, activity.agentLastActiveByAgent)
         if (latestAgent) {
           handleSelectChatAgent(latestAgent, { selectLatest: false })
         }
@@ -1343,9 +1347,8 @@ export function useAppController() {
     },
     [
       activity.agentLastActiveByAgent,
-      agentsData.agentNames,
+      selectableAgentRefs,
       handleSelectChatAgent,
-      isHostAccessBlocked,
       nav.handleNavSelect,
     ]
   )
@@ -1689,6 +1692,7 @@ export function useAppController() {
     selectedAgent: nav.selectedAgent,
     isHostAccessBlocked,
     heldAgentRefs,
+    selectableAgentRefs,
     heldHosts,
     focusedChatAgentRef,
     keepFocusedChat,
