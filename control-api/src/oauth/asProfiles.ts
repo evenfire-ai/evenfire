@@ -150,7 +150,11 @@ function isRejected(kind: ScopeClass): boolean {
   return kind === 'invalid' || kind === 'blocked-guid' || kind === 'foreign'
 }
 
-/** The first scope that breaks the profile's audience rule, or null. `null` too without a profile. */
+/**
+ * The first scope that breaks the profile's audience rule, or null. `null` too without a
+ * profile. An empty scope is itself a violation and comes back as `''`, so callers must
+ * test `!== null`, never truthiness.
+ */
 export function profileScopeViolation(
   id: AsProfileId | undefined,
   mcpBaseUrl: string,
