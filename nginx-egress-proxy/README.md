@@ -9,12 +9,13 @@ lives in [host-context-controller](../host-context-controller/) (`src/reconciler
 
 ## The image
 
-- Base: `nginx:1.30.6-alpine`, pinned by multi-arch index digest — kept because
-  its entrypoint runs `envsubst` on `/etc/nginx/templates/*.template` at
-  startup, which HCC relies on for credential injection. 1.30.6 is the stable
-  release that fixes CVE-2026-15176, CVE-2026-93479, CVE-2026-95101,
-  CVE-2026-97629 and CVE-2026-97205; `scripts/validate-nginx-images.sh`
-  rejects older platform references.
+- Base: the official `nginx:<x.y.z>-alpine` image named by the `FROM` line of
+  the [Dockerfile](./Dockerfile), pinned by multi-arch index digest. It is kept
+  because its entrypoint runs `envsubst` on `/etc/nginx/templates/*.template`
+  at startup, which HCC relies on for credential injection. The minimum NGINX
+  release per line, and the CVEs behind it, are in
+  [scripts/nginx-image-policy.sh](../scripts/nginx-image-policy.sh);
+  `scripts/validate-nginx-images.sh` rejects older platform references.
 - Hardened to run as non-root (`USER 101:101`): the `user` directive is removed
   from `nginx.conf`, the PID file moves to `/tmp/nginx.pid`, the shipped
   `default.conf` is removed, and nginx dirs plus `/tmp` temp dirs are chowned
@@ -86,6 +87,26 @@ builds this image, renders the template through the HCC reconciler, and runs it
 against a local TLS upstream: a trusted chain (direct and with two
 intermediates) is accepted; an untrusted CA, an expired certificate, a hostname
 mismatch, and the test CA without the mounted trust store are rejected.
+
+## Updating NGINX
+
+A newer fixed release on an accepted line (for example 1.30.6 → 1.30.7):
+
+1. Resolve the index digest of the new tag:
+   `docker buildx imagetools inspect nginx:<x.y.z>-alpine` (the `Digest:` line).
+2. Replace the old tag everywhere it is written (`git grep -n 'nginx:<old>-alpine'`):
+   `FIXED_NGINX_IMAGE` in `scripts/validate-nginx-images.sh`, the Dockerfile
+   `FROM` (tag and digest), the four gateway manifests under `deploy/base`,
+   `scripts/minikube/build-images.sh` and `scripts/bootstrap-cluster.sh`.
+3. Run `bash scripts/validate-nginx-images.sh`,
+   `bash scripts/tests/test-validate-nginx-images.sh` and
+   `bash scripts/verify-nginx-image-digests.sh`.
+
+No test or CI file changes for such a bump. When a new CVE raises the minimum,
+also edit `NGINX_RELEASE_FLOORS` and its CVE comment in
+`scripts/nginx-image-policy.sh`, the floor cases in
+`scripts/tests/test-validate-nginx-images.sh`, and every reference the
+validator then reports as below the new floor.
 
 ## Build & deploy
 
