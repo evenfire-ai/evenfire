@@ -61,6 +61,9 @@ jobs:
             dockerfile: mcp-host/Dockerfile.desktop
             context: .
             host: true
+          - name: playwright-test
+            dockerfile: mcp-servers/playwright/Dockerfile
+            context: mcp-servers/playwright
           - name: reference-hook
             dockerfile: hooks/reference-guardrail-hook/Dockerfile
             context: hooks/reference-guardrail-hook
@@ -119,6 +122,11 @@ jobs:
             }
           });
           NODE
+
+      - name: Verify patched test Playwright with a real browser session
+        if: matrix.variant.name == 'playwright-test'
+        run: |
+          timeout 90 docker run --rm -i --network none --entrypoint node --workdir /app runtime-smoke < mcp-servers/playwright/test/runtime-smoke.cjs
 
   test:
     name: Build / test / typecheck (${{ matrix.service }})
