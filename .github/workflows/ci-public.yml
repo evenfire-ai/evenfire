@@ -36,6 +36,95 @@ jobs:
             exit 1
           fi
 
+  node-runtime-images:
+    name: Node image runtime (${{ matrix.variant.name }}, ${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        variant:
+          - name: host-alpine
+            dockerfile: mcp-host/Dockerfile
+            context: .
+            host: true
+          - name: host-slim
+            dockerfile: mcp-host/Dockerfile.slim
+            context: .
+            host: true
+          - name: host-full
+            dockerfile: mcp-host/Dockerfile.full
+            context: .
+            host: true
+          - name: host-desktop
+            dockerfile: mcp-host/Dockerfile.desktop
+            context: .
+            host: true
+          - name: playwright
+            dockerfile: mcp-servers/playwright/Dockerfile
+            context: mcp-servers/playwright
+          - name: reference-hook
+            dockerfile: hooks/reference-guardrail-hook/Dockerfile
+            context: hooks/reference-guardrail-hook
+          - name: sandbox-ui
+            dockerfile: workflow-recipes/samples/sandbox-ui-test-harness/Dockerfile
+            context: workflow-recipes/samples/sandbox-ui-test-harness
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build the final runtime image
+        run: timeout 2400 docker build --pull -f '${{ matrix.variant.dockerfile }}' -t runtime-smoke '${{ matrix.variant.context }}'
+      - name: Verify the effective Node runtime
+        run: |
+          actual=$(timeout 30 docker run --rm --network none --entrypoint node runtime-smoke -p 'process.versions.node')
+          test "$actual" = "$(tr -d '[:space:]' < .nvmrc)"
+      - name: Verify Host native modules and default SDK transport
+        if: matrix.variant.host == true
+        run: |
+          timeout 60 docker run --rm -i --network none --entrypoint node --workdir /app/mcp-host runtime-smoke <<'NODE'
+          const assert = require('node:assert/strict');
+          const { createServer } = require('node:http');
+          const { gzipSync } = require('node:zlib');
+          const Database = require('better-sqlite3');
+          const { createCanvas } = require('@napi-rs/canvas');
+          const { OpenAICompatibleProvider } = require('./dist/llm/openaiCompatible.js');
+          const db = new Database(':memory:');
+          assert.equal(db.prepare('SELECT 42 AS value').get().value, 42);
+          db.close();
+          const canvas = createCanvas(10, 10);
+          canvas.getContext('2d').fillRect(0, 0, 10, 10);
+          assert.ok(canvas.toBuffer('image/png').length > 0);
+          let requests = 0;
+          const server = createServer((request, response) => {
+            request.resume();
+            request.on('end', () => {
+              requests++;
+              const body = gzipSync(Buffer.from(JSON.stringify({ choices: [{ message: { content: 'complete' }, finish_reason: 'stop' }] })));
+              response.writeHead(200, { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' });
+              response.write(body.subarray(0, 7));
+              setImmediate(() => response.end(body.subarray(7)));
+            });
+          });
+          server.listen(0, '127.0.0.1', async () => {
+            try {
+              const baseURL = `http://127.0.0.1:${server.address().port}/v1`;
+              const provider = new OpenAICompatibleProvider({ id: 'zai', baseURL, defaultModel: 'runtime-http-test' }, 'local-http-fixture');
+              const result = await provider.completeSingleTurn([{ role: 'user', content: 'read' }], { signal: AbortSignal.timeout(5000) });
+              assert.equal(result.content, 'complete');
+              assert.equal(requests, 1);
+            } catch (error) {
+              console.error(error);
+              process.exitCode = 1;
+            } finally {
+              server.closeAllConnections();
+              server.close();
+            }
+          });
+          NODE
+      - name: Verify the Playwright application loads on the patched runtime
+        if: matrix.variant.name == 'playwright'
+        run: timeout 30 docker run --rm --network none --entrypoint node runtime-smoke /app/cli.js --version
+
   test:
     name: Build / test / typecheck (${{ matrix.service }})
     runs-on: ubuntu-latest
@@ -99,7 +188,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: ${{ matrix.service }}/package-lock.json
 
@@ -287,7 +376,7 @@ jobs:
         timeout-minutes: 10
         run: |
           node ../../scripts/minikube/run-with-deadline.mjs --timeout-seconds 300 --heartbeat-seconds 20 --kill-grace-seconds 5 --label web-search-ci-image-build -- \
-            docker build --build-arg NODE_IMAGE=mirror.gcr.io/library/node:24-alpine -t issue198-ci-image:test .
+            docker build --build-arg NODE_IMAGE=mirror.gcr.io/library/node:24.22.1-alpine -t issue198-ci-image:test .
           web_search_image_id="$(node ../../scripts/minikube/run-with-deadline.mjs --timeout-seconds 10 --heartbeat-seconds 5 --kill-grace-seconds 5 --label web-search-ci-image-inspect -- \
             docker image inspect issue198-ci-image:test --format '{{.Id}}')"
           node test/run-network.mjs --image "$web_search_image_id"
@@ -386,7 +475,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: control-api/package-lock.json
 
@@ -545,7 +634,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: control-ui/package-lock.json
       - name: Install frontend components dependencies
@@ -568,7 +657,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: tests/e2e/package-lock.json
       - name: Run descriptor-bound fixture unit suites
@@ -629,7 +718,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         if: steps.token_check.outputs.skip != 'true'
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
           cache: 'npm'
           cache-dependency-path: |
             workflow-recipes/package-lock.json
@@ -688,7 +777,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
 
       - name: Run bash -n on all .sh files
         run: |
@@ -701,6 +790,9 @@ jobs:
             fi
           done < <(find deploy/scripts scripts -type f -name '*.sh' 2>/dev/null)
           exit $fail
+
+      - name: Verify Node security version policy
+        run: node --test scripts/tests/node-runtime-version.test.mjs
 
       - name: Validate governed tracing operations gate orchestration
         run: bash scripts/tests/test-governed-tracing-operations-gate.sh

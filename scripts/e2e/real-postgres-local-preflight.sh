@@ -43,9 +43,10 @@ real_pg_local_preflight() {
   # CI and the local runtime contract pin Node 24. Newer majors have already
   # changed deep-JSON behavior and must fail before T0 rather than pass the
   # old ">=24" check and break package suites mid-flight.
-  if ! [[ "$node_major" =~ ^[0-9]+$ ]] || (( node_major != 24 )); then
+  if ! [[ "$node_major" =~ ^[0-9]+$ ]] || (( node_major != 24 )) ||
+    ! node "$REAL_PG_PREFLIGHT_SCRIPT_DIR/../check-node-version.mjs" --major=24 >/dev/null 2>&1; then
     real_pg_preflight_fail LOCAL_DEPENDENCY_MISSING \
-      "Node.js 24.x is required for the canonical T0/T1/T2 harness; found ${node_major:-unknown}"
+      "Node.js 24.x at or above the .nvmrc security patch is required for the canonical T0/T1/T2 harness; found ${node_major:-unknown}"
     return 1
   fi
 

@@ -2,7 +2,7 @@
 
 MCP server for browser automation, packaging the upstream Microsoft Playwright MCP image (`mcr.microsoft.com/playwright/mcp`, digest-pinned). Uses StreamableHTTP transport on port 8931.
 
-This is upstream-image packaging, not first-party source: the [`Dockerfile`](./Dockerfile) extends the pinned upstream image and pre-installs the Chromium browser (`playwright install chromium`). There is no `src/` in this directory, so the tool list is defined by the upstream image — per the CRD description, it provides browser automation tools for navigation, DOM interaction, code execution, and screenshot capture. See the upstream [Playwright MCP](https://github.com/microsoft/playwright-mcp) project for the current tool set.
+The [`Dockerfile`](./Dockerfile) keeps the pinned upstream application and browser dependencies, replaces its Node 22.22.0 binary with the official digest-pinned Node 24.22.1 glibc binary, and pre-installs Chromium (`playwright install chromium`). CI verifies the effective Node version and CLI loading on amd64 and arm64. There is no `src/` in this directory, so the tool list remains defined by the upstream [Playwright MCP](https://github.com/microsoft/playwright-mcp) application.
 
 ## Environment Variables / Secrets
 
@@ -21,7 +21,7 @@ docker build -t playwright-mcp-server:latest .
 - `scripts/minikube/build-images.sh` optionally builds/reuses it as `clerum/playwright-mcp-server:test` (gated by `MINIKUBE_BUILD_PLAYWRIGHT_MCP_IMAGE`; the default minikube overlay does not deploy it).
 - `.github/workflows/build-publish.yml` publishes it to `ghcr.io/evenfire-ai/playwright-server` on changes under `mcp-servers/playwright/`.
 
-Note: the in-tree `mcpserver.yaml` currently points directly at the upstream digest-pinned image rather than the locally built one.
+The in-tree `mcpserver.yaml` still pins the upstream image with Node 22.22.0. A security rollout must publish the validated repository image and replace that reference with its multiarch digest. Changing the Dockerfile alone does not update that manifest, and a mutable `latest` reference does not bind it to the validated artifact.
 
 ## Kubernetes Deployment
 
