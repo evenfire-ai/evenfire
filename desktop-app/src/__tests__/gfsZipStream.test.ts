@@ -50,11 +50,12 @@ async function makeDeps(
     failDialog?: boolean
     openFile?: ZipStreamDeps['openFile']
   } = {}
-): Promise<ZipStreamDeps & { tempDir: string }> {
+): Promise<ZipStreamDeps & { tempDir: string; savePath: string }> {
   const tempDir = await mkdtemp(join(tmpdir(), 'evenfire-zip-test-'))
   tempRoots.push(tempDir)
   return {
     tempDir,
+    savePath,
     openFile: options.openFile,
     showSaveDialog: vi.fn(async () => {
       if (options.failDialog) throw new Error('save dialog failed')
@@ -316,6 +317,218 @@ describe('gfs zipStream — streamed payload (R1-H2)', () => {
     const { entries } = readZipArchive(new Uint8Array(await readFile(savePath)))
     expect(entries.map(entry => entry.name)).toEqual(['first.txt', 'second.txt'])
     expect(new TextDecoder().decode(entries[1]!.bytes)).toBe('second')
+  })
+})
+
+/**
+ * R4-M1 / R3-M2 — CONCURRENCY. The writer used to serialize individual
+ * WRITES, not complete ENTRY LIFECYCLES, so two concurrent appends could
+ * interleave: the second entry's local header landed inside the first
+ * entry's payload. The aggregate ceilings were likewise checked against
+ * committed state only, so concurrent appends could collectively exceed
+ * them.
+ */
+describe('gfs zipStream — concurrent entries (R4-M1, R3-M2)', () => {
+  /** Yields to the event loop, so concurrent appends really do interleave. */
+  const yieldToLoop = () => new Promise<void>(resolve => setTimeout(resolve, 0))
+
+  it('keeps concurrent streaming appends from interleaving entries (R4-M1)', async () => {
+    const savePath = join(tmpdir(), `concurrent-${Date.now()}.zip`)
+    savedFiles.push(savePath)
+    const deps = await makeDeps(savePath)
+    const jobId = await openJob(OWNER, deps)
+
+    const sources = [
+      { name: 'a.txt', chunks: ['aaa-1', 'aaa-2', 'aaa-3'] },
+      { name: 'b.txt', chunks: ['bbb-1', 'bbb-2', 'bbb-3'] },
+      { name: 'c.txt', chunks: ['ccc-1', 'ccc-2', 'ccc-3'] },
+    ]
+    // All three appends are ACCEPTED before any of them completes.
+    const results = await Promise.all(
+      sources.map(source =>
+        appendZipEntryStreaming(
+          jobId,
+          OWNER,
+          source.name,
+          async sink => {
+            for (const chunk of source.chunks) {
+              await sink.write(new TextEncoder().encode(chunk))
+              await yieldToLoop()
+            }
+          },
+          deps
+        )
+      )
+    )
+    expect(results.map(result => result.bytes)).toEqual([15, 15, 15])
+
+    await finishZipJob(jobId, OWNER, 'Concurrent.zip', deps)
+
+    // An INDEPENDENT reader sees three complete entries whose payloads are
+    // exactly what the producers wrote.
+    const { entries } = readZipArchive(new Uint8Array(await readFile(savePath)))
+    expect(entries.map(entry => entry.name).sort()).toEqual(['a.txt', 'b.txt', 'c.txt'])
+    for (const entry of entries) {
+      const source = sources.find(candidate => candidate.name === entry.name)!
+      expect(new TextDecoder().decode(entry.bytes)).toBe(source.chunks.join(''))
+      expect(entry.crc).toBe(crc32(entry.bytes))
+    }
+
+    // The SYSTEM extractor agrees — a corrupted archive does not extract.
+    const extracted = await extractWithSystemUnzip(savePath)
+    if (extracted) {
+      expect(extracted['a.txt']).toBe('aaa-1aaa-2aaa-3')
+      expect(extracted['b.txt']).toBe('bbb-1bbb-2bbb-3')
+      expect(extracted['c.txt']).toBe('ccc-1ccc-2ccc-3')
+    }
+  })
+
+  it('keeps a failed concurrent append from corrupting its neighbours (R4-M1)', async () => {
+    const savePath = join(tmpdir(), `concurrent-rollback-${Date.now()}.zip`)
+    savedFiles.push(savePath)
+    const deps = await makeDeps(savePath)
+    const jobId = await openJob(OWNER, deps)
+
+    const good = appendZipEntryStreaming(
+      jobId,
+      OWNER,
+      'good.txt',
+      async sink => {
+        await sink.write(new TextEncoder().encode('good-1'))
+        await yieldToLoop()
+        await sink.write(new TextEncoder().encode('good-2'))
+        await yieldToLoop()
+      },
+      deps
+    )
+    const doomed = appendZipEntryStreaming(
+      jobId,
+      OWNER,
+      'doomed.txt',
+      async sink => {
+        await sink.write(new TextEncoder().encode('partial'))
+        await yieldToLoop()
+        throw new Error('producer failed mid-stream')
+      },
+      deps
+    )
+
+    await expect(doomed).rejects.toThrow(/producer failed/)
+    await expect(good).resolves.toMatchObject({ name: 'good.txt', bytes: 12 })
+
+    await finishZipJob(jobId, OWNER, 'ConcurrentRollback.zip', deps)
+    const { entries } = readZipArchive(new Uint8Array(await readFile(savePath)))
+    expect(entries.map(entry => entry.name)).toEqual(['good.txt'])
+    expect(new TextDecoder().decode(entries[0]!.bytes)).toBe('good-1good-2')
+  })
+
+  it('reserves job slots atomically across concurrent starts (R3-M2)', async () => {
+    const deps = await makeDeps(join(tmpdir(), 'batch.zip'))
+    // Every start is fired WITHOUT awaiting, so they all race for the slots.
+    // DIFFERENT owners race for the PROCESS-wide ceiling.
+    const attempts = Array.from({ length: MAX_ACTIVE_ZIP_JOBS + 3 }, (_, index) =>
+      startZipJob(`window-${index}`, deps).then(
+        jobId => ({ ok: true as const, jobId }),
+        error => ({ ok: false as const, error })
+      )
+    )
+    const settled = await Promise.all(attempts)
+    const opened = settled.filter(result => result.ok)
+    const refused = settled.filter(result => !result.ok)
+    // Register the opened jobs for cleanup BEFORE asserting, so a failing
+    // expectation cannot leak a job into the next test.
+    settled.forEach((result, index) => {
+      if (result.ok) openJobs.push({ jobId: result.jobId, owner: `window-${index}`, deps })
+    })
+
+    expect(opened).toHaveLength(MAX_ACTIVE_ZIP_JOBS)
+    expect(refused).toHaveLength(3)
+    for (const result of refused) {
+      expect((result as { error: Error }).error).toBeInstanceOf(ZipStreamLimitError)
+    }
+  })
+
+  it('reserves per-window job slots atomically across concurrent starts (R3-M2)', async () => {
+    const deps = await makeDeps(join(tmpdir(), 'owner-batch.zip'))
+    // ONE window racing for its own ceiling.
+    const attempts = Array.from({ length: MAX_ACTIVE_ZIP_JOBS_PER_OWNER + 3 }, () =>
+      startZipJob(OWNER, deps).then(
+        jobId => ({ ok: true as const, jobId }),
+        error => ({ ok: false as const, error })
+      )
+    )
+    const settled = await Promise.all(attempts)
+    // Register the opened jobs for cleanup BEFORE asserting.
+    for (const result of settled.filter(result => result.ok)) {
+      openJobs.push({ jobId: result.jobId, owner: OWNER, deps })
+    }
+    expect(settled.filter(result => result.ok)).toHaveLength(MAX_ACTIVE_ZIP_JOBS_PER_OWNER)
+    expect(settled.filter(result => !result.ok)).toHaveLength(3)
+    for (const result of settled.filter(result => !result.ok)) {
+      expect((result as { error: Error }).error).toBeInstanceOf(ZipStreamLimitError)
+    }
+  })
+
+  it('reserves the payload budget atomically across concurrent appends (R3-M2)', async () => {
+    const deps = await makeDeps(join(tmpdir(), 'budget.zip'))
+    const jobId = await openJob(OWNER, { ...deps, limits: { maxTotalBytes: 64 } })
+
+    // Three appends of 32 bytes each: only TWO fit in a 64-byte archive.
+    const attempts = Array.from({ length: 3 }, (_, index) =>
+      appendZipEntryStreaming(
+        jobId,
+        OWNER,
+        `entry-${index}.bin`,
+        async sink => {
+          await sink.write(new Uint8Array(32).fill(index + 1))
+          await yieldToLoop()
+        },
+        deps
+      ).then(
+        () => ({ ok: true as const }),
+        error => ({ ok: false as const, error })
+      )
+    )
+    const settled = await Promise.all(attempts)
+    const accepted = settled.filter(result => result.ok)
+    const refused = settled.filter(result => !result.ok)
+
+    // The ceiling is not bypassed: the archive never exceeds 64 payload bytes.
+    expect(accepted).toHaveLength(2)
+    expect(refused).toHaveLength(1)
+    expect((refused[0] as { error: Error }).error).toBeInstanceOf(ZipStreamLimitError)
+
+    await finishZipJob(jobId, OWNER, 'Budget.zip', deps)
+    const { entries } = readZipArchive(new Uint8Array(await readFile(deps.savePath)))
+    const total = entries.reduce((sum, entry) => sum + entry.bytes.length, 0)
+    expect(total).toBeLessThanOrEqual(64)
+  })
+
+  it('reserves the entry count atomically across concurrent appends (R3-M2)', async () => {
+    const deps = await makeDeps(join(tmpdir(), 'entries.zip'))
+    const jobId = await openJob(OWNER, { ...deps, limits: { maxEntries: 2 } })
+
+    const attempts = Array.from({ length: 4 }, (_, index) =>
+      appendZipEntryStreaming(
+        jobId,
+        OWNER,
+        `entry-${index}.bin`,
+        async sink => {
+          await sink.write(new TextEncoder().encode('x'))
+          await yieldToLoop()
+        },
+        deps
+      ).then(
+        () => ({ ok: true as const }),
+        error => ({ ok: false as const, error })
+      )
+    )
+    const settled = await Promise.all(attempts)
+    expect(settled.filter(result => result.ok)).toHaveLength(2)
+    expect(settled.filter(result => !result.ok)).toHaveLength(2)
+    for (const result of settled.filter(result => !result.ok)) {
+      expect((result as { error: Error }).error).toBeInstanceOf(ZipStreamLimitError)
+    }
   })
 })
 
