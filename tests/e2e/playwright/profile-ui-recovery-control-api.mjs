@@ -320,7 +320,18 @@ export async function createRecoveryControlApi({
       if (invitation.email.toLowerCase() !== email) {
         return { status: 400, body: { error: 'invalid_invitation' } }
       }
-      if (invitation.purpose === 'password_reset' || invitation.status !== 'pending') {
+      if (invitation.purpose === 'password_reset') {
+        return { status: 400, body: { error: 'not_pending' } }
+      }
+      // An accepted invitation replayed by its owner is a success without a
+      // session: the token no longer proves a pending capability.
+      if (invitation.status === 'accepted') {
+        return {
+          status: 200,
+          body: { accepted: true, ...invitationPreview(invitation), replay: true },
+        }
+      }
+      if (invitation.status !== 'pending') {
         return { status: 400, body: { error: 'not_pending' } }
       }
       if (Date.parse(invitation.expiresAt) <= Date.now()) {
@@ -409,6 +420,11 @@ export async function createRecoveryControlApi({
       }
       const nextHash = await passwordHash(password)
       if (!nextHash) return { status: 400, body: { error: 'invalid_password' } }
+      // The session route sets only the first password; a later change goes
+      // through the reset link or Settings.
+      if (session.user.passwordHash) {
+        return { status: 409, body: { error: 'password_already_set' } }
+      }
       setPassword(session.user, nextHash, invitation)
       return {
         status: 200,

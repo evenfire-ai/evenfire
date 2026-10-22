@@ -272,14 +272,6 @@ realPg('Profile UI recovery lane fixture parity on PostgreSQL 16', () => {
       {
         path: '/external/invitations/accept',
         body: {
-          email: fixtureModule.RECOVERY_USERS.usedInvitee.email,
-          token: 'synthetic-used-invitation',
-        },
-        error: 'not_pending',
-      },
-      {
-        path: '/external/invitations/accept',
-        body: {
           email: fixtureModule.RECOVERY_USERS.recovery.email,
           token: 'synthetic-reset-proof',
         },
@@ -330,6 +322,29 @@ realPg('Profile UI recovery lane fixture parity on PostgreSQL 16', () => {
       expect(parity.real.body).toMatchObject({ error: scenario.error })
       expect(parity.synthetic.body).not.toHaveProperty('token')
     }
+  })
+
+  it('parities an owner replay of an accepted invitation as a success without a session', async () => {
+    const before = await db.pool.query(
+      'SELECT status, accepted_at FROM invitations WHERE id = $1',
+      ['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3']
+    )
+    const parity = await expectParity('POST', '/external/invitations/accept', {
+      body: {
+        email: fixtureModule.RECOVERY_USERS.usedInvitee.email,
+        token: 'synthetic-used-invitation',
+      },
+    })
+    expect(parity.real.status).toBe(200)
+    expect(parity.real.body).toMatchObject({ accepted: true, replay: true })
+    expect(parity.synthetic.body).toMatchObject({ accepted: true, replay: true })
+    expect(parity.real.body).not.toHaveProperty('token')
+    expect(parity.synthetic.body).not.toHaveProperty('token')
+    const after = await db.pool.query('SELECT status, accepted_at FROM invitations WHERE id = $1', [
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3',
+    ])
+    expect(before.rows[0].status).toBe('accepted')
+    expect(after.rows).toEqual(before.rows)
   })
 
   it('parities accept, authenticated password setup and the resulting session identity', async () => {
@@ -406,7 +421,22 @@ realPg('Profile UI recovery lane fixture parity on PostgreSQL 16', () => {
     })
     expect(fixtureRepeat.status).toBe(realRepeat.status)
     expect(bodyShape(fixtureRepeat.body)).toEqual(bodyShape(realRepeat.body))
-    expect(realRepeat.status).toBe(200)
+    expect(realRepeat.status).toBe(409)
+    expect(realRepeat.body).toEqual({ error: 'password_already_set' })
+    expect(fixtureRepeat.body).toEqual({ error: 'password_already_set' })
+
+    // The refused repeat leaves the first password in place on both sides.
+    await openPasswordPace()
+    const realKeptLogin = await loginReal(
+      fixtureModule.RECOVERY_USERS.onboarding.email,
+      fixtureModule.RECOVERY_PASSWORDS.onboarding
+    )
+    const fixtureKeptLogin = await loginFixture(
+      fixtureModule.RECOVERY_USERS.onboarding.email,
+      fixtureModule.RECOVERY_PASSWORDS.onboarding
+    )
+    expect(realKeptLogin.status).toBe(200)
+    expect(fixtureKeptLogin.status).toBe(200)
 
     const realRevoked = await requestReal(
       'GET',
