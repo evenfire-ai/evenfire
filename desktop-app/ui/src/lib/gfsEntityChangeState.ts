@@ -2,6 +2,7 @@ import type { QueryClient } from '@tanstack/react-query'
 import { planMoveConvergence } from '@clerum/gfs-interaction-policy'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { parseHttpStatus } from './gfsGrantErrors'
+import { publishGfsMoveRelocation } from './gfsOpenLocations'
 import { refreshPreviewTab } from './workspaceTabs'
 import type { WorkspaceTabsState } from './workspaceTabs.types'
 
@@ -124,6 +125,14 @@ export function applyMoveConvergence(
 ): void {
   const known = { childParentByResourceId: collectKnownChildParents(queryClient, scope, drive) }
   const plan = planMoveConvergence(receipt, known)
+
+  // The published open-location chains are OBSERVED chains, so the move makes
+  // them stale for every resource below the moved one. Relocating them here
+  // keeps the shared registry able to answer the NEXT question — "is the
+  // moved resource's new parent an ancestor of the open resource?" — which
+  // neither the registry's old crumbs nor the children cache can answer
+  // after the chain changed.
+  publishGfsMoveRelocation(queryClient, scope, receipt.resourceId, receipt.newParentId)
 
   for (const parentId of plan.refetchChildIds) {
     void queryClient.invalidateQueries({

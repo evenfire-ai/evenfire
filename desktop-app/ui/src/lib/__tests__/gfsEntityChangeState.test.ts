@@ -5,6 +5,11 @@ import { QueryClient, QueryObserver } from '@tanstack/react-query'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { markPluginGfsPreviewUnavailable } from '../gfsEntityChangeState'
 import { applyMoveConvergence, collectKnownChildParents } from '../gfsEntityChangeState'
+import {
+  ancestryDependentGfsResourceIds,
+  publishGfsOpenLocation,
+  readGfsOpenLocations,
+} from '../gfsOpenLocations'
 
 describe('plugin preview unavailable reconciliation', () => {
   it('increments the reload identity once and preserves it on repeated invalidation', () => {
@@ -150,6 +155,68 @@ describe('applyMoveConvergence', () => {
     // The dialog's rows were derived from an ancestry that no longer exists:
     // they are re-read, not merely marked stale.
     await vi.waitFor(() => expect(openReads).toBe(2))
+    unsubscribe()
+  })
+
+  it("re-reads a descendant's ACL rows after a SECOND move, through the relocated chain", async () => {
+    // TWO controllers: Files has the leaf L open (reached BY URI, so no
+    // children listing connects A to it), the sidebar has B open. The first
+    // move (A under B) relocates the leaf's published chain; the second
+    // move (of B) must then see the leaf as a descendant — neither the
+    // registry's old crumbs nor the children cache could answer that.
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    publishGfsOpenLocation(queryClient, SCOPE, 'files', {
+      resourceId: 'L',
+      ancestorResourceIds: ['A', 'X', 'root'],
+    })
+    publishGfsOpenLocation(queryClient, SCOPE, 'sidebar', {
+      resourceId: 'B',
+      ancestorResourceIds: ['P', 'root'],
+    })
+
+    const leafKey = desktopQueryKeys.gfsInheritedAccess(SCOPE, 'L', DRIVE)
+    let leafReads = 0
+    const observer = new QueryObserver(queryClient, {
+      queryKey: leafKey,
+      queryFn: async () => {
+        leafReads += 1
+        return { items: [], coverage: 'complete' }
+      },
+    })
+    const unsubscribe = observer.subscribe(() => {})
+    await vi.waitFor(() =>
+      expect(queryClient.getQueryCache().find({ queryKey: leafKey })?.state.fetchStatus).toBe(
+        'idle'
+      )
+    )
+    const readsBefore = leafReads
+
+    // Move 1: the sidebar moves A under B.
+    applyMoveConvergence(queryClient, SCOPE, DRIVE, {
+      resourceId: 'A',
+      oldParentId: 'X',
+      newParentId: 'B',
+    })
+    await Promise.resolve()
+
+    // The leaf's chain now names B, so the SECOND move claims it.
+    const ancestryDependent = ancestryDependentGfsResourceIds(
+      readGfsOpenLocations(queryClient, SCOPE),
+      'B'
+    )
+    expect(ancestryDependent).toContain('L')
+
+    // Move 2: the sidebar moves B elsewhere. The leaf's inherited rows are
+    // derived from its ancestry, so they must be re-read.
+    applyMoveConvergence(
+      queryClient,
+      SCOPE,
+      DRIVE,
+      { resourceId: 'B', oldParentId: 'P', newParentId: 'Q' },
+      { ancestryDependentResourceIds: ancestryDependent }
+    )
+
+    await vi.waitFor(() => expect(leafReads).toBeGreaterThan(readsBefore))
     unsubscribe()
   })
 

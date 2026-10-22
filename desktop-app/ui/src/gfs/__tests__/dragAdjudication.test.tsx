@@ -272,6 +272,24 @@ describe('useGfsDragAdjudication — required-probe drop admission (R1-H1)', () 
       expect(decision.allowNumberedRename).toBe(false)
     }
   })
+
+  it('refuses the drop when the OPTIONAL rename probe reports a session failure', async () => {
+    // The rename probe is optional for the MOVE, so an ordinary failure only
+    // withdraws the rename option. A session failure is not ordinary: the
+    // session the move would be dispatched with is gone, so the drop must be
+    // refused terminally instead of being dispatched into a dead session.
+    const message = await affordancesFailureMessage(401)
+    probes = await grantedProbes({ 'src-1': { error: new Error(message) } })
+    const handleAuthorityFailure = vi.fn(() => true)
+    const { result } = renderAdjudication(handleAuthorityFailure)
+
+    const decision = await result.current.adjudicateDrop(dragSource(), dropTarget())
+
+    expect(decision).toEqual({ allowed: false, reason: 'session-lost' })
+    // The surface is told the session is gone, so it revokes instead of
+    // leaving an active session over a dead one.
+    expect(handleAuthorityFailure).toHaveBeenCalled()
+  })
 })
 
 describe('useGfsDragAdjudication — the rename probe reads a fresh observation (RP-023)', () => {

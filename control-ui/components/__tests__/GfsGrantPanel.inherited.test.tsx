@@ -939,6 +939,85 @@ describe('GfsGrantPanel inherited access', () => {
     expect(mockDeleteGfsShare).not.toHaveBeenCalled()
   })
 
+  // RP-032 — the INVERSE combination: an inherited Editor grant plus a
+  // DIRECT Editor share on the opened item, with no direct grant. The
+  // downgrade rewrites the ancestor grant and (by the accepted semantics)
+  // preserves the direct share-only access — so the member keeps Editor
+  // access through it. The operator must be told BEFORE approving, and the
+  // outcome must repeat it.
+  it('discloses the surviving direct Editor share before and after the downgrade', async () => {
+    const DIRECT_SHARE_ID = '18181818-1818-4181-8181-181818181818'
+    mockGetGfsGrants.mockImplementation(async resourceId => {
+      if (resourceId === FOLDER_ID) {
+        return {
+          items: [
+            {
+              id: FOLDER_GRANT_ID,
+              drive: 'main',
+              resourceId: FOLDER_ID,
+              subject: miguel,
+              permissions: ['read', 'write'],
+              inherit: true,
+            },
+          ],
+        }
+      }
+      // No direct grant on the opened item: its access is the share below.
+      return { items: [] }
+    })
+    mockGetGfsShares.mockImplementation(async resourceId => ({
+      items:
+        resourceId === FILE_ID
+          ? [
+              {
+                id: DIRECT_SHARE_ID,
+                drive: 'main',
+                resourceId: FILE_ID,
+                subject: miguel,
+                permissions: ['read', 'write'],
+                includeDescendants: true,
+              },
+            ]
+          : [],
+    }))
+    renderPanel()
+
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    const miguelRow = await within(existing).findByTestId(miguelRowTestId)
+    await chooseRole(miguelRow, 'Read')
+
+    // CONSENT: the confirmation names the access that survives the change.
+    const dialog = await screen.findByRole('alertdialog')
+    expect(
+      within(dialog).getByText(
+        'Sharing entries on report.md still grant Editor access. This change does not remove them.'
+      )
+    ).toBeTruthy()
+    expect(mockPutGfsGrant).not.toHaveBeenCalled()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Update role' }))
+
+    // The ancestor grant is rewritten…
+    await waitFor(() =>
+      expect(mockPutGfsGrant).toHaveBeenCalledWith({
+        drive: 'main',
+        resourceId: FOLDER_ID,
+        subject: miguel,
+        permissions: ['read', 'share'],
+        inherit: true,
+      })
+    )
+    // …the share-only direct row is neither converted nor revoked…
+    expect(mockPutGfsGrant).toHaveBeenCalledTimes(1)
+    expect(mockDeleteGfsShare).not.toHaveBeenCalledWith(DIRECT_SHARE_ID)
+    // …and the outcome repeats the residual Editor access.
+    expect(
+      await screen.findByText(
+        'Changed grant access to Read-only on team-docs. Sharing entries on report.md still grant Editor access.'
+      )
+    ).toBeTruthy()
+  })
+
   // RP-032 — a revocation that fails is a PARTIAL outcome: the role changed,
   // but the link may still grant Editor, and the copy must say so.
   it('states the true partial outcome when a sharing entry cannot be revoked', async () => {

@@ -154,6 +154,26 @@ function revokedSharesCopy(folderNames: string[]): string {
 }
 
 /**
+ * The item's OWN surviving Editor access.
+ *
+ * A share-only direct row has no grant to rewrite, and a role change never
+ * converts one into a grant (R1-M5) — so an Editor sharing entry on the item
+ * itself SURVIVES the downgrade and the member keeps Editor access through
+ * it. The operator must be told: in the confirmation BEFORE the write (the
+ * consent) and in the outcome after it (the feedback).
+ *
+ * A direct GRANT is different: the change rewrites it, and RP-032 revokes the
+ * conflicting sharing entries together with it, so nothing of it survives.
+ */
+function collectResidualDirectShareNames(
+  direct: GfsExistingAccessItem | null,
+  itemName: string
+): string[] {
+  if (!direct || direct.grantId !== null) return []
+  return direct.shareEntries.some(entry => isEditorPermissions(entry.permissions)) ? [itemName] : []
+}
+
+/**
  * A role promise is only as good as the coverage it was made under: when the
  * inherited walk did not complete, an ancestor the operator cannot see may
  * still grant a stronger role. The success copy then states what was NOT
@@ -809,9 +829,16 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       // The surviving Editor shares are disclosed IN the confirmation, before
       // the operator approves a role that will not remove them. The folders
       // this change rewrites lose their conflicting sharing entries
-      // (RP-032), so only the share-only ancestors remain.
+      // (RP-032), so what remains is the share-only ancestors this panel
+      // cannot rewrite — plus a share-only Editor entry on the item ITSELF,
+      // which no rewrite touches and therefore survives.
       residualEditorFolderNames:
-        nextRole === 'read' ? collectResidualEditorFolderNames(plan.shareOnlySources) : [],
+        nextRole === 'read'
+          ? [
+              ...collectResidualEditorFolderNames(plan.shareOnlySources),
+              ...collectResidualDirectShareNames(row.direct, resource.name),
+            ]
+          : [],
     })
   }
 
@@ -975,9 +1002,15 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       }
       // Residual honesty (RP-032): the conflicting sharing entries are revoked
       // with the change, so what can still grant Editor is the share-only
-      // ancestor this panel cannot rewrite.
+      // ancestor this panel cannot rewrite — and a share-only Editor entry on
+      // the item itself, which this change never touches.
       const residualNames =
-        request.nextRole === 'read' ? collectResidualEditorFolderNames(request.residualSources) : []
+        request.nextRole === 'read'
+          ? [
+              ...collectResidualEditorFolderNames(request.residualSources),
+              ...collectResidualDirectShareNames(row.direct, resource.name),
+            ]
+          : []
       const details: string[] = []
       if (request.skippedFolderNames.length > 0) {
         details.push(

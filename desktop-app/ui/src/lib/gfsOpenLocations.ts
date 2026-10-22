@@ -69,6 +69,85 @@ export function readGfsOpenLocations(
 }
 
 /**
+ * The chain a location's ancestry takes after a move relocated part of it.
+ *
+ * The chain is nearest first: [parent, grandparent, …]. A move of X under Y
+ * leaves everything BELOW X where it was and replaces the segment ABOVE it:
+ * X's old ancestors are gone, and Y (plus Y's own observed ancestors) takes
+ * their place. The moved resource itself stays in the chain — it is still an
+ * ancestor of the open resource.
+ *
+ * Y's own ancestors are only known when a surface has Y open; when none has,
+ * the chain stops at Y. An unproven link is not a claim.
+ */
+export function relocateObservedChain(
+  chain: readonly string[],
+  movedResourceId: string,
+  newParentId: string | null,
+  newParentChain: readonly string[] = []
+): string[] {
+  const index = chain.indexOf(movedResourceId)
+  if (index < 0) return [...chain]
+  const below = chain.slice(0, index)
+  if (!newParentId) return [...below, movedResourceId]
+  const above = newParentChain.filter(
+    ancestor =>
+      ancestor !== newParentId && ancestor !== movedResourceId && !below.includes(ancestor)
+  )
+  return [...below, movedResourceId, newParentId, ...above]
+}
+
+/**
+ * Apply a committed move to every published chain.
+ *
+ * The published chains are OBSERVED chains, so a move makes them stale for
+ * every resource below the moved one. Relocating them keeps the shared
+ * registry able to answer "is X an ancestor of the open resource?": a LATER
+ * move of the moved resource's NEW parent would otherwise miss the surfaces
+ * that have a descendant open — the registry and the children cache both
+ * still hold the pre-move chain.
+ */
+export function relocatePublishedChains(
+  locations: GfsOpenLocationRegistry,
+  movedResourceId: string,
+  newParentId: string | null
+): GfsOpenLocationRegistry {
+  // The registry is keyed by MOUNT, so the new parent's own chain is found by
+  // the resource it has open — not by the key.
+  const newParentChain = newParentId
+    ? (Object.values(locations).find(location => location.resourceId === newParentId)
+        ?.ancestorResourceIds ?? [])
+    : []
+  const next: GfsOpenLocationRegistry = {}
+  for (const [id, location] of Object.entries(locations)) {
+    const relocated = relocateObservedChain(
+      location.ancestorResourceIds,
+      movedResourceId,
+      newParentId,
+      newParentChain
+    )
+    const unchanged =
+      relocated.length === location.ancestorResourceIds.length &&
+      relocated.every((value, index) => value === location.ancestorResourceIds[index])
+    next[id] = unchanged ? location : { ...location, ancestorResourceIds: relocated }
+  }
+  return next
+}
+
+/** Publish the relocation of a committed move into the shared registry. */
+export function publishGfsMoveRelocation(
+  queryClient: QueryClient,
+  sessionScope: string,
+  movedResourceId: string,
+  newParentId: string | null
+): void {
+  queryClient.setQueryData<GfsOpenLocationRegistry>(
+    desktopQueryKeys.gfsOpenLocations(sessionScope),
+    previous => relocatePublishedChains(previous ?? {}, movedResourceId, newParentId)
+  )
+}
+
+/**
  * The open resources whose inherited access depends on the moved resource's
  * ancestry: the resource itself, or any resource below it.
  *

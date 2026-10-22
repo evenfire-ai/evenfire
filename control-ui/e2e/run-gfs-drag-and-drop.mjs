@@ -14,20 +14,29 @@
 //      with an actionable message. It never silently degrades to "skip".
 //   2. The gate NEVER reports success for zero executed journeys, and never
 //      reports success while any journey was skipped.
-//   3. The live-fixture opt-in stays EXPLICIT. This gate is a separate,
+//   3. The gate NEVER reports success for an INCOMPLETE report: every counter
+//      must be present, the report's journey inventory must reconcile with
+//      those counters, and the inventory must be exactly the set of journeys
+//      Playwright selected.
+//   4. The live-fixture opt-in stays EXPLICIT. This gate is a separate,
 //      named command; the ordinary unit/CI lanes never mutate the dev
 //      environment, because nothing in `npm test` calls this file.
 //
 // Usage (from control-ui/):
 //   QA_RECORDER_CONFIRM_MUTATIONS=1 \
-//   E2E_ADMIN_USER=<admin> ADMIN_PASSWORD=<password> \
+//   E2E_ADMIN_USER=<admin> E2E_ADMIN_PASSWORD=<password> \
 //   CONTROL_UI_URL=http://127.0.0.1:<port> \
 //   CONTROL_API_URL=http://127.0.0.1:<port> \
 //     npm run e2e:gfs-drag-and-drop
 //
 // Exit codes: 0 = every requested journey ran and passed. 1 = the gate
 // refused to run, or the journey result was not a clean pass.
-import { spawnSync } from 'node:child_process'
+//
+// NOTE: the Desktop lane owns a copy of this gate
+// (desktop-app/test/e2e-playwright/run-gfs-drag-and-drop.mjs). The two
+// copies must stay in sync: the reviewer's "both evaluators" finding was
+// exactly a defect that lived in both.
+import { execFileSync, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -47,6 +56,13 @@ export const ADMIN_PASSWORD_KEYS = [
 
 const PROBE_TIMEOUT_MS = 10_000
 const HEALTH_PATH = '/health'
+const PLAYWRIGHT_ARGS = [
+  'test',
+  '--config=playwright.config.ts',
+  '--project=chromium',
+  'e2e/gfs-drag-and-drop.spec.ts',
+  '--workers=1',
+]
 
 /** First non-empty value among the candidate env names (never logged). */
 export function firstConfiguredValue(env, keys) {
@@ -113,11 +129,81 @@ export function collectGateProblems(env) {
 }
 
 /**
- * The verdict of a Playwright JSON report. A run is a clean pass only when
- * at least one journey actually executed, nothing was skipped, and nothing
- * failed. A report that ran zero journeys is NOT a pass.
+ * The counters a Playwright JSON report must carry. A report without them is
+ * INCOMPLETE: a missing counter is not "zero journeys", it is unknown, and
+ * an unknown count can never certify a run.
  */
-export function evaluateGateReport(report, run = { status: 0 }) {
+export const REQUIRED_REPORT_COUNTERS = ['expected', 'skipped', 'unexpected', 'flaky']
+
+/**
+ * Every journey a Playwright JSON report lists, with the outcome Playwright
+ * recorded for it.
+ *
+ * The inventory is what makes a report verifiable: the counters are only a
+ * summary of it, and a summary that does not match the detail it summarises
+ * is not evidence. A journey with no recorded outcome is an incomplete
+ * report.
+ */
+export function collectReportJourneys(report) {
+  const journeys = []
+  const walk = (suite, path) => {
+    const title = typeof suite?.title === 'string' ? suite.title : ''
+    const file = typeof suite?.file === 'string' ? suite.file : ''
+    // The file-level suite repeats the file name; it is not part of a test's
+    // title path.
+    const nextPath = title && title !== file ? [...path, title] : path
+    for (const spec of suite?.specs ?? []) {
+      for (const test of spec?.tests ?? []) {
+        const specTitle = String(spec?.title ?? '')
+        journeys.push({
+          identity: `${String(spec?.file ?? '')}::${[...nextPath, specTitle].join(' › ')}`,
+          title: specTitle,
+          file: String(spec?.file ?? ''),
+          outcome: typeof test?.status === 'string' ? test.status : null,
+          results: Array.isArray(test?.results) ? test.results.length : 0,
+        })
+      }
+    }
+    for (const child of suite?.suites ?? []) walk(child, nextPath)
+  }
+  for (const suite of report?.suites ?? []) walk(suite, [])
+  return journeys
+}
+
+/**
+ * The outcome tally of a report's inventory, computed the way Playwright
+ * computes it (a journey with no result counts as skipped). A journey with an
+ * outcome Playwright does not report is INCOMPLETE.
+ */
+export function tallyReportJourneys(journeys) {
+  const tally = { expected: 0, skipped: 0, unexpected: 0, flaky: 0, incomplete: 0 }
+  for (const journey of journeys) {
+    const outcome = journey.results === 0 ? 'skipped' : journey.outcome
+    if (
+      outcome === 'expected' ||
+      outcome === 'skipped' ||
+      outcome === 'unexpected' ||
+      outcome === 'flaky'
+    ) {
+      tally[outcome] += 1
+      continue
+    }
+    tally.incomplete += 1
+  }
+  return tally
+}
+
+/**
+ * The verdict of a Playwright JSON report. A run is a clean pass only when
+ * the report is COMPLETE, at least one journey actually executed, nothing
+ * was skipped, and nothing failed.
+ *
+ * `selectedJourneys` is the inventory Playwright selected before the run (the
+ * `--list` pass). When it is supplied, the report must describe exactly that
+ * set: a report that lists fewer journeys than were selected is not evidence
+ * for the run.
+ */
+export function evaluateGateReport(report, run = { status: 0 }, selectedJourneys = null) {
   const problems = []
   if (run.error || run.signal || run.status !== 0) {
     problems.push('Playwright did not exit successfully. The report cannot certify this run.')
@@ -126,12 +212,64 @@ export function evaluateGateReport(report, run = { status: 0 }) {
     problems.push('Playwright reported a run-level error. The report cannot certify this run.')
   }
   const stats = report && typeof report === 'object' ? (report.stats ?? {}) : {}
-  const expected = Number(stats.expected ?? 0)
-  const skipped = Number(stats.skipped ?? 0)
-  const unexpected = Number(stats.unexpected ?? 0)
-  const flaky = Number(stats.flaky ?? 0)
+  const counters = {}
+  for (const key of REQUIRED_REPORT_COUNTERS) {
+    const value = stats[key]
+    if (!Number.isInteger(value) || value < 0) {
+      problems.push(
+        `The journey report has invalid result counts: "${key}" is missing or not a non-negative integer. ` +
+          'An incomplete report cannot certify this run.'
+      )
+      counters[key] = null
+      continue
+    }
+    counters[key] = value
+  }
+  const expected = counters.expected ?? 0
+  const skipped = counters.skipped ?? 0
+  const unexpected = counters.unexpected ?? 0
+  const flaky = counters.flaky ?? 0
 
-  if (!Number.isFinite(expected) || expected <= 0) {
+  const journeys = collectReportJourneys(report)
+  const tally = tallyReportJourneys(journeys)
+  if (journeys.length === 0) {
+    problems.push(
+      'The journey report lists no journeys. A report without its inventory cannot certify this run.'
+    )
+  }
+  if (tally.incomplete > 0) {
+    problems.push(
+      `${tally.incomplete} journey(s) in the report carry no outcome. The report is incomplete.`
+    )
+  }
+  const mismatched = REQUIRED_REPORT_COUNTERS.filter(
+    key => counters[key] !== null && counters[key] !== tally[key]
+  )
+  if (mismatched.length > 0) {
+    problems.push(
+      `The journey report does not reconcile with its own inventory: ${mismatched.join(', ')} ` +
+        `(report ${expected}/${skipped}/${unexpected}/${flaky}, ` +
+        `inventory ${tally.expected}/${tally.skipped}/${tally.unexpected}/${tally.flaky}).`
+    )
+  }
+  if (selectedJourneys) {
+    const selected = new Set(selectedJourneys.map(journey => journey.identity))
+    const reported = new Set(journeys.map(journey => journey.identity))
+    const missing = [...selected].filter(identity => !reported.has(identity))
+    const extra = [...reported].filter(identity => !selected.has(identity))
+    if (missing.length > 0) {
+      problems.push(
+        `The journey report is missing ${missing.length} selected journey(s): ${missing.join(', ')}`
+      )
+    }
+    if (extra.length > 0) {
+      problems.push(
+        `The journey report contains ${extra.length} journey(s) that were not selected: ${extra.join(', ')}`
+      )
+    }
+  }
+
+  if (expected <= 0) {
     problems.push(
       'The journey suite executed zero journeys. A skipped suite is not a green result: ' +
         'check the mutation opt-in, the admin credential and the endpoint configuration.'
@@ -139,17 +277,6 @@ export function evaluateGateReport(report, run = { status: 0 }) {
   }
   if (skipped > 0) {
     problems.push(`${skipped} journey(s) were skipped. A skipped journey is not a green result.`)
-  }
-  if (
-    !Number.isInteger(skipped) ||
-    skipped < 0 ||
-    !Number.isInteger(unexpected) ||
-    unexpected < 0 ||
-    !Number.isInteger(flaky) ||
-    flaky < 0 ||
-    !Number.isInteger(expected)
-  ) {
-    problems.push('The journey report has invalid result counts.')
   }
   if (unexpected > 0) {
     problems.push(`${unexpected} journey(s) failed.`)
@@ -159,6 +286,52 @@ export function evaluateGateReport(report, run = { status: 0 }) {
   }
 
   return { problems, stats: { expected, skipped, unexpected, flaky } }
+}
+
+/**
+ * The SANITIZED evidence file for this run: the tested revision, the
+ * selected journeys, their outcomes and the process exit.
+ *
+ * The raw Playwright report carries error text, stdout and attachments, so
+ * it stays private under the ignored artifact directory. This file is the
+ * part a reviewer can read: no credentials, no cookies, no auth headers, no
+ * request or response bodies — only what certifies WHICH journeys ran, on
+ * WHICH revision, with WHICH exit code.
+ */
+export function writeSanitizedRunSummary({
+  lane,
+  revision,
+  branch,
+  command,
+  report,
+  run,
+  selectedJourneys,
+  verdict,
+  filePath,
+}) {
+  const journeys = collectReportJourneys(report).map(journey => ({
+    title: journey.title,
+    status: journey.outcome ?? 'incomplete',
+  }))
+  const summary = {
+    lane,
+    revision,
+    branch,
+    command,
+    processExit: typeof run?.status === 'number' ? run.status : null,
+    signal: run?.signal ?? null,
+    verdict,
+    counts: {
+      expected: Number(report?.stats?.expected ?? 0),
+      skipped: Number(report?.stats?.skipped ?? 0),
+      unexpected: Number(report?.stats?.unexpected ?? 0),
+      flaky: Number(report?.stats?.flaky ?? 0),
+    },
+    selected: (selectedJourneys ?? []).map(journey => journey.title),
+    journeys,
+  }
+  fs.writeFileSync(filePath, `${JSON.stringify(summary, null, 2)}\n`)
+  return summary
 }
 
 /** Bounded reachability probe. Never prints the response body. */
@@ -172,6 +345,26 @@ export async function probeReachable(url, timeoutMs = PROBE_TIMEOUT_MS) {
     return { ok: response.status < 500, status: response.status }
   } catch (error) {
     return { ok: false, status: 0, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/** The revision the lane ran against (never a branch guess). */
+export function readTestedRevision(repoRoot) {
+  try {
+    return execFileSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+  } catch {
+    return 'unknown'
+  }
+}
+
+/** The branch the lane ran on. */
+export function readTestedBranch(repoRoot) {
+  try {
+    return execFileSync('git', ['-C', repoRoot, 'rev-parse', '--abbrev-ref', 'HEAD'], {
+      encoding: 'utf8',
+    }).trim()
+  } catch {
+    return 'unknown'
   }
 }
 
@@ -194,6 +387,10 @@ function artifactDir() {
   const dir = path.join(REPO_ROOT, '.local-notes', 'infra', 'runs', 'control-ui-gfs-drag-and-drop')
   fs.mkdirSync(dir, { recursive: true })
   return dir
+}
+
+function readJson(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, 'utf8'))
 }
 
 async function main() {
@@ -225,30 +422,59 @@ async function main() {
 
   const dir = artifactDir()
   const reportPath = path.join(dir, 'playwright-report.json')
+  const selectionPath = path.join(dir, 'playwright-selection.json')
   const playwrightBin = resolvePlaywrightBin()
   // A previous successful run must never supply evidence for a failed launch.
   fs.rmSync(reportPath, { force: true })
+  fs.rmSync(selectionPath, { force: true })
+
+  // Enumerate the journeys Playwright SELECTS before running them. The run's
+  // report is reconciled against this inventory, so a report that describes
+  // fewer journeys than were selected cannot certify the run.
+  process.stdout.write('[E2E-GATE] enumerating the selected journeys\n')
+  const selection = spawnSync(playwrightBin, [...PLAYWRIGHT_ARGS, '--list', '--reporter=json'], {
+    cwd: APP_ROOT,
+    stdio: 'inherit',
+    timeout: 10 * 60_000,
+    env: { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: selectionPath },
+  })
+  if (selection.status !== 0 || !fs.existsSync(selectionPath)) {
+    process.stderr.write(
+      '[E2E-GATE] Playwright could not enumerate the selected journeys. ' +
+        'The gate cannot certify this run.\n'
+    )
+    return 1
+  }
+  let selectedJourneys
+  try {
+    selectedJourneys = collectReportJourneys(readJson(selectionPath))
+  } catch (error) {
+    process.stderr.write(
+      `[E2E-GATE] The Playwright selection report is unreadable: ${error instanceof Error ? error.message : String(error)}\n`
+    )
+    return 1
+  }
+  if (selectedJourneys.length === 0) {
+    process.stderr.write(
+      '[E2E-GATE] Playwright selected no journeys. The gate cannot certify this run.\n'
+    )
+    return 1
+  }
+  process.stdout.write(
+    `[E2E-GATE] ${selectedJourneys.length} journey(s) selected: ${selectedJourneys
+      .map(journey => journey.title)
+      .join(' | ')}\n`
+  )
 
   process.stdout.write(
     `[E2E-GATE] running the EvenDrive drag-and-drop journeys (report: ${reportPath})\n`
   )
-  const run = spawnSync(
-    playwrightBin,
-    [
-      'test',
-      '--config=playwright.config.ts',
-      '--project=chromium',
-      'e2e/gfs-drag-and-drop.spec.ts',
-      '--workers=1',
-      '--reporter=list,json',
-    ],
-    {
-      cwd: APP_ROOT,
-      stdio: 'inherit',
-      timeout: 75 * 60_000,
-      env: { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: reportPath },
-    }
-  )
+  const run = spawnSync(playwrightBin, [...PLAYWRIGHT_ARGS, '--reporter=list,json'], {
+    cwd: APP_ROOT,
+    stdio: 'inherit',
+    timeout: 75 * 60_000,
+    env: { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: reportPath },
+  })
 
   if (!fs.existsSync(reportPath)) {
     process.stderr.write(
@@ -259,7 +485,7 @@ async function main() {
 
   let report
   try {
-    report = JSON.parse(fs.readFileSync(reportPath, 'utf8'))
+    report = readJson(reportPath)
   } catch (error) {
     process.stderr.write(
       `[E2E-GATE] The Playwright JSON report is unreadable: ${error instanceof Error ? error.message : String(error)}\n`
@@ -267,7 +493,20 @@ async function main() {
     return 1
   }
 
-  const verdict = evaluateGateReport(report, run)
+  const verdict = evaluateGateReport(report, run, selectedJourneys)
+  const summaryPath = path.join(dir, 'playwright-summary.json')
+  writeSanitizedRunSummary({
+    lane: 'control-ui',
+    revision: readTestedRevision(REPO_ROOT),
+    branch: readTestedBranch(REPO_ROOT),
+    command: 'npm run e2e:gfs-drag-and-drop',
+    report,
+    run,
+    selectedJourneys,
+    verdict: verdict.problems.length > 0 ? 'fail' : 'pass',
+    filePath: summaryPath,
+  })
+  process.stdout.write(`[E2E-GATE] sanitized summary: ${summaryPath}\n`)
   if (verdict.problems.length > 0) {
     process.stderr.write('[E2E-GATE] The EvenDrive drag-and-drop gate did NOT pass:\n')
     for (const problem of verdict.problems) process.stderr.write(`  - ${problem}\n`)

@@ -457,7 +457,22 @@ export function useGfsDragAdjudication(deps: GfsDragAdjudicationDeps) {
 
       // Rename capability (not user consent): source-resource write proves a
       // combined rename+move; the folder confirmation records the opt-in.
+      //
+      // This probe is OPTIONAL for the move, so an ordinary failure only
+      // withdraws the rename option and the move stays allowed. A SESSION
+      // failure is different: the session the move would be dispatched with
+      // is gone, so the drop must be refused terminally instead of being
+      // dispatched into a dead session. The probe itself already reported the
+      // failure to the surface (which revoked the session), so this only
+      // CLASSIFIES it.
       const sourceProbe = await fetchAffordances(source.resourceId, AFFORDANCES_MUTATION_STALE_MS)
+      if (!sourceProbe.ok) {
+        const message =
+          sourceProbe.error instanceof Error ? sourceProbe.error.message : String(sourceProbe.error)
+        if (isGfsSessionAuthorityFailure(message, 'operation')) {
+          return { allowed: false, reason: 'session-lost' }
+        }
+      }
       const canRename = sourceProbe.ok && sourceProbe.held.includes('write')
 
       return {

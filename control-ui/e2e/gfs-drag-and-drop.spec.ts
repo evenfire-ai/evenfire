@@ -195,6 +195,32 @@ async function cleanupGfsDragDropFixtures(page: Page, names: ReadonlySet<string>
   }
 }
 
+/** The drive root's resource id, read through the operator plane. */
+async function driveRootId(page: Page): Promise<string> {
+  const response = await adminFetch(page, 'GET', '/control-api/api/v1/gfs/tree?drive=main')
+  if (response.status !== 200) throw new Error(`drive tree failed with HTTP ${response.status}`)
+  const rootResourceId = (response.data as { rootResourceId?: string }).rootResourceId
+  if (!rootResourceId) throw new Error('the drive root id did not resolve')
+  return rootResourceId
+}
+
+/** The resource id of a folder with an exact name, or null when it is absent. */
+async function findChildByName(
+  page: Page,
+  parentResourceId: string,
+  name: string
+): Promise<string | null> {
+  for (const child of await listChildren(page, parentResourceId)) {
+    if (child.name === name) return child.resourceId
+  }
+  return null
+}
+
+/** The names of a folder's live children, read through the operator plane. */
+async function childNames(page: Page, parentResourceId: string): Promise<string[]> {
+  return (await listChildren(page, parentResourceId)).map(child => child.name)
+}
+
 async function beginJourney(page: Page): Promise<void> {
   assertAllowedTarget('CONTROL_UI_URL', CONTROL_UI_URL)
   assertAllowedTarget('CONTROL_API_URL', CONTROL_API_URL)
@@ -307,6 +333,19 @@ test.describe('EvenDrive drag and drop', () => {
       // (toasts auto-dismiss after 3.5s) and then the refreshed listing.
       await expect(toast(page, `Moved "${fileName}" to "${folderName}".`)).toBeVisible()
       await expect(resourceRow(page, fileName)).toHaveCount(0)
+      // The business signal, not just the receipt: the file really is a
+      // child of the destination folder now.
+      const rootId = await driveRootId(page)
+      const parentId = await findChildByName(page, rootId, parentName)
+      expect(parentId).not.toBeNull()
+      const destinationId = await findChildByName(page, parentId as string, folderName)
+      expect(destinationId).not.toBeNull()
+      await expect
+        .poll(async () => (await childNames(page, destinationId as string)).includes(fileName), {
+          timeout: 30_000,
+          intervals: [250, 1_000],
+        })
+        .toBe(true)
       await screenshotAndLog(page, testInfo, 'gfs-dnd-file-move')
     } finally {
       await tempFile?.cleanup().catch(() => {})
@@ -392,6 +431,19 @@ test.describe('EvenDrive drag and drop', () => {
       await expect(toast(page, 'access now follows the new location')).toBeVisible()
       await expect(dialog).toBeHidden({ timeout: 20_000 })
       await expect(resourceRow(page, sourceName)).toHaveCount(0)
+      // The business signal: the moved folder really is a child of the
+      // destination folder now.
+      const rootId = await driveRootId(page)
+      const parentId = await findChildByName(page, rootId, parentName)
+      expect(parentId).not.toBeNull()
+      const destinationId = await findChildByName(page, parentId as string, destinationName)
+      expect(destinationId).not.toBeNull()
+      await expect
+        .poll(async () => (await childNames(page, destinationId as string)).includes(sourceName), {
+          timeout: 30_000,
+          intervals: [250, 1_000],
+        })
+        .toBe(true)
       await screenshotAndLog(page, testInfo, 'gfs-dnd-folder-commit')
     } finally {
       await cleanupGfsDragDropFixtures(page, new Set([parentName, sourceName, destinationName]))
@@ -588,11 +640,8 @@ test.describe('EvenDrive drag and drop', () => {
       await expect(dialog).toBeVisible({ timeout: 20_000 })
       // Leave "Use a numbered name if needed" unchecked.
       await dialog.getByRole('button', { name: 'Move', exact: true }).click()
-      await page.waitForTimeout(1500)
-      const toastTexts = await page.locator('.cu-toast').allTextContents()
-      // eslint-disable-next-line no-console
-      console.log('POST-MOVE-TOASTS:', JSON.stringify(toastTexts))
-
+      // The refusal is a visible outcome, so the expectation below waits for
+      // it — no fixed sleep and no toast dump.
       await expect(
         toast(
           page,

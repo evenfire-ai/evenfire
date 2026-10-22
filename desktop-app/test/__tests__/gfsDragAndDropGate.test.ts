@@ -1,10 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import {
   DESKTOP_EMAIL_KEYS,
   DESKTOP_PASSWORD_KEYS,
   collectGateProblems,
+  collectReportJourneys,
   evaluateGateReport,
+  tallyReportJourneys,
+  writeSanitizedRunSummary,
 } from '../e2e-playwright/run-gfs-drag-and-drop.mjs'
 
 /**
@@ -13,6 +18,51 @@ import {
  * contract: the gate refuses to run without the required setup, and it never
  * reads a zero-journey or skipped-journey run as a green result.
  */
+
+type Outcome = 'expected' | 'skipped' | 'unexpected' | 'flaky'
+
+const LANE = 'desktop-app'
+const COMMAND = 'npm run test:e2e:playwright:gfs-drag-and-drop'
+const FILE = 'gfs-drag-and-drop-desktop.test.ts'
+
+/**
+ * A report shaped like the one Playwright writes: the suite tree with one
+ * spec per journey, and the counters that summarise it.
+ */
+function journeyReport(
+  journeys: Array<{ title: string; outcome?: Outcome | null; results?: number }>,
+  counterOverrides: Record<string, unknown> = {}
+) {
+  const stats = { expected: 0, skipped: 0, unexpected: 0, flaky: 0, ...counterOverrides }
+  for (const journey of journeys) {
+    const outcome = journey.outcome ?? 'expected'
+    if (outcome in stats) stats[outcome] += 1
+  }
+  return {
+    suites: [
+      {
+        title: FILE,
+        file: FILE,
+        specs: journeys.map(journey => ({
+          title: journey.title,
+          file: FILE,
+          tests: [
+            {
+              ...(journey.outcome === null ? {} : { status: journey.outcome ?? 'expected' }),
+              expectedStatus: 'passed',
+              results:
+                journey.results === undefined
+                  ? [{ status: journey.outcome === 'skipped' ? 'skipped' : 'passed' }]
+                  : Array.from({ length: journey.results }, () => ({ status: 'passed' })),
+            },
+          ],
+        })),
+        suites: [],
+      },
+    ],
+    stats,
+  }
+}
 
 const completeSetup = {
   E2E_K8S_CONTEXT: 'dev',
@@ -81,7 +131,7 @@ describe('EvenDrive drag-and-drop Desktop E2E gate', () => {
   })
 
   describe('run verdict', () => {
-    const passingReport = { stats: { expected: 2, skipped: 0, unexpected: 0, flaky: 0 } }
+    const passingReport = journeyReport([{ title: 'journey one' }, { title: 'journey two' }])
 
     it.each([
       { status: 1 },
@@ -99,38 +149,182 @@ describe('EvenDrive drag-and-drop Desktop E2E gate', () => {
     })
 
     it('rejects flaky journeys', () => {
-      const report = { stats: { ...passingReport.stats, flaky: 1 } }
+      const report = journeyReport([{ title: 'journey one', outcome: 'flaky' }])
       expect(evaluateGateReport(report).problems.join('\n')).toContain('flaky')
     })
 
     it('rejects malformed result counts', () => {
-      const report = { stats: { ...passingReport.stats, skipped: 'invalid' } }
+      const report = journeyReport([{ title: 'journey one' }], { skipped: 'invalid' })
       expect(evaluateGateReport(report).problems.join('\n')).toContain('invalid result counts')
     })
 
     it('treats a run that executed zero journeys as a failure', () => {
-      const verdict = evaluateGateReport({ stats: { expected: 0, skipped: 2, unexpected: 0 } })
+      const verdict = evaluateGateReport(
+        journeyReport([
+          { title: 'journey one', outcome: 'skipped' },
+          { title: 'journey two', outcome: 'skipped' },
+        ])
+      )
       expect(verdict.problems.join('\n')).toContain('executed zero journeys')
     })
 
     it('treats a skipped journey as a failure', () => {
-      const verdict = evaluateGateReport({ stats: { expected: 2, skipped: 1, unexpected: 0 } })
+      const verdict = evaluateGateReport(
+        journeyReport([{ title: 'journey one' }, { title: 'journey two', outcome: 'skipped' }])
+      )
       expect(verdict.problems.join('\n')).toContain('skipped')
     })
 
     it('treats a failed journey as a failure', () => {
-      const verdict = evaluateGateReport({ stats: { expected: 2, skipped: 0, unexpected: 1 } })
+      const verdict = evaluateGateReport(
+        journeyReport([{ title: 'journey one' }, { title: 'journey two', outcome: 'unexpected' }])
+      )
       expect(verdict.problems.join('\n')).toContain('failed')
     })
 
     it('accepts a clean run', () => {
-      const verdict = evaluateGateReport({ stats: { expected: 2, skipped: 0, unexpected: 0 } })
+      const verdict = evaluateGateReport(passingReport)
       expect(verdict.problems).toEqual([])
       expect(verdict.stats.expected).toBe(2)
     })
 
     it('treats a missing report as a failure', () => {
       expect(evaluateGateReport(undefined).problems.join('\n')).toContain('executed zero journeys')
+    })
+  })
+
+  describe('incomplete reports', () => {
+    it('rejects a report whose counters are incomplete', () => {
+      // The reproduced defect: the missing counters used to be read as
+      // successful zero counts.
+      const verdict = evaluateGateReport({ stats: { expected: 1 } }, { status: 0 })
+      expect(verdict.problems.length).toBeGreaterThan(0)
+      expect(verdict.problems.join('\n')).toContain('invalid result counts')
+    })
+
+    it('rejects a report that lists no journeys', () => {
+      const verdict = evaluateGateReport({
+        stats: { expected: 1, skipped: 0, unexpected: 0, flaky: 0 },
+      })
+      expect(verdict.problems.join('\n')).toContain('lists no journeys')
+    })
+
+    it('rejects a report whose counters do not reconcile with its inventory', () => {
+      const report = journeyReport([{ title: 'journey one' }], { expected: 5 })
+      expect(evaluateGateReport(report).problems.join('\n')).toContain('does not reconcile')
+    })
+
+    it('rejects a journey the report carries no outcome for', () => {
+      const report = journeyReport([{ title: 'journey one', outcome: null }])
+      expect(evaluateGateReport(report).problems.join('\n')).toContain('carry no outcome')
+    })
+
+    it('rejects a journey whose recorded outcome contradicts the counters', () => {
+      const report = journeyReport([{ title: 'journey one', results: 0 }])
+      expect(evaluateGateReport(report).problems.join('\n')).toContain('does not reconcile')
+    })
+
+    it('rejects a report that is missing a selected journey', () => {
+      const selected = collectReportJourneys(
+        journeyReport([{ title: 'journey one' }, { title: 'journey two' }])
+      )
+      const report = journeyReport([{ title: 'journey one' }])
+      expect(evaluateGateReport(report, { status: 0 }, selected).problems.join('\n')).toContain(
+        'missing 1 selected journey'
+      )
+    })
+
+    it('rejects a report that carries a journey that was not selected', () => {
+      const selected = collectReportJourneys(journeyReport([{ title: 'journey one' }]))
+      const report = journeyReport([{ title: 'journey one' }, { title: 'journey two' }])
+      expect(evaluateGateReport(report, { status: 0 }, selected).problems.join('\n')).toContain(
+        'not selected'
+      )
+    })
+
+    it('accepts a report that matches the selected journeys exactly', () => {
+      const report = journeyReport([{ title: 'journey one' }, { title: 'journey two' }])
+      const selected = collectReportJourneys(report)
+      expect(evaluateGateReport(report, { status: 0 }, selected).problems).toEqual([])
+    })
+  })
+
+  describe('sanitized run summary', () => {
+    it('binds the revision, the selected cases, the outcomes and the exit code', () => {
+      const filePath = path.join(os.tmpdir(), `gfs-dnd-summary-${LANE}.json`)
+      const report = journeyReport([{ title: 'journey one' }, { title: 'journey two' }])
+      const summary = writeSanitizedRunSummary({
+        lane: LANE,
+        revision: 'abc123',
+        branch: 'feat/example',
+        command: COMMAND,
+        report,
+        run: { status: 0 },
+        selectedJourneys: collectReportJourneys(report),
+        verdict: 'pass',
+        filePath,
+      })
+
+      expect(summary).toMatchObject({
+        lane: LANE,
+        revision: 'abc123',
+        branch: 'feat/example',
+        command: COMMAND,
+        processExit: 0,
+        verdict: 'pass',
+      })
+      expect(summary.selected).toEqual(['journey one', 'journey two'])
+      expect(summary.journeys).toEqual([
+        { title: 'journey one', status: 'expected' },
+        { title: 'journey two', status: 'expected' },
+      ])
+      expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toEqual(summary)
+      fs.rmSync(filePath, { force: true })
+    })
+
+    it('does not carry the raw report text into the summary', () => {
+      const filePath = path.join(os.tmpdir(), `gfs-dnd-summary-private-${LANE}.json`)
+      const report = {
+        ...journeyReport([{ title: 'journey one', outcome: 'unexpected' }]),
+        errors: [{ message: 'the upstream said: private-token-value' }],
+      }
+      const summary = writeSanitizedRunSummary({
+        lane: LANE,
+        revision: 'abc123',
+        branch: 'feat/example',
+        command: COMMAND,
+        report,
+        run: { status: 1 },
+        selectedJourneys: collectReportJourneys(report),
+        verdict: 'fail',
+        filePath,
+      })
+
+      expect(JSON.stringify(summary)).not.toContain('private-token-value')
+      expect(summary.processExit).toBe(1)
+      expect(summary.verdict).toBe('fail')
+      fs.rmSync(filePath, { force: true })
+    })
+  })
+
+  describe('report inventory', () => {
+    it('identifies a journey by its file and title path', () => {
+      const journeys = collectReportJourneys(journeyReport([{ title: 'journey one' }]))
+      expect(journeys).toHaveLength(1)
+      expect(journeys[0]?.identity).toBe(`${FILE}::journey one`)
+    })
+
+    it('tallies the outcomes the way Playwright does', () => {
+      const journeys = collectReportJourneys(
+        journeyReport([{ title: 'one' }, { title: 'two' }, { title: 'three', outcome: 'skipped' }])
+      )
+      expect(tallyReportJourneys(journeys)).toEqual({
+        expected: 2,
+        skipped: 1,
+        unexpected: 0,
+        flaky: 0,
+        incomplete: 0,
+      })
     })
   })
 })
