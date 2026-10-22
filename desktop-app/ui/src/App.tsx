@@ -2157,7 +2157,7 @@ export function App() {
     void (async () => {
       const restoreTeamId = sandboxUiDeepLinkRestoreTeamByIdRef.current.get(pending.link.id)
       const originalTeamId = restoreTeamId ?? vm.getCurrentTeamId()
-      const originNavigation =
+      let originNavigation =
         sandboxUiDeepLinkOriginNavigationByIdRef.current.get(pending.link.id) ??
         vm.captureWorkspaceNavigation()
       sandboxUiDeepLinkOriginNavigationByIdRef.current.set(pending.link.id, originNavigation)
@@ -2199,6 +2199,15 @@ export function App() {
         }
         if (pending.link.teamId && pending.link.teamId !== currentTeamId) {
           await closeActiveSandboxUiEmbedForHandoff()
+          if (!vm.isNavigationIntentCurrent(navigationIntentSequence)) {
+            await acknowledgeSandboxUiDeepLink(pending.link.id)
+            return
+          }
+          // Closing the active embed may persist its live route into the app
+          // tab. Rollback must snapshot that updated workspace, while the
+          // existing intent guard keeps a newer explicit user choice in charge.
+          originNavigation = vm.captureWorkspaceNavigation()
+          sandboxUiDeepLinkOriginNavigationByIdRef.current.set(pending.link.id, originNavigation)
           try {
             const didSwitchTeam = await vm.handleEnsureTeamContext({
               teamId: pending.link.teamId,

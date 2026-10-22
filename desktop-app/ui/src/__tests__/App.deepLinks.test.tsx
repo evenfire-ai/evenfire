@@ -3589,6 +3589,41 @@ describe('App deep-link orchestration', () => {
     )
   })
 
+  it('preserves the live app route when an unavailable cross-team link restores the origin workspace', async () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      selectedAgent: 'alpha',
+      selectedAgentRoute: 'chat',
+    } as Partial<AppController>)
+    listApps.mockImplementation(async () =>
+      currentController.getCurrentTeamId() === 'team-a' ? { apps: [READY_APP] } : { apps: [] }
+    )
+    render(<App />)
+    await launchAppFromSidebar()
+
+    const originWorkspace = currentController.workspaceTabs
+    const appTab = activeWorkspaceTab(originWorkspace)
+    expect(appTab?.kind).toBe('app')
+    if (appTab?.kind !== 'app') throw new Error('The app picker did not create an app tab')
+
+    // The embed reports this current route as it is closed for the cross-team
+    // handoff. App persists it through the real workspace tab producer.
+    getSandboxUiLocation.mockResolvedValue({ appRef: 'ns/app', routePath: '/tickets/live' })
+    act(() => emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' }))
+    await confirmPendingAppLink()
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    const expectedWorkspace = setAppTabSavedRoutePath(originWorkspace, appTab.id, '/tickets/live')
+    expect(currentController.workspaceTabs).toEqual(expectedWorkspace)
+    expect(currentController.workspaceTabs.activeTabId).toBe(appTab.id)
+    expect(currentController.selectedAgent).toBe('alpha')
+    expect(currentController.selectedAgentRoute).toBe('chat')
+    expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(2, {
+      teamId: 'team-a',
+      announce: true,
+    })
+  })
+
   it('keeps two tabs of the same app on their own routes when alternating (§5)', async () => {
     currentController = makeController({ initialExperienceLoading: false })
     listApps.mockResolvedValue({ apps: [READY_APP] })
