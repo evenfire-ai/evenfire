@@ -3593,7 +3593,7 @@ describe('App deep-link orchestration', () => {
     currentController = makeController({
       initialExperienceLoading: false,
       selectedAgent: 'alpha',
-      selectedAgentRoute: 'chat',
+      selectedAgentRoute: 'mcp-servers',
     } as Partial<AppController>)
     listApps.mockImplementation(async () =>
       currentController.getCurrentTeamId() === 'team-a' ? { apps: [READY_APP] } : { apps: [] }
@@ -3617,7 +3617,7 @@ describe('App deep-link orchestration', () => {
     expect(currentController.workspaceTabs).toEqual(expectedWorkspace)
     expect(currentController.workspaceTabs.activeTabId).toBe(appTab.id)
     expect(currentController.selectedAgent).toBe('alpha')
-    expect(currentController.selectedAgentRoute).toBe('chat')
+    expect(currentController.selectedAgentRoute).toBe('mcp-servers')
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(2, {
       teamId: 'team-a',
       announce: true,
