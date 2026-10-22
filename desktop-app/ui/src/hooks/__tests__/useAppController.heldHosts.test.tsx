@@ -113,6 +113,21 @@ async function settle() {
   })
 }
 
+/**
+ * A catalog shaped like the producer's: every listed Host has a display name,
+ * and the team is the trimmed session team, or null without one.
+ */
+function producerCatalog(
+  names: string[],
+  labels: Record<string, string> = DISPLAY_BY_NAME,
+  teamId: string | null = 'team-1'
+) {
+  return {
+    ...createCatalog(names, Object.fromEntries(names.map(name => [name, labels[name] ?? name]))),
+    teamId,
+  }
+}
+
 describe('useAppController held Hosts', () => {
   let unmount: (() => void) | null = null
 
@@ -721,6 +736,60 @@ describe('useAppController held Hosts', () => {
       `Could not verify access to ${renamed}.`,
     ])
   })
+
+  it.each(['', 'team-1'])(
+    'T-R5L1-1: the team directory arriving after paint keeps holds and names (me.teamId=%j)',
+    async principalTeam => {
+      const { clerum, handle } = installAppControllerClerum({
+        me: { teamId: principalTeam },
+        agentNames: [HOST_A, HOST_B],
+        agentDisplayByName: DISPLAY_BY_NAME,
+      })
+      const directory = deferred<{ items: never[]; currentTeamId: string }>()
+      handle.teamDirectory.mockImplementation(() => directory.promise)
+      handle.refreshCatalog.mockImplementation(async () =>
+        producerCatalog([HOST_A, HOST_B], DISPLAY_BY_NAME, principalTeam || null)
+      )
+      const catalog = installCatalog(clerum)
+      catalog.deny(HOST_A, await ipcGenericForbidden('rpc:listSessions'))
+      const { app, commits } = await mount(clerum, handle)
+      await settle()
+      const catalogBeforeDirectory = cachedCatalog(app.queryClient)
+      expect(catalogBeforeDirectory).toMatchObject({
+        agentNames: [HOST_A, HOST_B],
+        teamId: principalTeam || null,
+      })
+      expect(app.result.current.currentTeamId).toBe(principalTeam)
+
+      // The display directory names team-1 after paint; the session team is unchanged.
+      await act(async () => {
+        directory.resolve({ items: [], currentTeamId: 'team-1' })
+      })
+      await waitFor(() => expect(app.result.current.currentTeamId).toBe('team-1'))
+      await settle()
+
+      // Hold a Host that is not selected, so no selection change rewrites the names.
+      await holdThroughCatalog(app, catalog, HOST_A)
+      await settle()
+      // Liveness witness: A is held, its page read ran, and no new catalog
+      // object reached the screen that could have refilled the names.
+      expect(catalog.pageReads(HOST_A)).toBeGreaterThan(0)
+      expect(cachedCatalog(app.queryClient)).toBe(catalogBeforeDirectory)
+      const verificationError = await ipcGenericForbidden('rpc:listSessions')
+      catalog.setVerify(async () => {
+        throw verificationError
+      })
+
+      act(() => {
+        app.result.current.handleSelectChatAgent(HOST_A, { selectLatest: false })
+      })
+      await waitFor(() => expect(catalog.verifyReads(HOST_A)).toBe(1))
+      await settle()
+
+      expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true)
+      expect(toastsSeen(commits)).toEqual([VERIFY_A])
+    }
+  )
 
   it('T-R2L2-1: a new hold after a successful Retry is announced again', async () => {
     const { clerum, handle } = installAppControllerClerum({

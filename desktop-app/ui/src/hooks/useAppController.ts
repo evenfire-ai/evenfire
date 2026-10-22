@@ -229,7 +229,7 @@ export function useAppController() {
   // The chat-list cache scope (`currentTeamId`) may fall back to the display
   // directory when it is empty; the delete fence (`chatAuthorityTeamId`) never
   // does, because a directory team was never proven to be the session's.
-  const principalTeamId = auth.me?.teamId ?? ''
+  const principalTeamId = (auth.me?.teamId ?? '').trim()
   const currentTeamId = principalTeamId || teamsData.currentTeamId || ''
   const availableTeamIds = useMemo(() => teamsData.teams.map(team => team.id), [teamsData.teams])
   const authenticatedPrincipalIdentity =
@@ -324,7 +324,9 @@ export function useAppController() {
     (agentName: string) => agentsData.agentDisplayByName[agentName] ?? agentName,
     [agentsData.agentDisplayByName]
   )
-  const authorityScope = `${auth.runtimeConfigState?.envKey ?? ''}:${auth.isAuthenticated}:${authenticatedPrincipalIdentity ?? ''}:${currentTeamId}`
+  // Keyed by the session team, not the display directory: the directory
+  // arriving after paint is not a team change and must not reset the holds.
+  const authorityScope = `${auth.runtimeConfigState?.envKey ?? ''}:${auth.isAuthenticated}:${authenticatedPrincipalIdentity ?? ''}:${principalTeamId}`
   const authorityScopeRef = useRef(authorityScope)
   authorityScopeRef.current = authorityScope
   const navigationIntentEpochRef = useRef(0)
