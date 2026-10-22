@@ -5,8 +5,9 @@ vi.mock('../src/config.js', () => ({
 }))
 
 describe('0131 catalog UTF-8 ordering migration', () => {
-  it('installs the immutable byte function and complete supporting index class', async () => {
+  it('installs the immutable byte function and plans its index class online', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    const { PR1_ONLINE_INDEX_PLAN } = await import('../src/migrations/pr1OnlineIndexPlan.js')
     const migration = CONTROL_API_MIGRATIONS.find(
       candidate => candidate.version === '0132_catalog_utf8_ordering'
     )
@@ -18,13 +19,22 @@ describe('0131 catalog UTF-8 ordering migration', () => {
 
     expect(sql).toContain('CREATE OR REPLACE FUNCTION catalog_utf8_bytes(value TEXT)')
     expect(sql).toContain("SELECT convert_to(value, 'UTF8')")
-    expect(sql.match(/catalog_utf8_bytes\(/g)).toHaveLength(8)
-    expect(sql).toContain('user_agents_catalog_utf8_idx')
-    expect(sql).toContain('team_agents_catalog_utf8_idx')
-    expect(sql).toContain('user_contexts_catalog_utf8_idx')
-    expect(sql).toContain('team_contexts_catalog_utf8_idx')
-    expect(sql).toContain('user_workflow_triggers_catalog_utf8_idx')
-    expect(sql).toContain('team_workflow_triggers_catalog_utf8_idx')
-    expect(sql).toContain('operational_relationship_catalog_utf8_target_idx')
+    expect(sql.match(/catalog_utf8_bytes\(/g)).toHaveLength(1)
+    expect(sql).not.toMatch(/CREATE\s+(UNIQUE\s+)?INDEX/i)
+
+    const expectedIndexes = [
+      'user_agents_catalog_utf8_idx',
+      'team_agents_catalog_utf8_idx',
+      'user_contexts_catalog_utf8_idx',
+      'team_contexts_catalog_utf8_idx',
+      'user_workflow_triggers_catalog_utf8_idx',
+      'team_workflow_triggers_catalog_utf8_idx',
+      'operational_relationship_catalog_utf8_target_idx',
+    ]
+    const planned = PR1_ONLINE_INDEX_PLAN.filter(
+      entry => entry.migrationVersion === '0132_catalog_utf8_ordering'
+    )
+    expect(planned.map(entry => entry.name).sort()).toEqual([...expectedIndexes].sort())
+    for (const entry of planned) expect(entry.createSql).toContain('catalog_utf8_bytes(')
   })
 })

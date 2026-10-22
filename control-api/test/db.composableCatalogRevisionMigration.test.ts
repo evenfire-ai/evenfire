@@ -50,4 +50,35 @@ describe('0132 composable catalog revisions migration', () => {
     expect(sql).toContain('DROP TABLE IF EXISTS authorization_catalog_revision')
     expect(sql).not.toContain('UPDATE authorization_catalog_revision')
   })
+
+  it('replaces row-level revision triggers without dropping them', async () => {
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    const migration = CONTROL_API_MIGRATIONS.find(
+      candidate => candidate.version === '0133_composable_catalog_revisions'
+    )
+    expect(migration).toBeDefined()
+
+    const query = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+    await migration!.apply({ query })
+    const sql = query.mock.calls
+      .map(call => String(call[0]))
+      .join('\n')
+      .replace(/\s+/g, ' ')
+
+    const replaced = [...sql.matchAll(/CREATE OR REPLACE TRIGGER (\w+) /g)].map(match => match[1])
+    expect(replaced.sort()).toEqual(
+      [
+        'users_authorization_revision',
+        'teams_authorization_revision',
+        'workflow_runs_authorization_revision',
+        'workflow_approval_requests_authorization_revision',
+        'notification_deliveries_authorization_revision',
+        'gfs_grants_authorization_revision',
+        'gfs_shares_authorization_revision',
+        'gfs_resources_authorization_revision',
+      ].sort()
+    )
+    expect(sql).not.toMatch(/DROP TRIGGER IF EXISTS \w+_authorization_revision/)
+    expect(sql).not.toMatch(/CREATE TRIGGER /)
+  })
 })

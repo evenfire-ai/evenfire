@@ -105,10 +105,13 @@ describe('D34 migration execution policy', () => {
   })
 
   it('preserves the approved historical migration bodies byte-for-byte', async () => {
+    // S1d changed the PR1 bodies before any shared environment applied them:
+    // statement-level catalog triggers are no longer installed by 0130, 0133/0134
+    // replace row triggers in place, and planned indexes left the transactions.
     const files = [
       [
         'src/services/access/userAccessFoundationSchema.ts',
-        'ed9cb12a3141871ddb4da12a19a865dcf11797436e830357193a4c3f3afc8ab6',
+        'bd1c6945cdc02fab9e4555e3c2c2714632bf6ed77a006fd1f321e8df35a59131',
       ],
       [
         'src/services/directory/invitationDeliverySchema.ts',
@@ -132,25 +135,20 @@ describe('D34 migration execution policy', () => {
         'utf8'
       ),
     ])
-    const historicalNames = historicalSql
+    const inTransactionNames = historicalSql
       .flatMap(sql => [...sql.matchAll(/CREATE (?:UNIQUE )?INDEX IF NOT EXISTS (\w+)/g)])
       .map(match => match[1]!)
       .sort()
-    const historicalDefinitions = new Map(
-      historicalSql.flatMap(sql =>
-        [...sql.matchAll(/CREATE (?:UNIQUE )?INDEX IF NOT EXISTS (\w+)[\s\S]*?;/g)].map(
-          match => [match[1]!, match[0]] as const
-        )
-      )
-    )
-    const classified = [
-      ...PR1_ONLINE_INDEX_PLAN.map(index => index.name),
-      ...FRESH_TABLE_INDEXES,
-    ].sort()
+    const plannedNames = PR1_ONLINE_INDEX_PLAN.map(index => index.name).sort()
 
-    expect(historicalNames).toHaveLength(39)
-    expect(classified).toEqual(historicalNames)
-    expect(new Set(classified)).toHaveLength(classified.length)
+    // Only indexes on tables PR1 itself creates are built inside a transaction;
+    // every index on a pre-existing table is built online, and only online.
+    expect(inTransactionNames).toEqual([...FRESH_TABLE_INDEXES].sort())
+    expect(plannedNames).toHaveLength(25)
+    expect(new Set([...plannedNames, ...inTransactionNames])).toHaveLength(39)
+
+    // The planned definitions equal the in-transaction definitions S1d removed
+    // (canonical form at 579ed2986), so an index built by either path is equivalent.
     const canonical = (value: string) =>
       value
         .replace(/\bCONCURRENTLY\b|\bIF NOT EXISTS\b/g, '')
@@ -158,11 +156,13 @@ describe('D34 migration execution policy', () => {
         .replace(/\s+/g, ' ')
         .replace(/\s*([(),])\s*/g, '$1')
         .trim()
-    for (const index of PR1_ONLINE_INDEX_PLAN) {
-      expect(canonical(index.createSql), index.name).toBe(
-        canonical(historicalDefinitions.get(index.name) ?? '')
-      )
-    }
+    const plannedDefinitions = [...PR1_ONLINE_INDEX_PLAN]
+      .sort((left, right) => (left.name < right.name ? -1 : 1))
+      .map(index => `${index.name}\t${canonical(index.createSql)}`)
+      .join('\n')
+    expect(createHash('sha256').update(plannedDefinitions).digest('hex')).toBe(
+      'bc94e081bba8daa3708eb783a2c9abaf64e72fdfdf11d1b74ac6ba1926e834d2'
+    )
   })
 
   it('normalizes PostgreSQL deparser syntax without accepting changed index tokens', () => {

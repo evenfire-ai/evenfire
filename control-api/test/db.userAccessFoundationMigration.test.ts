@@ -216,10 +216,13 @@ describe('user-access foundation migration', () => {
     expect(sql).not.toMatch(/CREATE\s+MATERIALIZED\s+VIEW/i)
   })
 
-  it('adds keyset and reverse indexes before catalog producers are introduced', async () => {
+  it('builds keyset and reverse indexes online, outside the 0130 transaction', async () => {
     const sql = await migrationSql()
-
-    for (const expectedIndex of [
+    const { PR1_ONLINE_INDEX_PLAN } = await import('../src/migrations/pr1OnlineIndexPlan.js')
+    const planned = PR1_ONLINE_INDEX_PLAN.filter(
+      entry => entry.migrationVersion === '0130_user_access_foundation'
+    )
+    const expectedIndexes = [
       'team_members_user_active_idx',
       'user_contexts_context_user_idx',
       'team_contexts_context_team_idx',
@@ -238,11 +241,26 @@ describe('user-access foundation migration', () => {
       'notification_team_catalog_idx',
       'gfs_grants_subject_resource_catalog_idx',
       'gfs_shares_subject_resource_catalog_idx',
-    ]) {
-      expect(sql).toContain(expectedIndex)
-    }
-    expect(sql).toContain('ON workflow_runs (actor_id, run_id)')
-    expect(sql).toContain("ON notification_deliveries ((audience->>'userId'), id)")
+    ]
+    expect(planned.map(entry => entry.name).sort()).toEqual([...expectedIndexes].sort())
+    // Witness: the transaction still creates the PR1-owned tables and their indexes.
+    expect(sql).toContain('CREATE TABLE IF NOT EXISTS external_user_sessions')
+    expect(sql).toContain('CREATE INDEX IF NOT EXISTS operational_relationship_target_idx')
+    for (const expectedIndex of expectedIndexes) expect(sql).not.toContain(expectedIndex)
+
+    const plannedSql = planned.map(entry => entry.createSql).join('\n')
+    expect(plannedSql).toContain('ON workflow_runs (actor_id, run_id)')
+    expect(plannedSql).toContain("ON notification_deliveries ((audience->>'userId'), id)")
+  })
+
+  it('installs no statement-level catalog revision trigger', async () => {
+    const sql = await migrationSql()
+
+    // Witness: the trigger block ran and still installs the row-level triggers.
+    expect(sql).toContain("('team_members', 'team_members_authorization_revision',")
+    expect(sql).toContain('CREATE OR REPLACE FUNCTION authorization_bump_catalog_revision()')
+    expect(sql).not.toMatch(/FOR EACH STATEMENT/i)
+    expect(sql).not.toMatch(/\|\|\s*'_catalog_revision'/)
   })
 
   it('declares exact least-privilege profiles for every new relation', () => {

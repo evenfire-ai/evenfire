@@ -649,6 +649,7 @@ jobs:
             legacySessionExchangeRace.realPostgres.integration \
             migrationExecutionPolicy.realPostgres.integration \
             migrationPreviousImageCompatibility.realPostgres.integration \
+            pr1MigrationLocks.realPostgres.integration \
             routes.externalTeamsFinalAuthority.realPostgres.integration \
             routes.externalTeamsLegacyAdminRevocation.realPostgres.integration \
             services.codexSubscriptionOAuth.realPostgres.integration \

@@ -197,75 +197,20 @@ export async function applyUserAccessFoundationSchema(db: DbClient): Promise<voi
         environment_id, source_family, source_generation, source_type, source_id,
         relationship_type, target_type, target_id, relationship_instance_id
       );
-
-    CREATE INDEX IF NOT EXISTS team_members_user_active_idx
-      ON team_members (user_id, status, team_id) INCLUDE (role, updated_at);
-    CREATE INDEX IF NOT EXISTS user_contexts_context_user_idx
-      ON user_contexts (context_id, user_id);
-    CREATE INDEX IF NOT EXISTS team_contexts_context_team_idx
-      ON team_contexts (context_id, team_id);
-    CREATE INDEX IF NOT EXISTS user_agents_agent_user_idx
-      ON user_agents (agent_name, user_id);
-    CREATE INDEX IF NOT EXISTS team_agents_agent_team_idx
-      ON team_agents (agent_name, team_id);
-    CREATE INDEX IF NOT EXISTS user_workflow_triggers_recipe_user_idx
-      ON user_workflow_triggers (recipe_namespace, recipe_name, user_id);
-    CREATE INDEX IF NOT EXISTS team_workflow_triggers_recipe_team_idx
-      ON team_workflow_triggers (recipe_namespace, recipe_name, team_id);
-    CREATE INDEX IF NOT EXISTS user_workflow_triggers_catalog_key_idx
-      ON user_workflow_triggers (
-        user_id, ((recipe_namespace || '/'::text) || recipe_name)
-      );
-    CREATE INDEX IF NOT EXISTS team_workflow_triggers_catalog_key_idx
-      ON team_workflow_triggers (
-        ((recipe_namespace || '/'::text) || recipe_name), team_id
-      );
-
-    CREATE INDEX IF NOT EXISTS workflow_runs_actor_catalog_idx
-      ON workflow_runs (actor_id, run_id)
-      INCLUDE (recipe_namespace, recipe_name, phase, team_id, usage_team_id)
-      WHERE actor_type = 'user' AND actor_id IS NOT NULL;
-    CREATE INDEX IF NOT EXISTS workflow_runs_team_catalog_idx
-      ON workflow_runs (team_id, run_id)
-      INCLUDE (recipe_namespace, recipe_name, phase, actor_type, actor_id, usage_team_id)
-      WHERE team_id IS NOT NULL;
-    CREATE INDEX IF NOT EXISTS workflow_runs_usage_team_catalog_idx
-      ON workflow_runs (usage_team_id, run_id)
-      INCLUDE (recipe_namespace, recipe_name, phase, actor_type, actor_id, team_id)
-      WHERE usage_team_id IS NOT NULL;
-
-    CREATE INDEX IF NOT EXISTS workflow_approval_user_catalog_idx
-      ON workflow_approval_requests (target_user_id, id)
-      INCLUDE (status, expires_at, recipe_namespace, recipe_name)
-      WHERE target_user_id IS NOT NULL;
-    CREATE INDEX IF NOT EXISTS workflow_approval_team_catalog_idx
-      ON workflow_approval_requests (target_team_id, id)
-      INCLUDE (status, expires_at, recipe_namespace, recipe_name)
-      WHERE target_team_id IS NOT NULL;
-
-    CREATE INDEX IF NOT EXISTS notification_user_catalog_idx
-      ON notification_deliveries ((audience->>'userId'), id)
-      INCLUDE (expires_at, status, event_type)
-      WHERE audience ? 'userId';
-    CREATE INDEX IF NOT EXISTS notification_team_catalog_idx
-      ON notification_deliveries ((audience->>'teamId'), id)
-      INCLUDE (expires_at, status, event_type)
-      WHERE audience ? 'teamId';
-
-    CREATE INDEX IF NOT EXISTS gfs_grants_subject_resource_catalog_idx
-      ON gfs_grants (subject_type, subject_id, resource_id)
-      INCLUDE (id, drive, permissions, inherit);
-    CREATE INDEX IF NOT EXISTS gfs_shares_subject_resource_catalog_idx
-      ON gfs_shares (subject_type, subject_id, resource_id)
-      INCLUDE (id, drive, permissions, include_descendants);
   `)
+  // Indexes on tables that exist before PR1 are built online by
+  // PR1_ONLINE_INDEX_PLAN before this transaction opens, so this transaction
+  // takes no ShareLock on those tables.
 
   await applyAuthorizationRevisionFunctions(db)
   await applyAuthorizationRevisionTriggers(db)
   await applyUserAccessRuntimePrivileges(db)
 }
 
-/** Forward migration for D26A's exact UTF-8 byte ordering and supporting indexes. */
+/**
+ * Forward migration for D26A's exact UTF-8 byte ordering. Its supporting
+ * indexes are built online by PR1_ONLINE_INDEX_PLAN before this transaction.
+ */
 export async function applyCatalogUtf8OrderingSchema(db: DbClient): Promise<void> {
   await db.query(`
     CREATE OR REPLACE FUNCTION catalog_utf8_bytes(value TEXT)
@@ -277,32 +222,6 @@ export async function applyCatalogUtf8OrderingSchema(db: DbClient): Promise<void
     AS $$
       SELECT convert_to(value, 'UTF8');
     $$;
-
-    CREATE INDEX IF NOT EXISTS user_agents_catalog_utf8_idx
-      ON user_agents (user_id, catalog_utf8_bytes(agent_name));
-    CREATE INDEX IF NOT EXISTS team_agents_catalog_utf8_idx
-      ON team_agents (catalog_utf8_bytes(agent_name), team_id);
-    CREATE INDEX IF NOT EXISTS user_contexts_catalog_utf8_idx
-      ON user_contexts (user_id, catalog_utf8_bytes(context_id));
-    CREATE INDEX IF NOT EXISTS team_contexts_catalog_utf8_idx
-      ON team_contexts (catalog_utf8_bytes(context_id), team_id);
-    CREATE INDEX IF NOT EXISTS user_workflow_triggers_catalog_utf8_idx
-      ON user_workflow_triggers (
-        user_id,
-        catalog_utf8_bytes(recipe_namespace || '/' || recipe_name)
-      );
-    CREATE INDEX IF NOT EXISTS team_workflow_triggers_catalog_utf8_idx
-      ON team_workflow_triggers (
-        catalog_utf8_bytes(recipe_namespace || '/' || recipe_name),
-        team_id
-      );
-    CREATE INDEX IF NOT EXISTS operational_relationship_catalog_utf8_target_idx
-      ON operational_resource_relationships (
-        environment_id,
-        target_type,
-        relationship_type,
-        catalog_utf8_bytes(target_id)
-      );
   `)
 }
 
@@ -648,38 +567,31 @@ export async function applyComposableCatalogRevisionSchema(db: DbClient): Promis
     DROP TRIGGER IF EXISTS operational_catalog_source_state_catalog_revision
       ON operational_catalog_source_state;
 
-    DROP TRIGGER IF EXISTS users_authorization_revision ON users;
-    CREATE TRIGGER users_authorization_revision
+    -- CREATE OR REPLACE takes ShareRowExclusiveLock (readers continue); a
+    -- DROP of an existing trigger would take AccessExclusiveLock. The
+    -- *_catalog_revision drops above lock nothing when the trigger is absent.
+    CREATE OR REPLACE TRIGGER users_authorization_revision
       AFTER INSERT OR UPDATE OR DELETE ON users
       FOR EACH ROW EXECUTE FUNCTION authorization_bump_user_row_revision();
-    DROP TRIGGER IF EXISTS teams_authorization_revision ON teams;
-    CREATE TRIGGER teams_authorization_revision
+    CREATE OR REPLACE TRIGGER teams_authorization_revision
       AFTER INSERT OR UPDATE OR DELETE ON teams
       FOR EACH ROW EXECUTE FUNCTION authorization_bump_team_row_revision();
-    DROP TRIGGER IF EXISTS workflow_runs_authorization_revision ON workflow_runs;
-    CREATE TRIGGER workflow_runs_authorization_revision
+    CREATE OR REPLACE TRIGGER workflow_runs_authorization_revision
       AFTER INSERT OR UPDATE OR DELETE ON workflow_runs
       FOR EACH ROW EXECUTE FUNCTION authorization_bump_workflow_run_revision();
-    DROP TRIGGER IF EXISTS workflow_approval_requests_authorization_revision
-      ON workflow_approval_requests;
-    CREATE TRIGGER workflow_approval_requests_authorization_revision
+    CREATE OR REPLACE TRIGGER workflow_approval_requests_authorization_revision
       AFTER INSERT OR UPDATE OR DELETE ON workflow_approval_requests
       FOR EACH ROW EXECUTE FUNCTION authorization_bump_workflow_approval_revision();
-    DROP TRIGGER IF EXISTS notification_deliveries_authorization_revision
-      ON notification_deliveries;
-    CREATE TRIGGER notification_deliveries_authorization_revision
+    CREATE OR REPLACE TRIGGER notification_deliveries_authorization_revision
       AFTER INSERT OR UPDATE OR DELETE ON notification_deliveries
       FOR EACH ROW EXECUTE FUNCTION authorization_bump_notification_revision();
-    DROP TRIGGER IF EXISTS gfs_grants_authorization_revision ON gfs_grants;
-    CREATE TRIGGER gfs_grants_authorization_revision
+    CREATE OR REPLACE TRIGGER gfs_grants_authorization_revision
       AFTER INSERT OR UPDATE OR DELETE ON gfs_grants
       FOR EACH ROW EXECUTE FUNCTION authorization_bump_gfs_authority_revision();
-    DROP TRIGGER IF EXISTS gfs_shares_authorization_revision ON gfs_shares;
-    CREATE TRIGGER gfs_shares_authorization_revision
+    CREATE OR REPLACE TRIGGER gfs_shares_authorization_revision
       AFTER INSERT OR UPDATE OR DELETE ON gfs_shares
       FOR EACH ROW EXECUTE FUNCTION authorization_bump_gfs_authority_revision();
-    DROP TRIGGER IF EXISTS gfs_resources_authorization_revision ON gfs_resources;
-    CREATE TRIGGER gfs_resources_authorization_revision
+    CREATE OR REPLACE TRIGGER gfs_resources_authorization_revision
       AFTER INSERT OR UPDATE OR DELETE ON gfs_resources
       FOR EACH ROW EXECUTE FUNCTION authorization_bump_gfs_resource_revision();
 
@@ -947,32 +859,9 @@ async function applyAuthorizationRevisionTriggers(db: DbClient): Promise<void> {
     END;
     $$;
 
-    DO $$
-    DECLARE table_name TEXT;
-    DECLARE trigger_name TEXT;
-    BEGIN
-      FOREACH table_name IN ARRAY ARRAY[
-        'users', 'teams', 'team_members',
-        'user_contexts', 'team_contexts', 'user_agents', 'team_agents',
-        'user_workflow_triggers', 'team_workflow_triggers',
-        'workflow_runs', 'workflow_approval_requests', 'notification_deliveries',
-        'gfs_resources', 'gfs_grants', 'gfs_shares',
-        'operational_resource_index', 'operational_resource_relationships',
-        'operational_catalog_source_state'
-      ]
-      LOOP
-        trigger_name := table_name || '_catalog_revision';
-        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = trigger_name) THEN
-          EXECUTE format(
-            'CREATE TRIGGER %I AFTER INSERT OR UPDATE OR DELETE ON %I '
-            || 'FOR EACH STATEMENT EXECUTE FUNCTION authorization_bump_catalog_revision()',
-            trigger_name,
-            table_name
-          );
-        END IF;
-      END LOOP;
-    END;
-    $$;
+    -- No *_catalog_revision statement triggers are installed here:
+    -- 0133_composable_catalog_revisions replaces the global catalog revision,
+    -- and dropping an installed trigger there would take AccessExclusiveLock.
 
     REVOKE ALL ON FUNCTION authorization_bump_catalog_revision() FROM PUBLIC;
     REVOKE ALL ON FUNCTION authorization_bump_team_membership_revision() FROM PUBLIC;
