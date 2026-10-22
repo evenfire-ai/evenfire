@@ -1312,6 +1312,12 @@ export function useAppController() {
         selectChatAgent(agentName, options)
         return
       }
+      // The drawer (`keepNavItem`) asked for this held Host with nothing
+      // selected, so its conversation is the one on that surface: keep it while
+      // the verification runs, as for a hold the drawer showed.
+      if (options.keepNavItem && selectedAgentRef.current === null) {
+        interruptedHostRef.current = agentName
+      }
       const scope = authorityScopeRef.current
       void verifyHostAccess(agentName).then(verified => {
         if (

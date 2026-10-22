@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect } from 'react'
+import { type ReactNode, useEffect, useReducer } from 'react'
 import { expect } from 'vitest'
 import { AgentActivityProvider } from '@contexts/AgentActivityContext'
 import { AgentChatProviders } from '@contexts/AgentChatProviders'
@@ -18,8 +18,14 @@ import { useAppController } from '../../../useAppController'
 export async function renderChatActionConsumer(children: ReactNode) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   let current: ReturnType<typeof useAppController> | undefined
+  let bumpOwner = () => {}
   function Probe() {
     useEffect(() => () => queryClient.clear(), [])
+    // App owns the drawer state next to the controller, so a drawer state change
+    // re-renders the controller in the same batch. A child surface's own state
+    // does not; it calls `rerenderController` to model that render.
+    const [, bump] = useReducer((n: number) => n + 1, 0)
+    bumpOwner = bump
     const vm = useAppController()
     current = vm
     const actions = useAgentChatActionsValue(vm)
@@ -75,5 +81,5 @@ export async function renderChatActionConsumer(children: ReactNode) {
     expect(getVm().isAuthenticated).toBe(true)
     expect(getVm().initialExperienceLoading).toBe(false)
   })
-  return { ...utils, getVm, queryClient }
+  return { ...utils, getVm, queryClient, rerenderController: () => bumpOwner() }
 }

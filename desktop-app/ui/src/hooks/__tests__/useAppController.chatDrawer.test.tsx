@@ -14,6 +14,7 @@ import { deferred, serverSessions } from '../domain/__tests__/__fixtures__/catal
 import { renderChatActionConsumer } from '../domain/__tests__/__fixtures__/chatActionConsumerHarness'
 import { ipcGenericForbidden } from '../domain/__tests__/__fixtures__/ipcErrors'
 import { uninstallMockClerum } from '../domain/__tests__/__fixtures__/mockClerum'
+import type { useAppController } from '../useAppController'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 vi.mock('@components/agents/AgentWorkspace', () => ({ AgentWorkspace: () => null }))
@@ -917,4 +918,140 @@ describe('useAppController — chat drawer over a held Host', () => {
     expect(getVm().selectedAgent).toBe(null)
     expect(trail.slice(beforePicker)).toEqual([])
   })
+
+  // T-A29A1-1: a conversation held in the full-screen chat tab has no drawer
+  // marker. Opening the drawer over Files restores that tab's chat with
+  // `keepNavItem`, which verifies the held Host; the drawer must not choose
+  // another Host while the verification runs.
+  it.each(['verified', 'denied'] as const)(
+    'keeps the held Host the drawer restores while its verification is %s',
+    async outcome => {
+      const { clerum, handle } = installAppControllerClerum({
+        agentNames: [HOST_A, HOST_B],
+        agentDisplayByName: namesOf([HOST_A, HOST_B]),
+      })
+      const pendingTranscript = deferred<{ agent: string; chatId: string; turns: never[] }>()
+      const pendingVerify = deferred<ReturnType<typeof serverSessions>>()
+      let transcriptReads = 0
+      let verifyReads = 0
+      clerum.rpc.loadSessionMessages.mockImplementation((host: string) => {
+        if (host === HOST_A && ++transcriptReads === 1) return pendingTranscript.promise
+        return Promise.resolve({ agent: host, chatId: 'saved-chat-a', turns: [] })
+      })
+      clerum.rpc.listSessions.mockImplementation(
+        async (host: string, _team: string, query?: { limit?: number }) => {
+          if (host === HOST_A && query?.limit === 1) {
+            verifyReads++
+            return pendingVerify.promise
+          }
+          return serverSessions([])
+        }
+      )
+
+      const trail: Array<string | null> = []
+      let openDrawer = () => {
+        throw new Error('the surface is not mounted')
+      }
+      let rerenderOwner = () => {
+        throw new Error('the controller is not mounted')
+      }
+      function Surface() {
+        // The harness provides the whole controller vm.
+        const vm = useNavigationContext() as ReturnType<typeof useAppController>
+        const [open, setOpen] = useState(false)
+        const available =
+          vm.activeWorkspaceTab !== undefined && vm.activeWorkspaceTab.kind !== 'chat'
+        const desired = available && open
+        // App writes the drawer's open intent on every render.
+        vm.chatDrawerDesiredRef.current = desired
+        const select = useCallback(
+          (host: string, opts: Parameters<typeof vm.handleSelectChatAgent>[1] = {}) => {
+            vm.clearAppsPicker()
+            vm.handleSelectChatAgent(host, desired ? { ...opts, keepNavItem: true } : opts)
+          },
+          [vm.handleSelectChatAgent, vm.clearAppsPicker, desired]
+        )
+        // App's drawer open over Files: no launch origin, so it restores the
+        // last persisted chat tab.
+        openDrawer = () => {
+          setOpen(true)
+          rerenderOwner()
+          const hasActiveChat = Boolean(vm.selectedAgent && vm.activeChatId)
+          const last =
+            !hasActiveChat && vm.lastActiveChatTabId
+              ? vm.workspaceTabs.tabs.find(
+                  tab => tab.id === vm.lastActiveChatTabId && tab.kind === 'chat'
+                )
+              : undefined
+          if (last?.chat?.agentRef && last.chat.chatId) {
+            vm.handleSelectChatAgent(last.chat.agentRef, {
+              chatId: last.chat.chatId,
+              title: last.title,
+              selectLatest: false,
+              keepNavItem: true,
+            })
+          }
+        }
+        useLayoutEffect(() => {
+          trail.push(vm.selectedAgent)
+        }, [vm.selectedAgent])
+        return vm.navItem === DESKTOP_ROUTES.chat || desired ? (
+          <NavigationContext.Provider value={{ ...vm, handleSelectChatAgent: select }}>
+            <div data-testid={desired ? 'drawer-chat' : 'full-chat'}>
+              <ChatPage scrollContainerRef={{ current: null }} />
+            </div>
+          </NavigationContext.Provider>
+        ) : null
+      }
+
+      const { getVm, queryByTestId, rerenderController } = await renderChatActionConsumer(
+        <Surface />
+      )
+      rerenderOwner = rerenderController
+      await waitFor(() => expect(handle.refreshCatalog).toHaveBeenCalledTimes(2))
+      await waitFor(() => expect(getVm().selectedAgent).toBe(HOST_A))
+      act(() =>
+        getVm().handleSelectChatAgent(HOST_A, { chatId: 'saved-chat-a', selectLatest: false })
+      )
+      await waitFor(() => expect(transcriptReads).toBe(1))
+      expect(queryByTestId('full-chat')).not.toBeNull()
+      await act(async () => {
+        pendingTranscript.reject(await ipcGenericForbidden('rpc:loadSessionMessages'))
+        await pendingTranscript.promise.catch(() => undefined)
+      })
+      // Witnesses: A is held from the full-screen tab, and that tab is the
+      // last chat tab the drawer will restore.
+      await waitFor(() => expect(getVm().isHostAccessBlocked(HOST_A)).toBe(true))
+      await waitFor(() => expect(getVm().selectedAgent).toBe(null))
+      expect(getVm().keepFocusedChat).toBe(true)
+      expect(getVm().heldHosts).toEqual([{ agentRef: HOST_A, label: DISPLAY[HOST_A] }])
+      const last = getVm().lastActiveChatTabId
+      expect(getVm().workspaceTabs.tabs.find(tab => tab.id === last)?.chat).toMatchObject({
+        agentRef: HOST_A,
+        chatId: 'saved-chat-a',
+      })
+
+      act(() => getVm().handleNavSelect(DESKTOP_ROUTES.files))
+      expect(queryByTestId('full-chat')).toBeNull()
+      expect(queryByTestId('drawer-chat')).toBeNull()
+      act(() => openDrawer())
+      // Witness: the restore reached A's verification and the drawer shows.
+      await waitFor(() => expect(verifyReads).toBe(1))
+      expect(queryByTestId('drawer-chat')).not.toBeNull()
+      await settle()
+      const selectedWhilePending = getVm().selectedAgent
+      await act(async () => {
+        if (outcome === 'verified') pendingVerify.resolve(serverSessions([]))
+        else pendingVerify.reject(await ipcGenericForbidden('rpc:listSessions'))
+        await pendingVerify.promise.catch(() => undefined)
+      })
+      await settle()
+      expect(selectedWhilePending, 'opening the drawer must not choose B while restoring A').toBe(
+        null
+      )
+      expect(trail).not.toContain(HOST_B)
+      expect(getVm().selectedAgent).toBe(outcome === 'verified' ? HOST_A : null)
+      if (outcome === 'verified') expect(getVm().activeChatId).toBe('saved-chat-a')
+    }
+  )
 })
