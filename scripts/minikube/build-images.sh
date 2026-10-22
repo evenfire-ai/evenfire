@@ -591,9 +591,9 @@ fi
 # them avoids repeated BuildKit metadata/blob downloads from Docker Hub during
 # pre-gate sync, which can fail on transient Cloudflare/R2 timeouts.
 BUILD_BASE_IMAGES=(
-  "node:24-alpine"
-  "node:24"
-  "node:24-slim"
+  "node:24.22.1-alpine"
+  "node:24.22.1"
+  "node:24.22.1-slim"
   "nginx:1.30.1-alpine"
 )
 

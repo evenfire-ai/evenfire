@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { closeSync, constants, fstatSync, openSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, relative, resolve } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
 import { pinnedSuiteViolations } from './assert-pinned-vitest-suites.mjs'
 
 export function verifySuiteManifest(root, manifest) {
@@ -88,7 +88,7 @@ export function reportViolations(root, manifest, lane, report) {
   return violations
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (import.meta.main) {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
   try {
     const manifest = verifySuiteManifest(
@@ -102,6 +102,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       console.log(
         `Recovery suite contract: ${manifest.publicPostgres.length} public PostgreSQL suites; 2 private exclusions`
       )
+    else if (command === 'public' && !lane && !path)
+      console.log(manifest.publicPostgres.join('\n'))
     else if (command === 'private' && ['local', 'configured', 'all'].includes(lane) && !path)
       console.log(
         (lane === 'all'
@@ -117,7 +119,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       console.log(`Recovery ${lane} report: complete and passing`)
     } else
       throw new Error(
-        'Usage: password-recovery-suite-contract.mjs verify | private local/configured/all | report lane report.json'
+        'Usage: password-recovery-suite-contract.mjs verify | public | private local/configured/all | report lane report.json'
       )
   } catch (error) {
     console.error(error.message)
