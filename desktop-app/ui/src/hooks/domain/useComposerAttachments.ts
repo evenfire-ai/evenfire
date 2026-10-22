@@ -30,6 +30,7 @@ export function mergeComposerImageAttachments(
   const accepted = [...existing]
   let kept = 0
   let duplicates = 0
+  let dropped = 0
   for (const attachment of incoming) {
     // Dedupe BEFORE capacity (R2-L1): a byte-identical copy of an attachment
     // the composer already holds is not "dropped at the cap" — nothing is
@@ -45,13 +46,21 @@ export function mergeComposerImageAttachments(
       duplicates += 1
       continue
     }
-    if (accepted.length >= COMPOSER_MAX_IMAGE_ATTACHMENTS) break
+    if (accepted.length >= COMPOSER_MAX_IMAGE_ATTACHMENTS) {
+      // The cap leaves no room: this attachment is dropped, but the loop
+      // CONTINUES (R4-L1). Stopping here would classify every LATER item as a
+      // drop without looking at it, so a duplicate that arrives after the cap
+      // was reached would be reported as a lost attachment when nothing was
+      // lost at all.
+      dropped += 1
+      continue
+    }
     accepted.push(
       attachment.addedOrder != null ? attachment : { ...attachment, addedOrder: nextOrder() }
     )
     kept += 1
   }
-  return { next: accepted, kept, duplicates, dropped: incoming.length - kept - duplicates }
+  return { next: accepted, kept, duplicates, dropped }
 }
 
 export interface ComposerReferenceMergeOutcome {
@@ -79,18 +88,25 @@ export function mergeComposerReferenceAttachments(
   const accepted = [...existing]
   let kept = 0
   let duplicates = 0
+  let dropped = 0
   for (const attachment of incoming) {
     if (accepted.some(candidate => candidate.id === attachment.id)) {
       duplicates += 1
       continue
     }
-    if (accepted.length >= FILE_REFERENCE_MAX_COUNT) break
+    if (accepted.length >= FILE_REFERENCE_MAX_COUNT) {
+      // The cap leaves no room: dropped, but the loop CONTINUES (R4-L1), so a
+      // duplicate arriving after the cap was reached is still classified as a
+      // duplicate rather than as a lost attachment.
+      dropped += 1
+      continue
+    }
     accepted.push(
       attachment.addedOrder != null ? attachment : { ...attachment, addedOrder: nextOrder() }
     )
     kept += 1
   }
-  return { next: accepted, kept, duplicates, dropped: incoming.length - kept - duplicates }
+  return { next: accepted, kept, duplicates, dropped }
 }
 
 interface UseComposerAttachmentsParams {

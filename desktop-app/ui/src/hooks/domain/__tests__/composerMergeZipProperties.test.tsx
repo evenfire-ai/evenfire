@@ -243,6 +243,78 @@ describe('composer merge invariants (R1-M6)', () => {
       { numRuns: PROPERTY_RUNS }
     )
   })
+
+  it('image merge: a duplicate arriving AFTER the cap is reached is a duplicate (R4-L1)', () => {
+    // The composer is full. The payload's FIRST item is unique — it is
+    // dropped — and the SECOND is a byte-identical copy of an image the
+    // composer already holds. Nothing was lost by the second item, so it is a
+    // DUPLICATE, not another drop: stopping the scan at the cap would
+    // classify it without looking at it and report a lost attachment.
+    const held = Array.from({ length: COMPOSER_MAX_IMAGE_ATTACHMENTS }, (_, index) => ({
+      ...({} as ComposerImageAttachment),
+      id: `held-${index}`,
+      name: `held-${index}.png`,
+      mimeType: 'image/png' as const,
+      dataBase64: `aGQt${index}`,
+      sizeBytes: index,
+      previewDataUrl: `data:image/png;base64,aGQt${index}`,
+    }))
+    const outcome = mergeComposerImageAttachments(held, [
+      {
+        id: 'unique',
+        name: 'unique.png',
+        mimeType: 'image/png' as const,
+        dataBase64: 'dW5pcXVl',
+        sizeBytes: 7,
+        previewDataUrl: 'data:image/png;base64,dW5pcXVl',
+      },
+      // A byte-identical copy of the FIRST held image.
+      {
+        id: 'held-0',
+        name: 'held-0.png',
+        mimeType: 'image/png' as const,
+        dataBase64: 'aGQt0',
+        sizeBytes: 0,
+        previewDataUrl: 'data:image/png;base64,aGQt0',
+      },
+    ])
+    expect(outcome.kept).toBe(0)
+    expect(outcome.duplicates).toBe(1)
+    expect(outcome.dropped).toBe(1)
+    expect(outcome.next).toEqual(held)
+  })
+
+  it('reference merge: a duplicate arriving AFTER the cap is reached is a duplicate (R4-L1)', () => {
+    const held = Array.from({ length: FILE_REFERENCE_MAX_COUNT }, (_, index) => ({
+      ...({} as ComposerReferenceAttachment),
+      id: `held-${index}`,
+      type: 'plugin' as const,
+      namespace: 'ns',
+      name: `held-${index}`,
+      label: `held ${index}`,
+    }))
+    const outcome = mergeComposerReferenceAttachments(held, [
+      {
+        id: 'unique',
+        type: 'plugin' as const,
+        namespace: 'ns',
+        name: 'unique',
+        label: 'unique',
+      },
+      // A copy of the FIRST held reference.
+      {
+        id: 'held-0',
+        type: 'plugin' as const,
+        namespace: 'ns',
+        name: 'held-0',
+        label: 'held 0',
+      },
+    ])
+    expect(outcome.kept).toBe(0)
+    expect(outcome.duplicates).toBe(1)
+    expect(outcome.dropped).toBe(1)
+    expect(outcome.next).toEqual(held)
+  })
 })
 
 describe('zip path normalization invariants (R1-M6)', () => {
