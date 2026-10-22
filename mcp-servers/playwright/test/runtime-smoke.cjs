@@ -9,41 +9,15 @@ const fs = require('node:fs')
 const { createServer } = require('node:http')
 const net = require('node:net')
 const { setTimeout: delay } = require('node:timers/promises')
+// Reuse the SDK shipped in this pinned upstream image. Its HTTP client handles
+// the server's heartbeat and SSE lifecycle; no extra package is installed.
+const {
+  Client,
+  PingRequestSchema,
+  StreamableHTTPClientTransport,
+} = require('/app/node_modules/playwright-core/lib/mcpBundle')
 
 const outputDir = '/tmp/playwright-runtime-smoke'
-
-// MCP permits JSON or SSE responses. The image bundles its server SDK inside
-// Playwright, so use native fetch for its public HTTP contract instead of
-// depending on an unexported client package.
-async function responseMessage(response, id) {
-  if (response.headers.get('content-type')?.startsWith('application/json')) return response.json()
-  assert.match(response.headers.get('content-type') ?? '', /text\/event-stream/)
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffered = ''
-  try {
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) throw new Error('MCP stream ended without the response')
-      buffered = (buffered + decoder.decode(value, { stream: true })).replace(/\r\n/g, '\n')
-      let boundary
-      while ((boundary = buffered.indexOf('\n\n')) !== -1) {
-        const frame = buffered.slice(0, boundary)
-        buffered = buffered.slice(boundary + 2)
-        const data = frame
-          .split('\n')
-          .filter(line => line.startsWith('data:'))
-          .map(line => line.slice(5).trimStart())
-          .join('\n')
-        if (!data) continue
-        const message = JSON.parse(data)
-        if (message.id === id) return message
-      }
-    }
-  } finally {
-    await reader.cancel()
-  }
-}
 
 async function portReady(port) {
   for (let attempt = 0; attempt < 40; attempt += 1) {
@@ -108,54 +82,29 @@ async function main() {
   server.once('error', error => {
     spawnError = error
   })
-  let session,
-    protocol,
-    sequence = 0
-  const request = async (method, params, notification = false) => {
-    const id = notification ? undefined : ++sequence
-    const response = await fetch('http://127.0.0.1:8931/mcp', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json, text/event-stream',
-        ...(session ? { 'Mcp-Session-Id': session } : {}),
-        ...(protocol ? { 'MCP-Protocol-Version': protocol } : {}),
-      },
-      body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
-      signal: AbortSignal.timeout(15_000),
-    })
-    assert.ok(response.ok, `MCP ${method}: HTTP ${response.status}`)
-    session = response.headers.get('mcp-session-id') || session
-    if (notification) {
-      await response.body?.cancel()
-      return
-    }
-    const message = await responseMessage(response, id)
-    assert.equal(message.id, id)
-    assert.equal(message.error, undefined, JSON.stringify(message.error))
-    return message.result
-  }
+  const client = new Client({ name: 'runtime-smoke', version: '1.0.0' })
+  let serverPings = 0
+  client.setRequestHandler(PingRequestSchema, async () => {
+    serverPings += 1
+    return {}
+  })
   const text = result =>
     result.content
       .filter(row => row.type === 'text')
       .map(row => row.text)
       .join('\n')
   const call = async (name, args = {}) => {
-    const result = await request('tools/call', { name, arguments: args })
+    const result = await client.callTool({ name, arguments: args }, undefined, { timeout: 15_000 })
     assert.notEqual(result.isError, true, `${name}: ${text(result)}`)
     return result
   }
   try {
     await portReady(8931)
     if (spawnError) throw spawnError
-    const initialized = await request('initialize', {
-      protocolVersion: '2025-03-26',
-      capabilities: {},
-      clientInfo: { name: 'runtime-smoke', version: '1.0.0' },
+    await client.connect(new StreamableHTTPClientTransport(new URL('http://127.0.0.1:8931/mcp')), {
+      timeout: 15_000,
     })
-    protocol = initialized.protocolVersion
-    await request('notifications/initialized', {}, true)
-    const tools = new Set((await request('tools/list', {})).tools.map(tool => tool.name))
+    const tools = new Set((await client.listTools()).tools.map(tool => tool.name))
     for (const name of [
       'browser_navigate',
       'browser_snapshot',
@@ -169,6 +118,10 @@ async function main() {
     assert.match(before, /waiting/)
     const button = /button "Run check" \[ref=([^\]]+)\]/.exec(before)
     assert.ok(button, before)
+    // The upstream server closes clients that miss its five-second ping
+    // deadline. Exercise the same browser session beyond that deadline.
+    await delay(6000)
+    assert.ok(serverPings >= 2, `Expected recurring server pings, received ${serverPings}`)
     await call('browser_click', { element: 'Run check button', ref: button[1] })
     assert.match(text(await call('browser_snapshot')), /check completed/)
     const agent = text(await call('browser_evaluate', { function: '() => navigator.userAgent' }))
@@ -187,11 +140,14 @@ async function main() {
         browserVersion: browserVersion[0],
         navigation: true,
         realClick: true,
+        serverPings,
+        sessionSurvivedHeartbeatDeadline: true,
         screenshotBytes: screenshot.length,
         screenshotSha256: createHash('sha256').update(screenshot).digest('hex'),
       })
     )
   } finally {
+    await client.close()
     server.kill('SIGTERM')
     fixture.closeAllConnections()
     await new Promise(resolve => fixture.close(resolve))
