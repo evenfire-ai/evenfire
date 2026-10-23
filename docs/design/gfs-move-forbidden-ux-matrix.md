@@ -6,6 +6,11 @@ panel (Control UI parity noted where it differs)
 **Goal:** every forbidden-move case tells the user WHAT happened and WHY — visually and
 programmatically — instead of the current silent refusal.
 
+**Audit baseline:** `966a3d647`, audited 2026-10-23 against the checked-out
+sources. Line receipts below describe that baseline, before implementation.
+The earlier live example is handoff evidence; this source audit did not access
+or mutate the dev cluster.
+
 ---
 
 ## 1. Why it is silent today (receipts)
@@ -17,11 +22,20 @@ The deny **reason is computed and then thrown away** at the UI layer:
 | Structure decision | `packages/gfs-interaction-policy/dragPolicy.cjs` → `decideDragStructure` | returns `{kind:'deny', reason:'self'│'cross-drive'│'root-source'│'same-parent'│'descendant'}` or `server-check-required` |
 | Authority decision | `dragPolicy.cjs` → `decideDragAuthority` | returns `{kind:'deny', reason:'destination-write'│'source-write'│'source-delete'}`, `checking`, `unavailable`, `observed-allowed` |
 | Adjudication | `desktop-app/ui/src/gfs/dragAdjudication.ts` | maps probes/session loss to `session-lost`, `unavailable`, `target-unavailable`, `source-location-unknown` |
-| Paint | `FileExplorerTree/index.tsx:314` | row gets `data-drop-state={allowed│denied│checking│unavailable}` — **reason collapsed to a boolean-ish state** |
-| Speech | `dropVerdict.ts` (RP-026) | generic only: *"You cannot move into {target}."* — no reason |
-| CSS | `styles.css:1987-2010` | **Tree:** `denied` only de-emphasizes the label (1999) — nearly invisible. **Files grid:** `checking`/`allowed` styles exist; **`denied` has NO style at all** → this is the "no blue highlight and no idea why" bug |
+| Paint | `desktop-app/ui/src/components/SidebarNav/FileExplorerTree/index.tsx:314-315` | row gets `data-drop-state={allowed│denied│checking│unavailable}` — **reason collapsed to a boolean-ish state** |
+| Speech | `desktop-app/ui/src/gfs/dropVerdict.ts:14-27` (RP-026) | generic only: *"You cannot move into {target}."* — no reason |
+| CSS | `desktop-app/ui/src/styles.css:1987-2011` | **Tree:** `denied` only de-emphasizes the label (1999) — nearly invisible. **Files grid:** `checking`/`allowed` styles exist; **`denied` has NO style at all** → this is the "no blue highlight and no idea why" bug |
 
-**The two symptoms you hit are exactly this:**
+`GfsDropVerdict` already carries denied/unavailable reasons in
+`desktop-app/ui/src/gfs/dragSession.types.ts:61-65`. Both surfaces discard
+them when storing only `verdict.state` (tree `:663-669`, FilesPage
+`:1284-1287`). `moveDenialMessage` already exists in `moveCommit.ts:360`,
+but its copy is generic and both callers toast every refusal as an error.
+Self-hover is skipped entirely (tree `:650`, FilesPage `:1339`). Both use
+`dropEffect=none` for denied hover (tree `:675`, FilesPage `:1364`), which
+can prevent Chromium from delivering the refused drop at all.
+
+**The two symptoms are:**
 - Sidebar tree: `denied` ≈ invisible (label dimming only) → "nothing happens".
 - Files panel: `allowed` paints the blue highlight; `denied` has no CSS → no highlight,
   no explanation.
@@ -56,63 +70,70 @@ on 409).
 
 | # | Reason (code) | Trigger — what the user did | Underlying rule | Sidebar tree feedback | Files panel feedback | Persistent message (drop) | SR announcement |
 |---|---|---|---|---|---|---|---|
-| A1 | `self` | Drop onto the dragged item itself | `dragPolicy.cjs:73` | row `denied` + tooltip | row `denied` | Banner/toast: "You dropped {name} onto itself. Pick a destination folder." | "You cannot move {name} into itself." |
-| A2 | `cross-drive` | Drop across drives | `dragPolicy.cjs:76` | same as A1 | same | "Moving between drives isn't supported." | same, spoken |
-| A3 | `root-source` | Source is the drive root (or virtual root item that is physically root) | `dragPolicy.cjs:79` | refused at dragstart: don't start a session, or show `denied` on all targets | same | "This location is the top level — it can't be moved." | spoken |
-| A4 | `same-parent` | Target IS the physical parent (no-op move) | `dragPolicy.cjs:84` + path form `:118` | row `denied` | row `denied` | "{name} is already in {target}." — **NOT an error tone; info**. Critical with the flat sidebar: e.g. `Assets` physically lives in `Product`, so dragging Assets→Product is a no-op even though it *looks* like a real move | "{name} is already in {target}." |
-| A5 | `descendant` | Folder dropped into its own subtree | `dragPolicy.cjs:92` | row `denied` on the whole subtree | highlight suppressed | "You can't move {name} into a folder inside itself." | spoken |
+| A1 | `self` | Drop onto the dragged item itself | `dragPolicy.cjs:59` | row `denied` + tooltip | row `denied` | Banner/toast: "You dropped {name} onto itself. Pick a destination folder." | "You cannot move {name} into itself." |
+| A2 | `cross-drive` | Drop across drives | `dragPolicy.cjs:60` | same as A1 | same | "Moving between drives isn't supported." | same, spoken |
+| A3 | `root-source` | Source is the drive root (or virtual root item that is physically root) | `dragPolicy.cjs:61-62` | show `denied` on targets when the source is observed to be root | same | "This location is the top level — it can't be moved." | spoken |
+| A4 | `same-parent` | Target IS the physical parent (no-op move) | `dragPolicy.cjs:64-65` + path form `:118` | row `denied` | row `denied` | "{name} is already in {target}." — **NOT an error tone; info**. Critical with the flat sidebar: e.g. `Assets` physically lives in `Product`, so dragging Assets→Product is a no-op even though it *looks* like a real move | "{name} is already in {target}." |
+| A5 | `descendant` | Folder dropped into its own subtree | `dragPolicy.cjs:73` | row `denied` on the whole subtree | row `denied`, no blue | "You can't move {name} into a folder inside itself." | spoken |
 | A6 | `destination-write` | No `write` on destination (e.g. read-only share) | `dragPolicy.cjs:146` — checked FIRST (surface the user acts on) | row `denied` — this is the case where the blue highlight must NOT appear | row `denied`, no blue | "You don't have permission to move items into {target}. You need edit access to the destination folder." | spoken with reason |
-| A7 | `source-write` | No `write` on the physical **source parent** | `dragPolicy.cjs:147` | row `denied` | row `denied`, no blue | "You can move {name} within places you manage, but not out of its current folder — you don't have edit access to the folder that contains it." | spoken |
-| A8 | `source-delete` | `write` but no `delete` on the source parent | `dragPolicy.cjs:148` | row `denied` | row `denied`, no blue | "Removing {name} from its current folder needs delete access there. You have edit, but not delete." | spoken |
+| A7 | `source-write` | No `write` on the physical **source parent** | `dragPolicy.cjs:147` | row `denied` | row `denied`, no blue | "You can’t move {name} out of its current folder because you don’t have edit access to the folder that contains it." | spoken |
+| A8 | `source-delete` | `write` but no `delete` on the source parent | `dragPolicy.cjs:148` | row `denied` | row `denied`, no blue | "You can’t move {name} out of its current folder because you don’t have delete access to the folder that contains it." | spoken |
 | A9 | `checking` | Bits not yet known (cold hover) | `dragPolicy.cjs:140` | neutral spinner-tint row | neutral | none (transient) | "Checking whether you can move into {target}…" |
-| A10 | `unavailable` / `target-unavailable` / `source-location-unknown` | Probe failed (network/5xx); hover budget exhausted | `dragAdjudication.ts:58-98` | row `unavailable` — must NOT look denied | row `unavailable` | "EvenDrive couldn't verify the move just now. Check your connection and try again — the move is still allowed on drop." (drop-time check remains available by contract) | spoken |
+| A10 | `unavailable` / `target-unavailable` / `source-location-unknown` | Required drop probe failed (network/5xx/429/404); exhausted hover budget stays `checking` | `dragAdjudication.ts:58-98` | failed cold hover currently remains `checking`; any `unavailable` paint must NOT look denied | row `unavailable` | "EvenDrive couldn’t verify this move. Check your connection and try again." For target disappearance: "This folder is no longer available." For an unknown source location: "EvenDrive cannot verify this item’s current location. Refresh and try again." Drop checks remain available after inconclusive hover; a failed required drop check refuses admission. | spoken |
 | A11 | `session-lost` | 401 during probe | `dragAdjudication.ts:58` | gesture ends; re-auth prompt | same | "Your session ended. Sign in again to continue moving files." (session revoked per med-probe-401) | spoken |
-| A12 | `server-check-required` | Ancestry unproved (grants start below root) | `dragPolicy.cjs:121` | row `checking` — NOT denied; stays landable | neutral | none at hover; drop proceeds to server verdict (Phase B) | "Checking…" |
+| A12 | `server-check-required` | Ancestry unproved (grants start below root) | `dragPolicy.cjs:82` | row `checking` — NOT denied; stays landable | neutral | none at hover; drop proceeds to server verdict (Phase B) | "Checking…" |
 
 ---
 
 ## 4. Phase-B matrix — commit-time outcomes (after "Move" confirm)
 
-Source of truth: `moveCommit.ts` `presentMoveCommitOutcome` (rev-2 §8 toasts) +
-`dragAdjudication.ts` verdict reasons.
+Source of truth: `desktop-app/ui/src/gfs/moveCommit.ts`
+`commitGfsMove` (`:132`), `toastMoveOutcome` (`:323`) and
+`desktop-app/ui/src/gfs/moveCommitRunner.ts` `runGfsMoveCommit` (`:63`).
+There is no `presentMoveCommitOutcome` symbol. The table records the required
+user-facing semantics; the notes distinguish existing behavior and safe copy
+limits from proposed improvements.
 
 | # | Outcome | Trigger | Message (toast) | Tone |
 |---|---|---|---|---|
 | B1 | `committed` (+ optional `renamedTo`) | PATCH 200 | "Moved {source} to {destination}." / "…as {renamed}." | success |
 | B2 | numbered-name conflict resolved | 409 → ladder accepted | same as B1 with "as {renamed}" | success |
-| B3 | conflict ladder exhausted | 409 × N > limit | "A name collision couldn't be resolved for {source} in {destination}. Try renaming first." | error |
-| B4 | source vanished (404 on source re-resolve/dispatch) | rp-027 | "{source} no longer exists — it may have been deleted or moved by someone else." | error |
-| B5 | destination vanished (404 on destination) | rp-027 | "The destination folder no longer exists." | error |
-| B6 | server structural deny (cycle/kind/parent-permission re-check) | PATCH 403/400 | distinct copy per status; if parent-permission: same wording as A7/A8 + "the change was not made" | error |
-| B7 | transport loss, outcome unknown | fetch threw after dispatch | "The connection dropped while moving {source}. EvenDrive is checking whether the move completed…" then verify-by-identity → converge to B1 or "couldn't confirm; refresh Files" | warning→info |
-| B8 | 5xx | server error | "EvenDrive couldn't complete the move. Nothing was changed. Try again." | error |
-| B9 | `session-lost` | 401 at commit | "Your session ended. Sign in again — the move was not completed." | error |
+| B3 | conflict ladder exhausted | 409 × N > limit | Existing bounded-ladder result: "The destination changed. Refresh it or choose another folder." Without rename consent: choose another folder or use Move to rename if permitted. | error |
+| B4 | source vanished (404 on source re-resolve/dispatch) | rp-027 | "EvenDrive cannot verify this item’s current location. Refresh and try again." (404 may also mean hidden; do not claim deletion.) | error |
+| B5 | destination vanished (404 on destination) | rp-027 | "This folder is no longer available." (source re-resolve distinguishes the sides; do not claim deletion.) | error |
+| B6 | server structural deny (cycle/kind/parent-permission re-check) | PATCH 403/400 | 400: "The server rejected this destination. Refresh and choose a different folder." 403: explain that permission could not be confirmed; do not invent which parent bit is missing without fresh proof. | error |
+| B7 | transport loss, outcome unknown | fetch threw after dispatch | Existing verification resolves by identity once → B1 or "Couldn’t confirm the move. Refresh before trying again." Do not repeat PATCH. An in-progress notice may precede this verification. | warning when unconfirmed; success if verified |
+| B8 | 5xx | server error | Verify by identity → B1 or "Couldn’t confirm the move. Refresh before trying again." A 5xx does not prove nothing changed. | error |
+| B9 | `session-lost` | 401 at commit | Persistent revoked-session surface: "Your session ended. Sign in again to continue moving files." Do not claim a dispatched move failed if its outcome is unknown. | error |
 | B10 | user stopped / canceled dialog | Stop / Esc / backdrop | silent or "Move canceled." (per PR's stop-notice pattern) | info |
 
 ---
 
 ## 5. Visual spec (what to change)
 
-1. **Carry the reason**: extend `GfsDropVerdict` (dragSession.types) with `reason`;
-   `data-drop-reason` attribute next to `data-drop-state` (FileExplorerTree:314, grid
+1. **Carry the reason**: preserve the existing `GfsDropVerdict.reason` instead of storing only its state;
+   `data-drop-reason` attribute next to `data-drop-state` (FileExplorerTree:315, grid
    rows). Tests in `dropVerdict`/RP-026 keep their one-wording-per-verdict contract by
-   keying on reason, not surface.
+   keying on reason, not surface. Add a shared browser-safe presenter for message and tone; reuse it for hover tooltips, SR and refused drops.
 2. **Give `denied` a real treatment in BOTH surfaces** (today: tree = label dim only,
    grid = nothing):
-   - Tree row + grid row: red/neutral border tint (match existing `allowed` blue
-     treatment, not-blue), reduced-opacity drag ghost.
+   - Tree row + grid row: red/neutral inset border and background tint; retain readable labels and existing source-opacity treatment.
    - **Do NOT** use error-red for `same-parent` (A4: info) or `unavailable` (A10:
      warning) — reasons map to tones: deny=error, no-op=info, unknown=warning.
-3. **Drop-time persistent message**: on a refused DROP, show the reason message from
-   the matrix as a toast (reuse `pushToast` from `presentMoveCommitOutcome`) or the
+3. **Drop-time persistent message**: keep internal directory drops deliverable
+   (`preventDefault`, `dropEffect='move'`) even for observed denial, so release
+   can present the reason. Admission still refuses the mutation. Remove the
+   self-hover early return so self drops also paint and explain their reason.
+   On a refused DROP, show the reason message from
+   the matrix as a toast (reuse the application `pushToast` stack) or the
    `StatusBanner` component — banners for `session-lost` (persistent), toasts for
    one-shot denies. Hover-time stays row-tint-only (no toast spam while dragging over
    many rows).
 4. **SR**: extend `gfsDropVerdictAnnouncement(state, target)` →
-   `(state, target, reason)`; on drop, announce the full reason sentence (RP-026
+   `(state, target, reason, sourceName?)`; on drop, announce the full reason sentence (RP-026
    contract: same wording per reason on every surface).
-5. **Blue highlight rule stays**: only `observed-allowed` (and `checking`→neutral)
-   paints blue. The fix is not to show blue more — it's to SAY WHY when it isn't blue.
+5. **Blue highlight rule stays**: only `observed-allowed` paints blue;
+   `checking` is neutral, and unknown/unavailable uses warning tokens. The fix is not to show blue more — it's to SAY WHY when it isn't blue.
 
 ## 6. Plain-language copy rules (match PR's existing tooltip style)
 
@@ -123,7 +144,32 @@ Source of truth: `moveCommit.ts` `presentMoveCommitOutcome` (rev-2 §8 toasts) +
 - No-op moves (A4) get info tone + "already there", never "cannot".
 - Unknown (A10) never implies forbidden — say "couldn't verify, try again".
 
-## 7. Manual test matrix (maps to your PR checklist lane 1/3)
+## 7. Implementation and verification handoff
+
+Frontend-only: implement Desktop tree + Files grid feedback; leave Control UI
+breadcrumb work and `docs/design/gfs-breadcrumb-drop-move.md` to their owner.
+No backend, deployment, or server-contract edits. Read `AGENTS.md`,
+`desktop-app/ui/AGENTS.md` and its referenced style documents first.
+
+Use Node 24.22.1 (`/home/pal/.nvm/versions/node/v24.22.1/bin`) and prefix
+**every npm invocation** with `UV_USE_IO_URING=0`. Before counting Desktop
+validation, verify `node --version` and `npm run verify:electron`. Required:
+Desktop `npm run build` (main + renderer), Desktop `npm test`; Control UI
+`npm run build` only if its parity surface changes. Cover reason retention,
+state-to-reason changes, no-op info tone, missing source/destination access,
+self/descendant, unknown warning and the browser drop-delivery contract with
+focused regression tests. Preserve session/gesture ownership checks and
+cold-hover network budgets. Keep session loss visible even when revocation
+invalidates the gesture before the normal drop callback resumes.
+
+Commit only owned paths in logical conventional commits. Do not stage
+`control-ui/next-env.d.ts`, `profile-ui/next-env.d.ts`, generated output or
+`desktop-app/package.json` churn. The checkbox reset is preserved separately
+in `bf469d7d8`. Other agents may commit on this same branch; never reset or
+amend their work. Report tests, commit IDs and any unresolved limitation to
+the supervisor for review before push.
+
+## 8. Manual test matrix (maps to your PR checklist lane 1/3)
 
 - ☐ A4 drag `Assets` onto `Product` (physically already inside) → info "already there", NOT red
 - ☐ A7 drag `live tests` onto any folder → refused drop + banner naming "the folder that contains it"
