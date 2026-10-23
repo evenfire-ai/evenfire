@@ -1,0 +1,128 @@
+# Connector Secret reuse: implementation plan and audit
+
+Status: plan reviewed before implementation. Baseline: `55e2ad8f2` on
+`feat/ux-improvements-32`, after pulling the latest remote changes.
+
+## Goal and scope
+
+This explanation and implementation reference is for frontend maintainers and
+reviewers. Users must be able to create and manage reusable connector Secrets,
+select one when creating a connector, and change the Secret assigned to an
+existing credential-bearing connector. All implementation changes are limited
+to Control UI. Backend services, API contracts, CRDs, deployments, and Desktop
+are outside this change.
+
+## Current flow and findings
+
+1. **Manage Secrets — source-reviewed, existing behavior retained.**
+   `SecretsTable` combines provisioned Secret metadata with connector
+   `spec.envSecret.name` references. The Secret editor supports keys and env
+   files. Listing returns names, key names, and optional identity metadata,
+   never credential values.
+2. **Create connector — blocked for reuse.**
+   `CreateMcpServerForm` only offers a new Kubernetes Secret or no credentials.
+   Its validation requires a value for every mapping and always creates the
+   Secret. An existing Secret cannot be selected.
+3. **Attach to a connector without a reference — already supported.**
+   `AttachConnectorCredentials` can create or select a Secret. This structural
+   action explains the reported “No credentials required” workaround: the
+   eligibility guard rejects every connector that already has `envSecret`.
+4. **Edit a credential-bearing connector — blocked for reassignment.**
+   The credentials tab only renders the set/rotate editor. That editor changes
+   values in the currently referenced Secret; it cannot assign another one.
+
+Screenshots `01-before-create.png` and `02-before-edit.png` were captured and
+inspected in this run under the ignored
+`.local-notes/infra/runs/connector-secrets-ui/` directory. They show the actual
+creation and edit components with project CSS and synthetic API metadata in a
+local frontend harness. They establish visible frontend behavior, not deployed
+backend behavior or a complete live product audit. No authenticated live
+product tab was available. Secret management is source-reviewed only.
+
+Accessibility risks: existing creation mapping inputs rely on placeholders;
+new controls need explicit labels. Loading, empty, error, retry, validation,
+keyboard selection, and pending states must remain understandable. Screenshots
+alone do not establish accessibility compliance.
+
+## Existing integration contract
+
+No backend change is needed for static Secret references:
+
+- `listMcpSecrets()` lists the same provisioned connector Secrets used by
+  Secrets → Connectors, including stored key names and optional UID.
+- `createMcpServer()` accepts `spec.envSecret = { name, keys }`.
+- `updateMcpServer()` accepts a changed reference and caller
+  UID/resourceVersion. Preserve the complete latest spec and update only
+  `envSecret`; reject concurrent changes instead of replaying stale settings.
+- Existing HCC reconciliation resolves the Secret and its keys, injects them
+  into the workload, and observes the new generation. Retain the bounded
+  `useRolloutWait` verification; a saved reference alone is not readiness.
+
+These conclusions come from read-only inspection of `lib/api.ts`,
+`control-api/src/routes/admin/resources.ts`, and the previously reviewed
+contract in [connector-credentials-attach.md](connector-credentials-attach.md).
+The earlier plan covers keyless attachment; this document extends that scope
+without removing its ownership, concurrency, cleanup, or readiness rules.
+
+OAuth uses a separate credential contract. Marketplace OAuth installation
+already supports an existing Secret reference. The remote OAuth wizard creates
+broker-managed client credentials, not an `envSecret` mapping. Do not rewrite
+OAuth through this static credential flow. Static remote connectors retain
+their existing authentication header placeholders; assigning a Secret does
+not invent authentication headers.
+
+## Implementation sequence
+
+1. **Creation and shared reference selection.** Add “Use an existing Secret”
+   alongside the new-Secret and keyless choices. Load metadata with an explicit
+   loading/error/retry/empty state. Select stored keys and map them to named
+   environment variables. Reuse mapping validation for names, duplicates,
+   runtime-reserved variables, and plain-env collisions. Never request values
+   for existing keys. Before any creation-side mutation, refresh the Secret
+   listing and verify its identity and selected keys. Skip Secret creation,
+   updates, and rollback deletion in reference mode. Preserve the existing
+   new-Secret transaction and cleanup behavior.
+2. **Existing connector reassignment.** Add a distinct “Change assigned Secret”
+   action beside the set/rotate surface for eligible managed, enabled, static
+   connectors with a valid reference. Open an existing-Secret assignment form
+   with explicit cancel. Keep value rotation separate. Preserve current
+   environment-variable destinations when choosing replacement keys; do not
+   silently drop required mappings. Recheck the displayed connector snapshot,
+   selected Secret identity/keys, ownership, and resource version before save.
+   Save only the reference and never mutate or delete either shared Secret.
+   Show old and new names in restart confirmation. Preserve egress interlocks,
+   spec-save recovery, and bounded readiness verification.
+3. **Connect management to assignment.** Explain in Secrets → Connectors that
+   reusable Secrets are assigned from a connector's Credentials tab or during
+   creation. Use canonical route builders for any navigation. Preserve current
+   key/env-file management and usage reporting.
+4. **Verify and record.** Test creation reuse, multiple connector references,
+   replacement including missing old Secrets, missing/replaced selected
+   Secrets, missing keys, load failures, conflicts, unchanged assignments,
+   spec preservation, no Secret writes/deletes on reuse, and rollout recovery.
+   Run focused regressions, Control UI typechecking, applicable style checks,
+   and the full UI suite/build when dependencies permit. Inspect regular and
+   narrow viewport screenshots with synthetic metadata. Record live-runtime
+   limits explicitly. Commit and push the reviewed plan, implementation
+   milestones, and final evidence to the current branch.
+
+## Plan audit before implementation
+
+| Review question | Finding and resolution |
+| --- | --- |
+| Is the scope frontend-only? | Yes. Read backend contracts as evidence; change only Control UI and this document. |
+| Does the plan address both reported dead ends? | Yes: existing-secret selection at creation and reassignment for an existing `envSecret`. |
+| Could reuse overwrite or delete shared credentials? | Reference-only paths must have no Secret create/update/delete calls, including error cleanup. |
+| Could reassignment clobber a concurrent edit? | Compare the displayed spec with a fresh snapshot and use live UID/resourceVersion for the final write. |
+| Could a key rename silently break authentication? | Preserve each existing destination and require an explicit replacement key when it is absent in the new Secret. |
+| Is missing-secret repair preserved? | Keep the current set/rotate editor and offer change-assignment independently of stale Secret status. |
+| Can a new reference be mistaken for a ready connector? | Keep saved and ready states separate; use existing generation-correlated polling. |
+| Are all credential types interchangeable? | No. Keep OAuth and recipe ownership boundaries and explain static remote placeholder limitations. |
+| Can visual evidence prove live integration? | No. Local synthetic screenshots plus frontend tests verify UI contracts; deployed runtime remains a separate lane. |
+
+Audit verdict: proceed with the above constraints. No user decision or backend
+work is needed for the planned static credential fixes.
+
+## Implementation and validation record
+
+To be completed as implementation milestones are verified.
