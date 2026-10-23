@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
-import { type ReactNode, useEffect, useLayoutEffect, useReducer } from 'react'
+import { type ReactNode, createElement, useEffect, useLayoutEffect, useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, render, waitFor } from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '@clerum/desktop-app-links'
+import type { WorkspaceTabStripProps } from '@components/WorkspaceTabStrip/types'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
 import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
@@ -26,6 +28,7 @@ import {
   setAppTabSavedRoutePath,
 } from '@lib/workspaceTabs'
 import { mapKindToRoute, settingsSectionForRoute } from '@lib/workspaceTabsRoute'
+import type { FilesPageProps } from '@pages/FilesPage.types'
 import { App } from '@/App'
 import type { GfsResourceDeepLinkEnvelope, SandboxUiDeepLinkEnvelope } from '@/App.types'
 import type { DesktopCommandId } from '../../../src/desktopCommands'
@@ -142,15 +145,11 @@ const sandboxUiPageHarness = vi.hoisted(() => ({
   },
 }))
 const filesPageHarness = vi.hoisted(() => ({
-  props: null as null | {
-    pendingGfsDeepLink?: { id: number; uri: string } | null
-    workspaceTabId?: string
-    onLocationChange?: (uri: string | null, name: string | null) => void
-    onPendingGfsDeepLinkOutcome?: (
-      id: number,
-      outcome: 'opened' | 'terminal' | 'retryable' | 'superseded'
-    ) => void
-  },
+  props: null as null | FilesPageProps,
+  renderActual: false,
+}))
+const workspaceTabStripHarness = vi.hoisted(() => ({
+  props: null as null | WorkspaceTabStripProps,
 }))
 const SLOT_BOUNDS = { x: 16, y: 12, width: 400, height: 300, dpr: 1 }
 
@@ -181,10 +180,17 @@ vi.mock('@components/CommandPalette', () => ({
   },
 }))
 vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
-vi.mock('@components/Common', () => ({
+vi.mock('@components/Common', async () => ({
+  ...(await vi.importActual<typeof import('@components/Common')>('@components/Common')),
   Button: () => null,
   IconButton: () => null,
   ToastStack: () => null,
+}))
+vi.mock('@components/WorkspaceTabStrip', () => ({
+  WorkspaceTabStrip: (props: WorkspaceTabStripProps) => {
+    workspaceTabStripHarness.props = props
+    return null
+  },
 }))
 vi.mock('@components/ConfirmDialog', () => ({
   ConfirmDialog: (props: {
@@ -213,12 +219,16 @@ vi.mock('@components/SidebarNav', () => ({
 vi.mock('@pages/AgentsPage', () => ({ AgentsPage: () => null }))
 vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
 vi.mock('@pages/ChatPage', () => ({ ChatPage: () => null }))
-vi.mock('@pages/FilesPage', () => ({
-  FilesPage: (props: NonNullable<typeof filesPageHarness.props>) => {
-    filesPageHarness.props = props
-    return null
-  },
-}))
+vi.mock('@pages/FilesPage', async () => {
+  const actual = await vi.importActual<typeof import('@pages/FilesPage')>('@pages/FilesPage')
+  return {
+    FilesPage: (props: FilesPageProps) => {
+      filesPageHarness.props = props
+      if (filesPageHarness.renderActual) return createElement(actual.FilesPage, props)
+      return null
+    },
+  }
+})
 vi.mock('@pages/McpServersPage', () => ({ McpServersPage: () => null }))
 // The page is stubbed, but like the real one it measures the slot for every
 // launch while it is mounted, so launches reach main.
@@ -386,8 +396,15 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     forceControllerRender()
   })
   const handleSelectChatAgent = vi.fn(
-    (agentName: string, options: { chatId?: string; keepNavItem?: boolean } = {}) => {
-      if (!options.keepNavItem) beginNavigationIntent()
+    (
+      agentName: string,
+      options: {
+        chatId?: string
+        keepNavItem?: boolean
+        navigationIntentAlreadyStarted?: boolean
+      } = {}
+    ) => {
+      if (!options.keepNavItem && !options.navigationIntentAlreadyStarted) beginNavigationIntent()
       controller.selectedAgent = agentName
       controller.activeChatId = options.chatId ?? null
       if (!options.keepNavItem) {
@@ -609,6 +626,8 @@ describe('App deep-link orchestration', () => {
     settingsPageHarness.props = null
     sandboxUiPageHarness.props = null
     filesPageHarness.props = null
+    filesPageHarness.renderActual = false
+    workspaceTabStripHarness.props = null
     sidebarHarness.props = null
     acknowledgeDeepLink.mockResolvedValue(undefined)
     listApps.mockResolvedValue({ apps: [] })
@@ -804,9 +823,13 @@ describe('App deep-link orchestration', () => {
     render(<App />)
 
     act(() => emitCommand?.('chat.newTab'))
-    expect(currentController.handleSelectChatAgent).toHaveBeenCalledWith('alpha', {
-      selectLatest: false,
-    })
+    expect(currentController.handleSelectChatAgent).toHaveBeenCalledWith(
+      'alpha',
+      expect.objectContaining({
+        selectLatest: false,
+        navigationIntentAlreadyStarted: true,
+      })
+    )
 
     act(() => emitCommand?.('composer.focus'))
     expect(currentController.handleSelectChatAgent).toHaveBeenLastCalledWith('alpha', {
@@ -1056,6 +1079,130 @@ describe('App deep-link orchestration', () => {
       files: { path: uri },
     })
     expect(gfsQueue.list()).toEqual([])
+  })
+
+  it('fences a pending producer link before blocked chat-tab access resolves', async () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const resource: Awaited<ReturnType<typeof window.clerum.gfs.resolve>> = {
+      drive: 'main',
+      resourceId: '0123456789abcdef0123456789abcdef',
+      parentResourceId: null,
+      gfsUri: uri,
+      name: 'Shared folder',
+      kind: 'directory',
+      pathCache: null,
+      version: 1,
+    }
+    let releaseResolve!: (value: typeof resource) => void
+    let resolveReleased = false
+    const heldResolve = new Promise<typeof resource>(resolve => {
+      releaseResolve = resolve
+    })
+    const resolveGfs = vi.fn(() => heldResolve)
+    const handleSelectChatAgent = vi.fn()
+    window.clerum.gfs.resolve = resolveGfs
+
+    currentController = makeController({
+      initialExperienceLoading: false,
+      workspaceTabs: openChatTab(createWorkspaceTabsState('chat-tab-1'), {
+        id: 'chat-tab-1',
+        agentRef: 'blocked-agent',
+        chatId: 'blocked-chat',
+      }),
+      isHostAccessBlocked: vi.fn(() => true),
+      handleSelectChatAgent,
+    } as Partial<AppController>)
+    filesPageHarness.renderActual = true
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <App />
+      </QueryClientProvider>
+    )
+    await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
+    await waitFor(() => expect(listPendingGfsDeepLinks).toHaveBeenCalled())
+
+    const link = produceGfsResourceDeepLink(uri)
+    act(() => emitGfsDeepLink?.(link))
+    await waitFor(() => expect(resolveGfs).toHaveBeenCalledTimes(1))
+
+    const ownerTabId = currentController.workspaceTabs.activeTabId
+    expect(activeWorkspaceTab(currentController.workspaceTabs)?.kind).toBe('files')
+    expect(ownerTabId).toBeTruthy()
+    expect(workspaceTabStripHarness.props).not.toBeNull()
+
+    const intentBeforeChatSelection = currentController.navigationIntentSequence
+    act(() => workspaceTabStripHarness.props?.onSelect('chat-tab-1'))
+    await waitFor(() => expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1'))
+    expect(currentController.navigationIntentSequence).toBe(intentBeforeChatSelection + 1)
+    expect(handleSelectChatAgent).toHaveBeenCalledWith(
+      'blocked-agent',
+      expect.objectContaining({
+        chatId: 'blocked-chat',
+        navigationIntentAlreadyStarted: true,
+      })
+    )
+
+    const intentBeforeOwnerReselection = currentController.navigationIntentSequence
+    act(() => workspaceTabStripHarness.props?.onSelect(ownerTabId!))
+    await waitFor(() => expect(currentController.workspaceTabs.activeTabId).toBe(ownerTabId))
+    expect(currentController.navigationIntentSequence).toBe(intentBeforeOwnerReselection + 1)
+
+    try {
+      // The real FilesPage consumer must not call resolve again when the owner
+      // tab is reselected after the user's explicit switch.
+      expect(resolveGfs).toHaveBeenCalledTimes(1)
+      await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
+      await act(async () => {
+        releaseResolve(resource)
+        resolveReleased = true
+        await heldResolve
+        await Promise.resolve()
+      })
+      await waitFor(() => expect(gfsQueue.list()).toEqual([]))
+      expect(acknowledgeGfsDeepLink).toHaveBeenCalledOnce()
+      expect(activeWorkspaceTab(currentController.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: null },
+      })
+    } finally {
+      if (!resolveReleased) {
+        await act(async () => {
+          releaseResolve(resource)
+          await heldResolve
+          await Promise.resolve()
+        })
+      }
+      queryClient.clear()
+    }
+  })
+
+  it('advances navigation intent for New Chat without a resource prefill', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    render(<App />)
+    await waitFor(() => expect(emitCommand).not.toBeNull())
+
+    const intentBeforeNewChat = currentController.navigationIntentSequence
+    act(() => emitCommand?.('chat.newTab'))
+
+    expect(currentController.navigationIntentSequence).toBe(intentBeforeNewChat + 1)
+    expect(activeWorkspaceTab(currentController.workspaceTabs)?.kind).toBe('chat')
+  })
+
+  it('does not double-advance when New Chat reveals the selected agent', async () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      selectedAgent: 'agent-a',
+      activeChatId: 'chat-1',
+    } as Partial<AppController>)
+    render(<App />)
+    await waitFor(() => expect(emitCommand).not.toBeNull())
+
+    const intentBeforeNewChat = currentController.navigationIntentSequence
+    act(() => emitCommand?.('chat.newTab'))
+
+    expect(currentController.navigationIntentSequence).toBe(intentBeforeNewChat + 1)
+    expect(activeWorkspaceTab(currentController.workspaceTabs)?.kind).toBe('chat')
   })
 
   it('keeps logged-out app links pending until the user confirms after login', async () => {

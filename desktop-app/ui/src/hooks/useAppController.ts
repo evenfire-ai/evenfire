@@ -1070,6 +1070,7 @@ export function useAppController() {
         // with the live app on the `apps` route and needs to swap the shared
         // <ChatPage>'s conversation in place, so it must not navigate away.
         keepNavItem?: boolean
+        navigationIntentAlreadyStarted?: boolean
       } = {}
     ) => {
       if (!agentName) return
@@ -1117,7 +1118,12 @@ export function useAppController() {
         // Activate the chat tab (dedupes/focuses by chatId). We are already on
         // the chat route, so `navItem` stays `chat` — same-commit derivation, no
         // blank frame.
-        nav.activateChatTab(agentName, targetChatId, options.title)
+        nav.activateChatTab(
+          agentName,
+          targetChatId,
+          options.title,
+          options.navigationIntentAlreadyStarted
+        )
         return
       }
       const shouldSelectLatest = targetChatId ? false : options.selectLatest !== false
@@ -1145,7 +1151,12 @@ export function useAppController() {
       // into its pending branch. `keepNavItem` (drawer) never touches the active
       // tab, so the app tab stays active and the route stays on `apps`.
       if (!options.keepNavItem) {
-        nav.activateChatTab(agentName, targetChatId || null, options.title)
+        nav.activateChatTab(
+          agentName,
+          targetChatId || null,
+          options.title,
+          options.navigationIntentAlreadyStarted
+        )
       }
       // Drawer same-agent selection: `setSelectedAgent` above is a no-op (same
       // value) and `navItem` is not flipped, so the agent-selection effect will

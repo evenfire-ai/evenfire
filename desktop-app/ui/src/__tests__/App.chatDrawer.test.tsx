@@ -518,8 +518,13 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('First chat')
 
     // Switch to chat-2 in the drawer switcher.
+    const beginUserNavigationIntent = currentController.beginUserNavigationIntent as ReturnType<
+      typeof vi.fn
+    >
+    const intentAdvancesBeforeSwitch = beginUserNavigationIntent.mock.calls.length
     act(() => fireEvent.click(screen.getByRole('button', { name: 'Open chats' })))
     act(() => fireEvent.click(screen.getByRole('option', { name: 'Second chat' })))
+    expect(beginUserNavigationIntent).toHaveBeenCalledTimes(intentAdvancesBeforeSwitch + 1)
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
 
     // Close the drawer, then reopen it.

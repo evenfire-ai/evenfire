@@ -262,8 +262,13 @@ export function useNavigationController() {
    * active and the route stays on `apps`.
    */
   const activateChatTab = useCallback(
-    (agentRef: string | null, chatId: string | null, title?: string) => {
-      beginUserNavigationIntent()
+    (
+      agentRef: string | null,
+      chatId: string | null,
+      title?: string,
+      navigationIntentAlreadyStarted = false
+    ) => {
+      if (!navigationIntentAlreadyStarted) beginUserNavigationIntent()
       setAppsPickerActive(false)
       const id = nextWorkspaceTabId()
       setWorkspaceTabs(current =>

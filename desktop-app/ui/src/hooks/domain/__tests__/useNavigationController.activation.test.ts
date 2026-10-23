@@ -154,6 +154,21 @@ function buildSeed(fromEmpty: boolean, seeds: Seed[]): WorkspaceTabsState {
 }
 
 describe('useNavigationController never activates an app tab', () => {
+  it('does not advance navigation intent when the caller already started it', () => {
+    const { result, unmount } = renderHook(() => useNavigationController())
+    try {
+      const intentBeforeActivation = result.current.navigationIntentSequence
+      act(() => result.current.activateChatTab('agent-a', 'chat-1', undefined, true))
+      expect(result.current.navigationIntentSequence).toBe(intentBeforeActivation)
+      expect(activeWorkspaceTab(result.current.workspaceTabs)).toMatchObject({
+        kind: 'chat',
+        chat: { agentRef: 'agent-a', chatId: 'chat-1' },
+      })
+    } finally {
+      unmount()
+    }
+  })
+
   it('keeps every navigation writer off app tabs, from any store state', () => {
     fc.assert(
       fc.property(

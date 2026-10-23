@@ -699,7 +699,11 @@ export function App() {
   // by the seam from the committed store, not here; DOM tabs (files/settings)
   // render from the derived `navItem`, so this only drops the app chrome.
   const revealWorkspaceTab = React.useCallback(
-    (tab: WorkspaceTab | undefined, inDrawer = chatDrawerVisibleRef.current) => {
+    (
+      tab: WorkspaceTab | undefined,
+      inDrawer = chatDrawerVisibleRef.current,
+      navigationIntentAlreadyStarted = false
+    ) => {
       if (!tab || tab.kind === 'files' || tab.kind === 'settings' || tab.kind === 'preview') {
         if (!inDrawer) leaveSandboxForChat()
         return
@@ -707,6 +711,9 @@ export function App() {
       if (tab.kind === 'app') return
       const agentRef = tab.chat?.agentRef ?? null
       const chatId = tab.chat?.chatId ?? null
+      const navigationIntentOption = navigationIntentAlreadyStarted
+        ? { navigationIntentAlreadyStarted: true }
+        : {}
       if (inDrawer) {
         // Swap the shared <ChatPage>'s conversation in place, keeping the live
         // app mounted and the `apps` route active. A blank tab with no agent
@@ -715,8 +722,14 @@ export function App() {
           vm.handleSelectChatAgent(
             agentRef,
             chatId
-              ? { chatId, title: tab.title, selectLatest: false, keepNavItem: true }
-              : { selectLatest: false, keepNavItem: true }
+              ? {
+                  chatId,
+                  title: tab.title,
+                  selectLatest: false,
+                  keepNavItem: true,
+                  ...navigationIntentOption,
+                }
+              : { selectLatest: false, keepNavItem: true, ...navigationIntentOption }
           )
         }
         return
@@ -732,7 +745,9 @@ export function App() {
       if (agentRef) {
         vm.handleSelectChatAgent(
           agentRef,
-          chatId ? { chatId, title: tab.title, selectLatest: false } : { selectLatest: false }
+          chatId
+            ? { chatId, title: tab.title, selectLatest: false, ...navigationIntentOption }
+            : { selectLatest: false, ...navigationIntentOption }
         )
       } else {
         vm.handleNavSelect(DESKTOP_ROUTES.chat)
@@ -747,15 +762,16 @@ export function App() {
     (id: string) => {
       const tab = workspaceTabsRef.current.tabs.find(candidate => candidate.id === id)
       if (!tab) return
+      vm.beginUserNavigationIntent()
       // Re-clicking the active app tab relaunches it only when its view is gone;
       // a live view is left as it is (Refresh is the explicit reload).
       activateAndLaunch(
         state => selectWorkspaceTab(state, id),
-        () => revealWorkspaceTab(tab, false),
+        () => revealWorkspaceTab(tab, false, true),
         ACTIVE_TAB_LAUNCH
       )
     },
-    [activateAndLaunch, revealWorkspaceTab]
+    [activateAndLaunch, revealWorkspaceTab, vm.beginUserNavigationIntent]
   )
 
   // Drawer switcher selection: reveal the chat IN the drawer (keepNavItem), never
@@ -765,9 +781,12 @@ export function App() {
       const tab = workspaceTabsRef.current.tabs.find(
         candidate => candidate.id === id && candidate.kind === 'chat'
       )
-      if (tab) revealWorkspaceTab(tab, true)
+      if (tab) {
+        vm.beginUserNavigationIntent()
+        revealWorkspaceTab(tab, true, true)
+      }
     },
-    [revealWorkspaceTab]
+    [revealWorkspaceTab, vm.beginUserNavigationIntent]
   )
 
   const handleCloseWorkspaceTab = React.useCallback(
@@ -804,13 +823,13 @@ export function App() {
 
   const handleNewWorkspaceChatTab = React.useCallback(() => {
     const sourceTab = vm.activeWorkspaceTab
+    const agentRef = vm.selectedAgent
+    vm.beginUserNavigationIntent()
     const sourceHasResource = Boolean(
       (sourceTab?.kind === 'files' && sourceTab.files?.path) ||
       (sourceTab?.kind === 'preview' && sourceTab.preview?.gfsUri)
     )
     if (sourceHasResource) {
-      vm.beginUserNavigationIntent()
-      const agentRef = vm.selectedAgent
       const destination = prepareNewChatWorkspaceTab(
         workspaceTabsRef.current,
         nextChatTabId(),
@@ -823,13 +842,16 @@ export function App() {
       }
     }
     vm.clearAppsPicker()
-    const agentRef = vm.selectedAgent
     if (chatDrawerDivertableRef.current) {
       // Drawer is a valid surface (app live, panel wide enough): open the blank
       // chat in the drawer without tearing the live embed down.
       setChatDrawerOpen(true)
       if (agentRef) {
-        vm.handleSelectChatAgent(agentRef, { selectLatest: false, keepNavItem: true })
+        vm.handleSelectChatAgent(agentRef, {
+          selectLatest: false,
+          keepNavItem: true,
+          navigationIntentAlreadyStarted: true,
+        })
       }
       // With no agent yet there is nothing to seed, so this INTENTIONALLY writes
       // nothing to the store — opening/focusing the drawer is the whole action
@@ -838,7 +860,10 @@ export function App() {
       // No divertable drawer: full-screen chat route so the new chat is reachable.
       leaveSandboxForChat()
       if (agentRef) {
-        vm.handleSelectChatAgent(agentRef, { selectLatest: false })
+        vm.handleSelectChatAgent(agentRef, {
+          selectLatest: false,
+          navigationIntentAlreadyStarted: true,
+        })
       } else {
         const id = nextChatTabId()
         setWorkspaceTabs(state => newChatTab(state, id, null))
@@ -2628,10 +2653,15 @@ export function App() {
       // chat-specific.
       const selectAndReveal = (update: (current: WorkspaceTabsState) => WorkspaceTabsState) => {
         const projected = update(state)
-        if (projected === state) return
+        if (projected === state) {
+          vm.beginUserNavigationIntent()
+          return
+        }
+        const projectedTab = activeWorkspaceTab(projected)
+        vm.beginUserNavigationIntent()
         activateAndLaunch(
           update,
-          () => revealWorkspaceTab(activeWorkspaceTab(projected), false),
+          () => revealWorkspaceTab(projectedTab, false, true),
           ACTIVE_TAB_LAUNCH
         )
       }
@@ -2803,6 +2833,7 @@ export function App() {
       vm.handleNavSelect,
       vm.handleLogout,
       vm.handleSelectChatAgent,
+      vm.beginUserNavigationIntent,
       vm.isAuthenticated,
       vm.navItem,
       vm.selectedAgent,
