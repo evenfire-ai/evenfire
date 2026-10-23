@@ -1092,7 +1092,7 @@ describe('App deep-link orchestration', () => {
     vi.useRealTimers()
     resetComposerDraftStore()
     await main.dispose()
-    expect(bodyChildElementCount).toBe(0)
+    expect(bodyChildElementCount, 'App deep-link suite body-empty postcondition').toBe(0)
   }
 
   afterEach(cleanupAppDeepLinkSuite)
@@ -3110,7 +3110,9 @@ describe('App deep-link orchestration', () => {
     document.body.append(leakedChild)
 
     try {
-      await expect(cleanupAppDeepLinkSuite()).rejects.toThrow()
+      await expect(cleanupAppDeepLinkSuite()).rejects.toThrow(
+        'App deep-link suite body-empty postcondition'
+      )
       expect(vi.isFakeTimers()).toBe(false)
       expect(getComposerDraft(chatId, agentRef)).toBe('')
       expect(dispose).toHaveBeenCalledOnce()
