@@ -51,9 +51,11 @@ const RPC_CLAIMS = {
 // URL construction site. Any new use of the base URL, in any form, changes a
 // count: add its emitter to emittedRequests() and update this inventory.
 const CONTROL_API_BASE_URL_MENTIONS: Record<string, number> = {
+  'actionAuthorityV2.ts': 1,
   'routes/mcpOauth.ts': 2,
   'routes/sandboxUi.ts': 3,
-  'services/controlApiRestService.ts': 6,
+  'services/controlApiRestService.ts': 9,
+  'services/pr2ReadinessReporter.ts': 1,
   'services/sandboxUiRegistry.ts': 4,
 }
 
