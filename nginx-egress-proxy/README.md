@@ -94,19 +94,27 @@ A newer fixed release on an accepted line (for example 1.30.6 → 1.30.7):
 
 1. Resolve the index digest of the new tag:
    `docker buildx imagetools inspect nginx:<x.y.z>-alpine` (the `Digest:` line).
-2. Replace the old tag everywhere it is written (`git grep -n 'nginx:<old>-alpine'`):
-   `FIXED_NGINX_IMAGE` in `scripts/validate-nginx-images.sh`, the Dockerfile
-   `FROM` (tag and digest), the four gateway manifests under `deploy/base`,
+2. Replace the old tag in the platform images: `FIXED_NGINX_IMAGE` in
+   `scripts/validate-nginx-images.sh`, the Dockerfile `FROM` (tag and digest),
+   the four gateway manifests under `deploy/base`,
    `scripts/minikube/build-images.sh` and `scripts/bootstrap-cluster.sh`.
-3. Run `bash scripts/validate-nginx-images.sh`,
-   `bash scripts/tests/test-validate-nginx-images.sh` and
+3. Find the remaining references of both images:
+   `git grep -nE '(nginx|nginx-unprivileged):<old>-alpine'`. These are the
+   `nginxinc/nginx-unprivileged` recipe samples, the recipe guides, E2E scripts
+   and specs, and unit tests. They stay valid at or above the floor, so moving
+   them to the new release is optional; the validator does not require it.
+4. Run `bash scripts/validate-nginx-images.sh`,
+   `bash scripts/tests/test-validate-nginx-images.sh`,
+   `bash scripts/tests/test-verify-nginx-image-digests.sh` and
    `bash scripts/verify-nginx-image-digests.sh`.
 
-No test or CI file changes for such a bump. When a new CVE raises the minimum,
-also edit `NGINX_RELEASE_FLOORS` and its CVE comment in
+The guard tests and CI need no edits for such a bump: both tests read the
+release from the validator and the Dockerfile. When a new CVE raises the
+minimum, also edit `NGINX_RELEASE_FLOORS` and its CVE comment in
 `scripts/nginx-image-policy.sh`, the floor cases in
 `scripts/tests/test-validate-nginx-images.sh`, and every reference the
-validator then reports as below the new floor.
+validator then reports as below the new floor, including the
+`nginxinc/nginx-unprivileged` ones.
 
 ## Build & deploy
 
