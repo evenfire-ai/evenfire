@@ -5331,4 +5331,70 @@ describe('GfsBrowser — breadcrumb drop moves', () => {
     expect(mockApiSend).not.toHaveBeenCalled()
     expect(screen.queryByRole('dialog')).toBeNull()
   })
+
+  it('raises the persistent sign-in alert when the dispatched PATCH itself comes back 401 (A11)', async () => {
+    breadcrumbTrailFixture()
+    // The API layer already routes PATCH 401s through the global
+    // unauthorized handler (throwing AuthExpiredError); a raw 401 status
+    // exercises the same classification. Either way: persistent sign-in
+    // alert, no transient error toast, no ladder retry.
+    mockApiSend.mockImplementation(async () => {
+      throw Object.assign(new Error('401 Unauthorized'), { status: 401 })
+    })
+    const list = await browseToLiveTests()
+    const abacRow = rowOf(list, 'abac.md')
+
+    const transfer = dragRowOverCrumb(abacRow, crumbButton('Product'))
+    fireEvent.drop(crumbButton('Product'), { dataTransfer: transfer })
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Move file abac.md to Product',
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move', exact: true }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Your session ended. Sign in again to continue moving files.')
+    // No generic transient toast for the 401, no unknown-outcome claim, no
+    // success claim — and exactly one PATCH (a dead session never retries).
+    expect(screen.queryByText(/401/)).toBeNull()
+    expect(screen.queryByText(/couldn.t (verify this move|confirm the move)/)).toBeNull()
+    expect(screen.queryByText(/Moved "abac\.md"/)).toBeNull()
+    await waitFor(() => expect(mockApiSend).toHaveBeenCalledTimes(1))
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(mockApiSend).toHaveBeenCalledTimes(1)
+  })
+
+  it('surfaces session loss alongside an honestly unknown outcome when verification reads 401', async () => {
+    const fixture = breadcrumbTrailFixture()
+    // The PATCH transport-fails after dispatch, and the session expires
+    // before the verification read can answer: the move outcome stays
+    // unknown (the PATCH may have landed) while the session loss surfaces
+    // through the persistent alert next to the warning toast.
+    fixture.policy.sourceReadResults.set(3, 'unauthorized')
+    mockApiSend.mockImplementation(async () => {
+      throw new TypeError('fetch failed')
+    })
+    const list = await browseToLiveTests()
+    const abacRow = rowOf(list, 'abac.md')
+
+    const transfer = dragRowOverCrumb(abacRow, crumbButton('Product'))
+    fireEvent.drop(crumbButton('Product'), { dataTransfer: transfer })
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Move file abac.md to Product',
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move', exact: true }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Your session ended. Sign in again to continue moving files.')
+    expect(
+      await screen.findByText(/Couldn.t confirm the move\. Refresh before trying again\./)
+    ).toBeTruthy()
+    expect(screen.getByText(/confirm the move/).closest('.cu-toast')).toHaveClass(
+      'cu-toast--warning'
+    )
+    // No connection-flavored warning and no repeat PATCH.
+    expect(screen.queryByText(/couldn.t verify this move/)).toBeNull()
+    expect(mockApiSend).toHaveBeenCalledTimes(1)
+  })
 })

@@ -2000,6 +2000,17 @@ export function GfsBrowser(): React.JSX.Element {
           break
         } catch (error) {
           if (!isGfsNameConflict(error)) {
+            // A 401 from the PATCH itself is session loss (A11), not a
+            // transient failure: raise the persistent sign-in alert and stop
+            // — no ladder retry can succeed against a dead session. The API
+            // layer's global unauthorized boundary has already run.
+            if (isUnauthorizedRead(error)) {
+              if (options.revalidate) {
+                raiseSessionLostNotice()
+                return
+              }
+              throw error
+            }
             if (
               options.revalidate &&
               entityChangeErrorStatus(error) === undefined &&
@@ -2172,6 +2183,14 @@ export function GfsBrowser(): React.JSX.Element {
       resolveEndpointView(destination.gfsUri, destination.resourceId),
     ])
     if (!isGestureEpochCurrent(epoch)) return 'unknown'
+    if (sourceRead.status === 'unauthorized' || targetRead.status === 'unauthorized') {
+      // The session died after the PATCH was dispatched: the move outcome
+      // stays HONESTLY UNKNOWN (the PATCH may have landed first), and the
+      // session loss surfaces alongside it through the persistent alert —
+      // never as a connection-flavored warning.
+      raiseSessionLostNotice()
+      return 'unknown'
+    }
     if (sourceRead.status !== 'resolved' || targetRead.status !== 'resolved') return 'unknown'
     if (targetRead.view.kind !== 'directory') return 'unknown'
     if (typeof sourceRead.view.path !== 'string' || typeof targetRead.view.path !== 'string') {

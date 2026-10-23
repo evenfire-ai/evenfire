@@ -70,11 +70,29 @@ const PLAYWRIGHT_ARGS = [
  * owns live journeys; a spec file that silently loses them would still
  * report green for the remaining journeys, so their absence from the
  * inventory is a gate failure, not a smaller pass.
+ *
+ * The four patterns are ANCHORED and DISJOINT — each matches exactly one
+ * journey title — so every lane is required independently: losing the root
+ * move alone (or any other single lane) fails the gate even when the other
+ * breadcrumb journeys survive.
  */
 export const REQUIRED_JOURNEY_INVENTORY = [
-  { label: 'a breadcrumb file-move journey', pattern: /breadcrumb crumb|drive-root crumb/i },
-  { label: 'an active-crumb same-parent journey', pattern: /active breadcrumb crumb/i },
-  { label: 'an ancestor folder-move journey', pattern: /ancestor crumb/i },
+  {
+    label: 'the file ancestor-crumb move journey',
+    pattern: /^file drag onto a breadcrumb crumb/i,
+  },
+  {
+    label: 'the file drive-root-crumb move journey',
+    pattern: /^file drag onto the main drive-root crumb/i,
+  },
+  {
+    label: 'the active-crumb same-parent no-op journey',
+    pattern: /^drop onto the active breadcrumb crumb/i,
+  },
+  {
+    label: 'the folder ancestor-crumb move journey',
+    pattern: /^folder drag onto an ancestor crumb/i,
+  },
 ]
 
 /**

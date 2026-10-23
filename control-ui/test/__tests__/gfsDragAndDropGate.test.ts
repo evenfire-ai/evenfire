@@ -388,10 +388,14 @@ describe('EvenDrive drag-and-drop E2E gate', () => {
       { title: 'drop onto the active breadcrumb crumb explains it is already there' },
       { title: 'folder drag onto an ancestor crumb above its parent commits after confirmation' },
     ]
+    const unrelatedJourneys = [
+      { title: 'file drag into folder moves it' },
+      { title: 'folder drag opens the one confirmation and Cancel changes nothing' },
+    ]
 
     it('accepts an inventory that carries every required lane', () => {
       const journeys = collectReportJourneys(
-        journeyReport([...breadcrumbJourneys, { title: 'file drag into folder moves it' }])
+        journeyReport([...breadcrumbJourneys, ...unrelatedJourneys])
       )
       expect(missingRequiredJourneyInventories(journeys)).toEqual([])
     })
@@ -399,35 +403,40 @@ describe('EvenDrive drag-and-drop E2E gate', () => {
     it('fails an inventory that lost the breadcrumb journeys entirely', () => {
       // The pre-breadcrumb spec: still a valid Playwright inventory, but it
       // can no longer certify the breadcrumb drop-move feature.
-      const journeys = collectReportJourneys(
-        journeyReport([
-          { title: 'file drag into folder moves it' },
-          { title: 'folder drag opens the one confirmation and Cancel changes nothing' },
-        ])
-      )
+      const journeys = collectReportJourneys(journeyReport(unrelatedJourneys))
       const missing = missingRequiredJourneyInventories(journeys)
       expect(missing).toEqual(REQUIRED_JOURNEY_INVENTORY.map(lane => lane.label))
     })
 
-    it('names the exact lane a partial inventory is missing', () => {
-      const journeys = collectReportJourneys(
-        journeyReport([breadcrumbJourneys[0]!, breadcrumbJourneys[1]!, breadcrumbJourneys[3]!])
-      )
-      expect(missingRequiredJourneyInventories(journeys)).toEqual([
-        'an active-crumb same-parent journey',
-      ])
+    it.each(
+      breadcrumbJourneys.map((lane, index) => ({
+        laneTitle: lane.title,
+        laneLabel: REQUIRED_JOURNEY_INVENTORY[index].label,
+      }))
+    )('fails when only the $laneLabel goes missing', ({ laneTitle, laneLabel }) => {
+      // Every lane is required INDEPENDENTLY: removing any single journey —
+      // including the root move — must fail the gate even while the other
+      // three breadcrumb journeys survive.
+      const remaining = breadcrumbJourneys.filter(journey => journey.title !== laneTitle)
+      expect(remaining).toHaveLength(breadcrumbJourneys.length - 1)
+      const journeys = collectReportJourneys(journeyReport([...remaining, ...unrelatedJourneys]))
+      expect(missingRequiredJourneyInventories(journeys)).toEqual([laneLabel])
     })
 
-    it('requires the same-parent lane through the active-crumb wording, not any crumb title', () => {
-      const journeys = collectReportJourneys(
-        journeyReport([breadcrumbJourneys[0]!, breadcrumbJourneys[1]!, breadcrumbJourneys[3]!])
-      )
-      expect(
-        REQUIRED_JOURNEY_INVENTORY.find(lane => lane.label.includes('active-crumb'))?.pattern.test(
-          'file drag onto a breadcrumb crumb moves it up'
-        )
-      ).toBe(false)
-      void journeys
+    it('requires the four lanes through disjoint anchored patterns', () => {
+      const titles = breadcrumbJourneys.map(journey => journey.title)
+      for (const lane of REQUIRED_JOURNEY_INVENTORY) {
+        // The lane pattern matches exactly one journey title — its own —
+        // so no sibling lane can satisfy it by accident.
+        const matches = titles.filter(title => lane.pattern.test(title))
+        expect(matches, lane.label).toHaveLength(1)
+      }
+      // And nothing outside the breadcrumb lanes is captured.
+      for (const lane of REQUIRED_JOURNEY_INVENTORY) {
+        for (const journey of unrelatedJourneys) {
+          expect(lane.pattern.test(journey.title), lane.label).toBe(false)
+        }
+      }
     })
   })
 })
