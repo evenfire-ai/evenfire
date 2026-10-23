@@ -2,6 +2,7 @@
 
 import React, { Suspense, useEffect, useMemo, useState } from 'react'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { AuthGate } from '@components/AuthGate'
 import { BodyLoadingSkeleton } from '@components/BodyLoadingSkeleton'
 import { CreatePageHeader } from '@components/CreatePageHeader'
@@ -19,7 +20,7 @@ import {
   isRecipeOwned,
   resolveCredentialSurface,
 } from '@components/UpdateConnectorCredentials/resolveCredentialSurface'
-import { Field, TextInput } from '@components/ui'
+import { Button, Field, FormSection, TextInput } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { getMcpServers, listMcpSecrets, updateMcpSecret } from '@lib/api'
 import type { McpServerResource } from '@lib/api'
@@ -272,95 +273,120 @@ function EditConnectorSecretContent() {
                   have been deleted.
                 </div>
               ) : (
-                <>
-                  <h2>Rotate stored values</h2>
-                  <p className="cu-muted">
-                    No connector references this Secret yet, so changes take effect for the next
-                    connector that attaches it. Only the keys you fill in are replaced or added;
-                    every other key already on the Secret is kept.
-                  </p>
-                  {saveError ? (
-                    <div className="cu-banner cu-banner--error" role="alert">
-                      {saveError}
-                    </div>
-                  ) : null}
-                  {secretSummary.keys.length === 0 && extraKeys.length === 0 ? (
-                    <p className="cu-muted">This Secret has no keys yet.</p>
-                  ) : (
-                    secretSummary.keys.map(key => (
-                      <Field
-                        key={key}
-                        label={key}
-                        htmlFor={`secret-key-${key}`}
-                        description="Write-only — leave blank to keep the current value."
-                      >
+                <FormSection
+                  title="Rotate stored values"
+                  description={
+                    <>
+                      No connector references this Secret yet, so changes take effect for the next
+                      connector that attaches it. Values are write-only — only the keys you fill in
+                      are replaced or added; every other key already on the Secret is kept.
+                    </>
+                  }
+                >
+                  <TableViewport className="cu-table-wrap">
+                    <DataTable className="eft-table cu-table">
+                      <thead>
+                        <tr>
+                          <th>Secret key</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {secretSummary.keys.length === 0 ? (
+                          <tr>
+                            <td>
+                              <span className="cu-muted">No keys yet.</span>
+                            </td>
+                          </tr>
+                        ) : (
+                          secretSummary.keys.map(key => (
+                            <tr key={key}>
+                              <td>
+                                <code>{key}</code>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </DataTable>
+                  </TableViewport>
+
+                  <form
+                    className="cu-connector-credentials-form cu-form-stack"
+                    onSubmit={event => {
+                      event.preventDefault()
+                      void saveDirectRotation()
+                    }}
+                    noValidate
+                  >
+                    {secretSummary.keys.map(key => (
+                      <Field key={key} label={key} htmlFor={`secret-key-${key}`}>
                         <TextInput
                           id={`secret-key-${key}`}
                           type="password"
                           name={key}
-                          autoComplete="off"
+                          autoComplete="new-password"
+                          placeholder="Leave blank to keep current value"
                           value={keyValues[key] ?? ''}
                           onChange={e =>
                             setKeyValues(current => ({ ...current, [key]: e.target.value }))
                           }
+                          disabled={saving}
                         />
                       </Field>
-                    ))
-                  )}
-                  {extraKeys.map(row => (
-                    <div className="cu-form-inline" key={row.id}>
-                      <TextInput
-                        monospace
-                        aria-label={`New key name ${row.id}`}
-                        value={row.key}
-                        onChange={e => updateExtraKey(row.id, 'key', e.target.value)}
-                        placeholder="NEW_API_KEY"
-                        disabled={saving}
-                      />
-                      <TextInput
-                        monospace
-                        aria-label={`New key value ${row.id}`}
-                        value={row.value}
-                        onChange={e => updateExtraKey(row.id, 'value', e.target.value)}
-                        placeholder="secret value"
-                        type="password"
-                        autoComplete="off"
-                        disabled={saving}
-                      />
-                      <button
-                        type="button"
-                        className="cu-btn cu-btn--ghost cu-btn--sm"
-                        onClick={() => removeExtraKey(row.id)}
-                        disabled={saving}
-                      >
-                        Remove
-                      </button>
+                    ))}
+
+                    {extraKeys.map(row => (
+                      <div className="cu-form-inline" key={row.id}>
+                        <TextInput
+                          monospace
+                          aria-label={`New key name ${row.id}`}
+                          value={row.key}
+                          onChange={e => updateExtraKey(row.id, 'key', e.target.value)}
+                          placeholder="NEW_API_KEY"
+                          disabled={saving}
+                        />
+                        <TextInput
+                          monospace
+                          aria-label={`New key value ${row.id}`}
+                          value={row.value}
+                          onChange={e => updateExtraKey(row.id, 'value', e.target.value)}
+                          placeholder="secret value"
+                          type="password"
+                          autoComplete="new-password"
+                          disabled={saving}
+                        />
+                        <Button
+                          type="button"
+                          onClick={() => removeExtraKey(row.id)}
+                          disabled={saving}
+                        >
+                          Remove
+                        </Button>
+                      </div>
+                    ))}
+
+                    <div>
+                      <Button type="button" onClick={addExtraKey} disabled={saving}>
+                        Add key
+                      </Button>
                     </div>
-                  ))}
-                  <div>
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--ghost cu-btn--sm"
-                      onClick={addExtraKey}
-                      disabled={saving}
-                    >
-                      Add key
-                    </button>
-                  </div>
-                  <div className="cu-create-actions">
-                    <button type="button" className="cu-btn cu-btn--ghost" onClick={backToList}>
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--primary"
-                      onClick={() => void saveDirectRotation()}
-                      disabled={saving}
-                    >
-                      {saving ? 'Saving…' : 'Save'}
-                    </button>
-                  </div>
-                </>
+
+                    {saveError ? (
+                      <div className="cu-banner cu-banner--error" role="alert">
+                        {saveError}
+                      </div>
+                    ) : null}
+
+                    <div className="cu-create-actions">
+                      <Button type="button" onClick={backToList} disabled={saving}>
+                        Cancel
+                      </Button>
+                      <Button type="submit" variant="primary" disabled={saving}>
+                        {saving ? 'Saving…' : 'Save'}
+                      </Button>
+                    </div>
+                  </form>
+                </FormSection>
               )
             ) : (
               <>
