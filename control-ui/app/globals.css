@@ -4740,6 +4740,14 @@ td.cu-registry-description {
   margin-top: var(--cu-space-1);
 }
 
+/* Remote wizard: the exact scopes an Entra install asks the operator to confirm. */
+.cu-unverified-scopes {
+  margin: var(--cu-space-1) 0;
+  padding-left: var(--cu-space-4);
+  font-family: var(--cu-font-mono);
+  overflow-wrap: anywhere;
+}
+
 /* Catalog-attention banner (stale-but-referenced models) on /llm-models. */
 .cu-model-attention__lede {
   margin: 0 0 var(--cu-space-2);
