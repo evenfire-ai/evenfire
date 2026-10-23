@@ -106,7 +106,7 @@ const RECIPES_BASE = `${CONTROL_API_URL}/api/v1/admin/recipes`
 const VALID_RECIPE_BODY = {
   metadata: { name: SMOKE_RECIPE_NAME },
   spec: {
-    workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
+    workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.6-alpine' }],
   },
 }
 
@@ -154,7 +154,7 @@ describe('control-api — WorkflowRecipe smoke: full lifecycle', () => {
     const workloads = Array.from({ length: 26 }, (_, index) => ({
       id: `worker-${index + 1}`,
       type: 'deployment',
-      image: 'nginx:1.30.1-alpine',
+      image: 'nginx:1.30.6-alpine',
     }))
 
     const { status, data } = await postJson<{
@@ -190,7 +190,7 @@ describe('control-api — WorkflowRecipe smoke: full lifecycle', () => {
       {
         metadata: { name: 'integration-too-many-ui-internal-egress' },
         spec: {
-          workloads: [{ id: 'api', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
+          workloads: [{ id: 'api', type: 'deployment', image: 'nginx:1.30.6-alpine' }],
           ui: {
             workloadRef: 'api',
             port: 8080,
@@ -257,7 +257,7 @@ describe('control-api — WorkflowRecipe smoke: full lifecycle', () => {
     if (!controlApiUp || !adminToken) return
     const updatedBody = {
       spec: {
-        workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
+        workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.6-alpine' }],
       },
     }
     const { status } = await putJson(
