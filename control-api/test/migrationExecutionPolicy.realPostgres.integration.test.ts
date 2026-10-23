@@ -318,6 +318,57 @@ async function withMigrationApplyObserver<T>(
   }
 }
 
+async function currentMigrationSchemaAndPrivileges(pool: Pool): Promise<{
+  objects: Record<string, string | null>
+  privileges: string[]
+}> {
+  const objectNames = [
+    'external_user_sessions',
+    'external_v1_session_revocations',
+    'authorization_resource_revisions',
+    'invitation_delivery_commands',
+  ]
+  const objectRows = await pool.query<{ name: string; relation: string | null }>(
+    `SELECT name, to_regclass(format('public.%I', name))::text AS relation
+       FROM unnest($1::text[]) AS names(name)`,
+    [objectNames]
+  )
+  const privilegeRows = await pool.query<{ privilege: string; allowed: boolean }>(
+    `SELECT relation || ':' || privilege AS privilege,
+            has_table_privilege('control_api_runtime', relation, privilege) AS allowed
+       FROM (VALUES
+         ('schema_migrations'::text, 'SELECT'::text),
+         ('schema_migrations', 'INSERT'),
+         ('schema_migrations', 'UPDATE'),
+         ('schema_migrations', 'DELETE')
+       ) AS required(relation, privilege)`,
+    []
+  )
+  return {
+    objects: Object.fromEntries(objectRows.rows.map(row => [row.name, row.relation])),
+    privileges: privilegeRows.rows.map(row => `${row.privilege}:${row.allowed}`).sort(),
+  }
+}
+
+async function passwordMigrationPrivileges(pool: Pool): Promise<string[]> {
+  const result = await pool.query<{ privilege: string; allowed: boolean }>(
+    `SELECT relation || ':' || privilege AS privilege,
+            has_table_privilege('control_api_runtime', relation, privilege) AS allowed
+       FROM (VALUES
+         ('password_identifier_state'::text, 'SELECT'::text),
+         ('password_identifier_state', 'INSERT'),
+         ('password_identifier_state', 'UPDATE'),
+         ('password_identifier_state', 'DELETE'),
+         ('password_verification_work', 'SELECT'),
+         ('password_verification_work', 'INSERT'),
+         ('password_verification_work', 'UPDATE'),
+         ('password_verification_work', 'DELETE')
+       ) AS required(relation, privilege)`,
+    []
+  )
+  return result.rows.map(row => `${row.privilege}:${row.allowed}`).sort()
+}
+
 async function versions(pool: Pool): Promise<string[]> {
   const result = await pool.query<{ version: string }>(
     'SELECT version FROM schema_migrations ORDER BY version'
