@@ -4,8 +4,10 @@
 # Builds nginx-egress-proxy/Dockerfile, renders the per-server
 # default.conf.template with the real HCC McpServerReconciler, and starts the
 # image through its own entrypoint (so the /etc/nginx/templates envsubst step
-# runs) as uid/gid 101 with every capability dropped, as HCC deploys it. A local
-# TLS upstream presents one certificate per port:
+# runs) with the docker equivalent of the securityContext HCC generates for the
+# egress-proxy container (user, dropped capabilities, no_new_privs, the default
+# seccomp profile), checked on the running process. A local TLS upstream
+# presents one certificate per port:
 #
 #   valid     leaf issued by test CA A            -> 200
 #   chain2    leaf under two CA A intermediates   -> 200 (proxy_ssl_verify_depth 3)
@@ -324,7 +326,8 @@ mkdir -p "$WORK/templates"
 (
   cd "$HCC_DIR"
   # shellcheck disable=SC2016 # TypeScript source; ${...} is a JS template literal.
-  TEMPLATE_DIR="$WORK/templates" node node_modules/ts-node/dist/bin.js --transpile-only -e '
+  TEMPLATE_DIR="$WORK/templates" SECURITY_ARGS="$WORK/proxy-security-args" \
+    node node_modules/ts-node/dist/bin.js --transpile-only -e '
 import * as fs from "fs"
 import * as path from "path"
 import * as k8s from "@kubernetes/client-node"
@@ -336,28 +339,63 @@ const reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
   coreApi: {} as never,
   customApi: {} as never,
 })
-for (const port of [8441, 8442, 8443, 8444, 8445]) {
-  const cm = (reconciler as any).buildNginxConfigMap({
-    name: `tls-test-${port}`,
-    namespace: "mcp-server",
-    spec: {
-      contextRef: "tls-test",
-      image: "clerum/nginx-egress-proxy:0.1.0",
-      transport: { type: "streamableHttp", port: 3000 },
-      managed: true,
-      enabled: true,
-      remote: {
-        baseUrl: `https://upstream.test:${port}/mcp`,
-        authHeaders: [{ header: "Authorization", valueTemplate: "Bearer ${UPSTREAM_TOKEN}" }],
-      },
+const server = (port: number) => ({
+  name: `tls-test-${port}`,
+  namespace: "mcp-server",
+  spec: {
+    contextRef: "tls-test",
+    image: "clerum/nginx-egress-proxy:0.1.0",
+    transport: { type: "streamableHttp", port: 3000 },
+    managed: true,
+    enabled: true,
+    remote: {
+      baseUrl: `https://upstream.test:${port}/mcp`,
+      authHeaders: [{ header: "Authorization", valueTemplate: "Bearer ${UPSTREAM_TOKEN}" }],
     },
-  })
+  },
+})
+for (const port of [8441, 8442, 8443, 8444, 8445]) {
+  const cm = (reconciler as any).buildNginxConfigMap(server(port))
   const dir = path.join(process.env.TEMPLATE_DIR as string, String(port))
   fs.mkdirSync(dir)
   fs.writeFileSync(path.join(dir, "default.conf.template"), cm.data["default.conf.template"])
 }
+
+// The proxy runs with the securityContext HCC generates for the egress-proxy
+// container. Each field maps to one docker flag; a field this test does not
+// map, or a value other than the mapped one, stops the test so the mapping is
+// updated together with the reconciler.
+const deployment = (reconciler as any).buildDeployment(server(8441))
+const proxies = deployment.spec.template.spec.containers.filter((c: any) => c.name === "egress-proxy")
+if (proxies.length !== 1) throw new Error(`expected one egress-proxy container, found ${proxies.length}`)
+const sc = proxies[0].securityContext ?? {}
+const mapped = ["runAsNonRoot", "runAsUser", "runAsGroup", "capabilities", "allowPrivilegeEscalation", "seccompProfile"]
+const unmapped = Object.keys(sc).filter((k) => !mapped.includes(k))
+if (unmapped.length > 0) throw new Error(`egress-proxy securityContext fields not mapped to docker: ${unmapped.join(", ")}`)
+const expect = (field: string, ok: boolean) => {
+  if (!ok) throw new Error(`egress-proxy securityContext.${field} = ${JSON.stringify(sc[field])} is not mapped to docker`)
+}
+expect("runAsNonRoot", sc.runAsNonRoot === true)
+expect("runAsUser", Number.isInteger(sc.runAsUser) && sc.runAsUser > 0)
+expect("runAsGroup", Number.isInteger(sc.runAsGroup))
+expect("capabilities", JSON.stringify(sc.capabilities) === JSON.stringify({ drop: ["ALL"] }))
+expect("allowPrivilegeEscalation", sc.allowPrivilegeEscalation === false)
+// RuntimeDefault is the engine default profile; start_proxy checks that the
+// running process is under a seccomp filter.
+expect("seccompProfile", JSON.stringify(sc.seccompProfile) === JSON.stringify({ type: "RuntimeDefault" }))
+const args = ["--user", `${sc.runAsUser}:${sc.runAsGroup}`, "--cap-drop", "ALL", "--security-opt", "no-new-privileges"]
+fs.writeFileSync(process.env.SECURITY_ARGS as string, args.join("\n") + "\n")
 '
 )
+PROXY_SECURITY_ARGS=()
+while IFS= read -r arg; do
+  PROXY_SECURITY_ARGS+=("$arg")
+done <"$WORK/proxy-security-args"
+PROXY_UID_GID="${PROXY_SECURITY_ARGS[1]}"
+if [ "${#PROXY_SECURITY_ARGS[@]}" -ne 6 ] || ! [[ "$PROXY_UID_GID" =~ ^[0-9]+:[0-9]+$ ]]; then
+  echo "FAIL: unexpected proxy security arguments: ${PROXY_SECURITY_ARGS[*]}" >&2
+  exit 1
+fi
 
 mutate() {
   local file="$1" from="$2" to="$3" count
@@ -387,7 +425,7 @@ start_proxy() {
   local case_name="$1" port="$2" mount_ca="$3" container="$NAME-proxy-$1"
   local args=(
     -d --name "$container" --network "$NETWORK"
-    --user 101:101 --cap-drop ALL --security-opt no-new-privileges
+    "${PROXY_SECURITY_ARGS[@]}"
     -e "UPSTREAM_TOKEN=$AUTH_SECRET"
     -v "$WORK/templates/$port:/etc/nginx/templates:ro"
     -p 127.0.0.1::3000
@@ -398,6 +436,27 @@ start_proxy() {
   docker run "${args[@]}" "$PROXY_IMAGE" >/dev/null
   wait_for "proxy for $case_name" "$container" \
     curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$(host_port "$container" 3000)/health"
+  check_proxy_process "$case_name" "$container"
+}
+
+# The NGINX master (PID 1) must run with the generated identity, an empty
+# capability bounding set (a non-root process has no effective capabilities
+# even without --cap-drop, so CapEff alone would not show the drop),
+# no_new_privs and a seccomp filter (mode 2).
+check_proxy_process() {
+  local case_name="$1" container="$2" status uid="${PROXY_UID_GID%%:*}" gid="${PROXY_UID_GID##*:}" want t=$'\t' missing=0
+  status="$(docker exec "$container" cat /proc/1/status)"
+  for want in "Uid:$t$uid$t$uid$t$uid$t$uid" "Gid:$t$gid$t$gid$t$gid$t$gid" \
+    "CapEff:${t}0000000000000000" "CapBnd:${t}0000000000000000" "NoNewPrivs:${t}1" "Seccomp:${t}2"; do
+    if ! grep -qxF -- "$want" <<<"$status"; then
+      echo "FAIL: proxy for $case_name: /proc/1/status has no line '$want'" >&2
+      missing=1
+    fi
+  done
+  if [ "$missing" -ne 0 ]; then
+    grep -E '^(Uid|Gid|CapEff|CapBnd|NoNewPrivs|Seccomp):' <<<"$status" >&2
+    exit 1
+  fi
 }
 
 proxy_request() {
