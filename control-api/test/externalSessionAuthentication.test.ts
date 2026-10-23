@@ -208,7 +208,7 @@ describe('external user-session authentication boundary', () => {
     const identity = validIdentity()
     const token = v2Token(identity)
     sessionMocks.renewUserSession.mockResolvedValue({
-      token: 'successor',
+      token: 'synthetic-successor',
       expiresInSeconds: 3600,
       identity,
     })
@@ -221,6 +221,6 @@ describe('external user-session authentication boundary', () => {
       renewExternalUserSession(token, {
         policy: policy({ issueV2: true, renewV2: true }),
       })
-    ).resolves.toMatchObject({ status: 'renewed', session: { token: 'successor' } })
+    ).resolves.toMatchObject({ status: 'renewed', session: { token: 'synthetic-successor' } })
   })
 })

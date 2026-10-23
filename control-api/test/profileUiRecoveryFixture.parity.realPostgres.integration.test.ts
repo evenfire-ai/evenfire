@@ -545,7 +545,7 @@ realPg('Profile UI recovery lane fixture parity on PostgreSQL 16', () => {
     await expectParity('POST', '/external/auth/password-login', {
       body: {
         email: fixtureModule.RECOVERY_USERS.logout.email,
-        password: 'definitely-not-the-password',
+        password: 'synthetic-definitely-not-the-password',
       },
     })
 

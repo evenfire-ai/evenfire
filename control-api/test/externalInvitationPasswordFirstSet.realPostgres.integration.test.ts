@@ -392,7 +392,7 @@ describeRealPostgres('external invitation password setup on real PostgreSQL', ()
     const response = await request(app())
       .post('/admin/auth/control-admin-invitations/complete')
       .send({
-        token: 'control-admin-flow-token',
+        token: 'synthetic-control-admin-flow-token',
         email: pair.email,
         username: `invitee-${randomUUID().slice(0, 8)}`,
         password: adminPassword,

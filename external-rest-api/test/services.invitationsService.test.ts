@@ -24,16 +24,16 @@ describe('invitation service error and token boundaries', () => {
       () => acceptInvitation('flow-token', 'user@example.com', 'v2'),
       () =>
         setupInvitationPassword(
-          { userId: 'user-1', email: 'user@example.com', sessionToken: 'session-token' },
+          { userId: 'user-1', email: 'user@example.com', sessionToken: 'synthetic-session-token' },
           'inv-1',
-          'valid-password'
+          'synthetic-valid-password'
         ),
       () =>
         setupInvitationPasswordWithToken(
           'flow-token',
           'user@example.com',
           'inv-1',
-          'valid-password'
+          'synthetic-valid-password'
         ),
     ]) {
       client.request.mockRejectedValueOnce(unavailable)
@@ -52,9 +52,9 @@ describe('invitation service error and token boundaries', () => {
 
     await expect(
       setupInvitationPassword(
-        { userId: 'user-1', email: 'user@example.com', sessionToken: 'session-token' },
+        { userId: 'user-1', email: 'user@example.com', sessionToken: 'synthetic-session-token' },
         'inv-1',
-        'valid-password'
+        'synthetic-valid-password'
       )
     ).resolves.toEqual({ error: 'password_already_set' })
   })
@@ -64,14 +64,14 @@ describe('invitation service error and token boundaries', () => {
       id: 'inv-1',
       email: 'user@example.com',
       passwordUpdated: true,
-      token: 'must-never-reach-browser-route',
+      token: 'synthetic-must-never-reach-browser-route',
     })
 
     const result = await setupInvitationPasswordWithToken(
       'flow-token',
       'user@example.com',
       'inv-1',
-      'valid-password'
+      'synthetic-valid-password'
     )
 
     expect(result.data).toMatchObject({ id: 'inv-1', passwordUpdated: true })

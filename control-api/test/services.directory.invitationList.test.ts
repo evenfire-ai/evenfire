@@ -31,7 +31,7 @@ describe('pending invitation list projection', () => {
             invitee_name: 'Invitee',
             email: 'invitee@example.com',
             role: 'member',
-            token: 'live-secret-capability',
+            token: 'synthetic-live-secret-capability',
             status: 'pending',
             purpose: 'member_invitation',
             created_at: new Date('2026-08-10T00:00:00Z'),

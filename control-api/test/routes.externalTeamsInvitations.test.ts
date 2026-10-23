@@ -71,7 +71,7 @@ describe('legacy external team invitation responses', () => {
 
   it('never serializes the invitation acceptance capability', async () => {
     directory.createManagedInvitationForUser.mockResolvedValueOnce({
-      invitation: { id: 'inv-1', token: 'must-never-leave-control-api' },
+      invitation: { id: 'inv-1', token: 'synthetic-must-never-leave-control-api' },
     })
 
     const response = await request(app())
@@ -80,7 +80,7 @@ describe('legacy external team invitation responses', () => {
 
     expect(response.status).toBe(200)
     expect(response.body).toEqual({ id: 'inv-1' })
-    expect(JSON.stringify(response.body)).not.toContain('must-never-leave-control-api')
+    expect(JSON.stringify(response.body)).not.toContain('synthetic-must-never-leave-control-api')
   })
 
   it('rate limits team reads before directory access', async () => {

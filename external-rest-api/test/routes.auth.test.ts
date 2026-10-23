@@ -41,7 +41,7 @@ describe('routes/auth password-login', () => {
 
     const res = await request(buildApp())
       .post('/api/v1/auth/password-login')
-      .send({ email: 'user@example.invalid', password: 'wrong-password' })
+      .send({ email: 'user@example.invalid', password: 'synthetic-wrong-password' })
 
     expect(res.status).toBe(401)
     expect(res.body).toEqual({ error: 'invalid_credentials' })
@@ -59,7 +59,7 @@ describe('routes/auth password-login', () => {
 
     const res = await request(buildApp())
       .post('/api/v1/auth/password-login')
-      .send({ email: 'retired@example.invalid', password: 'wrong-password' })
+      .send({ email: 'retired@example.invalid', password: 'synthetic-wrong-password' })
 
     expect(res.status).toBe(401)
     expect(res.body).toEqual({ error: 'invalid_credentials' })
@@ -85,7 +85,7 @@ describe('routes/auth password-login', () => {
 
     const res = await request(buildApp())
       .post('/api/v1/auth/password-login')
-      .send({ email: 'active@example.invalid', password: 'valid-password' })
+      .send({ email: 'active@example.invalid', password: 'synthetic-valid-password' })
 
     expect(res.status).toBe(401)
     expect(res.body).toEqual({ error: 'invalid_credentials' })
@@ -125,7 +125,7 @@ describe('routes/auth password-login', () => {
       .post('/api/v1/auth/password-login')
       .set('origin', 'http://localhost:3001')
       .set('x-forwarded-proto', 'https')
-      .send({ email: 'user@example.invalid', password: 'correct-password' })
+      .send({ email: 'user@example.invalid', password: 'synthetic-correct-password' })
       .expect(200)
 
     expect(res.body.token).toBeUndefined()
@@ -155,7 +155,7 @@ describe('routes/auth password-login', () => {
 
     const res = await request(buildApp())
       .post('/api/v1/auth/password-login')
-      .send({ email: 'user@example.invalid', password: 'correct-password' })
+      .send({ email: 'user@example.invalid', password: 'synthetic-correct-password' })
       .expect(200)
 
     expect(res.body.token).toBe('desktop-session-test-token')

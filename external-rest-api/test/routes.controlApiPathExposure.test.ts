@@ -112,7 +112,7 @@ async function expectProductShapedDownloadReachesStub(): Promise<void> {
   const positive = await rawRequest({
     method: 'GET',
     path: SFS_DOWNLOAD_POSITIVE,
-    token: 'session-token',
+    token: 'synthetic-session-token',
   })
 
   expect(positive.status).toBe(200)
@@ -125,7 +125,9 @@ async function expectProductShapedDownloadReachesStub(): Promise<void> {
   )
   expect(upstream.search).toBe('?path=notes%2Fplan.md')
   expect(init.method).toBe('GET')
-  expect((init.headers as Record<string, string>)['x-user-session-token']).toBe('session-token')
+  expect((init.headers as Record<string, string>)['x-user-session-token']).toBe(
+    'synthetic-session-token'
+  )
 }
 
 describe('control-api path exposure through public aliases', () => {
@@ -145,7 +147,7 @@ describe('control-api path exposure through public aliases', () => {
     const alias = await rawRequest({
       method: 'POST',
       path: RESEND_ALIAS,
-      token: 'session-token',
+      token: 'synthetic-session-token',
       correlationId: 'resend-alias-correlation',
     })
 
@@ -153,7 +155,7 @@ describe('control-api path exposure through public aliases', () => {
     expect(alias.body).toEqual(invalidRequestEnvelope('resend-alias-correlation'))
     // The alias carried a valid session: the 400 is the path guard's client
     // error, not the auth gate answering 401.
-    expect(mocks.verifyToken).toHaveBeenCalledWith('session-token')
+    expect(mocks.verifyToken).toHaveBeenCalledWith('synthetic-session-token')
     expect(mocks.controlApiFetch).not.toHaveBeenCalled()
 
     // Positive witness in the same test: the same app, router, auth middleware
@@ -161,7 +163,7 @@ describe('control-api path exposure through public aliases', () => {
     const positive = await rawRequest({
       method: 'POST',
       path: RESEND_POSITIVE,
-      token: 'session-token',
+      token: 'synthetic-session-token',
     })
 
     expect(positive.status).toBe(200)
@@ -172,7 +174,9 @@ describe('control-api path exposure through public aliases', () => {
       `${PUBLIC_API_PREFIX}/external/members/invitations/${INVITATION_ID}/resend`
     )
     expect(init.method).toBe('POST')
-    expect((init.headers as Record<string, string>)['x-user-session-token']).toBe('session-token')
+    expect((init.headers as Record<string, string>)['x-user-session-token']).toBe(
+      'synthetic-session-token'
+    )
   })
 
   it('rejects the encoded SFS resolve alias before fetch while a product-shaped download stays live', async () => {
@@ -181,13 +185,13 @@ describe('control-api path exposure through public aliases', () => {
     const alias = await rawRequest({
       method: 'GET',
       path: SFS_RESOLVE_ALIAS,
-      token: 'session-token',
+      token: 'synthetic-session-token',
       correlationId: 'sfs-resolve-alias-correlation',
     })
 
     expect(alias.status).toBe(400)
     expect(alias.body).toEqual(invalidRequestEnvelope('sfs-resolve-alias-correlation'))
-    expect(mocks.verifyToken).toHaveBeenCalledWith('session-token')
+    expect(mocks.verifyToken).toHaveBeenCalledWith('synthetic-session-token')
     expect(mocks.controlApiFetch).not.toHaveBeenCalled()
 
     await expectProductShapedDownloadReachesStub()
@@ -199,13 +203,13 @@ describe('control-api path exposure through public aliases', () => {
     const alias = await rawRequest({
       method: 'GET',
       path: SFS_CAPABILITIES_ALIAS,
-      token: 'session-token',
+      token: 'synthetic-session-token',
       correlationId: 'sfs-capabilities-alias-correlation',
     })
 
     expect(alias.status).toBe(400)
     expect(alias.body).toEqual(invalidRequestEnvelope('sfs-capabilities-alias-correlation'))
-    expect(mocks.verifyToken).toHaveBeenCalledWith('session-token')
+    expect(mocks.verifyToken).toHaveBeenCalledWith('synthetic-session-token')
     expect(mocks.controlApiFetch).not.toHaveBeenCalled()
 
     await expectProductShapedDownloadReachesStub()
@@ -217,7 +221,7 @@ describe('control-api path exposure through public aliases', () => {
     const response = await rawRequest({
       method: 'GET',
       path: SFS_ENCODED_QUESTION_MARK,
-      token: 'session-token',
+      token: 'synthetic-session-token',
     })
 
     expect(response.status).toBe(200)

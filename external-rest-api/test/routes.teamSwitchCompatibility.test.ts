@@ -39,7 +39,7 @@ describe('legacy team-switch compatibility', () => {
           sessionContract: 'v1',
         }
       }
-      if (token === 'team-b-token') {
+      if (token === 'synthetic-team-b-token') {
         return {
           userId: 'user-1',
           email: 'user@example.com',
@@ -64,10 +64,10 @@ describe('legacy team-switch compatibility', () => {
             userSessionToken: 'team-a-token',
             body: { userId: 'user-1', teamId: 'team-b', role: 'admin' },
           })
-          return { token: 'team-b-token', sessionContract: 'v1', deprecated: true }
+          return { token: 'synthetic-team-b-token', sessionContract: 'v1', deprecated: true }
         }
         if (method === 'PUT' && path === '/external/teams/team-b/name') {
-          expect(options).toMatchObject({ userSessionToken: 'team-b-token' })
+          expect(options).toMatchObject({ userSessionToken: 'synthetic-team-b-token' })
           return { id: 'team-b', name: 'Renamed Team B' }
         }
         throw new Error(`unexpected Control API request: ${method} ${path}`)
@@ -80,7 +80,7 @@ describe('legacy team-switch compatibility', () => {
       .send({ teamId: 'team-b' })
       .expect(200)
 
-    expect(switchResponse.body.token).toBe('team-b-token')
+    expect(switchResponse.body.token).toBe('synthetic-team-b-token')
 
     await request(app())
       .put('/team/name')

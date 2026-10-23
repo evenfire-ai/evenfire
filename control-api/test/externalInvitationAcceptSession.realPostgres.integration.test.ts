@@ -215,7 +215,7 @@ describeRealPostgres('external invitation acceptance session issuance on real Po
 
   it('does not issue a session on a replay after the owner set a password', async () => {
     const invitation = await createInvitation('replay-after-password')
-    const password = 'Replay-After-Password-1!'
+    const password = 'synthetic-Replay-After-Password-1!'
 
     const first = await accept(invitation.flowToken, invitation.email)
     expect(first.status).toBe(200)

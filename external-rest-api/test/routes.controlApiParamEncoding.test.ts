@@ -53,7 +53,7 @@ async function rawRequest(options: {
           path: options.path,
           method: options.method,
           headers: {
-            authorization: `Bearer ${options.token ?? 'session-token'}`,
+            authorization: `Bearer ${options.token ?? 'synthetic-session-token'}`,
             ...(payload === undefined
               ? {}
               : {
@@ -238,7 +238,7 @@ describe('caller-controlled control-api path components stay in one segment', ()
           jsonResponse({ team_id: 'B/C?D', role: 'member', team_name: 'Team B' })
         )
       }
-      return Promise.resolve(jsonResponse({ token: 'next-token' }))
+      return Promise.resolve(jsonResponse({ token: 'synthetic-next-token' }))
     })
 
     const alias = await rawRequest({

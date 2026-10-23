@@ -118,7 +118,7 @@ describe('directory privacy and atomic authorization', () => {
               invitee_name: 'Invitee',
               email: 'invitee@example.com',
               role: 'admin',
-              token: 'must-never-serialize',
+              token: 'synthetic-must-never-serialize',
               status: 'pending',
               purpose: 'member_invitation',
               ...activeInvitationWindow(),
@@ -159,7 +159,7 @@ describe('directory privacy and atomic authorization', () => {
     expect(result[0]).not.toHaveProperty('team_id')
     expect(result[0]).not.toHaveProperty('team_name')
     expect(result[0]).not.toHaveProperty('role')
-    expect(JSON.stringify(result)).not.toContain('must-never-serialize')
+    expect(JSON.stringify(result)).not.toContain('synthetic-must-never-serialize')
     expect(result[0]).toMatchObject({ canCancel: false, canResend: false })
   })
 
@@ -271,7 +271,7 @@ describe('directory privacy and atomic authorization', () => {
       invitee_name: 'Invitee',
       email: 'invitee@example.com',
       role: 'member',
-      token: 'must-never-leave-control-api',
+      token: 'synthetic-must-never-leave-control-api',
       status: 'draft',
       purpose: 'member_invitation',
       ...activeInvitationWindow(),
@@ -333,7 +333,7 @@ describe('directory privacy and atomic authorization', () => {
       invitee_name: 'Invitee',
       email: 'invitee@example.com',
       role: 'member',
-      token: 'inert-until-activation',
+      token: 'synthetic-inert-until-activation',
       status: 'draft',
       purpose: 'member_invitation',
       ...activeInvitationWindow(),
@@ -403,7 +403,7 @@ describe('directory privacy and atomic authorization', () => {
       invitee_name: 'Untrusted inviter label',
       email: 'target@example.com',
       role: 'member',
-      token: 'invitation-token',
+      token: 'synthetic-invitation-token',
       status: 'pending',
       purpose: 'member_invitation',
       ...activeInvitationWindow(),
@@ -480,7 +480,7 @@ describe('directory privacy and atomic authorization', () => {
       invitee_name: 'Target',
       email: 'target@example.com',
       role: 'member',
-      token: 'single-use-token',
+      token: 'synthetic-single-use-token',
       status: 'pending',
       purpose: 'member_invitation',
       ...activeInvitationWindow(),
@@ -574,7 +574,7 @@ describe('directory privacy and atomic authorization', () => {
       invitee_name: 'Invitee',
       email: 'invitee@example.com',
       role: 'member',
-      token: 'invitation-token',
+      token: 'synthetic-invitation-token',
       status: 'pending',
       purpose: 'member_invitation',
       ...activeInvitationWindow(),
@@ -668,7 +668,7 @@ describe('directory privacy and atomic authorization', () => {
       invitee_name: 'Target',
       email: 'target@example.com',
       role: 'member',
-      token: 'password-reset-token',
+      token: 'synthetic-password-reset-token',
       status: 'pending',
       purpose: 'password_reset',
       ...activeInvitationWindow(),
@@ -678,8 +678,15 @@ describe('directory privacy and atomic authorization', () => {
     }
 
     for (const operation of [
-      () => setInvitationPasswordForUser(TARGET, invitation.email, invitation.id, 'valid-password'),
-      () => setInvitationPasswordForEmail(invitation.email, invitation.id, 'valid-password'),
+      () =>
+        setInvitationPasswordForUser(
+          TARGET,
+          invitation.email,
+          invitation.id,
+          'synthetic-valid-password'
+        ),
+      () =>
+        setInvitationPasswordForEmail(invitation.email, invitation.id, 'synthetic-valid-password'),
     ]) {
       mocks.query.mockReset()
       mocks.query.mockImplementation(async (sql: string) => {
@@ -727,7 +734,7 @@ describe('directory privacy and atomic authorization', () => {
       invitee_name: 'New user',
       email: 'new-user@example.com',
       role: 'member',
-      token: 'member-setup-token',
+      token: 'synthetic-member-setup-token',
       status: 'pending',
       purpose: 'member_invitation',
       created_at: new Date(),
@@ -808,7 +815,12 @@ describe('directory privacy and atomic authorization', () => {
       acceptInvitationForEmail(invitation.email, invitation.token, invitation.id)
     ).resolves.toMatchObject({ data: { accepted: true, userId: TARGET, status: 'accepted' } })
     await expect(
-      setInvitationPasswordForUser(TARGET, invitation.email, invitation.id, 'valid-password')
+      setInvitationPasswordForUser(
+        TARGET,
+        invitation.email,
+        invitation.id,
+        'synthetic-valid-password'
+      )
     ).resolves.toMatchObject({ data: { passwordUpdated: true, status: 'accepted' } })
     expect(status).toBe('accepted')
     expect(passwordHash).not.toBeNull()
@@ -826,7 +838,7 @@ describe('directory privacy and atomic authorization', () => {
       invitee_name: 'Existing user',
       email: 'existing@example.com',
       role: 'member',
-      token: 'consumed-member-token',
+      token: 'synthetic-consumed-member-token',
       status: 'accepted',
       purpose: 'member_invitation',
       created_at: new Date(),
@@ -860,7 +872,7 @@ describe('directory privacy and atomic authorization', () => {
       invitee_name: 'Invitee',
       email: 'invitee@example.com',
       role: 'member',
-      token: 'invitation-token',
+      token: 'synthetic-invitation-token',
       status: 'pending',
       purpose: 'member_invitation',
       ...activeInvitationWindow(),
@@ -998,7 +1010,7 @@ describe('directory privacy and atomic authorization', () => {
   })
 
   it('changes a password and revokes every session in one conditional transaction', async () => {
-    const currentHash = await bcrypt.hash('current-password', 4)
+    const currentHash = await bcrypt.hash('synthetic-current-password', 4)
     mocks.query
       .mockResolvedValueOnce({ rows: [{ password_hash: currentHash }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ lifecycle_version: 2 }], rowCount: 1 })
@@ -1007,7 +1019,12 @@ describe('directory privacy and atomic authorization', () => {
       .mockResolvedValueOnce({ rows: [], rowCount: 2 })
 
     await expect(
-      updateUserPassword(MANAGER, 'manager@example.com', 'current-password', 'next-password')
+      updateUserPassword(
+        MANAGER,
+        'manager@example.com',
+        'synthetic-current-password',
+        'next-password'
+      )
     ).resolves.toEqual({ updated: true })
 
     expect(mocks.withTransaction).toHaveBeenCalledTimes(2)

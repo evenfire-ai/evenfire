@@ -32,7 +32,10 @@ describe('password session issuance serialization', () => {
     Object.values(mocks).forEach(mock => mock.mockReset())
     mocks.passwordLoginData.mockResolvedValue(verifiedLogin)
     mocks.beforeTransaction.mockResolvedValue(undefined)
-    mocks.issueExternalUserSession.mockResolvedValue({ token: 'v2-token', contract: 'v2' })
+    mocks.issueExternalUserSession.mockResolvedValue({
+      token: 'synthetic-v2-token',
+      contract: 'v2',
+    })
   })
 
   it('does not issue after a password change commits between verification and the row lock', async () => {
@@ -45,7 +48,7 @@ describe('password session issuance serialization', () => {
 
     const login = authenticatePasswordAndIssueSession({
       email: 'user@example.com',
-      password: 'old-password',
+      password: 'synthetic-old-password',
       contract: 'v2',
     })
     await vi.waitFor(() => expect(mocks.passwordLoginData).toHaveBeenCalledTimes(1))
@@ -63,10 +66,10 @@ describe('password session issuance serialization', () => {
     await expect(
       authenticatePasswordAndIssueSession({
         email: 'user@example.com',
-        password: 'current-password',
+        password: 'synthetic-current-password',
         contract: 'v2',
       })
-    ).resolves.toMatchObject({ issued: { token: 'v2-token', contract: 'v2' } })
+    ).resolves.toMatchObject({ issued: { token: 'synthetic-v2-token', contract: 'v2' } })
 
     expect(mocks.issueExternalUserSession).toHaveBeenCalledWith(
       expect.objectContaining({ userId: 'user-1', authenticationMethods: ['pwd'] }),

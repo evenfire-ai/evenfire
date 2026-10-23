@@ -25,15 +25,15 @@ describe('external-user client IP forwarding', () => {
       .mockResolvedValueOnce({ token: 'renewed', expiresInSeconds: 3600 })
       .mockResolvedValueOnce({ revoked: true })
 
-    await renewUserSession('session-token', clientIp)
-    await logoutUserSession('session-token', clientIp)
+    await renewUserSession('synthetic-session-token', clientIp)
+    await logoutUserSession('synthetic-session-token', clientIp)
 
     expect(client.controlApiRequest).toHaveBeenNthCalledWith(
       1,
       'POST',
       '/external/auth/session/renew',
       {
-        userSessionToken: 'session-token',
+        userSessionToken: 'synthetic-session-token',
         extraHeaders: headers,
       }
     )
@@ -42,7 +42,7 @@ describe('external-user client IP forwarding', () => {
       'POST',
       '/external/auth/session/logout',
       {
-        userSessionToken: 'session-token',
+        userSessionToken: 'synthetic-session-token',
         extraHeaders: headers,
       }
     )
@@ -50,13 +50,18 @@ describe('external-user client IP forwarding', () => {
 
   it('forwards the trusted client IP for credential and RPC issuance boundaries', async () => {
     client.controlApiRequest
-      .mockResolvedValueOnce({ token: 'google-session' })
-      .mockResolvedValueOnce({ token: 'password-session' })
-      .mockResolvedValueOnce({ token: 'rpc-token' })
+      .mockResolvedValueOnce({ token: 'synthetic-google-session' })
+      .mockResolvedValueOnce({ token: 'synthetic-password-session' })
+      .mockResolvedValueOnce({ token: 'synthetic-rpc-token' })
 
     await loginWithGoogle({ idToken: 'google-token' }, clientIp)
     await loginWithPassword('user@example.test', 'password', undefined, clientIp)
-    await issueRpcAccessToken('session-token', ['host:message:invoke'], ['agent-a'], clientIp)
+    await issueRpcAccessToken(
+      'synthetic-session-token',
+      ['host:message:invoke'],
+      ['agent-a'],
+      clientIp
+    )
 
     expect(client.controlApiRequest).toHaveBeenNthCalledWith(
       1,
@@ -81,16 +86,16 @@ describe('external-user client IP forwarding', () => {
   it('forwards the trusted client IP only on the session-token calls for team changes', async () => {
     client.controlApiRequest
       .mockResolvedValueOnce({ id: 'team-1', name: 'Team One' })
-      .mockResolvedValueOnce({ token: 'created-token' })
+      .mockResolvedValueOnce({ token: 'synthetic-created-token' })
       .mockResolvedValueOnce({ team_id: 'team-2', team_name: 'Team Two', role: 'member' })
-      .mockResolvedValueOnce({ token: 'switched-token' })
+      .mockResolvedValueOnce({ token: 'synthetic-switched-token' })
 
     await createTeamForUser(
-      { userId: 'user-1', email: 'user@example.test', sessionToken: 'session-token' },
+      { userId: 'user-1', email: 'user@example.test', sessionToken: 'synthetic-session-token' },
       'Team One',
       clientIp
     )
-    await switchTeam('user-1', 'user@example.test', 'team-2', 'session-token', clientIp)
+    await switchTeam('user-1', 'user@example.test', 'team-2', 'synthetic-session-token', clientIp)
 
     expect(client.controlApiRequest).toHaveBeenNthCalledWith(
       2,

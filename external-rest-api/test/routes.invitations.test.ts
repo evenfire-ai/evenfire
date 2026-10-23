@@ -60,10 +60,10 @@ describe('routes/invitations', () => {
       .post('/invitations/password')
       .set('x-evenfire-session-contract', 'v2')
       .send({
-        token: 'invitation-link-token',
+        token: 'synthetic-invitation-link-token',
         email: 'invitee@example.com',
         invitationId: 'inv-1',
-        password: 'user123!',
+        password: 'synthetic-user123!',
       })
       .expect(200)
 
@@ -77,10 +77,10 @@ describe('routes/invitations', () => {
     expect(String(res.headers['set-cookie'])).toContain('HttpOnly')
     expect(authTokenMock.verifyToken).not.toHaveBeenCalled()
     expect(invitationsServiceMock.getInvitationByToken).toHaveBeenCalledWith(
-      'invitation-link-token'
+      'synthetic-invitation-link-token'
     )
     expect(invitationsServiceMock.acceptInvitation).toHaveBeenCalledWith(
-      'invitation-link-token',
+      'synthetic-invitation-link-token',
       'invitee@example.com',
       'v2'
     )
@@ -91,7 +91,7 @@ describe('routes/invitations', () => {
         sessionToken: 'synthetic-invited-session-token',
       },
       'inv-1',
-      'user123!'
+      'synthetic-user123!'
     )
     expect(invitationsServiceMock.setupInvitationPasswordWithToken).not.toHaveBeenCalled()
   })
@@ -422,8 +422,8 @@ describe('routes/invitations', () => {
   })
 
   it.each([
-    ['bearer header', 'authorization', 'Bearer stale-token'],
-    ['profile session cookie', 'cookie', 'profile_session=stale-token'],
+    ['bearer header', 'authorization', 'Bearer synthetic-stale-token'],
+    ['profile session cookie', 'cookie', 'profile_session=synthetic-stale-token'],
   ])(
     'fails closed with 401 when an invalid %s is presented alongside an invitation link',
     async (_source, header, value) => {
@@ -452,18 +452,18 @@ describe('routes/invitations', () => {
         .set('x-forwarded-for', '203.0.113.20')
         .set(header, value)
         .send({
-          token: 'invitation-link-token',
+          token: 'synthetic-invitation-link-token',
           email: 'invitee@example.com',
           invitationId: 'inv-1',
-          password: 'user123!',
+          password: 'synthetic-user123!',
         })
         .expect(401)
 
       expect(res.body).toEqual({ error: 'Unauthorized' })
       // Liveness: the presented credential was verified and rejected.
-      expect(authTokenMock.verifyToken).toHaveBeenCalledWith('stale-token')
+      expect(authTokenMock.verifyToken).toHaveBeenCalledWith('synthetic-stale-token')
       expect(invitationsServiceMock.getInvitationByToken).toHaveBeenCalledWith(
-        'invitation-link-token'
+        'synthetic-invitation-link-token'
       )
       expect(invitationsServiceMock.acceptInvitation).not.toHaveBeenCalled()
       expect(invitationsServiceMock.setupInvitationPassword).not.toHaveBeenCalled()
@@ -516,17 +516,17 @@ describe('routes/invitations', () => {
       for (const [name, value] of Object.entries(headers)) pending = pending.set(name, value)
       const res = await pending
         .send({
-          token: 'invitation-link-token',
+          token: 'synthetic-invitation-link-token',
           email: 'invitee@example.com',
           invitationId: 'inv-1',
-          password: 'user123!',
+          password: 'synthetic-user123!',
         })
         .expect(401)
 
       expect(res.body).toEqual({ error: 'Unauthorized' })
       // Liveness: the route reached the credential decision.
       expect(invitationsServiceMock.getInvitationByToken).toHaveBeenCalledWith(
-        'invitation-link-token'
+        'synthetic-invitation-link-token'
       )
       expect(authTokenMock.verifyToken).not.toHaveBeenCalled()
       expect(invitationsServiceMock.acceptInvitation).not.toHaveBeenCalled()
@@ -552,7 +552,7 @@ describe('routes/invitations', () => {
       .set('x-forwarded-for', '203.0.113.37')
       .set('authorization', 'Bearer fresh-session-token')
       .set('cookie', 'profile_session=synthetic-cookie-session')
-      .send({ invitationId: 'inv-1', password: 'user123!' })
+      .send({ invitationId: 'inv-1', password: 'synthetic-user123!' })
       .expect(200)
 
     expect(authTokenMock.verifyToken).toHaveBeenCalledTimes(1)
@@ -577,7 +577,7 @@ describe('routes/invitations', () => {
       .set('authorization', 'Bearer fresh-session-token')
       .send({
         invitationId: 'inv-1',
-        password: 'user123!',
+        password: 'synthetic-user123!',
       })
       .expect(200)
 
@@ -590,7 +590,7 @@ describe('routes/invitations', () => {
         sessionToken: 'fresh-session-token',
       },
       'inv-1',
-      'user123!'
+      'synthetic-user123!'
     )
   })
 
@@ -609,7 +609,7 @@ describe('routes/invitations', () => {
 
     const res = await request(makeApp())
       .post('/invitations/accept')
-      .send({ token: 'invitation-link-token', email: 'invitee@example.com' })
+      .send({ token: 'synthetic-invitation-link-token', email: 'invitee@example.com' })
       .expect(200)
 
     expect(res.body.token).toBeUndefined()
@@ -632,7 +632,7 @@ describe('routes/invitations', () => {
           teamId: 'team-1',
           teamName: 'Team 1',
           role: 'member',
-          token: 'first-session-token',
+          token: 'synthetic-first-session-token',
         },
       })
       .mockResolvedValueOnce({
@@ -650,16 +650,18 @@ describe('routes/invitations', () => {
     const first = await request(makeApp())
       .post('/invitations/accept')
       .set('x-forwarded-for', '198.51.100.201')
-      .send({ token: 'invitation-link-token', email: 'invitee@example.com' })
+      .send({ token: 'synthetic-invitation-link-token', email: 'invitee@example.com' })
       .expect(200)
     const replay = await request(makeApp())
       .post('/invitations/accept')
       .set('x-forwarded-for', '198.51.100.202')
-      .send({ token: 'invitation-link-token', email: 'invitee@example.com' })
+      .send({ token: 'synthetic-invitation-link-token', email: 'invitee@example.com' })
       .expect(200)
 
     // Positive control: the first acceptance still publishes the session.
-    expect(String(first.headers['set-cookie'])).toContain('profile_session=first-session-token')
+    expect(String(first.headers['set-cookie'])).toContain(
+      'profile_session=synthetic-first-session-token'
+    )
     expect(first.body).not.toHaveProperty('replay')
     expect(replay.body).toMatchObject({
       accepted: true,
@@ -699,7 +701,7 @@ describe('routes/invitations', () => {
           teamId: null,
           teamName: null,
           role: 'member',
-          token: 'invited-session-token',
+          token: 'synthetic-invited-session-token',
         },
       })
     invitationsServiceMock.setupInvitationPassword.mockResolvedValue({
@@ -710,10 +712,10 @@ describe('routes/invitations', () => {
       .post('/invitations/password')
       .set('x-forwarded-for', '198.51.100.203')
       .send({
-        token: 'accepted-invitation-link',
+        token: 'synthetic-accepted-invitation-link',
         email: 'invitee@example.com',
         invitationId: 'inv-1',
-        password: 'user123!',
+        password: 'synthetic-user123!',
       })
       .expect(400)
 
@@ -733,10 +735,10 @@ describe('routes/invitations', () => {
       .post('/invitations/password')
       .set('x-forwarded-for', '198.51.100.204')
       .send({
-        token: 'pending-invitation-link',
+        token: 'synthetic-pending-invitation-link',
         email: 'invitee@example.com',
         invitationId: 'inv-1',
-        password: 'user123!',
+        password: 'synthetic-user123!',
       })
       .expect(200)
 
@@ -744,10 +746,10 @@ describe('routes/invitations', () => {
       {
         userId: 'user-1',
         email: 'invitee@example.com',
-        sessionToken: 'invited-session-token',
+        sessionToken: 'synthetic-invited-session-token',
       },
       'inv-1',
-      'user123!'
+      'synthetic-user123!'
     )
     expect(String(pending.headers['set-cookie'])).toContain('profile_session=;')
     expect(invitationsServiceMock.acceptInvitation).toHaveBeenCalledTimes(2)
@@ -780,7 +782,7 @@ describe('routes/invitations', () => {
           accepted: true,
           userId: 'user-1',
           email: 'invitee@example.com',
-          token: 'invited-session-token',
+          token: 'synthetic-invited-session-token',
         },
       }
     })
@@ -794,7 +796,7 @@ describe('routes/invitations', () => {
         .post('/invitations/password')
         .set('x-forwarded-for', `198.51.100.${210 + index}`)
         .send({
-          token: 'pending-invitation-link',
+          token: 'synthetic-pending-invitation-link',
           email: 'invitee@example.com',
           invitationId: 'inv-1',
           password,
@@ -817,10 +819,10 @@ describe('routes/invitations', () => {
       .post('/invitations/password')
       .set('x-forwarded-for', '198.51.100.220')
       .send({
-        token: 'pending-invitation-link',
+        token: 'synthetic-pending-invitation-link',
         email: 'invitee@example.com',
         invitationId: 'inv-1',
-        password: 'user123!',
+        password: 'synthetic-user123!',
       })
       .expect(200)
     expect(String(accepted.headers['set-cookie'])).toContain('profile_session=;')
@@ -831,10 +833,10 @@ describe('routes/invitations', () => {
       {
         userId: 'user-1',
         email: 'invitee@example.com',
-        sessionToken: 'invited-session-token',
+        sessionToken: 'synthetic-invited-session-token',
       },
       'inv-1',
-      'user123!'
+      'synthetic-user123!'
     )
 
     // The consumed state is real: the same fallback now receives the replay
@@ -843,10 +845,10 @@ describe('routes/invitations', () => {
       .post('/invitations/password')
       .set('x-forwarded-for', '198.51.100.221')
       .send({
-        token: 'pending-invitation-link',
+        token: 'synthetic-pending-invitation-link',
         email: 'invitee@example.com',
         invitationId: 'inv-1',
-        password: 'user123!',
+        password: 'synthetic-user123!',
       })
       .expect(400)
     expect(replayed.body).toEqual({
@@ -877,7 +879,7 @@ describe('routes/invitations', () => {
     invitationsServiceMock.acceptInvitation
       .mockResolvedValueOnce(acceptedWithoutSession)
       .mockResolvedValueOnce({
-        data: { ...acceptedWithoutSession.data, token: 'invited-session-token' },
+        data: { ...acceptedWithoutSession.data, token: 'synthetic-invited-session-token' },
       })
     invitationsServiceMock.setupInvitationPassword.mockResolvedValue({
       data: { id: 'inv-1', passwordUpdated: true },
@@ -887,10 +889,10 @@ describe('routes/invitations', () => {
       .post('/invitations/password')
       .set('x-forwarded-for', '198.51.100.205')
       .send({
-        token: 'pending-invitation-link',
+        token: 'synthetic-pending-invitation-link',
         email: 'invitee@example.com',
         invitationId: 'inv-1',
-        password: 'user123!',
+        password: 'synthetic-user123!',
       })
       .expect(502)
 
@@ -904,10 +906,10 @@ describe('routes/invitations', () => {
       .post('/invitations/password')
       .set('x-forwarded-for', '198.51.100.206')
       .send({
-        token: 'pending-invitation-link',
+        token: 'synthetic-pending-invitation-link',
         email: 'invitee@example.com',
         invitationId: 'inv-1',
-        password: 'user123!',
+        password: 'synthetic-user123!',
       })
       .expect(200)
     expect(invitationsServiceMock.setupInvitationPassword).toHaveBeenCalledTimes(1)
@@ -919,7 +921,7 @@ describe('routes/invitations', () => {
       .post('/invitations/password')
       .send({
         invitationId: 'inv-1',
-        password: 'user123!',
+        password: 'synthetic-user123!',
       })
       .expect(401)
 

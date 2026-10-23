@@ -88,71 +88,6 @@ safe_source_paths = {
 source_fixture_path = re.compile(
     r"(?i)(?:^|/)(?:tests?|__tests__)/|(?:\.test|\.spec|\.integration\.test)\.(?:cjs|cts|js|jsx|mjs|mts|ts|tsx)$"
 )
-safe_fixture_literals = {
-    "body-user-token",
-    "consumed-member-token",
-    "correct-password",
-    "created-token",
-    "current-password",
-    "flow-token",
-    "google-session",
-    "google-session-jwt",
-    "inert-until-activation",
-    "invitation-link-token",
-    "invitation-token",
-    "live-secret-capability",
-    "member-registration-flow-token",
-    "member-setup-token",
-    "must-never-leave-control-api",
-    "must-never-reach-browser-route",
-    "must-never-serialize",
-    "old-password",
-    "one-use-flow",
-    "password-reset-flow",
-    "password-reset-token",
-    "password-session",
-    "replacement-token",
-    "rotated-session",
-    "rpc-token",
-    "session-token",
-    "single-use-token",
-    "source-token",
-    "stale-token",
-    "successor",
-    "switched-token",
-    "team-b-token",
-    "unexpected-token",
-    "user123!",
-    "v2-token",
-    "valid-password",
-    "wrong-password",
-}
-contract_control_values = {
-    "private PostgreSQL URL": (
-        "postgresql://postgres@127.0.0.1/postgres",
-        "postgres://secret@internal/var/run/service.sock",
-        "DATABASE_URL=%s://private-host:5432/db",
-        "DATABASE_URL=postgresql://db_user:prod_password@127.0.0.1/postgres",
-    ),
-    "credentialed PostgreSQL URL": (
-        "DATABASE_URL=postgresql://db_user:prod_password@127.0.0.1/postgres",
-    ),
-    "private runtime URL": (
-        "PUBLIC_CALLBACK=http://127.0.0.1:18443/status",
-    ),
-    "credential assignment": (
-        "token: 'replacement-token'",
-        "password: 'valid-password'",
-        'password: "ProdCustomerPassword123"',
-    ),
-    "bearer token": (
-        "Authorization: Bearer abcdefghijklmnopqrstuvwxyz1234567890",
-    ),
-    "private key": (
-        "-----BEGIN PRIVATE KEY-----",
-    ),
-}
-
 def is_source_fixture(path: str) -> bool:
     lowered = path.lower()
     return bool(source_fixture_path.search(lowered))
@@ -177,22 +112,6 @@ def is_synthetic_postgres_fixture_url(text: str) -> bool:
     except ValueError:
         return False
 
-def safe_contract_control_value(
-    path: str, reason: str, value: str, match: re.Match[str]
-) -> bool:
-    if path not in {
-        "scripts/tests/test-minikube-t2-contract.sh",
-        "scripts/tests/test-minikube-t2-public-boundary.sh",
-    }:
-        return False
-    for control in contract_control_values.get(reason, ()):
-        offset = value.find(control)
-        while offset >= 0:
-            if offset <= match.start() and match.end() <= offset + len(control):
-                return True
-            offset = value.find(control, offset + 1)
-    return False
-
 def safe_source_fixture_value(path: str, reason: str, value: str, match: re.Match[str]) -> bool:
     if not is_source_fixture(path):
         return False
@@ -208,9 +127,6 @@ def safe_source_fixture_value(path: str, reason: str, value: str, match: re.Matc
         if is_credentialed_postgres_url(matched_url):
             return False
         return is_synthetic_postgres_fixture_url(matched_url)
-    if reason == "credential assignment":
-        literal = match.group(1) if match.lastindex else ""
-        return literal in safe_fixture_literals
     return False
 
 for line in diff.splitlines():
@@ -352,8 +268,6 @@ for line in diff.splitlines():
             ):
                 continue
             if safe_source_fixture_value(current, reason, value, match):
-                continue
-            if safe_contract_control_value(current, reason, value, match):
                 continue
             flagged = True
             break

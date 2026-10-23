@@ -53,7 +53,7 @@ vi.mock('../src/middleware/externalSessionAuth.js', () => ({
     next()
   },
 }))
-const tokenSigner = vi.hoisted(() => ({ sign: vi.fn(() => 'session-token') }))
+const tokenSigner = vi.hoisted(() => ({ sign: vi.fn(() => 'synthetic-session-token') }))
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   signExternalSessionToken: tokenSigner.sign,
 }))
@@ -149,13 +149,13 @@ describe('external invitation routes when the hub is unavailable', () => {
 
     const first = await request(app())
       .post('/external/invitations/accept')
-      .send({ email: 'a@b.c', token: 'one-use-flow' })
+      .send({ email: 'a@b.c', token: 'synthetic-one-use-flow' })
     const replay = await request(app())
       .post('/external/invitations/accept')
-      .send({ email: 'a@b.c', token: 'one-use-flow' })
+      .send({ email: 'a@b.c', token: 'synthetic-one-use-flow' })
 
     expect(first.status).toBe(200)
-    expect(first.body.token).toBe('session-token')
+    expect(first.body.token).toBe('synthetic-session-token')
     expect(first.body).not.toHaveProperty('replay')
     expect(replay.status).toBe(200)
     expect(replay.body).toEqual(replayData)
@@ -181,7 +181,7 @@ describe('external invitation routes when the hub is unavailable', () => {
 
     const res = await request(app())
       .post('/external/invitations/accept')
-      .send({ email: 'a@b.c', token: 'not-pending-flow' })
+      .send({ email: 'a@b.c', token: 'synthetic-not-pending-flow' })
 
     expect(res.status).toBe(400)
     expect(res.body).toEqual({ error: 'not_pending' })
@@ -225,9 +225,9 @@ describe('external invitation routes when the hub is unavailable', () => {
 
     const response = await request(app()).post('/external/invitations/password-token').send({
       email: 'a@b.c',
-      token: 'member-registration-flow-token',
+      token: 'synthetic-member-registration-flow-token',
       invitationId: '00000000-0000-4000-8000-000000000200',
-      password: 'valid-password',
+      password: 'synthetic-valid-password',
     })
 
     expect(response.status).toBe(200)
@@ -239,7 +239,7 @@ describe('external invitation routes when the hub is unavailable', () => {
     expect(directory.setInvitationPasswordForEmail).toHaveBeenCalledWith(
       'a@b.c',
       '00000000-0000-4000-8000-000000000200',
-      'valid-password'
+      'synthetic-valid-password'
     )
     expect(tokenSigner.sign).not.toHaveBeenCalled()
   })
@@ -258,9 +258,9 @@ describe('external invitation routes when the hub is unavailable', () => {
 
     const response = await request(app()).post('/external/invitations/password-token').send({
       email: 'a@b.c',
-      token: 'member-registration-flow-token',
+      token: 'synthetic-member-registration-flow-token',
       invitationId: '00000000-0000-4000-8000-000000000200',
-      password: 'valid-password',
+      password: 'synthetic-valid-password',
     })
 
     expect(response.status).toBe(403)

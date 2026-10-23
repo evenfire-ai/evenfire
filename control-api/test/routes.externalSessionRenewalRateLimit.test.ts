@@ -44,7 +44,7 @@ describe('external session route error boundaries and renewal rate limiting', ()
     sessions.renewExternalUserSession.mockResolvedValue({
       status: 'renewed',
       session: {
-        token: 'rotated-session',
+        token: 'synthetic-rotated-session',
         expiresInSeconds: 3600,
         identity: { absoluteExpiresAt: new Date('2030-01-01T00:00:00.000Z') },
       },
@@ -80,13 +80,13 @@ describe('external session route error boundaries and renewal rate limiting', ()
     const response = await request(app())
       .post('/external/auth/session/renew')
       .set('x-forwarded-for', '203.0.113.44')
-      .send({ token: 'session-token' })
+      .send({ token: 'synthetic-session-token' })
 
     expect(response.status).toBe(429)
     expect(response.body).toMatchObject({ error: { code: 'rate_limited' } })
     expect(response.headers['retry-after']).toBeDefined()
     expect(sessions.authenticateExternalUserSession).toHaveBeenCalledWith(
-      'session-token',
+      'synthetic-session-token',
       expect.objectContaining({ purpose: 'renew' })
     )
     expect(limiter.checkAndIncrement).toHaveBeenNthCalledWith(
@@ -106,7 +106,7 @@ describe('external session route error boundaries and renewal rate limiting', ()
     try {
       const response = await request(app())
         .post('/external/auth/verify')
-        .send({ token: 'session-token' })
+        .send({ token: 'synthetic-session-token' })
 
       expect(response.status).toBe(500)
       expect(response.body).toMatchObject({ error: 'Internal Server Error' })
@@ -133,7 +133,7 @@ describe('external session route error boundaries and renewal rate limiting', ()
 
     const response = await request(app())
       .post('/external/auth/verify')
-      .send({ token: 'session-token' })
+      .send({ token: 'synthetic-session-token' })
 
     expect(response.status).toBe(503)
     expect(response.body).toEqual({ error: 'session_backend_unavailable', retryAfterSeconds: 2 })
@@ -146,7 +146,7 @@ describe('external session route error boundaries and renewal rate limiting', ()
   it('returns the authenticated claims on successful session verification', async () => {
     const response = await request(app())
       .post('/external/auth/verify')
-      .send({ token: 'session-token' })
+      .send({ token: 'synthetic-session-token' })
 
     expect(response.status).toBe(200)
     expect(response.body).toEqual({
@@ -169,7 +169,7 @@ describe('external session route error boundaries and renewal rate limiting', ()
 
       const response = await request(app())
         .post('/external/auth/verify')
-        .send({ token: 'session-token' })
+        .send({ token: 'synthetic-session-token' })
 
       expect(response.status).toBe(expectedStatus)
       expect(response.body.error.code).toBe(expectedCode)
