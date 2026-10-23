@@ -789,26 +789,26 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
   }, 25_000)
 
   it('converges accepted legacy aliases without replaying historical bodies', async () => {
-    const entry = PR1_ONLINE_INDEX_PLAN[0]!
-    const before = await databasePool.query<{ oid: string }>(
-      'SELECT $1::regclass::oid::text AS oid',
-      [entry.name]
-    )
-    await removeMigrationReceiptForReplay(databasePool, entry.migrationVersion)
+    // 0139 is a PR2 descriptor that still owns its published aliases after the
+    // PR #334 fold. The retired PR1 alias 0101_user_access_foundation no longer
+    // belongs to 0130, so reusing it would replay the 0130 body instead of
+    // accepting an alias.
+    const canonicalVersion = '0139_pr2_readiness_evidence'
+    const acceptedLegacyVersion = '0119_pr2_readiness_evidence'
+    await removeMigrationReceiptForReplay(databasePool, canonicalVersion)
     await databasePool.query(
-      `INSERT INTO schema_migrations(version)
-       VALUES ('0101_user_access_foundation')
-       ON CONFLICT DO NOTHING`
+      `INSERT INTO schema_migrations(version) VALUES ($1) ON CONFLICT DO NOTHING`,
+      [acceptedLegacyVersion]
     )
 
-    await initDb({ connect: () => databasePool.connect() })
-
-    const after = await databasePool.query<{ oid: string }>(
-      'SELECT $1::regclass::oid::text AS oid',
-      [entry.name]
+    const run = await withMigrationApplyObserver(new Set([canonicalVersion]), async () =>
+      initDb({ connect: () => databasePool.connect() })
     )
-    expect(after.rows[0]?.oid).toBe(before.rows[0]?.oid)
-    expect(await versions(databasePool)).toContain(entry.migrationVersion)
+
+    expect(run.applyCounts.get(canonicalVersion) ?? 0).toBe(0)
+    const applied = await versions(databasePool)
+    expect(applied).toContain(acceptedLegacyVersion)
+    expect(applied).toContain(canonicalVersion)
   })
 
   it('converges every synchronized PR2 legacy identity through the canonical runner', async () => {
