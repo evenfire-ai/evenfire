@@ -46,12 +46,15 @@ function sanitizeString(input: unknown): string {
 
 // The renderer names each sandbox-ui open so it can tell events of the view
 // that open mounted from those of a view it replaced (same appRef on a
-// relaunch). The id is echoed verbatim on IPC events, so bound it here.
-const SANDBOX_UI_LAUNCH_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/
+// relaunch). Main outlives renderer reloads and keeps reporting views opened by
+// an earlier renderer, so the id must be unique across renderer lifetimes: a
+// random UUID, never a counter. It is echoed verbatim on IPC events.
+const SANDBOX_UI_LAUNCH_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 function parseSandboxUiLaunchId(input: unknown): string {
   if (typeof input !== 'string' || !SANDBOX_UI_LAUNCH_ID_PATTERN.test(input)) {
-    throw new Error('launchId must be 1-64 characters of [A-Za-z0-9-]')
+    throw new Error('launchId must be a UUID')
   }
   return input
 }
@@ -2072,6 +2075,11 @@ export function registerIpcHandlers(service: AppService): void {
     return { x, y, width, height, dpr }
   }
 
+  // `sandboxUi:open` and `sandboxUi:close` must reach the AppService queue with
+  // no `await` before it, in both handlers: a close the renderer sends right
+  // after an open for the same launch would otherwise be enqueued first and
+  // miss the view the open then mounts. `sandboxUi:reload` follows the same
+  // rule, so main serves it in the order the renderer sent it.
   ipcMain.handle(
     'sandboxUi:open',
     async (
@@ -2099,6 +2107,7 @@ export function registerIpcHandlers(service: AppService): void {
       const bounds = parseBounds(payload?.bounds)
       const appRef = `${recipeNs}/${recipeName}`
       await service.openSandboxUi({
+        launchId,
         recipeNs,
         recipeName,
         // Human title from the installed recipe, used verbatim in consent
@@ -2109,13 +2118,22 @@ export function registerIpcHandlers(service: AppService): void {
         routePath: typeof payload?.routePath === 'string' ? payload.routePath : undefined,
         bounds,
         parentWindow,
-        onClosed: () => {
+        // Only the window the view was mounted in owns it.
+        onReleased: released => {
           if (parentWindow.isDestroyed()) return
-          parentWindow.webContents.send('sandboxUi:closed', { appRef, launchId })
+          parentWindow.webContents.send('sandboxUi:released', {
+            launchId: released.launchId,
+            reason: released.reason,
+            location: released.location,
+          })
         },
         onRefreshError: message => {
           if (parentWindow.isDestroyed()) return
           parentWindow.webContents.send('sandboxUi:refreshError', { appRef, launchId, message })
+        },
+        onRefreshRecovered: () => {
+          if (parentWindow.isDestroyed()) return
+          parentWindow.webContents.send('sandboxUi:refreshRecovered', { appRef, launchId })
         },
         onTitleChanged: title => {
           if (parentWindow.isDestroyed()) return
@@ -2125,23 +2143,21 @@ export function registerIpcHandlers(service: AppService): void {
     }
   )
 
-  ipcMain.handle('sandboxUi:close', async event => {
+  // The launch id is mandatory: a close that names no launch, or a malformed
+  // one, must not degrade into closing whatever view is live, which another
+  // launch may own by the time the queue reaches it.
+  ipcMain.handle('sandboxUi:close', async (event, payload?: { launchId?: unknown } | null) => {
     assertTrustedSender(event)
-    await service.closeSandboxUi()
+    const launchId = parseSandboxUiLaunchId(payload?.launchId)
+    await service.closeSandboxUi({ launchId })
   })
 
-  ipcMain.handle('sandboxUi:reload', async event => {
+  // Same launch-id contract as close: a reload that names no launch must not
+  // degrade into reloading whatever view is live.
+  ipcMain.handle('sandboxUi:reload', async (event, payload?: { launchId?: unknown } | null) => {
     assertTrustedSender(event)
-    await service.reloadSandboxUi()
-  })
-
-  // Read the active embed's current in-app route so the renderer can persist it
-  // on the app tab before deactivation (mini-spec 05 §1). Returns null when no
-  // embed is mounted; rejects when the current URL is outside the recipe prefix
-  // (the renderer treats a rejection as "fall back to the default route").
-  ipcMain.handle('sandboxUi:getLocation', async event => {
-    assertTrustedSender(event)
-    return service.getSandboxUiLocation()
+    const launchId = parseSandboxUiLaunchId(payload?.launchId)
+    await service.reloadSandboxUi({ launchId })
   })
 
   ipcMain.handle('sandboxUi:copyDeepLink', async (event, payload: { teamId?: unknown }) => {
