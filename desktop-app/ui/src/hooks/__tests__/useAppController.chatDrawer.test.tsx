@@ -551,8 +551,8 @@ function chatTabIdOf(vm: ReturnType<typeof useAppController>, agentRef: string):
 
 /**
  * The chat drawer over Files when the Host of its conversation is held. The
- * drawer is never the stored active tab, so the keep rule has to come from the
- * Host the hold interrupted, not from the tab strip.
+ * drawer is never the stored active tab, so the keep rule comes from the Host
+ * of the last chat selection or drawer request, not from the tab strip.
  */
 describe('useAppController — chat drawer over a held Host', () => {
   afterEach(() => {

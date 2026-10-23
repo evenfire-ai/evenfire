@@ -410,7 +410,8 @@ export function useAppController() {
   )
   // ChatPage keeps its conversation only while the Host has a Retry row: held
   // and still in the catalog. The Host is the focused chat tab's, or, for the
-  // chat drawer, the Host of the last chat selection. The drawer is available
+  // chat drawer, the Host of the last chat selection or drawer request for a
+  // held Host, until the user closes that Host's last chat tab. The drawer is available
   // over any stored non-chat tab, the Apps picker included, so the picker does
   // not end the drawer's keep.
   // Holds reset with the authority scope, so a team switch never keeps a chat
