@@ -9,7 +9,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { execFile } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { constants, existsSync } from 'node:fs'
 import { mkdtemp, open, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -154,11 +154,21 @@ async function extractWithSystemUnzip(archivePath: string): Promise<Record<strin
   await execFileAsync('unzip', ['-o', '-q', archivePath, '-d', target])
   const out: Record<string, string> = {}
   const walk = async (dir: string, prefix: string) => {
-    for (const name of await readdir(dir)) {
-      const full = join(dir, name)
-      const info = await stat(full)
-      if (info.isDirectory()) await walk(full, `${prefix}${name}/`)
-      else out[`${prefix}${name}`] = (await readFile(full)).toString('utf8')
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        await walk(full, `${prefix}${entry.name}/`)
+      } else {
+        const file = await open(full, constants.O_RDONLY | constants.O_NOFOLLOW)
+        try {
+          // Inspect and read the same open file, so replacing its path cannot
+          // change the file between the check and the read.
+          expect((await file.stat()).isFile()).toBe(true)
+          out[`${prefix}${entry.name}`] = await file.readFile('utf8')
+        } finally {
+          await file.close()
+        }
+      }
     }
   }
   await walk(target, '')

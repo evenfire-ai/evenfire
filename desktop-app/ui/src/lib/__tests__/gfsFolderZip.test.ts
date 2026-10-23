@@ -1024,6 +1024,7 @@ describe('createGfsFolderZip', () => {
       { resourceId: 'root', drive: 'main', name: 'Emoji' },
       { deps: emojiDeps }
     )
+    expect(emojiResult.fileCount).toBe(1)
     const emojiName = streamEntryNames(emojiDeps.zipStreamRecord)[0]!
     expect(emojiName.endsWith('\uFFFD')).toBe(false)
     expect(new TextEncoder().encode(emojiName.slice('Emoji/'.length)).length).toBeLessThanOrEqual(
