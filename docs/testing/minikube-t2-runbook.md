@@ -393,6 +393,11 @@ non-T2 scope guard.
   `testResults[].name` set must exactly equal the selected physical files, and
   the Vitest process must also exit zero; a green reporter cannot hide
   teardown, worker, OOM, signal, or partial-selection failure.
+  Control API selection uses the same validated `publicPostgres` census as CI
+  in `tests/contracts/password-recovery-suites.json`. Both private producer
+  suites must still exist, but their execution is a separate
+  [private PostgreSQL lane](password-recovery-private-postgres.md), reported as
+  `NOT_RUN` by T1. A T1 pass does not verify Member Registration integration.
 * **T2** — the final exact-head preflight inside `make minikube-t2` (or
   `make minikube-t2-runtime`): the marker matches this worktree/`HEAD`, the
   image manifest is current, PostgreSQL and required namespaces/Services are
