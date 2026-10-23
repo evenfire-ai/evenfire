@@ -1085,14 +1085,17 @@ describe('App deep-link orchestration', () => {
     })
   })
 
-  afterEach(async () => {
+  async function cleanupAppDeepLinkSuite(): Promise<void> {
     cleanup()
     unmountRealApp = null
-    expect(document.body.childElementCount).toBe(0)
+    const bodyChildElementCount = document.body.childElementCount
     vi.useRealTimers()
     resetComposerDraftStore()
     await main.dispose()
-  })
+    expect(bodyChildElementCount).toBe(0)
+  }
+
+  afterEach(cleanupAppDeepLinkSuite)
 
   // The deep link's launch reached main (`times` opens so far). Main mounts it
   // unless the test told the fake to hold or fail that open.
@@ -3095,5 +3098,27 @@ describe('App deep-link orchestration', () => {
     })
     // The pending link stays with main for the next renderer to pick up.
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+  })
+
+  it('resets suite state even when the body-empty postcondition fails', async () => {
+    const dispose = vi.spyOn(main, 'dispose')
+    const chatId = 'teardown-failure-chat'
+    const agentRef = 'teardown-failure-agent'
+    const leakedChild = document.createElement('div')
+    setComposerDraft(chatId, 'draft that teardown must clear', agentRef)
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    document.body.append(leakedChild)
+
+    try {
+      await expect(cleanupAppDeepLinkSuite()).rejects.toThrow()
+      expect(vi.isFakeTimers()).toBe(false)
+      expect(getComposerDraft(chatId, agentRef)).toBe('')
+      expect(dispose).toHaveBeenCalledOnce()
+    } finally {
+      leakedChild.remove()
+      if (vi.isFakeTimers()) vi.useRealTimers()
+      resetComposerDraftStore()
+      if (dispose.mock.calls.length === 0) await main.dispose()
+    }
   })
 })
