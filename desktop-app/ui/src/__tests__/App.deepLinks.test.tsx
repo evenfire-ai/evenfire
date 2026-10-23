@@ -3,7 +3,7 @@ import { type ReactNode, createElement, useEffect, useLayoutEffect, useReducer }
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, render, waitFor } from '@testing-library/react'
+import { act, cleanup, render, waitFor } from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '@clerum/desktop-app-links'
 import type { WorkspaceTabStripProps } from '@components/WorkspaceTabStrip/types'
@@ -1086,9 +1086,10 @@ describe('App deep-link orchestration', () => {
   })
 
   afterEach(async () => {
-    vi.useRealTimers()
-    unmountRealApp?.()
+    cleanup()
     unmountRealApp = null
+    expect(document.body.childElementCount).toBe(0)
+    vi.useRealTimers()
     resetComposerDraftStore()
     await main.dispose()
   })
