@@ -13,16 +13,6 @@ const migrationTestPath = path.join(
 
 const producers = [
   {
-    environment: 'TASK106_R61_B1_HISTORICAL_SOURCE_DIR',
-    commit: 'HISTORICAL_TASK106_SOURCE_COMMIT',
-    checkout: 'historical-task106',
-  },
-  {
-    environment: 'TASK106_R61_B1_PUBLISHED_PR1_SOURCE_DIR',
-    commit: 'PUBLISHED_PR1_SOURCE_COMMIT',
-    checkout: 'published-pr1',
-  },
-  {
     environment: 'TASK106_R61_B1_DEV_SOURCE_DIR',
     commit: 'OBSERVED_DEV_SOURCE_COMMIT',
     checkout: 'observed-dev',
