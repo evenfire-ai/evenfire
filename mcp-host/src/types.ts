@@ -1,6 +1,7 @@
 /**
  * Shared types for the MCP Host.
  */
+import type { HostLocaleSpec } from '@clerum/host-locale'
 import type { ApprovalConfig } from './core/extensions/approvalTypes'
 import type { GuardrailsConfig } from './core/guardrails/config'
 import type { LlmProvider } from './llm/registryCore'
@@ -81,6 +82,12 @@ export interface HostSpec {
    * Phase 1: only `rules` + `limits` are interpreted.
    */
   guardrails?: GuardrailsConfig
+  /**
+   * The language (BCP 47 tag, e.g. es-MX) and IANA time zone the host's
+   * documents, dates and prompt use. Absent or unusable values fall back to
+   * en and UTC (@clerum/host-locale), never the server's zone.
+   */
+  locale?: HostLocaleSpec
 }
 
 /**

@@ -203,6 +203,16 @@ describe('buildTurnContextBlock (T2.2)', () => {
     )
   })
 
+  it("writes the date in the host's zone when it sets one", () => {
+    // 23:30 UTC is 01:30 the next day in Madrid, on summer time.
+    const block = buildTurnContextBlock({
+      date: new Date('2026-05-19T23:30:00Z'),
+      timeZone: 'Europe/Madrid',
+      channel: { type: 'telegram' },
+    })
+    expect(block).toContain('date: 2026-05-20T01:30:00+02:00 (Europe/Madrid)\n')
+  })
+
   it('includes sender when present', () => {
     const block = buildTurnContextBlock({
       date: new Date('2026-05-19T14:30:00Z'),

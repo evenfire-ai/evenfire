@@ -9,6 +9,7 @@
  * plugin package, so nothing is added to the dependency tree.
  */
 import type { Chart, ChartType, Plugin } from 'chart.js'
+import { writtenNumber } from '../locale/localeFormat'
 import { logger } from '../logger'
 import { CHART_FONT_STACK } from './fonts'
 
@@ -19,6 +20,8 @@ export interface ValueLabelOptions {
   /** Prefix for `currency`, e.g. "$" or "€". */
   currencySymbol?: string
   decimals?: number
+  /** The host's language: digits, grouping and decimal marks follow it; English is written as before. */
+  language?: string
   textColor: string
   backgroundColor: string
   /** 'y' when bars grow horizontally, which moves labels past the bar end. */
@@ -43,6 +46,7 @@ const COMPACT_STEPS: Array<[number, string]> = [
 /** Render one number the way a reader expects to see it on a chart. */
 export function formatValue(value: number, o: ValueLabelOptions): string {
   if (!Number.isFinite(value)) return ''
+  if (o.language && o.language !== 'en') return localizedValue(value, o, o.language)
   const decimals = o.decimals
   // A count the caller set prints exactly; a count guessed per value drops its
   // trailing zeros, so 45% does not read as 45.0%.
@@ -93,6 +97,53 @@ export function formatValue(value: number, o: ValueLabelOptions): string {
         ? formatValue(value, { ...o, format: 'compact' })
         : group(fixed(value, decimals ?? guessDecimals(value)))
   }
+}
+
+/** formatValue's choices, written with the digits and marks of `language`. */
+function localizedValue(value: number, o: ValueLabelOptions, language: string): string {
+  const decimals = o.decimals
+  // A count the caller set prints exactly; a guessed one drops trailing zeros.
+  const places = (guess: number): Intl.NumberFormatOptions =>
+    decimals !== undefined
+      ? { minimumFractionDigits: decimals, maximumFractionDigits: decimals }
+      : { minimumFractionDigits: 0, maximumFractionDigits: guess }
+  const abs = Math.abs(value)
+  switch (o.format) {
+    case 'percent':
+      return writtenNumber(value / 100, language, { style: 'percent', ...places(decimals ?? 1) })
+    case 'currency': {
+      const sym = o.currencySymbol ?? '$'
+      const sign = value < 0 ? '-' : ''
+      if (abs >= CURRENCY_ABBREVIATE_FROM) {
+        return `${sign}${sym}${writtenNumber(abs, language, { notation: 'compact', ...places(1) })}`
+      }
+      const guess = Number.isInteger(abs) ? 0 : Math.max(2, guessDecimals(abs))
+      // Unless a count is set, cents keep both places, as in English.
+      const cents: Intl.NumberFormatOptions =
+        decimals === undefined && guess > 0
+          ? { minimumFractionDigits: 2, maximumFractionDigits: guess }
+          : places(guess)
+      return `${sign}${sym}${writtenNumber(abs, language, cents)}`
+    }
+    case 'compact':
+      return abs >= 1_000
+        ? writtenNumber(value, language, { notation: 'compact', ...places(1) })
+        : writtenNumber(value, language, places(guessDecimals(value)))
+    case 'plain':
+      return writtenNumber(value, language, places(guessDecimals(value)))
+    case 'auto':
+    default:
+      return abs >= 10_000
+        ? localizedValue(value, { ...o, format: 'compact' }, language)
+        : writtenNumber(value, language, places(guessDecimals(value)))
+  }
+}
+
+/** A slice's share of the whole, as `language` writes a percentage. */
+function sharePercent(share: number, language: string | undefined): string {
+  return language && language !== 'en'
+    ? writtenNumber(share, language, { style: 'percent', maximumFractionDigits: 0 })
+    : `${(share * 100).toFixed(0)}%`
 }
 
 /**
@@ -338,7 +389,7 @@ function drawValueLabels(chart: Chart, o: ValueLabelOptions): void {
 
       let text = formatValue(value, o)
       if (arcs && total > 0) {
-        text = `${text} (${((Math.abs(value) / total) * 100).toFixed(0)}%)`
+        text = `${text} (${sharePercent(Math.abs(value) / total, o.language)})`
       }
       if (!text) return
 

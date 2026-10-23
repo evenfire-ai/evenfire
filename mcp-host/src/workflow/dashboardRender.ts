@@ -3,6 +3,8 @@
  * the tool entry. The stylesheet, the page parts and the templates are in
  * dashboardCss, dashboardComponents and dashboardTemplates.
  */
+import { type HostLocale, currentHostLocale } from '../locale/hostLocale'
+import { documentLabel, writingDirection } from '../locale/labels'
 import {
   artifactResult,
   claimOutputFile,
@@ -41,6 +43,8 @@ export { loadChartJsBundle } from './dashboardChartJs'
 
 interface DashWrapperOptions {
   title: string
+  language: string
+  direction: 'ltr' | 'rtl'
   cssSource?: string
   chartJsSource?: string
   chartInit?: string
@@ -53,7 +57,7 @@ function htmlWrapper(o: DashWrapperOptions): string {
     ? `<script>${o.chartJsSource ?? ''}</script>\n<script>${o.chartInit}</script>`
     : ''
   return `<!doctype html>
-<html lang="en">
+<html lang="${escapeHtml(o.language)}"${o.direction === 'rtl' ? ' dir="rtl"' : ''}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -79,6 +83,7 @@ interface DashboardRenderOptions {
   defaultThemeMode?: 'light' | 'dark'
   branding: DashboardBranding
   inlineChartJs: boolean
+  locale: HostLocale
 }
 
 function renderDashboard(opts: DashboardRenderOptions): { html: string; ctx: DashRender } {
@@ -86,7 +91,7 @@ function renderDashboard(opts: DashboardRenderOptions): { html: string; ctx: Das
   const warnings: string[] = []
   const failures: string[] = []
   const ctx: DashRender = {
-    charts: new DashboardCharts(opts.inlineChartJs, { warnings, failures }),
+    charts: new DashboardCharts(opts.inlineChartJs, { warnings, failures }, opts.locale.language),
     warnings,
     sparklines: 0,
     drawSparklines: opts.inlineChartJs,
@@ -94,18 +99,28 @@ function renderDashboard(opts: DashboardRenderOptions): { html: string; ctx: Das
     rendered: 0,
     failures,
     aliased: [],
+    locale: opts.locale,
   }
   const parts = (DASHBOARD_TEMPLATES[opts.template] ?? DASHBOARD_TEMPLATES['executive-brief'])(
     opts.data,
     ctx
   )
-  const body = [...parts, renderDashboardFooter(opts.data.meta, opts.branding)].join('\n')
+  const body = [...parts, renderDashboardFooter(opts.data.meta, opts.branding, opts.locale)].join(
+    '\n'
+  )
   const needsCharts = ctx.charts.specs.length > 0 || ctx.sparklines > 0
   const html = htmlWrapper({
     title: dashText(opts.data.title),
+    language: opts.locale.language,
+    direction: writingDirection(opts.locale.language),
     cssSource: buildDashboardCss(theme, opts.defaultThemeMode),
     chartJsSource: needsCharts ? loadChartJsBundle() : undefined,
-    chartInit: needsCharts ? dashboardScript(safeJsonForScript(ctx.charts.specs)) : undefined,
+    chartInit: needsCharts
+      ? dashboardScript(safeJsonForScript(ctx.charts.specs), {
+          locale: opts.locale.language,
+          trendNote: documentLabel(opts.locale.language, 'trendNotDrawn'),
+        })
+      : undefined,
     body,
   })
   return { html, ctx }
@@ -116,7 +131,8 @@ function renderDashboard(opts: DashboardRenderOptions): { html: string; ctx: Das
 
 export async function runGenerateDashboard(
   args: Record<string, unknown>,
-  outputDir: string
+  outputDir: string,
+  locale: HostLocale = currentHostLocale()
 ): Promise<InternalToolResult> {
   try {
     const filename = outputFilename(args.filename, 'html', 'dashboard')
@@ -164,6 +180,7 @@ export async function runGenerateDashboard(
       defaultThemeMode,
       inlineChartJs,
       branding: isDashRecord(args.branding) ? args.branding : {},
+      locale,
     })
 
     const produced = ctx.rendered + ctx.charts.drawn
@@ -197,7 +214,10 @@ export async function runGenerateDashboard(
     enforceQuota(outputDir, Buffer.byteLength(html, 'utf-8'), replacedBytes(target))
     writeArtifact(target, html)
 
-    return { ...artifactResult(target, 'html', { warnings }), aliasedArguments: ctx.aliased }
+    return {
+      ...artifactResult(target, 'html', { warnings, locale }),
+      aliasedArguments: ctx.aliased,
+    }
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) }
   }

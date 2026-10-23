@@ -18,6 +18,7 @@ COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-cont
 COPY packages/grok-provider-attempt-contract ./packages/grok-provider-attempt-contract
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
 COPY packages/gfs-interaction-policy ./packages/gfs-interaction-policy
+COPY packages/host-locale ./packages/host-locale
 
 # Install dependencies (file: deps resolve to ../packages/llm-providers and
 # ../packages/llm-provider-attempt-contract)
@@ -39,9 +40,21 @@ FROM node:24.22.1-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d
 WORKDIR /app
 
 # The chart and PDF renderers carry a face for Latin, Greek and Cyrillic; these
-# fonts add the arrows, check marks, CJK, Arabic and Hebrew it lacks. Alpine
-# packages Arabic and Hebrew apart from font-noto.
-RUN apk add --no-cache font-dejavu font-noto font-noto-cjk font-noto-arabic font-noto-hebrew
+# fonts add the arrows, check marks, CJK, Arabic and Hebrew it lacks, and the
+# other scripts host languages are written in (packages/host-locale). Alpine
+# packages each script apart from font-noto, in every weight and width; only the
+# regular and bold Noto Sans faces the renderers read are kept.
+RUN apk add --no-cache font-dejavu font-noto font-noto-cjk font-noto-arabic font-noto-hebrew \
+      font-noto-armenian font-noto-bengali font-noto-devanagari font-noto-ethiopic \
+      font-noto-georgian font-noto-gujarati font-noto-gurmukhi font-noto-kannada font-noto-khmer \
+      font-noto-lao font-noto-malayalam font-noto-myanmar font-noto-oriya font-noto-tamil \
+      font-noto-telugu font-noto-thai \
+  && find /usr/share/fonts -type f \( -name '*Armenian*' -o -name '*Bengali*' \
+      -o -name '*Devanagari*' -o -name '*Ethiopic*' -o -name '*Georgian*' -o -name '*Gujarati*' \
+      -o -name '*Gurmukhi*' -o -name '*Kannada*' -o -name '*Khmer*' -o -name '*Lao*' \
+      -o -name '*Malayalam*' -o -name '*Myanmar*' -o -name '*Oriya*' -o -name '*Tamil*' \
+      -o -name '*Telugu*' -o -name '*Thai*' \) \
+      ! -name 'NotoSans*-Regular.ttf' ! -name 'NotoSans*-Bold.ttf' -delete
 
 # Copy the shared package + package files + the already-pruned install
 COPY packages/llm-providers ./packages/llm-providers
@@ -49,6 +62,7 @@ COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-cont
 COPY packages/grok-provider-attempt-contract ./packages/grok-provider-attempt-contract
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
 COPY packages/gfs-interaction-policy ./packages/gfs-interaction-policy
+COPY packages/host-locale ./packages/host-locale
 COPY mcp-host/package*.json ./mcp-host/
 WORKDIR /app/mcp-host
 COPY --from=builder /app/mcp-host/node_modules ./node_modules

@@ -4,6 +4,8 @@
  * Each template reads a fixed set of fields, declared in the tool schema and
  * checked here, so a field name the model guessed wrong is reported by name.
  */
+import { type LabelKey, badgeLabel, documentLabel } from '../locale/labels'
+import { writtenNumber } from '../locale/localeFormat'
 import {
   PptxInputError,
   type PptxKpi,
@@ -21,6 +23,13 @@ import {
 import { PPTX_TEMPLATES, SEVERITIES, STATUSES } from './pptxVocabulary'
 
 export type PptxTemplate = (typeof PPTX_TEMPLATES)[number]
+
+const SEVERITY_LABELS: Record<(typeof SEVERITIES)[number], LabelKey> = {
+  low: 'severityLow',
+  medium: 'severityMedium',
+  high: 'severityHigh',
+  critical: 'severityCritical',
+}
 
 /** The fields each template reads; a required one missing fails the call. */
 export const PPTX_TEMPLATE_FIELDS: Record<
@@ -112,6 +121,11 @@ function requiredText(
   return text
 }
 
+/** A template's own text in the host language. */
+function label(ctx: ReadContext, key: LabelKey): string {
+  return documentLabel(ctx.language ?? 'en', key)
+}
+
 function kpiSlides(kpis: PptxKpi[], title: string): PptxSlide[] {
   return kpis.length > 0
     ? [{ layout: 'kpis', where: 'data', paths: { kpis: 'data.kpis' }, title, kpis }]
@@ -169,7 +183,7 @@ function executiveBrief(f: Record<string, unknown>, ctx: ReadContext): PptxSlide
     },
   ]
   if (f.kpis !== undefined)
-    slides.push(...kpiSlides(readKpis(f.kpis, 'data.kpis', ctx), 'Key Metrics'))
+    slides.push(...kpiSlides(readKpis(f.kpis, 'data.kpis', ctx), label(ctx, 'keyMetrics')))
   if (f.charts !== undefined && f.charts !== null) {
     if (!Array.isArray(f.charts)) {
       throw new PptxInputError('data.charts must be a list of charts.')
@@ -180,13 +194,13 @@ function executiveBrief(f: Record<string, unknown>, ctx: ReadContext): PptxSlide
         layout: 'title-chart',
         where: 'data',
         paths: { chart: `data.charts[${i}]`, title: `data.charts[${i}].title` },
-        title: chart.title ?? 'Chart',
+        title: chart.title ?? label(ctx, 'chart'),
         chart,
       })
     })
   }
-  slides.push(...listSlide(f, 'takeaways', 'Key Takeaways', ctx))
-  slides.push(...listSlide(f, 'nextSteps', 'Next Steps', ctx))
+  slides.push(...listSlide(f, 'takeaways', label(ctx, 'keyTakeaways'), ctx))
+  slides.push(...listSlide(f, 'nextSteps', label(ctx, 'nextSteps'), ctx))
   return slides
 }
 
@@ -204,27 +218,28 @@ function quarterlyReview(f: Record<string, unknown>, ctx: ReadContext): PptxSlid
       status: readEnum(f.status, 'data.status', STATUSES),
     },
   ]
-  slides.push(...listSlide(f, 'highlights', `${period} Highlights`, ctx))
+  const highlights = label(ctx, 'periodHighlights').replace('{period}', () => period)
+  slides.push(...listSlide(f, 'highlights', highlights, ctx))
   if (f.kpis !== undefined)
-    slides.push(...kpiSlides(readKpis(f.kpis, 'data.kpis', ctx), 'Quarterly KPIs'))
-  slides.push(...chartSlide(f, 'revenueChart', 'Revenue Trend', ctx))
-  slides.push(...chartSlide(f, 'breakdownChart', 'Revenue Breakdown', ctx))
+    slides.push(...kpiSlides(readKpis(f.kpis, 'data.kpis', ctx), label(ctx, 'quarterlyKpis')))
+  slides.push(...chartSlide(f, 'revenueChart', label(ctx, 'revenueTrend'), ctx))
+  slides.push(...chartSlide(f, 'breakdownChart', label(ctx, 'revenueBreakdown'), ctx))
   if (f.metricsTable !== undefined && f.metricsTable !== null) {
     slides.push({
       layout: 'title-table',
       where: 'data',
       paths: { table: 'data.metricsTable' },
-      title: 'Metrics Snapshot',
+      title: label(ctx, 'metricsSnapshot'),
       table: readTable(f.metricsTable, 'data.metricsTable', ctx),
     })
   }
-  const outlook = listSlide(f, 'outlook', 'Next Quarter Priorities', ctx)
+  const outlook = listSlide(f, 'outlook', label(ctx, 'nextQuarterPriorities'), ctx)
   if (outlook.length > 0) {
     slides.push({
       layout: 'section',
       where: 'data',
-      eyebrow: 'Looking ahead',
-      title: 'Outlook',
+      eyebrow: label(ctx, 'lookingAhead'),
+      title: label(ctx, 'outlook'),
     })
     slides.push(...outlook)
   }
@@ -249,7 +264,9 @@ function incidentReview(f: Record<string, unknown>, ctx: ReadContext): PptxSlide
       where: 'data',
       paths: { subtitle: 'data.date' },
       title,
-      subtitle: [severity.toUpperCase(), date].filter(Boolean).join(' · '),
+      subtitle: [badgeLabel(ctx.language ?? 'en', SEVERITY_LABELS[severity]), date]
+        .filter(Boolean)
+        .join(' · '),
       status:
         severity === 'critical' || severity === 'high'
           ? 'red'
@@ -261,7 +278,7 @@ function incidentReview(f: Record<string, unknown>, ctx: ReadContext): PptxSlide
       layout: 'title-bullets',
       where: 'data',
       paths: { bullets: 'data.summary' },
-      title: 'Summary',
+      title: label(ctx, 'summary'),
       bullets: [summary],
     },
   ]
@@ -270,30 +287,33 @@ function incidentReview(f: Record<string, unknown>, ctx: ReadContext): PptxSlide
       layout: 'title-table',
       where: 'data',
       paths: { table: 'data.timelineTable' },
-      title: 'Timeline',
+      title: label(ctx, 'timeline'),
       table: readTable(f.timelineTable, 'data.timelineTable', ctx),
     })
   }
-  slides.push(...listSlide(f, 'impact', 'Impact', ctx))
+  slides.push(...listSlide(f, 'impact', label(ctx, 'impact'), ctx))
   const rootCause = readText(f.rootCause, 'data.rootCause', TEXT_LIMITS.bullet, ctx)
   if (rootCause) {
     slides.push({
       layout: 'title-bullets',
       where: 'data',
       paths: { bullets: 'data.rootCause' },
-      title: 'Root Cause',
+      title: label(ctx, 'rootCause'),
       bullets: [rootCause],
     })
   }
-  slides.push(...listSlide(f, 'remediation', 'Remediation', ctx))
-  slides.push(...listSlide(f, 'lessons', 'Lessons Learned', ctx))
+  slides.push(...listSlide(f, 'remediation', label(ctx, 'remediation'), ctx))
+  slides.push(...listSlide(f, 'lessons', label(ctx, 'lessonsLearned'), ctx))
   return slides
 }
 
-/** A money amount: text as written, or a number grouped in thousands ("12,000,000,000"). */
+/**
+ * A money amount: text as written, or a number grouped in thousands as the
+ * host language writes it ("12,000,000,000", "12.000.000.000").
+ */
 function readAmount(value: unknown, where: string, ctx: ReadContext): string | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) {
-    return value.toLocaleString('en-US', { maximumFractionDigits: 2 })
+    return writtenNumber(value, ctx.language ?? 'en', { maximumFractionDigits: 2 })
   }
   return readText(value, where, TEXT_LIMITS.value, ctx)
 }
@@ -312,16 +332,16 @@ function pitchDeck(f: Record<string, unknown>, ctx: ReadContext): PptxSlide[] {
       layout: 'section',
       where: 'data',
       paths: { subtitle: 'data.problem' },
-      eyebrow: 'The pain',
-      title: 'Problem',
+      eyebrow: label(ctx, 'thePain'),
+      title: label(ctx, 'problem'),
       subtitle: requiredText(f, 'problem', t, TEXT_LIMITS.subtitle, ctx),
     },
     {
       layout: 'section',
       where: 'data',
       paths: { subtitle: 'data.solution' },
-      eyebrow: 'Our approach',
-      title: 'Solution',
+      eyebrow: label(ctx, 'ourApproach'),
+      title: label(ctx, 'solution'),
       subtitle: requiredText(f, 'solution', t, TEXT_LIMITS.subtitle, ctx),
     },
   ]
@@ -337,7 +357,7 @@ function pitchDeck(f: Record<string, unknown>, ctx: ReadContext): PptxSlide[] {
     slides.push({
       layout: 'kpis',
       where: 'data',
-      title: 'Market Size',
+      title: label(ctx, 'marketSize'),
       kpis: [
         {
           where: 'data.marketSize',
@@ -349,7 +369,7 @@ function pitchDeck(f: Record<string, unknown>, ctx: ReadContext): PptxSlide[] {
       ],
     })
   }
-  slides.push(...chartSlide(f, 'tractionChart', 'Traction', ctx))
+  slides.push(...chartSlide(f, 'tractionChart', label(ctx, 'traction'), ctx))
   if (f.team !== undefined && f.team !== null) {
     if (!Array.isArray(f.team))
       throw new PptxInputError('data.team must be a list of {name, role}.')
@@ -376,7 +396,7 @@ function pitchDeck(f: Record<string, unknown>, ctx: ReadContext): PptxSlide[] {
       slides.push({
         layout: 'kpis',
         where: 'data',
-        title: 'Team',
+        title: label(ctx, 'team'),
         kpis: people,
         kpiStyle: 'people',
       })
@@ -397,14 +417,14 @@ function pitchDeck(f: Record<string, unknown>, ctx: ReadContext): PptxSlide[] {
             layout: 'title-bullets',
             where: 'data',
             paths: { bullets: 'data.ask.useOfFunds', title: 'data.ask.amount' },
-            title: `The Ask · ${amount}`,
+            title: `${label(ctx, 'theAsk')} · ${amount}`,
             bullets: uses,
           }
         : {
             layout: 'section',
             where: 'data',
             paths: { title: 'data.ask.amount' },
-            eyebrow: 'The Ask',
+            eyebrow: label(ctx, 'theAsk'),
             title: amount,
           }
     )

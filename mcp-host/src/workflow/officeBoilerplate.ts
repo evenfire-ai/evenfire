@@ -3,19 +3,25 @@
  * arguments: theme and font names, namespaces, part and style names, the
  * generators' own labels. A protected value found in such text cannot be told
  * apart from it, so the delivered-package scan leaves that value to the check
- * of the arguments. Built once per format from a package the generator writes
- * with neutral content, so it follows the generators as they change.
+ * of the arguments. Built once per format and host language from a package the
+ * generator writes with neutral content, so it follows the generators as they
+ * change.
  */
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { officePackageTexts } from '../artifacts/officePackageText'
+import { type HostLocale, currentHostLocale } from '../locale/hostLocale'
 import { logger } from '../logger'
 import type { InternalToolResult } from './types'
 
 export type OfficeFormat = 'docx' | 'xlsx' | 'pptx'
 
-type Runner = (args: Record<string, unknown>, outputDir: string) => Promise<InternalToolResult>
+type Runner = (
+  args: Record<string, unknown>,
+  outputDir: string,
+  locale: HostLocale
+) => Promise<InternalToolResult>
 
 /** Each format's generator and a call that uses its layouts, with content too short to be a protected value. */
 const SAMPLES: Record<
@@ -95,40 +101,56 @@ export const REFERENCE_BUILD_MS = 60_000
 /** How long after a failed or given-up build the next one waits. */
 export const REFERENCE_RETRY_MS = 60_000
 
-const references = new Map<OfficeFormat, Promise<string[]>>()
-const failedAt = new Map<OfficeFormat, number>()
-/** Formats whose sample is being written, including a build given up that has not stopped. */
-const writing = new Set<OfficeFormat>()
+/** Keyed by format and language: the generators' own labels follow the host language. */
+const references = new Map<string, Promise<string[]>>()
+const failedAt = new Map<string, number>()
+/** Samples being written, including a build given up that has not stopped. */
+const writing = new Set<string>()
+
+/** Drops the references of other languages: one process serves one host, in one language at a time. */
+function forgetOtherLanguages(language: string): void {
+  for (const map of [references, failedAt]) {
+    for (const key of map.keys()) {
+      if (key.slice(key.indexOf(':') + 1) !== language) map.delete(key)
+    }
+  }
+}
 
 /**
- * The texts a package of `format` holds on its own. Empty when the sample
- * cannot be written, or is not ready within REFERENCE_WAIT_MS, which leaves
- * the scan as strict as before. A build that fails, or runs past
- * REFERENCE_BUILD_MS, is tried again once REFERENCE_RETRY_MS has passed and
- * the given-up build has stopped, so builds that hang do not pile up. Only the
- * first build makes a call wait: once one has failed, a call checks without
- * the reference until a retry has built it.
+ * The texts a package of `format` holds on its own in `locale`'s language.
+ * Empty when the sample cannot be written, or is not ready within
+ * REFERENCE_WAIT_MS, which leaves the scan as strict as before. A build that
+ * fails, or runs past REFERENCE_BUILD_MS, is tried again once
+ * REFERENCE_RETRY_MS has passed and the given-up build has stopped, so builds
+ * that hang do not pile up. Only the first build makes a call wait: once one
+ * has failed, a call checks without the reference until a retry has built it.
  */
-export function boilerplateTexts(format: OfficeFormat): Promise<string[]> {
-  let reference = references.get(format)
+export function boilerplateTexts(
+  format: OfficeFormat,
+  locale: HostLocale = currentHostLocale()
+): Promise<string[]> {
+  const key = `${format}:${locale.language}`
+  let reference = references.get(key)
   if (!reference) {
-    const failed = failedAt.get(format)
+    forgetOtherLanguages(locale.language)
+    const failed = failedAt.get(key)
     if (failed !== undefined && Date.now() - failed < REFERENCE_RETRY_MS) return Promise.resolve([])
-    if (writing.has(format)) return Promise.resolve([])
-    writing.add(format)
-    const build = writeSample(format).finally(() => writing.delete(format))
+    if (writing.has(key)) return Promise.resolve([])
+    writing.add(key)
+    const build = writeSample(format, locale).finally(() => writing.delete(key))
     reference = withinBuildLimit(build).then(
       texts => {
-        failedAt.delete(format)
+        failedAt.delete(key)
         return texts
       },
       (err: unknown) => {
-        references.delete(format)
-        failedAt.set(format, Date.now())
+        references.delete(key)
+        failedAt.set(key, Date.now())
         logger.warn(
           {
             component: 'OfficeBoilerplate',
             format,
+            language: locale.language,
             error: err instanceof Error ? err.name : typeof err,
           },
           'Could not build the reference package; protected values are checked against all its text'
@@ -136,14 +158,14 @@ export function boilerplateTexts(format: OfficeFormat): Promise<string[]> {
         return []
       }
     )
-    references.set(format, reference)
+    references.set(key, reference)
   }
-  if (failedAt.has(format)) return Promise.resolve([])
+  if (failedAt.has(key)) return Promise.resolve([])
   let timer: ReturnType<typeof setTimeout> | undefined
   const waited = new Promise<string[]>(resolve => {
     timer = setTimeout(() => {
       logger.warn(
-        { component: 'OfficeBoilerplate', format },
+        { component: 'OfficeBoilerplate', format, language: locale.language },
         'The reference package is not ready; protected values are checked against all its text'
       )
       resolve([])
@@ -179,12 +201,12 @@ export function withoutWriteTimes(text: string): string {
   return text.replace(WRITE_TIME, '\u0000')
 }
 
-async function writeSample(format: OfficeFormat): Promise<string[]> {
+async function writeSample(format: OfficeFormat, locale: HostLocale): Promise<string[]> {
   const sample = SAMPLES[format]
   const run = await sample.load()
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clerum-boilerplate-'))
   try {
-    const result = await run(sample.args, dir)
+    const result = await run(sample.args, dir, locale)
     if (!result.success || !result.artifact) throw new Error(result.error ?? 'no artifact')
     const texts = officePackageTexts(fs.readFileSync(result.artifact.path))
     if (!texts) throw new Error('the reference package could not be read')

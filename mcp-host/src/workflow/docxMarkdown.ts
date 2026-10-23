@@ -16,11 +16,14 @@ import {
   readBlock,
 } from './markdownBlocks'
 import { isRtlText } from './textDirection'
+import type { ScriptLanguage } from './textScript'
 
 export interface DocxBodyContext {
   palette: DocxPalette
   numbering: DocxListNumbering
   warnings: string[]
+  /** The host's spell-checking language, which right-to-left text in its script is tagged with. */
+  proofing?: ScriptLanguage
   /** The paragraph holding an image named in the body, or undefined when it cannot be embedded. */
   image(file: string, alt: string): Paragraph | undefined
 }
@@ -98,7 +101,12 @@ function parseList(lines: string[], start: number, ctx: DocxBodyContext, out: Pa
           instance: frame.instance,
           level: stack.length - 1,
         },
-        children: inlineRuns(item, { color: docxHex(ctx.palette.text) }, ctx.warnings),
+        children: inlineRuns(
+          item,
+          { color: docxHex(ctx.palette.text) },
+          ctx.warnings,
+          ctx.proofing
+        ),
       })
     )
     i++
@@ -124,7 +132,12 @@ function headingParagraph(level: number, content: string, ctx: DocxBodyContext):
     // could end a page with its section starting on the next.
     keepNext: true,
     keepLines: true,
-    children: inlineRuns(content, { color, size: style.size, bold: style.bold }, warnings),
+    children: inlineRuns(
+      content,
+      { color, size: style.size, bold: style.bold },
+      warnings,
+      ctx.proofing
+    ),
   })
 }
 
@@ -182,7 +195,8 @@ export function bodyToDocxChildren(body: string, ctx: DocxBodyContext): (Paragra
             palette,
             'striped',
             warnings,
-            `The body's table ${++tables}`
+            `The body's table ${++tables}`,
+            ctx.proofing
           )
         )
         out.push(new Paragraph({ children: [new TextRun({ text: '' })], spacing: { before: 60 } }))
@@ -229,7 +243,12 @@ export function bodyToDocxChildren(body: string, ctx: DocxBodyContext): (Paragra
               },
               indent: { left: 360 },
               border: isRtlText(quote) ? { right: bar } : { left: bar },
-              children: inlineRuns(quote, { color: docxHex(palette.muted) }, warnings),
+              children: inlineRuns(
+                quote,
+                { color: docxHex(palette.muted) },
+                warnings,
+                ctx.proofing
+              ),
             })
           )
         )
@@ -248,7 +267,12 @@ export function bodyToDocxChildren(body: string, ctx: DocxBodyContext): (Paragra
             new Paragraph({
               ...docxDirection(block.line),
               spacing: { after: 80 },
-              children: inlineRuns(block.line, { color: docxHex(palette.text) }, warnings),
+              children: inlineRuns(
+                block.line,
+                { color: docxHex(palette.text) },
+                warnings,
+                ctx.proofing
+              ),
             })
           )
         }

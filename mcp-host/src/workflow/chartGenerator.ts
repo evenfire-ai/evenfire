@@ -1,6 +1,8 @@
 /** The PNG chart generator (clerum__generate_chart): Chart.js drawn on a Skia canvas. */
 import { type SKRSContext2D, createCanvas } from '@napi-rs/canvas'
 import { Chart, type ChartConfiguration, type Plugin, type Scale, registerables } from 'chart.js'
+import { type HostLocale, currentHostLocale } from '../locale/hostLocale'
+import { documentLabel } from '../locale/labels'
 import {
   artifactResult,
   claimOutputFile,
@@ -321,7 +323,8 @@ function crc32(buf: Buffer): number {
 
 export async function runGenerateChart(
   args: Record<string, unknown>,
-  outputDir: string
+  outputDir: string,
+  locale: HostLocale = currentHostLocale()
 ): Promise<InternalToolResult> {
   let chart: Chart | undefined
   try {
@@ -375,7 +378,8 @@ export async function runGenerateChart(
       labels,
       theme,
       args,
-      warnings
+      warnings,
+      locale.language
     )
     const chartType = resolved.chartType
     if (resolved.labels !== undefined) labels = resolved.labels
@@ -420,6 +424,7 @@ export async function runGenerateChart(
       backgroundColor: theme.backgroundColor,
       indexAxis,
       fontScale,
+      language: locale.language,
     }
 
     const cartesian =
@@ -465,7 +470,7 @@ export async function runGenerateChart(
       )
     }
     if (isVisuallyEmpty(themedDatasets, chartTypeRaw === 'scatter' || chartTypeRaw === 'bubble')) {
-      plugins.push(emptyStatePlugin('No data to display', theme.textColor))
+      plugins.push(emptyStatePlugin(documentLabel(locale.language, 'noData'), theme.textColor))
     }
 
     const axisTicks = {
@@ -498,6 +503,8 @@ export async function runGenerateChart(
       options: {
         responsive: false,
         animation: false,
+        // Numbers Chart.js formats itself (radial ticks) follow the host's language.
+        ...(locale.language !== 'en' ? { locale: locale.language } : {}),
         devicePixelRatio: pixelRatio * layoutScale,
         maintainAspectRatio: false,
         // Room for value labels that sit just outside the outermost marks.
@@ -645,7 +652,7 @@ export async function runGenerateChart(
       `image: { path: '${target.filename}' } or chart: { path: '${target.filename}' } ` +
       'on a PPTX slide.'
     return {
-      ...artifactResult(target, 'png', { summary, warnings }),
+      ...artifactResult(target, 'png', { summary, warnings, locale }),
       shownText: drawnTexts(shownText),
     }
   } catch (err) {

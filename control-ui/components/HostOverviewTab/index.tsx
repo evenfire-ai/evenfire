@@ -1,5 +1,8 @@
 import React from 'react'
 import { SingleValueEditDialog } from '@clerum/frontend-components'
+import { hostLanguageLabel } from '@lib/hostLocale'
+import { HostLocaleDialog } from '../HostLocaleDialog'
+import type { HostLocaleValue } from '../HostLocaleDialog/types'
 import { IconRobot } from '../Sidebar/icons'
 import { IconPencil } from '../icons'
 import { Field, TextInput } from '../ui'
@@ -102,6 +105,8 @@ export function HostOverviewTab({
   onSaveDisplayName,
   onStartNameEdit,
   createdAt,
+  locale,
+  onSaveLocale,
 }: HostOverviewTabProps) {
   const shownName = displayName.trim() || hostName
   const [savingName, setSavingName] = React.useState(false)
@@ -110,6 +115,25 @@ export function HostOverviewTab({
   const hasContext = Boolean(contextRef.trim())
   const trimmedDescription = description.trim()
   const shownDescription = truncateDescription(trimmedDescription) || 'No description provided.'
+  const [editingLocale, setEditingLocale] = React.useState(false)
+  const [savingLocale, setSavingLocale] = React.useState(false)
+  const [localeError, setLocaleError] = React.useState('')
+
+  async function saveLocale(value: HostLocaleValue) {
+    if (savingLocale) return
+    setSavingLocale(true)
+    setLocaleError('')
+    try {
+      if (await onSaveLocale(value)) setEditingLocale(false)
+      else {
+        setLocaleError(
+          'Could not save the language and time zone. Review the page error, reload the agent, and re-apply your change.'
+        )
+      }
+    } finally {
+      setSavingLocale(false)
+    }
+  }
 
   async function saveName(value: string) {
     const nextName = value.trim()
@@ -231,6 +255,46 @@ export function HostOverviewTab({
           </div>
         </section>
 
+        <section className="cu-card" aria-label="Documents">
+          <div className="cu-card__body">
+            <div className="cu-host-overview-card-head">
+              <span className="cu-host-overview-section-label">Documents</span>
+              {/* Until the host loads, the dialog would start from an empty
+               * locale and a save would drop the stored values. */}
+              {loadingName ? null : (
+                <button
+                  type="button"
+                  className="cu-btn cu-btn--icon cu-btn--ghost"
+                  onClick={() => {
+                    setLocaleError('')
+                    setEditingLocale(true)
+                  }}
+                  aria-label="Edit document language and time zone"
+                  title="Edit document language and time zone"
+                >
+                  <IconPencil width={16} height={16} />
+                </button>
+              )}
+            </div>
+            <div className="cu-host-overview-config">
+              <ConfigRow
+                setting="Language"
+                value={
+                  loadingName
+                    ? ''
+                    : locale.language
+                      ? hostLanguageLabel(locale.language)
+                      : 'Not set (English)'
+                }
+              />
+              <ConfigRow
+                setting="Time zone"
+                value={loadingName ? '' : locale.timeZone || 'Not set (UTC)'}
+              />
+            </div>
+          </div>
+        </section>
+
         <section className="cu-card" aria-label="Access summary">
           <div className="cu-card__body">
             <NavHeader label="Access" tab="access" onNavigate={onNavigate} />
@@ -306,6 +370,18 @@ export function HostOverviewTab({
           </div>
         </section>
       </div>
+
+      <HostLocaleDialog
+        open={editingLocale}
+        locale={locale}
+        pending={savingLocale}
+        error={localeError || undefined}
+        onCancel={() => {
+          setLocaleError('')
+          setEditingLocale(false)
+        }}
+        onSave={value => void saveLocale(value)}
+      />
 
       <SingleValueEditDialog
         open={editingName}

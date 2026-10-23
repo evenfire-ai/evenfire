@@ -1,4 +1,7 @@
 /** The parts a dashboard page is made of: hero, KPI cards, chart cards, tables, sections, service health, incidents and footer. */
+import type { HostLocale } from '../locale/hostLocale'
+import { type LabelKey, badgeLabel, documentLabel, inCapitals } from '../locale/labels'
+import { writtenDate, writtenNumber } from '../locale/localeFormat'
 import { coerceNumber } from './chartData'
 import { DashboardCharts } from './dashboardCharts'
 import { escapeHtml, escapeHtmlAttr, oneOf } from './dashboardHtml'
@@ -36,6 +39,8 @@ export interface DashRender {
    * (InternalToolResult.aliasedArguments).
    */
   aliased: string[]
+  /** The host language and time zone the page's own text, numbers and date are written in. */
+  locale: HostLocale
 }
 
 const KPI_CARD_FIELDS = [
@@ -135,17 +140,17 @@ function titledSection(title: string | undefined, body: string): string {
     : body
 }
 
-/** A number as a reader expects it: grouped, without floating-point noise. */
-function formatDashNumber(n: number): string {
-  if (Number.isInteger(n)) return n.toLocaleString('en-US')
+/** A number as a reader of `language` expects it: grouped, without floating-point noise. */
+function formatDashNumber(n: number, language: string): string {
+  if (Number.isInteger(n)) return writtenNumber(n, language)
   return Math.abs(n) >= 1
-    ? n.toLocaleString('en-US', { maximumFractionDigits: 2 })
-    : n.toLocaleString('en-US', { maximumSignificantDigits: 4 })
+    ? writtenNumber(n, language, { maximumFractionDigits: 2 })
+    : writtenNumber(n, language, { maximumSignificantDigits: 4 })
 }
 
 /** A figure: numbers are formatted, text is shown as written. */
-function dashFigure(value: unknown): string {
-  return typeof value === 'number' ? formatDashNumber(value) : dashText(value)
+function dashFigure(value: unknown, language: string): string {
+  return typeof value === 'number' ? formatDashNumber(value, language) : dashText(value)
 }
 
 type DeltaDirection = 'up' | 'down' | 'neutral'
@@ -153,7 +158,8 @@ type DeltaDirection = 'up' | 'down' | 'neutral'
 /** A delta's text and arrow; a numeric delta is signed and, unless told otherwise, points its own way. */
 function dashDelta(
   delta: unknown,
-  direction: unknown
+  direction: unknown,
+  language: string
 ): { text: string; direction: DeltaDirection } {
   const directions = ['up', 'down', 'neutral'] as const
   if (typeof delta !== 'number') {
@@ -161,7 +167,7 @@ function dashDelta(
   }
   const own = delta > 0 ? 'up' : delta < 0 ? 'down' : 'neutral'
   return {
-    text: `${delta > 0 ? '+' : ''}${formatDashNumber(delta)}`,
+    text: `${delta > 0 ? '+' : ''}${formatDashNumber(delta, language)}`,
     direction: oneOf(direction, directions, own),
   }
 }
@@ -235,11 +241,31 @@ function dashItems(
 const cardNotice = (message: string) =>
   `<div class="callout" data-tone="danger">${escapeHtml(message)}</div>`
 
-export function renderHero(o: Record<string, unknown>): string {
+/**
+ * A badge's word in capitals: one of `known` in the host language, any other
+ * as written, by the default casing rules since it may be in any language.
+ */
+function badgeText(
+  word: string,
+  known: Partial<Record<string, LabelKey>>,
+  language: string
+): string {
+  const key = own(known, word.trim().toLowerCase())
+  return key ? badgeLabel(language, key) : inCapitals(word)
+}
+
+const HERO_STATUS_LABELS: Record<(typeof HERO_STATUSES)[number], LabelKey> = {
+  green: 'statusGreen',
+  yellow: 'statusYellow',
+  red: 'statusRed',
+  neutral: 'statusNeutral',
+}
+
+export function renderHero(o: Record<string, unknown>, language = 'en'): string {
   const eyebrowText = dashText(o.eyebrow)
   const eyebrow = eyebrowText ? `<div class="hero__eyebrow">${escapeHtml(eyebrowText)}</div>` : ''
   const status = oneOf(dashText(o.status).trim().toLowerCase(), HERO_STATUSES, 'neutral')
-  const statusLabel = dashText(o.statusLabel) || status.toUpperCase()
+  const statusLabel = dashText(o.statusLabel) || badgeLabel(language, HERO_STATUS_LABELS[status])
   const statusBadge =
     o.status !== undefined || dashText(o.statusLabel)
       ? `<span class="status-badge" data-status="${status}">${escapeHtml(statusLabel)}</span>`
@@ -283,6 +309,10 @@ function renderSparkline(value: unknown, where: string, ctx: DashRender): string
 
 const YEAR_LABEL = /\b(year|years|yr|fy|a[nñ]o|anio)\b/i
 
+/** "Year" in the other host languages, matched inside words (Geschäftsjahr, boekjaar). */
+const YEAR_WORDS =
+  /jahr|jaar|år|ann[ée]e|anno|año|\bano\b|rok|godin|год|рік|yıl|yil|tahun|năm|vuosi|aasta|év|metai|gads|\bvit|mwaka|unyaka|urte|\bany\b|blwyddyn|bliain|sena|ár|taon|leto|ejercicio|exercício|exercice|esercizio|έτος|χρον|տարի|წელ|ዓመት|年|년|연도|سنة|عام|سال|שנה|वर्ष|साल|বছর|সাল|ஆண்டு|సంవత్సర|ವರ್ಷ|വർഷ|વર્ષ|ਸਾਲ|ବର୍ଷ|ปี|ປີ|ឆ្នាំ|နှစ်|жыл/iu
+
 export function renderKpis(items: unknown, where: string, ctx: DashRender, title?: string): string {
   const kpis = dashList(items, where, 'KPI objects {label, value}')
   if (kpis.length === 0) return ''
@@ -295,17 +325,21 @@ export function renderKpis(items: unknown, where: string, ctx: DashRender, title
       takenFields(ctx, kpi, at, KPI_CARD_FIELDS)
       // A year is not grouped: 2026, not 2,026. Only a figure that could be one
       // is taken for it; revenue per year is still grouped.
+      const language = ctx.locale.language
+      const label = dashText(kpi.label)
       const year =
         typeof kpi.value === 'number' &&
         Number.isInteger(kpi.value) &&
         kpi.value >= 1000 &&
         kpi.value <= 9999 &&
-        YEAR_LABEL.test(dashText(kpi.label))
-      const value = year ? String(kpi.value) : dashFigure(kpi.value)
+        (YEAR_LABEL.test(label) || (!/^en(?:-|$)/i.test(language) && YEAR_WORDS.test(label)))
+      const value = year
+        ? writtenNumber(kpi.value as number, language, { useGrouping: false })
+        : dashFigure(kpi.value, language)
       if (!value) {
         throw new Error(`${at}.value is missing; pass the figure to show, e.g. "$1.2M" or 48.`)
       }
-      const { text, direction } = dashDelta(kpi.delta, kpi.deltaDirection)
+      const { text, direction } = dashDelta(kpi.delta, kpi.deltaDirection, language)
       const sentiment = oneOf(
         kpi.deltaSentiment,
         ['good', 'bad', 'neutral'] as const,
@@ -539,6 +573,15 @@ export function renderSectionHtml(s: unknown, where: string): string {
 
 const SERVICE_STATUSES = ['healthy', 'degraded', 'down', 'maintenance'] as const
 
+/** The schema's own status words (and the one an unset status takes), printed in the host language. */
+const SERVICE_STATUS_LABELS: Partial<Record<string, LabelKey>> = {
+  healthy: 'serviceHealthy',
+  degraded: 'serviceDegraded',
+  down: 'serviceDown',
+  maintenance: 'serviceMaintenance',
+  unknown: 'serviceUnknown',
+}
+
 /** Status words models use, by the card color they mean. */
 /** The entry `words` has for `text`, ignoring case; never one inherited from Object. */
 function ownWord<T>(words: Partial<Record<string, T>>, text: string): T | undefined {
@@ -588,10 +631,11 @@ export function renderServiceHealthGrid(
             'maintenance, so the card is grey.'
         )
       }
-      const { text, direction } = dashDelta(s.delta, s.deltaDirection)
+      const language = ctx.locale.language
+      const { text, direction } = dashDelta(s.delta, s.deltaDirection, language)
       const sentiment = direction === 'up' ? 'good' : direction === 'down' ? 'bad' : 'neutral'
       const delta = deltaHtml(text, direction, sentiment)
-      const metric = dashFigure(s.metric)
+      const metric = dashFigure(s.metric, language)
       // The fields a card shows, whichever list the entries came under.
       takenFields(ctx, s, at, SERVICE_CARD_FIELDS)
       return `
@@ -600,7 +644,7 @@ export function renderServiceHealthGrid(
     <span class="health-card__dot"></span>
     <h3 class="health-card__name">${escapeHtml(name)}</h3>
   </div>
-  <p class="health-card__status">${escapeHtml(statusText.toUpperCase())}</p>
+  <p class="health-card__status">${escapeHtml(badgeText(statusText, SERVICE_STATUS_LABELS, language))}</p>
   ${metric ? `<p class="health-card__metric">${escapeHtml(metric)}</p>` : ''}
   ${delta}
 </div>`.trim()
@@ -611,6 +655,15 @@ export function renderServiceHealthGrid(
 }
 
 const INCIDENT_SEVERITIES = ['critical', 'high', 'med', 'low', 'info'] as const
+
+/** The schema's own severity words, printed in the host language. */
+const SEVERITY_LABELS: Partial<Record<string, LabelKey>> = {
+  critical: 'severityCritical',
+  high: 'severityHigh',
+  medium: 'severityMedium',
+  low: 'severityLow',
+  info: 'severityInfo',
+}
 
 /** Severity words models use, by the color they take; p0-p2 match the table badges. */
 const SEVERITY_WORDS: Partial<Record<string, (typeof INCIDENT_SEVERITIES)[number]>> = {
@@ -657,10 +710,11 @@ export function renderIncidentsTimeline(
             'so it is shown in the info color.'
         )
       }
+      const language = ctx.locale.language
       const resolvedAt = dashText(it.resolvedAt)
       const resolved = resolvedAt
-        ? `<span class="timeline-item__resolved">resolved ${escapeHtml(resolvedAt)}</span>`
-        : `<span class="timeline-item__open">open</span>`
+        ? `<span class="timeline-item__resolved">${escapeHtml(documentLabel(language, 'resolved'))} ${escapeHtml(resolvedAt)}</span>`
+        : `<span class="timeline-item__open">${escapeHtml(documentLabel(language, 'open'))}</span>`
       const description = dashText(it.description)
       const desc = description
         ? `<p class="timeline-item__desc">${renderInlineMd(description)}</p>`
@@ -670,7 +724,7 @@ export function renderIncidentsTimeline(
   <div class="timeline-item__time">${escapeHtml(time)}</div>
   <div class="timeline-item__body">
     <div class="timeline-item__head">
-      <span class="severity-badge severity-${sev}">${escapeHtml((given || sev).toUpperCase())}</span>
+      <span class="severity-badge severity-${sev}">${escapeHtml(badgeText(given || sev, SEVERITY_LABELS, language))}</span>
       <h4 class="timeline-item__title">${escapeHtml(heading)}</h4>
       ${resolved}
     </div>
@@ -684,17 +738,53 @@ export function renderIncidentsTimeline(
   return titledSection(title, `<ol class="timeline">${html}</ol>`)
 }
 
-/** meta.date as shown; a number of 10+ digits is a Unix timestamp (seconds or ms), a shorter one a year. */
-function footerDate(value: unknown): string {
-  const long = { year: 'numeric', month: 'long', day: 'numeric' } as const
-  if (typeof value === 'number' && Number.isInteger(value) && Math.abs(value) >= 1e9) {
-    const ms = Math.abs(value) < 1e11 ? value * 1000 : value
-    return new Date(ms).toLocaleDateString('en-US', { ...long, timeZone: 'UTC' })
+/** An ISO timestamp with its offset ("2026-03-07T23:30:00Z"): an instant, unlike a calendar day. */
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/i
+
+/** Midnight UTC, which a date written as a timestamp usually stands for. */
+const UTC_MIDNIGHT = /T00:00(?::00(?:\.0+)?)?(?:Z|\+00:00)$/i
+
+/** `text` as a calendar day ("2026-03-07", or that day at midnight UTC), or undefined. */
+function calendarDay(text: string): Date | undefined {
+  const day = /^(\d{4})-(\d{2})-(\d{2})(T.*)?$/.exec(text)
+  if (!day || (day[4] !== undefined && !(ISO_INSTANT.test(text) && UTC_MIDNIGHT.test(text)))) {
+    return undefined
   }
-  return dashText(value) || new Date().toLocaleDateString('en-US', long)
+  const at = new Date(Date.UTC(Number(day[1]), Number(day[2]) - 1, Number(day[3])))
+  return at.getUTCDate() === Number(day[3]) && at.getUTCMonth() === Number(day[2]) - 1
+    ? at
+    : undefined
 }
 
-export function renderDashboardFooter(meta: unknown, branding: DashboardBranding): string {
+/**
+ * meta.date as shown; a number of 10+ digits is a Unix timestamp (seconds or
+ * ms), a shorter one a year. A timestamp and the default, today, are dated in
+ * the host's time zone. On a host that sets its locale, an ISO timestamp is
+ * dated in its zone too, and a calendar day is written in its language on that
+ * same day; other text is shown as written.
+ */
+function footerDate(value: unknown, locale: HostLocale): string {
+  if (typeof value === 'number' && Number.isInteger(value) && Math.abs(value) >= 1e9) {
+    const at = new Date(Math.abs(value) < 1e11 ? value * 1000 : value)
+    // Past the range a Date holds, the number is shown as written.
+    if (!Number.isNaN(at.getTime())) return writtenDate(locale, at)
+  }
+  const text = dashText(value)
+  if (locale.languageSet || locale.timeZoneSet) {
+    const trimmed = text.trim()
+    const day = calendarDay(trimmed)
+    if (day) return writtenDate({ language: locale.language, timeZone: 'UTC' }, day)
+    const at = ISO_INSTANT.test(trimmed) ? Date.parse(trimmed) : NaN
+    if (!Number.isNaN(at)) return writtenDate(locale, new Date(at))
+  }
+  return text || writtenDate(locale)
+}
+
+export function renderDashboardFooter(
+  meta: unknown,
+  branding: DashboardBranding,
+  locale: HostLocale
+): string {
   const m: Record<string, unknown> = isDashRecord(meta) ? meta : {}
   const companyName = dashText(branding.companyName)
   const left = companyName
@@ -704,7 +794,7 @@ export function renderDashboardFooter(meta: unknown, branding: DashboardBranding
     dashText(branding.footerText),
     dashText(m.author),
     dashText(m.runId),
-    footerDate(m.date),
+    footerDate(m.date, locale),
   ]
     .filter(part => part.trim() !== '')
     .map(escapeHtml)

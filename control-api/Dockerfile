@@ -13,6 +13,8 @@ COPY packages/llm-providers ./packages/llm-providers
 # before control-api's npm ci so its file: dependency resolves; resourceFieldValidation
 # imports validateDisplayField from it.
 COPY packages/display-field ./packages/display-field
+# Shared host language and time zone rules: validateHostSpec checks spec.locale with them.
+COPY packages/host-locale ./packages/host-locale
 COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
 COPY packages/grok-provider-attempt-contract ./packages/grok-provider-attempt-contract
 

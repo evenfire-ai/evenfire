@@ -131,6 +131,8 @@ export interface ReadContext {
   aliased?: string[]
   /** Set once a text field holding markup has been reported. */
   markupNoted?: boolean
+  /** The host language template titles and amounts are written in; English when unset. */
+  language?: string
 }
 
 /**

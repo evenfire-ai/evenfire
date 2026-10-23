@@ -20,6 +20,7 @@ import { CJK_WIDE_CHAR, bodyFaceEm } from './fonts'
 import { inlineSpans } from './inlineMarkup'
 import { columnNames, headerText } from './tableRows'
 import { isRtlText } from './textDirection'
+import type { ScriptLanguage } from './textScript'
 
 export type DocxTableLayout = 'striped' | 'minimal' | 'grid'
 
@@ -237,7 +238,8 @@ export function buildDocxTable(
   palette: DocxPalette,
   layout: DocxTableLayout,
   warnings: string[],
-  label: string
+  label: string,
+  proofing?: ScriptLanguage
 ): Table {
   const head = headers.map(headerText)
   const long = rows.filter(row => row.length > head.length).length
@@ -280,7 +282,7 @@ export function buildDocxTable(
           children: [
             new Paragraph({
               ...cellDirection(h),
-              children: inlineRuns(h, { color: 'FFFFFF', bold: true, size }, warnings),
+              children: inlineRuns(h, { color: 'FFFFFF', bold: true, size }, warnings, proofing),
             }),
           ],
           margins: { top: 80, bottom: 80, left: side, right: side },
@@ -299,7 +301,12 @@ export function buildDocxTable(
             children: [
               new Paragraph({
                 ...cellDirection(cell),
-                children: inlineRuns(cell, { color: docxHex(palette.text), size }, warnings),
+                children: inlineRuns(
+                  cell,
+                  { color: docxHex(palette.text), size },
+                  warnings,
+                  proofing
+                ),
               }),
             ],
             margins: { top: 60, bottom: 60, left: side, right: side },

@@ -10,12 +10,40 @@ const Database = require('better-sqlite3')
 const { createCanvas } = require('@napi-rs/canvas')
 const { resolve } = require('node:path')
 const { OpenAICompatibleProvider } = require(resolve('dist/llm/openaiCompatible.js'))
+const { SUPPORTED_HOST_LANGUAGES } = require('@clerum/host-locale')
+const { DOCUMENT_LABELS } = require(resolve('dist/locale/labels/index.js'))
+const { writtenDate, writtenNumber } = require(resolve('dist/locale/localeFormat.js'))
+const { PDF_FONT_FAMILY, pdfGlyphSource, sanitizeForFont } = require(
+  resolve('dist/workflow/fonts.js')
+)
 const db = new Database(':memory:')
 assert.equal(db.prepare('SELECT 42 AS value').get().value, 42)
 db.close()
 const canvas = createCanvas(10, 10)
 canvas.getContext('2d').fillRect(0, 0, 10, 10)
 assert.ok(canvas.toBuffer('image/png').length > 0)
+// The image has a face, for charts and for PDFs, for every character of each
+// host language's own text, its dates and its numbers.
+const glyphs = pdfGlyphSource()
+const uncovered = new Set()
+for (const language of SUPPORTED_HOST_LANGUAGES) {
+  const texts = [
+    ...Object.values(DOCUMENT_LABELS[language]),
+    writtenDate({ language, timeZone: 'UTC' }, new Date(Date.UTC(2026, 9, 22))),
+    writtenNumber(1234567.5, language),
+  ].map(text => text.replace(/\p{Cf}/gu, ''))
+  for (const text of texts) {
+    for (const ch of text) {
+      if (/\s/u.test(ch)) continue
+      const cp = `U+${ch.codePointAt(0).toString(16).toUpperCase()}`
+      if (sanitizeForFont(ch) !== ch) uncovered.add(`${language} chart ${cp}`)
+      if (glyphs.familyFor(ch.codePointAt(0), PDF_FONT_FAMILY) === undefined) {
+        uncovered.add(`${language} pdf ${cp}`)
+      }
+    }
+  }
+}
+assert.deepEqual([...uncovered], [], 'characters of host languages this image cannot draw')
 let requests = 0
 const server = createServer((request, response) => {
   request.resume()
@@ -49,6 +77,7 @@ server.listen(0, '127.0.0.1', async () => {
         nodeVersion: process.versions.node,
         sqlite: true,
         canvas: true,
+        hostLanguages: SUPPORTED_HOST_LANGUAGES.length,
         defaultSdkHttp: true,
         requests,
       })

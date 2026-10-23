@@ -17,10 +17,12 @@ import { HOST_DEFAULT_TAB, HOST_TABS } from '@constants/hostDetails'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { connectorAuthenticationLabel } from '@lib/connectorAuthentication'
 import { useSubscriptionCapabilities } from '@lib/hooks/useSubscriptionCapabilities'
+import { hostLocaleSpec, readHostLocale } from '@lib/hostLocale'
 import { HostAccessTab } from '../../../components/HostAccessTab'
 import { HostAdvancedTab } from '../../../components/HostAdvancedTab'
 import type { HostGuardrails } from '../../../components/HostGuardrailsSection/types'
 import { HostIdentityTab } from '../../../components/HostIdentityTab'
+import type { HostLocaleValue } from '../../../components/HostLocaleDialog/types'
 import { HostOverviewTab } from '../../../components/HostOverviewTab'
 import { LlmProviderConfig } from '../../../components/LlmProviderConfig'
 import { LlmProviderSummary } from '../../../components/LlmProviderSummary'
@@ -345,6 +347,7 @@ export default function HostDetailsPage() {
   const [hostStatusLabel, setHostStatusLabel] = useState('Unknown')
   const [hostStatusTone, setHostStatusTone] = useState<'active' | 'inactive' | 'unknown'>('unknown')
   const [hostCreatedAt, setHostCreatedAt] = useState('')
+  const [hostLocale, setHostLocale] = useState<HostLocaleValue>({ language: '', timeZone: '' })
   const [accessSummary, setAccessSummary] = useState<{
     memberCount: number
     teamCount: number
@@ -637,6 +640,7 @@ export default function HostDetailsPage() {
         }
         const createdAt = String(host.metadata?.creationTimestamp || '').trim()
         setHostCreatedAt(createdAt)
+        setHostLocale(readHostLocale(spec.locale))
       }
       const nextProvider = normalizeProvider(
         String((spec.model as { provider?: string } | undefined)?.provider || 'openai')
@@ -995,6 +999,40 @@ export default function HostDetailsPage() {
         )
       } else {
         setError(e instanceof Error ? e.message : 'Failed to save agent')
+      }
+      return false
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Writes only spec.locale; the rest of the spec is the Host as it is now.
+  async function saveHostLocale(value: HostLocaleValue): Promise<boolean> {
+    setBusy(true)
+    setError('')
+    try {
+      const currentHost = await getHost(routeName)
+      const nextSpec: Record<string, unknown> = { ...currentHost.spec }
+      const locale = hostLocaleSpec(value)
+      if (locale) nextSpec.locale = locale
+      else delete nextSpec.locale
+      const formResourceVersion = formResourceVersionRef.current
+      await apiSend('PUT', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`, {
+        ...(formResourceVersion ? { metadata: { resourceVersion: formResourceVersion } } : {}),
+        spec: nextSpec,
+      })
+      await loadData('overview')
+      showToast('Document language and time zone saved.', { tone: 'success' })
+      return true
+    } catch (e) {
+      const status = (e as { status?: number } | null)?.status
+      const code = (e as { code?: string } | null)?.code
+      if (status === 409 && code === 'conflict') {
+        setError(
+          "This agent changed since you opened the form (another edit, or the agent's own lifecycle state updated). Reload to see the latest, then re-apply your change."
+        )
+      } else {
+        setError(e instanceof Error ? e.message : 'Failed to save the language and time zone')
       }
       return false
     } finally {
@@ -1506,6 +1544,8 @@ export default function HostDetailsPage() {
             onNavigate={tab => selectTab(tab)}
             onSaveDisplayName={nextDisplayName => saveHost(nextDisplayName)}
             createdAt={hostCreatedAt}
+            locale={hostLocale}
+            onSaveLocale={saveHostLocale}
           />
         )}
 

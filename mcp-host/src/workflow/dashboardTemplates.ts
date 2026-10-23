@@ -1,4 +1,5 @@
 /** The four fixed templates, the custom template's blocks, and the data fields a template does not read. */
+import { type LabelKey, documentLabel } from '../locale/labels'
 import {
   type DashRender,
   dashList,
@@ -25,14 +26,22 @@ export type DashData = Record<string, unknown>
 
 // The fields are named rather than spread: a spread reads every key, which
 // would hide the ones nothing draws from the "Ignored arguments" note.
-function heroOf(data: DashData, eyebrowFallback?: unknown): string {
-  return renderHero({
-    title: data.title,
-    headline: data.headline,
-    status: data.status,
-    statusLabel: data.statusLabel,
-    eyebrow: data.eyebrow ?? eyebrowFallback,
-  })
+function heroOf(data: DashData, ctx: DashRender, eyebrowFallback?: unknown): string {
+  return renderHero(
+    {
+      title: data.title,
+      headline: data.headline,
+      status: data.status,
+      statusLabel: data.statusLabel,
+      eyebrow: data.eyebrow ?? eyebrowFallback,
+    },
+    ctx.locale.language
+  )
+}
+
+/** A template's own heading in the host language. */
+function heading(ctx: DashRender, key: LabelKey): string {
+  return documentLabel(ctx.locale.language, key)
 }
 
 function tablesOf(data: DashData, ctx: DashRender): string {
@@ -72,29 +81,34 @@ export const DASHBOARD_TEMPLATES: Record<
   (data: DashData, ctx: DashRender) => string[]
 > = {
   'executive-brief': (data, ctx) => [
-    heroOf(data),
+    heroOf(data, ctx),
     kpisOf(data, ctx),
-    chartsOf(data, ctx, 'Visual Trends'),
+    chartsOf(data, ctx, heading(ctx, 'visualTrends')),
     tablesOf(data, ctx),
     sectionsOf(data, ctx),
   ],
   'operations-pulse': (data, ctx) => [
-    heroOf(data),
+    heroOf(data, ctx),
     dashPart(ctx, 'data.services', false, () =>
-      renderServiceHealthGrid(data.services, 'data.services', ctx, 'Service Health')
+      renderServiceHealthGrid(data.services, 'data.services', ctx, heading(ctx, 'serviceHealth'))
     ),
     kpisOf(data, ctx),
     dashPart(ctx, 'data.incidents', false, () =>
-      renderIncidentsTimeline(data.incidents, 'data.incidents', ctx, 'Incident Timeline')
+      renderIncidentsTimeline(
+        data.incidents,
+        'data.incidents',
+        ctx,
+        heading(ctx, 'incidentTimeline')
+      )
     ),
-    chartsOf(data, ctx, 'Performance Trends'),
+    chartsOf(data, ctx, heading(ctx, 'performanceTrends')),
     tablesOf(data, ctx),
     sectionsOf(data, ctx),
   ],
   'financial-review': (data, ctx) => {
     const hasHero = data.heroChart !== undefined && data.heroChart !== null
     return [
-      heroOf(data, data.period),
+      heroOf(data, ctx, data.period),
       kpisOf(data, ctx),
       hasHero
         ? dashPart(
@@ -105,17 +119,17 @@ export const DASHBOARD_TEMPLATES: Record<
               `<section class="chart-stack">${ctx.charts.card(data.heroChart, 'data.heroChart', { tall: true })}</section>`
           )
         : '',
-      chartsOf(data, ctx, hasHero ? 'Breakdowns' : 'Visual Trends'),
+      chartsOf(data, ctx, heading(ctx, hasHero ? 'breakdowns' : 'visualTrends')),
       tablesOf(data, ctx),
       sectionsOf(data, ctx),
     ]
   },
   'technical-report': (data, ctx) => [
-    heroOf(data),
+    heroOf(data, ctx),
     kpisOf(data, ctx),
     sectionsOf(data, ctx),
     tablesOf(data, ctx),
-    chartsOf(data, ctx, 'Charts'),
+    chartsOf(data, ctx, heading(ctx, 'charts')),
   ],
   custom: (data, ctx) => {
     const blocks = dashList(data.blocks, 'data.blocks', 'block objects')
@@ -184,7 +198,7 @@ function renderBlock(b: unknown, where: string, ctx: DashRender): string {
     const title = dashText(block.title) || undefined
     switch (block.type) {
       case 'hero':
-        return renderHero(block)
+        return renderHero(block, ctx.locale.language)
       case 'kpis': {
         const list = blockList(block, where, ctx)
         return renderKpis(list.value, list.at, ctx, title)

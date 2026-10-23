@@ -7891,6 +7891,19 @@ td.cu-registry-description {
   color: var(--cu-text-muted);
 }
 
+/* An Overview card's section label with its edit button at the end. */
+.cu-host-overview-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--cu-space-2);
+  margin: 0 0 var(--cu-space-2);
+}
+
+.cu-host-overview-card-head .cu-host-overview-section-label {
+  margin: 0;
+}
+
 /* Clickable section header inside an Overview card. Matches the rhythm of
    `.cu-host-overview-section-label` (uppercase, muted) but reads as a
    navigation affordance via the chevron + hover color shift. */
