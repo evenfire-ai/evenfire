@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { PROFILE_ROUTES } from '@constants/routes'
 import { ProfileApiError } from '@lib/api'
 import type { InvitationPreview } from '@/app/types/api'
-import contractDocument from '../../../../tests/contracts/invitation-password-public-errors.json'
 import { InvitationClient } from '../../invitations/[token]/InvitationClient'
 
 type ContractEntry = {
@@ -18,7 +19,15 @@ type ContractEntry = {
   uiMessage: string
 }
 
-const contract = contractDocument as Record<string, ContractEntry>
+// Read at runtime, not imported: the image build type-checks this file with
+// only profile-ui/ in its context, where the repository contract is absent.
+// jsdom gives import.meta.url a non-file scheme, so resolve from the package root.
+const contract = JSON.parse(
+  readFileSync(
+    resolve(process.cwd(), '../tests/contracts/invitation-password-public-errors.json'),
+    'utf8'
+  )
+) as Record<string, ContractEntry>
 
 const mocks = vi.hoisted(() => ({
   acceptInvitation: vi.fn(),
