@@ -1,7 +1,8 @@
 # Connector Secret reuse: implementation plan and audit
 
-Status: plan reviewed before implementation. Baseline: `55e2ad8f2` on
-`feat/ux-improvements-32`, after pulling the latest remote changes.
+Status: implemented and validated on `feat/ux-improvements-32`; see the
+implementation and validation record below. The plan was reviewed twice
+before and during implementation, with findings recorded in this document.
 
 ## Goal and scope
 
@@ -108,21 +109,140 @@ not invent authentication headers.
 
 ## Plan audit before implementation
 
-| Review question | Finding and resolution |
-| --- | --- |
-| Is the scope frontend-only? | Yes. Read backend contracts as evidence; change only Control UI and this document. |
-| Does the plan address both reported dead ends? | Yes: existing-secret selection at creation and reassignment for an existing `envSecret`. |
-| Could reuse overwrite or delete shared credentials? | Reference-only paths must have no Secret create/update/delete calls, including error cleanup. |
-| Could reassignment clobber a concurrent edit? | Compare the displayed spec with a fresh snapshot and use live UID/resourceVersion for the final write. |
-| Could a key rename silently break authentication? | Preserve each existing destination and require an explicit replacement key when it is absent in the new Secret. |
-| Is missing-secret repair preserved? | Keep the current set/rotate editor and offer change-assignment independently of stale Secret status. |
-| Can a new reference be mistaken for a ready connector? | Keep saved and ready states separate; use existing generation-correlated polling. |
-| Are all credential types interchangeable? | No. Keep OAuth and recipe ownership boundaries and explain static remote placeholder limitations. |
-| Can visual evidence prove live integration? | No. Local synthetic screenshots plus frontend tests verify UI contracts; deployed runtime remains a separate lane. |
+| Review question                                        | Finding and resolution                                                                                             |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| Is the scope frontend-only?                            | Yes. Read backend contracts as evidence; change only Control UI and this document.                                 |
+| Does the plan address both reported dead ends?         | Yes: existing-secret selection at creation and reassignment for an existing `envSecret`.                           |
+| Could reuse overwrite or delete shared credentials?    | Reference-only paths must have no Secret create/update/delete calls, including error cleanup.                      |
+| Could reassignment clobber a concurrent edit?          | Compare the displayed spec with a fresh snapshot and use live UID/resourceVersion for the final write.             |
+| Could a key rename silently break authentication?      | Preserve each existing destination and require an explicit replacement key when it is absent in the new Secret.    |
+| Is missing-secret repair preserved?                    | Keep the current set/rotate editor and offer change-assignment independently of stale Secret status.               |
+| Can a new reference be mistaken for a ready connector? | Keep saved and ready states separate; use existing generation-correlated polling.                                  |
+| Are all credential types interchangeable?              | No. Keep OAuth and recipe ownership boundaries and explain static remote placeholder limitations.                  |
+| Can visual evidence prove live integration?            | No. Local synthetic screenshots plus frontend tests verify UI contracts; deployed runtime remains a separate lane. |
 
 Audit verdict: proceed with the above constraints. No user decision or backend
 work is needed for the planned static credential fixes.
 
+## Implementation review of the inherited WIP
+
+Second review, performed on the uncommitted selector/reassignment WIP found in
+the working tree on top of `54a30f064`. The WIP was adopted, not restarted.
+Findings and resolutions:
+
+1. **Appended test cases were structurally broken (harness, not product).**
+   The new `connectorCredentials.test.ts` cases passed bare arrays to
+   `it.each`, so Vitest spread each case into positional arguments: `items`
+   arrived as `undefined` or as a single Secret object instead of the items
+   array. The cases need one extra array level; no implementation change.
+2. **A stale or missing key could be answered with a value prompt.**
+   `validateCredentialAttach('use-existing', …)` intentionally allows keys that
+   are not yet stored in the selected Secret (the keyless-attach flow writes
+   those values into the shared Secret). The reference-only selector inherited
+   that behavior, so a key missing from the selected Secret produced "Enter a
+   credential value" — exactly the value re-entry this plan forbids.
+   Resolution: `validateCredentialAttach` gains an options object with
+   `storedKeysOnly`; the reuse selector, creation validation, reassignment
+   gating, and the pre-mutation verifier use it so a missing or stale key
+   reports a key-selection error, and a supplied value is rejected. Keyless
+   attach keeps its existing permissive behavior.
+3. **Focus was dropped when the change flow closed.** The edit page swaps the
+   whole credentials panel, so after cancel or finish the opener button
+   remounts and keyboard focus fell to `<body>`. Resolution: the page returns
+   focus to the "Change assigned Secret" trigger once the panel has reloaded.
+4. **The rotation busy interlock had no coverage.**
+   `UpdateConnectorCredentials` now reports busy while its confirm dialog is
+   open, which drives the page's duplicate-submit guard and tab/back
+   navigation lock. Tests pin the dialog-open busy report and the guard.
+5. **Cosmetic.** The edit-page fragment around `UpdateConnectorCredentials`
+   was misindented (formatter fixes it). The "Manage connector Secrets" link
+   inside the selector stays clickable while the fieldset is disabled; that is
+   acceptable read-only navigation, not a mutation path.
+6. **Verified non-issues.** Reference-only paths never call
+   `createMcpSecret`, `updateMcpSecret`, or `deleteMcpSecret`, including the
+   create form's rollback (gated on `willCreateSecret`, which is false in
+   reference mode). Reassignment rechecks the displayed snapshot and the live
+   UID/resourceVersion before and after verification, writes only
+   `spec.envSecret`, and never cleans up either shared Secret on error.
+   Unchanged assignments are refused client- and helper-side. Keyless attach,
+   OAuth, recipe ownership, and remote auth-header placeholders keep their
+   existing boundaries.
+
 ## Implementation and validation record
 
-To be completed as implementation milestones are verified.
+All work is frontend-only: Control UI plus this document. Implementation
+milestones:
+
+1. **Reference-only selection contract.** `validateCredentialAttach` accepts
+   an `AttachValidationOptions` argument; `storedKeysOnly` requires every key
+   to exist in the selected Secret, answers a missing or stale key with a
+   key-selection error (never a value request), and rejects any supplied
+   value. It is used by the reuse selector, the creation form's validation,
+   the reassignment gate, and `verifyExistingCredentialSelection`. Keyless
+   attach keeps its existing behavior of writing new keys (with values) into
+   a shared Secret.
+2. **Creation reuse.** The creation Secrets step offers a third choice, "Use
+   an existing Secret", backed by `ExistingConnectorSecretFields`: explicit
+   loading, error/retry, and empty states, an on-demand refresh, and explicit
+   key → environment-variable mappings with no value inputs. Submission
+   verifies the Secret's live identity and keys before any access-scope
+   creation or connector write; the rollback path can only delete a Secret
+   the same submission created (`willCreateSecret` stays false in reference
+   mode), so a failed creation never touches the shared Secret.
+3. **Reassignment.** Eligible managed, enabled, static connectors with a
+   valid `spec.envSecret` show an "Assigned Secret" section with "Change
+   assigned Secret" beside the untouched rotation editor.
+   `ChangeConnectorSecret` preserves each destination environment variable,
+   requires an explicit replacement key when the new Secret lacks one,
+   confirms with the old and new Secret names, and saves only
+   `spec.envSecret` through `changeConnectorSecretReference` (fresh snapshot
+   plus UID/resourceVersion checks before the write, unchanged-assignment
+   refusal, and no Secret create/update/delete on any error path). Readiness
+   reuses the bounded generation-correlated `useRolloutWait` observation;
+   saved and ready remain separate states. Recipe-owned, OAuth, disabled, and
+   keyless connectors keep their existing surfaces, and the eligible change
+   trigger is hidden otherwise.
+4. **Focus and interlocks.** The edit page returns keyboard focus to the
+   "Change assigned Secret" trigger after cancel or finish, waiting out the
+   post-save reload. `UpdateConnectorCredentials` reports busy while its
+   confirm dialog is open, which drives the page's duplicate-submit guard and
+   the tab/back navigation lock; the change flow feeds the same `attachBusy`
+   signal.
+5. **Management guidance.** The Secrets → Connectors header explains that
+   reusable Secrets are assigned during connector creation or from the
+   connector's Credentials tab via Change assigned Secret; other scopes keep
+   the generic subtitle.
+
+Validation evidence (Node 24, `UV_USE_IO_URING=0` on every npm command):
+
+- Focused suites, `npm test -- --maxWorkers=1` over `CreateMcpServerForm`,
+  `EditMcpServerPageAttach`, `EditMcpServerPageCredentials`,
+  `UpdateConnectorCredentials`, `SecretsTable`,
+  `lib/connectorCredentials`, plus the new `ChangeConnectorSecret` and
+  `ExistingConnectorSecretFields` suites: 8 files, 254 tests passed.
+- New coverage includes: selector loading/error/retry/empty and refresh;
+  auto-mapping with destination preservation when keys differ; stale/missing
+  keys producing key-selection errors without value prompts; unchanged
+  assignment no-op; blocked-reason display; confirmation naming both Secrets
+  and "Other connectors keep their current assignments"; the spec-only PUT
+  carrying UID and resourceVersion; concurrent-change refusal; 409 and
+  uncertain-save handling with no shared-Secret cleanup; correlated
+  readiness success and bounded timeout recovery; page-level eligibility
+  gating (recipe-owned hides the trigger); the busy tab interlock; focus
+  return after cancel and after finish; the rotation confirm-dialog busy
+  report; and the Secrets guidance copy.
+- `node_modules/.bin/tsc --noEmit --incremental false -p tsconfig.json` —
+  clean.
+- `npm run style-rules` (repository root) — 0 errors; one pre-existing
+  desktop-app warning outside this change's scope.
+- Prettier written over every changed file; `git diff --check` clean.
+- Full Control UI suite: 251 files, 2885 tests passed; `npm run build`
+  completed successfully.
+
+Limits: all evidence is local and synthetic. No authenticated live product
+session was available, so no live backend, E2E, or deployed-runtime behavior
+is claimed. The planning screenshots under the ignored
+`.local-notes/infra/runs/connector-secrets-ui/` show the pre-change UI only.
+Backend reconciliation (HCC resolving a referenced Secret and restarting the
+workload) is outside frontend evidence and stays governed by the existing
+contract tests.
