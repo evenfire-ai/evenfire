@@ -4849,6 +4849,11 @@ td.cu-registry-description {
   border-color: rgba(var(--cu-danger-rgb), 0.42);
 }
 
+.cu-toast--warning {
+  color: var(--cu-warning);
+  border-color: rgba(var(--cu-warning-rgb), 0.42);
+}
+
 .cu-toast__text {
   font-size: 0.8125rem;
   line-height: 1.35;
@@ -12677,6 +12682,56 @@ button.cu-gfs-tree__button:focus-visible,
   height: 100%;
 }
 
+/* Drop-move verdicts on breadcrumb crumbs (plan §3.3): only an allowed
+   target paints the blue affordance; checking stays neutral; ordinary
+   denials read as error; unavailable reads as warning; the same-parent
+   no-op reads neutral/info. The reason rides along on data-drop-reason. */
+.cu-gfs-breadcrumb__button[data-drop-state='allowed'] {
+  outline: 2px solid rgba(var(--cu-accent-rgb), 0.72);
+  outline-offset: -2px;
+  background: rgba(var(--cu-accent-rgb), 0.14);
+}
+
+.cu-gfs-breadcrumb__button[data-drop-state='checking'] {
+  outline: 2px dashed rgba(var(--cu-accent-rgb), 0.4);
+  outline-offset: -2px;
+  background: var(--cu-surface-hover);
+}
+
+.cu-gfs-breadcrumb__button[data-drop-state='denied'] {
+  outline: 2px solid rgba(var(--cu-danger-rgb), 0.6);
+  outline-offset: -2px;
+  background: rgba(var(--cu-danger-rgb), 0.12);
+}
+
+.cu-gfs-breadcrumb__button[data-drop-state='unavailable'] {
+  outline: 2px solid rgba(var(--cu-warning-rgb), 0.6);
+  outline-offset: -2px;
+  background: rgba(var(--cu-warning-rgb), 0.12);
+}
+
+.cu-gfs-breadcrumb__button[data-drop-state='same-parent'] {
+  outline: 2px solid rgba(var(--cu-accent-rgb), 0.35);
+  outline-offset: -2px;
+  background: var(--cu-surface-hover);
+}
+
+/* Visually-hidden live region carrying the hover verdict sentence (RP-026):
+   painted verdicts are invisible to screen readers, so the same wording is
+   spoken here when it changes. */
+.cu-gfs-drop-announce {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 .cu-gfs-list-frame {
   --cu-gfs-list-columns: 2.25rem minmax(0, 1fr) minmax(4.5rem, auto) 9.5rem;
 
@@ -12821,6 +12876,33 @@ button.cu-gfs-tree__button:focus-visible,
 
 .cu-gfs-list__row[data-drop-target='true']:hover {
   background: rgba(var(--cu-accent-rgb), 0.18);
+}
+
+/* Reason-aware row verdicts share the crumb tone contract: denied = error,
+   unavailable = warning, checking = neutral, same-parent = neutral/info.
+   Only the allowed verdict keeps the blue data-drop-target affordance. */
+.cu-gfs-list__row[data-drop-state='denied'] {
+  outline: 2px solid rgba(var(--cu-danger-rgb), 0.6);
+  outline-offset: -2px;
+  background: rgba(var(--cu-danger-rgb), 0.12);
+}
+
+.cu-gfs-list__row[data-drop-state='unavailable'] {
+  outline: 2px solid rgba(var(--cu-warning-rgb), 0.6);
+  outline-offset: -2px;
+  background: rgba(var(--cu-warning-rgb), 0.12);
+}
+
+.cu-gfs-list__row[data-drop-state='checking'] {
+  outline: 2px dashed rgba(var(--cu-accent-rgb), 0.4);
+  outline-offset: -2px;
+  background: var(--cu-surface-hover);
+}
+
+.cu-gfs-list__row[data-drop-state='same-parent'] {
+  outline: 2px solid rgba(var(--cu-accent-rgb), 0.35);
+  outline-offset: -2px;
+  background: var(--cu-surface-hover);
 }
 
 .cu-gfs-list__row--clickable {
