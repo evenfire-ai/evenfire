@@ -98,9 +98,10 @@ not invent authentication headers.
    creation. Use canonical route builders for any navigation. Preserve current
    key/env-file management and usage reporting.
 4. **Verify and record.** Test creation reuse, multiple connector references,
-   replacement including missing old Secrets, missing/replaced selected
-   Secrets, missing keys, load failures, conflicts, unchanged assignments,
-   spec preservation, no Secret writes/deletes on reuse, and rollout recovery.
+   replacement including an old Secret that is no longer present, selected
+   Secrets that were replaced or lost, missing keys, load failures, conflicts,
+   unchanged assignments, spec preservation, no Secret writes or deletes on
+   reuse, and rollout recovery.
    Run focused regressions, Control UI typechecking, applicable style checks,
    and the full UI suite/build when dependencies permit. Inspect regular and
    narrow viewport screenshots with synthetic metadata. Record live-runtime
