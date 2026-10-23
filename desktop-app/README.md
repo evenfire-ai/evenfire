@@ -127,31 +127,35 @@ npm run start
 
 ## Package and Sign
 
-Desktop builds need Node 24.22.1 or later in the Node 24 line, an `npm ci` with lifecycle scripts enabled (never
-`--ignore-scripts`, never `ELECTRON_SKIP_BINARY_DOWNLOAD`), and a passing
-`npm run verify:electron` before any build or test result counts.
+Desktop release packaging requires Node 24.22.1 or later in the Node 24 line,
+an npm install with lifecycle scripts enabled (never `--ignore-scripts` or
+`ELECTRON_SKIP_BINARY_DOWNLOAD`), and a passing `npm run verify:electron`.
 
-```bash
-npm ci
-npm run verify:electron
-npm run make:mac:arm64   # or make:mac:x64, make:windows:x64, make:windows:arm64, make:linux:x64, make:linux:arm64
-```
+`npm ci` and `npm run build` are used to prepare the local app.
 
-Each `make:*` script runs `electron-forge make` for one platform/arch and builds
-first via the forge `prePackage` hook (`EVENFIRE_SKIP_PACKAGE_BUILD=1` skips that).
-Output goes to `out/`. The makers are zip (all platforms), dmg (macOS), squirrel
-(Windows), and deb/rpm (Linux). This directory's `Makefile` has no packaging
-targets.
+The `make:*` scripts still invoke electron-forge for local platform packaging.
+Published updater releases are built by
+`.github/workflows/release-desktop.yml` with electron-builder. The workflow
+covers macOS and Windows x64/arm64 plus Linux AppImage, DEB, and RPM x64/arm64.
+It attaches update metadata and all target assets to the exact GitHub release
+tag returned by the selected backend.
 
-macOS signing and notarization are opt-in and run only on a macOS build host:
-set `ENABLE_APPLE_CODESIGN=1`, optionally `APPLE_CODESIGN_IDENTITY` and
-`APPLE_KEYCHAIN`, plus either `APPLE_API_KEY`/`APPLE_API_KEY_ID`/`APPLE_API_ISSUER`
-or `APPLE_KEYCHAIN_PROFILE` (the config throws if neither is set).
-`APPLE_BUNDLE_ID` overrides the default `ai.evenfire.desktop`. Windows and Linux
-packages are unsigned. No workflow in this repo builds or publishes installers.
+Release publication requires these repository secrets:
 
-Signing details, release tags, and how the app detects required updates are in
-[Ship it to your users](../docs/surfaces/desktop-app.md#ship-it-to-your-users).
+- `DESKTOP_MACOS_CSC_LINK` and `DESKTOP_MACOS_CSC_KEY_PASSWORD`
+- `DESKTOP_APPLE_API_KEY_P8`, `DESKTOP_APPLE_API_KEY_ID`, and
+  `DESKTOP_APPLE_API_ISSUER`
+- `DESKTOP_WINDOWS_CSC_LINK` and `DESKTOP_WINDOWS_CSC_KEY_PASSWORD`
+
+Mac builds are signed and notarized; Windows builds are signed. Linux uses the
+electron-updater package-manager/AppImage update path. The updater uses a feed
+URL for the backend's exact target tag, not a GitHub latest-release query.
+Those native release paths still require signed installation testing on every
+supported OS/architecture combination.
+
+The backend policy and user flows are documented in
+[Ship it to your users](../docs/surfaces/desktop-app.md#ship-it-to-your-users)
+and [Desktop setup & updates](../docs/how-to/desktop-setup-and-updates.md).
 
 ## Port-forward Remote Cluster Services
 

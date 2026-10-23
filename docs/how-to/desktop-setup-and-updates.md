@@ -117,20 +117,35 @@ on first launch; running through local dev commands selects it by default.
 
 ## Updates
 
-After you authenticate, the app checks the **currently selected tenant** for its
-update policy, so different tenants can be on different versions at the same
-time. It asks that tenant's External REST API for its release info, including a
-`minimumDesktopVersion`. If the installed version is **below** that minimum, the
-app shows a **Desktop update required** dialog; **Download update** opens the
-`releaseUrl` the server returns (the release tagged `v<desktopVersion>`) in
-your browser. (A packaged distribution is where this matters most — a source
-checkout can just pull the latest.)
+When an environment is selected, Desktop checks its External REST API release
+policy at startup, including before sign-in. Each backend deployment chooses a
+recommended Desktop version and the exact set of Desktop versions it supports.
+The app uses that selected backend's policy; it does not use GitHub's global
+latest release.
 
-This is update **detection**, not silent auto-install: the app tells the user an
-update is required and links the release; it never downloads or installs on
-its own. macOS signing and notarization are available as an opt-in build step,
-and Windows and Linux builds are unsigned — see
-[Ship it to your users](../surfaces/desktop-app.md#ship-it-to-your-users).
+If the installed version is in the compatible set, the app remains usable and
+does not prompt at startup, even if the backend recommends a newer build. If it
+is outside the set, a dismissible notice offers **Update and restart**. Choosing
+that action downloads the backend's selected compatible build with visible
+progress and restarts when ready. Dismissing the notice does not block app use.
+
+Choose **Evenfire → Check for Updates** on macOS, **Help → Check for Updates**
+on Windows/Linux, or **Settings → Information → Check for updates** to check
+manually. If a different compatible build is available, Desktop downloads it
+with progress and then asks whether to restart now or later. A deferred update
+is checked against the selected backend again before installation.
+
+If the compatibility check fails, Desktop reports that it could not verify the
+build and leaves the app available. Try again from Settings or close and reopen
+the app. An update is installed only through the app's updater; users do not
+select another build on GitHub during the normal flow.
+
+Existing releases without the integrated updater cannot acquire it remotely.
+The first updater-capable version must be installed through the normal
+distribution process. The versioned invite-email/Profile UI/landing download
+follow-up is separate and is not required for these update checks. See
+[Ship it to your users](../surfaces/desktop-app.md#ship-it-to-your-users) for
+release and signing details.
 
 ## Troubleshooting
 

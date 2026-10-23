@@ -1,276 +1,171 @@
-# Desktop compatibility updates: gaps and roadmap
+# Desktop compatibility updates: implementation status and roadmap
 
-Status: proposed roadmap incorporating owner-confirmed scope and update flows;
-no implementation authorized or performed.
-Discovery date: October 23, 2026, America/Guatemala.
-Audience: Desktop, API, release engineering, support, and QA.
+Status: first implementation slice is in this branch; cross-platform release
+qualification remains open. This is not evidence that signed packages have
+shipped or that native update/restart journeys have passed on all targets.
+Discovery baseline: October 23, 2026, America/Guatemala.
 
-The [specification](desktop-backend-compatible-updates-spec.md) contains the
-pinned latest-`dev` evidence, complete `main` release/date inventory, proposed
-contract, and acceptance conditions. It also records the inspected optional
-member-registration/Profile UI invitation handoff. This document maps that
-evidence to work; invitation/landing changes are a separate post-release track.
-Checkboxes describe future completion; none is completed by documentation alone.
+The [acceptance contract](desktop-backend-compatible-updates-spec.md) records
+the inspected release history, owner-confirmed decisions, user flows, and
+acceptance conditions. The closed-source invitation/member-registration and
+landing integration is an independent post-release track.
 
-## 1. Gap inventory
+## Current flow
 
-| Gap | Existing foundation | Missing work | Milestone / acceptance |
-| --- | --- | --- | --- |
-| G-01: backend authority | Deployment-local authenticated `/desktop/release` with target/minimum. | Pre-auth recovery, bounded support declaration, policy identity/revision, validated typed schema, and advisory compatibility notifications without access gates. | M1; AC-01–06, AC-18 |
-| G-02: target selection | Desktop already receives an exact `v<desktopVersion>` link. | Many-to-many compatibility, newest certified target, offered downgrade on mismatch, full SemVer/channels, and revocation. | M1/M3; AC-02–06, AC-17 |
-| G-03: automatic checks | Best-effort check after authenticated session loading. | Fresh verification on every startup, compatible-build continuity, dismissible mismatch/failure alerts, retry, and user-accepted immediate update/restart. | M3/M4; AC-01, AC-04–05, AC-13, AC-18 |
-| G-04: platform downloads | Landing matches six OS/architecture ZIP names and builds direct links. | Exact-policy release lookup; native architecture/install-format selection; remove global-latest and user-agent-guess fallbacks from the Desktop path. | M0/M2/M3; AC-09 |
-| G-05: update mechanism | Forge ZIP/DMG/Squirrel/DEB/RPM makers; optional macOS signing. | Chosen and proven updater adapters; progress; authenticated staging; install/restart; Linux mechanism; verified downgrade support. | M0/M2/M3; AC-08–13, AC-20 |
-| G-06: user controls | Required-update browser-link dialog and Settings diagnostics. | Native menu/Settings checking and download, dismissible alerts/progress, user-accepted immediate startup install/restart, and manual restart-now/later with continued usage even on mismatch. | M4; AC-07–10, AC-12, AC-18 |
-| G-07: publication | Release-preparation/version validators; six ZIPs visible on recent releases. | Reproducible owned packaging/signing/publishing pipeline, updater-native assets, embedded-version checks, complete catalog, atomic eligibility and historical retention. | M2; AC-11, AC-16–17 |
-| G-08: environment isolation | Existing saved REST endpoints, auth ownership, and environment switching. | Update work bound to environment generation/policy/target; stale-result cancellation; no wrong-environment staged install. | M3/M4; AC-11, AC-14 |
-| G-09: downgrade safety | Existing paged-chat legacy snapshots and reconciliation; unknown-index protection. | Whole-store and installer pair matrix; pending-work handling; tested safe rollback and post-restart validation. | M0/M3/M5; AC-05, AC-12–15 |
-| G-10: recent baseline | Owner confirms only builds from the last 30 days are in use; published in-window releases are `v0.10.0`/`v0.11.0`, with corrected tags. | Validate recent packages directly and document first updater installation; explicitly exclude legacy adapters/projections/backports in docs and implementation PRs. | M0/M5; AC-18–19 |
-| G-11: validation evidence | Existing route/status/UI/chat tests; manifest validation passed in discovery. | Native signed upgrade/downgrade journeys and fault cases across all six combinations; compatibility evidence for each supported backend family. | M5; AC-01–20 |
-| G-12: invitation download | Member-registration emails link Profile UI; its download button opens GitHub. Landing's download branch has no version selection and is not deployed, per owner. | Explicit-version first-party links across optional invitation service, Profile UI, and landing; exact-version OS/architecture resolution and safe fallback UX. | Post-release P0 only; PW-01–05 |
+Startup verification:
 
-## 2. Confirmed decisions and engineering choices
+```mermaid
+flowchart TD
+  A[Desktop starts with selected backend] --> B[GET backend desktop release policy]
+  B --> C{Installed build in compatible set?}
+  C -->|Yes| D[Continue without an update prompt]
+  C -->|No| E[Dismissible mismatch notice]
+  E -->|Update and restart| F[Download exact backend-selected release]
+  F --> G[Show progress, revalidate policy, restart]
+  E -->|Dismiss| D
+  B -->|Failure| H[Report unverified; keep app usable]
+  H --> I[Retry from Settings or next launch]
+```
 
-| Decision | Evidence / rule | Status / remaining work |
-| --- | --- | --- |
-| D-01: legacy exclusion | Owner confirms no in-use builds older than 30 days. No special compatibility code for excluded legacy releases, including broken tags. | Confirmed. State this exclusion in docs and future implementation PRs; do not reopen an old-deployment inventory as a prerequisite. |
-| D-02: recent baseline | As of October 23, the window starts September 23. Published releases in it are `v0.10.0` and `v0.11.0`; both already have corrected tags. | Validate actual recent binaries/contracts directly. No v1 projection is required just to preserve out-of-scope clients. The window is an initial baseline, not a rolling future expiry rule. |
-| D-03: first updater-capable release | Current binaries cannot remotely gain installer code. Provide the ordinary one-time installation of the new updater-enabled build. | Assign its version/distribution path in M0; no old-backend backport or historical maintenance release is requested. |
-| D-04: package/updater strategy | Forge configuration and six outer ZIPs do not prove unattended replacement, progress, or downgrade. Native Electron alone does not cover Linux. | M0 platform feasibility evidence and an architecture decision; do not select a library solely from its API name. |
-| D-05: supported install modes | Per-user vs system install, Linux package-manager vs managed bundle, read-only apps, and architecture migration affect permissions/replacement. | M0 engineering choice within the required three OS families and six architecture combinations; document first-install handling. |
-| D-06: compatibility representation | A backend may support multiple builds, and a build may support multiple backends. Start with explicit supported sets and the newest certified target. | Many-to-many requirement confirmed; finalize schema, revocation, distribution, and cache consistency in M1. |
-| D-07: check/restart timing | Compatible startup builds do not update automatically. A mismatch alert offers an immediate update/restart action and can be ignored. Manual checking downloads the newest compatible build and offers restart now/later. | Confirmed; Q-01–03 are answered. No extra periodic refresh is required and deferred restart never restricts usage. |
-| D-08: publisher trust | Existing binaries' signatures and embedded versions were not inspected; current Windows config has no signing. | Identify actual packaging owner, signing identities/credential storage, asset format, and trust verification rules. |
-| D-09: legacy local data | Pre-paging snapshots/reconciliation first shipped in `v0.6.0` and remain in current code. Their scope is narrower than whole-app compatibility. | Retain them; test supported source/target pairs. Any removal requires a separately scoped data-compatibility decision. |
-| D-10: invitation work | Optional closed-source service is used in prod/dev. Its invitation flow, Profile UI download action, and undeployed landing change need an explicit-version contract. | Confirmed post-release scope; PW-01–05 do not delay the updater release. Updater-capable downloads warn on incompatibility at startup and offer correction; users can ignore the warning. |
-| D-11: continued usage | Always attempt fresh startup verification. Failure, pending status, mismatch, ignored alerts, cancelled downloads, and deferred restart must not disable app/backend actions. | Confirmed owner decision. Report failures honestly and recheck on retry/relaunch; no cached-success bypass or compatibility-based usage gate. Installation integrity and existing authorization remain enforced. |
+Manual check:
 
-The investigation did not establish a functional "release X became incompatible
-on date Y" boundary. The current floor rejects versions below `0.1.252`, yet
-every published release's source Desktop version meets it. Early release labels
-do not equal their embedded source version: `v0.4.0` has `0.1.299`, and `v0.5.0`
-has `0.1.316`. Verify actual archives before relying on a tag for migration
-eligibility. Owner-supplied usage now settles the legacy exclusion; the historic
-floor still cannot certify recent product compatibility by itself. All three
-product questions are answered in [specification section 11](desktop-backend-compatible-updates-spec.md#11-confirmed-product-decisions).
+```mermaid
+flowchart TD
+  A[Evenfire menu, Help menu, or Settings] --> B[Check selected backend]
+  B --> C{Different compatible target?}
+  C -->|No| D[Report current build is up to date]
+  C -->|Yes| E[Download exact target with progress]
+  E --> F[Revalidate backend policy]
+  F --> G{Restart now or later?}
+  G -->|Now| H[Install and restart]
+  G -->|Later| I[Keep app usable; recheck before install]
+  B -->|Failure| J[Report failure; leave app usable]
+```
 
-## 3. Ordered implementation milestones
+In both flows, compatibility is advisory: no mismatch, failed check, pending
+download, ignored alert, or deferred restart intentionally disables use.
 
-### M0 — Establish support and platform feasibility
+## Gap inventory
 
-Suggested owners: Desktop/release engineering with support and product.
+| Area                        | Implemented in this branch                                                                                                                                                                                | Remaining work                                                                                                                                                                                                  |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Backend compatibility       | Public External REST API release metadata returns the deployment's target, exact compatible-version set, and version-tag feed URL. The target must be in the set.                                         | The policy is compiled into each API deployment. There is no dynamic policy UI, revision/expiry, per-platform eligibility, release revocation, or promotion check across replicas.                              |
+| Version/release writer      | Release preparation updates the Desktop version and target. It defaults the compatible set to the new version and accepts repeated flags for additional certified versions. The legacy minimum is frozen. | Release operators must publish all update metadata/assets before deploying a new target. Automation does not yet prove that ordering.                                                                           |
+| Startup check               | Checks when a selected backend is configured, whether or not the user is signed in. Compatible builds remain quiet; mismatch and failure do not impose a usage gate.                                      | Add packaged startup journeys for backend outage, missing policy, ignored mismatch, retry, and environment switching.                                                                                           |
+| Manual check and notices    | macOS app menu, Windows/Linux Help menu, Settings button, non-modal notice, download progress, and restart-now/later state are wired.                                                                     | Verify native menu and accessible progress behavior in packaged apps. Add cancellation and explicit concurrent-request coverage.                                                                                |
+| Main-process updater        | Uses electron-updater, exact release-tag feed validation, target rechecks before download/install, persisted manual pending state, and downgrade selection.                                               | Test stale-policy/backend switches, transfer failures, restart persistence, platform permissions, package integrity, and recovery.                                                                              |
+| Build and publication       | electron-builder config and release workflow cover macOS and Windows x64/arm64, Linux AppImage/DEB/RPM x64/arm64, exact-tag asset publication, macOS signing/notarization, and Windows signing.           | Configure signing secrets and produce a real candidate release. Verify every asset and metadata file across the six OS/architecture target groups; test actual upgrades/downgrades on each pair.                |
+| Recent-client transition    | The new client uses exact allowlist membership; old minimum-version policy is left in place for existing old clients. No legacy projection or historical backport is added.                               | The first updater-capable build must be installed through the normal one-time distribution process because earlier binaries cannot gain updater code remotely. Validate current in-window builds directly.      |
+| Invitation/download handoff | Explicitly excluded from the core update release.                                                                                                                                                         | After release, carry a backend-selected version through optional member-registration email, Profile UI, and the landing resolver; select recipient OS/architecture and download directly without a GitHub page. |
 
-- [ ] Apply the confirmed recent-build baseline and legacy exclusion from D-01–03.
-  Apply confirmed Q-01–03/D-07/D-11 and record engineering choices D-04–06/D-08–09
-  without adding out-of-scope compatibility work. Name supported backend families
-  and install formats; no further product decision is pending.
-- [ ] Inspect the actual recent release artifacts: archive contents, embedded
-  Desktop version, executable/publisher identity, signatures, and install mode.
-- [ ] In an explicitly authorized future implementation spike, prove user-gated
-  download, real progress, upgrade, older-version installation, and relaunch
-  for each selected macOS, Windows, and Linux adapter on x64/arm64.
-- [ ] Prove Linux permission/package ownership behavior and Windows downgrade
-  behavior; evaluate whether Forge can remain the packager or needs an adapter/
-  packaging change. Test ARM64 and emulated installations explicitly.
-- [ ] Inventory persisted stores and define permitted schema/version transitions.
-  Preserve existing chat downgrade safeguards and plan interrupted-update recovery.
-- [ ] Record the chosen mechanism, tradeoffs, signing requirements, target artifact
-  formats, first updater installation, and supported source/target pairs.
+## Confirmed compatibility decisions
 
-Exit: a feasible architecture within the confirmed scope. A failed platform
-spike blocks an "all platforms complete" claim; it does not silently remove
-Linux, downgrade, or ARM64 from scope. No implementation spike was run here.
+- All currently used builds are within the last 30 days, per the owner. No
+  compatibility shim, old-backend backport, broken-tag adapter, or historical
+  maintenance build is required for older releases.
+- Record that exclusion in implementation PR descriptions and future update
+  work. Do not raise the historical minimum version: old clients still consume
+  that field, and the new client uses the explicit compatible set.
+- Compatibility is many-to-many. One backend may allow several Desktop builds,
+  and the same build may appear in several deployment manifests. Each backend
+  chooses its own recommended target.
+- A compatible build is not prompted at startup, even if a newer compatible
+  target exists. Manual checks may download the selected target and ask whether
+  to restart now or later.
+- Always attempt verification when a configured backend is available. If it
+  fails, say it failed, keep the app usable, and retry from Settings or on the
+  next launch.
+- Never intentionally block use because of mismatch, failure, pending update,
+  ignored alert, or deferred restart. Existing service/auth errors still behave
+  normally.
+- Invitation emails, the member-registration repository, Profile UI download
+  action, and landing versioned download links are post-release work only.
 
-### M1 — Define and implement the compatibility policy
+## Ordered work and release gates
 
-Depends on M0. Suggested owners: External REST API and release engineering.
+### M0 — Product decisions and legacy boundary: complete
 
-- [ ] Define the versioned schema and pre-auth non-secret discovery endpoint;
-  update current supported consumers directly. Do not add a legacy route
-  projection, broken-tag adapter, or old-backend backport outside the baseline.
-- [ ] Model supported versions, newest certified target, platform catalog,
-  deployment/revision/expiry identity, channels, retirement, and revocation;
-  allow several Desktop versions per backend and a build shared across backends.
-- [ ] Validate target membership, full SemVer, immutable release identity, supported
-  installation format, and invalid/empty/unknown policy states.
-- [ ] Bind policy revisions to deployment promotion and replica/cache consistency;
-  define promotion of a newly certified compatible Desktop release independently
-  of an unrelated global release. Keep service counters separate.
-- [ ] Test recent/new supported clients, pre-auth failures, many-to-many support
-  across two backend deployments, policy changes, target gaps, channels, and
-  missing artifacts. Older historical clients are not an acceptance requirement.
+The owner confirmed startup/manual behavior, non-blocking failure/mismatch
+handling, the recent-build baseline, and post-release invitation scope. No open
+product question remains.
 
-Exit: reviewed contract and passing API/catalog integration evidence for
-AC-01–06, AC-16–18. Supported clients can identify a valid target without first
-completing an incompatible login. M2 can build against the reviewed contract
-while M1 implementation finishes.
+### M1 — Backend policy and release coordinates: implemented, deployment proof open
 
-### M2 — Publish trustworthy updater assets
+The current External REST API manifest contains the exact compatible set and
+recommended target. The route returns only public version/release metadata. The
+release writer validates the set and freezes the legacy minimum.
 
-Depends on M0 and the M1 contract. Suggested owners: release engineering.
+Before rollout, demonstrate two independently configured backend deployments
+with different targets, multiple compatible versions, and a shared compatible
+build. Confirm that each deployment retains its policy during separate release
+timing.
 
-- [ ] Establish ownership of the currently external/manual Desktop artifact
-  production process; add reproducible packaging/signing publication to the
-  appropriate release workflow.
-- [ ] Extend the shared release writer and validators for the selected native
-  update formats and signed catalog. Preserve the explicit mandatory-floor
-  decision and ordinary service-counter behavior.
-- [ ] Build all six OS/architecture combinations with the repository's required
-  Node 24 toolchain and verified Electron runtime. Verify embedded versions,
-  signing identity, digest/size, installation format, and release tag.
-- [ ] Publish and verify updater-native assets/feed metadata before activating a
-  target; fail on partial uploads, inaccessible assets, missing combinations,
-  invalid signatures, and unsupported prereleases.
-- [ ] Retain historical compatible releases and test policy rollback/revocation.
-  GitHub or a first-party proxy can serve bytes, but must preserve the selected
-  immutable artifact and trust checks.
+### M2 — Native package build and publication: implemented, real release open
 
-Exit: a real complete candidate release usable by the selected updaters, plus
-failed-publication and target-promotion tests for AC-09, AC-11, AC-16–17.
-The existing six release ZIP names alone do not satisfy this milestone.
+The workflow requires repository secrets:
 
-### M3 — Implement the main-process update service
+- `DESKTOP_MACOS_CSC_LINK` and `DESKTOP_MACOS_CSC_KEY_PASSWORD`
+- `DESKTOP_APPLE_API_KEY_P8`, `DESKTOP_APPLE_API_KEY_ID`, and `DESKTOP_APPLE_API_ISSUER`
+- `DESKTOP_WINDOWS_CSC_LINK` and `DESKTOP_WINDOWS_CSC_KEY_PASSWORD`
 
-Depends on M1 and test assets from M2. Suggested owner: Desktop main/preload.
+Configure these before a release. Build and inspect every platform/architecture
+asset, updater metadata file, embedded app version, signing identity, and
+download hash. Verify that target promotion cannot precede asset availability.
+The workflow runs after a GitHub Release is published, so release sequencing
+remains an explicit operational gap until an artifact-first promotion path is
+proven.
 
-- [ ] Implement one state machine for startup validation, manual check/download,
-  mismatch/failure warning, user-accepted immediate startup install/restart,
-  manual deferred restart, offered upgrade/downgrade, download, verification,
-  ready, install, and recovery. Separate metadata from application-byte transfer.
-- [ ] Bind operations to canonical selected backend/generation, policy revision,
-  target, and platform asset. Invalidate delayed results and revoke previous
-  consent on an environment/target change.
-- [ ] Detect platform and runtime/native architecture; select exactly one certified
-  package. Validate format/OS constraints; do not install unsafe downgrade pairs,
-  while leaving the current app's normal usage available.
-- [ ] Add user-triggered download, accessible progress events, cancellation/retry,
-  private staging, disk checks, integrity/publisher validation, and controlled
-  redirect/credential behavior. Keep executable/path choices out of renderer IPC.
-- [ ] Revalidate policy before install, including deferred packages; flush/save
-  work, handle OS permissions, apply through the chosen adapter, and verify the
-  outcome. Startup's update action authorizes immediate restart; manual download
-  offers restart now/later after verification. Persist deferred installation state.
-- [ ] Always attempt fresh startup/environment verification, plus reconnect
-  revalidation and serialized manual requests. Pending/failed checks, ignored
-  warnings, cancellations, and restart deferral must not disable normal app,
-  login, navigation, or backend/API/RPC activity. Retry/relaunch rechecks.
-- [ ] Test every persisted store and supported round trip, including offline work
-  and deletion state. Keep a recoverable working application after failure.
+electron-updater documents macOS DMG, Windows NSIS, and Linux AppImage/DEB/RPM
+as update-capable formats; macOS must be signed:
+[official auto-update documentation](https://www.electron.build/v26/docs/features/auto-update/).
+Documentation does not replace testing installed packages, permissions,
+downgrades, signing, or restart behavior.
 
-Exit: service and trust-boundary tests for AC-01–06, AC-08–15, AC-18; a real
-upgrade/downgrade proof on each selected adapter before broad UI rollout.
+### M3 — Main-process state and platform behavior: implemented, resilience proof open
 
-### M4 — Add menus, Settings, and update UX
+Test the exact-feed and membership checks, failure recovery, user-data marker
+persistence, backend switching, offline operation, incomplete downloads,
+permissions, and the platform package updater behavior. Confirm a failed or
+cancelled update leaves the current application working.
 
-Depends on M3 contracts; native adapter behavior must be verified before release.
-Suggested owner: Desktop renderer/main.
+### M4 — User controls and UX: implemented, packaged UX proof open
 
-- [ ] Add macOS Evenfire and Windows/Linux Help menu commands. Focus/open the
-  window and show the same update surface used by Settings.
-- [ ] Add explicit Settings check, state, backend, installed/compatible versions,
-  last-check time, errors, and pre-auth recovery access.
-- [ ] Replace "latest" browser-handoff messaging with backend-compatible startup
-  upgrade/downgrade warnings and manual-update messaging.
-- [ ] Add a dismissible startup mismatch alert with **Update and restart**,
-  progress, verification, and immediate restart only after choosing that action.
-  Compatible builds are not forced to update; ignored alerts leave usage available.
-- [ ] Manual menu/Settings checks download the newest compatible target and ask
-  **Restart now** / **Restart later** after verification; add cancellation/retry,
-  completion/recovery, and deferred-package revalidation.
-- [ ] Verify keyboard/screen-reader behavior, window close/reopen, signed-out
-  checks, honest failure warnings, usable controls/calls after ignored alerts or
-  restart deferral, and concurrent menu/Settings checks.
+Verify the native macOS Evenfire menu, Windows/Linux Help menu, Settings
+control, startup mismatch notice, visible transfer progress, no modal usage
+gate, immediate restart after the explicit startup action, and manual
+restart-now/later behavior. Exercise both compatible-old and incompatible-new
+clients against independent backend policies.
 
-Exit: AC-07–10, AC-12–14, AC-18 UX evidence. No normal path requires choosing
-assets on GitHub. Compatibility status never imposes a usage restriction. A
-startup action explicitly authorizes immediate update/restart; manual download
-offers restart now/later even on mismatch, with continued usage available.
+### M5 — Release qualification: not complete
 
-### M5 — Certify and migrate supported deployments
+Before calling the feature production-ready:
 
-Depends on M1–M4 and the confirmed scope. Suggested owners: QA/release/
-support, with service owners for backend capability tests.
+1. Use the verified Node 24.22.1 runtime and electron runtime. Build signed
+   packages for macOS, Windows, and Linux on x64 and arm64.
+2. Install each supported format and run a user-selected upgrade and downgrade.
+   Record source/target versions, selected backend policy, architecture,
+   package/signature identity, progress, restart, and post-restart compatibility.
+3. Test failed backend checks, missing target assets, interrupted downloads,
+   permission prompts, deferred restart, ignored alerts, and backend switching.
+   Confirm normal app activity remains available in each advisory state.
+4. Confirm release policy is activated only after the exact-tag assets and feed
+   metadata can be downloaded for every required architecture.
+5. Publish current user instructions for the first updater-capable installation.
+   Existing binaries without updater code cannot update themselves.
+6. Put versioned invitation and landing downloads in a separate post-release
+   project; do not make them a release prerequisite.
 
-- [ ] Run AC-01–20 with actual candidate artifacts, not only mocked updater events.
-  Record OS/distro, CPU/native/emulated mode, install format, publisher/digest,
-  source/target versions, backend policy revision, and post-restart result.
-- [ ] Cover macOS/Windows/Linux × x64/arm64 upgrade and offered downgrade,
-  retained source/target pairs, supported backend families, and data round trips.
-- [ ] Inject interrupted transfers/install, offline/expired policy, revoked release,
-  disk/permission/signature failures, proxy/rate limits, first-run locks, duplicate
-  clicks, and environment switching with a staged download. Verify that updater
-  failures/ignored warnings/deferred restart do not add a usage gate and that
-  closing/reopening attempts fresh backend verification.
-- [ ] Deploy the new policy and updater-enabled distribution to supported recent
-  environments. Publish ordinary one-time installation instructions for current
-  binaries without an updater; do not create historical backports or shims.
-- [ ] Roll out to a limited opted-in cohort, confirm recovery, then activate the
-  certified policy/catalog. Do not deploy an incompatible backend before its
-  Desktop target is available.
-- [ ] Update Desktop setup/update and packaging documentation with the two flows,
-  initial recent-build baseline, legacy exclusion, and future supported-artifact
-  retention rules. Include that exclusion explicitly in implementation PRs.
+## Validation completed in this branch
 
-Exit: every acceptance condition has named evidence or an explicit unresolved
-blocker. A unit test run, a published ZIP, or one successful macOS update cannot
-substitute for this milestone.
+- External REST API desktop release route: 4 focused tests pass.
+- Release coordinate contract: 36 assertions pass, including freezing the
+  historical minimum and validating the compatible version set.
+- Desktop unit/UI coverage and build/type checks: see the PR validation summary.
+  These checks do not prove signed native installation behavior.
+- Signing secrets were unavailable, so no published packages or native
+  upgrade/downgrade journeys are claimed.
 
-## 4. Post-release P0 — Versioned invitation and landing downloads
-
-This track is intentionally outside M0–M5's release gate. The optional invitation
-service may continue its existing handoff while the updater ships. Updater-capable
-downloads warn about incompatibility at startup and offer a compatible replacement.
-Users may ignore the alert and attempt operations; no prevention of incompatible
-usage is promised. Old pre-updater ZIPs do not provide the new notification/update
-capability.
-
-Suggested owners: member-registration, Profile UI, and landing maintainers.
-
-- [ ] Extend the invitation/download handoff to carry the inviting deployment's
-  exact newest compatible Desktop version from the same backend policy.
-- [ ] Preserve email invitation acceptance and optional deployment behavior. Add
-  a versioned first-party download link where the email/product flow needs it;
-  update Profile UI's existing download action so it no longer opens GitHub.
-- [ ] Add requested-version handling to landing's browser/server/no-JavaScript
-  resolver, routing, and caches. Detect OS/architecture at recipient click time
-  with an override when uncertain, and directly download the exact asset.
-- [ ] Validate version input and supported assets; avoid global-latest swaps,
-  arbitrary redirects, and invitation tokens or credentials in download URLs.
-- [ ] Deploy landing's version-aware resolver before enabling new versioned
-  invitation links. Test stale emails after backend version/policy changes and
-  verify Desktop startup correction on updater-capable distributions.
-- [ ] Validate PW-01–05 separately. Post-release failure or non-deployment does
-  not change the core updater's completion criteria or delay its release.
-
-Exit: exact-version first-party downloads from the optional invitation flow,
-with the correct OS/architecture and no GitHub page. The owner confirms the
-landing download branch is not deployed yet; this task did not deploy or edit it.
-
-## 5. Implementation surface map
-
-| Surface | Likely files / responsibilities |
-| --- | --- |
-| Backend policy | `external-rest-api/src/routes/desktop.ts`, `releaseManifest.ts`, config, middleware, and route tests; deployment-owned policy storage/configuration to be chosen in M1. |
-| Client contract | `desktop-app/src/types.ts`, `authClient.ts`, `appService.ts`, `ipc.ts`, `preload.ts`; a focused main-process update service and native menu setup. |
-| UI | `desktop-app/ui/src/hooks/domain/useAuthController.ts`, `useAppController.ts`, `App.tsx`, `pages/SettingsPage.tsx`, update components/styles and their tests. |
-| Packaging | `desktop-app/forge.config.js`, package scripts/dependencies, native updater integration selected in M0, signing/publishing workflow. |
-| Release policy | `scripts/release/prepare-release.mjs`, `release-coordinates.mjs`, `update-desktop-release-manifest.mjs`, validators/tests, publication and deployment promotion workflow. |
-| Data recovery | `desktop-app/src/chatStore.ts`, `chatStoreBinding.ts`, config/token/settings/upload stores and source/target fixtures. Existing compatibility behavior is retained until verified otherwise. |
-| Post-release invitation flow | `evenfire-member-registration` email service/templates, invitation registration/config contracts, and tests; Evenfire Profile UI's `lib/api.ts`, release/download constant, invitation page/action panel, and backend policy handoff. No invitation email was sent and no external repo files changed. |
-| Post-release landing | `lib/release-info.mjs`, `download.js`, `api/latest-release.js`, `api/download-latest.js`, routing/cache configuration, and local-preview equivalents: add exact-version contract plus OS/architecture selection. No landing files changed or deployed here. |
-| User docs | Desktop setup/updates, Desktop surface packaging, releases/upgrades, bootstrap/support and troubleshooting documentation after behavior ships. |
-
-## 6. Validation boundaries and task completion
-
-This task produced the specification, historical assessment, and roadmap only.
-The initial manifest read-only validator and isolated comparison evaluation
-passed; this amendment inspected member-registration's fetched `main` and the
-existing Profile UI download handoff without running product tests. The core
-gaps and separate post-release tasks remain open. No release, policy, minimum, dependency,
-application behavior, deployment, or backwards-compatibility implementation
-was changed. No product test or native-installation result is claimed.
-
-Before running future Desktop tests/builds, use the repository's required Node
-24 version, install with lifecycle scripts enabled, and pass
-`npm run verify:electron`. Native installer validation is additional evidence,
-separate from unit/renderer tests, CI, and any T0/T1/T2 or Playwright lane.
+Legacy releases outside the owner-confirmed recent baseline are explicitly out
+of scope. The first updater-capable build requires a normal one-time install for
+existing users; all subsequent supported update decisions come from their
+selected backend.
