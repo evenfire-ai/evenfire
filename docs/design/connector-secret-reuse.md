@@ -213,13 +213,29 @@ milestones:
    connector's Credentials tab via Change assigned Secret; other scopes keep
    the generic subtitle.
 
-Validation evidence (Node 24, `UV_USE_IO_URING=0` on every npm command):
+Validation evidence (Node 24 via
+`PATH=/home/pal/.nvm/versions/node/v24.22.1/bin:$PATH`, `UV_USE_IO_URING=0`
+on every npm command; exact command lines as run, from the `control-ui`
+directory unless noted):
 
-- Focused suites, `npm test -- --maxWorkers=1` over `CreateMcpServerForm`,
-  `EditMcpServerPageAttach`, `EditMcpServerPageCredentials`,
-  `UpdateConnectorCredentials`, `SecretsTable`,
-  `lib/connectorCredentials`, plus the new `ChangeConnectorSecret` and
-  `ExistingConnectorSecretFields` suites: 8 files, 254 tests passed.
+- Focused suites:
+
+  ```text
+  UV_USE_IO_URING=0 npm test -- --maxWorkers=1 \
+    components/__tests__/CreateMcpServerForm.test.tsx \
+    components/__tests__/EditMcpServerPageAttach.test.tsx \
+    components/__tests__/EditMcpServerPageCredentials.test.tsx \
+    components/__tests__/UpdateConnectorCredentials.test.tsx \
+    components/__tests__/SecretsTable.test.tsx \
+    lib/__tests__/connectorCredentials.test.ts \
+    components/__tests__/ChangeConnectorSecret.test.tsx \
+    components/__tests__/ExistingConnectorSecretFields.test.tsx
+  ```
+
+  Result: 8 files, 254 tests passed. (The inherited WIP's first run of the
+  same selection was 221 tests with 3 failed; the failures were the
+  `it.each` harness defect above and were fixed, not skipped.)
+
 - New coverage includes: selector loading/error/retry/empty and refresh;
   auto-mapping with destination preservation when keys differ; stale/missing
   keys producing key-selection errors without value prompts; unchanged
@@ -231,13 +247,40 @@ Validation evidence (Node 24, `UV_USE_IO_URING=0` on every npm command):
   gating (recipe-owned hides the trigger); the busy tab interlock; focus
   return after cancel and after finish; the rotation confirm-dialog busy
   report; and the Secrets guidance copy.
-- `node_modules/.bin/tsc --noEmit --incremental false -p tsconfig.json` —
-  clean.
-- `npm run style-rules` (repository root) — 0 errors; one pre-existing
-  desktop-app warning outside this change's scope.
-- Prettier written over every changed file; `git diff --check` clean.
-- Full Control UI suite: 251 files, 2885 tests passed; `npm run build`
-  completed successfully.
+- Typecheck: `node_modules/.bin/tsc --noEmit --incremental false -p
+tsconfig.json` — clean.
+- Style rules (repository root): `UV_USE_IO_URING=0 npm run style-rules` —
+  0 errors, 1 pre-existing desktop-app warning outside this change's scope.
+- Formatting: `node_modules/.bin/prettier --write` over every changed file;
+  `git diff --check` — clean.
+- Full suite: `UV_USE_IO_URING=0 npm test -- --maxWorkers=1` — 251 files,
+  2885 tests passed.
+- Build: `UV_USE_IO_URING=0 npm run build` (the package script is
+  `NEXT_IGNORE_INCORRECT_LOCKFILE=1 next build`) — completed successfully.
+- Evidence capture: all of the above ran inline in the implementation
+  session; command output was captured in that session's transcript only.
+  No test or build log files were persisted to disk, and none of this
+  evidence is committed.
+
+## Repository version hook delta
+
+An earlier report sentence claimed "no lockfile changes"; that was wrong and
+is corrected here. The repository pre-commit hook
+(`scripts/precommit/bump-staged-package-versions.mjs`) increments
+`control-ui/package.json` and re-synchronizes the two version fields in
+`control-ui/package-lock.json` whenever a commit stages any file inside the
+package. Across `54a30f064..0e896d226` the hook produced exactly this
+delta, and nothing else outside `control-ui` and this document:
+
+- `control-ui/package.json`: `0.1.751` → `0.1.752` (commit `bb03b1e0a`) →
+  `0.1.753` (commit `8c8168186`).
+- `control-ui/package-lock.json`: the top-level `"version"` and
+  `packages[""].version` fields follow the same two bumps (`0.1.751` →
+  `0.1.753`; four changed lines in the range diff). The dependency graph is
+  unchanged — no dependency entries, resolutions, or integrity values moved.
+
+The hook keys off staged file paths, so documentation-only commits (such as
+this correction) do not bump anything.
 
 Limits: all evidence is local and synthetic. No authenticated live product
 session was available, so no live backend, E2E, or deployed-runtime behavior
