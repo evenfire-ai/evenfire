@@ -273,120 +273,122 @@ function EditConnectorSecretContent() {
                   have been deleted.
                 </div>
               ) : (
-                <FormSection
-                  title="Rotate stored values"
-                  description={
-                    <>
-                      No connector references this Secret yet, so changes take effect for the next
-                      connector that attaches it. Values are write-only — only the keys you fill in
-                      are replaced or added; every other key already on the Secret is kept.
-                    </>
-                  }
-                >
-                  <TableViewport className="cu-table-wrap">
-                    <DataTable className="eft-table cu-table">
-                      <thead>
-                        <tr>
-                          <th>Secret key</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {secretSummary.keys.length === 0 ? (
+                <div className="cu-connector-edit-form">
+                  <FormSection
+                    title="Rotate stored values"
+                    description={
+                      <>
+                        No connector references this Secret yet, so changes take effect for the next
+                        connector that attaches it. Values are write-only — only the keys you fill
+                        in are replaced or added; every other key already on the Secret is kept.
+                      </>
+                    }
+                  >
+                    <TableViewport className="cu-table-wrap">
+                      <DataTable className="eft-table cu-table">
+                        <thead>
                           <tr>
-                            <td>
-                              <span className="cu-muted">No keys yet.</span>
-                            </td>
+                            <th>Secret key</th>
                           </tr>
-                        ) : (
-                          secretSummary.keys.map(key => (
-                            <tr key={key}>
+                        </thead>
+                        <tbody>
+                          {secretSummary.keys.length === 0 ? (
+                            <tr>
                               <td>
-                                <code>{key}</code>
+                                <span className="cu-muted">No keys yet.</span>
                               </td>
                             </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </DataTable>
-                  </TableViewport>
+                          ) : (
+                            secretSummary.keys.map(key => (
+                              <tr key={key}>
+                                <td>
+                                  <code>{key}</code>
+                                </td>
+                              </tr>
+                            ))
+                          )}
+                        </tbody>
+                      </DataTable>
+                    </TableViewport>
 
-                  <form
-                    className="cu-connector-credentials-form cu-form-stack"
-                    onSubmit={event => {
-                      event.preventDefault()
-                      void saveDirectRotation()
-                    }}
-                    noValidate
-                  >
-                    {secretSummary.keys.map(key => (
-                      <Field key={key} label={key} htmlFor={`secret-key-${key}`}>
-                        <TextInput
-                          id={`secret-key-${key}`}
-                          type="password"
-                          name={key}
-                          autoComplete="new-password"
-                          placeholder="Leave blank to keep current value"
-                          value={keyValues[key] ?? ''}
-                          onChange={e =>
-                            setKeyValues(current => ({ ...current, [key]: e.target.value }))
-                          }
-                          disabled={saving}
-                        />
-                      </Field>
-                    ))}
+                    <form
+                      className="cu-connector-credentials-form cu-form-stack"
+                      onSubmit={event => {
+                        event.preventDefault()
+                        void saveDirectRotation()
+                      }}
+                      noValidate
+                    >
+                      {secretSummary.keys.map(key => (
+                        <Field key={key} label={key} htmlFor={`secret-key-${key}`}>
+                          <TextInput
+                            id={`secret-key-${key}`}
+                            type="password"
+                            name={key}
+                            autoComplete="new-password"
+                            placeholder="Leave blank to keep current value"
+                            value={keyValues[key] ?? ''}
+                            onChange={e =>
+                              setKeyValues(current => ({ ...current, [key]: e.target.value }))
+                            }
+                            disabled={saving}
+                          />
+                        </Field>
+                      ))}
 
-                    {extraKeys.map(row => (
-                      <div className="cu-form-inline" key={row.id}>
-                        <TextInput
-                          monospace
-                          aria-label={`New key name ${row.id}`}
-                          value={row.key}
-                          onChange={e => updateExtraKey(row.id, 'key', e.target.value)}
-                          placeholder="NEW_API_KEY"
-                          disabled={saving}
-                        />
-                        <TextInput
-                          monospace
-                          aria-label={`New key value ${row.id}`}
-                          value={row.value}
-                          onChange={e => updateExtraKey(row.id, 'value', e.target.value)}
-                          placeholder="secret value"
-                          type="password"
-                          autoComplete="new-password"
-                          disabled={saving}
-                        />
-                        <Button
-                          type="button"
-                          onClick={() => removeExtraKey(row.id)}
-                          disabled={saving}
-                        >
-                          Remove
+                      {extraKeys.map(row => (
+                        <div className="cu-form-inline" key={row.id}>
+                          <TextInput
+                            monospace
+                            aria-label={`New key name ${row.id}`}
+                            value={row.key}
+                            onChange={e => updateExtraKey(row.id, 'key', e.target.value)}
+                            placeholder="NEW_API_KEY"
+                            disabled={saving}
+                          />
+                          <TextInput
+                            monospace
+                            aria-label={`New key value ${row.id}`}
+                            value={row.value}
+                            onChange={e => updateExtraKey(row.id, 'value', e.target.value)}
+                            placeholder="secret value"
+                            type="password"
+                            autoComplete="new-password"
+                            disabled={saving}
+                          />
+                          <Button
+                            type="button"
+                            onClick={() => removeExtraKey(row.id)}
+                            disabled={saving}
+                          >
+                            Remove
+                          </Button>
+                        </div>
+                      ))}
+
+                      <div>
+                        <Button type="button" onClick={addExtraKey} disabled={saving}>
+                          Add key
                         </Button>
                       </div>
-                    ))}
 
-                    <div>
-                      <Button type="button" onClick={addExtraKey} disabled={saving}>
-                        Add key
-                      </Button>
-                    </div>
+                      {saveError ? (
+                        <div className="cu-banner cu-banner--error" role="alert">
+                          {saveError}
+                        </div>
+                      ) : null}
 
-                    {saveError ? (
-                      <div className="cu-banner cu-banner--error" role="alert">
-                        {saveError}
+                      <div className="cu-create-actions">
+                        <Button type="button" onClick={backToList} disabled={saving}>
+                          Cancel
+                        </Button>
+                        <Button type="submit" variant="primary" disabled={saving}>
+                          {saving ? 'Saving…' : 'Save'}
+                        </Button>
                       </div>
-                    ) : null}
-
-                    <div className="cu-create-actions">
-                      <Button type="button" onClick={backToList} disabled={saving}>
-                        Cancel
-                      </Button>
-                      <Button type="submit" variant="primary" disabled={saving}>
-                        {saving ? 'Saving…' : 'Save'}
-                      </Button>
-                    </div>
-                  </form>
-                </FormSection>
+                    </form>
+                  </FormSection>
+                </div>
               )
             ) : (
               <>
@@ -414,17 +416,21 @@ function EditConnectorSecretContent() {
                 ) : null}
 
                 {selected && secretMatches ? (
-                  <UpdateConnectorCredentials
-                    key={selectedName}
-                    serverName={selectedName}
-                    envSecret={selectedEnvSecret}
-                    surface={resolveCredentialSurface(
-                      selected.status?.conditions,
-                      selected.spec as { managed?: boolean } | undefined
-                    )}
-                    recipeOwned={isRecipeOwned(selected.spec as { managed?: boolean } | undefined)}
-                    registryCredentialSource={resolveRegistryCredentialSource(selected.metadata)}
-                  />
+                  <div className="cu-connector-edit-form">
+                    <UpdateConnectorCredentials
+                      key={selectedName}
+                      serverName={selectedName}
+                      envSecret={selectedEnvSecret}
+                      surface={resolveCredentialSurface(
+                        selected.status?.conditions,
+                        selected.spec as { managed?: boolean } | undefined
+                      )}
+                      recipeOwned={isRecipeOwned(
+                        selected.spec as { managed?: boolean } | undefined
+                      )}
+                      registryCredentialSource={resolveRegistryCredentialSource(selected.metadata)}
+                    />
+                  </div>
                 ) : null}
               </>
             )}
