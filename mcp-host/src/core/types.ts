@@ -446,6 +446,12 @@ export interface Conversation {
   pending_approval?: PendingApproval
   auto_approved_tools: Set<string>
   /**
+   * Exact tool names denied in this conversation → the user who denied each
+   * (null when unknown). Checked before any allowlist and persisted on
+   * `sessions.denied_tools`. Read and change it only through denialPolicy.
+   */
+  denials?: Map<string, string | null>
+  /**
    * Session-scoped tools (SESSION_SCOPED_APPROVAL_TOOLS) approved without
    * "always" during the current task. Every later call of the task proceeds,
    * including after resumes; `startTurn` clears it when the next user message
@@ -662,9 +668,13 @@ export interface PendingApproval {
   /** Set only by reconstruction of migration-marked legacy rows. */
   legacy_budget?: boolean
   /**
-   * Consent expansion. New ordinary approvals use `turn_tools`; high-risk
-   * exact-call paths use `exact_invocation`. Legacy NULL rows are treated as
-   * exact because their original expansion cannot be proven.
+   * Durable grant scope of this request (pending_approvals.authorization_scope).
+   * `turn_tools` (the name is historical) marks an ordinary card: approving it
+   * may store the tool's exact name (Always approve) or a per-task approval for
+   * a session-scoped tool, never anything turn-wide. `exact_invocation` (forced
+   * gates, denial re-asks, guardrail and live-tool cards) authorizes only the
+   * call it shows. Legacy NULL rows are treated as exact. Every view derives
+   * "Always approve" eligibility from this field (pendingApprovalView).
    */
   authorization_scope?: 'turn_tools' | 'exact_invocation'
   /** Internal atomic replacement instruction; not persisted in the snapshot. */
@@ -707,6 +717,13 @@ export interface PendingApproval {
   reason?: 'approval_required' | 'connect_required'
   /** U5 — the oauth mcp-server to connect. Set iff reason==='connect_required'. */
   mcpServerName?: string
+  /**
+   * Why this card asks again: 'denied' = this exact tool was denied in the
+   * chat; 'denials_active' = the tool can start other tools (workflow_trigger,
+   * cron_manage create/enable/trigger) while a denial is active. Live only, not
+   * persisted.
+   */
+  reask?: 'denied' | 'denials_active'
 }
 
 // ─── Loop Types ─────────────────────────────────────────────

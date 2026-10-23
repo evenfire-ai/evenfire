@@ -24,7 +24,18 @@ export const APPROVAL_ALREADY_DECIDED_MARKERS = [
   'Task is no longer awaiting approval',
 ] as const
 
-export type ApprovalOutcome = 'ok' | 'already_decided' | 'failed'
+/** mcp-host's structured code for a deny that took effect (call cancelled,
+ *  approval consumed, task completed) but whose durable record failed. */
+export const APPROVAL_DENIAL_NOT_SAVED_CODE = 'denial_not_saved'
+
+export type ApprovalOutcome = 'ok' | 'already_decided' | 'decided_not_saved' | 'failed'
+
+/** What `decideApproval` settled to. `'not_awaiting'` means the double-decision
+ *  guard refused it locally (no RPC). `'decided_not_saved'` means the decision
+ *  took effect but was not durably recorded — the request is closed, so it is
+ *  NOT retryable. Only `'failed'` leaves the request open for a retry from the
+ *  same surface. */
+export type ApprovalDecisionSettlement = ApprovalOutcome | 'not_awaiting'
 
 /** Classify a settled approve/deny result. A thrown error (network / non-ok
  *  HTTP) is mapped to `'failed'` by the caller's catch. A nullish result is
@@ -33,6 +44,7 @@ export function classifyApprovalResult(
   result: ApprovalDecisionResult | null | undefined
 ): ApprovalOutcome {
   if (!result || result.success) return 'ok'
+  if (result.code === APPROVAL_DENIAL_NOT_SAVED_CODE) return 'decided_not_saved'
   const error = result.error ?? ''
   if (APPROVAL_ALREADY_DECIDED_MARKERS.some(marker => error.includes(marker))) {
     return 'already_decided'
@@ -50,6 +62,8 @@ export interface ApprovalDecisionTarget {
   taskId: string
   requestId: string
   decision: 'approve' | 'deny'
+  /** When true, the host allowlists this exact tool name for later calls. */
+  alwaysApprove?: boolean
   // `connect_completed` (U5): the OAuth deep-link returned for an mcp-server;
   // the suspended task is resumed through the SAME approval RPC (mcp-host
   // re-executes the tool with the freshly-minted grant). Always an approve.
@@ -158,7 +172,7 @@ export interface DecideApprovalDeps {
     requestId: string
     state: 'approved' | 'denied'
   }) => void
-  pushToast: (message: string, tone: 'success' | 'error' | 'info') => void
+  pushToast: (message: string, tone: 'success' | 'error' | 'info' | 'warn') => void
 }
 
 function errorMessage(error: unknown): string {
@@ -171,7 +185,7 @@ function errorMessage(error: unknown): string {
 export async function decideApproval(
   deps: DecideApprovalDeps,
   target: ApprovalDecisionTarget
-): Promise<void> {
+): Promise<ApprovalDecisionSettlement> {
   const chatKey = makeTaskKey(target.agentRef, target.chatId)
   const entry = deps.fsm.getState(chatKey)
   const hasEntry = !!entry
@@ -186,7 +200,7 @@ export async function decideApproval(
       entry!.phase === 'awaiting_approval' && entry!.pendingApproval?.requestId === target.requestId
     if (!awaitingThis) {
       deps.pushToast('That request was already handled.', 'info')
-      return
+      return 'not_awaiting'
     }
     // Step 2 — optimistic dispatch: badge flips to Running immediately.
     deps.fsm.dispatch(chatKey, {
@@ -213,7 +227,7 @@ export async function decideApproval(
     }
     deps.reconcile(chatKey, 'approval_decision_failed', target.taskId)
     deps.pushToast(`Failed to ${target.decision} request: ${errorMessage(error)}`, 'error')
-    return
+    return 'failed'
   }
 
   const outcome = classifyApprovalResult(result)
@@ -231,7 +245,7 @@ export async function decideApproval(
     })
     deps.reconcile(chatKey, 'approval_decided', target.taskId)
     deps.pushToast(`${verb} request for ${target.agentRef}.`, 'success')
-    return
+    return 'ok'
   }
 
   // Step 5a — already decided by another channel: converge, no revert.
@@ -244,7 +258,25 @@ export async function decideApproval(
     })
     deps.pushToast('That request was already decided.', 'info')
     deps.reconcile(chatKey, 'approval_conflict', target.taskId)
-    return
+    return 'already_decided'
+  }
+
+  // Step 5c — the host applied the decision (cancelled the call, consumed the
+  // approval) but could not record it: converge like a success (no revert, the
+  // gate must not reappear) and warn that the tool may ask again.
+  if (outcome === 'decided_not_saved') {
+    deps.resolveApprovalNotification({
+      agentName: target.agentRef,
+      taskId: target.taskId,
+      requestId: target.requestId,
+      state: resolvedState,
+    })
+    deps.reconcile(chatKey, 'approval_decided', target.taskId)
+    deps.pushToast(
+      "The call was cancelled, but the denial wasn't saved; this tool may ask again.",
+      'warn'
+    )
+    return 'decided_not_saved'
   }
 
   // Step 5b — genuine `success:false` failure: revert (suppression in reducer) +
@@ -261,4 +293,5 @@ export async function decideApproval(
     `Failed to ${target.decision} request: ${result.error ?? 'unknown error'}`,
     'error'
   )
+  return 'failed'
 }

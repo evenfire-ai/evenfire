@@ -6,12 +6,13 @@
  * AND native tools with requiresApproval() == true (e.g., shell_exec, http_request).
  *
  * Used as the base delegate inside ApprovalController. The decorator chain:
- *   ApprovalController (checks auto_approved_tools → "proceed" if found)
+ *   ApprovalController (denial, then exact tool name, then the approved call id)
  *     └─ UnifiedApprovalGateController (MCP tool? → suspend. Native requiresApproval? → suspend. Else → "proceed")
  *
- * This is the SINGLE approval gate (SPEC-UNIFIED §21). Gate 2 (the old
- * tool.requiresApproval() check inside toolUseLoop) has been removed.
- * All approval decisions go through this controller via LoopController.beforeTool().
+ * This is the base approval gate behind LoopController.beforeTool()
+ * (SPEC-UNIFIED §21); the guardrail `ask` lane in toolUseLoopToolBatch is the
+ * only other decision point. Gate 2 (the old tool.requiresApproval() check
+ * inside toolUseLoop) has been removed.
  */
 import { randomUUID } from 'node:crypto'
 import { LoopController, Tool, ToolRegistry } from '../interfaces'
@@ -29,15 +30,6 @@ type NativeAwareRegistry = ToolRegistry & {
  */
 export function isMcpToolName(toolName: string): boolean {
   return toolName.includes('__')
-}
-
-/**
- * Extract the MCP server prefix from a tool name.
- * Returns null if the tool name is not an MCP tool.
- */
-export function getMcpServerPrefix(toolName: string): string | null {
-  const idx = toolName.indexOf('__')
-  return idx >= 0 ? toolName.substring(0, idx) : null
 }
 
 // ─── U5 · Reactive OAuth-consent suspension ──────────────────────────────────
@@ -86,8 +78,8 @@ export function buildConnectRequiredApproval(
     tool_kind: 'mcp_server_tool',
     // The authoritative server name is the marker's mcpServerName (set from the
     // manager's sourceRef), mirroring the HITL gate's createSuspension
-    // (tool_source_ref = traceDescriptor.sourceRef). getMcpServerPrefix splits on
-    // the FIRST '__', so it truncates a server whose own name contains '__';
+    // (tool_source_ref = traceDescriptor.sourceRef). Splitting the tool name on
+    // the FIRST '__' would truncate a server whose own name contains '__';
     // reuse the marker to keep both suspension paths consistent (R3-L3).
     tool_source_ref: marker.mcpServerName,
     parameters: call.arguments,
@@ -228,9 +220,9 @@ export class UnifiedApprovalGateController implements LoopController {
    * override on both paths.
    *
    * Public so ApprovalController can consult it before any stored approval:
-   * every forced call asks, and no `'*'`, per-task, "always" or server-prefix
-   * approval covers it. The suspension is `exact_invocation`, so approving it
-   * authorizes only that frozen call.
+   * every forced call asks, and no per-task or "always" approval covers it.
+   * The suspension is `exact_invocation`, so approving it authorizes only that
+   * frozen call and stores nothing.
    */
   forcedApproval(
     toolName: string,
@@ -254,7 +246,11 @@ export class UnifiedApprovalGateController implements LoopController {
         )
         return {
           ...suspension,
-          approval: { ...suspension.approval, authorization_scope: 'exact_invocation' },
+          // Approving this card runs the call once; it never allowlists cron_manage.
+          approval: {
+            ...suspension.approval,
+            authorization_scope: 'exact_invocation',
+          },
         }
       }
     }

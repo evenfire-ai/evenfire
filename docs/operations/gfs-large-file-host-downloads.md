@@ -133,10 +133,9 @@ a new ID, after fresh GFS authorization.
   every iteration, including resumes after other approvals in the same task.
   The next user message starts a new task and asks again. An "always" approval
   keeps the tool approved for later tasks of the conversation while the
-  conversation stays in memory. Either approval stores only that tool's name
-  and never adds `'*'`, and a `'*'` granted by another approval (an MCP tool,
-  `workflow_trigger`) does not cover these three tools, so a `shell_exec`
-  approval does not approve `http_request` or `cron_manage`. A Host restart or
+  conversation stays in memory. Either approval stores only that tool's name.
+  No approval grants `'*'` or covers another tool, so a `shell_exec` approval
+  does not approve `http_request` or `cron_manage`. A Host restart or
   a cold resume asks again. A guardrail rule with `action: 'ask'`
   (`exact_invocation`) or a persisted legacy approval without a scope
   authorizes only that one frozen call.

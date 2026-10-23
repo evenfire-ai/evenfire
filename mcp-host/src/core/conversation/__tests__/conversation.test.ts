@@ -239,7 +239,7 @@ describe('ConversationManager — approval transitions', () => {
     expect(conv.state).toBe(ConversationState.Processing)
   })
 
-  it('should add MCP server prefix to auto_approved_tools on turn-tools consent', async () => {
+  it('should not add an MCP server prefix or the tool name on a plain approval', async () => {
     const conv = await manager.getOrCreate('user-1')
     await manager.startTurn(conv, 'Insert data', 'test-task')
 
@@ -255,14 +255,13 @@ describe('ConversationManager — approval transitions', () => {
       })
     )
 
-    // Approve without alwaysApprove — should still add server prefix
+    // Approve without alwaysApprove — must not allowlist the server or the tool
     await manager.approve(conv, false)
-    expect(conv.auto_approved_tools.has('mongodb-server')).toBe(true)
-    // Individual tool name should NOT be in the set (only server prefix)
+    expect(conv.auto_approved_tools.has('mongodb-server')).toBe(false)
     expect(conv.auto_approved_tools.has('mongodb-server__insert_many')).toBe(false)
   })
 
-  it('should add both server prefix and tool name on alwaysApprove for MCP tool', async () => {
+  it('should add only the exact tool name, not the server prefix, on alwaysApprove', async () => {
     const conv = await manager.getOrCreate('user-2')
     await manager.startTurn(conv, 'List tables', 'test-task')
 
@@ -279,7 +278,7 @@ describe('ConversationManager — approval transitions', () => {
     )
 
     await manager.approve(conv, true)
-    expect(conv.auto_approved_tools.has('airtable-server')).toBe(true)
+    expect(conv.auto_approved_tools.has('airtable-server')).toBe(false)
     expect(conv.auto_approved_tools.has('airtable-server__list_tables')).toBe(true)
   })
 
@@ -300,11 +299,10 @@ describe('ConversationManager — approval transitions', () => {
       })
     )
 
-    // Non-MCP tool: approve adds wildcard "*" for "approve once, run all" within this turn
+    // A plain approval must not allowlist '*' or the exact tool name
     await manager.approve(conv, false)
-    expect(conv.auto_approved_tools.has('*')).toBe(true)
-    expect(conv.auto_approved_tools.has('workflow_trigger')).toBe(false) // individual tool NOT added without alwaysApprove
-    expect(conv.auto_approved_tools).toEqual(new Set(['*'])) // no server prefix either
+    expect(conv.auto_approved_tools.has('*')).toBe(false)
+    expect(conv.auto_approved_tools.has('shell_exec')).toBe(false)
   })
 
   it('should transition AwaitingApproval → Idle on deny, clearing pending approval', async () => {
@@ -324,6 +322,137 @@ describe('ConversationManager — approval transitions', () => {
     await manager.deny(conv)
     expect(conv.state).toBe(ConversationState.Idle)
     expect(conv.pending_approval).toBeUndefined()
+  })
+
+  it('records a denied tool and clears it when that tool is later approved', async () => {
+    const conv = await manager.getOrCreate('user-deny-stick')
+    await manager.startTurn(conv, 'Run shell', 'test-task')
+
+    await manager.suspendForApproval(conv, {
+      request_id: 'req-deny-stick',
+      tool_name: 'shell_exec',
+      parameters: { command: 'ls' },
+      description: 'Shell command',
+      tool_call_id: 'tc_deny_stick',
+      context_snapshot: [],
+    })
+
+    await manager.deny(conv, { userId: 'user-a' })
+    expect(conv.denials?.has('shell_exec')).toBe(true)
+    expect(conv.denials?.get('shell_exec')).toBe('user-a')
+
+    await manager.startTurn(conv, 'Run shell again', 'test-task-2')
+    expect(conv.denials?.has('shell_exec')).toBe(true)
+    await manager.suspendForApproval(conv, {
+      request_id: 'req-deny-stick-2',
+      tool_name: 'shell_exec',
+      parameters: { command: 'ls' },
+      description: 'Shell command',
+      tool_call_id: 'tc_deny_stick_2',
+      context_snapshot: [],
+    })
+
+    await manager.approve(conv, false, 'user-b')
+    expect(conv.denials?.has('shell_exec')).toBe(true)
+    expect(conv.auto_approved_tools.has('shell_exec')).toBe(false)
+
+    await manager.completeTurn(conv, 'still blocked')
+    await manager.startTurn(conv, 'Run shell as the denier', 'test-task-3')
+    await manager.suspendForApproval(conv, {
+      request_id: 'req-deny-stick-3',
+      tool_name: 'shell_exec',
+      parameters: { command: 'ls' },
+      description: 'Shell command',
+      tool_call_id: 'tc_deny_stick_3',
+      context_snapshot: [],
+      authorization_scope: 'turn_tools',
+    })
+    await manager.approve(conv, true, 'user-a')
+    expect(conv.denials?.has('shell_exec')).toBe(false)
+    expect(conv.auto_approved_tools.has('shell_exec')).toBe(true)
+  })
+
+  it('a denial revokes an earlier Always approve, and approving once does not bring it back', async () => {
+    const conv = await manager.getOrCreate('user-revoke')
+    conv.auto_approved_tools.add('shell_exec')
+    await manager.startTurn(conv, 'Run shell', 'task-1')
+    await manager.suspendForApproval(conv, {
+      request_id: 'req-revoke-1',
+      tool_name: 'shell_exec',
+      parameters: { command: 'rm -rf /tmp/x' },
+      description: 'Guardrail requires approval',
+      tool_call_id: 'tc-1',
+      context_snapshot: [],
+    })
+
+    await manager.deny(conv, { userId: 'user-revoke' })
+    expect(conv.auto_approved_tools.has('shell_exec')).toBe(false)
+
+    await manager.startTurn(conv, 'Run shell again', 'task-2')
+    await manager.suspendForApproval(conv, {
+      request_id: 'req-revoke-2',
+      tool_name: 'shell_exec',
+      parameters: { command: 'ls' },
+      description: 'x',
+      tool_call_id: 'tc-2',
+      context_snapshot: [],
+    })
+    await manager.approve(conv, false, 'user-revoke')
+
+    expect(conv.denials?.has('shell_exec')).toBe(false)
+    expect(conv.auto_approved_tools.has('shell_exec')).toBe(false)
+  })
+
+  it('a timeout does not revoke an earlier Always approve', async () => {
+    const conv = await manager.getOrCreate('user-timeout-keep')
+    conv.auto_approved_tools.add('shell_exec')
+    await manager.startTurn(conv, 'Run shell', 'task-1')
+    await manager.suspendForApproval(conv, {
+      request_id: 'req-timeout-keep',
+      tool_name: 'shell_exec',
+      parameters: {},
+      description: 'x',
+      tool_call_id: 'tc-1',
+      context_snapshot: [],
+    })
+
+    await manager.deny(conv, { record: false })
+
+    expect(conv.auto_approved_tools.has('shell_exec')).toBe(true)
+  })
+
+  it('does not allowlist a card that does not allow Always approve', async () => {
+    const conv = await manager.getOrCreate('user-forced')
+    await manager.startTurn(conv, 'Schedule it', 'task-1')
+    await manager.suspendForApproval(conv, {
+      request_id: 'req-forced',
+      tool_name: 'cron_manage',
+      parameters: { action: 'create' },
+      description: 'forced',
+      tool_call_id: 'tc-1',
+      context_snapshot: [],
+      authorization_scope: 'exact_invocation',
+    })
+
+    await manager.approve(conv, true, 'user-forced')
+
+    expect(conv.state).toBe(ConversationState.Processing)
+    expect(conv.auto_approved_tools.has('cron_manage')).toBe(false)
+  })
+
+  it('an approval timeout does not record a denial', async () => {
+    const conv = await manager.getOrCreate('user-timeout')
+    await manager.startTurn(conv, 'Run shell', 'test-task')
+    await manager.suspendForApproval(conv, {
+      request_id: 'req-timeout',
+      tool_name: 'shell_exec',
+      parameters: { command: 'ls' },
+      description: 'Shell command',
+      tool_call_id: 'tc_timeout',
+      context_snapshot: [],
+    })
+    await manager.deny(conv, { record: false })
+    expect(conv.denials?.has('shell_exec')).toBeFalsy()
   })
 })
 
@@ -384,14 +513,14 @@ describe('ConversationManager — session key routing', () => {
   })
 })
 
-describe('ConversationManager — approve-once wildcard lifecycle', () => {
+describe('ConversationManager — wildcard is not written and is cleared on startTurn', () => {
   let manager: ConversationManager
 
   beforeEach(() => {
     manager = new ConversationManager()
   })
 
-  it("approve() adds wildcard '*' to auto_approved_tools", async () => {
+  it("approve() does not add wildcard '*'", async () => {
     const conv = await manager.getOrCreate('user-wc-1')
     await manager.startTurn(conv, 'Do something', 'test-task')
 
@@ -408,37 +537,10 @@ describe('ConversationManager — approve-once wildcard lifecycle', () => {
     )
 
     await manager.approve(conv, false)
-    expect(conv.auto_approved_tools.has('*')).toBe(true)
-  })
-
-  it("startTurn() clears the wildcard '*'", async () => {
-    const conv = await manager.getOrCreate('user-wc-2')
-
-    // Turn 1: approve to get wildcard
-    await manager.startTurn(conv, 'First message', 'test-task')
-    await manager.suspendForApproval(
-      conv,
-      ordinaryApproval({
-        request_id: 'req-wc-2',
-        tool_name: 'workflow_trigger',
-        parameters: {},
-        description: 'Workflow trigger',
-        tool_call_id: 'tc_wc_2',
-        context_snapshot: [],
-      })
-    )
-    await manager.approve(conv, false)
-    expect(conv.auto_approved_tools.has('*')).toBe(true)
-
-    // Complete turn 1, then start turn 2
-    await manager.completeTurn(conv, 'Done')
-    await manager.startTurn(conv, 'Second message', 'test-task')
-
-    // Wildcard should be cleared
     expect(conv.auto_approved_tools.has('*')).toBe(false)
   })
 
-  it('after approve + startTurn, wildcard is gone but MCP server-prefix approvals persist', async () => {
+  it('after approve and startTurn, wildcard and MCP server prefix stay absent', async () => {
     const conv = await manager.getOrCreate('user-wc-3')
 
     // Turn 1: approve an MCP tool
@@ -456,17 +558,15 @@ describe('ConversationManager — approve-once wildcard lifecycle', () => {
     )
     await manager.approve(conv, false)
 
-    // Both wildcard and server prefix should be present
-    expect(conv.auto_approved_tools.has('*')).toBe(true)
-    expect(conv.auto_approved_tools.has('mongodb-server')).toBe(true)
+    expect(conv.auto_approved_tools.has('*')).toBe(false)
+    expect(conv.auto_approved_tools.has('mongodb-server')).toBe(false)
 
     // Complete turn 1, start turn 2
     await manager.completeTurn(conv, 'Found results')
     await manager.startTurn(conv, 'Another query', 'test-task')
 
-    // Wildcard gone, but server-prefix persists across turns
     expect(conv.auto_approved_tools.has('*')).toBe(false)
-    expect(conv.auto_approved_tools.has('mongodb-server')).toBe(true)
+    expect(conv.auto_approved_tools.has('mongodb-server')).toBe(false)
   })
 })
 
@@ -528,14 +628,14 @@ describe('ConversationManager — session-scoped tool approvals', () => {
     await manager.suspendForApproval(conv, sessionToolApproval('http_request', 'req-h'))
     await manager.approve(conv, true)
 
-    // The earlier MCP '*' is neither revoked nor duplicated by the session approvals.
-    expect(conv.auto_approved_tools).toEqual(new Set(['*', 'mongodb-server', 'http_request']))
+    // The MCP approval ran that call only; the session approvals store their names.
+    expect(conv.auto_approved_tools).toEqual(new Set(['http_request']))
     expect(conv.task_approved_tools).toEqual(new Set(['shell_exec']))
 
     await manager.completeTurn(conv, 'Done')
     await manager.startTurn(conv, 'Second message', 'test-task')
 
-    expect(conv.auto_approved_tools).toEqual(new Set(['mongodb-server', 'http_request']))
+    expect(conv.auto_approved_tools).toEqual(new Set(['http_request']))
     expect(conv.task_approved_tools).toEqual(new Set())
   })
 })

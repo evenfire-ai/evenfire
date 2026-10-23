@@ -32,6 +32,8 @@ export interface SessionRow {
    *  shape because a row built before the first write (or by a fixture) has no
    *  value; readers normalize `undefined` to the column default 0. */
   model_selection_revision?: number
+  /** Migration 016 — JSON array of `{ tool, userId }` denials. NULL if none. */
+  denied_tools?: string | null
   system_prompt_stable_hash: string | null
   parent_session_id: string | null
   started_at: number
@@ -160,7 +162,7 @@ export interface PersistedSessionSummary {
   // suspension into a generic approval.
   pending_approval: Pick<
     PendingApprovalRow,
-    'request_id' | 'tool_name' | 'reason' | 'mcp_server_name'
+    'request_id' | 'tool_name' | 'reason' | 'mcp_server_name' | 'authorization_scope'
   > | null
 }
 
@@ -169,7 +171,7 @@ export interface PersistedSessionMessagePage {
   messages: MessageRow[]
   pending_approval: Pick<
     PendingApprovalRow,
-    'request_id' | 'tool_name' | 'reason' | 'mcp_server_name'
+    'request_id' | 'tool_name' | 'reason' | 'mcp_server_name' | 'authorization_scope'
   > | null
   total_turns: number
   first_turn_number: number | null
@@ -225,6 +227,13 @@ export type WorkerOp =
       activeTaskId?: string | null
       /** undefined = keep, string = set, null = clear. */
       activeTraceContext?: string | null
+      /** undefined = keep. A JSON array (including "[]") replaces the column. */
+      deniedToolsJson?: string | null
+      /**
+       * Consume this pending approval in the SAME transaction, so a resolved
+       * decision never commits without its session/denial outcome (or vice versa).
+       */
+      deletePendingRequestId?: string
     }
   | { kind: 'reap_processing_sessions'; nowEpoch: number; chunkSize?: number }
   | {
