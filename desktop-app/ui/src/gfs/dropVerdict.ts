@@ -1,5 +1,16 @@
 import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
 import type { GfsDropDenialReason, GfsDropRejection, GfsDropVerdict } from './dragSession.types'
+import type {
+  GfsDropFeedbackTone,
+  GfsDropReasonNames,
+  GfsDropRefusalPresentation,
+} from './dropVerdict.types'
+
+export type {
+  GfsDropFeedbackTone,
+  GfsDropReasonNames,
+  GfsDropRefusalPresentation,
+} from './dropVerdict.types'
 
 /**
  * The spoken + written form of a drop verdict (RP-026, refusal UX matrix §5).
@@ -13,9 +24,6 @@ import type { GfsDropDenialReason, GfsDropRejection, GfsDropVerdict } from './dr
  * controlled input, so every interpolated name is sanitized here before it
  * reaches a visible string.
  */
-
-/** Presentation tones (matrix §5.2): deny=error, no-op=info, unknown=warn. */
-export type GfsDropFeedbackTone = 'error' | 'info' | 'warn'
 
 /** A11: the drop-refusal surface for a dead session — a persistent banner,
  *  never a one-shot toast (matrix §5.3). */
@@ -44,11 +52,6 @@ function displaySource(name: string | undefined): string {
 
 function displayTarget(name: string | undefined): string {
   return sanitizeAppTabTitle(name ?? '') || 'this folder'
-}
-
-export interface GfsDropReasonNames {
-  source: string
-  target: string
 }
 
 /**
@@ -153,9 +156,38 @@ export function sameGfsDropVerdict(
   return left.reason === (right as typeof left).reason
 }
 
-export interface GfsDropRefusalPresentation {
-  message: string
-  tone: GfsDropFeedbackTone
+export interface GfsSessionLostBannerGateInput {
+  /** The surface's live drag scope captured when the drop was admitted. */
+  capturedScope: string | null
+  /** The surface's live drag scope NOW (null while revoked). */
+  liveScope: string | null
+  /** The surface's local gesture counter captured at admission. */
+  capturedEpoch: number
+  /** The surface's local gesture counter now. */
+  liveEpoch: number
+  /** The shared session generation captured at admission (null without one). */
+  capturedSessionGeneration: number | null
+  /** The shared session generation now (null without one). */
+  liveSessionGeneration: number | null
+  /** Whether the shared drag-session provider is present. */
+  hasSharedSession: boolean
+}
+
+/**
+ * May a drop callback that answered `session-lost` still paint the local
+ * banner and announcement? Only when the surface's session is observably dead
+ * now (live scope null — the revocation itself proves it), or when the very
+ * gesture that asked is still the live one. A call superseded by a newer
+ * gesture or a new, healthy scope must not declare that session ended (A11).
+ */
+export function mayPaintGfsSessionLostBanner(input: GfsSessionLostBannerGateInput): boolean {
+  if (input.liveScope === null) return true
+  if (input.liveScope !== input.capturedScope) return false
+  if (input.liveEpoch !== input.capturedEpoch) return false
+  if (input.hasSharedSession) {
+    return input.liveSessionGeneration === input.capturedSessionGeneration
+  }
+  return true
 }
 
 /**

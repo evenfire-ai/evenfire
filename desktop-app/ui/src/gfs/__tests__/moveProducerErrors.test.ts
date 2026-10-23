@@ -111,8 +111,14 @@ describe('real move producer verdicts (R1-M3)', () => {
         expect(result.outcome.message).toBe('Too many file requests — try again in 7s.')
       }
       if (result.outcome.status === 'unconfirmed') {
-        expect(result.outcome.message).toContain('move rejected')
-        expect(result.outcome.message).not.toMatch(/httpStatus=|retryAfterSeconds=/)
+        // B6 (refusal UX matrix): a 403 explains that permission could not be
+        // confirmed — generic re-check copy, never the raw server verdict or
+        // plumbing markers. The trusted STATUS still drives the verdict and
+        // the no-retry contract asserted above.
+        expect(result.outcome.message).toBe(
+          'EvenDrive could not confirm permission for this move. Refresh and try again.'
+        )
+        expect(result.outcome.message).not.toMatch(/httpStatus=|retryAfterSeconds=|move rejected/)
       }
       if (result.outcome.status === 'destination-rejected') {
         expect(result.outcome.message).toBe(

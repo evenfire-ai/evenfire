@@ -1648,9 +1648,16 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     fireEvent.dragOver(bRow, { dataTransfer })
     fireEvent.drop(bRow, { dataTransfer })
 
+    // The sentence appears on BOTH refusal surfaces: the gated
+    // callback-local banner AND the revoked tree surface, which owns it
+    // unconditionally and outlives the dead gesture's ownership (A11).
+    const sessionEnded = await screen.findAllByText(
+      'Your session ended. Sign in again to continue moving files.'
+    )
+    expect(sessionEnded.length).toBeGreaterThanOrEqual(2)
     expect(
-      await screen.findByText('Your session ended. Sign in again to continue moving files.')
-    ).toBeTruthy()
+      sessionEnded.some(element => element.closest('.da-file-explorer__revoked') !== null)
+    ).toBe(true)
     // The revoked surface stays visible alongside the refusal banner.
     expect(await screen.findByText('File access is not authorized')).toBeTruthy()
     // A dead session is not a one-shot toast.

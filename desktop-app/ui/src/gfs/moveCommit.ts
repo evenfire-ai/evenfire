@@ -235,9 +235,14 @@ export async function commitGfsMove(
       }
     }
     if (status === 403) {
-      // Generic unless a successful permission recheck proves the missing bit;
-      // the pre-commit probes own the exact-reason copy.
-      return { status: 'unconfirmed', message: describeGfsReadError(error).message }
+      // Generic unless a successful permission recheck proves the missing
+      // bit; the pre-commit probes own the exact-reason copy. B6: a 403
+      // explains that permission could not be confirmed — never raw HTTP
+      // prose, and never a named parent bit without fresh proof.
+      return {
+        status: 'unconfirmed',
+        message: 'EvenDrive could not confirm permission for this move. Refresh and try again.',
+      }
     }
     if (status === 429 || (!status && /too many/i.test(message))) {
       return {
@@ -317,9 +322,12 @@ export function suggestNumberedMoveName(
   return nextAvailableGfsResourceName(sourceName, occupiedDestinationNames)
 }
 
-export type MoveToast = (message: string, tone: 'success' | 'error' | 'info') => void
+export type MoveToast = (message: string, tone: 'success' | 'error' | 'info' | 'warn') => void
 
-/** Presented outcome toasts (rev-2 §8 UX matrix) shared by every surface. */
+/** Presented outcome toasts (rev-2 §8 UX matrix) shared by every surface.
+ *  Unknown-outcome statuses present as WARNINGS, never errors: an
+ *  unconfirmed or rate-limited move has not been shown to fail (B7/B8), and
+ *  claiming failure would invite a duplicate dispatch. */
 export function toastMoveOutcome(
   pushToast: MoveToast | undefined,
   outcome: MoveCommitOutcome,
@@ -344,6 +352,13 @@ export function toastMoveOutcome(
       break
     case 'no-op':
       pushToast?.(outcome.message, 'info')
+      break
+    case 'unconfirmed':
+    // The dispatch's outcome is unknown: verify-by-identity already ran and
+    // could not settle it. Warn — do not report a failure that was not shown.
+    case 'rate-limited':
+      // A metered refusal is a "try again" verdict, not a failed move.
+      pushToast?.(outcome.message, 'warn')
       break
     case 'session-lost':
     // A superseded gesture never reached the server: there is nothing to

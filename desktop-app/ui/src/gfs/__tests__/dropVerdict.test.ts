@@ -6,6 +6,7 @@ import {
   gfsDropReasonTone,
   gfsDropVerdictAnnouncement,
   gfsDropVerdictReason,
+  mayPaintGfsSessionLostBanner,
   presentGfsDropRefusal,
   sameGfsDropVerdict,
 } from '../dropVerdict'
@@ -213,5 +214,55 @@ describe('presentGfsDropRefusal — the drop-time presentation', () => {
         'You can’t move live tests out of its current folder because you don’t have delete access to the folder that contains it.',
       tone: 'error',
     })
+  })
+})
+
+describe('mayPaintGfsSessionLostBanner — superseded calls cannot end a healthy session (A11)', () => {
+  const admitted = {
+    capturedScope: 'env-1:user-1:team-1',
+    liveScope: 'env-1:user-1:team-1',
+    capturedEpoch: 3,
+    liveEpoch: 3,
+    capturedSessionGeneration: 7,
+    liveSessionGeneration: 7,
+    hasSharedSession: true,
+  }
+
+  it('paints while the admitted gesture is still the live one', () => {
+    expect(mayPaintGfsSessionLostBanner(admitted)).toBe(true)
+  })
+
+  it('paints when the session is observably dead (live scope null), even after the revocation invalidated everything', () => {
+    expect(
+      mayPaintGfsSessionLostBanner({
+        ...admitted,
+        liveScope: null,
+        liveEpoch: 4,
+        liveSessionGeneration: 8,
+      })
+    ).toBe(true)
+  })
+
+  it('does not paint when a new, healthy scope is live', () => {
+    expect(mayPaintGfsSessionLostBanner({ ...admitted, liveScope: 'env-2:user-1:team-1' })).toBe(
+      false
+    )
+  })
+
+  it('does not paint when a newer gesture on the same surface superseded the drop', () => {
+    expect(mayPaintGfsSessionLostBanner({ ...admitted, liveEpoch: 4 })).toBe(false)
+  })
+
+  it('does not paint when the shared session generation moved on', () => {
+    expect(mayPaintGfsSessionLostBanner({ ...admitted, liveSessionGeneration: 8 })).toBe(false)
+  })
+
+  it('without a shared session, the surface epoch alone decides', () => {
+    expect(
+      mayPaintGfsSessionLostBanner({ ...admitted, hasSharedSession: false, liveEpoch: 3 })
+    ).toBe(true)
+    expect(
+      mayPaintGfsSessionLostBanner({ ...admitted, hasSharedSession: false, liveEpoch: 4 })
+    ).toBe(false)
   })
 })

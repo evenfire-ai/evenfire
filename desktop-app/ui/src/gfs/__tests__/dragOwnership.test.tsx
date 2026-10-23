@@ -334,6 +334,36 @@ for (const surface of ['sidebar', 'files'] as const) {
       expect(h.api().activeSource()?.resourceId).toBe('external')
     })
 
+    it('names the cross-surface source in the denied hover tooltip (UX matrix §5.1)', async () => {
+      // The gesture begins on the OTHER surface through the shared session —
+      // no local dragstart ever fires here, so the tooltip's source name must
+      // come from the hover-resolved shared source, not a local dragstart.
+      // Runs for both surfaces: files→sidebar and sidebar→files.
+      const h = await setup('file')
+      expect(
+        h.api().beginDrag({
+          resourceId: 'external',
+          gfsUri: 'gfs://main/external',
+          drive: 'main',
+          kind: 'file',
+          name: 'external.txt',
+          parentKnown: true,
+          // The external source already lives in Hover: structure denies
+          // same-parent immediately, no probe needed.
+          parentResourceId: 'hover',
+          knownAncestorIds: ['hover'],
+          origin: 'files',
+          scope: 'env-1:user-1:team-1',
+        })
+      ).toBe(true)
+      fireEvent.dragOver(h.row('Hover'), { dataTransfer: h.dataTransfer })
+      expect(h.dropState('Hover')).toBe('denied')
+      expect(h.row('Hover').getAttribute('data-drop-reason')).toBe('same-parent')
+      // Not "This item is already in Hover." — the resolved source's own name.
+      expect(h.row('Hover').getAttribute('title')).toBe('external.txt is already in Hover.')
+      expect(screen.getByText('external.txt is already in Hover.')).toBeTruthy()
+    })
+
     it('reports an already dispatched move without clearing newer hover work', async () => {
       const h = await setup('file')
       let finish!: () => void

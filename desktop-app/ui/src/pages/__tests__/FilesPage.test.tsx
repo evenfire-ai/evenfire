@@ -4685,6 +4685,168 @@ describe('FilesPage', () => {
     expect(moveResource).not.toHaveBeenCalled()
   })
 
+  it('renders the session-ended sentence on the revoked surface with no gesture at all (A11)', async () => {
+    // The revoked surface owns the sentence unconditionally: it needs no
+    // drop callback, so nothing about gesture ownership can hide it.
+    const pushToast = vi.fn()
+    const controller = {
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+    }
+    hookMock.useGfsBrowserController.mockReturnValue(controller)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <FilesPage pushToast={pushToast} />
+      </QueryClientProvider>
+    )
+
+    expect(
+      screen.queryByText('Your session ended. Sign in again to continue moving files.')
+    ).toBeNull()
+
+    // Re-render with the controller reporting the revoked session.
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...controller,
+      accessState: 'revoked',
+    })
+    view.rerender(
+      <QueryClientProvider client={queryClient}>
+        <FilesPage pushToast={pushToast} />
+      </QueryClientProvider>
+    )
+
+    expect(
+      await screen.findByText('Your session ended. Sign in again to continue moving files.')
+    ).toBeTruthy()
+    expect(await screen.findByText('File access is not authorized')).toBeTruthy()
+    expect(pushToast).not.toHaveBeenCalled()
+  })
+
+  it('a session-lost decision superseded by a new healthy scope paints nothing (A11)', async () => {
+    // The drop's adjudication parks on a gated probe; the session then
+    // changes to a NEW, healthy scope before the 401 resolves. The stale
+    // callback must not declare that new session ended — no banner, no
+    // announcement, no toast.
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(async () => ({}))
+    let release401!: () => void
+    const gated = new Promise<void>(resolve => {
+      release401 = resolve
+    })
+    let parked = true
+    const affordances = vi.fn(() => {
+      if (parked) {
+        parked = false
+        return gated.then(() => {
+          throw new Error('401 Unauthorized httpStatus=401')
+        })
+      }
+      return Promise.resolve({
+        held: ['read', 'write', 'delete'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      })
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances } },
+    })
+    const healthyController = {
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'notes.txt',
+          kind: 'file',
+          path: '/Product/notes.txt',
+          version: 3,
+          bytes: 12,
+        },
+        {
+          resourceId: 'private-1',
+          rid: 'private-1',
+          gfsUri: 'gfs://main/private-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Private',
+          kind: 'directory',
+          path: '/Product/Private',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    }
+    hookMock.useGfsBrowserController.mockReturnValue(healthyController)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <FilesPage pushToast={pushToast} />
+      </QueryClientProvider>
+    )
+
+    const sourceRow = screen.getByRole('button', { name: 'Open notes.txt' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Private' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(destinationRow, { dataTransfer })
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith('private-1', 'main'))
+    fireEvent.drop(destinationRow, { dataTransfer })
+
+    // The session switches to a new, healthy scope while the probe is parked.
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...healthyController,
+      sessionScope: 'env-2:user-1:team-1',
+    })
+    await act(async () => {
+      view.rerender(
+        <QueryClientProvider client={queryClient}>
+          <FilesPage pushToast={pushToast} />
+        </QueryClientProvider>
+      )
+    })
+
+    // The stale 401 resolves against the new, healthy session.
+    await act(async () => {
+      release401()
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(
+      screen.queryByText('Your session ended. Sign in again to continue moving files.')
+    ).toBeNull()
+    expect(pushToast).not.toHaveBeenCalled()
+    expect(moveResource).not.toHaveBeenCalled()
+  })
+
   it('renames a folder child from its row menu once write affordances resolve', async () => {
     const pushToast = vi.fn()
     const renameResource = vi.fn(async () => ({}))

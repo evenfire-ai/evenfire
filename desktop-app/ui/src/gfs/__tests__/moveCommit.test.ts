@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { commitGfsMove, suggestNumberedMoveName } from '../moveCommit'
+import { commitGfsMove, suggestNumberedMoveName, toastMoveOutcome } from '../moveCommit'
 import type { MoveCommitSourceSnapshot } from '../moveCommit'
-import type { MoveCommitDeps, MoveCommitPlan } from '../moveCommit'
+import type { MoveCommitDeps, MoveCommitOutcome, MoveCommitPlan } from '../moveCommit'
 
 function resolved(overrides: Partial<MoveCommitSourceSnapshot> = {}): MoveCommitSourceSnapshot {
   return {
@@ -251,6 +251,24 @@ describe('commitGfsMove — server verdicts', () => {
     if (outcome.status === 'rate-limited') expect(outcome.retryAfterSeconds).toBe(7)
   })
 
+  it('a 403 explains unconfirmed permission without raw HTTP prose or a named bit (B6)', async () => {
+    const outcome = await commitGfsMove(
+      deps({
+        moveResource: vi.fn(async () => {
+          throw new Error('403 Forbidden: manage_acl_required httpStatus=403')
+        }),
+      }),
+      plan()
+    )
+    expect(outcome.status).toBe('unconfirmed')
+    if (outcome.status !== 'unconfirmed') return
+    expect(outcome.message).toBe(
+      'EvenDrive could not confirm permission for this move. Refresh and try again.'
+    )
+    expect(outcome.message).not.toContain('403')
+    expect(outcome.message).not.toContain('manage_acl_required')
+  })
+
   it('transport loss after dispatch verifies by resolve and never repeats the PATCH', async () => {
     const moveResource = vi.fn(async () => {
       throw new Error('network error')
@@ -420,5 +438,45 @@ describe('suggestNumberedMoveName', () => {
     expect(suggestNumberedMoveName('report.md', new Set(['report.md', 'report (1).md']))).toBe(
       'report (2).md'
     )
+  })
+})
+
+describe('toastMoveOutcome — unknown outcomes warn, definite negatives error (B6–B8)', () => {
+  const present = (outcome: MoveCommitOutcome) => {
+    const pushToast = vi.fn()
+    toastMoveOutcome(pushToast, outcome, 'report.md', 'Dest', 'file')
+    return pushToast.mock.calls as Array<[string, string]>
+  }
+
+  it('an unconfirmed outcome (transport loss, 403) warns instead of erroring', () => {
+    const calls = present({
+      status: 'unconfirmed',
+      message: 'Couldn’t confirm the move. Refresh before trying again.',
+    })
+    expect(calls).toEqual([['Couldn’t confirm the move. Refresh before trying again.', 'warn']])
+  })
+
+  it('a rate-limited outcome warns', () => {
+    const calls = present({
+      status: 'rate-limited',
+      message: 'Too many file requests — try again in 7s.',
+      retryAfterSeconds: 7,
+    })
+    expect(calls).toEqual([['Too many file requests — try again in 7s.', 'warn']])
+  })
+
+  it('definite negatives stay errors and successes stay successes', () => {
+    expect(present({ status: 'conflict-stopped', message: 'blocked' })).toEqual([
+      ['blocked', 'error'],
+    ])
+    expect(present({ status: 'target-unavailable', message: 'gone' })).toEqual([['gone', 'error']])
+    expect(present({ status: 'committed', version: 8, previousParentId: 'p' })).toEqual([
+      ['Moved report.md to Dest', 'success'],
+    ])
+  })
+
+  it('a dead or superseded gesture stays silent', () => {
+    expect(present({ status: 'session-lost' })).toEqual([])
+    expect(present({ status: 'gesture-lost' })).toEqual([])
   })
 })

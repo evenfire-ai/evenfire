@@ -72,6 +72,7 @@ import {
   GFS_DROP_SESSION_LOST_MESSAGE,
   gfsDropVerdictLiveAnnouncement,
   gfsDropVerdictReason,
+  mayPaintGfsSessionLostBanner,
   presentGfsDropRefusal,
   sameGfsDropVerdict,
 } from '@/gfs/dropVerdict'
@@ -359,7 +360,10 @@ export function FilesPage({
   // pointer accepts the move (RP-026).
   const [dropVerdictAnnouncement, setDropVerdictAnnouncement] = useState('')
   // A drop refused by a dead session must stay visible AFTER the revocation
-  // has already invalidated the gesture's ownership (UX matrix A11).
+  // has already invalidated the gesture's ownership (UX matrix A11). The
+  // revoked surface below carries the sentence unconditionally; this
+  // callback-local banner is gated by the captured scope/session identity so
+  // a superseded call cannot paint it over a new, healthy session.
   const [dropSessionLost, setDropSessionLost] = useState(false)
   // Display name of the live gesture's source, for reason copy that names it.
   const [dragSourceName, setDragSourceName] = useState<string | null>(null)
@@ -448,8 +452,11 @@ export function FilesPage({
     setDragOverFolderId(null)
     setDropStatesById({})
     setDropVerdictAnnouncement('')
-    setDropSessionLost(false)
     setDragSourceName(null)
+    // A NEW live session makes any session-ended refusal stale. A transition
+    // TO revoked (scope null) must NOT clear it: that is exactly when the
+    // message has to survive (A11), and the revoked surface carries it.
+    if (liveDragScope !== null) setDropSessionLost(false)
   }, [adjudication.endDragSession, liveDragScope])
 
   const ownsDrop = (source: GfsDragSource, epoch: number, sharedGeneration: number | null) =>
@@ -1360,6 +1367,10 @@ export function FilesPage({
     event.stopPropagation()
     hoveredFolderRef.current = folder.resourceId
     hoverOwnerRef.current = source
+    // The gesture may have started on ANOTHER surface (tree ↔ Files): the
+    // resolved shared source — not a local dragstart — owns the name the
+    // reason copy interpolates.
+    setDragSourceName(previous => (previous === source.name ? previous : source.name))
     const target = {
       resourceId: folder.resourceId,
       name: folder.name,
@@ -1466,6 +1477,7 @@ export function FilesPage({
 
     const dragGeneration = dragSessionRef.current
     const sessionGeneration = dragSession?.currentGeneration() ?? null
+    const scopeAtDrop = liveDragScopeRef.current
     try {
       const decision = await adjudication.adjudicateDrop(source, {
         resourceId: destination.resourceId,
@@ -1474,12 +1486,27 @@ export function FilesPage({
         ancestorIds: rowTargetAncestorIds(),
       })
       if (!decision.allowed && decision.reason === 'session-lost') {
-        // Presented BEFORE the ownership guard, and as a persistent banner:
-        // the revocation that caused this refusal has already invalidated
-        // the gesture's ownership, so the normal callback path would return
-        // silently — the session's death must stay explained (A11).
-        setDropSessionLost(true)
-        setDropVerdictAnnouncement(GFS_DROP_SESSION_LOST_MESSAGE)
+        // Presented BEFORE the ownership guard: the revocation that caused
+        // this refusal has already invalidated the gesture's ownership, so
+        // the normal callback path would return silently. The revoked
+        // surface below carries the sentence persistently; this local
+        // banner/announcement is gated by the captured scope/session
+        // identity so a superseded call cannot declare a NEW, healthy
+        // session ended (A11).
+        if (
+          mayPaintGfsSessionLostBanner({
+            capturedScope: scopeAtDrop,
+            liveScope: liveDragScopeRef.current,
+            capturedEpoch: dragGeneration,
+            liveEpoch: dragSessionRef.current,
+            capturedSessionGeneration: sessionGeneration,
+            liveSessionGeneration: dragSession?.currentGeneration() ?? null,
+            hasSharedSession: dragSession != null,
+          })
+        ) {
+          setDropSessionLost(true)
+          setDropVerdictAnnouncement(GFS_DROP_SESSION_LOST_MESSAGE)
+        }
         return
       }
       if (!ownsDrop(source, dragGeneration, sessionGeneration)) return
@@ -2047,6 +2074,10 @@ export function FilesPage({
 
           {accessRevoked ? (
             <>
+              {/* The revoked surface owns the session-ended sentence (A11): it
+                  outlives any gesture's ownership, so a drag whose probe died
+                  stays explained even after the revocation invalidated it. */}
+              <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} />
               <EmptyState
                 title="File access is not authorized"
                 body="Your current Desktop session cannot access this location. Sign in again or contact an administrator."

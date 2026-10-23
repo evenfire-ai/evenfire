@@ -25,6 +25,7 @@ import {
   GFS_DROP_SESSION_LOST_MESSAGE,
   gfsDropVerdictLiveAnnouncement,
   gfsDropVerdictReason,
+  mayPaintGfsSessionLostBanner,
   presentGfsDropRefusal,
   sameGfsDropVerdict,
 } from '@/gfs/dropVerdict'
@@ -477,8 +478,10 @@ export function FileExplorerTree({
   // screen reader as well (RP-026).
   const [dropVerdictAnnouncement, setDropVerdictAnnouncement] = useState('')
   // A drop refused by a dead session must stay visible AFTER the revocation
-  // has already invalidated the gesture's ownership (UX matrix A11): the
-  // banner outlives the drop callback, until the next gesture or scope.
+  // has already invalidated the gesture's ownership (UX matrix A11). The
+  // revoked surface below carries the sentence unconditionally; this
+  // callback-local banner is gated by the captured scope/session identity so
+  // a superseded call cannot paint it over a new, healthy session.
   const [dropSessionLost, setDropSessionLost] = useState(false)
   // Display name of the live gesture's source, for reason copy that names it.
   const [dragSourceName, setDragSourceName] = useState<string | null>(null)
@@ -522,8 +525,11 @@ export function FileExplorerTree({
     adjudication.endDragSession()
     setPendingFolderMove(null)
     setDropStatesByResourceId({})
-    setDropSessionLost(false)
     setDragSourceName(null)
+    // A NEW live session makes any session-ended refusal stale. A transition
+    // TO revoked (scope null) must NOT clear it: that is exactly when the
+    // message has to survive (A11), and the revoked surface below carries it.
+    if (liveDragScope !== null) setDropSessionLost(false)
   }, [adjudication.endDragSession, liveDragScope])
 
   const ownsDrop = useCallback(
@@ -691,6 +697,10 @@ export function FileExplorerTree({
       event.preventDefault()
       event.stopPropagation()
       hoverOwnerRef.current = source
+      // The gesture may have started on ANOTHER surface (Files ↔ tree): the
+      // resolved shared source — not a local dragstart — owns the name the
+      // reason copy interpolates.
+      setDragSourceName(previous => (previous === source.name ? previous : source.name))
       const verdict = adjudication.hoverVerdict(source, {
         resourceId: node.resourceId,
         name: node.name,
@@ -801,6 +811,7 @@ export function FileExplorerTree({
       if (!source || node.kind !== 'directory' || movingResourceIdRef.current) return
       const epoch = dragSessionEpochRef.current
       const sessionGeneration = dragSession?.currentGeneration() ?? null
+      const scopeAtDrop = liveDragScopeRef.current
       try {
         const decision = await adjudication.adjudicateDrop(source, {
           resourceId: node.resourceId,
@@ -809,12 +820,27 @@ export function FileExplorerTree({
           ancestorIds,
         })
         if (!decision.allowed && decision.reason === 'session-lost') {
-          // Presented BEFORE the ownership guard, and as a persistent banner:
-          // the revocation that caused this refusal has already invalidated
-          // the gesture's ownership, so the normal callback path would return
-          // silently — the session's death must stay explained (A11).
-          setDropSessionLost(true)
-          setDropVerdictAnnouncement(GFS_DROP_SESSION_LOST_MESSAGE)
+          // Presented BEFORE the ownership guard: the revocation that caused
+          // this refusal has already invalidated the gesture's ownership, so
+          // the normal callback path would return silently. The revoked
+          // surface below carries the sentence persistently; this local
+          // banner/announcement is gated by the captured scope/session
+          // identity so a superseded call cannot declare a NEW, healthy
+          // session ended (A11).
+          if (
+            mayPaintGfsSessionLostBanner({
+              capturedScope: scopeAtDrop,
+              liveScope: liveDragScopeRef.current,
+              capturedEpoch: epoch,
+              liveEpoch: dragSessionEpochRef.current,
+              capturedSessionGeneration: sessionGeneration,
+              liveSessionGeneration: dragSession?.currentGeneration() ?? null,
+              hasSharedSession: dragSession != null,
+            })
+          ) {
+            setDropSessionLost(true)
+            setDropVerdictAnnouncement(GFS_DROP_SESSION_LOST_MESSAGE)
+          }
           return
         }
         if (!ownsDrop(source, epoch, sessionGeneration)) return
@@ -953,6 +979,10 @@ export function FileExplorerTree({
         // discovery error and roots, so an unauthorized drive would read empty.
         <div className="da-file-explorer__revoked" role="alert">
           <p className="da-file-explorer__revoked-title">File access is not authorized</p>
+          {/* The revoked surface owns the session-ended sentence (A11): it
+              outlives any gesture's ownership, so a drag whose probe died
+              stays explained even after the revocation invalidated it. */}
+          <p className="da-file-explorer__revoked-body">{GFS_DROP_SESSION_LOST_MESSAGE}</p>
           <p className="da-file-explorer__revoked-body">
             Your current session cannot access these files. Sign in again or contact an
             administrator.
