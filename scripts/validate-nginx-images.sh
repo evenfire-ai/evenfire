@@ -7,7 +7,8 @@
 # fixtures that install platform NGINX). Unit tests that never pull an image
 # are not scanned.
 #
-# Every nginx / nginxinc/nginx-unprivileged reference in the scanned paths must
+# Every nginx, nginx/nginx-unprivileged, and legacy
+# nginxinc/nginx-unprivileged reference in the scanned paths must
 # carry a full x.y.z tag at or above the floor of its release line. Floating,
 # untagged and variable tags are rejected. A digest is accepted only next to
 # such a tag; scripts/verify-nginx-image-digests.sh checks in CI that each
@@ -38,7 +39,7 @@ EGRESS_PROXY_IMAGE="clerum/nginx-egress-proxy:0.1.0"
 
 # Pieces of the reference patterns. An optional literal registry[:port]/path/
 # prefix may precede the repository name.
-NGINX_NAME='(nginx|nginxinc/nginx-unprivileged)'
+NGINX_NAME='(nginx|nginx/nginx-unprivileged|nginxinc/nginx-unprivileged)'
 REGISTRY_PREFIX='([[:alnum:]_.-]+(:[0-9]+)?/)*'
 # After an untagged name: anything that cannot continue a reference ('}' ends it).
 # shellcheck disable=SC2016 # literal '$' and '{' in a regular expression
