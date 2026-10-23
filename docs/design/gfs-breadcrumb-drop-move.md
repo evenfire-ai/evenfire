@@ -109,25 +109,34 @@ Desktop Files and the sibling UX matrix document are owned by another task and m
 
 ## 5. Test plan
 
-- ☐ Drag `abac.md` onto `Product` crumb → confirm dialog shows "Move abac.md to
+Status recorded 2026-10-23 by the implementing worker (component/pure/gate lanes;
+live lanes pending the owned-environment opt-in — see §8).
+
+- ☑ Drag `abac.md` onto `Product` crumb → confirm dialog shows "Move abac.md to
   Product?" → commit → listing refreshes; file gone from `live tests`, present in
-  `Product`.
-- ☐ Drag onto drive-root crumb `main` → moves to root (admin plane).
-- ☐ Drag onto the ACTIVE crumb → info "already here", no error styling, no PATCH.
-- ☐ Folder onto ancestor crumb (incl. a crumb above its own parent) → moves;
-  descendant targets are impossible by construction (crumbs are ancestors) — assert no
-  `descendant` case can trigger here.
-- ☐ Structural refusal and same-parent info have reason attributes, correct styles,
+  `Product`. (component: file-kind confirmation + PATCH `newParentId`/fresh
+  `ifMatch`; live journey added.)
+- ☑ Drag onto drive-root crumb `main` → moves to root (admin plane). (component:
+  hydrated-root admission + PATCH to root id; unhydrated-root hydration retry;
+  live journey added.)
+- ☑ Drag onto the ACTIVE crumb → info "already here", no error styling, no PATCH.
+  (component + pure tests; live journey added.)
+- ☑ Folder onto ancestor crumb (incl. a crumb above its own parent) → moves;
+  descendant targets are impossible by construction (crumbs are ancestors) —
+  asserted no `descendant` case can trigger here (pure verdict walk over every
+  crumb × file/folder source; live ancestor journey added).
+- ☑ Structural refusal and same-parent info have reason attributes, correct styles,
   toasts and SR wording. Pure copy tests cover `destination-write`, `source-write`,
   and `source-delete`; operator hover never fabricates these permission denials.
-- ☐ Unavailable endpoint → warning, no PATCH; a later drop retries resolution. No
+- ☑ Unavailable endpoint → warning, no PATCH; a later drop retries resolution. No
   cold-hover budget exists in this operator surface (audit decision §3.2).
-- ☐ Breadcrumb reconstruction mid-drag → drop commits against captured crumb identity;
-  no mis-anchored trail (R5-M1/R7-M1 regression suite stays green).
-- ☐ Keyboard/access: crumb buttons keep click-navigation; Move dialog unchanged as the
+- ☑ Breadcrumb reconstruction mid-drag → drop commits against captured crumb identity;
+  no mis-anchored trail (R5-M1/R7-M1 regression suite stays green; new mid-gesture
+  rebuild test pins the captured identity).
+- ☑ Keyboard/access: crumb buttons keep click-navigation; Move dialog unchanged as the
   keyboard path; verdicts announced via aria-live.
-- ☐ Control UI production build + permission suites green; Desktop untouched in
-  phase 1.
+- ☑ Control UI production build + suites green (`npm test` 245 files / 2819 tests,
+  `npm run build`, `tsc --noEmit`); Desktop untouched by this task.
 
 ## 6. Acceptance criteria
 
@@ -147,3 +156,65 @@ journeys belong in `e2e/gfs-drag-and-drop.spec.ts`. Extend both so the gate requ
 the new breadcrumb cases. Component tests own deferred-read/epoch and reconstruction
 races. Live E2E requires configured owned endpoints and credentials; report it
 separately from the production build and permission/unit suites.
+
+---
+
+## 8. Implementation notes (2026-10-23, implementing worker)
+
+Refinements recorded against §§3–4 during implementation, cross-checked against
+the audited receipts. Nothing below changes the constraints; each note pins a
+decision the plan left open.
+
+- **Warning toast tone.** The Control UI toast stack only had `info/success/error`,
+  but the matrix tone contract (unknown = warning) requires a real warning tone.
+  `ToastTone` gained `warning`, painted through the existing `--cu-warning` /
+  `--cu-warning-rgb` tokens (`components/Toast/types.ts`, `app/globals.css`).
+  No other tone surface changed.
+- **Drop-state vocabulary.** `data-drop-state` on crumbs and rows is one of
+  `allowed | checking | denied | unavailable | same-parent`; `data-drop-reason`
+  carries the deny reason for `denied` rows/crumbs. Rows keep `data-drop-target`
+  (allowed only) so the existing Playwright journeys keep their release signal.
+  The dragged row itself is now a deliverable drop zone so a self-drop paints
+  and explains (matrix A1); plain file rows remain pass-through non-targets.
+- **Reason mapping home.** `control-ui/lib/gfsDragFeedback.ts` (+ `.types.ts`,
+  pure tests) owns reason → message/tone/announcement and the zero-network
+  hover verdict (wrapping the shared `decideDragStructure`). The previously
+  component-local `structureDenialMessage`/`canonicalPathOf` helpers were
+  removed in favor of it. A6–A8 copy is mapped and unit-tested but never
+  fabricated from local bits — the operator plane holds intrinsic authority.
+- **Admission reads.** Crumb drops and row FOLDER drops re-resolve both
+  endpoints by immutable URI at admission (404 → B4/B5 copy, transport →
+  warning, kind/identity mismatch → honest refusal, null path → defer to the
+  server guard). Row FILE drops keep moving directly and re-resolve only at
+  commit, preserving "files move directly" while still validating before
+  dispatch.
+- **Commit revalidation placement.** `moveResource` grew an opt-in
+  `revalidate: { epoch }` used by every drag commit path (direct file drops and
+  the confirmation's commit). It resolves both endpoints again, validates
+  identity + destination kind, re-runs `decideDragPathStructure` on fresh
+  paths, and uses the fresh source version for `ifMatch`. The keyboard Move
+  dialog path intentionally does not opt in — "preserve Move dialog behavior".
+- **Transport honesty.** A PATCH that fails without an HTTP status (outcome
+  unknown) is verified exactly once by resolving the source by URI: parent ==
+  destination ⇒ report the move it proved; unchanged path ⇒ warning
+  "couldn't complete"; failed verification ⇒ warning "couldn't confirm". The
+  PATCH is never repeated. This is a bounded Control-UI-sized version of the
+  Desktop B7/B8 semantics, not an import of the Desktop pipeline.
+- **Gesture epochs.** Monotonic counter bumped at dragstart (superseding prior
+  admissions and clearing an open confirmation) and at unmount (plus a mounted
+  guard). Dragend clears presentation only. The epoch is checked after every
+  async read and immediately before each PATCH dispatch.
+- **Root identity.** The unhydrated root paints `unavailable` at hover; the
+  drop retries hydration through one bounded `/gfs/tree` read and adopts the
+  returned `rootResourceId`/RID (same hydration code path as `load`). Root
+  destinations carry `gfs://main/<rid>` and canonical path `/`; no authority
+  probe, no fabricated deny.
+- **Convergence.** `planMoveConvergence` now drives old+new parent cache
+  invalidation inside `moveResource` (observed old parent = trail parent for
+  trail folders, else the current folder), replacing the single
+  destination-only cache delete. The live current folder is refreshed; a drag
+  move never auto-navigates.
+- **Gate inventory.** `run-gfs-drag-and-drop.mjs` exports
+  `REQUIRED_JOURNEY_INVENTORY` and fails the selection phase when the
+  breadcrumb lanes (file move, root move, active same-parent, ancestor folder
+  move) are absent, with unit tests in `test/__tests__/gfsDragAndDropGate.test.ts`.
