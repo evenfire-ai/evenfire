@@ -102,11 +102,8 @@ export function loadDevStore(root: string, snapshot: DevSnapshot): DevStore {
   const generation = readGeneration()
   const source = path.join(FIXTURE, snapshot)
   fs.mkdirSync(root, { recursive: true, mode: 0o700 })
-  // Node 24.15 (nodejs/node#61950) throws ERR_FS_CP_EEXIST when cp() copies a
-  // directory onto an existing one with errorOnExist and force disabled, and
-  // the Host root always exists. Copy the snapshot's entries one by one: the
-  // caller's root stays the root, and a root that already holds one of them
-  // still fails loudly instead of merging into it.
+  // Copy entry by entry: from Node 24.22, cpSync with errorOnExist rejects an
+  // existing destination root with ERR_FS_CP_EEXIST even when it is empty.
   for (const entry of fs.readdirSync(source))
     fs.cpSync(path.join(source, entry), path.join(root, entry), {
       recursive: true,

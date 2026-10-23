@@ -116,7 +116,7 @@ fi
 # Public images needed by E2E recipes
 log "Loading public images..."
 PUBLIC_IMAGES=(
-  "nginx:1.30.1-alpine"
+  "nginx:1.30.6-alpine"
   "postgres:16-alpine"
   "redis:7-alpine"
   "curlimages/curl:8.7.1"
