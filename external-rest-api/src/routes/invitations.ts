@@ -205,7 +205,12 @@ async function invitationPasswordAuthFromRequest(req: Request): Promise<
   const authorization = req.headers.authorization
   if (authorization !== undefined || hasCookie(req, PROFILE_SESSION_COOKIE)) {
     const sessionToken = presentedSessionToken(authorization, req)
-    const claims = sessionToken ? verifyToken(sessionToken) : null
+    // An empty or malformed credential is rejected before verification and
+    // never reaches the verifier.
+    if (!sessionToken) {
+      return { status: 401, body: { error: 'Unauthorized' } }
+    }
+    const claims = verifyToken(sessionToken)
     if (!claims) {
       return { status: 401, body: { error: 'Unauthorized' } }
     }
