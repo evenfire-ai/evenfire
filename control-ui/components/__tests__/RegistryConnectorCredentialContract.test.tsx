@@ -72,7 +72,9 @@ it('shows and rotates the registry-produced credential mapping for the attached 
 
   expect(await screen.findByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
   expect(screen.getByText('Edit connector secret: linear-credentials')).toBeInTheDocument()
-  expect(screen.getByLabelText('API token')).toBeInTheDocument()
+  // The credential fields render one effect pass after the button; wait for
+  // the label instead of assuming it settled with the button.
+  expect(await screen.findByLabelText('API token')).toBeInTheDocument()
   expect(screen.getAllByText('api-key').length).toBeGreaterThan(0)
 
   fireEvent.change(screen.getByLabelText('API token'), { target: { value: 'rotated' } })

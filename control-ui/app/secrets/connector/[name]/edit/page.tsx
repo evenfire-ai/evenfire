@@ -60,6 +60,8 @@ function EditConnectorSecretContent() {
     { name: string; keys: string[] } | null | undefined
   >(undefined)
   const [keyValues, setKeyValues] = useState<Record<string, string>>({})
+  const [extraKeys, setExtraKeys] = useState<Array<{ id: number; key: string; value: string }>>([])
+  const extraKeyId = React.useRef(0)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState('')
   const { showToast } = useToast()
@@ -159,15 +161,49 @@ function EditConnectorSecretContent() {
     router.push(CONTROL_ROUTES.secrets.connector)
   }
 
-  const filledKeyData = () =>
-    Object.fromEntries(
+  function addExtraKey() {
+    extraKeyId.current += 1
+    setExtraKeys(current => [...current, { id: extraKeyId.current, key: '', value: '' }])
+  }
+
+  function updateExtraKey(id: number, field: 'key' | 'value', value: string) {
+    setExtraKeys(current => current.map(row => (row.id === id ? { ...row, [field]: value } : row)))
+  }
+
+  function removeExtraKey(id: number) {
+    setExtraKeys(current => current.filter(row => row.id !== id))
+  }
+
+  const SECRET_KEY_NAME_PATTERN = /^[A-Za-z0-9._-]+$/
+
+  function collectRotationData(): Record<string, string> | string {
+    const data = Object.fromEntries(
       Object.entries(keyValues).filter(([key, value]) => key.length > 0 && value.trim().length > 0)
     )
+    const existingKeys = new Set(secretSummary?.keys ?? [])
+    for (const row of extraKeys) {
+      const name = row.key.trim()
+      const hasName = name.length > 0
+      const hasValue = row.value.trim().length > 0
+      if (!hasName && !hasValue) continue
+      if (!hasName) return 'Name the new key before saving.'
+      if (!hasValue) return `Fill in a value for the new key ${name}.`
+      if (!SECRET_KEY_NAME_PATTERN.test(name))
+        return `Key ${name} is invalid: use letters, numbers, dots, underscores, or hyphens.`
+      if (existingKeys.has(name) || name in data)
+        return `Key ${name} already exists on this Secret.`
+      data[name] = row.value
+    }
+    if (Object.keys(data).length === 0) {
+      return 'Fill in at least one key to rotate its value.'
+    }
+    return data
+  }
 
   async function saveDirectRotation() {
-    const data = filledKeyData()
-    if (Object.keys(data).length === 0) {
-      setSaveError('Fill in at least one key to rotate its value.')
+    const data = collectRotationData()
+    if (typeof data === 'string') {
+      setSaveError(data)
       return
     }
     setSaving(true)
@@ -240,15 +276,15 @@ function EditConnectorSecretContent() {
                   <h2>Rotate stored values</h2>
                   <p className="cu-muted">
                     No connector references this Secret yet, so changes take effect for the next
-                    connector that attaches it. Only the keys you fill in are replaced; every other
-                    key already on the Secret is kept.
+                    connector that attaches it. Only the keys you fill in are replaced or added;
+                    every other key already on the Secret is kept.
                   </p>
                   {saveError ? (
                     <div className="cu-banner cu-banner--error" role="alert">
                       {saveError}
                     </div>
                   ) : null}
-                  {secretSummary.keys.length === 0 ? (
+                  {secretSummary.keys.length === 0 && extraKeys.length === 0 ? (
                     <p className="cu-muted">This Secret has no keys yet.</p>
                   ) : (
                     secretSummary.keys.map(key => (
@@ -271,6 +307,46 @@ function EditConnectorSecretContent() {
                       </Field>
                     ))
                   )}
+                  {extraKeys.map(row => (
+                    <div className="cu-form-inline" key={row.id}>
+                      <TextInput
+                        monospace
+                        aria-label={`New key name ${row.id}`}
+                        value={row.key}
+                        onChange={e => updateExtraKey(row.id, 'key', e.target.value)}
+                        placeholder="NEW_API_KEY"
+                        disabled={saving}
+                      />
+                      <TextInput
+                        monospace
+                        aria-label={`New key value ${row.id}`}
+                        value={row.value}
+                        onChange={e => updateExtraKey(row.id, 'value', e.target.value)}
+                        placeholder="secret value"
+                        type="password"
+                        autoComplete="off"
+                        disabled={saving}
+                      />
+                      <button
+                        type="button"
+                        className="cu-btn cu-btn--ghost cu-btn--sm"
+                        onClick={() => removeExtraKey(row.id)}
+                        disabled={saving}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                  <div>
+                    <button
+                      type="button"
+                      className="cu-btn cu-btn--ghost cu-btn--sm"
+                      onClick={addExtraKey}
+                      disabled={saving}
+                    >
+                      Add key
+                    </button>
+                  </div>
                   <div className="cu-create-actions">
                     <button type="button" className="cu-btn cu-btn--ghost" onClick={backToList}>
                       Cancel
@@ -279,7 +355,7 @@ function EditConnectorSecretContent() {
                       type="button"
                       className="cu-btn cu-btn--primary"
                       onClick={() => void saveDirectRotation()}
-                      disabled={saving || secretSummary.keys.length === 0}
+                      disabled={saving}
                     >
                       {saving ? 'Saving…' : 'Save'}
                     </button>

@@ -50,6 +50,9 @@ type McpSecretRow = {
   /** Live Secret identity for compare-and-delete; absent on older backends. */
   uid?: string
   resourceVersion?: string
+  /** The provisioned listing confirmed this Secret exists. When false, the
+   * row comes from a connector reference alone and "Add" creates it. */
+  exists: boolean
 }
 type RecipeSecretStatus = 'provisioned' | 'missing'
 type RecipeSecretRowOwnership =
@@ -266,6 +269,9 @@ export function SecretsTable({
           .filter(item => item.name && item.uid && item.resourceVersion)
           .map(item => [item.name, { uid: item.uid!, resourceVersion: item.resourceVersion! }])
       )
+      const existsNames = new Set(
+        (provisioned.items ?? []).map(item => item.name).filter(name => name)
+      )
 
       const nextRows = Array.from(usage.entries())
         .map(([name, details]) => {
@@ -278,6 +284,7 @@ export function SecretsTable({
             servers: Array.from(details.servers).sort((a, b) => a.localeCompare(b)),
             registryEntries: registrySources.map(source => `${source.name}@${source.version}`),
             registrySources,
+            exists: existsNames.has(name),
             ...(identity ? identity : {}),
           }
         })
@@ -741,26 +748,35 @@ export function SecretsTable({
                           ariaLabel={`Actions for connector secret ${row.name}`}
                           horizontalTrigger
                           actions={[
-                            {
-                              key: 'add',
-                              label: 'Add',
-                              disabled: row.name !== row.name.trim(),
-                              disabledReason: 'The connector stores a non-canonical Secret name.',
-                              onClick: () => {
-                                const source =
-                                  row.registrySources.length === 1
-                                    ? row.registrySources[0]
-                                    : undefined
-                                router.push(
-                                  CONTROL_ROUTES.secrets.new({
-                                    scope: 'mcp',
-                                    name: row.name,
-                                    registryEntry: source?.name,
-                                    registryVersion: source?.version,
-                                  })
-                                )
-                              },
-                            },
+                            // "Add" creates the Secret a connector references but
+                            // that does not exist yet. An existing Secret must not
+                            // go through the create flow — POST refuses duplicate
+                            // names (409); its keys rotate through "Update".
+                            ...(row.exists
+                              ? []
+                              : [
+                                  {
+                                    key: 'add',
+                                    label: 'Add',
+                                    disabled: row.name !== row.name.trim(),
+                                    disabledReason:
+                                      'The connector stores a non-canonical Secret name.',
+                                    onClick: () => {
+                                      const source =
+                                        row.registrySources.length === 1
+                                          ? row.registrySources[0]
+                                          : undefined
+                                      router.push(
+                                        CONTROL_ROUTES.secrets.new({
+                                          scope: 'mcp',
+                                          name: row.name,
+                                          registryEntry: source?.name,
+                                          registryVersion: source?.version,
+                                        })
+                                      )
+                                    },
+                                  },
+                                ]),
                             {
                               key: 'update',
                               label: 'Update',

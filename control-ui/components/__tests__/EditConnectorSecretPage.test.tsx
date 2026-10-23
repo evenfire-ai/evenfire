@@ -310,6 +310,40 @@ describe('EditConnectorSecretPage', () => {
     expect(navigation.push).toHaveBeenCalledWith('/secrets/connector')
   })
 
+  it('adds new keys to the secret through the direct rotation merge', async () => {
+    mockGetMcpServers.mockResolvedValue({ items: [] })
+    await renderPage()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add key' }))
+    fireEvent.change(screen.getByLabelText('New key name 1'), {
+      target: { value: 'webhook-secret' },
+    })
+    fireEvent.change(screen.getByLabelText('New key value 1'), { target: { value: 'whv-1' } })
+    fireEvent.change(screen.getByLabelText('api-key'), { target: { value: 'new-token' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await flush()
+
+    expect(mockUpdateMcpSecret).toHaveBeenCalledWith('linear-credentials', {
+      'api-key': 'new-token',
+      'webhook-secret': 'whv-1',
+    })
+    expect(navigation.push).toHaveBeenCalledWith('/secrets/connector')
+  })
+
+  it('rejects a new key that duplicates an existing key instead of merging it', async () => {
+    mockGetMcpServers.mockResolvedValue({ items: [] })
+    await renderPage()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add key' }))
+    fireEvent.change(screen.getByLabelText('New key name 1'), { target: { value: 'api-key' } })
+    fireEvent.change(screen.getByLabelText('New key value 1'), { target: { value: 'dup' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await flush()
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Key api-key already exists')
+    expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+  })
+
   it('keeps unfilled keys out of the direct rotation and refuses empty saves', async () => {
     mockGetMcpServers.mockResolvedValue({ items: [] })
     await renderPage()

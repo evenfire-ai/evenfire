@@ -511,7 +511,7 @@ describe('SecretsTable — connector row actions', () => {
     fireEvent.click(trigger)
   }
 
-  it('offers Update, enabled Delete, and Add on a connector row with identity', async () => {
+  it('offers Update and enabled Delete, and no create-flow Add, on an existing secret', async () => {
     mockConnectorRow({
       uid: 'uid-linear-1',
       resourceVersion: '42',
@@ -519,9 +519,30 @@ describe('SecretsTable — connector row actions', () => {
     renderTable()
     await openRowMenu()
 
-    expect(screen.getByRole('menuitem', { name: 'Add' })).toBeEnabled()
     expect(screen.getByRole('menuitem', { name: 'Update' })).toBeEnabled()
     expect(screen.getByRole('menuitem', { name: /^Delete/ })).toBeEnabled()
+    // The Secret exists (the listing returned it); the create flow would 409.
+    expect(screen.queryByRole('menuitem', { name: 'Add' })).toBeNull()
+  })
+
+  it('routes Add to the create flow only for a referenced but missing secret', async () => {
+    getMcpServersMock.mockResolvedValue({
+      items: [
+        buildDirectCrdMcpServerReference({
+          name: 'ghost-conn',
+          secretName: 'ghost-credentials',
+        }),
+      ],
+    })
+    renderTable()
+
+    const trigger = await screen.findByRole('button', {
+      name: 'Actions for connector secret ghost-credentials',
+    })
+    fireEvent.click(trigger)
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Add' }))
+
+    expect(mockPush).toHaveBeenCalledWith('/secrets/new?scope=mcp&name=ghost-credentials')
   })
 
   it('deletes a connector secret through its live identity after confirmation', async () => {
