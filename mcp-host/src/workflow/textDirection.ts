@@ -4,6 +4,7 @@
  * right-to-left letters that Word and PowerPoint set as their own runs. The PDF
  * lays the text out from these classes itself (pdfBidi.ts).
  */
+import type { ScriptLanguage } from './textScript'
 
 export type BidiClass =
   | 'L'
@@ -253,7 +254,12 @@ export function scriptSegments(text: string, rtlParagraph = false): ScriptSegmen
   return merged.map(({ text: t, rtl }) => ({ text: t, rtl }))
 }
 
-/** Language tag for a right-to-left run of one script. */
-export function bidiLanguage(text: string): string {
+/**
+ * Language tag for a right-to-left run of one script: `preferred` when the run
+ * is in its script, so a Persian host's text is Persian rather than Arabic, and
+ * otherwise Hebrew or Arabic by its letters.
+ */
+export function bidiLanguage(text: string, preferred?: ScriptLanguage): string {
+  if (preferred?.letters.test(text)) return preferred.lang
   return HEBREW_LETTER.test(text) ? 'he-IL' : 'ar-SA'
 }

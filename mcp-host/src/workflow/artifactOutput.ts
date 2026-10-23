@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'crypto'
 import * as fs from 'fs'
 import * as path from 'path'
 import { FREE_SPACE_FLOOR_MIN_BYTES, freeSpaceFloor } from '../internalTools/gfsDownloadStore'
+import { type HostLocale, currentHostLocale } from '../locale/hostLocale'
 import { logger } from '../logger'
 import { CALLER_OUTPUTS_DIR } from '../workspace/callerOutputs'
 import type { ArtifactMetadata, InternalToolResult } from './types'
@@ -251,7 +252,7 @@ export function capNotes(warnings: string[]): string[] {
 export function artifactResult(
   target: OutputTarget,
   format: ArtifactMetadata['format'],
-  opts: { summary?: string; warnings?: string[] } = {}
+  opts: { summary?: string; warnings?: string[]; locale?: HostLocale } = {}
 ): InternalToolResult {
   let stats: fs.Stats
   try {
@@ -262,6 +263,9 @@ export function artifactResult(
   const parts = [opts.summary ?? `File generated: ${target.filename} (${format}).`]
   const warnings = capNotes(opts.warnings ?? [])
   if (warnings.length > 0) parts.push(`Notes: ${warnings.join(' ')}`)
+  const { language, timeZone } = opts.locale ?? currentHostLocale()
+  // Recorded with each document, so it can be written again the same way.
+  logger.info({ format, sizeBytes: stats.size, language, timeZone }, 'Document generated')
   return {
     success: true,
     artifact: {
@@ -270,6 +274,8 @@ export function artifactResult(
       path: target.filePath,
       sizeBytes: stats.size,
       createdAt: new Date().toISOString(),
+      language,
+      timeZone,
     },
     content: parts.join('\n'),
     ...(target.writtenSha256 ? { writtenSha256: target.writtenSha256 } : {}),

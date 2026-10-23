@@ -8,6 +8,32 @@ export interface EastAsianScript {
   lang: string
 }
 
+/** The language text of one script is spell-checked in ("es-MX"), and that script's letters. */
+export interface ScriptLanguage {
+  lang: string
+  letters: RegExp
+}
+
+/**
+ * The spell-checking language of a host `language`, for text in its script;
+ * undefined for English, and for Chinese, Japanese and Korean, whose text is
+ * tagged by its own characters.
+ */
+export function proofingFor(language: string): ScriptLanguage | undefined {
+  if (language === 'en') return undefined
+  try {
+    const given = new Intl.Locale(language)
+    const max = given.maximize()
+    if (!max.script || !max.region || /^(Hans|Hant|Jpan|Kore)$/.test(max.script)) {
+      return undefined
+    }
+    const lang = [max.language, given.script, max.region].filter(Boolean).join('-')
+    return { lang, letters: new RegExp(`\\p{Script=${max.script}}`, 'u') }
+  } catch {
+    return undefined
+  }
+}
+
 // Each face ships with Windows and with Word for Mac.
 const JAPANESE: EastAsianScript = { font: 'Yu Gothic', lang: 'ja-JP' }
 const KOREAN: EastAsianScript = { font: 'Malgun Gothic', lang: 'ko-KR' }

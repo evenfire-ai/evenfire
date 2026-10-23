@@ -115,6 +115,7 @@ import type { ImageInputResolver } from '../llm/imageInput'
 import type { PromptCache } from '../llm/promptCache'
 import { stampStableHashGauge } from '../llm/promptCacheMetrics'
 import { descriptorFor, isLlmProvider, resolveContextWindow } from '../llm/registryCore'
+import { currentHostLocale, hostLocaleGuidance } from '../locale/hostLocale'
 import { logger } from '../logger'
 import type { McpManager } from '../mcp'
 import { getDisplayName, sanitizeError } from '../progress/intentExtraction.js'
@@ -1283,8 +1284,10 @@ export class TaskExecutor {
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i]
       if (m.role !== 'user') continue
+      const locale = currentHostLocale()
       const block = buildTurnContextBlock({
         date: new Date(),
+        timeZone: locale.timeZoneSet ? locale.timeZone : undefined,
         channel: {
           type: this.task.sourceMessage?.channelType ?? 'internal',
           sender: this.task.sourceMessage?.sender ?? null,
@@ -1675,9 +1678,10 @@ export class TaskExecutor {
     // cache path sends the parts it built once, joined as `LlmPortAdapter`
     // joins them, whatever the loop presents; the legacy path runs the builder
     // `DefaultReasoningPort` runs, over the presented list. That builder stamps
-    // `new Date().toISOString()`, so the counted copy carries a different
-    // timestamp from the sent one; the ISO string is always 24 characters, so
-    // the byte count, which is all the gauge reads, is the same.
+    // the current time, so the counted copy carries a different timestamp from
+    // the sent one; the stamp's text is one length for a host (ISO, or the
+    // host's zone with a fixed-width offset), so the byte count, which is all
+    // the gauge reads, is the same.
     let systemPromptFor: (tools: ToolDefinition[]) => string
     if (parts) {
       const cachedPrompt = [parts.stable, parts.context].filter(s => s.length > 0).join('\n\n')
@@ -2138,6 +2142,10 @@ export class TaskExecutor {
     if (hasDesktopTools) {
       platformHints.push(DESKTOP_ENVIRONMENT_HINT)
     }
+    // Fixed per host, so it belongs to the stable tier; a change of the Host's
+    // locale invalidates the cache (main.ts).
+    const localeGuidance = hostLocaleGuidance()
+    if (localeGuidance) platformHints.push(localeGuidance)
 
     const parts = builder.buildParts({
       identityFiles,

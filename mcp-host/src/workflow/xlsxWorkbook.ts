@@ -4,6 +4,7 @@
  * `warnings`, so the agent does not describe content the file lacks.
  */
 import ExcelJS from 'exceljs'
+import { documentLabel } from '../locale/labels'
 import {
   type EmbeddableImage,
   type ImageSize,
@@ -608,7 +609,8 @@ export async function buildXlsxWorkbook(
   outputDir: string,
   imageBox: ImageSize,
   warnings: string[],
-  aliased: string[] = []
+  aliased: string[] = [],
+  language = 'en'
 ): Promise<XlsxBuild> {
   const requested = args.sheets
   if (!Array.isArray(requested) || requested.length === 0) {
@@ -651,7 +653,7 @@ export async function buildXlsxWorkbook(
   let logo = branding.logoPath
     ? loadImage(branding.logoPath, outputDir, warnings, 'branding.logoPath')
     : undefined
-  const names = new SheetNames()
+  const names = new SheetNames(documentLabel(language, 'sheet'))
   const parts: string[] = []
   let written = false
   sheets.forEach((sheet, i) => {

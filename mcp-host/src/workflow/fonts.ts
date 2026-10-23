@@ -44,11 +44,16 @@ export const PDF_MONO_FAMILY = 'ClerumMono'
 /**
  * Family list handed to the canvas. Roboto first so output is identical across
  * images; the rest are picked up only when the image ships them, which is what
- * makes arrows, check marks and CJK render natively where they exist.
+ * makes arrows, check marks, CJK and the scripts of the Noto core set (Indic,
+ * Southeast Asian, Armenian, Georgian, Ethiopic) render natively where they exist.
  */
 export const CHART_FONT_STACK =
   `"${CHART_FONT_FAMILY}", "DejaVu Sans", "Noto Sans", "Liberation Sans", ` +
-  '"Noto Sans CJK SC", "Noto Sans CJK JP", "Arial Unicode MS", sans-serif'
+  '"Noto Sans CJK SC", "Noto Sans CJK JP", "Noto Sans Devanagari", "Noto Sans Bengali", ' +
+  '"Noto Sans Gurmukhi", "Noto Sans Gujarati", "Noto Sans Oriya", "Noto Sans Tamil", ' +
+  '"Noto Sans Telugu", "Noto Sans Kannada", "Noto Sans Malayalam", "Noto Sans Sinhala", ' +
+  '"Noto Sans Thai", "Noto Sans Lao", "Noto Sans Khmer", "Noto Sans Myanmar", ' +
+  '"Noto Sans Armenian", "Noto Sans Georgian", "Noto Sans Ethiopic", "Arial Unicode MS", sans-serif'
 
 interface RobotoFaces {
   normal: Buffer

@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto'
 import { GFS_LOCAL_PROCESSING_GUIDANCE } from '../../internalTools/gfsReadTypes'
+import { currentHostLocale, hostLocaleGuidance } from '../../locale/hostLocale'
+import { zonedTimestamp } from '../../locale/localeFormat'
 import { logger } from '../../logger'
 import { PromptBuilder } from '../interfaces'
 import type { NativeToolPresentation } from '../orchestration/toolPresentationPolicy'
@@ -261,8 +263,15 @@ export class DefaultPromptBuilder implements PromptBuilder {
       sections.push(MEMORY_GUIDANCE_TEXT)
     }
 
-    // 3. Date/time context
-    sections.push(`Current date and time: ${new Date().toISOString()}`)
+    // 3. Date/time context: in the host's time zone when it sets one, else UTC
+    const locale = currentHostLocale()
+    sections.push(
+      locale.timeZoneSet
+        ? `Current date and time: ${zonedTimestamp(locale.timeZone)} (${locale.timeZone})`
+        : `Current date and time: ${new Date().toISOString()}`
+    )
+    const localeGuidance = hostLocaleGuidance(locale)
+    if (localeGuidance) sections.push(localeGuidance)
 
     // 4. Channel-specific context
     if (metadata?.channelType) {

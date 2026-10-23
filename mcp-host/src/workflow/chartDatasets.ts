@@ -4,6 +4,7 @@
  * Chart.js draws.
  */
 import type { ChartType } from 'chart.js'
+import { documentLabel, numberedLabel } from '../locale/labels'
 import { colorWarnings, withoutInvalidColors } from './chartColors'
 import type { NormalizedPoint } from './chartData'
 import { sliceColors } from './chartPlugins'
@@ -172,7 +173,8 @@ function resolveChartType(
   datasets: ChartDataset[],
   labels: string[] | undefined,
   theme: ChartTheme,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  language: string
 ): ResolvedChartType {
   const o: ResolvedChartType = { chartType: 'bar', optionsOverrides: {}, notes: [] }
   switch (raw) {
@@ -256,7 +258,7 @@ function resolveChartType(
       datasets.length = 1
       o.gaugeValue = reading
       o.gaugeMax = max
-      o.labels = ['Value', 'Remainder']
+      o.labels = [documentLabel(language, 'value'), documentLabel(language, 'remainder')]
       o.optionsOverrides = {
         rotation: -90,
         circumference: 180,
@@ -290,8 +292,10 @@ function resolveChartType(
       ds.backgroundColor = colors
       ds.borderColor = colors
       // Append "Total" to labels (or synthesize labels if absent).
-      const newLabels = labels ? [...labels] : deltas.map((_, i) => `Step ${i + 1}`)
-      newLabels.push('Total')
+      const newLabels = labels
+        ? [...labels]
+        : deltas.map((_, i) => numberedLabel(language, 'step', i + 1))
+      newLabels.push(documentLabel(language, 'total'))
       o.labels = newLabels
       // Drop extra datasets — waterfall is single-series.
       datasets.length = 1
@@ -303,7 +307,8 @@ function resolveChartType(
       const ds = datasets[0]
       if (!ds || !Array.isArray(ds.data)) return o
       // Sort descending while keeping label/data alignment.
-      const lbls = labels ?? (ds.data as number[]).map((_, i) => `Stage ${i + 1}`)
+      const lbls =
+        labels ?? (ds.data as number[]).map((_, i) => numberedLabel(language, 'stage', i + 1))
       const paired = (ds.data as number[]).map((v, i) => ({
         v: Number(v) || 0,
         l: lbls[i] ?? '',
@@ -342,7 +347,8 @@ export function paintedDatasets(
   labels: string[] | undefined,
   theme: ChartTheme,
   args: Record<string, unknown>,
-  warnings: string[]
+  warnings: string[],
+  language = 'en'
 ): { datasets: ChartDataset[]; resolved: ResolvedChartType } {
   // A color that is not a CSS color is left out for the palette's, as the
   // dashboard leaves it, instead of drawn black.
@@ -350,5 +356,8 @@ export function paintedDatasets(
   const checked = datasets.map((ds, i) => withoutInvalidColors(ds, i, 'data', bad))
   warnings.push(...colorWarnings(bad, 'data'))
   const themed = applyThemePalette(checked, theme, chartTypeRaw, warnings)
-  return { datasets: themed, resolved: resolveChartType(chartTypeRaw, themed, labels, theme, args) }
+  return {
+    datasets: themed,
+    resolved: resolveChartType(chartTypeRaw, themed, labels, theme, args, language),
+  }
 }

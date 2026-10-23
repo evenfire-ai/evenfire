@@ -26,6 +26,7 @@ import {
   GFS_CACHE_FULL_GUIDANCE,
   GFS_DISK_FULL_GUIDANCE,
 } from '../../internalTools/gfsSpaceGuidance'
+import { zonedTimestamp } from '../../locale/localeFormat'
 import type { Attachment } from '../types'
 
 export interface TurnContextChannel {
@@ -75,6 +76,8 @@ export interface TurnContextReferencedFile {
 
 export interface TurnContextInput {
   date: Date
+  /** The host's IANA zone when it sets one: the date is written in it, else in UTC. */
+  timeZone?: string
   channel: TurnContextChannel
   cron?: TurnContextCron
   attachedFiles?: TurnContextAttachedFile[]
@@ -180,7 +183,10 @@ export function attachedFilesForTurnContext(
 }
 
 export function buildTurnContextBlock(input: TurnContextInput): string {
-  const lines: string[] = [`date: ${input.date.toISOString()}`, `channel: ${input.channel.type}`]
+  const date = input.timeZone
+    ? `${zonedTimestamp(input.timeZone, input.date)} (${input.timeZone})`
+    : input.date.toISOString()
+  const lines: string[] = [`date: ${date}`, `channel: ${input.channel.type}`]
   if (input.channel.sender) {
     lines.push(`sender: ${input.channel.sender}`)
   }

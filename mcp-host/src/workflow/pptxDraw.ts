@@ -1,5 +1,6 @@
 /** What every slide renderer shares: the drawing context, colors and fitted text. */
 import type PptxGenJS from 'pptxgenjs'
+import type { HostLocale } from '../locale/hostLocale'
 import { type PptxPicture } from './pptxInput'
 import { type Frame } from './pptxLayout'
 import { TEXT_INSET_X, TEXT_INSET_Y, fitText, lineHeightIn, truncateToLines } from './pptxText'
@@ -27,6 +28,8 @@ export interface DrawContext {
   pptx: PptxDeck
   warnings: string[]
   logo?: PptxPicture
+  /** The host language and time zone the cover date is written in. */
+  locale: HostLocale
 }
 
 /** Fit `text` to `box` at one of `sizes`; if it cannot fit, shorten it at the smallest. */

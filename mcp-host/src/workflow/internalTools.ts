@@ -67,7 +67,10 @@ const generateDocx: InternalToolDefinition = {
   },
 }
 
-const generateXlsx: InternalToolDefinition = { ...XLSX_TOOL, execute: runGenerateXlsx }
+const generateXlsx: InternalToolDefinition = {
+  ...XLSX_TOOL,
+  execute: (args, outputDir) => runGenerateXlsx(args, outputDir),
+}
 
 const generateDashboardTool: InternalToolDefinition = {
   ...DASHBOARD_TOOL,
@@ -79,7 +82,10 @@ const generateDashboardTool: InternalToolDefinition = {
   },
 }
 
-const generatePptxTool: InternalToolDefinition = { ...PPTX_TOOL, execute: runGeneratePptx }
+const generatePptxTool: InternalToolDefinition = {
+  ...PPTX_TOOL,
+  execute: (args, outputDir) => runGeneratePptx(args, outputDir),
+}
 
 /** All internal tools available to workflow steps. */
 export const INTERNAL_TOOLS: InternalToolDefinition[] = [

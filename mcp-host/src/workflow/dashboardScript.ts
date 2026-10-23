@@ -9,11 +9,13 @@
  * Animation is off: headless HTML-to-PDF converters print a chart the moment it
  * is created, which with animation on is at a fraction of its height.
  */
+import { safeJsonForScript } from './dashboardHtml'
 
 const PAGE_SCRIPT = String.raw`
 (function () {
   'use strict';
   var charts = __CHARTS__;
+  var page = __PAGE__;
   var root = document.documentElement;
   var instances = [];
   var COLOR_KEYS = ['backgroundColor', 'borderColor', 'pointBackgroundColor'];
@@ -131,6 +133,7 @@ const PAGE_SCRIPT = String.raw`
       responsive: true,
       maintainAspectRatio: false,
       animation: false,
+      locale: page.locale,
       indexAxis: spec.indexAxis,
       plugins: { legend: { display: spec.legend, labels: labels } },
       scales: scales,
@@ -225,7 +228,7 @@ const PAGE_SCRIPT = String.raw`
       // A fixed text: the KPI says its trend is missing without the error's details.
       var note = document.createElement('p');
       note.className = 'kpi-card__sparkline-note';
-      note.textContent = 'Trend could not be drawn';
+      note.textContent = page.trendNote;
       (canvas.parentNode || canvas).replaceWith(note);
     }
   }
@@ -266,10 +269,24 @@ const PAGE_SCRIPT = String.raw`
 })();
 `.trim()
 
+/** The host language Chart.js formats numbers in, and the note left by a sparkline it cannot draw. */
+export interface DashboardPage {
+  locale: string
+  trendNote: string
+}
+
 /**
  * The page script for a dashboard. `chartsJson` is the list of ClientChart
  * specs, already serialized so it cannot close the script element.
  */
-export function dashboardScript(chartsJson: string): string {
-  return PAGE_SCRIPT.replace('__CHARTS__', () => chartsJson)
+export function dashboardScript(
+  chartsJson: string,
+  page: DashboardPage = { locale: 'en', trendNote: 'Trend could not be drawn' }
+): string {
+  const values: Record<string, string> = {
+    __CHARTS__: chartsJson,
+    __PAGE__: safeJsonForScript(page),
+  }
+  // One pass, so a placeholder's name inside the chart data is never replaced.
+  return PAGE_SCRIPT.replace(/__CHARTS__|__PAGE__/g, name => values[name])
 }

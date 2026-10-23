@@ -4,6 +4,8 @@
  * written, so an unusable chart becomes a note in its own card and a warning
  * for the agent instead of an error that stops the page script.
  */
+import { documentLabel } from '../locale/labels'
+import { writtenNumber } from '../locale/localeFormat'
 import { colorWarnings, withoutInvalidColors } from './chartColors'
 import { ChartDataError, coerceNumber, normalizeChartData } from './chartData'
 import type { NormalizedDataset, NormalizedPoint } from './chartData'
@@ -135,6 +137,13 @@ function plainNumber(n: number): string {
   return String(Number(n.toPrecision(12)))
 }
 
+/** A figure the page prints itself, ungrouped, in the digits and decimal mark of `language`. */
+function shownNumber(n: number, language: string): string {
+  return language === 'en'
+    ? String(n)
+    : writtenNumber(n, language, { useGrouping: false, maximumFractionDigits: 20 })
+}
+
 function firstSeriesValues(ds: NormalizedDataset | undefined): number[] {
   return ((ds?.data ?? []) as Array<number | null>).map(v => (typeof v === 'number' ? v : 0))
 }
@@ -144,7 +153,8 @@ function translate(
   type: string,
   spec: Record<string, unknown>,
   labels: string[],
-  datasets: NormalizedDataset[]
+  datasets: NormalizedDataset[],
+  language: string
 ): Translated {
   const warnings: string[] = []
   const chart: Omit<ClientChart, 'id'> = {
@@ -239,11 +249,17 @@ function translate(
       }
       floats.push([0, total])
       colors.push('$chart-0')
-      chart.labels = [...labels, 'Total']
+      chart.labels = [...labels, documentLabel(language, 'total')]
       const table = {
         labels: chart.labels,
         series: [
-          { label: datasets[0]?.label ?? '', values: [...deltas.map(String), plainNumber(total)] },
+          {
+            label: datasets[0]?.label ?? '',
+            values: [
+              ...deltas.map(delta => shownNumber(delta, language)),
+              shownNumber(Number(plainNumber(total)), language),
+            ],
+          },
         ],
       }
       chart.datasets = [
@@ -293,10 +309,13 @@ function translate(
           borderColor: ['$chart-0', '$border'],
         },
       ]
-      chart.gauge = { value: readout(raw), max: readout(max) }
+      chart.gauge = {
+        value: shownNumber(Number(readout(raw)), language),
+        max: shownNumber(Number(readout(max)), language),
+      }
       const table = {
         // A gauge sent with no labels has only a numbered position, which names nothing.
-        labels: [Array.isArray(spec.labels) ? chart.labels[0] : '', 'Max'],
+        labels: [Array.isArray(spec.labels) ? chart.labels[0] : '', documentLabel(language, 'max')],
         series: [{ label: datasets[0]?.label ?? '', values: [chart.gauge.value, chart.gauge.max] }],
       }
       return { chart, warnings, table }
@@ -327,7 +346,12 @@ function largestMark(type: string, datasets: NormalizedDataset[]): number {
   return largest + HOVER_GROWTH + MARK_BORDER
 }
 
-function valueTable(type: string, labels: string[], datasets: NormalizedDataset[]): ValueTable {
+function valueTable(
+  type: string,
+  labels: string[],
+  datasets: NormalizedDataset[],
+  language: string
+): ValueTable {
   if (XY_TYPES.has(type)) {
     const points = Math.max(...datasets.map(ds => ds.data.length))
     return {
@@ -344,7 +368,9 @@ function valueTable(type: string, labels: string[], datasets: NormalizedDataset[
     labels,
     series: datasets.map(ds => ({
       label: ds.label ?? '',
-      values: (ds.data as Array<number | null>).map(v => (v === null ? '' : String(v))),
+      values: (ds.data as Array<number | null>).map(v =>
+        v === null ? '' : shownNumber(v, language)
+      ),
     })),
   }
 }
@@ -359,8 +385,8 @@ export interface PreparedChart {
   warnings: string[]
 }
 
-/** Validate one chart spec found at `where` in the arguments. */
-export function prepareDashboardChart(raw: unknown, where: string): PreparedChart {
+/** Validate one chart spec found at `where` in the arguments; its own labels are in `language`. */
+export function prepareDashboardChart(raw: unknown, where: string, language = 'en'): PreparedChart {
   if (!isRecord(raw)) {
     return {
       warnings: [],
@@ -415,14 +441,14 @@ export function prepareDashboardChart(raw: unknown, where: string): PreparedChar
           `Fewer ${what} read better.`
       )
     }
-    const translated = translate(type, raw, labels, datasets)
+    const translated = translate(type, raw, labels, datasets, language)
     warnings.push(...translated.warnings.map(w => `${where}: ${w}`))
     return {
       title,
       caption:
         type === 'gauge' && Array.isArray(raw.labels) ? optionalText(raw.labels[0]) : undefined,
       chart: translated.chart,
-      table: translated.table ?? valueTable(type, labels, datasets),
+      table: translated.table ?? valueTable(type, labels, datasets, language),
       warnings,
     }
   } catch (err) {
@@ -455,14 +481,16 @@ export class DashboardCharts {
   /**
    * @param drawInBrowser false when Chart.js is not inlined: cards then carry a table of their values.
    * @param notes where repairs (`warnings`) and charts that could not be drawn (`failures`) are reported.
+   * @param language the host language of the labels the charts add (Total, Max).
    */
   constructor(
     private readonly drawInBrowser: boolean,
-    private readonly notes: { warnings: string[]; failures: string[] }
+    private readonly notes: { warnings: string[]; failures: string[] },
+    private readonly language = 'en'
   ) {}
 
   card(raw: unknown, where: string, opts: { title?: string; tall?: boolean } = {}): string {
-    const prepared = prepareDashboardChart(raw, where)
+    const prepared = prepareDashboardChart(raw, where, this.language)
     this.notes.warnings.push(...prepared.warnings)
     const title = opts.title ?? prepared.title
     const heading = title ? `<h3 class="chart-card__title">${escapeHtml(title)}</h3>` : ''

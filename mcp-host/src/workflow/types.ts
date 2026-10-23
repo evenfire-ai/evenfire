@@ -197,6 +197,9 @@ export interface ArtifactMetadata {
   path: string
   sizeBytes: number
   createdAt: string
+  /** The host language and IANA time zone the document was written in. */
+  language?: string
+  timeZone?: string
 }
 
 export interface InternalToolResult {

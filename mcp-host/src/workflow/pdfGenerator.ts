@@ -1,6 +1,9 @@
 /** The PDF generator (clerum__generate_pdf): markdown body, tables and images typeset with pdfmake. */
 import * as path from 'path'
 import { type Content, type ContentText, type TDocumentDefinitions } from 'pdfmake/interfaces'
+import { type HostLocale, currentHostLocale } from '../locale/hostLocale'
+import { documentLabel } from '../locale/labels'
+import { writtenDate } from '../locale/localeFormat'
 import {
   artifactResult,
   claimOutputFile,
@@ -99,7 +102,8 @@ function runningLine(text: string, width: number, measure: UnitMeasure): string 
 
 export async function runGeneratePdf(
   args: Record<string, unknown>,
-  outputDir: string
+  outputDir: string,
+  locale: HostLocale = currentHostLocale()
 ): Promise<InternalToolResult> {
   try {
     const filename = outputFilename(args.filename, 'pdf', 'output')
@@ -256,11 +260,7 @@ export async function runGeneratePdf(
         })
       }
       content.push({
-        text: new Date().toLocaleDateString('en-US', {
-          year: 'numeric',
-          month: 'long',
-          day: 'numeric',
-        }),
+        text: writtenDate(locale),
         color: palette.muted,
         fontSize: 11,
         margin: [0, 0, 0, 0],
@@ -379,7 +379,7 @@ export async function runGeneratePdf(
 
     const docDef: TDocumentDefinitions = {
       info: {
-        title: title ?? 'Report',
+        title: title ?? documentLabel(locale.language, 'report'),
         ...(branding.companyName ? { creator: branding.companyName } : {}),
       },
       pageSize: 'A4',
@@ -446,7 +446,10 @@ export async function runGeneratePdf(
     enforceQuota(outputDir, pdfBuffer.byteLength, replacedBytes(target))
     writeArtifact(target, pdfBuffer)
 
-    return artifactResult(target, 'pdf', { warnings: [...warnings, ...typesetter.warnings()] })
+    return artifactResult(target, 'pdf', {
+      warnings: [...warnings, ...typesetter.warnings()],
+      locale,
+    })
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) }
   }

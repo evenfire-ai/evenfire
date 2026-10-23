@@ -13,6 +13,8 @@ import {
   TabStopType,
   TextRun,
 } from 'docx'
+import { type HostLocale, currentHostLocale } from '../locale/hostLocale'
+import { documentLabel, numberedLabelParts } from '../locale/labels'
 import {
   artifactResult,
   claimOutputFile,
@@ -38,7 +40,8 @@ import { buildDocxTable, docxSections } from './docxTable'
 import { htmlToPlainText } from './inlineMarkup'
 import { choose } from './ownEntry'
 import { normalizeTableRows } from './tableRows'
-import { documentEastAsianScript, eastAsianScript } from './textScript'
+import { bidiLanguage, isRtlText } from './textDirection'
+import { documentEastAsianScript, eastAsianScript, proofingFor } from './textScript'
 import type { InternalToolResult } from './types'
 
 /**
@@ -74,7 +77,8 @@ interface DocxTableArg {
 
 export async function runGenerateDocx(
   args: Record<string, unknown>,
-  outputDir: string
+  outputDir: string,
+  locale: HostLocale = currentHostLocale()
 ): Promise<InternalToolResult> {
   try {
     const filename = outputFilename(args.filename, 'docx', 'output')
@@ -90,6 +94,8 @@ export async function runGenerateDocx(
         choose(args.palette, Object.keys(DOCX_PALETTES), 'default', 'palette', warnings)
       ]
     const numbering = new DocxListNumbering()
+    // Right-to-left text in the host's script is spell-checked in its language.
+    const proofing = proofingFor(locale.language)
     const imageBox = { width: DOCX_MAX_IMAGE_WIDTH, height: DOCX_MAX_IMAGE_HEIGHT }
     let embedded = 0
     let imageLeftOut = false
@@ -124,7 +130,8 @@ export async function runGenerateDocx(
           children: textRuns(
             title,
             { bold: true, color: docxHex(palette.primary), size: 48 },
-            eastAsianScript(title)
+            eastAsianScript(title),
+            proofing
           ),
         })
       )
@@ -137,7 +144,8 @@ export async function runGenerateDocx(
           children: textRuns(
             headline,
             { italics: true, color: docxHex(palette.muted), size: 26 },
-            eastAsianScript(headline)
+            eastAsianScript(headline),
+            proofing
           ),
         })
       )
@@ -148,6 +156,7 @@ export async function runGenerateDocx(
         palette,
         numbering,
         warnings,
+        proofing,
         image: (file, alt) =>
           embed(file, 'body', imageBox, {
             altText: alt,
@@ -171,7 +180,9 @@ export async function runGenerateDocx(
       tableTexts.push(...headers)
       for (const row of rows) tableTexts.push(...row)
       const layout = spec.layout === 'minimal' || spec.layout === 'grid' ? spec.layout : 'striped'
-      children.push(buildDocxTable(headers, rows, palette, layout, warnings, `tables[${i}]`))
+      children.push(
+        buildDocxTable(headers, rows, palette, layout, warnings, `tables[${i}]`, proofing)
+      )
       children.push(new Paragraph({ children: [new TextRun({ text: '' })] }))
       tablesWritten++
     })
@@ -214,6 +225,13 @@ export async function runGenerateDocx(
       footerLines[DOCX_MAX_FOOTER_LINES - 1] += '...'
     }
     const [firstFooterLine, ...moreFooterLines] = footerLines
+    const [pageBefore, pageAfter] = numberedLabelParts(locale.language, 'page')
+    // Word keeps the page numbers and the slash inside a right-to-left label
+    // only when their runs are right to left as well.
+    const pageLabel = `${pageBefore}${pageAfter}`
+    const pageDirection = isRtlText(pageLabel)
+      ? { rightToLeft: true, language: { bidirectional: bidiLanguage(pageLabel, proofing) } }
+      : {}
     const headerMuted = { color: docxHex(palette.muted), size: 18 }
     const companyName = branding.companyName ?? ''
     // The page number and the title sit at the right margin, on a right tab
@@ -226,15 +244,26 @@ export async function runGenerateDocx(
             alignment: AlignmentType.LEFT,
             tabStops,
             children: [
-              ...textRuns(firstFooterLine, footerMuted, eastAsianScript(firstFooterLine)),
+              ...textRuns(firstFooterLine, footerMuted, eastAsianScript(firstFooterLine), proofing),
               new TextRun({ text: '\t', ...footerMuted }),
-              new TextRun({ children: ['Page ', PageNumber.CURRENT], ...footerMuted }),
-              new TextRun({ children: [' / ', PageNumber.TOTAL_PAGES], ...footerMuted }),
+              ...(pageBefore
+                ? textRuns(pageBefore, footerMuted, eastAsianScript(pageBefore), proofing)
+                : []),
+              new TextRun({ children: [PageNumber.CURRENT], ...footerMuted, ...pageDirection }),
+              ...(pageAfter
+                ? textRuns(pageAfter, footerMuted, eastAsianScript(pageAfter), proofing)
+                : []),
+              new TextRun({
+                children: [' / ', PageNumber.TOTAL_PAGES],
+                ...footerMuted,
+                ...pageDirection,
+              }),
               ...(moreFooterLines.length > 0
                 ? textRuns(
                     `\n${moreFooterLines.join('\n')}`,
                     footerMuted,
-                    eastAsianScript(moreFooterLines.join(' '))
+                    eastAsianScript(moreFooterLines.join(' ')),
+                    proofing
                   ).slice(1)
                 : []),
             ],
@@ -247,9 +276,9 @@ export async function runGenerateDocx(
             alignment: AlignmentType.LEFT,
             tabStops,
             children: [
-              ...textRuns(companyName, headerMuted, eastAsianScript(companyName)),
+              ...textRuns(companyName, headerMuted, eastAsianScript(companyName), proofing),
               new TextRun({ text: '\t', ...headerMuted }),
-              ...textRuns(title ?? '', headerMuted, eastAsianScript(title ?? '')),
+              ...textRuns(title ?? '', headerMuted, eastAsianScript(title ?? ''), proofing),
             ],
           }),
         ],
@@ -267,7 +296,7 @@ export async function runGenerateDocx(
     )
     const doc = new DocxDocument({
       creator: branding.companyName ?? '',
-      title: title ?? 'Report',
+      title: title ?? documentLabel(locale.language, 'report'),
       description: headline,
       styles: {
         default: {
@@ -304,7 +333,7 @@ export async function runGenerateDocx(
     enforceQuota(outputDir, buffer.byteLength, replacedBytes(target))
     writeArtifact(target, buffer)
 
-    return artifactResult(target, 'docx', { warnings: [...new Set(warnings)] })
+    return artifactResult(target, 'docx', { warnings: [...new Set(warnings)], locale })
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) }
   }

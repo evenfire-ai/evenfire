@@ -72,6 +72,18 @@ describe('boilerplateTexts', () => {
     expect(texts.some(text => /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(text))).toBe(false)
   })
 
+  it("keeps only the language in use, building another language's reference on its own", async () => {
+    const { boilerplateTexts } = await freshModule()
+    const es = { language: 'es', timeZone: 'UTC', languageSet: true, timeZoneSet: false }
+    const de = { ...es, language: 'de' }
+    expect(await builtTexts(() => boilerplateTexts('docx', es))).not.toEqual([])
+    expect(await builtTexts(() => boilerplateTexts('docx', de))).not.toEqual([])
+    expect(control.docxBuilds).toBe(2)
+    // Spanish was dropped when German was built, so asking for it builds it again.
+    await builtTexts(() => boilerplateTexts('docx', es))
+    expect(control.docxBuilds).toBe(3)
+  })
+
   it('tries a failed build again once REFERENCE_RETRY_MS has passed, not on every call', async () => {
     const { REFERENCE_RETRY_MS, boilerplateTexts } = await freshModule()
     const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000)
