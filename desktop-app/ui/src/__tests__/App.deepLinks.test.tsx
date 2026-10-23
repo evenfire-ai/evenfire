@@ -1829,6 +1829,93 @@ describe('App deep-link orchestration', () => {
     })
   })
 
+  it('waits for a pending origin release before rolling back an unavailable cross-team link', async () => {
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.apps,
+    })
+
+    let holdRelease = false
+    let originLaunchId: string | null = null
+    let deliverHeldRelease: (() => void) | null = null
+    const registerReleased = main.bridge.onReleased.getMockImplementation()
+    if (!registerReleased) throw new Error('the main fake has no release listener producer')
+    main.bridge.onReleased.mockImplementation(listener =>
+      registerReleased(event => {
+        if (holdRelease && event.reason === 'closed' && event.launchId === originLaunchId) {
+          deliverHeldRelease = () => listener(event)
+          return
+        }
+        listener(event)
+      })
+    )
+
+    render(<App />)
+    await launchAppFromSidebar()
+    originLaunchId = main.live()?.launchId ?? null
+    if (!originLaunchId) throw new Error('the origin app did not mount')
+    main.navigate('/tickets/saved')
+    await act(async () => emitCommand?.('app.backToApps'))
+    await waitFor(() => expect(embedState().owner).toBeNull())
+    await waitFor(() => expect(appTabs()[0]?.app?.savedRoutePath).toBe('/tickets/saved'))
+
+    await selectTab(0)
+    await selectTab(1)
+    await waitForAppOpen(2)
+    await waitFor(() => expect(main.live()?.routePath).toBe('/tickets/saved'))
+    originLaunchId = main.live()?.launchId ?? null
+    if (!originLaunchId) throw new Error('the origin app did not remount')
+    main.navigate('/tickets/live')
+    expect(appTabs()[0]?.app?.savedRoutePath).toBe('/tickets/saved')
+    holdRelease = true
+    await act(async () => emitCommand?.('app.backToApps'))
+    await waitFor(() => expect(embedState().owner).toBeNull())
+    await waitFor(() => expect(deliverHeldRelease).not.toBeNull())
+    expect(embedState().views.get(originLaunchId)?.phase).toBe('closeRequested')
+
+    let resolveTargetApps!: (value: { apps: (typeof READY_APP)[] }) => void
+    const targetApps = new Promise<{ apps: (typeof READY_APP)[] }>(resolve => {
+      resolveTargetApps = resolve
+    })
+    const listAppsCallsBeforeLink = listApps.mock.calls.length
+    listApps.mockImplementationOnce(() => targetApps)
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'missing',
+        path: '/linked',
+        teamId: 'team-b',
+      })
+    )
+    if (!target) throw new Error('the shared producer rejected the unavailable app link fixture')
+    const link = new SandboxUiDeepLinkQueue().enqueue(target)
+
+    act(() => emitDeepLink?.(link))
+    await confirmPendingAppLink()
+    await waitFor(() =>
+      expect(
+        listApps.mock.calls.length === listAppsCallsBeforeLink + 1 ||
+          embedState().handoffs.length > 0
+      ).toBe(true)
+    )
+
+    await act(async () => {
+      deliverHeldRelease?.()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(appTabs()[0]?.app?.savedRoutePath).toBe('/tickets/live'))
+    await waitFor(() => expect(listApps).toHaveBeenCalledTimes(listAppsCallsBeforeLink + 1))
+    expect(currentController.getCurrentTeamId()).toBe('team-b')
+    resolveTargetApps({ apps: [] })
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+
+    expect(currentController.getCurrentTeamId()).toBe('team-a')
+    expect(appTabs()[0]?.app?.savedRoutePath).toBe('/tickets/live')
+    expect(openSandboxUi()).toHaveBeenCalledTimes(2)
+    expect(main.live()).toBeNull()
+  })
+
   it('resolves an unavailable cross-team target without relaunching a closed origin app', async () => {
     listApps.mockResolvedValue({ apps: [READY_APP] })
     currentController = makeController({

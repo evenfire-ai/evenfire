@@ -141,7 +141,7 @@ type PendingSandboxUiDeepLinkLaunch = {
 }
 
 type EmbedHandoffWaiter = {
-  resolve: (released: boolean) => void
+  resolve: (outcome: 'ready' | 'failed') => void
   ownerLaunchId: LaunchId | null
   originReleased: boolean
 }
@@ -453,12 +453,12 @@ export function App() {
       onHandoffReady: requestId => {
         const waiter = handoffWaitersRef.current.get(requestId)
         handoffWaitersRef.current.delete(requestId)
-        waiter?.resolve(waiter.originReleased)
+        waiter?.resolve('ready')
       },
       onHandoffFailed: requestId => {
         const waiter = handoffWaitersRef.current.get(requestId)
         handoffWaitersRef.current.delete(requestId)
-        waiter?.resolve(false)
+        waiter?.resolve('failed')
       },
       onOwnerRefreshError: event =>
         setEmbedRefreshError({ launchId: event.launchId, message: event.message }),
@@ -2023,20 +2023,24 @@ export function App() {
   > => {
     const lifetime = embedLifetimeRef.current!
     if (lifetime.disposed) return 'failed'
-    const ownerLaunchId = embed.getSnapshot().owner
-    if (ownerLaunchId === null) return 'no-owner'
+    const snapshot = embed.getSnapshot()
+    const ownerLaunchId = snapshot.owner
+    if (ownerLaunchId === null && snapshot.views.size === 0) return 'no-owner'
     const requestId = ++handoffSeqRef.current
-    const ready = new Promise<boolean>(resolve =>
-      handoffWaitersRef.current.set(requestId, {
-        resolve,
-        ownerLaunchId,
-        originReleased: false,
-      })
-    )
+    let resolveReady!: (outcome: 'ready' | 'failed') => void
+    const ready = new Promise<'ready' | 'failed'>(resolve => (resolveReady = resolve))
+    const waiter: EmbedHandoffWaiter = {
+      resolve: resolveReady,
+      ownerLaunchId,
+      originReleased: false,
+    }
+    handoffWaitersRef.current.set(requestId, waiter)
     embed.dispatch({ type: 'handoff', requestId })
-    const released = await Promise.race([ready, lifetime.unmounted.then(() => false)])
+    const outcome = await Promise.race([ready, lifetime.unmounted.then(() => 'failed' as const)])
     handoffWaitersRef.current.delete(requestId)
-    return released && !lifetime.disposed ? 'closed' : 'failed'
+    if (outcome !== 'ready' || lifetime.disposed) return 'failed'
+    if (ownerLaunchId === null) return 'no-owner'
+    return waiter.originReleased ? 'closed' : 'failed'
   }, [embed])
 
   // What a deep link does once its launch settled. Mounted: done. Failed: retried
@@ -2380,8 +2384,10 @@ export function App() {
               await acknowledgeSandboxUiDeepLink(pending.link.id)
               return
             }
-            if (handoff === 'closed') {
-              sandboxUiDeepLinkClosedOriginEmbedsRef.current.add(pending.link.id)
+            if (handoff === 'closed' || handoff === 'no-owner') {
+              if (handoff === 'closed') {
+                sandboxUiDeepLinkClosedOriginEmbedsRef.current.add(pending.link.id)
+              }
               originNavigation = vm.captureWorkspaceNavigation()
               sandboxUiDeepLinkOriginNavigationByIdRef.current.set(
                 pending.link.id,
