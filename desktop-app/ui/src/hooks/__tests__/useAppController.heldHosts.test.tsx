@@ -317,6 +317,11 @@ describe('useAppController held Hosts', () => {
     })
     expect(handle.switchTeam).toHaveBeenCalledWith('team-2')
     await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
+    // After the switch the Host may be named by its team-2 name or its ref, so every
+    // verification toast counts, not one display name.
+    const verifyToasts = () =>
+      toastTexts(app.result.current).filter(text => text.startsWith('Could not verify access to '))
+    const verifyToastsBefore = verifyToasts()
 
     await act(async () => {
       pendingVerification.reject(await ipcGenericForbidden('rpc:listSessions'))
@@ -329,7 +334,7 @@ describe('useAppController held Hosts', () => {
       agentRef: HOST_B,
       status: 403,
     })
-    expect(toastTexts(app.result.current)).not.toContain(`Could not verify access to ${DISPLAY_B}.`)
+    expect(verifyToasts()).toEqual(verifyToastsBefore)
   })
 
   it.each([
