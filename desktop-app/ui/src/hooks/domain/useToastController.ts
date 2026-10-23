@@ -1,23 +1,31 @@
 import { useCallback, useEffect, useState } from 'react'
 import { DEFAULT_TOAST_DURATION_MS, ERROR_TOAST_DURATION_MS } from '@constants/toasts'
-import type { ToastMessage, Tone } from '../../uiTypes'
+import type { ToastMessage, ToastMessageAction, Tone } from '../../uiTypes'
+
+export interface PushToastOptions {
+  durationMs?: number
+  action?: ToastMessageAction
+}
 
 export function useToastController() {
   const [toasts, setToasts] = useState<ToastMessage[]>([])
 
-  const pushToast = useCallback(
-    (message: string, tone: Tone, options: { durationMs?: number } = {}) => {
-      if (!message.trim()) return
-      const toast: ToastMessage = {
-        id: Date.now() + Math.floor(Math.random() * 1000),
-        text: message,
-        tone,
-        durationMs: options.durationMs,
-      }
-      setToasts(previous => [...previous.slice(-2), toast])
-    },
-    []
-  )
+  const pushToast = useCallback((message: string, tone: Tone, options: PushToastOptions = {}) => {
+    if (!message.trim()) return
+    const toast: ToastMessage = {
+      id: Date.now() + Math.floor(Math.random() * 1000),
+      text: message,
+      tone,
+      durationMs: options.durationMs,
+      action: options.action,
+    }
+    setToasts(previous => [...previous.slice(-2), toast])
+  }, [])
+
+  /** Removes a toast immediately (used after its inline action ran). */
+  const dismissToast = useCallback((id: number) => {
+    setToasts(previous => previous.filter(toast => toast.id !== id))
+  }, [])
 
   useEffect(() => {
     if (!toasts.length) return
@@ -33,5 +41,5 @@ export function useToastController() {
     return () => window.clearTimeout(timeoutId)
   }, [toasts])
 
-  return { toasts, pushToast }
+  return { toasts, pushToast, dismissToast }
 }
