@@ -6,6 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
+import { boundToolsCalledForStatus } from '@clerum/workflow-runtime-core'
 import {
   type AuthenticatedRequest,
   createWorkflowEndpointHandlers,
@@ -356,6 +357,101 @@ describe('postStepStatus — step-level update', () => {
     const result = step.toolsCalled?.[0]?.result
     expect(result).toMatchObject({ truncated: true })
     expect((result as { preview?: string }).preview).toHaveLength(1024)
+  })
+
+  it('stores a coordinator-bounded toolsCalled report exactly like the raw report', async () => {
+    const toolsCalled: Array<Record<string, unknown>> = Array.from({ length: 60 }, (_, i) => ({
+      serverName: 'git',
+      toolName: 'read_file',
+      args: { path: `src/file-${i}.ts`, padding: 'p'.repeat(i % 2 ? 2048 : 10) },
+      result: [{ type: 'text', text: 'x'.repeat(i % 3 ? 4096 : 10) }],
+      durationMs: i,
+    }))
+    // An artifact past the 50 stored calls must still reach status.artifacts.
+    toolsCalled[55] = {
+      serverName: 'clerum',
+      toolName: 'generate_docx',
+      args: { path: 'report', padding: 'c'.repeat(4096) },
+      result: {
+        success: true,
+        artifact: {
+          name: 'report.docx',
+          format: 'docx',
+          path: '/output/report.docx',
+          sizeBytes: 2048,
+          createdAt: '2026-10-16T00:00:00.000Z',
+        },
+      },
+      durationMs: 55,
+    }
+    const stored = async (calls: unknown[]) => {
+      const customApi = makeCustomApi({
+        getNamespacedCustomObject: vi.fn().mockResolvedValue({
+          metadata: { name: 'my-recipe', resourceVersion: '1' },
+          spec: { steps: [{ id: 's1' }] },
+          status: { workflowExecution: { phase: 'running', attempt: 1 }, steps: [], artifacts: [] },
+        }),
+      })
+      const h = createWorkflowEndpointHandlers(customApi, 'sandbox-recipes')
+      const result = await h.postStepStatus('my-recipe', makeClaims(), {
+        stepId: 's1',
+        phase: 'completed',
+        toolsCalled: calls as never,
+      })
+      expect(result.status).toBe(200)
+      const patchOps = getStatusPatchOps(customApi)
+      return {
+        toolsCalled: (
+          patchOps.find(op => op.path === '/status/steps/-')?.value as {
+            toolsCalled?: unknown[]
+          }
+        ).toolsCalled,
+        artifact: patchOps.find(op => op.path === '/status/artifacts/-')?.value,
+      }
+    }
+
+    const fromRaw = await stored(toolsCalled)
+    const fromBounded = await stored(boundToolsCalledForStatus(toolsCalled))
+
+    expect(fromRaw.artifact).toMatchObject({ name: 'report.docx' })
+    expect(fromBounded).toEqual(fromRaw)
+  })
+
+  it('still extracts an artifact whose tool result is too large for a preview', async () => {
+    const customApi = makeCustomApi({
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: { name: 'my-recipe', resourceVersion: '1' },
+        spec: { steps: [{ id: 's1' }] },
+        status: { workflowExecution: { phase: 'running', attempt: 1 }, steps: [], artifacts: [] },
+      }),
+    })
+    const h = createWorkflowEndpointHandlers(customApi, 'sandbox-recipes')
+    const artifact = {
+      name: 'big.pdf',
+      format: 'pdf',
+      path: '/output/big.pdf',
+      sizeBytes: 4096,
+      createdAt: '2026-10-16T00:00:00.000Z',
+    }
+
+    const result = await h.postStepStatus('my-recipe', makeClaims(), {
+      stepId: 's1',
+      phase: 'completed',
+      toolsCalled: boundToolsCalledForStatus([
+        {
+          serverName: 'clerum',
+          toolName: 'generate_pdf',
+          args: {},
+          result: { success: true, artifact, content: 'q'.repeat(5_000) },
+          durationMs: 1,
+        },
+      ]) as never,
+    })
+
+    expect(result.status).toBe(200)
+    expect(
+      getStatusPatchOps(customApi).find(op => op.path === '/status/artifacts/-')?.value
+    ).toEqual(artifact)
   })
 
   it('patches only the touched step so stale reads cannot overwrite sibling step status', async () => {
