@@ -4,6 +4,9 @@
 !packages/workflow-recipe-capability-policy/**
 !packages/display-field/
 !packages/display-field/**
+!packages/host-locale/
+!packages/host-locale/**
+packages/host-locale/node_modules/
 !packages/frontend-components/
 !packages/frontend-components/package.json
 !packages/frontend-components/src/
@@ -39,3 +42,8 @@ control-ui/node_modules/
 control-ui/coverage/
 control-ui/playwright-report/
 control-ui/test-results/
+**/.dev-keys/
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
