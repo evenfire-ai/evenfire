@@ -2015,13 +2015,16 @@ export function App() {
   // A cross-team link switches teams, which does not end the embed session, so
   // the live view is handed off first: ownership drops and the switch waits
   // until main has released every view this renderer still had, each leaving
-  // its route on its tab. Resolves `false` when App went away meanwhile.
+  // its route on its tab. No owner is a successful no-op; `closed` means this
+  // transaction released the live owner, while `failed` keeps the switch closed.
   const handoffSeqRef = React.useRef(0)
-  const handOffEmbedBeforeTeamSwitch = React.useCallback(async (): Promise<boolean> => {
+  const handOffEmbedBeforeTeamSwitch = React.useCallback(async (): Promise<
+    'closed' | 'no-owner' | 'failed'
+  > => {
     const lifetime = embedLifetimeRef.current!
-    if (lifetime.disposed) return false
+    if (lifetime.disposed) return 'failed'
     const ownerLaunchId = embed.getSnapshot().owner
-    if (ownerLaunchId === null) return false
+    if (ownerLaunchId === null) return 'no-owner'
     const requestId = ++handoffSeqRef.current
     const ready = new Promise<boolean>(resolve =>
       handoffWaitersRef.current.set(requestId, {
@@ -2033,7 +2036,7 @@ export function App() {
     embed.dispatch({ type: 'handoff', requestId })
     const released = await Promise.race([ready, lifetime.unmounted.then(() => false)])
     handoffWaitersRef.current.delete(requestId)
-    return released && !lifetime.disposed
+    return released && !lifetime.disposed ? 'closed' : 'failed'
   }, [embed])
 
   // What a deep link does once its launch settled. Mounted: done. Failed: retried
@@ -2364,12 +2367,12 @@ export function App() {
         }
         if (pending.link.teamId && pending.link.teamId !== currentTeamId) {
           if (originApp) {
-            const originEmbedClosed = await handOffEmbedBeforeTeamSwitch()
+            const handoff = await handOffEmbedBeforeTeamSwitch()
             if (!vm.isNavigationIntentCurrent(navigationIntentSequence)) {
               await acknowledgeSandboxUiDeepLink(pending.link.id)
               return
             }
-            if (!originEmbedClosed) {
+            if (handoff === 'failed') {
               vm.pushToast(
                 'Could not open app link: the current app could not be safely closed.',
                 'error'
@@ -2377,9 +2380,14 @@ export function App() {
               await acknowledgeSandboxUiDeepLink(pending.link.id)
               return
             }
-            sandboxUiDeepLinkClosedOriginEmbedsRef.current.add(pending.link.id)
-            originNavigation = vm.captureWorkspaceNavigation()
-            sandboxUiDeepLinkOriginNavigationByIdRef.current.set(pending.link.id, originNavigation)
+            if (handoff === 'closed') {
+              sandboxUiDeepLinkClosedOriginEmbedsRef.current.add(pending.link.id)
+              originNavigation = vm.captureWorkspaceNavigation()
+              sandboxUiDeepLinkOriginNavigationByIdRef.current.set(
+                pending.link.id,
+                originNavigation
+              )
+            }
           }
           try {
             const didSwitchTeam = await vm.handleEnsureTeamContext({

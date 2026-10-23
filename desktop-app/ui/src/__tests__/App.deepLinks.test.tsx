@@ -33,6 +33,8 @@ import { App } from '@/App'
 import type { GfsResourceDeepLinkEnvelope, SandboxUiDeepLinkEnvelope } from '@/App.types'
 import type { DesktopCommandId } from '../../../src/desktopCommands'
 import { GfsResourceDeepLinkQueue } from '../../../src/gfsResourceDeepLinkQueue'
+import { SandboxUiDeepLinkQueue } from '../../../src/sandboxUiDeepLinkQueue'
+import { buildSandboxUiDeepLink, parseSandboxUiDeepLink } from '../../../src/sandboxUiDeepLinks'
 import { type SandboxUiMainFake, createSandboxUiMainFake } from './__fixtures__/sandboxUiMainFake'
 
 // The sandbox-ui main fake runs the real main process; these are the
@@ -1763,7 +1765,71 @@ describe('App deep-link orchestration', () => {
     })
   })
 
-  it('does not relaunch a catalog app after its embed was already closed', async () => {
+  it('opens a valid cross-team app link after the origin embed was already closed', async () => {
+    const targetApp = {
+      appRef: 'ns/target',
+      title: 'Target App',
+      defaultPath: '/',
+      ready: true,
+      phase: 'active',
+    }
+    const targetPath = '/boards/linked'
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.apps,
+    })
+    render(<App />)
+    await launchAppFromSidebar()
+    main.navigate('/tickets/saved')
+    await act(async () => emitCommand?.('app.backToApps'))
+    await waitFor(() => expect(embedState().owner).toBeNull())
+    await waitFor(() => expect(appTabs()[0]?.app?.savedRoutePath).toBe('/tickets/saved'))
+    expect(main.live()).toBeNull()
+
+    // Main's producer parses a protocol URL, queues that target and emits the
+    // resulting envelope on sandboxUi:deepLink.
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'target',
+        path: targetPath,
+        teamId: 'team-b',
+      })
+    )
+    if (!target) throw new Error('The shared producer rejected the valid app link fixture')
+    const link = new SandboxUiDeepLinkQueue().enqueue(target)
+    const listAppsCallsBeforeLink = listApps.mock.calls.length
+    listApps.mockResolvedValue({ apps: [targetApp] })
+
+    act(() => emitDeepLink?.(link))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+
+    expect(currentController.handleEnsureTeamContext).toHaveBeenCalledWith({
+      teamId: 'team-b',
+      announce: true,
+    })
+    expect(currentController.getCurrentTeamId()).toBe('team-b')
+    expect(listApps).toHaveBeenCalledTimes(listAppsCallsBeforeLink + 1)
+    await waitForAppOpen(2)
+    expect(main.openCall(1)).toMatchObject({
+      recipeNs: 'ns',
+      recipeName: 'target',
+      routePath: targetPath,
+    })
+    expect(main.live()).toEqual({
+      launchId: main.openCall(1).launchId,
+      appRef: targetApp.appRef,
+      routePath: targetPath,
+    })
+    expect(activeWorkspaceTab(currentController.workspaceTabs)).toMatchObject({
+      kind: 'app',
+      app: { appRef: targetApp.appRef },
+    })
+  })
+
+  it('resolves an unavailable cross-team target without relaunching a closed origin app', async () => {
     listApps.mockResolvedValue({ apps: [READY_APP] })
     currentController = makeController({
       initialExperienceLoading: false,
@@ -1777,13 +1843,26 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(appTabs()[0]?.app?.savedRoutePath).toBe('/tickets/saved'))
     expect(main.live()).toBeNull()
     const listAppsCallsBeforeLink = listApps.mock.calls.length
+    listApps.mockResolvedValue({ apps: [] })
 
     act(() => emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' }))
     await confirmPendingAppLink()
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
 
-    expect(currentController.handleEnsureTeamContext).not.toHaveBeenCalled()
-    expect(listApps).toHaveBeenCalledTimes(listAppsCallsBeforeLink)
+    expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(1, {
+      teamId: 'team-b',
+      announce: true,
+    })
+    expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(2, {
+      teamId: 'team-a',
+      announce: true,
+    })
+    expect(listApps).toHaveBeenCalledTimes(listAppsCallsBeforeLink + 1)
+    expect(currentController.getCurrentTeamId()).toBe('team-a')
+    expect(currentController.pushToast).toHaveBeenCalledWith(
+      expect.stringContaining("You don't have access to this app in the linked team"),
+      'error'
+    )
     expect(openSandboxUi()).toHaveBeenCalledOnce()
     expect(main.live()).toBeNull()
     expect(appTabs()[0]?.app?.savedRoutePath).toBe('/tickets/saved')
