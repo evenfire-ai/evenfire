@@ -3730,6 +3730,58 @@ describe('App deep-link orchestration', () => {
     expect(ensureTeamContext).toHaveBeenCalledTimes(2)
   })
 
+  it('preserves the live origin app when native close rejects before a cross-team handoff', async () => {
+    const ensureTeamContext = vi.fn(async () => false)
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      handleEnsureTeamContext: ensureTeamContext,
+    })
+    render(<App />)
+    await launchAppFromSidebar()
+
+    // Drive a live route through App's tab-deactivation reader and restore the
+    // same embed before the native close bridge rejects its handoff request.
+    getSandboxUiLocation.mockResolvedValue({ appRef: 'ns/app', routePath: '/tickets/live' })
+    await selectTab(0)
+    await waitFor(() => expect(appTabs()[0]?.app?.savedRoutePath).toBe('/tickets/live'))
+    await selectTab(1)
+    await waitFor(() =>
+      expect(sandboxUiPageHarness.props?.shortcutApp?.routePath).toBe('/tickets/live')
+    )
+
+    const originWorkspace = currentController.workspaceTabs
+    const originRequestId = sandboxUiPageHarness.props?.shortcutOpenRequestId
+    expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe('ns/app')
+    expect(originRequestId).toBeDefined()
+
+    closeSandboxUi.mockRejectedValue(new Error('native close rejected'))
+    closeSandboxUi.mockClear()
+    getSandboxUiLocation.mockClear()
+    ensureTeamContext.mockClear()
+    listApps.mockClear()
+    act(() => emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' }))
+    await confirmPendingAppLink()
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(closeSandboxUi).toHaveBeenCalledOnce()
+    expect(getSandboxUiLocation).toHaveBeenCalledOnce()
+    expect(ensureTeamContext).not.toHaveBeenCalled()
+    expect(listApps).not.toHaveBeenCalled()
+    expect(currentController.pushToast).toHaveBeenCalledWith(
+      'Could not open app link: native close rejected',
+      'error'
+    )
+    expect(currentController.workspaceTabs).toEqual(originWorkspace)
+    expect(activeWorkspaceTab(currentController.workspaceTabs)?.kind).toBe('app')
+    expect(activeWorkspaceTab(currentController.workspaceTabs)?.app?.savedRoutePath).toBe(
+      '/tickets/live'
+    )
+    expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe('ns/app')
+    expect(sandboxUiPageHarness.props?.shortcutApp?.routePath).toBe('/tickets/live')
+    expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBe(originRequestId)
+  })
+
   it('keeps two tabs of the same app on their own routes when alternating (§5)', async () => {
     currentController = makeController({ initialExperienceLoading: false })
     listApps.mockResolvedValue({ apps: [READY_APP] })
