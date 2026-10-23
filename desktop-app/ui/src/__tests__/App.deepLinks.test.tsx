@@ -3626,11 +3626,20 @@ describe('App deep-link orchestration', () => {
   })
 
   it('preserves the live app after an unavailable same-team link', async () => {
-    const liveRouteApp = { ...READY_APP, defaultPath: '/tickets/live' }
-    listApps.mockResolvedValue({ apps: [liveRouteApp] })
+    listApps.mockResolvedValue({ apps: [READY_APP] })
     currentController = makeController({ initialExperienceLoading: false })
     render(<App />)
     await launchAppFromSidebar()
+
+    // Drive a non-default route through the same native-location producer App
+    // reads when the real embed is deactivated, then remount that owning tab.
+    getSandboxUiLocation.mockResolvedValue({ appRef: 'ns/app', routePath: '/tickets/live' })
+    await selectTab(0)
+    await waitFor(() => expect(appTabs()[0]?.app?.savedRoutePath).toBe('/tickets/live'))
+    await selectTab(1)
+    await waitFor(() =>
+      expect(sandboxUiPageHarness.props?.shortcutApp?.routePath).toBe('/tickets/live')
+    )
 
     const originWorkspace = currentController.workspaceTabs
     const originTab = activeWorkspaceTab(originWorkspace)
@@ -3638,7 +3647,7 @@ describe('App deep-link orchestration', () => {
     if (originTab?.kind !== 'app') throw new Error('The app picker did not create an app tab')
     const originRequestId = sandboxUiPageHarness.props?.shortcutOpenRequestId
     expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe('ns/app')
-    expect(sandboxUiPageHarness.props?.shortcutApp?.defaultPath).toBe('/tickets/live')
+    expect(sandboxUiPageHarness.props?.shortcutApp?.routePath).toBe('/tickets/live')
 
     closeSandboxUi.mockClear()
     getSandboxUiLocation.mockClear()
@@ -3651,7 +3660,7 @@ describe('App deep-link orchestration', () => {
       'error'
     )
     expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe('ns/app')
-    expect(sandboxUiPageHarness.props?.shortcutApp?.defaultPath).toBe('/tickets/live')
+    expect(sandboxUiPageHarness.props?.shortcutApp?.routePath).toBe('/tickets/live')
     expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBe(originRequestId)
     expect(currentController.workspaceTabs).toEqual(originWorkspace)
     expect(closeSandboxUi).not.toHaveBeenCalled()
