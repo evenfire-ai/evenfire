@@ -316,6 +316,40 @@ if run_fixture active-env-order-mismatch >/dev/null; then
 fi
 mv "$fixture_root/reordered-matched.json" "$capture"
 
+# The API server stores a defaulted Job, not the submitted manifest. These are the
+# fields a Kubernetes v1.35.1 apiserver added or dropped for this Job under
+# `create --dry-run=server` (T2 run1 on 92f6dc886 died on them): defaults are added
+# and empty env values are omitted. The stored Job must still be reused; a
+# non-default podReplacementPolicy must still be rejected.
+server_default_job() {
+  ruby -rjson -e '
+    job = JSON.parse(File.read(ARGV.fetch(0)))
+    spec = job["spec"]
+    spec.merge!("completionMode" => "NonIndexed", "completions" => 1, "manualSelector" => false,
+                "parallelism" => 1, "suspend" => false,
+                "podReplacementPolicy" => ARGV.fetch(1))
+    pod = spec["template"]["spec"]
+    pod.merge!("dnsPolicy" => "ClusterFirst", "schedulerName" => "default-scheduler",
+               "serviceAccount" => pod["serviceAccountName"], "terminationGracePeriodSeconds" => 30)
+    pod["containers"].each do |container|
+      container.merge!("terminationMessagePath" => "/dev/termination-log",
+                       "terminationMessagePolicy" => "File")
+      (container["env"] || []).each { |entry| entry.delete("value") if entry["value"] == "" }
+    end
+    File.write(ARGV.fetch(0), JSON.generate(job))
+  ' "$1" "$2"
+}
+cp "$capture" "$fixture_root/server-default-matched.json"
+server_default_job "$capture" "TerminatingOrFailed" || fail "could not build the server-defaulted fixture"
+run_fixture active-server-defaulted-matches >/dev/null || \
+  fail "active migration Job stored with API server defaults was not reused"
+cp "$fixture_root/server-default-matched.json" "$capture"
+server_default_job "$capture" "Failed" || fail "could not build the non-default fixture"
+if run_fixture active-server-defaulted-mismatch >/dev/null; then
+  fail "active migration Job with a non-default podReplacementPolicy was accepted"
+fi
+mv "$fixture_root/server-default-matched.json" "$capture"
+
 status_output="$(expect_fixture_failure 'existing migration Job status check' \
   run_fixture active-status-error)"
 [[ "$status_output" == *'could not determine existing migration Job status'* ]] || \
