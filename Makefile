@@ -53,7 +53,8 @@ SERVICES := \
 	packages/workflow-sdk \
 	packages/llm-provider-attempt-contract \
 	packages/llm-providers \
-	packages/grok-provider-attempt-contract
+	packages/grok-provider-attempt-contract \
+	packages/host-locale
 
 # Services that have unit tests
 TEST_SERVICES := \
@@ -86,7 +87,8 @@ TEST_SERVICES := \
 	packages/codex-catalog-projection \
 	packages/llm-provider-attempt-contract \
 	packages/llm-providers \
-	packages/grok-provider-attempt-contract
+	packages/grok-provider-attempt-contract \
+	packages/host-locale
 
 # ── Optional private infra (gcp-*, promotion) ──────────────────────────────
 -include Makefile.infra
