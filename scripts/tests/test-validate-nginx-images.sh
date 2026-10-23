@@ -227,13 +227,15 @@ done
 # Untagged references in every recognised position.
 # shellcheck disable=SC2016 # $P is injected literally
 for line in 'image: nginx # x' '"image": "nginx"' '- {name: gw, image: nginx}' 'image: nginx}' \
-  '"image": "nginx",' '--image=nginx' 'IMAGE=nginx' "image: 'nginx'"; do
+  '"image": "nginx",' '--image=nginx' 'IMAGE=nginx' "image: 'nginx'" 'image: &web_image nginx' \
+  'image: !!str nginx' 'image: !!str &web "nginx"'; do
   inject_text "$SAMPLE_REL" "$line"
   expect_fail_naming "untagged $line" "$SAMPLE_REL:1: " "$UNTAGGED"
   rm -f "$COPY/$SAMPLE_REL"
 done
 # shellcheck disable=SC2016 # $P is injected literally
-for line in 'FROM nginx' 'from nginx AS b' 'FROM --platform=$P nginx'; do
+for line in 'FROM nginx' 'from nginx AS b' 'FROM --platform=$P nginx' 'COPY --from=nginx /usr/sbin/nginx /x' \
+  'copy --from="nginx" /a /b' 'RUN --mount=type=bind,from=nginx,target=/n true' 'RUN --mount=from=nginx,target=/n true'; do
   inject_text "$E2E_DOCKERFILE_REL" "$line"
   expect_fail_naming "untagged $line" "$E2E_DOCKERFILE_REL:1: " "$UNTAGGED"
   rm -f "$COPY/$E2E_DOCKERFILE_REL"
@@ -273,11 +275,19 @@ rm -f "$COPY/$SAMPLE_REL"
 
 # Strings that are not image references are left alone; the count shows they
 # were not counted as references either.
-for image in nginx-egress-proxy clerum/nginx-egress-proxy:0.1.0 'nginx:*' 'nginx:'; do
+for image in nginx-egress-proxy clerum/nginx-egress-proxy:0.1.0 'nginx:'; do
   inject "$SAMPLE_REL" "$image"
   expect_pass "non-reference string $image" 0
   rm -f "$COPY/$SAMPLE_REL"
 done
+# A '*' tag is a glob, never a fixed release, wherever it is written.
+inject "$SAMPLE_REL" 'nginx:*'
+expect_fail_naming "glob tag nginx:* in a recipe sample" "$SAMPLE_REL:1: " "$NOT_FIXED"
+rm -f "$COPY/$SAMPLE_REL"
+# shellcheck disable=SC2016 # the variable is injected literally
+inject_text "$E2E_REL" 'PUBLIC_IMAGES=("nginx:${NGINX_TAG:-1.30.*}")'
+expect_fail_naming "variable tag with a glob default in a shell script" "$E2E_REL:1: " "$NOT_FIXED"
+rm -f "$COPY/$E2E_REL"
 for line in "id: 'nginx'" "if name == 'nginx'"; do
   inject_text "$SAMPLE_REL" "$line"
   expect_pass "non-reference line $line" 0
@@ -330,6 +340,12 @@ inject_kustomize $'images:\n  - name: clerum/gateway\n    newName: docker.io/lib
 expect_fail_naming "kustomize newName to NGINX below the baseline" "$KUSTOMIZE_REL:4: docker.io/library/nginx:1.31.6: " "$BELOW"
 inject_kustomize $'images:\n- name: clerum/gateway\n  newName: nginx'
 expect_fail_naming "kustomize newName to NGINX with no newTag" "$KUSTOMIZE_REL:4: nginx:<no newTag>: " "$NOT_FIXED"
+inject_kustomize $'images:\n- name: example/web\n  newName: "ngin\\u0078:1.30.5-alpine"'
+expect_fail_naming "kustomize escaped newName carrying a tag below the baseline" "$KUSTOMIZE_REL:4: nginx:1.30.5-alpine: " "$BELOW"
+inject_kustomize $'images:\n- name: nginx\n  newName: nginx:1.30.5-alpine'
+expect_fail_naming "kustomize newName carrying a tag below the baseline" "$KUSTOMIZE_REL:4: nginx:1.30.5-alpine: " "$BELOW"
+inject_kustomize $'images:\n- name: example/web\n  newName: nginx:1.30.5-alpine\n  newTag: 1.30.6-alpine'
+expect_fail_naming "kustomize tagged newName plus newTag" "$KUSTOMIZE_REL:4: nginx:1.30.5-alpine:1.30.6-alpine: " "$NOT_FIXED"
 inject_kustomize $'images:\n- name: nginx\n  newTag: stable-alpine'
 expect_fail_naming "kustomize floating newTag" "$KUSTOMIZE_REL:4: nginx:stable-alpine: " "$NOT_FIXED"
 inject_kustomize $'images:\n- name: nginx\n  digest: '"$FIXED_DIGEST"
@@ -338,6 +354,8 @@ inject_kustomize $'images:\n- name: nginx\n  newTag: 1.30.6-alpine # fixed basel
 expect_pass "kustomize newTag on the baseline" 1
 inject_kustomize $'images:\n- name: nginx\n  newTag: 1.30.6-alpine  '
 expect_pass "kustomize unquoted newTag with trailing spaces" 1
+inject_kustomize $'images:\n- name: example/web\n  newName: "ngin\\u0078:1.30.6-alpine"'
+expect_pass "kustomize escaped newName carrying the baseline tag" 1
 inject_kustomize $'images:\n- name: nginx\n  newName: clerum/nginx-egress-proxy\n  newTag: 0.1.0'
 expect_pass "kustomize rewrite of nginx to another image" 0
 inject_kustomize $'images:\n- name: clerum/control-api\n  newName: ghcr.io/evenfire-ai/control-api\n  newTag: v0.11.0'

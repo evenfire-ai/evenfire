@@ -18,8 +18,10 @@
 # not a renderer. It reads literal spellings: escape sequences in text files
 # are not decoded (yq decodes them only in kustomization images: entries).
 # Untagged references are recognised in an image field (YAML, JSON, flow maps,
-# --image=, IMAGE=), a Dockerfile FROM, and a shell array element in *.sh files;
-# an image: key whose value is not on the same line is rejected.
+# --image=, IMAGE=, after an optional YAML anchor or tag), a Dockerfile FROM or
+# COPY --from= / --mount=...,from= source, and a shell array element in *.sh
+# files; an image: key whose value is not on the same line is rejected. A name
+# reached through indirection (a YAML alias, a shell variable) is not resolved.
 #
 #   --list-digest-pins   print every tag@digest reference and exit
 #                        (input for verify-nginx-image-digests.sh)
@@ -49,10 +51,14 @@ QUOTE="[\"']"
 # so a flow map such as {image: nginx:1.30.6-alpine} yields the reference.
 # shellcheck disable=SC2016 # literal '$' and '{' in a regular expression
 NGINX_REF_REGEX='(^|[^[:alnum:]_.-])'"$REGISTRY_PREFIX$NGINX_NAME"'[:@][[:alnum:]_.:@${*-]*'
-# An untagged NGINX image (implicitly :latest) in an image field or a
-# Dockerfile FROM (keywords in any case, optional --flag=value words).
-NGINX_UNTAGGED_REGEX="[Ii][Mm][Aa][Gg][Ee]$QUOTE?[[:space:]]*[:=][[:space:]]*$QUOTE?$REGISTRY_PREFIX$NGINX_NAME$UNTAGGED_END"
+# An untagged NGINX image (implicitly :latest) in an image field (after an
+# optional YAML anchor or tag such as &img or !!str), a Dockerfile FROM
+# (keywords in any case, optional --flag=value words), or a Dockerfile
+# COPY --from= / RUN --mount=...,from= source.
+YAML_NODE_PROPERTIES='([&!][^[:space:]]*[[:space:]]+)*'
+NGINX_UNTAGGED_REGEX="[Ii][Mm][Aa][Gg][Ee]$QUOTE?[[:space:]]*[:=][[:space:]]*$YAML_NODE_PROPERTIES$QUOTE?$REGISTRY_PREFIX$NGINX_NAME$UNTAGGED_END"
 NGINX_UNTAGGED_REGEX="$NGINX_UNTAGGED_REGEX|^[[:space:]]*[Ff][Rr][Oo][Mm][[:space:]]+(--[^[:space:]]+[[:space:]]+)*$REGISTRY_PREFIX$NGINX_NAME$UNTAGGED_END"
+NGINX_UNTAGGED_REGEX="$NGINX_UNTAGGED_REGEX|(--|[,=])[Ff][Rr][Oo][Mm]=$QUOTE?$REGISTRY_PREFIX$NGINX_NAME$UNTAGGED_END"
 # An untagged NGINX shell-array element, quoted or not: after =( or +=( on the
 # same line, or alone on its own line.
 NGINX_UNTAGGED_ARRAY_REGEX="=\\(([^)]*[[:space:]])?$QUOTE?$REGISTRY_PREFIX$NGINX_NAME([\"'[:space:])]|\$)"
@@ -172,7 +178,7 @@ fi
 # Turns scan hits into "path:line<TAB>ref" lines: tagged references as written,
 # kustomize images entries composed into newName-or-name[:newTag][@digest].
 collect_refs() {
-  local hit path rest line token name newname newtag digest ref
+  local hit path rest line token name newname newtag digest ref last repo
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
     path="${hit%%:*}"; rest="${hit#*:}"; line="${rest%%:*}"; token="${rest#*:}"
@@ -183,16 +189,18 @@ collect_refs() {
       printf '%s:%s\t%s\n' "$path" "$line" "$token"
       continue
     fi
-    # "nginx:" alone is a YAML key or prose; a '*' tag is a policy glob.
+    # "nginx:" alone is a YAML key or prose.
     [ -z "$ref_tag" ] && [ -z "$ref_digest" ] && continue
-    case "$ref_tag" in *'*'*) continue ;; esac
     printf '%s:%s\t%s\n' "$path" "$line" "$token"
   done <<<"$ref_hits"
   while IFS='|' read -r path line name newname newtag digest; do
     [ -n "$path" ] || continue
     ref="${newname:-$name}"
-    is_nginx_name "$ref" || continue
-    if [ -z "$newtag" ] && [ -z "$digest" ]; then
+    # newName may carry its own tag or digest; classify the repository part.
+    last="${ref##*/}"
+    repo="${ref%"$last"}${last%%[:@]*}"
+    is_nginx_name "$repo" || continue
+    if [ "$ref" = "$repo" ] && [ -z "$newtag" ] && [ -z "$digest" ]; then
       # A plain name entry leaves the source tag to the text scan; a rewrite
       # of another image to NGINX without a tag pulls :latest.
       if ! is_nginx_name "$name"; then
