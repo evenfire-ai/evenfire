@@ -121,6 +121,21 @@ describe('FilePreviewPage move permission contract', () => {
     expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
   })
 
+  it('hides Move when the source parent has read and delete but lacks write', async () => {
+    const sourceReadDelete = delegationAffordances(new Set(['read', 'delete']), false)
+    installGfs({ source: async () => sourceReadDelete })
+    installController()
+    renderPreview()
+
+    await screen.findByAltText('Preview of diagram.png')
+    await waitFor(() =>
+      expect(window.clerum.gfs.affordances).toHaveBeenCalledWith(parentId, 'main')
+    )
+    const menu = await openPreviewActions()
+
+    expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
+  })
+
   it('allows Move from a write/delete parent even when the file itself is read-only', async () => {
     const sourceWriteDelete = delegationAffordances(new Set(['write', 'delete']), false)
     installGfs({ source: async () => sourceWriteDelete, destination: async () => readOnly })
