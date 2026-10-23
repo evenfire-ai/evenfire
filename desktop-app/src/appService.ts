@@ -6152,15 +6152,6 @@ export class AppService {
     return { url: buildGfsResourceWebLink(profileUiBaseUrl, canonicalUri) }
   }
 
-  // In-place hard-reload of the active embed (user-initiated "Refresh"). The
-  // session cookie is still valid, so this only reloads page content — it does
-  // NOT re-mint the session or cancel the refresh timer. No-op when nothing is
-  // mounted.
-  async reloadSandboxUi(): Promise<void> {
-    const driver = await import('./sandboxUiDriver.js')
-    driver.reloadActiveSandboxUiView()
-  }
-
   async setSandboxUiBounds(bounds: import('./sandboxUiDriver.js').SandboxUiBounds): Promise<void> {
     const { setSandboxUiBounds } = await import('./sandboxUiDriver.js')
     setSandboxUiBounds(bounds)

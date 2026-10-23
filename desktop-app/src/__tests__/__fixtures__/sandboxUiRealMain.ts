@@ -132,7 +132,7 @@ export function startRealMain(options: RealMainOptions): RealMain {
   initPluginSdkRuntime({ service, getMainWindow: () => null, userDataDir: options.userDataDir })
   electronMocks.ipcHandlers.clear()
   electronMocks.windowsBySender.clear()
-  registerIpcHandlers(service)
+  registerIpcHandlers(service, () => service.logout())
   electronMocks.windowsBySender.set(sender, parent)
   parent.webContents.send.mockImplementation((channel: string, payload: unknown) => {
     if (!main.dead) options.onSend(channel, payload)

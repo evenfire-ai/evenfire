@@ -238,7 +238,7 @@ describe('embed ownership machine — open request', () => {
     })
   })
 
-  it('forgets a view whose close main rejected', async () => {
+  it('retains a view whose close main rejected', async () => {
     const h = harness()
     await mountedOwner(h, launch('l-1'))
     h.machine.backToApps()
@@ -247,7 +247,8 @@ describe('embed ownership machine — open request', () => {
     h.closes.get('l-1')!.reject(new Error('ipc down'))
     await flush()
 
-    expect(h.machine.getSnapshot().views.size).toBe(0)
+    expect(h.machine.getSnapshot().views.get('l-1')?.phase).toBe('closeFailed')
+    expect(h.machine.getSnapshot().owner).toBeNull()
   })
 })
 
@@ -463,6 +464,22 @@ describe('embed ownership machine — notifications', () => {
     h.machine.onReleased({ launchId: 'l-1', reason: 'closed', location: null })
 
     expect(onHandoffReady).toHaveBeenCalledWith(7)
+  })
+
+  it('fails a handoff and retains the owner when its close is rejected', async () => {
+    const onHandoffReady = vi.fn()
+    const onHandoffFailed = vi.fn()
+    const h = harness({ onHandoffReady, onHandoffFailed })
+    await mountedOwner(h, launch('l-1'))
+
+    h.machine.handoff(8)
+    h.closes.get('l-1')!.reject(new Error('close rejected'))
+    await flush()
+
+    expect(onHandoffReady).not.toHaveBeenCalled()
+    expect(onHandoffFailed).toHaveBeenCalledWith(8)
+    expect(h.machine.getSnapshot().owner).toBe('l-1')
+    expect(h.machine.getSnapshot().views.get('l-1')?.phase).toBe('closeFailed')
   })
 
   it('resolves a launch that never got its tab as abandoned, in the same dispatch', async () => {

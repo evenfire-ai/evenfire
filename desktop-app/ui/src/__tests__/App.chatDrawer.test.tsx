@@ -210,7 +210,6 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   const noop = vi.fn()
   let controller: AppController
   let tabSequence = 2
-  let navigationIntentSequence = 0
   const nextWorkspaceTabId = vi.fn(() => `ws-tab-${tabSequence++}`)
   // React-setState-faithful: bail out on an unchanged reference (so the
   // idempotent reconcile effect can't spin), otherwise commit + re-render.
@@ -230,23 +229,9 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     controller.appsPickerActive = false
     forceControllerRender()
   })
-  const beginUserNavigationIntent = vi.fn(() => {
-    navigationIntentSequence += 1
-    controller.navigationIntentSequence = navigationIntentSequence
-    forceControllerRender()
-    return navigationIntentSequence
-  })
-  const selectWorkspaceTabById = vi.fn((id: string) => {
-    if (!controller.workspaceTabs.tabs.some(tab => tab.id === id)) return false
-    beginUserNavigationIntent()
-    clearAppsPicker()
-    setWorkspaceTabs((state: WorkspaceState) => selectWorkspaceTab(state, id))
-    return true
-  })
   // Faithful to the real controller's openFilesSection: open/focus a files tab at
   // `path` through the real store producer (dedupe by path lives in the store).
   const openFilesSection = vi.fn((path: string | null = null) => {
-    beginUserNavigationIntent()
     clearAppsPicker()
     setWorkspaceTabs((state: WorkspaceState) =>
       openFilesTab(state, { id: nextWorkspaceTabId(), path })
@@ -256,7 +241,6 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   // Faithful to the real controller's openPreviewSection: open/focus a preview
   // tab for a previewable file through the real store producer (dedupe by gfsUri).
   const openPreviewSection = vi.fn((preview: GfsPreviewResource) => {
-    beginUserNavigationIntent()
     clearAppsPicker()
     setWorkspaceTabs((state: WorkspaceState) =>
       openPreviewTab(state, {
@@ -272,7 +256,6 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     forceControllerRender()
   })
   const showAppsPicker = vi.fn(() => {
-    beginUserNavigationIntent()
     // The picker residual is redundant when an app tab is already active.
     if (controller.appsPickerActive) return
     if (activeWorkspaceTab(controller.workspaceTabs)?.kind === 'app') return
@@ -283,7 +266,6 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   // (useReactiveController), so these drive the store — never set navItem.
   const handleNavSelect = vi.fn((item: AppController['navItem']) => {
     if (item === DESKTOP_ROUTES.chat) {
-      beginUserNavigationIntent()
       controller.selectedAgent = null
       clearAppsPicker()
       setWorkspaceTabs((state: WorkspaceState) => focusChatState(state, nextWorkspaceTabId()))
@@ -295,7 +277,6 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     } else {
       const section = settingsSectionForRoute(item)
       if (section) {
-        beginUserNavigationIntent()
         if (section === 'agents') controller.selectedAgent = null
         clearAppsPicker()
         setWorkspaceTabs((state: WorkspaceState) =>
@@ -314,7 +295,6 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
       controller.selectedAgent = agentName
       controller.activeChatId = options.chatId ?? null
       if (!options.keepNavItem) {
-        beginUserNavigationIntent()
         clearAppsPicker()
         setWorkspaceTabs((state: WorkspaceState) =>
           activateChatState(state, agentName, options.chatId ?? null, nextWorkspaceTabId())
@@ -334,7 +314,6 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
       // Faithful routing: workflow notifications navigate to the plugins section;
       // sdk notifications navigate away without touching the agent chat state.
       if (notification.kind === 'workflow_completed') {
-        beginUserNavigationIntent()
         clearAppsPicker()
         setWorkspaceTabs((state: WorkspaceState) =>
           openSettingsTab(state, { id: nextWorkspaceTabId(), section: 'plugins' })
@@ -346,7 +325,6 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
       controller.selectedAgent = notification.agentName ?? controller.selectedAgent
       controller.activeChatId = notification.chatId ?? null
       if (!options.keepNavItem) {
-        beginUserNavigationIntent()
         clearAppsPicker()
         setWorkspaceTabs((state: WorkspaceState) =>
           activateChatState(
@@ -377,9 +355,6 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     selectedContext: null,
     selectedTeam: null,
     workspaceTabs: createWorkspaceTabsState('chat-tab-1'),
-    navigationIntentSequence,
-    beginUserNavigationIntent,
-    selectWorkspaceTabById,
     setWorkspaceTabs,
     activeWorkspaceTab: undefined,
     nextWorkspaceTabId,
@@ -387,6 +362,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     showAppsPicker,
     clearAppsPicker,
     activateWorkspaceChatTab: noop,
+    beginUserNavigationIntent: vi.fn(),
     openFilesSection,
     openPreviewSection,
     lastActiveChatTabId: null,
@@ -554,6 +530,36 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
 
     // Reopen must preserve chat-2, not jump back to the chat-1 origin.
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
+  })
+
+  it('binds a Files New Chat prefill to the exact chat tab created by the App', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('0123456789abcdef0123456789abcdef', 'Shared folder')
+    )
+    let workspaceTabs = openFilesTab(createEmptyWorkspaceTabsState(), {
+      id: 'files-resource-tab',
+      path: folder.gfsUri,
+    })
+    workspaceTabs = openFilesTab(workspaceTabs, { id: 'files-empty-tab', path: null })
+    workspaceTabs = selectWorkspaceTab(workspaceTabs, 'files-resource-tab')
+    currentController = makeController({
+      selectedAgent: 'agent-a',
+      activeChatId: null,
+      workspaceTabs,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+
+    render(<App />)
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    act(() => sidebarHarness.props?.onNewChat?.())
+
+    const composer = await screen.findByTestId('chat-page-surface')
+    const destinationTabId = composer.getAttribute('data-workspace-chat-tab-id')
+    expect(destinationTabId).toBeTruthy()
+    await waitFor(() => expect(composer.getAttribute('data-composer-draft')).toBe(folder.gfsUri))
+    expect(getComposerDraft(null, 'agent-a', destinationTabId!)).toBe(folder.gfsUri)
+    expect(getComposerDraft(null, 'agent-a')).toBe('')
   })
 
   it('hides already-delivered notifications after a Host is revoked', () => {
@@ -1774,7 +1780,6 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
   afterEach(() => {
     cleanup()
     delete (window as { clerum?: unknown }).clerum
-    resetComposerDraftStore()
     vi.unstubAllGlobals()
   })
 
@@ -1795,52 +1800,6 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
     bindPanelWidth()
     act(() => fireResize())
   }
-
-  it('prevents a sibling New Chat tab from editing the exact resource-owned key', async () => {
-    resetComposerDraftStore()
-    const folder = await resolveResource(
-      resolvedDirectory('abcdefabcdefabcdefabcdefabcdefab', 'Shared folder')
-    )
-    let workspaceTabs = openFilesTab(createEmptyWorkspaceTabsState(), {
-      id: 'files-resource-tab',
-      path: folder.gfsUri,
-    })
-    workspaceTabs = openFilesTab(workspaceTabs, { id: 'files-empty-tab', path: null })
-    workspaceTabs = selectWorkspaceTab(workspaceTabs, 'files-resource-tab')
-    currentController = makeController({
-      selectedAgent: 'agent-a',
-      activeChatId: null,
-      workspaceTabs,
-      chatList: CHAT_LIST,
-    } as Partial<AppController>)
-
-    render(<App />)
-    bindPanelWidth()
-    act(() => sidebarHarness.props?.onNewChat?.())
-
-    const ownerComposer = await screen.findByTestId('chat-page-surface')
-    const ownerTabId = ownerComposer.getAttribute('data-workspace-chat-tab-id')
-    expect(ownerTabId).toBeTruthy()
-    await waitFor(() =>
-      expect(ownerComposer.getAttribute('data-composer-draft')).toBe(folder.gfsUri)
-    )
-
-    resizeTo(300)
-    const filesTabs = screen.getAllByRole('button', { name: 'Files' })
-    expect(filesTabs).toHaveLength(2)
-    const siblingFilesTab = filesTabs[1]
-    if (!siblingFilesTab) throw new Error('Expected a second Files workspace tab')
-    act(() => fireEvent.click(siblingFilesTab))
-    act(() => sidebarHarness.props?.onNewChat?.())
-
-    const siblingComposer = await screen.findByTestId('chat-page-surface')
-    expect(siblingComposer.getAttribute('data-workspace-chat-tab-id')).not.toBe(ownerTabId)
-    expect(siblingComposer.getAttribute('data-composer-draft')).toBe('')
-    const siblingInput = screen.getByRole('textbox', { name: 'App drawer composer' })
-    expect((siblingInput as HTMLTextAreaElement).disabled).toBe(true)
-    expect(screen.getByRole('alert').textContent).toContain('Another workspace tab owns this draft')
-    expect(getComposerDraft(null, 'agent-a', ownerTabId)).toBe(folder.gfsUri)
-  })
 
   it('suppresses the drawer below the threshold and restores it on re-widen, but a manual close stays closed', () => {
     render(<App />)
@@ -1975,7 +1934,6 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
   let currentController: AppController
 
   beforeEach(() => {
-    resetComposerDraftStore()
     vi.clearAllMocks()
     sidebarHarness.props = null
     sandboxUiPageHarness.props = null
@@ -2010,7 +1968,6 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
   afterEach(() => {
     cleanup()
     delete (window as { clerum?: unknown }).clerum
-    resetComposerDraftStore()
   })
 
   // R2: available on app/files/settings, never on chat.
@@ -2057,64 +2014,6 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
     // No native view to ack a shrunk-bounds gate → ready immediately, not inert.
     expect(drawer!.getAttribute('data-ready')).toBe('true')
     expect(drawer!.hasAttribute('inert')).toBe(false)
-  })
-
-  it('passes a nullable composer tab owner through the App drawer context', () => {
-    const workspaceTabs = openFilesTab(createEmptyWorkspaceTabsState(), { id: 'files-owner-tab' })
-    currentController = makeController({
-      initialExperienceLoading: false,
-      selectedAgent: null,
-      activeChatId: null,
-      workspaceTabs,
-    } as Partial<AppController>)
-    render(<App />)
-    expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
-    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
-
-    const composer = screen.getByTestId('chat-page-surface')
-    expect(composer.getAttribute('data-workspace-chat-tab-id')).toBe('')
-    expect(composer.getAttribute('data-composer-draft')).toBe('')
-    fireEvent.click(screen.getByRole('button', { name: 'Write tabless recovery draft' }))
-
-    expect(getComposerDraft(null)).toBe('failed-send recovery')
-  })
-
-  it('binds a Files New Chat prefill to the exact tab created by the App producer', async () => {
-    const folder = await resolveResource(
-      resolvedDirectory('0123456789abcdef0123456789abcdef', 'Shared folder')
-    )
-    const workspaceTabs = openFilesTab(createEmptyWorkspaceTabsState(), {
-      id: 'files-owner-tab',
-      path: folder.gfsUri,
-    })
-
-    currentController = makeController({
-      initialExperienceLoading: false,
-      selectedAgent: 'agent-a',
-      activeChatId: null,
-      chatList: CHAT_LIST,
-      workspaceTabs,
-    } as Partial<AppController>)
-    render(<App />)
-    expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
-    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
-    let legacyComposer = screen.getByTestId('chat-page-surface')
-    expect(legacyComposer.getAttribute('data-workspace-chat-tab-id')).toBeTruthy()
-    act(() => fireEvent.click(screen.getByRole('button', { name: 'Close New chat' })))
-    legacyComposer = screen.getByTestId('chat-page-surface')
-    expect(legacyComposer.getAttribute('data-workspace-chat-tab-id')).toBe('')
-    fireEvent.click(screen.getByRole('button', { name: 'Write tabless recovery draft' }))
-    expect(getComposerDraft(null, 'agent-a')).toBe('failed-send recovery')
-    expect(sidebarHarness.props?.onNewChat).toBeTypeOf('function')
-
-    act(() => sidebarHarness.props?.onNewChat?.())
-
-    const composer = await screen.findByTestId('chat-page-surface')
-    const ownerChatTabId = composer.getAttribute('data-workspace-chat-tab-id')
-    expect(ownerChatTabId).toBeTruthy()
-    await waitFor(() => expect(composer.getAttribute('data-composer-draft')).toBe(folder.gfsUri))
-    expect(getComposerDraft(null, 'agent-a', ownerChatTabId)).toBe(folder.gfsUri)
-    expect(getComposerDraft(null, 'agent-a')).toBe('failed-send recovery')
   })
 
   // T5 invariant — on a DOM/files tab (no embed to measure) the drawer must dock

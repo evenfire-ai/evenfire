@@ -119,6 +119,8 @@ type RowResult = {
   failure?: EmbedFailure
   /** A handoff whose wait set is taken after the sweep. */
   handoffRequestId?: number
+  /** The owner present when a handoff began, for a failed-close rollback. */
+  handoffOwnerLaunchId?: LaunchId | null
 }
 
 function applyRow(state: EmbedOwnershipState, event: EmbedEvent): RowResult {
@@ -127,11 +129,17 @@ function applyRow(state: EmbedOwnershipState, event: EmbedEvent): RowResult {
     case 'projected': {
       if (event.activeAppTabId === state.activeAppTabId) return unchanged
       const ownerTab = state.owner === null ? null : state.views.get(state.owner)?.tabId
+      const retainedFailedClose = [...state.views.values()].find(
+        view => view.tabId === event.activeAppTabId && view.phase === 'closeFailed'
+      )
       return {
         state: {
           ...state,
           activeAppTabId: event.activeAppTabId,
-          owner: ownerTab === event.activeAppTabId ? state.owner : null,
+          owner:
+            ownerTab === event.activeAppTabId
+              ? state.owner
+              : (retainedFailedClose?.launchId ?? null),
         },
         effects: [],
       }
@@ -153,12 +161,21 @@ function applyRow(state: EmbedOwnershipState, event: EmbedEvent): RowResult {
     case 'backToApps':
       return state.owner === null ? unchanged : { state: { ...state, owner: null }, effects: [] }
 
-    case 'handoff':
-      return {
-        state: state.owner === null ? state : { ...state, owner: null },
-        effects: [],
-        handoffRequestId: event.requestId,
+    case 'handoff': {
+      let next = state.owner === null ? state : { ...state, owner: null }
+      const effects: EmbedEffect[] = []
+      for (const view of next.views.values()) {
+        if (view.phase !== 'closeFailed') continue
+        next = withView(next, { ...view, phase: 'closeRequested' })
+        effects.push({ type: 'close', launchId: view.launchId })
       }
+      return {
+        state: next,
+        effects,
+        handoffRequestId: event.requestId,
+        handoffOwnerLaunchId: state.owner,
+      }
+    }
 
     case 'slotMeasured': {
       const record = state.views.get(event.launchId)
@@ -223,8 +240,25 @@ function applyRow(state: EmbedOwnershipState, event: EmbedEvent): RowResult {
     case 'closeFailed': {
       const record = state.views.get(event.launchId)
       if (!record || record.phase !== 'closeRequested') return unchanged
-      // Main could not confirm the close; treat the view as gone so the tab is not stuck.
-      return { state: withoutView(state, record.launchId), effects: [] }
+      const failedHandoffs = state.handoffs.filter(handoff => handoff.waitFor.has(record.launchId))
+      const failedRequestIds = new Set(failedHandoffs.map(handoff => handoff.requestId))
+      let next: EmbedOwnershipState = {
+        ...withView(state, { ...record, phase: 'closeFailed' }),
+        handoffs: state.handoffs.filter(handoff => !failedRequestIds.has(handoff.requestId)),
+      }
+      const ownsFailedHandoff = failedHandoffs.some(
+        handoff => handoff.ownerLaunchId === record.launchId
+      )
+      if (ownsFailedHandoff && state.activeAppTabId === record.tabId && state.owner === null) {
+        next = { ...next, owner: record.launchId }
+      }
+      return {
+        state: next,
+        effects: failedHandoffs.map(handoff => ({
+          type: 'handoffFailed',
+          requestId: handoff.requestId,
+        })),
+      }
     }
 
     case 'released': {
@@ -373,6 +407,7 @@ export function reduceEmbedOwnership(
     const handoff: EmbedHandoff = {
       requestId: row.handoffRequestId,
       waitFor: new Set(next.views.keys()),
+      ownerLaunchId: row.handoffOwnerLaunchId ?? null,
     }
     next = { ...next, handoffs: [...next.handoffs, handoff] }
   }
