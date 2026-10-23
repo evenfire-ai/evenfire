@@ -219,6 +219,15 @@ incremental_classify_path() {
       incremental_add_target control-api control-plane control-api
       incremental_add_target control-ui control-plane control-ui
       ;;
+    packages/host-locale/*)
+      # The host language and time zone rules: control-api validates
+      # spec.locale with them, control-ui offers them and mcp-host applies
+      # them. All three Dockerfiles COPY the package, so a change here changes
+      # exactly those image outputs.
+      incremental_add_target control-api control-plane control-api
+      incremental_add_target control-ui control-plane control-ui
+      incremental_add_target mcp-host mcp-host chatllm
+      ;;
     profile-ui/*) incremental_add_target profile-ui profiles profile-ui ;;
     webhook-proxy/*) incremental_add_target webhook-proxy webhook-ingress webhook-proxy ;;
     codex-llm-proxy/*) incremental_add_target codex-llm-proxy control-plane codex-llm-proxy ;;

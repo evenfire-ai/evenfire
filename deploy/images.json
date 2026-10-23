@@ -25,6 +25,7 @@
         "packages/image-policy/**",
         "packages/jwt-key-policy/**",
         "packages/display-field/**",
+        "packages/host-locale/**",
         "packages/llm-provider-attempt-contract/**",
         "packages/grok-provider-attempt-contract/**"
       ],
@@ -39,6 +40,7 @@
         "control-ui/**",
         "packages/workflow-recipe-capability-policy/**",
         "packages/display-field/**",
+        "packages/host-locale/**",
         "packages/frontend-components/**",
         "packages/gfs-interaction-policy/**"
       ],
@@ -76,7 +78,8 @@
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
         "packages/grok-provider-attempt-contract/**",
-        "packages/gfs-interaction-policy/**"
+        "packages/gfs-interaction-policy/**",
+        "packages/host-locale/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -91,7 +94,8 @@
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
         "packages/grok-provider-attempt-contract/**",
-        "packages/gfs-interaction-policy/**"
+        "packages/gfs-interaction-policy/**",
+        "packages/host-locale/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -106,7 +110,8 @@
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
         "packages/grok-provider-attempt-contract/**",
-        "packages/gfs-interaction-policy/**"
+        "packages/gfs-interaction-policy/**",
+        "packages/host-locale/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -121,7 +126,8 @@
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
         "packages/grok-provider-attempt-contract/**",
-        "packages/gfs-interaction-policy/**"
+        "packages/gfs-interaction-policy/**",
+        "packages/host-locale/**"
       ],
       "published": true,
       "deployed_to_minikube": false

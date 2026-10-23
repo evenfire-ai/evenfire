@@ -248,25 +248,31 @@ for service in control-api rpc-proxy external-rest-api; do
   assert_service_secret_exclusions_after_allowlist "$service"
 done
 assert_service_make_root_context rpc-proxy docker-push-cross
+assert_service_secret_exclusions_after_allowlist control-ui
 
 # Direct consumers.  The first four are Node services; profile-ui and
 # control-ui are Next.js consumers and therefore also require materialization.
 assert_copy_before_every_ci control-api/Dockerfile \
-  display-field grok-provider-attempt-contract image-policy llm-provider-attempt-contract \
+  display-field grok-provider-attempt-contract host-locale image-policy llm-provider-attempt-contract \
   llm-providers workflow-recipe-capability-policy workflow-runtime-core
 assert_copy_before_every_ci control-ui/Dockerfile \
-  display-field frontend-components gfs-interaction-policy llm-providers workflow-recipe-capability-policy
+  display-field frontend-components gfs-interaction-policy host-locale llm-providers \
+  workflow-recipe-capability-policy
 assert_copy_before_every_ci profile-ui/Dockerfile desktop-app-links frontend-components
 assert_copy_before_every_ci host-context-controller/Dockerfile \
   image-policy llm-providers network-policy-core workflow-recipe-capability-policy
 assert_copy_before_every_ci mcp-host/Dockerfile \
-  gfs-interaction-policy grok-provider-attempt-contract llm-provider-attempt-contract llm-providers
+  gfs-interaction-policy grok-provider-attempt-contract host-locale llm-provider-attempt-contract \
+  llm-providers
 assert_copy_before_every_ci mcp-host/Dockerfile.desktop \
-  gfs-interaction-policy grok-provider-attempt-contract llm-provider-attempt-contract llm-providers
+  gfs-interaction-policy grok-provider-attempt-contract host-locale llm-provider-attempt-contract \
+  llm-providers
 assert_copy_before_every_ci mcp-host/Dockerfile.full \
-  gfs-interaction-policy grok-provider-attempt-contract llm-provider-attempt-contract llm-providers
+  gfs-interaction-policy grok-provider-attempt-contract host-locale llm-provider-attempt-contract \
+  llm-providers
 assert_copy_before_every_ci mcp-host/Dockerfile.slim \
-  gfs-interaction-policy grok-provider-attempt-contract llm-provider-attempt-contract llm-providers
+  gfs-interaction-policy grok-provider-attempt-contract host-locale llm-provider-attempt-contract \
+  llm-providers
 
 # workflow-runtime-core is built in a separate stage before workflow-recipes;
 # these are the packages needed by that stage, while the application install
@@ -285,6 +291,7 @@ assert_copy_before_last_ci workflow-recipes/Dockerfile.coordinator image-policy
 assert_materialized control-ui/Dockerfile display-field
 assert_materialized control-ui/Dockerfile frontend-components
 assert_materialized control-ui/Dockerfile gfs-interaction-policy
+assert_materialized control-ui/Dockerfile host-locale
 assert_materialized control-ui/Dockerfile llm-providers
 assert_materialized control-ui/Dockerfile workflow-recipe-capability-policy
 assert_materialized profile-ui/Dockerfile desktop-app-links
@@ -292,15 +299,19 @@ assert_materialized profile-ui/Dockerfile frontend-components
 
 assert_dockerignore_allows control-api/Dockerfile.dockerignore display-field
 assert_dockerignore_allows control-api/Dockerfile.dockerignore grok-provider-attempt-contract
+assert_dockerignore_allows control-api/Dockerfile.dockerignore host-locale
 assert_dockerignore_allows control-api/Dockerfile.dockerignore llm-provider-attempt-contract
 assert_dockerignore_allows control-api/Dockerfile.dockerignore llm-providers
 assert_dockerignore_allows workflow-recipes/Dockerfile.dockerignore grok-provider-attempt-contract
 assert_dockerignore_allows workflow-recipes/Dockerfile.coordinator.dockerignore grok-provider-attempt-contract
 assert_dockerignore_allows control-ui/Dockerfile.dockerignore display-field
 assert_dockerignore_allows control-ui/Dockerfile.dockerignore gfs-interaction-policy
+assert_dockerignore_allows control-ui/Dockerfile.dockerignore host-locale
 assert_dockerignore_allows control-ui/Dockerfile.dockerignore llm-providers
 assert_dockerignore_excludes_generated_dependencies \
   control-ui/Dockerfile.dockerignore gfs-interaction-policy
+assert_dockerignore_excludes_generated_dependencies \
+  control-ui/Dockerfile.dockerignore host-locale
 assert_dockerignore_narrow_package control-ui/Dockerfile.dockerignore frontend-components
 assert_dockerignore_excludes_generated_dependencies \
   control-ui/Dockerfile.dockerignore frontend-components
