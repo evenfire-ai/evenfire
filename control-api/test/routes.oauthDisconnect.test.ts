@@ -5,17 +5,43 @@ import { config } from '../src/config.js'
 import { MockGateway } from './mockGateway.js'
 
 const mockPoolQuery = vi.fn()
+const rateLimiter = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
 vi.mock('../src/db.js', () => ({
   pool: {
     query: (...args: unknown[]) => mockPoolQuery(...args),
   },
 }))
+vi.mock('../src/services/rateLimiterService.js', () => rateLimiter)
 
 const RPC_PROXY_TOKEN = 'dev-rpc-proxy-token'
 const URL = '/api/v1/internal/sandbox-ui/oauth/grant'
 
 function authed() {
-  const app = createApp(new MockGateway() as never)
+  const gateway = new MockGateway()
+  void gateway.createResource(
+    'workflowrecipes',
+    {
+      metadata: { name: 'crm' },
+      spec: {
+        oauthClients: [
+          {
+            id: 'salesforce-prod',
+            provider: 'salesforce',
+            clientIdRef: { name: 'salesforce-prod', key: 'client-id' },
+            clientSecretRef: { name: 'salesforce-prod', key: 'client-secret' },
+          },
+          {
+            id: 'never-connected',
+            provider: 'salesforce',
+            clientIdRef: { name: 'never-connected', key: 'client-id' },
+            clientSecretRef: { name: 'never-connected', key: 'client-secret' },
+          },
+        ],
+      },
+    },
+    config.sandboxNamespace
+  )
+  const app = createApp(gateway as never)
   return request(app)
     .delete(URL)
     .set('Authorization', `Bearer ${RPC_PROXY_TOKEN}`)
@@ -26,6 +52,15 @@ describe('DELETE /api/v1/internal/sandbox-ui/oauth/grant (spec §9.9 disconnect)
   beforeEach(() => {
     mockPoolQuery.mockReset()
     mockPoolQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+    rateLimiter.checkAndIncrement.mockReset()
+    rateLimiter.checkAndIncrement.mockResolvedValue({
+      allowed: true,
+      backendAvailable: true,
+      count: 1,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+    })
   })
 
   it('returns 401 when service-token auth is missing', async () => {

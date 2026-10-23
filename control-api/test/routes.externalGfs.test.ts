@@ -29,6 +29,7 @@ const mockAppendPermissionEvents = vi.hoisted(() => vi.fn())
 const mockWithTransaction = vi.hoisted(() => vi.fn())
 const mockResolveActiveLink = vi.hoisted(() => vi.fn())
 const mockIsDesktopUserActive = vi.hoisted(() => vi.fn())
+const mockRequireWorkflowActionAuthority = vi.hoisted(() => vi.fn())
 
 vi.mock('../src/services/auth/externalSessionAuthentication.js', () => ({
   authenticateExternalUserSession: (...a: unknown[]) => mockVerifyExternalSessionToken(...a),
@@ -116,6 +117,17 @@ vi.mock('../src/services/tracing/controlApiPermissionEvents.js', () => ({
 vi.mock('../src/middleware/controlUIAuth.js', () => ({
   requireAuthForControlUI: (_req: unknown, _res: unknown, next: () => void) => next(),
 }))
+vi.mock('../src/services/workflows/workflowAuthorityBindingService.js', async importOriginal => {
+  const actual =
+    await importOriginal<
+      typeof import('../src/services/workflows/workflowAuthorityBindingService.js')
+    >()
+  return {
+    ...actual,
+    requireWorkflowActionAuthority: (...args: unknown[]) =>
+      mockRequireWorkflowActionAuthority(...args),
+  }
+})
 
 // user/team subject ids are real UUIDs (validated by parseSubject); the caller
 // session + delegation target use valid UUIDs so the fixtures match production.
@@ -149,13 +161,13 @@ const ACTIVE_LINK = {
   createdAt: new Date('2026-08-10T00:00:00.000Z'),
 }
 
-async function buildApp() {
+async function buildApp(gateway?: { getResourceExact: (...args: unknown[]) => Promise<unknown> }) {
   const { createExternalGfsRouter } = await import('../src/routes/external/gfs.js')
   const { correlationIdMiddleware } = await import('../src/middleware/correlationId.js')
   const app = express()
   app.use(express.json())
   app.use(correlationIdMiddleware)
-  app.use(createExternalGfsRouter())
+  app.use(createExternalGfsRouter(gateway as never))
   return app
 }
 
@@ -225,6 +237,7 @@ beforeEach(() => {
   mockWithTransaction.mockReset()
   mockResolveActiveLink.mockReset()
   mockIsDesktopUserActive.mockReset()
+  mockRequireWorkflowActionAuthority.mockReset()
   mockResolveActiveLink.mockResolvedValue(null)
   mockIsDesktopUserActive.mockResolvedValue(true)
   mockQuery.mockImplementation(async (text: string) => {
@@ -239,6 +252,7 @@ beforeEach(() => {
   )
   mockAppendPermissionEvents.mockResolvedValue(null)
   mockSignGfsToken.mockReturnValue({ token: 'gfs-user-token', expiresInSeconds: 300 })
+  mockRequireWorkflowActionAuthority.mockResolvedValue(null)
   mockSignCurrentExternalGfsUserToken.mockImplementation(
     async (
       authentication: { claims?: typeof SESSION } | undefined,
@@ -263,6 +277,26 @@ const auth = () =>
     status: 'authenticated',
     contract: 'v1',
     claims: SESSION,
+  })
+
+const v2Auth = () =>
+  mockVerifyExternalSessionToken.mockResolvedValue({
+    status: 'authenticated',
+    contract: 'v2',
+    claims: {
+      userId: SESSION.userId,
+      email: SESSION.email,
+      teamId: SESSION.teamId,
+      role: SESSION.role,
+      exp: SESSION.exp,
+    },
+    authorityContext: {
+      contract: 'v2',
+      userId: U1,
+      sid: '99999999-9999-4999-8999-999999999999',
+      jti: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      sessionVersion: 1,
+    },
   })
 
 function activeSessionLifecycleResult(
@@ -1031,6 +1065,94 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
       authGeneration: 1,
       principalType: 'user',
     })
+  })
+
+  it('embeds the verified exact v2 action binding without turning it into service identity', async () => {
+    v2Auth()
+    const binding = {
+      version: 2 as const,
+      userId: U1,
+      sid: '99999999-9999-4999-8999-999999999999',
+      sessionVersion: 1,
+      delegationJti: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      operationId: 'gfs.read' as const,
+      resource: {
+        environmentId: 'development:local-cluster',
+        type: 'gfs_resource' as const,
+        canonicalId: `gfs_resource:${R}`,
+        logicalId: R,
+        displayName: R,
+      },
+      target: { drive: 'main', resourceId: R },
+      targetHash: 'ath2_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      accessPathId: 'ap1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      authorizationRevision: 'ar1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      pathKind: 'direct' as const,
+      effectiveTeamId: null,
+      behaviorBindingHash: 'bh2_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    }
+    mockRequireWorkflowActionAuthority.mockResolvedValue({
+      binding,
+      sourceIssuedAt: 100,
+      sourceExpiresAt: 200,
+      bindingHash: 'binding-hash',
+    })
+    const gateway = { getResourceExact: vi.fn() }
+
+    const res = await request(await buildApp(gateway))
+      .post('/external/gfs/token')
+      .set('x-user-session-token', 'v2-session')
+      .set('x-evenfire-action-delegation', 'signed-v2-action')
+      .send({
+        scopes: ['gfs.read'],
+        operationId: 'gfs.read',
+        resourceId: R,
+        target: binding.target,
+      })
+
+    expect(res.status).toBe(200)
+    expect(mockRequireWorkflowActionAuthority).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operationId: 'gfs.read',
+        resourceType: 'gfs_resource',
+        resourceLogicalId: R,
+        target: binding.target,
+        gateway,
+      })
+    )
+    expect(mockSignCurrentExternalGfsUserToken.mock.calls[0]?.[1]).toEqual({
+      subject: U1,
+      drive: 'main',
+      scopes: ['gfs.read'],
+      pathBindings: [],
+      actionAuthority: { binding, sourceIssuedAt: 100, sourceExpiresAt: 200 },
+    })
+    expect(mockSignGfsToken).toHaveBeenCalledWith({
+      subject: U1,
+      drive: 'main',
+      scopes: ['gfs.read'],
+      pathBindings: [],
+      principalType: 'user',
+      actionAuthority: { binding, sourceIssuedAt: 100, sourceExpiresAt: 200 },
+    })
+  })
+
+  it('fails closed when a v2 action delegation cannot be checked', async () => {
+    v2Auth()
+    const res = await request(await buildApp())
+      .post('/external/gfs/token')
+      .set('x-user-session-token', 'v2-session')
+      .set('x-evenfire-action-delegation', 'signed-v2-action')
+      .send({
+        scopes: ['gfs.read'],
+        operationId: 'gfs.read',
+        resourceId: R,
+        target: { drive: 'main', resourceId: R },
+      })
+
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'authority_unavailable' })
+    expect(mockSignGfsToken).not.toHaveBeenCalled()
   })
 
   it('denies token minting for a retired Desktop user before signing a user-plane token', async () => {
@@ -2349,6 +2471,43 @@ describe('GET /external/gfs/resources/:id/affordances', () => {
 })
 
 describe('user resource mutations via gfsc proxy', () => {
+  it.each([
+    ['resource read without delegation', 'get', `/external/gfs/proxy/${R}`, undefined],
+    ['resource read with forged delegation', 'get', `/external/gfs/proxy/${R}`, 'forged-token'],
+    ['resource write', 'post', `/external/gfs/resources/${R}/children`, undefined],
+    ['resource delete', 'delete', `/external/gfs/resources/${R}`, undefined],
+    ['upload', 'post', '/external/gfs/uploads', undefined],
+    // This metadata relay currently mints an unbound GFS write token too, so
+    // V2 capability discovery stays disabled until it has an action-bound path.
+    ['upload capabilities', 'get', '/external/gfs/capabilities', undefined],
+    ['grant mutation', 'put', '/external/gfs/grants', undefined],
+    ['share mutation', 'post', '/external/gfs/shares', undefined],
+  ] as const)(
+    'rejects V2 %s mediation without minting a legacy child token or producing effects',
+    async (_label, method, path, delegation) => {
+      v2Auth()
+      const fetchMock = vi.fn(
+        async () => new Response('legacy child reached GFSC', { status: 200 })
+      )
+      vi.stubGlobal('fetch', fetchMock)
+      const app = await buildApp()
+      const call = request(app)[method](path).set('x-user-session-token', 'v2-session')
+      if (delegation) call.set('x-evenfire-action-delegation', delegation)
+      call.send({ name: 'child', kind: 'directory', permissions: ['read'] })
+
+      const response = await call
+
+      expect(response.status).toBe(403)
+      expect(response.body).toEqual({ error: 'action_delegation_required' })
+      expect(mockSignCurrentExternalGfsUserToken).not.toHaveBeenCalled()
+      expect(mockSignGfsToken).not.toHaveBeenCalled()
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(
+        mockQuery.mock.calls.some(call => /INSERT INTO gfs_(?:grants|shares)/.test(String(call[0])))
+      ).toBe(false)
+    }
+  )
+
   it('rejects non-session tokens on external mutation routes before minting a GFS token', async () => {
     mockVerifyExternalSessionToken.mockResolvedValue({
       status: 'invalid',

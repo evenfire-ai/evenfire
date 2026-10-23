@@ -4,6 +4,7 @@
  */
 import express, { type Express } from 'express'
 import pinoHttp from 'pino-http'
+import { createWfcAuthorityCheckpointer } from './auth/actionAuthority'
 import { JwtVerifier } from './auth/jwtVerifier'
 import type { Config } from './config'
 import { logger } from './logger'
@@ -35,6 +36,15 @@ export function createApp(config: Config): Express {
       maxPathDepth: config.maxPathDepth,
       maxUploadBytes: config.maxUploadBytes,
       verifier,
+      ...(config.controlApiBaseUrl && config.controlApiServiceToken
+        ? {
+            checkpointAuthority: createWfcAuthorityCheckpointer({
+              baseUrl: config.controlApiBaseUrl,
+              serviceToken: config.controlApiServiceToken,
+              timeoutMs: config.authorityCheckpointTimeoutMs ?? 5000,
+            }),
+          }
+        : {}),
     })
   )
 

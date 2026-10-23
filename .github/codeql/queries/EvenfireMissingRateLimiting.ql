@@ -17,81 +17,29 @@
 import javascript
 import semmle.javascript.security.dataflow.MissingRateLimiting
 import semmle.javascript.RestrictedLocations
+import semmle.javascript.Routing
+import semmle.javascript.frameworks.Express
 
-private predicate isCanonicalEvenfireRateLimitImport(ImportSpecifier spec) {
-  spec.getImportedName() = "rateLimitMiddleware" and
-  spec.getImportDeclaration().getImportedFile().getRelativePath() =
-    "control-api/src/middleware/rateLimitMiddleware.ts"
-}
-
-private class EvenfireRateLimitingMiddleware extends RateLimitingMiddleware, DataFlow::CallNode {
-  EvenfireRateLimitingMiddleware() {
-    exists(ImportSpecifier spec |
-      isCanonicalEvenfireRateLimitImport(spec) and
-      DataFlow::valueNode(spec).(DataFlow::SourceNode).flowsTo(this.getCalleeNode())
-    )
-  }
-
-  override Routing::Node getRoutingNode() {
-    exists(DataFlow::Node ref | this.flowsTo(ref) and result = Routing::getNode(ref))
-  }
-}
-
-private predicate sameSourceFile(Routing::Node left, Routing::Node right) {
+/**
+ * The public artifact-read route is admitted by the RPC Proxy and durable Control API
+ * buckets before the request reaches this Host. Its Host-side limiter follows the
+ * authenticated service guard so it can use the verified user ID as its key. The stock
+ * query only recognizes limiters that run before the expensive authorization guard.
+ * Keep this exception bound to the two exact Host routes and require their actual
+ * express-rate-limit middleware to remain installed.
+ */
+predicate hasProducerAdmittedHostArtifactReadLimit(Routing::Node useSite) {
   exists(
-    string path, int leftStartLine, int leftStartColumn, int leftEndLine, int leftEndColumn,
-    int rightStartLine, int rightStartColumn, int rightEndLine, int rightEndColumn
+    Express::RouteSetup setup, int siteIndex, int limiterIndex, RateLimitingMiddleware limiter
   |
-    left.hasLocationInfo(path, leftStartLine, leftStartColumn, leftEndLine, leftEndColumn) and
-    right.hasLocationInfo(path, rightStartLine, rightStartColumn, rightEndLine, rightEndColumn)
+    useSite = Routing::getNode(setup.getRouteHandlerNode(siteIndex)) and
+    setup.getFile().getRelativePath() = "mcp-host/src/server.ts" and
+    setup.getMethodName() = "get" and
+    setup.getPath() = ["/v1/runtime/artifacts", "/v1/runtime/artifacts/:filename/download"] and
+    siteIndex >= 0 and
+    limiterIndex >= 0 and
+    limiter.ref().flowsTo(setup.getRouteHandlerNode(limiterIndex))
   )
-}
-
-/* D33 recognition removed under Spec 60. */
-/*
-private predicate isCanonicalExternalLimiterIdentityImport(ImportSpecifier spec) {
-  spec.getImportDeclaration().getImportedFile().getRelativePath() =
-    "control-api/src/middleware/externalSessionAuth.ts" and
-  spec.getImportedName() = "requireExternalSessionLimiterIdentityWithPublicErrors"
-}
-
-private predicate isCanonicalExternalLimiterIdentityHandler(Routing::Node useSite) {
-  exists(ImportSpecifier spec, DataFlow::Node installedNode |
-    isCanonicalExternalLimiterIdentityImport(spec) and
-    useSite = Routing::getNode(installedNode) and
-    DataFlow::valueNode(spec).(DataFlow::SourceNode).flowsTo(installedNode)
-  )
-}
-
-private predicate hasSameRouteEvenfireLimiterAfterContext(Routing::Node useSite) {
-  exists(EvenfireRateLimitingMiddleware middleware, Routing::Node limiterNode |
-    limiterNode = middleware.getRoutingNode() and
-    limiterNode = useSite.getNextSibling+() and
-    sameSourceFile(useSite, limiterNode) and
-    not exists(Routing::Node earlierNode |
-      earlierNode = useSite.getNextSibling+() and
-      limiterNode = earlierNode.getNextSibling+() and
-      not earlierNode.mayResumeDispatch()
-    )
-  )
-}
-
-*/
-
-private predicate hasEvenfireRateLimitingGuard(Routing::Node useSite) {
-  exists(EvenfireRateLimitingMiddleware middleware |
-    useSite.isGuardedByNode(middleware.getRoutingNode()) and
-    sameSourceFile(useSite, middleware.getRoutingNode())
-  )
-}
-
-
-private predicate hasRateLimitingGuard(Routing::Node useSite) {
-  exists(RateLimitingMiddleware middleware |
-    useSite.isGuardedByNode(middleware.getRoutingNode()) and
-    not middleware instanceof EvenfireRateLimitingMiddleware
-  ) or
-  hasEvenfireRateLimitingGuard(useSite)
 }
 
 from
@@ -100,6 +48,7 @@ from
 where
   useSite = Routing::getNode(r).getRouteInstallation() and
   r.explain(explanation, reference, referenceLabel) and
-  not hasRateLimitingGuard(useSite)
+  not useSite.isGuardedByNode(any(RateLimitingMiddleware m).getRoutingNode()) and
+  not hasProducerAdmittedHostArtifactReadLimit(useSite)
 select useSite, "This route handler " + explanation + ", but is not rate-limited.", reference,
   referenceLabel

@@ -1,11 +1,63 @@
 import { Request, Response, Router } from 'express'
 import httpProxy from 'http-proxy'
 import { config } from '../config.js'
-import { AuthedRequest, requireRpcAuth } from '../middleware/auth.js'
+import { AuthedRequest, extractAuthToken, requireRpcAuth } from '../middleware/auth.js'
 import { requireScope } from '../middleware/auth.js'
+import {
+  RouteActionBindingError,
+  bindRouteActionV2,
+  rejectUnadmittedV2DerivedView,
+} from '../routeActionBindingV2.js'
+import { startActiveViewLease } from '../services/activeViewLease.js'
+import { admitLegacySessionCreation } from '../services/controlApiRestService.js'
 import { DesktopSessionService } from '../services/desktopSessionService.js'
+import { tokenDeclaresV2, verifyUserDelegationV2 } from '../userDelegationV2.js'
 
 const sessionService = new DesktopSessionService()
+
+const DESKTOP_UPSTREAM_BLOCKED_HEADERS = new Set([
+  'authorization',
+  'cookie',
+  'x-evenfire-action-delegation',
+])
+
+export function stripDesktopEdgeCredentials(headers: Request['headers']): void {
+  for (const name of Object.keys(headers)) {
+    const normalized = name.toLowerCase()
+    if (
+      DESKTOP_UPSTREAM_BLOCKED_HEADERS.has(normalized) ||
+      normalized.startsWith('x-clerum-edge-')
+    ) {
+      delete headers[name]
+    }
+  }
+}
+
+function isV2ViewRequest(req: AuthedRequest): boolean {
+  return Boolean(req.userDelegationV2 && req.authorizedActionV2)
+}
+
+function requireV2Delegation(req: AuthedRequest, res: Response, next: () => void): void {
+  if (!isV2ViewRequest(req)) {
+    res.status(401).json({ error: 'v2_delegation_required' })
+    return
+  }
+  next()
+}
+
+function v2ViewAuthority(req: AuthedRequest, res: Response, next: () => void): void {
+  if (!tokenDeclaresV2(extractAuthToken(req))) {
+    next()
+    return
+  }
+  requireRpcAuth(req, res, () =>
+    rejectUnadmittedV2DerivedView(req, res, () => requireScope('desktop:view')(req, res, next))
+  )
+}
+
+function v2OrLegacyHostAllowed(req: AuthedRequest, hostRef: string): boolean {
+  return isV2ViewRequest(req) || Boolean(req.auth?.hostRefs.includes(hostRef))
+}
 
 /**
  * Issues a desktop session cookie after validating the caller's JWT
@@ -29,7 +81,7 @@ function createStatusRoute(): Router {
     async (req: AuthedRequest, res: Response) => {
       const { hostRef } = req.params
 
-      if (!req.auth!.hostRefs.includes(hostRef)) {
+      if (!v2OrLegacyHostAllowed(req, hostRef)) {
         res.status(403).json({ error: 'hostRef not permitted by JWT' })
         return
       }
@@ -76,66 +128,98 @@ function createStatusRoute(): Router {
 function createSessionRoute(): Router {
   const router = Router()
 
-  router.post(
-    '/desktop/:hostRef/session',
-    requireRpcAuth,
-    requireScope('desktop:view'),
-    async (req: AuthedRequest, res: Response) => {
-      const { hostRef } = req.params
+  const openOrReconnect = async (
+    req: AuthedRequest,
+    res: Response,
+    admitLegacySession = false
+  ): Promise<void> => {
+    const { hostRef } = req.params
 
-      // Enforce JWT hostRef allowlist
-      if (!req.auth!.hostRefs.includes(hostRef)) {
-        res.status(403).json({ error: 'hostRef not permitted by JWT' })
+    if (!v2OrLegacyHostAllowed(req, hostRef)) {
+      res.status(403).json({ error: 'hostRef not permitted by JWT' })
+      return
+    }
+
+    if (admitLegacySession && !isV2ViewRequest(req)) {
+      const admission = await admitLegacySessionCreation(extractAuthToken(req))
+      if (!admission.allowed) {
+        res.setHeader('Retry-After', String(admission.retryAfterSeconds))
+        res.setHeader('Cache-Control', 'no-store')
+        for (const [name, value] of Object.entries(admission.headers)) {
+          res.setHeader(name, value)
+        }
+        res.status(admission.status).json({
+          error: admission.status === 429 ? 'Too Many Requests' : 'rate_limit_unavailable',
+          retryAfterSeconds: admission.retryAfterSeconds,
+        })
         return
       }
+    }
 
-      // Check HCC: is the desktop actually running?
-      try {
-        const hccRes = await fetch(
-          `${config.hccBaseUrl}/api/v1/desktop/${encodeURIComponent(hostRef)}`,
-          {
-            method: 'GET',
-            headers: config.desktopApiToken
-              ? { authorization: `Bearer ${config.desktopApiToken}` }
-              : {},
-            signal: AbortSignal.timeout(config.upstreamTimeoutMs),
-          }
-        )
-        if (!hccRes.ok) {
-          res.status(502).json({ error: 'HCC readiness check failed' })
-          return
+    // HCC remains readiness-only. The earlier v2 checkpoint is the sole
+    // authorization producer; this call cannot widen host authority.
+    try {
+      const hccRes = await fetch(
+        `${config.hccBaseUrl}/api/v1/desktop/${encodeURIComponent(hostRef)}`,
+        {
+          method: 'GET',
+          headers: config.desktopApiToken
+            ? { authorization: `Bearer ${config.desktopApiToken}` }
+            : {},
+          signal: AbortSignal.timeout(config.upstreamTimeoutMs),
         }
-        const status = (await hccRes.json()) as { status: string; hostRef?: string }
-        if (
-          typeof status !== 'object' ||
-          status === null ||
-          typeof (status as any).status !== 'string'
-        ) {
-          res.status(502).json({ error: 'Malformed HCC response' })
-          return
-        }
-        if (status.hostRef && status.hostRef !== hostRef) {
-          res.status(502).json({ error: 'HCC returned status for unexpected hostRef' })
-          return
-        }
-        if (status.status !== 'running') {
-          res.status(503).json({ error: 'Desktop not running' })
-          return
-        }
-      } catch (err) {
-        console.error('[DesktopProxy] HCC readiness check error:', err)
-        res.status(502).json({ error: 'Failed to reach HCC' })
+      )
+      if (!hccRes.ok) {
+        res.status(502).json({ error: 'HCC readiness check failed' })
         return
       }
+      const status = (await hccRes.json()) as { status: string; hostRef?: string }
+      if (
+        typeof status !== 'object' ||
+        status === null ||
+        typeof status.status !== 'string' ||
+        (status.hostRef && status.hostRef !== hostRef)
+      ) {
+        res.status(502).json({ error: 'Malformed HCC response' })
+        return
+      }
+      if (status.status !== 'running') {
+        res.status(503).json({ error: 'Desktop not running' })
+        return
+      }
+    } catch {
+      res.status(502).json({ error: 'Failed to reach HCC' })
+      return
+    }
 
-      // Issue session cookie. Secure is set in production (HTTPS only) and skipped
-      // in dev/test where the desktop app talks to rpc-proxy over plain HTTP.
+    if (!isV2ViewRequest(req)) {
       const cookie = sessionService.createSession(hostRef, req.auth!.sub)
       const secureAttr = process.env.NODE_ENV === 'production' ? '; Secure' : ''
       res.setHeader('Set-Cookie', [
         `${sessionService.getCookieName()}=${cookie}; Path=/api/v1/desktop/${hostRef}; HttpOnly; SameSite=Strict${secureAttr}; Max-Age=${Math.floor(sessionService.getMaxAgeMs() / 1000)}`,
       ])
-      res.json({ ok: true, hostRef })
+    }
+    res.json({ ok: true, hostRef })
+  }
+
+  router.post(
+    '/desktop/:hostRef/session',
+    requireRpcAuth,
+    rejectUnadmittedV2DerivedView,
+    requireScope('desktop:view'),
+    async (req: AuthedRequest, res: Response) => {
+      await openOrReconnect(req, res, true)
+    }
+  )
+
+  router.post(
+    '/desktop/:hostRef/reconnect',
+    requireRpcAuth,
+    rejectUnadmittedV2DerivedView,
+    requireScope('desktop:view'),
+    requireV2Delegation,
+    async (req: AuthedRequest, res: Response) => {
+      await openOrReconnect(req, res)
     }
   )
 
@@ -180,26 +264,35 @@ const proxy = createDesktopHttpProxy()
 function createViewRoute(): Router {
   const router = Router()
 
-  router.all('/desktop/:hostRef/view/*', (req: Request, res: Response) => {
+  router.all('/desktop/:hostRef/view/*', v2ViewAuthority, (req: Request, res: Response) => {
     const { hostRef } = req.params
+    const authed = req as AuthedRequest
+    const v2Request = isV2ViewRequest(authed)
 
-    // Validate session cookie
-    const cookies = parseCookies(req.headers.cookie || '')
-    const cookieValue = cookies[sessionService.getCookieName()]
-    if (!cookieValue) {
-      res.status(401).json({ error: 'Desktop session required' })
-      return
-    }
-    const session = sessionService.validateSession(cookieValue)
-    if (!session || session.hostRef !== hostRef) {
-      res.status(401).json({ error: 'Invalid desktop session' })
-      return
+    if (!v2Request) {
+      const cookies = parseCookies(req.headers.cookie || '')
+      const cookieValue = cookies[sessionService.getCookieName()]
+      if (!cookieValue) {
+        res.status(401).json({ error: 'Desktop session required' })
+        return
+      }
+      const session = sessionService.validateSession(cookieValue)
+      if (!session || session.hostRef !== hostRef) {
+        res.status(401).json({ error: 'Invalid desktop session' })
+        return
+      }
     }
 
     // Proxy to desktop pod
     const target = `http://${hostRef}.${config.hostNamespace}.svc.cluster.local:${config.desktopPort}`
     const path = req.params[0] || ''
     req.url = `/${path}${req.url?.includes('?') ? req.url.slice(req.url.indexOf('?')) : ''}`
+    const lease = v2Request
+      ? startActiveViewLease(authed.authorizedActionV2!, { onDenied: () => res.destroy() })
+      : null
+    res.once('close', () => lease?.close())
+    res.once('finish', () => lease?.close())
+    stripDesktopEdgeCredentials(req.headers)
     proxy.web(req, res, { target })
   })
 
@@ -213,6 +306,55 @@ export function parseCookies(header: string): Record<string, string> {
     if (name) result[name.trim()] = rest.join('=').trim()
   }
   return result
+}
+
+function rejectUpgrade(socket: import('net').Socket, status: 400 | 401 | 403 | 503): void {
+  const reason = {
+    400: 'Bad Request',
+    401: 'Unauthorized',
+    403: 'Forbidden',
+    503: 'Service Unavailable',
+  }[status]
+  socket.write(`HTTP/1.1 ${status} ${reason}\r\n\r\n`)
+  socket.destroy()
+}
+
+async function handleV2DesktopUpgrade(
+  req: Request,
+  socket: import('net').Socket,
+  hostRef: string
+): Promise<void> {
+  const claims = verifyUserDelegationV2(extractAuthToken(req))
+  if (!claims) {
+    rejectUpgrade(socket, 401)
+    return
+  }
+  try {
+    const bound = bindRouteActionV2(
+      {
+        route: { path: '/desktop/:hostRef/view/*' },
+        method: 'GET',
+        params: { hostRef },
+        query: {},
+        body: undefined,
+      } as unknown as AuthedRequest,
+      claims
+    )
+    if (bound.operationId !== 'remote_desktop.reconnect') {
+      rejectUpgrade(socket, 403)
+      return
+    }
+    rejectUpgrade(socket, 503)
+  } catch (error) {
+    if (error instanceof RouteActionBindingError) {
+      rejectUpgrade(socket, error.code === 'invalid_binding' ? 400 : 403)
+      return
+    }
+    // The v2 view capability remains disabled until rollout; unexpected
+    // authority failures must not be mislabeled as a client authorization
+    // denial or reach the Desktop upstream.
+    rejectUpgrade(socket, 503)
+  }
 }
 
 /**
@@ -231,6 +373,11 @@ export function handleDesktopUpgrade(
   const hostRef = match[1]
   const path = match[2] || ''
 
+  if (tokenDeclaresV2(extractAuthToken(req))) {
+    void handleV2DesktopUpgrade(req, socket, hostRef)
+    return true
+  }
+
   // Validate via session cookie
   const cookies = parseCookies(req.headers.cookie || '')
   const cookieValue = cookies[sessionService.getCookieName()]
@@ -248,6 +395,7 @@ export function handleDesktopUpgrade(
 
   const target = `ws://${hostRef}.${config.hostNamespace}.svc.cluster.local:${config.desktopPort}`
   req.url = `/${path}`
+  stripDesktopEdgeCredentials(req.headers)
   proxy.ws(req, socket, head, { target })
   return true
 }

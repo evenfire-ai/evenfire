@@ -10,6 +10,7 @@ export type WorkflowPhase =
   | 'initializing'
   | 'running'
   | 'recovering'
+  | 'authorization_paused'
   | 'completed'
   | 'failed'
   | 'cancelled'

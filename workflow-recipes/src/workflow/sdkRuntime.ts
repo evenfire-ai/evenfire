@@ -11,6 +11,7 @@ import {
   type StepExecutor,
   type StepMcpServerRef,
   type StepSpec,
+  WorkflowAuthorizationPausedError,
   type WorkflowConfig,
   type WorkflowPhase,
   type WorkflowRecipeSpec,
@@ -32,7 +33,6 @@ import type { SnippetExecuteResponse } from './snippetTypes'
 // key pair (mirror of the enum comment in charts/.../workflowrecipe.yaml).
 type AgentProvider = LlmProviderId
 
-const DEFAULT_STEP_TIMEOUT_SECONDS = 300
 const PROVIDER_OUTPUT_LENGTH_EXCEEDED = 'provider_output_length_exceeded'
 const MCP_HOST_NOT_READY = 'mcp_host not ready'
 
@@ -109,6 +109,12 @@ class StepRuntimeError extends Error {
 class McpHostReadinessTimeoutError extends Error {
   constructor() {
     super(MCP_HOST_NOT_READY)
+  }
+}
+
+class WorkflowRunTerminatedError extends Error {
+  constructor(readonly phase: 'completed' | 'failed' | 'cancelled') {
+    super(`workflow_run_${phase}`)
   }
 }
 
@@ -207,7 +213,7 @@ export async function runWorkflowRuntime(deps: RuntimeDependencies): Promise<Run
       return { exitCode: 0, workflowPhase: 'completed' }
     }
 
-    await status.reportWorkflowStatus('running')
+    await reportRunningBoundary(status, signals, config.signalPollIntervalMs)
 
     let currentAgent = resolveLastCompletedAgent(orderedSteps, currentStatus, spec.agent)
     let needsInitialModelInjection = true
@@ -229,17 +235,23 @@ export async function runWorkflowRuntime(deps: RuntimeDependencies): Promise<Run
       const startedMs = Date.now()
       const executorKind = resolveExecutorKind(runtimeStep)
       const approvalBindingProof = runtimeStep.requiresApproval ? randomUUID() : undefined
-      await status.reportStepStatus(runtimeStep.id, 'running', {
-        executor: executorKind,
-        startedAt,
-        ...(approvalBindingProof
-          ? {
-              approvalBindingSha256: createHash('sha256')
-                .update(approvalBindingProof)
-                .digest('hex'),
-            }
-          : {}),
-      })
+      await reportStepRunningBoundary(
+        status,
+        signals,
+        config.signalPollIntervalMs,
+        runtimeStep.id,
+        {
+          executor: executorKind,
+          startedAt,
+          ...(approvalBindingProof
+            ? {
+                approvalBindingSha256: createHash('sha256')
+                  .update(approvalBindingProof)
+                  .digest('hex'),
+              }
+            : {}),
+        }
+      )
 
       try {
         if (isSnippetRuntimeStep(runtimeStep)) {
@@ -330,6 +342,12 @@ export async function runWorkflowRuntime(deps: RuntimeDependencies): Promise<Run
     await status.reportWorkflowStatus('completed', { completedAt: new Date().toISOString() })
     return { exitCode: 0, workflowPhase: 'completed' }
   } catch (err) {
+    if (err instanceof WorkflowRunTerminatedError) {
+      return {
+        exitCode: err.phase === 'completed' ? 0 : 1,
+        workflowPhase: err.phase,
+      }
+    }
     if (err instanceof GfsPublishCancelledError) {
       await status.reportWorkflowStatus('cancelled')
       return { exitCode: 1, workflowPhase: 'cancelled' }
@@ -351,6 +369,70 @@ export async function runWorkflowRuntime(deps: RuntimeDependencies): Promise<Run
     return { exitCode: 1, workflowPhase: 'failed', failureReason }
   } finally {
     stopPolling()
+  }
+}
+
+async function reportRunningBoundary(
+  status: RuntimeDependencies['status'],
+  signals: RuntimeDependencies['signals'],
+  pollIntervalMs: number
+): Promise<void> {
+  while (true) {
+    try {
+      await status.reportWorkflowStatus('running')
+      return
+    } catch (error) {
+      if (!(error instanceof WorkflowAuthorizationPausedError)) throw error
+      await waitForAuthorizationResume(status, signals, pollIntervalMs)
+    }
+  }
+}
+
+async function reportStepRunningBoundary(
+  status: RuntimeDependencies['status'],
+  signals: RuntimeDependencies['signals'],
+  pollIntervalMs: number,
+  stepId: string,
+  details: Parameters<RuntimeDependencies['status']['reportStepStatus']>[2]
+): Promise<void> {
+  while (true) {
+    try {
+      await status.reportStepStatus(stepId, 'running', details)
+      return
+    } catch (error) {
+      if (!(error instanceof WorkflowAuthorizationPausedError)) throw error
+      await waitForAuthorizationResume(status, signals, pollIntervalMs)
+    }
+  }
+}
+
+async function waitForAuthorizationResume(
+  status: RuntimeDependencies['status'],
+  signals: RuntimeDependencies['signals'],
+  pollIntervalMs: number
+): Promise<void> {
+  const delayMs = Math.max(250, pollIntervalMs)
+  while (true) {
+    if (signals.hasSignal('cancel')) {
+      await status.reportWorkflowStatus('cancelled')
+      throw new WorkflowRunTerminatedError('cancelled')
+    }
+    try {
+      const current = await status.getWorkflowStatus()
+      if (current.workflowPhase === 'running') return
+      if (
+        current.workflowPhase === 'completed' ||
+        current.workflowPhase === 'failed' ||
+        current.workflowPhase === 'cancelled'
+      ) {
+        throw new WorkflowRunTerminatedError(current.workflowPhase)
+      }
+    } catch (error) {
+      if (error instanceof WorkflowRunTerminatedError) throw error
+      // A temporary status read failure cannot authorize progress or turn a
+      // durable authorization pause into a terminal workflow failure.
+    }
+    await new Promise(resolve => setTimeout(resolve, delayMs))
   }
 }
 
@@ -420,11 +502,6 @@ function mergeSnippetArtifactsIntoOutput(response: SnippetExecuteResponse): unkn
     return { ...output, artifacts: [...existing, ...artifacts] }
   }
   return { value: response.output, artifacts }
-}
-
-function resolveStepTimeoutSeconds(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_STEP_TIMEOUT_SECONDS
-  return Math.max(1, Math.floor(value))
 }
 
 function resolveStepAgent(

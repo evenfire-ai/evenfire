@@ -6,6 +6,15 @@ metadata:
   name: host-context-controller-rpc-proxy-runtime
   namespace: rpc-proxy
 rules:
+  # HCC's strict Host rollout gate reads the producer Deployment cohort and
+  # every serving RPC Proxy pod. It does not mutate the RPC Proxy namespace.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["rpc-proxy"]
+    verbs: ["get"]
   # Manage NetworkPolicies (L0 deny-all + L1 infrastructure)
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]

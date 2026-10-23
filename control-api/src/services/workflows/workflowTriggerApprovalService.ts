@@ -1,6 +1,8 @@
+import { createHash } from 'node:crypto'
 import { config } from '../../config.js'
-import { withTransaction } from '../../db.js'
+import { type DbClient, withTransaction } from '../../db.js'
 import { approvalsCreatedTotal } from '../../observability/metrics.js'
+import { stableStringify } from '../../utils/stableStringify.js'
 import { emitNotification } from '../notificationEmitter.js'
 import { ApprovalPromptHistoryService } from '../tracing/approvalPromptHistoryService.js'
 import {
@@ -13,6 +15,27 @@ import {
   type WorkflowRunRow,
   computeWorkflowRunPayloadHash,
 } from '../workflowRunService.js'
+import {
+  type WorkflowAuthorityBinding,
+  persistWorkflowAuthorityBinding,
+} from './workflowAuthorityBindingService.js'
+
+function matchesPersistedAuthorityIgnoringDelegationIdentity(
+  authority: WorkflowAuthorityBinding,
+  persistedBindingHash: string,
+  persistedDelegationJti: string | null | undefined
+): boolean {
+  if (authority.bindingHash === persistedBindingHash) return true
+  if (!persistedDelegationJti) return false
+  const persistedShape = {
+    ...authority.binding,
+    delegationJti: persistedDelegationJti,
+  }
+  return (
+    createHash('sha256').update(stableStringify(persistedShape)).digest('hex') ===
+    persistedBindingHash
+  )
+}
 
 export type WorkflowTriggerApprovalRunIntent = {
   actorType: WorkflowRunActorType
@@ -57,6 +80,12 @@ export async function createWorkflowTriggerApprovalRequest(params: {
   idempotencyKey: string
   correlation?: { taskId?: string; stepId?: string }
   runIntent: WorkflowTriggerApprovalRunIntent
+  authority?: WorkflowAuthorityBinding | null
+  reauthorize?: () => Promise<WorkflowAuthorityBinding | null>
+  validateCurrentInTransaction?: (
+    db: DbClient,
+    authority: WorkflowAuthorityBinding
+  ) => Promise<WorkflowAuthorityBinding>
 }): Promise<WorkflowTriggerApprovalRequestResult> {
   const ttlSeconds = config.userApprovalRequestDefaultTtlSec
   const payloadHash = computePayloadHash({
@@ -67,25 +96,55 @@ export async function createWorkflowTriggerApprovalRequest(params: {
     ttlSeconds,
   })
 
+  const phaseOneAuthority = params.reauthorize ? await params.reauthorize() : params.authority
+  if (params.authority && phaseOneAuthority?.bindingHash !== params.authority.bindingHash) {
+    throw new Error('workflow_trigger_authority_changed')
+  }
+  if (params.reauthorize && phaseOneAuthority && !params.validateCurrentInTransaction) {
+    throw new Error('workflow_trigger_current_authority_validator_required')
+  }
+
   const result = await withTransaction(async db => {
-    const inserted = await db.query(
-      `INSERT INTO workflow_approval_requests
+    let existingBeforeFence = { rowCount: 0 as number | null }
+    if (phaseOneAuthority) {
+      await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [
+        `workflow_approval:${params.recipeNamespace}:${params.recipeName}:${params.idempotencyKey}`,
+      ])
+      existingBeforeFence = await db.query(
+        `SELECT id FROM workflow_approval_requests
+          WHERE recipe_namespace = $1 AND recipe_name = $2 AND idempotency_key = $3`,
+        [params.recipeNamespace, params.recipeName, params.idempotencyKey]
+      )
+    }
+    let authority = phaseOneAuthority
+    let inserted: { rows: unknown[]; rowCount: number | null } = { rows: [], rowCount: 0 }
+    if ((existingBeforeFence.rowCount ?? 0) === 0) {
+      authority =
+        phaseOneAuthority && params.validateCurrentInTransaction
+          ? await params.validateCurrentInTransaction(db, phaseOneAuthority)
+          : phaseOneAuthority
+      if (phaseOneAuthority && authority?.bindingHash !== phaseOneAuthority.bindingHash) {
+        throw new Error('workflow_trigger_authority_changed')
+      }
+      inserted = await db.query(
+        `INSERT INTO workflow_approval_requests
          (recipe_namespace, recipe_name, expires_at, status, target_user_id, target_team_id, payload, idempotency_key, correlation, payload_hash)
        VALUES ($1, $2, NOW() + interval '1 second' * $3, 'pending', $4, $5, $6::jsonb, $7, $8::jsonb, $9)
        ON CONFLICT (recipe_namespace, recipe_name, idempotency_key) DO NOTHING
        RETURNING id, expires_at, status`,
-      [
-        params.recipeNamespace,
-        params.recipeName,
-        ttlSeconds,
-        params.targetUserId ?? null,
-        params.targetTeamId ?? null,
-        JSON.stringify(params.payload),
-        params.idempotencyKey,
-        params.correlation ? JSON.stringify(params.correlation) : null,
-        payloadHash,
-      ]
-    )
+        [
+          params.recipeNamespace,
+          params.recipeName,
+          ttlSeconds,
+          params.targetUserId ?? null,
+          params.targetTeamId ?? null,
+          JSON.stringify(params.payload),
+          params.idempotencyKey,
+          params.correlation ? JSON.stringify(params.correlation) : null,
+          payloadHash,
+        ]
+      )
+    }
 
     if ((inserted.rowCount ?? 0) === 0) {
       const existing = await db.query(
@@ -118,7 +177,10 @@ export async function createWorkflowTriggerApprovalRequest(params: {
                 wr.completed_at,
                 wr.last_reconciled_at,
                 wr.created_at,
-                wr.updated_at
+                wr.updated_at,
+                wr.failure_reason,
+                binding.binding_hash AS "authorityBindingHash",
+                binding.delegation_jti AS "authorityDelegationJti"
            FROM workflow_approval_requests war
       LEFT JOIN workflow_approval_trigger_run_intents watri
              ON watri.approval_request_id = war.id
@@ -126,6 +188,8 @@ export async function createWorkflowTriggerApprovalRequest(params: {
              ON wr.recipe_namespace = war.recipe_namespace
             AND wr.recipe_name = war.recipe_name
             AND wr.idempotency_key = war.idempotency_key
+      LEFT JOIN workflow_authority_bindings binding
+             ON binding.id = war.trigger_authority_binding_id
           WHERE war.recipe_namespace = $1
             AND war.recipe_name = $2
             AND war.idempotency_key = $3`,
@@ -143,9 +207,21 @@ export async function createWorkflowTriggerApprovalRequest(params: {
         payloadHash: string
         runIntentApprovalRequestId?: string | null
         run_id?: string | null
+        authorityBindingHash?: string | null
+        authorityDelegationJti?: string | null
       } & Partial<WorkflowRunRow>
 
-      if (row.payloadHash && row.payloadHash !== payloadHash) {
+      if (
+        (row.payloadHash && row.payloadHash !== payloadHash) ||
+        Boolean(row.authorityBindingHash) !== Boolean(authority) ||
+        (authority &&
+          row.authorityBindingHash &&
+          !matchesPersistedAuthorityIgnoringDelegationIdentity(
+            authority,
+            row.authorityBindingHash,
+            row.authorityDelegationJti
+          ))
+      ) {
         return {
           kind: 'mismatch' as const,
           approvalRequestId: row.id,
@@ -177,6 +253,22 @@ export async function createWorkflowTriggerApprovalRequest(params: {
     }
 
     const row = inserted.rows[0] as { id: string; expires_at: string; status: ApprovalStatus }
+    const authorityBindingId = authority
+      ? await persistWorkflowAuthorityBinding(db, {
+          authority,
+          kind: 'trigger',
+          entityType: 'workflow_approval',
+          entityId: row.id,
+        })
+      : null
+    if (authorityBindingId) {
+      await db.query(
+        `UPDATE workflow_approval_requests
+            SET trigger_authority_binding_id = $2
+          WHERE id = $1`,
+        [row.id, authorityBindingId]
+      )
+    }
     await new ApprovalPromptHistoryService(db).capture({
       approvalRequestId: row.id,
       approvalKind: 'workflow',
@@ -196,6 +288,7 @@ export async function createWorkflowTriggerApprovalRequest(params: {
       inputs: params.runIntent.inputs ?? {},
       intermediateParameters: params.runIntent.intermediateParameters ?? null,
       outputOverrides: params.runIntent.outputOverrides ?? null,
+      authorityBindingHash: authority?.bindingHash ?? null,
     })
 
     await db.query(

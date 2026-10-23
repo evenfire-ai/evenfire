@@ -26,7 +26,7 @@ describe('db.initDb', () => {
     clientQuery.mockResolvedValue({ rows: [], rowCount: 0 })
   })
 
-  it('holds one advisory lock while partitioning legacy and PR1 migration transactions', async () => {
+  it('holds one advisory lock while partitioning legacy and composed migration transactions', async () => {
     const { initDb } = await import('../src/db.js')
 
     await initDb()
@@ -67,8 +67,9 @@ describe('db.initDb', () => {
     expect(sqls).not.toContain('ROLLBACK')
     // The migration plan now includes four separately committed parent-dev receipts at 0126-0129.
     // S1e folded three PR1 migrations; PR1 is five versions plus the 0132 function transaction.
-    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(30)
-    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(30)
+    // PR2 adds eight versions, and 0137 builds its online index between the schema and receipt transactions.
+    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(39)
+    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(39)
     expect(sqls[sqls.length - 2]).toBe('COMMIT')
     expect(sqls[sqls.length - 1]).toContain('SELECT pg_advisory_unlock')
     expect(clientRelease).toHaveBeenCalledTimes(1)

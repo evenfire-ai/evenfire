@@ -1,4 +1,5 @@
 import type { StepPhase, WorkflowPhase } from '../config-loader/types'
+import { WorkflowAuthorizationPausedError } from '../errors'
 import type { RuntimeTokenProvider } from '../runtime-token-provider/provider'
 import { requireRuntimeToken } from '../runtime-token-provider/provider'
 import { sendWithAuthRetryOn401 } from './authRetry'
@@ -54,6 +55,10 @@ export class StatusReporter {
           return
         }
 
+        if (resp.status === 423 && (await responseHasAuthorizationPauseCode(resp))) {
+          throw new WorkflowAuthorizationPausedError()
+        }
+
         // 4xx = permanent client error, don't retry. This must be fatal because
         // otherwise the coordinator can mark a workflow completed while step status
         // patches were rejected.
@@ -69,6 +74,7 @@ export class StatusReporter {
         lastErr = new Error(`HTTP ${resp.status}`)
       } catch (err) {
         lastErr = err instanceof Error ? err : new Error(String(err))
+        if (lastErr instanceof WorkflowAuthorizationPausedError) throw lastErr
         if (lastErr.message.startsWith('WRC rejected')) throw lastErr
       }
       if (attempt < MAX_RETRIES - 1) {
@@ -137,6 +143,15 @@ async function responseHasAlreadyTerminalPhase(resp: Response): Promise<boolean>
   try {
     const text = await resp.text()
     return text.toLowerCase().includes('already in terminal phase')
+  } catch {
+    return false
+  }
+}
+
+async function responseHasAuthorizationPauseCode(resp: Response): Promise<boolean> {
+  try {
+    const body = (await resp.json()) as { code?: unknown }
+    return body?.code === 'workflow_authorization_paused'
   } catch {
     return false
   }

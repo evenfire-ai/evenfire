@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { AddressInfo } from 'net'
 import { createHash } from 'node:crypto'
+import { withRpcProxyEdgeTestAuthentication } from './rpcProxyEdgeTestHeaders'
 
 type StartResult = {
   server: any
@@ -23,11 +24,11 @@ async function startServer(
 }
 
 function rpcEdgeHeaders(userId = 'user-1'): Record<string, string> {
-  return {
+  return withRpcProxyEdgeTestAuthentication({
     'x-clerum-edge-caller': 'rpc-proxy',
     'x-clerum-edge-host-ref': 'chatllm',
     'x-clerum-edge-user-id': userId,
-  }
+  })
 }
 
 function channelReaderEdgeHeaders(
@@ -353,6 +354,19 @@ describe('RPCServer v1 runtime interface contract', () => {
         }),
       })
       expect(ok.status).toBe(200)
+
+      const missingRequestId = await fetch(`${baseUrl}/v1/runtime/approvals/deny`, {
+        method: 'POST',
+        headers: {
+          ...rpcEdgeHeaders('edge-user-1'),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ taskId: 'task-1' }),
+      })
+      expect(missingRequestId.status).toBe(400)
+      expect(await missingRequestId.json()).toEqual({
+        error: 'Missing userId or requestId',
+      })
 
       const missingUser = await fetch(`${baseUrl}/v1/runtime/approvals/deny`, {
         method: 'POST',

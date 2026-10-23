@@ -141,9 +141,19 @@ assert_deploy_runs_expected_fake_commands() {
 
   [ "$(<"$lock_log")" = 'lock-check' ] || problem+="unexpected lock sequence; "
   calls="$(<"$mutation_log")"
-  printf -v expected_calls \
-    'build --only=%s\nkubectl --context=clerum-test -n %s rollout restart deployment/%s\nkubectl --context=clerum-test -n %s rollout status deployment/%s --timeout=180s' \
-    "$selector" "$namespace" "$deployment" "$namespace" "$deployment"
+  if [[ "$selector" == "rpc-proxy" ]]; then
+    printf -v expected_calls \
+      'build --only=%s\nedge-rollout restart-targets --context clerum-test --restart-proxy' \
+      "$selector"
+  elif [[ "$selector" == "mcp-host" ]]; then
+    printf -v expected_calls \
+      'build --only=%s\nedge-rollout restart-targets --context clerum-test --restart-host %s' \
+      "$selector" "$deployment"
+  else
+    printf -v expected_calls \
+      'build --only=%s\nkubectl --context=clerum-test -n %s rollout restart deployment/%s\nkubectl --context=clerum-test -n %s rollout status deployment/%s --timeout=180s' \
+      "$selector" "$namespace" "$deployment" "$namespace" "$deployment"
+  fi
   [ "$calls" = "$expected_calls" ] || problem+="unexpected mutation sequence; "
 
   if [ -z "$problem" ]; then
@@ -175,6 +185,11 @@ STUB
 #!/usr/bin/env bash
 set -eu
 printf 'build %s\n' "$*" >> "${FAKE_MUTATION_LOG:?}"
+STUB
+  cat > "$stub_root/scripts/minikube/rollout-rpc-proxy-edge-protocol.sh" <<'STUB'
+#!/usr/bin/env bash
+set -eu
+printf 'edge-rollout %s\n' "$*" >> "${FAKE_MUTATION_LOG:?}"
 STUB
   cat > "$stub_root/bin/kubectl" <<'STUB'
 #!/usr/bin/env bash
@@ -258,6 +273,7 @@ assert_contains minikube-start 'open -a "Docker Desktop"'
 assert_not_contains minikube-start "docker info"
 assert_contains minikube-deploy-all "with-t2-mutation-lock.sh"
 assert_contains minikube-deploy-all-body "minikube-sync-auth-key"
+assert_contains minikube-deploy-all-body "assert-rpc-proxy-edge-apply-safe.rb"
 assert_contains minikube-build-images "with-t2-mutation-lock.sh"
 assert_contains minikube-build-images-body "require-t2-mutation-lock.sh"
 assert_contains minikube-build-custom-coordinator-fixture "with-t2-mutation-lock.sh"
@@ -272,10 +288,12 @@ assert_contains minikube-deploy-service "unsupported SVC selector"
 assert_contains minikube-deploy-service-body "unsupported SVC selector"
 assert_contains minikube-deploy-service "effective DEPLOYMENT could not be resolved from SVC"
 assert_contains minikube-deploy-service-body "effective DEPLOYMENT could not be resolved from SVC"
+assert_contains minikube-deploy-service-body "rollout-rpc-proxy-edge-protocol.sh restart-targets"
 assert_contains minikube-restart-deploy "with-t2-mutation-lock.sh"
 assert_contains minikube-restart-deploy-body "require-t2-mutation-lock.sh"
 assert_contains minikube-restart-deploy "unsupported SVC selector"
 assert_contains minikube-restart-deploy-body "unsupported SVC selector"
+assert_contains minikube-restart-deploy-body "rollout-rpc-proxy-edge-protocol.sh restart-targets"
 assert_contains minikube-sync-auth-key "with-t2-mutation-lock.sh"
 assert_contains minikube-sync-auth-key-body "--context=clerum-test"
 assert_contains minikube-sync-auth-key-body "scripts/minikube/sync-auth-key.sh"

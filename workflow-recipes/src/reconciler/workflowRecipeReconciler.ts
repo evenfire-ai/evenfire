@@ -1736,7 +1736,8 @@ export class WorkflowRecipeReconciler {
     const workflowInProgress =
       workflowPhase === 'initializing' ||
       workflowPhase === 'running' ||
-      workflowPhase === 'recovering'
+      workflowPhase === 'recovering' ||
+      workflowPhase === 'authorization_paused'
 
     if (!isWorkflow || !workflowInProgress || recipe.metadata.deletionTimestamp) return
 

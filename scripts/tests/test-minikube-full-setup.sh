@@ -1530,6 +1530,20 @@ assert_recovery_migrations_are_head_bound() {
   fi
 }
 
+assert_edge_rollout_apply_guard_precedes_full_overlay() {
+  local guard_line apply_line restart_line
+  guard_line="$(grep -n 'assert-rpc-proxy-edge-apply-safe.rb' scripts/minikube/full-setup.sh | head -1 | cut -d: -f1)"
+  apply_line="$(grep -n '\$KC kustomize "\$ACTIVE_MINIKUBE_RENDER_DIR" | \$KC apply -f -' scripts/minikube/full-setup.sh | head -1 | cut -d: -f1)"
+  restart_line="$(grep -n 'restart-targets' scripts/minikube/full-setup.sh | tail -1 | cut -d: -f1)"
+  if [[ -n "$guard_line" && -n "$apply_line" && -n "$restart_line" && \
+        "$guard_line" -lt "$apply_line" && "$restart_line" -gt "$apply_line" && \
+        "$(sed -n "${restart_line}p" scripts/minikube/full-setup.sh)" == *rollout-rpc-proxy-edge-protocol.sh* ]]; then
+    pass "full setup guards full-overlay apply and uses ordered edge-protocol restarts"
+  else
+    fail "full setup lacks its apply guard or ordered edge-protocol restart coordinator"
+  fi
+}
+
 # The guard that keeps this file honest: a case defined but never added to the
 # call block below reports nothing at all, which reads as a green run.
 assert_every_defined_case_is_invoked() {
@@ -1584,6 +1598,7 @@ assert_trace_writer_fence_is_behaviorally_fail_closed
 assert_interrupted_recovery_resume_restores_all_writer_fences
 assert_interrupted_recovery_fence_is_behaviorally_fail_closed
 assert_recovery_migrations_are_head_bound
+assert_edge_rollout_apply_guard_precedes_full_overlay
 assert_skip_build_follows_the_recorded_image_source
 assert_skip_build_says_it_is_following_the_cluster
 assert_an_acquiring_run_still_honours_image_source

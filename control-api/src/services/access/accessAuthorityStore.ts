@@ -15,6 +15,11 @@ import {
 } from './operationalAuthorityCandidates.js'
 import type { PrincipalAuthoritySnapshot } from './principalAuthoritySnapshot.js'
 import type { CanonicalResourceIdentity } from './resourceIdentity.js'
+import {
+  assembleOperationalBehaviorDimensions,
+  budgetContextRefsForGraph,
+  loadRuntimeBehaviorPolicySnapshot,
+} from './runtimeBehaviorSource.js'
 
 function publicRelationships(graph: OperationalResourceGraphResult | null) {
   if (!graph || graph.status !== 'current') return []
@@ -39,15 +44,34 @@ export async function loadResourceAuthority(input: {
     return loadDatabaseCandidates(input)
   }
   if (input.operationalGraph?.status === 'current') {
+    const policySnapshot = await loadRuntimeBehaviorPolicySnapshot({
+      db: input.db,
+      budget: input.budget,
+      contextRefs: budgetContextRefsForGraph(input.operationalGraph),
+    })
+    const behaviorDimensions = (
+      graph: Extract<OperationalResourceGraphResult, { status: 'current' }>,
+      runtimeRef: string | null,
+      teamId?: string
+    ) =>
+      assembleOperationalBehaviorDimensions({
+        userId: input.snapshot.userId,
+        ...(teamId ? { teamId } : {}),
+        graph,
+        policySnapshot,
+        runtimeRef,
+      })
     const candidates = ['mcp_server', 'shared_filesystem'].includes(input.resource.type)
       ? await loadDerivedOperationalCandidates({
           ...input,
           userId: input.snapshot.userId,
+          behaviorDimensions,
           graph: input.operationalGraph,
         })
       : await loadSimpleOperationalGrantCandidates({
           ...input,
           userId: input.snapshot.userId,
+          behaviorDimensions,
           graph: input.operationalGraph,
         })
     return Object.freeze({

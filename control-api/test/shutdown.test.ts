@@ -23,6 +23,7 @@ describe('Control API shutdown', () => {
 
     expect(corePoolIndex).toBeGreaterThan(names.indexOf('entity-change-dispatcher'))
     expect(corePoolIndex).toBeGreaterThan(names.indexOf('operational-access-indexer'))
+    expect(corePoolIndex).toBeGreaterThan(names.indexOf('pr2-runtime-evidence'))
   })
 
   it('closes every registered resource in order and continues after failures', async () => {
