@@ -7,9 +7,17 @@ import { asyncHandler } from '../../http/asyncHandler.js'
 import { extractK8sError } from '../../http/k8sError.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { RFC1123_RE } from '../../http/rfc1123.js'
-import { validateOAuthEndpointUrl } from '../../http/validateMcpServerSpec.js'
+import { type ValidationError, validateOAuthEndpointUrl } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
 import { type UiAuthedRequest } from '../../middleware/controlUIAuth.js'
+import {
+  type AsProfileId,
+  SCOPE_TOKEN_RE,
+  profileHasResourceScope,
+  profileScopeViolation,
+  profileUnverifiedScopes,
+  withProfileScopes,
+} from '../../oauth/asProfiles.js'
 import { buildCimdDocument } from '../../oauth/cimd.js'
 import { MAX_CLIENT_ID_LENGTH, isCimdClientId } from '../../oauth/cimdIdentity.js'
 import {
@@ -23,6 +31,7 @@ import { bestEffortRfc7592Delete } from '../../oauth/dcrCleanup.js'
 import {
   type DiscoveryResult,
   advertisesIssBinding,
+  defaultScopes,
   discoverRemoteOAuth,
   registrationModeInputs,
   selectRegistrationMode,
@@ -106,8 +115,15 @@ function logDcrRevokeLocalOnly(serverName: string, hasRegistrationClientUri: boo
 // importers (and the mapping's own test) keep resolving it from this module.
 export { discoveryHttpStatus }
 
+const MAX_SCOPES = 128 // mirrors the McpServer CRD spec.oauth.scopes maxItems
+
+// `authorizationServer` names the operator's Microsoft Entra tenant authority when the
+// server advertises Entra's multi-tenant one; discovery rejects any other override.
+const authorizationServerSchema = z.string().min(1).max(2048)
+
 const discoverBodySchema = z.object({
   baseUrl: z.string().min(1),
+  authorizationServer: authorizationServerSchema.optional(),
 })
 
 // Install body: serverName + contextRef + baseUrl + registration mode. A
@@ -120,9 +136,27 @@ const installBodySchema = z.object({
   clientId: z.string().min(1).max(MAX_CLIENT_ID_LENGTH).optional(),
   clientSecret: z.string().min(1).optional(),
   grantScope: z.enum(['user', 'context']).optional(),
+  authorizationServer: authorizationServerSchema.optional(),
+  // The full list to request; replaces the advertised defaults. The profile's required
+  // scopes are added on top and count towards MAX_SCOPES.
+  scopes: z
+    .array(z.string().min(1).max(512).regex(SCOPE_TOKEN_RE))
+    .min(1)
+    .max(MAX_SCOPES)
+    .optional(),
+  // The exact GUID-form scopes the operator confirmed as this server's own API.
+  confirmedUnverifiedScopes: z.array(z.string().min(1).max(512)).max(MAX_SCOPES).optional(),
 })
 
 type InstallBody = z.infer<typeof installBodySchema>
+
+/** Kernel §4 on the operator's authorization-server override, before any fetch. */
+async function authorizationServerKernelErrors(
+  authorizationServer: string | undefined
+): Promise<ValidationError[]> {
+  if (authorizationServer === undefined) return []
+  return validateOAuthEndpointUrl(authorizationServer, 'authorizationServer')
+}
 
 /**
  * Fenced-delete preconditions from a just-created object, or undefined when the
@@ -206,10 +240,28 @@ export interface RemoteOAuthSpec {
   supportsRefresh: boolean
   clientIdRef?: RemoteOAuthClientSecretRef
   clientSecretRef?: RemoteOAuthClientSecretRef
+  /** Closed authorization-server profile recognised from the pinned issuer; drives the wire. */
+  asProfile?: AsProfileId
 }
 
-function derivedScopes(result: DiscoveryResult): string[] {
-  return result.prm.scopes_supported ?? result.as.scopes_supported ?? []
+/**
+ * The scopes an install requests: the operator's list when given, else the advertised
+ * defaults, plus whatever the authorization-server profile always requires. Duplicates
+ * are dropped (first occurrence wins) here rather than in `withProfileScopes`, which the
+ * runtime also applies to already-installed CRs whose wire must not change.
+ */
+export function effectiveRemoteScopes(result: DiscoveryResult, override?: string[]): string[] {
+  const scopes = withProfileScopes(
+    override ?? defaultScopes(result.prm, result.as),
+    result.asProfile
+  )
+  return [...new Set(scopes)]
+}
+
+/** `spec.oauth.asProfile` of the object the apiserver returned for a write. */
+function persistedAsProfile(persisted: unknown): unknown {
+  const spec = (persisted as { spec?: { oauth?: { asProfile?: unknown } } } | null)?.spec
+  return spec?.oauth?.asProfile
 }
 
 export function buildRemoteOAuthSpec(
@@ -225,6 +277,8 @@ export function buildRemoteOAuthSpec(
     cimdClientId?: string
     /** Pre-registered confidential: operator-supplied plaintext client_id — DEC-23 backfill. */
     preRegisteredClientId?: string
+    /** The scopes the install validated; defaults to {@link effectiveRemoteScopes}. */
+    scopes?: string[]
   }
 ): RemoteOAuthSpec {
   const oauth: RemoteOAuthSpec = {
@@ -235,12 +289,13 @@ export function buildRemoteOAuthSpec(
     issuer: result.issuer,
     resource: result.resource,
     grantScope: opts.grantScope,
-    scopes: derivedScopes(result),
+    scopes: opts.scopes ?? effectiveRemoteScopes(result),
     bearerInBody: result.quirks.bearerInBody,
     supportsRefresh: result.quirks.supportsRefresh,
   }
   if (result.endpoints.registration) oauth.registrationEndpoint = result.endpoints.registration
   if (result.issForCallback) oauth.issForCallback = result.issForCallback
+  if (result.asProfile) oauth.asProfile = result.asProfile
   // C4 discriminator (DEC-18): Secret refs present ⇒ read the secret from the K8s
   // Secret (pre-registered). No refs + clientMode 'confidential' + `id` set ⇒ read
   // the secret from the encrypted `dynamic_clients` store (DCR). The two sources
@@ -506,10 +561,10 @@ export function createAdminRemoteMcpRouter(
     asyncHandler(async (req: UiAuthedRequest, res) => {
       const parsed = discoverBodySchema.safeParse(req.body)
       if (!parsed.success) {
-        res.status(400).json({ error: 'baseUrl is required' })
+        res.status(400).json({ error: 'invalid_request', detail: parsed.error.issues })
         return
       }
-      const { baseUrl } = parsed.data
+      const { baseUrl, authorizationServer } = parsed.data
 
       // Kernel §4: the admin-typed URL is untrusted input of origin — validate before
       // any fetch (discovery also kernel-guards internally, but a clean 400 here gives
@@ -519,8 +574,13 @@ export function createAdminRemoteMcpRouter(
         res.status(400).json({ error: kernelErrors[0].message, errors: kernelErrors })
         return
       }
+      const asKernelErrors = await authorizationServerKernelErrors(authorizationServer)
+      if (asKernelErrors.length > 0) {
+        res.status(400).json({ error: asKernelErrors[0].message, errors: asKernelErrors })
+        return
+      }
 
-      const outcome = await discover(baseUrl, { logger: log })
+      const outcome = await discover(baseUrl, { logger: log }, { authorizationServer })
       if (!outcome.ok) {
         log.warn({ discovery: outcome.error.kind }, 'remote discovery (dry-run) failed')
         res
@@ -568,11 +628,17 @@ export function createAdminRemoteMcpRouter(
           resource: r.resource,
           issuer: r.issuer,
           ...(r.issForCallback ? { issForCallback: r.issForCallback } : {}),
+          ...(r.asProfile ? { asProfile: r.asProfile } : {}),
+          ...(r.scopeAudienceViolation !== undefined
+            ? { scopeAudienceViolation: r.scopeAudienceViolation }
+            : {}),
+          ...(r.unverifiedScopes ? { unverifiedScopes: r.unverifiedScopes } : {}),
+          ...(r.scopeAudienceMissing ? { scopeAudienceMissing: true } : {}),
           // Without `iss` the same-site rule is all that ties these hosts to the
           // issuer, and it cannot tell two hosts of one registrable domain apart; the
           // operator sees them before trusting them.
           ...(callback.variant === 'per-server' ? { asEndpointHosts: asEndpointHostsOf(r) } : {}),
-          scopes: derivedScopes(r),
+          scopes: effectiveRemoteScopes(r),
           quirks: r.quirks,
         },
       })
@@ -620,6 +686,11 @@ export function createAdminRemoteMcpRouter(
         res.status(400).json({ error: kernelErrors[0].message, errors: kernelErrors })
         return
       }
+      const asKernelErrors = await authorizationServerKernelErrors(body.authorizationServer)
+      if (asKernelErrors.length > 0) {
+        res.status(400).json({ error: asKernelErrors[0].message, errors: asKernelErrors })
+        return
+      }
 
       // Pre-check: a name already taken by a LIVE McpServer is rejected before any
       // discovery or AS mint, so we never register a throwaway client at the AS for a
@@ -645,7 +716,10 @@ export function createAdminRemoteMcpRouter(
       const outcome = await discover(
         body.baseUrl,
         { logger: log },
-        { hasPreRegisteredClient: body.mode === 'pre-registered' }
+        {
+          hasPreRegisteredClient: body.mode === 'pre-registered',
+          authorizationServer: body.authorizationServer,
+        }
       )
       if (!outcome.ok) {
         log.warn({ discovery: outcome.error.kind }, 'remote install discovery failed')
@@ -671,6 +745,81 @@ export function createAdminRemoteMcpRouter(
           error: 'bearer_in_body_unsupported',
           message:
             'this resource requires the bearer token in the request body, which is not yet supported',
+        })
+        return
+      }
+
+      // Validated before any write. With a profile the operator's list is what gets
+      // installed, never a re-discovered one: the wizard showed and confirmed exactly it.
+      const reqLog = req.log ?? log
+      if (discovery.asProfile && body.scopes === undefined) {
+        res.status(400).json({
+          error: 'invalid_request',
+          message: 'scopes is required for Microsoft Entra ID servers',
+        })
+        return
+      }
+      const scopes = effectiveRemoteScopes(discovery, body.scopes)
+      if (scopes.length > MAX_SCOPES) {
+        res.status(400).json({
+          error: 'invalid_request',
+          message: `at most ${MAX_SCOPES} scopes, including those the authorization server requires`,
+        })
+        return
+      }
+      // `body.baseUrl` passed the kernel above, so it parses and the audience checks cannot throw.
+      const audienceViolation = profileScopeViolation(discovery.asProfile, body.baseUrl, scopes)
+      if (audienceViolation !== null) {
+        reqLog.warn(
+          {
+            event: 'remote_install_scope_audience_rejected',
+            serverName: body.serverName,
+            reason: 'mismatch',
+          },
+          'remote install rejected: scope outside the server audience'
+        )
+        res.status(400).json({
+          error: 'scope_audience_mismatch',
+          scope: audienceViolation,
+          message:
+            'with Microsoft Entra ID, every resource scope must belong to this server; this scope would mint a token for another API',
+        })
+        return
+      }
+      if (!profileHasResourceScope(discovery.asProfile, body.baseUrl, scopes)) {
+        reqLog.warn(
+          {
+            event: 'remote_install_scope_audience_rejected',
+            serverName: body.serverName,
+            reason: 'missing',
+          },
+          'remote install rejected: no scope belongs to the server audience'
+        )
+        res.status(400).json({
+          error: 'scope_audience_missing',
+          message:
+            'with Microsoft Entra ID, at least one scope must belong to this server; sign-in scopes alone mint a Microsoft Graph token',
+        })
+        return
+      }
+      const confirmed = new Set(body.confirmedUnverifiedScopes ?? [])
+      const unverifiedScopes = profileUnverifiedScopes(discovery.asProfile, body.baseUrl, scopes)
+      const unconfirmed = unverifiedScopes.filter(scope => !confirmed.has(scope))
+      if (unconfirmed.length > 0) {
+        reqLog.warn(
+          {
+            event: 'remote_install_scope_audience_rejected',
+            serverName: body.serverName,
+            reason: 'unverified',
+            scopes: unconfirmed,
+          },
+          'remote install rejected: scopes not confirmed as belonging to the server'
+        )
+        res.status(400).json({
+          error: 'scope_audience_unverified',
+          scopes: unconfirmed,
+          message:
+            'these scopes name an API this platform cannot tie to the server; confirm they belong to it to continue',
         })
         return
       }
@@ -933,7 +1082,7 @@ export function createAdminRemoteMcpRouter(
         const dcrRequest = buildDcrRequest(discovery, {
           clientMode,
           redirectUris: [redirectUri],
-          scopes: derivedScopes(discovery),
+          scopes,
         })
         const dcrOutcome = await registerDynamicClient(dcrDeps, registrationEndpoint, dcrRequest)
         if (!dcrOutcome.ok) {
@@ -1233,6 +1382,7 @@ export function createAdminRemoteMcpRouter(
         ...(dcrClientId ? { dynamicClientId: dcrClientId } : {}),
         ...(cimdClientId ? { cimdClientId } : {}),
         ...(preRegisteredClientId ? { preRegisteredClientId } : {}),
+        scopes,
       })
 
       const mcpServerSpec: Record<string, unknown> = {
@@ -1268,6 +1418,7 @@ export function createAdminRemoteMcpRouter(
       let createdClientSecretSnapshot: SecretSnapshot | null = null
       let createdServerPreconditions: ResourcePreconditions | undefined
       let createdServerUid: string | undefined
+      let createdServer: unknown
       if (effectiveClientMode === 'confidential' && clientSecretName) {
         try {
           createdClientSecretSnapshot = await gateway.createSecret({
@@ -1301,7 +1452,7 @@ export function createAdminRemoteMcpRouter(
 
       // ── Saga step 2: create the McpServer CR (rollback Secret on failure) ──
       try {
-        const createdServer = await gateway.createResource(
+        createdServer = await gateway.createResource(
           'mcpservers',
           { metadata: { name: serverName, labels: managedLabels }, spec: mcpServerSpec },
           targetNs
@@ -1328,6 +1479,95 @@ export function createAdminRemoteMcpRouter(
         }
         throw err
       }
+      if (unverifiedScopes.length > 0) {
+        // Audit trail of who vouched for a token audience the platform could not verify.
+        // Emitted as soon as the CR exists: a CR that outlives a failed later step or a
+        // failed rollback is used at runtime, and writing it counts as the confirmation.
+        // Scopes are not secret; this record exists to name them.
+        reqLog.info(
+          {
+            event: 'remote_install_unverified_scopes_confirmed',
+            serverName,
+            admin: req.adminAuth?.sub,
+            scopes: unverifiedScopes,
+          },
+          'remote install: operator confirmed scopes whose API cannot be tied to the server'
+        )
+      }
+
+      /** Fenced delete of the CR this install created; false when it could not be removed. */
+      const rollbackCreatedServer = async (): Promise<boolean> => {
+        try {
+          await gateway.deleteResource(
+            'mcpservers',
+            serverName,
+            targetNs,
+            createdServerPreconditions
+          )
+          await waitForDeletion(
+            () => gateway.getResource('mcpservers', serverName, targetNs),
+            `McpServer/${serverName}`
+          )
+          return true
+        } catch {
+          // Best-effort rollback; preserve the reported failure.
+          return false
+        }
+      }
+
+      // ── Saga step 2a: the profile must survive the write ──────────────────
+      // An apiserver whose McpServer CRD predates `asProfile` prunes it and still answers
+      // 201. The CR would keep the Entra issuer on the generic wire (RFC 8707 `resource`,
+      // no scope on exchange and refresh), and since the profile's presence is immutable
+      // under the newer CRD, applying it later cannot repair the object: it must not stay.
+      const requestedAsProfile = oauthSpec.asProfile
+      if (
+        requestedAsProfile !== undefined &&
+        persistedAsProfile(createdServer) !== requestedAsProfile
+      ) {
+        const serverRemoved = await rollbackCreatedServer()
+        let secretRemoved = true
+        if (createdClientSecretSnapshot && clientSecretName) {
+          try {
+            await gateway.deleteSecret(clientSecretName, targetNs, {
+              uid: createdClientSecretSnapshot.uid,
+              resourceVersion: createdClientSecretSnapshot.resourceVersion,
+            })
+          } catch {
+            secretRemoved = false
+          }
+        }
+        await rollbackDynamicClient()
+        reqLog.warn(
+          {
+            event: 'remote_install_crd_outdated',
+            serverName,
+            namespace: targetNs,
+            field: 'spec.oauth.asProfile',
+          },
+          'remote install refused: the apiserver pruned spec.oauth.asProfile'
+        )
+        if (!serverRemoved || !secretRemoved) {
+          reqLog.error(
+            {
+              event: 'remote_install_crd_outdated_rollback_failed',
+              serverName,
+              namespace: targetNs,
+              serverRemoved,
+              secretRemoved,
+            },
+            'remote install rollback after a pruned asProfile left objects behind'
+          )
+        }
+        res.status(409).json({
+          error: 'mcpserver_crd_outdated',
+          code: 'mcpserver_crd_outdated',
+          message:
+            'McpServer spec.oauth.asProfile was not persisted by Kubernetes. ' +
+            'Apply the latest clerum-crds before installing this server.',
+        })
+        return
+      }
 
       // ── Saga step 2b (DCR only): bind the pending row to the created CR's uid ──
       // Only DCR wrote a dynamic_clients row; other modes skip this. Binding seals the
@@ -1335,22 +1575,6 @@ export function createAdminRemoteMcpRouter(
       // exact installation. A missing uid or a lost bind means the row is no longer ours
       // — compensate the CR (fenced) and this install rather than leave a dangling row.
       if (body.mode === 'dcr' && dcrRegistered) {
-        const rollbackCreatedServer = async (): Promise<void> => {
-          try {
-            await gateway.deleteResource(
-              'mcpservers',
-              serverName,
-              targetNs,
-              createdServerPreconditions
-            )
-            await waitForDeletion(
-              () => gateway.getResource('mcpservers', serverName, targetNs),
-              `McpServer/${serverName}`
-            )
-          } catch {
-            // Best-effort rollback; preserve the reported failure.
-          }
-        }
         if (createdServerUid === undefined) {
           // Without a uid the row can never be bound (it would strand as pending and be
           // reclaimed by the TTL). Compensate now instead of leaving that residue.
