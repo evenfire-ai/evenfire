@@ -157,7 +157,15 @@ const filesPageHarness = vi.hoisted(() => ({
   props: null as null | FilesPageProps,
   renderActual: false,
 }))
-const commonHarness = vi.hoisted(() => ({ renderActualToastStack: false }))
+const commonHarness = vi.hoisted(() => ({
+  renderActualToastStack: false,
+  renderWorkspaceSurfaces: false,
+  draftProbe: {
+    chatId: null as string | null,
+    agentRef: null as string | null,
+    tabId: null as string | null,
+  },
+}))
 const workspaceTabStripHarness = vi.hoisted(() => ({
   props: null as null | WorkspaceTabStripProps,
 }))
@@ -203,7 +211,23 @@ vi.mock('@components/Common', async () => {
 vi.mock('@components/WorkspaceTabStrip', () => ({
   WorkspaceTabStrip: (props: WorkspaceTabStripProps) => {
     workspaceTabStripHarness.props = props
-    return null
+    if (!commonHarness.renderWorkspaceSurfaces) return null
+    return createElement(
+      'div',
+      { role: 'toolbar', 'aria-label': 'Workspace tabs' },
+      props.tabs.map(tab =>
+        createElement(
+          'button',
+          {
+            'aria-pressed': tab.id === props.activeTabId,
+            'data-workspace-tab-id': tab.id,
+            key: tab.id,
+            type: 'button',
+          },
+          tab.title
+        )
+      )
+    )
   },
 }))
 vi.mock('@components/ConfirmDialog', () => ({
@@ -231,14 +255,32 @@ vi.mock('@components/SidebarNav', () => ({
   },
 }))
 vi.mock('@pages/AgentsPage', () => ({ AgentsPage: () => null }))
-vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
-vi.mock('@pages/ChatPage', () => ({ ChatPage: () => null }))
+vi.mock('@pages/AuthPage', () => ({
+  AuthPage: () => (commonHarness.renderWorkspaceSurfaces ? <div data-testid="auth-page" /> : null),
+}))
+vi.mock('@pages/ChatPage', async () => {
+  const { getComposerDraft } =
+    await vi.importActual<typeof import('@lib/composerDraftStore')>('@lib/composerDraftStore')
+  return {
+    ChatPage: () => {
+      if (!commonHarness.renderWorkspaceSurfaces) return null
+      const { chatId, agentRef, tabId } = commonHarness.draftProbe
+      const draft = chatId ? getComposerDraft(chatId, agentRef ?? undefined, tabId) : ''
+      return (
+        <div data-testid="chat-page-pane">
+          <textarea aria-label="Draft in App pane" readOnly value={draft} />
+        </div>
+      )
+    },
+  }
+})
 vi.mock('@pages/FilesPage', async () => {
   const actual = await vi.importActual<typeof import('@pages/FilesPage')>('@pages/FilesPage')
   return {
     FilesPage: (props: FilesPageProps) => {
       filesPageHarness.props = props
       if (filesPageHarness.renderActual) return createElement(actual.FilesPage, props)
+      if (commonHarness.renderWorkspaceSurfaces) return <div data-testid="files-page-pane" />
       return null
     },
   }
@@ -260,7 +302,7 @@ const settingsPageHarness = vi.hoisted(() => ({
 vi.mock('@pages/SettingsPage', () => ({
   SettingsPage: (props: NonNullable<typeof settingsPageHarness.props>) => {
     settingsPageHarness.props = props
-    return null
+    return commonHarness.renderWorkspaceSurfaces ? <div data-testid="settings-page-pane" /> : null
   },
 }))
 vi.mock('@pages/UnavailablePage', () => ({ UnavailablePage: () => null }))
@@ -644,6 +686,8 @@ describe('App deep-link orchestration', () => {
     filesPageHarness.props = null
     filesPageHarness.renderActual = false
     commonHarness.renderActualToastStack = false
+    commonHarness.renderWorkspaceSurfaces = false
+    commonHarness.draftProbe = { chatId: null, agentRef: null, tabId: null }
     workspaceTabStripHarness.props = null
     sidebarHarness.props = null
     acknowledgeDeepLink.mockResolvedValue(undefined)
@@ -2052,6 +2096,148 @@ describe('App deep-link orchestration', () => {
     expect(handle.teamDirectory).toHaveBeenCalledTimes(directoryCallsBefore)
     expect(listApps).toHaveBeenCalledTimes(listAppsCallsBefore)
     expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(link.id)
+  })
+
+  // The bridge returns successful logout, an unauthenticated session, then B login.
+  // There is no producer for direct authenticated A→B loadSession; do not synthesize it.
+  it('renders a fresh B workspace after successful A logout and null session', async () => {
+    const userA = {
+      id: 'user-a',
+      email: 'a@example.test',
+      name: 'User A',
+      teamId: 'team-a',
+      teamName: 'Team A',
+    }
+    const userB = {
+      id: 'user-b',
+      email: 'b@example.test',
+      name: 'User B',
+      teamId: 'team-b',
+      teamName: 'Team B',
+    }
+    let session: { authenticated: boolean; me: typeof userA | typeof userB | null } = {
+      authenticated: true,
+      me: userA,
+    }
+    const actualControllerModule =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    vi.mocked(useAppController).mockImplementation(() => {
+      realController = actualControllerModule.useAppController()
+      return realController
+    })
+    const appBridge = window.clerum
+    const { handle } = installAppControllerClerum({ agentNames: ['agent-x'], me: userA })
+    handle.getSessionState.mockImplementation(async () => session)
+    handle.logout.mockImplementation(async () => {
+      session = { authenticated: false, me: null }
+      return { ok: true, sessionGeneration: 2 }
+    })
+    handle.passwordLogin.mockImplementation(async () => {
+      session = { authenticated: true, me: userB }
+      return { authenticated: true, me: userB }
+    })
+    Object.assign(window.clerum, {
+      shortcuts: appBridge.shortcuts,
+      app: appBridge.app,
+      sandboxUi: appBridge.sandboxUi,
+      gfs: appBridge.gfs,
+    })
+    commonHarness.renderWorkspaceSurfaces = true
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTaskTrackerProvider>
+          <App />
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+    unmountRealApp = view.unmount
+    const getController = () => {
+      if (!realController) throw new Error('the real App controller did not mount')
+      return realController
+    }
+    await waitFor(() => expect(getController().booting).toBe(false))
+    await waitFor(() => expect(getController().isAuthenticated).toBe(true))
+    await waitFor(() => expect(getController().initialExperienceLoading).toBe(false))
+    await waitFor(() => expect(handle.refreshCatalog.mock.calls.length).toBeGreaterThanOrEqual(2))
+    await waitFor(() => expect(handle.teamDirectory).toHaveBeenCalledOnce())
+
+    act(() => {
+      getController().handleSelectChatAgent('agent-x', {
+        chatId: 'chat-a',
+        title: 'A conversation',
+        selectLatest: false,
+      })
+      getController().openFilesSection('gfs://main/0123456789abcdef0123456789abcdef')
+      getController().handleNavSelect(DESKTOP_ROUTES.settings)
+    })
+    const chatTab = getController().workspaceTabs.tabs.find(
+      tab => tab.kind === 'chat' && tab.chat?.chatId === 'chat-a'
+    )
+    if (chatTab?.kind !== 'chat') throw new Error('the A chat producer did not create its tab')
+    commonHarness.draftProbe = { chatId: 'chat-a', agentRef: 'agent-x', tabId: chatTab.id }
+    act(() => {
+      expect(setComposerDraft('chat-a', 'private A draft', 'agent-x', chatTab.id)).toBe(true)
+    })
+
+    const aTabs = view.getByRole('toolbar', { name: 'Workspace tabs' })
+    expect(Array.from(aTabs.querySelectorAll('button'), button => button.textContent)).toEqual([
+      'A conversation',
+      'Files',
+      'settings',
+    ])
+    expect(view.getByTestId('settings-page-pane')).toBeTruthy()
+    expect(getController().selectedAgent).toBe('agent-x')
+    expect(getComposerDraft('chat-a', 'agent-x', chatTab.id)).toBe('private A draft')
+
+    act(() => getController().selectWorkspaceTabById(chatTab.id))
+    await waitFor(() => expect(view.getByTestId('chat-page-pane')).toBeTruthy())
+    const aChatTab = aTabs.querySelector<HTMLButtonElement>(
+      `[data-workspace-tab-id="${chatTab.id}"]`
+    )
+    expect(aChatTab?.getAttribute('aria-pressed')).toBe('true')
+    expect(
+      (view.getByRole('textbox', { name: 'Draft in App pane' }) as HTMLTextAreaElement).value
+    ).toBe('private A draft')
+
+    await act(async () => getController().handleLogout())
+    await waitFor(() => expect(getController().isAuthenticated).toBe(false))
+    expect(view.getByTestId('auth-page')).toBeTruthy()
+    expect(view.queryByRole('toolbar', { name: 'Workspace tabs' })).toBeNull()
+    expect(getController().selectedAgent).toBeNull()
+    expect(getController().workspaceTabs.tabs).toHaveLength(1)
+    expect(getComposerDraft('chat-a', 'agent-x', chatTab.id)).toBe('')
+
+    act(() => {
+      getController().setEmail(userB.email)
+      getController().setPassword('test-password')
+    })
+    await act(async () => getController().handlePasswordLogin())
+    await waitFor(() => expect(getController().me?.id).toBe(userB.id))
+    await waitFor(() => expect(getController().initialExperienceLoading).toBe(false))
+
+    const bTabs = view.getByRole('toolbar', { name: 'Workspace tabs' })
+    const bTabButtons = Array.from(bTabs.querySelectorAll('button'))
+    expect(bTabButtons).toHaveLength(1)
+    expect(bTabButtons[0]?.textContent).toBe('New chat')
+    expect(bTabButtons[0]?.getAttribute('aria-pressed')).toBe('true')
+    expect(getController().getCurrentTeamId()).toBe('team-b')
+    expect(getController().selectedAgent).toBeNull()
+    expect(getController().workspaceTabs.tabs).toHaveLength(1)
+    const bActiveTab = activeWorkspaceTab(getController().workspaceTabs)
+    expect(bActiveTab).toMatchObject({
+      kind: 'chat',
+      chat: { agentRef: null, chatId: null },
+    })
+    expect(getController().lastActiveChatTabId).toBe(bActiveTab?.id)
+    expect(view.getByTestId('chat-page-pane')).toBeTruthy()
+    expect(view.queryByTestId('files-page-pane')).toBeNull()
+    expect(view.queryByTestId('settings-page-pane')).toBeNull()
+    expect(
+      (view.getByRole('textbox', { name: 'Draft in App pane' }) as HTMLTextAreaElement).value
+    ).toBe('')
+    expect(getComposerDraft('chat-a', 'agent-x', chatTab.id)).toBe('')
   })
 
   it('resolves an unavailable cross-team target without relaunching a closed origin app', async () => {
