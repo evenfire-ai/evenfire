@@ -490,7 +490,11 @@ export function SecretsTable({
               {activeInitialLoad ? 'Secrets' : `Secrets (${activeCount})`}
             </>
           }
-          subtitle="Manage LLM, connector, and recipe credentials in one place."
+          subtitle={
+            activeScope === 'mcp'
+              ? 'Create reusable connector Secrets here. Assign them when creating a connector or from its Credentials tab using Change assigned Secret.'
+              : 'Manage LLM, connector, and recipe credentials in one place.'
+          }
           primaryAction={
             <button
               type="button"

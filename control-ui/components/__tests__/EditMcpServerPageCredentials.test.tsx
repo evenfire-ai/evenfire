@@ -8,7 +8,9 @@ import {
   getContexts,
   getMcpServer,
   getMcpServers,
+  listMcpSecrets,
   updateMcpSecret,
+  updateMcpServer,
 } from '../../lib/api'
 import type { McpServerCondition, McpServerResource } from '../../lib/api'
 import {
@@ -63,6 +65,7 @@ vi.mock('../../lib/api', async () => {
     getContexts: vi.fn(),
     getMcpServer: vi.fn(),
     getMcpServers: vi.fn(),
+    listMcpSecrets: vi.fn(),
     updateMcpServer: vi.fn(),
     updateMcpSecret: vi.fn(),
     createMcpSecret: vi.fn(),
@@ -72,6 +75,8 @@ vi.mock('../../lib/api', async () => {
 const mockGetMcpServer = vi.mocked(getMcpServer)
 const mockGetMcpServers = vi.mocked(getMcpServers)
 const mockGetContexts = vi.mocked(getContexts)
+const mockListMcpSecrets = vi.mocked(listMcpSecrets)
+const mockUpdateMcpServer = vi.mocked(updateMcpServer)
 const mockUpdateMcpSecret = vi.mocked(updateMcpSecret)
 const mockCreateMcpSecret = vi.mocked(createMcpSecret)
 
@@ -492,5 +497,146 @@ describe('EditMcpServerPage — credential surface wiring', () => {
 
     expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Set credentials' })).not.toBeInTheDocument()
+  })
+})
+
+// ─── Change assigned Secret — page wiring ───────────────────────────────────
+//
+// The component suites cover the form in isolation; these tests pin the wiring
+// the page owns: eligibility gating, the busy navigation interlock, the
+// spec-only write, and keyboard focus surviving the panel swap.
+describe('EditMcpServerPage — Change assigned Secret', () => {
+  const OTHER_SECRET = {
+    name: 'other-credentials',
+    uid: 'other-uid',
+    keys: ['api-key', 'workspace-id'],
+  }
+
+  function eligibleServer(): McpServerResource {
+    return {
+      metadata: {
+        name: SERVER_NAME,
+        namespace: NAMESPACE,
+        uid: 'server-uid',
+        resourceVersion: '10',
+        generation: 2,
+      },
+      spec: {
+        image: CONNECTOR_IMAGE,
+        contextRef: 'default',
+        managed: true,
+        envSecret: {
+          name: SECRET_NAME,
+          keys: [
+            { secretKey: 'api-key', envVar: 'LINEAR_API_KEY' },
+            { secretKey: 'workspace-id', envVar: 'LINEAR_WORKSPACE' },
+          ],
+        },
+      },
+      status: { conditions: [] },
+    }
+  }
+
+  function reassignedServer(): McpServerResource {
+    return {
+      ...eligibleServer(),
+      metadata: { ...eligibleServer().metadata, resourceVersion: '11', generation: 3 },
+      spec: {
+        ...eligibleServer().spec,
+        envSecret: {
+          name: OTHER_SECRET.name,
+          keys: [
+            { secretKey: 'api-key', envVar: 'LINEAR_API_KEY' },
+            { secretKey: 'workspace-id', envVar: 'LINEAR_WORKSPACE' },
+          ],
+        },
+      },
+    }
+  }
+
+  beforeEach(() => {
+    mockListMcpSecrets.mockResolvedValue({
+      items: [
+        { name: SECRET_NAME, uid: 'secret-uid', keys: ['api-key', 'workspace-id'] },
+        OTHER_SECRET,
+      ],
+    })
+    mockUpdateMcpServer.mockResolvedValue(reassignedServer())
+  })
+
+  it('offers reassignment beside rotation for an eligible managed connector', async () => {
+    await renderPage(eligibleServer())
+    expect(screen.getByRole('button', { name: 'Change assigned Secret' })).toBeInTheDocument()
+    // Value rotation keeps its separate surface on the same tab.
+    expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+  })
+
+  it('hides reassignment when the WorkflowRecipe owns the credentials', async () => {
+    await renderPage(mcpServer({ managed: false, status: { conditions: [] } }))
+    expect(screen.queryByRole('button', { name: 'Change assigned Secret' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeInTheDocument()
+  })
+
+  it('returns focus to the trigger after the change flow is cancelled', async () => {
+    await renderPage(eligibleServer())
+    fireEvent.click(screen.getByRole('button', { name: 'Change assigned Secret' }))
+    await screen.findByLabelText(/^Existing Secret/)
+    fireEvent.change(screen.getByLabelText(/^Existing Secret/), {
+      target: { value: OTHER_SECRET.name },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel assignment change' }))
+    const trigger = await screen.findByRole('button', { name: 'Change assigned Secret' })
+    expect(trigger).toHaveFocus()
+    // Cancelling never wrote anything.
+    expect(mockUpdateMcpServer).not.toHaveBeenCalled()
+  })
+
+  it('locks navigation during the assignment, writes only envSecret, and reloads', async () => {
+    await renderPage(eligibleServer())
+    fireEvent.click(screen.getByRole('button', { name: 'Change assigned Secret' }))
+    fireEvent.change(await screen.findByLabelText(/^Existing Secret/), {
+      target: { value: OTHER_SECRET.name },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Assign and restart' }))
+    const dialog = await screen.findByRole('alertdialog')
+    // The busy interlock: every tab is locked while the mutation is pending.
+    for (const tab of screen.getAllByRole('tab')) {
+      expect(tab).toBeDisabled()
+    }
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Assign and restart' }))
+
+    await waitFor(() => expect(mockUpdateMcpServer).toHaveBeenCalledOnce())
+    expect(mockUpdateMcpServer).toHaveBeenCalledWith(SERVER_NAME, {
+      metadata: { uid: 'server-uid', resourceVersion: '10' },
+      spec: {
+        ...eligibleServer().spec,
+        envSecret: {
+          name: OTHER_SECRET.name,
+          keys: [
+            { secretKey: 'api-key', envVar: 'LINEAR_API_KEY' },
+            { secretKey: 'workspace-id', envVar: 'LINEAR_WORKSPACE' },
+          ],
+        },
+      },
+    })
+    // Reference-only: shared Secret values are never written by this flow.
+    expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+    expect(mockCreateMcpSecret).not.toHaveBeenCalled()
+    expect(await screen.findByText(/Assignment saved/)).toBeInTheDocument()
+    // Saved is not ready: the operator can leave while the rollout is observed.
+    for (const tab of screen.getAllByRole('tab')) {
+      expect(tab).toBeDisabled()
+    }
+
+    // Leaving releases the panel and reloads the connector's new reference.
+    mockGetMcpServer.mockResolvedValue(reassignedServer())
+    fireEvent.click(screen.getByRole('button', { name: 'Check credentials later' }))
+    const currentAssignment = await screen.findByText(/Current Secret:/)
+    expect(currentAssignment.textContent).toContain(OTHER_SECRET.name)
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Change assigned Secret' })).toHaveFocus()
+    )
   })
 })

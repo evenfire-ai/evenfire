@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { useToast } from '@components/Toast'
@@ -77,10 +77,15 @@ export function UpdateConnectorCredentials({
   surface = 'rotate',
   recipeOwned = false,
   registryCredentialSource,
+  onBusyChange,
 }: UpdateConnectorCredentialsProps) {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
 
+  const busyCallback = useRef(onBusyChange)
+  busyCallback.current = onBusyChange
+  const [confirming, setConfirming] = useState(false)
+  const confirmLock = useRef(false)
   const [draft, setDraft] = useState<CredentialMap>(emptyCredentialMap)
   const [validationError, setValidationError] = useState('')
   // The secretKeys the last submit rejected. Drives per-input `aria-invalid` /
@@ -166,6 +171,11 @@ export function UpdateConnectorCredentials({
     }
   }, [registryCredentialSource])
 
+  useEffect(() => {
+    busyCallback.current?.(confirming || phase === 'saving' || phase === 'rotating')
+    return () => busyCallback.current?.(false)
+  }, [confirming, phase])
+
   // "The Secret is missing and this screen would have to create it." Two
   // sources feed it, and `secretCreated` gates BOTH — not just the `surface`
   // prop. That latch flips the moment a create succeeds, and the Secret it
@@ -225,7 +235,7 @@ export function UpdateConnectorCredentials({
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (phase === 'saving' || phase === 'rotating') return
+    if (confirmLock.current || phase === 'saving' || phase === 'rotating') return
 
     const data = emptyCredentialMap()
     for (const key of envSecret!.keys) {
@@ -252,6 +262,8 @@ export function UpdateConnectorCredentials({
     setValidationError('')
     setInvalidKeys([])
 
+    confirmLock.current = true
+    setConfirming(true)
     const confirmed = await confirm(
       mode === 'set'
         ? {
@@ -266,6 +278,8 @@ export function UpdateConnectorCredentials({
             tone: 'danger',
           }
     )
+    confirmLock.current = false
+    setConfirming(false)
     if (!confirmed) return
 
     // Captured BEFORE the PUT fires — the correlation anchor the poll below
@@ -335,7 +349,7 @@ export function UpdateConnectorCredentials({
     setRotationAffected([])
   }
 
-  const busy = phase === 'saving' || phase === 'rotating'
+  const busy = confirming || phase === 'saving' || phase === 'rotating'
   // The poll above verifies ONLY this connector's own DeploymentReady, via
   // getMcpServer(serverName). A shared Secret can be referenced by other
   // connectors too (result.affectedConnectors); the HCC restarts them as well,

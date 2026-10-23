@@ -45,6 +45,7 @@ export type UpdateConnectorCredentialsProps = {
   recipeOwned?: boolean
   /** Marketplace source used to resolve operator-friendly credential labels. */
   registryCredentialSource?: RegistryCredentialSource
+  onBusyChange?: (busy: boolean) => void
 }
 
 /**

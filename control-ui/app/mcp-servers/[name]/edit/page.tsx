@@ -1,10 +1,11 @@
 'use client'
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { AttachConnectorCredentials } from '@components/AttachConnectorCredentials'
 import { AuthGate } from '@components/AuthGate'
 import { FormSectionsSkeleton } from '@components/BodyLoadingSkeleton'
+import { ChangeConnectorSecret } from '@components/ChangeConnectorSecret'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
@@ -46,7 +47,11 @@ import {
   mergeAccessSummaries,
   sortAccessPrincipals,
 } from '@lib/connectorAccess'
-import { credentialAttachUnavailable, sameCredentialSpec } from '@lib/connectorCredentials'
+import {
+  credentialAttachUnavailable,
+  credentialReferenceChangeUnavailable,
+  sameCredentialSpec,
+} from '@lib/connectorCredentials'
 import { buildMcpEgressStatus, deriveEgressEditorInputs } from '@lib/egressModel'
 import type { EgressEditorStatus } from '@lib/egressModel'
 import { extractOAuthImmutables, oauthClientSecretRefName } from '@lib/oauthInstall'
@@ -70,6 +75,10 @@ const CONTEXT_ACCESS_GROUPS: Array<{ key: keyof ContextAccess; title: string }> 
   { key: 'agents', title: 'Agents' },
 ]
 
+/** Keyboard focus must survive the credentials-panel swap when the change
+ *  flow closes, so the trigger is addressed by a stable element id. */
+const CHANGE_SECRET_TRIGGER_ID = 'change-assigned-secret-trigger'
+
 export default function EditMcpServerPage() {
   const router = useRouter()
   const params = useParams<{ name: string; tab?: string | string[] }>()
@@ -83,6 +92,7 @@ export default function EditMcpServerPage() {
   const [loadError, setLoadError] = useState('')
   const [saving, setSaving] = useState(false)
   const [reloadTick, setReloadTick] = useState(0)
+  const [changeSource, setChangeSource] = useState<McpServerResource | null>(null)
   const [attachActive, setAttachActive] = useState(false)
   const [attachBusy, setAttachBusy] = useState(false)
   const [egressDirty, setEgressDirty] = useState(false)
@@ -303,9 +313,36 @@ export default function EditMcpServerPage() {
   }, [])
   const onAttachFinished = useCallback(() => {
     setAttachActive(false)
+    setChangeSource(null)
     setAttachBusy(false)
     setReloadTick(tick => tick + 1)
   }, [])
+
+  // The change flow replaces the whole credentials panel; after it closes the
+  // trigger remounts (after a reload when a save happened). Park the return
+  // focus until the panel has settled, then hand focus back to the trigger.
+  const returnFocusState = useRef<'idle' | 'waiting-reload' | 'ready'>('idle')
+  const finishChangeFlow = useCallback(() => {
+    returnFocusState.current = 'waiting-reload'
+    onAttachFinished()
+  }, [onAttachFinished])
+  const cancelChangeFlow = useCallback(() => {
+    returnFocusState.current = 'ready'
+    setChangeSource(null)
+  }, [])
+  useEffect(() => {
+    if (returnFocusState.current === 'waiting-reload') {
+      // A save schedules a reload; focus must wait for it to finish.
+      if (loading) returnFocusState.current = 'ready'
+      return
+    }
+    if (returnFocusState.current !== 'ready') return
+    if (loading || changeSource || attachActive) return
+    const trigger = document.getElementById(CHANGE_SECRET_TRIGGER_ID)
+    if (!trigger) return
+    returnFocusState.current = 'idle'
+    trigger.focus()
+  }, [loading, changeSource, attachActive])
 
   return (
     <AuthGate>
@@ -372,7 +409,24 @@ export default function EditMcpServerPage() {
           ) : server ? (
             activeTab === 'credentials' ? (
               <div className="cu-connector-edit-form">
-                {attachActive || !attachUnavailable ? (
+                {changeSource ? (
+                  <ChangeConnectorSecret
+                    serverName={name}
+                    server={changeSource}
+                    reference={resolveEnvSecret(changeSource.spec)!}
+                    blockedReason={
+                      egressDirty
+                        ? 'Save or discard your egress changes before changing the assigned Secret.'
+                        : saving
+                          ? 'Wait for the egress save to finish.'
+                          : undefined
+                    }
+                    onBusyChange={setAttachBusy}
+                    onSpecSaved={setServer}
+                    onFinished={finishChangeFlow}
+                    onCancel={cancelChangeFlow}
+                  />
+                ) : attachActive || !attachUnavailable ? (
                   <>
                     <AttachConnectorCredentials
                       key={name}
@@ -419,17 +473,42 @@ export default function EditMcpServerPage() {
                     )}
                   />
                 ) : envSecret ? (
-                  <UpdateConnectorCredentials
-                    serverName={name}
-                    envSecret={envSecret}
-                    registryCredentialSource={registryCredentialSource}
-                    surface={resolveCredentialSurface(
-                      server.status?.conditions,
-                      server.spec as { managed?: boolean } | undefined
-                    )}
-                    // Ownership is a spec fact, independent of observed status.
-                    recipeOwned={isRecipeOwned(server.spec as { managed?: boolean } | undefined)}
-                  />
+                  <>
+                    {!credentialReferenceChangeUnavailable(server) ? (
+                      <FormSection
+                        title="Assigned Secret"
+                        description="Reuse stored credentials by choosing another Secret or changing its key mappings. Rotate credentials below to update values in the current shared Secret."
+                      >
+                        <p>
+                          Current Secret: <code>{envSecret.name}</code>
+                        </p>
+                        <Button
+                          id={CHANGE_SECRET_TRIGGER_ID}
+                          disabled={attachBusy || saving || egressDirty}
+                          onClick={() => setChangeSource(server)}
+                        >
+                          Change assigned Secret
+                        </Button>
+                        {egressDirty ? (
+                          <p role="status">
+                            Save or discard your egress changes before changing the assigned Secret.
+                          </p>
+                        ) : null}
+                      </FormSection>
+                    ) : null}
+                    <UpdateConnectorCredentials
+                      onBusyChange={setAttachBusy}
+                      serverName={name}
+                      envSecret={envSecret}
+                      registryCredentialSource={registryCredentialSource}
+                      surface={resolveCredentialSurface(
+                        server.status?.conditions,
+                        server.spec as { managed?: boolean } | undefined
+                      )}
+                      // Ownership is a spec fact, independent of observed status.
+                      recipeOwned={isRecipeOwned(server.spec as { managed?: boolean } | undefined)}
+                    />
+                  </>
                 ) : (
                   <FormSection title="Connector credentials">
                     <p className="cu-muted">{attachUnavailable}</p>

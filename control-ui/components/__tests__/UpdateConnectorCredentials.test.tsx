@@ -1454,3 +1454,48 @@ describe('UpdateConnectorCredentials — set mode submit', () => {
     expect(banner.textContent).not.toMatch(/rotation/i)
   })
 })
+
+// ─── Busy interlock during the confirmation ─────────────────────────────────
+//
+// The page drives its navigation lock from `onBusyChange`, and a pending
+// confirmation is a mutation-in-waiting: the submit must be guarded against
+// double activation and the page must be able to block tab/back navigation
+// from the moment the dialog opens, not only from the PUT.
+describe('UpdateConnectorCredentials — busy interlock', () => {
+  afterEach(() => {
+    cleanup()
+  })
+
+  it('reports busy while the rotation confirmation is pending and clears it on cancel', async () => {
+    const onBusyChange = vi.fn()
+    render(
+      <ToastProvider>
+        <UpdateConnectorCredentials
+          serverName={SERVER_NAME}
+          envSecret={ENV_SECRET}
+          surface="rotate"
+          onBusyChange={onBusyChange}
+        />
+      </ToastProvider>
+    )
+    await flush(2)
+    expect(onBusyChange).toHaveBeenLastCalledWith(false)
+
+    fireEvent.change(screen.getByLabelText('api-key'), { target: { value: 'next-value' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate credentials' }))
+    await flush(2)
+
+    // Dialog open: busy is reported, the submit is disabled, and a second
+    // activation is inert.
+    expect(onBusyChange).toHaveBeenLastCalledWith(true)
+    expect(screen.getByRole('button', { name: 'Rotate credentials' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate credentials' }))
+    expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
+    await flush(2)
+    expect(onBusyChange).toHaveBeenLastCalledWith(false)
+    expect(mockUpdateMcpSecret).not.toHaveBeenCalled()
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+})

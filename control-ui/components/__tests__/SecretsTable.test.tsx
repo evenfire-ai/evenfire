@@ -747,3 +747,34 @@ describe('SecretsTable — LLM empty state', () => {
     expect(screen.queryByRole('tab', { name: 'API-KEY' })).not.toBeInTheDocument()
   })
 })
+
+// ─── Connector Secret management guidance ───────────────────────────────────
+//
+// Reusable connector Secrets are assigned from a connector's Credentials tab
+// (Change assigned Secret) or during connector creation. The Connectors scope
+// header is where operators look first, so it carries that pointer instead of
+// the generic one-liner.
+describe('SecretsTable — connector Secret management guidance', () => {
+  afterEach(() => {
+    cleanup()
+  })
+
+  it('points at assignment from creation and the Credentials tab in the Connectors scope', () => {
+    renderTable('mcp')
+
+    expect(
+      screen.getByText(
+        /Create reusable connector Secrets here\. Assign them when creating a connector or from its Credentials tab using Change assigned Secret\./
+      )
+    ).toBeInTheDocument()
+  })
+
+  it('keeps the generic subtitle outside the Connectors scope', () => {
+    renderTable('recipe')
+
+    expect(
+      screen.getByText('Manage LLM, connector, and recipe credentials in one place.')
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/Change assigned Secret/)).not.toBeInTheDocument()
+  })
+})
