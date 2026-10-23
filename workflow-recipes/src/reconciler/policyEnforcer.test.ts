@@ -8,7 +8,7 @@ function makeRecipe(overrides: Partial<WorkflowRecipeCRD['spec']> = {}): Workflo
     kind: 'WorkflowRecipe',
     metadata: { name: 'test-recipe', namespace: 'sandbox-recipes' },
     spec: {
-      workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.1-alpine', port: 80 }],
+      workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.6-alpine', port: 80 }],
       ...overrides,
     },
   }
@@ -49,7 +49,7 @@ describe('policyEnforcer.enforcePolicy', () => {
   it('rejects when workload count exceeds limit', () => {
     const recipe = makeRecipe({
       workloads: [
-        { id: 'a', type: 'deployment', image: 'nginx:1.30.1-alpine' },
+        { id: 'a', type: 'deployment', image: 'nginx:1.30.6-alpine' },
         { id: 'b', type: 'deployment', image: 'redis:latest' },
         { id: 'c', type: 'deployment', image: 'postgres:latest' },
       ],
@@ -66,7 +66,7 @@ describe('policyEnforcer.enforcePolicy', () => {
 
   it('passes when replicas are within limit', () => {
     const recipe = makeRecipe({
-      workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.1-alpine', replicas: 3 }],
+      workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.6-alpine', replicas: 3 }],
     })
     const policy = makePolicy({ governance: { maxReplicasPerWorkload: 5 } })
     expect(enforcePolicy(recipe, [policy])).toEqual([])
@@ -74,7 +74,7 @@ describe('policyEnforcer.enforcePolicy', () => {
 
   it('rejects when replicas exceed limit', () => {
     const recipe = makeRecipe({
-      workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.1-alpine', replicas: 10 }],
+      workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.6-alpine', replicas: 10 }],
     })
     const policy = makePolicy({ governance: { maxReplicasPerWorkload: 5 } })
     const result = enforcePolicy(recipe, [policy])
@@ -245,7 +245,7 @@ describe('policyEnforcer.enforcePolicy', () => {
     const recipe = makeRecipe({
       workloads: [
         { id: 'a', type: 'daemonset', image: 'evil:latest' },
-        { id: 'b', type: 'job', image: 'nginx:1.30.1-alpine' },
+        { id: 'b', type: 'job', image: 'nginx:1.30.6-alpine' },
       ],
       security: { isolationLevel: 'minimal' },
     })
@@ -264,7 +264,7 @@ describe('policyEnforcer.enforcePolicy', () => {
 
   it('accumulates violations from multiple policies', () => {
     const recipe = makeRecipe({
-      workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.1-alpine', replicas: 10 }],
+      workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.6-alpine', replicas: 10 }],
     })
     const policy1 = makePolicy({ governance: { maxReplicasPerWorkload: 5 } })
     const policy2: WorkflowRecipePolicyCRD = {

@@ -70,6 +70,8 @@ const mockRateLimitPoolQuery = vi.fn(async (sql: unknown, params?: unknown[]) =>
 // pool only lends the long-lived advisory-lock client. A limiter statement on
 // the core pool is a wiring regression, so the core query rejects loudly.
 const mockCorePoolQuery = vi.fn(async (sql: unknown) => {
+  if (String(sql).includes('DELETE FROM password_identifier_state'))
+    return { rows: [], rowCount: 0 }
   throw new Error(`core pool must not serve the rate limiter: ${String(sql).slice(0, 40)}`)
 })
 
@@ -94,7 +96,7 @@ describe('rateLimiterService', () => {
     mockClientQuery.mockClear()
   })
 
-  it('serves the upsert and the prune from the limiter pool, never the core pool', async () => {
+  it('keeps legacy upserts/prune on the limiter pool and credential cleanup on the core pool', async () => {
     const r = await checkAndIncrement('test:bucket:pool-wiring', 5)
     await cleanupExpiredBuckets(1_700_000_000_000)
 
@@ -103,19 +105,22 @@ describe('rateLimiterService', () => {
     expect(
       mockRateLimitPoolQuery.mock.calls.map(([sql]) => String(sql).trim().split(/\s+/)[0])
     ).toEqual(['INSERT', 'DELETE'])
-    expect(mockCorePoolQuery).not.toHaveBeenCalled()
+    expect(mockCorePoolQuery).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining('DELETE FROM password_identifier_state')
+    )
   })
 
   it('allows requests up to the limit and denies the (limit+1)-th in the same window', async () => {
     const key = 'test:bucket:1'
     const limit = 5
+    const nowMs = 1_700_000_000_000
     for (let i = 0; i < limit; i++) {
-      const r = await checkAndIncrement(key, limit)
+      const r = await checkAndIncrement(key, limit, nowMs)
       expect(r.allowed).toBe(true)
       expect(r.count).toBe(i + 1)
       expect(r.remaining).toBe(limit - (i + 1))
     }
-    const over = await checkAndIncrement(key, limit)
+    const over = await checkAndIncrement(key, limit, nowMs)
     expect(over.allowed).toBe(false)
     expect(over.count).toBe(limit + 1)
     expect(over.remaining).toBe(0)
@@ -148,8 +153,9 @@ describe('rateLimiterService', () => {
   it('concurrent increments observe distinct counter values (no race)', async () => {
     const key = 'test:bucket:concurrent'
     const limit = 100
+    const nowMs = 1_700_000_000_000
     const results = await Promise.all(
-      Array.from({ length: 10 }, () => checkAndIncrement(key, limit))
+      Array.from({ length: 10 }, () => checkAndIncrement(key, limit, nowMs))
     )
     const counts = results.map(r => r.count).sort((a, b) => a - b)
     expect(counts).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
@@ -307,5 +313,51 @@ describe('rateLimiterService', () => {
     startRateLimiterCleanup(60_000) // second call is no-op
     stopRateLimiterCleanup()
     stopRateLimiterCleanup() // double stop is safe
+  })
+  it('releases the idle dedicated session after finite credential work', async () => {
+    mockConcurrencyClient.release.mockClear()
+    const lease = await acquireRateLimitConcurrencyLease(
+      [{ bucketKey: 'finite-password-work', maxConcurrent: 1 }],
+      { releaseIdleClient: true }
+    )
+    expect(lease.allowed).toBe(true)
+    await lease.release()
+    expect(mockConcurrencyClient.release).toHaveBeenCalledExactlyOnceWith(true)
+  })
+  it('releases an idle dedicated session after busy denial', async () => {
+    mockConcurrencyClient.release.mockClear()
+    mockClientQuery.mockResolvedValueOnce({ rows: [{ acquired: false }] } as never)
+    const lease = await acquireRateLimitConcurrencyLease(
+      [{ bucketKey: 'finite-busy-work', maxConcurrent: 1 }],
+      { releaseIdleClient: true }
+    )
+    expect(lease.allowed).toBe(false)
+    expect(lease.backendAvailable).toBe(true)
+    expect(mockConcurrencyClient.release).toHaveBeenCalledExactlyOnceWith(true)
+  })
+  it('releases an idle dedicated session after an admission query failure', async () => {
+    mockConcurrencyClient.release.mockClear()
+    mockClientQuery.mockRejectedValueOnce(new Error('synthetic admission failure'))
+    const lease = await acquireRateLimitConcurrencyLease(
+      [{ bucketKey: 'finite-failed-work', maxConcurrent: 1 }],
+      { releaseIdleClient: true }
+    )
+    expect(lease.allowed).toBe(false)
+    expect(lease.backendAvailable).toBe(false)
+    expect(mockConcurrencyClient.release).toHaveBeenCalledExactlyOnceWith(true)
+  })
+  it('retains the dedicated session when another lease remains active', async () => {
+    const active = await acquireRateLimitConcurrencyLease([
+      { bucketKey: 'retained-active-work', maxConcurrent: 1 },
+    ])
+    mockConcurrencyClient.release.mockClear()
+    mockClientQuery.mockResolvedValueOnce({ rows: [{ acquired: false }] } as never)
+    const denied = await acquireRateLimitConcurrencyLease(
+      [{ bucketKey: 'finite-denied-work', maxConcurrent: 1 }],
+      { releaseIdleClient: true }
+    )
+    expect(denied.allowed).toBe(false)
+    expect(mockConcurrencyClient.release).not.toHaveBeenCalled()
+    await active.release()
   })
 })

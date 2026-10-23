@@ -1,11 +1,10 @@
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import {
-  adminManagedIdentityFileMessage,
-  isLockedPath,
-  isStateDbPath,
-  stateDbProtectedMessage,
-} from '../../workspace/service'
+  isProtectedWorkspacePath,
+  protectedWorkspacePathMessage,
+} from '../../workspace/protectedPaths'
+import { adminManagedIdentityFileMessage, isLockedPath } from '../../workspace/service'
 import { Tool } from '../interfaces'
 import { ToolOutput } from '../types'
 import { validatePath } from './pathValidation'
@@ -73,10 +72,11 @@ export class FileWriteTool implements Tool {
       }
     }
 
-    // D3 — the session state database is platform state, never agent-writable.
-    if (isStateDbPath(filePath)) {
+    // Platform-owned state and governed GFS downloads never enter through the
+    // generic write tool, even when an agent knows their relative path.
+    if (isProtectedWorkspacePath(filePath)) {
       return {
-        content: stateDbProtectedMessage(filePath),
+        content: protectedWorkspacePathMessage(filePath),
         duration_ms: Date.now() - startTime,
         is_error: true,
       }

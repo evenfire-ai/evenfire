@@ -111,6 +111,7 @@ describe('MCP delimiter dispatch', () => {
       bridge: {
         nativeNames: new Set(['clerum__tool_call']),
         getDeferrableCatalogNames: () => new Set(manager.getAllTools().map(tool => tool.name)),
+        nativeTargets: false,
       },
     }
     const results = await executeToolCalls(

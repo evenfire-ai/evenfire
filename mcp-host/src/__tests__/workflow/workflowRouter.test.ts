@@ -14,6 +14,24 @@ import type { AddressInfo } from 'net'
 import * as os from 'os'
 import * as path from 'path'
 
+/**
+ * What console.log or console.error received, each line as the service wrote
+ * it. Once the logger loads, as it does first in the Host, it writes each such
+ * line as the msg of a JSON entry of its own; that msg is the line.
+ */
+function loggedLines(spy: { mock: { calls: unknown[][] } }): string[] {
+  return spy.mock.calls.map(call => {
+    const line = String(call[0])
+    try {
+      const entry = JSON.parse(line) as { msg?: unknown }
+      if (typeof entry?.msg === 'string' && entry.msg.startsWith('{')) return entry.msg
+    } catch {
+      // Not JSON: the line as written.
+    }
+    return line
+  })
+}
+
 // ─── RSA keypair for test tokens ─────────────────────────────────────────────
 
 let publicKeyPem: string
@@ -820,9 +838,9 @@ describe('workflowRouter — GET /artifacts/:filename', () => {
       const body = await res.text()
       expect(body).toBe(content)
 
-      const auditLine = logSpy.mock.calls
-        .map(c => String(c[0]))
-        .find(line => line.includes('"event":"artifact_download"'))
+      const auditLine = loggedLines(logSpy).find(line =>
+        line.includes('"event":"artifact_download"')
+      )
       expect(auditLine).toBeDefined()
       const parsed = JSON.parse(auditLine!)
       expect(parsed).toMatchObject({
@@ -977,9 +995,9 @@ describe('workflowRouter — DELETE /artifacts', () => {
       expect(fs.existsSync(sandboxDir)).toBe(true)
       expect(fs.readdirSync(sandboxDir)).toHaveLength(0)
 
-      const auditLine = logSpy.mock.calls
-        .map(c => String(c[0]))
-        .find(line => line.includes('"event":"artifact_cleanup"'))
+      const auditLine = loggedLines(logSpy).find(line =>
+        line.includes('"event":"artifact_cleanup"')
+      )
       expect(auditLine).toBeDefined()
       const parsed = JSON.parse(auditLine!)
       expect(parsed).toMatchObject({
@@ -1075,9 +1093,9 @@ describe('workflowRouter — DELETE /artifacts', () => {
       const body = (await res.json()) as { error: string }
       expect(body.error).toMatch(/Cleanup failed/)
 
-      const auditLine = errSpy.mock.calls
-        .map(c => String(c[0]))
-        .find(line => line.includes('"event":"artifact_cleanup_failed"'))
+      const auditLine = loggedLines(errSpy).find(line =>
+        line.includes('"event":"artifact_cleanup_failed"')
+      )
       expect(auditLine).toBeDefined()
       const parsed = JSON.parse(auditLine!)
       expect(parsed).toMatchObject({
@@ -1394,9 +1412,9 @@ describe('workflowRouter — DELETE /artifacts/:filename', () => {
       })
       expect(res.status).toBe(204)
 
-      const auditLine = logSpy.mock.calls
-        .map(c => String(c[0]))
-        .find(line => line.includes('"event":"artifact_file_deleted"'))
+      const auditLine = loggedLines(logSpy).find(line =>
+        line.includes('"event":"artifact_file_deleted"')
+      )
       expect(auditLine).toBeDefined()
       const parsed = JSON.parse(auditLine!)
       expect(parsed).toMatchObject({

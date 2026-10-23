@@ -318,7 +318,16 @@ PY
 }
 
 list_real_pg_files() {
-  local package="$1"
+  local package="$1" file
+  if [ "$package" = control-api ]; then
+    # Reuse CI's validated census. Private producer suites require a separate
+    # authorized service/database lane, documented in the private PG runbook.
+    node "$PROJECT_DIR/scripts/ci/password-recovery-suite-contract.mjs" public |
+      while IFS= read -r file; do
+        printf '%s/%s\n' "$PROJECT_DIR" "$file"
+      done
+    return
+  fi
   find "$PROJECT_DIR/$package" -type f -name '*realPostgres*.test.ts' \
     ! -name 'realPostgres.requirement.ts' -print | sort
 }
@@ -343,9 +352,11 @@ require_isolated_control_api_files() {
   local path
   for path in \
     "$PROJECT_DIR/control-api/test/db.realPostgresMigration.integration.test.ts" \
-    "$PROJECT_DIR/control-api/test/gfsReaderRole.realPostgres.integration.test.ts"; do
+    "$PROJECT_DIR/control-api/test/gfsReaderRole.realPostgres.integration.test.ts" \
+    "$PROJECT_DIR/control-api/test/services.llmProviderAttemptAuthorization.realPostgres.integration.test.ts" \
+    "$PROJECT_DIR/control-api/test/llmProviderAttemptAuthorizer.cancellation.realPostgres.integration.test.ts"; do
     [ -f "$path" ] || {
-      T1_NEXT_COMMAND='restore the role-reset Real PostgreSQL suite files, then re-run T1'
+      T1_NEXT_COMMAND='restore the required isolated Real PostgreSQL suite files, then re-run T1'
       die_t1 ZERO_TESTS_EXECUTED "required isolated control-api suite is missing: $path"
     }
   done
@@ -441,10 +452,15 @@ PY
 
 run_suite() {
   local package="$1" lane="$2" admin_url="$3"
-  local expected_files=0 reported_files=0 file log_file json_file stats
+  local expected_files=0 reported_files=0 file log_file json_file stats selection
   local suite_started_seconds="$SECONDS" suite_duration_seconds=0
   local -a files=() vitest_filters=()
 
+  if ! selection="$(list_real_pg_files "$package")"; then
+    T1_NEXT_COMMAND='restore the exact PostgreSQL suite manifest and its files, then re-run T1'
+    die_t1 REAL_PG_REPORT_INCOMPLETE "PostgreSQL suite inventory could not be validated for $package"
+    return 1
+  fi
   while IFS= read -r file; do
     [ -z "$file" ] && continue
     if [ "$package" = control-api ]; then
@@ -458,7 +474,7 @@ run_suite() {
     fi
     files+=("$file")
     vitest_filters+=("${file#"$PROJECT_DIR/$package/"}")
-  done < <(list_real_pg_files "$package")
+  done <<< "$selection"
 
   expected_files="${#files[@]}"
   if ! [[ "$expected_files" =~ ^[1-9][0-9]*$ ]]; then
@@ -470,6 +486,10 @@ run_suite() {
     die_t1 REAL_PG_REQUIRED_BUT_UNAVAILABLE "Real PostgreSQL $lane DSN is empty for $package"
   fi
 
+  if [ "$package" = control-api ]; then
+    printf '[minikube-t1] private producer PostgreSQL lanes: NOT_RUN; see docs/testing/password-recovery-private-postgres.md\n'
+    t2_evidence_write private-producer NOT_RUN 'Member Registration producer suites require the separate private PostgreSQL lane'
+  fi
   log_file="$T1_TMP_DIR/$(printf '%s' "$package-$lane" | tr / _).log"
   json_file="$T1_TMP_DIR/$(printf '%s' "$package-$lane" | tr / _).json"
   printf '[minikube-t1] running %s %s Real PostgreSQL suites (%s files)\n' \

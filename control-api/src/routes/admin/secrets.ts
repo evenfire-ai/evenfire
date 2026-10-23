@@ -9,6 +9,7 @@ import { extractK8sError } from '../../http/k8sError.js'
 import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { isValidDNSSubdomain } from '../../http/rfc1123.js'
 import { K8sGateway, extractHttpStatus } from '../../k8s.js'
+import { CalendarMinuteRateLimitStore } from '../../middleware/calendarMinuteRateLimitStore.js'
 import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { rootLogger } from '../../observability/logger.js'
@@ -56,27 +57,39 @@ const defaultMcpSecretRollbackPermitStore: McpSecretRollbackPermitStore = {
   finalize: finalizeMcpSecretRollbackPermitClaim,
 }
 
-const mcpSecretDeleteEdgeRateLimit = rateLimit({
-  windowMs: 60_000,
-  limit: 60,
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
-  // Keyed on `sub`, not `jti`: `signAdminToken` mints a fresh `jti` on every
-  // login (utils/auth/adminAuthToken.ts:21), so a per-`jti` budget resets each
-  // time the same admin re-authenticates. `sub` is the stable principal, which
-  // is what the sibling admin buckets use (registry.ts:4420, :4556) and what
-  // pluginWorkloadSdkRateLimits.ts:63-66 already did.
-  keyGenerator: req => {
-    const adminSub = (req as UiAuthedRequest).adminAuth?.sub
-    return adminSub
-      ? `admin-session:${createHash('sha256').update(adminSub).digest('hex')}`
-      : ipKeyGenerator(req.ip ?? '127.0.0.1')
-  },
-})
+/**
+ * Edge counter in front of the `admin_mcp_secret_delete` ledger. An admin
+ * principal is counted on the calendar minute, like the ledger, so the edge
+ * cannot stay exhausted after the ledger has reset. The anonymous fallback
+ * carries the `:ip:` marker, which keeps the first-hit window of the other
+ * source-IP safeguards.
+ */
+export function createMcpSecretDeleteEdgeRateLimit() {
+  return rateLimit({
+    windowMs: 60_000,
+    store: new CalendarMinuteRateLimitStore(),
+    limit: config.adminConnectorDeleteEdgePerMin,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    // Keyed on `sub`, not `jti`: `signAdminToken` mints a fresh `jti` on every
+    // login (utils/auth/adminAuthToken.ts:21), so a per-`jti` budget resets each
+    // time the same admin re-authenticates. `sub` is the stable principal, which
+    // is what the sibling admin buckets use (registry.ts:4420, :4556) and what
+    // pluginWorkloadSdkRateLimits.ts:63-66 already did.
+    keyGenerator: req => {
+      const adminSub = (req as UiAuthedRequest).adminAuth?.sub
+      return adminSub
+        ? `admin-session:${createHash('sha256').update(adminSub).digest('hex')}`
+        : `admin-mcp-secret-delete-edge:ip:${ipKeyGenerator(req.ip ?? '127.0.0.1')}`
+    },
+  })
+}
+
+const mcpSecretDeleteEdgeRateLimit = createMcpSecretDeleteEdgeRateLimit()
 
 const mcpSecretDeleteRateLimit = rateLimitMiddleware({
   bucketType: 'admin_mcp_secret_delete',
-  maxPerMinute: 30,
+  maxPerMinute: config.adminConnectorDeletePerMin,
   // Same reasoning as mcpSecretDeleteEdgeRateLimit: the stable principal, so
   // re-authenticating does not hand the caller a fresh delete budget.
   getBucketKey: req => {
@@ -88,7 +101,7 @@ const mcpSecretDeleteRateLimit = rateLimitMiddleware({
   // union has no fail-open member, so both modes still enforce.
   //
   // 'process-memory', not 'closed': this is an admin-authenticated surface that
-  // already sits behind mcpSecretDeleteEdgeRateLimit (in-process, 60/min), which
+  // already sits behind the in-process edge limiter, which
   // caps it whether or not Postgres can count. 'closed' answers 503, which would
   // deny an operator the ability to delete a Secret precisely during a Postgres
   // outage — when removing a compromised Secret matters most. The two 'closed'
@@ -570,7 +583,8 @@ export function createAdminSecretsRouter(
   // the wizard never writes a CR whose clientIdRef/clientSecretRef dangle. The
   // server-side install saga re-verifies existence at submit; this is the UI's
   // pre-check. Values are structurally impossible here: listSecrets projects only
-  // metadata + key names, and this route forwards only name + keys.
+  // metadata + key names, and this route forwards only name + keys + the
+  // uid/resourceVersion identity the UI needs for compare-and-delete.
   router.get(
     '/admin/mcp-secrets',
     enforceNamespace(config.mcpServersNamespace),
@@ -580,10 +594,18 @@ export function createAdminSecretsRouter(
         const record = asRecord(row)
         const metadata = asRecord(record?.metadata)
         const name = typeof metadata?.name === 'string' ? metadata.name : ''
+        const uid = typeof metadata?.uid === 'string' ? metadata.uid : undefined
+        const resourceVersion =
+          typeof metadata?.resourceVersion === 'string' ? metadata.resourceVersion : undefined
         const keys = Array.isArray(record?.keys)
           ? (record.keys as unknown[]).filter((k): k is string => typeof k === 'string')
           : []
-        return { name, keys }
+        return {
+          name,
+          keys,
+          ...(uid ? { uid } : {}),
+          ...(resourceVersion ? { resourceVersion } : {}),
+        }
       })
       res.status(200).json({ items })
     })

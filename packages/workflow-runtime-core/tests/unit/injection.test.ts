@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { spawnSync } from 'node:child_process'
 import { requestModelInjection } from '../../src/injection/model'
 import { getPreviousOutputPromptMaxChars, renderPrompt } from '../../src/injection/prompt'
 import { loadSoul } from '../../src/injection/soul'
@@ -6,6 +7,38 @@ import { createStaticRuntimeTokenProvider } from '../../src/runtime-token-provid
 import { AUTH_RETRY_DELAY_MS } from '../../src/status-reporter/authRetry'
 
 describe('renderPrompt()', () => {
+  it('CodeQL 427 bounds malformed template scanning', () => {
+    if (process.env.TEMPLATE_REDOS_CHILD === '1') {
+      const value = '{{{{|'.repeat(200_000)
+      process.stdout.write('TEMPLATE_SCAN_STARTED\n')
+      expect(renderPrompt(value, { step: { id: 'x' } as any, previousOutputs: {} })).toBe(value)
+      return
+    }
+    const child = spawnSync(
+      process.execPath,
+      [
+        'node_modules/vitest/vitest.mjs',
+        'run',
+        'tests/unit/injection.test.ts',
+        '--pool=threads',
+        '--maxWorkers=1',
+        '-t',
+        'CodeQL 427 bounds malformed template scanning',
+      ],
+      {
+        env: { ...process.env, TEMPLATE_REDOS_CHILD: '1' },
+        encoding: 'utf8',
+        timeout: 15_000,
+        killSignal: 'SIGKILL',
+      }
+    )
+    expect(child.stdout).toContain('TEMPLATE_SCAN_STARTED')
+    expect(
+      child.error,
+      'prompt rendering must finish within the generous CPU deadline'
+    ).toBeUndefined()
+    expect(child.status, child.stdout + child.stderr).toBe(0)
+  }, 20_000)
   afterEach(() => {
     delete process.env.CLERUM_WORKFLOW_PREVIOUS_OUTPUT_PROMPT_MAX_CHARS
   })

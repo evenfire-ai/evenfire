@@ -52,8 +52,43 @@ function sortableTimestamp(value: string): number {
   return Number.isFinite(timestamp) ? timestamp : 0
 }
 
-export function byUpdatedDesc(a: { updatedAt: string }, b: { updatedAt: string }): number {
-  return sortableTimestamp(b.updatedAt) - sortableTimestamp(a.updatedAt)
+interface SortableCatalogRow {
+  updatedAt: string
+  agentRef?: string
+  id?: string
+}
+
+const compareText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
+
+/**
+ * Newest first, then by Host and chat id, so the order of rows with the same
+ * time does not depend on which Host's catalog arrived first.
+ */
+export function byUpdatedDesc(a: SortableCatalogRow, b: SortableCatalogRow): number {
+  return (
+    sortableTimestamp(b.updatedAt) - sortableTimestamp(a.updatedAt) ||
+    compareText(a.agentRef ?? '', b.agentRef ?? '') ||
+    compareText(a.id ?? '', b.id ?? '')
+  )
+}
+
+/**
+ * Merges two lists already sorted by `byUpdatedDesc` in linear time. Rows that
+ * compare equal keep `first` ahead of `second`, the order a stable sort of
+ * `[...first, ...second]` gives.
+ */
+export function mergeByUpdatedDesc<T extends { updatedAt: string }>(first: T[], second: T[]): T[] {
+  const merged: T[] = []
+  let j = 0
+  for (const item of first) {
+    let next = second[j]
+    while (next !== undefined && byUpdatedDesc(item, next) > 0) {
+      merged.push(next)
+      next = second[++j]
+    }
+    merged.push(item)
+  }
+  return merged.concat(second.slice(j))
 }
 
 export function mergeCatalogPage<E extends CatalogMergeEntry, S extends CatalogMergeSession>(

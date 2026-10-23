@@ -26,6 +26,7 @@ import {
 } from '../../core/types'
 import type { ProviderCredentials } from '../../types'
 import { classifyUnknown } from '../errorClassification'
+import { type ProviderEnvLookup, processEnvLookup } from '../providerEnv'
 import type { LlmProvider } from '../registryCore'
 import type { ClassifiedError, SingleTurnProvider } from '../types'
 
@@ -148,10 +149,10 @@ export class GoogleGenerativeDriver implements SingleTurnProvider {
     const textContent = parts.map(p => p.text ?? '').join('') || null
 
     // Gemini function calls carry no opaque id (it matches responses by name);
-    // synthesize a stable per-response id so the normalized ToolCall shape and
-    // the downstream tool loop keep working. On the next turn the round-trip
-    // recovers the function name from the assistant message we emit (or the
-    // tool message's own `name`), so the synthetic id never has to survive.
+    // synthesize a per-response id so the normalized ToolCall shape and the
+    // downstream tool loop keep working. The ids restart at `call_0` on every
+    // response, so they are unique only within one assistant turn; the
+    // round-trip (toGeminiContents) resolves them against that turn alone.
     let callIndex = 0
     const toolCalls = parts
       .filter(p => p.functionCall)
@@ -174,20 +175,15 @@ export class GoogleGenerativeDriver implements SingleTurnProvider {
   /**
    * Convert the normalized ChatMessage[] into Gemini `contents` + a joined
    * `systemInstruction`. Tool results are matched back to their function name
-   * via the id→name map built from the assistant tool_calls in the SAME
-   * history (Gemini keys function responses by name, not by id).
+   * via the id→name map of the PRECEDING assistant turn (Gemini keys function
+   * responses by name, not by id). The map is per turn because the driver's
+   * synthetic ids restart at `call_0` on every response.
    */
   private toGeminiContents(messages: CoreChatMessage[]): {
     systemInstruction: string
     contents: GeminiContent[]
   } {
-    const idToName = new Map<string, string>()
-    for (const m of messages) {
-      if (m.role === 'assistant' && m.tool_calls) {
-        for (const tc of m.tool_calls) idToName.set(tc.id, tc.name)
-      }
-    }
-
+    let turnIdToName = new Map<string, string>()
     const systemParts: string[] = []
     const contents: GeminiContent[] = []
 
@@ -199,14 +195,20 @@ export class GoogleGenerativeDriver implements SingleTurnProvider {
       if (m.role === 'assistant') {
         const parts: GeminiPart[] = []
         if (m.content) parts.push({ text: m.content })
+        turnIdToName = new Map()
         for (const tc of m.tool_calls ?? []) {
+          turnIdToName.set(tc.id, tc.name)
           parts.push({ functionCall: { name: tc.name, args: tc.arguments } })
         }
         contents.push({ role: 'model', parts: parts.length > 0 ? parts : [{ text: '' }] })
         continue
       }
       if (m.role === 'tool') {
-        const name = m.name ?? (m.tool_call_id ? idToName.get(m.tool_call_id) : undefined) ?? 'tool'
+        // The functionCall's own name wins: a call routed through
+        // `clerum__tool_call` produces a result named after the REAL tool, but
+        // Gemini pairs the response with the `clerum__tool_call` functionCall.
+        const name =
+          (m.tool_call_id ? turnIdToName.get(m.tool_call_id) : undefined) ?? m.name ?? 'tool'
         contents.push({
           role: 'user',
           parts: [{ functionResponse: { name, response: { result: m.content } } }],
@@ -360,7 +362,9 @@ export interface VertexClientOptions {
 }
 
 /**
- * Pure: derive the Vertex client options from the credential bag + pod env,
+ * Pure: derive the Vertex client options from the credential bag + the
+ * non-secret provider env (`env`: per-Host `host-<ref>-env` via ConfigStore in a
+ * Host pod, `process.env` by default),
  * constructing the auth credentials IN MEMORY from the service-account JSON —
  * never via a `GOOGLE_APPLICATION_CREDENTIALS` file. `VERTEX_PROJECT_ID`
  * (falling back to the JSON's `project_id`) is required; `VERTEX_LOCATION`
@@ -369,7 +373,10 @@ export interface VertexClientOptions {
  * {@link buildGoogleGenerativeDriver} so all the wiring is testable without the
  * SDK.
  */
-export function buildVertexClientOptions(credentials: ProviderCredentials): VertexClientOptions {
+export function buildVertexClientOptions(
+  credentials: ProviderCredentials,
+  env: ProviderEnvLookup = processEnvLookup
+): VertexClientOptions {
   const rawJson = credentials['vertex-service-account-json']
   if (!rawJson) throw new Error('vertex: missing service-account JSON credential')
 
@@ -384,9 +391,9 @@ export function buildVertexClientOptions(credentials: ProviderCredentials): Vert
     throw new Error('vertex: service-account JSON missing client_email/private_key')
   }
 
-  const projectId = process.env.VERTEX_PROJECT_ID || sa.project_id
+  const projectId = env('VERTEX_PROJECT_ID')?.trim() || sa.project_id
   if (!projectId) throw new Error('vertex: VERTEX_PROJECT_ID is required')
-  const location = process.env.VERTEX_LOCATION || 'us-central1'
+  const location = env('VERTEX_LOCATION')?.trim() || 'us-central1'
 
   return {
     vertexai: true,
@@ -408,9 +415,10 @@ export function buildVertexClientOptions(credentials: ProviderCredentials): Vert
  */
 export function buildGoogleGenerativeDriver(
   credentials: ProviderCredentials,
-  model: string
+  model: string,
+  env: ProviderEnvLookup = processEnvLookup
 ): SingleTurnProvider {
-  const options = buildVertexClientOptions(credentials)
+  const options = buildVertexClientOptions(credentials, env)
 
   // Lazy CommonJS require — only reached for a Vertex Host.
 

@@ -1,6 +1,9 @@
 import { Router } from 'express'
 import { isWorkflowRecipeDefaultAllowedCapability } from '@clerum/workflow-recipe-capability-policy'
-import { EVENFIRE_REGISTRY_PULL_SECRET_NAME } from '@clerum/workflow-runtime-core'
+import {
+  EVENFIRE_REGISTRY_PULL_SECRET_NAME,
+  scanTemplateReferences,
+} from '@clerum/workflow-runtime-core'
 import { config } from '../../config.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { CONTENT_TYPES } from '../../http/contentTypes.js'
@@ -112,7 +115,6 @@ const JWT_LIKE_RE = /^[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}
 const SECRET_LIKE_VALUE_RE = /^(sk-[A-Za-z0-9_-]{8,}|pat[A-Za-z0-9_-]{8,})$/
 const URL_WITH_PASSWORD_RE = /^[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:([^@\s]+)@/i
 const INPUT_TEMPLATE_ONLY_RE = /^\{\{\s*inputs\.[A-Za-z0-9_.-]+\s*\}\}$/
-const TEMPLATE_RE = /\{\{([^}]+)\}\}/g
 // Pre-persistence mirror of workflow-recipes/src/reconciler/templateEngine.ts.
 // Keep in parity with the WRC runtime guard; WRC remains the final source of truth.
 const BLOCKED_TEMPLATE_KEYS = new Set([
@@ -364,8 +366,8 @@ function validateTemplateString(
   context: Parameters<typeof validateTemplateRef>[1]
 ): ValidationError[] {
   const errors: ValidationError[] = []
-  for (const match of value.matchAll(TEMPLATE_RE)) {
-    const reason = validateTemplateRef(match[1], context)
+  for (const match of scanTemplateReferences(value)) {
+    const reason = validateTemplateRef(match.body, context)
     if (!reason) continue
     errors.push({
       field,

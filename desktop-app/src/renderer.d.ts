@@ -18,6 +18,7 @@ import {
   DesktopAppInfo,
   DesktopReleaseStatus,
   DesktopRuntimeConfig,
+  DesktopRuntimeConfigHandoffSelection,
   DesktopRuntimeConfigState,
   EntityChangeStreamEvent,
   ExternalChannelsSummary,
@@ -39,6 +40,7 @@ import {
   RpcConnectorsResult,
   SandboxUiApp,
   SandboxUiDeepLinkEnvelope,
+  SandboxUiReleasedEvent,
   SessionLifecycleState,
   SessionMessagesQuery,
   SessionMessagesResult,
@@ -68,14 +70,22 @@ declare global {
       }
       auth: {
         getSessionState: () => Promise<SessionState>
+        getSessionGeneration: () => Promise<number>
         getDependenciesHealth: () => Promise<{
           externalRestApi: { ok: boolean; detail?: string }
           rpcProxy: { ok: boolean; detail?: string }
         }>
         getRuntimeConfigState: () => Promise<DesktopRuntimeConfigState>
         selectRuntimeConfig: (optionId: string) => Promise<DesktopRuntimeConfigState>
+        selectRuntimeConfigForHandoff: (
+          optionId: string,
+          expectedSessionGeneration: number
+        ) => Promise<DesktopRuntimeConfigHandoffSelection>
         clearRuntimeConfigSelection: () => Promise<DesktopRuntimeConfigState>
-        saveRuntimeConfig: (config: DesktopRuntimeConfig) => Promise<DesktopRuntimeConfigState>
+        saveRuntimeConfig: (
+          config: DesktopRuntimeConfig,
+          expectedSessionGeneration?: number
+        ) => Promise<DesktopRuntimeConfigState>
         deleteRuntimeConfig: (optionId: string) => Promise<DesktopRuntimeConfigState>
         googleLogin: (idToken: string) => Promise<SessionState>
         passwordLogin: (email: string, password: string) => Promise<PasswordLoginResult>
@@ -97,17 +107,13 @@ declare global {
           callback: (payload: { email: string; authorizationToken: string }) => void
         ) => () => void
         onDesktopEnvironmentSetup: (
-          callback: (payload: {
-            externalRestApiBaseUrl: string
-            rpcProxyBaseUrl: string
-            appName?: string
-          }) => void
+          callback: (payload: { externalRestApiBaseUrl: string; appName?: string }) => void
         ) => () => void
         getDesktopReleaseStatus: () => Promise<DesktopReleaseStatus>
         getDesktopAppInfo: () => Promise<DesktopAppInfo>
         openDesktopRelease: (releaseUrl: string) => Promise<{ opened: true }>
         onExternalLogout: (callback: () => void) => () => void
-        logout: () => Promise<{ ok: true }>
+        logout: () => Promise<{ ok: true; sessionGeneration: number }>
       }
       team: {
         list: () => Promise<{ currentTeamId: string; items: TeamSummary[] }>
@@ -769,7 +775,7 @@ declare global {
         getIndex: (agentRef: string) => Promise<ChatIndex>
         reconcileServerSessions: (
           agentRef: string,
-          sessions: Array<{ chatId: string; lastActivityAt?: string }>
+          sessions: Array<{ chatId: string; lastActivityAt?: string; title?: string }>
         ) => Promise<number>
         dismissOnboarding: (agentRef: string) => Promise<void>
         markUnreadTerminal: (agentRef: string, chatId: string) => Promise<void>
@@ -786,10 +792,14 @@ declare global {
           defaultPath?: string
           routePath?: string
           bounds: { x: number; y: number; width: number; height: number; dpr?: number }
+          // Echoed by main on `onReleased` / `onRefreshError` / `onRefreshRecovered` /
+          // `onTitleChanged` for the view this open mounts.
+          launchId: string
         }) => Promise<void>
-        close: () => Promise<void>
-        reload: () => Promise<void>
-        getLocation: () => Promise<{ appRef: string; routePath?: string } | null>
+        // Closes that launch's view only if it is still the live one.
+        close: (args: { launchId: string }) => Promise<void>
+        // Reloads that launch's view in place only if it is still the live one.
+        reload: (args: { launchId: string }) => Promise<void>
         copyDeepLink: (teamId?: string) => Promise<{ url: string }>
         listPendingDeepLinks: () => Promise<{ links: SandboxUiDeepLinkEnvelope[] }>
         clearPendingDeepLinks: () => Promise<void>
@@ -828,11 +838,19 @@ declare global {
           }) => void
         ) => () => void
         onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => () => void
-        onClosed: (callback: (args: { appRef: string }) => void) => () => void
+        // Once per view main tears down, whatever the reason, with the route it
+        // represented (`null`: unreadable, keep the last known one).
+        onReleased: (callback: (args: SandboxUiReleasedEvent) => void) => () => void
         onRefreshError: (
-          callback: (args: { appRef: string; message: string }) => void
+          callback: (args: { appRef: string; launchId: string; message: string }) => void
         ) => () => void
-        onTitleChanged: (callback: (args: { appRef: string; title: string }) => void) => () => void
+        // A refresh that `onRefreshError` reported as failed succeeded later.
+        onRefreshRecovered: (
+          callback: (args: { appRef: string; launchId: string }) => void
+        ) => () => void
+        onTitleChanged: (
+          callback: (args: { appRef: string; launchId: string; title: string }) => void
+        ) => () => void
       }
       pluginSdk: {
         onConsentRequested: (callback: (request: PluginConsentRequest) => void) => () => void

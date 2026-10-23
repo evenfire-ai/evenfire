@@ -1,5 +1,19 @@
 # Evenfire repository instructions
 
+## Shared capability naming
+
+Name shared variables, functions, types, database fields, quota families,
+metrics and configuration after the domain or capability they implement.
+Do not name shared infrastructure after the AI agent, authoring tool, model
+or provider that first introduced it. A shared subscription quota, for
+example, uses an administrative subscription name.
+
+Provider names remain appropriate for actual provider-specific adapters,
+protocol identifiers and external contracts. Historical data and migration
+compatibility identifiers may retain legacy names when the concrete
+compatibility requirement is documented. Keep those references confined to
+that boundary; do not copy them into new shared runtime names.
+
 ## Local Minikube reuse and ownership
 
 Use an existing healthy, branch-owned Minikube profile for successive local

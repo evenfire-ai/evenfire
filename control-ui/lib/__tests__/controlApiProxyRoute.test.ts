@@ -70,6 +70,36 @@ describe('control-ui control-api proxy route', () => {
     await expect(res.json()).resolves.toEqual({ items: [] })
   })
 
+  it('forwards 429 status, body, and Retry-After metadata unchanged', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ message: 'Slow down', retryAfterSeconds: 7 }), {
+        status: 429,
+        statusText: '',
+        headers: {
+          'content-type': 'application/json',
+          'retry-after': '7',
+          'x-ratelimit-remaining': '0',
+        },
+      })
+    )
+
+    const req = new NextRequest('http://localhost:3000/control-api/api/v1/admin/llm/providers', {
+      method: 'GET',
+    })
+    const res = await GET(req, {
+      params: { path: ['api', 'v1', 'admin', 'llm', 'providers'] },
+    })
+
+    expect(res.status).toBe(429)
+    expect(res.headers.get('retry-after')).toBe('7')
+    expect(res.headers.get('x-ratelimit-remaining')).toBe('0')
+    await expect(res.json()).resolves.toEqual({
+      message: 'Slow down',
+      retryAfterSeconds: 7,
+    })
+    expect(fetchMock).toHaveBeenCalledOnce()
+  })
+
   it('preserves encoded slashes in scoped Marketplace entry names', async () => {
     const fetchMock = vi
       .spyOn(globalThis, 'fetch')

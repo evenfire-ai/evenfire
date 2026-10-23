@@ -407,6 +407,25 @@ describe('file attachment validation (issue #666)', () => {
     expect(result).not.toHaveProperty('attachments')
   })
 
+  it('bounds a file by decoded bytes when one byte more has the same base64 length (#678)', () => {
+    // 11 and 12 bytes both encode to 16 characters, like 11MiB and 11MiB + 1.
+    const boundary = { maxCount: 2, maxBytes: 10, maxFileBytes: 11, messageId: 'message-1' }
+    const atLimit = fileOf('x'.repeat(11), 'at-limit.txt', 'text/plain', 'text/plain')
+    const overLimit = fileOf('x'.repeat(12), 'over-limit.txt', 'text/plain', 'text/plain')
+    expect(overLimit.dataBase64.length).toBe(atLimit.dataBase64.length)
+
+    const admitted = validateIncomingAttachments([atLimit], boundary)
+    expect(admitted.ok && admitted.attachments?.map(item => item.sizeBytes)).toEqual([11])
+
+    for (const declared of [12, 11]) {
+      const rejected = validateIncomingAttachments(
+        [{ ...overLimit, sizeBytes: declared }],
+        boundary
+      )
+      expect(rejected).toMatchObject({ ok: false, error: { code: 'FILE_ATTACHMENT_TOO_LARGE' } })
+    }
+  })
+
   it('keeps the #669 rejection for an unknown kind', () => {
     const result = validateIncomingAttachments([{ ...notes, kind: 'document' }], limits)
     expect(result).toMatchObject({ ok: false, error: { code: 'LLM_INVALID_ATTACHMENT' } })

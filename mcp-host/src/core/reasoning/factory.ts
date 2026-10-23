@@ -1,7 +1,6 @@
 import { LlmPort, PromptBuilder, ReasoningFactory, ReasoningPort } from '../interfaces'
 import type { TokenCounter } from '../tokenizer/tokenCounter'
 import { ContextBreakdownRaw, DefaultReasoningPort } from './port'
-import { DefaultPromptBuilder } from './promptBuilder'
 import type { SystemPromptParts } from './systemPrompt'
 
 /**
@@ -20,7 +19,9 @@ export class DefaultReasoningFactory implements ReasoningFactory {
 
   constructor(
     private readonly llmPort: LlmPort,
-    promptBuilder?: PromptBuilder,
+    // #1003 — required: the builder carries the host's native-tool presentation,
+    // which selects the discovery guidance text.
+    promptBuilder: PromptBuilder,
     private readonly metadata?: Record<string, unknown>,
     /**
      * F1.2b — optional context-window-breakdown wiring propagated to every
@@ -31,7 +32,7 @@ export class DefaultReasoningFactory implements ReasoningFactory {
     private readonly onContextBreakdown?: (raw: ContextBreakdownRaw) => void,
     private readonly contextMaxTokens?: number
   ) {
-    this.promptBuilder = promptBuilder ?? new DefaultPromptBuilder()
+    this.promptBuilder = promptBuilder
   }
 
   create(systemPrompt?: string): ReasoningPort {

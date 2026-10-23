@@ -32,6 +32,35 @@ export type SandboxUiApp = {
 
 export type { SandboxUiDeepLinkEnvelope } from '@clerum/desktop-app-links'
 
+/**
+ * Why a sandbox-ui view died. `crashed` never carries a location: handing the
+ * route back would relaunch straight into whatever crashed it. `open_failed`
+ * is a view torn down by the open that mounted it, which then rejects: the
+ * failure is that rejection, so the renderer must wait for it.
+ */
+export type SandboxUiReleaseReason =
+  | 'replaced'
+  | 'closed'
+  | 'open_failed'
+  | 'crashed'
+  | 'parent_closed'
+  | 'session'
+  | 'renderer_replaced'
+
+/** `{}` is the app's default route, `{ routePath }` a specific one. */
+export type SandboxUiRoute = { routePath?: string }
+
+/**
+ * Sent once per sandbox-ui view main tears down, to the window it was mounted
+ * in. `location: null` means the route could not be read: keep the last known
+ * one.
+ */
+export type SandboxUiReleasedEvent = {
+  launchId: string
+  reason: SandboxUiReleaseReason
+  location: SandboxUiRoute | null
+}
+
 export type SessionMe = {
   id: string
   email: string
@@ -578,7 +607,7 @@ export type HostMessageRequest = {
   [key: string]: unknown
 }
 
-export type HostMessageAttachment = {
+export type HostImageAttachment = {
   id: string
   kind: 'image'
   mimeType: 'image/jpeg' | 'image/png'
@@ -586,6 +615,26 @@ export type HostMessageAttachment = {
   dataBase64: string
   filename?: string
 }
+
+/**
+ * #678 — a document of any type sent inline. `sizeBytes` is the decoded length
+ * and `digest.hex` the sha256 of those bytes; mcp-host recomputes both and
+ * classifies the bytes itself, so `detectedMediaType` is the renderer's claim.
+ */
+export type HostFileAttachment = {
+  id: string
+  kind: 'file'
+  filename: string
+  /** Media type the OS or browser reported; empty when it reported none. */
+  mimeType: string
+  detectedMediaType: string
+  encoding: 'base64'
+  dataBase64: string
+  sizeBytes: number
+  digest: { algorithm: 'sha256'; hex: string }
+}
+
+export type HostMessageAttachment = HostImageAttachment | HostFileAttachment
 
 /**
  * Structured error returned by mcp-host when an LLM call fails.
@@ -703,6 +752,11 @@ export type DesktopRuntimeConfigState = {
   envKey: string
   storagePath: string
   options: DesktopRuntimeConfigOption[]
+}
+
+export type DesktopRuntimeConfigHandoffSelection = {
+  runtimeConfigState: DesktopRuntimeConfigState
+  sessionGeneration: number
 }
 
 export type TokenMetadata = {

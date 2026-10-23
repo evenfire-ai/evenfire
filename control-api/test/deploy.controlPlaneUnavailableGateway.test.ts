@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { LLM_PROVIDER_ATTEMPT_ADMISSION_POLICY } from '../src/middleware/llmProviderAttemptAdmissionLimits.js'
 
 // G1-10 (#720): a 502 that a gateway generates itself means control-api
 // produced no valid response (connect refused, closed before a response, or an
@@ -30,12 +31,17 @@ function proxyRedeemAbortMs(proxy: string): number {
   return Number(match![1].replace(/_/g, ''))
 }
 
-/** The one `proxy_connect_timeout` in a block, in milliseconds (`Ns` or `Nms`). */
-function connectTimeoutMs(block: string): number {
-  const matches = [...block.matchAll(/\bproxy_connect_timeout\s+([0-9]+)(ms|s)\s*;/g)]
-  expect(matches, 'exactly one proxy_connect_timeout').toHaveLength(1)
+/** The one `<directive>` timeout in a block, in milliseconds (`Ns` or `Nms`). */
+function timeoutMs(block: string, directive: string): number {
+  const matches = [...block.matchAll(new RegExp(`\\b${directive}\\s+([0-9]+)(ms|s)\\s*;`, 'g'))]
+  expect(matches, `exactly one ${directive}`).toHaveLength(1)
   const [, value, unit] = matches[0]
   return unit === 's' ? Number(value) * 1000 : Number(value)
+}
+
+/** The one `proxy_connect_timeout` in a block, in milliseconds. */
+function connectTimeoutMs(block: string): number {
+  return timeoutMs(block, 'proxy_connect_timeout')
 }
 
 // Any spelling nginx accepts: `error_page 502 = @x;`, `error_page 502 =@x;`, …
@@ -50,6 +56,13 @@ const CODEX_REDEEM = 'location = /api/v1/internal/llm/provider-attempts/redeem {
 const GROK_REDEEM = 'location = /api/v1/internal/llm/grok/provider-attempts/redeem {'
 const CODEX_FINALIZE = 'location = /api/v1/internal/llm/provider-attempts/finalize {'
 const GROK_FINALIZE = 'location = /api/v1/internal/llm/grok/provider-attempts/finalize {'
+
+// Authorize forwards the canonical URI: its exact location matches the
+// normalized URI, and a proxy_pass without a URI part would forward the raw
+// alias. Redeem keeps the raw forward.
+const AUTHORIZE_PROXY_PASS =
+  'proxy_pass http://control_api_upstream/api/v1/mcp-host/llm/provider-attempts/authorize;'
+const RAW_PROXY_PASS = 'proxy_pass http://control_api_upstream;'
 
 /** One ConfigMap document of configmaps.yaml, selected by its metadata name. */
 function configMap(name: string): string {
@@ -85,15 +98,19 @@ const RPC_GATEWAY = 'control-api-rpc-gateway'
 
 describe('gateway-generated 502 on user-facing control-plane hops (G1-10, #720)', () => {
   it.each([
-    ['H2 authorize', WORKFLOW_APPROVAL_GATEWAY, AUTHORIZE],
-    ['H3 Codex redeem', RPC_GATEWAY, CODEX_REDEEM],
-    ['H3 Grok redeem', RPC_GATEWAY, GROK_REDEEM],
-  ])('G1-10a: %s answers its own 502 as control_plane_unavailable', (_hop, gateway, opening) => {
-    const block = locationBlock(directives(configMap(gateway)), opening)
-    // Witness: this is the block that proxies to control-api.
-    expect(block).toContain('proxy_pass http://control_api_upstream;')
-    expect(count(block, ERROR_PAGE)).toBe(1)
-  })
+    ['H2 authorize', WORKFLOW_APPROVAL_GATEWAY, AUTHORIZE, AUTHORIZE_PROXY_PASS],
+    ['H3 Codex redeem', RPC_GATEWAY, CODEX_REDEEM, RAW_PROXY_PASS],
+    ['H3 Grok redeem', RPC_GATEWAY, GROK_REDEEM, RAW_PROXY_PASS],
+  ])(
+    'G1-10a: %s answers its own 502 as control_plane_unavailable',
+    (_hop, gateway, opening, proxyPass) => {
+      const block = locationBlock(directives(configMap(gateway)), opening)
+      // Witness: this is the block that proxies to control-api.
+      expect(block).toContain(proxyPass)
+      expect(count(block, /\bproxy_pass\b/g)).toBe(1)
+      expect(count(block, ERROR_PAGE)).toBe(1)
+    }
+  )
 
   it.each([WORKFLOW_APPROVAL_GATEWAY, RPC_GATEWAY])(
     'G1-10b: %s answers 503 JSON control_plane_unavailable with no-store headers',
@@ -153,15 +170,19 @@ const CONNECT_FAILED = 'if ($upstream_connect_time = "-") {'
 
 describe('gateway-generated connect-timeout 504 on user-facing control-plane hops (G1-12, #820)', () => {
   it.each([
-    ['H2 authorize', WORKFLOW_APPROVAL_GATEWAY, AUTHORIZE],
-    ['H3 Codex redeem', RPC_GATEWAY, CODEX_REDEEM],
-    ['H3 Grok redeem', RPC_GATEWAY, GROK_REDEEM],
-  ])('G1-12a: %s sends its own 504 to the connect-timeout check', (_hop, gateway, opening) => {
-    const block = locationBlock(directives(configMap(gateway)), opening)
-    // Witness: this is the block that proxies to control-api.
-    expect(block).toContain('proxy_pass http://control_api_upstream;')
-    expect(count(block, CONNECT_TIMEOUT_ERROR_PAGE)).toBe(1)
-  })
+    ['H2 authorize', WORKFLOW_APPROVAL_GATEWAY, AUTHORIZE, AUTHORIZE_PROXY_PASS],
+    ['H3 Codex redeem', RPC_GATEWAY, CODEX_REDEEM, RAW_PROXY_PASS],
+    ['H3 Grok redeem', RPC_GATEWAY, GROK_REDEEM, RAW_PROXY_PASS],
+  ])(
+    'G1-12a: %s sends its own 504 to the connect-timeout check',
+    (_hop, gateway, opening, proxyPass) => {
+      const block = locationBlock(directives(configMap(gateway)), opening)
+      // Witness: this is the block that proxies to control-api.
+      expect(block).toContain(proxyPass)
+      expect(count(block, /\bproxy_pass\b/g)).toBe(1)
+      expect(count(block, CONNECT_TIMEOUT_ERROR_PAGE)).toBe(1)
+    }
+  )
 
   it.each([WORKFLOW_APPROVAL_GATEWAY, RPC_GATEWAY])(
     'G1-12b: %s answers control_plane_unavailable only when no connection was made, else its own 504',
@@ -204,9 +225,28 @@ describe('gateway-generated connect-timeout 504 on user-facing control-plane hop
     expect(connectTimeoutMs(approval)).toBe(5000)
     const block = locationBlock(approval, AUTHORIZE)
     // Witness: the authorize block was read.
-    expect(block).toContain('proxy_pass http://control_api_upstream;')
+    expect(block).toContain(AUTHORIZE_PROXY_PASS)
     expect(block).not.toMatch(/\bproxy_connect_timeout\b/)
   })
+
+  it.each(['proxy_read_timeout', 'proxy_send_timeout'])(
+    'G1-12f: authorize %s outlasts the longest retained authorize, so control-api answers it',
+    directive => {
+      const approval = directives(configMap(WORKFLOW_APPROVAL_GATEWAY))
+      const block = locationBlock(approval, AUTHORIZE)
+      const { queueWaitMs, readDeadlineMs, workDeadlineMs } = LLM_PROVIDER_ATTEMPT_ADMISSION_POLICY
+      const longestAuthorizeMs = queueWaitMs + readDeadlineMs + workDeadlineMs
+      // Witnesses: the authorize block and the admission policy were read, and
+      // the server keeps 30 s for every other route, so the bound is local.
+      expect(block).toContain(AUTHORIZE_PROXY_PASS)
+      expect(longestAuthorizeMs).toBeGreaterThan(30_000)
+      const outside = approval.replace(block, '')
+      expect(timeoutMs(outside, directive)).toBe(30_000)
+      // Otherwise a queued request gets nginx's bare 504 before control-api's
+      // queue_wait or authorize_timeout.
+      expect(timeoutMs(block, directive)).toBeGreaterThan(longestAuthorizeMs)
+    }
+  )
 
   it.each([
     ['Codex finalize', CODEX_FINALIZE],

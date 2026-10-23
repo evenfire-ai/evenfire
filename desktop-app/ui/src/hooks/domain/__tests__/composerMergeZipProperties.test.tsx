@@ -14,7 +14,7 @@
 import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
 import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
-import { COMPOSER_MAX_IMAGE_ATTACHMENTS } from '@constants/attachments'
+import { COMPOSER_MAX_ATTACHMENTS } from '@constants/attachments'
 import { GFS_ZIP_MAX_SEGMENT_NAME_BYTES, sanitizeZipSegment } from '@lib/gfsFolderZip'
 import type { ComposerImageAttachment, ComposerReferenceAttachment } from '@/uiTypes'
 import { ZipEntryNameAllocator, entryNameFitsZipFields } from '../../../../../src/gfs/zipEntryName'
@@ -63,7 +63,7 @@ const referenceArbitrary = fc
 const heldImagesArbitrary = fc
   .uniqueArray(imageArbitrary, {
     minLength: 0,
-    maxLength: COMPOSER_MAX_IMAGE_ATTACHMENTS,
+    maxLength: COMPOSER_MAX_ATTACHMENTS,
     selector: item => `${item.mimeType}:${item.sizeBytes}:${item.dataBase64}`,
   })
   .map(items => items as ComposerImageAttachment[])
@@ -80,7 +80,7 @@ describe('composer merge invariants (R1-M6)', () => {
   it('counts a cap-time duplicate as a duplicate, not a drop (R2-L1)', () => {
     // Composer already at the cap; the restore payload is byte-identical to
     // what is held. Nothing is lost — reporting a drop would be a lie.
-    const held = Array.from({ length: COMPOSER_MAX_IMAGE_ATTACHMENTS }, (_, index) => ({
+    const held = Array.from({ length: COMPOSER_MAX_ATTACHMENTS }, (_, index) => ({
       ...({} as ComposerImageAttachment),
       id: `held-${index}`,
       name: `held-${index}.png`,
@@ -94,7 +94,7 @@ describe('composer merge invariants (R1-M6)', () => {
     expect(outcome.duplicates).toBe(2)
     expect(outcome.dropped).toBe(0)
     expect(outcome.kept).toBe(0)
-    expect(outcome.next).toHaveLength(COMPOSER_MAX_IMAGE_ATTACHMENTS)
+    expect(outcome.next).toHaveLength(COMPOSER_MAX_ATTACHMENTS)
     // The exact same set survives: restoring dropped nothing new.
     expect(outcome.next).toEqual(held)
   })
@@ -107,12 +107,12 @@ describe('composer merge invariants (R1-M6)', () => {
         (existing, incoming) => {
           // Valid starting state (R1-M6 round 2): a real composer is never
           // above the cap, and never holds byte-duplicates.
-          expect(existing.length).toBeLessThanOrEqual(COMPOSER_MAX_IMAGE_ATTACHMENTS)
+          expect(existing.length).toBeLessThanOrEqual(COMPOSER_MAX_ATTACHMENTS)
           const outcome = mergeComposerImageAttachments(
             existing,
             incoming as ComposerImageAttachment[]
           )
-          expect(outcome.next.length).toBeLessThanOrEqual(COMPOSER_MAX_IMAGE_ATTACHMENTS)
+          expect(outcome.next.length).toBeLessThanOrEqual(COMPOSER_MAX_ATTACHMENTS)
           expect(outcome.kept + outcome.duplicates + outcome.dropped).toBe(incoming.length)
           // The composer never loses what it already held.
           expect(outcome.next.slice(0, existing.length)).toEqual(existing)
@@ -135,7 +135,7 @@ describe('composer merge invariants (R1-M6)', () => {
   it('image merge at cap: incoming duplicates never count as drops (decision path)', () => {
     fc.assert(
       fc.property(
-        fc.integer({ min: 0, max: COMPOSER_MAX_IMAGE_ATTACHMENTS }),
+        fc.integer({ min: 0, max: COMPOSER_MAX_ATTACHMENTS }),
         fc.array(imageArbitrary, { maxLength: 10 }),
         (heldCount, extra) => {
           // A composer at the cap whose restore payload includes held images:
@@ -164,7 +164,7 @@ describe('composer merge invariants (R1-M6)', () => {
               !held.some(h => h.dataBase64 === item.dataBase64 && h.sizeBytes === item.sizeBytes)
           )
           expect(outcome.dropped).toBe(
-            Math.max(0, notHeld.length - Math.max(0, COMPOSER_MAX_IMAGE_ATTACHMENTS - heldCount))
+            Math.max(0, notHeld.length - Math.max(0, COMPOSER_MAX_ATTACHMENTS - heldCount))
           )
         }
       ),
@@ -250,7 +250,7 @@ describe('composer merge invariants (R1-M6)', () => {
     // composer already holds. Nothing was lost by the second item, so it is a
     // DUPLICATE, not another drop: stopping the scan at the cap would
     // classify it without looking at it and report a lost attachment.
-    const held = Array.from({ length: COMPOSER_MAX_IMAGE_ATTACHMENTS }, (_, index) => ({
+    const held = Array.from({ length: COMPOSER_MAX_ATTACHMENTS }, (_, index) => ({
       ...({} as ComposerImageAttachment),
       id: `held-${index}`,
       name: `held-${index}.png`,

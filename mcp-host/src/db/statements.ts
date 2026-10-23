@@ -52,8 +52,10 @@ export interface PreparedStatements {
   ftsSearchByUser: Statement
   /** T3.1 — scoped to (userId [, channelType] [, since]) with hard JOIN on `s.id = m.session_id`. */
   ftsSearchMessages: Statement
-  /** T3.1 — deletes sessions with `end_reason IS NOT NULL` closed before the cutoff. */
-  sweepClosedSessions: Statement
+  /** T3.1 — deletes up to `@limit` messages of sessions closed before the cutoff. */
+  sweepClosedSessionMessages: Statement
+  /** T3.1 — deletes up to `@limit` sessions closed before the cutoff. */
+  sweepClosedSessionsEmpty: Statement
 
   integrityCheck: Statement
 }
@@ -425,16 +427,17 @@ export function prepareStatements(db: Database): PreparedStatements {
         request_id, session_id, task_id, tool_name, tool_call_id,
         parameters, description, context_snapshot, completed_results,
         intent_summary, source_message, registered_at, expires_at, trace_context,
-        reason, mcp_server_name, task_budget
+        reason, mcp_server_name, task_budget, authorization_scope
       ) VALUES (
         @request_id, @session_id, @task_id, @tool_name, @tool_call_id,
         @parameters, @description, @context_snapshot, @completed_results,
         @intent_summary, @source_message, @registered_at, @expires_at, @trace_context,
-        @reason, @mcp_server_name, @task_budget
+        @reason, @mcp_server_name, @task_budget, @authorization_scope
       )
       ON CONFLICT(request_id) DO UPDATE SET
         task_id = excluded.task_id,
         task_budget = excluded.task_budget,
+        authorization_scope = excluded.authorization_scope,
         context_snapshot = excluded.context_snapshot,
         completed_results = excluded.completed_results,
         trace_context = excluded.trace_context,
@@ -519,15 +522,31 @@ export function prepareStatements(db: Database): PreparedStatements {
       ORDER BY rank
       LIMIT @limit
     `),
-    // T3.1 — retention sweep. Only deletes sessions that are properly closed
+    // T3.1 — retention sweep. Only touches sessions that are properly closed
     // (`end_reason IS NOT NULL`) AND aged past the cutoff. In-flight sessions
-    // never get pruned, regardless of `started_at`. ON DELETE CASCADE on
-    // `messages` cleans up the messages + FTS triggers handle the index.
-    sweepClosedSessions: db.prepare(`
+    // never get pruned, regardless of `started_at`. Each statement deletes at
+    // most `@limit` rows so one worker operation stays bounded however large
+    // the backlog is: messages go first (FTS triggers update the index), and
+    // the sessions are deleted once they have no messages left, so their
+    // cascade only reaches `pending_approvals`.
+    sweepClosedSessionMessages: db.prepare(`
+      DELETE FROM messages
+       WHERE id IN (
+         SELECT m.id FROM messages m
+           JOIN sessions s ON s.id = m.session_id
+          WHERE s.end_reason IS NOT NULL
+            AND s.ended_at IS NOT NULL
+            AND s.ended_at < @cutoff
+          LIMIT @limit)
+    `),
+    sweepClosedSessionsEmpty: db.prepare(`
       DELETE FROM sessions
-       WHERE end_reason IS NOT NULL
-         AND ended_at IS NOT NULL
-         AND ended_at < @cutoff
+       WHERE id IN (
+         SELECT id FROM sessions
+          WHERE end_reason IS NOT NULL
+            AND ended_at IS NOT NULL
+            AND ended_at < @cutoff
+          LIMIT @limit)
     `),
     integrityCheck: db.prepare(`PRAGMA integrity_check`),
   }

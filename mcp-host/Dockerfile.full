@@ -1,12 +1,12 @@
 # MCP Host Dockerfile — Full variant
-# Base: node:24 (full Debian, glibc + apt + python3/gcc/make/curl/perl, ~400-500MB)
+# Base: node:24.22.1 (Debian bookworm, glibc + apt + python3/gcc/make/curl/perl, ~400-500MB)
 # Use case: full dev workstation for agent shell execution
 #
 # BUILD CONTEXT = repo root (see Dockerfile). COPY packages/ alongside mcp-host/.
 #
-# Pinned to Node 24.16.0 by digest: 24.17.0's undici bump regresses node-fetch@2
-# (ERR_STREAM_PREMATURE_CLOSE). Keep the runtime frozen.
-FROM node:24.16.0-alpine@sha256:21f403ab171f2dc89bad4dd69d7721bfd15f084ccb46cdd225f31f2bc59b5c9a AS builder
+# Pinned to Node 24.22.1 by digest for the October 2026 security release.
+# HTTP compatibility and native bindings are exercised by the package suite and final-image CI probes.
+FROM node:24.22.1-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53 AS builder
 
 WORKDIR /app
 
@@ -31,7 +31,7 @@ COPY mcp-host/src ./src
 RUN npm run build
 
 # Production image — full Debian (git, python3, gcc, make, curl, perl included)
-FROM node:24.16.0@sha256:40ad9f3064e67d6860b4bc3fe1880b2953934fd6320ada990e45fe0efa6badd7
+FROM node:24.22.1@sha256:6449e19d8184d84062525b6a7524def03146c2cb04a7f08b076680d0e8e4240a
 
 WORKDIR /app
 
@@ -41,8 +41,10 @@ WORKDIR /app
 # no-op layer that makes the CA bundle a stated dependency of the tools we ship
 # instead of a property of whichever base digest is pinned.
 # Guarded by scripts/check-dockerfile-ca-certificates.sh.
+# The font packages back the chart and PDF renderers (see Dockerfile.slim).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates jq wget \
+    fonts-dejavu-core fonts-noto-core fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the shared package + package files, install production dependencies only

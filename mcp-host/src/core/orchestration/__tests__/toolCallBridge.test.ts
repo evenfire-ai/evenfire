@@ -126,6 +126,7 @@ function bridgeContext(nativeNames: string[], deferrable: string[]): LoopConfig[
   return {
     nativeNames: new Set(nativeNames),
     getDeferrableCatalogNames: () => new Set(deferrable),
+    nativeTargets: false,
   }
 }
 

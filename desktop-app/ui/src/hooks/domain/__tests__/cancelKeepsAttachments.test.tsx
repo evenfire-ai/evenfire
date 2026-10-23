@@ -231,7 +231,7 @@ describe('STORY-38 — attachments survive message cancel', () => {
     expect(rendered.result.current.composerImageAttachments).toHaveLength(20)
     const call = keptToastCall(rendered.spies)
     expect(call?.[0]).toBe(
-      'Attachments kept — 2 of 3 images exceed the 20-image limit and were dropped.'
+      'Attachments kept — 2 of 3 images exceed the 20-attachment limit and were dropped.'
     )
     expect(call?.[1]).toBe('info')
     expect(call?.[2]?.action?.label).toBe('Discard all')
@@ -527,7 +527,7 @@ describe('STORY-38 — attachments survive message cancel', () => {
     expect(rendered.result.current.composerImageAttachments).toHaveLength(20)
     const call = keptToastCall(rendered.spies)
     expect(call?.[0]).toBe(
-      'Attachments kept — 2 of 3 images exceed the 20-image limit and were dropped.'
+      'Attachments kept — 2 of 3 images exceed the 20-attachment limit and were dropped.'
     )
   })
 

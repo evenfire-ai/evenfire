@@ -43,7 +43,23 @@ describe('routes/auth password-login', () => {
       .send({ email: 'user@example.invalid', password: 'wrong-password' })
 
     expect(res.status).toBe(401)
-    expect(res.body).toEqual({ error: 'Unauthorized' })
+    expect(res.body).toEqual({ error: 'invalid_credentials' })
+  })
+
+  it('sanitizes password-operation programming errors without marking them retryable', async () => {
+    authServiceMock.loginWithPassword.mockRejectedValueOnce(
+      new TypeError('private URL and credential detail')
+    )
+
+    const res = await request(buildApp())
+      .post('/api/v1/auth/password-login')
+      .send({ email: 'user@example.invalid', password: 'synthetic-password' })
+
+    expect(res.status).toBe(500)
+    expect(res.body).toEqual({ error: 'Internal Server Error' })
+    expect(res.headers['retry-after']).toBeUndefined()
+    expect(res.text).not.toContain('private URL')
+    expect(res.text).not.toContain('credential detail')
   })
 
   it('sets an HttpOnly profile session cookie and omits bearer token body for browser login', async () => {

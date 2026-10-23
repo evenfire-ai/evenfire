@@ -62,6 +62,7 @@ done
 "$ROOT/scripts/tests/test-minikube-t1-port-forward-owner.sh"
 "$ROOT/scripts/tests/test-minikube-t2-process-owner.sh"
 "$ROOT/scripts/tests/test-minikube-t1-reporter-report.sh"
+CODEX_SCRATCH_ROOT="$TMP_ROOT" node --test "$ROOT/scripts/tests/password-recovery-suite-contract.test.mjs"
 "$ROOT/scripts/tests/test-minikube-explicit-context.sh"
 "$ROOT/scripts/tests/test-minikube-t2-evidence.sh"
 "$ROOT/scripts/tests/test-minikube-targeted-health.sh"
@@ -745,6 +746,118 @@ for leaked in \
     exit 1
   fi
 done
+# A key that is the content of a string literal ending in `=` or `:` is test
+# data, not an assignment: the quote after it closes that literal, so the text
+# up to the next quote is code. A real assignment later on the line, or a key
+# inside a literal of the other quote type, is still a credential.
+string_key="password="
+printf "const shape = { label: '%s', value: '%s' }\n" "$string_key" "$marker_value" >"$marker_repo/client.ts"
+if ! T2_PUBLIC_ROOT="$marker_repo" T2_PUBLIC_BASE_REF="$marker_base" \
+  bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" >"$tmp/marker-boundary.out" 2>"$tmp/marker-boundary.err"; then
+  echo 'FAIL: public boundary read a key inside a string literal as a credential assignment' >&2
+  cat "$tmp/marker-boundary.err" >&2
+  exit 1
+fi
+if ! grep -Fxq 'PUBLIC_BOUNDARY_PASS' "$tmp/marker-boundary.out"; then
+  echo 'FAIL: public boundary accepted the string-literal key without reporting PUBLIC_BOUNDARY_PASS' >&2
+  exit 1
+fi
+for leaked in \
+  "const shape = { label: '$string_key', password: '$marker_value' }" \
+  "const line = \"$string_key'$marker_value'\"" \
+  "// it's $string_key'$marker_value'"; do
+  printf '%s\n' "$leaked" >"$marker_repo/client.ts"
+  if T2_PUBLIC_ROOT="$marker_repo" T2_PUBLIC_BASE_REF="$marker_base" \
+    bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" 2>"$tmp/marker-boundary.err"; then
+    echo "FAIL: public boundary accepted a credential assignment ($leaked)" >&2
+    exit 1
+  fi
+  if ! grep -Fq -- '- client.ts: credential assignment' "$tmp/marker-boundary.err"; then
+    echo "FAIL: public boundary rejected ($leaked) for another reason" >&2
+    cat "$tmp/marker-boundary.err" >&2
+    exit 1
+  fi
+done
+bearer_repo="$tmp/public-bearer-fixture-repo"
+mkdir -p "$bearer_repo"
+git init -q -b dev "$bearer_repo"
+git -C "$bearer_repo" config user.email test@example.invalid
+git -C "$bearer_repo" config user.name boundary-test
+printf 'base\n' >"$bearer_repo/README.md"
+git -C "$bearer_repo" add README.md
+git -C "$bearer_repo" commit -q -m base
+bearer_base="$(git -C "$bearer_repo" rev-parse HEAD)"
+bearer_fixture_path='tests/e2e/playwright/profile-ui-recovery-fixture.mjs'
+bearer_other_path='tests/e2e/playwright/other-fixture.mjs'
+bearer_value='synthetic-profile-recovery-token'
+bearer_prefix='Bearer '
+bearer_marker='PUBLIC_SYNTHETIC_BEARER_FIXTURE'
+exact_bearer_line="const syntheticBearer = '${bearer_prefix}${bearer_value}' // $bearer_marker"
+bearer_fixtures_dir="$bearer_repo/tests/e2e/playwright"
+mkdir -p "$bearer_fixtures_dir"
+printf '%s\n' "$exact_bearer_line" >"$bearer_repo/$bearer_fixture_path"
+if ! T2_PUBLIC_ROOT="$bearer_repo" T2_PUBLIC_BASE_REF="$bearer_base" \
+  bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" >"$tmp/bearer-boundary.out" 2>"$tmp/bearer-boundary.err"; then
+  echo 'FAIL: public boundary rejected the exact marked synthetic bearer fixture' >&2
+  cat "$tmp/bearer-boundary.err" >&2
+  exit 1
+fi
+if ! grep -Fxq 'PUBLIC_BOUNDARY_PASS' "$tmp/bearer-boundary.out"; then
+  echo 'FAIL: marked synthetic bearer fixture passed without PUBLIC_BOUNDARY_PASS' >&2
+  exit 1
+fi
+reject_bearer_fixture() {
+  local relative_path="$1"
+  shift
+  local fixture="$bearer_repo/$relative_path"
+  rm -f -- "$bearer_repo/$bearer_fixture_path" "$bearer_repo/$bearer_other_path"
+  mkdir -p "$(dirname "$fixture")"
+  printf '%s\n' "$@" >"$fixture"
+  if T2_PUBLIC_ROOT="$bearer_repo" T2_PUBLIC_BASE_REF="$bearer_base" \
+    bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
+      >"$tmp/bearer-boundary.out" 2>"$tmp/bearer-boundary.err"; then
+    echo "FAIL: public boundary accepted an unauthorized bearer fixture at $relative_path" >&2
+    exit 1
+  fi
+  if ! grep -Fq -- "- $relative_path: bearer token" "$tmp/bearer-boundary.err"; then
+    echo "FAIL: public boundary rejected $relative_path for another reason" >&2
+    cat "$tmp/bearer-boundary.err" >&2
+    exit 1
+  fi
+}
+unmarked_bearer_line="const syntheticBearer = '${bearer_prefix}${bearer_value}'"
+reject_bearer_fixture "$bearer_fixture_path" "$unmarked_bearer_line"
+reject_bearer_fixture "$bearer_other_path" "$exact_bearer_line"
+altered_bearer_line="const syntheticBearer = '${bearer_prefix}${bearer_value}-altered' // $bearer_marker"
+reject_bearer_fixture "$bearer_fixture_path" "$altered_bearer_line"
+extra_bearer_value='synthetic-added-token-value'
+extra_bearer_line="const extraBearer = '${bearer_prefix}${extra_bearer_value}'"
+reject_bearer_fixture "$bearer_fixture_path" "$exact_bearer_line" "$extra_bearer_line"
+case_variant_repo="$tmp/public-bearer-case-variant-repo"
+mkdir -p "$case_variant_repo"
+git init -q -b dev "$case_variant_repo"
+git -C "$case_variant_repo" config user.email test@example.invalid
+git -C "$case_variant_repo" config user.name boundary-test
+printf 'base\n' >"$case_variant_repo/README.md"
+git -C "$case_variant_repo" add README.md
+git -C "$case_variant_repo" commit -q -m base
+case_variant_base="$(git -C "$case_variant_repo" rev-parse HEAD)"
+case_variant_path='Tests/E2E/Playwright/profile-ui-recovery-fixture.mjs'
+mkdir -p "$(dirname "$case_variant_repo/$case_variant_path")"
+printf '%s\n' "$exact_bearer_line" >"$case_variant_repo/$case_variant_path"
+if T2_PUBLIC_ROOT="$case_variant_repo" T2_PUBLIC_BASE_REF="$case_variant_base" \
+  bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
+    >"$tmp/bearer-case-variant-boundary.out" 2>"$tmp/bearer-case-variant-boundary.err"; then
+  echo 'FAIL: public boundary accepted the case-variant synthetic bearer fixture path' >&2
+  exit 1
+fi
+if ! grep -Fq -- "- $case_variant_path: bearer token" "$tmp/bearer-case-variant-boundary.err"; then
+  echo 'FAIL: case-variant fixture was rejected for another reason' >&2
+  cat "$tmp/bearer-case-variant-boundary.err" >&2
+  exit 1
+fi
+echo 'PASS: public boundary accepts only the exact marked synthetic bearer fixture'
+echo 'PASS: public boundary reads a string-literal key as data and still rejects real assignments'
 bash "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh"
 bash "$ROOT/scripts/tests/test-minikube-t2-proxy-runtime.sh"
 bash "$ROOT/scripts/tests/test-minikube-t2-control-api-runtime.sh"

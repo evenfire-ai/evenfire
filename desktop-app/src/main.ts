@@ -33,8 +33,10 @@ import {
   parseSandboxUiDeepLink,
 } from './sandboxUiDeepLinks.js'
 import { shouldAcceptSandboxUiProtocolLink } from './sandboxUiProtocolWindowPolicy.js'
+import { notifySandboxUiHostResumed } from './sandboxUiSessionRefresh.js'
 import { wireHostDesktopShortcutRouting } from './shortcutRouter.js'
 import { installAdaptiveSystemIcon, resolveSystemIconPath } from './systemIcon.js'
+import { TokenStore } from './tokenStore.js'
 
 const EVENFIRE_APP_NAME = 'Evenfire'
 const EVENFIRE_APP_ID = 'ai.evenfire.desktop'
@@ -63,7 +65,11 @@ process.stdout?.on?.('error', () => {})
 process.stderr?.on?.('error', () => {})
 
 let mainWindow: BrowserWindow | null = null
-const appService = new AppService()
+const appService = new AppService(
+  devIsolationPlan
+    ? { tokenStore: new TokenStore({ isolatedUserDataPath: devIsolationPlan.userDataDir }) }
+    : {}
+)
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
 // U5: deliver mcp-oauth completions to the renderer, or queue them when the
 // renderer is not yet ready (cold start), draining after `app:rendererReady`.
@@ -141,6 +147,8 @@ function emitWindowControlsState(win: BrowserWindow): void {
  * streams — the 30s watchdog stays as a slower safety net. No payload: the
  * renderer decides which chats to reconcile from its own FSM. Registered once,
  * app-wide (not per-window); `send` is a no-op when the webContents is gone.
+ * The sandbox UI session loop gets the same tick: a cookie that expired during
+ * sleep is re-minted now instead of whenever its timer catches up.
  */
 function wirePowerMonitor(): void {
   const emit = () => {
@@ -150,6 +158,8 @@ function wirePowerMonitor(): void {
   }
   powerMonitor.on('resume', emit)
   powerMonitor.on('unlock-screen', emit)
+  powerMonitor.on('resume', notifySandboxUiHostResumed)
+  powerMonitor.on('unlock-screen', notifySandboxUiHostResumed)
 }
 
 /** Push native window state to the renderer on every visibility/focus change. */
@@ -501,6 +511,7 @@ async function createWindow(): Promise<void> {
     markNotReady: () => {
       mainWindowRendererReady = false
     },
+    sandboxUi: appService,
   })
 
   wireWindowVisibility(window)

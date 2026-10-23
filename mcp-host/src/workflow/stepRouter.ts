@@ -8,9 +8,9 @@
  *
  * Source of truth: STAGE-2-STEP-EXECUTION-ENGINE.md §4.3–§4.4
  */
-import Ajv, { type ValidateFunction } from 'ajv'
 import { logger } from '../logger'
 import { VisualInputBudget } from '../visualInput/policy'
+import { argumentValidator, checkToolArguments } from './argumentGate'
 import { projectInternalToolResult } from './internalToolProjection'
 import {
   AllowedToolsConfig,
@@ -81,6 +81,15 @@ export interface McpClientConnection {
 
 export type McpClientFactory = (server: StepMcpServerRef) => McpClientConnection
 
+/**
+ * Error text the model receives when it calls a tool outside the step's
+ * allowedTools. Recoverable: the step continues and the model may retry with
+ * an offered tool (spec §3.1.2).
+ */
+function toolNotAllowedError(toolName: string): string {
+  return `Tool '${toolName}' is not allowed in this step and was not run. Use only the tools provided for this step.`
+}
+
 // ─── StepMcpRouter ──────────────────────────────────────────────────────
 
 export class StepMcpRouter {
@@ -88,11 +97,15 @@ export class StepMcpRouter {
   private connections = new Map<string, McpClientConnection>()
   private toolMap = new Map<string, { serverName: string; rawToolName: string }>()
   private internalToolMap = new Map<string, InternalToolDefinition>()
-  private internalToolValidators = new Map<string, ValidateFunction>()
   private allTools: ToolDefinition[] = []
   private readonly clientFactory: McpClientFactory
-  private readonly ajv = new Ajv({ allErrors: true, strict: false, useDefaults: true })
   private outputDir = '/output'
+  // Names callTool() may dispatch when the step declares a non-empty
+  // allowedTools.include. null = no allowlist in effect (every registered tool
+  // is callable — the pre-§3.1.2 behaviour, kept for absent/empty include).
+  // Deliberately NOT cleared by disconnect(): a restriction must never lapse
+  // into "everything callable" on reuse; the caller re-applies it per step.
+  private callableToolNames: Set<string> | null = null
 
   constructor(clientFactory: McpClientFactory) {
     this.clientFactory = clientFactory
@@ -102,9 +115,10 @@ export class StepMcpRouter {
    * Register internal tools (clerum__*) that execute locally without MCP connection.
    * Must be called before connect() so they appear in getFilteredTools().
    *
-   * The tool's `parameters` JSON Schema is compiled into an AJV validator that
-   * runs before each dispatch. Bad LLM output (wrong type, missing required,
-   * unknown enum value) is rejected before reaching `execute()`.
+   * The tool's `parameters` JSON Schema is compiled here into the validator
+   * that runs before each dispatch (argumentGate.ts, shared with chat). Bad LLM
+   * output (wrong type, missing required, unknown enum value) is rejected
+   * before reaching `execute()`.
    */
   registerInternalTools(tools: InternalToolDefinition[], outputDir: string): void {
     this.outputDir = outputDir
@@ -115,13 +129,9 @@ export class StepMcpRouter {
         inputSchema: tool.parameters,
       })
       this.internalToolMap.set(tool.name, tool)
-      try {
-        this.internalToolValidators.set(tool.name, this.ajv.compile(tool.parameters))
-      } catch (err) {
-        // Schema failed to compile — dispatch falls through to runtime arg type-checking.
-        // Surface the failure so schema regressions don't pass silently.
-        logger.warn({ err, toolName: tool.name }, 'Internal tool schema compilation failed')
-      }
+      // Compiled now so a schema that fails to compile is reported at
+      // registration; dispatch then falls through to the tool's own checks.
+      argumentValidator(tool)
       // Also register in toolMap for consistent dispatch
       this.toolMap.set(tool.name, {
         serverName: 'clerum',
@@ -205,8 +215,50 @@ export class StepMcpRouter {
   }
 
   /**
+   * Enforce the step's allowlist at dispatch time (spec §3.1.2).
+   *
+   * - include absent or empty: no restriction. Every registered tool stays
+   *   callable, matching getFilteredTools(), which offers every tool then.
+   * - include non-empty: callTool() dispatches only names that are both listed
+   *   and registered, i.e. exactly what getFilteredTools() offers the model.
+   *   Any other name gets a recoverable tool-error result and never runs.
+   *
+   * Membership is checked against the live registry on each call, so this may
+   * be applied before or after connect().
+   */
+  setAllowedTools(allowedTools?: AllowedToolsConfig): void {
+    const include = allowedTools?.include
+    this.callableToolNames = include && include.length > 0 ? new Set(include) : null
+  }
+
+  private rejectNotAllowed(
+    toolName: string,
+    args: Record<string, unknown>
+  ): { result: ToolResult; record: ToolCallRecord } {
+    const separator = toolName.indexOf('__')
+    const errorResult = { success: false, error: toolNotAllowedError(toolName) }
+    // Arguments are model output (and so attacker-shapeable); log the name only.
+    logger.warn(
+      { toolName: toolName.slice(0, 200) },
+      'Workflow step tool call rejected: tool is not in allowedTools'
+    )
+    return {
+      result: { content: errorResult, isError: true },
+      record: {
+        serverName: separator > 0 ? toolName.slice(0, separator) : 'unknown',
+        toolName: separator > 0 ? toolName.slice(separator + 2) : toolName,
+        args,
+        result: errorResult,
+        durationMs: 0,
+      },
+    }
+  }
+
+  /**
    * Dispatch a tool call to the correct server by tool name prefix.
    * Internal tools (clerum__*) are dispatched locally without MCP connection.
+   * With a non-empty allowlist (setAllowedTools), names outside the offered set
+   * return a recoverable tool-error result instead of dispatching.
    */
   async callTool(
     toolName: string,
@@ -221,18 +273,28 @@ export class StepMcpRouter {
       throw new Error(reason)
     }
 
+    // Spec §3.1.2: with an allowlist in effect, anything outside the offered set
+    // (unlisted, or listed but never registered) is answered with a recoverable
+    // tool error and is never dispatched.
+    if (
+      this.callableToolNames &&
+      !(this.callableToolNames.has(toolName) && this.toolMap.has(toolName))
+    ) {
+      return this.rejectNotAllowed(toolName, args)
+    }
+
     // Check internal tools first
     const internalTool = this.internalToolMap.get(toolName)
     if (internalTool) {
-      // Validate args against the tool's JSON Schema before dispatch.
-      // Failures come back as recoverable tool-error results (not thrown)
-      // so the LLM can read the error and retry within the same step.
-      const validator = this.internalToolValidators.get(toolName)
-      if (validator && !validator(args)) {
-        const errorText = this.ajv.errorsText(validator.errors, { separator: '; ' })
+      // The same check as on the chat path: unset nulls dropped, then the
+      // schema. Failures come back as recoverable tool-error results (not
+      // thrown) so the LLM can read the error and retry within the same step.
+      // The record keeps what the model sent.
+      const checked = checkToolArguments(internalTool, args)
+      if (!checked.ok) {
         const errorResult = {
           success: false,
-          error: `Invalid arguments: ${errorText}`,
+          error: checked.error,
         }
         const record: ToolCallRecord = {
           serverName: 'clerum',
@@ -248,7 +310,7 @@ export class StepMcpRouter {
       }
       const start = Date.now()
       const internalResult = projectInternalToolResult(
-        await internalTool.execute(args, this.outputDir, {
+        await internalTool.execute(checked.input, this.outputDir, {
           signal: options.signal,
           timeoutMs: options.timeoutMs,
           readBudget: this.readBudget,
@@ -303,7 +365,6 @@ export class StepMcpRouter {
     this.connections.clear()
     this.toolMap.clear()
     this.internalToolMap.clear()
-    this.internalToolValidators.clear()
     this.allTools = []
   }
 }

@@ -76,6 +76,11 @@ export interface BuilderInput {
    */
   toolDiscoveryGuidance: string
   /**
+   * Governed GFS workspace-file guidance. Empty when `clerum__gfs_download`
+   * is not registered. The per-tool `usage` receipt remains authoritative.
+   */
+  gfsWorkspaceGuidance?: string
+  /**
    * Memory guidance (P.4). Empty string when the session does not have
    * `memory_*` tools registered (P1-009): if memory tools light up
    * mid-session the cache stays valid — the guidance is best-effort and not

@@ -653,6 +653,9 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             ...row,
             source_message: sourceMessage,
             task_budget: row.task_budget ?? null,
+            // Legacy protocol payloads may omit this field. SQL NULL keeps
+            // that unknown consent scope exact when the approval rehydrates.
+            authorization_scope: row.authorization_scope ?? null,
           })
           if (op.markAwaitingApproval)
             db.prepare('UPDATE sessions SET state = ? WHERE id = ?').run(
@@ -884,10 +887,18 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
     }
 
     case 'sweep_closed_sessions':
+      // SQLite reads LIMIT 0 as "delete nothing" and a negative LIMIT as "no
+      // limit"; either would break the bounded-batch contract silently.
+      if (!Number.isSafeInteger(op.limit) || op.limit <= 0) {
+        throw new Error('sweep_closed_sessions: limit must be a positive integer')
+      }
       return withBusyRetry(() => {
         const tx = db.transaction(() => {
-          const result = s.sweepClosedSessions.run({ cutoff: op.cutoffEpoch })
-          return { deleted_sessions: result.changes }
+          const params = { cutoff: op.cutoffEpoch, limit: op.limit }
+          const deletedMessages = s.sweepClosedSessionMessages.run(params).changes
+          const deletedSessions =
+            deletedMessages === 0 ? s.sweepClosedSessionsEmpty.run(params).changes : 0
+          return { deleted_messages: deletedMessages, deleted_sessions: deletedSessions }
         })
         return tx.immediate()
       })

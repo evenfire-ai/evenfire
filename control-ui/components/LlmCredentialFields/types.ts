@@ -38,8 +38,16 @@ export type LlmCredentialFieldsProps = {
   // the active primary/fallback routing editor). They stay out of this
   // additive LLM Secret editor so a provider is never rendered twice.
   excludedProviders?: LlmProvider[]
+  // Stored keys (a subset of `existingKeys`) still referenced by a persisted
+  // Host fallback policy. The owning surface surfaces them recipe-edit style:
+  // a `cu-chip` state marker on the row and a disabled remove control, so a
+  // live fallback reference cannot be retired by accident. The save-time
+  // guard in the owning surface remains the backstop (rename can still
+  // retire a key, and is reported through `onRemovedKeysChange`).
+  protectedKeys?: ReadonlyArray<string>
   // Render the "Add provider" picker as an always-open inline list instead of a
-  // popover. Scroll-clipped surfaces (the update modal) must set it — an
-  // absolute-positioned menu would open below the modal's visible fold.
+  // popover. Scroll-clipped surfaces (a bounded dialog) must set it — an
+  // absolute-positioned menu would open below the visible fold. Full-screen
+  // pages leave it unset and get the popover picker.
   pickerInline?: boolean
 }

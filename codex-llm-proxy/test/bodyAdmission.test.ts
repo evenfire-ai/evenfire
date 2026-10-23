@@ -4,8 +4,10 @@
  * At an 8 MiB request cap, the stream gate alone would let 24 bodies in (8
  * running plus 16 queued). Thirteen bodies in flight (eight streams, two
  * visual, three queued; #739 D5) already peaked at 790 MiB of RSS with the
- * heap capped, so 24 would not fit the proxy's 1Gi limit by that ratio (not
- * measured at 24). These tests drive the real runtime app over HTTP and use
+ * heap capped. That ratio puts 24 bodies well above 1 GiB (not measured at
+ * 24), and it does not hold for structure-dense bodies, whose parsed trees
+ * cost far more than their bytes (#806 Q1). These tests drive the real
+ * runtime app over HTTP and use
  * the control-api `redeem` call as the witness: it runs only after the whole
  * body was read, JSON-parsed, contract-parsed and hash-checked, so the number
  * of attempts held there is the number of bodies in memory.
@@ -353,7 +355,7 @@ describe('codex-llm-proxy body admission (#731 R3-2)', () => {
     }
   }, 30_000)
 
-  it('T-R3-2c answers provider_unavailable once the admission queue is full', async () => {
+  it('T-R3-2c answers proxy_capacity_exceeded once the admission queue is full', async () => {
     // A small body limit keeps this cheap; the budget scales with it.
     const maxBodyBytes = 16 * 1024
     const proxy = await heldProxy(maxBodyBytes)
@@ -368,9 +370,28 @@ describe('codex-llm-proxy body admission (#731 R3-2)', () => {
       )
       expect(await settle(proxy.redeemed)).toBe(BUDGET_BODIES)
 
-      const overflow = await post(proxy.port, payload('overflow'))
-      expect(overflow.status).toBe(503)
-      expect(JSON.parse(overflow.body)).toEqual({ error: 'provider_unavailable' })
+      const warn = vi.spyOn(logger, 'warn')
+      try {
+        const overflow = await post(proxy.port, payload('overflow'))
+        // Witnesses: the refusal was answered, and the admission logged why.
+        expect(overflow.status).toBe(503)
+        expect(JSON.parse(overflow.body)).toEqual({ error: 'proxy_capacity_exceeded' })
+        const logged = warn.mock.calls.map(call => call[0] as unknown as Record<string, unknown>)
+        expect(logged.filter(entry => entry?.event === 'codex_proxy_denied')).toEqual([
+          { event: 'codex_proxy_denied', code: 'proxy_capacity_exceeded' },
+        ])
+        expect(logged.filter(entry => entry?.event === 'codex_proxy_admission_refused')).toEqual([
+          {
+            event: 'codex_proxy_admission_refused',
+            reason: 'body_budget',
+            code: 'proxy_capacity_exceeded',
+            kind: 'queue_full',
+            detail: expect.any(String),
+          },
+        ])
+      } finally {
+        warn.mockRestore()
+      }
 
       // Liveness: every queued request is still served once the budget frees.
       proxy.releaseAll()

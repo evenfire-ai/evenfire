@@ -89,6 +89,8 @@ export interface MessageRow {
 export interface PendingApprovalRow {
   /** Nullable for approvals created before migration 014. */
   task_budget?: string | null
+  /** Omitted write fields persist as legacy NULL; known scopes are `turn_tools` or `exact_invocation`. */
+  authorization_scope?: string | null
   request_id: string
   session_id: string
   task_id: string
@@ -328,7 +330,8 @@ export type WorkerOp =
       since?: string
       limit: number
     }
-  | { kind: 'sweep_closed_sessions'; cutoffEpoch: number }
+  /** Deletes at most `limit` rows; the caller repeats until a batch deletes nothing. */
+  | { kind: 'sweep_closed_sessions'; cutoffEpoch: number; limit: number }
   | { kind: 'integrity_check' }
   | { kind: 'checkpoint' }
   | { kind: 'shutdown' }

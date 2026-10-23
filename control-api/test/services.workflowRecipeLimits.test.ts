@@ -62,7 +62,7 @@ describe('validateWorkflowRecipeLimits', () => {
         workloads: Array.from({ length: 26 }, (_, index) => ({
           id: `service-${index}`,
           type: 'deployment',
-          image: 'nginx:1.30.1-alpine',
+          image: 'nginx:1.30.6-alpine',
         })),
       },
       [{ field: 'spec.workloads', message: 'must contain at most 25 items' }],

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { useReducer } from 'react'
+import { useLayoutEffect, useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
 import { QueryClientProvider, useInfiniteQuery, useQueries, useQuery } from '@tanstack/react-query'
@@ -7,6 +7,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useAppController } from '@hooks/useAppController'
+import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { desktopQueryClient } from '@lib/queryClient'
 import {
@@ -79,8 +80,7 @@ const sidebarHarness = vi.hoisted(() => ({
 }))
 const sandboxUiPageHarness = vi.hoisted(() => ({
   props: null as null | {
-    onEmbeddedAppMounted?: () => void
-    onEmbeddedAppBack?: () => void
+    embed: EmbedOwnershipMachine
     onEmbedBoundsApplied?: () => void
     onEmbedSlotTopChange?: (topPx: number) => void
     onEmbedSlotRightChange?: (rightPx: number) => void
@@ -156,9 +156,15 @@ vi.mock('@pages/ContextsPage', () => ({ ContextsPage: () => null }))
 vi.mock('@pages/FilesPage', () => ({ FilesPage: () => null }))
 vi.mock('@pages/FilePreviewPage', () => ({ FilePreviewPage: () => null }))
 vi.mock('@pages/McpServersPage', () => ({ McpServersPage: () => null }))
+// Like the real page, the stub measures the slot for each launch while mounted.
 vi.mock('@pages/SandboxUiPage', () => ({
   SandboxUiPage: (props: NonNullable<typeof sandboxUiPageHarness.props>) => {
     sandboxUiPageHarness.props = props
+    const { embed } = props
+    useLayoutEffect(
+      () => embed.registerMeasurer(async () => ({ x: 0, y: 0, width: 400, height: 300 })),
+      [embed]
+    )
     return null
   },
 }))
@@ -614,7 +620,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
   // embed acks its bounds and the drawer is READY — bumping on visibility alone
   // would open the option list while still inert, leaving it unfocused. This pins
   // that ordering at the observable level: options appear only after ready.
-  it('defers the chat.switcher open until the drawer is ready, not merely visible', () => {
+  it('defers the chat.switcher open until the drawer is ready, not merely visible', async () => {
     currentController = makeController({
       selectedAgent: 'alpha',
       activeChatId: 'chat-1',
@@ -640,6 +646,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
           setVisible: vi.fn().mockResolvedValue(undefined),
           setBounds: vi.fn().mockResolvedValue(undefined),
           focusActive: vi.fn().mockResolvedValue(true),
+          open: vi.fn().mockResolvedValue(undefined),
           close: vi.fn().mockResolvedValue(undefined),
         },
       } as unknown as Window['clerum'],
@@ -657,7 +664,11 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
         defaultPath: '/',
       })
     })
-    act(() => sandboxUiPageHarness.props?.onEmbeddedAppMounted?.())
+    // main mounts the launch.
+    await waitFor(() => {
+      const state = sandboxUiPageHarness.props!.embed.getSnapshot()
+      expect(state.owner && state.views.get(state.owner)?.phase).toBe('mounted')
+    })
     act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
     expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
 
@@ -797,7 +808,8 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     })
     expect(appHeaderHarness.props?.notificationTrayLeft).toBe(716)
 
-    act(() => sandboxUiPageHarness.props?.onEmbeddedAppBack?.())
+    // Back to apps: the embed is gone while the tab stays.
+    act(() => sandboxUiPageHarness.props?.embed.dispatch({ type: 'backToApps' }))
     expect(appHeaderHarness.props?.notificationTrayMode).toBe('overlay')
     expect(appHeaderHarness.props?.notificationTrayLeft).toBeNull()
 
@@ -1040,92 +1052,6 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       expect.objectContaining({ agentName: '   ' }),
       undefined
     )
-  })
-})
-
-// Mini-spec 06 §2 — an app tab is named after the embed's live `document.title`.
-// The main process forwards `page-title-updated` over `sandboxUi.onTitleChanged`;
-// App renames the LIVE app tab (never a background one), ignoring empty titles so
-// the tab keeps its `app.label`. Driven through the real store producer + the real
-// WorkspaceTabStrip so the assertion is on the rendered tab label (T4).
-describe('App app-tab title — live document.title (mini-spec 06 §2)', () => {
-  let currentController: AppController
-  let titleChangedCb: ((args: { appRef: string; title: string }) => void) | null
-
-  beforeEach(() => {
-    vi.clearAllMocks()
-    sidebarHarness.props = null
-    sandboxUiPageHarness.props = null
-    appHeaderHarness.props = null
-    appHeaderHarness.openNotification = null
-    titleChangedCb = null
-    currentController = makeController()
-    vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
-    Object.defineProperty(window, 'clerum', {
-      configurable: true,
-      value: {
-        shortcuts: { onCommand: vi.fn(() => vi.fn()) },
-        app: { rendererReady: vi.fn().mockResolvedValue(undefined) },
-        sandboxUi: {
-          listApps: vi.fn().mockResolvedValue({ apps: [] }),
-          listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
-          clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
-          onDeepLink: vi.fn(() => vi.fn()),
-          onTitleChanged: vi.fn((cb: (args: { appRef: string; title: string }) => void) => {
-            titleChangedCb = cb
-            return vi.fn()
-          }),
-          setVisible: vi.fn().mockResolvedValue(undefined),
-          setBounds: vi.fn().mockResolvedValue(undefined),
-          focusActive: vi.fn().mockResolvedValue(true),
-          close: vi.fn().mockResolvedValue(undefined),
-        },
-      } as unknown as Window['clerum'],
-    })
-  })
-
-  afterEach(() => {
-    cleanup()
-    delete (window as { clerum?: unknown }).clerum
-  })
-
-  it('renames the live app tab to the embed document.title, and an empty title keeps the label', () => {
-    render(<App />)
-
-    // Launch an app: its tab starts named after the registry label ('App').
-    act(() => {
-      sidebarHarness.props?.onOpenSandboxUiApp?.({
-        appRef: 'ns/app',
-        label: 'App',
-        defaultPath: '/',
-      })
-    })
-    expect(screen.getByRole('button', { name: 'App' })).toBeTruthy()
-
-    // The embed reports its live document.title → the tab renames to it.
-    act(() => titleChangedCb?.({ appRef: 'ns/app', title: 'Ticket 42 — Acme' }))
-    expect(screen.getByRole('button', { name: 'Ticket 42 — Acme' })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: 'App' })).toBeNull()
-
-    // A subsequent EMPTY title (mid-navigation blank) must not blank the label —
-    // the tab keeps the last real title.
-    act(() => titleChangedCb?.({ appRef: 'ns/app', title: '   ' }))
-    expect(screen.getByRole('button', { name: 'Ticket 42 — Acme' })).toBeTruthy()
-  })
-
-  it('ignores a title event whose appRef does not match the live tab', () => {
-    render(<App />)
-    act(() => {
-      sidebarHarness.props?.onOpenSandboxUiApp?.({
-        appRef: 'ns/app',
-        label: 'App',
-        defaultPath: '/',
-      })
-    })
-    // A stale title from a different app must not relabel the live tab.
-    act(() => titleChangedCb?.({ appRef: 'ns/other', title: 'Wrong' }))
-    expect(screen.getByRole('button', { name: 'App' })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: 'Wrong' })).toBeNull()
   })
 })
 

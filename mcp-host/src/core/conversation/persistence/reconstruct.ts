@@ -157,6 +157,14 @@ export function normalizeConnectReason(
   return raw === 'connect_required' ? 'connect_required' : undefined
 }
 
+function normalizeAuthorizationScope(
+  raw: string | null | undefined
+): PendingApproval['authorization_scope'] {
+  if (raw === null || raw === undefined) return undefined
+  if (raw === 'turn_tools' || raw === 'exact_invocation') return raw
+  throw new Error(`Invalid pending approval authorization scope: ${raw}`)
+}
+
 export function reconstructPendingApproval(row: PendingApprovalRow): PendingApproval {
   const snapshot = JSON.parse(row.context_snapshot) as ChatMessage[]
   return {
@@ -165,6 +173,7 @@ export function reconstructPendingApproval(row: PendingApprovalRow): PendingAppr
         ? undefined
         : parseTaskExecutionBudget(JSON.parse(row.task_budget ?? 'null')),
     legacy_budget: row.task_budget === 'legacy',
+    authorization_scope: normalizeAuthorizationScope(row.authorization_scope),
     request_id: row.request_id,
     tool_name: row.tool_name,
     parameters: JSON.parse(row.parameters) as Record<string, unknown>,

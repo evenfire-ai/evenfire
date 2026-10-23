@@ -8,6 +8,7 @@ import {
   TableViewport,
   useTableSort,
 } from '@clerum/frontend-components'
+import { SubscriptionCapabilityNotice } from '@components/SubscriptionCapabilityNotice'
 import { copyTextToClipboard } from '@lib/clipboard'
 import {
   CODEX_DEVICE_VERIFICATION_URI,
@@ -25,7 +26,6 @@ import {
 import {
   type CodexSubscriptionCapability,
   isCodexSubscriptionUiEnabled,
-  loadCodexSubscriptionCapability,
 } from '@lib/codexSubscriptionFeature'
 import {
   GROK_DEVICE_VERIFICATION_ORIGIN,
@@ -45,8 +45,8 @@ import {
 import {
   type GrokSubscriptionCapability,
   isGrokSubscriptionUiEnabled,
-  loadGrokSubscriptionCapability,
 } from '@lib/grokSubscriptionFeature'
+import { useSubscriptionCapabilities } from '@lib/hooks/useSubscriptionCapabilities'
 import {
   mapConnectionStatus,
   statusLabel,
@@ -173,6 +173,9 @@ async function copyDeviceValue(
 export function CodexSubscriptionHub() {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
+  const subscriptionCapabilities = useSubscriptionCapabilities()
+  const lifetimeController = useRef(new AbortController())
+  const editReadController = useRef<AbortController | null>(null)
   const [capability, setCapability] = useState<CodexSubscriptionCapability | null>(null)
   const [grokCapability, setGrokCapability] = useState<GrokSubscriptionCapability | null>(null)
   const [rowsByBroker, setRowsByBroker] = useState<Record<HubBroker, HubConnection[]>>({
@@ -209,27 +212,33 @@ export function CodexSubscriptionHub() {
   const grokEnabled = isGrokSubscriptionUiEnabled(grokCapability)
 
   useEffect(() => {
-    // A capability probe that fails for any reason other than "disabled" is
-    // kept on the capability itself, so later action-error resets cannot
-    // hide it and the other provider still loads.
-    void loadCodexSubscriptionCapability()
-      .then(setCapability)
-      .catch(err => {
-        setCapability({
-          enabled: false,
-          error: err instanceof Error ? err.message : 'Failed to load ChatGPT subscriptions',
-        })
-        setLoading(false)
-      })
-    void loadGrokSubscriptionCapability()
-      .then(setGrokCapability)
-      .catch(err => {
-        setGrokCapability({
-          enabled: false,
-          error: err instanceof Error ? err.message : 'Failed to load Grok subscriptions',
-        })
-      })
+    lifetimeController.current = new AbortController()
+    return () => {
+      lifetimeController.current.abort()
+      editReadController.current?.abort()
+    }
   }, [])
+
+  useEffect(() => {
+    const { capabilities, error: capabilityError } = subscriptionCapabilities
+    if (capabilities) {
+      setCapability({
+        enabled: capabilities.providers['codex-subscription'].enabled,
+      })
+      setGrokCapability({
+        enabled: capabilities.providers['grok-subscription'].enabled,
+      })
+    }
+    if (capabilityError) {
+      const message = capabilityError.message || 'Failed to load subscription capabilities'
+      setCapability(current =>
+        current?.enabled ? { enabled: true, error: message } : { enabled: false, error: message }
+      )
+      setGrokCapability(current =>
+        current?.enabled ? { enabled: true, error: message } : { enabled: false, error: message }
+      )
+    }
+  }, [subscriptionCapabilities.capabilities, subscriptionCapabilities.error])
 
   const connections = useMemo(
     () => [...rowsByBroker['codex-subscription'], ...rowsByBroker['grok-subscription']],
@@ -239,42 +248,48 @@ export function CodexSubscriptionHub() {
   // Each provider loads independently: a failing list keeps that provider's
   // last rows and records its own error, and never discards the healthy
   // provider's result. Resolves with whether any enabled provider failed.
-  const load = useCallback(async (): Promise<{ failed: boolean }> => {
-    const [codexResult, grokResult] = await Promise.allSettled([
-      enabled ? listCodexSubscriptionConnections() : Promise.resolve([]),
-      grokEnabled ? listGrokSubscriptionConnections() : Promise.resolve([]),
-    ])
-    const bothEnabled = enabled && grokEnabled
-    const describeFailure = (broker: HubBroker, reason: unknown) => {
-      const brand = HUB_PROVIDER_COPY[broker].brand
-      const message =
-        reason instanceof Error && reason.message
-          ? reason.message
-          : `Failed to load ${brand} subscriptions`
-      return bothEnabled ? `${brand} subscriptions: ${message}` : message
-    }
-    setRowsByBroker(current => ({
-      'codex-subscription':
-        codexResult.status === 'fulfilled'
-          ? codexResult.value.map(row => asHubRow(row, 'codex-subscription'))
-          : current['codex-subscription'],
-      'grok-subscription':
-        grokResult.status === 'fulfilled'
-          ? grokResult.value.map(row => asHubRow(row, 'grok-subscription'))
-          : current['grok-subscription'],
-    }))
-    setListErrors({
-      'codex-subscription':
-        codexResult.status === 'rejected'
-          ? describeFailure('codex-subscription', codexResult.reason)
-          : '',
-      'grok-subscription':
-        grokResult.status === 'rejected'
-          ? describeFailure('grok-subscription', grokResult.reason)
-          : '',
-    })
-    return { failed: codexResult.status === 'rejected' || grokResult.status === 'rejected' }
-  }, [enabled, grokEnabled])
+  const load = useCallback(
+    async (options: { refresh?: boolean } = {}): Promise<{ failed: boolean }> => {
+      const signal = lifetimeController.current.signal
+      const requestOptions = { ...options, signal }
+      const [codexResult, grokResult] = await Promise.allSettled([
+        enabled ? listCodexSubscriptionConnections(requestOptions) : Promise.resolve([]),
+        grokEnabled ? listGrokSubscriptionConnections(requestOptions) : Promise.resolve([]),
+      ])
+      if (signal.aborted) return { failed: true }
+      const bothEnabled = enabled && grokEnabled
+      const describeFailure = (broker: HubBroker, reason: unknown) => {
+        const brand = HUB_PROVIDER_COPY[broker].brand
+        const message =
+          reason instanceof Error && reason.message
+            ? reason.message
+            : `Failed to load ${brand} subscriptions`
+        return bothEnabled ? `${brand} subscriptions: ${message}` : message
+      }
+      setRowsByBroker(current => ({
+        'codex-subscription':
+          codexResult.status === 'fulfilled'
+            ? codexResult.value.map(row => asHubRow(row, 'codex-subscription'))
+            : current['codex-subscription'],
+        'grok-subscription':
+          grokResult.status === 'fulfilled'
+            ? grokResult.value.map(row => asHubRow(row, 'grok-subscription'))
+            : current['grok-subscription'],
+      }))
+      setListErrors({
+        'codex-subscription':
+          codexResult.status === 'rejected'
+            ? describeFailure('codex-subscription', codexResult.reason)
+            : '',
+        'grok-subscription':
+          grokResult.status === 'rejected'
+            ? describeFailure('grok-subscription', grokResult.reason)
+            : '',
+      })
+      return { failed: codexResult.status === 'rejected' || grokResult.status === 'rejected' }
+    },
+    [enabled, grokEnabled]
+  )
 
   useEffect(() => {
     if (capability === null || grokCapability === null) return
@@ -362,7 +377,13 @@ export function CodexSubscriptionHub() {
   }
 
   async function openEdit(row: HubConnection) {
-    connectEpoch.current += 1
+    const epoch = ++connectEpoch.current
+    editReadController.current?.abort()
+    const controller = new AbortController()
+    editReadController.current = controller
+    if (editing?.broker !== row.broker || editing.connectionKey !== row.connectionKey) {
+      setEditModels([])
+    }
     setEditing(row)
     setEditName(grantLabel(row))
     setEditDefault(row.defaultModel ?? '')
@@ -375,11 +396,18 @@ export function CodexSubscriptionHub() {
       try {
         const models =
           row.broker === 'grok-subscription'
-            ? await listGrokConnectionModels(row.connectionKey)
-            : await listCodexConnectionModels(row.connectionKey)
+            ? await listGrokConnectionModels(row.connectionKey, {
+                refresh: true,
+                signal: controller.signal,
+              })
+            : await listCodexConnectionModels(row.connectionKey, {
+                refresh: true,
+                signal: controller.signal,
+              })
+        if (controller.signal.aborted || connectEpoch.current !== epoch) return
         setEditModels(models)
       } catch (err) {
-        setEditModels([])
+        if (controller.signal.aborted || connectEpoch.current !== epoch) return
         setError(err instanceof Error ? err.message : 'Could not load grant models')
       }
     } else {
@@ -389,6 +417,7 @@ export function CodexSubscriptionHub() {
 
   function closeEdit() {
     connectEpoch.current += 1
+    editReadController.current?.abort()
     setCreating(false)
     setEditing(null)
     setEditName('')
@@ -628,7 +657,7 @@ export function CodexSubscriptionHub() {
       try {
         const models = grok
           ? await listGrokConnectionModels(row.connectionKey)
-          : await listCodexConnectionModels(row.connectionKey)
+          : await listCodexConnectionModels(row.connectionKey, { refresh: true })
         setEditModels(models)
         if (synced.connection) setEditing(asHubRow(synced.connection, row.broker))
         await load()
@@ -722,10 +751,11 @@ export function CodexSubscriptionHub() {
           <SecretsScopeTabs activeValue="llm-subscriptions" />
         </div>
         <div className="cu-empty">
-          {capability.error ||
-            grokCapability.error ||
-            error ||
-            'Coding-plan subscriptions are disabled.'}
+          {subscriptionCapabilities.error ? (
+            <SubscriptionCapabilityNotice state={subscriptionCapabilities} />
+          ) : (
+            error || 'Coding-plan subscriptions are disabled.'
+          )}
         </div>
       </div>
     )
@@ -758,7 +788,7 @@ export function CodexSubscriptionHub() {
             <button
               type="button"
               className="cu-btn cu-btn--icon cu-btn--toolbar"
-              onClick={() => void load()}
+              onClick={() => void load({ refresh: true })}
               disabled={initialLoad || loading}
               aria-label={loading ? 'Refreshing...' : `Reload ${listNoun}`}
             >

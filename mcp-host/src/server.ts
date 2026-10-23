@@ -4,13 +4,16 @@
  * Routing and authz are split into dedicated modules under src/server/.
  */
 import express, { type NextFunction, type Request, type Response } from 'express'
+import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import * as fs from 'fs'
 import * as http from 'http'
 import * as path from 'path'
 import { register } from 'prom-client'
 import { readOpenedArtifactBuffer, redactArtifactForDelivery } from './artifacts/artifactBytes'
 import type { ArtifactSecretEntry } from './artifacts/artifactRedaction'
+import './internalTools/gfsDownloadMetrics'
 import type { RuntimeLifecycleGate } from './lifecycle/statelessHeartbeat'
+import { logger } from './logger'
 import './mcp/catalogBootstrapMetrics'
 import './mcp/statusHeartbeatMetrics'
 import './observability/processMetrics'
@@ -79,11 +82,11 @@ import {
   openExistingArtifactFile,
   resolveExistingArtifactFile,
 } from './workflow/artifactPaths'
-import { getOutputDir } from './workflow/internalTools'
 import { isInternalWorkflowArtifactName } from './workflow/mcpHostJwtState'
 import { runtimeAuthHealthSnapshot } from './workflow/runtimeAuthHealth'
 import { createWorkflowRouter } from './workflow/workflowRouter'
 import { WorkflowService } from './workflow/workflowService'
+import type { CallerOutputLookup } from './workspace/callerOutputs'
 
 export type {
   HostActivityEvent,
@@ -129,6 +132,12 @@ export type {
   SetTitleResult,
 } from './server/types'
 
+/** A caller's generated files cannot be reached safely; no other folder is used instead. */
+const ARTIFACT_STORE_UNAVAILABLE = {
+  error: 'Generated files are unavailable right now',
+  code: 'artifact_store_unavailable',
+} as const
+
 /**
  * Body budgets for chat payloads carrying base64 attachments.
  *
@@ -137,22 +146,31 @@ export type {
  * one source without a new package. Both copies must change together.
  *
  *   - MAX_CHAT_BODY_BYTES stays 24MiB so one exceptional 16MiB 2048 PNG
- *     (~21.3MiB base64) plus the 1MiB non-image share still fits. Every other
+ *     (~21.3MiB base64) still fits with ~2.7MiB left for the rest of the body;
+ *     that remainder also counts against the 6MiB non-image share. Every other
  *     route keeps the 10mb ordinary JSON cap (see the parsers below).
  *   - MAX_NON_IMAGE_BODY_BYTES bounds that same body MINUS credited image
- *     base64 (16MiB per image, at most 20 images / 16MiB total). Usual product
- *     target remains 5 / 9 / 14 MiB at 2048 px.
- *   - `kind:'file'` attachments are never credited: their base64 (4/3 of the
- *     decoded size) counts against MAX_NON_IMAGE_BODY_BYTES with the rest of
- *     the body. One file at the 3MiB CLERUM_ATTACHMENT_FILE_MAX_BYTES default
- *     (4MiB base64) fits; two do not, and the message gets this 413 before
- *     admission can answer FILE_ATTACHMENT_TOO_LARGE for either file.
+ *     base64 (16MiB per image, at most 20 images / 16MiB total) and MINUS
+ *     credited file base64. Usual product target remains 5 / 9 / 14 MiB at
+ *     2048 px.
+ *   - `kind:'file'` attachments have their own quota (issue #678): a file with
+ *     the exact composer wire shape is credited up to 11MiB decoded each,
+ *     20 files and 16MiB of base64 in total, and a qualifying file that breaks
+ *     the count or the total rejects the request. The text, the JSON envelope
+ *     and the non-base64 fields of each file entry stay in the 6MiB share, and
+ *     a file without the wire shape is charged there in full. The 11MiB
+ *     matches the CLERUM_ATTACHMENT_FILE_MAX_BYTES default, so admission can
+ *     still answer FILE_ATTACHMENT_TOO_LARGE for a lowered override.
  */
 const MAX_CHAT_BODY_BYTES = 24 * 1024 * 1024
 const MAX_NON_IMAGE_BODY_BYTES = 6 * 1024 * 1024
 const MAX_CHAT_IMAGES = 20
 const MAX_IMAGE_DECODED_BYTES = 16 * 1024 * 1024
 const MAX_IMAGE_DECODED_BYTES_TOTAL = 16 * 1024 * 1024
+const MAX_CHAT_FILES = 20
+const MAX_FILE_DECODED_BYTES = 11 * 1024 * 1024
+const MAX_FILE_BASE64_BYTES_TOTAL = 16 * 1024 * 1024
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/
 const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff])
@@ -246,10 +264,68 @@ function inspectChatImageBudget(body: unknown): {
   return { creditedBase64: credited, rejectImages: false }
 }
 
+/**
+ * Byte length of the base64 that counts against the file quota. Only a
+ * `kind:'file'` attachment with the exact wire shape the composer produces
+ * qualifies: `encoding: 'base64'`, a non-empty file name, a sha256 digest of
+ * 64 lowercase hex characters, canonical non-empty base64 of at most 11MiB
+ * decoded, within a 20-file / 16MiB-of-base64 total. A qualifying file that
+ * would break the count or the total is fail-loud rather than charged as text.
+ * Anything else is charged to the non-image budget, so a claim cannot be
+ * smuggled through by mislabelling a payload. Mirror of rpc-proxy
+ * `inspectChatFileBudget`; size, digest and class are verified at admission.
+ */
+function inspectChatFileBudget(body: unknown): {
+  creditedBase64: number
+  rejectFiles: boolean
+} {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { creditedBase64: 0, rejectFiles: false }
+  }
+  const attachments = (body as { attachments?: unknown }).attachments
+  if (!Array.isArray(attachments)) return { creditedBase64: 0, rejectFiles: false }
+
+  let credited = 0
+  let counted = 0
+  for (const attachment of attachments) {
+    if (!attachment || typeof attachment !== 'object') continue
+    const candidate = attachment as {
+      kind?: unknown
+      encoding?: unknown
+      filename?: unknown
+      digest?: unknown
+      dataBase64?: unknown
+    }
+    if (candidate.kind !== 'file' || candidate.encoding !== 'base64') continue
+    if (typeof candidate.filename !== 'string' || candidate.filename.length === 0) continue
+    const digest = candidate.digest as { algorithm?: unknown; hex?: unknown } | null | undefined
+    if (
+      !digest ||
+      typeof digest !== 'object' ||
+      digest.algorithm !== 'sha256' ||
+      typeof digest.hex !== 'string' ||
+      !SHA256_HEX_RE.test(digest.hex)
+    ) {
+      continue
+    }
+    const dataBase64 = typeof candidate.dataBase64 === 'string' ? candidate.dataBase64 : ''
+    const decoded = decodedBase64Bytes(dataBase64)
+    if (decoded === null || decoded <= 0 || decoded > MAX_FILE_DECODED_BYTES) continue
+    if (counted >= MAX_CHAT_FILES || credited + dataBase64.length > MAX_FILE_BASE64_BYTES_TOTAL) {
+      return { creditedBase64: credited, rejectFiles: true }
+    }
+    credited += dataBase64.length
+    counted += 1
+  }
+  return { creditedBase64: credited, rejectFiles: false }
+}
+
 function chatBodyExceedsNonImageBudget(rawBodyBytes: number, body: unknown): boolean {
-  const budget = inspectChatImageBudget(body)
-  if (budget.rejectImages) return true
-  return rawBodyBytes - budget.creditedBase64 > MAX_NON_IMAGE_BODY_BYTES
+  const images = inspectChatImageBudget(body)
+  if (images.rejectImages) return true
+  const files = inspectChatFileBudget(body)
+  if (files.rejectFiles) return true
+  return rawBodyBytes - images.creditedBase64 - files.creditedBase64 > MAX_NON_IMAGE_BODY_BYTES
 }
 
 export class RPCServer {
@@ -290,6 +366,7 @@ export class RPCServer {
   private setTitleHandler: SetTitleHandler | null = null
   private workflowRouter: ReturnType<typeof createWorkflowRouter> | null = null
   private artifactSecretEntriesProvider: (() => ArtifactSecretEntry[]) | null = null
+  private chatArtifactDirResolver: ((userId: string) => CallerOutputLookup) | null = null
   private lifecycleGate: RuntimeLifecycleGate | null = null
 
   constructor(port: number = 8080) {
@@ -315,8 +392,8 @@ export class RPCServer {
 
     // Image and file attachments are sent as base64 in /v1/runtime/messages.
     // That route alone gets the 24 MiB ceiling; within it, only qualifying
-    // images are credited, and `kind:'file'` base64 is charged to the 6 MiB
-    // non-image budget like any other field. Every other Host route uses
+    // images and files are credited, and every other field is charged to the
+    // 6 MiB non-image budget. Every other Host route uses
     // the same 10mb ordinary JSON cap as rpc-proxy `jsonBody`, so a future
     // non-chat control body cannot 413 here and pass the proxy.
     const jsonParser = express.json({ limit: '10mb' })
@@ -634,21 +711,41 @@ export class RPCServer {
       }
       next()
     }
+    // A listing reads and stats the caller's folder and a download reads and
+    // redacts a file, so each caller gets a bucket of their own: every call
+    // comes through the same rpc-proxy address, where one bucket would let a
+    // single caller hold the Host's disk and starve the rest.
+    const limitArtifactCalls = rateLimit({
+      windowMs: 60_000,
+      limit: 600,
+      standardHeaders: 'draft-8',
+      legacyHeaders: false,
+      keyGenerator: req => {
+        const userId = getRuntimeCallerContext(req)?.userId
+        return userId ? `caller:${userId}` : ipKeyGenerator(req.ip ?? '')
+      },
+      message: { error: 'Too Many Requests', retryable: true },
+    })
 
     this.app.get(
       '/v1/runtime/artifacts',
       rejectWorkflowRuntimeArtifacts,
       runtimeEdgeGuard(['rpc-proxy']),
-      (_req, res) => {
+      limitArtifactCalls,
+      (req, res) => {
         try {
-          // Re-resolved per request: getOutputDir() depends on the Host CRD, which
-          // hydrates async after boot — a captured value would freeze the path
-          // (and point at the old /tmp emptyDir). D.2b.
-          const artifactDir = getOutputDir()
-          if (!fs.existsSync(artifactDir)) {
+          // Only the caller's own folder, re-verified per request; none yet
+          // means nothing generated.
+          const lookup = this.callerArtifactDir(req)
+          if ('missing' in lookup) {
             json(res, 200, { artifacts: [] })
             return
           }
+          if (!('dir' in lookup)) {
+            json(res, 503, ARTIFACT_STORE_UNAVAILABLE)
+            return
+          }
+          const artifactDir = lookup.dir
           const files = []
           for (const entry of fs.readdirSync(artifactDir, { withFileTypes: true })) {
             if (!entry.isFile() || isInternalWorkflowArtifactName(entry.name)) continue
@@ -677,13 +774,24 @@ export class RPCServer {
       '/v1/runtime/artifacts/:filename/download',
       rejectWorkflowRuntimeArtifacts,
       runtimeEdgeGuard(['rpc-proxy']),
+      limitArtifactCalls,
       (req, res) => {
         const filename = req.params.filename as string
         if (isInternalWorkflowArtifactName(filename)) {
           json(res, 404, { error: 'Artifact not found' })
           return
         }
-        const artifactDir = getOutputDir()
+        // Another user's file is not found here, whatever its name.
+        const lookup = this.callerArtifactDir(req)
+        if ('missing' in lookup) {
+          json(res, 404, { error: 'Artifact not found' })
+          return
+        }
+        if (!('dir' in lookup)) {
+          json(res, 503, ARTIFACT_STORE_UNAVAILABLE)
+          return
+        }
+        const artifactDir = lookup.dir
         let artifact: OpenedArtifactFile
         try {
           artifact = openExistingArtifactFile(artifactDir, filename)
@@ -871,6 +979,18 @@ export class RPCServer {
     this.artifactSecretEntriesProvider = provider
   }
 
+  /** Where a Desktop user's generated files are (callerOutputs.ts). */
+  setChatArtifactDirResolver(resolver: (userId: string) => CallerOutputLookup): void {
+    this.chatArtifactDirResolver = resolver
+  }
+
+  /** The requesting user's folder; unwired or without a user, unavailable, never a shared one. */
+  private callerArtifactDir(req: Request): CallerOutputLookup {
+    const userId = getRuntimeCallerContext(req)?.userId
+    if (!this.chatArtifactDirResolver || !userId) return { failureCode: 'ENOENT' }
+    return this.chatArtifactDirResolver(userId)
+  }
+
   /** Stage 3 (stateless-agents) — wire the DRAINING fence + activity tracker
    *  consulted by the POST /v1/runtime/messages route. */
   setLifecycleGate(gate: RuntimeLifecycleGate): void {
@@ -912,12 +1032,12 @@ export class RPCServer {
       this.server = this.app.listen(this.port)
 
       this.server.on('error', err => {
-        console.error('[Server] Error:', err)
+        logger.error({ component: 'Server', err }, 'RPC server error')
         reject(err)
       })
 
       this.server.on('listening', () => {
-        console.log(`[Server] RPC server listening on port ${this.port}`)
+        logger.info({ component: 'Server', port: this.port }, 'RPC server listening')
         resolve()
       })
     })
@@ -930,7 +1050,7 @@ export class RPCServer {
         return
       }
       this.server.close(() => {
-        console.log('[Server] RPC server stopped')
+        logger.info({ component: 'Server' }, 'RPC server stopped')
         resolve()
       })
     })

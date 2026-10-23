@@ -164,7 +164,17 @@ describe('incoming admission with file references (#666)', () => {
     const response = await admit(message({ fileReferences: [ref] }))
     expect(resolve).toHaveBeenCalledTimes(1)
     expect(dispatched(dispatch).fileReferenceResolutions).toEqual([
-      { availability: 'available', reference: ref },
+      {
+        availability: 'available',
+        reference: ref,
+        surfaces: {
+          metadata: true,
+          inline: true,
+          workspace: false,
+          localExecutor: false,
+          visual: false,
+        },
+      },
     ])
     expect(response).toEqual({
       success: true,

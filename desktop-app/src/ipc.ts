@@ -12,6 +12,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { parseFileReferenceV1 } from '@clerum/gfs-interaction-policy'
 import { AppService } from './appService.js'
+import { runChatGetIndex } from './chatGetIndexHandler.js'
 import {
   getChatStoreBindingGeneration,
   requireChatStore,
@@ -40,6 +41,7 @@ import {
   DesktopRuntimeConfig,
   EntityChangeStreamEvent,
   HostActivityStreamEvent,
+  HostMessageAttachment,
   HostMessageRequest,
   HostStatusStreamEvent,
   TaskProgressStreamEvent,
@@ -48,6 +50,21 @@ import {
 
 function sanitizeString(input: unknown): string {
   return String(input || '').trim()
+}
+
+// The renderer names each sandbox-ui open so it can tell events of the view
+// that open mounted from those of a view it replaced (same appRef on a
+// relaunch). Main outlives renderer reloads and keeps reporting views opened by
+// an earlier renderer, so the id must be unique across renderer lifetimes: a
+// random UUID, never a counter. It is echoed verbatim on IPC events.
+const SANDBOX_UI_LAUNCH_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function parseSandboxUiLaunchId(input: unknown): string {
+  if (typeof input !== 'string' || !SANDBOX_UI_LAUNCH_ID_PATTERN.test(input)) {
+    throw new Error('launchId must be a UUID')
+  }
+  return input
 }
 
 function sanitizeChatAuthorityScope(input: unknown): ChatAuthorityScope {
@@ -217,6 +234,54 @@ function isSelectionRevision(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0
 }
 
+const SHA256_HEX = /^[0-9a-f]{64}$/
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * Checks the shape of every `kind:'file'` attachment (#678). mcp-host enforces
+ * the size limits and recomputes the size and the digest; an image entry keeps
+ * the contract it always had and is not inspected here.
+ */
+function parseHostMessageAttachments(attachments: unknown): HostMessageAttachment[] {
+  if (!Array.isArray(attachments)) {
+    throw new Error('Invalid host message request: attachments')
+  }
+  attachments.forEach((entry, index) => {
+    if (!isPlainObject(entry) || entry.kind !== 'file') return
+    const digest = entry.digest
+    const problem =
+      typeof entry.id !== 'string' || !entry.id.trim()
+        ? 'id'
+        : typeof entry.filename !== 'string' || !entry.filename
+          ? 'filename'
+          : typeof entry.mimeType !== 'string'
+            ? 'mimeType'
+            : typeof entry.detectedMediaType !== 'string'
+              ? 'detectedMediaType'
+              : entry.encoding !== 'base64'
+                ? 'encoding'
+                : typeof entry.dataBase64 !== 'string'
+                  ? 'dataBase64'
+                  : !Number.isSafeInteger(entry.sizeBytes) || (entry.sizeBytes as number) < 0
+                    ? 'sizeBytes'
+                    : !isPlainObject(digest) ||
+                        digest.algorithm !== 'sha256' ||
+                        typeof digest.hex !== 'string' ||
+                        !SHA256_HEX.test(digest.hex)
+                      ? 'digest'
+                      : null
+    if (problem) {
+      throw new Error(
+        `Invalid host message request: COMPOSER_FILE_ATTACHMENT_INVALID attachments[${index}].${problem}`
+      )
+    }
+  })
+  return attachments as HostMessageAttachment[]
+}
+
 function parseHostMessageRequest(raw: unknown): HostMessageRequest {
   const parsed = raw as HostMessageRequest
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -233,6 +298,9 @@ function parseHostMessageRequest(raw: unknown): HostMessageRequest {
     !isSelectionRevision(parsed.modelSelectionRevision)
   ) {
     throw new Error('Invalid host message request: modelSelectionRevision')
+  }
+  if (parsed.attachments != null) {
+    parsed.attachments = parseHostMessageAttachments(parsed.attachments)
   }
   if (parsed.fileReferences !== undefined) {
     // Checks shape only; mcp-host enforces the count limit and resolves each reference.
@@ -338,6 +406,10 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     return service.getSessionState()
   })
+  ipcMain.handle('auth:getSessionGeneration', async event => {
+    assertTrustedSender(event)
+    return service.getSessionGeneration()
+  })
   ipcMain.handle('auth:getDependenciesHealth', async event => {
     assertTrustedSender(event)
     return service.getDependenciesHealth()
@@ -350,18 +422,52 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     return service.selectRuntimeConfig(sanitizeString(payload?.optionId))
   })
+  ipcMain.handle(
+    'auth:selectRuntimeConfigForHandoff',
+    async (event, payload: { optionId: string; expectedSessionGeneration: unknown }) => {
+      assertTrustedSender(event)
+      const expectedSessionGeneration = payload?.expectedSessionGeneration
+      if (
+        typeof expectedSessionGeneration !== 'number' ||
+        !Number.isSafeInteger(expectedSessionGeneration) ||
+        expectedSessionGeneration < 0
+      ) {
+        throw new Error('Invalid session generation')
+      }
+      return service.selectRuntimeConfigForHandoff(
+        sanitizeString(payload?.optionId),
+        expectedSessionGeneration
+      )
+    }
+  )
   ipcMain.handle('auth:clearRuntimeConfigSelection', async event => {
     assertTrustedSender(event)
     return service.clearRuntimeConfigSelection()
   })
-  ipcMain.handle('auth:saveRuntimeConfig', async (event, payload: DesktopRuntimeConfig) => {
-    assertTrustedSender(event)
-    return service.saveRuntimeConfig({
-      externalRestApiBaseUrl: sanitizeString(payload?.externalRestApiBaseUrl),
-      rpcProxyBaseUrl: sanitizeString(payload?.rpcProxyBaseUrl),
-      appName: sanitizeString(payload?.appName),
-    })
-  })
+  ipcMain.handle(
+    'auth:saveRuntimeConfig',
+    async (event, payload: DesktopRuntimeConfig & { expectedSessionGeneration?: unknown }) => {
+      assertTrustedSender(event)
+      const rawExpectedSessionGeneration = payload?.expectedSessionGeneration
+      if (
+        rawExpectedSessionGeneration !== undefined &&
+        (typeof rawExpectedSessionGeneration !== 'number' ||
+          !Number.isSafeInteger(rawExpectedSessionGeneration) ||
+          rawExpectedSessionGeneration < 0)
+      ) {
+        throw new Error('Invalid session generation')
+      }
+      const runtimeConfig = {
+        externalRestApiBaseUrl: sanitizeString(payload?.externalRestApiBaseUrl),
+        rpcProxyBaseUrl: sanitizeString(payload?.rpcProxyBaseUrl),
+        appName: sanitizeString(payload?.appName),
+      }
+      if (rawExpectedSessionGeneration === undefined) {
+        return service.saveRuntimeConfig(runtimeConfig)
+      }
+      return service.saveRuntimeConfig(runtimeConfig, rawExpectedSessionGeneration)
+    }
+  )
   ipcMain.handle('auth:deleteRuntimeConfig', async (event, payload: { optionId: string }) => {
     assertTrustedSender(event)
     return service.deleteRuntimeConfig(sanitizeString(payload?.optionId))
@@ -444,8 +550,8 @@ export function registerIpcHandlers(service: AppService): void {
   })
   ipcMain.handle('auth:logout', async event => {
     assertTrustedSender(event)
-    await service.logout()
-    return { ok: true }
+    const sessionGeneration = await service.logout()
+    return { ok: true, sessionGeneration }
   })
 
   ipcMain.handle('notifications:isSupported', async event => {
@@ -1910,7 +2016,7 @@ export function registerIpcHandlers(service: AppService): void {
       event,
       payload: {
         agentRef: string
-        sessions?: Array<{ chatId?: unknown; lastActivityAt?: unknown }>
+        sessions?: Array<{ chatId?: unknown; lastActivityAt?: unknown; title?: unknown }>
       }
     ) => {
       assertTrustedSender(event)
@@ -1922,6 +2028,8 @@ export function registerIpcHandlers(service: AppService): void {
               chatId: sanitizeString(session?.chatId),
               lastActivityAt:
                 typeof session?.lastActivityAt === 'string' ? session.lastActivityAt : undefined,
+              title:
+                typeof session?.title === 'string' ? session.title.trim() || undefined : undefined,
             }))
             .filter(session => Boolean(session.chatId))
         : []
@@ -1933,25 +2041,20 @@ export function registerIpcHandlers(service: AppService): void {
     assertTrustedSender(event)
     const agentRef = sanitizeString(payload?.agentRef)
     if (!agentRef) throw new Error('agentRef is required')
-    const store = requireChatStore()
-    // The catalog read must never depend on the deleted-chat artifact cleanup:
-    // a cleanup failure (scope changed mid-flight, no session, an unreadable
-    // chats directory) would otherwise reject the read and leave the renderer
-    // without the tombstones it filters deleted chats with. The failure is
-    // reported with its code and the cleanup stays queued for the next read.
-    // Only this agent's queue is retried (the renderer reads every agent in a
-    // fan-out); the store walks every agent once per bind on its own.
-    try {
-      const authority = service.getChatDeletionFenceAuthority()
-      await store.retryPendingDeleteCleanups(authority.authorityScope, agentRef)
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException | undefined)?.code
-      console.warn(
-        `[chat:getIndex] Deleted-chat cleanup retry failed for agent "${agentRef}"${code ? ` (${code})` : ''}; returning the index with its tombstones`,
-        error
-      )
-    }
-    return store.getIndex(agentRef)
+    return runChatGetIndex(
+      {
+        store: requireChatStore(),
+        getChatDeletionFenceAuthority: () => service.getChatDeletionFenceAuthority(),
+        warnCleanupFailure: error => {
+          const code = (error as NodeJS.ErrnoException | undefined)?.code
+          console.warn(
+            `[chat:getIndex] Deleted-chat cleanup retry failed for agent "${agentRef}"${code ? ` (${code})` : ''}; returning the index with its tombstones`,
+            error
+          )
+        },
+      },
+      agentRef
+    )
   })
 
   ipcMain.handle('chat:dismissOnboarding', async (event, payload: { agentRef: string }) => {
@@ -2126,6 +2229,11 @@ export function registerIpcHandlers(service: AppService): void {
     return { x, y, width, height, dpr }
   }
 
+  // `sandboxUi:open` and `sandboxUi:close` must reach the AppService queue with
+  // no `await` before it, in both handlers: a close the renderer sends right
+  // after an open for the same launch would otherwise be enqueued first and
+  // miss the view the open then mounts. `sandboxUi:reload` follows the same
+  // rule, so main serves it in the order the renderer sent it.
   ipcMain.handle(
     'sandboxUi:open',
     async (
@@ -2136,6 +2244,7 @@ export function registerIpcHandlers(service: AppService): void {
         defaultPath?: string
         routePath?: string
         bounds: unknown
+        launchId: unknown
       }
     ) => {
       assertTrustedSender(event)
@@ -2144,6 +2253,7 @@ export function registerIpcHandlers(service: AppService): void {
       if (!recipeNs || !recipeName) {
         throw new Error('recipeNs and recipeName are required')
       }
+      const launchId = parseSandboxUiLaunchId(payload?.launchId)
       const parentWindow = BrowserWindow.fromWebContents(event.sender)
       if (!parentWindow) {
         throw new Error('cannot resolve parent window from IPC sender')
@@ -2151,6 +2261,7 @@ export function registerIpcHandlers(service: AppService): void {
       const bounds = parseBounds(payload?.bounds)
       const appRef = `${recipeNs}/${recipeName}`
       await service.openSandboxUi({
+        launchId,
         recipeNs,
         recipeName,
         // Human title from the installed recipe, used verbatim in consent
@@ -2161,39 +2272,46 @@ export function registerIpcHandlers(service: AppService): void {
         routePath: typeof payload?.routePath === 'string' ? payload.routePath : undefined,
         bounds,
         parentWindow,
-        onClosed: () => {
+        // Only the window the view was mounted in owns it.
+        onReleased: released => {
           if (parentWindow.isDestroyed()) return
-          parentWindow.webContents.send('sandboxUi:closed', { appRef })
+          parentWindow.webContents.send('sandboxUi:released', {
+            launchId: released.launchId,
+            reason: released.reason,
+            location: released.location,
+          })
         },
         onRefreshError: message => {
           if (parentWindow.isDestroyed()) return
-          parentWindow.webContents.send('sandboxUi:refreshError', { appRef, message })
+          parentWindow.webContents.send('sandboxUi:refreshError', { appRef, launchId, message })
+        },
+        onRefreshRecovered: () => {
+          if (parentWindow.isDestroyed()) return
+          parentWindow.webContents.send('sandboxUi:refreshRecovered', { appRef, launchId })
         },
         onTitleChanged: title => {
           if (parentWindow.isDestroyed()) return
-          parentWindow.webContents.send('sandboxUi:titleChanged', { appRef, title })
+          parentWindow.webContents.send('sandboxUi:titleChanged', { appRef, launchId, title })
         },
       })
     }
   )
 
-  ipcMain.handle('sandboxUi:close', async event => {
+  // The launch id is mandatory: a close that names no launch, or a malformed
+  // one, must not degrade into closing whatever view is live, which another
+  // launch may own by the time the queue reaches it.
+  ipcMain.handle('sandboxUi:close', async (event, payload?: { launchId?: unknown } | null) => {
     assertTrustedSender(event)
-    await service.closeSandboxUi()
+    const launchId = parseSandboxUiLaunchId(payload?.launchId)
+    await service.closeSandboxUi({ launchId })
   })
 
-  ipcMain.handle('sandboxUi:reload', async event => {
+  // Same launch-id contract as close: a reload that names no launch must not
+  // degrade into reloading whatever view is live.
+  ipcMain.handle('sandboxUi:reload', async (event, payload?: { launchId?: unknown } | null) => {
     assertTrustedSender(event)
-    await service.reloadSandboxUi()
-  })
-
-  // Read the active embed's current in-app route so the renderer can persist it
-  // on the app tab before deactivation (mini-spec 05 §1). Returns null when no
-  // embed is mounted; rejects when the current URL is outside the recipe prefix
-  // (the renderer treats a rejection as "fall back to the default route").
-  ipcMain.handle('sandboxUi:getLocation', async event => {
-    assertTrustedSender(event)
-    return service.getSandboxUiLocation()
+    const launchId = parseSandboxUiLaunchId(payload?.launchId)
+    await service.reloadSandboxUi({ launchId })
   })
 
   ipcMain.handle('sandboxUi:copyDeepLink', async (event, payload: { teamId?: unknown }) => {

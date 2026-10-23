@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   findInActiveSandboxUi,
   focusActiveSandboxUi,
+  getActiveSandboxUi,
   installSandboxUiCookie,
   mountSandboxUiView,
   unmountSandboxUiView,
@@ -42,6 +43,10 @@ const electronMocks = vi.hoisted(() => {
       this.listeners.get(event)?.forEach(handler => handler(...args))
     }
 
+    listenerCount(event: string): number {
+      return this.listeners.get(event)?.size ?? 0
+    }
+
     getURL(): string {
       return this.currentUrl
     }
@@ -65,9 +70,17 @@ const electronMocks = vi.hoisted(() => {
     }
   }
 
+  // Partition cookie jar keyed by `${url}|${name}`, the identity Electron's
+  // `cookies.remove(url, name)` matches on.
+  const cookieJar = new Map<string, string>()
   const sessionObject = {
     cookies: {
-      set: vi.fn(async (_details?: { value: string }): Promise<void> => undefined),
+      set: vi.fn(
+        async (_details?: { url: string; name: string; value: string }): Promise<void> => undefined
+      ),
+      remove: vi.fn(async (url: string, name: string): Promise<void> => {
+        cookieJar.delete(`${url}|${name}`)
+      }),
     },
     setPermissionRequestHandler: vi.fn(),
     setPermissionCheckHandler: vi.fn(),
@@ -82,6 +95,7 @@ const electronMocks = vi.hoisted(() => {
     getDisplayMatching: vi.fn(() => ({ scaleFactor: 1 })),
     touchSandboxUiPartition: vi.fn(async () => undefined),
     sessionObject,
+    cookieJar,
     views,
   }
 })
@@ -146,6 +160,7 @@ type MountSandboxUiViewOverrides = Omit<Partial<MountSandboxUiViewArgs>, 'parent
 
 function mountArgs(overrides: MountSandboxUiViewOverrides): MountSandboxUiViewArgs {
   return {
+    launchId: crypto.randomUUID(),
     recipeNs: 'sandbox-recipes',
     recipeName: 'task-board',
     setCookie:
@@ -162,8 +177,24 @@ function mountArgs(overrides: MountSandboxUiViewOverrides): MountSandboxUiViewAr
 beforeEach(() => {
   vi.clearAllMocks()
   electronMocks.views.length = 0
+  electronMocks.cookieJar.clear()
   electronMocks.sessionObject.cookies.set.mockResolvedValue(undefined)
 })
+
+/** Holds every cookie write pending; `release()` lands them in the jar. */
+function holdCookieWrites(): { release: () => void } {
+  const pending: Array<() => void> = []
+  electronMocks.sessionObject.cookies.set.mockImplementation(
+    details =>
+      new Promise<void>(resolve => {
+        pending.push(() => {
+          if (details) electronMocks.cookieJar.set(`${details.url}|${details.name}`, details.value)
+          resolve()
+        })
+      })
+  )
+  return { release: () => pending.splice(0).forEach(land => land()) }
+}
 
 afterEach(async () => {
   await unmountSandboxUiView()
@@ -202,6 +233,62 @@ describe('mountSandboxUiView lifecycle cleanup', () => {
       'clearSelection'
     )
     parentWindow.emit('closed')
+    expect(onClosed).not.toHaveBeenCalled()
+  })
+
+  // Electron's payload for a dead renderer; any reason (crash, OOM, kill)
+  // leaves the view painting its last frame.
+  const RENDER_PROCESS_GONE: [unknown, Electron.RenderProcessGoneDetails] = [
+    {},
+    { reason: 'crashed', exitCode: 139 },
+  ]
+
+  it('tears the active view down and reports it closed once when its renderer dies', async () => {
+    const parentWindow = new FakeParentWindow()
+    const onClosed = vi.fn()
+    await mountSandboxUiView(mountArgs({ parentWindow, onClosed }))
+    const view = electronMocks.views[0]!
+
+    view.webContents.emit('render-process-gone', ...RENDER_PROCESS_GONE)
+
+    expect(getActiveSandboxUi()).toBeNull()
+    expect(parentWindow.contentView.removeChildView).toHaveBeenCalledOnce()
+    expect(parentWindow.contentView.removeChildView).toHaveBeenCalledWith(view)
+    expect(onClosed).toHaveBeenCalledOnce()
+    // The listener went with the view: a repeated signal reports nothing more.
+    expect(view.webContents.listenerCount('render-process-gone')).toBe(0)
+    view.webContents.emit('render-process-gone', ...RENDER_PROCESS_GONE)
+    expect(onClosed).toHaveBeenCalledOnce()
+  })
+
+  it('the dead-renderer listener of a replaced view no longer fires', async () => {
+    const parentWindow = new FakeParentWindow()
+    const firstClosed = vi.fn()
+    const secondClosed = vi.fn()
+    await mountSandboxUiView(mountArgs({ parentWindow, onClosed: firstClosed }))
+    await mountSandboxUiView(
+      mountArgs({ parentWindow, recipeName: 'support-desk', onClosed: secondClosed })
+    )
+    const [first, second] = electronMocks.views
+
+    first!.webContents.emit('render-process-gone', ...RENDER_PROCESS_GONE)
+
+    expect(getActiveSandboxUi()?.webContentsId).toBe(second!.webContents.id)
+    expect(parentWindow.contentView.removeChildView).toHaveBeenCalledTimes(1)
+    expect(firstClosed).not.toHaveBeenCalled()
+    expect(secondClosed).not.toHaveBeenCalled()
+  })
+
+  it('removes the dead-renderer listener when the active view is unmounted', async () => {
+    const parentWindow = new FakeParentWindow()
+    const onClosed = vi.fn()
+    await mountSandboxUiView(mountArgs({ parentWindow, onClosed }))
+    const view = electronMocks.views[0]!
+    expect(view.webContents.listenerCount('render-process-gone')).toBe(1)
+
+    await unmountSandboxUiView()
+
+    expect(view.webContents.listenerCount('render-process-gone')).toBe(0)
     expect(onClosed).not.toHaveBeenCalled()
   })
 
@@ -257,6 +344,33 @@ describe('mountSandboxUiView lifecycle cleanup', () => {
     })
   })
 
+  it('reports a 401 document navigation inside the app prefix, for as long as the view lives', async () => {
+    const parentWindow = new FakeParentWindow()
+    const onUnauthorizedNavigation = vi.fn()
+    await mountSandboxUiView(mountArgs({ parentWindow, onUnauthorizedNavigation }))
+    const webContents = electronMocks.views[0]!.webContents
+    const inPrefix = 'https://rpc.example/api/v1/sandbox-ui/sandbox-recipes/task-board/view/'
+
+    webContents.emit('did-navigate', {} as Electron.Event, inPrefix, 200, 'OK')
+    webContents.emit('did-navigate', {} as Electron.Event, 'https://elsewhere.example/', 401, '')
+    webContents.emit(
+      'did-navigate',
+      {} as Electron.Event,
+      'https://rpc.example/api/v1/sandbox-ui/sandbox-recipes/other-app/view/',
+      401,
+      ''
+    )
+    expect(onUnauthorizedNavigation).not.toHaveBeenCalled()
+
+    webContents.emit('did-navigate', {} as Electron.Event, `${inPrefix}inbox`, 401, 'Unauthorized')
+    webContents.emit('did-navigate', {} as Electron.Event, `${inPrefix}inbox`, 401, 'Unauthorized')
+    expect(onUnauthorizedNavigation).toHaveBeenCalledTimes(2)
+    expect(onUnauthorizedNavigation).toHaveBeenCalledWith(webContents.id)
+
+    await unmountSandboxUiView()
+    expect(webContents.listenerCount('did-navigate')).toBe(0)
+  })
+
   it('keeps the current document searchable after same-document navigation', async () => {
     const parentWindow = new FakeParentWindow()
     await mountSandboxUiView(mountArgs({ parentWindow }))
@@ -282,6 +396,45 @@ describe('mountSandboxUiView lifecycle cleanup', () => {
     )
 
     expect(findInActiveSandboxUi('invoice', 'start', 2, onResult).status).toBe('started')
+  })
+
+  it('a mount over a live view releases that view as replaced', async () => {
+    const parentWindow = new FakeParentWindow()
+    const onReleased = vi.fn()
+    const first = mountArgs({ parentWindow, onReleased })
+    await mountSandboxUiView(first)
+
+    await mountSandboxUiView(mountArgs({ parentWindow, recipeName: 'second-app' }))
+
+    expect(onReleased).toHaveBeenCalledOnce()
+    expect(onReleased).toHaveBeenCalledWith({
+      launchId: first.launchId,
+      reason: 'replaced',
+      location: {},
+    })
+  })
+
+  it('reports a view released only once it is detached and its webContents closed', async () => {
+    const parentWindow = new FakeParentWindow()
+    const seenAtRelease: Array<{ detached: boolean; closed: boolean }> = []
+    await mountSandboxUiView(
+      mountArgs({
+        parentWindow,
+        onReleased: () => {
+          const view = electronMocks.views[0]!
+          seenAtRelease.push({
+            detached: parentWindow.contentView.removeChildView.mock.calls.some(
+              ([removed]) => removed === view
+            ),
+            closed: view.webContents.isDestroyed(),
+          })
+        },
+      })
+    )
+
+    await unmountSandboxUiView()
+
+    expect(seenAtRelease).toEqual([{ detached: true, closed: true }])
   })
 
   it('keeps only the newest view when cookie writes complete out of order', async () => {
@@ -357,6 +510,55 @@ describe('mountSandboxUiView lifecycle cleanup', () => {
     expect(electronMocks.views).toHaveLength(0)
     expect(parentWindow.contentView.addChildView).not.toHaveBeenCalled()
     expect(parentWindow.listenerCount('closed')).toBe(0)
+  })
+
+  it('removes the cookie it wrote when the session changes during the write', async () => {
+    const parentWindow = new FakeParentWindow()
+    const cookieWrites = holdCookieWrites()
+    let sessionCurrent = true
+
+    const mount = mountSandboxUiView(mountArgs({ parentWindow, isCurrent: () => sessionCurrent }))
+    await vi.waitFor(() => {
+      expect(electronMocks.sessionObject.cookies.set).toHaveBeenCalledOnce()
+    })
+
+    sessionCurrent = false
+    cookieWrites.release()
+    await mount
+
+    expect([...electronMocks.cookieJar.keys()]).toEqual([])
+    expect(electronMocks.views).toHaveLength(0)
+    expect(parentWindow.contentView.addChildView).not.toHaveBeenCalled()
+  })
+
+  it('leaves the cookie alone when a newer mount superseded the write', async () => {
+    const parentWindow = new FakeParentWindow()
+    const cookieWrites = holdCookieWrites()
+    let sessionCurrent = true
+
+    const mount = mountSandboxUiView(mountArgs({ parentWindow, isCurrent: () => sessionCurrent }))
+    await vi.waitFor(() => {
+      expect(electronMocks.sessionObject.cookies.set).toHaveBeenCalledOnce()
+    })
+
+    const newerMount = mountSandboxUiView(
+      mountArgs({
+        parentWindow,
+        setCookie:
+          'clerum_sandbox_ui_session=tok-newer;' +
+          ' Path=/api/v1/sandbox-ui/sandbox-recipes/task-board/; HttpOnly',
+      })
+    )
+    await vi.waitFor(() => {
+      expect(electronMocks.sessionObject.cookies.set).toHaveBeenCalledTimes(2)
+    })
+    sessionCurrent = false
+    cookieWrites.release()
+    await Promise.all([mount, newerMount])
+
+    expect(electronMocks.sessionObject.cookies.remove).not.toHaveBeenCalled()
+    expect([...electronMocks.cookieJar.values()]).toEqual(['tok-newer'])
+    expect(electronMocks.views).toHaveLength(1)
   })
 
   it('encodes the canonical client route before handing it to the mounted app', async () => {

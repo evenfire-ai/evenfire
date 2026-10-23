@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
+import { asApiserverDeployment } from '../src/__tests__/asApiserverDeployment'
 import type { AdministrativeOutcomeReporter } from '../src/administrativeOutcomeReporter'
 import { config } from '../src/config'
 import { mintHostGfsToken } from '../src/gfsHostBinding'
@@ -56,6 +60,7 @@ vi.mock('../src/config', () => ({
     hostWorkspaceStorageClassName: 'do-block-storage-retain',
     hostWorkspaceStorageSize: '10Gi',
     hostWorkspacePath: '/workspace',
+    workspaceLayoutMerge: true,
     hostResources: {
       requests: { memory: '128Mi', cpu: '100m' },
       limits: { memory: '512Mi', cpu: '500m' },
@@ -268,6 +273,7 @@ function trustedRuntimeDeployment(
     ...deployment.metadata,
     uid: `deployment-${host.name}`,
     resourceVersion: '91',
+    generation: 1,
     labels: {
       ...(deployment.metadata?.labels ?? {}),
       'clerum.io/managed-by': 'host-context-controller',
@@ -281,7 +287,12 @@ function trustedRuntimeDeployment(
   if (deployment.spec) {
     deployment.spec.replicas = options.replicas ?? 1
   }
-  deployment.status = { readyReplicas: options.readyReplicas ?? 1 }
+  deployment.status = {
+    observedGeneration: deployment.metadata.generation,
+    replicas: deployment.spec?.replicas ?? 1,
+    updatedReplicas: deployment.spec?.replicas ?? 1,
+    readyReplicas: options.readyReplicas ?? 1,
+  }
   return deployment
 }
 
@@ -292,6 +303,7 @@ function markPersistedRuntimeTrusted(
 ): k8s.V1Deployment {
   deployment.metadata = {
     ...deployment.metadata,
+    generation: deployment.metadata?.generation ?? 1,
     labels: {
       ...(deployment.metadata?.labels ?? {}),
       'clerum.io/managed-by': 'host-context-controller',
@@ -523,13 +535,960 @@ function rejectedCondition(status: HostCrdStatus) {
   return cond
 }
 
+describe('HostReconciler resource rollout bootstrap', () => {
+  const initialResources = structuredClone(config.hostResources)
+  const initialDesktopResources = structuredClone(config.desktopResources)
+  const initialRefreshBefore = config.mcpHostBootstrapRefreshBeforeSec
+  const issue = vi.mocked(issueMcpHostRuntimeTokens)
+  const initialIssue = issue.getMockImplementation()!
+  const gfsMint = vi.mocked(mintHostGfsToken)
+  const initialGfsMint = gfsMint.getMockImplementation()!
+  const BOOTSTRAP = 'clerum.io/runtime-token-bootstrap-state'
+  const SECRET_REVISION = 'clerum.io/runtime-token-secret-revision'
+  const APPLIED_REVISION = 'clerum.io/runtime-token-revision'
+  const ROLLOUT = 'clerum.io/runtime-token-rollout-required'
+  const fixtures: HostReconciler[] = []
+
+  afterEach(() => {
+    config.hostResources = structuredClone(initialResources)
+    config.desktopResources = structuredClone(initialDesktopResources)
+    config.mcpHostBootstrapRefreshBeforeSec = initialRefreshBefore
+    issue.mockImplementation(initialIssue)
+    gfsMint.mockImplementation(initialGfsMint)
+    vi.useRealTimers()
+    // Full reconciles schedule readiness polls; keep their timers inside this fixture.
+    for (const reconciler of fixtures.splice(0)) {
+      for (const timer of (reconciler as any).readinessTimers.values()) clearTimeout(timer)
+    }
+  })
+
+  async function runtime(
+    options: {
+      desktop?: boolean
+      stateless?: boolean
+      draining?: boolean
+      consumed?: boolean
+      oauth?: boolean
+      canonicalResources?: boolean
+    } = {}
+  ) {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-07-03T00:00:00.000Z'))
+    // A finite producer-derived renewal window exercises maintenance before expiry.
+    config.mcpHostBootstrapRefreshBeforeSec = 90
+    const host = makeHost({
+      generation: 1,
+      ...(options.stateless
+        ? makeStatelessHost({
+            status: {
+              lifecycle: {
+                state: options.draining ? 'draining' : 'active',
+                wakeHandledGeneration: 0,
+              },
+            },
+          })
+        : {}),
+      ...(options.desktop ? { spec: { ...makeHost().spec, desktop: { browser: true } } } : {}),
+    })
+    let cacheSynced = true
+    const apis = createReconciler({ isCommunicationChannelCacheSynced: () => cacheSynced })
+    const { reconciler, appsApi, coreApi, customApi } = apis
+    fixtures.push(reconciler)
+    reconciler.setHostFrontsOAuthServer(async () => options.oauth ?? false)
+    const readHost = customApi.getNamespacedCustomObject.getMockImplementation()!
+    customApi.getNamespacedCustomObject.mockImplementation(async request =>
+      request.plural === 'hosts'
+        ? {
+            ...hostApiObject(host),
+            metadata: { ...hostApiObject(host).metadata, generation: host.generation },
+          }
+        : readHost(request)
+    )
+
+    let issuance = 0
+    let gfsIssuance = 0
+    const events: string[] = []
+    // Only the issuer boundary is simulated. Distinct synthetic emissions and
+    // decodable future refresh expiries exercise the real persistence/reuse path.
+    issue.mockImplementation(async (...args) => {
+      events.push('issue')
+      const emission = ++issuance
+      return {
+        ...(await initialIssue(...args)),
+        accessToken: `synthetic-access-${emission}`,
+        refreshToken: encodedRuntimeRefreshMaterial(Date.now() + 3_600_000 + emission * 1000),
+        mcpHostControlToken: `synthetic-control-${emission}`,
+      }
+    })
+    // Independent synthetic GFS emissions expose content-hash changes without
+    // changing the runtime access/refresh/control material.
+    gfsMint.mockImplementation(async (...args) => ({
+      ...(await initialGfsMint(...args)),
+      token: `synthetic-gfs-${++gfsIssuance}`,
+    }))
+    let secret: k8s.V1Secret | null = null
+    let deployment: k8s.V1Deployment | null = null
+    let secretVersion = 0
+    let deploymentVersion = 0
+    let templateChanges = 0
+    let replacementFailures: number[] = []
+    let secretConflict = false
+    const readSecret = coreApi.readNamespacedSecret.getMockImplementation()!
+    const writeSecret = (body: k8s.V1Secret): k8s.V1Secret => {
+      secret = structuredClone(body)
+      secret.data = {
+        ...secret.data,
+        ...Object.fromEntries(
+          Object.entries(secret.stringData ?? {}).map(([key, value]) => [
+            key,
+            Buffer.from(value).toString('base64'),
+          ])
+        ),
+      }
+      delete secret.stringData
+      secret.metadata = {
+        ...secret.metadata,
+        uid: 'runtime-secret-uid',
+        resourceVersion: String(++secretVersion),
+      }
+      events.push('persist-secret')
+      return structuredClone(secret)
+    }
+    coreApi.readNamespacedSecret.mockImplementation(async request => {
+      if (request.name !== `host-${host.name}-mcp-host-runtime-tokens`) return readSecret(request)
+      if (!secret) throw { code: 404 }
+      return structuredClone(secret)
+    })
+    const createSecret = coreApi.createNamespacedSecret.getMockImplementation()!
+    coreApi.createNamespacedSecret.mockImplementation(async request => {
+      const { body } = request
+      if (body.metadata?.name !== `host-${host.name}-mcp-host-runtime-tokens`)
+        return createSecret(request)
+      if (secret) throw { code: 409 }
+      return writeSecret(body)
+    })
+    const replaceSecret = coreApi.replaceNamespacedSecret.getMockImplementation()!
+    coreApi.replaceNamespacedSecret.mockImplementation(async request => {
+      const { body } = request
+      if (request.name !== `host-${host.name}-mcp-host-runtime-tokens`)
+        return replaceSecret(request)
+      if (!secret || body.metadata?.resourceVersion !== secret.metadata?.resourceVersion)
+        throw { code: 409 }
+      if (secretConflict) {
+        secretConflict = false
+        // An unrelated writer won CAS. The next read must see its new version.
+        secret.metadata!.resourceVersion = String(++secretVersion)
+        throw { code: 409 }
+      }
+      return writeSecret(body)
+    })
+
+    const readDeployment = appsApi.readNamespacedDeployment.getMockImplementation()!
+    const persistDeployment = (body: k8s.V1Deployment) => {
+      const result = asApiserverDeployment(body)
+      // The recorded-default overlay does not merge Date objects. A real SDK
+      // read preserves these timestamps on a replica-only replacement.
+      for (const [incoming, persisted] of [
+        [body.metadata, result.metadata],
+        [body.spec?.template.metadata, result.spec?.template.metadata],
+      ]) {
+        if (incoming?.creationTimestamp instanceof Date && persisted) {
+          persisted.creationTimestamp = structuredClone(incoming.creationTimestamp)
+        }
+      }
+      if (options.canonicalResources) {
+        // Closed equivalences from apimachinery Quantity parse/serialization,
+        // independent of the production guard's implementation.
+        for (const container of result.spec!.template.spec!.containers) {
+          for (const kind of ['requests', 'limits'] as const) {
+            const values = container.resources?.[kind]
+            if (values?.cpu === '1000m') values.cpu = '1'
+            if (values?.cpu === '0.1') values.cpu = '100m'
+            if (values?.cpu === '0.025') values.cpu = '25m'
+            if (values?.memory === '1024Mi') values.memory = '1Gi'
+          }
+        }
+      }
+      return result
+    }
+    appsApi.readNamespacedDeployment.mockImplementation(async request => {
+      if (request.name !== host.name) return readDeployment(request)
+      if (!deployment) throw { code: 404 }
+      return structuredClone(deployment)
+    })
+    const createDeployment = appsApi.createNamespacedDeployment.getMockImplementation()!
+    appsApi.createNamespacedDeployment.mockImplementation(async request => {
+      const { body } = request
+      if (body.metadata?.name !== host.name) return createDeployment(request)
+      if (deployment) throw { code: 409 }
+      deployment = persistDeployment(body)
+      deployment.metadata = {
+        ...deployment.metadata,
+        uid: 'runtime-deployment-uid',
+        resourceVersion: String(++deploymentVersion),
+        generation: 1,
+      }
+      events.push('create-deployment')
+      return structuredClone(deployment)
+    })
+    const replaceDeployment = appsApi.replaceNamespacedDeployment.getMockImplementation()!
+    appsApi.replaceNamespacedDeployment.mockImplementation(async request => {
+      const { body } = request
+      if (request.name !== host.name) return replaceDeployment(request)
+      if (!deployment || body.metadata?.resourceVersion !== deployment.metadata?.resourceVersion)
+        throw { code: 409 }
+      const failure = replacementFailures.shift()
+      if (failure) {
+        if (failure === 409) deployment.metadata!.resourceVersion = String(++deploymentVersion)
+        events.push(`replace-${failure}`)
+        throw { code: failure }
+      }
+      const previous = deployment
+      deployment = persistDeployment(body)
+      deployment.metadata = {
+        ...deployment.metadata,
+        uid: previous.metadata!.uid,
+        resourceVersion: String(++deploymentVersion),
+        generation:
+          previous.metadata!.generation! +
+          (isDeepStrictEqual(previous.spec, deployment.spec) ? 0 : 1),
+      }
+      if (!isDeepStrictEqual(previous.spec!.template, deployment.spec!.template)) templateChanges++
+      // Kubernetes status belongs to the prior generation until advance() is called.
+      deployment.status = structuredClone(previous.status)
+      events.push('replace-deployment')
+      return structuredClone(deployment)
+    })
+    const advance = (status: Partial<k8s.V1DeploymentStatus> = {}) => {
+      if (!deployment) throw new Error('No persisted Deployment')
+      const replicas = deployment.spec!.replicas ?? 1
+      deployment.status = {
+        observedGeneration: deployment.metadata!.generation,
+        replicas,
+        updatedReplicas: replicas,
+        readyReplicas: replicas,
+        availableReplicas: replicas,
+        unavailableReplicas: 0,
+        ...status,
+      }
+      deployment.metadata!.resourceVersion = String(++deploymentVersion)
+    }
+    await reconciler.reconcile(host)
+    advance()
+    if (options.consumed !== false) {
+      await reconciler.reconcile(host)
+      expect(secret!.metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+    }
+    events.length = 0
+    templateChanges = 0
+    issue.mockClear()
+    return {
+      ...apis,
+      host,
+      events,
+      advance,
+      secret: () => secret!,
+      deployment: () => deployment!,
+      reconcile: () => reconciler.reconcile(host),
+      failReplacements: (...codes: number[]) => {
+        replacementFailures = codes
+      },
+      conflictSecret: () => {
+        secretConflict = true
+      },
+      unbindLegacyPreparation: () => {
+        delete secret!.metadata!.annotations!['clerum.io/runtime-token-bootstrap-deployment-uid']
+        delete secret!.metadata!.annotations!['clerum.io/runtime-token-bootstrap-applied-revision']
+        secret!.metadata!.resourceVersion = String(++secretVersion)
+      },
+      setCacheSynced: (value: boolean) => {
+        cacheSynced = value
+      },
+      templateChanges: () => templateChanges,
+      recreateDeployment: () => {
+        deployment!.metadata!.uid = 'recreated-runtime-deployment-uid'
+        deployment!.metadata!.resourceVersion = String(++deploymentVersion)
+        deployment!.metadata!.generation = 1
+      },
+    }
+  }
+
+  it.each([
+    ['CPU request', 'requests', 'cpu', '25m'],
+    ['memory request', 'requests', 'memory', '192Mi'],
+    ['CPU limit', 'limits', 'cpu', '750m'],
+    ['memory limit', 'limits', 'memory', '768Mi'],
+  ] as const)(
+    'persists usable bootstrap before replacing a Ready runtime for a %s change',
+    async (_label, kind, resource, value) => {
+      const fixture = await runtime()
+      const before = fixture.secret().metadata!.annotations![SECRET_REVISION]
+      config.hostResources[kind][resource] = value
+
+      await fixture.reconcile()
+
+      expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
+      expect(issue).toHaveBeenCalledOnce()
+      const revision = fixture.secret().metadata!.annotations![SECRET_REVISION]
+      expect(revision).not.toBe(before)
+      expect(fixture.secret().metadata!.annotations).toMatchObject({
+        [BOOTSTRAP]: 'fresh',
+        [ROLLOUT]: 'true',
+      })
+      expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+        revision
+      )
+      expect(
+        fixture.deployment().spec!.template.spec!.containers[0].resources![kind]![resource]
+      ).toBe(value)
+      expect(fixture.deployment().metadata).toMatchObject({
+        uid: 'runtime-deployment-uid',
+        generation: 2,
+      })
+
+      await fixture.reconcile() // Ready from generation 1 must not acknowledge generation 2.
+      expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+      fixture.advance({ updatedReplicas: 0, readyReplicas: 0, availableReplicas: 0 })
+      await fixture.reconcile() // A starting rollout must not issue or replace again.
+      expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+      fixture.advance()
+      await fixture.reconcile()
+      expect(fixture.secret().metadata!.annotations).toMatchObject({
+        [BOOTSTRAP]: 'consumed',
+        [ROLLOUT]: 'false',
+      })
+      await fixture.reconcile()
+      expect(issue).toHaveBeenCalledOnce()
+      expect(fixture.events.filter(event => event === 'replace-deployment')).toHaveLength(1)
+      expect(fixture.secret().metadata!.annotations![SECRET_REVISION]).toBe(revision)
+    }
+  )
+
+  it.each([409, 503])('reuses persisted preparation after a Deployment %s failure', async code => {
+    const fixture = await runtime()
+    config.hostResources.requests.cpu = '25m'
+    fixture.failReplacements(...(code === 409 ? [409, 409, 409] : [503]))
+    await expect(fixture.reconcile()).rejects.toMatchObject({ code })
+    const revision = fixture.secret().metadata!.annotations![SECRET_REVISION]
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+    expect(fixture.deployment().metadata!.generation).toBe(1)
+
+    await fixture.reconcile()
+    await fixture.reconcile()
+    fixture.advance()
+    await fixture.reconcile()
+    await fixture.reconcile()
+    expect(issue).toHaveBeenCalledOnce()
+    expect(fixture.secret().metadata!.annotations![SECRET_REVISION]).toBe(revision)
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+    expect(fixture.events.filter(event => event === 'replace-deployment')).toHaveLength(1)
+  })
+
+  it('rereads CAS after a Secret conflict and persists before any Deployment replacement', async () => {
+    const fixture = await runtime()
+    config.hostResources.requests.cpu = '25m'
+    fixture.conflictSecret()
+    await fixture.reconcile()
+    expect(fixture.events).toEqual(['issue', 'issue', 'persist-secret', 'replace-deployment'])
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+    expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+      fixture.secret().metadata!.annotations![SECRET_REVISION]
+    )
+  })
+
+  it.each([
+    { observedGeneration: 0 },
+    { updatedReplicas: 0 },
+    { replicas: 2, readyReplicas: 2 },
+    { readyReplicas: 0, availableReplicas: 0 },
+  ])('does not consume fresh bootstrap before current-generation convergence: %j', async status => {
+    const fixture = await runtime({ consumed: false })
+    fixture.advance(status)
+    await fixture.reconcile()
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+    expect(issue).not.toHaveBeenCalled()
+    fixture.advance()
+    await fixture.reconcile()
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+  })
+
+  it('keeps an API-defaulted Ready no-op stable, including metadata-only resource policy reordering', async () => {
+    const fixture = await runtime()
+    config.hostResources = {
+      limits: { cpu: initialResources.limits.cpu, memory: initialResources.limits.memory },
+      requests: { cpu: initialResources.requests.cpu, memory: initialResources.requests.memory },
+    }
+    await fixture.reconcile()
+    await fixture.reconcile()
+    expect(fixture.events).toEqual([])
+    expect(issue).not.toHaveBeenCalled()
+  })
+
+  it('leaves an unchanged Desktop runtime stable when Host resources change', async () => {
+    const fixture = await runtime({ desktop: true })
+    config.hostResources.requests.cpu = '25m'
+    await fixture.reconcile()
+    expect(fixture.events).toEqual([])
+    expect(issue).not.toHaveBeenCalled()
+    expect(fixture.deployment().spec!.template.spec!.containers[0].resources).toEqual(
+      initialDesktopResources
+    )
+  })
+
+  it('prepares bootstrap for a change to the selected Desktop resource policy', async () => {
+    const fixture = await runtime({ desktop: true })
+    config.desktopResources.limits.memory = '5Gi'
+    await fixture.reconcile()
+    expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
+    expect(fixture.deployment().spec!.template.spec!.containers[0].resources).toEqual(
+      config.desktopResources
+    )
+  })
+
+  it('preserves a held template despite a resource policy change', async () => {
+    const fixture = await runtime({ stateless: true })
+    fixture.setCacheSynced(false)
+    config.hostResources.requests.cpu = '25m'
+    await fixture.reconcile()
+    expect(fixture.events).toEqual([])
+    expect(issue).not.toHaveBeenCalled()
+    expect(fixture.deployment().spec!.template.spec!.containers[0].resources).toEqual(
+      initialResources
+    )
+  })
+
+  it('does not consume a resource rollout through GFS-only renewal with old-generation Ready status', async () => {
+    const fixture = await runtime({ stateless: true })
+    config.hostResources.requests.cpu = '25m'
+    await fixture.reconcile()
+    fixture.setCacheSynced(false)
+    await fixture.reconcile()
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+    fixture.advance()
+    await fixture.reconcile()
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+    expect(issue).toHaveBeenCalledOnce()
+    expect(fixture.events.filter(event => event === 'replace-deployment')).toHaveLength(1)
+  })
+
+  it('retains consumed-bootstrap NotReady recovery', async () => {
+    const fixture = await runtime()
+    fixture.advance({ readyReplicas: 0, availableReplicas: 0 })
+    await fixture.reconcile()
+    expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+    await fixture.reconcile()
+    expect(issue).toHaveBeenCalledOnce()
+  })
+
+  it.each(['Desktop CPU', 'Host memory'])(
+    'keeps equivalent canonical API quantities stable: %s',
+    async kind => {
+      const desktop = kind === 'Desktop CPU'
+      if (!desktop) config.hostResources.requests.memory = '1024Mi'
+      const fixture = await runtime({ desktop, canonicalResources: true, consumed: false })
+      for (let pass = 0; pass < 3; pass++) {
+        await fixture.reconcile()
+        fixture.advance()
+      }
+      expect(issue).not.toHaveBeenCalled()
+      expect(fixture.templateChanges()).toBe(0)
+      expect(fixture.deployment().metadata!.generation).toBe(1)
+    }
+  )
+
+  it('keeps the reviewed decimal CPU no-op stable across four canonicalized reconciles', async () => {
+    config.hostResources.requests.cpu = '0.1'
+    const fixture = await runtime({ canonicalResources: true, consumed: false })
+    const revision = fixture.secret().metadata!.annotations![SECRET_REVISION]
+    for (let pass = 0; pass < 4; pass++) {
+      await fixture.reconcile()
+      fixture.advance()
+    }
+    expect(issue).not.toHaveBeenCalled()
+    expect(fixture.templateChanges()).toBe(0)
+    expect(fixture.deployment().metadata!.generation).toBe(1)
+    expect(fixture.secret().metadata!.annotations![SECRET_REVISION]).toBe(revision)
+    expect(fixture.deployment().spec!.template.spec!.containers[0].resources!.requests!.cpu).toBe(
+      '100m'
+    )
+  })
+
+  it('rolls the reviewed decimal CPU transition once and settles after four canonicalized reconciles', async () => {
+    const fixture = await runtime({ canonicalResources: true })
+    config.hostResources.requests.cpu = '0.025'
+    await fixture.reconcile()
+    expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
+    const prepared = fixture.secret().metadata!.annotations![SECRET_REVISION]
+    const appliedGeneration = fixture.deployment().metadata!.generation
+    expect(appliedGeneration).toBe(2)
+    for (let pass = 0; pass < 4; pass++) {
+      fixture.advance()
+      await fixture.reconcile()
+    }
+    expect(issue).toHaveBeenCalledOnce()
+    expect(fixture.templateChanges()).toBe(1)
+    expect(fixture.deployment().metadata!.generation).toBe(appliedGeneration)
+    expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+      prepared
+    )
+    expect(fixture.deployment().spec!.template.spec!.containers[0].resources!.requests!.cpu).toBe(
+      '25m'
+    )
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+  })
+
+  it.each([false, undefined] as const)(
+    'blocks an active resource change with an unprepared provision (%s), then resumes with persisted preparation',
+    async proof => {
+      const fixture = await runtime()
+      const template = structuredClone(fixture.deployment().spec!.template)
+      const generation = fixture.deployment().metadata!.generation
+      const credentialData = { ...fixture.secret().data }
+      config.hostResources.requests.cpu = '25m'
+      // Model a provisioning-contract regression at its boundary. The real
+      // Deployment mutation guard must reject the missing delivery proof.
+      const provision = vi
+        .spyOn(fixture.reconciler as any, 'provisionRuntimeTokenRevision')
+        .mockResolvedValue({
+          revision: template.metadata!.annotations![APPLIED_REVISION],
+          scopeHash: fixture.secret().metadata!.annotations!['clerum.io/runtime-token-scope-hash'],
+          deploymentUid: fixture.deployment().metadata!.uid,
+          freshBootstrapPrepared: proof,
+        })
+      try {
+        await fixture.reconcile()
+        expect(issue).not.toHaveBeenCalled()
+        expect(fixture.events).toEqual([])
+        expect(fixture.secret().data).toEqual(credentialData)
+        expect(fixture.deployment().spec!.template).toEqual(template)
+        expect(fixture.deployment().metadata!.generation).toBe(generation)
+        expect(fixture.reconciler.getStatus(fixture.host.name)).toMatchObject({
+          deployed: true,
+          ready: false,
+          message: 'Waiting for a prepared runtime bootstrap before changing resources',
+        })
+      } finally {
+        provision.mockRestore()
+      }
+
+      // The same intended change must proceed once real provisioning supplies
+      // persisted material, so refusal cannot hide a permanent convergence block.
+      await fixture.reconcile()
+      expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
+      expect(issue).toHaveBeenCalledOnce()
+      expect(fixture.templateChanges()).toBe(1)
+      expect(fixture.deployment().spec!.template.spec!.containers[0].resources!.requests!.cpu).toBe(
+        '25m'
+      )
+      expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+        fixture.secret().metadata!.annotations![SECRET_REVISION]
+      )
+      fixture.advance()
+      await fixture.reconcile()
+      expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+      expect(issue).toHaveBeenCalledOnce()
+    }
+  )
+
+  it('defers resource preparation when retained OAuth authority is temporarily unobserved', async () => {
+    const fixture = await runtime({ oauth: true })
+    config.hostResources.requests.cpu = '25m'
+    fixture.reconciler.setHostFrontsOAuthServer(async () => {
+      throw new Error('simulated OAuth observation unavailable')
+    })
+    await fixture.reconcile()
+    expect(issue).not.toHaveBeenCalled()
+    expect(fixture.events).toEqual([])
+    expect(
+      fixture.secret().metadata!.annotations!['clerum.io/runtime-token-fronts-oauth-server']
+    ).toBe('true')
+    expect(fixture.deployment().spec!.template.spec!.containers[0].resources!.requests!.cpu).toBe(
+      '100m'
+    )
+    fixture.reconciler.setHostFrontsOAuthServer(async () => true)
+    await fixture.reconcile()
+    expect(issue).toHaveBeenCalledOnce()
+    expect(issue.mock.calls[0][2]).toContain(OAUTH_USER_TOKEN_SCOPE)
+    expect(fixture.templateChanges()).toBe(1)
+  })
+
+  it.each([
+    ['Host', false],
+    ['Desktop', true],
+  ] as const)(
+    'does not reuse a routine renewal for a new %s resource rollout',
+    async (_kind, desktop) => {
+      const fixture = await runtime({ desktop })
+      const applied = fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]
+      vi.setSystemTime(
+        Date.parse(
+          fixture.secret().metadata!.annotations!['clerum.io/runtime-token-refresh-before']
+        ) + 1
+      )
+      await fixture.reconcile()
+      const renewed = fixture.secret().metadata!.annotations![SECRET_REVISION]
+      expect(renewed).not.toBe(applied)
+      expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+      expect(fixture.secret().metadata!.annotations![ROLLOUT]).toBe('false')
+      expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+        applied
+      )
+      expect(fixture.templateChanges()).toBe(0)
+      expect(issue).toHaveBeenCalledOnce()
+
+      // A routine renewal may be consumed after a container restart without an
+      // applied revision change. Its fresh record is not rollout preparation.
+      fixture.events.length = 0
+      const resources = desktop ? config.desktopResources : config.hostResources
+      resources.requests.cpu = '25m'
+      await fixture.reconcile()
+      const prepared = fixture.secret().metadata!.annotations![SECRET_REVISION]
+      expect(issue).toHaveBeenCalledTimes(2)
+      expect(prepared).not.toBe(renewed)
+      expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
+      expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+        prepared
+      )
+      expect(fixture.secret().metadata!.annotations![ROLLOUT]).toBe('true')
+
+      // The new preparation survives NotReady startup; it is not renewed on
+      // every reconcile, and is acknowledged only after convergence.
+      fixture.advance({ readyReplicas: 0, availableReplicas: 0, unavailableReplicas: 1 })
+      for (let pass = 0; pass < 3; pass++) await fixture.reconcile()
+      expect(issue).toHaveBeenCalledTimes(2)
+      expect(fixture.templateChanges()).toBe(1)
+      fixture.advance()
+      await fixture.reconcile()
+      expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+      expect(issue).toHaveBeenCalledTimes(2)
+    }
+  )
+
+  it('reuses an intrinsic renewal persisted before a failed resource replacement', async () => {
+    const fixture = await runtime()
+    vi.setSystemTime(
+      Date.parse(
+        fixture.secret().metadata!.annotations!['clerum.io/runtime-token-refresh-before']
+      ) + 1
+    )
+    config.hostResources.requests.cpu = '25m'
+    fixture.failReplacements(503)
+    await expect(fixture.reconcile()).rejects.toMatchObject({ code: 503 })
+    const prepared = fixture.secret().metadata!.annotations![SECRET_REVISION]
+    await fixture.reconcile()
+    expect(issue).toHaveBeenCalledOnce()
+    expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+      prepared
+    )
+    fixture.advance()
+    await fixture.reconcile()
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+  })
+
+  it('binds and delivers legacy unbound preparation even when its rollout marker is already true', async () => {
+    const fixture = await runtime()
+    config.hostResources.requests.cpu = '25m'
+    fixture.failReplacements(503)
+    await expect(fixture.reconcile()).rejects.toMatchObject({ code: 503 })
+    // The previously shipped preparation did not bind its target until acknowledgement.
+    fixture.unbindLegacyPreparation()
+    fixture.events.length = 0
+    await fixture.reconcile()
+    expect(issue).toHaveBeenCalledOnce()
+    expect(fixture.events).toEqual(['persist-secret', 'replace-deployment'])
+    expect(
+      fixture.secret().metadata!.annotations!['clerum.io/runtime-token-bootstrap-deployment-uid']
+    ).toBe(fixture.deployment().metadata!.uid)
+    for (let pass = 0; pass < 3; pass++) await fixture.reconcile()
+    expect(issue).toHaveBeenCalledOnce()
+    fixture.advance()
+    await fixture.reconcile()
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+  })
+
+  it('applies and acknowledges the preparation when intrinsic renewal and resources coincide', async () => {
+    const fixture = await runtime()
+    vi.setSystemTime(
+      Date.parse(fixture.secret().metadata!.annotations!['clerum.io/gfs-token-refresh-before']) + 1
+    )
+    config.hostResources.requests.cpu = '25m'
+    await fixture.reconcile()
+    expect(issue).toHaveBeenCalledOnce()
+    const prepared = fixture.secret().metadata!.annotations![SECRET_REVISION]
+    expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+      prepared
+    )
+    fixture.advance()
+    await fixture.reconcile()
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+  })
+
+  it('renews held GFS while strict bootstrap acknowledgement remains pending', async () => {
+    const fixture = await runtime({ stateless: true, consumed: false })
+    const applied = fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]
+    const runtimeData = { ...fixture.secret().data }
+    fixture.advance({ replicas: 2, updatedReplicas: 1, readyReplicas: 1 })
+    fixture.setCacheSynced(false)
+    gfsMint.mockClear()
+    vi.setSystemTime(Date.now() + 550_000)
+    await fixture.reconcile()
+    await fixture.reconcile()
+    vi.setSystemTime(Date.now() + 100_000)
+    await fixture.reconcile()
+    expect(gfsMint).toHaveBeenCalledOnce()
+    expect(issue).not.toHaveBeenCalled()
+    expect(
+      Date.parse(fixture.secret().metadata!.annotations!['clerum.io/gfs-token-expires-at'])
+    ).toBeGreaterThan(Date.now())
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+    for (const key of [
+      MCP_HOST_RUNTIME_TOKEN_SECRET_ACCESS_KEY,
+      MCP_HOST_RUNTIME_TOKEN_SECRET_REFRESH_KEY,
+      MCP_HOST_RUNTIME_TOKEN_SECRET_CONTROL_KEY,
+    ]) {
+      expect(fixture.secret().data![key]).toBe(runtimeData[key])
+    }
+    expect(fixture.secret().data![MCP_HOST_GFS_TOKEN_SECRET_KEY]).not.toBe(
+      runtimeData[MCP_HOST_GFS_TOKEN_SECRET_KEY]
+    )
+    fixture.setCacheSynced(true)
+    await fixture.reconcile()
+    expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+      applied
+    )
+    expect(fixture.templateChanges()).toBe(0)
+    fixture.advance()
+    await fixture.reconcile()
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+  })
+
+  it('recovers once after an observed partial Ready bootstrap subsequently loses Ready', async () => {
+    const fixture = await runtime({ consumed: false })
+    fixture.advance({ replicas: 2, updatedReplicas: 1, readyReplicas: 1 })
+    await fixture.reconcile()
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+    fixture.advance({ readyReplicas: 0, availableReplicas: 0, updatedReplicas: 0 })
+    await fixture.reconcile()
+    expect(issue).toHaveBeenCalledOnce()
+    for (let pass = 0; pass < 4; pass++) await fixture.reconcile()
+    expect(issue).toHaveBeenCalledOnce()
+    expect(fixture.templateChanges()).toBe(1)
+  })
+
+  it('does not mistake stale-generation Ready for possible bootstrap use during slow startup', async () => {
+    const fixture = await runtime({ consumed: false })
+    fixture.advance({ observedGeneration: 0, updatedReplicas: 0, readyReplicas: 1 })
+    await fixture.reconcile()
+    fixture.advance({ updatedReplicas: 0, readyReplicas: 0, availableReplicas: 0 })
+    for (let pass = 0; pass < 5; pass++) await fixture.reconcile()
+    expect(issue).not.toHaveBeenCalled()
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+    expect(fixture.templateChanges()).toBe(0)
+  })
+
+  it('prepares for a changed Deployment UID observed after credential persistence', async () => {
+    const fixture = await runtime()
+    config.hostResources.requests.cpu = '25m'
+    const read = fixture.appsApi.readNamespacedDeployment.getMockImplementation()!
+    let reads = 0
+    fixture.appsApi.readNamespacedDeployment.mockImplementation(async request => {
+      if (request.name === fixture.host.name && ++reads === 2) fixture.recreateDeployment()
+      return read(request)
+    })
+    await fixture.reconcile()
+    expect(issue).toHaveBeenCalledTimes(2)
+    expect(
+      fixture.secret().metadata!.annotations!['clerum.io/runtime-token-bootstrap-deployment-uid']
+    ).toBe('recreated-runtime-deployment-uid')
+    expect(fixture.templateChanges()).toBe(1)
+    await fixture.reconcile()
+    expect(issue).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not reuse a consumed record bound to a previous Deployment UID', async () => {
+    const fixture = await runtime()
+    fixture.recreateDeployment()
+    await fixture.reconcile()
+    expect(issue).toHaveBeenCalledOnce()
+    expect(
+      fixture.secret().metadata!.annotations!['clerum.io/runtime-token-bootstrap-deployment-uid']
+    ).toBe('recreated-runtime-deployment-uid')
+    await fixture.reconcile()
+    expect(issue).toHaveBeenCalledOnce()
+  })
+
+  it('replans resource preparation against drift observed at the mutation read with the same UID', async () => {
+    const fixture = await runtime()
+    const read = fixture.appsApi.readNamespacedDeployment.getMockImplementation()!
+    let reads = 0
+    fixture.appsApi.readNamespacedDeployment.mockImplementation(async request => {
+      if (request.name === fixture.host.name && ++reads === 2) {
+        fixture.deployment().spec!.template.spec!.containers[0].resources!.requests!.cpu = '50m'
+        fixture.deployment().metadata!.generation!++
+        fixture.advance()
+      }
+      return read(request)
+    })
+    await fixture.reconcile()
+    expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
+    expect(issue).toHaveBeenCalledOnce()
+    expect(fixture.deployment().spec!.template.spec!.containers[0].resources!.requests!.cpu).toBe(
+      '100m'
+    )
+  })
+
+  it('prepares a consumed-bootstrap resource transition without acknowledging a partial Ready runtime', async () => {
+    const fixture = await runtime()
+    fixture.advance({ replicas: 2, updatedReplicas: 1, readyReplicas: 1 })
+    config.hostResources.requests.cpu = '25m'
+    await fixture.reconcile()
+    expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+    for (let pass = 0; pass < 3; pass++) await fixture.reconcile()
+    expect(issue).toHaveBeenCalledOnce()
+    expect(fixture.templateChanges()).toBe(1)
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('fresh')
+    fixture.advance()
+    await fixture.reconcile()
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+  })
+
+  it('prepares an immediate resource repair for a fresh applied bootstrap without Ready replicas', async () => {
+    const fixture = await runtime({ consumed: false })
+    fixture.advance({ updatedReplicas: 0, readyReplicas: 0, availableReplicas: 0 })
+    config.hostResources.requests.cpu = '25m'
+    await fixture.reconcile()
+    expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
+    expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+      fixture.secret().metadata!.annotations![SECRET_REVISION]
+    )
+    for (let pass = 0; pass < 4; pass++) await fixture.reconcile()
+    expect(issue).toHaveBeenCalledOnce()
+    expect(fixture.templateChanges()).toBe(1)
+    fixture.advance()
+    await fixture.reconcile()
+    expect(fixture.secret().metadata!.annotations![BOOTSTRAP]).toBe('consumed')
+  })
+
+  it('recovers a NotReady consumed bootstrap when its resources also drift', async () => {
+    const fixture = await runtime()
+    fixture.advance({ readyReplicas: 0, availableReplicas: 0 })
+    config.hostResources.requests.cpu = '25m'
+    await fixture.reconcile()
+    expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
+    expect(issue).toHaveBeenCalledOnce()
+    expect(fixture.deployment().spec!.template.spec!.containers[0].resources!.requests!.cpu).toBe(
+      '25m'
+    )
+    for (let pass = 0; pass < 4; pass++) await fixture.reconcile()
+    expect(issue).toHaveBeenCalledOnce()
+    expect(fixture.templateChanges()).toBe(1)
+  })
+
+  it('replans same-UID resource drift introduced by a conflicting Deployment writer', async () => {
+    config.desktopResources.requests.cpu = '1000m'
+    const fixture = await runtime({ desktop: true, canonicalResources: true })
+    const replace = fixture.appsApi.replaceNamespacedDeployment.getMockImplementation()!
+    let changed = false
+    fixture.appsApi.replaceNamespacedDeployment.mockImplementation(async request => {
+      if (request.name === fixture.host.name && !changed) {
+        changed = true
+        fixture.deployment().spec!.template.spec!.containers[0].resources!.requests!.cpu = '50m'
+        fixture.deployment().metadata!.generation!++
+        fixture.advance()
+        // The external writer's new resourceVersion makes this first PUT conflict.
+        fixture.events.push('replace-409')
+      }
+      return replace(request)
+    })
+    await fixture.reconcile()
+    expect(fixture.events).toEqual(['replace-409', 'issue', 'persist-secret', 'replace-deployment'])
+    expect(issue).toHaveBeenCalledOnce()
+    expect(fixture.deployment().spec!.template.spec!.containers[0].resources!.requests!.cpu).toBe(
+      '1'
+    )
+    expect(fixture.templateChanges()).toBe(1)
+  })
+
+  it('defers resource transitions while the owned stateless runtime is draining', async () => {
+    const fixture = await runtime({ stateless: true, draining: true })
+    config.hostResources.requests.cpu = '25m'
+    await fixture.reconcile()
+    expect(issue).not.toHaveBeenCalled()
+    expect(fixture.events).toEqual([])
+    expect(fixture.templateChanges()).toBe(0)
+    expect(fixture.deployment().spec!.replicas).toBe(1)
+  })
+
+  it('delivers intrinsic bootstrap recovery while draining and preserves the applied resources', async () => {
+    const fixture = await runtime({ stateless: true, draining: true })
+    const resources = structuredClone(
+      fixture.deployment().spec!.template.spec!.containers[0].resources
+    )
+    fixture.advance({ readyReplicas: 0, availableReplicas: 0 })
+    config.hostResources.requests.cpu = '25m'
+    await fixture.reconcile()
+    expect(fixture.events).toEqual(['issue', 'persist-secret', 'replace-deployment'])
+    expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+      fixture.secret().metadata!.annotations![SECRET_REVISION]
+    )
+    expect(fixture.deployment().spec!.template.spec!.containers[0].resources).toEqual(resources)
+    for (let pass = 0; pass < 4; pass++) await fixture.reconcile()
+    expect(issue).toHaveBeenCalledOnce()
+    expect(fixture.templateChanges()).toBe(1)
+  })
+
+  it('suspends without applying resource drift or resurrecting the owned stateless runtime', async () => {
+    const fixture = await runtime({ stateless: true })
+    const template = structuredClone(fixture.deployment().spec!.template)
+    const runtimeData = { ...fixture.secret().data }
+    fixture.host.status = suspendedStatus()
+    config.hostResources.requests.cpu = '25m'
+    await fixture.reconcile()
+    expect(fixture.deployment().spec!.replicas).toBe(0)
+    expect(fixture.deployment().spec!.template).toEqual(template)
+    expect(fixture.secret().data).toEqual(runtimeData)
+    expect(issue).not.toHaveBeenCalled()
+    expect(fixture.events).toEqual(['replace-deployment'])
+    await fixture.reconcile()
+    expect(fixture.deployment().spec!.replicas).toBe(0)
+    expect(fixture.events).toEqual(['replace-deployment'])
+    expect(issue).not.toHaveBeenCalled()
+  })
+
+  it('keeps consumed runtime credentials and the applied revision stable after held GFS renewal', async () => {
+    const fixture = await runtime({ stateless: true })
+    const applied = fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]
+    const before = { ...fixture.secret().data }
+    fixture.setCacheSynced(false)
+    gfsMint.mockClear()
+    vi.setSystemTime(Date.now() + 550_000)
+    await fixture.reconcile()
+    expect(gfsMint).toHaveBeenCalledOnce()
+    expect(issue).not.toHaveBeenCalled()
+    for (const key of [
+      MCP_HOST_RUNTIME_TOKEN_SECRET_ACCESS_KEY,
+      MCP_HOST_RUNTIME_TOKEN_SECRET_REFRESH_KEY,
+      MCP_HOST_RUNTIME_TOKEN_SECRET_CONTROL_KEY,
+    ])
+      expect(fixture.secret().data![key]).toBe(before[key])
+    fixture.setCacheSynced(true)
+    await fixture.reconcile()
+    expect(fixture.deployment().spec!.template.metadata!.annotations![APPLIED_REVISION]).toBe(
+      applied
+    )
+    expect(fixture.templateChanges()).toBe(0)
+    expect(issue).not.toHaveBeenCalled()
+  })
+})
+
 describe('HostReconciler stateless lifecycle — buildDeployment replicas', () => {
-  it('pins replicas=1 and maxSurge=0 for a non-stateless host', () => {
+  it('pins replicas=1 and the Recreate strategy for a non-stateless host', () => {
     const { reconciler } = createReconciler()
     const dep = reconciler.buildDeployment(makeHost())
     expect(dep.spec?.replicas).toBe(1)
-    expect(dep.spec?.strategy?.rollingUpdate?.maxSurge).toBe(0)
-    expect(dep.spec?.strategy?.rollingUpdate?.maxUnavailable).toBe(1)
+    expect(dep.spec?.strategy).toEqual({ type: 'Recreate' })
     expect(dep.spec?.template.spec?.priorityClassName).toBeUndefined()
   })
 
@@ -909,22 +1868,22 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
     )
     expect(hostReplacements).toHaveLength(1)
     const replacement = hostReplacements[0][0].body as k8s.V1Deployment
+    // Witness: the flip really changed the lifecycle-specific template.
     expect(replacement.spec?.replicas).toBe(1)
     expect(replacement.spec?.template.spec?.priorityClassName).toBe('clerum-interactive-host')
-    expect(
-      replacement.spec?.template.spec?.initContainers?.map(container => container.name)
-    ).toContain('workspace-layout-init')
     expect(envValue(replacement, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
-    expect(replacement.spec?.template.spec?.containers?.[0]?.volumeMounts).toContainEqual({
-      name: 'workspace',
-      mountPath: '/workspace',
-      subPath: 'workspace',
+    // Storage is identical across the flip: mounts, storage env and the init.
+    const storage = (dep: k8s.V1Deployment) => ({
+      mounts: dep.spec?.template.spec?.containers?.[0]?.volumeMounts,
+      store: envValue(dep, 'CLERUM_SESSION_STORE'),
+      dbDir: envValue(dep, 'CLERUM_SESSION_DB_DIR'),
+      inits: dep.spec?.template.spec?.initContainers,
     })
-    expect(replacement.spec?.template.spec?.containers?.[0]?.volumeMounts).toContainEqual({
-      name: 'workspace',
-      mountPath: '/var/lib/clerum/state',
-      subPath: 'state',
-    })
+    expect(JSON.stringify(storage(replacement))).toBe(JSON.stringify(storage(runningStateful)))
+    expect(storage(replacement).dbDir).toBe('/workspace')
+    expect(storage(replacement).inits?.map(container => container.name)).toEqual([
+      'workspace-layout-merge',
+    ])
   })
 })
 
@@ -962,36 +1921,31 @@ describe('HostReconciler stateless lifecycle — env injection', () => {
     const created = hostDeploymentBody(appsApi, 'new-stateless-host')
     expect(created.spec?.replicas).toBe(1)
     expect(created.spec?.template.spec?.priorityClassName).toBe('clerum-interactive-host')
-    expect(created.spec?.template.spec?.initContainers?.map(container => container.name)).toContain(
-      'workspace-layout-init'
-    )
+    expect(created.spec?.template.spec?.initContainers?.map(container => container.name)).toEqual([
+      'workspace-layout-merge',
+    ])
     expect(envValue(created, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
     expect(created.spec?.template.spec?.containers?.[0]?.volumeMounts).toContainEqual({
       name: 'workspace',
       mountPath: '/workspace',
-      subPath: 'workspace',
-    })
-    expect(created.spec?.template.spec?.containers?.[0]?.volumeMounts).toContainEqual({
-      name: 'workspace',
-      mountPath: '/var/lib/clerum/state',
-      subPath: 'state',
     })
   })
 
-  it('injects the three stateless env vars when stateless is enabled', () => {
+  it('injects the stateless env and the root storage env when stateless is enabled', () => {
     const { reconciler } = createReconciler()
     const dep = reconciler.buildDeployment(makeStatelessHost())
     expect(envValue(dep, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
     expect(envValue(dep, 'CLERUM_SESSION_STORE')).toBe('sqlite')
-    expect(envValue(dep, 'CLERUM_SESSION_DB_DIR')).toBe('/var/lib/clerum/state')
+    expect(envValue(dep, 'CLERUM_SESSION_DB_DIR')).toBe('/workspace')
   })
 
-  it('does not inject the stateless env vars when stateless is off', () => {
+  it('injects the root storage env but not the stateless env when stateless is off', () => {
     const { reconciler } = createReconciler()
-    const names = containerEnv(reconciler.buildDeployment(makeHost())).map(e => e.name)
-    expect(names).not.toContain('CLERUM_STATELESS_LIFECYCLE')
-    expect(names).not.toContain('CLERUM_SESSION_STORE')
-    expect(names).not.toContain('CLERUM_SESSION_DB_DIR')
+    const dep = reconciler.buildDeployment(makeHost())
+    expect(containerEnv(dep).map(e => e.name)).not.toContain('CLERUM_STATELESS_LIFECYCLE')
+    // Witness: the same container carries the storage env every Host gets.
+    expect(envValue(dep, 'CLERUM_SESSION_STORE')).toBe('sqlite')
+    expect(envValue(dep, 'CLERUM_SESSION_DB_DIR')).toBe('/workspace')
   })
 })
 
@@ -1817,12 +2771,18 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
 
   it('does not let a failed live probe narrow a retained OAuth grant before its renewal window', async () => {
     const host = makeStatelessHost()
-    const { reconciler, coreApi } = createReconciler({
+    const { reconciler, coreApi, appsApi } = createReconciler({
       isCommunicationChannelCacheSynced: () => true,
     })
-    coreApi.readNamespacedSecret.mockResolvedValue(
-      await mintedRuntimeCredentialRecord(host, { frontsOAuthServer: true })
-    )
+    const record = await mintedRuntimeCredentialRecord(host, { frontsOAuthServer: true })
+    coreApi.readNamespacedSecret.mockResolvedValue(record)
+    const running = trustedRuntimeDeployment(reconciler, host)
+    running.spec!.template.metadata!.annotations = {
+      ...running.spec!.template.metadata!.annotations,
+      'clerum.io/runtime-token-revision':
+        record.metadata!.annotations!['clerum.io/runtime-token-secret-revision'],
+    }
+    appsApi.readNamespacedDeployment.mockResolvedValue(running)
     const oauthResolver = vi.fn(async (): Promise<boolean> => {
       throw new Error('oauth lookup unavailable')
     })
@@ -2484,7 +3444,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
         return deployment
       }
 
-      it('marks a bootstrap bound to the applied Deployment consumed without minting', async () => {
+      it('acknowledges a bound bootstrap and renews due GFS in one CAS write', async () => {
         const host = makeStatelessHost()
 
         const bound = await renewHeldGfs({
@@ -2497,7 +3457,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
         expect(bound.recordReads).toBeGreaterThan(0)
         expect(bound.recordWrites).toBe(1)
         expect(bound.provision.revision).toBe(APPLIED_REVISION)
-        expect(bound.mints).toBe(0)
+        expect(bound.mints).toBe(1)
       })
 
       it('renews once the bootstrap is bound to a different Deployment UID', async () => {
@@ -2507,7 +3467,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
           record: freshBootstrapBoundTo(`deployment-${host.name}`),
           deployment: appliedDeployment,
         })
-        expect(bound.mints).toBe(0)
+        expect(bound.mints).toBe(1)
         expect(bound.recordWrites).toBe(1)
 
         const replaced = await renewHeldGfs({
@@ -2584,10 +3544,9 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       vi.setSystemTime(t0 + 602_000)
       const provision = await (reconciler as any).ensureMcpHostRuntimeTokenSecret(host)
 
-      // Liveness witness: the hold renewed GFS once and wrote the record twice
-      // (the consumed marker, then the renewed GFS credential).
+      // The independent renewal and strict acknowledgement share one CAS write.
       expect(vi.mocked(mintHostGfsToken)).toHaveBeenCalledOnce()
-      expect(coreApi.replaceNamespacedSecret.mock.calls.length).toBeGreaterThanOrEqual(2)
+      expect(coreApi.replaceNamespacedSecret.mock.calls.length).toBe(1)
       expect(record.metadata!.annotations!['clerum.io/runtime-token-rollout-required']).not.toBe(
         'true'
       )
@@ -2789,7 +3748,12 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       )
     ).toHaveLength(0)
 
-    live().status = { readyReplicas: 1 }
+    live().status = {
+      observedGeneration: live().metadata!.generation,
+      replicas: 1,
+      updatedReplicas: 1,
+      readyReplicas: 1,
+    }
     coreApi.replaceNamespacedSecret.mockClear()
     await reconciler.reconcile(host)
 
@@ -3058,7 +4022,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     await reconciler.reconcile(host)
     const live = persistHostDeployment(appsApi, host, hostDeploymentBody(appsApi, host.name))
     const baseline = structuredClone(live().spec?.template)
-    expect(envValue(live(), 'CLERUM_SESSION_DB_DIR')).toBe('/var/lib/clerum/state')
+    expect(envValue(live(), 'CLERUM_SESSION_DB_DIR')).toBe('/workspace')
 
     for (let cycle = 1; cycle <= 2; cycle++) {
       cacheSynced = false
@@ -3072,7 +4036,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       const deployment = live()
       expect(deployment.spec?.replicas).toBe(1)
       expect(deployment.spec?.template).toEqual(baseline)
-      expect(envValue(deployment, 'CLERUM_SESSION_DB_DIR')).toBe('/var/lib/clerum/state')
+      expect(envValue(deployment, 'CLERUM_SESSION_DB_DIR')).toBe('/workspace')
       expect(reconciler.getEffectiveLifecycle(host)).toMatchObject({
         stateless: true,
         suspensionBlocked: true,
@@ -3140,7 +4104,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(deployment.spec?.replicas).toBe(0)
     expect(envValue(deployment, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
     expect(envValue(deployment, 'CLERUM_SESSION_STORE')).toBe('sqlite')
-    expect(envValue(deployment, 'CLERUM_SESSION_DB_DIR')).toBe('/var/lib/clerum/state')
+    expect(envValue(deployment, 'CLERUM_SESSION_DB_DIR')).toBe('/workspace')
     const writes = lifecycleStatusWrites(customApi)
     expect(writes).toHaveLength(2)
     expect(writes[0].lifecycle?.state).toBe('suspended')
@@ -3445,7 +4409,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     expect(deployment.spec?.replicas).toBe(1)
     expect(envValue(deployment, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
     expect(envValue(deployment, 'CLERUM_SESSION_STORE')).toBe('sqlite')
-    expect(envValue(deployment, 'CLERUM_SESSION_DB_DIR')).toBe('/var/lib/clerum/state')
+    expect(envValue(deployment, 'CLERUM_SESSION_DB_DIR')).toBe('/workspace')
   })
 
   it('rejects stateless by default when CommunicationChannels reference the host', async () => {
@@ -4157,63 +5121,198 @@ describe('HostReconciler stateless lifecycle — AP-1 fresh-read status writer',
   })
 })
 
-describe('HostReconciler stateless lifecycle — initContainer and mounts', () => {
-  it('adds the workspace-layout initContainer with dual subPath mounts', () => {
-    const { reconciler } = createReconciler()
-    const dep = reconciler.buildDeployment(makeStatelessHost())
+describe('HostReconciler storage layout — one shape for every lifecycle', () => {
+  const kinds = [
+    { kind: 'stateful', host: () => makeHost(), workspacePath: '/workspace' },
+    { kind: 'stateless', host: () => makeStatelessHost(), workspacePath: '/workspace' },
+    {
+      kind: 'desktop',
+      host: () => makeHost({ spec: { ...makeHost().spec, desktop: { browser: true } } }),
+      workspacePath: '/config/workspace',
+    },
+  ]
 
-    const initContainers = dep.spec?.template?.spec?.initContainers
-    if (!initContainers || initContainers.length !== 1) {
-      throw new Error('expected exactly one initContainer on the stateless pod')
+  it.each(kinds)(
+    'renders the root mount, storage env and merge init for a $kind Host',
+    ({ host, workspacePath }) => {
+      const { reconciler } = createReconciler()
+      const dep = reconciler.buildDeployment(host())
+      const podSpec = dep.spec?.template?.spec
+      const main = podSpec?.containers?.[0]
+
+      expect(main?.volumeMounts?.filter(mount => mount.name === 'workspace')).toEqual([
+        { name: 'workspace', mountPath: workspacePath },
+      ])
+      expect(JSON.stringify(dep)).not.toContain('subPath')
+      expect(envValue(dep, 'CLERUM_SESSION_STORE')).toBe('sqlite')
+      expect(envValue(dep, 'CLERUM_SESSION_DB_DIR')).toBe(workspacePath)
+      expect(dep.spec?.strategy).toEqual({ type: 'Recreate' })
+
+      const inits = podSpec?.initContainers ?? []
+      expect(inits.map(init => init.name)).toEqual(['workspace-layout-merge'])
+      const [merge] = inits
+      expect(merge.image).toBe(main?.image)
+      expect(merge.imagePullPolicy).toBe(main?.imagePullPolicy)
+      expect(merge.securityContext).toEqual(main?.securityContext)
+      expect(merge.securityContext).toMatchObject({ runAsUser: 1001, runAsNonRoot: true })
+      expect(merge.volumeMounts).toEqual([{ name: 'workspace', mountPath: '/mnt/workspace-root' }])
+      expect(merge.command?.[2]).toContain('workspace layout merge refused')
+      // A Pod's scheduling request counts its largest init container; dev
+      // requests 25m CPU for a Host, so the merge stays at or below 25m/128Mi.
+      expect(merge.resources?.requests).toEqual({ cpu: '10m', memory: '32Mi' })
+
+      const names = [...(main?.env ?? []), ...(merge.env ?? [])].map(env => env.name)
+      // Witness: the env list is populated with the storage env asserted above.
+      expect(names).toContain('CLERUM_SESSION_DB_DIR')
+      for (const withdrawn of [
+        'CLERUM_STORAGE_LAYOUT',
+        'CLERUM_STORAGE_STORE_ID',
+        'CLERUM_STORAGE_GENESIS',
+        'CLERUM_DB_BARRIER_MODE',
+      ]) {
+        expect(names).not.toContain(withdrawn)
+      }
     }
-    const init = initContainers[0]
-    expect(init.name).toBe('workspace-layout-init')
-    expect(init.image).toBe('clerum/mcp-host:0.6.0')
-    expect(init.command?.[0]).toBe('/bin/sh')
-    expect(init.command?.[2]).toContain('assert_managed_dir "$root/workspace" workspace')
-    expect(init.command?.[2]).toContain('directory is a symlink')
-    expect(init.command?.[2]).toContain('state.db-wal')
-    expect(init.volumeMounts).toEqual([{ name: 'workspace', mountPath: '/mnt/workspace-root' }])
-    expect(init.securityContext).toEqual({
-      allowPrivilegeEscalation: false,
-      runAsNonRoot: true,
-      runAsUser: 1001,
-      runAsGroup: 1001,
-      capabilities: { drop: ['ALL'] },
-      seccompProfile: { type: 'RuntimeDefault' },
-    })
+  )
 
-    const mounts = dep.spec?.template?.spec?.containers?.[0]?.volumeMounts ?? []
-    expect(mounts).toContainEqual({
-      name: 'workspace',
-      mountPath: '/workspace',
-      subPath: 'workspace',
-    })
-    expect(mounts).toContainEqual({
-      name: 'workspace',
-      mountPath: '/var/lib/clerum/state',
-      subPath: 'state',
-    })
+  it('changes only lifecycle fields when a Host flips lifecycle', () => {
+    const { reconciler } = createReconciler()
+    const stateful = reconciler.buildDeployment(makeHost())
+    const stateless = reconciler.buildDeployment(
+      makeHost({ spec: { ...makeHost().spec, lifecycle: { stateless: true } } })
+    )
+
+    // Witness: the lifecycle-specific template really differs.
+    expect(envValue(stateless, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
+    expect(containerEnv(stateful).map(env => env.name)).not.toContain('CLERUM_STATELESS_LIFECYCLE')
+    expect(stateless.spec?.template?.spec?.priorityClassName).toBe('clerum-interactive-host')
+    expect(stateful.spec?.template?.spec?.priorityClassName).toBeUndefined()
+
+    const storage = (dep: k8s.V1Deployment) =>
+      JSON.stringify({
+        mounts: dep.spec?.template?.spec?.containers?.[0]?.volumeMounts,
+        volumes: dep.spec?.template?.spec?.volumes,
+        store: envValue(dep, 'CLERUM_SESSION_STORE'),
+        dbDir: envValue(dep, 'CLERUM_SESSION_DB_DIR'),
+        inits: dep.spec?.template?.spec?.initContainers,
+        strategy: dep.spec?.strategy,
+      })
+    expect(storage(stateless)).toBe(storage(stateful))
   })
 
-  it('keeps the non-stateless pod spec identical to the legacy shape', () => {
+  it('renders the same manifest for an explicit non-stateless lifecycle argument', () => {
     const { reconciler } = createReconciler()
     const dep = reconciler.buildDeployment(makeHost())
-
-    expect(dep.spec?.template?.spec?.initContainers).toBeUndefined()
-    const mounts = dep.spec?.template?.spec?.containers?.[0]?.volumeMounts ?? []
-    expect(mounts).toContainEqual({ name: 'workspace', mountPath: '/workspace' })
-    const serialized = JSON.stringify(dep)
-    expect(serialized).not.toContain('subPath')
-    expect(serialized).not.toContain('CLERUM_STATELESS_LIFECYCLE')
-    expect(serialized).not.toContain('workspace-layout-init')
-    // An explicit non-stateless lifecycle argument yields the exact same manifest.
     const explicit = reconciler.buildDeployment(makeHost(), [], '', {
       stateless: false,
       state: 'active',
     })
     expect(explicit).toEqual(dep)
+    expect(dep.spec?.template?.spec?.initContainers?.map(init => init.name)).toEqual([
+      'workspace-layout-merge',
+    ])
   })
+
+  describe('with CONTEXT_MAPPER_WORKSPACE_LAYOUT_MERGE=false', () => {
+    afterEach(() => {
+      config.workspaceLayoutMerge = true
+    })
+
+    it.each(kinds)(
+      'renders no merge init and keeps the root layout for a $kind Host',
+      ({ host, workspacePath }) => {
+        const { reconciler } = createReconciler()
+        // Witness: with the flag on, the same Host renders the merge init.
+        expect(
+          reconciler.buildDeployment(host()).spec?.template?.spec?.initContainers?.map(i => i.name)
+        ).toEqual(['workspace-layout-merge'])
+
+        config.workspaceLayoutMerge = false
+        const dep = reconciler.buildDeployment(host())
+        expect(dep.spec?.template?.spec?.initContainers).toBeUndefined()
+        expect(dep.spec?.template?.spec?.containers?.[0]?.volumeMounts).toContainEqual({
+          name: 'workspace',
+          mountPath: workspacePath,
+        })
+        expect(envValue(dep, 'CLERUM_SESSION_DB_DIR')).toBe(workspacePath)
+        expect(JSON.stringify(dep)).not.toContain('subPath')
+      }
+    )
+  })
+})
+
+describe('HostReconciler storage layout — upgrade from a v0.11.0 Deployment', () => {
+  // The fixtures are the Deployments v0.11.0's HostReconciler renders for these
+  // Hosts with this file's mocks (dumped from the tag, not written by hand).
+  // v0.10.0 renders the same template: statelessDeployment.ts is identical.
+  const legacy = (file: string): k8s.V1Deployment =>
+    JSON.parse(readFileSync(join(__dirname, '__fixtures__', file), 'utf8'))
+
+  const cases = [
+    {
+      state: 'active',
+      host: () => makeStatelessHost({ name: 'upgrade-active' }),
+      fixture: 'v0.11.0-stateless-active-deployment.json',
+      replicas: 1,
+    },
+    {
+      state: 'suspended',
+      host: () => makeStatelessHost({ name: 'upgrade-suspended', status: suspendedStatus(7) }),
+      fixture: 'v0.11.0-stateless-suspended-deployment.json',
+      replicas: 0,
+    },
+  ]
+
+  it.each(cases)(
+    'replaces the split template of a $state stateless Host once',
+    async ({ host: makeUpgradeHost, fixture, replicas }) => {
+      const host = makeUpgradeHost()
+      const previous = legacy(fixture)
+      // Witness: the fixture carries the v0.11.0 split layout.
+      expect(previous.spec?.template.spec?.initContainers?.map(init => init.name)).toEqual([
+        'workspace-layout-init',
+      ])
+      expect(previous.spec?.template.spec?.containers?.[0]?.volumeMounts).toContainEqual({
+        name: 'workspace',
+        mountPath: '/var/lib/clerum/state',
+        subPath: 'state',
+      })
+      expect(previous.spec?.replicas).toBe(replicas)
+
+      const { reconciler, appsApi, customApi } = createReconciler()
+      customApi.getNamespacedCustomObject.mockResolvedValue({
+        ...hostApiObject(host),
+        status: host.status ?? { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
+      })
+      const live = persistHostDeployment(appsApi, host, previous)
+
+      await reconciler.reconcile(host)
+
+      const replacements = () =>
+        appsApi.replaceNamespacedDeployment.mock.calls.filter(
+          ([request]) => request.name === host.name
+        )
+      expect(replacements()).toHaveLength(1)
+      const replaced = live()
+      expect(replaced.spec?.template.spec?.initContainers?.map(init => init.name)).toEqual([
+        'workspace-layout-merge',
+      ])
+      expect(JSON.stringify(replaced)).not.toContain('subPath')
+      expect(replaced.spec?.template.spec?.containers?.[0]?.volumeMounts).toContainEqual({
+        name: 'workspace',
+        mountPath: '/workspace',
+      })
+      expect(envValue(replaced, 'CLERUM_SESSION_DB_DIR')).toBe('/workspace')
+      expect(replaced.spec?.strategy).toEqual({ type: 'Recreate' })
+      expect(replaced.spec?.replicas).toBe(replicas)
+      expect(envValue(replaced, 'CLERUM_STATELESS_LIFECYCLE')).toBe('true')
+
+      // Witness: the replaced template is up to date, so the next reconcile
+      // leaves it alone.
+      await reconciler.reconcile(host)
+      expect(replacements()).toHaveLength(1)
+    }
+  )
 })
 
 describe('HostReconciler stateless lifecycle — suspension durability', () => {
@@ -4434,6 +5533,8 @@ describe('HostReconciler stateless lifecycle — guarded image pull policy (Stag
     const { reconciler } = createReconciler()
     const { container, init } = podContainers(reconciler.buildDeployment(makeHost()))
     expect(container.imagePullPolicy).toBe('Always')
-    expect(init).toBeUndefined()
+    // The merge init follows the main container's policy on every Host.
+    expect(init?.name).toBe('workspace-layout-merge')
+    expect(init?.imagePullPolicy).toBe('Always')
   })
 })

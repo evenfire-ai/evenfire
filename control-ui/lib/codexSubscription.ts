@@ -1,4 +1,6 @@
 import { apiGet, apiSend } from './api'
+import { invalidateReadRequestCache } from './readRequestCache'
+import type { SubscriptionCapabilityLoadOptions } from './subscriptionCapabilities'
 
 export const CODEX_SUBSCRIPTION_API_BASE = '/api/v1/admin/llm/providers/codex-subscription'
 
@@ -282,19 +284,29 @@ function sanitizeAssignableHost(raw: unknown): CodexAssignableHost | null {
   }
 }
 
-export async function listCodexSubscriptionConnections(): Promise<
-  CodexSubscriptionConnectionView[]
-> {
-  const fleet = await listCodexSubscriptionFleet()
+export async function listCodexSubscriptionConnections(
+  options: SubscriptionCapabilityLoadOptions = {}
+): Promise<CodexSubscriptionConnectionView[]> {
+  const fleet = await listCodexSubscriptionFleet(options)
   return fleet.connections
 }
 
-export async function listCodexSubscriptionFleet(): Promise<{
+export async function listCodexSubscriptionFleet(
+  options: SubscriptionCapabilityLoadOptions = {}
+): Promise<{
   connections: CodexSubscriptionConnectionView[]
   assignableHosts: CodexAssignableHost[]
   assignableHostsUnavailable: boolean
 }> {
-  const raw = (await apiGet(`${CODEX_SUBSCRIPTION_API_BASE}/connections`)) as {
+  const raw = (await apiGet(
+    `${CODEX_SUBSCRIPTION_API_BASE}/connections`,
+    {},
+    {
+      metadataRead: 'subscription-connections',
+      refresh: options.refresh,
+      signal: options.signal,
+    }
+  )) as {
     connections?: unknown
     assignableHosts?: unknown
     assignableHostsUnavailable?: unknown
@@ -319,16 +331,23 @@ export async function createCodexSubscriptionConnection(input: {
   displayName: string
   connectionKey?: string
 }): Promise<CodexSubscriptionConnectionView> {
-  return sanitizeCodexConnection(
-    await apiSend('POST', `${CODEX_SUBSCRIPTION_API_BASE}/connections`, input)
-  )
+  const raw = await apiSend('POST', `${CODEX_SUBSCRIPTION_API_BASE}/connections`, input)
+  invalidateReadRequestCache()
+  return sanitizeCodexConnection(raw)
 }
 
 export async function listCodexConnectionModels(
-  connectionKey: string
+  connectionKey: string,
+  options: SubscriptionCapabilityLoadOptions = {}
 ): Promise<Array<{ model: string; enabled: boolean; stale: boolean }>> {
   const raw = (await apiGet(
-    `${CODEX_SUBSCRIPTION_API_BASE}/connections/${encodeURIComponent(connectionKey)}/models`
+    `${CODEX_SUBSCRIPTION_API_BASE}/connections/${encodeURIComponent(connectionKey)}/models`,
+    {},
+    {
+      metadataRead: 'subscription-model-catalog',
+      refresh: options.refresh,
+      signal: options.signal,
+    }
   )) as { models?: Array<{ model?: string; enabled?: boolean; stale?: boolean }> }
   return Array.isArray(raw.models)
     ? raw.models
@@ -359,56 +378,66 @@ export async function startCodexBrowserConnect(
   intent: CodexOAuthIntent,
   connectionKey?: string
 ): Promise<CodexBrowserStartView> {
-  return sanitizeCodexBrowserStart(
-    await apiSend('POST', keyedPath(connectionKey, 'browser/start'), { intent })
-  )
+  const raw = await apiSend('POST', keyedPath(connectionKey, 'browser/start'), { intent })
+  invalidateReadRequestCache()
+  return sanitizeCodexBrowserStart(raw)
 }
 
 export async function startCodexDeviceConnect(
   intent: CodexOAuthIntent,
   connectionKey?: string
 ): Promise<CodexDeviceStartView> {
-  return sanitizeCodexDeviceStart(
-    await apiSend('POST', keyedPath(connectionKey, 'device/start'), { intent })
-  )
+  const raw = await apiSend('POST', keyedPath(connectionKey, 'device/start'), { intent })
+  invalidateReadRequestCache()
+  return sanitizeCodexDeviceStart(raw)
 }
 
 export async function pollCodexDevice(
   state: string,
   connectionKey?: string
 ): Promise<CodexDevicePollView> {
-  return sanitizeCodexDevicePoll(await apiGet(keyedPath(connectionKey, 'device/poll'), { state }))
+  const result = sanitizeCodexDevicePoll(
+    await apiGet(keyedPath(connectionKey, 'device/poll'), { state })
+  )
+  if (result.status === 'connected') invalidateReadRequestCache()
+  return result
 }
 
 export async function refreshCodexSubscriptionConnection(
   connectionKey?: string
 ): Promise<CodexSubscriptionConnectionView> {
-  return sanitizeCodexConnection(await apiSend('POST', keyedPath(connectionKey, 'refresh')))
+  const raw = await apiSend('POST', keyedPath(connectionKey, 'refresh'))
+  invalidateReadRequestCache()
+  return sanitizeCodexConnection(raw)
 }
 
 export async function syncCodexSubscriptionCatalog(
   connectionKey?: string
 ): Promise<CodexCatalogSyncView> {
-  return sanitizeCodexCatalogSync(await apiSend('POST', keyedPath(connectionKey, 'catalog/sync')))
+  const raw = await apiSend('POST', keyedPath(connectionKey, 'catalog/sync'))
+  invalidateReadRequestCache()
+  return sanitizeCodexCatalogSync(raw)
 }
 
 export async function revokeCodexSubscription(
   connectionKey?: string
 ): Promise<CodexSubscriptionConnectionView> {
-  return sanitizeCodexConnection(await apiSend('POST', keyedPath(connectionKey, 'revoke')))
+  const raw = await apiSend('POST', keyedPath(connectionKey, 'revoke'))
+  invalidateReadRequestCache()
+  return sanitizeCodexConnection(raw)
 }
 
 export async function patchCodexSubscriptionConnection(
   connectionKey: string,
   patch: { displayName?: string; defaultModel?: string | null }
 ): Promise<CodexSubscriptionConnectionView> {
-  return sanitizeCodexConnection(
-    await apiSend(
-      'PATCH',
-      `${CODEX_SUBSCRIPTION_API_BASE}/connections/${encodeURIComponent(connectionKey)}`,
-      patch
-    )
+  const raw = await apiSend(
+    'PATCH',
+    `${CODEX_SUBSCRIPTION_API_BASE}/connections/${encodeURIComponent(connectionKey)}`,
+    patch
   )
+  invalidateReadRequestCache()
+  return sanitizeCodexConnection(raw)
 }
 
 export async function patchCodexCatalogModel(
@@ -421,6 +450,7 @@ export async function patchCodexCatalogModel(
     `${CODEX_SUBSCRIPTION_API_BASE}/connections/${encodeURIComponent(connectionKey)}/models/${encodeURIComponent(model)}`,
     { enabled }
   )) as { models?: Array<{ model?: string; enabled?: boolean; stale?: boolean }> }
+  invalidateReadRequestCache()
   return Array.isArray(raw.models)
     ? raw.models
         .filter(row => typeof row.model === 'string' && row.model.trim())

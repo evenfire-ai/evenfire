@@ -10,14 +10,20 @@ import {
   ToolDefinition,
 } from '../core/types'
 import { logger } from '../logger'
+import { resolveOfficialVisualDeliveryLimits } from '../visualInput/deliveryLimits'
 import { assertVisualRequestFits } from '../visualInput/requestPolicy'
 import { classifyByHttpStatus, classifyUnknown } from './errorClassification'
+import type { ImageTransportOperation } from './imageInput'
 import type { LlmProvider } from './registryCore'
 import type { ClassifiedError, SingleTurnProvider } from './types'
 
 export class OpenAIProvider implements SingleTurnProvider {
   private client: OpenAI
   private defaultModel: string
+
+  getVisualDeliveryLimits(operation: ImageTransportOperation) {
+    return resolveOfficialVisualDeliveryLimits('openai', this.client.baseURL, operation)
+  }
 
   constructor(apiKeyOrClient: string | OpenAI, defaultModel: string = 'gpt-5.4-mini') {
     if (typeof apiKeyOrClient === 'string') {
@@ -76,6 +82,7 @@ export class OpenAIProvider implements SingleTurnProvider {
     messages: CoreChatMessage[],
     options?: { max_tokens?: number; temperature?: number; signal?: AbortSignal }
   ): Promise<CompletionResponse> {
+    assertVisualRequestFits(messages, messages, false, this.getVisualDeliveryLimits('complete'))
     const openaiMessages = messages.map(m => ({
       role: m.role as 'system' | 'user' | 'assistant',
       content: m.content,
@@ -146,7 +153,12 @@ export class OpenAIProvider implements SingleTurnProvider {
       ...this.tokenLimitOptions(options?.max_tokens),
       temperature: options?.temperature,
     }
-    assertVisualRequestFits(messages, request, options?.verifyImageInput === true)
+    assertVisualRequestFits(
+      messages,
+      request,
+      options?.verifyImageInput === true,
+      this.getVisualDeliveryLimits('completeWithTools')
+    )
     const response = await this.client.chat.completions.create(request, { signal: options?.signal })
 
     const choice = response.choices[0]

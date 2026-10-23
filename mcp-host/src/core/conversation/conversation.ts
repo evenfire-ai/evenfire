@@ -2,6 +2,7 @@ import type { ModelSelectionWriteOutcome } from '../../db/worker/protocol'
 import { parseSessionKey } from '../../session/types'
 import { projectGfsApproval } from '../../visualInput/suspension'
 import { ConversationError, ConversationErrorCode } from '../errors'
+import { SESSION_SCOPED_APPROVAL_TOOLS } from '../extensions/approvalController'
 import { isMcpToolName } from '../extensions/mcpApprovalGateController'
 import {
   ChatMessage,
@@ -48,6 +49,12 @@ import { userIdFromRpcPrefix } from './sessionKeyParts'
  */
 export class ConversationManager {
   private store: ConversationStore
+  /**
+   * Load-or-create in flight per session key. Concurrent callers on a new
+   * chat share one creation; two would insert two rows with the same
+   * `session_key`, and the second insert fails on its unique index.
+   */
+  private readonly pendingCreates = new Map<string, Promise<Conversation>>()
 
   constructor(store: ConversationStore = new InMemoryConversationStore()) {
     this.store = store
@@ -87,11 +94,21 @@ export class ConversationManager {
       return cached
     }
 
-    const loaded = await this.store.getOrLoad(sessionKey)
-    if (loaded) {
-      this.assertSessionOwner(loaded, opts?.userId)
-      return loaded
+    let pending = this.pendingCreates.get(sessionKey)
+    if (!pending) {
+      pending = this.loadOrCreate(sessionKey, opts).finally(() => {
+        this.pendingCreates.delete(sessionKey)
+      })
+      this.pendingCreates.set(sessionKey, pending)
     }
+    const conv = await pending
+    this.assertSessionOwner(conv, opts?.userId)
+    return conv
+  }
+
+  private async loadOrCreate(sessionKey: string, opts?: GetOrCreateOptions): Promise<Conversation> {
+    const loaded = await this.store.getOrLoad(sessionKey)
+    if (loaded) return loaded
 
     const parsed = parseSessionKey(sessionKey)
 
@@ -269,6 +286,8 @@ export class ConversationManager {
 
     // Clear per-turn wildcard approval — each new message requires fresh approval
     conversation.auto_approved_tools.delete('*')
+    // A new user message starts a new task: plain session-scoped approvals end here.
+    conversation.task_approved_tools?.clear()
 
     // Materialize the auto-title (spec 15) in RAM before persisting so the
     // dual-store projection and the durable COALESCE write agree. `??=` keeps
@@ -542,9 +561,13 @@ export class ConversationManager {
    * Resume after approval.
    * Transitions: AwaitingApproval → Processing
    *
-   * Per-server approval: any approval of an MCP tool auto-approves all tools
-   * from the same MCP server for the rest of the conversation. This prevents
-   * repeated approval prompts when the LLM calls multiple tools from the same server.
+   * Proven turn-wide consent keeps the legacy expansion: all tools in this turn,
+   * plus the MCP server prefix for future turns. Exact-call and legacy unknown
+   * scopes authorize only the frozen invocation being resumed.
+   *
+   * SESSION_SCOPED_APPROVAL_TOOLS are the exception: turn-wide consent for one
+   * of them stores only that tool name, never '*' — in `task_approved_tools`
+   * for the current task, or in `auto_approved_tools` with alwaysApprove.
    *
    * When alwaysApprove=true, also stores the individual tool name (backwards compat).
    *
@@ -561,20 +584,30 @@ export class ConversationManager {
     const requestId = conversation.pending_approval?.request_id
     if (conversation.pending_approval) {
       const toolName = conversation.pending_approval.tool_name
+      const turnWide = conversation.pending_approval.authorization_scope === 'turn_tools'
 
-      // "Approve once, run all" — any approval auto-approves all subsequent tools in this turn.
-      // The user only needs to approve once per task, not per tool call.
-      conversation.auto_approved_tools.add('*')
+      if (turnWide && SESSION_SCOPED_APPROVAL_TOOLS.has(toolName)) {
+        // Session-scoped consent covers this tool alone and neither grants nor
+        // revokes '*'. A plain approval lasts for the current task; "always"
+        // lasts for later tasks while the conversation is in memory.
+        if (alwaysApprove) conversation.auto_approved_tools.add(toolName)
+        else (conversation.task_approved_tools ??= new Set()).add(toolName)
+      } else {
+        // Only proven turn-wide consent expands. Exact-call and legacy unknown
+        // scopes authorize just the frozen invocation being resumed.
+        if (turnWide) conversation.auto_approved_tools.add('*')
+        else conversation.auto_approved_tools.delete('*')
 
-      // MCP tools: also auto-approve the entire server for future turns
-      if (isMcpToolName(toolName)) {
-        const serverPrefix = toolName.split('__')[0]
-        conversation.auto_approved_tools.add(serverPrefix)
-      }
+        // MCP tools: also auto-approve the entire server for future turns
+        if (turnWide && isMcpToolName(toolName)) {
+          const serverPrefix = toolName.split('__')[0]
+          conversation.auto_approved_tools.add(serverPrefix)
+        }
 
-      // alwaysApprove also stores the individual tool name (for future turns)
-      if (alwaysApprove) {
-        conversation.auto_approved_tools.add(toolName)
+        // alwaysApprove also stores the individual tool name (for future turns)
+        if (turnWide && alwaysApprove) {
+          conversation.auto_approved_tools.add(toolName)
+        }
       }
     }
 

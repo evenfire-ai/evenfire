@@ -1,5 +1,5 @@
-import bcrypt from 'bcryptjs'
-import { withTransaction } from '../../db.js'
+import { type DbTransactionClient, withTransaction } from '../../db.js'
+import { verifyMemberPassword } from '../auth/passwordCredentialVerification.js'
 import type { TeamRole } from './types.js'
 
 type MembershipRow = {
@@ -131,6 +131,19 @@ function teamlessMemberMembership(): MembershipRow {
   }
 }
 
+async function currentMemberMembership(
+  db: Pick<DbTransactionClient, 'query'>,
+  user: { id: string; email: string }
+): Promise<MembershipRow> {
+  let membership = await findFirstActiveMembership(db, user.id)
+  if ((membership.rowCount ?? 0) === 0) {
+    await healAcceptedInvitationMemberships(db, user.id, user.email)
+    await linkAcceptedInvitationsToUser(db, user.id, user.email)
+    membership = await findFirstActiveMembership(db, user.id)
+  }
+  return (membership.rows[0] as MembershipRow | undefined) || teamlessMemberMembership()
+}
+
 export async function googleLoginData(input: { email: string; name?: string; picture?: string }) {
   return withTransaction(async db => {
     const existing = await db.query(
@@ -199,59 +212,9 @@ export async function googleLoginData(input: { email: string; name?: string; pic
 }
 
 export async function passwordLoginData(input: { email: string; password: string }) {
+  const user = await verifyMemberPassword(input.email, input.password, { publicLogin: true })
+  if (!user) return null
   return withTransaction(async db => {
-    const result = await db.query(
-      `SELECT id, email, name, picture, password_hash, lifecycle_state, lifecycle_version
-         FROM users
-        WHERE email = $1
-        LIMIT 1`,
-      [input.email.trim().toLowerCase()]
-    )
-    if ((result.rowCount ?? 0) === 0) {
-      return null
-    }
-
-    const user = result.rows[0] as {
-      id: string
-      email: string
-      name: string | null
-      picture: string | null
-      password_hash: string | null
-      lifecycle_state?: string | null
-      lifecycle_version?: number | string | null
-    }
-    if (user.lifecycle_state !== 'active') {
-      return { error: 'user_retired' as const }
-    }
-    if (!user.password_hash) {
-      return { error: 'password_not_set' as const }
-    }
-
-    const matches = await bcrypt.compare(input.password, user.password_hash)
-    if (!matches) {
-      return null
-    }
-
-    let membership = await findFirstActiveMembership(db, user.id)
-    if ((membership.rowCount ?? 0) === 0) {
-      await healAcceptedInvitationMemberships(db, user.id, user.email)
-      await linkAcceptedInvitationsToUser(db, user.id, user.email)
-      membership = await findFirstActiveMembership(db, user.id)
-    }
-
-    if ((membership.rowCount ?? 0) === 0) {
-      return {
-        authGeneration: Number(user.lifecycle_version || 0),
-        user: {
-          id: user.id,
-          email: user.email,
-          name: user.name,
-          picture: user.picture,
-        },
-        membership: teamlessMemberMembership(),
-      }
-    }
-
     return {
       authGeneration: Number(user.lifecycle_version || 0),
       user: {
@@ -260,9 +223,24 @@ export async function passwordLoginData(input: { email: string; password: string
         name: user.name,
         picture: user.picture,
       },
-      membership: membership.rows[0] as MembershipRow,
+      membership: await currentMemberMembership(db, user),
     }
   })
+}
+
+/** Resolve ordinary session claims in the same transaction as password recovery. */
+export async function getMemberSessionContext(
+  db: Pick<DbTransactionClient, 'query'>,
+  user: { id: string; email: string; lifecycle_version?: number | string | null }
+) {
+  const membership = await currentMemberMembership(db, user)
+  return {
+    userId: user.id,
+    email: user.email,
+    teamId: membership.team_id,
+    role: membership.role,
+    authGeneration: Number(user.lifecycle_version || 0),
+  }
 }
 
 export async function verifyUserPassword(input: {
@@ -270,21 +248,9 @@ export async function verifyUserPassword(input: {
   email: string
   password: string
 }): Promise<boolean> {
-  const result = await withTransaction(async db =>
-    db.query(
-      `SELECT password_hash
-         FROM users
-        WHERE id = $1
-          AND email = $2
-          AND lifecycle_state = 'active'
-        LIMIT 1`,
-      [input.userId.trim(), input.email.trim().toLowerCase()]
-    )
-  )
-
-  const row = result.rows[0] as { password_hash: string | null } | undefined
-  if (!row?.password_hash) {
-    return false
-  }
-  return bcrypt.compare(input.password, row.password_hash)
+  const user = await verifyMemberPassword(input.email, input.password, {
+    publicLogin: false,
+    userId: input.userId.trim(),
+  })
+  return !!user
 }

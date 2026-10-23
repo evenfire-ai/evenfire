@@ -41,7 +41,11 @@ test('missing directory and empty slot create a complete canonical pair', t => {
   const material = storeApi.loadOrCreateDevSigningMaterial('rpc', directory)
   assert.equal(fs.statSync(directory).mode & 0o777, 0o700)
   assert.equal(fs.statSync(path.join(directory, 'rpc.pem')).mode & 0o777, 0o600)
-  assert.equal(fs.statSync(path.join(directory, 'rpc.public.pem')).mode & 0o777, 0o644)
+  // Public creation requests 0644; a restrictive umask may remove read bits.
+  const publicMode = fs.statSync(path.join(directory, 'rpc.public.pem')).mode & 0o777
+  assert.equal(publicMode & 0o600, 0o600)
+  assert.equal(publicMode & 0o022, 0)
+  assert.equal(publicMode & 0o111, 0)
   assert.equal(policy.publicKeyPemFingerprint(material.privatePem), material.fingerprint)
   assert.equal(policy.publicKeyPemFingerprint(material.publicPem), material.fingerprint)
   assert.equal(storeApi.readDevVerifierMaterial('rpc', directory).fingerprint, material.fingerprint)

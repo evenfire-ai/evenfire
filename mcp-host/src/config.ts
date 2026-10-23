@@ -7,10 +7,15 @@ import type { GuardrailsConfig } from './core/guardrails/config'
 import { NativeToolConfig } from './core/interfaces'
 import {
   type CodexToolPresentation,
+  type NativeToolPresentation,
   parseCodexToolDiscoveryBytes,
   parseCodexToolPresentation,
+  parseNativeToolDiscoveryBytes,
+  parseNativeToolPresentation,
 } from './core/orchestration/toolPresentationPolicy'
+import { SHELL_TIMEOUT_CLEANUP_MS } from './core/tools/shellTimeouts'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
+import { logger } from './logger'
 import type { McpCatalogBootstrapConfig } from './mcp/grantProbe'
 import { HostSpec, McpServerInfo, MemoryConfig, ModelConfig, PersonalizationConfig } from './types'
 
@@ -176,6 +181,11 @@ export interface Config {
   // Codex presentation is independent of the legacy bridge opt-in.
   codexToolPresentation: CodexToolPresentation
   codexToolDiscoveryBytes: number
+  // #1003 — Native-tool presentation, independent of the Codex/Grok and legacy
+  // MCP presentation above. `auto` moves natives larger than the byte budget
+  // out of `tools[]` into search/describe/call; `direct` (default) keeps them.
+  nativeToolPresentation: NativeToolPresentation
+  nativeToolDiscoveryBytes: number
   // F1 (dynamic-tool-loading) — Gates the dynamic-tool-loading bridge; default
   // OFF; set true per-host to enable; see
   // `.specs/dynamic-tool-loading/plan-hermes-bridge.es.md`.
@@ -223,6 +233,7 @@ export interface Config {
   dbWorkerHeartbeatMs: number
   dbPersistSyncTimeoutMs: number
   dbPersistAsyncTimeoutMs: number
+  dbWorkerStallTimeoutMs: number
   dbCheckpointEveryWrites: number
   dbWalSizeAlarmBytes: number
 
@@ -240,7 +251,11 @@ export interface Config {
   enableResponseAttachments: boolean
   attachmentMaxCount: number
   attachmentMaxBytes: number
-  /** Decoded bytes per incoming `kind:'file'` attachment (issue #666). */
+  /**
+   * Decoded bytes per incoming `kind:'file'` attachment (issue #666). The
+   * default (11 MiB) matches the file quota of the chat body parser in
+   * `server.ts` and rpc-proxy (issue #678).
+   */
   attachmentFileMaxBytes: number
   /** Bytes one `clerum__attachment_read` call may return (issue #666). */
   attachmentTextReadMaxBytes: number
@@ -328,17 +343,59 @@ function getEnv(key: string, defaultValue?: string): string | undefined {
   return process.env[key] ?? defaultValue
 }
 
-function getExecutionLimit(key: string, defaultValue: number, allowZero = false): number {
+/** Largest delay, in ms, that a Node.js timer accepts. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647
+
+/**
+ * Upper bound for a tool timeout: it reserves the shell's declared cleanup
+ * budget below the timer range. executeWithTimeout arms no cleanup timer for
+ * the shell (it joins abort settlement), but it rejects any timeout whose sum
+ * with that budget exceeds the timer range, so a larger value would fail every
+ * shell call at runtime (#1021).
+ */
+const MAX_TOOL_TIMEOUT_MS = MAX_TIMER_DELAY_MS - SHELL_TIMEOUT_CLEANUP_MS
+
+function getExecutionLimit(
+  key: string,
+  defaultValue: number,
+  allowZero = false,
+  maximum = MAX_TIMER_DELAY_MS
+): number {
   const raw = getEnv(key)
   if (raw === undefined) return defaultValue
+  const value = Number(raw)
+  const minimum = allowZero ? 0 : 1
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(
+      `${key} must be a valid bounded integer from ${minimum} to ${maximum} (inclusive)`
+    )
+  }
+  return value
+}
+
+/** Progress snapshots are never scheduled more than once per second. */
+const MIN_TOOL_PROGRESS_INTERVAL_MS = 1000
+
+/**
+ * Milliseconds between native-tool progress snapshots. Unset keeps 30000; 0
+ * disables periodic snapshots; any other value must be a whole decimal integer
+ * from 1000 to the Node.js timer range. Anything else stops the Host at
+ * startup: a larger value would fire every millisecond and NaN would silently
+ * disable progress. The raw value is never echoed.
+ */
+function getToolProgressIntervalMs(): number {
+  const key = 'CLERUM_TOOL_PROGRESS_INTERVAL_MS'
+  const raw = getEnv(key)
+  if (raw === undefined) return 30000
   const value = Number(raw)
   if (
     !/^\d+$/.test(raw) ||
     !Number.isSafeInteger(value) ||
-    value < (allowZero ? 0 : 1) ||
-    value > 2_147_483_647
+    (value !== 0 && (value < MIN_TOOL_PROGRESS_INTERVAL_MS || value > MAX_TIMER_DELAY_MS))
   ) {
-    throw new Error(`${key} must be a valid bounded integer`)
+    throw new Error(
+      `${key} must be 0 (disables tool progress streaming) or an integer from ${MIN_TOOL_PROGRESS_INTERVAL_MS} to ${MAX_TIMER_DELAY_MS} (inclusive)`
+    )
   }
   return value
 }
@@ -357,8 +414,9 @@ function getEnvNumber(key: string, defaultValue: number): number {
   // Warn only when the value was actually set but invalid, so a typo'd env var
   // is visible in logs rather than silently ignored.
   if (!Number.isFinite(parsed) || parsed <= 0) {
-    console.warn(
-      `[config] ${key}=${value} is not a valid positive integer; using default ${defaultValue}`
+    logger.warn(
+      { component: 'Config', configurationKey: key, defaultValue },
+      'Invalid positive integer configuration; using its default'
     )
     return defaultValue
   }
@@ -417,6 +475,42 @@ export function parseStatelessHeartbeatIntervalMs(raw: string | undefined): numb
 }
 
 /**
+ * Parse CLERUM_DB_WORKER_STALL_TIMEOUT_MS, the longest time the db worker may
+ * go without completing an operation while it has work in flight. It must
+ * exceed the sync write timeout, so a sync write times out on its own budget
+ * before the worker is declared stalled. It must fit a Node timer (at most
+ * 2147483647 ms; a larger delay becomes 1 ms). An invalid value, the default
+ * included, fails at boot, as does a sync timeout that is not a positive
+ * integer.
+ */
+export function parseDbWorkerStallTimeoutMs(
+  raw: string | undefined,
+  syncTimeoutMs: number
+): number {
+  if (!Number.isSafeInteger(syncTimeoutMs) || syncTimeoutMs <= 0) {
+    throw new Error(
+      `CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS (${syncTimeoutMs}) must be a positive integer`
+    )
+  }
+  const name = 'CLERUM_DB_WORKER_STALL_TIMEOUT_MS'
+  const isDefault = raw === undefined || raw.trim() === ''
+  const label = isDefault ? "'30000' (default)" : `'${raw}'`
+  const value = isDefault ? 30_000 : /^\d+$/.test(raw) ? Number(raw) : NaN
+  if (!Number.isSafeInteger(value) || value < 1000) {
+    throw new Error(`${name}=${label} must be an integer of at least 1000`)
+  }
+  if (value > 2_147_483_647) {
+    throw new Error(`${name}=${label} must not exceed 2147483647`)
+  }
+  if (value <= syncTimeoutMs) {
+    throw new Error(
+      `${name}=${label} must exceed CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS (${syncTimeoutMs})`
+    )
+  }
+  return value
+}
+
+/**
  * Parse an MCP status-heartbeat duration. These values participate in the
  * liveness scheduler, so an explicit typo must fail at boot rather than turn
  * into an unbounded timer or a silent fallback.
@@ -448,17 +542,17 @@ function parseDevHostConfig(): HostSpec | undefined {
 
   try {
     const parsed = JSON.parse(configJson) as HostSpec
-    console.log('[Config] Parsed dev host config from CLERUM_HOST_CONFIG:')
-    console.log('[Config]   host:', parsed.host)
-    console.log('[Config]   contextRef:', parsed.contextRef)
-    console.log('[Config]   secretRef:', parsed.secretRef)
-    console.log(
-      '[Config]   model:',
-      parsed.model ? `${parsed.model.provider}/${parsed.model.name}` : 'not set'
+    logger.info(
+      { component: 'Config', modelConfigured: !!parsed.model },
+      'Parsed dev Host configuration'
     )
     return parsed
   } catch (error) {
-    console.error('[Config] Failed to parse CLERUM_HOST_CONFIG:', error)
+    // A JSON.parse SyntaxError quotes a slice of the input; log its name only.
+    logger.error(
+      { component: 'Config', errorName: (error as SyntaxError).name },
+      'Failed to parse dev Host configuration'
+    )
     return undefined
   }
 }
@@ -483,10 +577,9 @@ function buildDevHostConfig(provider?: LlmProvider, modelName?: string): HostSpe
       }
     : undefined
 
-  console.log('[Config] Built dev host config from env vars:')
-  console.log(
-    '[Config]   model:',
-    model ? `${model.provider}/${model.name}` : 'will auto-detect from API keys'
+  logger.info(
+    { component: 'Config', modelConfigured: !!model },
+    'Built dev Host configuration from environment'
   )
 
   return {
@@ -499,10 +592,20 @@ function buildDevHostConfig(provider?: LlmProvider, modelName?: string): HostSpe
 
 const devMode = getEnvBool('CLERUM_DEV_MODE', false)
 // Read once: the top-level field documents the limit, `nativeTool` carries it
-// to `clerum__attachment_read` (#666).
+// to `clerum__attachment_read` (#666). A page is shipped inline (the tool is
+// spillover-exempt). Its byte ceiling is separate from the measured page and
+// turn token budgets: dense data and output wrapping invalidate a fixed ratio.
 const attachmentTextReadMaxBytes = getExecutionLimit(
   'CLERUM_ATTACHMENT_TEXT_READ_MAX_BYTES',
-  262_144
+  65_536,
+  false,
+  1_048_576
+)
+const attachmentFileMaxBytes = getExecutionLimit(
+  'CLERUM_ATTACHMENT_FILE_MAX_BYTES',
+  11_534_336,
+  false,
+  11_534_336
 )
 const configuredWorkflowEnabled = getEnvBool('CLERUM_WORKFLOW_ENABLED', false)
 const configuredRuntimeKind = resolveMcpHostRuntimeKind({
@@ -625,7 +728,8 @@ function getDevHostConfig(): HostSpec | undefined {
 
 /**
  * Parse CLERUM_MCP_SERVERS JSON for dev mode.
- * Format: [{"name": "...", "spec": {"contextRef": "...", "transport": {...}}}]
+ * Format: a flat McpServerInfo[] — [{"name": "...", "contextRef": "...", "transport": {...}}]
+ * (no `spec` wrapper; the parsed JSON is used as-is, without shape validation).
  */
 function parseDevMcpServers(): McpServerInfo[] | undefined {
   const serversJson = process.env.CLERUM_MCP_SERVERS
@@ -635,13 +739,13 @@ function parseDevMcpServers(): McpServerInfo[] | undefined {
 
   try {
     const parsed = JSON.parse(serversJson) as McpServerInfo[]
-    console.log(`[Config] Parsed ${parsed.length} dev MCP server(s) from CLERUM_MCP_SERVERS`)
-    for (const server of parsed) {
-      console.log(`[Config]   - ${server.name}: ${server.transport.url}`)
-    }
+    logger.info({ component: 'Config', serverCount: parsed.length }, 'Parsed dev MCP servers')
     return parsed
   } catch (error) {
-    console.error('[Config] Failed to parse CLERUM_MCP_SERVERS:', error)
+    logger.error(
+      { component: 'Config', errorName: (error as SyntaxError).name },
+      'Failed to parse dev MCP servers'
+    )
     return undefined
   }
 }
@@ -656,12 +760,16 @@ function parseGuardrailsConfig(): GuardrailsConfig | undefined {
   if (!configJson) return undefined
   try {
     const parsed = JSON.parse(configJson) as GuardrailsConfig
-    console.log('[Config] Parsed guardrails config from CLERUM_GUARDRAILS_CONFIG:', {
-      rules: parsed.rules?.length ?? 0,
-    })
+    logger.info(
+      { component: 'Config', ruleCount: parsed.rules?.length ?? 0 },
+      'Parsed guardrails configuration'
+    )
     return parsed
   } catch (error) {
-    console.error('[Config] Failed to parse CLERUM_GUARDRAILS_CONFIG:', error)
+    logger.error(
+      { component: 'Config', errorName: (error as SyntaxError).name },
+      'Failed to parse guardrails configuration'
+    )
     return undefined
   }
 }
@@ -674,12 +782,16 @@ function parseApprovalConfig(): ApprovalConfig | undefined {
 
   try {
     const parsed = JSON.parse(configJson) as ApprovalConfig
-    console.log('[Config] Parsed approval config from CLERUM_APPROVAL_CONFIG:')
-    console.log('[Config]   defaultPolicy:', parsed.defaultPolicy)
-    console.log('[Config]   channels:', Object.keys(parsed.channels || {}))
+    logger.info(
+      { component: 'Config', channelCount: Object.keys(parsed.channels || {}).length },
+      'Parsed approval configuration'
+    )
     return parsed
   } catch (error) {
-    console.error('[Config] Failed to parse CLERUM_APPROVAL_CONFIG:', error)
+    logger.error(
+      { component: 'Config', errorName: (error as SyntaxError).name },
+      'Failed to parse approval configuration'
+    )
     return undefined
   }
 }
@@ -935,6 +1047,10 @@ export const config: Config = {
   // Codex optimization is independent of the legacy dynamic-tools opt-in.
   codexToolPresentation: parseCodexToolPresentation(process.env.CODEX_TOOL_PRESENTATION),
   codexToolDiscoveryBytes: parseCodexToolDiscoveryBytes(process.env.CODEX_TOOL_DISCOVERY_BYTES),
+  nativeToolPresentation: parseNativeToolPresentation(process.env.CLERUM_NATIVE_TOOL_PRESENTATION),
+  nativeToolDiscoveryBytes: parseNativeToolDiscoveryBytes(
+    process.env.CLERUM_NATIVE_TOOL_DISCOVERY_BYTES
+  ),
   // Legacy dynamic tools remain opt-in for other providers.
   dynamicToolsEnabled: getEnvBool('CLERUM_DYNAMIC_TOOLS_ENABLED', false),
   // F1 (dynamic-tool-loading) — Minimum deferrable (MCP) tool count above which
@@ -944,7 +1060,9 @@ export const config: Config = {
   // T2.1 — Conversation store backend selector.
   //
   //   - `memory`: legacy InMemoryConversationStore (no durability). Default
-  //     so the canary rollout can opt in per Host.
+  //     for a process started outside HCC (local dev, tests). HCC sets
+  //     `CLERUM_SESSION_STORE=sqlite` in every Host container's env, which
+  //     wins over the mcp-host ConfigMap (docs/architecture/host-storage-layout.md).
   //   - `sqlite`: SqliteConversationStore (RAM + worker thread + state.db).
   //   - `dual`: both stores live, reads from RAM, writes apply to both —
   //     for one-week parity validation (`clerum_conversation_store_parity_total`).
@@ -955,8 +1073,9 @@ export const config: Config = {
     if (raw === 'memory' || raw === 'sqlite' || raw === 'dual') {
       return raw as 'memory' | 'sqlite' | 'dual'
     }
-    console.warn(
-      `[Config] CLERUM_SESSION_STORE='${raw}' is not recognized — falling back to 'memory'`
+    logger.warn(
+      { component: 'Config', configurationKey: 'CLERUM_SESSION_STORE', selectedMode: 'memory' },
+      'Unknown session store mode; using memory'
     )
     return 'memory' as const
   })(),
@@ -988,6 +1107,10 @@ export const config: Config = {
   dbWorkerHeartbeatMs: parseInt(getEnv('CLERUM_DB_WORKER_HEARTBEAT_MS', '5000')!, 10),
   dbPersistSyncTimeoutMs: parseInt(getEnv('CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS', '2000')!, 10),
   dbPersistAsyncTimeoutMs: parseInt(getEnv('CLERUM_DB_PERSIST_ASYNC_TIMEOUT_MS', '5000')!, 10),
+  dbWorkerStallTimeoutMs: parseDbWorkerStallTimeoutMs(
+    getEnv('CLERUM_DB_WORKER_STALL_TIMEOUT_MS', ''),
+    parseInt(getEnv('CLERUM_DB_PERSIST_SYNC_TIMEOUT_MS', '2000')!, 10)
+  ),
   dbCheckpointEveryWrites: parseInt(getEnv('CLERUM_DB_CHECKPOINT_EVERY_WRITES', '100')!, 10),
   dbWalSizeAlarmBytes: parseInt(getEnv('CLERUM_DB_WAL_SIZE_ALARM_BYTES', '52428800')!, 10),
 
@@ -1013,9 +1136,9 @@ export const config: Config = {
   // Native tool configuration
   nativeTool: {
     workspacePath: process.env.CLERUM_WORKSPACE_PATH || process.cwd(),
-    shellTimeout: getExecutionLimit('CLERUM_SHELL_TIMEOUT', 1500000),
-    toolTimeout: getExecutionLimit('CLERUM_TOOL_TIMEOUT', 1500000),
-    toolProgressInterval: parseInt(getEnv('CLERUM_TOOL_PROGRESS_INTERVAL_MS', '30000')!, 10),
+    shellTimeout: getExecutionLimit('CLERUM_SHELL_TIMEOUT', 1500000, false, MAX_TOOL_TIMEOUT_MS),
+    toolTimeout: getExecutionLimit('CLERUM_TOOL_TIMEOUT', 1500000, false, MAX_TOOL_TIMEOUT_MS),
+    toolProgressInterval: getToolProgressIntervalMs(),
     httpAllowlist: (process.env.CLERUM_HTTP_ALLOWLIST || '')
       .split(',')
       .map(s => s.trim())
@@ -1035,7 +1158,7 @@ export const config: Config = {
   enableResponseAttachments: getEnvBool('CLERUM_ENABLE_RESPONSE_ATTACHMENTS', true),
   attachmentMaxCount: parseInt(getEnv('CLERUM_ATTACHMENT_MAX_COUNT', '3')!, 10),
   attachmentMaxBytes: parseInt(getEnv('CLERUM_ATTACHMENT_MAX_BYTES', '52428800')!, 10),
-  attachmentFileMaxBytes: getExecutionLimit('CLERUM_ATTACHMENT_FILE_MAX_BYTES', 3_145_728),
+  attachmentFileMaxBytes,
   attachmentTextReadMaxBytes,
   fileReferenceMaxCount: FILE_REFERENCE_MAX_COUNT,
   activityBufferSize: parseInt(getEnv('MCP_HOST_ACTIVITY_BUFFER_SIZE', '1000')!, 10),
@@ -1131,7 +1254,7 @@ export const config: Config = {
       try {
         seed = JSON.parse(seedJson) as Omit<PersonalizationConfig, 'enabled'>
       } catch {
-        console.error('[Config] Failed to parse CLERUM_IDENTITY_SEED')
+        logger.error({ component: 'Config' }, 'Failed to parse identity seed configuration')
       }
     }
     return { enabled, ...seed }

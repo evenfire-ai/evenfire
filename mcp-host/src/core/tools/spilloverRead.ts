@@ -7,8 +7,10 @@
  * this tool with `ref` (and optionally a `[start, end)` byte range) to fetch
  * the full content on demand.
  *
- * Important: this tool itself NEVER spills its own output (excepción §4.1 of
- * the plan). The check lives in `executeSingleTool` and is keyed by tool name.
+ * Important: this tool itself NEVER spills its own output (exception §4.1 of
+ * the plan). It declares `spilloverExempt()`, which `executeSingleTool`
+ * honours; `SpilloverStorage.maybePersist` keeps a guard on the tool name as
+ * its own recursion invariant.
  */
 import { Tool } from '../interfaces'
 import { SpilloverStorage, clerumSpilloverReadsTotal } from '../spillover'
@@ -62,6 +64,12 @@ export class SpilloverReadTool implements Tool {
     // The original tool already passed (or didn't need) approval. Reading
     // back the persisted result is not a fresh side effect.
     return false
+  }
+
+  spilloverExempt(): boolean {
+    // The model asked for the bytes of a blob that was spilled once;
+    // spilling them again would be recursion.
+    return true
   }
 
   async execute(params: Record<string, unknown>): Promise<ToolOutput> {
