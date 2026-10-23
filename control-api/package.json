@@ -1,6 +1,6 @@
 {
   "name": "clerum-control-api",
-  "version": "0.1.815",
+  "version": "0.1.816",
   "description": "Internal Clerum control plane REST API + UI for managing CRDs and secrets",
   "main": "dist/main.js",
   "engines": {
@@ -19,6 +19,7 @@
   "dependencies": {
     "@clerum/display-field": "file:../packages/display-field",
     "@clerum/grok-provider-attempt-contract": "file:../packages/grok-provider-attempt-contract",
+    "@clerum/host-locale": "file:../packages/host-locale",
     "@clerum/image-policy": "file:../packages/image-policy",
     "@clerum/jwt-key-policy": "file:../packages/jwt-key-policy",
     "@clerum/llm-provider-attempt-contract": "file:../packages/llm-provider-attempt-contract",

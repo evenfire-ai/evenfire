@@ -12,6 +12,8 @@
 !packages/image-policy/**
 !packages/display-field/
 !packages/display-field/**
+!packages/host-locale/
+!packages/host-locale/**
 !packages/llm-providers/
 !packages/llm-providers/**
 !packages/llm-provider-attempt-contract/

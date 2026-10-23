@@ -996,6 +996,66 @@ describe('routes/resources', () => {
     })
   })
 
+  describe('Host spec.locale round-trip and validation', () => {
+    function makeApp() {
+      const gateway = new MockGateway('mcp-server')
+      const app = express()
+      app.use(express.json())
+      app.use(createAdminResourcesRouter(gateway as never))
+      return { app, gateway }
+    }
+
+    async function storedSpec(gateway: MockGateway, name: string) {
+      const stored = (await gateway.getResource('hosts', name, config.hostsNamespace)) as {
+        spec: Record<string, unknown>
+      }
+      return stored.spec
+    }
+
+    it('stores the language and time zone it accepts', async () => {
+      const { app, gateway } = makeApp()
+      const locale = { language: 'es-MX', timeZone: 'America/Mexico_City' }
+      await request(app)
+        .post('/admin/hosts')
+        .send({ metadata: { name: 'host-locale' }, spec: { contextRef: 'c1', locale } })
+        .expect(201)
+      expect((await storedSpec(gateway, 'host-locale')).locale).toEqual(locale)
+    })
+
+    it('refuses an unusable value with the field named, and keeps the stored spec', async () => {
+      const { app, gateway } = makeApp()
+      const locale = { language: 'es-MX', timeZone: 'America/Mexico_City' }
+      await request(app)
+        .post('/admin/hosts')
+        .send({ metadata: { name: 'host-locale-bad' }, spec: { contextRef: 'c1', locale } })
+        .expect(201)
+      const res = await request(app)
+        .put('/admin/hosts/host-locale-bad')
+        .send({ spec: { contextRef: 'c1', locale: { language: 'es-MX', timeZone: '+01:00' } } })
+        .expect(422)
+      expect(res.body.errors.map((e: { field: string }) => e.field)).toEqual([
+        'spec.locale.timeZone',
+      ])
+      expect((await storedSpec(gateway, 'host-locale-bad')).locale).toEqual(locale)
+    })
+
+    it('clears the locale when an update leaves it out', async () => {
+      const { app, gateway } = makeApp()
+      await request(app)
+        .post('/admin/hosts')
+        .send({
+          metadata: { name: 'host-locale-clear' },
+          spec: { contextRef: 'c1', locale: { language: 'de' } },
+        })
+        .expect(201)
+      await request(app)
+        .put('/admin/hosts/host-locale-clear')
+        .send({ spec: { contextRef: 'c1' } })
+        .expect(200)
+      expect((await storedSpec(gateway, 'host-locale-clear')).locale).toBeUndefined()
+    })
+  })
+
   describe('Host spec.lifecycle round-trip and validation', () => {
     function makeApp() {
       const gateway = new MockGateway('mcp-server')

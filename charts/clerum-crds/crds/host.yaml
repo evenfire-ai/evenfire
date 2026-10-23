@@ -384,6 +384,29 @@ spec:
                     user:
                       type: string
                       description: Content of USER.md (system-prompt section "## User Context").
+                locale:
+                  type: object
+                  description: >-
+                    The language and time zone of the documents this host
+                    generates and of the dates it shows. A missing or unusable
+                    value falls back to en and UTC, never the server's zone.
+                    control-api checks each value (packages/host-locale).
+                  properties:
+                    language:
+                      type: string
+                      maxLength: 35
+                      pattern: '^[A-Za-z]{2,3}([-_][A-Za-z0-9]{1,8})*$'
+                      description: >-
+                        BCP 47 tag of a supported language, such as es, es-MX
+                        or pt-BR. Numbers and dates follow the whole tag.
+                    timeZone:
+                      type: string
+                      maxLength: 64
+                      pattern: '^[A-Za-z][A-Za-z0-9_+\-/]{0,63}$'
+                      description: >-
+                        IANA zone of a place, such as Europe/Madrid or
+                        America/New_York, or UTC; fixed offsets such as
+                        +01:00 or EST are refused.
                 guardrails:
                   # Guardrail policy (guardrails spec §5). ADDITIVE, OPT-IN: a Host
                   # with no guardrails block behaves exactly as before — no rules, no
