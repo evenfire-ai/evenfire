@@ -19,7 +19,6 @@ import {
   getInvitationRecordByToken,
   getInvitationRecordByTokenOrId,
   insertInvitationForTeams,
-  insertInvitationTeams,
   invitationForTeamsResponse,
   invitationResponse,
   invitationUserIsRetired,

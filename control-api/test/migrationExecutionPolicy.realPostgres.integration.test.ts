@@ -241,25 +241,6 @@ async function withMigrationApplyObserver<T>(
   }
 }
 
-async function passwordMigrationPrivileges(pool: Pool): Promise<string[]> {
-  const result = await pool.query<{ privilege: string; allowed: boolean }>(
-    `SELECT relation || ':' || privilege AS privilege,
-            has_table_privilege('control_api_runtime', relation, privilege) AS allowed
-       FROM (VALUES
-         ('password_identifier_state'::text, 'SELECT'::text),
-         ('password_identifier_state', 'INSERT'),
-         ('password_identifier_state', 'UPDATE'),
-         ('password_identifier_state', 'DELETE'),
-         ('password_verification_work', 'SELECT'),
-         ('password_verification_work', 'INSERT'),
-         ('password_verification_work', 'UPDATE'),
-         ('password_verification_work', 'DELETE')
-       ) AS required(relation, privilege)`,
-    []
-  )
-  return result.rows.map(row => `${row.privilege}:${row.allowed}`).sort()
-}
-
 async function versions(pool: Pool): Promise<string[]> {
   const result = await pool.query<{ version: string }>(
     'SELECT version FROM schema_migrations ORDER BY version'

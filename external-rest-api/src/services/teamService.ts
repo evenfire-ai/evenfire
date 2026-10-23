@@ -146,9 +146,9 @@ export async function updateMemberRole(
   if (targetUserId === auth.userId) {
     return { error: 'bad_request' }
   }
-  let target: { role: TeamRole }
+  // Existence and visibility check only: the PATCH below carries the change.
   try {
-    target = await controlApiRequest<{ role: TeamRole }>(
+    await controlApiRequest<{ role: TeamRole }>(
       'GET',
       `/external/teams/${auth.teamId}/members/${encodeURIComponent(targetUserId)}/role`,
       { userSessionToken: auth.sessionToken }
