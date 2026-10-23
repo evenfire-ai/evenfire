@@ -657,26 +657,36 @@ export function buildRemoteAuthorizeUrl(
 /**
  * Build a remote token-exchange POST against a discovered `tokenEndpoint`, as a
  * public client (omits `client_secret` when `input.clientSecret` is absent — the
- * standard builder already drops it) and appending RFC 8707 `resource` when given.
+ * standard builder already drops it), appending `scope` and then RFC 8707 `resource`
+ * when given. Without either the body is the standard exchange body.
  */
 export function buildRemoteTokenRequest(
   tokenEndpoint: string,
   input: TokenExchangeInput,
-  resource?: string
+  resource?: string,
+  scopes?: readonly string[]
 ): TokenRequest {
-  return appendResource(standardTokenRequest(tokenEndpoint, input), resource)
+  return appendResource(appendScope(standardTokenRequest(tokenEndpoint, input), scopes), resource)
+}
+
+/** Append the space-joined `scope` param to an already form-encoded body. */
+function appendScope(request: TokenRequest, scopes?: readonly string[]): TokenRequest {
+  if (!scopes || scopes.length === 0) return request
+  return { ...request, body: `${request.body}&scope=${encodeURIComponent(scopes.join(' '))}` }
 }
 
 /**
  * Build a remote refresh POST against a discovered `tokenEndpoint`, public client
- * (omits `client_secret` when absent), appending RFC 8707 `resource` when given.
+ * (omits `client_secret` when absent), appending `scope` and then RFC 8707 `resource`
+ * when given. Without either the body is the standard refresh body.
  */
 export function buildRemoteRefreshRequest(
   tokenEndpoint: string,
   input: RefreshTokenInput,
-  resource?: string
+  resource?: string,
+  scopes?: readonly string[]
 ): TokenRequest {
-  return appendResource(standardRefreshRequest(tokenEndpoint, input), resource)
+  return appendResource(appendScope(standardRefreshRequest(tokenEndpoint, input), scopes), resource)
 }
 
 /** Remote token responses are standard OAuth2 — reuse the baked parser. */

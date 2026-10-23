@@ -399,7 +399,13 @@ export const workflowScheduleWorkerRunsTotal = getOrCreateCounter({
 export const workflowScheduleWorkerFiresTotal = getOrCreateCounter({
   name: 'wrc_schedule_worker_fires_total',
   help: 'Count of individual schedule fires translated into workflow_runs rows.',
-  labelNames: ['result'] as const as Array<'result'>, // ok | error
+  labelNames: ['result'] as const as Array<'result'>, // ok | error | actor_not_allowed | concurrency_forbidden
+})
+
+export const workflowScheduleWorkerConcurrencyForbiddenSustainedTotal = getOrCreateCounter({
+  name: 'wrc_schedule_worker_concurrency_forbidden_sustained_total',
+  help: 'Schedules that reached the sustained consecutive-skip threshold under concurrencyPolicy Forbid (once per streak).',
+  labelNames: [] as string[],
 })
 
 export const workflowScheduleWorkerDurationSeconds = getOrCreateHistogram({
@@ -662,4 +668,18 @@ export const llmAllowlistConfigMapWriteFailuresTotal = getOrCreateCounter({
   name: 'clerum_llm_allowlist_configmap_write_failures_total',
   help: 'Count of failed clerum-llm-allowed-models ConfigMap writes, labelled by phase.',
   labelNames: ['phase'] as const as Array<'phase'>, // mutation | boot | sync
+})
+
+export type PasswordAdmissionDenialReason =
+  | 'source_rate'
+  | 'identifier_attempts'
+  | 'identifier_cooldown'
+  | 'global_pace'
+  | 'verification_busy'
+  | 'authority_failure'
+
+export const passwordAdmissionDenialsTotal = getOrCreateCounter({
+  name: 'password_admission_denials_total',
+  help: 'Password admission denials by bounded internal reason; never labelled by identity.',
+  labelNames: ['reason'] as const as Array<'reason'>,
 })

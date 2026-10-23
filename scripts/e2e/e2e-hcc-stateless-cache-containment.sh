@@ -213,8 +213,8 @@ baseline="$(kctl get deployment "$HOST_REF" -n "$HOST_NS" -o json)"
 baseline_template="$(jq -Sc '.spec.template' <<<"$baseline")"
 baseline_pod="$(kctl get pods -n "$HOST_NS" -l "app=${HOST_REF}" -o json |
   jq -er '[.items[]|select(.metadata.deletionTimestamp==null)|select(any(.status.conditions[]?;.type=="Ready" and .status=="True"))]|if length==1 then .[0].metadata.uid else error("pod identity ambiguous") end')"
-jq -e '[.spec.template.spec.containers[].env[]? | select(.name=="CLERUM_SESSION_DB_DIR" and .value=="/var/lib/clerum/state")]|length==1' <<<"$baseline" >/dev/null ||
-  die 'baseline SQLite directory is not the stateless path'
+jq -e '[.spec.template.spec.containers[].env[]? | select(.name=="CLERUM_SESSION_DB_DIR" and .value=="/workspace")]|length==1' <<<"$baseline" >/dev/null ||
+  die 'baseline SQLite directory is not the workspace PVC root'
 
 cache_held_active() {
   local status deployment pod

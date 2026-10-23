@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { ControlApiError } from '../src/controlApiClient.js'
 import { createInvitationsRouter } from '../src/routes/invitations.js'
 
 const authTokenMock = vi.hoisted(() => ({
@@ -13,10 +14,15 @@ const invitationsServiceMock = vi.hoisted(() => ({
   getInvitationByToken: vi.fn(),
   listPendingInvitations: vi.fn(),
   setupInvitationPassword: vi.fn(),
+  setupInvitationPasswordWithToken: vi.fn(),
 }))
 
 vi.mock('../src/authToken.js', () => authTokenMock)
 vi.mock('../src/services/invitationsService.js', () => invitationsServiceMock)
+vi.mock('../src/services/invitationPasswordService.js', () => ({
+  setupInvitationPassword: invitationsServiceMock.setupInvitationPassword,
+  setupInvitationPasswordWithToken: invitationsServiceMock.setupInvitationPasswordWithToken,
+}))
 
 describe('routes/invitations', () => {
   beforeEach(() => {
@@ -75,6 +81,344 @@ describe('routes/invitations', () => {
       'inv-1',
       'user123!'
     )
+  })
+
+  it('restores a password-reset session only after the password is updated', async () => {
+    invitationsServiceMock.acceptInvitation.mockResolvedValue({
+      data: {
+        accepted: true,
+        userId: 'user-1',
+        email: 'invitee@example.com',
+        teamId: null,
+        teamName: null,
+        role: 'member',
+        token: 'Synthetic-pre-reset-session-token',
+      },
+    })
+    invitationsServiceMock.setupInvitationPassword.mockResolvedValue({
+      data: { id: 'inv-1', passwordUpdated: true },
+    })
+    invitationsServiceMock.getInvitationByToken.mockResolvedValue({
+      id: 'inv-1',
+      email: 'invitee@example.com',
+      purpose: 'password_reset',
+      status: 'pending',
+    })
+    invitationsServiceMock.setupInvitationPasswordWithToken.mockResolvedValue({
+      data: {
+        id: 'inv-1',
+        email: 'invitee@example.com',
+        purpose: 'password_reset',
+        status: 'accepted',
+        passwordUpdated: true,
+        token: 'Synthetic-post-reset-session-token',
+      },
+    })
+
+    const res = await request(makeApp())
+      .post('/invitations/password')
+      .send({
+        token: 'Synthetic-verified-password-reset-link',
+        email: 'invitee@example.com',
+        invitationId: 'inv-1',
+        password: 'Synthetic-new-password-123',
+      })
+      .expect(200)
+
+    expect(res.body).toEqual({
+      id: 'inv-1',
+      email: 'invitee@example.com',
+      purpose: 'password_reset',
+      status: 'accepted',
+      passwordUpdated: true,
+    })
+    expect(JSON.stringify(res.body)).not.toContain('Synthetic-post-reset-session-token')
+    expect(String(res.headers['set-cookie'])).toContain(
+      'profile_session=Synthetic-post-reset-session-token'
+    )
+    expect(String(res.headers['set-cookie'])).not.toContain('Synthetic-pre-reset-session-token')
+    expect(invitationsServiceMock.acceptInvitation).not.toHaveBeenCalled()
+    expect(invitationsServiceMock.setupInvitationPassword).not.toHaveBeenCalled()
+    expect(invitationsServiceMock.setupInvitationPasswordWithToken).toHaveBeenCalledWith(
+      'Synthetic-verified-password-reset-link',
+      'invitee@example.com',
+      'inv-1',
+      'Synthetic-new-password-123'
+    )
+  })
+
+  it('uses the additive reset route without preview or invitation acceptance', async () => {
+    invitationsServiceMock.setupInvitationPasswordWithToken.mockResolvedValue({
+      data: {
+        id: 'reset-1',
+        email: 'invitee@example.com',
+        purpose: 'password_reset',
+        status: 'accepted',
+        passwordUpdated: true,
+        token: 'Synthetic-reset-session-token',
+      },
+    })
+
+    const res = await request(makeApp())
+      .post('/invitations/password-reset')
+      .set('x-forwarded-for', '198.51.100.12')
+      .send({
+        token: 'Synthetic-reset-proof',
+        email: 'Invitee@Example.com',
+        invitationId: 'reset-1',
+        password: 'Synthetic-new-password-123',
+      })
+      .expect(200)
+
+    expect(res.body).toMatchObject({ id: 'reset-1', passwordUpdated: true })
+    expect(JSON.stringify(res.body)).not.toContain('Synthetic-reset-session-token')
+    expect(String(res.headers['set-cookie'])).toContain(
+      'profile_session=Synthetic-reset-session-token'
+    )
+    expect(invitationsServiceMock.getInvitationByToken).not.toHaveBeenCalled()
+    expect(invitationsServiceMock.acceptInvitation).not.toHaveBeenCalled()
+    expect(invitationsServiceMock.setupInvitationPassword).not.toHaveBeenCalled()
+    expect(invitationsServiceMock.setupInvitationPasswordWithToken).toHaveBeenCalledWith(
+      'Synthetic-reset-proof',
+      'invitee@example.com',
+      'reset-1',
+      'Synthetic-new-password-123'
+    )
+  })
+
+  it.each([
+    {
+      source: 'invalid_password',
+      status: 400,
+      code: 'invalid_password',
+      message: 'Password must be between 8 and 256 characters',
+    },
+    {
+      source: 'invalid_invitation',
+      status: 400,
+      code: 'invalid_invitation',
+      message: 'This recovery link is invalid or expired',
+    },
+    {
+      source: 'not_found',
+      status: 404,
+      code: 'not_found',
+      message: 'Invitation not found',
+    },
+    {
+      source: 'forbidden',
+      status: 403,
+      code: 'forbidden',
+      message: 'Invitation is invalid or unavailable',
+    },
+    {
+      source: 'not_accepted',
+      status: 409,
+      code: 'invitation_not_accepted',
+      message: 'Invitation must be accepted before setting a password',
+    },
+    {
+      source: 'not_pending',
+      status: 409,
+      code: 'invitation_not_pending',
+      message: 'Invitation has already been used',
+    },
+    {
+      source: 'expired',
+      status: 410,
+      code: 'expired',
+      message: 'Invitation has expired',
+    },
+  ] as const)(
+    'returns stable reset code and safe message for $source without a session cookie',
+    async ({ source, status, code, message }) => {
+      invitationsServiceMock.setupInvitationPasswordWithToken.mockResolvedValue({
+        error: source,
+      })
+
+      const res = await request(makeApp())
+        .post('/invitations/password-reset')
+        .set(
+          'x-forwarded-for',
+          {
+            invalid_password: '198.51.100.151',
+            invalid_invitation: '198.51.100.152',
+            not_found: '198.51.100.153',
+            forbidden: '198.51.100.154',
+            not_accepted: '198.51.100.155',
+            not_pending: '198.51.100.156',
+            expired: '198.51.100.157',
+          }[source]
+        )
+        .send({
+          token: 'Synthetic-reset-proof',
+          email: 'invitee@example.com',
+          invitationId: 'reset-1',
+          password: 'Synthetic-new-password-123',
+        })
+        .expect(status)
+
+      expect(res.body).toEqual({ error: code, message })
+      expect(res.headers['set-cookie']).toBeUndefined()
+    }
+  )
+
+  it('keeps legacy reset error responses unchanged for existing invitation clients', async () => {
+    invitationsServiceMock.getInvitationByToken.mockResolvedValue({
+      id: 'reset-1',
+      email: 'invitee@example.com',
+      purpose: 'password_reset',
+      status: 'pending',
+    })
+    invitationsServiceMock.setupInvitationPasswordWithToken.mockResolvedValue({
+      error: 'invalid_password',
+    })
+
+    const res = await request(makeApp())
+      .post('/invitations/password')
+      .set('x-forwarded-for', '198.51.100.199')
+      .send({
+        token: 'Synthetic-reset-proof',
+        email: 'invitee@example.com',
+        invitationId: 'reset-1',
+        password: 'Synthetic-new-password-123',
+      })
+      .expect(400)
+
+    expect(res.body).toEqual({ error: 'Password must be between 8 and 256 characters' })
+    expect(res.headers['set-cookie']).toBeUndefined()
+  })
+
+  it('uses non-enumerating wording when a reset row does not match the verified link', async () => {
+    invitationsServiceMock.getInvitationByToken.mockResolvedValue({
+      id: 'current-reset-row',
+      email: 'invitee@example.com',
+      purpose: 'password_reset',
+      status: 'pending',
+    })
+    invitationsServiceMock.setupInvitationPasswordWithToken.mockResolvedValue({
+      error: 'forbidden',
+    })
+
+    const res = await request(makeApp())
+      .post('/invitations/password')
+      .send({
+        token: 'Synthetic-verified-password-reset-link',
+        email: 'invitee@example.com',
+        invitationId: 'stale-reset-row',
+        password: 'Synthetic-new-password-123',
+      })
+      .expect(403)
+
+    expect(res.body).toEqual({ error: 'Invitation is invalid or unavailable' })
+    expect(JSON.stringify(res.body)).not.toContain('invitee@example.com')
+    expect(res.headers['set-cookie']).toBeUndefined()
+    expect(invitationsServiceMock.setupInvitationPasswordWithToken).toHaveBeenCalledWith(
+      'Synthetic-verified-password-reset-link',
+      'invitee@example.com',
+      'stale-reset-row',
+      'Synthetic-new-password-123'
+    )
+  })
+
+  it('preserves only sanitized recovery saturation metadata', async () => {
+    invitationsServiceMock.getInvitationByToken.mockResolvedValue({
+      id: 'inv-1',
+      email: 'invitee@example.com',
+      purpose: 'password_reset',
+      status: 'pending',
+    })
+    invitationsServiceMock.setupInvitationPasswordWithToken.mockRejectedValue(
+      new ControlApiError(
+        'internal authority detail with no public meaning',
+        429,
+        { error: 'rate_limited', retryAfterSeconds: 8 },
+        { 'retry-after': '8' }
+      )
+    )
+
+    const res = await request(makeApp())
+      .post('/invitations/password')
+      .send({
+        token: 'Synthetic-verified-password-reset-link',
+        email: 'invitee@example.com',
+        invitationId: 'inv-1',
+        password: 'Synthetic-new-password-123',
+      })
+      .expect(429)
+
+    expect(res.body).toEqual({ error: 'rate_limited', retryAfterSeconds: 8 })
+    expect(res.headers['retry-after']).toBe('8')
+    expect(res.headers['x-ratelimit-limit']).toBeUndefined()
+    expect(res.headers.ratelimit).toBeUndefined()
+    expect(res.headers['set-cookie']).toBeUndefined()
+  })
+
+  it('returns a generic invalid-link response for rejected recovery proof', async () => {
+    invitationsServiceMock.getInvitationByToken.mockResolvedValue({
+      id: 'inv-1',
+      email: 'invitee@example.com',
+      purpose: 'password_reset',
+      status: 'pending',
+    })
+    invitationsServiceMock.setupInvitationPasswordWithToken.mockResolvedValue({
+      error: 'invalid_invitation',
+    })
+
+    const res = await request(makeApp())
+      .post('/invitations/password')
+      .send({
+        token: 'Synthetic-invalid-recovery-proof',
+        email: 'invitee@example.com',
+        invitationId: 'inv-1',
+        password: 'Synthetic-new-password-123',
+      })
+      .expect(400)
+
+    expect(res.body).toEqual({ error: 'invalid_invitation' })
+    expect(res.headers['set-cookie']).toBeUndefined()
+  })
+
+  it('does not expose preview lookup paths or recovery proofs when the signed link is invalid', async () => {
+    invitationsServiceMock.getInvitationByToken.mockRejectedValue(
+      new ControlApiError(
+        'Control API GET /external/invitations/token/Synthetic-raw-proof failed (400)',
+        400,
+        { error: 'invalid_invitation' }
+      )
+    )
+
+    const res = await request(makeApp())
+      .post('/invitations/password')
+      .send({
+        token: 'Synthetic-raw-proof',
+        email: 'invitee@example.com',
+        invitationId: 'inv-1',
+        password: 'Synthetic-new-password-123',
+      })
+      .expect(400)
+
+    expect(res.body).toEqual({ error: 'invalid_invitation' })
+    expect(JSON.stringify(res.body)).not.toContain('Synthetic-raw-proof')
+    expect(JSON.stringify(res.body)).not.toContain('/external/invitations/token')
+    expect(res.headers['set-cookie']).toBeUndefined()
+    expect(invitationsServiceMock.setupInvitationPasswordWithToken).not.toHaveBeenCalled()
+  })
+
+  it('sanitizes rejected recovery proofs on the public invitation preview route', async () => {
+    invitationsServiceMock.getInvitationByToken.mockRejectedValue(
+      new ControlApiError(
+        'Control API GET /external/invitations/token/Synthetic-raw-proof failed (400)',
+        400,
+        { error: 'invalid_invitation' }
+      )
+    )
+
+    const res = await request(makeApp()).get('/invitations/token/Synthetic-raw-proof').expect(400)
+
+    expect(res.body).toEqual({ error: 'invalid_invitation' })
+    expect(JSON.stringify(res.body)).not.toContain('Synthetic-raw-proof')
+    expect(JSON.stringify(res.body)).not.toContain('/external/invitations/token')
   })
 
   it('falls back to invitation token flow when an old bearer token is invalid', async () => {
@@ -200,7 +544,7 @@ describe('routes/invitations', () => {
     }
 
     const limited = await request(app)
-      .post('/invitations/password')
+      .post('/invitations/password-reset')
       .set('x-forwarded-for', '198.51.100.10')
       .send({})
       .expect(429)

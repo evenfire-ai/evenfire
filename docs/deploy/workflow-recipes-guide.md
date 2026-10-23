@@ -22,7 +22,7 @@ spec:
   workloads:
     - id: web
       type: deployment
-      image: nginx:1.30.1-alpine
+      image: nginx:1.30.6-alpine
 ```
 
 **Namespace contract**:
@@ -186,8 +186,8 @@ The tab is activated from the main dashboard. Implemented in:
                - Workloads with no `resources` get default CPU/memory
                  requests+limits
                - A bare image name (no `/`) gets the registry prefix
-                 prepended — e.g. `nginx:1.30.1-alpine` becomes
-                 `us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/nginx:1.30.1-alpine`
+                 prepended — e.g. `nginx:1.30.6-alpine` becomes
+                 `us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/nginx:1.30.6-alpine`
                - `volumeClaimTemplates` with no `storageClass` get the
                  default storage class
                It does NOT set a namespace and does NOT add imagePullSecrets.
@@ -229,7 +229,7 @@ make minikube-pf-all          # all port-forwards
   "kind": "WorkflowRecipe",
   "metadata": { "name": "my-nginx" },
   "spec": {
-    "workloads": [{ "id": "web", "type": "deployment", "image": "nginx:1.30.1-alpine" }]
+    "workloads": [{ "id": "web", "type": "deployment", "image": "nginx:1.30.6-alpine" }]
   }
 }
 ```
@@ -239,8 +239,8 @@ make minikube-pf-all          # all port-forwards
 7. The editor closes and the recipe appears in the table
 
 > **Do not click "Apply Operator Defaults" on this example in minikube.**
-> `nginx:1.30.1-alpine` has no `/`, so the registry rule rewrites it to
-> `us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/nginx:1.30.1-alpine`, which
+> `nginx:1.30.6-alpine` has no `/`, so the registry rule rewrites it to
+> `us-central1-docker.pkg.dev/${GCP_PROJECT}/clerum/nginx:1.30.6-alpine`, which
 > minikube cannot pull (`ImagePullBackOff`). The button is safe for images that
 > already carry a registry/repo path.
 
@@ -259,7 +259,7 @@ curl -s -b /tmp/clerum-admin.jar -X POST http://localhost:8090/api/v1/admin/reci
   -d '{
     "metadata": {"name": "my-nginx"},
     "spec": {
-      "workloads": [{"id": "web", "type": "deployment", "image": "nginx:1.30.1-alpine"}]
+      "workloads": [{"id": "web", "type": "deployment", "image": "nginx:1.30.6-alpine"}]
     }
   }' | jq .
 ```

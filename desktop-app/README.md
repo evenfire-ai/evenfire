@@ -68,8 +68,12 @@ The app now auto-populates default RPC `hostRefs` from authorized agent names re
 
 - `EXTERNAL_REST_API_BASE_URL` (default: `http://127.0.0.1:8091`)
 - `RPC_PROXY_BASE_URL` (default: `http://127.0.0.1:8094`)
-- `MEMBER_REGISTRATION_SERVICE_BASE_URL` (no working default — falls back to the placeholder `https://example.com`, so set it explicitly; locally this is usually `http://127.0.0.1:8092`)
+- `MEMBER_REGISTRATION_SERVICE_BASE_URL` (default: `https://registration.evenfire.ai`, the hosted service — set it when you run your own; locally this is usually `http://127.0.0.1:8092`)
 - `REQUEST_TIMEOUT_MS` (default: `60000`)
+
+## Authentication Transition Ownership
+
+Same-team mutations keep the native auth/environment owner from their initial session check until the server request completes. This lets an already-dispatched mutation commit before a queued logout or environment switch, so those transitions may wait through the request deadline (`REQUEST_TIMEOUT_MS`, 60 seconds by default). Operations configured for one transient retry can hold the owner through a second bounded attempt. Same-team reads release the owner while waiting on the server and validate the captured session and environment before accepting the result.
 
 ## Architecture
 
@@ -120,6 +124,34 @@ For production-like local run:
 npm run build
 npm run start
 ```
+
+## Package and Sign
+
+Desktop builds need Node 24.22.1 or later in the Node 24 line, an `npm ci` with lifecycle scripts enabled (never
+`--ignore-scripts`, never `ELECTRON_SKIP_BINARY_DOWNLOAD`), and a passing
+`npm run verify:electron` before any build or test result counts.
+
+```bash
+npm ci
+npm run verify:electron
+npm run make:mac:arm64   # or make:mac:x64, make:windows:x64, make:windows:arm64, make:linux:x64, make:linux:arm64
+```
+
+Each `make:*` script runs `electron-forge make` for one platform/arch and builds
+first via the forge `prePackage` hook (`EVENFIRE_SKIP_PACKAGE_BUILD=1` skips that).
+Output goes to `out/`. The makers are zip (all platforms), dmg (macOS), squirrel
+(Windows), and deb/rpm (Linux). This directory's `Makefile` has no packaging
+targets.
+
+macOS signing and notarization are opt-in and run only on a macOS build host:
+set `ENABLE_APPLE_CODESIGN=1`, optionally `APPLE_CODESIGN_IDENTITY` and
+`APPLE_KEYCHAIN`, plus either `APPLE_API_KEY`/`APPLE_API_KEY_ID`/`APPLE_API_ISSUER`
+or `APPLE_KEYCHAIN_PROFILE` (the config throws if neither is set).
+`APPLE_BUNDLE_ID` overrides the default `ai.evenfire.desktop`. Windows and Linux
+packages are unsigned. No workflow in this repo builds or publishes installers.
+
+Signing details, release tags, and how the app detects required updates are in
+[Ship it to your users](../docs/surfaces/desktop-app.md#ship-it-to-your-users).
 
 ## Port-forward Remote Cluster Services
 
@@ -203,16 +235,16 @@ npm run test:e2e:all          # Phase 1 + Phase 2
 
 ### Environment Configuration (`.env.e2e`)
 
-| Variable                               | Default                                      | Description                                                                                                          |
-| -------------------------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `EXTERNAL_REST_API_BASE_URL`           | `http://localhost:8091`                      | external-rest-api URL                                                                                                |
-| `RPC_PROXY_BASE_URL`                   | `http://localhost:8094`                      | rpc-proxy URL                                                                                                        |
-| `MEMBER_REGISTRATION_SERVICE_BASE_URL` | `https://example.com` (placeholder — set it) | member-registration-service activation URL. There is no working default: unset, it silently points at `example.com`. |
-| `E2E_DEV_LOGIN_EMAIL`                  | `test@clerum.io`                             | Test-only login email (must have agent access)                                                                       |
-| `E2E_DEV_LOGIN_EMAIL_2`                | `test2@clerum.io`                            | Second user, required by the cross-device session tests                                                              |
-| `E2E_DEV_LOGIN_NAME`                   | `Test User`                                  | Test-only login display name                                                                                         |
-| `E2E_HOST_REF`                         | `chatllm`                                    | Agent hostRef to test against                                                                                        |
-| `E2E_ALLOW_DEV_PORT_FORWARD`           | unset (off)                                  | Set to `1`/`true` to let the Playwright global-setup guard accept localhost port-forward URLs                        |
+| Variable                               | Default                            | Description                                                                                                                |
+| -------------------------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `EXTERNAL_REST_API_BASE_URL`           | `http://localhost:8091`            | external-rest-api URL                                                                                                      |
+| `RPC_PROXY_BASE_URL`                   | `http://localhost:8094`            | rpc-proxy URL                                                                                                              |
+| `MEMBER_REGISTRATION_SERVICE_BASE_URL` | `https://registration.evenfire.ai` | member-registration-service activation URL. Unset or empty, it points at the hosted evenfire service; set it for your own. |
+| `E2E_DEV_LOGIN_EMAIL`                  | `test@clerum.io`                   | Test-only login email (must have agent access)                                                                             |
+| `E2E_DEV_LOGIN_EMAIL_2`                | `test2@clerum.io`                  | Second user, required by the cross-device session tests                                                                    |
+| `E2E_DEV_LOGIN_NAME`                   | `Test User`                        | Test-only login display name                                                                                               |
+| `E2E_HOST_REF`                         | `chatllm`                          | Agent hostRef to test against                                                                                              |
+| `E2E_ALLOW_DEV_PORT_FORWARD`           | unset (off)                        | Set to `1`/`true` to let the Playwright global-setup guard accept localhost port-forward URLs                              |
 
 ## Notes
 

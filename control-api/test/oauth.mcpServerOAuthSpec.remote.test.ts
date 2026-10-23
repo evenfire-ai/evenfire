@@ -7,6 +7,11 @@ import {
 } from '../src/oauth/mcpServerOAuthSpec.js'
 import { buildRemoteOAuthSpec } from '../src/routes/admin/remoteMcp.js'
 import { normalizeMcpServerOwnerDecl } from '../src/routes/mcpOauth.js'
+import {
+  type InstalledMcpServer,
+  WORKIQ_URL_SCOPE,
+  installWorkIqServer,
+} from './fixtures/perServerInstall.js'
 import { PILOTS, makeDiscoveryTransport } from './fixtures/remoteOAuthDiscovery.js'
 
 /**
@@ -206,5 +211,59 @@ describe('normalizeMcpServerOwnerDecl (refresh reader) does not diverge from the
       spec: { oauth: oauth as never },
     })
     expect(normalized?.spec?.oauthClients?.[0]?.secretSource).toEqual({ kind: 'dcr-store' })
+  })
+})
+
+describe('remote lane with the entra-v2 profile (CR from the real Work IQ install, T1)', () => {
+  const WORKIQ_RESOURCE = 'https://workiq.svc.cloud.microsoft/mcp'
+  let workIq: InstalledMcpServer
+
+  beforeAll(async () => {
+    workIq = await installWorkIqServer({ scopes: [WORKIQ_URL_SCOPE] })
+  })
+
+  /** The installed CR with `spec.oauth.scopes` rewritten, as an API or kubectl edit would. */
+  function withScopes(scopes: string[]): McpServerOAuthSpecInput {
+    return { ...workIq, spec: { ...workIq.spec, oauth: { ...workIq.spec.oauth, scopes } } }
+  }
+
+  it('the installed CR pins the profile and keeps the PRM resource for audit', () => {
+    expect(workIq.spec.oauth.asProfile).toBe('entra-v2')
+    expect(workIq.spec.oauth.resource).toBe(WORKIQ_RESOURCE)
+    expect(workIq.spec.oauth.scopes).toEqual([WORKIQ_URL_SCOPE, 'offline_access'])
+  })
+
+  for (const phase of ['consent', 'token'] as const) {
+    it(`${phase}: the routing carries the profile and no resource`, () => {
+      const r = resolveServerOAuthSubject(workIq, phase)
+      expect(r?.decl.remote?.asProfile).toBe('entra-v2')
+      expect(r?.decl.remote?.resource).toBeUndefined()
+      expect(r?.decl.scopes).toEqual([WORKIQ_URL_SCOPE, 'offline_access'])
+    })
+
+    it(`${phase}: decl.scopes requests offline_access even when the CR no longer has it`, () => {
+      const r = resolveServerOAuthSubject(withScopes([WORKIQ_URL_SCOPE]), phase)
+      expect(r?.decl.scopes).toEqual([WORKIQ_URL_SCOPE, 'offline_access'])
+    })
+  }
+
+  it('the refresh reader (normalizeMcpServerOwnerDecl) gets the same decl (D4)', () => {
+    const decl = normalizeMcpServerOwnerDecl(withScopes([WORKIQ_URL_SCOPE]) as never)?.spec
+      ?.oauthClients?.[0]
+    expect(decl?.scopes).toEqual([WORKIQ_URL_SCOPE, 'offline_access'])
+    expect(decl?.remote?.resource).toBeUndefined()
+    expect(decl?.remote?.asProfile).toBe('entra-v2')
+  })
+
+  it('without a profile the routing still carries resource and the CR scopes as-is (I6)', () => {
+    const oauth = buildRemoteOAuthSpec(discovery(), {
+      clientMode: 'public',
+      grantScope: 'user',
+      cimdClientId: CIMD_SELF,
+    }) as unknown as Record<string, unknown>
+    const r = resolveServerOAuthSubject(serverFrom(oauth), 'consent')
+    expect(r?.decl.scopes).toEqual(oauth.scopes)
+    expect(r?.decl.remote?.resource).toBe(`${LINEAR}/mcp`)
+    expect(r?.decl.remote && 'asProfile' in r.decl.remote).toBe(false)
   })
 })
