@@ -420,6 +420,18 @@ export function useAppController() {
     nav.activeTab !== undefined && nav.activeTab.kind !== 'chat' ? lastChatHostRef.current : null
   const keptChatAgentRef = focusedChatAgentRef ?? drawerHost
   const keepFocusedChat = keptChatAgentRef !== null && heldAgentRefs.includes(keptChatAgentRef)
+  // The conversation the keep shows, so Retry returns to it: the focused chat
+  // tab's, or for the drawer the last active chat tab of its Host, which is the
+  // tab the drawer restores.
+  let keptChatId: string | null = null
+  if (focusedChatAgentRef !== null) {
+    keptChatId = nav.activeTab?.chat?.chatId ?? null
+  } else if (drawerHost !== null) {
+    const lastChatTab = nav.workspaceTabs.tabs.find(tab => tab.id === nav.lastActiveChatTabId)
+    if (lastChatTab?.kind === 'chat' && lastChatTab.chat?.agentRef === drawerHost) {
+      keptChatId = lastChatTab.chat.chatId ?? null
+    }
+  }
   const heldAgentRefsRef = useRef(heldAgentRefs)
   heldAgentRefsRef.current = heldAgentRefs
   const heldHosts = useMemo<HeldHost[]>(
@@ -427,8 +439,9 @@ export function useAppController() {
       heldAgentRefs.map(agentRef => ({
         agentRef,
         label: principalCatalogName(principalCatalog, agentRef),
+        ...(agentRef === keptChatAgentRef && keptChatId ? { chatId: keptChatId } : {}),
       })),
-    [principalCatalog, heldAgentRefs, principalCatalogName]
+    [principalCatalog, heldAgentRefs, principalCatalogName, keptChatAgentRef, keptChatId]
   )
   const getHostAuthorityEpoch = useCallback(
     (agentRef: string) => hostAuthority.getEpoch(agentRef),

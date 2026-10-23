@@ -32,6 +32,8 @@ export type HeldHost = {
   agentRef: string
   /** Display name. */
   label: string
+  /** The conversation on screen for this Host, which Retry reopens. */
+  chatId?: string
 }
 
 export type NotificationSettings = {

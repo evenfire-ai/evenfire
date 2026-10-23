@@ -400,7 +400,9 @@ describe('useAppController held Hosts', () => {
     )
     // The catalog on screen is still the previous one, so A keeps its Retry row.
     expect(cachedCatalog(app.queryClient)?.agentNames).toEqual([HOST_A, HOST_B])
-    expect(app.result.current.heldHosts).toEqual([{ agentRef: HOST_A, label: DISPLAY_A }])
+    expect(app.result.current.heldHosts).toEqual([
+      { agentRef: HOST_A, label: DISPLAY_A, chatId: 'chat-1' },
+    ])
     expect(toastsSeen(commits)).toEqual([VERIFY_A])
   })
 
@@ -629,7 +631,9 @@ describe('useAppController held Hosts', () => {
     })
     // Liveness witness: the switch completed and team 2 names its own A.
     await waitFor(() =>
-      expect(app.result.current.heldHosts).toEqual([{ agentRef: HOST_A, label: TEAM_TWO_HOST }])
+      expect(app.result.current.heldHosts).toEqual([
+        { agentRef: HOST_A, label: TEAM_TWO_HOST, chatId: 'team-2-chat' },
+      ])
     )
     expect(handle.switchTeam).toHaveBeenCalledWith('team-2')
 
@@ -722,7 +726,9 @@ describe('useAppController held Hosts', () => {
     })
     // Liveness witness: team 2's catalog landed and names its own A.
     await waitFor(() =>
-      expect(app.result.current.heldHosts).toEqual([{ agentRef: HOST_A, label: TEAM_TWO_HOST }])
+      expect(app.result.current.heldHosts).toEqual([
+        { agentRef: HOST_A, label: TEAM_TWO_HOST, chatId: 'team-2-chat' },
+      ])
     )
     expect(cachedCatalog(app.queryClient)?.teamId).toBe('team-2')
     handle.refreshCatalog.mockImplementation(async () =>
@@ -923,7 +929,9 @@ describe('useAppController held Hosts', () => {
       await switching
     })
     await waitFor(() =>
-      expect(app.result.current.heldHosts).toEqual([{ agentRef: HOST_B, label: 'Team Two Host' }])
+      expect(app.result.current.heldHosts).toEqual([
+        { agentRef: HOST_B, label: 'Team Two Host', chatId: 'team-2-chat' },
+      ])
     )
   })
 
@@ -1121,7 +1129,9 @@ describe('useAppController held Hosts', () => {
       })
       await waitFor(() => expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true))
       await waitFor(() =>
-        expect(app.result.current.heldHosts).toEqual([{ agentRef: HOST_A, label: TEAM_TWO_HOST }])
+        expect(app.result.current.heldHosts).toEqual([
+          { agentRef: HOST_A, label: TEAM_TWO_HOST, chatId: 'team-2-chat' },
+        ])
       )
       await settle()
 
@@ -1330,7 +1340,9 @@ describe('useAppController held Hosts', () => {
     })
     await waitFor(() => expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(true))
     // Liveness witness: team 1's hold is listed before the switch.
-    expect(app.result.current.heldHosts).toEqual([{ agentRef: HOST_A, label: DISPLAY_A }])
+    expect(app.result.current.heldHosts).toEqual([
+      { agentRef: HOST_A, label: DISPLAY_A, chatId: 'team-1-chat' },
+    ])
     const commitsBeforeSwitch = commits.length
 
     const teamTwoCatalog = deferred<ReturnType<typeof producerCatalog>>()
@@ -1371,7 +1383,9 @@ describe('useAppController held Hosts', () => {
     })
     // Positive half: team 2's own catalog lists B, so its Retry row appears.
     await waitFor(() =>
-      expect(app.result.current.heldHosts).toEqual([{ agentRef: HOST_B, label: TEAM_TWO_HOST }])
+      expect(app.result.current.heldHosts).toEqual([
+        { agentRef: HOST_B, label: TEAM_TWO_HOST, chatId: 'team-2-chat' },
+      ])
     )
     expect(app.result.current.isHostAccessBlocked(HOST_A)).toBe(false)
   })

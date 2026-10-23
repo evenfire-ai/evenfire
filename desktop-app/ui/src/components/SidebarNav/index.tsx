@@ -442,14 +442,17 @@ export function SidebarNav({
 
                 {item.id === DESKTOP_ROUTES.chat && chatSessionsOpen && (
                   <div className="nav-latest-sessions" ref={sessionsRef}>
-                    {heldHosts.map(({ agentRef, label }) => (
+                    {heldHosts.map(({ agentRef, label, chatId }) => (
                       <div key={agentRef} className="nav-latest-session nav-latest-session--held">
                         <span>Couldn't verify access to {label}</span>
                         <Button
                           aria-label={`Retry access to ${label}`}
                           onClick={() => {
                             retriedAgentRefRef.current = agentRef
-                            onSelectChatAgent(agentRef, { selectLatest: false })
+                            onSelectChatAgent(agentRef, {
+                              ...(chatId ? { chatId } : {}),
+                              selectLatest: false,
+                            })
                             closeSidebarMenus()
                           }}
                           color="neutral"

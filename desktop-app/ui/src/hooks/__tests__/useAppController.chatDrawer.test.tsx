@@ -1288,7 +1288,9 @@ describe('useAppController — chat drawer over a held Host', () => {
       await waitFor(() => expect(getVm().isHostAccessBlocked(HOST_A)).toBe(true))
       await waitFor(() => expect(getVm().selectedAgent).toBe(null))
       expect(getVm().keepFocusedChat).toBe(true)
-      expect(getVm().heldHosts).toEqual([{ agentRef: HOST_A, label: DISPLAY[HOST_A] }])
+      expect(getVm().heldHosts).toEqual([
+        { agentRef: HOST_A, label: DISPLAY[HOST_A], chatId: 'saved-chat-a' },
+      ])
       const last = getVm().lastActiveChatTabId
       expect(getVm().workspaceTabs.tabs.find(tab => tab.id === last)?.chat).toMatchObject({
         agentRef: HOST_A,
