@@ -6,10 +6,12 @@ import {
   ADMIN_PASSWORD_KEYS,
   ADMIN_USER_KEYS,
   CONFIRM_MUTATIONS_FLAG,
+  REQUIRED_JOURNEY_INVENTORY,
   collectGateProblems,
   collectReportJourneys,
   evaluateGateReport,
   invalidatePreviousAttemptArtifacts,
+  missingRequiredJourneyInventories,
   tallyReportJourneys,
   writeSanitizedRunSummary,
 } from '../../e2e/run-gfs-drag-and-drop.mjs'
@@ -376,6 +378,56 @@ describe('EvenDrive drag-and-drop E2E gate', () => {
         flaky: 0,
         incomplete: 0,
       })
+    })
+  })
+
+  describe('required breadcrumb journey inventory', () => {
+    const breadcrumbJourneys = [
+      { title: 'file drag onto a breadcrumb crumb moves it up after one confirmation' },
+      { title: 'file drag onto the main drive-root crumb moves it to the root' },
+      { title: 'drop onto the active breadcrumb crumb explains it is already there' },
+      { title: 'folder drag onto an ancestor crumb above its parent commits after confirmation' },
+    ]
+
+    it('accepts an inventory that carries every required lane', () => {
+      const journeys = collectReportJourneys(
+        journeyReport([...breadcrumbJourneys, { title: 'file drag into folder moves it' }])
+      )
+      expect(missingRequiredJourneyInventories(journeys)).toEqual([])
+    })
+
+    it('fails an inventory that lost the breadcrumb journeys entirely', () => {
+      // The pre-breadcrumb spec: still a valid Playwright inventory, but it
+      // can no longer certify the breadcrumb drop-move feature.
+      const journeys = collectReportJourneys(
+        journeyReport([
+          { title: 'file drag into folder moves it' },
+          { title: 'folder drag opens the one confirmation and Cancel changes nothing' },
+        ])
+      )
+      const missing = missingRequiredJourneyInventories(journeys)
+      expect(missing).toEqual(REQUIRED_JOURNEY_INVENTORY.map(lane => lane.label))
+    })
+
+    it('names the exact lane a partial inventory is missing', () => {
+      const journeys = collectReportJourneys(
+        journeyReport([breadcrumbJourneys[0]!, breadcrumbJourneys[1]!, breadcrumbJourneys[3]!])
+      )
+      expect(missingRequiredJourneyInventories(journeys)).toEqual([
+        'an active-crumb same-parent journey',
+      ])
+    })
+
+    it('requires the same-parent lane through the active-crumb wording, not any crumb title', () => {
+      const journeys = collectReportJourneys(
+        journeyReport([breadcrumbJourneys[0]!, breadcrumbJourneys[1]!, breadcrumbJourneys[3]!])
+      )
+      expect(
+        REQUIRED_JOURNEY_INVENTORY.find(lane => lane.label.includes('active-crumb'))?.pattern.test(
+          'file drag onto a breadcrumb crumb moves it up'
+        )
+      ).toBe(false)
+      void journeys
     })
   })
 })

@@ -327,6 +327,37 @@ async function dragRowToRow(page: Page, sourceRow: Locator, targetRow: Locator):
   await page.mouse.up()
 }
 
+/**
+ * Drag a resource row onto a breadcrumb crumb button. Same mouse sequence as
+ * dragRowToRow, but the release waits for the crumb to advertise its
+ * `data-drop-state` verdict — the breadcrumb drop targets paint a tokenized
+ * state (allowed/checking/denied/unavailable/same-parent) instead of the row
+ * affordance.
+ */
+async function dragRowToCrumb(
+  page: Page,
+  sourceRow: Locator,
+  crumb: Locator,
+  expectedState: 'allowed' | 'checking' | 'same-parent' | 'unavailable' = 'allowed'
+): Promise<void> {
+  await sourceRow.scrollIntoViewIfNeeded()
+  const iconBox = await sourceRow.locator('.cu-gfs-list__icon').boundingBox()
+  const crumbBox = await crumb.boundingBox()
+  if (!iconBox || !crumbBox) {
+    throw new Error(
+      'drag source row or breadcrumb crumb is not visible; cannot compute drag coordinates'
+    )
+  }
+  const start = { x: iconBox.x + iconBox.width / 2, y: iconBox.y + iconBox.height / 2 }
+  const end = { x: crumbBox.x + crumbBox.width / 2, y: crumbBox.y + crumbBox.height / 2 }
+  await page.mouse.move(start.x, start.y)
+  await page.mouse.down()
+  await page.mouse.move((start.x + end.x) / 2, (start.y + end.y) / 2, { steps: 6 })
+  await page.mouse.move(end.x, end.y, { steps: 6 })
+  await expect(crumb).toHaveAttribute('data-drop-state', expectedState, { timeout: 10_000 })
+  await page.mouse.up()
+}
+
 test.describe('EvenDrive drag and drop', () => {
   test.describe.configure({ mode: 'serial' })
   test.skip(
@@ -543,6 +574,195 @@ test.describe('EvenDrive drag and drop', () => {
         page,
         new Set([outerName, folderAName, childOfAName, siblingName])
       )
+    }
+  })
+
+  test('file drag onto a breadcrumb crumb moves it up after one confirmation', async ({
+    page,
+  }, testInfo) => {
+    const parentName = fixtureName('parent')
+    const childName = fixtureName('kid')
+    const fileName = `${fixtureName('doc')}.txt`
+    let tempFile: Awaited<ReturnType<typeof createSecureTempFile>> | undefined
+
+    await beginJourney(page)
+    try {
+      await createFolderViaUi(page, parentName)
+      await openFolderViaUi(page, parentName)
+      await createFolderViaUi(page, childName)
+      await openFolderViaUi(page, childName)
+      tempFile = await createSecureTempFile(fileName, 'even-drive breadcrumb drop fixture\n')
+      await uploadFileViaUi(page, tempFile.filePath, fileName)
+
+      // The file lands on the PARENT crumb while browsing the child folder.
+      await dragRowToCrumb(page, resourceRow(page, fileName), breadcrumbButton(page, parentName))
+
+      // Both files and folders dropped onto a crumb stop at ONE
+      // confirmation with source-kind-accurate copy.
+      const dialog = page.getByRole('dialog', {
+        name: `Move file ${fileName} to ${parentName}`,
+        exact: true,
+      })
+      await expect(dialog).toBeVisible({ timeout: 20_000 })
+      await expect(dialog.getByRole('heading', { level: 3 })).toHaveText(
+        `Move “${fileName}” to “${parentName}”?`
+      )
+      await expect(
+        dialog.getByText(/Inherited access to this file follows the new location/)
+      ).toBeVisible()
+      await dialog.getByRole('button', { name: 'Move', exact: true }).click()
+
+      await expect(toast(page, `Moved "${fileName}" to "${parentName}".`)).toBeVisible()
+      await expect(resourceRow(page, fileName)).toHaveCount(0)
+      // Business signal: the file is now a child of the parent folder.
+      const rootId = await driveRootId(page)
+      const parentId = await findChildByName(page, rootId, parentName)
+      expect(parentId).not.toBeNull()
+      await expect
+        .poll(async () => (await childNames(page, parentId as string)).includes(fileName), {
+          timeout: 30_000,
+          intervals: [250, 1_000],
+        })
+        .toBe(true)
+      await screenshotAndLog(page, testInfo, 'gfs-dnd-breadcrumb-file-move')
+    } finally {
+      await tempFile?.cleanup().catch(() => {})
+      await cleanupGfsDragDropFixtures(page, new Set([parentName, childName, fileName]))
+    }
+  })
+
+  test('file drag onto the main drive-root crumb moves it to the root', async ({ page }) => {
+    const parentName = fixtureName('parent')
+    const childName = fixtureName('kid')
+    const fileName = `${fixtureName('doc')}.txt`
+    let tempFile: Awaited<ReturnType<typeof createSecureTempFile>> | undefined
+
+    await beginJourney(page)
+    try {
+      await createFolderViaUi(page, parentName)
+      await openFolderViaUi(page, parentName)
+      await createFolderViaUi(page, childName)
+      await openFolderViaUi(page, childName)
+      tempFile = await createSecureTempFile(fileName, 'even-drive root crumb fixture\n')
+      await uploadFileViaUi(page, tempFile.filePath, fileName)
+
+      // The root crumb is an admin-plane destination with intrinsic
+      // authority: the drop is admitted, never a fabricated permission deny.
+      await dragRowToCrumb(page, resourceRow(page, fileName), breadcrumbButton(page, 'main'))
+
+      const dialog = page.getByRole('dialog', {
+        name: `Move file ${fileName} to main`,
+        exact: true,
+      })
+      await expect(dialog).toBeVisible({ timeout: 20_000 })
+      await dialog.getByRole('button', { name: 'Move', exact: true }).click()
+
+      await expect(toast(page, `Moved "${fileName}" to "main".`)).toBeVisible()
+      await expect(resourceRow(page, fileName)).toHaveCount(0)
+      const rootId = await driveRootId(page)
+      await expect
+        .poll(async () => (await childNames(page, rootId)).includes(fileName), {
+          timeout: 30_000,
+          intervals: [250, 1_000],
+        })
+        .toBe(true)
+    } finally {
+      await tempFile?.cleanup().catch(() => {})
+      await cleanupGfsDragDropFixtures(page, new Set([parentName, childName, fileName]))
+    }
+  })
+
+  test('drop onto the active breadcrumb crumb explains it is already there', async ({
+    page,
+  }, testInfo) => {
+    const parentName = fixtureName('parent')
+    const childName = fixtureName('kid')
+    const fileName = `${fixtureName('doc')}.txt`
+    let tempFile: Awaited<ReturnType<typeof createSecureTempFile>> | undefined
+
+    await beginJourney(page)
+    try {
+      await createFolderViaUi(page, parentName)
+      await openFolderViaUi(page, parentName)
+      await createFolderViaUi(page, childName)
+      await openFolderViaUi(page, childName)
+      tempFile = await createSecureTempFile(fileName, 'even-drive active crumb fixture\n')
+      await uploadFileViaUi(page, tempFile.filePath, fileName)
+
+      const rootId = await driveRootId(page)
+      const parentId = await findChildByName(page, rootId, parentName)
+      const childId = await findChildByName(page, parentId as string, childName)
+      const namesBefore = await childNames(page, childId as string)
+
+      // The ACTIVE crumb is the listing's physical parent: an info no-op,
+      // never an error and never a PATCH.
+      await dragRowToCrumb(
+        page,
+        resourceRow(page, fileName),
+        breadcrumbButton(page, childName),
+        'same-parent'
+      )
+
+      await expect(toast(page, `${fileName} is already in ${childName}.`)).toBeVisible()
+      await expect(toast(page, `${fileName} is already in ${childName}.`)).toHaveClass(
+        /cu-toast--info/
+      )
+      await expect(page.getByRole('dialog')).toHaveCount(0)
+      await expect(resourceRow(page, fileName)).toBeVisible()
+      const namesAfter = await childNames(page, childId as string)
+      expect(namesAfter).toEqual(namesBefore)
+      await screenshotAndLog(page, testInfo, 'gfs-dnd-breadcrumb-same-parent')
+    } finally {
+      await tempFile?.cleanup().catch(() => {})
+      await cleanupGfsDragDropFixtures(page, new Set([parentName, childName, fileName]))
+    }
+  })
+
+  test('folder drag onto an ancestor crumb above its parent commits after confirmation', async ({
+    page,
+  }) => {
+    const outerName = fixtureName('outer')
+    const midName = fixtureName('mid')
+    const leafName = fixtureName('leaf')
+    const folderName = fixtureName('arch')
+
+    await beginJourney(page)
+    try {
+      await createFolderViaUi(page, outerName)
+      await openFolderViaUi(page, outerName)
+      await createFolderViaUi(page, midName)
+      await openFolderViaUi(page, midName)
+      await createFolderViaUi(page, leafName)
+      await openFolderViaUi(page, leafName)
+      await createFolderViaUi(page, folderName)
+
+      // Drag the folder TWO levels up, onto a crumb above its own parent.
+      await dragRowToCrumb(page, resourceRow(page, folderName), breadcrumbButton(page, outerName))
+
+      const dialog = page.getByRole('dialog', {
+        name: `Move folder ${folderName} to ${outerName}`,
+        exact: true,
+      })
+      await expect(dialog).toBeVisible({ timeout: 20_000 })
+      await expect(
+        dialog.getByText(/Inherited access to this folder and its contents/)
+      ).toBeVisible()
+      await dialog.getByRole('button', { name: 'Move', exact: true }).click()
+
+      await expect(toast(page, `Moved "${folderName}" to "${outerName}".`)).toBeVisible()
+      await expect(toast(page, 'access now follows the new location')).toBeVisible()
+      await expect(resourceRow(page, folderName)).toHaveCount(0)
+      // Business signal: the folder is now a direct child of OUTER.
+      const rootId = await driveRootId(page)
+      const outerId = await findChildByName(page, rootId, outerName)
+      await expect
+        .poll(async () => (await childNames(page, outerId as string)).includes(folderName), {
+          timeout: 30_000,
+          intervals: [250, 1_000],
+        })
+        .toBe(true)
+    } finally {
+      await cleanupGfsDragDropFixtures(page, new Set([outerName, midName, leafName, folderName]))
     }
   })
 

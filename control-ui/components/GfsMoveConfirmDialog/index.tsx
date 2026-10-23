@@ -5,6 +5,8 @@ import { Button } from '@components/ui'
 
 export interface GfsMoveConfirmRequest {
   sourceName: string
+  /** Accurate impact copy and accessible naming per source kind. */
+  sourceKind: 'file' | 'directory'
   destinationName: string
   /** Suggested numbered-name candidate, when destination names are known. */
   suggestedName?: string
@@ -20,12 +22,12 @@ export interface GfsMoveConfirmDialogProps {
 }
 
 /**
- * The ONE confirmation for folder drag moves (rev-2 §1): explains the
+ * The ONE confirmation for drag moves (rev-2 §1): explains the
  * inherited-access impact and records the conflict naming policy in the same
  * dialog, so no second automatic prompt follows the drop. Cancel ends the
  * admission before dispatch; once the PATCH is dispatched it cannot be
- * recalled. Files move without confirmation; the Move dialog is its own
- * explicit confirmation surface.
+ * recalled. Files dropped onto breadcrumbs stop here too (source-kind-aware
+ * copy); the Move dialog is its own explicit confirmation surface.
  */
 export function GfsMoveConfirmDialog({
   request,
@@ -35,6 +37,7 @@ export function GfsMoveConfirmDialog({
 }: GfsMoveConfirmDialogProps): React.JSX.Element {
   const [allowNumberedRename, setAllowNumberedRename] = useState(false)
   const dialogRef = useRef<HTMLElement | null>(null)
+  const sourceLabel = request.sourceKind === 'file' ? 'file' : 'folder'
   // The element that had focus before the dialog opened. It is captured during
   // the FIRST render — before the dialog moves focus into itself — so the
   // restore can hand the keyboard back where it came from (RP-020).
@@ -112,7 +115,7 @@ export function GfsMoveConfirmDialog({
       }}
     >
       <section
-        aria-label={`Move folder ${request.sourceName} to ${request.destinationName}`}
+        aria-label={`Move ${sourceLabel} ${request.sourceName} to ${request.destinationName}`}
         aria-modal="true"
         className="cu-modal-panel cu-gfs-move-confirm"
         onKeyDown={handleDialogKeyDown}
@@ -126,11 +129,18 @@ export function GfsMoveConfirmDialog({
           </h3>
         </header>
         <div className="cu-gfs-move-confirm__body">
-          <p className="cu-gfs-move-confirm__impact">
-            Inherited access to this folder and its contents follows the new location. Direct
-            sharing entries stay with their items — including any access they grant — and grantees
-            may lose access.
-          </p>
+          {request.sourceKind === 'file' ? (
+            <p className="cu-gfs-move-confirm__impact">
+              Inherited access to this file follows the new location. Direct sharing entries stay
+              with it — including any access they grant.
+            </p>
+          ) : (
+            <p className="cu-gfs-move-confirm__impact">
+              Inherited access to this folder and its contents follows the new location. Direct
+              sharing entries stay with their items — including any access they grant — and grantees
+              may lose access.
+            </p>
+          )}
           {request.canRename ? (
             <label className="cu-gfs-move-confirm__rename-toggle">
               <input

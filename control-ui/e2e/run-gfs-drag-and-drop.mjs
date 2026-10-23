@@ -64,7 +64,35 @@ const PLAYWRIGHT_ARGS = [
   '--workers=1',
 ]
 
-/** First non-empty value among the candidate env names (never logged). */
+/**
+ * The journey lanes this gate REQUIRES in the selected inventory. The
+ * breadcrumb drop-move feature (docs/design/gfs-breadcrumb-drop-move.md §7)
+ * owns live journeys; a spec file that silently loses them would still
+ * report green for the remaining journeys, so their absence from the
+ * inventory is a gate failure, not a smaller pass.
+ */
+export const REQUIRED_JOURNEY_INVENTORY = [
+  { label: 'a breadcrumb file-move journey', pattern: /breadcrumb crumb|drive-root crumb/i },
+  { label: 'an active-crumb same-parent journey', pattern: /active breadcrumb crumb/i },
+  { label: 'an ancestor folder-move journey', pattern: /ancestor crumb/i },
+]
+
+/**
+ * Required lanes missing from a journey inventory (selection or report).
+ * Returns the missing lane labels; empty means the inventory is complete.
+ */
+export function missingRequiredJourneyInventories(journeys) {
+  const titles = journeys.map(journey => journey.title)
+  const missing = []
+  for (const lane of REQUIRED_JOURNEY_INVENTORY) {
+    if (!titles.some(title => lane.pattern.test(title))) missing.push(lane.label)
+  }
+  return missing
+}
+
+/**
+ * First non-empty value among the candidate env names (never logged).
+ */
 export function firstConfiguredValue(env, keys) {
   for (const key of keys) {
     const value = env[key]
@@ -473,6 +501,17 @@ async function main() {
   if (selectedJourneys.length === 0) {
     process.stderr.write(
       '[E2E-GATE] Playwright selected no journeys. The gate cannot certify this run.\n'
+    )
+    return 1
+  }
+  // The inventory must carry every required lane BEFORE anything runs: a
+  // selection that lost the breadcrumb journeys cannot certify the feature.
+  const missingLanes = missingRequiredJourneyInventories(selectedJourneys)
+  if (missingLanes.length > 0) {
+    process.stderr.write('[E2E-GATE] The selected journey inventory is missing required lanes:\n')
+    for (const lane of missingLanes) process.stderr.write(`  - ${lane}\n`)
+    process.stderr.write(
+      '[E2E-GATE] Nothing was executed. This is a FAILURE, not a smaller pass.\n'
     )
     return 1
   }

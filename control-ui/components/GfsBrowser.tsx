@@ -11,7 +11,10 @@ import {
   gfsUploadNameRetryDecision,
   isGfsNameConflict,
   nextAvailableGfsResourceName,
+  normalizeCanonicalPath,
   normalizeGfsResourceName,
+  parentPathOf,
+  planMoveConvergence,
 } from '@clerum/gfs-interaction-policy'
 import { FileUploadModal } from '@components/FileUploadModal'
 import { GfsImagePreview } from '@components/GfsImagePreview'
@@ -53,6 +56,18 @@ import {
 } from '@lib/entityChangeStream'
 import { watchEntityChangeStreamLiveness } from '@lib/entityChangeStreamLiveness'
 import { isGfsDocumentFile } from '@lib/gfsDocumentFile'
+import {
+  GfsMoveRefusalError,
+  computeGfsDropHoverVerdict,
+  gfsDropHoverAnnouncement,
+  gfsDropRefusalMessage,
+  gfsDropRefusalTone,
+} from '@lib/gfsDragFeedback'
+import type {
+  GfsDropHoverVerdict,
+  GfsDropRefusalReason,
+  GfsMoveDestination,
+} from '@lib/gfsDragFeedback.types'
 import {
   GfsUploadCapabilityError,
   type GfsUploadJob,
@@ -168,6 +183,14 @@ interface GfsResolvedLocation {
   kind: string
   path: string | null
   version: number
+}
+
+/** The slice of a resolve response the drag admission/commit reads. */
+interface GfsResolvedEndpointView {
+  resourceId: string
+  kind: string
+  path: string | null
+  version?: number
 }
 
 /** Project every response-backed folder source through one version-preserving
@@ -401,14 +424,19 @@ export function GfsBrowser(): React.JSX.Element {
   const [droppedUploadCount, setDroppedUploadCount] = useState(0)
   const [draggingResourceId, setDraggingResourceId] = useState<string | null>(null)
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null)
+  const [dragOverCrumbIndex, setDragOverCrumbIndex] = useState<number | null>(null)
   const [movingResourceId, setMovingResourceId] = useState<string | null>(null)
   const [moveTarget, setMoveTarget] = useState<GfsChild | null>(null)
-  // rev-2 §1: a folder DROP stops at ONE confirmation (impact + naming
-  // policy); files move directly; the Move dialog is its own confirmation.
+  // rev-2 §1 + breadcrumb plan §3.2: a drag DROP stops at ONE confirmation
+  // (impact + naming policy) for folders AND for breadcrumb drops of either
+  // kind; row file drops keep moving directly; the Move dialog is its own
+  // confirmation. The destination is captured IMMUTABLY at drop so a later
+  // trail rebuild can never re-anchor the commit (R7-M1).
   const [confirmMoveTarget, setConfirmMoveTarget] = useState<{
     source: GfsChild
-    destination: GfsChild
+    destination: GfsMoveDestination
     suggestedName?: string
+    epoch: number
   } | null>(null)
   const moveTargetRef = useRef(moveTarget)
   moveTargetRef.current = moveTarget
@@ -437,6 +465,28 @@ export function GfsBrowser(): React.JSX.Element {
   const trailReconstructionEpochRef = useRef(0)
   const draggingResourceRef = useRef<GfsChild | null>(null)
   const movingResourceRef = useRef<string | null>(null)
+  // Monotonic drag-gesture epoch (breadcrumb plan §3.4). A newer dragstart
+  // bumps it and thereby supersedes every pending admission read, the open
+  // confirmation, and any commit read that has not dispatched its PATCH yet.
+  // Dragend does NOT bump it: it only clears presentation, so a drop the
+  // browser already accepted keeps its async admission/commit. Unmount bumps
+  // it as well, so no stale closure can dispatch after the surface is gone.
+  const dragGestureEpochRef = useRef(0)
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      dragGestureEpochRef.current += 1
+    }
+  }, [])
+  // The physical source-parent ID observed at dragstart (null = the synthetic
+  // drive root). Active-crumb and own-parent drops resolve to same-parent
+  // from this observation without any network round-trip.
+  const dragSourceParentIdRef = useRef<string | null>(null)
+  const isGestureEpochCurrent = useCallback((epoch: number): boolean => {
+    return mountedRef.current && epoch === dragGestureEpochRef.current
+  }, [])
   const [imagePreview, setImagePreview] = useState<Extract<
     OpenPreviewState,
     { kind: 'image' }
@@ -1307,6 +1357,11 @@ export function GfsBrowser(): React.JSX.Element {
       event.preventDefault()
       return
     }
+    // A newer gesture supersedes every pending admission read and any
+    // confirmation still open from an older one (plan §3.4).
+    dragGestureEpochRef.current += 1
+    setConfirmMoveTarget(null)
+    dragSourceParentIdRef.current = currentCrumbRef.current?.id ?? null
     event.dataTransfer.effectAllowed = 'move'
     event.dataTransfer.setData(GFS_RESOURCE_DRAG_TYPE, child.resourceId)
     event.dataTransfer.setData('text/plain', child.name)
@@ -1315,18 +1370,108 @@ export function GfsBrowser(): React.JSX.Element {
   }
 
   function handleResourceDragEnd(): void {
+    // Presentation-only: an accepted drop's async admission/commit keeps
+    // running under the same gesture epoch (plan §3.4 — dragend must not
+    // cancel its own accepted drop).
     draggingResourceRef.current = null
     setDraggingResourceId(null)
     setDragOverFolderId(null)
+    setDragOverCrumbIndex(null)
   }
 
-  function handleFolderDragOver(event: React.DragEvent<HTMLLIElement>, folder: GfsChild): void {
-    if (!hasDraggedGfsResource(event)) return
-    const source = draggingResourceRef.current
-    if (!source || source.resourceId === folder.resourceId || folder.kind !== 'directory') return
+  /** Trail observed ancestors of the SOURCE: the physical parent (the
+   *  current folder) plus every crumb above it. */
+  function knownSourceAncestorIdsForCurrentTrail(): Set<string> {
+    const ids = new Set<string>()
+    for (const crumb of crumbsRef.current) {
+      if (crumb.id) ids.add(crumb.id)
+    }
+    return ids
+  }
+
+  /** Nearest-first ancestor chain of a breadcrumb target, observed through
+   *  the live trail. The trailing null marks the chain walked to the
+   *  physical drive root (the trail always starts there, hydrated or not). */
+  function crumbTargetAncestorIds(index: number): (string | null)[] {
+    const chain: (string | null)[] = []
+    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+      const crumb = crumbsRef.current[cursor]
+      chain.push(crumb?.id ?? null)
+    }
+    chain.push(null)
+    return chain
+  }
+
+  /** Nearest-first ancestor chain of a listing ROW target: its parent (the
+   *  current folder) plus the trail above, observed to the physical root. */
+  function rowTargetAncestorIds(): (string | null)[] {
+    const chain: (string | null)[] = [currentCrumbRef.current?.id ?? null]
+    for (let cursor = crumbsRef.current.length - 2; cursor >= 0; cursor -= 1) {
+      const crumb = crumbsRef.current[cursor]
+      chain.push(crumb?.id ?? null)
+    }
+    chain.push(null)
+    return chain
+  }
+
+  function rowHoverVerdict(source: GfsChild, folder: GfsChild): GfsDropHoverVerdict | null {
+    if (folder.kind !== 'directory' && folder.resourceId !== source.resourceId) return null
+    return computeGfsDropHoverVerdict({
+      drive: DRIVE,
+      sourceResourceId: source.resourceId,
+      sourceKind: source.kind === 'file' ? 'file' : 'directory',
+      sourceParentKnown: (currentCrumbRef.current?.id ?? null) !== null,
+      sourceParentResourceId: currentCrumbRef.current?.id ?? null,
+      targetResourceId: folder.resourceId,
+      targetName: folder.name,
+      targetIsActiveLocation: false,
+      targetIsSourceParent: false,
+      targetAncestorIds: rowTargetAncestorIds(),
+      knownSourceAncestorIds: knownSourceAncestorIdsForCurrentTrail(),
+    })
+  }
+
+  function crumbHoverVerdict(source: GfsChild, index: number): GfsDropHoverVerdict | null {
+    const crumb = crumbsRef.current[index]
+    if (!crumb) return null
+    const parentId = dragSourceParentIdRef.current
+    return computeGfsDropHoverVerdict({
+      drive: DRIVE,
+      sourceResourceId: source.resourceId,
+      sourceKind: source.kind === 'file' ? 'file' : 'directory',
+      sourceParentKnown: parentId !== null,
+      sourceParentResourceId: parentId,
+      targetResourceId: crumb.id,
+      targetName: isDriveRootCrumb(crumb) ? DRIVE : crumb.name,
+      targetIsActiveLocation: index === crumbsRef.current.length - 1,
+      targetIsSourceParent:
+        parentId !== null
+          ? crumb.id === parentId
+          : isDriveRootCrumb(crumb) && dragSourceParentIdRef.current === null,
+      targetAncestorIds: crumbTargetAncestorIds(index),
+      knownSourceAncestorIds: knownSourceAncestorIdsForCurrentTrail(),
+    })
+  }
+
+  /** Internal directory drops stay DELIVERABLE even for an observed refusal,
+   *  so release can present the reason (UX matrix §5.3). Admission still
+   *  refuses the mutation. */
+  function deliverInternalMoveDrag(event: React.DragEvent<HTMLElement>): boolean {
+    if (!hasDraggedGfsResource(event)) return false
+    if (!draggingResourceRef.current) return false
     event.preventDefault()
     event.stopPropagation()
     event.dataTransfer.dropEffect = 'move'
+    return true
+  }
+
+  function handleFolderDragOver(event: React.DragEvent<HTMLLIElement>, folder: GfsChild): void {
+    const source = draggingResourceRef.current
+    if (!hasDraggedGfsResource(event) || !source) return
+    // Self and directory targets stay deliverable and painted; a plain file
+    // row is not a move destination and keeps today's pass-through.
+    if (folder.kind !== 'directory' && folder.resourceId !== source.resourceId) return
+    deliverInternalMoveDrag(event)
     setDragOverFolderId(folder.resourceId)
   }
 
@@ -1343,9 +1488,305 @@ export function GfsBrowser(): React.JSX.Element {
     }
   }
 
+  function handleCrumbDragOver(event: React.DragEvent<HTMLButtonElement>, index: number): void {
+    const source = draggingResourceRef.current
+    if (!hasDraggedGfsResource(event) || !source) return
+    deliverInternalMoveDrag(event)
+    setDragOverCrumbIndex(index)
+  }
+
+  function handleCrumbDragEnter(event: React.DragEvent<HTMLButtonElement>, index: number): void {
+    handleCrumbDragOver(event, index)
+  }
+
+  function handleCrumbDragLeave(event: React.DragEvent<HTMLButtonElement>, index: number): void {
+    if (!hasDraggedGfsResource(event)) return
+    event.preventDefault()
+    event.stopPropagation()
+    if (
+      dragOverCrumbIndex === index &&
+      !event.currentTarget.contains(event.relatedTarget as Node | null)
+    ) {
+      setDragOverCrumbIndex(null)
+    }
+  }
+
+  function handleCrumbDrop(
+    event: React.DragEvent<HTMLButtonElement>,
+    crumb: Crumb,
+    index: number
+  ): void {
+    if (!hasDraggedGfsResource(event)) return
+    // Stop propagation/default FIRST so the upload container can never
+    // process an internal crumb drop (plan §3.4).
+    event.preventDefault()
+    event.stopPropagation()
+    setDragOverCrumbIndex(null)
+    const source = draggingResourceRef.current
+    if (!source) return
+    const epoch = dragGestureEpochRef.current
+    void admitCrumbDropMove(source, crumb, index, epoch)
+  }
+
+  /** Refuse a drop honestly: matrix wording, reason tone, no mutation. */
+  function refuseDropMove(
+    reason: GfsDropRefusalReason,
+    names: { sourceName?: string; targetName?: string }
+  ): void {
+    showToast(gfsDropRefusalMessage(reason, names), {
+      tone: gfsDropRefusalTone(reason),
+    })
+  }
+
+  /** One bounded read to (re)hydrate the drive root's resource identity. */
+  async function hydrateDriveRootIdentity(epoch: number): Promise<string | null> {
+    try {
+      const page = (await apiGet('/api/v1/gfs/tree', { drive: DRIVE })) as TreePage
+      if (!page.rootResourceId || !isGestureEpochCurrent(epoch)) return null
+      const rootRid = ridOfResourceId(page.rootResourceId)
+      setCrumbs(prev => {
+        const root = prev[0]
+        if (!isDriveRootCrumb(root)) return prev
+        if (root.id === page.rootResourceId && root.rid === rootRid) return prev
+        return [{ ...root, id: page.rootResourceId, rid: rootRid }, ...prev.slice(1)]
+      })
+      return page.rootResourceId
+    } catch {
+      return null
+    }
+  }
+
+  /** Immutable destination capture for a breadcrumb target, synchronously
+   *  derivable from the crumb. Null for the not-yet-hydrated root. */
+  function crumbToMoveDestination(crumb: Crumb): GfsMoveDestination | null {
+    if (isDriveRootCrumb(crumb)) {
+      if (!crumb.id || !crumb.rid) return null
+      return {
+        resourceId: crumb.id,
+        rid: crumb.rid,
+        name: DRIVE,
+        kind: 'directory',
+        gfsUri: `gfs://${DRIVE}/${crumb.rid}`,
+        path: '/',
+        origin: 'crumb',
+      }
+    }
+    if (!crumb.id) return null
+    const gfsUri = crumb.gfsUri ?? (crumb.rid ? `gfs://${DRIVE}/${crumb.rid}` : null)
+    return {
+      resourceId: crumb.id,
+      rid: crumb.rid,
+      name: crumb.name,
+      kind: 'directory',
+      gfsUri,
+      path: null,
+      ...(crumb.version !== undefined ? { version: crumb.version } : {}),
+      origin: 'crumb',
+    }
+  }
+
+  function rowToMoveDestination(folder: GfsChild): GfsMoveDestination {
+    return {
+      resourceId: folder.resourceId,
+      rid: folder.rid,
+      name: folder.name,
+      kind: 'directory',
+      gfsUri: folder.gfsUri,
+      path: folder.path,
+      ...(folder.version !== undefined ? { version: folder.version } : {}),
+      origin: 'row',
+    }
+  }
+
+  async function admitCrumbDropMove(
+    source: GfsChild,
+    crumb: Crumb,
+    index: number,
+    epoch: number
+  ): Promise<void> {
+    // 1. Destination identity. The unhydrated root retries resolution here
+    //    (plan §3.1); a failed retry warns honestly and dispatches nothing.
+    let destination = crumbToMoveDestination(crumb)
+    if (!destination) {
+      const rootId = await hydrateDriveRootIdentity(epoch)
+      if (!isGestureEpochCurrent(epoch)) return
+      if (!rootId) {
+        refuseDropMove('unavailable', { targetName: DRIVE })
+        return
+      }
+      destination = {
+        resourceId: rootId,
+        rid: ridOfResourceId(rootId),
+        name: DRIVE,
+        kind: 'directory',
+        gfsUri: `gfs://${DRIVE}/${ridOfResourceId(rootId)}`,
+        path: '/',
+        origin: 'crumb',
+      }
+    }
+    // 2. Synchronous identity/no-op checks from the dragstart observation.
+    if (destination.resourceId === source.resourceId) {
+      refuseDropMove('self', { sourceName: source.name, targetName: destination.name })
+      return
+    }
+    const parentId = dragSourceParentIdRef.current
+    const isSourceParent =
+      index === crumbsRef.current.length - 1 ||
+      (parentId !== null
+        ? destination.resourceId === parentId
+        : isDriveRootCrumb(crumb) && parentId === null)
+    if (isSourceParent) {
+      refuseDropMove('same-parent', {
+        sourceName: source.name,
+        targetName: destination.name,
+      })
+      return
+    }
+    // 3. Fresh-path structural admission: both endpoints re-resolved by
+    //    immutable URI; failed resolution prevents dispatch with honest
+    //    feedback, a missing path defers to the atomic server guard.
+    const admitted = await admitMoveEndpoints(source, destination, epoch)
+    if (!admitted.ok) {
+      if (admitted.refusal) {
+        refuseDropMove(admitted.refusal.reason, {
+          sourceName: source.name,
+          targetName: destination.name,
+        })
+      }
+      return
+    }
+    // 4. ONE confirmation for both files and folders (plan §3.2).
+    openMoveConfirmation(source, destination, epoch)
+  }
+
+  /** Fresh endpoint resolution + structural check shared by row and crumb
+   *  admissions. `refusal` is set for every honest refusal; ok=true means
+   *  the move is structurally admissible (observed or deferred to the server
+   *  guard). */
+  async function admitMoveEndpoints(
+    source: GfsChild,
+    destination: GfsMoveDestination,
+    epoch: number
+  ): Promise<{ ok: boolean; refusal?: { reason: GfsDropRefusalReason } }> {
+    if (!destination.gfsUri) return { ok: false, refusal: { reason: 'unavailable' } }
+    const [sourceRead, targetRead] = await Promise.all([
+      resolveEndpointView(source.gfsUri, source.resourceId),
+      resolveEndpointView(destination.gfsUri!, destination.resourceId),
+    ])
+    if (!isGestureEpochCurrent(epoch)) return { ok: false }
+    if (sourceRead.status === 'missing' || sourceRead.status === 'mismatched') {
+      return { ok: false, refusal: { reason: 'source-location-unknown' } }
+    }
+    if (sourceRead.status === 'failed') return { ok: false, refusal: { reason: 'unavailable' } }
+    if (targetRead.status === 'missing' || targetRead.status === 'mismatched') {
+      return { ok: false, refusal: { reason: 'target-unavailable' } }
+    }
+    if (targetRead.status === 'failed') return { ok: false, refusal: { reason: 'unavailable' } }
+    if (targetRead.view.kind !== 'directory') {
+      return { ok: false, refusal: { reason: 'target-unavailable' } }
+    }
+    const targetPath = destination.path === '/' ? '/' : targetRead.view.path
+    const structure = decideDragPathStructure({
+      sourcePath: sourceRead.view.path,
+      targetPath,
+    })
+    if (structure.kind === 'deny') {
+      return { ok: false, refusal: { reason: structure.reason } }
+    }
+    return { ok: true }
+  }
+
+  /** Seed the confirmation dialog exactly like the row path: the same cache
+   *  the numbered-name ladder will consult. */
+  function openMoveConfirmation(
+    source: GfsChild,
+    destination: GfsMoveDestination,
+    epoch: number
+  ): void {
+    const occupiedNames = new Set<string>(
+      (childCacheRef.current.get(destination.resourceId)?.items ?? []).map(item => item.name)
+    )
+    const suggested =
+      occupiedNames.size > 0 && occupiedNames.has(source.name)
+        ? nextAvailableGfsResourceName(source.name, occupiedNames)
+        : undefined
+    setConfirmMoveTarget({
+      source,
+      destination,
+      ...(suggested !== undefined ? { suggestedName: suggested } : {}),
+      epoch,
+    })
+  }
+
+  /** GET /gfs/resolve by immutable URI, classified for admission/commit.
+   *  `expectedResourceId` turns an identity drift (the immutable URI now
+   *  resolves to a different resource id) into an explicit mismatch. */
+  async function resolveEndpointView(
+    uri: string,
+    expectedResourceId?: string
+  ): Promise<
+    | { status: 'resolved'; view: GfsResolvedEndpointView }
+    | { status: 'missing' }
+    | { status: 'mismatched' }
+    | { status: 'failed' }
+  > {
+    try {
+      const view = (await apiGet('/api/v1/gfs/resolve', { uri })) as GfsResolvedEndpointView
+      if (expectedResourceId && view.resourceId !== expectedResourceId) {
+        return { status: 'mismatched' }
+      }
+      return { status: 'resolved', view }
+    } catch (error) {
+      if (entityChangeErrorStatus(error) === 404) return { status: 'missing' }
+      return { status: 'failed' }
+    }
+  }
+
+  async function handleFolderDrop(
+    event: React.DragEvent<HTMLLIElement>,
+    folder: GfsChild
+  ): Promise<void> {
+    if (!hasDraggedGfsResource(event)) return
+    event.preventDefault()
+    event.stopPropagation()
+    setDragOverFolderId(null)
+    const source = draggingResourceRef.current
+    if (!source) return
+    const epoch = dragGestureEpochRef.current
+    if (source.resourceId === folder.resourceId) {
+      refuseDropMove('self', { sourceName: source.name, targetName: folder.name })
+      return
+    }
+    const destination = rowToMoveDestination(folder)
+    if (source.kind === 'file') {
+      // Files cannot be ancestors: no structural risk; move directly — the
+      // commit runner still re-resolves both endpoints before dispatch.
+      await moveResource(source, destination, {
+        revalidate: { epoch },
+      })
+      return
+    }
+    // Folder drops stop at ONE confirmation (rev-2 §1) after the fresh-path
+    // structural guard — the impact dialog also records the naming policy.
+    const admitted = await admitMoveEndpoints(source, destination, epoch)
+    if (!admitted.ok) {
+      if (admitted.refusal) {
+        refuseDropMove(admitted.refusal.reason, {
+          sourceName: source.name,
+          targetName: destination.name,
+        })
+      }
+      return
+    }
+    openMoveConfirmation(source, destination, epoch)
+  }
+
   async function moveResource(
     source: GfsChild,
-    destination: Pick<GfsChild, 'resourceId' | 'name' | 'kind'>,
+    destination: Pick<GfsChild, 'resourceId' | 'name' | 'kind'> & {
+      gfsUri?: string
+      path?: string | null
+    },
     options: {
       bubbleError?: boolean
       allowNumberedRename?: boolean
@@ -1357,6 +1798,14 @@ export function GfsBrowser(): React.JSX.Element {
        * are already taken (RP-003).
        */
       occupiedNames?: readonly string[]
+      /**
+       * Drag commits re-resolve BOTH endpoints by immutable URI immediately
+       * before dispatch (plan §3.4): validate returned identity and
+       * destination kind, use the fresh source version, and stop without
+       * dispatching when the gesture epoch was superseded. The keyboard Move
+       * dialog keeps its established single-read behavior.
+       */
+      revalidate?: { epoch: number }
     } = {}
   ): Promise<void> {
     const { bubbleError = false, allowNumberedRename = true } = options
@@ -1371,6 +1820,63 @@ export function GfsBrowser(): React.JSX.Element {
     movingResourceRef.current = source.resourceId
     setMovingResourceId(source.resourceId)
     try {
+      let ifMatchVersion = source.version
+      let verifiedDestinationPath: string | null = destination.path ?? null
+      if (options.revalidate) {
+        const epoch = options.revalidate.epoch
+        if (!isGestureEpochCurrent(epoch)) return
+        const sourceRead = await resolveEndpointView(source.gfsUri, source.resourceId)
+        if (!isGestureEpochCurrent(epoch)) return
+        if (sourceRead.status === 'missing' || sourceRead.status === 'mismatched') {
+          throw new GfsMoveRefusalError(
+            'source-location-unknown',
+            gfsDropRefusalMessage('source-location-unknown', { sourceName: source.name })
+          )
+        }
+        if (sourceRead.status === 'failed') {
+          throw new GfsMoveRefusalError('unavailable', gfsDropRefusalMessage('unavailable'))
+        }
+        ifMatchVersion = Number.isSafeInteger(sourceRead.view.version)
+          ? (sourceRead.view.version as number)
+          : source.version
+        if (destination.gfsUri) {
+          const targetRead = await resolveEndpointView(destination.gfsUri, destination.resourceId)
+          if (!isGestureEpochCurrent(epoch)) return
+          if (targetRead.status === 'missing' || targetRead.status === 'mismatched') {
+            throw new GfsMoveRefusalError(
+              'target-unavailable',
+              gfsDropRefusalMessage('target-unavailable')
+            )
+          }
+          if (targetRead.status === 'failed') {
+            throw new GfsMoveRefusalError('unavailable', gfsDropRefusalMessage('unavailable'))
+          }
+          if (targetRead.view.kind !== 'directory') {
+            throw new GfsMoveRefusalError(
+              'target-unavailable',
+              gfsDropRefusalMessage('target-unavailable')
+            )
+          }
+          verifiedDestinationPath = destination.path === '/' ? '/' : targetRead.view.path
+          const structure = decideDragPathStructure({
+            sourcePath: sourceRead.view.path,
+            targetPath: verifiedDestinationPath,
+          })
+          if (structure.kind === 'deny') {
+            throw new GfsMoveRefusalError(
+              structure.reason,
+              gfsDropRefusalMessage(structure.reason, {
+                sourceName: source.name,
+                targetName: destination.name,
+              })
+            )
+          }
+        } else if (verifiedDestinationPath === null) {
+          // No immutable key and no path observation: the destination cannot
+          // be validated or verified — refuse honestly instead of guessing.
+          throw new GfsMoveRefusalError('unavailable', gfsDropRefusalMessage('unavailable'))
+        }
+      }
       // Seed the ladder with the destination's known children (the same cache
       // the confirmation suggestion came from, plus whatever the caller
       // observed) so the first 409 skips every already-taken numbered name
@@ -1386,6 +1892,9 @@ export function GfsBrowser(): React.JSX.Element {
       // approved numbered-name policy; a single attempt otherwise.
       const maxAttempts = allowNumberedRename ? GFS_MOVE_MAX_NETWORK_ATTEMPTS : 1
       for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        // The gesture must still own the dispatch the instant the PATCH
+        // leaves (plan §3.4); an already-dispatched request is never recalled.
+        if (options.revalidate && !isGestureEpochCurrent(options.revalidate.epoch)) return
         try {
           moveResult = await apiSend(
             'PATCH',
@@ -1393,7 +1902,7 @@ export function GfsBrowser(): React.JSX.Element {
             {
               drive: DRIVE,
               newParentId: destination.resourceId,
-              ifMatch: source.version,
+              ifMatch: ifMatchVersion,
               ...(moveName === source.name ? {} : { newName: moveName }),
             },
             { drive: DRIVE }
@@ -1401,7 +1910,39 @@ export function GfsBrowser(): React.JSX.Element {
           moved = true
           break
         } catch (error) {
-          if (!isGfsNameConflict(error)) throw error
+          if (!isGfsNameConflict(error)) {
+            if (
+              options.revalidate &&
+              entityChangeErrorStatus(error) === undefined &&
+              movingResourceRef.current === source.resourceId
+            ) {
+              // Transport loss with the request possibly dispatched: the
+              // outcome is UNKNOWN. Never claim the move failed and never
+              // repeat the PATCH — verify once by identity (matrix B7/B8).
+              const settled = await settleUnknownTransportMove(
+                source,
+                verifiedDestinationPath,
+                options.revalidate.epoch
+              )
+              if (!isGestureEpochCurrent(options.revalidate.epoch)) return
+              if (settled === 'moved') {
+                moved = true
+                moveResult = undefined
+                break
+              }
+              if (settled === 'not-moved') {
+                throw new GfsMoveRefusalError(
+                  'move-not-completed',
+                  gfsDropRefusalMessage('move-not-completed')
+                )
+              }
+              throw new GfsMoveRefusalError(
+                'unknown-outcome',
+                gfsDropRefusalMessage('unknown-outcome')
+              )
+            }
+            throw error
+          }
           if (!allowNumberedRename) {
             throw new Error(
               'An item with this name already exists. Choose another folder, or use Move to change its name.'
@@ -1423,10 +1964,26 @@ export function GfsBrowser(): React.JSX.Element {
         movedResource?.resourceId && movedResource.resourceId !== source.resourceId
           ? undefined
           : movedResource?.version
-      // The destination may have been prefetched while it was visible. Its
-      // cached listing is stale after a move and must be revalidated before it
-      // is opened.
-      childCacheRef.current.delete(destination.resourceId)
+      // plan §3.4 convergence: invalidate the observed OLD and NEW parent
+      // listings through the shared pure planner. The old parent is the
+      // observed folder whose listing held the source — the trail parent for
+      // a trail folder, otherwise the folder currently on screen.
+      const movedCrumbIndex = crumbs.findIndex(crumb => crumb.id === source.resourceId)
+      const oldParentId =
+        movedCrumbIndex > 0
+          ? (crumbs[movedCrumbIndex - 1]?.id ?? null)
+          : (currentCrumbRef.current?.id ?? null)
+      const childParentByResourceId = new Map<string, string | null>()
+      for (const [folderId, page] of childCacheRef.current.entries()) {
+        for (const item of page.items) childParentByResourceId.set(item.resourceId, folderId)
+      }
+      const convergence = planMoveConvergence(
+        { resourceId: source.resourceId, oldParentId, newParentId: destination.resourceId },
+        { childParentByResourceId }
+      )
+      for (const staleFolderId of convergence.refetchChildIds) {
+        childCacheRef.current.delete(staleFolderId)
+      }
       showToast(
         moveName === source.name
           ? `Moved "${source.name}" to "${destination.name}".`
@@ -1443,14 +2000,9 @@ export function GfsBrowser(): React.JSX.Element {
       // is part of the open breadcrumb trail, patching only its own crumb
       // would leave every crumb above it describing the OLD location (R5-M1):
       // with /org open and /org moved under /archive, the trail must become
-      // main / archive / org — not stay main / org.
-      const movedCrumbIndex = crumbs.findIndex(crumb => crumb.id === source.resourceId)
+      // main / archive / org — not stay main / org. (The old parent's cache
+      // entry was already invalidated through the convergence plan above.)
       if (movedCrumbIndex >= 0) {
-        // The listing the moved folder left behind (its old parent, an
-        // ancestor of the old trail) still contains its row; drop it so a
-        // later navigation revalidates instead of serving the stale page.
-        const oldParent = crumbs[movedCrumbIndex - 1]
-        if (oldParent?.id) childCacheRef.current.delete(oldParent.id)
         // The crumb adopts the receipt metadata FIRST — this is the
         // resource's truthful post-move state. The ancestry rebuild below
         // (and any later retry of it) preserves this metadata from LIVE
@@ -1482,16 +2034,45 @@ export function GfsBrowser(): React.JSX.Element {
         }
         return
       }
+      // Refresh the live current location — the user stays where they are;
+      // a drag move never auto-navigates to the destination (plan §3.4).
       await refreshCurrent()
     } catch (err) {
       if (bubbleError) throw err
-      showToast(err instanceof Error ? err.message : 'Could not move resource.', {
-        tone: 'error',
-      })
+      if (err instanceof GfsMoveRefusalError) {
+        showToast(err.message, { tone: err.tone })
+      } else {
+        showToast(err instanceof Error ? err.message : 'Could not move resource.', {
+          tone: 'error',
+        })
+      }
     } finally {
       movingResourceRef.current = null
       setMovingResourceId(null)
     }
+  }
+
+  /** Resolve the moved source ONCE by immutable URI after a transport loss
+   *  on the move PATCH (matrix B7/B8): a fresh path whose parent IS the
+   *  destination proves the move landed; an unchanged path proves it did
+   *  not; a failed verification keeps the outcome honestly unknown. */
+  async function settleUnknownTransportMove(
+    source: GfsChild,
+    destinationPath: string | null,
+    epoch: number
+  ): Promise<'moved' | 'not-moved' | 'unknown'> {
+    if (destinationPath === null) return 'unknown'
+    const read = await resolveEndpointView(source.gfsUri, source.resourceId)
+    if (!isGestureEpochCurrent(epoch)) return 'unknown'
+    if (read.status !== 'resolved' || typeof read.view.path !== 'string') return 'unknown'
+    const destinationCanonical = normalizeCanonicalPath(destinationPath)
+    if (destinationCanonical === null) return 'unknown'
+    const parent = parentPathOf(read.view.path)
+    // null → the resolved path IS the root itself (parent is root by
+    // definition); undefined → the path could not be classified.
+    if (parent === undefined) return 'unknown'
+    const landedParent = parent ?? '/'
+    return landedParent === destinationCanonical ? 'moved' : 'not-moved'
   }
 
   /** Rebuild the breadcrumb trail ANCESTRY for a moved trail-folder. The
@@ -1579,78 +2160,6 @@ export function GfsBrowser(): React.JSX.Element {
     const recovery = trailRecovery
     if (!recovery) return
     await rebuildTrailFromNewLocation(recovery.resourceId, recovery.gfsUri)
-  }
-
-  /** Resolve a resource's canonical path from a current authorized view
-   *  (rev-2 §3.2): the operator resolve contract returns `path`; a null or
-   *  absent path NEVER certifies structure — callers fall back to the atomic
-   *  server check. */
-  async function canonicalPathOf(child: Pick<GfsChild, 'gfsUri' | 'path'>): Promise<string | null> {
-    if (typeof child.path === 'string' && child.path.length > 0) return child.path
-    try {
-      const view = (await apiGet('/api/v1/gfs/resolve', { uri: child.gfsUri })) as {
-        path?: string | null
-      }
-      return typeof view.path === 'string' && view.path.length > 0 ? view.path : null
-    } catch {
-      return null
-    }
-  }
-
-  function structureDenialMessage(
-    reason: 'self' | 'descendant' | 'same-parent' | 'root-source' | 'cross-drive'
-  ): string {
-    switch (reason) {
-      case 'same-parent':
-        return 'This item is already in this folder.'
-      case 'descendant':
-      case 'self':
-        return 'A folder cannot be moved into itself or one of its subfolders.'
-      case 'root-source':
-        return 'The top-level folder cannot be moved.'
-      default:
-        return 'Items can’t be moved between drives.'
-    }
-  }
-
-  async function handleFolderDrop(
-    event: React.DragEvent<HTMLLIElement>,
-    folder: GfsChild
-  ): Promise<void> {
-    if (!hasDraggedGfsResource(event)) return
-    event.preventDefault()
-    event.stopPropagation()
-    setDragOverFolderId(null)
-    const source = draggingResourceRef.current
-    if (!source) return
-    if (source.kind === 'file') {
-      // Files cannot be ancestors: no structural risk; move directly.
-      await moveResource(source, folder)
-      return
-    }
-    // Folder drops stop at ONE confirmation (rev-2 §1) after the fresh-path
-    // structural guard — the impact dialog also records the naming policy.
-    const [sourcePath, targetPath] = await Promise.all([
-      canonicalPathOf(source),
-      canonicalPathOf(folder),
-    ])
-    const structure = decideDragPathStructure({ sourcePath, targetPath })
-    if (structure.kind === 'deny') {
-      showToast(structureDenialMessage(structure.reason), { tone: 'error' })
-      return
-    }
-    const occupiedNames = new Set<string>(
-      (childCacheRef.current.get(folder.resourceId)?.items ?? []).map(item => item.name)
-    )
-    const suggested =
-      occupiedNames.size > 0 && occupiedNames.has(source.name)
-        ? nextAvailableGfsResourceName(source.name, occupiedNames)
-        : undefined
-    setConfirmMoveTarget({
-      source,
-      destination: folder,
-      ...(suggested !== undefined ? { suggestedName: suggested } : {}),
-    })
   }
 
   async function uploadWithCompatibility(
@@ -2203,12 +2712,42 @@ export function GfsBrowser(): React.JSX.Element {
   const moveDialogCrumbs =
     moveTargetCrumbIndex >= 0 ? crumbs.slice(0, moveTargetCrumbIndex) : crumbs
 
+  // Hover verdict announcement (RP-026 shape, plan §3.3): the live region
+  // carries the hovered target's verdict sentence. Text CHANGES announce;
+  // repeated identical text stays silent, so repeated dragover events never
+  // spam. Refused drops additionally use the toast stack, which is itself a
+  // live region.
+  const draggedSourceNow = draggingResourceId !== null ? draggingResourceRef.current : null
+  let dropHoverAnnouncement = ''
+  if (draggedSourceNow && dragOverCrumbIndex !== null) {
+    const hoveredCrumb = crumbs[dragOverCrumbIndex]
+    const verdict = crumbHoverVerdict(draggedSourceNow, dragOverCrumbIndex)
+    if (verdict && hoveredCrumb) {
+      dropHoverAnnouncement = gfsDropHoverAnnouncement(verdict, {
+        sourceName: draggedSourceNow.name,
+        targetName: isDriveRootCrumb(hoveredCrumb) ? DRIVE : hoveredCrumb.name,
+      })
+    }
+  } else if (draggedSourceNow && dragOverFolderId !== null) {
+    const hoveredRow = items.find(item => item.resourceId === dragOverFolderId)
+    const verdict = hoveredRow ? rowHoverVerdict(draggedSourceNow, hoveredRow) : null
+    if (verdict && hoveredRow) {
+      dropHoverAnnouncement = gfsDropHoverAnnouncement(verdict, {
+        sourceName: draggedSourceNow.name,
+        targetName: hoveredRow.name,
+      })
+    }
+  }
+
   return (
     <section
       className="cu-gfs"
       aria-label="EvenDrive browser"
       aria-busy={loading || droppedUploadCount > 0 || movingResourceId !== null}
     >
+      <div aria-live="polite" className="cu-gfs-drop-announce" data-testid="gfs-drop-announce">
+        {dropHoverAnnouncement}
+      </div>
       <div
         className="cu-card cu-card--viewport-fill cu-gfs-card"
         onDragEnter={handleGfsDragEnter}
@@ -2275,6 +2814,15 @@ export function GfsBrowser(): React.JSX.Element {
                 // the right of its name, mirroring the Desktop Files pattern.
                 // The synthetic drive root and ancestor crumbs stay plain.
                 const activeFolder = index === crumbs.length - 1 ? crumbToChild(crumb) : null
+                // Every crumb is a drop target (plan §3.1): the drop-state
+                // verdict is painted token-driven alongside the reason; click
+                // and keyboard navigation stay untouched.
+                const draggedSource =
+                  draggingResourceId !== null ? draggingResourceRef.current : null
+                const crumbVerdict =
+                  draggedSource && dragOverCrumbIndex === index
+                    ? crumbHoverVerdict(draggedSource, index)
+                    : null
                 return (
                   <span
                     className="cu-gfs-breadcrumb__item"
@@ -2287,7 +2835,17 @@ export function GfsBrowser(): React.JSX.Element {
                       }`}
                       type="button"
                       onClick={() => goToCrumb(index)}
+                      onDragEnter={event => handleCrumbDragEnter(event, index)}
+                      onDragOver={event => handleCrumbDragOver(event, index)}
+                      onDragLeave={event => handleCrumbDragLeave(event, index)}
+                      onDrop={event => handleCrumbDrop(event, crumb, index)}
                       aria-current={index === crumbs.length - 1 ? 'page' : undefined}
+                      data-drop-state={crumbVerdict ? crumbVerdict.state : undefined}
+                      data-drop-reason={
+                        crumbVerdict && crumbVerdict.state === 'denied'
+                          ? crumbVerdict.reason
+                          : undefined
+                      }
                     >
                       {crumb.name === '/' ? (
                         <>
@@ -2357,8 +2915,20 @@ export function GfsBrowser(): React.JSX.Element {
                 {items.map(child => {
                   const rowOpenable = child.kind === 'directory' || isGfsPreviewFile(child.name)
                   const isDragging = draggingResourceId === child.resourceId
-                  const isDropTarget = dragOverFolderId === child.resourceId
                   const canDragResource = movingResourceId === null
+                  // Directory rows and the dragged row itself stay hoverable
+                  // drop zones so a refused drop can explain its reason
+                  // (matrix A1/§5.3); plain file rows are not move targets.
+                  const rowIsDropZone =
+                    canDragResource &&
+                    (child.kind === 'directory' ||
+                      (isDragging && draggingResourceId === child.resourceId))
+                  const draggedSource =
+                    draggingResourceId !== null ? draggingResourceRef.current : null
+                  const rowVerdict =
+                    draggedSource && dragOverFolderId === child.resourceId
+                      ? rowHoverVerdict(draggedSource, child)
+                      : null
                   const openRow = () => {
                     if (child.kind === 'directory') openDirectory(child)
                     else openFilePreview(child)
@@ -2369,30 +2939,30 @@ export function GfsBrowser(): React.JSX.Element {
                       key={child.resourceId}
                       draggable={canDragResource}
                       title={
-                        canDragResource ? `Drag ${child.name} into a folder to move it` : undefined
+                        canDragResource
+                          ? `Drag ${child.name} into a folder or breadcrumb to move it`
+                          : undefined
                       }
                       onDragStart={
                         canDragResource ? event => handleResourceDragStart(event, child) : undefined
                       }
                       onDragEnd={canDragResource ? handleResourceDragEnd : undefined}
                       onDragEnter={
-                        child.kind === 'directory'
-                          ? event => handleFolderDragEnter(event, child)
-                          : undefined
+                        rowIsDropZone ? event => handleFolderDragEnter(event, child) : undefined
                       }
                       onDragOver={
-                        child.kind === 'directory'
-                          ? event => handleFolderDragOver(event, child)
-                          : undefined
+                        rowIsDropZone ? event => handleFolderDragOver(event, child) : undefined
                       }
-                      onDragLeave={child.kind === 'directory' ? handleFolderDragLeave : undefined}
+                      onDragLeave={rowIsDropZone ? handleFolderDragLeave : undefined}
                       onDrop={
-                        child.kind === 'directory'
-                          ? event => void handleFolderDrop(event, child)
-                          : undefined
+                        rowIsDropZone ? event => void handleFolderDrop(event, child) : undefined
                       }
                       data-dragging={isDragging ? 'true' : undefined}
-                      data-drop-target={isDropTarget ? 'true' : undefined}
+                      data-drop-target={rowVerdict?.state === 'allowed' ? 'true' : undefined}
+                      data-drop-state={rowVerdict ? rowVerdict.state : undefined}
+                      data-drop-reason={
+                        rowVerdict && rowVerdict.state === 'denied' ? rowVerdict.reason : undefined
+                      }
                       role={rowOpenable ? 'button' : undefined}
                       tabIndex={rowOpenable ? 0 : undefined}
                       aria-label={rowOpenable ? `Open ${child.name}` : undefined}
@@ -2729,11 +3299,15 @@ export function GfsBrowser(): React.JSX.Element {
             const pending = confirmMoveTarget
             setConfirmMoveTarget(null)
             if (pending) {
-              void moveResource(pending.source, pending.destination, { allowNumberedRename })
+              void moveResource(pending.source, pending.destination, {
+                allowNumberedRename,
+                revalidate: { epoch: pending.epoch },
+              })
             }
           }}
           request={{
             sourceName: confirmMoveTarget.source.name,
+            sourceKind: confirmMoveTarget.source.kind === 'directory' ? 'directory' : 'file',
             destinationName: confirmMoveTarget.destination.name,
             canRename: true,
             ...(confirmMoveTarget.suggestedName !== undefined
