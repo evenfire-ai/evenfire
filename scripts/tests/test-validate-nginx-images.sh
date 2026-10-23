@@ -193,7 +193,7 @@ if [ -z "$baseline_refs" ] || [ "$baseline_refs" -eq 0 ]; then
   exit 1
 fi
 
-for family in nginx nginxinc/nginx-unprivileged docker.io/library/nginx; do
+for family in nginx nginxinc/nginx-unprivileged nginx/nginx-unprivileged docker.io/library/nginx; do
   for tag in 1.30.0 1.30.1 1.30.2 1.30.3 1.30.4 1.30.5 1.30.5-alpine \
     1.31.0 1.31.1 1.31.2 1.31.3 1.31.4 1.31.5 1.31.6 1.31.6-alpine 1.27.5-alpine 1.29.9; do
     image="$family:$tag"
@@ -320,6 +320,8 @@ done
 # kustomize images: entries rewrite an image without naming its tag inline.
 inject_kustomize $'images:\n- name: nginx\n  newTag: 1.30.1-alpine'
 expect_fail_naming "kustomize newTag below the baseline" "$KUSTOMIZE_REL:4: nginx:1.30.1-alpine: " "$BELOW"
+inject_kustomize $'images:\n- name: nginx/nginx-unprivileged\n  newTag: 1.30.1-alpine'
+expect_fail_naming "kustomize official unprivileged name below the baseline" "$KUSTOMIZE_REL:4: nginx/nginx-unprivileged:1.30.1-alpine: " "$BELOW"
 inject_kustomize $'images: [{name: nginx, newTag: 1.30.1-alpine}]'
 expect_fail_naming "kustomize flow list below the baseline" "$KUSTOMIZE_REL:3: nginx:1.30.1-alpine: " "$BELOW"
 inject_kustomize $'images:\n- {name: nginx, newTag: 1.30.1-alpine}'
@@ -340,6 +342,8 @@ inject_kustomize $'images:\n  - name: clerum/gateway\n    newName: docker.io/lib
 expect_fail_naming "kustomize newName to NGINX below the baseline" "$KUSTOMIZE_REL:4: docker.io/library/nginx:1.31.6: " "$BELOW"
 inject_kustomize $'images:\n- name: clerum/gateway\n  newName: nginx'
 expect_fail_naming "kustomize newName to NGINX with no newTag" "$KUSTOMIZE_REL:4: nginx:<no newTag>: " "$NOT_FIXED"
+inject_kustomize $'images:\n- name: example/web\n  newName: nginx/nginx-unprivileged:1.30.1-alpine'
+expect_fail_naming "kustomize official unprivileged newName below the baseline" "$KUSTOMIZE_REL:4: nginx/nginx-unprivileged:1.30.1-alpine: " "$BELOW"
 inject_kustomize $'images:\n- name: example/web\n  newName: "ngin\\u0078:1.30.5-alpine"'
 expect_fail_naming "kustomize escaped newName carrying a tag below the baseline" "$KUSTOMIZE_REL:4: nginx:1.30.5-alpine: " "$BELOW"
 inject_kustomize $'images:\n- name: nginx\n  newName: nginx:1.30.5-alpine'
