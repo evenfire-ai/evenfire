@@ -3674,9 +3674,8 @@ describe('App deep-link orchestration', () => {
       liveTeamId = teamId
       return true
     })
-    const originApp = { ...READY_APP, defaultPath: '/tickets/live' }
     listApps.mockImplementation(async () =>
-      liveTeamId === 'team-a' ? { apps: [originApp] } : { apps: [] }
+      liveTeamId === 'team-a' ? { apps: [READY_APP] } : { apps: [] }
     )
     currentController = makeController({
       initialExperienceLoading: false,
@@ -3686,10 +3685,21 @@ describe('App deep-link orchestration', () => {
     render(<App />)
     await launchAppFromSidebar()
 
+    // Persist a non-default route through App's normal tab-deactivation reader
+    // before the native unsolicited-close callback removes the live embed.
+    getSandboxUiLocation.mockResolvedValue({ appRef: 'ns/app', routePath: '/tickets/live' })
+    await selectTab(0)
+    await waitFor(() => expect(appTabs()[0]?.app?.savedRoutePath).toBe('/tickets/live'))
+    await selectTab(1)
+    await waitFor(() =>
+      expect(sandboxUiPageHarness.props?.shortcutApp?.routePath).toBe('/tickets/live')
+    )
+
     const originWorkspace = currentController.workspaceTabs
     const originTab = activeWorkspaceTab(originWorkspace)
     expect(originTab?.kind).toBe('app')
     if (originTab?.kind !== 'app') throw new Error('The app picker did not create an app tab')
+    expect(originTab.app?.savedRoutePath).toBe('/tickets/live')
     const originRequestId = sandboxUiPageHarness.props?.shortcutOpenRequestId
 
     // The native unsolicited-close producer leaves the app tab selected but unmounted.
@@ -3712,6 +3722,7 @@ describe('App deep-link orchestration', () => {
     expect(liveTeamId).toBe('team-a')
     expect(currentController.workspaceTabs.activeTabId).toBe(originTab.id)
     expect(currentController.workspaceTabs.tabs).toContainEqual(originTab)
+    expect(currentController.workspaceTabs).toEqual(originWorkspace)
     expect(sandboxUiPageHarness.props?.shortcutApp).toBeNull()
     expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBe(originRequestId)
     expect(closeSandboxUi).not.toHaveBeenCalled()
