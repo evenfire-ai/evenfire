@@ -7,6 +7,7 @@ import type {
   GfsInheritedAccessItem,
   GfsShareListItem,
 } from '../delegation.types'
+import { mergeInheritedAccessItem } from '../inheritedAccessMerge'
 
 /**
  * "Who has access" list (Manage modal). Rows resolve host subjects to agent
@@ -225,15 +226,16 @@ describe('GfsGrantList', () => {
       subject: { type: 'user', id: 'user-2' },
       permissions: ['read', 'write'],
       inheritedFrom: ['team-docs'],
-      sources: [
+      sources: mergeInheritedAccessItem(
+        null,
         {
-          resourceId: 'folder-1',
-          name: 'team-docs',
+          subject: { type: 'user', id: 'user-2' },
           permissions: ['read', 'write'],
           grantId: 'parent-grant-1',
           shareIds: [],
         },
-      ],
+        { resourceId: 'folder-1', name: 'team-docs' }
+      ).sources,
       ...overrides,
     })
 

@@ -94,6 +94,7 @@ export function GfsGrantList({
   mergeInherited = false,
   loading = false,
   derivationNotice = null,
+  derivationNoticeHint = null,
   error = null,
   shareError = null,
   agents,
@@ -148,7 +149,13 @@ export function GfsGrantList({
 
   return (
     <>
-      {derivationNotice ? <StatusBanner tone="info" text={derivationNotice} /> : null}
+      {derivationNotice ? (
+        <StatusBanner
+          tone="info"
+          text={derivationNotice}
+          title={derivationNoticeHint ?? undefined}
+        />
+      ) : null}
       {hasAnyError ? (
         <div className="da-gfs-grant-list__errors" data-testid="gfs-access-list-error">
           {error ? (
