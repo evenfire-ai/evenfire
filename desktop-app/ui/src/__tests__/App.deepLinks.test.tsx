@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { type ReactNode, createElement, useEffect, useLayoutEffect, useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, render, waitFor } from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -8,6 +9,11 @@ import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '@clerum/desk
 import type { WorkspaceTabStripProps } from '@components/WorkspaceTabStrip/types'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
+import {
+  getComposerDraft,
+  resetComposerDraftStore,
+  setComposerDraft,
+} from '@lib/composerDraftStore'
 import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
 import {
   type GfsResourceNavigationRequest,
@@ -35,6 +41,7 @@ import type { DesktopCommandId } from '../../../src/desktopCommands'
 import { GfsResourceDeepLinkQueue } from '../../../src/gfsResourceDeepLinkQueue'
 import { SandboxUiDeepLinkQueue } from '../../../src/sandboxUiDeepLinkQueue'
 import { buildSandboxUiDeepLink, parseSandboxUiDeepLink } from '../../../src/sandboxUiDeepLinks'
+import { installAppControllerClerum } from '../hooks/domain/__tests__/__fixtures__/appControllerHarness'
 import { type SandboxUiMainFake, createSandboxUiMainFake } from './__fixtures__/sandboxUiMainFake'
 
 // The sandbox-ui main fake runs the real main process; these are the
@@ -150,6 +157,7 @@ const filesPageHarness = vi.hoisted(() => ({
   props: null as null | FilesPageProps,
   renderActual: false,
 }))
+const commonHarness = vi.hoisted(() => ({ renderActualToastStack: false }))
 const workspaceTabStripHarness = vi.hoisted(() => ({
   props: null as null | WorkspaceTabStripProps,
 }))
@@ -182,12 +190,16 @@ vi.mock('@components/CommandPalette', () => ({
   },
 }))
 vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
-vi.mock('@components/Common', async () => ({
-  ...(await vi.importActual<typeof import('@components/Common')>('@components/Common')),
-  Button: () => null,
-  IconButton: () => null,
-  ToastStack: () => null,
-}))
+vi.mock('@components/Common', async () => {
+  const actual = await vi.importActual<typeof import('@components/Common')>('@components/Common')
+  return {
+    ...actual,
+    Button: () => null,
+    IconButton: () => null,
+    ToastStack: (props: Parameters<typeof actual.ToastStack>[0]) =>
+      commonHarness.renderActualToastStack ? createElement(actual.ToastStack, props) : null,
+  }
+})
 vi.mock('@components/WorkspaceTabStrip', () => ({
   WorkspaceTabStrip: (props: WorkspaceTabStripProps) => {
     workspaceTabStripHarness.props = props
@@ -545,6 +557,8 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
 
 describe('App deep-link orchestration', () => {
   let currentController: AppController
+  let realController: AppController | null = null
+  let unmountRealApp: (() => void) | null = null
   let emitDeepLink: ((link: SandboxUiDeepLinkEnvelope) => void) | null
   let emitGfsDeepLink: ((link: GfsResourceDeepLinkEnvelope) => void) | null
   let emitCommand: ((commandId: DesktopCommandId, source?: 'host' | 'sandbox') => void) | null
@@ -629,6 +643,7 @@ describe('App deep-link orchestration', () => {
     sandboxUiPageHarness.props = null
     filesPageHarness.props = null
     filesPageHarness.renderActual = false
+    commonHarness.renderActualToastStack = false
     workspaceTabStripHarness.props = null
     sidebarHarness.props = null
     acknowledgeDeepLink.mockResolvedValue(undefined)
@@ -646,6 +661,7 @@ describe('App deep-link orchestration', () => {
     emitGfsDeepLink = null
     emitCommand = null
     currentController = makeController()
+    realController = null
     vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
 
     Object.defineProperty(window, 'clerum', {
@@ -1027,6 +1043,9 @@ describe('App deep-link orchestration', () => {
 
   afterEach(async () => {
     vi.useRealTimers()
+    unmountRealApp?.()
+    unmountRealApp = null
+    resetComposerDraftStore()
     await main.dispose()
   })
 
@@ -1914,6 +1933,125 @@ describe('App deep-link orchestration', () => {
     expect(appTabs()[0]?.app?.savedRoutePath).toBe('/tickets/live')
     expect(openSandboxUi()).toHaveBeenCalledTimes(2)
     expect(main.live()).toBeNull()
+  })
+
+  it('keeps the visible workspace and retry path when the team switch RPC rejects', async () => {
+    const actualControllerModule =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    vi.mocked(useAppController).mockImplementation(() => {
+      realController = actualControllerModule.useAppController()
+      return realController
+    })
+    const appBridge = window.clerum
+    const { handle } = installAppControllerClerum({ agentNames: ['agent-x'] })
+    Object.assign(window.clerum, {
+      shortcuts: appBridge.shortcuts,
+      app: appBridge.app,
+      sandboxUi: appBridge.sandboxUi,
+      gfs: appBridge.gfs,
+    })
+    expect(window.clerum.team.switch).toBe(handle.switchTeam)
+    commonHarness.renderActualToastStack = true
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTaskTrackerProvider>
+          <App />
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+    unmountRealApp = view.unmount
+    const getController = () => {
+      if (!realController) throw new Error('the real App controller did not mount')
+      return realController
+    }
+    await waitFor(() => expect(getController().booting).toBe(false))
+    await waitFor(() => expect(getController().isAuthenticated).toBe(true))
+    await waitFor(() => expect(getController().initialExperienceLoading).toBe(false))
+    await waitFor(() => expect(handle.refreshCatalog.mock.calls.length).toBeGreaterThanOrEqual(2))
+    await waitFor(() => expect(handle.teamDirectory).toHaveBeenCalledOnce())
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    act(() => {
+      getController().handleSelectChatAgent('agent-x', {
+        chatId: 'chat-1',
+        title: 'Conversation',
+        selectLatest: false,
+      })
+      getController().openFilesSection('gfs://main/0123456789abcdef0123456789abcdef')
+    })
+    const chatTab = getController().workspaceTabs.tabs.find(
+      tab => tab.kind === 'chat' && tab.chat?.chatId === 'chat-1'
+    )
+    if (chatTab?.kind !== 'chat') throw new Error('the chat producer did not create its tab')
+    act(() => {
+      expect(setComposerDraft('chat-1', 'unsent selected-tab draft', 'agent-x', chatTab.id)).toBe(
+        true
+      )
+      getController().selectWorkspaceTabById(chatTab.id)
+    })
+    await waitFor(() => expect(getController().workspaceTabs.activeTabId).toBe(chatTab.id))
+
+    const workspaceBefore = getController().workspaceTabs
+    const navigationBefore = getController().captureWorkspaceNavigation()
+    const catalogCallsBefore = handle.refreshCatalog.mock.calls.length
+    const directoryCallsBefore = handle.teamDirectory.mock.calls.length
+    const listAppsCallsBefore = listApps.mock.calls.length
+    expect(getController().selectedAgent).toBe('agent-x')
+    expect(getController().lastActiveChatTabId).toBe(chatTab.id)
+    expect(getComposerDraft('chat-1', 'agent-x', chatTab.id)).toBe('unsent selected-tab draft')
+
+    let rejectTeamSwitch!: (error: Error) => void
+    handle.switchTeam.mockClear()
+    handle.switchTeam.mockImplementationOnce(
+      () => new Promise((_resolve, reject) => (rejectTeamSwitch = reject))
+    )
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'missing',
+        path: '/linked',
+        teamId: 'team-2',
+      })
+    )
+    if (!target) throw new Error('the shared producer rejected the team-switch link fixture')
+    const link = new SandboxUiDeepLinkQueue().enqueue(target)
+    act(() => emitDeepLink?.(link))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(handle.switchTeam).toHaveBeenCalledWith('team-2'))
+    await waitFor(() => expect(getController().busy).toBe(true))
+
+    expect(getController().getCurrentTeamId()).toBe('team-1')
+    expect(getController().workspaceTabs).toBe(workspaceBefore)
+    expect(getController().captureWorkspaceNavigation()).toEqual(navigationBefore)
+    expect(handle.refreshCatalog).toHaveBeenCalledTimes(catalogCallsBefore)
+    expect(handle.teamDirectory).toHaveBeenCalledTimes(directoryCallsBefore)
+
+    await act(async () => {
+      rejectTeamSwitch(
+        Object.assign(new Error('team switch connection failed'), { code: 'ECONNRESET' })
+      )
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(getController().busy).toBe(false))
+    const retryMessage = await view.findByText(
+      /Could not switch to the linked team yet:.*will retry shortly/
+    )
+    expect(retryMessage.closest('[role="status"]')?.isConnected).toBe(true)
+    expect(getController().getCurrentTeamId()).toBe('team-1')
+    expect(getController().workspaceTabs).toBe(workspaceBefore)
+    expect(getController().captureWorkspaceNavigation()).toEqual(navigationBefore)
+    expect(getController().selectedAgent).toBe('agent-x')
+    expect(getController().lastActiveChatTabId).toBe(chatTab.id)
+    expect(getComposerDraft('chat-1', 'agent-x', chatTab.id)).toBe('unsent selected-tab draft')
+    expect(handle.refreshCatalog).toHaveBeenCalledTimes(catalogCallsBefore)
+    expect(handle.teamDirectory).toHaveBeenCalledTimes(directoryCallsBefore)
+    expect(listApps).toHaveBeenCalledTimes(listAppsCallsBefore)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(link.id)
   })
 
   it('resolves an unavailable cross-team target without relaunching a closed origin app', async () => {
