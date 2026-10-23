@@ -62,13 +62,13 @@ function buildApp(discover: ReturnType<typeof fetchFailedDiscover>) {
 }
 
 describe('discoveryHttpStatus — DiscoveryError → HTTP status decision table', () => {
-  // One entry per DiscoveryError.kind. 502 = upstream transport failure (AS gave no
-  // usable HTTP response); 400 = operator-actionable (bad input or reachable-but-
-  // incompatible AS).
+  // One entry per DiscoveryError.kind. 424 = a dependency failed (the AS or the remote
+  // server gave no usable response); 400 = operator-actionable (bad input or reachable-
+  // but-incompatible AS). Never a 5xx: the edge proxy would replace the typed body.
   const cases: Array<{ error: DiscoveryError; status: number }> = [
     {
       error: { kind: 'fetch_failed', url: 'https://as.example.test/x', detail: 'ECONNREFUSED' },
-      status: 502,
+      status: 424,
     },
     {
       error: {
@@ -76,7 +76,7 @@ describe('discoveryHttpStatus — DiscoveryError → HTTP status decision table'
         url: 'https://as.example.test/x',
         encoding: 'br',
       },
-      status: 502,
+      status: 424,
     },
     { error: { kind: 'kernel_rejected', field: 'baseUrl', errors: [] }, status: 400 },
     {
@@ -109,6 +109,19 @@ describe('discoveryHttpStatus — DiscoveryError → HTTP status decision table'
       error: { kind: 'as_endpoints_cross_site', field: 'token', detail: 'token on another site' },
       status: 400,
     },
+    {
+      error: {
+        kind: 'tenant_required',
+        authorizationServer: 'https://login.microsoftonline.com/organizations/v2.0',
+        tenantAuthorityTemplate: 'https://login.microsoftonline.com/{tenantId}/v2.0',
+        detail: 'name the tenant',
+      },
+      status: 400,
+    },
+    {
+      error: { kind: 'authorization_server_override_rejected', detail: 'not a tenant authority' },
+      status: 400,
+    },
   ]
 
   for (const { error, status } of cases) {
@@ -116,6 +129,33 @@ describe('discoveryHttpStatus — DiscoveryError → HTTP status decision table'
       expect(discoveryHttpStatus(error)).toBe(status)
     })
   }
+
+  it('the table lists every DiscoveryError kind exactly once', () => {
+    const kinds = cases.map(c => c.error.kind)
+    expect(new Set(kinds).size).toBe(kinds.length)
+    expect([...kinds].sort()).toEqual(
+      [
+        'as_endpoints_cross_site',
+        'authorization_server_override_rejected',
+        'content_encoding_rejected',
+        'fetch_failed',
+        'invalid_metadata',
+        'issuer_mismatch',
+        'kernel_rejected',
+        'no_authorization_server',
+        'no_s256',
+        'prm_resource_mismatch',
+        'redirect_blocked',
+        'tenant_required',
+      ].sort()
+    )
+  })
+
+  it('I8: no DiscoveryError kind maps to a 5xx', () => {
+    for (const { error } of cases) {
+      expect(discoveryHttpStatus(error)).toBeLessThan(500)
+    }
+  })
 })
 
 describe('POST /admin/mcp-servers/remote/discover — discovery error mapping', () => {
@@ -123,7 +163,7 @@ describe('POST /admin/mcp-servers/remote/discover — discovery error mapping', 
     vi.clearAllMocks()
   })
 
-  it('returns 502 (not 400) when discovery fails with fetch_failed (upstream transport)', async () => {
+  it('returns 424 (not 400, not 5xx) when discovery fails with fetch_failed (upstream transport)', async () => {
     const discover = fetchFailedDiscover()
     const app = buildApp(discover)
 
@@ -131,7 +171,7 @@ describe('POST /admin/mcp-servers/remote/discover — discovery error mapping', 
       .post('/api/v1/admin/mcp-servers/remote/discover')
       .send({ baseUrl: BASE_URL })
 
-    expect(res.status).toBe(502)
+    expect(res.status).toBe(424)
     expect(res.body.error).toBe('discovery_failed')
     expect(res.body.detail.kind).toBe('fetch_failed')
     // Never hit the real network: the discovery seam was the only source of the outcome.
