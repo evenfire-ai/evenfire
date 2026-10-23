@@ -40,6 +40,7 @@ import {
 } from '@components/icons'
 import { Button, Field, TextInput } from '@components/ui'
 import {
+  AuthExpiredError,
   apiGet,
   apiSend,
   getGfsResourceByPath,
@@ -66,7 +67,9 @@ import {
 import type {
   GfsDropHoverVerdict,
   GfsDropRefusalReason,
+  GfsEndpointRead,
   GfsMoveDestination,
+  GfsResolvedEndpointView,
 } from '@lib/gfsDragFeedback.types'
 import {
   GfsUploadCapabilityError,
@@ -183,14 +186,6 @@ interface GfsResolvedLocation {
   kind: string
   path: string | null
   version: number
-}
-
-/** The slice of a resolve response the drag admission/commit reads. */
-interface GfsResolvedEndpointView {
-  resourceId: string
-  kind: string
-  path: string | null
-  version?: number
 }
 
 /** Project every response-backed folder source through one version-preserving
@@ -437,6 +432,9 @@ export function GfsBrowser(): React.JSX.Element {
     destination: GfsMoveDestination
     suggestedName?: string
     epoch: number
+    /** Physical source parent captured at the drop boundary (R7): drives
+     *  convergence invalidation when the commit finally runs. */
+    oldParentId: string | null
   } | null>(null)
   const moveTargetRef = useRef(moveTarget)
   moveTargetRef.current = moveTarget
@@ -453,6 +451,11 @@ export function GfsBrowser(): React.JSX.Element {
     gfsUri: string
     reason: 'move' | 'hierarchy'
   } | null>(null)
+  // Matrix A11: an endpoint read that came back 401 during a drag move.
+  // Session loss is TERMINAL for the gesture and must stay visible while the
+  // surface is mounted — a transient toast read as a connection hiccup and
+  // invited retries that could never succeed.
+  const [sessionLost, setSessionLost] = useState(false)
   // Monotonic epoch for breadcrumb-reconstruction attempts (R7-M1 race). A
   // reconstruction (a move's rebuild or a Retry) captures the epoch at start
   // and may apply its result only while it is still the LATEST attempt. Any
@@ -1351,6 +1354,16 @@ export function GfsBrowser(): React.JSX.Element {
     await load(current)
   }
 
+  /** Refresh whatever folder is LIVE on screen, read at call time. Async
+   *  drag work must use this: a render-time `current` can name a folder the
+   *  operator navigated away from while the work was in flight, and loading
+   *  it would clear-and-discard against the visible listing. */
+  async function refreshLiveCurrent(): Promise<void> {
+    const liveCrumb = currentCrumbRef.current
+    if (!liveCrumb) return
+    await load(liveCrumb)
+  }
+
   function handleResourceDragStart(event: React.DragEvent<HTMLLIElement>, child: GfsChild): void {
     // Files AND folders drag (rev-2 D2); an in-flight move freezes sources.
     if (movingResourceRef.current) {
@@ -1525,7 +1538,16 @@ export function GfsBrowser(): React.JSX.Element {
     const source = draggingResourceRef.current
     if (!source) return
     const epoch = dragGestureEpochRef.current
-    void admitCrumbDropMove(source, crumb, index, epoch)
+    // EVERY same-parent/no-op fact is computed synchronously HERE, against
+    // the trail as dropped on (R7): a reconstruction landing while admission
+    // awaits must never turn a captured ancestor index into the live active
+    // index and falsely refuse same-parent. Nothing after an await may read
+    // live trail state for these checks.
+    const parentId = dragSourceParentIdRef.current
+    const sameParentDrop =
+      index === crumbsRef.current.length - 1 ||
+      (parentId !== null ? crumb.id === parentId : isDriveRootCrumb(crumb) && parentId === null)
+    void admitCrumbDropMove(source, crumb, sameParentDrop, epoch)
   }
 
   /** Refuse a drop honestly: matrix wording, reason tone, no mutation. */
@@ -1538,11 +1560,29 @@ export function GfsBrowser(): React.JSX.Element {
     })
   }
 
-  /** One bounded read to (re)hydrate the drive root's resource identity. */
-  async function hydrateDriveRootIdentity(epoch: number): Promise<string | null> {
+  /** Matrix A11: a 401 from the drag pipeline's own reads. The API layer's
+   *  unauthorized boundary has already run (global auth-error handler); this
+   *  surfaces the session loss persistently for this surface instead of a
+   *  connection-flavored warning. */
+  function raiseSessionLostNotice(): void {
+    setSessionLost(true)
+  }
+
+  /** True when a read error is an authentication expiry: either the API
+   *  layer's AuthExpiredError or a raw 401 status (tests and non-GET paths). */
+  function isUnauthorizedRead(error: unknown): boolean {
+    return error instanceof AuthExpiredError || entityChangeErrorStatus(error) === 401
+  }
+
+  /** One bounded read to (re)hydrate the drive root's resource identity.
+   *  A 401 stays session-lost (matrix A11): the persistent sign-in alert is
+   *  raised and the caller must NOT report a connection warning. */
+  async function hydrateDriveRootIdentity(
+    epoch: number
+  ): Promise<{ kind: 'hydrated'; rootId: string } | { kind: 'session-lost' } | { kind: 'failed' }> {
     try {
       const page = (await apiGet('/api/v1/gfs/tree', { drive: DRIVE })) as TreePage
-      if (!page.rootResourceId || !isGestureEpochCurrent(epoch)) return null
+      if (!page.rootResourceId || !isGestureEpochCurrent(epoch)) return { kind: 'failed' }
       const rootRid = ridOfResourceId(page.rootResourceId)
       setCrumbs(prev => {
         const root = prev[0]
@@ -1550,9 +1590,13 @@ export function GfsBrowser(): React.JSX.Element {
         if (root.id === page.rootResourceId && root.rid === rootRid) return prev
         return [{ ...root, id: page.rootResourceId, rid: rootRid }, ...prev.slice(1)]
       })
-      return page.rootResourceId
-    } catch {
-      return null
+      return { kind: 'hydrated', rootId: page.rootResourceId }
+    } catch (error) {
+      if (isUnauthorizedRead(error)) {
+        raiseSessionLostNotice()
+        return { kind: 'session-lost' }
+      }
+      return { kind: 'failed' }
     }
   }
 
@@ -1601,41 +1645,38 @@ export function GfsBrowser(): React.JSX.Element {
   async function admitCrumbDropMove(
     source: GfsChild,
     crumb: Crumb,
-    index: number,
+    sameParentDrop: boolean,
     epoch: number
   ): Promise<void> {
     // 1. Destination identity. The unhydrated root retries resolution here
-    //    (plan §3.1); a failed retry warns honestly and dispatches nothing.
+    //    (plan §3.1); a failed retry warns honestly and dispatches nothing,
+    //    and a session-lost retry raises the sign-in alert instead.
     let destination = crumbToMoveDestination(crumb)
     if (!destination) {
-      const rootId = await hydrateDriveRootIdentity(epoch)
+      const hydration = await hydrateDriveRootIdentity(epoch)
       if (!isGestureEpochCurrent(epoch)) return
-      if (!rootId) {
+      if (hydration.kind === 'session-lost') return
+      if (hydration.kind === 'failed') {
         refuseDropMove('unavailable', { targetName: DRIVE })
         return
       }
       destination = {
-        resourceId: rootId,
-        rid: ridOfResourceId(rootId),
+        resourceId: hydration.rootId,
+        rid: ridOfResourceId(hydration.rootId),
         name: DRIVE,
         kind: 'directory',
-        gfsUri: `gfs://${DRIVE}/${ridOfResourceId(rootId)}`,
+        gfsUri: `gfs://${DRIVE}/${ridOfResourceId(hydration.rootId)}`,
         path: '/',
         origin: 'crumb',
       }
     }
-    // 2. Synchronous identity/no-op checks from the dragstart observation.
+    // 2. Identity/no-op checks from the drop-boundary capture — the boolean
+    //    was computed synchronously at drop, never from live trail state.
     if (destination.resourceId === source.resourceId) {
       refuseDropMove('self', { sourceName: source.name, targetName: destination.name })
       return
     }
-    const parentId = dragSourceParentIdRef.current
-    const isSourceParent =
-      index === crumbsRef.current.length - 1 ||
-      (parentId !== null
-        ? destination.resourceId === parentId
-        : isDriveRootCrumb(crumb) && parentId === null)
-    if (isSourceParent) {
+    if (sameParentDrop) {
       refuseDropMove('same-parent', {
         sourceName: source.name,
         targetName: destination.name,
@@ -1647,6 +1688,7 @@ export function GfsBrowser(): React.JSX.Element {
     //    feedback, a missing path defers to the atomic server guard.
     const admitted = await admitMoveEndpoints(source, destination, epoch)
     if (!admitted.ok) {
+      if (admitted.sessionLost) return
       if (admitted.refusal) {
         refuseDropMove(admitted.refusal.reason, {
           sourceName: source.name,
@@ -1656,24 +1698,33 @@ export function GfsBrowser(): React.JSX.Element {
       return
     }
     // 4. ONE confirmation for both files and folders (plan §3.2).
-    openMoveConfirmation(source, destination, epoch)
+    openMoveConfirmation(source, destination, epoch, dragSourceParentIdRef.current)
   }
 
   /** Fresh endpoint resolution + structural check shared by row and crumb
-   *  admissions. `refusal` is set for every honest refusal; ok=true means
-   *  the move is structurally admissible (observed or deferred to the server
-   *  guard). */
+   *  admissions. `refusal` is set for every honest refusal; `sessionLost`
+   *  outranks it (the persistent sign-in alert was already raised);
+   *  ok=true means the move is structurally admissible (observed or
+   *  deferred to the server guard). */
   async function admitMoveEndpoints(
     source: GfsChild,
     destination: GfsMoveDestination,
     epoch: number
-  ): Promise<{ ok: boolean; refusal?: { reason: GfsDropRefusalReason } }> {
+  ): Promise<{
+    ok: boolean
+    refusal?: { reason: GfsDropRefusalReason }
+    sessionLost?: boolean
+  }> {
     if (!destination.gfsUri) return { ok: false, refusal: { reason: 'unavailable' } }
     const [sourceRead, targetRead] = await Promise.all([
       resolveEndpointView(source.gfsUri, source.resourceId),
-      resolveEndpointView(destination.gfsUri!, destination.resourceId),
+      resolveEndpointView(destination.gfsUri, destination.resourceId),
     ])
     if (!isGestureEpochCurrent(epoch)) return { ok: false }
+    if (sourceRead.status === 'unauthorized' || targetRead.status === 'unauthorized') {
+      raiseSessionLostNotice()
+      return { ok: false, sessionLost: true }
+    }
     if (sourceRead.status === 'missing' || sourceRead.status === 'mismatched') {
       return { ok: false, refusal: { reason: 'source-location-unknown' } }
     }
@@ -1701,7 +1752,8 @@ export function GfsBrowser(): React.JSX.Element {
   function openMoveConfirmation(
     source: GfsChild,
     destination: GfsMoveDestination,
-    epoch: number
+    epoch: number,
+    oldParentId: string | null
   ): void {
     const occupiedNames = new Set<string>(
       (childCacheRef.current.get(destination.resourceId)?.items ?? []).map(item => item.name)
@@ -1715,21 +1767,20 @@ export function GfsBrowser(): React.JSX.Element {
       destination,
       ...(suggested !== undefined ? { suggestedName: suggested } : {}),
       epoch,
+      oldParentId,
     })
   }
 
   /** GET /gfs/resolve by immutable URI, classified for admission/commit.
    *  `expectedResourceId` turns an identity drift (the immutable URI now
-   *  resolves to a different resource id) into an explicit mismatch. */
+   *  resolves to a different resource id) into an explicit mismatch, and a
+   *  401 stays session-lost (matrix A11) instead of reading as a connection
+   *  failure. The API layer's own unauthorized boundary (global auth-error
+   *  handler + AuthExpiredError) remains untouched. */
   async function resolveEndpointView(
     uri: string,
     expectedResourceId?: string
-  ): Promise<
-    | { status: 'resolved'; view: GfsResolvedEndpointView }
-    | { status: 'missing' }
-    | { status: 'mismatched' }
-    | { status: 'failed' }
-  > {
+  ): Promise<GfsEndpointRead> {
     try {
       const view = (await apiGet('/api/v1/gfs/resolve', { uri })) as GfsResolvedEndpointView
       if (expectedResourceId && view.resourceId !== expectedResourceId) {
@@ -1737,6 +1788,7 @@ export function GfsBrowser(): React.JSX.Element {
       }
       return { status: 'resolved', view }
     } catch (error) {
+      if (isUnauthorizedRead(error)) return { status: 'unauthorized' }
       if (entityChangeErrorStatus(error) === 404) return { status: 'missing' }
       return { status: 'failed' }
     }
@@ -1762,7 +1814,7 @@ export function GfsBrowser(): React.JSX.Element {
       // Files cannot be ancestors: no structural risk; move directly — the
       // commit runner still re-resolves both endpoints before dispatch.
       await moveResource(source, destination, {
-        revalidate: { epoch },
+        revalidate: { epoch, oldParentId: dragSourceParentIdRef.current },
       })
       return
     }
@@ -1770,6 +1822,7 @@ export function GfsBrowser(): React.JSX.Element {
     // structural guard — the impact dialog also records the naming policy.
     const admitted = await admitMoveEndpoints(source, destination, epoch)
     if (!admitted.ok) {
+      if (admitted.sessionLost) return
       if (admitted.refusal) {
         refuseDropMove(admitted.refusal.reason, {
           sourceName: source.name,
@@ -1778,7 +1831,7 @@ export function GfsBrowser(): React.JSX.Element {
       }
       return
     }
-    openMoveConfirmation(source, destination, epoch)
+    openMoveConfirmation(source, destination, epoch, dragSourceParentIdRef.current)
   }
 
   async function moveResource(
@@ -1805,7 +1858,15 @@ export function GfsBrowser(): React.JSX.Element {
        * dispatching when the gesture epoch was superseded. The keyboard Move
        * dialog keeps its established single-read behavior.
        */
-      revalidate?: { epoch: number }
+      revalidate?: {
+        epoch: number
+        /**
+         * The physical old parent observed at the drag boundary, used for
+         * convergence invalidation — never a response-time guess at what
+         * folder held the source.
+         */
+        oldParentId: string | null
+      }
     } = {}
   ): Promise<void> {
     const { bubbleError = false, allowNumberedRename = true } = options
@@ -1821,12 +1882,16 @@ export function GfsBrowser(): React.JSX.Element {
     setMovingResourceId(source.resourceId)
     try {
       let ifMatchVersion = source.version
-      let verifiedDestinationPath: string | null = destination.path ?? null
+      let verifiedDestinationPath: string | null = null
       if (options.revalidate) {
         const epoch = options.revalidate.epoch
         if (!isGestureEpochCurrent(epoch)) return
         const sourceRead = await resolveEndpointView(source.gfsUri, source.resourceId)
         if (!isGestureEpochCurrent(epoch)) return
+        if (sourceRead.status === 'unauthorized') {
+          raiseSessionLostNotice()
+          return
+        }
         if (sourceRead.status === 'missing' || sourceRead.status === 'mismatched') {
           throw new GfsMoveRefusalError(
             'source-location-unknown',
@@ -1836,45 +1901,69 @@ export function GfsBrowser(): React.JSX.Element {
         if (sourceRead.status === 'failed') {
           throw new GfsMoveRefusalError('unavailable', gfsDropRefusalMessage('unavailable'))
         }
-        ifMatchVersion = Number.isSafeInteger(sourceRead.view.version)
-          ? (sourceRead.view.version as number)
-          : source.version
-        if (destination.gfsUri) {
-          const targetRead = await resolveEndpointView(destination.gfsUri, destination.resourceId)
-          if (!isGestureEpochCurrent(epoch)) return
-          if (targetRead.status === 'missing' || targetRead.status === 'mismatched') {
-            throw new GfsMoveRefusalError(
-              'target-unavailable',
-              gfsDropRefusalMessage('target-unavailable')
-            )
-          }
-          if (targetRead.status === 'failed') {
-            throw new GfsMoveRefusalError('unavailable', gfsDropRefusalMessage('unavailable'))
-          }
-          if (targetRead.view.kind !== 'directory') {
-            throw new GfsMoveRefusalError(
-              'target-unavailable',
-              gfsDropRefusalMessage('target-unavailable')
-            )
-          }
-          verifiedDestinationPath = destination.path === '/' ? '/' : targetRead.view.path
-          const structure = decideDragPathStructure({
-            sourcePath: sourceRead.view.path,
-            targetPath: verifiedDestinationPath,
-          })
-          if (structure.kind === 'deny') {
-            throw new GfsMoveRefusalError(
-              structure.reason,
-              gfsDropRefusalMessage(structure.reason, {
-                sourceName: source.name,
-                targetName: destination.name,
-              })
-            )
-          }
-        } else if (verifiedDestinationPath === null) {
-          // No immutable key and no path observation: the destination cannot
-          // be validated or verified — refuse honestly instead of guessing.
+        // The captured source kind must still be the resource's kind: a
+        // flip means the immutable URI no longer names the captured item.
+        if (sourceRead.view.kind !== source.kind) {
+          throw new GfsMoveRefusalError(
+            'source-location-unknown',
+            gfsDropRefusalMessage('source-location-unknown', { sourceName: source.name })
+          )
+        }
+        // Fresh-precondition contract: the dispatched ifMatch must be the
+        // version the fresh authorized read just returned. A missing,
+        // negative, or non-safe-integer version is NOT downgraded to the
+        // stale row version — the move refuses instead.
+        const freshVersion = sourceRead.view.version
+        if (
+          typeof freshVersion !== 'number' ||
+          !Number.isSafeInteger(freshVersion) ||
+          freshVersion < 0
+        ) {
+          throw new GfsMoveRefusalError(
+            'source-precondition-unavailable',
+            gfsDropRefusalMessage('source-precondition-unavailable')
+          )
+        }
+        ifMatchVersion = freshVersion
+        // The destination identity is ALWAYS revalidated through its
+        // immutable URI; a cached path observation is never a substitute.
+        if (!destination.gfsUri) {
           throw new GfsMoveRefusalError('unavailable', gfsDropRefusalMessage('unavailable'))
+        }
+        const targetRead = await resolveEndpointView(destination.gfsUri, destination.resourceId)
+        if (!isGestureEpochCurrent(epoch)) return
+        if (targetRead.status === 'unauthorized') {
+          raiseSessionLostNotice()
+          return
+        }
+        if (targetRead.status === 'missing' || targetRead.status === 'mismatched') {
+          throw new GfsMoveRefusalError(
+            'target-unavailable',
+            gfsDropRefusalMessage('target-unavailable')
+          )
+        }
+        if (targetRead.status === 'failed') {
+          throw new GfsMoveRefusalError('unavailable', gfsDropRefusalMessage('unavailable'))
+        }
+        if (targetRead.view.kind !== 'directory') {
+          throw new GfsMoveRefusalError(
+            'target-unavailable',
+            gfsDropRefusalMessage('target-unavailable')
+          )
+        }
+        verifiedDestinationPath = destination.path === '/' ? '/' : targetRead.view.path
+        const structure = decideDragPathStructure({
+          sourcePath: sourceRead.view.path,
+          targetPath: verifiedDestinationPath,
+        })
+        if (structure.kind === 'deny') {
+          throw new GfsMoveRefusalError(
+            structure.reason,
+            gfsDropRefusalMessage(structure.reason, {
+              sourceName: source.name,
+              targetName: destination.name,
+            })
+          )
         }
       }
       // Seed the ladder with the destination's known children (the same cache
@@ -1919,9 +2008,14 @@ export function GfsBrowser(): React.JSX.Element {
               // Transport loss with the request possibly dispatched: the
               // outcome is UNKNOWN. Never claim the move failed and never
               // repeat the PATCH — verify once by identity (matrix B7/B8).
+              // Anything the single read cannot PROVE stays unknown: the
+              // PATCH may still be executing, or another actor may have
+              // moved the source, so a differing parent is not a failure
+              // verdict.
               const settled = await settleUnknownTransportMove(
                 source,
-                verifiedDestinationPath,
+                destination,
+                moveName,
                 options.revalidate.epoch
               )
               if (!isGestureEpochCurrent(options.revalidate.epoch)) return
@@ -1929,12 +2023,6 @@ export function GfsBrowser(): React.JSX.Element {
                 moved = true
                 moveResult = undefined
                 break
-              }
-              if (settled === 'not-moved') {
-                throw new GfsMoveRefusalError(
-                  'move-not-completed',
-                  gfsDropRefusalMessage('move-not-completed')
-                )
               }
               throw new GfsMoveRefusalError(
                 'unknown-outcome',
@@ -1965,14 +2053,18 @@ export function GfsBrowser(): React.JSX.Element {
           ? undefined
           : movedResource?.version
       // plan §3.4 convergence: invalidate the observed OLD and NEW parent
-      // listings through the shared pure planner. The old parent is the
-      // observed folder whose listing held the source — the trail parent for
-      // a trail folder, otherwise the folder currently on screen.
+      // listings through the shared pure planner. For drag commits the old
+      // parent is the PHYSICAL source parent captured at the drag boundary —
+      // never a response-time guess, because the operator may have navigated
+      // while the commit was in flight. Non-drag callers (the Move dialog)
+      // keep the trail-derived observation.
       const movedCrumbIndex = crumbs.findIndex(crumb => crumb.id === source.resourceId)
       const oldParentId =
-        movedCrumbIndex > 0
-          ? (crumbs[movedCrumbIndex - 1]?.id ?? null)
-          : (currentCrumbRef.current?.id ?? null)
+        options.revalidate?.oldParentId !== undefined
+          ? options.revalidate.oldParentId
+          : movedCrumbIndex > 0
+            ? (crumbs[movedCrumbIndex - 1]?.id ?? null)
+            : (currentCrumbRef.current?.id ?? null)
       const childParentByResourceId = new Map<string, string | null>()
       for (const [folderId, page] of childCacheRef.current.entries()) {
         for (const item of page.items) childParentByResourceId.set(item.resourceId, folderId)
@@ -2034,9 +2126,12 @@ export function GfsBrowser(): React.JSX.Element {
         }
         return
       }
-      // Refresh the live current location — the user stays where they are;
+      // Refresh the LIVE current location — the user stays where they are;
       // a drag move never auto-navigates to the destination (plan §3.4).
-      await refreshCurrent()
+      // Reading currentCrumbRef HERE (not a render-time crumb) is what makes
+      // the refresh truthful when the operator navigated while the commit
+      // was in flight: the folder on screen is the one that reloads.
+      await refreshLiveCurrent()
     } catch (err) {
       if (bubbleError) throw err
       if (err instanceof GfsMoveRefusalError) {
@@ -2052,27 +2147,47 @@ export function GfsBrowser(): React.JSX.Element {
     }
   }
 
-  /** Resolve the moved source ONCE by immutable URI after a transport loss
-   *  on the move PATCH (matrix B7/B8): a fresh path whose parent IS the
-   *  destination proves the move landed; an unchanged path proves it did
-   *  not; a failed verification keeps the outcome honestly unknown. */
+  /** Resolve the outcome of a transport-lost move PATCH (matrix B7/B8) with
+   *  ONE bounded read per endpoint and no repeat dispatch.
+   *
+   *  'moved' requires POSITIVE proof: the source resolves by immutable URI
+   *  under the destination's CURRENT canonical path — re-resolved by URI so
+   *  a remotely moved destination still verifies identity-correctly — AND
+   *  carries the exact name this PATCH requested (or its unrenamed name).
+   *  Everything else stays 'unknown': the PATCH may still be executing, the
+   *  source may have been moved by another actor, or the endpoints cannot
+   *  be established at all. A differing parent NEVER reads as a failure
+   *  verdict, and a source resolved AT the root path ('/' — the drive root
+   *  itself) can never prove a move into root landed: a moved item lives at
+   *  '/<name>'. */
   async function settleUnknownTransportMove(
     source: GfsChild,
-    destinationPath: string | null,
+    destination: { resourceId: string; gfsUri?: string | null },
+    requestedName: string,
     epoch: number
-  ): Promise<'moved' | 'not-moved' | 'unknown'> {
-    if (destinationPath === null) return 'unknown'
-    const read = await resolveEndpointView(source.gfsUri, source.resourceId)
+  ): Promise<'moved' | 'unknown'> {
+    if (!destination.gfsUri) return 'unknown'
+    const [sourceRead, targetRead] = await Promise.all([
+      resolveEndpointView(source.gfsUri, source.resourceId),
+      resolveEndpointView(destination.gfsUri, destination.resourceId),
+    ])
     if (!isGestureEpochCurrent(epoch)) return 'unknown'
-    if (read.status !== 'resolved' || typeof read.view.path !== 'string') return 'unknown'
-    const destinationCanonical = normalizeCanonicalPath(destinationPath)
-    if (destinationCanonical === null) return 'unknown'
-    const parent = parentPathOf(read.view.path)
-    // null → the resolved path IS the root itself (parent is root by
-    // definition); undefined → the path could not be classified.
-    if (parent === undefined) return 'unknown'
-    const landedParent = parent ?? '/'
-    return landedParent === destinationCanonical ? 'moved' : 'not-moved'
+    if (sourceRead.status !== 'resolved' || targetRead.status !== 'resolved') return 'unknown'
+    if (targetRead.view.kind !== 'directory') return 'unknown'
+    if (typeof sourceRead.view.path !== 'string' || typeof targetRead.view.path !== 'string') {
+      return 'unknown'
+    }
+    const sourcePath = normalizeCanonicalPath(sourceRead.view.path)
+    const destinationPath = normalizeCanonicalPath(targetRead.view.path)
+    if (sourcePath === null || destinationPath === null) return 'unknown'
+    // The drive root itself: a completed move into any folder — including
+    // the root — lands at '/<name>', never at '/'.
+    if (sourcePath === '/') return 'unknown'
+    const parent = parentPathOf(sourcePath)
+    if (parent !== destinationPath) return 'unknown'
+    const leaf = sourcePath.split('/').filter(Boolean).pop()
+    if ((leaf ?? '') !== requestedName) return 'unknown'
+    return 'moved'
   }
 
   /** Rebuild the breadcrumb trail ANCESTRY for a moved trail-folder. The
@@ -2719,7 +2834,12 @@ export function GfsBrowser(): React.JSX.Element {
   // live region.
   const draggedSourceNow = draggingResourceId !== null ? draggingResourceRef.current : null
   let dropHoverAnnouncement = ''
-  if (draggedSourceNow && dragOverCrumbIndex !== null) {
+  if (sessionLost) {
+    // Matrix A11: the session-lost sentence is spoken once through the same
+    // live region that carries hover verdicts, alongside the persistent
+    // banner for sighted users.
+    dropHoverAnnouncement = gfsDropRefusalMessage('session-lost')
+  } else if (draggedSourceNow && dragOverCrumbIndex !== null) {
     const hoveredCrumb = crumbs[dragOverCrumbIndex]
     const verdict = crumbHoverVerdict(draggedSourceNow, dragOverCrumbIndex)
     if (verdict && hoveredCrumb) {
@@ -2777,6 +2897,12 @@ export function GfsBrowser(): React.JSX.Element {
         {error ? (
           <div className="cu-banner cu-banner--error" role="alert">
             {error}
+          </div>
+        ) : null}
+
+        {sessionLost ? (
+          <div className="cu-banner cu-banner--error" role="alert">
+            {gfsDropRefusalMessage('session-lost')}
           </div>
         ) : null}
 
@@ -2842,7 +2968,9 @@ export function GfsBrowser(): React.JSX.Element {
                       aria-current={index === crumbs.length - 1 ? 'page' : undefined}
                       data-drop-state={crumbVerdict ? crumbVerdict.state : undefined}
                       data-drop-reason={
-                        crumbVerdict && crumbVerdict.state === 'denied'
+                        crumbVerdict &&
+                        crumbVerdict.state !== 'allowed' &&
+                        crumbVerdict.state !== 'checking'
                           ? crumbVerdict.reason
                           : undefined
                       }
@@ -2961,7 +3089,11 @@ export function GfsBrowser(): React.JSX.Element {
                       data-drop-target={rowVerdict?.state === 'allowed' ? 'true' : undefined}
                       data-drop-state={rowVerdict ? rowVerdict.state : undefined}
                       data-drop-reason={
-                        rowVerdict && rowVerdict.state === 'denied' ? rowVerdict.reason : undefined
+                        rowVerdict &&
+                        rowVerdict.state !== 'allowed' &&
+                        rowVerdict.state !== 'checking'
+                          ? rowVerdict.reason
+                          : undefined
                       }
                       role={rowOpenable ? 'button' : undefined}
                       tabIndex={rowOpenable ? 0 : undefined}
@@ -3301,7 +3433,7 @@ export function GfsBrowser(): React.JSX.Element {
             if (pending) {
               void moveResource(pending.source, pending.destination, {
                 allowNumberedRename,
-                revalidate: { epoch: pending.epoch },
+                revalidate: { epoch: pending.epoch, oldParentId: pending.oldParentId },
               })
             }
           }}

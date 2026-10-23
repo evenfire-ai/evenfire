@@ -28,6 +28,7 @@ describe('gfsDropRefusalTone', () => {
       'source-delete',
       'target-unavailable',
       'source-location-unknown',
+      'session-lost',
     ] as const) {
       expect(gfsDropRefusalTone(reason)).toBe('error')
     }
@@ -38,7 +39,11 @@ describe('gfsDropRefusalTone', () => {
   })
 
   it('maps unknown/unverifiable outcomes to warning (matrix A10/B7)', () => {
-    for (const reason of ['unavailable', 'unknown-outcome', 'move-not-completed'] as const) {
+    for (const reason of [
+      'unavailable',
+      'unknown-outcome',
+      'source-precondition-unavailable',
+    ] as const) {
       expect(gfsDropRefusalTone(reason)).toBe('warning')
     }
   })
@@ -73,12 +78,18 @@ describe('gfsDropRefusalMessage', () => {
     )
   })
 
-  it('distinguishes the three vanish/verify outcomes honestly (A10/B4/B5/B7)', () => {
+  it('distinguishes the three vanish/verify outcomes honestly (A10/A11/B4/B5/B7)', () => {
     expect(gfsDropRefusalMessage('target-unavailable', names)).toBe(
       'This folder is no longer available.'
     )
     expect(gfsDropRefusalMessage('source-location-unknown', names)).toBe(
       'EvenDrive cannot verify this item’s current location. Refresh and try again.'
+    )
+    expect(gfsDropRefusalMessage('source-precondition-unavailable', names)).toBe(
+      'EvenDrive couldn’t confirm this item’s current version. Refresh the folder and try again.'
+    )
+    expect(gfsDropRefusalMessage('session-lost', names)).toBe(
+      'Your session ended. Sign in again to continue moving files.'
     )
     expect(gfsDropRefusalMessage('unavailable', names)).toBe(
       'EvenDrive couldn’t verify this move. Check your connection and try again.'
@@ -109,7 +120,7 @@ describe('gfsDropHoverAnnouncement', () => {
   it('speaks the same reason sentence a refused drop would toast', () => {
     const denied: GfsDropHoverVerdict = { state: 'denied', reason: 'descendant' }
     expect(gfsDropHoverAnnouncement(denied, names)).toBe(gfsDropRefusalMessage('descendant', names))
-    expect(gfsDropHoverAnnouncement({ state: 'same-parent' }, names)).toBe(
+    expect(gfsDropHoverAnnouncement({ state: 'same-parent', reason: 'same-parent' }, names)).toBe(
       gfsDropRefusalMessage('same-parent', names)
     )
   })
@@ -154,6 +165,7 @@ describe('computeGfsDropHoverVerdict', () => {
   it('marks an unhydrated root target unavailable without denying (plan §3.1)', () => {
     expect(computeGfsDropHoverVerdict(crumbFacts({ targetResourceId: null }))).toEqual({
       state: 'unavailable',
+      reason: 'target-unavailable',
     })
   })
 
@@ -168,12 +180,13 @@ describe('computeGfsDropHoverVerdict', () => {
   it('reports the active crumb and the observed own parent as same-parent info (A4)', () => {
     expect(computeGfsDropHoverVerdict(crumbFacts({ targetIsActiveLocation: true }))).toEqual({
       state: 'same-parent',
+      reason: 'same-parent',
     })
     expect(
       computeGfsDropHoverVerdict(
         crumbFacts({ targetResourceId: 'live-tests-id', targetName: 'live tests' })
       )
-    ).toEqual({ state: 'same-parent' })
+    ).toEqual({ state: 'same-parent', reason: 'same-parent' })
   })
 
   it('allows an observed ancestor crumb through the common-anchor proof', () => {

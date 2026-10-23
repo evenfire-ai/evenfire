@@ -218,3 +218,41 @@ decision the plan left open.
   `REQUIRED_JOURNEY_INVENTORY` and fails the selection phase when the
   breadcrumb lanes (file move, root move, active same-parent, ancestor folder
   move) are absent, with unit tests in `test/__tests__/gfsDragAndDropGate.test.ts`.
+
+### QA corrections (2026-10-23, supervisor review round 1)
+
+- **Drop-boundary capture (R7).** Same-parent/no-op facts and the destination
+  identity are computed synchronously in `handleCrumbDrop`; nothing after an
+  await reads live trail state for those checks. A trail reconstruction that
+  lands while root hydration is pending can no longer turn a captured
+  ancestor index into the live active index (regression covered).
+- **Fresh precondition.** The commit re-resolve refuses without a PATCH when
+  the fresh source version is missing, negative, or not a safe integer —
+  never downgraded to the stale row version — and when the fresh source kind
+  no longer matches the captured kind. The destination identity is ALWAYS
+  revalidated through its immutable URI; a cached path observation is never a
+  substitute.
+- **Live-location convergence.** The commit refresh loads the LIVE
+  `currentCrumbRef` location (a render-time crumb could name a folder the
+  operator navigated away from mid-commit), and convergence invalidation uses
+  the physical old parent captured at the drag boundary (regression:
+  navigation mid-commit refreshes the live folder, invalidates the captured
+  old parent and the destination, never navigates away).
+- **Unknown transport outcomes.** The single post-transport verification
+  proves `moved` only positively: source resolves under the destination's
+  CURRENT path (re-resolved by URI) with the exact requested name. A
+  differing parent, a source resolved at `/`, an unreachable destination, or
+  a failed read all stay UNKNOWN with refresh guidance ("Couldn't confirm the
+  move. Refresh before trying again.") and no repeat PATCH — the former
+  `move-not-completed` verdict was removed because one GET cannot prove the
+  PATCH did not land.
+- **Session loss (A11).** A 401 from any drag-pipeline read — admission,
+  commit, or root hydration — classifies as session-lost and raises a
+  persistent sign-in alert (plus the announcement wording) instead of a
+  connection-flavored warning. The API layer's own unauthorized boundary
+  (`AuthExpiredError` + global auth-error handler) is unchanged.
+- **Reason attribute contract.** `data-drop-reason` now carries its reason
+  for every defined state: `denied`, `unavailable` (`target-unavailable`),
+  and `same-parent`; only `allowed`/`checking` stay reason-free. The shared
+  endpoint view/read types moved to `lib/gfsDragFeedback.types.ts` per the
+  frontend style rules.

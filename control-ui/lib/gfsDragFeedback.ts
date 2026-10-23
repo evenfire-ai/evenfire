@@ -23,15 +23,15 @@ export function gfsDropRefusalTone(reason: GfsDropRefusalReason): GfsFeedbackTon
     case 'same-parent':
       return 'info'
     case 'unavailable':
+    case 'source-precondition-unavailable':
     case 'unknown-outcome':
-    case 'move-not-completed':
       return 'warning'
     default:
       return 'error'
   }
 }
 
-/** The persistent (toast) message for a refused or uncertain move. */
+/** The persistent (toast/banner) message for a refused or uncertain move. */
 export function gfsDropRefusalMessage(
   reason: GfsDropRefusalReason,
   names: { sourceName?: string; targetName?: string } = {}
@@ -59,10 +59,12 @@ export function gfsDropRefusalMessage(
       return 'This folder is no longer available.'
     case 'source-location-unknown':
       return 'EvenDrive cannot verify this item’s current location. Refresh and try again.'
+    case 'source-precondition-unavailable':
+      return 'EvenDrive couldn’t confirm this item’s current version. Refresh the folder and try again.'
+    case 'session-lost':
+      return 'Your session ended. Sign in again to continue moving files.'
     case 'unavailable':
       return 'EvenDrive couldn’t verify this move. Check your connection and try again.'
-    case 'move-not-completed':
-      return 'EvenDrive couldn’t complete this move. Check your connection and try again.'
     case 'unknown-outcome':
       return 'Couldn’t confirm the move. Refresh before trying again.'
     default:
@@ -104,14 +106,14 @@ export function gfsDropHoverAnnouncement(
  * atomic server guard to adjudicate.
  */
 export function computeGfsDropHoverVerdict(facts: GfsDropHoverFacts): GfsDropHoverVerdict {
-  if (!facts.targetResourceId) return { state: 'unavailable' }
+  if (!facts.targetResourceId) return { state: 'unavailable', reason: 'target-unavailable' }
   if (facts.targetResourceId === facts.sourceResourceId) return { state: 'denied', reason: 'self' }
   if (
     facts.targetIsActiveLocation ||
     (facts.sourceParentKnown && facts.sourceParentResourceId === facts.targetResourceId) ||
     facts.targetIsSourceParent
   ) {
-    return { state: 'same-parent' }
+    return { state: 'same-parent', reason: 'same-parent' }
   }
   const structure = decideDragStructure({
     source: {
@@ -126,7 +128,7 @@ export function computeGfsDropHoverVerdict(facts: GfsDropHoverFacts): GfsDropHov
     knownSourceAncestorIds: facts.knownSourceAncestorIds,
   })
   if (structure.kind === 'deny') {
-    if (structure.reason === 'same-parent') return { state: 'same-parent' }
+    if (structure.reason === 'same-parent') return { state: 'same-parent', reason: 'same-parent' }
     return { state: 'denied', reason: structure.reason }
   }
   if (structure.kind === 'server-check-required') return { state: 'checking' }

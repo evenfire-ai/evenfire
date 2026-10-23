@@ -14,8 +14,8 @@ export type GfsFeedbackTone = 'info' | 'error' | 'warning'
  * Structure denies (A1–A5) and the operator-plane authority denies (A6–A8,
  * copy-mapped here but never fabricated from local permission bits — the
  * operator plane holds intrinsic authority) come from the shared policy.
- * Resolution/outcome reasons (A10, B4, B5, B7) come from endpoint reads and
- * transport results around the move PATCH.
+ * Resolution/outcome reasons (A10, A11, B4, B5, B7) come from endpoint reads
+ * and transport results around the move PATCH.
  */
 export type GfsDropRefusalReason =
   | GfsStructureRefusalReason
@@ -25,8 +25,9 @@ export type GfsDropRefusalReason =
   | 'unavailable'
   | 'target-unavailable'
   | 'source-location-unknown'
+  | 'source-precondition-unavailable'
+  | 'session-lost'
   | 'unknown-outcome'
-  | 'move-not-completed'
 
 export type GfsStructureRefusalReason =
   | 'self'
@@ -46,8 +47,8 @@ export type GfsDropHoverVerdict =
   | { state: 'allowed'; evidence: GfsDragStructureEvidence }
   | { state: 'checking' }
   | { state: 'denied'; reason: Exclude<GfsStructureRefusalReason, 'same-parent'> }
-  | { state: 'unavailable' }
-  | { state: 'same-parent' }
+  | { state: 'unavailable'; reason: 'target-unavailable' }
+  | { state: 'same-parent'; reason: 'same-parent' }
 
 /** Observed facts one hover verdict is computed from (zero network). */
 export interface GfsDropHoverFacts {
@@ -84,3 +85,27 @@ export interface GfsMoveDestination {
   version?: number
   origin: 'row' | 'crumb'
 }
+
+/**
+ * The slice of a /gfs/resolve response the drag admission/commit reads.
+ * Shared by every endpoint re-resolution path in the drag pipeline.
+ */
+export interface GfsResolvedEndpointView {
+  resourceId: string
+  kind: string
+  path: string | null
+  version?: number
+}
+
+/**
+ * A classified endpoint read. `unauthorized` preserves the session-lost
+ * distinction (matrix A11) so it never reads as a generic connection
+ * failure; `mismatched` marks an immutable URI that now resolves to a
+ * different resource identity.
+ */
+export type GfsEndpointRead =
+  | { status: 'resolved'; view: GfsResolvedEndpointView }
+  | { status: 'missing' }
+  | { status: 'mismatched' }
+  | { status: 'unauthorized' }
+  | { status: 'failed' }

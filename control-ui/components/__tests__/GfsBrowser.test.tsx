@@ -40,6 +40,12 @@ vi.mock('@lib/api', () => ({
   apiSend: vi.fn(),
   controlApiUrl: (path: string) => `/control-api${path}`,
   handleControlUIUnauthorized: vi.fn(),
+  AuthExpiredError: class AuthExpiredError extends Error {
+    constructor(message = 'Auth expired') {
+      super(message)
+      this.name = 'AuthExpiredError'
+    }
+  },
   GFS_UPLOAD_TIMEOUT_MS: 300000,
   getAdminTeams: vi.fn(),
   getAdminUsers: vi.fn(),
@@ -4309,17 +4315,30 @@ describe('GfsBrowser — breadcrumb drop moves', () => {
     let treeReads = 0
     let sourceResolveReads = 0
     const parkedSourceReads: Array<(view: EndpointView) => void> = []
+    const parkedTreeReads: Array<(page: unknown) => void> = []
     const hydrateRoot = options?.hydrateRoot !== false
     // Test-side knobs that do not clobber the base listing mocks.
     const policy = {
       /** Tree reads (1-based) at and after this index throw transport errors. */
       treeErrorFromRead: 0,
-      /** Per-read (1-based) overrides for the SOURCE resolve: a view, or 'failed'. */
-      sourceReadResults: new Map<number, EndpointView | 'failed'>(),
+      /** One exact tree read (1-based) that answers 401 (session lost). */
+      treeUnauthorizedAt: 0,
+      /** Tree reads (1-based) at/after this index park until released. */
+      parkTreeReadsFrom: 0,
+      /** Per-read (1-based) overrides for the SOURCE resolve: a view, 'failed', or 'unauthorized'. */
+      sourceReadResults: new Map<number, EndpointView | 'failed' | 'unauthorized'>(),
       /** Park source reads at/after this index until released. */
       parkSourceReadFrom: 0,
     }
-    const resolveOverride: { uri?: string; result?: 'missing' | 'failed' | EndpointView } = {}
+    const resolveOverride: {
+      uri?: string
+      result?: 'missing' | 'failed' | 'unauthorized' | EndpointView
+    } = {}
+    const treePageFor = (includeRoot: boolean) => ({
+      ...(includeRoot ? { rootResourceId: rootId } : {}),
+      items: [product],
+      nextCursor: null,
+    })
     mockApiGet.mockImplementation(async (path: string, query?: Record<string, string>) => {
       if (path === '/api/v1/gfs/resolve' && query?.uri) {
         if (resolveOverride.uri === query.uri) {
@@ -4329,12 +4348,18 @@ describe('GfsBrowser — breadcrumb drop moves', () => {
           if (resolveOverride.result === 'failed') {
             throw new TypeError('fetch failed')
           }
+          if (resolveOverride.result === 'unauthorized') {
+            throw Object.assign(new Error('401 Unauthorized'), { status: 401 })
+          }
           if (resolveOverride.result) return resolveOverride.result
         }
         if (query.uri === 'gfs://main/r2') {
           sourceResolveReads += 1
           const readResult = policy.sourceReadResults.get(sourceResolveReads)
           if (readResult === 'failed') throw new TypeError('fetch failed')
+          if (readResult === 'unauthorized') {
+            throw Object.assign(new Error('401 Unauthorized'), { status: 401 })
+          }
           if (readResult) return readResult
           if (policy.parkSourceReadFrom > 0 && sourceResolveReads >= policy.parkSourceReadFrom) {
             return new Promise<EndpointView>(resolve => {
@@ -4349,17 +4374,20 @@ describe('GfsBrowser — breadcrumb drop moves', () => {
       }
       if (path === '/api/v1/gfs/tree') {
         treeReads += 1
+        if (policy.treeUnauthorizedAt === treeReads) {
+          throw Object.assign(new Error('401 Unauthorized'), { status: 401 })
+        }
         if (policy.treeErrorFromRead > 0 && treeReads >= policy.treeErrorFromRead) {
           throw new TypeError('fetch failed')
         }
+        if (policy.parkTreeReadsFrom > 0 && treeReads >= policy.parkTreeReadsFrom) {
+          return new Promise(resolve => {
+            parkedTreeReads.push(resolve)
+          })
+        }
         // First load leaves the root synthetic when hydration is disabled;
         // the drop-time retry then hydrates on the next tree read.
-        const includeRoot = hydrateRoot || treeReads > 1
-        return {
-          ...(includeRoot ? { rootResourceId: rootId } : {}),
-          items: [product],
-          nextCursor: null,
-        }
+        return treePageFor(hydrateRoot || treeReads > 1)
       }
       if (path === '/api/v1/gfs/by-path' && query?.path === '/live tests') {
         return { ...views['r3']!, path: '/live tests' }
@@ -4389,6 +4417,9 @@ describe('GfsBrowser — breadcrumb drop moves', () => {
       policy,
       releaseParkedSourceReads(view: EndpointView) {
         for (const release of parkedSourceReads.splice(0)) release(view)
+      },
+      releaseParkedTreeReads() {
+        for (const release of parkedTreeReads.splice(0)) release(treePageFor(true))
       },
     }
   }
@@ -4544,8 +4575,10 @@ describe('GfsBrowser — breadcrumb drop moves', () => {
     const rootCrumb = crumbButton('main')
 
     const transfer = dragRowOverCrumb(abacRow, rootCrumb)
-    // Identity not available yet: warning paint, never a fake denial.
+    // Identity not available yet: warning paint, never a fake denial, with
+    // the reason carried on the dedicated attribute.
     expect(rootCrumb).toHaveAttribute('data-drop-state', 'unavailable')
+    expect(rootCrumb).toHaveAttribute('data-drop-reason', 'target-unavailable')
     expect(screen.getByTestId('gfs-drop-announce')).toHaveTextContent(
       'EvenDrive could not confirm whether you can move into main.'
     )
@@ -4600,6 +4633,7 @@ describe('GfsBrowser — breadcrumb drop moves', () => {
 
     const transfer = dragRowOverCrumb(abacRow, activeCrumb)
     expect(activeCrumb).toHaveAttribute('data-drop-state', 'same-parent')
+    expect(activeCrumb).toHaveAttribute('data-drop-reason', 'same-parent')
     expect(screen.getByTestId('gfs-drop-announce')).toHaveTextContent(
       'abac.md is already in live tests.'
     )
@@ -4904,8 +4938,16 @@ describe('GfsBrowser — breadcrumb drop moves', () => {
     expect(mockApiSend).toHaveBeenCalledTimes(1)
   })
 
-  it('reports a transport-lost PATCH as not-completed when verification proves no move', async () => {
-    breadcrumbTrailFixture()
+  it('keeps a transport-lost PATCH unknown when the source lands under a third folder', async () => {
+    // A differing parent does NOT prove the PATCH failed: it may still be
+    // executing, or another actor may have moved the source. The single
+    // verification read must report unknown — with refresh guidance, never a
+    // failure verdict and never a repeat PATCH.
+    const fixture = breadcrumbTrailFixture()
+    fixture.policy.sourceReadResults.set(3, {
+      ...fixture.views['r2']!,
+      path: '/Elsewhere/abac.md',
+    })
     mockApiSend.mockImplementation(async () => {
       throw new TypeError('fetch failed')
     })
@@ -4920,10 +4962,68 @@ describe('GfsBrowser — breadcrumb drop moves', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move', exact: true }))
 
     expect(
-      await screen.findByText(
-        'EvenDrive couldn’t complete this move. Check your connection and try again.'
-      )
+      await screen.findByText(/Couldn.t confirm the move\. Refresh before trying again\./)
     ).toBeTruthy()
+    expect(screen.getByText(/confirm the move/).closest('.cu-toast')).toHaveClass(
+      'cu-toast--warning'
+    )
+    expect(mockApiSend).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a transport-lost PATCH unknown when the destination cannot be established', async () => {
+    const fixture = breadcrumbTrailFixture()
+    // The PATCH "transport-fails" while the source read would prove the
+    // move — but the destination itself is no longer resolvable, so the
+    // positive proof is incomplete and the outcome stays unknown.
+    mockApiSend.mockImplementation(async () => {
+      fixture.resolveOverride.uri = 'gfs://main/r1'
+      fixture.resolveOverride.result = 'missing'
+      throw new TypeError('fetch failed')
+    })
+    fixture.policy.sourceReadResults.set(3, {
+      ...fixture.views['r2']!,
+      path: '/Product/abac.md',
+    })
+    const list = await browseToLiveTests()
+    const abacRow = rowOf(list, 'abac.md')
+
+    const transfer = dragRowOverCrumb(abacRow, crumbButton('Product'))
+    fireEvent.drop(crumbButton('Product'), { dataTransfer: transfer })
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Move file abac.md to Product',
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move', exact: true }))
+
+    expect(
+      await screen.findByText(/Couldn.t confirm the move\. Refresh before trying again\./)
+    ).toBeTruthy()
+    expect(screen.queryByText(/Moved "abac\.md"/)).toBeNull()
+    expect(mockApiSend).toHaveBeenCalledTimes(1)
+  })
+
+  it('never reads a source resolved at the drive root as a completed move to root', async () => {
+    const fixture = breadcrumbTrailFixture()
+    // The verification read resolves the source AT '/' (the drive root
+    // itself). A completed move lands at '/<name>', so '/' can never prove
+    // this move — the outcome stays unknown.
+    fixture.policy.sourceReadResults.set(3, { ...fixture.views['r2']!, path: '/' })
+    mockApiSend.mockImplementation(async () => {
+      throw new TypeError('fetch failed')
+    })
+    const list = await browseToLiveTests()
+    const abacRow = rowOf(list, 'abac.md')
+
+    const transfer = dragRowOverCrumb(abacRow, crumbButton('Product'))
+    fireEvent.drop(crumbButton('Product'), { dataTransfer: transfer })
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Move file abac.md to Product',
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move', exact: true }))
+
+    expect(
+      await screen.findByText(/Couldn.t confirm the move\. Refresh before trying again\./)
+    ).toBeTruthy()
+    expect(screen.queryByText(/Moved "abac\.md"/)).toBeNull()
     expect(mockApiSend).toHaveBeenCalledTimes(1)
   })
 
@@ -4975,5 +5075,260 @@ describe('GfsBrowser — breadcrumb drop moves', () => {
     ).toBeTruthy()
     expect(mockApiSend).not.toHaveBeenCalled()
     expect(within(list).getByText('specs')).toBeTruthy()
+  })
+
+  it('refuses without a PATCH when the fresh source version is missing', async () => {
+    const fixture = breadcrumbTrailFixture()
+    // Commit-time source read succeeds but carries NO version: the fresh
+    // precondition contract forbids downgrading to the stale row version.
+    fixture.policy.sourceReadResults.set(2, {
+      resourceId: 'id-2',
+      kind: 'file',
+      path: '/Product/live tests/abac.md',
+    })
+    const list = await browseToLiveTests()
+    const abacRow = rowOf(list, 'abac.md')
+
+    const transfer = dragRowOverCrumb(abacRow, crumbButton('Product'))
+    fireEvent.drop(crumbButton('Product'), { dataTransfer: transfer })
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Move file abac.md to Product',
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move', exact: true }))
+
+    expect(
+      await screen.findByText(
+        /EvenDrive couldn.t confirm this item.s current version\. Refresh the folder and try again\./
+      )
+    ).toBeTruthy()
+    expect(mockApiSend).not.toHaveBeenCalled()
+    expect(screen.queryByText(/Moved "abac\.md"/)).toBeNull()
+  })
+
+  it('refuses without a PATCH when the fresh source version is negative', async () => {
+    const fixture = breadcrumbTrailFixture()
+    fixture.policy.sourceReadResults.set(2, { ...fixture.views['r2']!, version: -1 })
+    const list = await browseToLiveTests()
+    const abacRow = rowOf(list, 'abac.md')
+
+    const transfer = dragRowOverCrumb(abacRow, crumbButton('Product'))
+    fireEvent.drop(crumbButton('Product'), { dataTransfer: transfer })
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Move file abac.md to Product',
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move', exact: true }))
+
+    expect(await screen.findByText(/couldn.t confirm this item.s current version/)).toBeTruthy()
+    expect(mockApiSend).not.toHaveBeenCalled()
+  })
+
+  it('refuses without a PATCH when the fresh source kind no longer matches the captured one', async () => {
+    const fixture = breadcrumbTrailFixture()
+    // The immutable URI now resolves to a directory while the captured
+    // source is a file: the read no longer names the captured item.
+    fixture.policy.sourceReadResults.set(2, {
+      ...fixture.views['r2']!,
+      kind: 'directory',
+    })
+    const list = await browseToLiveTests()
+    const abacRow = rowOf(list, 'abac.md')
+
+    const transfer = dragRowOverCrumb(abacRow, crumbButton('Product'))
+    fireEvent.drop(crumbButton('Product'), { dataTransfer: transfer })
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Move file abac.md to Product',
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move', exact: true }))
+
+    expect(
+      await screen.findByText(
+        'EvenDrive cannot verify this item’s current location. Refresh and try again.'
+      )
+    ).toBeTruthy()
+    expect(mockApiSend).not.toHaveBeenCalled()
+  })
+
+  it('keeps same-parent facts captured at drop when a reconstruction lands during root hydration (R7)', async () => {
+    const streamControllers: ReadableStreamDefaultController<Uint8Array>[] = []
+    const fixture = breadcrumbTrailFixture({ hydrateRoot: false })
+    // Park the drop-time root hydration read so the trail can change while
+    // the admission awaits.
+    fixture.policy.parkTreeReadsFrom = 2
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streamControllers.push(controller)
+            init?.signal?.addEventListener('abort', () => controller.close(), { once: true })
+          },
+        })
+        return new Response(body, {
+          status: 200,
+          headers: { 'content-type': 'application/x-ndjson' },
+        })
+      })
+    )
+    const list = await browseToLiveTests()
+    const abacRow = rowOf(list, 'abac.md')
+
+    // Drop onto the (synthetic, unhydrated) root crumb at index 0 of a
+    // three-crumb trail: a real upward move, NOT the active crumb.
+    const transfer = dragRowOverCrumb(abacRow, crumbButton('main'))
+    fireEvent.drop(crumbButton('main'), { dataTransfer: transfer })
+    fireEvent.dragEnd(abacRow, { dataTransfer: transfer })
+
+    // While hydration is pending, a remote change removes the current
+    // folder's ancestry: the hierarchy refresh collapses the trail to the
+    // root alone. Comparing the CAPTURED index (0) against the LIVE active
+    // index would now falsely read as same-parent.
+    fixture.resolveOverride.uri = 'gfs://main/r3'
+    fixture.resolveOverride.result = 'missing'
+    const frame = await controlApiProducerFrame()
+    await act(async () => {
+      streamControllers[0]!.enqueue(new TextEncoder().encode(`${frame}\n`))
+    })
+    await waitFor(() =>
+      expect(within(breadcrumbNav()).queryByRole('button', { name: 'live tests' })).toBeNull()
+    )
+
+    fixture.releaseParkedTreeReads()
+
+    // The admission continues from the drop-boundary facts: no false
+    // "already in" refusal — the confirmation for the root move appears.
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Move file abac.md to main',
+    })
+    expect(screen.queryByText(/is already in/)).toBeNull()
+    void dialog
+  })
+
+  it('refreshes the live folder and captured old parent when the operator navigates mid-commit', async () => {
+    const fixture = breadcrumbTrailFixture()
+    // Park the commit-time SOURCE read so the operator can navigate while
+    // the commit is in flight.
+    fixture.policy.parkSourceReadFrom = 2
+    const { unmount } = renderBrowser()
+    void unmount
+    await waitFor(() => expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull())
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Product' }))[0]!)
+    let list = screen.getByRole('list', { name: 'Current folder resources' })
+    fireEvent.click(await within(list).findByRole('button', { name: 'live tests', exact: true }))
+    await waitFor(() => expect(crumbButton('live tests')).toHaveAttribute('aria-current', 'page'))
+    list = screen.getByRole('list', { name: 'Current folder resources' })
+    await within(list).findByText('abac.md')
+    const abacRow = rowOf(list, 'abac.md')
+
+    const transfer = dragRowOverCrumb(abacRow, crumbButton('Product'))
+    fireEvent.drop(crumbButton('Product'), { dataTransfer: transfer })
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Move file abac.md to Product',
+    })
+    const childrenOfOldParentBefore = mockApiGet.mock.calls.filter(
+      ([path]) => path === '/api/v1/gfs/resources/id-3/children'
+    ).length
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move', exact: true }))
+    // The commit is parked on its source read; navigate to the drive root.
+    fireEvent.click(crumbButton('main'))
+    await waitFor(() => expect(crumbButton('main')).toHaveAttribute('aria-current', 'page'))
+
+    fixture.releaseParkedSourceReads(fixture.views['r2']!)
+
+    // The commit completes against the captured destination and the LIVE
+    // location refreshes: the operator stays at the root with its rows on
+    // screen — never navigated away, never stuck loading.
+    await waitFor(() =>
+      expect(mockApiSend).toHaveBeenCalledWith(
+        'PATCH',
+        '/api/v1/gfs/resources/id-2',
+        { drive: 'main', newParentId: 'id-1', ifMatch: 5 },
+        { drive: 'main' }
+      )
+    )
+    expect(await screen.findByText('Moved "abac.md" to "Product".')).toBeTruthy()
+    await waitFor(() => {
+      expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull()
+      expect(
+        within(screen.getByRole('list', { name: 'Current folder resources' })).getByText('Product')
+      ).toBeTruthy()
+    })
+    expect(crumbButton('main')).toHaveAttribute('aria-current', 'page')
+    // The OLD source parent's listing was invalidated through the captured
+    // drop-boundary parent: re-entering it must re-fetch, not serve cache.
+    const childrenOfOldParentAfter = mockApiGet.mock.calls.filter(
+      ([path]) => path === '/api/v1/gfs/resources/id-3/children'
+    ).length
+    expect(childrenOfOldParentAfter).toBeGreaterThanOrEqual(childrenOfOldParentBefore)
+    await act(async () => {
+      fireEvent.click(
+        within(screen.getByRole('list', { name: 'Current folder resources' })).getByRole('button', {
+          name: 'Product',
+          exact: true,
+        })
+      )
+    })
+    await waitFor(() =>
+      expect(
+        mockApiGet.mock.calls.filter(([path]) => path === '/api/v1/gfs/resources/id-3/children')
+          .length
+      ).toBeGreaterThan(childrenOfOldParentAfter)
+    )
+  })
+
+  it('raises the persistent sign-in alert when an admission read comes back 401 (A11)', async () => {
+    const fixture = breadcrumbTrailFixture()
+    fixture.resolveOverride.uri = 'gfs://main/r1'
+    fixture.resolveOverride.result = 'unauthorized'
+    const list = await browseToLiveTests()
+    const abacRow = rowOf(list, 'abac.md')
+
+    const transfer = dragRowOverCrumb(abacRow, crumbButton('Product'))
+    fireEvent.drop(crumbButton('Product'), { dataTransfer: transfer })
+    fireEvent.dragEnd(abacRow, { dataTransfer: transfer })
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Your session ended. Sign in again to continue moving files.')
+    // Session loss is NOT a connection hiccup: no generic warning toast and
+    // no move admission.
+    expect(screen.queryByText(/couldn.t verify this move/)).toBeNull()
+    expect(mockApiSend).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('raises the persistent sign-in alert when a commit read comes back 401 (A11)', async () => {
+    const fixture = breadcrumbTrailFixture()
+    const list = await browseToLiveTests()
+    const abacRow = rowOf(list, 'abac.md')
+
+    const transfer = dragRowOverCrumb(abacRow, crumbButton('Product'))
+    fireEvent.drop(crumbButton('Product'), { dataTransfer: transfer })
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Move file abac.md to Product',
+    })
+    fixture.resolveOverride.uri = 'gfs://main/r2'
+    fixture.resolveOverride.result = 'unauthorized'
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move', exact: true }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Your session ended. Sign in again to continue moving files.')
+    expect(screen.queryByText(/couldn.t verify this move/)).toBeNull()
+    expect(mockApiSend).not.toHaveBeenCalled()
+  })
+
+  it('raises the persistent sign-in alert when root hydration comes back 401 (A11)', async () => {
+    const fixture = breadcrumbTrailFixture({ hydrateRoot: false })
+    fixture.policy.treeUnauthorizedAt = 2
+    const list = await browseToLiveTests()
+    const abacRow = rowOf(list, 'abac.md')
+
+    const transfer = dragRowOverCrumb(abacRow, crumbButton('main'))
+    fireEvent.drop(crumbButton('main'), { dataTransfer: transfer })
+    fireEvent.dragEnd(abacRow, { dataTransfer: transfer })
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Your session ended. Sign in again to continue moving files.')
+    expect(screen.queryByText(/couldn.t verify this move/)).toBeNull()
+    expect(mockApiSend).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).toBeNull()
   })
 })
