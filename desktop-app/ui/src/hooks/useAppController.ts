@@ -1428,6 +1428,10 @@ export function useAppController() {
           return
         }
 
+        // A chat selection like selectChatAgent's: the drawer shows this Host's
+        // conversation once the user leaves the chat route.
+        lastChatHostRef.current = targetAgent
+
         // Same imperative-fast-path guard as handleSelectChatAgent: `switchToChat`
         // leaves no pending selection, so it only survives while the route (and
         // hence the agent-selection effect's deps) does not change. Opening a
