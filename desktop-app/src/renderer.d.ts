@@ -20,6 +20,7 @@ import {
   DesktopRuntimeConfig,
   DesktopRuntimeConfigHandoffSelection,
   DesktopRuntimeConfigState,
+  DesktopUpdateProgress,
   EntityChangeStreamEvent,
   ExternalChannelsSummary,
   HostActivitySnapshot,
@@ -32,6 +33,7 @@ import {
   LoginBackendHint,
   MessageToolStep,
   PasswordLoginResult,
+  PendingDesktopUpdate,
   PendingWorkflowApproval,
   PrewarmHostResult,
   ProfileSettingsOpenOptions,
@@ -110,6 +112,16 @@ declare global {
           callback: (payload: { externalRestApiBaseUrl: string; appName?: string }) => void
         ) => () => void
         getDesktopReleaseStatus: () => Promise<DesktopReleaseStatus>
+        getPendingDesktopUpdate: () => Promise<PendingDesktopUpdate | null>
+        downloadDesktopUpdate: (
+          expectedVersion: string,
+          restartAfterDownload?: boolean
+        ) => Promise<{ downloaded: true; version: string }>
+        installDesktopUpdate: (expectedVersion: string) => Promise<{ installed: true }>
+        onDesktopUpdateCheckRequested: (callback: () => void) => () => void
+        onDesktopUpdateProgress: (callback: (progress: DesktopUpdateProgress) => void) => () => void
+        onDesktopUpdateDownloaded: (callback: (version: string) => void) => () => void
+        onDesktopUpdateError: (callback: (message: string) => void) => () => void
         getDesktopAppInfo: () => Promise<DesktopAppInfo>
         openDesktopRelease: (releaseUrl: string) => Promise<{ opened: true }>
         onExternalLogout: (callback: () => void) => () => void
