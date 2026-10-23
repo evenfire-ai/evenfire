@@ -1,0 +1,7 @@
+{
+  "status": 400,
+  "body": {
+    "error": "invalid_request",
+    "message": "at most 128 scopes, including those the authorization server requires"
+  }
+}

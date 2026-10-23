@@ -21,7 +21,7 @@ describe('validateWorkflowRecipeLimits egress limits', () => {
         workloads: Array.from({ length: 26 }, (_, index) => ({
           id: `service-${index}`,
           type: 'deployment',
-          image: 'nginx:1.30.1-alpine',
+          image: 'nginx:1.30.6-alpine',
         })),
       } as never,
       config
