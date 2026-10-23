@@ -37,7 +37,7 @@ describe('useAppController team-scoped catalog selection', () => {
   })
 
   it('keeps a team-A-only agent selected through a successful same-principal switch', async () => {
-    const { clerum } = installAppControllerClerum({
+    installAppControllerClerum({
       me: { teamId: 'team-a', teamName: 'Team A' },
       teamDirectory: { items: [], currentTeamId: 'team-a' },
     })
