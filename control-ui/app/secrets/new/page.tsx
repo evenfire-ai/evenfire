@@ -13,6 +13,7 @@ import { IconKey } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { IconX } from '@components/icons'
 import { Button, Field, FormSection, SelectInput, TextInput } from '@components/ui'
+import { MCP_SECRET_NAME_PATTERN } from '@constants/connectorCredentials'
 import { CREATE_FLOW_LOADING } from '@constants/createFlowLoading'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
@@ -35,7 +36,6 @@ import type { CredentialDraftRow } from '@lib/registryCredentialDraft.types'
 
 const HOST_SECRET_LABEL_KEY = 'clerum.io/host-secret'
 const HOST_SECRET_LABEL_VALUE = 'true'
-const MCP_SECRET_NAME_PATTERN = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/
 const LLM_SECRET_NAME_FIELD_ID = 'llm-secret-name'
 const LLM_SECRET_NAME_ERROR_ID = `${LLM_SECRET_NAME_FIELD_ID}-error`
 const LLM_SECRET_NAME_ERROR =

@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
+import { AttachConnectorCredentials } from '@components/AttachConnectorCredentials'
 import { AuthGate } from '@components/AuthGate'
 import { FormSectionsSkeleton } from '@components/BodyLoadingSkeleton'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
@@ -22,6 +23,7 @@ import {
   isRecipeOwned,
   resolveCredentialSurface,
 } from '@components/UpdateConnectorCredentials/resolveCredentialSurface'
+import { Button, FormSection } from '@components/ui'
 import {
   CONNECTOR_EDIT_DEFAULT_TAB,
   CONNECTOR_EDIT_TABS,
@@ -44,6 +46,8 @@ import {
   mergeAccessSummaries,
   sortAccessPrincipals,
 } from '@lib/connectorAccess'
+import { credentialAttachUnavailable, sameCredentialSpec } from '@lib/connectorCredentials'
+import { buildMcpEgressStatus, deriveEgressEditorInputs } from '@lib/egressModel'
 import type { EgressEditorStatus } from '@lib/egressModel'
 import { extractOAuthImmutables, oauthClientSecretRefName } from '@lib/oauthInstall'
 
@@ -78,6 +82,10 @@ export default function EditMcpServerPage() {
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [saving, setSaving] = useState(false)
+  const [reloadTick, setReloadTick] = useState(0)
+  const [attachActive, setAttachActive] = useState(false)
+  const [attachBusy, setAttachBusy] = useState(false)
+  const [egressDirty, setEgressDirty] = useState(false)
   const [saveError, setSaveError] = useState('')
   const [egressBindings, setEgressBindings] = useState<EgressBinding[] | undefined>(undefined)
   const [egressStatus, setEgressStatus] = useState<EgressEditorStatus | null>(null)
@@ -90,10 +98,12 @@ export default function EditMcpServerPage() {
   const [loadingContextAccess, setLoadingContextAccess] = useState(false)
 
   function backToList() {
+    if (attachBusy) return
     router.push(CONTROL_ROUTES.connectors.root)
   }
 
   function selectTab(next: ConnectorEditTab) {
+    if (attachBusy) return
     if (next === CONNECTOR_EDIT_DEFAULT_TAB) {
       router.replace(CONTROL_ROUTES.connectors.edit(name))
     } else {
@@ -101,12 +111,21 @@ export default function EditMcpServerPage() {
     }
   }
 
+  const baselineEgress = useMemo(() => {
+    const inputs = deriveEgressEditorInputs(
+      server?.spec?.egressBindings as EgressBinding[] | undefined,
+      { allowCidr: true }
+    )
+    return buildMcpEgressStatus(inputs.mode, inputs.domainInput, inputs.portInput)
+  }, [server?.spec?.egressBindings])
+
   const handleEgressChange = useCallback(
     (nextBindings: EgressBinding[] | undefined, nextStatus: EgressEditorStatus) => {
       setEgressBindings(nextBindings)
       setEgressStatus(nextStatus)
+      setEgressDirty(!sameCredentialSpec(nextStatus, baselineEgress))
     },
-    []
+    [baselineEgress]
   )
 
   useEffect(() => {
@@ -118,9 +137,11 @@ export default function EditMcpServerPage() {
         const result = await getMcpServer(name)
         if (cancelled) return
         setServer(result)
+        setEgressDirty(false)
         setEgressBindings((result.spec?.egressBindings as EgressBinding[] | undefined) ?? undefined)
       } catch (error) {
         if (!cancelled) {
+          setServer(null)
           setLoadError(error instanceof Error ? error.message : 'Failed to load connector')
         }
       } finally {
@@ -131,7 +152,7 @@ export default function EditMcpServerPage() {
     return () => {
       cancelled = true
     }
-  }, [name])
+  }, [name, reloadTick])
 
   useEffect(() => {
     let cancelled = false
@@ -241,7 +262,7 @@ export default function EditMcpServerPage() {
 
   async function handleSave(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!server?.spec || saving || egressStatus?.errors.length) return
+    if (!server?.spec || saving || attachBusy || egressStatus?.errors.length) return
     setSaving(true)
     setSaveError('')
     try {
@@ -275,6 +296,17 @@ export default function EditMcpServerPage() {
     [server?.metadata]
   )
 
+  const attachUnavailable = server ? credentialAttachUnavailable(server) : undefined
+  const onSpecSaved = useCallback((updated: McpServerResource) => {
+    setAttachActive(true)
+    setServer(updated)
+  }, [])
+  const onAttachFinished = useCallback(() => {
+    setAttachActive(false)
+    setAttachBusy(false)
+    setReloadTick(tick => tick + 1)
+  }, [])
+
   return (
     <AuthGate>
       <DashboardLayout isDetailPage>
@@ -296,6 +328,7 @@ export default function EditMcpServerPage() {
             onChange={selectTab}
             options={CONNECTOR_EDIT_TABS.map(tab => ({
               value: tab,
+              disabled: attachBusy,
               label: CONNECTOR_EDIT_TAB_LABELS[tab],
               href:
                 tab === CONNECTOR_EDIT_DEFAULT_TAB
@@ -304,7 +337,11 @@ export default function EditMcpServerPage() {
             }))}
           />
 
-          {loadError ? <div className="cu-banner cu-banner--error">{loadError}</div> : null}
+          {loadError ? (
+            <div className="cu-banner cu-banner--error" role="alert">
+              {loadError}
+            </div>
+          ) : null}
 
           {loading ? (
             activeTab === 'credentials' ? (
@@ -335,7 +372,39 @@ export default function EditMcpServerPage() {
           ) : server ? (
             activeTab === 'credentials' ? (
               <div className="cu-connector-edit-form">
-                {nonCanonicalSecretName !== undefined ? (
+                {attachActive || !attachUnavailable ? (
+                  <>
+                    <AttachConnectorCredentials
+                      key={name}
+                      serverName={name}
+                      server={server}
+                      registryCredentialSource={registryCredentialSource}
+                      blockedReason={
+                        egressDirty
+                          ? 'Save or discard your egress changes before attaching credentials.'
+                          : saving
+                            ? 'Wait for the egress save to finish.'
+                            : undefined
+                      }
+                      onBusyChange={setAttachBusy}
+                      onSpecSaved={onSpecSaved}
+                      onFinished={onAttachFinished}
+                    />
+                    {egressDirty && !attachBusy ? (
+                      <Button
+                        onClick={() => {
+                          setEgressBindings(
+                            server.spec?.egressBindings as EgressBinding[] | undefined
+                          )
+                          setEgressStatus(null)
+                          setEgressDirty(false)
+                        }}
+                      >
+                        Discard egress changes
+                      </Button>
+                    ) : null}
+                  </>
+                ) : nonCanonicalSecretName !== undefined ? (
                   <div className="cu-banner cu-banner--error" role="alert">
                     This connector stores a non-canonical Secret name:{' '}
                     <code>{JSON.stringify(nonCanonicalSecretName)}</code>. Correct the connector
@@ -349,7 +418,7 @@ export default function EditMcpServerPage() {
                       server.spec as Record<string, unknown>
                     )}
                   />
-                ) : (
+                ) : envSecret ? (
                   <UpdateConnectorCredentials
                     serverName={name}
                     envSecret={envSecret}
@@ -361,6 +430,10 @@ export default function EditMcpServerPage() {
                     // Ownership is a spec fact, independent of observed status.
                     recipeOwned={isRecipeOwned(server.spec as { managed?: boolean } | undefined)}
                   />
+                ) : (
+                  <FormSection title="Connector credentials">
+                    <p className="cu-muted">{attachUnavailable}</p>
+                  </FormSection>
                 )}
               </div>
             ) : activeTab === 'access' ? (
@@ -462,7 +535,7 @@ export default function EditMcpServerPage() {
                   <button
                     type="button"
                     className="cu-btn cu-btn--ghost"
-                    disabled={saving}
+                    disabled={saving || attachBusy}
                     onClick={backToList}
                   >
                     Cancel
@@ -470,7 +543,7 @@ export default function EditMcpServerPage() {
                   <button
                     type="submit"
                     className="cu-btn cu-btn--primary"
-                    disabled={saving || Boolean(egressStatus?.errors.length)}
+                    disabled={saving || attachBusy || Boolean(egressStatus?.errors.length)}
                   >
                     {saving ? 'Saving...' : 'Save egress'}
                   </button>
