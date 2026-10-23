@@ -56,6 +56,35 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     expect(duplicates, `duplicate migration slot(s):\n${duplicates.join('\n')}`).toEqual([])
   })
 
+  it('keeps current-dev password migrations before the relocated Task 106 sequence', async () => {
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    const versions = CONTROL_API_MIGRATIONS.map(migration => migration.version)
+    const parentDev = [
+      '0126_bug192_password_admission',
+      '0127_password_evaluation_retention',
+      '0128_password_work_ownership',
+    ]
+    const incomingDev = '0129_workflow_schedules_concurrency_policy'
+    const task106 = [
+      '0130_user_access_foundation',
+      '0131_invitation_delivery_commands',
+      '0132_catalog_utf8_ordering',
+      '0133_composable_catalog_revisions',
+      '0134_legacy_password_security_epoch_backfill',
+    ]
+
+    expect(
+      versions.slice(versions.indexOf(parentDev[0]!), versions.indexOf(parentDev[0]!) + 3)
+    ).toEqual(parentDev)
+    expect(versions[versions.indexOf(parentDev.at(-1)!) + 1]).toBe(incomingDev)
+    expect(versions.indexOf(incomingDev)).toBeLessThan(versions.indexOf(task106[0]!))
+    expect(
+      versions.slice(versions.indexOf(task106[0]!), versions.indexOf(task106[0]!) + 5)
+    ).toEqual(task106)
+    expect(versions.indexOf(parentDev.at(-1)!)).toBeLessThan(versions.indexOf(task106[0]!))
+    expect(versions.at(-1)).toBe(task106.at(-1))
+  })
+
   it('keeps legacy aliases unique and distinct from current versions', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const current = new Set(CONTROL_API_MIGRATIONS.map(migration => migration.version))
@@ -218,6 +247,10 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
 
     expect(migration).toBeDefined()
     if (!migration) return
+    expect(migration.legacyVersions).toEqual([
+      '0101_mcp_secret_rollback_permits',
+      '0109_mcp_secret_rollback_permits',
+    ])
 
     const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
     await migration.apply({ query } as never)

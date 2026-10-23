@@ -68,6 +68,7 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
     const { clerumErrorHandler } = await import('../src/http/errorHandler.js')
     const { createExternalInvitationsRouter } =
       await import('../src/routes/external/invitations.js')
+    const { createExternalAuthRouter } = await import('../src/routes/external/auth.js')
     const { createExternalUsersRouter } = await import('../src/routes/external/users.js')
 
     controlApp = express()
@@ -82,6 +83,7 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
     const controlApi = express.Router()
     controlApi.use('/external', requireInternalService('external-rest-api'))
     controlApi.use(createExternalInvitationsRouter())
+    controlApi.use(createExternalAuthRouter({} as Parameters<typeof createExternalAuthRouter>[0]))
     controlApi.use(createExternalUsersRouter({} as Parameters<typeof createExternalUsersRouter>[0]))
     controlApp.use('/api/v1', controlApi)
     controlApp.use(clerumErrorHandler)
@@ -219,11 +221,26 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
     const session = await acceptedInvitationSession()
     const setPassword = await invitationPasswordRequest(session, nextSourceIp(), currentPassword)
     expect(setPassword.status).toBe(200)
+    expect(setPassword.body.reauthenticationRequired).toBe(true)
+    expect(String(setPassword.headers['set-cookie'])).toContain('profile_session=;')
+    await db.pool.query(
+      "UPDATE password_verification_pace SET next_permit = clock_timestamp() - interval '1 second'"
+    )
+    const login = await request(publicApp)
+      .post('/api/v1/auth/password-login')
+      .set('x-forwarded-for', nextSourceIp())
+      .send({ email: session.email, password: currentPassword })
+      .expect(200)
+    expect(login.body.token).toEqual(expect.any(String))
     const user = await db.pool.query('SELECT password_hash FROM users WHERE id = $1', [
       session.userId,
     ])
     expect(user.rows[0].password_hash).toEqual(expect.any(String))
-    return { ...session, passwordHash: user.rows[0].password_hash as string }
+    return {
+      ...session,
+      token: login.body.token as string,
+      passwordHash: user.rows[0].password_hash as string,
+    }
   }
 
   it('returns a sanitized busy response, preserves invitation state, and succeeds on retry', async () => {
@@ -253,7 +270,8 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
 
     const retried = await invitationPasswordRequest(session, sourceIp)
     expect(retried.status).toBe(200)
-    expect(String(retried.headers['set-cookie'])).toContain('profile_session=')
+    expect(retried.body.reauthenticationRequired).toBe(true)
+    expect(String(retried.headers['set-cookie'])).toContain('profile_session=;')
     expect(
       await bcrypt.compare(
         invitationPassword,
@@ -377,12 +395,13 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
       expect(response.status, JSON.stringify(response.body)).toBe(200)
       expect(response.body).toMatchObject({
         passwordUpdated: true,
+        reauthenticationRequired: true,
         purpose,
         status: 'accepted',
         email,
         role,
       })
-      expect(String(response.headers['set-cookie'])).toContain('profile_session=')
+      expect(String(response.headers['set-cookie'])).toContain('profile_session=;')
 
       const invitationRow = await db.pool.query(
         'SELECT purpose, status, accepted_user_id FROM invitations WHERE id = $1',
@@ -407,7 +426,16 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
       )
       expect(memberships.rows).toEqual([{ team_id: teamId, role, status: 'active' }])
 
-      const sessionCookie = String(response.headers['set-cookie'])
+      expect(response.body).not.toHaveProperty('token')
+      await db.pool.query(
+        "UPDATE password_verification_pace SET next_permit = clock_timestamp() - interval '1 second'"
+      )
+      const login = await request(publicApp)
+        .post('/api/v1/auth/password-login')
+        .set('x-forwarded-for', nextSourceIp())
+        .send({ email, password })
+        .expect(200)
+      const sessionCookie = String(login.headers['set-cookie'])
         .split(';', 1)[0]
         .replace(/^profile_session=/, '')
       const identity = await request(publicApp)
@@ -443,7 +471,8 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
 
     const retried = await invitationPasswordRequest(session, sourceIp)
     expect(retried.status).toBe(200)
-    expect(String(retried.headers['set-cookie'])).toContain('profile_session=')
+    expect(retried.body.reauthenticationRequired).toBe(true)
+    expect(String(retried.headers['set-cookie'])).toContain('profile_session=;')
   })
 
   it('maps authenticated password-change authority outcomes and permits a later retry', async () => {
@@ -492,5 +521,81 @@ realPg('R2-M1/R2-M2 public password authority contract on PostgreSQL 16', () => 
         ])
       ).rows[0].password_hash
     ).toBe(unavailableMember.passwordHash)
+  })
+
+  it('revokes the pre-reset session, sets no session, rejects the old password, and accepts a fresh login', async () => {
+    const member = await memberWithPassword()
+    const sessionCookie = `profile_session=${member.token}`
+    const beforeReset = await request(publicApp).get('/api/v1/me').set('cookie', sessionCookie)
+    expect(beforeReset.status).toBe(200)
+    expect(beforeReset.body).toMatchObject({ id: member.userId, email: member.email })
+
+    const { createSilentPasswordResetInvitation } =
+      await import('../src/services/directory/passwordResetInvitations.js')
+    const invitation = await createSilentPasswordResetInvitation({
+      inviteeName: 'Synthetic pre-reset session',
+      email: member.email,
+    })
+    const flowToken = `synthetic-reset-revokes-${randomBytes(20).toString('hex')}`
+    invitationFlowFixtures.set(flowToken, {
+      email: member.email,
+      invitationUuid: invitation.token,
+    })
+    const resetPassword = `Synthetic-Reset-Revokes-${randomBytes(8).toString('hex')}`
+
+    const reset = await request(publicApp)
+      .post('/api/v1/invitations/password')
+      .set('cookie', sessionCookie)
+      .set('origin', 'http://127.0.0.1')
+      .set('x-forwarded-for', nextSourceIp())
+      .send({
+        token: flowToken,
+        email: member.email,
+        invitationId: invitation.id,
+        password: resetPassword,
+      })
+
+    expect(reset.status, JSON.stringify(reset.body)).toBe(200)
+    expect(reset.body).toMatchObject({
+      userId: member.userId,
+      passwordUpdated: true,
+      reauthenticationRequired: true,
+    })
+    expect(reset.body).not.toHaveProperty('token')
+    expect(reset.body).not.toHaveProperty('sessionContext')
+    expect(String(reset.headers['set-cookie'])).toContain('profile_session=;')
+    expect(String(reset.headers['set-cookie'])).not.toMatch(/profile_session=[^;]+/)
+
+    const revoked = await request(publicApp).get('/api/v1/me').set('cookie', sessionCookie)
+    expect(revoked.status).toBe(401)
+
+    await db.pool.query(
+      "UPDATE password_verification_pace SET next_permit = clock_timestamp() - interval '1 second'"
+    )
+    const stalePasswordLogin = await request(publicApp)
+      .post('/api/v1/auth/password-login')
+      .set('x-forwarded-for', nextSourceIp())
+      .send({ email: member.email, password: currentPassword })
+    expect(stalePasswordLogin.status).toBe(401)
+    await db.pool.query(
+      "UPDATE password_verification_pace SET next_permit = clock_timestamp() - interval '1 second'"
+    )
+    const login = await request(publicApp)
+      .post('/api/v1/auth/password-login')
+      .set('x-forwarded-for', nextSourceIp())
+      .send({ email: member.email, password: resetPassword })
+    expect(login.status).toBe(200)
+    expect(login.body.token).toEqual(expect.any(String))
+    const freshCookie = `profile_session=${login.body.token as string}`
+    const freshSession = await request(publicApp).get('/api/v1/me').set('cookie', freshCookie)
+    expect(freshSession.status).toBe(200)
+    expect(freshSession.body).toMatchObject({ id: member.userId, email: member.email })
+    expect(
+      await bcrypt.compare(
+        resetPassword,
+        (await db.pool.query('SELECT password_hash FROM users WHERE id = $1', [member.userId]))
+          .rows[0].password_hash
+      )
+    ).toBe(true)
   })
 })

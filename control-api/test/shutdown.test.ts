@@ -17,6 +17,14 @@ describe('Control API shutdown', () => {
     expect(poolIndex).toBeGreaterThan(cronIndex)
   })
 
+  it('stops both database-backed dispatchers and the access indexer before pools close', () => {
+    const names = [...CONTROL_API_SHUTDOWN_STEP_NAMES] as string[]
+    const corePoolIndex = names.indexOf('core-database-pool')
+
+    expect(corePoolIndex).toBeGreaterThan(names.indexOf('entity-change-dispatcher'))
+    expect(corePoolIndex).toBeGreaterThan(names.indexOf('operational-access-indexer'))
+  })
+
   it('closes every registered resource in order and continues after failures', async () => {
     const completed: string[] = []
     const actions = Object.fromEntries(

@@ -92,8 +92,10 @@ describe('accepted invitation password authority outcomes', () => {
       id: 'synthetic-invitation-row',
       passwordUpdated: true,
       status: 'accepted',
+      reauthenticationRequired: true,
     })
-    expect(String(retried.headers['set-cookie'])).toContain('profile_session=test-session')
+    expect(String(retried.headers['set-cookie'])).toContain('profile_session=;')
+    expect(String(retried.headers['set-cookie'])).not.toContain('test-session')
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 

@@ -2,6 +2,19 @@ import { randomUUID } from 'node:crypto'
 
 const labels = ['83', '150', '250', 'workflow']
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const safeErrorName = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
+const safeErrorCode = /^[A-Z0-9][A-Z0-9_.:-]{0,63}$/
+
+// Fixture errors can cross the container boundary. Preserve only bounded
+// class/code fields: messages may contain SQL, credentials, tokens, or identity
+// data. Nested causes remain structured and bounded without exposing raw text.
+export function describeFixtureError(error) {
+  const value = error && typeof error === 'object' ? error : {}
+  const name = safeErrorName.test(value.name ?? '') ? value.name : 'UnknownError'
+  const code = safeErrorCode.test(value.code ?? '') ? value.code : undefined
+  const cause = value.cause && value.cause !== error ? describeFixtureError(value.cause) : undefined
+  return { name, ...(code ? { code } : {}), ...(cause ? { cause } : {}) }
+}
 
 function requireValue(condition, message) {
   if (!condition) throw new Error(message)
@@ -322,12 +335,14 @@ export async function createFixtureIdentities(
     journal.status = 'created'
     await persist(saveJournal, journal)
     return journal
-  } catch {
+  } catch (error) {
     // A failed COMMIT acknowledgement is ambiguous. Recorded random IDs permit
     // recovery without inferring ownership from a later same-email lookup.
     journal.status = 'recovery-required'
     await persist(saveJournal, journal)
-    throw new Error('Fixture creation failed; recover using the recorded identity journal')
+    throw new Error('Fixture creation failed; recover using the recorded identity journal', {
+      cause: describeFixtureError(error),
+    })
   }
 }
 
@@ -638,9 +653,11 @@ export async function cleanupFixtureIdentities(
     journal.cleanupOutcome = outcome
     await persist(saveJournal, journal)
     return { outcome, auditRetention: 'preserved' }
-  } catch {
+  } catch (error) {
     journal.status = 'recovery-required'
     await persist(saveJournal, journal)
-    throw new Error('Fixture cleanup refused or failed; retain journal for recovery')
+    throw new Error('Fixture cleanup refused or failed; retain journal for recovery', {
+      cause: describeFixtureError(error),
+    })
   }
 }

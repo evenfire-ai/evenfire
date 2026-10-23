@@ -54,6 +54,10 @@ import {
 
 const ADMIN_PASSWORD_MIN_LENGTH = 8
 const ADMIN_PASSWORD_MAX_LENGTH = 256
+// A replay proves another request already consumed the Desktop invitation and
+// established its password. This completion therefore reports that it did not
+// complete Desktop access instead of overwriting the password that request set.
+const DESKTOP_ACCESS_ALREADY_ACCEPTED_REASON = 'desktop_invitation_already_accepted'
 
 const logger = rootLogger.child({ module: 'admin-auth' })
 
@@ -520,7 +524,11 @@ export function createAdminAuthRouter(): Router {
             )
             return { status: 409, body: { error: acceptedDesktopAccess.error } }
           }
-          if (acceptedDesktopAccess?.data?.userId && desktopAccess) {
+          // An acceptance replay consumed no pending Desktop invitation: another
+          // request already accepted it, possibly setting its own password. The
+          // replay must not write a password over that request's credential.
+          const desktopAccessReplayed = acceptedDesktopAccess?.data?.replay === true
+          if (acceptedDesktopAccess?.data?.userId && desktopAccess && !desktopAccessReplayed) {
             const passwordResult = await setInvitationPasswordForUser(
               acceptedDesktopAccess.data.userId,
               validation.email,
@@ -538,8 +546,13 @@ export function createAdminAuthRouter(): Router {
             body: {
               completed: true,
               desktopAccessCompleted: Boolean(
-                acceptedDesktopAccess && !('error' in acceptedDesktopAccess)
+                acceptedDesktopAccess &&
+                !('error' in acceptedDesktopAccess) &&
+                !desktopAccessReplayed
               ),
+              ...(desktopAccessReplayed
+                ? { desktopAccessReason: DESKTOP_ACCESS_ALREADY_ACCEPTED_REASON }
+                : {}),
               login: {
                 username: result.email || result.username,
               },

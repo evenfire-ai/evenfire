@@ -146,7 +146,8 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
       })
       .expect(200)
     expect(reset.body).not.toHaveProperty('sessionContext')
-    expect(reset.body.token).toEqual(expect.any(String))
+    expect(reset.body.reauthenticationRequired).toBe(true)
+    expect(reset.body).not.toHaveProperty('token')
 
     const replay = await request(app)
       .post('/external/invitations/password-token')
@@ -158,13 +159,6 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
       })
       .expect(409)
     expect(replay.body).not.toHaveProperty('token')
-
-    const access = await request(app)
-      .post('/external/auth/verify')
-      .send({ token: reset.body.token })
-    expect(access.status).toBe(200)
-    expect(access.body.claims).toMatchObject({ userId, email: 'member@example.invalid' })
-    return access.body.claims
   }
   beforeAll(async () => {
     admin = new Pool({ connectionString: adminUrl })
@@ -230,7 +224,7 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
       const response = await login(email)
       expect({ status: response.status, body: response.body }).toEqual({
         status: 401,
-        body: { error: 'invalid_credentials' },
+        body: { error: 'Unauthorized' },
       })
     }
   )
@@ -252,7 +246,7 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
     await holder.pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, userId])
     const response = await login('member@example.invalid', password)
     expect(response.status).toBe(401)
-    expect(response.body).toEqual({ error: 'invalid_credentials' })
+    expect(response.body).toEqual({ error: 'Unauthorized' })
     expect(compare).toHaveBeenCalledTimes(1)
     expect(compare.mock.calls[0][1]).not.toBe(hash)
     expect(bcrypt.getRounds(compare.mock.calls[0][1] as string)).toBe(12)
@@ -336,7 +330,7 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
       ).status
     ).toBe(429)
   })
-  it('restores authenticated access during identifier cooldown and preserves public attempts', async () => {
+  it('requires reauthentication during identifier cooldown and preserves public attempts', async () => {
     for (let i = 0; i < 5; i++) {
       await openPace()
       await login('member@example.invalid', 'wrong', `192.0.2.${40 + i}`)
@@ -363,8 +357,7 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
       "INSERT INTO team_members(team_id, user_id, role, status) VALUES ($1, $2, 'admin', 'active')",
       [teamId, userId]
     )
-    const claims = await recoverPassword('Synthetic-BUG192-recovered-during-identifier-cooldown')
-    expect(claims).toMatchObject({ teamId, role: 'admin' })
+    await recoverPassword('Synthetic-BUG192-recovered-during-identifier-cooldown')
     const stateAfterRecovery = (
       await holder.pool.query(
         'SELECT attempts FROM password_identifier_state WHERE identifier_key = $1',
@@ -382,6 +375,7 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
       '192.0.2.50'
     )
     expect(stillDenied.status).toBe(429)
+    expect(stillDenied.body.error).toBe('rate_limited')
     expect(compare.mock.calls.length).toBe(comparisons)
     expect(await denialCount('identifier_attempts')).toBe(attemptDenials + 1)
   })
@@ -476,8 +470,11 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
     expect(recoveryUpdateCommitted).toBe(true)
     expect(result).toBeDefined()
     expect(result).toMatchObject({
-      data: { passwordUpdated: true, sessionContext: { userId } },
+      data: { passwordUpdated: true },
     })
+    const resultData = (result as { data: Record<string, unknown> }).data
+    expect(resultData).not.toHaveProperty('sessionContext')
+    expect(resultData).not.toHaveProperty('token')
     expect(
       (
         await holder.pool.query('SELECT id, status FROM invitations WHERE id = ANY($1::uuid[])', [

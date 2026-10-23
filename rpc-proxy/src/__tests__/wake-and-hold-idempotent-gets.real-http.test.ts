@@ -18,6 +18,7 @@ const serviceMock = vi.hoisted(() => ({
   listAllowedServersForUser: vi.fn(),
   resolveServerConnectionForUser: vi.fn(),
   resolveHostConnectionForUser: vi.fn(),
+  resolveArtifactReadHostConnectionForUser: vi.fn(),
   validateRpcRequest: vi.fn(),
   forwardRpcToServer: vi.fn(),
   forwardHostMessageToHost: vi.fn(),
@@ -92,11 +93,13 @@ async function startUpstream(handler: Handler): Promise<void> {
     server!.listen(0, '127.0.0.1', resolve)
   })
   const { port } = server.address() as AddressInfo
-  serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+  const connection = {
     name: 'chatllm',
     url: `http://127.0.0.1:${port}`,
     headers: {},
-  })
+  }
+  serviceMock.resolveHostConnectionForUser.mockResolvedValue(connection)
+  serviceMock.resolveArtifactReadHostConnectionForUser.mockResolvedValue(connection)
 }
 
 /** Ends the TCP connection without a response: undici reports it as `fetch failed`. */

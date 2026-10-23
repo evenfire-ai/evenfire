@@ -1,6 +1,7 @@
 import type { NextFunction, Response } from 'express'
 import { Router } from 'express'
-import { ControlApiError, controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
+import { controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
+import { publicCorrelationId, sanitizeControlApiPublicError } from '../http/publicApiError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
 
 /**
@@ -33,10 +34,13 @@ const PASSTHROUGH_HEADERS = [
 ] as const
 
 function forwardControlApiError(error: unknown, res: Response, next: NextFunction): void {
-  if (error instanceof ControlApiError && PROPAGATED_STATUSES.has(error.status)) {
-    const body =
-      error.body && typeof error.body === 'object' ? error.body : { error: String(error.message) }
-    res.status(error.status).json(body)
+  const sanitized = sanitizeControlApiPublicError(
+    error,
+    PROPAGATED_STATUSES,
+    publicCorrelationId(res.req)
+  )
+  if (sanitized) {
+    res.status(sanitized.status).json(sanitized.body)
     return
   }
   next(error)
@@ -80,7 +84,15 @@ export function createContextSharedFilesystemsRouter(): Router {
     async (req: AuthedRequest, res, next) => {
       try {
         const sessionToken = extractAuthToken(req)
-        const subPath = req.params[0] ? `/${req.params[0]}` : '/'
+        // Express decodes the wildcard once. Re-encode each segment so a
+        // caller-supplied `?` or `#` stays data inside one segment instead of
+        // changing the pathname, while a real `/` keeps its hierarchy.
+        const wildcard = req.params[0] ?? ''
+        const encodedSubPath = wildcard
+          .split('/')
+          .map(segment => encodeURIComponent(segment))
+          .join('/')
+        const subPath = wildcard ? `/${encodedSubPath}` : '/'
         const queryString = (() => {
           const idx = req.originalUrl.indexOf('?')
           return idx === -1 ? '' : req.originalUrl.slice(idx)
@@ -88,8 +100,9 @@ export function createContextSharedFilesystemsRouter(): Router {
         const upstreamRes = await controlApiStreamRequest(
           req.method === 'HEAD' ? 'HEAD' : 'GET',
           `/external/contexts/${encodeURIComponent(req.params.contextId)}` +
-            `/shared-filesystems/${encodeURIComponent(req.params.sfsName)}/proxy${subPath}${queryString}`,
+            `/shared-filesystems/${encodeURIComponent(req.params.sfsName)}/proxy${subPath}`,
           {
+            rawQueryString: queryString,
             userSessionToken: sessionToken,
             throwOnHttpError: false,
           }

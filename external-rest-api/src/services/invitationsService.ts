@@ -44,7 +44,8 @@ export async function listPendingInvitations(email: string, sessionToken: string
 
 export async function acceptInvitation(
   token: string,
-  email: string
+  email: string,
+  sessionContract?: 'v2'
 ): Promise<{
   error?: 'not_found' | 'forbidden' | 'not_pending' | 'expired' | 'invalid'
   data?: {
@@ -55,7 +56,11 @@ export async function acceptInvitation(
     role: string
     email: string
     userId: string
-    token: string
+    // A replay of an already accepted invitation is an explicit success without
+    // a session: control-api does not mint one for a token that no longer
+    // proves a pending capability.
+    replay?: true
+    token?: string
   }
 }> {
   try {
@@ -67,21 +72,24 @@ export async function acceptInvitation(
       role: string
       email: string
       userId: string
-      token: string
+      replay?: true
+      token?: string
     }>('POST', '/external/invitations/accept', {
       body: {
         email,
         token,
+        ...(sessionContract ? { sessionContract } : {}),
       },
     })
     return { data }
   } catch (error) {
-    const message = error instanceof Error ? error.message : ''
-    if (message.includes('(400)')) return { error: 'invalid' }
-    if (message.includes('(404)')) return { error: 'not_found' }
-    if (message.includes('(403)')) return { error: 'forbidden' }
-    if (message.includes('(410)')) return { error: 'expired' }
-    return { error: 'not_pending' }
+    if (!(error instanceof ControlApiError)) throw error
+    if (error.status === 400) return { error: 'invalid' }
+    if (error.status === 404) return { error: 'not_found' }
+    if (error.status === 403) return { error: 'forbidden' }
+    if (error.status === 410) return { error: 'expired' }
+    if (error.status === 409) return { error: 'not_pending' }
+    throw error
   }
 }
 

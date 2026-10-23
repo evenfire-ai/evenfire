@@ -9,6 +9,7 @@ import React, {
   useRef,
   useState,
 } from 'react'
+import { useToast } from '@components/Toast'
 import {
   clearToken,
   getMe,
@@ -48,6 +49,7 @@ function meFromPasswordLoginResponse(me: PasswordLoginResponse['me']): Me {
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const { showToast } = useToast()
   const sessionExpiredHandledRef = useRef(false)
   const authCheckSequenceRef = useRef(0)
   const [authState, setAuthState] = useState<AuthState>({
@@ -115,9 +117,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     authCheckSequenceRef.current += 1
     sessionExpiredHandledRef.current = false
     resetProfileAccessCache(authState.me?.id)
-    void logoutProfileUI()
+    clearToken()
     setAuthState({ isLoggedIn: false, isLoading: false, me: null })
-  }, [authState.me?.id])
+    void logoutProfileUI()
+      .then(({ revocationConfirmed }) => {
+        if (!revocationConfirmed) {
+          showToast(
+            'You are signed out here, but the server could not confirm that your session was revoked. The old session may remain valid until it expires.',
+            { tone: 'error', durationMs: 7000 }
+          )
+        }
+      })
+      .catch(() => {
+        showToast(
+          'You are signed out here, but the server could not confirm that your session was revoked. The old session may remain valid until it expires.',
+          { tone: 'error', durationMs: 7000 }
+        )
+      })
+  }, [authState.me?.id, showToast])
 
   const value = useMemo(
     () => ({ authState, login, logout, checkAuth }),

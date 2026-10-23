@@ -1,0 +1,1291 @@
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { randomBytes, randomUUID } from 'node:crypto'
+import { Pool, type PoolClient } from 'pg'
+import { config } from '../src/config.js'
+import { type DbClient, initDb } from '../src/db.js'
+import { K8sGateway } from '../src/k8s.js'
+import { buildAccessCatalog } from '../src/services/access/accessCatalogCoordinator.js'
+import {
+  AccessBudgetExceededError,
+  AccessExecutionBudget,
+} from '../src/services/access/accessExecutionBudget.js'
+import type { AccessCapability } from '../src/services/access/capabilityRegistry.js'
+import { CATALOG_FAMILIES, type CatalogFamily } from '../src/services/access/catalogContracts.js'
+import { resolveLiveAuthorization } from '../src/services/access/liveAuthorizationResolver.js'
+import { OperationalAccessIndex } from '../src/services/access/operationalAccessIndex.js'
+import {
+  OperationalAccessIndexer,
+  operationalSourceSpecs,
+} from '../src/services/access/operationalAccessIndexer.js'
+import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
+import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
+import {
+  catalogBudgetOptionsForIntent,
+  loadConfiguredUserAccessIntent,
+} from '../src/services/access/userAccessPolicy.js'
+import type { ExternalSessionAuthorityContext } from '../src/services/auth/externalSessionAuthentication.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
+import { TemporaryKubernetesApi } from './helpers/temporaryKubernetesApi.js'
+
+vi.mock('../src/services/access/operationTarget.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/services/access/operationTarget.js')>()
+  return {
+    ...actual,
+    validateOperationTarget: (input: Parameters<typeof actual.validateOperationTarget>[0]) =>
+      input.capability === 'gfs.write' || input.capability === 'gfs.delete'
+        ? null
+        : actual.validateOperationTarget(input),
+  }
+})
+
+const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
+const describeRealPostgres = adminUrl ? describe : describe.skip
+const runtimeRoles = [
+  'control_api_runtime',
+  'trace_maintenance_runtime',
+  'workflow_recipes_runtime',
+] as const
+
+function databaseUrl(baseUrl: string, database: string): string {
+  const value = new URL(baseUrl)
+  value.pathname = `/${database}`
+  return value.toString()
+}
+
+function quoteIdentifier(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`
+}
+
+function transaction(pool: Pool) {
+  return async <T>(work: (db: DbClient) => Promise<T>): Promise<T> => {
+    const client = (await pool.connect()) as PoolClient
+    try {
+      await client.query('BEGIN')
+      const result = await work(client)
+      await client.query('COMMIT')
+      return result
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+}
+
+async function waitFor(predicate: () => boolean | Promise<boolean>): Promise<void> {
+  const deadline = Date.now() + 2_000
+  while (Date.now() < deadline) {
+    if (await predicate()) return
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error('producer_boundary_wait_timeout')
+}
+
+type OperationalFixture = Readonly<{
+  plural: 'hosts' | 'contexts' | 'mcpservers' | 'workflowrecipes' | 'sharedfilesystems'
+  namespace: string
+  object: Readonly<Record<string, unknown>>
+}>
+
+function fixture(input: {
+  plural: OperationalFixture['plural']
+  namespace: string
+  name: string
+  uid: string
+  spec?: Readonly<Record<string, unknown>>
+}): OperationalFixture {
+  const kind = {
+    hosts: 'Host',
+    contexts: 'Context',
+    mcpservers: 'McpServer',
+    workflowrecipes: 'WorkflowRecipe',
+    sharedfilesystems: 'SharedFileSystem',
+  }[input.plural]
+  return Object.freeze({
+    plural: input.plural,
+    namespace: input.namespace,
+    object: Object.freeze({
+      apiVersion: 'clerum.io/v1alpha1',
+      kind,
+      metadata: Object.freeze({
+        name: input.name,
+        namespace: input.namespace,
+        uid: input.uid,
+        resourceVersion: '1',
+        generation: 1,
+      }),
+      spec: Object.freeze({ enabled: true, ...(input.spec ?? {}) }),
+    }),
+  })
+}
+
+describeRealPostgres('all aggregate catalog families on real producers', () => {
+  const database = `control_api_catalog_families_${randomBytes(6).toString('hex')}`
+  const connectionString = databaseUrl(
+    adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres',
+    database
+  )
+  const environmentId = canonicalEnvironmentId()
+  const userId = randomUUID()
+  const teamId = randomUUID()
+  const directRunId = randomUUID()
+  const teamRunId = randomUUID()
+  const directApprovalId = randomUUID()
+  const teamApprovalId = randomUUID()
+  const directNotificationId = randomUUID()
+  const teamNotificationId = randomUUID()
+  const gfsResourceId = randomUUID()
+  const session: ExternalSessionAuthorityContext = {
+    contract: 'v1',
+    userId,
+    tokenHash: randomBytes(32).toString('hex'),
+    issuedAt: Math.floor(Date.now() / 1_000),
+    authGeneration: 1,
+  }
+  const operationalFixtures: readonly OperationalFixture[] = [
+    fixture({
+      plural: 'hosts',
+      namespace: config.hostsNamespace,
+      name: 'catalog-host',
+      uid: 'catalog-host-uid',
+      spec: {
+        contextRef: 'catalog-context',
+        model: { provider: 'openai', name: 'test-model' },
+      },
+    }),
+    fixture({
+      plural: 'contexts',
+      namespace: config.contextsNamespace,
+      name: 'catalog-context',
+      uid: 'catalog-context-uid',
+      spec: {
+        mcpServers: ['catalog-mcp'],
+        sharedFileSystems: [
+          { name: 'catalog-files', mountPath: '/workspace/a' },
+          { name: 'catalog-files', mountPath: '/workspace/b' },
+        ],
+      },
+    }),
+    fixture({
+      plural: 'mcpservers',
+      namespace: config.mcpServersNamespace,
+      name: 'catalog-mcp',
+      uid: 'catalog-mcp-uid',
+    }),
+    fixture({
+      plural: 'workflowrecipes',
+      namespace: config.sandboxNamespace,
+      name: 'catalog-recipe',
+      uid: 'catalog-recipe-uid',
+      spec: {
+        contextRef: 'catalog-context',
+        runtimeEgress: ['example.test'],
+        ui: {
+          workloadRef: 'catalog-app',
+          port: 8080,
+          title: 'Catalog App',
+          defaultPath: '/',
+        },
+      },
+    }),
+    fixture({
+      plural: 'sharedfilesystems',
+      namespace: config.sharedFilesystemsNamespace,
+      name: 'catalog-files',
+      uid: 'catalog-files-uid',
+    }),
+  ]
+  const kubernetesApi = new TemporaryKubernetesApi()
+  let adminPool: Pool
+  let databasePool: Pool
+  let gateway: K8sGateway
+  let indexer: OperationalAccessIndexer
+  let initialWireRequestCount = 0
+
+  beforeAll(async () => {
+    adminPool = new Pool({ connectionString: adminUrl })
+    await adminPool.query(`DROP ROLE IF EXISTS ${runtimeRoles.join(', ')}`)
+    await adminPool.query(`CREATE DATABASE ${quoteIdentifier(database)}`)
+    databasePool = new Pool({ connectionString })
+    await initDb({ connect: () => databasePool.connect() })
+    await kubernetesApi.start()
+    for (const value of operationalFixtures) {
+      kubernetesApi.put(value.plural, value.namespace, value.object)
+    }
+    const priorKubeconfig = process.env.KUBECONFIG
+    process.env.KUBECONFIG = kubernetesApi.kubeconfig()
+    try {
+      gateway = new K8sGateway()
+    } finally {
+      if (priorKubeconfig === undefined) delete process.env.KUBECONFIG
+      else process.env.KUBECONFIG = priorKubeconfig
+    }
+
+    await databasePool.query(
+      `INSERT INTO users(id, email, name) VALUES ($1, $2, 'Catalog Harness User')`,
+      [userId, `${userId}@example.test`]
+    )
+    await databasePool.query(`INSERT INTO teams(id, name) VALUES ($1, 'Catalog Harness Team')`, [
+      teamId,
+    ])
+    await databasePool.query(
+      `INSERT INTO team_members(team_id, user_id, role, status)
+       VALUES ($1, $2, 'admin', 'active')`,
+      [teamId, userId]
+    )
+    await databasePool.query(
+      `INSERT INTO user_agents(user_id, agent_name) VALUES ($1, 'catalog-host')`,
+      [userId]
+    )
+    await databasePool.query(
+      `INSERT INTO team_agents(team_id, agent_name) VALUES ($1, 'catalog-host')`,
+      [teamId]
+    )
+    await databasePool.query(
+      `INSERT INTO user_contexts(user_id, context_id) VALUES ($1, 'catalog-context')`,
+      [userId]
+    )
+    await databasePool.query(
+      `INSERT INTO team_contexts(team_id, context_id) VALUES ($1, 'catalog-context')`,
+      [teamId]
+    )
+    await databasePool.query(
+      `INSERT INTO user_workflow_triggers(user_id, recipe_namespace, recipe_name)
+       VALUES ($1, $2, 'catalog-recipe')`,
+      [userId, config.sandboxNamespace]
+    )
+    await databasePool.query(
+      `INSERT INTO team_workflow_triggers(team_id, recipe_namespace, recipe_name)
+       VALUES ($1, $2, 'catalog-recipe')`,
+      [teamId, config.sandboxNamespace]
+    )
+    await databasePool.query(
+      `INSERT INTO workflow_runs(
+         run_id, recipe_namespace, recipe_name, phase, actor_type, actor_id,
+         team_id, trigger_source
+       ) VALUES
+         ($1, $5, 'catalog-recipe', 'Succeeded', 'user', $3, NULL, 'onDemand'),
+         ($2, $5, 'catalog-recipe', 'Succeeded', 'user', $3, $4, 'onDemand')`,
+      [directRunId, teamRunId, userId, teamId, config.sandboxNamespace]
+    )
+    await databasePool.query(
+      `INSERT INTO workflow_approval_requests(
+         id, recipe_namespace, recipe_name, expires_at, status, target_user_id,
+         target_team_id, payload, idempotency_key, payload_hash
+       ) VALUES
+         ($1, $5, 'catalog-recipe', NOW() + INTERVAL '1 hour', 'pending', $3, NULL,
+          '{}'::jsonb, $6, 'hash'),
+         ($2, $5, 'catalog-recipe', NOW() + INTERVAL '1 hour', 'pending', NULL, $4,
+          '{}'::jsonb, $7, 'hash')`,
+      [
+        directApprovalId,
+        teamApprovalId,
+        userId,
+        teamId,
+        config.sandboxNamespace,
+        `direct-${directApprovalId}`,
+        `team-${teamApprovalId}`,
+      ]
+    )
+    await databasePool.query(
+      `INSERT INTO notification_deliveries(
+         id, event_type, dedupe_key, audience, payload, status, expires_at
+       ) VALUES
+         ($1, 'catalog.direct', $3, jsonb_build_object('userId', $5::text),
+          '{}'::jsonb, 'queued', NOW() + INTERVAL '1 hour'),
+         ($2, 'catalog.team', $4, jsonb_build_object('teamId', $6::text),
+          '{}'::jsonb, 'queued', NOW() + INTERVAL '1 hour')`,
+      [
+        directNotificationId,
+        teamNotificationId,
+        `direct-${directNotificationId}`,
+        `team-${teamNotificationId}`,
+        userId,
+        teamId,
+      ]
+    )
+    await databasePool.query(
+      `INSERT INTO gfs_resources(resource_id, drive, name, kind)
+       VALUES ($1, 'catalog-drive', '/', 'directory')`,
+      [gfsResourceId]
+    )
+    await databasePool.query(
+      `INSERT INTO gfs_grants(drive, resource_id, subject_type, subject_id, permissions)
+       VALUES
+         ('catalog-drive', $1, 'user', $2::text, ARRAY['read', 'write']::text[]),
+         ('catalog-drive', $1, 'team', $3::text, ARRAY['read']::text[])`,
+      [gfsResourceId, userId, teamId]
+    )
+
+    const index = new OperationalAccessIndex(databasePool, transaction(databasePool))
+    indexer = new OperationalAccessIndexer(gateway, index, {
+      environmentId,
+      behaviorFingerprintKey: config.sessionJwtPrivateKey,
+    })
+    for (const source of operationalSourceSpecs) {
+      await indexer.reconcileSource(source)
+    }
+    initialWireRequestCount = kubernetesApi.requests.length
+  })
+
+  afterAll(async () => {
+    try {
+      await kubernetesApi.close()
+      await endPoolAndWaitForClients(databasePool)
+      if (adminPool) {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid)
+           FROM pg_stat_activity
+          WHERE datname = $1 AND pid <> pg_backend_pid()`,
+          [database]
+        )
+        await adminPool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)}`)
+        await adminPool.query(`DROP ROLE IF EXISTS ${runtimeRoles.join(', ')}`)
+      }
+    } finally {
+      await adminPool?.end()
+    }
+  })
+
+  const expectedItemCounts: Readonly<Record<CatalogFamily, number>> = Object.freeze({
+    user: 1,
+    team: 1,
+    host: 1,
+    context: 1,
+    mcp_server: 1,
+    workflow_recipe: 1,
+    workflow_run: 2,
+    workflow_approval: 2,
+    notification: 2,
+    gfs_resource: 1,
+    shared_filesystem: 1,
+    sandbox_app: 1,
+  })
+  const capability: Readonly<Record<CatalogFamily, AccessCapability>> = Object.freeze({
+    user: 'user.profile.read',
+    team: 'team.read',
+    host: 'host.read',
+    context: 'context.read',
+    mcp_server: 'mcp_server.read',
+    workflow_recipe: 'workflow.read',
+    workflow_run: 'workflow.read',
+    workflow_approval: 'workflow.approval.decide',
+    notification: 'notification.read',
+    gfs_resource: 'gfs.read',
+    shared_filesystem: 'shared_filesystem.read',
+    sandbox_app: 'sandbox_app.read',
+  })
+  const expectedKinds: Readonly<Record<CatalogFamily, readonly ('direct' | 'team')[]>> =
+    Object.freeze({
+      user: ['direct'],
+      team: ['team'],
+      host: ['direct', 'team'],
+      context: ['direct', 'team'],
+      mcp_server: ['direct', 'team'],
+      workflow_recipe: ['direct', 'team'],
+      workflow_run: ['direct', 'team'],
+      workflow_approval: ['direct', 'team'],
+      notification: ['direct', 'team'],
+      gfs_resource: ['direct', 'team'],
+      shared_filesystem: ['direct', 'team'],
+      sandbox_app: ['direct', 'team'],
+    })
+
+  for (const family of CATALOG_FAMILIES) {
+    it(`${family} producer paths round-trip through catalog and live resolution`, async () => {
+      const catalog = await buildAccessCatalog(
+        { session, families: [family], limit: 100 },
+        {
+          transaction: transaction(databasePool),
+          ...(family === 'gfs_resource' ? { teamGfsMembershipAdmissionLimit: 1 } : {}),
+        }
+      )
+      expect(catalog.complete).toBe(true)
+      expect(catalog.partialErrors).toEqual([])
+      expect(catalog.nextCursor).toBeNull()
+      expect(catalog.items).toHaveLength(expectedItemCounts[family])
+      expect(
+        [...new Set(catalog.items.flatMap(item => item.accessPaths.map(path => path.kind)))].sort()
+      ).toEqual([...expectedKinds[family]].sort())
+
+      for (const item of catalog.items) {
+        expect(item.resource.type).toBe(family)
+        expect(item.accessPaths.length).toBeGreaterThan(0)
+        for (const path of item.accessPaths) {
+          const resolved = await resolveLiveAuthorization(
+            {
+              session,
+              requiredCapability: capability[family],
+              resource: canonicalResourceIdentity(item.resource),
+              requestedAccessPathId: path.accessPathId,
+              ...(family === 'workflow_approval'
+                ? {
+                    operationTarget: {
+                      approvalId: item.resource.logicalId,
+                      decision: 'approve',
+                    },
+                  }
+                : {}),
+            },
+            {
+              transaction: transaction(databasePool),
+              gateway,
+            }
+          )
+          expect(resolved).toEqual(
+            expect.objectContaining({
+              status: 'allowed',
+              selectedPath: expect.objectContaining({ id: path.accessPathId }),
+            })
+          )
+        }
+      }
+    })
+  }
+
+  it('resolves producer Context aliases to one canonical catalog and authority identity', async () => {
+    const suffix = randomBytes(5).toString('hex')
+    const contextName = `r55-m7-context-${suffix}`
+    const contextAlias = `r55-m7-wire-${suffix}`
+    const hostName = `r55-m7-host-${suffix}`
+    const mcpName = `r55-m7-mcp-${suffix}`
+    const sharedFilesystemName = `r55-m7-files-${suffix}`
+    const duplicateAliasName = `r55-m7-duplicate-${suffix}`
+    const nextContextAlias = `r55-m7-next-wire-${suffix}`
+    const contextUid = randomUUID()
+    const contextSource = operationalSourceSpecs.find(value => value.family === 'context')!
+    const hostSource = operationalSourceSpecs.find(value => value.family === 'host')!
+    const mcpSource = operationalSourceSpecs.find(value => value.family === 'mcp_server')!
+    const sharedFilesystemSource = operationalSourceSpecs.find(
+      value => value.family === 'shared_filesystem'
+    )!
+    let contextObject = fixture({
+      plural: 'contexts',
+      namespace: config.contextsNamespace,
+      name: contextName,
+      uid: contextUid,
+      spec: {
+        contextId: contextAlias,
+        mcpServers: [mcpName],
+        sharedFileSystems: [{ name: sharedFilesystemName, mountPath: '/workspace/m7' }],
+      },
+    })
+    let hostObject = fixture({
+      plural: 'hosts',
+      namespace: config.hostsNamespace,
+      name: hostName,
+      uid: randomUUID(),
+      spec: { contextRef: contextAlias },
+    })
+    const mcpObject = fixture({
+      plural: 'mcpservers',
+      namespace: config.mcpServersNamespace,
+      name: mcpName,
+      uid: randomUUID(),
+    })
+    const sharedFilesystemObject = fixture({
+      plural: 'sharedfilesystems',
+      namespace: config.sharedFilesystemsNamespace,
+      name: sharedFilesystemName,
+      uid: randomUUID(),
+    })
+    kubernetesApi.put(contextObject.plural, contextObject.namespace, contextObject.object)
+    kubernetesApi.put(hostObject.plural, hostObject.namespace, hostObject.object)
+    kubernetesApi.put(mcpObject.plural, mcpObject.namespace, mcpObject.object)
+    kubernetesApi.put(
+      sharedFilesystemObject.plural,
+      sharedFilesystemObject.namespace,
+      sharedFilesystemObject.object
+    )
+    await indexer.reconcileSource(contextSource)
+    await indexer.reconcileSource(hostSource)
+    await indexer.reconcileSource(mcpSource)
+    await indexer.reconcileSource(sharedFilesystemSource)
+    await databasePool.query(`INSERT INTO user_contexts(user_id, context_id) VALUES ($1, $2)`, [
+      userId,
+      contextAlias,
+    ])
+    await databasePool.query(`INSERT INTO user_agents(user_id, agent_name) VALUES ($1, $2)`, [
+      userId,
+      hostName,
+    ])
+
+    try {
+      const canonicalContextId = `${config.contextsNamespace}/${contextName}`
+      const contextCatalog = await buildAccessCatalog(
+        { session, families: ['context'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      const contextItem = contextCatalog.items.find(
+        item => item.resource.logicalId === canonicalContextId
+      )
+      expect(contextCatalog.complete).toBe(true)
+      expect(contextItem?.resource.logicalId).toBe(canonicalContextId)
+      expect(contextItem?.resource.providerUid).toBe(contextUid)
+      expect(contextItem?.accessPaths).toHaveLength(1)
+      expect(contextItem?.relationships).not.toContainEqual(
+        expect.objectContaining({ type: 'context_identity_alias' })
+      )
+
+      const mcpCatalog = await buildAccessCatalog(
+        { session, families: ['mcp_server'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      const mcpItem = mcpCatalog.items.find(
+        item => item.resource.logicalId === `${config.mcpServersNamespace}/${mcpName}`
+      )
+      expect(mcpCatalog.complete).toBe(true)
+      expect(mcpItem?.accessPaths).toHaveLength(2)
+      for (const path of mcpItem!.accessPaths) {
+        await expect(
+          resolveLiveAuthorization(
+            {
+              session,
+              requiredCapability: 'mcp_server.read',
+              resource: canonicalResourceIdentity(mcpItem!.resource),
+              requestedAccessPathId: path.accessPathId,
+            },
+            { transaction: transaction(databasePool), gateway }
+          )
+        ).resolves.toEqual(
+          expect.objectContaining({
+            status: 'allowed',
+            selectedPath: expect.objectContaining({ id: path.accessPathId }),
+          })
+        )
+      }
+
+      const sharedFilesystemCatalog = await buildAccessCatalog(
+        { session, families: ['shared_filesystem'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      const sharedFilesystemItem = sharedFilesystemCatalog.items.find(
+        item =>
+          item.resource.logicalId === `${config.sharedFilesystemsNamespace}/${sharedFilesystemName}`
+      )
+      expect(sharedFilesystemCatalog.complete).toBe(true)
+      expect(sharedFilesystemItem?.accessPaths).toHaveLength(1)
+      await expect(
+        resolveLiveAuthorization(
+          {
+            session,
+            requiredCapability: 'shared_filesystem.read',
+            resource: canonicalResourceIdentity(sharedFilesystemItem!.resource),
+            requestedAccessPathId: sharedFilesystemItem!.accessPaths[0].accessPathId,
+          },
+          { transaction: transaction(databasePool), gateway }
+        )
+      ).resolves.toEqual(
+        expect.objectContaining({
+          status: 'allowed',
+          selectedPath: expect.objectContaining({
+            id: sharedFilesystemItem!.accessPaths[0].accessPathId,
+          }),
+        })
+      )
+
+      const duplicateAliasObject = fixture({
+        plural: 'contexts',
+        namespace: config.contextsNamespace,
+        name: duplicateAliasName,
+        uid: randomUUID(),
+        spec: { contextId: contextAlias, mcpServers: [], sharedFileSystems: [] },
+      })
+      kubernetesApi.put(
+        duplicateAliasObject.plural,
+        duplicateAliasObject.namespace,
+        duplicateAliasObject.object
+      )
+      await indexer.reconcileSource(contextSource)
+      const duplicateAliasCatalog = await buildAccessCatalog(
+        { session, families: ['context'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      expect(
+        duplicateAliasCatalog.items.some(item => item.resource.logicalId === canonicalContextId)
+      ).toBe(false)
+      const duplicateAliasMcpCatalog = await buildAccessCatalog(
+        { session, families: ['mcp_server'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      expect(
+        duplicateAliasMcpCatalog.items.find(
+          item => item.resource.logicalId === `${config.mcpServersNamespace}/${mcpName}`
+        )?.accessPaths ?? []
+      ).toHaveLength(0)
+      kubernetesApi.delete(
+        duplicateAliasObject.plural,
+        duplicateAliasObject.namespace,
+        duplicateAliasName
+      )
+      await indexer.reconcileSource(contextSource)
+
+      const nameCollisionObject = fixture({
+        plural: 'contexts',
+        namespace: config.contextsNamespace,
+        name: contextAlias,
+        uid: randomUUID(),
+        spec: { mcpServers: [], sharedFileSystems: [] },
+      })
+      kubernetesApi.put(
+        nameCollisionObject.plural,
+        nameCollisionObject.namespace,
+        nameCollisionObject.object
+      )
+      await indexer.reconcileSource(contextSource)
+      const nameCollisionCatalog = await buildAccessCatalog(
+        { session, families: ['context'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      expect(
+        nameCollisionCatalog.items.some(item => item.resource.logicalId === canonicalContextId)
+      ).toBe(false)
+      kubernetesApi.delete(nameCollisionObject.plural, nameCollisionObject.namespace, contextAlias)
+      await indexer.reconcileSource(contextSource)
+
+      contextObject = fixture({
+        plural: 'contexts',
+        namespace: config.contextsNamespace,
+        name: contextName,
+        uid: contextUid,
+        spec: {
+          contextId: nextContextAlias,
+          mcpServers: [mcpName],
+          sharedFileSystems: [{ name: sharedFilesystemName, mountPath: '/workspace/m7' }],
+        },
+      })
+      kubernetesApi.put(contextObject.plural, contextObject.namespace, contextObject.object)
+      await indexer.reconcileSource(contextSource)
+      const staleAliasCatalog = await buildAccessCatalog(
+        { session, families: ['context'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      expect(
+        staleAliasCatalog.items.some(item => item.resource.logicalId === canonicalContextId)
+      ).toBe(false)
+
+      await databasePool.query(
+        `UPDATE user_contexts SET context_id = $3 WHERE user_id = $1 AND context_id = $2`,
+        [userId, contextAlias, nextContextAlias]
+      )
+      hostObject = fixture({
+        plural: 'hosts',
+        namespace: config.hostsNamespace,
+        name: hostName,
+        uid: String((hostObject.object.metadata as Record<string, unknown>).uid),
+        spec: { contextRef: nextContextAlias },
+      })
+      kubernetesApi.put(hostObject.plural, hostObject.namespace, hostObject.object)
+      await indexer.reconcileSource(hostSource)
+      const refreshedCatalog = await buildAccessCatalog(
+        { session, families: ['context'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      const refreshedContext = refreshedCatalog.items.find(
+        item => item.resource.logicalId === canonicalContextId
+      )
+      expect(refreshedContext?.accessPaths).toHaveLength(1)
+
+      const oldContextPathId = refreshedContext!.accessPaths[0].accessPathId
+      const recreatedUid = randomUUID()
+      contextObject = fixture({
+        plural: 'contexts',
+        namespace: config.contextsNamespace,
+        name: contextName,
+        uid: recreatedUid,
+        spec: {
+          contextId: nextContextAlias,
+          mcpServers: [mcpName],
+          sharedFileSystems: [{ name: sharedFilesystemName, mountPath: '/workspace/m7' }],
+        },
+      })
+      kubernetesApi.put(contextObject.plural, contextObject.namespace, contextObject.object)
+      await indexer.reconcileSource(contextSource)
+      const recreatedCatalog = await buildAccessCatalog(
+        { session, families: ['context'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      const recreatedContext = recreatedCatalog.items.find(
+        item => item.resource.logicalId === canonicalContextId
+      )
+      expect(recreatedContext?.resource.providerUid).toBe(recreatedUid)
+      expect(recreatedContext?.accessPaths.map(path => path.accessPathId)).not.toContain(
+        oldContextPathId
+      )
+      await expect(
+        resolveLiveAuthorization(
+          {
+            session,
+            requiredCapability: 'context.read',
+            resource: canonicalResourceIdentity(refreshedContext!.resource),
+            requestedAccessPathId: oldContextPathId,
+          },
+          { transaction: transaction(databasePool), gateway }
+        )
+      ).resolves.toEqual(expect.objectContaining({ status: 'access_path_stale' }))
+    } finally {
+      await databasePool.query(
+        `DELETE FROM user_contexts WHERE user_id = $1 AND context_id = ANY($2::text[])`,
+        [userId, [contextAlias, nextContextAlias]]
+      )
+      await databasePool.query(`DELETE FROM user_agents WHERE user_id = $1 AND agent_name = $2`, [
+        userId,
+        hostName,
+      ])
+      kubernetesApi.delete(hostObject.plural, hostObject.namespace, hostName)
+      kubernetesApi.delete(contextObject.plural, contextObject.namespace, contextName)
+      kubernetesApi.delete('contexts', config.contextsNamespace, duplicateAliasName)
+      kubernetesApi.delete('contexts', config.contextsNamespace, contextAlias)
+      kubernetesApi.delete(mcpObject.plural, mcpObject.namespace, mcpName)
+      kubernetesApi.delete(
+        sharedFilesystemObject.plural,
+        sharedFilesystemObject.namespace,
+        sharedFilesystemName
+      )
+      await indexer.reconcileSource(hostSource)
+      await indexer.reconcileSource(contextSource)
+      await indexer.reconcileSource(mcpSource)
+      await indexer.reconcileSource(sharedFilesystemSource)
+    }
+  })
+
+  it('excludes an ineligible sibling Host from selected MCP hydration', async () => {
+    const hostSource = operationalSourceSpecs.find(value => value.family === 'host')!
+    const disabledHost = fixture({
+      plural: 'hosts',
+      namespace: config.hostsNamespace,
+      name: 'disabled-catalog-host',
+      uid: 'disabled-catalog-host-uid',
+      spec: { enabled: false, contextRef: 'catalog-context' },
+    })
+    kubernetesApi.put(disabledHost.plural, disabledHost.namespace, disabledHost.object)
+    await indexer.reconcileSource(hostSource)
+    await databasePool.query(
+      `INSERT INTO user_agents(user_id, agent_name) VALUES ($1, 'disabled-catalog-host')`,
+      [userId]
+    )
+
+    try {
+      const disabledEdge = await databasePool.query<{ relationship_instance_id: string }>(
+        `SELECT relationship_instance_id
+           FROM operational_resource_relationships
+          WHERE environment_id = $1 AND source_type = 'host'
+            AND source_id = $2 AND relationship_type = 'uses_context'
+            AND target_id = $3`,
+        [
+          environmentId,
+          `${config.hostsNamespace}/disabled-catalog-host`,
+          `${config.contextsNamespace}/catalog-context`,
+        ]
+      )
+      const enabledEdge = await databasePool.query<{ relationship_instance_id: string }>(
+        `SELECT relationship_instance_id
+           FROM operational_resource_relationships
+          WHERE environment_id = $1 AND source_type = 'host'
+            AND source_id = $2 AND relationship_type = 'uses_context'
+            AND target_id = $3`,
+        [
+          environmentId,
+          `${config.hostsNamespace}/catalog-host`,
+          `${config.contextsNamespace}/catalog-context`,
+        ]
+      )
+      const directContextEdge = await databasePool.query<{ relationship_instance_id: string }>(
+        `SELECT relationship_instance_id
+           FROM operational_resource_relationships
+          WHERE environment_id = $1 AND source_type = 'context'
+            AND source_id = $2 AND relationship_type = 'includes_mcp_server'
+            AND target_id = $3`,
+        [
+          environmentId,
+          `${config.contextsNamespace}/catalog-context`,
+          `${config.mcpServersNamespace}/catalog-mcp`,
+        ]
+      )
+      expect(disabledEdge.rows).toHaveLength(1)
+      expect(enabledEdge.rows).toHaveLength(1)
+      expect(directContextEdge.rows).toHaveLength(1)
+
+      const catalog = await buildAccessCatalog(
+        { session, families: ['mcp_server'], limit: 100 },
+        { transaction: transaction(databasePool) }
+      )
+      const item = catalog.items.find(
+        value => value.resource.logicalId === `${config.mcpServersNamespace}/catalog-mcp`
+      )
+      expect(catalog.complete).toBe(true)
+      expect(catalog.partialErrors).toEqual([])
+      expect(item).toBeDefined()
+      const runtimeRefs = item!.accessPaths.flatMap(path => {
+        const runtime = path.behaviorDescriptors.runtime
+        return runtime.state === 'known' && runtime.value ? [runtime.value] : []
+      })
+      expect(
+        runtimeRefs.some(value => value.includes(enabledEdge.rows[0]!.relationship_instance_id))
+      ).toBe(true)
+      expect(
+        runtimeRefs.some(value => value === directContextEdge.rows[0]!.relationship_instance_id)
+      ).toBe(true)
+      expect(
+        runtimeRefs.some(value => value.includes(disabledEdge.rows[0]!.relationship_instance_id))
+      ).toBe(false)
+    } finally {
+      await databasePool.query(
+        `DELETE FROM user_agents WHERE user_id = $1 AND agent_name = 'disabled-catalog-host'`,
+        [userId]
+      )
+      kubernetesApi.delete(disabledHost.plural, disabledHost.namespace, 'disabled-catalog-host')
+      await indexer.reconcileSource(hostSource)
+    }
+  })
+
+  it('round-trips a catalog write path when capability selection excludes a read-only sibling', async () => {
+    const catalog = await buildAccessCatalog(
+      { session, families: ['gfs_resource'], limit: 10 },
+      {
+        transaction: transaction(databasePool),
+        teamGfsMembershipAdmissionLimit: 1,
+      }
+    )
+    const item = catalog.items[0]!
+    const directWritePath = item.accessPaths.find(
+      path => path.kind === 'direct' && path.capabilities.includes('gfs.write')
+    )
+    const teamReadPath = item.accessPaths.find(
+      path => path.kind === 'team' && path.capabilities.includes('gfs.read')
+    )
+    expect(directWritePath).toBeDefined()
+    expect(teamReadPath).toBeDefined()
+
+    const resolved = await resolveLiveAuthorization(
+      {
+        session,
+        requiredCapability: 'gfs.write',
+        resource: canonicalResourceIdentity(item.resource),
+        requestedAccessPathId: directWritePath!.accessPathId,
+      },
+      { transaction: transaction(databasePool), gateway }
+    )
+
+    expect(resolved).toEqual(
+      expect.objectContaining({
+        status: 'allowed',
+        selectedPath: expect.objectContaining({ id: directWritePath!.accessPathId }),
+      })
+    )
+
+    await expect(
+      resolveLiveAuthorization(
+        {
+          session,
+          requiredCapability: 'gfs.write',
+          resource: canonicalResourceIdentity(item.resource),
+          requestedAccessPathId: teamReadPath!.accessPathId,
+        },
+        { transaction: transaction(databasePool), gateway }
+      )
+    ).resolves.toEqual(
+      expect.objectContaining({ status: 'access_path_stale', code: 'access_path_stale' })
+    )
+
+    await expect(
+      resolveLiveAuthorization(
+        {
+          session,
+          requiredCapability: 'gfs.delete',
+          resource: canonicalResourceIdentity(item.resource),
+        },
+        { transaction: transaction(databasePool), gateway }
+      )
+    ).resolves.toEqual({ status: 'denied', code: 'forbidden' })
+  })
+
+  it('enforces the operator-configured Team-GFS admission through the production budget contract', async () => {
+    const intent = loadConfiguredUserAccessIntent({
+      CONTROL_API_USER_ACCESS_CATALOG_MODE: 'serve',
+      CONTROL_API_USER_ACCESS_TEAM_GFS_MEMBERSHIP_ADMISSION_LIMIT: '1',
+    })
+    const budget = AccessExecutionBudget.create('catalog', catalogBudgetOptionsForIntent(intent))
+    try {
+      await expect(
+        buildAccessCatalog(
+          { session, families: ['gfs_resource'], limit: 100 },
+          { transaction: transaction(databasePool), budget }
+        )
+      ).resolves.toMatchObject({ complete: true, items: [{ resource: { type: 'gfs_resource' } }] })
+    } finally {
+      budget.close()
+    }
+
+    const secondTeamId = randomUUID()
+    await databasePool.query(`INSERT INTO teams(id, name) VALUES ($1, 'Admission Overflow Team')`, [
+      secondTeamId,
+    ])
+    await databasePool.query(
+      `INSERT INTO team_members(team_id, user_id, role, status)
+       VALUES ($1, $2, 'member', 'active')`,
+      [secondTeamId, userId]
+    )
+    const exhausted = AccessExecutionBudget.create('catalog', catalogBudgetOptionsForIntent(intent))
+    try {
+      await expect(
+        buildAccessCatalog(
+          { session, families: ['gfs_resource'], limit: 100 },
+          { transaction: transaction(databasePool), budget: exhausted }
+        )
+      ).rejects.toBeInstanceOf(AccessBudgetExceededError)
+    } finally {
+      exhausted.close()
+      await databasePool.query(`DELETE FROM teams WHERE id = $1`, [secondTeamId])
+    }
+  })
+
+  it('preserves both direct/team provenance across duplicate filesystem mounts', async () => {
+    const catalog = await buildAccessCatalog(
+      { session, families: ['shared_filesystem'], limit: 100 },
+      { transaction: transaction(databasePool) }
+    )
+    const item = catalog.items[0]
+    expect(
+      item.relationships.filter(value => value.type === 'mounts_shared_filesystem')
+    ).toHaveLength(2)
+    expect(item.accessPaths).toHaveLength(4)
+    expect(new Set(item.accessPaths.map(path => path.accessPathId)).size).toBe(4)
+    expect(
+      new Set(
+        item.accessPaths.map(path => JSON.stringify(path.behaviorDescriptors.filesystemScope))
+      ).size
+    ).toBe(2)
+  })
+
+  it('discovers a Host through a direct user grant without a team grant', async () => {
+    const directOnlyUserId = randomUUID()
+    const directOnlySession: ExternalSessionAuthorityContext = {
+      contract: 'v1',
+      userId: directOnlyUserId,
+      tokenHash: randomBytes(32).toString('hex'),
+      issuedAt: Math.floor(Date.now() / 1_000),
+      authGeneration: 1,
+    }
+    await databasePool.query(
+      `INSERT INTO users(id, email, name) VALUES ($1, $2, 'Direct-only Catalog User')`,
+      [directOnlyUserId, `${directOnlyUserId}@example.test`]
+    )
+    await databasePool.query(
+      `INSERT INTO user_agents(user_id, agent_name) VALUES ($1, 'catalog-host')`,
+      [directOnlyUserId]
+    )
+
+    const catalog = await buildAccessCatalog(
+      { session: directOnlySession, families: ['host'], limit: 10 },
+      { transaction: transaction(databasePool) }
+    )
+    expect(catalog.items.map(item => item.resource.logicalId)).toEqual([
+      `${config.hostsNamespace}/catalog-host`,
+    ])
+    expect(catalog.items[0]?.accessPaths).toHaveLength(1)
+    expect(catalog.items[0]?.accessPaths[0]).toEqual(expect.objectContaining({ kind: 'direct' }))
+    expect(catalog.items[0]?.accessPaths[0]).not.toHaveProperty('teamId')
+  })
+
+  it('discovers a team-only Host and revokes it live without replacing the user session', async () => {
+    const teamOnlyUserId = randomUUID()
+    const teamOnlyTeamId = randomUUID()
+    const teamOnlySession: ExternalSessionAuthorityContext = {
+      contract: 'v1',
+      userId: teamOnlyUserId,
+      tokenHash: randomBytes(32).toString('hex'),
+      issuedAt: Math.floor(Date.now() / 1_000),
+      authGeneration: 1,
+    }
+    await databasePool.query(
+      `INSERT INTO users(id, email, name) VALUES ($1, $2, 'Team-only Catalog User')`,
+      [teamOnlyUserId, `${teamOnlyUserId}@example.test`]
+    )
+    await databasePool.query(`INSERT INTO teams(id, name) VALUES ($1, 'Team-only Catalog Team')`, [
+      teamOnlyTeamId,
+    ])
+    await databasePool.query(
+      `INSERT INTO team_members(team_id, user_id, role, status)
+       VALUES ($1, $2, 'member', 'active')`,
+      [teamOnlyTeamId, teamOnlyUserId]
+    )
+    await databasePool.query(
+      `INSERT INTO team_agents(team_id, agent_name) VALUES ($1, 'catalog-host')`,
+      [teamOnlyTeamId]
+    )
+
+    const firstCatalog = await buildAccessCatalog(
+      { session: teamOnlySession, families: ['host'], limit: 10 },
+      { transaction: transaction(databasePool) }
+    )
+    expect(firstCatalog.items.map(item => item.resource.logicalId)).toEqual([
+      `${config.hostsNamespace}/catalog-host`,
+    ])
+    expect(firstCatalog.items[0]?.accessPaths).toEqual([
+      expect.objectContaining({
+        kind: 'team',
+        safeTeamDescriptor: expect.objectContaining({ teamId: teamOnlyTeamId }),
+      }),
+    ])
+
+    const teamPath = firstCatalog.items[0]!.accessPaths[0]!
+    await expect(
+      resolveLiveAuthorization(
+        {
+          session: teamOnlySession,
+          requiredCapability: 'host.read',
+          resource: canonicalResourceIdentity(firstCatalog.items[0]!.resource),
+          requestedAccessPathId: teamPath.accessPathId,
+        },
+        { transaction: transaction(databasePool), gateway }
+      )
+    ).resolves.toEqual(
+      expect.objectContaining({
+        status: 'allowed',
+        selectedPath: expect.objectContaining({ kind: 'team', teamId: teamOnlyTeamId }),
+      })
+    )
+
+    await databasePool.query(
+      `UPDATE team_members SET status = 'deleted' WHERE team_id = $1 AND user_id = $2`,
+      [teamOnlyTeamId, teamOnlyUserId]
+    )
+
+    const afterRevocation = await buildAccessCatalog(
+      { session: teamOnlySession, families: ['host'], limit: 10 },
+      { transaction: transaction(databasePool) }
+    )
+    expect(afterRevocation.items).toEqual([])
+    await expect(
+      resolveLiveAuthorization(
+        {
+          session: teamOnlySession,
+          requiredCapability: 'host.read',
+          resource: canonicalResourceIdentity(firstCatalog.items[0]!.resource),
+          requestedAccessPathId: teamPath.accessPathId,
+        },
+        { transaction: transaction(databasePool), gateway }
+      )
+    ).resolves.toEqual(expect.objectContaining({ status: 'not_found', code: 'not_found' }))
+  })
+
+  it('uses real Kubernetes list and exact-read wire boundaries', async () => {
+    const initialWireRequests = kubernetesApi.requests.slice(0, initialWireRequestCount)
+    const listRequests = initialWireRequests.filter(request => !request.watch && !request.name)
+    expect(listRequests).toHaveLength(operationalSourceSpecs.length)
+    expect(listRequests.map(request => `${request.namespace}/${request.plural}`).sort()).toEqual(
+      operationalSourceSpecs.map(source => `${source.namespace}/${source.plural}`).sort()
+    )
+    expect(listRequests.every(request => request.limit !== null)).toBe(true)
+    const exactRequests = kubernetesApi.requests.filter(request => request.name)
+    expect(exactRequests.length).toBeGreaterThan(0)
+    expect(
+      new Set(exactRequests.map(request => request.namespace)).has(config.hostsNamespace)
+    ).toBe(true)
+    const sourceStates = await databasePool.query(
+      `SELECT source_family, resource_version, status
+         FROM operational_catalog_source_state
+        WHERE environment_id = $1
+        ORDER BY source_family`,
+      [environmentId]
+    )
+    expect(sourceStates.rows).toHaveLength(operationalSourceSpecs.length)
+    expect(sourceStates.rows.every(row => row.resource_version === '1')).toBe(true)
+    expect(sourceStates.rows.every(row => row.status === 'current')).toBe(true)
+  })
+
+  it('ingests deletion and recreation through the real Kubernetes watch boundary', async () => {
+    const source = operationalSourceSpecs.find(value => value.family === 'host')!
+    const original = operationalFixtures.find(value => value.plural === 'hosts')!
+    const controller = new AbortController()
+    const watch = gateway.watchResource(
+      source.plural,
+      source.namespace,
+      '1',
+      controller.signal,
+      (phase, object) => indexer.applyWatchEvent(source, phase, object, controller.signal)
+    )
+    await waitFor(() => kubernetesApi.requests.some(request => request.watch))
+
+    const deleted = {
+      ...original.object,
+      metadata: {
+        ...(original.object.metadata as Record<string, unknown>),
+        resourceVersion: '2',
+      },
+    }
+    kubernetesApi.delete(source.plural, source.namespace, 'catalog-host')
+    kubernetesApi.emitWatch('DELETED', deleted)
+    await waitFor(async () => {
+      const result = await databasePool.query(
+        `SELECT COUNT(*)::int AS count
+           FROM operational_resource_index
+          WHERE environment_id = $1 AND resource_type = 'host'
+            AND logical_id = $2`,
+        [environmentId, `${config.hostsNamespace}/catalog-host`]
+      )
+      return result.rows[0]?.count === 0
+    })
+
+    const recreated = fixture({
+      plural: 'hosts',
+      namespace: config.hostsNamespace,
+      name: 'catalog-host',
+      uid: 'catalog-host-uid-recreated',
+      spec: {
+        contextRef: 'catalog-context',
+        model: { provider: 'openai', name: 'test-model' },
+      },
+    }).object
+    const recreatedWithVersion = {
+      ...recreated,
+      metadata: {
+        ...(recreated.metadata as Record<string, unknown>),
+        resourceVersion: '3',
+      },
+    }
+    kubernetesApi.put(source.plural, source.namespace, recreatedWithVersion)
+    kubernetesApi.emitWatch('ADDED', recreatedWithVersion)
+    await waitFor(async () => {
+      const result = await databasePool.query(
+        `SELECT provider_uid, provider_resource_version, deleted_at
+           FROM operational_resource_index
+          WHERE environment_id = $1 AND resource_type = 'host'
+            AND logical_id = $2`,
+        [environmentId, `${config.hostsNamespace}/catalog-host`]
+      )
+      return (
+        result.rows[0]?.provider_uid === 'catalog-host-uid-recreated' &&
+        result.rows[0]?.provider_resource_version === '3' &&
+        result.rows[0]?.deleted_at === null
+      )
+    })
+
+    const catalog = await buildAccessCatalog(
+      { session, families: ['host'], limit: 10 },
+      { transaction: transaction(databasePool) }
+    )
+    expect(catalog.items).toHaveLength(1)
+    const item = catalog.items[0]
+    const resolved = await resolveLiveAuthorization(
+      {
+        session,
+        requiredCapability: 'host.read',
+        resource: canonicalResourceIdentity(item.resource),
+        requestedAccessPathId: item.accessPaths[0].accessPathId,
+      },
+      { transaction: transaction(databasePool), gateway }
+    )
+    expect(resolved.status).toBe('allowed')
+
+    controller.abort('watch_complete')
+    await expect(watch).resolves.toBeUndefined()
+    const watchRequest = kubernetesApi.requests.find(request => request.watch)
+    expect(watchRequest).toEqual(
+      expect.objectContaining({
+        namespace: config.hostsNamespace,
+        plural: 'hosts',
+        resourceVersion: '1',
+      })
+    )
+  })
+
+  it('cancels a real indexer relist without staging or promoting late results', async () => {
+    const source = operationalSourceSpecs.find(value => value.family === 'host')!
+    const cancellationHost = fixture({
+      plural: 'hosts',
+      namespace: config.hostsNamespace,
+      name: 'catalog-host',
+      uid: 'catalog-host-uid-cancellation',
+      spec: {
+        contextRef: 'catalog-context',
+        model: { provider: 'openai', name: 'test-model' },
+      },
+    }).object
+    const cancellationHostWithVersion = {
+      ...cancellationHost,
+      metadata: {
+        ...(cancellationHost.metadata as Record<string, unknown>),
+        resourceVersion: '4',
+      },
+    }
+    kubernetesApi.put(source.plural, source.namespace, cancellationHostWithVersion)
+    await expect(indexer.reconcileSource(source)).resolves.toBe('4')
+    const before = await databasePool.query(
+      `SELECT generation, staging_generation, resource_version, status
+         FROM operational_catalog_source_state
+        WHERE environment_id = $1 AND source_family = $2`,
+      [environmentId, source.family]
+    )
+    expect(before.rows[0]).toEqual(
+      expect.objectContaining({
+        staging_generation: null,
+        resource_version: '4',
+        status: 'current',
+      })
+    )
+    const held = kubernetesApi.holdNextList()
+    const controller = new AbortController()
+    const pending = indexer.reconcileSource(source, controller.signal)
+    try {
+      await held.requested
+      controller.abort(new Error('test_cancelled'))
+      await expect(pending).rejects.toThrow()
+      await held.closed
+
+      const afterAbort = await databasePool.query(
+        `SELECT generation, staging_generation, resource_version, status
+           FROM operational_catalog_source_state
+          WHERE environment_id = $1 AND source_family = $2`,
+        [environmentId, source.family]
+      )
+      expect(afterAbort.rows[0]).toEqual(
+        expect.objectContaining({
+          generation: String(Number(before.rows[0].generation) + 1),
+          resource_version: '4',
+          status: 'relisting',
+        })
+      )
+      expect(afterAbort.rows[0].staging_generation).not.toBeNull()
+      const staged = await databasePool.query(
+        `SELECT
+           (SELECT COUNT(*)::int FROM operational_resource_index_staging
+             WHERE environment_id = $1 AND source_family = $2) AS resources,
+           (SELECT COUNT(*)::int FROM operational_relationships_staging
+             WHERE environment_id = $1 AND source_family = $2) AS relationships`,
+        [environmentId, source.family]
+      )
+      expect(staged.rows[0]).toEqual({ resources: 0, relationships: 0 })
+      const live = await databasePool.query(
+        `SELECT provider_uid, provider_resource_version
+           FROM operational_resource_index
+          WHERE environment_id = $1 AND resource_type = 'host'
+            AND logical_id = $2`,
+        [environmentId, `${config.hostsNamespace}/catalog-host`]
+      )
+      expect(live.rows).toEqual([
+        {
+          provider_uid: 'catalog-host-uid-cancellation',
+          provider_resource_version: '4',
+        },
+      ])
+
+      await expect(indexer.reconcileSource(source)).resolves.toBe('4')
+      const recovered = await databasePool.query(
+        `SELECT staging_generation, resource_version, status
+           FROM operational_catalog_source_state
+          WHERE environment_id = $1 AND source_family = $2`,
+        [environmentId, source.family]
+      )
+      expect(recovered.rows[0]).toEqual({
+        staging_generation: null,
+        resource_version: '4',
+        status: 'current',
+      })
+    } finally {
+      held.release()
+    }
+  })
+})

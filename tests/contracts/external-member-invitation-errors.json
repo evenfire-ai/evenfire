@@ -1,0 +1,21 @@
+{
+  "invalidEmail": {
+    "control": { "status": 400, "body": { "error": "invalid_email" } },
+    "external": { "status": 400, "body": { "error": "Valid email is required" } }
+  },
+  "invalidPayload": {
+    "control": { "status": 400, "body": { "error": "invalid_payload" } },
+    "external": {
+      "status": 400,
+      "body": { "error": "Email and at least one team are required" }
+    }
+  },
+  "invalidName": {
+    "control": { "status": 400, "body": { "error": "invalid_name" } },
+    "external": { "status": 400, "body": { "error": "Name is too long" } }
+  },
+  "tooManyTeams": {
+    "control": { "status": 400, "body": { "error": "too_many_teams" } },
+    "external": { "status": 400, "body": { "error": "Too many teams selected" } }
+  }
+}
