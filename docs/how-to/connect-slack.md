@@ -333,11 +333,11 @@ app is not configured to handle interactive responses."
 A tool approval posts **three** buttons, not two
 (`channel-reader/src/main.ts:154-186`):
 
-| Button             | Value      | Effect on the conversation                                                     |
-| ------------------ | ---------- | ------------------------------------------------------------------------------ |
-| **Approve**        | `tool:a:…` | Runs that call only                                                            |
-| **Always approve** | `tool:l:…` | Runs the call and allowlists that exact tool name for later turns             |
-| **Deny**           | `tool:d:…` | Cancels the call and blocks that tool name until it is approved               |
+| Button             | Value      | Effect on the conversation                                                                                        |
+| ------------------ | ---------- | ----------------------------------------------------------------------------------------------------------------- |
+| **Approve**        | `tool:a:…` | Runs that call only. For `shell_exec`, `http_request` or `cron_manage`, covers that tool for the rest of the task |
+| **Always approve** | `tool:l:…` | Runs the call and allowlists that exact tool name for later turns while the conversation stays in memory          |
+| **Deny**           | `tool:d:…` | Cancels the call and blocks that tool name until it is approved                                                   |
 
 The value is `tool:<a|l|d>:<16-char token>`
 (`main.ts:110-121`, matched by `decisionHandler.ts:93`). Typing `/approve`,

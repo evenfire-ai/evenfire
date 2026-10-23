@@ -1678,14 +1678,14 @@ Approving a tool runs that call only. It does not allowlist the rest of the turn
 
 Denials apply to calls made in that conversation only. A workflow triggered from it does not inherit them; its steps follow the workflow's own tool scoping. So while any denial is active, tools that can start other tools out of sight ask again on every call, even when allowlisted: `workflow_trigger`, and `cron_manage` with `create`, `enable` or `trigger`. Autonomous cron runs keep their own narrow gate and do not consult chat denials.
 
-| Scenario                                                  | Approvals required                    |
-| --------------------------------------------------------- | ------------------------------------- |
-| LLM calls 3 tools from `airtable-server`                  | 3 (one card per call)                 |
-| LLM calls tools from `airtable-server` + `mongodb-server` | One card per call                     |
-| Same tool after **Always approve**                        | Later calls of that exact name proceed |
-| Same tool after **Deny**                                 | Asks again until that tool is approved |
-| `shell_exec` called 5 times, then `http_request`          | 2 (one per tool, for the rest of the task) |
-| `workflow_trigger` / `cron_manage` create, enable, trigger while a denial is active | Asks on every call                    |
+| Scenario                                                                            | Approvals required                         |
+| ----------------------------------------------------------------------------------- | ------------------------------------------ |
+| LLM calls 3 tools from `airtable-server`                                            | 3 (one card per call)                      |
+| LLM calls tools from `airtable-server` + `mongodb-server`                           | One card per call                          |
+| Same tool after **Always approve**                                                  | Later calls of that exact name proceed     |
+| Same tool after **Deny**                                                            | Asks again until that tool is approved     |
+| `shell_exec` called 5 times, then `http_request`                                    | 2 (one per tool, for the rest of the task) |
+| `workflow_trigger` / `cron_manage` create, enable, trigger while a denial is active | Asks on every call                         |
 
 `shell_exec`, `http_request` and `cron_manage` (`SESSION_SCOPED_APPROVAL_TOOLS` in `approvalController.ts`) are approved per tool. A plain approval of one of them covers that tool for the rest of the current task, including every later iteration and the resume after another tool's approval card; the next user message starts a new task and asks again. **Always approve** covers it in later tasks while the conversation stays in memory. A Host restart or cold resume asks again.
 
@@ -1693,10 +1693,10 @@ Every pending approval carries a durable `authorization_scope`. An ordinary card
 
 **Channel commands:**
 
-| Command           | Behavior                                              |
-| ----------------- | ----------------------------------------------------- |
-| `/approve`        | Run the approved call only                            |
-| `/approve always` | Run the call and allowlist that exact tool name      |
+| Command           | Behavior                                                                            |
+| ----------------- | ----------------------------------------------------------------------------------- |
+| `/approve`        | Run the approved call only                                                          |
+| `/approve always` | Run the call and allowlist that exact tool name                                     |
 | `/deny`           | Cancel the call, block that tool name until approved, and revoke its Always approve |
 
 ### Architecture Components
