@@ -46,9 +46,13 @@ export const PDF_MONO_FAMILY = 'ClerumMono'
  * images; the rest are picked up only when the image ships them, which is what
  * makes arrows, check marks, CJK and the scripts of the Noto core set (Indic,
  * Southeast Asian, Armenian, Georgian, Ethiopic) render natively where they exist.
+ * As in PDFs, the Arabic faces come before DejaVu Sans so one face draws every
+ * letter of an Arabic, Persian or Urdu word: DejaVu Sans lacks Urdu letters such
+ * as U+06D2, and letters drawn from two faces do not join.
  */
 export const CHART_FONT_STACK =
-  `"${CHART_FONT_FAMILY}", "DejaVu Sans", "Noto Sans", "Liberation Sans", ` +
+  `"${CHART_FONT_FAMILY}", "Noto Sans Arabic UI", "Noto Sans Arabic", "DejaVu Sans", ` +
+  '"Noto Sans", "Liberation Sans", ' +
   '"Noto Sans CJK SC", "Noto Sans CJK JP", "Noto Sans Devanagari", "Noto Sans Bengali", ' +
   '"Noto Sans Gurmukhi", "Noto Sans Gujarati", "Noto Sans Oriya", "Noto Sans Tamil", ' +
   '"Noto Sans Telugu", "Noto Sans Kannada", "Noto Sans Malayalam", "Noto Sans Sinhala", ' +
