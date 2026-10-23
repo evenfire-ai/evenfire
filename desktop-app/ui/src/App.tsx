@@ -436,6 +436,7 @@ export function App() {
     new Map<number, ActiveSandboxUiApp | null>()
   )
   const sandboxUiDeepLinkIntentByIdRef = React.useRef(new Map<number, number>())
+  const sandboxUiDeepLinkClosedOriginEmbedsRef = React.useRef(new Set<number>())
   const sandboxUiDeepLinkIdentityRef = React.useRef<string | null | undefined>(undefined)
   const sandboxUiDeepLinkGenerationRef = React.useRef(0)
   const sandboxUiShortcutOpenRequestIdRef = React.useRef(0)
@@ -1416,6 +1417,7 @@ export function App() {
     sandboxUiDeepLinkOriginNavigationByIdRef.current.clear()
     sandboxUiDeepLinkOriginAppByIdRef.current.clear()
     sandboxUiDeepLinkIntentByIdRef.current.clear()
+    sandboxUiDeepLinkClosedOriginEmbedsRef.current.clear()
     sandboxUiDeepLinkGenerationRef.current += 1
     void window.clerum.sandboxUi.clearPendingDeepLinks().catch(error => {
       console.warn('[Desktop] Could not clear stale app deep links:', error)
@@ -1791,6 +1793,7 @@ export function App() {
       sandboxUiDeepLinkOriginNavigationByIdRef.current.delete(linkId)
       sandboxUiDeepLinkOriginAppByIdRef.current.delete(linkId)
       sandboxUiDeepLinkIntentByIdRef.current.delete(linkId)
+      sandboxUiDeepLinkClosedOriginEmbedsRef.current.delete(linkId)
       try {
         await window.clerum.sandboxUi.acknowledgeDeepLink(linkId)
       } catch (error) {
@@ -1863,6 +1866,8 @@ export function App() {
           sandboxUiDeepLinkIntentByIdRef.current.set(context.linkId, restoredIntent)
           const originTab = activeWorkspaceTab(context.originNavigation.workspaceTabs)
           if (
+            sandboxUiDeepLinkClosedOriginEmbedsRef.current.has(context.linkId) &&
+            vm.isNavigationIntentCurrent(restoredIntent) &&
             context.originApp &&
             originTab?.kind === 'app' &&
             originTab.app?.appRef === context.originApp.appRef
@@ -1905,7 +1910,7 @@ export function App() {
   )
 
   const closeActiveSandboxUiEmbedForHandoff = React.useCallback(async () => {
-    if (!activeSandboxUiApp) return
+    if (!activeSandboxUiApp) return false
     // §3 consistency: persist the outgoing app tab's route before tearing the
     // embed down for a deep-link handoff, so returning to that tab restores
     // where the user was rather than the default/stale route. Same read-then-
@@ -1930,15 +1935,16 @@ export function App() {
         tab => tab.id === outgoingTabId && tab.kind === 'app'
       )?.app?.appRef
       const decision = await readOutgoingRouteDecision(outgoingAppRef)
-      if (gen !== sandboxUiActivationGenRef.current) return
+      if (gen !== sandboxUiActivationGenRef.current) return false
       if (decision.action !== 'preserve') {
         const nextRoutePath = decision.action === 'set' ? decision.routePath : undefined
         setWorkspaceTabs(state => setAppTabSavedRoutePath(state, outgoingTabId, nextRoutePath))
       }
     }
-    if (gen !== sandboxUiActivationGenRef.current) return
+    if (gen !== sandboxUiActivationGenRef.current) return false
     await window.clerum.sandboxUi.close()
     handleSandboxUiClosed()
+    return true
   }, [activeSandboxUiApp, handleSandboxUiClosed, setWorkspaceTabs])
 
   React.useEffect(() => {
@@ -2218,6 +2224,7 @@ export function App() {
           sandboxUiDeepLinkOriginNavigationByIdRef.current.delete(pending.link.id)
           sandboxUiDeepLinkOriginAppByIdRef.current.delete(pending.link.id)
           sandboxUiDeepLinkIntentByIdRef.current.delete(pending.link.id)
+          sandboxUiDeepLinkClosedOriginEmbedsRef.current.delete(pending.link.id)
           clearSandboxUiDeepLinkProcessing(pending.link.id)
           const next = failPendingSandboxUiDeepLink(
             pendingSandboxUiDeepLinksRef.current,
@@ -2236,7 +2243,10 @@ export function App() {
           return
         }
         if (pending.link.teamId && pending.link.teamId !== currentTeamId) {
-          await closeActiveSandboxUiEmbedForHandoff()
+          const closedOriginEmbed = await closeActiveSandboxUiEmbedForHandoff()
+          if (closedOriginEmbed) {
+            sandboxUiDeepLinkClosedOriginEmbedsRef.current.add(pending.link.id)
+          }
           if (!vm.isNavigationIntentCurrent(navigationIntentSequence)) {
             await acknowledgeSandboxUiDeepLink(pending.link.id)
             return

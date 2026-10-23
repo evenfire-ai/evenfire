@@ -3625,6 +3625,91 @@ describe('App deep-link orchestration', () => {
     })
   })
 
+  it('preserves the live app after an unavailable same-team link', async () => {
+    const liveRouteApp = { ...READY_APP, defaultPath: '/tickets/live' }
+    listApps.mockResolvedValue({ apps: [liveRouteApp] })
+    currentController = makeController({ initialExperienceLoading: false })
+    render(<App />)
+    await launchAppFromSidebar()
+
+    const originWorkspace = currentController.workspaceTabs
+    const originTab = activeWorkspaceTab(originWorkspace)
+    expect(originTab?.kind).toBe('app')
+    if (originTab?.kind !== 'app') throw new Error('The app picker did not create an app tab')
+    const originRequestId = sandboxUiPageHarness.props?.shortcutOpenRequestId
+    expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe('ns/app')
+    expect(sandboxUiPageHarness.props?.shortcutApp?.defaultPath).toBe('/tickets/live')
+
+    closeSandboxUi.mockClear()
+    getSandboxUiLocation.mockClear()
+    act(() => emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-a' }))
+    await confirmPendingAppLink()
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(currentController.pushToast).toHaveBeenCalledWith(
+      "Could not open app link: You don't have access to this app in the linked team",
+      'error'
+    )
+    expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe('ns/app')
+    expect(sandboxUiPageHarness.props?.shortcutApp?.defaultPath).toBe('/tickets/live')
+    expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBe(originRequestId)
+    expect(currentController.workspaceTabs).toEqual(originWorkspace)
+    expect(closeSandboxUi).not.toHaveBeenCalled()
+    expect(getSandboxUiLocation).not.toHaveBeenCalled()
+  })
+
+  it('does not relaunch an app tab after a cross-team link finds no active embed to close', async () => {
+    let liveTeamId = 'team-a'
+    const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
+      if (!teamId || teamId === liveTeamId) return false
+      liveTeamId = teamId
+      return true
+    })
+    const originApp = { ...READY_APP, defaultPath: '/tickets/live' }
+    listApps.mockImplementation(async () =>
+      liveTeamId === 'team-a' ? { apps: [originApp] } : { apps: [] }
+    )
+    currentController = makeController({
+      initialExperienceLoading: false,
+      handleEnsureTeamContext: ensureTeamContext,
+      getCurrentTeamId: () => liveTeamId,
+    })
+    render(<App />)
+    await launchAppFromSidebar()
+
+    const originWorkspace = currentController.workspaceTabs
+    const originTab = activeWorkspaceTab(originWorkspace)
+    expect(originTab?.kind).toBe('app')
+    if (originTab?.kind !== 'app') throw new Error('The app picker did not create an app tab')
+    const originRequestId = sandboxUiPageHarness.props?.shortcutOpenRequestId
+
+    // The native unsolicited-close producer leaves the app tab selected but unmounted.
+    await act(async () => {
+      sandboxUiPageHarness.props?.onEmbeddedAppBack?.()
+      await Promise.resolve()
+    })
+    expect(sandboxUiPageHarness.props?.shortcutApp).toBeNull()
+
+    closeSandboxUi.mockClear()
+    getSandboxUiLocation.mockClear()
+    act(() => emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' }))
+    await confirmPendingAppLink()
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(currentController.pushToast).toHaveBeenCalledWith(
+      "Could not open app link: You don't have access to this app in the linked team",
+      'error'
+    )
+    expect(liveTeamId).toBe('team-a')
+    expect(currentController.workspaceTabs.activeTabId).toBe(originTab.id)
+    expect(currentController.workspaceTabs.tabs).toContainEqual(originTab)
+    expect(sandboxUiPageHarness.props?.shortcutApp).toBeNull()
+    expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBe(originRequestId)
+    expect(closeSandboxUi).not.toHaveBeenCalled()
+    expect(getSandboxUiLocation).not.toHaveBeenCalled()
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
+  })
+
   it('keeps two tabs of the same app on their own routes when alternating (§5)', async () => {
     currentController = makeController({ initialExperienceLoading: false })
     listApps.mockResolvedValue({ apps: [READY_APP] })
