@@ -19,6 +19,7 @@ const allHandlers = () => ({
   'copy-content': handler(),
   preview: handler(),
   download: handler(),
+  'download-zip': handler(),
   replace: handler(),
   'open-folder': handler(),
   delete: handler(),
@@ -39,6 +40,7 @@ describe('GFS resource action model', () => {
         canMove: true,
         canCreateFolder: true,
         canUpload: true,
+        canDownloadZip: true,
         canShare: true,
         canOpenFolder: true,
         canDelete: true,
@@ -69,6 +71,7 @@ describe('GFS resource action model', () => {
       'move',
       'new-folder',
       'upload-file',
+      'download-zip',
       'delete',
     ])
     expect(fileActions.map(action => action.id)).toEqual([

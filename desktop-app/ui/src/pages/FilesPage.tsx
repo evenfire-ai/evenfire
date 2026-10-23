@@ -1810,9 +1810,8 @@ export function FilesPage({
     setRenameDraft(target.name)
   }
 
-  /** Adapt the open folder crumb for the row-action handlers so the active
-   *  folder's menu (the one beside the breadcrumb) runs on the same shape a
-   *  parent-view row does. */
+  // An open folder's breadcrumb carries route identity but not row metadata.
+  // Adapt that exact current URI for the shared folder action model.
   const crumbAsResource = (crumb: GfsCrumb): GfsDriveResource => ({
     resourceId: crumb.resourceId,
     rid: crumb.resourceId.replace(/-/g, '').toLowerCase(),
@@ -1826,31 +1825,6 @@ export function FilesPage({
     bytes: crumb.bytes,
   })
 
-  /** Single construction path for a FOLDER's ⋯ menu. The parent-view row menu
-   *  and the active folder's breadcrumb menu both build their props here, so
-   *  their option lists cannot drift apart; only the gates (permission source)
-   *  and the open-navigation action differ per surface. */
-  const folderMenuPropsFor = (
-    folder: GfsDriveResource,
-    gates: { canManage: boolean; canRename: boolean; canDelete: boolean },
-    actions: { onOpen?: () => void; onOpenChange?: (open: boolean) => void } = {}
-  ) => ({
-    resourceName: folder.name,
-    onManage: gates.canManage ? () => openManage(folder) : undefined,
-    onCopyLink: () => void handleCopyLink(folder.gfsUri),
-    onOpen: actions.onOpen,
-    onOpenGfsLink: () => setOpenLinkOpen(true),
-    onOpenChange: actions.onOpenChange,
-    onRename: gates.canRename ? () => openRenameTarget(folder) : undefined,
-    onMove: () => setMoveTarget(folder),
-    onDelete: gates.canDelete ? () => setDeleteTarget(folder) : undefined,
-    onDownloadZip:
-      folder.readable === false
-        ? undefined
-        : () => {
-            void handleFolderZipDownload(folder)
-          },
-  })
   const visibleResources = useMemo<GfsDriveResource[]>(() => {
     const resources = currentIsFolder ? items : currentIsFile ? [] : accessibleResources
     return [...resources].sort((left, right) => {
@@ -1988,6 +1962,9 @@ export function FilesPage({
           download: currentIsFile
             ? () => void handleDownload(current.gfsUri, current.name)
             : undefined,
+          'download-zip': currentIsFolder
+            ? () => void handleFolderZipDownload(crumbAsResource(current))
+            : undefined,
           replace:
             currentIsFile && canWriteCurrent
               ? (file, context) => {
@@ -2004,6 +1981,7 @@ export function FilesPage({
         canShare: canManageCurrent,
         canPreview: currentPreviewAvailable,
         canDownload: currentIsFile,
+        canDownloadZip: currentIsFolder,
         canReplace: currentIsFile && canWriteCurrent,
         canDelete: canDeleteCurrent,
         mutating: ctrl.mutating,
@@ -2035,6 +2013,7 @@ export function FilesPage({
     const canPreview =
       !isDirectory && resource.readable !== false && isGfsPreviewFile(resource.name)
     const canDownload = !isDirectory && resource.readable !== false
+    const canDownloadZip = isDirectory && resource.readable !== false
     const canRename = rowCanRename(resource)
     const canWrite = isDirectory && rowCanWrite(resource)
     const canManage = rowCanManage(resource)
@@ -2062,6 +2041,7 @@ export function FilesPage({
           download: canDownload
             ? () => void handleDownload(resource.gfsUri, resource.name)
             : undefined,
+          'download-zip': canDownloadZip ? () => void handleFolderZipDownload(resource) : undefined,
         },
         canOpenFolder: isDirectory,
         canRename,
@@ -2072,6 +2052,7 @@ export function FilesPage({
         canDelete,
         canPreview,
         canDownload,
+        canDownloadZip,
         mutating: ctrl.mutating,
       })
     )

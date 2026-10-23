@@ -29,6 +29,7 @@ export type GfsResourceActionId =
   | 'copy-content'
   | 'preview'
   | 'download'
+  | 'download-zip'
   | 'replace'
   | 'open-folder'
   | 'delete'
@@ -66,6 +67,7 @@ export type GfsResourceActionOptions = {
   canCopyContent?: boolean
   canPreview?: boolean
   canDownload?: boolean
+  canDownloadZip?: boolean
   canReplace?: boolean
   canOpenFolder?: boolean
   canDelete?: boolean
@@ -191,6 +193,15 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       menu: true,
       eligible: Boolean(
         options.kind === 'file' && options.canDownload && options.handlers.download
+      ),
+    },
+    {
+      id: 'download-zip',
+      label: 'Download as zip',
+      icon: <IconDownload />,
+      menu: true,
+      eligible: Boolean(
+        options.kind === 'directory' && options.canDownloadZip && options.handlers['download-zip']
       ),
     },
     {
