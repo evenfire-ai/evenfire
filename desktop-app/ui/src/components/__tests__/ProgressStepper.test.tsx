@@ -768,7 +768,8 @@ describe('ProgressStepper — suspended status (approval flow)', () => {
       )
 
       const btn = screen.getByTestId('approval-always-approve-btn')
-      const scope = 'Allow every future Shell call in this conversation'
+      const scope =
+        'Allow later Shell calls in this conversation. Asks again if the Host restarts or reloads the chat.'
       expect(btn.getAttribute('title')).toBe(scope)
       const describedBy = btn.getAttribute('aria-describedby')
       expect(describedBy).toBeTruthy()

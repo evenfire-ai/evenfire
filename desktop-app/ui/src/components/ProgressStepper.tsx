@@ -447,11 +447,13 @@ export function ProgressStepper({
     const approvalPending = pendingAction !== null
     // The host refuses to allowlist some suspensions (`alwaysApproveAllowed: false`).
     const canAlwaysApprove = !!onAlwaysApprove && info?.alwaysApproveAllowed !== false
+    // The host keeps this grant in memory only: a Host restart or a reload of
+    // the chat from storage asks again (docs/architecture/overview.md).
     const alwaysApproveScope = info
-      ? `Allow every future ${formatToolApprovalLabel({
+      ? `Allow later ${formatToolApprovalLabel({
           displayName: info.displayName,
           toolName: info.toolName,
-        })} call in this conversation`
+        })} calls in this conversation. Asks again if the Host restarts or reloads the chat.`
       : undefined
     const decide = (action: ApprovalAction, handler: () => void | Promise<unknown>) => {
       if (!info) return
