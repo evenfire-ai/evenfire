@@ -96,6 +96,13 @@ say so. [Design records](#design-records) are point-in-time and not maintained.
 
 ## Reference
 
+Proposed engineering design: [backend-compatible Desktop updates](design/desktop-backend-compatible-updates-spec.md)
+and its [gap inventory and roadmap](design/desktop-backend-compatible-updates-roadmap.md).
+These records describe planned behavior, not shipped update installation.
+They define advisory startup checks, user-selected startup updates, and manual
+updates with deferred restart without intentionally restricting usage. They record
+the recent-build baseline and separate invitation/landing changes as post-release work.
+
 | Doc                                                  | Description                                                                                                     |
 | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
 | [Configuration switches](reference/configuration.md) | Feature flags that differ between `deploy/base` and minikube, and where each service's variables are documented |
