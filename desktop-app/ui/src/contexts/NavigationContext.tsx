@@ -12,9 +12,10 @@ export interface NavigationContextValue {
   /** The held Hosts of the current principal's catalog, with the names the Retry rows show. */
   heldHosts: HeldHost[]
   /**
-   * True while the Host of the chat on screen (the focused chat tab's, or the
-   * one a hold deselected under the chat drawer) is held and still in the
-   * catalog, so its Retry row exists: ChatPage must not select another Host.
+   * True while the kept Host is held and still in the catalog, so its Retry row
+   * exists: ChatPage must not select another Host. The kept Host is the focused
+   * chat tab's; over a non-chat tab it is the Host of the last chat selection
+   * or drawer request, whose conversation the drawer shows or restores.
    */
   keepFocusedChat: boolean
   selectedAgentRoute: AgentWorkspaceRoute

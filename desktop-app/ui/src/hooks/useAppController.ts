@@ -860,7 +860,7 @@ export function useAppController() {
     const held = isHostAccessBlocked(selected)
     if (!held && catalog.agentNames.includes(selected)) return
     nav.setSelectedAgent(null)
-    // A held Host was already announced by `blockHostAccess`.
+    // No toast here for a held Host: the loop above announces its loss.
     if (!held && leftCatalog(selected)) announceLoss(selected)
   }, [
     agentsData.accessCatalog,

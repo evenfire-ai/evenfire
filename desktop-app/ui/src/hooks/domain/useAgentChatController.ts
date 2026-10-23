@@ -1093,7 +1093,9 @@ export function useAgentChatController({
     // so it alone would leave the previous team's rows visible for one commit,
     // and an old-scope catalog or selected-list read that settles before that
     // commit would publish again.
-    // Every caller of `resetChat` changes the scope.
+    // The team switch and logout callers of `resetChat` change the scope. The
+    // signed-out session load can call it with the scope unchanged; there is
+    // nothing to invalidate then, and the extra bump is harmless.
     invalidateAuthorityScope()
     hideAllRemoteRows()
     // R-F13 renderer half (spec §4.5-3): tear down EVERY tracked task so a late
