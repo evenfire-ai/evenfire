@@ -48,7 +48,7 @@ Ready before E2E results are interpreted.
 - **minikube** v1.30+ (`brew install minikube`)
 - **kubectl** (`brew install kubectl`)
 - **python3** (for JWT key sync)
-- **Node.js** 24+ (for building services and desktop app)
+- **Node.js** 24.22.1 or later (Node 24 is required for Desktop and the validation harness)
 - **git**, **make**, and **ruby** (ruby renders the control-api DB migration overlay)
 - `.env` file at project root with LLM API keys (optional — uses placeholders if missing)
 

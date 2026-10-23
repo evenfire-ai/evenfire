@@ -1,6 +1,6 @@
 import { config } from '../../config.js'
 import type { TeamRole } from '../../profileTypes.js'
-import { type AuthorityCandidate, authorityCandidate } from './accessAuthorityStore.js'
+import { type AuthorityCandidate, authorityCandidate } from './authorityCandidates.js'
 import {
   canonicalAccessPathSeeds,
   databaseRelationshipsRevision,

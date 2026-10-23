@@ -7,6 +7,7 @@ import {
 } from '../access/userAccessPolicy.js'
 import type { ExternalSessionClient } from './externalSessionAuthentication.js'
 import { ExternalSessionIssuanceUnavailableError } from './externalSessionIssuanceError.js'
+import { legacySecurityCutoffRejects } from './legacySecurityCutoff.js'
 import {
   createUserSession,
   loadSessionDatabaseNow,
@@ -119,7 +120,7 @@ export async function issueExternalUserSession(
     )
     const validAfter = (epoch.rows[0] as { valid_after?: Date | string | null } | undefined)
       ?.valid_after
-    if (validAfter && issuedAt * 1000 <= new Date(validAfter).getTime()) {
+    if (legacySecurityCutoffRejects(issuedAt, validAfter)) {
       throw new ExternalSessionIssuanceUnavailableError()
     }
     return signExternalSessionToken({

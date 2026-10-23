@@ -42,7 +42,7 @@ function agenticManifestWithoutOptIn(recipeName: string, contextName: string): s
       spec: {
         contextRef: contextName,
         triggers: { onDemand: true },
-        workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
+        workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.6-alpine' }],
         steps: [
           {
             id: 'run',
@@ -134,7 +134,7 @@ test.describe('optional QA recorder: Control UI recipe connector-scope copy', ()
           spec: {
             contextRef: contextName,
             security: { allowContextRef: true },
-            workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
+            workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.6-alpine' }],
             steps: [
               {
                 id: 'run',

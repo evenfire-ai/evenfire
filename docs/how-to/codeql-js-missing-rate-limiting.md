@@ -118,8 +118,8 @@ for the ambiguous-reset case. For ordinary proxy responses it copies the upstrea
 sets a constant `application/json` content type, and forwards no response headers, including
 `Retry-After` or `Set-Cookie`. For the one-use password-token POST it consumes the upstream
 response and destroys the downstream connection to model a lost reset acknowledgement. The public
-External REST route owns its bounded retry response and issues its own session cookie only after a
-successful reset with a valid session token. Focused invitation and trusted-source tests verify the
+External REST route owns its bounded retry response and, after a successful reset with a valid
+session token, clears the profile session cookie instead of issuing a session. Focused invitation and trusted-source tests verify the
 public 429/`Retry-After` behavior; they do not assert that the fault-injection proxy forwards those
 headers.
 

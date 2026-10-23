@@ -1,7 +1,6 @@
 'use client'
 
 import {
-  EVENFIRE_RELEASES_URL,
   EXTERNAL_REST_API_BASE_URL,
   EXTERNAL_SESSION_TOKEN_EXPIRES_AT_KEY,
   EXTERNAL_SESSION_TOKEN_KEY,
@@ -32,6 +31,14 @@ let globalHandleAuthError: (() => void) | null = null
 
 type ApiRequestOptions = {
   silentUnauthorized?: boolean
+  /**
+   * Allows one invitation-proof request through the unconfirmed-logout fence.
+   * Only a password-reset submission uses it: that route ignores the surviving
+   * cookie and clears it server-side, so the fence can be released after the
+   * server accepts the recovery action. Ordinary session requests must not
+   * bypass the fence.
+   */
+  allowUnconfirmedLogout?: boolean
 }
 
 const PROFILE_LOGOUT_UNCONFIRMED_KEY = 'profile_logout_unconfirmed'
@@ -57,7 +64,12 @@ function markLogoutUnconfirmed(): void {
   }
 }
 
-function clearUnconfirmedLogout(): void {
+/**
+ * Clears the logout fence. The fence is released only after a successful
+ * password login, a confirmed logout, or an accepted recovery submission; a
+ * recovery page view never releases it.
+ */
+export function clearUnconfirmedLogout(): void {
   if (typeof window === 'undefined') return
   logoutUnconfirmedInMemory = false
   try {
@@ -111,6 +123,10 @@ function handleUnauthorized(): never {
   throw new AuthExpiredError()
 }
 
+// The public envelope may carry an object `error` with a code, or the legacy
+// `error` field. A top-level `code` is the stable machine code invitation
+// routes publish for responses whose `error` is an English sentence; it must
+// win over that sentence so classification never depends on display copy.
 function publicErrorFields(text: string): { code?: string; detail?: string } {
   try {
     const parsed = JSON.parse(text) as unknown
@@ -121,11 +137,13 @@ function publicErrorFields(text: string): { code?: string; detail?: string } {
         ? (body.error as Record<string, unknown>)
         : undefined
     const code =
-      typeof envelope?.code === 'string'
-        ? envelope.code
-        : typeof body.error === 'string'
-          ? body.error
-          : undefined
+      typeof body.code === 'string'
+        ? body.code
+        : typeof envelope?.code === 'string'
+          ? envelope.code
+          : typeof body.error === 'string'
+            ? body.error
+            : undefined
     const message =
       typeof envelope?.message === 'string'
         ? envelope.message
@@ -195,9 +213,10 @@ export async function apiSend(
   path: string,
   body?: unknown,
   q: Record<string, string | undefined> = {},
-  extraHeaders: Record<string, string> = {}
+  extraHeaders: Record<string, string> = {},
+  options: ApiRequestOptions = {}
 ) {
-  if (hasUnconfirmedLogout()) handleUnauthorized()
+  if (hasUnconfirmedLogout() && !options.allowUnconfirmedLogout) handleUnauthorized()
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...extraHeaders,
@@ -330,12 +349,19 @@ export async function setupInvitationPasswordWithToken(
   invitationId: string,
   password: string
 ): Promise<InvitationPreview & { passwordUpdated: boolean }> {
-  const response = (await apiSend('POST', '/api/v1/invitations/password-reset', {
-    token: invitationUrlId,
-    email,
-    invitationId,
-    password,
-  })) as InvitationPreview & { passwordUpdated: boolean }
+  const response = (await apiSend(
+    'POST',
+    '/api/v1/invitations/password-reset',
+    {
+      token: invitationUrlId,
+      email,
+      invitationId,
+      password,
+    },
+    {},
+    {},
+    { allowUnconfirmedLogout: true }
+  )) as InvitationPreview & { passwordUpdated: boolean }
   clearToken()
   return response
 }
@@ -509,8 +535,4 @@ export function getConfiguredExternalRestApiBaseUrl(): string {
   } catch {
     return EXTERNAL_REST_API_BASE_URL.replace(/\/+$/, '')
   }
-}
-
-export function getEvenfireDownloadUrl(): string {
-  return EVENFIRE_RELEASES_URL
 }

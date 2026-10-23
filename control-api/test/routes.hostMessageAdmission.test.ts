@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { config } from '../src/config.js'
 import type { K8sGateway } from '../src/k8s.js'
 import { createRpcAccessUsersRouter } from '../src/routes/rpc-access/users.js'
 import { signRpcAccessToken } from '../src/utils/auth/rpcAuthToken.js'
@@ -20,6 +21,7 @@ const USER_A = '00000000-0000-4000-8000-000000000001'
 const USER_B = '00000000-0000-4000-8000-000000000002'
 const ROUTE = (user: string, host: string) =>
   `/rpc/access/users/${user}/mcp-hosts/${host}/message-resolution`
+const LEGACY_ROUTE = (user: string, host: string) => `/rpc/access/users/${user}/mcp-hosts/${host}`
 const BINDING = {
   runId: '00000000-0000-4000-8000-000000000123',
   sessionId: 'session-a',
@@ -149,23 +151,106 @@ describe('R44-H1 legacy Host-message admission', () => {
     await send(server, USER_B, 'host-a', {}).expect(200)
   })
 
-  it('leaves shared GET and the existing strict POST outside message admission', async () => {
+  it('charges the legacy strict POST into the same subject bucket as message-resolution', async () => {
+    const { server, gateway, bindingService } = app()
+    const jwt = token(USER_A, ['host-a', 'host-b'])
+    const limit = config.hostMessageRlPerMin
+    const legacyStatuses: number[] = []
+    const resolutionStatuses: number[] = []
+    for (let index = 0; index < limit; index += 1) {
+      const host = index % 2 ? 'host-b' : 'host-a'
+      if (index % 2 === 0) {
+        const legacy = await request(server)
+          .post(LEGACY_ROUTE(USER_A, host))
+          .set('x-rpc-access-token', jwt)
+          .send({ ...BINDING, sessionId: `legacy-${index}` })
+        legacyStatuses.push(legacy.status)
+      } else {
+        const resolution = await send(server, USER_A, host, {}, jwt)
+        resolutionStatuses.push(resolution.status)
+      }
+    }
+    // Witness: both routes admitted requests into the shared bucket before it
+    // filled, so the refusals below cannot come from a route that never worked.
+    expect(legacyStatuses.length).toBeGreaterThan(0)
+    expect(resolutionStatuses.length).toBeGreaterThan(0)
+    expect(legacyStatuses).toEqual(Array.from({ length: legacyStatuses.length }, () => 200))
+    expect(resolutionStatuses).toEqual(Array.from({ length: resolutionStatuses.length }, () => 200))
+
+    const resolverCalls = gateway.listResource.mock.calls.length
+    const bindingCalls = bindingService.bind.mock.calls.length
+    // Witness: the admitted half really authorized and bound, so the unchanged
+    // counts after both refusals are not a zero-against-zero comparison.
+    expect(resolverCalls).toBeGreaterThan(0)
+    expect(bindingCalls).toBeGreaterThan(0)
+    const legacyDenied = await request(server)
+      .post(LEGACY_ROUTE(USER_A, 'host-a'))
+      .set('x-rpc-access-token', jwt)
+      .send({ ...BINDING, sessionId: 'legacy-denied' })
+      .expect(429)
+    const resolutionDenied = await send(server, USER_A, 'host-b', {}, jwt).expect(429)
+    expect(legacyDenied.body).toEqual({
+      error: 'Too Many Requests',
+      retryAfterSeconds: expect.any(Number),
+    })
+    expect(resolutionDenied.body).toEqual({
+      error: 'Too Many Requests',
+      retryAfterSeconds: expect.any(Number),
+    })
+    expect(gateway.listResource).toHaveBeenCalledTimes(resolverCalls)
+    expect(bindingService.bind).toHaveBeenCalledTimes(bindingCalls)
+    expect(new Set(limiter.checkAndIncrement.mock.calls.map(call => call[0]))).toEqual(
+      new Set([`host-message-admission:${USER_A}`])
+    )
+    expect(limiter.checkAndIncrement).toHaveBeenCalledTimes(limit + 2)
+
+    // A different verified subject keeps its own bucket on either route.
+    await request(server)
+      .post(LEGACY_ROUTE(USER_B, 'host-a'))
+      .set('x-rpc-access-token', token(USER_B, ['host-a']))
+      .send(BINDING)
+      .expect(200)
+  })
+
+  it('leaves the shared GET outside admission and charges the strict POST only after a valid body', async () => {
     const { server } = app()
     const jwt = token(USER_A, ['host-a'])
     await request(server)
       .get(`/rpc/access/users/${USER_A}/mcp-hosts/host-a`)
       .set('x-rpc-access-token', jwt)
       .expect(200)
+    expect(limiter.checkAndIncrement).not.toHaveBeenCalled()
     await request(server)
-      .post(`/rpc/access/users/${USER_A}/mcp-hosts/host-a`)
+      .post(LEGACY_ROUTE(USER_A, 'host-a'))
       .set('x-rpc-access-token', jwt)
       .send({})
       .expect(400)
     expect(limiter.checkAndIncrement).not.toHaveBeenCalled()
+    await request(server)
+      .post(LEGACY_ROUTE(USER_A, 'host-a'))
+      .set('x-rpc-access-token', jwt)
+      .send(BINDING)
+      .expect(200)
+    expect(limiter.checkAndIncrement).toHaveBeenCalledOnce()
+    expect(limiter.checkAndIncrement).toHaveBeenCalledWith(
+      `host-message-admission:${USER_A}`,
+      config.hostMessageRlPerMin
+    )
   })
 
   it('rejects invalid auth, scope, claim, and binding before charging', async () => {
-    const { server, gateway } = app()
+    const { server, gateway, bindingService } = app()
+    // Liveness witness: one fully valid bound request proves the limiter, live
+    // Host authorization, and the binding are observable in this test.
+    await request(server)
+      .post(LEGACY_ROUTE(USER_A, 'host-a'))
+      .set('x-rpc-access-token', token(USER_A, ['host-a']))
+      .send(BINDING)
+      .expect(200)
+    expect(limiter.checkAndIncrement).toHaveBeenCalledOnce()
+    expect(gateway.listResource).toHaveBeenCalledOnce()
+    expect(bindingService.bind).toHaveBeenCalledOnce()
+
     await request(server).post(ROUTE(USER_A, 'host-a')).send({}).expect(401)
     await send(server, USER_A, 'host-a', {}, 'bad-token').expect(401)
     await send(
@@ -177,6 +262,18 @@ describe('R44-H1 legacy Host-message admission', () => {
     ).expect(403)
     await send(server, USER_A, 'host-a', {}, token(USER_B, ['host-a'])).expect(403)
     await send(server, USER_A, 'host-b', {}, token(USER_A, ['host-a'])).expect(403)
+    await request(server)
+      .post(LEGACY_ROUTE(USER_A, 'host-a'))
+      .set('x-rpc-access-token', token(USER_B, ['host-a']))
+      .send(BINDING)
+      .expect(403)
+      .expect('x-host-access-denial-reason', 'subject_mismatch')
+    await request(server)
+      .post(LEGACY_ROUTE(USER_A, 'host-b'))
+      .set('x-rpc-access-token', token(USER_A, ['host-a']))
+      .send(BINDING)
+      .expect(403)
+      .expect('x-host-access-denial-reason', 'host_claim_missing')
     await send(server, USER_A, 'host-a', { runId: 'bad' }).expect(400)
     await request(server)
       .post(ROUTE(USER_A, 'host-a'))
@@ -184,8 +281,10 @@ describe('R44-H1 legacy Host-message admission', () => {
       .set('content-type', 'application/json')
       .send('{"runId":')
       .expect(400)
-    expect(limiter.checkAndIncrement).not.toHaveBeenCalled()
-    expect(gateway.listResource).not.toHaveBeenCalled()
+    // Every rejected shape above left the witness baseline unchanged.
+    expect(limiter.checkAndIncrement).toHaveBeenCalledOnce()
+    expect(gateway.listResource).toHaveBeenCalledOnce()
+    expect(bindingService.bind).toHaveBeenCalledOnce()
   })
 
   it('charges a valid request before a later live grant denial', async () => {

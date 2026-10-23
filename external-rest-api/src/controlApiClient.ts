@@ -64,6 +64,68 @@ export class ControlApiUnexpectedResponseError extends Error {
   }
 }
 
+/**
+ * A caller-influenced control-api path would have selected a route other than
+ * the one the edge intended. It is a client error, not an upstream failure:
+ * extend ControlApiError so the existing public invalid-request mapping
+ * (sanitizeControlApiPublicError and the app's 4xx handler) handles it without
+ * a new status scheme.
+ */
+export class ControlApiPathError extends ControlApiError {
+  constructor() {
+    super('Control API request path is not allowed', 400, { error: 'invalid_request' })
+    this.name = 'ControlApiPathError'
+  }
+}
+
+const DOT_SEGMENT = /^(?:\.|\.\.)$/
+const RAW_QUERY_CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/
+
+/**
+ * The single boundary that keeps a caller-influenced value from selecting a
+ * different control-api route. Call sites interpolate route parameters into
+ * `path`; URL construction would otherwise normalize dot segments or drop a
+ * `#` fragment and dispatch the resulting path with this edge's service
+ * identity. A `?` is rejected too: an unencoded value would truncate the path
+ * and select another handler below the call site's literal prefix.
+ *
+ * The only caller that forwards an opaque query string (the SharedFileSystem
+ * relay) passes it through `rawQueryString` instead, which is validated
+ * separately and appended after the pathname has been validated.
+ */
+export function assertControlApiPathAllowed(path: string): void {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`
+  if (normalizedPath.includes('?')) throw new ControlApiPathError()
+  if (normalizedPath.includes('#')) throw new ControlApiPathError()
+
+  // Express decodes encoded separators and dots in route params before a call
+  // site interpolates them. Decode both for the segment check so a value that a
+  // proxy or another decoder could still resolve cannot pass as a literal.
+  const decodedSegments = normalizedPath.replace(/%2f/gi, '/').replace(/%2e/gi, '.').split('/')
+  if (decodedSegments.some(segment => DOT_SEGMENT.test(segment))) {
+    throw new ControlApiPathError()
+  }
+
+  const base = config.controlApiBaseUrl.replace(/\/+$/, '')
+  const basePathname = new URL(base).pathname.replace(/\/+$/, '')
+  const constructedPathname = new URL(`${base}${normalizedPath}`).pathname
+  if (constructedPathname !== `${basePathname}${normalizedPath}`) {
+    throw new ControlApiPathError()
+  }
+}
+
+/**
+ * Validate the opaque query string that the SharedFileSystem relay forwards.
+ * The bytes must reach control-api unchanged, so this never runs through
+ * `URLSearchParams`. It is appended only after the pathname is validated.
+ */
+export function assertControlApiRawQueryAllowed(rawQueryString: string): void {
+  if (rawQueryString === '') return
+  if (!rawQueryString.startsWith('?')) throw new ControlApiPathError()
+  if (rawQueryString.includes('#')) throw new ControlApiPathError()
+  if (RAW_QUERY_CONTROL_CHARACTER.test(rawQueryString)) throw new ControlApiPathError()
+}
+
 const SAFE_RATE_LIMIT_RESPONSE_HEADERS = [
   'retry-after',
   'x-ratelimit-limit',
@@ -100,7 +162,16 @@ function safeForwardableResponseHeaders(headers: Headers, status: number): Recor
   return result
 }
 
-function buildUrl(path: string, query?: Record<string, string | undefined>): string {
+function buildUrl(
+  path: string,
+  query?: Record<string, string | undefined>,
+  rawQueryString?: string
+): string {
+  assertControlApiPathAllowed(path)
+  if (rawQueryString !== undefined) assertControlApiRawQueryAllowed(rawQueryString)
+  if (query !== undefined && rawQueryString !== undefined) {
+    throw new Error('control-api raw query and structured query are mutually exclusive')
+  }
   const base = config.controlApiBaseUrl.replace(/\/+$/, '')
   const normalizedPath = path.startsWith('/') ? path : `/${path}`
   const url = new URL(`${base}${normalizedPath}`)
@@ -111,7 +182,9 @@ function buildUrl(path: string, query?: Record<string, string | undefined>): str
       }
     }
   }
-  return url.toString()
+  // Append the relayed query only after both the pathname and the query string
+  // passed validation, and keep its bytes untouched.
+  return rawQueryString ? `${url.toString()}${rawQueryString}` : url.toString()
 }
 
 async function readResponseText(response: Response): Promise<string> {
@@ -139,6 +212,8 @@ export async function controlApiRequestWithStatus<T>(
     extraHeaders?: Record<string, string>
   }
 ): Promise<ControlApiResponse<T>> {
+  // Build and validate the URL before any credential enters a request object.
+  const url = buildUrl(path, options?.query)
   const headers: Record<string, string> = {
     'content-type': 'application/json',
     authorization: `Bearer ${config.controlApiServiceToken}`,
@@ -152,7 +227,6 @@ export async function controlApiRequestWithStatus<T>(
     Object.assign(headers, options.extraHeaders)
   }
 
-  const url = buildUrl(path, options?.query)
   const body = options?.body !== undefined ? JSON.stringify(options.body) : undefined
   const operation: ControlApiTransportOperation =
     method === 'GET' || method === 'HEAD' ? 'read' : 'mutation'
@@ -232,6 +306,8 @@ export async function controlApiBinaryRequestWithStatus(
     extraHeaders?: Record<string, string>
   }
 ): Promise<{ body: Buffer; status: number; headers: Record<string, string> }> {
+  // Build and validate the URL before any credential enters a request object.
+  const url = buildUrl(path, options?.query)
   const headers: Record<string, string> = {
     authorization: `Bearer ${config.controlApiServiceToken}`,
     'x-service-token': config.controlApiServiceName,
@@ -244,7 +320,7 @@ export async function controlApiBinaryRequestWithStatus(
     Object.assign(headers, options.extraHeaders)
   }
 
-  const response = await fetch(buildUrl(path, options?.query), { method, headers })
+  const response = await fetch(url, { method, headers })
   if (!response.ok) {
     let parsed: unknown = null
     const raw = await readResponseText(response)
@@ -281,6 +357,7 @@ export async function controlApiStreamRequest(
   path: string,
   options?: {
     query?: Record<string, string | undefined>
+    rawQueryString?: string
     userSessionToken?: string
     extraHeaders?: Record<string, string>
     signal?: AbortSignal
@@ -288,6 +365,8 @@ export async function controlApiStreamRequest(
     throwOnHttpError?: boolean
   }
 ): Promise<Response> {
+  // Build and validate the URL before any credential enters a request object.
+  const url = buildUrl(path, options?.query, options?.rawQueryString)
   const headers: Record<string, string> = {
     authorization: `Bearer ${config.controlApiServiceToken}`,
     'x-service-token': config.controlApiServiceName,
@@ -309,7 +388,7 @@ export async function controlApiStreamRequest(
   if (options?.body && typeof options.body === 'object' && Symbol.asyncIterator in options.body) {
     fetchInit.duplex = 'half'
   }
-  const response = await fetch(buildUrl(path, options?.query), fetchInit)
+  const response = await fetch(url, fetchInit)
   if (!response.ok && options?.throwOnHttpError !== false) {
     let parsed: unknown = null
     const raw = await readResponseText(response)
@@ -341,6 +420,8 @@ export async function controlApiPassthroughGet(
   path: string,
   rawQueryString: string
 ): Promise<{ status: number; contentType: string; body: string }> {
+  assertControlApiPathAllowed(path)
+  assertControlApiRawQueryAllowed(rawQueryString)
   const base = config.controlApiBaseUrl.replace(/\/+$/, '')
   const normalizedPath = path.startsWith('/') ? path : `/${path}`
   const response = await fetch(`${base}${normalizedPath}${rawQueryString}`, {

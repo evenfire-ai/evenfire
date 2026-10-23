@@ -38,9 +38,30 @@ export function signExternalSessionToken(
   )
 }
 
+const BASE64URL_SEGMENT_PATTERN = /^[A-Za-z0-9_-]+$/
+const JWS_SEGMENT_COUNT = 3
+
+/**
+ * V1 revocation is keyed by the SHA-256 of the exact token string, so an
+ * alternate base64url encoding of the same JWS segments would carry a
+ * different hash and escape its revocation record. A canonical segment is
+ * unpadded base64url over the base64url alphabet and re-encodes to exactly
+ * the presented text; verification accepts nothing else.
+ */
+function isCanonicalBase64UrlSegment(segment: string): boolean {
+  if (!BASE64URL_SEGMENT_PATTERN.test(segment)) return false
+  return Buffer.from(segment, 'base64url').toString('base64url') === segment
+}
+
+function hasCanonicalJwsRepresentation(token: string): boolean {
+  const segments = token.split('.')
+  return segments.length === JWS_SEGMENT_COUNT && segments.every(isCanonicalBase64UrlSegment)
+}
+
 export function verifyExternalSessionToken(token: string): AuthClaims | null {
   try {
     if (token.length > 4096) return null
+    if (!hasCanonicalJwsRepresentation(token)) return null
     const payload = jwt.verify(token, sessionJwtPublicKey, {
       algorithms: ['RS256'],
       issuer: config.jwtIssuer,
@@ -55,8 +76,7 @@ export function verifyExternalSessionToken(token: string): AuthClaims | null {
       (teamId !== null && typeof teamId !== 'string') ||
       typeof payload?.role !== 'string' ||
       typeof payload?.exp !== 'number' ||
-      (authGeneration !== undefined &&
-        legacyExternalSessionAuthGeneration({ authGeneration }) === null)
+      legacyExternalSessionAuthGeneration({ authGeneration }) === null
     ) {
       return null
     }
@@ -69,7 +89,7 @@ export function verifyExternalSessionToken(token: string): AuthClaims | null {
       email: payload.email,
       teamId,
       role: payload.role as AuthClaims['role'],
-      ...(authGeneration === undefined ? {} : { authGeneration: Number(authGeneration) }),
+      authGeneration: Number(authGeneration),
       exp: payload.exp,
       ...(typeof payload.iat === 'number' ? { iat: payload.iat } : {}),
       ...(typeof payload.jti === 'string' ? { jti: payload.jti } : {}),

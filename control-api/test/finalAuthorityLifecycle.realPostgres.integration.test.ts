@@ -196,7 +196,7 @@ describeRealPostgres('final catalog and resolve lifecycle authority on real Post
       expect.objectContaining<AccessCatalogRequestError>({ code: 'session_not_live' })
     )
 
-    const originalIncarnation = await createUser('missing-generation-canonicalized')
+    const originalIncarnation = await createUser('generation-one-current')
     await expect(
       buildAccessCatalog(
         {
@@ -292,5 +292,57 @@ describeRealPostgres('final catalog and resolve lifecycle authority on real Post
     await retire(principal.userId, principal.retirementActorId)
     release.resolve()
     await expect(pending).resolves.toEqual({ status: 'denied', code: 'session_not_live' })
+  })
+
+  it('applies the V1 security cutoff to the catalog and the authority snapshot', async () => {
+    const principal = await createUser('security-cutoff')
+    const secondResult = await databasePool.query(
+      `SELECT EXTRACT(EPOCH FROM date_trunc('second', clock_timestamp()))::bigint - 60 AS second`
+    )
+    const cutoff = Number((secondResult.rows[0] as { second: string }).second)
+    await databasePool.query(
+      `INSERT INTO external_user_session_security_epochs(user_id, valid_after, reason, updated_at)
+       VALUES ($1, to_timestamp($2), 'cutoff_site_test', to_timestamp($2))`,
+      [principal.userId, cutoff]
+    )
+    // The generation stays current and the token unrevoked, so only the
+    // cutoff can make these sessions not live.
+    const atCutoff: ExternalSessionAuthorityContext = { ...principal.session, issuedAt: cutoff }
+    const afterCutoff: ExternalSessionAuthorityContext = {
+      ...principal.session,
+      issuedAt: cutoff + 1,
+    }
+
+    await expect(
+      buildAccessCatalog(
+        { session: atCutoff, families: ['user'], limit: 10 },
+        { transaction: transaction() }
+      )
+    ).rejects.toEqual(
+      expect.objectContaining<AccessCatalogRequestError>({ code: 'session_not_live' })
+    )
+    const catalog = await buildAccessCatalog(
+      { session: afterCutoff, families: ['user'], limit: 10 },
+      { transaction: transaction() }
+    )
+    expect(catalog).toMatchObject({ complete: true })
+    const item = catalog.items[0]
+    expect(item).toBeDefined()
+
+    const resolve = (session: ExternalSessionAuthorityContext) =>
+      resolveLiveAuthorization(
+        {
+          session,
+          requiredCapability: 'user.profile.read',
+          resource: canonicalResourceIdentity(item!.resource),
+          requestedAccessPathId: item!.accessPaths[0]!.accessPathId,
+        },
+        { transaction: transaction() }
+      )
+    await expect(resolve(atCutoff)).resolves.toEqual({
+      status: 'denied',
+      code: 'session_not_live',
+    })
+    await expect(resolve(afterCutoff)).resolves.toMatchObject({ status: 'allowed' })
   })
 })

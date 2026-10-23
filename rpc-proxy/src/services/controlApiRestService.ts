@@ -3,6 +3,10 @@ import { type AuthorizedActionV2, actionAuthorityCheckpointRequest } from '../ac
 import { config } from '../config.js'
 import { ResolvedServerConnection } from '../types.js'
 import {
+  type ControlApiHostOperation,
+  ControlApiHostVersionMismatchError,
+} from './controlApiVersionError.js'
+import {
   type HostAccessDenial,
   type HostAccessDenialCode,
   hostAccessDenialCodeForReason,
@@ -444,6 +448,11 @@ async function fetchHostConnectionForPath(
   const directRunBinding = options.directRunBinding
   const hostAccessPath = `${controlApiBaseUrl()}/rpc/access/users/${encodeURIComponent(userId)}/mcp-hosts/${encodeURIComponent(hostRef)}`
   const messageResolution = options.messageResolution === true
+  const operation: ControlApiHostOperation = options.artifactRead
+    ? 'host-artifact-read'
+    : messageResolution
+      ? 'host-message-resolution'
+      : 'host-access'
   const response = await (options.fetchImpl ?? fetch)(
     options.artifactRead
       ? `${hostAccessPath}/artifact-read`
@@ -517,12 +526,12 @@ async function fetchHostConnectionForPath(
     }
     throw new ControlApiArtifactReadRateLimitedError(retryAfterSeconds)
   }
+  if (response.status === 404) {
+    await drainBody(response)
+    throw new ControlApiHostVersionMismatchError(operation)
+  }
   if (!directRunBinding && response.status === 403) {
     return hostAccessDenied(await readHostAccessDenialCode(response))
-  }
-  if (!directRunBinding && response.status === 404) {
-    await drainBody(response)
-    return hostAccessDenied('host_access_denied')
   }
   if (response.status === 403) {
     throw new ControlApiHostAccessRejectedError(403, await readHostAccessDenialCode(response))

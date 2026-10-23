@@ -9,9 +9,9 @@ import {
   invitationResponse,
   invitationUserIsRetired,
   loadInvitationTeams,
+  lockInvitationUserForPasswordSetup,
   lockPasswordResetUser,
 } from './invitationStore.js'
-import { getMemberSessionContext } from './login.js'
 
 async function updateActivePasswordHash(
   db: Pick<DbClient, 'query'>,
@@ -68,12 +68,22 @@ async function revokeSiblingPasswordResets(
   )
 }
 
+export type SetInvitationPasswordOptions = {
+  /**
+   * Only the external session password route is first-password-only. The admin
+   * finalization and the password-reset branch keep their existing overwrite
+   * semantics, so they never pass this option.
+   */
+  rejectIfPasswordAlreadySet?: boolean
+}
+
 export async function setInvitationPasswordForUser(
   userId: string,
   email: string,
   invitationId: string,
   password: string,
-  passwordWorkLease?: MemberPasswordWorkLease
+  passwordWorkLease?: MemberPasswordWorkLease,
+  options?: SetInvitationPasswordOptions
 ) {
   const trimmedUserId = userId.trim()
   const normalizedEmail = email.trim().toLowerCase()
@@ -100,8 +110,7 @@ export async function setInvitationPasswordForUser(
       passwordWorkLease
     )
     if ('error' in result) return result
-    const { sessionContext: _sessionContext, ...data } = result.data
-    return { data }
+    return { data: result.data }
   }
   if (candidate.purpose !== 'member_invitation' && candidate.purpose !== 'admin_desktop_access') {
     return { error: 'not_found' as const }
@@ -122,6 +131,21 @@ export async function setInvitationPasswordForUser(
         return { error: 'not_found' as const }
       }
       if (invitation.status !== 'accepted') return { error: 'not_accepted' as const }
+      if (options?.rejectIfPasswordAlreadySet) {
+        // The first-password decision must precede ensureInvitationUser, which
+        // can insert the invitee's users and profiles rows: deciding after it
+        // would write on a refused call. Lock the session user
+        // row inside the writing transaction and decide from the authoritative
+        // hash, so a concurrent first set either commits before this lock (and
+        // this request sees its hash) or waits behind it.
+        const lockedUser = await lockInvitationUserForPasswordSetup(db, trimmedUserId)
+        if (!lockedUser) return { error: 'not_found' as const }
+        if (invitationUserIsRetired(lockedUser)) return { error: 'user_retired' as const }
+        if (lockedUser.email.toLowerCase() !== invitation.email.toLowerCase()) {
+          return { error: 'forbidden' as const }
+        }
+        if (lockedUser.password_hash) return { error: 'password_already_set' as const }
+      }
       const user = await ensureInvitationUser(db, invitation.email, invitation.invitee_name)
       if (invitationUserIsRetired(user)) return { error: 'user_retired' as const }
       if (user.id !== trimmedUserId) return { error: 'forbidden' as const }
@@ -185,7 +209,7 @@ export async function setInvitationPasswordForEmail(
       if (expectedUserId && user.id !== expectedUserId.trim()) {
         return { error: 'forbidden' as const }
       }
-      const invitation = await getInvitationRecordById(db, trimmedInvitationId, true)
+      const invitation = await getInvitationRecordById(db, trimmedInvitationId, { lock: true })
       if (!invitation || invitation.purpose !== 'password_reset') {
         return { error: 'not_found' as const }
       }
@@ -219,11 +243,9 @@ export async function setInvitationPasswordForEmail(
 
       const response = await loadInvitationPasswordResponse(db, invitation.id, user, passwordHash)
       if (!response) return { error: 'not_found' as const }
-      const sessionContext = await getMemberSessionContext(db, user)
       return {
         data: {
           passwordUpdated: true,
-          sessionContext,
           ...response,
         },
       }

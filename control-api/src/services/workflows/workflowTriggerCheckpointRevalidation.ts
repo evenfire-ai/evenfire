@@ -6,11 +6,11 @@ import {
 import type { DbClient } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
 import type { ActionCheckpointCallerIdentity } from '../../middleware/actionCheckpointCaller.js'
-import { type LogicalSessionCheckpointAuthority } from '../access/accessAuthorityStore.js'
 import { runAccessDatabaseQuery } from '../access/accessDatabaseQuery.js'
 import { AccessExecutionBudget } from '../access/accessExecutionBudget.js'
 import { type ActionAuthorizationV2Result, authorizeActionV2 } from '../access/actionAuthorizer.js'
 import { resolveActionDestination } from '../access/actionDestination.js'
+import { type LogicalSessionCheckpointAuthority } from '../access/principalAuthoritySnapshot.js'
 
 type StoredWorkflowBinding = Readonly<{
   id: string

@@ -1,7 +1,6 @@
 import type { K8sGateway } from '../../k8s.js'
 import { rootLogger } from '../../observability/logger.js'
 import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAuthentication.js'
-import type { LogicalSessionCheckpointAuthority } from './accessAuthorityStore.js'
 import { AccessExecutionBudget } from './accessExecutionBudget.js'
 import {
   ActionContextV2Error,
@@ -27,6 +26,7 @@ import {
   resolveLiveActionAuthorization,
 } from './liveAuthorizationResolver.js'
 import { actionOperationTargetHash } from './operationTarget.js'
+import type { LogicalSessionCheckpointAuthority } from './principalAuthoritySnapshot.js'
 import {
   type CanonicalResourceIdentity,
   canonicalResourceIdentity,

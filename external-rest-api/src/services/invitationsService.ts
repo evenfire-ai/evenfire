@@ -56,7 +56,11 @@ export async function acceptInvitation(
     role: string
     email: string
     userId: string
-    token: string
+    // A replay of an already accepted invitation is an explicit success without
+    // a session: control-api does not mint one for a token that no longer
+    // proves a pending capability.
+    replay?: true
+    token?: string
   }
 }> {
   try {
@@ -68,7 +72,8 @@ export async function acceptInvitation(
       role: string
       email: string
       userId: string
-      token: string
+      replay?: true
+      token?: string
     }>('POST', '/external/invitations/accept', {
       body: {
         email,

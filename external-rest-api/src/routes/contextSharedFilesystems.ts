@@ -89,7 +89,15 @@ export function createContextSharedFilesystemsRouter(): Router {
     async (req: AuthedRequest, res, next) => {
       try {
         const sessionToken = extractAuthToken(req)
-        const subPath = req.params[0] ? `/${req.params[0]}` : '/'
+        // Express decodes the wildcard once. Re-encode each segment so a
+        // caller-supplied `?` or `#` stays data inside one segment instead of
+        // changing the pathname, while a real `/` keeps its hierarchy.
+        const wildcard = req.params[0] ?? ''
+        const encodedSubPath = wildcard
+          .split('/')
+          .map(segment => encodeURIComponent(segment))
+          .join('/')
+        const subPath = wildcard ? `/${encodedSubPath}` : '/'
         const queryString = (() => {
           const idx = req.originalUrl.indexOf('?')
           return idx === -1 ? '' : req.originalUrl.slice(idx)
@@ -97,8 +105,9 @@ export function createContextSharedFilesystemsRouter(): Router {
         const upstreamRes = await controlApiStreamRequest(
           req.method === 'HEAD' ? 'HEAD' : 'GET',
           `/external/contexts/${encodeURIComponent(req.params.contextId)}` +
-            `/shared-filesystems/${encodeURIComponent(req.params.sfsName)}/proxy${subPath}${queryString}`,
+            `/shared-filesystems/${encodeURIComponent(req.params.sfsName)}/proxy${subPath}`,
           {
+            rawQueryString: queryString,
             userSessionToken: sessionToken,
             extraHeaders: workflowActionDelegationHeaders(req),
             throwOnHttpError: false,

@@ -118,7 +118,7 @@ describe('directory privacy and atomic authorization', () => {
               invitee_name: 'Invitee',
               email: 'invitee@example.com',
               role: 'admin',
-              token: 'must-never-serialize',
+              token: 'synthetic-must-never-serialize',
               status: 'pending',
               purpose: 'member_invitation',
               ...activeInvitationWindow(),
@@ -159,7 +159,7 @@ describe('directory privacy and atomic authorization', () => {
     expect(result[0]).not.toHaveProperty('team_id')
     expect(result[0]).not.toHaveProperty('team_name')
     expect(result[0]).not.toHaveProperty('role')
-    expect(JSON.stringify(result)).not.toContain('must-never-serialize')
+    expect(JSON.stringify(result)).not.toContain('synthetic-must-never-serialize')
     expect(result[0]).toMatchObject({ canCancel: false, canResend: false })
   })
 
@@ -271,7 +271,7 @@ describe('directory privacy and atomic authorization', () => {
       invitee_name: 'Invitee',
       email: 'invitee@example.com',
       role: 'member',
-      token: 'must-never-leave-control-api',
+      token: 'synthetic-must-never-leave-control-api',
       status: 'draft',
       purpose: 'member_invitation',
       ...activeInvitationWindow(),
@@ -333,7 +333,7 @@ describe('directory privacy and atomic authorization', () => {
       invitee_name: 'Invitee',
       email: 'invitee@example.com',
       role: 'member',
-      token: 'inert-until-activation',
+      token: 'synthetic-inert-until-activation',
       status: 'draft',
       purpose: 'member_invitation',
       ...activeInvitationWindow(),
@@ -403,7 +403,7 @@ describe('directory privacy and atomic authorization', () => {
       invitee_name: 'Untrusted inviter label',
       email: 'target@example.com',
       role: 'member',
-      token: 'invitation-token',
+      token: 'synthetic-invitation-token',
       status: 'pending',
       purpose: 'member_invitation',
       ...activeInvitationWindow(),
@@ -473,14 +473,14 @@ describe('directory privacy and atomic authorization', () => {
     expect(sql).not.toContain('UPDATE profiles')
   })
 
-  it('allows exactly one general invitation acceptance and rejects password-reset use', async () => {
+  it('replays a general invitation acceptance for the same user and rejects password-reset use', async () => {
     const invitation = {
       id: '00000000-0000-4000-8000-000000000200',
       team_id: TEAM_A,
       invitee_name: 'Target',
       email: 'target@example.com',
       role: 'member',
-      token: 'single-use-token',
+      token: 'synthetic-single-use-token',
       status: 'pending',
       purpose: 'member_invitation',
       ...activeInvitationWindow(),
@@ -490,9 +490,19 @@ describe('directory privacy and atomic authorization', () => {
     }
     let status = invitation.status
     let membershipWrites = 0
+    let acceptanceWrites = 0
     mocks.query.mockImplementation(async (sql: string) => {
       if (sql.includes("$2 = '' AND i.token = $1")) {
-        return { rows: [{ ...invitation, status }], rowCount: 1 }
+        return {
+          rows: [
+            {
+              ...invitation,
+              status,
+              accepted_user_id: status === 'accepted' ? TARGET : null,
+            },
+          ],
+          rowCount: 1,
+        }
       }
       if (sql.includes('FROM users') && sql.includes('WHERE email = $1')) {
         return {
@@ -513,6 +523,7 @@ describe('directory privacy and atomic authorization', () => {
       if (sql.includes("SET status = 'accepted'")) {
         if (status !== 'pending') return { rows: [], rowCount: 0 }
         status = 'accepted'
+        acceptanceWrites += 1
         return { rows: [{ id: invitation.id }], rowCount: 1 }
       }
       if (sql.includes('FROM invitation_teams it') && sql.includes('JOIN teams')) {
@@ -534,13 +545,19 @@ describe('directory privacy and atomic authorization', () => {
       throw new Error(`unexpected query: ${sql.slice(0, 40)}`)
     })
 
-    await expect(
-      acceptInvitationForEmail(invitation.email, invitation.token)
-    ).resolves.toMatchObject({ data: { accepted: true, userId: TARGET } })
-    await expect(acceptInvitationForEmail(invitation.email, invitation.token)).resolves.toEqual({
-      error: 'not_pending',
+    const first = await acceptInvitationForEmail(invitation.email, invitation.token)
+    expect(first).toMatchObject({ data: { accepted: true, userId: TARGET } })
+    const replay = await acceptInvitationForEmail(invitation.email, invitation.token)
+    expect(replay).toMatchObject({
+      data: { accepted: true, userId: TARGET, replay: true },
     })
+    // The replay repeats the retained payload and only adds the replay signal.
+    if (!('data' in first) || !('data' in replay)) {
+      throw new Error('acceptance replay did not return data')
+    }
+    expect(replay.data).toEqual({ ...first.data, replay: true })
     expect(membershipWrites).toBe(1)
+    expect(acceptanceWrites).toBe(1)
 
     status = 'pending'
     const passwordReset = { ...invitation, purpose: 'password_reset' }
@@ -557,7 +574,7 @@ describe('directory privacy and atomic authorization', () => {
       invitee_name: 'Invitee',
       email: 'invitee@example.com',
       role: 'member',
-      token: 'invitation-token',
+      token: 'synthetic-invitation-token',
       status: 'pending',
       purpose: 'member_invitation',
       ...activeInvitationWindow(),
@@ -651,7 +668,7 @@ describe('directory privacy and atomic authorization', () => {
       invitee_name: 'Target',
       email: 'target@example.com',
       role: 'member',
-      token: 'password-reset-token',
+      token: 'synthetic-password-reset-token',
       status: 'pending',
       purpose: 'password_reset',
       ...activeInvitationWindow(),
@@ -661,8 +678,15 @@ describe('directory privacy and atomic authorization', () => {
     }
 
     for (const operation of [
-      () => setInvitationPasswordForUser(TARGET, invitation.email, invitation.id, 'valid-password'),
-      () => setInvitationPasswordForEmail(invitation.email, invitation.id, 'valid-password'),
+      () =>
+        setInvitationPasswordForUser(
+          TARGET,
+          invitation.email,
+          invitation.id,
+          'synthetic-valid-password'
+        ),
+      () =>
+        setInvitationPasswordForEmail(invitation.email, invitation.id, 'synthetic-valid-password'),
     ]) {
       mocks.query.mockReset()
       mocks.query.mockImplementation(async (sql: string) => {
@@ -710,7 +734,7 @@ describe('directory privacy and atomic authorization', () => {
       invitee_name: 'New user',
       email: 'new-user@example.com',
       role: 'member',
-      token: 'member-setup-token',
+      token: 'synthetic-member-setup-token',
       status: 'pending',
       purpose: 'member_invitation',
       created_at: new Date(),
@@ -791,7 +815,12 @@ describe('directory privacy and atomic authorization', () => {
       acceptInvitationForEmail(invitation.email, invitation.token, invitation.id)
     ).resolves.toMatchObject({ data: { accepted: true, userId: TARGET, status: 'accepted' } })
     await expect(
-      setInvitationPasswordForUser(TARGET, invitation.email, invitation.id, 'valid-password')
+      setInvitationPasswordForUser(
+        TARGET,
+        invitation.email,
+        invitation.id,
+        'synthetic-valid-password'
+      )
     ).resolves.toMatchObject({ data: { passwordUpdated: true, status: 'accepted' } })
     expect(status).toBe('accepted')
     expect(passwordHash).not.toBeNull()
@@ -809,7 +838,7 @@ describe('directory privacy and atomic authorization', () => {
       invitee_name: 'Existing user',
       email: 'existing@example.com',
       role: 'member',
-      token: 'consumed-member-token',
+      token: 'synthetic-consumed-member-token',
       status: 'accepted',
       purpose: 'member_invitation',
       created_at: new Date(),
@@ -843,7 +872,7 @@ describe('directory privacy and atomic authorization', () => {
       invitee_name: 'Invitee',
       email: 'invitee@example.com',
       role: 'member',
-      token: 'invitation-token',
+      token: 'synthetic-invitation-token',
       status: 'pending',
       purpose: 'member_invitation',
       ...activeInvitationWindow(),
@@ -981,7 +1010,7 @@ describe('directory privacy and atomic authorization', () => {
   })
 
   it('changes a password and revokes every session in one conditional transaction', async () => {
-    const currentHash = await bcrypt.hash('current-password', 4)
+    const currentHash = await bcrypt.hash('synthetic-current-password', 4)
     mocks.query
       .mockResolvedValueOnce({ rows: [{ password_hash: currentHash }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ lifecycle_version: 2 }], rowCount: 1 })
@@ -990,7 +1019,12 @@ describe('directory privacy and atomic authorization', () => {
       .mockResolvedValueOnce({ rows: [], rowCount: 2 })
 
     await expect(
-      updateUserPassword(MANAGER, 'manager@example.com', 'current-password', 'next-password')
+      updateUserPassword(
+        MANAGER,
+        'manager@example.com',
+        'synthetic-current-password',
+        'next-password'
+      )
     ).resolves.toEqual({ updated: true })
 
     expect(mocks.withTransaction).toHaveBeenCalledTimes(2)

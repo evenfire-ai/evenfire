@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { loadPrincipalAuthoritySnapshot } from '../src/services/access/accessAuthorityStore.js'
 import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
+import { loadPrincipalAuthoritySnapshot } from '../src/services/access/principalAuthoritySnapshot.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
 
 const userId = '10000000-0000-4000-8000-000000000001'

@@ -827,7 +827,7 @@ describe('routes/profile', () => {
       role: 'member',
     })
     rpcMock.issueRpcAccessToken.mockReturnValue({
-      token: 'rpc-token',
+      token: 'synthetic-rpc-token',
       accessScope: 'team',
       teamId: 'team-from-claims',
       scopes: ['mcp:servers:list'],
@@ -1179,7 +1179,7 @@ describe('routes/profile', () => {
       .expect(403, { error: 'membership_not_found' })
 
     await withInternalServiceAuth(request(app).post('/external/auth/password-login'))
-      .send({ email: 'retired@example.com', password: 'correct-password' })
+      .send({ email: 'retired@example.com', password: 'synthetic-correct-password' })
       .expect(403, { error: 'membership_not_found' })
 
     expect(svc.googleLoginData).toHaveBeenCalledWith({
@@ -1190,7 +1190,7 @@ describe('routes/profile', () => {
     expect(passwordAuthMock.authenticatePasswordAndIssueSession).toHaveBeenCalledWith(
       expect.objectContaining({
         email: 'retired@example.com',
-        password: 'correct-password',
+        password: 'synthetic-correct-password',
       })
     )
   })
@@ -1203,7 +1203,7 @@ describe('routes/profile', () => {
     mountInternalRoutes(app, { listResource: vi.fn() })
 
     await withInternalServiceAuth(request(app).post('/external/auth/password-login'))
-      .send({ email: 'active@example.com', password: 'wrong-password' })
+      .send({ email: 'active@example.com', password: 'synthetic-wrong-password' })
       .expect(401, { error: 'Unauthorized' })
   })
 
@@ -1295,7 +1295,7 @@ describe('routes/profile', () => {
 
   it('keeps legacy RPC issuance bound to the documented body session token', async () => {
     rpcMock.issueRpcAccessToken.mockReturnValue({
-      token: 'unexpected-token',
+      token: 'synthetic-unexpected-token',
       accessScope: 'user',
       teamId: null,
       scopes: ['host:message:invoke'],
@@ -1328,7 +1328,7 @@ describe('routes/profile', () => {
     svc.getUserAgents.mockResolvedValue({ userId: 'body-user', agentNames: ['agent-a'] })
     svc.getTeamAgents.mockResolvedValue({ teamId: 't1', agentNames: ['agent-a'] })
     rpcMock.issueRpcAccessToken.mockReturnValue({
-      token: 'body-user-token',
+      token: 'synthetic-body-user-token',
       accessScope: 'user',
       teamId: null,
       scopes: ['host:message:invoke'],

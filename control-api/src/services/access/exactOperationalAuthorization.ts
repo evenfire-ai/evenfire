@@ -1,8 +1,8 @@
 import { config } from '../../config.js'
 import type { K8sGateway } from '../../k8s.js'
 import type { ClerumResourceType } from '../../types.js'
-import type { OperationalPathBinding } from './accessAuthorityStore.js'
 import type { AccessExecutionBudget } from './accessExecutionBudget.js'
+import type { OperationalPathBinding } from './authorityCandidates.js'
 import { compareCanonicalUtf8Text } from './canonicalText.js'
 import { projectOperationalObject } from './operationalAccessProjection.js'
 

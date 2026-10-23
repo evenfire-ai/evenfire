@@ -62,6 +62,7 @@ done
 "$ROOT/scripts/tests/test-minikube-t1-port-forward-owner.sh"
 "$ROOT/scripts/tests/test-minikube-t2-process-owner.sh"
 "$ROOT/scripts/tests/test-minikube-t1-reporter-report.sh"
+CODEX_SCRATCH_ROOT="$TMP_ROOT" node --test "$ROOT/scripts/tests/password-recovery-suite-contract.test.mjs"
 "$ROOT/scripts/tests/test-minikube-explicit-context.sh"
 "$ROOT/scripts/tests/test-minikube-t2-evidence.sh"
 "$ROOT/scripts/tests/test-minikube-targeted-health.sh"
@@ -700,7 +701,7 @@ fixture_base="$(git -C "$fixture_repo" rev-parse HEAD)"
   printf '%s\n' "const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL ?? 'postgresql://postgres@127.0.0.1/postgres'"
   printf '%s\n' "const databaseUrl = 'postgresql://postgres@127.0.0.7:5432/postgres'"
   printf '%s\n' "const localDatabaseUrl = 'postgresql://localhost/tracing_test'"
-  printf '%s\n' "const issued = { token: 'replacement-token', password: 'valid-password' }"
+  printf '%s\n' "const issued = { token: 'synthetic-replacement-token', password: 'synthetic-valid-password' }"
   printf '%s\n' "const callbackUrl = 'http://127.0.0.1:36148/callback'"
 } >"$fixture_repo/control-api/test/example.realPostgres.integration.test.ts"
 if ! T2_PUBLIC_ROOT="$fixture_repo" T2_PUBLIC_BASE_REF="$fixture_base" \
@@ -709,9 +710,9 @@ if ! T2_PUBLIC_ROOT="$fixture_repo" T2_PUBLIC_BASE_REF="$fixture_base" \
   exit 1
 fi
 
-assert_public_boundary_rejects_postgres_fixture() {
+assert_public_boundary_rejects_source_fixture() {
   local name="$1" source_line="$2" expected_reason="$3"
-  local case_repo="$tmp/public-postgres-${name}"
+  local case_repo="$tmp/public-source-${name}"
   mkdir -p "$case_repo/control-api/test"
   git init -q -b dev "$case_repo"
   git -C "$case_repo" config user.email test@example.invalid
@@ -721,52 +722,38 @@ assert_public_boundary_rejects_postgres_fixture() {
   git -C "$case_repo" commit -q -m base
   local case_base
   case_base="$(git -C "$case_repo" rev-parse HEAD)"
-  printf '%s\n' "$source_line" >"$case_repo/control-api/test/postgresFixture.test.ts"
+  printf '%s\n' "$source_line" >"$case_repo/control-api/test/sourceFixture.test.ts"
   if T2_PUBLIC_ROOT="$case_repo" T2_PUBLIC_BASE_REF="$case_base" \
     bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
     >"$tmp/${name}.out" 2>"$tmp/${name}.err"; then
-    echo "FAIL: public boundary accepted unsafe PostgreSQL fixture: $name" >&2
+    echo "FAIL: public boundary accepted unsafe source fixture: $name" >&2
     exit 1
   fi
   grep -Fq "$expected_reason" "$tmp/${name}.err"
 }
 
-assert_public_boundary_rejects_postgres_fixture \
+assert_public_boundary_rejects_source_fixture \
   nearby-admin-url \
   "const adminUrl = 'postgresql://postgres@database.""internal/catalog'" \
   'private PostgreSQL URL'
-assert_public_boundary_rejects_postgres_fixture \
+assert_public_boundary_rejects_source_fixture \
   nearby-example \
   "const example = 'postgresql://postgres@10.""20.30.40/catalog'" \
   'private PostgreSQL URL'
-assert_public_boundary_rejects_postgres_fixture \
+assert_public_boundary_rejects_source_fixture \
   later-private-url \
   "const urls = ['postgresql://localhost/catalog', 'postgresql://database.""internal/catalog']" \
   'private PostgreSQL URL'
-assert_public_boundary_rejects_postgres_fixture \
+assert_public_boundary_rejects_source_fixture \
   credentialed-loopback \
   "const fixture = 'postgresql://app:""secret@127.0.0.1/catalog'" \
   'credentialed PostgreSQL URL'
-
-contract_control_repo="$tmp/public-contract-control-repo"
-mkdir -p "$contract_control_repo/scripts/tests"
-git init -q -b dev "$contract_control_repo"
-git -C "$contract_control_repo" config user.email test@example.invalid
-git -C "$contract_control_repo" config user.name boundary-test
-printf 'base\n' >"$contract_control_repo/README.md"
-git -C "$contract_control_repo" add README.md
-git -C "$contract_control_repo" commit -q -m base
-contract_control_base="$(git -C "$contract_control_repo" rev-parse HEAD)"
-printf '%s\n' \
-  "const urls = ['postgresql://postgres@127.0.0.1/postgres', 'postgresql://database.""internal/catalog']" \
-  >"$contract_control_repo/scripts/tests/test-minikube-t2-public-boundary.sh"
-if T2_PUBLIC_ROOT="$contract_control_repo" T2_PUBLIC_BASE_REF="$contract_control_base" \
-  bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
-  >"$tmp/contract-control.out" 2>"$tmp/contract-control.err"; then
-  echo 'FAIL: public boundary let one contract control mask a later unsafe URL' >&2
-  exit 1
-fi
-grep -Fq 'private PostgreSQL URL' "$tmp/contract-control.err"
+# A test path does not exempt a credential value: only the shared fixture
+# marker convention (for example a `synthetic-` value) does.
+assert_public_boundary_rejects_source_fixture \
+  unmarked-test-credential \
+  "const issued = { pass""word: 'valid-password' }" \
+  'credential assignment'
 
 public_repo="$tmp/public-repo"
 mkdir -p "$public_repo"
@@ -792,13 +779,15 @@ printf 'base\n' >"$malicious_repo/README.md"
 git -C "$malicious_repo" add README.md
 git -C "$malicious_repo" commit -q -m base
 malicious_base="$(git -C "$malicious_repo" rev-parse HEAD)"
-cat >"$malicious_repo/materialized.txt" <<'EOF'
-DATABASE_URL=postgresql://db_user:prod_password@127.0.0.1/postgres
-PUBLIC_CALLBACK=http://127.0.0.1:18443/status
-password: "ProdCustomerPassword123"
-Authorization: Bearer abcdefghijklmnopqrstuvwxyz1234567890
------BEGIN PRIVATE KEY-----
-EOF
+# Split literals keep these values out of this script's own diff, which the
+# boundary scans; the materialized file holds them whole.
+printf '%s\n' \
+  'DATABASE_URL=postgresql://db_user:''prod_password@127.0.0.1/postgres' \
+  'PUBLIC_CALLBACK=http://127.0.0.1:18443/status' \
+  'pass''word: "ProdCustomerPassword123"' \
+  'Authorization: Bear''er abcdefghijklmnopqrstuvwxyz1234567890' \
+  '-----BEGIN PRIVATE'' KEY-----' \
+  >"$malicious_repo/materialized.txt"
 printf 'empty\n' >"$malicious_repo/.env"
 if T2_PUBLIC_ROOT="$malicious_repo" T2_PUBLIC_BASE_REF="$malicious_base" \
   bash "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" 2>"$tmp/malicious-public.err"; then

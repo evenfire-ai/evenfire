@@ -270,44 +270,48 @@ describe('user session state machine', () => {
     })
   })
 
-  it.each([
-    ['active generation one', 'active', 1, null, false, 'valid'],
-    ['retired generation one', 'retired', 1, null, false, 'revoked'],
-    ['reactivated generation two', 'active', 2, null, false, 'revoked'],
-    ['password/security epoch', 'active', 1, now, false, 'revoked'],
-    ['explicit token revocation', 'active', 1, null, true, 'revoked'],
-  ] as const)(
-    'maps a missing-generation legacy token against %s authority',
-    async (_label, lifecycleState, lifecycleVersion, validAfter, tokenRevoked, expectedStatus) => {
-      const claims: AuthClaims = {
-        userId: randomUUID(),
-        email: 'legacy@example.com',
-        teamId: null,
-        role: 'member',
-        exp: Math.floor(now.getTime() / 1000) + 3600,
-        iat: Math.floor(now.getTime() / 1000) - 1,
-      }
-      const db = {
-        query: vi.fn(async (sql: string) =>
-          sql.includes('clock_timestamp()')
-            ? { rows: [{ db_now: now }], rowCount: 1 }
-            : {
-                rows: [
-                  {
-                    id: claims.userId,
-                    lifecycle_state: lifecycleState,
-                    lifecycle_version: lifecycleVersion,
-                    valid_after: validAfter,
-                    token_revoked: tokenRevoked,
-                  },
-                ],
-                rowCount: 1,
-              }
-        ),
-      }
-
-      const result = await validateLegacyUserSession('legacy-v1-token', claims, { db })
-      expect(result.status).toBe(expectedStatus)
+  it('rejects a missing-generation legacy token before reading authority', async () => {
+    const claims: AuthClaims = {
+      userId: randomUUID(),
+      email: 'legacy@example.com',
+      teamId: null,
+      role: 'member',
+      exp: Math.floor(now.getTime() / 1000) + 3600,
+      iat: Math.floor(now.getTime() / 1000) - 1,
     }
-  )
+    const db = {
+      query: vi.fn(async (sql: string) =>
+        sql.includes('clock_timestamp()')
+          ? { rows: [{ db_now: now }], rowCount: 1 }
+          : {
+              rows: [
+                {
+                  id: claims.userId,
+                  lifecycle_state: 'active',
+                  lifecycle_version: 1,
+                  valid_after: null,
+                  token_revoked: false,
+                },
+              ],
+              rowCount: 1,
+            }
+      ),
+    }
+
+    await expect(validateLegacyUserSession('legacy-v1-token', claims, { db })).resolves.toEqual({
+      status: 'invalid',
+      reason: 'invalid_legacy_representation',
+    })
+    expect(db.query).not.toHaveBeenCalled()
+
+    // Liveness witness: the same claims with generation one reach the
+    // authority read and validate against the same active row.
+    const current = await validateLegacyUserSession(
+      'legacy-v1-token',
+      { ...claims, authGeneration: 1 },
+      { db }
+    )
+    expect(current.status).toBe('valid')
+    expect(db.query).toHaveBeenCalled()
+  })
 })

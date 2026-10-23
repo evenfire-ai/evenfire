@@ -70,9 +70,7 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       '0131_invitation_delivery_commands',
       '0132_catalog_utf8_ordering',
       '0133_composable_catalog_revisions',
-      '0134_gfs_catalog_revision_components',
-      '0135_user_access_foundation_definer_temp_shadow_hardening',
-      '0136_legacy_password_security_epoch_backfill',
+      '0134_legacy_password_security_epoch_backfill',
       '0137_workflow_authority_bindings',
       '0138_gfs_upload_authority_bindings',
       '0139_pr2_readiness_evidence',
@@ -80,7 +78,7 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
       '0141_workflow_recipe_authority_entity',
       '0142_workflow_run_failure_reason',
       '0143_r31_runtime_behavior_sources',
-      '0144_authorization_revision_delete_compatibility',
+      '0145_workflow_authorization_pause',
     ]
 
     expect(
@@ -89,9 +87,10 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     expect(versions[versions.indexOf(parentDev.at(-1)!) + 1]).toBe(incomingDev)
     expect(versions.indexOf(incomingDev)).toBeLessThan(versions.indexOf(task106[0]!))
     expect(
-      versions.slice(versions.indexOf(task106[0]!), versions.indexOf(task106[0]!) + 15)
+      versions.slice(versions.indexOf(task106[0]!), versions.indexOf(task106[0]!) + 13)
     ).toEqual(task106)
     expect(versions.indexOf(parentDev.at(-1)!)).toBeLessThan(versions.indexOf(task106[0]!))
+    expect(versions.at(-1)).toBe(task106.at(-1))
   })
 
   it('keeps legacy aliases unique and distinct from current versions', async () => {
@@ -103,66 +102,6 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
 
     expect(duplicates).toEqual([])
     expect(currentCollisions).toEqual([])
-  })
-
-  it('registers the narrow R56-B1 access-foundation definer hardening migration', async () => {
-    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
-    const version = '0135_user_access_foundation_definer_temp_shadow_hardening'
-    const migration = CONTROL_API_MIGRATIONS.find(candidate => candidate.version === version)
-    const versions = CONTROL_API_MIGRATIONS.map(candidate => candidate.version)
-
-    expect(migration).toBeDefined()
-    expect(migration?.legacyVersions).toEqual([
-      '0134_user_access_foundation_definer_temp_shadow_hardening',
-      '012b_user_access_foundation_definer_temp_shadow_hardening',
-      '012a_user_access_foundation_definer_temp_shadow_hardening',
-    ])
-    expect(migration?.preserveLegacyReceipts).toBe(true)
-    expect(versions.indexOf('0134_gfs_catalog_revision_components')).toBeLessThan(
-      versions.indexOf(version)
-    )
-    expect(versions.indexOf(version)).toBeLessThan(
-      versions.indexOf('0136_legacy_password_security_epoch_backfill')
-    )
-    if (!migration) return
-
-    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
-    await migration.apply({ query } as never)
-    expect(query).toHaveBeenCalledOnce()
-
-    const sql = query.mock.calls.map(([statement]) => String(statement)).join('\n')
-    const compactSql = sql.replace(/\s+/g, '')
-    const signatures = [
-      'authorization_bump_user_revision(pg_catalog.uuid)',
-      'authorization_bump_team_revision(pg_catalog.uuid)',
-      'authorization_bump_subject_revision(pg_catalog.text,pg_catalog.text)',
-      'authorization_bump_user_row_revision()',
-      'authorization_bump_team_row_revision()',
-      'authorization_bump_workflow_run_revision()',
-      'authorization_bump_workflow_approval_revision()',
-      'authorization_bump_notification_revision()',
-      'authorization_bump_gfs_subject_revision()',
-      'authorization_bump_gfs_resource_component(pg_catalog.uuid)',
-      'authorization_bump_gfs_authority_revision()',
-      'authorization_bump_gfs_resource_subjects(pg_catalog.uuid)',
-      'authorization_bump_gfs_resource_revision()',
-      'authorization_bump_resource_revision(pg_catalog.text,pg_catalog.text,pg_catalog.text)',
-      'authorization_bump_team_membership_revision()',
-      'authorization_bump_user_grant_revision()',
-      'authorization_bump_team_grant_revision()',
-      'authorization_bump_operational_resource_revision()',
-      'authorization_bump_operational_relationship_revision()',
-    ]
-
-    // 0133_composable_catalog_revisions removes this trigger before 0135 runs.
-    expect(signatures).not.toContain('authorization_bump_catalog_revision()')
-    expect(sql.match(/ALTER FUNCTION public\./g)).toHaveLength(signatures.length)
-    for (const signature of signatures) {
-      expect(compactSql).toContain(
-        `ALTERFUNCTIONpublic.${signature}SETsearch_path=pg_catalog,public,pg_temp;`
-      )
-    }
-    expect(sql).not.toMatch(/\b(?:CREATE OR REPLACE|DROP|GRANT|REVOKE|OWNER TO)\b/i)
   })
 
   it('recognizes deployed BUG-192 admission without reapplying its schema', async () => {
@@ -347,52 +286,5 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     expect(sql).toMatch(
       /CREATE INDEX IF NOT EXISTS[\s\S]+?ON mcp_secret_rollback_permits\s*\(\s*expires_at\s*\)/i
     )
-  })
-
-  it('registers the narrow 0129 team-delete compatibility successor', async () => {
-    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
-    const predecessorIndex = CONTROL_API_MIGRATIONS.findIndex(
-      candidate => candidate.version === '0130_user_access_foundation'
-    )
-    const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '0144_authorization_revision_delete_compatibility'
-    )
-
-    expect(predecessorIndex).toBeGreaterThanOrEqual(0)
-    expect(migration).toBeDefined()
-    expect(CONTROL_API_MIGRATIONS.at(-1)?.version).toBe('0145_workflow_authorization_pause')
-    expect(migration?.legacyVersions).toEqual([
-      '0143_authorization_revision_delete_compatibility',
-      '0138_authorization_revision_delete_compatibility',
-    ])
-    if (!migration) return
-
-    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
-    await migration.apply({ query } as never)
-
-    expect(query).toHaveBeenCalledOnce()
-    const sql = String(query.mock.calls[0]?.[0])
-    for (const functionName of [
-      'authorization_bump_user_revision',
-      'authorization_bump_team_revision',
-    ]) {
-      expect(sql).toMatch(
-        new RegExp(`CREATE OR REPLACE FUNCTION public\\.${functionName}\\(target_.* UUID\\)`, 'i')
-      )
-      expect(sql).toMatch(
-        new RegExp(
-          `${functionName}[\\s\\S]+?SELECT ${functionName.includes('user') ? 'users' : 'teams'}\\.id[\\s\\S]+FROM ${functionName.includes('user') ? 'users' : 'teams'}`,
-          'i'
-        )
-      )
-    }
-    expect(sql).toMatch(
-      /CREATE OR REPLACE FUNCTION public\.authorization_bump_team_revision\(target_team_id UUID\)/i
-    )
-    expect(sql).toMatch(/SECURITY DEFINER[\s\S]+SET search_path = pg_catalog, public, pg_temp/i)
-    expect(sql).toMatch(/SELECT teams\.id[\s\S]+FROM teams[\s\S]+WHERE teams\.id = target_team_id/i)
-    expect(sql).toMatch(/SELECT users\.id[\s\S]+FROM users[\s\S]+WHERE users\.id = target_user_id/i)
-    expect(sql).not.toMatch(/VALUES\s*\(target_(?:team|user)_id/i)
-    expect(sql).not.toMatch(/\b(?:GRANT|REVOKE|OWNER TO)\b/i)
   })
 })

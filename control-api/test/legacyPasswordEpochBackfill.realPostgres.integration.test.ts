@@ -23,20 +23,11 @@ function quoteIdentifier(value: string): string {
 }
 
 async function removeLegacyEpochMigrationReceipts(databasePool: Pool): Promise<void> {
-  await databasePool.query(
+  const removed = await databasePool.query(
     `DELETE FROM schema_migrations
-      WHERE version = ANY($1::text[])`,
-    [
-      [
-        '0136_legacy_password_security_epoch_backfill',
-        '0135_legacy_password_security_epoch_backfill',
-        '0130_legacy_password_security_epoch_backfill',
-        '010e_legacy_password_security_epoch_backfill',
-        '010c_legacy_password_security_epoch_backfill',
-        '0106_legacy_password_security_epoch_backfill',
-      ],
-    ]
+      WHERE version = '0134_legacy_password_security_epoch_backfill'`
   )
+  if (removed.rowCount !== 1) throw new Error('legacy epoch backfill receipt was not recorded')
 }
 
 function legacyToken(input: { userId: string; email: string; teamId: string; issuedAt: Date }) {
@@ -142,7 +133,7 @@ describeRealPostgres('legacy password epoch backfill on real PostgreSQL', () => 
     const recorded = await databasePool.query<{ count: string }>(
       `SELECT COUNT(*)::text AS count
          FROM schema_migrations
-        WHERE version = '0136_legacy_password_security_epoch_backfill'`
+        WHERE version = '0134_legacy_password_security_epoch_backfill'`
     )
     expect(recorded.rows[0]?.count).toBe('1')
   })

@@ -32,13 +32,14 @@ const sessionJwtPublicKey = createPublicKey(config.sessionJwtPrivateKey).export(
   format: 'pem',
 })
 
-function legacySessionToken(): string {
+function legacySessionToken(authGeneration?: number): string {
   return jwt.sign(
     {
       userId: '11111111-1111-4111-8111-111111111111',
       email: 'legacy@example.com',
       teamId: null,
       role: 'member',
+      ...(authGeneration === undefined ? {} : { authGeneration }),
     },
     config.sessionJwtPrivateKey,
     {
@@ -84,7 +85,7 @@ describe('external session legacy token cut-over', () => {
     )
   })
 
-  it('accepts a producer-shaped pre-generation token only as lifecycle generation one', async () => {
+  it('denies a signature-valid token without a lifecycle generation', async () => {
     const token = legacySessionToken()
 
     const cryptographicallyValidClaims = jwt.verify(token, sessionJwtPublicKey, {
@@ -93,11 +94,24 @@ describe('external session legacy token cut-over', () => {
       audience: config.jwtAudience,
     }) as jwt.JwtPayload
     expect(cryptographicallyValidClaims.authGeneration).toBeUndefined()
-    const parsed = verifyExternalSessionToken(token)
-    expect(parsed).toEqual(
-      expect.objectContaining({ userId: '11111111-1111-4111-8111-111111111111' })
+    expect(verifyExternalSessionToken(token)).toBeNull()
+
+    const response = await request(app()).get('/protected').set('x-user-session-token', token)
+
+    expect(response.status).toBe(401)
+    expect(response.body).not.toEqual({ ok: true })
+    expect(poolQuery).not.toHaveBeenCalled()
+  })
+
+  it('accepts the same token shape carrying generation one', async () => {
+    const token = legacySessionToken(1)
+
+    expect(verifyExternalSessionToken(token)).toEqual(
+      expect.objectContaining({
+        userId: '11111111-1111-4111-8111-111111111111',
+        authGeneration: 1,
+      })
     )
-    expect(parsed?.authGeneration).toBeUndefined()
 
     const response = await request(app()).get('/protected').set('x-user-session-token', token)
 

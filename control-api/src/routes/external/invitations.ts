@@ -40,6 +40,22 @@ function invitationAdmissionKey(req: Request, operation: 'preview' | 'password-t
   return `invite-token:${operation}:${externalClientIpRateLimitKey(req)}`
 }
 
+// Password setup never returns a session representation. Strip the fields at
+// the public boundary even if a directory implementation supplies them.
+function withoutSessionResponseFields<T extends object>(
+  data: T
+): Omit<T, 'sessionContext' | 'token'> {
+  const {
+    sessionContext: _sessionContext,
+    token: _token,
+    ...response
+  } = data as T & {
+    sessionContext?: unknown
+    token?: unknown
+  }
+  return response
+}
+
 export function createExternalInvitationsRouter(): Router {
   const router = Router()
   const externalInvitationsEdgeRateLimits = createExternalClientRateLimiters(
@@ -152,19 +168,11 @@ export function createExternalInvitationsRouter(): Router {
         }
 
         const userId = result.data.userId
-        const session = result.data.sessionContext
-        if (
-          !userId ||
-          !session ||
-          session.userId !== userId ||
-          !Number.isSafeInteger(session.authGeneration) ||
-          session.authGeneration < 1
-        ) {
+        if (!userId) {
           return res.status(409).json({ error: 'invitation_not_ready' })
         }
-        const { sessionContext: _sessionContext, ...response } = result.data
         return res.status(200).json({
-          ...response,
+          ...withoutSessionResponseFields(result.data),
           reauthenticationRequired: true,
         })
       } catch (error) {
@@ -193,13 +201,23 @@ export function createExternalInvitationsRouter(): Router {
           return res.status(400).json({ error: 'invalid payload' })
         }
 
-        const result = await setInvitationPasswordForUser(userId, email, invitationId, password)
+        const result = await setInvitationPasswordForUser(
+          userId,
+          email,
+          invitationId,
+          password,
+          undefined,
+          { rejectIfPasswordAlreadySet: true }
+        )
         if ('error' in result) {
           if (result.error === 'not_found') {
             return res.status(404).json({ error: 'not_found' })
           }
           if (result.error === 'forbidden') {
             return res.status(403).json({ error: 'forbidden' })
+          }
+          if (result.error === 'password_already_set') {
+            return res.status(409).json({ error: 'password_already_set' })
           }
           if (result.error === 'not_accepted') {
             return res.status(409).json({ error: 'invitation_not_accepted' })
@@ -215,7 +233,7 @@ export function createExternalInvitationsRouter(): Router {
           }
           return res.status(400).json({ error: 'invalid_password' })
         }
-        return res.status(200).json(result.data)
+        return res.status(200).json(withoutSessionResponseFields(result.data))
       } catch (error) {
         if (sendPasswordAdmissionError(error, res)) return
         return next(error)
@@ -328,6 +346,10 @@ export function createExternalInvitationsRouter(): Router {
             validation.invitationUuid
           )
           if ('error' in result && result.error) return { error: result.error }
+          // Only the transaction that consumed a pending invitation proves the
+          // capability. A replay must stay a success without minting a session,
+          // because the token may already be public knowledge.
+          if ('replay' in result.data) return { data: result.data, replay: true as const }
           const lockedUser = await db.query(`SELECT id FROM users WHERE id = $1 FOR UPDATE`, [
             result.data.userId,
           ])
@@ -357,6 +379,9 @@ export function createExternalInvitationsRouter(): Router {
             return res.status(410).json({ error: 'expired' })
           }
           return res.status(400).json({ error: 'not_pending' })
+        }
+        if ('replay' in accepted) {
+          return res.status(200).json(accepted.data)
         }
 
         return res.status(200).json({

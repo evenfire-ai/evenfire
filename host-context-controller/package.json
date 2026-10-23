@@ -1,10 +1,10 @@
 {
   "name": "clerum-host-context-controller",
-  "version": "0.1.405",
+  "version": "0.1.406",
   "description": "Host Context Controller - provides McpServer CRDs to mcp-host via REST API",
   "main": "dist/main.js",
   "engines": {
-    "node": ">=24"
+    "node": ">=24.22.1"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

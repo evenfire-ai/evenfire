@@ -44,7 +44,7 @@ describe('password admission error forwarding', () => {
 
     const response = await request(buildApp())
       .post('/api/v1/auth/password-login')
-      .send({ email: 'user@example.invalid', password: 'valid-password' })
+      .send({ email: 'user@example.invalid', password: 'synthetic-valid-password' })
 
     expect(response.status).toBe(503)
     expect(response.headers['cache-control']).toBe('no-store')
@@ -69,7 +69,7 @@ describe('password admission error forwarding', () => {
 
     const response = await request(buildApp())
       .post('/api/v1/auth/password-login')
-      .send({ email: 'user@example.invalid', password: 'valid-password' })
+      .send({ email: 'user@example.invalid', password: 'synthetic-valid-password' })
 
     expect(response.status).toBe(503)
     expect(response.headers['retry-after']).toBe('5')
@@ -82,7 +82,7 @@ describe('password admission error forwarding', () => {
 
     const response = await request(buildApp())
       .post('/api/v1/auth/password-login')
-      .send({ email: 'user@example.invalid', password: 'valid-password' })
+      .send({ email: 'user@example.invalid', password: 'synthetic-valid-password' })
 
     expect(response.status).toBe(429)
     expect(response.headers['retry-after']).toBe('7')

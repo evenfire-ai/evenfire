@@ -136,8 +136,13 @@ describe('Method gating', () => {
     expect(res.body).toEqual(Buffer.from('file-data'))
     expect(controlApiClientMock.controlApiStreamRequest).toHaveBeenCalledWith(
       'GET',
-      '/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/files?download=1',
-      { userSessionToken: 'good-token', extraHeaders: {}, throwOnHttpError: false }
+      '/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/files',
+      {
+        rawQueryString: '?download=1',
+        userSessionToken: 'good-token',
+        extraHeaders: {},
+        throwOnHttpError: false,
+      }
     )
   })
 
@@ -158,10 +163,37 @@ describe('Method gating', () => {
 
     expect(controlApiClientMock.controlApiStreamRequest).toHaveBeenCalledWith(
       'GET',
-      '/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/files?path=docs',
+      '/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/files',
       {
+        rawQueryString: '?path=docs',
         userSessionToken: 'good-token',
         extraHeaders: { 'x-evenfire-action-delegation': 'delegation.fixture.value' },
+        throwOnHttpError: false,
+      }
+    )
+  })
+
+  it('re-encodes every wildcard segment and passes the original query separately', async () => {
+    authTokenMock.verifyToken.mockReturnValue(claims)
+    controlApiClientMock.controlApiStreamRequest.mockResolvedValue(
+      new Response('file-data', {
+        status: 200,
+        headers: { 'content-type': 'application/octet-stream' },
+      })
+    )
+
+    await request(buildApp())
+      .get('/me/contexts/ctx-a/shared-filesystems/team-mission/proxy/files/a%3Fb.txt?download=1')
+      .set('authorization', 'Bearer good-token')
+      .expect(200)
+
+    expect(controlApiClientMock.controlApiStreamRequest).toHaveBeenCalledWith(
+      'GET',
+      '/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/files/a%3Fb.txt',
+      {
+        rawQueryString: '?download=1',
+        userSessionToken: 'good-token',
+        extraHeaders: {},
         throwOnHttpError: false,
       }
     )
@@ -213,8 +245,13 @@ describe('Method gating', () => {
     expect(cancel).toHaveBeenCalledOnce()
     expect(controlApiClientMock.controlApiStreamRequest).toHaveBeenCalledWith(
       'HEAD',
-      '/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/files?download=1',
-      { userSessionToken: 'good-token', extraHeaders: {}, throwOnHttpError: false }
+      '/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/files',
+      {
+        rawQueryString: '?download=1',
+        userSessionToken: 'good-token',
+        extraHeaders: {},
+        throwOnHttpError: false,
+      }
     )
   })
 

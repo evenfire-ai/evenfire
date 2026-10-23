@@ -1,6 +1,6 @@
 import type { DbClient } from '../../db.js'
 import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAuthentication.js'
-import { parseAuthorizationMemberships } from './accessAuthorityStore.js'
+import { legacySecurityCutoffRejectsSql } from '../auth/legacySecurityCutoff.js'
 import type { AccessExecutionBudget } from './accessExecutionBudget.js'
 import { revisionOfValues } from './authorizationRevision.js'
 import type {
@@ -13,6 +13,7 @@ import {
   OPERATIONAL_SOURCE_FAMILIES,
   type OperationalSourceFamily,
 } from './operationalAccessProjection.js'
+import { parseAuthorizationMemberships } from './principalAuthoritySnapshot.js'
 
 export class CatalogAuthorityError extends Error {
   constructor(readonly code: 'principal_not_found' | 'session_not_live' | 'source_state_invalid') {
@@ -121,7 +122,7 @@ export async function loadCatalogRequestContext(input: {
                 AND NOT EXISTS (
                   SELECT 1 FROM external_user_session_security_epochs epoch
                    WHERE epoch.user_id = users.id
-                     AND $7::bigint * 1000 <= EXTRACT(EPOCH FROM epoch.valid_after) * 1000
+                     AND ${legacySecurityCutoffRejectsSql('$7::bigint', 'epoch.valid_after')}
                 )
               )
             END AS session_live,

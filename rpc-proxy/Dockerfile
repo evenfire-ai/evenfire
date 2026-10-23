@@ -1,4 +1,4 @@
-FROM node:24-alpine AS builder
+FROM node:24.22.1-alpine AS builder
 WORKDIR /app
 
 COPY packages/action-context-contracts ./packages/action-context-contracts
@@ -12,7 +12,7 @@ COPY rpc-proxy/src ./src
 RUN npm run build
 RUN npm prune --production
 
-FROM node:24-alpine
+FROM node:24.22.1-alpine
 ARG EVENFIRE_SOURCE_REVISION
 ARG EVENFIRE_SERVICE_VERSION
 RUN addgroup -S app && adduser -S app -G app

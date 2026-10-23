@@ -58,6 +58,7 @@ describe('external directory authorization', () => {
       role: 'member',
       exp: 2_000_000_000,
       sessionContract: 'v1',
+      authGeneration: 1,
     })
     mocks.searchDirectory.mockResolvedValue({ items: [], nextCursor: null })
     mocks.checkAndIncrement.mockResolvedValue(allowedRateLimitResult())

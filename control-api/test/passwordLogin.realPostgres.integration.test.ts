@@ -470,8 +470,11 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
     expect(recoveryUpdateCommitted).toBe(true)
     expect(result).toBeDefined()
     expect(result).toMatchObject({
-      data: { passwordUpdated: true, sessionContext: { userId } },
+      data: { passwordUpdated: true },
     })
+    const resultData = (result as { data: Record<string, unknown> }).data
+    expect(resultData).not.toHaveProperty('sessionContext')
+    expect(resultData).not.toHaveProperty('token')
     expect(
       (
         await holder.pool.query('SELECT id, status FROM invitations WHERE id = ANY($1::uuid[])', [

@@ -68,7 +68,10 @@ describe('legacy external-session replacement exchange', () => {
       },
       policy: { issueV1: true, switchCompatibility: true },
     })
-    issuance.issueExternalUserSession.mockResolvedValue({ token: 'stale-token', contract: 'v1' })
+    issuance.issueExternalUserSession.mockResolvedValue({
+      token: 'synthetic-stale-token',
+      contract: 'v1',
+    })
     revocations.revokeAllUserSessions.mockResolvedValue(1)
     revocations.revokeUserSession.mockResolvedValue(true)
     database.query.mockResolvedValue({
@@ -83,13 +86,13 @@ describe('legacy external-session replacement exchange', () => {
     const response = await request(app())
       .post('/external/auth/session-token')
       .set('x-forwarded-for', '203.0.113.44')
-      .set('x-user-session-token', 'source-token')
+      .set('x-user-session-token', 'synthetic-source-token')
       .send({ userId: claims.userId, email: claims.email, teamId: 'team-new' })
 
     expect(response.status).toBe(401)
     expect(response.body).toMatchObject({ error: { code: 'invalid_session' } })
     expect(issuance.exchangeLegacyExternalUserSession).toHaveBeenCalledWith(
-      expect.objectContaining({ token: 'source-token', teamId: 'team-new', claims }),
+      expect.objectContaining({ token: 'synthetic-source-token', teamId: 'team-new', claims }),
       expect.objectContaining({ policy: expect.any(Object) })
     )
     expect(issuance.issueExternalUserSession).not.toHaveBeenCalled()
@@ -98,19 +101,19 @@ describe('legacy external-session replacement exchange', () => {
   it('uses the current locked membership role for the replacement representation', async () => {
     issuance.exchangeLegacyExternalUserSession.mockResolvedValue({
       status: 'issued',
-      token: 'replacement-token',
+      token: 'synthetic-replacement-token',
       role: 'member',
     })
 
     const response = await request(app())
       .post('/external/auth/session-token')
       .set('x-forwarded-for', '203.0.113.44')
-      .set('x-user-session-token', 'source-token')
+      .set('x-user-session-token', 'synthetic-source-token')
       .send({ userId: claims.userId, email: claims.email, teamId: 'team-new' })
       .expect(200)
 
     expect(response.body).toEqual({
-      token: 'replacement-token',
+      token: 'synthetic-replacement-token',
       sessionContract: 'v1',
       deprecated: true,
     })
@@ -124,7 +127,7 @@ describe('legacy external-session replacement exchange', () => {
     await request(app())
       .post('/external/auth/session-token')
       .set('x-forwarded-for', '203.0.113.44')
-      .set('x-user-session-token', 'source-token')
+      .set('x-user-session-token', 'synthetic-source-token')
       .send({ userId: claims.userId, email: claims.email, teamId: 'team-new' })
       .expect(403, { error: 'membership_not_found' })
 
@@ -150,7 +153,7 @@ describe('legacy external-session replacement exchange', () => {
     await request(app())
       .post('/external/auth/sessions/revoke-all')
       .set('x-forwarded-for', '203.0.113.44')
-      .set('x-user-session-token', 'source-token')
+      .set('x-user-session-token', 'synthetic-source-token')
       .expect(200, { revoked: 1 })
 
     expect(revocations.revokeAllUserSessions).toHaveBeenCalledWith(
@@ -185,7 +188,7 @@ describe('legacy external-session replacement exchange', () => {
     await request(app())
       .post('/external/auth/sessions/target-session/revoke')
       .set('x-forwarded-for', '203.0.113.44')
-      .set('x-user-session-token', 'source-token')
+      .set('x-user-session-token', 'synthetic-source-token')
       .expect(200, { revoked: true })
 
     expect(revocations.revokeUserSession).toHaveBeenCalledWith(
@@ -221,7 +224,7 @@ describe('legacy external-session replacement exchange', () => {
     await request(app())
       .post('/external/auth/session/logout')
       .set('x-forwarded-for', '203.0.113.44')
-      .set('x-user-session-token', 'source-token')
+      .set('x-user-session-token', 'synthetic-source-token')
       .expect(200, { revoked: true })
 
     expect(revocations.revokeUserSession).toHaveBeenCalledWith(

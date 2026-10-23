@@ -1,6 +1,7 @@
 import type { DbClient } from '../db.js'
 import type { PinnedTransport } from '../http/pinnedFetch.js'
 import type { DnsResolver } from '../http/validateMcpServerSpec.js'
+import { remoteWireForProfile } from './asProfiles.js'
 import {
   type OAuthClientDecl,
   RecipeNotFoundError,
@@ -19,13 +20,13 @@ import {
   isKnownOAuthProvider,
   parseRemoteTokenResponse,
 } from './providers.js'
+import { resolveExactRecipeOAuthClient } from './recipeOAuthClient.js'
 import {
   type OAuthGrantKey,
   getOAuthGrant,
   refreshOAuthGrantTokens,
   resolveOwnerKind,
 } from './store.js'
-import { resolveExactRecipeOAuthClient } from './recipeOAuthClient.js'
 
 /**
  * Fetch the current access token for a grant (user or service), refreshing on
@@ -332,7 +333,10 @@ async function refreshRemoteGrant(
       clientId: credResult.cred.clientId,
       clientSecret: credResult.cred.clientSecret,
     },
-    remote.resource
+    remote.resource,
+    // Entra's refresh token is valid for every consented API, so without `scope` the
+    // refreshed token's audience would not be pinned to this server.
+    remoteWireForProfile(remote.asProfile).scopeOnTokenRequests ? decl.scopes : undefined
   )
   const posted = await postRemoteTokenForm(
     remote.tokenEndpoint,
