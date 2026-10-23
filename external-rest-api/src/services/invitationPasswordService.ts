@@ -13,12 +13,7 @@ type AuthContext = {
 }
 
 type ResetPasswordDomainError =
-  | 'not_found'
-  | 'forbidden'
-  | 'not_pending'
-  | 'expired'
-  | 'invalid_invitation'
-  | 'invalid_password'
+  'not_found' | 'forbidden' | 'not_pending' | 'expired' | 'invalid_invitation' | 'invalid_password'
 
 function invitationPasswordDomainError(
   error: ControlApiError
@@ -82,12 +77,7 @@ export async function setupInvitationPassword(
   password: string
 ): Promise<{
   error?:
-    | 'not_found'
-    | 'forbidden'
-    | 'not_accepted'
-    | 'not_pending'
-    | 'expired'
-    | 'invalid_password'
+    'not_found' | 'forbidden' | 'not_accepted' | 'not_pending' | 'expired' | 'invalid_password'
   data?: InvitationPreview & { passwordUpdated: boolean }
 }> {
   try {

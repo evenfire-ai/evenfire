@@ -2349,8 +2349,7 @@ export class AppService {
       return ++this.sessionGeneration
     })
     let setupRequest:
-      | ReturnType<MemberRegistrationServiceClient['completeDesktopSetup']>
-      | undefined
+      ReturnType<MemberRegistrationServiceClient['completeDesktopSetup']> | undefined
     await this.withNativeAuthEnvironmentCommit(async () => {
       this.assertSessionGeneration(setupGeneration)
       setupRequest = this.memberRegistrationServiceClient.completeDesktopSetup(
