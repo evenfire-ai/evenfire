@@ -36,13 +36,21 @@ import {
   DCR_PUBLIC_WITH_ECHOED_SECRET_REGISTRATION_RESPONSE,
   DCR_VERCEL_DOWNGRADE_REGISTRATION_JSON,
   DCR_VERCEL_DOWNGRADE_REGISTRATION_RESPONSE,
+  ENTRA_AGENT365_MAIL_PILOT,
+  ENTRA_GRAPH_SCOPE_PILOT,
+  ENTRA_NO_SCOPES_PILOT,
+  ENTRA_SHAREPOINT_SCOPE_PILOT,
+  ENTRA_UNKNOWN_GUID_PILOT,
+  ENTRA_WORKIQ_PILOT,
   NOTION_PRM_JSON,
   PILOTS,
+  type PilotFixture,
   VERCEL_PILOT,
   dcrPilot,
   makeDcrTransport,
   makeDiscoveryTransport,
   makeInMemoryDynamicClientsDb,
+  workIqPilotWithPrm,
 } from './fixtures/remoteOAuthDiscovery.js'
 import { MockGateway } from './mockGateway.js'
 
@@ -67,6 +75,9 @@ vi.mock('../src/oauth/discovery.js', async importActual => {
 })
 
 const NS = config.mcpServersNamespace // 'mcp-server'
+
+/** The two request fields the auth and correlation middlewares set in production. */
+type UiAuthedRequestLike = { adminAuth?: { sub: string; jti: string }; log?: unknown }
 
 // F1 collateral: the router now probes the MCP transport in BOTH discover and install.
 // Every app injects a `probe` derived from the REAL producer (`probeMcpTransport` bound
@@ -2555,5 +2566,606 @@ describe('POST /admin/mcp-servers/remote — per-server callback (AS without RFC
         expect(res.body.callback).toEqual({ configured: false, variant: 'per-server' })
       })
     }
+  })
+})
+
+describe('Microsoft Entra ID — authorizationServer override on /discover and install', () => {
+  const PUBLIC_IP = async () => ['93.184.216.34']
+  const ORIGIN = 'https://control.example.com'
+  const TENANT_AUTHORITY =
+    'https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0'
+  let savedCallbackBaseUrl: string
+
+  beforeEach(() => {
+    vi.mocked(discoverRemoteOAuth).mockReset()
+    savedCallbackBaseUrl = config.oauthCallbackBaseUrl
+    config.oauthCallbackBaseUrl = ORIGIN
+  })
+  afterEach(() => {
+    config.oauthCallbackBaseUrl = savedCallbackBaseUrl
+  })
+
+  /**
+   * The router wired to the REAL discovery client and transport probe over a pilot's
+   * recorded bytes (T1), through the `discover`/`probe` seams, so what the route passes
+   * to discovery (the override included) decides the outcome.
+   */
+  async function entraApp(
+    pilot: PilotFixture,
+    gw: MockGateway,
+    deps: AdminRemoteMcpDeps = {}
+  ): Promise<express.Express> {
+    const actual = await vi.importActual<typeof import('../src/oauth/discovery.js')>(
+      '../src/oauth/discovery.js'
+    )
+    const transport = makeDiscoveryTransport(pilot)
+    return makeApp(gw, boundProbe(transport), {
+      discover: (url, discoveryDeps, opts) =>
+        actual.discoverRemoteOAuth(
+          url,
+          { ...discoveryDeps, transport, resolveDns: PUBLIC_IP },
+          opts
+        ),
+      ...deps,
+    })
+  }
+
+  async function expectNoWrites(gw: MockGateway, serverName: string): Promise<void> {
+    await expect(gw.getSecret(`${serverName}-oauth-client`, NS)).rejects.toThrow()
+    await expect(gw.getResource('mcpservers', serverName, NS)).rejects.toThrow()
+  }
+
+  it('/discover without baseUrl → 400 invalid_request with the schema issues', async () => {
+    const res = await request(makeApp(gatewayWithContext()))
+      .post('/admin/mcp-servers/remote/discover')
+      .send({})
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('invalid_request')
+    expect(Array.isArray(res.body.detail)).toBe(true)
+    expect(res.body.detail[0].path).toEqual(['baseUrl'])
+    expect(discoverRemoteOAuth).not.toHaveBeenCalled()
+  })
+
+  it('row 7: /discover kernel-rejects a non-https authorizationServer before discovery', async () => {
+    const res = await request(makeApp(gatewayWithContext()))
+      .post('/admin/mcp-servers/remote/discover')
+      .send({
+        baseUrl: ENTRA_WORKIQ_PILOT.mcpUrl,
+        authorizationServer: TENANT_AUTHORITY.replace('https:', 'http:'),
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('must use https')
+    expect(res.body.errors[0].field).toBe('authorizationServer')
+    expect(discoverRemoteOAuth).not.toHaveBeenCalled()
+  })
+
+  it('row 7: install kernel-rejects a non-https authorizationServer before discovery or writes', async () => {
+    const gw = gatewayWithContext()
+    const res = await request(makeApp(gw))
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'workiq',
+        contextRef: 'ctx-a',
+        baseUrl: ENTRA_WORKIQ_PILOT.mcpUrl,
+        mode: 'pre-registered',
+        clientId: 'entra-client',
+        clientSecret: 'entra-secret',
+        authorizationServer: TENANT_AUTHORITY.replace('https:', 'http:'),
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.errors[0].field).toBe('authorizationServer')
+    expect(discoverRemoteOAuth).not.toHaveBeenCalled()
+    await expectNoWrites(gw, 'workiq')
+  })
+
+  it('/discover of Work IQ without an override → 400 tenant_required with the template', async () => {
+    const res = await request(await entraApp(ENTRA_WORKIQ_PILOT, gatewayWithContext()))
+      .post('/admin/mcp-servers/remote/discover')
+      .send({ baseUrl: ENTRA_WORKIQ_PILOT.mcpUrl })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('discovery_failed')
+    expect(res.body.detail).toMatchObject({
+      kind: 'tenant_required',
+      authorizationServer: 'https://login.microsoftonline.com/organizations/v2.0',
+      tenantAuthorityTemplate: 'https://login.microsoftonline.com/{tenantId}/v2.0',
+    })
+  })
+
+  it('row 2: /discover of Work IQ with the tenant → profile and PRM scopes plus offline_access', async () => {
+    const res = await request(await entraApp(ENTRA_WORKIQ_PILOT, gatewayWithContext()))
+      .post('/admin/mcp-servers/remote/discover')
+      .send({ baseUrl: ENTRA_WORKIQ_PILOT.mcpUrl, authorizationServer: TENANT_AUTHORITY })
+    expect(res.status).toBe(200)
+    expect(res.body.detected.asProfile).toBe('entra-v2')
+    expect(res.body.detected.registrationMode).toBe('manual')
+    expect(res.body.detected.quirks).toEqual({ bearerInBody: false, supportsRefresh: true })
+    expect(res.body.detected.scopes).toEqual([
+      'fdcc1f02-fc51-4226-8753-f668596af7f7/WorkIQAgent.Ask',
+      'offline_access',
+    ])
+    expect(res.body.callback.variant).toBe('per-server')
+    expect(res.body.detected.issForCallback).toBeUndefined()
+  })
+
+  it("row 4: an unknown tenant → 424 fetch_failed carrying Entra's 400 and its URL", async () => {
+    const unknownTenant =
+      'https://login.microsoftonline.com/00000000-0000-0000-0000-000000000001/v2.0'
+    const res = await request(await entraApp(ENTRA_WORKIQ_PILOT, gatewayWithContext()))
+      .post('/admin/mcp-servers/remote/discover')
+      .send({ baseUrl: ENTRA_WORKIQ_PILOT.mcpUrl, authorizationServer: unknownTenant })
+    expect(res.status).toBe(424)
+    expect(res.body.error).toBe('discovery_failed')
+    expect(res.body.detail.kind).toBe('fetch_failed')
+    expect(res.body.detail.status).toBe(400)
+    expect(res.body.detail.url.startsWith('https://login.microsoftonline.com/')).toBe(true)
+  })
+
+  it('Agent 365 Mail: offline_access, already in its PRM, is not added twice', async () => {
+    const res = await request(await entraApp(ENTRA_AGENT365_MAIL_PILOT, gatewayWithContext()))
+      .post('/admin/mcp-servers/remote/discover')
+      .send({ baseUrl: ENTRA_AGENT365_MAIL_PILOT.mcpUrl, authorizationServer: TENANT_AUTHORITY })
+    expect(res.status).toBe(200)
+    expect(res.body.detected.scopes).toEqual([
+      'https://agent365.svc.cloud.microsoft/agents/tenants/72f988bf-86f1-41af-91ab-2d7cd011db47/servers/mcp_MailTools/.default',
+      'openid',
+      'profile',
+      'offline_access',
+    ])
+  })
+
+  it('/discover ignores a PRM scopes_supported that is a string, not a list', async () => {
+    const res = await request(
+      await entraApp(
+        workIqPilotWithPrm('entra-string-scopes', prm => {
+          prm.scopes_supported = 'fdcc1f02-fc51-4226-8753-f668596af7f7/WorkIQAgent.Ask'
+        }),
+        gatewayWithContext()
+      )
+    )
+      .post('/admin/mcp-servers/remote/discover')
+      .send({ baseUrl: ENTRA_WORKIQ_PILOT.mcpUrl, authorizationServer: TENANT_AUTHORITY })
+    expect(res.status).toBe(200)
+    // The real Entra tenant metadata advertises only sign-in scopes.
+    expect(res.body.detected.scopes).toEqual(['openid', 'profile', 'email', 'offline_access'])
+    expect(res.body.detected.scopeAudienceMissing).toBe(true)
+  })
+
+  it('/discover keeps an empty-string audience violation in the response', async () => {
+    const res = await request(
+      await entraApp(
+        workIqPilotWithPrm('entra-empty-scope', prm => {
+          prm.scopes_supported = ['', 'https://graph.microsoft.com/x']
+        }),
+        gatewayWithContext()
+      )
+    )
+      .post('/admin/mcp-servers/remote/discover')
+      .send({ baseUrl: ENTRA_WORKIQ_PILOT.mcpUrl, authorizationServer: TENANT_AUTHORITY })
+    expect(res.status).toBe(200)
+    expect(res.body.detected.scopeAudienceViolation).toBe('')
+  })
+
+  it('row 10: /discover passes the override to discovery (Linear rejects a tenant authority)', async () => {
+    const res = await request(await entraApp(PILOTS.linear, gatewayWithContext()))
+      .post('/admin/mcp-servers/remote/discover')
+      .send({ baseUrl: PILOTS.linear.mcpUrl, authorizationServer: TENANT_AUTHORITY })
+    expect(res.status).toBe(400)
+    expect(res.body.detail.kind).toBe('authorization_server_override_rejected')
+  })
+
+  it('row 10: install passes the override to discovery and writes nothing when it is rejected', async () => {
+    const gw = gatewayWithContext()
+    const res = await request(await entraApp(PILOTS.linear, gw))
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'linear-entra',
+        contextRef: 'ctx-a',
+        baseUrl: PILOTS.linear.mcpUrl,
+        mode: 'cimd',
+        authorizationServer: TENANT_AUTHORITY,
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.detail.kind).toBe('authorization_server_override_rejected')
+    await expectNoWrites(gw, 'linear-entra')
+  })
+})
+
+describe('Microsoft Entra ID — remote install with scopes, scope audience and asProfile', () => {
+  const PUBLIC_IP = async () => ['93.184.216.34']
+  const ORIGIN = 'https://control.example.com'
+  const TENANT_AUTHORITY =
+    'https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0'
+  const WORKIQ_GUID_SCOPE = 'fdcc1f02-fc51-4226-8753-f668596af7f7/WorkIQAgent.Ask'
+  const WORKIQ_URL_SCOPE = 'api://workiq.svc.cloud.microsoft/WorkIQAgent.Ask'
+  const UNKNOWN_GUID_SCOPE = '11111111-2222-3333-4444-555555555555/Tools.Read'
+  const SHAREPOINT_SCOPE = '00000003-0000-0ff1-ce00-000000000000/AllSites.Read'
+  let savedCallbackBaseUrl: string
+
+  beforeEach(() => {
+    vi.mocked(discoverRemoteOAuth).mockReset()
+    savedCallbackBaseUrl = config.oauthCallbackBaseUrl
+    config.oauthCallbackBaseUrl = ORIGIN
+  })
+  afterEach(() => {
+    config.oauthCallbackBaseUrl = savedCallbackBaseUrl
+  })
+
+  /** Real discovery + probe over the pilot's recorded bytes (T1), through the router seams. */
+  async function pilotDeps(pilot: PilotFixture): Promise<AdminRemoteMcpDeps> {
+    const actual = await vi.importActual<typeof import('../src/oauth/discovery.js')>(
+      '../src/oauth/discovery.js'
+    )
+    const transport = makeDiscoveryTransport(pilot)
+    return {
+      probe: boundProbe(transport),
+      discover: (url, discoveryDeps, opts) =>
+        actual.discoverRemoteOAuth(
+          url,
+          { ...discoveryDeps, transport, resolveDns: PUBLIC_IP },
+          opts
+        ),
+    }
+  }
+
+  /**
+   * The router behind a stand-in for the auth middleware and the correlation logger, so
+   * the audit record's `admin` and the request logger are what production would see.
+   */
+  async function entraInstall(
+    pilot: PilotFixture,
+    gw: MockGateway,
+    body: Record<string, unknown>,
+    extra: { reqLog?: unknown; deps?: AdminRemoteMcpDeps } = {}
+  ) {
+    const { db } = makeInMemoryDynamicClientsDb()
+    const app = express()
+    app.use(express.json())
+    app.use((req, _res, next) => {
+      ;(req as UiAuthedRequestLike).adminAuth = { sub: 'admin-7', jti: 'jti-7' }
+      if (extra.reqLog) (req as UiAuthedRequestLike).log = extra.reqLog
+      next()
+    })
+    app.use(
+      createAdminRemoteMcpRouter(gw as unknown as K8sGateway, {
+        db,
+        ...(await pilotDeps(pilot)),
+        ...extra.deps,
+      })
+    )
+    return request(app)
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'workiq',
+        contextRef: 'ctx-a',
+        baseUrl: pilot.mcpUrl,
+        mode: 'pre-registered',
+        clientId: 'entra-client-id',
+        clientSecret: 'entra-client-secret',
+        authorizationServer: TENANT_AUTHORITY,
+        ...body,
+      })
+  }
+
+  async function expectNoWrites(gw: MockGateway, serverName = 'workiq'): Promise<void> {
+    await expect(gw.getSecret(`${serverName}-oauth-client`, NS)).rejects.toThrow()
+    await expect(gw.getResource('mcpservers', serverName, NS)).rejects.toThrow()
+  }
+
+  async function installedOauth(gw: MockGateway, serverName = 'workiq') {
+    const cr = (await gw.getResource('mcpservers', serverName, NS)) as {
+      spec: { oauth: Record<string, unknown> }
+    }
+    return cr.spec.oauth
+  }
+
+  it('row 19: with the profile, an install without scopes → 400 invalid_request, no writes', async () => {
+    const gw = gatewayWithContext()
+    const res = await entraInstall(ENTRA_WORKIQ_PILOT, gw, {})
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({
+      error: 'invalid_request',
+      message: 'scopes is required for Microsoft Entra ID servers',
+    })
+    await expectNoWrites(gw)
+  })
+
+  it('rows 2/13: Work IQ with its detected GUID scope → 201 and a CR pinned to the profile', async () => {
+    const gw = gatewayWithContext()
+    const res = await entraInstall(ENTRA_WORKIQ_PILOT, gw, { scopes: [WORKIQ_GUID_SCOPE] })
+    expect(res.status).toBe(201)
+    const oauth = await installedOauth(gw)
+    expect(oauth.asProfile).toBe('entra-v2')
+    expect(oauth.supportsRefresh).toBe(true)
+    expect(oauth.issuer).toBe(TENANT_AUTHORITY)
+    expect(oauth.scopes).toEqual([WORKIQ_GUID_SCOPE, 'offline_access'])
+    expect(oauth.resource).toBe('https://workiq.svc.cloud.microsoft/mcp')
+    expect('issForCallback' in oauth).toBe(false)
+  })
+
+  it('I7: the URL-form scope without offline_access → the CR still requests offline_access', async () => {
+    const gw = gatewayWithContext()
+    const res = await entraInstall(ENTRA_WORKIQ_PILOT, gw, { scopes: [WORKIQ_URL_SCOPE] })
+    expect(res.status).toBe(201)
+    expect((await installedOauth(gw)).scopes).toEqual([WORKIQ_URL_SCOPE, 'offline_access'])
+  })
+
+  it('row 17: only offline_access → 400 scope_audience_missing, no writes', async () => {
+    const gw = gatewayWithContext()
+    const res = await entraInstall(ENTRA_NO_SCOPES_PILOT, gw, { scopes: ['offline_access'] })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('scope_audience_missing')
+    await expectNoWrites(gw)
+  })
+
+  it('row 18: a Graph GUID smuggled as userinfo → 400 scope_audience_mismatch, no writes', async () => {
+    const gw = gatewayWithContext()
+    const smuggled =
+      'api://00000003-0000-0000-c000-000000000000@workiq.svc.cloud.microsoft/Mail.Read'
+    const res = await entraInstall(ENTRA_WORKIQ_PILOT, gw, { scopes: [smuggled] })
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: 'scope_audience_mismatch', scope: smuggled })
+    await expectNoWrites(gw)
+  })
+
+  it('row 12: the Graph scope the PRM suggests, installed as detected → 400, no Secret or CR', async () => {
+    const gw = gatewayWithContext()
+    const graph = 'https://graph.microsoft.com/Mail.ReadWrite'
+    const res = await entraInstall(ENTRA_GRAPH_SCOPE_PILOT, gw, { scopes: [graph] })
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: 'scope_audience_mismatch', scope: graph })
+    await expectNoWrites(gw)
+  })
+
+  it('I10: a bare scope name (read by Entra as Microsoft Graph) → 400, no writes', async () => {
+    const gw = gatewayWithContext()
+    const res = await entraInstall(ENTRA_GRAPH_SCOPE_PILOT, gw, { scopes: ['Mail.Read'] })
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: 'scope_audience_mismatch', scope: 'Mail.Read' })
+    await expectNoWrites(gw)
+  })
+
+  it('128 scopes plus the profile offline_access → 400 invalid_request, no writes', async () => {
+    const gw = gatewayWithContext()
+    const scopes = Array.from({ length: 128 }, (_, i) => `api://workiq.svc.cloud.microsoft/s${i}`)
+    const res = await entraInstall(ENTRA_WORKIQ_PILOT, gw, { scopes })
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({
+      error: 'invalid_request',
+      message: 'at most 128 scopes, including those the authorization server requires',
+    })
+    await expectNoWrites(gw)
+  })
+
+  it('127 scopes plus the profile offline_access (128 in all) → 201', async () => {
+    const gw = gatewayWithContext()
+    const scopes = Array.from({ length: 127 }, (_, i) => `api://workiq.svc.cloud.microsoft/s${i}`)
+    const res = await entraInstall(ENTRA_WORKIQ_PILOT, gw, { scopes })
+    expect(res.status).toBe(201)
+    expect((await installedOauth(gw)).scopes).toHaveLength(128)
+  })
+
+  for (const scopes of [['bad scope'], []]) {
+    it(`scopes ${JSON.stringify(scopes)} → 400 invalid_request, no writes`, async () => {
+      const gw = gatewayWithContext()
+      const res = await entraInstall(ENTRA_WORKIQ_PILOT, gw, { scopes })
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('invalid_request')
+      await expectNoWrites(gw)
+    })
+  }
+
+  it('row 14: an unknown GUID without confirmation → 400 scope_audience_unverified, no writes', async () => {
+    const gw = gatewayWithContext()
+    const res = await entraInstall(ENTRA_UNKNOWN_GUID_PILOT, gw, { scopes: [UNKNOWN_GUID_SCOPE] })
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({
+      error: 'scope_audience_unverified',
+      scopes: [UNKNOWN_GUID_SCOPE],
+    })
+    await expectNoWrites(gw)
+  })
+
+  it('row 14: a confirmation that does not name the scope → still 400, no writes', async () => {
+    const gw = gatewayWithContext()
+    const res = await entraInstall(ENTRA_UNKNOWN_GUID_PILOT, gw, {
+      scopes: [UNKNOWN_GUID_SCOPE],
+      confirmedUnverifiedScopes: ['11111111-2222-3333-4444-555555555555/Tools.Write'],
+    })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('scope_audience_unverified')
+    await expectNoWrites(gw)
+  })
+
+  it('row 14: the exact confirmation → 201, the CR carries the scope and the admin is audited', async () => {
+    const gw = gatewayWithContext()
+    const reqLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    const res = await entraInstall(
+      ENTRA_UNKNOWN_GUID_PILOT,
+      gw,
+      { scopes: [UNKNOWN_GUID_SCOPE], confirmedUnverifiedScopes: [UNKNOWN_GUID_SCOPE] },
+      { reqLog }
+    )
+    expect(res.status).toBe(201)
+    expect((await installedOauth(gw)).scopes).toEqual([UNKNOWN_GUID_SCOPE, 'offline_access'])
+    const audits = reqLog.info.mock.calls.filter(
+      ([fields]) =>
+        (fields as { event?: string }).event === 'remote_install_unverified_scopes_confirmed'
+    )
+    expect(audits).toHaveLength(1)
+    expect(audits[0][0]).toEqual({
+      event: 'remote_install_unverified_scopes_confirmed',
+      serverName: 'workiq',
+      admin: 'admin-7',
+      scopes: [UNKNOWN_GUID_SCOPE],
+    })
+  })
+
+  it('row 14: the confirmation is audited once the CR exists, even if attach and its rollback fail', async () => {
+    const gw = gatewayWithContext()
+    vi.spyOn(gw, 'updateResource').mockRejectedValueOnce(new Error('attach boom'))
+    vi.spyOn(gw, 'deleteResource').mockRejectedValue(new Error('delete boom'))
+    const reqLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    const res = await entraInstall(
+      ENTRA_UNKNOWN_GUID_PILOT,
+      gw,
+      { scopes: [UNKNOWN_GUID_SCOPE], confirmedUnverifiedScopes: [UNKNOWN_GUID_SCOPE] },
+      { reqLog }
+    )
+    expect(res.status).toBe(500)
+    // The rollback failed, so the CR — and with it the confirmation — is live.
+    expect((await installedOauth(gw)).scopes).toEqual([UNKNOWN_GUID_SCOPE, 'offline_access'])
+    expect(reqLog.info).toHaveBeenCalledWith(
+      {
+        event: 'remote_install_unverified_scopes_confirmed',
+        serverName: 'workiq',
+        admin: 'admin-7',
+        scopes: [UNKNOWN_GUID_SCOPE],
+      },
+      expect.any(String)
+    )
+  })
+
+  it('row 13: a known GUID on its host needs no confirmation and leaves no audit record', async () => {
+    const gw = gatewayWithContext()
+    const reqLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    const res = await entraInstall(
+      ENTRA_WORKIQ_PILOT,
+      gw,
+      { scopes: [WORKIQ_GUID_SCOPE] },
+      { reqLog }
+    )
+    expect(res.status).toBe(201)
+    expect(
+      reqLog.info.mock.calls.some(
+        ([fields]) =>
+          (fields as { event?: string }).event === 'remote_install_unverified_scopes_confirmed'
+      )
+    ).toBe(false)
+  })
+
+  it('row 15: a SharePoint Online scope → 400 scope_audience_mismatch even when confirmed', async () => {
+    const gw = gatewayWithContext()
+    const res = await entraInstall(ENTRA_SHAREPOINT_SCOPE_PILOT, gw, {
+      scopes: [SHAREPOINT_SCOPE],
+      confirmedUnverifiedScopes: [SHAREPOINT_SCOPE],
+    })
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: 'scope_audience_mismatch', scope: SHAREPOINT_SCOPE })
+    await expectNoWrites(gw)
+  })
+
+  it('row 16: the Agent 365 GUID on the Work IQ host → 400 scope_audience_mismatch even when confirmed', async () => {
+    const gw = gatewayWithContext()
+    const agent365Scope = '05879165-0320-489e-b644-f72b33f3edf0/McpServers.Mail.All'
+    const res = await entraInstall(ENTRA_WORKIQ_PILOT, gw, {
+      scopes: [agent365Scope],
+      confirmedUnverifiedScopes: [agent365Scope],
+    })
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ error: 'scope_audience_mismatch', scope: agent365Scope })
+    await expectNoWrites(gw)
+  })
+
+  it('a rejected audience is logged on the request logger without the scope', async () => {
+    const gw = gatewayWithContext()
+    const reqLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    await entraInstall(ENTRA_GRAPH_SCOPE_PILOT, gw, { scopes: ['Mail.Read'] }, { reqLog })
+    expect(reqLog.warn).toHaveBeenCalledWith(
+      { event: 'remote_install_scope_audience_rejected', serverName: 'workiq', reason: 'mismatch' },
+      'remote install rejected: scope outside the server audience'
+    )
+  })
+
+  it('a missing server audience is logged on the request logger', async () => {
+    const gw = gatewayWithContext()
+    const reqLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    const res = await entraInstall(
+      ENTRA_NO_SCOPES_PILOT,
+      gw,
+      { scopes: ['offline_access'] },
+      { reqLog }
+    )
+    expect(res.body.error).toBe('scope_audience_missing')
+    expect(reqLog.warn).toHaveBeenCalledWith(
+      { event: 'remote_install_scope_audience_rejected', serverName: 'workiq', reason: 'missing' },
+      'remote install rejected: no scope belongs to the server audience'
+    )
+  })
+
+  it('unconfirmed unverified scopes are logged on the request logger with those scopes', async () => {
+    const gw = gatewayWithContext()
+    const reqLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    const res = await entraInstall(
+      ENTRA_UNKNOWN_GUID_PILOT,
+      gw,
+      { scopes: [UNKNOWN_GUID_SCOPE] },
+      { reqLog }
+    )
+    expect(res.body.error).toBe('scope_audience_unverified')
+    expect(reqLog.warn).toHaveBeenCalledWith(
+      {
+        event: 'remote_install_scope_audience_rejected',
+        serverName: 'workiq',
+        reason: 'unverified',
+        scopes: [UNKNOWN_GUID_SCOPE],
+      },
+      'remote install rejected: scopes not confirmed as belonging to the server'
+    )
+  })
+
+  it('DCR with a scopes override: the registration request carries exactly those scopes', async () => {
+    const gw = gatewayWithContext()
+    const { db } = makeInMemoryDynamicClientsDb()
+    const { transport, calls } = makeDcrTransport({
+      responseJson: JSON.stringify(DCR_PUBLIC_REGISTRATION_RESPONSE),
+      redirectUris: 'requested',
+    })
+    const pilot = dcrPilot('public')
+    const app = makeApp(gw, genericProbe, {
+      ...(await pilotDeps(pilot)),
+      db,
+      dcr: { transport, resolveDns: PUBLIC_IP },
+    })
+    const res = await request(app)
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'notion-dcr-scopes',
+        contextRef: 'ctx-a',
+        baseUrl: pilot.mcpUrl,
+        mode: 'dcr',
+        scopes: ['custom'],
+      })
+    expect(res.status).toBe(201)
+    const post = calls.find(c => c.method === 'POST')
+    expect(JSON.parse(post?.body ?? '{}').scope).toBe('custom')
+    expect((await installedOauth(gw, 'notion-dcr-scopes')).scopes).toEqual(['custom'])
+  })
+
+  it('DCR without a profile: a repeated scope is requested and installed once, in first-seen order', async () => {
+    const gw = gatewayWithContext()
+    const { db } = makeInMemoryDynamicClientsDb()
+    const { transport, calls } = makeDcrTransport({
+      responseJson: JSON.stringify(DCR_PUBLIC_REGISTRATION_RESPONSE),
+      redirectUris: 'requested',
+    })
+    const pilot = dcrPilot('public')
+    const app = makeApp(gw, genericProbe, {
+      ...(await pilotDeps(pilot)),
+      db,
+      dcr: { transport, resolveDns: PUBLIC_IP },
+    })
+    const res = await request(app)
+      .post('/admin/mcp-servers/remote')
+      .send({
+        serverName: 'notion-dcr-dup-scopes',
+        contextRef: 'ctx-a',
+        baseUrl: pilot.mcpUrl,
+        mode: 'dcr',
+        scopes: ['a', 'b', 'a'],
+      })
+    expect(res.status).toBe(201)
+    const post = calls.find(c => c.method === 'POST')
+    expect(JSON.parse(post?.body ?? '{}').scope).toBe('a b')
+    expect((await installedOauth(gw, 'notion-dcr-dup-scopes')).scopes).toEqual(['a', 'b'])
   })
 })

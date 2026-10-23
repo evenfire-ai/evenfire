@@ -133,7 +133,7 @@ spec:
   workloads:
     - id: web
       type: deployment
-      image: nginxinc/nginx-unprivileged:1.27-alpine   # MUST run non-root, listen on 8080
+      image: nginxinc/nginx-unprivileged:1.30.6-alpine   # MUST run non-root, listen on 8080
       port: 8080
       healthCheck: { type: http, path: /, port: 8080 }
       resources:
@@ -576,7 +576,7 @@ If your recipe currently has one credentialed workload doubling as the UI, split
 
 The `sandbox-ui` namespace runs the K8s PodSecurity `restricted` profile. Your image MUST:
 
-- Run as non-root (UID > 0). `nginxinc/nginx-unprivileged:1.27-alpine` (UID 101, port 8080) is the canonical example.
+- Run as non-root (UID > 0). `nginxinc/nginx-unprivileged:1.30.6-alpine` (UID 101, port 8080) is the canonical example.
 - Drop all capabilities (enforced; do not request them back).
 - Listen on `0.0.0.0:8080` (not `127.0.0.1`, not any other port).
 - Return 2xx on `/` (or your `healthCheck.path`) so K8s marks the pod Ready.
@@ -1512,7 +1512,7 @@ same `control-api-config` key by default.
 | OAuth secret missing | `/oauth/authorize-url` returns 503 `integration_not_configured`. NOTE: `/oauth/token` does **not** — with no grant it returns `404 no_grant` and never reads the Secret (§7.2.1). | Create K8s Secret in `sandbox-recipes`. |
 | UI workload declares `envSecret` | Admission ACCEPTS it (no CEL rule blocks this), then the pod sticks in `CreateContainerConfigError`: `secret "X" not found`, even though the Secret exists in `sandbox-recipes`. UI workloads run in `sandbox-ui`, which has no Secrets (§6.3). | Split the recipe: thin UI workload (no creds) + sibling backend workload in `sandbox-recipes` that owns the `envSecret`. Wire them with `spec.bindings[]`. |
 | OAuth callback `400 invalid_recipe_namespace` | Recipe in wrong namespace. | Use `sandbox-recipes`. |
-| Workload runs as root | Image entrypoint requires root (`nginx:alpine` etc). | Switch to non-root variant or set `security.runAsUser`. |
+| Workload runs as root | Image entrypoint requires root (the upstream `nginx` image, etc). | Switch to non-root variant or set `security.runAsUser`. |
 | StatefulSet PVC mount fails to chown | `fsGroup` missing. | Set `fsGroup` = `runAsGroup`. |
 | OAuth refresh fails after weeks | Provider rotated secret or user revoked. | `/oauth/token` returns 502 `refresh_failed`; show Reconnect UI. |
 | Embed stuck on "still updating" | Pod not Ready. | Check `healthCheck` returns 2xx; binding `0.0.0.0:8080`. |
@@ -1532,7 +1532,7 @@ The canonical sandbox-UI shape is "thin static-asset UI pod + sibling credential
 
 | Before | After |
 |---|---|
-| `Dockerfile` builds Node app, copies bundled UI assets into `public/`, serves both. | `api/Dockerfile` (Node + Fastify, no statics) and `ui/Dockerfile` (multi-stage: build the bundle in Node, copy `public/` into `nginxinc/nginx-unprivileged:1.27-alpine`). |
+| `Dockerfile` builds Node app, copies bundled UI assets into `public/`, serves both. | `api/Dockerfile` (Node + Fastify, no statics) and `ui/Dockerfile` (multi-stage: build the bundle in Node, copy `public/` into `nginxinc/nginx-unprivileged:1.30.6-alpine`). |
 | Server registers `@fastify/static` and a `/` route. | Server keeps only `/api/*`, `/webhook/*`, `/healthz`. Drop the static plugin entirely. |
 | One image, one repo tag. | Two repos: `<org>/<name>-api:<tag>` and `<org>/<name>-ui:<tag>`. Both must satisfy §14.2 / §17.2 separately. |
 | UI assets reference `/static/app.js`, `/static/styles.css`. | nginx config in the UI image serves `/static/` from `/usr/share/nginx/html/` AND reverse-proxies `/api/` to `http://${API_HOST}:${API_PORT}` (use `envsubst` templates so the FQDN is recipe-injected). |
@@ -2226,7 +2226,7 @@ Steps 4 and 6 are the only operator-action steps; the rest is platform automatio
 
 ### 14.9 Worked example — publishing `sandbox-ui-oauth-hello`
 
-**Step 1 — image is ready.** This recipe uses `nginxinc/nginx-unprivileged:1.27-alpine`, already public, multi-arch, non-root — so build/push is a no-op. For a custom image, run through §14.2 first (`docker buildx build --platform linux/amd64,linux/arm64 ... --push`).
+**Step 1 — image is ready.** This recipe uses `nginxinc/nginx-unprivileged:1.30.6-alpine`, already public, multi-arch, non-root — so build/push is a no-op. For a custom image, run through §14.2 first (`docker buildx build --platform linux/amd64,linux/arm64 ... --push`).
 
 **Step 2 — `spec.description` spells out every prerequisite.** The Slack OAuth app, the redirect URI to register (`http://<control-api-host>/api/v1/oauth-callback/slack-bot`), and the `kubectl create secret generic slack-oauth-creds ...` command.
 

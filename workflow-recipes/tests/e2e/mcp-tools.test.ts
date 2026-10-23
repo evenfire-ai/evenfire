@@ -241,7 +241,7 @@ describe('MCP Tools E2E', () => {
   it('E7.8 — validate_recipe returns valid for correct recipe', async () => {
     const validRecipe = JSON.stringify({
       spec: {
-        workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.1-alpine' }],
+        workloads: [{ id: 'web', type: 'deployment', image: 'nginx:1.30.6-alpine' }],
       },
     })
     const result = await mcpCallTool(portForward!.url, 'validate_recipe', {

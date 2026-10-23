@@ -11,6 +11,17 @@ import {
   validateOAuthEndpointUrl,
 } from '../http/validateMcpServerSpec.js'
 import { type Logger, rootLogger } from '../observability/logger.js'
+import {
+  type AsProfileId,
+  ENTRA_TENANT_AUTHORITY_TEMPLATE,
+  detectAsProfile,
+  isEntraMultiTenantAuthority,
+  isEntraTenantAuthority,
+  profileHasResourceScope,
+  profileScopeViolation,
+  profileUnverifiedScopes,
+  withProfileScopes,
+} from './asProfiles.js'
 
 /**
  * Remote MCP-OAuth discovery client (spec 19 §4/§5 C1, D-3/D-8).
@@ -284,6 +295,19 @@ export type DiscoveryError =
   | { kind: 'content_encoding_rejected'; url: string; encoding: string }
   /** Without RFC 9207, an AS endpoint is not on the issuer's registrable domain. */
   | { kind: 'as_endpoints_cross_site'; field: string; detail: string }
+  /**
+   * The authorization server is Microsoft Entra ID's multi-tenant authority, whose
+   * metadata declares a templated issuer that can never match. The operator must name
+   * the tenant; `tenantAuthorityTemplate` is the URL to complete.
+   */
+  | {
+      kind: 'tenant_required'
+      authorizationServer: string
+      tenantAuthorityTemplate: string
+      detail: string
+    }
+  /** The operator-supplied authorization server is not accepted for this resource. */
+  | { kind: 'authorization_server_override_rejected'; detail: string }
 
 export interface DiscoveryResult {
   prm: ProtectedResourceMetadata
@@ -307,6 +331,27 @@ export interface DiscoveryResult {
   }
   registrationMode: RegistrationMode
   quirks: RemoteQuirks
+  /** Closed authorization-server profile recognised from the pinned issuer (`asProfiles.ts`). */
+  asProfile?: AsProfileId
+  /**
+   * With a profile, the first derived scope that would mint a token for another API.
+   * Informative only: the install validates the operator's final list. May be `''`.
+   */
+  scopeAudienceViolation?: string
+  /** With a profile, the derived GUID-form scopes the platform cannot tie to the MCP host. */
+  unverifiedScopes?: string[]
+  /** With a profile, the derived scopes name no resource (sign-in scopes only). */
+  scopeAudienceMissing?: true
+}
+
+/** Default requested scopes: PRM `scopes_supported`, else AS `scopes_supported`, else none. Untrusted → strings only. */
+export function defaultScopes(
+  prm: ProtectedResourceMetadata,
+  as: AuthorizationServerMetadata
+): string[] {
+  const pick = (v: unknown): string[] | undefined =>
+    Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : undefined
+  return pick(prm.scopes_supported) ?? pick(as.scopes_supported) ?? []
 }
 
 export type DiscoveryOutcome =
@@ -522,19 +567,33 @@ function isResourceConsistentWithMcpUrl(resource: string, mcpUrl: URL): boolean 
 }
 
 /**
- * RFC 8414 §3.3: the AS metadata `issuer` must be identical to the authorization
- * server it was retrieved from. Otherwise a hostile AS response could hand us an
- * `issuer` we then trust for the RFC 9207 callback `iss` check. Compared as
- * origin+path with trailing slashes normalized.
+ * An RFC 8414 §2 issuer identifier: no query, no fragment and no userinfo. Checked
+ * on the raw string because `URL` drops an empty `?` or `#`.
  */
-function isIssuerConsistentWithBase(issuer: string, base: URL): boolean {
+function isBareIdentifier(raw: string, parsed: URL): boolean {
+  return (
+    !raw.includes('?') && !raw.includes('#') && parsed.username === '' && parsed.password === ''
+  )
+}
+
+/**
+ * RFC 8414 §3.3: the AS metadata `issuer` must be identical to the authorization
+ * server it was retrieved from; neither carries a query, fragment or userinfo
+ * (RFC 8414 §2). Otherwise a hostile AS response could hand us an `issuer` we then
+ * trust for the RFC 9207 callback `iss` check. Compared as origin+path with
+ * trailing slashes normalized.
+ */
+function isIssuerConsistentWithBase(issuer: string, base: string): boolean {
   let issuerUrl: URL
+  let baseUrl: URL
   try {
     issuerUrl = new URL(issuer)
+    baseUrl = new URL(base)
   } catch {
     return false
   }
-  return issuerUrl.origin === base.origin && trimmedPath(issuerUrl) === trimmedPath(base)
+  if (!isBareIdentifier(issuer, issuerUrl) || !isBareIdentifier(base, baseUrl)) return false
+  return issuerUrl.origin === baseUrl.origin && trimmedPath(issuerUrl) === trimmedPath(baseUrl)
 }
 
 /**
@@ -624,15 +683,43 @@ async function resolvePrm(
 }
 
 /**
+ * Why an operator-supplied authorization server cannot replace the one the PRM
+ * advertises, or null when it can. Accepted only to name the tenant of Microsoft
+ * Entra ID's multi-tenant authority: on authorization servers that separate tenants
+ * by path on one origin (`auth.atlassian.com/<id>`, Keycloak realms, Okta
+ * `/oauth2/<id>`), a "same origin" override would let the operator point a resource at
+ * another tenant's issuer, so no wider override is offered.
+ */
+function authorizationServerOverrideRejection(
+  override: string,
+  advertisedAs: string
+): string | null {
+  if (!isEntraTenantAuthority(override)) {
+    return 'authorizationServer must be a Microsoft Entra ID tenant authority (https://login.microsoftonline.com/<tenant-id>/v2.0)'
+  }
+  // Only the first entry counts: discovery replaces `authorization_servers[0]` and only
+  // that entry raises `tenant_required`, so an Entra multi-tenant authority listed later
+  // must not license swapping out an unrelated first authorization server.
+  if (!URL.canParse(advertisedAs) || !isEntraMultiTenantAuthority(new URL(advertisedAs))) {
+    return "the protected resource's first authorization server is not the Microsoft Entra ID multi-tenant authority"
+  }
+  return null
+}
+
+/**
  * Full RFC 9728 → 8414 discovery for a remote MCP server URL. Returns the pinned
  * endpoints, `resource` (RFC 8707), issuer/`iss` handling (RFC 9207), the
  * registration mode (D-3) and transport quirks (D-8). Fail-closed if the AS does
- * not advertise S256 (invariant 3), and — when it does not return `iss` (RFC 9207) —
+ * not advertise S256, unless the pinned issuer matches a closed authorization-server
+ * profile (`asProfiles.ts`) (invariant 3), and — when it does not return `iss` (RFC 9207) —
  * if any of its endpoints leaves the issuer's registrable domain
  * (`as_endpoints_cross_site`), before anything is registered against it.
  *
  * `hasPreRegisteredClient` reflects operator config (a pre-registered Secret),
- * defaulting to false.
+ * defaulting to false. `authorizationServer` is the operator's tenant authority for a
+ * resource that advertises Microsoft Entra ID's multi-tenant authority
+ * (`tenant_required`); any other override is `authorization_server_override_rejected`
+ * and nothing is fetched from it.
  *
  * Contract with control-ui: the `/discover` and install responses built from this
  * result are pinned as wire goldens by test/routes.adminRemoteMcp.wireGoldens.test.ts,
@@ -642,7 +729,7 @@ async function resolvePrm(
 export async function discoverRemoteOAuth(
   mcpUrl: string,
   deps: DiscoveryDeps,
-  opts: { hasPreRegisteredClient?: boolean } = {}
+  opts: { hasPreRegisteredClient?: boolean; authorizationServer?: string } = {}
 ): Promise<DiscoveryOutcome> {
   const log = (deps.logger ?? rootLogger).child({ module: 'oauth-discovery' })
 
@@ -653,12 +740,28 @@ export async function discoverRemoteOAuth(
   }
   const prm = prmResult.prm
 
-  const asBase = prm.authorization_servers?.[0]
-  if (typeof asBase !== 'string' || asBase.length === 0) {
+  const advertisedAs = prm.authorization_servers?.[0]
+  if (typeof advertisedAs !== 'string' || advertisedAs.length === 0) {
     return {
       ok: false,
       error: { kind: 'no_authorization_server', detail: 'PRM has no authorization_servers[0]' },
     }
+  }
+
+  let asBase = advertisedAs
+  if (opts.authorizationServer !== undefined) {
+    const rejection = authorizationServerOverrideRejection(opts.authorizationServer, advertisedAs)
+    if (rejection !== null) {
+      log.warn(
+        { discovery: 'authorization_server_override_rejected' },
+        'remote discovery rejected the operator-supplied authorization server'
+      )
+      return {
+        ok: false,
+        error: { kind: 'authorization_server_override_rejected', detail: rejection },
+      }
+    }
+    asBase = opts.authorizationServer
   }
 
   let asBaseUrl: URL
@@ -671,6 +774,23 @@ export async function discoverRemoteOAuth(
         kind: 'invalid_metadata',
         url: asBase,
         detail: 'authorization_servers[0] is not a valid URL',
+      },
+    }
+  }
+
+  // Entra's multi-tenant authority declares the literal issuer
+  // `https://login.microsoftonline.com/{tenantid}/v2.0`, which can never equal the base,
+  // so fetching it could only end in `issuer_mismatch`. Ask for the tenant instead.
+  if (isEntraMultiTenantAuthority(asBaseUrl)) {
+    log.warn({ discovery: 'tenant_required' }, 'remote discovery needs the Entra tenant')
+    return {
+      ok: false,
+      error: {
+        kind: 'tenant_required',
+        authorizationServer: asBase,
+        tenantAuthorityTemplate: ENTRA_TENANT_AUTHORITY_TEMPLATE,
+        detail:
+          'authorization server is the Microsoft Entra ID multi-tenant authority; name the tenant',
       },
     }
   }
@@ -707,7 +827,7 @@ export async function discoverRemoteOAuth(
     // RFC 8414 §3.3: `issuer` must match the AS we fetched the metadata from. The
     // `issuer` feeds the RFC 9207 callback `iss` check, so a hostile mismatch is
     // rejected here rather than trusted downstream.
-    if (!isIssuerConsistentWithBase(candidate.issuer, asBaseUrl)) {
+    if (!isIssuerConsistentWithBase(candidate.issuer, asBase)) {
       lastAsError = {
         kind: 'issuer_mismatch',
         detail: `AS issuer "${candidate.issuer}" does not match authorization server "${asBase}"`,
@@ -722,9 +842,16 @@ export async function discoverRemoteOAuth(
     return { ok: false, error: lastAsError }
   }
 
-  // Invariant 3: fail closed unless S256 is advertised (ignore `plain`).
+  // Recognised only from an issuer that passed the strict comparison above, so a profile
+  // never widens which issuers are trusted.
+  const profile = detectAsProfile(as.issuer)
+
+  // Invariant 3: fail closed unless S256 is advertised (ignore `plain`). A profile stands
+  // in for the advertisement only for an authorization server that documents S256
+  // support but omits it from its metadata (`asProfiles.ts`).
   const challengeMethods = as.code_challenge_methods_supported
-  if (!Array.isArray(challengeMethods) || !challengeMethods.includes('S256')) {
+  const advertisesS256 = Array.isArray(challengeMethods) && challengeMethods.includes('S256')
+  if (!advertisesS256 && profile === null) {
     return {
       ok: false,
       error: {
@@ -781,6 +908,12 @@ export async function discoverRemoteOAuth(
     })
   )
 
+  const quirks = deriveQuirks(as, prm)
+  // `mcpUrl` already parsed in `resolvePrm`, so the audience checks cannot throw here.
+  const derivedScopes = withProfileScopes(defaultScopes(prm, as), profile?.id)
+  const violation = profileScopeViolation(profile?.id, mcpUrl, derivedScopes)
+  const unverified = profileUnverifiedScopes(profile?.id, mcpUrl, derivedScopes)
+
   return {
     ok: true,
     result: {
@@ -796,7 +929,13 @@ export async function discoverRemoteOAuth(
           typeof as.registration_endpoint === 'string' ? as.registration_endpoint : undefined,
       },
       registrationMode,
-      quirks: deriveQuirks(as, prm),
+      quirks: profile ? { ...quirks, supportsRefresh: true } : quirks,
+      ...(profile ? { asProfile: profile.id } : {}),
+      ...(violation !== null ? { scopeAudienceViolation: violation } : {}),
+      ...(unverified.length > 0 ? { unverifiedScopes: unverified } : {}),
+      ...(profileHasResourceScope(profile?.id, mcpUrl, derivedScopes)
+        ? {}
+        : { scopeAudienceMissing: true as const }),
     },
   }
 }
@@ -864,7 +1003,7 @@ async function resolveAsMetadataFromBase(
       }
       continue
     }
-    if (!isIssuerConsistentWithBase(candidate.issuer, asBaseUrl)) {
+    if (!isIssuerConsistentWithBase(candidate.issuer, asBaseUrl.toString())) {
       lastError = {
         kind: 'issuer_mismatch',
         detail: `AS issuer "${candidate.issuer}" does not match authorization server "${asBaseUrl.toString()}"`,
@@ -903,8 +1042,17 @@ export async function discoverAuthorizationServerMetadata(
   let prm: ProtectedResourceMetadata | undefined
   let resource: string | undefined
 
-  // Issuer-first (DA-2): the typed URL is most likely an AS issuer.
-  const issuerFirst = await resolveAsMetadataFromBase(base, deps)
+  // Issuer-first (DA-2): the typed URL is most likely an AS issuer. Only its origin
+  // and path locate the well-known documents, so the operator's query, fragment or
+  // userinfo are dropped before the comparison; the issuer the AS declares must still
+  // be bare. The PRM fallback below keeps `authorization_servers[0]` strict: that one
+  // is a third party's claim of the identifier, not a locator typed by the operator.
+  const operatorBase = new URL(base.href)
+  operatorBase.search = ''
+  operatorBase.hash = ''
+  operatorBase.username = ''
+  operatorBase.password = ''
+  const issuerFirst = await resolveAsMetadataFromBase(operatorBase, deps)
   if (issuerFirst.ok) {
     as = issuerFirst.as
   } else {
