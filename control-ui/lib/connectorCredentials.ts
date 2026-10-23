@@ -20,7 +20,9 @@ import type {
   AttachMode,
   AttachPayload,
   AttachValidation,
+  AttachValidationOptions,
   AttachedCredentials,
+  ChangeCredentialReferenceRequest,
 } from './connectorCredentials.types'
 
 /** Structural eligibility, independent of potentially stale status conditions. */
@@ -38,6 +40,124 @@ export function credentialAttachUnavailable(server: McpServerResource): string |
   return undefined
 }
 
+/** A reference change is separate from rotating values in a shared Secret. */
+export function credentialReferenceChangeUnavailable(
+  server: McpServerResource
+): string | undefined {
+  const raw = server.spec?.envSecret as { name?: unknown; keys?: unknown } | undefined
+  if (
+    !raw ||
+    typeof raw.name !== 'string' ||
+    raw.name !== raw.name.trim() ||
+    !MCP_SECRET_NAME_PATTERN.test(raw.name) ||
+    !Array.isArray(raw.keys) ||
+    !raw.keys.length ||
+    raw.keys.some(
+      key => !key || typeof key.secretKey !== 'string' || typeof key.envVar !== 'string'
+    )
+  )
+    return 'The connector has no valid Secret reference to change.'
+  const { envSecret: _reference, ...spec } = server.spec!
+  return credentialAttachUnavailable({ ...server, spec })
+}
+
+/** Refresh metadata only. Never read, create, rotate, or delete credential values. */
+export async function verifyExistingCredentialSelection(
+  secretName: string,
+  rows: AttachCredentialRow[],
+  selected: McpSecretSummary | undefined,
+  server: McpServerResource
+): Promise<void> {
+  const { items } = await listMcpSecrets()
+  const current = items.find(item => item.name === secretName)
+  if (!selected || !current || (selected.uid && selected.uid !== current.uid)) {
+    throw new CredentialAttachError(
+      'This Secret no longer exists or was replaced. Refresh and select it again.',
+      true
+    )
+  }
+  if (rows.some(row => row.value !== '' || !current.keys.includes(row.secretKey.trim()))) {
+    throw new CredentialAttachError(
+      'A selected key is no longer available. Refresh and select its replacement.',
+      true
+    )
+  }
+  const invalid = validateCredentialAttach('use-existing', secretName, rows, server, current, {
+    storedKeysOnly: true,
+  })
+  if (invalid) throw new CredentialAttachError(invalid.message)
+}
+
+/** Replace only envSecret, with explicit snapshot and API concurrency checks. */
+export async function changeConnectorSecretReference({
+  serverName,
+  server,
+  selection,
+}: ChangeCredentialReferenceRequest): Promise<AttachedCredentials> {
+  const initial = await getMcpServer(serverName)
+  if (
+    !server.metadata?.uid ||
+    initial.metadata?.uid !== server.metadata.uid ||
+    !initial.metadata?.resourceVersion ||
+    credentialReferenceChangeUnavailable(initial) ||
+    !sameCredentialSpec(server.spec, initial.spec)
+  )
+    throw new CredentialAttachError(
+      'The connector changed. Refresh before changing its assigned Secret.',
+      true
+    )
+  const secretName = selection.secret?.name ?? ''
+  if (!selection.ready)
+    throw new CredentialAttachError('Wait for the Secret list to finish loading.')
+  await verifyExistingCredentialSelection(secretName, selection.rows, selection.secret, initial)
+  const { reference } = buildAttachPayload(secretName, selection.rows)
+  if (sameCredentialSpec(initial.spec?.envSecret, reference)) {
+    throw new CredentialAttachError('Choose a different Secret or change its key mappings.')
+  }
+  const latest = await getMcpServer(serverName)
+  if (
+    latest.metadata?.uid !== initial.metadata.uid ||
+    !latest.metadata?.resourceVersion ||
+    credentialReferenceChangeUnavailable(latest) ||
+    !sameCredentialSpec(initial.spec, latest.spec)
+  )
+    throw new CredentialAttachError(
+      'The connector changed. Refresh before changing its assigned Secret.',
+      true
+    )
+  const spec = { ...latest.spec, envSecret: reference }
+  const cutoff = new Date(Date.now() - CLOCK_SKEW_TOLERANCE_MS).toISOString()
+  let saved: McpServerResource
+  try {
+    saved = await updateMcpServer(serverName, {
+      metadata: { uid: latest.metadata.uid, resourceVersion: latest.metadata.resourceVersion },
+      spec,
+    })
+  } catch (error) {
+    if (definiteRejection(error)) {
+      throw new CredentialAttachError(
+        'The assignment was rejected. Refresh and review the connector before retrying.',
+        true
+      )
+    }
+    try {
+      saved = await getMcpServer(serverName)
+    } catch {
+      throw new CredentialAttachError(
+        'The assignment outcome could not be confirmed. Refresh to check the connector.',
+        true
+      )
+    }
+    if (saved.metadata?.uid !== initial.metadata.uid || !sameCredentialSpec(saved.spec, spec)) {
+      throw new CredentialAttachError(
+        'The assignment outcome could not be confirmed. Refresh to check the connector.',
+        true
+      )
+    }
+  }
+  return { server: saved, cutoff, affectedConnectors: [] }
+}
+
 export function suggestedCredentialEnvVar(key: string): string {
   const name = key.replace(/[^A-Za-z0-9_]/g, '_').toUpperCase()
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : ''
@@ -48,7 +168,8 @@ export function validateCredentialAttach(
   secretName: string,
   rows: AttachCredentialRow[],
   server: McpServerResource,
-  selected?: McpSecretSummary
+  selected?: McpSecretSummary,
+  options?: AttachValidationOptions
 ): AttachValidation | undefined {
   if (!MCP_SECRET_NAME_PATTERN.test(secretName.trim()) || secretName.trim().length > 253) {
     return {
@@ -72,6 +193,26 @@ export function validateCredentialAttach(
   for (const row of rows) {
     const key = row.secretKey.trim()
     const env = row.envVar.trim()
+    if (options?.storedKeysOnly) {
+      // Reference-only reuse: keys must already exist in the selected Secret
+      // and values are never accepted. A missing or stale key is a key
+      // selection problem, never a request to re-enter a credential value.
+      if (!key) {
+        return { message: 'Choose a stored key from the selected Secret.', field: `${row.id}-key` }
+      }
+      if (!selected || !selected.keys.includes(key)) {
+        return {
+          message: `"${key}" is not stored in the selected Secret. Refresh the Secret list and choose a stored key.`,
+          field: `${row.id}-key`,
+        }
+      }
+      if (row.value !== '') {
+        return {
+          message: 'Stored keys never take a value here. Values stay unchanged in the Secret.',
+          field: `${row.id}-value`,
+        }
+      }
+    }
     if (!/^[-._a-zA-Z0-9]+$/.test(key) || key.length > 253 || key === '.' || key.startsWith('..')) {
       return {
         message:

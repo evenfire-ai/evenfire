@@ -4,6 +4,7 @@ import type { McpServerResource } from '@lib/api'
 import {
   attachConnectorCredentials,
   buildAttachPayload,
+  changeConnectorSecretReference,
   credentialAttachUnavailable,
   validateCredentialAttach,
 } from '@lib/connectorCredentials'
@@ -151,6 +152,78 @@ describe('attach validation', () => {
     expect(
       credentialAttachUnavailable({ ...server(), spec: { ...server().spec, ...spec } })
     ).toBeTruthy()
+  })
+})
+
+// Reference-only reuse (creation + reassignment) must answer a missing or
+// stale key with a KEY selection error and must never request a credential
+// value — unlike the keyless-attach flow, which may still write new keys.
+describe('reference-only validation with storedKeysOnly', () => {
+  const selected = { name: 'new-secret', uid: 'secret-uid', keys: ['api-key', 'other-key'] }
+  const options = { storedKeysOnly: true } as const
+
+  it('reports an empty key as a key choice, not a format or value error', () => {
+    const invalid = validateCredentialAttach(
+      'use-existing',
+      'new-secret',
+      [{ ...row, secretKey: '' }],
+      server(),
+      selected,
+      options
+    )
+    expect(invalid?.field).toBe('row-key')
+    expect(invalid?.message).toContain('Choose a stored key')
+  })
+
+  it('reports a stale key as a key selection error and never asks for a value', () => {
+    const invalid = validateCredentialAttach(
+      'use-existing',
+      'new-secret',
+      [{ ...row, secretKey: 'removed-key' }],
+      server(),
+      selected,
+      options
+    )
+    expect(invalid?.field).toBe('row-key')
+    expect(invalid?.message).toContain('not stored')
+    expect(invalid?.message.toLowerCase()).not.toContain('enter a credential value')
+  })
+
+  it('rejects a supplied value even for a stored key', () => {
+    const invalid = validateCredentialAttach(
+      'use-existing',
+      'new-secret',
+      [row],
+      server(),
+      selected,
+      options
+    )
+    expect(invalid?.field).toBe('row-value')
+    expect(invalid?.message).toContain('never take a value')
+  })
+
+  it('accepts a stored key mapped without a value and keeps destination checks', () => {
+    const stored: AttachCredentialRow = { ...row, value: '' }
+    expect(
+      validateCredentialAttach('use-existing', 'new-secret', [stored], server(), selected, options)
+    ).toBeUndefined()
+    const colliding = server()
+    colliding.spec.env = [{ name: 'API_KEY', value: 'plain' }]
+    expect(
+      validateCredentialAttach('use-existing', 'new-secret', [stored], colliding, selected, options)
+        ?.field
+    ).toBe('row-env')
+  })
+
+  it('keeps the keyless-attach behavior when the option is absent: a missing stored key requires a value', () => {
+    const invalid = validateCredentialAttach(
+      'use-existing',
+      'new-secret',
+      [{ ...row, secretKey: 'new-key', value: '' }],
+      server(),
+      selected
+    )
+    expect(invalid?.field).toBe('row-value')
   })
 })
 
@@ -380,5 +453,128 @@ describe('ordered attach writes and recovery', () => {
     ).rejects.toThrow('Secret values were updated')
     expect(api.deleteMcpSecret).not.toHaveBeenCalled()
     expect(api.updateMcpSecret).toHaveBeenCalledOnce()
+  })
+})
+
+describe('reference-only Secret reassignment', () => {
+  const oldReference = { name: 'old-secret', keys: [{ secretKey: 'old-token', envVar: 'API_KEY' }] }
+  function assignedServer() {
+    const current = server()
+    current.spec.envSecret = oldReference
+    current.spec.contextRef = 'private-context'
+    current.spec.remote = {
+      authType: 'bearer',
+      authHeaders: [{ name: 'Authorization', valueTemplate: 'Bearer ${API_KEY}' }],
+    }
+    return current
+  }
+  function changeRequest() {
+    return {
+      serverName: 'connector',
+      server: assignedServer(),
+      selection: { ready: true, secret: existing, rows: [{ ...row, value: '' }] },
+    }
+  }
+  beforeEach(() => {
+    vi.mocked(api.getMcpServer).mockResolvedValue(assignedServer())
+  })
+  it('changes only envSecret and preserves the remote auth, access, egress, and identity preconditions', async () => {
+    const result = await changeConnectorSecretReference(changeRequest())
+    expect(api.updateMcpServer).toHaveBeenCalledWith('connector', {
+      metadata: { uid: 'server-uid', resourceVersion: '10' },
+      spec: { ...assignedServer().spec, envSecret: reference },
+    })
+    expect(result.server.spec.envSecret).toEqual(reference)
+    expect(api.createMcpSecret).not.toHaveBeenCalled()
+    expect(api.updateMcpSecret).not.toHaveBeenCalled()
+    expect(api.deleteMcpSecret).not.toHaveBeenCalled()
+  })
+  it.each([
+    { managed: false },
+    { enabled: false },
+    { oauth: null },
+    { envSecret: null },
+    { envSecret: { name: 'invalid' } },
+  ])('rejects ineligible reference changes without writes: %j', async changed => {
+    const request = changeRequest()
+    request.server.spec = { ...request.server.spec, ...changed }
+    vi.mocked(api.getMcpServer).mockResolvedValue(request.server)
+    await expect(changeConnectorSecretReference(request)).rejects.toThrow(/connector changed/)
+    expect(api.updateMcpServer).not.toHaveBeenCalled()
+    expect(api.deleteMcpSecret).not.toHaveBeenCalled()
+  })
+  it('rejects an edit since the displayed snapshot before checking or writing Secrets', async () => {
+    const changed = assignedServer()
+    changed.spec.image = 'example/new-image:v2'
+    vi.mocked(api.getMcpServer).mockResolvedValue(changed)
+    await expect(changeConnectorSecretReference(changeRequest())).rejects.toThrow(
+      /connector changed/
+    )
+    expect(api.listMcpSecrets).not.toHaveBeenCalled()
+    expect(api.updateMcpServer).not.toHaveBeenCalled()
+  })
+  it('rejects changes between verification and the final write', async () => {
+    const changed = assignedServer()
+    changed.spec.enabled = false
+    vi.mocked(api.getMcpServer)
+      .mockResolvedValueOnce(assignedServer())
+      .mockResolvedValueOnce(changed)
+    await expect(changeConnectorSecretReference(changeRequest())).rejects.toThrow(
+      /connector changed/
+    )
+    expect(api.updateMcpServer).not.toHaveBeenCalled()
+  })
+  // Each case is the full `items` array, wrapped one extra level so `it.each`
+  // passes it as a single argument instead of spreading it.
+  it.each([
+    [[]],
+    [[{ ...existing, uid: 'replacement' }]],
+    [[{ ...existing, keys: ['different-key'] }]],
+  ])('rejects missing/replaced Secrets and missing stored keys: %j', async items => {
+    vi.mocked(api.listMcpSecrets).mockResolvedValue({ items })
+    await expect(changeConnectorSecretReference(changeRequest())).rejects.toThrow(/Secret|key/)
+    expect(api.updateMcpServer).not.toHaveBeenCalled()
+    expect(api.createMcpSecret).not.toHaveBeenCalled()
+    expect(api.updateMcpSecret).not.toHaveBeenCalled()
+    expect(api.deleteMcpSecret).not.toHaveBeenCalled()
+  })
+  it('rejects an unchanged assignment', async () => {
+    const current = assignedServer()
+    current.spec.envSecret = reference
+    vi.mocked(api.getMcpServer).mockResolvedValue(current)
+    await expect(
+      changeConnectorSecretReference({ ...changeRequest(), server: current })
+    ).rejects.toThrow(/different Secret/)
+    expect(api.updateMcpServer).not.toHaveBeenCalled()
+  })
+  it('never cleans up shared Secrets when the API rejects the reference save', async () => {
+    vi.mocked(api.updateMcpServer).mockRejectedValue(error(409))
+    await expect(changeConnectorSecretReference(changeRequest())).rejects.toThrow(/rejected/)
+    expect(api.deleteMcpSecret).not.toHaveBeenCalled()
+  })
+  it('recovers an uncertain successful save through a matching read', async () => {
+    vi.mocked(api.updateMcpServer).mockRejectedValue(error(503))
+    const saved = assignedServer()
+    saved.spec.envSecret = reference
+    vi.mocked(api.getMcpServer)
+      .mockResolvedValueOnce(assignedServer())
+      .mockResolvedValueOnce(assignedServer())
+      .mockResolvedValueOnce(saved)
+    expect((await changeConnectorSecretReference(changeRequest())).server).toEqual(saved)
+    expect(api.deleteMcpSecret).not.toHaveBeenCalled()
+  })
+  it('reports an uncertain outcome when the read cannot prove the reference was saved', async () => {
+    vi.mocked(api.updateMcpServer).mockRejectedValue(error(503))
+    await expect(changeConnectorSecretReference(changeRequest())).rejects.toThrow(
+      /could not be confirmed/
+    )
+    expect(api.deleteMcpSecret).not.toHaveBeenCalled()
+  })
+  it('rejects any attempt to supply credential bytes in a reference-only operation', async () => {
+    const request = changeRequest()
+    request.selection.rows[0].value = 'unexpected'
+    await expect(changeConnectorSecretReference(request)).rejects.toThrow(/key/)
+    expect(api.updateMcpServer).not.toHaveBeenCalled()
+    expect(api.updateMcpSecret).not.toHaveBeenCalled()
   })
 })

@@ -35,3 +35,25 @@ export type AttachPayload = {
   reference: EnvSecret
   data: Record<string, string>
 }
+
+/**
+ * Validation switches for credential selection. `storedKeysOnly` marks the
+ * reference-only reuse flows: every key must already be stored in the selected
+ * Secret and credential values are forbidden. The keyless-attach flow omits it
+ * because it may write new keys into a shared Secret.
+ */
+export type AttachValidationOptions = {
+  storedKeysOnly?: boolean
+}
+
+export type ExistingCredentialSelection = {
+  secret?: McpSecretSummary
+  rows: AttachCredentialRow[]
+  ready: boolean
+}
+
+export type ChangeCredentialReferenceRequest = {
+  serverName: string
+  server: McpServerResource
+  selection: ExistingCredentialSelection
+}
