@@ -10,7 +10,7 @@ export type GfsDriveResource = GfsBrowserChild & {
 
 export interface FilesPageProps {
   /** App-level toast dispatcher for success feedback (desktop-app/ui rule). */
-  pushToast?: (message: string, tone: Tone) => void
+  pushToast?: (message: string, tone: Tone, options?: { durationMs?: number }) => void
   /** Native titlebar action slot supplied by the app shell. */
   titlebarLeadingTarget?: HTMLElement | null
   /**

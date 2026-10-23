@@ -156,7 +156,10 @@ declare global {
           bytes?: number
           updatedAt?: string
         }>
-        download: (uri: string) => Promise<{
+        download: (
+          uri: string,
+          options?: { maxBytes?: number; signal?: AbortSignal }
+        ) => Promise<{
           resource: {
             drive: string
             resourceId: string
@@ -220,7 +223,8 @@ declare global {
         listChildren: (
           resourceId: string,
           drive?: string,
-          cursor?: string
+          cursor?: string,
+          options?: { signal?: AbortSignal }
         ) => Promise<{
           items: Array<{
             resourceId: string
@@ -246,6 +250,26 @@ declare global {
           grantableBits: string[]
           canCreateShare: boolean
         }>
+        zipStream: {
+          start: () => Promise<{ jobId: string }>
+          append: (jobId: string, name: string, bytes: ArrayBuffer) => Promise<{ name: string }>
+          /**
+           * Appends one entry by URI: the main process fetches the resource
+           * and writes it into the archive chunk by chunk, so the payload
+           * never crosses the IPC boundary (R1-H2).
+           */
+          appendFromUri: (
+            jobId: string,
+            name: string,
+            uri: string,
+            options?: { maxBytes?: number; signal?: AbortSignal }
+          ) => Promise<{ name: string; bytes: number }>
+          finish: (
+            jobId: string,
+            suggestedName: string
+          ) => Promise<{ saved: boolean; filePath: string | null; entryCount: number }>
+          abort: (jobId: string) => Promise<{ aborted: boolean }>
+        }
         createFolder: (
           parentResourceId: string,
           name: string,
