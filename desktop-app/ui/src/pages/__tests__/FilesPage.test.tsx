@@ -4008,19 +4008,28 @@ describe('FilesPage', () => {
     expect(destinationRow.getAttribute('data-drop-target')).toBeNull()
     // The initial hover stays landable while authority is unresolved (the
     // drop-time priority check must be reachable); once the cold check
-    // observes the missing write, a further hover refuses the drop.
+    // observes the missing write, a further hover paints the denied verdict
+    // with its reason. The denied hover stays DELIVERABLE (UX matrix §5.3) —
+    // the tint, not the cursor, carries the denial.
     fireEvent.dragOver(destinationRow, { dataTransfer })
-    expect(dataTransfer.dropEffect).toBe('none')
+    expect(dataTransfer.dropEffect).toBe('move')
     expect(destinationRow.getAttribute('data-drop-state')).toBe('denied')
+    expect(destinationRow.getAttribute('data-drop-reason')).toBe('destination-write')
     fireEvent.drop(destinationRow, { dataTransfer })
 
     await waitFor(() => {
       expect(moveResource).not.toHaveBeenCalled()
       expect(pushToast).toHaveBeenCalledWith(
-        'You can’t move files to Private because you don’t have write permission for this folder.',
+        'You don’t have permission to move items into Private. You need edit access to the destination folder.',
         'error'
       )
     })
+    // The refused drop announces its full reason to the screen reader.
+    expect(
+      screen.getByText(
+        'You don’t have permission to move items into Private. You need edit access to the destination folder.'
+      )
+    ).toBeTruthy()
   })
 
   it('commits a file drop whose adjudication resolves after the gesture’s dragend', async () => {
@@ -4350,12 +4359,330 @@ describe('FilesPage', () => {
 
     await waitFor(() => {
       expect(moveResource).not.toHaveBeenCalled()
-      expect(pushToast).toHaveBeenCalledWith('Too many file requests — try again in 7s.', 'error')
+      // A rate-limited check is unverifiable, not forbidden: warning tone.
+      expect(pushToast).toHaveBeenCalledWith('Too many file requests — try again in 7s.', 'warn')
     })
     const toasted = pushToast.mock.calls.map(([text]) => String(text)).join('\n')
     expect(toasted).not.toContain('httpStatus=')
     expect(toasted).not.toContain('retryAfterSeconds=')
     expect(toasted).not.toContain('Error invoking remote method')
+  })
+
+  it('paints and explains a drop of a folder onto itself (A1)', async () => {
+    // Self-hover used to be skipped entirely, so dropping an item onto itself
+    // looked dead. The verdict now paints with its `self` reason, the denied
+    // hover stays deliverable, and the release explains itself while
+    // admission still refuses the mutation.
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(async () => ({}))
+    const affordances = vi.fn(async () => ({
+      held: ['read', 'write', 'delete'],
+      canDelegate: false,
+      grantableBits: [],
+      canCreateShare: false,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'archive-1',
+          rid: 'archive-1',
+          gfsUri: 'gfs://main/archive-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Archive',
+          kind: 'directory',
+          path: '/Product/Archive',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+
+    const archiveRow = screen.getByRole('button', { name: 'Open Archive' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+
+    fireEvent.dragStart(archiveRow, { dataTransfer })
+    fireEvent.dragOver(archiveRow, { dataTransfer })
+    expect(archiveRow.getAttribute('data-drop-state')).toBe('denied')
+    expect(archiveRow.getAttribute('data-drop-reason')).toBe('self')
+    // The denied hover stays deliverable so the refused drop can fire (§5.3).
+    expect(dataTransfer.dropEffect).toBe('move')
+    fireEvent.drop(archiveRow, { dataTransfer })
+
+    await waitFor(() => {
+      expect(moveResource).not.toHaveBeenCalled()
+      expect(pushToast).toHaveBeenCalledWith(
+        'You dropped Archive onto itself. Pick a destination folder.',
+        'error'
+      )
+    })
+    // The refused drop announces its full reason to the screen reader.
+    expect(
+      screen.getByText('You dropped Archive onto itself. Pick a destination folder.')
+    ).toBeTruthy()
+  })
+
+  it('updates the deny reason on a row when a newer gesture denies it differently', async () => {
+    // The stored verdict must not collapse to its state: gesture 1 denies a
+    // row as destination-write; its dragend is lost, and gesture 2 denies the
+    // SAME row as self. A state-only guard would skip the repaint and leave
+    // the stale reason on the row.
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(async () => ({}))
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folder-1') {
+        return {
+          held: ['read', 'write', 'delete'],
+          canDelegate: false,
+          grantableBits: [],
+          canCreateShare: false,
+        }
+      }
+      return {
+        held: ['read'],
+        canDelegate: false,
+        grantableBits: [],
+        canCreateShare: false,
+      }
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'notes.txt',
+          kind: 'file',
+          path: '/Product/notes.txt',
+          version: 3,
+          bytes: 12,
+        },
+        {
+          resourceId: 'private-1',
+          rid: 'private-1',
+          gfsUri: 'gfs://main/private-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Private',
+          kind: 'directory',
+          path: '/Product/Private',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+
+    const sourceRow = screen.getByRole('button', { name: 'Open notes.txt' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Private' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+
+    // Gesture 1: the destination lacks write once the cold check answers.
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(destinationRow, { dataTransfer })
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith('private-1', 'main'))
+    fireEvent.dragOver(destinationRow, { dataTransfer })
+    expect(destinationRow.getAttribute('data-drop-state')).toBe('denied')
+    expect(destinationRow.getAttribute('data-drop-reason')).toBe('destination-write')
+
+    // The browser lost gesture 1's dragend; gesture 2 drags the row onto
+    // itself and must repaint the reason, not skip the same state.
+    fireEvent.dragStart(destinationRow, { dataTransfer })
+    fireEvent.dragOver(destinationRow, { dataTransfer })
+    expect(destinationRow.getAttribute('data-drop-state')).toBe('denied')
+    expect(destinationRow.getAttribute('data-drop-reason')).toBe('self')
+    expect(moveResource).not.toHaveBeenCalled()
+  })
+
+  it('presents an unverifiable drop check as a warning, never as a refusal (A10)', async () => {
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(async () => ({}))
+    const affordances = vi.fn(async () => {
+      throw new Error('500 Internal Server Error httpStatus=500')
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'notes.txt',
+          kind: 'file',
+          path: '/Product/notes.txt',
+          version: 3,
+          bytes: 12,
+        },
+        {
+          resourceId: 'private-1',
+          rid: 'private-1',
+          gfsUri: 'gfs://main/private-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Private',
+          kind: 'directory',
+          path: '/Product/Private',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+
+    const sourceRow = screen.getByRole('button', { name: 'Open notes.txt' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Private' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(destinationRow, { dataTransfer })
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith('private-1', 'main'))
+    fireEvent.drop(destinationRow, { dataTransfer })
+
+    await waitFor(() => {
+      expect(moveResource).not.toHaveBeenCalled()
+      expect(pushToast).toHaveBeenCalledWith('500 Internal Server Error', 'warn')
+    })
+  })
+
+  it('keeps a session-lost drop persistently visible after the probe revoked the session (A11)', async () => {
+    // The probe 401 refuses the drop AND revokes the session; the revocation
+    // invalidates the gesture's ownership before the drop continuation
+    // resumes. The refused drop must still explain itself — as a persistent
+    // banner, not a one-shot toast.
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(async () => ({}))
+    const affordances = vi.fn(async () => {
+      throw new Error('401 Unauthorized httpStatus=401')
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      items: [
+        {
+          resourceId: 'file-1',
+          rid: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'notes.txt',
+          kind: 'file',
+          path: '/Product/notes.txt',
+          version: 3,
+          bytes: 12,
+        },
+        {
+          resourceId: 'private-1',
+          rid: 'private-1',
+          gfsUri: 'gfs://main/private-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Private',
+          kind: 'directory',
+          path: '/Product/Private',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+
+    const sourceRow = screen.getByRole('button', { name: 'Open notes.txt' })
+    const destinationRow = screen.getByRole('button', { name: 'Open Private' })
+    const dataTransfer = {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(destinationRow, { dataTransfer })
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith('private-1', 'main'))
+    fireEvent.drop(destinationRow, { dataTransfer })
+
+    // Both refusal surfaces carry it: the persistent banner AND the SR live
+    // region (the spoken refusal). A one-shot toast was NOT used.
+    const sessionLostSurfaces = await screen.findAllByText(
+      'Your session ended. Sign in again to continue moving files.'
+    )
+    expect(sessionLostSurfaces.some(element => element.closest('.status-banner') !== null)).toBe(
+      true
+    )
+    expect(pushToast).not.toHaveBeenCalled()
+    expect(moveResource).not.toHaveBeenCalled()
   })
 
   it('renames a folder child from its row menu once write affordances resolve', async () => {

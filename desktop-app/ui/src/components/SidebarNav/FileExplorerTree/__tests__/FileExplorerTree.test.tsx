@@ -1282,7 +1282,9 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     expect(dataTransfer.dropEffect).toBe('move')
 
     // Expand A to reveal its child C; a drop into the source's own descendant
-    // is structurally denied and must keep the no-drop cursor.
+    // is structurally denied. The refusal must stay DELIVERABLE (dropEffect
+    // 'move', UX matrix §5.3) so the release can present the reason — the
+    // tone-keyed tint, not the cursor, carries the denial.
     await act(async () => {
       fireEvent.click(rowA)
     })
@@ -1293,7 +1295,8 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     const cRow = rowC.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
     fireEvent.dragOver(cRow, { dataTransfer })
     expect(cRow.getAttribute('data-drop-state')).toBe('denied')
-    expect(dataTransfer.dropEffect).toBe('none')
+    expect(cRow.getAttribute('data-drop-reason')).toBe('descendant')
+    expect(dataTransfer.dropEffect).toBe('move')
   })
 
   it('refuses a same-parent drop before any request or confirmation', async () => {
@@ -1328,10 +1331,13 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     fireEvent.dragStart(rowA, { dataTransfer })
     const pRow = rowP.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
     fireEvent.dragOver(pRow, { dataTransfer })
+    expect(pRow.getAttribute('data-drop-state')).toBe('denied')
+    expect(pRow.getAttribute('data-drop-reason')).toBe('same-parent')
     fireEvent.drop(pRow, { dataTransfer })
 
+    // A4: the no-op is INFO ("already in"), never an error "cannot".
     await waitFor(() => {
-      expect(pushToast).toHaveBeenCalledWith('This item is already in this folder.', 'error')
+      expect(pushToast).toHaveBeenCalledWith('A is already in P.', 'info')
     })
     expect(moveResource).not.toHaveBeenCalled()
     expect(screen.queryByRole('dialog')).toBeNull()
@@ -1365,14 +1371,290 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     const cRow = rowC.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
     fireEvent.dragOver(cRow, { dataTransfer })
     expect(cRow.getAttribute('data-drop-state')).toBe('denied')
+    expect(cRow.getAttribute('data-drop-reason')).toBe('descendant')
     fireEvent.drop(cRow, { dataTransfer })
 
     await waitFor(() => {
       expect(pushToast).toHaveBeenCalledWith(
-        'A folder cannot be moved into itself or one of its subfolders.',
+        'You can’t move A into a folder inside itself.',
         'error'
       )
     })
+    expect(moveResource).not.toHaveBeenCalled()
+  })
+
+  it('paints and explains a drop of an item onto itself (A1)', async () => {
+    // Self-hover used to be skipped entirely, so dropping an item onto itself
+    // looked dead: no verdict, no cursor story, no words. The verdict now
+    // paints with its `self` reason and the release explains itself, while
+    // admission still refuses the mutation.
+    const moveResource = vi.fn()
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('folder-a', 'A', 'directory')])
+      ),
+      affordances: vi.fn(async () => ({ held: ['read', 'write', 'delete'] })),
+      moveResource,
+    })
+    const { pushToast } = renderTreeWithSession()
+
+    const rowA = await screen.findByRole('button', { name: 'A' })
+    const aRow = rowA.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const dataTransfer = dragTypes()
+    fireEvent.dragStart(rowA, { dataTransfer })
+    fireEvent.dragOver(aRow, { dataTransfer })
+    expect(aRow.getAttribute('data-drop-state')).toBe('denied')
+    expect(aRow.getAttribute('data-drop-reason')).toBe('self')
+    // The denied hover stays deliverable so the refused drop can fire (§5.3).
+    expect(dataTransfer.dropEffect).toBe('move')
+    fireEvent.drop(aRow, { dataTransfer })
+
+    await waitFor(() => {
+      expect(pushToast).toHaveBeenCalledWith(
+        'You dropped A onto itself. Pick a destination folder.',
+        'error'
+      )
+    })
+    expect(moveResource).not.toHaveBeenCalled()
+    // The refused drop announces its full reason to the screen reader.
+    expect(screen.getByText('You dropped A onto itself. Pick a destination folder.')).toBeTruthy()
+  })
+
+  it('updates the reason when a newer gesture denies the same row differently', async () => {
+    // The stored verdict must not collapse to its state: gesture 1 denies a
+    // row as same-parent; a lost dragend leaves that verdict painted, and
+    // gesture 2 denies the SAME row as self. A state-only guard would skip
+    // the repaint and leave the stale reason on the row.
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('folder-a', 'A', 'directory')])
+      ),
+      listChildren: vi.fn(async () =>
+        listChildrenPage([childView('file-1', 'f.md', 'file', { parentResourceId: 'folder-a' })])
+      ),
+      affordances: vi.fn(async () => ({ held: ['read', 'write', 'delete'] })),
+      moveResource: vi.fn(),
+    })
+    renderTreeWithSession()
+
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: 'A' }))
+    })
+    const rowA = await screen.findByRole('button', { name: 'A' })
+    const rowF = await screen.findByRole('button', { name: 'f.md' })
+    const aRow = rowA.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const dataTransfer = dragTypes()
+
+    // Gesture 1: the file already lives in A → same-parent.
+    fireEvent.dragStart(rowF, { dataTransfer })
+    fireEvent.dragOver(aRow, { dataTransfer })
+    expect(aRow.getAttribute('data-drop-state')).toBe('denied')
+    expect(aRow.getAttribute('data-drop-reason')).toBe('same-parent')
+    expect(aRow.getAttribute('title')).toBe('f.md is already in A.')
+
+    // The browser lost gesture 1's dragend (R1-H2); gesture 2 supersedes it
+    // and denies the same row as self — the reason must repaint.
+    fireEvent.dragStart(rowA, { dataTransfer })
+    fireEvent.dragOver(aRow, { dataTransfer })
+    expect(aRow.getAttribute('data-drop-state')).toBe('denied')
+    expect(aRow.getAttribute('data-drop-reason')).toBe('self')
+    expect(aRow.getAttribute('title')).toBe('You cannot move A into itself.')
+  })
+
+  it('refuses a drop whose source parent lacks write, naming the folder that contains it (A7)', async () => {
+    const moveResource = vi.fn()
+    const affordances = vi.fn(async (resourceId: string) => {
+      // The physical source parent holds no write bit; everything else is full.
+      if (resourceId === 'parent-1') return { held: ['read'] }
+      return { held: ['read', 'write', 'delete'] }
+    })
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('parent-1', 'P', 'directory')])
+      ),
+      listChildren: vi.fn(async () =>
+        listChildrenPage([
+          childView('folder-a', 'A', 'directory', { parentResourceId: 'parent-1' }),
+          childView('folder-b', 'B', 'directory', { parentResourceId: 'parent-1' }),
+        ])
+      ),
+      affordances,
+      moveResource,
+    })
+    const { pushToast } = renderTreeWithSession()
+
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: 'P' }))
+    })
+    const rowA = await screen.findByRole('button', { name: 'A' })
+    const rowB = await screen.findByRole('button', { name: 'B' })
+    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const dataTransfer = dragTypes()
+
+    fireEvent.dragStart(rowA, { dataTransfer })
+    fireEvent.dragOver(bRow, { dataTransfer })
+    fireEvent.drop(bRow, { dataTransfer })
+
+    await waitFor(() => {
+      expect(pushToast).toHaveBeenCalledWith(
+        'You can’t move A out of its current folder because you don’t have edit access to the folder that contains it.',
+        'error'
+      )
+    })
+    expect(moveResource).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('refuses a drop whose source parent lacks delete, naming the folder that contains it (A8)', async () => {
+    const moveResource = vi.fn()
+    const affordances = vi.fn(async (resourceId: string) => {
+      // Write but no delete on the physical source parent.
+      if (resourceId === 'parent-1') return { held: ['read', 'write'] }
+      return { held: ['read', 'write', 'delete'] }
+    })
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('parent-1', 'P', 'directory')])
+      ),
+      listChildren: vi.fn(async () =>
+        listChildrenPage([
+          childView('folder-a', 'A', 'directory', { parentResourceId: 'parent-1' }),
+          childView('folder-b', 'B', 'directory', { parentResourceId: 'parent-1' }),
+        ])
+      ),
+      affordances,
+      moveResource,
+    })
+    const { pushToast } = renderTreeWithSession()
+
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: 'P' }))
+    })
+    const rowA = await screen.findByRole('button', { name: 'A' })
+    const rowB = await screen.findByRole('button', { name: 'B' })
+    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const dataTransfer = dragTypes()
+
+    fireEvent.dragStart(rowA, { dataTransfer })
+    fireEvent.dragOver(bRow, { dataTransfer })
+    fireEvent.drop(bRow, { dataTransfer })
+
+    await waitFor(() => {
+      expect(pushToast).toHaveBeenCalledWith(
+        'You can’t move A out of its current folder because you don’t have delete access to the folder that contains it.',
+        'error'
+      )
+    })
+    expect(moveResource).not.toHaveBeenCalled()
+  })
+
+  it('refuses a move of an observed physical root with the top-level copy (A3)', async () => {
+    const moveResource = vi.fn()
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('root-1', 'R', 'directory'),
+          accessibleResource('folder-b', 'B', 'directory'),
+        ])
+      ),
+      affordances: vi.fn(async () => ({ held: ['read', 'write', 'delete'] })),
+      resolve: vi.fn(async () => ({ parentResourceId: null, kind: 'directory', version: 1 })),
+      moveResource,
+    })
+    const { pushToast } = renderTreeWithSession()
+
+    const rowR = await screen.findByRole('button', { name: 'R' })
+    const rowB = await screen.findByRole('button', { name: 'B' })
+    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const dataTransfer = dragTypes()
+
+    fireEvent.dragStart(rowR, { dataTransfer })
+    fireEvent.dragOver(bRow, { dataTransfer })
+    fireEvent.drop(bRow, { dataTransfer })
+
+    await waitFor(() => {
+      expect(pushToast).toHaveBeenCalledWith(
+        'This location is the top level — it can’t be moved.',
+        'error'
+      )
+    })
+    expect(moveResource).not.toHaveBeenCalled()
+  })
+
+  it('presents an unverifiable drop as a warning, never as a refusal (A10)', async () => {
+    const moveResource = vi.fn()
+    const affordances = vi.fn(async () => {
+      throw new Error('500 Internal Server Error httpStatus=500')
+    })
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('folder-a', 'A', 'directory'),
+          accessibleResource('folder-b', 'B', 'directory'),
+        ])
+      ),
+      affordances,
+      resolve: vi.fn(async () => ({ parentResourceId: 'grand', kind: 'directory', version: 1 })),
+      moveResource,
+    })
+    const { pushToast } = renderTreeWithSession()
+
+    const rowA = await screen.findByRole('button', { name: 'A' })
+    const rowB = await screen.findByRole('button', { name: 'B' })
+    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const dataTransfer = dragTypes()
+
+    fireEvent.dragStart(rowA, { dataTransfer })
+    fireEvent.dragOver(bRow, { dataTransfer })
+    fireEvent.drop(bRow, { dataTransfer })
+
+    await waitFor(() => {
+      expect(pushToast).toHaveBeenCalledWith('500 Internal Server Error', 'warn')
+    })
+    expect(moveResource).not.toHaveBeenCalled()
+  })
+
+  it('keeps a session-lost drop persistently visible after revocation invalidates the gesture (A11)', async () => {
+    // The probe 401 both refuses the drop AND revokes the session; the
+    // revocation invalidates the gesture's ownership before the drop
+    // continuation resumes. The refused drop must still explain itself — as a
+    // persistent banner, not a toast — and stay visible next to the revoked
+    // surface.
+    const moveResource = vi.fn()
+    const affordances = vi.fn(async () => {
+      throw new Error(
+        "Error invoking remote method 'gfs:affordances': Error: 401 Unauthorized httpStatus=401"
+      )
+    })
+    installDndClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([
+          accessibleResource('folder-a', 'A', 'directory'),
+          accessibleResource('folder-b', 'B', 'directory'),
+        ])
+      ),
+      affordances,
+      resolve: vi.fn(async () => ({ parentResourceId: 'grand', kind: 'directory', version: 1 })),
+      moveResource,
+    })
+    const { pushToast } = renderTreeWithSession()
+
+    const rowA = await screen.findByRole('button', { name: 'A' })
+    const rowB = await screen.findByRole('button', { name: 'B' })
+    const bRow = rowB.closest('[role="treeitem"]')!.querySelector('.da-file-explorer__row')!
+    const dataTransfer = dragTypes()
+
+    fireEvent.dragStart(rowA, { dataTransfer })
+    fireEvent.dragOver(bRow, { dataTransfer })
+    fireEvent.drop(bRow, { dataTransfer })
+
+    expect(
+      await screen.findByText('Your session ended. Sign in again to continue moving files.')
+    ).toBeTruthy()
+    // The revoked surface stays visible alongside the refusal banner.
+    expect(await screen.findByText('File access is not authorized')).toBeTruthy()
+    // A dead session is not a one-shot toast.
+    expect(pushToast).not.toHaveBeenCalled()
     expect(moveResource).not.toHaveBeenCalled()
   })
 

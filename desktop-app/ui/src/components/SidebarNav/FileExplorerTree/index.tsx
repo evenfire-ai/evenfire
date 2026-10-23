@@ -19,15 +19,21 @@ import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
 import { isGfsChildrenDenied, purgeDeniedGfsChildren } from '@/gfs/deniedChildren'
 import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
 import { ownsGfsDrop } from '@/gfs/dragOwnership'
-import type { GfsDragSource } from '@/gfs/dragSession'
+import type { GfsDragSource, GfsDropVerdict } from '@/gfs/dragSession'
 import { useGfsDragSession } from '@/gfs/dragSession'
-import { gfsDropVerdictAnnouncement } from '@/gfs/dropVerdict'
-import { moveDenialMessage, suggestNumberedMoveName } from '@/gfs/moveCommit'
+import {
+  GFS_DROP_SESSION_LOST_MESSAGE,
+  gfsDropVerdictLiveAnnouncement,
+  gfsDropVerdictReason,
+  presentGfsDropRefusal,
+  sameGfsDropVerdict,
+} from '@/gfs/dropVerdict'
+import { suggestNumberedMoveName } from '@/gfs/moveCommit'
 import { runGfsMoveCommit } from '@/gfs/moveCommitRunner'
 import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
 import { IconChevronRight, IconContexts } from '../icons'
-import type { FileExplorerDropState, FileExplorerNodeProps, FileExplorerTreeProps } from './types'
+import type { FileExplorerNodeProps, FileExplorerTreeProps } from './types'
 
 // A folder's single-click (toggle) must not act before we know a double-click
 // (open its files tab) is not coming, so it is deferred by this window to let a
@@ -81,6 +87,7 @@ function FileExplorerNode({
   ancestorCrumbs,
   dropState,
   dropStatesByResourceId,
+  dragSourceName,
   onToggle,
   onActivateFolder,
   onActivateFile,
@@ -256,10 +263,11 @@ function FileExplorerNode({
   const handleRowDragEnterOrOver = useCallback(
     (event: React.DragEvent<HTMLDivElement>) => {
       handleRowDragOver(event)
+      const hoverState = dropState?.state
       if (
         isDirectoryRow &&
         !isExpanded &&
-        (dropState === undefined || dropState === 'allowed' || dropState === 'checking')
+        (hoverState === undefined || hoverState === 'allowed' || hoverState === 'checking')
       ) {
         if (hoverExpandTimerRef.current === null) {
           hoverExpandTimerRef.current = window.setTimeout(() => {
@@ -302,6 +310,15 @@ function FileExplorerNode({
     [ancestorCrumbs, node]
   )
 
+  const dropStateName = isDirectory ? dropState?.state : undefined
+  const dropReason = isDirectory ? gfsDropVerdictReason(dropState) : undefined
+  // The deny/no-op/unknown tint carries no reason of its own; the tooltip
+  // speaks the full sentence for it (one wording per reason, every surface).
+  const dropReasonTooltip =
+    dropState && dropReason !== undefined
+      ? gfsDropVerdictLiveAnnouncement(dropState, node.name, dragSourceName ?? undefined)
+      : undefined
+
   return (
     <div
       aria-expanded={isDirectory ? isExpanded : undefined}
@@ -311,8 +328,10 @@ function FileExplorerNode({
       role="treeitem"
     >
       <div
-        className={`da-file-explorer__row${dropState ? ` is-drop-${dropState}` : ''}`}
-        data-drop-state={isDirectory ? dropState : undefined}
+        className={`da-file-explorer__row${dropStateName ? ` is-drop-${dropStateName}` : ''}`}
+        data-drop-state={dropStateName}
+        data-drop-reason={dropReason}
+        title={dropReasonTooltip}
         onDragEnter={isDirectory ? handleRowDragEnterOrOver : undefined}
         onDragOver={isDirectory ? handleRowDragEnterOrOver : undefined}
         onDragLeave={isDirectory ? handleRowDragLeave : undefined}
@@ -374,6 +393,7 @@ function FileExplorerNode({
               accessActive={accessActive}
               ancestorCrumbs={nextAncestorCrumbs}
               ancestorIds={nextAncestorIds}
+              dragSourceName={dragSourceName}
               dropState={dropStatesByResourceId[child.resourceId]}
               dropStatesByResourceId={dropStatesByResourceId}
               expandedIds={expandedIds}
@@ -450,12 +470,18 @@ export function FileExplorerTree({
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set())
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [dropStatesByResourceId, setDropStatesByResourceId] = useState<
-    Record<string, FileExplorerDropState>
+    Record<string, GfsDropVerdict>
   >({})
   // The drop verdict is painted on the target row, which assistive technology
   // never announces. The spoken form lives here so the verdict reaches a
   // screen reader as well (RP-026).
   const [dropVerdictAnnouncement, setDropVerdictAnnouncement] = useState('')
+  // A drop refused by a dead session must stay visible AFTER the revocation
+  // has already invalidated the gesture's ownership (UX matrix A11): the
+  // banner outlives the drop callback, until the next gesture or scope.
+  const [dropSessionLost, setDropSessionLost] = useState(false)
+  // Display name of the live gesture's source, for reason copy that names it.
+  const [dragSourceName, setDragSourceName] = useState<string | null>(null)
   const [movingResourceId, setMovingResourceId] = useState<string | null>(null)
   const movingResourceIdRef = useRef<string | null>(null)
   const draggingSourceRef = useRef<GfsDragSource | null>(null)
@@ -496,6 +522,8 @@ export function FileExplorerTree({
     adjudication.endDragSession()
     setPendingFolderMove(null)
     setDropStatesByResourceId({})
+    setDropSessionLost(false)
+    setDragSourceName(null)
   }, [adjudication.endDragSession, liveDragScope])
 
   const ownsDrop = useCallback(
@@ -555,6 +583,7 @@ export function FileExplorerTree({
     adjudication.endDragSession()
     setDropStatesByResourceId({})
     setDropVerdictAnnouncement('')
+    setDragSourceName(null)
   }, [adjudication, dragSession])
 
   /** Release only the source and hover work owned by the admitted gesture. */
@@ -629,6 +658,9 @@ export function FileExplorerTree({
       event.dataTransfer.setData(GFS_RESOURCE_DRAG_TYPE, node.resourceId)
       event.dataTransfer.setData('text/plain', node.name)
       draggingSourceRef.current = source
+      setDragSourceName(node.name)
+      // A new gesture clears the previous gesture's persistent surfaces.
+      setDropSessionLost(false)
     },
     [adjudication, dragSession, treeDragSourceFrom]
   )
@@ -651,7 +683,11 @@ export function FileExplorerTree({
     ) => {
       if (!Array.from(event.dataTransfer.types || []).includes(GFS_RESOURCE_DRAG_TYPE)) return
       const source = resolveActiveSource()
-      if (!source || node.kind !== 'directory' || source.resourceId === node.resourceId) return
+      // Self-hover is NO longer skipped: dropping an item onto itself paints
+      // the denied verdict with its `self` reason, so the release can explain
+      // itself instead of looking dead (UX matrix §5.3). Admission still
+      // refuses the mutation.
+      if (!source || node.kind !== 'directory') return
       event.preventDefault()
       event.stopPropagation()
       hoverOwnerRef.current = source
@@ -662,16 +698,17 @@ export function FileExplorerTree({
         ancestorIds,
       })
       setDropStatesByResourceId(previous =>
-        previous[node.resourceId] === verdict.state
+        sameGfsDropVerdict(previous[node.resourceId], verdict)
           ? previous
-          : { ...previous, [node.resourceId]: verdict.state }
+          : { ...previous, [node.resourceId]: verdict }
       )
-      setDropVerdictAnnouncement(gfsDropVerdictAnnouncement(verdict.state, node.name))
-      // 'checking' must keep the drop LANDABLE (rev-2 §4.1): dropEffect 'none'
-      // makes Chromium cancel the drag at release, so the drop-time priority
-      // adjudication could never run and unresolved authority checks silently
-      // swallowed the gesture. Only an observed deny refuses the drop.
-      event.dataTransfer.dropEffect = verdict.state === 'denied' ? 'none' : 'move'
+      setDropVerdictAnnouncement(gfsDropVerdictLiveAnnouncement(verdict, node.name, source.name))
+      // An OBSERVED deny must stay DELIVERABLE: dropEffect 'none' makes
+      // Chromium cancel the drag at release, so the refused drop event never
+      // fires and the reason could never be presented (UX matrix §5.3). The
+      // tone-keyed row tint carries the denial; the drop-time adjudication
+      // still refuses the mutation.
+      event.dataTransfer.dropEffect = 'move'
       if (verdict.state === 'checking') {
         adjudication.scheduleColdCheck(
           { resourceId: node.resourceId, name: node.name, kind: node.kind, ancestorIds },
@@ -685,11 +722,13 @@ export function FileExplorerTree({
               ancestorIds,
             })
             setDropStatesByResourceId(previous =>
-              previous[node.resourceId] === fresh.state
+              sameGfsDropVerdict(previous[node.resourceId], fresh)
                 ? previous
-                : { ...previous, [node.resourceId]: fresh.state }
+                : { ...previous, [node.resourceId]: fresh }
             )
-            setDropVerdictAnnouncement(gfsDropVerdictAnnouncement(fresh.state, node.name))
+            setDropVerdictAnnouncement(
+              gfsDropVerdictLiveAnnouncement(fresh, node.name, source.name)
+            )
           }
         )
       }
@@ -769,10 +808,23 @@ export function FileExplorerTree({
           kind: node.kind,
           ancestorIds,
         })
+        if (!decision.allowed && decision.reason === 'session-lost') {
+          // Presented BEFORE the ownership guard, and as a persistent banner:
+          // the revocation that caused this refusal has already invalidated
+          // the gesture's ownership, so the normal callback path would return
+          // silently — the session's death must stay explained (A11).
+          setDropSessionLost(true)
+          setDropVerdictAnnouncement(GFS_DROP_SESSION_LOST_MESSAGE)
+          return
+        }
         if (!ownsDrop(source, epoch, sessionGeneration)) return
         if (!decision.allowed) {
-          const message = moveDenialMessage(decision, node.name)
-          if (message) pushToast(message, 'error')
+          const { message, tone } = presentGfsDropRefusal(decision, {
+            source: source.name,
+            target: node.name,
+          })
+          setDropVerdictAnnouncement(message)
+          pushToast(message, tone)
           return
         }
         if (source.kind === 'directory') {
@@ -889,6 +941,11 @@ export function FileExplorerTree({
       <p aria-live="polite" className="visually-hidden">
         {dropVerdictAnnouncement}
       </p>
+      {dropSessionLost ? (
+        // Persistent (A11): the refusal outlives the dead gesture and the
+        // revoked tree surface below — it is not a one-shot toast.
+        <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} compact />
+      ) : null}
       {ctrl.accessState === 'revoked' ? (
         // Mirror the Files page's revoked surface, adapted to the sidebar's
         // compact chrome. Without this branch a revoked drive falls through to
@@ -921,6 +978,7 @@ export function FileExplorerTree({
               accessActive={ctrl.accessState === 'active'}
               ancestorCrumbs={[]}
               ancestorIds={node.parentResourceId != null ? [node.parentResourceId] : []}
+              dragSourceName={dragSourceName}
               // The forest roots are drop targets like any other row: their
               // verdict belongs to them, so the root row receives its own
               // state instead of only the map its children read (RP-019).

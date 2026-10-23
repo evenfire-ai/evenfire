@@ -5,7 +5,6 @@ import {
   nextAvailableGfsResourceName,
 } from '@clerum/gfs-interaction-policy'
 import { describeGfsReadError, parseHttpStatus, parseRetryAfterSeconds } from '@lib/gfsGrantErrors'
-import type { GfsDropRejection } from './dragSession.types'
 
 /** Server truth from a commit-time resolve of the source. */
 export interface MoveCommitSourceSnapshot {
@@ -353,33 +352,5 @@ export function toastMoveOutcome(
       break
     default:
       pushToast?.(outcome.message, 'error')
-  }
-}
-
-/** Exact-reason denial copy (rev-2 §8). Null = stay silent (session-lost). */
-export function moveDenialMessage(
-  rejection: GfsDropRejection,
-  destinationName: string
-): string | null {
-  switch (rejection.reason) {
-    case 'destination-write':
-      return `You can’t move files to ${destinationName} because you don’t have write permission for this folder.`
-    case 'source-write':
-      return 'You cannot move this item out of its current folder without write access there.'
-    case 'source-delete':
-      return 'You do not have permission to remove this item from its current folder.'
-    case 'same-parent':
-      return 'This item is already in this folder.'
-    case 'self':
-    case 'descendant':
-      return 'A folder cannot be moved into itself or one of its subfolders.'
-    case 'root-source':
-      return 'The top-level folder cannot be moved.'
-    case 'cross-drive':
-      return 'Items can’t be moved between drives.'
-    case 'session-lost':
-      return null
-    default:
-      return rejection.message ?? 'This move is not available right now. Try again in a moment.'
   }
 }

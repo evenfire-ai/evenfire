@@ -68,9 +68,15 @@ import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
 import { ownsGfsDrop } from '@/gfs/dragOwnership'
 import type { GfsDragSource, GfsDropVerdict } from '@/gfs/dragSession'
 import { useGfsDragSession } from '@/gfs/dragSession'
-import { gfsDropVerdictAnnouncement } from '@/gfs/dropVerdict'
+import {
+  GFS_DROP_SESSION_LOST_MESSAGE,
+  gfsDropVerdictLiveAnnouncement,
+  gfsDropVerdictReason,
+  presentGfsDropRefusal,
+  sameGfsDropVerdict,
+} from '@/gfs/dropVerdict'
 import { GfsFilePicker } from '@/gfs/filePicker'
-import { moveDenialMessage, suggestNumberedMoveName } from '@/gfs/moveCommit'
+import { suggestNumberedMoveName } from '@/gfs/moveCommit'
 import type { MoveCommitOutcome } from '@/gfs/moveCommit'
 import { runGfsMoveCommit } from '@/gfs/moveCommitRunner'
 import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
@@ -344,11 +350,19 @@ export function FilesPage({
   const [draggingResourceId, setDraggingResourceId] = useState<string | null>(null)
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null)
   const [movingResourceId, setMovingResourceId] = useState<string | null>(null)
-  const [dropStatesById, setDropStatesById] = useState<Record<string, GfsDropVerdict['state']>>({})
+  // The FULL verdict is stored — not just its state — so the deny reason
+  // reaches the row (`data-drop-reason`), the tooltip and the announcements
+  // (UX matrix §5.1); a same-state reason change must still repaint.
+  const [dropStatesById, setDropStatesById] = useState<Record<string, GfsDropVerdict>>({})
   // The drop verdict is painted on the target row; this live region is its
   // spoken form, so a screen reader learns whether the folder under the
   // pointer accepts the move (RP-026).
   const [dropVerdictAnnouncement, setDropVerdictAnnouncement] = useState('')
+  // A drop refused by a dead session must stay visible AFTER the revocation
+  // has already invalidated the gesture's ownership (UX matrix A11).
+  const [dropSessionLost, setDropSessionLost] = useState(false)
+  // Display name of the live gesture's source, for reason copy that names it.
+  const [dragSourceName, setDragSourceName] = useState<string | null>(null)
   // Folder drops stop at ONE confirmation (impact + naming policy) before the
   // shared dispatch; files commit directly on an allowed admission.
   const [pendingFolderMove, setPendingFolderMove] = useState<{
@@ -434,6 +448,8 @@ export function FilesPage({
     setDragOverFolderId(null)
     setDropStatesById({})
     setDropVerdictAnnouncement('')
+    setDropSessionLost(false)
+    setDragSourceName(null)
   }, [adjudication.endDragSession, liveDragScope])
 
   const ownsDrop = (source: GfsDragSource, epoch: number, sharedGeneration: number | null) =>
@@ -1210,6 +1226,7 @@ export function FilesPage({
     setDraggingResourceId(null)
     setDragOverFolderId(null)
     setDropStatesById({})
+    setDragSourceName(null)
   }
 
   /** Release only the source and hover work owned by the admitted gesture. */
@@ -1222,6 +1239,7 @@ export function FilesPage({
     draggingResourceRef.current = null
     draggingSourceRef.current = null
     setDraggingResourceId(null)
+    setDragSourceName(null)
     if (hoverOwnerRef.current === null || hoverOwnerRef.current === source) {
       hoverOwnerRef.current = null
       hoveredFolderRef.current = null
@@ -1274,17 +1292,21 @@ export function FilesPage({
   const applyHoverVerdict = (
     folderId: string,
     verdict: GfsDropVerdict,
-    folderName = ''
+    folderName = '',
+    sourceName = ''
   ): GfsDropVerdict => {
+    // Only observed-allowed paints the blue highlight (UX matrix §5.5).
     if (verdict.state === 'allowed') {
       setDragOverFolderId(folderId)
     } else if (hoveredFolderRef.current === folderId) {
       setDragOverFolderId(null)
     }
     setDropStatesById(previous =>
-      previous[folderId] === verdict.state ? previous : { ...previous, [folderId]: verdict.state }
+      sameGfsDropVerdict(previous[folderId], verdict)
+        ? previous
+        : { ...previous, [folderId]: verdict }
     )
-    setDropVerdictAnnouncement(gfsDropVerdictAnnouncement(verdict.state, folderName))
+    setDropVerdictAnnouncement(gfsDropVerdictLiveAnnouncement(verdict, folderName, sourceName))
     return verdict
   }
 
@@ -1317,6 +1339,9 @@ export function FilesPage({
     draggingResourceRef.current = resource
     draggingSourceRef.current = source
     setDraggingResourceId(resource.resourceId)
+    setDragSourceName(resource.name)
+    // A new gesture clears the previous gesture's persistent surfaces.
+    setDropSessionLost(false)
   }
 
   const handleResourceDragEnd = () => {
@@ -1326,7 +1351,10 @@ export function FilesPage({
   const handleFolderDragOver = (event: ReactDragEvent<HTMLElement>, folder: GfsDriveResource) => {
     if (!hasDraggedGfsResource(event)) return
     const source = resolveActiveSource()
-    if (!source || folder.kind !== 'directory' || source.resourceId === folder.resourceId) return
+    // Self-hover is NO longer skipped: dropping an item onto itself paints the
+    // denied verdict with its `self` reason, so the release can explain itself
+    // instead of looking dead (UX matrix §5.3). Admission still refuses.
+    if (!source || folder.kind !== 'directory') return
 
     event.preventDefault()
     event.stopPropagation()
@@ -1341,14 +1369,16 @@ export function FilesPage({
     const verdict = applyHoverVerdict(
       folder.resourceId,
       adjudication.hoverVerdict(source, target),
-      folder.name
+      folder.name,
+      source.name
     )
-    // 'checking' must keep the drop LANDABLE: with dropEffect 'none' Chromium
-    // cancels the drag at release, so the drop-time priority adjudication
-    // (rev-2 §4.1 — "priority check on drop instead of a false deny") could
-    // never run and every authority check that had not finished resolving
-    // silently swallowed the gesture. Only an observed deny refuses the drop.
-    event.dataTransfer.dropEffect = verdict.state === 'denied' ? 'none' : 'move'
+    // An OBSERVED deny must stay DELIVERABLE: dropEffect 'none' makes Chromium
+    // cancel the drag at release, so the refused drop event never fires and
+    // the reason could never be presented (UX matrix §5.3) — and 'checking'
+    // must stay landable so the drop-time priority adjudication (rev-2 §4.1)
+    // can decide. The tone-keyed row tint carries the denial; admission still
+    // refuses the mutation.
+    event.dataTransfer.dropEffect = 'move'
     if (verdict.state === 'checking') {
       adjudication.scheduleColdCheck(
         target,
@@ -1357,7 +1387,7 @@ export function FilesPage({
           if (hoverOwnerRef.current !== source || hoveredFolderRef.current !== folder.resourceId)
             return
           const fresh = adjudication.hoverVerdict(source, target)
-          applyHoverVerdict(folder.resourceId, fresh, folder.name)
+          applyHoverVerdict(folder.resourceId, fresh, folder.name, source.name)
         }
       )
     }
@@ -1443,10 +1473,23 @@ export function FilesPage({
         kind: destination.kind,
         ancestorIds: rowTargetAncestorIds(),
       })
+      if (!decision.allowed && decision.reason === 'session-lost') {
+        // Presented BEFORE the ownership guard, and as a persistent banner:
+        // the revocation that caused this refusal has already invalidated
+        // the gesture's ownership, so the normal callback path would return
+        // silently — the session's death must stay explained (A11).
+        setDropSessionLost(true)
+        setDropVerdictAnnouncement(GFS_DROP_SESSION_LOST_MESSAGE)
+        return
+      }
       if (!ownsDrop(source, dragGeneration, sessionGeneration)) return
       if (!decision.allowed) {
-        const message = moveDenialMessage(decision, destination.name)
-        if (message) pushToast?.(message, 'error')
+        const { message, tone } = presentGfsDropRefusal(decision, {
+          source: source.name,
+          target: destination.name,
+        })
+        setDropVerdictAnnouncement(message)
+        pushToast?.(message, tone)
         return
       }
       if (source.kind === 'directory') {
@@ -1984,6 +2027,11 @@ export function FilesPage({
             </div>
           ) : null}
 
+          {dropSessionLost ? (
+            // Persistent (A11): the refusal outlives the dead gesture and the
+            // revoked surface below — it is not a one-shot toast.
+            <StatusBanner tone="error" text={GFS_DROP_SESSION_LOST_MESSAGE} />
+          ) : null}
           {accessibleNotice ? <StatusBanner tone="info" text={accessibleNotice} /> : null}
           {unavailableLocation ? (
             <StatusBanner tone="error" text={GFS_UNAVAILABLE_LOCATION_MESSAGE} />
@@ -2133,6 +2181,18 @@ export function FilesPage({
                   const isDropTarget = dragOverFolderId === resource.resourceId
                   const dropState =
                     resource.kind === 'directory' ? dropStatesById[resource.resourceId] : undefined
+                  const dropReason = gfsDropVerdictReason(dropState)
+                  // The deny/no-op/unknown tint carries no reason of its own;
+                  // the tooltip speaks the full sentence (one wording per
+                  // reason, every surface).
+                  const dropReasonTooltip =
+                    dropState && dropReason !== undefined
+                      ? gfsDropVerdictLiveAnnouncement(
+                          dropState,
+                          resource.name,
+                          dragSourceName ?? undefined
+                        )
+                      : undefined
                   const canDragResource =
                     resource.readable !== false && movingResourceId === null && !ctrl.mutating
                   return (
@@ -2141,13 +2201,15 @@ export function FilesPage({
                       key={resource.resourceId}
                       draggable={canDragResource}
                       title={
-                        canDragResource
+                        dropReasonTooltip ??
+                        (canDragResource
                           ? `Drag ${resource.name} into a folder to move it`
-                          : undefined
+                          : undefined)
                       }
                       data-dragging={isDragging ? 'true' : undefined}
                       data-drop-target={isDropTarget ? 'true' : undefined}
-                      data-drop-state={dropState}
+                      data-drop-state={dropState?.state}
+                      data-drop-reason={dropReason}
                       role="button"
                       tabIndex={0}
                       aria-label={

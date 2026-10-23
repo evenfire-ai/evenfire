@@ -1978,14 +1978,17 @@ h3 {
   flex: 0 0 auto;
 }
 
-/* ── Drag-and-drop states (rev-2 D1) ──────────────────────────────────────
-   Existing tokens only; no motion. `checking` reads as neutral-active so the
-   row is visibly being adjudicated without implying a verdict; `allowed`
-   reuses the selected-row accent; `denied` keeps the error border tone. The
-   row-level attribute also styles Files-page rows which reuse the same
-   attribute names on their grid rows. */
+/* ── Drag-and-drop states (rev-2 D1; refusal UX matrix §5) ────────────────
+   Tone-keyed by REASON, existing tokens only, no motion. Only `allowed`
+   paints the accent (blue); `checking` is neutral; a deny paints the error
+   inset unless its reason re-maps the tone — `same-parent` is the no-op
+   (info, edge tokens) and the unknown family is a warning, never a deny
+   look. Labels stay readable: the tint + inset carry the verdict, not label
+   dimming (the old dim-only treatment was the invisible one). The row-level
+   attribute also styles Files-page rows which reuse the same attribute
+   names on their grid rows. */
 .da-file-explorer__row[data-drop-state='checking'] {
-  background: rgba(var(--accent-rgb), 0.06);
+  background: rgba(var(--edge-rgb), 0.08);
 }
 
 .da-file-explorer__row[data-drop-state='allowed'] {
@@ -1996,14 +1999,36 @@ h3 {
   background: transparent;
 }
 
-.da-file-explorer__row[data-drop-state='denied'] .da-file-explorer__label.ui-button,
-.da-file-explorer__row[data-drop-state='unavailable'] .da-file-explorer__label.ui-button {
-  color: var(--text-dim);
+/* Deny = error inset + tint (UX matrix A1–A8). */
+.da-file-explorer__row[data-drop-state='denied'],
+.da-grid__row--compact[data-drop-state='denied'] {
+  background: rgba(var(--danger-rgb), 0.1);
+  box-shadow: inset 2px 0 0 rgba(var(--danger-rgb), 0.72);
+}
+
+/* A4 no-op: informational, never error-red. */
+.da-file-explorer__row[data-drop-state='denied'][data-drop-reason='same-parent'],
+.da-grid__row--compact[data-drop-state='denied'][data-drop-reason='same-parent'] {
+  background: rgba(var(--edge-rgb), 0.12);
+  box-shadow: inset 2px 0 0 rgba(var(--edge-rgb), 0.6);
+}
+
+/* A10 unknown/unverifiable: warning, must not look denied. */
+.da-file-explorer__row[data-drop-state='denied'][data-drop-reason='unavailable'],
+.da-file-explorer__row[data-drop-state='denied'][data-drop-reason='target-unavailable'],
+.da-file-explorer__row[data-drop-state='denied'][data-drop-reason='source-location-unknown'],
+.da-file-explorer__row[data-drop-state='unavailable'],
+.da-grid__row--compact[data-drop-state='denied'][data-drop-reason='unavailable'],
+.da-grid__row--compact[data-drop-state='denied'][data-drop-reason='target-unavailable'],
+.da-grid__row--compact[data-drop-state='denied'][data-drop-reason='source-location-unknown'],
+.da-grid__row--compact[data-drop-state='unavailable'] {
+  background: rgba(var(--warning-rgb), 0.1);
+  box-shadow: inset 2px 0 0 rgba(var(--warning-rgb), 0.72);
 }
 
 /* Files-page grid rows use the same attribute vocabulary. */
 .da-grid__row--compact[data-drop-state='checking'] {
-  background: rgba(var(--accent-rgb), 0.06);
+  background: rgba(var(--edge-rgb), 0.08);
 }
 
 .da-grid__row--compact[data-drop-state='allowed'] {
@@ -10664,6 +10689,12 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 
 .toast.tone-error {
   border-color: rgba(var(--danger-rgb), 0.52);
+}
+
+/* Unverifiable-but-not-forbidden outcomes (refusal UX matrix A10): the
+   warning border pairs with the warn toast tone. */
+.toast.tone-warn {
+  border-color: rgba(var(--warning-rgb), 0.52);
 }
 
 .auth-page {

@@ -1,6 +1,7 @@
 import type { DragEvent as ReactDragEvent } from 'react'
 import type { GfsBrowserChild, GfsCrumb } from '@hooks/domain/useGfsBrowserController'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
+import type { GfsDropVerdict } from '@/gfs/dragSession'
 import type { Tone } from '@/uiTypes'
 
 /**
@@ -17,8 +18,6 @@ export interface FileExplorerTreeProps {
   pushToast: (message: string, tone: Tone) => void
 }
 
-export type FileExplorerDropState = 'checking' | 'allowed' | 'denied' | 'unavailable'
-
 export interface FileExplorerNodeProps {
   node: GfsBrowserChild
   /** 1-based ARIA depth (`aria-level`). */
@@ -26,22 +25,26 @@ export interface FileExplorerNodeProps {
   /** Cache-scope key shared with the Files page's TanStack queries. */
   scope: string
   /** Session access is live: gates the per-node children fetch the same way the
-   * controller gates its own children query — a revoked session fetches nothing. */
+   *  controller gates its own children query — a revoked session fetches nothing. */
   accessActive: boolean
   expandedIds: ReadonlySet<string>
   selectedId: string | null
   /** Resource id currently being moved (freezes drag starts), when a move the
-   * tree itself initiated is in flight. */
+   *  tree itself initiated is in flight. */
   movingResourceId?: string | null
   /** Loaded ancestors of this node, NEAREST-FIRST; drives the drag structure
-   * facts (common-anchor / descendant observations). */
+   *  facts (common-anchor / descendant observations). */
   ancestorIds: readonly (string | null)[]
   /** Same ancestors as crumbs, ROOT-FIRST, for the Move dialog's initial path. */
   ancestorCrumbs: readonly GfsCrumb[]
-  /** Live hover verdict for directory nodes (drop feedback). */
-  dropState?: FileExplorerDropState
+  /** Live hover verdict for directory nodes (drop feedback). The FULL verdict
+   *  is carried — not just its state — so the deny reason reaches the row
+   *  (`data-drop-reason`), the tooltip and the announcements (UX matrix §5.1). */
+  dropState?: GfsDropVerdict
   /** Verdict map shared with descendant nodes (render feedback only). */
-  dropStatesByResourceId: Readonly<Record<string, FileExplorerDropState>>
+  dropStatesByResourceId: Readonly<Record<string, GfsDropVerdict>>
+  /** Display name of the active drag's source, for reason copy that names it. */
+  dragSourceName?: string | null
   onToggle: (resourceId: string) => void
   onActivateFolder: (node: GfsBrowserChild) => void
   onActivateFile: (node: GfsBrowserChild) => void
