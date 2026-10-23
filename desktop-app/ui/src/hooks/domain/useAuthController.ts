@@ -737,15 +737,22 @@ export function useAuthController({
     }
   }
 
-  const refreshDesktopReleaseStatus = async (): Promise<DesktopReleaseStatus | null> => {
-    try {
-      const status = await window.clerum.auth.getDesktopReleaseStatus()
-      setDesktopReleaseStatus(status)
-      return status
-    } catch {
-      return null
-    }
-  }
+  const refreshDesktopReleaseStatus =
+    useCallback(async (): Promise<DesktopReleaseStatus | null> => {
+      try {
+        const status = await window.clerum.auth.getDesktopReleaseStatus()
+        setDesktopReleaseStatus(status)
+        return status
+      } catch {
+        setStatus(
+          'Could not verify this Desktop build with the selected backend. The app remains available; try again later or restart to retry.',
+          'info',
+          undefined,
+          { toast: true }
+        )
+        return null
+      }
+    }, [setStatus])
 
   const handleOpenDesktopRelease = async () => {
     const releaseUrl = desktopReleaseStatus?.releaseUrl || ''

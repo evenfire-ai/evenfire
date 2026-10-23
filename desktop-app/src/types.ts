@@ -102,9 +102,11 @@ export type DesktopReleasePolicy = {
   externalRestApiVersion?: string
   rpcProxyVersion?: string
   desktopVersion: string
+  compatibleDesktopVersions: string[]
   minimumDesktopVersion: string
   releaseTag: string
   releaseUrl: string
+  updateFeedUrl: string
 }
 
 export type DesktopAppInfo = {
@@ -117,14 +119,28 @@ export type DesktopReleaseStatus = {
   checked: boolean
   currentVersion: string
   latestVersion: string
+  compatibleVersions: string[]
+  compatible: boolean
+  updateAvailable: boolean
   minimumVersion: string
   updateRequired: boolean
   releaseUrl: string
   releaseId?: string
   releaseTag?: string
+  updateFeedUrl?: string
   externalRestApiVersion?: string
   rpcProxyVersion?: string
   reason?: string
+}
+
+export type DesktopUpdateProgress = {
+  percent: number
+  transferred: number
+  total: number
+}
+
+export type PendingDesktopUpdate = {
+  version: string
 }
 
 export type PendingWorkflowApproval = {

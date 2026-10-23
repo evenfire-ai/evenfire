@@ -65,6 +65,7 @@ export type ReleaseManifest = {
   externalRestApiVersion: string
   rpcProxyVersion: string
   desktopVersion: string
+  compatibleDesktopVersions: string[]
   minimumDesktopVersion: string
 }
 
@@ -73,6 +74,7 @@ export const releaseManifest: ReleaseManifest = {
   externalRestApiVersion: '$mev',
   rpcProxyVersion: '$mrv',
   desktopVersion: '$mdv',
+  compatibleDesktopVersions: ['$mdv'],
   minimumDesktopVersion: '$mmin',
 }
 EOF
@@ -91,6 +93,17 @@ manifest_field() {
   # type block above the object, so "^  desktopVersion:" alone also matches
   # "  desktopVersion: string" and sed passes that line straight through.
   grep -E "^  $2: '" "$1/external-rest-api/src/releaseManifest.ts" | sed "s/.*'\(.*\)'.*/\1/"
+}
+
+manifest_compatible_versions() {
+  node - "$1/external-rest-api/src/releaseManifest.ts" <<'NODE'
+const fs = require('node:fs')
+const source = fs.readFileSync(process.argv[2], 'utf8')
+const match = source.match(/compatibleDesktopVersions:\s*\[([\s\S]*?)\]/)
+if (!match) process.exit(1)
+const versions = [...match[1].matchAll(/'([0-9]+\.[0-9]+\.[0-9]+)'/g)].map((item) => item[1])
+process.stdout.write(versions.join(','))
+NODE
 }
 
 assert_floor_is_not_dragged_by_a_desktop_bump() {
@@ -126,23 +139,20 @@ assert_floor_above_desktop_is_rejected() {
   rm -rf "$d"
 }
 
-assert_explicit_minimum_flag_is_honoured() {
+assert_legacy_minimum_flag_is_rejected() {
   local d; d="$(mktemp -d)"
   make_fixture "$d" 0.6.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
 
-  # 0.5.5 deliberately differs from BOTH the old floor (0.1.252) and the new
-  # desktop version (0.6.0). Asking for 0.6.0 here would pass against the
-  # unpatched script too, since its forced write lands on exactly that value.
   if ( cd "$d" && node "$REPO_ROOT/scripts/release/update-desktop-release-manifest.mjs" \
         --release-id test-0000000 --minimum-desktop-version 0.5.5 >/dev/null 2>&1 ); then
-    local min; min="$(manifest_field "$d" minimumDesktopVersion)"
-    if [ "$min" = "0.5.5" ]; then
-      pass "--minimum-desktop-version raises the floor when asked"
-    else
-      fail "expected floor 0.5.5 after explicit raise, got $min"
-    fi
+    fail "--minimum-desktop-version was accepted after the legacy floor was frozen"
   else
-    fail "--minimum-desktop-version was not accepted"
+    local min; min="$(manifest_field "$d" minimumDesktopVersion)"
+    if [ "$min" = "0.1.252" ]; then
+      pass "legacy minimum flag is rejected and the existing floor stays unchanged"
+    else
+      fail "legacy floor changed despite the rejected flag: $min"
+    fi
   fi
   rm -rf "$d"
 }
@@ -287,18 +297,62 @@ assert_prepare_release_writes_every_coordinate() {
 
   if ( cd "$d" && node scripts/release/prepare-release.mjs \
         --version 0.6.0 --release-id test-1111111 >/dev/null 2>&1 ); then
-    local pv lv dv min
+    local pv lv dv min compatible
     pv="$(grep '"version"' "$d/desktop-app/package.json" | sed 's/.*: "\(.*\)".*/\1/')"
     lv="$(node -e 'const j=require(process.argv[1]);console.log(j.version,j.packages[""].version)' "$d/desktop-app/package-lock.json")"
     dv="$(manifest_field "$d" desktopVersion)"
     min="$(manifest_field "$d" minimumDesktopVersion)"
-    if [ "$pv" = "0.6.0" ] && [ "$lv" = "0.6.0 0.6.0" ] && [ "$dv" = "0.6.0" ] && [ "$min" = "0.1.252" ]; then
-      pass "prepare-release writes package.json, both lockfile sites, and the manifest"
+    compatible="$(manifest_compatible_versions "$d")"
+    if [ "$pv" = "0.6.0" ] && [ "$lv" = "0.6.0 0.6.0" ] && [ "$dv" = "0.6.0" ] && [ "$min" = "0.1.252" ] && [ "$compatible" = "0.6.0" ]; then
+      pass "prepare-release writes package coordinates and defaults compatibility to the new build"
     else
-      fail "coordinates after prepare-release: pkg=$pv lock='$lv' manifest=$dv floor=$min"
+      fail "coordinates after prepare-release: pkg=$pv lock='$lv' manifest=$dv floor=$min compatible=$compatible"
     fi
   else
     fail "prepare-release.mjs exited non-zero"
+  fi
+  rm -rf "$d"
+}
+
+assert_prepare_release_can_retain_compatible_builds() {
+  local d; d="$(mktemp -d)"
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  cp -R "$REPO_ROOT/scripts" "$d/scripts"
+
+  if ( cd "$d" && node scripts/release/prepare-release.mjs \
+        --version 0.6.0 --release-id test-2222222 \
+        --compatible-desktop-version 0.5.0 \
+        --compatible-desktop-version 0.6.0 >/dev/null 2>&1 ); then
+    local compatible
+    compatible="$(manifest_compatible_versions "$d")"
+    if [ "$compatible" = "0.5.0,0.6.0" ]; then
+      pass "prepare-release retains multiple explicitly compatible Desktop builds"
+    else
+      fail "expected compatible builds 0.5.0,0.6.0, got '$compatible'"
+    fi
+  else
+    fail "prepare-release rejected repeated compatible Desktop version flags"
+  fi
+  rm -rf "$d"
+}
+
+assert_manifest_requires_the_highest_compatible_target() {
+  local d; d="$(mktemp -d)"
+  make_fixture "$d" 0.5.0 0.1.60 0.1.51 0.5.0 0.1.252 0.1.60 0.1.51
+  node -e '
+    const fs = require("fs"), p = process.argv[1]
+    const source = fs.readFileSync(p, "utf8")
+    fs.writeFileSync(p, source.replace(
+      "compatibleDesktopVersions: ['\''0.5.0'\'']",
+      "compatibleDesktopVersions: ['\''0.5.0'\'', '\''0.6.0'\'']"
+    ))
+  ' "$d/external-rest-api/src/releaseManifest.ts"
+
+  if ( cd "$d" && node "$REPO_ROOT/scripts/release/update-desktop-release-manifest.mjs" \
+        --validate-only >/dev/null 2>&1 ); then
+    fail "release manifest accepted a target below a compatible Desktop version"
+  else
+    pass "release manifest requires the target to be the highest compatible Desktop version"
   fi
   rm -rf "$d"
 }
@@ -935,11 +989,13 @@ EOF
 
 assert_floor_is_not_dragged_by_a_desktop_bump
 assert_floor_above_desktop_is_rejected
-assert_explicit_minimum_flag_is_honoured
+assert_legacy_minimum_flag_is_rejected
 assert_unreadable_manifest_does_not_synthesize_a_floor
 assert_previous_ref_does_not_revert_a_raised_floor
 assert_ordering_check_fails_against_unpatched_script
 assert_prepare_release_writes_every_coordinate
+assert_prepare_release_can_retain_compatible_builds
+assert_manifest_requires_the_highest_compatible_target
 assert_prepare_release_leaves_a_same_string_dependency_alone
 assert_prepare_release_rejects_a_non_greater_version
 assert_prepare_release_rejects_a_bad_version_shape

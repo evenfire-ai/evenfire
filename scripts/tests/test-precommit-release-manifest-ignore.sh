@@ -44,6 +44,7 @@ export type ReleaseManifest = {
   externalRestApiVersion: string
   rpcProxyVersion: string
   desktopVersion: string
+  compatibleDesktopVersions: string[]
   minimumDesktopVersion: string
 }
 
@@ -52,6 +53,7 @@ export const releaseManifest: ReleaseManifest = {
   externalRestApiVersion: '0.1.60',
   rpcProxyVersion: '0.1.51',
   desktopVersion: '0.1.252',
+  compatibleDesktopVersions: ['0.1.252'],
   minimumDesktopVersion: '0.1.252',
 }
 EOF
@@ -201,6 +203,7 @@ export type ReleaseManifest = {
   externalRestApiVersion: string
   rpcProxyVersion: string
   desktopVersion: string
+  compatibleDesktopVersions: string[]
   minimumDesktopVersion: string
 }
 
@@ -209,6 +212,7 @@ export const releaseManifest: ReleaseManifest = {
   externalRestApiVersion: '0.1.60',
   rpcProxyVersion: '0.1.51',
   desktopVersion: '0.1.252',
+  compatibleDesktopVersions: ['0.1.252'],
   minimumDesktopVersion: '0.1.252',
 }
 EOF
@@ -250,6 +254,7 @@ export type ReleaseManifest = {
   externalRestApiVersion: string
   rpcProxyVersion: string
   desktopVersion: string
+  compatibleDesktopVersions: string[]
   minimumDesktopVersion: string
 }
 
@@ -262,6 +267,7 @@ export const releaseManifest: ReleaseManifest = {
 >>>>>>> feature
   rpcProxyVersion: '0.1.51',
   desktopVersion: '0.1.252',
+  compatibleDesktopVersions: ['0.1.252'],
   minimumDesktopVersion: '0.1.252',
 }
 EOF
@@ -282,6 +288,7 @@ export type ReleaseManifest = {
   externalRestApiVersion: string
   rpcProxyVersion: string
   desktopVersion: string
+  compatibleDesktopVersions: string[]
   minimumDesktopVersion: string
 }
 
@@ -290,6 +297,7 @@ export const releaseManifest: ReleaseManifest = {
   externalRestApiVersion: '0.1.60',
   rpcProxyVersion: '0.1.51',
   desktopVersion: '0.1.252',
+  compatibleDesktopVersions: ['0.1.252'],
   minimumDesktopVersion: '0.1.252',
 }
 EOF
@@ -319,6 +327,7 @@ export type ReleaseManifest = {
   externalRestApiVersion: string
   rpcProxyVersion: string
   desktopVersion: string
+  compatibleDesktopVersions: string[]
   minimumDesktopVersion: string
 }
 
@@ -326,6 +335,7 @@ export const releaseManifest: ReleaseManifest = {
   externalRestApiVersion: '0.1.60',
   rpcProxyVersion: '0.1.51',
   desktopVersion: '0.1.252',
+  compatibleDesktopVersions: ['0.1.252'],
   minimumDesktopVersion: '0.1.252',
 }
 EOF
@@ -423,6 +433,7 @@ export type ReleaseManifest = {
   externalRestApiVersion: string
   rpcProxyVersion: string
   desktopVersion: string
+  compatibleDesktopVersions: string[]
   minimumDesktopVersion: string
 }
 
@@ -431,6 +442,7 @@ export const releaseManifest: ReleaseManifest = {
   externalRestApiVersion: '0.1.61',
   rpcProxyVersion: '0.1.51',
   desktopVersion: '0.1.252',
+  compatibleDesktopVersions: ['0.1.252'],
   minimumDesktopVersion: '0.1.252',
 }
 EOF

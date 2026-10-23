@@ -347,7 +347,7 @@ export class AuthClient {
     return requestJson<DesktopEnvironmentDiscovery>('GET', url('/api/v1/desktop/environment'))
   }
 
-  async getDesktopReleasePolicy(token: string): Promise<DesktopReleasePolicy> {
+  async getDesktopReleasePolicy(token?: string): Promise<DesktopReleasePolicy> {
     return requestJson<DesktopReleasePolicy>('GET', url('/api/v1/desktop/release'), { token })
   }
 

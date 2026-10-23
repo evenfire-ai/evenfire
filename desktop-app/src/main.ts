@@ -1,4 +1,12 @@
-import { BrowserWindow, app, ipcMain, nativeTheme, powerMonitor } from 'electron'
+import {
+  BrowserWindow,
+  Menu,
+  type MenuItemConstructorOptions,
+  app,
+  ipcMain,
+  nativeTheme,
+  powerMonitor,
+} from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
 import { AppService } from './appService.js'
@@ -10,6 +18,7 @@ import {
   hydrateDesktopRuntimeConfig,
 } from './config.js'
 import { installDesktopTextContextMenus } from './desktopTextContextMenu.js'
+import { DesktopUpdateManager, sendDesktopUpdateEvent } from './desktopUpdateManager.js'
 import {
   type DevIsolationPlan,
   devIsolationRuntimePolicy,
@@ -65,11 +74,13 @@ process.stdout?.on?.('error', () => {})
 process.stderr?.on?.('error', () => {})
 
 let mainWindow: BrowserWindow | null = null
+let pendingDesktopUpdateCheck = false
 const appService = new AppService(
   devIsolationPlan
     ? { tokenStore: new TokenStore({ isolatedUserDataPath: devIsolationPlan.userDataDir }) }
     : {}
 )
+const desktopUpdateManager = new DesktopUpdateManager(appService, sendDesktopUpdateEvent)
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
 // U5: deliver mcp-oauth completions to the renderer, or queue them when the
 // renderer is not yet ready (cold start), draining after `app:rendererReady`.
@@ -132,6 +143,51 @@ type WindowControlsState = { maximized: boolean; fullscreen: boolean }
 
 function windowControlsState(win: BrowserWindow | null): WindowControlsState {
   return { maximized: Boolean(win?.isMaximized()), fullscreen: Boolean(win?.isFullScreen()) }
+}
+
+function requestDesktopUpdateCheck(): void {
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindowRendererReady) {
+    mainWindow.webContents.send('desktopUpdate:checkRequested')
+    return
+  }
+  pendingDesktopUpdateCheck = true
+  requestMainWindow()
+}
+
+function installApplicationMenu(): void {
+  const checkForUpdates: MenuItemConstructorOptions = {
+    label: 'Check for Updates',
+    click: requestDesktopUpdateCheck,
+  }
+  const template: MenuItemConstructorOptions[] =
+    process.platform === 'darwin'
+      ? [
+          {
+            role: 'appMenu',
+            submenu: [
+              { role: 'about' },
+              { type: 'separator' },
+              checkForUpdates,
+              { type: 'separator' },
+              { role: 'services' },
+              { type: 'separator' },
+              { role: 'hide' },
+              { role: 'hideOthers' },
+              { role: 'unhide' },
+              { type: 'separator' },
+              { role: 'quit' },
+            ],
+          },
+          { role: 'editMenu' },
+          { role: 'windowMenu' },
+        ]
+      : [
+          {
+            label: 'Help',
+            submenu: [checkForUpdates],
+          },
+        ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
 function emitWindowControlsState(win: BrowserWindow): void {
@@ -239,6 +295,10 @@ ipcMain.handle('app:rendererReady', event => {
   if (!mainWindow || event.sender !== mainWindow.webContents) return
   mainWindowRendererReady = true
   emitWindowControlsState(mainWindow)
+  if (pendingDesktopUpdateCheck) {
+    pendingDesktopUpdateCheck = false
+    mainWindow.webContents.send('desktopUpdate:checkRequested')
+  }
   evenfireDeepLinkRouter.drainPending()
   // U5: flush mcp-oauth completions that arrived before the renderer installed
   // its listener (cold start). The onMcpOauthCompleted listener is registered by
@@ -563,11 +623,12 @@ if (gotSingleInstanceLock) {
       if (devIsolationPlan && !verifyDevIsolationBeforeServices(devIsolationPlan)) return
       installDesktopTextContextMenus()
       wireAdaptiveSystemIcon()
+      installApplicationMenu()
       // Must precede registerIpcHandlers: the SDK IPC handlers resolve the
       // runtime eagerly on first call, and a plugin can be mounted the moment
       // the window paints.
       initPluginSdkRuntime({ service: appService, getMainWindow: () => mainWindow })
-      registerIpcHandlers(appService)
+      registerIpcHandlers(appService, desktopUpdateManager)
       mainWindowLifecycleReady = true
       wirePowerMonitor()
       app.on('activate', () => {
