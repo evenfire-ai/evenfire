@@ -66,23 +66,25 @@ while IFS= read -r ref; do
     failed=1
     continue
   fi
-  # A multi-platform index gives a map keyed by platform; a single-platform
-  # manifest gives one config object.
-  versions="$(jq -r '
-    (if has("config") then {"single": .} else . end)
-    | to_entries[]
-    | "\(.key) \([.value.config.Env[]? | select(startswith("NGINX_VERSION=")) | ltrimstr("NGINX_VERSION=")] | first // "<none>")"
-  ' <<<"$image_json")"
   for platform in $REQUIRED_PLATFORMS; do
-    got="$(awk -v p="$platform" '$1 == p { print $2 }' <<<"$versions")"
-    if [ -z "$got" ]; then
+    # A multi-platform index gives a map keyed by platform; a single-platform
+    # manifest gives one config object, which has no platform key. The value
+    # stays JSON-encoded (null when the platform is absent), so it is compared
+    # whole and a newline or space in it cannot pass for another platform.
+    got="$(jq -c --arg p "$platform" '
+      (if has("config") then {"single": .} else . end)
+      | if has($p) then [.[$p].config.Env[]? | select(startswith("NGINX_VERSION=")) | ltrimstr("NGINX_VERSION=")] | first // "<none>" else null end
+    ' <<<"$image_json")"
+    shown="${got#\"}"
+    shown="${shown%\"}"
+    if [ "$got" = null ]; then
       echo "ERROR: $target has no $platform manifest (for $ref)" >&2
       failed=1
-    elif [ "$got" != "$want" ]; then
-      echo "ERROR: $target $platform declares NGINX_VERSION=$got, tag says $want (for $ref)" >&2
+    elif [ "$got" != "\"$want\"" ]; then
+      echo "ERROR: $target $platform declares NGINX_VERSION=$shown, tag says $want (for $ref)" >&2
       failed=1
     else
-      echo "ok: $target $platform NGINX_VERSION=$got (for $ref)"
+      echo "ok: $target $platform NGINX_VERSION=$want (for $ref)"
     fi
   done
   checked=$((checked + 1))

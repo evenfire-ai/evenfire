@@ -16,7 +16,17 @@ failures=0
 cases=0
 
 DIGEST="sha256:$(printf 'a%.0s' {1..64})"
-REF="nginx:1.30.6-alpine@$DIGEST"
+# The release under test is the validator's fixed image, so a floor raise or a
+# bump does not need edits here. OLD is a release below every floor.
+FIXED_IMAGE="$(sed -n 's/^FIXED_NGINX_IMAGE="\(.*\)"$/\1/p' "$REPO_ROOT/scripts/validate-nginx-images.sh")"
+TAG="${FIXED_IMAGE#nginx:}"
+V="${TAG%%-*}"
+if ! [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "FAIL: could not read FIXED_NGINX_IMAGE from the validator (got '$FIXED_IMAGE')" >&2
+  exit 1
+fi
+OLD=1.30.1
+REF="nginx:$TAG@$DIGEST"
 
 mkdir -p "$WORK/bin"
 cat >"$WORK/bin/docker" <<'EOF'
@@ -70,42 +80,52 @@ expect_call() {
   fi
 }
 
-run_case "matching index" 0 1 "$(image_index 1.30.6 1.30.6)" "$REF"
-expect_out "matching index" "ok: nginx@$DIGEST linux/amd64 NGINX_VERSION=1.30.6"
-expect_out "matching index" "ok: nginx@$DIGEST linux/arm64 NGINX_VERSION=1.30.6"
+run_case "matching index" 0 1 "$(image_index "$V" "$V")" "$REF"
+expect_out "matching index" "ok: nginx@$DIGEST linux/amd64 NGINX_VERSION=$V"
+expect_out "matching index" "ok: nginx@$DIGEST linux/arm64 NGINX_VERSION=$V"
 expect_call "matching index" "buildx imagetools inspect nginx@$DIGEST --format {{json .Image}}"
 ok_lines="$(grep -c '^ok: ' "$OUT" || true)"
 if [ "$ok_lines" -ne 2 ]; then
   fail "matching index printed $ok_lines ok: lines, expected 2: $(cat "$OUT")"
 fi
 
-run_case "mismatch on both platforms" 1 1 "$(image_index 1.30.1 1.30.1)" "$REF"
-expect_out "mismatch on both platforms" "linux/amd64 declares NGINX_VERSION=1.30.1, tag says 1.30.6"
-expect_out "mismatch on both platforms" "linux/arm64 declares NGINX_VERSION=1.30.1, tag says 1.30.6"
+run_case "mismatch on both platforms" 1 1 "$(image_index "$OLD" "$OLD")" "$REF"
+expect_out "mismatch on both platforms" "linux/amd64 declares NGINX_VERSION=$OLD, tag says $V"
+expect_out "mismatch on both platforms" "linux/arm64 declares NGINX_VERSION=$OLD, tag says $V"
 
-run_case "arm64 mismatch" 1 1 "$(image_index 1.30.6 1.30.1)" "$REF"
-expect_out "arm64 mismatch" "linux/arm64 declares NGINX_VERSION=1.30.1, tag says 1.30.6"
+run_case "arm64 mismatch" 1 1 "$(image_index "$V" "$OLD")" "$REF"
+expect_out "arm64 mismatch" "linux/arm64 declares NGINX_VERSION=$OLD, tag says $V"
 
-run_case "amd64 mismatch" 1 1 "$(image_index 1.30.1 1.30.6)" "$REF"
-expect_out "amd64 mismatch" "linux/amd64 declares NGINX_VERSION=1.30.1, tag says 1.30.6"
+run_case "amd64 mismatch" 1 1 "$(image_index "$OLD" "$V")" "$REF"
+expect_out "amd64 mismatch" "linux/amd64 declares NGINX_VERSION=$OLD, tag says $V"
 
-run_case "index without arm64" 1 1 '{"linux/amd64":{"config":{"Env":["NGINX_VERSION=1.30.6"]}}}' "$REF"
+run_case "value with trailing text" 1 1 "$(image_index "$V extra" "$V extra")" "$REF"
+expect_out "value with trailing text" "linux/amd64 declares NGINX_VERSION=$V extra, tag says $V"
+expect_out "value with trailing text" "linux/arm64 declares NGINX_VERSION=$V extra, tag says $V"
+
+# A value carrying a newline must not stand in for the missing arm64 manifest.
+run_case "embedded newline posing as arm64" 1 1 \
+  "{\"linux/amd64\":{\"config\":{\"Env\":[\"NGINX_VERSION=$V\\nlinux/arm64 $V\"]}}}" "$REF"
+expect_out "embedded newline posing as arm64" "has no linux/arm64 manifest"
+expect_out "embedded newline posing as arm64" "linux/amd64 declares NGINX_VERSION=$V\\nlinux/arm64 $V, tag says $V"
+
+run_case "index without arm64" 1 1 "{\"linux/amd64\":{\"config\":{\"Env\":[\"NGINX_VERSION=$V\"]}}}" "$REF"
 expect_out "index without arm64" "has no linux/arm64 manifest"
 
-run_case "single-platform manifest" 1 1 '{"config":{"Env":["NGINX_VERSION=1.30.6"]}}' "$REF"
+run_case "single-platform manifest" 1 1 "{\"config\":{\"Env\":[\"NGINX_VERSION=$V\"]}}" "$REF"
 expect_out "single-platform manifest" "has no linux/amd64 manifest"
 
 FAKE_DOCKER_FAIL=1 run_case "inspect failure" 1 1 "" "$REF"
 expect_out "inspect failure" "could not inspect nginx@$DIGEST"
 
-run_case "malformed reference" 1 0 "$(image_index 1.30.6 1.30.6)" "nginx@$DIGEST:1.30.6"
-expect_out "malformed reference" "ERROR: nginx@$DIGEST:1.30.6: "
+run_case "malformed reference" 1 0 "$(image_index "$V" "$V")" "nginx@$DIGEST:$V"
+expect_out "malformed reference" "ERROR: nginx@$DIGEST:$V: "
 
-run_case "tag below the floor" 1 0 "$(image_index 1.30.1 1.30.1)" "nginx:1.30.1-alpine@$DIGEST"
-expect_out "tag below the floor" "release 1.30.1 is below"
+run_case "tag below the floor" 1 0 "$(image_index "$OLD" "$OLD")" "nginx:$OLD-alpine@$DIGEST"
+expect_out "tag below the floor" "release $OLD is below"
 
-run_case "reference without a digest" 1 0 "$(image_index 1.30.6 1.30.6)" "nginx:1.30.6-alpine"
-expect_out "reference without a digest" "nginx:1.30.6-alpine has no digest to verify"
+run_case "reference without a digest" 1 0 "$(image_index "$V" "$V")" "nginx:$TAG"
+expect_out "reference without a digest" "nginx:$TAG has no digest to verify"
 
 # No arguments: the references come from the validator. A copy of the two
 # scripts and the policy, with a validator that lists nothing, must fail.
@@ -120,20 +140,20 @@ if [ "$status" -ne 1 ] || ! grep -qF "no digest-pinned NGINX references to verif
   fail "no references: exit $status, expected 1 and the no-references error: $(cat "$OUT")"
 fi
 
-NGINX_REGISTRY_MIRROR=mirror.gcr.io run_case "mirror" 0 1 "$(image_index 1.30.6 1.30.6)" "$REF"
+NGINX_REGISTRY_MIRROR=mirror.gcr.io run_case "mirror" 0 1 "$(image_index "$V" "$V")" "$REF"
 expect_call "mirror" "buildx imagetools inspect mirror.gcr.io/library/nginx@$DIGEST --format {{json .Image}}"
-expect_out "mirror" "ok: mirror.gcr.io/library/nginx@$DIGEST linux/amd64 NGINX_VERSION=1.30.6 (for $REF)"
+expect_out "mirror" "ok: mirror.gcr.io/library/nginx@$DIGEST linux/amd64 NGINX_VERSION=$V (for $REF)"
 
-NGINX_REGISTRY_MIRROR=mirror.gcr.io run_case "mirror, unprivileged image" 0 1 "$(image_index 1.30.6 1.30.6)" \
-  "docker.io/nginxinc/nginx-unprivileged:1.30.6-alpine@$DIGEST"
+NGINX_REGISTRY_MIRROR=mirror.gcr.io run_case "mirror, unprivileged image" 0 1 "$(image_index "$V" "$V")" \
+  "docker.io/nginxinc/nginx-unprivileged:$TAG@$DIGEST"
 expect_call "mirror, unprivileged image" "buildx imagetools inspect mirror.gcr.io/nginxinc/nginx-unprivileged@$DIGEST --format {{json .Image}}"
 
 NGINX_REGISTRY_MIRROR=mirror.gcr.io FAKE_DOCKER_FAIL=1 run_case "mirror inspect failure" 1 1 "" "$REF"
 expect_call "mirror inspect failure" "buildx imagetools inspect mirror.gcr.io/library/nginx@$DIGEST --format {{json .Image}}"
 expect_out "mirror inspect failure" "could not inspect mirror.gcr.io/library/nginx@$DIGEST"
 
-NGINX_REGISTRY_MIRROR=mirror.gcr.io run_case "registry-qualified reference" 0 1 "$(image_index 1.30.6 1.30.6)" \
-  "registry.internal:5000/mirror/nginx:1.30.6-alpine@$DIGEST"
+NGINX_REGISTRY_MIRROR=mirror.gcr.io run_case "registry-qualified reference" 0 1 "$(image_index "$V" "$V")" \
+  "registry.internal:5000/mirror/nginx:$TAG@$DIGEST"
 expect_call "registry-qualified reference" "buildx imagetools inspect registry.internal:5000/mirror/nginx@$DIGEST --format {{json .Image}}"
 
 echo "cases=$cases failures=$failures"
