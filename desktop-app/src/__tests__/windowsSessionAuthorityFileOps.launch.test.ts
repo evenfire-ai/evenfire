@@ -60,7 +60,16 @@ describe('Windows session-authority native file-operation launcher', () => {
     expect(args[4]).toContain('[Console]::In.ReadToEnd()')
     expect(args[4]).toContain('[scriptblock]::Create($sourceText)')
     expect(args[4].length).toBeLessThan(256)
+    expect(options.input).toContain('DefinePInvokeMethod')
+    expect(options.input).toContain('MoveFileExW')
     expect(options.input).toContain('MoveFileEx')
+    expect(options.input).toContain("'Move'")
+    expect(options.input).toContain('[bool]$nativeType.GetMethod')
+    expect(options.input).toContain('EmitCall')
+    expect(options.input).not.toContain('GetLastError')
+    expect(options.input).not.toContain('nativeErrorCode')
+    expect(options.input).not.toContain('Add-Type')
+    expect(options.input).not.toContain('CodeDOM')
     expect(options.input).toContain('$flags = [uint32]8')
     expect(options.input).toContain('$flags = [uint32]9')
     expect(options.input).toContain('EVENFIRE_SESSION_AUTHORITY_PHASE:')
@@ -100,11 +109,11 @@ describe('Windows session-authority native file-operation launcher', () => {
     expect(commandLineLength).toBeLessThan(32_767)
   })
 
-  it('maps a verified native rejection without exposing command or path data', () => {
+  it('keeps a failed native move rejected without trusting last-error state', () => {
     spawnSyncMock.mockReturnValue(
       processResult({
         status: 2,
-        stdout: '{"ok":false,"phase":"native-move","errorCode":183}',
+        stdout: '{"ok":false,"phase":"native-move","nativeMoveRejected":true}',
       })
     )
 
@@ -115,13 +124,35 @@ describe('Windows session-authority native file-operation launcher', () => {
         false
       )
     })
-    expect(error).toMatchObject({ code: 'EEXIST', outcome: 'rejected' })
+    expect(error).toMatchObject({ code: 'EIO', outcome: 'rejected' })
     expect(error.diagnostic).toMatchObject({
       phase: 'native-operation-rejected',
       verifierPhase: 'native-move',
-      nativeErrorCode: 183,
     })
     expect(error.message).not.toContain('C:\\Users')
+  })
+
+  it('classifies fixed native-binding setup errors without exposing PowerShell details', () => {
+    spawnSyncMock.mockReturnValue(
+      processResult({
+        status: 2,
+        stdout: '{"ok":false,"phase":"prepare-native-move","errorType":"MethodAccessException"}',
+      })
+    )
+
+    const error = captureError(() =>
+      moveSessionAuthorityFileDurablySync(
+        'C:\\Users\\fixture\\Evenfire\\candidate.next',
+        'C:\\Users\\fixture\\Evenfire\\candidate.json'
+      )
+    )
+
+    expect(error).toMatchObject({ code: 'EIO', outcome: 'rejected' })
+    expect(error.diagnostic).toMatchObject({
+      phase: 'powershell-execution-failed',
+      verifierPhase: 'prepare-native-move',
+    })
+    expect(error.message).not.toContain('MethodAccessException')
   })
 
   it('classifies process-start failure as rejected and post-start timeout as indeterminate', () => {

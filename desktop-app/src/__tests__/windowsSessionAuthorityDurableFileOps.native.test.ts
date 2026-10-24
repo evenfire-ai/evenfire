@@ -204,7 +204,7 @@ describe('Windows session-authority durable file operations', () => {
   )
 
   it.skipIf(process.platform !== 'win32')(
-    'rejects a non-replacing publication when another authority file already exists',
+    'never accepts a failed non-replacing native move when the target already exists',
     () => {
       const root = createRoot()
       const authority = path.join(root, 'authority.record')
@@ -219,7 +219,11 @@ describe('Windows session-authority durable file operations', () => {
         failure = error
       }
       expect(failure).toBeInstanceOf(SessionAuthorityFileMutationError)
-      expect(failure).toMatchObject({ code: 'EEXIST', outcome: 'rejected' })
+      expect(failure).toMatchObject({
+        code: 'EIO',
+        outcome: 'rejected',
+        diagnostic: { phase: 'native-operation-rejected', verifierPhase: 'native-move' },
+      })
       expect(readFileSync(authority, 'utf8')).toBe('{"owner":"current"}')
       expect(readFileSync(candidate, 'utf8')).toBe('{"owner":"candidate"}')
     },
@@ -247,12 +251,12 @@ describe('Windows session-authority durable file operations', () => {
       expect(failure).toBeInstanceOf(SessionAuthorityFileMutationError)
       if (!(failure instanceof SessionAuthorityFileMutationError))
         throw new Error('Expected native replacement to be rejected')
+      expect(failure.code).toBe('EIO')
       expect(failure.outcome).toBe('rejected')
       expect(failure.diagnostic).toMatchObject({
         phase: 'native-operation-rejected',
         verifierPhase: 'native-move',
       })
-      expect([5, 32]).toContain(failure.diagnostic?.nativeErrorCode)
       expect(readFileSync(authority, 'utf8')).toBe('{"owner":"current"}')
       expect(readFileSync(candidate, 'utf8')).toBe('{"owner":"candidate"}')
     },

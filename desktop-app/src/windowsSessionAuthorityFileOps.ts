@@ -5,50 +5,69 @@ const REQUEST_ENV = 'EVENFIRE_SESSION_AUTHORITY_FILE_OPS'
 const POWERSHELL_OPERATION_TIMEOUT_MS = 30_000
 const LAUNCHER = '$sourceText = [Console]::In.ReadToEnd(); & ([scriptblock]::Create($sourceText))'
 const ARGS = ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', LAUNCHER] as const
-const VERIFIER_PHASES = new Set(['compile-native-move', 'validate-request', 'native-move'])
+const VERIFIER_PHASES = new Set(['validate-request', 'prepare-native-move', 'native-move'])
 const SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$phase = 'compile-native-move'
+$phase = 'validate-request'
 $null = [Console]::Error.WriteLine('EVENFIRE_SESSION_AUTHORITY_PHASE:' + $phase)
 [Console]::Error.Flush()
-$code = @'
-using System;
-using System.Runtime.InteropServices;
-public static class EvenfireSessionAuthorityMove {
-  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true,
-    EntryPoint = "MoveFileExW")]
-  static extern bool MoveFileEx(string source, string destination, uint flags);
-  public static int Move(string source, string destination, uint flags) {
-    return MoveFileEx(source, destination, flags) ? 0 : Marshal.GetLastWin32Error();
-  }
-}
-'@
 try {
-  Add-Type -TypeDefinition $code -Language CSharp -ErrorAction Stop
-  $phase = 'validate-request'
-  [Console]::Error.WriteLine('EVENFIRE_SESSION_AUTHORITY_PHASE:' + $phase)
-  [Console]::Error.Flush()
   $payload = [Environment]::GetEnvironmentVariable('EVENFIRE_SESSION_AUTHORITY_FILE_OPS')
   if (-not $payload) { throw 'request-missing' }
   $request = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload)) |
     ConvertFrom-Json
-  if (-not $request -or -not $request.source -or -not $request.destination) {
+  if (-not $request -or $request.source -isnot [string] -or
+    $request.destination -isnot [string] -or -not $request.source -or -not $request.destination) {
     throw 'request-invalid'
   }
   $flags = [uint32]8
   if ($request.replaceExisting -eq $true) { $flags = [uint32]9 }
+
+  $phase = 'prepare-native-move'
+  [Console]::Error.WriteLine('EVENFIRE_SESSION_AUTHORITY_PHASE:' + $phase)
+  [Console]::Error.Flush()
+  $assemblyName = [System.Reflection.AssemblyName]::new('EvenfireSessionAuthorityMove')
+  $assemblyBuilder = [AppDomain]::CurrentDomain.DefineDynamicAssembly(
+    $assemblyName, [System.Reflection.Emit.AssemblyBuilderAccess]::Run)
+  $moduleBuilder = $assemblyBuilder.DefineDynamicModule($assemblyName.Name)
+  $typeBuilder = $moduleBuilder.DefineType(
+    $assemblyName.Name, [System.Reflection.TypeAttributes]::Public)
+  $importAttributes = [System.Reflection.MethodAttributes]::Public -bor
+    [System.Reflection.MethodAttributes]::Static -bor
+    [System.Reflection.MethodAttributes]::PinvokeImpl
+  $nativeMove = $typeBuilder.DefinePInvokeMethod(
+    'MoveFileEx', 'kernel32.dll', 'MoveFileExW', $importAttributes,
+    [System.Reflection.CallingConventions]::Standard, [bool],
+    [type[]]@([string], [string], [uint32]),
+    [System.Runtime.InteropServices.CallingConvention]::Winapi,
+    [System.Runtime.InteropServices.CharSet]::Unicode)
+  $nativeMove.SetImplementationFlags(
+    $nativeMove.GetMethodImplementationFlags() -bor
+    [System.Reflection.MethodImplAttributes]::PreserveSig)
+  $move = $typeBuilder.DefineMethod(
+    'Move',
+    [System.Reflection.MethodAttributes]::Public -bor [System.Reflection.MethodAttributes]::Static,
+    [bool], [type[]]@([string], [string], [uint32]))
+  $il = $move.GetILGenerator()
+  $il.Emit([System.Reflection.Emit.OpCodes]::Ldarg_0)
+  $il.Emit([System.Reflection.Emit.OpCodes]::Ldarg_1)
+  $il.Emit([System.Reflection.Emit.OpCodes]::Ldarg_2)
+  $il.EmitCall([System.Reflection.Emit.OpCodes]::Call, $nativeMove, $null)
+  $il.Emit([System.Reflection.Emit.OpCodes]::Ret)
+  $nativeType = $typeBuilder.CreateType()
+
   $phase = 'native-move'
   [Console]::Error.WriteLine('EVENFIRE_SESSION_AUTHORITY_PHASE:' + $phase)
   [Console]::Error.Flush()
-  $errorCode = [EvenfireSessionAuthorityMove]::Move(
-    [string]$request.source, [string]$request.destination, $flags)
-  if ($errorCode -eq 0) {
+  $moveSucceeded = [bool]$nativeType.GetMethod('Move').Invoke(
+    $null, [object[]]@([string]$request.source, [string]$request.destination, $flags))
+  if ($moveSucceeded) {
     [Console]::Out.WriteLine('{"ok":true}')
     exit 0
   }
   [Console]::Out.WriteLine((ConvertTo-Json -Compress @{ ok = $false; phase = $phase;
-    errorCode = $errorCode }))
+    nativeMoveRejected = $true }))
   exit 2
 } catch {
   [Console]::Out.WriteLine((ConvertTo-Json -Compress @{ ok = $false; phase = $phase;
@@ -68,7 +87,6 @@ export class SessionAuthorityFileMutationError extends Error {
         | 'path-validation'
         | 'process-launch'
         | 'process-interrupted'
-        | 'powershell-compilation-failed'
         | 'powershell-execution-failed'
         | 'native-operation-rejected'
         | 'file-validation-failed'
@@ -88,7 +106,6 @@ export class SessionAuthorityFileMutationError extends Error {
       stdoutPresent: boolean
       stderrPresent: boolean
       verifierPhase?: string
-      nativeErrorCode?: number
     }
   ) {
     super('Session authority file mutation did not establish durable completion')
@@ -173,29 +190,17 @@ function diagnostic(
       typeof response.phase === 'string' && /^[a-z-]{1,40}$/.test(response.phase)
         ? response.phase
         : undefined
-    if (response.ok === false && Number.isInteger(response.errorCode)) {
-      const nativeErrorCode = response.errorCode as number
-      const nativeCode =
-        nativeErrorCode === 2 || nativeErrorCode === 3
-          ? 'ENOENT'
-          : nativeErrorCode === 80 || nativeErrorCode === 183
-            ? 'EEXIST'
-            : `WIN32_${nativeErrorCode}`
-      return new SessionAuthorityFileMutationError(nativeCode, 'rejected', {
+    if (response.ok === false && response.nativeMoveRejected === true) {
+      return new SessionAuthorityFileMutationError('EIO', 'rejected', {
         ...diagnosticFields,
         phase: 'native-operation-rejected',
         ...(verifierPhase ? { verifierPhase } : {}),
-        nativeErrorCode,
       })
     }
     if (response.ok === false && typeof response.errorType === 'string') {
-      const phase =
-        verifierPhase === 'compile-native-move'
-          ? 'powershell-compilation-failed'
-          : 'powershell-execution-failed'
       return new SessionAuthorityFileMutationError(codeForError, 'rejected', {
         ...diagnosticFields,
-        phase,
+        phase: 'powershell-execution-failed',
         ...(verifierPhase ? { verifierPhase } : {}),
       })
     }
@@ -264,8 +269,8 @@ export function moveSessionAuthorityFileDurablySync(
   ).toString('base64')
   const result = spawnSync(executable, [...ARGS], {
     encoding: 'utf8',
-    // Add-Type's CodeDOM compiler and PowerShell need a system-only PATH and COMSPEC. Do not pass
-    // unrelated application credentials or user-defined command hooks to the child process.
+    // PowerShell and native interop use only system components. Do not pass unrelated application
+    // credentials or user-defined command hooks to the child process.
     env: {
       SystemRoot: systemRoot,
       WINDIR: systemRoot,
@@ -279,8 +284,8 @@ export function moveSessionAuthorityFileDurablySync(
     },
     input: SCRIPT,
     maxBuffer: 4096,
-    // Add-Type compiles the fixed native MoveFileEx wrapper on each isolated invocation. Keep the
-    // wait bounded; timeout remains indeterminate and carries only a sanitized phase marker.
+    // Define the fixed MoveFileEx wrapper in memory; keep the wait bounded so a hung native call
+    // remains indeterminate and carries only a sanitized phase marker.
     timeout: POWERSHELL_OPERATION_TIMEOUT_MS,
     windowsHide: true,
   })
