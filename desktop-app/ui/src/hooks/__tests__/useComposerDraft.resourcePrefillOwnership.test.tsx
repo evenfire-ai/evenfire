@@ -78,7 +78,7 @@ function SelectedChatHarness() {
 }
 
 describe('tab-owned GFS composer prefill', () => {
-  it('refreshes legacy owner feedback when a same-key tab prefill arrives unchanged', () => {
+  it('keeps a legacy draft independent when a same-key tab prefill arrives unchanged', () => {
     const uri = `gfs://main/${'f'.repeat(32)}`
     setComposerDraft(null, uri, 'agent-a')
     render(<DraftSurface tabId={null} agentRef="agent-a" />)
@@ -91,13 +91,16 @@ describe('tab-owned GFS composer prefill', () => {
       expect(setResourceComposerPrefill('owner-tab', uri, 'agent-a')).toBe(true)
     })
 
-    expect(textarea.disabled).toBe(true)
-    expect(screen.getByRole('alert').textContent).toContain('Another workspace tab owns this draft')
+    expect(textarea.disabled).toBe(false)
     expect(getComposerDraft(null, 'agent-a')).toBe(uri)
+    expect(getComposerDraft(null, 'agent-a', 'owner-tab')).toBe(uri)
+
+    fireEvent.change(textarea, { target: { value: 'legacy edit' } })
+    expect(textarea.value).toBe('legacy edit')
     expect(getComposerDraft(null, 'agent-a', 'owner-tab')).toBe(uri)
   })
 
-  it('keeps a rejected keystroke visible if ownership changes before the write', () => {
+  it('keeps a sibling tab editable while another tab owns a resource prefill', () => {
     render(<DraftSurface tabId="other-tab" agentRef="agent-a" />)
     const uri = `gfs://main/${'e'.repeat(32)}`
     let accepted: { accepted: boolean } | undefined
@@ -107,15 +110,15 @@ describe('tab-owned GFS composer prefill', () => {
       accepted = draftSurfaceHarness.setDraft?.('typed during owner change')
     })
 
-    expect(accepted?.accepted).toBe(false)
+    expect(accepted?.accepted).toBe(true)
     expect(
       (screen.getByRole('textbox', { name: 'other-tab composer' }) as HTMLTextAreaElement).value
     ).toBe('typed during owner change')
     expect(
       (screen.getByRole('textbox', { name: 'other-tab composer' }) as HTMLTextAreaElement).disabled
-    ).toBe(true)
-    expect(screen.getByRole('alert').textContent).toContain('Another workspace tab owns this draft')
+    ).toBe(false)
     expect(getComposerDraft(null, 'agent-a', 'owner-tab')).toBe(uri)
+    expect(getComposerDraft(null, 'agent-a', 'other-tab')).toBe('typed during owner change')
   })
 
   it('does not let another selected chat claim a pending Files resource prefill', async () => {
