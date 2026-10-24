@@ -71,6 +71,7 @@ describe('Windows session-authority native file-operation launcher', () => {
       'WINDIR',
     ])
     expect(options.env.EVENFIRE_SESSION_AUTHORITY_FILE_OPS).toBeTruthy()
+    expect(options.timeout).toBe(30_000)
 
     const request = JSON.parse(
       Buffer.from(options.env.EVENFIRE_SESSION_AUTHORITY_FILE_OPS, 'base64').toString('utf8')

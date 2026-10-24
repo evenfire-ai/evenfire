@@ -2,6 +2,7 @@ import { type SpawnSyncReturns, spawnSync } from 'node:child_process'
 import path from 'node:path'
 
 const REQUEST_ENV = 'EVENFIRE_SESSION_AUTHORITY_FILE_OPS'
+const POWERSHELL_OPERATION_TIMEOUT_MS = 30_000
 const LAUNCHER = '$sourceText = [Console]::In.ReadToEnd(); & ([scriptblock]::Create($sourceText))'
 const ARGS = ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', LAUNCHER] as const
 const SCRIPT = String.raw`
@@ -243,7 +244,10 @@ export function moveSessionAuthorityFileDurablySync(
     },
     input: SCRIPT,
     maxBuffer: 4096,
-    timeout: 10_000,
+    // Add-Type compiles the fixed native MoveFileEx wrapper on each isolated invocation. A
+    // 10-second deadline repeatedly expired on the hosted Windows full-suite run before the
+    // verifier returned structured evidence. Keep the wait bounded; timeout remains indeterminate.
+    timeout: POWERSHELL_OPERATION_TIMEOUT_MS,
     windowsHide: true,
   })
   if (result.error || result.signal || !result.stdout) throw diagnostic(result)
