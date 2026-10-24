@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
+import { useAuthContext } from '@contexts/AuthContext'
 import { useChatComposerStateContext } from '@contexts/ChatComposerStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
@@ -27,6 +28,7 @@ import {
   composerImageBudget,
   composerImageCountedBytes,
 } from '@constants/attachments'
+import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
 import { useClickOutside } from '@hooks/useClickOutside'
@@ -148,6 +150,7 @@ function getComposerFileNotice(file: ComposerFileAttachment): string | null {
 
 export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelProps) {
   const { selectedAgent } = useNavigationContext()
+  const { me } = useAuthContext()
   const {
     composerImageAttachments,
     composerFileAttachments,
@@ -185,6 +188,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     selectedAgent,
   })
   const { sharedFilesByContext, refreshSharedFiles } = useContextsDataController()
+  const agentCatalog = useAgentsDataController()
 
   const [composerAttachmentError, setComposerAttachmentError] = useState<string | null>(null)
   const [composerMenuOpen, setComposerMenuOpen] = useState(false)
@@ -423,8 +427,39 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   // Sending now would leave it out without saying so, so send stays disabled
   // until each chip is ready or removed.
   const filesBlockedForSend = composerFileAttachments.some(file => file.status !== 'ready')
+  const accessCatalog = agentCatalog.accessCatalog
+  const agentCatalogMatchesSession = Boolean(
+    me && accessCatalog && accessCatalog.userId === me.id && accessCatalog.teamId === me.teamId
+  )
+  const selectedAgentCatalogState = !selectedAgent
+    ? 'ready'
+    : agentCatalog.loading || !agentCatalogMatchesSession
+      ? 'checking'
+      : agentCatalog.error
+        ? 'error'
+        : agentCatalog.agentNames.includes(selectedAgent)
+          ? 'available'
+          : 'unavailable'
+  const selectedAgentCatalogMessage =
+    selectedAgentCatalogState === 'checking'
+      ? 'Checking agent access for this team…'
+      : selectedAgentCatalogState === 'error'
+        ? 'Could not verify agent access for this team. Wait for the catalog to load before sending.'
+        : selectedAgentCatalogState === 'unavailable'
+          ? `${selectedAgent} is unavailable in this team. Select an available agent to send.`
+          : null
+  const selectedAgentSendBlocked =
+    selectedAgentCatalogState !== 'ready' && selectedAgentCatalogState !== 'available'
+  const agentCatalogNoticeId = useId()
   const handleSend = useCallback(() => {
-    if (imagesBlockedForSend || filesBlockedForSend || draftOwnerConflictTabId) return
+    if (
+      imagesBlockedForSend ||
+      filesBlockedForSend ||
+      selectedAgentSendBlocked ||
+      draftOwnerConflictTabId
+    ) {
+      return
+    }
     if (workspaceChatTabId) void onSend(draft, workspaceChatTabId)
     else void onSend(draft)
   }, [
@@ -433,6 +468,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     draftOwnerConflictTabId,
     imagesBlockedForSend,
     filesBlockedForSend,
+    selectedAgentSendBlocked,
     workspaceChatTabId,
   ])
 
@@ -1242,6 +1278,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                 agentSending ||
                 imagesBlockedForSend ||
                 filesBlockedForSend ||
+                selectedAgentSendBlocked ||
                 Boolean(draftOwnerConflictTabId) ||
                 (!draft.trim() &&
                   composerImageAttachments.length === 0 &&
@@ -1252,6 +1289,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
               aria-describedby={
                 [
                   imagesBlockedForSend ? imageNoticeId : null,
+                  selectedAgentCatalogMessage ? agentCatalogNoticeId : null,
                   draftOwnerConflictTabId ? draftOwnerConflictId : null,
                 ]
                   .filter(Boolean)
@@ -1286,6 +1324,22 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
               ? (imageAttachmentBlockMessage ??
                 'Image attachments are not available for this model yet.')
               : composerAttachmentError}
+          </p>
+        </div>
+      ) : null}
+      {selectedAgentCatalogMessage ? (
+        <div className="composer-attachments">
+          <p
+            className={
+              selectedAgentCatalogState === 'checking'
+                ? 'composer-attachment-notice'
+                : 'composer-attachment-error'
+            }
+            role={selectedAgentCatalogState === 'checking' ? 'status' : 'alert'}
+            id={agentCatalogNoticeId}
+            data-testid="composer-agent-catalog-notice"
+          >
+            {selectedAgentCatalogMessage}
           </p>
         </div>
       ) : null}

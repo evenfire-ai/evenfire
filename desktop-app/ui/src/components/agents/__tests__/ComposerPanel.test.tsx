@@ -84,8 +84,21 @@ vi.mock('@contexts/McpRuntimeContext', () => ({
   useMcpRuntimeContext: () => ({ hostRuntimeStatus: null, activeLlmProvider: null }),
 }))
 
+vi.mock('@contexts/AuthContext', () => ({
+  useAuthContext: () => ({ me: { id: 'user-1', teamId: 'team-1' } }),
+}))
+
 vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => ({ selectedAgent: 'agent-1' }),
+}))
+
+vi.mock('@hooks/domain/useAgentsDataController', () => ({
+  useAgentsDataController: () => ({
+    accessCatalog: { userId: 'user-1', teamId: 'team-1' },
+    agentNames: ['agent-1'],
+    loading: false,
+    error: null,
+  }),
 }))
 
 vi.mock('@hooks/domain/useContextsDataController', () => ({
