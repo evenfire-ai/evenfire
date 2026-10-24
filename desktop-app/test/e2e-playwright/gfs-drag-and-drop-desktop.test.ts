@@ -334,184 +334,195 @@ test.describe('EvenDrive drag and drop (desktop grid)', () => {
     }
   })
 
-  test('drop onto itself refuses with the self reason and mutates nothing', async () => {
-    const fixtureName = uniqueGfsFixtureName('e2e-gfs-dnd-self')
-    let app: ElectronApplication | undefined
-    try {
-      const dir = await seedFixtureDirectory(fixtureName)
-      await grantFixtureToE2eUser(dir.resourceId)
+  // The refused-drop journeys share ONE launched app: the login admission
+  // policy allows 5 password attempts per identity per rolling 15-minute
+  // window, and a gate run already spends one attempt per success-path
+  // journey plus the setup preflight. Serial tests reuse the session so
+  // the whole gate stays inside the admission budget; login is not what
+  // these journeys verify.
+  test.describe('EvenDrive refused drops (desktop grid)', () => {
+    test.describe.configure({ mode: 'serial' })
+
+    let sharedApp: ElectronApplication | undefined
+    let sharedPage: Page | undefined
+
+    test.beforeAll(async () => {
       const launched = await launchAndLogin()
-      app = launched.app
-      const page = launched.page
-      await openFixtureFolder(page, fixtureName)
-      const childRow = gridRow(page, dir.childName)
-      await childRow.waitFor({ state: 'visible', timeout: 60_000 })
+      sharedApp = launched.app
+      sharedPage = launched.page
+    })
 
-      // Release on the SAME row: the drag hovers its own source.
-      await dragRowOntoRowForRefusal(page, childRow, childRow, 'self')
+    test.afterAll(async () => {
+      await sharedApp?.close().catch(() => undefined)
+    })
 
-      await expect(
-        toast(page, `You dropped ${dir.childName} onto itself. Pick a destination folder.`)
-      ).toBeVisible({ timeout: 30_000 })
-      await expect(
-        toast(page, `You dropped ${dir.childName} onto itself. Pick a destination folder.`)
-      ).toHaveClass(/tone-error/)
-      // Refused: no confirmation dialog, and the child never left its folder.
-      await expect(page.getByRole('dialog')).toHaveCount(0)
-      await expect
-        .poll(
-          () =>
-            countGfsLiveChildrenByName({
-              parentResourceId: dir.resourceId,
-              name: dir.childName,
-            }),
-          { timeout: 30_000, intervals: [250, 1_000] }
+    test('drop onto itself refuses with the self reason and mutates nothing', async () => {
+      const fixtureName = uniqueGfsFixtureName('e2e-gfs-dnd-self')
+      try {
+        const dir = await seedFixtureDirectory(fixtureName)
+        await grantFixtureToE2eUser(dir.resourceId)
+        const page = sharedPage!
+        await openFixtureFolder(page, fixtureName)
+        const childRow = gridRow(page, dir.childName)
+        await childRow.waitFor({ state: 'visible', timeout: 60_000 })
+
+        // Release on the SAME row: the drag hovers its own source.
+        await dragRowOntoRowForRefusal(page, childRow, childRow, 'self')
+
+        await expect(
+          toast(page, `You dropped ${dir.childName} onto itself. Pick a destination folder.`)
+        ).toBeVisible({ timeout: 30_000 })
+        await expect(
+          toast(page, `You dropped ${dir.childName} onto itself. Pick a destination folder.`)
+        ).toHaveClass(/tone-error/)
+        // Refused: no confirmation dialog, and the child never left its folder.
+        await expect(page.getByRole('dialog')).toHaveCount(0)
+        await expect
+          .poll(
+            () =>
+              countGfsLiveChildrenByName({
+                parentResourceId: dir.resourceId,
+                name: dir.childName,
+              }),
+            { timeout: 30_000, intervals: [250, 1_000] }
+          )
+          .toBe(1)
+        await expect(childRow).toBeVisible({ timeout: 30_000 })
+      } finally {
+        await removeFixture(fixtureName)
+      }
+    })
+
+    test('folder drag onto its own parent explains it is already there and mutates nothing', async () => {
+      const fixtureName = uniqueGfsFixtureName('e2e-gfs-dnd-nop')
+      try {
+        const dir = await seedFixtureDirectory(fixtureName)
+        // The fixture folder (destination) AND its child (source) must both be
+        // listed at the shared root, so the child also needs a DIRECT grant —
+        // the shared-with-me listing only shows directly granted resources.
+        await grantFixtureToE2eUser(dir.resourceId)
+        await withTransportRetry('seedGfsGrant', () =>
+          seedGfsGrant({
+            resourceId: dir.childResourceId,
+            subjectType: 'user',
+            subjectId: getE2EUserId(),
+            permissions: ['read'],
+            inherit: false,
+            grantedBy: 'e2e:gfs-drag-and-drop',
+          })
         )
-        .toBe(1)
-      await expect(childRow).toBeVisible({ timeout: 30_000 })
-    } finally {
-      await app?.close().catch(() => undefined)
-      await removeFixture(fixtureName)
-    }
-  })
+        const page = sharedPage!
+        await openFilesSharedRoot(page)
+        const childRow = gridRow(page, dir.childName)
+        const parentRow = gridRow(page, dir.name)
+        await childRow.waitFor({ state: 'visible', timeout: 60_000 })
+        await parentRow.waitFor({ state: 'visible', timeout: 60_000 })
 
-  test('folder drag onto its own parent explains it is already there and mutates nothing', async () => {
-    const fixtureName = uniqueGfsFixtureName('e2e-gfs-dnd-nop')
-    let app: ElectronApplication | undefined
-    try {
-      const dir = await seedFixtureDirectory(fixtureName)
-      // The fixture folder (destination) AND its child (source) must both be
-      // listed at the shared root, so the child also needs a DIRECT grant —
-      // the shared-with-me listing only shows directly granted resources.
-      await grantFixtureToE2eUser(dir.resourceId)
-      await withTransportRetry('seedGfsGrant', () =>
-        seedGfsGrant({
-          resourceId: dir.childResourceId,
-          subjectType: 'user',
-          subjectId: getE2EUserId(),
-          permissions: ['read'],
-          inherit: false,
-          grantedBy: 'e2e:gfs-drag-and-drop',
+        await dragRowOntoRowForRefusal(page, childRow, parentRow, 'same-parent')
+
+        // A4: the no-op is INFO, never error — "already in", not "cannot".
+        await expect(toast(page, `${dir.childName} is already in ${dir.name}.`)).toBeVisible({
+          timeout: 30_000,
         })
-      )
-      const launched = await launchAndLogin()
-      app = launched.app
-      const page = launched.page
-      await openFilesSharedRoot(page)
-      const childRow = gridRow(page, dir.childName)
-      const parentRow = gridRow(page, dir.name)
-      await childRow.waitFor({ state: 'visible', timeout: 60_000 })
-      await parentRow.waitFor({ state: 'visible', timeout: 60_000 })
-
-      await dragRowOntoRowForRefusal(page, childRow, parentRow, 'same-parent')
-
-      // A4: the no-op is INFO, never error — "already in", not "cannot".
-      await expect(toast(page, `${dir.childName} is already in ${dir.name}.`)).toBeVisible({
-        timeout: 30_000,
-      })
-      await expect(toast(page, `${dir.childName} is already in ${dir.name}.`)).toHaveClass(
-        /tone-info/
-      )
-      // Refused: no confirmation dialog, and the child is still exactly where
-      // it was — one live child of the parent, not a moved copy.
-      await expect(page.getByRole('dialog')).toHaveCount(0)
-      await expect
-        .poll(
-          () =>
-            countGfsLiveChildrenByName({
-              parentResourceId: dir.resourceId,
-              name: dir.childName,
-            }),
-          { timeout: 30_000, intervals: [250, 1_000] }
+        await expect(toast(page, `${dir.childName} is already in ${dir.name}.`)).toHaveClass(
+          /tone-info/
         )
-        .toBe(1)
-      await expect(childRow).toBeVisible({ timeout: 30_000 })
-    } finally {
-      await app?.close().catch(() => undefined)
-      await removeFixture(fixtureName)
-    }
-  })
+        // Refused: no confirmation dialog, and the child is still exactly where
+        // it was — one live child of the parent, not a moved copy.
+        await expect(page.getByRole('dialog')).toHaveCount(0)
+        await expect
+          .poll(
+            () =>
+              countGfsLiveChildrenByName({
+                parentResourceId: dir.resourceId,
+                name: dir.childName,
+              }),
+            { timeout: 30_000, intervals: [250, 1_000] }
+          )
+          .toBe(1)
+        await expect(childRow).toBeVisible({ timeout: 30_000 })
+      } finally {
+        await removeFixture(fixtureName)
+      }
+    })
 
-  test('drag without source-parent delete access refuses with the source-delete reason and mutates nothing', async () => {
-    const sourceName = uniqueGfsFixtureName('e2e-gfs-dnd-nodel')
-    const destinationName = uniqueGfsFixtureName('e2e-gfs-dnd-nodel-dst')
-    let app: ElectronApplication | undefined
-    try {
-      const sourceDir = await seedFixtureDirectory(sourceName)
-      const destinationDir = await seedFixtureDirectory(destinationName)
-      // The persona holds read+write on the source's PHYSICAL parent but no
-      // delete: the move out of that folder must be refused (A8). The child
-      // still needs a DIRECT grant to appear at the shared root; the
-      // destination holds full access so only the source side can deny.
-      await withTransportRetry('seedGfsGrant', () =>
-        seedGfsGrant({
-          resourceId: sourceDir.resourceId,
-          subjectType: 'user',
-          subjectId: getE2EUserId(),
-          permissions: ['read', 'write'],
-          inherit: true,
-          grantedBy: 'e2e:gfs-drag-and-drop',
-        })
-      )
-      await withTransportRetry('seedGfsGrant', () =>
-        seedGfsGrant({
-          resourceId: sourceDir.childResourceId,
-          subjectType: 'user',
-          subjectId: getE2EUserId(),
-          permissions: ['read'],
-          inherit: false,
-          grantedBy: 'e2e:gfs-drag-and-drop',
-        })
-      )
-      await grantFixtureToE2eUser(destinationDir.resourceId)
-      const launched = await launchAndLogin()
-      app = launched.app
-      const page = launched.page
-      await openFilesSharedRoot(page)
-      const childRow = gridRow(page, sourceDir.childName)
-      const destinationRow = gridRow(page, destinationDir.name)
-      await childRow.waitFor({ state: 'visible', timeout: 60_000 })
-      await destinationRow.waitFor({ state: 'visible', timeout: 60_000 })
+    test('drag without source-parent delete access refuses with the source-delete reason and mutates nothing', async () => {
+      const sourceName = uniqueGfsFixtureName('e2e-gfs-dnd-nodel')
+      const destinationName = uniqueGfsFixtureName('e2e-gfs-dnd-nodel-dst')
+      try {
+        const sourceDir = await seedFixtureDirectory(sourceName)
+        const destinationDir = await seedFixtureDirectory(destinationName)
+        // The persona holds read+write on the source's PHYSICAL parent but no
+        // delete: the move out of that folder must be refused (A8). The child
+        // still needs a DIRECT grant to appear at the shared root; the
+        // destination holds full access so only the source side can deny.
+        await withTransportRetry('seedGfsGrant', () =>
+          seedGfsGrant({
+            resourceId: sourceDir.resourceId,
+            subjectType: 'user',
+            subjectId: getE2EUserId(),
+            permissions: ['read', 'write'],
+            inherit: true,
+            grantedBy: 'e2e:gfs-drag-and-drop',
+          })
+        )
+        await withTransportRetry('seedGfsGrant', () =>
+          seedGfsGrant({
+            resourceId: sourceDir.childResourceId,
+            subjectType: 'user',
+            subjectId: getE2EUserId(),
+            permissions: ['read'],
+            inherit: false,
+            grantedBy: 'e2e:gfs-drag-and-drop',
+          })
+        )
+        await grantFixtureToE2eUser(destinationDir.resourceId)
+        const page = sharedPage!
+        await openFilesSharedRoot(page)
+        const childRow = gridRow(page, sourceDir.childName)
+        const destinationRow = gridRow(page, destinationDir.name)
+        await childRow.waitFor({ state: 'visible', timeout: 60_000 })
+        await destinationRow.waitFor({ state: 'visible', timeout: 60_000 })
 
-      await dragRowOntoRowForRefusal(page, childRow, destinationRow, 'source-delete')
+        await dragRowOntoRowForRefusal(page, childRow, destinationRow, 'source-delete')
 
-      await expect(
-        toast(
-          page,
-          `You can’t move ${sourceDir.childName} out of its current folder because you don’t have delete access to the folder that contains it.`
-        )
-      ).toBeVisible({ timeout: 30_000 })
-      await expect(
-        toast(
-          page,
-          `You can’t move ${sourceDir.childName} out of its current folder because you don’t have delete access to the folder that contains it.`
-        )
-      ).toHaveClass(/tone-error/)
-      // Refused: no confirmation dialog, and BOTH persisted locations are
-      // unchanged — the child is still a live child of its old parent and
-      // never appeared under the destination.
-      await expect(page.getByRole('dialog')).toHaveCount(0)
-      await expect
-        .poll(
-          () =>
-            countGfsLiveChildrenByName({
-              parentResourceId: sourceDir.resourceId,
-              name: sourceDir.childName,
-            }),
-          { timeout: 30_000, intervals: [250, 1_000] }
-        )
-        .toBe(1)
-      expect(
-        countGfsLiveChildrenByName({
-          parentResourceId: destinationDir.resourceId,
-          name: sourceDir.childName,
-        })
-      ).toBe(0)
-      await expect(childRow).toBeVisible({ timeout: 30_000 })
-    } finally {
-      await app?.close().catch(() => undefined)
-      await removeFixture(sourceName)
-      await removeFixture(destinationName)
-    }
+        await expect(
+          toast(
+            page,
+            `You can’t move ${sourceDir.childName} out of its current folder because you don’t have delete access to the folder that contains it.`
+          )
+        ).toBeVisible({ timeout: 30_000 })
+        await expect(
+          toast(
+            page,
+            `You can’t move ${sourceDir.childName} out of its current folder because you don’t have delete access to the folder that contains it.`
+          )
+        ).toHaveClass(/tone-error/)
+        // Refused: no confirmation dialog, and BOTH persisted locations are
+        // unchanged — the child is still a live child of its old parent and
+        // never appeared under the destination.
+        await expect(page.getByRole('dialog')).toHaveCount(0)
+        await expect
+          .poll(
+            () =>
+              countGfsLiveChildrenByName({
+                parentResourceId: sourceDir.resourceId,
+                name: sourceDir.childName,
+              }),
+            { timeout: 30_000, intervals: [250, 1_000] }
+          )
+          .toBe(1)
+        expect(
+          countGfsLiveChildrenByName({
+            parentResourceId: destinationDir.resourceId,
+            name: sourceDir.childName,
+          })
+        ).toBe(0)
+        await expect(childRow).toBeVisible({ timeout: 30_000 })
+      } finally {
+        await removeFixture(sourceName)
+        await removeFixture(destinationName)
+      }
+    })
   })
 })
