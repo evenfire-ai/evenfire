@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import type { QueryKey } from '@tanstack/react-query'
 import { normalizeGfsResourceName } from '@clerum/gfs-interaction-policy'
 import { Button, IconButton, TextInput } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
@@ -187,32 +188,40 @@ export function useFilePreviewResourceActions({
   const sharePermissionError = affordancesQuery.error
     ? describeGfsReadError(affordancesQuery.error).message
     : null
+  const retryPermissionCheck = async (
+    queryKey: QueryKey,
+    refetch: () => Promise<{ isError: boolean; error: unknown }>
+  ) => {
+    try {
+      assertGfsAuthorityRetryAllowed(queryClient, queryKey)
+      const result = await refetch()
+      if (result.isError) throw result.error
+    } catch (error) {
+      pushToast?.(describeGfsReadError(error).message, 'error')
+    }
+  }
   const permissionNotices = [
     affordancesQuery.isFetching && affordancesQuery.data
       ? {
           id: 'resource-permissions',
           message: 'Checking file permissions…',
           pending: true,
-          retry: () => {
-            assertGfsAuthorityRetryAllowed(
-              queryClient,
-              desktopQueryKeys.gfsAffordances(sessionScope, resourceId || gfsUri, drive)
-            )
-            return affordancesQuery.refetch()
-          },
+          retry: () =>
+            retryPermissionCheck(
+              desktopQueryKeys.gfsAffordances(sessionScope, resourceId || gfsUri, drive),
+              () => affordancesQuery.refetch()
+            ),
         }
       : affordancesQuery.error
         ? {
             id: 'resource-permissions',
             message: `Could not verify file permissions: ${describeGfsReadError(affordancesQuery.error).message}`,
             pending: false,
-            retry: () => {
-              assertGfsAuthorityRetryAllowed(
-                queryClient,
-                desktopQueryKeys.gfsAffordances(sessionScope, resourceId || gfsUri, drive)
-              )
-              return affordancesQuery.refetch()
-            },
+            retry: () =>
+              retryPermissionCheck(
+                desktopQueryKeys.gfsAffordances(sessionScope, resourceId || gfsUri, drive),
+                () => affordancesQuery.refetch()
+              ),
           }
         : null,
     sourceParentId
@@ -221,26 +230,22 @@ export function useFilePreviewResourceActions({
             id: 'move-source-permissions',
             message: 'Checking move permissions…',
             pending: true,
-            retry: () => {
-              assertGfsAuthorityRetryAllowed(
-                queryClient,
-                desktopQueryKeys.gfsAffordances(sessionScope, sourceParentId, drive)
-              )
-              return sourceParentAffordancesQuery.refetch()
-            },
+            retry: () =>
+              retryPermissionCheck(
+                desktopQueryKeys.gfsAffordances(sessionScope, sourceParentId, drive),
+                () => sourceParentAffordancesQuery.refetch()
+              ),
           }
         : sourceParentAffordancesQuery.error
           ? {
               id: 'move-source-permissions',
               message: `Could not verify move permissions: ${describeGfsReadError(sourceParentAffordancesQuery.error).message}`,
               pending: false,
-              retry: () => {
-                assertGfsAuthorityRetryAllowed(
-                  queryClient,
-                  desktopQueryKeys.gfsAffordances(sessionScope, sourceParentId, drive)
-                )
-                return sourceParentAffordancesQuery.refetch()
-              },
+              retry: () =>
+                retryPermissionCheck(
+                  desktopQueryKeys.gfsAffordances(sessionScope, sourceParentId, drive),
+                  () => sourceParentAffordancesQuery.refetch()
+                ),
             }
           : null
       : null,

@@ -171,6 +171,31 @@ describe('FilePreviewPage move permission contract', () => {
     expect(screen.queryByRole('button', { name: 'Retry permission check' })).toBeNull()
   })
 
+  it('reports a Retry-After pause when Preview permission retry is not yet allowed', async () => {
+    const limited = new Error(
+      "Error invoking remote method 'gfs:affordances': 429 Too Many Requests " +
+        'httpStatus=429 retryAfterSeconds=7'
+    )
+    const source = vi.fn(async () => {
+      throw limited
+    })
+    const { affordances } = installGfs({ source })
+    installController()
+    const pushToast = vi.fn()
+    renderPreview(pushToast)
+
+    await screen.findByAltText('Preview of diagram.png')
+    const notice = await screen.findByText(/Could not verify move permissions/)
+    expect(notice).toBeTruthy()
+    expect(affordances).toHaveBeenCalledWith(parentId, 'main')
+    fireEvent.click(screen.getByRole('button', { name: 'Retry permission check' }))
+
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith('Too many file requests — try again in 7s.', 'error')
+    )
+    expect(affordances).toHaveBeenCalledTimes(2)
+  })
+
   it('hides Move until the source parent has server-derived write and delete bits', async () => {
     const { affordances } = installGfs({ source: async () => readOnly })
     installController()
