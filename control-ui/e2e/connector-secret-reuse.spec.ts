@@ -98,17 +98,20 @@ function reassignedConnector(name: string, atIso: string) {
     },
   }
 }
-
 type RecordedRequest = { method: string; pathname: string; body?: unknown }
 
 type Mocks = {
   /** Every admin API request the browser actually made. */
   requests: RecordedRequest[]
-  /** Non-GET requests against /admin/mcp-secrets — must stay empty in
-   *  every reference-only journey. */
+  /** Every non-GET request whose path is the Secret collection or anything
+   *  under it (mcp-secrets and mcp-secrets/:name), recorded before any
+   *  per-endpoint handling — so a named PUT/DELETE can never bypass the
+   *  no-mutation assertions. */
   secretWrites: RecordedRequest[]
   /** GET /admin/mcp-secrets fails this many times before succeeding. */
   listSecretsFailures: number
+  /** The catalog GET /admin/mcp-secrets answers with. */
+  secretsItems: Array<{ name: string; uid: string; keys: string[] }>
   /** Supplies GET /admin/mcp-servers/:name responses in order; the last
    *  supplier repeats once the queue is exhausted. */
   serverReads: Array<() => unknown>
@@ -119,13 +122,14 @@ function mocks(initialServer: () => unknown): Mocks {
     requests: [],
     secretWrites: [],
     listSecretsFailures: 0,
+    secretsItems: [LEGACY_SECRET, SHARED_SECRET, PARTIAL_SECRET],
     serverReads: [initialServer],
   }
 }
 
 /** Installs the browser-level Control API replacement. Only metadata ever
  *  crosses: names, key names, UIDs, and spec references — no values. */
-function installApiMocks(page: Page, state: Mocks, serverName: string) {
+async function installApiMocks(page: Page, state: Mocks, serverName: string) {
   async function handle(route: Route) {
     const request = route.request()
     const url = new URL(request.url())
@@ -144,6 +148,16 @@ function installApiMocks(page: Page, state: Mocks, serverName: string) {
     const marker = '/api/v1/admin/'
     const index = pathname.indexOf(marker)
     const adminPath = index === -1 ? '' : pathname.slice(index + marker.length)
+
+    // Write capture comes FIRST, before any endpoint dispatch: the collection
+    // AND every named child (mcp-secrets/:name) must be recorded so the
+    // reference-only journeys can prove no Secret was created, updated, or
+    // deleted under any path shape.
+    if (adminPath === 'mcp-secrets' || adminPath.startsWith('mcp-secrets/')) {
+      if (method !== 'GET') {
+        state.secretWrites.push({ method, pathname, body })
+      }
+    }
 
     const json = (status: number, payload: unknown) =>
       route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(payload) })
@@ -175,12 +189,11 @@ function installApiMocks(page: Page, state: Mocks, serverName: string) {
           await json(500, { message: 'simulated listing outage' })
           return
         }
-        await json(200, { items: [LEGACY_SECRET, SHARED_SECRET, PARTIAL_SECRET] })
+        await json(200, { items: state.secretsItems })
         return
       }
-      // Record any Secret mutation so reference-only journeys can prove none
-      // happened; answer 201 so a bug does not cascade before the assertion.
-      state.secretWrites.push({ method, pathname, body })
+      // Answer 201 so a bug does not cascade before the assertion; the
+      // capture above has already recorded it.
       await json(201, { name: body?.name ?? 'unexpected', namespace: 'mcp-server' })
       return
     }
@@ -203,13 +216,13 @@ function installApiMocks(page: Page, state: Mocks, serverName: string) {
     await json(404, {})
   }
 
-  void page.route('**/api/v1/admin/**', route => void handle(route))
+  await page.route('**/api/v1/admin/**', route => void handle(route))
 }
 
 /** Authenticates AuthGate through the same localStorage contract the other
  *  mocked specs use, before any page script runs. */
-function authenticate(page: Page) {
-  void page.addInitScript(() => {
+async function authenticate(page: Page) {
+  await page.addInitScript(() => {
     window.localStorage.setItem('controlUiAdminToken', 'e2e-mock-only-token')
   })
 }
@@ -263,9 +276,9 @@ test.describe('Connector Secret reuse — creation', () => {
   test('creates a connector from an existing Secret without value re-entry or Secret writes', async ({
     page,
   }) => {
-    authenticate(page)
+    await authenticate(page)
     const state = mocks(() => connectorResource('brave-search', undefined))
-    installApiMocks(page, state, 'brave-search')
+    await installApiMocks(page, state, 'brave-search')
 
     await createConnectorUsingSharedSecret(page, 'brave-search')
     await page.screenshot({
@@ -296,9 +309,9 @@ test.describe('Connector Secret reuse — creation', () => {
   test('reuses one Secret across multiple connectors without Secret POST/PUT/DELETE', async ({
     page,
   }) => {
-    authenticate(page)
+    await authenticate(page)
     const state = mocks(() => connectorResource('brave-search', undefined))
-    installApiMocks(page, state, 'brave-search')
+    await installApiMocks(page, state, 'brave-search')
 
     await createConnectorUsingSharedSecret(page, 'brave-search')
     await createConnectorUsingSharedSecret(page, 'jira-bridge')
@@ -317,13 +330,13 @@ test.describe('Connector Secret reuse — creation', () => {
     expect(state.secretWrites).toEqual([])
   })
 
-  test('surfaces listing failures with retry and an empty catalog without value prompts', async ({
+  test('surfaces listing failures with retry and recovers without value prompts', async ({
     page,
   }) => {
-    authenticate(page)
+    await authenticate(page)
     const state = mocks(() => connectorResource('brave-search', undefined))
     state.listSecretsFailures = 1
-    installApiMocks(page, state, 'brave-search')
+    await installApiMocks(page, state, 'brave-search')
 
     await page.goto('/connectors/new')
     await page.getByPlaceholder('my-mcp-server').fill('brave-search')
@@ -344,14 +357,38 @@ test.describe('Connector Secret reuse — creation', () => {
     await page.getByLabel(/^Existing Secret/).selectOption(SHARED_SECRET.name)
     await expect(page.getByLabel(/^Environment variable 1/)).toHaveValue('API_KEY')
   })
+
+  test('an empty Secret catalog disables creation and never asks for values', async ({ page }) => {
+    await authenticate(page)
+    const state = mocks(() => connectorResource('brave-search', undefined))
+    state.secretsItems = []
+    await installApiMocks(page, state, 'brave-search')
+
+    await page.goto('/connectors/new')
+    await page.getByPlaceholder('my-mcp-server').fill('brave-search')
+    await page
+      .getByPlaceholder('us-central1-docker.pkg.dev/my-project/repo/mcp-server:latest')
+      .fill('ghcr.io/example/brave-mcp:1.0')
+    await page.getByRole('button', { name: 'Continue' }).click()
+    await page.getByRole('button', { name: 'Continue' }).click()
+    await page.getByRole('radio', { name: 'Use an existing Secret' }).click()
+
+    // A genuinely empty listing: the picker enables, but there is nothing to
+    // choose, creation stays blocked, and no credential value is ever asked.
+    await expect(page.getByText(/No connector Secrets are available/)).toBeVisible()
+    await expect(page.getByLabel(/^Existing Secret/)).toBeEnabled()
+    await expect(page.getByRole('button', { name: 'Create connector' })).toBeDisabled()
+    await expect(page.locator('input[type="password"]')).toHaveCount(0)
+    expect(state.secretWrites).toEqual([])
+  })
 })
 
 test.describe('Connector Secret reuse — change assigned Secret', () => {
-  function prepare(page: Page, serverReads: Array<() => unknown>) {
-    authenticate(page)
+  async function prepare(page: Page, serverReads: Array<() => unknown>) {
+    await authenticate(page)
     const state = mocks(serverReads[0]!)
     state.serverReads = serverReads
-    installApiMocks(page, state, 'linear')
+    await installApiMocks(page, state, 'linear')
     return state
   }
 
@@ -370,7 +407,7 @@ test.describe('Connector Secret reuse — change assigned Secret', () => {
     // Reads: page mount, the change flow's two verification reads, then the
     // post-save poll sees the freshly Ready reassigned connector.
     const current = () => connectorResource('linear', LINEAR_REFERENCE)
-    const state = prepare(page, [
+    const state = await prepare(page, [
       current,
       current,
       current,
@@ -432,7 +469,7 @@ test.describe('Connector Secret reuse — change assigned Secret', () => {
       const saved = reassignedConnector('linear', new Date().toISOString())
       return { ...saved, status: { conditions: [] } }
     }
-    const state = prepare(page, [stale, stale, stale, savedNotReady])
+    const state = await prepare(page, [stale, stale, stale, savedNotReady])
 
     await openChangeFlow(page)
     await page.getByLabel(/^Existing Secret/).selectOption(SHARED_SECRET.name)
@@ -458,7 +495,7 @@ test.describe('Connector Secret reuse — change assigned Secret', () => {
     const current = () => connectorResource('linear', LINEAR_REFERENCE)
     const concurrentlyEdited = () =>
       connectorResource('linear', LINEAR_REFERENCE, { image: 'ghcr.io/example/linear-mcp:1.5.0' })
-    const state = prepare(page, [current, current, concurrentlyEdited])
+    const state = await prepare(page, [current, current, concurrentlyEdited])
 
     await openChangeFlow(page)
     await page.getByLabel(/^Existing Secret/).selectOption(SHARED_SECRET.name)
@@ -476,7 +513,7 @@ test.describe('Connector Secret reuse — change assigned Secret', () => {
     page,
   }) => {
     const current = () => connectorResource('linear', LINEAR_REFERENCE)
-    const state = prepare(page, [current])
+    const state = await prepare(page, [current])
 
     await openChangeFlow(page)
 
@@ -503,9 +540,53 @@ test.describe('Connector Secret reuse — change assigned Secret', () => {
     expect(state.secretWrites).toEqual([])
   })
 
+  test('an empty Secret catalog keeps reassignment disabled without value prompts', async ({
+    page,
+  }) => {
+    const current = () => connectorResource('linear', LINEAR_REFERENCE)
+    const state = await prepare(page, [current])
+    state.secretsItems = []
+
+    await openChangeFlow(page)
+    await expect(page.getByText(/No connector Secrets are available/)).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Assign and restart' })).toBeDisabled()
+    await expect(page.locator('input[type="password"]')).toHaveCount(0)
+    expect(state.secretWrites).toEqual([])
+  })
+
+  test('control: the write capture detects named Secret PUT and DELETE', async ({ page }) => {
+    const current = () => connectorResource('linear', LINEAR_REFERENCE)
+    const state = await prepare(page, [current])
+
+    await page.goto('/connectors/linear/edit/credentials')
+    await expect(page.getByRole('button', { name: 'Rotate credentials' })).toBeVisible()
+
+    // In-page fetches traverse page.route, so these deliberately issued
+    // named-child writes prove the capture itself — not the fallback 404 —
+    // detects mcp-secrets/:name PUT and DELETE, including a value-bearing
+    // body. This is the negative/control half of the no-mutation contract;
+    // the journeys above prove the flows never trigger it.
+    await page.evaluate(async () => {
+      await fetch('/control-api/api/v1/admin/mcp-secrets/team-shared-credentials', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 'api-key': 'control-only-fake-value' }),
+      })
+      await fetch('/control-api/api/v1/admin/mcp-secrets/team-shared-credentials', {
+        method: 'DELETE',
+      })
+    })
+
+    expect(state.secretWrites.map(write => `${write.method} ${write.pathname}`)).toEqual([
+      'PUT /control-api/api/v1/admin/mcp-secrets/team-shared-credentials',
+      'DELETE /control-api/api/v1/admin/mcp-secrets/team-shared-credentials',
+    ])
+    expect(state.secretWrites[0]?.body).toEqual({ 'api-key': 'control-only-fake-value' })
+  })
+
   test('recovers from a Secret listing outage inside the change flow', async ({ page }) => {
     const current = () => connectorResource('linear', LINEAR_REFERENCE)
-    const state = prepare(page, [current])
+    const state = await prepare(page, [current])
     state.listSecretsFailures = 1
 
     await page.goto('/connectors/linear/edit/credentials')
@@ -526,10 +607,10 @@ test.describe('Connector Secret reuse — narrow viewport', () => {
   test('reuse and reassignment stay usable at 390px without horizontal overflow', async ({
     page,
   }) => {
-    authenticate(page)
+    await authenticate(page)
     const current = () => connectorResource('linear', LINEAR_REFERENCE)
     const state = mocks(current)
-    installApiMocks(page, state, 'linear')
+    await installApiMocks(page, state, 'linear')
 
     await page.goto('/connectors/linear/edit/credentials')
     await page.getByRole('button', { name: 'Change assigned Secret' }).click()
