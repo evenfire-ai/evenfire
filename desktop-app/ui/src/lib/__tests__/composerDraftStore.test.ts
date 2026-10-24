@@ -86,7 +86,7 @@ describe('composerDraftStore', () => {
     expect(getComposerDraft(null, 'agent-a', 'tab-a')).toBe('')
   })
 
-  it('keeps tabless writes from replacing another tab resource draft', () => {
+  it('keeps a tabless legacy write independent from another tab resource draft', () => {
     fc.assert(
       fc.property(
         fc.string({ minLength: 1 }),
@@ -97,12 +97,13 @@ describe('composerDraftStore', () => {
           const resourceUri = `gfs://main/${'a'.repeat(32)}`
           expect(setResourceComposerPrefill(ownerTabId, resourceUri, 'agent-a')).toBe(true)
 
-          // A caller without a workspace identity cannot read the tab-owned
-          // resource draft; it must not be allowed to overwrite or clear it.
+          // A caller without a workspace identity reads and writes only the
+          // separate legacy slot; it cannot access the tab-owned prefill.
           expect(getComposerDraft(null, 'agent-a')).toBe('')
           const accepted = setComposerDraft(null, replacement, 'agent-a')
+          expect(accepted).toBe(true)
+          expect(getComposerDraft(null, 'agent-a')).toBe(replacement)
           expect(getComposerDraft(null, 'agent-a', ownerTabId)).toBe(resourceUri)
-          expect(accepted).toBe(false)
         }
       )
     )
@@ -141,17 +142,18 @@ describe('composerDraftStore', () => {
     expect(getComposerDraft(null, 'agent-a', 'pending-owner')).toBe(`gfs://main/${'c'.repeat(32)}`)
   })
 
-  it('rejects a workspace write and clear from a foreign owner of the same key', () => {
+  it('allows a second workspace tab to edit an independent same-agent draft', () => {
     const resourceUri = `gfs://main/${'d'.repeat(32)}`
     expect(setResourceComposerPrefill('owner-tab', resourceUri, 'agent-a')).toBe(true)
 
-    expect(setComposerDraft(null, 'foreign text', 'agent-a', 'other-tab')).toBe(false)
-    expect(clearComposerDraft(null, 'agent-a', 'other-tab')).toBe(false)
+    expect(setComposerDraft(null, 'tab B text', 'agent-a', 'other-tab')).toBe(true)
+    expect(getComposerDraft(null, 'agent-a', 'other-tab')).toBe('tab B text')
+    expect(clearComposerDraft(null, 'agent-a', 'other-tab')).toBe(true)
     expect(getComposerDraft(null, 'agent-a', 'owner-tab')).toBe(resourceUri)
     expect(getComposerDraft(null, 'agent-a', 'other-tab')).toBe('')
   })
 
-  it('keeps tabless clears from deleting another tab resource draft', () => {
+  it('keeps tabless clears confined to the legacy slot', () => {
     fc.assert(
       fc.property(fc.string({ minLength: 1 }), ownerSuffix => {
         resetComposerDraftStore()
@@ -160,8 +162,8 @@ describe('composerDraftStore', () => {
         expect(setResourceComposerPrefill(ownerTabId, resourceUri, 'agent-a')).toBe(true)
 
         const cleared = clearComposerDraft(null, 'agent-a')
+        expect(cleared).toBe(true)
         expect(getComposerDraft(null, 'agent-a', ownerTabId)).toBe(resourceUri)
-        expect(cleared).toBe(false)
       })
     )
   })
@@ -181,7 +183,7 @@ describe('composerDraftStore', () => {
     expect(getComposerDraft(null, undefined, 'tab-pending')).toBe('')
   })
 
-  it('preserves exact owners through generated write, clear, and release sequences', () => {
+  it('preserves independent slots through generated write, clear, and release sequences', () => {
     const commandArbitrary = fc.record({
       actor: fc.constantFrom('tab-a' as const, 'tab-b' as const, 'legacy' as const),
       action: fc.constantFrom('write' as const, 'clear' as const, 'release' as const),
@@ -193,8 +195,6 @@ describe('composerDraftStore', () => {
         resetComposerDraftStore()
         const key = 'agent-a'
         let legacyValue = 'legacy baseline'
-        let globalValue = legacyValue
-        let resourceOwner: 'tab-a' | 'tab-b' | null = null
         const tabDrafts = new Map<'tab-a' | 'tab-b', string>()
 
         expect(setComposerDraft(null, legacyValue, key)).toBe(true)
@@ -206,72 +206,30 @@ describe('composerDraftStore', () => {
         for (const command of commands) {
           if (command.actor === 'legacy') {
             if (command.action === 'release') continue
-            const hasOwner = resourceOwner !== null || tabDrafts.size > 0
             const accepted =
               command.action === 'write'
                 ? setComposerDraft(null, command.value, key)
                 : clearComposerDraft(null, key)
-            expect(accepted).toBe(!hasOwner)
-            if (!hasOwner) {
-              legacyValue = command.action === 'write' ? command.value : ''
-              globalValue = legacyValue
-            }
+            expect(accepted).toBe(true)
+            legacyValue = command.action === 'write' ? command.value : ''
           } else if (command.action === 'release') {
             releaseComposerDraftForWorkspaceTab(command.actor)
             tabDrafts.delete(command.actor)
-            if (resourceOwner === command.actor) {
-              resourceOwner = null
-              globalValue = ''
-            }
           } else if (command.action === 'write') {
-            const ownsSlot = tabDrafts.has(command.actor)
-            const hasForeignOwner =
-              (resourceOwner !== null && resourceOwner !== command.actor) ||
-              [...tabDrafts.keys()].some(tabId => tabId !== command.actor)
             const accepted = setComposerDraft(null, command.value, key, command.actor)
-            expect(accepted).toBe(ownsSlot || !hasForeignOwner)
-            if (accepted) {
-              if (ownsSlot) {
-                if (command.value) tabDrafts.set(command.actor, command.value)
-                else tabDrafts.delete(command.actor)
-              } else if (resourceOwner === command.actor) {
-                globalValue = command.value
-                if (!command.value) resourceOwner = null
-              } else if (legacyValue) {
-                if (command.value) tabDrafts.set(command.actor, command.value)
-              } else if (command.value) {
-                resourceOwner = command.actor
-                globalValue = command.value
-              }
-            }
+            expect(accepted).toBe(true)
+            if (command.value) tabDrafts.set(command.actor, command.value)
+            else tabDrafts.delete(command.actor)
           } else {
-            const ownsSlot = tabDrafts.has(command.actor)
-            const ownsResource = resourceOwner === command.actor
-            const hasForeignOwner =
-              (resourceOwner !== null && !ownsResource) ||
-              [...tabDrafts.keys()].some(tabId => tabId !== command.actor)
             const accepted = clearComposerDraft(null, key, command.actor)
-            expect(accepted).toBe(
-              ownsSlot || ownsResource || (!hasForeignOwner && legacyValue === '')
-            )
-            if (accepted) {
-              if (ownsSlot) tabDrafts.delete(command.actor)
-              if (ownsResource) {
-                resourceOwner = null
-                globalValue = ''
-              }
-            }
+            expect(accepted).toBe(true)
+            tabDrafts.delete(command.actor)
           }
 
-          expect(getComposerDraft(null, key, 'tab-a')).toBe(
-            tabDrafts.get('tab-a') ?? (resourceOwner === 'tab-a' ? globalValue : '')
-          )
-          expect(getComposerDraft(null, key, 'tab-b')).toBe(
-            tabDrafts.get('tab-b') ?? (resourceOwner === 'tab-b' ? globalValue : '')
-          )
-          expect(getComposerDraft(null, key)).toBe(resourceOwner ? '' : globalValue)
-          const expectedOwner = resourceOwner ?? tabDrafts.keys().next().value ?? null
-          expect(getComposerDraftOwnerConflict(null, key)).toBe(expectedOwner)
+          expect(getComposerDraft(null, key, 'tab-a')).toBe(tabDrafts.get('tab-a') ?? '')
+          expect(getComposerDraft(null, key, 'tab-b')).toBe(tabDrafts.get('tab-b') ?? '')
+          expect(getComposerDraft(null, key)).toBe(legacyValue)
+          expect(getComposerDraftOwnerConflict(null, key)).toBeNull()
         }
       })
     )
