@@ -142,7 +142,7 @@ export interface GfsBrowserAffordances {
 }
 
 export interface GfsRowPermissionStatus {
-  status: 'checking' | 'error' | 'ready'
+  status: 'checking' | 'stale' | 'error' | 'ready'
   message: string | null
 }
 
@@ -872,6 +872,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       // the exact resource authority before opening a permission-dependent
       // action, and mutations remain server-authorized.
       if (!query?.data) return
+      const status = query.isError ? parseHttpStatus(toMessage(query.error)) : null
+      if (status === 403 || status === 404) return
       const data = query.data
       if (data) byResourceId[item.resourceId] = data as GfsBrowserAffordances
     })
@@ -956,7 +958,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
           message: toPresentedMessage(query.error),
         } as const
       }
-      if (!query?.data || query.isStale) return { status: 'checking', message: null } as const
+      if (!query?.data) return { status: 'checking', message: null } as const
+      if (query.isStale) return { status: 'stale', message: null } as const
       return { status: 'ready', message: null } as const
     }
     items.forEach((item, index) => {

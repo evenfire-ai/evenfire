@@ -154,6 +154,9 @@ describe('FilesPage stale permission action oracle', () => {
     vi.setSystemTime(Date.now() + 16_000)
     rerender(<FilesPage pendingGfsUri={FOLDER_URI} />)
     expect(reportPermissionReads).toBe(1)
+    expect(screen.getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
+    expect(screen.getByText('Permissions will be checked when you use an action.')).toBeTruthy()
+    expect(screen.queryByText('Checking permissions for report.txt…')).toBeNull()
     act(() => {
       focusManager.setFocused(false)
       focusManager.setFocused(true)
@@ -179,6 +182,65 @@ describe('FilesPage stale permission action oracle', () => {
     expect(screen.getByRole('form', { name: 'Rename resource' })).toBeTruthy()
     expect(renameResource).not.toHaveBeenCalled()
     expect(reportPermissionReads).toBe(2)
+    client.clear()
+  })
+
+  it('removes stale row actions after the exact resource is no longer found', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const folder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', { gfsUri: FOLDER_URI })
+    )
+    const report = childView('child-report', 'report.txt', 'file', {
+      parentResourceId: 'folder-active',
+    })
+    const children = await listChildrenPage([report])
+    let reportPermissionReads = 0
+    const renameResource = vi.fn(async () => undefined)
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId !== 'child-report') {
+        return delegationAffordances(new Set(['read']), false)
+      }
+      reportPermissionReads += 1
+      if (reportPermissionReads > 1) {
+        throw new Error('404 Not Found: resource unavailable httpStatus=404')
+      }
+      return delegationAffordances(new Set(['read', 'write']), false)
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => folder),
+          listChildren: vi.fn(async () => children),
+          affordances,
+          renameResource,
+        },
+      },
+    })
+
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const { rerender } = render(<FilesPage pendingGfsUri={FOLDER_URI} />, {
+      wrapper: wrapper(client),
+    })
+    await screen.findByText('report.txt')
+    await waitFor(() => expect(reportPermissionReads).toBe(1))
+    vi.setSystemTime(Date.now() + 16_000)
+    rerender(<FilesPage pendingGfsUri={FOLDER_URI} />)
+    expect(reportPermissionReads).toBe(1)
+    expect(screen.getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Rename report.txt' }))
+    const renameForm = screen.getByRole('form', { name: 'Rename resource' })
+    fireEvent.change(screen.getByRole('textbox', { name: 'New name' }), {
+      target: { value: 'renamed.txt' },
+    })
+    fireEvent.click(within(renameForm).getByRole('button', { name: 'Save name' }))
+
+    await waitFor(() => expect(reportPermissionReads).toBe(2))
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Rename report.txt' })).toBeNull()
+    )
+    expect(renameResource).not.toHaveBeenCalled()
     client.clear()
   })
 
