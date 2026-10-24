@@ -2441,7 +2441,8 @@ export function App() {
           return
         }
         if (pending.link.teamId && pending.link.teamId !== currentTeamId) {
-          if (originApp) {
+          const embedSnapshot = embed.getSnapshot()
+          if (originApp || embedSnapshot.owner !== null || embedSnapshot.views.size > 0) {
             const handoff = await handOffEmbedBeforeTeamSwitch()
             if (!vm.isNavigationIntentCurrent(navigationIntentSequence)) {
               await acknowledgeSandboxUiDeepLink(pending.link.id)
