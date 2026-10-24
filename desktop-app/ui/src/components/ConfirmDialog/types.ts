@@ -5,7 +5,7 @@ export type ConfirmDialogProps = {
   cancelLabel?: string
   confirmLabel?: string
   onCancel: () => void
-  onConfirm: () => void
+  onConfirm: () => void | Promise<unknown>
   title: string
   tone?: 'danger' | 'primary'
 }

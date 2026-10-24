@@ -11,13 +11,16 @@ import {
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
+  accessibleResource,
   childView,
+  listAccessiblePage,
   listChildrenPage,
   resolveDeniedMessage,
   resolveResource,
   resolvedDirectory,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { shouldRevalidateGfsQuery } from '@/lib/gfsEntityChangeState'
+import { delegationAffordances } from '../../../../../src/gfs/delegation.js'
 import { desktopQueryKeys } from '../queryKeys'
 import { useGfsBrowserController } from '../useGfsBrowserController'
 
@@ -126,6 +129,9 @@ function Probe() {
       <div data-testid="loading-accessible">{ctrl.loadingAccessible ? 'loading' : 'idle'}</div>
       <div data-testid="background-refresh-outcome">{backgroundRefreshOutcome}</div>
       <div data-testid="row-affordances">{ctrl.rowAffordances?.held.join(',') ?? 'none'}</div>
+      <div data-testid="move-source-parent">
+        {ctrl.moveSourceParentAffordancesById?.['source-parent']?.held.join(',') ?? 'none'}
+      </div>
       <div data-testid="held-permissions">{ctrl.affordances?.held.join(',') ?? 'none'}</div>
       {ctrl.items.map(item => (
         <div key={item.resourceId} data-testid={`row-affordances-${item.resourceId}`}>
@@ -133,9 +139,17 @@ function Probe() {
         </div>
       ))}
       {ctrl.accessibleResources.map(resource => (
-        <button key={resource.resourceId} type="button" onClick={() => ctrl.openResource(resource)}>
-          open {resource.name}
-        </button>
+        <span key={resource.resourceId}>
+          <button type="button" onClick={() => ctrl.openResource(resource)}>
+            open {resource.name}
+          </button>
+          <button
+            type="button"
+            onClick={() => ctrl.setMoveSourceParentResourceId(resource.parentResourceId)}
+          >
+            load move source for {resource.name}
+          </button>
+        </span>
       ))}
       {ctrl.crumbs.map((crumb, index) => (
         <button key={crumb.resourceId} type="button" onClick={() => ctrl.goToCrumb(index)}>
@@ -294,6 +308,41 @@ function ProductionHarness({ children }: { children: ReactNode }) {
 }
 
 describe('useGfsBrowserController', () => {
+  it('resolves move authority from a shared-root row’s exact source parent', async () => {
+    const accessiblePage = await listAccessiblePage([
+      accessibleResource('shared-file', 'report.txt', 'file', {
+        parentResourceId: 'source-parent',
+        permissions: ['read'],
+      }),
+    ])
+    const affordances = vi.fn(async (resourceId: string) =>
+      delegationAffordances(
+        new Set(resourceId === 'source-parent' ? ['write', 'delete'] : ['read']),
+        false
+      )
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => accessiblePage),
+          affordances,
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: ProductionHarness })
+
+    await waitFor(() => expect(screen.getByTestId('accessible-count').textContent).toBe('1'))
+    await act(async () =>
+      screen.getByRole('button', { name: 'load move source for report.txt' }).click()
+    )
+    await waitFor(() =>
+      expect(screen.getByTestId('move-source-parent').textContent).toBe('write,delete')
+    )
+    expect(affordances).toHaveBeenCalledWith('source-parent', 'main')
+  })
+
   it('keeps loaded pages and avoids per-row reads during a scope revalidation', async () => {
     const root = await resolveResource(
       resolvedDirectory('root', 'Root', { gfsUri: 'gfs://main/root' })
@@ -953,7 +1002,7 @@ describe('useGfsBrowserController', () => {
     expect(listChildren).toHaveBeenCalledTimes(1)
     first.unmount()
 
-    vi.setSystemTime(mountedAt + 17_000)
+    vi.setSystemTime(mountedAt + 7_000)
     const second = render(<Probe />, { wrapper })
     await enterWorkspace()
     await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2))
@@ -971,10 +1020,10 @@ describe('useGfsBrowserController', () => {
     expect(rowCalls()).toBe(3)
     second.unmount()
 
-    // Past the 60s bound the bits are stale, so a permission change made
+    // Past the 15s bound the bits are stale, so a permission change made
     // outside this page is still picked up — the bound is a delay, not a
     // suppression.
-    vi.setSystemTime(mountedAt + 70_000)
+    vi.setSystemTime(mountedAt + 17_000)
     render(<Probe />, { wrapper })
     await enterWorkspace()
     await waitFor(() => expect(rowCalls()).toBe(6))

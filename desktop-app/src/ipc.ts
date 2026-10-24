@@ -1,5 +1,6 @@
 import {
   BrowserWindow,
+  IpcMainEvent,
   IpcMainInvokeEvent,
   Notification,
   app,
@@ -321,7 +322,7 @@ function parseHostMessageRequest(raw: unknown): HostMessageRequest {
   return parsed
 }
 
-export function assertTrustedSender(event: IpcMainInvokeEvent): void {
+export function assertTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): void {
   const senderUrl = String(event.senderFrame?.url || '')
   const devUrl = String(process.env.EVENFIRE_RENDERER_URL || '').trim()
   const isFileSender = senderUrl.startsWith('file://')
@@ -371,7 +372,7 @@ function sanitizeDesktopNotificationActions(
     .slice(0, 3)
 }
 
-export function registerIpcHandlers(service: AppService): void {
+export function registerIpcHandlers(service: AppService, logout: () => Promise<number>): void {
   const streamOwnerCleanupRegistered = new Set<number>()
   const entityChangeOwnerCleanupRegistered = new Set<number>()
   const activeDesktopNotifications = new Map<string, Notification>()
@@ -550,7 +551,7 @@ export function registerIpcHandlers(service: AppService): void {
   })
   ipcMain.handle('auth:logout', async event => {
     assertTrustedSender(event)
-    const sessionGeneration = await service.logout()
+    const sessionGeneration = await logout()
     return { ok: true, sessionGeneration }
   })
 
@@ -628,6 +629,12 @@ export function registerIpcHandlers(service: AppService): void {
   ipcMain.handle('gfs:resolve', async (event, payload: { uri: string }) => {
     assertTrustedSender(event)
     return service.resolveGfsUri(sanitizeString(payload?.uri))
+  })
+  ipcMain.handle('gfs:copyDeepLink', async (event, payload: { uri: string }) => {
+    assertTrustedSender(event)
+    const result = await service.createGfsResourceDeepLink(sanitizeString(payload?.uri))
+    clipboard.writeText(result.url)
+    return result
   })
   ipcMain.handle(
     'gfs:download',

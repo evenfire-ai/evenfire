@@ -21,6 +21,7 @@ import type { DesktopEnvironmentSwitchConfirmation, SetStatusFn } from './types'
 interface UseAuthControllerParams {
   setStatus: SetStatusFn
   onSessionNeedsLoad: (options?: { preserveNav?: boolean }) => Promise<void>
+  onSessionEnded: () => void
   logoutForEnvironmentMismatch: () => Promise<number | null>
 }
 
@@ -61,6 +62,7 @@ function getDesktopSetupErrorMessage(error: unknown) {
 export function useAuthController({
   setStatus,
   onSessionNeedsLoad,
+  onSessionEnded,
   logoutForEnvironmentMismatch,
 }: UseAuthControllerParams) {
   const [booting, setBootingState] = useState(true)
@@ -217,12 +219,13 @@ export function useAuthController({
 
   useEffect(() => {
     return window.clerum.auth.onExternalLogout(() => {
+      onSessionEnded()
       setIsAuthenticated(false)
       setMe(null)
       setPassword('')
       setStatus('Signed out after password update.', 'info')
     })
-  }, [setStatus])
+  }, [onSessionEnded, setStatus])
 
   const handlePasswordLogin = async () => {
     try {

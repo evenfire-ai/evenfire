@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   onDesktopEnvironmentSetup: vi.fn(),
   onDesktopSetupToken: vi.fn(),
   onExternalLogout: vi.fn(),
+  onSessionEnded: vi.fn(),
   saveRuntimeConfig: vi.fn(),
   selectRuntimeConfig: vi.fn(),
   selectRuntimeConfigForHandoff: vi.fn(),
@@ -72,6 +73,7 @@ function Probe() {
   const auth = useAuthController({
     setStatus: mocks.setStatus,
     onSessionNeedsLoad: mocks.loadSession,
+    onSessionEnded: mocks.onSessionEnded,
     logoutForEnvironmentMismatch: mocks.logoutForEnvironmentMismatch,
   })
   setBootingForTest = auth.setBooting

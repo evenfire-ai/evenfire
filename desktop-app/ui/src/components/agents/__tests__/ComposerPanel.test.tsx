@@ -13,6 +13,7 @@ import {
   GROK_COMPOSER_MAX_IMAGE_BYTES,
 } from '@constants/attachments'
 import type { HostModelsResult } from '@hooks/useChatStore'
+import type { ComposerDraftWriteResult } from '@hooks/useComposerDraft'
 import { readComposerFile } from '@lib/composerFileAdmission'
 import {
   type ImageInputDecision,
@@ -42,12 +43,17 @@ const composerState: ChatComposerStateContextValue = {
   agentError: null,
   failedAgentSend: null,
   activeChatId: null,
+  workspaceChatTabId: null,
   activeMessageCount: 0,
   composerFocusRequestId: 0,
   requestComposerFocus: vi.fn(),
 }
 
-const draftState = { value: '', set: vi.fn() }
+const draftState = {
+  value: '',
+  ownerConflictTabId: null as string | null,
+  set: vi.fn<(value: string) => ComposerDraftWriteResult>(() => ({ accepted: true })),
+}
 
 /** Stable action spies so guard tests can assert what did (not) reach the controller. */
 const actionsMock = {
@@ -78,8 +84,21 @@ vi.mock('@contexts/McpRuntimeContext', () => ({
   useMcpRuntimeContext: () => ({ hostRuntimeStatus: null, activeLlmProvider: null }),
 }))
 
+vi.mock('@contexts/AuthContext', () => ({
+  useAuthContext: () => ({ me: { id: 'user-1', teamId: 'team-1' } }),
+}))
+
 vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => ({ selectedAgent: 'agent-1' }),
+}))
+
+vi.mock('@hooks/domain/useAgentsDataController', () => ({
+  useAgentsDataController: () => ({
+    accessCatalog: { userId: 'user-1', teamId: 'team-1' },
+    agentNames: ['agent-1'],
+    loading: false,
+    error: null,
+  }),
 }))
 
 vi.mock('@hooks/domain/useContextsDataController', () => ({
@@ -95,7 +114,7 @@ vi.mock('@hooks/domain/useMcpServersDataController', () => ({
 }))
 
 vi.mock('@hooks/useComposerDraft', () => ({
-  useComposerDraft: () => [draftState.value, draftState.set],
+  useComposerDraft: () => [draftState.value, draftState.set, draftState.ownerConflictTabId],
 }))
 
 /**
@@ -183,6 +202,7 @@ afterEach(() => {
   globalFilesMock.showComposerItem = false
   globalFilesMock.modalProps = undefined
   draftState.value = ''
+  draftState.ownerConflictTabId = null
   draftState.set.mockReset()
   Object.assign(composerState, {
     composerImageAttachments: [],
@@ -193,6 +213,7 @@ afterEach(() => {
     agentError: null,
     failedAgentSend: null,
     activeChatId: null,
+    workspaceChatTabId: null,
     activeMessageCount: 0,
     composerFocusRequestId: 0,
   })
@@ -254,6 +275,49 @@ describe.each([
     rerender(<ComposerPanel inline={inline} />)
     expect(textarea.style.height).toBe(inline ? '48px' : '56px')
     expect(textarea.style.overflowY).toBe('hidden')
+  })
+
+  it('disables a composer owned by another workspace tab and explains the conflict', () => {
+    draftState.ownerConflictTabId = 'workspace-owner-tab'
+    render(<ComposerPanel inline={inline} />)
+
+    const textarea = screen.getByTestId('chat-input') as HTMLTextAreaElement
+    expect(textarea.disabled).toBe(true)
+    expect(textarea.getAttribute('aria-describedby')).toBeTruthy()
+    const conflict = screen.getByRole('alert')
+    expect(conflict.textContent).toContain('Another workspace tab owns this draft')
+    const sendButton = screen.getByTestId('send-button') as HTMLButtonElement
+    expect(sendButton.disabled).toBe(true)
+    expect(sendButton.getAttribute('aria-describedby')).toContain(conflict.id)
+  })
+
+  it('keeps a failed send when a raced draft write is rejected', () => {
+    composerState.agentError = 'Sending failed'
+    composerState.failedAgentSend = {
+      content: 'failed payload',
+      attachments: [],
+      files: [],
+      references: [],
+      message: 'Retry is available',
+      kind: 'upstream',
+      timestamp: 1,
+      agentRef: 'agent-1',
+      chatId: 'chat-1',
+    }
+    draftState.set.mockReturnValue({
+      accepted: false,
+      reason: 'owned-by-another-tab',
+      ownerTabId: 'owner-tab',
+    })
+    render(<ComposerPanel inline />)
+    actionsMock.clearComposerSendError.mockClear()
+
+    fireEvent.change(screen.getByTestId('chat-input'), { target: { value: 'raced keystroke' } })
+
+    expect(draftState.set).toHaveBeenCalledWith('raced keystroke')
+    expect(actionsMock.clearComposerSendError).not.toHaveBeenCalled()
+    expect(screen.getByText('Sending failed')).toBeTruthy()
+    expect(screen.getByText('Retry is available')).toBeTruthy()
   })
 
   it('keeps context and model popovers outside the clipped text viewport', () => {
@@ -375,10 +439,12 @@ describe('ComposerPanel reference submenu portaling', () => {
 
   it('keeps the menu mounted through a mousedown on a portaled submenu item so its click fires', async () => {
     // A clickable plugin so the submenu holds a real menuitem, not an empty state.
-    window.clerum.workflows.list = vi.fn(async (): Promise<WorkflowRecipeListResult> => ({
-      items: [{ metadata: { namespace: 'ns', name: 'plug-a' } }],
-      count: 1,
-    }))
+    window.clerum.workflows.list = vi.fn(
+      async (): Promise<WorkflowRecipeListResult> => ({
+        items: [{ metadata: { namespace: 'ns', name: 'plug-a' } }],
+        count: 1,
+      })
+    )
     render(<ComposerPanel inline={false} />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
@@ -1205,6 +1271,19 @@ describe('ComposerPanel with a pending image after a model switch', () => {
     expect(actionsMock.handleSendAgentMessage).toHaveBeenCalledTimes(2)
   })
 
+  it('sends the exact workspace chat-tab owner with its draft', () => {
+    composerState.workspaceChatTabId = 'chat-owner-a'
+    draftState.value = 'gfs://main/0123456789abcdef0123456789abcdef'
+    render(<ComposerPanel inline />)
+
+    fireEvent.click(screen.getByTestId('send-button'))
+
+    expect(actionsMock.handleSendAgentMessage).toHaveBeenCalledWith(
+      'gfs://main/0123456789abcdef0123456789abcdef',
+      'chat-owner-a'
+    )
+  })
+
   it('renders the pending image chip and dispatches removal with its id', () => {
     render(<ComposerPanel inline />)
 
@@ -1294,6 +1373,7 @@ describe('ComposerPanel failed-send recovery actions', () => {
   it('offers explicit recovery and dispatch and routes each action to the controller', () => {
     composerState.failedAgentSend = failedSend
     composerState.agentError = 'Sending failed'
+    composerState.workspaceChatTabId = 'owner-tab'
     render(<ComposerPanel inline />)
 
     expect(screen.getByText('Sending failed')).toBeTruthy()
@@ -1301,6 +1381,7 @@ describe('ComposerPanel failed-send recovery actions', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Recover input' }))
     expect(actionsMock.handleRecoverFailedAgentSend).toHaveBeenCalledTimes(1)
+    expect(actionsMock.handleRecoverFailedAgentSend).toHaveBeenCalledWith('owner-tab')
     expect(actionsMock.handleDiscardFailedAgentSend).not.toHaveBeenCalled()
 
     fireEvent.click(screen.getByRole('button', { name: 'Discard failed input' }))

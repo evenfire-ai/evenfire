@@ -76,7 +76,8 @@ export interface ResolvedGfsResource {
 }
 
 type GfsEnvelope<T> =
-  { ok: true; data: T } | { ok: false; error: { code: string; message: string } }
+  | { ok: true; data: T }
+  | { ok: false; error: { code: string; message: string } }
 
 /** Inject the API transport so the client is testable without a real backend. */
 export interface GfsTransport {

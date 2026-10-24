@@ -4,6 +4,7 @@ import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
   DesktopRuntimeConfigHandoffSelection,
   EntityChangeStreamEvent,
+  GfsResourceDeepLinkEnvelope,
   HostMessageRequest,
   ProfileSettingsOpenOptions,
   SandboxUiDeepLinkEnvelope,
@@ -176,6 +177,18 @@ const clerum = Object.freeze({
     switch: (teamId: string) => ipcRenderer.invoke('team:switch', { teamId }),
   },
   gfs: {
+    getUserNavigationGeneration: () => ipcRenderer.sendSync('gfs:getUserNavigationGeneration'),
+    advanceUserNavigationGeneration: () =>
+      ipcRenderer.sendSync('gfs:advanceUserNavigationGeneration'),
+    listPendingDeepLinks: () => ipcRenderer.invoke('gfs:listPendingDeepLinks'),
+    clearPendingDeepLinks: () => ipcRenderer.invoke('gfs:clearPendingDeepLinks'),
+    acknowledgeDeepLink: (id: number) => ipcRenderer.invoke('gfs:acknowledgeDeepLink', { id }),
+    onDeepLink: (callback: (link: GfsResourceDeepLinkEnvelope) => void) => {
+      const listener = (_event: unknown, payload: GfsResourceDeepLinkEnvelope) => callback(payload)
+      ipcRenderer.on('gfs:deepLink', listener)
+      return () => ipcRenderer.off('gfs:deepLink', listener)
+    },
+    copyDeepLink: (uri: string) => ipcRenderer.invoke('gfs:copyDeepLink', { uri }),
     resolve: (uri: string) => ipcRenderer.invoke('gfs:resolve', { uri }),
     download: (uri: string, options?: { maxBytes?: number; signal?: AbortSignal }) =>
       cancellableGfsInvoke('gfs:download', { uri, maxBytes: options?.maxBytes }, options?.signal),

@@ -275,8 +275,12 @@ function MessageAttachmentList({ attachments }: { attachments: ChatMessageAttach
 export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: ChatThreadProps) {
   const { selectedAgent, handleSelectChatAgent: onStartNewChat } = useNavigationContext()
   const { decideApproval, pushToast } = useNotificationsContext()
-  const { composerImageAttachments, composerReferenceAttachments, requestComposerFocus } =
-    useChatComposerStateContext()
+  const {
+    composerImageAttachments,
+    composerReferenceAttachments,
+    requestComposerFocus,
+    workspaceChatTabId,
+  } = useChatComposerStateContext()
   const {
     activeMessages,
     groupedMessages,
@@ -531,7 +535,7 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
     (source: Pick<RenderableChatMessage, 'content' | 'attachments'>) => {
       if (!activeChatId) return
       if (
-        getComposerDraft(activeChatId) ||
+        getComposerDraft(activeChatId, undefined, workspaceChatTabId) ||
         composerImageAttachments.length ||
         composerReferenceAttachments.length
       ) {
@@ -539,7 +543,13 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
         return
       }
       const draft = buildComposerResendDraft(source)
-      setComposerDraft(activeChatId, draft.content)
+      if (!setComposerDraft(activeChatId, draft.content, undefined, workspaceChatTabId)) {
+        pushToast(
+          'This composer no longer owns the draft. Select its chat tab and try again.',
+          'error'
+        )
+        return
+      }
       if (draft.imageAttachments.length) {
         onAddComposerImageAttachments(draft.imageAttachments)
       }
@@ -559,6 +569,7 @@ export function ChatThread({ showAgentLabel = false, onScrollPositionChange }: C
       activeChatId,
       composerImageAttachments,
       composerReferenceAttachments,
+      workspaceChatTabId,
       onAddComposerImageAttachments,
       onAddComposerReferenceAttachments,
       pushToast,

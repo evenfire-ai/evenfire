@@ -26,6 +26,25 @@ import {
   screenshotAndLog,
 } from './qa-recorder-helpers'
 
+async function findRowWithMenuAction(page: Page, actionLabel: string) {
+  await expect(page.getByText('Loading files…', { exact: true })).toBeHidden({ timeout: 20_000 })
+  const rows = page.locator('.da-gfs-drive__grid .da-grid__row')
+  const rowCount = await rows.count()
+  for (let index = 0; index < rowCount; index += 1) {
+    const row = rows.nth(index)
+    const trigger = row.getByRole('button', { name: /^Options for / })
+    if ((await trigger.count()) === 0) continue
+    await trigger.click()
+    const menu = page.getByRole('menu')
+    await expect(menu).toBeVisible()
+    const action = menu.getByRole('menuitem', { name: actionLabel, exact: true })
+    const found = (await action.count()) > 0
+    await page.keyboard.press('Escape')
+    if (found) return row
+  }
+  return null
+}
+
 test('optional QA recorder: Desktop shared files browser journey', async ({}, testInfo) => {
   await assertAllowedTarget('EXTERNAL_REST_API_BASE_URL', EXTERNAL_REST_API_BASE_URL)
   await assertAllowedTarget('RPC_PROXY_BASE_URL', RPC_PROXY_BASE_URL)
@@ -59,36 +78,37 @@ test('optional QA recorder: Desktop shared files browser journey', async ({}, te
       timeout: 20_000,
     })
 
-    // The "Open EvenDrive link" affordance lives in the card header and is always
-    // present — a stable proof that the browse/open affordances rendered.
-    await expect(
-      page.getByRole('button', { name: 'Open EvenDrive link', exact: true })
-    ).toBeVisible({
-      timeout: 20_000,
-    })
+    // Shared-with-me has titlebar actions; Copy link is intentionally disabled
+    // because the virtual root does not have a shareable resource URL.
+    const titlebar = page.getByRole('toolbar', { name: 'EvenDrive actions' })
+    await expect(titlebar).toBeVisible({ timeout: 20_000 })
+    await expect(titlebar.getByRole('button', { name: 'Refresh', exact: true })).toBeVisible()
+    await expect(titlebar.getByRole('button', { name: 'Copy link', exact: true })).toBeDisabled()
+    await expect(titlebar.getByRole('button', { name: 'Open link', exact: true })).toBeVisible()
 
-    // Download affordance: when a file row is present it exposes a Download
-    // button. We only assert its presence — we never click it, because the
-    // native save dialog is not reliably drivable in the recorder.
-    const fileRow = page
-      .locator('.da-gfs-drive__grid .da-grid__row')
-      .filter({ has: page.locator('.da-gfs-drive__type', { hasText: 'File' }) })
-      .first()
-    if (await fileRow.isVisible().catch(() => false)) {
-      await expect(fileRow.getByRole('button', { name: /Download / })).toBeVisible({
-        timeout: 20_000,
-      })
+    // Download is in the file's action menu; verify the menu action without
+    // clicking it because the native save dialog is not reliably drivable.
+    const fileRow = await findRowWithMenuAction(page, 'Download')
+    if (fileRow) {
+      const fileName = (await fileRow.locator('.da-gfs-list__name button').textContent())?.trim()
+      if (fileName) {
+        await fileRow.getByRole('button', { name: `Options for ${fileName}` }).click()
+        await expect(page.getByRole('menuitem', { name: 'Download', exact: true })).toBeVisible({
+          timeout: 20_000,
+        })
+        await page.keyboard.press('Escape')
+      }
     }
 
     await screenshotAndLog(page, testInfo, 'desktop-shared-files-root')
 
     // (2) If a directory row is present, open it and assert no crash.
-    const folderRow = page
-      .locator('.da-gfs-drive__grid .da-grid__row')
-      .filter({ has: page.locator('.da-gfs-drive__type', { hasText: 'Folder' }) })
-      .first()
-    if (await folderRow.isVisible().catch(() => false)) {
+    const folderRow = await findRowWithMenuAction(page, 'Open folder')
+    if (folderRow) {
       await folderRow.locator('.da-gfs-list__name button').first().click()
+      await expect(page.getByText('Loading files…', { exact: true })).toBeHidden({
+        timeout: 20_000,
+      })
 
       // After navigation the card either loads, lists the folder contents, or
       // reports the folder is empty. The shell itself stays mounted (no crash).
@@ -100,6 +120,10 @@ test('optional QA recorder: Desktop shared files browser journey', async ({}, te
       })
       await expect(filesHeading).toBeVisible({ timeout: 20_000 })
       await expect(browserCard).toBeVisible({ timeout: 20_000 })
+      await expect(titlebar).toBeVisible({ timeout: 20_000 })
+      await expect(titlebar.getByRole('button', { name: 'Refresh', exact: true })).toBeVisible()
+      await expect(titlebar.getByRole('button', { name: 'Copy link', exact: true })).toBeEnabled()
+      await expect(titlebar.getByRole('button', { name: 'Open link', exact: true })).toBeVisible()
       await screenshotAndLog(page, testInfo, 'desktop-shared-files-inside')
 
       // (3) Navigate back via the breadcrumb root ("Shared with me") and assert

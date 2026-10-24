@@ -2349,7 +2349,8 @@ export class AppService {
       return ++this.sessionGeneration
     })
     let setupRequest:
-      ReturnType<MemberRegistrationServiceClient['completeDesktopSetup']> | undefined
+      | ReturnType<MemberRegistrationServiceClient['completeDesktopSetup']>
+      | undefined
     await this.withNativeAuthEnvironmentCommit(async () => {
       this.assertSessionGeneration(setupGeneration)
       setupRequest = this.memberRegistrationServiceClient.completeDesktopSetup(
@@ -6166,6 +6167,16 @@ export class AppService {
         teamId: String(teamId || '').trim() || undefined,
       }),
     }
+  }
+
+  async createGfsResourceDeepLink(uri: string): Promise<{ url: string }> {
+    const { buildGfsResourceWebLink, normalizeGfsResourceUri } = await import('./gfsDeepLinks.js')
+    const canonicalUri = normalizeGfsResourceUri(uri)
+    if (!canonicalUri) throw new Error('Cannot create a deep link for this resource')
+    const profileUiBaseUrl = await this.resolveProfileUiBaseUrl(undefined, {
+      fallbackOnLookupError: false,
+    })
+    return { url: buildGfsResourceWebLink(profileUiBaseUrl, canonicalUri) }
   }
 
   async setSandboxUiBounds(bounds: import('./sandboxUiDriver.js').SandboxUiBounds): Promise<void> {

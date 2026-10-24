@@ -4,6 +4,8 @@ const SANDBOX_UI_DEEP_LINK_HOST = 'app'
 const SANDBOX_UI_DEEP_LINK_PROTOCOL = 'evenfire:'
 const CLERUM_OAUTH_PROTOCOL = 'clerum:'
 const SANDBOX_UI_WEB_LINK_PATH = '/open/apps'
+const GFS_RESOURCE_DEEP_LINK_HOST = 'files'
+const GFS_RESOURCE_WEB_LINK_PATH = '/open/files'
 const MAX_APP_SEGMENT_LENGTH = 253
 const MAX_APP_ROUTE_LENGTH = 4096
 const MAX_TEAM_ID_LENGTH = 255
@@ -201,14 +203,115 @@ function sandboxUiDeepLinkTargetsEqual(left, right) {
   )
 }
 
+function normalizeGfsResourceUri(rawUri) {
+  if (typeof rawUri !== 'string' || rawUri.length > 1024) return null
+  const match =
+    /^gfs:\/\/([A-Za-z0-9](?:[A-Za-z0-9._-]{0,251}[A-Za-z0-9])?)\/([0-9a-f]{32})$/i.exec(rawUri)
+  if (!match) return null
+  const drive = match[1]
+  const rid = match[2]
+  if (!drive || !rid) return null
+  return `gfs://${drive}/${rid.toLowerCase()}`
+}
+
+function buildGfsResourceDeepLink(uri) {
+  const canonicalUri = normalizeGfsResourceUri(uri)
+  if (!canonicalUri) throw new Error('Cannot create a deep link for this resource')
+  const url = new URL(`evenfire://${GFS_RESOURCE_DEEP_LINK_HOST}`)
+  url.searchParams.set('uri', canonicalUri)
+  return url.toString()
+}
+
+function buildGfsResourceWebLink(profileUiBaseUrl, uri) {
+  const canonicalUri = normalizeGfsResourceUri(uri)
+  if (!canonicalUri) throw new Error('Cannot create a deep link for this resource')
+  let baseUrl
+  try {
+    baseUrl = new URL(profileUiBaseUrl)
+  } catch {
+    throw new Error('Cannot create a shareable link for this desktop environment')
+  }
+  if (!['http:', 'https:'].includes(baseUrl.protocol) || baseUrl.username || baseUrl.password) {
+    throw new Error('Cannot create a shareable link for this desktop environment')
+  }
+  if (baseUrl.pathname !== '/' || baseUrl.search || baseUrl.hash) {
+    throw new Error('Cannot create a shareable link for this desktop environment')
+  }
+  baseUrl.pathname = GFS_RESOURCE_WEB_LINK_PATH
+  baseUrl.searchParams.set('uri', canonicalUri)
+  return baseUrl.toString()
+}
+
+function parseGfsResourceDeepLink(rawUrl) {
+  let parsed
+  try {
+    parsed = new URL(rawUrl)
+  } catch {
+    return null
+  }
+  if (
+    parsed.protocol !== SANDBOX_UI_DEEP_LINK_PROTOCOL ||
+    parsed.hostname.toLowerCase() !== GFS_RESOURCE_DEEP_LINK_HOST ||
+    parsed.port ||
+    parsed.username ||
+    parsed.password ||
+    parsed.pathname !== '' ||
+    parsed.hash ||
+    [...parsed.searchParams.keys()].some(key => key !== 'uri') ||
+    parsed.searchParams.getAll('uri').length !== 1
+  ) {
+    return null
+  }
+  const uri = normalizeGfsResourceUri(parsed.searchParams.get('uri'))
+  return uri ? { uri } : null
+}
+
+function parseGfsResourceLink(rawLink) {
+  if (typeof rawLink !== 'string' || rawLink.length > 4096) return null
+  const value = rawLink.trim()
+  const uri = normalizeGfsResourceUri(value)
+  if (uri) return { uri }
+
+  const desktopTarget = parseGfsResourceDeepLink(value)
+  if (desktopTarget) return desktopTarget
+
+  let parsed
+  try {
+    parsed = new URL(value)
+  } catch {
+    return null
+  }
+  if (
+    !['http:', 'https:'].includes(parsed.protocol) ||
+    parsed.username ||
+    parsed.password ||
+    parsed.pathname !== GFS_RESOURCE_WEB_LINK_PATH ||
+    parsed.hash ||
+    [...parsed.searchParams.keys()].some(key => key !== 'uri') ||
+    parsed.searchParams.getAll('uri').length !== 1
+  ) {
+    return null
+  }
+
+  const webUri = normalizeGfsResourceUri(parsed.searchParams.get('uri'))
+  return webUri ? { uri: webUri } : null
+}
+
 module.exports = {
   CLERUM_OAUTH_PROTOCOL,
+  GFS_RESOURCE_DEEP_LINK_HOST,
+  GFS_RESOURCE_WEB_LINK_PATH,
   SANDBOX_UI_DEEP_LINK_HOST,
   SANDBOX_UI_DEEP_LINK_PROTOCOL,
   SANDBOX_UI_WEB_LINK_PATH,
   buildSandboxUiDeepLink,
   buildSandboxUiWebLink,
+  buildGfsResourceDeepLink,
+  buildGfsResourceWebLink,
   normalizeSandboxUiRoute,
+  normalizeGfsResourceUri,
+  parseGfsResourceDeepLink,
+  parseGfsResourceLink,
   parseSandboxUiDeepLink,
   sandboxUiDeepLinkTargetsEqual,
 }

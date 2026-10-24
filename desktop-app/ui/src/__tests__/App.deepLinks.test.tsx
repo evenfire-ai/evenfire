@@ -1,23 +1,47 @@
 // @vitest-environment jsdom
-import { type ReactNode, useEffect, useLayoutEffect, useReducer } from 'react'
+import { type ReactNode, createElement, useEffect, useLayoutEffect, useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, render, waitFor } from '@testing-library/react'
+import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { act, cleanup, render, waitFor } from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '@clerum/desktop-app-links'
+import type { WorkspaceTabStripProps } from '@components/WorkspaceTabStrip/types'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
+import {
+  getComposerDraft,
+  resetComposerDraftStore,
+  setComposerDraft,
+} from '@lib/composerDraftStore'
 import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
 import {
+  type GfsResourceNavigationRequest,
+  assignGfsResourceNavigationOwner,
+  canCompleteGfsResourceNavigation,
+  isGfsResourceNavigationOwnerPresent,
+} from '@lib/gfsResourceNavigationIntent'
+import {
   activeWorkspaceTab,
+  createFilesTab,
   createWorkspaceTabsState,
   newChatTab,
   openChatTab,
   openFilesTab,
+  openPreviewTab,
   openSettingsTab,
+  selectWorkspaceTab,
+  setAppTabSavedRoutePath,
 } from '@lib/workspaceTabs'
 import { mapKindToRoute, settingsSectionForRoute } from '@lib/workspaceTabsRoute'
+import type { FilesPageProps } from '@pages/FilesPage.types'
 import { App } from '@/App'
-import type { SandboxUiDeepLinkEnvelope } from '@/App.types'
+import type { GfsResourceDeepLinkEnvelope, SandboxUiDeepLinkEnvelope } from '@/App.types'
 import type { DesktopCommandId } from '../../../src/desktopCommands'
+import { GfsResourceDeepLinkQueue } from '../../../src/gfsResourceDeepLinkQueue'
+import { SandboxUiDeepLinkQueue } from '../../../src/sandboxUiDeepLinkQueue'
+import { buildSandboxUiDeepLink, parseSandboxUiDeepLink } from '../../../src/sandboxUiDeepLinks'
+import { installAppControllerClerum } from '../hooks/domain/__tests__/__fixtures__/appControllerHarness'
 import { type SandboxUiMainFake, createSandboxUiMainFake } from './__fixtures__/sandboxUiMainFake'
 
 // The sandbox-ui main fake runs the real main process; these are the
@@ -123,10 +147,27 @@ const sidebarHarness = vi.hoisted(() => ({
 const sandboxUiPageHarness = vi.hoisted(() => ({
   props: null as null | {
     embed: EmbedOwnershipMachine
+    activeAppRef?: string | null
     headerShellOverlayOpen?: boolean
     deepLinkShellOverlayOpen?: boolean
     localSearchRequestId?: number
   },
+}))
+const filesPageHarness = vi.hoisted(() => ({
+  props: null as null | FilesPageProps,
+  renderActual: false,
+}))
+const commonHarness = vi.hoisted(() => ({
+  renderActualToastStack: false,
+  renderWorkspaceSurfaces: false,
+  draftProbe: {
+    chatId: null as string | null,
+    agentRef: null as string | null,
+    tabId: null as string | null,
+  },
+}))
+const workspaceTabStripHarness = vi.hoisted(() => ({
+  props: null as null | WorkspaceTabStripProps,
 }))
 const SLOT_BOUNDS = { x: 16, y: 12, width: 400, height: 300, dpr: 1 }
 
@@ -157,10 +198,37 @@ vi.mock('@components/CommandPalette', () => ({
   },
 }))
 vi.mock('@components/BootSplash', () => ({ BootSplash: () => null }))
-vi.mock('@components/Common', () => ({
-  Button: () => null,
-  IconButton: () => null,
-  ToastStack: () => null,
+vi.mock('@components/Common', async () => {
+  const actual = await vi.importActual<typeof import('@components/Common')>('@components/Common')
+  return {
+    ...actual,
+    Button: () => null,
+    IconButton: () => null,
+    ToastStack: (props: Parameters<typeof actual.ToastStack>[0]) =>
+      commonHarness.renderActualToastStack ? createElement(actual.ToastStack, props) : null,
+  }
+})
+vi.mock('@components/WorkspaceTabStrip', () => ({
+  WorkspaceTabStrip: (props: WorkspaceTabStripProps) => {
+    workspaceTabStripHarness.props = props
+    if (!commonHarness.renderWorkspaceSurfaces) return null
+    return createElement(
+      'div',
+      { role: 'toolbar', 'aria-label': 'Workspace tabs' },
+      props.tabs.map(tab =>
+        createElement(
+          'button',
+          {
+            'aria-pressed': tab.id === props.activeTabId,
+            'data-workspace-tab-id': tab.id,
+            key: tab.id,
+            type: 'button',
+          },
+          tab.title
+        )
+      )
+    )
+  },
 }))
 vi.mock('@components/ConfirmDialog', () => ({
   ConfirmDialog: (props: {
@@ -187,9 +255,36 @@ vi.mock('@components/SidebarNav', () => ({
   },
 }))
 vi.mock('@pages/AgentsPage', () => ({ AgentsPage: () => null }))
-vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
-vi.mock('@pages/ChatPage', () => ({ ChatPage: () => null }))
-vi.mock('@pages/FilesPage', () => ({ FilesPage: () => null }))
+vi.mock('@pages/AuthPage', () => ({
+  AuthPage: () => (commonHarness.renderWorkspaceSurfaces ? <div data-testid="auth-page" /> : null),
+}))
+vi.mock('@pages/ChatPage', async () => {
+  const { getComposerDraft } =
+    await vi.importActual<typeof import('@lib/composerDraftStore')>('@lib/composerDraftStore')
+  return {
+    ChatPage: () => {
+      if (!commonHarness.renderWorkspaceSurfaces) return null
+      const { chatId, agentRef, tabId } = commonHarness.draftProbe
+      const draft = chatId ? getComposerDraft(chatId, agentRef ?? undefined, tabId) : ''
+      return (
+        <div data-testid="chat-page-pane">
+          <textarea aria-label="Draft in App pane" readOnly value={draft} />
+        </div>
+      )
+    },
+  }
+})
+vi.mock('@pages/FilesPage', async () => {
+  const actual = await vi.importActual<typeof import('@pages/FilesPage')>('@pages/FilesPage')
+  return {
+    FilesPage: (props: FilesPageProps) => {
+      filesPageHarness.props = props
+      if (filesPageHarness.renderActual) return createElement(actual.FilesPage, props)
+      if (commonHarness.renderWorkspaceSurfaces) return <div data-testid="files-page-pane" />
+      return null
+    },
+  }
+})
 vi.mock('@pages/McpServersPage', () => ({ McpServersPage: () => null }))
 // The page is stubbed, but like the real one it measures the slot for every
 // launch while it is mounted, so launches reach main.
@@ -207,7 +302,7 @@ const settingsPageHarness = vi.hoisted(() => ({
 vi.mock('@pages/SettingsPage', () => ({
   SettingsPage: (props: NonNullable<typeof settingsPageHarness.props>) => {
     settingsPageHarness.props = props
-    return null
+    return commonHarness.renderWorkspaceSurfaces ? <div data-testid="settings-page-pane" /> : null
   },
 }))
 vi.mock('@pages/UnavailablePage', () => ({ UnavailablePage: () => null }))
@@ -220,6 +315,12 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   let liveTeamId = String(overrides.currentTeamId || 'team-a')
   let controller: AppController
   let tabSequence = 2
+  let navigationIntentSequence = 0
+  const beginNavigationIntent = () => {
+    navigationIntentSequence += 1
+    controller.navigationIntentSequence = navigationIntentSequence
+    return navigationIntentSequence
+  }
   const nextWorkspaceTabId = vi.fn(() => `ws-tab-${tabSequence++}`)
   const setWorkspaceTabs = vi.fn((updater: unknown) => {
     const next =
@@ -247,8 +348,81 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     liveTeamId = targetTeamId
     return true
   })
+  const beginGfsResourceNavigation = vi.fn(
+    (
+      id: number,
+      uri: string,
+      principalGeneration: number,
+      userNavigationGenerationAtActivation: number
+    ): GfsResourceNavigationRequest | null => {
+      if (userNavigationGenerationAtActivation !== 0) return null
+      const intentSequence = beginNavigationIntent()
+      const owner = assignGfsResourceNavigationOwner(controller.workspaceTabs, uri)
+      return {
+        id,
+        uri,
+        ownerTabId: owner.createDestination ? nextWorkspaceTabId() : owner.ownerTabId,
+        createDestination: owner.createDestination,
+        intentSequence,
+        principalGeneration,
+        userNavigationGenerationAtActivation,
+      }
+    }
+  )
+  const isGfsResourceNavigationCurrent = vi.fn(
+    (request: GfsResourceNavigationRequest, principalGeneration: number) =>
+      canCompleteGfsResourceNavigation(request, {
+        intentSequence: navigationIntentSequence,
+        principalGeneration,
+        userNavigationGeneration: 0,
+        activeTabId: controller.workspaceTabs.activeTabId,
+        tabs: controller.workspaceTabs.tabs,
+      })
+  )
+  const activateGfsResourceNavigation = vi.fn(
+    (request: GfsResourceNavigationRequest, principalGeneration: number) => {
+      if (
+        request.intentSequence !== navigationIntentSequence ||
+        request.principalGeneration !== principalGeneration ||
+        request.userNavigationGenerationAtActivation !== 0
+      ) {
+        return false
+      }
+      const state = controller.workspaceTabs
+      if (request.createDestination) {
+        if (state.tabs.some(tab => tab.id === request.ownerTabId)) return false
+        setWorkspaceTabs(createFilesTab(state, { id: request.ownerTabId, path: null }))
+      } else {
+        if (!isGfsResourceNavigationOwnerPresent(request, state.tabs)) return false
+        setWorkspaceTabs(selectWorkspaceTab(state, request.ownerTabId))
+      }
+      return controller.workspaceTabs.activeTabId === request.ownerTabId
+    }
+  )
+  const completeGfsResourceNavigationPreview = vi.fn(
+    (
+      request: GfsResourceNavigationRequest,
+      preview: Parameters<AppController['completeGfsResourceNavigationPreview']>[1],
+      principalGeneration: number
+    ) => {
+      if (!isGfsResourceNavigationCurrent(request, principalGeneration)) return false
+      setWorkspaceTabs(
+        openPreviewTab(controller.workspaceTabs, {
+          id: nextWorkspaceTabId(),
+          title: preview.name,
+          gfsUri: preview.gfsUri,
+          fileKind: preview.kind,
+          byteLength: preview.bytes,
+          ...(preview.version !== undefined ? { resourceVersion: preview.version } : {}),
+          ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
+        })
+      )
+      return controller.workspaceTabs.activeTabId !== request.ownerTabId
+    }
+  )
   // Faithful nav: a store action; `navItem` is derived (useReactiveController).
   const handleNavSelect = vi.fn((item: AppController['navItem']) => {
+    beginNavigationIntent()
     if (item === DESKTOP_ROUTES.chat) {
       controller.selectedAgent = null
       clearAppsPicker()
@@ -278,7 +452,15 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     forceControllerRender()
   })
   const handleSelectChatAgent = vi.fn(
-    (agentName: string, options: { chatId?: string; keepNavItem?: boolean } = {}) => {
+    (
+      agentName: string,
+      options: {
+        chatId?: string
+        keepNavItem?: boolean
+        navigationIntentAlreadyStarted?: boolean
+      } = {}
+    ) => {
+      if (!options.keepNavItem && !options.navigationIntentAlreadyStarted) beginNavigationIntent()
       controller.selectedAgent = agentName
       controller.activeChatId = options.chatId ?? null
       if (!options.keepNavItem) {
@@ -313,6 +495,29 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
       role: 'member',
     },
     currentTeamId: 'team-a',
+    navigationIntentSequence,
+    beginUserNavigationIntent: vi.fn(beginNavigationIntent),
+    isNavigationIntentCurrent: vi.fn(sequence => sequence === navigationIntentSequence),
+    captureWorkspaceNavigation: vi.fn(() => ({
+      workspaceTabs: controller.workspaceTabs,
+      selectedAgent: controller.selectedAgent,
+      selectedAgentRoute: controller.selectedAgentRoute,
+      appsPickerActive: controller.appsPickerActive,
+      lastActiveChatTabId:
+        activeWorkspaceTab(controller.workspaceTabs)?.kind === 'chat'
+          ? (activeWorkspaceTab(controller.workspaceTabs)?.id ?? null)
+          : null,
+    })),
+    restoreWorkspaceNavigation: vi.fn((snapshot, expectedIntentSequence) => {
+      if (expectedIntentSequence !== navigationIntentSequence) return null
+      const restoredIntent = beginNavigationIntent()
+      controller.workspaceTabs = snapshot.workspaceTabs
+      controller.selectedAgent = snapshot.selectedAgent
+      controller.selectedAgentRoute = snapshot.selectedAgentRoute
+      controller.appsPickerActive = snapshot.appsPickerActive
+      forceControllerRender()
+      return restoredIntent
+    }),
     navItem: DESKTOP_ROUTES.chat,
     selectedAgent: null,
     selectedAgentRoute: null,
@@ -365,6 +570,10 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     setRuntimeConfigSetupRpcProxyBaseUrl: noop,
     setPendingDesktopEnvironmentSetup: noop,
     setDesktopEnvironmentSetupComplete: noop,
+    beginGfsResourceNavigation,
+    isGfsResourceNavigationCurrent,
+    activateGfsResourceNavigation,
+    completeGfsResourceNavigationPreview,
     ...overrides,
   } as unknown as AppController
   // `navItem` is derived from the store; translate a starting-route override into
@@ -390,12 +599,19 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
 
 describe('App deep-link orchestration', () => {
   let currentController: AppController
+  let realController: AppController | null = null
+  let unmountRealApp: (() => void) | null = null
   let emitDeepLink: ((link: SandboxUiDeepLinkEnvelope) => void) | null
+  let emitGfsDeepLink: ((link: GfsResourceDeepLinkEnvelope) => void) | null
   let emitCommand: ((commandId: DesktopCommandId, source?: 'host' | 'sandbox') => void) | null
   const clearPendingDeepLinks = vi.fn().mockResolvedValue(undefined)
   const acknowledgeDeepLink = vi.fn().mockResolvedValue(undefined)
   const listApps = vi.fn().mockResolvedValue({ apps: [] })
   const listPendingDeepLinks = vi.fn().mockResolvedValue({ links: [] })
+  let gfsQueue = new GfsResourceDeepLinkQueue()
+  const clearPendingGfsDeepLinks = vi.fn(async () => gfsQueue.clear())
+  const acknowledgeGfsDeepLink = vi.fn(async (id: number) => gfsQueue.acknowledge(id))
+  const listPendingGfsDeepLinks = vi.fn(async () => ({ links: gfsQueue.list() }))
   let main: SandboxUiMainFake
   const closeSandboxUi = () => main.bridge.close
   const openSandboxUi = () => main.bridge.open
@@ -467,14 +683,29 @@ describe('App deep-link orchestration', () => {
     commandPaletteHarness.props = null
     settingsPageHarness.props = null
     sandboxUiPageHarness.props = null
+    filesPageHarness.props = null
+    filesPageHarness.renderActual = false
+    commonHarness.renderActualToastStack = false
+    commonHarness.renderWorkspaceSurfaces = false
+    commonHarness.draftProbe = { chatId: null, agentRef: null, tabId: null }
+    workspaceTabStripHarness.props = null
     sidebarHarness.props = null
     acknowledgeDeepLink.mockResolvedValue(undefined)
     listApps.mockResolvedValue({ apps: [] })
     listPendingDeepLinks.mockResolvedValue({ links: [] })
+    gfsQueue = new GfsResourceDeepLinkQueue()
+    clearPendingGfsDeepLinks.mockClear()
+    clearPendingGfsDeepLinks.mockImplementation(async () => gfsQueue.clear())
+    acknowledgeGfsDeepLink.mockClear()
+    acknowledgeGfsDeepLink.mockImplementation(async id => gfsQueue.acknowledge(id))
+    listPendingGfsDeepLinks.mockClear()
+    listPendingGfsDeepLinks.mockImplementation(async () => ({ links: gfsQueue.list() }))
     main = createSandboxUiMainFake()
     emitDeepLink = null
+    emitGfsDeepLink = null
     emitCommand = null
     currentController = makeController()
+    realController = null
     vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
 
     Object.defineProperty(window, 'clerum', {
@@ -500,6 +731,15 @@ describe('App deep-link orchestration', () => {
           focusActive: vi.fn().mockResolvedValue(true),
           onDeepLink: vi.fn((callback: (link: SandboxUiDeepLinkEnvelope) => void) => {
             emitDeepLink = callback
+            return vi.fn()
+          }),
+        },
+        gfs: {
+          acknowledgeDeepLink: acknowledgeGfsDeepLink,
+          clearPendingDeepLinks: clearPendingGfsDeepLinks,
+          listPendingDeepLinks: listPendingGfsDeepLinks,
+          onDeepLink: vi.fn((callback: (link: GfsResourceDeepLinkEnvelope) => void) => {
+            emitGfsDeepLink = callback
             return vi.fn()
           }),
         },
@@ -645,9 +885,13 @@ describe('App deep-link orchestration', () => {
     render(<App />)
 
     act(() => emitCommand?.('chat.newTab'))
-    expect(currentController.handleSelectChatAgent).toHaveBeenCalledWith('alpha', {
-      selectLatest: false,
-    })
+    expect(currentController.handleSelectChatAgent).toHaveBeenCalledWith(
+      'alpha',
+      expect.objectContaining({
+        selectLatest: false,
+        navigationIntentAlreadyStarted: true,
+      })
+    )
 
     act(() => emitCommand?.('composer.focus'))
     expect(currentController.handleSelectChatAgent).toHaveBeenLastCalledWith('alpha', {
@@ -841,10 +1085,17 @@ describe('App deep-link orchestration', () => {
     })
   })
 
-  afterEach(async () => {
+  async function cleanupAppDeepLinkSuite(): Promise<void> {
+    cleanup()
+    unmountRealApp = null
+    const bodyChildElementCount = document.body.childElementCount
     vi.useRealTimers()
+    resetComposerDraftStore()
     await main.dispose()
-  })
+    expect(bodyChildElementCount, 'App deep-link suite body-empty postcondition').toBe(0)
+  }
+
+  afterEach(cleanupAppDeepLinkSuite)
 
   // The deep link's launch reached main (`times` opens so far). Main mounts it
   // unless the test told the fake to hold or fail that open.
@@ -859,6 +1110,169 @@ describe('App deep-link orchestration', () => {
       await Promise.resolve()
     })
   }
+
+  function produceGfsResourceDeepLink(uri: string): GfsResourceDeepLinkEnvelope {
+    const target = parseGfsResourceDeepLink(buildGfsResourceDeepLink(uri))
+    if (!target) throw new Error('The shared producer rejected the GFS resource URI fixture')
+    return gfsQueue.enqueue(target, 0)
+  }
+
+  it('routes a shared GFS producer link to Files and acknowledges its resolved owner', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    render(<App />)
+    await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
+    await waitFor(() => expect(listPendingGfsDeepLinks).toHaveBeenCalled())
+
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const link = produceGfsResourceDeepLink(uri)
+    act(() => emitGfsDeepLink?.(link))
+
+    await waitFor(() =>
+      expect(filesPageHarness.props?.pendingGfsDeepLink).toEqual({ id: link.id, uri })
+    )
+    expect(currentController.activateGfsResourceNavigation).toHaveBeenCalledOnce()
+    expect(activeWorkspaceTab(currentController.workspaceTabs)).toMatchObject({
+      kind: 'files',
+      files: { path: null },
+    })
+    expect(acknowledgeGfsDeepLink).not.toHaveBeenCalled()
+
+    act(() => {
+      filesPageHarness.props?.onLocationChange?.(uri, 'Shared document.md')
+      filesPageHarness.props?.onPendingGfsDeepLinkOutcome?.(link.id, 'opened')
+    })
+
+    await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
+    expect(activeWorkspaceTab(currentController.workspaceTabs)).toMatchObject({
+      kind: 'files',
+      files: { path: uri },
+    })
+    expect(gfsQueue.list()).toEqual([])
+  })
+
+  it('fences a pending producer link before blocked chat-tab access resolves', async () => {
+    const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    const resource: Awaited<ReturnType<typeof window.clerum.gfs.resolve>> = {
+      drive: 'main',
+      resourceId: '0123456789abcdef0123456789abcdef',
+      parentResourceId: null,
+      gfsUri: uri,
+      name: 'Shared folder',
+      kind: 'directory',
+      pathCache: null,
+      version: 1,
+    }
+    let releaseResolve!: (value: typeof resource) => void
+    let resolveReleased = false
+    const heldResolve = new Promise<typeof resource>(resolve => {
+      releaseResolve = resolve
+    })
+    const resolveGfs = vi.fn(() => heldResolve)
+    const handleSelectChatAgent = vi.fn()
+    window.clerum.gfs.resolve = resolveGfs
+
+    currentController = makeController({
+      initialExperienceLoading: false,
+      workspaceTabs: openChatTab(createWorkspaceTabsState('chat-tab-1'), {
+        id: 'chat-tab-1',
+        agentRef: 'blocked-agent',
+        chatId: 'blocked-chat',
+      }),
+      isHostAccessBlocked: vi.fn(() => true),
+      handleSelectChatAgent,
+    } as Partial<AppController>)
+    filesPageHarness.renderActual = true
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <App />
+      </QueryClientProvider>
+    )
+    await waitFor(() => expect(emitGfsDeepLink).not.toBeNull())
+    await waitFor(() => expect(listPendingGfsDeepLinks).toHaveBeenCalled())
+
+    const link = produceGfsResourceDeepLink(uri)
+    act(() => emitGfsDeepLink?.(link))
+    await waitFor(() => expect(resolveGfs).toHaveBeenCalledTimes(1))
+
+    const ownerTabId = currentController.workspaceTabs.activeTabId
+    expect(activeWorkspaceTab(currentController.workspaceTabs)?.kind).toBe('files')
+    expect(ownerTabId).toBeTruthy()
+    expect(workspaceTabStripHarness.props).not.toBeNull()
+
+    const intentBeforeChatSelection = currentController.navigationIntentSequence
+    act(() => workspaceTabStripHarness.props?.onSelect('chat-tab-1'))
+    await waitFor(() => expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1'))
+    expect(currentController.navigationIntentSequence).toBe(intentBeforeChatSelection + 1)
+    expect(handleSelectChatAgent).toHaveBeenCalledWith(
+      'blocked-agent',
+      expect.objectContaining({
+        chatId: 'blocked-chat',
+        navigationIntentAlreadyStarted: true,
+      })
+    )
+
+    const intentBeforeOwnerReselection = currentController.navigationIntentSequence
+    act(() => workspaceTabStripHarness.props?.onSelect(ownerTabId!))
+    await waitFor(() => expect(currentController.workspaceTabs.activeTabId).toBe(ownerTabId))
+    expect(currentController.navigationIntentSequence).toBe(intentBeforeOwnerReselection + 1)
+
+    try {
+      // The real FilesPage consumer must not call resolve again when the owner
+      // tab is reselected after the user's explicit switch.
+      expect(resolveGfs).toHaveBeenCalledTimes(1)
+      await waitFor(() => expect(acknowledgeGfsDeepLink).toHaveBeenCalledWith(link.id))
+      await act(async () => {
+        releaseResolve(resource)
+        resolveReleased = true
+        await heldResolve
+        await Promise.resolve()
+      })
+      await waitFor(() => expect(gfsQueue.list()).toEqual([]))
+      expect(acknowledgeGfsDeepLink).toHaveBeenCalledOnce()
+      expect(activeWorkspaceTab(currentController.workspaceTabs)).toMatchObject({
+        kind: 'files',
+        files: { path: null },
+      })
+    } finally {
+      if (!resolveReleased) {
+        await act(async () => {
+          releaseResolve(resource)
+          await heldResolve
+          await Promise.resolve()
+        })
+      }
+      queryClient.clear()
+    }
+  })
+
+  it('advances navigation intent for New Chat without a resource prefill', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    render(<App />)
+    await waitFor(() => expect(emitCommand).not.toBeNull())
+
+    const intentBeforeNewChat = currentController.navigationIntentSequence
+    act(() => emitCommand?.('chat.newTab'))
+
+    expect(currentController.navigationIntentSequence).toBe(intentBeforeNewChat + 1)
+    expect(activeWorkspaceTab(currentController.workspaceTabs)?.kind).toBe('chat')
+  })
+
+  it('does not double-advance when New Chat reveals the selected agent', async () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      selectedAgent: 'agent-a',
+      activeChatId: 'chat-1',
+    } as Partial<AppController>)
+    render(<App />)
+    await waitFor(() => expect(emitCommand).not.toBeNull())
+
+    const intentBeforeNewChat = currentController.navigationIntentSequence
+    act(() => emitCommand?.('chat.newTab'))
+
+    expect(currentController.navigationIntentSequence).toBe(intentBeforeNewChat + 1)
+    expect(activeWorkspaceTab(currentController.workspaceTabs)?.kind).toBe('chat')
+  })
 
   it('keeps logged-out app links pending until the user confirms after login', async () => {
     currentController = makeController({
@@ -1232,16 +1646,17 @@ describe('App deep-link orchestration', () => {
     )
   })
 
-  // Guard for conversationOrigin use (3): retiring back-to-conversation must not
-  // touch the deep-link team restore, which re-selects the originating chat after
-  // rolling a failed cross-team link back to the original team. Passes before and
-  // after the retirement.
-  it('re-selects the originating chat when a failed cross-team link rolls the team back', async () => {
+  it('restores the originating chat workspace when a failed cross-team link rolls back', async () => {
     currentController = makeController({
       initialExperienceLoading: false,
       navItem: DESKTOP_ROUTES.chat,
       selectedAgent: 'alpha',
       activeChatId: 'chat-1',
+      workspaceTabs: openChatTab(createWorkspaceTabsState('chat-tab-1'), {
+        id: 'chat-tab-1',
+        agentRef: 'alpha',
+        chatId: 'chat-1',
+      }),
     } as Partial<AppController>)
     render(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
@@ -1257,11 +1672,26 @@ describe('App deep-link orchestration', () => {
       teamId: 'team-a',
       announce: true,
     })
-    expect(currentController.handleSelectChatAgent).toHaveBeenCalledWith('alpha', {
-      selectLatest: false,
-      chatId: 'chat-1',
-      title: 'Conversation',
-    })
+    expect(currentController.restoreWorkspaceNavigation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        selectedAgent: 'alpha',
+        workspaceTabs: expect.objectContaining({
+          activeTabId: 'chat-tab-1',
+          tabs: expect.arrayContaining([
+            expect.objectContaining({
+              kind: 'chat',
+              id: 'chat-tab-1',
+              chat: expect.objectContaining({
+                agentRef: 'alpha',
+                chatId: 'chat-1',
+              }),
+            }),
+          ]),
+        }),
+      }),
+      expect.any(Number)
+    )
+    expect(currentController.handleSelectChatAgent).not.toHaveBeenCalled()
   })
 
   it('closes the active embed before switching teams for a failed cross-team handoff', async () => {
@@ -1295,6 +1725,826 @@ describe('App deep-link orchestration', () => {
     expect(closeSandboxUi().mock.invocationCallOrder[0]).toBeLessThan(
       ensureTeamContext.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY
     )
+  })
+
+  it('preserves a live app and its route when a same-team link is unavailable', async () => {
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    currentController = makeController({ initialExperienceLoading: false })
+    render(<App />)
+    await launchAppFromSidebar()
+    const launchId = main.live()?.launchId
+    main.navigate('/tickets/live')
+
+    act(() => emitDeepLink?.({ id: 1, appRef: 'ns/missing' }))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+
+    expect(closeSandboxUi()).not.toHaveBeenCalled()
+    expect(openSandboxUi()).toHaveBeenCalledOnce()
+    expect(embedState().owner).toBe(launchId)
+    expect(main.live()).toEqual({
+      launchId,
+      appRef: 'ns/app',
+      routePath: '/tickets/live',
+    })
+    expect(currentController.handleEnsureTeamContext).not.toHaveBeenCalled()
+  })
+
+  it('restores the exact origin app route after a closed cross-team handoff fails', async () => {
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.apps,
+    })
+    render(<App />)
+    await launchAppFromSidebar()
+    main.navigate('/tickets/origin')
+    expect(activeWorkspaceTab(currentController.workspaceTabs)?.kind).toBe('app')
+    expect(activeWorkspaceTab(currentController.workspaceTabs)?.app?.appRef).toBe('ns/app')
+    listApps.mockResolvedValue({ apps: [] })
+
+    act(() => emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' }))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(currentController.restoreWorkspaceNavigation).toHaveBeenCalledOnce()
+    expect(currentController.restoreWorkspaceNavigation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceTabs: expect.objectContaining({
+          activeTabId: currentController.workspaceTabs.tabs.find(tab => tab.kind === 'app')?.id,
+        }),
+      }),
+      expect.any(Number)
+    )
+    await waitFor(() =>
+      expect(sidebarHarness.props?.availableSandboxUiApps).toEqual(
+        expect.arrayContaining([expect.objectContaining({ appRef: 'ns/app' })])
+      )
+    )
+    expect(embedState().activeAppTabId).toBe(currentController.workspaceTabs.activeTabId)
+    await waitForAppOpen(2)
+
+    expect(closeSandboxUi()).toHaveBeenCalledOnce()
+    expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(1, {
+      teamId: 'team-b',
+      announce: true,
+    })
+    expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(2, {
+      teamId: 'team-a',
+      announce: true,
+    })
+    expect(main.openCall(1).launchId).not.toBe(main.openCall(0).launchId)
+    expect(main.openCall(1).routePath).toBe('/tickets/origin')
+    expect(main.live()).toEqual({
+      launchId: main.openCall(1).launchId,
+      appRef: 'ns/app',
+      routePath: '/tickets/origin',
+    })
+    expect(
+      appTabs().find(tab => tab.id === currentController.workspaceTabs.activeTabId)?.app
+    ).toMatchObject({ appRef: 'ns/app', savedRoutePath: '/tickets/origin' })
+  })
+
+  it('keeps a link retryable when the active owner close is rejected', async () => {
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.apps,
+    })
+    render(<App />)
+    await launchAppFromSidebar()
+    main.navigate('/tickets/live')
+    const listAppsCallsBeforeLink = listApps.mock.calls.length
+    closeSandboxUi().mockRejectedValueOnce(new Error('close rejected'))
+
+    act(() => emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' }))
+    await confirmPendingAppLink()
+    await waitFor(() =>
+      expect(currentController.pushToast).toHaveBeenCalledWith(
+        'Could not open app link: the current app could not be safely closed.',
+        'error'
+      )
+    )
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+    expect(currentController.pushToast).toHaveBeenCalledWith(
+      'The current app could not be closed safely. Try launching it again.',
+      'error'
+    )
+
+    expect(currentController.handleEnsureTeamContext).not.toHaveBeenCalled()
+    expect(listApps).toHaveBeenCalledTimes(listAppsCallsBeforeLink)
+    expect(closeSandboxUi()).toHaveBeenCalledOnce()
+    expect(openSandboxUi()).toHaveBeenCalledOnce()
+    expect(embedState().owner).toBe(main.openCall(0).launchId)
+    expect(main.live()).toEqual({
+      launchId: main.openCall(0).launchId,
+      appRef: 'ns/app',
+      routePath: '/tickets/live',
+    })
+  })
+
+  it('opens a valid cross-team app link after the origin embed was already closed', async () => {
+    const targetApp = {
+      appRef: 'ns/target',
+      title: 'Target App',
+      defaultPath: '/',
+      ready: true,
+      phase: 'active',
+    }
+    const targetPath = '/boards/linked'
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.apps,
+    })
+    render(<App />)
+    await launchAppFromSidebar()
+    main.navigate('/tickets/saved')
+    await act(async () => emitCommand?.('app.backToApps'))
+    await waitFor(() => expect(embedState().owner).toBeNull())
+    await waitFor(() => expect(appTabs()[0]?.app?.savedRoutePath).toBe('/tickets/saved'))
+    expect(main.live()).toBeNull()
+
+    // Main's producer parses a protocol URL, queues that target and emits the
+    // resulting envelope on sandboxUi:deepLink.
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'target',
+        path: targetPath,
+        teamId: 'team-b',
+      })
+    )
+    if (!target) throw new Error('The shared producer rejected the valid app link fixture')
+    const link = new SandboxUiDeepLinkQueue().enqueue(target)
+    const listAppsCallsBeforeLink = listApps.mock.calls.length
+    listApps.mockResolvedValue({ apps: [targetApp] })
+
+    act(() => emitDeepLink?.(link))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+
+    expect(currentController.handleEnsureTeamContext).toHaveBeenCalledWith({
+      teamId: 'team-b',
+      announce: true,
+    })
+    expect(currentController.getCurrentTeamId()).toBe('team-b')
+    expect(listApps).toHaveBeenCalledTimes(listAppsCallsBeforeLink + 1)
+    await waitForAppOpen(2)
+    expect(main.openCall(1)).toMatchObject({
+      recipeNs: 'ns',
+      recipeName: 'target',
+      routePath: targetPath,
+    })
+    expect(main.live()).toEqual({
+      launchId: main.openCall(1).launchId,
+      appRef: targetApp.appRef,
+      routePath: targetPath,
+    })
+    expect(activeWorkspaceTab(currentController.workspaceTabs)).toMatchObject({
+      kind: 'app',
+      app: { appRef: targetApp.appRef },
+    })
+  })
+
+  it('waits for outstanding origin views with Chat active and rolls back to their final route', async () => {
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    currentController = makeController({ initialExperienceLoading: false })
+
+    let holdRelease = false
+    let originLaunchId: string | null = null
+    let deliverHeldRelease: (() => void) | null = null
+    const registerReleased = main.bridge.onReleased.getMockImplementation()
+    if (!registerReleased) throw new Error('the main fake has no release listener producer')
+    main.bridge.onReleased.mockImplementation(listener =>
+      registerReleased(event => {
+        if (holdRelease && event.reason === 'closed' && event.launchId === originLaunchId) {
+          deliverHeldRelease = () => listener(event)
+          return
+        }
+        listener(event)
+      })
+    )
+
+    render(<App />)
+    await launchAppFromSidebar()
+    originLaunchId = main.live()?.launchId ?? null
+    if (!originLaunchId) throw new Error('the origin app did not mount')
+    main.navigate('/tickets/live')
+    holdRelease = true
+    await act(async () => emitCommand?.('app.backToApps'))
+    await waitFor(() => expect(deliverHeldRelease).not.toBeNull())
+    expect(embedState().views.get(originLaunchId)?.phase).toBe('closeRequested')
+    await selectTab(0)
+    expect(activeWorkspaceTab(currentController.workspaceTabs)?.kind).toBe('chat')
+
+    let resolveTargetApps!: (value: { apps: (typeof READY_APP)[] }) => void
+    const targetApps = new Promise<{ apps: (typeof READY_APP)[] }>(resolve => {
+      resolveTargetApps = resolve
+    })
+    const listAppsCallsBeforeLink = listApps.mock.calls.length
+    listApps.mockImplementationOnce(() => targetApps)
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'missing',
+        path: '/linked',
+        teamId: 'team-b',
+      })
+    )
+    if (!target) throw new Error('the shared producer rejected the unavailable app link fixture')
+    const link = new SandboxUiDeepLinkQueue().enqueue(target)
+
+    act(() => emitDeepLink?.(link))
+    await confirmPendingAppLink()
+    await waitFor(() =>
+      expect(
+        listApps.mock.calls.length === listAppsCallsBeforeLink + 1 ||
+          embedState().handoffs.length > 0
+      ).toBe(true)
+    )
+
+    await act(async () => {
+      deliverHeldRelease?.()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(appTabs()[0]?.app?.savedRoutePath).toBe('/tickets/live'))
+    await waitFor(() => expect(listApps).toHaveBeenCalledTimes(listAppsCallsBeforeLink + 1))
+    expect(currentController.getCurrentTeamId()).toBe('team-b')
+    resolveTargetApps({ apps: [] })
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+
+    expect(currentController.getCurrentTeamId()).toBe('team-a')
+    expect(activeWorkspaceTab(currentController.workspaceTabs)?.kind).toBe('chat')
+    expect(appTabs()[0]?.app?.savedRoutePath).toBe('/tickets/live')
+    expect(openSandboxUi()).toHaveBeenCalledTimes(1)
+    expect(main.live()).toBeNull()
+  })
+
+  it('continues a cross-team link after a matching session release without relaunching origin', async () => {
+    const targetApp = {
+      appRef: 'ns/target',
+      title: 'Target App',
+      defaultPath: '/',
+      ready: true,
+      phase: 'active',
+    }
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    currentController = makeController({ initialExperienceLoading: false })
+    render(<App />)
+    await launchAppFromSidebar()
+    const originLaunchId = main.live()?.launchId
+    if (!originLaunchId) throw new Error('the origin app did not mount')
+
+    const closeMainView = closeSandboxUi().getMockImplementation()
+    if (!closeMainView) throw new Error('the main close producer is unavailable')
+    const closeRequestControl: { release?: () => void } = {}
+    closeSandboxUi().mockImplementation(
+      request =>
+        new Promise((resolve, reject) => {
+          closeRequestControl.release = () => {
+            void Promise.resolve(closeMainView(request)).then(resolve, reject)
+          }
+        })
+    )
+
+    listApps.mockResolvedValueOnce({ apps: [targetApp] })
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'target',
+        path: '/linked',
+        teamId: 'team-b',
+      })
+    )
+    if (!target) throw new Error('the shared producer rejected the target app-link fixture')
+    const link = new SandboxUiDeepLinkQueue().enqueue(target)
+
+    act(() => emitDeepLink?.(link))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(embedState().handoffs).toHaveLength(1))
+    expect(currentController.getCurrentTeamId()).toBe('team-a')
+
+    main.endSession()
+    await waitFor(() =>
+      expect(
+        main
+          .reported('sandboxUi:released')
+          .some(
+            event =>
+              (event as { launchId?: string; reason?: string }).launchId === originLaunchId &&
+              (event as { reason?: string }).reason === 'session'
+          )
+      ).toBe(true)
+    )
+    await waitFor(() => expect(currentController.getCurrentTeamId()).toBe('team-b'))
+    closeRequestControl.release?.()
+    await waitForAppOpen(2)
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+
+    expect(main.openCall(1)).toMatchObject({ recipeNs: 'ns', recipeName: 'target' })
+    expect(openSandboxUi()).toHaveBeenCalledTimes(2)
+    expect(currentController.getCurrentTeamId()).toBe('team-b')
+    expect(activeWorkspaceTab(currentController.workspaceTabs)).toMatchObject({
+      kind: 'app',
+      app: { appRef: targetApp.appRef },
+    })
+  })
+
+  it('waits for a pending origin release before rolling back an unavailable cross-team link', async () => {
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.apps,
+    })
+
+    let holdRelease = false
+    let originLaunchId: string | null = null
+    let deliverHeldRelease: (() => void) | null = null
+    const registerReleased = main.bridge.onReleased.getMockImplementation()
+    if (!registerReleased) throw new Error('the main fake has no release listener producer')
+    main.bridge.onReleased.mockImplementation(listener =>
+      registerReleased(event => {
+        if (holdRelease && event.reason === 'closed' && event.launchId === originLaunchId) {
+          deliverHeldRelease = () => listener(event)
+          return
+        }
+        listener(event)
+      })
+    )
+
+    render(<App />)
+    await launchAppFromSidebar()
+    originLaunchId = main.live()?.launchId ?? null
+    if (!originLaunchId) throw new Error('the origin app did not mount')
+    main.navigate('/tickets/saved')
+    await act(async () => emitCommand?.('app.backToApps'))
+    await waitFor(() => expect(embedState().owner).toBeNull())
+    await waitFor(() => expect(appTabs()[0]?.app?.savedRoutePath).toBe('/tickets/saved'))
+
+    await selectTab(0)
+    await selectTab(1)
+    await waitForAppOpen(2)
+    await waitFor(() => expect(main.live()?.routePath).toBe('/tickets/saved'))
+    originLaunchId = main.live()?.launchId ?? null
+    if (!originLaunchId) throw new Error('the origin app did not remount')
+    main.navigate('/tickets/live')
+    expect(appTabs()[0]?.app?.savedRoutePath).toBe('/tickets/saved')
+    holdRelease = true
+    await act(async () => emitCommand?.('app.backToApps'))
+    await waitFor(() => expect(embedState().owner).toBeNull())
+    await waitFor(() => expect(deliverHeldRelease).not.toBeNull())
+    expect(embedState().views.get(originLaunchId)?.phase).toBe('closeRequested')
+
+    let resolveTargetApps!: (value: { apps: (typeof READY_APP)[] }) => void
+    const targetApps = new Promise<{ apps: (typeof READY_APP)[] }>(resolve => {
+      resolveTargetApps = resolve
+    })
+    const listAppsCallsBeforeLink = listApps.mock.calls.length
+    listApps.mockImplementationOnce(() => targetApps)
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'missing',
+        path: '/linked',
+        teamId: 'team-b',
+      })
+    )
+    if (!target) throw new Error('the shared producer rejected the unavailable app link fixture')
+    const link = new SandboxUiDeepLinkQueue().enqueue(target)
+
+    act(() => emitDeepLink?.(link))
+    await confirmPendingAppLink()
+    await waitFor(() =>
+      expect(
+        listApps.mock.calls.length === listAppsCallsBeforeLink + 1 ||
+          embedState().handoffs.length > 0
+      ).toBe(true)
+    )
+
+    await act(async () => {
+      deliverHeldRelease?.()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(appTabs()[0]?.app?.savedRoutePath).toBe('/tickets/live'))
+    await waitFor(() => expect(listApps).toHaveBeenCalledTimes(listAppsCallsBeforeLink + 1))
+    expect(currentController.getCurrentTeamId()).toBe('team-b')
+    resolveTargetApps({ apps: [] })
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+
+    expect(currentController.getCurrentTeamId()).toBe('team-a')
+    expect(appTabs()[0]?.app?.savedRoutePath).toBe('/tickets/live')
+    expect(openSandboxUi()).toHaveBeenCalledTimes(2)
+    expect(main.live()).toBeNull()
+  })
+
+  it('keeps the visible workspace and retry path when the team switch RPC rejects', async () => {
+    const actualControllerModule =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    vi.mocked(useAppController).mockImplementation(() => {
+      realController = actualControllerModule.useAppController()
+      return realController
+    })
+    const appBridge = window.clerum
+    const { handle } = installAppControllerClerum({ agentNames: ['agent-x'] })
+    Object.assign(window.clerum, {
+      shortcuts: appBridge.shortcuts,
+      app: appBridge.app,
+      sandboxUi: appBridge.sandboxUi,
+      gfs: appBridge.gfs,
+    })
+    expect(window.clerum.team.switch).toBe(handle.switchTeam)
+    commonHarness.renderActualToastStack = true
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTaskTrackerProvider>
+          <App />
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+    unmountRealApp = view.unmount
+    const getController = () => {
+      if (!realController) throw new Error('the real App controller did not mount')
+      return realController
+    }
+    await waitFor(() => expect(getController().booting).toBe(false))
+    await waitFor(() => expect(getController().isAuthenticated).toBe(true))
+    await waitFor(() => expect(getController().initialExperienceLoading).toBe(false))
+    await waitFor(() => expect(handle.refreshCatalog.mock.calls.length).toBeGreaterThanOrEqual(2))
+    await waitFor(() => expect(handle.teamDirectory).toHaveBeenCalledOnce())
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    act(() => {
+      getController().handleSelectChatAgent('agent-x', {
+        chatId: 'chat-1',
+        title: 'Conversation',
+        selectLatest: false,
+      })
+      getController().openFilesSection('gfs://main/0123456789abcdef0123456789abcdef')
+    })
+    const chatTab = getController().workspaceTabs.tabs.find(
+      tab => tab.kind === 'chat' && tab.chat?.chatId === 'chat-1'
+    )
+    if (chatTab?.kind !== 'chat') throw new Error('the chat producer did not create its tab')
+    act(() => {
+      expect(setComposerDraft('chat-1', 'unsent selected-tab draft', 'agent-x', chatTab.id)).toBe(
+        true
+      )
+      getController().selectWorkspaceTabById(chatTab.id)
+    })
+    await waitFor(() => expect(getController().workspaceTabs.activeTabId).toBe(chatTab.id))
+
+    const workspaceBefore = getController().workspaceTabs
+    const navigationBefore = getController().captureWorkspaceNavigation()
+    const catalogCallsBefore = handle.refreshCatalog.mock.calls.length
+    const directoryCallsBefore = handle.teamDirectory.mock.calls.length
+    const listAppsCallsBefore = listApps.mock.calls.length
+    expect(getController().selectedAgent).toBe('agent-x')
+    expect(getController().lastActiveChatTabId).toBe(chatTab.id)
+    expect(getComposerDraft('chat-1', 'agent-x', chatTab.id)).toBe('unsent selected-tab draft')
+
+    let rejectTeamSwitch!: (error: Error) => void
+    handle.switchTeam.mockClear()
+    handle.switchTeam.mockImplementationOnce(
+      () => new Promise((_resolve, reject) => (rejectTeamSwitch = reject))
+    )
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'missing',
+        path: '/linked',
+        teamId: 'team-2',
+      })
+    )
+    if (!target) throw new Error('the shared producer rejected the team-switch link fixture')
+    const link = new SandboxUiDeepLinkQueue().enqueue(target)
+    act(() => emitDeepLink?.(link))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(handle.switchTeam).toHaveBeenCalledWith('team-2'))
+    await waitFor(() => expect(getController().busy).toBe(true))
+
+    expect(getController().getCurrentTeamId()).toBe('team-1')
+    expect(getController().workspaceTabs).toBe(workspaceBefore)
+    expect(getController().captureWorkspaceNavigation()).toEqual(navigationBefore)
+    expect(handle.refreshCatalog).toHaveBeenCalledTimes(catalogCallsBefore)
+    expect(handle.teamDirectory).toHaveBeenCalledTimes(directoryCallsBefore)
+
+    await act(async () => {
+      rejectTeamSwitch(
+        Object.assign(new Error('team switch connection failed'), { code: 'ECONNRESET' })
+      )
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(getController().busy).toBe(false))
+    const retryMessage = await view.findByText(
+      /Could not switch to the linked team yet:.*will retry shortly/
+    )
+    expect(retryMessage.closest('[role="status"]')?.isConnected).toBe(true)
+    expect(getController().getCurrentTeamId()).toBe('team-1')
+    expect(getController().workspaceTabs).toBe(workspaceBefore)
+    expect(getController().captureWorkspaceNavigation()).toEqual(navigationBefore)
+    expect(getController().selectedAgent).toBe('agent-x')
+    expect(getController().lastActiveChatTabId).toBe(chatTab.id)
+    expect(getComposerDraft('chat-1', 'agent-x', chatTab.id)).toBe('unsent selected-tab draft')
+    expect(handle.refreshCatalog).toHaveBeenCalledTimes(catalogCallsBefore)
+    expect(handle.teamDirectory).toHaveBeenCalledTimes(directoryCallsBefore)
+    expect(listApps).toHaveBeenCalledTimes(listAppsCallsBefore)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(link.id)
+  })
+
+  it('restores the origin app and keeps the link retryable when origin refresh rejects', async () => {
+    const actualControllerModule =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    let activeTeamId = 'team-1'
+    let rejectOriginRefresh = false
+    let injectOriginRefreshFailure = true
+    vi.mocked(useAppController).mockImplementation(() => {
+      realController = actualControllerModule.useAppController()
+      const ensureTeamContext = realController.handleEnsureTeamContext
+      realController.handleEnsureTeamContext = async target => {
+        const didSwitch = await ensureTeamContext(target)
+        if (target.teamId) activeTeamId = target.teamId
+        if (target.teamId === 'team-2' && injectOriginRefreshFailure) {
+          rejectOriginRefresh = true
+          injectOriginRefreshFailure = false
+        } else if (target.teamId === 'team-1' && rejectOriginRefresh) {
+          // Model a refresh rejection after the real team switch has landed.
+          rejectOriginRefresh = false
+          throw Object.assign(new Error('origin catalog timed out'), { code: 'ETIMEDOUT' })
+        }
+        return didSwitch
+      }
+      return realController
+    })
+    const appBridge = window.clerum
+    const { handle } = installAppControllerClerum({ agentNames: ['agent-x'] })
+    Object.assign(window.clerum, {
+      shortcuts: appBridge.shortcuts,
+      app: appBridge.app,
+      sandboxUi: appBridge.sandboxUi,
+      gfs: appBridge.gfs,
+    })
+
+    const switchTeam = handle.switchTeam.getMockImplementation()
+    if (!switchTeam) throw new Error('the team-switch producer is missing')
+    const targetApp = { ...READY_APP, appRef: 'ns/target', title: 'Target app' }
+    let rejectTargetCatalog = true
+    listApps.mockImplementation(async () => {
+      if (activeTeamId === 'team-2' && rejectTargetCatalog) {
+        rejectTargetCatalog = false
+        throw new Error('target app catalog failed')
+      }
+      return activeTeamId === 'team-1' ? { apps: [READY_APP] } : { apps: [targetApp] }
+    })
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTaskTrackerProvider>
+          <App />
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+    unmountRealApp = view.unmount
+    const getController = () => {
+      if (!realController) throw new Error('the real App controller did not mount')
+      return realController
+    }
+    await waitFor(() => expect(getController().booting).toBe(false))
+    await waitFor(() => expect(getController().isAuthenticated).toBe(true))
+    await waitFor(() => expect(getController().initialExperienceLoading).toBe(false))
+    await waitFor(() => expect(handle.refreshCatalog.mock.calls.length).toBeGreaterThanOrEqual(2))
+    await launchAppFromSidebar()
+    main.navigate('/tickets/origin')
+
+    const openTeams: string[] = []
+    const open = main.bridge.open.getMockImplementation()
+    if (!open) throw new Error('the main fake has no app-open producer')
+    main.bridge.open.mockImplementation(async (...args) => {
+      openTeams.push(getController().getCurrentTeamId())
+      return open(...args)
+    })
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'target',
+        path: '/linked',
+        teamId: 'team-2',
+      })
+    )
+    if (!target) throw new Error('the shared producer rejected the cross-team link fixture')
+    const link = new SandboxUiDeepLinkQueue().enqueue(target)
+    act(() => emitDeepLink?.(link))
+    await confirmPendingAppLink()
+
+    await waitFor(() => expect(getController().getCurrentTeamId()).toBe('team-1'))
+    await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(2))
+    await waitForMounted()
+    await waitFor(() => expect(confirmDialogHarness.props?.confirmLabel).toBe('Retry'))
+
+    expect(handle.switchTeam.mock.calls.map(([teamId]) => teamId)).toEqual(['team-2', 'team-1'])
+    expect(openTeams).toEqual(['team-1'])
+    expect(getController().getCurrentTeamId()).toBe('team-1')
+    expect(activeWorkspaceTab(getController().workspaceTabs)).toMatchObject({
+      kind: 'app',
+      app: { appRef: 'ns/app', savedRoutePath: '/tickets/origin' },
+    })
+    expect(main.live()).toMatchObject({ appRef: 'ns/app', routePath: '/tickets/origin' })
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(link.id)
+
+    await act(async () => {
+      confirmDialogHarness.props?.onConfirm()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+    expect(getController().getCurrentTeamId()).toBe('team-2')
+    expect(main.live()?.appRef).toBe('ns/target')
+    expect(openTeams).toEqual(['team-1', 'team-2'])
+  })
+
+  // The bridge returns successful logout, an unauthenticated session, then B login.
+  // There is no producer for direct authenticated A→B loadSession; do not synthesize it.
+  it('renders a fresh B workspace after successful A logout and null session', async () => {
+    const userA = {
+      id: 'user-a',
+      email: 'a@example.test',
+      name: 'User A',
+      teamId: 'team-a',
+      teamName: 'Team A',
+    }
+    const userB = {
+      id: 'user-b',
+      email: 'b@example.test',
+      name: 'User B',
+      teamId: 'team-b',
+      teamName: 'Team B',
+    }
+    let session: { authenticated: boolean; me: typeof userA | typeof userB | null } = {
+      authenticated: true,
+      me: userA,
+    }
+    const actualControllerModule =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    vi.mocked(useAppController).mockImplementation(() => {
+      realController = actualControllerModule.useAppController()
+      return realController
+    })
+    const appBridge = window.clerum
+    const { handle } = installAppControllerClerum({ agentNames: ['agent-x'], me: userA })
+    handle.getSessionState.mockImplementation(async () => session)
+    handle.logout.mockImplementation(async () => {
+      session = { authenticated: false, me: null }
+      return { ok: true, sessionGeneration: 2 }
+    })
+    handle.passwordLogin.mockImplementation(async () => {
+      session = { authenticated: true, me: userB }
+      return { authenticated: true, me: userB }
+    })
+    Object.assign(window.clerum, {
+      shortcuts: appBridge.shortcuts,
+      app: appBridge.app,
+      sandboxUi: appBridge.sandboxUi,
+      gfs: appBridge.gfs,
+    })
+    commonHarness.renderWorkspaceSurfaces = true
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTaskTrackerProvider>
+          <App />
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+    unmountRealApp = view.unmount
+    const getController = () => {
+      if (!realController) throw new Error('the real App controller did not mount')
+      return realController
+    }
+    await waitFor(() => expect(getController().booting).toBe(false))
+    await waitFor(() => expect(getController().isAuthenticated).toBe(true))
+    await waitFor(() => expect(getController().initialExperienceLoading).toBe(false))
+    await waitFor(() => expect(handle.refreshCatalog.mock.calls.length).toBeGreaterThanOrEqual(2))
+    await waitFor(() => expect(handle.teamDirectory).toHaveBeenCalledOnce())
+
+    act(() => {
+      getController().handleSelectChatAgent('agent-x', {
+        chatId: 'chat-a',
+        title: 'A conversation',
+        selectLatest: false,
+      })
+      getController().openFilesSection('gfs://main/0123456789abcdef0123456789abcdef')
+      getController().handleNavSelect(DESKTOP_ROUTES.settings)
+    })
+    const chatTab = getController().workspaceTabs.tabs.find(
+      tab => tab.kind === 'chat' && tab.chat?.chatId === 'chat-a'
+    )
+    if (chatTab?.kind !== 'chat') throw new Error('the A chat producer did not create its tab')
+    commonHarness.draftProbe = { chatId: 'chat-a', agentRef: 'agent-x', tabId: chatTab.id }
+    act(() => {
+      expect(setComposerDraft('chat-a', 'private A draft', 'agent-x', chatTab.id)).toBe(true)
+    })
+
+    const aTabs = view.getByRole('toolbar', { name: 'Workspace tabs' })
+    expect(Array.from(aTabs.querySelectorAll('button'), button => button.textContent)).toEqual([
+      'A conversation',
+      'Files',
+      'settings',
+    ])
+    expect(view.getByTestId('settings-page-pane')).toBeTruthy()
+    expect(getController().selectedAgent).toBe('agent-x')
+    expect(getComposerDraft('chat-a', 'agent-x', chatTab.id)).toBe('private A draft')
+
+    act(() => getController().selectWorkspaceTabById(chatTab.id))
+    await waitFor(() => expect(view.getByTestId('chat-page-pane')).toBeTruthy())
+    const aChatTab = aTabs.querySelector<HTMLButtonElement>(
+      `[data-workspace-tab-id="${chatTab.id}"]`
+    )
+    expect(aChatTab?.getAttribute('aria-pressed')).toBe('true')
+    expect(
+      (view.getByRole('textbox', { name: 'Draft in App pane' }) as HTMLTextAreaElement).value
+    ).toBe('private A draft')
+
+    await act(async () => getController().handleLogout())
+    await waitFor(() => expect(getController().isAuthenticated).toBe(false))
+    expect(view.getByTestId('auth-page')).toBeTruthy()
+    expect(view.queryByRole('toolbar', { name: 'Workspace tabs' })).toBeNull()
+    expect(getController().selectedAgent).toBeNull()
+    expect(getController().workspaceTabs.tabs).toHaveLength(1)
+    expect(getComposerDraft('chat-a', 'agent-x', chatTab.id)).toBe('')
+
+    act(() => {
+      getController().setEmail(userB.email)
+      getController().setPassword('test-password')
+    })
+    await act(async () => getController().handlePasswordLogin())
+    await waitFor(() => expect(getController().me?.id).toBe(userB.id))
+    await waitFor(() => expect(getController().initialExperienceLoading).toBe(false))
+
+    const bTabs = view.getByRole('toolbar', { name: 'Workspace tabs' })
+    const bTabButtons = Array.from(bTabs.querySelectorAll('button'))
+    expect(bTabButtons).toHaveLength(1)
+    expect(bTabButtons[0]?.textContent).toBe('New chat')
+    expect(bTabButtons[0]?.getAttribute('aria-pressed')).toBe('true')
+    expect(getController().getCurrentTeamId()).toBe('team-b')
+    expect(getController().selectedAgent).toBeNull()
+    expect(getController().workspaceTabs.tabs).toHaveLength(1)
+    const bActiveTab = activeWorkspaceTab(getController().workspaceTabs)
+    expect(bActiveTab).toMatchObject({
+      kind: 'chat',
+      chat: { agentRef: null, chatId: null },
+    })
+    expect(getController().lastActiveChatTabId).toBe(bActiveTab?.id)
+    expect(view.getByTestId('chat-page-pane')).toBeTruthy()
+    expect(view.queryByTestId('files-page-pane')).toBeNull()
+    expect(view.queryByTestId('settings-page-pane')).toBeNull()
+    expect(
+      (view.getByRole('textbox', { name: 'Draft in App pane' }) as HTMLTextAreaElement).value
+    ).toBe('')
+    expect(getComposerDraft('chat-a', 'agent-x', chatTab.id)).toBe('')
+  })
+
+  it('resolves an unavailable cross-team target without relaunching a closed origin app', async () => {
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.apps,
+    })
+    render(<App />)
+    await launchAppFromSidebar()
+    main.navigate('/tickets/saved')
+    await act(async () => emitCommand?.('app.backToApps'))
+    await waitFor(() => expect(embedState().owner).toBeNull())
+    await waitFor(() => expect(appTabs()[0]?.app?.savedRoutePath).toBe('/tickets/saved'))
+    expect(main.live()).toBeNull()
+    const listAppsCallsBeforeLink = listApps.mock.calls.length
+    listApps.mockResolvedValue({ apps: [] })
+
+    act(() => emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' }))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+
+    expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(1, {
+      teamId: 'team-b',
+      announce: true,
+    })
+    expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(2, {
+      teamId: 'team-a',
+      announce: true,
+    })
+    expect(listApps).toHaveBeenCalledTimes(listAppsCallsBeforeLink + 1)
+    expect(currentController.getCurrentTeamId()).toBe('team-a')
+    expect(currentController.pushToast).toHaveBeenCalledWith(
+      expect.stringContaining("You don't have access to this app in the linked team"),
+      'error'
+    )
+    expect(openSandboxUi()).toHaveBeenCalledOnce()
+    expect(main.live()).toBeNull()
+    expect(appTabs()[0]?.app?.savedRoutePath).toBe('/tickets/saved')
   })
 
   it('lets the server authorize a linked team even when the local directory is empty', async () => {
@@ -1484,6 +2734,62 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
   })
 
+  it('reports when explicit workspace navigation cancels a retrying app link', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    currentController = makeController({ initialExperienceLoading: false })
+    currentController.workspaceTabs = openFilesTab(currentController.workspaceTabs, {
+      id: 'files-tab-2',
+    })
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready: false,
+          phase: 'deploying',
+        },
+      ],
+    })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+    const listAppsCallsBeforeLink = listApps.mock.calls.length
+
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({ recipeNs: 'ns', recipeName: 'app' })
+    )
+    if (!target) throw new Error('the shared producer rejected the app-link fixture')
+    const link = new SandboxUiDeepLinkQueue().enqueue(target)
+    act(() => emitDeepLink?.(link))
+    await confirmPendingAppLink()
+    await waitFor(() =>
+      expect(currentController.pushToast).toHaveBeenCalledWith(
+        'Linked App is still starting up. This link will retry shortly.',
+        'info'
+      )
+    )
+
+    const previousIntent = currentController.navigationIntentSequence
+    act(() => workspaceTabStripHarness.props?.onSelect('chat-tab-1'))
+    await waitFor(() => expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1'))
+    expect(currentController.navigationIntentSequence).toBeGreaterThan(previousIntent)
+
+    await act(async () => {
+      vi.advanceTimersByTime(1_000)
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+
+    expect(acknowledgeDeepLink).toHaveBeenCalledOnce()
+    expect(listApps).toHaveBeenCalledTimes(listAppsCallsBeforeLink + 1)
+    expect(openSandboxUi()).not.toHaveBeenCalled()
+    expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1')
+    expect(currentController.pushToast).toHaveBeenCalledWith(
+      'App link canceled because you navigated elsewhere.',
+      'info'
+    )
+  })
+
   it('keeps the target team during cross-team starting app retries', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     let liveTeamId = 'team-a'
@@ -1523,20 +2829,22 @@ describe('App deep-link orchestration', () => {
         'info'
       )
     })
-    expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(liveTeamId).toBe('team-a')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
     expect(ensureTeamContext).toHaveBeenCalledWith({
       teamId: 'team-b',
       announce: true,
     })
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
 
     await act(async () => {
       vi.advanceTimersByTime(1_000)
       await Promise.resolve()
     })
     await waitFor(() => expect(currentController.pushToast).toHaveBeenCalledTimes(2))
-    expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(liveTeamId).toBe('team-a')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(4)
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(4, { teamId: 'team-a', announce: true })
 
     ready = true
     await act(async () => {
@@ -1547,7 +2855,7 @@ describe('App deep-link orchestration', () => {
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(ensureTeamContext).toHaveBeenCalledTimes(5)
   })
 
   it('defers a cross-team link whose open mounts and then fails, with its error', async () => {
@@ -1594,8 +2902,9 @@ describe('App deep-link orchestration', () => {
       expect.objectContaining({ reason: 'open_failed' }),
     ])
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
-    expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(liveTeamId).toBe('team-a')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
   })
 
   it('retries a failed cross-team native mount without treating its own restore as a user switch', async () => {
@@ -1635,8 +2944,10 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => {
       expect(currentController.pushToast).toHaveBeenCalledWith('native mount failed', 'error')
     })
-    expect(liveTeamId).toBe('team-b')
+    expect(liveTeamId).toBe('team-a')
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
 
     await act(async () => {
       vi.advanceTimersByTime(1_000)
@@ -1647,7 +2958,8 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(acknowledgeDeepLink).toHaveBeenCalledTimes(1)
     expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(ensureTeamContext).toHaveBeenCalledTimes(3)
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
     expect(currentController.pushToast).not.toHaveBeenCalledWith(
       expect.stringContaining('you switched teams'),
       'error'
@@ -1691,8 +3003,9 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => {
       expect(currentController.pushToast).toHaveBeenCalledWith('native mount failed', 'error')
     })
-    expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(liveTeamId).toBe('team-a')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
 
     liveTeamId = 'team-c'
     await act(async () => {
@@ -1711,10 +3024,10 @@ describe('App deep-link orchestration', () => {
     )
     expect(confirmDialogHarness.props?.title).toBe('App link could not be opened')
     expect(liveTeamId).toBe('team-c')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
-    // The launch put the shell on the Apps route via the store (observable that
-    // replaced the retired single `handleNavSelect(apps)` call).
-    expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
+    // The failed link restored the origin Chat tab; the manual team change and
+    // later retry must not let the older link select its target app tab.
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.chat)
     expect(openSandboxUi()).toHaveBeenCalledTimes(1)
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
 
@@ -1723,7 +3036,7 @@ describe('App deep-link orchestration', () => {
       await Promise.resolve()
     })
     expect(liveTeamId).toBe('team-c')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
   })
 
@@ -2112,5 +3425,29 @@ describe('App deep-link orchestration', () => {
     })
     // The pending link stays with main for the next renderer to pick up.
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+  })
+
+  it('resets suite state even when the body-empty postcondition fails', async () => {
+    const dispose = vi.spyOn(main, 'dispose')
+    const chatId = 'teardown-failure-chat'
+    const agentRef = 'teardown-failure-agent'
+    const leakedChild = document.createElement('div')
+    setComposerDraft(chatId, 'draft that teardown must clear', agentRef)
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    document.body.append(leakedChild)
+
+    try {
+      await expect(cleanupAppDeepLinkSuite()).rejects.toThrow(
+        'App deep-link suite body-empty postcondition'
+      )
+      expect(vi.isFakeTimers()).toBe(false)
+      expect(getComposerDraft(chatId, agentRef)).toBe('')
+      expect(dispose).toHaveBeenCalledOnce()
+    } finally {
+      leakedChild.remove()
+      if (vi.isFakeTimers()) vi.useRealTimers()
+      resetComposerDraftStore()
+      if (dispose.mock.calls.length === 0) await main.dispose()
+    }
   })
 })

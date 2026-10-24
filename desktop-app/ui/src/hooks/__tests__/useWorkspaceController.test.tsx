@@ -60,12 +60,14 @@ function renderControllerHarness() {
 
 function ControllerHarness() {
   const vm = useWorkspaceController()
+  const [sessionReloads, setSessionReloads] = React.useState(0)
 
   return (
     <div>
       <div data-testid="booting">{String(vm.booting)}</div>
       <div data-testid="busy">{String(vm.busy)}</div>
       <div data-testid="nav-item">{vm.navItem}</div>
+      <div data-testid="session-reloads">{sessionReloads}</div>
       {vm.toasts.map(toast => (
         <div
           key={toast.id}
@@ -90,7 +92,13 @@ function ControllerHarness() {
       <button type="button" onClick={() => vm.handleNavSelect('workflows')}>
         Open workflows
       </button>
-      <button type="button" onClick={() => void vm.loadSession()}>
+      <button
+        type="button"
+        onClick={async () => {
+          await vm.loadSession()
+          setSessionReloads(count => count + 1)
+        }}
+      >
         Reload session
       </button>
     </div>
@@ -179,7 +187,7 @@ describe('useWorkspaceController', () => {
     await waitFor(() => expect(screen.getByTestId('busy').textContent).toBe('false'))
   })
 
-  it('resets navigation to chat on a default session reload', async () => {
+  it('preserves an explicit route through default session reload navigation', async () => {
     const clerum = installClerumHarness()
 
     renderControllerHarness()
@@ -197,7 +205,8 @@ describe('useWorkspaceController', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Reload session' }))
 
-    await waitFor(() => expect(screen.getByTestId('nav-item').textContent).toBe('chat'))
+    await waitFor(() => expect(screen.getByTestId('session-reloads').textContent).toBe('1'))
+    expect(screen.getByTestId('nav-item').textContent).toBe('workflows')
   })
 
   it('shows a specific notification when password login is unauthorized', async () => {

@@ -18,6 +18,7 @@ export function GfsVideoPreviewBody({
   mimeType,
   onDownloadError,
   titleId,
+  titleActions,
   headerActions,
   headingLevel = 3,
 }: GfsVideoPreviewBodyProps) {
@@ -76,9 +77,12 @@ export function GfsVideoPreviewBody({
   return (
     <>
       <header className="da-gfs-video-preview-dialog__header">
-        <HeadingTag className="da-gfs-preview-title" id={headingId}>
-          {fileName}
-        </HeadingTag>
+        <div className="da-gfs-preview-title-row">
+          <HeadingTag className="da-gfs-preview-title" id={headingId}>
+            {fileName}
+          </HeadingTag>
+          {titleActions}
+        </div>
         {headerActions}
       </header>
       <div className="da-gfs-video-preview-dialog__body">

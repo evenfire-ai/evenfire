@@ -27,6 +27,7 @@ export const PROFILE_ROUTES = {
   invitation: (token: string) => `/invitations/${segment(token)}`,
   openDesktopApp: (recipeNs: string, recipeName: string) =>
     `/open/apps/${segment(recipeNs)}/${segment(recipeName)}`,
+  openGfsResource: (uri: string) => withQuery('/open/files', { uri }),
   members: {
     root: '/members',
     invite: '/members/invite',

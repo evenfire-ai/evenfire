@@ -53,6 +53,8 @@ export function GfsDelegationPanel({
   subjectOptions,
   subjectOptionsLoading = false,
   subjectOptionsError = null,
+  permissionPending = false,
+  permissionError = null,
   isDirectory,
   onGrant,
   onDetailViewChange,
@@ -72,7 +74,19 @@ export function GfsDelegationPanel({
   const canOfferEditor = (hasHost ? ['write'] : ['write', 'delete', 'manage_acl']).some(bit =>
     grantableBits.includes(bit)
   )
-  const roleOptions = canOfferEditor ? ROLE_OPTIONS : ROLE_OPTIONS.slice(0, 1)
+  const permissionUnavailable =
+    permissionPending || Boolean(permissionError) || !affordances.canDelegate
+  const roleOptions =
+    canOfferEditor || (permissionUnavailable && role === 'editor')
+      ? ROLE_OPTIONS
+      : ROLE_OPTIONS.slice(0, 1)
+  const permissionMessage = permissionPending
+    ? 'Checking permissions…'
+    : permissionError
+      ? `Could not verify sharing permissions: ${permissionError}`
+      : !affordances.canDelegate && subjectKeys.length > 0
+        ? 'Your sharing permission changed. Your edits are preserved, but cannot be submitted.'
+        : null
 
   useEffect(() => {
     onDetailViewChange?.(subjectKeys.length > 0)
@@ -101,7 +115,12 @@ export function GfsDelegationPanel({
   }
 
   // A Leader without manage_acl (canDelegate=false) sees no controls.
-  if (!affordances.canDelegate) {
+  if (
+    !affordances.canDelegate &&
+    subjectKeys.length === 0 &&
+    !permissionPending &&
+    !permissionError
+  ) {
     return (
       <div className="da-gfs-delegation__empty" role="note">
         <strong>Read-only access</strong>
@@ -139,6 +158,13 @@ export function GfsDelegationPanel({
         </p>
       ) : null}
       {subjectOptionsError ? <StatusBanner tone="error" text={subjectOptionsError} /> : null}
+      {permissionPending ? (
+        <p className="muted" role="status">
+          {permissionMessage}
+        </p>
+      ) : permissionMessage ? (
+        <StatusBanner tone="error" text={permissionMessage} />
+      ) : null}
       {subjectKeys.length > 0 ? (
         <div className="da-gfs-delegation__scope-actions">
           {isDirectory ? (
@@ -167,7 +193,7 @@ export function GfsDelegationPanel({
             <Button
               type="button"
               loading={busy}
-              disabled={busy || bits.length === 0}
+              disabled={busy || permissionUnavailable || bits.length === 0}
               onClick={() => run(() => onGrant(subjectKeys, bits, isDirectory ? inherit : false))}
             >
               Share

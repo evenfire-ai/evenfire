@@ -69,6 +69,7 @@ function renderDialog(
         target={target}
         initialCrumbs={[]}
         onMove={vi.fn(async () => undefined)}
+        onRetryPermissionCheck={vi.fn(async () => undefined)}
         onClose={vi.fn()}
         {...props}
       />

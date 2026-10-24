@@ -30,7 +30,8 @@ export default defineConfig({
     },
   },
   optimizeDeps: {
-    include: ['@clerum/gfs-interaction-policy'],
+    // These linked workspace packages are CommonJS; prebundle them for Vite's dev server.
+    include: ['@clerum/gfs-interaction-policy', '@clerum/desktop-app-links'],
   },
   server: {
     host: '127.0.0.1',

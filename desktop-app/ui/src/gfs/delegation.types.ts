@@ -20,6 +20,8 @@ export interface GfsDelegationPanelProps {
   subjectOptions: GfsDelegationSubjectOption[]
   subjectOptionsLoading?: boolean
   subjectOptionsError?: string | null
+  permissionPending?: boolean
+  permissionError?: string | null
   /** Directories offer the "Include contents" toggle (default ON); files always send inherit=false. */
   isDirectory: boolean
   onGrant: (subjectKeys: string[], bits: string[], inherit: boolean) => Promise<void>

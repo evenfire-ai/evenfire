@@ -34,7 +34,7 @@ describe('ipc rpc:prewarmHost handler', () => {
   beforeEach(() => {
     testState.handlers.clear()
     vi.clearAllMocks()
-    registerIpcHandlers(service as never)
+    registerIpcHandlers(service as never, async () => 0)
   })
 
   it('forwards sanitized args to the service and passes the structured result through', async () => {

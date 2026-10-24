@@ -196,8 +196,10 @@ export function GfsMoveDialog({
   sessionScope,
   initialCrumbs,
   onMove,
+  onRetryPermissionCheck,
   onClose,
   busy = false,
+  permissionStatus = null,
   onAuthorityFailure,
 }: GfsMoveDialogProps) {
   const initialDestination = initialCrumbs[initialCrumbs.length - 1]
@@ -231,6 +233,7 @@ export function GfsMoveDialog({
         : null
   )
   const [error, setError] = useState<string | null>(null)
+  const [permissionCheckSucceeded, setPermissionCheckSucceeded] = useState(false)
   const scope = sessionScope ?? 'anonymous'
 
   const accessibleQuery = useInfiniteQuery({
@@ -302,6 +305,7 @@ export function GfsMoveDialog({
 
   const selectFolder = (folder: GfsBrowserChild) => {
     setError(null)
+    setPermissionCheckSucceeded(false)
     setSelectedDestination({ resourceId: folder.resourceId, name: folder.name })
     setExpandedFolderIds(previous => {
       if (previous.has(folder.resourceId)) return previous
@@ -312,10 +316,23 @@ export function GfsMoveDialog({
   const commit = async () => {
     if (!selectedDestination) return
     setError(null)
+    setPermissionCheckSucceeded(false)
     try {
       await onMove(selectedDestination.resourceId, selectedDestination.name)
     } catch (moveError) {
       setError(errorMessage(moveError))
+    }
+  }
+
+  const retryPermissionCheck = async () => {
+    if (!selectedDestination) return
+    setError(null)
+    setPermissionCheckSucceeded(false)
+    try {
+      await onRetryPermissionCheck(selectedDestination.resourceId, selectedDestination.name)
+      setPermissionCheckSucceeded(true)
+    } catch (retryError) {
+      setError(errorMessage(retryError))
     }
   }
 
@@ -347,7 +364,27 @@ export function GfsMoveDialog({
           </span>
         </header>
         <div className="da-gfs-manage-dialog__body">
+          {permissionStatus === 'checking' ? (
+            <p className="muted" role="status">
+              Checking permissions…
+            </p>
+          ) : null}
           {error ? <StatusBanner tone="error" text={error} /> : null}
+          {permissionCheckSucceeded ? (
+            <p className="muted" role="status">
+              Permissions verified. Select Move to confirm.
+            </p>
+          ) : null}
+          {permissionStatus === 'failed' ? (
+            <Button
+              disabled={busy || !selectedDestination}
+              onClick={() => void retryPermissionCheck()}
+              size="sm"
+              variant="outline"
+            >
+              Retry permission check
+            </Button>
+          ) : null}
           {listError ? <StatusBanner tone="error" text={listError} /> : null}
           <div className="da-gfs-move-dialog__current-location">
             <span>Current location:</span>
@@ -432,7 +469,9 @@ export function GfsMoveDialog({
                 aria-label={
                   selectedDestination ? `Move here (${selectedDestination.name})` : 'Move'
                 }
-                disabled={!selectedDestination || pathPassesThroughTarget || isNoOpDestination}
+                disabled={
+                  busy || !selectedDestination || pathPassesThroughTarget || isNoOpDestination
+                }
                 loading={busy}
                 onClick={() => void commit()}
                 type="button"

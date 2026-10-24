@@ -17,8 +17,11 @@ export type GfsMoveDialogProps = {
   /** Commit the move; resolves on success (caller toasts) and throws the
    *  server verdict on denial so the dialog can surface it in place. */
   onMove: (destinationId: string, destinationName: string) => Promise<void>
+  /** Recheck both source and destination permissions without committing Move. */
+  onRetryPermissionCheck: (destinationId: string, destinationName: string) => Promise<void>
   onClose: () => void
   busy?: boolean
+  permissionStatus?: 'checking' | 'failed' | null
   /** Central fail-closed boundary (R4 spec §1): destination-listing authority
    *  failures must revoke the session even though the dialog owns these
    *  query observers. Policy verdicts return false and stay local. */

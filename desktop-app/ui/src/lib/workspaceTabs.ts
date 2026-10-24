@@ -150,6 +150,39 @@ export function newChatTab(
   return appendBlankChatTab(state, id, agentRef)
 }
 
+/**
+ * Resolve the exact blank-chat tab for a New Chat action. Drawer actions keep
+ * the non-chat workspace tab active while reserving/reusing the chat tab that
+ * the drawer's reconciliation will own; full-page actions activate it.
+ */
+export function prepareNewChatWorkspaceTab(
+  state: WorkspaceTabsState,
+  id: string,
+  agentRef: string | null,
+  keepActiveTab = false
+): { state: WorkspaceTabsState; tabId: string } {
+  if (!keepActiveTab) {
+    const next = newChatTab(state, id, agentRef)
+    return { state: next, tabId: next.activeTabId! }
+  }
+
+  const existingBlank = state.tabs.find(isBlankChatTab)
+  if (existingBlank) {
+    const nextTab = { ...existingBlank, chat: { agentRef, chatId: null } }
+    const tabs =
+      existingBlank.chat?.agentRef === agentRef
+        ? state.tabs
+        : state.tabs.map(tab => (tab.id === existingBlank.id ? nextTab : tab))
+    return {
+      state: tabs === state.tabs ? state : { tabs, activeTabId: state.activeTabId },
+      tabId: existingBlank.id,
+    }
+  }
+
+  const appended = appendBlankChatTab(state, id, agentRef)
+  return { state: { tabs: appended.tabs, activeTabId: state.activeTabId }, tabId: id }
+}
+
 /** Apps ALWAYS open a new tab, keyed by tab-id — no dedupe by appRef (R9). */
 export function openAppTab(state: WorkspaceTabsState, input: OpenAppTabInput): WorkspaceTabsState {
   const tab: WorkspaceTab = {
@@ -246,6 +279,16 @@ export function openFilesTab(
       activeTabId: existing.id,
     }
   }
+  return createFilesTab(state, { ...input, path, ...(title ? { title } : {}) })
+}
+
+/** Create a distinct Files owner even when another tab already has this path. */
+export function createFilesTab(
+  state: WorkspaceTabsState,
+  input: OpenFilesTabInput
+): WorkspaceTabsState {
+  const path = input.path ?? null
+  const title = input.title?.trim()
   const tab: WorkspaceTab = {
     id: input.id,
     kind: 'files',

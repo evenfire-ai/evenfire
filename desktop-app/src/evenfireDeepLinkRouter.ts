@@ -10,12 +10,15 @@ type EvenfireDeepLinkRouterOptions<TWindow extends RendererTarget> = {
   focusMainWindow: () => void
   getWindow: () => TWindow | null
   handleSandboxUiDeepLink: (rawUrl: string) => boolean
+  handleGfsResourceDeepLink: (rawUrl: string) => boolean
   isRendererReady: () => boolean
   logout: () => Promise<unknown>
+  gfsResourceDeepLinkHost: string
   maxPendingUrls?: number
   requestMainWindow: () => void
   sandboxUiDeepLinkHost: string
   shouldAcceptSandboxUiProtocolLink: (rawUrl: string) => boolean
+  shouldAcceptGfsResourceProtocolLink: (rawUrl: string) => boolean
 }
 
 export type EvenfireDeepLinkRouter = {
@@ -32,6 +35,7 @@ export function createEvenfireDeepLinkRouter<TWindow extends RendererTarget>(
   const pendingEvenfireUrls: string[] = []
   const appProtocol = options.appProtocol.replace(/:$/, '').toLowerCase()
   const sandboxUiDeepLinkHost = options.sandboxUiDeepLinkHost.toLowerCase()
+  const gfsResourceDeepLinkHost = options.gfsResourceDeepLinkHost.toLowerCase()
   const maxPendingUrls = options.maxPendingUrls ?? DEFAULT_MAX_PENDING_EVENFIRE_URLS
 
   const getReadyWindow = () => {
@@ -97,6 +101,12 @@ export function createEvenfireDeepLinkRouter<TWindow extends RendererTarget>(
     if (hostname === sandboxUiDeepLinkHost) {
       if (!options.shouldAcceptSandboxUiProtocolLink(rawUrl)) return
       options.handleSandboxUiDeepLink(rawUrl)
+      return
+    }
+
+    if (hostname === gfsResourceDeepLinkHost) {
+      if (!options.shouldAcceptGfsResourceProtocolLink(rawUrl)) return
+      options.handleGfsResourceDeepLink(rawUrl)
       return
     }
 

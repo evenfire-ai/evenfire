@@ -1,6 +1,13 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, waitFor } from '@testing-library/react'
+import { DESKTOP_ROUTES } from '../../constants/navigation'
+import {
+  getComposerDraft,
+  resetComposerDraftStore,
+  setComposerDraft,
+} from '../../lib/composerDraftStore'
+import { activeWorkspaceTab } from '../../lib/workspaceTabs'
 import {
   HARNESS_ME,
   installAppControllerClerum,
@@ -22,6 +29,7 @@ describe('useAppController team context', () => {
     unmount = null
     vi.restoreAllMocks()
     uninstallMockClerum()
+    resetComposerDraftStore()
   })
 
   it('switches back when stale directory data disagrees with the authenticated team', async () => {
@@ -124,5 +132,42 @@ describe('useAppController team context', () => {
     expect(handle.switchTeam).toHaveBeenCalledWith('team-2')
     await waitFor(() => expect(app.result.current.currentTeamId).toBe('team-2'))
     expect(await fencedTeamId()).toBe('team-2')
+  })
+
+  it('preserves the same-principal workspace and drafts across a team switch', async () => {
+    const { handle } = installAppControllerClerum()
+    const app = renderAppController()
+    unmount = app.unmount
+
+    await waitFor(() => expect(app.result.current.isAuthenticated).toBe(true))
+    await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
+
+    act(() => {
+      app.result.current.handleSelectChatAgent('agent-x', {
+        chatId: 'chat-1',
+        title: 'Conversation',
+        selectLatest: false,
+      })
+      app.result.current.openFilesSection('gfs://main/0123456789abcdef0123456789abcdef')
+    })
+    const before = app.result.current.workspaceTabs
+    const activeBefore = activeWorkspaceTab(before)
+    expect(activeBefore?.kind).toBe('files')
+    const chatTab = before.tabs.find(tab => tab.kind === 'chat' && tab.chat?.chatId === 'chat-1')
+    expect(chatTab?.kind).toBe('chat')
+    if (chatTab?.kind !== 'chat') throw new Error('expected the producer-created chat tab')
+    expect(setComposerDraft('chat-1', 'unsent workspace draft', 'agent-x', chatTab.id)).toBe(true)
+
+    await act(async () => {
+      await app.result.current.handleEnsureTeamContext({ teamId: 'team-2' })
+    })
+
+    expect(handle.switchTeam).toHaveBeenCalledWith('team-2')
+    expect(app.result.current.workspaceTabs).toEqual(before)
+    expect(activeWorkspaceTab(app.result.current.workspaceTabs)?.id).toBe(activeBefore?.id)
+    expect(app.result.current.selectedAgent).toBe('agent-x')
+    expect(getComposerDraft('chat-1', 'agent-x', chatTab.id)).toBe('unsent workspace draft')
+    expect(app.result.current.currentTeamId).toBe('team-2')
+    expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.files)
   })
 })

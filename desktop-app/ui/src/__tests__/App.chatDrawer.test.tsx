@@ -7,17 +7,20 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useAppController } from '@hooks/useAppController'
+import { getComposerDraft, resetComposerDraftStore } from '@lib/composerDraftStore'
 import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
 import { desktopQueryClient } from '@lib/queryClient'
 import {
   activeWorkspaceTab,
+  createEmptyWorkspaceTabsState,
   createWorkspaceTabsState,
   newChatTab,
   openChatTab,
   openFilesTab,
   openPreviewTab,
   openSettingsTab,
+  selectWorkspaceTab,
 } from '@lib/workspaceTabs'
 import { mapKindToRoute, settingsSectionForRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
@@ -25,6 +28,8 @@ import { USER_SCOPE_INVALIDATED } from '@/gfs/__fixtures__/entityChangeFixtures'
 import {
   openGfsResourcePayload,
   resolveDeniedMessage,
+  resolveResource,
+  resolvedDirectory,
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import type { AppNotification } from '@/uiTypes'
@@ -75,6 +80,7 @@ function activateChatState(
 // is stubbed to null / prop-capture.
 const sidebarHarness = vi.hoisted(() => ({
   props: null as null | {
+    onNewChat?: () => void
     onOpenSandboxUiApp?: (app: { appRef: string; label: string; defaultPath: string }) => void
   },
 }))
@@ -138,15 +144,39 @@ vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
 // than hand-written controller state.
 vi.mock('@pages/ChatPage', async () => {
   const { useChatComposerStateContext } = await import('@contexts/ChatComposerStateContext')
+  const { useNavigationContext } = await import('@contexts/NavigationContext')
+  const { useComposerDraft } = await import('@hooks/useComposerDraft')
   return {
     ChatPage: () => {
-      const { activeChatId, composerFocusRequestId } = useChatComposerStateContext()
+      const { activeChatId, composerFocusRequestId, workspaceChatTabId } =
+        useChatComposerStateContext()
+      const { selectedAgent } = useNavigationContext()
+      const [draft, setDraft, ownerConflictTabId] = useComposerDraft(
+        activeChatId,
+        selectedAgent ?? undefined,
+        workspaceChatTabId
+      )
       return (
         <div
           data-testid="chat-page-surface"
           data-active-chat-id={activeChatId ?? ''}
           data-composer-focus-request-id={composerFocusRequestId}
-        />
+          data-workspace-chat-tab-id={workspaceChatTabId ?? ''}
+          data-composer-draft={draft}
+        >
+          <textarea
+            aria-label="App drawer composer"
+            disabled={Boolean(ownerConflictTabId)}
+            onChange={event => setDraft(event.currentTarget.value)}
+            value={draft}
+          />
+          {ownerConflictTabId ? (
+            <div role="alert">Another workspace tab owns this draft.</div>
+          ) : null}
+          <button type="button" onClick={() => setDraft('failed-send recovery')}>
+            Write tabless recovery draft
+          </button>
+        </div>
       )
     },
   }
@@ -332,6 +362,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     showAppsPicker,
     clearAppsPicker,
     activateWorkspaceChatTab: noop,
+    beginUserNavigationIntent: vi.fn(),
     openFilesSection,
     openPreviewSection,
     lastActiveChatTabId: null,
@@ -452,6 +483,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
   afterEach(() => {
     cleanup()
     delete (window as { clerum?: unknown }).clerum
+    resetComposerDraftStore()
   })
 
   it('reopening the drawer keeps the switched-to chat instead of re-seeding the origin', () => {
@@ -486,8 +518,13 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('First chat')
 
     // Switch to chat-2 in the drawer switcher.
+    const beginUserNavigationIntent = currentController.beginUserNavigationIntent as ReturnType<
+      typeof vi.fn
+    >
+    const intentAdvancesBeforeSwitch = beginUserNavigationIntent.mock.calls.length
     act(() => fireEvent.click(screen.getByRole('button', { name: 'Open chats' })))
     act(() => fireEvent.click(screen.getByRole('option', { name: 'Second chat' })))
+    expect(beginUserNavigationIntent).toHaveBeenCalledTimes(intentAdvancesBeforeSwitch + 1)
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
 
     // Close the drawer, then reopen it.
@@ -498,6 +535,36 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
 
     // Reopen must preserve chat-2, not jump back to the chat-1 origin.
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
+  })
+
+  it('binds a Files New Chat prefill to the exact chat tab created by the App', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('0123456789abcdef0123456789abcdef', 'Shared folder')
+    )
+    let workspaceTabs = openFilesTab(createEmptyWorkspaceTabsState(), {
+      id: 'files-resource-tab',
+      path: folder.gfsUri,
+    })
+    workspaceTabs = openFilesTab(workspaceTabs, { id: 'files-empty-tab', path: null })
+    workspaceTabs = selectWorkspaceTab(workspaceTabs, 'files-resource-tab')
+    currentController = makeController({
+      selectedAgent: 'agent-a',
+      activeChatId: null,
+      workspaceTabs,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+
+    render(<App />)
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    act(() => sidebarHarness.props?.onNewChat?.())
+
+    const composer = await screen.findByTestId('chat-page-surface')
+    const destinationTabId = composer.getAttribute('data-workspace-chat-tab-id')
+    expect(destinationTabId).toBeTruthy()
+    await waitFor(() => expect(composer.getAttribute('data-composer-draft')).toBe(folder.gfsUri))
+    expect(getComposerDraft(null, 'agent-a', destinationTabId!)).toBe(folder.gfsUri)
+    expect(getComposerDraft(null, 'agent-a')).toBe('')
   })
 
   it('hides already-delivered notifications after a Host is revoked', () => {
