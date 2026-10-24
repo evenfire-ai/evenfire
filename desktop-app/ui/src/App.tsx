@@ -168,6 +168,8 @@ const SANDBOX_UI_DEEP_LINK_MANUAL_TEAM_CHANGE_MESSAGE =
   'App link paused because you switched teams. Retry to open it from the current team, or dismiss it.'
 const SANDBOX_UI_DEEP_LINK_ROLLBACK_RETRY_MESSAGE =
   'Could not finish refreshing the previous team. Retry this app link.'
+const SANDBOX_UI_DEEP_LINK_CLOSE_RETRY_MESSAGE =
+  'The current app could not be safely closed. Retry this app link.'
 
 // Every reveal gesture launches whatever app tab its commit leaves active.
 const ACTIVE_TAB_LAUNCH: EmbedLaunchPlan = { kind: 'activeTab' }
@@ -1929,15 +1931,11 @@ export function App() {
   )
 
   const markSandboxUiDeepLinkRetryableFailure = React.useCallback(
-    (linkId: number) => {
+    (linkId: number, message = SANDBOX_UI_DEEP_LINK_ROLLBACK_RETRY_MESSAGE) => {
       if (!pendingSandboxUiDeepLinksRef.current.some(item => item.link.id === linkId)) return
       clearSandboxUiDeepLinkProcessing(linkId)
       setPendingSandboxUiDeepLinkState(
-        failPendingSandboxUiDeepLink(
-          pendingSandboxUiDeepLinksRef.current,
-          linkId,
-          SANDBOX_UI_DEEP_LINK_ROLLBACK_RETRY_MESSAGE
-        )
+        failPendingSandboxUiDeepLink(pendingSandboxUiDeepLinksRef.current, linkId, message)
       )
     },
     [clearSandboxUiDeepLinkProcessing, setPendingSandboxUiDeepLinkState]
@@ -2497,7 +2495,10 @@ export function App() {
                 'Could not open app link: the current app could not be safely closed.',
                 'error'
               )
-              await acknowledgeSandboxUiDeepLink(pending.link.id)
+              markSandboxUiDeepLinkRetryableFailure(
+                pending.link.id,
+                SANDBOX_UI_DEEP_LINK_CLOSE_RETRY_MESSAGE
+              )
               return
             }
             if (handoff === 'closed' || handoff === 'released' || handoff === 'no-owner') {

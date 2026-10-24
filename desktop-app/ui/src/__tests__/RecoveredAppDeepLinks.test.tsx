@@ -4505,12 +4505,20 @@ describe('App deep-link orchestration', () => {
     expect(ensureTeamContext).toHaveBeenCalledTimes(2)
   })
 
-  it('preserves the live origin app when native close rejects before a cross-team handoff', async () => {
-    const ensureTeamContext = vi.fn(async () => false)
+  it('retries a producer-backed app link after Chat handoff close rejects', async () => {
+    let liveTeamId = 'team-a'
+    const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
+      if (!teamId || teamId === liveTeamId) return false
+      liveTeamId = teamId
+      return true
+    })
     listApps.mockResolvedValue({ apps: [READY_APP] })
+    const queue = new SandboxUiDeepLinkQueue()
+    acknowledgeDeepLink.mockImplementation(async (id: number) => queue.acknowledge(id))
     currentController = makeController({
       initialExperienceLoading: false,
       handleEnsureTeamContext: ensureTeamContext,
+      getCurrentTeamId: () => liveTeamId,
     })
     render(<App />)
     await launchAppFromSidebar()
@@ -4526,34 +4534,82 @@ describe('App deep-link orchestration', () => {
     await waitForMounted()
     await waitFor(() => expect(main.live()?.routePath).toBe('/tickets/live'))
 
-    const originWorkspace = currentController.workspaceTabs
     const originLiveView = main.live()
-    expect(originLiveView?.appRef).toBe('ns/app')
-    expect(originLiveView?.launchId).toBeDefined()
-
-    closeSandboxUi.mockRejectedValue(new Error('native close rejected'))
+    if (!originLiveView) throw new Error('The producer did not mount the origin app')
+    const originLaunchId = originLiveView.launchId
     closeSandboxUi.mockClear()
-    getSandboxUiLocation.mockClear()
+    closeSandboxUi.mockRejectedValueOnce(new Error('native close rejected while selecting Chat'))
+    await selectTab(0)
+    await waitFor(() =>
+      expect(activeWorkspaceTab(currentController.workspaceTabs)?.kind).toBe('chat')
+    )
+    expect(closeSandboxUi).toHaveBeenCalledOnce()
+    expect(main.live()).toEqual(originLiveView)
+    expect(embedState().owner).toBeNull()
+    expect(embedState().views.get(originLaunchId)?.phase).toBe('closeFailed')
+
+    const chatWorkspace = currentController.workspaceTabs
+    closeSandboxUi.mockClear()
+    closeSandboxUi.mockRejectedValueOnce(new Error('native close rejected during handoff'))
     ensureTeamContext.mockClear()
     listApps.mockClear()
-    act(() => emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' }))
+    getSandboxUiLocation.mockClear()
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({ recipeNs: 'ns', recipeName: 'app', teamId: 'team-b' })
+    )
+    if (!target) throw new Error('The production app-link parser rejected the fixture URL')
+    const link = queue.enqueue(target)
+    act(() => emitDeepLink?.(link))
     await confirmPendingAppLink()
+    await waitFor(() => expect(closeSandboxUi).toHaveBeenCalledOnce())
+    expect(closeSandboxUi).toHaveBeenCalledWith({ launchId: originLaunchId })
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
 
-    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    await waitFor(() =>
+      expect(confirmDialogHarness.props?.title).toBe('App link could not be opened')
+    )
+    expect(confirmDialogHarness.mountedCount).toBeGreaterThan(0)
+    expect(confirmDialogHarness.props?.confirmLabel).toBe('Retry')
+    expect(renderToStaticMarkup(<>{confirmDialogHarness.props?.body}</>)).toContain(
+      'The current app could not be safely closed. Retry this app link.'
+    )
+    expect(queue.list()).toEqual([link])
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
     expect(closeSandboxUi).toHaveBeenCalledOnce()
-    expect(getSandboxUiLocation).not.toHaveBeenCalled()
     expect(ensureTeamContext).not.toHaveBeenCalled()
     expect(listApps).not.toHaveBeenCalled()
     expect(currentController.pushToast).toHaveBeenCalledWith(
       'Could not open app link: the current app could not be safely closed.',
       'error'
     )
-    expect(currentController.workspaceTabs).toEqual(originWorkspace)
-    expect(activeWorkspaceTab(currentController.workspaceTabs)?.kind).toBe('app')
-    expect(activeWorkspaceTab(currentController.workspaceTabs)?.app?.savedRoutePath).toBe(
-      '/tickets/live'
-    )
+    expect(getSandboxUiLocation).not.toHaveBeenCalled()
+    expect(currentController.workspaceTabs).toEqual(chatWorkspace)
+    expect(activeWorkspaceTab(currentController.workspaceTabs)?.kind).toBe('chat')
+    expect(embedState().owner).toBeNull()
+    expect(embedState().views.get(originLaunchId)?.phase).toBe('closeFailed')
     expect(main.live()).toEqual(originLiveView)
+
+    const opensBeforeRetry = openSandboxUi.mock.calls.length
+    await act(async () => {
+      confirmDialogHarness.props?.onConfirm()
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(liveTeamId).toBe('team-b'))
+    await waitFor(() => expect(openSandboxUi).toHaveBeenCalledTimes(opensBeforeRetry + 1))
+    await waitForMounted()
+    await waitFor(() => expect(queue.list()).toEqual([]))
+    expect(acknowledgeDeepLink).toHaveBeenCalledExactlyOnceWith(link.id)
+    expect(main.reported('sandboxUi:released')).toEqual(
+      expect.arrayContaining([expect.objectContaining({ launchId: originLaunchId })])
+    )
+    expect(ensureTeamContext).toHaveBeenCalledExactlyOnceWith({
+      teamId: 'team-b',
+      announce: true,
+    })
+    expect(main.live()?.appRef).toBe('ns/app')
+    expect(main.live()?.launchId).not.toBe(originLaunchId)
+    expect(openSandboxUi).toHaveBeenCalledTimes(opensBeforeRetry + 1)
   })
 
   it('keeps two tabs of the same app on their own routes when alternating (§5)', async () => {
