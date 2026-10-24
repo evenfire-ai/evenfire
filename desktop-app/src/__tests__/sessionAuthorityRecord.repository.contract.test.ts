@@ -39,6 +39,33 @@ import {
   sessionPersistenceCandidateHash,
 } from '../sessionPersistenceJournal.js'
 
+// Keep repository state-machine tests on real temporary files without launching PowerShell for
+// every metadata move on Windows. The required native durability suite separately exercises the
+// production MoveFileExW implementation and its write-through behavior.
+vi.mock('../windowsSessionAuthorityFileOps.js', async () => {
+  const actual = await vi.importActual<typeof import('../windowsSessionAuthorityFileOps.js')>(
+    '../windowsSessionAuthorityFileOps.js'
+  )
+  const fileSystem = await import('node:fs')
+
+  return {
+    ...actual,
+    moveSessionAuthorityFileDurablySync(
+      source: string,
+      destination: string,
+      replaceExisting = false
+    ): void {
+      if (replaceExisting) {
+        fileSystem.renameSync(source, destination)
+        return
+      }
+
+      fileSystem.linkSync(source, destination)
+      fileSystem.unlinkSync(source)
+    },
+  }
+})
+
 const ENV_KEY = 'repository_test-0123456789ab'
 const ABSENT_MARKER_DIGEST = sha256('session-marker:absent:v1')
 const ABSENT_JOURNAL_BYTES = 'session-persistence-journal:absent:v0'
