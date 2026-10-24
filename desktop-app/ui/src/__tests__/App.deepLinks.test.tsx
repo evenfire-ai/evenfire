@@ -1804,7 +1804,7 @@ describe('App deep-link orchestration', () => {
     ).toMatchObject({ appRef: 'ns/app', savedRoutePath: '/tickets/origin' })
   })
 
-  it('does not switch teams or relaunch when the active owner close is rejected', async () => {
+  it('keeps a link retryable when the active owner close is rejected', async () => {
     listApps.mockResolvedValue({ apps: [READY_APP] })
     currentController = makeController({
       initialExperienceLoading: false,
@@ -1818,7 +1818,13 @@ describe('App deep-link orchestration', () => {
 
     act(() => emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' }))
     await confirmPendingAppLink()
-    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    await waitFor(() =>
+      expect(currentController.pushToast).toHaveBeenCalledWith(
+        'Could not open app link: the current app could not be safely closed.',
+        'error'
+      )
+    )
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
     expect(currentController.pushToast).toHaveBeenCalledWith(
       'The current app could not be closed safely. Try launching it again.',
       'error'
