@@ -80,7 +80,10 @@ describe('session-authority durable file operations', () => {
       createSessionAuthorityFileDurablySync(authority, 'candidate-owner')
     )
 
-    expect(error).toMatchObject({ outcome: 'rejected', code: 'EEXIST' })
+    // MoveFileExW exposes a Boolean result here, so Windows deliberately reports
+    // an opaque native rejection rather than inferring a possibly stale error code.
+    const expectedCode = process.platform === 'win32' ? 'EIO' : 'EEXIST'
+    expect(error).toMatchObject({ outcome: 'rejected', code: expectedCode })
     expect(fs.readFileSync(authority, 'utf8')).toBe('existing-owner')
     expect(fs.readdirSync(root)).toEqual(['authority.record'])
   })
