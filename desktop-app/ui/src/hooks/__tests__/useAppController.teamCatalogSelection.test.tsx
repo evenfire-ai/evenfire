@@ -189,7 +189,7 @@ describe('useAppController team-scoped catalog selection', () => {
   it.each(['team.switch', 'same-principal loadSession'] as const)(
     'blocks the retained unavailable agent after %s until an agent in Team B is selected',
     async transition => {
-      const { clerum, handle } = installAppControllerClerum({
+      const { handle } = installAppControllerClerum({
         me: { teamId: 'team-a', teamName: 'Team A' },
         teamDirectory: { items: [], currentTeamId: 'team-a' },
       })
