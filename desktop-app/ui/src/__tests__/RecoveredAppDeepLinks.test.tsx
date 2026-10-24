@@ -3635,8 +3635,14 @@ describe('App deep-link orchestration', () => {
     const actual =
       await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
     const realController: { current: AppController | null } = { current: null }
+    const restoreRequests: number[] = []
     vi.mocked(useAppController).mockImplementation(() => {
       realController.current = actual.useAppController()
+      const restoreWorkspaceNavigation = realController.current.restoreWorkspaceNavigation
+      realController.current.restoreWorkspaceNavigation = (snapshot, expectedIntentSequence) => {
+        restoreRequests.push(expectedIntentSequence)
+        return restoreWorkspaceNavigation(snapshot, expectedIntentSequence)
+      }
       return realController.current
     })
     const queue = new SandboxUiDeepLinkQueue()
@@ -3674,6 +3680,7 @@ describe('App deep-link orchestration', () => {
     expect(realController.current?.currentTeamId).toBe('team-b')
     expect(realController.current?.navItem).toBe(DESKTOP_ROUTES.settings)
     expect(activeWorkspaceTab(realController.current!.workspaceTabs)?.kind).toBe('settings')
+    expect(restoreRequests).toEqual([])
     expect(main.live()).toBeNull()
   })
 
