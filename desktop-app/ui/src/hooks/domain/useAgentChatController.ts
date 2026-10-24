@@ -696,6 +696,7 @@ export function useAgentChatController({
   const activityUnsubByAgentRef = useRef<Record<string, () => Promise<void>>>({})
   const activityInFlightByAgentRef = useRef<Record<string, string[]>>({})
   const activityTaskToMessageByAgentRef = useRef<Record<string, Record<string, string>>>({})
+  const activityStreamGenerationRef = useRef(0)
   const agentSendInFlightRef = useRef(false)
   const agentSendSetupOwnerRef = useRef<{ id: symbol; agentRef: string } | null>(null)
   // (Phase-2 AbortController + `recoveringTaskIdByKeyRef` removed in Fase 5b: the
@@ -1164,11 +1165,33 @@ export function useAgentChatController({
 
   const stopAllActivityStreams = useCallback(async () => {
     const streams = Object.values(activityUnsubByAgentRef.current)
-    await Promise.all(streams.map(stop => stop().catch(() => undefined)))
+    activityStreamGenerationRef.current += 1
     activityUnsubByAgentRef.current = {}
     activityInFlightByAgentRef.current = {}
     activityTaskToMessageByAgentRef.current = {}
+    await Promise.all(streams.map(stop => stop().catch(() => undefined)))
   }, [])
+
+  const teardownTeamActivity = useCallback(async () => {
+    // Fence async sends, task terminals, and reconciliation before stopping any
+    // native subscriptions. Same-principal navigation and composer drafts remain
+    // owned by their workspace tabs across the switch.
+    sendScopeGeneration.current += 1
+    agentSendSetupOwnerRef.current = null
+    agentSendInFlightRef.current = false
+    setAgentSending(false)
+    tracker.releaseAll()
+    fsm.reset()
+    reconcileChatRef.current?.reset()
+    resetReplyNotificationDedupe()
+    retainedSends.resetRetainedSendStore()
+    parkedRestorationsRef.current.clear()
+    setActivityByAgentMessage({})
+    setProgressByAgentMessage({})
+    setAgentError(null)
+    setFailedAgentSend(null)
+    await stopAllActivityStreams()
+  }, [fsm, resetReplyNotificationDedupe, retainedSends, stopAllActivityStreams, tracker])
 
   const resetChat = useCallback(() => {
     beginSelectionIntent()
@@ -2021,10 +2044,12 @@ export function useAgentChatController({
   const ensureAgentActivityStream = useCallback(
     async (agentName: string) => {
       if (activityUnsubByAgentRef.current[agentName]) return
+      const streamGeneration = activityStreamGenerationRef.current
       const unsubscribe = await window.clerum.rpc.subscribeHostActivity(
         agentName,
         [agentName],
         event => {
+          if (activityStreamGenerationRef.current !== streamGeneration) return
           const typed = event as HostActivityStreamEvent
           const inFlight = activityInFlightByAgentRef.current[agentName] || []
           if (typed.type === 'open') {
@@ -2062,6 +2087,10 @@ export function useAgentChatController({
           }
         }
       )
+      if (activityStreamGenerationRef.current !== streamGeneration) {
+        await unsubscribe().catch(() => undefined)
+        return
+      }
       activityUnsubByAgentRef.current[agentName] = unsubscribe
     },
     [resolveActivityMessageId, updateMessageActivity]
@@ -4537,6 +4566,7 @@ export function useAgentChatController({
     switchToChat,
     reconcileChat,
     stopAllActivityStreams,
+    teardownTeamActivity,
     resetChat,
     setPendingChatSelection,
     clearActiveChat,

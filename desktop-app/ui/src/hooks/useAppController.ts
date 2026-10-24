@@ -733,10 +733,10 @@ export function useAppController() {
         if (!sessionState.authenticated || !sessionState.me) {
           throw new Error('Team switch ended without an authenticated session')
         }
-        // Team is a data scope, not a principal boundary: stop old-team activity
-        // streams and let the team-scoped stores revalidate without clearing the
-        // user's tabs, selection, focus, or drafts.
-        await chat.stopAllActivityStreams()
+        // Team is a data scope, not a principal boundary. Terminate Team A's
+        // task/FSM/reconcile ownership while preserving workspace tabs, focus,
+        // selection, and local drafts for this same principal.
+        await chat.teardownTeamActivity()
         // The connectors panel key is identity-unscoped, and its payload carries
         // per-connector OAuth authorization state — drop it here (before the
         // refresh below repopulates) so the previous team's grants cannot show,
@@ -769,7 +769,7 @@ export function useAppController() {
       auth.setEmail,
       auth.setIsAuthenticated,
       auth.setMe,
-      chat.stopAllActivityStreams,
+      chat.teardownTeamActivity,
       connectorsData.reset,
       fullSetStatus,
       refreshAuthenticatedData,
