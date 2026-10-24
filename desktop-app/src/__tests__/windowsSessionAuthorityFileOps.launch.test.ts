@@ -61,15 +61,33 @@ describe('Windows session-authority native file-operation launcher', () => {
     expect(args[4]).toContain('[scriptblock]::Create($sourceText)')
     expect(args[4].length).toBeLessThan(256)
     expect(options.input).toContain('MoveFileEx')
+    expect(options.input).toContain('$flags = [uint32]8')
+    expect(options.input).toContain('$flags = [uint32]9')
+    expect(options.input).toContain('EVENFIRE_SESSION_AUTHORITY_PHASE:')
     expect(options.input.length).toBeGreaterThan(512)
     expect(options.env.EVENFIRE_TEST_SECRET).toBeUndefined()
     expect(Object.keys(options.env).sort()).toEqual([
+      'COMSPEC',
       'EVENFIRE_SESSION_AUTHORITY_FILE_OPS',
+      'PATH',
+      'PATHEXT',
+      'SystemDrive',
       'SystemRoot',
       'TEMP',
       'TMP',
       'WINDIR',
     ])
+    expect(options.env.PATH).toBe(
+      [
+        'C:\\Windows\\System32',
+        'C:\\Windows\\System32\\Wbem',
+        'C:\\Windows\\System32\\WindowsPowerShell\\v1.0',
+        'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319',
+        'C:\\Windows\\Microsoft.NET\\Framework\\v4.0.30319',
+      ].join(';')
+    )
+    expect(options.env.COMSPEC).toBe('C:\\Windows\\System32\\cmd.exe')
+    expect(options.env.SystemDrive).toBe('C:')
     expect(options.env.EVENFIRE_SESSION_AUTHORITY_FILE_OPS).toBeTruthy()
     expect(options.timeout).toBe(30_000)
 
@@ -123,7 +141,13 @@ describe('Windows session-authority native file-operation launcher', () => {
 
     const timeout = Object.assign(new Error('private command and path'), { code: 'ETIMEDOUT' })
     spawnSyncMock.mockReturnValue(
-      processResult({ status: null, signal: 'SIGTERM', stdout: null, error: timeout })
+      processResult({
+        status: null,
+        signal: 'SIGTERM',
+        stdout: null,
+        stderr: 'EVENFIRE_SESSION_AUTHORITY_PHASE:native-move',
+        error: timeout,
+      })
     )
     const interruption = captureError(() => {
       moveSessionAuthorityFileDurablySync(
@@ -135,6 +159,7 @@ describe('Windows session-authority native file-operation launcher', () => {
     expect(interruption.diagnostic).toMatchObject({
       phase: 'process-interrupted',
       processErrorCode: 'ETIMEDOUT',
+      verifierPhase: 'native-move',
     })
     expect(interruption.message).not.toContain('private command')
   })

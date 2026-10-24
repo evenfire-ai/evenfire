@@ -5,10 +5,13 @@ const REQUEST_ENV = 'EVENFIRE_SESSION_AUTHORITY_FILE_OPS'
 const POWERSHELL_OPERATION_TIMEOUT_MS = 30_000
 const LAUNCHER = '$sourceText = [Console]::In.ReadToEnd(); & ([scriptblock]::Create($sourceText))'
 const ARGS = ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', LAUNCHER] as const
+const VERIFIER_PHASES = new Set(['compile-native-move', 'validate-request', 'native-move'])
 const SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $phase = 'compile-native-move'
+$null = [Console]::Error.WriteLine('EVENFIRE_SESSION_AUTHORITY_PHASE:' + $phase)
+[Console]::Error.Flush()
 $code = @'
 using System;
 using System.Runtime.InteropServices;
@@ -24,6 +27,8 @@ public static class EvenfireSessionAuthorityMove {
 try {
   Add-Type -TypeDefinition $code -Language CSharp -ErrorAction Stop
   $phase = 'validate-request'
+  [Console]::Error.WriteLine('EVENFIRE_SESSION_AUTHORITY_PHASE:' + $phase)
+  [Console]::Error.Flush()
   $payload = [Environment]::GetEnvironmentVariable('EVENFIRE_SESSION_AUTHORITY_FILE_OPS')
   if (-not $payload) { throw 'request-missing' }
   $request = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload)) |
@@ -34,6 +39,8 @@ try {
   $flags = [uint32]8
   if ($request.replaceExisting -eq $true) { $flags = [uint32]9 }
   $phase = 'native-move'
+  [Console]::Error.WriteLine('EVENFIRE_SESSION_AUTHORITY_PHASE:' + $phase)
+  [Console]::Error.Flush()
   $errorCode = [EvenfireSessionAuthorityMove]::Move(
     [string]$request.source, [string]$request.destination, $flags)
   if ($errorCode -eq 0) {
@@ -139,11 +146,13 @@ function diagnostic(
     stdoutPresent: Boolean(result.stdout),
     stderrPresent: Boolean(result.stderr),
   }
+  const verifierPhase = observedVerifierPhase(result)
   const codeForError = safeProcessErrorCode ?? code ?? 'EIO'
   if (result.signal || errorCode === 'ETIMEDOUT' || (result.error && started)) {
     return new SessionAuthorityFileMutationError(codeForError, 'indeterminate', {
       ...diagnosticFields,
       phase: 'process-interrupted',
+      ...(verifierPhase ? { verifierPhase } : {}),
     })
   }
   if (!started && processError) {
@@ -202,6 +211,19 @@ function diagnostic(
   })
 }
 
+function observedVerifierPhase(result: SpawnSyncReturns<string>): string | undefined {
+  const output = [result.stdout, result.stderr]
+    .filter((value): value is string => typeof value === 'string')
+    .join('\n')
+  const expression = /EVENFIRE_SESSION_AUTHORITY_PHASE:([a-z-]{1,40})/g
+  let phase: string | undefined
+  for (const match of output.matchAll(expression)) {
+    const candidate = match[1]
+    if (candidate && VERIFIER_PHASES.has(candidate)) phase = candidate
+  }
+  return phase
+}
+
 /** Use same-directory MoveFileExW with WRITE_THROUGH; never use copy-across-volume fallback. */
 export function moveSessionAuthorityFileDurablySync(
   source: string,
@@ -220,33 +242,45 @@ export function moveSessionAuthorityFileDurablySync(
     !path.win32.isAbsolute(temporaryDirectory)
   )
     throw new SessionAuthorityFileMutationError('EINVAL', 'rejected')
-  const executable = path.join(
+  const executable = path.win32.join(
     systemRoot,
     'System32',
     'WindowsPowerShell',
     'v1.0',
     'powershell.exe'
   )
+  const system32 = path.win32.join(systemRoot, 'System32')
+  const powershellDirectory = path.win32.join(system32, 'WindowsPowerShell', 'v1.0')
+  const safePath = [
+    system32,
+    path.win32.join(system32, 'Wbem'),
+    powershellDirectory,
+    path.win32.join(systemRoot, 'Microsoft.NET', 'Framework64', 'v4.0.30319'),
+    path.win32.join(systemRoot, 'Microsoft.NET', 'Framework', 'v4.0.30319'),
+  ].join(';')
   const request = Buffer.from(
     JSON.stringify({ source, destination, replaceExisting }),
     'utf8'
   ).toString('base64')
   const result = spawnSync(executable, [...ARGS], {
     encoding: 'utf8',
-    // PowerShell needs only the OS root and a temporary directory for Add-Type. Do not pass
+    // Add-Type's CodeDOM compiler and PowerShell need a system-only PATH and COMSPEC. Do not pass
     // unrelated application credentials or user-defined command hooks to the child process.
     env: {
       SystemRoot: systemRoot,
       WINDIR: systemRoot,
+      SystemDrive: path.win32.parse(systemRoot).root.replace(/[\\/]+$/, ''),
+      PATH: safePath,
+      COMSPEC: path.win32.join(system32, 'cmd.exe'),
+      PATHEXT: '.COM;.EXE;.BAT;.CMD',
       TEMP: temporaryDirectory,
       TMP: temporaryDirectory,
       [REQUEST_ENV]: request,
     },
     input: SCRIPT,
     maxBuffer: 4096,
-    // Add-Type compiles the fixed native MoveFileEx wrapper on each isolated invocation. A
-    // 10-second deadline repeatedly expired on the hosted Windows full-suite run before the
-    // verifier returned structured evidence. Keep the wait bounded; timeout remains indeterminate.
+    // Add-Type compiles the fixed native MoveFileEx wrapper on each isolated invocation. Keep the
+    // wait bounded; timeout remains indeterminate and carries only a sanitized phase marker.
     timeout: POWERSHELL_OPERATION_TIMEOUT_MS,
     windowsHide: true,
   })
