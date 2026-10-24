@@ -3620,8 +3620,9 @@ describe('App deep-link orchestration', () => {
     expect(ensureTeamContext).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps a real newer workspace tab selected when an older app-link launch fails', async () => {
+  it('keeps a real newer workspace tab selected when an older app-link catalog request fails', async () => {
     const existingBridge = window.clerum
+    let activeTeamId = 'team-a'
     const { clerum } = installAppControllerClerum({
       me: { teamId: 'team-a', teamName: 'Team A' },
       teamDirectory: { items: [], currentTeamId: 'team-a' },
@@ -3631,6 +3632,19 @@ describe('App deep-link orchestration', () => {
       app: existingBridge.app,
       gfs: existingBridge.gfs,
       sandboxUi: existingBridge.sandboxUi,
+    })
+    Object.assign(window.clerum.team, {
+      switch: vi.fn(async (teamId: string) => {
+        activeTeamId = teamId
+        return {
+          authenticated: true,
+          me: {
+            ...HARNESS_ME,
+            teamId,
+            teamName: teamId === 'team-a' ? 'Team A' : 'Team B',
+          },
+        }
+      }),
     })
     const actual =
       await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
@@ -3647,7 +3661,18 @@ describe('App deep-link orchestration', () => {
     })
     const queue = new SandboxUiDeepLinkQueue()
     acknowledgeDeepLink.mockImplementation(async id => queue.acknowledge(id))
-    listApps.mockResolvedValue({ apps: [READY_APP] })
+    let rejectTargetApps!: (error: Error) => void
+    const pendingTargetApps = new Promise<{ apps: (typeof READY_APP)[] }>((_, reject) => {
+      rejectTargetApps = reject
+    })
+    let targetTeamAppListCalls = 0
+    listApps.mockImplementation(async () => {
+      if (activeTeamId === 'team-b') {
+        targetTeamAppListCalls += 1
+        return pendingTargetApps
+      }
+      return { apps: [READY_APP] }
+    })
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     render(
       <QueryClientProvider client={queryClient}>
@@ -3666,21 +3691,21 @@ describe('App deep-link orchestration', () => {
     )
     if (!target) throw new Error('The production app-link parser rejected the fixture URL')
     const link = queue.enqueue(target)
-    const heldTargetOpen = main.holdNextOpen()
     act(() => emitDeepLink?.(link))
     await confirmPendingAppLink()
-    await waitForAppOpen()
     await waitFor(() => expect(realController.current?.currentTeamId).toBe('team-b'))
+    await waitFor(() => expect(targetTeamAppListCalls).toBeGreaterThan(0))
 
     act(() => realController.current?.handleNavSelect(DESKTOP_ROUTES.settings))
     expect(realController.current?.navItem).toBe(DESKTOP_ROUTES.settings)
-    await act(async () => heldTargetOpen().reject(new Error('native mount failed')))
+    await act(async () => rejectTargetApps(new Error('target catalog request failed')))
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
     expect(realController.current?.currentTeamId).toBe('team-b')
     expect(realController.current?.navItem).toBe(DESKTOP_ROUTES.settings)
     expect(activeWorkspaceTab(realController.current!.workspaceTabs)?.kind).toBe('settings')
     expect(restoreRequests).toEqual([])
+    expect(openSandboxUi).not.toHaveBeenCalled()
     expect(main.live()).toBeNull()
   })
 
