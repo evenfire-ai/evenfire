@@ -807,6 +807,11 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         accessState === 'active',
       notifyOnChangeProps: 'all',
       ...gfsAuthorityQueryPolicy,
+      // A folder can expose many child actions. The stale-time policy is not a
+      // request scheduler, and focusing the window must not fan out one read
+      // per visible row. Explicit menu/mutation paths revalidate the selected
+      // resource before acting.
+      refetchOnWindowFocus: false,
     })),
   })
   const moveSourceParentIds = useMemo(() => {
