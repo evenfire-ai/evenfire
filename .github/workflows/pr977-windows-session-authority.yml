@@ -55,6 +55,10 @@ jobs:
         working-directory: desktop-app
         run: npx playwright install chromium
 
+      - name: Test packaged compatibility diagnostics
+        working-directory: desktop-app
+        run: npm test -- src/__tests__/pr977V011OlderReaderDiagnostics.test.ts
+
       - name: Require native Windows ACL evidence
         working-directory: desktop-app
         env:

@@ -8,7 +8,17 @@ import { createRequire } from 'node:module'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import {
+  InconclusiveError,
+  UnsafeOlderReaderBehaviorError,
+  attachFinalCleanupObservations,
+  classifyDiagnosticFailure,
+  classifyUncaughtExperimentFailure,
+  runDiagnosticPhase,
+  runWhenOwnedProcessesStopped,
+  waitForOwnedChildClose,
+} from './pr977-v011-older-reader-diagnostics.mjs'
 
 const require = createRequire(import.meta.url)
 const keytar = require('keytar')
@@ -41,14 +51,6 @@ const PACKAGE_SHA256 = '9101d2a7c2fc49c6f64c15fc889523a8d830dd8779278dc69256317c
 const SCRIPT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url))
 const DESKTOP_DIRECTORY = path.resolve(SCRIPT_DIRECTORY, '..')
 const COMPATIBILITY_TIMEOUT_MS = 45_000
-
-class InconclusiveError extends Error {
-  constructor(category) {
-    super(category)
-    this.name = 'InconclusiveError'
-    this.category = category
-  }
-}
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex')
@@ -109,9 +111,9 @@ function listen(server, port) {
 }
 
 function closeServer(server) {
-  return new Promise(resolve => {
+  return new Promise((resolve, reject) => {
     if (!server.listening) return resolve()
-    server.close(() => resolve())
+    server.close(error => (error ? reject(error) : resolve()))
   })
 }
 
@@ -160,6 +162,28 @@ async function waitFor(predicate, category, timeoutMs = COMPATIBILITY_TIMEOUT_MS
     await delay(200)
   }
   throw new InconclusiveError(category)
+}
+
+function waitForChildSpawn(child, timeoutMs = 20_000) {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const finish = callback => value => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      child.off('spawn', onSpawn)
+      child.off('error', onError)
+      callback(value)
+    }
+    const onSpawn = finish(resolve)
+    const onError = finish(reject)
+    const timer = setTimeout(() => {
+      child.kill()
+      finish(() => reject(new InconclusiveError('packaged-binary-process-start-timeout')))()
+    }, timeoutMs)
+    child.once('spawn', onSpawn)
+    child.once('error', onError)
+  })
 }
 
 async function credentialState(accounts) {
@@ -323,46 +347,123 @@ async function waitForUiState(page, state, category, timeoutMs = COMPATIBILITY_T
   )
 }
 
-async function launchPackagedBinary(executable, userDataDirectory, profile) {
-  const port = await getFreePort()
-  const child = spawn(
-    executable,
-    [
-      `--user-data-dir=${userDataDirectory}`,
-      '--evenfire-desktop-dev-package',
-      `--remote-debugging-address=127.0.0.1`,
-      `--remote-debugging-port=${port}`,
-      '--disable-gpu',
-      '--no-first-run',
-    ],
-    { cwd: profile.taskRoot, env: appEnvironment(profile), stdio: 'ignore', windowsHide: true }
-  )
-  let spawnError = null
-  child.once('error', error => {
-    spawnError = error.code || 'spawn-error'
-  })
-  let browser
+async function launchPackagedBinary(
+  executable,
+  userDataDirectory,
+  profile,
+  scenario,
+  state,
+  phase
+) {
+  let child = null
+  let browser = null
   try {
-    const endpoint = await waitForDebugEndpoint(port, child, () => spawnError)
-    browser = await chromium.connectOverCDP(endpoint, { timeout: COMPATIBILITY_TIMEOUT_MS })
-    const page = await waitForApplicationPage(browser)
-    return { child, browser, page }
+    const port = await phase(
+      'debug-port-allocation',
+      async () => {
+        const selectedPort = await getFreePort()
+        state.debugPortAllocated = true
+        return selectedPort
+      },
+      scenario
+    )
+    await phase(
+      'packaged-process-start',
+      async () => {
+        state.processSpawnAttempted = true
+        try {
+          child = spawn(
+            executable,
+            [
+              `--user-data-dir=${userDataDirectory}`,
+              '--evenfire-desktop-dev-package',
+              '--remote-debugging-address=127.0.0.1',
+              `--remote-debugging-port=${port}`,
+              '--disable-gpu',
+              '--no-first-run',
+            ],
+            {
+              cwd: profile.taskRoot,
+              env: appEnvironment(profile),
+              stdio: 'ignore',
+              windowsHide: true,
+            }
+          )
+        } catch (error) {
+          state.processStopped = true
+          throw error
+        }
+        state.ownedChild = child
+        try {
+          await waitForChildSpawn(child)
+        } catch (error) {
+          if (!child.pid) {
+            state.ownedChild = null
+            state.processStopped = true
+          }
+          throw error
+        }
+        state.processSpawned = true
+        state.processAlive = child.exitCode === null
+      },
+      scenario
+    )
+
+    let spawnError = null
+    child.once('error', error => {
+      spawnError = error.code || 'spawn-error'
+    })
+    const endpoint = await phase(
+      'packaged-cdp-attachment',
+      async () => {
+        const debugEndpoint = await waitForDebugEndpoint(port, child, () => spawnError)
+        browser = await chromium.connectOverCDP(debugEndpoint, {
+          timeout: COMPATIBILITY_TIMEOUT_MS,
+        })
+        state.ownedBrowser = browser
+        state.cdpAttached = true
+        state.processAlive = child.exitCode === null
+        return debugEndpoint
+      },
+      scenario
+    )
+    const page = await phase(
+      'packaged-renderer-readiness',
+      async () => {
+        const readyPage = await waitForApplicationPage(browser)
+        state.rendererReady = true
+        return readyPage
+      },
+      scenario
+    )
+    return { child, browser, page, endpoint }
   } catch (error) {
-    await stopPackagedBinary({ child, browser })
-    if (error instanceof InconclusiveError) throw error
-    throw new InconclusiveError('packaged-electron-cdp-connection-failed')
+    if (child) {
+      try {
+        await phase(
+          'owned-process-tree-stop',
+          () => stopPackagedBinary({ child, browser }, state),
+          scenario
+        )
+      } catch {
+        // The phase report retains cleanup failure without exposing process output.
+      }
+    }
+    throw error
   }
 }
 
-async function stopPackagedBinary(instance) {
+async function stopPackagedBinary(instance, state) {
   if (!instance) return
   try {
     await instance.browser?.close()
   } catch {
     // The process tree below is the authoritative stop operation for this owned launch.
   }
+  if (state) state.ownedBrowser = null
   const child = instance.child
   if (child && child.exitCode === null && child.pid) {
+    if (state) state.processTreeStopRequested = true
     try {
       execFileSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
         stdio: 'ignore',
@@ -379,6 +480,11 @@ async function stopPackagedBinary(instance) {
         throw new InconclusiveError('owned-packaged-process-did-not-exit')
     }
   }
+  if (state) state.processStopped = !child || child.exitCode !== null
+  if (state && (!child || child.exitCode !== null)) state.processAlive = false
+  if (child && child.exitCode === null)
+    throw new InconclusiveError('owned-packaged-process-did-not-exit')
+  if (state && child && child.exitCode !== null) state.ownedChild = null
 }
 
 async function waitForIsolatedElectronProfile(userDataDirectory) {
@@ -392,12 +498,13 @@ async function waitForIsolatedElectronProfile(userDataDirectory) {
   }, 'packaged-binary-did-not-use-the-isolated-user-data-profile')
 }
 
-async function submitSyntheticLogin(page, loginRequests) {
+async function submitSyntheticLogin(page, loginRequests, state) {
   await waitForUiState(page, 'loginForm', 'older-binary-login-form-not-reached')
   await page.locator('#email-input').fill(EMAIL)
   await page.locator('#password-input').fill(PASSWORD)
   const before = loginRequests.length
   await page.locator('form.auth-form-stack button[type="submit"]').click()
+  if (state) state.loginSubmitted = true
   await waitFor(
     () => loginRequests.length > before,
     'synthetic-password-login-endpoint-not-reached'
@@ -420,399 +527,912 @@ function readV2AcceptancePendingState(profileDirectory, envKey) {
   const candidate = record.candidates?.find(
     item => item.transactionId === record.projectionIntent?.candidateTransactionId
   )
+  const authorityFrameVerified = record.version === 2 && !rawRecord.includes(CANDIDATE_TOKEN)
+  const projectionIntentMatched =
+    record.projectionIntent?.operationId === marker.operationId &&
+    record.projectionIntent?.stagedMarker?.revision === marker.revision &&
+    marker.expectedAuthorityRevision === record.projectionIntent.baseAuthorityRevision
+  const markerReceiptMatched =
+    marker.version === 2 &&
+    marker.intent === 'acceptance-pending' &&
+    marker.purpose === 'candidate-acceptance'
+  const candidateDenialVerified =
+    Boolean(candidate) &&
+    candidate.phase === 'verified' &&
+    candidate.candidateHash === sessionPersistenceCandidateHash(CANDIDATE_TOKEN)
+  const legacyJournalSnapshotMatched =
+    Boolean(journal) &&
+    record.projectionIntent.legacyJournalReceipt?.schemaVersion === 1 &&
+    record.projectionIntent.legacyJournalReceipt?.digest === journalDigest &&
+    record.projectionIntent.legacyJournalReceipt?.byteLength === journalBytes.length &&
+    record.projectionIntent.legacyJournalReceipt?.revision === `v0-sha256:${journalDigest}`
+
   if (
-    record.version !== 2 ||
-    rawRecord.includes(CANDIDATE_TOKEN) ||
-    record.projectionIntent?.operationId !== marker.operationId ||
-    record.projectionIntent?.stagedMarker?.revision !== marker.revision ||
-    marker.version !== 2 ||
-    marker.intent !== 'acceptance-pending' ||
-    marker.purpose !== 'candidate-acceptance' ||
-    marker.expectedAuthorityRevision !== record.projectionIntent.baseAuthorityRevision ||
-    !candidate ||
-    candidate.phase !== 'verified' ||
-    candidate.candidateHash !== sessionPersistenceCandidateHash(CANDIDATE_TOKEN) ||
-    !journal ||
-    record.projectionIntent.legacyJournalReceipt?.schemaVersion !== 1 ||
-    record.projectionIntent.legacyJournalReceipt?.digest !== journalDigest ||
-    record.projectionIntent.legacyJournalReceipt?.byteLength !== journalBytes.length ||
-    record.projectionIntent.legacyJournalReceipt?.revision !== `v0-sha256:${journalDigest}`
+    !authorityFrameVerified ||
+    !projectionIntentMatched ||
+    !markerReceiptMatched ||
+    !candidateDenialVerified ||
+    !legacyJournalSnapshotMatched
   ) {
     throw new InconclusiveError('current-v2-repository-did-not-produce-matching-pending-state')
   }
   return {
-    markerRevision: marker.revision,
-    candidateHash: candidate.candidateHash,
-    candidatePhase: candidate.phase,
-    journalDigest,
-    projectionIntentOperationId: marker.operationId,
+    authorityFrameVerified,
+    projectionIntentMatched,
+    candidateDenialVerified,
+    markerReceiptMatched,
+    legacyJournalSnapshotMatched,
   }
 }
 
 async function main() {
-  const principal = assertHostedWindowsRunner()
-  const executable = process.env.EVENFIRE_V011_EXE
-  const executableProductVersion = process.env.EVENFIRE_V011_PRODUCT_VERSION
-  if (
-    !executable ||
-    !fs.existsSync(executable) ||
-    !executableProductVersion?.startsWith('0.11.0')
-  ) {
-    throw new InconclusiveError('verified-v011-packaged-executable-not-available')
+  const state = {
+    principalProfileVerified: false,
+    executablePresent: false,
+    productVersionVerified: false,
+    executableIntegrityReadable: false,
+    credentialReadSucceeded: false,
+    preexistingSelectorCount: 0,
+    restEndpointListening: false,
+    rpcEndpointListening: false,
+    debugPortAllocated: false,
+    processSpawnAttempted: false,
+    processSpawned: false,
+    processAlive: false,
+    cdpAttached: false,
+    rendererReady: false,
+    isolatedProfileObserved: false,
+    loginSubmitted: false,
+    passwordLoginRequestCount: 0,
+    authenticatedUi: false,
+    syntheticCredentialPresent: false,
+    credentialSelectorCount: 0,
+    processTreeStopRequested: false,
+    processStopped: false,
+    ownedChild: null,
+    ownedBrowser: null,
+    getMeRequestCount: 0,
+    syntheticTokenGetMeCount: 0,
+    logoutMarkerPublished: false,
+    logoutMarkerRevisionVerified: false,
+    restoreDecisionReached: false,
+    loginFormVisible: false,
+    credentialChanged: false,
+    logoutMarkerRemoved: false,
+    authorityDirectoryRemoved: false,
+    journalRemoved: false,
+    writerStarted: false,
+    writerClosed: false,
+    writerTerminationRequested: false,
+    writerStopped: true,
+    ownedWriter: null,
+    writerExitCode: null,
+    writerExitCodeKnown: false,
+    writerTerminatedBySignal: false,
+    authorityFrameVerified: false,
+    projectionIntentMatched: false,
+    candidateDenialVerified: false,
+    markerReceiptMatched: false,
+    legacyJournalSnapshotMatched: false,
+    baselineRestoreSucceeded: false,
+    lpCaseDenied: false,
+    v2CaseDenied: false,
+    syntheticCredentialRemoved: false,
+    remainingTargetSelectorCount: null,
+    restEndpointClosed: false,
+    rpcEndpointClosed: false,
+    taskDirectoryRemoved: false,
   }
-  const packageHash = execFileSync('certutil.exe', ['-hashfile', executable, 'SHA256'], {
-    encoding: 'utf8',
-    windowsHide: true,
-  })
-    .match(/[0-9a-f]{64}/i)?.[0]
-    ?.toLowerCase()
-  if (!packageHash) throw new InconclusiveError('packaged-executable-integrity-not-readable')
-
   const envKey = resolveEnvironmentKey(REST_URL, RPC_URL)
-  const scopedAccount = `session-token::${envKey}`
-  const accounts = [scopedAccount, 'session-token']
-  let preexisting
-  try {
-    preexisting = await credentialState(accounts)
-  } catch {
-    throw new InconclusiveError('isolated-windows-credential-manager-unavailable')
-  }
-  if (preexisting.length !== 0) {
-    throw new InconclusiveError('fresh-runner-evenfire-credential-selector-was-not-empty')
-  }
-
-  const runnerTemp = path.resolve(process.env.RUNNER_TEMP)
-  const taskRoot = fs.mkdtempSync(path.join(runnerTemp, 'pr977-v011-older-reader-'))
-  const appDataDirectory = path.join(taskRoot, 'appdata')
-  const userDataDirectory = path.join(appDataDirectory, 'Evenfire')
-  const localAppDataDirectory = path.join(taskRoot, 'local-appdata')
-  const tempDirectory = path.join(taskRoot, 'temp')
-  fs.mkdirSync(userDataDirectory, { recursive: true })
-  fs.mkdirSync(localAppDataDirectory, { recursive: true })
-  fs.mkdirSync(tempDirectory, { recursive: true })
-  const childProfile = {
-    appDataDirectory,
-    localAppDataDirectory,
-    tempDirectory,
-    taskRoot,
-    userProfile: principal.userProfile,
-  }
-  if (
-    !path
-      .resolve(userDataDirectory)
-      .toLowerCase()
-      .startsWith(`${runnerTemp.toLowerCase()}${path.sep.toLowerCase()}`)
-  ) {
-    throw new InconclusiveError('synthetic-profile-escaped-runner-temp')
-  }
-
+  const accounts = [`session-token::${envKey}`, 'session-token']
   const calls = []
   const loginRequests = []
   let responseMode = 'allow-synthetic-token'
-  const apiServer = http.createServer(async (request, response) => {
-    const remoteAddress = request.socket.remoteAddress ?? ''
-    if (remoteAddress !== '127.0.0.1' && remoteAddress !== '::ffff:127.0.0.1') {
-      writeJson(response, 403, { error: 'loopback-only' })
-      return
-    }
-    if (request.method === 'OPTIONS') {
-      response.writeHead(204, {
-        'access-control-allow-origin': '*',
-        'access-control-allow-headers': 'authorization, content-type',
-        'access-control-allow-methods': 'GET, POST, OPTIONS',
-      })
-      response.end()
-      return
-    }
-    const pathname = new URL(request.url ?? '/', REST_URL).pathname
-    if (request.method === 'POST' && pathname === '/api/v1/auth/password-login') {
-      let body
-      try {
-        body = await readJsonRequest(request)
-      } catch {
-        writeJson(response, 400, { error: 'synthetic-login-request-invalid' })
-        return
-      }
-      if (body.email !== EMAIL || body.password !== PASSWORD) {
-        writeJson(response, 401, { error: 'synthetic-login-rejected' })
-        return
-      }
-      loginRequests.push({ at: Date.now() })
-      writeJson(response, 200, { token: CANDIDATE_TOKEN, me: USER })
-      return
-    }
-    if (request.method === 'GET' && pathname === '/api/v1/me') {
-      const authorization = request.headers.authorization ?? ''
-      const token = authorization.startsWith('Bearer ') ? authorization.slice(7) : ''
-      const tokenMatches = token === CANDIDATE_TOKEN
-      calls.push({ mode: responseMode, tokenMatches, tokenDigest: token ? sha256(token) : null })
-      if (responseMode === 'allow-synthetic-token' && tokenMatches) {
-        writeJson(response, 200, USER)
-      } else {
-        writeJson(response, 401, { error: 'synthetic-session-denied' })
-      }
-      return
-    }
-    if (request.method === 'GET' && pathname === '/api/v1/desktop/release') {
-      writeJson(response, 200, {
-        releaseId: 'synthetic-v011-compatibility-test',
-        desktopVersion: '0.11.0',
-        minimumDesktopVersion: '0.1.252',
-        releaseTag: 'v0.11.0',
-        releaseUrl: 'http://127.0.0.1:8091/synthetic-release',
-      })
-      return
-    }
-    if (request.method === 'GET' && pathname.endsWith('/health')) {
-      writeJson(response, 200, { status: 'ok' })
-      return
-    }
-    if (request.method === 'GET' && pathname === '/api/v1/me/teams') {
-      writeJson(response, 200, { currentTeamId: USER.teamId, items: [] })
-      return
-    }
-    if (request.method === 'GET' && pathname === '/api/v1/desktop/environment') {
-      writeJson(response, 404, { error: 'not-configured' })
-      return
-    }
-    writeJson(response, 404, { error: 'synthetic-endpoint-not-found' })
-  })
-  const rpcServer = http.createServer((_request, response) =>
-    writeJson(response, 200, { ok: true })
-  )
+  let taskRoot = null
+  let userDataDirectory = null
+  let apiServer = null
+  let rpcServer = null
   let appInstance = null
-  let result = null
+  let syntheticCredentialMayBeOwned = false
+  let fatalError = null
+  let failedPhase = 'orchestration'
+  let summary = null
+
+  const phase = async (name, operation, scenario) => {
+    try {
+      return await runDiagnosticPhase(name, operation, {
+        scenario,
+        observations: () => state,
+      })
+    } catch (error) {
+      if (!fatalError) {
+        fatalError = error
+        failedPhase = name
+      }
+      throw error
+    }
+  }
 
   try {
-    try {
-      await listen(apiServer, 8091)
-      await listen(rpcServer, 8094)
-    } catch {
-      throw new InconclusiveError('synthetic-local-endpoint-port-unavailable')
+    const principal = await phase('runner-principal-profile', async () => {
+      const verified = assertHostedWindowsRunner()
+      state.principalProfileVerified = true
+      return verified
+    })
+
+    const executable = process.env.EVENFIRE_V011_EXE
+    const executableProductVersion = process.env.EVENFIRE_V011_PRODUCT_VERSION
+    const packageHash = await phase('release-executable-verification', async () => {
+      state.executablePresent = Boolean(executable && fs.existsSync(executable))
+      state.productVersionVerified = Boolean(
+        executableProductVersion && /^0\.11\.0(?:\.|$)/.test(executableProductVersion)
+      )
+      if (!state.executablePresent || !state.productVersionVerified) {
+        throw new InconclusiveError('verified-v011-packaged-executable-not-available')
+      }
+      const digest = execFileSync('certutil.exe', ['-hashfile', executable, 'SHA256'], {
+        encoding: 'utf8',
+        windowsHide: true,
+      })
+        .match(/[0-9a-f]{64}/i)?.[0]
+        ?.toLowerCase()
+      if (!digest) throw new InconclusiveError('packaged-executable-integrity-not-readable')
+      state.executableIntegrityReadable = true
+      return digest
+    })
+
+    const preexisting = await phase('credential-selector-preflight', async () => {
+      let observed
+      try {
+        observed = await credentialState(accounts)
+      } catch {
+        throw new InconclusiveError('isolated-windows-credential-manager-unavailable')
+      }
+      state.credentialReadSucceeded = true
+      state.preexistingSelectorCount = observed.length
+      if (observed.length !== 0) {
+        throw new InconclusiveError('fresh-runner-evenfire-credential-selector-was-not-empty')
+      }
+      return observed
+    })
+
+    const profile = await phase('isolated-user-data-profile', async () => {
+      const runnerTemp = path.resolve(process.env.RUNNER_TEMP)
+      taskRoot = fs.mkdtempSync(path.join(runnerTemp, 'pr977-v011-older-reader-'))
+      const appDataDirectory = path.join(taskRoot, 'appdata')
+      userDataDirectory = path.join(appDataDirectory, 'Evenfire')
+      const localAppDataDirectory = path.join(taskRoot, 'local-appdata')
+      const tempDirectory = path.join(taskRoot, 'temp')
+      fs.mkdirSync(userDataDirectory, { recursive: true })
+      fs.mkdirSync(localAppDataDirectory, { recursive: true })
+      fs.mkdirSync(tempDirectory, { recursive: true })
+      if (
+        !path
+          .resolve(userDataDirectory)
+          .toLowerCase()
+          .startsWith(`${runnerTemp.toLowerCase()}${path.sep.toLowerCase()}`)
+      ) {
+        throw new InconclusiveError('synthetic-profile-escaped-runner-temp')
+      }
+      state.isolatedProfileObserved = true
+      return {
+        appDataDirectory,
+        localAppDataDirectory,
+        tempDirectory,
+        taskRoot,
+        userProfile: principal.userProfile,
+      }
+    })
+
+    apiServer = http.createServer(async (request, response) => {
+      const remoteAddress = request.socket.remoteAddress ?? ''
+      if (remoteAddress !== '127.0.0.1' && remoteAddress !== '::ffff:127.0.0.1') {
+        writeJson(response, 403, { error: 'loopback-only' })
+        return
+      }
+      if (request.method === 'OPTIONS') {
+        response.writeHead(204, {
+          'access-control-allow-origin': '*',
+          'access-control-allow-headers': 'authorization, content-type',
+          'access-control-allow-methods': 'GET, POST, OPTIONS',
+        })
+        response.end()
+        return
+      }
+      const pathname = new URL(request.url ?? '/', REST_URL).pathname
+      if (request.method === 'POST' && pathname === '/api/v1/auth/password-login') {
+        let body
+        try {
+          body = await readJsonRequest(request)
+        } catch {
+          writeJson(response, 400, { error: 'synthetic-login-request-invalid' })
+          return
+        }
+        if (body.email !== EMAIL || body.password !== PASSWORD) {
+          writeJson(response, 401, { error: 'synthetic-login-rejected' })
+          return
+        }
+        syntheticCredentialMayBeOwned = true
+        loginRequests.push({ at: Date.now() })
+        state.passwordLoginRequestCount = loginRequests.length
+        writeJson(response, 200, { token: CANDIDATE_TOKEN, me: USER })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/api/v1/me') {
+        const authorization = request.headers.authorization ?? ''
+        const token = authorization.startsWith('Bearer ') ? authorization.slice(7) : ''
+        const tokenMatches = token === CANDIDATE_TOKEN
+        calls.push({ mode: responseMode, tokenMatches })
+        state.getMeRequestCount = calls.length
+        state.syntheticTokenGetMeCount = calls.filter(call => call.tokenMatches).length
+        if (responseMode === 'allow-synthetic-token' && tokenMatches) {
+          writeJson(response, 200, USER)
+        } else {
+          writeJson(response, 401, { error: 'synthetic-session-denied' })
+        }
+        return
+      }
+      if (request.method === 'GET' && pathname === '/api/v1/desktop/release') {
+        writeJson(response, 200, {
+          releaseId: 'synthetic-v011-compatibility-test',
+          desktopVersion: '0.11.0',
+          minimumDesktopVersion: '0.1.252',
+          releaseTag: 'v0.11.0',
+          releaseUrl: 'http://127.0.0.1:8091/synthetic-release',
+        })
+        return
+      }
+      if (request.method === 'GET' && pathname.endsWith('/health')) {
+        writeJson(response, 200, { status: 'ok' })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/api/v1/me/teams') {
+        writeJson(response, 200, { currentTeamId: USER.teamId, items: [] })
+        return
+      }
+      if (request.method === 'GET' && pathname === '/api/v1/desktop/environment') {
+        writeJson(response, 404, { error: 'not-configured' })
+        return
+      }
+      writeJson(response, 404, { error: 'synthetic-endpoint-not-found' })
+    })
+    rpcServer = http.createServer((_request, response) => writeJson(response, 200, { ok: true }))
+
+    await phase('synthetic-endpoint-startup', async () => {
+      try {
+        await listen(apiServer, 8091)
+        state.restEndpointListening = true
+        await listen(rpcServer, 8094)
+        state.rpcEndpointListening = true
+      } catch {
+        throw new InconclusiveError('synthetic-local-endpoint-port-unavailable')
+      }
+    })
+
+    const launch = scenario => {
+      state.debugPortAllocated = false
+      state.processSpawnAttempted = false
+      state.processSpawned = false
+      state.processAlive = false
+      state.cdpAttached = false
+      state.rendererReady = false
+      state.processStopped = false
+      return launchPackagedBinary(executable, userDataDirectory, profile, scenario, state, phase)
     }
 
-    appInstance = await launchPackagedBinary(executable, userDataDirectory, childProfile)
-    await waitForIsolatedElectronProfile(userDataDirectory)
-    await submitSyntheticLogin(appInstance.page, loginRequests)
-    const initialCredential = await waitFor(async () => {
-      const found = await credentialState(accounts)
-      if (found.length === 1 && found[0].matchesSynthetic) return found
-      return false
-    }, 'v011-password-login-did-not-persist-to-isolated-keytar')
-    await stopPackagedBinary(appInstance)
+    appInstance = await launch('initial-login')
+    await phase(
+      'isolated-user-data-profile',
+      async () => {
+        await waitForIsolatedElectronProfile(userDataDirectory)
+        state.isolatedProfileObserved = true
+      },
+      'initial-login'
+    )
+    await phase(
+      'synthetic-password-login',
+      async () => {
+        await submitSyntheticLogin(appInstance.page, loginRequests, state)
+        state.authenticatedUi = (await readUiState(appInstance.page)).authenticatedSurface
+        if (!state.authenticatedUi)
+          throw new InconclusiveError('older-binary-login-did-not-authenticate')
+      },
+      'initial-login'
+    )
+    await phase(
+      'synthetic-credential-readback',
+      async () => {
+        const found = await waitFor(async () => {
+          const current = await credentialState(accounts)
+          if (current.length === 1 && current[0].matchesSynthetic) return current
+          return false
+        }, 'v011-password-login-did-not-persist-to-isolated-keytar')
+        state.syntheticCredentialPresent = true
+        state.credentialSelectorCount = found.length
+        return found
+      },
+      'initial-login'
+    )
+    await phase(
+      'owned-process-tree-stop',
+      () => stopPackagedBinary(appInstance, state),
+      'initial-login'
+    )
     appInstance = null
 
     responseMode = 'allow-synthetic-token'
     const baselineStart = calls.length
-    appInstance = await launchPackagedBinary(executable, userDataDirectory, childProfile)
-    await waitForIsolatedElectronProfile(userDataDirectory)
-    await waitFor(
-      () => calls.slice(baselineStart).some(call => call.tokenMatches),
-      'v011-cold-restart-did-not-read-synthetic-keytar-credential'
+    appInstance = await launch('baseline')
+    await phase(
+      'isolated-user-data-profile',
+      async () => {
+        await waitForIsolatedElectronProfile(userDataDirectory)
+        state.isolatedProfileObserved = true
+      },
+      'baseline'
     )
-    await waitForUiState(
-      appInstance.page,
-      'authenticatedSurface',
-      'v011-baseline-restart-not-authenticated'
+    const baseline = await phase(
+      'baseline-getme-restore',
+      async () => {
+        await waitFor(
+          () => calls.slice(baselineStart).some(call => call.tokenMatches),
+          'v011-cold-restart-did-not-read-synthetic-keytar-credential'
+        )
+        const baselineCalls = calls.slice(baselineStart)
+        state.getMeRequestCount = baselineCalls.length
+        state.syntheticTokenGetMeCount = baselineCalls.filter(call => call.tokenMatches).length
+        return baselineCalls
+      },
+      'baseline'
     )
-    const baselineCredential = await credentialState(accounts)
-    await stopPackagedBinary(appInstance)
+    const baselineCredential = await phase(
+      'baseline-authenticated-ui',
+      async () => {
+        await waitForUiState(
+          appInstance.page,
+          'authenticatedSurface',
+          'v011-baseline-restart-not-authenticated'
+        )
+        state.authenticatedUi = true
+        state.baselineRestoreSucceeded = state.syntheticTokenGetMeCount > 0
+        const persisted = await credentialState(accounts)
+        state.syntheticCredentialPresent = persisted.length === 1 && persisted[0].matchesSynthetic
+        if (!state.baselineRestoreSucceeded || !state.syntheticCredentialPresent) {
+          throw new InconclusiveError('v011-baseline-restart-not-authenticated')
+        }
+        return persisted
+      },
+      'baseline'
+    )
+    await phase('owned-process-tree-stop', () => stopPackagedBinary(appInstance, state), 'baseline')
     appInstance = null
 
-    recordPendingExternalLogout(userDataDirectory, envKey)
-    const logoutMarker = readPendingExternalLogoutMarker(userDataDirectory, envKey)
-    if (logoutMarker?.intent?.intent !== 'logout-pending' || !logoutMarker.revision) {
-      throw new InconclusiveError('current-lp-marker-writer-did-not-publish-durable-revision')
-    }
+    await phase(
+      'publish-lp-marker',
+      async () => {
+        recordPendingExternalLogout(userDataDirectory, envKey)
+        const marker = readPendingExternalLogoutMarker(userDataDirectory, envKey)
+        state.logoutMarkerPublished = marker?.intent?.intent === 'logout-pending'
+        state.logoutMarkerRevisionVerified = Boolean(marker?.revision)
+        if (!state.logoutMarkerPublished || !state.logoutMarkerRevisionVerified) {
+          throw new InconclusiveError('current-lp-marker-writer-did-not-publish-durable-revision')
+        }
+        return marker
+      },
+      'lp'
+    )
     responseMode = 'deny-synthetic-token'
+    state.restoreDecisionReached = false
+    state.loginFormVisible = false
+    state.getMeRequestCount = 0
+    state.syntheticTokenGetMeCount = 0
+    state.authenticatedUi = false
+    state.credentialChanged = false
     const lpStart = calls.length
-    appInstance = await launchPackagedBinary(executable, userDataDirectory, childProfile)
-    await waitFor(async () => {
-      const ui = await readUiState(appInstance.page)
-      return ui.loginForm || ui.authenticatedSurface || calls.length > lpStart
-    }, 'v011-lp-startup-did-not-reach-a-restore-decision')
-    await delay(10_000)
-    const lpCalls = calls.slice(lpStart)
-    const lpCredentialAfter = await credentialState(accounts)
-    const lpUi = await readUiState(appInstance.page)
-    if (!lpUi.loginForm && !lpUi.authenticatedSurface) {
-      throw new InconclusiveError('v011-lp-startup-did-not-reach-a-stable-authentication-surface')
-    }
-    await stopPackagedBinary(appInstance)
-    appInstance = null
-
-    const currentLp = readPendingExternalLogoutMarker(userDataDirectory, envKey)
-    if (currentLp && !clearPendingExternalLogoutIfUnchanged(userDataDirectory, envKey, currentLp)) {
-      throw new InconclusiveError('task-owned-lp-marker-could-not-be-cleared-for-next-case')
-    }
-    const authorityDirectory = path.join(userDataDirectory, 'authority')
-    const journalPath = path.join(
-      userDataDirectory,
-      `session-persistence-journal-${sha256(envKey)}`
+    appInstance = await launch('lp')
+    const lpObservation = await phase(
+      'lp-restore-observation',
+      async () => {
+        await waitFor(async () => {
+          const ui = await readUiState(appInstance.page)
+          return ui.loginForm || ui.authenticatedSurface || calls.length > lpStart
+        }, 'v011-lp-startup-did-not-reach-a-restore-decision')
+        await delay(COMPATIBILITY_TIMEOUT_MS)
+        const launchedInstance = appInstance
+        const ui = await readUiState(launchedInstance.page)
+        state.loginFormVisible = ui.loginForm
+        state.authenticatedUi = ui.authenticatedSurface
+        await phase(
+          'owned-process-tree-stop',
+          () => stopPackagedBinary(launchedInstance, state),
+          'lp'
+        )
+        appInstance = null
+        const observedCalls = calls.slice(lpStart)
+        const credential = await credentialState(accounts)
+        state.getMeRequestCount = observedCalls.length
+        state.syntheticTokenGetMeCount = observedCalls.filter(call => call.tokenMatches).length
+        state.credentialChanged = credential.length !== 1 || !credential[0].matchesSynthetic
+        state.restoreDecisionReached =
+          observedCalls.length > 0 || ui.loginForm || ui.authenticatedSurface
+        if (!ui.loginForm && !ui.authenticatedSurface) {
+          if (!state.restoreDecisionReached) {
+            throw new InconclusiveError(
+              'v011-lp-startup-did-not-reach-a-stable-authentication-surface'
+            )
+          }
+        }
+        return {
+          calls: observedCalls,
+          credential,
+          ui,
+          restoreDecisionReached: state.restoreDecisionReached,
+        }
+      },
+      'lp'
     )
-    fs.rmSync(authorityDirectory, { recursive: true, force: true })
-    fs.rmSync(journalPath, { force: true })
+
+    await phase(
+      'reset-lp-before-v2',
+      async () => {
+        const currentLp = readPendingExternalLogoutMarker(userDataDirectory, envKey)
+        if (
+          currentLp &&
+          !clearPendingExternalLogoutIfUnchanged(userDataDirectory, envKey, currentLp)
+        ) {
+          throw new InconclusiveError('task-owned-lp-marker-could-not-be-cleared-for-next-case')
+        }
+        state.logoutMarkerRemoved = !readPendingExternalLogoutMarker(userDataDirectory, envKey)
+        const authorityDirectory = path.join(userDataDirectory, 'authority')
+        const journalPath = path.join(
+          userDataDirectory,
+          `session-persistence-journal-${sha256(envKey)}`
+        )
+        fs.rmSync(authorityDirectory, { recursive: true, force: true })
+        fs.rmSync(journalPath, { force: true })
+        state.authorityDirectoryRemoved = !fs.existsSync(authorityDirectory)
+        state.journalRemoved = !fs.existsSync(journalPath)
+        if (
+          !state.logoutMarkerRemoved ||
+          !state.authorityDirectoryRemoved ||
+          !state.journalRemoved
+        ) {
+          throw new InconclusiveError('task-owned-lp-marker-could-not-be-cleared-for-next-case')
+        }
+      },
+      'v2'
+    )
 
     responseMode = 'allow-synthetic-token'
-    const existingCredential = await credentialState(accounts)
+    const existingCredential = await phase(
+      'lp-credential-state-before-v2',
+      async () => {
+        let current
+        try {
+          current = await credentialState(accounts)
+        } catch {
+          throw new InconclusiveError('isolated-windows-credential-manager-unavailable')
+        }
+        state.credentialReadSucceeded = true
+        state.syntheticCredentialPresent = current.length === 1 && current[0].matchesSynthetic
+        state.credentialSelectorCount = current.length
+        if (current.length !== 0 && !state.syntheticCredentialPresent) {
+          throw new InconclusiveError('v011-lp-case-left-an-unexpected-credential-selector-state')
+        }
+        return current
+      },
+      'v2'
+    )
     if (existingCredential.length === 0) {
-      appInstance = await launchPackagedBinary(executable, userDataDirectory, childProfile)
-      await submitSyntheticLogin(appInstance.page, loginRequests)
-      await waitFor(async () => {
-        const found = await credentialState(accounts)
-        return found.length === 1 && found[0].matchesSynthetic
-      }, 'v011-could-not-reseed-synthetic-credential-for-v2-case')
-      await stopPackagedBinary(appInstance)
+      appInstance = await launch('v2')
+      await phase(
+        'synthetic-password-login',
+        async () => {
+          await submitSyntheticLogin(appInstance.page, loginRequests, state)
+          state.authenticatedUi = (await readUiState(appInstance.page)).authenticatedSurface
+          if (!state.authenticatedUi) {
+            throw new InconclusiveError('older-binary-login-did-not-authenticate')
+          }
+        },
+        'v2'
+      )
+      await phase(
+        'reseed-synthetic-credential',
+        async () => {
+          await waitFor(async () => {
+            const found = await credentialState(accounts)
+            return found.length === 1 && found[0].matchesSynthetic
+          }, 'v011-could-not-reseed-synthetic-credential-for-v2-case')
+          state.syntheticCredentialPresent = true
+        },
+        'v2'
+      )
+      await phase('owned-process-tree-stop', () => stopPackagedBinary(appInstance, state), 'v2')
       appInstance = null
-    } else if (existingCredential.length !== 1 || !existingCredential[0].matchesSynthetic) {
-      throw new InconclusiveError('v011-lp-case-left-an-unexpected-credential-selector-state')
     }
 
-    fs.mkdirSync(authorityDirectory, { recursive: true })
+    const authorityDirectory = path.join(userDataDirectory, 'authority')
     const crashWorker = path.join(
       DESKTOP_DIRECTORY,
       'src',
       '__tests__',
       'sessionAuthorityRecordCrashWorker.cjs'
     )
-    const writer = spawn(
-      process.execPath,
-      [crashWorker, authorityDirectory, envKey, 'produce', 'after-marker'],
-      { cwd: DESKTOP_DIRECTORY, stdio: 'ignore', windowsHide: true }
+    const pendingState = await phase(
+      'publish-v2-pending-state',
+      async () => {
+        fs.mkdirSync(authorityDirectory, { recursive: true })
+        const writer = spawn(
+          process.execPath,
+          [crashWorker, authorityDirectory, envKey, 'produce', 'after-marker'],
+          { cwd: DESKTOP_DIRECTORY, stdio: 'ignore', windowsHide: true }
+        )
+        state.ownedWriter = writer
+        state.writerStopped = false
+        writer.once('close', (code, signal) => {
+          state.writerClosed = true
+          state.writerStopped = true
+          state.writerExitCode = code
+          state.writerExitCodeKnown = code !== null
+          state.writerTerminatedBySignal = signal !== null
+          state.ownedWriter = null
+        })
+        await waitForChildSpawn(writer)
+        state.writerStarted = true
+        const writerExit = await waitForOwnedChildClose(writer, {
+          timeoutMs: COMPATIBILITY_TIMEOUT_MS,
+          onTerminationRequested: () => {
+            state.writerTerminationRequested = true
+          },
+        })
+        state.writerClosed = true
+        state.writerStopped = true
+        state.ownedWriter = null
+        state.writerExitCode = writerExit.code
+        state.writerExitCodeKnown = writerExit.code !== null
+        state.writerTerminatedBySignal = writerExit.signal !== null
+        if (writerExit.timedOut) {
+          throw new InconclusiveError('current-v2-repository-writer-exceeded-timeout')
+        }
+        if (writerExit.signal !== null) {
+          throw new InconclusiveError('child-process-terminated-by-signal')
+        }
+        if (writerExit.code === null) {
+          throw new InconclusiveError('child-process-exit-state-unknown')
+        }
+        if (writerExit.code !== 73) {
+          throw new InconclusiveError('current-v2-repository-writer-did-not-exit-expectedly')
+        }
+        return writerExit
+      },
+      'v2'
     )
-    const [writerExitCode] = await once(writer, 'close')
-    if (writerExitCode !== 73) {
-      throw new InconclusiveError(`current-v2-repository-writer-exited-${writerExitCode}`)
-    }
-    const pendingState = readV2AcceptancePendingState(userDataDirectory, envKey)
-    const v2Before = await credentialState(accounts)
-    if (v2Before.length !== 1 || !v2Before[0].matchesSynthetic) {
-      throw new InconclusiveError('synthetic-denied-token-missing-before-v2-restore')
-    }
+    const v2Receipt = await phase(
+      'read-v2-pending-receipt',
+      async () => {
+        const receipt = readV2AcceptancePendingState(userDataDirectory, envKey)
+        Object.assign(state, receipt)
+        const current = await credentialState(accounts)
+        state.syntheticCredentialPresent = current.length === 1 && current[0].matchesSynthetic
+        state.credentialSelectorCount = current.length
+        if (!state.syntheticCredentialPresent) {
+          throw new InconclusiveError('synthetic-denied-token-missing-before-v2-restore')
+        }
+        return receipt
+      },
+      'v2'
+    )
 
     responseMode = 'deny-synthetic-token'
+    state.restoreDecisionReached = false
+    state.loginFormVisible = false
+    state.getMeRequestCount = 0
+    state.syntheticTokenGetMeCount = 0
+    state.authenticatedUi = false
+    state.credentialChanged = false
     const v2Start = calls.length
-    appInstance = await launchPackagedBinary(executable, userDataDirectory, childProfile)
-    await waitFor(async () => {
-      const ui = await readUiState(appInstance.page)
-      return ui.loginForm || ui.authenticatedSurface || calls.length > v2Start
-    }, 'v011-v2-startup-did-not-reach-a-restore-decision')
-    await delay(10_000)
-    const v2Calls = calls.slice(v2Start)
-    const v2CredentialAfter = await credentialState(accounts)
-    const v2Ui = await readUiState(appInstance.page)
-    if (!v2Ui.loginForm && !v2Ui.authenticatedSurface) {
-      throw new InconclusiveError('v011-v2-startup-did-not-reach-a-stable-authentication-surface')
-    }
-    await stopPackagedBinary(appInstance)
-    appInstance = null
+    appInstance = await launch('v2')
+    const v2Observation = await phase(
+      'v2-restore-observation',
+      async () => {
+        await waitFor(async () => {
+          const ui = await readUiState(appInstance.page)
+          return ui.loginForm || ui.authenticatedSurface || calls.length > v2Start
+        }, 'v011-v2-startup-did-not-reach-a-restore-decision')
+        await delay(COMPATIBILITY_TIMEOUT_MS)
+        const launchedInstance = appInstance
+        const ui = await readUiState(launchedInstance.page)
+        state.loginFormVisible = ui.loginForm
+        state.authenticatedUi = ui.authenticatedSurface
+        await phase(
+          'owned-process-tree-stop',
+          () => stopPackagedBinary(launchedInstance, state),
+          'v2'
+        )
+        appInstance = null
+        const observedCalls = calls.slice(v2Start)
+        const credential = await credentialState(accounts)
+        state.getMeRequestCount = observedCalls.length
+        state.syntheticTokenGetMeCount = observedCalls.filter(call => call.tokenMatches).length
+        state.credentialChanged = credential.length !== 1 || !credential[0].matchesSynthetic
+        state.restoreDecisionReached =
+          observedCalls.length > 0 || ui.loginForm || ui.authenticatedSurface
+        if (!ui.loginForm && !ui.authenticatedSurface) {
+          if (!state.restoreDecisionReached) {
+            throw new InconclusiveError(
+              'v011-v2-startup-did-not-reach-a-stable-authentication-surface'
+            )
+          }
+        }
+        return {
+          calls: observedCalls,
+          credential,
+          ui,
+          restoreDecisionReached: state.restoreDecisionReached,
+        }
+      },
+      'v2'
+    )
 
-    const lpDeniedTokenGetMe = lpCalls.some(call => call.tokenMatches)
-    const v2DeniedTokenGetMe = v2Calls.some(call => call.tokenMatches)
-    const lpAuthenticated = lpUi.authenticatedSurface
-    const v2Authenticated = v2Ui.authenticatedSurface
+    const lpDeniedTokenGetMe = lpObservation.calls.some(call => call.tokenMatches)
+    const v2DeniedTokenGetMe = v2Observation.calls.some(call => call.tokenMatches)
+    const lpAuthenticated = lpObservation.ui.authenticatedSurface
+    const v2Authenticated = v2Observation.ui.authenticatedSurface
+    const lpCredentialChanged =
+      lpObservation.credential.length !== 1 || !lpObservation.credential[0].matchesSynthetic
     const v2CredentialChanged =
-      v2CredentialAfter.length !== 1 || !v2CredentialAfter[0].matchesSynthetic
+      v2Observation.credential.length !== 1 || !v2Observation.credential[0].matchesSynthetic
+    const lpDenied =
+      lpObservation.restoreDecisionReached &&
+      lpObservation.ui.loginForm &&
+      !lpDeniedTokenGetMe &&
+      !lpAuthenticated &&
+      !lpCredentialChanged
+    const v2Denied =
+      v2Observation.restoreDecisionReached &&
+      v2Observation.ui.loginForm &&
+      !v2DeniedTokenGetMe &&
+      !v2Authenticated &&
+      !v2CredentialChanged
+    state.lpCaseDenied = lpDenied
+    state.v2CaseDenied = v2Denied
     const unsafe =
       lpDeniedTokenGetMe ||
       lpAuthenticated ||
+      lpCredentialChanged ||
       v2DeniedTokenGetMe ||
       v2Authenticated ||
       v2CredentialChanged
+    await phase('evaluate-compatibility', async () => {
+      if (!state.baselineRestoreSucceeded || !lpDenied || !v2Denied) {
+        if (unsafe) throw new UnsafeOlderReaderBehaviorError()
+        throw new InconclusiveError('older-reader-denial-assertion-not-reached')
+      }
+      return true
+    })
 
-    result = {
-      status: unsafe ? 'UNSAFE_OLDER_READER_BEHAVIOR' : 'PASS_FOR_TESTED_STATES_ONLY',
+    summary = {
+      kind: 'compatibility-experiment-result',
+      status: 'PASS_FOR_TESTED_STATES_ONLY',
       runner: {
         image: process.env.ImageOS ?? null,
         version: process.env.ImageVersion ?? null,
-        environment: process.env.RUNNER_ENVIRONMENT,
         workflowSha: process.env.GITHUB_SHA ?? null,
         workflowRunId: process.env.GITHUB_RUN_ID ?? null,
-        principalSid: principal.sid,
-        userProfile: principal.userProfile,
+        hostedProfileVerified: state.principalProfileVerified,
       },
-      package: {
-        version: '0.11.0',
+      executable: {
+        productVersion: '0.11.0',
         assetSha256: PACKAGE_SHA256,
         executableSha256: packageHash,
-        executableProductVersion,
+        spawned: state.processSpawned,
+        cdpAttached: state.cdpAttached,
+        rendererReady: state.rendererReady,
       },
       isolation: {
-        userDataDirectory,
-        appDataDirectory,
-        localAppDataDirectory: path.join(taskRoot, 'local-appdata'),
-        service: SERVICE,
-        selectedKeytarAccount: initialCredential[0].account,
-        environmentKey: envKey,
+        userDataProfileVerified: state.isolatedProfileObserved,
+        credentialManagerReadSucceeded: state.credentialReadSucceeded,
         preexistingTargetCount: preexisting.length,
       },
-      lp: {
-        currentWriterIntent: logoutMarker.intent.intent,
-        currentWriterRevision: logoutMarker.revision,
+      baseline: {
+        passwordLoginSubmitted: state.loginSubmitted,
+        syntheticCredentialReadBack: state.syntheticCredentialPresent,
+        coldRestartUsedSyntheticCredential: baseline.some(call => call.tokenMatches),
+        authenticatedUi: state.baselineRestoreSucceeded,
+        getMeRequestCount: baseline.length,
+      },
+      logoutPending: {
+        markerPublished: state.logoutMarkerPublished,
+        markerRevisionVerified: state.logoutMarkerRevisionVerified,
+        restoreDecisionReached: lpObservation.restoreDecisionReached,
         deniedTokenGetMe: lpDeniedTokenGetMe,
-        getMeCalls: lpCalls.length,
+        getMeRequestCount: lpObservation.calls.length,
         authenticatedUi: lpAuthenticated,
-        keytarSourcePresentAfter: lpCredentialAfter.length === 1,
-        keytarSourceChangedByOldReader:
-          lpCredentialAfter.length !== 1 || !lpCredentialAfter[0].matchesSynthetic,
+        loginFormVisible: lpObservation.ui.loginForm,
+        credentialChanged: lpCredentialChanged,
+        denied: lpDenied,
       },
       acceptancePending: {
-        currentRepositoryIntent: 'acceptance-pending',
-        operationId: pendingState.projectionIntentOperationId,
-        markerRevision: pendingState.markerRevision,
-        candidateHash: pendingState.candidateHash,
-        candidatePhase: pendingState.candidatePhase,
-        legacyJournalDigest: pendingState.journalDigest,
+        writerExitCode: pendingState.code,
+        writerExitCodeKnown: state.writerExitCodeKnown,
+        writerTerminatedBySignal: state.writerTerminatedBySignal,
+        authorityFrameVerified: v2Receipt.authorityFrameVerified,
+        projectionIntentMatched: v2Receipt.projectionIntentMatched,
+        candidateDenialVerified: v2Receipt.candidateDenialVerified,
+        markerReceiptMatched: v2Receipt.markerReceiptMatched,
+        legacyJournalSnapshotMatched: v2Receipt.legacyJournalSnapshotMatched,
+        restoreDecisionReached: v2Observation.restoreDecisionReached,
         deniedTokenGetMe: v2DeniedTokenGetMe,
-        getMeCalls: v2Calls.length,
+        getMeRequestCount: v2Observation.calls.length,
         authenticatedUi: v2Authenticated,
-        keytarSourcePresentAfter: v2CredentialAfter.length === 1,
-        keytarSourceChangedByOldReader: v2CredentialChanged,
+        loginFormVisible: v2Observation.ui.loginForm,
+        credentialChanged: v2CredentialChanged,
+        denied: v2Denied,
       },
-      baseline: {
-        passwordLoginPersistedSyntheticCredential: true,
-        coldRestartGetMeUsedSyntheticCredential: calls.some(
-          call => call.mode === 'allow-synthetic-token' && call.tokenMatches
-        ),
-        credentialStateAfterRestore: baselineCredential.length === 1,
-      },
-      network: {
-        configuredRestEndpoint: REST_URL,
-        configuredRpcEndpoint: RPC_URL,
-        observedPasswordLoginRequests: loginRequests.length,
-        observedGetMeRequests: calls.length,
+      cleanup: {
+        processStopped: state.processStopped,
+        syntheticCredentialRemoved: state.syntheticCredentialRemoved,
+        remainingTargetSelectorCount: state.remainingTargetSelectorCount,
+        restEndpointClosed: state.restEndpointClosed,
+        rpcEndpointClosed: state.rpcEndpointClosed,
+        taskDirectoryRemoved: state.taskDirectoryRemoved,
       },
     }
-    console.log(JSON.stringify(result))
-    if (unsafe) process.exitCode = 1
+  } catch (error) {
+    if (!fatalError) fatalError = error
   } finally {
-    await stopPackagedBinary(appInstance).catch(() => undefined)
-    await closeServer(apiServer)
-    await closeServer(rpcServer)
-    for (const account of accounts) {
-      try {
-        const remaining = await keytar.getPassword(SERVICE, account)
-        if (remaining === CANDIDATE_TOKEN) await keytar.deletePassword(SERVICE, account)
-      } catch {
-        // The hosted VM is disposable; never delete an unexpected credential value.
+    try {
+      await phase('cleanup-owned-resources', async () => {
+        const cleanupErrors = []
+        if (state.ownedWriter && !state.writerStopped) {
+          const writer = state.ownedWriter
+          try {
+            const writerExit = await waitForOwnedChildClose(writer, {
+              timeoutMs: 0,
+              onTerminationRequested: () => {
+                state.writerTerminationRequested = true
+              },
+            })
+            state.writerClosed = true
+            state.writerExitCode = writerExit.code
+            state.writerExitCodeKnown = writerExit.code !== null
+            state.writerTerminatedBySignal = writerExit.signal !== null
+            state.writerStopped =
+              writerExit.code !== null || writerExit.signal !== null || state.writerClosed
+            if (state.writerStopped) state.ownedWriter = null
+            else
+              cleanupErrors.push(new InconclusiveError('current-v2-repository-writer-did-not-exit'))
+          } catch (error) {
+            state.writerStopped =
+              writer.exitCode !== null || writer.signalCode !== null || state.writerClosed
+            state.writerExitCode = writer.exitCode
+            state.writerExitCodeKnown = writer.exitCode !== null
+            state.writerTerminatedBySignal = writer.signalCode !== null
+            if (state.writerStopped) state.ownedWriter = null
+            else cleanupErrors.push(error)
+          }
+        }
+        if (appInstance || state.ownedChild) {
+          try {
+            await stopPackagedBinary(
+              appInstance ?? { child: state.ownedChild, browser: state.ownedBrowser },
+              state
+            )
+          } catch (error) {
+            cleanupErrors.push(error)
+          }
+          appInstance = null
+        }
+        if (apiServer) {
+          try {
+            await closeServer(apiServer)
+            state.restEndpointClosed = !apiServer.listening
+          } catch (error) {
+            cleanupErrors.push(error)
+          }
+        } else state.restEndpointClosed = true
+        if (rpcServer) {
+          try {
+            await closeServer(rpcServer)
+            state.rpcEndpointClosed = !rpcServer.listening
+          } catch (error) {
+            cleanupErrors.push(error)
+          }
+        } else state.rpcEndpointClosed = true
+        state.processStopped = state.processStopped || !state.processSpawnAttempted
+        if (!syntheticCredentialMayBeOwned) {
+          state.syntheticCredentialRemoved =
+            state.preexistingSelectorCount === 0 && !state.syntheticCredentialPresent
+          state.remainingTargetSelectorCount = state.preexistingSelectorCount
+        } else if (!state.credentialReadSucceeded) {
+          state.syntheticCredentialRemoved = false
+          state.remainingTargetSelectorCount = null
+          cleanupErrors.push(
+            new InconclusiveError('isolated-windows-credential-manager-unavailable')
+          )
+        } else {
+          try {
+            const cleanupWasAllowed = await runWhenOwnedProcessesStopped(state, async () => {
+              for (const account of accounts) {
+                const remaining = await keytar.getPassword(SERVICE, account)
+                if (remaining === CANDIDATE_TOKEN) await keytar.deletePassword(SERVICE, account)
+              }
+              const finalCredentials = await credentialState(accounts)
+              state.remainingTargetSelectorCount = finalCredentials.length
+              state.syntheticCredentialRemoved = !finalCredentials.some(
+                credential => credential.matchesSynthetic
+              )
+              if (!state.syntheticCredentialRemoved || finalCredentials.length !== 0) {
+                cleanupErrors.push(new InconclusiveError('cleanup-verification-failed'))
+              }
+            })
+            if (!cleanupWasAllowed) {
+              state.syntheticCredentialRemoved = false
+              state.remainingTargetSelectorCount = null
+              if (!state.processStopped) {
+                cleanupErrors.push(new InconclusiveError('owned-packaged-process-did-not-exit'))
+              }
+              if (!state.writerStopped) {
+                cleanupErrors.push(
+                  new InconclusiveError('current-v2-repository-writer-did-not-exit')
+                )
+              }
+            }
+          } catch (error) {
+            cleanupErrors.push(error)
+          }
+        }
+        if (taskRoot) {
+          try {
+            const taskDirectoryCleanupAllowed = await runWhenOwnedProcessesStopped(
+              state,
+              async () => {
+                fs.rmSync(taskRoot, { recursive: true, force: true })
+                state.taskDirectoryRemoved = !fs.existsSync(taskRoot)
+              }
+            )
+            if (!taskDirectoryCleanupAllowed) state.taskDirectoryRemoved = false
+          } catch (error) {
+            cleanupErrors.push(error)
+          }
+        } else if (!taskRoot) state.taskDirectoryRemoved = true
+        else state.taskDirectoryRemoved = false
+        if (!state.taskDirectoryRemoved) {
+          cleanupErrors.push(new InconclusiveError('cleanup-verification-failed'))
+        }
+        if (!state.restEndpointClosed || !state.rpcEndpointClosed) {
+          cleanupErrors.push(new InconclusiveError('local-test-server-did-not-close'))
+        }
+        if (cleanupErrors.length > 0) throw cleanupErrors[0]
+      })
+    } catch (error) {
+      if (!fatalError) {
+        fatalError = error
+        failedPhase = 'cleanup-owned-resources'
       }
     }
-    fs.rmSync(taskRoot, { recursive: true, force: true })
   }
+
+  summary = attachFinalCleanupObservations(summary, state)
+
+  if (fatalError) {
+    const failure = classifyDiagnosticFailure(fatalError)
+    const output = classifyUncaughtExperimentFailure(fatalError, failedPhase)
+    console.error(JSON.stringify(output))
+    process.exitCode = failure.status === 'FAIL' ? 1 : 2
+    return
+  }
+  console.log(JSON.stringify(summary))
 }
 
 const environmentSelfTest = process.argv.includes('--self-test-child-environment')
-const execution = environmentSelfTest
-  ? Promise.resolve().then(runChildEnvironmentContractSelfTest)
-  : main()
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  const execution = environmentSelfTest
+    ? Promise.resolve().then(runChildEnvironmentContractSelfTest)
+    : main()
 
-execution.catch(error => {
-  const category =
-    error instanceof InconclusiveError
-      ? error.category
-      : error instanceof Error
-        ? 'runtime-experiment-failed'
-        : 'runtime-experiment-failed-unknown'
-  console.error(`INCONCLUSIVE: ${category}`)
-  process.exitCode = 2
-})
+  execution.catch(error => {
+    console.error(JSON.stringify(classifyUncaughtExperimentFailure(error)))
+    process.exitCode = 2
+  })
+}
