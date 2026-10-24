@@ -100,6 +100,72 @@ describe('useAppController session ownership oracle', () => {
     expect.soft(clerum.hasProgressHandler('team-a-task')).toBe(false)
   })
 
+  it('preserves workspace and tears down team activity when loadSession observes a team change', async () => {
+    const { clerum, handle } = installAppControllerClerum()
+    const app = installCoordinatorHarness()
+    tracker = app.result.current.tracker
+
+    await waitFor(() => expect(app.result.current.controller.isAuthenticated).toBe(true))
+    await waitFor(() => expect(app.result.current.controller.initialExperienceLoading).toBe(false))
+
+    act(() => {
+      app.result.current.controller.handleSelectChatAgent('agent-x', {
+        chatId: 'team-a-load-session-chat',
+        title: 'Team A conversation',
+        selectLatest: false,
+      })
+    })
+    await waitFor(() =>
+      expect(app.result.current.controller.activeChatId).toBe('team-a-load-session-chat')
+    )
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'team-a-load-session-task' })
+    await act(async () => {
+      await app.result.current.controller.handleSendAgentMessage('team scoped task')
+    })
+    await waitFor(() => expect(clerum.hasProgressHandler('team-a-load-session-task')).toBe(true))
+    const chatKey = 'agent-x::team-a-load-session-chat'
+    await waitFor(() =>
+      expect(app.result.current.controller.sessionStateByChatKey[chatKey]?.state).toBe('processing')
+    )
+
+    act(() =>
+      app.result.current.controller.openFilesSection('gfs://main/0123456789abcdef0123456789abcdef')
+    )
+    const before = app.result.current.controller.workspaceTabs
+    const chatTab = before.tabs.find(
+      tab => tab.kind === 'chat' && tab.chat?.chatId === 'team-a-load-session-chat'
+    )
+    expect(chatTab?.kind).toBe('chat')
+    if (chatTab?.kind !== 'chat') throw new Error('expected the producer-created chat tab')
+    expect(
+      setComposerDraft('team-a-load-session-chat', 'keep this draft', 'agent-x', chatTab.id)
+    ).toBe(true)
+    expect(app.result.current.tracker.get(chatKey)?.taskId).toBe('team-a-load-session-task')
+
+    handle.getSessionState.mockResolvedValue({
+      authenticated: true,
+      me: {
+        ...HARNESS_ME,
+        teamId: 'team-2',
+        teamName: 'Team 2',
+      },
+    })
+
+    await act(async () => {
+      await app.result.current.controller.loadSession()
+    })
+    await waitFor(() => expect(app.result.current.controller.currentTeamId).toBe('team-2'))
+
+    expect(app.result.current.controller.workspaceTabs).toEqual(before)
+    expect(getComposerDraft('team-a-load-session-chat', 'agent-x', chatTab.id)).toBe(
+      'keep this draft'
+    )
+    expect(app.result.current.tracker.get(chatKey)).toBeUndefined()
+    expect(app.result.current.tracker.getResend('team-a-load-session-task')).toBeUndefined()
+    expect(app.result.current.controller.sessionStateByChatKey[chatKey]).toBeUndefined()
+    expect(clerum.hasProgressHandler('team-a-load-session-task')).toBe(false)
+  })
+
   it('does not carry the prior principal workspace through A → null → B', async () => {
     const { handle } = installAppControllerClerum()
     const app = installCoordinatorHarness()

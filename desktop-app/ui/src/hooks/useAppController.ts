@@ -844,14 +844,30 @@ export function useAppController() {
             ? `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
             : null
         const previousIdentity = activeAuthenticatedSessionIdentityRef.current
-        if (
-          previousIdentity !== null &&
-          (sessionIdentity === null || previousIdentity !== sessionIdentity)
-        ) {
+        const previousPrincipal = previousIdentity ? authenticatedPrincipalIdentity : null
+        const nextPrincipal =
+          authenticated && sessionState.me
+            ? `${sessionState.me.id}:${String(sessionState.me.email || '')
+                .trim()
+                .toLowerCase()}`
+            : null
+        const principalChanged = previousPrincipal !== null && nextPrincipal !== previousPrincipal
+        const samePrincipalTeamChanged =
+          previousPrincipal !== null &&
+          nextPrincipal === previousPrincipal &&
+          currentTeamIdRef.current !== (sessionState.me?.teamId || '')
+        if (previousPrincipal !== null && (nextPrincipal === null || principalChanged)) {
           // Invalidate the prior workspace before publishing another principal
           // or a confirmed signed-out state, and before its asynchronous catalog
           // refresh can finish. A null → first-auth bootstrap has no prior owner.
           nav.resetSessionNavigation()
+        }
+        if (samePrincipalTeamChanged) {
+          // loadSession and the explicit team switch share the same team-scope
+          // boundary: preserve this principal's workspace, but stop old-team
+          // task/FSM/reconciliation ownership before refreshing Team B data.
+          await chat.teardownTeamActivity()
+          connectorsData.reset()
         }
         auth.setIsAuthenticated(authenticated)
         auth.setMe(sessionState.me)
@@ -916,8 +932,10 @@ export function useAppController() {
       auth.setMe,
       auth.setPassword,
       auth.refreshDesktopReleaseStatus,
+      authenticatedPrincipalIdentity,
       chat.resetChat,
       chat.stopAllActivityStreams,
+      chat.teardownTeamActivity,
       contextsData.reset,
       mcpServersData.reset,
       nav.handleNavSelect,
