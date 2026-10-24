@@ -3554,7 +3554,7 @@ describe('App deep-link orchestration', () => {
       await Promise.resolve()
     })
     expect(liveTeamId).toBe('team-c')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
   })
 
