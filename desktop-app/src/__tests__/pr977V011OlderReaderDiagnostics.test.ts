@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import {
   InconclusiveError,
@@ -8,10 +8,51 @@ import {
   classifyUncaughtExperimentFailure,
   runDiagnosticPhase,
   runWhenOwnedProcessesStopped,
+  waitFor,
   waitForOwnedChildClose,
 } from '../../scripts/pr977-v011-older-reader-diagnostics.mjs'
 
 describe('v0.11 older-reader phase diagnostics', () => {
+  it('returns the successful predicate result for credential readback callers', async () => {
+    const matchingCredentials = [{ selector: 'synthetic-selector', matchesSynthetic: true }]
+    const predicate = vi
+      .fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(matchingCredentials)
+
+    vi.useFakeTimers()
+    try {
+      const result = waitFor(predicate, 'credential-readback-timeout', 1_000)
+      await vi.advanceTimersByTimeAsync(200)
+
+      const found = await result
+      expect(found).toBe(matchingCredentials)
+      expect(found.length).toBe(1)
+      expect(predicate).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps timeout and predicate exceptions observable', async () => {
+    vi.useFakeTimers()
+    try {
+      const timedOut = waitFor(async () => false, 'credential-readback-timeout', 100)
+      const timeoutAssertion = expect(timedOut).rejects.toMatchObject({
+        category: 'credential-readback-timeout',
+      })
+      await vi.advanceTimersByTimeAsync(200)
+      await timeoutAssertion
+    } finally {
+      vi.useRealTimers()
+    }
+
+    const predicateFailure = new Error('synthetic predicate failure')
+    await expect(
+      waitFor(async () => Promise.reject(predicateFailure), 'unused-category')
+    ).rejects.toBe(predicateFailure)
+  })
+
   it('reports a fixed phase and sanitized category for a failed platform stage', async () => {
     const records: unknown[] = []
     let elapsed = 10

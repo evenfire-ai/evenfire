@@ -196,6 +196,8 @@ const SAFE_FAILURE_CATEGORIES = new Set([
 const SAFE_PHASE_STATUSES = new Set(['STARTED', 'PASS', 'INCONCLUSIVE', 'FAIL'])
 const MAX_ELAPSED_MS = 4 * 60 * 60 * 1000
 const MAX_OBSERVATION_COUNT = 10_000
+export const COMPATIBILITY_TIMEOUT_MS = 45_000
+const WAIT_POLL_INTERVAL_MS = 200
 
 export class InconclusiveError extends Error {
   constructor(category) {
@@ -210,6 +212,16 @@ export class UnsafeOlderReaderBehaviorError extends Error {
     super('older reader violated the tested denial contract')
     this.name = 'UnsafeOlderReaderBehaviorError'
   }
+}
+
+export async function waitFor(predicate, category, timeoutMs = COMPATIBILITY_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const result = await predicate()
+    if (result) return result
+    await new Promise(resolve => setTimeout(resolve, WAIT_POLL_INTERVAL_MS))
+  }
+  throw new InconclusiveError(category)
 }
 
 export function waitForOwnedChildClose(

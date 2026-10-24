@@ -10,6 +10,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
+  COMPATIBILITY_TIMEOUT_MS,
   InconclusiveError,
   UnsafeOlderReaderBehaviorError,
   attachFinalCleanupObservations,
@@ -17,6 +18,7 @@ import {
   classifyUncaughtExperimentFailure,
   runDiagnosticPhase,
   runWhenOwnedProcessesStopped,
+  waitFor,
   waitForOwnedChildClose,
 } from './pr977-v011-older-reader-diagnostics.mjs'
 
@@ -50,7 +52,6 @@ const USER = {
 const PACKAGE_SHA256 = '9101d2a7c2fc49c6f64c15fc889523a8d830dd8779278dc69256317c6bbc9f41'
 const SCRIPT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url))
 const DESKTOP_DIRECTORY = path.resolve(SCRIPT_DIRECTORY, '..')
-const COMPATIBILITY_TIMEOUT_MS = 45_000
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex')
@@ -153,15 +154,6 @@ async function getFreePort() {
 
 function delay(milliseconds) {
   return new Promise(resolve => setTimeout(resolve, milliseconds))
-}
-
-async function waitFor(predicate, category, timeoutMs = COMPATIBILITY_TIMEOUT_MS) {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    if (await predicate()) return
-    await delay(200)
-  }
-  throw new InconclusiveError(category)
 }
 
 function waitForChildSpawn(child, timeoutMs = 20_000) {
