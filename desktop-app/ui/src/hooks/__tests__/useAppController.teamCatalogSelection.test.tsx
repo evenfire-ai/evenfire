@@ -278,4 +278,103 @@ describe('useAppController team-scoped catalog selection', () => {
       expect(send).toHaveBeenCalledExactlyOnceWith('send with the Team B agent')
     }
   )
+
+  it.each(['team.switch', 'same-principal loadSession'] as const)(
+    'shows a settled Team B catalog failure and retries only the catalog after %s',
+    async transition => {
+      const { handle } = installAppControllerClerum({
+        me: { teamId: 'team-a', teamName: 'Team A' },
+        teamDirectory: { items: [], currentTeamId: 'team-a' },
+      })
+      let currentTeamId = 'team-a'
+      let failTeamBRefresh = true
+      const refreshCatalog = vi.fn(async () => {
+        if (currentTeamId === 'team-a') return productionCatalog('team-a', 'team-a-only-agent')
+        if (failTeamBRefresh) throw new Error('Team B catalog unavailable')
+        return productionCatalog('team-b', 'team-b-only-agent')
+      })
+      Object.assign(window.clerum.team, {
+        switch: vi.fn(async (teamId: string) => {
+          currentTeamId = teamId
+          return {
+            authenticated: true,
+            me: { ...HARNESS_ME, teamId, teamName: teamId === 'team-a' ? 'Team A' : 'Team B' },
+          }
+        }),
+      })
+      Object.assign(window.clerum.access, { refreshCatalog })
+
+      const app = renderAppController()
+      unmount = app.unmount
+      await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
+      await waitFor(() =>
+        expect(
+          app.queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)?.teamId
+        ).toBe('team-a')
+      )
+      act(() => {
+        app.result.current.handleSelectChatAgent('team-a-only-agent', { selectLatest: false })
+      })
+      await waitFor(() => expect(app.result.current.selectedAgent).toBe('team-a-only-agent'))
+
+      const send = vi.fn(async () => undefined)
+      const panel = renderControllerComposer(app)
+      unmountPanel = panel.unmount
+      const textarea = screen.getByRole('textbox', { name: 'Agent message composer' })
+      fireEvent.change(textarea, { target: { value: 'preserve while Team B access is checked' } })
+
+      if (transition === 'team.switch') {
+        await act(async () => {
+          await app.result.current.handleEnsureTeamContext({ teamId: 'team-b' })
+        })
+      } else {
+        currentTeamId = 'team-b'
+        handle.getSessionState.mockResolvedValue({
+          authenticated: true,
+          me: { ...HARNESS_ME, teamId: 'team-b', teamName: 'Team B' },
+        })
+        await act(async () => {
+          await app.result.current.loadSession({ preserveNav: true })
+        })
+      }
+
+      await waitFor(() => expect(app.result.current.currentTeamId).toBe('team-b'))
+      await waitFor(() =>
+        expect(app.queryClient.getQueryState(desktopQueryKeys.accessCatalog)?.status).toBe('error')
+      )
+      expect(
+        app.queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)?.teamId
+      ).toBe('team-a')
+      expect(app.result.current.selectedAgent).toBe('team-a-only-agent')
+      panel.rerender(controllerComposerElement(app, send))
+
+      expect((await screen.findByRole('alert')).textContent).toContain(
+        'Could not verify agent access for this team'
+      )
+      expect(screen.queryByText(/Checking agent access for this team/)).toBeNull()
+      expect((screen.getByTestId('send-button') as HTMLButtonElement).disabled).toBe(true)
+      expect((textarea as HTMLTextAreaElement).value).toBe(
+        'preserve while Team B access is checked'
+      )
+      fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false })
+      expect(send).not.toHaveBeenCalled()
+
+      const callsBeforeRetry = refreshCatalog.mock.calls.length
+      failTeamBRefresh = false
+      fireEvent.click(screen.getByRole('button', { name: 'Retry access check' }))
+      await waitFor(() => expect(refreshCatalog).toHaveBeenCalledTimes(callsBeforeRetry + 1))
+      await waitFor(() =>
+        expect(
+          app.queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)?.teamId
+        ).toBe('team-b')
+      )
+      panel.rerender(controllerComposerElement(app, send))
+      expect((await screen.findByRole('alert')).textContent).toContain(
+        'team-a-only-agent is unavailable in this team'
+      )
+      expect((screen.getByTestId('send-button') as HTMLButtonElement).disabled).toBe(true)
+      fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false })
+      expect(send).not.toHaveBeenCalled()
+    }
+  )
 })

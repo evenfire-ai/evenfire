@@ -35,6 +35,7 @@ import { useClickOutside } from '@hooks/useClickOutside'
 import { useComposerDraft } from '@hooks/useComposerDraft'
 import { useFlyoutPosition } from '@hooks/useFlyoutPosition'
 import { useHostModels } from '@hooks/useHostModels'
+import { resolveAgentCatalogAvailability } from '@lib/agentCatalogAvailability'
 import { formatFileSize } from '@lib/composerFileAdmission'
 import { readImageHeaderDimensions } from '@lib/imageHeaderDimensions'
 import type { WorkflowRecipeListResult } from '../../../../src/types'
@@ -431,20 +432,18 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const agentCatalogMatchesSession = Boolean(
     me && accessCatalog && accessCatalog.userId === me.id && accessCatalog.teamId === me.teamId
   )
-  const selectedAgentCatalogState = !selectedAgent
-    ? 'ready'
-    : agentCatalog.loading || !agentCatalogMatchesSession
-      ? 'checking'
-      : agentCatalog.error
-        ? 'error'
-        : agentCatalog.agentNames.includes(selectedAgent)
-          ? 'available'
-          : 'unavailable'
+  const selectedAgentCatalogState = resolveAgentCatalogAvailability({
+    selectedAgent,
+    loading: agentCatalog.loading,
+    error: agentCatalog.error,
+    catalogMatchesSession: agentCatalogMatchesSession,
+    agentNames: agentCatalog.agentNames,
+  })
   const selectedAgentCatalogMessage =
     selectedAgentCatalogState === 'checking'
       ? 'Checking agent access for this team…'
       : selectedAgentCatalogState === 'error'
-        ? 'Could not verify agent access for this team. Wait for the catalog to load before sending.'
+        ? 'Could not verify agent access for this team. Retry the check before sending.'
         : selectedAgentCatalogState === 'unavailable'
           ? `${selectedAgent} is unavailable in this team. Select an available agent to send.`
           : null
@@ -1341,6 +1340,16 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           >
             {selectedAgentCatalogMessage}
           </p>
+          {selectedAgentCatalogState === 'error' ? (
+            <Button
+              disabled={agentCatalog.loading}
+              onClick={() => void agentCatalog.refresh()}
+              size="sm"
+              variant="ghost"
+            >
+              Retry access check
+            </Button>
+          ) : null}
         </div>
       ) : null}
       {composerFileNotices.length > 0 ? (
