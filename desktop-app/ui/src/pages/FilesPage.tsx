@@ -1686,7 +1686,11 @@ export function FilesPage({
    *  success toasts and closes it. An authority rejection instead fails the
    *  session closed and closes the dialog — the revoked state takes over.
    *  ifMatch pins the resource version. */
-  const handleMoveTarget = async (destinationId: string, destinationName: string) => {
+  const handleMoveTarget = async (
+    destinationId: string,
+    destinationName: string,
+    executeMove = true
+  ) => {
     if (!moveTarget) return
     const target = moveTarget
     const sourceParentId =
@@ -1752,6 +1756,10 @@ export function FilesPage({
         throw new Error(
           'Move was not started because the workspace changed; review the destination.'
         )
+      }
+      if (!executeMove) {
+        setMovePermissionStatus(null)
+        return
       }
       await ctrl.moveResource(target.resourceId, destinationId, target.version)
       if (!pageActiveRef.current || !contextStillMatches()) return
@@ -2883,7 +2891,12 @@ export function FilesPage({
             setMovePermissionStatus(null)
             setMoveTarget(null)
           }}
-          onMove={handleMoveTarget}
+          onMove={(destinationId, destinationName) =>
+            handleMoveTarget(destinationId, destinationName)
+          }
+          onRetryPermissionCheck={(destinationId, destinationName) =>
+            handleMoveTarget(destinationId, destinationName, false)
+          }
           onAuthorityFailure={message => ctrl.handleAuthorityFailure(message, 'operation')}
           sessionScope={sessionScope}
           target={moveTarget}

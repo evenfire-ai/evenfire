@@ -196,6 +196,7 @@ export function GfsMoveDialog({
   sessionScope,
   initialCrumbs,
   onMove,
+  onRetryPermissionCheck,
   onClose,
   busy = false,
   permissionStatus = null,
@@ -232,6 +233,7 @@ export function GfsMoveDialog({
         : null
   )
   const [error, setError] = useState<string | null>(null)
+  const [permissionCheckSucceeded, setPermissionCheckSucceeded] = useState(false)
   const scope = sessionScope ?? 'anonymous'
 
   const accessibleQuery = useInfiniteQuery({
@@ -303,6 +305,7 @@ export function GfsMoveDialog({
 
   const selectFolder = (folder: GfsBrowserChild) => {
     setError(null)
+    setPermissionCheckSucceeded(false)
     setSelectedDestination({ resourceId: folder.resourceId, name: folder.name })
     setExpandedFolderIds(previous => {
       if (previous.has(folder.resourceId)) return previous
@@ -313,10 +316,23 @@ export function GfsMoveDialog({
   const commit = async () => {
     if (!selectedDestination) return
     setError(null)
+    setPermissionCheckSucceeded(false)
     try {
       await onMove(selectedDestination.resourceId, selectedDestination.name)
     } catch (moveError) {
       setError(errorMessage(moveError))
+    }
+  }
+
+  const retryPermissionCheck = async () => {
+    if (!selectedDestination) return
+    setError(null)
+    setPermissionCheckSucceeded(false)
+    try {
+      await onRetryPermissionCheck(selectedDestination.resourceId, selectedDestination.name)
+      setPermissionCheckSucceeded(true)
+    } catch (retryError) {
+      setError(errorMessage(retryError))
     }
   }
 
@@ -354,8 +370,18 @@ export function GfsMoveDialog({
             </p>
           ) : null}
           {error ? <StatusBanner tone="error" text={error} /> : null}
+          {permissionCheckSucceeded ? (
+            <p className="muted" role="status">
+              Permissions verified. Select Move to confirm.
+            </p>
+          ) : null}
           {permissionStatus === 'failed' ? (
-            <Button onClick={() => void commit()} size="sm" variant="outline">
+            <Button
+              disabled={busy || !selectedDestination}
+              onClick={() => void retryPermissionCheck()}
+              size="sm"
+              variant="outline"
+            >
               Retry permission check
             </Button>
           ) : null}

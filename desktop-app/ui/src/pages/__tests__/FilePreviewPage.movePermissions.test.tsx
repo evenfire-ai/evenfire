@@ -367,6 +367,15 @@ describe('FilePreviewPage move permission contract', () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
       for (let index = 0; index < 10; index += 1) await Promise.resolve()
     })
+    expect(within(dialog).getByRole('status').textContent).toContain(
+      'Permissions verified. Select Move to confirm.'
+    )
+    expect(moveResource).not.toHaveBeenCalled()
+
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+      for (let index = 0; index < 10; index += 1) await Promise.resolve()
+    })
     expect(moveResource).toHaveBeenCalledTimes(1)
     queryClient.clear()
   })

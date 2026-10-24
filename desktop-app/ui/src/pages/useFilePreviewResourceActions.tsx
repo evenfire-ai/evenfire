@@ -439,7 +439,7 @@ export function useFilePreviewResourceActions({
     }
   }
 
-  const handleMove = async (destinationId: string, destinationName: string) => {
+  const handleMove = async (destinationId: string, destinationName: string, executeMove = true) => {
     if (!resource || !sourceParentId) return
     const requestId = ++moveRequestRef.current
     const moveContext = {
@@ -511,6 +511,10 @@ export function useFilePreviewResourceActions({
         throw new Error('You do not have write access to the destination folder.')
       }
       permissionsChecked = true
+      if (!executeMove) {
+        setMovePermissionStatus(null)
+        return
+      }
       await window.clerum.gfs.moveResource(
         resource.resourceId,
         destinationId,
@@ -803,7 +807,10 @@ export function useFilePreviewResourceActions({
           }}
           sessionScope={sessionScope}
           initialCrumbs={[]}
-          onMove={handleMove}
+          onMove={(destinationId, destinationName) => handleMove(destinationId, destinationName)}
+          onRetryPermissionCheck={(destinationId, destinationName) =>
+            handleMove(destinationId, destinationName, false)
+          }
           onClose={() => {
             moveRequestRef.current += 1
             setMovePermissionStatus(null)
