@@ -112,15 +112,14 @@ export function getComposerDraftRevision(
   workspaceTabId?: string | null
 ): number {
   const key = keyFor(chatId, agentRef)
-  if (workspaceTabId) {
+  if (chatId === null && workspaceTabId) {
     const tabDraft = getTabDraft(workspaceTabId, key)
     if (tabDraft) return tabRevisions.get(workspaceTabId)?.get(key) ?? 0
     const pending = pendingResourcePrefillsByTab.get(workspaceTabId)
-    if (chatId === null && pending) return pending.revision
+    if (pending) return pending.revision
+    return tabRevisions.get(workspaceTabId)?.get(key) ?? 0
   }
-  return workspaceTabId
-    ? (tabRevisions.get(workspaceTabId)?.get(key) ?? 0)
-    : (revisions.get(key) ?? 0)
+  return revisions.get(key) ?? 0
 }
 
 export function getComposerDraft(
