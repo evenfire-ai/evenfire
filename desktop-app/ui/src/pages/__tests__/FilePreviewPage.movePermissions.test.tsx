@@ -475,7 +475,7 @@ describe('FilePreviewPage move permission contract', () => {
     expect(within(dialog).getByText('Checking permissions…')).toBeTruthy()
 
     const nextUri = 'gfs://main/abcdefabcdefabcdefabcdefabcdefab'
-    const nextResource = resolveResource({
+    const nextResource = await resolveResource({
       resourceId: 'abcdefabcdefabcdefabcdefabcdefab',
       rid: 'abcdefabcdefabcdefabcdefabcdefab',
       gfsUri: nextUri,

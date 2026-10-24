@@ -2861,7 +2861,9 @@ describe('App deep-link orchestration', () => {
       agentProviderByName: { [agentName]: null },
       agentDisplayByName: { [agentName]: agentName },
     })
-    const switchTeamProducer = handle.switchTeam.getMockImplementation()
+    const switchTeamProducer = handle.switchTeam.getMockImplementation() as unknown as
+      | ((teamId: string) => Promise<{ authenticated: boolean; me: unknown | null }>)
+      | undefined
     if (!switchTeamProducer) throw new Error('The team-switch producer was not installed')
     handle.switchTeam.mockImplementation(async (teamId: string) => {
       activeTeamId = teamId
@@ -3273,7 +3275,9 @@ describe('App deep-link orchestration', () => {
     const selectorsBeforeSwitch = Array.from(
       document.querySelectorAll<HTMLButtonElement>('.chat-view-tab__select')
     )
-    fireEvent.click(selectorsBeforeSwitch[tabBReturnIndex])
+    const tabBReturnButton = selectorsBeforeSwitch[tabBReturnIndex]
+    if (!tabBReturnButton) throw new Error('New Chat B tab selector was not rendered')
+    fireEvent.click(tabBReturnButton)
     await waitFor(() =>
       expect(
         screen.getByTestId('chat-page-surface').getAttribute('data-workspace-chat-tab-id')
@@ -3289,7 +3293,9 @@ describe('App deep-link orchestration', () => {
     const selectors = Array.from(
       document.querySelectorAll<HTMLButtonElement>('.chat-view-tab__select')
     )
-    fireEvent.click(selectors[tabAIndex])
+    const tabAButton = selectors[tabAIndex]
+    if (!tabAButton) throw new Error('New Chat A tab selector was not rendered')
+    fireEvent.click(tabAButton)
     await waitFor(() =>
       expect(
         screen.getByTestId('chat-page-surface').getAttribute('data-workspace-chat-tab-id')
@@ -3305,7 +3311,9 @@ describe('App deep-link orchestration', () => {
     const refreshedSelectors = Array.from(
       document.querySelectorAll<HTMLButtonElement>('.chat-view-tab__select')
     )
-    fireEvent.click(refreshedSelectors[tabBIndex])
+    const tabBButton = refreshedSelectors[tabBIndex]
+    if (!tabBButton) throw new Error('New Chat B tab selector was not rendered')
+    fireEvent.click(tabBButton)
     await waitFor(() =>
       expect(
         screen.getByTestId('chat-page-surface').getAttribute('data-workspace-chat-tab-id')
@@ -3321,7 +3329,9 @@ describe('App deep-link orchestration', () => {
     const closeButtons = Array.from(
       document.querySelectorAll<HTMLButtonElement>('.chat-view-tab__close')
     )
-    fireEvent.click(closeButtons[tabAIndex])
+    const tabACloseButton = closeButtons[tabAIndex]
+    if (!tabACloseButton) throw new Error('New Chat A close button was not rendered')
+    fireEvent.click(tabACloseButton)
     await waitFor(() =>
       expect(realController.current?.workspaceTabs.tabs.some(tab => tab.id === tabA.id)).toBe(false)
     )
