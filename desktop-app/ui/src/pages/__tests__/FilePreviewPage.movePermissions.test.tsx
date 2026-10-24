@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import {
   accessibleResource,
   listAccessiblePage,
@@ -46,16 +47,20 @@ function installGfs(options: {
     version: 7,
     bytes: 1,
   })
+  const resolve = vi.fn(async () => resource)
   const affordances = vi.fn(async (resourceId: string) => {
     if (resourceId === parentId) return (options.source ?? (async () => fullAccess))()
-    return (options.destination ?? (async () => fullAccess))()
+    if (resourceId === 'destination-1') {
+      return (options.destination ?? (async () => fullAccess))()
+    }
+    return fullAccess
   })
   const moveResource = vi.fn(options.move ?? (async () => undefined))
   Object.defineProperty(window, 'clerum', {
     configurable: true,
     value: {
       gfs: {
-        resolve: vi.fn(async () => resource),
+        resolve,
         affordances,
         listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
         downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
@@ -64,7 +69,7 @@ function installGfs(options: {
       },
     },
   })
-  return { affordances, moveResource }
+  return { affordances, moveResource, resolve }
 }
 
 function renderPreview(pushToast?: (message: string, tone: Tone) => void) {
@@ -223,6 +228,40 @@ describe('FilePreviewPage move permission contract', () => {
     expect(moveResource).not.toHaveBeenCalled()
   })
 
+  it('rejects a cached destination grant when fresh confirmation sees write revoked', async () => {
+    const destinationPage = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+    ])
+    const moveResource = vi.fn(async () => undefined)
+    const { affordances } = installGfs({
+      destination: async () => readOnly,
+      listAccessible: async () => destinationPage,
+      move: moveResource,
+    })
+    installController()
+    const { queryClient } = renderPreview()
+    queryClient.setQueryData(
+      desktopQueryKeys.gfsAffordances('preview-test-user:main', 'destination-1', 'main'),
+      fullAccess
+    )
+
+    await screen.findByAltText('Preview of diagram.png')
+    const menu = await openPreviewActions()
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
+    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+
+    expect(
+      await within(dialog).findByText('You do not have write access to the destination folder.')
+    ).toBeTruthy()
+    expect(affordances).toHaveBeenCalledWith(parentId, 'main')
+    expect(affordances).toHaveBeenCalledWith('destination-1', 'main')
+    expect(moveResource).not.toHaveBeenCalled()
+  })
+
   it('keeps a confirmed move visible while fresh source-parent permissions are pending', async () => {
     const destinationPage = await listAccessiblePage([
       accessibleResource('destination-1', 'Archive', 'directory', {
@@ -329,6 +368,134 @@ describe('FilePreviewPage move permission contract', () => {
       for (let index = 0; index < 10; index += 1) await Promise.resolve()
     })
     expect(moveResource).toHaveBeenCalledTimes(1)
+    queryClient.clear()
+  })
+
+  it('does not let a successful permission retry commit Move without a second confirmation', async () => {
+    const destinationPage = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+    ])
+    const limited = new Error(
+      "Error invoking remote method 'gfs:affordances': 429 Too Many Requests " +
+        'httpStatus=429 retryAfterSeconds=7'
+    )
+    let destinationCalls = 0
+    const destination = vi.fn(async () => {
+      destinationCalls += 1
+      if (destinationCalls === 1) throw limited
+      return fullAccess
+    })
+    const moveResource = vi.fn(async () => undefined)
+    const { affordances } = installGfs({
+      destination,
+      listAccessible: async () => destinationPage,
+      move: moveResource,
+    })
+    installController()
+    const { queryClient } = renderPreview()
+
+    await screen.findByAltText('Preview of diagram.png')
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith(parentId, 'main'))
+    const menu = await openPreviewActions()
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
+    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+
+    expect(
+      await within(dialog).findByText('Too many file requests — try again in 7s.')
+    ).toBeTruthy()
+    expect(within(dialog).getByRole('button', { name: 'Retry permission check' })).toBeTruthy()
+    expect(affordances).toHaveBeenCalledWith(parentId, 'main')
+    expect(affordances).toHaveBeenCalledWith('destination-1', 'main')
+    expect(moveResource).not.toHaveBeenCalled()
+
+    vi.useFakeTimers()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(7_001)
+    })
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
+      for (let index = 0; index < 10; index += 1) await Promise.resolve()
+    })
+    expect(destination).toHaveBeenCalledTimes(2)
+    expect.soft(moveResource).not.toHaveBeenCalled()
+    queryClient.clear()
+  })
+
+  it('rejects a permission response after the preview resource changes', async () => {
+    const destinationPage = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+    ])
+    let finishDestinationCheck!: (value: ReturnType<typeof delegationAffordances>) => void
+    const destination = vi.fn(
+      () =>
+        new Promise<ReturnType<typeof delegationAffordances>>(resolve => {
+          finishDestinationCheck = resolve
+        })
+    )
+    const moveResource = vi.fn(async () => undefined)
+    const { resolve } = installGfs({
+      destination,
+      listAccessible: async () => destinationPage,
+      move: moveResource,
+    })
+    installController()
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 0 } },
+    })
+    const renderPage = (activeUri = uri, activeFileName = 'diagram.png') => (
+      <QueryClientProvider client={queryClient}>
+        <FilePreviewPage
+          gfsUri={activeUri}
+          fileName={activeFileName}
+          fileKind="image"
+          mimeType="image/png"
+          byteLength={1}
+          pushToast={vi.fn()}
+        />
+      </QueryClientProvider>
+    )
+    const view = render(renderPage())
+
+    await screen.findByAltText('Preview of diagram.png')
+    const menu = await openPreviewActions()
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
+    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Move here (Archive)' })).toBeTruthy()
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Move here (Archive)' }))
+    await waitFor(() => expect(destination).toHaveBeenCalledOnce())
+    expect(within(dialog).getByText('Checking permissions…')).toBeTruthy()
+
+    const nextUri = 'gfs://main/abcdefabcdefabcdefabcdefabcdefab'
+    const nextResource = resolveResource({
+      resourceId: 'abcdefabcdefabcdefabcdefabcdefab',
+      rid: 'abcdefabcdefabcdefabcdefabcdefab',
+      gfsUri: nextUri,
+      drive: 'main',
+      parentResourceId: 'source-parent-2',
+      name: 'replacement.png',
+      kind: 'file',
+      version: 8,
+      bytes: 1,
+    })
+    resolve.mockResolvedValue(nextResource)
+    view.rerender(renderPage(nextUri, 'replacement.png'))
+    await screen.findByRole('heading', { name: 'replacement.png', level: 2 })
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Move file diagram.png' })).toBeNull()
+    )
+    await act(async () => finishDestinationCheck(fullAccess))
+
+    expect(resolve).toHaveBeenLastCalledWith(nextUri)
+    expect(moveResource).not.toHaveBeenCalled()
     queryClient.clear()
   })
 
