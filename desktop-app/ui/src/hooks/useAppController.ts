@@ -844,9 +844,13 @@ export function useAppController() {
             ? `${sessionState.me.id}:${sessionState.me.email}:${sessionState.me.teamId || ''}`
             : null
         const previousIdentity = activeAuthenticatedSessionIdentityRef.current
-        if (sessionIdentity && previousIdentity !== null && previousIdentity !== sessionIdentity) {
+        if (
+          previousIdentity !== null &&
+          (sessionIdentity === null || previousIdentity !== sessionIdentity)
+        ) {
           // Invalidate the prior workspace before publishing another principal
-          // or allowing its asynchronous catalog refresh to finish.
+          // or a confirmed signed-out state, and before its asynchronous catalog
+          // refresh can finish. A null → first-auth bootstrap has no prior owner.
           nav.resetSessionNavigation()
         }
         auth.setIsAuthenticated(authenticated)
