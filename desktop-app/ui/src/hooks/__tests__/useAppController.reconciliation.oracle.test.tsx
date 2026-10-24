@@ -74,7 +74,9 @@ describe('useAppController reconciliation ownership oracle', () => {
     const key = 'agent-x::team-a-reconcile-chat'
     // Capture the ownership boundary separately from the late RPC result. The
     // approved contract tears down Team A reconciliation state on the switch.
-    const oldTeamStateAtSwitch = app.result.current.controller.sessionStateByChatKey[key]
+    const oldTeamStateAtSwitch = structuredClone(
+      app.result.current.controller.sessionStateByChatKey[key]
+    )
 
     resolveSnapshot({
       agent: 'agent-x',
@@ -86,9 +88,13 @@ describe('useAppController reconciliation ownership oracle', () => {
     await act(async () => {
       await switchPromise
     })
+    const oldTeamStateAfterLateResult = structuredClone(
+      app.result.current.controller.sessionStateByChatKey[key]
+    )
 
     expect.soft(oldTeamStateAtSwitch).toBeUndefined()
-    expect.soft(app.result.current.controller.sessionStateByChatKey[key]).toBeUndefined()
+    expect.soft(oldTeamStateAfterLateResult).toEqual(oldTeamStateAtSwitch)
+    expect.soft(oldTeamStateAfterLateResult).toBeUndefined()
   })
 
   it('keeps Team B task state unchanged when a delayed Team A snapshot settles', async () => {
