@@ -74,7 +74,7 @@ function controllerComposerElement(
     activeLlmModel: null,
     activeLlmProvider: null,
     mcpHealthRefreshing: false,
-    handleRefreshMcpHealth: noOp,
+    handleRefreshMcpHealth: async () => undefined,
     cancelTask: async () => undefined,
   }
 
