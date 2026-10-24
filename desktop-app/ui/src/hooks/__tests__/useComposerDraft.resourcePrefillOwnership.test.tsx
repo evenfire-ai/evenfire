@@ -9,7 +9,12 @@ import {
   setResourceComposerPrefill,
 } from '@lib/composerDraftStore'
 import { prefillNewConversationWithGfsResource } from '@lib/gfsConversationPrefill'
-import { createWorkspaceTabsState, openFilesTab } from '@lib/workspaceTabs'
+import {
+  activeWorkspaceTab,
+  createWorkspaceTabsState,
+  newChatTab,
+  openFilesTab,
+} from '@lib/workspaceTabs'
 import type { WorkspaceTab } from '@lib/workspaceTabs.types'
 import { resolveResource, resolvedDirectory } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { useComposerDraft } from '../useComposerDraft'
@@ -77,7 +82,100 @@ function SelectedChatHarness() {
   )
 }
 
+function ReusedBlankTabHarness() {
+  const [workspace, setWorkspace] = useState(() =>
+    newChatTab(createWorkspaceTabsState('reused-blank'), 'reused-blank', 'agent-a')
+  )
+  const activeTab = activeWorkspaceTab(workspace)
+  if (activeTab?.kind !== 'chat') throw new Error('the blank workspace tab was not active')
+
+  return (
+    <section>
+      <button
+        onClick={() => setWorkspace(current => newChatTab(current, 'unused-b', 'agent-b'))}
+        type="button"
+      >
+        Agent B
+      </button>
+      <button
+        onClick={() => setWorkspace(current => newChatTab(current, 'unused-a', 'agent-a'))}
+        type="button"
+      >
+        Agent A
+      </button>
+      <output data-testid="reused-tab-id">{activeTab.id}</output>
+      <DraftSurface tabId={activeTab.id} agentRef={activeTab.chat?.agentRef ?? ''} />
+    </section>
+  )
+}
+
+function SeparateSameAgentTabsHarness() {
+  const [workspace, setWorkspace] = useState(() => {
+    let state = newChatTab(createWorkspaceTabsState('agent-a-tab'), 'agent-a-tab', 'agent-same')
+    state = openFilesTab(state, { id: 'files-between-agent-tabs' })
+    state = newChatTab(state, 'agent-b-tab', 'agent-same')
+    return { ...state, activeTabId: 'agent-a-tab' }
+  })
+  const activeTab = activeWorkspaceTab(workspace)
+  if (activeTab?.kind !== 'chat') throw new Error('the same-agent workspace tab was not active')
+  const firstTabId = workspace.tabs.find(tab => tab.id === 'agent-a-tab')?.id
+
+  return (
+    <section>
+      <button
+        onClick={() => {
+          if (firstTabId) setWorkspace(current => ({ ...current, activeTabId: firstTabId }))
+        }}
+        type="button"
+      >
+        First tab
+      </button>
+      <button
+        onClick={() => setWorkspace(current => ({ ...current, activeTabId: 'agent-b-tab' }))}
+        type="button"
+      >
+        Second tab
+      </button>
+      <DraftSurface tabId={activeTab.id} agentRef={activeTab.chat?.agentRef ?? ''} />
+    </section>
+  )
+}
+
 describe('tab-owned GFS composer prefill', () => {
+  it('keeps each agent draft when New Chat reuses the same blank workspace tab', () => {
+    render(<ReusedBlankTabHarness />)
+    const originalTabId = screen.getByTestId('reused-tab-id').textContent
+    const composer = () =>
+      screen.getByRole('textbox', { name: 'reused-blank composer' }) as HTMLTextAreaElement
+
+    fireEvent.change(composer(), { target: { value: 'draft for agent A' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Agent B' }))
+    expect(screen.getByTestId('reused-tab-id').textContent).toBe(originalTabId)
+    expect(composer().value).toBe('')
+    fireEvent.change(composer(), { target: { value: 'draft for agent B' } })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Agent A' }))
+    expect(composer().value).toBe('draft for agent A')
+    fireEvent.click(screen.getByRole('button', { name: 'Agent B' }))
+    expect(composer().value).toBe('draft for agent B')
+  })
+
+  it('keeps separate same-agent blank tabs on their own drafts', () => {
+    render(<SeparateSameAgentTabsHarness />)
+    const composer = (tabId: string) =>
+      screen.getByRole('textbox', { name: `${tabId} composer` }) as HTMLTextAreaElement
+
+    fireEvent.change(composer('agent-a-tab'), { target: { value: 'draft for first tab' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Second tab' }))
+    expect(composer('agent-b-tab').value).toBe('')
+    fireEvent.change(composer('agent-b-tab'), { target: { value: 'draft for second tab' } })
+
+    fireEvent.click(screen.getByRole('button', { name: 'First tab' }))
+    expect(composer('agent-a-tab').value).toBe('draft for first tab')
+    fireEvent.click(screen.getByRole('button', { name: 'Second tab' }))
+    expect(composer('agent-b-tab').value).toBe('draft for second tab')
+  })
+
   it('keeps a legacy draft independent when a same-key tab prefill arrives unchanged', () => {
     const uri = `gfs://main/${'f'.repeat(32)}`
     setComposerDraft(null, uri, 'agent-a')

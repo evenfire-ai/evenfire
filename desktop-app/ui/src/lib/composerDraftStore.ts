@@ -1,12 +1,13 @@
 /**
  * Composer draft store — the single source of truth for unsent composer text,
- * keyed per chat. Resource prefills that begin before agent selection are held
- * by the exact destination workspace tab and can only be claimed there.
+ * keyed per chat and, for blank chats, per agent within the workspace tab.
+ * Resource prefills that begin before agent selection are held by the exact
+ * destination workspace tab and can only be claimed there.
  */
 
 type Listener = () => void
 
-type ResourcePrefill = { requestId: number; uri: string }
+type ResourcePrefill = { requestId: number; revision: number; uri: string }
 type TabDraft = { key: string; value: string; requestId?: number }
 
 /** Legacy no-chat key retained for callers that do not yet provide an agent. */
@@ -16,8 +17,8 @@ let revision = 0
 const revisions = new Map<string, number>()
 const listenersByKey = new Map<string, Set<Listener>>()
 const pendingResourcePrefillsByTab = new Map<string, ResourcePrefill>()
-const tabDrafts = new Map<string, TabDraft>()
-const tabRevisions = new Map<string, number>()
+const tabDrafts = new Map<string, Map<string, TabDraft>>()
+const tabRevisions = new Map<string, Map<string, number>>()
 let resourcePrefillRequestSequence = 0
 
 function keyFor(chatId: string | null, agentRef?: string): string {
@@ -45,24 +46,48 @@ function setDraftByKey(key: string, value: string): boolean {
   return true
 }
 
+function getTabDraft(tabId: string, key: string): TabDraft | undefined {
+  return tabDrafts.get(tabId)?.get(key)
+}
+
+function setTabRevision(tabId: string, key: string): number {
+  const nextRevision = ++revision
+  let revisionsForTab = tabRevisions.get(tabId)
+  if (!revisionsForTab) {
+    revisionsForTab = new Map()
+    tabRevisions.set(tabId, revisionsForTab)
+  }
+  revisionsForTab.set(key, nextRevision)
+  return nextRevision
+}
+
 function setTabDraft(tabId: string, key: string, value: string, requestId?: number): void {
-  const current = tabDrafts.get(tabId)
-  if ((current?.key === key ? current.value : '') === value) return
-  tabRevisions.set(tabId, ++revision)
+  const current = getTabDraft(tabId, key)
+  if ((current?.value ?? '') === value) return
+  setTabRevision(tabId, key)
+  let draftsForTab = tabDrafts.get(tabId)
   if (value) {
-    const ownerRequestId = requestId ?? (current?.key === key ? current.requestId : undefined)
-    tabDrafts.set(tabId, {
+    if (!draftsForTab) {
+      draftsForTab = new Map()
+      tabDrafts.set(tabId, draftsForTab)
+    }
+    const ownerRequestId = requestId ?? current?.requestId
+    draftsForTab.set(key, {
       key,
       value,
       ...(ownerRequestId === undefined ? {} : { requestId: ownerRequestId }),
     })
-  } else tabDrafts.delete(tabId)
+  } else if (draftsForTab) {
+    draftsForTab.delete(key)
+    if (draftsForTab.size === 0) tabDrafts.delete(tabId)
+  }
   emit(tabListenerKey(tabId))
   emit(key)
 }
 
 function removePendingResourcePrefill(tabId: string): void {
   if (!pendingResourcePrefillsByTab.delete(tabId)) return
+  setTabRevision(tabId, NO_CHAT_DRAFT_KEY)
   emit(tabListenerKey(tabId))
 }
 
@@ -86,12 +111,16 @@ export function getComposerDraftRevision(
   agentRef?: string,
   workspaceTabId?: string | null
 ): number {
+  const key = keyFor(chatId, agentRef)
   if (workspaceTabId) {
-    const tabDraft = tabDrafts.get(workspaceTabId)
-    if (tabDraft?.key === keyFor(chatId, agentRef)) return tabRevisions.get(workspaceTabId) ?? 0
-    if (chatId === null) return tabRevisions.get(workspaceTabId) ?? 0
+    const tabDraft = getTabDraft(workspaceTabId, key)
+    if (tabDraft) return tabRevisions.get(workspaceTabId)?.get(key) ?? 0
+    const pending = pendingResourcePrefillsByTab.get(workspaceTabId)
+    if (chatId === null && pending) return pending.revision
   }
-  return revisions.get(keyFor(chatId, agentRef)) ?? 0
+  return workspaceTabId
+    ? (tabRevisions.get(workspaceTabId)?.get(key) ?? 0)
+    : (revisions.get(key) ?? 0)
 }
 
 export function getComposerDraft(
@@ -101,8 +130,8 @@ export function getComposerDraft(
 ): string {
   const key = keyFor(chatId, agentRef)
   if (workspaceTabId) {
-    const tabDraft = tabDrafts.get(workspaceTabId)
-    if (tabDraft?.key === key) return tabDraft.value
+    const tabDraft = getTabDraft(workspaceTabId, key)
+    if (tabDraft) return tabDraft.value
     const pending = pendingResourcePrefillsByTab.get(workspaceTabId)
     if (pending && chatId === null) return pending.uri
   }
@@ -119,8 +148,7 @@ export function setResourceComposerPrefill(
   if (!workspaceTabId) return false
   const requestId = ++resourcePrefillRequestSequence
   const key = keyFor(null, agentRef ?? undefined)
-  const currentTabDraft = tabDrafts.get(workspaceTabId)
-  if (currentTabDraft?.key === key) return false
+  if (getTabDraft(workspaceTabId, key)) return false
   if (pendingResourcePrefillsByTab.has(workspaceTabId)) return false
 
   if (agentRef) {
@@ -130,8 +158,8 @@ export function setResourceComposerPrefill(
     return true
   }
 
-  pendingResourcePrefillsByTab.set(workspaceTabId, { requestId, uri })
-  tabRevisions.set(workspaceTabId, ++revision)
+  const pendingRevision = ++revision
+  pendingResourcePrefillsByTab.set(workspaceTabId, { requestId, revision: pendingRevision, uri })
   emit(tabListenerKey(workspaceTabId))
   return true
 }
@@ -146,8 +174,8 @@ export function claimPendingResourceComposerPrefill(
   if (!pending || !agent) return
 
   const key = keyFor(null, agent)
-  const current = tabDrafts.get(workspaceTabId)
-  if (current?.key === key && current.value) {
+  const current = getTabDraft(workspaceTabId, key)
+  if (current?.value) {
     removePendingResourcePrefill(workspaceTabId)
     return
   }
@@ -164,8 +192,8 @@ export function setComposerDraft(
   const key = keyFor(chatId, agentRef)
   if (chatId === null && workspaceTabId) {
     const pending = pendingResourcePrefillsByTab.get(workspaceTabId)
-    const currentTabDraft = tabDrafts.get(workspaceTabId)
-    if (currentTabDraft?.key === key) {
+    const currentTabDraft = getTabDraft(workspaceTabId, key)
+    if (currentTabDraft) {
       removePendingResourcePrefill(workspaceTabId)
       setTabDraft(workspaceTabId, key, value, currentTabDraft?.requestId)
       return true
@@ -189,8 +217,8 @@ export function clearComposerDraft(
 ): boolean {
   const key = keyFor(chatId, agentRef)
   if (chatId === null && workspaceTabId) {
-    const tabDraft = tabDrafts.get(workspaceTabId)
-    if (tabDraft?.key === key) setTabDraft(workspaceTabId, key, '')
+    const tabDraft = getTabDraft(workspaceTabId, key)
+    if (tabDraft) setTabDraft(workspaceTabId, key, '')
     removePendingResourcePrefill(workspaceTabId)
     return true
   }
@@ -205,8 +233,9 @@ export function cancelPendingResourceComposerPrefill(workspaceTabId: string): vo
 /** Release resource-owned draft state when its workspace destination closes. */
 export function releaseComposerDraftForWorkspaceTab(workspaceTabId: string): void {
   removePendingResourcePrefill(workspaceTabId)
-  const tabDraft = tabDrafts.get(workspaceTabId)
-  if (tabDraft) setTabDraft(workspaceTabId, tabDraft.key, '')
+  for (const key of tabDrafts.get(workspaceTabId)?.keys() ?? []) {
+    setTabDraft(workspaceTabId, key, '')
+  }
 }
 
 /** Drop drafts and pending resource requests on logout or principal/team change. */
@@ -215,8 +244,16 @@ export function clearAllComposerDrafts(): void {
   const changedTabs = new Set([...pendingResourcePrefillsByTab.keys(), ...tabDrafts.keys()])
   for (const key of drafts.keys()) revisions.set(key, ++revision)
   drafts.clear()
+  for (const tabId of pendingResourcePrefillsByTab.keys()) {
+    setTabRevision(tabId, NO_CHAT_DRAFT_KEY)
+  }
   pendingResourcePrefillsByTab.clear()
-  for (const tabId of tabDrafts.keys()) tabRevisions.set(tabId, ++revision)
+  for (const [tabId, draftsForTab] of tabDrafts) {
+    for (const key of draftsForTab.keys()) {
+      changedKeys.add(key)
+      setTabRevision(tabId, key)
+    }
+  }
   tabDrafts.clear()
   for (const key of changedKeys) emit(key)
   for (const tabId of changedTabs) emit(tabListenerKey(tabId))

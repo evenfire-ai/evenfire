@@ -3,9 +3,11 @@ import fc from 'fast-check'
 import {
   cancelPendingResourceComposerPrefill,
   claimPendingResourceComposerPrefill,
+  clearAllComposerDrafts,
   clearComposerDraft,
   getComposerDraft,
   getComposerDraftOwnerConflict,
+  getComposerDraftRevision,
   releaseComposerDraftForWorkspaceTab,
   resetComposerDraftStore,
   setComposerDraft,
@@ -54,6 +56,22 @@ describe('composerDraftStore', () => {
 
     expect(getComposerDraft(null, 'agent-a')).toBe('existing draft')
     expect(getComposerDraft(null, 'agent-a', 'tab-a')).toBe('gfs://main/resource')
+  })
+
+  it('keeps different agent drafts and prefill revisions independent within one reused tab', () => {
+    expect(setResourceComposerPrefill('reused-tab', 'gfs://main/agent-a', 'agent-a')).toBe(true)
+    const revisionA = getComposerDraftRevision(null, 'agent-a', 'reused-tab')
+
+    expect(setComposerDraft(null, 'draft for agent B', 'agent-b', 'reused-tab')).toBe(true)
+
+    expect(getComposerDraft(null, 'agent-a', 'reused-tab')).toBe('gfs://main/agent-a')
+    expect(getComposerDraft(null, 'agent-b', 'reused-tab')).toBe('draft for agent B')
+    expect(getComposerDraftRevision(null, 'agent-a', 'reused-tab')).toBe(revisionA)
+    expect(getComposerDraftRevision(null, 'agent-b', 'reused-tab')).toBeGreaterThan(revisionA)
+
+    expect(clearComposerDraft(null, 'agent-a', 'reused-tab')).toBe(true)
+    expect(getComposerDraft(null, 'agent-a', 'reused-tab')).toBe('')
+    expect(getComposerDraft(null, 'agent-b', 'reused-tab')).toBe('draft for agent B')
   })
 
   it('keeps the legacy draft out of a workspace tab until that tab claims the key', () => {
@@ -170,12 +188,14 @@ describe('composerDraftStore', () => {
 
   it('releases only the closing tab’s claimed and pending resource drafts', () => {
     setResourceComposerPrefill('tab-a', 'gfs://main/a', 'agent-a')
+    setComposerDraft(null, 'agent B draft', 'agent-b', 'tab-a')
     setResourceComposerPrefill('tab-b', 'gfs://main/b', 'agent-a')
     setResourceComposerPrefill('tab-pending', 'gfs://main/pending', null)
 
     releaseComposerDraftForWorkspaceTab('tab-a')
 
     expect(getComposerDraft(null, 'agent-a', 'tab-a')).toBe('')
+    expect(getComposerDraft(null, 'agent-b', 'tab-a')).toBe('')
     expect(getComposerDraft(null, 'agent-a', 'tab-b')).toBe('gfs://main/b')
     expect(getComposerDraft(null, undefined, 'tab-pending')).toBe('gfs://main/pending')
 
@@ -329,5 +349,19 @@ describe('composerDraftStore', () => {
     expect(getComposerDraft('chat-1')).toBe('')
     setComposerDraft('chat-1', 'again')
     expect(listener).toHaveBeenCalledTimes(1) // only the pre-reset write
+  })
+
+  it('clears every agent draft for each workspace tab on principal cleanup', () => {
+    setComposerDraft(null, 'agent A draft', 'agent-a', 'tab-shared')
+    setComposerDraft(null, 'agent B draft', 'agent-b', 'tab-shared')
+    setComposerDraft(null, 'other tab draft', 'agent-a', 'tab-other')
+    setResourceComposerPrefill('tab-pending', 'gfs://main/pending', null)
+
+    clearAllComposerDrafts()
+
+    expect(getComposerDraft(null, 'agent-a', 'tab-shared')).toBe('')
+    expect(getComposerDraft(null, 'agent-b', 'tab-shared')).toBe('')
+    expect(getComposerDraft(null, 'agent-a', 'tab-other')).toBe('')
+    expect(getComposerDraft(null, undefined, 'tab-pending')).toBe('')
   })
 })
