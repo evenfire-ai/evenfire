@@ -410,8 +410,6 @@ export function FilesPage({
       ])
     ),
   }
-  const rowPermissionStatusFor = (resourceId: string) =>
-    ctrl.rowPermissionStatusByResourceId?.[resourceId]
   const rowPermissionNoticeFor = (resourceId: string, resourceName: string) => {
     const statuses = ctrl.rowPermissionStatusByResourceId
     if (!statuses) return null
