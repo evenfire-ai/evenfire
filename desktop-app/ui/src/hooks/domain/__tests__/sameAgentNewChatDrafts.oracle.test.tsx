@@ -51,7 +51,7 @@ function renderComposer(workspaceTabId: string) {
   )
 }
 
-describe('same-agent New Chat draft ownership oracle', () => {
+describe('owner-directed same-agent New Chat draft ownership oracle', () => {
   afterEach(() => {
     cleanup()
     resetComposerDraftStore()

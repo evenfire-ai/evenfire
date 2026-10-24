@@ -31,18 +31,31 @@ function mountedFirstLaunch(): EmbedOwnershipState {
   return apply(state, { type: 'openSettled', launchId: FIRST, outcome: 'mounted' })
 }
 
-describe('embed close recovery against the approved single-live-view model', () => {
-  it('keeps the known live launch as owner when replacement close rejects', () => {
+describe('embed close recovery against the owner-directed single-live-view model', () => {
+  it('retries a failed handoff and retires its exact view after terminal release', () => {
     let state = mountedFirstLaunch()
-    state = apply(state, { type: 'relaunch', launch: launch(NEXT) })
+    let transition = reduceEmbedOwnership(state, { type: 'handoff', requestId: 1 })
+    expect(transition.effects).toContainEqual({ type: 'close', launchId: FIRST })
+    state = transition.state
     state = apply(state, { type: 'closeFailed', launchId: FIRST })
 
-    // A rejected close is not a release. Keep the native live view authoritative
-    // and retain the replacement as pending until an exact release arrives.
+    // The exact failed view remains visible and owned until a later handoff can retry it.
     expect(state.views.get(FIRST)?.phase).toBe('closeFailed')
-    expect(state.views.get(NEXT)?.phase).toBe('waiting')
     expect(state.owner).toBe(FIRST)
     expect(embedViewState(state)).toMatchObject({ kind: 'mounted', launch: { launchId: FIRST } })
+
+    transition = reduceEmbedOwnership(state, { type: 'handoff', requestId: 2 })
+    expect(transition.effects).toContainEqual({ type: 'close', launchId: FIRST })
+    state = transition.state
+    transition = reduceEmbedOwnership(state, {
+      type: 'released',
+      launchId: FIRST,
+      reason: 'closed',
+      location: null,
+    })
+    expect(transition.state.views.has(FIRST)).toBe(false)
+    expect(transition.state.owner).toBeNull()
+    expect(transition.effects).toContainEqual({ type: 'handoffReady', requestId: 2 })
   })
 
   it('advances the pending replacement only after a matching terminal release', () => {

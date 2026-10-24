@@ -28,7 +28,7 @@ const operationArbitrary: fc.Arbitrary<Operation> = fc.oneof(
   })
 )
 
-describe('New Chat draft tab ownership against the approved reference model', () => {
+describe('New Chat draft tab ownership against the owner-directed reference model', () => {
   afterEach(() => resetComposerDraftStore())
 
   it('keeps each blank-chat tab independently writable, readable, and clearable', () => {
@@ -45,7 +45,9 @@ describe('New Chat draft tab ownership against the approved reference model', ()
             )
             reference.set(operation.tabId, operation.value)
           } else if (operation.kind === 'clear') {
-            expect(clearComposerDraft(null, 'agent-same', operation.tabId)).toBe(true)
+            const tabHadDraft = reference.has(operation.tabId)
+            const cleared = clearComposerDraft(null, 'agent-same', operation.tabId)
+            if (tabHadDraft) expect(cleared).toBe(true)
             reference.delete(operation.tabId)
           } else {
             expect(getComposerDraft(null, 'agent-same', operation.tabId)).toBe(

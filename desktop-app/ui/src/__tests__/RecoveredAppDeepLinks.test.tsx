@@ -306,9 +306,9 @@ vi.mock('@pages/ChatPage', async () => {
   const { useComposerDraft } = await import('@hooks/useComposerDraft')
   return {
     ChatPage: () => {
-      const { composerFocusRequestId } = useChatComposerStateContext()
+      const { composerFocusRequestId, workspaceChatTabId } = useChatComposerStateContext()
       const { selectedAgent } = useNavigationContext()
-      const [draft] = useComposerDraft(null, selectedAgent ?? undefined)
+      const [draft, setDraft] = useComposerDraft(null, selectedAgent ?? undefined)
       const composerRef = useRef<HTMLTextAreaElement | null>(null)
       useEffect(() => {
         if (composerFocusRequestId > 0) composerRef.current?.focus()
@@ -316,11 +316,12 @@ vi.mock('@pages/ChatPage', async () => {
       return (
         <textarea
           data-testid="chat-page-surface"
+          data-workspace-chat-tab-id={workspaceChatTabId ?? ''}
           data-composer-focus-request-id={composerFocusRequestId}
           data-composer-draft={draft}
           ref={composerRef}
+          onChange={event => setDraft(event.currentTarget.value)}
           value={draft}
-          readOnly
         />
       )
     },
@@ -3008,6 +3009,76 @@ describe('App deep-link orchestration', () => {
     expect.soft(realController.current?.selectedAgent).toBeNull()
   })
 
+  it('routes same-agent New Chat drafts through the active workspace tab', async () => {
+    const existingBridge = window.clerum
+    const { clerum } = installAppControllerClerum({ agentNames: ['agent-x'] })
+    Object.assign(clerum, {
+      shortcuts: existingBridge.shortcuts,
+      app: existingBridge.app,
+      gfs: existingBridge.gfs,
+      sandboxUi: existingBridge.sandboxUi,
+    })
+    const actual =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    const realController: { current: AppController | null } = { current: null }
+    vi.mocked(useAppController).mockImplementation(() => {
+      realController.current = actual.useAppController()
+      return realController.current
+    })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTaskTrackerProvider>
+          <App />
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => expect(realController.current?.isAuthenticated).toBe(true))
+    await waitFor(() => expect(realController.current?.initialExperienceLoading).toBe(false))
+    await act(async () => {
+      realController.current?.handleSelectChatAgent('agent-x', { selectLatest: false })
+    })
+    await waitFor(() =>
+      expect(activeWorkspaceTab(realController.current!.workspaceTabs)?.kind).toBe('chat')
+    )
+    const tabA = activeWorkspaceTab(realController.current!.workspaceTabs)
+    if (!tabA || tabA.kind !== 'chat') throw new Error('the controller did not create New Chat A')
+
+    const composer = screen.getByTestId('chat-page-surface') as HTMLTextAreaElement
+    expect(composer.dataset.workspaceChatTabId).toBe(tabA.id)
+    fireEvent.change(composer, { target: { value: 'draft owned by A' } })
+    expect(composer.value).toBe('draft owned by A')
+
+    act(() => realController.current?.openFilesSection(null))
+    await act(async () => {
+      realController.current?.handleSelectChatAgent('agent-x', { selectLatest: false })
+    })
+    const tabB = activeWorkspaceTab(realController.current!.workspaceTabs)
+    if (!tabB || tabB.kind !== 'chat' || tabB.id === tabA.id) {
+      throw new Error('the controller did not create a second same-agent New Chat tab')
+    }
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId('chat-page-surface') as HTMLTextAreaElement).dataset.workspaceChatTabId
+      ).toBe(tabB.id)
+    )
+
+    const composerB = screen.getByTestId('chat-page-surface') as HTMLTextAreaElement
+    expect.soft(composerB.value).toBe('')
+    fireEvent.change(composerB, { target: { value: 'draft owned by B' } })
+    expect(composerB.value).toBe('draft owned by B')
+
+    act(() => realController.current?.selectWorkspaceTabById(tabA.id))
+    expect((screen.getByTestId('chat-page-surface') as HTMLTextAreaElement).value).toBe(
+      'draft owned by A'
+    )
+    act(() => realController.current?.selectWorkspaceTabById(tabB.id))
+    expect
+      .soft((screen.getByTestId('chat-page-surface') as HTMLTextAreaElement).value)
+      .toBe('draft owned by B')
+  })
+
   it('closes the active embed before switching teams for a failed cross-team handoff', async () => {
     let viewLiveAtSwitch: unknown = 'not switched'
     const ensureTeamContext = vi.fn(async (): Promise<boolean> => {
@@ -3817,27 +3888,54 @@ describe('App deep-link orchestration', () => {
 
   it('does not restore or relaunch an origin app when team rollback fails', async () => {
     let liveTeamId = 'team-a'
-    const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
-      if (teamId === 'team-b') {
-        liveTeamId = 'team-b'
-        currentController.currentTeamId = 'team-b'
-        forceControllerRender()
-        return true
-      }
-      if (teamId === 'team-a') throw new Error('origin team is unavailable')
-      return false
+    const existingBridge = window.clerum
+    const { clerum } = installAppControllerClerum({
+      me: { teamId: 'team-a', teamName: 'Team A' },
+      teamDirectory: { items: [], currentTeamId: 'team-a' },
     })
-    currentController = makeController({
-      initialExperienceLoading: false,
-      handleEnsureTeamContext: ensureTeamContext,
-      getCurrentTeamId: () => liveTeamId,
+    Object.assign(clerum, {
+      shortcuts: existingBridge.shortcuts,
+      app: existingBridge.app,
+      gfs: existingBridge.gfs,
+      sandboxUi: existingBridge.sandboxUi,
+    })
+    const switchTeam = vi.fn(async (teamId: string) => {
+      if (teamId === 'team-a' && liveTeamId === 'team-b') {
+        throw new Error('origin team is unavailable')
+      }
+      liveTeamId = teamId
+      return {
+        authenticated: true,
+        me: {
+          ...HARNESS_ME,
+          teamId,
+          teamName: teamId === 'team-a' ? 'Team A' : 'Team B',
+        },
+      }
+    })
+    Object.assign(window.clerum.team, { switch: switchTeam })
+    const actual =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    const realController: { current: AppController | null } = { current: null }
+    vi.mocked(useAppController).mockImplementation(() => {
+      realController.current = actual.useAppController()
+      return realController.current
     })
     listApps.mockImplementation(async () =>
       liveTeamId === 'team-a' ? { apps: [READY_APP] } : { apps: [] }
     )
-    render(<App />)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTaskTrackerProvider>
+          <App />
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+    await waitFor(() => expect(realController.current?.isAuthenticated).toBe(true))
+    await waitFor(() => expect(realController.current?.initialExperienceLoading).toBe(false))
     await launchAppFromSidebar()
-    const originWorkspace = currentController.workspaceTabs
+    const originWorkspace = realController.current!.workspaceTabs
     expect(activeWorkspaceTab(originWorkspace)?.kind).toBe('app')
     expect(main.live()?.appRef).toBe('ns/app')
 
@@ -3846,9 +3944,10 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
 
     expect.soft(liveTeamId).toBe('team-b')
-    expect.soft(currentController.currentTeamId).toBe('team-b')
-    expect.soft(currentController.workspaceTabs).not.toEqual(originWorkspace)
-    expect.soft(activeWorkspaceTab(currentController.workspaceTabs)?.kind).not.toBe('app')
+    expect.soft(realController.current?.currentTeamId).toBe('team-b')
+    expect
+      .soft(sidebarHarness.props?.availableSandboxUiApps)
+      .not.toContainEqual(expect.objectContaining({ appRef: 'ns/app' }))
     expect.soft(openSandboxUi).toHaveBeenCalledTimes(1)
     expect.soft(main.live()).toBeNull()
   })
