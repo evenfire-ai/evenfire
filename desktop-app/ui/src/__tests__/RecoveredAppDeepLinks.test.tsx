@@ -3786,8 +3786,9 @@ describe('App deep-link orchestration', () => {
       expect.objectContaining({ reason: 'open_failed' }),
     ])
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
-    expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(liveTeamId).toBe('team-a')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
   })
 
   it('retries a failed cross-team native mount without treating its own restore as a user switch', async () => {

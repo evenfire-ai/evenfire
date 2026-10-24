@@ -1927,15 +1927,37 @@ export function App() {
       ) {
         return
       }
+      // A failed target-team RPC that left the origin embed open is a no-op for
+      // navigation. There is nothing to roll back unless this transaction
+      // switched teams or actually closed the origin view.
+      if (
+        !context.switchedTeam &&
+        !context.originEmbedClosed &&
+        context.linkTeamId &&
+        context.originalTeamId !== context.linkTeamId
+      ) {
+        return
+      }
+      let originTeamRestored = !context.switchedTeam
       if (context.switchedTeam) {
         try {
           await vm.handleEnsureTeamContext({ teamId: context.originalTeamId, announce: true })
+          originTeamRestored = vm.getCurrentTeamId() === context.originalTeamId
+          if (!originTeamRestored) {
+            vm.pushToast(
+              'Could not restore the previous team because the active team changed.',
+              'error'
+            )
+          }
         } catch (rollbackError) {
           const message =
             rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
           vm.pushToast(`Could not restore the previous team: ${message}`, 'error')
         }
       }
+      // A workspace/app owned by the origin must never be restored under the
+      // target team's session when rollback failed or another team won.
+      if (!originTeamRestored) return
       if (
         context.restoreWorkspace &&
         context.originNavigation &&
@@ -1998,16 +2020,15 @@ export function App() {
     ]
   )
 
-  const deferSandboxUiDeepLinkUntilTerminal = React.useCallback(
+  const deferSandboxUiDeepLinkAndRestoreOrigin = React.useCallback(
     async (
       pending: PendingSandboxUiDeepLink,
       message: string,
       launchContext: PendingSandboxUiDeepLinkLaunch,
       tone: 'info' | 'error' = 'error'
     ) => {
-      if (deferSandboxUiDeepLink(pending, message, tone)) {
-        await restoreSandboxUiDeepLinkTeam(launchContext)
-      }
+      deferSandboxUiDeepLink(pending, message, tone)
+      await restoreSandboxUiDeepLinkTeam(launchContext)
     },
     [deferSandboxUiDeepLink, restoreSandboxUiDeepLinkTeam]
   )
@@ -2071,7 +2092,7 @@ export function App() {
         return
       }
       const failure = embed.getSnapshot().failure
-      await deferSandboxUiDeepLinkUntilTerminal(
+      await deferSandboxUiDeepLinkAndRestoreOrigin(
         pending,
         failure?.launchId === launchId
           ? embedFailureMessage(failure)
@@ -2082,7 +2103,7 @@ export function App() {
     [
       acknowledgeSandboxUiDeepLink,
       clearSandboxUiDeepLinkProcessing,
-      deferSandboxUiDeepLinkUntilTerminal,
+      deferSandboxUiDeepLinkAndRestoreOrigin,
       embed,
     ]
   )
@@ -2339,18 +2360,14 @@ export function App() {
         originNavigation,
         originApp,
         navigationIntentSequence,
-        restoreWorkspace: switchedTeam,
+        restoreWorkspace:
+          switchedTeam || sandboxUiDeepLinkClosedOriginEmbedsRef.current.has(pending.link.id),
         originEmbedClosed: sandboxUiDeepLinkClosedOriginEmbedsRef.current.has(pending.link.id),
       })
       const currentTeamId = vm.getCurrentTeamId()
       try {
         if (processingGeneration !== sandboxUiDeepLinkGenerationRef.current) return
-        if (
-          restoreTeamId &&
-          pending.retryCount &&
-          pending.link.teamId &&
-          currentTeamId !== pending.link.teamId
-        ) {
+        if (restoreTeamId && pending.retryCount && currentTeamId !== restoreTeamId) {
           sandboxUiDeepLinkRestoreTeamByIdRef.current.delete(pending.link.id)
           sandboxUiDeepLinkOriginNavigationByIdRef.current.delete(pending.link.id)
           sandboxUiDeepLinkOriginAppByIdRef.current.delete(pending.link.id)
@@ -2414,7 +2431,7 @@ export function App() {
             }
             if (isTransientSandboxUiTeamContextError(error)) {
               const launchContext = makeLaunchContext()
-              await deferSandboxUiDeepLinkUntilTerminal(
+              await deferSandboxUiDeepLinkAndRestoreOrigin(
                 pending,
                 `Could not switch to the linked team yet: ${errorMessage(
                   error
@@ -2446,7 +2463,7 @@ export function App() {
         }
         if (resolution.status === 'starting') {
           const launchContext = makeLaunchContext()
-          await deferSandboxUiDeepLinkUntilTerminal(
+          await deferSandboxUiDeepLinkAndRestoreOrigin(
             pending,
             `${resolution.label} is still starting up. This link will retry shortly.`,
             launchContext,
@@ -2488,7 +2505,7 @@ export function App() {
     awaitLaunchOutcome,
     bootSplashLoading,
     clearSandboxUiDeepLinkProcessing,
-    deferSandboxUiDeepLinkUntilTerminal,
+    deferSandboxUiDeepLinkAndRestoreOrigin,
     finishSandboxUiDeepLinkLaunch,
     handOffEmbedBeforeTeamSwitch,
     launchSandboxUiApp,

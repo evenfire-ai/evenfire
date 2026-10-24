@@ -2509,20 +2509,22 @@ describe('App deep-link orchestration', () => {
         'info'
       )
     })
-    expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(liveTeamId).toBe('team-a')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
     expect(ensureTeamContext).toHaveBeenCalledWith({
       teamId: 'team-b',
       announce: true,
     })
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
 
     await act(async () => {
       vi.advanceTimersByTime(1_000)
       await Promise.resolve()
     })
     await waitFor(() => expect(currentController.pushToast).toHaveBeenCalledTimes(2))
-    expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(liveTeamId).toBe('team-a')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(4)
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(4, { teamId: 'team-a', announce: true })
 
     ready = true
     await act(async () => {
@@ -2533,7 +2535,7 @@ describe('App deep-link orchestration', () => {
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(ensureTeamContext).toHaveBeenCalledTimes(5)
   })
 
   it('defers a cross-team link whose open mounts and then fails, with its error', async () => {
@@ -2580,8 +2582,9 @@ describe('App deep-link orchestration', () => {
       expect.objectContaining({ reason: 'open_failed' }),
     ])
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
-    expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(liveTeamId).toBe('team-a')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
   })
 
   it('retries a failed cross-team native mount without treating its own restore as a user switch', async () => {
@@ -2621,8 +2624,10 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => {
       expect(currentController.pushToast).toHaveBeenCalledWith('native mount failed', 'error')
     })
-    expect(liveTeamId).toBe('team-b')
+    expect(liveTeamId).toBe('team-a')
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
 
     await act(async () => {
       vi.advanceTimersByTime(1_000)
@@ -2633,7 +2638,8 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(acknowledgeDeepLink).toHaveBeenCalledTimes(1)
     expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(ensureTeamContext).toHaveBeenCalledTimes(3)
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
     expect(currentController.pushToast).not.toHaveBeenCalledWith(
       expect.stringContaining('you switched teams'),
       'error'
@@ -2677,8 +2683,9 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => {
       expect(currentController.pushToast).toHaveBeenCalledWith('native mount failed', 'error')
     })
-    expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(liveTeamId).toBe('team-a')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
 
     liveTeamId = 'team-c'
     await act(async () => {
@@ -2697,10 +2704,10 @@ describe('App deep-link orchestration', () => {
     )
     expect(confirmDialogHarness.props?.title).toBe('App link could not be opened')
     expect(liveTeamId).toBe('team-c')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
-    // The launch put the shell on the Apps route via the store (observable that
-    // replaced the retired single `handleNavSelect(apps)` call).
-    expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
+    // The failed link restored the origin Chat tab; the manual team change and
+    // later retry must not let the older link select its target app tab.
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.chat)
     expect(openSandboxUi()).toHaveBeenCalledTimes(1)
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
 
@@ -2709,7 +2716,7 @@ describe('App deep-link orchestration', () => {
       await Promise.resolve()
     })
     expect(liveTeamId).toBe('team-c')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
   })
 
