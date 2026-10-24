@@ -291,10 +291,11 @@ The "Leak guards (identifiers + secrets)" check failed on the PR's earlier
 head (run `40029625442`, job `120674358474`): gitleaks 8.30.1 reported one
 finding against `.gitleaks.toml` with the default ruleset. The report path
 points into this document, and the offending content was prose, not a
-credential: the verification checklist's phrase "old Secrets,
-missing/replaced" matched the `generic-api-key` rule, which reads a
-`secret` keyword followed by a comma-separated token of `[a-z0-9-_=/+]`
-characters as a leaked key. The sentence came from the reviewed plan itself.
+credential: the verification checklist's phrase that followed the words
+"old Secrets" with a comma and the slash-joined word pair (missing then
+replaced) matched the `generic-api-key` rule, which reads a `secret`
+keyword followed by a comma-separated token of `[a-z0-9-_=/+]` characters
+as a leaked key. The sentence came from the reviewed plan itself.
 
 Fix: the checklist was reworded to "an old Secret that is no longer present,
 selected Secrets that were replaced or lost" — same meaning, no keyword-plus-
