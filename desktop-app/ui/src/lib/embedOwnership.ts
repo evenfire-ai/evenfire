@@ -112,6 +112,21 @@ function takeOwnership(state: EmbedOwnershipState, launch: Launch): EmbedOwnersh
   return { ...withView(state, { ...launch, phase: 'waiting' }), owner: launch.launchId }
 }
 
+function retryFailedCloseBeforeLaunch(
+  state: EmbedOwnershipState,
+  launch: Launch
+): RowResult | null {
+  const retained = [...state.views.values()].find(
+    view => view.tabId === launch.tabId && view.phase === 'closeFailed'
+  )
+  if (!retained) return null
+  const closing = withView(state, { ...retained, phase: 'closeRequested' })
+  return {
+    state: takeOwnership(closing, launch),
+    effects: [{ type: 'close', launchId: retained.launchId }],
+  }
+}
+
 type RowResult = {
   state: EmbedOwnershipState
   effects: EmbedEffect[]
@@ -148,6 +163,8 @@ function applyRow(state: EmbedOwnershipState, event: EmbedEvent): RowResult {
     case 'intent': {
       const launch = event.launch
       if (launch.tabId !== state.activeAppTabId) return unchanged
+      const retry = retryFailedCloseBeforeLaunch(state, launch)
+      if (retry) return retry
       // A re-click while the tab's view is alive must not relaunch it.
       if (!tabIsFree(state, launch)) return unchanged
       return { state: takeOwnership(state, launch), effects: [] }
@@ -155,6 +172,8 @@ function applyRow(state: EmbedOwnershipState, event: EmbedEvent): RowResult {
 
     case 'relaunch': {
       if (event.launch.tabId !== state.activeAppTabId) return unchanged
+      const retry = retryFailedCloseBeforeLaunch(state, event.launch)
+      if (retry) return retry
       return { state: takeOwnership(state, event.launch), effects: [] }
     }
 
@@ -242,22 +261,54 @@ function applyRow(state: EmbedOwnershipState, event: EmbedEvent): RowResult {
       if (!record || record.phase !== 'closeRequested') return unchanged
       const failedHandoffs = state.handoffs.filter(handoff => handoff.waitFor.has(record.launchId))
       const failedRequestIds = new Set(failedHandoffs.map(handoff => handoff.requestId))
+      const failedSuccessors = [...state.views.values()].filter(
+        view =>
+          view.tabId === record.tabId &&
+          view.launchId !== record.launchId &&
+          view.phase === 'waiting'
+      )
       let next: EmbedOwnershipState = {
         ...withView(state, { ...record, phase: 'closeFailed' }),
         handoffs: state.handoffs.filter(handoff => !failedRequestIds.has(handoff.requestId)),
       }
+      for (const successor of failedSuccessors) next = withoutView(next, successor.launchId)
       const ownsFailedHandoff = failedHandoffs.some(
         handoff => handoff.ownerLaunchId === record.launchId
       )
-      if (ownsFailedHandoff && state.activeAppTabId === record.tabId && state.owner === null) {
+      const ownerWasFailedSuccessor = failedSuccessors.some(
+        successor => successor.launchId === state.owner
+      )
+      if (
+        state.activeAppTabId === record.tabId &&
+        (ownsFailedHandoff || ownerWasFailedSuccessor) &&
+        (state.owner === null || ownerWasFailedSuccessor)
+      ) {
         next = { ...next, owner: record.launchId }
       }
+      const failedLaunch = failedSuccessors.find(successor => successor.launchId === state.owner)
       return {
         state: next,
-        effects: failedHandoffs.map(handoff => ({
-          type: 'handoffFailed',
-          requestId: handoff.requestId,
-        })),
+        effects: [
+          ...failedHandoffs.map(handoff => ({
+            type: 'handoffFailed' as const,
+            requestId: handoff.requestId,
+          })),
+          ...failedSuccessors.map(successor => ({
+            type: 'launchSettled' as const,
+            launchId: successor.launchId,
+            outcome: 'failed' as const,
+          })),
+        ],
+        ...(failedLaunch
+          ? {
+              failure: {
+                tabId: failedLaunch.tabId,
+                launchId: failedLaunch.launchId,
+                kind: 'open' as const,
+                message: 'The current app could not be closed safely. Try launching again.',
+              },
+            }
+          : {}),
       }
     }
 

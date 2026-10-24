@@ -1819,6 +1819,10 @@ describe('App deep-link orchestration', () => {
     act(() => emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' }))
     await confirmPendingAppLink()
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(currentController.pushToast).toHaveBeenCalledWith(
+      'The current app could not be closed safely. Try launching it again.',
+      'error'
+    )
 
     expect(currentController.handleEnsureTeamContext).not.toHaveBeenCalled()
     expect(listApps).toHaveBeenCalledTimes(listAppsCallsBeforeLink)

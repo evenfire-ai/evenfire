@@ -468,7 +468,13 @@ export function App() {
       // matching the launch here keeps one from ever clearing another's error.
       onOwnerRefreshRecovered: event =>
         setEmbedRefreshError(prev => (prev?.launchId === event.launchId ? null : prev)),
-      onTransition: ({ previous, next }) => {
+      onTransition: ({ event, previous, next }) => {
+        if (event.type === 'closeFailed') {
+          vm.pushToast(
+            'The current app could not be closed safely. Try launching it again.',
+            'error'
+          )
+        }
         // The tab stays but its embed is gone (back to apps, team handoff, a
         // failed open, a crash, a session end): drop the chrome that belonged
         // to it, as the picker it falls back to has none. Leaving the tab is
