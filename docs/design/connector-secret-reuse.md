@@ -326,7 +326,7 @@ references) and every Secret write endpoint is recorded so reference-only
 journeys can prove zero Secret POST/PUT/DELETE. No credentials, `.env`, or
 cluster state are involved.
 
-The nine scenarios, all passing in one Chromium run (about 14 seconds):
+The twelve scenarios, all passing in one Chromium run (about 19 seconds):
 
 1. Creation from an existing Secret: no value inputs render, both stored
    keys are auto-mapped (API_KEY, WORKSPACE_ID), and the captured
@@ -337,27 +337,45 @@ The nine scenarios, all passing in one Chromium run (about 14 seconds):
    Secret POST/PUT/DELETE occurs.
 3. Listing outage at creation: error alert, disabled submit, retry
    recovers, and no value prompts appear.
-4. Change assigned Secret, happy path: destinations preserved
+4. A genuinely empty Secret catalog at creation: the picker enables on an
+   empty list, the empty-state guidance shows, Create stays disabled, and
+   no value prompts appear.
+5. Change assigned Secret, happy path: destinations preserved
    (LINEAR_API_KEY, LINEAR_WORKSPACE), confirmation names both Secrets,
    the captured `PUT /admin/mcp-servers/linear` carries CAS
    `metadata.uid`/`resourceVersion` and changes only `envSecret` in an
    otherwise identical spec, and a fresh `DeploymentReady=True` (post-cutoff
    timestamp, matching observedGeneration) resolves the wait, reloads the
    page on the new reference, and returns focus to the trigger.
-5. Saved but not ready: after the PUT, polls never observe a fresh Ready
+6. Saved but not ready: after the PUT, polls never observe a fresh Ready
    condition; the panel keeps "Assignment saved. Waiting for…", tabs stay
    disabled, and "Check credentials later" leaves cleanly onto the new
    reference with focus returned.
-6. Concurrent change: the live connector diverges from the displayed
+7. Concurrent change: the live connector diverges from the displayed
    snapshot between verification reads — the assignment is refused before
    any write, the panel locks until refresh, and no Secret is touched.
-7. No-op refusal (re-selecting the current Secret), explicit replacement
+8. No-op refusal (re-selecting the current Secret), explicit replacement
    key demanded when a stored key is missing (empty key select plus a
    key-selection alert, never a value prompt), and cancel returning focus
    to the trigger with nothing written.
-8. Listing outage inside the change flow: alert plus retry recovery.
-9. Narrow viewport (390×844): the change flow stays usable with
-   `document.scrollWidth <= window.innerWidth`, verified in the browser.
+9. A genuinely empty Secret catalog in the change flow: reassignment stays
+   disabled with no value prompts.
+10. Control proof for the no-mutation capture: deliberately issued
+    in-page `PUT` and `DELETE` against `mcp-secrets/<name>` (including a
+    value-bearing body) are both recorded by the write capture — pinned by
+    assertion, not by the fallback 404 — while every journey test asserts
+    the same capture stays empty.
+11. Listing outage inside the change flow: alert plus retry recovery.
+12. Narrow viewport (390×844): the change flow stays usable with
+    `document.scrollWidth <= window.innerWidth`, verified in the browser.
+
+Two review-driven corrections hardened this suite after its first nine-test
+version: the no-mutation capture now records every non-GET under both
+`mcp-secrets` and the `mcp-secrets/` child prefix **before** any endpoint
+dispatch (scenario 10 proves named PUT/DELETE are detected), the catalog
+fixture became configurable so scenarios 4 and 9 exercise real empty
+listings, and the route/init-script registrations are awaited before any
+navigation, removing the setup races the first version had.
 
 Runner (operational state stays under the ignored
 `.local-notes/infra/runs/connector-secrets-ui/playwright/`; the runner
@@ -373,7 +391,7 @@ CONTROL_UI_BASE_URL=http://127.0.0.1:<port> \
   --project=chromium --reporter=list
 ```
 
-Result on the committed spec: **9 passed / 0 failed / 0 skipped**
+Result on the committed spec: **12 passed / 0 failed / 0 skipped**
 (Chromium, headless), including the 390px pass. The full-unit, typecheck,
 style, and build evidence above was unchanged by the spec (it adds no app
 code); `tsc --noEmit` stays green — the app `tsconfig` excludes `e2e` by
