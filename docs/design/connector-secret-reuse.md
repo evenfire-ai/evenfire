@@ -281,7 +281,126 @@ delta, and nothing else outside `control-ui` and this document:
   unchanged — no dependency entries, resolutions, or integrity values moved.
 
 The hook keys off staged file paths, so documentation-only commits (such as
-this correction) do not bump anything.
+this correction) do not bump anything. The later Playwright test commit
+(`c9f217623`) triggered the same mechanism once more: `0.1.753` → `0.1.754`
+in `package.json` with the matching two lockfile version fields (4 lines).
+
+## CI leak-guard fix
+
+The "Leak guards (identifiers + secrets)" check failed on the PR's earlier
+head (run `40029625442`, job `120674358474`): gitleaks 8.30.1 reported one
+finding against `.gitleaks.toml` with the default ruleset. The report path
+points into this document, and the offending content was prose, not a
+credential: the verification checklist's phrase "old Secrets,
+missing/replaced" matched the `generic-api-key` rule, which reads a
+`secret` keyword followed by a comma-separated token of `[a-z0-9-_=/+]`
+characters as a leaked key. The sentence came from the reviewed plan itself.
+
+Fix: the checklist was reworded to "an old Secret that is no longer present,
+selected Secrets that were replaced or lost" — same meaning, no keyword-plus-
+token sequence (commit `1f86edcce`). The fix was verified locally with the
+exact CI recipe before pushing — gitleaks 8.30.1, the repository's
+`.gitleaks.toml`, scanned over `git archive HEAD` — reporting "no leaks
+found", and the same check then passed on GitHub (run `40040321077`, job
+`120709615475`). No allowlist entry was added and no guard was weakened.
+
+## Playwright coverage (mocked-API frontend E2E)
+
+Durable browser coverage lives in
+`control-ui/e2e/connector-secret-reuse.spec.ts`, using the repository's
+existing Playwright setup (`@playwright/test` 1.58.2, `control-ui/playwright.config.ts`,
+`testDir ./e2e`, chromium project) and the same pattern as the existing
+mocked specs (`controlUiAdminToken` in localStorage plus
+`page.route('**/api/v1/admin/**')`). The app under test is the REAL built
+Control UI served by `next start -p <port> -H 127.0.0.1` from the production
+`.next` build; `CONTROL_UI_BASE_URL` points the suite at it. The routes are
+the real ones: `/connectors/new` (rewritten to `/mcp-servers/new`) and
+`/connectors/linear/edit/credentials`.
+
+Boundary, stated plainly: this is **mocked-API frontend E2E**. The Control
+API is replaced at the browser network layer, so the specs prove what the
+real browser sends and renders — they are not live-backend E2E and not T2
+certification. Mocks carry metadata only (names, key names, UIDs, spec
+references) and every Secret write endpoint is recorded so reference-only
+journeys can prove zero Secret POST/PUT/DELETE. No credentials, `.env`, or
+cluster state are involved.
+
+The nine scenarios, all passing in one Chromium run (about 14 seconds):
+
+1. Creation from an existing Secret: no value inputs render, both stored
+   keys are auto-mapped (API_KEY, WORKSPACE_ID), and the captured
+   `POST /admin/mcp-servers` body persists
+   `spec.envSecret = { name, keys }` with zero Secret writes.
+2. The same Secret reused by two connectors created back to back: two
+   connector POSTs reference it, the Secret list is read each time, and no
+   Secret POST/PUT/DELETE occurs.
+3. Listing outage at creation: error alert, disabled submit, retry
+   recovers, and no value prompts appear.
+4. Change assigned Secret, happy path: destinations preserved
+   (LINEAR_API_KEY, LINEAR_WORKSPACE), confirmation names both Secrets,
+   the captured `PUT /admin/mcp-servers/linear` carries CAS
+   `metadata.uid`/`resourceVersion` and changes only `envSecret` in an
+   otherwise identical spec, and a fresh `DeploymentReady=True` (post-cutoff
+   timestamp, matching observedGeneration) resolves the wait, reloads the
+   page on the new reference, and returns focus to the trigger.
+5. Saved but not ready: after the PUT, polls never observe a fresh Ready
+   condition; the panel keeps "Assignment saved. Waiting for…", tabs stay
+   disabled, and "Check credentials later" leaves cleanly onto the new
+   reference with focus returned.
+6. Concurrent change: the live connector diverges from the displayed
+   snapshot between verification reads — the assignment is refused before
+   any write, the panel locks until refresh, and no Secret is touched.
+7. No-op refusal (re-selecting the current Secret), explicit replacement
+   key demanded when a stored key is missing (empty key select plus a
+   key-selection alert, never a value prompt), and cancel returning focus
+   to the trigger with nothing written.
+8. Listing outage inside the change flow: alert plus retry recovery.
+9. Narrow viewport (390×844): the change flow stays usable with
+   `document.scrollWidth <= window.innerWidth`, verified in the browser.
+
+Runner (operational state stays under the ignored
+`.local-notes/infra/runs/connector-secrets-ui/playwright/`; the runner
+script `run.sh` there starts the server, runs the suite, and always stops
+it; logs and six screenshots — confirm dialog, saved-not-ready, missing-key
+choice, narrow viewport, and the creation and ready flows — are saved
+beside it):
+
+```text
+cd control-ui
+CONTROL_UI_BASE_URL=http://127.0.0.1:<port> \
+  node_modules/.bin/playwright test e2e/connector-secret-reuse.spec.ts \
+  --project=chromium --reporter=list
+```
+
+Result on the committed spec: **9 passed / 0 failed / 0 skipped**
+(Chromium, headless), including the 390px pass. The full-unit, typecheck,
+style, and build evidence above was unchanged by the spec (it adds no app
+code); `tsc --noEmit` stays green — the app `tsconfig` excludes `e2e` by
+repository convention, and Playwright transpiles the spec itself — and the
+root style-rules check reports 0 errors. The gitleaks scan above was re-run
+with the spec overlaid into the archive tree: no leaks found.
+
+Limits: the rollout poll runs on real 3-second ticks, so the happy path
+observes readiness within seconds; the 180-second timeout terminal state is
+covered by component-level unit tests rather than a real 5-minute browser
+wait, which would add no coverage the mocks cannot express. Everything in
+this section remains mocked-API frontend evidence.
+
+## GitHub checks
+
+Tracked by PR #858; a commit's own conclusion is always read from that
+commit's runs, never inherited from an earlier SHA:
+
+- `1f86edcce` (leak-guard fix): all checks green, including Leak guards
+  (identifiers + secrets) — run `40040321077`, job `120709615475` — and
+  CodeQL.
+- `c9f217623` (Playwright spec, hook bump to `0.1.754`): all 60 checks
+  green — Build/test/typecheck and Leak guards under run `40044380395`,
+  CodeQL under run `40044380264`.
+- The documentation commit that carries this section is the final head of
+  this change; its own check run is the acceptance run and is reported
+  alongside this document rather than self-recorded here, since a commit
+  cannot contain its own run URL.
 
 Limits: all evidence is local and synthetic. No authenticated live product
 session was available, so no live backend, E2E, or deployed-runtime behavior
