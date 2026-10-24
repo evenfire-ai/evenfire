@@ -205,6 +205,7 @@ function makeController(): AppController {
     forceControllerRender()
   })
   const openPreviewSection = vi.fn((preview: GfsPreviewResource) => {
+    controller.beginUserNavigationIntent()
     clearAppsPicker()
     setWorkspaceTabs((state: WorkspaceState) =>
       openPreviewTab(state, {
@@ -219,12 +220,14 @@ function makeController(): AppController {
     )
   })
   const openFilesSection = vi.fn((path: string | null = null) => {
+    controller.beginUserNavigationIntent()
     clearAppsPicker()
     setWorkspaceTabs((state: WorkspaceState) =>
       openFilesTab(state, { id: nextWorkspaceTabId(), path })
     )
   })
   const showAppsPicker = vi.fn(() => {
+    controller.beginUserNavigationIntent()
     if (controller.appsPickerActive) return
     if (activeWorkspaceTab(controller.workspaceTabs)?.kind === 'app') return
     controller.appsPickerActive = true
@@ -1143,6 +1146,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
   it('closes the view when a plugin hands off to a preview tab', async () => {
     await renderApp()
     await openFromSidebar(ALPHA, 1)
+    const navigationIntentBeforePlugin = controller.navigationIntentSequence
     const payload = await openGfsResourcePayload(
       resolvedFile('md1', 'README.md', { gfsUri: 'gfs://main/md1' })
     )
@@ -1150,6 +1154,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     await flushMacrotask()
 
     expect(controller.navItem).toBe(DESKTOP_ROUTES.preview)
+    expect(controller.navigationIntentSequence).toBe(navigationIntentBeforePlugin + 1)
     expect(sandboxUi.close).toHaveBeenCalledWith({ launchId: main.openCall(0).launchId })
     expect(machine().getSnapshot().views.size).toBe(0)
   })
