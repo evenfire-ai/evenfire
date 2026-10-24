@@ -2728,6 +2728,62 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
   })
 
+  it('reports when explicit workspace navigation cancels a retrying app link', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    currentController = makeController({ initialExperienceLoading: false })
+    currentController.workspaceTabs = openFilesTab(currentController.workspaceTabs, {
+      id: 'files-tab-2',
+    })
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready: false,
+          phase: 'deploying',
+        },
+      ],
+    })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+    const listAppsCallsBeforeLink = listApps.mock.calls.length
+
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({ recipeNs: 'ns', recipeName: 'app' })
+    )
+    if (!target) throw new Error('the shared producer rejected the app-link fixture')
+    const link = new SandboxUiDeepLinkQueue().enqueue(target)
+    act(() => emitDeepLink?.(link))
+    await confirmPendingAppLink()
+    await waitFor(() =>
+      expect(currentController.pushToast).toHaveBeenCalledWith(
+        'Linked App is still starting up. This link will retry shortly.',
+        'info'
+      )
+    )
+
+    const previousIntent = currentController.navigationIntentSequence
+    act(() => workspaceTabStripHarness.props?.onSelect('chat-tab-1'))
+    await waitFor(() => expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1'))
+    expect(currentController.navigationIntentSequence).toBeGreaterThan(previousIntent)
+
+    await act(async () => {
+      vi.advanceTimersByTime(1_000)
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+
+    expect(acknowledgeDeepLink).toHaveBeenCalledOnce()
+    expect(listApps).toHaveBeenCalledTimes(listAppsCallsBeforeLink + 1)
+    expect(openSandboxUi()).not.toHaveBeenCalled()
+    expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1')
+    expect(currentController.pushToast).toHaveBeenCalledWith(
+      'App link canceled because you navigated elsewhere.',
+      'info'
+    )
+  })
+
   it('keeps the target team during cross-team starting app retries', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     let liveTeamId = 'team-a'

@@ -1891,6 +1891,14 @@ export function App() {
     [clearSandboxUiDeepLinkProcessing, setPendingSandboxUiDeepLinkState]
   )
 
+  const cancelSupersededSandboxUiDeepLink = React.useCallback(
+    async (linkId: number) => {
+      vm.pushToast('App link canceled because you navigated elsewhere.', 'info')
+      await acknowledgeSandboxUiDeepLink(linkId)
+    },
+    [acknowledgeSandboxUiDeepLink, vm.pushToast]
+  )
+
   const deferSandboxUiDeepLink = React.useCallback(
     (
       pending: PendingSandboxUiDeepLink,
@@ -2081,8 +2089,21 @@ export function App() {
       deferSandboxUiDeepLink(pending, message, tone)
       const outcome = await restoreSandboxUiDeepLinkTeam(launchContext)
       if (outcome === 'retryable') markSandboxUiDeepLinkRetryableFailure(pending.link.id)
+      else if (
+        outcome === 'superseded' &&
+        launchContext.navigationIntentSequence !== undefined &&
+        !vm.isNavigationIntentCurrent(launchContext.navigationIntentSequence)
+      ) {
+        await cancelSupersededSandboxUiDeepLink(pending.link.id)
+      }
     },
-    [deferSandboxUiDeepLink, markSandboxUiDeepLinkRetryableFailure, restoreSandboxUiDeepLinkTeam]
+    [
+      cancelSupersededSandboxUiDeepLink,
+      deferSandboxUiDeepLink,
+      markSandboxUiDeepLinkRetryableFailure,
+      restoreSandboxUiDeepLinkTeam,
+      vm.isNavigationIntentCurrent,
+    ]
   )
 
   // A cross-team link switches teams, which does not end the embed session, so
@@ -2142,7 +2163,14 @@ export function App() {
         return
       }
       if (outcome === 'abandoned') {
-        await acknowledgeSandboxUiDeepLink(context.linkId)
+        if (
+          context.navigationIntentSequence !== undefined &&
+          !vm.isNavigationIntentCurrent(context.navigationIntentSequence)
+        ) {
+          await cancelSupersededSandboxUiDeepLink(context.linkId)
+        } else {
+          await acknowledgeSandboxUiDeepLink(context.linkId)
+        }
         return
       }
       const failure = embed.getSnapshot().failure
@@ -2157,8 +2185,10 @@ export function App() {
     [
       acknowledgeSandboxUiDeepLink,
       clearSandboxUiDeepLinkProcessing,
+      cancelSupersededSandboxUiDeepLink,
       deferSandboxUiDeepLinkAndRestoreOrigin,
       embed,
+      vm.isNavigationIntentCurrent,
     ]
   )
 
@@ -2350,6 +2380,7 @@ export function App() {
     const currentIdentity = vm.authenticatedPrincipalIdentity
     if (!currentIdentity) return
     let stalePending: PendingSandboxUiDeepLink | null = null
+    let supersededRetry: PendingSandboxUiDeepLink | null = null
     const now = Date.now()
     // Written as a loop rather than `.find()` because TypeScript's control-flow
     // analysis does not track assignments made inside a callback: `stalePending`
@@ -2364,12 +2395,25 @@ export function App() {
       }
       if (isPendingSandboxUiDeepLinkAwaitingConfirmation(item, currentIdentity)) continue
       if (item.failedMessage) continue
+      const expectedIntent = sandboxUiDeepLinkIntentByIdRef.current.get(item.link.id)
+      if (
+        (item.retryCount ?? 0) > 0 &&
+        expectedIntent !== undefined &&
+        !vm.isNavigationIntentCurrent(expectedIntent)
+      ) {
+        supersededRetry = item
+        break
+      }
       if (item.nextRetryAt && item.nextRetryAt > now) continue
       pending = item
       break
     }
     if (stalePending) {
       void acknowledgeSandboxUiDeepLink(stalePending.link.id)
+      return
+    }
+    if (supersededRetry) {
+      void cancelSupersededSandboxUiDeepLink(supersededRetry.link.id)
       return
     }
     if (!pending || processingSandboxUiDeepLinkIdRef.current !== null) return
@@ -2445,7 +2489,7 @@ export function App() {
           if (originApp || embedSnapshot.owner !== null || embedSnapshot.views.size > 0) {
             const handoff = await handOffEmbedBeforeTeamSwitch()
             if (!vm.isNavigationIntentCurrent(navigationIntentSequence)) {
-              await acknowledgeSandboxUiDeepLink(pending.link.id)
+              await cancelSupersededSandboxUiDeepLink(pending.link.id)
               return
             }
             if (handoff === 'failed') {
@@ -2501,13 +2545,13 @@ export function App() {
         }
         if (processingGeneration !== sandboxUiDeepLinkGenerationRef.current) return
         if (!vm.isNavigationIntentCurrent(navigationIntentSequence)) {
-          await acknowledgeSandboxUiDeepLink(pending.link.id)
+          await cancelSupersededSandboxUiDeepLink(pending.link.id)
           return
         }
         const result = await window.clerum.sandboxUi.listApps()
         if (processingGeneration !== sandboxUiDeepLinkGenerationRef.current) return
         if (!vm.isNavigationIntentCurrent(navigationIntentSequence)) {
-          await acknowledgeSandboxUiDeepLink(pending.link.id)
+          await cancelSupersededSandboxUiDeepLink(pending.link.id)
           return
         }
         const availableApps = toActiveSandboxUiApps(result.apps)
@@ -2543,6 +2587,14 @@ export function App() {
         if (outcome === null) return
         await finishSandboxUiDeepLinkLaunch(makeLaunchContext(), launchId, outcome)
       } catch (err) {
+        if (
+          processingGeneration === sandboxUiDeepLinkGenerationRef.current &&
+          processingSandboxUiDeepLinkIdRef.current === pending.link.id &&
+          !vm.isNavigationIntentCurrent(navigationIntentSequence)
+        ) {
+          await cancelSupersededSandboxUiDeepLink(pending.link.id)
+          return
+        }
         const message = err instanceof Error ? err.message : String(err)
         vm.pushToast(`Could not open app link: ${message}`, 'error')
         if (
@@ -2564,6 +2616,7 @@ export function App() {
     awaitLaunchOutcome,
     bootSplashLoading,
     clearSandboxUiDeepLinkProcessing,
+    cancelSupersededSandboxUiDeepLink,
     deferSandboxUiDeepLinkAndRestoreOrigin,
     finishSandboxUiDeepLinkLaunch,
     handOffEmbedBeforeTeamSwitch,
