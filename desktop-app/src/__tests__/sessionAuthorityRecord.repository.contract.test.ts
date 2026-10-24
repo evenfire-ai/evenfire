@@ -1280,7 +1280,12 @@ describe('dormant V2 session-authority record repository', () => {
     expect(after.record.projectionIntent?.candidateTransactionId).toBe(candidate.transactionId)
   })
 
-  it('keeps authority denied when marker publication returns uncertain after the file move', () => {
+  // This injects POSIX parent-directory fsync uncertainty. Windows instead verifies the native
+  // MoveFileExW write-through outcome in its dedicated native durability suite.
+  it('keeps authority denied when marker publication returns uncertain after the file move', ({
+    skip,
+  }) => {
+    if (process.platform === 'win32') skip()
     const { adapter } = fixture()
     const repo = repository(adapter)
     const candidate = prepareVerifiedMemoryCandidate(
@@ -1384,7 +1389,9 @@ describe('dormant V2 session-authority record repository', () => {
     expect(after.record.candidates).toHaveLength(0)
   })
 
-  it('fails closed when the protected storage boundary is not private', () => {
+  // chmod mode bits do not alter or verify a Windows DACL; native ACL evidence is tested separately.
+  it('fails closed when the protected storage boundary is not private', ({ skip }) => {
+    if (process.platform === 'win32') skip()
     const { adapter } = fixture()
     fs.chmodSync(adapter.directory, 0o755)
     expect(() => repository(adapter)).toThrow(/not private/)
@@ -1392,7 +1399,12 @@ describe('dormant V2 session-authority record repository', () => {
     expect(repository(adapter).observe().status).toBe('absent')
   })
 
-  it('resolves directory-sync uncertainty by exact reread before reporting a candidate', () => {
+  // Windows has no supported parent-directory fsync contract; write-through and uncertainty are
+  // exercised through the native Windows publication adapter instead.
+  it('resolves directory-sync uncertainty by exact reread before reporting a candidate', ({
+    skip,
+  }) => {
+    if (process.platform === 'win32') skip()
     const { adapter } = fixture()
     const repo = repository(adapter)
     const absent = repo.observe()

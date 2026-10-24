@@ -61,6 +61,13 @@ jobs:
           npm test -- src/__tests__/windowsSessionAuthorityAcl.native.test.ts
           src/__tests__/windowsSessionAuthorityAcl.launch.test.ts
 
+      - name: Require native Windows authority durability evidence
+        working-directory: desktop-app
+        env:
+          EVENFIRE_REQUIRE_WINDOWS_DURABLE_TEST: '1'
+        run: >-
+          npm test -- src/__tests__/windowsSessionAuthorityDurableFileOps.native.test.ts
+
       - name: Build Desktop main and renderer
         working-directory: desktop-app
         run: npm run build

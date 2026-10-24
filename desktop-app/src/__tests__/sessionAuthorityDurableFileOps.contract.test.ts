@@ -98,7 +98,10 @@ describe('session-authority durable file operations', () => {
     expect(() => fs.lstatSync(candidate)).toThrow()
   })
 
-  it('does not overwrite a destination that appears before no-replace publication', () => {
+  // This races the POSIX linkSync publication path. Windows no-replace behavior is exercised by
+  // the native MoveFileExW test, where a pre-existing destination must remain untouched.
+  it('does not overwrite a destination that appears before no-replace publication', ({ skip }) => {
+    if (process.platform === 'win32') skip()
     const root = createRoot()
     const current = path.join(root, 'authority.record')
     const candidate = path.join(root, 'authority.next')
@@ -118,7 +121,9 @@ describe('session-authority durable file operations', () => {
     expect(fs.readFileSync(candidate, 'utf8')).toBe('candidate')
   })
 
-  it('preserves the prior authority when replacement publication is rejected', () => {
+  // This injects the POSIX renameSync failure; Windows rejection is covered by the native test.
+  it('preserves the prior authority when replacement publication is rejected', ({ skip }) => {
+    if (process.platform === 'win32') skip()
     const root = createRoot()
     const current = path.join(root, 'authority.record')
     const candidate = path.join(root, 'authority.next')
@@ -185,7 +190,11 @@ describe('session-authority durable file operations', () => {
     expect(fs.readFileSync(candidate, 'utf8')).toBe('candidate')
   })
 
-  it('reports indeterminate completion when parent-directory durability fails after replace', () => {
+  // Windows uses MoveFileExW(MOVEFILE_WRITE_THROUGH), not parent-directory fsync.
+  it('reports indeterminate completion when parent-directory durability fails after replace', ({
+    skip,
+  }) => {
+    if (process.platform === 'win32') skip()
     const root = createRoot()
     const current = path.join(root, 'authority.record')
     const candidate = path.join(root, 'authority.next')
@@ -209,7 +218,9 @@ describe('session-authority durable file operations', () => {
     expect(fs.readFileSync(current, 'utf8')).toBe('candidate')
   })
 
-  it('reports indeterminate completion if the parent directory identity changes', () => {
+  // This intercepts the POSIX renameSync publication, which the Windows native adapter bypasses.
+  it('reports indeterminate completion if the parent directory identity changes', ({ skip }) => {
+    if (process.platform === 'win32') skip()
     const root = createRoot()
     const movedRoot = `${root}-moved`
     roots.push(movedRoot)
@@ -238,7 +249,9 @@ describe('session-authority durable file operations', () => {
     expect(() => fs.lstatSync(current)).toThrow()
   })
 
-  it('reports indeterminate completion when published bytes fail exact read-back', () => {
+  // This injects after POSIX renameSync; native Windows publication has its own byte read-back.
+  it('reports indeterminate completion when published bytes fail exact read-back', ({ skip }) => {
+    if (process.platform === 'win32') skip()
     const root = createRoot()
     const current = path.join(root, 'authority.record')
     const candidate = path.join(root, 'authority.next')
