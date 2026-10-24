@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentTaskTrackerProvider, useAgentTaskTracker } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, renderHook, waitFor } from '@testing-library/react'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import {
   getComposerDraft,
   resetComposerDraftStore,
@@ -26,9 +27,11 @@ function installCoordinatorHarness() {
       <AgentTaskTrackerProvider>{children}</AgentTaskTrackerProvider>
     </QueryClientProvider>
   )
-  return renderHook(() => ({ controller: useAppController(), tracker: useAgentTaskTracker() }), {
-    wrapper,
-  })
+  const rendered = renderHook(
+    () => ({ controller: useAppController(), tracker: useAgentTaskTracker() }),
+    { wrapper }
+  )
+  return { ...rendered, queryClient }
 }
 
 describe('useAppController session ownership oracle', () => {
@@ -214,5 +217,50 @@ describe('useAppController session ownership oracle', () => {
     expect(app.result.current.controller.workspaceTabs.tabs).not.toContainEqual(
       expect.objectContaining({ kind: 'files' })
     )
+  })
+
+  it('continues logout cleanup when one query-cache reset throws', async () => {
+    const { handle } = installAppControllerClerum()
+    const app = installCoordinatorHarness()
+    tracker = app.result.current.tracker
+
+    await waitFor(() => expect(app.result.current.controller.isAuthenticated).toBe(true))
+    await waitFor(() => expect(app.result.current.controller.initialExperienceLoading).toBe(false))
+    act(() => {
+      app.result.current.controller.handleSelectChatAgent('agent-x', {
+        chatId: 'logout-cleanup-chat',
+        title: 'Current conversation',
+        selectLatest: false,
+      })
+      app.result.current.controller.openFilesSection('gfs://main/0123456789abcdef0123456789abcdef')
+    })
+    await waitFor(() =>
+      expect(app.result.current.controller.activeChatId).toBe('logout-cleanup-chat')
+    )
+
+    const removeQueries = app.queryClient.removeQueries.bind(app.queryClient)
+    const failedCleanup = vi.spyOn(app.queryClient, 'removeQueries').mockImplementation(filters => {
+      if (JSON.stringify(filters.queryKey) === JSON.stringify(desktopQueryKeys.gfsRoot)) {
+        throw new Error('diagnostic cache cleanup failure')
+      }
+      return removeQueries(filters)
+    })
+    const clearCache = vi.spyOn(app.queryClient, 'clear')
+    handle.logout.mockResolvedValue({ ok: true, sessionGeneration: 3 })
+
+    await act(async () => {
+      await app.result.current.controller.handleLogout()
+    })
+
+    expect(failedCleanup).toHaveBeenCalledWith({ queryKey: desktopQueryKeys.gfsRoot })
+    expect(clearCache).toHaveBeenCalledOnce()
+    expect(app.result.current.controller.isAuthenticated).toBe(false)
+    expect(app.result.current.controller.selectedAgent).toBeNull()
+    expect(app.result.current.controller.activeChatId).toBeNull()
+    expect(app.result.current.controller.workspaceTabs.tabs).toHaveLength(1)
+    expect(activeWorkspaceTab(app.result.current.controller.workspaceTabs)).toMatchObject({
+      kind: 'chat',
+      chat: { agentRef: null, chatId: null },
+    })
   })
 })

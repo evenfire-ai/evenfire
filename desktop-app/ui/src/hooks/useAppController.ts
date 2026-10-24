@@ -964,26 +964,45 @@ export function useAppController() {
       auth.setBusy(true)
       const logoutResult = await window.clerum.auth.logout()
       logoutGeneration = logoutResult.sessionGeneration
-      await chat.stopAllActivityStreams()
+      const cleanupErrors: unknown[] = []
+      const attemptCleanup = async (cleanup: () => unknown | Promise<unknown>) => {
+        try {
+          await cleanup()
+        } catch (error) {
+          cleanupErrors.push(error)
+        }
+      }
+
+      await attemptCleanup(() => chat.stopAllActivityStreams())
       catalogRefreshPromiseRef.current = null
-      agentsData.reset()
-      contextsData.reset()
-      mcpServersData.reset()
-      connectorsData.reset()
-      teamsData.reset()
-      resetWorkflowsData()
-      queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot })
+      await attemptCleanup(() => agentsData.reset())
+      await attemptCleanup(() => contextsData.reset())
+      await attemptCleanup(() => mcpServersData.reset())
+      await attemptCleanup(() => connectorsData.reset())
+      await attemptCleanup(() => teamsData.reset())
+      await attemptCleanup(() => resetWorkflowsData())
+      await attemptCleanup(() => queryClient.removeQueries({ queryKey: desktopQueryKeys.gfsRoot }))
       // Drop ALL cached queries on confirmed logout: the singleton
       // desktopQueryClient uses staleTime:Infinity, so any env-scoped data left
       // in cache would otherwise bleed into the next login (possibly a different
       // environment, since the env is chosen pre-login).
-      queryClient.clear()
+      await attemptCleanup(() => queryClient.clear())
       activeAuthenticatedSessionIdentityRef.current = null
       authenticatedSessionIdentityRef.current = null
-      nav.resetSessionNavigation()
-      reflectSignedOutState()
-      chat.resetChat()
-      notif.resetNotifications()
+      await attemptCleanup(() => nav.resetSessionNavigation())
+      await attemptCleanup(() => auth.setDesktopReleaseStatus(null))
+      await attemptCleanup(() => setPostPaintDataReady(false))
+      await attemptCleanup(() => reflectSignedOutState())
+      await attemptCleanup(() => chat.resetChat())
+      await attemptCleanup(() => notif.resetNotifications())
+      if (cleanupErrors.length > 0) {
+        const error = cleanupErrors[0]
+        fullSetStatus(
+          `Signed out, but some local cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+          'warn'
+        )
+        return logoutGeneration
+      }
       fullSetStatus('Logged out.', 'success')
       try {
         await loadSession()
