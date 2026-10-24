@@ -165,6 +165,8 @@ const TRANSIENT_TEAM_CONTEXT_ERROR_CODES = new Set([
 
 const SANDBOX_UI_DEEP_LINK_MANUAL_TEAM_CHANGE_MESSAGE =
   'App link paused because you switched teams. Retry to open it from the current team, or dismiss it.'
+const SANDBOX_UI_DEEP_LINK_ROLLBACK_RETRY_MESSAGE =
+  'Could not finish refreshing the previous team. Retry this app link.'
 
 // Every reveal gesture launches whatever app tab its commit leaves active.
 const ACTIVE_TAB_LAUNCH: EmbedLaunchPlan = { kind: 'activeTab' }
@@ -1914,19 +1916,38 @@ export function App() {
     [clearSandboxUiDeepLinkProcessing, setPendingSandboxUiDeepLinkState, vm.pushToast]
   )
 
+  const markSandboxUiDeepLinkRetryableFailure = React.useCallback(
+    (linkId: number) => {
+      if (!pendingSandboxUiDeepLinksRef.current.some(item => item.link.id === linkId)) return
+      clearSandboxUiDeepLinkProcessing(linkId)
+      setPendingSandboxUiDeepLinkState(
+        failPendingSandboxUiDeepLink(
+          pendingSandboxUiDeepLinksRef.current,
+          linkId,
+          SANDBOX_UI_DEEP_LINK_ROLLBACK_RETRY_MESSAGE
+        )
+      )
+    },
+    [clearSandboxUiDeepLinkProcessing, setPendingSandboxUiDeepLinkState]
+  )
+
   const restoreSandboxUiDeepLinkTeam = React.useCallback(
     async (context: PendingSandboxUiDeepLinkLaunch) => {
+      const stillOwnsSessionAndLink = () =>
+        context.generation === sandboxUiDeepLinkGenerationRef.current &&
+        pendingSandboxUiDeepLinksRef.current.some(item => item.link.id === context.linkId)
+      const stillOwnsLinkAndNavigation = () =>
+        stillOwnsSessionAndLink() &&
+        (context.navigationIntentSequence === undefined ||
+          vm.isNavigationIntentCurrent(context.navigationIntentSequence))
       if (
-        context.generation !== sandboxUiDeepLinkGenerationRef.current ||
-        (context.navigationIntentSequence !== undefined &&
-          !vm.isNavigationIntentCurrent(context.navigationIntentSequence)) ||
+        !stillOwnsLinkAndNavigation() ||
         (context.switchedTeam &&
           (!context.originalTeamId ||
             !context.linkTeamId ||
             vm.getCurrentTeamId() !== context.linkTeamId))
-      ) {
-        return
-      }
+      )
+        return 'superseded' as const
       // A failed target-team RPC that left the origin embed open is a no-op for
       // navigation. There is nothing to roll back unless this transaction
       // switched teams or actually closed the origin view.
@@ -1936,12 +1957,17 @@ export function App() {
         context.linkTeamId &&
         context.originalTeamId !== context.linkTeamId
       ) {
-        return
+        return 'restored' as const
+      }
+      if (vm.getCurrentTeamId() !== context.linkTeamId && context.switchedTeam) {
+        return 'superseded' as const
       }
       let originTeamRestored = !context.switchedTeam
+      let retryable = false
       if (context.switchedTeam) {
         try {
           await vm.handleEnsureTeamContext({ teamId: context.originalTeamId, announce: true })
+          if (!stillOwnsLinkAndNavigation()) return 'superseded' as const
           originTeamRestored = vm.getCurrentTeamId() === context.originalTeamId
           if (!originTeamRestored) {
             vm.pushToast(
@@ -1950,14 +1976,25 @@ export function App() {
             )
           }
         } catch (rollbackError) {
+          if (!stillOwnsLinkAndNavigation()) return 'superseded' as const
           const message =
             rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
-          vm.pushToast(`Could not restore the previous team: ${message}`, 'error')
+          originTeamRestored = vm.getCurrentTeamId() === context.originalTeamId
+          retryable = originTeamRestored
+          vm.pushToast(
+            originTeamRestored
+              ? `The previous team is active, but its data refresh failed: ${message}. Retry the app link.`
+              : `Could not restore the previous team: ${message}`,
+            'error'
+          )
         }
       }
       // A workspace/app owned by the origin must never be restored under the
       // target team's session when rollback failed or another team won.
-      if (!originTeamRestored) return
+      if (!originTeamRestored || vm.getCurrentTeamId() !== context.originalTeamId) {
+        return retryable ? ('retryable' as const) : ('superseded' as const)
+      }
+      if (!stillOwnsLinkAndNavigation()) return 'superseded' as const
       if (
         context.restoreWorkspace &&
         context.originNavigation &&
@@ -1968,6 +2005,9 @@ export function App() {
           context.originNavigation,
           context.navigationIntentSequence
         )
+        if (!stillOwnsSessionAndLink() || vm.getCurrentTeamId() !== context.originalTeamId) {
+          return 'superseded' as const
+        }
         if (restoredIntent !== null) {
           sandboxUiDeepLinkIntentByIdRef.current.set(context.linkId, restoredIntent)
           if (context.originEmbedClosed && context.originApp) {
@@ -1989,6 +2029,8 @@ export function App() {
             context.originApp &&
             originTab?.kind === 'app' &&
             originTab.app?.appRef === context.originApp.appRef &&
+            vm.getCurrentTeamId() === context.originalTeamId &&
+            stillOwnsSessionAndLink() &&
             vm.isNavigationIntentCurrent(restoredIntent)
           ) {
             activateAndLaunch(state => selectWorkspaceTab(state, originTab.id), undefined, {
@@ -1999,7 +2041,11 @@ export function App() {
         }
       } else if (context.conversationOrigin) {
         const origin = context.conversationOrigin
-        if (!origin.teamId || origin.teamId === context.originalTeamId) {
+        if (
+          stillOwnsLinkAndNavigation() &&
+          vm.getCurrentTeamId() === context.originalTeamId &&
+          (!origin.teamId || origin.teamId === context.originalTeamId)
+        ) {
           vm.handleSelectChatAgent(origin.agentName, {
             selectLatest: false,
             chatId: origin.chatId,
@@ -2007,6 +2053,7 @@ export function App() {
           })
         }
       }
+      return retryable ? ('retryable' as const) : ('restored' as const)
     },
     [
       activateAndLaunch,
@@ -2028,9 +2075,10 @@ export function App() {
       tone: 'info' | 'error' = 'error'
     ) => {
       deferSandboxUiDeepLink(pending, message, tone)
-      await restoreSandboxUiDeepLinkTeam(launchContext)
+      const outcome = await restoreSandboxUiDeepLinkTeam(launchContext)
+      if (outcome === 'retryable') markSandboxUiDeepLinkRetryableFailure(pending.link.id)
     },
-    [deferSandboxUiDeepLink, restoreSandboxUiDeepLinkTeam]
+    [deferSandboxUiDeepLink, markSandboxUiDeepLinkRetryableFailure, restoreSandboxUiDeepLinkTeam]
   )
 
   // A cross-team link switches teams, which does not end the embed session, so
@@ -2496,7 +2544,11 @@ export function App() {
         ) {
           return
         }
-        await restoreSandboxUiDeepLinkTeam(makeLaunchContext())
+        const restoreOutcome = await restoreSandboxUiDeepLinkTeam(makeLaunchContext())
+        if (restoreOutcome === 'retryable') {
+          markSandboxUiDeepLinkRetryableFailure(pending.link.id)
+          return
+        }
         await acknowledgeSandboxUiDeepLink(pending.link.id)
       }
     })()
@@ -2509,6 +2561,7 @@ export function App() {
     finishSandboxUiDeepLinkLaunch,
     handOffEmbedBeforeTeamSwitch,
     launchSandboxUiApp,
+    markSandboxUiDeepLinkRetryableFailure,
     pendingSandboxUiDeepLinks,
     restoreSandboxUiDeepLinkTeam,
     sandboxUiConversationOrigin,

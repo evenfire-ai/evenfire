@@ -2102,6 +2102,116 @@ describe('App deep-link orchestration', () => {
     expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(link.id)
   })
 
+  it('restores the origin app and keeps the link retryable when origin refresh rejects', async () => {
+    const actualControllerModule =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    let activeTeamId = 'team-1'
+    let rejectOriginRefresh = false
+    let injectOriginRefreshFailure = true
+    vi.mocked(useAppController).mockImplementation(() => {
+      realController = actualControllerModule.useAppController()
+      const ensureTeamContext = realController.handleEnsureTeamContext
+      realController.handleEnsureTeamContext = async target => {
+        const didSwitch = await ensureTeamContext(target)
+        if (target.teamId) activeTeamId = target.teamId
+        if (target.teamId === 'team-2' && injectOriginRefreshFailure) {
+          rejectOriginRefresh = true
+          injectOriginRefreshFailure = false
+        } else if (target.teamId === 'team-1' && rejectOriginRefresh) {
+          // Model a refresh rejection after the real team switch has landed.
+          rejectOriginRefresh = false
+          throw Object.assign(new Error('origin catalog timed out'), { code: 'ETIMEDOUT' })
+        }
+        return didSwitch
+      }
+      return realController
+    })
+    const appBridge = window.clerum
+    const { handle } = installAppControllerClerum({ agentNames: ['agent-x'] })
+    Object.assign(window.clerum, {
+      shortcuts: appBridge.shortcuts,
+      app: appBridge.app,
+      sandboxUi: appBridge.sandboxUi,
+      gfs: appBridge.gfs,
+    })
+
+    const switchTeam = handle.switchTeam.getMockImplementation()
+    if (!switchTeam) throw new Error('the team-switch producer is missing')
+    const targetApp = { ...READY_APP, appRef: 'ns/target', title: 'Target app' }
+    let rejectTargetCatalog = true
+    listApps.mockImplementation(async () => {
+      if (activeTeamId === 'team-2' && rejectTargetCatalog) {
+        rejectTargetCatalog = false
+        throw new Error('target app catalog failed')
+      }
+      return activeTeamId === 'team-1' ? { apps: [READY_APP] } : { apps: [targetApp] }
+    })
+
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTaskTrackerProvider>
+          <App />
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+    unmountRealApp = view.unmount
+    const getController = () => {
+      if (!realController) throw new Error('the real App controller did not mount')
+      return realController
+    }
+    await waitFor(() => expect(getController().booting).toBe(false))
+    await waitFor(() => expect(getController().isAuthenticated).toBe(true))
+    await waitFor(() => expect(getController().initialExperienceLoading).toBe(false))
+    await waitFor(() => expect(handle.refreshCatalog.mock.calls.length).toBeGreaterThanOrEqual(2))
+    await launchAppFromSidebar()
+    main.navigate('/tickets/origin')
+
+    const openTeams: string[] = []
+    const open = main.bridge.open.getMockImplementation()
+    if (!open) throw new Error('the main fake has no app-open producer')
+    main.bridge.open.mockImplementation(async (...args) => {
+      openTeams.push(getController().getCurrentTeamId())
+      return open(...args)
+    })
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'target',
+        path: '/linked',
+        teamId: 'team-2',
+      })
+    )
+    if (!target) throw new Error('the shared producer rejected the cross-team link fixture')
+    const link = new SandboxUiDeepLinkQueue().enqueue(target)
+    act(() => emitDeepLink?.(link))
+    await confirmPendingAppLink()
+
+    await waitFor(() => expect(getController().getCurrentTeamId()).toBe('team-1'))
+    await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledTimes(2))
+    await waitForMounted()
+    await waitFor(() => expect(confirmDialogHarness.props?.confirmLabel).toBe('Retry'))
+
+    expect(handle.switchTeam.mock.calls.map(([teamId]) => teamId)).toEqual(['team-2', 'team-1'])
+    expect(openTeams).toEqual(['team-1'])
+    expect(getController().getCurrentTeamId()).toBe('team-1')
+    expect(activeWorkspaceTab(getController().workspaceTabs)).toMatchObject({
+      kind: 'app',
+      app: { appRef: 'ns/app', savedRoutePath: '/tickets/origin' },
+    })
+    expect(main.live()).toMatchObject({ appRef: 'ns/app', routePath: '/tickets/origin' })
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(link.id)
+
+    await act(async () => {
+      confirmDialogHarness.props?.onConfirm()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+    expect(getController().getCurrentTeamId()).toBe('team-2')
+    expect(main.live()?.appRef).toBe('ns/target')
+    expect(openTeams).toEqual(['team-1', 'team-2'])
+  })
+
   // The bridge returns successful logout, an unauthenticated session, then B login.
   // There is no producer for direct authenticated A→B loadSession; do not synthesize it.
   it('renders a fresh B workspace after successful A logout and null session', async () => {
