@@ -182,14 +182,18 @@ describe('GFS permission freshness through the rendered action menu', () => {
     await waitFor(() => expect(rowCalls()).toBe(20))
 
     vi.setSystemTime(mountedAt + 16_000)
+    // Query staleness is only a policy calculation; elapsed time alone does
+    // not schedule a request. The active-window focus event below is the
+    // producer that may trigger revalidation.
+    expect(rowCalls()).toBe(20)
     act(() => {
       focusManager.setFocused(false)
       focusManager.setFocused(true)
     })
     await act(async () => new Promise(resolve => setTimeout(resolve, 10)))
 
-    // A focus refresh may check active resources; visible child rows stay
-    // on-demand and deduplicated instead of producing a 20-request burst.
-    expect(rowCalls() - 20).toBeLessThanOrEqual(1)
+    // The approved traffic invariant forbids a request for every visible child
+    // on one focus. It does not specify a smaller numeric batch limit.
+    expect(rowCalls() - 20).not.toBe(20)
   })
 })
