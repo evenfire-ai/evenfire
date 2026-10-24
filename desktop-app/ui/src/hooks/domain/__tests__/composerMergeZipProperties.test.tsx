@@ -31,7 +31,11 @@ import {
  */
 const PROPERTY_RUNS = 25_000
 
-const imageArbitrary = fc
+// These values are inputs to the pure merge helper, not claims about what the
+// file-intake UI produces. Shrinking can yield whitespace IDs/base64 and
+// zero-byte sizes. Keep this broad domain for helper-only robustness properties;
+// ComposerPanel's file-input tests cover producer output.
+const helperImageArbitrary = fc
   .record({
     id: fc.string({ minLength: 1, maxLength: 12 }),
     dataBase64: fc.string({ minLength: 1, maxLength: 8 }),
@@ -43,6 +47,79 @@ const imageArbitrary = fc
     mimeType: 'image/png' as const,
     previewDataUrl: `data:image/png;base64,${record.dataBase64}`,
   }))
+
+function producerShapedImage(
+  id: string,
+  bytes: readonly number[],
+  mimeType: ComposerImageAttachment['mimeType'] = 'image/png'
+): ComposerImageAttachment {
+  const dataBase64 = btoa(String.fromCharCode(...bytes))
+  const extension = mimeType === 'image/jpeg' ? 'jpg' : 'png'
+  return {
+    id,
+    name: `${id}.${extension}`,
+    mimeType,
+    dataBase64,
+    sizeBytes: bytes.length,
+    previewDataUrl: `blob:${id}`,
+  }
+}
+
+// This arbitrary matches ComposerPanel's prepared attachment shape: UUID,
+// accepted MIME, non-empty base64, and File.size matching the source bytes.
+// The pure helper does not decode images; real intake/cancellation behavior is
+// exercised in ComposerPanel and cancellation producer tests.
+const producerShapedImageArbitrary = fc
+  .record({
+    id: fc.uuid(),
+    bytes: fc.array(fc.integer({ min: 0, max: 3 }), { minLength: 1, maxLength: 4 }),
+    mimeType: fc.constantFrom('image/png' as const, 'image/jpeg' as const),
+  })
+  .map(({ id, bytes, mimeType }) => producerShapedImage(id, bytes, mimeType))
+
+function imageIdentityKey(
+  image: Pick<ComposerImageAttachment, 'mimeType' | 'sizeBytes' | 'dataBase64'>
+): string {
+  return JSON.stringify([image.mimeType, image.sizeBytes, image.dataBase64])
+}
+
+type ImageMergeCounts = Pick<
+  ReturnType<typeof mergeComposerImageAttachments>,
+  'kept' | 'duplicates' | 'dropped'
+>
+
+/**
+ * Independent reference model: group incoming identities in first-seen order,
+ * then allocate one slot per new group. Copies of held or accepted identities
+ * are duplicates; groups after capacity is exhausted are drops. This does not
+ * replay the helper's item-by-item acceptance loop.
+ */
+function expectedImageMergeCounts(
+  existing: ComposerImageAttachment[],
+  incoming: ComposerImageAttachment[]
+): ImageMergeCounts {
+  const heldIdentities = new Set(existing.map(imageIdentityKey))
+  const incomingGroups = new Map<string, number>()
+  for (const image of incoming) {
+    const identity = imageIdentityKey(image)
+    incomingGroups.set(identity, (incomingGroups.get(identity) ?? 0) + 1)
+  }
+
+  let availableSlots = Math.max(0, COMPOSER_MAX_ATTACHMENTS - existing.length)
+  const expected: ImageMergeCounts = { kept: 0, duplicates: 0, dropped: 0 }
+  for (const [identity, copies] of incomingGroups) {
+    if (heldIdentities.has(identity)) {
+      expected.duplicates += copies
+    } else if (availableSlots > 0) {
+      expected.kept += 1
+      expected.duplicates += copies - 1
+      availableSlots -= 1
+    } else {
+      expected.dropped += copies
+    }
+  }
+  return expected
+}
 
 const referenceArbitrary = fc
   .record({
@@ -61,10 +138,10 @@ const referenceArbitrary = fc
 // hold, so every invariant below was provable against garbage. The existing
 // arrays are constrained to at-most-cap; incoming stays arbitrary.
 const heldImagesArbitrary = fc
-  .uniqueArray(imageArbitrary, {
+  .uniqueArray(producerShapedImageArbitrary, {
     minLength: 0,
     maxLength: COMPOSER_MAX_ATTACHMENTS,
-    selector: item => `${item.mimeType}:${item.sizeBytes}:${item.dataBase64}`,
+    selector: imageIdentityKey,
   })
   .map(items => items as ComposerImageAttachment[])
 
@@ -103,7 +180,7 @@ describe('composer merge invariants (R1-M6)', () => {
     fc.assert(
       fc.property(
         heldImagesArbitrary,
-        fc.array(imageArbitrary, { maxLength: 30 }),
+        fc.array(helperImageArbitrary, { maxLength: 30 }),
         (existing, incoming) => {
           // Valid starting state (R1-M6 round 2): a real composer is never
           // above the cap, and never holds byte-duplicates.
@@ -136,47 +213,97 @@ describe('composer merge invariants (R1-M6)', () => {
     fc.assert(
       fc.property(
         fc.integer({ min: 0, max: COMPOSER_MAX_ATTACHMENTS }),
-        fc.array(imageArbitrary, { maxLength: 10 }),
+        fc.array(helperImageArbitrary, { maxLength: 10 }),
         (heldCount, extra) => {
-          // A composer at the cap whose restore payload includes held images:
-          // every held image reports as a duplicate and dropped is exactly the
-          // not-held overflow.
-          const held = Array.from({ length: heldCount }, (_, index) => ({
-            ...({} as ComposerImageAttachment),
-            id: `h-${index}`,
-            name: `h-${index}.png`,
-            mimeType: 'image/png' as const,
-            dataBase64: `aGQt${index}`,
-            sizeBytes: index,
-            previewDataUrl: `data:image/png;base64,aGQt${index}`,
-          }))
+          // Existing entries are producer-shaped and unique. Incoming values
+          // intentionally use the broader helper-only domain, which can shrink
+          // to malformed records that normal file intake cannot produce.
+          const held = Array.from({ length: heldCount }, (_, index) =>
+            producerShapedImage(`h-${index}`, [index, 255])
+          )
           const payload = [
             ...held.slice(0, Math.min(3, heldCount)),
             ...(extra as ComposerImageAttachment[]),
           ]
           const outcome = mergeComposerImageAttachments(held, payload)
-          expect(outcome.next).toEqual(
-            held.length ? expect.arrayContaining(held) : expect.anything()
-          )
-          expect(outcome.next.length).toBe(Math.max(heldCount, 0) + outcome.kept)
-          const notHeld = payload.filter(
-            item =>
-              !held.some(h => h.dataBase64 === item.dataBase64 && h.sizeBytes === item.sizeBytes)
-          )
-          expect(outcome.dropped).toBe(
-            Math.max(0, notHeld.length - Math.max(0, COMPOSER_MAX_ATTACHMENTS - heldCount))
-          )
+          const expected = expectedImageMergeCounts(held, payload)
+          expect(outcome.next.slice(0, held.length)).toEqual(held)
+          expect(outcome.next.length).toBe(held.length + expected.kept)
+          expect(outcome.kept).toBe(expected.kept)
+          expect(outcome.duplicates).toBe(expected.duplicates)
+          expect(outcome.dropped).toBe(expected.dropped)
         }
       ),
       { numRuns: PROPERTY_RUNS }
     )
   })
 
+  it('producer-shaped image batches match identity-group capacity counts', () => {
+    fc.assert(
+      fc.property(
+        heldImagesArbitrary,
+        fc.array(producerShapedImageArbitrary, { maxLength: 30 }),
+        (existing, incoming) => {
+          const outcome = mergeComposerImageAttachments(existing, incoming)
+          const expected = expectedImageMergeCounts(existing, incoming)
+          expect(outcome.next.slice(0, existing.length)).toEqual(existing)
+          expect(outcome.next.length).toBe(existing.length + expected.kept)
+          expect(outcome.kept).toBe(expected.kept)
+          expect(outcome.duplicates).toBe(expected.duplicates)
+          expect(outcome.dropped).toBe(expected.dropped)
+        }
+      ),
+      { numRuns: PROPERTY_RUNS }
+    )
+  })
+
+  it('counts same-batch copies after the first accepted image as duplicates', () => {
+    const held = Array.from({ length: COMPOSER_MAX_ATTACHMENTS - 6 }, (_, index) =>
+      producerShapedImage(`held-${index}`, [index, 255])
+    )
+    const copies = Array.from({ length: 7 }, (_, index) =>
+      producerShapedImage(`copy-${index}`, [201, 202])
+    )
+    const payload = [...held.slice(0, 3), ...copies]
+    const outcome = mergeComposerImageAttachments(held, payload, () => 900)
+
+    expect(outcome).toMatchObject({ kept: 1, duplicates: 9, dropped: 0 })
+    expect(outcome.next).toHaveLength(held.length + 1)
+    expect(outcome.next.at(-1)).toMatchObject({
+      id: 'copy-0',
+      dataBase64: copies[0]?.dataBase64,
+      addedOrder: 900,
+    })
+  })
+
+  it('drops only distinct image groups beyond remaining capacity', () => {
+    const held = Array.from({ length: COMPOSER_MAX_ATTACHMENTS - 6 }, (_, index) =>
+      producerShapedImage(`held-${index}`, [index, 255])
+    )
+    const distinct = Array.from({ length: 7 }, (_, index) =>
+      producerShapedImage(`new-${index}`, [200, index, 255])
+    )
+    const outcome = mergeComposerImageAttachments(held, distinct)
+
+    expect(outcome).toMatchObject({ kept: 6, duplicates: 0, dropped: 1 })
+    expect(outcome.next).toHaveLength(COMPOSER_MAX_ATTACHMENTS)
+  })
+
+  it('keeps MIME type in image duplicate identity', () => {
+    const bytes = [137, 80, 78, 71]
+    const png = producerShapedImage('png-copy', bytes, 'image/png')
+    const jpeg = producerShapedImage('jpeg-copy', bytes, 'image/jpeg')
+    const outcome = mergeComposerImageAttachments([], [png, jpeg])
+
+    expect(outcome).toMatchObject({ kept: 2, duplicates: 0, dropped: 0 })
+    expect(outcome.next).toHaveLength(2)
+  })
+
   it('image merge idempotence: a second identical restore changes nothing', () => {
     fc.assert(
       fc.property(
         heldImagesArbitrary,
-        fc.array(imageArbitrary, { maxLength: 15 }),
+        fc.array(helperImageArbitrary, { maxLength: 15 }),
         (existing, incoming) => {
           const first = mergeComposerImageAttachments(
             existing,
