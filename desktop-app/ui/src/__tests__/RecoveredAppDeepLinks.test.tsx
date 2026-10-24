@@ -3620,6 +3620,63 @@ describe('App deep-link orchestration', () => {
     expect(ensureTeamContext).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps a real newer workspace tab selected when an older app-link launch fails', async () => {
+    const existingBridge = window.clerum
+    const { clerum } = installAppControllerClerum({
+      me: { teamId: 'team-a', teamName: 'Team A' },
+      teamDirectory: { items: [], currentTeamId: 'team-a' },
+    })
+    Object.assign(clerum, {
+      shortcuts: existingBridge.shortcuts,
+      app: existingBridge.app,
+      gfs: existingBridge.gfs,
+      sandboxUi: existingBridge.sandboxUi,
+    })
+    const actual =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    const realController: { current: AppController | null } = { current: null }
+    vi.mocked(useAppController).mockImplementation(() => {
+      realController.current = actual.useAppController()
+      return realController.current
+    })
+    const queue = new SandboxUiDeepLinkQueue()
+    acknowledgeDeepLink.mockImplementation(async id => queue.acknowledge(id))
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTaskTrackerProvider>
+          <App />
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => expect(realController.current?.isAuthenticated).toBe(true))
+    await waitFor(() => expect(realController.current?.initialExperienceLoading).toBe(false))
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({ recipeNs: 'ns', recipeName: 'app', teamId: 'team-b' })
+    )
+    if (!target) throw new Error('The production app-link parser rejected the fixture URL')
+    const link = queue.enqueue(target)
+    const heldTargetOpen = main.holdNextOpen()
+    act(() => emitDeepLink?.(link))
+    await confirmPendingAppLink()
+    await waitForAppOpen()
+    await waitFor(() => expect(realController.current?.currentTeamId).toBe('team-b'))
+
+    act(() => realController.current?.handleNavSelect(DESKTOP_ROUTES.settings))
+    expect(realController.current?.navItem).toBe(DESKTOP_ROUTES.settings)
+    await act(async () => heldTargetOpen().reject(new Error('native mount failed')))
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+    expect(realController.current?.currentTeamId).toBe('team-b')
+    expect(realController.current?.navItem).toBe(DESKTOP_ROUTES.settings)
+    expect(activeWorkspaceTab(realController.current!.workspaceTabs)?.kind).toBe('settings')
+    expect(main.live()).toBeNull()
+  })
+
   it('retries a transient team-context failure and opens without duplicate mounts', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     let liveTeamId = 'team-a'
