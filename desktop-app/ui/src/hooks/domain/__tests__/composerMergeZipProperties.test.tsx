@@ -88,6 +88,10 @@ type ImageMergeCounts = Pick<
   'kept' | 'duplicates' | 'dropped'
 >
 
+type ImageMergeExpectation = ImageMergeCounts & {
+  keptIncoming: ComposerImageAttachment[]
+}
+
 /**
  * Independent reference model: group incoming identities in first-seen order,
  * then allocate one slot per new group. Copies of held or accepted identities
@@ -96,22 +100,32 @@ type ImageMergeCounts = Pick<
  */
 function expectedImageMergeCounts(
   existing: ComposerImageAttachment[],
-  incoming: ComposerImageAttachment[]
-): ImageMergeCounts {
+  incoming: ComposerImageAttachment[],
+  occupiedByFiles = 0
+): ImageMergeExpectation {
   const heldIdentities = new Set(existing.map(imageIdentityKey))
-  const incomingGroups = new Map<string, number>()
+  const incomingGroups = new Map<string, { first: ComposerImageAttachment; copies: number }>()
   for (const image of incoming) {
     const identity = imageIdentityKey(image)
-    incomingGroups.set(identity, (incomingGroups.get(identity) ?? 0) + 1)
+    const group = incomingGroups.get(identity)
+    if (group) group.copies += 1
+    else incomingGroups.set(identity, { first: image, copies: 1 })
   }
 
-  let availableSlots = Math.max(0, COMPOSER_MAX_ATTACHMENTS - existing.length)
-  const expected: ImageMergeCounts = { kept: 0, duplicates: 0, dropped: 0 }
-  for (const [identity, copies] of incomingGroups) {
+  let availableSlots = Math.max(0, COMPOSER_MAX_ATTACHMENTS - existing.length - occupiedByFiles)
+  const expected: ImageMergeExpectation = {
+    kept: 0,
+    duplicates: 0,
+    dropped: 0,
+    keptIncoming: [],
+  }
+  for (const [identity, group] of incomingGroups) {
+    const { first, copies } = group
     if (heldIdentities.has(identity)) {
       expected.duplicates += copies
     } else if (availableSlots > 0) {
       expected.kept += 1
+      expected.keptIncoming.push(first)
       expected.duplicates += copies - 1
       availableSlots -= 1
     } else {
@@ -119,6 +133,10 @@ function expectedImageMergeCounts(
     }
   }
   return expected
+}
+
+function imageOutputKey(image: ComposerImageAttachment): string {
+  return JSON.stringify([image.id, imageIdentityKey(image)])
 }
 
 const referenceArbitrary = fc
@@ -144,6 +162,21 @@ const heldImagesArbitrary = fc
     selector: imageIdentityKey,
   })
   .map(items => items as ComposerImageAttachment[])
+
+const imageMergeInputsWithFileOccupancyArbitrary = fc
+  .integer({ min: 0, max: COMPOSER_MAX_ATTACHMENTS })
+  .chain(occupiedByFiles =>
+    fc
+      .uniqueArray(producerShapedImageArbitrary, {
+        minLength: 0,
+        maxLength: COMPOSER_MAX_ATTACHMENTS - occupiedByFiles,
+        selector: imageIdentityKey,
+      })
+      .map(existing => ({
+        existing: existing as ComposerImageAttachment[],
+        occupiedByFiles,
+      }))
+  )
 
 const heldReferencesArbitrary = fc
   .uniqueArray(referenceArbitrary, {
@@ -227,7 +260,9 @@ describe('composer merge invariants (R1-M6)', () => {
           ]
           const outcome = mergeComposerImageAttachments(held, payload)
           const expected = expectedImageMergeCounts(held, payload)
-          expect(outcome.next.slice(0, held.length)).toEqual(held)
+          expect(outcome.next.map(imageOutputKey)).toEqual(
+            [...held, ...expected.keptIncoming].map(imageOutputKey)
+          )
           expect(outcome.next.length).toBe(held.length + expected.kept)
           expect(outcome.kept).toBe(expected.kept)
           expect(outcome.duplicates).toBe(expected.duplicates)
@@ -241,12 +276,19 @@ describe('composer merge invariants (R1-M6)', () => {
   it('producer-shaped image batches match identity-group capacity counts', () => {
     fc.assert(
       fc.property(
-        heldImagesArbitrary,
+        imageMergeInputsWithFileOccupancyArbitrary,
         fc.array(producerShapedImageArbitrary, { maxLength: 30 }),
-        (existing, incoming) => {
-          const outcome = mergeComposerImageAttachments(existing, incoming)
-          const expected = expectedImageMergeCounts(existing, incoming)
-          expect(outcome.next.slice(0, existing.length)).toEqual(existing)
+        ({ existing, occupiedByFiles }, incoming) => {
+          const outcome = mergeComposerImageAttachments(
+            existing,
+            incoming,
+            () => 0,
+            occupiedByFiles
+          )
+          const expected = expectedImageMergeCounts(existing, incoming, occupiedByFiles)
+          expect(outcome.next.map(imageOutputKey)).toEqual(
+            [...existing, ...expected.keptIncoming].map(imageOutputKey)
+          )
           expect(outcome.next.length).toBe(existing.length + expected.kept)
           expect(outcome.kept).toBe(expected.kept)
           expect(outcome.duplicates).toBe(expected.duplicates)
@@ -287,6 +329,26 @@ describe('composer merge invariants (R1-M6)', () => {
 
     expect(outcome).toMatchObject({ kept: 6, duplicates: 0, dropped: 1 })
     expect(outcome.next).toHaveLength(COMPOSER_MAX_ATTACHMENTS)
+    expect(outcome.next.map(item => item.id)).toEqual([
+      ...held.map(item => item.id),
+      ...distinct.slice(0, 6).map(item => item.id),
+    ])
+  })
+
+  it('accounts for file attachments in shared image restoration capacity', () => {
+    const occupiedByFiles = 1
+    const held = Array.from(
+      { length: COMPOSER_MAX_ATTACHMENTS - occupiedByFiles - 1 },
+      (_, index) => producerShapedImage(`held-${index}`, [index, 255])
+    )
+    const first = producerShapedImage('first', [201, 202])
+    const duplicate = producerShapedImage('same-content', [201, 202])
+    const overflow = producerShapedImage('overflow', [203, 204])
+    const incoming = [first, duplicate, overflow]
+    const outcome = mergeComposerImageAttachments(held, incoming, () => 900, occupiedByFiles)
+
+    expect(outcome).toMatchObject({ kept: 1, duplicates: 1, dropped: 1 })
+    expect(outcome.next.map(imageOutputKey)).toEqual([...held, first].map(imageOutputKey))
   })
 
   it('keeps MIME type in image duplicate identity', () => {
@@ -313,12 +375,21 @@ describe('composer merge invariants (R1-M6)', () => {
             first.next,
             incoming as ComposerImageAttachment[]
           )
+          const originalSet = mergeComposerImageAttachments(first.next, existing)
           // State stability: nothing new is kept, the composer is unchanged, and
           // the payload still accounts entirely to duplicates + (persistent,
           // cap-driven) drops — never to new losses.
           expect(second.kept).toBe(0)
           expect(second.next).toEqual(first.next)
           expect(second.duplicates + second.dropped).toBe(incoming.length)
+          // Composability: restoring the original held set after any merge is
+          // state-stable and classifies every original item as a duplicate.
+          expect(originalSet.next).toEqual(first.next)
+          expect(originalSet).toMatchObject({
+            kept: 0,
+            duplicates: existing.length,
+            dropped: 0,
+          })
         }
       ),
       { numRuns: PROPERTY_RUNS }
