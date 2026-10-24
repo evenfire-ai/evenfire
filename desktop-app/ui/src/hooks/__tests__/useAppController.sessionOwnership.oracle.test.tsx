@@ -240,7 +240,7 @@ describe('useAppController session ownership oracle', () => {
 
     const removeQueries = app.queryClient.removeQueries.bind(app.queryClient)
     const failedCleanup = vi.spyOn(app.queryClient, 'removeQueries').mockImplementation(filters => {
-      if (JSON.stringify(filters.queryKey) === JSON.stringify(desktopQueryKeys.gfsRoot)) {
+      if (JSON.stringify(filters?.queryKey) === JSON.stringify(desktopQueryKeys.gfsRoot)) {
         throw new Error('diagnostic cache cleanup failure')
       }
       return removeQueries(filters)
