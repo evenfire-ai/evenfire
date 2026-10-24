@@ -1689,12 +1689,34 @@ export function FilesPage({
 
   const handleReplaceCurrentFile = async (file: File | null | undefined) => {
     if (!file || !current) return
+    const target = {
+      resourceId: current.resourceId,
+      name: current.name,
+      version: current.version,
+    }
+    const requestContext = rowActionContextRef.current
     try {
       assertGfsFileUploadSize(file.size)
       const filePath = window.clerum.gfs.getPathForFile(file)
       if (!filePath) throw new Error('Could not resolve the selected local file')
-      await ctrl.replaceFileFromPath(current.resourceId, filePath, current.version)
-      pushToast?.(`Replaced ${current.name}`, 'success')
+      pushToast?.(`Checking write permission for ${target.name}…`, 'info')
+      const allowed = await requireFreshRowPermissions(target.resourceId, target.name, ['write'])
+      const latest = rowActionContextRef.current
+      if (
+        !pageActiveRef.current ||
+        latest.sessionScope !== requestContext.sessionScope ||
+        latest.currentResourceId !== requestContext.currentResourceId ||
+        latest.resourceVersions.get(target.resourceId) !== target.version
+      ) {
+        pushToast?.(
+          `Replace was not started for ${target.name} because the workspace changed.`,
+          'error'
+        )
+        return
+      }
+      if (!allowed) return
+      await ctrl.replaceFileFromPath(target.resourceId, filePath, target.version)
+      pushToast?.(`Replaced ${target.name}`, 'success')
     } catch (replaceError) {
       if (failClosedOnAuthorizationError(replaceError)) return
       pushToast?.(
