@@ -179,6 +179,7 @@ async function openManageDialog(resourceName: string) {
     await act(async () => {
       fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Share' }))
     })
+    await waitFor(() => expect(screen.getByRole('dialog', { name: /^Share/ })).toBeTruthy())
   }
 }
 
@@ -202,6 +203,15 @@ async function chooseResourceAction(resourceName: string, actionName: string) {
       screen.getByRole('menuitem', { name: actionName === 'Move to…' ? 'Move to' : actionName })
     )
   })
+  if (actionName === 'Rename') {
+    await screen.findByRole('form', { name: 'Rename resource' })
+  } else if (actionName === 'Delete') {
+    await screen.findByRole('dialog', { name: new RegExp(`Delete ${resourceName}\\?`) })
+  } else if (actionName === 'Move to…') {
+    await screen.findByRole('dialog', { name: new RegExp(`Move .*${resourceName}`) })
+  } else if (actionName === 'New folder') {
+    await screen.findByRole('form', { name: 'Create folder' })
+  }
 }
 
 describe('FilesPage', () => {
@@ -1938,7 +1948,7 @@ describe('FilesPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
 
-    const renameForm = screen.getByRole('form', { name: 'Rename resource' })
+    const renameForm = await screen.findByRole('form', { name: 'Rename resource' })
     expect(screen.getAllByRole('form', { name: 'Rename resource' })).toHaveLength(1)
     expect(screen.queryByRole('dialog', { name: 'Rename resource' })).toBeNull()
     fireEvent.change(within(renameForm).getByLabelText('New name'), {
@@ -3514,6 +3524,15 @@ describe('FilesPage', () => {
 
   it('closes the move dialog when authority is revoked mid-session', async () => {
     const moveResource = vi.fn(async () => ({}))
+    const affordances = vi.fn(async (resourceId: string, drive: string) => {
+      expect(resourceId).toBe('source-parent')
+      expect(drive).toBe('main')
+      return delegationAffordances(new Set(['write', 'delete']), false)
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances } },
+    })
     const controllerState = {
       ...baseController(),
       current: {
@@ -5391,7 +5410,7 @@ describe('FilesPage', () => {
         name: 'Share',
       })
     )
-    expect(openResource).toHaveBeenCalledWith(nestedFolder)
+    await waitFor(() => expect(openResource).toHaveBeenCalledWith(nestedFolder))
   })
 
   it('keeps row folder menus limited to actions available on that folder', async () => {

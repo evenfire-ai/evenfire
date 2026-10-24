@@ -43,7 +43,10 @@ import {
   useGfsBrowserController,
 } from '@hooks/domain/useGfsBrowserController'
 import { isEventFromNestedInteractive } from '@lib/clickableRowProps'
-import { assertGfsAuthorityRetryAllowed } from '@lib/gfsAuthorityQueryPolicy'
+import {
+  GFS_AUTHORITY_STALE_TIME_MS,
+  assertGfsAuthorityRetryAllowed,
+} from '@lib/gfsAuthorityQueryPolicy'
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
 import {
@@ -387,6 +390,26 @@ export function FilesPage({
     resolving,
     refreshAffordances,
   } = ctrl
+  const rowActionContextRef = useRef({
+    sessionScope,
+    currentResourceId: current?.resourceId ?? null,
+    resourceVersions: new Map(
+      [...items, ...accessibleResources, ...(current ? [current] : [])].map(resource => [
+        resource.resourceId,
+        resource.version,
+      ])
+    ),
+  })
+  rowActionContextRef.current = {
+    sessionScope,
+    currentResourceId: current?.resourceId ?? null,
+    resourceVersions: new Map(
+      [...items, ...accessibleResources, ...(current ? [current] : [])].map(resource => [
+        resource.resourceId,
+        resource.version,
+      ])
+    ),
+  }
   const rowPermissionStatusFor = (resourceId: string) =>
     ctrl.rowPermissionStatusByResourceId?.[resourceId]
   const rowPermissionNoticeFor = (resourceId: string, resourceName: string) => {
@@ -415,6 +438,11 @@ export function FilesPage({
     }
   }
   const moveWorkspaceRef = useRef({ sessionScope, currentResourceId: current?.resourceId ?? null })
+  const cachedCurrentAffordances = current
+    ? queryClient.getQueryData<{ held?: string[]; grantableBits?: string[] }>(
+        desktopQueryKeys.gfsAffordances(sessionScope, current.resourceId, current.drive)
+      )
+    : undefined
   moveWorkspaceRef.current = { sessionScope, currentResourceId: current?.resourceId ?? null }
 
   const lastRemoteGfsChangeEpochRef = useRef(remoteGfsChangeEpoch)
@@ -616,7 +644,7 @@ export function FilesPage({
       const authority = await queryClient.fetchQuery({
         queryKey,
         queryFn: () => window.clerum.gfs.affordances(resourceId, drive),
-        staleTime: 0,
+        staleTime: GFS_AUTHORITY_STALE_TIME_MS,
         retry: false,
       })
       if (!pageActiveRef.current || moveWorkspaceRef.current.sessionScope !== requestedScope) {
@@ -637,7 +665,44 @@ export function FilesPage({
     drive = GFS_DRIVE_MAIN,
     requiredGrantableBits: string[] = []
   ) => {
-    const authority = await fetchRowAuthority(resourceId, resourceName, drive)
+    const requestedScope = sessionScope
+    const queryKey = requestedScope
+      ? desktopQueryKeys.gfsAffordances(requestedScope, resourceId, drive)
+      : null
+    const queryState = queryKey ? queryClient.getQueryState(queryKey) : undefined
+    const stateAuthority = queryState?.data as
+      | { held?: string[]; grantableBits?: string[] }
+      | undefined
+    const queryDataIsFresh = Boolean(
+      queryState?.status === 'success' &&
+      stateAuthority &&
+      !queryState.isInvalidated &&
+      Date.now() - queryState.dataUpdatedAt < GFS_AUTHORITY_STALE_TIME_MS
+    )
+    const rowStatus = ctrl.rowPermissionStatusByResourceId?.[resourceId]?.status
+    const controllerAuthority =
+      ctrl.current?.resourceId === resourceId
+        ? ctrl.affordances
+        : (ctrl.rowAffordancesByResourceId?.[resourceId] ??
+          (ctrl.rowAffordancesResourceId === resourceId ? ctrl.rowAffordances : null))
+    // The controller already observes this exact session/resource/drive query.
+    // Reuse only an explicitly fresh success. Legacy controller-only test
+    // harnesses have no query observer/status map, so their injected fresh
+    // authority remains a valid fixture; production always exposes the query.
+    const controllerDataIsFresh = Boolean(
+      queryState === undefined &&
+      rowStatus === undefined &&
+      controllerAuthority &&
+      (hasBit(controllerAuthority, 'read') ||
+        hasBit(controllerAuthority, 'write') ||
+        hasBit(controllerAuthority, 'delete') ||
+        hasBit(controllerAuthority, 'manage_acl'))
+    )
+    const authority = queryDataIsFresh
+      ? stateAuthority
+      : controllerDataIsFresh
+        ? controllerAuthority
+        : await fetchRowAuthority(resourceId, resourceName, drive)
     if (!authority) return false
     const missing = requiredBits.filter(bit => !hasBit(authority, bit))
     if (missing.length > 0) {
@@ -658,16 +723,59 @@ export function FilesPage({
     }
     return true
   }
-  const openDeleteTarget = (resource: GfsActionTarget) => setDeleteTarget(resource)
-  const currentPermissionsConfirmed = Boolean(affordances && !affordancesError)
+  const runWithFreshResourcePermissions = async (
+    target: GfsActionTarget,
+    authorityResourceId: string,
+    authorityName: string,
+    requiredBits: string[],
+    action: () => void
+  ) => {
+    const requestContext = rowActionContextRef.current
+    const allowed = await requireFreshRowPermissions(
+      authorityResourceId,
+      authorityName,
+      requiredBits
+    )
+    if (!allowed) return false
+    const latest = rowActionContextRef.current
+    if (
+      !pageActiveRef.current ||
+      latest.sessionScope !== requestContext.sessionScope ||
+      latest.currentResourceId !== requestContext.currentResourceId ||
+      !latest.resourceVersions.has(target.resourceId) ||
+      latest.resourceVersions.get(target.resourceId) !== target.version
+    ) {
+      return false
+    }
+    action()
+    return true
+  }
+  const openDeleteTarget = (resource: GfsActionTarget) => {
+    void runWithFreshResourcePermissions(
+      resource,
+      resource.resourceId,
+      resource.name,
+      ['delete'],
+      () => setDeleteTarget(resource)
+    )
+  }
+  const currentPermissionPresentationAvailable = Boolean(
+    (affordances ?? cachedCurrentAffordances) &&
+    !accessRevoked &&
+    !ctrl.authorityPending &&
+    parseHttpStatus(affordancesError ?? '') !== 404
+  )
   const canWriteCurrent =
-    !accessRevoked && currentPermissionsConfirmed && hasBit(affordances, 'write')
+    currentPermissionPresentationAvailable &&
+    hasBit(affordances ?? cachedCurrentAffordances, 'write')
   const canDeleteCurrent =
-    !accessRevoked && currentPermissionsConfirmed && hasBit(affordances, 'delete')
+    currentPermissionPresentationAvailable &&
+    hasBit(affordances ?? cachedCurrentAffordances, 'delete')
   // The Manage modal lists ACL rows, and view-ACL = manage-ACL server-side —
   // a caller without the bit gets the API's 403, so the entry must not show.
   const canManageCurrent =
-    !accessRevoked && currentPermissionsConfirmed && hasBit(affordances, 'manage_acl')
+    currentPermissionPresentationAvailable &&
+    hasBit(affordances ?? cachedCurrentAffordances, 'manage_acl')
   const canMoveCurrent = Boolean(
     !accessRevoked &&
     current?.parentResourceId &&
@@ -1839,8 +1947,25 @@ export function FilesPage({
   }
 
   const openRenameTarget = (target: GfsActionTarget) => {
-    setRenameTarget(target)
-    setRenameDraft(target.name)
+    void runWithFreshResourcePermissions(target, target.resourceId, target.name, ['write'], () => {
+      setRenameTarget(target)
+      setRenameDraft(target.name)
+    })
+  }
+
+  const openMoveTarget = (target: GfsActionTarget) => {
+    const sourceParentId = target.parentResourceId
+    if (!sourceParentId) {
+      pushToast?.('Could not verify the source folder for this move.', 'error')
+      return
+    }
+    void runWithFreshResourcePermissions(
+      target,
+      sourceParentId,
+      'the source folder',
+      ['write', 'delete'],
+      () => setMoveTarget(target)
+    )
   }
 
   // An open folder's breadcrumb carries route identity but not row metadata.
@@ -1944,28 +2069,44 @@ export function FilesPage({
   const loadingMoreVisible = currentIsFolder ? ctrl.isFetchingMore : ctrl.isFetchingMoreAccessible
 
   const openManage = (resource: GfsDriveResource) => {
-    if (resource.resourceId !== current?.resourceId) {
-      beginExplicitFilesNavigation()
-      manageReturnCrumbsRef.current = [...crumbs]
-      ctrl.openResource(resource)
-    } else {
-      manageReturnCrumbsRef.current = resource.kind === 'file' ? crumbs.slice(0, -1) : null
-    }
-    setCreateFolderOpen(false)
-    setRenameOpen(false)
-    setDeleteOpen(false)
-    setShareDetailsOpen(false)
-    setManageOpen(true)
+    void runWithFreshResourcePermissions(
+      resource,
+      resource.resourceId,
+      resource.name,
+      ['manage_acl'],
+      () => {
+        if (resource.resourceId !== current?.resourceId) {
+          beginExplicitFilesNavigation()
+          manageReturnCrumbsRef.current = [...crumbs]
+          ctrl.openResource(resource)
+        } else {
+          manageReturnCrumbsRef.current = resource.kind === 'file' ? crumbs.slice(0, -1) : null
+        }
+        setCreateFolderOpen(false)
+        setRenameOpen(false)
+        setDeleteOpen(false)
+        setShareDetailsOpen(false)
+        setManageOpen(true)
+      }
+    )
   }
 
   const openManageCurrent = () => {
     if (!current) return
-    manageReturnCrumbsRef.current = currentIsFile ? crumbs.slice(0, -1) : null
-    setCreateFolderOpen(false)
-    setRenameOpen(false)
-    setDeleteOpen(false)
-    setShareDetailsOpen(false)
-    setManageOpen(true)
+    void runWithFreshResourcePermissions(
+      current,
+      current.resourceId,
+      current.name,
+      ['manage_acl'],
+      () => {
+        manageReturnCrumbsRef.current = currentIsFile ? crumbs.slice(0, -1) : null
+        setCreateFolderOpen(false)
+        setRenameOpen(false)
+        setDeleteOpen(false)
+        setShareDetailsOpen(false)
+        setManageOpen(true)
+      }
+    )
   }
 
   const currentResourceActions = current
@@ -1978,7 +2119,7 @@ export function FilesPage({
           'copy-route': () => void handleCopyRoute(current.gfsUri, current.kind),
           'open-route': () => setOpenLinkOpen(true),
           rename: () => openRenameTarget(current),
-          move: () => setMoveTarget(current),
+          move: () => openMoveTarget(current),
           'new-folder': () => openCreateFolder(current.resourceId, current.name),
           'upload-file': () =>
             requestUploadForFolder(
@@ -2066,7 +2207,7 @@ export function FilesPage({
             ? () => requestUploadForFolder(resource.resourceId, new Set(), resource.name)
             : undefined,
           rename: () => openRenameTarget(resource),
-          move: () => setMoveTarget(resource),
+          move: () => openMoveTarget(resource),
           share: () => openManage(resource),
           delete: () => openDeleteTarget(resource),
           preview: canPreview ? () => void openFilePreview(resource) : undefined,

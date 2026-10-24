@@ -440,7 +440,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     client.clear()
   })
 
-  it('withholds child-row mutation actions while row permissions are stale, pending, or rate limited', async () => {
+  it('keeps cached child-row actions visible but requires fresh authority before mutation', async () => {
     const folder = await resolveResource(
       resolvedDirectory('folder-active', 'Reports', { gfsUri: SEED_URI })
     )
@@ -521,21 +521,20 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
         name: 'Delete',
       })
     )
-    const deleteDialog = screen.getByRole('dialog', { name: 'Delete report.txt?' })
+    const deleteDialog = await screen.findByRole('dialog', { name: 'Delete report.txt?' })
 
     await act(async () => {
       await client.invalidateQueries({ exact: true, queryKey: reportKey, refetchType: 'none' })
       await client.invalidateQueries({ exact: true, queryKey: folderKey, refetchType: 'none' })
     })
-    await waitFor(() => {
-      expect(screen.getByText('Checking permissions for report.txt…')).toBeTruthy()
-      expect(screen.getByText('Checking permissions for Child folder…')).toBeTruthy()
-    })
-    expect(screen.queryByRole('button', { name: 'Share report.txt' })).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Rename report.txt' })).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Share Child folder' })).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Rename Child folder' })).toBeNull()
-    expectFolderRowMutationMenu('Child folder', false)
+    expect(client.getQueryState(reportKey)?.isInvalidated).toBe(true)
+    expect(reportCalls).toBe(1)
+    expect(childFolderCalls).toBe(1)
+    expect(screen.getByRole('button', { name: 'Share report.txt' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Share Child folder' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Rename Child folder' })).toBeTruthy()
+    expectFolderRowMutationMenu('Child folder', true)
     await act(async () => {
       fireEvent.click(within(deleteDialog).getByRole('button', { name: 'Delete' }))
     })
@@ -551,7 +550,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       expect(screen.getByText('Checking permissions for report.txt…')).toBeTruthy()
       expect(screen.getByText('Checking permissions for Child folder…')).toBeTruthy()
     })
-    expectFolderRowMutationMenu('Child folder', false)
+    expectFolderRowMutationMenu('Child folder', true)
 
     await act(async () => {
       rejectReportRefresh(new Error('429 Too Many Requests'))
@@ -566,9 +565,9 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
         screen.getByText(/Could not verify permissions for Child folder.*Too many file requests/i)
       ).toBeTruthy()
     })
-    expect(screen.queryByRole('button', { name: 'Share report.txt' })).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Rename report.txt' })).toBeNull()
-    expectFolderRowMutationMenu('Child folder', false)
+    expect(screen.getByRole('button', { name: 'Share report.txt' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
+    expectFolderRowMutationMenu('Child folder', true)
     for (const queryKey of [reportKey, folderKey]) {
       await act(async () => {
         void client.invalidateQueries({ exact: true, queryKey, refetchType: 'active' })
@@ -587,7 +586,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     client.clear()
   })
 
-  it('withholds shared-row mutation actions during stale, pending, failed, and recovering list checks', async () => {
+  it('preserves cached shared-row actions during accessible-list refresh and failure', async () => {
     const sharedFile = accessibleResource('shared-file', 'shared.txt', 'file', {
       permissions: ['read', 'write', 'delete', 'manage_acl', 'share'],
     })
@@ -652,15 +651,13 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
         refetchType: 'none',
       })
     })
-    await waitFor(() => {
-      expect(screen.getByText('Checking permissions for shared.txt…')).toBeTruthy()
-      expect(screen.getByText('Checking permissions for Shared folder…')).toBeTruthy()
-    })
-    expect(screen.queryByRole('button', { name: 'Share shared.txt' })).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Rename shared.txt' })).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Share Shared folder' })).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Rename Shared folder' })).toBeNull()
-    expectFolderRowMutationMenu('Shared folder', false)
+    expect(client.getQueryState(accessibleKey)?.isInvalidated).toBe(true)
+    expect(listCalls).toBe(1)
+    expect(screen.getByRole('button', { name: 'Share shared.txt' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Rename shared.txt' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Share Shared folder' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Rename Shared folder' })).toBeTruthy()
+    expectFolderRowMutationMenu('Shared folder', true)
 
     await act(async () => {
       void client.invalidateQueries({
@@ -674,22 +671,15 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       expect(screen.getByText('Checking permissions for shared.txt…')).toBeTruthy()
       expect(screen.getByText('Checking permissions for Shared folder…')).toBeTruthy()
     })
-    expectFolderRowMutationMenu('Shared folder', false)
+    expectFolderRowMutationMenu('Shared folder', true)
     await act(async () => {
       rejectRefresh(new Error('429 Too Many Requests'))
       await Promise.resolve()
     })
-    await waitFor(() => {
-      expect(
-        screen.getByText(/Could not verify permissions for shared\.txt.*Too many file requests/i)
-      ).toBeTruthy()
-      expect(
-        screen.getByText(/Could not verify permissions for Shared folder.*Too many file requests/i)
-      ).toBeTruthy()
-    })
-    expect(screen.queryByRole('button', { name: 'Share shared.txt' })).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Rename shared.txt' })).toBeNull()
-    expectFolderRowMutationMenu('Shared folder', false)
+    await waitFor(() => expect(listCalls).toBe(2))
+    expect(screen.getByRole('button', { name: 'Share shared.txt' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Rename shared.txt' })).toBeTruthy()
+    expectFolderRowMutationMenu('Shared folder', true)
 
     await act(async () => {
       void client.invalidateQueries({
@@ -711,7 +701,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     client.clear()
   })
 
-  it('hides current-folder mutations while real permission refresh is pending or rate limited', async () => {
+  it('keeps current-folder action presentation during refresh and rate limits mutation', async () => {
     const folder = await resolveResource(
       resolvedDirectory('folder-active', 'Reports', { gfsUri: SEED_URI })
     )
@@ -771,15 +761,15 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       fireEvent.click(screen.getByRole('button', { name: 'Options for Reports' }))
     })
     const folderActions = within(screen.getByRole('menu', { name: 'Actions for Reports' }))
-    expect(screen.queryByRole('menuitem', { name: 'Rename' })).toBeNull()
-    expect(screen.queryByRole('menuitem', { name: 'New folder' })).toBeNull()
-    expect(screen.queryByRole('menuitem', { name: 'Upload file' })).toBeNull()
-    expect(screen.queryByRole('menuitem', { name: 'Delete' })).toBeNull()
+    expect(screen.getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
+    expect(screen.getByRole('menuitem', { name: 'New folder' })).toBeTruthy()
+    expect(screen.getByRole('menuitem', { name: 'Upload file' })).toBeTruthy()
+    expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeTruthy()
     fireEvent.click(folderActions.getByRole('menuitem', { name: 'Share' }))
     const folderShareOptions = within(
       screen.getByRole('menu', { name: 'Share options for Reports' })
     )
-    expect(folderShareOptions.queryByRole('menuitem', { name: 'Share' })).toBeNull()
+    expect(folderShareOptions.getByRole('menuitem', { name: 'Share' })).toBeTruthy()
     expect(screen.getByText('Checking permissions for Reports…')).toBeTruthy()
 
     await act(async () => {
@@ -789,11 +779,11 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     expect(
       await screen.findByText(/Could not verify permissions for Reports.*Too many file requests/i)
     ).toBeTruthy()
-    expect(screen.queryByRole('menuitem', { name: 'Rename' })).toBeNull()
-    expect(screen.queryByRole('menuitem', { name: 'New folder' })).toBeNull()
-    expect(screen.queryByRole('menuitem', { name: 'Upload file' })).toBeNull()
-    expect(screen.queryByRole('menuitem', { name: 'Delete' })).toBeNull()
-    expect(folderShareOptions.queryByRole('menuitem', { name: 'Share' })).toBeNull()
+    expect(folderActions.getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
+    expect(folderActions.getByRole('menuitem', { name: 'New folder' })).toBeTruthy()
+    expect(folderActions.getByRole('menuitem', { name: 'Upload file' })).toBeTruthy()
+    expect(folderActions.getByRole('menuitem', { name: 'Delete' })).toBeTruthy()
+    expect(folderShareOptions.getByRole('menuitem', { name: 'Share' })).toBeTruthy()
     client.clear()
   })
 
@@ -815,6 +805,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       })
     )
     let permissionCalls = 0
+    const renameResource = vi.fn(async () => undefined)
     let rejectRefresh!: (error: Error) => void
     const pendingRefresh = new Promise<ReturnType<typeof delegationAffordances>>((_, reject) => {
       rejectRefresh = reject
@@ -838,6 +829,7 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
           ),
           listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
           affordances,
+          renameResource,
           listGrants: vi.fn(async () => []),
           listShares: vi.fn(async () => []),
         },
@@ -870,14 +862,23 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
       fireEvent.click(screen.getByRole('button', { name: 'Options for notes.bin' }))
     })
     const fileActions = within(screen.getByRole('menu', { name: 'Actions for notes.bin' }))
-    expect(screen.queryByRole('menuitem', { name: 'Replace file' })).toBeNull()
-    expect(screen.queryByRole('menuitem', { name: 'Rename' })).toBeNull()
-    expect(screen.queryByRole('menuitem', { name: 'Delete' })).toBeNull()
-    fireEvent.click(fileActions.getByRole('menuitem', { name: 'Share' }))
+    expect(fileActions.getByRole('menuitem', { name: 'Replace file' })).toBeTruthy()
+    expect(fileActions.getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
+    expect(fileActions.getByRole('menuitem', { name: 'Delete' })).toBeTruthy()
+    fireEvent.click(fileActions.getByRole('menuitem', { name: 'Rename' }))
+    expect(screen.queryByRole('form', { name: 'Rename resource' })).toBeNull()
+    if (!screen.queryByRole('menu', { name: 'Actions for notes.bin' })) {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for notes.bin' }))
+    }
+    fireEvent.click(
+      within(screen.getByRole('menu', { name: 'Actions for notes.bin' })).getByRole('menuitem', {
+        name: 'Share',
+      })
+    )
     const fileShareOptions = within(
       screen.getByRole('menu', { name: 'Share options for notes.bin' })
     )
-    expect(fileShareOptions.queryByRole('menuitem', { name: 'Share' })).toBeNull()
+    expect(fileShareOptions.getByRole('menuitem', { name: 'Share' })).toBeTruthy()
     expect(screen.getByText('Checking permissions for notes.bin…')).toBeTruthy()
 
     await act(async () => {
@@ -887,10 +888,8 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     expect(await screen.findByText(/Could not verify sharing permissions/i)).toBeTruthy()
     expect(screen.getByRole('combobox', { name: 'Add people, teams, or agents' })).toBe(manageInput)
     expect(await screen.findByText(/Could not verify permissions for notes.bin/i)).toBeTruthy()
-    expect(screen.queryByRole('menuitem', { name: 'Replace file' })).toBeNull()
-    expect(screen.queryByRole('menuitem', { name: 'Rename' })).toBeNull()
-    expect(screen.queryByRole('menuitem', { name: 'Delete' })).toBeNull()
-    expect(fileShareOptions.queryByRole('menuitem', { name: 'Share' })).toBeNull()
+    expect(renameResource).not.toHaveBeenCalled()
+    expect(screen.queryByRole('form', { name: 'Rename resource' })).toBeNull()
     client.clear()
   })
 
