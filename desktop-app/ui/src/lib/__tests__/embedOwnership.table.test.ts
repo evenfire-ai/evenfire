@@ -597,15 +597,9 @@ describe('decision table rows', () => {
     const s = stateOf([...mountedSeq, ev.relaunch(LB)])
     const out = reduceEmbedOwnership(s, ev.closeFailed(A))
     expect(phaseOf(out.state, A)).toBe('closeFailed')
-    expect(out.state.views.has(B)).toBe(false)
-    expect(out.state.owner).toBe(A)
-    expect(out.state.failure).toEqual({
-      tabId: T1,
-      launchId: B,
-      kind: 'open',
-      message: 'The current app could not be closed safely. Try launching again.',
-    })
-    expect(out.effects).toEqual([{ type: 'launchSettled', launchId: B, outcome: 'failed' }])
+    expect(phaseOf(out.state, B)).toBe('waiting')
+    expect(out.state.owner).toBe(B)
+    expect(out.effects).toEqual([])
   })
 
   it('T1: a title from the owner updates its tab', () => {

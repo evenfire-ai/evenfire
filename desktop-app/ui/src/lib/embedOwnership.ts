@@ -267,21 +267,27 @@ function applyRow(state: EmbedOwnershipState, event: EmbedEvent): RowResult {
           view.launchId !== record.launchId &&
           view.phase === 'waiting'
       )
+      const waitingSuccessorOwnsTab = failedSuccessors.some(
+        successor => successor.launchId === state.owner
+      )
       let next: EmbedOwnershipState = {
         ...withView(state, { ...record, phase: 'closeFailed' }),
         handoffs: state.handoffs.filter(handoff => !failedRequestIds.has(handoff.requestId)),
       }
-      for (const successor of failedSuccessors) next = withoutView(next, successor.launchId)
+      // Keep the current replacement pending behind the possibly-live native
+      // view. A later terminal release can advance it; a newer explicit launch
+      // still supersedes it and retries closing the retained view first.
+      for (const successor of failedSuccessors) {
+        if (successor.launchId !== state.owner) next = withoutView(next, successor.launchId)
+      }
       const ownsFailedHandoff = failedHandoffs.some(
         handoff => handoff.ownerLaunchId === record.launchId
       )
-      const ownerWasFailedSuccessor = failedSuccessors.some(
-        successor => successor.launchId === state.owner
-      )
       if (
         state.activeAppTabId === record.tabId &&
-        (ownsFailedHandoff || ownerWasFailedSuccessor) &&
-        (state.owner === null || ownerWasFailedSuccessor)
+        ownsFailedHandoff &&
+        state.owner === null &&
+        !waitingSuccessorOwnsTab
       ) {
         next = { ...next, owner: record.launchId }
       }
@@ -292,11 +298,6 @@ function applyRow(state: EmbedOwnershipState, event: EmbedEvent): RowResult {
           ...failedHandoffs.map(handoff => ({
             type: 'handoffFailed' as const,
             requestId: handoff.requestId,
-          })),
-          ...failedSuccessors.map(successor => ({
-            type: 'launchSettled' as const,
-            launchId: successor.launchId,
-            outcome: 'failed' as const,
           })),
         ],
         ...(failedLaunch
