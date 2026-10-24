@@ -155,13 +155,19 @@ const confirmDialogHarness = vi.hoisted(() => ({
 const appHeaderHarness = vi.hoisted(() => ({
   props: null as null | {
     placement?: 'default' | 'titlebar'
+    chatDrawerOpen?: boolean
     searchFocusRequestId?: number
     notificationOpenRequestId?: number
     onShellOverlayOpenChange?: (open: boolean) => void
+    onToggleChatDrawer?: () => void
   },
 }))
 
 const chatLocalSearchHarness = vi.hoisted(() => ({ rendered: vi.fn() }))
+const composerPanelHarness = vi.hoisted(() => ({
+  useRealComposerPanel: false,
+  controller: null as Record<string, unknown> | null,
+}))
 const filesPageHarness = vi.hoisted(() => ({
   pendingGfsUri: null as string | null,
   activeTabId: null as string | null,
@@ -207,6 +213,7 @@ const sidebarHarness = vi.hoisted(() => ({
     onCollapsedChange?: (next: boolean) => void
     availableSandboxUiApps?: SidebarLaunchApp[]
     onOpenSandboxUiApp?: (app: SidebarLaunchApp) => void
+    onNewChat?: () => void
     onSelect?: (item: NavItem) => void
   },
 }))
@@ -228,6 +235,36 @@ vi.mock('@hooks/useAppController', () => ({
 vi.mock('@hooks/useAgentChatActionsValue', () => ({
   useAgentChatActionsValue: () => ({}),
 }))
+
+const composerHookHarness = vi.hoisted(() => ({
+  refreshConnectors: vi.fn().mockResolvedValue(undefined),
+  refreshSharedFiles: vi.fn().mockResolvedValue(undefined),
+}))
+vi.mock('@hooks/domain/useMcpServersDataController', () => ({
+  useMcpServersDataController: () => ({
+    selectedAgentMcpServers: [],
+    agentContextByName: {},
+    refresh: composerHookHarness.refreshConnectors,
+    refreshWithCatalog: vi.fn().mockResolvedValue(undefined),
+    reset: vi.fn(),
+  }),
+}))
+vi.mock('@hooks/domain/useContextsDataController', () => ({
+  useContextsDataController: () => ({
+    sharedFilesByContext: {},
+    refreshSharedFiles: composerHookHarness.refreshSharedFiles,
+    refreshWithCatalog: vi.fn().mockResolvedValue(undefined),
+    reset: vi.fn(),
+  }),
+}))
+vi.mock('@hooks/useHostModels', () => ({
+  useHostModels: () => ({
+    data: null,
+    imageBlockMessage: null,
+    visualSendBlocked: false,
+  }),
+}))
+vi.mock('../components/agents/ModelSelector', () => ({ ModelSelector: () => null }))
 
 vi.mock('@components/AppHeader', () => ({
   AppHeader: (props: NonNullable<typeof appHeaderHarness.props>) => {
@@ -256,15 +293,28 @@ vi.mock('@components/Common', () => ({
     <button
       aria-controls={props['aria-controls'] as string | undefined}
       aria-label={props['aria-label'] as string | undefined}
+      aria-busy={props['aria-busy'] as boolean | undefined}
       aria-pressed={props['aria-pressed'] as boolean | undefined}
       className={props.className as string | undefined}
+      disabled={props.disabled as boolean | undefined}
       onClick={props.onClick as (() => void) | undefined}
+      title={props.title as string | undefined}
       type="button"
     >
       {props.children as ReactNode}
     </button>
   ),
   IconButton: () => null,
+  MenuItem: (props: Record<string, unknown>) => (
+    <button
+      aria-label={props['aria-label'] as string | undefined}
+      disabled={props.disabled as boolean | undefined}
+      onClick={props.onClick as (() => void) | undefined}
+      type="button"
+    >
+      {props.children as ReactNode}
+    </button>
+  ),
   ToastStack: () => null,
 }))
 vi.mock('@components/ConfirmDialog', () => ({
@@ -304,27 +354,52 @@ vi.mock('@pages/ChatPage', async () => {
   const { useChatComposerStateContext } = await import('@contexts/ChatComposerStateContext')
   const { useNavigationContext } = await import('@contexts/NavigationContext')
   const { useComposerDraft } = await import('@hooks/useComposerDraft')
+  const { ComposerPanel } = await import('@components/agents/ComposerPanel')
+  const { AgentChatActionsProvider } = await import('@contexts/AgentChatActionsContext')
+  const { useAgentChatActionsValue } = await vi.importActual<
+    typeof import('@hooks/useAgentChatActionsValue')
+  >('@hooks/useAgentChatActionsValue')
+
+  function StubChatPage() {
+    const { composerFocusRequestId, workspaceChatTabId } = useChatComposerStateContext()
+    const { selectedAgent } = useNavigationContext()
+    const [draft, setDraft] = useComposerDraft(null, selectedAgent ?? undefined, workspaceChatTabId)
+    const composerRef = useRef<HTMLTextAreaElement | null>(null)
+    useEffect(() => {
+      if (composerFocusRequestId > 0) composerRef.current?.focus()
+    }, [composerFocusRequestId])
+    return (
+      <textarea
+        data-testid="chat-page-surface"
+        data-workspace-chat-tab-id={workspaceChatTabId ?? ''}
+        data-composer-focus-request-id={composerFocusRequestId}
+        data-composer-draft={draft}
+        ref={composerRef}
+        onChange={event => setDraft(event.currentTarget.value)}
+        value={draft}
+      />
+    )
+  }
+
+  function ActualComposerPage() {
+    const { workspaceChatTabId } = useChatComposerStateContext()
+    const controller = composerPanelHarness.controller
+    const actions = useAgentChatActionsValue(controller as never)
+    if (!controller) {
+      throw new Error('The actual App controller is required for ComposerPanel integration tests')
+    }
+    return (
+      <div data-testid="chat-page-surface" data-workspace-chat-tab-id={workspaceChatTabId ?? ''}>
+        <AgentChatActionsProvider value={actions}>
+          <ComposerPanel inline />
+        </AgentChatActionsProvider>
+      </div>
+    )
+  }
+
   return {
-    ChatPage: () => {
-      const { composerFocusRequestId, workspaceChatTabId } = useChatComposerStateContext()
-      const { selectedAgent } = useNavigationContext()
-      const [draft, setDraft] = useComposerDraft(null, selectedAgent ?? undefined)
-      const composerRef = useRef<HTMLTextAreaElement | null>(null)
-      useEffect(() => {
-        if (composerFocusRequestId > 0) composerRef.current?.focus()
-      }, [composerFocusRequestId])
-      return (
-        <textarea
-          data-testid="chat-page-surface"
-          data-workspace-chat-tab-id={workspaceChatTabId ?? ''}
-          data-composer-focus-request-id={composerFocusRequestId}
-          data-composer-draft={draft}
-          ref={composerRef}
-          onChange={event => setDraft(event.currentTarget.value)}
-          value={draft}
-        />
-      )
-    },
+    ChatPage: () =>
+      composerPanelHarness.useRealComposerPanel ? <ActualComposerPage /> : <StubChatPage />,
   }
 })
 vi.mock('@pages/FilesPage', () => ({
@@ -843,6 +918,10 @@ describe('App deep-link orchestration', () => {
     vi.clearAllMocks()
     testNavigationIntentSequence = 0
     testUserNavigationGeneration = 0
+    composerPanelHarness.useRealComposerPanel = false
+    composerPanelHarness.controller = null
+    composerHookHarness.refreshConnectors.mockClear()
+    composerHookHarness.refreshSharedFiles.mockClear()
     resetComposerDraftStore()
     confirmDialogHarness.props = null
     confirmDialogHarness.mountedCount = 0
@@ -2759,11 +2838,15 @@ describe('App deep-link orchestration', () => {
 
   it('restores a team-A-only selection after a produced unavailable app link rolls back', async () => {
     const existingBridge = window.clerum
-    const { clerum } = installAppControllerClerum({
+    let activeTeamId = 'team-a'
+    const { clerum, handle } = installAppControllerClerum({
       me: { teamId: 'team-a', teamName: 'Team A' },
       teamDirectory: { items: [], currentTeamId: 'team-a' },
     })
-    let activeTeamId = 'team-a'
+    handle.teamDirectory.mockImplementation(async () => ({
+      items: [],
+      currentTeamId: activeTeamId,
+    }))
     const catalogFor = (teamId: string, agentName: string): AccessCatalog => ({
       userId: HARNESS_ME.id,
       teamId,
@@ -2778,35 +2861,28 @@ describe('App deep-link orchestration', () => {
       agentProviderByName: { [agentName]: null },
       agentDisplayByName: { [agentName]: agentName },
     })
-    const switchTeam = vi.fn(async (teamId: string) => {
+    const switchTeamProducer = handle.switchTeam.getMockImplementation()
+    if (!switchTeamProducer) throw new Error('The team-switch producer was not installed')
+    handle.switchTeam.mockImplementation(async (teamId: string) => {
       activeTeamId = teamId
-      return {
-        authenticated: true,
-        me: { ...HARNESS_ME, teamId, teamName: teamId === 'team-a' ? 'Team A' : 'Team B' },
-      }
+      return switchTeamProducer(teamId)
     })
+    const switchTeam = handle.switchTeam
     const refreshCatalog = vi.fn(async () =>
       activeTeamId === 'team-a'
         ? catalogFor('team-a', 'team-a-only-agent')
         : catalogFor('team-b', 'team-b-only-agent')
     )
-    Object.assign(window.clerum.team, { switch: switchTeam })
     Object.assign(window.clerum.access, { refreshCatalog })
 
     let resolveApps!: (value: { apps: [] }) => void
     let targetAppsLoading = false
-    let targetAppsCalls = 0
     const pendingAppsResult = () =>
       new Promise<{ apps: [] }>(resolve => {
         resolveApps = resolve
       })
     let targetAppsResult = pendingAppsResult()
-    listApps.mockImplementation(async () => {
-      if (activeTeamId !== 'team-b') return { apps: [] }
-      targetAppsCalls += 1
-      targetAppsLoading = targetAppsCalls >= 2
-      return targetAppsResult
-    })
+    listApps.mockResolvedValue({ apps: [] })
     const queue = new SandboxUiDeepLinkQueue()
     acknowledgeDeepLink.mockImplementation(async (id: number) => queue.acknowledge(id))
     const appBridge = existingBridge
@@ -2862,6 +2938,13 @@ describe('App deep-link orchestration', () => {
     expect(realController.current?.selectedAgent).toBe('team-a-only-agent')
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
+    listApps.mockClear()
+    targetAppsLoading = false
+    listApps.mockImplementation(async () => {
+      targetAppsLoading = true
+      return targetAppsResult
+    })
+
     const target = parseSandboxUiDeepLink(
       buildSandboxUiDeepLink({ recipeNs: 'ns', recipeName: 'missing', teamId: 'team-b' })
     )
@@ -2870,6 +2953,7 @@ describe('App deep-link orchestration', () => {
     act(() => emitDeepLink?.(producedLink))
     await confirmPendingAppLink()
     originWorkspace = realController.current?.workspaceTabs
+    await waitFor(() => expect(switchTeam).toHaveBeenCalledWith('team-b'))
     await waitFor(() => expect(targetAppsLoading).toBe(true))
     await waitFor(() => expect(realController.current?.currentTeamId).toBe('team-b'))
     await waitFor(() =>
@@ -2889,8 +2973,10 @@ describe('App deep-link orchestration', () => {
     expect(restoredWorkspaceTabs).toEqual([originWorkspace])
     expect(switchTeam).toHaveBeenNthCalledWith(1, 'team-b')
     expect(switchTeam).toHaveBeenNthCalledWith(2, 'team-a')
+    // Reaching this assertion proves the real controller completed a successful
+    // rollback before checking the next handoff count.
+    expect(switchTeam).toHaveBeenCalledTimes(2)
 
-    targetAppsCalls = 0
     targetAppsLoading = false
     targetAppsResult = pendingAppsResult()
     const explicitTarget = parseSandboxUiDeepLink(
@@ -2911,6 +2997,8 @@ describe('App deep-link orchestration', () => {
         queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)?.teamAgentNames
       ).toEqual(['team-b-only-agent'])
     )
+    expect(switchTeam).toHaveBeenCalledTimes(3)
+    expect(switchTeam).toHaveBeenNthCalledWith(3, 'team-b')
     act(() => {
       realController.current?.handleSelectChatAgent('team-b-only-agent', {
         selectLatest: false,
@@ -3077,6 +3165,236 @@ describe('App deep-link orchestration', () => {
     expect
       .soft((screen.getByTestId('chat-page-surface') as HTMLTextAreaElement).value)
       .toBe('draft owned by B')
+  })
+
+  it('keeps actual ComposerPanel drafts on their App-created workspace tabs', async () => {
+    composerPanelHarness.useRealComposerPanel = true
+    const existingBridge = window.clerum
+    const { clerum, handle } = installAppControllerClerum({ agentNames: ['agent-x'] })
+    Object.assign(clerum, {
+      shortcuts: existingBridge.shortcuts,
+      app: existingBridge.app,
+      gfs: existingBridge.gfs,
+      sandboxUi: existingBridge.sandboxUi,
+    })
+    const actual =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    const realController: { current: AppController | null } = { current: null }
+    vi.mocked(useAppController).mockImplementation(() => {
+      realController.current = actual.useAppController()
+      composerPanelHarness.controller = realController.current as unknown as Record<string, unknown>
+      return realController.current
+    })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTaskTrackerProvider>
+          <App />
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => expect(realController.current?.isAuthenticated).toBe(true))
+    await waitFor(() => expect(realController.current?.initialExperienceLoading).toBe(false))
+    await act(async () => {
+      realController.current?.handleSelectChatAgent('agent-x', { selectLatest: false })
+    })
+    const tabA = activeWorkspaceTab(realController.current!.workspaceTabs)
+    if (!tabA || tabA.kind !== 'chat') throw new Error('App did not create New Chat A')
+    expect(tabA.chat).toEqual({ agentRef: 'agent-x', chatId: null })
+    const inputA = screen.getByRole('textbox', { name: 'Agent message composer' })
+    fireEvent.change(inputA, { target: { value: 'draft owned by New Chat A' } })
+    expect(
+      (screen.getByRole('textbox', { name: 'Agent message composer' }) as HTMLTextAreaElement).value
+    ).toBe('draft owned by New Chat A')
+
+    const resourceUri = 'gfs://main/0123456789abcdef0123456789abcdef'
+    act(() => realController.current?.openFilesSection(resourceUri))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(realController.current!.workspaceTabs)?.kind).toBe('files')
+    )
+    const contentPanel = document.querySelector('.content-panel') as HTMLElement | null
+    if (!contentPanel) throw new Error('The App content panel is unavailable')
+    Object.defineProperty(contentPanel, 'clientWidth', { configurable: true, get: () => 300 })
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    await act(async () => {
+      sidebarHarness.props?.onNewChat?.()
+      await Promise.resolve()
+    })
+    await waitFor(() =>
+      expect(activeWorkspaceTab(realController.current!.workspaceTabs)?.kind).toBe('chat')
+    )
+    const tabB = activeWorkspaceTab(realController.current!.workspaceTabs)
+    if (!tabB || tabB.kind !== 'chat' || tabB.id === tabA.id) {
+      throw new Error('App New Chat did not create a distinct tab from the resource route')
+    }
+    expect(tabB.chat).toEqual({ agentRef: 'agent-x', chatId: null })
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('chat-page-surface').getAttribute('data-workspace-chat-tab-id')
+      ).toBe(tabB.id)
+    )
+    const inputB = screen.getByRole('textbox', { name: 'Agent message composer' })
+    expect((inputB as HTMLTextAreaElement).value).toBe(resourceUri)
+    fireEvent.change(inputB, { target: { value: 'draft owned by New Chat B' } })
+    expect(
+      (screen.getByRole('textbox', { name: 'Agent message composer' }) as HTMLTextAreaElement).value
+    ).toBe('draft owned by New Chat B')
+
+    act(() => realController.current?.openFilesSection(resourceUri))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(realController.current!.workspaceTabs)?.kind).toBe('files')
+    )
+    await act(async () => {
+      sidebarHarness.props?.onNewChat?.()
+      await Promise.resolve()
+    })
+    await waitFor(() =>
+      expect(activeWorkspaceTab(realController.current!.workspaceTabs)?.kind).toBe('chat')
+    )
+    const tabC = activeWorkspaceTab(realController.current!.workspaceTabs)
+    if (!tabC || tabC.kind !== 'chat' || [tabA.id, tabB.id].includes(tabC.id)) {
+      throw new Error('App did not create a separate resource-prefilled Chat tab')
+    }
+    expect(tabC.chat).toEqual({ agentRef: 'agent-x', chatId: null })
+    await waitFor(() =>
+      expect(
+        (screen.getByRole('textbox', { name: 'Agent message composer' }) as HTMLTextAreaElement)
+          .value
+      ).toBe(resourceUri)
+    )
+
+    const tabBReturnIndex = realController.current!.workspaceTabs.tabs.findIndex(
+      tab => tab.id === tabB.id
+    )
+    const selectorsBeforeSwitch = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('.chat-view-tab__select')
+    )
+    fireEvent.click(selectorsBeforeSwitch[tabBReturnIndex])
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('chat-page-surface').getAttribute('data-workspace-chat-tab-id')
+      ).toBe(tabB.id)
+    )
+    expect(
+      (screen.getByRole('textbox', { name: 'Agent message composer' }) as HTMLTextAreaElement).value
+    ).toBe('draft owned by New Chat B')
+
+    const tabAIndex = realController.current!.workspaceTabs.tabs.findIndex(
+      tab => tab.id === tabA.id
+    )
+    const selectors = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('.chat-view-tab__select')
+    )
+    fireEvent.click(selectors[tabAIndex])
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('chat-page-surface').getAttribute('data-workspace-chat-tab-id')
+      ).toBe(tabA.id)
+    )
+    expect(
+      (screen.getByRole('textbox', { name: 'Agent message composer' }) as HTMLTextAreaElement).value
+    ).toBe('draft owned by New Chat A')
+
+    const tabBIndex = realController.current!.workspaceTabs.tabs.findIndex(
+      tab => tab.id === tabB.id
+    )
+    const refreshedSelectors = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('.chat-view-tab__select')
+    )
+    fireEvent.click(refreshedSelectors[tabBIndex])
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('chat-page-surface').getAttribute('data-workspace-chat-tab-id')
+      ).toBe(tabB.id)
+    )
+    expect
+      .soft(
+        (screen.getByRole('textbox', { name: 'Agent message composer' }) as HTMLTextAreaElement)
+          .value
+      )
+      .toBe('draft owned by New Chat B')
+
+    const closeButtons = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('.chat-view-tab__close')
+    )
+    fireEvent.click(closeButtons[tabAIndex])
+    await waitFor(() =>
+      expect(realController.current?.workspaceTabs.tabs.some(tab => tab.id === tabA.id)).toBe(false)
+    )
+    expect(realController.current?.workspaceTabs.activeTabId).toBe(tabB.id)
+    expect(
+      (screen.getByRole('textbox', { name: 'Agent message composer' }) as HTMLTextAreaElement).value
+    ).toBe('draft owned by New Chat B')
+
+    const notes = new File(['tab-owned attachment'], 'tab-notes.txt', { type: 'text/plain' })
+    clerum.rpc.invokeHostMessage.mockRejectedValueOnce(new Error('network down'))
+    const filePicker = document.querySelector<HTMLInputElement>('.composer-file-input')
+    if (!filePicker) throw new Error('The real ComposerPanel file picker is unavailable')
+    fireEvent.change(filePicker, { target: { files: [notes] } })
+    await waitFor(() =>
+      expect(screen.getByTestId('composer-file-chip').getAttribute('data-file-status')).toBe(
+        'ready'
+      )
+    )
+    const inputForFailedSend = screen.getByRole('textbox', { name: 'Agent message composer' })
+    fireEvent.keyDown(inputForFailedSend, { key: 'Enter', code: 'Enter' })
+    const recoverInput = await screen.findByRole('button', { name: 'Recover input' })
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(clerum.rpc.invokeHostMessage.mock.calls[0]?.[1]).toMatchObject({
+      content: 'draft owned by New Chat B',
+      attachments: [expect.objectContaining({ filename: 'tab-notes.txt' })],
+    })
+
+    await waitFor(() => expect((recoverInput as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(recoverInput)
+    await act(async () => Promise.resolve())
+    expect(screen.queryByRole('button', { name: 'Recover input' })).toBeNull()
+    expect(
+      (screen.getByRole('textbox', { name: 'Agent message composer' }) as HTMLTextAreaElement).value
+    ).toBe('draft owned by New Chat B')
+    expect(screen.getByTestId('composer-file-chip').textContent).toContain('tab-notes.txt')
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+
+    handle.getSessionState
+      .mockResolvedValueOnce({ authenticated: false, me: null })
+      .mockResolvedValueOnce({
+        authenticated: true,
+        me: {
+          ...HARNESS_ME,
+          id: 'user-b',
+          email: 'user-b@example.test',
+          teamId: 'team-b',
+          teamName: 'Team B',
+        },
+      })
+    await act(async () => realController.current?.loadSession())
+    await waitFor(() => expect(realController.current?.isAuthenticated).toBe(false))
+    await waitFor(() => expect(realController.current?.workspaceTabs.tabs).toHaveLength(1))
+    await act(async () => realController.current?.loadSession())
+    await waitFor(() => expect(realController.current?.currentTeamId).toBe('team-b'))
+    await waitFor(() => expect(realController.current?.initialExperienceLoading).toBe(false))
+    expect(screen.queryByText('draft owned by New Chat B')).toBeNull()
+    await act(async () => {
+      realController.current?.handleSelectChatAgent('agent-x', { selectLatest: false })
+    })
+    await waitFor(() =>
+      expect(
+        (screen.getByRole('textbox', { name: 'Agent message composer' }) as HTMLTextAreaElement)
+          .value
+      ).toBe('')
+    )
+    handle.logout.mockResolvedValue({ ok: true, sessionGeneration: 2 })
+    handle.getSessionState.mockResolvedValueOnce({ authenticated: false, me: null })
+    await act(async () => realController.current?.handleLogout())
+    await waitFor(() => expect(realController.current?.isAuthenticated).toBe(false))
+    expect(realController.current?.workspaceTabs.tabs).toHaveLength(1)
+    expect(screen.queryByRole('textbox', { name: 'Agent message composer' })).toBeNull()
+    expect(screen.queryByText('draft owned by New Chat B')).toBeNull()
+    queryClient.clear()
   })
 
   it('closes the active embed before switching teams for a failed cross-team handoff', async () => {
@@ -3299,6 +3617,50 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
   })
 
+  it('releases a starting origin embed before continuing a cross-team app link', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let liveTeamId = 'team-a'
+    const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
+      if (!teamId || teamId === liveTeamId) return false
+      liveTeamId = teamId
+      return true
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      handleEnsureTeamContext: ensureTeamContext,
+      getCurrentTeamId: () => liveTeamId,
+    })
+    listApps.mockImplementation(async () => ({
+      apps: liveTeamId === 'team-a' ? [READY_APP] : [READY_APP_B],
+    }))
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    const heldOriginOpen = main.holdNextOpen()
+    await launchLiveApp()
+    await waitForAppOpen()
+    await waitFor(() => expect(embedPhase()).toBe('opening'))
+    const originLaunchId = main.openCall(0).launchId
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: READY_APP_B.appRef, teamId: 'team-b' })
+    })
+    await confirmPendingAppLink()
+    await waitFor(() => expect(closeSandboxUi).toHaveBeenCalledWith({ launchId: originLaunchId }))
+
+    // Main owns the pending open. Releasing it through its real event path must
+    // settle the old embed owner before the cross-team target can mount.
+    await act(async () => heldOriginOpen().resolve())
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    await waitFor(() => expect(embedPhase()).toBe('mounted'))
+    expect(ensureTeamContext).toHaveBeenCalledWith({ teamId: 'team-b', announce: true })
+    expect(main.live()?.appRef).toBe(READY_APP_B.appRef)
+    expect(main.openCall(1).launchId).not.toBe(originLaunchId)
+    expect(main.reported('sandboxUi:released')).toContainEqual(
+      expect.objectContaining({ launchId: originLaunchId })
+    )
+  })
+
   it('keeps the target team during cross-team starting app retries', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     let liveTeamId = 'team-a'
@@ -3340,21 +3702,23 @@ describe('App deep-link orchestration', () => {
     })
     // A retryable cross-team handoff restores the captured origin while it
     // still owns navigation. The next retry can switch to the target again.
-    expect(liveTeamId).toBe('team-a')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
-    expect(ensureTeamContext).toHaveBeenCalledWith({
+    // Keep this as a soft oracle so the assertions below still run when the
+    // independent rollback expectation exposes the current product defect.
+    expect.soft(liveTeamId).toBe('team-a')
+    expect.soft(ensureTeamContext).toHaveBeenCalledTimes(2)
+    expect.soft(ensureTeamContext).toHaveBeenCalledWith({
       teamId: 'team-b',
       announce: true,
     })
-    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
+    expect.soft(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
 
     await act(async () => {
       vi.advanceTimersByTime(1_000)
       await Promise.resolve()
     })
     await waitFor(() => expect(currentController.pushToast).toHaveBeenCalledTimes(2))
-    expect(liveTeamId).toBe('team-a')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(4)
+    expect.soft(liveTeamId).toBe('team-a')
+    expect.soft(ensureTeamContext).toHaveBeenCalledTimes(4)
 
     ready = true
     await act(async () => {
