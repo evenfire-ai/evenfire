@@ -70,7 +70,9 @@ describe('useAppController reconciliation ownership oracle', () => {
     })
     await waitFor(() => expect(app.result.current.controller.currentTeamId).toBe('team-2'))
     const key = 'agent-x::team-a-reconcile-chat'
-    const teamStateBeforeLateSnapshot = app.result.current.controller.sessionStateByChatKey[key]
+    const teamStateBeforeLateSnapshot = structuredClone(
+      app.result.current.controller.sessionStateByChatKey[key]
+    )
 
     resolveSnapshot({
       agent: 'agent-x',
@@ -83,8 +85,8 @@ describe('useAppController reconciliation ownership oracle', () => {
       await switchPromise
     })
 
-    expect(app.result.current.controller.sessionStateByChatKey[key]?.syncing).toBe(
-      teamStateBeforeLateSnapshot?.syncing
+    expect(app.result.current.controller.sessionStateByChatKey[key]).toEqual(
+      teamStateBeforeLateSnapshot
     )
   })
 })

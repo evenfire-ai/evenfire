@@ -3338,25 +3338,23 @@ describe('App deep-link orchestration', () => {
         'info'
       )
     })
-    expect(liveTeamId).toBe('team-b')
+    // A retryable cross-team handoff restores the captured origin while it
+    // still owns navigation. The next retry can switch to the target again.
+    expect(liveTeamId).toBe('team-a')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
     expect(ensureTeamContext).toHaveBeenCalledWith({
       teamId: 'team-b',
       announce: true,
     })
-    expect(ensureTeamContext).not.toHaveBeenCalledWith({
-      teamId: 'team-a',
-      announce: true,
-    })
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
 
     await act(async () => {
       vi.advanceTimersByTime(1_000)
       await Promise.resolve()
     })
     await waitFor(() => expect(currentController.pushToast).toHaveBeenCalledTimes(2))
-    expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext.mock.calls.every(([request]) => request.teamId === 'team-b')).toBe(
-      true
-    )
+    expect(liveTeamId).toBe('team-a')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(4)
 
     ready = true
     await act(async () => {
@@ -3367,9 +3365,7 @@ describe('App deep-link orchestration', () => {
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext.mock.calls.every(([request]) => request.teamId === 'team-b')).toBe(
-      true
-    )
+    expect(ensureTeamContext).toHaveBeenCalledTimes(5)
   })
 
   it('defers a cross-team link whose open mounts and then fails, with its error', async () => {
@@ -3464,18 +3460,11 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => {
       expect(currentController.pushToast).toHaveBeenCalledWith('native mount failed', 'error')
     })
-    expect(liveTeamId).toBe('team-b')
-    expect(currentController.workspaceTabs.tabs).toEqual(
-      expect.arrayContaining(originWorkspace.tabs)
-    )
-    expect(activeWorkspaceTab(currentController.workspaceTabs)?.kind).toBe('app')
-    expect(activeWorkspaceTab(currentController.workspaceTabs)?.app?.appRef).toBe('ns/app')
+    expect(liveTeamId).toBe('team-a')
+    expect(currentController.workspaceTabs).toEqual(originWorkspace)
     expect(currentController.selectedAgent).toBe(originAgent)
     expect(ensureTeamContext).toHaveBeenNthCalledWith(1, { teamId: 'team-b', announce: true })
-    expect(ensureTeamContext).not.toHaveBeenCalledWith({
-      teamId: 'team-a',
-      announce: true,
-    })
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
 
     await act(async () => {
@@ -3488,9 +3477,7 @@ describe('App deep-link orchestration', () => {
     expect(acknowledgeDeepLink).toHaveBeenCalledTimes(1)
     expect(liveTeamId).toBe('team-b')
     expect(currentController.workspaceTabs).not.toEqual(originWorkspace)
-    expect(ensureTeamContext.mock.calls.every(([request]) => request.teamId === 'team-b')).toBe(
-      true
-    )
+    expect(ensureTeamContext).toHaveBeenCalledTimes(3)
     expect(currentController.pushToast).not.toHaveBeenCalledWith(
       expect.stringContaining('you switched teams'),
       'error'
@@ -3534,8 +3521,8 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => {
       expect(currentController.pushToast).toHaveBeenCalledWith('native mount failed', 'error')
     })
-    expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    expect(liveTeamId).toBe('team-a')
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
 
     const workspaceBeforeManualSwitch = currentController.workspaceTabs
     liveTeamId = 'team-c'
@@ -3555,12 +3542,11 @@ describe('App deep-link orchestration', () => {
     )
     expect(confirmDialogHarness.props?.title).toBe('App link could not be opened')
     expect(liveTeamId).toBe('team-c')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
-    // A later same-principal team switch preserves the workspace that was
-    // current when the user made that switch; it does not roll back to the
-    // link's older origin after the retry detects the team mismatch.
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
+    // The link restored its captured origin before the user's newer team
+    // selection. The retry must leave that newer selection in control.
     expect(currentController.workspaceTabs).toEqual(workspaceBeforeManualSwitch)
-    expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.chat)
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
 
     await act(async () => {
