@@ -87,7 +87,7 @@ import { GfsMoveDialog } from '@/gfs/moveDialog'
 import type { TeamDirectoryResult } from '../../../src/types'
 import type { FilesPageProps, GfsDriveResource, MyAgentEntry } from './FilesPage.types'
 
-function hasBit(affordances: { held?: string[] } | null, bit: string): boolean {
+function hasBit(affordances: { held?: string[] } | null | undefined, bit: string): boolean {
   return Boolean(affordances?.held?.includes(bit))
 }
 
@@ -440,7 +440,7 @@ export function FilesPage({
   const moveWorkspaceRef = useRef({ sessionScope, currentResourceId: current?.resourceId ?? null })
   const cachedCurrentAffordances = current
     ? queryClient.getQueryData<{ held?: string[]; grantableBits?: string[] }>(
-        desktopQueryKeys.gfsAffordances(sessionScope, current.resourceId, current.drive)
+        desktopQueryKeys.gfsAffordances(sessionScope, current.resourceId, GFS_DRIVE_MAIN)
       )
     : undefined
   moveWorkspaceRef.current = { sessionScope, currentResourceId: current?.resourceId ?? null }
@@ -712,7 +712,7 @@ export function FilesPage({
       return false
     }
     const noLongerGrantable = requiredGrantableBits.filter(
-      bit => !authority.grantableBits.includes(bit)
+      bit => !authority.grantableBits?.includes(bit)
     )
     if (noLongerGrantable.length > 0) {
       pushToast?.(
