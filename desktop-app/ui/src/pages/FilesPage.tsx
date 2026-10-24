@@ -652,9 +652,7 @@ export function FilesPage({
     return true
   }
   const openDeleteTarget = (resource: GfsActionTarget) => setDeleteTarget(resource)
-  const currentPermissionsConfirmed = Boolean(
-    affordances && !loadingAffordances && !affordancesError
-  )
+  const currentPermissionsConfirmed = Boolean(affordances && !affordancesError)
   const canWriteCurrent =
     !accessRevoked && currentPermissionsConfirmed && hasBit(affordances, 'write')
   const canDeleteCurrent =

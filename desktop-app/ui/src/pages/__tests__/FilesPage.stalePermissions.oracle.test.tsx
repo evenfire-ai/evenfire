@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import {
   accessibleResource,
@@ -178,6 +179,73 @@ describe('FilesPage stale permission action oracle', () => {
     expect(screen.getByRole('form', { name: 'Rename resource' })).toBeTruthy()
     expect(renameResource).not.toHaveBeenCalled()
     expect(reportPermissionReads).toBe(2)
+    client.clear()
+  })
+
+  it('keeps current-folder actions presented during a background permission refetch', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', { gfsUri: FOLDER_URI })
+    )
+    const children = await listChildrenPage([])
+    let permissionReads = 0
+    let releaseRefresh!: (value: Awaited<ReturnType<typeof delegationAffordances>>) => void
+    const refreshResult = new Promise<Awaited<ReturnType<typeof delegationAffordances>>>(
+      resolve => {
+        releaseRefresh = resolve
+      }
+    )
+    const permissions = delegationAffordances(
+      new Set(['read', 'write', 'delete', 'manage_acl']),
+      false
+    )
+    const affordances = vi.fn(() => {
+      permissionReads += 1
+      return permissionReads === 1 ? Promise.resolve(permissions) : refreshResult
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => folder),
+          listChildren: vi.fn(async () => children),
+          affordances,
+        },
+      },
+    })
+
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    render(<FilesPage pendingGfsUri={FOLDER_URI} />, { wrapper: wrapper(client) })
+    await screen.findByRole('button', { name: 'Options for Reports' })
+    await waitFor(() => expect(permissionReads).toBe(1))
+    fireEvent.click(screen.getByRole('button', { name: 'Options for Reports' }))
+
+    await act(async () => {
+      void client.refetchQueries({
+        exact: true,
+        queryKey: desktopQueryKeys.gfsAffordances(
+          'test-environment:user-1:team-1',
+          'folder-active',
+          'main'
+        ),
+      })
+    })
+    await waitFor(() => expect(permissionReads).toBe(2))
+
+    const menu = screen.getByRole('menu', { name: 'Actions for Reports' })
+    expect(within(menu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
+    expect(within(menu).getByRole('menuitem', { name: 'New folder' })).toBeTruthy()
+    expect(within(menu).getByRole('menuitem', { name: 'Delete' })).toBeTruthy()
+
+    await act(async () => {
+      releaseRefresh(permissions)
+      await refreshResult
+    })
+    expect(
+      within(screen.getByRole('menu', { name: 'Actions for Reports' })).getByRole('menuitem', {
+        name: 'Rename',
+      })
+    ).toBeTruthy()
     client.clear()
   })
 
