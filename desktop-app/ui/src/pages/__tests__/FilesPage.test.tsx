@@ -131,7 +131,43 @@ function uploadInput(): HTMLInputElement {
   return input
 }
 
+function installControllerPermissionQuery() {
+  const gfs = (window.clerum?.gfs ?? {}) as Record<string, unknown>
+  if (typeof gfs.affordances === 'function') return
+  const controller = hookMock.useGfsBrowserController.mock.results.at(-1)?.value as
+    | {
+        current?: { resourceId: string }
+        affordances?: { held?: string[]; canDelegate?: boolean } | null
+        rowAffordancesResourceId?: string | null
+        rowAffordances?: { held?: string[]; canDelegate?: boolean } | null
+        rowAffordancesByResourceId?: Record<string, { held?: string[]; canDelegate?: boolean }>
+        items?: Array<{ resourceId: string; permissions?: string[] }>
+        accessibleResources?: Array<{ resourceId: string; permissions?: string[] }>
+      }
+    | undefined
+  const affordances = vi.fn(async (resourceId: string) => {
+    const resource = [
+      ...(controller?.items ?? []),
+      ...(controller?.accessibleResources ?? []),
+    ].find(item => item.resourceId === resourceId)
+    const rowAuthority =
+      controller?.rowAffordancesByResourceId?.[resourceId] ??
+      (controller?.rowAffordancesResourceId === resourceId ? controller.rowAffordances : null)
+    const authority =
+      controller?.current?.resourceId === resourceId ? controller.affordances : rowAuthority
+    return delegationAffordances(
+      new Set(authority?.held ?? resource?.permissions ?? []),
+      Boolean(authority?.canDelegate)
+    )
+  })
+  Object.defineProperty(window, 'clerum', {
+    configurable: true,
+    value: { ...window.clerum, gfs: { ...gfs, affordances } },
+  })
+}
+
 async function openManageDialog(resourceName: string) {
+  installControllerPermissionQuery()
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name: `Options for ${resourceName}` }))
   })
@@ -147,6 +183,7 @@ async function openManageDialog(resourceName: string) {
 }
 
 async function chooseResourceAction(resourceName: string, actionName: string) {
+  installControllerPermissionQuery()
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name: `Options for ${resourceName}` }))
   })
@@ -169,11 +206,36 @@ async function chooseResourceAction(resourceName: string, actionName: string) {
 
 describe('FilesPage', () => {
   beforeEach(() => {
+    const affordances = vi.fn(async (resourceId: string) => {
+      const controller = hookMock.useGfsBrowserController.mock.results.at(-1)?.value as
+        | {
+            current?: { resourceId: string }
+            affordances?: { held?: string[]; canDelegate?: boolean } | null
+            rowAffordancesResourceId?: string | null
+            rowAffordances?: { held?: string[]; canDelegate?: boolean } | null
+            rowAffordancesByResourceId?: Record<string, { held?: string[]; canDelegate?: boolean }>
+            items?: Array<{ resourceId: string; permissions?: string[] }>
+            accessibleResources?: Array<{ resourceId: string; permissions?: string[] }>
+          }
+        | undefined
+      const rows = [...(controller?.items ?? []), ...(controller?.accessibleResources ?? [])]
+      const resource = rows.find(row => row.resourceId === resourceId)
+      const rowAuthority =
+        controller?.rowAffordancesByResourceId?.[resourceId] ??
+        (controller?.rowAffordancesResourceId === resourceId ? controller.rowAffordances : null)
+      const authority =
+        controller?.current?.resourceId === resourceId ? controller.affordances : rowAuthority
+      return delegationAffordances(
+        new Set(authority?.held ?? resource?.permissions ?? []),
+        Boolean(authority?.canDelegate)
+      )
+    })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
         gfs: {
           getPathForFile: vi.fn((file: File) => `/tmp/${file.name}`),
+          affordances,
         },
       },
     })
@@ -1446,6 +1508,15 @@ describe('FilesPage', () => {
       }
     }
     hookMock.useGfsBrowserController.mockImplementation(useChangingFolderController)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          ...(window.clerum?.gfs ?? {}),
+          affordances: vi.fn(async () => delegationAffordances(new Set(['read', 'write']), false)),
+        },
+      },
+    })
 
     renderFilesPage()
     const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
@@ -5343,6 +5414,9 @@ describe('FilesPage', () => {
         gfs: {
           getPathForFile: vi.fn((file: File) => `/tmp/${file.name}`),
           listChildren,
+          affordances: vi.fn(async () =>
+            delegationAffordances(new Set(['read', 'write', 'delete', 'manage_acl']), false)
+          ),
         },
       },
     })

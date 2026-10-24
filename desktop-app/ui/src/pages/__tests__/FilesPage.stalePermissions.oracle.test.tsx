@@ -103,6 +103,84 @@ describe('FilesPage stale permission action oracle', () => {
     client.clear()
   })
 
+  it('keeps a stale row action visible while its exact permission is rechecked on use', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const folder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', { gfsUri: FOLDER_URI })
+    )
+    const report = childView('child-report', 'report.txt', 'file', {
+      parentResourceId: 'folder-active',
+    })
+    const children = await listChildrenPage([report])
+    const denied = delegationAffordances(new Set(['read']), false)
+    let denyPermissionCheck!: (value: Awaited<ReturnType<typeof delegationAffordances>>) => void
+    const deniedPermission = new Promise<Awaited<ReturnType<typeof delegationAffordances>>>(
+      resolve => {
+        denyPermissionCheck = resolve
+      }
+    )
+    let reportPermissionReads = 0
+    const renameResource = vi.fn(async () => undefined)
+    const affordances = vi.fn((resourceId: string) => {
+      if (resourceId !== 'child-report') {
+        return Promise.resolve(delegationAffordances(new Set(['read']), false))
+      }
+      reportPermissionReads += 1
+      return reportPermissionReads === 2
+        ? deniedPermission
+        : Promise.resolve(delegationAffordances(new Set(['read', 'write']), false))
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => folder),
+          listChildren: vi.fn(async () => children),
+          affordances,
+          renameResource,
+        },
+      },
+    })
+
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const { rerender } = render(<FilesPage pendingGfsUri={FOLDER_URI} />, {
+      wrapper: wrapper(client),
+    })
+    await screen.findByText('report.txt')
+    await waitFor(() => expect(reportPermissionReads).toBe(1))
+
+    vi.setSystemTime(Date.now() + 16_000)
+    rerender(<FilesPage pendingGfsUri={FOLDER_URI} />)
+    expect(reportPermissionReads).toBe(1)
+    act(() => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    expect(reportPermissionReads).toBe(1)
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
+    })
+    await waitFor(() => expect(reportPermissionReads).toBe(2))
+    const menu = screen.getByRole('menu', { name: 'Actions for report.txt' })
+    const renameAction = within(menu).getByRole('menuitem', { name: 'Rename' })
+    fireEvent.click(renameAction)
+    const renameForm = screen.getByRole('form', { name: 'Rename resource' })
+
+    await act(async () => {
+      fireEvent.click(within(renameForm).getByRole('button', { name: 'Save name' }))
+      expect(renameResource).not.toHaveBeenCalled()
+      denyPermissionCheck(denied)
+      await deniedPermission
+    })
+
+    expect(screen.getByRole('form', { name: 'Rename resource' })).toBeTruthy()
+    expect(renameResource).not.toHaveBeenCalled()
+    expect(reportPermissionReads).toBe(2)
+    client.clear()
+  })
+
   it('keeps a shared-with-me row actionable after its list permission goes stale', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     const sharedFolder = accessibleResource('shared-folder', 'Shared folder', 'directory', {

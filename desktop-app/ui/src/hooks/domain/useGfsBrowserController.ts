@@ -867,7 +867,11 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     if (authorityPending || accessState === 'revoked') return byResourceId
     items.forEach((item, index) => {
       const query = rowAffordancesQueries[index]
-      if (!query?.data || query.isFetching || query.isError || query.isStale) return
+      // These bits may keep an affordance visible while its selected-row
+      // observer refreshes. They are presentation only: FilesPage rechecks
+      // the exact resource authority before opening a permission-dependent
+      // action, and mutations remain server-authorized.
+      if (!query?.data) return
       const data = query.data
       if (data) byResourceId[item.resourceId] = data as GfsBrowserAffordances
     })
