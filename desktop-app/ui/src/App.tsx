@@ -144,6 +144,7 @@ type EmbedHandoffWaiter = {
   resolve: (outcome: 'ready' | 'failed') => void
   ownerLaunchId: LaunchId | null
   originReleased: boolean
+  originClosed: boolean
 }
 
 function formatLinkProvidedEnvironmentName(name: string): string {
@@ -530,12 +531,9 @@ export function App() {
     const sandboxUi = window.clerum.sandboxUi
     const offReleased = sandboxUi.onReleased?.(event => {
       for (const waiter of handoffWaitersRef.current.values()) {
-        if (
-          event.reason === 'closed' &&
-          waiter.ownerLaunchId !== null &&
-          waiter.ownerLaunchId === event.launchId
-        ) {
+        if (waiter.ownerLaunchId !== null && waiter.ownerLaunchId === event.launchId) {
           waiter.originReleased = true
+          waiter.originClosed = event.reason === 'closed'
         }
       }
       embed.onReleased(event)
@@ -2094,7 +2092,7 @@ export function App() {
   // transaction released the live owner, while `failed` keeps the switch closed.
   const handoffSeqRef = React.useRef(0)
   const handOffEmbedBeforeTeamSwitch = React.useCallback(async (): Promise<
-    'closed' | 'no-owner' | 'failed'
+    'closed' | 'released' | 'no-owner' | 'failed'
   > => {
     const lifetime = embedLifetimeRef.current!
     if (lifetime.disposed) return 'failed'
@@ -2108,6 +2106,7 @@ export function App() {
       resolve: resolveReady,
       ownerLaunchId,
       originReleased: false,
+      originClosed: false,
     }
     handoffWaitersRef.current.set(requestId, waiter)
     embed.dispatch({ type: 'handoff', requestId })
@@ -2115,7 +2114,8 @@ export function App() {
     handoffWaitersRef.current.delete(requestId)
     if (outcome !== 'ready' || lifetime.disposed) return 'failed'
     if (ownerLaunchId === null) return 'no-owner'
-    return waiter.originReleased ? 'closed' : 'failed'
+    if (waiter.originReleased) return waiter.originClosed ? 'closed' : 'released'
+    return embed.getSnapshot().views.has(ownerLaunchId) ? 'failed' : 'no-owner'
   }, [embed])
 
   // What a deep link does once its launch settled. Mounted: done. Failed: retried
@@ -2456,7 +2456,7 @@ export function App() {
               await acknowledgeSandboxUiDeepLink(pending.link.id)
               return
             }
-            if (handoff === 'closed' || handoff === 'no-owner') {
+            if (handoff === 'closed' || handoff === 'released' || handoff === 'no-owner') {
               if (handoff === 'closed') {
                 sandboxUiDeepLinkClosedOriginEmbedsRef.current.add(pending.link.id)
               }

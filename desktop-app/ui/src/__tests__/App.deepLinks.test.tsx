@@ -1974,6 +1974,76 @@ describe('App deep-link orchestration', () => {
     expect(main.live()).toBeNull()
   })
 
+  it('continues a cross-team link after a matching session release without relaunching origin', async () => {
+    const targetApp = {
+      appRef: 'ns/target',
+      title: 'Target App',
+      defaultPath: '/',
+      ready: true,
+      phase: 'active',
+    }
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    currentController = makeController({ initialExperienceLoading: false })
+    render(<App />)
+    await launchAppFromSidebar()
+    const originLaunchId = main.live()?.launchId
+    if (!originLaunchId) throw new Error('the origin app did not mount')
+
+    const closeMainView = closeSandboxUi().getMockImplementation()
+    if (!closeMainView) throw new Error('the main close producer is unavailable')
+    const closeRequestControl: { release?: () => void } = {}
+    closeSandboxUi().mockImplementation(
+      request =>
+        new Promise((resolve, reject) => {
+          closeRequestControl.release = () => {
+            void Promise.resolve(closeMainView(request)).then(resolve, reject)
+          }
+        })
+    )
+
+    listApps.mockResolvedValueOnce({ apps: [targetApp] })
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({
+        recipeNs: 'ns',
+        recipeName: 'target',
+        path: '/linked',
+        teamId: 'team-b',
+      })
+    )
+    if (!target) throw new Error('the shared producer rejected the target app-link fixture')
+    const link = new SandboxUiDeepLinkQueue().enqueue(target)
+
+    act(() => emitDeepLink?.(link))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(embedState().handoffs).toHaveLength(1))
+    expect(currentController.getCurrentTeamId()).toBe('team-a')
+
+    main.endSession()
+    await waitFor(() =>
+      expect(
+        main
+          .reported('sandboxUi:released')
+          .some(
+            event =>
+              (event as { launchId?: string; reason?: string }).launchId === originLaunchId &&
+              (event as { reason?: string }).reason === 'session'
+          )
+      ).toBe(true)
+    )
+    await waitFor(() => expect(currentController.getCurrentTeamId()).toBe('team-b'))
+    closeRequestControl.release?.()
+    await waitForAppOpen(2)
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+
+    expect(main.openCall(1)).toMatchObject({ recipeNs: 'ns', recipeName: 'target' })
+    expect(openSandboxUi()).toHaveBeenCalledTimes(2)
+    expect(currentController.getCurrentTeamId()).toBe('team-b')
+    expect(activeWorkspaceTab(currentController.workspaceTabs)).toMatchObject({
+      kind: 'app',
+      app: { appRef: targetApp.appRef },
+    })
+  })
+
   it('waits for a pending origin release before rolling back an unavailable cross-team link', async () => {
     listApps.mockResolvedValue({ apps: [READY_APP] })
     currentController = makeController({
