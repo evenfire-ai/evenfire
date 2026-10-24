@@ -249,6 +249,50 @@ describe('FilesPage stale permission action oracle', () => {
     client.clear()
   })
 
+  it('uses the current folder parent for Move and does not show an idle denial', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', {
+        gfsUri: FOLDER_URI,
+        parentResourceId: 'source-parent',
+      })
+    )
+    const children = await listChildrenPage([])
+    const permissions = vi.fn(async (resourceId: string) =>
+      resourceId === 'source-parent'
+        ? delegationAffordances(new Set(['read', 'write', 'delete']), false)
+        : delegationAffordances(new Set(['read']), false)
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => folder),
+          listChildren: vi.fn(async () => children),
+          affordances: permissions,
+        },
+      },
+    })
+
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    render(<FilesPage pendingGfsUri={FOLDER_URI} />, { wrapper: wrapper(client) })
+    await screen.findByRole('button', { name: 'Options for Reports' })
+    await waitFor(() => expect(permissions).toHaveBeenCalledWith('source-parent', 'main'))
+
+    expect(
+      screen.queryByText(/Move is unavailable because you need write and delete access/)
+    ).toBeNull()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Reports' }))
+    })
+    expect(
+      within(screen.getByRole('menu', { name: 'Actions for Reports' })).getByRole('menuitem', {
+        name: 'Move to',
+      })
+    ).toBeTruthy()
+    client.clear()
+  })
+
   it('keeps a shared-with-me row actionable after its list permission goes stale', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     const sharedFolder = accessibleResource('shared-folder', 'Shared folder', 'directory', {

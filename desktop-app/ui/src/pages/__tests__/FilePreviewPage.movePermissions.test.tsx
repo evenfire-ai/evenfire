@@ -156,6 +156,21 @@ describe('FilePreviewPage move permission contract', () => {
     expect(within(menu).getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
   })
 
+  it('does not leave a denied Move notice on an idle read-only Preview', async () => {
+    installGfs({ source: async () => readOnly })
+    installController()
+    renderPreview()
+
+    await screen.findByAltText('Preview of diagram.png')
+    await waitFor(() =>
+      expect(window.clerum.gfs.affordances).toHaveBeenCalledWith(parentId, 'main')
+    )
+    expect(
+      screen.queryByText('You need write and delete access to the source folder to move this file.')
+    ).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Retry permission check' })).toBeNull()
+  })
+
   it('hides Move until the source parent has server-derived write and delete bits', async () => {
     const { affordances } = installGfs({ source: async () => readOnly })
     installController()

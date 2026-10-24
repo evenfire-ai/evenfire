@@ -670,54 +670,6 @@ export function FilesPage({
   )
   const currentIsFolder = current?.kind === 'directory'
   const currentIsFile = current?.kind === 'file'
-  const movePermissionParentId = currentIsFile
-    ? current?.parentResourceId
-    : currentIsFolder
-      ? current?.resourceId
-      : null
-  const movePermissionQuery = movePermissionParentId
-    ? currentIsFolder
-      ? {
-          affordances: ctrl.affordances ?? undefined,
-          error: ctrl.affordancesError,
-          isFetching: ctrl.loadingAffordances,
-        }
-      : ctrl.moveSourceParentStatusById?.[movePermissionParentId]
-    : undefined
-  const movePermissionNotice = !movePermissionParentId
-    ? null
-    : movePermissionQuery?.isFetching
-      ? { message: 'Checking move permissions…', pending: true }
-      : movePermissionQuery?.error
-        ? {
-            message: `Could not verify move permissions: ${movePermissionQuery.error}`,
-            pending: false,
-          }
-        : movePermissionQuery?.affordances &&
-            !hasGfsMoveSourcePermissions(movePermissionQuery.affordances.held)
-          ? {
-              message:
-                'Move is unavailable because you need write and delete access to the source folder.',
-              pending: false,
-            }
-          : null
-  const retryMovePermission = () => {
-    if (!movePermissionParentId || !sessionScope) return
-    const queryKey = desktopQueryKeys.gfsAffordances(
-      sessionScope,
-      movePermissionParentId,
-      GFS_DRIVE_MAIN
-    )
-    try {
-      assertGfsAuthorityRetryAllowed(queryClient, queryKey)
-    } catch {
-      return
-    }
-    void queryClient.refetchQueries({
-      exact: true,
-      queryKey,
-    })
-  }
   // A total inherited-derivation failure becomes a quiet notice in the Share
   // dialog: an empty derived list alone would silently read as "no one else
   // has access" (R1-M3). Per-ancestor best-effort skipping stays silent.
@@ -2289,19 +2241,6 @@ export function FilesPage({
                 tone="error"
                 text={`Could not verify permissions for ${current.name}: ${affordancesError}`}
               />
-            </div>
-          ) : null}
-          {movePermissionNotice ? (
-            <div role={movePermissionNotice.pending ? 'status' : 'alert'}>
-              <StatusBanner
-                tone={movePermissionNotice.pending ? 'info' : 'error'}
-                text={movePermissionNotice.message}
-              />
-              {!movePermissionNotice.pending ? (
-                <Button onClick={retryMovePermission} size="sm" variant="outline">
-                  Retry permission check
-                </Button>
-              ) : null}
             </div>
           ) : null}
           {pendingGfsDeepLinkFailure ? (

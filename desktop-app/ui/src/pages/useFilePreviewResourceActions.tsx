@@ -242,21 +242,7 @@ export function useFilePreviewResourceActions({
                 return sourceParentAffordancesQuery.refetch()
               },
             }
-          : sourceParentAffordancesQuery.data &&
-              !hasGfsMoveSourcePermissions(sourceParentAffordancesQuery.data.held)
-            ? {
-                id: 'move-source-permissions',
-                message: 'You need write and delete access to the source folder to move this file.',
-                pending: false,
-                retry: () => {
-                  assertGfsAuthorityRetryAllowed(
-                    queryClient,
-                    desktopQueryKeys.gfsAffordances(sessionScope, sourceParentId, drive)
-                  )
-                  return sourceParentAffordancesQuery.refetch()
-                },
-              }
-            : null
+          : null
       : null,
   ].filter((notice): notice is NonNullable<typeof notice> => notice !== null)
 
