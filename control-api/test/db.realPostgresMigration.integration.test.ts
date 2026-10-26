@@ -322,6 +322,37 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     const heldPid = process.pid
     let legacyCompletionClient: PoolClient | null = null
     let legacyCompletionCommittedAt: number | null = null
+    let migrationSettled = false
+    let migrationError: unknown
+    let migrationPromise: Promise<void> | undefined
+    let fence: { phase: string; fenced_at_ms: string } | undefined
+    let legacyOwnerReleased = false
+    const releaseLegacyOwner = async () => {
+      const releaseClient = await dbPool.connect()
+      try {
+        await releaseClient.query('SET ROLE control_api_runtime')
+        await releaseClient.query(
+          'DELETE FROM password_verification_work WHERE singleton AND operation_id=$1 AND owner_instance=$2',
+          [heldOperation, heldOwner]
+        )
+        await releaseClient.query('RESET ROLE')
+      } finally {
+        releaseClient.release()
+      }
+      legacyOwnerReleased = true
+    }
+    const expectLegacyWriteRejected = async (sql: string, values: unknown[] = []) => {
+      const runtime = await dbPool.connect()
+      try {
+        await runtime.query('SET ROLE control_api_runtime')
+        await expect(runtime.query(sql, values)).rejects.toMatchObject({
+          code: '55000',
+        })
+        await runtime.query('RESET ROLE')
+      } finally {
+        runtime.release()
+      }
+    }
 
     // Reconstruct the actual pre-0130 schema in this throwaway database after
     // the ordinary migration test has initialized all preceding migrations.
@@ -387,88 +418,57 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     // Model a legacy completion transaction that released its durable work owner but still
     // holds the identifier row while writing its outcome. Trigger installation must wait for
     // this transaction, then timestamp the fence after it commits.
-    legacyCompletionClient = await dbPool.connect()
-    await legacyCompletionClient.query('SET ROLE control_api_runtime')
-    await legacyCompletionClient.query('BEGIN')
-    await legacyCompletionClient.query(
-      'UPDATE password_identifier_state SET revision = revision + 1 WHERE identifier_key = $1',
-      [key]
-    )
-
-    let migrationSettled = false
-    let migrationError: unknown
-    const migrationPromise = db
-      .initDb({ connect: () => dbPool.connect() })
-      .then(() => {
-        migrationSettled = true
-      })
-      .catch(error => {
-        migrationError = error
-        migrationSettled = true
-      })
-
-    let guardInstallWaiting = false
-    const guardDeadline = Date.now() + 10_000
-    while (Date.now() < guardDeadline) {
-      const waiting = await dbPool.query(
-        `SELECT EXISTS (
-           SELECT 1 FROM pg_stat_activity
-            WHERE datname = current_database()
-              AND pid <> pg_backend_pid()
-              AND wait_event_type = 'Lock'
-              AND query LIKE '%password_admission_rollout_state%'
-         ) AS waiting`
-      )
-      if (waiting.rows[0].waiting) {
-        guardInstallWaiting = true
-        break
-      }
-      await new Promise(resolve => setTimeout(resolve, 20))
-    }
-    expect(guardInstallWaiting).toBe(true)
-    expect(migrationSettled).toBe(false)
-    await legacyCompletionClient.query('COMMIT')
-    legacyCompletionCommittedAt = Number(
-      (
-        await dbPool.query(
-          'SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS now'
-        )
-      ).rows[0].now
-    )
-    await legacyCompletionClient.query('RESET ROLE')
-    legacyCompletionClient.release()
-    legacyCompletionClient = null
-
-    let fence: { phase: string; fenced_at_ms: string } | undefined
-    let legacyOwnerReleased = false
-    const releaseLegacyOwner = async () => {
-      const releaseClient = await dbPool.connect()
-      try {
-        await releaseClient.query('SET ROLE control_api_runtime')
-        await releaseClient.query(
-          'DELETE FROM password_verification_work WHERE singleton AND operation_id=$1 AND owner_instance=$2',
-          [heldOperation, heldOwner]
-        )
-        await releaseClient.query('RESET ROLE')
-      } finally {
-        releaseClient.release()
-      }
-      legacyOwnerReleased = true
-    }
-    const expectLegacyWriteRejected = async (sql: string, values: unknown[] = []) => {
-      const runtime = await dbPool.connect()
-      try {
-        await runtime.query('SET ROLE control_api_runtime')
-        await expect(runtime.query(sql, values)).rejects.toMatchObject({
-          code: '55000',
-        })
-        await runtime.query('RESET ROLE')
-      } finally {
-        runtime.release()
-      }
-    }
-
     try {
+      legacyCompletionClient = await dbPool.connect()
+      await legacyCompletionClient.query('SET ROLE control_api_runtime')
+      await legacyCompletionClient.query('BEGIN')
+      await legacyCompletionClient.query(
+        'UPDATE password_identifier_state SET revision = revision + 1 WHERE identifier_key = $1',
+        [key]
+      )
+
+      migrationPromise = db
+        .initDb({ connect: () => dbPool.connect() })
+        .then(() => {
+          migrationSettled = true
+        })
+        .catch(error => {
+          migrationError = error
+          migrationSettled = true
+        })
+
+      let guardInstallWaiting = false
+      const guardDeadline = Date.now() + 10_000
+      while (Date.now() < guardDeadline) {
+        const waiting = await dbPool.query(
+          `SELECT EXISTS (
+             SELECT 1 FROM pg_stat_activity
+              WHERE datname = current_database()
+                AND pid <> pg_backend_pid()
+                AND wait_event_type = 'Lock'
+                AND query LIKE '%password_admission_rollout_state%'
+           ) AS waiting`
+        )
+        if (waiting.rows[0].waiting) {
+          guardInstallWaiting = true
+          break
+        }
+        await new Promise(resolve => setTimeout(resolve, 20))
+      }
+      expect(guardInstallWaiting).toBe(true)
+      expect(migrationSettled).toBe(false)
+      await legacyCompletionClient.query('COMMIT')
+      legacyCompletionCommittedAt = Number(
+        (
+          await dbPool.query(
+            'SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS now'
+          )
+        ).rows[0].now
+      )
+      await legacyCompletionClient.query('RESET ROLE')
+      legacyCompletionClient.release()
+      legacyCompletionClient = null
+
       const deadline = Date.now() + 10_000
       while (Date.now() < deadline) {
         if (migrationSettled) {
@@ -544,12 +544,22 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       await migrationPromise
     } finally {
       if (legacyCompletionClient) {
+        let cleanupFailed = false
         try {
           await legacyCompletionClient.query('ROLLBACK')
         } catch {
+          cleanupFailed = true
           // Preserve the original failure while releasing the lock held for this fixture.
         }
-        legacyCompletionClient.release()
+        try {
+          await legacyCompletionClient.query('RESET ROLE')
+        } catch {
+          cleanupFailed = true
+          // Do not return a session with an unknown role state to the shared test pool.
+        }
+        legacyCompletionClient.release(
+          cleanupFailed ? new Error('legacy completion fixture cleanup failed') : undefined
+        )
         legacyCompletionClient = null
       }
       if (!legacyOwnerReleased) await releaseLegacyOwner()
