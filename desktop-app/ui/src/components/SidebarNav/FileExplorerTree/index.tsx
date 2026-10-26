@@ -13,7 +13,9 @@ import {
   type GfsCrumb,
   useGfsBrowserController,
 } from '@hooks/domain/useGfsBrowserController'
+import { assertGfsAuthorityRetryAllowed } from '@lib/gfsAuthorityQueryPolicy'
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
+import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
 import { resolveGfsPreview } from '@lib/gfsPreview'
 import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
 import { isGfsChildrenDenied, purgeDeniedGfsChildren } from '@/gfs/deniedChildren'
@@ -502,6 +504,17 @@ export function FileExplorerTree({
     node: GfsBrowserChild
     initialCrumbs: GfsCrumb[]
   } | null>(null)
+  const moveDialogTargetRef = useRef(moveDialogTarget)
+  moveDialogTargetRef.current = moveDialogTarget
+  const [movePermissionStatus, setMovePermissionStatus] = useState<'checking' | 'failed' | null>(
+    null
+  )
+
+  const closeMoveDialog = useCallback(() => {
+    moveDialogTargetRef.current = null
+    setMovePermissionStatus(null)
+    setMoveDialogTarget(null)
+  }, [])
 
   useEffect(
     () => () => {
@@ -890,10 +903,75 @@ export function FileExplorerTree({
 
   const handleRequestMove = useCallback(
     (node: GfsBrowserChild, ancestorCrumbs: readonly GfsCrumb[]) => {
-      setMoveDialogTarget({ node, initialCrumbs: [...ancestorCrumbs] })
+      const target = { node, initialCrumbs: [...ancestorCrumbs] }
+      moveDialogTargetRef.current = target
+      setMovePermissionStatus(null)
+      setMoveDialogTarget(target)
     },
     []
   )
+
+  const handleRetryMovePermission = async (
+    destinationId: string,
+    _destinationName: string,
+    isDialogCurrent: () => boolean
+  ) => {
+    const target = moveDialogTarget
+    if (!target || !isDialogCurrent()) return
+    const ownsRetry = () => moveDialogTargetRef.current === target && isDialogCurrent()
+    const scope = ctrl.sessionScope
+    const drive = target.node.drive || GFS_DRIVE_MAIN
+    const sourceParentId = target.node.parentResourceId
+    setMovePermissionStatus('checking')
+
+    try {
+      if (!scope || !sourceParentId) {
+        throw new Error('Could not verify the source folder for this move.')
+      }
+      const sourceKey = desktopQueryKeys.gfsAffordances(scope, sourceParentId, drive)
+      const destinationKey = desktopQueryKeys.gfsAffordances(scope, destinationId, drive)
+      assertGfsAuthorityRetryAllowed(queryClient, sourceKey)
+      assertGfsAuthorityRetryAllowed(queryClient, destinationKey)
+      const [source, destination] = await Promise.all([
+        queryClient.fetchQuery({
+          queryKey: sourceKey,
+          queryFn: () => window.clerum.gfs.affordances(sourceParentId, drive),
+          staleTime: 0,
+          retry: false,
+        }),
+        queryClient.fetchQuery({
+          queryKey: destinationKey,
+          queryFn: () => window.clerum.gfs.affordances(destinationId, drive),
+          staleTime: 0,
+          retry: false,
+        }),
+      ])
+      if (!ownsRetry()) {
+        if (moveDialogTargetRef.current === target) setMovePermissionStatus(null)
+        return
+      }
+      if (!hasGfsMoveSourcePermissions(source.held)) {
+        throw new Error('You do not have write and delete access to the source folder.')
+      }
+      if (!destination.held.includes('write')) {
+        throw new Error('You do not have write access to the destination folder.')
+      }
+      setMovePermissionStatus(null)
+    } catch (retryError) {
+      if (moveDialogTargetRef.current !== target) return
+      if (!isDialogCurrent()) {
+        setMovePermissionStatus(null)
+        return
+      }
+      const message = errorMessage(retryError) ?? String(retryError)
+      if (ctrl.handleAuthorityFailure(message, 'operation')) {
+        closeMoveDialog()
+        return
+      }
+      setMovePermissionStatus('failed')
+      throw retryError
+    }
+  }
 
   const handleActivateFolder = useCallback(
     (node: GfsBrowserChild) => {
@@ -1077,10 +1155,11 @@ export function FileExplorerTree({
 
       {moveDialogTarget ? (
         <GfsMoveDialog
-          busy={ctrl.mutating}
+          busy={ctrl.mutating || movePermissionStatus === 'checking'}
           initialCrumbs={moveDialogTarget.initialCrumbs}
-          onClose={() => setMoveDialogTarget(null)}
+          onClose={closeMoveDialog}
           onMove={async (destinationId, destinationName) => {
+            setMovePermissionStatus(null)
             const target = moveDialogTarget
             const allowNumberedRename = await adjudication.probeSourceWrite(target.node.resourceId)
             const source: GfsDragSource = {
@@ -1109,10 +1188,19 @@ export function FileExplorerTree({
               return
             }
             if (outcome.status !== 'committed' && outcome.status !== 'no-op') {
+              if (
+                moveDialogTargetRef.current === target &&
+                outcome.status === 'unconfirmed' &&
+                outcome.message ===
+                  'EvenDrive could not confirm permission for this move. Refresh and try again.'
+              ) {
+                setMovePermissionStatus('failed')
+              }
               throw new Error(outcome.message)
             }
             setMoveDialogTarget(null)
           }}
+          onRetryPermissionCheck={handleRetryMovePermission}
           onAuthorityFailure={message => {
             handleAuthorityFailure(message)
             return false
@@ -1124,6 +1212,7 @@ export function FileExplorerTree({
             kind: moveDialogTarget.node.kind === 'directory' ? 'directory' : 'file',
             parentResourceId: moveDialogTarget.node.parentResourceId ?? null,
           }}
+          permissionStatus={movePermissionStatus}
         />
       ) : null}
     </div>

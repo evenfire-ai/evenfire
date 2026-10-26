@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { FOLDER_HOVER_EXPAND_DELAY_MS } from '@constants/gfsBrowser'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import { activeWorkspaceTab, openFilesTab } from '@lib/workspaceTabs'
@@ -14,8 +15,13 @@ import {
   downloadResult,
   listAccessiblePage,
   listChildrenPage,
+  resolveResource,
   resolvedFile,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import {
+  appServiceAffordanceProducer,
+  heldPermissionResponse,
+} from '@/gfs/__fixtures__/permissionProducerFixtures'
 // ── drag-and-drop (rev-2 D1) ─────────────────────────────────────────────────
 
 import { GfsDragSessionProvider, useGfsDragSession } from '@/gfs/dragSession'
@@ -797,8 +803,220 @@ function renderTreeWithSession(props: Partial<Parameters<typeof FileExplorerTree
       </GfsDragSessionProvider>
     </QueryClientProvider>
   )
-  return { onOpenFolder, onOpenPreview, pushToast }
+  return { onOpenFolder, onOpenPreview, pushToast, queryClient }
 }
+
+describe('FileExplorerTree — explicit Move permission retry', () => {
+  const sourceResourceId = 'file-a'
+  const sourceParentId = 'source-parent'
+  const destinationAId = 'archive-a'
+  const destinationBId = 'archive-b'
+  const sessionScope = 'test:user-1:team-1'
+
+  async function openMoveDialog() {
+    const row = await screen.findByRole('button', { name: 'report.txt' })
+    fireEvent.keyDown(row, { key: 'F10', shiftKey: true })
+    return screen.findByRole('dialog', { name: 'Move file report.txt' })
+  }
+
+  function accessibleRows() {
+    return listAccessiblePage([
+      accessibleResource(sourceResourceId, 'report.txt', 'file', {
+        parentResourceId: sourceParentId,
+        path: '/Team/report.txt',
+        version: 4,
+        permissions: ['read'],
+      }),
+      accessibleResource(destinationAId, 'Archive A', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+      accessibleResource(destinationBId, 'Archive B', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+    ])
+  }
+
+  async function resolveSource() {
+    return resolveResource(
+      resolvedFile(sourceResourceId, 'report.txt', {
+        parentResourceId: sourceParentId,
+        version: 4,
+      })
+    )
+  }
+
+  it('freshly checks the source parent and destination without dispatching another Move', async () => {
+    let sourcePermissions = ['read']
+    let sourceParentReads = 0
+    let finishFirstRetry!: () => void
+    let markFirstRetryStarted!: () => void
+    const firstRetryStarted = new Promise<void>(resolve => {
+      markFirstRetryStarted = resolve
+    })
+    const firstRetryGate = new Promise<void>(resolve => {
+      finishFirstRetry = resolve
+    })
+    const produceAffordances = appServiceAffordanceProducer(async resourceId => {
+      if (resourceId === sourceParentId) {
+        sourceParentReads += 1
+        if (sourceParentReads === 1) {
+          markFirstRetryStarted()
+          await firstRetryGate
+        }
+        return heldPermissionResponse(sourcePermissions)
+      }
+      return heldPermissionResponse(['read', 'write', 'delete'])
+    })
+    const affordances = vi.fn((resourceId: string, drive?: string) =>
+      produceAffordances(resourceId, drive)
+    )
+    const moveResource = vi.fn(async () => {
+      throw new Error('403 Forbidden httpStatus=403')
+    })
+    const resolved = await resolveSource()
+    installDndClerum({
+      listAccessible: vi.fn(async () => accessibleRows()),
+      affordances,
+      resolve: vi.fn(async () => resolved),
+      moveResource,
+    })
+    const { pushToast } = renderTreeWithSession()
+
+    const dialog = await openMoveDialog()
+    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
+    await within(dialog).findByText(
+      'EvenDrive could not confirm permission for this move. Refresh and try again.'
+    )
+    expect(
+      await within(dialog).findByRole('button', { name: 'Retry permission check' })
+    ).toBeTruthy()
+    expect(moveResource).toHaveBeenCalledTimes(1)
+
+    affordances.mockClear()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
+    await firstRetryStarted
+    expect(within(dialog).getByText('Checking permissions…')).toBeTruthy()
+    expect(
+      (within(dialog).getByRole('button', { name: 'Move here (Archive A)' }) as HTMLButtonElement)
+        .disabled
+    ).toBe(true)
+    await act(async () => {
+      finishFirstRetry()
+    })
+    await within(dialog).findByText('You do not have write and delete access to the source folder.')
+    expect(
+      await within(dialog).findByRole('button', { name: 'Retry permission check' })
+    ).toBeTruthy()
+    expect(moveResource).toHaveBeenCalledTimes(1)
+
+    sourcePermissions = ['read', 'write', 'delete']
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
+    expect(
+      await within(dialog).findByText('Permissions verified. Select Move to confirm.')
+    ).toBeTruthy()
+    expect(affordances).toHaveBeenCalledWith(sourceParentId, 'main')
+    expect(affordances).toHaveBeenCalledWith(destinationAId, 'main')
+    expect(affordances).toHaveBeenCalledTimes(4)
+    expect(moveResource).toHaveBeenCalledTimes(1)
+    expect(pushToast).toHaveBeenCalledWith(
+      'EvenDrive could not confirm permission for this move. Refresh and try again.',
+      'warn'
+    )
+  })
+
+  it('does not apply an Archive A retry result after selection changes to Archive B', async () => {
+    let finishRetry!: () => void
+    let markRetryStarted!: () => void
+    const retryStarted = new Promise<void>(resolve => {
+      markRetryStarted = resolve
+    })
+    const retryGate = new Promise<void>(resolve => {
+      finishRetry = resolve
+    })
+    const produceAffordances = appServiceAffordanceProducer(async resourceId => {
+      if (resourceId === sourceParentId) {
+        markRetryStarted()
+        await retryGate
+      }
+      return heldPermissionResponse(['read', 'write', 'delete'])
+    })
+    const moveResource = vi.fn(async () => {
+      throw new Error('403 Forbidden httpStatus=403')
+    })
+    const resolved = await resolveSource()
+    installDndClerum({
+      listAccessible: vi.fn(async () => accessibleRows()),
+      affordances: vi.fn((resourceId: string, drive?: string) =>
+        produceAffordances(resourceId, drive)
+      ),
+      resolve: vi.fn(async () => resolved),
+      moveResource,
+    })
+    renderTreeWithSession()
+
+    const dialog = await openMoveDialog()
+    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
+    await within(dialog).findByText(
+      'EvenDrive could not confirm permission for this move. Refresh and try again.'
+    )
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
+    await retryStarted
+    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive B' }))
+    await act(async () => {
+      finishRetry()
+    })
+
+    expect(
+      await within(dialog).findByRole('button', { name: 'Move here (Archive B)' })
+    ).toBeTruthy()
+    expect(within(dialog).queryByText('Checking permissions…')).toBeNull()
+    expect(within(dialog).queryByText('Permissions verified. Select Move to confirm.')).toBeNull()
+    expect(moveResource).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps an explicit Retry inside the existing 429 pause', async () => {
+    const affordances = vi.fn(
+      appServiceAffordanceProducer(async () => heldPermissionResponse(['read', 'write', 'delete']))
+    )
+    const moveResource = vi.fn(async () => {
+      throw new Error('403 Forbidden httpStatus=403')
+    })
+    const resolved = await resolveSource()
+    installDndClerum({
+      listAccessible: vi.fn(async () => accessibleRows()),
+      affordances,
+      resolve: vi.fn(async () => resolved),
+      moveResource,
+    })
+    const { queryClient } = renderTreeWithSession()
+
+    const dialog = await openMoveDialog()
+    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
+    await within(dialog).findByText(
+      'EvenDrive could not confirm permission for this move. Refresh and try again.'
+    )
+    affordances.mockClear()
+    await expect(
+      queryClient.fetchQuery({
+        queryKey: desktopQueryKeys.gfsAffordances(sessionScope, sourceParentId, 'main'),
+        queryFn: async () => {
+          throw new Error('429 Too Many Requests retryAfterSeconds=30')
+        },
+        retry: false,
+      })
+    ).rejects.toThrow('429 Too Many Requests retryAfterSeconds=30')
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
+    expect(
+      await within(dialog).findByText(/Too many file requests — try again in \d+s\./)
+    ).toBeTruthy()
+    expect(affordances).not.toHaveBeenCalled()
+    expect(moveResource).toHaveBeenCalledTimes(1)
+  })
+})
 
 describe('FileExplorerTree — drag-and-drop moves', () => {
   it('still opens the confirmation when adjudication resolves after the gesture’s dragend', async () => {
