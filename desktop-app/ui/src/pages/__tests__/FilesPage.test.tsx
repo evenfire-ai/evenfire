@@ -6907,7 +6907,9 @@ describe('FilesPage — folder drag-and-drop', () => {
 
   // Breadcrumb crumb drop targets (Control UI parity): the trail inside a
   // nested folder — folder-0 "Product" is an enabled ancestor crumb, folder-1
-  // "Child" is the active (disabled) crumb and the rows' parent.
+  // "Child" is the ACTIVE crumb (a live drop target: same-parent no-op for
+  // its own listing rows, a real move for items from other surfaces) and the
+  // rows' parent.
   function crumbDragHarness(
     options: {
       destinationHeld?: string[]
@@ -7083,6 +7085,28 @@ describe('FilesPage — folder drag-and-drop', () => {
         'You can’t move Projects out of its current folder because you don’t have delete access to the folder that contains it.',
         'error'
       )
+    )
+    expect(moveResource).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('dropping a listing row onto the ACTIVE crumb explains it is already there', async () => {
+    const { pushToast, moveResource } = crumbDragHarness()
+    const sourceRow = screen.getByRole('button', { name: 'Open Projects' })
+    const activeCrumb = screen.getByRole('button', { name: 'Child' })
+    expect(activeCrumb.getAttribute('aria-current')).toBe('page')
+    const dataTransfer = crumbDragDataTransfer()
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragOver(activeCrumb, { dataTransfer })
+    await waitFor(() => {
+      expect(activeCrumb.getAttribute('data-drop-state')).toBe('denied')
+    })
+    expect(activeCrumb.getAttribute('data-drop-reason')).toBe('same-parent')
+
+    fireEvent.drop(activeCrumb, { dataTransfer })
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith('Projects is already in Child.', 'info')
     )
     expect(moveResource).not.toHaveBeenCalled()
     expect(screen.queryByRole('dialog')).toBeNull()

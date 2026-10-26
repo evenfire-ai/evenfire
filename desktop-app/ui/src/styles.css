@@ -15373,9 +15373,11 @@ pre {
   white-space: nowrap;
 }
 
-.da-gfs-drive__breadcrumb.ui-button:disabled {
+.da-gfs-drive__breadcrumb.ui-button[aria-current='page'] {
   color: var(--text);
   opacity: 1;
+  background: rgba(var(--accent-rgb), 0.1);
+  cursor: default;
 }
 
 /* Breadcrumb drop-move verdict tints (drop-move parity, refusal UX matrix):

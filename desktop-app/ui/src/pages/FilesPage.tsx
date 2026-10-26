@@ -2151,7 +2151,12 @@ export function FilesPage({
                             : ''
                         }`}
                         color="neutral"
-                        disabled={index === crumbs.length - 1}
+                        // The ACTIVE crumb stays a live drop target (Control UI
+                        // parity): a listing row dropped here is the same-parent
+                        // no-op ("already in"), and an item dragged from another
+                        // surface (the sidebar tree) moves INTO the open folder.
+                        // Only the click is inert — you are already here.
+                        aria-current={index === crumbs.length - 1 ? 'page' : undefined}
                         title={
                           gfsDropVerdictReason(dropStatesById[crumb.resourceId]) !== undefined
                             ? gfsDropVerdictLiveAnnouncement(
@@ -2163,19 +2168,18 @@ export function FilesPage({
                         }
                         data-drop-state={dropStatesById[crumb.resourceId]?.state}
                         data-drop-reason={gfsDropVerdictReason(dropStatesById[crumb.resourceId])}
-                        onClick={() => ctrl.goToCrumb(index)}
+                        onClick={
+                          index === crumbs.length - 1 ? undefined : () => ctrl.goToCrumb(index)
+                        }
                         onDragEnter={event => handleCrumbDragOver(event, crumb, index)}
                         onDragOver={event => handleCrumbDragOver(event, crumb, index)}
                         onDragLeave={handleFolderDragLeave}
-                        onDrop={
-                          index === crumbs.length - 1
-                            ? undefined
-                            : event =>
-                                void handleFolderDrop(event, {
-                                  resourceId: crumb.resourceId,
-                                  name: crumb.name,
-                                  kind: 'directory',
-                                })
+                        onDrop={event =>
+                          void handleFolderDrop(event, {
+                            resourceId: crumb.resourceId,
+                            name: crumb.name,
+                            kind: 'directory',
+                          })
                         }
                         variant="text"
                       >
