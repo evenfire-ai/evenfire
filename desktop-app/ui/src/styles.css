@@ -15379,35 +15379,43 @@ pre {
 }
 
 /* Breadcrumb drop-move verdict tints (drop-move parity, refusal UX matrix):
-   same tone contract as the tree rows and grid rows — only observed-allowed
-   paints the accent, checking is neutral, the unknown family warns, and a
-   deny carries the danger inset. The active (disabled) crumb is never a
-   target, so these only ever render on ancestor crumbs. */
+   identical treatment to Control UI's cu-gfs-breadcrumb verdicts — the
+   target gets a crisp 2px accent ring, checking dashes neutrally, ordinary
+   denials read as error, the unknown family warns, and the same-parent
+   no-op stays neutral. The active (disabled) crumb is never a target, so
+   these only ever render on ancestor crumbs. */
 .da-gfs-drive__breadcrumb.ui-button[data-drop-state='checking'] {
+  outline: 2px dashed rgba(var(--accent-rgb), 0.4);
+  outline-offset: -2px;
   background: rgba(var(--edge-rgb), 0.08);
 }
 
 .da-gfs-drive__breadcrumb.ui-button[data-drop-state='allowed'],
 .da-gfs-drive__breadcrumb.ui-button.da-gfs-drive__breadcrumb--allowed {
-  background: rgba(var(--accent-rgb), 0.12);
+  outline: 2px solid rgba(var(--accent-rgb), 0.72);
+  outline-offset: -2px;
+  background: rgba(var(--accent-rgb), 0.14);
 }
 
 .da-gfs-drive__breadcrumb.ui-button[data-drop-state='denied'] {
-  background: rgba(var(--danger-rgb), 0.1);
-  box-shadow: inset 2px 0 0 rgba(var(--danger-rgb), 0.72);
+  outline: 2px solid rgba(var(--danger-rgb), 0.6);
+  outline-offset: -2px;
+  background: rgba(var(--danger-rgb), 0.12);
 }
 
 .da-gfs-drive__breadcrumb.ui-button[data-drop-state='denied'][data-drop-reason='same-parent'] {
-  background: rgba(var(--edge-rgb), 0.12);
-  box-shadow: inset 2px 0 0 rgba(var(--edge-rgb), 0.6);
+  outline: 2px solid rgba(var(--accent-rgb), 0.35);
+  outline-offset: -2px;
+  background: rgba(var(--edge-rgb), 0.08);
 }
 
 .da-gfs-drive__breadcrumb.ui-button[data-drop-state='denied'][data-drop-reason='unavailable'],
 .da-gfs-drive__breadcrumb.ui-button[data-drop-state='denied'][data-drop-reason='target-unavailable'],
 .da-gfs-drive__breadcrumb.ui-button[data-drop-state='denied'][data-drop-reason='source-location-unknown'],
 .da-gfs-drive__breadcrumb.ui-button[data-drop-state='unavailable'] {
-  background: rgba(var(--warning-rgb), 0.1);
-  box-shadow: inset 2px 0 0 rgba(var(--warning-rgb), 0.72);
+  outline: 2px solid rgba(var(--warning-rgb), 0.6);
+  outline-offset: -2px;
+  background: rgba(var(--warning-rgb), 0.12);
 }
 
 .da-gfs-drive__header-actions {
