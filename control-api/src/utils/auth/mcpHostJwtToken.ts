@@ -24,6 +24,23 @@ export const MCP_HOST_CREDENTIAL_CAPABILITY = 'mcp:credential:read'
  */
 export const MCP_HOST_HCC_ACCESS_MAX_TTL_SECONDS = 600
 const HCC_HOST_NAME_RE = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/
+export const HCC_STANDALONE_RECIPE_NAME = 'standalone'
+
+/** HCC token lineage: the hosts-namespace standalone recipe and one bare Host name. */
+function isHccShape(
+  recipeNamespace: string,
+  recipeName: string,
+  hostRefs: string[],
+  hostsNamespace: string = config.hostsNamespace
+): boolean {
+  return (
+    recipeNamespace === hostsNamespace &&
+    recipeName === HCC_STANDALONE_RECIPE_NAME &&
+    hostRefs.length === 1 &&
+    hostRefs[0].length <= 63 &&
+    HCC_HOST_NAME_RE.test(hostRefs[0])
+  )
+}
 
 type McpHostCredentialLineage = {
   hostUid: string
@@ -62,20 +79,7 @@ function cacheRevokedRefreshJti(jti: string): void {
   }
 }
 
-// Explicit revocation path for admin/manual invalidation flows. Refresh-token
-// rotation uses consumeRefreshJti() instead so the one-time-use path stays
-// atomic under race.
-async function revokeRefreshJti(jti: string, exp: number): Promise<void> {
-  const expiresAt = new Date(exp * 1000).toISOString()
-  // Persist to DB first (authoritative), then update cache
-  await pool.query(
-    `INSERT INTO workflow_revoked_refresh_jtis (jti, expires_at) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-    [jti, expiresAt]
-  )
-  cacheRevokedRefreshJti(jti)
-}
-
-async function consumeRefreshJti(jti: string, exp: number): Promise<boolean> {
+async function insertRefreshJtiOnce(jti: string, exp: number): Promise<boolean> {
   if (revokedRefreshJtis.has(jti)) {
     return false
   }
@@ -110,8 +114,6 @@ async function isRefreshJtiRevoked(jti: string): Promise<boolean> {
   }
   return false
 }
-
-export { revokeRefreshJti }
 
 /**
  * For 1st-party HCC-issued tokens, `hostRefs[0]` is the actual Host CRD
@@ -198,10 +200,31 @@ export type McpHostControlClaims = {
   hostRefs: string[]
   typ: 'service'
   scopes: McpHostControlScope[]
+  host_uid?: string
   iss: string
   aud: string
   jti: string
   exp: number
+}
+
+const BROKER_USER_TOKEN_SCOPE: McpHostControlScope = 'oauth:user-token'
+
+/**
+ * Structural shape of a control token minted for a host-context-controller
+ * Host: the sentinel standalone recipe in the hosts namespace and exactly one
+ * bare Host name. `standalone` itself is rejected because it is the reserved
+ * name of the legacy shared principal, not a Host. Deliberately not part of
+ * `verifyMcpHostControlJwt`: other verifiers accept workflow-recipe tokens and
+ * a Host that happens to be called `standalone`.
+ */
+export function isHccControlLineage(
+  claims: Pick<McpHostControlClaims, 'recipeNamespace' | 'recipeName' | 'hostRefs'>,
+  hostsNamespace: string
+): boolean {
+  return (
+    isHccShape(claims.recipeNamespace, claims.recipeName, claims.hostRefs, hostsNamespace) &&
+    claims.hostRefs[0] !== HCC_STANDALONE_RECIPE_NAME
+  )
 }
 
 // Lazy memoized public key — deferred until first verification call so that
@@ -316,11 +339,27 @@ export function issueMcpHostControlJwt(
   recipeNamespace: string,
   recipeName: string,
   hostRefs?: string[],
-  options: { scopes?: McpHostControlScope[] } = {}
-): { token: string; expiresInSeconds: number } {
+  options: { scopes?: McpHostControlScope[]; hccCredential?: McpHostCredentialLineage } = {}
+): { token: string; expiresInSeconds: number; scopeStripped: boolean } {
   const refs = normalizeIssuedMcpHostHostRefs(recipeNamespace, recipeName, hostRefs)
-  const scopes = normalizeMcpHostControlScopes(options.scopes ?? [])
-  if (!scopes) throw new Error('invalid mcp-host control scopes')
+  const requestedScopes = normalizeMcpHostControlScopes(options.scopes ?? [])
+  if (!requestedScopes) throw new Error('invalid mcp-host control scopes')
+  const { hccCredential } = options
+  if (hccCredential) {
+    assertHccCredentialLineage(recipeNamespace, recipeName, refs, hccCredential)
+  }
+  // The OAuth broker binds a control token to a live Host through host_uid, so
+  // only HCC-lineage tokens may carry the broker scope. Filtering here (not in
+  // each route) also covers refresh/reissue of older chains that still list the
+  // scope. Access and refresh keep it because they never authorize at the
+  // broker. workflow-recipes compares the scopes of all three tokens, control
+  // included, against what it requested and re-mints on any difference: if it
+  // ever requests oauth:user-token, this strip turns into a permanent re-mint
+  // loop. Today only host-context-controller requests that scope.
+  const scopeStripped = !hccCredential && requestedScopes.includes(BROKER_USER_TOKEN_SCOPE)
+  const scopes = scopeStripped
+    ? requestedScopes.filter(scope => scope !== BROKER_USER_TOKEN_SCOPE)
+    : requestedScopes
   const token = jwt.sign(
     {
       sub: `${recipeNamespace}/${recipeName}`,
@@ -329,6 +368,9 @@ export function issueMcpHostControlJwt(
       hostRefs: refs,
       typ: 'service',
       scopes,
+      // host_uid only. mcpCapabilities would let this token act as an HCC
+      // credential reader; that authority stays on access/refresh.
+      ...(hccCredential ? { host_uid: hccCredential.hostUid } : {}),
     },
     config.adminJwtPrivateKey,
     {
@@ -340,7 +382,7 @@ export function issueMcpHostControlJwt(
     }
   )
   mcpHostJwtIssueTotal.inc({ kind: 'control' }, 1)
-  return { token, expiresInSeconds: config.mcpHostJwtControlTtlSec }
+  return { token, expiresInSeconds: config.mcpHostJwtControlTtlSec, scopeStripped }
 }
 
 function normalizeMcpHostControlScopes(value: unknown): McpHostControlScope[] | null {
@@ -387,14 +429,7 @@ function assertHccCredentialLineage(
   hostRefs: string[],
   lineage: McpHostCredentialLineage
 ): void {
-  if (
-    recipeNamespace !== config.hostsNamespace ||
-    recipeName !== 'standalone' ||
-    hostRefs.length !== 1 ||
-    hostRefs[0].length > 63 ||
-    !HCC_HOST_NAME_RE.test(hostRefs[0]) ||
-    !normalizeHostUid(lineage.hostUid)
-  ) {
+  if (!isHccShape(recipeNamespace, recipeName, hostRefs) || !normalizeHostUid(lineage.hostUid)) {
     throw new Error('invalid HCC mcp-host credential lineage')
   }
 }
@@ -415,11 +450,7 @@ function validateMcpCredentialLineage(
   const hostUid = normalizeHostUid(payload.host_uid)
   const capabilities = payload.mcpCapabilities
   if (
-    recipeNamespace !== config.hostsNamespace ||
-    recipeName !== 'standalone' ||
-    hostRefs.length !== 1 ||
-    hostRefs[0].length > 63 ||
-    !HCC_HOST_NAME_RE.test(hostRefs[0]) ||
+    !isHccShape(recipeNamespace, recipeName, hostRefs) ||
     !hostUid ||
     !Array.isArray(capabilities) ||
     capabilities.length !== 1 ||
@@ -532,6 +563,13 @@ export function verifyMcpHostControlJwt(token: string): McpHostControlClaims | n
       return null
     }
 
+    let hostUid: string | undefined
+    if (payload.host_uid !== undefined) {
+      const normalized = normalizeHostUid(payload.host_uid)
+      if (!normalized) return null
+      hostUid = normalized
+    }
+
     return {
       sub,
       recipeNamespace,
@@ -539,6 +577,7 @@ export function verifyMcpHostControlJwt(token: string): McpHostControlClaims | n
       hostRefs,
       typ: 'service',
       scopes,
+      ...(hostUid ? { host_uid: hostUid } : {}),
       iss: payload.iss as string,
       aud: 'mcp-host',
       jti,
@@ -663,7 +702,7 @@ export async function verifyMcpHostRefreshJwt(token: string): Promise<McpHostRef
  * (the caller surfaces an opaque 401 to avoid leaking which check failed).
  *
  * Does NOT consume the jti — callers that want one-shot semantics must
- * invoke `consumeRevokedRefreshJti` separately (see route handler).
+ * invoke `consumeRefreshJti` separately (see route handler).
  */
 export async function verifyExpiredMcpHostRefreshJwt(
   token: string
@@ -707,52 +746,23 @@ export async function verifyExpiredMcpHostRefreshJwtDetailed(
 }
 
 /**
- * Atomic single-use consumption of an expired refresh jti on the recovery
- * path. Same contract as `consumeRefreshJti` but exported so the
- * reissue route can close the race between "verify" and "emit new pair":
- * if two mcp-host replicas both hold the same expired refresh and both
- * hit /reissue simultaneously, only one wins the INSERT and only one
- * receives fresh tokens.
+ * Atomic single-use consumption of a refresh jti. Callers verify first
+ * (`verifyMcpHostRefreshJwt` / `verifyExpiredMcpHostRefreshJwtDetailed`),
+ * run every check that can fail transiently, and only then consume: a
+ * consumed jti cannot be retried, so consuming before a check that answers
+ * 503 would burn the caller's rotation chain. When two requests race on the
+ * same jti only one wins the INSERT.
  */
-export async function consumeExpiredRefreshJti(jti: string, exp: number): Promise<boolean> {
-  // The expiry cron removes rows where `expires_at < now()`. An expired
-  // refresh jti (exp in the past) would be reclaimed almost immediately,
-  // which defeats replay prevention during the short window after reissue.
-  // Floor the stored expiry at the reissue grace window so the revocation record
-  // survives long enough to block a replayed token issued in the same
-  // minute.
-  const minExp = Math.floor(Date.now() / 1000) + EXPIRED_REFRESH_REISSUE_GRACE_SECONDS
-  const effectiveExp = Math.max(exp, minExp)
-  return consumeRefreshJti(jti, effectiveExp)
-}
-
-export async function consumeMcpHostRefreshJwt(
-  token: string
-): Promise<McpHostRefreshClaims | null> {
-  try {
-    const payload = jwt.verify(token, getWorkflowJwtPublicKey(), {
-      algorithms: ['RS256'],
-      issuer: config.adminJwtIssuer,
-      audience: MCP_HOST_WORKFLOW_AUDIENCE,
-    }) as jwt.JwtPayload
-
-    const claims = validateClaims(
-      payload,
-      'workflow:approval:refresh'
-    ) as McpHostRefreshClaims | null
-    if (!claims) {
-      return null
-    }
-
-    const consumed = await consumeRefreshJti(claims.jti, claims.exp)
-    if (!consumed) {
-      return null
-    }
-
-    return claims
-  } catch {
-    return null
-  }
+export async function consumeRefreshJti(jti: string, exp: number): Promise<boolean> {
+  // Reissue accepts a refresh until `exp + grace`, and the expiry cron deletes
+  // rows once `expires_at` passes. The row must therefore outlive the whole
+  // reissue window: stored at plain `exp`, the cron could drop it while the
+  // consumed token is still reissuable, and after a restart (cold in-memory
+  // cache) reissue would accept it a second time. `now + grace` covers a jti
+  // consumed on reissue after its exp.
+  const now = Math.floor(Date.now() / 1000)
+  const replayableUntil = Math.max(exp, now) + EXPIRED_REFRESH_REISSUE_GRACE_SECONDS
+  return insertRefreshJtiOnce(jti, replayableUntil)
 }
 
 export function getMcpHostCallerKey(

@@ -12,8 +12,8 @@ import {
 import { signOAuthState } from '../src/oauth/state.js'
 import { buildRemoteOAuthSpec } from '../src/routes/admin/remoteMcp.js'
 import { normalizeMcpServerOwnerDecl } from '../src/routes/mcpOauth.js'
-import { issueMcpHostControlJwt } from '../src/utils/auth/mcpHostJwtToken.js'
-import { membership, seedAllowlistedContext } from './fixtures/contextAllowlist.js'
+import { membership, seedAgentHost, seedAllowlistedContext } from './fixtures/contextAllowlist.js'
+import { mintHccControlToken } from './fixtures/hccControlToken.js'
 import {
   type InstalledMcpServer,
   WORKIQ_GUID_SCOPE,
@@ -65,6 +65,9 @@ vi.mock('../src/services/rateLimiterService.js', () => ({
 
 const MCP_NS = config.mcpServersNamespace
 const CONTEXT = 'ctx-9'
+const RUNTIME_HOST = 'agent-host'
+// users.id is a UUID: the broker refuses any other end-user id.
+const RUNTIME_USER = '3f9a1c2e-6b4d-4e8f-a1c3-5d7e9f0b2a46'
 const PRE_REGISTERED_CLIENT_ID = 'client-abc'
 const CIMD_SELF = 'https://control.example.com/api/v1/.well-known/evenfire-mcp-client'
 const RPC_PROXY_TOKEN = 'dev-rpc-proxy-token'
@@ -628,7 +631,11 @@ describe('routes refuse an incoherent remote server with 409 remote_oauth_spec_i
     it(`${c.label}: POST /mcp-oauth/user-token → ${c.consentOnly ? '200, the stored token is served' : '409 even with a fresh stored token'}`, async () => {
       const oauth = c.oauth()
       const uid = await seed('srv', oauth, c.remote?.())
-      mockPoolQuery.mockImplementation((sql: unknown) => {
+      // The runtime caller is a live Host of CONTEXT, through whose allowlist the
+      // server is reached, and the end user enters that Host.
+      await seedAgentHost(gateway, RUNTIME_HOST, CONTEXT)
+      const token = await mintHccControlToken(app, gateway, RUNTIME_HOST)
+      membership(mockPoolQuery, { agents: { [RUNTIME_USER]: [RUNTIME_HOST] } }, sql => {
         const text = typeof sql === 'string' ? sql : ''
         if (text.includes('FROM oauth_grants')) {
           return Promise.resolve({
@@ -637,7 +644,7 @@ describe('routes refuse an incoherent remote server with 409 remote_oauth_spec_i
                 owner_kind: 'mcpserver',
                 recipe_namespace: MCP_NS,
                 recipe_name: 'srv',
-                user_id: 'user-1',
+                user_id: RUNTIME_USER,
                 context_id: null,
                 bootstrapped_by_user_id: null,
                 oauth_client_id: oauth.id,
@@ -656,13 +663,10 @@ describe('routes refuse an incoherent remote server with 409 remote_oauth_spec_i
         }
         return Promise.resolve({ rows: [], rowCount: 0 })
       })
-      const token = issueMcpHostControlJwt('mcp-host', 'standalone', ['mcp-host/standalone'], {
-        scopes: ['oauth:user-token'],
-      }).token
       const res = await request(app)
         .post('/api/v1/mcp-oauth/user-token')
         .set('Authorization', `Bearer ${token}`)
-        .send({ mcpServerName: 'srv', userId: 'user-1' })
+        .send({ mcpServerName: 'srv', userId: RUNTIME_USER })
       if (c.consentOnly) {
         expect(res.status).toBe(200)
         expect(JSON.stringify(res.body)).toContain('LIVE-ACCESS')
