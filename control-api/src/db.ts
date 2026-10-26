@@ -10,6 +10,10 @@ import { applyAdminSubscriptionRateLimitNamespace } from './services/adminSubscr
 import {
   applyPasswordAdmissionSchema,
   applyPasswordEvaluationRetentionSchema,
+  applyPasswordSuccessAdmissionSchema,
+  assertPasswordAdmissionRolloutReady,
+  passwordVerificationOwnerCount,
+  preparePasswordAdmissionRolloutFence,
 } from './services/auth/passwordAdmissionSchema.js'
 import { applyPasswordWorkOwnershipSchema } from './services/auth/passwordWorkOwnershipSchema.js'
 import { applyCodexCatalogModelsSchema } from './services/codexSubscriptionCatalog.js'
@@ -95,6 +99,7 @@ type DbConnector = {
 }
 
 const INIT_DB_LOCK_KEY_SQL = "hashtext('control-api-init-db-v1')::bigint"
+const PASSWORD_SUCCESS_ADMISSION_MIGRATION = '0130_password_login_success_admission'
 
 type DbMigration = {
   version: string
@@ -6377,6 +6382,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0129_workflow_schedules_concurrency_policy',
     apply: applyWorkflowScheduleConcurrencyPolicyMigration,
   },
+  {
+    version: '0130_password_login_success_admission',
+    apply: applyPasswordSuccessAdmissionSchema,
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {
@@ -6707,6 +6716,40 @@ async function applyPendingMigrations(db: DbClient): Promise<void> {
   }
 }
 
+async function preparePasswordAdmissionMigrationFence(
+  db: DbClient,
+  appliedVersions: Set<string>
+): Promise<boolean> {
+  if (appliedVersions.has(PASSWORD_SUCCESS_ADMISSION_MIGRATION)) return false
+
+  const result = await db.query(`
+    SELECT to_regclass('public.password_identifier_state') AS identifier_state,
+           to_regclass('public.password_verification_work') AS work_owner
+  `)
+  const tables = result.rows[0] as
+    | { identifier_state: string | null; work_owner: string | null }
+    | undefined
+  if (!tables?.identifier_state) return false
+  if (!tables.work_owner) {
+    throw new Error(
+      'password admission migration requires the durable verifier owner before the legacy fence'
+    )
+  }
+
+  await db.query("SET LOCAL lock_timeout = '60s'")
+  await preparePasswordAdmissionRolloutFence(db)
+  return true
+}
+
+async function waitForPasswordVerifierDrain(db: DbClient): Promise<void> {
+  for (;;) {
+    if ((await passwordVerificationOwnerCount(db)) === 0) return
+    // The surrounding Kubernetes migration Job provides the established finite
+    // rollout deadline. Never clear or age-reclaim a durable owner here.
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+}
+
 export async function initDb(db: DbConnector = pool): Promise<void> {
   const client = await db.connect()
   let locked = false
@@ -6716,10 +6759,39 @@ export async function initDb(db: DbConnector = pool): Promise<void> {
     await client.query(`SELECT pg_advisory_lock(${INIT_DB_LOCK_KEY_SQL})`)
     locked = true
 
+    // Ensure the rollout fence is durably committed before the schema transaction
+    // can alter the old verifier's admission state. The session advisory lock is
+    // held across both phases and the owner drain, but no database transaction is.
     await client.query('BEGIN')
     inTransaction = true
+    await client.query('SET LOCAL synchronous_commit = on')
+    await ensureSchemaMigrationsTable(client)
+    const initialAppliedVersions = await loadAppliedMigrationVersions(client)
+    const drainLegacyVerifiers = await preparePasswordAdmissionMigrationFence(
+      client,
+      initialAppliedVersions
+    )
+    await client.query('COMMIT')
+    inTransaction = false
+
+    if (drainLegacyVerifiers) await waitForPasswordVerifierDrain(client)
+
+    await client.query('BEGIN')
+    inTransaction = true
+    await client.query('SET LOCAL synchronous_commit = on')
+    await client.query("SET LOCAL app.password_admission_rollout_migration = 'v2'")
 
     await applyPendingMigrations(client)
+    // The explicit readiness probe is meaningful after the migration row is
+    // visible in PostgreSQL. Lightweight migration fakes do not persist rows;
+    // startup still performs this probe through assertDbReady().
+    const completedVersions = await loadAppliedMigrationVersions(client)
+    if (
+      !initialAppliedVersions.has(PASSWORD_SUCCESS_ADMISSION_MIGRATION) &&
+      completedVersions.has(PASSWORD_SUCCESS_ADMISSION_MIGRATION)
+    ) {
+      await assertPasswordAdmissionRolloutReady(client)
+    }
 
     await client.query('COMMIT')
     inTransaction = false
@@ -6755,6 +6827,9 @@ export async function assertDbReady(db: DbClient = pool): Promise<void> {
   }).map(migration => migration.version)
   if (missing.length) {
     throw new Error(`Control API database is not ready: missing migrations ${missing.join(', ')}`)
+  }
+  if (applied.has(PASSWORD_SUCCESS_ADMISSION_MIGRATION)) {
+    await assertPasswordAdmissionRolloutReady(db)
   }
 }
 

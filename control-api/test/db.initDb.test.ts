@@ -930,11 +930,13 @@ describe('db.initDb', () => {
 
     expect(sqls[0]).toContain('SELECT pg_advisory_lock')
     expect(sqls[1]).toBe('BEGIN')
+    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(1)
+    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(2)
     expect(sqls).toContainEqual(
       expect.stringContaining('CREATE TABLE IF NOT EXISTS schema_migrations')
     )
     expect(sqls).toContain('ROLLBACK')
-    expect(sqls).not.toContain('COMMIT')
+    expect(sqls.indexOf('COMMIT')).toBeLessThan(sqls.indexOf('ROLLBACK'))
     expect(sqls[sqls.length - 1]).toContain('SELECT pg_advisory_unlock')
     expect(clientRelease).toHaveBeenCalledTimes(1)
   })
@@ -961,8 +963,9 @@ describe('db.initDb', () => {
     expect(sqls).toContainEqual(
       expect.stringContaining('CREATE TABLE IF NOT EXISTS desktop_user_retirement_operations')
     )
+    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(1)
     expect(sqls).toContain('ROLLBACK')
-    expect(sqls).not.toContain('COMMIT')
+    expect(sqls.indexOf('COMMIT')).toBeLessThan(sqls.indexOf('ROLLBACK'))
     const retirementRecord = clientQuery.mock.calls.find(
       ([, params]) =>
         Array.isArray(params) && params[0] === '0094_desktop_user_retirement_lifecycle'

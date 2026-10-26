@@ -13,15 +13,17 @@ const VERSION = '0129_workflow_schedules_concurrency_policy'
 type QueryResult = { rows: unknown[]; rowCount: number }
 
 function recordingQuery(appliedVersions: string[]) {
-  return vi.fn(
-    async (sql: string): Promise<QueryResult> =>
-      sql.includes('SELECT version FROM schema_migrations')
-        ? {
-            rows: appliedVersions.map(version => ({ version })),
-            rowCount: appliedVersions.length,
-          }
-        : { rows: [], rowCount: 0 }
-  )
+  return vi.fn(async (sql: string): Promise<QueryResult> => {
+    if (sql.includes('password_admission_rollout_is_ready')) {
+      return { rows: [{ ready: true }], rowCount: 1 }
+    }
+    return sql.includes('SELECT version FROM schema_migrations')
+      ? {
+          rows: appliedVersions.map(version => ({ version })),
+          rowCount: appliedVersions.length,
+        }
+      : { rows: [], rowCount: 0 }
+  })
 }
 
 describe('0129_workflow_schedules_concurrency_policy migration', () => {
@@ -82,7 +84,7 @@ describe('0129_workflow_schedules_concurrency_policy migration', () => {
   it('initDb applies it exactly once on a cluster that recorded every earlier migration', async () => {
     const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
     const earlier = CONTROL_API_MIGRATIONS.map(migration => migration.version).filter(
-      version => version !== VERSION
+      version => version < VERSION
     )
     const query = recordingQuery(earlier)
     const release = vi.fn()

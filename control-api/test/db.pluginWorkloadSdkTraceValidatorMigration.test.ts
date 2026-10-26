@@ -41,7 +41,7 @@ describe('Plugin Workload SDK runtime-contract reconciliation migration', () => 
     clientQuery.mockImplementation(async (sql: string) => {
       if (sql.includes('SELECT version FROM schema_migrations')) {
         const appliedVersions = CONTROL_API_MIGRATIONS.filter(
-          candidate => candidate.version !== migration?.version
+          candidate => candidate.version < (migration?.version ?? '')
         ).map(candidate => ({ version: candidate.version }))
         return { rows: appliedVersions, rowCount: appliedVersions.length }
       }

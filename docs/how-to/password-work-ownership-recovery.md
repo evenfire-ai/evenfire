@@ -30,6 +30,30 @@ container/process termination from the node runtime, or infrastructure fencing t
 prevents that node/process from resuming. If that evidence is unavailable, leave
 password verification fail-closed and escalate to the infrastructure owner.
 
+## Roll out the Spec 092 outcome-admission protocol
+
+The migration runner keeps the database session advisory lock across the fence, owner drain
+and schema upgrade, while committing the fence before waiting or migrating. In its first
+durable transaction it marks admission as draining and installs database guards. Trigger DDL
+waits for any legacy admission or completion transaction already holding those tables. Only
+after the guards are installed does the transaction record `fenced_at_ms` and commit. This
+timestamp therefore follows every legacy completion transaction that could still commit.
+
+After the fence commits, an old verifier cannot start another owned bcrypt operation or write
+identifier state. A verifier that released its work-owner row before its completion transaction
+will have that late legacy write rejected; it must fail closed without issuing a session. The
+migration then waits for the durable owner table to become empty without reclaiming it by age,
+applies schema 0130 in a separate durable transaction, and verifies the rollout state is `v2`.
+The migration backfill keeps a legacy hold for at least 15 minutes after the committed fence
+timestamp. A migration timeout leaves the fence in place; retry the supported migration path or
+keep password login unavailable. Do not manually clear the fence, owner, or identifier state.
+
+The private dev workflow runs the migration before the rendered Control API release, and the
+Deployment uses `Recreate` before new pods start. The database fence protects migration even
+while old pods are still present; `Recreate` must still complete before new verifier processes
+serve traffic. If node termination is uncertain, follow the exact-incarnation proof above and
+do not treat an empty Kubernetes listing as proof.
+
 ## Recover an abandoned slot
 
 This is a privileged, separately authorized operational change, not an API endpoint.
@@ -49,6 +73,79 @@ This is a privileged, separately authorized operational change, not an API endpo
    record or missing row means the observation is stale; stop and investigate.
 5. Keep the aggregate pace and identifier state intact. Resume only ownership-aware
    instances and verify ordinary password authentication and current service health.
+
+## Reconcile an abandoned identifier operation
+
+Spec 092 adds a second durable fence: a running per-identity provisional operation. A
+missing global work row does not prove this operation is safe to reuse. Do not delete
+or expire a running identifier operation directly.
+
+1. Complete the exact-incarnation termination/fencing proof above for every old verifier
+   process. `password_work_process_incarnation` startup logs record the random process
+   incarnation, host and PID without recording an identity or operation token. If those
+   logs or infrastructure evidence cannot bind the persisted owner tuple to a terminated
+   process, leave the identity fenced.
+2. Using the authorized database owner, inspect the hashed identifier row and retain the
+   exact `instance`, current `revision`, `provisional_operation`, `provisional_epoch`,
+   `provisional_scope`, `provisional_quota_masked`, `provisional_owner_instance`,
+   `provisional_owner_host` and `provisional_owner_pid`. Never include the unhashed email
+   in an operational ticket or log.
+3. If `terminal_operation` already equals the operation token, its receipt is authoritative.
+   Do not debit or clear anything again. If the state instance, revision, token, phase, or
+   owner tuple changes before reconciliation, stop; the observation is stale.
+4. For an exact `running` operation, choose a disposition only from trusted evidence:
+
+   - `failure`: authoritative evidence proves the verification completed unsuccessfully;
+     add one F and start the 15-minute cooldown if this is the fifth completed failure.
+   - `success`: authoritative evidence proves a public credential success; add one S only
+     for a public, non-quota-masked operation. Authenticated reverification adds no S.
+   - `prestart`: exact process evidence proves bcrypt never began; add no F, U or S.
+   - `uncertain`: the default when bcrypt might have begun and no terminal outcome can be
+     established; add one U and, for public non-masked work, one conservative S at database
+     recovery time. A quota-masked dummy operation adds U but never S.
+
+   A stale credential epoch is detected by the database routine and reconciles as `stale`
+   without adding new-epoch F, U or S. Do not infer a successful or failed password from
+   request status, elapsed time, a missing session, or a log that lacks an authoritative
+   terminal receipt.
+
+5. In one transaction with `SET LOCAL synchronous_commit = on`, call the restricted
+   `public.password_reconcile_running_admission` database function with the exact values
+   observed above and the chosen disposition. It locks and compare-and-sets that operation,
+   applies bounded rolling-window accounting, writes the terminal receipt, and clears only
+   that operation. A stale/mismatched tuple raises an error and changes nothing. The routine
+   is revoked from `PUBLIC` and `control_api_runtime`; it is not an HTTP endpoint and cannot
+   be used by application requests.
+
+   Example invocation shape (replace every placeholder with the captured values; keep the
+   disposition tied to the evidence review):
+
+   ```sql
+   BEGIN;
+   SET LOCAL synchronous_commit = on;
+   SELECT * FROM public.password_reconcile_running_admission(
+     '<sha256 identifier key>'::text,
+     '<state instance UUID>'::uuid,
+     <current revision>::bigint,
+     '<provisional operation UUID>'::uuid,
+     <provisional epoch>::bigint,
+     '<owner instance UUID>'::uuid,
+     '<owner host>'::text,
+     <owner PID>::integer,
+     'uncertain'::text
+   );
+   COMMIT;
+   ```
+
+6. Confirm the returned disposition and receipt in the same transaction, then commit. A
+   repeated call for an operation with the retained terminal receipt returns
+   `already_terminal` and performs no second debit. If the receipt was overwritten or the
+   state was recreated, stop rather than infer the outcome. Reconcile the global work row
+   separately using its exact operation ID and owner instance as described above.
+7. Resume only the ownership-aware verifier after checking the failure/cooldown, success and
+   uncertainty arrays and the global owner state. Uncertainty can consume all five risk slots
+   without being mislabeled as a wrong password; this fail-closed availability cost is
+   approved.
 
 No generic `TRUNCATE`, unconditional deletion, database-session kill, TTL reclaim or
 automatic retry of bcrypt is a recovery mechanism. Database restoration/failover

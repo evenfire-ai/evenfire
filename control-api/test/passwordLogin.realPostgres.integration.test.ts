@@ -8,6 +8,7 @@ import { passwordAdmissionDenialsTotal } from '../src/observability/metrics.js'
 import { createExternalAuthRouter } from '../src/routes/external/auth.js'
 import { createExternalInvitationsRouter } from '../src/routes/external/invitations.js'
 import { passwordIdentifierKey } from '../src/services/auth/passwordAdmissionState.js'
+import { PASSWORD_DUMMY_HASH } from '../src/services/auth/passwordCredentialVerification.js'
 import { acquirePasswordWork } from '../src/services/auth/passwordWorkOwnership.js'
 import { verifyUserPassword } from '../src/services/directory/login.js'
 import {
@@ -26,6 +27,7 @@ import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 const holder = vi.hoisted(() => ({
   pool: null as unknown as Pool,
   leaseClient: null as unknown as import('pg').PoolClient,
+  queryObserver: null as ((sql: string, values?: unknown[]) => void) | null,
 }))
 const invitationFlow = vi.hoisted(() => ({
   registerAndSendInvitation: vi.fn().mockResolvedValue(undefined),
@@ -43,7 +45,14 @@ vi.mock('../src/services/invitationFlowRegistrationService.js', async importOrig
 vi.mock('../src/db.js', async importOriginal => {
   const real = await importOriginal<typeof import('../src/db.js')>()
   const proxy = {
-    query: (...args: unknown[]) => (holder.pool.query as Function)(...args),
+    query: (...args: unknown[]) => {
+      const text =
+        typeof args[0] === 'string'
+          ? args[0]
+          : ((args[0] as { text?: string } | undefined)?.text ?? '')
+      holder.queryObserver?.(text, Array.isArray(args[1]) ? args[1] : undefined)
+      return (holder.pool.query as Function)(...args)
+    },
     connect: () => holder.pool.connect(),
   }
   return {
@@ -63,7 +72,10 @@ vi.mock('../src/services/rateLimiterService.js', async importOriginal => {
     ...real,
     acquireRateLimitConcurrencyLease: (
       requirements: Parameters<typeof real.acquireRateLimitConcurrencyLease>[0]
-    ) => real.acquireRateLimitConcurrencyLease(requirements, { client: holder.leaseClient }),
+    ) =>
+      real.acquireRateLimitConcurrencyLease(requirements, {
+        client: holder.leaseClient,
+      }),
   }
 })
 
@@ -163,7 +175,10 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
       .post('/external/auth/verify')
       .send({ token: reset.body.token })
     expect(access.status).toBe(200)
-    expect(access.body.claims).toMatchObject({ userId, email: 'member@example.invalid' })
+    expect(access.body.claims).toMatchObject({
+      userId,
+      email: 'member@example.invalid',
+    })
     return access.body.claims
   }
   beforeAll(async () => {
@@ -198,9 +213,7 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
     await holder.pool.query('DELETE FROM users')
     await holder.pool.query('DELETE FROM rate_limit_buckets')
     if (await newStateExists()) {
-      await holder.pool.query('UPDATE password_identifier_state SET retained_until_ms=0')
-      await holder.pool.query('DELETE FROM password_identifier_state')
-      await holder.pool.query('DELETE FROM password_verification_pace')
+      await holder.pool.query('TRUNCATE password_identifier_state, password_verification_pace')
     }
     userId = (
       await holder.pool.query(
@@ -336,7 +349,7 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
       ).status
     ).toBe(429)
   })
-  it('restores authenticated access during identifier cooldown and preserves public attempts', async () => {
+  it('trusted password recovery clears failure cooldown while preserving success history', async () => {
     for (let i = 0; i < 5; i++) {
       await openPace()
       await login('member@example.invalid', 'wrong', `192.0.2.${40 + i}`)
@@ -349,11 +362,11 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
 
     const stateBeforeRecovery = (
       await holder.pool.query(
-        'SELECT attempts FROM password_identifier_state WHERE identifier_key = $1',
+        'SELECT attempts,successes FROM password_identifier_state WHERE identifier_key = $1',
         [passwordIdentifierKey('member@example.invalid')]
       )
     ).rows[0].attempts
-    expect(stateBeforeRecovery).toHaveLength(5)
+    expect(stateBeforeRecovery).toHaveLength(0)
     const teamId = (
       await holder.pool.query(
         "INSERT INTO teams(name) VALUES ('Synthetic recovery team') RETURNING id"
@@ -367,36 +380,228 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
     expect(claims).toMatchObject({ teamId, role: 'admin' })
     const stateAfterRecovery = (
       await holder.pool.query(
-        'SELECT attempts FROM password_identifier_state WHERE identifier_key = $1',
+        'SELECT attempts,successes,failures,locked_until_ms FROM password_identifier_state WHERE identifier_key = $1',
         [passwordIdentifierKey('member@example.invalid')]
       )
     ).rows[0].attempts
     expect(stateAfterRecovery).toEqual(stateBeforeRecovery)
-
-    const attemptDenials = await denialCount('identifier_attempts')
+    const afterReset = (
+      await holder.pool.query(
+        'SELECT successes,failures,locked_until_ms FROM password_identifier_state WHERE identifier_key=$1',
+        [passwordIdentifierKey('member@example.invalid')]
+      )
+    ).rows[0]
+    expect(afterReset).toMatchObject({
+      successes: [],
+      failures: [],
+      locked_until_ms: '0',
+    })
     const comparisons = compare.mock.calls.length
     await openPace()
-    const stillDenied = await login(
+    const admitted = await login(
       'member@example.invalid',
       'Synthetic-BUG192-recovered-during-identifier-cooldown',
       '192.0.2.50'
     )
-    expect(stillDenied.status).toBe(429)
-    expect(compare.mock.calls.length).toBe(comparisons)
-    expect(await denialCount('identifier_attempts')).toBe(attemptDenials + 1)
+    expect(admitted.status).toBe(200)
+    expect(compare.mock.calls.length).toBe(comparisons + 1)
   })
-  it('keeps the account attempt budget after correct-password successes', async () => {
-    for (let i = 0; i < 5; i++) {
+  it('admits forty successes and quota-masks the next login through dummy verification', async () => {
+    for (let i = 0; i < 40; i++) {
       await openPace()
-      expect((await login('member@example.invalid', password, `192.0.2.${60 + i}`)).status).toBe(
-        200
-      )
+      const ip = `192.0.2.${100 + Math.floor(i / 5)}`
+      const response = await login('member@example.invalid', password, ip)
+      expect(response.status).toBe(200)
+      if ([5, 19, 39].includes(i)) {
+        const state = (
+          await holder.pool.query(
+            'SELECT successes FROM password_identifier_state WHERE identifier_key = $1',
+            [passwordIdentifierKey('member@example.invalid')]
+          )
+        ).rows[0]
+        expect(state.successes).toHaveLength(i + 1)
+      }
+      expect(verifyExternalSessionToken(response.body.token)).toMatchObject({
+        userId,
+        email: 'member@example.invalid',
+      })
     }
-    const attemptDenials = await denialCount('identifier_attempts')
+    expect(compare).toHaveBeenCalledTimes(40)
     await openPace()
-    const denied = await login('member@example.invalid', password, '192.0.2.69')
-    expect(denied.status).toBe(429)
-    expect(await denialCount('identifier_attempts')).toBe(attemptDenials + 1)
+    const quotaMasked = await login('member@example.invalid', password, '192.0.2.250')
+    expect(quotaMasked.status).toBe(401)
+    expect(quotaMasked.body).toEqual({ error: 'invalid_credentials' })
+    expect(compare).toHaveBeenCalledTimes(41)
+    expect(compare.mock.calls[40][1]).toBe(PASSWORD_DUMMY_HASH)
+    const state = (
+      await holder.pool.query(
+        `SELECT successes, failures, locked_until_ms
+         FROM password_identifier_state WHERE identifier_key = $1`,
+        [passwordIdentifierKey('member@example.invalid')]
+      )
+    ).rows[0]
+    expect(state.successes).toHaveLength(40)
+    expect(state.failures).toHaveLength(1)
+    expect(state.locked_until_ms).toBe('0')
+  }, 120_000)
+  it('keeps a quota-masked known identity indistinguishable from an unknown identity', async () => {
+    const identities = ['member@example.invalid', 'quota-shadow@example.invalid']
+    const columns = await holder.pool.query(
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='password_identifier_state'`
+    )
+    const hasSuccessAccounting = columns.rows.some(
+      row => (row as { column_name: string }).column_name === 'successes'
+    )
+    const now = Number(
+      (
+        await holder.pool.query(
+          'SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::text AS ms'
+        )
+      ).rows[0].ms
+    )
+    for (const identity of identities) {
+      const key = passwordIdentifierKey(identity)
+      await holder.pool.query(
+        'INSERT INTO password_identifier_state(identifier_key) VALUES ($1) ON CONFLICT DO NOTHING',
+        [key]
+      )
+      if (hasSuccessAccounting) {
+        await holder.pool.query(
+          'UPDATE password_identifier_state SET successes=$2 WHERE identifier_key=$1',
+          [key, Array.from({ length: 40 }, (_, index) => now - 100 - index)]
+        )
+      } else {
+        // At the genuine pre-amendment head this exercises the observable old gate: both
+        // histories are exhausted and must not become valid T3 evidence via missing schema.
+        await holder.pool.query(
+          'UPDATE password_identifier_state SET attempts=$2 WHERE identifier_key=$1',
+          [key, Array.from({ length: 5 }, (_, index) => now - 100 - index)]
+        )
+      }
+    }
+
+    const publicIdentityLookups: string[] = []
+    holder.queryObserver = (sql, values) => {
+      if (/FROM users WHERE email = \$1 LIMIT 1/i.test(sql))
+        publicIdentityLookups.push(String(values?.[0]))
+    }
+    let known: Awaited<ReturnType<typeof login>>
+    let unknown: Awaited<ReturnType<typeof login>>
+    try {
+      await openPace()
+      known = await login('member@example.invalid', password, '192.0.2.241')
+      await openPace()
+      unknown = await login('quota-shadow@example.invalid', password, '192.0.2.242')
+    } finally {
+      holder.queryObserver = null
+    }
+    expect(known!.status).toBe(401)
+    expect(unknown!.status).toBe(401)
+    expect(publicIdentityLookups).toEqual(identities)
+    expect({ status: known.status, body: known.body }).toEqual({
+      status: unknown.status,
+      body: unknown.body,
+    })
+    expect(known.body).toEqual({ error: 'invalid_credentials' })
+    expect(known.headers['retry-after']).toBeUndefined()
+    expect(compare.mock.calls.slice(-2).map(([, hash]) => hash)).toEqual([
+      PASSWORD_DUMMY_HASH,
+      PASSWORD_DUMMY_HASH,
+    ])
+    if (hasSuccessAccounting) {
+      for (const identity of identities) {
+        const state = (
+          await holder.pool.query(
+            'SELECT successes,failures FROM password_identifier_state WHERE identifier_key=$1',
+            [passwordIdentifierKey(identity)]
+          )
+        ).rows[0]
+        expect(state.successes).toHaveLength(40)
+        expect(state.failures).toHaveLength(1)
+      }
+    }
+
+    for (const identity of identities) {
+      const octet = identity === identities[0] ? 243 : 244
+      for (let failure = 2; failure <= 5; failure++) {
+        await openPace()
+        const response = await login(identity, password, `192.0.2.${octet + failure}`)
+        expect(response.status).toBe(401)
+        expect(response.body).toEqual({ error: 'invalid_credentials' })
+      }
+      const state = (
+        await holder.pool.query(
+          'SELECT successes,failures,locked_until_ms FROM password_identifier_state WHERE identifier_key=$1',
+          [passwordIdentifierKey(identity)]
+        )
+      ).rows[0]
+      if (hasSuccessAccounting) {
+        expect(state.successes).toHaveLength(40)
+        expect(state.failures).toHaveLength(5)
+        expect(Number(state.locked_until_ms)).toBeGreaterThan(0)
+      }
+    }
+    const comparisonsAtCooldown = compare.mock.calls.length
+    await openPace()
+    const knownCooldown = await login('member@example.invalid', password, '192.0.2.251')
+    await openPace()
+    const unknownCooldown = await login('quota-shadow@example.invalid', password, '192.0.2.252')
+    expect(knownCooldown.status).toBe(429)
+    expect(unknownCooldown.status).toBe(429)
+    expect(knownCooldown.body.error).toBe(unknownCooldown.body.error)
+    expect(Number(knownCooldown.body.retryAfterSeconds)).toBeGreaterThanOrEqual(899)
+    expect(Number(unknownCooldown.body.retryAfterSeconds)).toBeGreaterThanOrEqual(899)
+    expect(
+      Math.abs(
+        Number(knownCooldown.body.retryAfterSeconds) -
+          Number(unknownCooldown.body.retryAfterSeconds)
+      )
+    ).toBeLessThanOrEqual(1)
+    expect(compare.mock.calls).toHaveLength(comparisonsAtCooldown)
+  })
+  it('preserves an earlier failure across a later successful public login', async () => {
+    await openPace()
+    expect((await login('member@example.invalid', 'wrong', '192.0.2.30')).status).toBe(401)
+    const before = (
+      await holder.pool.query(
+        'SELECT failures FROM password_identifier_state WHERE identifier_key = $1',
+        [passwordIdentifierKey('member@example.invalid')]
+      )
+    ).rows[0].failures
+    expect(before).toHaveLength(1)
+
+    await openPace()
+    const success = await login('member@example.invalid', password, '192.0.2.31')
+    expect(success.status).toBe(200)
+    const after = (
+      await holder.pool.query(
+        'SELECT failures FROM password_identifier_state WHERE identifier_key = $1',
+        [passwordIdentifierKey('member@example.invalid')]
+      )
+    ).rows[0].failures
+    expect(after).toEqual(before)
+  })
+  it('keeps the fifth completed failure boundary after an ordinary successful login', async () => {
+    await openPace()
+    expect((await login('member@example.invalid', 'wrong-1', '192.0.2.61')).status).toBe(401)
+    await openPace()
+    expect((await login('member@example.invalid', password, '192.0.2.62')).status).toBe(200)
+
+    for (let failure = 2; failure <= 5; failure++) {
+      await openPace()
+      const response = await login(
+        'member@example.invalid',
+        `wrong-${failure}`,
+        `192.0.2.${60 + failure}`
+      )
+      expect(response.status).toBe(401)
+    }
+
+    await openPace()
+    const sixthFailure = await login('member@example.invalid', 'wrong-6', '192.0.2.70')
+    expect(sixthFailure.status).toBe(429)
+    expect(Number(sixthFailure.headers['retry-after'])).toBeGreaterThanOrEqual(899)
   })
   it('records durable verification-owner contention without running bcrypt', async () => {
     const lease = await acquirePasswordWork()
@@ -618,17 +823,21 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
     if (await newStateExists()) {
       const row = (
         await holder.pool.query(
-          'SELECT attempts, failures, locked_until_ms FROM password_identifier_state'
+          'SELECT attempts, failures, successes, locked_until_ms FROM password_identifier_state'
         )
       ).rows[0]
-      expect(row.attempts).toHaveLength(5)
+      expect(row.attempts).toHaveLength(0)
       expect(row.failures).toHaveLength(5)
     }
   })
   it('shares public failure cooldown with authenticated reverification', async () => {
     for (let i = 0; i < 5; i++) {
       await openPace()
-      await verifyUserPassword({ userId, email: 'member@example.invalid', password: 'wrong' })
+      await verifyUserPassword({
+        userId,
+        email: 'member@example.invalid',
+        password: 'wrong',
+      })
     }
     const before = compare.mock.calls.length
     const response = await login('member@example.invalid', 'wrong')
@@ -647,7 +856,11 @@ realPg('BUG-192 observable password-login regressions on real PostgreSQL', () =>
       email: 'member@example.invalid',
       authGeneration: 1,
     })
-    expect(success.body.me).toMatchObject({ id: userId, role: 'member', teamId: null })
+    expect(success.body.me).toMatchObject({
+      id: userId,
+      role: 'member',
+      teamId: null,
+    })
   })
   it('fails closed before bcrypt when credential persistence is unavailable', async () => {
     // Real database producer: temporarily revoke table access by making its
