@@ -1,6 +1,10 @@
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { config } from '../../src/config.js'
+import {
+  type ResolvedHostBinding,
+  resolveBrokerHostBinding,
+} from '../../src/services/access/brokerHostBinding.js'
 import type { MockGateway } from '../mockGateway.js'
 
 type Provisioner = 'hcc' | 'wrc'
@@ -47,6 +51,24 @@ export async function mintHccControlToken(
     throw new Error(`hcc control token issuance failed: ${res.status} ${res.text}`)
   }
   return res.body.mcpHostControlToken as string
+}
+
+/**
+ * The live binding the broker resolves for an HCC control token of `host`
+ * (uid read back from the Host CR, as the issuance route signs it), produced by
+ * the real `resolveBrokerHostBinding`. For suites that drive the grant-existence
+ * resolver directly; throws when the seeded state does not bind.
+ */
+export async function resolveHccHostBinding(
+  gateway: MockGateway,
+  host: string
+): Promise<ResolvedHostBinding> {
+  const cr = (await gateway.getResource('hosts', host, config.hostsNamespace)) as {
+    metadata: { uid: string }
+  }
+  const binding = await resolveBrokerHostBinding(gateway, host, cr.metadata.uid, config)
+  if (binding.kind !== 'ok') throw new Error(`host ${host} does not bind: ${binding.kind}`)
+  return binding
 }
 
 /**

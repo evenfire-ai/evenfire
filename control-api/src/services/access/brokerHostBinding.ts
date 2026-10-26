@@ -62,8 +62,18 @@ export interface ContextCR {
   spec?: { contextId?: unknown; mcpServers?: unknown }
 }
 
+export interface ResolvedHostBinding {
+  kind: 'ok'
+  hostName: string
+  /** The Host's Context, by name: the only Context the caller may act for. */
+  contextName: string
+  host: HostCR
+  ctx: ContextCR
+  allowlist: readonly string[]
+}
+
 export type HostBinding =
-  | { kind: 'ok'; host: HostCR; ctx: ContextCR; allowlist: readonly string[] }
+  | ResolvedHostBinding
   | { kind: 'denied' }
   | { kind: 'unavailable'; cause: unknown }
 
@@ -110,7 +120,7 @@ export async function resolveBrokerHostBinding(
   const allowlist = Array.isArray(raw)
     ? raw.filter((entry): entry is string => typeof entry === 'string')
     : []
-  return { kind: 'ok', host, ctx, allowlist }
+  return { kind: 'ok', hostName, contextName: contextRef, host, ctx, allowlist }
 }
 
 /**

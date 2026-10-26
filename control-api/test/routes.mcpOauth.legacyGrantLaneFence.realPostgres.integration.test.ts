@@ -27,7 +27,7 @@ import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
 import { resolveBatchGrantExistence } from '../src/routes/mcpOauth.js'
 import { resolveInvocableMcpServersForContexts } from '../src/services/access/mcpInvocable.js'
 import { seedActiveMember, seedAgentHost } from './fixtures/contextAllowlist.js'
-import { mintHccControlToken } from './fixtures/hccControlToken.js'
+import { mintHccControlToken, resolveHccHostBinding } from './fixtures/hccControlToken.js'
 import {
   CONTEXT,
   NS,
@@ -174,10 +174,16 @@ describeRealPostgres('legacy grants seen by the broker, gate and sweep (real Pos
   const invocable = async (gateway: MockGateway) =>
     (await resolveInvocableMcpServersForContexts(gateway, NS, [CONTEXT], USER, db)).map(s => s.name)
 
-  const sweep = (gateway: MockGateway, name: string) =>
-    resolveBatchGrantExistence({ db, gateway, mcpServersNamespace: NS }, [
-      { mcpServerName: name, userId: USER },
-    ])
+  const sweep = async (gateway: MockGateway, name: string) =>
+    resolveBatchGrantExistence(
+      {
+        db,
+        gateway,
+        binding: await resolveHccHostBinding(gateway, HOST),
+        mcpServersNamespace: NS,
+      },
+      [{ mcpServerName: name, userId: USER }]
+    )
 
   describe.each<Flavor>(['user', 'context'])('%s flavor', flavor => {
     it('user-token: a generic reinstall gets 404 no_grant, not the legacy access token', async () => {
