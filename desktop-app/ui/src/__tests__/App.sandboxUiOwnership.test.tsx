@@ -546,7 +546,7 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     await flushMacrotask()
 
     expect(sandboxUi.close).toHaveBeenCalledWith({ launchId: first })
-    expect(tabOf(ALPHA!.appRef)?.app?.savedRoutePath).toBe('/inbox')
+    await waitFor(() => expect(tabOf(ALPHA!.appRef)?.app?.savedRoutePath).toBe('/inbox'))
 
     fireEvent.click(screen.getByRole('button', { name: 'Alpha', pressed: false }))
     await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(2))
