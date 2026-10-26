@@ -317,7 +317,7 @@ describe('User Approval Request Routes', () => {
           'host_unavailable',
           'host_mismatch',
           'lineage_without_audience',
-          'revoked',
+          'race_lost',
         ]
         const out: Record<string, number> = {}
         for (const label of labels) out[label] = await refreshCount(label)
@@ -410,7 +410,7 @@ describe('User Approval Request Routes', () => {
         await expectOnlyIncremented(before, 'lineage_without_audience')
       })
 
-      it('counts a jti consumed between verify and consume as revoked', async () => {
+      it('counts a jti consumed between verify and consume as race_lost', async () => {
         const { refreshToken } = issueTestTokens()
         conflictOnNextRefreshJtiInsert = true
         const before = await snapshot()
@@ -418,7 +418,18 @@ describe('User Approval Request Routes', () => {
         const res = await postRefresh(refreshToken)
 
         expect(res.status).toBe(401)
-        await expectOnlyIncremented(before, 'revoked')
+        await expectOnlyIncremented(before, 'race_lost')
+      })
+
+      it('counts a replay of an already-rotated refresh token as failed, not race_lost', async () => {
+        const { refreshToken } = issueTestTokens()
+        expect((await postRefresh(refreshToken)).status).toBe(200)
+        const before = await snapshot()
+
+        const res = await postRefresh(refreshToken)
+
+        expect(res.status).toBe(401)
+        await expectOnlyIncremented(before, 'failed')
       })
 
       it('keeps an invalid refresh token on the failed label', async () => {

@@ -190,14 +190,16 @@ export const oauthBrokerJwtIssueTotal = getOrCreateCounter({
 
 // Refresh endpoint outcomes (also the label of the duration histogram below).
 // The 401 body stays opaque; the label is emitted server-side in a `finally`.
-// Label values, aligned with the re-issue counter where the outcome is shared:
+// Label values (binding outcomes share their names with the re-issue counter):
 //   success                  — token rotated, fresh token set minted
-//   failed                   — missing bearer; signature/claims/expiry rejected or
-//                              jti already consumed at verify time; unhandled error
+//   failed                   — missing bearer; signature/claims/expiry rejected;
+//                              replay of a jti already consumed at verify time;
+//                              unhandled error
 //   host_unavailable         — Host lookup failed transiently (503, jti not consumed)
 //   host_mismatch            — HCC chain's Host is gone or was recreated (new uid)
 //   lineage_without_audience — hosts-namespace standalone chain without HCC audience
-//   revoked                  — jti consumed concurrently between verify and consume
+//   race_lost                — jti consumed concurrently between verify and consume
+//                              (not the re-issue `revoked`, which also covers replay)
 // Rate-limited requests never reach the handler and are not counted here.
 export const mcpHostJwtRefreshTotal = getOrCreateCounter({
   name: 'workflow_auth_refresh_total',
@@ -221,7 +223,8 @@ export const mcpHostJwtRefreshDurationSeconds = getOrCreateHistogram({
 //   invalid_sig    — JWT signature / iss / aud / scope / format rejected
 //   invalid_claims — JWT verified but failed refresh-token claim validation
 //   expired_beyond_reissue_grace — signed refresh token is too old to reissue
-//   revoked        — jti already present in workflow_revoked_refresh_jtis
+//   revoked        — jti already present in workflow_revoked_refresh_jtis at verify
+//                    time, or consumed concurrently between verify and consume
 //   mismatch       — recipe_name body did not match JWT sub's recipe component
 //   bad_request    — missing/malformed body or bearer token
 //   host_unavailable — Host lookup failed transiently (503, jti not consumed)

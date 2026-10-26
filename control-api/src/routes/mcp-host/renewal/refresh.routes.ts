@@ -37,14 +37,16 @@ export function createMcpHostRefreshRoutes(gateway: RenewalHostGateway): Router 
     (req, res, next) => {
       void (async () => {
         const refreshStart = process.hrtime.bigint()
-        // Values mirror the reissue route's labels so the two can be compared.
+        // Binding labels share their names with the reissue counter so the two
+        // can be compared. `race_lost` is refresh-only and is not reissue's
+        // `revoked`: here a jti already consumed at verify time lands in `failed`.
         type ResultLabel =
           | 'success'
           | 'failed'
           | 'host_unavailable'
           | 'host_mismatch'
           | 'lineage_without_audience'
-          | 'revoked'
+          | 'race_lost'
         let resultLabel: ResultLabel = 'failed'
         try {
           const token = extractBearerToken(req)
@@ -94,7 +96,7 @@ export function createMcpHostRefreshRoutes(gateway: RenewalHostGateway): Router 
 
           const consumed = await consumeRefreshJti(claims.jti, claims.exp)
           if (!consumed) {
-            resultLabel = 'revoked'
+            resultLabel = 'race_lost'
             req.log?.info(
               { event: 'auth_denied', reason: 'jti_race_lost', route: 'workflow_auth_refresh' },
               'auth denied'
