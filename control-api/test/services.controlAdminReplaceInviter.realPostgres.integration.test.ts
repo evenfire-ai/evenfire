@@ -193,13 +193,21 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
     }
   })
 
-  it('expires member, admin desktop-access, and Control Admin invitations after seven days', async () => {
+  it('keeps new invitations at seven days and legacy Control Admin inserts at 48 hours', async () => {
     const inviter = await seedAdmin('ttl-inviter')
     const controlAdminInvitation = await createControlAdminInvitation(
       uniqueEmail('ttl-admin'),
       inviter.id
     )
     if ('error' in controlAdminInvitation) throw new Error(controlAdminInvitation.error)
+
+    // This matches the pre-0131 writer's INSERT columns, which rely on the table default.
+    const legacyControlAdminInvitation = await testPool.query(
+      `INSERT INTO control_admin_invitations (email, invited_by_admin_id, replace_inviter)
+       VALUES ($1, $2, false)
+       RETURNING created_at, expires_at`,
+      [uniqueEmail('ttl-legacy-admin'), inviter.id]
+    )
 
     const memberInvitation = await createSilentInvitationForTeams({
       inviteeName: 'TTL member',
@@ -230,6 +238,13 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
     expect(
       controlAdminInvitation.expiresAt.getTime() - controlAdminInvitation.createdAt.getTime()
     ).toBe(604_800_000)
+    const legacyControlAdminRow = legacyControlAdminInvitation.rows[0] as {
+      created_at: Date
+      expires_at: Date
+    }
+    expect(
+      legacyControlAdminRow.expires_at.getTime() - legacyControlAdminRow.created_at.getTime()
+    ).toBe(172_800_000)
   })
 
   it('stores replaceInviter and exposes it with the inviter on every invitation read', async () => {

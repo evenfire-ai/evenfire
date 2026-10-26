@@ -6,12 +6,12 @@ vi.mock('pg', () => ({
   }),
 }))
 
-describe('0130_invitation_expiration_ttl_one_week migration', () => {
-  it('updates member and Control Admin invitation defaults without rewriting existing rows', async () => {
+describe('0131_invitation_expiration_writer_compatibility migration', () => {
+  it('restores 48-hour invitation defaults without rewriting existing rows', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const versions = CONTROL_API_MIGRATIONS.map(migration => migration.version)
-    const previous = versions.indexOf('0129_workflow_schedules_concurrency_policy')
-    const current = versions.indexOf('0130_invitation_expiration_ttl_one_week')
+    const previous = versions.indexOf('0130_invitation_expiration_ttl_one_week')
+    const current = versions.indexOf('0131_invitation_expiration_writer_compatibility')
     expect(previous).toBeGreaterThanOrEqual(0)
     expect(current).toBeGreaterThan(previous)
 
@@ -21,10 +21,10 @@ describe('0130_invitation_expiration_ttl_one_week migration', () => {
     const sql = String(query.mock.calls[0]?.[0])
 
     expect(sql).toMatch(
-      /ALTER TABLE invitations\s+ALTER COLUMN expires_at SET DEFAULT \(NOW\(\) \+ INTERVAL '7 days'\)/i
+      /ALTER TABLE invitations\s+ALTER COLUMN expires_at SET DEFAULT \(NOW\(\) \+ INTERVAL '48 hours'\)/i
     )
     expect(sql).toMatch(
-      /ALTER TABLE control_admin_invitations\s+ALTER COLUMN expires_at SET DEFAULT \(NOW\(\) \+ INTERVAL '7 days'\)/i
+      /ALTER TABLE control_admin_invitations\s+ALTER COLUMN expires_at SET DEFAULT \(NOW\(\) \+ INTERVAL '48 hours'\)/i
     )
     expect(sql).not.toMatch(/UPDATE\s+(?:invitations|control_admin_invitations)/i)
   })

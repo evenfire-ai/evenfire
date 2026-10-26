@@ -1,6 +1,7 @@
 import { config } from '../config.js'
 import { type DbClient, pool, withTransaction } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
+import { INVITATION_TTL_HOURS } from './directory/invitationStore.js'
 import { retireDesktopUserInTransaction } from './directory/users.js'
 import { gfsDesktopOperatorLinkService } from './gfsDesktopOperatorLinkService.js'
 import { currentAdministrativeRequestContext } from './tracing/adminOperationContext.js'
@@ -889,8 +890,9 @@ export async function createControlAdminInvitation(
             AND status = 'active'
           FOR UPDATE
        )
-       INSERT INTO control_admin_invitations(email, invited_by_admin_id, replace_inviter)
-       SELECT $1, locked_inviter.id, $3::boolean
+       INSERT INTO control_admin_invitations(email, invited_by_admin_id, replace_inviter, expires_at)
+       SELECT $1, locked_inviter.id, $3::boolean,
+              NOW() + INTERVAL '${INVITATION_TTL_HOURS} hours'
          FROM locked_inviter
         WHERE NOT EXISTS (
           SELECT 1 FROM control_admin_users WHERE lower(email) = lower($1)

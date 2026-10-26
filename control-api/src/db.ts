@@ -3219,6 +3219,16 @@ async function applyInvitationExpirationTtlMigration(db: DbClient): Promise<void
   `)
 }
 
+async function applyInvitationExpirationWriterCompatibilityMigration(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE invitations
+      ALTER COLUMN expires_at SET DEFAULT (NOW() + INTERVAL '48 hours');
+
+    ALTER TABLE control_admin_invitations
+      ALTER COLUMN expires_at SET DEFAULT (NOW() + INTERVAL '48 hours');
+  `)
+}
+
 // Exported (read-only) so the migration-order invariant test can assert the
 // array is monotonic by version-string. Applied strictly in array order and
 // tracked by full version-string in `schema_migrations`, so a non-monotonic
@@ -6390,6 +6400,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0130_invitation_expiration_ttl_one_week',
     apply: applyInvitationExpirationTtlMigration,
+  },
+  {
+    version: '0131_invitation_expiration_writer_compatibility',
+    apply: applyInvitationExpirationWriterCompatibilityMigration,
   },
 ]
 
