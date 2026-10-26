@@ -707,7 +707,6 @@ export async function verifyMemberPassword(
       await cancelUnstartedOrFailClosed(capture, {
         knownUnstartedLease: lease,
       })
-      reservationTerminal = true
       return null
     }
 
@@ -727,7 +726,6 @@ export async function verifyMemberPassword(
       // slot) instead of leaving a settled operation permanently running.
       await releasePasswordWork(lease)
       await completeUncertainPasswordEvaluation(capture, lease)
-      reservationTerminal = true
       throw error
     }
     // Release the global owner before credential-state completion borrows its pool connection.
@@ -735,7 +733,6 @@ export async function verifyMemberPassword(
     const authenticated =
       !capture.quotaMasked && !!user && user.lifecycle_state === 'active' && supported && match
     const current = await completePasswordEvaluation(capture, authenticated, lease)
-    reservationTerminal = true
     return current && authenticated ? user : null
   } catch (error) {
     if (capture && !bcryptStarted && !reservationTerminal) {
