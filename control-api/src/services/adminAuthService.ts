@@ -892,7 +892,7 @@ export async function createControlAdminInvitation(
        )
        INSERT INTO control_admin_invitations(email, invited_by_admin_id, replace_inviter, expires_at)
        SELECT $1, locked_inviter.id, $3::boolean,
-              NOW() + INTERVAL '${INVITATION_TTL_HOURS} hours'
+              NOW() + ($4::int * INTERVAL '1 hour')
          FROM locked_inviter
         WHERE NOT EXISTS (
           SELECT 1 FROM control_admin_users WHERE lower(email) = lower($1)
@@ -903,7 +903,7 @@ export async function createControlAdminInvitation(
                AND status IN ('pending', 'opened')
           )
        RETURNING ${INVITATION_COLUMNS}`,
-      [normalizedEmail, invitedByAdminId, replaceInviter]
+      [normalizedEmail, invitedByAdminId, replaceInviter, INVITATION_TTL_HOURS]
     )
   } catch (error) {
     if (
