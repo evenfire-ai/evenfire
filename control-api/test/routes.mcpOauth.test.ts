@@ -2,8 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import request from 'supertest'
 import { createApp } from '../src/app.js'
 import { config } from '../src/config.js'
+import { discoverRemoteOAuth } from '../src/oauth/discovery.js'
 import { deriveOAuthEncryptionKey, encryptOAuthSecret } from '../src/oauth/encryption.js'
 import { registry } from '../src/observability/metrics.js'
+import { buildRemoteOAuthSpec } from '../src/routes/admin/remoteMcp.js'
 import { attachServerToContext } from '../src/services/contextAllowlist.js'
 import { checkAndIncrement } from '../src/services/rateLimiterService.js'
 import { verifyMcpHostControlJwt } from '../src/utils/auth/mcpHostJwtToken.js'
@@ -13,6 +15,7 @@ import {
   signInternalControlJwt,
   signLegacyControlToken,
 } from './fixtures/hccControlToken.js'
+import { PILOTS, makeDiscoveryTransport } from './fixtures/remoteOAuthDiscovery.js'
 import { captureRequestLogs } from './helpers/requestLogCapture.js'
 import { MockGateway } from './mockGateway.js'
 
@@ -596,6 +599,51 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
     expect(res.status).toBe(404)
     expect(res.text).toBe('{"error":"server_not_found"}')
     expect(grantQueries()).toHaveLength(0)
+  })
+
+  it('R6: a foreign-owned context server with an incoherent remote spec → the same 404, not a 409', async () => {
+    // Derived from the real producer: the builder's confidential output with
+    // clientMode flipped to public, an in-place edit the coherence check refuses.
+    const outcome = await discoverRemoteOAuth(PILOTS.sentry.mcpUrl, {
+      transport: makeDiscoveryTransport(PILOTS.sentry),
+      resolveDns: async () => ['93.184.216.34'],
+    })
+    if (!outcome.ok) throw new Error(`fixture discovery failed: ${outcome.error.kind}`)
+    const incoherentOauth = {
+      ...(buildRemoteOAuthSpec(outcome.result, {
+        clientMode: 'confidential',
+        grantScope: 'context',
+        clientSecretName: 'gdrive-oauth-client',
+        preRegisteredClientId: 'client-abc',
+      }) as unknown as Record<string, unknown>),
+      clientMode: 'public',
+    }
+    const seed = (contextRef: string) =>
+      gateway.createResource(
+        'mcpservers',
+        {
+          metadata: { name: 'gdrive' },
+          spec: { contextRef, auth: { type: 'oauth' }, oauth: incoherentOauth },
+        },
+        MCP_NS
+      )
+
+    // Control: owned by the Host Context, the same spec is refused as incoherent.
+    await seed(HOST_CONTEXT)
+    const own = await post({ mcpServerName: 'gdrive', userId: USER_1 })
+    expect(own.status).toBe(409)
+    expect(own.body.error).toBe('remote_oauth_spec_incoherent')
+
+    await gateway.deleteResource('mcpservers', 'gdrive', MCP_NS)
+    await seed('ctx-A')
+    const secretReads = vi.spyOn(gateway, 'getSecret')
+
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_1 })
+
+    expect(res.status).toBe(404)
+    expect(res.text).toBe('{"error":"server_not_found"}')
+    expect(grantQueries()).toHaveLength(0)
+    expect(secretReads).not.toHaveBeenCalled()
   })
 
   it('R6b: a body contextId is ignored — a foreign value neither denies nor redirects the key', async () => {

@@ -1,5 +1,4 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import fc from 'fast-check'
 import request from 'supertest'
 import { createApp } from '../src/app.js'
 import { config } from '../src/config.js'
@@ -95,28 +94,37 @@ function serverSpec(
   }
 }
 
-const caseArb = fc.oneof(
-  fc.record({
-    state: fc.constantFrom<State>('missing', 'outside_allowlist', 'deleting', 'disabled'),
-    shape: fc.constantFrom<Shape>(
-      'oauth',
-      'remote_incoherent',
-      'not_oauth',
-      'unsupported_provider'
-    ),
-    grantScope: fc.constantFrom<'user' | 'context'>('user', 'context'),
-    withUserId: fc.boolean(),
-    withContextId: fc.boolean(),
-  }),
+interface Case {
+  state: State
+  shape: Shape
+  grantScope: 'user' | 'context'
+  withUserId: boolean
+  withContextId: boolean
+}
+
+// The full cartesian product (144 cases) instead of a random sample, so an
+// ordering regression is caught on every run rather than only on a lucky seed.
+const BOOLS = [false, true] as const
+function enumerate(states: State[], shapes: Shape[], scopes: Array<'user' | 'context'>): Case[] {
+  return states.flatMap(state =>
+    shapes.flatMap(shape =>
+      scopes.flatMap(grantScope =>
+        BOOLS.flatMap(withUserId =>
+          BOOLS.map(withContextId => ({ state, shape, grantScope, withUserId, withContextId }))
+        )
+      )
+    )
+  )
+}
+const CASES: Case[] = [
+  ...enumerate(
+    ['missing', 'outside_allowlist', 'deleting', 'disabled'],
+    ['oauth', 'remote_incoherent', 'not_oauth', 'unsupported_provider'],
+    ['user', 'context']
+  ),
   // The owner rule only applies to shared OAuth servers.
-  fc.record({
-    state: fc.constantFrom<State>('foreign_owner', 'no_owner'),
-    shape: fc.constantFrom<Shape>('oauth', 'remote_incoherent'),
-    grantScope: fc.constant<'user' | 'context'>('context'),
-    withUserId: fc.boolean(),
-    withContextId: fc.boolean(),
-  })
-)
+  ...enumerate(['foreign_owner', 'no_owner'], ['oauth', 'remote_incoherent'], ['context']),
+]
 
 describe('P-I5: uniform server_not_found across the Context boundary', () => {
   const originalBrokerEnabled = config.mcpOauthBrokerEnabled
@@ -130,56 +138,55 @@ describe('P-I5: uniform server_not_found across the Context boundary', () => {
   })
 
   it('every hidden state answers 404 {"error":"server_not_found"} without reading grants or Secrets', async () => {
-    await fc.assert(
-      fc.asyncProperty(caseArb, async c => {
-        mockPoolQuery.mockReset()
-        membership(mockPoolQuery, { agents: { [USER]: [HOST] } })
-        const gateway = new MockGateway(MCP_NS)
-        const app = createApp(gateway as never)
-        await seedAgentHost(gateway, HOST, HOST_CONTEXT)
-        await seedAllowlistedContext(gateway, HOST_CONTEXT, [], config.contextsNamespace)
-        await seedAllowlistedContext(gateway, OTHER_CONTEXT, [SERVER], config.contextsNamespace)
-        const token = await mintHccControlToken(app, gateway, HOST)
+    expect(CASES).toHaveLength(144)
+    for (const c of CASES) {
+      mockPoolQuery.mockReset()
+      membership(mockPoolQuery, { agents: { [USER]: [HOST] } })
+      const gateway = new MockGateway(MCP_NS)
+      const app = createApp(gateway as never)
+      await seedAgentHost(gateway, HOST, HOST_CONTEXT)
+      await seedAllowlistedContext(gateway, HOST_CONTEXT, [], config.contextsNamespace)
+      await seedAllowlistedContext(gateway, OTHER_CONTEXT, [SERVER], config.contextsNamespace)
+      const token = await mintHccControlToken(app, gateway, HOST)
 
-        const owner =
-          c.state === 'no_owner'
-            ? undefined
-            : c.state === 'foreign_owner' || c.state === 'outside_allowlist'
-              ? OTHER_CONTEXT
-              : HOST_CONTEXT
-        if (c.state !== 'missing') {
-          const spec = serverSpec(c.shape, c.grantScope, owner)
-          if (c.state === 'disabled') spec.enabled = false
-          await gateway.createResource('mcpservers', { metadata: { name: SERVER }, spec }, MCP_NS)
-          if (c.state === 'deleting') gateway.markDeleting('mcpservers', SERVER, MCP_NS)
-        }
-        if (c.state !== 'outside_allowlist') {
-          await attachServerToContext(
-            gateway as never,
-            { name: HOST_CONTEXT, namespace: config.contextsNamespace },
-            SERVER
-          )
-        }
-        const secretReads = vi.spyOn(gateway, 'getSecret')
-
-        const res = await request(app)
-          .post('/api/v1/mcp-oauth/user-token')
-          .set('Authorization', `Bearer ${token}`)
-          .send({
-            mcpServerName: SERVER,
-            ...(c.withUserId ? { userId: USER } : {}),
-            ...(c.withContextId ? { contextId: HOST_CONTEXT } : {}),
-          })
-
-        expect(res.status).toBe(404)
-        expect(res.text).toBe('{"error":"server_not_found"}')
-        const grantReads = mockPoolQuery.mock.calls.filter(
-          ([sql]) => typeof sql === 'string' && sql.includes('oauth_grants')
+      const owner =
+        c.state === 'no_owner'
+          ? undefined
+          : c.state === 'foreign_owner' || c.state === 'outside_allowlist'
+            ? OTHER_CONTEXT
+            : HOST_CONTEXT
+      if (c.state !== 'missing') {
+        const spec = serverSpec(c.shape, c.grantScope, owner)
+        if (c.state === 'disabled') spec.enabled = false
+        await gateway.createResource('mcpservers', { metadata: { name: SERVER }, spec }, MCP_NS)
+        if (c.state === 'deleting') gateway.markDeleting('mcpservers', SERVER, MCP_NS)
+      }
+      if (c.state !== 'outside_allowlist') {
+        await attachServerToContext(
+          gateway as never,
+          { name: HOST_CONTEXT, namespace: config.contextsNamespace },
+          SERVER
         )
-        expect(grantReads).toHaveLength(0)
-        expect(secretReads).not.toHaveBeenCalled()
-      }),
-      { numRuns: 200 }
-    )
+      }
+      const secretReads = vi.spyOn(gateway, 'getSecret')
+
+      const res = await request(app)
+        .post('/api/v1/mcp-oauth/user-token')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          mcpServerName: SERVER,
+          ...(c.withUserId ? { userId: USER } : {}),
+          ...(c.withContextId ? { contextId: HOST_CONTEXT } : {}),
+        })
+
+      const label = JSON.stringify(c)
+      expect(res.status, label).toBe(404)
+      expect(res.text, label).toBe('{"error":"server_not_found"}')
+      const grantReads = mockPoolQuery.mock.calls.filter(
+        ([sql]) => typeof sql === 'string' && sql.includes('oauth_grants')
+      )
+      expect(grantReads, label).toHaveLength(0)
+      expect(secretReads, label).not.toHaveBeenCalled()
+    }
   })
 })
