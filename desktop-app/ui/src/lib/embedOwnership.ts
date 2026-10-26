@@ -163,8 +163,6 @@ function applyRow(state: EmbedOwnershipState, event: EmbedEvent): RowResult {
     case 'intent': {
       const launch = event.launch
       if (launch.tabId !== state.activeAppTabId) return unchanged
-      const retry = retryFailedCloseBeforeLaunch(state, launch)
-      if (retry) return retry
       // A re-click while the tab's view is alive must not relaunch it.
       if (!tabIsFree(state, launch)) return unchanged
       return { state: takeOwnership(state, launch), effects: [] }

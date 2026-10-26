@@ -80,4 +80,58 @@ describe('embed close recovery against the owner-directed single-live-view model
       { numRuns: 4 }
     )
   })
+
+  function rejectedHandoffOwner(): EmbedOwnershipState {
+    let state = mountedFirstLaunch()
+    state = apply(state, { type: 'handoff', requestId: 1 })
+    return apply(state, { type: 'closeFailed', launchId: FIRST })
+  }
+
+  it.each([
+    ['active-tab reselect', (state: EmbedOwnershipState) => state],
+    [
+      'leave and return to the same tab',
+      (state: EmbedOwnershipState) =>
+        apply(apply(state, { type: 'projected', activeAppTabId: null }), {
+          type: 'projected',
+          activeAppTabId: TAB,
+        }),
+    ],
+  ] as const)('%s preserves a retained close-failed view on intent', (_name, prepare) => {
+    const state = prepare(rejectedHandoffOwner())
+    expect(state.owner).toBe(FIRST)
+    expect(state.views.get(FIRST)?.phase).toBe('closeFailed')
+
+    const transition = reduceEmbedOwnership(state, { type: 'intent', launch: launch(NEXT) })
+
+    expect(transition.state).toBe(state)
+    expect(transition.effects).toEqual([
+      { type: 'launchSettled', launchId: NEXT, outcome: 'abandoned' },
+    ])
+    expect(transition.effects).not.toContainEqual(expect.objectContaining({ type: 'close' }))
+  })
+
+  it('retries the retained close only for an explicit relaunch and waits for release', () => {
+    const state = rejectedHandoffOwner()
+    const relaunch = reduceEmbedOwnership(state, { type: 'relaunch', launch: launch(NEXT) })
+
+    expect(relaunch.effects).toEqual([{ type: 'close', launchId: FIRST }])
+    expect(relaunch.state.views.get(FIRST)?.phase).toBe('closeRequested')
+    expect(relaunch.state.views.get(NEXT)?.phase).toBe('waiting')
+    expect(relaunch.state.owner).toBe(NEXT)
+
+    const released = reduceEmbedOwnership(relaunch.state, {
+      type: 'released',
+      launchId: FIRST,
+      reason: 'closed',
+      location: { routePath: '/tickets/live' },
+    })
+    expect(released.state.views.has(FIRST)).toBe(false)
+    expect(released.state.views.get(NEXT)?.phase).toBe('measuring')
+    expect(released.state.owner).toBe(NEXT)
+    expect(released.effects).toEqual([
+      { type: 'persistRoute', tabId: TAB, route: { action: 'set', routePath: '/tickets/live' } },
+      { type: 'measure', launchId: NEXT },
+    ])
+  })
 })

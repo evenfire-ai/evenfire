@@ -5843,4 +5843,136 @@ describe('App deep-link orchestration', () => {
     // The pending link stays with main for the next renderer to pick up.
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
   })
+
+  async function rejectCrossTeamAppHandoffClose() {
+    const queue = new SandboxUiDeepLinkQueue()
+    acknowledgeDeepLink.mockImplementation(async (id: number) => queue.acknowledge(id))
+    await launchAppFromSidebar()
+    main.navigate('/tickets/live')
+    const originLiveView = main.live()
+    if (!originLiveView) throw new Error('The App producer did not mount the origin view')
+    closeSandboxUi.mockClear()
+    closeSandboxUi.mockRejectedValueOnce(new Error('native close rejected during handoff'))
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({ recipeNs: 'ns', recipeName: 'app', teamId: 'team-b' })
+    )
+    if (!target) throw new Error('The production app-link parser rejected the fixture URL')
+    const link = queue.enqueue(target)
+    act(() => emitDeepLink?.(link))
+    await confirmPendingAppLink()
+    await waitFor(() =>
+      expect(confirmDialogHarness.props?.title).toBe('App link could not be opened')
+    )
+    expect(closeSandboxUi).toHaveBeenCalledOnce()
+    expect(main.live()).toEqual(originLiveView)
+    expect(queue.list()).toEqual([link])
+    return { link, originLiveView, queue }
+  }
+
+  it('preserves a live close-failed app on active-tab reselect', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    render(<App />)
+    const { originLiveView } = await rejectCrossTeamAppHandoffClose()
+    const tabId = appTabs()[0]?.id
+    if (!tabId) throw new Error('The sidebar launch did not create an app tab')
+    const intentBefore = currentController.navigationIntentSequence
+    const activeTabButton = screen
+      .getByRole('toolbar', { name: 'Workspace tabs' })
+      .querySelector('button[aria-pressed="true"]')
+    if (!activeTabButton) throw new Error('The active app tab is not rendered')
+
+    fireEvent.click(activeTabButton)
+    await waitFor(() => expect(currentController.navigationIntentSequence).toBe(intentBefore + 1))
+    await act(() => main.settle())
+
+    expect(currentController.workspaceTabs.activeTabId).toBe(tabId)
+    expect.soft(embedState().owner).toBe(originLiveView.launchId)
+    expect.soft(embedState().views.get(originLiveView.launchId)?.phase).toBe('closeFailed')
+    expect.soft(closeSandboxUi).toHaveBeenCalledOnce()
+    expect.soft(openSandboxUi).toHaveBeenCalledOnce()
+    expect.soft(main.live()).toEqual(originLiveView)
+  })
+
+  it('keeps navigation intent and app-link cancellation when the live tab is reselected', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    render(<App />)
+    const { link, queue } = await rejectCrossTeamAppHandoffClose()
+    const intentBefore = currentController.navigationIntentSequence
+    const activeTabButton = screen
+      .getByRole('toolbar', { name: 'Workspace tabs' })
+      .querySelector('button[aria-pressed="true"]')
+    if (!activeTabButton) throw new Error('The active app tab is not rendered')
+
+    fireEvent.click(activeTabButton)
+    await waitFor(() => expect(currentController.navigationIntentSequence).toBe(intentBefore + 1))
+
+    // Retry is a new user request; the old transaction must report that this
+    // real tab selection superseded it and settle the queued link once.
+    await act(async () => {
+      confirmDialogHarness.props?.onConfirm()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(queue.list()).toEqual([]))
+    await waitFor(() =>
+      expect(currentController.pushToast).toHaveBeenCalledWith(
+        'App link canceled because you navigated elsewhere.',
+        'info'
+      )
+    )
+    expect(acknowledgeDeepLink).toHaveBeenCalledExactlyOnceWith(link.id)
+    expect(currentController.navigationIntentSequence).toBe(intentBefore + 1)
+  })
+
+  it('reuses the live owner when leaving and returning to its app tab', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    render(<App />)
+    const { originLiveView } = await rejectCrossTeamAppHandoffClose()
+    const tabId = appTabs()[0]?.id
+    if (!tabId) throw new Error('The sidebar launch did not create an app tab')
+    const intentBefore = currentController.navigationIntentSequence
+
+    fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(currentController.workspaceTabs)?.kind).toBe('chat')
+    )
+    const chatIntent = currentController.navigationIntentSequence
+    expect(chatIntent).toBeGreaterThan(intentBefore)
+    expect(main.live()).toEqual(originLiveView)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Linked App', pressed: false }))
+    await waitFor(() => expect(currentController.workspaceTabs.activeTabId).toBe(tabId))
+    await waitFor(() => expect(currentController.navigationIntentSequence).toBe(chatIntent + 1))
+    await act(() => main.settle())
+
+    expect.soft(embedState().owner).toBe(originLiveView.launchId)
+    expect.soft(embedState().views.get(originLiveView.launchId)?.phase).toBe('closeFailed')
+    expect.soft(closeSandboxUi).toHaveBeenCalledOnce()
+    expect.soft(openSandboxUi).toHaveBeenCalledOnce()
+    expect.soft(main.live()).toEqual(originLiveView)
+  })
+
+  it('keeps explicit Refresh as a close retry for a retained live owner', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    render(<App />)
+    const { originLiveView } = await rejectCrossTeamAppHandoffClose()
+
+    await act(async () => {
+      emitCommand?.('app.refresh')
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(openSandboxUi).toHaveBeenCalledTimes(2), { timeout: 5_000 })
+    await waitFor(() => expect(embedPhase()).toBe('mounted'))
+
+    expect(closeSandboxUi).toHaveBeenCalledTimes(2)
+    expect(closeSandboxUi).toHaveBeenLastCalledWith({ launchId: originLiveView.launchId })
+    expect(main.reported('sandboxUi:released')).toContainEqual(
+      expect.objectContaining({ launchId: originLiveView.launchId, reason: 'closed' })
+    )
+    expect(main.live()?.launchId).toBe(openSandboxUi.mock.calls[1]?.[0].launchId)
+    expect(main.live()?.launchId).not.toBe(originLiveView.launchId)
+  })
 })
