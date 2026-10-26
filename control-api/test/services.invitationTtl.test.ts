@@ -27,7 +27,7 @@ describe('invitation expiration policy', () => {
               invitee_name: 'Setup member',
               email: 'member@example.invalid',
               role: 'member',
-              token: 'invitation-token',
+              token: 'synthetic-invitation-token',
               status: 'pending',
               purpose: normalizedPurpose,
               created_at: createdAt,
