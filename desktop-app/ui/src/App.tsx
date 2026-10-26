@@ -2082,9 +2082,11 @@ export function App() {
       pending: PendingSandboxUiDeepLink,
       message: string,
       launchContext: PendingSandboxUiDeepLinkLaunch,
-      tone: 'info' | 'error' = 'error'
+      tone: 'info' | 'error' = 'error',
+      restoreWhileRetryable = true
     ) => {
-      deferSandboxUiDeepLink(pending, message, tone)
+      const terminal = deferSandboxUiDeepLink(pending, message, tone)
+      if (!terminal && !restoreWhileRetryable) return
       const outcome = await restoreSandboxUiDeepLinkTeam(launchContext)
       if (outcome === 'retryable') markSandboxUiDeepLinkRetryableFailure(pending.link.id)
       else if (
@@ -2567,7 +2569,8 @@ export function App() {
             pending,
             `${resolution.label} is still starting up. This link will retry shortly.`,
             launchContext,
-            'info'
+            'info',
+            launchContext.switchedTeam
           )
           return
         }

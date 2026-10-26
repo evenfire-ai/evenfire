@@ -3016,6 +3016,127 @@ describe('App deep-link orchestration', () => {
     expect(restoredWorkspaceTabs).toEqual([originWorkspace])
   })
 
+  it('keeps a same-team starting app link alive from an active Chat conversation', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const existingBridge = window.clerum
+    const { clerum } = installAppControllerClerum({
+      me: { teamId: 'team-a', teamName: 'Team A' },
+      teamDirectory: { items: [], currentTeamId: 'team-a' },
+    })
+    Object.assign(clerum, {
+      shortcuts: existingBridge.shortcuts,
+      app: existingBridge.app,
+      gfs: existingBridge.gfs,
+      sandboxUi: {
+        ...existingBridge.sandboxUi,
+        listPendingDeepLinks: vi.fn(async () => ({ links: [] })),
+        onDeepLink: vi.fn((callback: (link: SandboxUiDeepLinkEnvelope) => void) => {
+          emitDeepLink = callback
+          return vi.fn()
+        }),
+        acknowledgeDeepLink,
+      },
+    })
+
+    const actual =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    const realController: { current: AppController | null } = { current: null }
+    vi.mocked(useAppController).mockImplementation(() => {
+      realController.current = actual.useAppController()
+      return realController.current
+    })
+    const queue = new SandboxUiDeepLinkQueue()
+    acknowledgeDeepLink.mockImplementation(async id => queue.acknowledge(id))
+    let ready = false
+    listApps.mockImplementation(async () => ({
+      apps: [
+        {
+          appRef: 'ns/app',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready,
+          phase: ready ? 'active' : 'deploying',
+        },
+      ],
+    }))
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTaskTrackerProvider>
+          <App />
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => expect(realController.current?.isAuthenticated).toBe(true))
+    await waitFor(() => expect(realController.current?.initialExperienceLoading).toBe(false))
+    act(() => {
+      realController.current?.handleSelectChatAgent('agent-x', {
+        chatId: 'origin-chat',
+        title: 'Origin conversation',
+        selectLatest: false,
+      })
+    })
+    await waitFor(() => expect(realController.current?.activeChatId).toBe('origin-chat'))
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    listApps.mockClear()
+    const originIntent = realController.current?.navigationIntentSequence
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({ recipeNs: 'ns', recipeName: 'app', teamId: 'team-a' })
+    )
+    if (!target) throw new Error('The production app-link parser rejected the fixture URL')
+    const link = queue.enqueue(target)
+    act(() => emitDeepLink?.(link))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(listApps).toHaveBeenCalledTimes(1))
+    await act(async () => Promise.resolve())
+
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+    expect(openSandboxUi).not.toHaveBeenCalled()
+    expect(realController.current?.navigationIntentSequence).toBe(originIntent)
+
+    ready = true
+    await act(async () => {
+      vi.advanceTimersByTime(1_000)
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(listApps).toHaveBeenCalledTimes(2))
+    await waitForAppOpen()
+    await waitForMounted()
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+
+    expect(acknowledgeDeepLink).toHaveBeenCalledOnce()
+    expect(openSandboxUi).toHaveBeenCalledOnce()
+    expect(activeWorkspaceTab(realController.current!.workspaceTabs)?.kind).toBe('app')
+
+    act(() => realController.current?.handleNavSelect(DESKTOP_ROUTES.chat))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(realController.current!.workspaceTabs)?.kind).toBe('chat')
+    )
+    ready = false
+    acknowledgeDeepLink.mockClear()
+    listApps.mockClear()
+    const explicitLink = queue.enqueue(target)
+    act(() => emitDeepLink?.(explicitLink))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(listApps).toHaveBeenCalledTimes(1))
+    act(() => realController.current?.handleNavSelect(DESKTOP_ROUTES.files))
+    await waitFor(() =>
+      expect(activeWorkspaceTab(realController.current!.workspaceTabs)?.kind).toBe('files')
+    )
+
+    ready = true
+    await act(async () => {
+      vi.advanceTimersByTime(1_000)
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(explicitLink.id))
+    expect(acknowledgeDeepLink).toHaveBeenCalledOnce()
+    expect(openSandboxUi).toHaveBeenCalledOnce()
+    expect(activeWorkspaceTab(realController.current!.workspaceTabs)?.kind).toBe('files')
+  })
+
   it('clears the prior principal selection across an authenticated → null → B transition', async () => {
     const existingBridge = window.clerum
     const { clerum, handle } = installAppControllerClerum({
