@@ -349,6 +349,8 @@ export function useAppController() {
   const [hostAuthorityRevision, setHostAuthorityRevision] = useState(0)
   const selectedAgentRef = useRef(nav.selectedAgent)
   selectedAgentRef.current = nav.selectedAgent
+  const activeWorkspaceTabRef = useRef(nav.activeTab)
+  activeWorkspaceTabRef.current = nav.activeTab
   const isHostAccessBlocked = useCallback(
     (agentRef: string) => hostAuthority.isBlocked(agentRef),
     [hostAuthority]
@@ -484,6 +486,8 @@ export function useAppController() {
     hostAuthorityRevision,
     chatAuthorityTeamId: principalTeamId,
   })
+  const activeChatIdRef = useRef(chat.activeChatId)
+  activeChatIdRef.current = chat.activeChatId
   // §4.7.4: the ONE central approval-decision function, bound to the chat
   // controller's FSM store. All four surfaces (desktop notification, in-app bell,
   // in-chat gate, in-flight placeholder) funnel through it so the badge converges
@@ -786,21 +790,24 @@ export function useAppController() {
         const previousTeamId = currentTeamIdRef.current
         const nextTeamId = sessionState.me.teamId || teamId
         const teamContextChanged = nextTeamId !== previousTeamId
+        const activeWorkspaceTab = activeWorkspaceTabRef.current
+        const selectedAgent = selectedAgentRef.current
+        const activeChatId = activeChatIdRef.current
         const activeChatTab =
-          nav.activeTab?.kind === 'chat' &&
-          nav.activeTab.chat?.agentRef &&
-          nav.activeTab.chat.chatId
-            ? nav.activeTab
+          activeWorkspaceTab?.kind === 'chat' &&
+          activeWorkspaceTab.chat?.agentRef &&
+          activeWorkspaceTab.chat.chatId
+            ? activeWorkspaceTab
             : null
         const agentsToSuppress = new Set<string>()
         if (teamContextChanged && activeChatTab?.kind === 'chat' && activeChatTab.chat?.agentRef) {
           agentsToSuppress.add(activeChatTab.chat.agentRef)
-          if (nav.selectedAgent) agentsToSuppress.add(nav.selectedAgent)
-        } else if (teamContextChanged && chat.activeChatId && nav.selectedAgent) {
+          if (selectedAgent) agentsToSuppress.add(selectedAgent)
+        } else if (teamContextChanged && activeChatId && selectedAgent) {
           // The chat drawer keeps its app workspace tab active while its chat is
           // displayed, so use the controller identity when no concrete workspace
           // chat tab is active.
-          agentsToSuppress.add(nav.selectedAgent)
+          agentsToSuppress.add(selectedAgent)
         }
         if (teamContextChanged) {
           const nextRevision = teamContextRevisionRef.current + 1
@@ -857,13 +864,10 @@ export function useAppController() {
       auth.setEmail,
       auth.setIsAuthenticated,
       auth.setMe,
-      chat.activeChatId,
       chat.resetChat,
       chat.setPendingChatSelection,
       connectorsData.reset,
       fullSetStatus,
-      nav.activeTab,
-      nav.selectedAgent,
       refreshAuthenticatedData,
       setTeamContextRevision,
       setPostPaintDataReady,

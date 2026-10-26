@@ -932,6 +932,164 @@ describe('App workspace chat tabs with held Host access', () => {
     })
   })
 
+  it('resets from the current selected agent after a delayed cross-team notification', async () => {
+    const chats: Array<[string, string]> = [
+      ['agent-x', 'chat-1'],
+      ['agent-x', 'chat-2'],
+      ['agent-y', 'chat-3'],
+    ]
+    const { clerum, handle, live } = await mountProductionApp({
+      agentNames: ['agent-x', 'agent-y'],
+      chats,
+    })
+    await addProductionChatTabs(live, chats)
+    await clickProductionChatTab(live, 'chat-1')
+    await waitFor(() => expect(live.chatMessagesLoading).toBe(false))
+
+    const localReads: Array<{
+      agentRef: string
+      chatId: string
+      teamId: string
+      teamContextRevision: number
+      exactAccessVerified: boolean
+    }> = []
+    const originalLocalLoad = clerum.chat.loadMessages.getMockImplementation()!
+    clerum.chat.loadMessages.mockImplementation(async (...args) => {
+      localReads.push({
+        agentRef: args[0],
+        chatId: args[1],
+        teamId: live.getCurrentTeamId(),
+        teamContextRevision: live.teamContextRevision,
+        exactAccessVerified: live.isConversationAccessVerifiedForCurrentTeam(args[0], args[1]),
+      })
+      return originalLocalLoad(...args)
+    })
+
+    const switchResult = makeDeferred<{
+      authenticated: true
+      me: {
+        id: string
+        email: string
+        name: string
+        teamId: string
+        teamName: string
+        role: string
+      }
+    }>()
+    handle.switchTeam.mockReturnValue(switchResult.promise)
+    let opening!: Promise<void>
+    act(() => {
+      opening = appHeaderHarness.openNotification!({
+        id: 'delayed-cross-team-open',
+        kind: 'assistant_reply',
+        agentName: 'agent-x',
+        chatId: 'chat-2',
+        teamId: 'team-2',
+        text: 'new-team reply',
+        timestamp: Date.now(),
+        read: false,
+      } as AppNotification)
+    })
+    await waitFor(() => expect(handle.switchTeam).toHaveBeenCalledWith('team-2'))
+
+    await clickProductionChatTab(live, 'chat-3')
+    await waitFor(() => expect(live.selectedAgent).toBe('agent-y'))
+    await waitFor(() => expect(live.activeChatId).toBe('chat-3'))
+    await waitFor(() => expect(live.chatMessagesLoading).toBe(false))
+    expect(
+      localReads.some(
+        read => read.agentRef === 'agent-y' && read.chatId === 'chat-3' && read.teamId === 'team-1'
+      )
+    ).toBe(true)
+
+    handle.teamDirectory.mockResolvedValue({ items: [], currentTeamId: 'team-2' })
+    await act(async () => {
+      switchResult.resolve({
+        authenticated: true,
+        me: {
+          id: 'user-1',
+          email: 'test@clerum.io',
+          name: 'Test User',
+          teamId: 'team-2',
+          teamName: 'Team 2',
+          role: 'member',
+        },
+      })
+      await opening
+    })
+    await waitFor(() => expect(live.getCurrentTeamId()).toBe('team-2'))
+    await waitFor(() => expect(live.teamContextRevision).toBe(1))
+    expect(localReads.filter(read => read.teamId === 'team-2' && read.chatId === 'chat-3')).toEqual(
+      []
+    )
+    expect(live.isConversationAccessVerifiedForCurrentTeam('agent-y', 'chat-3')).toBe(false)
+    expect(live.activeChatId).toBeNull()
+    expect(
+      live.workspaceTabs.tabs.find(tab => tab.id === live.workspaceTabs.activeTabId)?.chat?.chatId
+    ).toBe('chat-3')
+    expect(
+      screen.getByRole('button', { name: 'chat-3, team changed' }).getAttribute('aria-pressed')
+    ).toBe('true')
+    expect(
+      screen.getByText(
+        'The team changed while this conversation was opening. Select this tab to retry.'
+      )
+    ).toBeTruthy()
+    expect(localReads.filter(read => read.teamId === 'team-2' && read.chatId === 'chat-3')).toEqual(
+      []
+    )
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+
+    const exactAccess = makeDeferred<Awaited<ReturnType<typeof clerum.rpc.loadSessionMessages>>>()
+    const reconciledLoad =
+      makeDeferred<Awaited<ReturnType<typeof clerum.rpc.loadSessionMessages>>>()
+    const originalRemoteLoad = clerum.rpc.loadSessionMessages.getMockImplementation()!
+    let teamTwoChatLoads = 0
+    clerum.rpc.loadSessionMessages.mockImplementation(async (...args) => {
+      if (live.getCurrentTeamId() === 'team-2' && args[2] === 'chat-3') {
+        teamTwoChatLoads += 1
+        if (teamTwoChatLoads === 1) return exactAccess.promise
+        if (teamTwoChatLoads === 2) return reconciledLoad.promise
+        return { agent: 'agent-y', chatId: 'chat-3', turns: [] }
+      }
+      return originalRemoteLoad(...args)
+    })
+    await clickProductionChatTab(live, 'chat-3')
+    await waitFor(() =>
+      expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith('agent-y', 'agent-y', 'chat-3')
+    )
+    expect(live.isConversationAccessVerifiedForCurrentTeam('agent-y', 'chat-3')).toBe(false)
+    expect(localReads.filter(read => read.teamId === 'team-2' && read.chatId === 'chat-3')).toEqual(
+      []
+    )
+
+    await act(async () => {
+      exactAccess.resolve({ agent: 'agent-y', chatId: 'chat-3', turns: [] })
+    })
+    await waitFor(() =>
+      expect(
+        localReads.some(
+          read =>
+            read.agentRef === 'agent-y' &&
+            read.chatId === 'chat-3' &&
+            read.teamId === 'team-2' &&
+            read.exactAccessVerified
+        )
+      ).toBe(true)
+    )
+    await waitFor(() => expect(live.sessionStateByChatKey['agent-y::chat-3']?.syncing).toBe(true))
+    expect(live.isConversationAccessVerifiedForCurrentTeam('agent-y', 'chat-3')).toBe(true)
+    await act(async () => {
+      reconciledLoad.resolve({ agent: 'agent-y', chatId: 'chat-3', turns: [] })
+    })
+    await waitFor(() => expect(live.sessionStateByChatKey['agent-y::chat-3']?.syncing).toBe(false))
+    await waitFor(() => expect(live.chatMessagesLoading).toBe(false))
+    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+      'chat-3'
+    )
+    await waitFor(() => expect(screen.getByText('chat-3 cached content')).toBeTruthy())
+  })
+
   it('does not restore local chat history after a team reset before exact access succeeds', async () => {
     const chats: Array<[string, string]> = [['agent-x', 'chat-1']]
     const { clerum, handle, live } = await mountProductionApp({ chats })
