@@ -57,6 +57,7 @@ export function GfsImagePreview({
     setCopied(false)
     try {
       if (!(await copy())) return
+      clearCopiedResetTimeout()
       setCopied(true)
       copiedResetTimeoutRef.current = setTimeout(() => {
         copiedResetTimeoutRef.current = null
