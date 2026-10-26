@@ -12,6 +12,7 @@ import {
   enqueuePendingSandboxUiDeepLink,
   failPendingSandboxUiDeepLink,
   findPendingSandboxUiDeepLinkAwaitingConfirmation,
+  getSandboxUiDeepLinkMetadataIdsToPrune,
   isPendingSandboxUiDeepLinkAwaitingConfirmation,
   isPendingSandboxUiDeepLinkStale,
   nextSandboxUiDeepLinkRetryDelayMs,
@@ -181,6 +182,34 @@ describe('pending sandbox UI deep-link state', () => {
     expect(clearSandboxUiDeepLinkProcessingOwner(1, 1)).toBeNull()
     expect(clearSandboxUiDeepLinkProcessingOwner(2, 1)).toBe(2)
     expect(clearSandboxUiDeepLinkProcessingOwner(null, 1)).toBeNull()
+  })
+
+  it('prunes only absent metadata that is not owned by the active processor', () => {
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(fc.integer({ min: 1, max: 100 }), { maxLength: 50 }),
+        fc.uniqueArray(fc.integer({ min: 1, max: 100 }), { maxLength: 50 }),
+        fc.option(fc.integer({ min: 1, max: 100 }), { nil: null }),
+        (metadataIds, pendingIds, processingOwnerId) => {
+          const pending = new Set(pendingIds)
+          const expected = new Set<number>()
+          for (const linkId of metadataIds) {
+            if (pending.has(linkId) || linkId === processingOwnerId) continue
+            expected.add(linkId)
+          }
+
+          const actual = getSandboxUiDeepLinkMetadataIdsToPrune(
+            metadataIds,
+            pendingIds,
+            processingOwnerId
+          )
+
+          expect(new Set(actual)).toEqual(expected)
+          expect(actual).toHaveLength(expected.size)
+        }
+      ),
+      { numRuns: 10_000 }
+    )
   })
 
   it('merges live and cold-start links in FIFO order', () => {

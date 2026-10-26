@@ -2903,12 +2903,12 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(1, {
       teamId: 'team-b',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(2, {
       teamId: 'team-a',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
     expect(currentController.pushToast).toHaveBeenCalledWith(
       expect.stringContaining("You don't have access"),
@@ -2937,7 +2937,7 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(2, {
       teamId: 'team-a',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
     expect(currentController.workspaceTabs).toEqual(originWorkspace)
     expect(currentController.selectedAgent).toBe('alpha')
@@ -3200,7 +3200,7 @@ describe('App deep-link orchestration', () => {
 
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
     expect(openSandboxUi).not.toHaveBeenCalled()
-    expect(realController.current?.navigationIntentSequence).toBe(originIntent)
+    expect(realController.current?.navigationIntentSequence).toBe((originIntent ?? 0) + 1)
 
     ready = true
     await act(async () => {
@@ -3357,7 +3357,7 @@ describe('App deep-link orchestration', () => {
     expect(openSandboxUi).toHaveBeenCalledOnce()
     expect(handle.switchTeam).toHaveBeenCalledOnce()
     expect(originRestorations).toHaveLength(0)
-    expect(realController.current?.navigationIntentSequence).toBe(navigationIntent)
+    expect(realController.current?.navigationIntentSequence).toBe((navigationIntent ?? 0) + 1)
     expect(activeWorkspaceTab(realController.current!.workspaceTabs)?.id).toBe(originTabId)
     expect(activeWorkspaceTab(realController.current!.workspaceTabs)?.app?.savedRoutePath).toBe(
       '/tickets/origin'
@@ -3376,7 +3376,7 @@ describe('App deep-link orchestration', () => {
       expect(closeSandboxUi).toHaveBeenCalledOnce()
       expect(openSandboxUi).toHaveBeenCalledOnce()
       expect(originRestorations).toHaveLength(0)
-      expect(realController.current?.navigationIntentSequence).toBe(navigationIntent)
+      expect(realController.current?.navigationIntentSequence).toBe((navigationIntent ?? 0) + 1)
     }
 
     ready = true
@@ -3464,7 +3464,7 @@ describe('App deep-link orchestration', () => {
     expect(realController.current?.navItem).toBe(DESKTOP_ROUTES.chat)
     expect(realController.current?.selectedAgent).toBe('agent-x')
     expect(realController.current?.activeChatId).toBe('origin-chat')
-    expect(realController.current?.navigationIntentSequence).toBe(originIntent)
+    expect(realController.current?.navigationIntentSequence).toBe((originIntent ?? 0) + 1)
     expect(acknowledgeDeepLink).toHaveBeenCalledOnce()
     expect(openSandboxUi).not.toHaveBeenCalled()
   })
@@ -4515,7 +4515,7 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleEnsureTeamContext).toHaveBeenCalledWith({
       teamId: 'team-b',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
     expect(currentController.pushToast).not.toHaveBeenCalledWith(
       "Could not open app link: You don't have access to this app in the linked team",
@@ -4711,7 +4711,7 @@ describe('App deep-link orchestration', () => {
     expect(ensureTeamContext).toHaveBeenCalledWith({
       teamId: 'team-b',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
     expect(main.live()?.appRef).toBe(READY_APP_B.appRef)
     expect(main.openCall(1).launchId).not.toBe(originLaunchId)
@@ -4766,7 +4766,7 @@ describe('App deep-link orchestration', () => {
     expect(ensureTeamContext).toHaveBeenCalledWith({
       teamId: 'team-b',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
 
     await act(async () => {
@@ -4840,7 +4840,7 @@ describe('App deep-link orchestration', () => {
     expect(ensureTeamContext).toHaveBeenNthCalledWith(2, {
       teamId: 'team-a',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
   })
 
@@ -4877,6 +4877,7 @@ describe('App deep-link orchestration', () => {
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
     const originWorkspace = currentController.workspaceTabs
     const originAgent = currentController.selectedAgent
+    const intentBeforeConfirmation = currentController.navigationIntentSequence
 
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
@@ -4894,12 +4895,12 @@ describe('App deep-link orchestration', () => {
     expect(ensureTeamContext).toHaveBeenNthCalledWith(1, {
       teamId: 'team-b',
       announce: true,
-      navigationIntentSequence: 1,
+      navigationIntentSequence: intentBeforeConfirmation + 1,
     })
     expect(ensureTeamContext).toHaveBeenNthCalledWith(2, {
       teamId: 'team-a',
       announce: true,
-      navigationIntentSequence: 1,
+      navigationIntentSequence: intentBeforeConfirmation + 1,
     })
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
 
@@ -4914,6 +4915,11 @@ describe('App deep-link orchestration', () => {
     expect(liveTeamId).toBe('team-b')
     expect(currentController.workspaceTabs).not.toEqual(originWorkspace)
     expect(ensureTeamContext).toHaveBeenCalledTimes(3)
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(3, {
+      teamId: 'team-b',
+      announce: true,
+      navigationIntentSequence: intentBeforeConfirmation + 2,
+    })
     expect(currentController.pushToast).not.toHaveBeenCalledWith(
       expect.stringContaining('you switched teams'),
       'error'
@@ -5250,7 +5256,7 @@ describe('App deep-link orchestration', () => {
     expect(confirmDialogHarness.props?.title).not.toBe('App link could not be opened')
   })
 
-  it('keeps a failed native mount unacked and continues with later links', async () => {
+  it('cancels a failed native mount after a later link is confirmed', async () => {
     currentController = makeController({ initialExperienceLoading: false })
     listApps.mockResolvedValue({
       apps: [
@@ -5289,7 +5295,8 @@ describe('App deep-link orchestration', () => {
     await waitForAppOpen(2)
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(2))
-    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(1)
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(acknowledgeDeepLink).toHaveBeenCalledTimes(2)
   })
 
   // ── the route an app tab is left on, and deep links left before mounting ──
@@ -5394,7 +5401,7 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(2, {
       teamId: 'team-a',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
   })
 
@@ -5611,6 +5618,7 @@ describe('App deep-link orchestration', () => {
     expect(embedState().views.get(originLaunchId)?.phase).toBe('closeFailed')
 
     const chatWorkspace = currentController.workspaceTabs
+    const intentBeforeConfirmation = currentController.navigationIntentSequence
     closeSandboxUi.mockClear()
     closeSandboxUi.mockRejectedValueOnce(new Error('native close rejected during handoff'))
     ensureTeamContext.mockClear()
@@ -5668,7 +5676,7 @@ describe('App deep-link orchestration', () => {
     expect(ensureTeamContext).toHaveBeenCalledExactlyOnceWith({
       teamId: 'team-b',
       announce: true,
-      navigationIntentSequence: 5,
+      navigationIntentSequence: intentBeforeConfirmation + 1,
     })
     expect(main.live()?.appRef).toBe('ns/app')
     expect(main.live()?.launchId).not.toBe(originLaunchId)

@@ -78,6 +78,7 @@ import {
   enqueuePendingSandboxUiDeepLink,
   failPendingSandboxUiDeepLink,
   findPendingSandboxUiDeepLinkAwaitingConfirmation,
+  getSandboxUiDeepLinkMetadataIdsToPrune,
   isPendingSandboxUiDeepLinkAwaitingConfirmation,
   isPendingSandboxUiDeepLinkStale,
   removePendingSandboxUiDeepLink,
@@ -1790,6 +1791,25 @@ export function App() {
   )
 
   const setPendingSandboxUiDeepLinkState = React.useCallback((next: PendingSandboxUiDeepLink[]) => {
+    const metadataIds = new Set<number>([
+      ...sandboxUiDeepLinkRestoreTeamByIdRef.current.keys(),
+      ...sandboxUiDeepLinkOriginNavigationByIdRef.current.keys(),
+      ...sandboxUiDeepLinkOriginAppByIdRef.current.keys(),
+      ...sandboxUiDeepLinkIntentByIdRef.current.keys(),
+      ...sandboxUiDeepLinkClosedOriginEmbedsRef.current,
+    ])
+    const pendingIds = new Set(next.map(item => item.link.id))
+    for (const linkId of getSandboxUiDeepLinkMetadataIdsToPrune(
+      metadataIds,
+      pendingIds,
+      processingSandboxUiDeepLinkIdRef.current
+    )) {
+      sandboxUiDeepLinkRestoreTeamByIdRef.current.delete(linkId)
+      sandboxUiDeepLinkOriginNavigationByIdRef.current.delete(linkId)
+      sandboxUiDeepLinkOriginAppByIdRef.current.delete(linkId)
+      sandboxUiDeepLinkIntentByIdRef.current.delete(linkId)
+      sandboxUiDeepLinkClosedOriginEmbedsRef.current.delete(linkId)
+    }
     pendingSandboxUiDeepLinksRef.current = next
     setPendingSandboxUiDeepLinks(next)
   }, [])
@@ -2411,7 +2431,7 @@ export function App() {
     const currentIdentity = vm.authenticatedPrincipalIdentity
     if (!currentIdentity) return
     let stalePending: PendingSandboxUiDeepLink | null = null
-    let supersededRetry: PendingSandboxUiDeepLink | null = null
+    let supersededPending: PendingSandboxUiDeepLink | null = null
     const now = Date.now()
     // Written as a loop rather than `.find()` because TypeScript's control-flow
     // analysis does not track assignments made inside a callback: `stalePending`
@@ -2425,16 +2445,12 @@ export function App() {
         continue
       }
       if (isPendingSandboxUiDeepLinkAwaitingConfirmation(item, currentIdentity)) continue
-      if (item.failedMessage) continue
       const expectedIntent = sandboxUiDeepLinkIntentByIdRef.current.get(item.link.id)
-      if (
-        (item.retryCount ?? 0) > 0 &&
-        expectedIntent !== undefined &&
-        !vm.isNavigationIntentCurrent(expectedIntent)
-      ) {
-        supersededRetry = item
+      if (expectedIntent === undefined || !vm.isNavigationIntentCurrent(expectedIntent)) {
+        supersededPending = item
         break
       }
+      if (item.failedMessage) continue
       if (item.nextRetryAt && item.nextRetryAt > now) continue
       pending = item
       break
@@ -2443,11 +2459,19 @@ export function App() {
       void acknowledgeSandboxUiDeepLink(stalePending.link.id)
       return
     }
-    if (supersededRetry) {
-      void cancelSupersededSandboxUiDeepLink(supersededRetry.link.id)
+    if (supersededPending) {
+      void cancelSupersededSandboxUiDeepLink(supersededPending.link.id)
       return
     }
     if (!pending || processingSandboxUiDeepLinkIdRef.current !== null) return
+    const navigationIntentSequence = sandboxUiDeepLinkIntentByIdRef.current.get(pending.link.id)
+    if (
+      navigationIntentSequence === undefined ||
+      !vm.isNavigationIntentCurrent(navigationIntentSequence)
+    ) {
+      void cancelSupersededSandboxUiDeepLink(pending.link.id)
+      return
+    }
     processingSandboxUiDeepLinkIdRef.current = pending.link.id
     const processingGeneration = sandboxUiDeepLinkGenerationRef.current
 
@@ -2473,9 +2497,6 @@ export function App() {
             : null
         sandboxUiDeepLinkOriginAppByIdRef.current.set(pending.link.id, originApp)
       }
-      let navigationIntentSequence =
-        sandboxUiDeepLinkIntentByIdRef.current.get(pending.link.id) ?? vm.navigationIntentSequence
-      sandboxUiDeepLinkIntentByIdRef.current.set(pending.link.id, navigationIntentSequence)
       let switchedTeam = Boolean(
         restoreTeamId && pending.link.teamId && restoreTeamId !== pending.link.teamId
       )
@@ -2508,7 +2529,6 @@ export function App() {
           sandboxUiDeepLinkRestoreTeamByIdRef.current.delete(pending.link.id)
           sandboxUiDeepLinkOriginNavigationByIdRef.current.delete(pending.link.id)
           sandboxUiDeepLinkOriginAppByIdRef.current.delete(pending.link.id)
-          sandboxUiDeepLinkIntentByIdRef.current.delete(pending.link.id)
           sandboxUiDeepLinkClosedOriginEmbedsRef.current.delete(pending.link.id)
           clearSandboxUiDeepLinkProcessing(pending.link.id)
           const next = failPendingSandboxUiDeepLink(
@@ -3050,47 +3070,81 @@ export function App() {
     ? pendingSandboxUiDeepLinks.find(item => item.failedMessage)
     : null
 
-  const handleConfirmSandboxUiDeepLink = React.useCallback(() => {
-    const identity = vm.authenticatedPrincipalIdentity
-    const pending = findPendingSandboxUiDeepLinkAwaitingConfirmation(
-      pendingSandboxUiDeepLinksRef.current,
-      identity
-    )
-    if (!identity || !pending) return
-    const next = confirmPendingSandboxUiDeepLink(
-      pendingSandboxUiDeepLinksRef.current,
-      pending.link.id,
-      identity
-    )
-    setPendingSandboxUiDeepLinkState(next)
-  }, [setPendingSandboxUiDeepLinkState, vm.authenticatedPrincipalIdentity])
+  const handleConfirmSandboxUiDeepLink = React.useCallback(
+    (linkId: number) => {
+      const identity = vm.authenticatedPrincipalIdentity
+      const pending = findPendingSandboxUiDeepLinkAwaitingConfirmation(
+        pendingSandboxUiDeepLinksRef.current,
+        identity
+      )
+      if (!identity || !pending || pending.link.id !== linkId) return
+      const navigationIntentSequence = vm.beginUserNavigationIntent()
+      sandboxUiDeepLinkIntentByIdRef.current.set(linkId, navigationIntentSequence)
+      const next = confirmPendingSandboxUiDeepLink(
+        pendingSandboxUiDeepLinksRef.current,
+        linkId,
+        identity
+      )
+      setPendingSandboxUiDeepLinkState(next)
+    },
+    [
+      setPendingSandboxUiDeepLinkState,
+      vm.authenticatedPrincipalIdentity,
+      vm.beginUserNavigationIntent,
+    ]
+  )
 
-  const handleDismissSandboxUiDeepLink = React.useCallback(() => {
-    const identity = vm.authenticatedPrincipalIdentity
-    const pending = findPendingSandboxUiDeepLinkAwaitingConfirmation(
-      pendingSandboxUiDeepLinksRef.current,
-      identity
-    )
-    if (!pending) return
-    void acknowledgeSandboxUiDeepLink(pending.link.id)
-  }, [acknowledgeSandboxUiDeepLink, vm.authenticatedPrincipalIdentity])
+  const handleDismissSandboxUiDeepLink = React.useCallback(
+    (linkId: number) => {
+      const identity = vm.authenticatedPrincipalIdentity
+      const pending = findPendingSandboxUiDeepLinkAwaitingConfirmation(
+        pendingSandboxUiDeepLinksRef.current,
+        identity
+      )
+      if (!pending || pending.link.id !== linkId) return
+      void acknowledgeSandboxUiDeepLink(linkId)
+    },
+    [acknowledgeSandboxUiDeepLink, vm.authenticatedPrincipalIdentity]
+  )
 
-  const handleRetryFailedSandboxUiDeepLink = React.useCallback(() => {
-    const pending = pendingSandboxUiDeepLinksRef.current.find(item => item.failedMessage)
-    if (!pending) return
-    const next = resetPendingSandboxUiDeepLinkFailure(
-      pendingSandboxUiDeepLinksRef.current,
-      pending.link.id
-    )
-    setPendingSandboxUiDeepLinkState(next)
-    setSandboxUiDeepLinkRetryTick(value => value + 1)
-  }, [setPendingSandboxUiDeepLinkState])
+  const handleRetryFailedSandboxUiDeepLink = React.useCallback(
+    (linkId: number) => {
+      const pending = pendingSandboxUiDeepLinksRef.current.find(
+        item => item.link.id === linkId && item.failedMessage
+      )
+      if (!pending) return
+      const navigationIntentSequence = sandboxUiDeepLinkIntentByIdRef.current.get(linkId)
+      if (
+        navigationIntentSequence === undefined ||
+        !vm.isNavigationIntentCurrent(navigationIntentSequence)
+      ) {
+        void cancelSupersededSandboxUiDeepLink(linkId)
+        return
+      }
+      const next = resetPendingSandboxUiDeepLinkFailure(
+        pendingSandboxUiDeepLinksRef.current,
+        linkId
+      )
+      setPendingSandboxUiDeepLinkState(next)
+      setSandboxUiDeepLinkRetryTick(value => value + 1)
+    },
+    [
+      cancelSupersededSandboxUiDeepLink,
+      setPendingSandboxUiDeepLinkState,
+      vm.isNavigationIntentCurrent,
+    ]
+  )
 
-  const handleDismissFailedSandboxUiDeepLink = React.useCallback(() => {
-    const pending = pendingSandboxUiDeepLinksRef.current.find(item => item.failedMessage)
-    if (!pending) return
-    void acknowledgeSandboxUiDeepLink(pending.link.id)
-  }, [acknowledgeSandboxUiDeepLink])
+  const handleDismissFailedSandboxUiDeepLink = React.useCallback(
+    (linkId: number) => {
+      const pending = pendingSandboxUiDeepLinksRef.current.find(
+        item => item.link.id === linkId && item.failedMessage
+      )
+      if (!pending) return
+      void acknowledgeSandboxUiDeepLink(linkId)
+    },
+    [acknowledgeSandboxUiDeepLink]
+  )
 
   const sandboxUiDeepLinkDialog = pendingSandboxUiConfirmation ? (
     <ConfirmDialog
@@ -3098,8 +3152,8 @@ export function App() {
       body={<p>Open {pendingSandboxUiConfirmation.link.appRef} in this desktop session.</p>}
       cancelLabel="Dismiss"
       confirmLabel="Open"
-      onCancel={handleDismissSandboxUiDeepLink}
-      onConfirm={handleConfirmSandboxUiDeepLink}
+      onCancel={() => handleDismissSandboxUiDeepLink(pendingSandboxUiConfirmation.link.id)}
+      onConfirm={() => handleConfirmSandboxUiDeepLink(pendingSandboxUiConfirmation.link.id)}
       tone="primary"
     />
   ) : failedSandboxUiDeepLink ? (
@@ -3113,8 +3167,8 @@ export function App() {
       }
       cancelLabel="Dismiss"
       confirmLabel="Retry"
-      onCancel={handleDismissFailedSandboxUiDeepLink}
-      onConfirm={handleRetryFailedSandboxUiDeepLink}
+      onCancel={() => handleDismissFailedSandboxUiDeepLink(failedSandboxUiDeepLink.link.id)}
+      onConfirm={() => handleRetryFailedSandboxUiDeepLink(failedSandboxUiDeepLink.link.id)}
       tone="primary"
     />
   ) : null

@@ -21,6 +21,7 @@ import {
   canCompleteGfsResourceNavigation,
   isGfsResourceNavigationOwnerPresent,
 } from '@lib/gfsResourceNavigationIntent'
+import * as sandboxUiDeepLinkState from '@lib/sandboxUiDeepLinkState'
 import {
   activeWorkspaceTab,
   createFilesTab,
@@ -1226,6 +1227,225 @@ describe('App deep-link orchestration', () => {
     )
   })
 
+  it('keeps a later Chat selection when a confirmed retained link wakes afterward', async () => {
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    let liveTeamId = 'team-a'
+    let releaseFirstSwitch!: () => void
+    const firstSwitchGate = new Promise<void>(resolve => (releaseFirstSwitch = resolve))
+    const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
+      if (ensureTeamContext.mock.calls.length === 1) await firstSwitchGate
+      if (!teamId || teamId === liveTeamId) return false
+      liveTeamId = teamId
+      return true
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      handleEnsureTeamContext: ensureTeamContext,
+      getCurrentTeamId: () => liveTeamId,
+    })
+    const pushToast = vi.spyOn(currentController, 'pushToast')
+    const queue = new SandboxUiDeepLinkQueue()
+    acknowledgeDeepLink.mockImplementation(async id => queue.acknowledge(id))
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    const first = queue.enqueue({ appRef: 'ns/first', teamId: 'team-b' })
+    act(() => emitDeepLink?.(first))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(ensureTeamContext).toHaveBeenCalledTimes(1))
+    const firstSwitch = ensureTeamContext.mock.results[0]?.value
+    if (!firstSwitch) throw new Error('first team switch did not start')
+
+    const retained = queue.enqueue({ appRef: READY_APP.appRef, teamId: 'team-c' })
+    act(() => {
+      emitDeepLink?.(retained)
+      for (let index = 1; index < 20; index += 1) {
+        const link = queue.enqueue({ appRef: `ns/queued-${index}`, teamId: 'team-c' })
+        emitDeepLink?.(link)
+      }
+    })
+    expect(queue.list()).toHaveLength(20)
+    expect(queue.list().some(link => link.id === first.id)).toBe(false)
+    await waitFor(() => {
+      expect(confirmDialogHarness.props?.title).toBe('Open app link?')
+      expect(renderToStaticMarkup(<>{confirmDialogHarness.props?.body}</>)).toContain(
+        `Open ${READY_APP.appRef} in this desktop session.`
+      )
+    })
+
+    await confirmPendingAppLink()
+    expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+    const confirmationIntent = currentController.navigationIntentSequence
+    act(() => workspaceTabStripHarness.props?.onSelect('chat-tab-1'))
+    await waitFor(() => expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1'))
+    expect(currentController.navigationIntentSequence).toBeGreaterThan(confirmationIntent)
+
+    await act(async () => {
+      releaseFirstSwitch()
+      await firstSwitch
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(retained.id))
+    await waitFor(() => expect(currentController.navItem).toBe(DESKTOP_ROUTES.chat))
+
+    expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1')
+    expect(ensureTeamContext.mock.calls.map(call => call[0].teamId)).toEqual(['team-b'])
+    expect(openSandboxUi()).not.toHaveBeenCalled()
+    expect(main.live()).toBeNull()
+    expect(acknowledgeDeepLink).toHaveBeenCalledTimes(1)
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
+    expect(
+      pushToast.mock.calls.filter(
+        ([message]) => message === 'App link canceled because you navigated elsewhere.'
+      )
+    ).toHaveLength(1)
+  })
+
+  it('prunes confirmed evictions but retains an evicted processing owner until settlement', async () => {
+    const pruneSpy = vi.spyOn(sandboxUiDeepLinkState, 'getSandboxUiDeepLinkMetadataIdsToPrune')
+    try {
+      listApps.mockResolvedValue({ apps: [READY_APP] })
+      let liveTeamId = 'team-a'
+      let releaseFirstSwitch!: () => void
+      const firstSwitchGate = new Promise<void>(resolve => (releaseFirstSwitch = resolve))
+      const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
+        if (ensureTeamContext.mock.calls.length === 1) await firstSwitchGate
+        if (!teamId || teamId === liveTeamId) return false
+        liveTeamId = teamId
+        return true
+      })
+      currentController = makeController({
+        initialExperienceLoading: false,
+        handleEnsureTeamContext: ensureTeamContext,
+        getCurrentTeamId: () => liveTeamId,
+      })
+      const queue = new SandboxUiDeepLinkQueue()
+      acknowledgeDeepLink.mockImplementation(async id => queue.acknowledge(id))
+      render(<App />)
+      await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+      const first = queue.enqueue({ appRef: 'ns/first', teamId: 'team-b' })
+      act(() => emitDeepLink?.(first))
+      await confirmPendingAppLink()
+      await waitFor(() => expect(ensureTeamContext).toHaveBeenCalledTimes(1))
+      const firstSwitch = ensureTeamContext.mock.results[0]?.value
+      if (!firstSwitch) throw new Error('first team switch did not start')
+
+      const retained = queue.enqueue({ appRef: READY_APP.appRef, teamId: 'team-c' })
+      act(() => {
+        emitDeepLink?.(retained)
+        for (let index = 1; index < 20; index += 1) {
+          const link = queue.enqueue({ appRef: `ns/queued-${index}`, teamId: 'team-c' })
+          emitDeepLink?.(link)
+        }
+      })
+      await waitFor(() => {
+        expect(confirmDialogHarness.props?.title).toBe('Open app link?')
+        expect(renderToStaticMarkup(<>{confirmDialogHarness.props?.body}</>)).toContain(
+          `Open ${READY_APP.appRef} in this desktop session.`
+        )
+      })
+      await confirmPendingAppLink()
+      expect(ensureTeamContext).toHaveBeenCalledTimes(1)
+
+      act(() => {
+        for (let index = 20; index < 40; index += 1) {
+          const link = queue.enqueue({ appRef: `ns/queued-${index}`, teamId: 'team-c' })
+          emitDeepLink?.(link)
+        }
+      })
+      expect(queue.list()).toHaveLength(20)
+      expect(queue.list().some(link => link.id === retained.id)).toBe(false)
+      expect(queue.list().some(link => link.id === first.id)).toBe(false)
+
+      const prunedUnprocessedEviction = pruneSpy.mock.calls.some(
+        ([metadataIds, pendingIds, processingOwnerId], callIndex) => {
+          const metadata = new Set(metadataIds)
+          const pending = new Set(pendingIds)
+          const result = pruneSpy.mock.results[callIndex]?.value as number[] | undefined
+          return (
+            metadata.has(retained.id) &&
+            !pending.has(retained.id) &&
+            processingOwnerId === first.id &&
+            result?.includes(retained.id) === true &&
+            result.includes(first.id) === false
+          )
+        }
+      )
+      expect(prunedUnprocessedEviction).toBe(true)
+      const unprocessedPruneCall = pruneSpy.mock.calls.findIndex(
+        ([metadataIds, pendingIds, processingOwnerId], callIndex) => {
+          const metadata = new Set(metadataIds)
+          const pending = new Set(pendingIds)
+          const result = pruneSpy.mock.results[callIndex]?.value as number[] | undefined
+          return (
+            metadata.has(retained.id) &&
+            !pending.has(retained.id) &&
+            processingOwnerId === first.id &&
+            result?.includes(retained.id) === true
+          )
+        }
+      )
+      expect(unprocessedPruneCall).toBeGreaterThanOrEqual(0)
+      expect(
+        pruneSpy.mock.calls
+          .slice(unprocessedPruneCall + 1)
+          .every(([metadataIds]) => !Array.from(metadataIds).includes(retained.id))
+      ).toBe(true)
+      const retainedProcessingOwner = pruneSpy.mock.calls.some(
+        ([metadataIds, pendingIds, processingOwnerId], callIndex) => {
+          const metadata = new Set(metadataIds)
+          const pending = new Set(pendingIds)
+          const result = pruneSpy.mock.results[callIndex]?.value as number[] | undefined
+          return (
+            metadata.has(first.id) &&
+            !pending.has(first.id) &&
+            processingOwnerId === first.id &&
+            result?.includes(first.id) === false
+          )
+        }
+      )
+      expect(retainedProcessingOwner).toBe(true)
+
+      act(() => workspaceTabStripHarness.props?.onSelect('chat-tab-1'))
+      await waitFor(() => expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1'))
+      await act(async () => {
+        releaseFirstSwitch()
+        await firstSwitch
+        await Promise.resolve()
+      })
+
+      expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1')
+      expect(currentController.navItem).toBe(DESKTOP_ROUTES.chat)
+      expect(ensureTeamContext.mock.calls.map(call => call[0].teamId)).toEqual(['team-b'])
+      expect(openSandboxUi()).not.toHaveBeenCalled()
+      expect(main.live()).toBeNull()
+      expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
+      expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(retained.id)
+      expect(currentController.pushToast).not.toHaveBeenCalledWith(
+        'App link canceled because you navigated elsewhere.',
+        'info'
+      )
+
+      const prunedSettledOwner = pruneSpy.mock.calls.some(
+        ([metadataIds, pendingIds, processingOwnerId], callIndex) => {
+          const metadata = new Set(metadataIds)
+          const pending = new Set(pendingIds)
+          const result = pruneSpy.mock.results[callIndex]?.value as number[] | undefined
+          return (
+            metadata.has(first.id) &&
+            !pending.has(first.id) &&
+            processingOwnerId === null &&
+            result?.includes(first.id) === true
+          )
+        }
+      )
+      expect(prunedSettledOwner).toBe(true)
+    } finally {
+      pruneSpy.mockRestore()
+    }
+  })
+
   it('releases an evicted owner after its normal app mount settles', async () => {
     listApps.mockResolvedValue({ apps: [READY_APP] })
     let liveTeamId = 'team-a'
@@ -1378,6 +1598,8 @@ describe('App deep-link orchestration', () => {
         'Open ns/queued-0 in this desktop session.'
       )
     })
+    act(() => workspaceTabStripHarness.props?.onSelect('chat-tab-1'))
+    await waitFor(() => expect(currentController.workspaceTabs.activeTabId).toBe('chat-tab-1'))
     await confirmPendingAppLink()
     expect(listApps).toHaveBeenCalledTimes(2)
     expect(ensureTeamContext.mock.calls.map(call => call[0].teamId)).toEqual(['team-b'])
@@ -1387,13 +1609,11 @@ describe('App deep-link orchestration', () => {
       await Promise.resolve()
     })
     await waitFor(() =>
-      expect(currentController.pushToast).toHaveBeenCalledWith(
-        'Could not open app link: app catalog unavailable',
-        'error'
-      )
-    )
-    await waitFor(() =>
       expect(ensureTeamContext.mock.calls.map(call => call[0].teamId)).toContain('team-c')
+    )
+    expect(currentController.pushToast).not.toHaveBeenCalledWith(
+      'Could not open app link: app catalog unavailable',
+      'error'
     )
     expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
     expect(currentController.pushToast).not.toHaveBeenCalledWith(
@@ -1752,7 +1972,7 @@ describe('App deep-link orchestration', () => {
     // mounted. Retry is distinct from Dismiss here — it must not acknowledge
     // the link, it re-drives the open.
     vi.useFakeTimers({ shouldAdvanceTime: true })
-    const ensureTeamContext = vi.fn(async () => {
+    const ensureTeamContext = vi.fn(async (_target: { navigationIntentSequence?: number }) => {
       throw Object.assign(new Error('fetch failed'), { code: 'ECONNRESET' })
     })
     currentController = makeController({
@@ -1760,6 +1980,7 @@ describe('App deep-link orchestration', () => {
       navItem: DESKTOP_ROUTES.apps,
       handleEnsureTeamContext: ensureTeamContext,
     })
+    const beginUserNavigationIntent = vi.spyOn(currentController, 'beginUserNavigationIntent')
     render(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
@@ -1784,6 +2005,8 @@ describe('App deep-link orchestration', () => {
     expect(sandboxUiPageHarness.props?.deepLinkShellOverlayOpen).toBe(true)
 
     const ensureCallsBeforeRetry = ensureTeamContext.mock.calls.length
+    const acceptedIntent = currentController.navigationIntentSequence
+    const navigationIntentCallsBeforeRetry = beginUserNavigationIntent.mock.calls.length
 
     // Retry — the failure dialog's onConfirm, not onCancel.
     await act(async () => {
@@ -1803,6 +2026,71 @@ describe('App deep-link orchestration', () => {
     // The retry actually re-attempted the open (handleRetryFailedSandboxUiDeepLink
     // ran), rather than just tearing the dialog down.
     expect(ensureTeamContext.mock.calls.length).toBeGreaterThan(ensureCallsBeforeRetry)
+    expect(
+      ensureTeamContext.mock.calls
+        .slice(ensureCallsBeforeRetry)
+        .every(([target]) => target.navigationIntentSequence === acceptedIntent)
+    ).toBe(true)
+    expect(currentController.navigationIntentSequence).toBe(acceptedIntent)
+    expect(beginUserNavigationIntent).toHaveBeenCalledTimes(navigationIntentCallsBeforeRetry)
+  })
+
+  it('does not reauthorize a failed link from a stale Retry callback', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const ensureTeamContext = vi.fn(async (_target: { navigationIntentSequence?: number }) => {
+      throw Object.assign(new Error('fetch failed'), { code: 'ECONNRESET' })
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.files,
+      handleEnsureTeamContext: ensureTeamContext,
+    })
+    const beginUserNavigationIntent = vi.spyOn(currentController, 'beginUserNavigationIntent')
+    const queue = new SandboxUiDeepLinkQueue()
+    acknowledgeDeepLink.mockImplementation(async id => queue.acknowledge(id))
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    const link = queue.enqueue({ appRef: 'ns/app', teamId: 'team-b' })
+    act(() => emitDeepLink?.(link))
+    await confirmPendingAppLink()
+    for (const delay of [1_000, 2_000, 4_000, 8_000, 15_000]) {
+      await act(async () => {
+        vi.advanceTimersByTime(delay)
+        await Promise.resolve()
+      })
+    }
+    await waitFor(() =>
+      expect(confirmDialogHarness.props?.title).toBe('App link could not be opened')
+    )
+    expect(confirmDialogHarness.props?.confirmLabel).toBe('Retry')
+    const staleRetry = confirmDialogHarness.props?.onConfirm
+    if (!staleRetry) throw new Error('The failed link did not render its Retry callback')
+    const acceptedIntent = currentController.navigationIntentSequence
+    const callsBeforeStaleRetry = ensureTeamContext.mock.calls.length
+    let intentAfterSelection = acceptedIntent
+    const navigationCallsBeforeSelection = beginUserNavigationIntent.mock.calls.length
+    expect(filesPageHarness.props?.onExplicitNavigationIntent).toBeTypeOf('function')
+
+    act(() => {
+      filesPageHarness.props?.onExplicitNavigationIntent?.()
+      intentAfterSelection = currentController.navigationIntentSequence
+      expect(queue.list()).toEqual([link])
+      staleRetry()
+    })
+
+    await waitFor(() => expect(queue.list()).toEqual([]))
+    expect(currentController.navigationIntentSequence).toBe(intentAfterSelection)
+    expect(intentAfterSelection).toBe(acceptedIntent + 1)
+    expect(beginUserNavigationIntent).toHaveBeenCalledTimes(navigationCallsBeforeSelection + 1)
+    expect(ensureTeamContext).toHaveBeenCalledTimes(callsBeforeStaleRetry)
+    expect(acknowledgeDeepLink).toHaveBeenCalledExactlyOnceWith(link.id)
+    expect(openSandboxUi()).not.toHaveBeenCalled()
+    expect(main.live()).toBeNull()
+    expect(currentController.pushToast).toHaveBeenCalledWith(
+      'App link canceled because you navigated elsewhere.',
+      'info'
+    )
   })
 
   it('does not duplicate an authenticated confirmation for the same link id', async () => {
@@ -1834,6 +2122,64 @@ describe('App deep-link orchestration', () => {
     // Launched exactly once — the store put the shell on the Apps route (the
     // observable that replaced the retired single `handleNavSelect(apps)` call).
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
+  })
+
+  it('does not let a stale Open callback confirm the next queued link', async () => {
+    let liveTeamId = 'team-a'
+    let releaseFirstSwitch!: () => void
+    const firstSwitchGate = new Promise<void>(resolve => (releaseFirstSwitch = resolve))
+    const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
+      await firstSwitchGate
+      if (!teamId || teamId === liveTeamId) return false
+      liveTeamId = teamId
+      return true
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      handleEnsureTeamContext: ensureTeamContext,
+      getCurrentTeamId: () => liveTeamId,
+    })
+    const beginUserNavigationIntent = vi.spyOn(currentController, 'beginUserNavigationIntent')
+    const queue = new SandboxUiDeepLinkQueue()
+    acknowledgeDeepLink.mockImplementation(async id => queue.acknowledge(id))
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    const first = queue.enqueue({ appRef: 'ns/first', teamId: 'team-b' })
+    const second = queue.enqueue({ appRef: 'ns/second', teamId: 'team-c' })
+    act(() => {
+      emitDeepLink?.(first)
+      emitDeepLink?.(second)
+    })
+    await waitFor(() => {
+      expect(confirmDialogHarness.props?.title).toBe('Open app link?')
+      expect(renderToStaticMarkup(<>{confirmDialogHarness.props?.body}</>)).toContain(
+        'Open ns/first in this desktop session.'
+      )
+    })
+    const staleOpen = confirmDialogHarness.props?.onConfirm
+    if (!staleOpen) throw new Error('first confirmation callback did not render')
+    const priorIntentCalls = beginUserNavigationIntent.mock.calls.length
+
+    await act(async () => {
+      staleOpen()
+      staleOpen()
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(ensureTeamContext).toHaveBeenCalledTimes(1))
+    await waitFor(() => {
+      expect(confirmDialogHarness.mountedCount).toBe(1)
+      expect(confirmDialogHarness.props?.title).toBe('Open app link?')
+      expect(renderToStaticMarkup(<>{confirmDialogHarness.props?.body}</>)).toContain(
+        'Open ns/second in this desktop session.'
+      )
+    })
+    expect(beginUserNavigationIntent).toHaveBeenCalledTimes(priorIntentCalls + 1)
+
+    // The first operation is deliberately held so this callback-lifetime check
+    // remains independent of catalog or native-app completion.
+    releaseFirstSwitch()
   })
 
   it('never presents a user A link after user B becomes authenticated', async () => {
@@ -1926,12 +2272,12 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(1, {
       teamId: 'team-b',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(2, {
       teamId: 'team-a',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
     expect(currentController.pushToast).toHaveBeenCalledWith(
       expect.stringContaining("You don't have access"),
@@ -1964,7 +2310,7 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(2, {
       teamId: 'team-a',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
     expect(currentController.restoreWorkspaceNavigation).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -2081,12 +2427,12 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(1, {
       teamId: 'team-b',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(2, {
       teamId: 'team-a',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
     expect(main.openCall(1).launchId).not.toBe(main.openCall(0).launchId)
     expect(main.openCall(1).routePath).toBe('/tickets/origin')
@@ -2182,7 +2528,7 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleEnsureTeamContext).toHaveBeenCalledWith({
       teamId: 'team-b',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
     expect(currentController.getCurrentTeamId()).toBe('team-b')
     expect(listApps).toHaveBeenCalledTimes(listAppsCallsBeforeLink + 1)
@@ -2766,6 +3112,19 @@ describe('App deep-link orchestration', () => {
       (view.getByRole('textbox', { name: 'Draft in App pane' }) as HTMLTextAreaElement).value
     ).toBe('private A draft')
 
+    const deepLinkQueue = new SandboxUiDeepLinkQueue()
+    acknowledgeDeepLink.mockImplementation(async id => deepLinkQueue.acknowledge(id))
+    clearPendingDeepLinks.mockImplementation(async () => deepLinkQueue.clear())
+    let resolveApps!: (value: { apps: (typeof READY_APP)[] }) => void
+    listApps.mockClear()
+    listApps.mockImplementationOnce(() => new Promise(resolve => (resolveApps = resolve)))
+    const pendingLink = deepLinkQueue.enqueue({ appRef: 'ns/user-a-app', teamId: 'team-a' })
+    act(() => emitDeepLink?.(pendingLink))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(listApps).toHaveBeenCalledOnce())
+    expect(deepLinkQueue.list()).toEqual([pendingLink])
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(pendingLink.id)
+
     await act(async () => getController().handleLogout())
     await waitFor(() => expect(getController().isAuthenticated).toBe(false))
     expect(view.getByTestId('auth-page')).toBeTruthy()
@@ -2773,6 +3132,9 @@ describe('App deep-link orchestration', () => {
     expect(getController().selectedAgent).toBeNull()
     expect(getController().workspaceTabs.tabs).toHaveLength(1)
     expect(getComposerDraft('chat-a', 'agent-x', chatTab.id)).toBe('')
+    await waitFor(() => expect(clearPendingDeepLinks).toHaveBeenCalledOnce())
+    expect(deepLinkQueue.list()).toEqual([])
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(pendingLink.id)
 
     act(() => {
       getController().setEmail(userB.email)
@@ -2803,6 +3165,14 @@ describe('App deep-link orchestration', () => {
       (view.getByRole('textbox', { name: 'Draft in App pane' }) as HTMLTextAreaElement).value
     ).toBe('')
     expect(getComposerDraft('chat-a', 'agent-x', chatTab.id)).toBe('')
+
+    await act(async () => {
+      resolveApps({ apps: [READY_APP] })
+      await Promise.resolve()
+    })
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(pendingLink.id)
+    expect(openSandboxUi()).not.toHaveBeenCalled()
+    expect(main.live()).toBeNull()
   })
 
   it('resolves an unavailable cross-team target without relaunching a closed origin app', async () => {
@@ -2828,12 +3198,12 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(1, {
       teamId: 'team-b',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(2, {
       teamId: 'team-a',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
     expect(listApps).toHaveBeenCalledTimes(listAppsCallsBeforeLink + 1)
     expect(currentController.getCurrentTeamId()).toBe('team-a')
@@ -2877,7 +3247,7 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleEnsureTeamContext).toHaveBeenCalledWith({
       teamId: 'team-b',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
     expect(currentController.pushToast).not.toHaveBeenCalledWith(
       "Could not open app link: You don't have access to this app in the linked team",
@@ -3134,7 +3504,7 @@ describe('App deep-link orchestration', () => {
     expect(ensureTeamContext).toHaveBeenCalledWith({
       teamId: 'team-b',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
 
     await act(async () => {
@@ -3212,7 +3582,7 @@ describe('App deep-link orchestration', () => {
     expect(ensureTeamContext).toHaveBeenCalledWith({
       teamId: 'team-b',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
     expect(closeSandboxUi()).toHaveBeenCalledOnce()
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
@@ -3232,7 +3602,7 @@ describe('App deep-link orchestration', () => {
     expect(ensureTeamContext).toHaveBeenNthCalledWith(2, {
       teamId: 'team-a',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
     expect(currentController.restoreWorkspaceNavigation).toHaveBeenCalledOnce()
     expect(currentController.restoreWorkspaceNavigation).toHaveBeenCalledWith(
@@ -3302,7 +3672,7 @@ describe('App deep-link orchestration', () => {
     expect(ensureTeamContext).toHaveBeenNthCalledWith(2, {
       teamId: 'team-a',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
   })
 
@@ -3349,7 +3719,7 @@ describe('App deep-link orchestration', () => {
     expect(ensureTeamContext).toHaveBeenNthCalledWith(2, {
       teamId: 'team-a',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
 
     await act(async () => {
@@ -3365,7 +3735,7 @@ describe('App deep-link orchestration', () => {
     expect(ensureTeamContext).toHaveBeenNthCalledWith(2, {
       teamId: 'team-a',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
     expect(currentController.pushToast).not.toHaveBeenCalledWith(
       expect.stringContaining('you switched teams'),
@@ -3415,7 +3785,7 @@ describe('App deep-link orchestration', () => {
     expect(ensureTeamContext).toHaveBeenNthCalledWith(2, {
       teamId: 'team-a',
       announce: true,
-      navigationIntentSequence: 0,
+      navigationIntentSequence: 1,
     })
 
     liveTeamId = 'team-c'
@@ -3570,7 +3940,7 @@ describe('App deep-link orchestration', () => {
     expect(confirmDialogHarness.props?.title).not.toBe('App link could not be opened')
   })
 
-  it('keeps a failed native mount unacked and continues with later links', async () => {
+  it('cancels a failed native mount after a later link is confirmed', async () => {
     currentController = makeController({ initialExperienceLoading: false })
     listApps.mockResolvedValue({
       apps: [
@@ -3609,7 +3979,8 @@ describe('App deep-link orchestration', () => {
     await waitForAppOpen(2)
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(2))
-    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(1)
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    expect(acknowledgeDeepLink).toHaveBeenCalledTimes(2)
   })
 
   // ── the route an app tab is left on, and deep links left before mounting ──
