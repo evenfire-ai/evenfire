@@ -1097,7 +1097,7 @@ describe('App deep-link orchestration', () => {
       authenticatedPrincipalIdentity: 'user-b:user-b@example.com',
       navItem: DESKTOP_ROUTES.apps,
     })
-    rerenderApp(<App />)
+    rerender(<App />)
 
     await waitFor(() => {
       expect(appHeaderHarness.props?.notificationOpenRequestId).toBe(0)
@@ -1839,7 +1839,7 @@ describe('App deep-link orchestration', () => {
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
 
     currentController = makeController({ initialExperienceLoading: false })
-    rerenderApp(<App />)
+    rerender(<App />)
 
     await waitFor(() => expect(confirmDialogHarness.props?.title).toBe('Open app link?'))
     expect(currentController.handleNavSelect).not.toHaveBeenCalledWith(DESKTOP_ROUTES.apps)
@@ -2226,7 +2226,7 @@ describe('App deep-link orchestration', () => {
       },
       currentTeamId: 'team-b',
     })
-    rerenderApp(<App />)
+    rerender(<App />)
 
     expect(confirmDialogHarness.rendered).not.toHaveBeenCalled()
     await waitFor(() => expect(clearPendingDeepLinks).toHaveBeenCalledOnce())
@@ -2266,7 +2266,7 @@ describe('App deep-link orchestration', () => {
       },
       currentTeamId: 'team-b',
     })
-    rerenderApp(<App />)
+    rerender(<App />)
     await waitFor(() => expect(clearPendingDeepLinks).toHaveBeenCalledOnce())
 
     await act(async () => {
