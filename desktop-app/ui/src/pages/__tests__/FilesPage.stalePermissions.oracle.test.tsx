@@ -306,6 +306,102 @@ describe('FilesPage stale permission action oracle', () => {
     client.clear()
   })
 
+  it('reuses twenty row presentations on folder re-entry and rechecks one stale row on use', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const folder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', { gfsUri: FOLDER_URI })
+    )
+    const nestedFolder = childView('nested-folder', 'Subfolder', 'directory', {
+      parentResourceId: 'folder-active',
+    })
+    const reportsChildren = await listChildrenPage([nestedFolder])
+    const rows = Array.from({ length: 20 }, (_, index) =>
+      childView(`child-${index}`, `report-${index}.txt`, 'file', {
+        parentResourceId: 'nested-folder',
+      })
+    )
+    const nestedChildren = await listChildrenPage(rows)
+    const rowReads = new Map<string, number>()
+    const renameResource = vi.fn(async () => undefined)
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId.startsWith('child-')) {
+        const reads = (rowReads.get(resourceId) ?? 0) + 1
+        rowReads.set(resourceId, reads)
+        if (resourceId === 'child-0' && reads > 1) {
+          return delegationAffordances(new Set(['read']), false)
+        }
+      }
+      return delegationAffordances(new Set(['read', 'write', 'delete']), false)
+    })
+    const listChildren = vi.fn(async (resourceId: string) =>
+      resourceId === 'folder-active' ? reportsChildren : nestedChildren
+    )
+    const rootFolder = accessibleResource('folder-active', 'Reports', 'directory', {
+      gfsUri: FOLDER_URI,
+      permissions: ['read'],
+      coversDescendants: true,
+    })
+    const accessible = await listAccessiblePage([rootFolder])
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => accessible),
+          resolve: vi.fn(async () => folder),
+          listChildren,
+          affordances,
+          renameResource,
+        },
+      },
+    })
+
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    render(<FilesPage />, { wrapper: wrapper(client) })
+    await screen.findByRole('button', { name: 'Reports' })
+    fireEvent.click(screen.getByRole('button', { name: 'Reports' }))
+    await screen.findByRole('button', { name: 'Subfolder' })
+    fireEvent.click(screen.getByRole('button', { name: 'Subfolder' }))
+    await screen.findByText('report-0.txt')
+    await waitFor(() => {
+      expect([...rowReads.values()].reduce((sum, reads) => sum + reads, 0)).toBe(20)
+    })
+    expect(rowReads.size).toBe(20)
+    expect([...rowReads.values()].every(reads => reads === 1)).toBe(true)
+
+    vi.setSystemTime(Date.now() + 16_000)
+    act(() => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    expect([...rowReads.values()].reduce((sum, reads) => sum + reads, 0)).toBe(20)
+
+    vi.setSystemTime(Date.now() + 20_000)
+    const breadcrumbs = within(screen.getByRole('navigation', { name: 'File location' }))
+    fireEvent.click(breadcrumbs.getByRole('button', { name: 'Reports' }))
+    await screen.findByRole('button', { name: 'Subfolder' })
+    fireEvent.click(screen.getByRole('button', { name: 'Subfolder' }))
+    await screen.findByText('report-0.txt')
+    expect(
+      listChildren.mock.calls.filter(([resourceId]) => resourceId === 'nested-folder').length
+    ).toBeGreaterThanOrEqual(2)
+    expect(rowReads.size).toBe(20)
+    expect([...rowReads.values()].reduce((sum, reads) => sum + reads, 0)).toBe(20)
+    expect([...rowReads.values()].every(reads => reads === 1)).toBe(true)
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for report-0.txt' }))
+    })
+    const menu = screen.getByRole('menu', { name: 'Actions for report-0.txt' })
+    await act(async () => {
+      fireEvent.click(within(menu).getByRole('menuitem', { name: 'Rename' }))
+    })
+    await waitFor(() => expect(rowReads.get('child-0')).toBe(2))
+    expect([...rowReads.values()].reduce((sum, reads) => sum + reads, 0)).toBe(21)
+    expect(screen.queryByRole('form', { name: 'Rename resource' })).toBeNull()
+    expect(renameResource).not.toHaveBeenCalled()
+    client.clear()
+  })
+
   it('keeps current-folder actions presented during a background permission refetch', async () => {
     const folder = await resolveResource(
       resolvedDirectory('folder-active', 'Reports', { gfsUri: FOLDER_URI })

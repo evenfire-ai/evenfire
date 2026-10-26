@@ -9,7 +9,11 @@ import {
   useQueryClient,
 } from '@tanstack/react-query'
 import { GFS_BREADCRUMB_MAX_DEPTH } from '@constants/gfsBrowser'
-import { GFS_AUTHORITY_STALE_TIME_MS, gfsAuthorityQueryPolicy } from '@lib/gfsAuthorityQueryPolicy'
+import {
+  GFS_AUTHORITY_STALE_TIME_MS,
+  GFS_ROW_PRESENTATION_CACHE_MS,
+  gfsAuthorityQueryPolicy,
+} from '@lib/gfsAuthorityQueryPolicy'
 import {
   describeGfsReadError,
   isRateLimited,
@@ -807,10 +811,15 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         accessState === 'active',
       notifyOnChangeProps: 'all',
       ...gfsAuthorityQueryPolicy,
+      // Row data remains stale for authorization after 15 seconds, but a
+      // navigation remount only refreshes the presentation cache after 60.
+      refetchOnMount: query =>
+        query.state.dataUpdatedAt === 0 ||
+        Date.now() - query.state.dataUpdatedAt >= GFS_ROW_PRESENTATION_CACHE_MS,
       // A folder can expose many child actions. The stale-time policy is not a
-      // request scheduler, and focusing the window must not fan out one read
-      // per visible row. Explicit menu/mutation paths revalidate the selected
-      // resource before acting.
+      // request scheduler. Cache row affordances for presentation through
+      // short navigation gaps; exact use-time checks keep the 15-second
+      // authority window before opening an editor or mutating.
       refetchOnWindowFocus: false,
     })),
   })

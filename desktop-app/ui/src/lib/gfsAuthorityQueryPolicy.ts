@@ -2,6 +2,7 @@ import type { Query, QueryClient, QueryKey } from '@tanstack/react-query'
 import { isRateLimited, parseHttpStatus, parseRetryAfterSeconds } from './gfsGrantErrors'
 
 export const GFS_AUTHORITY_STALE_TIME_MS = 15_000
+export const GFS_ROW_PRESENTATION_CACHE_MS = 60_000
 
 const UNKNOWN_RATE_LIMIT_PAUSE_MS = 60_000
 const MAX_RATE_LIMIT_PAUSE_MS = 60_000

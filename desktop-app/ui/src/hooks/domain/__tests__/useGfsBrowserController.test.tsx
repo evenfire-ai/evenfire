@@ -1020,10 +1020,17 @@ describe('useGfsBrowserController', () => {
     expect(rowCalls()).toBe(3)
     second.unmount()
 
-    // Past the 15s bound the bits are stale, so a permission change made
-    // outside this page is still picked up — the bound is a delay, not a
-    // suppression.
+    // Past the 15s authority bound, the rows are stale for use but stay
+    // cached for presentation until the 60s remount refresh bound.
     vi.setSystemTime(mountedAt + 17_000)
+    const third = render(<Probe />, { wrapper })
+    await enterWorkspace()
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(3))
+    expect(rowCalls()).toBe(3)
+    third.unmount()
+
+    // Once the presentation cache has expired, a remount refreshes all rows.
+    vi.setSystemTime(mountedAt + 61_000)
     render(<Probe />, { wrapper })
     await enterWorkspace()
     await waitFor(() => expect(rowCalls()).toBe(6))
