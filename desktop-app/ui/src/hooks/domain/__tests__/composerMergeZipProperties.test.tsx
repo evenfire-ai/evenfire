@@ -159,13 +159,29 @@ describe('composer merge invariants (R1-M6)', () => {
             held.length ? expect.arrayContaining(held) : expect.anything()
           )
           expect(outcome.next.length).toBe(Math.max(heldCount, 0) + outcome.kept)
-          const notHeld = payload.filter(
-            item =>
-              !held.some(h => h.dataBase64 === item.dataBase64 && h.sizeBytes === item.sizeBytes)
+          // The drop count replays the documented classification (R2-L1/R4-L1)
+          // sequentially: an incoming item that duplicates ANYTHING already
+          // accepted — the held set or an earlier incoming item — is a
+          // duplicate, never a drop; only non-duplicates past the free slots
+          // are dropped. Counting not-held items individually (the old
+          // formula) treated identical incoming duplicates as overflow drops
+          // and contradicted this property's own title.
+          const acceptedKeys = new Set(
+            held.map(item => `${item.mimeType}:${item.sizeBytes}:${item.dataBase64}`)
           )
-          expect(outcome.dropped).toBe(
-            Math.max(0, notHeld.length - Math.max(0, COMPOSER_MAX_ATTACHMENTS - heldCount))
-          )
+          let freeSlots = Math.max(0, COMPOSER_MAX_ATTACHMENTS - heldCount)
+          let expectedDropped = 0
+          for (const item of payload) {
+            const key = `${item.mimeType}:${item.sizeBytes}:${item.dataBase64}`
+            if (acceptedKeys.has(key)) continue
+            if (freeSlots === 0) {
+              expectedDropped += 1
+              continue
+            }
+            freeSlots -= 1
+            acceptedKeys.add(key)
+          }
+          expect(outcome.dropped).toBe(expectedDropped)
         }
       ),
       { numRuns: PROPERTY_RUNS }

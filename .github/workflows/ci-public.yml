@@ -661,6 +661,8 @@ jobs:
             services.adminSubscriptionRateLimitMigration.realPostgres.integration.test.ts \
             pluginWorkloadSdkSteplessQuota.realPostgres.integration.test.ts \
             entityChangeFeed.realPostgres.integration.test.ts \
+            routes.mcp-host.renewal.realPostgres.integration.test.ts \
+            routes.mcpOauth.brokerBinding.realPostgres.integration.test.ts \
             db.realPostgresMigration.integration.test.ts
 
       - name: Install gfs-controller dependencies
