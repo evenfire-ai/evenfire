@@ -1869,12 +1869,22 @@ export function App() {
     [acknowledgeGfsDeepLink, vm.isNavigationIntentCurrent]
   )
 
-  const clearSandboxUiDeepLinkProcessing = React.useCallback((linkId: number) => {
-    processingSandboxUiDeepLinkIdRef.current = clearSandboxUiDeepLinkProcessingOwner(
-      processingSandboxUiDeepLinkIdRef.current,
-      linkId
-    )
-  }, [])
+  const clearSandboxUiDeepLinkProcessing = React.useCallback(
+    (linkId: number) => {
+      const processingLinkId = processingSandboxUiDeepLinkIdRef.current
+      processingSandboxUiDeepLinkIdRef.current = clearSandboxUiDeepLinkProcessingOwner(
+        processingLinkId,
+        linkId
+      )
+      if (processingLinkId === linkId) {
+        // The scheduler reads pending links from React state but reads its owner
+        // from a ref. Publish the same entries so an already-confirmed link gets
+        // another scheduler pass without changing its identity or retry state.
+        setPendingSandboxUiDeepLinkState([...pendingSandboxUiDeepLinksRef.current])
+      }
+    },
+    [setPendingSandboxUiDeepLinkState]
+  )
 
   const clearSandboxUiDeepLinkLocalOwnership = React.useCallback(
     (linkId: number) => {
