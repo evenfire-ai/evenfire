@@ -3285,7 +3285,18 @@ describe('FilesPage', () => {
       configurable: true,
       value: {
         agents: { listMine: vi.fn(async () => []) },
-        team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
+        team: {
+          directory: vi.fn(async () => ({
+            currentTeamId: 'team-1',
+            items: [
+              {
+                team: { id: 'team-1', name: 'Core Team' },
+                role: 'admin',
+                members: [{ id: 'user-9', name: 'Shared Member', email: 'shared@clerum.io' }],
+              },
+            ],
+          })),
+        },
       },
     })
     const revokeShare = vi.fn(async () => undefined)
@@ -3323,16 +3334,64 @@ describe('FilesPage', () => {
 
     const shareRow = await screen.findByTestId('gfs-access-row-share-share-1')
     expect(shareRow.textContent).not.toContain('Includes contents')
-    // A share subject outside the visible team directory renders as a hidden
-    // label (never a raw UUID); the accessible name keeps the id distinct.
-    expect(screen.getByText('Hidden user')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Actions for Hidden user (user-9)' }))
+    // A share whose subject resolves through the team directory lists the name.
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for Shared Member' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
 
     await waitFor(() => expect(revokeShare).toHaveBeenCalledWith('share-1'))
     await waitFor(() =>
-      expect(pushToast).toHaveBeenCalledWith('Shared access revoked for Hidden user', 'success')
+      expect(pushToast).toHaveBeenCalledWith('Shared access revoked for Shared Member', 'success')
     )
+  })
+
+  it('filters a directory-less share from the who-has-access list and explains why', async () => {
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        agents: { listMine: vi.fn(async () => []) },
+        team: { directory: vi.fn(async () => ({ currentTeamId: 'team-1', items: [] })) },
+      },
+    })
+    const revokeShare = vi.fn(async () => undefined)
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder',
+        name: 'Team folder',
+        kind: 'directory',
+      },
+      affordances: {
+        held: ['read', 'manage_acl'],
+        canDelegate: true,
+        grantableBits: ['read'],
+        canCreateShare: true,
+      },
+      grants: [],
+      shares: [
+        {
+          id: 'share-1',
+          drive: 'main',
+          resourceId: 'folder-1',
+          subject: { type: 'user', id: 'user-outside' },
+          permissions: ['read'],
+          includeDescendants: true,
+        },
+      ],
+      revokeShare,
+    })
+
+    renderFilesPage()
+    await openManageDialog('Team folder')
+
+    // The directory-less member never renders — the muted line explains why
+    // and the empty state never claims the folder has no access.
+    await screen.findByText(
+      'Members outside your teams aren’t listed here. Access can also follow from parent folders you cannot see.'
+    )
+    expect(screen.queryByTestId('gfs-access-row-share-share-1')).toBeNull()
+    expect(screen.queryByText('user-outside')).toBeNull()
+    expect(screen.getByText('Only members outside your teams have access here.')).toBeTruthy()
   })
 
   it('renders the fail-closed state when GFS access is revoked and retries on demand', async () => {

@@ -12,14 +12,17 @@ import { mergeInheritedAccessItem } from '../inheritedAccessMerge'
 /**
  * "Who has access" list (Manage modal). Rows resolve host subjects to agent
  * names, user/team subjects through the visible team directory. A user/team
- * outside the directory renders as "Hidden user"/"Hidden team" with a hover
- * explanation (id included for support) — never a raw UUID in the row, and
- * never a hidden row. Unresolved host ids keep their raw identifier. A
- * manage_acl_required list failure is an expected state and renders as a
- * quiet informational banner, not an error.
+ * outside the directory has no name this surface can act on, so its row is
+ * filtered and one muted line explains what isn't listed and why; a fully
+ * filtered list says so instead of claiming to be empty. Unresolved host ids
+ * keep their raw identifier. A manage_acl_required list failure is an
+ * expected state and renders as a quiet informational banner, not an error.
  */
 
 afterEach(cleanup)
+
+const HIDDEN_ACCESS_NOTICE_TEXT =
+  'Members outside your teams aren’t listed here. Access can also follow from parent folders you cannot see.'
 
 const agents = [{ id: '1st:mcp-host/chatllm', name: 'Chat LLM' }]
 const userInheritedRowTestId = 'gfs-access-row-inherited-user:user-2'
@@ -102,7 +105,7 @@ describe('GfsGrantList', () => {
     expect(workflowRow.querySelector('[data-subject-kind="workflow"] svg')).not.toBeNull()
   })
 
-  it('renders directory-less user and team subjects as hidden labels with a hover explanation', () => {
+  it('filters directory-less user and team rows and explains what is not listed', () => {
     render(
       <GfsGrantList
         agents={agents}
@@ -117,33 +120,54 @@ describe('GfsGrantList', () => {
             subject: { type: 'team', id: 'team-outside-directory' },
             permissions: ['read'],
           }),
+          grantItem({
+            id: 'grant-resolved',
+            subject: { type: 'user', id: 'user-2' },
+            permissions: ['read'],
+          }),
         ]}
         onRevoke={vi.fn()}
         subjects={subjects}
       />
     )
 
-    const hiddenUserLabel = screen.getByText('Hidden user')
+    // Directory-less members never render — not as rows, not as raw ids.
+    expect(screen.queryByText('Hidden user')).toBeNull()
+    expect(screen.queryByText('Hidden team')).toBeNull()
     expect(screen.queryByText('user-outside-directory')).toBeNull()
-    expect(hiddenUserLabel.getAttribute('title')).toBe(
-      'This member isn’t in any of your teams, so EvenDrive can’t show their name. (user-outside-directory)'
-    )
-    // The accessible name keeps the id so multiple hidden members stay distinct.
-    expect(
-      screen.getByRole('button', { name: 'Access role for Hidden user (user-outside-directory)' })
-    ).toBeTruthy()
-    expect(
-      screen.getByRole('button', { name: 'Actions for Hidden user (user-outside-directory)' })
-    ).toBeTruthy()
-
-    const hiddenTeamLabel = screen.getByText('Hidden team')
     expect(screen.queryByText('team-outside-directory')).toBeNull()
-    expect(hiddenTeamLabel.getAttribute('title')).toBe(
-      'This team isn’t in your team list, so EvenDrive can’t show its name. (team-outside-directory)'
+    expect(screen.queryByTestId('gfs-access-row-grant-grant-hidden-user')).toBeNull()
+    expect(screen.queryByTestId('gfs-access-row-grant-grant-hidden-team')).toBeNull()
+    // Resolved members stay, with no tooltip machinery.
+    expect(screen.getByText('Test Two')).toBeTruthy()
+    expect(screen.getByText('Test Two').getAttribute('title')).toBeNull()
+    // The muted line explains the filtering once.
+    expect(screen.getAllByText(HIDDEN_ACCESS_NOTICE_TEXT)).toHaveLength(1)
+  })
+
+  it('never claims an empty folder when the filter removed every row', () => {
+    render(
+      <GfsGrantList
+        agents={agents}
+        items={[
+          grantItem({
+            id: 'grant-hidden-user',
+            subject: { type: 'user', id: 'user-outside-directory' },
+            permissions: ['read'],
+          }),
+        ]}
+        onRevoke={vi.fn()}
+        subjects={subjects}
+      />
     )
 
-    // A resolved subject carries no hover explanation.
-    const resolvedRow = render(
+    expect(screen.queryByText('No one has access yet.')).toBeNull()
+    expect(screen.getByText('Only members outside your teams have access here.')).toBeTruthy()
+    expect(screen.getAllByText(HIDDEN_ACCESS_NOTICE_TEXT)).toHaveLength(1)
+  })
+
+  it('shows no hidden-members notice when every subject resolves', () => {
+    render(
       <GfsGrantList
         agents={agents}
         items={[
@@ -156,8 +180,10 @@ describe('GfsGrantList', () => {
         onRevoke={vi.fn()}
         subjects={subjects}
       />
-    ).getByText('Test Two')!
-    expect(resolvedRow.getAttribute('title')).toBeNull()
+    )
+
+    expect(screen.queryByText(HIDDEN_ACCESS_NOTICE_TEXT)).toBeNull()
+    expect(screen.getByText('Test Two')).toBeTruthy()
   })
 
   it('labels a host subject by its displayName, falling back to the identifier when blank', () => {
@@ -373,7 +399,10 @@ describe('GfsGrantList', () => {
           onChangeInheritedRole={vi.fn()}
           onRemoveInherited={vi.fn()}
           onRevoke={vi.fn()}
-          subjects={subjects}
+          subjects={[
+            ...subjects,
+            { type: 'user' as const, id: 'user-3', label: 'Test Three', description: 't3' },
+          ]}
         />
       )
 

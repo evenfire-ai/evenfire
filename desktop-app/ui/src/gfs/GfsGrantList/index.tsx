@@ -49,66 +49,35 @@ function AccessSubjectIcon({ kind }: { kind: AccessSubjectKind }) {
  * grants GET (the only revoke-id source: the grant PUT returns no ids). Subject
  * labels resolve host ids to agent names via the caller's own agent directory
  * and user/team ids via the visible team directory. A user/team subject outside
- * that directory renders as "Hidden user"/"Hidden team" — never a raw UUID —
- * and carries a hover explanation (plus the id for support) on the row; no row
- * is ever hidden or mislabeled.
+ * that directory has no name this surface can act on, so its row is filtered
+ * and one muted line explains what isn't listed and why; unresolved host ids
+ * keep their raw identifier (the agent tail is meaningful). No row is ever
+ * mislabeled, and a filtered list never claims to be empty.
  */
 
-const HIDDEN_USER_LABEL = 'Hidden user'
-const HIDDEN_TEAM_LABEL = 'Hidden team'
-
-/** The hidden-kind of a user/team subject the visible directory cannot name;
- *  null when the subject resolves (or is not a directory-resolved kind). */
-function hiddenSubjectKind(
+/** True when a user/team subject is not in the caller's visible directory —
+ *  the surface cannot name it, so the row is filtered out. */
+function isHiddenSubject(
   subject:
     | GfsGrantListItem['subject']
     | GfsShareListItem['subject']
     | GfsInheritedAccessItem['subject'],
   subjects: GfsDelegationSubjectOption[]
-): 'user' | 'team' | null {
+): boolean {
   if ((subject.type === 'user' || subject.type === 'team') && subject.id) {
-    const match = subjects.find(
+    return !subjects.some(
       candidate => candidate.type === subject.type && candidate.id === subject.id
     )
-    if (!match) return subject.type
   }
-  return null
+  return false
 }
 
-/** One-phrase hover explanation for a subject the directory cannot name. */
-function hiddenSubjectTitle(
-  subject:
-    | GfsGrantListItem['subject']
-    | GfsShareListItem['subject']
-    | GfsInheritedAccessItem['subject'],
-  subjects: GfsDelegationSubjectOption[]
-): string | null {
-  const kind = hiddenSubjectKind(subject, subjects)
-  if (kind === 'user' && subject.type === 'user' && subject.id) {
-    return `This member isn’t in any of your teams, so EvenDrive can’t show their name. (${subject.id})`
-  }
-  if (kind === 'team' && subject.type === 'team' && subject.id) {
-    return `This team isn’t in your team list, so EvenDrive can’t show its name. (${subject.id})`
-  }
-  return null
-}
+/** The muted line under a list that filtered directory-less members. */
+const HIDDEN_ACCESS_NOTICE =
+  'Members outside your teams aren’t listed here. Access can also follow from parent folders you cannot see.'
 
-/** Accessible name for a hidden subject: the label alone would collide when a
- *  folder has more than one hidden member, so the id disambiguates for screen
- *  readers and menus while the visible row stays clean. */
-function subjectAccessibleName(
-  subject:
-    | GfsGrantListItem['subject']
-    | GfsShareListItem['subject']
-    | GfsInheritedAccessItem['subject'],
-  subjects: GfsDelegationSubjectOption[],
-  label: string
-): string {
-  const hidden = hiddenSubjectKind(subject, subjects)
-  if (!hidden) return label
-  const id = subject.type === 'user' || subject.type === 'team' ? (subject.id ?? '') : ''
-  return id ? `${label} (${id})` : label
-}
+/** Empty state when the filter removed every row. */
+const ONLY_HIDDEN_ACCESS_NOTICE = 'Only members outside your teams have access here.'
 
 function subjectLabel(
   subject:
@@ -130,7 +99,6 @@ function subjectLabel(
       candidate => candidate.type === subject.type && candidate.id === subject.id
     )
     if (match) return match.label
-    return subject.type === 'user' ? HIDDEN_USER_LABEL : HIDDEN_TEAM_LABEL
   }
   return subject.id ?? subject.type
 }
@@ -175,6 +143,8 @@ export function GfsGrantList({
     const merged = new Map<string, GfsMergedAccessRow>()
     if (!mergeInherited) return merged
     for (const inherited of inheritedItems) {
+      // A directory-less member has no name this surface can act on.
+      if (isHiddenSubject(inherited.subject, subjects)) continue
       const key = subjectKey(inherited.subject)
       const grant = items.find(item => subjectKey(item.subject) === key) ?? null
       const subjectShares = shares.filter(share => subjectKey(share.subject) === key)
@@ -193,13 +163,28 @@ export function GfsGrantList({
       })
     }
     return merged
-  }, [inheritedItems, items, mergeInherited, shares])
+  }, [inheritedItems, items, mergeInherited, shares, subjects])
 
   // Grants and shares are independent server surfaces with independent
   // failure modes (R4 spec §2): one list's error suppresses only its own rows
   // and never the other list's rows or revoke actions.
-  const showGrantRows = !error && items.length > 0
-  const showShareRows = !shareError && shares.length > 0
+  const visibleItems = error ? [] : items.filter(item => !isHiddenSubject(item.subject, subjects))
+  const visibleShares = shareError
+    ? []
+    : shares.filter(share => !isHiddenSubject(share.subject, subjects))
+  // How many rows the filter removed: drives the muted explanation line and
+  // the honest empty state (a filtered list never claims to be empty). An
+  // errored surface's rows are error-suppressed, not filtered — never count
+  // them, or a failure would be reported as a directory gap.
+  const hiddenInheritedCount = mergeInherited
+    ? inheritedItems.filter(item => isHiddenSubject(item.subject, subjects)).length
+    : 0
+  const hiddenCount =
+    (error ? 0 : items.length - visibleItems.length) +
+    (shareError ? 0 : shares.length - visibleShares.length) +
+    hiddenInheritedCount
+  const showGrantRows = visibleItems.length > 0
+  const showShareRows = visibleShares.length > 0
   // Merged rows are a client-derived supplement: they render whenever the
   // derivation produced them, including while a direct list failed quietly.
   const showMergedRows = mergedByKey.size > 0
@@ -234,11 +219,9 @@ export function GfsGrantList({
       {hasRows ? (
         <ul className="da-gfs-grant-list" aria-label="Resource access">
           {showGrantRows
-            ? items.map(item => {
+            ? visibleItems.map(item => {
                 if (mergedByKey.has(subjectKey(item.subject))) return null
                 const label = subjectLabel(item.subject, agents, subjects)
-                const accessibleName = subjectAccessibleName(item.subject, subjects, label)
-                const hiddenTitle = hiddenSubjectTitle(item.subject, subjects)
                 const kind = subjectKind(item.subject)
                 return (
                   <li
@@ -254,13 +237,11 @@ export function GfsGrantList({
                       <AccessSubjectIcon kind={kind} />
                     </span>
                     <span className="da-gfs-grant-list__identity">
-                      <span className="da-gfs-grant-list__label" title={hiddenTitle ?? undefined}>
-                        {label}
-                      </span>
+                      <span className="da-gfs-grant-list__label">{label}</span>
                     </span>
                     <span className="da-gfs-grant-list__meta">
                       <DropdownSelect
-                        ariaLabel={`Access role for ${accessibleName}`}
+                        ariaLabel={`Access role for ${label}`}
                         className="da-gfs-grant-list__role"
                         disabled={updatingRole || !onChangeRole}
                         onChange={value => void onChangeRole?.(item, label, value as GfsAccessRole)}
@@ -272,7 +253,7 @@ export function GfsGrantList({
                     </span>
                     <AccessRowMenu
                       disabled={revoking}
-                      label={accessibleName}
+                      label={label}
                       onRemove={() => onRevoke(item, label)}
                     />
                   </li>
@@ -282,8 +263,6 @@ export function GfsGrantList({
           {showMergedRows
             ? [...mergedByKey.values()].map(row => {
                 const label = subjectLabel(row.subject, agents, subjects)
-                const accessibleName = subjectAccessibleName(row.subject, subjects, label)
-                const hiddenTitle = hiddenSubjectTitle(row.subject, subjects)
                 const kind = subjectKind(row.subject)
                 return (
                   <li
@@ -300,15 +279,13 @@ export function GfsGrantList({
                       <AccessSubjectIcon kind={kind} />
                     </span>
                     <span className="da-gfs-grant-list__identity">
-                      <span className="da-gfs-grant-list__label" title={hiddenTitle ?? undefined}>
-                        {label}
-                      </span>
+                      <span className="da-gfs-grant-list__label">{label}</span>
                     </span>
                     <span className="da-gfs-grant-list__meta">
                       {/* Normal toggleable row: any edit opens the
                           parent-folder confirmation in the page. */}
                       <DropdownSelect
-                        ariaLabel={`Access role for ${accessibleName}`}
+                        ariaLabel={`Access role for ${label}`}
                         className="da-gfs-grant-list__role"
                         disabled={updatingRole || !onChangeInheritedRole}
                         onChange={value =>
@@ -322,7 +299,7 @@ export function GfsGrantList({
                     </span>
                     <AccessRowMenu
                       disabled={revoking || !onRemoveInherited}
-                      label={accessibleName}
+                      label={label}
                       onRemove={() => void onRemoveInherited?.(row, label)}
                     />
                   </li>
@@ -330,11 +307,9 @@ export function GfsGrantList({
               })
             : null}
           {showShareRows
-            ? shares.map(item => {
+            ? visibleShares.map(item => {
                 if (mergedByKey.has(subjectKey(item.subject))) return null
                 const label = subjectLabel(item.subject, agents, subjects)
-                const accessibleName = subjectAccessibleName(item.subject, subjects, label)
-                const hiddenTitle = hiddenSubjectTitle(item.subject, subjects)
                 const kind = subjectKind(item.subject)
                 return (
                   <li
@@ -350,9 +325,7 @@ export function GfsGrantList({
                       <AccessSubjectIcon kind={kind} />
                     </span>
                     <span className="da-gfs-grant-list__identity">
-                      <span className="da-gfs-grant-list__label" title={hiddenTitle ?? undefined}>
-                        {label}
-                      </span>
+                      <span className="da-gfs-grant-list__label">{label}</span>
                     </span>
                     <span className="da-gfs-grant-list__meta">
                       <span className="da-gfs-grant-list__role-label">
@@ -361,7 +334,7 @@ export function GfsGrantList({
                     </span>
                     <AccessRowMenu
                       disabled={revokingShare || !onRevokeShare}
-                      label={accessibleName}
+                      label={label}
                       onRemove={() => onRevokeShare?.(item, label)}
                     />
                   </li>
@@ -369,12 +342,22 @@ export function GfsGrantList({
               })
             : null}
         </ul>
+      ) : !hasAnyError && hiddenCount > 0 ? (
+        // The filter removed every row: never claim an empty folder.
+        loading ? (
+          <p className="muted">Loading access…</p>
+        ) : (
+          <p className="muted">{ONLY_HIDDEN_ACCESS_NOTICE}</p>
+        )
       ) : !hasAnyError ? (
         loading ? (
           <p className="muted">Loading access…</p>
         ) : derivationNotice ? null : (
           <p className="muted">No one has access yet.</p>
         )
+      ) : null}
+      {hiddenCount > 0 && !loading && !hasAnyError ? (
+        <p className="muted da-gfs-grant-list__hidden-notice">{HIDDEN_ACCESS_NOTICE}</p>
       ) : null}
     </>
   )
