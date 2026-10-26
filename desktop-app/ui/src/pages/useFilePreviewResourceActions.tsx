@@ -45,6 +45,16 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+const INHERITED_ACCESS_ERROR_NOTICE =
+  'Some access inherited from parent folders could not be loaded.'
+const INHERITED_COVERAGE_UNAVAILABLE_NOTICE =
+  'Inherited access could not be loaded. Members with access from a parent folder may be missing.'
+const INHERITED_READ_BOUNDARY_NOTICE = 'There may be access from parent folders you cannot see.'
+const INHERITED_READ_BOUNDARY_HINT =
+  'Some folders above this one are not visible to you. People may still have access through them, but we cannot show who.'
+const INHERITED_ACL_LIMITED_NOTICE =
+  'Sharing details on some parent folders are not visible to you.'
+
 function teamSubjectOptions(directory: TeamDirectoryResult | undefined) {
   if (!directory) return []
   const options = new Map<string, GfsDelegationSubjectOption>()
@@ -271,6 +281,19 @@ export function useFilePreviewResourceActions({
     queryFn: () => deriveGfsInheritedAccess(resourceId, drive),
     enabled: Boolean(canResolve && shareOpen && canShare && resourceId),
   })
+  const inheritedAccessNotice = inheritedQuery.error
+    ? INHERITED_ACCESS_ERROR_NOTICE
+    : inheritedQuery.data?.coverage === 'read-boundary'
+      ? INHERITED_READ_BOUNDARY_NOTICE
+      : inheritedQuery.data?.coverage === 'acl-limited'
+        ? INHERITED_ACL_LIMITED_NOTICE
+        : inheritedQuery.data?.coverage === 'unavailable'
+          ? INHERITED_COVERAGE_UNAVAILABLE_NOTICE
+          : null
+  const inheritedAccessNoticeHint =
+    !inheritedQuery.error && inheritedQuery.data?.coverage === 'read-boundary'
+      ? INHERITED_READ_BOUNDARY_HINT
+      : null
   const teamsQuery = useQuery({
     queryKey: desktopQueryKeys.teamsDirectory,
     queryFn: () => window.clerum.team.directory(),
@@ -866,13 +889,10 @@ export function useFilePreviewResourceActions({
                 </div>
                 <GfsGrantList
                   agents={agents}
-                  derivationNotice={
-                    inheritedQuery.error
-                      ? 'Some access inherited from parent folders could not be loaded.'
-                      : null
-                  }
+                  derivationNotice={inheritedAccessNotice}
+                  derivationNoticeHint={inheritedAccessNoticeHint}
                   error={grantsQuery.error ? describeGfsGrantError(grantsQuery.error) : null}
-                  inheritedItems={inheritedQuery.data ?? []}
+                  inheritedItems={inheritedQuery.data?.items ?? []}
                   items={grantsQuery.data ?? []}
                   loading={
                     grantsQuery.isFetching || sharesQuery.isFetching || inheritedQuery.isFetching
