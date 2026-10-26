@@ -1827,7 +1827,11 @@ export function FilesPage({
       sourceParentId === current?.resourceId
         ? ctrl.affordances
         : ctrl.moveSourceParentAffordancesById?.[sourceParentId]
-    if (sourceParentId === current?.resourceId && ctrl.affordancesError) {
+    if (
+      sourceParentId === current?.resourceId &&
+      ctrl.affordancesError &&
+      ctrl.affordancesHttpStatus !== 429
+    ) {
       return false
     }
     return hasGfsMoveSourcePermissions(sourceParent?.held)
@@ -2406,8 +2410,35 @@ export function FilesPage({
                 tone="error"
                 text={`Could not verify permissions for ${current.name}: ${affordancesError}`}
               />
+              {ctrl.affordancesHttpStatus === 429 ? (
+                <Button
+                  color="secondary"
+                  onClick={() =>
+                    void fetchRowAuthority(current.resourceId, current.name, GFS_DRIVE_MAIN)
+                  }
+                >
+                  Retry permission check
+                </Button>
+              ) : null}
             </div>
           ) : null}
+          {Object.entries(ctrl.moveSourceParentStatusById ?? {}).map(([resourceId, status]) =>
+            status.rateLimited && status.httpStatus === 429 && status.error ? (
+              <div key={resourceId} role="alert">
+                <StatusBanner tone="warn">
+                  <span>Could not verify Move permissions: {status.error}</span>
+                </StatusBanner>
+                <Button
+                  color="secondary"
+                  onClick={() =>
+                    void fetchRowAuthority(resourceId, 'the source folder', GFS_DRIVE_MAIN)
+                  }
+                >
+                  Retry permission check
+                </Button>
+              </div>
+            ) : null
+          )}
           {pendingGfsDeepLinkFailure ? (
             <div role="alert">
               <StatusBanner tone="error" text={pendingGfsDeepLinkFailure.message} />

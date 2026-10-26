@@ -848,7 +848,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     if (authorityPending || accessState === 'revoked') return byId
     moveSourceParentIds.forEach((resourceId, index) => {
       const query = moveSourceParentQueries[index]
-      if (!query?.data || query.isError) return
+      if (!query?.data) return
+      const rawError = query.error ? toMessage(query.error) : ''
+      const rateLimited = rawError ? isRateLimited(rawError) : false
+      if (query.isError && !rateLimited) return
       byId[resourceId] = query.data as GfsBrowserAffordances
     })
     return byId
@@ -859,15 +862,22 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       {
         affordances?: GfsBrowserAffordances
         error: string | null
+        httpStatus: number | null
+        rateLimited: boolean
+        retryAfterSeconds: number | null
         isFetching: boolean
       }
     > = {}
     if (authorityPending || accessState === 'revoked') return byId
     moveSourceParentIds.forEach((resourceId, index) => {
       const query = moveSourceParentQueries[index]
+      const rawError = query?.error ? toMessage(query.error) : ''
       byId[resourceId] = {
         affordances: query?.data as GfsBrowserAffordances | undefined,
         error: query?.error ? toPresentedMessage(query.error) : null,
+        httpStatus: rawError ? parseHttpStatus(rawError) : null,
+        rateLimited: rawError ? isRateLimited(rawError) : false,
+        retryAfterSeconds: rawError ? parseRetryAfterSeconds(rawError) : null,
         isFetching: Boolean(query?.isFetching),
       }
     })
@@ -1406,6 +1416,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         ? null
         : ((affordancesQuery.data as GfsBrowserAffordances | undefined) ?? null),
     affordancesError: affordancesQuery.error ? toPresentedMessage(affordancesQuery.error) : null,
+    affordancesHttpStatus: affordancesQuery.error
+      ? parseHttpStatus(toMessage(affordancesQuery.error))
+      : null,
     loadingAffordances: affordancesQuery.isFetching,
     rowAffordancesByResourceId,
     rowPermissionStatusByResourceId,

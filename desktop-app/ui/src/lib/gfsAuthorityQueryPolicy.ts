@@ -42,7 +42,7 @@ export function assertGfsAuthorityRetryAllowed(queryClient: QueryClient, queryKe
 /**
  * Resource authority is stale after the shared freshness window. If the last
  * active read was rate limited, wait for its bounded server window before a
- * focus-driven retry; an explicit user retry remains available immediately.
+ * focus-driven or explicit user retry.
  */
 export function refetchGfsAuthorityOnWindowFocus<
   TQueryFnData = unknown,

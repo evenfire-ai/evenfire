@@ -776,6 +776,102 @@ describe('FilesPage stale permission action oracle', () => {
     client.clear()
   })
 
+  it('keeps the source-parent Move candidate and reports bounded 429 retry', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const folder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', {
+        gfsUri: FOLDER_URI,
+        parentResourceId: 'source-parent',
+      })
+    )
+    const children = await listChildrenPage([])
+    let sourceParentReads = 0
+    const rateLimited = Object.assign(new Error('429 Too Many Requests'), {
+      status: 429,
+      retryAfter: '7',
+    })
+    const produceAffordances = appServiceAffordanceProducer(resourceId => {
+      if (resourceId === 'source-parent') {
+        sourceParentReads += 1
+        if (sourceParentReads === 2) return Promise.reject(rateLimited)
+      }
+      return Promise.resolve(heldPermissionResponse(['read', 'write', 'delete']))
+    })
+    const affordances = vi.fn((resourceId: string) => produceAffordances(resourceId))
+    const moveResource = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => folder),
+          listChildren: vi.fn(async () => children),
+          affordances,
+          moveResource,
+        },
+      },
+    })
+
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    render(<FilesPage pendingGfsUri={FOLDER_URI} pushToast={pushToast} />, {
+      wrapper: wrapper(client),
+    })
+    await screen.findByRole('button', { name: 'Options for Reports' })
+    await waitFor(() => expect(sourceParentReads).toBe(1))
+    fireEvent.click(screen.getByRole('button', { name: 'Options for Reports' }))
+    expect(
+      within(screen.getByRole('menu', { name: 'Actions for Reports' })).getByRole('menuitem', {
+        name: 'Move to',
+      })
+    ).toBeTruthy()
+
+    const sourceKey = desktopQueryKeys.gfsAffordances(
+      'test-environment:user-1:team-1',
+      'source-parent',
+      'main'
+    )
+    await act(async () => {
+      await client.refetchQueries({ exact: true, queryKey: sourceKey })
+    })
+    await waitFor(() => expect(sourceParentReads).toBe(2))
+
+    const sourceError = String(client.getQueryState(sourceKey)?.error)
+    expect(sourceError).toContain('httpStatus=429')
+    expect(sourceError).toContain('retryAfterSeconds=7')
+    expect(screen.getAllByText(/Could not verify Move permissions:/)).toHaveLength(1)
+    expect(screen.getByRole('button', { name: 'Retry permission check' })).toBeTruthy()
+    const menuAfterError = screen.queryByRole('menu', { name: 'Actions for Reports' })
+    const moveItem = menuAfterError
+      ? within(menuAfterError).queryByRole('menuitem', { name: 'Move to' })
+      : null
+    expect(moveItem).toBeTruthy()
+    if (moveItem) fireEvent.click(moveItem)
+    expect
+      .soft(pushToast)
+      .toHaveBeenCalledWith('Too many file requests — try again in 7s.', 'error')
+    expect(moveResource).not.toHaveBeenCalled()
+    expect(sourceParentReads).toBe(2)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry permission check' }))
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenLastCalledWith(
+        'Too many file requests — try again in 7s.',
+        'error'
+      )
+    )
+    expect(sourceParentReads).toBe(2)
+    expect(moveResource).not.toHaveBeenCalled()
+
+    vi.setSystemTime(Date.now() + 7_000)
+    fireEvent.click(screen.getByRole('button', { name: 'Retry permission check' }))
+    await waitFor(() => expect(sourceParentReads).toBe(3))
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByRole('dialog', { name: 'Move folder Reports' })).toBeNull()
+    expect(moveResource).not.toHaveBeenCalled()
+    client.clear()
+  })
+
   it('keeps a shared-with-me row actionable after its list permission goes stale', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     const sharedFolder = accessibleResource('shared-folder', 'Shared folder', 'directory', {
