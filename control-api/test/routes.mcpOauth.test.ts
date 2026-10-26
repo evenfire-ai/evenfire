@@ -3,8 +3,20 @@ import request from 'supertest'
 import { createApp } from '../src/app.js'
 import { config } from '../src/config.js'
 import { deriveOAuthEncryptionKey, encryptOAuthSecret } from '../src/oauth/encryption.js'
+import { registry } from '../src/observability/metrics.js'
+import { attachServerToContext } from '../src/services/contextAllowlist.js'
 import { checkAndIncrement } from '../src/services/rateLimiterService.js'
-import { issueMcpHostControlJwt } from '../src/utils/auth/mcpHostJwtToken.js'
+import {
+  issueMcpHostControlJwt,
+  verifyMcpHostControlJwt,
+} from '../src/utils/auth/mcpHostJwtToken.js'
+import { membership, seedAgentHost, seedAllowlistedContext } from './fixtures/contextAllowlist.js'
+import {
+  mintHccControlToken,
+  signInternalControlJwt,
+  signLegacyControlToken,
+} from './fixtures/hccControlToken.js'
+import { captureRequestLogs } from './helpers/requestLogCapture.js'
 import { MockGateway } from './mockGateway.js'
 
 const mockPoolQuery = vi.fn()
@@ -37,13 +49,14 @@ const ENCRYPTION_KEY = deriveOAuthEncryptionKey(config.oauthEncryptionKey)
 
 function seedOauthServer(
   gateway: MockGateway,
-  opts: { name: string; grantScope?: 'user' | 'context'; contextRef?: string }
+  opts: { name: string; grantScope?: 'user' | 'context'; contextRef?: string; enabled?: boolean }
 ): void {
   void gateway.createResource(
     'mcpservers',
     {
       metadata: { name: opts.name },
       spec: {
+        ...(opts.enabled !== undefined ? { enabled: opts.enabled } : {}),
         // contextRef is CRD-required + singular — the AUTHORITATIVE Context.
         contextRef: opts.contextRef ?? 'ctx-9',
         auth: { type: 'oauth' },
@@ -70,8 +83,8 @@ async function liveUid(gateway: MockGateway, name: string): Promise<string> {
   return cr.metadata.uid
 }
 
-// Control JWT derived from the REAL minter (T1) — no hand-forged token. Only an
-// HCC-lineage control token may carry oauth:user-token, so it is minted for a Host.
+// Control JWT for the grants/exists suite below, from the real minter (T1).
+// Only an HCC-lineage control token may carry oauth:user-token.
 function controlToken(scopes: Array<'oauth:user-token'> = ['oauth:user-token']): string {
   return issueMcpHostControlJwt('mcp-host', 'standalone', ['agent-host'], {
     scopes,
@@ -98,31 +111,95 @@ function nonExpiredUserGrantRow(userId: string, expiresAt: Date) {
   }
 }
 
+function sharedGrantRow(contextId: string, expiresAt: Date) {
+  return {
+    ...nonExpiredUserGrantRow('', expiresAt),
+    grant_kind: 'shared',
+    user_id: null,
+    context_id: contextId,
+    bootstrapped_by_user_id: USER_1,
+  }
+}
+
+const HOST = 'agent-host'
+const HOST_CONTEXT = 'ctx-9'
+// users.id is a UUID; the broker refuses anything else before querying.
+const USER_1 = '0b4f3c1e-8a52-4e0f-9b7d-2d6c9e1a7f10'
+const USER_NO_ACCESS = '7d2e4a90-3c1b-4f6e-8d5a-1b9c0e2f4a63'
+
+const grantQueries = () =>
+  mockPoolQuery.mock.calls.filter(
+    ([sql]) => typeof sql === 'string' && sql.includes('FROM oauth_grants')
+  )
+
+async function deniedCount(reason: string): Promise<number> {
+  // Read by name so a build without the counter reports 0 instead of throwing.
+  const metric = registry.getSingleMetric('mcp_oauth_broker_denied_total')
+  if (!metric) return 0
+  const { values } = await metric.get()
+  return values.find(v => v.labels.reason === reason && v.labels.route === 'user_token')?.value ?? 0
+}
+
 describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
   let gateway: MockGateway
   let app: ReturnType<typeof createApp>
+  let token: string
+  let grantRows: unknown[]
   const originalBrokerEnabled = config.mcpOauthBrokerEnabled
 
-  beforeEach(() => {
+  // The DB answers by SQL, not by call position: the Host-entry read goes
+  // through the shared membership stand-in (USER_1 enters HOST), grant reads
+  // return `grantRows`.
+  function serveDb(opts: { accessError?: Error } = {}): void {
+    membership(mockPoolQuery, { agents: { [USER_1]: [HOST] } }, sql => {
+      const text = typeof sql === 'string' ? sql : ''
+      if (text.includes('FROM oauth_grants')) {
+        return Promise.resolve({ rows: grantRows, rowCount: grantRows.length })
+      }
+      return Promise.resolve({ rows: [], rowCount: 0 })
+    })
+    if (opts.accessError) {
+      const answer = mockPoolQuery.getMockImplementation()!
+      mockPoolQuery.mockImplementation((sql: unknown, values: unknown) =>
+        typeof sql === 'string' && sql.includes('lifecycle_state') && sql.includes('team_agents')
+          ? Promise.reject(opts.accessError)
+          : answer(sql, values)
+      )
+    }
+  }
+
+  const post = (body: Record<string, unknown>, bearer: string = token) =>
+    request(app)
+      .post('/api/v1/mcp-oauth/user-token')
+      .set('Authorization', `Bearer ${bearer}`)
+      .send(body)
+
+  beforeEach(async () => {
     gateway = new MockGateway(MCP_NS)
     app = createApp(gateway as never)
     mockPoolQuery.mockReset()
-    mockPoolQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+    grantRows = []
+    serveDb()
     // These specs assert the broker's live behavior, so run them with the
     // kill-switch ON. The flag defaults OFF (fail-closed); the OFF→404 spec
     // below flips it back to exercise the disabled path.
     config.mcpOauthBrokerEnabled = true
+    await seedAgentHost(gateway, HOST, HOST_CONTEXT)
+    await seedAllowlistedContext(gateway, HOST_CONTEXT, ['gdrive', 'plain', 'no-ctx'])
+    token = await mintHccControlToken(app, gateway, HOST)
   })
 
   afterEach(() => {
     config.mcpOauthBrokerEnabled = originalBrokerEnabled
   })
 
+  // ── R0: gates that precede the binding, unchanged ─────────────────────────
+
   it('401 without a control JWT', async () => {
     seedOauthServer(gateway, { name: 'gdrive' })
     const res = await request(app)
       .post('/api/v1/mcp-oauth/user-token')
-      .send({ mcpServerName: 'gdrive', userId: 'user-1' })
+      .send({ mcpServerName: 'gdrive', userId: USER_1 })
     expect(res.status).toBe(401)
   })
 
@@ -131,148 +208,355 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
     // keying the limiter by sub would drop all of them in one bucket. The bucket
     // key must be the verified per-host principal (hostRefs[0]) instead.
     seedOauthServer(gateway, { name: 'gdrive' })
+    await seedAgentHost(gateway, 'host-a', HOST_CONTEXT)
+    await seedAgentHost(gateway, 'host-b', HOST_CONTEXT)
+    const tokenA = await mintHccControlToken(app, gateway, 'host-a')
+    const tokenB = await mintHccControlToken(app, gateway, 'host-b')
     vi.mocked(checkAndIncrement).mockClear()
 
-    const tokenA = issueMcpHostControlJwt('mcp-host', 'standalone', ['host-a'], {
-      scopes: ['oauth:user-token'],
-      hccCredential: { hostUid: 'uid-host-a' },
-    }).token
-    const tokenB = issueMcpHostControlJwt('mcp-host', 'standalone', ['host-b'], {
-      scopes: ['oauth:user-token'],
-      hccCredential: { hostUid: 'uid-host-b' },
-    }).token
-
-    await request(app)
-      .post('/api/v1/mcp-oauth/user-token')
-      .set('Authorization', `Bearer ${tokenA}`)
-      .send({ mcpServerName: 'gdrive', userId: 'user-1' })
-    await request(app)
-      .post('/api/v1/mcp-oauth/user-token')
-      .set('Authorization', `Bearer ${tokenB}`)
-      .send({ mcpServerName: 'gdrive', userId: 'user-1' })
+    await post({ mcpServerName: 'gdrive', userId: USER_1 }, tokenA)
+    await post({ mcpServerName: 'gdrive', userId: USER_1 }, tokenB)
 
     const keys = vi.mocked(checkAndIncrement).mock.calls.map(call => call[0])
     expect(keys).toHaveLength(2)
     expect(keys[0]).toBe('mcp-oauth:mcp-host/host/host-a')
     expect(keys[1]).toBe('mcp-oauth:mcp-host/host/host-b')
-    expect(keys[0]).not.toBe(keys[1])
   })
 
   it('403 with a valid control JWT that lacks the oauth:user-token scope', async () => {
     seedOauthServer(gateway, { name: 'gdrive' })
-    const res = await request(app)
-      .post('/api/v1/mcp-oauth/user-token')
-      .set('Authorization', `Bearer ${controlToken([])}`)
-      .send({ mcpServerName: 'gdrive', userId: 'user-1' })
+    const noScope = await mintHccControlToken(app, gateway, HOST, [])
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_1 }, noScope)
     expect(res.status).toBe(403)
-    expect(res.body.error).toBe('insufficient_scope')
+    expect(res.text).toBe('{"error":"insufficient_scope"}')
   })
 
-  it('200 {token,expiresAt} for a per-user grant, keyed by (mcpserver owner, userId)', async () => {
+  // ── Rule 1a: caller lineage ───────────────────────────────────────────────
+
+  it('R1a: a workflow-recipe control token carrying the scope → 403 host_not_bound (I-4)', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
-    const future = new Date(Date.now() + 3600_000)
-    mockPoolQuery.mockResolvedValueOnce({
-      rows: [nonExpiredUserGrantRow('user-1', future)],
-      rowCount: 1,
+    grantRows = [nonExpiredUserGrantRow(USER_1, new Date(Date.now() + 3600_000))]
+    const wrc = signLegacyControlToken({
+      recipeNamespace: config.sandboxNamespace,
+      recipeName: 'recipe-x',
+      hostRefs: [`${config.sandboxNamespace}/recipe-x`],
     })
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_1 }, wrc)
+    expect(res.status).toBe(403)
+    expect(res.text).toBe('{"error":"host_not_bound"}')
+    expect(grantQueries()).toHaveLength(0)
+  })
 
+  it('R1a: the real issuer no longer gives a workflow-recipe control token the scope', async () => {
     const res = await request(app)
-      .post('/api/v1/mcp-oauth/user-token')
-      .set('Authorization', `Bearer ${controlToken()}`)
-      .send({ mcpServerName: 'gdrive', userId: 'user-1', contextId: 'ctx-9' })
+      .post(`/api/v1/auth/mcp-host/${config.sandboxNamespace}/recipe-x/tokens`)
+      .set('Authorization', `Bearer ${signInternalControlJwt('wrc')}`)
+      .send({ includeMcpHostControlToken: true, workflowControlScopes: ['oauth:user-token'] })
+    expect(res.status).toBe(200)
+    const claims = verifyMcpHostControlJwt(res.body.mcpHostControlToken)
+    expect(claims?.scopes).not.toContain('oauth:user-token')
+  })
 
+  it.each([
+    ['the reserved name standalone', { hostRefs: ['standalone'] }],
+    ['a namespaced hostRef', { hostRefs: ['ns/agent-host'] }],
+    ['two hostRefs', { hostRefs: ['agent-host', 'other-host'] }],
+    ['a recipe name other than standalone', { recipeName: 'other', hostRefs: ['agent-host'] }],
+    ['another namespace', { recipeNamespace: 'elsewhere', hostRefs: ['agent-host'] }],
+  ])('R1a: an HCC-like token with %s → 403 host_not_bound', async (_label, shape) => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    const forged = signLegacyControlToken({
+      recipeNamespace: config.hostsNamespace,
+      recipeName: 'standalone',
+      host_uid: 'uid-anything',
+      ...shape,
+    } as Parameters<typeof signLegacyControlToken>[0])
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_1 }, forged)
+    expect(res.status).toBe(403)
+    expect(res.text).toBe('{"error":"host_not_bound"}')
+  })
+
+  // ── Rule 1b: host_uid present ─────────────────────────────────────────────
+
+  it('R1b: an HCC token without host_uid → 401 with the requireControlCaller body', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    grantRows = [nonExpiredUserGrantRow(USER_1, new Date(Date.now() + 3600_000))]
+    const legacy = signLegacyControlToken({
+      recipeNamespace: config.hostsNamespace,
+      recipeName: 'standalone',
+      hostRefs: [HOST],
+    })
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_1 }, legacy)
+    expect(res.status).toBe(401)
+    expect(res.text).toBe('{"error":"Unauthorized"}')
+    expect(grantQueries()).toHaveLength(0)
+  })
+
+  it('400 invalid_request for a malformed (non-k8s) server name, before any getResource', async () => {
+    const reads = vi.spyOn(gateway, 'getResource')
+    const res = await post({ mcpServerName: 'Foo/Bar', userId: USER_1 })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('invalid_request')
+    expect(reads).not.toHaveBeenCalled()
+  })
+
+  // ── Rule 2: live Host with the token's uid ────────────────────────────────
+
+  it('R2a: Host deleted after issuance → 403 host_not_bound', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    grantRows = [nonExpiredUserGrantRow(USER_1, new Date(Date.now() + 3600_000))]
+    await gateway.deleteResource('hosts', HOST, config.hostsNamespace)
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_1 })
+    expect(res.status).toBe(403)
+    expect(res.text).toBe('{"error":"host_not_bound"}')
+    expect(grantQueries()).toHaveLength(0)
+  })
+
+  it('R2a: Host being deleted → 403 host_not_bound', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    grantRows = [nonExpiredUserGrantRow(USER_1, new Date(Date.now() + 3600_000))]
+    gateway.markDeleting('hosts', HOST, config.hostsNamespace)
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_1 })
+    expect(res.status).toBe(403)
+    expect(res.text).toBe('{"error":"host_not_bound"}')
+  })
+
+  it('R2b: Host recreated under the same name (new uid) → 403 host_not_bound (I-8)', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    grantRows = [nonExpiredUserGrantRow(USER_1, new Date(Date.now() + 3600_000))]
+    await gateway.deleteResource('hosts', HOST, config.hostsNamespace)
+    await seedAgentHost(gateway, HOST, HOST_CONTEXT)
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_1 })
+    expect(res.status).toBe(403)
+    expect(res.text).toBe('{"error":"host_not_bound"}')
+    expect(grantQueries()).toHaveLength(0)
+  })
+
+  it('R2c: a draining Host still obtains its token', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    grantRows = [nonExpiredUserGrantRow(USER_1, new Date(Date.now() + 3600_000))]
+    const host = (await gateway.getResource('hosts', HOST, config.hostsNamespace)) as {
+      status?: Record<string, unknown>
+    }
+    host.status = { lifecycle: { state: 'draining' } }
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_1 })
     expect(res.status).toBe(200)
     expect(res.body.token).toBe('GDRIVE-ACCESS')
-    expect(res.body.expiresAt).toBe(future.toISOString())
-
-    // Grant lookup scoped to the mcpserver owner + asserted userId, oauthClientId
-    // derived from the server (never the body).
-    const grantQuery = mockPoolQuery.mock.calls.find(
-      ([sql]) =>
-        typeof sql === 'string' &&
-        sql.includes('FROM oauth_grants') &&
-        sql.includes("grant_kind = 'user'")
-    )
-    expect(grantQuery?.[1]).toEqual([
-      'mcpserver',
-      MCP_NS,
-      'gdrive',
-      'user-1',
-      'google-drive',
-      await liveUid(gateway, 'gdrive'),
-      // Baked CR: the reader key carries its provider for unsealed legacy rows.
-      'google',
-    ])
   })
 
-  it('404 no_grant when no row exists', async () => {
+  it.each([
+    ['an apiserver outage', { statusCode: 503 }],
+    ['an RBAC refusal', { statusCode: 403, body: { message: 'hosts is forbidden' } }],
+  ])('R2d: %s reading the Host → 503 fixed body, no grant read', async (_label, err) => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
-    const res = await request(app)
-      .post('/api/v1/mcp-oauth/user-token')
-      .set('Authorization', `Bearer ${controlToken()}`)
-      .send({ mcpServerName: 'gdrive', userId: 'nobody' })
-    expect(res.status).toBe(404)
-    expect(res.body.error).toBe('no_grant')
+    grantRows = [nonExpiredUserGrantRow(USER_1, new Date(Date.now() + 3600_000))]
+    gateway.failGetResource('hosts', err)
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_1 })
+    expect(res.status).toBe(503)
+    expect(res.text).toBe('{"error":"host_state_unavailable"}')
+    expect(grantQueries()).toHaveLength(0)
   })
 
-  it('404 server_not_found for an unknown server', async () => {
-    const res = await request(app)
-      .post('/api/v1/mcp-oauth/user-token')
-      .set('Authorization', `Bearer ${controlToken()}`)
-      .send({ mcpServerName: 'ghost', userId: 'user-1' })
-    expect(res.status).toBe(404)
-    expect(res.body.error).toBe('server_not_found')
+  // ── Rule 3: the Host's Context ────────────────────────────────────────────
+
+  it('R3: the Host Context does not exist → 403 host_not_bound', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    await gateway.deleteResource('contexts', HOST_CONTEXT, config.contextsNamespace)
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_1 })
+    expect(res.status).toBe(403)
+    expect(res.text).toBe('{"error":"host_not_bound"}')
   })
 
-  it('400 not_oauth_server for a non-oauth server', async () => {
+  it('R3: the Host Context is being deleted → 403 host_not_bound', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    gateway.markDeleting('contexts', HOST_CONTEXT, config.contextsNamespace)
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_1 })
+    expect(res.status).toBe(403)
+    expect(res.text).toBe('{"error":"host_not_bound"}')
+  })
+
+  it.each([
+    ['empty', ''],
+    ['not a k8s name', 'Bad/Name'],
+  ])('R3: host.spec.contextRef %s → 403 without reading contexts', async (_label, ref) => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    await seedAgentHost(gateway, 'odd-host', ref)
+    const odd = await mintHccControlToken(app, gateway, 'odd-host')
+    const reads = vi.spyOn(gateway, 'getResource')
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_1 }, odd)
+    expect(res.status).toBe(403)
+    expect(res.text).toBe('{"error":"host_not_bound"}')
+    expect(reads.mock.calls.some(([plural]) => plural === 'contexts')).toBe(false)
+  })
+
+  it('R3: the Context is read from contextsNamespace, not the mcp-servers namespace', async () => {
+    const originalContextsNamespace = config.contextsNamespace
+    config.contextsNamespace = 'contexts-elsewhere'
+    try {
+      seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+      grantRows = [nonExpiredUserGrantRow(USER_1, new Date(Date.now() + 3600_000))]
+      await seedAgentHost(gateway, 'split-host', 'ctx-split')
+      // Only the contexts namespace holds this Context.
+      await seedAllowlistedContext(gateway, 'ctx-split', ['gdrive'], config.contextsNamespace)
+      const split = await mintHccControlToken(app, gateway, 'split-host')
+      mockPoolQuery.mockReset()
+      membership(mockPoolQuery, { agents: { [USER_1]: ['split-host'] } }, sql =>
+        Promise.resolve(
+          typeof sql === 'string' && sql.includes('FROM oauth_grants')
+            ? { rows: grantRows, rowCount: grantRows.length }
+            : { rows: [], rowCount: 0 }
+        )
+      )
+      const res = await post({ mcpServerName: 'gdrive', userId: USER_1 }, split)
+      expect(res.status).toBe(200)
+      expect(res.body.token).toBe('GDRIVE-ACCESS')
+    } finally {
+      config.contextsNamespace = originalContextsNamespace
+    }
+  })
+
+  it('R3: a Context object whose name differs from host.spec.contextRef → 403 host_not_bound', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    grantRows = [nonExpiredUserGrantRow(USER_1, new Date(Date.now() + 3600_000))]
+    // Stub: the apiserver answers the Context read with another object.
+    const read = gateway.getResource.bind(gateway)
+    vi.spyOn(gateway, 'getResource').mockImplementation(async (plural, name, ns) => {
+      const row = (await read(plural, name, ns)) as { metadata: Record<string, unknown> }
+      return plural === 'contexts'
+        ? { ...row, metadata: { ...row.metadata, name: 'ctx-other' } }
+        : row
+    })
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_1 })
+    expect(res.status).toBe(403)
+    expect(res.text).toBe('{"error":"host_not_bound"}')
+    expect(grantQueries()).toHaveLength(0)
+  })
+
+  it('R3: a transient error reading the Context → 503', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    gateway.failGetResource('contexts', { statusCode: 500 })
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_1 })
+    expect(res.status).toBe(503)
+    expect(res.text).toBe('{"error":"host_state_unavailable"}')
+  })
+
+  it('R3b: spec.contextId differing from the Context name is served and only logged', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    grantRows = [nonExpiredUserGrantRow(USER_1, new Date(Date.now() + 3600_000))]
+    await seedAgentHost(gateway, 'renamed-host', 'ctx-renamed')
+    await gateway.createResource(
+      'contexts',
+      { metadata: { name: 'ctx-renamed' }, spec: { contextId: 'legacy-id', mcpServers: [] } },
+      config.contextsNamespace
+    )
+    await attachServerToContext(
+      gateway as never,
+      { name: 'ctx-renamed', namespace: config.contextsNamespace },
+      'gdrive'
+    )
+    const renamed = await mintHccControlToken(app, gateway, 'renamed-host')
+    mockPoolQuery.mockReset()
+    membership(mockPoolQuery, { agents: { [USER_1]: ['renamed-host'] } }, sql =>
+      Promise.resolve(
+        typeof sql === 'string' && sql.includes('FROM oauth_grants')
+          ? { rows: grantRows, rowCount: grantRows.length }
+          : { rows: [], rowCount: 0 }
+      )
+    )
+    const logs = captureRequestLogs()
+    try {
+      const res = await post({ mcpServerName: 'gdrive', userId: USER_1 }, renamed)
+      expect(res.status).toBe(200)
+      expect(logs.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'context_id_mismatch', host: 'renamed-host' }),
+        expect.any(String)
+      )
+    } finally {
+      logs.restore()
+    }
+  })
+
+  // ── Rule 4: allowlist, then the CR ────────────────────────────────────────
+
+  it('R4: missing, outside the allowlist, being deleted and disabled all answer the same 404 (I-2, I-5)', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    seedOauthServer(gateway, { name: 'foreign', grantScope: 'user' })
+    seedOauthServer(gateway, { name: 'leaving', grantScope: 'user' })
+    seedOauthServer(gateway, { name: 'off', grantScope: 'user', enabled: false })
+    for (const name of ['ghost', 'leaving', 'off']) {
+      await attachServerToContext(
+        gateway as never,
+        { name: HOST_CONTEXT, namespace: config.contextsNamespace },
+        name
+      )
+    }
+    gateway.markDeleting('mcpservers', 'leaving', MCP_NS)
+    grantRows = [nonExpiredUserGrantRow(USER_1, new Date(Date.now() + 3600_000))]
+
+    for (const name of ['ghost', 'foreign', 'leaving', 'off']) {
+      const res = await post({ mcpServerName: name, userId: USER_1 })
+      expect(res.status, name).toBe(404)
+      expect(res.text, name).toBe('{"error":"server_not_found"}')
+    }
+    expect(grantQueries()).toHaveLength(0)
+  })
+
+  it('R4b: the allowlist match is exact, like host-context-controller (no trim)', async () => {
+    seedOauthServer(gateway, { name: 'drive', grantScope: 'user' })
+    await attachServerToContext(
+      gateway as never,
+      { name: HOST_CONTEXT, namespace: config.contextsNamespace },
+      ' drive '
+    )
+    const res = await post({ mcpServerName: 'drive', userId: USER_1 })
+    expect(res.status).toBe(404)
+    expect(res.text).toBe('{"error":"server_not_found"}')
+  })
+
+  it('R4c: a server outside the allowlist is never read from the apiserver', async () => {
+    seedOauthServer(gateway, { name: 'foreign', grantScope: 'user' })
+    const reads = vi.spyOn(gateway, 'getResource')
+    const res = await post({ mcpServerName: 'foreign', userId: USER_1 })
+    expect(res.status).toBe(404)
+    expect(reads.mock.calls.some(([plural]) => plural === 'mcpservers')).toBe(false)
+  })
+
+  it('R4: a transient error reading an allowlisted server → 503', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    gateway.failGetResource('mcpservers', { statusCode: 500 })
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_1 })
+    expect(res.status).toBe(503)
+    expect(res.text).toBe('{"error":"host_state_unavailable"}')
+  })
+
+  // ── Rule 5 ────────────────────────────────────────────────────────────────
+
+  it('R5: 400 not_oauth_server for a non-oauth server of the own Context', async () => {
     void gateway.createResource(
       'mcpservers',
       { metadata: { name: 'plain' }, spec: { auth: { type: 'none' } } },
       MCP_NS
     )
-    const res = await request(app)
-      .post('/api/v1/mcp-oauth/user-token')
-      .set('Authorization', `Bearer ${controlToken()}`)
-      .send({ mcpServerName: 'plain', userId: 'user-1' })
+    const res = await post({ mcpServerName: 'plain', userId: USER_1 })
     expect(res.status).toBe(400)
     expect(res.body.error).toBe('not_oauth_server')
   })
 
-  it('context flavor: key uses the AUTHORITATIVE spec.contextRef, not the body; user_id NULL', async () => {
-    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
-    const future = new Date(Date.now() + 3600_000)
-    mockPoolQuery.mockResolvedValueOnce({
-      rows: [
-        {
-          ...nonExpiredUserGrantRow('', future),
-          grant_kind: 'shared',
-          user_id: null,
-          context_id: 'ctx-A',
-          bootstrapped_by_user_id: 'user-1',
-        },
-      ],
-      rowCount: 1,
-    })
+  // ── Rule 6: context-scope owner ───────────────────────────────────────────
 
-    // Body omits contextId entirely — the server's contextRef is authoritative.
-    const res = await request(app)
-      .post('/api/v1/mcp-oauth/user-token')
-      .set('Authorization', `Bearer ${controlToken()}`)
-      .send({ mcpServerName: 'gdrive', userId: 'user-2' })
+  it('context flavor: key uses the Host Context (= owner), not the body; user_id NULL', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: HOST_CONTEXT })
+    grantRows = [sharedGrantRow(HOST_CONTEXT, new Date(Date.now() + 3600_000))]
+
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_NO_ACCESS })
 
     expect(res.status).toBe(200)
-    const grantQuery = mockPoolQuery.mock.calls.find(
-      ([sql]) =>
-        typeof sql === 'string' &&
-        sql.includes('FROM oauth_grants') &&
-        sql.includes("grant_kind = 'shared'")
-    )
-    // owner, ns, name, contextId(=contextRef), clientId — userId NOT a coordinate.
+    const grantQuery = grantQueries().find(([sql]) => String(sql).includes("grant_kind = 'shared'"))
     expect(grantQuery?.[1]).toEqual([
       'mcpserver',
       MCP_NS,
       'gdrive',
-      'ctx-A',
+      HOST_CONTEXT,
       'google-drive',
       await liveUid(gateway, 'gdrive'),
       // Baked CR: the reader key carries its provider for unsealed legacy rows.
@@ -280,73 +564,26 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
     ])
   })
 
-  // Guardian (T5): a caller with the scope must NOT be able to fetch another
-  // Context's shared token by asserting a foreign contextId in the body. The
-  // server's spec.contextRef is 'ctx-A'; a request naming 'ctx-B' is rejected
-  // BEFORE any grant lookup — the ctx-B token is never observable (T4).
-  it('rejects a cross-context body contextId with 400 context_mismatch and never queries the foreign grant', async () => {
+  it('R6: a context server owned by another Context → 404 server_not_found + metric, no grant read (I-1)', async () => {
+    // Before the binding, this request handed ctx-A's shared token to any Host.
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
+    grantRows = [sharedGrantRow('ctx-A', new Date(Date.now() + 3600_000))]
+    const before = await deniedCount('context_ref_mismatch')
 
-    const res = await request(app)
-      .post('/api/v1/mcp-oauth/user-token')
-      .set('Authorization', `Bearer ${controlToken()}`)
-      .send({ mcpServerName: 'gdrive', userId: 'user-2', contextId: 'ctx-B' })
-
-    expect(res.status).toBe(400)
-    expect(res.body.error).toBe('context_mismatch')
-    expect(res.body.token).toBeUndefined()
-    // No grant lookup ran at all — the foreign coordinate never reached the DB.
-    const grantQuery = mockPoolQuery.mock.calls.find(
-      ([sql]) => typeof sql === 'string' && sql.includes('FROM oauth_grants')
-    )
-    expect(grantQuery).toBeUndefined()
-  })
-
-  // Happy-negative for the context branch (U1 dispatch, U6 activation): when NO
-  // shared grant exists for the server's authoritative contextRef, the broker
-  // returns 404 no_grant — the same fail-closed outcome the user branch gives,
-  // driven through the REAL shared getOAuthGrant SQL (mockPoolQuery → 0 rows).
-  it('context flavor: 404 no_grant when no shared grant exists for spec.contextRef', async () => {
-    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
-    // Default mock already resolves { rows: [], rowCount: 0 } → getOAuthGrant null.
-    const res = await request(app)
-      .post('/api/v1/mcp-oauth/user-token')
-      .set('Authorization', `Bearer ${controlToken()}`)
-      .send({ mcpServerName: 'gdrive', userId: 'user-2' })
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_1 })
 
     expect(res.status).toBe(404)
-    expect(res.body.error).toBe('no_grant')
-    expect(res.body.token).toBeUndefined()
-    // The lookup that ran was the SHARED coordinate keyed by contextRef, no userId.
-    const grantQuery = mockPoolQuery.mock.calls.find(
-      ([sql]) =>
-        typeof sql === 'string' &&
-        sql.includes('FROM oauth_grants') &&
-        sql.includes("grant_kind = 'shared'")
-    )
-    expect(grantQuery?.[1]).toEqual([
-      'mcpserver',
-      MCP_NS,
-      'gdrive',
-      'ctx-A',
-      'google-drive',
-      await liveUid(gateway, 'gdrive'),
-      // Baked CR: the reader key carries its provider for unsealed legacy rows.
-      'google',
-    ])
+    expect(res.text).toBe('{"error":"server_not_found"}')
+    expect(grantQueries()).toHaveLength(0)
+    expect(await deniedCount('context_ref_mismatch')).toBe(before + 1)
   })
 
-  // Fail-closed: a context-flavor server that is missing its CRD-required
-  // spec.contextRef must NOT resolve to any grant. The broker rejects with 400
-  // server_missing_context BEFORE any DB lookup (mini-spec 05 §2 — the shared
-  // key coordinate is unresolvable, so there is nothing safe to query).
-  it('context flavor: 400 server_missing_context when spec.contextRef is absent, no grant lookup', async () => {
+  it('R6: a context server without contextRef → the same 404, no grant read', async () => {
     void gateway.createResource(
       'mcpservers',
       {
         metadata: { name: 'no-ctx' },
         spec: {
-          // contextRef deliberately omitted.
           auth: { type: 'oauth' },
           oauth: {
             id: 'google-drive',
@@ -359,49 +596,127 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
       },
       MCP_NS
     )
-    const res = await request(app)
-      .post('/api/v1/mcp-oauth/user-token')
-      .set('Authorization', `Bearer ${controlToken()}`)
-      .send({ mcpServerName: 'no-ctx', userId: 'user-2' })
-
-    expect(res.status).toBe(400)
-    expect(res.body.error).toBe('server_missing_context')
-    const grantQuery = mockPoolQuery.mock.calls.find(
-      ([sql]) => typeof sql === 'string' && sql.includes('FROM oauth_grants')
-    )
-    expect(grantQuery).toBeUndefined()
+    const res = await post({ mcpServerName: 'no-ctx', userId: USER_1 })
+    expect(res.status).toBe(404)
+    expect(res.text).toBe('{"error":"server_not_found"}')
+    expect(grantQueries()).toHaveLength(0)
   })
 
-  it('accepts a body contextId that matches spec.contextRef', async () => {
-    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: 'ctx-A' })
-    const future = new Date(Date.now() + 3600_000)
-    mockPoolQuery.mockResolvedValueOnce({
-      rows: [
-        {
-          ...nonExpiredUserGrantRow('', future),
-          grant_kind: 'shared',
-          user_id: null,
-          context_id: 'ctx-A',
-          bootstrapped_by_user_id: 'user-1',
-        },
-      ],
-      rowCount: 1,
-    })
-    const res = await request(app)
-      .post('/api/v1/mcp-oauth/user-token')
-      .set('Authorization', `Bearer ${controlToken()}`)
-      .send({ mcpServerName: 'gdrive', userId: 'user-2', contextId: 'ctx-A' })
+  it('R6b: a body contextId is ignored — a foreign value neither denies nor redirects the key', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: HOST_CONTEXT })
+    grantRows = [sharedGrantRow(HOST_CONTEXT, new Date(Date.now() + 3600_000))]
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_1, contextId: 'ctx-B' })
     expect(res.status).toBe(200)
     expect(res.body.token).toBe('GDRIVE-ACCESS')
+    const keys = grantQueries().map(([, values]) => (values as unknown[])[3])
+    expect(keys).toEqual([HOST_CONTEXT])
   })
 
-  it('400 invalid_request for a malformed (non-k8s) server name, before any getResource', async () => {
-    const res = await request(app)
-      .post('/api/v1/mcp-oauth/user-token')
-      .set('Authorization', `Bearer ${controlToken()}`)
-      .send({ mcpServerName: 'Foo/Bar', userId: 'user-1' })
+  it('context flavor: 404 no_grant when no shared grant exists for the Host Context', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'context', contextRef: HOST_CONTEXT })
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_1 })
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'no_grant' })
+  })
+
+  // ── Rule 7: the end user enters this Host ─────────────────────────────────
+
+  it('200 {token,expiresAt} for a per-user grant, keyed by (mcpserver owner, userId)', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    const future = new Date(Date.now() + 3600_000)
+    grantRows = [nonExpiredUserGrantRow(USER_1, future)]
+
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_1, contextId: HOST_CONTEXT })
+
+    expect(res.status).toBe(200)
+    expect(res.body.token).toBe('GDRIVE-ACCESS')
+    expect(res.body.expiresAt).toBe(future.toISOString())
+    const grantQuery = grantQueries().find(([sql]) => String(sql).includes("grant_kind = 'user'"))
+    expect(grantQuery?.[1]).toEqual([
+      'mcpserver',
+      MCP_NS,
+      'gdrive',
+      USER_1,
+      'google-drive',
+      await liveUid(gateway, 'gdrive'),
+      // Baked CR: the reader key carries its provider for unsealed legacy rows.
+      'google',
+    ])
+  })
+
+  it('404 no_grant when the user enters the Host but never connected', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_1 })
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'no_grant' })
+  })
+
+  it('R7: a user who cannot enter the Host gets no_grant without any grant read (I-3)', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    grantRows = [nonExpiredUserGrantRow(USER_NO_ACCESS, new Date(Date.now() + 3600_000))]
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_NO_ACCESS })
+    expect(res.status).toBe(404)
+    expect(res.text).toBe('{"error":"no_grant"}')
+    expect(grantQueries()).toHaveLength(0)
+  })
+
+  it('R7: 400 invalid_request for a user server without userId', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    const res = await post({ mcpServerName: 'gdrive' })
     expect(res.status).toBe(400)
     expect(res.body.error).toBe('invalid_request')
+  })
+
+  it('R7f: a DB error reading Host access → 503 fixed body, no grant read', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    grantRows = [nonExpiredUserGrantRow(USER_1, new Date(Date.now() + 3600_000))]
+    serveDb({ accessError: new Error('connection terminated') })
+    const before = await deniedCount('unavailable')
+    const res = await post({ mcpServerName: 'gdrive', userId: USER_1 })
+    expect(res.status).toBe(503)
+    expect(res.text).toBe('{"error":"host_state_unavailable"}')
+    expect(grantQueries()).toHaveLength(0)
+    expect(await deniedCount('unavailable')).toBe(before + 1)
+  })
+
+  it('logs the denial with server and Host, never the userId', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    const logs = captureRequestLogs()
+    try {
+      await post({ mcpServerName: 'gdrive', userId: USER_NO_ACCESS })
+    } finally {
+      logs.restore()
+    }
+    const denial = logs.warn.mock.calls.find(
+      ([fields]) => (fields as { event?: string }).event === 'mcp_oauth_broker_denied'
+    )
+    expect(denial?.[0]).toMatchObject({ reason: 'no_grant', host: HOST, mcpServerName: 'gdrive' })
+    expect(JSON.stringify(logs.warn.mock.calls)).not.toContain(USER_NO_ACCESS)
+  })
+
+  it('no_grant by Host access logs at warn; a non-UUID channel sender only at debug', async () => {
+    seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
+    const before = await deniedCount('no_grant')
+    const logs = captureRequestLogs()
+    try {
+      const entitledLooking = await post({ mcpServerName: 'gdrive', userId: USER_NO_ACCESS })
+      const channelSender = await post({ mcpServerName: 'gdrive', userId: 'U024BE7LH' })
+      expect(entitledLooking.text).toBe('{"error":"no_grant"}')
+      expect(channelSender.text).toBe('{"error":"no_grant"}')
+    } finally {
+      logs.restore()
+    }
+    const denials = (calls: unknown[][]) =>
+      calls
+        .map(([fields]) => fields as { event?: string; reason?: string; cause?: string })
+        .filter(fields => fields.event === 'mcp_oauth_broker_denied')
+    expect(denials(logs.warn.mock.calls)).toEqual([
+      expect.objectContaining({ reason: 'no_grant', cause: 'no_host_access' }),
+    ])
+    expect(denials(logs.debug.mock.calls)).toEqual([
+      expect.objectContaining({ reason: 'no_grant', cause: 'non_uuid_user_id' }),
+    ])
+    expect(await deniedCount('no_grant')).toBe(before + 2)
   })
 
   // Finding R1-H1: the broker is gated behind a kill-switch that defaults OFF,
@@ -414,45 +729,22 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
     it('OFF (default): a well-formed authorized request returns 404 not_found and never resolves a grant', async () => {
       config.mcpOauthBrokerEnabled = false
       seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
-      // A grant that WOULD resolve to a 200 token if the endpoint served — so
-      // the 404 can only come from the gate, not from a missing grant.
-      const future = new Date(Date.now() + 3600_000)
-      mockPoolQuery.mockResolvedValueOnce({
-        rows: [nonExpiredUserGrantRow('user-1', future)],
-        rowCount: 1,
-      })
+      grantRows = [nonExpiredUserGrantRow(USER_1, new Date(Date.now() + 3600_000))]
 
-      const res = await request(app)
-        .post('/api/v1/mcp-oauth/user-token')
-        .set('Authorization', `Bearer ${controlToken()}`)
-        .send({ mcpServerName: 'gdrive', userId: 'user-1', contextId: 'ctx-9' })
+      const res = await post({ mcpServerName: 'gdrive', userId: USER_1 })
 
-      // Load-bearing (T4): assert the observable HTTP response, not an internal
-      // call count. This assertion fails against the pre-gate parent (which
-      // always serves → 200 with the seeded grant).
       expect(res.status).toBe(404)
       expect(res.body.error).toBe('not_found')
       expect(res.body.token).toBeUndefined()
-      // Never reached grant resolution — no oauth_grants lookup ran.
-      const grantQuery = mockPoolQuery.mock.calls.find(
-        ([sql]) => typeof sql === 'string' && sql.includes('FROM oauth_grants')
-      )
-      expect(grantQuery).toBeUndefined()
+      expect(grantQueries()).toHaveLength(0)
     })
 
     it('ON: the same request resolves normally (behavior unchanged)', async () => {
-      config.mcpOauthBrokerEnabled = true
       seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
       const future = new Date(Date.now() + 3600_000)
-      mockPoolQuery.mockResolvedValueOnce({
-        rows: [nonExpiredUserGrantRow('user-1', future)],
-        rowCount: 1,
-      })
+      grantRows = [nonExpiredUserGrantRow(USER_1, future)]
 
-      const res = await request(app)
-        .post('/api/v1/mcp-oauth/user-token')
-        .set('Authorization', `Bearer ${controlToken()}`)
-        .send({ mcpServerName: 'gdrive', userId: 'user-1', contextId: 'ctx-9' })
+      const res = await post({ mcpServerName: 'gdrive', userId: USER_1 })
 
       expect(res.status).toBe(200)
       expect(res.body.token).toBe('GDRIVE-ACCESS')

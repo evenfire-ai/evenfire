@@ -9,15 +9,16 @@ import { rootLogger } from '../../src/observability/logger.js'
 export function captureRequestLogs() {
   const info = vi.fn()
   const warn = vi.fn()
+  const debug = vi.fn()
   const fakeChild: Record<string, unknown> = {
     info,
     warn,
     error: vi.fn(),
-    debug: vi.fn(),
+    debug,
     trace: vi.fn(),
     fatal: vi.fn(),
   }
   fakeChild.child = () => fakeChild
   const spy = vi.spyOn(rootLogger, 'child').mockReturnValue(fakeChild as never)
-  return { info, warn, restore: () => spy.mockRestore() }
+  return { info, warn, debug, restore: () => spy.mockRestore() }
 }

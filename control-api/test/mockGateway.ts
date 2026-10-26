@@ -262,6 +262,18 @@ export class MockGateway {
     this.getResourceFailures.set(plural, queue)
   }
 
+  /**
+   * Test helper: put a stored resource in the "being deleted" state the
+   * apiserver reports while finalizers run (`metadata.deletionTimestamp` set,
+   * object still readable). `createResource` drops that field, so this is the
+   * only way to model it.
+   */
+  markDeleting(plural: ResourceType, name: string, namespace?: string): void {
+    const row = this.store[plural].get(this.key(name, namespace))
+    if (!row) throw new Error(`markDeleting: ${plural}/${name} not found`)
+    ;(row.metadata as Record<string, unknown>).deletionTimestamp = new Date().toISOString()
+  }
+
   async getResource(plural: ResourceType, name: string, namespace?: string): Promise<unknown> {
     const queuedFailure = this.getResourceFailures.get(plural)
     if (queuedFailure && queuedFailure.length > 0) {

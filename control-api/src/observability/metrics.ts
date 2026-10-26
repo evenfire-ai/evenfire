@@ -220,6 +220,16 @@ export const mcpHostJwtReissueTotal = getOrCreateCounter({
   labelNames: ['result'] as const as Array<'result'>,
 })
 
+// OAuth mcp-server broker refused a caller on its Host binding. reason:
+// lineage | unauthenticated | host_not_bound | server_not_found |
+// context_ref_mismatch | no_grant | unavailable. route: user_token |
+// grants_exists. The mcp-server and Host go to the log, never a label.
+export const mcpOauthBrokerDeniedTotal = getOrCreateCounter({
+  name: 'mcp_oauth_broker_denied_total',
+  help: 'Count of OAuth broker requests denied by the Host binding, by reason and route.',
+  labelNames: ['reason', 'route'] as const as Array<'reason' | 'route'>,
+})
+
 // MCP server uninstall: a cleanup step failed. Every stage except
 // oauth_grants_post_delete runs before the CR delete and leaves the CR in place for a
 // retry (the request answers "repair required"); a sustained rate means uninstalls

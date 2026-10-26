@@ -26,6 +26,17 @@ import {
 import { getAccessTokenReactive } from '../oauth/reactiveTokenHelper.js'
 import { type OAuthGrantKey, oauthGrantExists } from '../oauth/store.js'
 import { type Logger, rootLogger } from '../observability/logger.js'
+import { mcpOauthBrokerDeniedTotal } from '../observability/metrics.js'
+import {
+  checkBrokerCallerLineage,
+  hasContextIdMismatch,
+  hostAccessForUser,
+  isCanonicalUuid,
+  isLive,
+  isValidK8sName,
+  resolveBrokerHostBinding,
+} from '../services/access/brokerHostBinding.js'
+import { isK8sResourceNotFound } from '../services/access/mcpInvocable.js'
 import { K8sNotFoundError } from '../services/resourceService.js'
 import {
   type McpHostControlClaims,
@@ -46,27 +57,33 @@ import { extractBearerToken } from '../utils/extractBearerToken.js'
  * Gate: the control JWT + scope `oauth:user-token`. No new static credential
  * and no new broker-token minting infra (the híbrido design, §U1).
  *
- * Identity provenance:
+ * Binding: the body only names the mcp-server and, for per-user servers, the
+ * end user. Everything else comes from the authenticated caller:
+ *   - The control JWT must belong to a host-context-controller Host
+ *     (`hostRefs[0]` + `host_uid`), and that Host must be live with the same
+ *     uid, so a token cannot outlive or be replayed against a recreated Host.
+ *   - The Context is the Host's `spec.contextRef`, never a body field: a
+ *     caller cannot name another Context to obtain its shared token.
+ *   - The mcp-server must be in that Context's allowlist (exact match, as
+ *     host-context-controller applies it), enabled and live. Anything else
+ *     answers the same 404 as a missing server, read before the CR is fetched,
+ *     so the broker is no existence oracle across Contexts.
+ *   - A per-user token requires the body `userId` to be an active user who
+ *     enters this Host (directly or through an active team). The `userId`
+ *     itself is still asserted by mcp-host, not proven by a signature here.
  *   - `oauthClientId` is derived from the McpServer's `spec.oauth.id`, NEVER
  *     from the request body.
- *   - `userId` / `contextId` ride the request body. This is the accepted pattern
- *     of the mutually-authenticated mcp-host ↔ control-api seam (same as
- *     `routes/internal/oauth.ts`): the caller is authenticated by its control
- *     JWT and asserts, over that trusted channel, which end-user session /
- *     Context pod the token is for. control-api authorizes the grant against the
- *     forwarded `userId`/`contextId` (defense in depth — a wrong value simply
- *     resolves to `no_grant`). It is therefore INCORRECT to say "userId is never
- *     a body param" here.
  *
  * Flavor dispatch — read from the server's `spec.oauth.grantScope`:
  *   - `user`    → grant key `(server, userId)`   — per-user identity.
- *   - `context` → grant key `(server, contextId)` — shared identity.
+ *   - `context` → grant key `(server, contextRef)` — shared identity.
  * Both branches ship in v1; the `context` branch is governed/exercised by U6.
  */
 
 export interface McpServerResource {
-  metadata?: { name?: string; namespace?: string; uid?: string }
+  metadata?: { name?: string; namespace?: string; uid?: string; deletionTimestamp?: unknown }
   spec?: {
+    enabled?: unknown
     auth?: { type?: unknown }
     oauth?: McpServerOAuthDecl
     // `spec.contextRef` is REQUIRED + singular on the CRD ("the context this
@@ -156,13 +173,22 @@ export function normalizeMcpServerOwnerDecl(
   }
 }
 
-// DNS-1123 subdomain, the shape a k8s resource name takes. Reject anything else
-// up front so a malformed `mcpServerName` (e.g. "Foo/Bar") becomes a 400 rather
-// than surfacing a non-404 apiserver error as a 500.
-const K8S_NAME_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/
-function isValidK8sName(name: string): boolean {
-  return name.length > 0 && name.length <= 253 && K8S_NAME_RE.test(name)
-}
+type BrokerDenialReason =
+  | 'lineage'
+  | 'unauthenticated'
+  | 'host_not_bound'
+  | 'server_not_found'
+  | 'context_ref_mismatch'
+  | 'no_grant'
+  | 'unavailable'
+
+// Fixed bodies: denials must not vary with what was found, and a 503 never
+// forwards the apiserver or DB error (an RBAC 403 from Kubernetes would
+// otherwise reach the client through the shared error handler).
+const HOST_NOT_BOUND = { error: 'host_not_bound' }
+const SERVER_NOT_FOUND = { error: 'server_not_found' }
+const STATE_UNAVAILABLE = { error: 'host_state_unavailable' }
+const NO_GRANT = { error: 'no_grant' }
 
 // Upper bound on the grant-existence batch. mcp-host caps its per-user OAuth
 // partitions at OAUTH_USER_PARTITION_MAX=500, so one sweep never legitimately
@@ -438,23 +464,66 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
       if (!claims || !claims.scopes.includes('oauth:user-token')) {
         return res.status(403).json({ error: 'insufficient_scope' })
       }
+      const log = req.log ?? rootLogger
+      const deny = (
+        reason: BrokerDenialReason,
+        status: number,
+        body: Record<string, string>,
+        context: Record<string, unknown> = {},
+        level: 'warn' | 'debug' = 'warn'
+      ) => {
+        mcpOauthBrokerDeniedTotal.inc({ reason, route: 'user_token' }, 1)
+        log[level](
+          { event: 'mcp_oauth_broker_denied', reason, route: 'user_token', ...context },
+          'mcp oauth broker denied'
+        )
+        return res.status(status).json(body)
+      }
+
+      const lineage = checkBrokerCallerLineage(claims, config)
+      if (lineage.kind === 'lineage') {
+        return deny('lineage', 403, HOST_NOT_BOUND, { sub: claims.sub })
+      }
+      if (lineage.kind === 'unauthenticated') {
+        return deny('unauthenticated', 401, { error: 'Unauthorized' }, { host: claims.hostRefs[0] })
+      }
+      const hostName = lineage.hostName
 
       try {
         const body = (req.body ?? {}) as {
           mcpServerName?: unknown
           userId?: unknown
-          contextId?: unknown
         }
         const mcpServerName = body.mcpServerName
         const userId = body.userId
-        const contextId = body.contextId
         if (typeof mcpServerName !== 'string' || !isValidK8sName(mcpServerName)) {
           return res.status(400).json({ error: 'invalid_request' })
         }
+        const where = { host: hostName, mcpServerName }
 
-        // Read the McpServer to derive `oauthClientId` + `grantScope` from the
-        // server's declaration — never from the body.
-        let server: McpServerResource | null
+        const binding = await resolveBrokerHostBinding(gateway, hostName, lineage.hostUid, config)
+        if (binding.kind === 'denied') return deny('host_not_bound', 403, HOST_NOT_BOUND, where)
+        if (binding.kind === 'unavailable') {
+          return deny('unavailable', 503, STATE_UNAVAILABLE, {
+            ...where,
+            stage: 'host_binding',
+            err: binding.cause,
+          })
+        }
+        if (hasContextIdMismatch(binding.ctx)) {
+          log.warn(
+            { event: 'context_id_mismatch', host: hostName, context: binding.ctx.metadata?.name },
+            'context spec.contextId differs from its name'
+          )
+        }
+        const hostContext = binding.host.spec?.contextRef as string
+
+        // Allowlist before the CR read: a server outside this Host's Context
+        // must cost the same as one that does not exist.
+        if (!binding.allowlist.includes(mcpServerName)) {
+          return deny('server_not_found', 404, SERVER_NOT_FOUND, where)
+        }
+        let server: McpServerResource
         try {
           server = (await gateway.getResource(
             'mcpservers',
@@ -462,17 +531,32 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
             config.mcpServersNamespace
           )) as McpServerResource
         } catch (err) {
-          if (err instanceof K8sNotFoundError) {
-            return res.status(404).json({ error: 'server_not_found' })
+          if (isK8sResourceNotFound(err)) {
+            return deny('server_not_found', 404, SERVER_NOT_FOUND, where)
           }
-          throw err
+          return deny('unavailable', 503, STATE_UNAVAILABLE, {
+            ...where,
+            stage: 'mcp_server',
+            err,
+          })
+        }
+        if (!server || !isLive(server.metadata) || server.spec?.enabled === false) {
+          return deny('server_not_found', 404, SERVER_NOT_FOUND, where)
         }
 
-        const authType = server?.spec?.auth?.type
+        const authType = server.spec?.auth?.type
         const resolved = resolveServerOAuth(server)
         if (authType !== 'oauth' || !resolved) {
           return res.status(400).json({ error: 'not_oauth_server' })
         }
+
+        // Context-scope: the server's owner must be this Host's Context. Checked
+        // before remote coherence so a foreign owner gets the uniform 404, not
+        // a 409 that would reveal its spec. Any body `contextId` is ignored.
+        if (resolved.grantScope === 'context' && resolved.contextRef !== hostContext) {
+          return deny('context_ref_mismatch', 404, SERVER_NOT_FOUND, where)
+        }
+
         // Checked up front, not only through the refresh reader: a still-fresh
         // access token is served without ever reading the owner declaration.
         assertRemoteOAuthSpecCoherent(server, 'token')
@@ -480,26 +564,31 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
         // Bifurcate by grantScope read from the server. The KEY comes from the
         // shared derivation (`buildMcpServerGrantKey`, D4) so the mint, the
         // rpc-proxy grant-presence gate and the grant-existence sweep never
-        // drift. The mint keeps its own request-validation guards, which map to
-        // specific error codes the shared builder's null return cannot express.
+        // drift.
         let userForKey: string | undefined
-        if (resolved.grantScope === 'context') {
-          // AUTHORITATIVE Context = server.spec.contextRef, NEVER the body.
-          // Trusting a body contextId would let a caller with the scope request
-          // {server, contextId: <someone else's Context>} and receive that
-          // Context's shared token (cross-context token theft). The body value,
-          // if present, is only cross-checked against the authoritative one.
-          if (!resolved.contextRef) {
-            // A context-identity server MUST carry contextRef (CRD-required).
-            // Fail closed if it somehow doesn't.
-            return res.status(400).json({ error: 'server_missing_context' })
-          }
-          if (typeof contextId === 'string' && contextId !== resolved.contextRef) {
-            return res.status(400).json({ error: 'context_mismatch' })
-          }
-        } else {
+        if (resolved.grantScope === 'user') {
           if (typeof userId !== 'string' || userId.length === 0) {
             return res.status(400).json({ error: 'invalid_request' })
+          }
+          // A user who cannot enter this Host looks exactly like one who never
+          // connected the server.
+          let access: 'allowed' | 'denied'
+          try {
+            access = await hostAccessForUser(pool, userId, hostName)
+          } catch (err) {
+            return deny('unavailable', 503, STATE_UNAVAILABLE, {
+              ...where,
+              stage: 'user_access',
+              err,
+            })
+          }
+          if (access === 'denied') {
+            // Channel senders (Slack, email, Telegram ids) are not users.id and
+            // reach here on every mint by design; only an entitled-looking id
+            // that cannot enter the Host is worth a warning.
+            return isCanonicalUuid(userId)
+              ? deny('no_grant', 404, NO_GRANT, { ...where, cause: 'no_host_access' })
+              : deny('no_grant', 404, NO_GRANT, { ...where, cause: 'non_uuid_user_id' }, 'debug')
           }
           userForKey = userId
         }
@@ -509,8 +598,9 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
           userId: userForKey,
         })
         if (!key) {
-          // Unreachable: the guards above already rejected the null cases. Fail
-          // closed defensively rather than mint against a malformed key.
+          // Unreachable: the guards above already rejected the null cases (a
+          // context server without contextRef never equals the Host's Context).
+          // Fail closed defensively rather than mint against a malformed key.
           return res.status(400).json({ error: 'invalid_request' })
         }
 
