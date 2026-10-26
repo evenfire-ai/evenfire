@@ -366,8 +366,11 @@ export function issueMcpHostControlJwt(
   // The OAuth broker binds a control token to a live Host through host_uid, so
   // only HCC-lineage tokens may carry the broker scope. Filtering here (not in
   // each route) also covers refresh/reissue of older chains that still list the
-  // scope. Access and refresh keep it: they never authorize at the broker, and
-  // workflow-recipes compares their scopes against what it requested.
+  // scope. Access and refresh keep it because they never authorize at the
+  // broker. workflow-recipes compares the scopes of all three tokens, control
+  // included, against what it requested and re-mints on any difference: if it
+  // ever requests oauth:user-token, this strip turns into a permanent re-mint
+  // loop. Today only host-context-controller requests that scope.
   const scopeStripped = !hccCredential && requestedScopes.includes(BROKER_USER_TOKEN_SCOPE)
   const scopes = scopeStripped
     ? requestedScopes.filter(scope => scope !== BROKER_USER_TOKEN_SCOPE)
