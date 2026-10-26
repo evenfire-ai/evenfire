@@ -656,8 +656,9 @@ describe('routes refuse an incoherent remote server with 409 remote_oauth_spec_i
         }
         return Promise.resolve({ rows: [], rowCount: 0 })
       })
-      const token = issueMcpHostControlJwt('mcp-host', 'standalone', ['mcp-host/standalone'], {
+      const token = issueMcpHostControlJwt('mcp-host', 'standalone', ['agent-host'], {
         scopes: ['oauth:user-token'],
+        hccCredential: { hostUid: 'uid-agent-host' },
       }).token
       const res = await request(app)
         .post('/api/v1/mcp-oauth/user-token')

@@ -70,9 +70,13 @@ async function liveUid(gateway: MockGateway, name: string): Promise<string> {
   return cr.metadata.uid
 }
 
-// Control JWT derived from the REAL minter (T1) — no hand-forged token.
+// Control JWT derived from the REAL minter (T1) — no hand-forged token. Only an
+// HCC-lineage control token may carry oauth:user-token, so it is minted for a Host.
 function controlToken(scopes: Array<'oauth:user-token'> = ['oauth:user-token']): string {
-  return issueMcpHostControlJwt('mcp-host', 'standalone', ['mcp-host/standalone'], { scopes }).token
+  return issueMcpHostControlJwt('mcp-host', 'standalone', ['agent-host'], {
+    scopes,
+    hccCredential: { hostUid: 'uid-agent-host' },
+  }).token
 }
 
 function nonExpiredUserGrantRow(userId: string, expiresAt: Date) {
@@ -131,9 +135,11 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
 
     const tokenA = issueMcpHostControlJwt('mcp-host', 'standalone', ['host-a'], {
       scopes: ['oauth:user-token'],
+      hccCredential: { hostUid: 'uid-host-a' },
     }).token
     const tokenB = issueMcpHostControlJwt('mcp-host', 'standalone', ['host-b'], {
       scopes: ['oauth:user-token'],
+      hccCredential: { hostUid: 'uid-host-b' },
     }).token
 
     await request(app)

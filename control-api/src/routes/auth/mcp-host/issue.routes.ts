@@ -163,7 +163,18 @@ export function createAuthMcpHostIssueRoutes(): Router {
           })
           const control = issueMcpHostControlJwt(recipeNamespace, recipeName, hostRefs, {
             scopes: controlScopes.scopes,
+            hccCredential,
           })
+          if (control.scopeStripped) {
+            req.log?.warn(
+              {
+                event: 'oauth_user_token_scope_stripped',
+                route: 'issue',
+                provisioner: provisioner.iss,
+              },
+              'oauth:user-token dropped from a non-HCC control token'
+            )
+          }
           req.log?.info(
             {
               event: 'mcp_host_credentials_issued',

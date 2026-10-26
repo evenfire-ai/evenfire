@@ -91,8 +91,9 @@ const USER = 'alice'
 type Flavor = 'user' | 'context'
 
 function controlToken(): string {
-  return issueMcpHostControlJwt('mcp-host', 'standalone', ['mcp-host/standalone'], {
+  return issueMcpHostControlJwt('mcp-host', 'standalone', ['agent-host'], {
     scopes: ['oauth:user-token'],
+    hccCredential: { hostUid: 'uid-agent-host' },
   }).token
 }
 

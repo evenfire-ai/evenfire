@@ -48,25 +48,38 @@ vi.mock('../src/services/workflowApprovalMediumTeamsVerificationService.js', () 
 vi.mock('../src/services/workflowApprovalTelegramChannelGateService.js', () => ({
   verifyTelegramOperationalChannelBinding: vi.fn(),
 }))
-vi.mock('../src/utils/auth/mcpHostJwtToken.js', async () => {
-  const actual = await vi.importActual<typeof import('../src/utils/auth/mcpHostJwtToken.js')>(
-    '../src/utils/auth/mcpHostJwtToken.js'
-  )
-  return {
-    ...actual,
-    consumeMcpHostRefreshJwt: vi.fn(),
-  }
-})
 vi.mock('../src/services/notificationEmitter.js', () => ({
   emitNotification: vi.fn().mockResolvedValue(undefined),
   enqueueApprovalRequestedNotification: vi.fn().mockResolvedValue(undefined),
   enqueueApprovalUpdatedNotification: vi.fn().mockResolvedValue(undefined),
 }))
 
-// Mock DB pool — refresh token revocation now uses DB-backed storage
+// Mock DB pool — refresh token revocation now uses DB-backed storage. The
+// refresh-jti table is modelled by SQL shape (SELECT = revoked?, INSERT ... ON
+// CONFLICT DO NOTHING = consume) so the real verify-then-consume path runs.
+const consumedRefreshJtis = new Set<string>()
+let failNextRefreshJtiInsert: Error | null = null
 vi.mock('../src/db.js', () => ({
   pool: {
-    query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
+    query: vi.fn(async (sql: unknown, params?: unknown[]) => {
+      const text = typeof sql === 'string' ? sql : ''
+      if (/workflow_revoked_refresh_jtis/i.test(text)) {
+        const jti = Array.isArray(params) && typeof params[0] === 'string' ? params[0] : ''
+        if (/^\s*SELECT/i.test(text)) {
+          const hit = consumedRefreshJtis.has(jti)
+          return { rows: hit ? [{ '?column?': 1 }] : [], rowCount: hit ? 1 : 0 }
+        }
+        if (failNextRefreshJtiInsert) {
+          const err = failNextRefreshJtiInsert
+          failNextRefreshJtiInsert = null
+          throw err
+        }
+        if (consumedRefreshJtis.has(jti)) return { rows: [], rowCount: 0 }
+        consumedRefreshJtis.add(jti)
+        return { rows: [{ jti }], rowCount: 1 }
+      }
+      return { rows: [], rowCount: 0 }
+    }),
     connect: vi.fn(),
   },
   withTransaction: vi.fn(),
@@ -120,9 +133,8 @@ describe('User Approval Request Routes', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks()
-    vi.mocked(mcpHostJwt.consumeMcpHostRefreshJwt).mockImplementation(async token =>
-      mcpHostJwt.verifyMcpHostRefreshJwt(token)
-    )
+    consumedRefreshJtis.clear()
+    failNextRefreshJtiInsert = null
     vi.mocked(userApprovalRequestService.parseWorkflowTriggerIntent).mockImplementation(
       (payload: unknown) => {
         const record =
@@ -206,19 +218,6 @@ describe('User Approval Request Routes', () => {
   describe('POST /api/v1/workflow-auth/refresh', () => {
     it('issues new tokens with valid refresh token', async () => {
       const { refreshToken } = issueTestTokens()
-      vi.mocked(mcpHostJwt.consumeMcpHostRefreshJwt).mockResolvedValueOnce({
-        sub: `${NS}/${RECIPE}`,
-        recipeNamespace: NS,
-        recipeName: RECIPE,
-        hostRefs: [`${NS}/${RECIPE}`],
-        scope: 'workflow:approval:refresh',
-        workflowControlScopes: ['workflow:list', 'workflow:read'],
-        mcpCapabilities: [],
-        iss: 'test-issuer',
-        aud: 'workflow-approvals',
-        jti: 'jti-1',
-        exp: Math.floor(Date.now() / 1000) + 3600,
-      })
       const res = await request(app)
         .post('/api/v1/workflow-auth/refresh')
         .set('Authorization', `Bearer ${refreshToken}`)
@@ -231,21 +230,21 @@ describe('User Approval Request Routes', () => {
     })
 
     it('preserves HCC authority only from verified refresh lineage and ignores body upgrades', async () => {
-      const { refreshToken } = issueTestTokens()
-      vi.mocked(mcpHostJwt.consumeMcpHostRefreshJwt).mockResolvedValueOnce({
-        sub: 'mcp-host/standalone',
-        recipeNamespace: 'mcp-host',
-        recipeName: 'standalone',
-        hostRefs: ['chatllm'],
-        host_uid: 'signed-host-uid',
-        scope: 'workflow:approval:refresh',
-        workflowControlScopes: ['workflow:list'],
-        mcpCapabilities: [mcpHostJwt.MCP_HOST_CREDENTIAL_CAPABILITY],
-        iss: 'control-api',
-        aud: [mcpHostJwt.MCP_HOST_WORKFLOW_AUDIENCE, mcpHostJwt.MCP_HOST_HCC_AUDIENCE],
-        jti: 'hcc-refresh-jti',
-        exp: Math.floor(Date.now() / 1000) + 3600,
-      })
+      const host = (await gateway.createResource(
+        'hosts',
+        {
+          metadata: { name: SHARED_HOST },
+          spec: { host: SHARED_HOST, contextRef: 'ctx-a', secretRef: `${SHARED_HOST}-llm` },
+        },
+        SHARED_HOST_NS
+      )) as { metadata: { uid: string } }
+      const hostUid = host.metadata.uid
+      const refreshToken = mcpHostJwt.issueMcpHostRefreshJwt(
+        SHARED_HOST_NS,
+        'standalone',
+        [SHARED_HOST],
+        { workflowControlScopes: ['workflow:list'], hccCredential: { hostUid } }
+      ).token
 
       const res = await request(app)
         .post('/api/v1/workflow-auth/refresh')
@@ -259,16 +258,17 @@ describe('User Approval Request Routes', () => {
           mcpHostJwt.MCP_HOST_WORKFLOW_AUDIENCE,
           mcpHostJwt.MCP_HOST_HCC_AUDIENCE,
         ])
-        expect(claims.host_uid).toBe('signed-host-uid')
+        expect(claims.host_uid).toBe(hostUid)
         expect(claims.mcpCapabilities).toEqual([mcpHostJwt.MCP_HOST_CREDENTIAL_CAPABILITY])
       }
+      // The control token is bound to the Host uid but never carries the
+      // credential-reader capability.
       const control = jwt.decode(res.body.mcpHostControlToken) as Record<string, unknown>
-      expect(control.host_uid).toBeUndefined()
+      expect(control.host_uid).toBe(hostUid)
       expect(control.mcpCapabilities).toBeUndefined()
     })
 
     it('rejects invalid refresh token', async () => {
-      vi.mocked(mcpHostJwt.consumeMcpHostRefreshJwt).mockResolvedValueOnce(null)
       const res = await request(app)
         .post('/api/v1/workflow-auth/refresh')
         .set('Authorization', 'Bearer invalid-token')
@@ -283,11 +283,12 @@ describe('User Approval Request Routes', () => {
     })
 
     it('propagates refresh-token consumption errors to the error handler', async () => {
-      vi.mocked(mcpHostJwt.consumeMcpHostRefreshJwt).mockRejectedValueOnce(new Error('db down'))
+      const { refreshToken } = issueTestTokens()
+      failNextRefreshJtiInsert = new Error('db down')
 
       const res = await request(app)
         .post('/api/v1/workflow-auth/refresh')
-        .set('Authorization', 'Bearer syntactically-present')
+        .set('Authorization', `Bearer ${refreshToken}`)
         .send()
 
       expect(res.status).toBe(500)
@@ -296,7 +297,6 @@ describe('User Approval Request Routes', () => {
 
     it('rejects access token used as refresh', async () => {
       const { accessToken } = issueTestTokens()
-      vi.mocked(mcpHostJwt.consumeMcpHostRefreshJwt).mockResolvedValueOnce(null)
       const res = await request(app)
         .post('/api/v1/workflow-auth/refresh')
         .set('Authorization', `Bearer ${accessToken}`)
