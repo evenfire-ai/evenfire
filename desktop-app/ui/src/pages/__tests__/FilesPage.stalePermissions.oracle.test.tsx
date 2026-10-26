@@ -872,6 +872,90 @@ describe('FilesPage stale permission action oracle', () => {
     client.clear()
   })
 
+  it.each([403, 404])(
+    'withholds current-folder permission actions after HTTP %i and preserves identity actions',
+    async status => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      const folder = await resolveResource(
+        resolvedDirectory('folder-active', 'Reports', { gfsUri: FOLDER_URI })
+      )
+      const children = await listChildrenPage([])
+      let currentPermissionReads = 0
+      const denied = Object.assign(
+        new Error(
+          status === 403
+            ? '403 Forbidden: resource_access_denied'
+            : '404 Not Found: resource_not_found'
+        ),
+        { status }
+      )
+      const produceAffordances = appServiceAffordanceProducer(resourceId => {
+        if (resourceId === 'folder-active') {
+          currentPermissionReads += 1
+          if (currentPermissionReads > 1) return Promise.reject(denied)
+        }
+        return Promise.resolve(heldPermissionResponse(['read', 'write', 'delete', 'manage_acl']))
+      })
+      const affordances = vi.fn((resourceId: string) => produceAffordances(resourceId))
+      Object.defineProperty(window, 'clerum', {
+        configurable: true,
+        value: {
+          gfs: {
+            listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+            resolve: vi.fn(async () => folder),
+            listChildren: vi.fn(async () => children),
+            affordances,
+          },
+        },
+      })
+
+      const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+      render(<FilesPage pendingGfsUri={FOLDER_URI} />, { wrapper: wrapper(client) })
+      await screen.findByRole('button', { name: 'Options for Reports' })
+      await waitFor(() => expect(currentPermissionReads).toBe(1))
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Reports' }))
+
+      const menu = screen.getByRole('menu', { name: 'Actions for Reports' })
+      const identityActions = () =>
+        within(screen.getByRole('menu', { name: 'Share options for Reports' }))
+          .getAllByRole('menuitem')
+          .map(item => item.textContent?.trim())
+          .filter(label => label === 'Copy link' || label === 'Copy folder ID')
+      fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+      const identityActionsBefore = identityActions()
+      expect(identityActionsBefore).toEqual(['Copy link', 'Copy folder ID'])
+      fireEvent.click(within(menu).getByRole('menuitem', { name: 'Share' }))
+      expect(within(menu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
+
+      vi.setSystemTime(Date.now() + 16_000)
+      const currentKey = desktopQueryKeys.gfsAffordances(
+        'test-environment:user-1:team-1',
+        'folder-active',
+        'main'
+      )
+      await act(async () => {
+        await client.refetchQueries({ exact: true, queryKey: currentKey })
+      })
+      await waitFor(() => expect(currentPermissionReads).toBe(2))
+      expect(String(client.getQueryState(currentKey)?.error)).toContain(`httpStatus=${status}`)
+      expect(screen.getByText(/Could not verify permissions for Reports:/)).toBeTruthy()
+
+      const currentMenu = screen.getByRole('menu', { name: 'Actions for Reports' })
+      const actionsAfterDenial = within(currentMenu)
+        .getAllByRole('menuitem')
+        .map(item => item.textContent?.trim())
+      expect(actionsAfterDenial).not.toContain('Rename')
+      expect(actionsAfterDenial).not.toContain('New folder')
+      expect(actionsAfterDenial).not.toContain('Upload file')
+      expect(actionsAfterDenial).not.toContain('Delete')
+      fireEvent.click(within(currentMenu).getByRole('menuitem', { name: 'Share' }))
+      const shareMenu = screen.getByRole('menu', { name: 'Share options for Reports' })
+      expect(within(shareMenu).queryByRole('menuitem', { name: 'Share' })).toBeNull()
+      expect(identityActions()).toEqual(identityActionsBefore)
+      client.clear()
+    }
+  )
+
   it('keeps a shared-with-me row actionable after its list permission goes stale', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     const sharedFolder = accessibleResource('shared-folder', 'Shared folder', 'directory', {

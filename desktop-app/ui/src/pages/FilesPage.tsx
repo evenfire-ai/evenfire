@@ -934,7 +934,8 @@ export function FilesPage({
     (affordances ?? cachedCurrentAffordances) &&
     !accessRevoked &&
     !ctrl.authorityPending &&
-    parseHttpStatus(affordancesError ?? '') !== 404
+    ctrl.affordancesHttpStatus !== 403 &&
+    ctrl.affordancesHttpStatus !== 404
   )
   const canWriteCurrent =
     currentPermissionPresentationAvailable &&
