@@ -533,7 +533,7 @@ async function finalizePasswordEvaluation(
   try {
     return await withTransaction(async db => {
       await useOutcomeAdmissionProtocol(db)
-      let principalCurrent = true
+      let principalCurrent: boolean
       if (capture.user) {
         const current = await db.query(
           `SELECT id, email, password_auth_generation FROM users
