@@ -188,10 +188,21 @@ export const oauthBrokerJwtIssueTotal = getOrCreateCounter({
   labelNames: ['result'] as const as Array<'result'>, // issued | recipe_not_found | not_background_access
 })
 
+// Refresh endpoint outcomes (also the label of the duration histogram below).
+// The 401 body stays opaque; the label is emitted server-side in a `finally`.
+// Label values, aligned with the re-issue counter where the outcome is shared:
+//   success                  — token rotated, fresh token set minted
+//   failed                   — missing bearer; signature/claims/expiry rejected or
+//                              jti already consumed at verify time; unhandled error
+//   host_unavailable         — Host lookup failed transiently (503, jti not consumed)
+//   host_mismatch            — HCC chain's Host is gone or was recreated (new uid)
+//   lineage_without_audience — hosts-namespace standalone chain without HCC audience
+//   revoked                  — jti consumed concurrently between verify and consume
+// Rate-limited requests never reach the handler and are not counted here.
 export const mcpHostJwtRefreshTotal = getOrCreateCounter({
   name: 'workflow_auth_refresh_total',
   help: 'Count of workflow refresh attempts labelled by result.',
-  labelNames: ['result'] as const as Array<'result'>, // success | failed | rotated
+  labelNames: ['result'] as const as Array<'result'>,
 })
 
 export const mcpHostJwtRefreshDurationSeconds = getOrCreateHistogram({
@@ -212,8 +223,11 @@ export const mcpHostJwtRefreshDurationSeconds = getOrCreateHistogram({
 //   expired_beyond_reissue_grace — signed refresh token is too old to reissue
 //   revoked        — jti already present in workflow_revoked_refresh_jtis
 //   mismatch       — recipe_name body did not match JWT sub's recipe component
-//   rate_limited   — limiter denied before handler ran (emitted in middleware)
 //   bad_request    — missing/malformed body or bearer token
+//   host_unavailable — Host lookup failed transiently (503, jti not consumed)
+//   host_mismatch  — HCC chain's Host is gone or was recreated (new uid)
+//   lineage_without_audience — hosts-namespace standalone chain without HCC audience
+// Rate-limited requests never reach the handler and are not counted here.
 export const mcpHostJwtReissueTotal = getOrCreateCounter({
   name: 'workflow_auth_reissue_requests_total',
   help: 'Count of workflow auth re-issue attempts labelled by result.',

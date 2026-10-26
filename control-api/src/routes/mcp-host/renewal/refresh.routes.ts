@@ -37,7 +37,15 @@ export function createMcpHostRefreshRoutes(gateway: RenewalHostGateway): Router 
     (req, res, next) => {
       void (async () => {
         const refreshStart = process.hrtime.bigint()
-        let resultLabel: 'success' | 'failed' = 'failed'
+        // Values mirror the reissue route's labels so the two can be compared.
+        type ResultLabel =
+          | 'success'
+          | 'failed'
+          | 'host_unavailable'
+          | 'host_mismatch'
+          | 'lineage_without_audience'
+          | 'revoked'
+        let resultLabel: ResultLabel = 'failed'
         try {
           const token = extractBearerToken(req)
           if (!token) {
@@ -65,6 +73,7 @@ export function createMcpHostRefreshRoutes(gateway: RenewalHostGateway): Router 
 
           const binding = await resolveRenewalHostBinding(gateway, claims)
           if (binding.kind === 'unavailable') {
+            resultLabel = 'host_unavailable'
             req.log?.warn(
               { event: 'host_state_unavailable', route: 'workflow_auth_refresh' },
               'host lookup failed; refresh token left unconsumed'
@@ -72,6 +81,10 @@ export function createMcpHostRefreshRoutes(gateway: RenewalHostGateway): Router 
             return res.status(503).json({ error: 'host_state_unavailable' })
           }
           if (binding.kind === 'denied') {
+            resultLabel =
+              binding.reason === 'hcc_lineage_without_audience'
+                ? 'lineage_without_audience'
+                : 'host_mismatch'
             req.log?.info(
               { event: 'auth_denied', reason: binding.reason, route: 'workflow_auth_refresh' },
               'auth denied'
@@ -81,6 +94,7 @@ export function createMcpHostRefreshRoutes(gateway: RenewalHostGateway): Router 
 
           const consumed = await consumeRefreshJti(claims.jti, claims.exp)
           if (!consumed) {
+            resultLabel = 'revoked'
             req.log?.info(
               { event: 'auth_denied', reason: 'jti_race_lost', route: 'workflow_auth_refresh' },
               'auth denied'
