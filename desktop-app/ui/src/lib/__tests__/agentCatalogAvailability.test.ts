@@ -64,7 +64,7 @@ describe('resolveAgentCatalogAvailability', () => {
             resolveAgentCatalogAvailability({
               selectedAgent,
               loading: false,
-              error: `Error invoking remote method 'access:refreshCatalog': Error: ${status} Server Error`,
+              error: `Error invoking remote method 'access:refreshCatalog': Error: ${status} Server Error: producer body`,
               catalogMatchesSession: true,
               agentNames: [selectedAgent, 'another-agent'],
             })
@@ -111,7 +111,7 @@ describe('resolveAgentCatalogAvailability', () => {
         resolveAgentCatalogAvailability({
           selectedAgent: 'agent-x',
           loading: true,
-          error: `Error invoking remote method 'access:refreshCatalog': Error: ${status} HTTP Error`,
+          error: `Error invoking remote method 'access:refreshCatalog': Error: ${status} HTTP Error: producer body`,
           catalogMatchesSession: true,
           agentNames: ['agent-x'],
         })
