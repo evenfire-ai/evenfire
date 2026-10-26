@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { GfsImagePreview } from './index'
 
 describe('GfsImagePreview layout', () => {
@@ -59,6 +59,7 @@ describe('GfsImagePreview layout', () => {
     resizeObserverCallback = null
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
+    vi.useRealTimers()
   })
 
   it('centers in the workspace and follows sidebar expansion changes', async () => {
@@ -141,6 +142,65 @@ describe('GfsImagePreview layout', () => {
 
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('data:image/png;base64,AQID'))
     expect(await screen.findByRole('button', { name: 'Copied image to clipboard' })).toBeTruthy()
+  })
+
+  it.each([
+    {
+      name: 'inline chat images',
+      source: { dataBase64: 'AQID' as const },
+      fileName: 'chat-image.png',
+    },
+    {
+      name: 'GFS-backed images',
+      source: { gfsUri: 'gfs://main/image-1' as const },
+      fileName: 'drive-image.png',
+    },
+  ])('resets copied feedback after exactly two seconds for $name', async ({ source, fileName }) => {
+    vi.useFakeTimers()
+    const write = vi.fn(async () => undefined)
+    vi.stubGlobal(
+      'ClipboardItem',
+      class {
+        constructor(_items: Record<string, Blob>) {}
+      }
+    )
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { write },
+    })
+    const view = render(
+      <GfsImagePreview
+        byteLength={3}
+        fileName={fileName}
+        {...source}
+        mimeType="image/png"
+        onClose={vi.fn()}
+      />
+    )
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy image to clipboard' }))
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(write).toHaveBeenCalledOnce()
+    expect(screen.getByRole('button', { name: 'Copied image to clipboard' })).toBeTruthy()
+
+    await act(async () => vi.advanceTimersByTimeAsync(1_999))
+    expect(screen.getByRole('button', { name: 'Copied image to clipboard' })).toBeTruthy()
+    await act(async () => vi.advanceTimersByTimeAsync(1))
+    expect(screen.getByRole('button', { name: 'Copy image to clipboard' })).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy image to clipboard' }))
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+    view.unmount()
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('keeps the unavailable image dialog named and closable', async () => {
