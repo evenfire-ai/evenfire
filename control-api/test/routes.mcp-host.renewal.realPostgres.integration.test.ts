@@ -31,10 +31,7 @@ const describeRealPostgres = adminUrl ? describe : describe.skip
 
 describeRealPostgres('mcp-host refresh rotation (real Postgres)', () => {
   const database = `control_api_mcp_host_renewal_${randomBytes(6).toString('hex')}`
-  const connectionString = databaseUrl(
-    adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres',
-    database
-  )
+  let connectionString = ''
   const previousPgEnv = process.env.CONTROL_API_PG_CONNECTION_STRING
 
   let adminPool: Pool
@@ -51,6 +48,7 @@ describeRealPostgres('mcp-host refresh rotation (real Postgres)', () => {
   let app: import('express').Express
 
   beforeAll(async () => {
+    connectionString = databaseUrl(adminUrl!, database)
     adminPool = new Pool({ connectionString: adminUrl })
     await adminPool.query(`CREATE DATABASE "${database.replace(/"/g, '""')}"`)
 
