@@ -884,4 +884,69 @@ describe('FilePreviewPage move permission contract', () => {
     expect(pushToast).toHaveBeenCalledWith('Moved diagram.png to Archive', 'success')
     expect(screen.queryByRole('dialog', { name: 'Move file diagram.png' })).toBeNull()
   })
+
+  it('closes a Preview Retry owned by a previous session scope', async () => {
+    const destinationPage = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+    ])
+    let sourceReads = 0
+    let finishRetry!: () => void
+    const retry = new Promise<void>(resolve => {
+      finishRetry = resolve
+    })
+    const produceAffordances = appServiceAffordanceProducer(async resourceId => {
+      if (resourceId === parentId) {
+        sourceReads += 1
+        if (sourceReads === 2) return heldPermissionResponse(['read'])
+        if (sourceReads === 3) await retry
+      }
+      return heldPermissionResponse(['read', 'write', 'delete'])
+    })
+    const source = vi.fn(async () => produceAffordances(parentId))
+    const destination = async () => produceAffordances('destination-1')
+    installGfs({ source, destination, listAccessible: async () => destinationPage })
+    installController()
+    const { queryClient, rerender } = renderPreview()
+
+    await screen.findByAltText('Preview of diagram.png')
+    await waitFor(() => expect(sourceReads).toBe(1))
+    const menu = await openPreviewActions()
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
+    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+    expect(
+      await within(dialog).findByText(
+        'You do not have write and delete access to the source folder.'
+      )
+    ).toBeTruthy()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
+    await waitFor(() => expect(sourceReads).toBe(3))
+    hookMock.useGfsBrowserController.mockReturnValue({
+      accessState: 'active',
+      sessionScope: 'preview-test-user-b:main',
+      authorityPending: false,
+      handleAuthorityFailure: vi.fn(() => false),
+    })
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <FilePreviewPage
+          gfsUri={uri}
+          fileName="diagram.png"
+          fileKind="image"
+          mimeType="image/png"
+          byteLength={1}
+        />
+      </QueryClientProvider>
+    )
+    await act(async () => {
+      finishRetry()
+    })
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(window.clerum.gfs.moveResource).not.toHaveBeenCalled()
+  })
 })

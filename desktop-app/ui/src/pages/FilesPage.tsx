@@ -2455,11 +2455,14 @@ export function FilesPage({
           retry: false,
         }),
       ])
-      if (!pageActiveRef.current || !ownsDialog()) return
+      if (!pageActiveRef.current || !ownsDialogGeneration()) return
       if (!contextStillMatches()) {
-        throw new Error(
-          'Move was not started because the workspace changed; review the destination.'
-        )
+        closeOwnedDialog()
+        return
+      }
+      if (!ownsDialog()) {
+        setMovePermissionStatus(null)
+        return
       }
       if (!hasGfsMoveSourcePermissions(source.held)) {
         throw new Error('You do not have write and delete access to the source folder.')
@@ -2561,12 +2564,12 @@ export function FilesPage({
     } catch (moveError) {
       if (!pageActiveRef.current) return
       if (!ownsDialogGeneration()) return
-      if (!ownsDialog()) {
-        setMovePermissionStatus(null)
+      if (!contextStillMatches()) {
+        closeOwnedDialog()
         return
       }
-      if (moveWorkspaceRef.current.sessionScope !== origin.sessionScope) {
-        closeOwnedDialog()
+      if (!ownsDialog()) {
+        setMovePermissionStatus(null)
         return
       }
       if (failClosedOnAuthorizationError(moveError)) {
@@ -3816,8 +3819,8 @@ export function FilesPage({
           onMoveWithOwnership={(destinationId, destinationName, isCurrent) =>
             handleMoveTarget(destinationId, destinationName, true, isCurrent)
           }
-          onRetryPermissionCheck={(destinationId, destinationName) =>
-            handleMoveTarget(destinationId, destinationName, false)
+          onRetryPermissionCheck={(destinationId, destinationName, isCurrent) =>
+            handleMoveTarget(destinationId, destinationName, false, isCurrent)
           }
           onAuthorityFailure={message => ctrl.handleAuthorityFailure(message, 'operation')}
           sessionScope={sessionScope}

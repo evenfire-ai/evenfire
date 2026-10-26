@@ -24,7 +24,11 @@ export type GfsMoveDialogProps = {
     isCurrent: () => boolean
   ) => Promise<void>
   /** Recheck both source and destination permissions without committing Move. */
-  onRetryPermissionCheck: (destinationId: string, destinationName: string) => Promise<void>
+  onRetryPermissionCheck: (
+    destinationId: string,
+    destinationName: string,
+    isCurrent: () => boolean
+  ) => Promise<void>
   onClose: () => void
   busy?: boolean
   permissionStatus?: 'checking' | 'failed' | null

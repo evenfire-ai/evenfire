@@ -219,6 +219,7 @@ export function GfsMoveDialog({
     initialDestination && initialDestination.resourceId === currentParentId
       ? initialDestination.name
       : null
+  const scope = sessionScope ?? 'anonymous'
   const [expandedFolderIds, setExpandedFolderIds] = useState<Set<string>>(
     () => new Set(initialCrumbs.map(crumb => crumb.resourceId))
   )
@@ -238,14 +239,21 @@ export function GfsMoveDialog({
   const mountedRef = useRef(true)
   const selectedDestinationRef = useRef(selectedDestination)
   selectedDestinationRef.current = selectedDestination
+  const dialogIdentity = {
+    scope,
+    resourceId: target.resourceId,
+    name: target.name,
+    kind: target.kind,
+    parentResourceId: target.parentResourceId ?? null,
+  }
+  const dialogIdentityRef = useRef(dialogIdentity)
+  dialogIdentityRef.current = dialogIdentity
   useEffect(() => {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
     }
   }, [])
-  const scope = sessionScope ?? 'anonymous'
-
   const accessibleQuery = useInfiniteQuery({
     queryKey: desktopQueryKeys.gfsAccessible(scope, GFS_DRIVE_MAIN),
     queryFn: ({ pageParam }) => {
@@ -323,13 +331,27 @@ export function GfsMoveDialog({
     })
   }
 
+  const isCurrentDestination = (destination: SelectedDestination) => {
+    const expectedIdentity = dialogIdentityRef.current
+    return () => {
+      const currentIdentity = dialogIdentityRef.current
+      return (
+        mountedRef.current &&
+        selectedDestinationRef.current?.resourceId === destination.resourceId &&
+        selectedDestinationRef.current.name === destination.name &&
+        currentIdentity.scope === expectedIdentity.scope &&
+        currentIdentity.resourceId === expectedIdentity.resourceId &&
+        currentIdentity.name === expectedIdentity.name &&
+        currentIdentity.kind === expectedIdentity.kind &&
+        currentIdentity.parentResourceId === expectedIdentity.parentResourceId
+      )
+    }
+  }
+
   const commit = async () => {
     const destination = selectedDestination
     if (!destination) return
-    const isCurrent = () =>
-      mountedRef.current &&
-      selectedDestinationRef.current?.resourceId === destination.resourceId &&
-      selectedDestinationRef.current.name === destination.name
+    const isCurrent = isCurrentDestination(destination)
     setError(null)
     setPermissionCheckSucceeded(false)
     try {
@@ -344,14 +366,16 @@ export function GfsMoveDialog({
   }
 
   const retryPermissionCheck = async () => {
-    if (!selectedDestination) return
+    const destination = selectedDestination
+    if (!destination) return
+    const isCurrent = isCurrentDestination(destination)
     setError(null)
     setPermissionCheckSucceeded(false)
     try {
-      await onRetryPermissionCheck(selectedDestination.resourceId, selectedDestination.name)
-      setPermissionCheckSucceeded(true)
+      await onRetryPermissionCheck(destination.resourceId, destination.name, isCurrent)
+      if (isCurrent()) setPermissionCheckSucceeded(true)
     } catch (retryError) {
-      setError(errorMessage(retryError))
+      if (isCurrent()) setError(errorMessage(retryError))
     }
   }
 

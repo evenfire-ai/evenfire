@@ -10,6 +10,10 @@ import {
   listAccessiblePage,
   listChildrenPage,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import {
+  appServiceAffordanceProducer,
+  heldPermissionResponse,
+} from '@/gfs/__fixtures__/permissionProducerFixtures'
 import { FilesPage } from '../FilesPage'
 
 const member = (teamId: string, userId: string) => ({
@@ -166,5 +170,101 @@ describe('FilesPage Move permission generation fencing', () => {
       expect(screen.queryByRole('dialog', { name: 'Move file report.txt' })).toBeNull()
     )
     expect(moveResource).not.toHaveBeenCalled()
+  })
+
+  it('does not confirm a retry for a destination replaced while fresh permissions are pending', async () => {
+    const rows = await listAccessiblePage([
+      accessibleResource('file-1', 'report.txt', 'file', {
+        parentResourceId: 'source-parent',
+        path: '/Team/report.txt',
+        permissions: ['read'],
+      }),
+      accessibleResource('destination-a', 'Archive A', 'directory', {
+        path: '/Archive A',
+        permissions: ['read', 'write'],
+      }),
+      accessibleResource('destination-b', 'Archive B', 'directory', {
+        path: '/Archive B',
+        permissions: ['read', 'write'],
+      }),
+    ])
+    let sourceCalls = 0
+    let finishRetrySource!: () => void
+    let markRetryStarted!: () => void
+    const retryStarted = new Promise<void>(resolve => {
+      markRetryStarted = resolve
+    })
+    const retryGate = new Promise<void>(resolve => {
+      finishRetrySource = resolve
+    })
+    const produceAffordances = appServiceAffordanceProducer(async resourceId => {
+      if (resourceId === 'source-parent') {
+        sourceCalls += 1
+        if (sourceCalls === 2) return heldPermissionResponse(['read', 'delete'])
+        if (sourceCalls === 3) {
+          markRetryStarted()
+          await retryGate
+        }
+      }
+      return heldPermissionResponse(['read', 'write', 'delete'])
+    })
+    const affordances = vi.fn((resourceId: string, drive?: string) =>
+      produceAffordances(resourceId, drive)
+    )
+    const moveResource = vi.fn(async () => undefined)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => rows),
+          listChildren: vi.fn(async () => listChildrenPage([])),
+          affordances,
+          moveResource,
+        },
+      },
+    })
+
+    const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    render(
+      <AuthContext.Provider value={authFor('team-a')}>
+        <QueryClientProvider client={queryClient}>
+          <FilesPage />
+        </QueryClientProvider>
+      </AuthContext.Provider>
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Options for report.txt' }))
+    const menu = screen.getByRole('menu', { name: 'Actions for report.txt' })
+    await waitFor(() => expect(screen.getByRole('menuitem', { name: 'Move to' })).toBeTruthy())
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Move file report.txt' })
+    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
+    expect(
+      await within(dialog).findByText(
+        'You do not have write and delete access to the source folder.'
+      )
+    ).toBeTruthy()
+    expect(moveResource).not.toHaveBeenCalled()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
+    await retryStarted
+    expect(within(dialog).queryByRole('button', { name: 'Retry permission check' })).toBeNull()
+    expect(
+      (within(dialog).getByRole('button', { name: 'Move here (Archive A)' }) as HTMLButtonElement)
+        .disabled
+    ).toBe(true)
+    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive B' }))
+    await act(async () => {
+      finishRetrySource()
+    })
+
+    expect(
+      await within(dialog).findByRole('button', { name: 'Move here (Archive B)' })
+    ).toBeTruthy()
+    expect(within(dialog).queryByText('Permissions verified. Select Move to confirm.')).toBeNull()
+    expect(moveResource).not.toHaveBeenCalled()
+    expect(affordances).toHaveBeenCalledWith('source-parent', 'main')
+    expect(affordances).toHaveBeenCalledWith('destination-a', 'main')
   })
 })

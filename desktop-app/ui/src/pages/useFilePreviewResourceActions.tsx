@@ -323,6 +323,18 @@ export function useFilePreviewResourceActions({
     setRenameName(fileName)
   }, [fileName, gfsUri])
 
+  const previousMoveScopeRef = useRef(sessionScope)
+  const moveRequestAtRender = moveRequestRef.current
+  useEffect(() => {
+    if (previousMoveScopeRef.current === sessionScope) return
+    previousMoveScopeRef.current = sessionScope
+    if (moveRequestRef.current !== moveRequestAtRender) return
+    moveRequestRef.current += 1
+    setMovePermissionStatus(null)
+    setMutationPending(false)
+    setMoveOpen(false)
+  }, [moveRequestAtRender, sessionScope])
+
   useEffect(() => {
     if (canResolve) return
     setShareOpen(false)
@@ -554,8 +566,14 @@ export function useFilePreviewResourceActions({
     }
   }
 
-  const handleMove = async (destinationId: string, destinationName: string, executeMove = true) => {
+  const handleMove = async (
+    destinationId: string,
+    destinationName: string,
+    executeMove = true,
+    isDialogCurrent?: () => boolean
+  ) => {
     if (!resource || !sourceParentId) return
+    if (isDialogCurrent && !isDialogCurrent()) return
     const requestId = ++moveRequestRef.current
     const moveContext = {
       gfsUri,
@@ -595,6 +613,10 @@ export function useFilePreviewResourceActions({
       )
       const sourceCheck = await sourceParentAffordancesQuery.refetch({ cancelRefetch: false })
       if (!isActiveMove()) return
+      if (isDialogCurrent && !isDialogCurrent()) {
+        setMovePermissionStatus(null)
+        return
+      }
       if (!hasCurrentMoveContext()) {
         throw new Error(
           'Move was not started because the workspace changed; review the destination.'
@@ -617,6 +639,10 @@ export function useFilePreviewResourceActions({
         retry: false,
       })
       if (!isActiveMove()) return
+      if (isDialogCurrent && !isDialogCurrent()) {
+        setMovePermissionStatus(null)
+        return
+      }
       if (!hasCurrentMoveContext()) {
         throw new Error(
           'Move was not started because the workspace changed; review the destination.'
@@ -642,6 +668,10 @@ export function useFilePreviewResourceActions({
       pushToast?.(`Moved ${resource.name} to ${destinationName}`, 'success')
     } catch (error) {
       if (!isActiveMove()) return
+      if (isDialogCurrent && !isDialogCurrent()) {
+        setMovePermissionStatus(null)
+        return
+      }
       if (onAuthorityFailure(errorMessage(error))) {
         setMoveOpen(false)
         setMovePermissionStatus(null)
@@ -929,8 +959,8 @@ export function useFilePreviewResourceActions({
           sessionScope={sessionScope}
           initialCrumbs={[]}
           onMove={(destinationId, destinationName) => handleMove(destinationId, destinationName)}
-          onRetryPermissionCheck={(destinationId, destinationName) =>
-            handleMove(destinationId, destinationName, false)
+          onRetryPermissionCheck={(destinationId, destinationName, isCurrent) =>
+            handleMove(destinationId, destinationName, false, isCurrent)
           }
           onClose={() => {
             moveRequestRef.current += 1
