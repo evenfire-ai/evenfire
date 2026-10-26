@@ -3323,12 +3323,15 @@ describe('FilesPage', () => {
 
     const shareRow = await screen.findByTestId('gfs-access-row-share-share-1')
     expect(shareRow.textContent).not.toContain('Includes contents')
-    fireEvent.click(screen.getByRole('button', { name: 'Actions for user-9' }))
+    // A share subject outside the visible team directory renders as a hidden
+    // label (never a raw UUID); the accessible name keeps the id distinct.
+    expect(screen.getByText('Hidden user')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for Hidden user (user-9)' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
 
     await waitFor(() => expect(revokeShare).toHaveBeenCalledWith('share-1'))
     await waitFor(() =>
-      expect(pushToast).toHaveBeenCalledWith('Shared access revoked for user-9', 'success')
+      expect(pushToast).toHaveBeenCalledWith('Shared access revoked for Hidden user', 'success')
     )
   })
 

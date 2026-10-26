@@ -11,9 +11,12 @@ import { mergeInheritedAccessItem } from '../inheritedAccessMerge'
 
 /**
  * "Who has access" list (Manage modal). Rows resolve host subjects to agent
- * names, user/team subjects through the visible team directory, and fall back
- * to the raw id (a row is never hidden). A manage_acl_required list failure is
- * an expected state and renders as a quiet informational banner, not an error.
+ * names, user/team subjects through the visible team directory. A user/team
+ * outside the directory renders as "Hidden user"/"Hidden team" with a hover
+ * explanation (id included for support) — never a raw UUID in the row, and
+ * never a hidden row. Unresolved host ids keep their raw identifier. A
+ * manage_acl_required list failure is an expected state and renders as a
+ * quiet informational banner, not an error.
  */
 
 afterEach(cleanup)
@@ -97,6 +100,64 @@ describe('GfsGrantList', () => {
     expect(screen.getByText('1st:mcp-host/unknown')).toBeTruthy()
     const workflowRow = screen.getByText('monthly-report').closest('li')!
     expect(workflowRow.querySelector('[data-subject-kind="workflow"] svg')).not.toBeNull()
+  })
+
+  it('renders directory-less user and team subjects as hidden labels with a hover explanation', () => {
+    render(
+      <GfsGrantList
+        agents={agents}
+        items={[
+          grantItem({
+            id: 'grant-hidden-user',
+            subject: { type: 'user', id: 'user-outside-directory' },
+            permissions: ['read', 'share'],
+          }),
+          grantItem({
+            id: 'grant-hidden-team',
+            subject: { type: 'team', id: 'team-outside-directory' },
+            permissions: ['read'],
+          }),
+        ]}
+        onRevoke={vi.fn()}
+        subjects={subjects}
+      />
+    )
+
+    const hiddenUserLabel = screen.getByText('Hidden user')
+    expect(screen.queryByText('user-outside-directory')).toBeNull()
+    expect(hiddenUserLabel.getAttribute('title')).toBe(
+      'This member isn’t in any of your teams, so EvenDrive can’t show their name. (user-outside-directory)'
+    )
+    // The accessible name keeps the id so multiple hidden members stay distinct.
+    expect(
+      screen.getByRole('button', { name: 'Access role for Hidden user (user-outside-directory)' })
+    ).toBeTruthy()
+    expect(
+      screen.getByRole('button', { name: 'Actions for Hidden user (user-outside-directory)' })
+    ).toBeTruthy()
+
+    const hiddenTeamLabel = screen.getByText('Hidden team')
+    expect(screen.queryByText('team-outside-directory')).toBeNull()
+    expect(hiddenTeamLabel.getAttribute('title')).toBe(
+      'This team isn’t in your team list, so EvenDrive can’t show its name. (team-outside-directory)'
+    )
+
+    // A resolved subject carries no hover explanation.
+    const resolvedRow = render(
+      <GfsGrantList
+        agents={agents}
+        items={[
+          grantItem({
+            id: 'grant-resolved',
+            subject: { type: 'user', id: 'user-2' },
+            permissions: ['read'],
+          }),
+        ]}
+        onRevoke={vi.fn()}
+        subjects={subjects}
+      />
+    ).getByText('Test Two')!
+    expect(resolvedRow.getAttribute('title')).toBeNull()
   })
 
   it('labels a host subject by its displayName, falling back to the identifier when blank', () => {
