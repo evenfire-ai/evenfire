@@ -618,8 +618,10 @@ export function createMcpOauthRouter(gateway: K8sGateway): Router {
             err: binding.cause,
           })
         }
+        // Debug, not warn: the broker never keys on spec.contextId, and this
+        // fires on every mint for every Host of the Context.
         if (hasContextIdMismatch(binding.ctx)) {
-          log.warn(
+          log.debug(
             { event: 'context_id_mismatch', host: hostName, context: binding.ctx.metadata?.name },
             'context spec.contextId differs from its name'
           )

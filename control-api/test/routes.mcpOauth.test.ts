@@ -432,7 +432,7 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
     expect(res.text).toBe('{"error":"host_state_unavailable"}')
   })
 
-  it('R3b: spec.contextId differing from the Context name is served and only logged', async () => {
+  it('R3b: spec.contextId differing from the Context name is served and only logged at debug', async () => {
     seedOauthServer(gateway, { name: 'gdrive', grantScope: 'user' })
     grantRows = [nonExpiredUserGrantRow(USER_1, new Date(Date.now() + 3600_000))]
     await seedAgentHost(gateway, 'renamed-host', 'ctx-renamed')
@@ -459,9 +459,13 @@ describe('routes/mcp-oauth — POST /mcp-oauth/user-token (U1)', () => {
     try {
       const res = await post({ mcpServerName: 'gdrive', userId: USER_1 }, renamed)
       expect(res.status).toBe(200)
-      expect(logs.warn).toHaveBeenCalledWith(
+      expect(logs.debug).toHaveBeenCalledWith(
         expect.objectContaining({ event: 'context_id_mismatch', host: 'renamed-host' }),
         expect.any(String)
+      )
+      expect(logs.warn).not.toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'context_id_mismatch' }),
+        expect.anything()
       )
     } finally {
       logs.restore()
