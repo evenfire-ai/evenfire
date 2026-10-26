@@ -527,14 +527,7 @@ export function FilesPage({
     const statuses = ctrl.rowPermissionStatusByResourceId
     if (!statuses) return null
     const status = statuses[resourceId]
-    if (status?.status === 'ready') return null
-    if (status?.status === 'stale') {
-      return {
-        role: 'status' as const,
-        tone: 'info' as const,
-        message: 'Permissions will be checked when you use an action.',
-      }
-    }
+    if (status?.status === 'ready' || status?.status === 'stale') return null
     if (status?.status === 'error') {
       return {
         role: 'alert' as const,

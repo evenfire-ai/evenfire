@@ -168,7 +168,7 @@ describe('FilesPage stale permission action oracle', () => {
     rerender(<FilesPage pendingGfsUri={FOLDER_URI} />)
     expect(reportPermissionReads).toBe(1)
     expect(screen.getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
-    expect(screen.getByText('Permissions will be checked when you use an action.')).toBeTruthy()
+    expect(screen.queryByText('Permissions will be checked when you use an action.')).toBeNull()
     expect(screen.queryByText('Checking permissions for report.txt…')).toBeNull()
     act(() => {
       focusManager.setFocused(false)
@@ -390,6 +390,12 @@ describe('FilesPage stale permission action oracle', () => {
     )
     const nestedChildren = await listChildrenPage(rows)
     const rowReads = new Map<string, number>()
+    const staleRowAnnouncementCount = () =>
+      screen
+        .getAllByRole('button', { name: /^Open report-\d+\.txt$/ })
+        .filter(row =>
+          within(row).queryByText('Permissions will be checked when you use an action.')
+        ).length
     const renameResource = vi.fn(async () => undefined)
     const affordances = vi.fn(async (resourceId: string) => {
       if (resourceId.startsWith('child-')) {
@@ -442,6 +448,7 @@ describe('FilesPage stale permission action oracle', () => {
       focusManager.setFocused(true)
     })
     expect([...rowReads.values()].reduce((sum, reads) => sum + reads, 0)).toBe(20)
+    expect(staleRowAnnouncementCount()).toBe(0)
 
     vi.setSystemTime(Date.now() + 20_000)
     const breadcrumbs = within(screen.getByRole('navigation', { name: 'File location' }))
@@ -455,6 +462,7 @@ describe('FilesPage stale permission action oracle', () => {
     expect(rowReads.size).toBe(20)
     expect([...rowReads.values()].reduce((sum, reads) => sum + reads, 0)).toBe(20)
     expect([...rowReads.values()].every(reads => reads === 1)).toBe(true)
+    expect(staleRowAnnouncementCount()).toBe(0)
 
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for report-0.txt' }))
