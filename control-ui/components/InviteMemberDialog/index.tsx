@@ -50,7 +50,7 @@ export function InviteMemberDialog({
             </button>
           </div>
           <p className="cu-muted" style={{ margin: 0, fontSize: '0.875rem' }}>
-            An invitation link will be sent and remain available for 48 hours.
+            An invitation link will be sent and remain available for 7 days.
           </p>
         </div>
       )}

@@ -193,6 +193,45 @@ describeRealPostgres('control admin replace-inviter invitations on real PostgreS
     }
   })
 
+  it('expires member, admin desktop-access, and Control Admin invitations after seven days', async () => {
+    const inviter = await seedAdmin('ttl-inviter')
+    const controlAdminInvitation = await createControlAdminInvitation(
+      uniqueEmail('ttl-admin'),
+      inviter.id
+    )
+    if ('error' in controlAdminInvitation) throw new Error(controlAdminInvitation.error)
+
+    const memberInvitation = await createSilentInvitationForTeams({
+      inviteeName: 'TTL member',
+      email: uniqueEmail('ttl-member'),
+      teamAssignments: [],
+      fallbackRole: 'member',
+      purpose: 'member_invitation',
+    })
+    const desktopInvitation = await createSilentInvitationForTeams({
+      inviteeName: 'TTL admin desktop access',
+      email: uniqueEmail('ttl-desktop'),
+      teamAssignments: [],
+      fallbackRole: 'member',
+      purpose: 'admin_desktop_access',
+    })
+
+    const memberRows = await testPool.query(
+      `SELECT purpose, EXTRACT(EPOCH FROM (expires_at - created_at))::int AS ttl_seconds
+         FROM invitations
+        WHERE id = ANY($1::uuid[])
+        ORDER BY purpose`,
+      [[memberInvitation.id, desktopInvitation.id]]
+    )
+    const memberTtls = Object.fromEntries(
+      memberRows.rows.map(row => [String(row.purpose), Number(row.ttl_seconds)])
+    )
+    expect(memberTtls).toEqual({ admin_desktop_access: 604_800, member_invitation: 604_800 })
+    expect(
+      controlAdminInvitation.expiresAt.getTime() - controlAdminInvitation.createdAt.getTime()
+    ).toBe(604_800_000)
+  })
+
   it('stores replaceInviter and exposes it with the inviter on every invitation read', async () => {
     const inviter = await seedAdmin('lister')
     const replacing = await createControlAdminInvitation(uniqueEmail('replacing'), inviter.id, {

@@ -79,7 +79,7 @@ the invitation and set a password.
 - **Invite by email** sends a member invitation for this team.
 
 Pending member invitations appear on the Members tab, where you can resend or
-cancel them. Member invitations expire after **48 hours**.
+cancel them. Member invitations expire after **7 days**.
 
 ### Invitations need a registration service
 
@@ -113,7 +113,7 @@ Admins tab → **Invite admin** opens `/users-and-teams/admins/new`:
 2. Optionally tick **Create access to Desktop App** (`createDesktopAccess`).
    Pick teams and a role for each. evenfire then also creates a member
    invitation for those teams, and one email covers both.
-3. Send. Admin invitations expire after **48 hours**.
+3. Send. Admin invitations expire after **7 days**.
 
 You can also start from a member: a member's row menu has **Create
 administrator access**, which opens the same wizard for that email. It skips
