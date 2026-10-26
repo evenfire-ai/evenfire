@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { DropdownSelect, StatusBanner } from '@components/Common'
 import {
   IconAgents,
@@ -55,6 +55,15 @@ function AccessSubjectIcon({ kind }: { kind: AccessSubjectKind }) {
  * mislabeled, and a filtered list never claims to be empty.
  */
 
+/** One informational banner explains the filter. The hidden-members sentence
+ *  subsumes the derivation notice (it already covers access inherited from
+ *  parent folders), so the surface never shows both. */
+const HIDDEN_ACCESS_NOTICE =
+  'Members outside your teams aren’t listed here. Access can also follow from parent folders you cannot see.'
+
+/** The muted empty state when the filter removed every row. */
+const ONLY_HIDDEN_ACCESS_NOTICE = 'Only members outside your teams have access here.'
+
 /** True when a user/team subject is not in the caller's visible directory —
  *  the surface cannot name it, so the row is filtered out. */
 function isHiddenSubject(
@@ -71,13 +80,6 @@ function isHiddenSubject(
   }
   return false
 }
-
-/** The muted line under a list that filtered directory-less members. */
-const HIDDEN_ACCESS_NOTICE =
-  'Members outside your teams aren’t listed here. Access can also follow from parent folders you cannot see.'
-
-/** Empty state when the filter removed every row. */
-const ONLY_HIDDEN_ACCESS_NOTICE = 'Only members outside your teams have access here.'
 
 function subjectLabel(
   subject:
@@ -191,13 +193,26 @@ export function GfsGrantList({
   const hasRows = showGrantRows || showShareRows || showMergedRows
   const hasAnyError = Boolean(error || shareError)
 
+  // ONE informational banner. The hidden-members sentence subsumes the
+  // derivation notice when it applies (it already covers access inherited
+  // from parent folders), so the surface never shows two overlapping lines.
+  // The last stable text survives refetch/loading cycles — recomputing from
+  // live props made the notice blink while the lists reloaded.
+  const noticeText = hiddenCount > 0 ? HIDDEN_ACCESS_NOTICE : derivationNotice
+  const [stableNotice, setStableNotice] = useState(derivationNotice)
+  useEffect(() => {
+    if (!loading) setStableNotice(noticeText)
+  }, [loading, noticeText])
+
   return (
     <>
-      {derivationNotice ? (
+      {stableNotice ? (
         <StatusBanner
           tone="info"
-          text={derivationNotice}
-          title={derivationNoticeHint ?? undefined}
+          text={stableNotice}
+          title={
+            stableNotice === derivationNotice ? (derivationNoticeHint ?? undefined) : undefined
+          }
         />
       ) : null}
       {hasAnyError ? (
@@ -355,9 +370,6 @@ export function GfsGrantList({
         ) : derivationNotice ? null : (
           <p className="muted">No one has access yet.</p>
         )
-      ) : null}
-      {hiddenCount > 0 && !loading && !hasAnyError ? (
-        <p className="muted da-gfs-grant-list__hidden-notice">{HIDDEN_ACCESS_NOTICE}</p>
       ) : null}
     </>
   )
