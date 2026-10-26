@@ -6905,6 +6905,189 @@ describe('FilesPage — folder drag-and-drop', () => {
     expect(moveResource).toHaveBeenCalledTimes(1)
   })
 
+  // Breadcrumb crumb drop targets (Control UI parity): the trail inside a
+  // nested folder — folder-0 "Product" is an enabled ancestor crumb, folder-1
+  // "Child" is the active (disabled) crumb and the rows' parent.
+  function crumbDragHarness(
+    options: {
+      destinationHeld?: string[]
+      sourceParentHeld?: string[]
+      sourceResourceHeld?: string[]
+    } = {}
+  ) {
+    const pushToast = vi.fn()
+    const moveResource = vi.fn(async () => ({ resourceId: 'folder-src', version: 5 }))
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'folder-0') {
+        return { held: options.destinationHeld ?? ['read', 'write', 'delete'] }
+      }
+      if (resourceId === 'folder-1') {
+        return { held: options.sourceParentHeld ?? ['read', 'write', 'delete'] }
+      }
+      return { held: options.sourceResourceHeld ?? ['read', 'write'] }
+    })
+    const resolve = vi.fn(async () => ({
+      drive: 'main',
+      resourceId: 'folder-src',
+      parentResourceId: 'folder-1',
+      rid: 'foldersrc',
+      gfsUri: 'gfs://main/foldersrc',
+      name: 'Projects',
+      kind: 'directory',
+      pathCache: '/Product/Child/Projects',
+      version: 4,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { affordances, resolve } },
+    })
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Child',
+        kind: 'directory',
+        version: 1,
+      },
+      crumbs: [
+        {
+          resourceId: 'folder-0',
+          gfsUri: 'gfs://main/folder-0',
+          name: 'Product',
+          kind: 'directory',
+          version: 1,
+          bytes: 0,
+        },
+        {
+          resourceId: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          name: 'Child',
+          kind: 'directory',
+          version: 1,
+          bytes: 0,
+        },
+      ],
+      items: [
+        {
+          resourceId: 'folder-src',
+          rid: 'folder-src',
+          gfsUri: 'gfs://main/folder-src',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Projects',
+          kind: 'directory',
+          path: '/Product/Child/Projects',
+          version: 4,
+          bytes: 0,
+        },
+        {
+          resourceId: 'archive-1',
+          rid: 'archive-1',
+          gfsUri: 'gfs://main/archive-1',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Archive',
+          kind: 'directory',
+          path: '/Product/Child/Archive',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      moveResource,
+    })
+    renderFilesPage(pushToast)
+    return { pushToast, moveResource }
+  }
+
+  function crumbDragDataTransfer() {
+    return {
+      types: ['application/x-evenfire-gfs-resource'],
+      files: [],
+      effectAllowed: 'none',
+      dropEffect: 'none',
+      setData: vi.fn(),
+    }
+  }
+
+  it('drops a dragged folder onto an ancestor crumb after the one confirmation', async () => {
+    const { pushToast, moveResource } = crumbDragHarness()
+    const sourceRow = screen.getByRole('button', { name: 'Open Projects' })
+    const ancestorCrumb = screen.getByRole('button', { name: 'Product' })
+    const dataTransfer = crumbDragDataTransfer()
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.dragEnter(ancestorCrumb, { dataTransfer })
+    fireEvent.dragOver(ancestorCrumb, { dataTransfer })
+    fireEvent.drop(ancestorCrumb, { dataTransfer })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects to Product' })
+    expect(
+      within(dialog).getByText(
+        /Inherited access to this folder and its contents follows the new location/
+      )
+    ).toBeTruthy()
+    expect(moveResource).not.toHaveBeenCalled()
+
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move' }))
+    })
+    await waitFor(() => {
+      expect(moveResource).toHaveBeenCalledWith('folder-src', 'folder-0', 4, undefined, 'folder-1')
+    })
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith('Moved Projects to Product', 'success')
+    )
+    expect(pushToast).toHaveBeenCalledWith(
+      'Moving a folder changes who can access its contents — access now follows the new location.',
+      'info'
+    )
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('cancelling a crumb-drop confirmation sends nothing', async () => {
+    const { pushToast, moveResource } = crumbDragHarness()
+    const sourceRow = screen.getByRole('button', { name: 'Open Projects' })
+    const ancestorCrumb = screen.getByRole('button', { name: 'Product' })
+    const dataTransfer = crumbDragDataTransfer()
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    fireEvent.drop(ancestorCrumb, { dataTransfer })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move folder Projects to Product' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(moveResource).not.toHaveBeenCalled()
+    expect(pushToast).not.toHaveBeenCalledWith(expect.stringContaining('Moved'), expect.anything())
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('a crumb drop without source-parent delete access refuses with the source-delete reason', async () => {
+    const { pushToast, moveResource } = crumbDragHarness({
+      sourceParentHeld: ['read', 'write'],
+    })
+    const sourceRow = screen.getByRole('button', { name: 'Open Projects' })
+    const ancestorCrumb = screen.getByRole('button', { name: 'Product' })
+    const dataTransfer = crumbDragDataTransfer()
+
+    fireEvent.dragStart(sourceRow, { dataTransfer })
+    // Hover paints the deny on the crumb itself once the cold check lands.
+    fireEvent.dragOver(ancestorCrumb, { dataTransfer })
+    await waitFor(() => {
+      expect(ancestorCrumb.getAttribute('data-drop-state')).toBe('denied')
+    })
+    expect(ancestorCrumb.getAttribute('data-drop-reason')).toBe('source-delete')
+
+    fireEvent.drop(ancestorCrumb, { dataTransfer })
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        'You can’t move Projects out of its current folder because you don’t have delete access to the folder that contains it.',
+        'error'
+      )
+    )
+    expect(moveResource).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
   it('a file conflict resolves with a numbered whole-resource rename (CU parity)', async () => {
     const pushToast = vi.fn()
     let conflicted = false

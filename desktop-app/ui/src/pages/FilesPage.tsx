@@ -225,8 +225,14 @@ function mergeErrorMessages(...errors: unknown[]): string | null {
   return messages.length > 0 ? messages.join(' · ') : null
 }
 
+/** A drop destination the drag pipeline can move INTO: a grid folder row or a
+ *  breadcrumb crumb. Only the identity fields admission and the commit need. */
+type GfsFolderDropTarget = Pick<GfsDriveResource, 'resourceId' | 'name'> & {
+  kind: 'directory'
+}
+
 /** Any row/header action target — a listing row (GfsDriveResource) or the
- *  current breadcrumb (GfsCrumb); both carry the identity fields the delete /
+ * current breadcrumb (GfsCrumb); both carry the identity fields the delete /
  *  rename / move calls need (kind also powers dialog titles + the move cycle
  *  guard). */
 type GfsActionTarget = Pick<GfsDriveResource, 'resourceId' | 'name' | 'version'> & {
@@ -1512,6 +1518,66 @@ export function FilesPage({
     }
   }
 
+  /** Nearest-first ancestor chain of a breadcrumb target, observed through the
+   *  live trail (the crumbs above the hovered one). Crumbs are ancestors of
+   *  the current folder, so a crumb can never be inside a dragged row — the
+   *  descendant case is unreachable here and the policy sees an honest chain. */
+  const crumbTargetAncestorIds = (index: number): string[] =>
+    crumbs
+      .slice(0, index)
+      .map(trailCrumb => trailCrumb.resourceId)
+      .reverse()
+
+  /** Breadcrumb hover (drop-move parity with Control UI): paint the verdict on
+   *  the crumb, keep internal drops deliverable even when denied (§5.3), and
+   *  cold-check through the same budgeted adjudication the grid rows use. The
+   *  dragged source is the shared drag-session source captured at dragstart —
+   *  its parent identity is frozen, so the same-parent verdict can never be
+   *  flipped by a trail reconstruction landing mid-gesture (Control UI R7). */
+  const handleCrumbDragOver = (
+    event: ReactDragEvent<HTMLElement>,
+    crumb: GfsCrumb,
+    index: number
+  ) => {
+    if (!hasDraggedGfsResource(event)) return
+    const source = resolveActiveSource()
+    if (!source) return
+    event.preventDefault()
+    event.stopPropagation()
+    hoveredFolderRef.current = crumb.resourceId
+    hoverOwnerRef.current = source
+    setDragSourceName(previous => (previous === source.name ? previous : source.name))
+    const target = {
+      resourceId: crumb.resourceId,
+      name: crumb.name,
+      kind: 'directory',
+      ancestorIds: crumbTargetAncestorIds(index),
+    } as const
+    const verdict = applyHoverVerdict(
+      crumb.resourceId,
+      adjudication.hoverVerdict(source, target),
+      crumb.name,
+      source.name
+    )
+    event.dataTransfer.dropEffect = 'move'
+    if (verdict.state === 'checking') {
+      adjudication.scheduleColdCheck(
+        target,
+        source.parentKnown ? source.parentResourceId : null,
+        () => {
+          if (hoverOwnerRef.current !== source || hoveredFolderRef.current !== crumb.resourceId)
+            return
+          applyHoverVerdict(
+            crumb.resourceId,
+            adjudication.hoverVerdict(source, target),
+            crumb.name,
+            source.name
+          )
+        }
+      )
+    }
+  }
+
   /** Cached destination names for the suggested numbered-name candidate. */
   const cachedDestinationNames = (destinationId: string): Set<string> => {
     const cached = queryClient.getQueryData<{ pages?: Array<{ items?: GfsDriveResource[] }> }>(
@@ -1560,7 +1626,7 @@ export function FilesPage({
 
   const handleFolderDrop = async (
     event: ReactDragEvent<HTMLElement>,
-    destination: GfsDriveResource
+    destination: GfsFolderDropTarget
   ) => {
     if (!hasDraggedGfsResource(event)) return
     event.preventDefault()
@@ -2079,10 +2145,38 @@ export function FilesPage({
                       />
                     ) : (
                       <Button
-                        className="da-gfs-drive__breadcrumb"
+                        className={`da-gfs-drive__breadcrumb${
+                          dragOverFolderId === crumb.resourceId
+                            ? ' da-gfs-drive__breadcrumb--allowed'
+                            : ''
+                        }`}
                         color="neutral"
                         disabled={index === crumbs.length - 1}
+                        title={
+                          gfsDropVerdictReason(dropStatesById[crumb.resourceId]) !== undefined
+                            ? gfsDropVerdictLiveAnnouncement(
+                                dropStatesById[crumb.resourceId]!,
+                                crumb.name,
+                                dragSourceName ?? undefined
+                              )
+                            : undefined
+                        }
+                        data-drop-state={dropStatesById[crumb.resourceId]?.state}
+                        data-drop-reason={gfsDropVerdictReason(dropStatesById[crumb.resourceId])}
                         onClick={() => ctrl.goToCrumb(index)}
+                        onDragEnter={event => handleCrumbDragOver(event, crumb, index)}
+                        onDragOver={event => handleCrumbDragOver(event, crumb, index)}
+                        onDragLeave={handleFolderDragLeave}
+                        onDrop={
+                          index === crumbs.length - 1
+                            ? undefined
+                            : event =>
+                                void handleFolderDrop(event, {
+                                  resourceId: crumb.resourceId,
+                                  name: crumb.name,
+                                  kind: 'directory',
+                                })
+                        }
                         variant="text"
                       >
                         {crumb.name}
@@ -2402,7 +2496,12 @@ export function FilesPage({
                       }
                       onDrop={
                         resource.kind === 'directory'
-                          ? event => void handleFolderDrop(event, resource)
+                          ? event =>
+                              void handleFolderDrop(event, {
+                                resourceId: resource.resourceId,
+                                name: resource.name,
+                                kind: 'directory',
+                              })
                           : undefined
                       }
                     >
