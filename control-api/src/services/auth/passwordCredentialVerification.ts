@@ -17,7 +17,6 @@ import {
   type PasswordWorkLease,
   acquirePasswordWork,
   passwordWorkLeaseIdentity,
-  passwordWorkOwnerIdentity,
   passwordWorkReleaseConfirmed,
   releasePasswordWork,
 } from './passwordWorkOwnership.js'
