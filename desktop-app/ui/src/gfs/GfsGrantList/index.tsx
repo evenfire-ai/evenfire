@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { DropdownSelect, StatusBanner } from '@components/Common'
 import {
   IconAgents,
@@ -48,9 +48,38 @@ function AccessSubjectIcon({ kind }: { kind: AccessSubjectKind }) {
  * "Who has access" — the resource's current grants, sourced from the user-plane
  * grants GET (the only revoke-id source: the grant PUT returns no ids). Subject
  * labels resolve host ids to agent names via the caller's own agent directory
- * and user/team ids via the visible team directory; anything unresolved shows
- * its raw id so a row is never hidden or mislabeled.
+ * and user/team ids via the visible team directory. A user/team subject outside
+ * that directory has no name this surface can act on, so its row is filtered
+ * and one muted line explains what isn't listed and why; unresolved host ids
+ * keep their raw identifier (the agent tail is meaningful). No row is ever
+ * mislabeled, and a filtered list never claims to be empty.
  */
+
+/** One informational banner explains the filter. The hidden-members sentence
+ *  subsumes the derivation notice (it already covers access inherited from
+ *  parent folders), so the surface never shows both. */
+const HIDDEN_ACCESS_NOTICE =
+  'Members outside your teams aren’t listed here. Access can also follow from parent folders you cannot see.'
+
+/** The muted empty state when the filter removed every row. */
+const ONLY_HIDDEN_ACCESS_NOTICE = 'Only members outside your teams have access here.'
+
+/** True when a user/team subject is not in the caller's visible directory —
+ *  the surface cannot name it, so the row is filtered out. */
+function isHiddenSubject(
+  subject:
+    | GfsGrantListItem['subject']
+    | GfsShareListItem['subject']
+    | GfsInheritedAccessItem['subject'],
+  subjects: GfsDelegationSubjectOption[]
+): boolean {
+  if ((subject.type === 'user' || subject.type === 'team') && subject.id) {
+    return !subjects.some(
+      candidate => candidate.type === subject.type && candidate.id === subject.id
+    )
+  }
+  return false
+}
 
 function subjectLabel(
   subject:
@@ -94,6 +123,7 @@ export function GfsGrantList({
   mergeInherited = false,
   loading = false,
   derivationNotice = null,
+  derivationNoticeHint = null,
   error = null,
   shareError = null,
   agents,
@@ -115,6 +145,8 @@ export function GfsGrantList({
     const merged = new Map<string, GfsMergedAccessRow>()
     if (!mergeInherited) return merged
     for (const inherited of inheritedItems) {
+      // A directory-less member has no name this surface can act on.
+      if (isHiddenSubject(inherited.subject, subjects)) continue
       const key = subjectKey(inherited.subject)
       const grant = items.find(item => subjectKey(item.subject) === key) ?? null
       const subjectShares = shares.filter(share => subjectKey(share.subject) === key)
@@ -133,22 +165,56 @@ export function GfsGrantList({
       })
     }
     return merged
-  }, [inheritedItems, items, mergeInherited, shares])
+  }, [inheritedItems, items, mergeInherited, shares, subjects])
 
   // Grants and shares are independent server surfaces with independent
   // failure modes (R4 spec §2): one list's error suppresses only its own rows
   // and never the other list's rows or revoke actions.
-  const showGrantRows = !error && items.length > 0
-  const showShareRows = !shareError && shares.length > 0
+  const visibleItems = error ? [] : items.filter(item => !isHiddenSubject(item.subject, subjects))
+  const visibleShares = shareError
+    ? []
+    : shares.filter(share => !isHiddenSubject(share.subject, subjects))
+  // How many rows the filter removed: drives the muted explanation line and
+  // the honest empty state (a filtered list never claims to be empty). An
+  // errored surface's rows are error-suppressed, not filtered — never count
+  // them, or a failure would be reported as a directory gap.
+  const hiddenInheritedCount = mergeInherited
+    ? inheritedItems.filter(item => isHiddenSubject(item.subject, subjects)).length
+    : 0
+  const hiddenCount =
+    (error ? 0 : items.length - visibleItems.length) +
+    (shareError ? 0 : shares.length - visibleShares.length) +
+    hiddenInheritedCount
+  const showGrantRows = visibleItems.length > 0
+  const showShareRows = visibleShares.length > 0
   // Merged rows are a client-derived supplement: they render whenever the
   // derivation produced them, including while a direct list failed quietly.
   const showMergedRows = mergedByKey.size > 0
   const hasRows = showGrantRows || showShareRows || showMergedRows
   const hasAnyError = Boolean(error || shareError)
 
+  // ONE informational banner. The hidden-members sentence subsumes the
+  // derivation notice when it applies (it already covers access inherited
+  // from parent folders), so the surface never shows two overlapping lines.
+  // The last stable text survives refetch/loading cycles — recomputing from
+  // live props made the notice blink while the lists reloaded.
+  const noticeText = hiddenCount > 0 ? HIDDEN_ACCESS_NOTICE : derivationNotice
+  const [stableNotice, setStableNotice] = useState(derivationNotice)
+  useEffect(() => {
+    if (!loading) setStableNotice(noticeText)
+  }, [loading, noticeText])
+
   return (
     <>
-      {derivationNotice ? <StatusBanner tone="info" text={derivationNotice} /> : null}
+      {stableNotice ? (
+        <StatusBanner
+          tone="info"
+          text={stableNotice}
+          title={
+            stableNotice === derivationNotice ? (derivationNoticeHint ?? undefined) : undefined
+          }
+        />
+      ) : null}
       {hasAnyError ? (
         <div className="da-gfs-grant-list__errors" data-testid="gfs-access-list-error">
           {error ? (
@@ -168,7 +234,7 @@ export function GfsGrantList({
       {hasRows ? (
         <ul className="da-gfs-grant-list" aria-label="Resource access">
           {showGrantRows
-            ? items.map(item => {
+            ? visibleItems.map(item => {
                 if (mergedByKey.has(subjectKey(item.subject))) return null
                 const label = subjectLabel(item.subject, agents, subjects)
                 const kind = subjectKind(item.subject)
@@ -256,7 +322,7 @@ export function GfsGrantList({
               })
             : null}
           {showShareRows
-            ? shares.map(item => {
+            ? visibleShares.map(item => {
                 if (mergedByKey.has(subjectKey(item.subject))) return null
                 const label = subjectLabel(item.subject, agents, subjects)
                 const kind = subjectKind(item.subject)
@@ -291,6 +357,13 @@ export function GfsGrantList({
               })
             : null}
         </ul>
+      ) : !hasAnyError && hiddenCount > 0 ? (
+        // The filter removed every row: never claim an empty folder.
+        loading ? (
+          <p className="muted">Loading access…</p>
+        ) : (
+          <p className="muted">{ONLY_HIDDEN_ACCESS_NOTICE}</p>
+        )
       ) : !hasAnyError ? (
         loading ? (
           <p className="muted">Loading access…</p>

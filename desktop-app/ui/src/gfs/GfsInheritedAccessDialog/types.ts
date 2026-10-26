@@ -23,6 +23,14 @@ export type GfsInheritedAccessDialogRequest = {
   fileCurrentRole: GfsInheritedAccessRole
   /** change-role: the role that will replace the folders'/file's current role. */
   nextRole?: GfsInheritedAccessRole
+  /**
+   * Folders whose SHARING entries still grant Editor after this change. A
+   * role change rewrites the folder's GRANT row only (R1-M5); a share row
+   * survives it, so the member keeps Editor through it. The confirmation
+   * says so BEFORE the user approves — the effective role it shows is not the
+   * whole truth, and only the post-change toast used to say so.
+   */
+  residualEditorFolderNames?: string[]
 }
 
 export interface GfsInheritedAccessDialogProps {
