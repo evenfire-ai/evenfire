@@ -650,8 +650,11 @@ export function App() {
       flushSync(() => {
         vm.clearAppsPicker()
         setWorkspaceTabs(update)
-        reveal?.()
       })
+      // Resolve content from the state the store actually committed. A pending
+      // store update can make App's render-time projection stale; selecting a
+      // chat from that projection here could undo the committed activation.
+      reveal?.()
       if (!plan) return null
       if (
         plan.kind === 'activeTab' &&
@@ -2107,14 +2110,44 @@ export function App() {
       // records a pending selection that survives the `apps` route change and
       // loads the chat. The reconcile effect adds the chat tab to the switcher.
       setChatDrawerOpen(true)
-      vm.handleSelectChatAgent(conversationOrigin.agentName, {
-        chatId: conversationOrigin.chatId,
-        title: conversationOrigin.title,
-        selectLatest: false,
-        keepNavItem: true,
-      })
+      const identity = JSON.stringify([conversationOrigin.agentName, conversationOrigin.chatId])
+      closedWorkspaceChatIdentitiesRef.current.delete(identity)
+      const requiresExactAccess = Boolean(
+        staleTeamContextChatIdentitiesRef.current.has(identity) ||
+        (conversationOrigin.teamId && conversationOrigin.teamId !== vm.getCurrentTeamId())
+      )
+      if (requiresExactAccess) staleTeamContextChatIdentitiesRef.current.add(identity)
+      const chatTab = workspaceTabsRef.current.tabs.find(
+        tab =>
+          tab.kind === 'chat' &&
+          tab.chat?.agentRef === conversationOrigin.agentName &&
+          tab.chat.chatId === conversationOrigin.chatId
+      )
+      if (requiresExactAccess && chatTab) {
+        requestWorkspaceTabSelection(chatTab.id, true, chatTab)
+      } else if (requiresExactAccess) {
+        restoreWorkspaceChatSelection(
+          conversationOrigin.agentName,
+          conversationOrigin.chatId,
+          conversationOrigin.title,
+          true,
+          true
+        )
+      } else {
+        vm.handleSelectChatAgent(conversationOrigin.agentName, {
+          chatId: conversationOrigin.chatId,
+          title: conversationOrigin.title,
+          selectLatest: false,
+          keepNavItem: true,
+        })
+      }
     },
-    [vm.handleSelectChatAgent]
+    [
+      requestWorkspaceTabSelection,
+      restoreWorkspaceChatSelection,
+      vm.getCurrentTeamId,
+      vm.handleSelectChatAgent,
+    ]
   )
   // Grid and deep-link launches: always a new app tab (apps never dedupe by
   // appRef). Its `kind:'app'` derives `navItem` to the Apps route this commit.

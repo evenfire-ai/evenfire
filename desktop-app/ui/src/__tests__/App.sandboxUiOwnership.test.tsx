@@ -15,6 +15,7 @@ import {
   createWorkspaceTabsState,
   newChatTab,
   openAppTab,
+  openChatTab,
   openFilesTab,
   openPreviewTab,
   selectWorkspaceTab,
@@ -277,7 +278,7 @@ function makeController(): AppController {
     handleEnsureTeamContext: vi.fn(async () => false),
     beginNavigationIntent: vi.fn(() => ++navigationIntentEpoch),
     isNavigationIntentCurrent: vi.fn((intent: number) => intent === navigationIntentEpoch),
-    getCurrentTeamId: vi.fn(() => 'team-a'),
+    getCurrentTeamId: vi.fn(() => controller.currentTeamId),
     isHostAccessBlocked: vi.fn(() => false),
     handleSelectChatAgent: vi.fn(() => forceControllerRender()),
     isChatDeleted: vi.fn(() => false),
@@ -994,6 +995,51 @@ describe('App wires gestures and main events to the embed ownership machine', ()
     expect(await screen.findByRole('button', { name: 'Refresh app content' })).toBeTruthy()
     const alphaAfter = controller.workspaceTabs.tabs.find(tab => tab.id === alphaTab.id)
     expect(alphaAfter?.app?.appRef).toBe(ALPHA!.appRef)
+  })
+
+  it('verifies a preserved chat origin before selecting it after a team change', async () => {
+    type ExactProof = NonNullable<Awaited<ReturnType<AppController['verifyConversationAccess']>>>
+    let resolveProof: (proof: ExactProof) => void = () => {}
+    const proofPromise = new Promise<ExactProof>(resolve => {
+      resolveProof = resolve
+    })
+    controller.selectedAgent = 'agent-x'
+    controller.activeChatId = 'chat-3'
+    controller.workspaceTabs = openChatTab(controller.workspaceTabs, {
+      id: 'ws-tab-90',
+      agentRef: 'agent-x',
+      chatId: 'chat-3',
+      title: 'Chat 3',
+    })
+    controller.verifyConversationAccess = vi.fn(() => proofPromise)
+    controller.isConversationAccessProofCurrent = vi.fn(() => true)
+    controller.isConversationAccessVerifiedForCurrentTeam = vi.fn(() => false)
+
+    await renderApp()
+    act(() => sidebarHarness.props?.onSelect?.(DESKTOP_ROUTES.apps))
+    await flushMacrotask()
+    act(() => {
+      controller.currentTeamId = 'team-b'
+      forceControllerRender()
+    })
+    vi.mocked(controller.handleSelectChatAgent).mockClear()
+
+    act(() => sidebarHarness.props?.onOpenSandboxUiApp?.(ALPHA!))
+    await waitFor(() =>
+      expect(controller.verifyConversationAccess).toHaveBeenCalledWith('agent-x', 'chat-3')
+    )
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalledTimes(1))
+    expect(controller.handleSelectChatAgent).not.toHaveBeenCalled()
+
+    await act(async () => resolveProof({} as ExactProof))
+    await waitFor(() =>
+      expect(controller.handleSelectChatAgent).toHaveBeenCalledWith(
+        'agent-x',
+        expect.objectContaining({ chatId: 'chat-3', keepNavItem: true })
+      )
+    )
+    expect(activeWorkspaceTab(controller.workspaceTabs)?.kind).toBe('app')
+    expect(owner()?.appRef).toBe(ALPHA!.appRef)
   })
 
   // A store update can be pending when a gesture runs (here, one written while

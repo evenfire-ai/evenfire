@@ -159,6 +159,7 @@ function makeController(writes: StoreWrite[]): AppController {
   const noop = vi.fn()
   let controller: AppController
   let tabSequence = 2
+  let navigationIntentEpoch = 0
   const nextWorkspaceTabId = vi.fn(() => `ws-tab-${tabSequence++}`)
   const setWorkspaceTabs = vi.fn((updater: unknown) => {
     const previous = controller.workspaceTabs
@@ -258,9 +259,19 @@ function makeController(writes: StoreWrite[]): AppController {
     runtimeConfigMissing: false,
     authTransitioning: false,
     handleEnsureTeamContext: vi.fn(async () => false),
+    beginNavigationIntent: vi.fn(() => ++navigationIntentEpoch),
+    isNavigationIntentCurrent: vi.fn((intent: number) => intent === navigationIntentEpoch),
     getCurrentTeamId: vi.fn(() => 'team-a'),
     isHostAccessBlocked: vi.fn(() => false),
+    isChatDeleted: vi.fn(() => false),
+    isConversationAccessProofCurrent: vi.fn(() => false),
+    isConversationAccessVerifiedForCurrentTeam: vi.fn(() => false),
+    verifyConversationAccess: vi.fn(async () => null),
+    verifyHostAccess: vi.fn(async () => false),
+    teamContextRevision: 0,
     handleSelectChatAgent: vi.fn(() => forceControllerRender()),
+    clearActiveChat: vi.fn(),
+    setSelectedAgent: vi.fn(),
     handleOpenNotification: vi.fn(async () => undefined),
     handleNavSelect: vi.fn((item: string) => {
       if (item === DESKTOP_ROUTES.apps) showAppsPicker()
