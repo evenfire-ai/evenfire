@@ -262,6 +262,7 @@ describe('FilesPage Move permission generation fencing', () => {
     expect(
       await within(dialog).findByRole('button', { name: 'Move here (Archive B)' })
     ).toBeTruthy()
+    expect(within(dialog).queryByText('Checking permissions…')).toBeNull()
     expect(within(dialog).queryByText('Permissions verified. Select Move to confirm.')).toBeNull()
     expect(moveResource).not.toHaveBeenCalled()
     expect(affordances).toHaveBeenCalledWith('source-parent', 'main')
