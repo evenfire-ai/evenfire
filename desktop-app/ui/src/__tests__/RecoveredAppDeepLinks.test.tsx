@@ -1,9 +1,24 @@
 // @vitest-environment jsdom
-import { type ReactNode, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
+import {
+  type ReactElement,
+  type ReactNode,
+  useEffect,
+  useLayoutEffect,
+  useReducer,
+  useRef,
+  useState,
+} from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render as renderWithoutQueryClient,
+  screen,
+  waitFor,
+} from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { buildSandboxUiDeepLink, parseSandboxUiDeepLink } from '@clerum/desktop-app-links'
 import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '@clerum/desktop-app-links'
@@ -21,6 +36,7 @@ import {
   canCompleteGfsResourceNavigation,
   isGfsResourceNavigationOwnerPresent,
 } from '@lib/gfsResourceNavigationIntent'
+import { desktopQueryDefaults } from '@lib/queryClient'
 import {
   activeWorkspaceTab,
   createFilesTab,
@@ -61,6 +77,18 @@ import { type SandboxUiMainFake, createSandboxUiMainFake } from './__fixtures__/
 // The sandbox main fake installs a fetch stub for its token mint. The real
 // ApiError producer below needs Node's native fetch for its loopback fixture.
 const nativeFetch = globalThis.fetch
+
+// App mounts GfsDragSessionProvider, which reads Query state. Keep the real
+// provider in every render with production cache defaults; manually wrapped
+// journeys below retain their more specific QueryClients as the inner owner.
+function render(ui: ReactElement) {
+  const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+  return renderWithoutQueryClient(ui, {
+    wrapper: ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    ),
+  })
+}
 
 // The sandbox-ui main fake runs the real main process; these are the
 // layers under it that the suite does not stand up.

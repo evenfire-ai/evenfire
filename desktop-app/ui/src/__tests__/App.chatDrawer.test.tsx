@@ -569,7 +569,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       chatList: CHAT_LIST,
     } as Partial<AppController>)
 
-    render(<App />)
+    renderApp(<App />)
     expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
     act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
     act(() => sidebarHarness.props?.onNewChat?.())
