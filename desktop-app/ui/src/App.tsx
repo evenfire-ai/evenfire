@@ -873,7 +873,6 @@ export function App() {
       if (
         tabToClose?.kind === 'chat' &&
         tabToClose.chat?.agentRef &&
-        tabToClose.chat.chatId &&
         (wasActive ||
           closesSelectedDrawerChat ||
           pending?.tabId === id ||
@@ -2873,6 +2872,9 @@ export function App() {
         staleTeamContextChatIdentitiesRef.current.delete(identity)
       }
     }
+    const activeIdentity = JSON.stringify([active.agentRef, active.chatId])
+    if (closedWorkspaceChatIdentitiesRef.current.has(activeIdentity)) return
+
     const id = nextChatTabId()
     setWorkspaceTabs(state => {
       const reconciled = reconcileWorkspaceChatTab(state, active, id)
@@ -2882,17 +2884,20 @@ export function App() {
           JSON.stringify([tab.chat.agentRef, tab.chat.chatId ?? null])
         )
       })
+      const activeTabId = filteredTabs.some(tab => tab.id === reconciled.activeTabId)
+        ? reconciled.activeTabId
+        : filteredTabs.some(tab => tab.id === state.activeTabId)
+          ? state.activeTabId
+          : (filteredTabs[0]?.id ?? null)
+      const effectiveTabsUnchanged =
+        filteredTabs.length === state.tabs.length &&
+        filteredTabs.every((tab, index) => tab === state.tabs[index])
       const safeReconciled =
-        filteredTabs.length === reconciled.tabs.length
-          ? reconciled
-          : {
-              tabs: filteredTabs,
-              activeTabId: filteredTabs.some(tab => tab.id === reconciled.activeTabId)
-                ? reconciled.activeTabId
-                : filteredTabs.some(tab => tab.id === state.activeTabId)
-                  ? state.activeTabId
-                  : (filteredTabs[0]?.id ?? null),
-            }
+        effectiveTabsUnchanged && activeTabId === state.activeTabId
+          ? state
+          : filteredTabs.length === reconciled.tabs.length
+            ? reconciled
+            : { tabs: filteredTabs, activeTabId }
       if (safeReconciled === state) return state
       // Keep reconciling chat metadata while a requested tab is authoritative,
       // but don't let the old displayed conversation reactivate it mid-switch.

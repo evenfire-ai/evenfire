@@ -610,12 +610,14 @@ describe('App workspace chat tabs with held Host access', () => {
         args: Parameters<typeof window.clerum.rpc.loadSessionMessages>,
         load: typeof window.clerum.rpc.loadSessionMessages
       ) => ReturnType<typeof window.clerum.rpc.loadSessionMessages>
+      configureRpc?: (clerum: ReturnType<typeof installAppControllerClerum>['clerum']) => void
     } = {}
   ) {
     const originalBridge = window.clerum
     const { clerum, handle } = installAppControllerClerum({
       agentNames: options.agentNames ?? ['agent-x'],
     })
+    options.configureRpc?.(clerum)
     const directory = makeDeferred<{ items: []; currentTeamId: string }>()
     if (options.nullSessionTeam) {
       handle.getSessionState.mockResolvedValue({
@@ -787,6 +789,114 @@ describe('App workspace chat tabs with held Host access', () => {
         expect.objectContaining({ role: 'assistant', content: 'accepted reply' }),
       ])
     )
+  })
+
+  it('quiesces drawer reconciliation while a closed displayed chat is behind a pending selection', async () => {
+    const chats: Array<[string, string]> = [
+      ['agent-a', 'chat-b'],
+      ['agent-b', 'chat-c'],
+    ]
+    const denied = await ipcGenericForbidden('rpc:listSessions')
+    const accessCheck = makeDeferred<Awaited<ReturnType<typeof window.clerum.rpc.listSessions>>>()
+    const verificationStarted = makeDeferred<void>()
+    let initialDenialCalls = 0
+    const { live } = await mountProductionApp({
+      agentNames: ['agent-a', 'agent-b'],
+      chats,
+      configureRpc: bridge => {
+        const originalListSessions = bridge.rpc.listSessions.getMockImplementation()!
+        bridge.rpc.listSessions.mockImplementation(async (agentRef, ...args) => {
+          if (agentRef !== 'agent-b') return originalListSessions(agentRef, ...args)
+          if (initialDenialCalls < 2) {
+            initialDenialCalls += 1
+            throw denied
+          }
+          verificationStarted.resolve()
+          return accessCheck.promise
+        })
+      },
+    })
+    await waitFor(() => expect(initialDenialCalls).toBe(2))
+    await waitFor(() => expect(live.isHostAccessBlocked('agent-b')).toBe(true))
+    await addProductionChatTabs(live, chats)
+    await clickProductionChatTab(live, 'chat-b')
+    await waitFor(() => expect(live.chatMessagesLoading).toBe(false))
+
+    act(() => live.handleNavSelect(DESKTOP_ROUTES.files))
+    await waitFor(() => expect(live.navItem).toBe(DESKTOP_ROUTES.files))
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open chats' })).toBeTruthy())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open chats' }))
+    const unavailableOption = screen
+      .getAllByRole('option')
+      .find(
+        option =>
+          option.getAttribute('aria-selected') === 'false' &&
+          option.textContent?.includes('Conversation unavailable')
+      )
+    expect(unavailableOption).toBeDefined()
+    fireEvent.click(unavailableOption!)
+    await verificationStarted.promise
+    expect(live.selectedAgent).toBe('agent-a')
+    expect(live.activeChatId).toBe('chat-b')
+
+    const displayedTab = live.workspaceTabs.tabs.find(
+      tab => tab.kind === 'chat' && tab.chat?.agentRef === 'agent-a' && tab.chat.chatId === 'chat-b'
+    )!
+    fireEvent.click(screen.getByRole('button', { name: `Close ${displayedTab.title}` }))
+
+    expect(live.workspaceTabs.tabs.some(tab => tab.id === displayedTab.id)).toBe(false)
+    expect(live.workspaceTabs.tabs.some(tab => tab.chat?.chatId === 'chat-b')).toBe(false)
+    expect(live.navItem).toBe(DESKTOP_ROUTES.files)
+    expect(live.workspaceTabs.activeTabId).toBe(
+      live.workspaceTabs.tabs.find(tab => tab.kind === 'files')?.id
+    )
+    expect(live.activeChatId).toBe('chat-b')
+    expect(screen.getByText('Checking access to conversation…')).toBeTruthy()
+    expect(screen.queryByTestId('chat-page-surface')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Open chats' }))
+    expect(
+      screen
+        .getAllByRole('option')
+        .find(option => option.getAttribute('aria-selected') === 'true')
+        ?.getAttribute('aria-label')
+    ).toContain('checking access')
+
+    const drawerSnapshot = () =>
+      JSON.stringify({
+        route: live.navItem,
+        activeTabId: live.workspaceTabs.activeTabId,
+        tabs: live.workspaceTabs.tabs.map(tab => [tab.id, tab.kind, tab.title, tab.chat?.chatId]),
+        options: screen
+          .getAllByRole('option')
+          .map(option => [
+            option.textContent,
+            option.getAttribute('aria-label'),
+            option.getAttribute('aria-selected'),
+          ]),
+      })
+    const stableSnapshot = drawerSnapshot()
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 0))
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+    expect(drawerSnapshot()).toBe(stableSnapshot)
+
+    await act(async () => {
+      accessCheck.resolve({ items: [] })
+    })
+    await waitFor(() => expect(live.selectedAgent).toBe('agent-b'))
+    await waitFor(() => expect(live.activeChatId).toBe('chat-c'))
+    await waitFor(() => expect(live.chatMessagesLoading).toBe(false))
+    await waitFor(() => expect(live.chatListLoading).toBe(false))
+    await waitFor(() => expect(live.sessionStateByChatKey['agent-b::chat-c']?.syncing).toBe(false))
+    expect(live.navItem).toBe(DESKTOP_ROUTES.files)
+    expect(live.workspaceTabs.tabs.some(tab => tab.chat?.chatId === 'chat-b')).toBe(false)
+    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+      'chat-c'
+    )
+    expect(screen.getByText('chat-c cached content')).toBeTruthy()
   })
 
   it('lets newer drawer navigation supersede a send-created chat promotion', async () => {
