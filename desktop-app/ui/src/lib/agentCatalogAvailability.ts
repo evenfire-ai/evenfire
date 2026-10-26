@@ -1,3 +1,5 @@
+import { httpErrorStatus, isAuthorizationError, isNetworkError } from './format'
+
 export type AgentCatalogAvailability = 'ready' | 'checking' | 'error' | 'available' | 'unavailable'
 
 export interface AgentCatalogAvailabilityInput {
@@ -8,13 +10,28 @@ export interface AgentCatalogAvailabilityInput {
   agentNames: readonly string[]
 }
 
-/** Resolve the composer state without treating stale catalog data as current-team authority. */
+/** Resolve composer availability without reusing a mismatched catalog as current-team authority. */
 export function resolveAgentCatalogAvailability(
   input: AgentCatalogAvailabilityInput
 ): AgentCatalogAvailability {
-  if (!input.selectedAgent) return 'ready'
-  if (input.loading) return 'checking'
-  if (input.error !== null) return 'error'
+  const selectedAgent = input.selectedAgent
+  if (!selectedAgent) return 'ready'
+
+  const hasConfirmedSelection =
+    input.catalogMatchesSession && input.agentNames.includes(selectedAgent)
+  if (input.error !== null) {
+    if (isAuthorizationError(input.error)) return 'error'
+
+    const status = httpErrorStatus(input.error)
+    const isServerFailure = status !== undefined && status >= 500 && status < 600
+    const isTransientFailure = isNetworkError(input.error) || isServerFailure
+    return hasConfirmedSelection && isTransientFailure ? 'available' : 'error'
+  }
+
+  if (input.loading) {
+    if (hasConfirmedSelection) return 'available'
+    return 'checking'
+  }
   if (!input.catalogMatchesSession) return 'checking'
-  return input.agentNames.includes(input.selectedAgent) ? 'available' : 'unavailable'
+  return hasConfirmedSelection ? 'available' : 'unavailable'
 }

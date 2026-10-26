@@ -9,8 +9,10 @@ import { buildSandboxUiDeepLink, parseSandboxUiDeepLink } from '@clerum/desktop-
 import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '@clerum/desktop-app-links'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
+import { resolveAgentCatalogAvailability } from '@lib/agentCatalogAvailability'
 import { resetComposerDraftStore } from '@lib/composerDraftStore'
 import type { EmbedOwnershipMachine } from '@lib/embedOwnershipMachine.types'
+import { httpErrorStatus, isAuthorizationError, isNetworkError } from '@lib/format'
 import {
   type GfsResourceNavigationRequest,
   assignGfsResourceNavigationOwner,
@@ -46,6 +48,10 @@ import {
   HARNESS_ME,
   installAppControllerClerum,
 } from '../hooks/domain/__tests__/__fixtures__/appControllerHarness'
+import {
+  ipcGenericForbidden,
+  wrapLikeElectronIpc,
+} from '../hooks/domain/__tests__/__fixtures__/ipcErrors'
 import { desktopQueryKeys } from '../hooks/domain/queryKeys'
 import type { NavItem } from '../uiTypes'
 import { type SandboxUiMainFake, createSandboxUiMainFake } from './__fixtures__/sandboxUiMainFake'
@@ -119,6 +125,84 @@ async function produceDeniedGfsMessage(
   }
 }
 
+async function produceSerializedAccessCatalogFetchFailure(): Promise<Error> {
+  const nativeFetch = globalThis.fetch
+  const actual =
+    await vi.importActual<typeof import('../../../src/authClient')>('../../../src/authClient')
+  let producerError: unknown
+  globalThis.fetch = vi.fn(async () => {
+    throw new TypeError('fetch failed')
+  }) as typeof fetch
+  try {
+    await new actual.AuthClient().getTeamAgents('catalog-proof-session')
+  } catch (error) {
+    producerError = error
+  } finally {
+    globalThis.fetch = nativeFetch
+  }
+  if (!(producerError instanceof TypeError) || !producerError.message.includes('fetch failed')) {
+    throw new Error(
+      `The real AuthClient catalog producer emitted an unexpected error: ${String(producerError)}`
+    )
+  }
+  return wrapLikeElectronIpc('access:refreshCatalog', producerError)
+}
+
+async function produceSerializedAccessCatalogHttpFailure(status: number): Promise<Error> {
+  const nativeFetch = globalThis.fetch
+  const actual =
+    await vi.importActual<typeof import('../../../src/authClient')>('../../../src/authClient')
+  let producerError: unknown
+  const statusText =
+    status === 500 ? 'Internal Server Error' : status === 401 ? 'Unauthorized' : 'Forbidden'
+  globalThis.fetch = vi.fn(
+    async () =>
+      new Response(JSON.stringify({ error: 'catalog request failed' }), {
+        status,
+        statusText,
+        headers: { 'content-type': 'application/json' },
+      })
+  ) as typeof fetch
+  try {
+    await new actual.AuthClient().getTeamAgents('catalog-proof-session')
+  } catch (error) {
+    producerError = error
+  } finally {
+    globalThis.fetch = nativeFetch
+  }
+  if (!(producerError instanceof Error)) {
+    throw new Error(`The real AuthClient catalog producer did not reject for HTTP ${status}`)
+  }
+  if (httpErrorStatus(producerError) !== status) {
+    throw new Error(
+      `The real AuthClient catalog producer lost HTTP ${status}: ${producerError.message}`
+    )
+  }
+  return wrapLikeElectronIpc('access:refreshCatalog', producerError)
+}
+
+async function produceSerializedAccessCatalogMalformedResponse(): Promise<Error> {
+  const nativeFetch = globalThis.fetch
+  const actual =
+    await vi.importActual<typeof import('../../../src/authClient')>('../../../src/authClient')
+  let producerError: unknown
+  globalThis.fetch = vi.fn(
+    async () =>
+      new Response('not-json', { status: 200, headers: { 'content-type': 'application/json' } })
+  ) as typeof fetch
+  try {
+    await new actual.AuthClient().getTeamAgents('catalog-proof-session')
+  } catch (error) {
+    producerError = error
+  } finally {
+    globalThis.fetch = nativeFetch
+  }
+  if (!(producerError instanceof SyntaxError)) {
+    throw new Error(`The real AuthClient catalog producer did not expose its malformed response`)
+  }
+  return wrapLikeElectronIpc('access:refreshCatalog', producerError)
+}
+
 function useReactiveController(controller: AppController): AppController {
   const [, force] = useReducer((count: number) => count + 1, 0)
   forceControllerRender = force
@@ -166,6 +250,7 @@ const appHeaderHarness = vi.hoisted(() => ({
 const chatLocalSearchHarness = vi.hoisted(() => ({ rendered: vi.fn() }))
 const composerPanelHarness = vi.hoisted(() => ({
   useRealComposerPanel: false,
+  renderSendButton: false,
   controller: null as Record<string, unknown> | null,
 }))
 const filesPageHarness = vi.hoisted(() => ({
@@ -304,7 +389,22 @@ vi.mock('@components/Common', () => ({
       {props.children as ReactNode}
     </button>
   ),
-  IconButton: () => null,
+  IconButton: (props: Record<string, unknown>) => {
+    if (!composerPanelHarness.renderSendButton || props['data-testid'] !== 'send-button')
+      return null
+    return (
+      <button
+        aria-describedby={props['aria-describedby'] as string | undefined}
+        aria-label={props['aria-label'] as string | undefined}
+        disabled={props.disabled as boolean | undefined}
+        onClick={props.onClick as (() => void) | undefined}
+        data-testid={props['data-testid'] as string | undefined}
+        type="button"
+      >
+        {props.children as ReactNode}
+      </button>
+    )
+  },
   MenuItem: (props: Record<string, unknown>) => (
     <button
       aria-label={props['aria-label'] as string | undefined}
@@ -919,6 +1019,7 @@ describe('App deep-link orchestration', () => {
     testNavigationIntentSequence = 0
     testUserNavigationGeneration = 0
     composerPanelHarness.useRealComposerPanel = false
+    composerPanelHarness.renderSendButton = false
     composerPanelHarness.controller = null
     composerHookHarness.refreshConnectors.mockClear()
     composerHookHarness.refreshSharedFiles.mockClear()
@@ -3573,6 +3674,217 @@ describe('App deep-link orchestration', () => {
     expect
       .soft((screen.getByTestId('chat-page-surface') as HTMLTextAreaElement).value)
       .toBe('draft owned by B')
+  })
+
+  it('keeps a confirmed current-team agent sendable through a transient catalog refresh', async () => {
+    composerPanelHarness.useRealComposerPanel = true
+    composerPanelHarness.renderSendButton = true
+    const existingBridge = window.clerum
+    const { clerum, handle } = installAppControllerClerum({ agentNames: ['agent-x', 'agent-y'] })
+    Object.assign(clerum, {
+      shortcuts: existingBridge.shortcuts,
+      app: existingBridge.app,
+      gfs: existingBridge.gfs,
+      sandboxUi: existingBridge.sandboxUi,
+    })
+    const actual =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    const realController: { current: AppController | null } = { current: null }
+    vi.mocked(useAppController).mockImplementation(() => {
+      realController.current = actual.useAppController()
+      composerPanelHarness.controller = realController.current as unknown as Record<string, unknown>
+      return realController.current
+    })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTaskTrackerProvider>
+          <App />
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => expect(realController.current?.isAuthenticated).toBe(true))
+    await waitFor(() => expect(realController.current?.initialExperienceLoading).toBe(false))
+    await waitFor(() =>
+      expect(queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)).toMatchObject(
+        {
+          userId: HARNESS_ME.id,
+          teamId: HARNESS_ME.teamId,
+          agentNames: ['agent-x', 'agent-y'],
+        }
+      )
+    )
+    await act(async () => {
+      realController.current?.handleSelectChatAgent('agent-x', { selectLatest: false })
+    })
+
+    const draft = 'message retained during agent catalog refresh'
+    const composer = screen.getByRole('textbox', { name: 'Agent message composer' })
+    fireEvent.change(composer, { target: { value: draft } })
+    const note = new File(['catalog refresh attachment'], 'notes.txt', { type: 'text/plain' })
+    const filePicker = document.querySelector<HTMLInputElement>('.composer-file-input')
+    if (!filePicker) throw new Error('The real ComposerPanel file picker is unavailable')
+    fireEvent.change(filePicker, { target: { files: [note] } })
+    await waitFor(() =>
+      expect(screen.getByTestId('composer-file-chip').getAttribute('data-file-status')).toBe(
+        'ready'
+      )
+    )
+
+    const catalogProducer = handle.refreshCatalog.getMockImplementation() as
+      | (() => Promise<AccessCatalog>)
+      | undefined
+    if (!catalogProducer) throw new Error('The shared catalog producer is unavailable')
+    let rejectRefresh!: (error: Error) => void
+    let pendingCatalogRefresh: Promise<AccessCatalog> | null = null
+    handle.refreshCatalog.mockImplementation(() => pendingCatalogRefresh ?? catalogProducer())
+    const callsBeforeRefresh = handle.refreshCatalog.mock.calls.length
+    pendingCatalogRefresh = new Promise<AccessCatalog>((_resolve, reject) => {
+      rejectRefresh = reject
+    })
+
+    let refreshTask: Promise<unknown> | undefined
+    act(() => {
+      refreshTask = realController.current?.handleRefreshWorkspaceData(DESKTOP_ROUTES.agents)
+    })
+    await waitFor(() =>
+      expect(handle.refreshCatalog.mock.calls.length).toBeGreaterThan(callsBeforeRefresh)
+    )
+    await waitFor(() =>
+      expect(queryClient.getQueryState(desktopQueryKeys.accessCatalog)?.fetchStatus).toBe(
+        'fetching'
+      )
+    )
+    expect(queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)).toMatchObject({
+      userId: HARNESS_ME.id,
+      teamId: HARNESS_ME.teamId,
+      agentNames: ['agent-x', 'agent-y'],
+    })
+    expect(realController.current?.selectedAgent).toBe('agent-x')
+    expect(clerum.rpc.invokeHostMessage).not.toHaveBeenCalled()
+    expect.soft((screen.getByTestId('send-button') as HTMLButtonElement).disabled).toBe(false)
+    expect.soft(screen.queryByTestId('composer-agent-catalog-notice')).toBeNull()
+    expect((composer as HTMLTextAreaElement).value).toBe(draft)
+    expect(screen.getByTestId('composer-file-chip').textContent).toContain('notes.txt')
+
+    const networkError = await produceSerializedAccessCatalogFetchFailure()
+    expect(isNetworkError(networkError)).toBe(true)
+    await act(async () => {
+      rejectRefresh(networkError)
+      await refreshTask
+    })
+    await waitFor(() =>
+      expect(queryClient.getQueryState(desktopQueryKeys.accessCatalog)?.status).toBe('error')
+    )
+    expect(queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)).toMatchObject({
+      userId: HARNESS_ME.id,
+      teamId: HARNESS_ME.teamId,
+      agentNames: ['agent-x', 'agent-y'],
+    })
+    expect.soft(screen.queryByTestId('composer-agent-catalog-notice')).toBeNull()
+    expect.soft((screen.getByTestId('send-button') as HTMLButtonElement).disabled).toBe(false)
+    expect((composer as HTMLTextAreaElement).value).toBe(draft)
+    expect(screen.getByTestId('composer-file-chip').textContent).toContain('notes.txt')
+    expect(clerum.rpc.invokeHostMessage).not.toHaveBeenCalled()
+
+    let rejectServerError!: (error: Error) => void
+    pendingCatalogRefresh = new Promise<AccessCatalog>((_resolve, reject) => {
+      rejectServerError = reject
+    })
+    const callsBeforeServerError = handle.refreshCatalog.mock.calls.length
+    let serverErrorRefreshTask: Promise<unknown> | undefined
+    act(() => {
+      serverErrorRefreshTask = realController.current?.handleRefreshWorkspaceData(
+        DESKTOP_ROUTES.agents
+      )
+    })
+    await waitFor(() =>
+      expect(handle.refreshCatalog.mock.calls.length).toBeGreaterThan(callsBeforeServerError)
+    )
+    await waitFor(() =>
+      expect(queryClient.getQueryState(desktopQueryKeys.accessCatalog)?.fetchStatus).toBe(
+        'fetching'
+      )
+    )
+    const serverError = await produceSerializedAccessCatalogHttpFailure(500)
+    expect(httpErrorStatus(serverError)).toBe(500)
+    expect(isNetworkError(serverError)).toBe(false)
+    expect(realController.current?.selectedAgent).toBe('agent-x')
+    expect(queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)).toMatchObject({
+      userId: HARNESS_ME.id,
+      teamId: HARNESS_ME.teamId,
+      agentNames: ['agent-x', 'agent-y'],
+    })
+    expect.soft((screen.getByTestId('send-button') as HTMLButtonElement).disabled).toBe(false)
+    expect.soft(screen.queryByTestId('composer-agent-catalog-notice')).toBeNull()
+    await act(async () => {
+      rejectServerError(serverError)
+      await serverErrorRefreshTask
+    })
+    await waitFor(() =>
+      expect(queryClient.getQueryState(desktopQueryKeys.accessCatalog)?.status).toBe('error')
+    )
+    expect(queryClient.getQueryData<AccessCatalog>(desktopQueryKeys.accessCatalog)).toMatchObject({
+      userId: HARNESS_ME.id,
+      teamId: HARNESS_ME.teamId,
+      agentNames: ['agent-x', 'agent-y'],
+    })
+    expect.soft((screen.getByTestId('send-button') as HTMLButtonElement).disabled).toBe(false)
+    expect.soft(screen.queryByTestId('composer-agent-catalog-notice')).toBeNull()
+    expect((composer as HTMLTextAreaElement).value).toBe(draft)
+    expect(screen.getByTestId('composer-file-chip').textContent).toContain('notes.txt')
+
+    const sendDenial = await ipcGenericForbidden('rpc:invokeHostMessage')
+    expect(httpErrorStatus(sendDenial)).toBe(403)
+    expect(isAuthorizationError(sendDenial)).toBe(true)
+    clerum.rpc.invokeHostMessage.mockRejectedValueOnce(sendDenial)
+    fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' })
+    await vi.waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledOnce(), {
+      timeout: 2_000,
+    })
+    const recoverInput = await screen.findByRole('button', { name: 'Recover input' })
+    await waitFor(() => expect((recoverInput as HTMLButtonElement).disabled).toBe(false))
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledOnce()
+    expect(clerum.rpc.invokeHostMessage.mock.calls[0]?.[1]).toMatchObject({
+      content: draft,
+      attachments: [expect.objectContaining({ filename: 'notes.txt' })],
+    })
+  })
+
+  it.each([401, 403])(
+    'preserves explicit catalog HTTP %i authorization failures through IPC',
+    async status => {
+      const error = await produceSerializedAccessCatalogHttpFailure(status)
+      expect(error.message).toContain("Error invoking remote method 'access:refreshCatalog'")
+      expect(httpErrorStatus(error)).toBe(status)
+      expect(isAuthorizationError(error)).toBe(true)
+      expect(
+        resolveAgentCatalogAvailability({
+          selectedAgent: 'agent-x',
+          loading: false,
+          error: error.message,
+          catalogMatchesSession: true,
+          agentNames: ['agent-x'],
+        })
+      ).toBe('error')
+    }
+  )
+
+  it('keeps a genuinely unclassified catalog producer failure blocked', async () => {
+    const error = await produceSerializedAccessCatalogMalformedResponse()
+    expect(httpErrorStatus(error)).toBeUndefined()
+    expect(isNetworkError(error)).toBe(false)
+    expect(isAuthorizationError(error)).toBe(false)
+    expect(
+      resolveAgentCatalogAvailability({
+        selectedAgent: 'agent-x',
+        loading: false,
+        error: error.message,
+        catalogMatchesSession: true,
+        agentNames: ['agent-x'],
+      })
+    ).toBe('error')
   })
 
   it('keeps actual ComposerPanel drafts on their App-created workspace tabs', async () => {
