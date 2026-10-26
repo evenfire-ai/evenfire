@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Dispatch, SetStateAction } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
+import type { Query } from '@tanstack/react-query'
 import {
   useInfiniteQuery,
   useMutation,
@@ -813,7 +814,8 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       ...gfsAuthorityQueryPolicy,
       // Row data remains stale for authorization after 15 seconds, but a
       // navigation remount only refreshes the presentation cache after 60.
-      refetchOnMount: query =>
+      refetchOnMount: (query: Query) =>
+        query.state.isInvalidated ||
         query.state.dataUpdatedAt === 0 ||
         Date.now() - query.state.dataUpdatedAt >= GFS_ROW_PRESENTATION_CACHE_MS,
       // A folder can expose many child actions. The stale-time policy is not a

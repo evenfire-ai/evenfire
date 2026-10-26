@@ -306,6 +306,62 @@ describe('FilesPage stale permission action oracle', () => {
     client.clear()
   })
 
+  it('refreshes invalidated row authority when FilesPage remounts', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const folder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', { gfsUri: FOLDER_URI })
+    )
+    const report = childView('child-report', 'report.txt', 'file', {
+      parentResourceId: 'folder-active',
+    })
+    const children = await listChildrenPage([report])
+    let reportPermissionReads = 0
+    const affordances = vi.fn(async (resourceId: string) => {
+      if (resourceId === 'child-report') {
+        reportPermissionReads += 1
+        return reportPermissionReads === 1
+          ? delegationAffordances(new Set(['read', 'write', 'delete']), false)
+          : delegationAffordances(new Set(['read']), false)
+      }
+      return delegationAffordances(new Set(['read']), false)
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => folder),
+          listChildren: vi.fn(async () => children),
+          affordances,
+          renameResource: vi.fn(async () => undefined),
+        },
+      },
+    })
+
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const firstMount = render(<FilesPage pendingGfsUri={FOLDER_URI} />, {
+      wrapper: wrapper(client),
+    })
+    await screen.findByText('report.txt')
+    await waitFor(() => expect(reportPermissionReads).toBe(1))
+    expect(screen.getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
+
+    firstMount.unmount()
+    await act(async () => {
+      // Match the preview mutation's prefix invalidation while the row query is inactive.
+      await client.invalidateQueries({ queryKey: desktopQueryKeys.gfsRoot })
+    })
+    vi.setSystemTime(Date.now() + 1_000)
+
+    render(<FilesPage pendingGfsUri={FOLDER_URI} />, { wrapper: wrapper(client) })
+    await screen.findByText('report.txt')
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Rename report.txt' })).toBeNull()
+    )
+    expect(reportPermissionReads).toBe(2)
+    client.clear()
+  })
+
   it('reuses twenty row presentations on folder re-entry and rechecks one stale row on use', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     const folder = await resolveResource(
