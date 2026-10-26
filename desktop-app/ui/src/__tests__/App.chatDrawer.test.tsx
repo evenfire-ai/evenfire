@@ -118,9 +118,11 @@ const appHeaderHarness = vi.hoisted(() => ({
 const navigationHarness = vi.hoisted(() => ({
   selectChatAgent: null as null | ((agentRef: string, options?: { chatId?: string }) => void),
 }))
+const chatPageHarness = vi.hoisted(() => ({
+  sendMessage: null as null | ((text: string) => Promise<void>),
+}))
 
 vi.mock('@hooks/useAppController', () => ({ useAppController: vi.fn() }))
-vi.mock('@hooks/useAgentChatActionsValue', () => ({ useAgentChatActionsValue: () => ({}) }))
 vi.mock('@components/AppHeader', () => ({
   AppHeader: (props: NonNullable<typeof appHeaderHarness.props>) => {
     appHeaderHarness.props = props
@@ -152,17 +154,28 @@ vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
 // than hand-written controller state.
 vi.mock('@pages/ChatPage', async () => {
   const { useChatComposerStateContext } = await import('@contexts/ChatComposerStateContext')
+  const { useChatThreadStateContext } = await import('@contexts/ChatThreadStateContext')
+  const { useAgentChatActionsContext } = await import('@contexts/AgentChatActionsContext')
   const { useNavigationContext } = await import('@contexts/NavigationContext')
   return {
     ChatPage: () => {
       const { activeChatId, composerFocusRequestId } = useChatComposerStateContext()
+      const { activeMessages } = useChatThreadStateContext()
+      const { handleSendAgentMessage } = useAgentChatActionsContext()
       navigationHarness.selectChatAgent = useNavigationContext().handleSelectChatAgent
+      chatPageHarness.sendMessage = handleSendAgentMessage
       return (
         <div
           data-testid="chat-page-surface"
           data-active-chat-id={activeChatId ?? ''}
           data-composer-focus-request-id={composerFocusRequestId}
-        />
+        >
+          {activeMessages.map(message => (
+            <p key={message.id} data-testid="chat-message" data-role={message.role}>
+              {message.content}
+            </p>
+          ))}
+        </div>
       )
     },
   }
@@ -715,6 +728,111 @@ describe('App workspace chat tabs with held Host access', () => {
       ).toBe(chatId)
     )
   }
+
+  it('keeps a drawer blank chat promoted to its real first-send conversation', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
+    const { clerum, live } = await mountProductionApp({ chats: [['agent-x', 'prior-chat']] })
+    act(() => live.handleSelectChatAgent('agent-x', { selectLatest: false }))
+    await waitFor(() => expect(live.selectedAgent).toBe('agent-x'))
+    await waitFor(() => expect(live.activeChatId).toBeNull())
+
+    act(() => live.handleNavSelect(DESKTOP_ROUTES.files))
+    await waitFor(() => expect(live.navItem).toBe(DESKTOP_ROUTES.files))
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open chats' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Open chats' }))
+    fireEvent.click(screen.getByRole('button', { name: '+ New chat' }))
+    await waitFor(() =>
+      expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe('')
+    )
+
+    const selectedBlank = [...live.workspaceTabs.tabs]
+      .reverse()
+      .find(tab => tab.kind === 'chat' && tab.chat?.agentRef === 'agent-x' && !tab.chat.chatId)
+    expect(selectedBlank).toBeDefined()
+    expect(activeWorkspaceTab(live.workspaceTabs)?.kind).toBe('files')
+
+    await act(async () => {
+      await live.handleRenameChatForAgent('agent-x', 'prior-chat', 'Updated prior chat')
+    })
+    await waitFor(() =>
+      expect(live.chatList.find(chat => chat.id === 'prior-chat')?.title).toBe('Updated prior chat')
+    )
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ response: 'accepted reply' })
+    if (!chatPageHarness.sendMessage)
+      throw new Error('The production ChatPage action was not mounted')
+    await act(async () => {
+      await chatPageHarness.sendMessage!('first drawer message')
+    })
+
+    const request = clerum.rpc.invokeHostMessage.mock.calls.at(-1)?.[1] as
+      | { threadId?: string }
+      | undefined
+    const createdChatId = request?.threadId
+    expect(createdChatId).toBeTruthy()
+    expect(live.workspaceTabs.tabs.find(tab => tab.id === selectedBlank!.id)?.chat?.chatId).toBe(
+      createdChatId
+    )
+    expect(activeWorkspaceTab(live.workspaceTabs)?.kind).toBe('files')
+    expect(live.navItem).toBe(DESKTOP_ROUTES.files)
+    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+      createdChatId
+    )
+    expect(screen.getAllByTestId('chat-message').map(node => node.textContent)).toEqual(
+      expect.arrayContaining(['first drawer message', 'accepted reply'])
+    )
+    expect(await clerum.persistedMessages('agent-x', createdChatId!)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: 'user', content: 'first drawer message' }),
+        expect.objectContaining({ role: 'assistant', content: 'accepted reply' }),
+      ])
+    )
+  })
+
+  it('lets newer drawer navigation supersede a send-created chat promotion', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
+    const { clerum, live } = await mountProductionApp({
+      chats: [
+        ['agent-x', 'prior-chat'],
+        ['agent-x', 'other-chat'],
+      ],
+    })
+    act(() => live.handleSelectChatAgent('agent-x', { selectLatest: false }))
+    await waitFor(() => expect(live.selectedAgent).toBe('agent-x'))
+    act(() => live.handleNavSelect(DESKTOP_ROUTES.files))
+    await waitFor(() => expect(live.navItem).toBe(DESKTOP_ROUTES.files))
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open chats' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Open chats' }))
+    fireEvent.click(screen.getByRole('button', { name: '+ New chat' }))
+    const releaseSend = makeDeferred<{ response: string }>()
+    clerum.rpc.invokeHostMessage.mockReturnValue(releaseSend.promise)
+    if (!chatPageHarness.sendMessage)
+      throw new Error('The production ChatPage action was not mounted')
+
+    let send!: Promise<void>
+    await act(async () => {
+      send = chatPageHarness.sendMessage!('superseded first message')
+      await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalled())
+    })
+    await waitFor(() => expect(live.activeChatId).toBeTruthy())
+    await act(async () => {
+      await live.handleSelectChatAgent('agent-x', { chatId: 'other-chat', keepNavItem: true })
+    })
+    await waitFor(() => expect(live.activeChatId).toBe('other-chat'))
+    await act(async () => {
+      releaseSend.resolve({ response: 'late reply' })
+      await send
+    })
+
+    expect(live.activeChatId).toBe('other-chat')
+    expect(screen.getByTestId('chat-page-surface').getAttribute('data-active-chat-id')).toBe(
+      'other-chat'
+    )
+    const visibleMessages = screen.getAllByTestId('chat-message').map(node => node.textContent)
+    expect(visibleMessages).not.toContain('superseded first message')
+    expect(visibleMessages).not.toContain('late reply')
+  })
 
   it('keeps a failed selected tab focused when an unrelated tab closes', async () => {
     currentController.workspaceTabs = openChatTab(currentController.workspaceTabs, {

@@ -125,6 +125,49 @@ export function openChatTab(
   return { tabs: [...state.tabs, next], activeTabId: next.id }
 }
 
+/** Promote the blank tab that owns a first send without changing its route. */
+export function promoteBlankChatTab(
+  state: WorkspaceTabsState,
+  input: { tabId: string; agentRef: string; chatId: string; title?: string }
+): WorkspaceTabsState {
+  const target = state.tabs.find(tab => tab.id === input.tabId)
+  if (
+    target?.kind !== 'chat' ||
+    target.chat?.agentRef !== input.agentRef ||
+    (target.chat?.chatId ?? null) !== null
+  ) {
+    return state
+  }
+
+  const duplicates = new Set(
+    state.tabs
+      .filter(
+        tab =>
+          tab.id !== target.id &&
+          tab.kind === 'chat' &&
+          tab.chat?.agentRef === input.agentRef &&
+          tab.chat.chatId === input.chatId
+      )
+      .map(tab => tab.id)
+  )
+  const title = input.title?.trim() || (target.title === 'New chat' ? 'Conversation' : target.title)
+  const tabs = state.tabs.flatMap(tab => {
+    if (duplicates.has(tab.id)) return []
+    if (tab.id !== target.id) return [tab]
+    return [
+      {
+        ...tab,
+        title,
+        chat: { agentRef: input.agentRef, chatId: input.chatId },
+      },
+    ]
+  })
+  return {
+    tabs,
+    activeTabId: duplicates.has(state.activeTabId ?? '') ? target.id : state.activeTabId,
+  }
+}
+
 /**
  * "New chat" (`focusBlankChatViewTab` port with the §1 kind guard): if the
  * active tab is already a blank chat, reuse it (align the agent); otherwise —

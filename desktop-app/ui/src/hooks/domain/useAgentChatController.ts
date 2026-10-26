@@ -132,6 +132,12 @@ export type SessionStateLite = SessionStateProjection
 
 const MAX_ACTIVITY_EVENTS_PER_MESSAGE = 100
 
+type SendCreatedChatSelection = {
+  agentRef: string
+  chatId: string
+  selectionIntentRevision: number
+}
+
 /**
  * B14 cap: max number of per-message activity/progress entries retained per agent.
  * On a task terminal (§4.1 cleanup transition) the oldest entries beyond this cap
@@ -449,6 +455,8 @@ export function useAgentChatController({
   const tracker = useAgentTaskTracker()
 
   const [activeChatId, setActiveChatId] = useState<string | null>(null)
+  const [sendCreatedChatSelection, setSendCreatedChatSelection] =
+    useState<SendCreatedChatSelection | null>(null)
   const selectionIntentRevisionRef = useRef(0)
   // Effects can share an in-flight execution or its successful same-intent
   // result. A previously rejected execution instead permits an independent retry.
@@ -539,6 +547,7 @@ export function useAgentChatController({
   const beginSelectionIntent = useCallback(
     (startsHistoryLoad = false) => {
       selectionIntentRevisionRef.current += 1
+      setSendCreatedChatSelection(null)
       if (!startsHistoryLoad) {
         setChatMessagesLoading(false)
         activeChatSwitchRequestRef.current = null
@@ -3156,6 +3165,11 @@ export function useAgentChatController({
               selectedAgent: sendAgent,
             }
             setActiveChatId(chatId)
+            setSendCreatedChatSelection({
+              agentRef: sendAgent,
+              chatId,
+              selectionIntentRevision: sendSelectionIntentRevision,
+            })
             activeChatLocalPageRequestRef.current = null
             setChatMessages([])
           }
@@ -4107,6 +4121,7 @@ export function useAgentChatController({
 
   return {
     activeChatId,
+    sendCreatedChatSelection,
     isChatDeleted,
     chatList,
     chatListLoading,

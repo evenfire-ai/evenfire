@@ -1744,6 +1744,7 @@ export function useAppController() {
 
     // Chat
     activeChatId: chat.activeChatId,
+    sendCreatedChatSelection: chat.sendCreatedChatSelection,
     chatList: chat.chatList,
     sessionStateByChatId: chat.sessionStateByChatId,
     sessionStateByChatKey: chat.sessionStateByChatKey,

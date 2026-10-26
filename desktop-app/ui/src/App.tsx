@@ -79,6 +79,7 @@ import {
   newChatTab,
   openAppTab,
   openChatTab,
+  promoteBlankChatTab,
   reconcileWorkspaceChatTab,
   refreshPreviewTab,
   reorderWorkspaceTab,
@@ -956,7 +957,7 @@ export function App() {
 
   const handleNewWorkspaceChatTab = React.useCallback(() => {
     vm.clearAppsPicker()
-    workspaceTabSelectionIntentRef.current += 1
+    const selectionIntent = ++workspaceTabSelectionIntentRef.current
     vm.beginNavigationIntent()
     clearPendingWorkspaceTabSelection()
     workspaceChatSelectionAuthorityRef.current = null
@@ -977,6 +978,12 @@ export function App() {
           tab => tab.kind === 'chat' && (tab.chat?.chatId ?? null) === null
         )
         const blankTabId = existingBlank?.id ?? nextChatTabId()
+        const blankTab: WorkspaceTab = {
+          id: blankTabId,
+          kind: 'chat',
+          title: 'New chat',
+          chat: { agentRef, chatId: null },
+        }
         setWorkspaceTabs(state => {
           const reconciled = reconcileWorkspaceChatTab(
             state,
@@ -987,6 +994,7 @@ export function App() {
         })
         setRequestedDrawerChatTabId(blankTabId)
         vm.handleSelectChatAgent(agentRef, { selectLatest: false, keepNavItem: true })
+        rememberWorkspaceChatSelection(blankTab, selectionIntent, vm.beginNavigationIntent(), true)
       }
       // With no agent yet there is nothing to seed, so this INTENTIONALLY writes
       // nothing to the store — opening/focusing the drawer is the whole action
@@ -995,7 +1003,26 @@ export function App() {
       // No divertable drawer: full-screen chat route so the new chat is reachable.
       leaveSandboxForChat()
       if (agentRef) {
+        const existingBlank = workspaceTabsRef.current.tabs.find(
+          tab => tab.kind === 'chat' && (tab.chat?.chatId ?? null) === null
+        )
+        const blankTabId = existingBlank?.id ?? nextChatTabId()
+        const blankTab: WorkspaceTab = {
+          id: blankTabId,
+          kind: 'chat',
+          title: 'New chat',
+          chat: { agentRef, chatId: null },
+        }
+        setWorkspaceTabs(state => {
+          const reconciled = reconcileWorkspaceChatTab(
+            state,
+            { agentRef, chatId: null },
+            blankTabId
+          )
+          return reconciled === state ? state : { ...reconciled, activeTabId: blankTabId }
+        })
         vm.handleSelectChatAgent(agentRef, { selectLatest: false })
+        rememberWorkspaceChatSelection(blankTab, selectionIntent, vm.beginNavigationIntent(), false)
       } else {
         const id = nextChatTabId()
         setWorkspaceTabs(state => newChatTab(state, id, null))
@@ -1006,6 +1033,7 @@ export function App() {
     clearPendingWorkspaceTabSelection,
     leaveSandboxForChat,
     nextChatTabId,
+    rememberWorkspaceChatSelection,
     setWorkspaceTabs,
     vm.clearAppsPicker,
     vm.beginNavigationIntent,
@@ -2567,6 +2595,56 @@ export function App() {
   // reference when already aligned); an explicit tab selection remains the
   // authority across controller resets and is replayed if its conversation drifts.
   React.useEffect(() => {
+    const sendCreatedSelection = vm.sendCreatedChatSelection
+    const sendAuthority = workspaceChatSelectionAuthorityRef.current
+    const sendAuthorityTab = sendAuthority
+      ? workspaceTabsRef.current.tabs.find(tab => tab.id === sendAuthority.tabId)
+      : undefined
+    const ownsSendSurface = Boolean(
+      sendAuthority &&
+      sendAuthorityTab?.kind === 'chat' &&
+      sendAuthorityTab.chat?.agentRef === sendCreatedSelection?.agentRef &&
+      (sendAuthorityTab.chat?.chatId ?? null) === null &&
+      sendAuthority.teamContextRevision === vm.teamContextRevision &&
+      vm.isNavigationIntentCurrent(sendAuthority.navigationIntent) &&
+      (sendAuthority.inDrawer
+        ? chatDrawerVisible
+        : vm.navItem === DESKTOP_ROUTES.chat &&
+          workspaceTabsRef.current.activeTabId === sendAuthority.tabId)
+    )
+    if (
+      sendCreatedSelection &&
+      sendAuthority &&
+      sendAuthorityTab?.kind === 'chat' &&
+      ownsSendSurface &&
+      vm.selectedAgent === sendCreatedSelection.agentRef &&
+      vm.activeChatId === sendCreatedSelection.chatId &&
+      !vm.isHostAccessBlocked(sendCreatedSelection.agentRef) &&
+      !vm.isChatDeleted(sendCreatedSelection.agentRef, sendCreatedSelection.chatId)
+    ) {
+      const title = vm.chatList.find(chat => chat.id === sendCreatedSelection.chatId)?.title
+      const promotion = {
+        tabId: sendAuthority.tabId,
+        agentRef: sendCreatedSelection.agentRef,
+        chatId: sendCreatedSelection.chatId,
+        title,
+      }
+      const promoted = promoteBlankChatTab(workspaceTabsRef.current, promotion)
+      const promotedTab = promoted.tabs.find(tab => tab.id === sendAuthority.tabId)
+      if (promoted !== workspaceTabsRef.current && promotedTab) {
+        sendAuthority.tabSnapshot = promotedTab
+        sendAuthority.lastReplayKey = null
+        const pending = pendingWorkspaceTabSelectionRef.current
+        if (pending?.tabId === sendAuthority.tabId) {
+          pendingWorkspaceTabSelectionRef.current = null
+          setPendingWorkspaceTabId(null)
+        }
+        setUnavailableWorkspaceTabId(null)
+        setUnavailableWorkspaceTabReason('access')
+        setWorkspaceTabs(state => promoteBlankChatTab(state, promotion))
+        return
+      }
+    }
     const pendingSelection = pendingWorkspaceTabSelectionRef.current
     const pendingTab = pendingSelection
       ? workspaceTabsRef.current.tabs.find(tab => tab.id === pendingSelection.tabId)
@@ -2870,9 +2948,11 @@ export function App() {
     pendingWorkspaceTabId,
     revealWorkspaceTab,
     setWorkspaceTabs,
+    workspaceTabs,
     vm.activeChatId,
     vm.beginNavigationIntent,
     vm.chatList,
+    vm.sendCreatedChatSelection,
     vm.hostAuthorityRevision,
     vm.isChatDeleted,
     vm.isHostAccessBlocked,

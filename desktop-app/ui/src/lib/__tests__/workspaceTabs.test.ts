@@ -14,6 +14,7 @@ import {
   openFilesTab,
   openPreviewTab,
   openSettingsTab,
+  promoteBlankChatTab,
   reconcileWorkspaceChatTab,
   refreshPreviewTab,
   reorderWorkspaceTab,
@@ -97,6 +98,39 @@ describe('workspaceTabs — identity rules R6–R9', () => {
     state = openAppTab(state, { id: 'app-2', appRef: 'eventasks' })
     expect(state.tabs.filter(t => t.kind === 'app')).toHaveLength(2)
     expect(state.activeTabId).toBe('app-2')
+  })
+
+  it('promotes the owning blank chat in place and preserves the active route', () => {
+    const blank = createWorkspaceTabsState('blank', 'agent-a')
+    const files = openFilesTab(blank, { id: 'files' })
+    const promoted = promoteBlankChatTab(files, {
+      tabId: 'blank',
+      agentRef: 'agent-a',
+      chatId: 'send-created',
+      title: 'First message',
+    })
+
+    expect(promoted.tabs.find(tab => tab.id === 'blank')).toEqual({
+      id: 'blank',
+      kind: 'chat',
+      title: 'First message',
+      chat: { agentRef: 'agent-a', chatId: 'send-created' },
+    })
+    expect(promoted.activeTabId).toBe('files')
+    expect(
+      promoteBlankChatTab(promoted, {
+        tabId: 'blank',
+        agentRef: 'agent-a',
+        chatId: 'send-created',
+      })
+    ).toBe(promoted)
+    expect(
+      promoteBlankChatTab(files, {
+        tabId: 'blank',
+        agentRef: 'agent-b',
+        chatId: 'other-agent-chat',
+      })
+    ).toBe(files)
   })
 
   // R8 (files = single instance) was superseded by §3: files are multi-instance,
