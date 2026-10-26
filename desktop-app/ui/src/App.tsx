@@ -1876,6 +1876,7 @@ export function App() {
 
   const acknowledgeSandboxUiDeepLink = React.useCallback(
     async (linkId: number) => {
+      if (!pendingSandboxUiDeepLinksRef.current.some(item => item.link.id === linkId)) return
       const next = removePendingSandboxUiDeepLink(pendingSandboxUiDeepLinksRef.current, linkId)
       setPendingSandboxUiDeepLinkState(next)
       clearSandboxUiDeepLinkProcessing(linkId)
@@ -1895,6 +1896,7 @@ export function App() {
 
   const cancelSupersededSandboxUiDeepLink = React.useCallback(
     async (linkId: number) => {
+      if (!pendingSandboxUiDeepLinksRef.current.some(item => item.link.id === linkId)) return
       vm.pushToast('App link canceled because you navigated elsewhere.', 'info')
       await acknowledgeSandboxUiDeepLink(linkId)
     },
@@ -1976,7 +1978,11 @@ export function App() {
       let retryable = false
       if (context.switchedTeam) {
         try {
-          await vm.handleEnsureTeamContext({ teamId: context.originalTeamId, announce: true })
+          await vm.handleEnsureTeamContext({
+            teamId: context.originalTeamId,
+            announce: true,
+            navigationIntentSequence: context.navigationIntentSequence,
+          })
           if (!stillOwnsLinkAndNavigation()) return 'superseded' as const
           originTeamRestored = vm.getCurrentTeamId() === context.originalTeamId
           if (!originTeamRestored) {
@@ -2060,6 +2066,7 @@ export function App() {
             selectLatest: false,
             chatId: origin.chatId,
             title: origin.title,
+            navigationIntentAlreadyStarted: true,
           })
         }
       }
@@ -2526,6 +2533,7 @@ export function App() {
             const didSwitchTeam = await vm.handleEnsureTeamContext({
               teamId: pending.link.teamId,
               announce: true,
+              navigationIntentSequence,
             })
             switchedTeam = switchedTeam || didSwitchTeam
             if (switchedTeam && originalTeamId !== pending.link.teamId) {

@@ -1635,10 +1635,12 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(1, {
       teamId: 'team-b',
       announce: true,
+      navigationIntentSequence: 0,
     })
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(2, {
       teamId: 'team-a',
       announce: true,
+      navigationIntentSequence: 0,
     })
     expect(currentController.pushToast).toHaveBeenCalledWith(
       expect.stringContaining("You don't have access"),
@@ -1671,6 +1673,7 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(2, {
       teamId: 'team-a',
       announce: true,
+      navigationIntentSequence: 0,
     })
     expect(currentController.restoreWorkspaceNavigation).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1787,10 +1790,12 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(1, {
       teamId: 'team-b',
       announce: true,
+      navigationIntentSequence: 0,
     })
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(2, {
       teamId: 'team-a',
       announce: true,
+      navigationIntentSequence: 0,
     })
     expect(main.openCall(1).launchId).not.toBe(main.openCall(0).launchId)
     expect(main.openCall(1).routePath).toBe('/tickets/origin')
@@ -1886,6 +1891,7 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleEnsureTeamContext).toHaveBeenCalledWith({
       teamId: 'team-b',
       announce: true,
+      navigationIntentSequence: 0,
     })
     expect(currentController.getCurrentTeamId()).toBe('team-b')
     expect(listApps).toHaveBeenCalledTimes(listAppsCallsBeforeLink + 1)
@@ -2531,10 +2537,12 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(1, {
       teamId: 'team-b',
       announce: true,
+      navigationIntentSequence: 0,
     })
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(2, {
       teamId: 'team-a',
       announce: true,
+      navigationIntentSequence: 0,
     })
     expect(listApps).toHaveBeenCalledTimes(listAppsCallsBeforeLink + 1)
     expect(currentController.getCurrentTeamId()).toBe('team-a')
@@ -2578,6 +2586,7 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleEnsureTeamContext).toHaveBeenCalledWith({
       teamId: 'team-b',
       announce: true,
+      navigationIntentSequence: 0,
     })
     expect(currentController.pushToast).not.toHaveBeenCalledWith(
       "Could not open app link: You don't have access to this app in the linked team",
@@ -2834,6 +2843,7 @@ describe('App deep-link orchestration', () => {
     expect(ensureTeamContext).toHaveBeenCalledWith({
       teamId: 'team-b',
       announce: true,
+      navigationIntentSequence: 0,
     })
 
     await act(async () => {
@@ -2908,7 +2918,11 @@ describe('App deep-link orchestration', () => {
     )
     expect(liveTeamId).toBe('team-b')
     expect(ensureTeamContext).toHaveBeenCalledOnce()
-    expect(ensureTeamContext).toHaveBeenCalledWith({ teamId: 'team-b', announce: true })
+    expect(ensureTeamContext).toHaveBeenCalledWith({
+      teamId: 'team-b',
+      announce: true,
+      navigationIntentSequence: 0,
+    })
     expect(closeSandboxUi()).toHaveBeenCalledOnce()
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
 
@@ -2924,7 +2938,11 @@ describe('App deep-link orchestration', () => {
     await waitForAppOpen(2)
     await waitForMounted()
     expect(ensureTeamContext).toHaveBeenCalledTimes(2)
-    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, {
+      teamId: 'team-a',
+      announce: true,
+      navigationIntentSequence: 0,
+    })
     expect(currentController.restoreWorkspaceNavigation).toHaveBeenCalledOnce()
     expect(currentController.restoreWorkspaceNavigation).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceTabs: expectedWorkspace }),
@@ -2990,7 +3008,11 @@ describe('App deep-link orchestration', () => {
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
     expect(liveTeamId).toBe('team-a')
     expect(ensureTeamContext).toHaveBeenCalledTimes(2)
-    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, {
+      teamId: 'team-a',
+      announce: true,
+      navigationIntentSequence: 0,
+    })
   })
 
   it('retries a failed cross-team native mount without treating its own restore as a user switch', async () => {
@@ -3033,7 +3055,11 @@ describe('App deep-link orchestration', () => {
     expect(liveTeamId).toBe('team-a')
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
     expect(ensureTeamContext).toHaveBeenCalledTimes(2)
-    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, {
+      teamId: 'team-a',
+      announce: true,
+      navigationIntentSequence: 0,
+    })
 
     await act(async () => {
       vi.advanceTimersByTime(1_000)
@@ -3045,7 +3071,11 @@ describe('App deep-link orchestration', () => {
     expect(acknowledgeDeepLink).toHaveBeenCalledTimes(1)
     expect(liveTeamId).toBe('team-b')
     expect(ensureTeamContext).toHaveBeenCalledTimes(3)
-    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, {
+      teamId: 'team-a',
+      announce: true,
+      navigationIntentSequence: 0,
+    })
     expect(currentController.pushToast).not.toHaveBeenCalledWith(
       expect.stringContaining('you switched teams'),
       'error'
@@ -3091,7 +3121,11 @@ describe('App deep-link orchestration', () => {
     })
     expect(liveTeamId).toBe('team-a')
     expect(ensureTeamContext).toHaveBeenCalledTimes(2)
-    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, {
+      teamId: 'team-a',
+      announce: true,
+      navigationIntentSequence: 0,
+    })
 
     liveTeamId = 'team-c'
     await act(async () => {

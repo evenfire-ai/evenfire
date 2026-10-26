@@ -779,11 +779,21 @@ export function useAppController() {
   )
 
   const ensureTeamContext = useCallback(
-    async (target: { teamId?: string; announce?: boolean }): Promise<boolean> => {
+    async (target: {
+      teamId?: string
+      announce?: boolean
+      navigationIntentSequence?: number
+    }): Promise<boolean> => {
       const targetTeamId = String(target.teamId || '').trim()
       if (!targetTeamId) return false
 
       const queuedSwitch = notificationTeamContextQueueRef.current.then(async () => {
+        if (
+          target.navigationIntentSequence !== undefined &&
+          !nav.isNavigationIntentCurrent(target.navigationIntentSequence)
+        ) {
+          return false
+        }
         const activeTeamId = currentTeamIdRef.current
         if (targetTeamId === activeTeamId) return false
 
@@ -796,7 +806,7 @@ export function useAppController() {
       )
       return queuedSwitch
     },
-    [switchTeamForWorkspace]
+    [nav.isNavigationIntentCurrent, switchTeamForWorkspace]
   )
   const getCurrentTeamId = useCallback(() => currentTeamIdRef.current, [])
 
@@ -1255,8 +1265,8 @@ export function useAppController() {
 
   // ─── Cross-domain: handleNavSelect (extended) ───
   const handleNavSelect = useCallback(
-    (item: NavItem) => {
-      const focusedChat = nav.handleNavSelect(item)
+    (item: NavItem, options: { navigationIntentAlreadyStarted?: boolean } = {}) => {
+      const focusedChat = nav.handleNavSelect(item, options)
       if (item === DESKTOP_ROUTES.chat) {
         // `nav.handleNavSelect` owns the "which chat did this focus" precedence
         // (active chat → last chat tab → blank) and RETURNS it. Load exactly that:
@@ -1298,6 +1308,7 @@ export function useAppController() {
       const targetTeamId = String(target.teamId || '').trim()
       const activeTeamId = currentTeamIdRef.current
       const requiresTeamSwitch = Boolean(targetTeamId && targetTeamId !== activeTeamId)
+      const navigationIntentSequence = nav.beginUserNavigationIntent()
       // minispec 04 approach C: when the app embed is live (App requests
       // `keepNavItem`) and no team switch is needed, surface the conversation IN
       // the drawer instead of ejecting to the full-screen chat route. A team
@@ -1306,9 +1317,13 @@ export function useAppController() {
 
       try {
         if (requiresTeamSwitch) {
-          await ensureTeamContext({ teamId: targetTeamId })
+          await ensureTeamContext({ teamId: targetTeamId, navigationIntentSequence })
+          if (!nav.isNavigationIntentCurrent(navigationIntentSequence)) return
         }
-        if (isHostAccessBlocked(targetAgent) && !(await verifyHostAccess(targetAgent))) return
+        if (isHostAccessBlocked(targetAgent)) {
+          const verified = await verifyHostAccess(targetAgent)
+          if (!verified || !nav.isNavigationIntentCurrent(navigationIntentSequence)) return
+        }
 
         if (stayInDrawer) {
           // handleSelectChatAgent(keepNavItem) sets the active chat without
@@ -1317,6 +1332,7 @@ export function useAppController() {
           handleSelectChatAgent(targetAgent, {
             selectLatest: false,
             keepNavItem: true,
+            navigationIntentAlreadyStarted: true,
             ...(targetChatId ? { chatId: targetChatId } : {}),
           })
           return
@@ -1351,13 +1367,14 @@ export function useAppController() {
             // This UI event observes that rejection without reporting it again.
             return
           }
-          nav.activateChatTab(targetAgent, targetChatId)
+          if (!nav.isNavigationIntentCurrent(navigationIntentSequence)) return
+          nav.activateChatTab(targetAgent, targetChatId, undefined, true)
           return
         }
 
         chat.setPendingChatSelection(targetAgent, targetChatId || null)
         nav.setSelectedAgent(targetAgent)
-        nav.activateChatTab(targetAgent, targetChatId || null)
+        nav.activateChatTab(targetAgent, targetChatId || null, undefined, true)
       } catch (error) {
         fullSetStatus(
           `Could not open notification: ${error instanceof Error ? error.message : String(error)}`,
@@ -1372,8 +1389,10 @@ export function useAppController() {
       fullSetStatus,
       handleSelectChatAgent,
       isHostAccessBlocked,
+      nav.beginUserNavigationIntent,
       verifyHostAccess,
       nav.activateChatTab,
+      nav.isNavigationIntentCurrent,
       nav.navItem,
       nav.selectedAgent,
       nav.setSelectedAgent,
@@ -1386,9 +1405,14 @@ export function useAppController() {
     async (notification: AppNotification) => {
       const target = notification.workflow
       if (!target) return
+      const navigationIntentSequence = nav.beginUserNavigationIntent()
       try {
-        await ensureTeamContext({ teamId: notification.teamId })
-        nav.handleNavSelect(DESKTOP_ROUTES.plugins)
+        await ensureTeamContext({
+          teamId: notification.teamId,
+          navigationIntentSequence,
+        })
+        if (!nav.isNavigationIntentCurrent(navigationIntentSequence)) return
+        nav.handleNavSelect(DESKTOP_ROUTES.plugins, { navigationIntentAlreadyStarted: true })
 
         const fallbackWorkflow = {
           namespace: target.namespace,
@@ -1449,7 +1473,14 @@ export function useAppController() {
         )
       }
     },
-    [ensureTeamContext, fullSetStatus, nav.handleNavSelect, queryClient]
+    [
+      ensureTeamContext,
+      fullSetStatus,
+      nav.beginUserNavigationIntent,
+      nav.handleNavSelect,
+      nav.isNavigationIntentCurrent,
+      queryClient,
+    ]
   )
 
   const openSdkNotificationTarget = useCallback(

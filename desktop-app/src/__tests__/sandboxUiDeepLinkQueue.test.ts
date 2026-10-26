@@ -11,6 +11,22 @@ describe('SandboxUiDeepLinkQueue', () => {
     expect(queue.list()).toEqual([])
   })
 
+  it('replays an earlier link when its ack fails and a newer link is acknowledged', async () => {
+    const queue = new SandboxUiDeepLinkQueue()
+    const first = queue.enqueue({ appRef: 'ns/first' })
+    const second = queue.enqueue({ appRef: 'ns/second' })
+    const acknowledge = async (id: number) => {
+      if (id === first.id) throw new Error('Renderer acknowledgement failed')
+      queue.acknowledge(id)
+    }
+
+    await expect(acknowledge(first.id)).rejects.toThrow('Renderer acknowledgement failed')
+    await acknowledge(second.id)
+
+    const replayedLinks = queue.list()
+    expect(replayedLinks).toEqual([first])
+  })
+
   it('clears pending links when the authenticated identity changes', () => {
     const queue = new SandboxUiDeepLinkQueue()
     queue.enqueue({ appRef: 'ns/app' })

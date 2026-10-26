@@ -67,6 +67,61 @@ describe('useAppController team context', () => {
     expect(handle.switchTeam).toHaveBeenCalledWith(HARNESS_ME.teamId)
   })
 
+  // Queue API contract only; App producer races are covered in RecoveredAppDeepLinks.test.tsx.
+  it('enforces the team-context queue contract for an old captured intent', async () => {
+    let releaseDirectory!: () => void
+    let directoryRefreshStarted!: () => void
+    const directoryGate = new Promise<void>(resolve => (releaseDirectory = resolve))
+    const directoryStarted = new Promise<void>(resolve => (directoryRefreshStarted = resolve))
+    const { handle } = installAppControllerClerum()
+    const app = renderAppController()
+    unmount = app.unmount
+
+    await waitFor(() => expect(app.result.current.isAuthenticated).toBe(true))
+    await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
+
+    handle.teamDirectory.mockImplementation(async () => {
+      directoryRefreshStarted()
+      await directoryGate
+      return { items: [], currentTeamId: 'team-2' }
+    })
+    const capturedIntent = app.result.current.navigationIntentSequence
+    let firstSwitch!: Promise<boolean>
+    await act(async () => {
+      firstSwitch = app.result.current.handleEnsureTeamContext({
+        teamId: 'team-2',
+        navigationIntentSequence: capturedIntent,
+      })
+      await Promise.resolve()
+    })
+    await directoryStarted
+
+    let newerIntent = 0
+    act(() => {
+      newerIntent = app.result.current.beginUserNavigationIntent()
+    })
+    expect(newerIntent).toBe(capturedIntent + 1)
+    let oldQueuedSwitch!: Promise<boolean>
+    act(() => {
+      oldQueuedSwitch = app.result.current.handleEnsureTeamContext({
+        teamId: 'team-3',
+        navigationIntentSequence: capturedIntent,
+      })
+    })
+
+    expect(handle.switchTeam).toHaveBeenCalledTimes(1)
+    expect(handle.switchTeam).toHaveBeenCalledWith('team-2')
+    releaseDirectory()
+    await act(async () => {
+      await firstSwitch
+      await oldQueuedSwitch
+    })
+
+    expect(handle.switchTeam).toHaveBeenCalledTimes(1)
+    expect(app.result.current.currentTeamId).toBe('team-2')
+    expect(app.result.current.navigationIntentSequence).toBe(newerIntent)
+  })
+
   // R1-L10: the delete fence binds to the authenticated principal's team only.
   // The team directory is display data; a directory team must never stand in
   // for an absent `me.teamId`, or a deletion would be fenced to a team the

@@ -286,8 +286,11 @@ export function useNavigationController() {
   )
 
   const openSettingsSection = useCallback(
-    (section: Parameters<typeof openSettingsTab>[1]['section']) => {
-      beginUserNavigationIntent()
+    (
+      section: Parameters<typeof openSettingsTab>[1]['section'],
+      navigationIntentAlreadyStarted = false
+    ) => {
+      if (!navigationIntentAlreadyStarted) beginUserNavigationIntent()
       setAppsPickerActive(false)
       const id = nextWorkspaceTabId()
       setWorkspaceTabs(current => openSettingsTab(current, { id, section }))
@@ -459,7 +462,10 @@ export function useNavigationController() {
   const handleNavSelect = useCallback(
     (
       item: NavItem,
-      options: { source?: 'explicit' | 'programmatic' } = {}
+      options: {
+        source?: 'explicit' | 'programmatic'
+        navigationIntentAlreadyStarted?: boolean
+      } = {}
     ): { agentRef: string; chatId: string } | null => {
       const source = options.source ?? 'explicit'
       if (source === 'programmatic' && navigationIntentSequenceRef.current > 0) return null
@@ -482,7 +488,7 @@ export function useNavigationController() {
         setSelectedAgent(null)
         setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
       }
-      openSettingsSection(section)
+      openSettingsSection(section, options.navigationIntentAlreadyStarted)
       return null
     },
     [focusChatSection, openFilesSection, openSettingsSection, showAppsPicker]

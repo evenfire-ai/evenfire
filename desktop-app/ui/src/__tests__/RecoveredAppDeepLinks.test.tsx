@@ -8,6 +8,8 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { buildSandboxUiDeepLink, parseSandboxUiDeepLink } from '@clerum/desktop-app-links'
 import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '@clerum/desktop-app-links'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
+import type { PushNotificationInput } from '@hooks/domain/types'
+import { type ActiveChatVisibility, useChatNotifications } from '@hooks/domain/useChatNotifications'
 import { useAppController } from '@hooks/useAppController'
 import { resolveAgentCatalogAvailability } from '@lib/agentCatalogAvailability'
 import { resetComposerDraftStore } from '@lib/composerDraftStore'
@@ -43,7 +45,7 @@ import {
 import type { DesktopCommandId } from '../../../src/desktopCommands'
 import { GfsResourceDeepLinkQueue } from '../../../src/gfsResourceDeepLinkQueue'
 import { SandboxUiDeepLinkQueue } from '../../../src/sandboxUiDeepLinkQueue'
-import type { AccessCatalog } from '../../../src/types'
+import type { AccessCatalog, WorkflowNotificationStreamEvent } from '../../../src/types'
 import {
   HARNESS_ME,
   installAppControllerClerum,
@@ -53,7 +55,7 @@ import {
   wrapLikeElectronIpc,
 } from '../hooks/domain/__tests__/__fixtures__/ipcErrors'
 import { desktopQueryKeys } from '../hooks/domain/queryKeys'
-import type { NavItem } from '../uiTypes'
+import type { AppNotification, NavItem } from '../uiTypes'
 import { type SandboxUiMainFake, createSandboxUiMainFake } from './__fixtures__/sandboxUiMainFake'
 
 // The sandbox main fake installs a fetch stub for its token mint. The real
@@ -2523,6 +2525,7 @@ describe('App deep-link orchestration', () => {
     resetComposerDraftStore()
     vi.useRealTimers()
     await main.dispose()
+    vi.unstubAllGlobals()
   })
 
   // The deep link's launch reached main (`times` opens so far). Main mounts it
@@ -2900,10 +2903,12 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(1, {
       teamId: 'team-b',
       announce: true,
+      navigationIntentSequence: 0,
     })
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(2, {
       teamId: 'team-a',
       announce: true,
+      navigationIntentSequence: 0,
     })
     expect(currentController.pushToast).toHaveBeenCalledWith(
       expect.stringContaining("You don't have access"),
@@ -2932,6 +2937,7 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(2, {
       teamId: 'team-a',
       announce: true,
+      navigationIntentSequence: 0,
     })
     expect(currentController.workspaceTabs).toEqual(originWorkspace)
     expect(currentController.selectedAgent).toBe('alpha')
@@ -3138,7 +3144,6 @@ describe('App deep-link orchestration', () => {
         acknowledgeDeepLink,
       },
     })
-
     const actual =
       await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
     const realController: { current: AppController | null } = { current: null }
@@ -3396,18 +3401,104 @@ describe('App deep-link orchestration', () => {
     expect(originRestorations).toHaveLength(0)
   })
 
+  it('restores a same-team chat origin without creating user intent after terminal link failure', async () => {
+    const existingBridge = window.clerum
+    const { clerum } = installAppControllerClerum({
+      me: { teamId: 'team-a', teamName: 'Team A' },
+      teamDirectory: { items: [], currentTeamId: 'team-a' },
+    })
+    Object.assign(clerum, {
+      shortcuts: existingBridge.shortcuts,
+      app: existingBridge.app,
+      gfs: existingBridge.gfs,
+      sandboxUi: {
+        ...existingBridge.sandboxUi,
+        listPendingDeepLinks: vi.fn(async () => ({ links: [] })),
+        onDeepLink: vi.fn((callback: (link: SandboxUiDeepLinkEnvelope) => void) => {
+          emitDeepLink = callback
+          return vi.fn()
+        }),
+        acknowledgeDeepLink,
+      },
+    })
+    const actual =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    const realController: { current: AppController | null } = { current: null }
+    vi.mocked(useAppController).mockImplementation(() => {
+      realController.current = actual.useAppController()
+      return realController.current
+    })
+    const queue = new SandboxUiDeepLinkQueue()
+    acknowledgeDeepLink.mockImplementation(async id => queue.acknowledge(id))
+    listApps.mockResolvedValue({ apps: [] })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTaskTrackerProvider>
+          <App />
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => expect(realController.current?.isAuthenticated).toBe(true))
+    await waitFor(() => expect(realController.current?.initialExperienceLoading).toBe(false))
+    act(() => {
+      realController.current?.handleSelectChatAgent('agent-x', {
+        chatId: 'origin-chat',
+        title: 'Origin conversation',
+        selectLatest: false,
+      })
+    })
+    await waitFor(() => expect(realController.current?.activeChatId).toBe('origin-chat'))
+    const originIntent = realController.current?.navigationIntentSequence
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({ recipeNs: 'ns', recipeName: 'missing', teamId: 'team-a' })
+    )
+    if (!target) throw new Error('The production app-link parser rejected the fixture URL')
+    const link = queue.enqueue(target)
+    act(() => emitDeepLink?.(link))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+
+    expect(realController.current?.currentTeamId).toBe('team-a')
+    expect(realController.current?.navItem).toBe(DESKTOP_ROUTES.chat)
+    expect(realController.current?.selectedAgent).toBe('agent-x')
+    expect(realController.current?.activeChatId).toBe('origin-chat')
+    expect(realController.current?.navigationIntentSequence).toBe(originIntent)
+    expect(acknowledgeDeepLink).toHaveBeenCalledOnce()
+    expect(openSandboxUi).not.toHaveBeenCalled()
+  })
+
   it('cancels a target-team startup retry after a user returns to the origin team', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.stubGlobal(
+      'Audio',
+      class {
+        currentTime = 0
+        volume = 1
+        play = vi.fn(async () => undefined)
+      }
+    )
     const existingBridge = window.clerum
     let activeTeamId = 'team-a'
+    let holdOriginRefresh = false
+    let releaseOriginRefresh!: () => void
+    let originRefreshStarted!: () => void
+    const originRefreshGate = new Promise<void>(resolve => (releaseOriginRefresh = resolve))
+    const originRefreshStartedPromise = new Promise<void>(
+      resolve => (originRefreshStarted = resolve)
+    )
     const { clerum, handle } = installAppControllerClerum({
       me: { teamId: 'team-a', teamName: 'Team A' },
       teamDirectory: { items: [], currentTeamId: 'team-a' },
     })
-    handle.teamDirectory.mockImplementation(async () => ({
-      items: [],
-      currentTeamId: activeTeamId,
-    }))
+    handle.teamDirectory.mockImplementation(async () => {
+      if (holdOriginRefresh && activeTeamId === 'team-a') {
+        originRefreshStarted()
+        await originRefreshGate
+      }
+      return { items: [], currentTeamId: activeTeamId }
+    })
     const switchTeamProducer = handle.switchTeam.getMockImplementation() as unknown as
       | ((teamId: string) => Promise<{ authenticated: boolean; me: unknown | null }>)
       | undefined
@@ -3429,6 +3520,226 @@ describe('App deep-link orchestration', () => {
         }),
         acknowledgeDeepLink,
       },
+    })
+
+    const actual =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    const realController: { current: AppController | null } = { current: null }
+    const observedToasts: Array<[string, unknown]> = []
+    vi.mocked(useAppController).mockImplementation(() => {
+      realController.current = actual.useAppController()
+      const pushToast = realController.current.pushToast
+      realController.current.pushToast = (message, type) => {
+        observedToasts.push([message, type])
+        return pushToast(message, type)
+      }
+      return realController.current
+    })
+    const assistantReplyProducer: {
+      current: ReturnType<typeof useChatNotifications> | null
+    } = { current: null }
+    const producedAssistantReply: { current: PushNotificationInput | null } = { current: null }
+    const activeChatVisibilityRef: { current: ActiveChatVisibility } = {
+      current: {
+        activeChatId: null,
+        currentTeamId: 'team-a',
+        navItem: DESKTOP_ROUTES.chat,
+        selectedAgent: null,
+      },
+    }
+    function AssistantReplyNotificationProducer() {
+      assistantReplyProducer.current = useChatNotifications({
+        activeChatVisibilityRef,
+        currentTeamId: 'team-a',
+        currentTeamName: 'Team A',
+        agentDisplayName: agentName => agentName,
+        pushNotification: input => {
+          producedAssistantReply.current = input
+        },
+        canDeliverChatResponseNotification: () => true,
+        showDesktopNotification: async () => 'unsupported',
+        openAgentConversationFromNotification: async () => undefined,
+        decideApprovalFromNotification: async () => undefined,
+      })
+      return null
+    }
+    const queue = new SandboxUiDeepLinkQueue()
+    acknowledgeDeepLink.mockImplementation(async id => queue.acknowledge(id))
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/linked',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready: false,
+          phase: 'deploying',
+        },
+      ],
+    })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTaskTrackerProvider>
+          <>
+            <App />
+            <AssistantReplyNotificationProducer />
+          </>
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => expect(realController.current?.isAuthenticated).toBe(true))
+    await waitFor(() => expect(realController.current?.initialExperienceLoading).toBe(false))
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({ recipeNs: 'ns', recipeName: 'linked', teamId: 'team-b' })
+    )
+    if (!target) throw new Error('The production app-link parser rejected the fixture URL')
+    const link = queue.enqueue(target)
+    act(() => emitDeepLink?.(link))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(realController.current?.currentTeamId).toBe('team-b'))
+    await waitFor(() =>
+      expect(observedToasts).toContainEqual([
+        'Linked App is still starting up. This link will retry shortly.',
+        'info',
+      ])
+    )
+    const startingIntent = realController.current?.navigationIntentSequence
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+    expect(openSandboxUi).not.toHaveBeenCalled()
+
+    const notificationChatId = 'origin-notification-chat'
+    holdOriginRefresh = true
+    act(() => {
+      assistantReplyProducer.current!.pushAssistantReplyNotification(
+        'agent-x',
+        {
+          id: 'origin-notification-reply',
+          role: 'assistant',
+          content: 'Open the origin-team conversation',
+          timestamp: Date.now(),
+          task_id: 'origin-notification-task',
+        },
+        notificationChatId
+      )
+    })
+    const assistantReplyInput = producedAssistantReply.current
+    if (!assistantReplyInput)
+      throw new Error('The assistant-reply producer emitted no notification')
+    const notification: AppNotification = {
+      ...assistantReplyInput,
+      id: 'assistant-reply-producer-output',
+      timestamp: assistantReplyInput.timestamp ?? Date.now(),
+      read: false,
+    }
+    let notificationPromise!: Promise<void>
+    act(() => {
+      notificationPromise = realController.current!.handleOpenNotification(notification)
+    })
+    expect(realController.current?.navigationIntentSequence).toBe((startingIntent ?? 0) + 1)
+    await waitFor(() => expect(handle.switchTeam).toHaveBeenNthCalledWith(2, 'team-a'))
+    await originRefreshStartedPromise
+    await act(async () => {
+      vi.advanceTimersByTime(1_000)
+      await Promise.resolve()
+    })
+    expect(handle.switchTeam).toHaveBeenCalledTimes(2)
+    expect(realController.current?.currentTeamId).toBe('team-a')
+    releaseOriginRefresh()
+    await act(async () => notificationPromise)
+
+    expect(realController.current?.currentTeamId).toBe('team-a')
+    expect(realController.current?.navigationIntentSequence).toBeGreaterThan(startingIntent ?? 0)
+    expect(realController.current?.activeWorkspaceTab?.kind).toBe('chat')
+    expect(realController.current?.activeWorkspaceTab?.chat?.chatId).toBe(notificationChatId)
+    expect(handle.switchTeam).toHaveBeenCalledTimes(2)
+    expect(handle.switchTeam).toHaveBeenNthCalledWith(1, 'team-b')
+    expect(handle.switchTeam).toHaveBeenNthCalledWith(2, 'team-a')
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+    expect(acknowledgeDeepLink).toHaveBeenCalledOnce()
+    expect(realController.current?.currentTeamId).toBe('team-a')
+    expect(realController.current?.activeWorkspaceTab?.kind).toBe('chat')
+    expect(handle.switchTeam).toHaveBeenCalledTimes(2)
+    expect(openSandboxUi).not.toHaveBeenCalled()
+    expect(observedToasts).toContainEqual([
+      'App link canceled because you navigated elsewhere.',
+      'info',
+    ])
+  })
+
+  it('lets a workflow-completion notification supersede a target-team startup retry', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.stubGlobal(
+      'Audio',
+      class {
+        currentTime = 0
+        volume = 1
+        play = vi.fn(async () => undefined)
+      }
+    )
+    const existingBridge = window.clerum
+    let activeTeamId = 'team-a'
+    let holdOriginRefresh = false
+    let releaseOriginRefresh!: () => void
+    let originRefreshStarted!: () => void
+    const originRefreshGate = new Promise<void>(resolve => (releaseOriginRefresh = resolve))
+    const originRefreshStartedPromise = new Promise<void>(
+      resolve => (originRefreshStarted = resolve)
+    )
+    const { clerum, handle } = installAppControllerClerum({
+      me: { teamId: 'team-a', teamName: 'Team A' },
+      teamDirectory: { items: [], currentTeamId: 'team-a' },
+    })
+    handle.teamDirectory.mockImplementation(async () => {
+      if (holdOriginRefresh && activeTeamId === 'team-a') {
+        originRefreshStarted()
+        await originRefreshGate
+      }
+      return { items: [], currentTeamId: activeTeamId }
+    })
+    const switchTeamProducer = handle.switchTeam.getMockImplementation() as unknown as
+      | ((teamId: string) => Promise<{ authenticated: boolean; me: unknown | null }>)
+      | undefined
+    if (!switchTeamProducer) throw new Error('The team-switch producer was not installed')
+    handle.switchTeam.mockImplementation(async (teamId: string) => {
+      activeTeamId = teamId
+      return switchTeamProducer(teamId)
+    })
+    Object.assign(clerum, {
+      shortcuts: existingBridge.shortcuts,
+      app: existingBridge.app,
+      gfs: existingBridge.gfs,
+      sandboxUi: {
+        ...existingBridge.sandboxUi,
+        listPendingDeepLinks: vi.fn(async () => ({ links: [] })),
+        onDeepLink: vi.fn((callback: (link: SandboxUiDeepLinkEnvelope) => void) => {
+          emitDeepLink = callback
+          return vi.fn()
+        }),
+        acknowledgeDeepLink,
+      },
+    })
+    let workflowNotificationListener: ((event: WorkflowNotificationStreamEvent) => void) | null =
+      null
+    const notificationBridge = (
+      clerum as unknown as {
+        notifications: {
+          subscribe: (
+            listener: (event: WorkflowNotificationStreamEvent) => void
+          ) => Promise<() => Promise<void>>
+        }
+      }
+    ).notifications
+    notificationBridge.subscribe = vi.fn(async listener => {
+      workflowNotificationListener = listener
+      listener({
+        type: 'notification.snapshot',
+        items: [],
+        cursor: null,
+        observedAt: new Date().toISOString(),
+      })
+      return async () => undefined
     })
 
     const actual =
@@ -3476,6 +3787,7 @@ describe('App deep-link orchestration', () => {
     act(() => emitDeepLink?.(link))
     await confirmPendingAppLink()
     await waitFor(() => expect(realController.current?.currentTeamId).toBe('team-b'))
+    await waitFor(() => expect(listApps).toHaveBeenCalled())
     await waitFor(() =>
       expect(observedToasts).toContainEqual([
         'Linked App is still starting up. This link will retry shortly.',
@@ -3484,43 +3796,57 @@ describe('App deep-link orchestration', () => {
     )
     const startingIntent = realController.current?.navigationIntentSequence
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
-    expect(openSandboxUi).not.toHaveBeenCalled()
 
-    await act(async () => {
-      await realController.current!.handleOpenNotification({
-        id: 'origin-team-notification',
-        kind: 'approval_required',
-        agentName: 'agent-x',
-        teamId: 'team-a',
-        text: 'Open the origin-team conversation',
-        timestamp: Date.now(),
-        read: false,
-        approval: { taskId: 'task-a', requestId: 'request-a' },
+    expect(workflowNotificationListener).not.toBeNull()
+    act(() => {
+      workflowNotificationListener?.({
+        type: 'workflow.run.completed',
+        id: 'workflow-delivery-1',
+        cursor: 'workflow-cursor-1',
+        observedAt: '2026-10-26T12:00:00.000Z',
+        workflowRun: {
+          workflowRunId: 'run-1',
+          approvalRequestId: 'approval-1',
+          recipeNamespace: 'ns',
+          recipeName: 'completed-workflow',
+          phase: 'Succeeded',
+          completedAt: '2026-10-26T12:00:00.000Z',
+          target: { userId: 'user-1', teamId: 'team-a', teamName: 'Team A' },
+        },
       })
     })
+    await waitFor(() =>
+      expect(realController.current?.notifications[0]?.kind).toBe('workflow_completed')
+    )
+    const notification = realController.current!.notifications[0]!
 
-    expect(realController.current?.currentTeamId).toBe('team-a')
-    expect(realController.current?.navigationIntentSequence).toBeGreaterThan(startingIntent ?? 0)
-    expect(realController.current?.activeWorkspaceTab?.kind).toBe('chat')
-    expect(handle.switchTeam).toHaveBeenCalledTimes(2)
-    expect(handle.switchTeam).toHaveBeenNthCalledWith(1, 'team-b')
-    expect(handle.switchTeam).toHaveBeenNthCalledWith(2, 'team-a')
-
+    holdOriginRefresh = true
+    let notificationPromise!: Promise<void>
+    act(() => {
+      notificationPromise = realController.current!.handleOpenNotification(notification)
+    })
+    expect(realController.current?.navigationIntentSequence).toBe((startingIntent ?? 0) + 1)
+    await waitFor(() => expect(handle.switchTeam).toHaveBeenNthCalledWith(2, 'team-a'))
+    await originRefreshStartedPromise
     await act(async () => {
       vi.advanceTimersByTime(1_000)
       await Promise.resolve()
     })
-    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
-
-    expect(acknowledgeDeepLink).toHaveBeenCalledOnce()
-    expect(realController.current?.currentTeamId).toBe('team-a')
-    expect(realController.current?.activeWorkspaceTab?.kind).toBe('chat')
     expect(handle.switchTeam).toHaveBeenCalledTimes(2)
-    expect(openSandboxUi).not.toHaveBeenCalled()
-    expect(observedToasts).toContainEqual([
-      'App link canceled because you navigated elsewhere.',
-      'info',
-    ])
+
+    releaseOriginRefresh()
+    await act(async () => notificationPromise)
+
+    expect(realController.current?.currentTeamId).toBe('team-a')
+    expect(realController.current?.navItem).toBe(DESKTOP_ROUTES.plugins)
+    expect(realController.current?.navigationIntentSequence).toBe((startingIntent ?? 0) + 1)
+    expect(handle.switchTeam).toHaveBeenCalledTimes(2)
+    expect(handle.switchTeam).toHaveBeenNthCalledWith(1, 'team-b')
+    expect(handle.switchTeam).toHaveBeenNthCalledWith(2, 'team-a')
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+    expect(acknowledgeDeepLink).toHaveBeenCalledOnce()
+    expect(window.clerum.workflows.read).toHaveBeenCalledWith('ns', 'completed-workflow')
   })
 
   it('clears the prior principal selection across an authenticated → null → B transition', async () => {
@@ -4189,6 +4515,7 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleEnsureTeamContext).toHaveBeenCalledWith({
       teamId: 'team-b',
       announce: true,
+      navigationIntentSequence: 0,
     })
     expect(currentController.pushToast).not.toHaveBeenCalledWith(
       "Could not open app link: You don't have access to this app in the linked team",
@@ -4381,7 +4708,11 @@ describe('App deep-link orchestration', () => {
     await act(async () => heldOriginOpen().resolve())
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     await waitFor(() => expect(embedPhase()).toBe('mounted'))
-    expect(ensureTeamContext).toHaveBeenCalledWith({ teamId: 'team-b', announce: true })
+    expect(ensureTeamContext).toHaveBeenCalledWith({
+      teamId: 'team-b',
+      announce: true,
+      navigationIntentSequence: 0,
+    })
     expect(main.live()?.appRef).toBe(READY_APP_B.appRef)
     expect(main.openCall(1).launchId).not.toBe(originLaunchId)
     expect(main.reported('sandboxUi:released')).toContainEqual(
@@ -4435,6 +4766,7 @@ describe('App deep-link orchestration', () => {
     expect(ensureTeamContext).toHaveBeenCalledWith({
       teamId: 'team-b',
       announce: true,
+      navigationIntentSequence: 0,
     })
 
     await act(async () => {
@@ -4505,7 +4837,11 @@ describe('App deep-link orchestration', () => {
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
     expect(liveTeamId).toBe('team-a')
     expect(ensureTeamContext).toHaveBeenCalledTimes(2)
-    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, {
+      teamId: 'team-a',
+      announce: true,
+      navigationIntentSequence: 0,
+    })
   })
 
   it('retries a failed cross-team native mount without treating its own restore as a user switch', async () => {
@@ -4555,8 +4891,16 @@ describe('App deep-link orchestration', () => {
     expect(liveTeamId).toBe('team-a')
     expect(currentController.workspaceTabs).toEqual(originWorkspace)
     expect(currentController.selectedAgent).toBe(originAgent)
-    expect(ensureTeamContext).toHaveBeenNthCalledWith(1, { teamId: 'team-b', announce: true })
-    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(1, {
+      teamId: 'team-b',
+      announce: true,
+      navigationIntentSequence: 1,
+    })
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, {
+      teamId: 'team-a',
+      announce: true,
+      navigationIntentSequence: 1,
+    })
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
 
     await act(async () => {
@@ -5050,6 +5394,7 @@ describe('App deep-link orchestration', () => {
     expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(2, {
       teamId: 'team-a',
       announce: true,
+      navigationIntentSequence: 0,
     })
   })
 
@@ -5323,6 +5668,7 @@ describe('App deep-link orchestration', () => {
     expect(ensureTeamContext).toHaveBeenCalledExactlyOnceWith({
       teamId: 'team-b',
       announce: true,
+      navigationIntentSequence: 5,
     })
     expect(main.live()?.appRef).toBe('ns/app')
     expect(main.live()?.launchId).not.toBe(originLaunchId)
