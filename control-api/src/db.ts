@@ -3209,6 +3209,16 @@ async function applyControlAdminReplaceInviterAcceptGuard(db: DbClient): Promise
   `)
 }
 
+async function applyInvitationExpirationTtlMigration(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE invitations
+      ALTER COLUMN expires_at SET DEFAULT (NOW() + INTERVAL '7 days');
+
+    ALTER TABLE control_admin_invitations
+      ALTER COLUMN expires_at SET DEFAULT (NOW() + INTERVAL '7 days');
+  `)
+}
+
 // Exported (read-only) so the migration-order invariant test can assert the
 // array is monotonic by version-string. Applied strictly in array order and
 // tracked by full version-string in `schema_migrations`, so a non-monotonic
@@ -6376,6 +6386,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0129_workflow_schedules_concurrency_policy',
     apply: applyWorkflowScheduleConcurrencyPolicyMigration,
+  },
+  {
+    version: '0130_invitation_expiration_ttl_one_week',
+    apply: applyInvitationExpirationTtlMigration,
   },
 ]
 
