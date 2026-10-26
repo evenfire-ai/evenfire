@@ -79,19 +79,6 @@ function cacheRevokedRefreshJti(jti: string): void {
   }
 }
 
-// Explicit revocation path for admin/manual invalidation flows. Refresh-token
-// rotation uses consumeRefreshJti() instead so the one-time-use path stays
-// atomic under race.
-async function revokeRefreshJti(jti: string, exp: number): Promise<void> {
-  const expiresAt = new Date(exp * 1000).toISOString()
-  // Persist to DB first (authoritative), then update cache
-  await pool.query(
-    `INSERT INTO workflow_revoked_refresh_jtis (jti, expires_at) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-    [jti, expiresAt]
-  )
-  cacheRevokedRefreshJti(jti)
-}
-
 async function insertRefreshJtiOnce(jti: string, exp: number): Promise<boolean> {
   if (revokedRefreshJtis.has(jti)) {
     return false
@@ -127,8 +114,6 @@ async function isRefreshJtiRevoked(jti: string): Promise<boolean> {
   }
   return false
 }
-
-export { revokeRefreshJti }
 
 /**
  * For 1st-party HCC-issued tokens, `hostRefs[0]` is the actual Host CRD
