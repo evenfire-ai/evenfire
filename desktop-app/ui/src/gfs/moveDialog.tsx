@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { Button, IconButton, StatusBanner } from '@components/Common'
 import { IconCheck, IconChevronRight, IconClose, IconContexts } from '@components/SidebarNav/icons'
@@ -196,6 +196,7 @@ export function GfsMoveDialog({
   sessionScope,
   initialCrumbs,
   onMove,
+  onMoveWithOwnership,
   onRetryPermissionCheck,
   onClose,
   busy = false,
@@ -234,6 +235,15 @@ export function GfsMoveDialog({
   )
   const [error, setError] = useState<string | null>(null)
   const [permissionCheckSucceeded, setPermissionCheckSucceeded] = useState(false)
+  const mountedRef = useRef(true)
+  const selectedDestinationRef = useRef(selectedDestination)
+  selectedDestinationRef.current = selectedDestination
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
   const scope = sessionScope ?? 'anonymous'
 
   const accessibleQuery = useInfiniteQuery({
@@ -314,13 +324,22 @@ export function GfsMoveDialog({
   }
 
   const commit = async () => {
-    if (!selectedDestination) return
+    const destination = selectedDestination
+    if (!destination) return
+    const isCurrent = () =>
+      mountedRef.current &&
+      selectedDestinationRef.current?.resourceId === destination.resourceId &&
+      selectedDestinationRef.current.name === destination.name
     setError(null)
     setPermissionCheckSucceeded(false)
     try {
-      await onMove(selectedDestination.resourceId, selectedDestination.name)
+      if (onMoveWithOwnership) {
+        await onMoveWithOwnership(destination.resourceId, destination.name, isCurrent)
+      } else {
+        await onMove(destination.resourceId, destination.name)
+      }
     } catch (moveError) {
-      setError(errorMessage(moveError))
+      if (isCurrent()) setError(errorMessage(moveError))
     }
   }
 

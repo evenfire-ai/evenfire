@@ -95,8 +95,8 @@ import {
   sameGfsDropVerdict,
 } from '@/gfs/dropVerdict'
 import { GfsFilePicker } from '@/gfs/filePicker'
-import { suggestNumberedMoveName } from '@/gfs/moveCommit'
-import type { MoveCommitOutcome } from '@/gfs/moveCommit'
+import { suggestNumberedMoveName, toastMoveOutcome } from '@/gfs/moveCommit'
+import type { MoveCommitExpectedSourceSnapshot, MoveCommitOutcome } from '@/gfs/moveCommit'
 import { runGfsMoveCommit } from '@/gfs/moveCommitRunner'
 import { GfsMoveConfirmDialog } from '@/gfs/moveConfirmDialog'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
@@ -354,6 +354,15 @@ export function FilesPage({
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<GfsActionTarget | null>(null)
   const [moveTarget, setMoveTarget] = useState<GfsActionTarget | null>(null)
+  const moveDialogGenerationRef = useRef(0)
+  const showMoveDialog = (target: GfsActionTarget) => {
+    moveDialogGenerationRef.current += 1
+    setMoveTarget(target)
+  }
+  const closeMoveDialog = () => {
+    moveDialogGenerationRef.current += 1
+    setMoveTarget(null)
+  }
   const [movePermissionStatus, setMovePermissionStatus] = useState<'checking' | 'failed' | null>(
     null
   )
@@ -775,7 +784,7 @@ export function FilesPage({
     setCreateFolderParentId(null)
     setCreateFolderParentName(null)
     setManageOpen(false)
-    setMoveTarget(null)
+    closeMoveDialog()
     setRenameTarget(null)
     setDeleteTarget(null)
     setOpenLinkOpen(false)
@@ -1024,7 +1033,7 @@ export function FilesPage({
       }
       closeManage()
       setOpenLinkOpen(false)
-      setMoveTarget(null)
+      closeMoveDialog()
       setRenameTarget(null)
     }
     window.addEventListener('keydown', handleKeyDown)
@@ -2052,13 +2061,15 @@ export function FilesPage({
    *
    * `isCurrent` is the gesture-ownership predicate: the drag path passes the
    * ownership check it already runs at admission, so the commit re-validates
-   * it at the dispatch boundary too (the explicit Move dialog owns no gesture
-   * and passes none). */
+   * it at the dispatch boundary too. The explicit Move dialog passes its exact
+   * snapshot and selection/workspace ownership predicate. */
   const runMoveCommit = async (
     source: GfsDragSource,
     destination: { resourceId: string; name: string },
     allowNumberedRename: boolean,
-    isCurrent?: () => boolean
+    isCurrent?: () => boolean,
+    expectedSourceSnapshot?: MoveCommitExpectedSourceSnapshot,
+    reportOutcomes = true
   ): Promise<MoveCommitOutcome> => {
     movingResourceRef.current = source.resourceId
     setMovingResourceId(source.resourceId)
@@ -2069,12 +2080,13 @@ export function FilesPage({
             ctrl.moveResource(resourceId, destinationId, ifMatch, newName, oldParentId),
           handleAuthorityFailure: message => ctrl.handleAuthorityFailure(message, 'operation'),
           convergeCommittedMove: (input, receipt) => ctrl.convergeCommittedMove(input, receipt),
-          ...(pushToast ? { pushToast } : {}),
+          ...(reportOutcomes && pushToast ? { pushToast } : {}),
         },
         {
           source,
           destination,
           allowNumberedRename,
+          ...(expectedSourceSnapshot ? { expectedSourceSnapshot } : {}),
           occupiedDestinationNames: cachedDestinationNames(destination.resourceId),
           ...(isCurrent ? { isCurrent } : {}),
         }
@@ -2383,10 +2395,19 @@ export function FilesPage({
   const handleMoveTarget = async (
     destinationId: string,
     destinationName: string,
-    executeMove = true
+    executeMove = true,
+    isDialogCurrent?: () => boolean
   ) => {
     if (!moveTarget) return
     const target = moveTarget
+    const dialogGeneration = moveDialogGenerationRef.current
+    const ownsDialogGeneration = () => moveDialogGenerationRef.current === dialogGeneration
+    const ownsDialog = () => ownsDialogGeneration() && (isDialogCurrent?.() ?? true)
+    const closeOwnedDialog = () => {
+      if (!ownsDialogGeneration()) return
+      closeMoveDialog()
+      setMovePermissionStatus(null)
+    }
     const sourceParentId =
       target.parentResourceId ??
       (target.resourceId === current?.resourceId ? current.parentResourceId : null)
@@ -2402,6 +2423,7 @@ export function FilesPage({
       moveWorkspaceRef.current.sessionScope === origin.sessionScope &&
       moveWorkspaceRef.current.currentResourceId === origin.currentResourceId
     let permissionsChecked = false
+    if (!ownsDialog()) return
     setMovePermissionStatus('checking')
     try {
       if (!sessionScope || !sourceParentId) {
@@ -2433,7 +2455,7 @@ export function FilesPage({
           retry: false,
         }),
       ])
-      if (!pageActiveRef.current) return
+      if (!pageActiveRef.current || !ownsDialog()) return
       if (!contextStillMatches()) {
         throw new Error(
           'Move was not started because the workspace changed; review the destination.'
@@ -2446,6 +2468,7 @@ export function FilesPage({
         throw new Error('You do not have write access to the destination folder.')
       }
       permissionsChecked = true
+      if (!ownsDialog()) return
       if (!contextStillMatches()) {
         throw new Error(
           'Move was not started because the workspace changed; review the destination.'
@@ -2474,15 +2497,16 @@ export function FilesPage({
           staleTime: 0,
           retry: false,
         })
+        if (!ownsDialog()) return
         allowNumberedRename = resourceAuthority.held.includes('write')
       } catch (optionalPermissionError) {
+        if (!ownsDialog()) return
         if (failClosedOnAuthorizationError(optionalPermissionError)) {
-          setMoveTarget(null)
-          setMovePermissionStatus(null)
+          closeOwnedDialog()
           return
         }
       }
-      if (!pageActiveRef.current) return
+      if (!pageActiveRef.current || !ownsDialog()) return
       if (!contextStillMatches()) {
         throw new Error(
           'Move was not started because the workspace changed; review the destination.'
@@ -2503,41 +2527,60 @@ export function FilesPage({
         scope: sessionScope,
         generation: dragSessionRef.current,
       }
+      const expectedSourceSnapshot: MoveCommitExpectedSourceSnapshot = {
+        resourceId: target.resourceId,
+        version: target.version,
+        parentResourceId: sourceParentId,
+      }
       const outcome = await runMoveCommit(
         moveSource,
         { resourceId: destinationId, name: destinationName },
-        allowNumberedRename
+        allowNumberedRename,
+        () => pageActiveRef.current && ownsDialog() && contextStillMatches(),
+        expectedSourceSnapshot,
+        false
       )
-      if (!pageActiveRef.current || !contextStillMatches()) return
-      if (outcome.status === 'session-lost' || outcome.status === 'gesture-lost') {
-        setMoveTarget(null)
+      if (!pageActiveRef.current || !ownsDialogGeneration()) return
+      if (!contextStillMatches()) {
+        closeOwnedDialog()
+        return
+      }
+      if (!ownsDialog()) {
         setMovePermissionStatus(null)
+        return
+      }
+      if (outcome.status === 'session-lost' || outcome.status === 'gesture-lost') {
+        if (outcome.status === 'session-lost') closeOwnedDialog()
+        else setMovePermissionStatus(null)
         return
       }
       if (outcome.status !== 'committed' && outcome.status !== 'no-op') {
         throw new Error(outcome.message)
       }
+      toastMoveOutcome(pushToast, outcome, target.name, destinationName, target.kind)
     } catch (moveError) {
       if (!pageActiveRef.current) return
-      if (moveWorkspaceRef.current.sessionScope !== origin.sessionScope) {
-        setMoveTarget(null)
+      if (!ownsDialogGeneration()) return
+      if (!ownsDialog()) {
         setMovePermissionStatus(null)
         return
       }
+      if (moveWorkspaceRef.current.sessionScope !== origin.sessionScope) {
+        closeOwnedDialog()
+        return
+      }
       if (failClosedOnAuthorizationError(moveError)) {
-        setMoveTarget(null)
-        setMovePermissionStatus(null)
+        closeOwnedDialog()
         return
       }
       setMovePermissionStatus(permissionsChecked ? null : 'failed')
       throw moveError
     }
-    setMoveTarget(null)
-    setMovePermissionStatus(null)
+    closeOwnedDialog()
   }
 
   const requestMoveCurrent = () => {
-    if (current) setMoveTarget(current)
+    if (current) showMoveDialog(current)
   }
 
   /** Page-level rename works inline for any row or the current resource; the
@@ -2578,12 +2621,16 @@ export function FilesPage({
       pushToast?.('Could not verify the source folder for this move.', 'error')
       return
     }
+    const openGeneration = moveDialogGenerationRef.current + 1
+    moveDialogGenerationRef.current = openGeneration
     void runWithFreshResourcePermissions(
       target,
       sourceParentId,
       'the source folder',
       ['write', 'delete'],
-      () => setMoveTarget(target)
+      () => {
+        if (moveDialogGenerationRef.current === openGeneration) setMoveTarget(target)
+      }
     )
   }
 
@@ -3761,10 +3808,13 @@ export function FilesPage({
           }
           onClose={() => {
             setMovePermissionStatus(null)
-            setMoveTarget(null)
+            closeMoveDialog()
           }}
           onMove={(destinationId, destinationName) =>
             handleMoveTarget(destinationId, destinationName)
+          }
+          onMoveWithOwnership={(destinationId, destinationName, isCurrent) =>
+            handleMoveTarget(destinationId, destinationName, true, isCurrent)
           }
           onRetryPermissionCheck={(destinationId, destinationName) =>
             handleMoveTarget(destinationId, destinationName, false)

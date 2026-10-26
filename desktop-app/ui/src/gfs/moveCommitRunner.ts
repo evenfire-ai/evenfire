@@ -1,6 +1,6 @@
 import type { GfsDragSource } from './dragSession.types'
 import { commitGfsMove, toastMoveOutcome } from './moveCommit'
-import type { MoveCommitOutcome, MoveToast } from './moveCommit'
+import type { MoveCommitExpectedSourceSnapshot, MoveCommitOutcome, MoveToast } from './moveCommit'
 
 /**
  * The surface-level operations the shared commit path needs. They are the
@@ -36,6 +36,8 @@ export interface GfsMoveCommitRequest {
   destination: { resourceId: string; name: string }
   /** Numbered renaming is pre-approved (source write proved or confirmed). */
   allowNumberedRename: boolean
+  /** Explicit Move only: the immutable source snapshot shown by its dialog. */
+  expectedSourceSnapshot?: MoveCommitExpectedSourceSnapshot
   /** Names already known to be taken in the destination, when cached. */
   occupiedDestinationNames?: ReadonlySet<string>
   /**
@@ -104,6 +106,9 @@ export async function runGfsMoveCommit(
       },
       destination,
       allowNumberedRename,
+      ...(request.expectedSourceSnapshot
+        ? { expectedSourceSnapshot: request.expectedSourceSnapshot }
+        : {}),
       ...(request.occupiedDestinationNames
         ? { occupiedDestinationNames: request.occupiedDestinationNames }
         : {}),

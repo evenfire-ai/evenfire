@@ -17,11 +17,18 @@ export interface MoveCommitSourceSnapshot {
   parentResourceId: string | null
 }
 
+export type MoveCommitExpectedSourceSnapshot = Pick<
+  MoveCommitSourceSnapshot,
+  'resourceId' | 'version' | 'parentResourceId'
+>
+
 export interface MoveCommitPlan {
   source: { resourceId: string; gfsUri: string; kind: 'file' | 'directory'; name: string }
   destination: { resourceId: string; name: string }
   /** Pre-approved numbered-name conflict policy (rev-2 §5). */
   allowNumberedRename: boolean
+  /** Explicit Move only: the target shown by the dialog, before its fresh resolve. */
+  expectedSourceSnapshot?: MoveCommitExpectedSourceSnapshot
   /** Names already known to be taken in the destination, when cached. */
   occupiedDestinationNames?: ReadonlySet<string>
 }
@@ -139,6 +146,24 @@ export async function commitGfsMove(
       }
     }
     return { status: 'unconfirmed', message: describeGfsReadError(error).message }
+  }
+
+  // An explicit Move dialog is consent for the exact resource snapshot it
+  // showed. A same-URI resolve may find a newer version or parent; do not let
+  // that retarget the user's confirmation. Drag callers omit this guard and
+  // keep their commit-time snapshot/convergence behavior.
+  const expectedSource = plan.expectedSourceSnapshot
+  if (
+    expectedSource &&
+    (snapshot.resourceId !== expectedSource.resourceId ||
+      snapshot.version !== expectedSource.version ||
+      snapshot.parentResourceId !== expectedSource.parentResourceId)
+  ) {
+    return {
+      status: 'changed',
+      message:
+        'This item changed while you were moving it. Review its current location and try again.',
+    }
   }
 
   // Fresh-parent no-op guard before any request (a concurrent move may have

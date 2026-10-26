@@ -16,7 +16,9 @@ import {
 import type { WorkspaceTabsState } from '@lib/workspaceTabs.types'
 import {
   accessibleResource,
+  affordancesResult,
   childView,
+  heldAffordances,
   listAccessiblePage,
   listChildrenPage,
   resolveDeniedMessage,
@@ -395,6 +397,101 @@ describe('FilesPage seed → onLocationChange round-trip (mini-spec 06 §3)', ()
     expect(within(dialog).getByRole('button', { name: 'Retry permission check' })).toBeTruthy()
     expect(moveResource).not.toHaveBeenCalled()
   })
+
+  it.each([
+    { changedPart: 'version', parentResourceId: 'folder-active' },
+    { changedPart: 'parent', parentResourceId: 'other-parent' },
+  ])(
+    'refuses a Move when the resolved source $changedPart differs from the dialog snapshot',
+    async ({ parentResourceId }) => {
+      const sourceUri = 'gfs://main/notesfile'
+      const folder = await resolveResource(
+        resolvedDirectory('folder-active', 'Reports', { gfsUri: SEED_URI })
+      )
+      const notes = childView('notes-file', 'notes.txt', 'file', {
+        parentResourceId: 'folder-active',
+        version: 3,
+      })
+      const children = await listChildrenPage([notes])
+      const destinations = await listAccessiblePage([
+        accessibleResource('archive-folder', 'Archive', 'directory'),
+      ])
+      const changedSource = await resolveResource(
+        resolvedFile('notes-file', 'notes.txt', {
+          gfsUri: sourceUri,
+          parentResourceId,
+          path:
+            parentResourceId === 'other-parent'
+              ? '/Other location/notes.txt'
+              : '/Reports/notes.txt',
+          version: 4,
+          bytes: 12,
+        })
+      )
+      const resolve = vi.fn(async (uri: string) => {
+        if (uri === SEED_URI) return folder
+        if (uri === sourceUri) return changedSource
+        throw new Error(`Unexpected GFS resolve URI: ${uri}`)
+      })
+      const affordances = vi.fn(async (resourceId: string) => {
+        const held =
+          resourceId === 'folder-active'
+            ? ['read', 'write', 'delete']
+            : resourceId === 'archive-folder'
+              ? ['read', 'write']
+              : ['read']
+        const produced = await affordancesResult(heldAffordances(held))
+        return delegationAffordances(new Set(produced.held), produced.isOperator)
+      })
+      const moveResource = vi.fn(
+        async (
+          resourceId: string,
+          _destinationId: string,
+          _drive?: string,
+          ifMatch?: number,
+          _newName?: string
+        ) => ({ resourceId, version: (ifMatch ?? 0) + 1 })
+      )
+      Object.defineProperty(window, 'clerum', {
+        configurable: true,
+        value: {
+          gfs: {
+            listAccessible: vi.fn(async () => destinations),
+            resolve,
+            listChildren: vi.fn(async (resourceId: string) =>
+              resourceId === 'folder-active' ? children : listChildrenPage([])
+            ),
+            affordances,
+            moveResource,
+          },
+        },
+      })
+
+      renderHarness()
+      await screen.findByText('notes.txt')
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
+      })
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Move to' }))
+      const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+      await act(async () => {
+        fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+      })
+      await act(async () => {
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+      })
+
+      await waitFor(() => expect(resolve).toHaveBeenCalledWith(sourceUri))
+      await act(async () => {
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      expect(moveResource).not.toHaveBeenCalled()
+      expect(
+        await within(dialog).findByText(/This item changed while you were moving it/)
+      ).toBeTruthy()
+    }
+  )
 
   it('loads the real source-parent query for a shared-with-me row before rendering Move', async () => {
     const parentResourceId = 'source-parent'
