@@ -201,6 +201,22 @@ async function dragRowOntoRowForRefusal(
 test.describe('EvenDrive drag and drop (desktop grid)', () => {
   test.setTimeout(300_000)
 
+  // LOGIN-ADMISSION BUDGET. The control-api password admission policy allows
+  // FIVE login attempts per identity per rolling 15-minute window, and this
+  // gate spends them fast: one in the setup preflight, then TWO per app
+  // launch (the harness API login plus the UI sign-in). The
+  // folder-confirmation journey therefore hands its still-authenticated app
+  // to the refused-drop journeys below instead of closing it, which keeps
+  // the whole five-journey gate at exactly the same five-attempt profile as
+  // the original two-journey gate. The final afterAll reaps the handed-off
+  // app.
+  let handoffApp: ElectronApplication | undefined
+  let handoffPage: Page | undefined
+
+  test.afterAll(async () => {
+    await handoffApp?.close().catch(() => undefined)
+  })
+
   test('file drag into a folder moves it without a confirmation', async () => {
     // ONE fixture name: the file helper and the directory helper reuse the
     // same fixture folder row, so the folder ends up holding BOTH the file
@@ -254,6 +270,7 @@ test.describe('EvenDrive drag and drop (desktop grid)', () => {
     const sourceName = uniqueGfsFixtureName('e2e-gfs-dnd-src')
     const destinationName = uniqueGfsFixtureName('e2e-gfs-dnd-dst')
     let app: ElectronApplication | undefined
+    let page: Page | undefined
     try {
       const sourceDir = await seedFixtureDirectory(sourceName)
       const destinationDir = await seedFixtureDirectory(destinationName)
@@ -265,7 +282,7 @@ test.describe('EvenDrive drag and drop (desktop grid)', () => {
       await grantFixtureToE2eUser(destinationDir.resourceId)
       const launched = await launchAndLogin()
       app = launched.app
-      const page = launched.page
+      page = launched.page
       await openFilesSharedRoot(page)
       const sourceRow = gridRow(page, sourceDir.childName)
       const destinationRow = gridRow(page, destinationDir.name)
@@ -328,7 +345,10 @@ test.describe('EvenDrive drag and drop (desktop grid)', () => {
         })
       ).toBeNull()
     } finally {
-      await app?.close().catch(() => undefined)
+      // The app is NOT closed here: the refused-drop journeys below reuse
+      // this authenticated session (login-admission budget, see above).
+      handoffApp = app
+      handoffPage = page
       await removeFixture(sourceName)
       await removeFixture(destinationName)
     }
@@ -343,17 +363,16 @@ test.describe('EvenDrive drag and drop (desktop grid)', () => {
   test.describe('EvenDrive refused drops (desktop grid)', () => {
     test.describe.configure({ mode: 'serial' })
 
-    let sharedApp: ElectronApplication | undefined
     let sharedPage: Page | undefined
 
     test.beforeAll(async () => {
-      const launched = await launchAndLogin()
-      sharedApp = launched.app
-      sharedPage = launched.page
-    })
-
-    test.afterAll(async () => {
-      await sharedApp?.close().catch(() => undefined)
+      // Serial order guarantees the folder-confirmation journey already ran
+      // and handed off its still-authenticated app (login-admission budget,
+      // see the outer describe).
+      if (!handoffPage) {
+        throw new Error('the folder-confirmation journey did not hand off its authenticated app')
+      }
+      sharedPage = handoffPage
     })
 
     test('drop onto itself refuses with the self reason and mutates nothing', async () => {
