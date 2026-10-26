@@ -1827,10 +1827,7 @@ export function FilesPage({
       sourceParentId === current?.resourceId
         ? ctrl.affordances
         : ctrl.moveSourceParentAffordancesById?.[sourceParentId]
-    if (
-      sourceParentId === current?.resourceId &&
-      (ctrl.loadingAffordances || ctrl.affordancesError)
-    ) {
+    if (sourceParentId === current?.resourceId && ctrl.affordancesError) {
       return false
     }
     return hasGfsMoveSourcePermissions(sourceParent?.held)

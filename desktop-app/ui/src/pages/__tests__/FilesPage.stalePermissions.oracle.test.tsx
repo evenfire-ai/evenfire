@@ -14,8 +14,19 @@ import {
   resolveResource,
   resolvedDirectory,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import {
+  appServiceAffordanceProducer,
+  heldPermissionResponse,
+} from '@/gfs/__fixtures__/permissionProducerFixtures'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
 import { FilesPage } from '../FilesPage'
+
+vi.mock('electron', () => ({
+  app: { getPath: () => '/tmp/evenfire-renderer-test', isPackaged: false, isReady: () => false },
+  safeStorage: { isEncryptionAvailable: () => false },
+  BrowserWindow: { getAllWindows: () => [] },
+  Notification: { isSupported: () => false },
+}))
 
 const FOLDER_URI = 'gfs://main/aaa'
 const me = {
@@ -48,6 +59,7 @@ describe('FilesPage stale permission action oracle', () => {
   afterEach(() => {
     cleanup()
     vi.useRealTimers()
+    focusManager.setFocused(undefined)
     vi.restoreAllMocks()
     delete (window as { clerum?: unknown }).clerum
   })
@@ -522,6 +534,201 @@ describe('FilesPage stale permission action oracle', () => {
         name: 'Rename',
       })
     ).toBeTruthy()
+    client.clear()
+  })
+
+  it('keeps child-row Move presented while its current-folder authority refresh is pending', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', { gfsUri: FOLDER_URI })
+    )
+    const report = childView('child-report', 'report.txt', 'file', {
+      parentResourceId: 'folder-active',
+    })
+    const children = await listChildrenPage([report])
+    const permissionResponse = heldPermissionResponse(['read', 'write', 'delete'])
+    let folderReads = 0
+    let releaseFolderRefresh!: (value: typeof permissionResponse) => void
+    const folderRefresh = new Promise<typeof permissionResponse>(resolve => {
+      releaseFolderRefresh = resolve
+    })
+    const produceAffordances = appServiceAffordanceProducer(resourceId => {
+      if (resourceId !== 'folder-active') return Promise.resolve(permissionResponse)
+      folderReads += 1
+      return folderReads === 1 ? Promise.resolve(permissionResponse) : folderRefresh
+    })
+    const affordances = vi.fn((resourceId: string) => produceAffordances(resourceId))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => folder),
+          listChildren: vi.fn(async () => children),
+          affordances,
+        },
+      },
+    })
+
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    try {
+      render(<FilesPage pendingGfsUri={FOLDER_URI} />, { wrapper: wrapper(client) })
+      await screen.findByText('report.txt')
+      await waitFor(() => expect(folderReads).toBe(1))
+      fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
+      const menu = screen.getByRole('menu', { name: 'Actions for report.txt' })
+      expect(within(menu).getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+
+      await act(async () => {
+        void client.refetchQueries({
+          exact: true,
+          queryKey: desktopQueryKeys.gfsAffordances(
+            'test-environment:user-1:team-1',
+            'folder-active',
+            'main'
+          ),
+        })
+      })
+      await waitFor(() => expect(folderReads).toBe(2))
+
+      const pendingMenu = screen.getByRole('menu', { name: 'Actions for report.txt' })
+      expect(within(pendingMenu).getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+      fireEvent.click(within(pendingMenu).getByRole('menuitem', { name: 'Move to' }))
+      expect(screen.queryByRole('dialog', { name: 'Move file report.txt' })).toBeNull()
+
+      await act(async () => {
+        releaseFolderRefresh(permissionResponse)
+        await folderRefresh
+      })
+      expect(await screen.findByRole('dialog', { name: 'Move file report.txt' })).toBeTruthy()
+    } finally {
+      await act(async () => {
+        releaseFolderRefresh(permissionResponse)
+        await Promise.resolve()
+      })
+      client.clear()
+    }
+  })
+
+  it('keeps current-folder Move presented while its source-parent authority refresh is pending', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', {
+        gfsUri: FOLDER_URI,
+        parentResourceId: 'source-parent',
+      })
+    )
+    const sourceParent = await resolveResource(resolvedDirectory('source-parent', 'Shared folder'))
+    const children = await listChildrenPage([])
+    const permissionResponse = heldPermissionResponse(['read', 'write', 'delete'])
+    let sourceParentReads = 0
+    let releaseSourceParentRefresh!: (value: typeof permissionResponse) => void
+    const sourceParentRefresh = new Promise<typeof permissionResponse>(resolve => {
+      releaseSourceParentRefresh = resolve
+    })
+    const produceAffordances = appServiceAffordanceProducer(resourceId => {
+      if (resourceId !== 'source-parent') return Promise.resolve(permissionResponse)
+      sourceParentReads += 1
+      return sourceParentReads === 1 ? Promise.resolve(permissionResponse) : sourceParentRefresh
+    })
+    const affordances = vi.fn((resourceId: string) => produceAffordances(resourceId))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async (uri: string) => (uri === FOLDER_URI ? folder : sourceParent)),
+          listChildren: vi.fn(async () => children),
+          affordances,
+        },
+      },
+    })
+
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    try {
+      render(<FilesPage pendingGfsUri={FOLDER_URI} />, { wrapper: wrapper(client) })
+      await screen.findByRole('button', { name: 'Options for Reports' })
+      await waitFor(() => expect(sourceParentReads).toBe(1))
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Reports' }))
+      const menu = screen.getByRole('menu', { name: 'Actions for Reports' })
+      expect(within(menu).getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+
+      await act(async () => {
+        void client.refetchQueries({
+          exact: true,
+          queryKey: desktopQueryKeys.gfsAffordances(
+            'test-environment:user-1:team-1',
+            'source-parent',
+            'main'
+          ),
+        })
+      })
+      await waitFor(() => expect(sourceParentReads).toBe(2))
+
+      const pendingMenu = screen.getByRole('menu', { name: 'Actions for Reports' })
+      expect(within(pendingMenu).getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+      fireEvent.click(within(pendingMenu).getByRole('menuitem', { name: 'Move to' }))
+      expect(screen.queryByRole('dialog', { name: 'Move folder Reports' })).toBeNull()
+
+      await act(async () => {
+        releaseSourceParentRefresh(permissionResponse)
+        await sourceParentRefresh
+      })
+      expect(await screen.findByRole('dialog', { name: 'Move folder Reports' })).toBeTruthy()
+    } finally {
+      await act(async () => {
+        releaseSourceParentRefresh(permissionResponse)
+        await Promise.resolve()
+      })
+      client.clear()
+    }
+  })
+
+  it('denies Files Move without destination write even when the source parent permits it', async () => {
+    const folder = await resolveResource(
+      resolvedDirectory('folder-active', 'Reports', {
+        gfsUri: FOLDER_URI,
+        parentResourceId: 'source-parent',
+      })
+    )
+    const sourceParent = await resolveResource(resolvedDirectory('source-parent', 'Shared folder'))
+    const destinations = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', { permissions: ['read'] }),
+    ])
+    const children = await listChildrenPage([])
+    const produceAffordances = appServiceAffordanceProducer(resourceId =>
+      resourceId === 'source-parent'
+        ? Promise.resolve(heldPermissionResponse(['read', 'write', 'delete']))
+        : Promise.resolve(heldPermissionResponse(['read']))
+    )
+    const affordances = vi.fn((resourceId: string) => produceAffordances(resourceId))
+    const moveResource = vi.fn(async () => undefined)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => destinations),
+          resolve: vi.fn(async (uri: string) => (uri === FOLDER_URI ? folder : sourceParent)),
+          listChildren: vi.fn(async () => children),
+          affordances,
+          moveResource,
+        },
+      },
+    })
+
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    render(<FilesPage pendingGfsUri={FOLDER_URI} />, { wrapper: wrapper(client) })
+    await screen.findByRole('button', { name: 'Options for Reports' })
+    await waitFor(() => expect(affordances).toHaveBeenCalledWith('source-parent', 'main'))
+    fireEvent.click(screen.getByRole('button', { name: 'Options for Reports' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Move folder Reports' })
+    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive' }))
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+
+    expect(
+      await within(dialog).findByText('You do not have write access to the destination folder.')
+    ).toBeTruthy()
+    expect(affordances).toHaveBeenCalledWith('destination-1', 'main')
+    expect(moveResource).not.toHaveBeenCalled()
     client.clear()
   })
 

@@ -848,7 +848,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     if (authorityPending || accessState === 'revoked') return byId
     moveSourceParentIds.forEach((resourceId, index) => {
       const query = moveSourceParentQueries[index]
-      if (!query?.data || query.isError || query.isFetching) return
+      if (!query?.data || query.isError) return
       byId[resourceId] = query.data as GfsBrowserAffordances
     })
     return byId
