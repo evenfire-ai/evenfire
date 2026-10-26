@@ -2,8 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
-MIGRATION_POLICY_FILE="${REPO_ROOT}/control-api/src/migrations/migrationExecutionPolicy.json"
+MIGRATION_POLICY_FILE="${SCRIPT_DIR}/control-api-migration-execution-policy.json"
 RUNTIME_ACCESS_PROFILES_FILE="${SCRIPT_DIR}/control-api-runtime-access-profiles.tsv"
 RUNTIME_SEQUENCE_ACCESS_PROFILES_FILE="${SCRIPT_DIR}/control-api-runtime-sequence-access-profiles.tsv"
 MAINTENANCE_ACCESS_PROFILES_FILE="${SCRIPT_DIR}/trace-maintenance-runtime-access-profiles.tsv"

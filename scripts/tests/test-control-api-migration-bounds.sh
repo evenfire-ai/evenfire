@@ -7,6 +7,7 @@ RUNNER_FILE="$ROOT_DIR/control-api/src/migrations/migrationRunner.ts"
 INDEX_PLAN_FILE="$ROOT_DIR/control-api/src/migrations/pr1OnlineIndexPlan.ts"
 DB_FILE="$ROOT_DIR/control-api/src/db.ts"
 DEPLOY_FILE="$ROOT_DIR/deploy/scripts/run-control-api-db-migration.sh"
+DEPLOY_POLICY_FILE="$ROOT_DIR/deploy/scripts/control-api-migration-execution-policy.json"
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -16,6 +17,8 @@ fail() {
 [ -f "$POLICY_FILE" ] || fail "canonical migration policy is missing"
 [ -f "$RUNNER_FILE" ] || fail "bounded migration runner is missing"
 [ -f "$INDEX_PLAN_FILE" ] || fail "PR1 online index plan is missing"
+cmp -s "$POLICY_FILE" "$DEPLOY_POLICY_FILE" || \
+  fail "deploy migration policy differs from the canonical control-api policy"
 
 node - "$POLICY_FILE" <<'NODE'
 const fs = require('node:fs')
