@@ -7,6 +7,9 @@ const testState = vi.hoisted(() => {
     handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
       handlers.set(channel, handler)
     }),
+    // The real ipcMain also carries event listeners (gfs:abort); registration
+    // must not depend on them being exercised.
+    on: vi.fn(),
   }
   return { handlers, ipcMainMock }
 })
