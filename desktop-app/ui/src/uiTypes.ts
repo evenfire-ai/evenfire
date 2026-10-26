@@ -23,7 +23,9 @@ export type ThemeMode = 'dark' | 'light'
 export type AgentWorkspaceRoute = AgentWorkspaceRouteValue
 export type AgentChatRole = 'user' | 'assistant' | 'system'
 export type ChatNotificationPreference =
-  'always' | 'when_app_focused_away_from_chat' | 'when_app_unfocused'
+  | 'always'
+  | 'when_app_focused_away_from_chat'
+  | 'when_app_unfocused'
 export type DesktopNotificationPermission = NotificationPermission | 'unsupported'
 
 export type NotificationSettings = {
@@ -84,7 +86,12 @@ export type AgentChatMessage = {
 }
 
 export type AgentActivityStateTone =
-  'waiting' | 'streaming' | 'reconnecting' | 'completed' | 'error' | 'no_activity'
+  | 'waiting'
+  | 'streaming'
+  | 'reconnecting'
+  | 'completed'
+  | 'error'
+  | 'no_activity'
 
 export type AgentMessageActivity = {
   status: AgentActivityStateTone
@@ -109,7 +116,10 @@ export type ToastMessageAction = {
 }
 
 export type AppNotificationKind =
-  'assistant_reply' | 'approval_required' | 'workflow_completed' | 'sdk_notification'
+  | 'assistant_reply'
+  | 'approval_required'
+  | 'workflow_completed'
+  | 'sdk_notification'
 
 export type SdkNotificationTarget = {
   deliveryId: string
@@ -308,7 +318,8 @@ export type ReadyComposerFileAttachment = Extract<ComposerFileAttachment, { stat
 
 /** The outcome of reading a picked document: ready to send, or the reason it cannot be. */
 export type ComposerFileReadResult =
-  ReadyComposerFileAttachment | (ComposerFileAttachmentBase & { status: 'failed'; error: string })
+  | ReadyComposerFileAttachment
+  | (ComposerFileAttachmentBase & { status: 'failed'; error: string })
 
 /**
  * Why a picked document was not attached (#678). Shown as a notice until the
