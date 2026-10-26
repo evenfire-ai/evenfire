@@ -629,33 +629,50 @@ export async function launchAndLogin(
       // loginAs just spent a password attempt through the API; without the pace
       // control-api answers this click with 429 and the form stays on screen.
       await awaitPasswordPace()
-      await humanUiClick(signInButton)
       // The error alert expires after a few seconds, so keep its text once seen
       // and stop polling: an error is terminal, not a pending login.
+      //
+      // A sign-in POST can still fail transiently while the identity itself is
+      // healthy — a shared cluster's admission answered the click without
+      // recording a credential failure (the admission state stores no failure
+      // for it), so ONE paced second click cannot worsen the login budget. The
+      // retry is bounded and the final attempt still fails loudly.
       let loginError = ''
-      await expect
-        .poll(
-          async () => {
-            if (await authenticatedShell.isVisible().catch(() => false)) return 'authenticated'
-            const errorToast = page.getByRole('alert').filter({ hasText: /login|password|failed/i })
-            if (await errorToast.isVisible().catch(() => false)) {
-              loginError = (
-                await errorToast
-                  .first()
-                  .innerText()
-                  .catch(() => '')
-              ).trim()
-              return 'error'
+      for (let signInAttempt = 0; signInAttempt < 2; signInAttempt += 1) {
+        if (signInAttempt > 0) await awaitPasswordPace()
+        await humanUiClick(signInButton)
+        loginError = ''
+        await expect
+          .poll(
+            async () => {
+              if (await authenticatedShell.isVisible().catch(() => false)) return 'authenticated'
+              const errorToast = page
+                .getByRole('alert')
+                .filter({ hasText: /login|password|failed/i })
+              if (await errorToast.isVisible().catch(() => false)) {
+                loginError = (
+                  await errorToast
+                    .first()
+                    .innerText()
+                    .catch(() => '')
+                ).trim()
+                return 'error'
+              }
+              return 'pending'
+            },
+            {
+              timeout: 60_000,
+              intervals: [500, 1_000, 2_000],
+              message: `waiting for Desktop password login to complete for ${email}`,
             }
-            return 'pending'
-          },
-          {
-            timeout: 60_000,
-            intervals: [500, 1_000, 2_000],
-            message: `waiting for Desktop password login to complete for ${email}`,
-          }
-        )
-        .not.toBe('pending')
+          )
+          .not.toBe('pending')
+          .catch(error => {
+            if (signInAttempt > 0) throw error
+            // First click settled nowhere usable: pace again and retry once.
+          })
+        if (loginError === '' && (await authenticatedShell.isVisible().catch(() => false))) break
+      }
       expect(loginError, `Desktop password login failed for ${email}`).toBe('')
       await expect(authenticatedShell).toBeVisible()
     }
