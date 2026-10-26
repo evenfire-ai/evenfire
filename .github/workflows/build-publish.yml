@@ -126,12 +126,14 @@ jobs:
               - 'packages/image-policy/**'
               - 'packages/jwt-key-policy/**'
               - 'packages/display-field/**'
+              - 'packages/host-locale/**'
               - 'packages/llm-provider-attempt-contract/**'
               - 'packages/grok-provider-attempt-contract/**'
             control-ui:
               - 'control-ui/**'
               - 'packages/workflow-recipe-capability-policy/**'
               - 'packages/display-field/**'
+              - 'packages/host-locale/**'
               - 'packages/frontend-components/**'
               - 'packages/gfs-interaction-policy/**'
             external-rest-api:
@@ -149,6 +151,7 @@ jobs:
               - 'packages/codex-catalog-projection/**'
               - 'packages/grok-provider-attempt-contract/**'
               - 'packages/gfs-interaction-policy/**'
+              - 'packages/host-locale/**'
             mcp-proxy:
               - 'mcp-proxy/**'
             gfs-controller:

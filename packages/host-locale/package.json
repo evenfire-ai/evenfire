@@ -1,0 +1,24 @@
+{
+  "name": "@clerum/host-locale",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The language and time zone a host writes its documents in: supported languages, defaults and spec.locale validation",
+  "main": "index.cjs",
+  "types": "index.d.ts",
+  "files": [
+    "index.cjs",
+    "index.d.ts"
+  ],
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "require": "./index.cjs",
+      "default": "./index.cjs"
+    }
+  },
+  "scripts": {
+    "build": "node --check index.cjs",
+    "test": "node --test index.test.cjs"
+  },
+  "license": "MIT"
+}

@@ -1,6 +1,8 @@
 import { Tool } from "../interfaces";
 import { ToolOutput } from "../types";
 import * as os from "os";
+import { currentHostLocale } from "../../locale/hostLocale";
+import { zonedTimestamp } from "../../locale/localeFormat";
 
 export class SystemInfoTool implements Tool {
   name() {
@@ -24,9 +26,13 @@ export class SystemInfoTool implements Tool {
 
   async execute(): Promise<ToolOutput> {
     const startTime = Date.now();
+    const now = new Date();
+    // The host's time zone (Host spec.locale), never the server's.
+    const { timeZone } = currentHostLocale();
     const info = {
-      datetime: new Date().toISOString(),
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      datetime: now.toISOString(),
+      localTime: zonedTimestamp(timeZone, now),
+      timezone: timeZone,
       platform: process.platform,
       arch: process.arch,
       hostname: os.hostname(),

@@ -1,4 +1,6 @@
 /** The slide renderers, one per layout, and the footer. */
+import { inCapitals } from '../locale/labels'
+import { writtenDate } from '../locale/localeFormat'
 import { nativeChartArgs } from './pptxCharts'
 import { type DrawContext, fitOrShorten, hex } from './pptxDraw'
 import { type PptxColumn, type PptxSlide, type SlideOf, fieldPath } from './pptxInput'
@@ -123,14 +125,9 @@ function drawCover(slide: Slide, spec: PptxSlide, ctx: DrawContext): void {
       { fontSize: subFit.size, italic: true, color: hex(palette.muted), valign: 'top' }
     )
   }
-  const dateStr = new Date().toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-  })
   addText(
     slide,
-    dateStr,
+    writtenDate(ctx.locale),
     { x: 0.5, y: frame.height - 0.7, w, h: 0.3 },
     { fontSize: 11, color: hex(palette.muted) }
   )
@@ -152,14 +149,14 @@ function drawSection(slide: Slide, spec: PptxSlide, ctx: DrawContext): void {
   const spacing = spec.eyebrow && !ARABIC_SCRIPT.test(spec.eyebrow) ? 4 : 0
   const eyebrow = spec.eyebrow
     ? truncateToLines(
-        spec.eyebrow.toUpperCase(),
+        inCapitals(spec.eyebrow, ctx.locale.language),
         14,
         w - TEXT_INSET_X - (Array.from(spec.eyebrow).length * spacing) / 72,
         1,
         true
       )
     : undefined
-  if (eyebrow && spec.eyebrow && eyebrow !== spec.eyebrow.toUpperCase()) {
+  if (eyebrow && spec.eyebrow && eyebrow !== inCapitals(spec.eyebrow, ctx.locale.language)) {
     warnings.push(`${fieldPath(spec, 'eyebrow')} is too long for one line and was shortened.`)
   }
   const eyebrowH = eyebrow ? 0.45 : 0
@@ -323,7 +320,9 @@ function drawTable(slide: Slide, planned: PlanOf<'title-table'>, ctx: DrawContex
   const p = ctx.palette
   const data = rows.map((row, r) =>
     row.map(text => ({
-      text: hasRtlLetter(text) ? directionRuns(text, paragraphOptions(slide, text, 'left')) : text,
+      text: hasRtlLetter(text)
+        ? directionRuns(slide, text, paragraphOptions(slide, text, 'left'))
+        : text,
       options: {
         ...(r === 0
           ? { bold: true, color: 'FFFFFF', fill: { color: hex(p.primary) } }

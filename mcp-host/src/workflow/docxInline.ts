@@ -4,7 +4,7 @@
 import { ExternalHyperlink, type IFontAttributesProperties, type IRunOptions, TextRun } from 'docx'
 import { htmlToMarkdownInline, markdownSpans } from './inlineMarkup'
 import { bidiLanguage, isRtlText, scriptSegments } from './textDirection'
-import { type EastAsianScript, eastAsianScript } from './textScript'
+import { type EastAsianScript, type ScriptLanguage, eastAsianScript } from './textScript'
 
 export type DocxInline = TextRun | ExternalHyperlink
 
@@ -24,13 +24,15 @@ type RunOptions = Omit<IRunOptions, 'text' | 'children' | 'break' | 'font'> & {
 /**
  * Runs for `text`: one per line, each after the first starting on a new line,
  * and within a line one per stretch of left-to-right or right-to-left text,
- * the RTL ones marked so Word orders and shapes them as such. `rtlParagraph`
- * is the direction of the paragraph the runs go into, by default `text`'s own.
+ * the RTL ones marked so Word orders and shapes them as such, in `proofing`
+ * when they are in its script. `rtlParagraph` is the direction of the
+ * paragraph the runs go into, by default `text`'s own.
  */
 export function textRuns(
   text: string,
   options: RunOptions,
   eastAsia?: EastAsianScript,
+  proofing?: ScriptLanguage,
   rtlParagraph = isRtlText(text)
 ): TextRun[] {
   const font = eastAsia ? { ...options.font, eastAsia: eastAsia.font } : options.font
@@ -46,7 +48,7 @@ export function textRuns(
           ...(segment.rtl || eastAsia
             ? {
                 language: {
-                  ...(segment.rtl ? { bidirectional: bidiLanguage(segment.text) } : {}),
+                  ...(segment.rtl ? { bidirectional: bidiLanguage(segment.text, proofing) } : {}),
                   ...(eastAsia ? { eastAsia: eastAsia.lang } : {}),
                 },
               }
@@ -64,6 +66,7 @@ interface RunContext {
   eastAsia?: EastAsianScript
   /** The paragraph reads right to left. */
   rtl: boolean
+  proofing?: ScriptLanguage
   /** Half-points; code is set a point smaller than the text around it. */
   codeSize: number
 }
@@ -85,7 +88,7 @@ function appendRuns(markdown: string, base: RunOptions, ctx: RunContext, out: Do
         `The image '${span.image}' was inside a line of text and was left out; ` +
           'put ![alt](file.png) on a line of its own to embed it.'
       )
-      if (span.text) out.push(...textRuns(span.text, style, ctx.eastAsia, ctx.rtl))
+      if (span.text) out.push(...textRuns(span.text, style, ctx.eastAsia, ctx.proofing, ctx.rtl))
     } else if (span.link !== undefined) {
       out.push(
         new ExternalHyperlink({
@@ -94,14 +97,17 @@ function appendRuns(markdown: string, base: RunOptions, ctx: RunContext, out: Do
             span.text,
             { ...style, ...(span.code ? codeStyle(ctx) : {}), color: '1D4ED8', underline: {} },
             ctx.eastAsia,
+            ctx.proofing,
             ctx.rtl
           ),
         })
       )
     } else if (span.code) {
-      out.push(...textRuns(span.text, { ...style, ...codeStyle(ctx) }, ctx.eastAsia, ctx.rtl))
+      out.push(
+        ...textRuns(span.text, { ...style, ...codeStyle(ctx) }, ctx.eastAsia, ctx.proofing, ctx.rtl)
+      )
     } else {
-      out.push(...textRuns(span.text, style, ctx.eastAsia, ctx.rtl))
+      out.push(...textRuns(span.text, style, ctx.eastAsia, ctx.proofing, ctx.rtl))
     }
   }
 }
@@ -112,7 +118,12 @@ function appendRuns(markdown: string, base: RunOptions, ctx: RunContext, out: Do
  * HTML is read. An image written inside a sentence cannot be placed there, so
  * its alt text stands in for it and a warning says how to embed it.
  */
-export function inlineRuns(text: string, style: RunStyle, warnings: string[]): DocxInline[] {
+export function inlineRuns(
+  text: string,
+  style: RunStyle,
+  warnings: string[],
+  proofing?: ScriptLanguage
+): DocxInline[] {
   const size = style.size ?? 22
   const base: RunOptions = { color: style.color, size, bold: style.bold, italics: style.italics }
   const source = htmlToMarkdownInline(text)
@@ -121,6 +132,7 @@ export function inlineRuns(text: string, style: RunStyle, warnings: string[]): D
     warnings,
     eastAsia: eastAsianScript(source),
     rtl: isRtlText(source),
+    proofing,
     codeSize: size - 2,
   }
   appendRuns(source, base, ctx, runs)

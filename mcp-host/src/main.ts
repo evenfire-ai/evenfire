@@ -92,6 +92,7 @@ import {
   providerEnvLookup,
 } from './llm/providerEnv'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
+import { applyHostLocale, currentHostLocale } from './locale/hostLocale'
 import { logger } from './logger'
 import {
   McpManager,
@@ -486,6 +487,30 @@ function refreshFailoverPolicy(host: HostCRD): void {
     failoverEngine.setPolicy(next)
     bootFallbackEntry = null
   }
+}
+
+/**
+ * Take the Host's `spec.locale`: the language and time zone documents, dates
+ * and the prompt use. A value that cannot be used falls back to its default
+ * (en, UTC) with a warning. Returns whether the locale in use changed.
+ */
+function refreshHostLocale(host: HostCRD): boolean {
+  const before = currentHostLocale()
+  const { locale, defaulted, issues } = applyHostLocale(host.spec.locale)
+  if (issues.length > 0) {
+    logger.warn(
+      { issues, defaulted },
+      '[Main] Host spec.locale has values that cannot be used; their defaults apply'
+    )
+  }
+  const changed = JSON.stringify(locale) !== JSON.stringify(before)
+  if (changed) {
+    logger.info(
+      { language: locale.language, timeZone: locale.timeZone, defaulted },
+      '[Main] Host locale applied'
+    )
+  }
+  return changed
 }
 
 /**
@@ -1508,6 +1533,11 @@ async function onHostChange(host: HostCRD): Promise<void> {
   // model). This is deliberately OUTSIDE the personalization branch below.
   if (providerChanged || secretRefChanged || modelChanged || connectionRefChanged) {
     promptCache?.invalidateAll('model_change')
+  }
+
+  // The stable tier carries the locale guidance, so a locale edit rebuilds it.
+  if (refreshHostLocale(host)) {
+    promptCache?.invalidateAll('host_change')
   }
 
   // Reconcile admin-managed identity files. This is intentionally keyed off the
@@ -3278,6 +3308,7 @@ async function startDevMode(): Promise<void> {
   // R5 — parse `spec.llmPolicy` (dev mode has no ConfigStore, so fallback
   // providers won't build — failover stays inert, byte-identical to today).
   refreshFailoverPolicy(host)
+  refreshHostLocale(host)
   await initializeProvider(host, keys)
 
   // Initialize MCP manager
@@ -3343,6 +3374,7 @@ async function startProductionMode(): Promise<void> {
   // R5 — parse `spec.llmPolicy` BEFORE the ConfigStore so its referenced
   // fallback credential slots are loaded from the LLM Secret at boot.
   refreshFailoverPolicy(host)
+  refreshHostLocale(host)
   await ensureConfigStore(host)
   const keys = apiKeysFromConfigStore(configStore!)
 

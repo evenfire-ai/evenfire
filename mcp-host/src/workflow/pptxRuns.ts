@@ -4,6 +4,7 @@ import { type PptxSlide, isRecord } from './pptxInput'
 import { type Box } from './pptxLayout'
 import { scriptOptions } from './pptxText'
 import { bidiLanguage, hasRtlLetter, isRtlText, scriptSegments } from './textDirection'
+import type { ScriptLanguage } from './textScript'
 
 // U+2022, not U+25CF: PowerPoint sets the ambiguous-width U+25CF in the East Asian face of
 // a CJK-tagged paragraph, where the dot is larger than on the Latin lines around it.
@@ -12,6 +13,12 @@ export type Slide = PptxGenJS.Slide
 
 /** The language of each slide's text of Han characters alone: the deck's. */
 export const hanLanguage = new WeakMap<Slide, string>()
+
+/**
+ * The host language a slide's text in that language's script is spell-checked
+ * in ("es-MX", "fa-IR"), when it is not English; other text keeps its own tag.
+ */
+export const proofingLanguage = new WeakMap<Slide, ScriptLanguage>()
 
 /** Every string in the slides, to find the deck's East Asian language from. */
 export function deckText(specs: PptxSlide[]): string {
@@ -32,8 +39,10 @@ export function deckText(specs: PptxSlide[]): string {
  */
 export function runOptions(slide: Slide, text: string, align?: unknown): Record<string, unknown> {
   const script = scriptOptions(text, hanLanguage.get(slide))
+  const proofing = proofingLanguage.get(slide)
   const out: Record<string, unknown> = {}
   if (script.lang) out.lang = script.lang
+  else if (proofing?.letters.test(text)) out.lang = proofing.lang
   if (script.rtlMode) {
     out.rtlMode = true
     if (!align || align === 'left') out.align = 'right'
@@ -57,10 +66,22 @@ type TextRun = { text: string; options: Record<string, unknown> }
  * Arabic print in reverse. `paragraph` (alignment, direction) goes on every
  * run, since pptxgenjs starts a new paragraph where the alignment changes.
  */
-export function directionRuns(text: string, paragraph: Record<string, unknown>): TextRun[] {
+export function directionRuns(
+  slide: Slide,
+  text: string,
+  paragraph: Record<string, unknown>
+): TextRun[] {
+  const proofing = proofingLanguage.get(slide)
   return scriptSegments(text, isRtlText(text)).map(segment => ({
     text: segment.text,
-    options: { ...paragraph, lang: segment.rtl ? bidiLanguage(segment.text) : 'en-US' },
+    options: {
+      ...paragraph,
+      lang: segment.rtl
+        ? bidiLanguage(segment.text, proofing)
+        : proofing?.letters.test(segment.text)
+          ? proofing.lang
+          : 'en-US',
+    },
   }))
 }
 
@@ -91,7 +112,12 @@ export function addText(
     return
   }
   const paragraph = paragraphOptions(slide, text, options.align)
-  slide.addText(directionRuns(text, paragraph), { ...box, ...options, ...upright, ...paragraph })
+  slide.addText(directionRuns(slide, text, paragraph), {
+    ...box,
+    ...options,
+    ...upright,
+    ...paragraph,
+  })
 }
 
 /**
@@ -104,7 +130,7 @@ export function bulletRuns(slide: Slide, items: string[]): TextRun[] {
   return items.flatMap(text => {
     const runs = text.split('\n').flatMap((line, i) => {
       const lineRuns = hasRtlLetter(text)
-        ? directionRuns(line, paragraphOptions(slide, text))
+        ? directionRuns(slide, line, paragraphOptions(slide, text))
         : [{ text: line, options: runOptions(slide, text) }]
       if (i > 0) lineRuns[0].options.softBreakBefore = true
       return lineRuns

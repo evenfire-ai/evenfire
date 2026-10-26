@@ -278,6 +278,10 @@ describe('HostDetailsPage identity integration', () => {
       'foo'
     )
     expect(screen.queryByRole('button', { name: 'Edit agent name' })).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Edit document language and time zone' })
+    ).not.toBeInTheDocument()
+    expect(screen.queryByText('Not set (UTC)')).not.toBeInTheDocument()
 
     resolveBundle({
       host,
@@ -300,6 +304,9 @@ describe('HostDetailsPage identity integration', () => {
       })
     ).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Edit agent name' })).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Edit document language and time zone' })
+    ).toBeInTheDocument()
   })
 
   it('renders the agent detail tabs in order', async () => {
@@ -555,6 +562,71 @@ describe('HostDetailsPage identity integration', () => {
     expect(screen.getByText('foo-display')).toBeInTheDocument()
     expect(screen.queryByText('Discarded Draft')).not.toBeInTheDocument()
     expect(api.apiSend).not.toHaveBeenCalled()
+  })
+
+  it('saves the document locale through one PUT that keeps the rest of the spec', async () => {
+    const localized = {
+      metadata: { ...host.metadata, resourceVersion: '41' },
+      spec: { ...host.spec, locale: { language: 'es-MX', timeZone: 'America/Mexico_City' } },
+    }
+    ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      host: localized,
+      contexts: [{ metadata: { name: 'ctx' }, spec: { contextId: 'ctx' } }],
+      secrets: [{ name: 'openai-secret', keys: ['openai-api-key'] }],
+      users: [],
+      teams: [],
+      agentUsers: [],
+      agentTeams: [],
+    })
+    ;(api.getHost as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(localized)
+    render(<HostDetailsPage />)
+
+    const card = await screen.findByRole('region', { name: 'Documents' })
+    expect(within(card).getByText('America/Mexico_City')).toBeInTheDocument()
+    fireEvent.click(
+      within(card).getByRole('button', { name: 'Edit document language and time zone' })
+    )
+    expect(screen.getByLabelText('Language')).toHaveValue('es-MX')
+    fireEvent.change(screen.getByLabelText('Time zone'), { target: { value: 'Europe/Madrid' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save language and time zone' }))
+
+    await waitFor(() =>
+      expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', {
+        metadata: { resourceVersion: '41' },
+        spec: { ...host.spec, locale: { language: 'es-MX', timeZone: 'Europe/Madrid' } },
+      })
+    )
+    const puts = (api.apiSend as unknown as ReturnType<typeof vi.fn>).mock.calls.filter(
+      c => c[0] === 'PUT'
+    )
+    expect(puts).toHaveLength(1)
+  })
+
+  it('removes spec.locale when both document values are cleared', async () => {
+    const localized = { ...host, spec: { ...host.spec, locale: { language: 'ja' } } }
+    ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      host: localized,
+      contexts: [{ metadata: { name: 'ctx' }, spec: { contextId: 'ctx' } }],
+      secrets: [{ name: 'openai-secret', keys: ['openai-api-key'] }],
+      users: [],
+      teams: [],
+      agentUsers: [],
+      agentTeams: [],
+    })
+    ;(api.getHost as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(localized)
+    render(<HostDetailsPage />)
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Edit document language and time zone' })
+    )
+    fireEvent.change(screen.getByLabelText('Language'), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save language and time zone' }))
+
+    await waitFor(() =>
+      expect(api.apiSend).toHaveBeenCalledWith('PUT', '/api/v1/admin/hosts/foo', {
+        spec: host.spec,
+      })
+    )
   })
 
   it('saves a Codex-only Host without secretRef and keeps metadata.name as identity', async () => {

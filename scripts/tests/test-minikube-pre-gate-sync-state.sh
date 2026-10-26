@@ -136,6 +136,27 @@ else
   fail "gfs-interaction-policy maps to the wrong consumers: ${gfs_policy_targets:-<none>}"
 fi
 
+host_locale_targets="$(
+  PROJECT_DIR="$PWD"
+  PROFILE=fake
+  KC="kubectl --context=fake"
+  FORCE_CLUSTER_SYNC=false
+  FORCE_RESTART=false
+  IMAGE_SOURCE=local
+  IMAGE_TAG=test
+  IMAGES_GENERATED_AT=test
+  log() { :; }
+  # shellcheck source=/dev/null
+  source "$INCREMENTAL_SCRIPT"
+  incremental_classify_path packages/host-locale/index.cjs
+  printf '%s\n' ${INCREMENTAL_TARGETS[@]+"${INCREMENTAL_TARGETS[@]}"}
+)"
+if [[ "$host_locale_targets" == $'control-api|control-plane|control-api\ncontrol-ui|control-plane|control-ui\nmcp-host|mcp-host|chatllm' ]]; then
+  pass "a host-locale change reshadows Control API, Control UI and mcp-host"
+else
+  fail "host-locale maps to the wrong consumers: ${host_locale_targets:-<none>}"
+fi
+
 jwt_policy_targets="$(
   PROJECT_DIR="$PWD"
   PROFILE=fake

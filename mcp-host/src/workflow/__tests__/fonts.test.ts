@@ -32,6 +32,14 @@ describe('font provisioning', () => {
     expect(canRender('é')).toBe(true)
   })
 
+  it('draws Arabic script from the Arabic faces before DejaVu Sans', () => {
+    // DejaVu Sans lacks Urdu letters such as U+06D2, and a word drawn from two faces does not join.
+    const at = (family: string) => CHART_FONT_STACK.indexOf(`"${family}"`)
+    expect(at('Noto Sans Arabic UI')).toBeGreaterThan(at(CHART_FONT_FAMILY))
+    expect(at('Noto Sans Arabic UI')).toBeLessThan(at('DejaVu Sans'))
+    expect(at('Noto Sans Arabic')).toBeLessThan(at('DejaVu Sans'))
+  })
+
   it('supplies pdfmake with embedded faces rather than a standard-14 name', () => {
     const descriptors = pdfFontDescriptors()
     const faces = descriptors[PDF_FONT_FAMILY]

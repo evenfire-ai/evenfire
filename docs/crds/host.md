@@ -49,6 +49,9 @@ represents a single LLM agent instance (an "agent" in Control UI and the Desktop
 | `spec.personalization.soul` | string | no | Content of `SOUL.md` (system-prompt section "## Core Values"). |
 | `spec.personalization.agents` | string | no | Content of `AGENTS.md` (system-prompt section "## Agent Instructions"). |
 | `spec.personalization.user` | string | no | Content of `USER.md` (system-prompt section "## User Context"). |
+| `spec.locale` | object | no | Language and time zone of the documents the agent generates. See [Locale](#locale). |
+| `spec.locale.language` | string | no | BCP 47 tag of a supported language, such as `es`, `es-MX` or `pt-BR`. Default `en`. |
+| `spec.locale.timeZone` | string | no | IANA zone of a place, such as `Europe/Madrid` or `America/New_York`, or `UTC`. Default `UTC`. |
 | `spec.guardrails` | object | no | Opt-in guardrail policy. A Host without it runs no rules or hooks. See [Guardrails](#guardrails). |
 
 ### Guardrails
@@ -65,6 +68,42 @@ represents a single LLM agent instance (an "agent" in Control UI and the Desktop
 
 Apply the CRD before any component writes `spec.guardrails`: the API server
 silently prunes fields an older CRD does not know.
+
+### Locale
+
+`spec.locale` sets how the document tools (`clerum__generate_pdf`, `_docx`,
+`_pptx`, `_xlsx`, `_chart`, `_dashboard` and `_markdown`) write for this agent.
+The supported languages are listed in
+[`packages/host-locale`](../../packages/host-locale/index.cjs).
+
+- **Language.** The text the tools print themselves (template headings, the
+  DOCX page label, chart, dashboard and badge labels) is written in the
+  language, and numbers follow the whole tag: `es-MX` writes `12,345.5` where
+  `es` writes `12.345,5`. When the language is set, the agent is also told to
+  write the documents it generates in it, unless the user asks for another
+  one; quoted or imported material keeps its own language. Dates follow the
+  language's own calendar (`th` writes Buddhist years, `fa` Persian ones); a
+  Unicode extension changes it, as in `fa-u-ca-gregory`. A regional tag takes
+  the fixed text of its own script (`sr-ME` reads Serbian in Latin letters), and
+  a tag whose script no supported language is written in (`pa-PK`) is refused.
+  Dashboards in Arabic, Persian, Hebrew and Urdu run right to left, and slide
+  text in the language's script is marked for spell checking in it.
+- **Time zone.** Dates the platform writes (a document's date, the dashboard
+  footer, including a footer timestamp given as a number or as an ISO time
+  with its offset) and the current time given to the agent (the prompt and
+  each turn's context) are computed in the zone with its daylight-saving
+  rules. Only zones of places and `UTC` are taken: fixed offsets such as
+  `+01:00`, `EST` or `Etc/GMT+5` do not follow daylight saving. A calendar day
+  (`2026-03-07`, or that day at midnight UTC) keeps its day in every zone, and
+  dates the agent writes inside tables and text are shown as written.
+- **Defaults.** A missing value, or one that cannot be used, falls back to `en`
+  and `UTC`, never to the server's zone. Control API refuses an unsupported
+  language or a name that is not an IANA zone; mcp-host logs a warning and
+  uses the default for such a value written another way, such as with
+  kubectl.
+- **Record.** The artifact each document tool returns carries the `language`
+  and `timeZone` it was written with, and mcp-host logs them with each file
+  (`Document generated`).
 
 ## Status Fields
 
@@ -100,6 +139,9 @@ spec:
       - workflow:approval:decide
   channels:
     - all-channels
+  locale:
+    language: es-MX
+    timeZone: America/Mexico_City
   approval:
     defaultPolicy: designated_approvers
     channels:

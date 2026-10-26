@@ -117,6 +117,7 @@ Shared packages under [`packages/`](packages/) (npm name `@clerum/<dir>`):
 | [frontend-components](packages/frontend-components/)                             | React table, record-list and edit-dialog components shared by Control UI and Profile UI             |
 | [gfs-interaction-policy](packages/gfs-interaction-policy/)                       | Browser-safe GFS upload naming/collision/retry policy, `FileReference` v1, file classifier          |
 | [grok-provider-attempt-contract](packages/grok-provider-attempt-contract/)       | Grok subscription wire contract: limits, origins, request hashing, ticket and receipt types         |
+| [host-locale](packages/host-locale/)                                             | Host language and time zone: supported languages, defaults and `spec.locale` validation             |
 | [image-policy](packages/image-policy/)                                           | Container image reference policy for plugins and workflow coordinators                              |
 | [jwt-key-policy](packages/jwt-key-policy/)                                       | RSA JWT key identity policy and local development key storage                                       |
 | [llm-provider-attempt-contract](packages/llm-provider-attempt-contract/)         | Codex subscription wire contract: limits, request hashing, ticket and receipt types                 |

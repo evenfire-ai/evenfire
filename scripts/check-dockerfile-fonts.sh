@@ -17,10 +17,9 @@
 #   Noto Sans Hebrew               apk font-noto-hebrew  (in fonts-noto-core)
 #   Noto Sans CJK collections      apk font-noto-cjk     apt fonts-noto-cjk
 # The further script faces (Devanagari, Thai, Ethiopic and the rest of
-# MORE_SCRIPTS) are in Debian's fonts-noto-core. Alpine ships them as one
-# package per script (font-noto-devanagari, font-noto-thai, ...), which the
-# Alpine image does not install yet, so they are not required here; the
-# renderer logs the scripts it has no face for.
+# MORE_SCRIPTS), which the host languages are written in (packages/host-locale),
+# are in Debian's fonts-noto-core; Alpine ships one package per script
+# (font-noto-devanagari, font-noto-thai, ...).
 #
 # Only the final stage of a Dockerfile counts: fonts installed in a builder
 # stage do not reach the image. Exempt a deliberate, reviewed case with a
@@ -34,7 +33,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-APK_FONTS="font-dejavu font-noto font-noto-cjk font-noto-arabic font-noto-hebrew"
+APK_FONTS="font-dejavu font-noto font-noto-cjk font-noto-arabic font-noto-hebrew \
+font-noto-armenian font-noto-bengali font-noto-devanagari font-noto-ethiopic font-noto-georgian \
+font-noto-gujarati font-noto-gurmukhi font-noto-kannada font-noto-khmer font-noto-lao \
+font-noto-malayalam font-noto-myanmar font-noto-oriya font-noto-tamil font-noto-telugu \
+font-noto-thai"
 APT_FONTS="fonts-dejavu-core fonts-noto-core fonts-noto-cjk"
 
 workflow=""

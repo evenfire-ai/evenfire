@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { safeJsonForScript } from '../dashboardHtml'
-import { dashboardScript } from '../dashboardScript'
+import { type DashboardPage, dashboardScript } from '../dashboardScript'
 
 interface Config {
   type: string
@@ -62,6 +62,7 @@ function runScript(
     sparklines?: string[]
     throwOn?: string[]
     failUpdateOn?: string[]
+    page?: DashboardPage
   } = {}
 ): Page {
   let vars: Record<string, string> = VARS
@@ -123,7 +124,7 @@ function runScript(
     const chart = byCanvas.get(el.id)
     return chart && { destroy: () => (chart.destroyed = true) }
   }
-  const source = dashboardScript(safeJsonForScript(specs))
+  const source = dashboardScript(safeJsonForScript(specs), opts.page)
   new Function('document', 'window', 'getComputedStyle', 'Chart', source)(
     document,
     window,
@@ -165,6 +166,22 @@ describe('dashboardScript', () => {
     const page = runScript([spec('c0', { labels })])
     expect(page.charts.get('c0')!.data.labels).toEqual(labels)
     expect(dashboardScript('[]')).not.toContain('__CHARTS__')
+  })
+
+  it('keeps a placeholder name in the chart data as data', () => {
+    const labels = ['__PAGE__', '__CHARTS__']
+    const page = runScript([spec('c0', { labels })])
+    expect(page.charts.get('c0')!.data.labels).toEqual(labels)
+  })
+
+  it("formats in the page's language and writes its trend note", () => {
+    const page = runScript([spec('c0')], {
+      page: { locale: 'es-MX', trendNote: 'No se pudo dibujar la tendencia' },
+      throwOn: ['sparkline-0'],
+      sparklines: ['sparkline-0'],
+    })
+    expect(page.charts.get('c0')!.options.locale).toBe('es-MX')
+    expect(page.notes).toEqual(['No se pudo dibujar la tendencia'])
   })
 
   it('paints color tokens from the page variables and passes other colors through', () => {

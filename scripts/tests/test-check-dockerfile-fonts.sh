@@ -33,13 +33,27 @@ fails_naming() {
   fi
 }
 
-cat >"$WORK/alpine.Dockerfile" <<'EOF'
+SCRIPT_FONTS="font-noto-armenian font-noto-bengali font-noto-devanagari font-noto-ethiopic \
+font-noto-georgian font-noto-gujarati font-noto-gurmukhi font-noto-kannada font-noto-khmer \
+font-noto-lao font-noto-malayalam font-noto-myanmar font-noto-oriya font-noto-tamil \
+font-noto-telugu font-noto-thai"
+
+cat >"$WORK/alpine.Dockerfile" <<EOF
 FROM node:24-alpine AS builder
 RUN npm ci
 FROM node:24-alpine
-RUN apk add --no-cache font-dejavu font-noto font-noto-cjk font-noto-arabic font-noto-hebrew
+RUN apk add --no-cache font-dejavu font-noto font-noto-cjk font-noto-arabic font-noto-hebrew \\
+      $SCRIPT_FONTS \\
+  && find /usr/share/fonts -name '*Thai*' ! -name 'NotoSans*-Regular.ttf' -delete
 EOF
 passes "an Alpine image with every font package" "$WORK/alpine.Dockerfile"
+
+cat >"$WORK/no-script.Dockerfile" <<EOF
+FROM node:24-alpine
+RUN apk add --no-cache font-dejavu font-noto font-noto-cjk font-noto-arabic font-noto-hebrew \\
+      ${SCRIPT_FONTS/font-noto-devanagari /}
+EOF
+fails_naming "an Alpine image without a script's faces" "font-noto-devanagari" "$WORK/no-script.Dockerfile"
 
 cat >"$WORK/debian.Dockerfile" <<'EOF'
 FROM node:24-alpine AS builder
@@ -52,9 +66,9 @@ RUN apt-get update \
 EOF
 passes "a Debian image installing them over continuation lines" "$WORK/debian.Dockerfile"
 
-cat >"$WORK/no-hebrew.Dockerfile" <<'EOF'
+cat >"$WORK/no-hebrew.Dockerfile" <<EOF
 FROM node:24-alpine
-RUN apk add --no-cache font-dejavu font-noto font-noto-cjk font-noto-arabic
+RUN apk add --no-cache font-dejavu font-noto font-noto-cjk font-noto-arabic $SCRIPT_FONTS
 EOF
 fails_naming "an Alpine image without the Hebrew faces" "font-noto-hebrew" "$WORK/no-hebrew.Dockerfile"
 

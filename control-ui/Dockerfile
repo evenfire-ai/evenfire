@@ -8,6 +8,7 @@ ENV NEXT_PUBLIC_CLERUM_ENABLE_LOCAL_TEMPLATES=${NEXT_PUBLIC_CLERUM_ENABLE_LOCAL_
 
 COPY packages/workflow-recipe-capability-policy ./packages/workflow-recipe-capability-policy
 COPY packages/display-field ./packages/display-field
+COPY packages/host-locale ./packages/host-locale
 COPY packages/frontend-components ./packages/frontend-components
 COPY packages/gfs-interaction-policy ./packages/gfs-interaction-policy
 COPY packages/llm-providers ./packages/llm-providers
@@ -24,6 +25,8 @@ RUN npm ci \
   && cp -R ../packages/llm-providers node_modules/@clerum/llm-providers \
   && rm -rf node_modules/@clerum/display-field \
   && cp -R ../packages/display-field node_modules/@clerum/display-field \
+  && rm -rf node_modules/@clerum/host-locale \
+  && cp -R ../packages/host-locale node_modules/@clerum/host-locale \
   && rm -rf node_modules/@clerum/frontend-components \
   && cp -R ../packages/frontend-components node_modules/@clerum/frontend-components \
   && rm -rf node_modules/@clerum/gfs-interaction-policy \

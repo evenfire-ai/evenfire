@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { hostLocaleIssues } from '@clerum/host-locale'
 import {
   type LlmProviderId,
   PROVIDER_AUTH_MODE,
@@ -464,6 +465,11 @@ export async function validateHostSpec(
         })
       }
     }
+  }
+  // A locale is checked when it is new or changed, so one written another way
+  // (mcp-host falls back from an unusable value) never blocks an unrelated edit.
+  if (JSON.stringify(spec.locale) !== JSON.stringify(context.stored?.locale)) {
+    structuralErrors.push(...hostLocaleIssues(spec.locale))
   }
   if (structuralErrors.length > 0) return { errors: structuralErrors }
 

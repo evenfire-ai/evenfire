@@ -113,12 +113,15 @@ export class SheetNames {
   // Excel reserves "History" for its change log.
   private readonly used = new Set(['history'])
 
+  /** `stem` names an unnamed sheet with its position, as Excel does: Sheet1, Hoja1. */
+  constructor(private readonly stem = 'Sheet') {}
+
   name(requested: unknown, index: number, warnings: string[]): string {
     const asked = requested === null || requested === undefined ? '' : String(requested)
     const base =
       stripQuotes(
         fitLength(stripQuotes(asked.replace(FORBIDDEN_SHEET_CHARS, '-')), MAX_SHEET_NAME)
-      ) || `Sheet${index + 1}`
+      ) || `${this.stem}${index + 1}`
     let name = base
     for (let n = 2; this.used.has(name.toLowerCase()); n++) {
       const suffix = ` (${n})`

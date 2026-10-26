@@ -1,4 +1,5 @@
 /** clerum__generate_xlsx: builds the workbook (xlsxWorkbook, loaded on first use) and writes it. */
+import { type HostLocale, currentHostLocale } from '../locale/hostLocale'
 import {
   artifactResult,
   claimOutputFile,
@@ -16,7 +17,8 @@ const XLSX_MAX_IMAGE_HEIGHT = 400
 
 export async function runGenerateXlsx(
   args: Record<string, unknown>,
-  outputDir: string
+  outputDir: string,
+  locale: HostLocale = currentHostLocale()
 ): Promise<InternalToolResult> {
   try {
     const filename = outputFilename(args.filename, 'xlsx', 'output')
@@ -28,7 +30,8 @@ export async function runGenerateXlsx(
       outputDir,
       { width: XLSX_MAX_IMAGE_WIDTH, height: XLSX_MAX_IMAGE_HEIGHT },
       warnings,
-      aliased
+      aliased,
+      locale.language
     )
     if (!built.ok) return { success: false, error: built.error }
     // The workbook is already in memory, so a quota breach leaves no partial file.
@@ -40,6 +43,7 @@ export async function runGenerateXlsx(
       ...artifactResult(target, 'xlsx', {
         summary: `File generated: ${target.filename} (xlsx): ${built.summary}.`,
         warnings,
+        locale,
       }),
       aliasedArguments: aliased,
     }

@@ -657,6 +657,30 @@ em, i { font-style: italic; }
   color: var(--text-muted);
 }
 
+/* ─── Right-to-left pages (Arabic, Persian, Hebrew, Urdu hosts) ───── */
+
+[dir="rtl"] .data-table thead th { text-align: right; }
+[dir="rtl"] .callout,
+[dir="rtl"] .health-card { border-left: 1px solid var(--border); }
+[dir="rtl"] .callout { border-right: 4px solid var(--accent); }
+[dir="rtl"] .callout[data-tone="warning"] { border-right-color: var(--warning); }
+[dir="rtl"] .callout[data-tone="danger"]  { border-right-color: var(--danger); }
+[dir="rtl"] .callout[data-tone="success"] { border-right-color: var(--success); }
+[dir="rtl"] .timeline-item > .callout { margin: 0 12px 0 0; }
+[dir="rtl"] .bullets { padding: 0 20px 0 0; }
+[dir="rtl"] .health-card { border-right: 4px solid var(--text-muted); }
+[dir="rtl"] .health-card[data-status="healthy"]     { border-right-color: var(--success); }
+[dir="rtl"] .health-card[data-status="degraded"]    { border-right-color: var(--warning); }
+[dir="rtl"] .health-card[data-status="down"]        { border-right-color: var(--danger); }
+[dir="rtl"] .health-card[data-status="maintenance"] { border-right-color: var(--text-muted); }
+[dir="rtl"] .timeline::before { left: auto; right: 88px; }
+[dir="rtl"] .timeline-item::before { left: auto; right: 84px; }
+[dir="rtl"] .timeline-item__time { text-align: left; }
+[dir="rtl"] .timeline-item__body { margin-left: 0; margin-right: 12px; }
+/* A signed figure and the text drawn on a chart keep their left-to-right order. */
+[dir="rtl"] .kpi-card__delta { direction: ltr; justify-content: flex-end; }
+[dir="rtl"] canvas { direction: ltr; }
+
 /* ─── Print ───────────────────────────────────────────────────────── */
 
 @media print {

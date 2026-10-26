@@ -1,3 +1,5 @@
+import type { HostLocaleValue } from '../HostLocaleDialog/types'
+
 export type HostOverviewAccessSummary = {
   memberCount: number
   teamCount: number
@@ -33,4 +35,7 @@ export type HostOverviewTabProps = {
   onSaveDisplayName: (displayName: string) => Promise<boolean>
   onStartNameEdit: () => void
   createdAt: string
+  /** spec.locale as stored: the document language and time zone, empty when unset. */
+  locale: HostLocaleValue
+  onSaveLocale: (locale: HostLocaleValue) => Promise<boolean>
 }

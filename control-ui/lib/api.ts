@@ -1263,6 +1263,8 @@ export type HostResource = {
     contextRef?: string
     model?: { provider?: string; name?: string }
     lifecycle?: HostLifecycleSpec
+    /** Language and time zone of the agent's documents (@clerum/host-locale). */
+    locale?: { language?: string; timeZone?: string }
   }
   status?: AnyRecord & {
     lifecycle?: { state?: string; reason?: string }

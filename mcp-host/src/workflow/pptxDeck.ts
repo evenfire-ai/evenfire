@@ -7,6 +7,7 @@
  * values shrink to fit their boxes, and pictures keep their proportions.
  */
 import type PptxGenJSType from 'pptxgenjs'
+import { type HostLocale, currentHostLocale } from '../locale/hostLocale'
 import { choose } from './ownEntry'
 import { type DrawContext, hex } from './pptxDraw'
 import {
@@ -21,11 +22,11 @@ import {
 import { frameFor, planSlide } from './pptxLayout'
 import { withOnePropertiesPerParagraph } from './pptxPackage'
 import { drawFooter, drawSlide } from './pptxRender'
-import { deckText, hanLanguage } from './pptxRuns'
+import { deckText, hanLanguage, proofingLanguage } from './pptxRuns'
 import { type PptxTemplate, buildTemplateSlides } from './pptxTemplates'
 import { PPTX_FONT_FACE, TEXT_INSET_X, truncateToLines, wrapLines } from './pptxText'
 import { PPTX_ASPECT_RATIOS, PPTX_PALETTES, PPTX_TEMPLATES } from './pptxVocabulary'
-import { documentEastAsianScript } from './textScript'
+import { documentEastAsianScript, proofingFor } from './textScript'
 import { keepZipTextWhole } from './zipText'
 
 // Loaded with require so the tests and the Host run the same CommonJS bundle.
@@ -73,9 +74,10 @@ export async function buildPptxDeck(
   args: Record<string, unknown>,
   outputDir: string,
   warnings: string[],
-  aliased: string[] = []
+  aliased: string[] = [],
+  locale: HostLocale = currentHostLocale()
 ): Promise<{ buffer: Buffer; slides: number }> {
-  const ctx: ReadContext = { outputDir, warnings, aliased }
+  const ctx: ReadContext = { outputDir, warnings, aliased, language: locale.language }
   const specs = readDeck(args, ctx)
   const palette =
     PPTX_PALETTES[choose(args.palette, Object.keys(PPTX_PALETTES), 'default', 'palette', warnings)]
@@ -118,7 +120,7 @@ export async function buildPptxDeck(
 
   const frame = frameFor(aspect.width, aspect.height)
   const planned = specs.flatMap(spec => planSlide(spec, frame, warnings))
-  const drawCtx: DrawContext = { frame, palette, pptx, warnings, logo }
+  const drawCtx: DrawContext = { frame, palette, pptx, warnings, logo, locale }
 
   let footer = [companyName, footerText].filter(Boolean).join(' · ') || undefined
   if (footer && wrapLines(footer, 9, frame.width / 2 - TEXT_INSET_X).length > 1) {
@@ -129,9 +131,11 @@ export async function buildPptxDeck(
   }
 
   const han = documentEastAsianScript(deckText(specs))?.lang
+  const proofing = proofingFor(locale.language)
   planned.forEach((plan, i) => {
     const slide = pptx.addSlide()
     if (han) hanLanguage.set(slide, han)
+    if (proofing) proofingLanguage.set(slide, proofing)
     slide.background = { color: hex(palette.background) }
     drawSlide(slide, plan, drawCtx)
     if (plan.spec.notes && planned[i - 1]?.spec !== plan.spec) slide.addNotes(plan.spec.notes)
