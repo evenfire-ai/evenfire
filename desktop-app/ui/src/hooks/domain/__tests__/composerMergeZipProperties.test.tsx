@@ -260,6 +260,12 @@ describe('composer merge invariants (R1-M6)', () => {
           ]
           const outcome = mergeComposerImageAttachments(held, payload)
           const expected = expectedImageMergeCounts(held, payload)
+          // The incoming sequential classifier is equivalent here: rejected identity groups
+          // never enter the accepted set. Keep this oracle independent of that implementation.
+          expect(outcome.next).toEqual(
+            held.length ? expect.arrayContaining(held) : expect.anything()
+          )
+          expect(outcome.next.length).toBe(Math.max(heldCount, 0) + outcome.kept)
           expect(outcome.next.map(imageOutputKey)).toEqual(
             [...held, ...expected.keptIncoming].map(imageOutputKey)
           )
