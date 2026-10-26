@@ -1111,6 +1111,167 @@ describe('App deep-link orchestration', () => {
     })
   }
 
+  it('continues after a superseded in-flight link is evicted from the bounded queue', async () => {
+    let liveTeamId = 'team-a'
+    let releaseFirstSwitch!: () => void
+    const firstSwitchGate = new Promise<void>(resolve => (releaseFirstSwitch = resolve))
+    const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
+      if (ensureTeamContext.mock.calls.length === 1) await firstSwitchGate
+      if (!teamId || teamId === liveTeamId) return false
+      liveTeamId = teamId
+      return true
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      handleEnsureTeamContext: ensureTeamContext,
+      getCurrentTeamId: () => liveTeamId,
+    })
+    const queue = new SandboxUiDeepLinkQueue()
+    acknowledgeDeepLink.mockImplementation(async id => queue.acknowledge(id))
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    const first = queue.enqueue({ appRef: 'ns/first', teamId: 'team-b' })
+    act(() => emitDeepLink?.(first))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(ensureTeamContext).toHaveBeenCalledTimes(1))
+    const firstSwitch = ensureTeamContext.mock.results[0]?.value
+    if (!firstSwitch) throw new Error('first team switch did not start')
+
+    act(() => {
+      for (let index = 0; index < 20; index += 1) {
+        const link = queue.enqueue({ appRef: 'ns/queued-' + index, teamId: 'team-c' })
+        emitDeepLink?.(link)
+      }
+    })
+    expect(queue.list()).toHaveLength(20)
+    expect(queue.list().some(link => link.id === first.id)).toBe(false)
+
+    act(() => workspaceTabStripHarness.props?.onSelect('chat-tab-1'))
+    await act(async () => {
+      releaseFirstSwitch()
+      await firstSwitch
+      await Promise.resolve()
+    })
+
+    await confirmPendingAppLink()
+    await waitFor(() =>
+      expect(ensureTeamContext.mock.calls.map(call => call[0].teamId)).toContain('team-c')
+    )
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
+    expect(currentController.pushToast).not.toHaveBeenCalledWith(
+      'App link canceled because you navigated elsewhere.',
+      'info'
+    )
+  })
+
+  it('releases an evicted owner after its normal app mount settles', async () => {
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    let liveTeamId = 'team-a'
+    const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
+      if (!teamId || teamId === liveTeamId) return false
+      liveTeamId = teamId
+      return true
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      handleEnsureTeamContext: ensureTeamContext,
+      getCurrentTeamId: () => liveTeamId,
+    })
+    const queue = new SandboxUiDeepLinkQueue()
+    acknowledgeDeepLink.mockImplementation(async id => queue.acknowledge(id))
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    const heldOpen = main.holdNextOpen()()
+    const first = queue.enqueue({ appRef: READY_APP.appRef, teamId: 'team-b' })
+    act(() => emitDeepLink?.(first))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(openSandboxUi()).toHaveBeenCalledOnce())
+
+    act(() => {
+      for (let index = 0; index < 20; index += 1) {
+        const link = queue.enqueue({ appRef: 'ns/queued-' + index, teamId: 'team-c' })
+        emitDeepLink?.(link)
+      }
+    })
+    expect(queue.list()).toHaveLength(20)
+    expect(queue.list().some(link => link.id === first.id)).toBe(false)
+
+    await act(async () => {
+      heldOpen.resolve()
+      await main.settle()
+    })
+    await waitFor(() => expect(main.live()?.appRef).toBe(READY_APP.appRef))
+    await confirmPendingAppLink()
+    await waitFor(() =>
+      expect(ensureTeamContext.mock.calls.map(call => call[0].teamId)).toContain('team-c')
+    )
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
+  })
+
+  it('cleans an evicted processing owner before an absent-link acknowledgement', async () => {
+    let rejectListApps!: (error: Error) => void
+    let liveTeamId = 'team-a'
+    const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
+      if (!teamId || teamId === liveTeamId) return false
+      liveTeamId = teamId
+      return true
+    })
+    const queue = new SandboxUiDeepLinkQueue()
+    acknowledgeDeepLink.mockImplementation(async id => queue.acknowledge(id))
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      handleEnsureTeamContext: ensureTeamContext,
+      getCurrentTeamId: () => liveTeamId,
+    })
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+    await waitFor(() => expect(listApps).toHaveBeenCalledTimes(1))
+    listApps.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectListApps = reject
+        })
+    )
+
+    const first = queue.enqueue({ appRef: READY_APP.appRef, teamId: 'team-b' })
+    act(() => emitDeepLink?.(first))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(listApps).toHaveBeenCalledTimes(2))
+
+    act(() => {
+      for (let index = 0; index < 20; index += 1) {
+        const link = queue.enqueue({ appRef: 'ns/queued-' + index, teamId: 'team-c' })
+        emitDeepLink?.(link)
+      }
+    })
+    expect(queue.list()).toHaveLength(20)
+    expect(queue.list().some(link => link.id === first.id)).toBe(false)
+
+    await act(async () => {
+      rejectListApps(new Error('app catalog unavailable'))
+      await Promise.resolve()
+    })
+    await waitFor(() =>
+      expect(currentController.pushToast).toHaveBeenCalledWith(
+        'Could not open app link: app catalog unavailable',
+        'error'
+      )
+    )
+
+    await confirmPendingAppLink()
+    await waitFor(() =>
+      expect(ensureTeamContext.mock.calls.map(call => call[0].teamId)).toContain('team-c')
+    )
+    expect(acknowledgeDeepLink).not.toHaveBeenCalledWith(first.id)
+    expect(currentController.pushToast).not.toHaveBeenCalledWith(
+      'App link canceled because you navigated elsewhere.',
+      'info'
+    )
+  })
+
   function produceGfsResourceDeepLink(uri: string): GfsResourceDeepLinkEnvelope {
     const target = parseGfsResourceDeepLink(buildGfsResourceDeepLink(uri))
     if (!target) throw new Error('The shared producer rejected the GFS resource URI fixture')

@@ -72,6 +72,7 @@ import {
 } from '@lib/sandboxUiConversationOrigin'
 import {
   MAX_SANDBOX_UI_DEEP_LINK_RETRY_ATTEMPTS,
+  clearSandboxUiDeepLinkProcessingOwner,
   confirmPendingSandboxUiDeepLink,
   deferPendingSandboxUiDeepLink,
   enqueuePendingSandboxUiDeepLink,
@@ -1868,39 +1869,51 @@ export function App() {
     [acknowledgeGfsDeepLink, vm.isNavigationIntentCurrent]
   )
 
-  const clearSandboxUiDeepLinkProcessing = React.useCallback((linkId?: number) => {
-    if (linkId === undefined || processingSandboxUiDeepLinkIdRef.current === linkId) {
-      processingSandboxUiDeepLinkIdRef.current = null
-    }
+  const clearSandboxUiDeepLinkProcessing = React.useCallback((linkId: number) => {
+    processingSandboxUiDeepLinkIdRef.current = clearSandboxUiDeepLinkProcessingOwner(
+      processingSandboxUiDeepLinkIdRef.current,
+      linkId
+    )
   }, [])
 
-  const acknowledgeSandboxUiDeepLink = React.useCallback(
-    async (linkId: number) => {
-      if (!pendingSandboxUiDeepLinksRef.current.some(item => item.link.id === linkId)) return
-      const next = removePendingSandboxUiDeepLink(pendingSandboxUiDeepLinksRef.current, linkId)
-      setPendingSandboxUiDeepLinkState(next)
+  const clearSandboxUiDeepLinkLocalOwnership = React.useCallback(
+    (linkId: number) => {
       clearSandboxUiDeepLinkProcessing(linkId)
       sandboxUiDeepLinkRestoreTeamByIdRef.current.delete(linkId)
       sandboxUiDeepLinkOriginNavigationByIdRef.current.delete(linkId)
       sandboxUiDeepLinkOriginAppByIdRef.current.delete(linkId)
       sandboxUiDeepLinkIntentByIdRef.current.delete(linkId)
       sandboxUiDeepLinkClosedOriginEmbedsRef.current.delete(linkId)
+    },
+    [clearSandboxUiDeepLinkProcessing]
+  )
+
+  const acknowledgeSandboxUiDeepLink = React.useCallback(
+    async (linkId: number) => {
+      const isPending = pendingSandboxUiDeepLinksRef.current.some(item => item.link.id === linkId)
+      clearSandboxUiDeepLinkLocalOwnership(linkId)
+      if (!isPending) return
+      const next = removePendingSandboxUiDeepLink(pendingSandboxUiDeepLinksRef.current, linkId)
+      setPendingSandboxUiDeepLinkState(next)
       try {
         await window.clerum.sandboxUi.acknowledgeDeepLink(linkId)
       } catch (error) {
         console.warn('[Desktop] Could not acknowledge app deep link:', error)
       }
     },
-    [clearSandboxUiDeepLinkProcessing, setPendingSandboxUiDeepLinkState]
+    [clearSandboxUiDeepLinkLocalOwnership, setPendingSandboxUiDeepLinkState]
   )
 
   const cancelSupersededSandboxUiDeepLink = React.useCallback(
     async (linkId: number) => {
-      if (!pendingSandboxUiDeepLinksRef.current.some(item => item.link.id === linkId)) return
+      if (!pendingSandboxUiDeepLinksRef.current.some(item => item.link.id === linkId)) {
+        clearSandboxUiDeepLinkLocalOwnership(linkId)
+        return
+      }
       vm.pushToast('App link canceled because you navigated elsewhere.', 'info')
       await acknowledgeSandboxUiDeepLink(linkId)
     },
-    [acknowledgeSandboxUiDeepLink, vm.pushToast]
+    [acknowledgeSandboxUiDeepLink, clearSandboxUiDeepLinkLocalOwnership, vm.pushToast]
   )
 
   const deferSandboxUiDeepLink = React.useCallback(
@@ -2162,7 +2175,7 @@ export function App() {
         item => item.link.id === context.linkId
       )
       if (!pending) {
-        clearSandboxUiDeepLinkProcessing(context.linkId)
+        clearSandboxUiDeepLinkLocalOwnership(context.linkId)
         return
       }
       if (outcome === 'mounted') {
@@ -2192,6 +2205,7 @@ export function App() {
     [
       acknowledgeSandboxUiDeepLink,
       clearSandboxUiDeepLinkProcessing,
+      clearSandboxUiDeepLinkLocalOwnership,
       cancelSupersededSandboxUiDeepLink,
       deferSandboxUiDeepLinkAndRestoreOrigin,
       embed,

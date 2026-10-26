@@ -6,6 +6,7 @@ import { SandboxUiDeepLinkQueue } from '../../../../src/sandboxUiDeepLinkQueue.j
 import {
   MAX_PENDING_SANDBOX_UI_DEEP_LINKS,
   MAX_SANDBOX_UI_DEEP_LINK_RETRY_ATTEMPTS,
+  clearSandboxUiDeepLinkProcessingOwner,
   confirmPendingSandboxUiDeepLink,
   deferPendingSandboxUiDeepLink,
   enqueuePendingSandboxUiDeepLink,
@@ -176,6 +177,12 @@ describe('shouldPurgeSandboxUiDeepLinks', () => {
 })
 
 describe('pending sandbox UI deep-link state', () => {
+  it('clears only the matching processing owner', () => {
+    expect(clearSandboxUiDeepLinkProcessingOwner(1, 1)).toBeNull()
+    expect(clearSandboxUiDeepLinkProcessingOwner(2, 1)).toBe(2)
+    expect(clearSandboxUiDeepLinkProcessingOwner(null, 1)).toBeNull()
+  })
+
   it('merges live and cold-start links in FIFO order', () => {
     let pending = enqueuePendingSandboxUiDeepLink([], { id: 2, appRef: 'ns/two' }, null, null)
     pending = enqueuePendingSandboxUiDeepLink(pending, { id: 1, appRef: 'ns/one' }, null, 'user-a')

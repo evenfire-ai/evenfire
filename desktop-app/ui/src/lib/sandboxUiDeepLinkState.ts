@@ -37,6 +37,13 @@ export function removePendingSandboxUiDeepLink(
   return current.filter(item => item.link.id !== linkId)
 }
 
+export function clearSandboxUiDeepLinkProcessingOwner(
+  currentOwnerId: number | null,
+  completedLinkId: number
+): number | null {
+  return currentOwnerId === completedLinkId ? null : currentOwnerId
+}
+
 export function isPendingSandboxUiDeepLinkAwaitingConfirmation(
   pending: PendingSandboxUiDeepLink,
   currentIdentity: string | null
