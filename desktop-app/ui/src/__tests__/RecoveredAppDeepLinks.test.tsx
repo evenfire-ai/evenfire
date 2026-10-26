@@ -3137,6 +3137,291 @@ describe('App deep-link orchestration', () => {
     expect(activeWorkspaceTab(realController.current!.workspaceTabs)?.kind).toBe('files')
   })
 
+  it('keeps a cross-team target selected through repeated app startup retries', async () => {
+    const existingBridge = window.clerum
+    let activeTeamId = 'team-a'
+    const { clerum, handle } = installAppControllerClerum({
+      me: { teamId: 'team-a', teamName: 'Team A' },
+      teamDirectory: { items: [], currentTeamId: 'team-a' },
+    })
+    handle.teamDirectory.mockImplementation(async () => ({
+      items: [],
+      currentTeamId: activeTeamId,
+    }))
+    const switchTeamProducer = handle.switchTeam.getMockImplementation() as unknown as
+      | ((teamId: string) => Promise<{ authenticated: boolean; me: unknown | null }>)
+      | undefined
+    if (!switchTeamProducer) throw new Error('The team-switch producer was not installed')
+    handle.switchTeam.mockImplementation(async (teamId: string) => {
+      activeTeamId = teamId
+      return switchTeamProducer(teamId)
+    })
+    Object.assign(clerum, {
+      shortcuts: existingBridge.shortcuts,
+      app: existingBridge.app,
+      gfs: existingBridge.gfs,
+      sandboxUi: {
+        ...existingBridge.sandboxUi,
+        listPendingDeepLinks: vi.fn(async () => ({ links: [] })),
+        onDeepLink: vi.fn((callback: (link: SandboxUiDeepLinkEnvelope) => void) => {
+          emitDeepLink = callback
+          return vi.fn()
+        }),
+        acknowledgeDeepLink,
+      },
+    })
+
+    const actual =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    const realController: { current: AppController | null } = { current: null }
+    const originRestorations: WorkspaceState[] = []
+    const observedToasts: Array<[string, unknown]> = []
+    vi.mocked(useAppController).mockImplementation(() => {
+      realController.current = actual.useAppController()
+      const restoreWorkspaceNavigation = realController.current.restoreWorkspaceNavigation
+      realController.current.restoreWorkspaceNavigation = (snapshot, expectedIntentSequence) => {
+        originRestorations.push(snapshot.workspaceTabs)
+        return restoreWorkspaceNavigation(snapshot, expectedIntentSequence)
+      }
+      const pushToast = realController.current.pushToast
+      realController.current.pushToast = (message, type) => {
+        observedToasts.push([message, type])
+        return pushToast(message, type)
+      }
+      return realController.current
+    })
+    const queue = new SandboxUiDeepLinkQueue()
+    acknowledgeDeepLink.mockImplementation(async id => queue.acknowledge(id))
+    let ready = false
+    const targetAppRef = 'ns/linked'
+    listApps.mockImplementation(async () => ({
+      apps: [
+        {
+          appRef: targetAppRef,
+          title: 'Linked App',
+          defaultPath: '/',
+          ready,
+          phase: ready ? 'active' : 'deploying',
+        },
+      ],
+    }))
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTaskTrackerProvider>
+          <App />
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => expect(realController.current?.isAuthenticated).toBe(true))
+    await waitFor(() => expect(realController.current?.initialExperienceLoading).toBe(false))
+    await launchLiveApp({ appRef: 'ns/origin', label: 'Origin App', defaultPath: '/' })
+    await waitForMounted()
+    main.navigate('/tickets/origin')
+    await waitFor(() => expect(main.live()?.routePath).toBe('/tickets/origin'))
+    const originLaunchId = main.live()?.launchId
+    expect(originLaunchId).toBeTruthy()
+    const originTabId = activeWorkspaceTab(realController.current!.workspaceTabs)?.id
+    const navigationIntent = realController.current?.navigationIntentSequence
+    handle.switchTeam.mockClear()
+    listApps.mockClear()
+    closeSandboxUi.mockClear()
+
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({ recipeNs: 'ns', recipeName: 'linked', teamId: 'team-b' })
+    )
+    if (!target) throw new Error('The production app-link parser rejected the fixture URL')
+    const link = queue.enqueue(target)
+    act(() => emitDeepLink?.(link))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(handle.switchTeam).toHaveBeenCalledWith('team-b'))
+    await waitFor(() => expect(realController.current?.currentTeamId).toBe('team-b'))
+    await waitFor(() => expect(closeSandboxUi).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(embedState().owner).toBeNull())
+    await waitFor(() =>
+      expect(observedToasts).toContainEqual([
+        'Linked App is still starting up. This link will retry shortly.',
+        'info',
+      ])
+    )
+
+    expect(realController.current?.currentTeamId).toBe('team-b')
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+    expect(openSandboxUi).toHaveBeenCalledOnce()
+    expect(handle.switchTeam).toHaveBeenCalledOnce()
+    expect(originRestorations).toHaveLength(0)
+    expect(realController.current?.navigationIntentSequence).toBe(navigationIntent)
+    expect(activeWorkspaceTab(realController.current!.workspaceTabs)?.id).toBe(originTabId)
+    expect(activeWorkspaceTab(realController.current!.workspaceTabs)?.app?.savedRoutePath).toBe(
+      '/tickets/origin'
+    )
+
+    // Team switching also refreshes the shared app catalog. Measure retries
+    // relative to the first startup result and its team-scoped catalog refresh.
+    const firstStartupCalls = listApps.mock.calls.length
+    for (const [attempt, timeout] of [2_000, 3_000].entries()) {
+      await waitFor(() => expect(listApps).toHaveBeenCalledTimes(firstStartupCalls + attempt + 1), {
+        timeout,
+        interval: 20,
+      })
+      expect(realController.current?.currentTeamId).toBe('team-b')
+      expect(handle.switchTeam).toHaveBeenCalledOnce()
+      expect(closeSandboxUi).toHaveBeenCalledOnce()
+      expect(openSandboxUi).toHaveBeenCalledOnce()
+      expect(originRestorations).toHaveLength(0)
+      expect(realController.current?.navigationIntentSequence).toBe(navigationIntent)
+    }
+
+    ready = true
+    await waitFor(() => expect(listApps).toHaveBeenCalledTimes(firstStartupCalls + 3), {
+      timeout: 5_000,
+      interval: 20,
+    })
+    await waitForAppOpen(2)
+    await waitForMounted()
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+
+    expect(acknowledgeDeepLink).toHaveBeenCalledOnce()
+    expect(handle.switchTeam).toHaveBeenCalledOnce()
+    expect(handle.switchTeam).toHaveBeenCalledWith('team-b')
+    expect(closeSandboxUi).toHaveBeenCalledOnce()
+    expect(closeSandboxUi).toHaveBeenCalledWith({ launchId: originLaunchId })
+    expect(openSandboxUi).toHaveBeenCalledTimes(2)
+    expect(main.openCall(1).recipeNs).toBe('ns')
+    expect(main.openCall(1).recipeName).toBe('linked')
+    expect(main.live()?.appRef).toBe(targetAppRef)
+    expect(realController.current?.currentTeamId).toBe('team-b')
+    expect(originRestorations).toHaveLength(0)
+  })
+
+  it('cancels a target-team startup retry after a user returns to the origin team', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const existingBridge = window.clerum
+    let activeTeamId = 'team-a'
+    const { clerum, handle } = installAppControllerClerum({
+      me: { teamId: 'team-a', teamName: 'Team A' },
+      teamDirectory: { items: [], currentTeamId: 'team-a' },
+    })
+    handle.teamDirectory.mockImplementation(async () => ({
+      items: [],
+      currentTeamId: activeTeamId,
+    }))
+    const switchTeamProducer = handle.switchTeam.getMockImplementation() as unknown as
+      | ((teamId: string) => Promise<{ authenticated: boolean; me: unknown | null }>)
+      | undefined
+    if (!switchTeamProducer) throw new Error('The team-switch producer was not installed')
+    handle.switchTeam.mockImplementation(async (teamId: string) => {
+      activeTeamId = teamId
+      return switchTeamProducer(teamId)
+    })
+    Object.assign(clerum, {
+      shortcuts: existingBridge.shortcuts,
+      app: existingBridge.app,
+      gfs: existingBridge.gfs,
+      sandboxUi: {
+        ...existingBridge.sandboxUi,
+        listPendingDeepLinks: vi.fn(async () => ({ links: [] })),
+        onDeepLink: vi.fn((callback: (link: SandboxUiDeepLinkEnvelope) => void) => {
+          emitDeepLink = callback
+          return vi.fn()
+        }),
+        acknowledgeDeepLink,
+      },
+    })
+
+    const actual =
+      await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
+    const realController: { current: AppController | null } = { current: null }
+    const observedToasts: Array<[string, unknown]> = []
+    vi.mocked(useAppController).mockImplementation(() => {
+      realController.current = actual.useAppController()
+      const pushToast = realController.current.pushToast
+      realController.current.pushToast = (message, type) => {
+        observedToasts.push([message, type])
+        return pushToast(message, type)
+      }
+      return realController.current
+    })
+    const queue = new SandboxUiDeepLinkQueue()
+    acknowledgeDeepLink.mockImplementation(async id => queue.acknowledge(id))
+    listApps.mockResolvedValue({
+      apps: [
+        {
+          appRef: 'ns/linked',
+          title: 'Linked App',
+          defaultPath: '/',
+          ready: false,
+          phase: 'deploying',
+        },
+      ],
+    })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTaskTrackerProvider>
+          <App />
+        </AgentTaskTrackerProvider>
+      </QueryClientProvider>
+    )
+
+    await waitFor(() => expect(realController.current?.isAuthenticated).toBe(true))
+    await waitFor(() => expect(realController.current?.initialExperienceLoading).toBe(false))
+    const target = parseSandboxUiDeepLink(
+      buildSandboxUiDeepLink({ recipeNs: 'ns', recipeName: 'linked', teamId: 'team-b' })
+    )
+    if (!target) throw new Error('The production app-link parser rejected the fixture URL')
+    const link = queue.enqueue(target)
+    act(() => emitDeepLink?.(link))
+    await confirmPendingAppLink()
+    await waitFor(() => expect(realController.current?.currentTeamId).toBe('team-b'))
+    await waitFor(() =>
+      expect(observedToasts).toContainEqual([
+        'Linked App is still starting up. This link will retry shortly.',
+        'info',
+      ])
+    )
+    const startingIntent = realController.current?.navigationIntentSequence
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+    expect(openSandboxUi).not.toHaveBeenCalled()
+
+    await act(async () => {
+      await realController.current!.handleOpenNotification({
+        id: 'origin-team-notification',
+        kind: 'approval_required',
+        agentName: 'agent-x',
+        teamId: 'team-a',
+        text: 'Open the origin-team conversation',
+        timestamp: Date.now(),
+        read: false,
+        approval: { taskId: 'task-a', requestId: 'request-a' },
+      })
+    })
+
+    expect(realController.current?.currentTeamId).toBe('team-a')
+    expect(realController.current?.navigationIntentSequence).toBeGreaterThan(startingIntent ?? 0)
+    expect(realController.current?.activeWorkspaceTab?.kind).toBe('chat')
+    expect(handle.switchTeam).toHaveBeenCalledTimes(2)
+    expect(handle.switchTeam).toHaveBeenNthCalledWith(1, 'team-b')
+    expect(handle.switchTeam).toHaveBeenNthCalledWith(2, 'team-a')
+
+    await act(async () => {
+      vi.advanceTimersByTime(1_000)
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(link.id))
+
+    expect(acknowledgeDeepLink).toHaveBeenCalledOnce()
+    expect(realController.current?.currentTeamId).toBe('team-a')
+    expect(realController.current?.activeWorkspaceTab?.kind).toBe('chat')
+    expect(handle.switchTeam).toHaveBeenCalledTimes(2)
+    expect(openSandboxUi).not.toHaveBeenCalled()
+    expect(observedToasts).toContainEqual([
+      'App link canceled because you navigated elsewhere.',
+      'info',
+    ])
+  })
+
   it('clears the prior principal selection across an authenticated → null → B transition', async () => {
     const existingBridge = window.clerum
     const { clerum, handle } = installAppControllerClerum({
@@ -3819,6 +4104,7 @@ describe('App deep-link orchestration', () => {
     }))
     render(<App />)
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
+    listApps.mockClear()
 
     act(() => {
       emitDeepLink?.({ id: 1, appRef: 'ns/app', teamId: 'team-b' })
@@ -3831,25 +4117,22 @@ describe('App deep-link orchestration', () => {
         'info'
       )
     })
-    // A retryable cross-team handoff restores the captured origin while it
-    // still owns navigation. The next retry can switch to the target again.
-    // Keep this as a soft oracle so the assertions below still run when the
-    // independent rollback expectation exposes the current product defect.
-    expect.soft(liveTeamId).toBe('team-a')
-    expect.soft(ensureTeamContext).toHaveBeenCalledTimes(2)
-    expect.soft(ensureTeamContext).toHaveBeenCalledWith({
+    expect(liveTeamId).toBe('team-b')
+    expect(listApps).toHaveBeenCalledTimes(1)
+    expect(ensureTeamContext).toHaveBeenCalledOnce()
+    expect(ensureTeamContext).toHaveBeenCalledWith({
       teamId: 'team-b',
       announce: true,
     })
-    expect.soft(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
 
     await act(async () => {
       vi.advanceTimersByTime(1_000)
       await Promise.resolve()
     })
     await waitFor(() => expect(currentController.pushToast).toHaveBeenCalledTimes(2))
-    expect.soft(liveTeamId).toBe('team-a')
-    expect.soft(ensureTeamContext).toHaveBeenCalledTimes(4)
+    expect(liveTeamId).toBe('team-b')
+    expect(listApps).toHaveBeenCalledTimes(2)
+    expect(ensureTeamContext).toHaveBeenCalledOnce()
 
     ready = true
     await act(async () => {
@@ -3860,7 +4143,8 @@ describe('App deep-link orchestration', () => {
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(5)
+    expect(ensureTeamContext).toHaveBeenCalledOnce()
+    expect(listApps).toHaveBeenCalledTimes(3)
   })
 
   it('defers a cross-team link whose open mounts and then fails, with its error', async () => {

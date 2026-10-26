@@ -2829,22 +2829,20 @@ describe('App deep-link orchestration', () => {
         'info'
       )
     })
-    expect(liveTeamId).toBe('team-a')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
+    expect(liveTeamId).toBe('team-b')
+    expect(ensureTeamContext).toHaveBeenCalledOnce()
     expect(ensureTeamContext).toHaveBeenCalledWith({
       teamId: 'team-b',
       announce: true,
     })
-    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
 
     await act(async () => {
       vi.advanceTimersByTime(1_000)
       await Promise.resolve()
     })
     await waitFor(() => expect(currentController.pushToast).toHaveBeenCalledTimes(2))
-    expect(liveTeamId).toBe('team-a')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(4)
-    expect(ensureTeamContext).toHaveBeenNthCalledWith(4, { teamId: 'team-a', announce: true })
+    expect(liveTeamId).toBe('team-b')
+    expect(ensureTeamContext).toHaveBeenCalledOnce()
 
     ready = true
     await act(async () => {
@@ -2855,7 +2853,95 @@ describe('App deep-link orchestration', () => {
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(liveTeamId).toBe('team-b')
-    expect(ensureTeamContext).toHaveBeenCalledTimes(5)
+    expect(ensureTeamContext).toHaveBeenCalledOnce()
+  })
+
+  it('restores the exact origin route when cross-team startup retries exhaust', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let liveTeamId = 'team-a'
+    const ensureTeamContext = vi.fn(async ({ teamId }: { teamId?: string }) => {
+      if (!teamId || teamId === liveTeamId) return false
+      liveTeamId = teamId
+      return true
+    })
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.apps,
+      handleEnsureTeamContext: ensureTeamContext,
+      getCurrentTeamId: () => liveTeamId,
+    })
+    listApps.mockImplementation(async () =>
+      liveTeamId === 'team-a'
+        ? { apps: [READY_APP] }
+        : {
+            apps: [
+              {
+                appRef: 'ns/slow',
+                title: 'Slow App',
+                defaultPath: '/',
+                ready: false,
+                phase: 'deploying',
+              },
+            ],
+          }
+    )
+    render(<App />)
+    await launchAppFromSidebar()
+    main.navigate('/tickets/origin')
+    const originWorkspace = currentController.workspaceTabs
+    const originTab = activeWorkspaceTab(originWorkspace)
+    if (originTab?.kind !== 'app') throw new Error('The origin app tab was not active')
+    const expectedWorkspace = setAppTabSavedRoutePath(
+      originWorkspace,
+      originTab.id,
+      '/tickets/origin'
+    )
+    closeSandboxUi().mockClear()
+
+    act(() => emitDeepLink?.({ id: 1, appRef: 'ns/slow', teamId: 'team-b' }))
+    await confirmPendingAppLink()
+    await waitFor(() =>
+      expect(currentController.pushToast).toHaveBeenCalledWith(
+        'Slow App is still starting up. This link will retry shortly.',
+        'info'
+      )
+    )
+    expect(liveTeamId).toBe('team-b')
+    expect(ensureTeamContext).toHaveBeenCalledOnce()
+    expect(ensureTeamContext).toHaveBeenCalledWith({ teamId: 'team-b', announce: true })
+    expect(closeSandboxUi()).toHaveBeenCalledOnce()
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
+
+    for (let attempt = 0; attempt < 8 && liveTeamId === 'team-b'; attempt += 1) {
+      await act(async () => {
+        vi.advanceTimersByTime(30_000)
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+    }
+
+    await waitFor(() => expect(liveTeamId).toBe('team-a'))
+    await waitForAppOpen(2)
+    await waitForMounted()
+    expect(ensureTeamContext).toHaveBeenCalledTimes(2)
+    expect(ensureTeamContext).toHaveBeenNthCalledWith(2, { teamId: 'team-a', announce: true })
+    expect(currentController.restoreWorkspaceNavigation).toHaveBeenCalledOnce()
+    expect(currentController.restoreWorkspaceNavigation).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceTabs: expectedWorkspace }),
+      expect.any(Number)
+    )
+    expect(currentController.workspaceTabs).toEqual(expectedWorkspace)
+    expect(main.openCall(1).routePath).toBe('/tickets/origin')
+    expect(main.live()).toEqual({
+      launchId: main.openCall(1).launchId,
+      appRef: 'ns/app',
+      routePath: '/tickets/origin',
+    })
+    expect(currentController.pushToast).toHaveBeenCalledWith(
+      'Could not open app link: Slow App is still starting up. This link will retry shortly.',
+      'error'
+    )
+    expect(acknowledgeDeepLink).not.toHaveBeenCalled()
   })
 
   it('defers a cross-team link whose open mounts and then fails, with its error', async () => {

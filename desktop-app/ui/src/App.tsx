@@ -2465,7 +2465,15 @@ export function App() {
       const currentTeamId = vm.getCurrentTeamId()
       try {
         if (processingGeneration !== sandboxUiDeepLinkGenerationRef.current) return
-        if (restoreTeamId && pending.retryCount && currentTeamId !== restoreTeamId) {
+        // A retry may resume at the origin after a rollback or remain in the
+        // target team while that app is still starting. Any third team is a
+        // user-owned switch and must cancel this link.
+        if (
+          restoreTeamId &&
+          pending.retryCount &&
+          currentTeamId !== restoreTeamId &&
+          currentTeamId !== pending.link.teamId
+        ) {
           sandboxUiDeepLinkRestoreTeamByIdRef.current.delete(pending.link.id)
           sandboxUiDeepLinkOriginNavigationByIdRef.current.delete(pending.link.id)
           sandboxUiDeepLinkOriginAppByIdRef.current.delete(pending.link.id)
@@ -2565,12 +2573,14 @@ export function App() {
         }
         if (resolution.status === 'starting') {
           const launchContext = makeLaunchContext()
+          // Keep the target context through retries; the helper restores only
+          // when defer marks the startup attempt terminal or exhausted.
           await deferSandboxUiDeepLinkAndRestoreOrigin(
             pending,
             `${resolution.label} is still starting up. This link will retry shortly.`,
             launchContext,
             'info',
-            launchContext.switchedTeam
+            false
           )
           return
         }
