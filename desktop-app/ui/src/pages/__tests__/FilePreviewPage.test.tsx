@@ -354,7 +354,7 @@ describe('FilePreviewPage', () => {
     const cancel = within(dialog).getByRole('button', { name: 'Cancel' }) as HTMLButtonElement
     const confirm = within(dialog).getByRole('button', { name: 'Delete' }) as HTMLButtonElement
     const cancelFocus = vi.spyOn(cancel, 'focus')
-    expect(document.activeElement).toBe(cancel)
+    await waitFor(() => expect(document.activeElement).toBe(cancel))
 
     fireEvent.click(confirm)
 

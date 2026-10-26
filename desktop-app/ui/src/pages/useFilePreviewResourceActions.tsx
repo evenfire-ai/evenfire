@@ -7,7 +7,9 @@ import { ConfirmDialog } from '@components/ConfirmDialog'
 import { IconClose, IconShare } from '@components/SidebarNav/icons'
 import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
+import { httpErrorStatus } from '@lib/format'
 import {
+  GFS_AUTHORITY_STALE_TIME_MS,
   assertGfsAuthorityRetryAllowed,
   gfsAuthorityQueryPolicy,
 } from '@lib/gfsAuthorityQueryPolicy'
@@ -141,7 +143,10 @@ export function useFilePreviewResourceActions({
     ...gfsAuthorityQueryPolicy,
   })
   const affordances: ResourceAffordances | undefined =
-    affordancesQuery.isError || affordancesQuery.isFetching ? undefined : affordancesQuery.data
+    affordancesQuery.isError &&
+    [401, 403, 404].includes(httpErrorStatus(affordancesQuery.error) ?? 0)
+      ? undefined
+      : affordancesQuery.data
   const sourceParentId = resource?.parentResourceId ?? null
   const moveContextRef = useRef({
     gfsUri,
@@ -166,17 +171,17 @@ export function useFilePreviewResourceActions({
     ...gfsAuthorityQueryPolicy,
   })
   const sourceParentAffordances: ResourceAffordances | undefined =
-    sourceParentAffordancesQuery.isError || sourceParentAffordancesQuery.isFetching
+    sourceParentAffordancesQuery.isError &&
+    [401, 403, 404].includes(httpErrorStatus(sourceParentAffordancesQuery.error) ?? 0)
       ? undefined
       : sourceParentAffordancesQuery.data
-  const canShare = Boolean(canResolve && !affordancesQuery.isFetching && affordances?.canDelegate)
+  const canShare = Boolean(canResolve && affordances?.canDelegate)
   const canRename = Boolean(canResolve && affordances?.held.includes('write'))
   const canDelete = Boolean(canResolve && affordances?.held.includes('delete'))
   const canMove = Boolean(
     canResolve &&
     resource?.kind === 'file' &&
     sourceParentId &&
-    !sourceParentAffordancesQuery.isFetching &&
     !sourceParentAffordancesQuery.isError &&
     hasGfsMoveSourcePermissions(sourceParentAffordances?.held)
   )
@@ -357,16 +362,131 @@ export function useFilePreviewResourceActions({
     [invalidateResource, onAuthorityFailure, pushToast]
   )
 
+  const requireAffordancePermissions = async (
+    targetResourceId: string,
+    targetName: string,
+    requiredBits: string[],
+    refetch: () => Promise<ResourceAffordances>,
+    canPerform?: (authority: ResourceAffordances) => boolean,
+    deniedMessage?: string
+  ) => {
+    if (!sessionScope || !targetResourceId) return false
+    const requestedContext = moveContextRef.current
+    const queryKey = desktopQueryKeys.gfsAffordances(sessionScope, targetResourceId, drive)
+    const queryState = queryClient.getQueryState(queryKey)
+    const cachedAuthority = queryState?.data as ResourceAffordances | undefined
+    const cachedAuthorityIsFresh = Boolean(
+      queryState?.status === 'success' &&
+      queryState.fetchStatus === 'idle' &&
+      cachedAuthority &&
+      !queryState.isInvalidated &&
+      Date.now() - queryState.dataUpdatedAt < GFS_AUTHORITY_STALE_TIME_MS
+    )
+    let authority: ResourceAffordances | undefined
+    try {
+      if (cachedAuthorityIsFresh) {
+        authority = cachedAuthority
+      } else {
+        assertGfsAuthorityRetryAllowed(queryClient, queryKey)
+        authority = await refetch()
+      }
+    } catch (error) {
+      if (!onAuthorityFailure(errorMessage(error))) {
+        pushToast?.(
+          `Could not verify permissions for ${targetName}: ${describeGfsReadError(error).message}`,
+          'error'
+        )
+      }
+      return false
+    }
+
+    const currentContext = moveContextRef.current
+    if (
+      currentContext.gfsUri !== requestedContext.gfsUri ||
+      currentContext.sessionScope !== requestedContext.sessionScope ||
+      currentContext.resourceId !== requestedContext.resourceId ||
+      currentContext.parentResourceId !== requestedContext.parentResourceId ||
+      currentContext.drive !== requestedContext.drive ||
+      currentContext.version !== requestedContext.version ||
+      !authority
+    ) {
+      return false
+    }
+
+    const missingBits = requiredBits.filter(bit => !authority.held.includes(bit))
+    if (missingBits.length > 0 || (canPerform && !canPerform(authority))) {
+      const labels = missingBits.map(bit => (bit === 'manage_acl' ? 'manage' : bit))
+      const required = labels.length > 0 ? labels.join(' and ') : 'the required'
+      pushToast?.(deniedMessage ?? `You do not have ${required} access to ${targetName}.`, 'error')
+      return false
+    }
+    return true
+  }
+
+  const requireResourcePermissions = (
+    requiredBits: string[],
+    canPerform?: (a: ResourceAffordances) => boolean,
+    deniedMessage?: string
+  ) => {
+    if (!resource) return Promise.resolve(false)
+    return requireAffordancePermissions(
+      resource.resourceId,
+      resource.name,
+      requiredBits,
+      async () => {
+        const result = await affordancesQuery.refetch({ cancelRefetch: false })
+        if (result.isError || !result.data) {
+          throw result.error ?? new Error('Could not verify file permissions.')
+        }
+        return result.data
+      },
+      canPerform,
+      deniedMessage
+    )
+  }
+
+  const requireMoveSourcePermissions = () => {
+    if (!sourceParentId || !resource) return Promise.resolve(false)
+    return requireAffordancePermissions(
+      sourceParentId,
+      'the source folder',
+      ['write', 'delete'],
+      async () => {
+        const result = await sourceParentAffordancesQuery.refetch({ cancelRefetch: false })
+        if (result.isError || !result.data) {
+          throw result.error ?? new Error('Could not verify source folder permissions.')
+        }
+        return result.data
+      },
+      undefined,
+      'You need write and delete access to the source folder to move this file.'
+    )
+  }
+
   const handlers = useMemo(
     () => ({
-      share: () => setShareOpen(true),
-      rename: () => {
-        if (!canRename) return
+      share: async () => {
+        if (
+          !canShare ||
+          !(await requireResourcePermissions(
+            [],
+            a => a.canDelegate,
+            `You do not have permission to manage access to ${resource?.name ?? fileName}.`
+          ))
+        ) {
+          return
+        }
+        setShareOpen(true)
+      },
+      rename: async () => {
+        if (!canRename || !(await requireResourcePermissions(['write']))) return
         setRenameName(resource?.name ?? fileName)
         setRenameOpen(true)
       },
-      move: () => {
-        if (resource?.kind === 'file' && canMove) setMoveOpen(true)
+      move: async () => {
+        if (resource?.kind === 'file' && canMove && (await requireMoveSourcePermissions())) {
+          setMoveOpen(true)
+        }
       },
       download: () => {
         if (resource?.kind !== 'file' || !canResolve) return
@@ -381,20 +501,23 @@ export function useFilePreviewResourceActions({
             }
           })
       },
-      delete: () => {
-        if (canDelete) setDeleteOpen(true)
+      delete: async () => {
+        if (canDelete && (await requireResourcePermissions(['delete']))) setDeleteOpen(true)
       },
     }),
     [
       canDelete,
       canMove,
       canRename,
+      canShare,
       canResolve,
       fileName,
       gfsUri,
       onAuthorityFailure,
       pushToast,
       resource,
+      requireMoveSourcePermissions,
+      requireResourcePermissions,
     ]
   )
 
@@ -408,6 +531,7 @@ export function useFilePreviewResourceActions({
         setRenameOpen(false)
         return
       }
+      if (!(await requireResourcePermissions(['write']))) return
       const renamed = await runMutation(
         () =>
           window.clerum.gfs
@@ -535,18 +659,24 @@ export function useFilePreviewResourceActions({
   const handleDelete = async () => {
     if (!resource || deletePendingRef.current) return
     deletePendingRef.current = true
-    const deleted = await runMutation(
-      () =>
-        window.clerum.gfs
-          .deleteResource(resource.resourceId, resource.drive, resource.version)
-          .then(() => undefined),
-      `Deleted ${resource.name}`,
-      'Could not delete the file'
-    )
-    deletePendingRef.current = false
-    if (deleted) {
-      setDeleteOpen(false)
-      onDeleted()
+    setMutationPending(true)
+    try {
+      if (!(await requireResourcePermissions(['delete']))) return
+      const deleted = await runMutation(
+        () =>
+          window.clerum.gfs
+            .deleteResource(resource.resourceId, resource.drive, resource.version)
+            .then(() => undefined),
+        `Deleted ${resource.name}`,
+        'Could not delete the file'
+      )
+      if (deleted) {
+        setDeleteOpen(false)
+        onDeleted()
+      }
+    } finally {
+      deletePendingRef.current = false
+      setMutationPending(false)
     }
   }
 

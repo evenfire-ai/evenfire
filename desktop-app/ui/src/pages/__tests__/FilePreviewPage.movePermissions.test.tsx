@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import {
@@ -8,6 +8,10 @@ import {
   listAccessiblePage,
   resolveResource,
 } from '@/gfs/__fixtures__/gfsProducerFixtures'
+import {
+  appServiceAffordanceProducer,
+  heldPermissionResponse,
+} from '@/gfs/__fixtures__/permissionProducerFixtures'
 import type { Tone } from '@/uiTypes'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
 import { FilePreviewPage } from '../FilePreviewPage'
@@ -15,8 +19,15 @@ import { FilePreviewPage } from '../FilePreviewPage'
 const hookMock = vi.hoisted(() => ({ useGfsBrowserController: vi.fn() }))
 
 vi.mock('@hooks/domain/useGfsBrowserController', () => hookMock)
+vi.mock('electron', () => ({
+  app: { getPath: () => '/tmp/evenfire-renderer-test', isPackaged: false, isReady: () => false },
+  safeStorage: { isEncryptionAvailable: () => false },
+  BrowserWindow: { getAllWindows: () => [] },
+  Notification: { isSupported: () => false },
+}))
 
 const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
+const resourceId = '0123456789abcdef0123456789abcdef'
 const parentId = 'source-parent'
 const fullAccess = delegationAffordances(
   new Set(['read', 'write', 'delete', 'manage_acl', 'share']),
@@ -32,13 +43,15 @@ afterEach(() => {
 
 function installGfs(options: {
   source?: () => Promise<ReturnType<typeof delegationAffordances>>
+  resourceAffordances?: () => Promise<ReturnType<typeof delegationAffordances>>
   destination?: () => Promise<ReturnType<typeof delegationAffordances>>
   move?: (...args: unknown[]) => Promise<void>
+  rename?: (...args: unknown[]) => Promise<void>
   listAccessible?: () => Promise<unknown>
 }) {
   const resource = resolveResource({
-    resourceId: '0123456789abcdef0123456789abcdef',
-    rid: '0123456789abcdef0123456789abcdef',
+    resourceId,
+    rid: resourceId,
     gfsUri: uri,
     drive: 'main',
     parentResourceId: parentId,
@@ -48,14 +61,19 @@ function installGfs(options: {
     bytes: 1,
   })
   const resolve = vi.fn(async () => resource)
-  const affordances = vi.fn(async (resourceId: string) => {
-    if (resourceId === parentId) return (options.source ?? (async () => fullAccess))()
-    if (resourceId === 'destination-1') {
+  const affordances = vi.fn(async (affordanceResourceId: string) => {
+    if (affordanceResourceId === parentId) return (options.source ?? (async () => fullAccess))()
+    if (affordanceResourceId === resourceId && options.resourceAffordances) {
+      return options.resourceAffordances()
+    }
+    if (affordanceResourceId === 'destination-1') {
       return (options.destination ?? (async () => fullAccess))()
     }
     return fullAccess
   })
   const moveResource = vi.fn(options.move ?? (async () => undefined))
+  const renameResource = vi.fn(options.rename ?? (async () => undefined))
+  const deleteResource = vi.fn(async () => undefined)
   Object.defineProperty(window, 'clerum', {
     configurable: true,
     value: {
@@ -65,11 +83,13 @@ function installGfs(options: {
         listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
         downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
         moveResource,
+        renameResource,
+        deleteResource,
         listAccessible: options.listAccessible ?? (async () => ({ items: [], nextCursor: null })),
       },
     },
   })
-  return { affordances, moveResource, resolve }
+  return { affordances, moveResource, renameResource, deleteResource, resolve }
 }
 
 function renderPreview(pushToast?: (message: string, tone: Tone) => void) {
@@ -111,6 +131,285 @@ async function openPreviewActions() {
 }
 
 describe('FilePreviewPage move permission contract', () => {
+  it('keeps cached Preview actions visible during a background permission refetch', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    let resourceReads = 0
+    let sourceReads = 0
+    const permissionResponse = heldPermissionResponse([
+      'read',
+      'write',
+      'delete',
+      'manage_acl',
+      'share',
+    ])
+    let releaseResourceRefresh!: (value: typeof permissionResponse) => void
+    let releaseSourceRefresh!: (value: typeof permissionResponse) => void
+    const resourceRefresh = new Promise<typeof permissionResponse>(resolve => {
+      releaseResourceRefresh = resolve
+    })
+    const sourceRefresh = new Promise<typeof permissionResponse>(resolve => {
+      releaseSourceRefresh = resolve
+    })
+    const produceAffordances = appServiceAffordanceProducer(targetResourceId => {
+      if (targetResourceId === resourceId) {
+        resourceReads += 1
+        return resourceReads === 1 ? Promise.resolve(permissionResponse) : resourceRefresh
+      }
+      if (targetResourceId === parentId) {
+        sourceReads += 1
+        return sourceReads === 1 ? Promise.resolve(permissionResponse) : sourceRefresh
+      }
+      return Promise.resolve(permissionResponse)
+    })
+    const { affordances } = installGfs({
+      resourceAffordances: () => produceAffordances(resourceId),
+      source: () => produceAffordances(parentId),
+    })
+    installController()
+    const { queryClient } = renderPreview()
+    try {
+      await screen.findByAltText('Preview of diagram.png')
+      await waitFor(() => {
+        expect(resourceReads).toBe(1)
+        expect(sourceReads).toBe(1)
+      })
+      await openPreviewActions()
+
+      const mountedAt = Date.now()
+      vi.setSystemTime(mountedAt + 16_000)
+      await act(async () => {
+        focusManager.setFocused(false)
+        focusManager.setFocused(true)
+      })
+      await waitFor(() => {
+        expect(resourceReads).toBe(2)
+        expect(sourceReads).toBe(2)
+      })
+
+      const menu = screen.getByRole('menu', { name: 'Actions for diagram.png' })
+      expect(within(menu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
+      expect(within(menu).getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+      expect(within(menu).getByRole('menuitem', { name: 'Delete' })).toBeTruthy()
+
+      // Cached presentation is not permission to open the Move dialog. It joins
+      // the background source check and opens only after that exact query resolves.
+      fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
+      expect(screen.queryByRole('dialog', { name: 'Move file diagram.png' })).toBeNull()
+      expect(affordances).toHaveBeenCalledWith(resourceId, 'main')
+      expect(affordances).toHaveBeenCalledWith(parentId, 'main')
+      expect(affordances).toHaveBeenCalledTimes(4)
+
+      await act(async () => {
+        releaseSourceRefresh(permissionResponse)
+        await Promise.resolve()
+      })
+      await screen.findByRole('dialog', { name: 'Move file diagram.png' })
+      expect(affordances).toHaveBeenCalledTimes(4)
+      expect(window.clerum.gfs.moveResource).not.toHaveBeenCalled()
+
+      fireEvent.click(screen.getByRole('button', { name: 'Close move dialog' }))
+      const reopenedMenu = await openPreviewActions()
+
+      // Rename also waits for the pending exact resource query before opening.
+      fireEvent.click(within(reopenedMenu).getByRole('menuitem', { name: 'Rename' }))
+      expect(screen.queryByRole('dialog', { name: 'Rename file' })).toBeNull()
+      expect(affordances).toHaveBeenCalledTimes(4)
+      await act(async () => {
+        releaseResourceRefresh(permissionResponse)
+        await Promise.resolve()
+      })
+      await screen.findByRole('dialog', { name: 'Rename file' })
+      expect(affordances).toHaveBeenCalledTimes(4)
+    } finally {
+      await act(async () => {
+        releaseResourceRefresh(permissionResponse)
+        releaseSourceRefresh(permissionResponse)
+        await Promise.resolve()
+      })
+      focusManager.setFocused(undefined)
+      queryClient.clear()
+    }
+  })
+
+  it('keeps rename from mutating when its fresh permission check is denied', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    let resourceReads = 0
+    let releaseRefresh!: (value: ReturnType<typeof heldPermissionResponse>) => void
+    const refresh = new Promise<ReturnType<typeof heldPermissionResponse>>(resolve => {
+      releaseRefresh = resolve
+    })
+    const produceAffordances = appServiceAffordanceProducer(() => {
+      resourceReads += 1
+      return resourceReads === 1
+        ? Promise.resolve(
+            heldPermissionResponse(['read', 'write', 'delete', 'manage_acl', 'share'])
+          )
+        : refresh
+    })
+    const { affordances, renameResource } = installGfs({
+      resourceAffordances: () => produceAffordances(resourceId),
+    })
+    installController()
+    const pushToast = vi.fn()
+    const { queryClient } = renderPreview(pushToast)
+    try {
+      await screen.findByAltText('Preview of diagram.png')
+      await waitFor(() => expect(resourceReads).toBe(1))
+      const menu = await openPreviewActions()
+      fireEvent.click(within(menu).getByRole('menuitem', { name: 'Rename' }))
+      const dialog = await screen.findByRole('dialog', { name: 'Rename file' })
+      fireEvent.change(within(dialog).getByRole('textbox', { name: 'New name' }), {
+        target: { value: 'renamed.png' },
+      })
+
+      vi.setSystemTime(Date.now() + 16_000)
+      await act(async () => {
+        focusManager.setFocused(false)
+        focusManager.setFocused(true)
+      })
+      await waitFor(() => expect(resourceReads).toBe(2))
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
+      expect(renameResource).not.toHaveBeenCalled()
+
+      await act(async () => {
+        releaseRefresh(heldPermissionResponse(['read', 'delete']))
+        await Promise.resolve()
+      })
+      await waitFor(() =>
+        expect(pushToast).toHaveBeenCalledWith(
+          'You do not have write access to diagram.png.',
+          'error'
+        )
+      )
+      expect(renameResource).not.toHaveBeenCalled()
+      expect(screen.getByRole('dialog', { name: 'Rename file' })).toBeTruthy()
+      expect(resourceReads).toBe(2)
+    } finally {
+      await act(async () => {
+        releaseRefresh(heldPermissionResponse(['read', 'delete']))
+        await Promise.resolve()
+      })
+      focusManager.setFocused(undefined)
+      queryClient.clear()
+    }
+  })
+
+  it('retains cached Preview actions after a transient refresh error without using them as authority', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    let resourceReads = 0
+    const produceAffordances = async () => {
+      resourceReads += 1
+      if (resourceReads === 1) {
+        return delegationAffordances(
+          new Set(['read', 'write', 'delete', 'manage_acl', 'share']),
+          false
+        )
+      }
+      throw new TypeError('fetch failed')
+    }
+    const { renameResource } = installGfs({
+      resourceAffordances: produceAffordances,
+      source: async () => fullAccess,
+    })
+    installController()
+    const pushToast = vi.fn()
+    const { queryClient } = renderPreview(pushToast)
+    try {
+      await screen.findByAltText('Preview of diagram.png')
+      await waitFor(() => expect(resourceReads).toBe(1))
+      await openPreviewActions()
+
+      vi.setSystemTime(Date.now() + 16_000)
+      await act(async () => {
+        focusManager.setFocused(false)
+        focusManager.setFocused(true)
+      })
+      await waitFor(() => expect(resourceReads).toBe(2))
+
+      const menu = screen.getByRole('menu', { name: 'Actions for diagram.png' })
+      expect(within(menu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
+      fireEvent.click(within(menu).getByRole('menuitem', { name: 'Rename' }))
+      await waitFor(() => expect(resourceReads).toBe(3))
+      expect(screen.queryByRole('dialog', { name: 'Rename file' })).toBeNull()
+      expect(renameResource).not.toHaveBeenCalled()
+      await waitFor(() =>
+        expect(pushToast).toHaveBeenCalledWith(
+          expect.stringContaining('Could not verify permissions'),
+          'error'
+        )
+      )
+    } finally {
+      focusManager.setFocused(undefined)
+      queryClient.clear()
+    }
+  })
+
+  it.each([
+    { target: 'resource', status: 403, hidden: ['Rename', 'Delete'] },
+    { target: 'resource', status: 404, hidden: ['Rename', 'Delete'] },
+    { target: 'source parent', status: 403, hidden: ['Move to'] },
+    { target: 'source parent', status: 404, hidden: ['Move to'] },
+  ])(
+    'withholds cached $target actions after an explicit HTTP $status denial',
+    async ({ target, status, hidden }) => {
+      vi.useFakeTimers({ toFake: ['Date'] })
+      let resourceReads = 0
+      let sourceReads = 0
+      const denied = () =>
+        Promise.reject(
+          new Error(
+            `Error invoking remote method 'gfs:affordances': Error: ${status} Forbidden httpStatus=${status}`
+          )
+        )
+      installGfs({
+        resourceAffordances: async () => {
+          resourceReads += 1
+          return target === 'resource' && resourceReads > 1 ? denied() : fullAccess
+        },
+        source: async () => {
+          sourceReads += 1
+          return target === 'source parent' && sourceReads > 1 ? denied() : fullAccess
+        },
+      })
+      installController()
+      const { queryClient } = renderPreview()
+      try {
+        await screen.findByAltText('Preview of diagram.png')
+        await waitFor(() => {
+          expect(resourceReads).toBe(1)
+          expect(sourceReads).toBe(1)
+        })
+        await openPreviewActions()
+
+        vi.setSystemTime(Date.now() + 16_000)
+        await act(async () => {
+          focusManager.setFocused(false)
+          focusManager.setFocused(true)
+        })
+        await waitFor(() => {
+          expect(resourceReads).toBe(2)
+          expect(sourceReads).toBe(2)
+        })
+
+        await waitFor(() => {
+          const refreshedMenu = screen.getByRole('menu', { name: 'Actions for diagram.png' })
+          for (const action of hidden) {
+            expect(within(refreshedMenu).queryByRole('menuitem', { name: action })).toBeNull()
+          }
+          if (target === 'resource') {
+            expect(within(refreshedMenu).getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+          } else {
+            expect(within(refreshedMenu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
+            expect(within(refreshedMenu).getByRole('menuitem', { name: 'Delete' })).toBeTruthy()
+          }
+        })
+      } finally {
+        focusManager.setFocused(undefined)
+        queryClient.clear()
+      }
+    }
+  )
+
   it('hides Move when the source parent has read and write but lacks delete', async () => {
     const sourceReadWrite = delegationAffordances(new Set(['read', 'write']), false)
     installGfs({ source: async () => sourceReadWrite })
