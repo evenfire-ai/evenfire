@@ -583,7 +583,8 @@ export function createAdminSecretsRouter(
   // the wizard never writes a CR whose clientIdRef/clientSecretRef dangle. The
   // server-side install saga re-verifies existence at submit; this is the UI's
   // pre-check. Values are structurally impossible here: listSecrets projects only
-  // metadata + key names, and this route forwards only name + keys.
+  // metadata + key names, and this route forwards only name + keys + the
+  // uid/resourceVersion identity the UI needs for compare-and-delete.
   router.get(
     '/admin/mcp-secrets',
     enforceNamespace(config.mcpServersNamespace),
@@ -593,10 +594,18 @@ export function createAdminSecretsRouter(
         const record = asRecord(row)
         const metadata = asRecord(record?.metadata)
         const name = typeof metadata?.name === 'string' ? metadata.name : ''
+        const uid = typeof metadata?.uid === 'string' ? metadata.uid : undefined
+        const resourceVersion =
+          typeof metadata?.resourceVersion === 'string' ? metadata.resourceVersion : undefined
         const keys = Array.isArray(record?.keys)
           ? (record.keys as unknown[]).filter((k): k is string => typeof k === 'string')
           : []
-        return { name, keys }
+        return {
+          name,
+          keys,
+          ...(uid ? { uid } : {}),
+          ...(resourceVersion ? { resourceVersion } : {}),
+        }
       })
       res.status(200).json({ items })
     })

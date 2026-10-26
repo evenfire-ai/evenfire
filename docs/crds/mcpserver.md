@@ -41,9 +41,61 @@ HCC-owned servers, and exposes discovery/status for WRC-owned servers.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `spec.auth` | object | no | Authentication configuration for the mcp-host connecting to this server. |
-| `spec.auth.type` | string | no | Authentication type. One of: `none`, `bearer`, `basic`, `apiKey`. |
+| `spec.auth.type` | string | no | Authentication type. One of: `none`, `bearer`, `basic`, `apiKey`, `oauth`. `oauth` requires `spec.oauth` and forbids `secretRef`/`secretKey`. |
 | `spec.auth.secretRef` | string | no | Name of the Kubernetes Secret containing auth credentials. |
 | `spec.auth.secretKey` | string | no | Key within the secret to use (default depends on auth type). |
+
+### OAuth (`spec.oauth`)
+
+Present only when `spec.auth.type: oauth`. control-api runs the OAuth 2.1
+authorize, token and refresh flow. Tokens are resolved per connection at call
+time and are **never mounted into the connector pod**.
+
+> **Enable the broker first.** `MCP_OAUTH_BROKER_ENABLED` is **off by default**
+> in `deploy/base` (the minikube overlay turns it on). While it is off,
+> OAuth connectors keep asking for consent and never get a token. Also set
+> `CONTROL_API_OAUTH_CALLBACK_BASE_URL` to the browser-reachable control-api
+> origin; otherwise registry OAuth installs are refused, and other callbacks
+> fall back to the request host (an internal hostname behind the proxy chain).
+
+There are three configuration styles, chosen by `source`, which can't change
+after creation:
+
+- **Built-in provider** (`source` absent): one of the known adapters in
+  `provider`.
+- **`remote`**: endpoints pinned from discovery when the remote-connector
+  wizard installs the server.
+- **`generic`**: an operator-configured client with explicit endpoints and
+  wire options.
+
+| Field | Applies to | Description |
+|-------|-----------|-------------|
+| `oauth.id` | all | Stable client identifier; also the callback path segment. Immutable. |
+| `oauth.provider` | built-in | `salesforce`, `slack`, `notion`, `microsoft-graph`, `google`, `monday`, `clickup`, `vercel`. Immutable. |
+| `oauth.clientIdRef` / `oauth.clientSecretRef` | all | `{name, key}` of Secrets in the `mcp-server` namespace (control-api's `CONTROL_API_MCP_SERVERS_NAMESPACE`) holding the client id / secret. |
+| `oauth.scopes[]` | all | Scopes to request. Include the provider's offline/refresh scope when `backgroundAccess` is true. |
+| `oauth.backgroundAccess` | all | Allow use by a workload with no live human session. |
+| `oauth.grantScope` | all | `user` (default): every user authorizes their own grant. `context`: one shared identity per Context, which one member bootstraps and others inherit. Immutable. |
+| `oauth.source` | — | absent (built-in), `remote`, or `generic`. Immutable. |
+| `oauth.clientMode` | remote | `public` (PKCE, no secret) or `confidential`. |
+| `oauth.authorizationEndpoint`, `tokenEndpoint`, `resource` | remote, generic | Pinned endpoints; `resource` is the RFC 8707 resource indicator. |
+| `oauth.registrationEndpoint`, `issuer`, `issForCallback` | remote | Dynamic client registration URL, issuer, and the RFC 9207 `iss` validated on callback. |
+| `oauth.bearerInBody`, `supportsRefresh` | remote (`supportsRefresh` also generic) | Pinned at install. `bearerInBody` must be `false`. |
+| `oauth.asProfile` | remote | Optional. Closed authorization-server profile, set at install when the pinned issuer is recognised. Only value: `entra-v2` (Microsoft Entra ID v2, tenant authority): the RFC 8707 `resource` is not sent, `offline_access` is always requested, and the scopes are sent on the code exchange and on refresh. Requires a Microsoft Entra tenant issuer (see the AS-PROFILE-ISSUER rule below). With `entra-v2`, control-api also checks `oauth.scopes` against the host of `spec.remote.baseUrl` at install and at runtime; see [Scopes and audience](../how-to/connect-oauth-connector.md#scopes-and-audience). Immutable. |
+| `oauth.tokenRequestFormat`, `tokenAuthMethod`, `scopeSeparator`, `sendScope`, `usePkce`, `includeResponseType`, `refreshEndpoint`, `extraAuthorizeParams` | generic | Wire options for non-standard authorization servers. |
+
+**Redirect URI to register** with the provider:
+
+- Built-in and `generic`:
+  `<CONTROL_API_OAUTH_CALLBACK_BASE_URL>/api/v1/oauth-callback/<oauth.id>`.
+- `remote`: `/api/v1/oauth-callback/remote` when the authorization server
+  advertises RFC 9207, otherwise `/api/v1/oauth-callback/remote/<serverName>`.
+  With dynamic registration, the install id is appended and registered
+  automatically.
+
+The remote-connector wizard in Control UI shows the exact URI. See
+[Connect an OAuth connector](../how-to/connect-oauth-connector.md) for the
+full walkthrough.
 
 ### Server Configuration
 
@@ -182,6 +234,7 @@ API translates to this explicit `egressClass: public-web` CRD shape.
 | `status.resolvedEgressIPs[].dns` | string | The DNS hostname that was resolved. |
 | `status.resolvedEgressIPs[].ips` | string[] | Resolved IP addresses. |
 | `status.resolvedEgressIPs[].resolvedAt` | date-time | When the resolution occurred. |
+| `status.conditions[]` | object[] | Standard conditions written by host-context-controller (e.g. `SecretResolved`, `Ready`) with `reason` (e.g. `SecretNotFound`) and `observedGeneration`. Control UI uses them to show connectors whose credentials are still missing. |
 
 ## Additional Printer Columns
 
@@ -195,6 +248,18 @@ API translates to this explicit `egressClass: public-web` CRD shape.
 - Each egress binding must have exactly one of `dns` or `cidr` (not both, not neither).
 - A `cidr` must be a canonical public IPv4 range; ranges overlapping private, metadata, link-local, documentation, multicast, or reserved IPv4 ranges (including `0.0.0.0/0` and RFC1918 ranges such as `10.0.0.0/8`) are rejected.
 - An McpServer with `spec.remote` must declare at least one `egressBinding`.
+- `spec.oauth.asProfile` is remote-only: built-in (no `source`) and `generic` servers must not set it.
+- On a `remote` server, `spec.oauth.asProfile` is immutable like the other pinned fields: it cannot be added, removed, or changed after creation. Delete and recreate the server to change it.
+- **AS-PROFILE-ISSUER:** when `spec.oauth.asProfile` is set, `spec.oauth.issuer` must be a Microsoft Entra ID tenant authority, matching `^https://login[.]microsoftonline[.]com/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/v2[.]0$` (lower-case tenant GUID, no trailing slash). Otherwise the write is rejected with `spec.oauth.asProfile entra-v2 requires spec.oauth.issuer to be a Microsoft Entra ID tenant authority`. A profile stops sending the RFC 8707 `resource`, so it must stay on the issuer it was recognised from. control-api applies the same check at runtime and refuses an object written before the rule was in the cluster (`409 remote_oauth_spec_incoherent`, reason `as_profile_issuer_mismatch`).
+
+> **Apply the CRD before control-api.** An apiserver whose McpServer CRD does not
+> declare `asProfile` drops the field on write and still answers 200. The install
+> route detects this, removes what it created and answers `409 mcpserver_crd_outdated`.
+> An object written another way (`kubectl`, GitOps) keeps the Entra issuer without
+> the profile; control-api refuses it at runtime (`409 remote_oauth_spec_incoherent`,
+> reason `as_profile_issuer_mismatch`), and because the profile cannot be added after
+> creation it must be deleted and recreated once the CRD is applied. See
+> [Deploy order for additive schema fields](../../charts/clerum-crds/README.md#deploy-order-for-additive-schema-fields).
 
 ## Example
 

@@ -66,48 +66,62 @@ afterEach(() => {
 
 describe('sandboxUi:open launch id', () => {
   it("tags each view's events with the launch id of the open that mounted it", async () => {
-    await open({ launchId: 'launch-1' })
-    await open({ launchId: 'launch-2' })
+    const launch1 = crypto.randomUUID()
+    const launch2 = crypto.randomUUID()
+    await open({ launchId: launch1 })
+    await open({ launchId: launch2 })
     const [first, second] = opens
 
     // The replaced view reports after the relaunch of the same app.
-    first!.onClosed?.()
     first!.onRefreshError?.('refresh failed')
+    first!.onRefreshRecovered?.()
     first!.onTitleChanged?.('Old title')
     second!.onTitleChanged?.('New title')
+    second!.onRefreshRecovered?.()
 
     expect(electron.send.mock.calls).toEqual([
-      ['sandboxUi:closed', { appRef: 'sandbox-recipes/alpha', launchId: 'launch-1' }],
       [
         'sandboxUi:refreshError',
-        { appRef: 'sandbox-recipes/alpha', launchId: 'launch-1', message: 'refresh failed' },
+        { appRef: 'sandbox-recipes/alpha', launchId: launch1, message: 'refresh failed' },
+      ],
+      ['sandboxUi:refreshRecovered', { appRef: 'sandbox-recipes/alpha', launchId: launch1 }],
+      [
+        'sandboxUi:titleChanged',
+        { appRef: 'sandbox-recipes/alpha', launchId: launch1, title: 'Old title' },
       ],
       [
         'sandboxUi:titleChanged',
-        { appRef: 'sandbox-recipes/alpha', launchId: 'launch-1', title: 'Old title' },
+        { appRef: 'sandbox-recipes/alpha', launchId: launch2, title: 'New title' },
       ],
-      [
-        'sandboxUi:titleChanged',
-        { appRef: 'sandbox-recipes/alpha', launchId: 'launch-2', title: 'New title' },
-      ],
+      ['sandboxUi:refreshRecovered', { appRef: 'sandbox-recipes/alpha', launchId: launch2 }],
     ])
   })
 
-  it.each([undefined, '', 42, 'a'.repeat(65), 'has space', '../x', { id: 'x' }])(
-    'rejects launch id %j before opening anything',
-    async launchId => {
-      await expect(open({ launchId })).rejects.toThrow(/launchId/)
-      expect(service.openSandboxUi).not.toHaveBeenCalled()
-    }
-  )
+  // A counter or any non-UUID id could repeat across renderer reloads, which
+  // main outlives.
+  it.each([
+    undefined,
+    '',
+    42,
+    'launch-1',
+    'a'.repeat(65),
+    'has space',
+    '../x',
+    { id: 'x' },
+    `${crypto.randomUUID()}-extra`,
+  ])('rejects launch id %j before opening anything', async launchId => {
+    await expect(open({ launchId })).rejects.toThrow(/launchId/)
+    expect(service.openSandboxUi).not.toHaveBeenCalled()
+  })
 
   it('accepts a renderer-minted UUID', async () => {
     const launchId = crypto.randomUUID()
     await open({ launchId })
-    opens[0]!.onClosed?.()
-    expect(electron.send).toHaveBeenCalledWith('sandboxUi:closed', {
+    opens[0]!.onTitleChanged?.('Title')
+    expect(electron.send).toHaveBeenCalledWith('sandboxUi:titleChanged', {
       appRef: 'sandbox-recipes/alpha',
       launchId,
+      title: 'Title',
     })
   })
 })

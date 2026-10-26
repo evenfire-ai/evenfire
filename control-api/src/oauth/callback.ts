@@ -3,6 +3,7 @@ import type { PinnedTransport } from '../http/pinnedFetch.js'
 import { pinnedFetch } from '../http/pinnedFetch.js'
 import type { DnsResolver } from '../http/validateMcpServerSpec.js'
 import { rootLogger } from '../observability/logger.js'
+import { type AsProfileId, remoteWireForProfile } from './asProfiles.js'
 import { getDynamicClient } from './dynamicClientStore.js'
 import {
   type RemoteOAuthSpecIncoherence,
@@ -63,7 +64,7 @@ export type ServerOAuthSecretSource =
 export interface RemoteClientRouting {
   authorizationEndpoint: string
   tokenEndpoint: string
-  /** RFC 8707 resource indicator, echoed in authorize + token/refresh. */
+  /** RFC 8707 resource indicator; absent when the authorization-server profile does not send it. */
   resource?: string
   clientMode: 'public' | 'confidential'
   /** D-8: token in the body vs Authorization header (mcp-host concern; carried for parity). */
@@ -77,6 +78,8 @@ export interface RemoteClientRouting {
    * it must match this value rather than being ignored.
    */
   issuer?: string
+  /** Closed authorization-server profile pinned on the CR; drives the wire (asProfiles.ts). */
+  asProfile?: AsProfileId
 }
 
 /**
@@ -288,9 +291,21 @@ export interface CallbackDeps {
    * consenting user MUST be a member first. Injected so the pure callback stays
    * testable; the route wires the real `getUserContexts`. When absent on a
    * shared-context path, that path fails closed (`context_membership_denied`).
-   * The per-user path never touches it (its key IS the user).
+   * The per-user path never touches it: its access check is
+   * `userServerAccessReader`.
    */
   userContextsReader?: (userId: string) => Promise<{ contextIds: string[] }>
+  /**
+   * Whether some Context the user reaches (directly, or through an agent
+   * assigned to them) still enables the server through its `spec.mcpServers`
+   * allowlist. Required ONLY for the per-user mcp path
+   * (`grantScope='user'`), re-checked before the code exchange so a user who
+   * lost that access after the authorize URL was minted cannot finish creating
+   * a grant. The route wires the same rule the authorize-URL mint applies. When
+   * absent on a per-user path, that path fails closed
+   * (`context_membership_denied`). The shared-context path never touches it.
+   */
+  userServerAccessReader?: (userId: string, mcpServerName: string) => Promise<boolean>
   /**
    * Injectable for tests; defaults to globalThis.fetch in production wiring.
    * BAKED lane ONLY — the remote lane (`source:'remote'`) never uses it (DEC-17):
@@ -382,10 +397,13 @@ export type CallbackResult =
    */
   | { kind: 'server_missing_context' }
   /**
-   * mcp subject with `grantScope='context'` where the consenting (signed) user
-   * is NOT a member of the server's Context. A shared grant lends a team-wide
-   * credential, so a non-member must not be able to bootstrap it. Fail closed →
-   * 403, no persist.
+   * mcp subject whose consenting (signed) user lacks access, by flavor:
+   *   - `grantScope='context'`: not a member of the server's `spec.contextRef`
+   *     (a shared grant lends a Context-wide credential);
+   *   - `grantScope='user'`: no Context the user reaches (directly or through an
+   *     assigned agent) still lists the server in its `spec.mcpServers` allowlist.
+   * Also returned when the reader for that flavor is not wired. Fail closed →
+   * 403, no code exchange, no persist.
    */
   | { kind: 'context_membership_denied' }
   /**
@@ -543,13 +561,20 @@ export async function handleOAuthCallback(
  * the `mcpServerName`; the server's OAuth declaration + grant-scope routing are
  * recovered fresh from the CR (authoritative), NOT from the state or any body.
  *
+ * Access is re-checked BEFORE the code exchange, by flavor:
+ *   - `grantScope='user'`    → some Context the signed user reaches (directly or
+ *     through an assigned agent) must still allowlist the server
+ *     (`userServerAccessReader`); `spec.contextRef` is not consulted.
+ *   - `grantScope='context'` → the signed user must be a member of the server's
+ *     `spec.contextRef` (`userContextsReader`).
+ *
  * Persistence connects to the U1 store primitives (no reimplementation):
  *   - `grantScope='user'`    → `upsertOAuthGrant` `(mcpserver, ns, name, userId)`.
  *   - `grantScope='context'` → `bootstrapSharedOAuthGrant` `(mcpserver, ns, name,
  *     spec.contextRef)`, bootstrapper = the signed `userId` (first-consent wins;
  *     U6 governance). The Context comes from the AUTHORITATIVE `spec.contextRef`,
  *     never the state — so no context field is (or needs to be) bound into the
- *     mcp state in v1.
+ *     mcp state.
  */
 async function handleMcpOAuthCallback(
   claims: OAuthMcpStateClaims,
@@ -607,16 +632,15 @@ async function handleMcpOAuthCallback(
     redirectUri = perServer.redirectUri
   }
 
-  // ─── Membership guards run BEFORE the token exchange (R3-L1) ──────────────
+  // ─── Access guards run BEFORE the token exchange (R3-L1) ──────────────────
   // These guards depend only on the signed claims + the resolved subject
-  // (`subject.contextRef`, `deps.userContextsReader`, `claims.userId`) — never
-  // on the token. Running them first means a user removed from the Context
-  // during the ~600s mint→callback window fails here instead of first driving
-  // `exchangeAuthCode`, which burns the single-use auth-code against the
-  // provider and yields a real token only to discard it at a 403. The mint is
-  // still the primary gate, so this is not exploitable head-on; it just avoids
-  // the pointless exchange + code burn. Persistence (below) stays after the
-  // exchange, unchanged.
+  // (`subject.contextRef`, `claims.userId`, `claims.mcpServerName`) and the
+  // injected readers — never on the token. Running them first means a user who
+  // lost access during the ~600s mint→callback window fails here instead of
+  // first driving `exchangeAuthCode`, which burns the single-use auth-code
+  // against the provider and yields a real token only to discard it at a 403.
+  // The mint is still the primary gate; this re-check closes the window between
+  // the two. Persistence (below) stays after the exchange.
   //
   // `contextRef` is set iff this is a context-scoped grant that passed the
   // membership guard; the persistence dispatch below keys off it (non-undefined
@@ -636,6 +660,14 @@ async function handleMcpOAuthCallback(
       return { kind: 'context_membership_denied' }
     }
     contextRef = subject.contextRef
+  } else {
+    // Per-user identity — the grant serves every Context that enables the
+    // server, so access is "some Context the user reaches still allowlists
+    // it", the same rule the mint applied. Fail closed when the reader is
+    // unwired.
+    if (!deps.userServerAccessReader) return { kind: 'context_membership_denied' }
+    const enabled = await deps.userServerAccessReader(claims.userId, claims.mcpServerName)
+    if (!enabled) return { kind: 'context_membership_denied' }
   }
 
   const exchanged = await exchangeAuthCode(
@@ -957,7 +989,11 @@ async function exchangeRemoteAuthCode(
       redirectUri: grant.redirectUri,
       codeVerifier,
     },
-    remote.resource
+    remote.resource,
+    // The authorize request's `scope` travels through the browser and can be edited;
+    // without `scope` on the redemption Entra issues the token for whatever that leg
+    // asked for, so the CR's scopes are what pin the audience here.
+    remoteWireForProfile(remote.asProfile).scopeOnTokenRequests ? decl.scopes : undefined
   )
   const posted = await postRemoteTokenForm(
     remote.tokenEndpoint,

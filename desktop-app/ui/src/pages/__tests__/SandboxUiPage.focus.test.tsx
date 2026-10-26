@@ -1,13 +1,15 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { LaunchingSandboxUiPage as SandboxUiPage } from './__fixtures__/launchingSandboxUiPage'
+import {
+  LaunchingSandboxUiPage as SandboxUiPage,
+  createPageEmbed,
+} from './__fixtures__/launchingSandboxUiPage'
 
 const sandboxUi = {
   listApps: vi.fn(),
   open: vi.fn(),
   close: vi.fn(),
-  reload: vi.fn(),
   copyDeepLink: vi.fn(),
   setBounds: vi.fn(),
   setVisible: vi.fn(),
@@ -16,8 +18,6 @@ const sandboxUi = {
   stopFindInPage: vi.fn(),
   focusActive: vi.fn(),
   onFindResult: vi.fn(() => vi.fn()),
-  onClosed: vi.fn(() => vi.fn()),
-  onRefreshError: vi.fn(() => vi.fn()),
 }
 
 const apps = [
@@ -117,19 +117,15 @@ describe('SandboxUiPage contextual-search focus ownership', () => {
   })
 
   it('does not replay a stale focus request after the page remounts', async () => {
-    const first = render(<SandboxUiPage localSearchRequestId={0} />)
+    // App's machine outlives the page: a remount finds the app already mounted.
+    const embed = createPageEmbed()
+    const first = render(<SandboxUiPage embed={embed} localSearchRequestId={0} />)
     await openApp()
-    first.rerender(<SandboxUiPage localSearchRequestId={1} />)
+    first.rerender(<SandboxUiPage embed={embed} localSearchRequestId={1} />)
     await screen.findByRole('textbox', { name: 'Find in current app' })
     first.unmount()
 
-    render(
-      <SandboxUiPage
-        localSearchRequestId={1}
-        shortcutApp={{ appRef: apps[0]!.appRef, defaultPath: '/', label: 'Sales CRM' }}
-        shortcutOpenRequestId={1}
-      />
-    )
+    render(<SandboxUiPage embed={embed} localSearchRequestId={1} />)
     await screen.findByTestId('sandbox-ui-mounted')
     await new Promise(resolve => window.setTimeout(resolve, 0))
 

@@ -425,6 +425,61 @@ describe('rename pending queue — concurrency (spec 15 §2.5)', () => {
     })
   })
 
+  // A poll during an in-flight rename must not write the server's (older) title
+  // into the local index over the optimistic one (§2.2 case E).
+  it('omits the server title of a chat with an in-flight rename from the index write', async () => {
+    const inFlight = deferred<{ title: string }>()
+    clerum.chat.getIndex.mockResolvedValue(
+      localIndex([
+        { id: 'c1', title: 'old' },
+        { id: 'c2', title: 'other' },
+      ])
+    )
+    clerum.rpc.listSessions.mockResolvedValue(
+      reportedSessions([
+        { chatId: 'c1', title: 'server c1' },
+        { chatId: 'c2', title: 'server c2' },
+      ])
+    )
+    clerum.rpc.renameSession.mockReturnValue(inFlight.promise)
+
+    const { result, rerender } = renderController({
+      selectedAgent: 'agent-x',
+      agentNames: ['agent-x'],
+    })
+    await waitFor(() => expect(titleInList(result.current, 'c1')).toBe('server c1'))
+
+    let pending: Promise<void> | undefined
+    await act(async () => {
+      pending = result.current.handleRenameChatForAgent('agent-x', 'c1', 'renamed')
+      await flushMicrotasks()
+    })
+    await waitFor(() => expect(clerum.rpc.renameSession).toHaveBeenCalledTimes(1))
+    const callsBeforePoll = clerum.chat.reconcileServerSessions.mock.calls.length
+
+    await act(async () => {
+      rerender({ agentNames: ['agent-x', 'agent-y'] })
+      await flushMicrotasks()
+    })
+
+    type Payload = Array<{ chatId: string; title?: string }>
+    const pollWrites = (clerum.chat.reconcileServerSessions.mock.calls as Array<[string, Payload]>)
+      .slice(callsBeforePoll)
+      .filter(([agentRef]) => agentRef === 'agent-x')
+      .map(([, sessions]) => sessions)
+    // Witness: the poll wrote this Host's index, with c2's server title.
+    expect(pollWrites.length).toBeGreaterThan(0)
+    for (const sessions of pollWrites) {
+      expect(sessions.find(s => s.chatId === 'c2')?.title).toBe('server c2')
+      expect(sessions.find(s => s.chatId === 'c1')).not.toHaveProperty('title')
+    }
+
+    await act(async () => {
+      inFlight.resolve({ title: 'renamed' })
+      await pending
+    })
+  })
+
   // FIX 2: renaming the same chat twice before the first PATCH resolves. The
   // second rename's pending marker must survive the first (stale) 200, so the
   // newer optimistic title keeps its case-E protection and is not clobbered.

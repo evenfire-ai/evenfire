@@ -24,6 +24,7 @@ vi.mock('electron', () => ({
 }))
 
 vi.mock('../config.js', () => ({
+  getActiveRuntimeConfigOptionId: () => null,
   getActiveEnvKey: () => 'test-env',
   config: {
     rpcProxyBaseUrl: 'https://rpc.example',
