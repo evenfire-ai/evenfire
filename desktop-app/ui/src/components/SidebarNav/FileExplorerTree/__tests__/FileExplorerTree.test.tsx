@@ -809,6 +809,7 @@ function renderTreeWithSession(props: Partial<Parameters<typeof FileExplorerTree
 describe('FileExplorerTree — explicit Move permission retry', () => {
   const sourceResourceId = 'file-a'
   const sourceParentId = 'source-parent'
+  const movedSourceParentId = 'source-parent-b'
   const destinationAId = 'archive-a'
   const destinationBId = 'archive-b'
   const sessionScope = 'test:user-1:team-1'
@@ -819,10 +820,10 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     return screen.findByRole('dialog', { name: 'Move file report.txt' })
   }
 
-  function accessibleRows() {
+  function accessibleRows(parentResourceId = sourceParentId) {
     return listAccessiblePage([
       accessibleResource(sourceResourceId, 'report.txt', 'file', {
-        parentResourceId: sourceParentId,
+        parentResourceId,
         path: '/Team/report.txt',
         version: 4,
         permissions: ['read'],
@@ -973,6 +974,78 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     ).toBeTruthy()
     expect(within(dialog).queryByText('Checking permissions…')).toBeNull()
     expect(within(dialog).queryByText('Permissions verified. Select Move to confirm.')).toBeNull()
+    expect(moveResource).toHaveBeenCalledTimes(1)
+  })
+
+  it('rechecks the latest source parent after the listed resource moves before Retry', async () => {
+    let currentParentId = sourceParentId
+    const listAccessible = vi.fn(async () => accessibleRows(currentParentId))
+    const resolve = vi.fn(async (uri: string) => {
+      if (uri !== `gfs://main/${sourceResourceId}`) {
+        throw new Error(`Unexpected resolve: ${uri}`)
+      }
+      return resolveResource(
+        resolvedFile(sourceResourceId, 'report.txt', {
+          parentResourceId: currentParentId,
+          version: currentParentId === sourceParentId ? 4 : 5,
+        })
+      )
+    })
+    const affordanceProducer = appServiceAffordanceProducer(async resourceId => {
+      if (resourceId === sourceParentId && currentParentId !== sourceParentId) {
+        return heldPermissionResponse(['read'])
+      }
+      return heldPermissionResponse(['read', 'write', 'delete'])
+    })
+    const affordances = vi.fn((resourceId: string, drive?: string) =>
+      affordanceProducer(resourceId, drive)
+    )
+    const moveResource = vi.fn(async () => {
+      throw new Error('403 Forbidden httpStatus=403')
+    })
+    installDndClerum({
+      listAccessible,
+      affordances,
+      resolve,
+      moveResource,
+    })
+    const { queryClient } = renderTreeWithSession()
+
+    const dialog = await openMoveDialog()
+    await fireEvent.click(await within(dialog).findByRole('button', { name: 'Archive A' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive A)' }))
+    await within(dialog).findByText(
+      'EvenDrive could not confirm permission for this move. Refresh and try again.'
+    )
+    expect(moveResource).toHaveBeenCalledTimes(1)
+
+    currentParentId = movedSourceParentId
+    await act(async () => {
+      await queryClient.invalidateQueries({
+        queryKey: desktopQueryKeys.gfsAccessible(sessionScope, 'main'),
+      })
+    })
+    const currentSourceParent = () => {
+      const accessibleData = queryClient.getQueryData<{
+        pages: Array<{ items: Array<{ resourceId: string; parentResourceId: string | null }> }>
+      }>(desktopQueryKeys.gfsAccessible(sessionScope, 'main'))
+      return accessibleData?.pages
+        .flatMap(page => page.items)
+        .find(item => item.resourceId === sourceResourceId)?.parentResourceId
+    }
+    await waitFor(() => expect(currentSourceParent()).toBe(movedSourceParentId))
+
+    resolve.mockClear()
+    affordances.mockClear()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry permission check' }))
+
+    expect(
+      await within(dialog).findByText('Permissions verified. Select Move to confirm.')
+    ).toBeTruthy()
+    expect(resolve).toHaveBeenCalledWith(`gfs://main/${sourceResourceId}`)
+    expect(affordances).toHaveBeenCalledWith(movedSourceParentId, 'main')
+    expect(affordances).not.toHaveBeenCalledWith(sourceParentId, 'main')
+    expect(affordances).toHaveBeenCalledWith(destinationAId, 'main')
     expect(moveResource).toHaveBeenCalledTimes(1)
   })
 

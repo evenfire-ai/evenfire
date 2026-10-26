@@ -918,20 +918,51 @@ export function FileExplorerTree({
   ) => {
     const target = moveDialogTarget
     if (!target || !isDialogCurrent()) return
-    const ownsRetry = () => moveDialogTargetRef.current === target && isDialogCurrent()
     const scope = ctrl.sessionScope
+    const expectedScope = scope ?? 'anonymous'
+    const ownsRetry = () =>
+      moveDialogTargetRef.current === target &&
+      liveDragScopeRef.current === expectedScope &&
+      isDialogCurrent()
     const drive = target.node.drive || GFS_DRIVE_MAIN
-    const sourceParentId = target.node.parentResourceId
     setMovePermissionStatus('checking')
 
     try {
-      if (!scope || !sourceParentId) {
+      if (!scope) {
+        throw new Error('Could not verify the source folder for this move.')
+      }
+      const destinationKey = desktopQueryKeys.gfsAffordances(scope, destinationId, drive)
+      const previousSourceParentId = target.node.parentResourceId
+      if (previousSourceParentId) {
+        const previousSourceKey = desktopQueryKeys.gfsAffordances(
+          scope,
+          previousSourceParentId,
+          drive
+        )
+        assertGfsAuthorityRetryAllowed(queryClient, previousSourceKey)
+      }
+      assertGfsAuthorityRetryAllowed(queryClient, destinationKey)
+
+      if (!ownsRetry()) {
+        if (moveDialogTargetRef.current === target) setMovePermissionStatus(null)
+        return
+      }
+      const resolvedSource = await window.clerum.gfs.resolve(target.node.gfsUri)
+      if (!ownsRetry()) {
+        if (moveDialogTargetRef.current === target) setMovePermissionStatus(null)
+        return
+      }
+      if (resolvedSource.resourceId !== target.node.resourceId) {
+        throw new Error('Could not verify the source folder for this move.')
+      }
+      const sourceParentId = resolvedSource.parentResourceId
+      if (!sourceParentId) {
         throw new Error('Could not verify the source folder for this move.')
       }
       const sourceKey = desktopQueryKeys.gfsAffordances(scope, sourceParentId, drive)
-      const destinationKey = desktopQueryKeys.gfsAffordances(scope, destinationId, drive)
       assertGfsAuthorityRetryAllowed(queryClient, sourceKey)
       assertGfsAuthorityRetryAllowed(queryClient, destinationKey)
+
       const [source, destination] = await Promise.all([
         queryClient.fetchQuery({
           queryKey: sourceKey,
@@ -959,7 +990,7 @@ export function FileExplorerTree({
       setMovePermissionStatus(null)
     } catch (retryError) {
       if (moveDialogTargetRef.current !== target) return
-      if (!isDialogCurrent()) {
+      if (!ownsRetry()) {
         setMovePermissionStatus(null)
         return
       }
