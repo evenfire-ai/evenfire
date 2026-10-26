@@ -432,6 +432,36 @@ describe('User Approval Request Routes', () => {
         await expectOnlyIncremented(before, 'failed')
       })
 
+      it('counts a successful rotation as success', async () => {
+        const { refreshToken } = issueTestTokens()
+        const before = await snapshot()
+
+        const res = await postRefresh(refreshToken)
+
+        expect(res.status).toBe(200)
+        await expectOnlyIncremented(before, 'success')
+      })
+
+      it('counts a refresh-jti consumption error as failed', async () => {
+        const { refreshToken } = issueTestTokens()
+        failNextRefreshJtiInsert = new Error('db down')
+        const before = await snapshot()
+
+        const res = await postRefresh(refreshToken)
+
+        expect(res.status).toBe(500)
+        await expectOnlyIncremented(before, 'failed')
+      })
+
+      it('counts a request without bearer token as failed', async () => {
+        const before = await snapshot()
+
+        const res = await request(app).post('/api/v1/workflow-auth/refresh').send()
+
+        expect(res.status).toBe(401)
+        await expectOnlyIncremented(before, 'failed')
+      })
+
       it('keeps an invalid refresh token on the failed label', async () => {
         const before = await snapshot()
 
