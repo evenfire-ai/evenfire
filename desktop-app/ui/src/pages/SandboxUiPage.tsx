@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { IconButton, StatusBanner } from '@components/Common'
+import { Button, IconButton, StatusBanner } from '@components/Common'
+import { useEmbedOwnership } from '@hooks/useEmbedOwnership'
 import { joinClasses } from '@lib/classNames'
-import type { ActiveSandboxUiApp } from '@/uiTypes'
+import { embedFailureMessage, embedViewState, httpStatusOf } from '@lib/embedOwnershipView'
 import SandboxCurrentContentSearch from '../components/SandboxCurrentContentSearch'
 import type { AppFindState } from '../components/SandboxCurrentContentSearch/types'
 import { IconCopy, IconRefresh, IconSandboxUi } from '../components/SidebarNav/icons'
 import { clickableRowProps } from '../lib/clickableRowProps'
 import { toActiveSandboxUiApp } from '../lib/sandboxUiAppSelection'
 import type { SandboxUiAppListing } from '../lib/sandboxUiAppSelection.types'
-import type { SandboxUiPageProps, SandboxUiShortcutOpenResult } from './SandboxUiPage.types'
+import type { SandboxUiPageProps } from './SandboxUiPage.types'
 
 type PhasePillTone = 'allowed' | 'warning' | 'denied' | 'info' | 'muted'
 
@@ -44,22 +45,24 @@ function phasePill(phase: string | null): { label: string; tone: PhasePillTone }
   }
 }
 
-// `launchId` names one open request end to end: main tags every per-view event
-// (`closed`, `refreshError`, `titleChanged`) with the id of the open that
-// mounted that view. Relaunching the SAME app keeps the appRef, so only the id
-// tells a late event from the replaced view apart from the live one.
-type LaunchState =
-  | { kind: 'idle' }
-  | { kind: 'minting'; appRef: string; launchId: string }
-  | { kind: 'mounted'; appRef: string; launchId: string }
-  | { kind: 'error'; appRef: string; launchId: string; message: string }
+// Past this, the overlay hides the native view without a preview: a brief flash
+// of the empty slot is better than a view that never gets out of the way.
+const CAPTURE_PREVIEW_TIMEOUT_MS = 500
 
 function statusFromError(err: unknown): { status: number | null; message: string } {
   const message = err instanceof Error ? err.message : String(err)
-  // SandboxUiSessionError surfaces "(404):" / "(403):" etc., while bridge
-  // failures can include "403 Forbidden". Pull out either form for UX copy.
-  const m = /\((\d{3})\)|\b(\d{3})\s+[A-Za-z]/.exec(message)
-  return { status: m ? Number(m[1] ?? m[2]) : null, message }
+  return { status: httpStatusOf(message), message }
+}
+
+function previewWithin(timeoutMs: number): Promise<string | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timedOut = new Promise<null>(resolve => {
+    timer = setTimeout(() => resolve(null), timeoutMs)
+  })
+  const capture = Promise.resolve()
+    .then(() => window.clerum.sandboxUi.capturePreview())
+    .catch(() => null)
+  return Promise.race([capture, timedOut]).finally(() => clearTimeout(timer))
 }
 
 function appLabel(app: SandboxUiAppListing): string {
@@ -203,47 +206,28 @@ function TitlebarLeadingAction({
 }
 
 export function SandboxUiPage({
-  actionRequest = null,
+  embed,
+  activeAppRef = null,
+  refreshError = null,
   boundsRefreshKey = 0,
   currentTeamId = '',
   headerShellOverlayOpen = false,
   sidebarShellOverlayOpen = false,
   toastShellOverlayOpen = false,
   deepLinkShellOverlayOpen = false,
-  shortcutApp = null,
-  shortcutOpenRequestId = 0,
   localSearchRequestId = 0,
   titlebarLeadingContainer = null,
   onLaunchApp,
-  onEmbeddedAppOpening,
-  onEmbeddedAppMounted,
-  onEmbeddedAppBack,
-  onEmbeddedAppOpenFailed,
+  onRefresh,
+  onRelaunch,
   onEmbedBoundsApplied,
   onEmbedSlotTopChange,
   onEmbedSlotRightChange,
   onNotify,
-  onShortcutOpenResult,
 }: SandboxUiPageProps) {
+  const view = embedViewState(useEmbedOwnership(embed))
   const [apps, setApps] = useState<SandboxUiAppListing[] | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [launch, setLaunchState] = useState<LaunchState>({ kind: 'idle' })
-  // Mirrors `launch` synchronously: the `sandboxUi:closed` listener must judge
-  // the launch that is current when the event lands, not the last committed
-  // render.
-  const launchRef = useRef<LaunchState>({ kind: 'idle' })
-  // Bumped by every launch and by back-to-apps. An open that resolves after a
-  // newer one took over must not write its outcome: that would re-point
-  // `launchRef` at the superseded app, so a later `closed` for it would release
-  // the owner of the embed that is actually live.
-  const launchSeqRef = useRef(0)
-  const setLaunch = useCallback((next: LaunchState) => {
-    launchRef.current = next
-    setLaunchState(next)
-  }, [])
-  const [refreshError, setRefreshError] = useState<{ launchId: string; message: string } | null>(
-    null
-  )
   const [appsPage, setAppsPage] = useState(0)
   const [embedPreviewDataUrl, setEmbedPreviewDataUrl] = useState<string | null>(null)
   const [localSearchOpen, setLocalSearchOpen] = useState(false)
@@ -252,10 +236,10 @@ export function SandboxUiPage({
   const embedSlotRef = useRef<HTMLDivElement>(null)
   const activeFindClientRequestIdRef = useRef<number | null>(null)
   const localSearchStateRef = useRef<AppFindState>({ status: 'idle' })
-  const lastLocalSearchRequestIdRef = useRef(shortcutApp ? localSearchRequestId : 0)
+  const lastLocalSearchRequestIdRef = useRef(
+    view.kind === 'mounted' || view.kind === 'minting' ? localSearchRequestId : 0
+  )
   const localSearchPreviousFocusRef = useRef<HTMLElement | null>(null)
-  const lastShortcutOpenRequestIdRef = useRef(0)
-  const lastActionRequestIdRef = useRef(0)
   // The deep-link confirm/error dialogs render as renderer DOM at the App
   // shell level; like the other shell overlays they must hide the native
   // WebContentsView, which always paints above the DOM, to be visible at all.
@@ -285,36 +269,18 @@ export function SandboxUiPage({
     setAppsPage(0)
   }, [apps?.length])
 
-  // Re-render the picker if the main process tears the view down (e.g. on
-  // app quit, parent window close, or the embed's renderer crashing).
-  useEffect(() => {
-    return window.clerum.sandboxUi.onClosed(({ launchId }) => {
-      // A closed event can land after the renderer has already launched
-      // another app, or relaunched the same one (it was in flight when the
-      // switch happened). Reconciling it would drop the owner of the NEW embed,
-      // which then stays painted over every later surface. Only the launch it
-      // names may be released.
-      const current = launchRef.current
-      if (current.kind === 'idle' || current.launchId !== launchId) return
-      if (current.kind === 'mounted' || current.kind === 'minting') {
-        setLaunch({ kind: 'idle' })
-      }
-      setRefreshError(null)
-      onEmbeddedAppBack?.()
-    })
-  }, [onEmbeddedAppBack, setLaunch])
-
-  // Surface refresh failures (403 / 410 / network) as an in-chrome banner.
-  // The main-process timer has already stopped firing by the time we get
-  // here — this is informational, not actionable beyond the user closing
-  // and re-opening.
-  useEffect(() => {
-    return window.clerum.sandboxUi.onRefreshError(({ launchId, message }) => {
-      const current = launchRef.current
-      if (current.kind === 'idle' || current.launchId !== launchId) return
-      setRefreshError({ launchId, message })
-    })
-  }, [])
+  // A launch waits for a registered measurer before anything is sent to main,
+  // so the slot it opens into is the one this page lays out. The slot only
+  // renders while a launch owns the tab; a measurement that never finds it laid
+  // out reports `null` and the launch fails before reaching main.
+  useLayoutEffect(
+    () =>
+      embed.registerMeasurer(async () => {
+        const rect = await waitForEmbedSlotRect(embedSlotRef)
+        return rect ? boundsFromRect(rect) : null
+      }),
+    [embed]
+  )
 
   useEffect(() => {
     return window.clerum.sandboxUi.onFindResult(result => {
@@ -398,138 +364,18 @@ export function SandboxUiPage({
   )
 
   useEffect(() => {
-    if (localSearchRequestId <= lastLocalSearchRequestIdRef.current || launch.kind !== 'mounted') {
+    if (localSearchRequestId <= lastLocalSearchRequestIdRef.current || view.kind !== 'mounted') {
       return
     }
     lastLocalSearchRequestIdRef.current = localSearchRequestId
     localSearchPreviousFocusRef.current = document.activeElement as HTMLElement | null
     setLocalSearchOpen(true)
-  }, [launch.kind, localSearchRequestId])
+  }, [view.kind, localSearchRequestId])
 
   useEffect(() => {
-    if (launch.kind === 'mounted' || !localSearchOpen) return
+    if (view.kind === 'mounted' || !localSearchOpen) return
     stopLocalSearch()
-  }, [launch.kind, localSearchOpen, stopLocalSearch])
-
-  // The embed lifecycle is governed by the universal tab store (mini-spec 05
-  // §3), not by this page's mount/unmount: deactivating an app tab persists its
-  // route and closes the embed from App.tsx, so the store is the single
-  // solicited `close()` emitter. The old unmount-driven `close()` +
-  // `setTimeout` cancel lived here; it could not capture the route on an
-  // app→app switch (this page stays mounted) and risked a double close, so it
-  // was removed. Unsolicited teardown still flows through `onClosed` (crash /
-  // quit / partition GC) and the explicit back-to-apps `closeEmbed`.
-
-  const openApp = useCallback(
-    async (app: ActiveSandboxUiApp): Promise<SandboxUiShortcutOpenResult> => {
-      const [recipeNs, recipeName] = app.appRef.split('/', 2)
-      if (!recipeNs || !recipeName) {
-        return { status: 'failed', message: 'Invalid app reference' }
-      }
-      // Transition to 'minting' so the slot div mounts. Wait for the next
-      // layout commit so getBoundingClientRect() reflects the slot's real
-      // position (otherwise we'd be reading before React has rendered the
-      // slot, and the fallback would mount the WebContentsView full-window —
-      // covering the close button until the next ResizeObserver tick).
-      const seq = ++launchSeqRef.current
-      // Unique across page remounts, unlike `seq`: main echoes it on events
-      // that can outlive this component instance.
-      const launchId = crypto.randomUUID()
-      setLaunch({ kind: 'minting', appRef: app.appRef, launchId })
-      onEmbeddedAppOpening?.(
-        {
-          appRef: app.appRef,
-          label: app.label,
-          icon: app.icon,
-          defaultPath: app.defaultPath,
-          ...(app.routePath ? { routePath: app.routePath } : {}),
-        },
-        launchId
-      )
-      try {
-        const rect = await waitForEmbedSlotRect(embedSlotRef)
-        if (!rect) {
-          throw new Error('Embed slot is not laid out — cannot determine bounds')
-        }
-        const bounds = boundsFromRect(rect)
-        await window.clerum.sandboxUi.open({
-          recipeNs,
-          recipeName,
-          // Title travels from the trusted app list into consent prompts and
-          // notification attribution. The plugin never gets to name itself.
-          ...(app.label ? { title: app.label } : {}),
-          defaultPath: app.defaultPath,
-          ...(app.routePath ? { routePath: app.routePath } : {}),
-          bounds,
-          launchId,
-        })
-        if (seq === launchSeqRef.current) {
-          setLaunch({ kind: 'mounted', appRef: app.appRef, launchId })
-          onEmbeddedAppMounted?.()
-        }
-        return { status: 'mounted' }
-      } catch (err) {
-        const { status, message } = statusFromError(err)
-        const userFacing =
-          status === 404
-            ? 'This app was removed.'
-            : status === 403
-              ? "You don't have access to this app."
-              : status === 409
-                ? 'This app is starting up — try again in a moment.'
-                : message
-        if (seq === launchSeqRef.current) {
-          setLaunch({ kind: 'error', appRef: app.appRef, launchId, message: userFacing })
-          onEmbeddedAppOpenFailed?.()
-        }
-        return { status: 'failed', message: userFacing }
-      }
-    },
-    [onEmbeddedAppMounted, onEmbeddedAppOpening, onEmbeddedAppOpenFailed, setLaunch]
-  )
-
-  const closeEmbed = useCallback(async () => {
-    launchSeqRef.current += 1
-    try {
-      await window.clerum.sandboxUi.close()
-    } catch {
-      // Always return the user to the app picker even if the main-process
-      // close call races with an already-closed view.
-    }
-    setLaunch({ kind: 'idle' })
-    setRefreshError(null)
-  }, [setLaunch])
-
-  const onBackToApps = useCallback(async () => {
-    await closeEmbed()
-    onEmbeddedAppBack?.()
-  }, [closeEmbed, onEmbeddedAppBack])
-
-  // In-place hard-reload of the embedded app — fetches freshly-arrived
-  // server data (e.g. new inbox items) without tearing the view down, so the
-  // user no longer has to navigate away and back to see updates.
-  const onRefresh = useCallback(() => {
-    void window.clerum.sandboxUi.reload()
-  }, [])
-
-  useEffect(() => {
-    if (!actionRequest || actionRequest.id <= lastActionRequestIdRef.current) return
-    lastActionRequestIdRef.current = actionRequest.id
-    if (actionRequest.action === 'release') {
-      // Any launch state counts: a minting open must not write its outcome, and
-      // a failed one must not leave its banner on a tab it never belonged to.
-      launchSeqRef.current += 1
-      setLaunch({ kind: 'idle' })
-      setRefreshError(null)
-      return
-    }
-    if (launch.kind !== 'mounted') return
-    if (actionRequest.action === 'refresh') {
-      onRefresh()
-    } else if (actionRequest.action === 'back-to-apps') {
-      void onBackToApps()
-    }
-  }, [actionRequest, launch.kind, onBackToApps, onRefresh, setLaunch])
+  }, [view.kind, localSearchOpen, stopLocalSearch])
 
   const onCopyDeepLink = useCallback(async () => {
     try {
@@ -541,20 +387,17 @@ export function SandboxUiPage({
     }
   }, [currentTeamId, onNotify])
 
-  useEffect(() => {
-    if (shortcutOpenRequestId === lastShortcutOpenRequestIdRef.current) return
-    lastShortcutOpenRequestIdRef.current = shortcutOpenRequestId
-    if (shortcutOpenRequestId <= 0 || !shortcutApp) return
-    void openApp(shortcutApp).then(result => {
-      void onShortcutOpenResult?.(shortcutOpenRequestId, result)
-    })
-  }, [onShortcutOpenResult, openApp, shortcutApp, shortcutOpenRequestId])
+  const embedLive = view.kind === 'mounted' || view.kind === 'minting'
+  // Main only honours setVisible/setBounds for a view it has already attached,
+  // and attaches a freshly opened one visible. Re-running the visibility effect
+  // per mounted view re-applies a hide requested while it was still opening.
+  const mountedLaunchId = view.kind === 'mounted' ? view.launch.launchId : null
 
-  // Track bounds while mounted; also during 'minting' so openApp can read
-  // the slot's rect AFTER the layout pass that renders the slot div.
+  // Track bounds while mounted; also while minting so the slot is placed by
+  // the time the open reads it.
   useEmbedBounds(
     embedSlotRef,
-    launch.kind === 'mounted' || launch.kind === 'minting',
+    embedLive,
     shellOverlayOpen,
     boundsRefreshKey,
     onEmbedBoundsApplied,
@@ -569,12 +412,7 @@ export function SandboxUiPage({
     let cancelled = false
     const updateVisibility = async (): Promise<void> => {
       if (shellOverlayOpen) {
-        let dataUrl: string | null = null
-        try {
-          dataUrl = await window.clerum.sandboxUi.capturePreview()
-        } catch {
-          // A missing preview must not prevent the shell overlay from opening.
-        }
+        const dataUrl = await previewWithin(CAPTURE_PREVIEW_TIMEOUT_MS)
         if (cancelled) return
         if (dataUrl) {
           setEmbedPreviewDataUrl(dataUrl)
@@ -589,7 +427,7 @@ export function SandboxUiPage({
         return
       }
 
-      if (launch.kind === 'mounted' || launch.kind === 'minting') {
+      if (embedLive) {
         const rect = embedSlotRef.current?.getBoundingClientRect()
         if (rect) {
           try {
@@ -612,17 +450,21 @@ export function SandboxUiPage({
     return () => {
       cancelled = true
     }
-  }, [launch.kind, shellOverlayOpen])
+  }, [embedLive, mountedLaunchId, shellOverlayOpen])
 
-  if (launch.kind === 'mounted' || launch.kind === 'minting') {
+  if (view.kind === 'mounted' || view.kind === 'minting') {
+    // Only failures of the launch that owns the tab right now; one from a view
+    // the user already left must not surface on its replacement.
     const showRefreshBanner =
-      refreshError && launch.kind === 'mounted' && refreshError.launchId === launch.launchId
+      refreshError !== null &&
+      view.kind === 'mounted' &&
+      refreshError.launchId === view.launch.launchId
     // The refresh/copy pair only exists while 'mounted'. The chat-drawer toggle
     // moved to the app header (mini-spec 04a §C), so the leading slot carries no
     // drawer control any more. In the 'minting' state both are absent, so
     // portaling the wrapper unconditionally would inject an empty <div> into the
     // shared title bar. Only portal when at least one control will render.
-    const hasLeadingActions = launch.kind === 'mounted'
+    const hasLeadingActions = view.kind === 'mounted'
     return (
       <section className="page" data-testid="sandbox-ui-mounted">
         {/* App actions live in the native title bar's leading slot (icon-only,
@@ -635,32 +477,35 @@ export function SandboxUiPage({
           hasLeadingActions &&
           createPortal(
             <div className="window-titlebar__leading-actions">
-              {launch.kind === 'mounted' && (
-                <>
-                  <TitlebarLeadingAction
-                    className="sandbox-ui-refresh-btn"
-                    label="Refresh app content"
-                    onClick={onRefresh}
-                  >
-                    <IconRefresh />
-                  </TitlebarLeadingAction>
-                  <TitlebarLeadingAction
-                    className="sandbox-ui-copy-link-btn"
-                    label="Copy current app link"
-                    onClick={() => void onCopyDeepLink()}
-                  >
-                    <IconCopy />
-                  </TitlebarLeadingAction>
-                </>
-              )}
+              <TitlebarLeadingAction
+                className="sandbox-ui-refresh-btn"
+                label="Refresh app content"
+                onClick={() => onRefresh?.()}
+              >
+                <IconRefresh />
+              </TitlebarLeadingAction>
+              <TitlebarLeadingAction
+                className="sandbox-ui-copy-link-btn"
+                label="Copy current app link"
+                onClick={() => void onCopyDeepLink()}
+              >
+                <IconCopy />
+              </TitlebarLeadingAction>
             </div>,
             titlebarLeadingContainer
           )}
         {showRefreshBanner && (
-          <StatusBanner
-            tone="error"
-            text={`Session refresh failed: ${refreshError.message}. Close and re-open the app to continue.`}
-          />
+          <StatusBanner tone="error">
+            <span>{`Session refresh failed: ${refreshError.message}.`}</span>
+            <Button
+              className="sandbox-ui-status-action"
+              size="xs"
+              variant="outline"
+              onClick={() => onRelaunch?.()}
+            >
+              Retry
+            </Button>
+          </StatusBanner>
         )}
         {localSearchOpen ? (
           <SandboxCurrentContentSearch
@@ -686,7 +531,7 @@ export function SandboxUiPage({
               data-testid="sandbox-ui-embed-preview"
             />
           )}
-          {launch.kind === 'minting' && (
+          {view.kind === 'minting' && (
             <div className="sandbox-ui-loading" role="status" aria-live="polite">
               <span className="sandbox-ui-loading__mark" aria-hidden="true">
                 <span />
@@ -700,6 +545,27 @@ export function SandboxUiPage({
       </section>
     )
   }
+
+  const failure = view.kind === 'failed' ? view.failure : null
+  const failureBanner =
+    failure === null ? null : failure.kind === 'crashed' ? (
+      <StatusBanner tone="error">
+        <span>{embedFailureMessage(failure)}</span>
+        <Button
+          className="sandbox-ui-status-action"
+          size="xs"
+          variant="outline"
+          onClick={() => onRelaunch?.()}
+        >
+          Reopen
+        </Button>
+      </StatusBanner>
+    ) : (
+      <StatusBanner
+        tone="error"
+        text={`${activeAppRef ?? 'App'}: ${embedFailureMessage(failure)}`}
+      />
+    )
 
   if (apps === null) {
     return (
@@ -738,6 +604,7 @@ export function SandboxUiPage({
     return (
       <section className="page apps-page">
         {error && <StatusBanner tone="error" text={error} />}
+        {failureBanner}
 
         <div className="apps-page-header">
           <div className="apps-page-header-text">
@@ -782,9 +649,7 @@ export function SandboxUiPage({
   return (
     <section className="page apps-page">
       {error && <StatusBanner tone="error" text={error} />}
-      {launch.kind === 'error' && (
-        <StatusBanner tone="error" text={`${launch.appRef}: ${launch.message}`} />
-      )}
+      {failureBanner}
 
       <div className="apps-page-header">
         <div className="apps-page-header-text">

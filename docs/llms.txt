@@ -2,12 +2,14 @@
 
 > Curated map of public docs. Prefer these paths over random monorepo files.
 > Code/API still use the historical name "clerum" (clerum.io, CLERUM_*).
+> Docs describe what deploy/base and the minikube overlays ship; off-by-default features say so. design/ records are point-in-time, not maintained.
 
 ## Start here
 
-- README: ../README.md — product pitch, security model, CRDs, license
-- Quickstart: get-started/quickstart.md — full platform on minikube, one command
+- README: ../README.md — product pitch, security model, providers, license
+- Quickstart: get-started/quickstart.md — full platform on minikube: fill in .env, then one command
 - Registry quickstart: get-started/registry-quickstart.md — self-hosted connect → install → publish round trip
+- Dev mode (mcp-host without Kubernetes): get-started/dev-mode.md
 - Learning path: get-started/learning-path.md
 - FAQ: faq.md
 
@@ -15,11 +17,13 @@
 
 - Why evenfire: concepts/why-evenfire.md
 - When to use evenfire (categories): concepts/when-to-use-evenfire.md
+- A tool call, end to end: concepts/tool-call-end-to-end.md
 - Open core (self-host vs evenfire hosted): concepts/open-core-and-hosted.md
 - Claims guardrails: meta/claims-guardrails.md
 - Code names (evenfire vs clerum): concepts/code-names.md
 - Architecture overview: architecture/overview.md
 - Platform topology / NetworkPolicies: architecture/platform-topology.md
+- Non-MCP services (namespace split, L0–L3 policy layers): architecture/non-mcp-services.md
 
 ## Surfaces (the UIs)
 
@@ -33,39 +37,99 @@
 - Connect Telegram: how-to/connect-telegram.md
 - Connect Slack (app scopes, request URL, verify flow, approval buttons): how-to/connect-slack.md
 - Connect Microsoft Teams (Teams CLI registration, derived endpoint, single-tenant requirement, verify flow): how-to/connect-teams.md
+- Use the Desktop App (chat, attachments, EvenDrive, shortcuts, deep links): how-to/use-the-desktop-app.md
+- Configure guardrails (rules, installed hooks, built-ins): how-to/configure-guardrails.md
+- Connect an OAuth connector (remote MCP servers, Microsoft 365 / Entra ID, user authorization, connector credentials): how-to/connect-oauth-connector.md
 - Configure approvals: how-to/configure-approvals.md
 - Add MCP server: how-to/add-mcp-server.md
-- LLM providers overview (the 23 providers, including oauth-broker ChatGPT, mental model, support matrix): llm-providers/README.md
-- Configure LLM providers (credentials, model allowlist, session selector): deploy/llm-providers.md
-- Add an LLM provider (data-only vs driver-based integration): llm-providers/adding-a-provider.md
 - Desktop setup & updates (environments, invitation, updates): how-to/desktop-setup-and-updates.md
+- Manage users and teams (roles, control admins, agent access): how-to/manage-users-and-teams.md
 - Member invitations on self-hosted (hosted mode vs your own service): how-to/member-invitations-self-hosted.md
 - Track usage & set token budgets: how-to/token-budgets-and-usage.md
 - Connect a self-hosted deployment to the registry: how-to/connect-to-registry.md
 - Publish a plugin to the registry (efrk_ org key): how-to/publish-plugin-to-registry.md
-- Shared & global files (SFS team workspace + brokered GFS drive): how-to/shared-and-global-files.md
-- Minikube full stack: deploy/minikube.md
+- Shared & global files (SFS team workspace + EvenDrive/GFS brokered drive): how-to/shared-and-global-files.md
+
+## LLM providers
+
+- LLM providers overview (the 24 providers, including the Codex and Grok subscription sign-ins, mental model, support matrix): llm-providers/README.md
+- Configure LLM providers — operator guide (credentials, Vertex/Bedrock/Azure, allowlist, session selector): deploy/llm-providers.md
+- Use a ChatGPT (Codex) or Grok subscription instead of an API key: how-to/connect-llm-subscription.md
+- Add an LLM provider (data-only vs driver-based integration): llm-providers/adding-a-provider.md
+
+## Deploy & operate
+
+- Minikube full stack (in-depth reference): deploy/minikube.md
 - Production checklist: deploy/production.md
 - WorkflowRecipes ops: deploy/workflow-recipes-guide.md
+- Releases and upgrades (versions, release images, pinning, upgrade order): deploy/releases-and-upgrades.md
+- Monitoring and observability: operations/monitoring.md
+- Upgrade: workflow output PVC ownership: deploy/workflow-output-pvc-upgrade.md
+- Upgrade: Plugin Workload SDK (promptBridge / clientNotifications): deploy/plugin-workload-sdk-upgrade.md
+- GFS permission store credential (provision, rotate, recover): deploy/gfs-permission-store.md
+- Runbook: password work ownership recovery: how-to/password-work-ownership-recovery.md
+- Runbook: MCP secret rollback permits: how-to/control-api-mcp-secret-rollback-permits.md
+- Runbook: GFS large-file downloads and model input limits: operations/gfs-large-file-host-downloads.md
 
 ## Reference
 
+- Configuration switches (feature flags, base vs minikube): reference/configuration.md
+- Plugin UI SDK (window.clerum for embedded plugin apps): reference/plugin-ui-sdk.md
 - CRD index: crds/README.md
 - Host: crds/host.md
 - Context: crds/context.md
 - McpServer: crds/mcpserver.md
+- LlmHook (installed guardrail hooks): crds/llmhook.md
 - CommunicationChannel: crds/communicationchannel.md
 - WorkflowRecipe: crds/workflowrecipe.md
 - WorkflowRecipePolicy: crds/workflowrecipepolicy.md
 - SharedFileSystem: crds/sharedfilesystem.md
 - GlobalFileSystem: crds/globalfilesystem.md
+- Workflow SDK: ../packages/workflow-sdk/README.md
+
+## Architecture deep dives
+
+- Stateless agent invariants: architecture/stateless-invariants.md
+- HCC readiness flows: architecture/hcc-readiness-flows.md
+- Live entity-change consumer semantics: architecture/live-entity-change-consumer-semantics.md
+- Governed tracing: architecture/governed-tracing.md
+- Administrative rate limits: architecture/administrative-rate-limits.md
+- GFS desktop operator parity: architecture/gfs-desktop-operator-parity.md
+- Registry pull secret self-provisioning: architecture/registry-pull-secret-self-provisioning.md
+- Registry pull secret for recipe workloads: architecture/registry-pull-secret-recipe-workloads.md
+- Codex subscription transport contract: architecture/codex-subscription-transport-contract.md
+- Grok subscription transport contract: architecture/grok-subscription-transport-contract.md
+- WorkflowRecipe naming: architecture/workflow-recipe-naming.md
 
 ## Testing & contributing
 
-- E2E guide: testing/e2e-guide.md
 - Contributing: ../CONTRIBUTING.md
+- E2E guide: testing/e2e-guide.md
+- Minikube T0/T1/T2 runbook: testing/minikube-t2-runbook.md
+- Custom coordinator E2E gates: testing/custom-coordinator-e2e-gates.md
+- Desktop observation smoke test: testing/desktop-observation-smoke-test.md
+- Control UI headful journeys: testing/control-ui-headful-journeys.md
+- Desktop headful journeys: testing/desktop-headful-journeys.md
+- Codex subscription validation: testing/codex-subscription-validation.md
+- Grok subscription validation: testing/grok-subscription-validation.md
+- Workflow NetworkPolicy regressions: testing/workflow-network-policy-regressions.md
+- Stateless idle calibration: testing/stateless-idle-calibration.md
+- Local measurements: testing/local-measurements.md
+- CodeQL rate-limiting dispositions: how-to/codeql-js-missing-rate-limiting.md
 - Security: ../SECURITY.md
 - License: ../LICENSE
+
+## For coding agents
+
+- WorkflowRecipe authoring guide: agents/CLERUM_WORKFLOW_RECIPE_GUIDE.md
+- Shared frontend rules: agents/frontend-style-rules.md
+- Control UI rules: agents/control-ui-rules.md
+- Profile UI rules: agents/profile-ui-rules.md
+- Desktop renderer rules: agents/desktop-ui-rules.md
+
+## Design records (point-in-time, not maintained)
+
+- Index: design/README.md
 
 ## Service READMEs (implementation detail)
 
@@ -78,5 +142,7 @@
 - ../control-ui/README.md — admin console routes, config, tests
 - ../desktop-app/README.md — Electron client, scopes, endpoint table, E2E
 - ../profile-ui/README.md — profile and invitation flows
+- ../codex-llm-proxy/README.md — Codex subscription model proxy
+- ../grok-llm-proxy/README.md — Grok subscription model proxy
 - ../rpc-proxy/README.md — external JWT-gated gateway for desktop traffic
 - ../external-rest-api/README.md — auth, profiles, teams, RPC-token brokerage

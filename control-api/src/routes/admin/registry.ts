@@ -354,8 +354,7 @@ function assertHookAdmissible(
       status: 400,
       body: {
         error: 'content_access_conflict',
-        reason:
-          'contentAccess: metadata is not allowed for a hook using moderate/postCallSuccess/onError (§8.4)',
+        reason: `contentAccess: metadata is not allowed for a hook using ${[...INHERENTLY_CONTENT_POINTS].join('/')} (§8.4)`,
       },
     }
   }
@@ -499,8 +498,7 @@ export function registryErrorLogFields(err: unknown): SafeRegistryErrorLogFields
 }
 
 type CredentialPayloadValidation =
-  | { ok: true; secretData: Record<string, string> }
-  | { ok: false; body: Record<string, unknown> }
+  { ok: true; secretData: Record<string, string> } | { ok: false; body: Record<string, unknown> }
 
 function looksLikeCredentialPlaceholder(value: string): boolean {
   const normalized = value.trim().toLowerCase()
@@ -1237,11 +1235,7 @@ async function readSecretMutationOutcome(
 }
 
 export type CreatedSecretAfterDeleteFailure =
-  | 'gone'
-  | 'replaced'
-  | 'modified-original'
-  | 'unchanged-original'
-  | 'identity-unavailable'
+  'gone' | 'replaced' | 'modified-original' | 'unchanged-original' | 'identity-unavailable'
 
 /** Classify what remains under a Secret name after an identity-bound delete failed. */
 export function classifyCreatedSecretAfterDeleteFailure(
@@ -1308,11 +1302,7 @@ async function waitForSecretDeletionOrReplacement(
 }
 
 type CreatedResourceAfterDeleteFailure =
-  | 'gone'
-  | 'replaced'
-  | 'modified-original'
-  | 'unchanged-original'
-  | 'identity-unavailable'
+  'gone' | 'replaced' | 'modified-original' | 'unchanged-original' | 'identity-unavailable'
 
 function normalizeRegistryResourceSnapshot(
   raw: unknown,
@@ -2112,9 +2102,7 @@ export function createAdminRegistryRouter(
         }
 
         const transport = (entry.transport ?? 'streamableHttp') as
-          | 'streamableHttp'
-          | 'sse'
-          | 'stdio'
+          'streamableHttp' | 'sse' | 'stdio'
         const port = (meta?.port as number | undefined) ?? 3000
         const secretName = `${serverName}-credentials`
 
@@ -5234,9 +5222,7 @@ export function createAdminRegistryRouter(
       const limit = toPageNum(req.query.limit)
       const offset = toPageNum(req.query.offset)
       const raw = (await listOrgEntries(ctx.orgName, { limit, offset })) as
-        | { data?: unknown[]; entries?: unknown[]; meta?: unknown }
-        | null
-        | undefined
+        { data?: unknown[]; entries?: unknown[]; meta?: unknown } | null | undefined
       const data = raw?.data ?? raw?.entries ?? []
       res.status(200).json(raw?.meta !== undefined ? { data, meta: raw.meta } : { data })
     } catch (err) {

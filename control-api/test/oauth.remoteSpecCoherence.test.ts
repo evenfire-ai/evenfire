@@ -12,8 +12,14 @@ import {
 import { signOAuthState } from '../src/oauth/state.js'
 import { buildRemoteOAuthSpec } from '../src/routes/admin/remoteMcp.js'
 import { normalizeMcpServerOwnerDecl } from '../src/routes/mcpOauth.js'
-import { issueMcpHostControlJwt } from '../src/utils/auth/mcpHostJwtToken.js'
-import { membership, seedAllowlistedContext } from './fixtures/contextAllowlist.js'
+import { membership, seedAgentHost, seedAllowlistedContext } from './fixtures/contextAllowlist.js'
+import { mintHccControlToken } from './fixtures/hccControlToken.js'
+import {
+  type InstalledMcpServer,
+  WORKIQ_GUID_SCOPE,
+  WORKIQ_URL_SCOPE,
+  installWorkIqServer,
+} from './fixtures/perServerInstall.js'
 import {
   ATLASSIAN_V2_PILOT,
   DROPBOX_PILOT,
@@ -59,6 +65,9 @@ vi.mock('../src/services/rateLimiterService.js', () => ({
 
 const MCP_NS = config.mcpServersNamespace
 const CONTEXT = 'ctx-9'
+const RUNTIME_HOST = 'agent-host'
+// users.id is a UUID: the broker refuses any other end-user id.
+const RUNTIME_USER = '3f9a1c2e-6b4d-4e8f-a1c3-5d7e9f0b2a46'
 const PRE_REGISTERED_CLIENT_ID = 'client-abc'
 const CIMD_SELF = 'https://control.example.com/api/v1/.well-known/evenfire-mcp-client'
 const RPC_PROXY_TOKEN = 'dev-rpc-proxy-token'
@@ -94,13 +103,49 @@ let bodyDiscovery: DiscoveryResult
 // Real Atlassian v2: CIMD + DCR, no RFC 9207, every endpoint on atlassian.com.
 let perServerDiscovery: DiscoveryResult
 let crossSiteDiscovery: DiscoveryResult
+let notionDiscovery: DiscoveryResult
+// Work IQ as the real install writes it (entra-v2 profile), once per scope form.
+let workIqGuid: InstalledMcpServer
+let workIqUrl: InstalledMcpServer
 
 beforeAll(async () => {
   headerDiscovery = await discover(PILOTS.sentry)
   bodyDiscovery = await discover(bodyOnlyPilot())
   perServerDiscovery = await discover(ATLASSIAN_V2_PILOT)
   crossSiteDiscovery = await discover(dropboxWithRfc9207())
+  notionDiscovery = await discover(PILOTS.notion)
+  workIqGuid = await installWorkIqServer({ scopes: [WORKIQ_GUID_SCOPE] })
+  workIqUrl = await installWorkIqServer({ scopes: [WORKIQ_URL_SCOPE] })
 })
+
+const EVIL_BASE_URL = 'https://evil.example/mcp'
+
+/** The `spec.remote` the install wrote for Work IQ. */
+function workIqRemote(): Record<string, unknown> {
+  return { ...workIqGuid.spec.remote }
+}
+
+/** The installed Work IQ `spec.oauth` with its scopes rewritten by a direct write. */
+function workIqWithScopes(scopes: string[]): Record<string, unknown> {
+  return { ...workIqGuid.spec.oauth, scopes }
+}
+
+/** The installed Work IQ `spec.oauth` minus the profile, as an outdated CRD persists it. */
+function workIqWithoutProfile(): Record<string, unknown> {
+  const { asProfile: _pruned, ...oauth } = workIqGuid.spec.oauth
+  return oauth
+}
+
+/** A Notion pre-registered CR with the profile stamped on it: no producer, a direct write. */
+function profileOnNotionOAuth(): Record<string, unknown> {
+  const oauth = buildRemoteOAuthSpec(notionDiscovery, {
+    clientMode: 'confidential',
+    grantScope: 'user',
+    clientSecretName: 'srv-oauth-client',
+    preRegisteredClientId: PRE_REGISTERED_CLIENT_ID,
+  }) as unknown as Record<string, unknown>
+  return { ...oauth, asProfile: 'entra-v2' }
+}
 
 function publicWithRefsOAuth(): Record<string, unknown> {
   const oauth = buildRemoteOAuthSpec(headerDiscovery, {
@@ -171,7 +216,16 @@ function crossSiteRegistrationOAuth(): Record<string, unknown> {
   }
 }
 
-const INCOHERENT = [
+/** `spec.remote` of a case: `undefined` omits the block; a function builds it. */
+type RemoteOf = (() => Record<string, unknown>) | undefined
+
+const INCOHERENT: ReadonlyArray<{
+  label: string
+  oauth: () => Record<string, unknown>
+  remote?: RemoteOf
+  reason: string
+  consentOnly: boolean
+}> = [
   // CRD mirrors: refused in consent and token issuance alike.
   {
     label: 'public + secret refs',
@@ -211,16 +265,147 @@ const INCOHERENT = [
     reason: 'as_endpoints_cross_site',
     consentOnly: true,
   },
-] as const
+  // AS-PROFILE-ISSUER mirror: a profile only on the Entra tenant issuer it comes from.
+  {
+    label: 'asProfile entra-v2 on the Notion issuer',
+    oauth: profileOnNotionOAuth,
+    remote: () => ({ baseUrl: PILOTS.notion.mcpUrl }),
+    reason: 'as_profile_issuer_mismatch',
+    consentOnly: false,
+  },
+  {
+    label: 'unknown asProfile on the Entra issuer',
+    oauth: () => ({ ...workIqGuid.spec.oauth, asProfile: 'other' }),
+    remote: workIqRemote,
+    reason: 'as_profile_issuer_mismatch',
+    consentOnly: false,
+  },
+  {
+    // What an apiserver with a CRD older than the field leaves of a real Work IQ install.
+    label: 'Entra tenant issuer without asProfile (pruned by an outdated CRD)',
+    oauth: workIqWithoutProfile,
+    remote: workIqRemote,
+    reason: 'as_profile_issuer_mismatch',
+    consentOnly: false,
+  },
+  // Hard audience rules of the profile, against the base URL in force.
+  {
+    label: 'entra-v2 with the Microsoft Graph GUID scope',
+    oauth: () => workIqWithScopes(['00000003-0000-0000-c000-000000000000/Mail.Read']),
+    remote: workIqRemote,
+    reason: 'scope_audience_mismatch',
+    consentOnly: false,
+  },
+  {
+    // The server's own scope satisfies the resource-scope rule, so only the audience
+    // violation catches a Graph scope added next to it.
+    label: 'entra-v2 with the Work IQ scope plus a Microsoft Graph GUID scope',
+    oauth: () =>
+      workIqWithScopes([WORKIQ_GUID_SCOPE, '00000003-0000-0000-c000-000000000000/Mail.Read']),
+    remote: workIqRemote,
+    reason: 'scope_audience_mismatch',
+    consentOnly: false,
+  },
+  {
+    // A CR written while Azure SQL was still an unknown GUID must stop resolving once it is
+    // blocked; the server's own scope next to it does not save it.
+    label: 'entra-v2 with the Work IQ scope plus an Azure SQL Database GUID scope',
+    oauth: () =>
+      workIqWithScopes([
+        WORKIQ_GUID_SCOPE,
+        '022907d3-0f1b-48f7-badc-1ba6abab6d66/user_impersonation',
+      ]),
+    remote: workIqRemote,
+    reason: 'scope_audience_mismatch',
+    consentOnly: false,
+  },
+  {
+    label: 'entra-v2 with a Microsoft Graph URL scope',
+    oauth: () => workIqWithScopes(['https://graph.microsoft.com/x']),
+    remote: workIqRemote,
+    reason: 'scope_audience_mismatch',
+    consentOnly: false,
+  },
+  {
+    label: 'entra-v2 with an unprefixed scope (read as Graph)',
+    oauth: () => workIqWithScopes(['Mail.Read']),
+    remote: workIqRemote,
+    reason: 'scope_audience_mismatch',
+    consentOnly: false,
+  },
+  {
+    label: 'entra-v2 with sign-in scopes only (a Graph token)',
+    oauth: () => workIqWithScopes(['offline_access']),
+    remote: workIqRemote,
+    reason: 'scope_audience_mismatch',
+    consentOnly: false,
+  },
+  {
+    // profileScopeViolation reports an empty scope as '', so a truthiness test misses it.
+    label: 'entra-v2 with an empty scope ahead of a Graph URL scope',
+    oauth: () => workIqWithScopes(['', 'https://graph.microsoft.com/x']),
+    remote: workIqRemote,
+    reason: 'scope_audience_mismatch',
+    consentOnly: false,
+  },
+  {
+    // Same, with the server's own scope after it: only a `!== null` test catches this one,
+    // since the resource-scope rule is satisfied.
+    label: 'entra-v2 with an empty scope ahead of the server URL scope',
+    oauth: () => ({ ...workIqUrl.spec.oauth, scopes: ['', WORKIQ_URL_SCOPE] }),
+    remote: () => ({ ...workIqUrl.spec.remote }),
+    reason: 'scope_audience_mismatch',
+    consentOnly: false,
+  },
+  {
+    label: 'entra-v2 URL-form scope after baseUrl moved to another host',
+    oauth: () => ({ ...workIqUrl.spec.oauth }),
+    remote: () => ({ ...workIqUrl.spec.remote, baseUrl: EVIL_BASE_URL }),
+    reason: 'scope_audience_mismatch',
+    consentOnly: false,
+  },
+  {
+    // The Work IQ app GUID is tied to its own host, so an edited base URL cannot carry its
+    // tokens elsewhere even though a GUID scope names no host.
+    label: 'entra-v2 GUID-form scope of a known API after baseUrl moved to another host',
+    oauth: () => ({ ...workIqGuid.spec.oauth }),
+    remote: () => ({ ...workIqGuid.spec.remote, baseUrl: EVIL_BASE_URL }),
+    reason: 'scope_audience_mismatch',
+    consentOnly: false,
+  },
+  {
+    label: 'entra-v2 without spec.remote',
+    oauth: () => ({ ...workIqGuid.spec.oauth }),
+    remote: undefined,
+    reason: 'scope_audience_mismatch',
+    consentOnly: false,
+  },
+  {
+    label: 'entra-v2 with an unparseable baseUrl',
+    oauth: () => ({ ...workIqGuid.spec.oauth }),
+    remote: () => ({ ...workIqGuid.spec.remote, baseUrl: 'not a url' }),
+    reason: 'scope_audience_mismatch',
+    consentOnly: false,
+  },
+]
 
 function crFrom(
   name: string,
-  oauth: Record<string, unknown>
+  oauth: Record<string, unknown>,
+  remote?: Record<string, unknown>
 ): McpServerOAuthSpecInput & {
   metadata: { name: string }
   spec: Record<string, unknown>
 } {
-  return { metadata: { name }, spec: { contextRef: CONTEXT, auth: { type: 'oauth' }, oauth } }
+  return {
+    metadata: { name },
+    spec: { contextRef: CONTEXT, auth: { type: 'oauth' }, oauth, ...(remote ? { remote } : {}) },
+  }
+}
+
+/** The CR of an INCOHERENT case. */
+function caseCr(name: string, c: (typeof INCOHERENT)[number]) {
+  return crFrom(name, c.oauth(), c.remote?.())
 }
 
 function thrownBy(fn: () => unknown): { code?: unknown; reason?: unknown } | undefined {
@@ -252,37 +437,36 @@ describe('resolver mirror of the remote CRD coherence rules', () => {
 
   for (const c of INCOHERENT) {
     it(`${c.label}: resolveServerOAuthSubject(consent) throws remote_oauth_spec_incoherent`, () => {
-      const err = thrownBy(() => resolveServerOAuthSubject(crFrom('srv', c.oauth()), 'consent'))
+      const err = thrownBy(() => resolveServerOAuthSubject(caseCr('srv', c), 'consent'))
       expect(err?.code).toBe('remote_oauth_spec_incoherent')
       expect(err?.reason).toBe(c.reason)
     })
 
     if (c.consentOnly) {
       it(`${c.label}: resolveServerOAuthSubject(token) still resolves the subject`, () => {
-        const r = resolveServerOAuthSubject(crFrom('srv', c.oauth()), 'token')
+        const r = resolveServerOAuthSubject(caseCr('srv', c), 'token')
         expect(r?.decl.id).toBe(c.oauth().id)
         expect(r?.decl.remote?.tokenEndpoint).toBe(c.oauth().tokenEndpoint)
       })
 
       it(`${c.label}: the refresh reader (normalizeMcpServerOwnerDecl) keeps accepting it`, () => {
-        const decl = normalizeMcpServerOwnerDecl(crFrom('srv', c.oauth()) as never)?.spec
-          ?.oauthClients?.[0]
+        const decl = normalizeMcpServerOwnerDecl(caseCr('srv', c) as never)?.spec?.oauthClients?.[0]
         expect(decl?.remote?.tokenEndpoint).toBe(c.oauth().tokenEndpoint)
       })
     } else {
       it(`${c.label}: resolveServerOAuthSubject(token) throws too`, () => {
-        const err = thrownBy(() => resolveServerOAuthSubject(crFrom('srv', c.oauth()), 'token'))
+        const err = thrownBy(() => resolveServerOAuthSubject(caseCr('srv', c), 'token'))
         expect(err?.reason).toBe(c.reason)
       })
 
       it(`${c.label}: the refresh reader (normalizeMcpServerOwnerDecl) refuses it too`, () => {
-        const err = thrownBy(() => normalizeMcpServerOwnerDecl(crFrom('srv', c.oauth()) as never))
+        const err = thrownBy(() => normalizeMcpServerOwnerDecl(caseCr('srv', c) as never))
         expect(err?.code).toBe('remote_oauth_spec_incoherent')
       })
     }
 
     it(`${c.label}: resolveServerOAuth still yields the grant coordinate (revoke, sweep)`, () => {
-      const r = resolveServerOAuth(crFrom('srv', c.oauth()))
+      const r = resolveServerOAuth(caseCr('srv', c))
       expect(r?.oauthClientId).toBe(c.oauth().id)
       expect(r?.grantScope).toBe('user')
       expect(r?.contextRef).toBe(CONTEXT)
@@ -332,6 +516,47 @@ describe('resolver mirror of the remote CRD coherence rules', () => {
   })
 })
 
+describe('entra-v2 runtime audience: what stays coherent', () => {
+  const PHASES = ['consent', 'token'] as const
+  const AUDIENCE_BREAKERS = [
+    ['00000003-0000-0000-c000-000000000000/Mail.Read'],
+    ['https://graph.microsoft.com/x'],
+    ['Mail.Read'],
+    ['offline_access'],
+  ]
+
+  for (const phase of PHASES) {
+    it(`${phase}: both installed Work IQ CRs resolve as written`, () => {
+      for (const cr of [workIqGuid, workIqUrl]) {
+        expect(resolveServerOAuthSubject(cr, phase)?.decl.remote?.asProfile).toBe('entra-v2')
+      }
+    })
+
+    it(`${phase}: an unknown GUID scope is coherent (writing the CR is the confirmation)`, () => {
+      const cr = crFrom(
+        'srv',
+        workIqWithScopes(['11111111-2222-3333-4444-555555555555/Tools.Read']),
+        workIqRemote()
+      )
+      expect(resolveServerOAuthSubject(cr, phase)?.decl.id).toBe(workIqGuid.spec.oauth.id)
+    })
+
+    it(`${phase}: without a profile the same scopes are coherent (I6)`, () => {
+      const preRegistered = buildRemoteOAuthSpec(headerDiscovery, {
+        clientMode: 'confidential',
+        grantScope: 'user',
+        clientSecretName: 'srv-oauth-client',
+        preRegisteredClientId: PRE_REGISTERED_CLIENT_ID,
+      }) as unknown as Record<string, unknown>
+      expect(preRegistered.asProfile).toBeUndefined()
+      for (const scopes of [...AUDIENCE_BREAKERS, ['', 'https://graph.microsoft.com/x']]) {
+        const cr = crFrom('srv', { ...preRegistered, scopes })
+        expect(resolveServerOAuthSubject(cr, phase)?.decl.scopes).toEqual(scopes)
+      }
+    })
+  }
+})
+
 describe('routes refuse an incoherent remote server with 409 remote_oauth_spec_incoherent', () => {
   let gateway: MockGateway
   let app: ReturnType<typeof createApp>
@@ -354,8 +579,16 @@ describe('routes refuse an incoherent remote server with 409 remote_oauth_spec_i
     config.mcpOauthBrokerEnabled = originalBrokerEnabled
   })
 
-  async function seed(name: string, oauth: Record<string, unknown>): Promise<string> {
-    const created = (await gateway.createResource('mcpservers', crFrom(name, oauth), MCP_NS)) as {
+  async function seed(
+    name: string,
+    oauth: Record<string, unknown>,
+    remote?: Record<string, unknown>
+  ): Promise<string> {
+    const created = (await gateway.createResource(
+      'mcpservers',
+      crFrom(name, oauth, remote),
+      MCP_NS
+    )) as {
       metadata: { uid: string }
     }
     // The server is enabled in CONTEXT's allowlist (written by the real
@@ -373,7 +606,7 @@ describe('routes refuse an incoherent remote server with 409 remote_oauth_spec_i
 
   for (const c of INCOHERENT) {
     it(`${c.label}: POST /internal/mcp-oauth/authorize-url → 409, no URL minted`, async () => {
-      await seed('srv', c.oauth())
+      await seed('srv', c.oauth(), c.remote?.())
       const res = await request(app)
         .post('/api/v1/internal/mcp-oauth/authorize-url')
         .set('Authorization', `Bearer ${RPC_PROXY_TOKEN}`)
@@ -384,7 +617,7 @@ describe('routes refuse an incoherent remote server with 409 remote_oauth_spec_i
     })
 
     it(`${c.label}: authorize-url for a non-member → 403, configuration not disclosed`, async () => {
-      await seed('srv', c.oauth())
+      await seed('srv', c.oauth(), c.remote?.())
       membership(mockPoolQuery, { contexts: { 'user-2': ['ctx-other'] } })
       const res = await request(app)
         .post('/api/v1/internal/mcp-oauth/authorize-url')
@@ -397,8 +630,12 @@ describe('routes refuse an incoherent remote server with 409 remote_oauth_spec_i
 
     it(`${c.label}: POST /mcp-oauth/user-token → ${c.consentOnly ? '200, the stored token is served' : '409 even with a fresh stored token'}`, async () => {
       const oauth = c.oauth()
-      const uid = await seed('srv', oauth)
-      mockPoolQuery.mockImplementation((sql: unknown) => {
+      const uid = await seed('srv', oauth, c.remote?.())
+      // The runtime caller is a live Host of CONTEXT, through whose allowlist the
+      // server is reached, and the end user enters that Host.
+      await seedAgentHost(gateway, RUNTIME_HOST, CONTEXT)
+      const token = await mintHccControlToken(app, gateway, RUNTIME_HOST)
+      membership(mockPoolQuery, { agents: { [RUNTIME_USER]: [RUNTIME_HOST] } }, sql => {
         const text = typeof sql === 'string' ? sql : ''
         if (text.includes('FROM oauth_grants')) {
           return Promise.resolve({
@@ -407,7 +644,7 @@ describe('routes refuse an incoherent remote server with 409 remote_oauth_spec_i
                 owner_kind: 'mcpserver',
                 recipe_namespace: MCP_NS,
                 recipe_name: 'srv',
-                user_id: 'user-1',
+                user_id: RUNTIME_USER,
                 context_id: null,
                 bootstrapped_by_user_id: null,
                 oauth_client_id: oauth.id,
@@ -426,13 +663,10 @@ describe('routes refuse an incoherent remote server with 409 remote_oauth_spec_i
         }
         return Promise.resolve({ rows: [], rowCount: 0 })
       })
-      const token = issueMcpHostControlJwt('mcp-host', 'standalone', ['mcp-host/standalone'], {
-        scopes: ['oauth:user-token'],
-      }).token
       const res = await request(app)
         .post('/api/v1/mcp-oauth/user-token')
         .set('Authorization', `Bearer ${token}`)
-        .send({ mcpServerName: 'srv', userId: 'user-1' })
+        .send({ mcpServerName: 'srv', userId: RUNTIME_USER })
       if (c.consentOnly) {
         expect(res.status).toBe(200)
         expect(JSON.stringify(res.body)).toContain('LIVE-ACCESS')
@@ -445,7 +679,7 @@ describe('routes refuse an incoherent remote server with 409 remote_oauth_spec_i
 
     it(`${c.label}: GET /oauth-callback/remote → 409, nothing persisted`, async () => {
       const oauth = c.oauth()
-      await seed('srv', oauth)
+      await seed('srv', oauth, c.remote?.())
       const state = signOAuthState(config.oauthStateHmacSecret, {
         subjectKind: 'mcp',
         mcpServerName: 'srv',
@@ -470,7 +704,7 @@ describe('routes refuse an incoherent remote server with 409 remote_oauth_spec_i
     // binding check or exchange, whichever remote callback the AS used.
     it(`${c.label}: GET /oauth-callback/remote/srv → 409, nothing persisted`, async () => {
       const oauth = c.oauth()
-      await seed('srv', oauth)
+      await seed('srv', oauth, c.remote?.())
       const state = signOAuthState(config.oauthStateHmacSecret, {
         subjectKind: 'mcp',
         mcpServerName: 'srv',
@@ -492,7 +726,7 @@ describe('routes refuse an incoherent remote server with 409 remote_oauth_spec_i
     })
 
     it(`${c.label}: DELETE /internal/mcp-oauth/grant still revokes (204)`, async () => {
-      await seed('srv', c.oauth())
+      await seed('srv', c.oauth(), c.remote?.())
       const res = await request(app)
         .delete('/api/v1/internal/mcp-oauth/grant')
         .set('Authorization', `Bearer ${RPC_PROXY_TOKEN}`)

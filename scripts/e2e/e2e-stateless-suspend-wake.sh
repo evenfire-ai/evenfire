@@ -158,9 +158,21 @@ restore_hcc_env() {
   HCC_ENV_SAVED=""
 }
 
+# Bearer values never go in curl argv (visible in `ps`). auth_header writes one
+# header to a new 0600 file under SCRATCH and prints its path for `-H @file`;
+# one file per call because background turns mint tokens concurrently.
+SCRATCH="$(mktemp -d)"
+auth_header() {
+  local file
+  file="$(umask 077 && mktemp "${SCRATCH}/auth.XXXXXX")" || return 1
+  printf '%s\n' "$1" >"$file"
+  printf '%s' "$file"
+}
+
 cleanup_on_exit() {
   local status=$?
   set +e
+  rm -rf "$SCRATCH"
   if [ "$CONTEXT_PATCH_APPLIED" = "1" ]; then restore_context_mcpserver; fi
   if [ "$SECRET_ROTATED" = "1" ] && [ -n "$SECRET_NAME" ] && [ -n "$SECRET_DATA_BACKUP" ]; then
     kctl patch secret "$SECRET_NAME" -n "$MCP_HOST_NS" --type=merge \
@@ -259,11 +271,13 @@ SESSION_TOKEN=""; RPC_TOKEN=""
 RPC_SCOPES_JSON='["host:message:invoke","host:approval:write","host:session:read","host:status:read","host:health:read","host:wake:write"]'
 RPC_HOSTREFS_JSON=""
 
+# The password never goes in argv (visible in `ps`): jq reads it from its
+# environment and curl reads the body from stdin.
 mint_session_token() {
   local resp code body
-  resp=$(curl -sS -m 30 -w '\n%{http_code}' -X POST "${EXT_BASE}/api/v1/auth/password-login" \
-    -H 'Content-Type: application/json' \
-    -d "$(jq -cn --arg e "$DEV_EMAIL" --arg p "$DEV_PASSWORD" '{email:$e,password:$p}')") || {
+  resp=$(DEV_PASSWORD="$DEV_PASSWORD" jq -cn --arg e "$DEV_EMAIL" '{email:$e,password:env.DEV_PASSWORD}' |
+    curl -sS -m 30 -w '\n%{http_code}' -X POST "${EXT_BASE}/api/v1/auth/password-login" \
+      -H 'Content-Type: application/json' --data-binary @-) || {
     echo "password-login request failed at ${EXT_BASE}" >&2; return 1; }
   code="$(echo "$resp" | tail -n1)"; body="$(echo "$resp" | sed '$d')"
   [ "$code" = "200" ] || { echo "password-login -> HTTP ${code}: ${body}" >&2; return 1; }
@@ -275,7 +289,7 @@ mint_rpc_token() {
   local resp code body hostrefs
   hostrefs="${RPC_HOSTREFS_JSON:-$(jq -cn --arg h "$HOST_REF" '[$h]')}"
   resp=$(curl -sS -m 30 -w '\n%{http_code}' -X POST "${EXT_BASE}/api/v1/rpc/token" \
-    -H "Authorization: Bearer ${SESSION_TOKEN}" -H 'Content-Type: application/json' \
+    -H "@$(auth_header "Authorization: Bearer ${SESSION_TOKEN}")" -H 'Content-Type: application/json' \
     -d "$(jq -cn --argjson h "$hostrefs" --argjson s "$RPC_SCOPES_JSON" '{hostRefs:$h,scopes:$s}')") || {
     echo "rpc/token request failed at ${EXT_BASE}" >&2; return 1; }
   code="$(echo "$resp" | tail -n1)"; body="$(echo "$resp" | sed '$d')"
@@ -291,9 +305,28 @@ send_turn() {
   payload="$(jq -cn --arg c "$content" --arg t "$THREAD_ID" '{content:$c,threadId:$t}')"
   resp=$(curl -sS -m "$E2E_TURN_TIMEOUT" -w '\n%{http_code}' -X POST \
     "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/messages" \
-    -H "Authorization: Bearer ${RPC_TOKEN}" -H 'Content-Type: application/json' \
+    -H "@$(auth_header "Authorization: Bearer ${RPC_TOKEN}")" -H 'Content-Type: application/json' \
     -d "$payload") || { echo "message POST failed at ${RPC_BASE}" >&2; return 1; }
   TURN_STATUS="$(echo "$resp" | tail -n1)"; TURN_BODY="$(echo "$resp" | sed '$d')"
+}
+
+# Conversation continuity oracle (#1102). THREAD_MESSAGES holds the stored
+# history of THREAD_ID; history_prefix_digest prints "<n> <sha256>" over the
+# first n turns and refuses an empty history, so an empty catalog never matches.
+THREAD_MESSAGES=""
+read_thread_messages() {
+  local resp code
+  mint_rpc_token || return 1
+  resp=$(curl -sS -m 30 -w '\n%{http_code}' \
+    "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/sessions/${HOST_REF}/${THREAD_ID}/messages?limit=100" \
+    -H "@$(auth_header "Authorization: Bearer ${RPC_TOKEN}")") || { echo "messages GET failed at ${RPC_BASE}" >&2; return 1; }
+  code="$(echo "$resp" | tail -n1)"; THREAD_MESSAGES="$(echo "$resp" | sed '$d')"
+  [ "$code" = "200" ] || { echo "messages GET -> HTTP ${code}: ${THREAD_MESSAGES}" >&2; return 1; }
+}
+history_prefix_digest() {
+  local json=$1 n=$2
+  [ "$n" -gt 0 ] && [ "$(echo "$json" | jq '.turns | length')" -ge "$n" ] || return 1
+  printf '%s %s' "$n" "$(echo "$json" | jq -cS --argjson n "$n" '[.turns[:$n][] | {number, user_input, response}]' | shasum -a 256 | cut -d' ' -f1)"
 }
 
 # send_turn_expect_ok: single bounded deadline; the ONLY retryable is the
@@ -314,10 +347,6 @@ send_turn_expect_ok() {
   return 1
 }
 
-rpc_auth_header() {
-  printf '%s: %s %s' "Authorization" "Bearer" "$RPC_TOKEN"
-}
-
 ASYNC_STATUS=""; ASYNC_BODY=""
 send_async_turn() {
   local content=$1 payload resp
@@ -325,7 +354,7 @@ send_async_turn() {
   payload="$(jq -cn --arg c "$content" --arg t "$THREAD_ID" '{content:$c,threadId:$t}')"
   resp=$(curl -sS -m "$E2E_TURN_TIMEOUT" -w '\n%{http_code}' -X POST \
     "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/messages?async=true" \
-    -H "$(rpc_auth_header)" -H 'Content-Type: application/json' \
+    -H "@$(auth_header "Authorization: Bearer ${RPC_TOKEN}")" -H 'Content-Type: application/json' \
     -d "$payload") || { echo "async message POST failed at ${RPC_BASE}" >&2; return 1; }
   ASYNC_STATUS="$(echo "$resp" | tail -n1)"; ASYNC_BODY="$(echo "$resp" | sed '$d')"
 }
@@ -336,7 +365,7 @@ wait_for_async_result_ok() {
     mint_rpc_token || return 1
     resp=$(curl -sS -m 30 -w '\n%{http_code}' \
       "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/tasks/${task_id}/result" \
-      -H "$(rpc_auth_header)") || {
+      -H "@$(auth_header "Authorization: Bearer ${RPC_TOKEN}")") || {
       echo "${label}: task result poll failed at ${RPC_BASE}" >&2
       return 1
     }
@@ -387,7 +416,7 @@ post_wake() {
   fi
   resp=$(curl -sS -m 30 -w '\n%{http_code}' -X POST \
     "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/wake" \
-    -H "Authorization: Bearer ${auth}" -H 'Content-Type: application/json') || {
+    -H "@$(auth_header "Authorization: Bearer ${auth}")" -H 'Content-Type: application/json') || {
     echo "wake POST failed at ${RPC_BASE}" >&2; return 1; }
   WAKE_STATUS="$(echo "$resp" | tail -n1)"; WAKE_BODY="$(echo "$resp" | sed '$d')"
   case "$WAKE_STATUS" in
@@ -403,43 +432,49 @@ wake_handled_generation() { kctl get host "$HOST_REF" -n "$MCP_HOST_NS" -o jsonp
 wake_requested_annotation() { kctl get host "$HOST_REF" -n "$MCP_HOST_NS" -o jsonpath="{.metadata.annotations.clerum\\.io/wake-requested}" 2>/dev/null || true; }
 deployment_replicas() { kctl get deployment "$HOST_REF" -n "$MCP_HOST_NS" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo ""; }
 
-# A stateless effective lifecycle is more than replicas=1: it changes the
-# pod template. Assert both shapes so a stale Host watch event cannot leave a
-# legacy stateful Deployment behind while status says stateless is enabled.
+# Every lifecycle uses one storage layout (#825): the workspace PVC root is
+# mounted at /workspace with no subPath, the conversation database lives there
+# (CLERUM_SESSION_STORE=sqlite, CLERUM_SESSION_DB_DIR=/workspace), and the only
+# init container is workspace-layout-merge. Both template checks require it, so
+# a lifecycle switch that changes storage fails either check.
+# shellcheck disable=SC2016 # $pod is a jq variable
+ROOT_LAYOUT_JQ='
+  def root_layout($pod):
+    ([ $pod.containers[] | select(.name == "mcp-host") | .volumeMounts[]? | select(.name == "workspace") ]
+       == [ {name: "workspace", mountPath: "/workspace"} ])
+    and ([ $pod.initContainers[]? | .name ] == ["workspace-layout-merge"])
+    and ([ $pod.containers[] | select(.name == "mcp-host") | .env[]?
+           | select(.name == "CLERUM_SESSION_STORE" or .name == "CLERUM_SESSION_DB_DIR") | {(.name): .value} ] | add
+         == {CLERUM_SESSION_STORE: "sqlite", CLERUM_SESSION_DB_DIR: "/workspace"});'
+
+# The stateless effective lifecycle changes compute only: interactive priority
+# class and CLERUM_STATELESS_LIFECYCLE=true, on the root storage layout.
 deployment_has_stateless_template() {
   local deployment
   deployment="$(kctl get deployment "$HOST_REF" -n "$MCP_HOST_NS" -o json 2>/dev/null)" || return 2
-  printf '%s' "$deployment" | jq -e '
+  printf '%s' "$deployment" | jq -e "${ROOT_LAYOUT_JQ}"'
     .spec.template.spec as $pod
     | [
         ($pod.priorityClassName == "clerum-interactive-host"),
-        ([ $pod.initContainers[]? | select(.name == "workspace-layout-init") ] | length == 1),
         ([ $pod.containers[] | select(.name == "mcp-host") | .env[]? | select(.name == "CLERUM_STATELESS_LIFECYCLE" and .value == "true") ] | length == 1),
-        ([ $pod.containers[] | select(.name == "mcp-host") | .volumeMounts[]? | select(.name == "workspace" and .mountPath == "/workspace" and .subPath == "workspace") ] | length == 1),
-        ([ $pod.containers[] | select(.name == "mcp-host") | .volumeMounts[]? | select(.name == "workspace" and .mountPath == "/var/lib/clerum/state" and .subPath == "state") ] | length == 1)
+        root_layout($pod)
       ] | all
   ' >/dev/null
 }
 
-# A STATEFUL effective template is discriminated ONLY by the effective-mode
-# markers: no interactive priority class and no CLERUM_STATELESS_LIFECYCLE env.
-# The requested stateless STORAGE layout (workspace-layout-init init container +
-# the /var/lib/clerum/state and /workspace subPath mounts) is durable-
-# compatibility state that a HARD REJECTION deliberately RETAINS — exactly like
-# a spec.desktop/SFS rejection (buildDeployment gates the storage layout on the
-# spec REQUEST `usesStatelessStorageLayout`, never on effective mode, so a
-# rejection never remounts the PVC root and creates a second state.db). So the
-# storage layout must NOT be part of the stateful discriminator: this helper
-# must pass for a genuinely-stateful host (no layout) AND a channel/desktop hard-
-# rejected stateless-requesting host (layout retained). See Addendum 6.
+# The stateful effective lifecycle (requested, or a hard rejection of a
+# stateless request by a CommunicationChannel or spec.desktop) has no
+# interactive priority class and no CLERUM_STATELESS_LIFECYCLE env, on the same
+# root storage layout.
 deployment_has_stateful_template() {
   local deployment
   deployment="$(kctl get deployment "$HOST_REF" -n "$MCP_HOST_NS" -o json 2>/dev/null)" || return 2
-  printf '%s' "$deployment" | jq -e '
+  printf '%s' "$deployment" | jq -e "${ROOT_LAYOUT_JQ}"'
     .spec.template.spec as $pod
     | [
         ($pod.priorityClassName != "clerum-interactive-host"),
-        ([ $pod.containers[] | select(.name == "mcp-host") | .env[]? | select(.name == "CLERUM_STATELESS_LIFECYCLE") ] | length == 0)
+        ([ $pod.containers[] | select(.name == "mcp-host") | .env[]? | select(.name == "CLERUM_STATELESS_LIFECYCLE") ] | length == 0),
+        root_layout($pod)
       ] | all
   ' >/dev/null
 }
@@ -805,7 +840,7 @@ C_MARKER="refusal-c-${RUN_ID}"
 mint_rpc_token || true
 c_payload="$(jq -cn --arg c "Reply exactly marker ${C_MARKER} in plain text. Do not call tools." --arg t "$THREAD_ID" "{content:\$c,threadId:\$t}")"
 c_resp="$(curl -sS -m "$E2E_TURN_TIMEOUT" -w "\n%{http_code}" -X POST "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/messages?async=true" \
-  -H "Authorization: Bearer ${RPC_TOKEN}" -H 'Content-Type: application/json' -d "$c_payload")" || {
+  -H "@$(auth_header "Authorization: Bearer ${RPC_TOKEN}")" -H 'Content-Type: application/json' -d "$c_payload")" || {
   fail "2c: async message POST failed at ${RPC_BASE}"
   print_results
   exit 1
@@ -821,7 +856,7 @@ fi
 if assert_refusal "2c pendingResults" "pendingResults"; then
   ok "2c: parked async result blocks suspend"
   mint_rpc_token || true
-  curl -sS -m 30 "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/tasks/${C_TASK_ID}/result" -H "Authorization: Bearer ${RPC_TOKEN}" >/dev/null 2>&1 || true
+  curl -sS -m 30 "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/tasks/${C_TASK_ID}/result" -H "@$(auth_header "Authorization: Bearer ${RPC_TOKEN}")" >/dev/null 2>&1 || true
   if force_idle_and_suspend; then ok "2c: suspends after pending result is drained"; else print_results; exit 1; fi
 else
   fail "2c: could not induce pendingResults (see mcp-host resultStore/pendingTaskResults flow -- the async intake did not park a result)"
@@ -834,9 +869,9 @@ wait_for_ready_pod "$POD_READY_TIMEOUT" >/dev/null || { fail "no pod after wake 
 # CommunicationChannel, then flipped to spec.lifecycle.stateless:true, must
 # hard-reject from the FIRST stateless-requesting reconcile -- the requested
 # stateless lifecycle must NEVER be transiently enabled. Direct CRD writes are
-# used deliberately: control-api blocks this flip at the admin API with a 409
-# (stateless_host_communication_channel_conflict), so the state-derived HCC
-# backstop is exactly the racing/direct-write path under test. Uses the shared
+# used deliberately: control-api does not check CommunicationChannels when the
+# lifecycle changes, so HCC's state-derived rejection is the only guard and is
+# the path under test. Uses the shared
 # $HOST_REF sequentially (the suite's established pattern; test 11 also flips
 # spec.lifecycle.stateless on it) and restores it via the cleanup trap.
 header "Test 2d-pre -- reverse arrival: channel-bound host flipped to stateless hard-rejects"
@@ -1231,7 +1266,7 @@ MISMATCH_HOST="${E2E_OTHER_HOST_REF:-chatllm}"
 TARGET_RUNTIME_TOKEN="$(kctl get secret "host-${HOST_REF}-mcp-host-runtime-tokens" -n "$MCP_HOST_NS"   -o jsonpath='{.data.mcp-host-runtime-access-token}' 2>/dev/null | base64 -d 2>/dev/null || true)"
 if [ -n "$TARGET_RUNTIME_TOKEN" ]; then
   HB_MISMATCH_BODY="$(jq -cn --arg h "$MISMATCH_HOST" --arg p "$HB_POD_UID" '{schemaVersion:1,state:"active",activeWork:false,lastActivityTs:0,hostRef:$h,podUid:$p,conditions:{activeTask:false,awaitingApproval:false,pendingResults:false}}')"
-  hb2_code="$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -X POST "${GATEWAY_BASE}${HB_PATH}"     -H "Authorization: Bearer ${TARGET_RUNTIME_TOKEN}" -H 'Content-Type: application/json'     -d "$HB_MISMATCH_BODY" 2>/dev/null || echo "000")"
+  hb2_code="$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -X POST "${GATEWAY_BASE}${HB_PATH}"     -H "@$(auth_header "Authorization: Bearer ${TARGET_RUNTIME_TOKEN}")" -H 'Content-Type: application/json'     -d "$HB_MISMATCH_BODY" 2>/dev/null || echo "000")"
   if [ "$hb2_code" = "403" ]; then
     ok "heartbeat with valid target token but mismatched payload hostRef -> 403 (claims win)"
   else
@@ -1246,6 +1281,59 @@ fi
 #  Test 11 -- Kill-switch with held request
 # ====================================================================== #
 header "Test 11 -- kill-switch with held request completes or retryable"
+# Continuity across the flip (#1102): a Ready Pod is not enough. Seed a
+# conversation turn and a workspace file on the stateless Pod, then require
+# both on the stateful Pod and again after the switch back.
+# wait_for_switched_pod EXPECTED: a Ready, non-terminating Pod whose own spec
+# has the EXPECTED lifecycle markers on the root storage layout; prints its name.
+wait_for_switched_pod() {
+  local expected=$1 elapsed=0 name
+  while [ "$elapsed" -lt "$POD_READY_TIMEOUT" ]; do
+    name="$(kctl get pods -n "$MCP_HOST_NS" -l "app=${HOST_REF}" -o json 2>/dev/null | jq -r --arg e "$expected" "${ROOT_LAYOUT_JQ}"'
+      [ .items[]
+        | select(.metadata.deletionTimestamp == null)
+        | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))
+        | select(root_layout(.spec))
+        | select(([ .spec.containers[] | select(.name == "mcp-host") | .env[]? | select(.name == "CLERUM_STATELESS_LIFECYCLE" and .value == "true") ] | length == 1)
+                 == ($e == "stateless"))
+        | .metadata.name ][0] // empty')" || name=""
+    if [ -n "$name" ]; then printf '%s\n' "$name"; return 0; fi
+    sleep "$POLL_INTERVAL"; elapsed=$((elapsed + POLL_INTERVAL))
+  done
+  return 1
+}
+SEED11_FILE="e2e-1102-${RUN_ID}.txt"
+SEED11_CONTENT="seed-1102-${RUN_ID}"
+assert_test11_continuity() {
+  local label=$1 pod=$2 digest got
+  read_thread_messages || { fail "11 ${label}: cannot read the seeded conversation"; return 1; }
+  digest="$(history_prefix_digest "$THREAD_MESSAGES" "$SEED11_TURNS")" || {
+    fail "11 ${label}: seeded conversation has fewer than ${SEED11_TURNS} turn(s): $(echo "$THREAD_MESSAGES" | jq -c '.turns | length')"; return 1; }
+  [ "$digest" = "$SEED11_DIGEST" ] || { fail "11 ${label}: seeded history changed (${SEED11_DIGEST} -> ${digest})"; return 1; }
+  got="$(kctl exec "$pod" -n "$MCP_HOST_NS" -c mcp-host -- cat "/workspace/${SEED11_FILE}" 2>&1)" || got="<unreadable: ${got}>"
+  [ "$got" = "$SEED11_CONTENT" ] || { fail "11 ${label}: workspace file reads '${got}', expected '${SEED11_CONTENT}'"; return 1; }
+  ok "11 ${label}: seeded conversation (${SEED11_TURNS} turn(s)) and workspace file unchanged on ${pod}"
+}
+# Negative control: the history oracle refuses an empty catalog.
+if history_prefix_digest '{"totalTurns":0,"turns":[]}' 1 >/dev/null; then
+  fail "11 negative control: history oracle accepted an empty catalog"; print_results; exit 1
+fi
+ok "11 negative control: history oracle rejects an empty catalog"
+send_turn_expect_ok "Reply with exactly: seed-1102-${RUN_ID}" || { fail "11: seed turn failed"; print_results; exit 1; }
+S11_POD="$(wait_for_switched_pod stateless)" || { fail "11: no Ready stateless Pod on the root layout before the flip"; pod_diagnostics; print_results; exit 1; }
+# shellcheck disable=SC2016 # expanded by the Pod shell
+kctl exec "$S11_POD" -n "$MCP_HOST_NS" -c mcp-host -- sh -c 'printf "%s\n" "$1" > "/workspace/$2"' sh "$SEED11_CONTENT" "$SEED11_FILE" \
+  || { fail "11: could not seed workspace file on ${S11_POD}"; print_results; exit 1; }
+# Wall-clock deadline: each read_thread_messages can itself take up to 30s.
+s11_deadline=$((SECONDS + 60))
+until read_thread_messages && echo "$THREAD_MESSAGES" | jq -e --arg m "seed-1102-${RUN_ID}" '(.turns[-1].user_input // "") | contains($m)' >/dev/null; do
+  [ "$SECONDS" -lt "$s11_deadline" ] || { fail "11: seed turn not persisted within 60s"; print_results; exit 1; }
+  sleep 3
+done
+SEED11_TURNS="$(echo "$THREAD_MESSAGES" | jq '.turns | length')"
+SEED11_DIGEST="$(history_prefix_digest "$THREAD_MESSAGES" "$SEED11_TURNS")" \
+  || { fail "11: seeded conversation is empty after a 200 turn"; print_results; exit 1; }
+assert_test11_continuity "witness on the stateless Pod" "$S11_POD" || { print_results; exit 1; }
 force_idle_and_suspend || { print_results; exit 1; }
 k_status_file="$(mktemp)"
 MARKER11="killswitch-held-${RUN_ID}"
@@ -1282,12 +1370,25 @@ else
   pod_diagnostics; print_results; exit 1
 fi
 wait_for_deployment_template stateful "$POD_READY_TIMEOUT" "11: stateless disabled" || { print_results; exit 1; }
-kctl patch host "$HOST_REF" -n "$MCP_HOST_NS" --type=merge -p '{"spec":{"lifecycle":{"stateless":true}}}' >/dev/null 2>&1 || true
+S11_POD="$(wait_for_switched_pod stateful)" || { fail "11: no Ready stateful Pod on the root layout after the flip"; pod_diagnostics; print_results; exit 1; }
+assert_test11_continuity "stateless -> stateful" "$S11_POD" || { print_results; exit 1; }
+kctl patch host "$HOST_REF" -n "$MCP_HOST_NS" --type=merge -p '{"spec":{"lifecycle":{"stateless":true}}}' >/dev/null \
+  || { fail "test 11 could not flip stateless:true"; print_results; exit 1; }
 STATELESS_DISABLED=0
 wait_for_deployment_template stateless "$POD_READY_TIMEOUT" "11: stateless re-enabled" \
   || { print_results; exit 1; }
-wait_for_ready_pod "$POD_READY_TIMEOUT" >/dev/null || { fail "host did not recover after re-enabling stateless"; print_results; exit 1; }
-ok "running stateful Host converged back to stateless and is Ready"
+S11_POD="$(wait_for_switched_pod stateless)" || { fail "host did not recover after re-enabling stateless"; pod_diagnostics; print_results; exit 1; }
+assert_test11_continuity "stateful -> stateless" "$S11_POD" || { print_results; exit 1; }
+send_turn_expect_ok "Reply with exactly: resume-1102-${RUN_ID}" || { fail "11: resume turn failed after the round trip"; print_results; exit 1; }
+s11_deadline=$((SECONDS + 60))
+until read_thread_messages && echo "$THREAD_MESSAGES" | jq -e --argjson n "$SEED11_TURNS" --arg m "resume-1102-${RUN_ID}" \
+    '(.turns | length) > $n and ((.turns[-1].user_input // "") | contains($m))' >/dev/null; do
+  [ "$SECONDS" -lt "$s11_deadline" ] || { fail "11: resume turn not appended to the seeded conversation within 60s"; print_results; exit 1; }
+  sleep 3
+done
+kctl exec "$S11_POD" -n "$MCP_HOST_NS" -c mcp-host -- rm -f "/workspace/${SEED11_FILE}" \
+  || { fail "11: could not remove the seeded workspace file"; print_results; exit 1; }
+ok "running stateful Host converged back to stateless with its conversation and files, and resumed"
 
 # ====================================================================== #
 #  Test 12 -- Re-resolution on wake
@@ -1315,7 +1416,7 @@ else
 fi
 wait_for_ready_pod "$POD_READY_TIMEOUT" >/dev/null || { fail "test 12: no pod after wake"; print_results; exit 1; }
 mint_rpc_token || true
-status_snap="$(curl -sS -m 30 "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/status" -H "Authorization: Bearer ${RPC_TOKEN}" 2>/dev/null || echo '{}')"
+status_snap="$(curl -sS -m 30 "${RPC_BASE}/api/v1/rpc/hosts/${HOST_REF}/status" -H "@$(auth_header "Authorization: Bearer ${RPC_TOKEN}")" 2>/dev/null || echo '{}')"
 if echo "$status_snap" | jq -e --arg s "$DISABLED_MCP_SERVER" \
     '((.mcpServers // []) | map(if type == "object" then (.name // "") else . end) | index($s)) == null' >/dev/null 2>&1; then
   ok "post-wake status.mcpServers no longer lists '${DISABLED_MCP_SERVER}' (re-resolution honored)"
@@ -1417,7 +1518,7 @@ log "Handing off to Playwright (cycle 1) with E2E_HOST_REF=${HOST_REF}"
 # fresh suspension and is run in the second pass below. Scenario 5 is excluded
 # here by its title ("second cycle").
 if E2E_HOST_REF="$HOST_REF" E2E_STATELESS_HOST_REF="$HOST_REF" E2E_STATELESS_SUSPENDED=1 \
-   E2E_STATELESS_CYCLE=1 \
+   E2E_STATELESS_CYCLE=1 E2E_STATELESS_RUN_ID="$RUN_ID" \
    bash "${SCRIPT_DIR}/playwright-dev.sh" stateless-wake.test.ts --grep-invert "second cycle"; then
   ok "Desktop Playwright stateless-wake cycle 1 PASSED"
 else
@@ -1440,7 +1541,7 @@ header "Phase 2 (cycle 2) -- repeat suspend/wake (stateless-wake.test.ts -g 'sec
 force_idle_and_suspend || { print_results; exit 1; }
 log "Handing off to Playwright (cycle 2) with E2E_HOST_REF=${HOST_REF}"
 if E2E_HOST_REF="$HOST_REF" E2E_STATELESS_HOST_REF="$HOST_REF" E2E_STATELESS_SUSPENDED=1 \
-   E2E_STATELESS_CYCLE=2 E2E_SKIP_DESKTOP_BUILD=1 \
+   E2E_STATELESS_CYCLE=2 E2E_STATELESS_RUN_ID="$RUN_ID" E2E_SKIP_DESKTOP_BUILD=1 \
    bash "${SCRIPT_DIR}/playwright-dev.sh" stateless-wake.test.ts -g "second cycle"; then
   ok "Desktop Playwright stateless-wake cycle 2 (repeat suspend/wake) PASSED"
 else

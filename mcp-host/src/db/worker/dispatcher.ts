@@ -428,8 +428,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
         // fire-and-forget lie this change removes.
         const tx = db.transaction((): ModelSelectionWriteOutcome => {
           const row = s.selectSessionModelSelectionRevision.get({ id: op.sessionId }) as
-            | { model_selection_revision: number; model_selections: string | null }
-            | undefined
+            { model_selection_revision: number; model_selections: string | null } | undefined
           if (!row) {
             const err: Error & { code?: string } = new Error(
               `update_session_model_selections: no session row for id=${op.sessionId}`
@@ -718,8 +717,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
           }
         | undefined
       const pendingRow = s.selectPendingApprovalBySession.get(sessionRow.id) as
-        | PendingApprovalRow
-        | undefined
+        PendingApprovalRow | undefined
       return {
         session: sessionRow,
         messages: messageRows as PersistedSessionMessagePage['messages'],
@@ -887,10 +885,18 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
     }
 
     case 'sweep_closed_sessions':
+      // SQLite reads LIMIT 0 as "delete nothing" and a negative LIMIT as "no
+      // limit"; either would break the bounded-batch contract silently.
+      if (!Number.isSafeInteger(op.limit) || op.limit <= 0) {
+        throw new Error('sweep_closed_sessions: limit must be a positive integer')
+      }
       return withBusyRetry(() => {
         const tx = db.transaction(() => {
-          const result = s.sweepClosedSessions.run({ cutoff: op.cutoffEpoch })
-          return { deleted_sessions: result.changes }
+          const params = { cutoff: op.cutoffEpoch, limit: op.limit }
+          const deletedMessages = s.sweepClosedSessionMessages.run(params).changes
+          const deletedSessions =
+            deletedMessages === 0 ? s.sweepClosedSessionsEmpty.run(params).changes : 0
+          return { deleted_messages: deletedMessages, deleted_sessions: deletedSessions }
         })
         return tx.immediate()
       })

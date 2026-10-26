@@ -40,6 +40,7 @@ import {
   RpcConnectorsResult,
   SandboxUiApp,
   SandboxUiDeepLinkEnvelope,
+  SandboxUiReleasedEvent,
   SessionLifecycleState,
   SessionMessagesQuery,
   SessionMessagesResult,
@@ -136,7 +137,10 @@ declare global {
           bytes?: number
           updatedAt?: string
         }>
-        download: (uri: string) => Promise<{
+        download: (
+          uri: string,
+          options?: { maxBytes?: number; signal?: AbortSignal }
+        ) => Promise<{
           resource: {
             drive: string
             resourceId: string
@@ -200,7 +204,8 @@ declare global {
         listChildren: (
           resourceId: string,
           drive?: string,
-          cursor?: string
+          cursor?: string,
+          options?: { signal?: AbortSignal }
         ) => Promise<{
           items: Array<{
             resourceId: string
@@ -226,6 +231,26 @@ declare global {
           grantableBits: string[]
           canCreateShare: boolean
         }>
+        zipStream: {
+          start: () => Promise<{ jobId: string }>
+          append: (jobId: string, name: string, bytes: ArrayBuffer) => Promise<{ name: string }>
+          /**
+           * Appends one entry by URI: the main process fetches the resource
+           * and writes it into the archive chunk by chunk, so the payload
+           * never crosses the IPC boundary (R1-H2).
+           */
+          appendFromUri: (
+            jobId: string,
+            name: string,
+            uri: string,
+            options?: { maxBytes?: number; signal?: AbortSignal }
+          ) => Promise<{ name: string; bytes: number }>
+          finish: (
+            jobId: string,
+            suggestedName: string
+          ) => Promise<{ saved: boolean; filePath: string | null; entryCount: number }>
+          abort: (jobId: string) => Promise<{ aborted: boolean }>
+        }
         createFolder: (
           parentResourceId: string,
           name: string,
@@ -750,7 +775,7 @@ declare global {
         getIndex: (agentRef: string) => Promise<ChatIndex>
         reconcileServerSessions: (
           agentRef: string,
-          sessions: Array<{ chatId: string; lastActivityAt?: string }>
+          sessions: Array<{ chatId: string; lastActivityAt?: string; title?: string }>
         ) => Promise<number>
         dismissOnboarding: (agentRef: string) => Promise<void>
         markUnreadTerminal: (agentRef: string, chatId: string) => Promise<void>
@@ -767,13 +792,14 @@ declare global {
           defaultPath?: string
           routePath?: string
           bounds: { x: number; y: number; width: number; height: number; dpr?: number }
-          // Echoed by main on `onClosed` / `onRefreshError` / `onTitleChanged`
-          // for the view this open mounts.
+          // Echoed by main on `onReleased` / `onRefreshError` / `onRefreshRecovered` /
+          // `onTitleChanged` for the view this open mounts.
           launchId: string
         }) => Promise<void>
-        close: () => Promise<void>
-        reload: () => Promise<void>
-        getLocation: () => Promise<{ appRef: string; routePath?: string } | null>
+        // Closes that launch's view only if it is still the live one.
+        close: (args: { launchId: string }) => Promise<void>
+        // Reloads that launch's view in place only if it is still the live one.
+        reload: (args: { launchId: string }) => Promise<void>
         copyDeepLink: (teamId?: string) => Promise<{ url: string }>
         listPendingDeepLinks: () => Promise<{ links: SandboxUiDeepLinkEnvelope[] }>
         clearPendingDeepLinks: () => Promise<void>
@@ -812,9 +838,15 @@ declare global {
           }) => void
         ) => () => void
         onDeepLink: (callback: (args: SandboxUiDeepLinkEnvelope) => void) => () => void
-        onClosed: (callback: (args: { appRef: string; launchId: string }) => void) => () => void
+        // Once per view main tears down, whatever the reason, with the route it
+        // represented (`null`: unreadable, keep the last known one).
+        onReleased: (callback: (args: SandboxUiReleasedEvent) => void) => () => void
         onRefreshError: (
           callback: (args: { appRef: string; launchId: string; message: string }) => void
+        ) => () => void
+        // A refresh that `onRefreshError` reported as failed succeeded later.
+        onRefreshRecovered: (
+          callback: (args: { appRef: string; launchId: string }) => void
         ) => () => void
         onTitleChanged: (
           callback: (args: { appRef: string; launchId: string; title: string }) => void

@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import {
   deleteAdminTeam,
   deleteAdminUser,
+  formatApiError,
   getAdminTeams,
   getAdminUserTeams,
   getProfileAdminOverview,
@@ -388,5 +389,48 @@ describe('ProfileAdminHome — members invitations', () => {
     expect(vi.mocked(deleteAdminUser).mock.calls[1]?.[1]).toEqual(
       vi.mocked(deleteAdminUser).mock.calls[0]?.[1]
     )
+  })
+
+  async function openDeleteTeamDialog() {
+    renderProfileAdminHome('teams')
+    await screen.findByLabelText('Open team Marketing')
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for team Marketing' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
+    return screen.findByRole('alertdialog')
+  }
+
+  function conflictError(code: string) {
+    return formatApiError(
+      new Response(null, { status: 409, statusText: 'Conflict' }),
+      JSON.stringify({ error: code })
+    )
+  }
+
+  it('does not promise to delete active memberships in the delete-team dialog', async () => {
+    const dialog = await openDeleteTeamDialog()
+
+    expect(dialog).not.toHaveTextContent(/all memberships/i)
+    expect(dialog).toHaveTextContent('Only a team with no active members can be deleted')
+    expect(dialog).toHaveTextContent('a team referenced by workflow audit history is kept')
+  })
+
+  it.each([
+    [
+      'team_not_empty',
+      'This team still has active members. Remove every member from the team, then delete it.',
+    ],
+    [
+      'team_has_audit_history',
+      'This team cannot be deleted because workflow audit history references it, and audit history is retained.',
+    ],
+  ])('explains a %s 409 in the delete-team dialog', async (code, message) => {
+    vi.mocked(deleteAdminTeam).mockRejectedValueOnce(conflictError(code))
+    const dialog = await openDeleteTeamDialog()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete team' }))
+
+    await waitFor(() => expect(dialog).toHaveTextContent(message))
+    expect(dialog).not.toHaveTextContent(code)
+    expect(deleteAdminTeam).toHaveBeenCalledWith('team-1')
   })
 })

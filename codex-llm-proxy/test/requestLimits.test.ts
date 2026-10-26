@@ -12,7 +12,7 @@ import {
 } from '../src/requestLimits.js'
 import { DEFAULT_HEARTBEAT_INTERVAL_MS, MAX_HEARTBEAT_INTERVAL_MS } from '../src/sseHeartbeat.js'
 
-// undici's default headersTimeout and bodyTimeout in the Node 24.16.0 image the
+// undici's default headersTimeout and bodyTimeout in the Node 24.22.1 image the
 // Host runs; the Host sets neither for its proxy calls.
 const HOST_UNDICI_TIMEOUT_MS = 300_000
 

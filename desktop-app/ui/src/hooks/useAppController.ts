@@ -1722,6 +1722,7 @@ export function useAppController() {
     unreadNotificationCount: notif.unreadNotificationCount,
     toasts,
     pushToast,
+    dismissToast: toastCtrl.dismissToast,
     markNotificationsRead: notif.markNotificationsRead,
     markNotificationRead: notif.markNotificationRead,
     clearNotifications: notif.clearNotifications,
@@ -1795,6 +1796,7 @@ export function useAppController() {
     handleRemoveComposerFileAttachment: chat.handleRemoveComposerFileAttachment,
     handleAddComposerReferenceAttachments: chat.handleAddComposerReferenceAttachments,
     handleRemoveComposerReferenceAttachment: chat.handleRemoveComposerReferenceAttachment,
+    handleClearComposerAttachments: chat.handleClearComposerAttachments,
     cancelTask: chat.cancelTask,
 
     // MCP Server

@@ -148,7 +148,7 @@ Admin sessions are signed as RS256 JWTs with audience `control-ui`. UI-facing ro
 - `DELETE /api/v1/admin/users/:userId` — hard-deletes the user row (profiles, personal context/agent links, and their `team_members` rows CASCADE). Teams are retained even if this leaves them with zero members. User-linked audit/history rows keep their event data but set the deleted user reference to `NULL`. **Destructive and irreversible** for that user id.
 - `GET /api/v1/admin/teams`
 - `POST /api/v1/admin/teams` — creates a team shell without assigning initial members
-- `DELETE /api/v1/admin/teams/:teamId` — hard-deletes the team (memberships, invitations, team context/agent links CASCADE). **Destructive and irreversible** for that team id.
+- `DELETE /api/v1/admin/teams/:teamId` — hard-deletes an empty team (invitations, inactive memberships, team context/agent links CASCADE). Active members block deletion (`409 team_not_empty`); a team referenced by workflow audit history is kept (`409 team_has_audit_history`). **Destructive and irreversible** for that team id.
 - `PUT /api/v1/admin/teams/:teamId/name`
 - `GET /api/v1/admin/teams/:teamId/members`
 - `PATCH /api/v1/admin/teams/:teamId/members/:userId/role`
