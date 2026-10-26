@@ -133,8 +133,10 @@ export function hasContextIdMismatch(ctx: ContextCR): boolean {
   return typeof contextId === 'string' && contextId !== ctx.metadata?.name
 }
 
-// Same entry rule rpc-proxy applies to let a user into a Host: an active user
-// with the agent assigned directly or through any active team membership.
+// Host entry rule: an active user with the agent assigned directly or through
+// any active team membership. rpc-proxy only counts the team of the current
+// session; the broker never sees that session, so it accepts any active team
+// (a superset, so nobody who can enter the Host loses their token).
 // Context membership (`user_contexts`) deliberately does not count: it never
 // admits a user to a Host, and counting it would let any Context member's
 // identity be used from every Host of that Context.
