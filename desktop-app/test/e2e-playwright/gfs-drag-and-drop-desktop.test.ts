@@ -199,22 +199,29 @@ async function dragRowOntoRowForRefusal(
 }
 
 test.describe('EvenDrive drag and drop (desktop grid)', () => {
+  test.describe.configure({ mode: 'serial' })
   test.setTimeout(300_000)
 
   // LOGIN-ADMISSION BUDGET. The control-api password admission policy allows
   // FIVE login attempts per identity per rolling 15-minute window, and this
-  // gate spends them fast: one in the setup preflight, then TWO per app
-  // launch (the harness API login plus the UI sign-in). The
-  // folder-confirmation journey therefore hands its still-authenticated app
-  // to the refused-drop journeys below instead of closing it, which keeps
-  // the whole five-journey gate at exactly the same five-attempt profile as
-  // the original two-journey gate. The final afterAll reaps the handed-off
-  // app.
-  let handoffApp: ElectronApplication | undefined
-  let handoffPage: Page | undefined
+  // gate would otherwise spend them fast: one in the setup preflight, then
+  // TWO per app launch (the harness API login plus the UI sign-in). The
+  // whole suite therefore shares ONE authenticated app: beforeAll owns the
+  // single launch and afterAll reaps it, so a gate run spends exactly three
+  // attempts and every journey can run against its own fixtures. Serial
+  // order keeps the shared session honest; each test still seeds, asserts
+  // and cleans its own fixtures independently.
+  let sessionApp: ElectronApplication | undefined
+  let sessionPage: Page | undefined
+
+  test.beforeAll(async () => {
+    const launched = await launchAndLogin()
+    sessionApp = launched.app
+    sessionPage = launched.page
+  })
 
   test.afterAll(async () => {
-    await handoffApp?.close().catch(() => undefined)
+    await sessionApp?.close().catch(() => undefined)
   })
 
   test('file drag into a folder moves it without a confirmation', async () => {
@@ -224,14 +231,11 @@ test.describe('EvenDrive drag and drop (desktop grid)', () => {
     const fixtureName = uniqueGfsFixtureName('e2e-gfs-dnd-file')
     // The setup runs INSIDE the cleanup scope: a failed seed, grant or
     // login must not leave seeded rows behind.
-    let app: ElectronApplication | undefined
     try {
       const file = await seedFixtureFile(fixtureName)
       const dir = await seedFixtureDirectory(fixtureName)
       await grantFixtureToE2eUser(dir.resourceId)
-      const launched = await launchAndLogin()
-      app = launched.app
-      const page = launched.page
+      const page = sessionPage!
       await openFixtureFolder(page, fixtureName)
       const fileRow = gridRow(page, file.fileName)
       const dirRow = gridRow(page, dir.childName)
@@ -261,7 +265,6 @@ test.describe('EvenDrive drag and drop (desktop grid)', () => {
       // The moved file is gone from the folder listing it was dragged out of.
       await expect(fileRow).toBeHidden({ timeout: 30_000 })
     } finally {
-      await app?.close().catch(() => undefined)
       await removeFixture(fixtureName)
     }
   })
@@ -269,8 +272,6 @@ test.describe('EvenDrive drag and drop (desktop grid)', () => {
   test('folder drag stops at the one confirmation: Cancel is a no-op, Move commits with impact info', async () => {
     const sourceName = uniqueGfsFixtureName('e2e-gfs-dnd-src')
     const destinationName = uniqueGfsFixtureName('e2e-gfs-dnd-dst')
-    let app: ElectronApplication | undefined
-    let page: Page | undefined
     try {
       const sourceDir = await seedFixtureDirectory(sourceName)
       const destinationDir = await seedFixtureDirectory(destinationName)
@@ -280,9 +281,7 @@ test.describe('EvenDrive drag and drop (desktop grid)', () => {
       await grantFixtureToE2eUser(sourceDir.resourceId)
       await grantFixtureToE2eUser(sourceDir.childResourceId)
       await grantFixtureToE2eUser(destinationDir.resourceId)
-      const launched = await launchAndLogin()
-      app = launched.app
-      page = launched.page
+      const page = sessionPage!
       await openFilesSharedRoot(page)
       const sourceRow = gridRow(page, sourceDir.childName)
       const destinationRow = gridRow(page, destinationDir.name)
@@ -345,42 +344,20 @@ test.describe('EvenDrive drag and drop (desktop grid)', () => {
         })
       ).toBeNull()
     } finally {
-      // The app is NOT closed here: the refused-drop journeys below reuse
-      // this authenticated session (login-admission budget, see above).
-      handoffApp = app
-      handoffPage = page
       await removeFixture(sourceName)
       await removeFixture(destinationName)
     }
   })
 
-  // The refused-drop journeys share ONE launched app: the login admission
-  // policy allows 5 password attempts per identity per rolling 15-minute
-  // window, and a gate run already spends one attempt per success-path
-  // journey plus the setup preflight. Serial tests reuse the session so
-  // the whole gate stays inside the admission budget; login is not what
-  // these journeys verify.
+  // The refused-drop journeys run against the same shared session the
+  // success-path journeys use; login is not what they verify.
   test.describe('EvenDrive refused drops (desktop grid)', () => {
-    test.describe.configure({ mode: 'serial' })
-
-    let sharedPage: Page | undefined
-
-    test.beforeAll(async () => {
-      // Serial order guarantees the folder-confirmation journey already ran
-      // and handed off its still-authenticated app (login-admission budget,
-      // see the outer describe).
-      if (!handoffPage) {
-        throw new Error('the folder-confirmation journey did not hand off its authenticated app')
-      }
-      sharedPage = handoffPage
-    })
-
     test('drop onto itself refuses with the self reason and mutates nothing', async () => {
       const fixtureName = uniqueGfsFixtureName('e2e-gfs-dnd-self')
       try {
         const dir = await seedFixtureDirectory(fixtureName)
         await grantFixtureToE2eUser(dir.resourceId)
-        const page = sharedPage!
+        const page = sessionPage!
         await openFixtureFolder(page, fixtureName)
         const childRow = gridRow(page, dir.childName)
         await childRow.waitFor({ state: 'visible', timeout: 60_000 })
@@ -430,7 +407,7 @@ test.describe('EvenDrive drag and drop (desktop grid)', () => {
             grantedBy: 'e2e:gfs-drag-and-drop',
           })
         )
-        const page = sharedPage!
+        const page = sessionPage!
         await openFilesSharedRoot(page)
         const childRow = gridRow(page, dir.childName)
         const parentRow = gridRow(page, dir.name)
@@ -496,7 +473,7 @@ test.describe('EvenDrive drag and drop (desktop grid)', () => {
           })
         )
         await grantFixtureToE2eUser(destinationDir.resourceId)
-        const page = sharedPage!
+        const page = sessionPage!
         await openFilesSharedRoot(page)
         const childRow = gridRow(page, sourceDir.childName)
         const destinationRow = gridRow(page, destinationDir.name)
