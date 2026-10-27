@@ -1,0 +1,130 @@
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { randomBytes } from 'node:crypto'
+import { Pool } from 'pg'
+import { initDb } from '../src/db.js'
+import {
+  type OidcProtocolAttemptBinding,
+  cancelOidcProtocolAttempt,
+  claimOidcProtocolAttempt,
+  finishOidcProtocolAttempt,
+  insertOidcProtocolAttempt,
+} from '../src/oidc/protocolAttemptStore.js'
+import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
+import './realPostgres.requirement.js'
+
+const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
+const describeRealPostgres = adminUrl ? describe : describe.skip
+const ENCRYPTION_KEY = 'ab'.repeat(32)
+const BINDING: OidcProtocolAttemptBinding = {
+  registrationId: 'company-login',
+  configurationGeneration: 'v1:generation-one',
+  issuer: 'https://issuer.example.test',
+  clientId: 'test-client',
+  redirectUri: 'https://api.example.test/oidc/callback',
+  responseMode: 'query',
+}
+
+function databaseUrl(baseUrl: string, database: string): string {
+  const url = new URL(baseUrl)
+  url.pathname = `/${database}`
+  return url.toString()
+}
+
+function quoteIdent(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`
+}
+
+describeRealPostgres('OIDC protocol attempts on real PostgreSQL', () => {
+  const database = `oidc_attempts_${randomBytes(6).toString('hex')}`
+  let adminPool: Pool | undefined
+  let pool: Pool | undefined
+
+  beforeAll(async () => {
+    if (!adminUrl) throw new Error('CONTROL_API_REAL_PG_ADMIN_URL is required')
+    adminPool = new Pool({ connectionString: adminUrl })
+    await adminPool.query(`CREATE DATABASE ${quoteIdent(database)}`)
+    pool = new Pool({ connectionString: databaseUrl(adminUrl, database) })
+    await initDb({ connect: () => pool!.connect() })
+  }, 60_000)
+
+  afterAll(async () => {
+    try {
+      await endPoolAndWaitForClients(pool)
+      if (adminPool) {
+        await adminPool
+          .query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
+          .catch(() => undefined)
+      }
+    } finally {
+      await adminPool?.end()
+    }
+  })
+
+  it('stores only a state hash and encrypted verifier/nonce, and claims a state once under race', async () => {
+    const state = `state-${randomBytes(32).toString('base64url')}`
+    const created = await insertOidcProtocolAttempt(pool!, ENCRYPTION_KEY, {
+      ...BINDING,
+      state,
+      pkceVerifier: 'secret-pkce-verifier',
+      nonce: 'secret-nonce',
+      expiresAt: new Date(Date.now() + 60_000),
+    })
+    const stored = await pool!.query<{
+      state_hash: string
+      pkce_verifier_encrypted: string
+      nonce_encrypted: string
+    }>(
+      `SELECT state_hash, pkce_verifier_encrypted, nonce_encrypted
+         FROM oidc_protocol_attempts WHERE id = $1`,
+      [created.id]
+    )
+    expect(stored.rows[0]?.state_hash).not.toBe(state)
+    expect(stored.rows[0]?.pkce_verifier_encrypted).not.toContain('secret-pkce-verifier')
+    expect(stored.rows[0]?.nonce_encrypted).not.toContain('secret-nonce')
+
+    const claims = await Promise.all(
+      Array.from({ length: 12 }, () =>
+        claimOidcProtocolAttempt(pool!, ENCRYPTION_KEY, state, BINDING)
+      )
+    )
+    const winners = claims.filter((claim): claim is NonNullable<typeof claim> => claim !== null)
+    expect(winners).toHaveLength(1)
+    expect(winners[0]).toMatchObject({
+      id: created.id,
+      pkceVerifier: 'secret-pkce-verifier',
+      nonce: 'secret-nonce',
+      ...BINDING,
+    })
+    expect(await finishOidcProtocolAttempt(pool!, created.id, 'completed')).toBe(true)
+    expect(await claimOidcProtocolAttempt(pool!, ENCRYPTION_KEY, state, BINDING)).toBeNull()
+  })
+
+  it('fails closed for an altered binding, expired state, and cancellation', async () => {
+    const state = `state-${randomBytes(32).toString('base64url')}`
+    await insertOidcProtocolAttempt(pool!, ENCRYPTION_KEY, {
+      ...BINDING,
+      state,
+      pkceVerifier: 'verifier-two',
+      nonce: 'nonce-two',
+      expiresAt: new Date(Date.now() + 60_000),
+    })
+    expect(
+      await claimOidcProtocolAttempt(pool!, ENCRYPTION_KEY, state, {
+        ...BINDING,
+        clientId: 'different-client',
+      })
+    ).toBeNull()
+    expect(await cancelOidcProtocolAttempt(pool!, state, BINDING)).toBe(true)
+    expect(await claimOidcProtocolAttempt(pool!, ENCRYPTION_KEY, state, BINDING)).toBeNull()
+
+    const expiredState = `state-${randomBytes(32).toString('base64url')}`
+    await insertOidcProtocolAttempt(pool!, ENCRYPTION_KEY, {
+      ...BINDING,
+      state: expiredState,
+      pkceVerifier: 'expired-verifier',
+      nonce: 'expired-nonce',
+      expiresAt: new Date(Date.now() - 60_000),
+    })
+    expect(await claimOidcProtocolAttempt(pool!, ENCRYPTION_KEY, expiredState, BINDING)).toBeNull()
+  })
+})

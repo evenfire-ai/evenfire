@@ -6,6 +6,7 @@ import {
 } from './boundedPgPool.js'
 import { config } from './config.js'
 import { rootLogger } from './observability/logger.js'
+import { applyOidcProtocolAttemptSchema } from './oidc/protocolAttemptStore.js'
 import { applyAdminSubscriptionRateLimitNamespace } from './services/adminSubscriptionRateLimitMigration.js'
 import {
   applyPasswordAdmissionSchema,
@@ -6376,6 +6377,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0129_workflow_schedules_concurrency_policy',
     apply: applyWorkflowScheduleConcurrencyPolicyMigration,
+  },
+  {
+    version: '0130_oidc_protocol_attempts',
+    apply: applyOidcProtocolAttemptSchema,
   },
 ]
 

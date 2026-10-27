@@ -96,4 +96,79 @@ describe('pinnedFetch — the socket pins to the validated IP (R2-L1)', () => {
     // The transport was never reached — no connection attempt to a blocked IP.
     expect(seen.invoked).toBe(false)
   })
+
+  it('rejects a public-to-private DNS change before the next request is connected', async () => {
+    let resolutions = 0
+    let secondTransportCalled = false
+    const resolveDns = async () => {
+      resolutions += 1
+      return resolutions === 1 ? [VALIDATED_IP] : ['169.254.169.254']
+    }
+    const first = await pinnedFetch('https://as.example.com/discovery', 'test', {
+      resolveDns,
+      transport: observingTransport().transport,
+    })
+    expect(first.ok).toBe(true)
+
+    const second = await pinnedFetch('https://as.example.com/token', 'test', {
+      resolveDns,
+      transport: async () => {
+        secondTransportCalled = true
+        return { status: 200, headers: {}, bodyText: '' }
+      },
+    })
+    expect(second).toMatchObject({ ok: false, error: { kind: 'kernel_rejected' } })
+    expect(resolutions).toBe(2)
+    expect(secondTransportCalled).toBe(false)
+  })
+
+  it('propagates caller cancellation to the transport', async () => {
+    const { resolveDns } = countingResolver([VALIDATED_IP])
+    const controller = new AbortController()
+    let observedSignal: AbortSignal | undefined
+    let markTransportReady!: () => void
+    const transportReady = new Promise<void>(resolve => {
+      markTransportReady = resolve
+    })
+    const transport: PinnedTransport = input => {
+      observedSignal = input.signal
+      markTransportReady()
+      return new Promise((_resolve, reject) => {
+        if (input.signal.aborted) {
+          reject(input.signal.reason)
+          return
+        }
+        input.signal.addEventListener('abort', () => reject(input.signal.reason), { once: true })
+      })
+    }
+
+    const pending = pinnedFetch('https://as.example.com/token', 'test', {
+      resolveDns,
+      transport,
+      signal: controller.signal,
+    })
+    await transportReady
+    controller.abort(new Error('test cancellation'))
+    const result = await pending
+
+    expect(observedSignal?.aborted).toBe(true)
+    expect(result).toMatchObject({ ok: false, error: { kind: 'transport_failed' } })
+  })
+
+  it('does not resolve an endpoint after caller cancellation', async () => {
+    const controller = new AbortController()
+    controller.abort(new Error('test cancellation'))
+    let resolverCalled = false
+
+    const result = await pinnedFetch('https://as.example.com/token', 'test', {
+      signal: controller.signal,
+      resolveDns: async () => {
+        resolverCalled = true
+        return [{ address: VALIDATED_IP, family: 4 }]
+      },
+    })
+
+    expect(result).toMatchObject({ ok: false, error: { kind: 'transport_failed' } })
+    expect(resolverCalled).toBe(false)
+  })
 })

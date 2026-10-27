@@ -92,6 +92,8 @@ export interface PinnedFetchOptions {
   transport?: PinnedTransport
   timeoutMs?: number
   maxBodyBytes?: number
+  /** Optional caller cancellation, combined with the bounded request deadline. */
+  signal?: AbortSignal
   /**
    * When false, the transport resolves on the response headers and discards the body
    * (see {@link PinnedTransportInput.readBody}). The returned `bodyText` is empty.
@@ -213,9 +215,44 @@ export async function pinnedFetch(
   field: string,
   options: PinnedFetchOptions = {}
 ): Promise<PinnedFetchResult> {
-  const resolved = await resolveValidatedOAuthEndpoint(url, field, {
-    resolveDns: options.resolveDns,
-  })
+  const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
+  const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal
+  if (signal.aborted) {
+    return {
+      ok: false,
+      error: {
+        kind: 'transport_failed',
+        detail: options.signal?.aborted ? 'request cancelled' : 'request deadline exceeded',
+      },
+    }
+  }
+  let abortListener: (() => void) | undefined
+  let resolved: Awaited<ReturnType<typeof resolveValidatedOAuthEndpoint>>
+  try {
+    const aborted = new Promise<never>((_resolve, reject) => {
+      abortListener = () => reject(signal.reason ?? new Error('request aborted'))
+      if (signal.aborted) abortListener()
+      else signal.addEventListener('abort', abortListener, { once: true })
+    })
+    resolved = await Promise.race([
+      resolveValidatedOAuthEndpoint(url, field, { resolveDns: options.resolveDns }),
+      aborted,
+    ])
+  } catch {
+    return {
+      ok: false,
+      error: {
+        kind: 'transport_failed',
+        detail: signal.aborted
+          ? options.signal?.aborted
+            ? 'request cancelled'
+            : 'request deadline exceeded'
+          : 'endpoint resolution failed',
+      },
+    }
+  } finally {
+    if (abortListener) signal.removeEventListener('abort', abortListener)
+  }
   if (!resolved.ok) {
     return { ok: false, error: { kind: 'kernel_rejected', field, errors: resolved.errors } }
   }
@@ -227,8 +264,6 @@ export async function pinnedFetch(
     'accept-encoding': 'identity',
     ...options.headers,
   }
-  const signal = AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
-
   let raw: PinnedRawResponse
   try {
     raw = await transport({
