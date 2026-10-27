@@ -310,8 +310,10 @@ else
     if kctl exec "$pod" -n "$MCP_HOST_NS" -- sh -c 'command -v sqlite3' >/dev/null 2>&1; then
       count="$(kctl exec "$pod" -n "$MCP_HOST_NS" -- sqlite3 -readonly "$db_path" "$sql" || true)"
     else
+      # Resolve the Host's own better-sqlite3 from the container working directory
+      # (/app/mcp-host/node_modules in the chatllm image), not a fixed path.
       count="$(kctl exec "$pod" -n "$MCP_HOST_NS" -- env "DB=${db_path}" "SQL=${sql}" node -e \
-        'const D=require("/app/node_modules/better-sqlite3");const db=new D(process.env.DB,{readonly:true});db.pragma("busy_timeout=5000");const row=db.prepare(process.env.SQL).get();console.log(row?Object.values(row)[0]:0);' || true)"
+        'const D=require("better-sqlite3");const db=new D(process.env.DB,{readonly:true});db.pragma("busy_timeout=5000");const row=db.prepare(process.env.SQL).get();console.log(row?Object.values(row)[0]:0);' || true)"
     fi
     count="$(printf '%s' "$count" | tr -d '[:space:]')"
     if [ "$count" = "1" ]; then
