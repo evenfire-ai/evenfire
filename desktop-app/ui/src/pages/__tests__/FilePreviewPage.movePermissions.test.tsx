@@ -1008,12 +1008,23 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
     const pendingMove = new Promise<void>(resolve => {
       settleMove = resolve
     })
+    const movedResource = await resolveResource({
+      resourceId,
+      rid: resourceId,
+      gfsUri: uri,
+      drive: 'main',
+      parentResourceId: 'destination-1',
+      name: 'diagram.png',
+      kind: 'file',
+      version: 8,
+      bytes: 1,
+    })
     const destinationPage = await listAccessiblePage([
       accessibleResource('destination-1', 'Archive', 'directory', {
         permissions: ['read', 'write'],
       }),
     ])
-    const { moveResource } = installGfs({
+    const { moveResource, resolve } = installGfs({
       destination: async () => fullAccess,
       listAccessible: async () => destinationPage,
       move: () => pendingMove,
@@ -1039,10 +1050,19 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       expect(screen.queryByText(moveMessage)).toBeNull()
       expect(queryClient.getQueryState(capturedSessionCache)?.isInvalidated).toBe(false)
 
+      resolve.mockResolvedValue(movedResource)
       await act(async () => settleMove())
 
       expect(await screen.findByText(moveMessage)).toBeTruthy()
       expect(screen.getAllByText(moveMessage)).toHaveLength(1)
+      expect(
+        queryClient.getQueryData([
+          ...desktopQueryKeys.gfsRoot,
+          sessionScope,
+          'preview-resource',
+          uri,
+        ])
+      ).toEqual(movedResource)
       expect(queryClient.getQueryState(capturedSessionCache)?.isInvalidated).toBe(true)
       expect(queryClient.getQueryState(otherSessionCache)?.isInvalidated).toBe(false)
       expect(moveResource).toHaveBeenCalledTimes(1)
@@ -1079,7 +1099,7 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       await act(async () => rejectMove(new Error('Move rejected httpStatus=400')))
 
       const failure = await screen.findByRole('alert')
-      expect(failure.textContent).toContain('Could not move diagram.png: Move rejected')
+      expect(failure.textContent).toContain('Could not move diagram.png to Archive: Move rejected')
       expect(screen.getAllByRole('alert')).toHaveLength(1)
       expect(moveResource).toHaveBeenCalledTimes(1)
     } finally {
@@ -1298,6 +1318,73 @@ describe('FilePreviewPage dispatched Move outcome ownership', () => {
       await act(async () => {
         settleArchive()
         settleWork()
+      })
+      queryClient.clear()
+    }
+  })
+
+  it('identifies the captured destination for overlapping post-close Move failures', async () => {
+    let rejectArchive!: (error: Error) => void
+    let rejectWork!: (error: Error) => void
+    const archiveMove = new Promise<void>((_resolve, reject) => {
+      rejectArchive = reject
+    })
+    const workMove = new Promise<void>((_resolve, reject) => {
+      rejectWork = reject
+    })
+    const destinationPage = await listAccessiblePage([
+      accessibleResource('destination-1', 'Archive', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+      accessibleResource('destination-2', 'Work', 'directory', {
+        permissions: ['read', 'write'],
+      }),
+    ])
+    const { moveResource } = installGfs({
+      listAccessible: async () => destinationPage,
+      move: (_resourceId, destinationId) =>
+        destinationId === 'destination-1' ? archiveMove : workMove,
+    })
+    installController(sessionScope)
+    const { queryClient } = renderPreviewWithToastStack()
+    try {
+      await screen.findByAltText('Preview of diagram.png')
+      const archiveMenu = await openPreviewActions()
+      fireEvent.click(within(archiveMenu).getByRole('menuitem', { name: 'Move to' }))
+      const archiveDialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
+      await fireEvent.click(await within(archiveDialog).findByRole('button', { name: 'Archive' }))
+      await fireEvent.click(
+        within(archiveDialog).getByRole('button', { name: 'Move here (Archive)' })
+      )
+      await waitFor(() => expect(moveResource).toHaveBeenCalledTimes(1))
+      fireEvent.click(within(archiveDialog).getByRole('button', { name: 'Close move dialog' }))
+
+      const workMenu = await openPreviewActions()
+      fireEvent.click(within(workMenu).getByRole('menuitem', { name: 'Move to' }))
+      const workDialog = await screen.findByRole('dialog', { name: 'Move file diagram.png' })
+      await fireEvent.click(await within(workDialog).findByRole('button', { name: 'Work' }))
+      await fireEvent.click(within(workDialog).getByRole('button', { name: 'Move here (Work)' }))
+      await waitFor(() => expect(moveResource).toHaveBeenCalledTimes(2))
+      expect(moveResource.mock.calls[0]).toEqual([resourceId, 'destination-1', 'main', 7])
+      expect(moveResource.mock.calls[1]).toEqual([resourceId, 'destination-2', 'main', 7])
+      fireEvent.click(within(workDialog).getByRole('button', { name: 'Close move dialog' }))
+
+      expect(screen.queryByRole('alert')).toBeNull()
+      await act(async () => rejectArchive(new Error('Move rejected httpStatus=400')))
+      const archiveFailure = await screen.findByText(
+        'Could not move diagram.png to Archive: Move rejected'
+      )
+      expect(archiveFailure).toBeTruthy()
+      await act(async () => rejectWork(new Error('Move rejected httpStatus=400')))
+      expect(
+        await screen.findByText('Could not move diagram.png to Work: Move rejected')
+      ).toBeTruthy()
+      expect(screen.getAllByRole('alert')).toHaveLength(2)
+      expect(moveResource).toHaveBeenCalledTimes(2)
+    } finally {
+      await act(async () => {
+        rejectArchive(new Error('Move rejected httpStatus=400'))
+        rejectWork(new Error('Move rejected httpStatus=400'))
       })
       queryClient.clear()
     }

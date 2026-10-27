@@ -737,7 +737,7 @@ export function useFilePreviewResourceActions({
         throw error
       } else {
         pushToast?.(
-          `Could not move ${resource.name}: ${describeGfsReadError(error).message}`,
+          `Could not move ${resource.name} to ${destinationName}: ${describeGfsReadError(error).message}`,
           'error'
         )
       }
