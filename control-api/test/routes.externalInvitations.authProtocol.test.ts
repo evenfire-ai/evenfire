@@ -3,6 +3,7 @@ import express from 'express'
 import request from 'supertest'
 import { config } from '../src/config.js'
 import { createExternalInvitationsRouter } from '../src/routes/external/invitations.js'
+import { invitationResponse } from '../src/services/directory/invitationStore.js'
 import { verifyExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
 
 const invitationFlow = vi.hoisted(() => ({
@@ -80,6 +81,27 @@ function acceptedPasswordReset() {
   }
 }
 
+function passwordResetPreview() {
+  return invitationResponse(
+    {
+      id: 'invitation-1',
+      team_id: null,
+      invitee_name: null,
+      email: 'user@example.com',
+      role: 'member',
+      token: 'invitation-1',
+      status: 'pending',
+      purpose: 'password_reset',
+      created_at: new Date('2026-10-27T00:00:00.000Z'),
+      expires_at: new Date('2026-10-29T00:00:00.000Z'),
+      accepted_at: null,
+      accepted_user_id: null,
+      team_name: null,
+    },
+    null
+  )
+}
+
 describe('unversioned invitation session producers', () => {
   let previousCutover = config.authProtocolCutoverEnabled
 
@@ -120,14 +142,22 @@ describe('unversioned invitation session producers', () => {
     expect(verifyExternalSessionToken(response.body.token)).toBeNull()
   })
 
-  it('does not promote password-token invitation sessions to protocol v2', async () => {
-    directory.getInvitationByToken.mockResolvedValue({
+  it('returns the producer invitation projection without its storage token', async () => {
+    directory.getInvitationByToken.mockResolvedValue(passwordResetPreview())
+
+    const response = await request(buildApp()).get('/external/invitations/token/flow-token')
+
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({
       id: 'invitation-1',
-      token: 'invitation-1',
-      email: 'user@example.com',
       purpose: 'password_reset',
       status: 'pending',
     })
+    expect(response.body).not.toHaveProperty('token')
+  })
+
+  it('does not promote password-token invitation sessions to protocol v2', async () => {
+    directory.getInvitationByToken.mockResolvedValue(passwordResetPreview())
     directory.setInvitationPasswordForEmail.mockResolvedValue(acceptedPasswordReset())
 
     const response = await request(buildApp())
