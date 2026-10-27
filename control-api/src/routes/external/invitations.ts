@@ -160,10 +160,10 @@ export function createExternalInvitationsRouter(): Router {
         // Invitation proof does not establish which client protocol made the request.
         // Keep this session unversioned so invitation redemption cannot attest v2.
         const sessionToken = signExternalSessionToken({
-          userId,
-          email: result.data.email,
-          teamId: result.data.teamId || null,
-          role: result.data.role,
+          userId: session.userId,
+          email: session.email,
+          teamId: session.teamId || null,
+          role: session.role,
           authGeneration: session.authGeneration,
         })
         const { sessionContext: _sessionContext, ...response } = result.data

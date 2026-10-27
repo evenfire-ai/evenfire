@@ -61,6 +61,13 @@ function acceptedInvitation() {
       role: 'member',
       authGeneration: 4,
       lifecycleState: 'active',
+      sessionContext: {
+        userId: 'user-1',
+        email: 'user@example.com',
+        teamId: 'team-1',
+        role: 'member',
+        authGeneration: 4,
+      },
     },
   }
 }
@@ -91,7 +98,12 @@ describe('unversioned invitation session producers', () => {
       .expect(200)
     const claims = verifyExternalSessionToken(response.body.token)
 
-    expect(claims).toMatchObject({ userId: 'user-1', authGeneration: 4 })
+    expect(claims).toMatchObject({
+      userId: 'user-1',
+      teamId: 'team-1',
+      role: 'member',
+      authGeneration: 4,
+    })
     expect(claims).not.toHaveProperty('authProtocolVersion')
     expect(directory.acceptInvitationForEmail).toHaveBeenCalledOnce()
 
@@ -100,6 +112,13 @@ describe('unversioned invitation session producers', () => {
   })
 
   it('does not promote password-token invitation sessions to protocol v2', async () => {
+    directory.getInvitationByToken.mockResolvedValue({
+      id: 'invitation-1',
+      token: 'invitation-1',
+      email: 'user@example.com',
+      purpose: 'password_reset',
+      status: 'pending',
+    })
     directory.setInvitationPasswordForEmail.mockResolvedValue(acceptedInvitation())
 
     const response = await request(buildApp())
