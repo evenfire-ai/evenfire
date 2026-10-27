@@ -156,6 +156,11 @@ export class OidcProviderIncompatibleError extends Error {
   }
 }
 
+type OidcOperationContext = {
+  signal?: AbortSignal
+  transportFailure?: OidcProviderIncompatibleError | OidcProviderUnavailableError
+}
+
 export type OidcProtocolDependencies = Readonly<{
   db: Pick<DbClient, 'query'>
   getClientSecret: () => string
@@ -175,7 +180,7 @@ type TrustedConfiguration = Readonly<{
  */
 export class OidcProtocolEngine {
   private cachedConfiguration?: TrustedConfiguration
-  private readonly operationSignal = new AsyncLocalStorage<AbortSignal | undefined>()
+  private readonly operationContext = new AsyncLocalStorage<OidcOperationContext>()
 
   constructor(
     private readonly provider: OidcProviderConfiguration,
@@ -183,7 +188,7 @@ export class OidcProtocolEngine {
   ) {}
 
   async validateProvider(options: { signal?: AbortSignal } = {}): Promise<OidcProviderValidation> {
-    return this.operationSignal.run(options.signal, async () => {
+    return this.operationContext.run({ signal: options.signal }, async () => {
       try {
         const trusted = await this.getTrustedConfiguration()
         await trusted.transport.fetchJwks()
@@ -205,7 +210,7 @@ export class OidcProtocolEngine {
   async beginIdentityProofAttempt(
     options: { signal?: AbortSignal } = {}
   ): Promise<{ authorizationUrl: string; expiresAt: Date }> {
-    return this.operationSignal.run(options.signal, async () => {
+    return this.operationContext.run({ signal: options.signal }, async () => {
       const trusted = await this.getTrustedConfiguration()
       const now = this.now()
       const state = randomState()
@@ -248,7 +253,7 @@ export class OidcProtocolEngine {
     },
     options: { signal?: AbortSignal } = {}
   ): Promise<VerifiedOidcIdentityProof> {
-    return this.operationSignal.run(options.signal, () =>
+    return this.operationContext.run({ signal: options.signal }, () =>
       this.completeIdentityProofAttemptInternal(input)
     )
   }
@@ -302,7 +307,6 @@ export class OidcProtocolEngine {
       callback.searchParams.set('state', input.state)
       if (input.issuer !== undefined) callback.searchParams.set('iss', input.issuer)
 
-      trusted.transport.resetFailure()
       const tokenResponse = await authorizationCodeGrant(trusted.client, callback, {
         expectedState: input.state,
         expectedNonce: claimed.nonce,
@@ -324,15 +328,16 @@ export class OidcProtocolEngine {
       return proof
     } catch (error) {
       await finishOidcProtocolAttempt(this.dependencies.db, claimed.id, 'failed')
+      const transportFailure = this.operationContext.getStore()?.transportFailure
       if (
         error instanceof OidcProviderUnavailableError ||
-        trusted.transport.failure instanceof OidcProviderUnavailableError
+        transportFailure instanceof OidcProviderUnavailableError
       ) {
         throw new OidcProviderUnavailableError()
       }
       if (error instanceof OidcProviderIncompatibleError) throw error
-      if (trusted.transport.failure instanceof OidcProviderIncompatibleError) {
-        throw trusted.transport.failure
+      if (transportFailure instanceof OidcProviderIncompatibleError) {
+        throw transportFailure
       }
       throw new OidcProviderIncompatibleError('OIDC authorization response could not be verified')
     }
@@ -437,7 +442,7 @@ export class OidcProtocolEngine {
 
   private async discover(previous?: TrustedConfiguration): Promise<TrustedConfiguration> {
     const transport = new TrustedOidcTransport(this.provider, {
-      getSignal: () => this.operationSignal.getStore(),
+      getOperationContext: () => this.operationContext.getStore(),
     })
     const clientSecret = this.dependencies.getClientSecret()
     const clientAuthentication =
@@ -533,22 +538,28 @@ export class OidcProtocolEngine {
 
 class TrustedOidcTransport {
   readonly fetch: CustomFetch
-  failure?: OidcProviderIncompatibleError | OidcProviderUnavailableError
   private readonly allowedEndpoints = new Set<string>()
   private readonly discoveryUrl: string
   private jwksEndpoint?: string
 
   constructor(
     private readonly provider: OidcProviderConfiguration,
-    private readonly dependencies: { getSignal: () => AbortSignal | undefined }
+    private readonly dependencies: { getOperationContext: () => OidcOperationContext | undefined }
   ) {
     this.discoveryUrl = oidcDiscoveryUrl(provider.issuer)
     this.allowedEndpoints.add(this.discoveryUrl)
     this.fetch = (url, options) => this.request(url, options)
   }
 
-  resetFailure(): void {
-    this.failure = undefined
+  get failure(): OidcProviderIncompatibleError | OidcProviderUnavailableError | undefined {
+    return this.dependencies.getOperationContext()?.transportFailure
+  }
+
+  private set failure(
+    value: OidcProviderIncompatibleError | OidcProviderUnavailableError | undefined
+  ) {
+    const context = this.dependencies.getOperationContext()
+    if (context) context.transportFailure = value
   }
 
   async trustMetadata(metadata: OidcServerMetadata): Promise<void> {
@@ -591,7 +602,7 @@ class TrustedOidcTransport {
       const resolved = await resolveEndpointWithDeadline(
         url,
         `OIDC ${field}`,
-        this.dependencies.getSignal()
+        this.dependencies.getOperationContext()?.signal
       )
       if (!resolved.ok) {
         if (resolved.errors.some(isTransientDnsFailure)) {
@@ -695,7 +706,7 @@ class TrustedOidcTransport {
       ...(body !== undefined ? { body } : {}),
       timeoutMs: REQUEST_TIMEOUT_MS,
       maxBodyBytes: 1024 * 1024,
-      signal: combineSignals(options.signal, this.dependencies.getSignal()),
+      signal: combineSignals(options.signal, this.dependencies.getOperationContext()?.signal),
     })
     if (!result.ok) {
       if (result.error.kind === 'kernel_rejected') {

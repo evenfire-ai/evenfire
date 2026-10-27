@@ -191,6 +191,7 @@ function fixture(
     tokenTimeout?: boolean
     temporaryTokenEndpointDnsFailure?: boolean
     claims?: (nonce: string) => Record<string, unknown>
+    beforeTokenResponse?: (code: string) => Promise<void>
   } = {}
 ) {
   const issuer = options.issuer ?? GENERIC_ISSUER
@@ -240,19 +241,15 @@ function fixture(
     }
     if (input.url === metadata.token_endpoint) {
       tokenRequests += 1
-      if (tokenStatus !== undefined) {
-        return {
-          status: tokenStatus,
-          headers: { 'content-type': 'application/json' },
-          bodyText: '{}',
-        }
-      }
       const body = new URLSearchParams(input.body)
+      const code = body.get('code') ?? ''
       const verifier = body.get('code_verifier') ?? ''
+      const expectedNonce = nonce
+      const expectedCodeChallenge = codeChallenge
       expect(body.get('grant_type')).toBe('authorization_code')
-      expect(body.get('code')).toBe('fixture-code')
+      expect(code).not.toBe('')
       expect(body.get('redirect_uri')).toBe(GENERIC_REDIRECT)
-      if (createHash('sha256').update(verifier).digest('base64url') !== codeChallenge) {
+      if (createHash('sha256').update(verifier).digest('base64url') !== expectedCodeChallenge) {
         return {
           status: 400,
           headers: { 'content-type': 'application/json' },
@@ -264,15 +261,23 @@ function fixture(
         Buffer.from(input.headers.authorization.slice('Basic '.length), 'base64').toString('utf8')
       )
       expect(basicCredentials).toBe(`${CLIENT_ID}:${currentClientSecret}`)
+      await options.beforeTokenResponse?.(code)
+      if (tokenStatus !== undefined) {
+        return {
+          status: tokenStatus,
+          headers: { 'content-type': 'application/json' },
+          bodyText: '{}',
+        }
+      }
       const now = Math.floor(Date.now() / 1000)
-      const claims = options.claims?.(nonce) ?? {
+      const claims = options.claims?.(expectedNonce) ?? {
         iss: issuer,
         sub: 'opaque-subject-1',
         aud: CLIENT_ID,
         azp: CLIENT_ID,
         exp: now + 300,
         iat: now,
-        nonce,
+        nonce: expectedNonce,
         auth_time: now,
         email: 'member@example.test',
         email_verified: true,
@@ -378,6 +383,14 @@ async function begin(f: ReturnType<typeof fixture>) {
   f.setNonce(params.get('nonce') ?? '')
   f.setChallenge(params.get('code_challenge') ?? '')
   return { attempt, params }
+}
+
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  const promise = new Promise<T>(done => {
+    resolve = done
+  })
+  return { promise, resolve }
 }
 
 describe('generic OIDC protocol foundation', () => {
@@ -687,6 +700,49 @@ describe('generic OIDC protocol foundation', () => {
         issuer: GENERIC_ISSUER,
       })
     ).rejects.toBeInstanceOf(OidcProviderIncompatibleError)
+    expect([...f.db.rows.values()].map(row => row.status)).toEqual(['failed', 'failed'])
+  })
+
+  it('keeps transport failure classification isolated between concurrent exchanges', async () => {
+    const invalidTokenStarted = deferred<void>()
+    const releaseInvalidToken = deferred<void>()
+    const f = fixture({
+      claims: nonce => ({
+        iss: GENERIC_ISSUER,
+        sub: 'opaque-subject-1',
+        aud: 'wrong-client',
+        exp: Math.floor(Date.now() / 1000) + 300,
+        iat: Math.floor(Date.now() / 1000),
+        nonce,
+      }),
+      beforeTokenResponse: async code => {
+        if (code !== 'invalid-token-code') return
+        invalidTokenStarted.resolve()
+        await releaseInvalidToken.promise
+      },
+    })
+
+    const invalidAttempt = await begin(f)
+    const invalidCompletion = f.engine.completeIdentityProofAttempt({
+      state: invalidAttempt.params.get('state')!,
+      code: 'invalid-token-code',
+      issuer: GENERIC_ISSUER,
+    })
+    await invalidTokenStarted.promise
+
+    f.setTokenStatus(503)
+    const unavailableAttempt = await begin(f)
+    await expect(
+      f.engine.completeIdentityProofAttempt({
+        state: unavailableAttempt.params.get('state')!,
+        code: 'transient-failure-code',
+        issuer: GENERIC_ISSUER,
+      })
+    ).rejects.toBeInstanceOf(OidcProviderUnavailableError)
+
+    f.setTokenStatus(undefined)
+    releaseInvalidToken.resolve()
+    await expect(invalidCompletion).rejects.toBeInstanceOf(OidcProviderIncompatibleError)
     expect([...f.db.rows.values()].map(row => row.status)).toEqual(['failed', 'failed'])
   })
 
