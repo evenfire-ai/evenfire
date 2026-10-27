@@ -3071,7 +3071,6 @@ describe('App deep-link orchestration', () => {
         selectLatest: false,
       })
     })
-    let originWorkspace = realController.current?.workspaceTabs
     expect(realController.current?.selectedAgent).toBe('team-a-only-agent')
     await waitFor(() => expect(emitDeepLink).not.toBeNull())
 
@@ -3089,7 +3088,7 @@ describe('App deep-link orchestration', () => {
     const producedLink = queue.enqueue(target)
     act(() => emitDeepLink?.(producedLink))
     await confirmPendingAppLink()
-    originWorkspace = realController.current?.workspaceTabs
+    const originWorkspace = realController.current?.workspaceTabs
     await waitFor(() => expect(switchTeam).toHaveBeenCalledWith('team-b'))
     await waitFor(() => expect(targetAppsLoading).toBe(true))
     await waitFor(() => expect(realController.current?.currentTeamId).toBe('team-b'))
