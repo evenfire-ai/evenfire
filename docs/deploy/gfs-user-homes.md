@@ -1,0 +1,205 @@
+# Per-user GFS homes
+
+This runbook applies after the complete per-user home release is deployed.
+The schema alone does not provide the reconciler, operator routes, or UI.
+Code references below are relative to the public repository at the S7 starting
+commit `1f2d5352e`.
+
+## What the feature does
+
+Each active user in a GFS-enabled cluster is enrolled for one home on the
+configured drive, at `/Users/<storage_username>`. Enrollment and backfill do
+not require a login or a manual job. The home owner receives an inheritable
+grant with `read`, `write`, `delete`, `share`, and `manage_acl`. The reserved
+storage name does not change when the user changes their profile name. Homes
+are local to each cluster; they are not replicated across clusters.
+
+In Desktop, the user opens **My home** and manages access to the home or its
+contents with user authority, including when the user has an operator link.
+The user can share with users and teams in their team directory and grant
+`read` and `write` to their own first-party agents. Control UI is for operators;
+it provides the home inventory, recovery actions, and existing ACL management.
+
+The owner can see and manage entries throughout their own home tree, including
+entries created by another manager. In that tree, user entries include the
+person's email and, when available, name; team entries include the team name,
+even when the subject is outside the owner's team directory. Outside the
+owner's home, the existing directory visibility rules remain in effect. Grant
+rows keep their existing role-change and remove actions; share rows keep their
+remove action.
+
+The `/Users` directory and bound home roots cannot be moved, renamed, or
+deleted; the guard is in `control-api/src/db.ts:3251`. Contents inside a home
+can still be managed according to their permissions.
+
+## Drive requirements
+
+`GFS_HOME_DRIVE` must be `main` for this rollout. The host-context-controller
+(HCC) default drive must also remain `main`; its default is defined at
+`host-context-controller/src/gfsConfig.ts:90`. Do not set
+`CONTEXT_MAPPER_GFS_DRIVE_NAME`. Control UI's file browser uses `main`
+(`control-ui/components/GfsBrowser.tsx:233`), so operator home management
+depends on this alignment. Desktop carries the drive returned by the server.
+
+The release places `GFS_HOME_DRIVE` in the public base Control API ConfigMap
+and the Minikube override. A missing value disables the reconciler and leaves
+unprovisioned homes pending; there is no `main` fallback. If the drive root is
+not ready, the affected row stays pending with `drive_not_ready`. If an
+existing home's drive differs from the configured drive, inventory reports
+`driveMismatch` and the reconciler leaves the home untouched; changing the
+drive does not create a second home or migrate the existing one.
+
+## Rollout and per-cluster verification
+
+1. Before deploying to dev, require the release's J1–J8 and access-guard
+   journeys to pass on the PR head. Merge the public-repository change through
+   the normal release process. The dev and prod infrastructure workflows
+   assemble their public base at `base_sha`; they pick up the base ConfigMap
+   through that input. No infrastructure-repository change is part of this
+   release.
+2. Use the existing deployment order: the migration job runs with the new
+   Control API image, the overlay is applied, GFS runtime provisioning runs,
+   and the services restart. During the migration, old binaries can continue
+   serving; enrollment can create pending rows, but the old Control API does
+   not provision homes. The governed-root guard is active after migration.
+3. When the new Control API starts, it creates `/Users` as needed under the
+   drive structure lock, then enrolls and provisions homes. Do not add
+   `/Users` to a GFS layout. Backfill and provisioning run automatically; a
+   60-second tick is a scheduling interval, not a completion deadline.
+4. In each cluster, open the operator home inventory and watch the overall
+   `pending` count fall to zero. Review all `conflict` and `driveMismatch`
+   entries separately. Production follows dev through the existing promotion.
+
+The inventory counts registry rows, so `pending = 0` alone does not prove that
+backfill has discovered every active user. Compare the inventory with the
+active-user list after backfill. Where approved read-only database access is
+available, this aggregate check also identifies an incomplete enrollment pass:
+
+```sql
+SELECT count(*) AS active_users_without_home_rows
+FROM users u
+WHERE u.lifecycle_state = 'active'
+  AND NOT EXISTS (
+    SELECT 1 FROM gfs_user_homes h WHERE h.user_id = u.id
+  );
+```
+
+Repeat the inventory and completeness checks in each cluster. Zero pending
+and zero missing rows do not clear conflicts or prove a user's file access;
+review conflicts and validate the relevant access separately.
+
+## Inventory and user detail
+
+The operator inventory can filter by `pending`, `ready`, `conflict`, or
+`retired` and links rows to users. Its counts cover the whole registry, not
+just the displayed page. A retained home whose user was hard-deleted remains
+in `retired` as **Deleted user**, with the user ID and path. Its home-detail
+API still returns the row; `404 home_not_found` means there is no home row.
+
+The **Home folder** block on `/users-and-teams/users/<id>` shows the state,
+drive, and path. A conflict shows its cause and the appropriate recovery
+action. After an action, the block polls for up to 60 seconds. If the home is
+still pending, it shows **Still pending** and **Refresh**; this is neither a
+success nor a failure.
+
+For an operator using the API, the inventory route is
+`GET /api/v1/gfs/user-homes?state=&cursor=&limit=`. It returns `items`,
+`nextCursor`, and total `counts` for the four states and `driveMismatch`.
+The page limit is 1–100, with a default of 50. Invalid state, limit, or cursor
+returns HTTP 400 with `invalid_state`, `invalid_limit`, or `invalid_cursor`.
+`GET /api/v1/gfs/user-homes/:userId` returns `{ home }` or 404
+`home_not_found`. Errors use `{ error: <code> }`.
+
+## Conflicts and recovery
+
+Use the user detail block as an operator. Do not adopt, overwrite, move, or
+delete a foreign directory to make a conflict disappear.
+
+| Conflict                  | Cause                                                                       | Operator action                                                                                                 |
+| ------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `path_conflict`           | The proposed home path already belongs to a different resource.             | Enter a valid unused folder name and select **Retry**. The existing resource and its contents remain untouched. |
+| `ancestor_grant_conflict` | A non-operator grant or share on the drive root or `/Users` is inheritable. | Review and resolve the exposure with operator authority, then select **Retry**.                                 |
+| `ownership_conflict`      | A bound home's owner grant is missing, narrowed, or no longer inheritable.  | Select **Restore owner access**. Retry cannot restore this grant.                                               |
+
+Retry accepts an optional storage name for `path_conflict` or
+`ancestor_grant_conflict`. An accepted request returns HTTP 202 with a pending
+home; the next reconciler tick attempts provisioning. An invalid name returns
+422 `invalid_name` without changing the row. A non-retryable state returns
+409 `home_not_retryable`; an ownership conflict returns 409
+`home_owner_grant_requires_operator_restore`. A missing home returns 404.
+
+Restore owner access is available only for `ownership_conflict`. It restores
+all five owner permissions with inheritance and returns HTTP 200 with the
+ready home. Another state returns 409 `home_not_in_ownership_conflict`; a
+missing home returns 404. A reconciler tick does not restore the grant on its
+own. A non-operator attempting to revoke or narrow the owner grant receives
+403 `home_owner_grant_protected`.
+
+## Ancestor access and delegated permissions
+
+Non-operators cannot create inheritable grants or descendant-including shares
+on the drive root or `/Users`: the request returns 409
+`ancestor_home_exposure`. Operators are not subject to that guard. Review
+inheritable non-operator entries at both ancestors before provisioning or
+retiring homes; an operator-created entry can expose a home or block its
+provisioning. Existing GFS authorization applies inheritable ancestor grants
+and shares to descendants (`gfs-controller/src/authz/resolve.ts:91` and
+`gfs-controller/src/authz/resolve.ts:112`).
+
+Permissions do not cascade when their grantor loses access. If A gives B
+`manage_acl`, B grants C access, and A revokes B, C's entry remains until an
+authorized owner or operator removes it. Grantor-bound revocation is outside
+this release; [issue #761](https://github.com/evenfire-ai/evenfire/issues/761)
+remains open. To review existing delegated access, inspect grants and shares
+on the home and its descendants with owner or operator authority. This review
+is read-only until an authorized person selects an entry to change or remove;
+the release does not add a provenance table or infer a revocation cascade.
+
+## Retirement and deletion
+
+On retirement or hard deletion, the home and its data remain. Cleanup removes
+all user, team, host, and context grants and shares on the home and its
+descendants, including entries an operator created. Operator-subject entries
+remain. The retired user's own grants and shares elsewhere are also removed.
+The operator may later grant selected access to the retained home through
+Control UI.
+
+Cleanup also removes grants anywhere for the user's captured first-party
+agents when no other active user and no team is associated with that agent.
+This includes operator-created grants for those captured agents. An agent
+still associated with another active user or a team is not removed by this
+agent-specific rule; there is no global orphan sweep.
+
+The intended result is that only operators can reach the retained home until
+an operator grants access again. Home-tree cleanup does not remove entries on
+the drive root or `/Users`. Because an operator may create inheritable entries
+there, review those ancestors too before treating a retired home as
+operator-only. A retired user's next Desktop action shows
+`desktop_user_retired`; open views are not forcibly closed.
+
+## Rollback and startup repair
+
+Keep the new table and triggers when rolling back to an older Control API
+image. During that rollback window the older image does not provision homes,
+does not perform the new retirement cleanup, and does not protect the owner
+grant. Do not reset the data or automatically re-grant owner access.
+
+After roll-forward, the planned startup repair runs once per Control API
+process start, before its first regular tick, in batches of 50. For ready or
+conflict rows, it cleans home entries for users retired or deleted during the
+window. It marks a ready home with a missing or narrowed owner grant as
+`ownership_conflict`. An operator must use **Restore owner access**; the
+repair does not re-grant it. It is not run on every tick.
+
+Startup repair is conditional on its T1 cost gate: a pass over 10,000 ready
+homes with nothing to repair must finish in under five seconds using index
+scans. If that gate fails, the plan removes the repair and accepts a documented
+rollback gap instead. Check the release's T1 evidence before relying on the
+repair.
+
+A hard delete during rollback can also remove the user's agent associations
+before repair runs: the `user_agents` foreign key cascades on deletion
+(`control-api/src/db.ts:321`). The repair may therefore lack the information
+needed to identify that user's agent grants outside the home. Review those
+grants separately using available records; do not assume startup repair removed
+them. Review ancestor entries as described above as well.
